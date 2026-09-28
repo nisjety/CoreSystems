@@ -1,3 +1,4 @@
+mod browse;
 mod connect_sessions;
 pub(crate) mod connections;
 pub(crate) mod model_subscriptions;
@@ -67,6 +68,19 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
         .route(
             "/api/v1/integrations/connections/{id}/inbox-history",
             post(connections::extend_inbox_history),
+        )
+        // Connector-attach picker (composer): browser-reachable list/search +
+        // single-item content read, gated by a fixed read-only operation
+        // allowlist in browse.rs on top of integration-corev2's own
+        // capability gate. First browser-reachable route into the action
+        // executor — execution-core's agent-tool path is separate and unaffected.
+        .route(
+            "/api/v1/integrations/connections/{id}/browse",
+            post(browse::browse_connection),
+        )
+        .route(
+            "/api/v1/integrations/connections/{id}/content",
+            post(browse::content_connection),
         )
         // Sync jobs — static before param
         .route(

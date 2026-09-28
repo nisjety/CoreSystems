@@ -77,6 +77,13 @@ pub(super) async fn stream_chat(
     {
         return (status, body).into_response();
     }
+    // Persona spec — user layer, independent of org/Space resolution.
+    if let Err((status, body)) =
+        crate::domains::spaces::inject_persona_instructions(&state, &user, &mut outbound_body)
+            .await
+    {
+        return (status, body).into_response();
+    }
     if let Err((status, body)) = crate::domains::spaces::inject_personal_thread_context(
         &state,
         &user,

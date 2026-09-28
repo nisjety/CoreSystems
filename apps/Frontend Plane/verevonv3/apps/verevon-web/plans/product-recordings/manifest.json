@@ -36,13 +36,13 @@
         }
       ],
       "currentEvidence": {
-        "reviewedOn": "2026-09-22",
-        "consecutivePassesOnReleaseBuild": 0,
-        "record": "evidence/PRODUCT_RECORDING_CAPTURE_PASS3_2026-09-22.md",
+        "reviewedOn": "2026-09-27",
+        "consecutivePassesOnReleaseBuild": 5,
+        "record": "evidence/PRODUCT_RECORDING_READINESS_2026-09-24.md",
         "latestRehearsal": {
           "result": "passed",
           "kind": "editorial-rehearsal",
-          "build": "sha256:472e143629bce267b2ded5c27a24c83d6d48f0452a176a9321abedd6c3593648",
+          "build": "sha256:e90d485701eb0b3494ea16b61aeaa5727c59e0455ec002b1e2679dff4cbe45b8",
           "publicationApproved": false
         }
       },
@@ -84,13 +84,13 @@
         }
       ],
       "currentEvidence": {
-        "reviewedOn": "2026-09-22",
-        "consecutivePassesOnReleaseBuild": 0,
-        "record": "evidence/PRODUCT_RECORDING_CAPTURE_PASS3_2026-09-22.md",
+        "reviewedOn": "2026-09-27",
+        "consecutivePassesOnReleaseBuild": 5,
+        "record": "evidence/PRODUCT_RECORDING_READINESS_2026-09-24.md",
         "latestRehearsal": {
           "result": "passed",
           "kind": "editorial-rehearsal",
-          "build": "sha256:448d5768f79d0d018a01227b7a07c89300ea46d47e0166281f881ae39ccc7ae2",
+          "build": "sha256:e90d485701eb0b3494ea16b61aeaa5727c59e0455ec002b1e2679dff4cbe45b8",
           "publicationApproved": false
         }
       },
@@ -132,13 +132,13 @@
         }
       ],
       "currentEvidence": {
-        "reviewedOn": "2026-09-22",
-        "consecutivePassesOnReleaseBuild": 0,
-        "record": "evidence/PRODUCT_RECORDING_CAPTURE_PASS3_2026-09-22.md",
+        "reviewedOn": "2026-09-27",
+        "consecutivePassesOnReleaseBuild": 5,
+        "record": "evidence/PRODUCT_RECORDING_READINESS_2026-09-24.md",
         "latestRehearsal": {
           "result": "passed",
           "kind": "editorial-rehearsal",
-          "build": "sha256:bbd439960ca93e14c49c0020a791a465cf946d658a3f2195dbd67a164340daa2",
+          "build": "sha256:e90d485701eb0b3494ea16b61aeaa5727c59e0455ec002b1e2679dff4cbe45b8",
           "publicationApproved": false
         }
       },
@@ -179,13 +179,13 @@
         }
       ],
       "currentEvidence": {
-        "reviewedOn": "2026-09-23",
-        "consecutivePassesOnReleaseBuild": 0,
-        "record": "evidence/PRODUCT_RECORDING_CAPTURE_PASS6_2026-09-23.md",
+        "reviewedOn": "2026-09-27",
+        "consecutivePassesOnReleaseBuild": 5,
+        "record": "evidence/PRODUCT_RECORDING_READINESS_2026-09-24.md",
         "latestRehearsal": {
           "result": "passed",
           "kind": "editorial-rehearsal",
-          "build": "sha256:d5c2ceba6f568d1c018984032cda28cd4bed0a77668830ea0f3883bce91ed9c6",
+          "build": "sha256:e90d485701eb0b3494ea16b61aeaa5727c59e0455ec002b1e2679dff4cbe45b8",
           "publicationApproved": false
         }
       },
@@ -199,21 +199,23 @@
   "recordingReadiness": {
     "requiredConsecutivePasses": 5,
     "reasons": [
-      "The final gateway build completed five consecutive private project rehearsals with initial plan, separate REGI note and reload; prior builds had source-review timeouts and oracle false rejections. These private takes do not qualify the release gate.",
-      "The high-effort Terra subscription reviewer passed 104/104 semantic controls and 10/10 repair/context controls; component accuracy does not establish all-scenario reliability.",
-      "Five consecutive qualified complete release passes per scenario, predefined performance targets and recovery/durability checks are not established.",
-      "Four private previews exist on different test builds, including a project preview from an earlier passing build; no public media pack is approved."
+      "Third freeze (2026-09-27T04:30Z; the owner rulings of 2026-09-27 on scoped revisions; image IDs and switches in the readiness record): all four scenarios reached five consecutive private rehearsal passes with the capture tool, no automatic retry and all attempts kept: 01 at attempt 8 (18/20 plus 2/2), 02 at attempt 5 (20/20), 03 at attempt 5 (18/20 plus 3/3), 04 at attempt 6 (16/20 plus 3/3).",
+      "Durability passed: the 20 qualifying threads reopened identically in fresh browser contexts before and after a controlled restart of Model Plane Postgres, session-core, model-gateway and verevon-gateway-rs.",
+      "Recovery passed: product-recovery.spec.ts 9/9 on this build and the live Q08 reload-resume check on the restarted system.",
+      "Performance remains partial against the owner targets (first turn p95 <= 120 s, follow-up p95 <= 70 s, no timeouts, >= 20 samples per journey turn): every first turn and the 01/02/04 follow-ups pass; the 03 follow-up p95 is 74.7 s (117.4 s on the second freeze) and 03 had one first-turn response_validation_timeout.",
+      "Correctness remains partial: 8 of 80 series attempts failed. Rejection cascades on turns that keep the complete recheck (03 first turns x2, 04 new notes x2), exhausted document-stage repairs in 01 (x2), and two 04 plans without the required 'earliest possible date' wording (author guidance v1).",
+      "Experience remains partial: mobile/desktop, keyboard and reduced-motion checks pass on the four journeys (viewport spec 9/9, live Q08 mobile); caption tracks and the editorial/media review of the films are not done. Trust is not re-evidenced on this build. No public media pack is approved."
     ],
-    "reviewedOn": "2026-09-23",
-    "evidence": "evidence/PRODUCT_RECORDING_CAPTURE_PASS6_2026-09-23.md",
+    "reviewedOn": "2026-09-27",
+    "evidence": "evidence/PRODUCT_RECORDING_READINESS_2026-09-24.md",
     "status": "blocked",
     "gates": {
       "trust": "partial",
       "performance": "partial",
-      "repeatability": "pending",
+      "repeatability": "passed",
       "experience": "partial",
-      "recovery": "partial",
-      "durability": "pending",
+      "recovery": "passed",
+      "durability": "passed",
       "correctness": "partial"
     }
   }

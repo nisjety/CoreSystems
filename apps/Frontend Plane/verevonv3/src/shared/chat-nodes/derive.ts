@@ -43,7 +43,15 @@ function answerState(turn: ChatTurn, displayContent: string): AnswerState {
     return { state: 'pending', since: turn.createdAt, ...(activity ? { activity } : {}) }
   }
   if (turn.status === 'error') {
-    return { state: 'failed', message: turn.content || 'Stream error' }
+    // Keys only when set, as for `unsaved`: an ordinary failure derives the
+    // same shape it always did.
+    return {
+      state: 'failed',
+      message: turn.content || 'Stream error',
+      ...(turn.unsavedContent?.trim() ? { unsaved: turn.unsavedContent } : {}),
+      ...(turn.failureAction ? { action: turn.failureAction } : {}),
+      ...(turn.retryAt ? { retryAt: turn.retryAt } : {}),
+    }
   }
   return {
     state: 'content',
@@ -130,6 +138,21 @@ export function deriveConversationNodes(
       memories: turn.recalledMemories ?? [],
     })
   }
+  // chat-wave2 scope spec §2.2: the receipt badge. Prefers the server's own
+  // confirmation (`scopeApplied`, from the `source_scope_applied` SSE event)
+  // over the client-sent request (`retrievalScope`) — the server is what
+  // actually enforced the filter, and a live turn may not have the frame yet
+  // while still streaming, so the request value is the interim best guess.
+  // Absent for `auto`/unset either way: an ordinary turn gets no badge.
+  if (!waiting) {
+    const applied = turn.scopeApplied
+      ?? (turn.retrievalScope === 'knowledge_only' || turn.retrievalScope === 'web_only'
+        ? { scope: turn.retrievalScope, excludedTools: [] }
+        : undefined)
+    if (applied) {
+      nodes.push({ kind: 'source-scope', scope: applied.scope, excludedTools: applied.excludedTools })
+    }
+  }
   if (!waiting && !errored && turn.stopReason) {
     nodes.push({ kind: 'truncated', stopReason: turn.stopReason })
   }
@@ -143,11 +166,30 @@ export function deriveConversationNodes(
   if ((turn.pendingApprovals?.length ?? 0) > 0) {
     nodes.push({ kind: 'approvals', approvals: turn.pendingApprovals ?? [] })
   }
-  // Only a FINISHED plan-mode turn: the control asks a person to approve a plan,
-  // and there is no plan to approve until the agent has finished describing it.
+  // Only a FINISHED plan-mode turn: the control asks a person to approve a
+  // plan, and there is no plan to approve until the agent has finished
+  // describing it. This must NOT additionally require `turn.proposedPlan`:
+  // the model is only INSTRUCTED to call `plan.propose` in plan mode, never
+  // guaranteed to (a smaller/non-compliant model can still just describe its
+  // plan in prose, exactly as every plan-mode turn did before this tool
+  // existed), and `proposedPlan` is session-only — never persisted into
+  // thread history — so a page reload between the model finishing and the
+  // user approving loses it even when the model DID call the tool. Either
+  // way the turn is genuinely finished and plan-mode's rung still has to be
+  // grantable, or the run is stuck in plan mode forever with no control
+  // left to exit it. `PlanApprovalControl` already degrades gracefully on
+  // its own — `hasStructuredPlan()` is `Boolean(props.planId)`, so an absent
+  // `proposedPlan` renders exactly today's rung-only control, never a
+  // broken or empty edit surface — this is the "degrades to today's
+  // rung-only control" behavior plan-gate's own rollout note (§4) commits
+  // to, and the ONLY reason to omit the node entirely; a proposed plan that
+  // has arrived just adds the step list on top of that same control.
   if (turn.planMode === true && !turn.streaming) {
     nodes.push({
       kind: 'plan-approval',
+      planId: turn.proposedPlan?.planId,
+      summary: turn.proposedPlan?.summary,
+      steps: turn.proposedPlan?.steps,
       grantedRung: turn.grantedRung,
       pending: planApproval?.pending === true,
       error: planApproval?.error,

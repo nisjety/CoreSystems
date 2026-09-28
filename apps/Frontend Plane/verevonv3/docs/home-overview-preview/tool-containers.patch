@@ -1,0 +1,20 @@
+--- a/src/features/dashboard/home/dashboard-overview.css
++++ b/src/features/dashboard/home/dashboard-overview.css
+@@ -144,7 +144,8 @@
+ .home-chat-dock[data-dock-expanded='false'] .dashboard-composer-submit-button { width: 36px; height: 36px; }
+ .home-chat-dock[data-dock-expanded='false'] .dashboard-composer-card > :not(.dashboard-composer-textarea-wrap):not(.dashboard-composer-toolbar):not(.sr-only) { grid-column: 1 / -1; }
+ .dashboard-home--overview[data-home-tab='Søk'] .verevon-home-composer-section,
+-.dashboard-home--overview[data-home-tab='Crawl'] .verevon-home-composer-section { flex: 0 0 auto; order: 0; padding: 24px; border-radius: 12px; background: var(--home-card); }
++.dashboard-home--overview[data-home-tab='Crawl'] .verevon-home-composer-section { flex: 0 0 auto; order: 0; padding: 0; border: 0; border-radius: 0; background: transparent; box-shadow: none; }
++.dashboard-home--overview[data-home-tab='Crawl'] .dashboard-knowledge-composer { padding: 0; border: 0; border-radius: 0; background: transparent; box-shadow: none; }
+ .dashboard-home--overview:not([data-home-tab='Chat']) .home-overview-grid { order: 1; }
+ .dashboard-home--overview .verevon-home-composer-section--expanded { min-height: 580px; }
+ .dashboard-home--overview .verevon-home-composer-section--knowledge-browser { min-height: 660px; }
+@@ -184,6 +185,6 @@
+   .home-chat-dock .dashboard-composer-model-button { max-width: 180px; }
+   .home-chat-dock .dashboard-composer-model-menu { max-height: min(340px, 45dvh); }
+   .dashboard-home--overview[data-home-tab='Søk'] .verevon-home-composer-section,
+-  .dashboard-home--overview[data-home-tab='Crawl'] .verevon-home-composer-section { padding: 16px; }
++  .dashboard-home--overview[data-home-tab='Crawl'] .verevon-home-composer-section { padding: 0; }
+ }
+ @media (prefers-reduced-motion: reduce) { .dashboard-home--overview *, .dashboard-home--overview *::before, .dashboard-home--overview *::after { animation: none !important; transition: none !important; } }

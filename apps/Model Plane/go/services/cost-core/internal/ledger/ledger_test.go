@@ -279,3 +279,57 @@ func mustRecord(t *testing.T, s *Store, e Entry) {
 		t.Fatalf("RecordEntry: %v", err)
 	}
 }
+
+func TestNormalizeCostBasis(t *testing.T) {
+	for raw, want := range map[string]struct {
+		basis string
+		ok    bool
+	}{
+		"":                  {CostBasisUnknown, true},
+		"metered":           {CostBasisMetered, true},
+		"subscription":      {CostBasisSubscription, true},
+		" Subscription ":    {CostBasisSubscription, true},
+		"METERED":           {CostBasisMetered, true},
+		"free":              {CostBasisUnknown, false},
+		"subscription-plus": {CostBasisUnknown, false},
+	} {
+		basis, ok := NormalizeCostBasis(raw)
+		if basis != want.basis || ok != want.ok {
+			t.Errorf("NormalizeCostBasis(%q) = (%q, %v), want (%q, %v)", raw, basis, ok, want.basis, want.ok)
+		}
+	}
+}
+
+// The ledger stores only canonical bases, so a reader can compare the column
+// with ==. Decoders normalize before building the entry.
+func TestValidateEntryAcceptsOnlyCanonicalCostBasis(t *testing.T) {
+	for _, basis := range []string{CostBasisUnknown, CostBasisMetered, CostBasisSubscription} {
+		if err := ValidateEntry(Entry{OrgID: "org1", UserID: "u1", CostBasis: basis}); err != nil {
+			t.Errorf("basis %q rejected: %v", basis, err)
+		}
+	}
+	for _, basis := range []string{"Subscription", " metered", "free"} {
+		if err := ValidateEntry(Entry{OrgID: "org1", UserID: "u1", CostBasis: basis}); !errors.Is(err, ErrInvalidEntry) {
+			t.Errorf("basis %q: err = %v, want ErrInvalidEntry", basis, err)
+		}
+	}
+}
+
+func TestStore_ListEntriesCarriesCostBasis(t *testing.T) {
+	ctx := context.Background()
+	s := NewStore()
+	mustRecord(t, s, Entry{OrgID: "org1", UserID: "u1", Model: "gpt-5.6-terra", InputTokens: 1_800, OutputTokens: 120, CostBasis: CostBasisSubscription})
+	mustRecord(t, s, Entry{OrgID: "org1", UserID: "u1", Model: "legacy", InputTokens: 5})
+
+	entries, err := s.ListEntries(ctx, AggregateFilter{OrgID: "org1"}, 10)
+	if err != nil {
+		t.Fatalf("ListEntries: %v", err)
+	}
+	bases := map[string]string{}
+	for _, e := range entries {
+		bases[e.Model] = e.CostBasis
+	}
+	if bases["gpt-5.6-terra"] != CostBasisSubscription || bases["legacy"] != CostBasisUnknown {
+		t.Fatalf("cost bases = %v", bases)
+	}
+}

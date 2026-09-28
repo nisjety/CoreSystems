@@ -128,13 +128,24 @@ describe('mid-run input is never dropped', () => {
 
   it('never reinvokes a failed turn through a different provider', async () => {
     const text = await source(CONTROLLER)
-    const handler = text.slice(
-      text.indexOf('onError: ({ code, message })'),
-      text.indexOf('onFrameId:', text.indexOf('onError: ({ code, message })')),
-    )
-
-    expect(handler).not.toContain('sendContent(')
-    expect(handler).toContain("code === 'connection_error'")
+    // Every stream error handler — the live stream's AND the resume path's.
+    // Each takes the whole error event, so a subscription refusal's reset
+    // time reaches the turn.
+    const handlers: string[] = []
+    for (let at = text.indexOf('onError: (failure) =>'); at >= 0; at = text.indexOf('onError: (failure) =>', at + 1)) {
+      handlers.push(text.slice(at, text.indexOf('onFrameId:', at)))
+    }
+    expect(handlers.length).toBeGreaterThanOrEqual(2)
+    expect(text.match(/onError:/g)).toHaveLength(handlers.length)
+    for (const handler of handlers) {
+      expect(handler).not.toContain('sendContent(')
+      // A lost connection reattaches to the same invocation; it is never a
+      // reason to start another one.
+      expect(handler).toContain('isTransportLossCode(code)')
+    }
+    // Only connection-level codes count as transport loss. A server failure
+    // (tool, validation, provider) is the run's outcome and is shown as such.
+    expect(text).toMatch(/export function isTransportLossCode\(code: string \| undefined\): boolean \{\n\s*return code === 'connection_error' \|\| code === 'upstream_unavailable'\n\}/)
   })
 
   it('preserves the subscription route when regenerating the latest answer', async () => {
@@ -145,7 +156,16 @@ describe('mid-run input is never dropped', () => {
     )
 
     expect(regenerate).toContain('provider: lastUser.provider')
-    expect(regenerate).toContain('subscriptionConnectionId: lastUser.subscriptionConnectionId')
+    // The connection is looked up again, never resent from the stored turn:
+    // reconnecting ChatGPT creates a new connection, and the stored id then
+    // names one that is refused with the same "reconnect" notice.
+    expect(regenerate).toContain('withReplayConnection(lastUser,')
+    expect(regenerate).toContain('withReplayConnection(exchange.lastUser,')
+    expect(regenerate).not.toContain('subscriptionConnectionId: lastUser.subscriptionConnectionId')
+    // Only the connection is re-chosen; the lookup never picks a provider.
+    const lookup = text.slice(text.indexOf('const replayConnectionId'), text.indexOf('const withReplayConnection'))
+    expect(lookup).toContain('turn.provider === OPENAI_CODEX_SUBSCRIPTION_PROVIDER')
+    expect(lookup).not.toContain('provider:')
   })
 
   it('renders the strip, so a queued message is visible while it is in flight', async () => {

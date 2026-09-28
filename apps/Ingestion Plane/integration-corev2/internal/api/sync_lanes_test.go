@@ -233,6 +233,7 @@ func TestConnectionSyncRefusesMicrosoftWithoutRegisteredSources(t *testing.T) {
 
 	req := httptest.NewRequest("POST", "/api/v1/connections/conn-ms-empty/sync", nil)
 	req.Header.Set("X-Internal-API-Key", "dev-key")
+	req.Header.Set("X-User-ID", "user-1")
 	resp, err := app.Test(req)
 	if err != nil {
 		t.Fatalf("app.Test error: %v", err)
@@ -281,6 +282,7 @@ func TestConnectionSyncQueuesMicrosoftWhenSourcesExistOrFinspoUnknown(t *testing
 
 			req := httptest.NewRequest("POST", "/api/v1/connections/conn-ms/sync", nil)
 			req.Header.Set("X-Internal-API-Key", "dev-key")
+			req.Header.Set("X-User-ID", "user-1")
 			resp, err := app.Test(req)
 			if err != nil {
 				t.Fatalf("app.Test error: %v", err)
@@ -313,6 +315,9 @@ func TestConnectionsListCarriesSyncLanes(t *testing.T) {
 
 	req := httptest.NewRequest("GET", "/api/v1/connections?organizationId=org-1", nil)
 	req.Header.Set("X-Internal-API-Key", "dev-key")
+	// Owner ruling (5): the list omits another user's personal connection,
+	// so name the connection's own owner to see it here.
+	req.Header.Set("X-User-ID", "user-1")
 	resp, err := app.Test(req)
 	if err != nil {
 		t.Fatalf("app.Test error: %v", err)

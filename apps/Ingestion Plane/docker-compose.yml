@@ -406,6 +406,10 @@ services:
         CODEX_VERSION: ${CODEX_VERSION:-0.153.4}
     container_name: integration-api
     restart: unless-stopped
+    # PID 1 reaps the Codex process trees (Node shim, native codex, MCP/npm
+    # children) that sign-in, sign-out and the optional app-server fallback
+    # spawn, so killed processes never linger as zombies.
+    init: true
     env_file:
       # Cutover compatibility: reuse the existing v1 credential source while
       # the runtime is integration-corev2. Service URLs and safety knobs below
@@ -458,7 +462,31 @@ services:
       # integration-corev2 env file so its dedicated model-plane credential is
       # not expanded from Compose's project-wide environment. The API image
       # installs the reviewed, pinned Codex CLI release selected by CODEX_VERSION.
-      # The named volume keeps Codex-managed login state out of the database.
+      # The named volume keeps each connection's Codex sign-in out of the database.
+      # ChatGPT subscription broker: non-secret knobs. Compose `environment`
+      # overrides env_file, so these are owned here; the dedicated
+      # CODEX_SUBSCRIPTION_MODEL_PLANE_API_KEY stays only in integration-corev2/.env.
+      # The hardened Codex app-server is the default until OpenAI confirms the
+      # direct transport for a hosted product; opt in without a rebuild by
+      # setting CODEX_SUBSCRIPTION_TRANSPORT=direct and recreating the container.
+      CODEX_SUBSCRIPTION_TRANSPORT: ${CODEX_SUBSCRIPTION_TRANSPORT:-app-server}
+      # The API image links the vendored native Codex binary here (see its
+      # Dockerfile), so each app-server call skips the npm Node launcher; the
+      # broker adds the launcher's two variables itself. This overrides the
+      # env_file value. Set CODEX_APP_SERVER_COMMAND=codex to use the launcher.
+      CODEX_APP_SERVER_COMMAND: ${CODEX_APP_SERVER_COMMAND:-/usr/local/bin/codex-native}
+      CODEX_SUBSCRIPTION_DIRECT_ORIGINATOR: ${CODEX_SUBSCRIPTION_DIRECT_ORIGINATOR:-verevon}
+      CODEX_SUBSCRIPTION_DIRECT_REQUEST_SHAPE: ${CODEX_SUBSCRIPTION_DIRECT_REQUEST_SHAPE:-classic}
+      CODEX_SUBSCRIPTION_DIRECT_PROMPT_MODE: ${CODEX_SUBSCRIPTION_DIRECT_PROMPT_MODE:-roles}
+      CODEX_SUBSCRIPTION_DIRECT_MAX_RETRIES: ${CODEX_SUBSCRIPTION_DIRECT_MAX_RETRIES:-2}
+      CODEX_SUBSCRIPTION_REFRESH_SKEW: ${CODEX_SUBSCRIPTION_REFRESH_SKEW:-10m}
+      CODEX_SUBSCRIPTION_MAX_CONCURRENCY: ${CODEX_SUBSCRIPTION_MAX_CONCURRENCY:-16}
+      CODEX_SUBSCRIPTION_MAX_CONCURRENCY_PER_CONNECTION: ${CODEX_SUBSCRIPTION_MAX_CONCURRENCY_PER_CONNECTION:-4}
+      CODEX_SUBSCRIPTION_QUEUE_TIMEOUT: ${CODEX_SUBSCRIPTION_QUEUE_TIMEOUT:-30s}
+      CODEX_APP_SERVER_HARDENED: ${CODEX_APP_SERVER_HARDENED:-true}
+      # thread/start carries the turn's reasoning effort so Codex's startup
+      # prewarm matches the turn; false restores the earlier thread/start.
+      CODEX_APP_SERVER_THREAD_EFFORT: ${CODEX_APP_SERVER_THREAD_EFFORT:-true}
       META_JS_SDK_APP_ID: ${META_JS_SDK_APP_ID:-${META_APP_CLIENT_ID:-${FACEBOOK_CLIENT_ID:-${INSTAGRAM_CLIENT_ID:-}}}}
       META_JS_SDK_API_VERSION: ${META_JS_SDK_API_VERSION:-v23.0}
       META_JS_SDK_LOCALE: ${META_JS_SDK_LOCALE:-en_US}
@@ -504,11 +532,15 @@ services:
     deploy:
       resources:
         limits:
-          # The API also hosts scoped Codex subprocesses for subscription
-          # inference. The former CRUD-only 256M/0.25 CPU cap throttled even
-          # short review calls into their deadlines. Keep limits configurable.
-          memory: ${INTEGRATION_API_MEMORY_LIMIT:-2G}
-          cpus: "${INTEGRATION_API_CPU_LIMIT:-2.0}"
+          # The default app-server transport spawns one Codex process per
+          # call, and review passes spawn several at once. At 2 CPUs / 2 GiB
+          # the cgroup was CPU-throttled in 9.3% of periods, which stretched
+          # every local Codex setup phase of parallel calls, and memory.peak
+          # reached the 2 GiB cap (memory.events counted limit hits). The former
+          # CRUD-only 256M/0.25 CPU cap throttled even short review calls into
+          # their deadlines. Keep limits configurable.
+          memory: ${INTEGRATION_API_MEMORY_LIMIT:-4G}
+          cpus: "${INTEGRATION_API_CPU_LIMIT:-6.0}"
         reservations:
           memory: 256M
     depends_on:

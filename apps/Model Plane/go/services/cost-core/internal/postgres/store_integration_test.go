@@ -39,7 +39,10 @@ func TestPostgresLedger_Integration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
-	defer pool.Close()
+	// t.Cleanup, not defer: cleanups run after the test body returns, so a
+	// deferred Close would shut the pool before the row cleanup below runs
+	// and leave rows behind that break the next run's global run rollup.
+	t.Cleanup(pool.Close)
 
 	applyMigration(ctx, t, pool)
 
@@ -152,7 +155,10 @@ func TestPostgresLedger_PurgeOrgIsolatesOtherOrg(t *testing.T) {
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
-	defer pool.Close()
+	// t.Cleanup, not defer: cleanups run after the test body returns, so a
+	// deferred Close would shut the pool before the row cleanup below runs
+	// and leave rows behind that break the next run's global run rollup.
+	t.Cleanup(pool.Close)
 
 	applyMigration(ctx, t, pool)
 
@@ -221,5 +227,95 @@ func applyMigration(ctx context.Context, t *testing.T, pool *pgxpool.Pool) {
 		if _, execErr := pool.Exec(ctx, string(sqlBytes)); execErr != nil {
 			t.Fatalf("apply migration %s: %v", path, execErr)
 		}
+	}
+}
+
+// TestPostgresLedger_CostBasisRoundTrip pins migration 0005: a reported cost
+// basis survives the round trip, an unreported one is stored as NULL rather
+// than an empty string, and the migrations stay safe to re-run on every boot.
+func TestPostgresLedger_CostBasisRoundTrip(t *testing.T) {
+	dsn := os.Getenv("COST_CORE_TEST_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("COST_CORE_TEST_DATABASE_URL not set; skipping Postgres integration test")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	pool, err := Connect(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	// t.Cleanup, not defer: cleanups run after the test body returns, so a
+	// deferred Close would shut the pool before the row cleanup below runs
+	// and leave rows behind that break the next run's global run rollup.
+	t.Cleanup(pool.Close)
+
+	applyMigration(ctx, t, pool)
+	// The entrypoint re-applies every migration on each boot.
+	applyMigration(ctx, t, pool)
+
+	org := "itest-basis-" + time.Now().Format("150405.000")
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(), `DELETE FROM cost_entries WHERE org_id = $1`, org)
+	})
+
+	store, err := New(pool)
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+	for requestID, basis := range map[string]string{
+		"req-sub":     ledger.CostBasisSubscription,
+		"req-metered": ledger.CostBasisMetered,
+		"req-old":     ledger.CostBasisUnknown,
+	} {
+		if err := store.RecordEntry(ctx, ledger.Entry{
+			OrgID: org, UserID: "u1", RequestID: requestID, Model: "gpt-5.6-terra",
+			InputTokens: 1_800, OutputTokens: 120, CostBasis: basis, IdempotencyKey: requestID,
+		}); err != nil {
+			t.Fatalf("record %s: %v", requestID, err)
+		}
+	}
+
+	entries, err := store.ListEntries(ctx, ledger.AggregateFilter{OrgID: org}, 10)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	got := map[string]string{}
+	for _, e := range entries {
+		got[e.RequestID] = e.CostBasis
+	}
+	if len(got) != 3 || got["req-sub"] != ledger.CostBasisSubscription ||
+		got["req-metered"] != ledger.CostBasisMetered || got["req-old"] != ledger.CostBasisUnknown {
+		t.Fatalf("listed cost bases = %v", got)
+	}
+
+	var nullRows int
+	if err := pool.QueryRow(ctx,
+		`SELECT COUNT(*) FROM cost_entries WHERE org_id = $1 AND cost_basis IS NULL`, org,
+	).Scan(&nullRows); err != nil {
+		t.Fatalf("count NULL bases: %v", err)
+	}
+	if nullRows != 1 {
+		t.Fatalf("rows with a NULL cost_basis = %d, want 1 (the unreported one)", nullRows)
+	}
+
+	// A token budget caps metered tokens only: the subscription entry stays
+	// in the totals but never counts against max_tokens.
+	usage, err := store.GetUsage(ctx, org, "u1")
+	if err != nil {
+		t.Fatalf("get usage: %v", err)
+	}
+	agg, err := store.Aggregate(ctx, ledger.AggregateFilter{OrgID: org})
+	if err != nil {
+		t.Fatalf("aggregate: %v", err)
+	}
+	for name, u := range map[string]*ledger.Usage{"usage": usage, "aggregate": agg} {
+		if u.TotalInputTokens != 3*1_800 || u.MeteredInputTokens != 2*1_800 || u.MeteredOutputTokens != 2*120 {
+			t.Fatalf("%s tokens = %+v, want the subscription entry in the totals only", name, u)
+		}
+	}
+	if err := store.CheckBudget(ctx, org, "u1", 0, 2*(1_800+120)+1); err != nil {
+		t.Fatalf("subscription tokens counted against max_tokens: %v", err)
 	}
 }

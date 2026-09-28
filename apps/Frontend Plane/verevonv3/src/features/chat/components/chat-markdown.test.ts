@@ -41,9 +41,9 @@ function renderInlineWithCitations(text: string, citations: readonly Citation[])
 // Full block-to-DOM path (parseMarkdownBlocks + the actual ChatMessages
 // renderers), for fidelity fixes whose observable behaviour lives in the
 // renderer rather than the parser alone (e.g. <ol start>, a task checkbox).
-function renderMarkdown(content: string): HTMLElement {
+function renderMarkdown(content: string, citations?: readonly Citation[]): HTMLElement {
   return createRoot((dispose) => {
-    const element = ChatMarkdown({ content }) as unknown as HTMLElement
+    const element = ChatMarkdown({ content, citations }) as unknown as HTMLElement
     dispose()
     return element
   })
@@ -181,6 +181,51 @@ describe('parseMarkdownBlocks — GFM pipe tables', () => {
 
     const numericLink = renderInlineWithCitations('[3](https://example.com/three)', citations)
     expect(numericLink.some((node): node is Element => node instanceof Element && node.tagName === 'A')).toBe(true)
+  })
+
+  it('groups the citation chip popover by sourceGroupId, with a sub-heading per group', () => {
+    const citations: Citation[] = [
+      {
+        id: 'c1', title: 'Refund policy', url: 'https://intranet/refunds', snippet: 'A',
+        sourceGroupId: 'kb:sharepoint', sourceGroupLabel: 'Microsoft 365',
+      },
+      {
+        id: 'c2', title: 'Refund FAQ', url: 'https://intranet/faq', snippet: 'B',
+        sourceGroupId: 'kb:sharepoint', sourceGroupLabel: 'Microsoft 365',
+      },
+      {
+        id: 'c3', title: 'Aquatiq refund page', url: 'https://www.aquatiq.com/refunds', snippet: 'C',
+        sourceGroupId: 'aquatiq.com',
+      },
+    ]
+    const element = renderMarkdown('Supported by internal and external sources [1, 2, 3].', citations)
+    const chip = element.querySelector('.verevon-chat-citation-chip')
+    expect(chip).not.toBeNull()
+    const groupLabels = Array.from(chip!.querySelectorAll('.verevon-chat-citation-chip__group-label'))
+      .map((node) => node.textContent)
+    // Two groups: the two SharePoint sources share one heading, the
+    // aquatiq.com source gets its own.
+    expect(groupLabels).toEqual(['Microsoft 365', 'aquatiq.com'])
+    const groups = chip!.querySelectorAll('.verevon-chat-citation-chip__group')
+    expect(groups).toHaveLength(2)
+    // The first group holds both SharePoint sources.
+    expect(groups[0]?.querySelectorAll('.verevon-chat-citation-chip__source')).toHaveLength(2)
+    expect(groups[1]?.querySelectorAll('.verevon-chat-citation-chip__source')).toHaveLength(1)
+  })
+
+  it('falls back to hostname() grouping when sourceGroupId is absent (a not-yet-updated gateway)', () => {
+    const citations: Citation[] = [
+      { id: 'c1', title: 'Example A', url: 'https://example.com/a', snippet: 'A' },
+      { id: 'c2', title: 'Example B', url: 'https://www.example.com/b', snippet: 'B' },
+    ]
+    const element = renderMarkdown('Two pages from the same site [1, 2].', citations)
+    const chip = element.querySelector('.verevon-chat-citation-chip')
+    expect(chip).not.toBeNull()
+    const groupLabels = Array.from(chip!.querySelectorAll('.verevon-chat-citation-chip__group-label'))
+      .map((node) => node.textContent)
+    // hostname() strips `www.`, so both sources fall into ONE group.
+    expect(groupLabels).toEqual(['example.com'])
+    expect(chip!.querySelectorAll('.verevon-chat-citation-chip__source')).toHaveLength(2)
   })
 })
 

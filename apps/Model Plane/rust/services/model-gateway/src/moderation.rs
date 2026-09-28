@@ -577,26 +577,35 @@ fn looks_like_long_number(token: &str) -> bool {
 }
 
 /// Redact PII (emails, card/IBAN-length number sequences) from `text`.
-/// Returns the sanitized string and the number of redactions. Whitespace is
-/// normalized to single spaces (acceptable for prompt content).
+/// Returns the sanitized string and the number of redactions. Only matching
+/// whitespace-delimited tokens are replaced; every whitespace run is copied
+/// unchanged, so line structure (for example the `--- VEDLEGG: … ---`
+/// attachment markers that source review parses) survives, and text with no
+/// redaction comes back byte-identical.
 #[must_use]
 pub fn redact_pii(text: &str) -> (String, usize) {
     let mut count = 0;
-    let sanitized = text
-        .split_whitespace()
-        .map(|token| {
-            if looks_like_email(token) {
-                count += 1;
-                "[redacted-email]".to_owned()
-            } else if looks_like_long_number(token) {
-                count += 1;
-                "[redacted-number]".to_owned()
-            } else {
-                token.to_owned()
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(" ");
+    let mut sanitized = String::with_capacity(text.len());
+    let mut rest = text;
+    while !rest.is_empty() {
+        let token_end = rest.find(char::is_whitespace).unwrap_or(rest.len());
+        let (token, tail) = rest.split_at(token_end);
+        if looks_like_email(token) {
+            count += 1;
+            sanitized.push_str("[redacted-email]");
+        } else if looks_like_long_number(token) {
+            count += 1;
+            sanitized.push_str("[redacted-number]");
+        } else {
+            sanitized.push_str(token);
+        }
+        let whitespace_end = tail
+            .find(|c: char| !c.is_whitespace())
+            .unwrap_or(tail.len());
+        let (whitespace, next) = tail.split_at(whitespace_end);
+        sanitized.push_str(whitespace);
+        rest = next;
+    }
     (sanitized, count)
 }
 
@@ -716,6 +725,47 @@ mod tests {
     fn redact_pii_keeps_ordinary_text_and_small_numbers() {
         let (out, n) = redact_pii("we shipped 42 units in 2026");
         assert_eq!(out, "we shipped 42 units in 2026");
+        assert_eq!(n, 0);
+    }
+
+    #[test]
+    fn redact_pii_preserves_attachment_markers_for_source_review() {
+        use crate::source_validation::{SourceContext, CONVERSATION_SCOPE_NOTICE};
+        use mp_contracts::model_plane::v1::ChatMessage;
+
+        let prompt = "Skriv et svar til kunden.\n\n--- VEDLEGG: avtale.txt ---\nKontakt: alice@example.com\n\nPris:  1200 kr\n--- SLUTT PÅ VEDLEGG: avtale.txt ---";
+        let (out, n) = redact_pii(prompt);
+        assert_eq!(n, 1);
+        assert!(!out.contains("alice@example.com"));
+        assert_eq!(out, prompt.replace("alice@example.com", "[redacted-email]"));
+
+        let messages = vec![
+            ChatMessage {
+                role: "system".into(),
+                content: CONVERSATION_SCOPE_NOTICE.into(),
+                ..Default::default()
+            },
+            ChatMessage {
+                role: "user".into(),
+                content: out,
+                ..Default::default()
+            },
+        ];
+        let context = SourceContext::from_messages(&messages)
+            .expect("redacted attachment turn must keep its source for review");
+        assert_eq!(context.sources.len(), 1);
+        assert_eq!(context.sources[0].name, "avtale.txt");
+        assert_eq!(
+            context.sources[0].content,
+            "Kontakt: [redacted-email]\n\nPris:  1200 kr"
+        );
+    }
+
+    #[test]
+    fn redact_pii_without_matches_is_byte_identical() {
+        let text = "  leading\ttab\r\nline two\n\n  trailing  ";
+        let (out, n) = redact_pii(text);
+        assert_eq!(out, text);
         assert_eq!(n, 0);
     }
 

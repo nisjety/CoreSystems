@@ -351,6 +351,7 @@ async fn browser_run_start(
         None,
         None,
         false,
+        None,
     )
     .await
     .map_err(|error| {

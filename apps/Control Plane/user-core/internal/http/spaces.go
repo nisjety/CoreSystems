@@ -616,11 +616,27 @@ type sharedThreadReadDecisionRequest struct {
 // issueThreadReadDecision authorizes one short-lived read of a SHARED Space's
 // conversation record.
 //
-// Personal Spaces are refused rather than served, and that is not an omission:
-// a personal Space's threads are already readable by their only member through
-// the existing owner-bound path, so issuing a read decision there would add a
-// second, weaker way to reach the same rows. Model Plane keeps the owner check
-// for anything without one of these decisions.
+// Personal Spaces are refused on THIS path rather than served, and that is
+// not an omission: a personal Space's own threads are already readable by
+// their only member through the existing owner-bound path, so issuing a
+// shared-room read decision there would add a second, weaker way to reach
+// the same rows. Model Plane keeps the owner check for anything without one
+// of these decisions.
+//
+// What the owner-bound path does NOT cover is a thread a trusted SERVICE
+// created inside the owner's own personal Space on their behalf — concretely,
+// a schedule's result thread, owned by "service:orchestrator-core" per
+// session-core's PrepareScheduledRunThread (chat-wave2 "schedule" spec §1,
+// §2.4). There was previously no decision that Space's own owner could obtain
+// to read it: this is the smallest safe fix, not a relaxation of the shared
+// path above. When the shared-room resolution fails — which it always does
+// for a personal Space, since that resolver's own query excludes
+// space_kind='personal' — fall back to the narrow, owner-only
+// ResolveOwnScheduledThreadReadDecisionEvidence/IssueOwnScheduledThreadReadDecision
+// pair (same action id and schema as the shared path, so Session Core's
+// verifier needs no change) before giving up. A caller who is neither a
+// shared-room member nor that personal Space's own owner still gets the
+// original 403.
 func (s *Server) issueThreadReadDecision(c *gin.Context) {
 	if !s.spaceRepoAvailable(c) {
 		return
@@ -629,17 +645,26 @@ func (s *Server) issueThreadReadDecision(c *gin.Context) {
 	if !bindSpaceDecisionBody(c, &request, "space_ref and idempotency_key are required", request.SpaceRef, request.IdempotencyKey) {
 		return
 	}
-	evidence, err := s.spaceRepo.ResolveSharedThreadReadDecisionEvidence(
-		c.Request.Context(), request.SpaceRef, c.GetString("org_id"), c.GetString("user_id"),
-	)
-	if writeSpaceEvidenceError(c, err, "current shared Space authority required", http.StatusForbidden, "shared Space read authority is not available") {
-		return
+	orgID, userID := c.GetString("org_id"), c.GetString("user_id")
+	issue := spaces.IssueSharedThreadReadDecision
+	evidence, err := s.spaceRepo.ResolveSharedThreadReadDecisionEvidence(c.Request.Context(), request.SpaceRef, orgID, userID)
+	if err != nil {
+		ownEvidence, ownErr := s.spaceRepo.ResolveOwnScheduledThreadReadDecisionEvidence(c.Request.Context(), request.SpaceRef, orgID, userID)
+		if ownErr != nil {
+			// Report the ORIGINAL shared-path error, which is the one whose
+			// message ("current shared Space authority required") matches
+			// what most callers of this endpoint are actually asking for; the
+			// own-scheduled fallback is the exception, not the norm.
+			writeSpaceEvidenceError(c, err, "current shared Space authority required", http.StatusForbidden, "shared Space read authority is not available")
+			return
+		}
+		evidence, issue = ownEvidence, spaces.IssueOwnScheduledThreadReadDecision
 	}
 	key, decisionRef, nonce, ok := spaceDecisionMaterial(c)
 	if !ok {
 		return
 	}
-	decision, err := spaces.IssueSharedThreadReadDecision(evidence, spaces.SharedThreadReadDecisionRequest{
+	decision, err := issue(evidence, spaces.SharedThreadReadDecisionRequest{
 		DecisionRef: decisionRef, IdempotencyKey: request.IdempotencyKey, Nonce: nonce,
 		ServiceAudience: request.ServiceAudience,
 	}, time.Now().UTC())

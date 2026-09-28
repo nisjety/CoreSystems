@@ -2,6 +2,8 @@
 
 > **Execution update — 2026-09-19:** The design-only status below is historical. [Q01–Q04](../product-recordings/evidence/PRODUCT_RECORDING_Q01_Q04_2026-09-19.md) records implemented capability selection, native summary round-trip and live threshold/restart verification. These are separate from performance certification: [Q08–Q10](../product-recordings/evidence/PRODUCT_RECORDING_Q08_Q10_2026-09-19.md) tracks measured latency and recovery. Do not reopen the original gaps without checking those results, or infer a speed target has passed from request acceptance alone.
 
+> **Execution update — 2026-09-24:** §8 records §4.6, §4.1 (with summary reuse) and §4.3 as implemented. The first two sit behind flags that cannot take effect on the subscription route. §8 also covers the new OpenAI cached-token and Codex subscription usage telemetry, and corrects §7.3: hand-rolled compaction now runs on every route. None of it is deployed yet.
+
 Research and design pass. No code was changed as part of this document. Produced by a
 5-researcher + adversarial-verify + synthesis workflow: 1 external best-practice researcher
 (Anthropic/OpenAI/LangChain/Claude Code documentation) plus 1 internal architecture mapper,
@@ -385,3 +387,156 @@ the migration alone without also resolving or excluding that other bundled work.
 **Status: implemented, live-tested against a real Azure deployment, and independently verified.**
 Not yet deployed to the running containers as of this writing — needs a Model Plane rebuild to take
 effect live.
+
+## 8. OpenAI-route cache items, telemetry and a correction to §7.3 — 2026-09-24
+
+A read-only investigation re-checked §2–§7 against the code on 2026-09-23. The implementation
+followed on 2026-09-24, then a cross-cutting review with fixes. **Nothing in this section is
+deployed.** It takes effect only after the launcher rebuild (`build-verevon-services.sh --from
+model`, which covers the Model, Application, Ingestion and Frontend planes). Live validation
+follows: the 104-case review matrix, the 10 recheck controls, note-turn runs and one smoke turn,
+all before the build freeze. No cache hit has been measured on any route.
+
+### 8.1 Decisions recorded
+
+- **2026-09-23 — keep `gpt-5.6-terra` via `openai-codex-subscription`** as the product and
+  recording route. No model switch. The cache items in 8.2 are therefore built for the OpenAI-API
+  routes and gated off on this one (8.3).
+- **2026-09-24 — the broker's direct ChatGPT-OAuth Responses transport is built but opt-in.** The
+  hardened Codex app-server stays the default (`CODEX_SUBSCRIPTION_TRANSPORT` defaults to
+  `app-server`, `apps/Ingestion Plane/docker-compose.yml`) until OpenAI confirms hosted multi-user
+  use. OpenAI's public statements cover individuals using their own account in a client. Its
+  2026-08-21 statement says re-serving a subscription as API traffic gets flagged. This decides
+  whether the subscription route can cache across calls at all (8.6).
+- **2026-09-24 — subscription tokens are excluded from org token caps.** This restores the
+  behaviour from before the route reported real tokens (8.4).
+- **2026-09-24 — four model-visible latency levers ship on**, each behind an env kill-switch:
+  note-turn plan prefetch (`MODEL_GATEWAY_SOLE_NOTE_PREFETCH`), recheck proposes edits
+  (`MODEL_GATEWAY_RECHECK_PROPOSES_EDITS`), balanced review batches
+  (`MODEL_GATEWAY_BALANCED_REVIEW_BATCHES`) and thread/start effort
+  (`CODEX_APP_SERVER_THREAD_EFFORT`). They are not cache items. They are listed here because they,
+  not the items in 8.2, are what changes the prompts on the recorded route.
+
+### 8.2 Status of the §5 list
+
+| # | Item | State on 2026-09-24 |
+|---|---|---|
+| 1 | Remove the inert env vars (§4.4) | Done and live since 2026-09-17 (§6.1). Unchanged. |
+| 2 | System-message reordering (§4.6) | **Implemented for OpenAI-API routes, off by default.** New `model-gateway/src/prompt_context.rs` fills a `PromptContext` with 15 named slots. The legacy render is proven byte-identical to the old insertion sequence on 15 inputs. `PromptOrder::StablePrefix` sends the stable blocks first, then pins, summary and prior history, then the per-turn blocks (inventory, calendar, grounding, session-core context block, memory, skills, image state), then the current user turn. The same flag moves `reattach_context` and `web_search` to the end of the tool list. Flag: `MODEL_GATEWAY_CACHE_STABLE_PROMPT_ORDER`. The Anthropic two-block system split from §6.2 was not built, so on Anthropic the reorder is still a no-op. |
+| 3 | Compaction/cache-boundary anchoring (§4.2) | Not started. |
+| 4 | Token-budget trigger (§4.1) | **Implemented with summary reuse, off by default.** `plan_head_summary_by_budget` (`compaction.rs`) estimates each message as bytes/4 plus 4. It triggers above the budget when the history has at least 6 messages, or above 96 messages. The tail keeps up to 23 messages, trimmed to half the budget, never fewer than 2. The head stops at the first system message or the first attachment turn (`--- VEDLEGG:`), so sources are never summarised away. The summary is stored as `head_summary` {summary, through_id, pinned_ids} in the assistant message's metadata (skipped under ZDR, 128 KB cap). Later turns reuse it byte for byte and summarise again only when the uncovered part exceeds the budget. Flag: `MODEL_GATEWAY_COMPACTION_TOKEN_BUDGET` (estimated tokens, clamped to 1,000–200,000; 12,000 is the investigated value). Unset keeps the 24/23 message-count path. The floor is 6, not §4.1's example of 8: an 8-message floor with a 23-message tail could never compact a two-turn thread. |
+| 5 | Summary-prompt cache-stability clause (§4.3) | **Implemented on every route.** `SUMMARY_STABILITY_CLAUSE` is appended to both variants of the summary prompt. Summary calls now run at `SUMMARY_TEMPERATURE` (0.0). Only OpenAI non-reasoning models receive a temperature. |
+
+Two further items came out of the investigation, behind the same route gate:
+- **E.** Under the prompt-order flag, the streamed answer resends the last tool round's tools with
+  `tool_choice: "none"`, so it can share that round's prefix. Never with a subscription connection
+  or a structured-output schema.
+- **F.** `MODEL_GATEWAY_DEDUP_CONTEXT_HISTORY` leaves out session-core context-block thread lines
+  that repeat a history message already sent.
+
+R4 added 28 unit tests, and all model-gateway test targets passed. No end-to-end test runs with the
+flags on.
+
+### 8.3 How the flags stay off on the subscription route
+
+- The gateway assembles the prompt before the first provider call, so it decides from what the
+  turn pins: `CacheRoute::of_turn(provider_hint, subscription_connection_id, model)`
+  (`prompt_context.rs`). It returns the OpenAI Chat Completions route only when all of these hold:
+  the hint is `openai`, `azure-openai` or `azure`; there is no subscription connection or alias
+  (`pricing::CostBasis::of_route`); and the model is not `claude*`.
+- Every other turn is `CacheRoute::Other`, and `CacheOptions::for_route(Other)` turns every option
+  off, whatever the env says. That covers every `openai-codex-subscription` turn, and unhinted
+  "Verevon Auto" turns.
+- The cross-review checked this against the code and found no path from the flags to
+  `gpt-5.6-terra`.
+- The flags are read once per process, so changing one needs a gateway restart.
+- Item 5 is the only one that reaches the recorded route. It is prompt text, and it matters only
+  when message-count compaction runs, above 24 messages. The recorded journeys send at most 3
+  prompts per test, so at most 6 messages per thread. The Codex adapter forwards no temperature.
+- Enable the flags only on OpenAI-API or Azure OpenAI deployments, and only after rerunning the
+  product and eval suites there. Variant B moves grounding, memory and skills to just before the
+  question. Its effect on answer quality is not measured.
+- Expected gain on those routes, **estimated, not measured**: the stable prefix grows from about
+  1.3 KB (~330 tokens) to about 6.4 KB (~1.6k tokens), which lifts the final answer above OpenAI's
+  1,024-token minimum. Variant B plus summary reuse adds most of the prior history. In money this
+  is small.
+
+### 8.4 Telemetry now reported
+
+**OpenAI and Azure OpenAI cached tokens.** Before, `openai.rs` read only prompt and completion
+tokens and stamped zero cache legs, although streaming already asked for usage. Now
+`openai_cache_tokens` reads `prompt_tokens_details.cached_tokens` and `cache_write_tokens`
+(falling back to `input_tokens_details`), treats missing or `null` as 0, and caps both legs inside
+`prompt_tokens`. It runs on `infer` and on both final chunks of `infer_stream`. `input_tokens` is
+unchanged, since OpenAI already counts cached tokens inside it.
+
+**Per-model cache rates.** `pricing.rs` `cache_rates` replaces the flat 0.1× read discount for the
+models OpenAI documents: gpt-4o-mini reads at 0.5×, the GPT-5 family at 0.1×, and GPT-5.6 and
+later also charge cache writes at 1.25×. Every other model keeps the old behaviour. cost-core
+mirrors the table in `internal/pricing/pricing.go` `cacheRatesFor`, so the streamed display cost
+and the ledgered cost agree. GPT-5 API models still have no catalogue row and price at the
+`default` $3/$15 per 1M rate; no sourced price exists in the repo.
+
+**Codex subscription usage.** Before, every turn on the recorded route reached the ledger as 0
+input and 0 output tokens. Now:
+- The broker handles Codex's `thread/tokenUsage/updated` notification in `waitForTurn`
+  (`appserver.go`). It matches thread and turn ids and keeps the latest total. `InvokeResponse`
+  and the stream `done` event carry `Usage` and `PhasesMs`.
+- `codex_subscription.rs` maps that to input, output, cache-read and cache-write tokens, with the
+  same caps as the OpenAI helper. An older broker still gives zeros.
+- `pricing::CostBasis` marks the turn `subscription`, so its cost stays 0.0. The `usage` SSE event
+  and `USAGE_ENVELOPE` carry `cost_basis`. cost-core stores it (migration `0005_cost_basis`) and
+  never re-prices a subscription entry. The SPA shows "Inkludert i abonnementet" instead of $0.00.
+- Token caps: cost-core's `/api/v1/budget/check` compares `max_tokens` with metered tokens only
+  (`MeteredInputTokens`/`MeteredOutputTokens`, `SUM … FILTER (WHERE cost_basis IS DISTINCT FROM
+  'subscription')`). Usage and aggregate reports still include subscription tokens.
+- Not verified live: whether Codex 0.153.4 sends the usage notification before `turn/completed` on
+  these one-turn threads. If it does not, usage stays unknown, which is the safe default.
+- cost-core must be deployed with or before the broker, inference-core and gateway. Otherwise
+  subscription tokens are priced at the default rate. The launcher rebuild covers all four.
+
+### 8.5 Correction to §7.3
+
+- **Hand-rolled compaction now runs on every route.** §7.3 says an Anthropic-family turn skips
+  `plan_head_summary`/`apply_head_summary` and `clear_stale_tool_results`. That is out of date. In
+  HEAD (`932b30d2`), `should_run_local_compaction` always returns `true` and
+  `clear_stale_tool_results_unless_native` always clears (`compaction.rs`). The code's reason:
+  routing can substitute a different provider, so a model-name guess must not remove recovery.
+  Native context management still applies to Anthropic calls inside inference-core.
+- **On the default path the head summary is made again on every turn past 24 messages.**
+  Session-core returns the whole thread each turn, and nothing stored the summary before item 4.
+  Each such turn pays a new summary call (6 s timeout) over a head that keeps growing. On the Codex
+  route that call also starts another app-server process. Summary reuse fixes this, but only where
+  its flag can apply.
+
+### 8.6 What this means for the recorded route
+
+- On the final [Pass 6](../product-recordings/evidence/PRODUCT_RECORDING_CAPTURE_PASS6_2026-09-23.md)
+  build (v53–v57, 10 turns), 98.8–99.7% of server time was spent waiting on the provider. That was
+  measured from the retained logs in a timing reconstruction on 2026-09-23. None of the items in
+  8.2 reaches that route.
+- On the default app-server transport, every call starts a new Codex process and a throwaway
+  thread. Codex sends its session id as the cache key. That was seen in Codex source on `main`;
+  the pinned 0.153.4 has the field, but its value was not confirmed. So each call gets a new key,
+  and no prompt cache carries over between calls. The investigation's estimate for this route is
+  about zero cache gain from items 2, 4 and 5.
+- The direct transport sends a stable `prompt_cache_key` and `session-id` per connection and model
+  (`direct.go` `promptCacheKey`, UUIDv5). That would allow caching across calls, but it stays
+  opt-in under the 2026-09-24 decision, and no hit has been measured.
+- What the recorded route does gain, once deployed, is its first real token and cache counts.
+
+### 8.7 Still open
+
+- §4.2 boundary anchoring and the Anthropic two-block system split (§6.2): not started.
+- No live cache measurement on any route. Once deployed, OpenAI and Azure turns report cache reads;
+  repeat the tombstone's "same question twice" experiment with the flags off, then on.
+- Not verified: whether Azure api-version `2025-01-01-preview` returns `cached_tokens` for these
+  deployments.
+- The gRPC Invoke and HTTP invoke paths keep their own prompt assembly. Only the SSE chat path uses
+  `PromptContext`.
+- Budget mode never compacts from the first attachment turn onward. A thread whose attachment is in
+  turn 1 never compacts in budget mode.
+- The session-core context block still repeats recent history. Item F drops the repeats in the
+  gateway, but session-core still spends its assembly budget on them.
+- `max_tokens_per_run` is compared against a user's all-time token total, not one run. This
+  predates the change and still affects metered routes.

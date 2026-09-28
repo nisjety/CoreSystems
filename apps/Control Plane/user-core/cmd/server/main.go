@@ -21,6 +21,7 @@ import (
 	"github.com/I-Dacosta/AquatiqCMS/apps/user-service-go/internal/handlers"
 	httpserver "github.com/I-Dacosta/AquatiqCMS/apps/user-service-go/internal/http"
 	"github.com/I-Dacosta/AquatiqCMS/apps/user-service-go/internal/internalkey"
+	"github.com/I-Dacosta/AquatiqCMS/apps/user-service-go/internal/mailtask"
 	metricsserver "github.com/I-Dacosta/AquatiqCMS/apps/user-service-go/internal/metrics"
 	"github.com/I-Dacosta/AquatiqCMS/apps/user-service-go/internal/nats"
 	rediscache "github.com/I-Dacosta/AquatiqCMS/apps/user-service-go/internal/redis"
@@ -380,6 +381,12 @@ func main() {
 	httpServer := httpserver.NewServer(userService, aclRepo, sharedPublisher, redisClient, httpPort)
 	httpServer.SetSpaceRepository(spaces.NewRepository(db))
 	httpServer.SetAuthInternalCredential(serviceCredential)
+	// Personal inbound-mail alias (chat-wave2 mail-task spec). The service is
+	// always wired; every route stays 503 on its own until
+	// MAIL_TASK_RECEIVING_DOMAIN is set (owner has not finished the Postmark
+	// account + DNS setup yet), so this line carries no runtime behavior change
+	// by itself.
+	httpServer.SetMailTaskService(mailtask.NewService(mailtask.NewRepository(db)))
 	// Owner-action issuance is intentionally unavailable until this Control
 	// service has its distinct, least-privilege Session Core credential. Do not
 	// substitute a gateway, execution, or broad Model token here.

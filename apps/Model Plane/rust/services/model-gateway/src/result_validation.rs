@@ -12,7 +12,42 @@ use serde::Serialize;
 pub const CHECKER_VERSION: &str = "direct-word-range-v1";
 pub const VALIDATION_FAILED: &str = "response_validation_failed";
 pub const VALIDATION_TIMEOUT: &str = "response_validation_timeout";
+/// The model service, not the draft, failed while a draft was being checked
+/// or repaired.
+pub const VALIDATION_UNAVAILABLE: &str = "response_validation_unavailable";
 pub const MAX_CANDIDATES: u8 = 3;
+
+/// Why a document's source review or repair failed, from the status it ended
+/// with.
+///
+/// An outage used to be reported as a failed check ("try a smaller change or
+/// clearer sources"), which sends the user to rewrite a request that was never
+/// judged. The checker's own failures carry this module's codes as their
+/// message, including its `ResourceExhausted` for a draft too large to
+/// review, so only a status without one is the provider's.
+///
+/// A typed ChatGPT-subscription refusal is its own reason, so the draft's
+/// explanation can say what actually stopped it. `rate_limited` is not read
+/// here: any provider may throttle, and only a caller that knows the turn is
+/// on the subscription route may treat it as the subscription's.
+#[must_use]
+pub fn check_failure_reason(status: &tonic::Status) -> &'static str {
+    if let Some(failure) = crate::subscription_failure::on_route(status, false) {
+        return failure.code;
+    }
+    let own = matches!(status.message(), VALIDATION_FAILED | VALIDATION_TIMEOUT);
+    match status.code() {
+        tonic::Code::Unavailable
+        | tonic::Code::ResourceExhausted
+        | tonic::Code::DeadlineExceeded
+            if !own =>
+        {
+            VALIDATION_UNAVAILABLE
+        }
+        tonic::Code::DeadlineExceeded => VALIDATION_TIMEOUT,
+        _ => VALIDATION_FAILED,
+    }
+}
 
 /// Private structured reports need unary tool payloads: InferChunk does not
 /// carry them. Require an explicit cache-bypass acknowledgement, so an older
@@ -23,7 +58,9 @@ pub async fn infer_candidate(
     mut request: tonic::Request<InferRequest>,
 ) -> Result<InferResponse, tonic::Status> {
     if request.get_ref().tools.is_empty() {
-        return collect_candidate(client.infer_stream(request).await?.into_inner()).await;
+        let subscription_route = !request.get_ref().subscription_connection_id.trim().is_empty();
+        let stream = client.infer_stream(request).await?.into_inner();
+        return collect_candidate_on_route(stream, subscription_route).await;
     }
     request.metadata_mut().insert("cache-control", "no-store".parse().expect("static metadata"));
     checked_report_response(client.infer(request).await?)
@@ -38,7 +75,34 @@ fn checked_report_response(response: tonic::Response<InferResponse>) -> Result<I
 
 /// Collect the ordinary streaming provider route, without opting chat into
 /// inference-core's unary response cache. No provisional text is published.
-pub async fn collect_candidate<S>(mut stream: S) -> Result<InferResponse, tonic::Status>
+///
+/// A stream that ended on a failure is an error, as on the subscription
+/// route; see [`collect_candidate_on_route`].
+pub async fn collect_candidate<S>(stream: S) -> Result<InferResponse, tonic::Status>
+where
+    S: futures::Stream<Item = Result<InferChunk, tonic::Status>> + Unpin,
+{
+    collect_candidate_on_route(stream, true).await
+}
+
+/// [`collect_candidate`] for a call on or off the ChatGPT-subscription route.
+///
+/// On the subscription route a stream that ended on a failure
+/// (`stream_error`, `stream_incomplete`) is no candidate but an error: the
+/// Codex turn behind it already ran, and asking for a fresh candidate would
+/// spend another turn of the plan's quota on a route that had just failed.
+/// Off it, the failed stream stays a candidate that the checker rejects by
+/// its stop reason, so an API provider's dropped stream still earns the
+/// fresh candidate it always did.
+///
+/// # Errors
+///
+/// A failed chunk, a candidate over 200 000 bytes, a stream without a final
+/// chunk, and on the subscription route a stream that ended on a failure.
+pub async fn collect_candidate_on_route<S>(
+    mut stream: S,
+    subscription_route: bool,
+) -> Result<InferResponse, tonic::Status>
 where
     S: futures::Stream<Item = Result<InferChunk, tonic::Status>> + Unpin,
 {
@@ -50,6 +114,11 @@ where
             return Err(tonic::Status::resource_exhausted(VALIDATION_FAILED));
         }
         if chunk.done {
+            if subscription_route
+                && matches!(chunk.stop_reason.as_str(), "stream_error" | "stream_incomplete")
+            {
+                return Err(tonic::Status::unavailable("candidate stream failed"));
+            }
             return Ok(InferResponse {
                 request_id: chunk.request_id,
                 content,
@@ -63,6 +132,8 @@ where
                 cache_read_input_tokens: chunk.cache_read_input_tokens,
                 cache_creation_input_tokens: chunk.cache_creation_input_tokens,
                 compaction_summary: chunk.compaction_summary,
+                // Stamped on the final chunk only: the call's provider timing.
+                provider_timing: chunk.provider_timing,
                 ..Default::default()
             });
         }
@@ -348,13 +419,17 @@ pub struct RevisionReceipt {
 /// Simple revision commands can finish with a deterministic receipt. Questions
 /// and mixed requests keep the normal answer path rather than losing an answer
 /// the user also requested. No language model is asked to restate document facts.
+///
+/// `document_tool_failures` counts failed document writes only. Any failed
+/// tool used to withhold the receipt, so one failed lookup turned the chat
+/// text about the document into free model prose.
 pub fn revision_completion(
     prompt: &str,
     previous: &[ArtifactSnapshot],
     artifacts: &[crate::sse_events::RecordedArtifact],
-    tool_failures: u32,
+    document_tool_failures: u32,
 ) -> Option<(String, RevisionReceipt)> {
-    if tool_failures > 0 || artifacts.len() != 1 {
+    if document_tool_failures > 0 || artifacts.len() != 1 {
         return None;
     }
     let lower = prompt.split("\n\n--- VEDLEGG: ").next().unwrap_or(prompt).trim().to_lowercase();
@@ -544,6 +619,9 @@ where
                     cache_read_input_tokens: response.cache_read_input_tokens,
                     cache_creation_input_tokens: response.cache_creation_input_tokens,
                     compaction_summary: response.compaction_summary,
+                    // The accepted candidate's report, so the turn can tell
+                    // whether the token counts it releases were reported.
+                    provider_timing: response.provider_timing,
                     ..Default::default()
                 },
                 receipt,
@@ -656,6 +734,34 @@ mod tests {
         })]))
         .await
         .is_err());
+    }
+
+    /// A streamed review or repair is timed from its final chunk's report,
+    /// which the collected response must keep.
+    #[tokio::test]
+    async fn collected_candidates_keep_the_final_chunk_provider_timing() {
+        let timing = mp_contracts::model_plane::v1::ProviderTiming {
+            handler_ms: 25_422,
+            provider_ms: 25_400,
+            attempts: 1,
+            usage_reported: true,
+            ..Default::default()
+        };
+        let response = collect_candidate(futures::stream::iter([
+            Ok(InferChunk {
+                delta: "a".into(),
+                ..Default::default()
+            }),
+            Ok(InferChunk {
+                delta: "b".into(),
+                done: true,
+                provider_timing: Some(timing.clone()),
+                ..Default::default()
+            }),
+        ]))
+        .await
+        .unwrap();
+        assert_eq!(response.provider_timing, Some(timing));
     }
 
     #[test]
@@ -864,5 +970,151 @@ mod tests {
         .await;
         assert_eq!(calls, 3);
         assert_eq!(result.unwrap_err().message(), VALIDATION_FAILED);
+    }
+
+    #[tokio::test]
+    async fn a_failed_candidate_stream_is_an_error_not_an_empty_candidate() {
+        for stop_reason in ["stream_error", "stream_incomplete"] {
+            let error = collect_candidate(futures::stream::iter([
+                Ok(InferChunk {
+                    delta: "partial".into(),
+                    ..Default::default()
+                }),
+                Ok(InferChunk {
+                    done: true,
+                    stop_reason: stop_reason.into(),
+                    ..Default::default()
+                }),
+            ]))
+            .await
+            .expect_err("a failed stream is not a candidate");
+            assert_eq!(error.code(), tonic::Code::Unavailable, "{stop_reason}");
+            assert_eq!(check_failure_reason(&error), VALIDATION_UNAVAILABLE);
+        }
+    }
+
+    /// A word-range answer whose first candidate stream failed makes no
+    /// second candidate: the failure is the outcome.
+    #[tokio::test]
+    async fn a_failed_candidate_stream_makes_no_further_candidates() {
+        let range = WordRange::from_user_prompt("Svar i chatten med 3-5 ord.").unwrap();
+        let mut calls = 0;
+        let result = check_with_repair(
+            InferRequest::default(),
+            "Svar i chatten med 3-5 ord.",
+            range,
+            |_| {
+                calls += 1;
+                collect_candidate(futures::stream::iter([Ok(InferChunk {
+                    done: true,
+                    stop_reason: "stream_error".into(),
+                    ..Default::default()
+                })]))
+            },
+        )
+        .await;
+        assert_eq!(calls, 1);
+        assert_eq!(result.unwrap_err().code(), tonic::Code::Unavailable);
+    }
+
+    /// Off the subscription route a dropped candidate stream is what it was
+    /// before: a candidate rejected by its stop reason, followed by a fresh
+    /// one, so an API provider's transient drop can still be repaired.
+    #[tokio::test]
+    async fn off_the_subscription_route_a_failed_candidate_stream_earns_a_fresh_candidate() {
+        for stop_reason in ["stream_error", "stream_incomplete"] {
+            let response = collect_candidate_on_route(
+                futures::stream::iter([
+                    Ok(InferChunk {
+                        delta: "partial".into(),
+                        ..Default::default()
+                    }),
+                    Ok(InferChunk {
+                        done: true,
+                        stop_reason: stop_reason.into(),
+                        ..Default::default()
+                    }),
+                ]),
+                false,
+            )
+            .await
+            .expect("off the route the failed stream is a candidate");
+            assert_eq!(response.stop_reason, stop_reason);
+        }
+
+        let range = WordRange::from_user_prompt("Svar i chatten med 3-5 ord.").unwrap();
+        let mut calls = 0;
+        let result = check_with_repair(
+            InferRequest::default(),
+            "Svar i chatten med 3-5 ord.",
+            range,
+            |_| {
+                calls += 1;
+                let chunk = if calls == 1 {
+                    InferChunk {
+                        done: true,
+                        stop_reason: "stream_error".into(),
+                        ..Default::default()
+                    }
+                } else {
+                    InferChunk {
+                        delta: "tre gode ord".into(),
+                        done: true,
+                        stop_reason: "end_turn".into(),
+                        ..Default::default()
+                    }
+                };
+                collect_candidate_on_route(futures::stream::iter([Ok(chunk)]), false)
+            },
+        )
+        .await;
+        assert_eq!(calls, 2, "the dropped stream is rejected and a fresh candidate asked for");
+        assert_eq!(result.expect("the fresh candidate passes").0.delta, "tre gode ord");
+    }
+
+    /// A typed subscription refusal names itself, where a bare outage is
+    /// only "unavailable". A throttle is left to the route-aware caller.
+    #[test]
+    fn a_subscription_refusal_is_its_own_check_failure_reason() {
+        let typed = |code: &str| {
+            let mut metadata = tonic::metadata::MetadataMap::new();
+            metadata.insert("x-mp-provider-error", code.parse().unwrap());
+            tonic::Status::with_metadata(tonic::Code::Unavailable, "subscription refused", metadata)
+        };
+        for code in [
+            crate::subscription_failure::SUBSCRIPTION_USAGE_LIMIT,
+            crate::subscription_failure::SUBSCRIPTION_REAUTH_REQUIRED,
+            crate::subscription_failure::SUBSCRIPTION_UPSTREAM_UNAVAILABLE,
+            crate::subscription_failure::SUBSCRIPTION_BAD_REQUEST,
+        ] {
+            assert_eq!(check_failure_reason(&typed(code)), code);
+        }
+        assert_eq!(check_failure_reason(&typed("rate_limited")), VALIDATION_UNAVAILABLE);
+        assert_eq!(check_failure_reason(&typed("too_long")), VALIDATION_UNAVAILABLE);
+    }
+
+    #[test]
+    fn a_provider_outage_is_not_reported_as_a_failed_check() {
+        for status in [
+            tonic::Status::unavailable("subscription broker unreachable"),
+            tonic::Status::resource_exhausted("usage limit reached"),
+            tonic::Status::deadline_exceeded("provider timed out"),
+        ] {
+            let reason = check_failure_reason(&status);
+            assert_eq!(reason, VALIDATION_UNAVAILABLE, "{status:?}");
+        }
+        // The checker's own verdicts keep their meaning, including its
+        // ResourceExhausted for a draft too large to review.
+        let too_large = tonic::Status::resource_exhausted(VALIDATION_FAILED);
+        let rejected = tonic::Status::failed_precondition(VALIDATION_FAILED);
+        let deadline = tonic::Status::deadline_exceeded(VALIDATION_TIMEOUT);
+        for (status, reason) in [
+            (too_large, VALIDATION_FAILED),
+            (rejected, VALIDATION_FAILED),
+            (deadline, VALIDATION_TIMEOUT),
+            (tonic::Status::internal("unexpected"), VALIDATION_FAILED),
+        ] {
+            assert_eq!(check_failure_reason(&status), reason, "{status:?}");
+        }
     }
 }

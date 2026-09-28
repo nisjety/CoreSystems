@@ -16,6 +16,7 @@ import (
 
 var ErrInactiveOwnerMembership = errors.New("space owner is not an active organization member")
 var ErrNoCurrentMembership = errors.New("no current Space membership")
+var ErrNoOrgEffectPolicy = errors.New("no Space effect policy for organization")
 
 // RegisteredSpace is Control's durable acknowledgement of an
 // Application-issued immutable Space reference.
@@ -1156,6 +1157,71 @@ func (r *Repository) resolvePersonalDecisionEvidence(ctx context.Context, spaceR
 	return evidence, nil
 }
 
+// ResolveOwnScheduledThreadReadDecisionEvidence resolves a personal Space's
+// own owner's authority to read the system-owned (schedule) threads inside
+// their own Space (chat-wave2 "schedule" spec §2.4, Phase B).
+//
+// Mirrors resolvePersonalDecisionEvidence's current-authority query exactly,
+// scanning the one additional column (thread_read_entitled) that resolver
+// does not need, and is explicitly scoped to s.space_kind='personal' rather
+// than accepting whatever kind the caller's current membership happens to
+// be — ValidateForOwnScheduledThreadRead double-checks this too, but the
+// query itself refusing to resolve for a non-personal Space keeps this
+// resolver from ever becoming a second, weaker path into a shared room.
+func (r *Repository) ResolveOwnScheduledThreadReadDecisionEvidence(ctx context.Context, spaceRef, orgID, subjectID string) (PersonalThreadDecisionEvidence, error) {
+	if r == nil || r.db == nil {
+		return PersonalThreadDecisionEvidence{}, fmt.Errorf("space authority repository unavailable")
+	}
+	var evidence PersonalThreadDecisionEvidence
+	err := r.db.Pool.QueryRow(ctx, `
+		SELECT s.space_ref, s.org_id, m.subject_id, s.space_kind, m.role,
+		       r.authority_revision, r.membership_revision,
+		       r.privacy_revision, r.recipient_audience_revision, r.entitlement_revision,
+		       p.privacy_policy_ref, p.purpose, p.lawful_basis, p.privacy_class,
+		       p.third_party_processing_allowed, p.retention_class, p.residency,
+		       p.deletion_scope, p.zero_data_retention, p.thread_read_entitled
+		FROM registered_spaces s
+		JOIN space_memberships m ON m.space_ref=s.space_ref
+		JOIN space_authority_revisions r ON r.space_ref=s.space_ref
+		JOIN space_effect_policies p ON p.org_id=s.org_id
+		WHERE s.space_ref=$1 AND s.org_id=$2 AND s.registration_state='active'
+		  AND s.space_kind='personal'
+		  AND m.subject_type='user' AND m.subject_id=$3 AND m.active=TRUE
+		  AND EXISTS (
+			SELECT 1 FROM user_org_memberships u
+			WHERE u.user_id=$3 AND u.org_id=$2 AND u.status='active'
+		  )`,
+		strings.TrimSpace(spaceRef), strings.TrimSpace(orgID), strings.TrimSpace(subjectID),
+	).Scan(
+		&evidence.Membership.SpaceRef, &evidence.Membership.OrgID, &evidence.Membership.SubjectID,
+		&evidence.Membership.Kind, &evidence.Membership.Role,
+		&evidence.Membership.Revisions.Authority, &evidence.Membership.Revisions.Membership,
+		&evidence.Membership.Revisions.Privacy, &evidence.Membership.Revisions.RecipientAudience,
+		&evidence.Membership.Revisions.Entitlement,
+		&evidence.Privacy.PolicyRef, &evidence.Privacy.Purpose, &evidence.Privacy.LawfulBasis,
+		&evidence.Privacy.PrivacyClass, &evidence.Privacy.ThirdPartyAllowed,
+		&evidence.Privacy.RetentionClass, &evidence.Privacy.Residency, &evidence.Privacy.DeletionScope,
+		&evidence.Privacy.ZeroDataRetention, &evidence.ThreadReadEntitled,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return PersonalThreadDecisionEvidence{}, ErrNoCurrentMembership
+	}
+	if err != nil {
+		return PersonalThreadDecisionEvidence{}, fmt.Errorf("resolve own scheduled thread read authority: %w", err)
+	}
+	evidence.RecipientSubjectID = evidence.Membership.SubjectID
+	evidence.RecipientAudienceRef = fmt.Sprintf("personal:%s:recipient:%d", evidence.Membership.SpaceRef, evidence.Membership.Revisions.RecipientAudience)
+	evidence.RecipientAudienceHash, err = RecipientAudienceHash(evidence.RecipientSubjectID)
+	if err != nil {
+		return PersonalThreadDecisionEvidence{}, fmt.Errorf("derive personal recipient audience hash: %w", err)
+	}
+	evidence.ResourceAuthorizationRef = fmt.Sprintf("control:%s:thread-read:%d", evidence.Membership.SpaceRef, evidence.Membership.Revisions.Authority)
+	if err := evidence.ValidateForOwnScheduledThreadRead(); err != nil {
+		return PersonalThreadDecisionEvidence{}, fmt.Errorf("invalid own scheduled thread read authority: %w", err)
+	}
+	return evidence, nil
+}
+
 // UpsertEffectPolicy stores a Control-owned privacy/entitlement floor and
 // fences every active Space in that organization when the effective policy
 // changes. Replays are idempotent: identical policy material does not make
@@ -1248,6 +1314,40 @@ func (r *Repository) UpsertEffectPolicy(ctx context.Context, policy EffectPolicy
 		return false, fmt.Errorf("commit Space effect policy update: %w", err)
 	}
 	return true, nil
+}
+
+// ResolveOrgEffectPolicy reads an organization's current Control-owned
+// privacy/entitlement floor with no Space membership required. Mail-task
+// deliberately has no Space (see mail_task_thread_decision.go's package
+// doc) — this is the org-level read every other resolver in this file
+// gets bundled with a Space-membership JOIN, exposed standalone for that
+// one caller. Read-only; unlike UpsertEffectPolicy this takes no lock and
+// runs outside a transaction, matching every other read-only resolver here.
+func (r *Repository) ResolveOrgEffectPolicy(ctx context.Context, orgID string) (EffectPolicy, error) {
+	if r == nil || r.db == nil {
+		return EffectPolicy{}, fmt.Errorf("space authority repository unavailable")
+	}
+	var policy EffectPolicy
+	err := r.db.Pool.QueryRow(ctx, `
+		SELECT org_id, privacy_policy_ref, purpose, lawful_basis, privacy_class,
+		       third_party_processing_allowed, retention_class, residency,
+		       deletion_scope, zero_data_retention, thread_create_entitled, retrieval_read_entitled,
+		       import_write_entitled, agent_action_entitled, schedule_fire_entitled, thread_read_entitled,
+		       sandbox_capability_entitled, process_registry_entitled
+		FROM space_effect_policies WHERE org_id=$1`, strings.TrimSpace(orgID),
+	).Scan(&policy.OrgID, &policy.PrivacyPolicyRef, &policy.Purpose, &policy.LawfulBasis,
+		&policy.PrivacyClass, &policy.ThirdPartyProcessingAllowed, &policy.RetentionClass,
+		&policy.Residency, &policy.DeletionScope, &policy.ZeroDataRetention,
+		&policy.ThreadCreateEntitled, &policy.RetrievalReadEntitled, &policy.ImportWriteEntitled,
+		&policy.AgentActionEntitled, &policy.ScheduleFireEntitled,
+		&policy.ThreadReadEntitled, &policy.SandboxCapabilityEntitled, &policy.ProcessRegistryEntitled)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return EffectPolicy{}, ErrNoOrgEffectPolicy
+	}
+	if err != nil {
+		return EffectPolicy{}, fmt.Errorf("resolve org effect policy: %w", err)
+	}
+	return policy, nil
 }
 
 // privacyPolicyChanged reports whether the processing/privacy floor of the

@@ -1,6 +1,11 @@
-// Package codexsubscription brokers a user's ChatGPT subscription to the
-// official Codex app-server. It intentionally never exposes a reusable
-// ChatGPT access or refresh token to another CoreSystem plane.
+// Package codexsubscription brokers a user's own ChatGPT subscription for
+// text inference. By default it runs each turn in the pinned, hardened Codex
+// app-server; the opt-in direct transport sends Responses API requests to the
+// ChatGPT Codex backend with the connection's ChatGPT OAuth token. Either way
+// the broker reads and refreshes that token in the connection's Codex
+// auth.json, and the app-server remains the device-code sign-in flow. It
+// never copies a ChatGPT access or refresh token into the database, a log, or
+// another CoreSystem plane.
 package codexsubscription
 
 import (
@@ -31,14 +36,22 @@ var (
 	ErrReauthenticationRequired = errors.New("ChatGPT subscription reauthentication is required")
 )
 
-// Config controls the local Codex app-server broker. Home must be a persistent
-// service-owned volume: Codex stores and refreshes ChatGPT auth there, while the
-// integration database stores only the opaque connection metadata.
+// Config controls the subscription broker. Home must be a persistent
+// service-owned volume: the Codex sign-in writes each connection's auth.json
+// there and the broker refreshes it in place, while the integration database
+// stores only the opaque connection metadata.
 type Config struct {
 	Enabled           bool
 	Home              string
 	LoginTTL          time.Duration
 	InvocationTimeout time.Duration
+	// MaxConcurrency caps concurrent calls across all connections (default
+	// 16); MaxConcurrencyPerConnection caps them per connection (default 4).
+	MaxConcurrency              int
+	MaxConcurrencyPerConnection int
+	// QueueTimeout bounds the wait for a concurrency slot (default 30s);
+	// past it the call is rate limited with RateLimitQueue.
+	QueueTimeout time.Duration
 }
 
 // DeviceLogin is safe to return to the browser. The user code is short lived
@@ -61,9 +74,9 @@ type LoginStatus struct {
 	Message      string `json:"message,omitempty"`
 }
 
-// ChatMessage is deliberately a small text-only contract. Codex subscription
-// inference does not expose tools, files, or structured-output execution to
-// Model Plane in this first integration.
+// ChatMessage is deliberately a small text-only contract. Subscription
+// inference exposes no tools, files, or execution to Model Plane: tool
+// proposals travel as JSON text that Model Gateway validates.
 type ChatMessage struct {
 	Role    string `json:"role"`
 	Content string `json:"content"`
@@ -85,11 +98,57 @@ type InvokeResponse struct {
 	RequestID string `json:"requestId"`
 	Content   string `json:"content"`
 	ModelUsed string `json:"modelUsed"`
+	// Usage is the token accounting the upstream reported for the turn. It
+	// is nil when none arrived before the turn completed, which callers must
+	// read as unknown usage, not as a free turn.
+	Usage *TokenUsage `json:"usage,omitempty"`
+	// PhasesMs holds the broker's own phase durations in whole milliseconds,
+	// keyed by the Phase* names below. A phase that did not run is absent.
+	// Durations only: nothing here is derived from prompt or answer text.
+	PhasesMs map[string]int64 `json:"phasesMs,omitempty"`
 }
 
-// Runner is the narrow seam around the official Codex app-server protocol.
-// Keeping persistence and process ownership here lets HTTP handlers remain
-// responsible for org/user authorization and audit decisions.
+// TokenUsage is the token accounting of one turn, as response.completed's
+// usage (direct) or the app-server's thread/tokenUsage/updated notification
+// reports it. Counts only, never content. As in the OpenAI accounting,
+// InputTokens already includes CachedInputTokens and CacheWriteInputTokens,
+// and OutputTokens already includes ReasoningOutputTokens.
+type TokenUsage struct {
+	InputTokens           int64 `json:"inputTokens"`
+	CachedInputTokens     int64 `json:"cachedInputTokens"`
+	CacheWriteInputTokens int64 `json:"cacheWriteInputTokens"`
+	OutputTokens          int64 `json:"outputTokens"`
+	ReasoningOutputTokens int64 `json:"reasoningOutputTokens"`
+}
+
+// Broker phase names used as InvokeResponse.PhasesMs keys. Model Plane
+// forwards them as upstream phase timings and drops any other key
+// (inference-core codex_subscription.rs BROKER_PHASES), so they are part of
+// this route's contract. The direct transport reports only turn_start,
+// first_delta and turn_total: its turn_start runs from the first POST to the
+// final attempt's response headers.
+const (
+	// PhaseSpawn is starting the per-invocation Codex app-server process.
+	PhaseSpawn = "spawn"
+	// PhaseInitialize is the initialize handshake with that process.
+	PhaseInitialize = "initialize"
+	// PhaseThreadStart is the thread/start request.
+	PhaseThreadStart = "thread_start"
+	// PhaseTurnStart is the turn/start request.
+	PhaseTurnStart = "turn_start"
+	// PhaseFirstDelta runs from turn/start's acknowledgement to the turn's
+	// first answer text. Absent when no text arrived before completion.
+	PhaseFirstDelta = "first_delta"
+	// PhaseTurnTotal runs from turn/start's acknowledgement to the turn's
+	// completion, so it contains PhaseFirstDelta.
+	PhaseTurnTotal = "turn_total"
+)
+
+// Runner is the narrow seam between the Manager and the ChatGPT backend:
+// inference through the selected Transport, sign-in and sign-out through the
+// Codex CLI. Keeping credential custody and process ownership behind it lets
+// HTTP handlers remain responsible for org/user authorization and audit
+// decisions.
 type Runner interface {
 	BeginDeviceLogin(ctx context.Context, codeHome string) (LoginProcess, DeviceCode, error)
 	Invoke(ctx context.Context, codeHome string, request InvokeRequest) (InvokeResponse, error)
@@ -119,15 +178,17 @@ type pendingLogin struct {
 	process      LoginProcess
 }
 
-// Manager owns in-memory device-code sessions. Completed credentials remain in
-// the per-connection Codex home, managed by Codex itself; no OAuth token is
-// copied into this process or database.
+// Manager owns in-memory device-code sessions and the invocation limits.
+// Completed credentials remain in the per-connection Codex home; the broker
+// reads and refreshes them there but never copies an OAuth token into the
+// database, a log, or another plane.
 type Manager struct {
 	enabled           bool
 	home              string
 	loginTTL          time.Duration
 	invocationTimeout time.Duration
 	runner            Runner
+	limiter           *invocationLimiter
 	now               func() time.Time
 
 	mu      sync.Mutex
@@ -151,6 +212,9 @@ func NewManager(cfg Config, runner Runner) (*Manager, error) {
 	if err := os.MkdirAll(home, 0o700); err != nil {
 		return nil, fmt.Errorf("create codex subscription home: %w", err)
 	}
+	// No Codex process of an earlier broker instance survives it, so every
+	// throwaway state directory left in the home is a leftover prompt log.
+	sweepEphemeralHomes(home)
 	if cfg.LoginTTL <= 0 {
 		cfg.LoginTTL = 10 * time.Minute
 	}
@@ -163,6 +227,7 @@ func NewManager(cfg Config, runner Runner) (*Manager, error) {
 		loginTTL:          cfg.LoginTTL,
 		invocationTimeout: cfg.InvocationTimeout,
 		runner:            runner,
+		limiter:           newInvocationLimiter(cfg.MaxConcurrency, cfg.MaxConcurrencyPerConnection, cfg.QueueTimeout),
 		now:               func() time.Time { return time.Now().UTC() },
 		pending:           make(map[string]pendingLogin),
 	}, nil
@@ -247,20 +312,63 @@ func (m *Manager) Invoke(ctx context.Context, request InvokeRequest) (InvokeResp
 	}
 	invokeCtx, cancel := context.WithTimeout(ctx, m.invocationTimeout)
 	defer cancel()
-	return m.runner.Invoke(invokeCtx, home, request)
-}
-
-func (m *Manager) InvokeStream(ctx context.Context, request InvokeRequest, onDelta func(string) error) (InvokeResponse, error) {
-	home, request, err := m.prepareInvocation(request)
+	release, waited, err := m.limiter.acquire(invokeCtx, request.ConnectionID)
 	if err != nil {
 		return InvokeResponse{}, err
 	}
-	if onDelta == nil {
-		return InvokeResponse{}, fmt.Errorf("%w: stream delta callback is required", ErrInvalidRequest)
+	defer release()
+	return m.runner.Invoke(withQueueWait(invokeCtx, waited), home, request)
+}
+
+func (m *Manager) InvokeStream(ctx context.Context, request InvokeRequest, onDelta func(string) error) (InvokeResponse, error) {
+	run, release, err := m.ReserveStream(ctx, request)
+	if err != nil {
+		return InvokeResponse{}, err
+	}
+	defer release()
+	return run(onDelta)
+}
+
+// ReserveStream validates a streamed invocation and takes its concurrency
+// slots, so a caller can report a full queue as a rate limit before it
+// commits to a streamed response. The invocation timeout starts here. run
+// executes the turn; release frees the slots and ends the invocation context.
+// The caller must call release exactly once, whether or not it calls run;
+// release is idempotent.
+func (m *Manager) ReserveStream(ctx context.Context, request InvokeRequest) (run func(onDelta func(string) error) (InvokeResponse, error), release func(), err error) {
+	home, request, err := m.prepareInvocation(request)
+	if err != nil {
+		return nil, nil, err
 	}
 	invokeCtx, cancel := context.WithTimeout(ctx, m.invocationTimeout)
-	defer cancel()
-	return m.runner.InvokeStream(invokeCtx, home, request, onDelta)
+	releaseSlots, waited, err := m.limiter.acquire(invokeCtx, request.ConnectionID)
+	if err != nil {
+		cancel()
+		return nil, nil, err
+	}
+	release = func() {
+		releaseSlots()
+		cancel()
+	}
+	run = func(onDelta func(string) error) (InvokeResponse, error) {
+		if onDelta == nil {
+			return InvokeResponse{}, fmt.Errorf("%w: stream delta callback is required", ErrInvalidRequest)
+		}
+		return m.runner.InvokeStream(withQueueWait(invokeCtx, waited), home, request, onDelta)
+	}
+	return run, release, nil
+}
+
+// TransportKind reports the inference transport in use, or "" when the
+// runner does not say.
+func (m *Manager) TransportKind() TransportKind {
+	if m == nil {
+		return ""
+	}
+	if reporter, ok := m.runner.(interface{ TransportKind() TransportKind }); ok {
+		return reporter.TransportKind()
+	}
+	return ""
 }
 
 func (m *Manager) prepareInvocation(request InvokeRequest) (string, InvokeRequest, error) {
@@ -283,6 +391,7 @@ func (m *Manager) prepareInvocation(request InvokeRequest) (string, InvokeReques
 	if request.ReasoningEffort != "low" && request.ReasoningEffort != "high" {
 		return "", InvokeRequest{}, fmt.Errorf("%w: reasoningEffort must be low or high", ErrInvalidRequest)
 	}
+	request.ConnectionID = strings.TrimSpace(request.ConnectionID)
 	request.ServiceTier = strings.ToLower(strings.TrimSpace(request.ServiceTier))
 	if request.ServiceTier != "" && request.ServiceTier != "priority" {
 		return "", InvokeRequest{}, fmt.Errorf("%w: serviceTier must be empty or priority", ErrInvalidRequest)
@@ -306,6 +415,23 @@ func (m *Manager) Logout(ctx context.Context, connectionID string) error {
 		return err
 	}
 	return m.runner.Logout(ctx, home)
+}
+
+// Close ends every pending device-code login on shutdown, so their Codex
+// processes and throwaway state directories do not outlive a graceful stop.
+// A login in progress is abandoned: the user starts a new connection.
+func (m *Manager) Close() error {
+	if m == nil {
+		return nil
+	}
+	m.mu.Lock()
+	pending := m.pending
+	m.pending = make(map[string]pendingLogin)
+	m.mu.Unlock()
+	for _, login := range pending {
+		_ = login.process.Close()
+	}
+	return nil
 }
 
 func (m *Manager) expireLogin(pending pendingLogin) {

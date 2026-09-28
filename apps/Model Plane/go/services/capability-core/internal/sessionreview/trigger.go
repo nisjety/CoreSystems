@@ -77,32 +77,45 @@ func ParseRunCompleted(env *envelope.Envelope) (SessionRef, bool) {
 	return ref, true
 }
 
-// TranscriptSource fetches what a review needs for a session: the transcript
-// text and the org's already-registered skills (for the dedup hint). The
-// concrete implementation is session-core-backed (ReplayThread + agent_skills)
-// and is wired when the running stack is available.
+// Transcript is what a [TranscriptSource] hands a review: the transcript text
+// and the org's already-registered skills (for the dedup hint) — or, when
+// there is nothing the review may read, no text and a Skip saying why.
+type Transcript struct {
+	Text     string
+	Existing []learning.ExistingSkill
+	Skip     learning.SkipReason
+}
+
+// TranscriptSource fetches what a review needs for a session. The concrete
+// implementation is session-core-backed (ListConversation + agent_skills) and
+// is wired when the running stack is available.
 type TranscriptSource interface {
-	Fetch(ctx context.Context, ref SessionRef) (transcript string, existing []learning.ExistingSkill, err error)
+	Fetch(ctx context.Context, ref SessionRef) (Transcript, error)
 }
 
 // OnRunCompleted runs one learning review for a completed run: fetch the
-// transcript + existing skills, then [learning.RunReview] (which applies the
-// provenance/dedup/confidence policy and persists survivors via the sink).
-// Returns the number of skills persisted. Every dependency is injected, so this
-// orchestration is unit-tested with fakes — no stack required.
+// transcript + existing skills, then [learning.RunReviewOutcome] (which applies
+// the provenance/dedup/confidence policy and persists survivors via the sink).
+// Returns the [learning.ReviewOutcome]: a skip when the source had nothing to
+// review (the model is never called), otherwise the review's counts. Every
+// dependency is injected, so this orchestration is unit-tested with fakes — no
+// stack required.
 func OnRunCompleted(
 	ctx context.Context,
 	ref SessionRef,
 	src TranscriptSource,
 	reviewer learning.Reviewer,
 	sink learning.Sink,
-) (int, error) {
+) (learning.ReviewOutcome, error) {
 	if src == nil || reviewer == nil || sink == nil {
-		return 0, fmt.Errorf("sessionreview: src, reviewer and sink are required")
+		return learning.ReviewOutcome{}, fmt.Errorf("sessionreview: src, reviewer and sink are required")
 	}
-	transcript, existing, err := src.Fetch(ctx, ref)
+	transcript, err := src.Fetch(ctx, ref)
 	if err != nil {
-		return 0, fmt.Errorf("sessionreview: fetch transcript for run %s: %w", ref.RunID, err)
+		return learning.ReviewOutcome{}, fmt.Errorf("sessionreview: fetch transcript for run %s: %w", ref.RunID, err)
 	}
-	return learning.RunReview(ctx, transcript, existing, reviewer, sink)
+	if transcript.Skip != "" {
+		return learning.ReviewOutcome{Skipped: transcript.Skip}, nil
+	}
+	return learning.RunReviewOutcome(ctx, transcript.Text, transcript.Existing, reviewer, sink)
 }

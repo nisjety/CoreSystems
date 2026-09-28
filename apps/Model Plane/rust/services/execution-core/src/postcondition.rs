@@ -794,6 +794,7 @@ fn response_contains_identifier(value: &Value, identifier: &str, depth: u8) -> b
 /// identity is already known, the ones whose providers answer 204 will not run.
 /// That gap is a false *failure*, not a false success, so it is recorded here
 /// rather than papered over by loosening what counts as a verified outcome.
+#[allow(clippy::too_many_arguments)]
 pub async fn verify_provider_action(
     client: &crate::integration_tools::IntegrationActionsClient,
     org_id: &str,
@@ -802,6 +803,7 @@ pub async fn verify_provider_action(
     params: &Value,
     body: &Value,
     receipt_id: &str,
+    session_bearer: Option<&str>,
 ) -> PostconditionOutcome {
     if receipt_id.trim().is_empty() {
         return PostconditionOutcome::Inconclusive {
@@ -814,7 +816,13 @@ pub async fn verify_provider_action(
         };
     };
     match client
-        .read_action_json(org_id, connection_id, plan.operation, plan.params.clone())
+        .read_action_json(
+            org_id,
+            connection_id,
+            plan.operation,
+            plan.params.clone(),
+            session_bearer,
+        )
         .await
     {
         Ok(result) => judge_provider_read_back(&plan, receipt_id, &result),
@@ -843,6 +851,7 @@ pub async fn verify_provider_action(
 ///
 /// `None` means no field-level verifier applies, and the caller must keep the
 /// receipt-less write's existing terminal judgment.
+#[allow(clippy::too_many_arguments)]
 pub async fn verify_unreceipted_mutation(
     client: &crate::integration_tools::IntegrationActionsClient,
     org_id: &str,
@@ -850,10 +859,17 @@ pub async fn verify_unreceipted_mutation(
     operation: &str,
     params: &Value,
     body: &Value,
+    session_bearer: Option<&str>,
 ) -> Option<(String, PostconditionOutcome)> {
     let (effect_id, plan) = plan_unreceipted_mutation(operation, params, body)?;
     let outcome = match client
-        .read_action_json(org_id, connection_id, plan.operation, plan.params.clone())
+        .read_action_json(
+            org_id,
+            connection_id,
+            plan.operation,
+            plan.params.clone(),
+            session_bearer,
+        )
         .await
     {
         Ok(result) => judge_provider_read_back(&plan, "", &result),

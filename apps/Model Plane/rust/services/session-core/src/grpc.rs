@@ -89,6 +89,14 @@ const CONTROL_SCHEDULED_RUN_EXECUTION_AUDIENCE: &str = "model-plane-session-core
 const CONTROL_SCHEDULED_RUN_EXECUTION_ACTION: &str = "model.schedule.execute";
 const CONTROL_SCHEDULED_RUN_EXECUTION_SCHEMA: &str = "sha256:space-scheduled-run-execute-v1";
 const MAX_CONTROL_SPACE_DECISION_TOKEN_BYTES: usize = 16 * 1024;
+// Delegated-identity design, Gap B (03-design-2-token-exchange.md §2.5). A
+// distinct envelope version from CONTROL_SPACE_DECISION_VERSION ("v2") --
+// deliberately not reusing that tag or the full Space Decision claim shape
+// (security-review §B-1/B-2): a mail-task-v1 token can never verify against
+// the Space-decision verifier above, or vice versa, by construction.
+const MAIL_TASK_DECISION_VERSION: &str = "mail-task-v1";
+const MAIL_TASK_THREAD_PREPARE_AUDIENCE: &str = "model-plane-session-core";
+const MAIL_TASK_THREAD_PREPARE_ACTION: &str = "mail_task:thread_prepare";
 
 #[allow(clippy::result_large_err)]
 fn validate_user_checkpoint(checkpoint_id: &str, state: &[u8]) -> Result<(), Status> {
@@ -246,6 +254,10 @@ pub struct SessionService {
 /// durable, source-bound terminal receipt contract.
 pub struct ManagedRunLifecycleService {
     pool: PgPool,
+    /// `CompleteDirectRunWithMessage` saves an assistant message exactly as
+    /// `AppendMessage` does, including mirroring its extracted memories into
+    /// Letta after commit, so it needs the same adapter.
+    letta_memory: Option<LettaMemoryAdapter>,
 }
 
 /// Attach the caller's delegated Data Plane credential to an outbound Data
@@ -642,6 +654,31 @@ struct ControlSpaceDecisionClaims {
     expires_at: DateTime<Utc>,
 }
 
+/// Delegated-identity design, Gap B (03-design-2-token-exchange.md §2.2/§2.5).
+/// A LEAN, purpose-built claim family for exactly one RPC
+/// (`prepare_user_owned_thread` when `origin == "mail_task"`) -- deliberately
+/// NOT [`ControlSpaceDecisionClaims`]'s Space-authority shape, which has no
+/// fields this RPC could even check (it carries no `space_id`). Field names
+/// mirror user-core's `spaces.MailTaskThreadDecision` (Go) exactly; this is
+/// the same signed envelope, verified here with the SAME Control Ed25519
+/// keys `configured_control_space_decision_keys()` already loads for the
+/// scheduled-run family -- no new key configuration.
+#[derive(Debug, serde::Deserialize)]
+struct MailTaskThreadDecisionClaims {
+    decision_ref: String,
+    org_id: String,
+    user_id: String,
+    alias_id: String,
+    provider_message_id: String,
+    session_key: String,
+    origin: String,
+    service_audience: String,
+    action_id: String,
+    nonce: String,
+    issued_at: DateTime<Utc>,
+    expires_at: DateTime<Utc>,
+}
+
 fn scheduled_run_payload_digest(
     req: &pb::PrepareScheduledRunThreadRequest,
     claims: &ControlSpaceDecisionClaims,
@@ -794,6 +831,90 @@ fn verify_scheduled_run_decision_with_keys(
     {
         return Err(Status::permission_denied(
             "Control decision does not authorize this scheduled run",
+        ));
+    }
+    Ok(())
+}
+
+/// Verifies `req.control_decision_token` as a mail-task-v1 decision bound to
+/// exactly this request's `(org_id, user_id, session_key, origin)` --
+/// delegated-identity design, Gap B. Called ONLY when
+/// `prepare_user_owned_thread`'s `origin == "mail_task"`; every other
+/// current `USER_OWNED_THREAD_CALLERS` origin is untouched by this function
+/// existing. This is the single most important check for the owner-only
+/// ruling itself (security-review §4's named test): a decision minted for
+/// user A must be rejected outright when the request names user B, because
+/// `claims.user_id == req.user_id` is checked field-for-field below, not
+/// merely "some valid decision was presented."
+fn verify_mail_task_thread_decision(req: &pb::PrepareUserOwnedThreadRequest) -> Result<(), Status> {
+    let keys = configured_control_space_decision_keys()?;
+    verify_mail_task_thread_decision_with_keys(req, &keys, Utc::now())
+}
+
+fn verify_mail_task_thread_decision_with_keys(
+    req: &pb::PrepareUserOwnedThreadRequest,
+    keys: &BTreeMap<String, VerifyingKey>,
+    now: DateTime<Utc>,
+) -> Result<(), Status> {
+    if req.control_decision_token.len() > MAX_CONTROL_SPACE_DECISION_TOKEN_BYTES {
+        return Err(Status::invalid_argument(
+            "Control mail-task thread decision is too large",
+        ));
+    }
+    let parts: Vec<&str> = req.control_decision_token.split('.').collect();
+    if parts.len() != 4 || parts[0] != MAIL_TASK_DECISION_VERSION {
+        return Err(Status::permission_denied(
+            "invalid Control mail-task thread decision envelope",
+        ));
+    }
+    let key_id = URL_SAFE_NO_PAD
+        .decode(parts[1])
+        .ok()
+        .and_then(|raw| String::from_utf8(raw).ok())
+        .filter(|id| !id.trim().is_empty())
+        .ok_or_else(|| Status::permission_denied("untrusted Control Space decision key"))?;
+    let key = keys
+        .get(&key_id)
+        .ok_or_else(|| Status::permission_denied("untrusted Control Space decision key"))?;
+    let payload = URL_SAFE_NO_PAD.decode(parts[2]).map_err(|_| {
+        Status::permission_denied("invalid Control mail-task thread decision payload")
+    })?;
+    let signature = URL_SAFE_NO_PAD.decode(parts[3]).map_err(|_| {
+        Status::permission_denied("invalid Control mail-task thread decision signature")
+    })?;
+    let signature = Signature::from_slice(&signature).map_err(|_| {
+        Status::permission_denied("invalid Control mail-task thread decision signature")
+    })?;
+    key.verify(
+        format!("{}.{}.{}", parts[0], parts[1], parts[2]).as_bytes(),
+        &signature,
+    )
+    .map_err(|_| Status::permission_denied("invalid Control mail-task thread decision signature"))?;
+    let claims: MailTaskThreadDecisionClaims = serde_json::from_slice(&payload).map_err(|_| {
+        Status::permission_denied("invalid Control mail-task thread decision claims")
+    })?;
+    // Every field the request itself carries is compared field-for-field --
+    // a decision minted for one (org, user, session_key) can never be
+    // pointed at a different one, and cross-family confusion is structurally
+    // impossible because the envelope's version tag was already checked
+    // above.
+    let matches = claims.org_id == req.org_id
+        && claims.user_id == req.user_id
+        && claims.session_key == req.session_key
+        && claims.origin == req.origin
+        && claims.origin == "mail_task"
+        && claims.service_audience == MAIL_TASK_THREAD_PREPARE_AUDIENCE
+        && claims.action_id == MAIL_TASK_THREAD_PREPARE_ACTION
+        && !claims.decision_ref.trim().is_empty()
+        && !claims.alias_id.trim().is_empty()
+        && !claims.provider_message_id.trim().is_empty();
+    if !matches
+        || claims.nonce.trim().is_empty()
+        || claims.expires_at <= now
+        || claims.issued_at > now + chrono::Duration::minutes(1)
+    {
+        return Err(Status::permission_denied(
+            "Control decision does not authorize this mail-task thread",
         ));
     }
     Ok(())
@@ -2121,7 +2242,33 @@ async fn create_thread_inner_preverified(
 /// Every value `origin` is allowed to hold. Kept as a single source rather
 /// than repeating the list in the CHECK constraint, the proto comment, and
 /// this validator.
-const THREAD_ORIGINS: [&str; 5] = ["chat", "space", "agent_run", "support", "system"];
+const THREAD_ORIGINS: [&str; 6] = ["chat", "space", "agent_run", "support", "system", "mail_task"];
+
+/// Trusted service principals allowed to call `prepare_user_owned_thread`
+/// (chat-wave2 "schedule"/"mail-task" specs, 2026-09-28). Closed rather than
+/// "any authenticated service" -- this RPC mints a thread under an arbitrary
+/// user_id the caller names, which is exactly the kind of authority that must
+/// never be handed to a service merely because it holds *some* credential.
+///
+/// Two entries, not one, and deliberately so:
+/// - `service:model-gateway` -- the identity a live, user-delegated call
+///   through model-gateway's ordinary gRPC ingress would carry, kept for any
+///   future caller of this RPC that reuses that shared principal.
+/// - `service:model-gateway-mail-task-bridge` -- the mail-task thread-prepare
+///   bridge's OWN, distinct Auth Core principal (`mail_task_bridge_auth.rs`'s
+///   `MailTaskBridgeTokenProvider`, default `MAIL_TASK_BRIDGE_SERVICE_ID`).
+///   It is intentionally a separate principal from `service:model-gateway`
+///   because the two need conflicting `retentionByAudience.session-core`
+///   registry postures for the SAME audience (`zdr` for model-gateway's
+///   existing terminalize/heartbeat credential vs. `persistent` for a real,
+///   durably-stored thread) -- see `mail_task_bridge_auth.rs`'s module doc
+///   (security-review B-4/T-6). Because it is a different Auth Core
+///   `service_id`, its minted token's `sub`/`service_id` claim is a
+///   different string too, so it MUST be allow-listed here in its own
+///   right, or every real mail-task call fails closed with
+///   `permission_denied` regardless of every registry row being correct.
+const USER_OWNED_THREAD_CALLERS: [&str; 2] =
+    ["service:model-gateway", "service:model-gateway-mail-task-bridge"];
 
 /// Resolve and validate `origin` for a thread about to be created.
 ///
@@ -2218,6 +2365,50 @@ async fn append_message_inner(
     req: pb::AppendMessageRequest,
     author_subject_id: &str,
 ) -> Result<Response<pb::AppendMessageResponse>, Status> {
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|e| Status::internal(e.to_string()))?;
+    let appended = append_message_in_tx(&mut tx, &req, author_subject_id).await?;
+    tx.commit()
+        .await
+        .map_err(|e| Status::internal(e.to_string()))?;
+    sync_appended_memory(pool, letta, retention, &req.thread_id, appended.memory).await;
+
+    Ok(Response::new(pb::AppendMessageResponse {
+        sequence: appended.sequence,
+    }))
+}
+
+/// Memory candidates an append extracted inside its transaction, to mirror
+/// into Letta only once that transaction has committed.
+pub(crate) struct AppendedMemory {
+    org_id: String,
+    user_id: String,
+    candidates: Vec<crate::dreaming::DreamMemoryCandidate>,
+    persisted: Vec<crate::dreaming::PersistedMemoryId>,
+}
+
+/// One message appended inside a caller's still-open transaction.
+pub(crate) struct AppendedMessage {
+    pub(crate) sequence: u64,
+    pub(crate) memory: Option<AppendedMemory>,
+}
+
+/// The whole durable half of an append -- thread lock, Space authority,
+/// source scope, the message row, its `MESSAGE_APPENDED` event and memory
+/// extraction -- inside the caller's transaction. Shared by `AppendMessage`
+/// and `CompleteDirectRunWithMessage`, so an answer saved together with its
+/// run's terminal receipt is stored exactly as an ordinary append stores it.
+/// The caller commits, then passes `memory` to [`sync_appended_memory`].
+// The body is the former `append_message_inner`, moved unchanged; splitting it
+// would scatter checks that must all run under the one thread lock.
+#[allow(clippy::too_many_lines)]
+pub(crate) async fn append_message_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    req: &pb::AppendMessageRequest,
+    author_subject_id: &str,
+) -> Result<AppendedMessage, Status> {
     let author_subject_id = if req.role.trim() == "user" {
         author_subject_id.trim()
     } else {
@@ -2225,23 +2416,13 @@ async fn append_message_inner(
     };
     let msg_id = new_ulid();
     let now = Utc::now();
-    let mut letta_sync: Option<(
-        String,
-        String,
-        Vec<crate::dreaming::DreamMemoryCandidate>,
-        Vec<crate::dreaming::PersistedMemoryId>,
-    )> = None;
+    let mut letta_sync: Option<AppendedMemory> = None;
 
-    let mut tx = pool
-        .begin()
-        .await
-        .map_err(|e| Status::internal(e.to_string()))?;
-
-    let has_append_context = validate_append_space_context_shape(&req)?;
+    let has_append_context = validate_append_space_context_shape(req)?;
     let thread: (String, String, Option<String>, String) =
         sqlx::query_as("SELECT org_id, user_id, space_id, source_scope FROM threads WHERE id = $1 FOR UPDATE")
             .bind(&req.thread_id)
-            .fetch_optional(&mut *tx)
+            .fetch_optional(&mut **tx)
             .await
             .map_err(|e| Status::internal(e.to_string()))?
             .ok_or_else(|| Status::not_found("thread not found"))?;
@@ -2255,7 +2436,7 @@ async fn append_message_inner(
                 let (message_count,): (i64,) =
                     sqlx::query_as("SELECT COUNT(*) FROM messages WHERE thread_id = $1")
                         .bind(&req.thread_id)
-                        .fetch_one(&mut *tx)
+                        .fetch_one(&mut **tx)
                         .await
                         .map_err(|e| Status::internal(e.to_string()))?;
                 if message_count != 0 {
@@ -2275,7 +2456,7 @@ async fn append_message_inner(
                     "SELECT role FROM messages WHERE thread_id = $1 ORDER BY sequence DESC LIMIT 1",
                 )
                 .bind(&req.thread_id)
-                .fetch_optional(&mut *tx)
+                .fetch_optional(&mut **tx)
                 .await
                 .map_err(|e| Status::internal(e.to_string()))?;
                 if !assistant_reply_slot_is_open(last_role.as_ref().map(|(role,)| role.as_str())) {
@@ -2289,7 +2470,7 @@ async fn append_message_inner(
                         "Control Space append decision targets another Space",
                     ));
                 }
-                verify_append_space_decision(&req, &thread.0, &thread.1)?;
+                verify_append_space_decision(req, &thread.0, &thread.1)?;
                 sqlx::query(
                     "UPDATE threads SET space_decision_ref = $2, recipient_audience_ref = $3, \
                      recipient_audience_revision = $4, recipient_audience_hash = $5, privacy_policy_ref = $6, \
@@ -2303,7 +2484,7 @@ async fn append_message_inner(
                 .bind(&req.privacy_policy_ref)
                 .bind(&req.resource_authorization_ref)
                 .bind(i64::try_from(req.authority_revision).map_err(|_| Status::invalid_argument("authority revision out of range"))?)
-                .execute(&mut *tx)
+                .execute(&mut **tx)
                 .await
                 .map_err(|e| Status::internal(e.to_string()))?;
             }
@@ -2337,17 +2518,28 @@ async fn append_message_inner(
         }
         if requested_isolation && !stored_isolation {
             let (has_history,): (bool,) = sqlx::query_as("SELECT EXISTS(SELECT 1 FROM messages WHERE thread_id = $1)")
-                .bind(&req.thread_id).fetch_one(&mut *tx).await.map_err(|e| Status::internal(e.to_string()))?;
+                .bind(&req.thread_id).fetch_one(&mut **tx).await.map_err(|e| Status::internal(e.to_string()))?;
             if has_history {
                 return Err(Status::failed_precondition("Start a new conversation to restrict its source scope."));
             }
             sqlx::query("UPDATE threads SET source_scope = 'conversation' WHERE id = $1")
-                .bind(&req.thread_id).execute(&mut *tx).await.map_err(|e| Status::internal(e.to_string()))?;
+                .bind(&req.thread_id).execute(&mut **tx).await.map_err(|e| Status::internal(e.to_string()))?;
         }
     }
     let conversation_only = stored_isolation || (req.role == "user" && requested_isolation);
     if conversation_only {
         metadata_json["source_scope"] = serde_json::json!("conversation");
+        // Per-turn retrieval-source filter (chat-wave2 scope spec §2.4):
+        // deliberately NOT part of the immutability check above — this axis
+        // is per-turn, not thread-locked, and rides through verbatim in the
+        // already-schemaless `messages.metadata` JSON via `struct_to_json`'s
+        // generic conversion a few lines up, with no CHECK constraint and no
+        // migration needed. The one thing that DOES need an explicit line:
+        // `conversation_only` already excludes both source families
+        // outright, so a stray `retrieval_scope` the caller also sent must
+        // be dropped rather than persisted — it must never contradict the
+        // turn's own `source_scope` in stored history.
+        metadata_json.as_object_mut().map(|map| map.remove("retrieval_scope"));
     }
 
     let row: (i64, Option<String>, Option<String>, Option<i64>, Option<String>, Option<i64>, Option<String>) = sqlx::query_as(
@@ -2370,7 +2562,7 @@ async fn append_message_inner(
     .bind(req.agent_name.trim())
     .bind(&metadata_json)
     .bind(author_subject_id)
-    .fetch_one(&mut *tx)
+    .fetch_one(&mut **tx)
     .await
     .map_err(|e| Status::internal(e.to_string()))?;
 
@@ -2408,7 +2600,7 @@ async fn append_message_inner(
     .bind(&msg_idem)
     .bind(&msg_resource)
     .bind(MESSAGE_APPENDED_TYPE_URL)
-    .execute(&mut *tx)
+    .execute(&mut **tx)
     .await
     .map_err(|e| Status::internal(e.to_string()))?;
 
@@ -2419,11 +2611,11 @@ async fn append_message_inner(
         let (org_id, user_id): (String, String) =
             sqlx::query_as("SELECT org_id, user_id FROM threads WHERE id = $1")
                 .bind(&req.thread_id)
-                .fetch_one(&mut *tx)
+                .fetch_one(&mut **tx)
                 .await
                 .map_err(|e| Status::internal(e.to_string()))?;
         let (saved, persisted) = crate::dreaming::persist_candidates(
-            &mut tx,
+            tx,
             &org_id,
             &user_id,
             &req.thread_id,
@@ -2433,7 +2625,7 @@ async fn append_message_inner(
         .await
         .map_err(|e| Status::internal(e.to_string()))?;
         crate::dreaming::record_dream_run(
-            &mut tx,
+            tx,
             &org_id,
             &req.thread_id,
             "append_message",
@@ -2449,29 +2641,43 @@ async fn append_message_inner(
             memories_saved = saved,
             "dream memory extraction completed"
         );
-        letta_sync = Some((org_id, user_id, candidates, persisted));
+        letta_sync = Some(AppendedMemory {
+            org_id,
+            user_id,
+            candidates,
+            persisted,
+        });
     }
 
-    tx.commit()
-        .await
-        .map_err(|e| Status::internal(e.to_string()))?;
+    Ok(AppendedMessage {
+        sequence,
+        memory: letta_sync,
+    })
+}
 
-    if let Some((org_id, user_id, candidates, persisted)) = letta_sync {
+/// Mirror an append's extracted memories into Letta after its transaction
+/// committed, unless the retention posture forbids durable memory.
+pub(crate) async fn sync_appended_memory(
+    pool: &PgPool,
+    letta: Option<&LettaMemoryAdapter>,
+    retention: MemoryRetention,
+    thread_id: &str,
+    memory: Option<AppendedMemory>,
+) {
+    if let Some(memory) = memory {
         if retention.permits_durable_memory() {
             crate::dreaming::sync_persisted_candidates_to_letta(
                 pool,
                 letta,
-                &org_id,
-                &user_id,
-                &req.thread_id,
-                &candidates,
-                &persisted,
+                &memory.org_id,
+                &memory.user_id,
+                thread_id,
+                &memory.candidates,
+                &memory.persisted,
             )
             .await;
         }
     }
-
-    Ok(Response::new(pb::AppendMessageResponse { sequence }))
 }
 
 #[cfg(test)]
@@ -2508,6 +2714,48 @@ mod source_scope_db_tests {
         assert_eq!(relabelled.code(), tonic::Code::FailedPrecondition);
     }
 
+    /// chat-wave2 scope spec §2.4/§2.1: `retrieval_scope` is deliberately NOT
+    /// part of the immutability check above — it is a per-turn axis, not a
+    /// thread-locked privacy commitment like `source_scope`. Contrasts
+    /// directly with `source_scope_survives_storage_and_blocks_widening_and_learning`:
+    /// the same two-messages-on-one-thread shape, but the second message's
+    /// different value is accepted rather than rejected with
+    /// `FailedPrecondition`, and each message's own row keeps the value it
+    /// was written with (no retroactive relabeling, no shared thread-level
+    /// column the way `threads.source_scope` is).
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres"]
+    async fn retrieval_scope_can_differ_turn_to_turn_while_source_scope_stays_locked() {
+        let pool = PgPool::connect(&std::env::var("DATABASE_URL").expect("disposable database required")).await.unwrap();
+        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+        let suffix = new_ulid();
+        let org = format!("retrieval-scope-test-{suffix}");
+        let thread = create_thread_inner(&pool, pb::CreateThreadRequest {
+            session_key: format!("retrieval-scope-{suffix}"), org_id: org.clone(), user_id: "test-user".into(), ..Default::default()
+        }).await.unwrap().into_inner().thread_id;
+        let request = |scope: &str| pb::AppendMessageRequest {
+            thread_id: thread.clone(), role: "user".into(), content: format!("Turn under {scope}."),
+            metadata: Some(prost_types::Struct { fields: [("retrieval_scope".into(), prost_types::Value { kind: Some(prost_types::value::Kind::StringValue(scope.into())) })].into() }),
+            ..Default::default()
+        };
+        append_message_inner(&pool, None, MemoryRetention::Durable, request("knowledge_only"), "test-user").await.unwrap();
+        // A different value on the SECOND message of the same thread must not
+        // be rejected the way a widened source_scope is above.
+        append_message_inner(&pool, None, MemoryRetention::Durable, request("web_only"), "test-user").await.unwrap();
+        let scopes: Vec<String> = sqlx::query_scalar(
+            "SELECT metadata->>'retrieval_scope' FROM messages WHERE thread_id = $1 ORDER BY created_at",
+        )
+        .bind(&thread)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(scopes, vec!["knowledge_only".to_owned(), "web_only".to_owned()], "each turn keeps its own scope — no thread-level lock, no retroactive relabeling");
+        // The thread-level column that DOES lock (`source_scope`) is
+        // unaffected — still the default, never touched by this axis.
+        let (source_scope,): (String,) = sqlx::query_as("SELECT source_scope FROM threads WHERE id = $1").bind(&thread).fetch_one(&pool).await.unwrap();
+        assert_eq!(source_scope, "workspace");
+    }
+
     #[tokio::test]
     #[ignore = "requires DATABASE_URL to a disposable Postgres"]
     async fn forgotten_memory_cannot_return_from_pending_or_inflight_extraction() {
@@ -2528,7 +2776,7 @@ mod source_scope_db_tests {
             .bind(&thread).fetch_one(&pool).await.unwrap();
         let mut candidates = crate::dreaming::extract_memory_candidates("user", content, &thread);
         assert!(!candidates.is_empty());
-        assert!(crate::dreaming::delete_user_memory(&pool, &org, user, &id).await.unwrap());
+        assert!(crate::dreaming::delete_user_memory(&pool, &org, user, &id).await.unwrap().deleted());
         // Simulate an LLM result that was already in flight when deletion won.
         // A different generated slot must not bypass the message cutoff.
         candidates[0].key = "user:llm:another_slot".into();
@@ -2554,6 +2802,144 @@ mod source_scope_db_tests {
             .bind(&org).fetch_all(&pool).await.unwrap();
         assert!(contents.iter().any(|value| value.contains("sjøgrønn")), "new explicit learning remains available");
         assert!(contents.iter().all(|value| !value.contains("ravgul")));
+    }
+}
+
+#[cfg(test)]
+mod persona_db_tests {
+    use super::*;
+
+    fn test_service(pool: PgPool) -> SessionService {
+        SessionService {
+            pool,
+            retrieval_client: None,
+            graph_client: None,
+            knowledge_client: None,
+            letta_memory: None,
+            audit_publisher: None,
+            auth: None,
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres"]
+    async fn get_context_assembly_reports_persona_enabled_from_the_threads_row() {
+        let pool = PgPool::connect(&std::env::var("DATABASE_URL").expect("disposable database required")).await.unwrap();
+        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+        let suffix = new_ulid();
+        let org = format!("persona-assembly-test-{suffix}");
+        let thread = create_thread_inner(&pool, pb::CreateThreadRequest {
+            session_key: format!("persona-assembly-{suffix}"), org_id: org.clone(), user_id: "test-user".into(), ..Default::default()
+        }).await.unwrap().into_inner().thread_id;
+
+        // Freshly created: the migration's column default applies, so the
+        // very first read already reports enabled without any write.
+        let enabled = get_context_assembly_inner(
+            &test_service(pool.clone()),
+            pb::GetContextAssemblyRequest { thread_id: thread.clone(), ..Default::default() },
+            MemoryRetention::Durable,
+            None,
+        ).await.unwrap().into_inner().persona_enabled;
+        assert_eq!(enabled, Some(true));
+
+        sqlx::query("UPDATE threads SET persona_enabled = false WHERE id = $1")
+            .bind(&thread)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let disabled = get_context_assembly_inner(
+            &test_service(pool.clone()),
+            pb::GetContextAssemblyRequest { thread_id: thread.clone(), ..Default::default() },
+            MemoryRetention::Durable,
+            None,
+        ).await.unwrap().into_inner().persona_enabled;
+        assert_eq!(disabled, Some(false));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres"]
+    async fn update_thread_presentation_toggles_persona_enabled_independent_of_pin_and_title() {
+        let pool = PgPool::connect(&std::env::var("DATABASE_URL").expect("disposable database required")).await.unwrap();
+        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+        let suffix = new_ulid();
+        let org = format!("persona-toggle-test-{suffix}");
+        let thread = create_thread_inner(&pool, pb::CreateThreadRequest {
+            session_key: format!("persona-toggle-{suffix}"), org_id: org.clone(), user_id: "test-user".into(), ..Default::default()
+        }).await.unwrap().into_inner().thread_id;
+        let svc = test_service(pool.clone());
+
+        let mut request = Request::new(pb::UpdateThreadPresentationRequest {
+            org_id: org.clone(),
+            thread_id: thread.clone(),
+            persona_enabled: Some(false),
+            ..Default::default()
+        });
+        request.extensions_mut().insert(VerifiedIdentity::user_for_test(&org, "test-user"));
+        svc.update_thread_presentation(request).await.expect("persona-only update");
+
+        let (persona_enabled, title, pinned_at): (bool, Option<String>, Option<DateTime<Utc>>) =
+            sqlx::query_as("SELECT persona_enabled, presentation_title, pinned_at FROM threads WHERE id = $1")
+                .bind(&thread)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(!persona_enabled, "the toggle must take effect");
+        assert!(title.is_none(), "a persona-only write must not touch the title");
+        assert!(pinned_at.is_none(), "a persona-only write must not touch the pin");
+
+        // Flipping pin/title afterward must not silently revert persona back on.
+        let mut pin_request = Request::new(pb::UpdateThreadPresentationRequest {
+            org_id: org.clone(),
+            thread_id: thread.clone(),
+            pinned: Some(true),
+            ..Default::default()
+        });
+        pin_request.extensions_mut().insert(VerifiedIdentity::user_for_test(&org, "test-user"));
+        svc.update_thread_presentation(pin_request).await.expect("pin-only update");
+        let (persona_enabled,): (bool,) =
+            sqlx::query_as("SELECT persona_enabled FROM threads WHERE id = $1")
+                .bind(&thread)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(!persona_enabled, "an unrelated presentation write must leave persona as the caller last set it");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres"]
+    async fn update_thread_presentation_rejects_persona_toggle_for_a_zdr_caller() {
+        let pool = PgPool::connect(&std::env::var("DATABASE_URL").expect("disposable database required")).await.unwrap();
+        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+        let suffix = new_ulid();
+        let org = format!("persona-zdr-test-{suffix}");
+        let thread = create_thread_inner(&pool, pb::CreateThreadRequest {
+            session_key: format!("persona-zdr-{suffix}"), org_id: org.clone(), user_id: "test-user".into(), ..Default::default()
+        }).await.unwrap().into_inner().thread_id;
+        let svc = test_service(pool.clone());
+
+        let mut request = Request::new(pb::UpdateThreadPresentationRequest {
+            org_id: org.clone(),
+            thread_id: thread.clone(),
+            persona_enabled: Some(false),
+            ..Default::default()
+        });
+        request.extensions_mut().insert(VerifiedIdentity::user_for_test_with_zdr(&org, "test-user", true));
+        let error = svc
+            .update_thread_presentation(request)
+            .await
+            .expect_err("a ZDR caller cannot durably set the per-thread persona toggle");
+        assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+
+        // Same rejection reuses the existing ZDR-presentation guard, so the
+        // column must be left at its migration default, untouched.
+        let (persona_enabled,): (bool,) =
+            sqlx::query_as("SELECT persona_enabled FROM threads WHERE id = $1")
+                .bind(&thread)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(persona_enabled);
     }
 }
 
@@ -3806,6 +4192,19 @@ async fn get_context_assembly_inner(
         Some(req.agent_id.clone())
     };
 
+    // Persona spec — the per-thread override, cheap and keyed by `thread_id`
+    // alone (works even on a request with no `run_id`, unlike the run-scoped
+    // lookup above). `None` only when the thread row itself cannot be found
+    // (e.g. a request for a thread ID that does not exist); model-gateway
+    // treats an absent value as enabled, the same fail-open direction this
+    // whole feature uses throughout.
+    let persona_enabled: Option<bool> =
+        sqlx::query_scalar::<_, bool>("SELECT persona_enabled FROM threads WHERE id = $1")
+            .bind(&thread_id)
+            .fetch_optional(&svc.pool)
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+
     let thread_messages = load_thread_messages(&svc.pool, &thread_id).await?;
     let memory_rows = load_context_memory_rows(
         svc,
@@ -3870,6 +4269,7 @@ async fn get_context_assembly_inner(
     Ok(Response::new(pb::GetContextAssemblyResponse {
         segments,
         estimated_tokens,
+        persona_enabled,
     }))
 }
 
@@ -4150,6 +4550,71 @@ impl SessionCore for SessionService {
             thread_id: created.thread_id,
             run_id: req.run_id,
             owner_id: owner.to_owned(),
+        }))
+    }
+
+    /// The reusable "service creates or reuses a thread owned by user U,
+    /// readable by U, with a named origin" seam (chat-wave2
+    /// "schedule"/"mail-task" specs, 2026-09-28). See the RPC's own proto
+    /// doc comment for how this differs from `prepare_scheduled_run_thread`.
+    async fn prepare_user_owned_thread(
+        &self,
+        request: Request<pb::PrepareUserOwnedThreadRequest>,
+    ) -> Result<Response<pb::PrepareUserOwnedThreadResponse>, Status> {
+        let caller = identity(&request)?;
+        authorize_operation(&caller, "session:user-owned-thread-prepare")?;
+        if !caller.is_service() || !USER_OWNED_THREAD_CALLERS.contains(&caller.principal_id()) {
+            return Err(Status::permission_denied(
+                "only an allow-listed trusted service may prepare a user-owned thread",
+            ));
+        }
+        let req = request.into_inner();
+        caller.authorize_org(&req.org_id)?;
+        if req.org_id.trim().is_empty()
+            || req.user_id.trim().is_empty()
+            || req.session_key.trim().is_empty()
+        {
+            return Err(Status::invalid_argument(
+                "org_id, user_id and session_key are required",
+            ));
+        }
+        // A service caller must never be allowed to hand a thread to a
+        // service-shaped "owner" through this path -- that is exactly what
+        // prepare_scheduled_run_thread is for, with its own Space-authority
+        // verification. This RPC's entire value is that the owner IS a real
+        // user, so it is refused outright for anything else.
+        if req.user_id.trim().starts_with("service:") {
+            return Err(Status::invalid_argument(
+                "user_id must be a real user, not a service principal",
+            ));
+        }
+        let origin = req.origin.trim();
+        if origin.is_empty() || origin == "space" || !THREAD_ORIGINS.contains(&origin) {
+            return Err(Status::invalid_argument(format!(
+                "origin must be one of {THREAD_ORIGINS:?} and not \"space\" (this RPC never sets space_id)"
+            )));
+        }
+        // Delegated-identity design, Gap B: mail_task is the one origin that
+        // additionally requires an independently-verified Control decision
+        // binding this exact (org_id, user_id, session_key) -- every other
+        // origin keeps today's allow-list-only behavior unchanged.
+        if origin == "mail_task" {
+            verify_mail_task_thread_decision(&req)?;
+        }
+        let created = create_thread_inner_preverified(
+            &self.pool,
+            pb::CreateThreadRequest {
+                session_key: req.session_key.clone(),
+                org_id: req.org_id.clone(),
+                user_id: req.user_id.clone(),
+                origin: origin.to_owned(),
+                ..Default::default()
+            },
+        )
+        .await?
+        .into_inner();
+        Ok(Response::new(pb::PrepareUserOwnedThreadResponse {
+            thread_id: created.thread_id,
         }))
     }
 
@@ -4876,6 +5341,7 @@ impl SessionCore for SessionService {
                 Option<DateTime<Utc>>,
                 String,
                 String,
+                bool,
             )> = sqlx::query_as(
                 "SELECT
                     t.id,
@@ -4890,7 +5356,8 @@ impl SessionCore for SessionService {
                     latest_run.status AS latest_run_status,
                     latest_run.updated_at AS latest_run_updated_at,
                     t.origin,
-                    t.user_id
+                    t.user_id,
+                    t.persona_enabled
                  FROM threads t
                  LEFT JOIN LATERAL (
                     SELECT content
@@ -4939,7 +5406,7 @@ impl SessionCore for SessionService {
             let threads = rows
                 .into_iter()
                 .map(
-                    |(thread_id, session_key, created_at, title, preview, pinned_at, updated_at, space_id, latest_run_id, latest_run_status, latest_run_updated_at, origin, owner_subject_id)| {
+                    |(thread_id, session_key, created_at, title, preview, pinned_at, updated_at, space_id, latest_run_id, latest_run_status, latest_run_updated_at, origin, owner_subject_id, persona_enabled)| {
                         let fallback_title = if session_key.trim().is_empty() {
                             "Verevon Chat"
                         } else {
@@ -4963,6 +5430,7 @@ impl SessionCore for SessionService {
                             latest_run_updated_at: latest_run_updated_at.map(to_proto_timestamp),
                             origin,
                             owner_subject_id,
+                            persona_enabled,
                         }
                     },
                 )
@@ -4994,7 +5462,11 @@ impl SessionCore for SessionService {
                     "org_id and thread_id are required",
                 ));
             }
-            if req.title.is_none() && req.preview.is_none() && req.pinned.is_none() {
+            if req.title.is_none()
+                && req.preview.is_none()
+                && req.pinned.is_none()
+                && req.persona_enabled.is_none()
+            {
                 return Err(Status::invalid_argument(
                     "at least one presentation field is required",
                 ));
@@ -5030,7 +5502,8 @@ impl SessionCore for SessionService {
                      pinned_at = CASE
                          WHEN $7 THEN CASE WHEN $8 THEN $9 ELSE NULL END
                          ELSE pinned_at
-                     END
+                     END,
+                     persona_enabled = CASE WHEN $10 THEN $11 ELSE persona_enabled END
                  WHERE id = $1 AND org_id = $2 AND archived_at IS NULL
                  RETURNING id, user_id",
             )
@@ -5043,6 +5516,11 @@ impl SessionCore for SessionService {
             .bind(req.pinned.is_some())
             .bind(req.pinned.unwrap_or_default())
             .bind(now)
+            // Plain boolean, no tri-state NULL semantics needed — unlike
+            // `pinned_at`'s optional timestamp, "unset" and "false" are the
+            // same non-value for a column that is itself `NOT NULL`.
+            .bind(req.persona_enabled.is_some())
+            .bind(req.persona_enabled.unwrap_or(true))
             .fetch_optional(&mut *tx)
             .await
             .map_err(|error| Status::internal(error.to_string()))?;
@@ -5062,6 +5540,7 @@ impl SessionCore for SessionService {
                 "title_overridden": title.is_some(),
                 "preview_overridden": preview.is_some(),
                 "pinned": req.pinned,
+                "persona_enabled": req.persona_enabled,
             }))
             .bind(now)
             .bind(&req.org_id)
@@ -5738,6 +6217,61 @@ impl ManagedRunLifecycle for ManagedRunLifecycleService {
         }
         .await;
         record_metrics("record_run_output", started, result.is_ok());
+        result
+    }
+
+    /// Save a gateway-direct run's final assistant message and its Completed
+    /// terminal receipt in one transaction.
+    ///
+    /// * **The receipt's authority, not a user's.** The caller must be the
+    ///   workload that owns `GatewayDirect`, holding `session:terminalize`,
+    ///   exactly as for `RecordTerminalOutcome`. A delegated user bearer is not
+    ///   accepted, so a turn that outlives it can still be saved.
+    /// * **Owner from the run.** Tenant and user come from the durable run, and
+    ///   the message can go only into that run's own thread.
+    /// * **Retention from the run, not the credential.** A zero-retention run
+    ///   is refused inside the transaction, so the post-commit memory mirror
+    ///   below is always durable. The service credential's own `zdr` is Auth
+    ///   Core's fixed per-principal posture, `true` for every Model Gateway
+    ///   token, so it cannot say whether this turn may be kept (see
+    ///   `terminalization::authorize_direct_completion`).
+    async fn complete_direct_run_with_message(
+        &self,
+        request: Request<pb::CompleteDirectRunWithMessageRequest>,
+    ) -> Result<Response<pb::CompleteDirectRunWithMessageResponse>, Status> {
+        let started = Instant::now();
+        // For the refusal log only; bounded, since it is not validated yet.
+        let run_id: String = request.get_ref().run_id.chars().take(128).collect();
+        let result: Result<Response<pb::CompleteDirectRunWithMessageResponse>, Status> = async {
+            let caller = identity(&request)?;
+            let req = request.into_inner();
+            terminalization::authorize_direct_completion(&caller)?;
+            authorize_run_owner(&self.pool, &caller, &req.run_id, OwnerIntent::Mutate).await?;
+            let thread_id = req.thread_id.clone();
+            let completed =
+                terminalization::complete_direct_run_with_message_inner(&self.pool, req).await?;
+            sync_appended_memory(
+                &self.pool,
+                self.letta_memory.as_ref(),
+                MemoryRetention::Durable,
+                &thread_id,
+                completed.memory,
+            )
+            .await;
+            Ok(Response::new(completed.completion.into_proto()))
+        }
+        .await;
+        if let Err(status) = &result {
+            // Content-free: the status code and Session Core's own reason,
+            // never the answer or its metadata.
+            warn!(
+                run_id = %run_id,
+                code = ?status.code(),
+                reason = status.message(),
+                "CompleteDirectRunWithMessage refused"
+            );
+        }
+        record_metrics("complete_direct_run_with_message", started, result.is_ok());
         result
     }
 }
@@ -6586,7 +7120,10 @@ pub async fn serve(
     audit_outbox.start();
     let audit_publisher = Some(audit_outbox);
 
-    let managed_lifecycle = ManagedRunLifecycleService { pool: pool.clone() };
+    let managed_lifecycle = ManagedRunLifecycleService {
+        pool: pool.clone(),
+        letta_memory: letta_memory.clone(),
+    };
 
     let session = SessionService {
         pool,
@@ -6650,13 +7187,14 @@ mod tests {
         CONTROL_SPACE_DECISION_VERSION, CONTROL_THREAD_APPEND_ACTION, CONTROL_THREAD_CREATE_ACTION,
         DEFAULT_RESIDENCY, HEALTH_SERVICE_NAMES, MAX_USER_CHECKPOINT_ID_BYTES,
         MAX_USER_CHECKPOINT_STATE_BYTES, MESSAGE_APPENDED_TYPE_URL, STEP_COMPLETED_TYPE_URL,
-        THREAD_TITLE_MAX_CHARS, ZDR_MEMORY_READ_SUPPRESSED,
+        THREAD_ORIGINS, THREAD_TITLE_MAX_CHARS, ZDR_MEMORY_READ_SUPPRESSED,
     };
     use crate::auth::{SPACE_DELETION_SCOPE, SPACE_DELETION_SERVICE};
     use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
     use chrono::{DateTime, Utc};
-    use ed25519_dalek::{Signer as _, SigningKey};
+    use ed25519_dalek::{Signer as _, SigningKey, VerifyingKey};
     use mp_contracts::model_plane::v1::session_core_server::SessionCore;
+    use sha2::{Digest as _, Sha256};
     use std::collections::BTreeMap;
     use tonic::Request;
     use wiremock::matchers::{method, path};
@@ -6742,8 +7280,8 @@ mod tests {
              (id, session_key, org_id, user_id, space_id, space_decision_ref,
               recipient_audience_ref, recipient_audience_revision,
               recipient_audience_hash, privacy_policy_ref,
-              resource_authorization_ref, authority_revision)
-             VALUES ($1,$2,$3,'service:orchestrator-core',$4,$5,$6,1,$7,$8,$9,1)",
+              resource_authorization_ref, authority_revision, origin)
+             VALUES ($1,$2,$3,'service:orchestrator-core',$4,$5,$6,1,$7,$8,$9,1,'space')",
         )
         .bind(&thread_id)
         .bind(&thread_id)
@@ -7381,6 +7919,42 @@ mod tests {
             ..pb::CreateThreadRequest::default()
         };
         assert_eq!(resolve_thread_origin(&req).unwrap(), "system");
+    }
+
+    /// mail-task spec §3.3: the inbound-email-triggered thread declares
+    /// `origin="mail_task"` with no `space_id` -- like `agent_run`, it has no
+    /// live session key to infer origin from, so it can only be closed by an
+    /// explicit declaration, and (also like `agent_run`) it must NOT require a
+    /// Space to exist.
+    #[test]
+    fn origin_accepts_mail_task_without_space_id() {
+        let req = pb::CreateThreadRequest {
+            origin: "mail_task".to_owned(),
+            ..pb::CreateThreadRequest::default()
+        };
+        assert_eq!(resolve_thread_origin(&req).unwrap(), "mail_task");
+    }
+
+    /// Migration-content check (pattern per `0026`'s
+    /// `semantic_memory_deletion_ledger_is_request_bound_...` test above): the
+    /// widened CHECK constraint 0041 installs must legalize `mail_task`
+    /// without dropping any of the five origins 0034 already legalized, and
+    /// the validator's own allow-list (asserted immediately above and by
+    /// `declared_origin_is_validated_against_the_allowed_set`) is what keeps
+    /// an arbitrary 7th value illegal -- the migration and the Rust validator
+    /// must agree on exactly the same six-element set.
+    #[test]
+    fn mail_task_origin_migration_widens_the_check_constraint_to_exactly_the_six_known_origins() {
+        let migration = include_str!("../migrations/0041_mail_task_thread_origin.sql");
+        assert!(migration.contains("threads_origin_chk"));
+        assert!(migration.contains("'mail_task'"));
+        for origin in THREAD_ORIGINS {
+            assert!(
+                migration.contains(&format!("'{origin}'")),
+                "migration's CHECK constraint is missing existing origin {origin:?}"
+            );
+        }
+        assert!(!migration.contains("'literally-anything'"));
     }
 
     #[test]
@@ -8526,8 +9100,19 @@ mod tests {
         );
     }
 
+    /// A request as the mandatory interceptor hands it on: carrying the
+    /// verified user the handler authorizes. Handlers fail closed without one.
+    fn as_user<T>(org_id: &str, user_id: &str, message: T) -> Request<T> {
+        let mut request = Request::new(message);
+        request
+            .extensions_mut()
+            .insert(VerifiedIdentity::user_for_test(org_id, user_id));
+        request
+    }
+
     // P3 SetRunMode — durable run.mode, invalid-mode rejection, and per-org
-    // isolation (a foreign org's UPDATE matches no row → not_found, no mutation).
+    // isolation (a foreign org's caller is refused by the tenant check before
+    // any UPDATE runs → permission_denied, no mutation).
     async fn assert_set_run_mode_isolation(
         svc: &super::SessionService,
         pool: &sqlx::PgPool,
@@ -8537,43 +9122,55 @@ mod tests {
     ) {
         use mp_contracts::model_plane::v1 as pb;
         use mp_contracts::model_plane::v1::session_core_server::SessionCore;
-        use tonic::Request;
 
         let resp = svc
-            .set_run_mode(Request::new(pb::SetRunModeRequest {
-                run_id: run_id.to_owned(),
-                mode: "plan".into(),
-                org_id: org.to_owned(),
-                granted_rung: 0,
-                justification: String::new(),
-            }))
+            .set_run_mode(as_user(
+                org,
+                "u1",
+                pb::SetRunModeRequest {
+                    run_id: run_id.to_owned(),
+                    mode: "plan".into(),
+                    org_id: org.to_owned(),
+                    granted_rung: 0,
+                    justification: String::new(),
+                },
+            ))
             .await
             .expect("set_run_mode")
             .into_inner();
         assert_eq!(resp.mode, "plan");
         assert!(svc
-            .set_run_mode(Request::new(pb::SetRunModeRequest {
-                run_id: run_id.to_owned(),
-                mode: "bogus".into(),
-                org_id: org.to_owned(),
-                granted_rung: 0,
-                justification: String::new(),
-            }))
+            .set_run_mode(as_user(
+                org,
+                "u1",
+                pb::SetRunModeRequest {
+                    run_id: run_id.to_owned(),
+                    mode: "bogus".into(),
+                    org_id: org.to_owned(),
+                    granted_rung: 0,
+                    justification: String::new(),
+                },
+            ))
             .await
             .is_err());
 
+        let attacker = format!("attacker-{sfx}");
         let cross = svc
-            .set_run_mode(Request::new(pb::SetRunModeRequest {
-                run_id: run_id.to_owned(),
-                mode: "execute".into(),
-                org_id: format!("attacker-{sfx}"),
-                granted_rung: 0,
-                justification: String::new(),
-            }))
+            .set_run_mode(as_user(
+                &attacker,
+                "u1",
+                pb::SetRunModeRequest {
+                    run_id: run_id.to_owned(),
+                    mode: "execute".into(),
+                    org_id: attacker.clone(),
+                    granted_rung: 0,
+                    justification: String::new(),
+                },
+            ))
             .await;
         assert_eq!(
             cross.unwrap_err().code(),
-            tonic::Code::NotFound,
+            tonic::Code::PermissionDenied,
             "cross-org set_run_mode must be rejected (per-org isolation)"
         );
         let persisted: (String,) = sqlx::query_as("SELECT mode FROM runs WHERE id = $1")
@@ -8592,7 +9189,6 @@ mod tests {
     async fn assert_upsert_skill_guards(svc: &super::SessionService, org: &str) {
         use mp_contracts::model_plane::v1 as pb;
         use mp_contracts::model_plane::v1::session_core_server::SessionCore;
-        use tonic::Request;
 
         let skill = |name: &str, content: &str, origin: &str| pb::UpsertAgentSkillRequest {
             org_id: org.to_owned(),
@@ -8607,21 +9203,21 @@ mod tests {
         };
 
         let r = svc
-            .upsert_agent_skill(Request::new(skill("Cache", "c1", "background_review")))
+            .upsert_agent_skill(as_user(org, "u1", skill("Cache", "c1", "background_review")))
             .await
             .expect("upsert")
             .into_inner();
         assert!(r.created && !r.skipped_protected);
 
-        svc.upsert_agent_skill(Request::new(skill("Runbook", "human", "user")))
+        svc.upsert_agent_skill(as_user(org, "u1", skill("Runbook", "human", "user")))
             .await
             .expect("user skill");
         let blocked = svc
-            .upsert_agent_skill(Request::new(skill(
-                "Runbook",
-                "MACHINE",
-                "background_review",
-            )))
+            .upsert_agent_skill(as_user(
+                org,
+                "u1",
+                skill("Runbook", "MACHINE", "background_review"),
+            ))
             .await
             .expect("guarded upsert")
             .into_inner();
@@ -8688,10 +9284,14 @@ mod tests {
         // G7 read path: list_agent_skills returns this org's skills (Cache +
         // Runbook), proving the learned-skill last mile is readable.
         let listed = svc
-            .list_agent_skills(Request::new(pb::ListAgentSkillsRequest {
-                org_id: org.clone(),
-                enabled_only: true,
-            }))
+            .list_agent_skills(as_user(
+                &org,
+                "u1",
+                pb::ListAgentSkillsRequest {
+                    org_id: org.clone(),
+                    enabled_only: true,
+                },
+            ))
             .await
             .expect("list_agent_skills")
             .into_inner();
@@ -8702,11 +9302,16 @@ mod tests {
             "list must return the upserted skills, got {names:?}"
         );
         // Per-org isolation: another org sees none of them.
+        let other_org = format!("other-{sfx}");
         let other = svc
-            .list_agent_skills(Request::new(pb::ListAgentSkillsRequest {
-                org_id: format!("other-{sfx}"),
-                enabled_only: true,
-            }))
+            .list_agent_skills(as_user(
+                &other_org,
+                "u1",
+                pb::ListAgentSkillsRequest {
+                    org_id: other_org.clone(),
+                    enabled_only: true,
+                },
+            ))
             .await
             .expect("list other org")
             .into_inner();
@@ -8731,13 +9336,17 @@ mod tests {
                 .expect("seed message");
         }
         let convo = svc
-            .list_conversation(Request::new(pb::ListConversationRequest {
-                org_id: org.clone(),
-                thread_id: thread_id.clone(),
-                space_id: String::new(),
-                space_read_decision_ref: String::new(),
-                space_read_decision_token: String::new(),
-            }))
+            .list_conversation(as_user(
+                &org,
+                "u1",
+                pb::ListConversationRequest {
+                    org_id: org.clone(),
+                    thread_id: thread_id.clone(),
+                    space_id: String::new(),
+                    space_read_decision_ref: String::new(),
+                    space_read_decision_token: String::new(),
+                },
+            ))
             .await
             .expect("list_thread_messages")
             .into_inner();
@@ -8746,19 +9355,23 @@ mod tests {
         assert_eq!(convo.messages[0].content, "hello");
         assert_eq!(convo.messages[1].role, "assistant", "ordered by sequence");
         // Per-org isolation: another org cannot read this thread's conversation.
+        let attacker = format!("attacker-{sfx}");
         let cross_convo = svc
-            .list_conversation(Request::new(pb::ListConversationRequest {
-                org_id: format!("attacker-{sfx}"),
-                thread_id: thread_id.clone(),
-                space_id: String::new(),
-                space_read_decision_ref: String::new(),
-                space_read_decision_token: String::new(),
-            }))
-            .await
-            .expect("list other-org convo")
-            .into_inner();
-        assert!(
-            cross_convo.messages.is_empty(),
+            .list_conversation(as_user(
+                &attacker,
+                "u1",
+                pb::ListConversationRequest {
+                    org_id: attacker.clone(),
+                    thread_id: thread_id.clone(),
+                    space_id: String::new(),
+                    space_read_decision_ref: String::new(),
+                    space_read_decision_token: String::new(),
+                },
+            ))
+            .await;
+        assert_eq!(
+            cross_convo.expect_err("another org must not read this thread's messages").code(),
+            tonic::Code::PermissionDenied,
             "another org must not read this thread's messages"
         );
 
@@ -8946,8 +9559,8 @@ mod tests {
             "INSERT INTO threads
              (id, session_key, org_id, user_id, space_id, space_decision_ref,
               recipient_audience_ref, recipient_audience_revision, recipient_audience_hash, privacy_policy_ref, resource_authorization_ref,
-              authority_revision)
-             VALUES ($1, $1, $2, $3, $4, $5, $6, 4, $7, $8, $9, 9)",
+              authority_revision, origin)
+             VALUES ($1, $1, $2, $3, $4, $5, $6, 4, $7, $8, $9, 9, 'space')",
         )
         .bind(&thread_id)
         .bind(&org_id)
@@ -9351,8 +9964,8 @@ mod tests {
                 "INSERT INTO threads (\
                     id, session_key, org_id, user_id, space_id, space_decision_ref, \
                     recipient_audience_ref, privacy_policy_ref, resource_authorization_ref, \
-                    authority_revision, recipient_audience_revision, recipient_audience_hash\
-                ) VALUES ($1, $1, $2, $3, $4, $5, $6, $7, $8, 1, 1, $9)",
+                    authority_revision, recipient_audience_revision, recipient_audience_hash, origin\
+                ) VALUES ($1, $1, $2, $3, $4, $5, $6, $7, $8, 1, 1, $9, 'space')",
             )
             .bind(thread_id)
             .bind(&org_id)
@@ -9456,6 +10069,643 @@ mod tests {
                 .code(),
             tonic::Code::PermissionDenied
         );
+    }
+
+    fn lazy_test_service() -> super::SessionService {
+        super::SessionService {
+            pool: sqlx::PgPool::connect_lazy("postgres://postgres:postgres@127.0.0.1/session_core")
+                .expect("construct lazy pool"),
+            retrieval_client: None,
+            graph_client: None,
+            knowledge_client: None,
+            letta_memory: None,
+            audit_publisher: None,
+            auth: None,
+        }
+    }
+
+    /// Delegated-identity design, Gap B (§2.2): identical formula to
+    /// user-core's `spaces.MailTaskSessionKey` (Go) and the gateway BFF's
+    /// `IngestRequest::session_key()` (`mail_task.rs`) -- `"mail_task/" +
+    /// sha256(org_id + provider_message_id)` -- so all three independently
+    /// written implementations produce field-for-field comparable session
+    /// keys. Test-only: production code never recomputes this, it only
+    /// compares the caller-supplied `session_key` against the signed
+    /// decision's own claim.
+    fn mail_task_session_key(org_id: &str, provider_message_id: &str) -> String {
+        format!(
+            "mail_task/{:x}",
+            Sha256::digest(format!("{org_id}{provider_message_id}").as_bytes())
+        )
+    }
+
+    /// Signs a syntactically-valid mail-task-v1 decision for the given
+    /// claim overrides, defaulting every field to a mutually-consistent
+    /// happy-path set so each test only needs to state what it deviates.
+    struct MailTaskDecisionBuilder {
+        signing_key: SigningKey,
+        key_id: String,
+        decision_ref: String,
+        org_id: String,
+        user_id: String,
+        alias_id: String,
+        provider_message_id: String,
+        session_key: String,
+        origin: String,
+        service_audience: String,
+        action_id: String,
+        nonce: String,
+        issued_at: DateTime<Utc>,
+        expires_at: DateTime<Utc>,
+    }
+
+    impl MailTaskDecisionBuilder {
+        fn new(now: DateTime<Utc>) -> Self {
+            let org_id = "org-1".to_owned();
+            let provider_message_id = "provider-msg-1".to_owned();
+            Self {
+                signing_key: SigningKey::from_bytes(&[42_u8; 32]),
+                key_id: "control-mail-task-test".to_owned(),
+                decision_ref: "decision-1".to_owned(),
+                session_key: mail_task_session_key(&org_id, &provider_message_id),
+                org_id,
+                user_id: "user-a".to_owned(),
+                alias_id: "alias-1".to_owned(),
+                provider_message_id,
+                origin: "mail_task".to_owned(),
+                service_audience: super::MAIL_TASK_THREAD_PREPARE_AUDIENCE.to_owned(),
+                action_id: super::MAIL_TASK_THREAD_PREPARE_ACTION.to_owned(),
+                nonce: "nonce-1".to_owned(),
+                issued_at: now - chrono::Duration::seconds(1),
+                expires_at: now + chrono::Duration::minutes(5),
+            }
+        }
+
+        fn keys(&self) -> BTreeMap<String, VerifyingKey> {
+            BTreeMap::from([(self.key_id.clone(), self.signing_key.verifying_key())])
+        }
+
+        /// The request a caller with a matching decision would actually
+        /// send -- every field here defaults to the SAME value the decision
+        /// itself claims, so a test only diverges the ONE field it means to.
+        fn request(&self) -> pb::PrepareUserOwnedThreadRequest {
+            pb::PrepareUserOwnedThreadRequest {
+                org_id: self.org_id.clone(),
+                user_id: self.user_id.clone(),
+                origin: self.origin.clone(),
+                session_key: self.session_key.clone(),
+                control_decision_token: self.sign(),
+            }
+        }
+
+        fn sign(&self) -> String {
+            let claims = serde_json::json!({
+                "decision_ref": self.decision_ref,
+                "org_id": self.org_id,
+                "user_id": self.user_id,
+                "alias_id": self.alias_id,
+                "provider_message_id": self.provider_message_id,
+                "session_key": self.session_key,
+                "origin": self.origin,
+                "service_audience": self.service_audience,
+                "action_id": self.action_id,
+                "nonce": self.nonce,
+                "issued_at": self.issued_at.to_rfc3339(),
+                "expires_at": self.expires_at.to_rfc3339(),
+            });
+            let payload = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&claims).expect("claims encode"));
+            let encoded_key = URL_SAFE_NO_PAD.encode(self.key_id.as_bytes());
+            let signing_input = format!("{}.{encoded_key}.{payload}", super::MAIL_TASK_DECISION_VERSION);
+            format!(
+                "{signing_input}.{}",
+                URL_SAFE_NO_PAD.encode(self.signing_key.sign(signing_input.as_bytes()).to_bytes())
+            )
+        }
+    }
+
+    #[test]
+    fn mail_task_thread_decision_verifies_when_every_field_matches_the_request() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-09-28T12:00:00Z")
+            .expect("test time")
+            .with_timezone(&Utc);
+        let decision = MailTaskDecisionBuilder::new(now);
+        super::verify_mail_task_thread_decision_with_keys(&decision.request(), &decision.keys(), now)
+            .expect("a fully matching mail-task-v1 decision must authorize the request");
+    }
+
+    /// prepare_user_owned_thread_rejects_a_decision_minted_for_user_A_when_the_request_names_user_B
+    /// -- the single most important test for the owner-only ruling itself
+    /// (security-review §4). Everything else about the request is a perfect,
+    /// validly-signed match; ONLY the request's user_id has been swapped
+    /// for a different user than the decision was minted for. This must
+    /// fail -- proving the field-by-field claim comparison actually fires,
+    /// not merely "some validly signed decision was presented."
+    #[test]
+    fn prepare_user_owned_thread_rejects_a_decision_minted_for_user_a_when_the_request_names_user_b() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-09-28T12:00:00Z")
+            .expect("test time")
+            .with_timezone(&Utc);
+        let decision = MailTaskDecisionBuilder::new(now);
+        let mut request = decision.request(); // signed for user "user-a"
+        request.user_id = "user-b".to_owned(); // request now claims a DIFFERENT user
+        assert_eq!(
+            super::verify_mail_task_thread_decision_with_keys(&request, &decision.keys(), now)
+                .expect_err("a decision minted for user A must never authorize a request naming user B")
+                .code(),
+            tonic::Code::PermissionDenied
+        );
+    }
+
+    #[test]
+    fn prepare_user_owned_thread_rejects_a_decision_whose_session_key_does_not_match_the_requests_session_key(
+    ) {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-09-28T12:00:00Z")
+            .expect("test time")
+            .with_timezone(&Utc);
+        let decision = MailTaskDecisionBuilder::new(now);
+        let mut request = decision.request();
+        request.session_key = "mail_task/a-different-inbound-message-digest".to_owned();
+        assert_eq!(
+            super::verify_mail_task_thread_decision_with_keys(&request, &decision.keys(), now)
+                .expect_err("a decision bound to one inbound message must not authorize a different one")
+                .code(),
+            tonic::Code::PermissionDenied
+        );
+    }
+
+    #[test]
+    fn prepare_user_owned_thread_rejects_a_decision_minted_for_a_different_org() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-09-28T12:00:00Z")
+            .expect("test time")
+            .with_timezone(&Utc);
+        let decision = MailTaskDecisionBuilder::new(now);
+        let mut request = decision.request();
+        request.org_id = "org-attacker".to_owned();
+        assert_eq!(
+            super::verify_mail_task_thread_decision_with_keys(&request, &decision.keys(), now)
+                .expect_err("cross-org decision reuse must be rejected")
+                .code(),
+            tonic::Code::PermissionDenied
+        );
+    }
+
+    #[test]
+    fn prepare_user_owned_thread_rejects_a_missing_control_decision_token_for_mail_task_origin() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-09-28T12:00:00Z")
+            .expect("test time")
+            .with_timezone(&Utc);
+        let decision = MailTaskDecisionBuilder::new(now);
+        let mut request = decision.request();
+        request.control_decision_token = String::new();
+        assert_eq!(
+            super::verify_mail_task_thread_decision_with_keys(&request, &decision.keys(), now)
+                .expect_err("an empty decision token must be refused, not treated as \"no decision required\"")
+                .code(),
+            tonic::Code::PermissionDenied
+        );
+    }
+
+    #[test]
+    fn mail_task_thread_decision_rejects_expired_or_not_yet_issued_claims() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-09-28T12:00:00Z")
+            .expect("test time")
+            .with_timezone(&Utc);
+        let mut expired = MailTaskDecisionBuilder::new(now);
+        expired.expires_at = now - chrono::Duration::seconds(1);
+        assert_eq!(
+            super::verify_mail_task_thread_decision_with_keys(&expired.request(), &expired.keys(), now)
+                .expect_err("an expired decision must be rejected")
+                .code(),
+            tonic::Code::PermissionDenied
+        );
+
+        let mut future_issued = MailTaskDecisionBuilder::new(now);
+        future_issued.issued_at = now + chrono::Duration::minutes(5);
+        future_issued.expires_at = now + chrono::Duration::minutes(10);
+        assert_eq!(
+            super::verify_mail_task_thread_decision_with_keys(&future_issued.request(), &future_issued.keys(), now)
+                .expect_err("a decision issued more than a minute in the future must be rejected")
+                .code(),
+            tonic::Code::PermissionDenied
+        );
+    }
+
+    /// Cross-family confusion pin (closes B-2/security-review's reason for
+    /// the distinct "mail-task-v1" tag over reusing the Space decision's
+    /// "v2" envelope): a syntactically valid, correctly-signed decision
+    /// minted for a COMPLETELY different Control decision family (here, a
+    /// "v2" Space decision envelope, mirroring `expected_decision`-shaped
+    /// claims used elsewhere in this file) must never verify as a mail-task
+    /// decision, even if an attacker could somehow get one of its bytes to
+    /// line up. The reverse direction (a mail-task-v1 envelope rejected by
+    /// the Space-decision verifier) is proven on the issuing side, in
+    /// user-core's own
+    /// TestMailTaskThreadDecisionIsRejectedByTheSpaceDecisionVerifierAndViceVersa.
+    #[test]
+    fn mail_task_thread_decision_verifier_rejects_a_v2_space_decision_envelope() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-09-28T12:00:00Z")
+            .expect("test time")
+            .with_timezone(&Utc);
+        let decision = MailTaskDecisionBuilder::new(now);
+        let signing_key = SigningKey::from_bytes(&[43_u8; 32]);
+        let key_id = "control-space-v2-test".to_owned();
+        // A "v2"-tagged envelope carrying otherwise-plausible mail-task-shaped
+        // field NAMES (an attacker's best attempt to collide) -- the version
+        // tag mismatch alone must be enough to reject it.
+        let claims = serde_json::json!({
+            "decision_ref": decision.decision_ref,
+            "org_id": decision.org_id,
+            "user_id": decision.user_id,
+            "session_key": decision.session_key,
+            "origin": decision.origin,
+        });
+        let payload = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&claims).expect("claims encode"));
+        let encoded_key = URL_SAFE_NO_PAD.encode(key_id.as_bytes());
+        let signing_input = format!("v2.{encoded_key}.{payload}");
+        let mut request = decision.request();
+        request.control_decision_token = format!(
+            "{signing_input}.{}",
+            URL_SAFE_NO_PAD.encode(signing_key.sign(signing_input.as_bytes()).to_bytes())
+        );
+        let keys = BTreeMap::from([(key_id, signing_key.verifying_key())]);
+        assert_eq!(
+            super::verify_mail_task_thread_decision_with_keys(&request, &keys, now)
+                .expect_err("a \"v2\" Space-decision envelope must never verify as a mail-task-v1 decision")
+                .code(),
+            tonic::Code::PermissionDenied
+        );
+    }
+
+    #[tokio::test]
+    async fn prepare_user_owned_thread_rejects_a_caller_not_on_the_allowlist_before_database_access() {
+        let svc = lazy_test_service();
+        let mut request = Request::new(pb::PrepareUserOwnedThreadRequest {
+            org_id: "org-1".to_owned(),
+            user_id: "user-1".to_owned(),
+            origin: "mail_task".to_owned(),
+            session_key: "mail_task/abc".to_owned(),
+            control_decision_token: String::new(),
+        });
+        // A real, correctly-scoped service credential -- just not one this
+        // RPC allow-lists. Holding SOME valid service credential must never
+        // be enough on its own.
+        request
+            .extensions_mut()
+            .insert(VerifiedIdentity::service_for_test_as(
+                "org-1",
+                "service:some-other-workload",
+                &["session:user-owned-thread-prepare"],
+                false,
+            ));
+        assert_eq!(
+            svc.prepare_user_owned_thread(request)
+                .await
+                .expect_err("an unlisted service must be refused")
+                .code(),
+            tonic::Code::PermissionDenied
+        );
+    }
+
+    /// Pins the mail-task thread-prepare bridge's OWN, distinct Auth Core
+    /// principal (`mail_task_bridge_auth.rs`'s `MailTaskBridgeTokenProvider`,
+    /// default service id `model-gateway-mail-task-bridge` -- deliberately
+    /// separate from `service:model-gateway` per security-review B-4/T-6)
+    /// onto `USER_OWNED_THREAD_CALLERS`. Without this entry, EVERY real
+    /// mail-task call fails closed with the same "only an allow-listed
+    /// trusted service" error the previous test asserts for a genuinely
+    /// untrusted caller -- indistinguishable from this RPC being entirely
+    /// unreachable, even once every deploy-config registry row is correct.
+    /// A plain constant assertion, not a full RPC-level test, matching this
+    /// file's existing convention of keeping `prepare_user_owned_thread`
+    /// tests that go through decision verification independent of global
+    /// process env (see `prepare_user_owned_thread_accepts_a_valid_mail_task_decision_and_is_idempotent_on_retry`'s
+    /// own comment on why): a full RPC call for a `mail_task` origin also
+    /// requires `configured_control_space_decision_keys()`, which reads
+    /// process-global env this test must not depend on or mutate.
+    #[test]
+    fn user_owned_thread_callers_allowlists_the_mail_task_bridges_own_distinct_service_principal() {
+        assert!(
+            super::USER_OWNED_THREAD_CALLERS.contains(&"service:model-gateway-mail-task-bridge"),
+            "the mail-task bridge mints its OWN distinct service principal \
+             (mail_task_bridge_auth.rs, default MAIL_TASK_BRIDGE_SERVICE_ID) \
+             specifically to avoid widening model-gateway's existing ZDR-scoped \
+             session-core credential (B-4/T-6) -- if that principal id is not \
+             also allow-listed here, every real mail-task call is refused \
+             regardless of every registry row being correct"
+        );
+    }
+
+    #[tokio::test]
+    async fn prepare_user_owned_thread_rejects_a_live_user_bearer() {
+        let svc = lazy_test_service();
+        let mut request = Request::new(pb::PrepareUserOwnedThreadRequest {
+            org_id: "org-1".to_owned(),
+            user_id: "user-1".to_owned(),
+            origin: "mail_task".to_owned(),
+            session_key: "mail_task/abc".to_owned(),
+            control_decision_token: String::new(),
+        });
+        request
+            .extensions_mut()
+            .insert(VerifiedIdentity::user_for_test("org-1", "user-1"));
+        assert_eq!(
+            svc.prepare_user_owned_thread(request)
+                .await
+                .expect_err("a live user's own bearer must never mint a thread for an arbitrary user_id")
+                .code(),
+            tonic::Code::PermissionDenied
+        );
+    }
+
+    #[tokio::test]
+    async fn prepare_user_owned_thread_rejects_a_service_shaped_owner() {
+        let svc = lazy_test_service();
+        let mut request = Request::new(pb::PrepareUserOwnedThreadRequest {
+            org_id: "org-1".to_owned(),
+            user_id: "service:orchestrator-core".to_owned(),
+            origin: "mail_task".to_owned(),
+            session_key: "mail_task/abc".to_owned(),
+            control_decision_token: String::new(),
+        });
+        request
+            .extensions_mut()
+            .insert(VerifiedIdentity::service_for_test_as(
+                "org-1",
+                "service:model-gateway",
+                &["session:user-owned-thread-prepare"],
+                false,
+            ));
+        assert_eq!(
+            svc.prepare_user_owned_thread(request)
+                .await
+                .expect_err("a service-shaped user_id must be refused -- that is prepare_scheduled_run_thread's job, with its own Space-authority checks")
+                .code(),
+            tonic::Code::InvalidArgument
+        );
+    }
+
+    #[tokio::test]
+    async fn prepare_user_owned_thread_rejects_an_unrecognized_or_space_origin() {
+        let svc = lazy_test_service();
+        for bad_origin in ["space", "not-a-real-origin", ""] {
+            let mut request = Request::new(pb::PrepareUserOwnedThreadRequest {
+                org_id: "org-1".to_owned(),
+                user_id: "user-1".to_owned(),
+                origin: bad_origin.to_owned(),
+                session_key: "mail_task/abc".to_owned(),
+                control_decision_token: String::new(),
+            });
+            request
+                .extensions_mut()
+                .insert(VerifiedIdentity::service_for_test_as(
+                    "org-1",
+                    "service:model-gateway",
+                    &["session:user-owned-thread-prepare"],
+                    false,
+                ));
+            assert_eq!(
+                svc.prepare_user_owned_thread(request)
+                    .await
+                    .expect_err(&format!("origin {bad_origin:?} must be refused"))
+                    .code(),
+                tonic::Code::InvalidArgument,
+                "origin {bad_origin:?}",
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn prepare_user_owned_thread_rejects_a_cross_org_caller_before_database_access() {
+        let svc = lazy_test_service();
+        let mut request = Request::new(pb::PrepareUserOwnedThreadRequest {
+            org_id: "org-victim".to_owned(),
+            user_id: "user-1".to_owned(),
+            origin: "mail_task".to_owned(),
+            session_key: "mail_task/abc".to_owned(),
+            control_decision_token: String::new(),
+        });
+        request
+            .extensions_mut()
+            .insert(VerifiedIdentity::service_for_test_as(
+                "org-attacker",
+                "service:model-gateway",
+                &["session:user-owned-thread-prepare"],
+                false,
+            ));
+        assert_eq!(
+            svc.prepare_user_owned_thread(request)
+                .await
+                .expect_err("cross-org must fail before SQL")
+                .code(),
+            tonic::Code::PermissionDenied
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres with session-core migrations"]
+    // Uses origin "chat", not "mail_task" -- this is deliberately the
+    // backward-compatibility pin for the delegated-identity design (Gap B):
+    // a non-mail_task USER_OWNED_THREAD_CALLERS origin must keep exactly
+    // today's allow-list-only behavior, unaffected by the new
+    // control_decision_token gate (empty here, on purpose). The mail_task
+    // origin's OWN happy path, which DOES require a valid decision, is
+    // covered separately below by
+    // prepare_user_owned_thread_accepts_a_valid_mail_task_decision_and_is_idempotent_on_retry.
+    async fn prepare_user_owned_thread_creates_a_user_owned_thread_and_is_idempotent_on_retry() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping: DATABASE_URL unset");
+            return;
+        };
+        let pool = sqlx::PgPool::connect(&url).await.expect("connect pg");
+        sqlx::migrate!("./migrations")
+            .run(&pool)
+            .await
+            .expect("migrate");
+        let svc = super::SessionService {
+            pool: pool.clone(),
+            retrieval_client: None,
+            graph_client: None,
+            knowledge_client: None,
+            letta_memory: None,
+            audit_publisher: None,
+            auth: None,
+        };
+        let session_key = format!("chat/{}", super::new_ulid());
+        let build_request = || {
+            let mut request = Request::new(pb::PrepareUserOwnedThreadRequest {
+                org_id: "org-1".to_owned(),
+                user_id: "user-1".to_owned(),
+                origin: "chat".to_owned(),
+                session_key: session_key.clone(),
+                control_decision_token: String::new(),
+            });
+            request
+                .extensions_mut()
+                .insert(VerifiedIdentity::service_for_test_as(
+                    "org-1",
+                    "service:model-gateway",
+                    &["session:user-owned-thread-prepare"],
+                    false,
+                ));
+            request
+        };
+        let first = svc
+            .prepare_user_owned_thread(build_request())
+            .await
+            .expect("first prepare succeeds (no decision required for a non-mail_task origin)")
+            .into_inner();
+        assert!(!first.thread_id.is_empty());
+
+        let (owner, origin): (String, String) = sqlx::query_as(
+            "SELECT user_id, origin FROM threads WHERE id = $1",
+        )
+        .bind(&first.thread_id)
+        .fetch_one(&pool)
+        .await
+        .expect("thread row exists");
+        assert_eq!(owner, "user-1", "thread must be owned by the real user, not the calling service");
+        assert_eq!(origin, "chat");
+
+        // A retry with the identical (org, user, session_key) must resolve
+        // to the SAME thread -- the whole point of the idempotency contract
+        // mail-task's own retry-storm requirement depends on.
+        let second = svc
+            .prepare_user_owned_thread(build_request())
+            .await
+            .expect("retry succeeds")
+            .into_inner();
+        assert_eq!(second.thread_id, first.thread_id);
+
+        sqlx::query("DELETE FROM threads WHERE id = $1")
+            .bind(&first.thread_id)
+            .execute(&pool)
+            .await
+            .expect("cleanup");
+    }
+
+    /// prepare_user_owned_thread_accepts_a_valid_mail_task_decision_and_is_idempotent_on_retry
+    /// (delegated-identity design, Gap B "Exact tests"). Confirms the
+    /// (org_id, user_id, session_key) advisory-lock idempotency
+    /// create_thread_inner_preverified already provides holds even under
+    /// decision-TOKEN replay within its window: a retry mints a FRESH
+    /// decision (new decision_ref/nonce, same claims otherwise) and must
+    /// still resolve to the same thread, never a second one.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres with session-core migrations"]
+    async fn prepare_user_owned_thread_accepts_a_valid_mail_task_decision_and_is_idempotent_on_retry() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping: DATABASE_URL unset");
+            return;
+        };
+        let pool = sqlx::PgPool::connect(&url).await.expect("connect pg");
+        sqlx::migrate!("./migrations")
+            .run(&pool)
+            .await
+            .expect("migrate");
+        let svc = super::SessionService {
+            pool: pool.clone(),
+            retrieval_client: None,
+            graph_client: None,
+            knowledge_client: None,
+            letta_memory: None,
+            audit_publisher: None,
+            auth: None,
+        };
+
+        let signing_key = SigningKey::from_bytes(&[41_u8; 32]);
+        let key_id = "control-mail-task-thread-prepare".to_owned();
+        // Global process env is only touched by this one #[ignore]d,
+        // manually-run integration test in this file -- every other
+        // mail-task-v1 test below exercises verify_mail_task_thread_decision_with_keys
+        // directly, which takes its key set as a plain argument specifically
+        // to avoid this kind of shared, order-sensitive global state.
+        std::env::set_var("CONTROL_SPACE_DECISION_KEY_ID", &key_id);
+        std::env::set_var(
+            "CONTROL_SPACE_DECISION_PUBLIC_KEY_BASE64",
+            URL_SAFE_NO_PAD.encode(signing_key.verifying_key().to_bytes()),
+        );
+
+        let org_id = "org-1".to_owned();
+        let user_id = "user-1".to_owned();
+        let provider_message_id = format!("provider-msg-{}", super::new_ulid());
+        let session_key = mail_task_session_key(&org_id, &provider_message_id);
+        let sign = |decision_ref: &str, nonce: &str| -> String {
+            let claims = serde_json::json!({
+                "decision_ref": decision_ref,
+                "org_id": org_id,
+                "user_id": user_id,
+                "alias_id": "alias-1",
+                "provider_message_id": provider_message_id,
+                "session_key": session_key,
+                "origin": "mail_task",
+                "service_audience": super::MAIL_TASK_THREAD_PREPARE_AUDIENCE,
+                "action_id": super::MAIL_TASK_THREAD_PREPARE_ACTION,
+                "nonce": nonce,
+                "issued_at": Utc::now().to_rfc3339(),
+                "expires_at": (Utc::now() + chrono::Duration::minutes(5)).to_rfc3339(),
+            });
+            let payload = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&claims).expect("claims encode"));
+            let encoded_key = URL_SAFE_NO_PAD.encode(key_id.as_bytes());
+            let signing_input = format!("{}.{encoded_key}.{payload}", super::MAIL_TASK_DECISION_VERSION);
+            format!(
+                "{signing_input}.{}",
+                URL_SAFE_NO_PAD.encode(signing_key.sign(signing_input.as_bytes()).to_bytes())
+            )
+        };
+        let build_request = |decision_ref: &str, nonce: &str| {
+            let mut request = Request::new(pb::PrepareUserOwnedThreadRequest {
+                org_id: org_id.clone(),
+                user_id: user_id.clone(),
+                origin: "mail_task".to_owned(),
+                session_key: session_key.clone(),
+                control_decision_token: sign(decision_ref, nonce),
+            });
+            request
+                .extensions_mut()
+                .insert(VerifiedIdentity::service_for_test_as(
+                    "org-1",
+                    "service:model-gateway",
+                    &["session:user-owned-thread-prepare"],
+                    false,
+                ));
+            request
+        };
+
+        let first = svc
+            .prepare_user_owned_thread(build_request("decision-1", "nonce-1"))
+            .await
+            .expect("first prepare with a valid mail-task-v1 decision succeeds")
+            .into_inner();
+        assert!(!first.thread_id.is_empty());
+
+        // A retry mints a FRESH decision (new decision_ref/nonce) -- the same
+        // "same fire, new decision" shape scheduled-run retries already rely
+        // on -- and must still resolve to the identical thread.
+        let second = svc
+            .prepare_user_owned_thread(build_request("decision-2", "nonce-2"))
+            .await
+            .expect("retry with a fresh decision succeeds")
+            .into_inner();
+        assert_eq!(second.thread_id, first.thread_id);
+
+        let (count,): (i64,) = sqlx::query_as(
+            "SELECT count(*) FROM threads WHERE org_id = $1 AND user_id = $2 AND session_key = $3",
+        )
+        .bind(&org_id)
+        .bind(&user_id)
+        .bind(&session_key)
+        .fetch_one(&pool)
+        .await
+        .expect("count prepared threads");
+        assert_eq!(count, 1, "retry must not create a second thread");
+
+        sqlx::query("DELETE FROM threads WHERE id = $1")
+            .bind(&first.thread_id)
+            .execute(&pool)
+            .await
+            .expect("cleanup");
+        std::env::remove_var("CONTROL_SPACE_DECISION_KEY_ID");
+        std::env::remove_var("CONTROL_SPACE_DECISION_PUBLIC_KEY_BASE64");
     }
 
     #[tokio::test]
@@ -9965,9 +11215,18 @@ mod tests {
             .unwrap()
             .local_addr()
             .unwrap();
+        // Production wraps the service in the auth interceptor; this one
+        // installs the verified run owner it would have produced.
+        let caller = VerifiedIdentity::user_for_test(&org, "u1");
         tokio::spawn(async move {
             Server::builder()
-                .add_service(SessionCoreServer::new(svc))
+                .add_service(SessionCoreServer::with_interceptor(
+                    svc,
+                    move |mut request: Request<()>| {
+                        request.extensions_mut().insert(caller.clone());
+                        Ok(request)
+                    },
+                ))
                 .serve(addr)
                 .await
                 .ok();
@@ -10181,5 +11440,725 @@ mod tests {
             !stranger_view.contains("private-skill") && !stranger_view.contains("shared-skill"),
             "a stranger must see neither the owner's private skill nor a skill shared with someone else: {stranger_view:?}"
         );
+    }
+}
+
+/// `CompleteDirectRunWithMessage` behind the production wiring
+/// (`ManagedRunLifecycleServer::with_interceptor(.., JwtVerifier)`, over the
+/// wire) with the credentials Auth Core really issues.
+///
+/// No database is needed: the pool points at a socket that never answers, so a
+/// call that clears every credential check fails at the handler's first query
+/// (`authorize_run_owner`) with a pool timeout, and a call refused on its
+/// credential fails before it. The live regression was the second kind: a
+/// trailers-only error a few milliseconds in, with no SQL.
+#[cfg(test)]
+mod direct_completion_wire_auth_tests {
+    use super::*;
+    use crate::auth::test_support::{
+        model_gateway_terminalize_claims, service_principal_claims, sign, user_claims, verifier,
+        KID,
+    };
+    use mp_contracts::model_plane::v1::managed_run_lifecycle_client::ManagedRunLifecycleClient;
+    use std::time::Duration;
+
+    /// A server behind the production interceptor whose database never
+    /// answers. Keep the returned listener alive: it holds that socket.
+    async fn lifecycle_client() -> (std::net::TcpListener, ManagedRunLifecycleClient<Channel>) {
+        let silent_database = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .acquire_timeout(Duration::from_millis(250))
+            .connect_lazy(&format!(
+                "postgresql://session-core@{}/session_core",
+                silent_database.local_addr().expect("address")
+            ))
+            .expect("lazy pool");
+        let service = ManagedRunLifecycleService {
+            pool,
+            letta_memory: None,
+        };
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let address = listener.local_addr().expect("address");
+        tokio::spawn(async move {
+            tonic::transport::Server::builder()
+                .add_service(ManagedRunLifecycleServer::with_interceptor(
+                    service,
+                    verifier("session-core"),
+                ))
+                .serve_with_incoming(
+                    tonic::transport::server::TcpIncoming::from_listener(listener, true, None)
+                        .expect("incoming"),
+                )
+                .await
+                .expect("serve");
+        });
+        let channel = tonic::transport::Endpoint::from_shared(format!("http://{address}"))
+            .expect("endpoint")
+            .connect()
+            .await
+            .expect("connect");
+        (silent_database, ManagedRunLifecycleClient::new(channel))
+    }
+
+    /// The call Model Gateway makes for the failed live turn, ids and all.
+    async fn complete(
+        client: &mut ManagedRunLifecycleClient<Channel>,
+        claims: Option<&serde_json::Value>,
+    ) -> Status {
+        let mut request = Request::new(pb::CompleteDirectRunWithMessageRequest {
+            run_id: "01M3AN90KN32RDEXZW3MYQE5FD".to_owned(),
+            thread_id: "01M3AN90GZ8SHZPBGYB5GHT1CE".to_owned(),
+            content: "Svar.".to_owned(),
+            idempotency_key: "fixture-idempotency-key".to_owned(),
+            ..Default::default()
+        });
+        if let Some(claims) = claims {
+            request.metadata_mut().insert(
+                "authorization",
+                format!("Bearer {}", sign(claims, KID))
+                    .parse()
+                    .expect("metadata"),
+            );
+        }
+        client
+            .complete_direct_run_with_message(request)
+            .await
+            .expect_err("there is no database behind this server")
+    }
+
+    /// Regression, 2026-09-24: Model Gateway's real terminalize credential
+    /// (`zdr: true` by registry policy) was refused FAILED_PRECONDITION before
+    /// any SQL. It must reach the run-owner query; retention is decided later,
+    /// from the run.
+    #[tokio::test]
+    async fn the_gateways_real_credential_reaches_the_run_owner_query() {
+        let (_silent_database, mut client) = lifecycle_client().await;
+        let status = complete(
+            &mut client,
+            Some(&model_gateway_terminalize_claims("org-1")),
+        )
+        .await;
+        assert_eq!(status.code(), tonic::Code::Internal, "{status:?}");
+        assert!(
+            status.message().contains("pool timed out"),
+            "refused before the first query: {status:?}"
+        );
+    }
+
+    /// The credential checks that remain all refuse before any SQL.
+    #[tokio::test]
+    async fn every_other_credential_is_refused_before_any_query() {
+        let (_silent_database, mut client) = lifecycle_client().await;
+        let heartbeat = service_principal_claims(
+            "session-core",
+            "org-1",
+            "model-gateway",
+            &["session:heartbeat"],
+            "model-gateway managed-run heartbeat",
+            true,
+        );
+        let execution = service_principal_claims(
+            "session-core",
+            "org-1",
+            "execution-core",
+            &["session:terminalize"],
+            "execution-core managed-run terminalization",
+            false,
+        );
+        let user = user_claims("session-core", "org-1", "user-1", false);
+        let mut quarry = model_gateway_terminalize_claims("org-1");
+        quarry["aud"] = serde_json::json!("quarry");
+        for (claims, expected) in [
+            (Some(&heartbeat), tonic::Code::PermissionDenied),
+            (Some(&execution), tonic::Code::PermissionDenied),
+            (Some(&user), tonic::Code::PermissionDenied),
+            (Some(&quarry), tonic::Code::Unauthenticated),
+            (None, tonic::Code::Unauthenticated),
+        ] {
+            let status = complete(&mut client, claims).await;
+            assert_eq!(status.code(), expected, "{claims:?}: {status:?}");
+        }
+    }
+}
+
+/// `ManagedRunLifecycle.CompleteDirectRunWithMessage` against a real Postgres.
+///
+/// DB: `DATABASE_URL=<disposable> cargo test -p session-core --bin session-core
+/// -- --ignored direct_completion_db_tests`
+#[cfg(test)]
+mod direct_completion_db_tests {
+    use super::*;
+    use mp_contracts::model_plane::v1::run_service_server::RunService as _;
+
+    const GATEWAY: &str = "service:model-gateway";
+
+    async fn disposable_pool() -> Option<PgPool> {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping: DATABASE_URL unset");
+            return None;
+        };
+        let pool = PgPool::connect(&url).await.expect("connect pg");
+        sqlx::migrate!("./migrations")
+            .run(&pool)
+            .await
+            .expect("migrate");
+        Some(pool)
+    }
+
+    #[allow(clippy::struct_field_names)]
+    struct DirectRun {
+        org_id: String,
+        user_id: String,
+        thread_id: String,
+        run_id: String,
+    }
+
+    /// A thread with its user turn, and a managed run on it owned by `source`.
+    async fn managed_run(pool: &PgPool, source: pb::ManagedRunSource, zdr: bool) -> DirectRun {
+        let suffix = new_ulid();
+        let org_id = format!("org-direct-{suffix}");
+        let user_id = format!("user-direct-{suffix}");
+        let mut thread_id = String::new();
+        if !zdr {
+            thread_id = create_thread_inner(
+                pool,
+                pb::CreateThreadRequest {
+                    session_key: format!("direct-{suffix}"),
+                    org_id: org_id.clone(),
+                    user_id: user_id.clone(),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("create thread")
+            .into_inner()
+            .thread_id;
+            append_message_inner(
+                pool,
+                None,
+                MemoryRetention::Durable,
+                pb::AppendMessageRequest {
+                    thread_id: thread_id.clone(),
+                    role: "user".into(),
+                    content: "Hva er status?".into(),
+                    ..Default::default()
+                },
+                &user_id,
+            )
+            .await
+            .expect("user turn");
+        }
+        let started = crate::terminalization::start_managed_run_inner(
+            pool,
+            pb::StartManagedRunRequest {
+                thread_id,
+                agent_id: "model-gateway".into(),
+                goal: "Hva er status?".into(),
+                mode: "execute".into(),
+                org_id: org_id.clone(),
+                user_id: user_id.clone(),
+                start_key: format!("direct-start-{suffix}"),
+                terminal_source: source as i32,
+                ..Default::default()
+            },
+            zdr,
+        )
+        .await
+        .expect("start managed run");
+        DirectRun {
+            org_id,
+            user_id,
+            thread_id: started.thread_id,
+            run_id: started.run_id,
+        }
+    }
+
+    fn evidence() -> prost_types::Struct {
+        json_to_struct(&serde_json::json!({
+            "grounding": { "citations": [{ "title": "Kilde", "url": "https://example.test/a" }] },
+        }))
+        .expect("an object")
+    }
+
+    fn completion(
+        run: &DirectRun,
+        content: &str,
+        key: &str,
+    ) -> pb::CompleteDirectRunWithMessageRequest {
+        pb::CompleteDirectRunWithMessageRequest {
+            run_id: run.run_id.clone(),
+            thread_id: run.thread_id.clone(),
+            content: content.to_owned(),
+            agent_name: " Verevon ".to_owned(),
+            metadata: Some(evidence()),
+            idempotency_key: key.to_owned(),
+        }
+    }
+
+    fn lifecycle(pool: &PgPool) -> ManagedRunLifecycleService {
+        ManagedRunLifecycleService {
+            pool: pool.clone(),
+            letta_memory: None,
+        }
+    }
+
+    fn as_caller<T>(message: T, caller: VerifiedIdentity) -> Request<T> {
+        let mut request = Request::new(message);
+        request.extensions_mut().insert(caller);
+        request
+    }
+
+    /// `message` carrying the terminalize credential Auth Core really issues
+    /// Model Gateway for `org_id` (`zdr: true`, by registry policy), through
+    /// the production interceptor, never a hand-built identity.
+    fn as_gateway<T>(message: T, org_id: &str) -> Request<T> {
+        use crate::auth::test_support::{
+            authenticate, model_gateway_terminalize_claims, sign, verifier, KID,
+        };
+        let token = sign(&model_gateway_terminalize_claims(org_id), KID);
+        let request = authenticate(&verifier("session-core"), &token, message)
+            .expect("the gateway's Auth Core credential verifies");
+        assert_eq!(
+            identity(&request).expect("identity").principal_id(),
+            GATEWAY
+        );
+        request
+    }
+
+    async fn complete(
+        pool: &PgPool,
+        request: pb::CompleteDirectRunWithMessageRequest,
+        org_id: &str,
+    ) -> Result<pb::CompleteDirectRunWithMessageResponse, Status> {
+        lifecycle(pool)
+            .complete_direct_run_with_message(as_gateway(request, org_id))
+            .await
+            .map(Response::into_inner)
+    }
+
+    async fn assistant_messages(pool: &PgPool, thread_id: &str) -> Vec<(i64, String)> {
+        sqlx::query_as(
+            "SELECT sequence, content FROM messages
+             WHERE thread_id = $1 AND role = 'assistant' ORDER BY sequence",
+        )
+        .bind(thread_id)
+        .fetch_all(pool)
+        .await
+        .expect("read messages")
+    }
+
+    async fn run_status(pool: &PgPool, run_id: &str) -> String {
+        sqlx::query_scalar("SELECT status FROM runs WHERE id = $1")
+            .bind(run_id)
+            .fetch_one(pool)
+            .await
+            .expect("read run")
+    }
+
+    async fn run_events(pool: &PgPool, run_id: &str, event_type: &str) -> i64 {
+        sqlx::query_scalar("SELECT count(*) FROM events WHERE run_id = $1 AND event_type = $2")
+            .bind(run_id)
+            .bind(event_type)
+            .fetch_one(pool)
+            .await
+            .expect("count events")
+    }
+
+    async fn obligation_state(pool: &PgPool, run_id: &str) -> (String, Option<String>) {
+        sqlx::query_as(
+            "SELECT state, completion_key FROM managed_run_terminalization_outbox WHERE run_id = $1",
+        )
+        .bind(run_id)
+        .fetch_one(pool)
+        .await
+        .expect("read obligation")
+    }
+
+    async fn cancel(pool: &PgPool, run: &DirectRun) -> bool {
+        crate::run_service_grpc::RunServiceImpl::new(pool.clone())
+            .cancel_run(as_caller(
+                pb::CancelRunRequest {
+                    run_id: run.run_id.clone(),
+                    reason: "client_stream_cancelled".into(),
+                },
+                VerifiedIdentity::user_for_test(&run.org_id, &run.user_id),
+            ))
+            .await
+            .expect("cancel run")
+            .into_inner()
+            .cancelled
+    }
+
+    /// The answer, stored exactly as `AppendMessage` stores it, and the
+    /// Completed receipt commit together.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres"]
+    async fn completes_the_run_and_saves_its_answer_in_one_transaction() {
+        let Some(pool) = disposable_pool().await else {
+            return;
+        };
+        let run = managed_run(&pool, pb::ManagedRunSource::GatewayDirect, false).await;
+        let key = new_ulid();
+
+        let response = complete(&pool, completion(&run, "Alt er klart.", &key), &run.org_id)
+            .await
+            .expect("complete");
+
+        assert!(!response.already_terminal);
+        let receipt = response.receipt.expect("a Completed receipt");
+        assert_eq!(receipt.run_id, run.run_id);
+        assert_eq!(receipt.source, pb::ManagedRunSource::GatewayDirect as i32);
+        assert_eq!(
+            receipt.terminal_step_id,
+            "model-gateway-direct-inference-final"
+        );
+        assert!(!receipt.already_applied);
+        assert!(!receipt.receipt_id.is_empty());
+        let saved = assistant_messages(&pool, &run.thread_id).await;
+        assert_eq!(saved.len(), 1);
+        assert_eq!(
+            u64::try_from(saved[0].0).unwrap(),
+            response.message_sequence
+        );
+        assert_eq!(saved[0].1, "Alt er klart.");
+        let (agent_name, metadata, author): (Option<String>, serde_json::Value, Option<String>) =
+            sqlx::query_as(
+                "SELECT agent_name, metadata, author_subject_id FROM messages
+                 WHERE thread_id = $1 AND role = 'assistant'",
+            )
+            .bind(&run.thread_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            agent_name.as_deref(),
+            Some("Verevon"),
+            "trimmed like an append"
+        );
+        assert_eq!(metadata, struct_to_json(&evidence()));
+        assert_eq!(author, None, "an assistant turn names no human author");
+        let appended: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM events WHERE run_id = $1 AND event_type = 'MESSAGE_APPENDED'",
+        )
+        .bind(&run.thread_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            appended, 2,
+            "the user turn and the answer each have their event"
+        );
+
+        assert_eq!(run_status(&pool, &run.run_id).await, "completed");
+        assert_eq!(run_events(&pool, &run.run_id, "STEP_COMPLETED").await, 1);
+        assert_eq!(run_events(&pool, &run.run_id, "RUN_COMPLETED").await, 1);
+        let receipt_event: String = sqlx::query_scalar(
+            "SELECT id FROM events WHERE run_id = $1 AND event_type = 'RUN_COMPLETED'",
+        )
+        .bind(&run.run_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(receipt_event, receipt.receipt_id);
+        assert_eq!(
+            obligation_state(&pool, &run.run_id).await,
+            ("applied".to_owned(), Some(key))
+        );
+    }
+
+    /// A retry after a lost response returns the original receipt and
+    /// sequence and saves no second message.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres"]
+    async fn an_exact_retry_returns_the_original_result_without_a_second_message() {
+        let Some(pool) = disposable_pool().await else {
+            return;
+        };
+        let run = managed_run(&pool, pb::ManagedRunSource::GatewayDirect, false).await;
+        let key = new_ulid();
+
+        let first = complete(&pool, completion(&run, "Svar.", &key), &run.org_id)
+            .await
+            .expect("first");
+        let retry = complete(&pool, completion(&run, "Svar.", &key), &run.org_id)
+            .await
+            .expect("retry");
+
+        assert!(!retry.already_terminal);
+        assert_eq!(retry.message_sequence, first.message_sequence);
+        let (first_receipt, retry_receipt) = (first.receipt.unwrap(), retry.receipt.unwrap());
+        assert_eq!(retry_receipt.receipt_id, first_receipt.receipt_id);
+        assert_eq!(retry_receipt.step_index, first_receipt.step_index);
+        assert!(retry_receipt.already_applied, "the retry is a replay");
+        assert_eq!(assistant_messages(&pool, &run.thread_id).await.len(), 1);
+        assert_eq!(run_events(&pool, &run.run_id, "RUN_COMPLETED").await, 1);
+
+        // Another operation finds the run completed and writes nothing.
+        let other = complete(
+            &pool,
+            completion(&run, "Et annet svar.", &new_ulid()),
+            &run.org_id,
+        )
+        .await
+        .expect("other operation");
+        assert!(other.already_terminal);
+        assert!(other.receipt.is_none());
+        assert_eq!(other.message_sequence, 0);
+        assert_eq!(assistant_messages(&pool, &run.thread_id).await.len(), 1);
+    }
+
+    /// A cancelled run answers `already_terminal` and nothing is written.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres"]
+    async fn a_run_that_is_no_longer_active_saves_nothing() {
+        let Some(pool) = disposable_pool().await else {
+            return;
+        };
+        let run = managed_run(&pool, pb::ManagedRunSource::GatewayDirect, false).await;
+        assert!(cancel(&pool, &run).await);
+
+        let response = complete(
+            &pool,
+            completion(&run, "For sent.", &new_ulid()),
+            &run.org_id,
+        )
+        .await
+        .expect("an already-terminal run is an answer, not an error");
+
+        assert!(response.already_terminal);
+        assert!(response.receipt.is_none());
+        assert!(assistant_messages(&pool, &run.thread_id).await.is_empty());
+        assert_eq!(run_status(&pool, &run.run_id).await, "cancelled");
+        assert_eq!(run_events(&pool, &run.run_id, "RUN_COMPLETED").await, 0);
+        assert_eq!(run_events(&pool, &run.run_id, "STEP_COMPLETED").await, 0);
+        assert_eq!(
+            obligation_state(&pool, &run.run_id).await,
+            ("superseded".to_owned(), None),
+            "the obligation is retired as a receipt or heartbeat would"
+        );
+    }
+
+    /// A cancel holding the run row makes the completion wait; once the cancel
+    /// commits, the completion finds the run over and writes nothing.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres"]
+    async fn a_cancel_that_commits_first_leaves_no_answer_on_the_run() {
+        let Some(pool) = disposable_pool().await else {
+            return;
+        };
+        let run = managed_run(&pool, pb::ManagedRunSource::GatewayDirect, false).await;
+
+        // The same row update `CancelRun` makes, held open.
+        let mut cancel_tx = pool.begin().await.unwrap();
+        let cancelled = sqlx::query(
+            "UPDATE runs SET status = 'cancelled', ended_at = now(), updated_at = now()
+             WHERE id = $1 AND status NOT IN ('completed', 'failed', 'cancelled')",
+        )
+        .bind(&run.run_id)
+        .execute(&mut *cancel_tx)
+        .await
+        .unwrap();
+        assert_eq!(cancelled.rows_affected(), 1);
+
+        let racing = {
+            let pool = pool.clone();
+            let request = completion(&run, "Svar.", &new_ulid());
+            let org_id = run.org_id.clone();
+            tokio::spawn(async move { complete(&pool, request, &org_id).await })
+        };
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert!(
+            !racing.is_finished(),
+            "the completion waits for the run row"
+        );
+        cancel_tx.commit().await.unwrap();
+
+        let response = racing.await.unwrap().expect("complete after the cancel");
+        assert!(response.already_terminal);
+        assert!(assistant_messages(&pool, &run.thread_id).await.is_empty());
+        assert_eq!(run_status(&pool, &run.run_id).await, "cancelled");
+        assert_eq!(run_events(&pool, &run.run_id, "RUN_COMPLETED").await, 0);
+    }
+
+    /// The real `CancelRun` racing the completion: every run ends one way or
+    /// the other, never with an answer saved on a cancelled run.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres"]
+    async fn a_racing_cancel_never_leaves_an_answer_on_a_cancelled_run() {
+        let Some(pool) = disposable_pool().await else {
+            return;
+        };
+        let (mut completed, mut cancelled) = (0, 0);
+        for _ in 0..20 {
+            let run = managed_run(&pool, pb::ManagedRunSource::GatewayDirect, false).await;
+            let (completion_result, cancel_result) = tokio::join!(
+                complete(&pool, completion(&run, "Svar.", &new_ulid()), &run.org_id),
+                cancel(&pool, &run),
+            );
+            let response = completion_result.expect("complete");
+            let saved = assistant_messages(&pool, &run.thread_id).await.len();
+            match run_status(&pool, &run.run_id).await.as_str() {
+                "completed" => {
+                    assert!(!response.already_terminal && !cancel_result);
+                    assert_eq!(saved, 1);
+                    completed += 1;
+                }
+                "cancelled" => {
+                    assert!(response.already_terminal && cancel_result);
+                    assert_eq!(saved, 0, "no answer on a cancelled run");
+                    assert_eq!(run_events(&pool, &run.run_id, "RUN_COMPLETED").await, 0);
+                    cancelled += 1;
+                }
+                other => panic!("unexpected run status {other}"),
+            }
+        }
+        eprintln!("racing cancel: {completed} completed, {cancelled} cancelled");
+    }
+
+    /// Only the Gateway workload holding `session:terminalize`, in the run's
+    /// own org, may complete a direct run. Nothing is written otherwise.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres"]
+    async fn only_the_gateway_terminalizer_of_the_runs_org_may_complete() {
+        let Some(pool) = disposable_pool().await else {
+            return;
+        };
+        let run = managed_run(&pool, pb::ManagedRunSource::GatewayDirect, false).await;
+        let callers = [
+            VerifiedIdentity::user_for_test(&run.org_id, &run.user_id),
+            VerifiedIdentity::service_for_test_as(
+                &run.org_id,
+                GATEWAY,
+                &["session:heartbeat"],
+                false,
+            ),
+            VerifiedIdentity::service_for_test_as(&run.org_id, GATEWAY, &["session:write"], false),
+            VerifiedIdentity::service_for_test_as(
+                &run.org_id,
+                "service:execution-core",
+                &["session:terminalize"],
+                false,
+            ),
+            VerifiedIdentity::service_for_test_as(
+                "another-org",
+                GATEWAY,
+                &["session:terminalize"],
+                false,
+            ),
+        ];
+        for caller in callers {
+            let refused = lifecycle(&pool)
+                .complete_direct_run_with_message(as_caller(
+                    completion(&run, "Svar.", &new_ulid()),
+                    caller.clone(),
+                ))
+                .await
+                .expect_err("refused");
+            assert_eq!(refused.code(), tonic::Code::PermissionDenied, "{caller:?}");
+        }
+        // The gateway's credential for another org, as Auth Core issues it.
+        let refused = lifecycle(&pool)
+            .complete_direct_run_with_message(as_gateway(
+                completion(&run, "Svar.", &new_ulid()),
+                "another-org",
+            ))
+            .await
+            .expect_err("another org's credential");
+        assert_eq!(refused.code(), tonic::Code::PermissionDenied);
+
+        assert!(assistant_messages(&pool, &run.thread_id).await.is_empty());
+        assert_eq!(run_status(&pool, &run.run_id).await, "queued");
+        assert_eq!(
+            obligation_state(&pool, &run.run_id).await,
+            ("open".to_owned(), None)
+        );
+
+        // Regression, 2026-09-24: that credential is `zdr: true` for every
+        // turn, and the durable run is still the gateway's to complete.
+        let response = complete(&pool, completion(&run, "Svar.", &new_ulid()), &run.org_id)
+            .await
+            .expect("the real gateway credential completes a durable run");
+        assert!(!response.already_terminal);
+        assert_eq!(assistant_messages(&pool, &run.thread_id).await.len(), 1);
+        assert_eq!(run_status(&pool, &run.run_id).await, "completed");
+    }
+
+    /// A zero-retention run, another thread, and a run another producer owns
+    /// are refused before anything is written.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres"]
+    async fn refuses_zdr_runs_foreign_threads_and_other_producers_without_writing() {
+        let Some(pool) = disposable_pool().await else {
+            return;
+        };
+        let zdr = managed_run(&pool, pb::ManagedRunSource::GatewayDirect, true).await;
+        let refused = complete(&pool, completion(&zdr, "Svar.", &new_ulid()), &zdr.org_id)
+            .await
+            .expect_err("a ZDR run has no durable answer");
+        assert_eq!(refused.code(), tonic::Code::FailedPrecondition);
+        assert_eq!(
+            refused.message(),
+            "a zero-retention run has no durable assistant message",
+            "the run's own retention refuses it, not the credential's"
+        );
+        let zdr_messages: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM messages WHERE thread_id = $1")
+                .bind(&zdr.thread_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(zdr_messages, 0);
+        assert_ne!(run_status(&pool, &zdr.run_id).await, "completed");
+
+        let run = managed_run(&pool, pb::ManagedRunSource::GatewayDirect, false).await;
+        let elsewhere = managed_run(&pool, pb::ManagedRunSource::GatewayDirect, false).await;
+        let mut misdirected = completion(&run, "Svar.", &new_ulid());
+        misdirected.thread_id.clone_from(&elsewhere.thread_id);
+        let refused = complete(&pool, misdirected, &run.org_id)
+            .await
+            .expect_err("only the run's own thread");
+        assert_eq!(refused.code(), tonic::Code::PermissionDenied);
+        assert!(assistant_messages(&pool, &elsewhere.thread_id)
+            .await
+            .is_empty());
+        assert_eq!(run_status(&pool, &run.run_id).await, "queued");
+
+        let agent = managed_run(&pool, pb::ManagedRunSource::ExecutionAgent, false).await;
+        let refused = complete(
+            &pool,
+            completion(&agent, "Svar.", &new_ulid()),
+            &agent.org_id,
+        )
+        .await
+        .expect_err("an execution-agent run is not the Gateway's to complete");
+        assert_eq!(refused.code(), tonic::Code::PermissionDenied);
+        assert!(assistant_messages(&pool, &agent.thread_id).await.is_empty());
+        assert_eq!(run_status(&pool, &agent.run_id).await, "queued");
+
+        let bad_key = complete(&pool, completion(&run, "Svar.", "not a key"), &run.org_id)
+            .await
+            .expect_err("an idempotency key is an opaque token");
+        assert_eq!(bad_key.code(), tonic::Code::InvalidArgument);
+    }
+
+    /// An empty answer completes the run without a message, as the two-call
+    /// path did.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres"]
+    async fn an_empty_answer_completes_without_a_message() {
+        let Some(pool) = disposable_pool().await else {
+            return;
+        };
+        let run = managed_run(&pool, pb::ManagedRunSource::GatewayDirect, false).await;
+        let response = complete(&pool, completion(&run, "  \n ", &new_ulid()), &run.org_id)
+            .await
+            .expect("complete");
+        assert!(!response.already_terminal);
+        assert_eq!(response.message_sequence, 0);
+        assert!(response.receipt.is_some());
+        assert!(assistant_messages(&pool, &run.thread_id).await.is_empty());
+        assert_eq!(run_status(&pool, &run.run_id).await, "completed");
     }
 }

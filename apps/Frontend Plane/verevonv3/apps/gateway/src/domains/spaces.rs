@@ -2264,7 +2264,7 @@ pub(crate) async fn space_thread_presentation(
         return (membership_status, Json(membership));
     }
     match crate::domains::chat::history::update_durable_presentation(
-        &state, &user, &headers, thread_id, title, None, pinned,
+        &state, &user, &headers, thread_id, title, None, pinned, None,
     )
     .await
     {
@@ -4312,6 +4312,71 @@ pub(crate) async fn inject_authored_instructions(
     Ok(())
 }
 
+/// Persona spec (chat-wave2, `persona.md`) — the user layer beneath org/Space
+/// in the authored-instruction hierarchy. `None` when the caller has never
+/// written any persona text, or when Convex cannot be reached (same fail-open
+/// shape as the org/Space fetchers: an outage silently omits the layer rather
+/// than failing the turn). The bool is the caller's GLOBAL on/off switch
+/// (`users.personaEnabled`, Settings → Persona) — distinct from the
+/// PER-THREAD override, which lives in session-core's `threads.persona_enabled`
+/// and is applied downstream by model-gateway from the same context-assembly
+/// call it already makes, not from here.
+pub(crate) async fn fetch_persona_instructions(
+    state: &AppState,
+    user: &AuthenticatedUser,
+) -> Option<(String, bool)> {
+    let value = convex_gateway_call(
+        state,
+        "query",
+        "users:personaForGateway",
+        json!({ "externalAuthId": user.user_id }),
+    )
+    .await
+    .ok()?;
+    let text = value
+        .get("instructions")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    let enabled = value.get("enabled").and_then(Value::as_bool).unwrap_or(true);
+    text.filter(|t| !t.trim().is_empty()).map(|t| (t, enabled))
+}
+
+/// Stamps `persona_instructions` onto the outbound turn — the field
+/// `model-gateway`'s composed authored-instructions message reads for the
+/// user layer, inserted only when the persona has text AND the caller's
+/// global switch is on. Any client-supplied `persona_instructions`/
+/// `persona_enabled` is discarded first: same trust class as
+/// `org_instructions`/`space_instructions`, never client-suppliable.
+///
+/// Unlike [`inject_authored_instructions`], this needs no `org_id` — persona
+/// is global to the user, not scoped to an organization or Space — so it can
+/// run independently of Space resolution. Call it from the same three
+/// injection sites as `inject_authored_instructions`.
+pub(crate) async fn inject_persona_instructions(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    body: &mut Value,
+) -> Result<(), (StatusCode, Json<Value>)> {
+    let object = body.as_object_mut().ok_or_else(|| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(error(
+                "invalid_chat_request",
+                "Chat request must be an object.",
+            )),
+        )
+    })?;
+    object.remove("persona_instructions");
+    object.remove("persona_enabled");
+
+    if let Some((instructions, enabled)) = fetch_persona_instructions(state, user).await {
+        if enabled {
+            object.insert("persona_instructions".to_owned(), json!(instructions));
+        }
+    }
+    Ok(())
+}
+
 /// Exchange a client-supplied `@` mention for a Control- and
 /// Application-verified agent persona, injected into the outbound turn as
 /// `agent_name`/`agent_system_prompt` — the two fields
@@ -4852,7 +4917,8 @@ async fn space_actions(
 mod tests {
     use super::{
         forward_owner_grant_mutation, inject_authored_instructions,
-        inject_mentioned_space_agent_persona, inject_personal_schedule_create_context,
+        inject_mentioned_space_agent_persona, inject_persona_instructions,
+        inject_personal_schedule_create_context,
         inject_personal_thread_context, personal_import_ingress_decision, space_actions,
         thread_items_match_space, OwnerGrantMutationRequest, UpdateSpaceInstructionsRequest,
     };
@@ -9297,6 +9363,76 @@ mod tests {
 
         assert!(result.is_ok());
         assert!(body.get("org_instructions").is_none());
+    }
+
+    // ── Persona: the user layer beneath org/Space ───────────────────────────
+
+    async fn persona_instructions_test_state(persona_response: Value) -> (AppState, MockServer) {
+        let application = MockServer::start().await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/api/query"))
+            .and(wm_body_partial_json(
+                json!({"path": "users:personaForGateway"}),
+            ))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(json!({"value": persona_response})),
+            )
+            .mount(&application)
+            .await;
+        let mut state = crate::tests::test_state(false);
+        state.application_convex_url = application.uri();
+        state.application_convex_service_key = "application-test-key".into();
+        (state, application)
+    }
+
+    #[tokio::test]
+    async fn persona_instructions_are_injected_on_a_personal_turn() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let (state, _application) =
+            persona_instructions_test_state(json!({"instructions": "Always be terse.", "enabled": true}))
+                .await;
+        let mut body = json!({"content": "hello"});
+        let result = inject_persona_instructions(&state, &authenticated_user(), &mut body).await;
+
+        assert!(result.is_ok());
+        assert_eq!(body["persona_instructions"], "Always be terse.");
+    }
+
+    #[tokio::test]
+    async fn disabled_persona_is_not_injected_even_when_authored() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let (state, _application) = persona_instructions_test_state(
+            json!({"instructions": "Always be terse.", "enabled": false}),
+        )
+        .await;
+        let mut body = json!({"content": "hello"});
+        let result = inject_persona_instructions(&state, &authenticated_user(), &mut body).await;
+
+        assert!(result.is_ok());
+        assert!(
+            body.get("persona_instructions").is_none(),
+            "the global switch is off, so authored text must still be withheld"
+        );
+    }
+
+    #[tokio::test]
+    async fn client_supplied_persona_instructions_are_discarded_and_replaced() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let (state, _application) =
+            persona_instructions_test_state(json!({"instructions": null, "enabled": true})).await;
+        let mut body = json!({
+            "content": "hello",
+            "persona_instructions": "forged persona instructions",
+            "persona_enabled": true,
+        });
+        let result = inject_persona_instructions(&state, &authenticated_user(), &mut body).await;
+
+        assert!(result.is_ok());
+        assert!(
+            body.get("persona_instructions").is_none(),
+            "a forged value must not survive just because Convex had nothing authored"
+        );
+        assert!(body.get("persona_enabled").is_none());
     }
 
     async fn space_instructions_response(

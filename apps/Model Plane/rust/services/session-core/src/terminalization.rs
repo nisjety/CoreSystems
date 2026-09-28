@@ -105,6 +105,26 @@ pub(crate) fn authorize_terminalization_source(
     authorize_managed_source(caller, source, TERMINALIZE_SCOPE)
 }
 
+/// Credential authority for `CompleteDirectRunWithMessage`: the `GatewayDirect`
+/// terminalizer, exactly as for that source's `RecordTerminalOutcome`.
+///
+/// The credential's `zdr` claim is deliberately not consulted. Auth Core sets a
+/// service token's `zdr` from the principal registry's per-audience posture
+/// (`retentionByAudience`), never from a user or a turn. Model Gateway's
+/// `session-core` posture is `zdr`, so every terminalize token it can hold is
+/// `zdr: true`, minted once per org and cached across durable and
+/// zero-retention turns alike; refusing on it refused every save. The turn's
+/// retention is the run's own `zdr`, which `StartManagedRun` records from the
+/// user's verified credential (the claim `AppendMessage` reads off its caller),
+/// and `complete_direct_run_with_message_inner` refuses a zero-retention run
+/// inside the transaction, before anything is written.
+#[allow(clippy::result_large_err)]
+pub(crate) fn authorize_direct_completion(
+    caller: &crate::auth::VerifiedIdentity,
+) -> Result<(), Status> {
+    authorize_terminalization_source(caller, pb::ManagedRunSource::GatewayDirect)
+}
+
 /// Heartbeats are deliberately split from terminal receipts so a producer
 /// lease can be renewed without granting terminal-write authority. They retain
 /// the same source-to-principal binding as a terminal receipt.
@@ -1298,6 +1318,253 @@ pub(crate) async fn heartbeat_managed_run_inner(
     })
 }
 
+/// Same grammar as a start key and the `completion_key` CHECK (migration
+/// 0040): an opaque operation id, never content.
+#[allow(clippy::result_large_err)]
+fn validate_completion_key(value: &str) -> Result<(), Status> {
+    if value.is_empty()
+        || value.len() > MAX_START_KEY_BYTES
+        || !value.as_bytes()[0].is_ascii_alphanumeric()
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+    {
+        return Err(Status::invalid_argument("invalid idempotency_key"));
+    }
+    Ok(())
+}
+
+/// What `CompleteDirectRunWithMessage` did.
+#[derive(Debug, Clone)]
+pub(crate) enum DirectRunCompletion {
+    /// The run was no longer active. Nothing was written.
+    AlreadyTerminal,
+    /// The message (when there was content) and the Completed receipt are
+    /// durable: committed now, or by an earlier call with the same key, in
+    /// which case `receipt.already_applied` is set.
+    Completed {
+        receipt: ManagedTerminalReceipt,
+        message_sequence: u64,
+    },
+}
+
+impl DirectRunCompletion {
+    #[must_use]
+    pub(crate) fn into_proto(self) -> pb::CompleteDirectRunWithMessageResponse {
+        match self {
+            Self::AlreadyTerminal => pb::CompleteDirectRunWithMessageResponse {
+                already_terminal: true,
+                receipt: None,
+                message_sequence: 0,
+            },
+            Self::Completed {
+                receipt,
+                message_sequence,
+            } => pb::CompleteDirectRunWithMessageResponse {
+                already_terminal: false,
+                receipt: Some(receipt.into_proto()),
+                message_sequence,
+            },
+        }
+    }
+}
+
+/// A committed completion, plus the memory extraction the caller mirrors into
+/// Letta after commit (see `grpc::sync_appended_memory`).
+pub(crate) struct CommittedDirectCompletion {
+    pub completion: DirectRunCompletion,
+    pub memory: Option<crate::grpc::AppendedMemory>,
+}
+
+#[derive(FromRow)]
+struct DirectCompletionRow {
+    zdr: bool,
+    completion_key: Option<String>,
+    completion_message_sequence: Option<i64>,
+}
+
+/// Save a gateway-direct run's final assistant message and record its
+/// Completed terminal receipt in one transaction.
+///
+/// The two-call path (`AppendMessage`, then `RecordTerminalOutcome`) let a
+/// durable cancel commit between the calls and leave a saved answer on a
+/// cancelled run. Here the run row is locked before anything is written, so a
+/// cancel either commits first (this call then answers `AlreadyTerminal` and
+/// writes nothing) or waits and finds the run completed.
+///
+/// Lock order is thread, run, obligation: the thread first, as `AppendMessage`
+/// and `DeleteThread` take it, then run before obligation, as
+/// `RecordTerminalOutcome` does.
+// One transaction, read top to bottom: every early return below writes
+// nothing, which is easiest to check when the checks sit in one place.
+#[allow(clippy::result_large_err, clippy::too_many_lines)]
+pub(crate) async fn complete_direct_run_with_message_inner(
+    pool: &PgPool,
+    request: pb::CompleteDirectRunWithMessageRequest,
+) -> Result<CommittedDirectCompletion, Status> {
+    validate_token(&request.run_id, "run_id", MAX_RUN_ID_BYTES, false)?;
+    validate_token(&request.thread_id, "thread_id", MAX_RUN_ID_BYTES, false)?;
+    validate_completion_key(&request.idempotency_key)?;
+    let source = pb::ManagedRunSource::GatewayDirect;
+    let step_id = canonical_terminal_step(source)
+        .ok_or_else(|| Status::internal("gateway-direct terminal step is not configured"))?;
+    let source_name = source_storage_name(source)
+        .ok_or_else(|| Status::internal("gateway-direct terminal source is not configured"))?;
+
+    let mut transaction = pool.begin().await.map_err(database_error)?;
+    let thread: Option<String> =
+        sqlx::query_scalar("SELECT id FROM threads WHERE id = $1 FOR UPDATE")
+            .bind(&request.thread_id)
+            .fetch_optional(&mut *transaction)
+            .await
+            .map_err(database_error)?;
+    if thread.is_none() {
+        return Err(Status::not_found("thread not found"));
+    }
+    let run: Option<(String, String)> =
+        sqlx::query_as("SELECT status, thread_id FROM runs WHERE id = $1 FOR UPDATE")
+            .bind(&request.run_id)
+            .fetch_optional(&mut *transaction)
+            .await
+            .map_err(database_error)?;
+    let (run_status, run_thread_id) = run.ok_or_else(|| Status::not_found("run not found"))?;
+    if run_thread_id != request.thread_id {
+        return Err(Status::permission_denied(
+            "the assistant message must go to the run's own thread",
+        ));
+    }
+    let obligation = lock_managed_obligation(&mut transaction, &request.run_id).await?;
+    let completion: DirectCompletionRow = sqlx::query_as(
+        "SELECT zdr, completion_key, completion_message_sequence
+         FROM managed_run_terminalization_outbox
+         WHERE run_id = $1",
+    )
+    .bind(&request.run_id)
+    .fetch_one(&mut *transaction)
+    .await
+    .map_err(database_error)?;
+
+    if obligation.state == "applied" {
+        // Only the exact operation that completed the run gets its result
+        // back. Any other terminal state, and any other operation, finds a run
+        // that is no longer active.
+        let replay = obligation.applied_source.as_deref() == Some(source_name)
+            && obligation.outcome.as_deref() == Some("completed")
+            && completion.completion_key.as_deref() == Some(request.idempotency_key.as_str());
+        let result = if replay {
+            let message_sequence = completion
+                .completion_message_sequence
+                .and_then(|sequence| u64::try_from(sequence).ok())
+                .ok_or_else(|| Status::internal("direct completion receipt is incomplete"))?;
+            DirectRunCompletion::Completed {
+                receipt: receipt_from_applied_row(&obligation, true)?,
+                message_sequence,
+            }
+        } else {
+            DirectRunCompletion::AlreadyTerminal
+        };
+        transaction.commit().await.map_err(database_error)?;
+        return Ok(CommittedDirectCompletion {
+            completion: result,
+            memory: None,
+        });
+    }
+    if obligation.state == "reconciliation_required" || obligation.state == "superseded" {
+        transaction.commit().await.map_err(database_error)?;
+        return Ok(CommittedDirectCompletion {
+            completion: DirectRunCompletion::AlreadyTerminal,
+            memory: None,
+        });
+    }
+    if obligation.state == "processing" {
+        return Err(Status::unavailable(
+            "managed terminalization recovery is in progress; retry receipt request",
+        ));
+    }
+    if is_terminal_run_status(&run_status) {
+        // A cancel (or a legacy terminal step) ended the run without settling
+        // the obligation. Retire the obligation, exactly as a terminal receipt
+        // or heartbeat would, and save nothing.
+        supersede_obligation(&mut transaction, &request.run_id, Utc::now()).await?;
+        transaction.commit().await.map_err(database_error)?;
+        return Ok(CommittedDirectCompletion {
+            completion: DirectRunCompletion::AlreadyTerminal,
+            memory: None,
+        });
+    }
+    if source_from_storage(&obligation.configured_source)? != source {
+        return Err(Status::permission_denied(
+            "managed terminal source is not authorized for this run",
+        ));
+    }
+    // The retention gate of this call. The run's own posture, fixed at start
+    // from the user's verified credential, not the service credential's (see
+    // `authorize_direct_completion`).
+    if completion.zdr {
+        return Err(Status::failed_precondition(
+            "a zero-retention run has no durable assistant message",
+        ));
+    }
+
+    // An empty answer completes the run without a message, as the two-call
+    // path did (the Gateway skipped the append and still recorded Completed).
+    let (message_sequence, memory) = if request.content.trim().is_empty() {
+        (0, None)
+    } else {
+        let appended = crate::grpc::append_message_in_tx(
+            &mut transaction,
+            &pb::AppendMessageRequest {
+                thread_id: request.thread_id.clone(),
+                role: "assistant".to_owned(),
+                content: request.content,
+                metadata: request.metadata,
+                agent_name: request.agent_name,
+                ..Default::default()
+            },
+            "",
+        )
+        .await?;
+        (appended.sequence, appended.memory)
+    };
+    let receipt = apply_managed_terminal_outcome(
+        &mut transaction,
+        &obligation,
+        source,
+        step_id,
+        ManagedOutcome::Completed,
+        false,
+        Utc::now(),
+    )
+    .await?;
+    let recorded = sqlx::query(
+        "UPDATE managed_run_terminalization_outbox
+         SET completion_key = $2, completion_message_sequence = $3
+         WHERE run_id = $1",
+    )
+    .bind(&request.run_id)
+    .bind(&request.idempotency_key)
+    .bind(
+        i64::try_from(message_sequence)
+            .map_err(|_| Status::internal("message sequence out of range"))?,
+    )
+    .execute(&mut *transaction)
+    .await
+    .map_err(database_error)?;
+    if recorded.rows_affected() != 1 {
+        return Err(Status::internal(
+            "direct completion receipt was not persisted",
+        ));
+    }
+    transaction.commit().await.map_err(database_error)?;
+    Ok(CommittedDirectCompletion {
+        completion: DirectRunCompletion::Completed {
+            receipt,
+            message_sequence,
+        },
+        memory,
+    })
+}
+
 #[derive(FromRow)]
 struct ClaimedRecoveryRow {
     run_id: String,
@@ -1507,8 +1774,8 @@ pub(crate) async fn run_recovery_worker(pool: PgPool) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        authorize_terminalization_source, canonical_terminal_step, is_startable_source,
-        validate_terminal_outcome, ManagedOutcome,
+        authorize_direct_completion, authorize_terminalization_source, canonical_terminal_step,
+        is_startable_source, validate_terminal_outcome, ManagedOutcome,
     };
     use mp_contracts::model_plane::v1 as pb;
 
@@ -1722,5 +1989,71 @@ mod tests {
                 .code(),
             tonic::Code::PermissionDenied
         );
+    }
+
+    /// Regression, 2026-09-24: the atomic save refused the terminalize token
+    /// Auth Core really issues Model Gateway (FAILED_PRECONDITION, before any
+    /// SQL), because that token is `zdr: true` by registry policy for every
+    /// turn. Built through the production interceptor, not by hand, so the
+    /// identity carries the claims the issuer actually signs.
+    #[test]
+    fn the_atomic_save_accepts_the_gateway_credential_auth_core_really_issues() {
+        use crate::auth::test_support::{
+            authenticate, model_gateway_terminalize_claims, service_principal_claims, sign,
+            user_claims, verifier, KID,
+        };
+        let verifier = verifier("session-core");
+        let caller = |claims: &serde_json::Value| {
+            let request = authenticate(&verifier, &sign(claims, KID), ())
+                .expect("an Auth Core-shaped credential verifies");
+            crate::auth::identity(&request).expect("the interceptor installs an identity")
+        };
+
+        let gateway = caller(&model_gateway_terminalize_claims("org-1"));
+        assert!(
+            gateway.zdr(),
+            "Auth Core marks every Model Gateway token ZDR"
+        );
+        authorize_direct_completion(&gateway)
+            .expect("the gateway's real terminalize credential may complete its direct run");
+        authorize_terminalization_source(&gateway, pb::ManagedRunSource::GatewayDirect)
+            .expect("the same credential RecordTerminalOutcome accepts");
+
+        for (claims, why) in [
+            (
+                service_principal_claims(
+                    "session-core",
+                    "org-1",
+                    "model-gateway",
+                    &["session:heartbeat"],
+                    "model-gateway managed-run heartbeat",
+                    true,
+                ),
+                "a heartbeat token carries no terminal authority",
+            ),
+            (
+                service_principal_claims(
+                    "session-core",
+                    "org-1",
+                    "execution-core",
+                    &["session:terminalize"],
+                    "execution-core managed-run terminalization",
+                    false,
+                ),
+                "another workload's terminalizer, even a durable one",
+            ),
+            (
+                user_claims("session-core", "org-1", "user-1", false),
+                "a user, even the run's owner, is not the terminalizer",
+            ),
+        ] {
+            assert_eq!(
+                authorize_direct_completion(&caller(&claims))
+                    .expect_err(why)
+                    .code(),
+                tonic::Code::PermissionDenied,
+                "{why}"
+            );
+        }
     }
 }

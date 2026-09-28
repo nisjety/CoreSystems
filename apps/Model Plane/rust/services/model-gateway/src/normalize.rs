@@ -49,6 +49,38 @@ pub fn min_privacy_tier_wire(req: &NormalizedRequest) -> i32 {
     req.min_privacy_tier.map_or(0, |tier| tier as i32)
 }
 
+/// Per-turn retrieval-source filter (Perplexity-Focus style, chat-wave2
+/// scope spec). Orthogonal to `conversation_only`: that flag is a
+/// privacy/retention commitment that excludes both families outright, while
+/// this axis only narrows which family a turn that IS grounded may draw on.
+/// `Auto` reproduces today's behavior byte-identically.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RetrievalScope {
+    Auto,
+    KnowledgeOnly,
+    WebOnly,
+}
+
+impl RetrievalScope {
+    #[must_use]
+    pub fn is_auto(self) -> bool {
+        matches!(self, RetrievalScope::Auto)
+    }
+}
+
+/// Normalizes the wire `retrieval_scope` string
+/// (`InvokeRequest::retrieval_scope`). Unknown or absent values fail safe to
+/// `Auto` — an unrecognized value from a newer client must never silently
+/// narrow what an older gateway would have granted.
+#[must_use]
+pub fn retrieval_scope(raw: Option<&str>) -> RetrievalScope {
+    match raw {
+        Some("knowledge_only") => RetrievalScope::KnowledgeOnly,
+        Some("web_only") => RetrievalScope::WebOnly,
+        _ => RetrievalScope::Auto,
+    }
+}
+
 /// Load the model allowlist from `ALLOWED_MODELS` env var (comma-separated).
 /// Returns `None` if the env var is not set (all models allowed).
 fn load_allowed_models() -> Option<Vec<String>> {
@@ -269,6 +301,7 @@ mod tests {
             browse_web: false,
             skill_ids: Vec::new(),
             deep_research: false,
+            retrieval_scope: None,
             max_cost_usd: None,
             max_tokens: None,
             profile: None,
@@ -285,6 +318,7 @@ mod tests {
             agent_system_prompt: None,
             org_instructions: None,
             space_instructions: None,
+            persona_instructions: None,
         }
     }
 
@@ -412,5 +446,24 @@ mod tests {
             let message = error.1 .0.to_string();
             assert!(message.contains("unknown privacy tier"), "got: {message}");
         }
+    }
+
+    #[test]
+    fn retrieval_scope_normalizes_known_values() {
+        assert_eq!(retrieval_scope(Some("knowledge_only")), RetrievalScope::KnowledgeOnly);
+        assert_eq!(retrieval_scope(Some("web_only")), RetrievalScope::WebOnly);
+    }
+
+    #[test]
+    fn retrieval_scope_fails_safe_to_auto() {
+        // Absent, unknown, and empty values must all land on Auto — never a
+        // restrictive mode a newer client didn't actually ask for.
+        assert_eq!(retrieval_scope(None), RetrievalScope::Auto);
+        assert_eq!(retrieval_scope(Some("")), RetrievalScope::Auto);
+        assert_eq!(retrieval_scope(Some("knowledgeOnly")), RetrievalScope::Auto);
+        assert_eq!(retrieval_scope(Some("bogus")), RetrievalScope::Auto);
+        assert!(RetrievalScope::Auto.is_auto());
+        assert!(!RetrievalScope::KnowledgeOnly.is_auto());
+        assert!(!RetrievalScope::WebOnly.is_auto());
     }
 }

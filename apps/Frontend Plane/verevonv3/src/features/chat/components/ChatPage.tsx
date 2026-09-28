@@ -9,10 +9,12 @@ import {
   onCleanup,
   untrack,
 } from 'solid-js'
+import { Portal } from '@solidjs/web'
 import { createResource } from '@/shared/lib/create-resource-compat'
 import { createElementHeight } from '@/shared/ui/verevon/createElementHeight'
 import {
   ArrowDown,
+  CalendarClock,
   EyeOff,
   Square,
 } from '@/shared/icons'
@@ -46,6 +48,8 @@ import {
 } from './ChatLiveRunPanel'
 import { ChatWorkspaceCanvas } from './ChatWorkspaceCanvas'
 import { ChatAttachmentCanvas } from './ChatAttachmentCanvas'
+import { ScheduleDialog } from './ScheduleDialog'
+import { ScheduledRunsPanel } from './ScheduledRunsPanel'
 import {
   partitionEvidenceSources,
   spokenSourceTally,
@@ -58,6 +62,8 @@ import { chatSurfaceClaimsFocus, isChatSurfaceAvailable, type ChatSurfaceAvailab
 import { isWorkStep } from './chat-normalizers'
 import type { ChatTab } from './chat-types'
 import { useI18n } from '@/shared/i18n'
+import { speechPlayer } from '@/features/voice/speech-playback'
+import { latestVoiceReply } from '@/features/voice/voice-reply'
 import { pinnedMessagesFull } from '../lib/chat-pinned-messages'
 import { selectChatThread } from '../lib/chat-thread-history'
 
@@ -67,6 +73,7 @@ export default function ChatPage() {
   const {
     hasMessages,
     isStreaming,
+    followUpPending,
     evidenceSources,
     latestGrounding,
     artifactItems,
@@ -90,6 +97,7 @@ export default function ChatPage() {
     regenerateLatest,
     continueGeneration,
     rerunAsNewTurn,
+    resolveScheduleSeedForTurn,
     editAndResubmit,
     branchAt,
     finalExchangeVersion,
@@ -108,11 +116,14 @@ export default function ChatPage() {
     planMode,
     setPlanMode,
     approveTurnPlan,
+    rejectTurnPlan,
     planApprovalPending,
     planApprovalError,
     browseWeb,
     sourceScope,
     setSourceScope,
+    retrievalScope,
+    setRetrievalScope,
     setBrowseWeb,
     temporaryChat,
     setTemporaryChat,
@@ -128,6 +139,19 @@ export default function ChatPage() {
   // files share the same conversation. The canvas still lets the user switch
   // files locally after it opens.
   const [selectedAttachmentId, setSelectedAttachmentId] = createSignal<string | null>(null)
+
+  // "Planlegg dette" (chat-wave2 "schedule" spec §2.1) — the message-action
+  // entry point. `resolveScheduleSeedForTurn` reuses `rerunAsNewTurn`'s own
+  // turnId -> preceding-user-turn resolution rather than re-deriving it.
+  const [scheduleDialogOpen, setScheduleDialogOpen] = createSignal(false)
+  const [scheduleDialogSeed, setScheduleDialogSeed] = createSignal({ title: '', goal: '' })
+  const [scheduledRunsPanelOpen, setScheduledRunsPanelOpen] = createSignal(false)
+  const openScheduleDialogForTurn = (turnId: string): void => {
+    const goal = resolveScheduleSeedForTurn(turnId)
+    if (!goal) return
+    setScheduleDialogSeed({ title: goal.slice(0, 40).trim(), goal })
+    setScheduleDialogOpen(true)
+  }
 
   // Work surfaces belong to the durable run they describe. Looking at the
   // last transcript turn is subtly wrong when a user opens an older run after
@@ -172,6 +196,29 @@ export default function ChatPage() {
     await importUpload(orgId, files, { zdr: false })
   }
 
+  // Voice mode waits on the latest assistant turn after a spoken message and
+  // shows that reply. A spoken message the running turn has not taken (yet)
+  // keeps it waiting for the turn that answers it; see `latestVoiceReply`.
+  const voiceReply = createMemo(() => latestVoiceReply(state.turns, followUpPending()))
+
+  // Governed speech cannot yet attest zero data retention, so "Les høyt" is off
+  // in Temporary chat, whether it was switched on or the thread already is one.
+  const readAloudBlocked = () => temporaryChat() || isActiveThreadTemporary()
+
+  // Reading aloud belongs to the conversation on screen: stop it when the
+  // thread changes, when Temporary chat starts, and when the page goes away.
+  createEffect(
+    () => ({ threadId: state.threadId, blocked: readAloudBlocked() }),
+    (next, previous) => {
+      if (next.blocked || (previous && previous.threadId !== next.threadId)) speechPlayer().stop()
+    },
+  )
+  onCleanup(() => {
+    // Deferred: stopping notifies other components' signals, which must not
+    // be written while this page is being torn down.
+    queueMicrotask(() => speechPlayer().stop())
+  })
+
   const composer = () => (
     <DashboardComposer
       appearance="chat"
@@ -179,6 +226,8 @@ export default function ChatPage() {
       sourceScope={sourceScope()}
       onSourceScopeChange={setSourceScope}
       sourceScopeLocked={state.turns.length > 0}
+      retrievalScope={retrievalScope()}
+      onRetrievalScopeChange={setRetrievalScope}
       imageMode={imageMode()}
       message={input()}
       onBrowseWebChange={setBrowseWeb}
@@ -200,8 +249,17 @@ export default function ChatPage() {
       temporaryChatLocked={temporaryChatLocked()}
       disabled={isForeignOriginThread()}
       onKnowledgeImport={importAttachmentsToKnowledge}
+      voiceReply={voiceReply()}
     />
   )
+  // ONE composer for the page, created once and moved between the empty
+  // state and the thread dock below. With one per layout, the first message
+  // of a new chat unmounted the composer that sent it: an open Voice mode
+  // dialog closed mid-turn (no reply wait, no "Svar mottatt", no reading
+  // aloud, focus dropped to the page) and the composer's own state was lost.
+  // The two places are mutually exclusive (`hasMessages()`), and moving a DOM
+  // node keeps its owner, its effects and the dialog it opened.
+  const composerView = composer()
 
   // `<For>` mappers are untracked in Solid 2. Derive the neighboring turns and
   // all per-row reactive values up front so each mapper receives plain row data
@@ -584,6 +642,7 @@ export default function ChatPage() {
           context={threadContext()}
           loading={threadContext.loading}
           failed={threadContext.error != null}
+          scopeApplied={activeRunTurn()?.scopeApplied}
         />
       </Match>
       <Match when={activeTab() === 'trace'}>
@@ -713,7 +772,7 @@ export default function ChatPage() {
               orgName={session.activeOrg?.name}
               userName={session.user?.name}
             >
-              {composer()}
+              {composerView}
             </EmptyChatState>
           </Match>
           <Match when={hasMessages()}>
@@ -730,6 +789,21 @@ export default function ChatPage() {
                 temporary={isActiveThreadTemporary}
                 foreignOrigin={isForeignOriginThread}
               />
+              <div class="verevon-scheduled-runs-entry">
+                <button
+                  type="button"
+                  class="verevon-scheduled-runs-entry__trigger"
+                  aria-expanded={scheduledRunsPanelOpen() ? 'true' : 'false'}
+                  onClick={() => setScheduledRunsPanelOpen((open) => !open)}
+                >
+                  <CalendarClock size={14} aria-hidden="true" /> {i18n.tr('Planlagte kjøringer', 'Scheduled runs')}
+                </button>
+                <Show when={scheduledRunsPanelOpen()}>
+                  <div class="verevon-scheduled-runs-entry__panel" role="region" aria-label={i18n.tr('Planlagte kjøringer', 'Scheduled runs')}>
+                    <ScheduledRunsPanel />
+                  </div>
+                </Show>
+              </div>
               <div class="verevon-chat-thread">
                 <For each={messageRows()}>
                   {(row) => (
@@ -746,13 +820,15 @@ export default function ChatPage() {
                         onRegenerate={regenerateLatest}
                         onContinue={() => continueGeneration(row.turn.id)}
                         onRerunAsNewTurn={() => void rerunAsNewTurn(row.turn.id)}
+                        onScheduleThis={() => openScheduleDialogForTurn(row.turn.id)}
                         onFeedback={(rating, note) => submitTurnFeedback(row.turn.id, rating, note)}
                         onApprovalDecision={(approvalId, decision) =>
                           void handleApprovalDecision(row.turn.id, approvalId, decision)
                         }
-                        onApprovePlan={(rung, justification) =>
-                          void approveTurnPlan(row.turn.id, rung, justification)
+                        onApprovePlan={(rung, justification, steps) =>
+                          void approveTurnPlan(row.turn.id, rung, justification, steps)
                         }
+                        onRejectPlan={(_planId, reason) => void rejectTurnPlan(row.turn.id, reason)}
                         pinned={pinnedMessages().includes(row.turn.id)}
                         pinDisabled={pinnedMessagesFull(pinnedMessages())}
                         onTogglePin={() => togglePin(row.turn.id)}
@@ -770,6 +846,7 @@ export default function ChatPage() {
                         onSelectVersion={selectExchangeVersion}
                         editLocked={row.editLocked}
                         threadId={state.threadId}
+                        temporaryChat={readAloudBlocked()}
                       />
                     </>
                   )}
@@ -840,7 +917,7 @@ export default function ChatPage() {
                   </button>
                 </div>
               </Show>
-              {composer()}
+              {composerView}
             </div>
           </div>
         </Show>
@@ -874,6 +951,16 @@ export default function ChatPage() {
         onCloseWork={() => setActiveTab('chat')}
         workContent={liveRailWorkContent()}
       />
+      <Show when={scheduleDialogOpen()}>
+        <Portal>
+          <ScheduleDialog
+            onClose={() => setScheduleDialogOpen(false)}
+            seedTitle={scheduleDialogSeed().title}
+            seedGoal={scheduleDialogSeed().goal}
+            threadOriginHint="message-action"
+          />
+        </Portal>
+      </Show>
     </div>
   )
 }

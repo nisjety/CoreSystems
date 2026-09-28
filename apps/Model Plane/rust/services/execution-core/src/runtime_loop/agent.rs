@@ -1041,6 +1041,10 @@ async fn run_rounds(
             // Governed agent loops cannot select a user-owned ChatGPT
             // subscription; only an explicit user chat request may do so.
             subscription_connection_id: String::new(),
+            // The priority tier is a subscription speed control, so it has no
+            // meaning without a subscription connection. `false` is also what
+            // this loop sent before the field existed.
+            prefer_priority_service_tier: false,
         });
         infer_request.metadata_mut().insert(
             "authorization",
@@ -3223,6 +3227,20 @@ fn offered_tool_defs() -> Vec<pb::ToolDefinition> {
             description: "Delegate a self-contained sub-task to a subagent that runs its own tool loop with the SAME tools you have, then returns only its final answer. Its work happens in an isolated context, so use it when a sub-task needs many tool calls whose intermediate output you do not need (e.g. 'find every carrier that ships dangerous goods to Svalbard and summarise the cheapest'). Give it one clear, self-contained goal — it cannot see this conversation, cannot ask you questions, and cannot delegate further (nesting is capped at one level). It may ONLY use read/analysis tools: any side-effecting or destructive action (delete, write, send, deploy, book, publish, execute a provider action, drive a browser, run a shell command, ...) is refused outright, even if this run's own permission mode is 'auto' — delegating that kind of step does not skip its gate, it just fails, so do it yourself instead. Its rounds come out of THIS run's budget, so do not delegate work you can do in a call or two yourself.".to_owned(),
             parameters_json: r#"{"type":"object","properties":{"goal":{"type":"string","description":"The complete, self-contained task for the subagent, including any context it needs"},"max_rounds":{"type":"integer","minimum":1,"description":"Optional cap on the subagent's tool rounds; capped by this run's remaining budget"}},"required":["goal"]}"#.to_owned(),
         },
+        // Plan-mode's control tool (chat-wave2-specs plan-gate §2.1). Offered
+        // UNCONDITIONALLY, the same way plan mode itself gates risky tools by
+        // classification rather than by hiding their definitions
+        // (`is_risky_call`/`is_restricted_context_write` at :1332-1354) — the
+        // description alone signals when it matters, so a non-plan-mode run
+        // that calls it anyway still gets a real, structured plan out of it.
+        // It is never in the risky/restricted-write classifiers (matching
+        // `list_subagent_results`'s treatment), so it is dispatched under
+        // `ask` posture with no approval gate.
+        pb::ToolDefinition {
+            name: crate::plan::PROPOSE_TOOL.to_owned(),
+            description: "Propose your plan as STRUCTURED DATA instead of prose, for the user to review, edit (reorder, rewrite, add or remove steps), and approve before you may act. Use this ONCE you know what you intend to do in a plan-mode run — do not describe the plan in your text answer AND call this; this call is the plan. If you change your mind about the plan later in the same turn, call it again: the new call supersedes the earlier one (last-proposed-wins).".to_owned(),
+            parameters_json: r#"{"type":"object","properties":{"summary":{"type":"string","description":"One or two sentences: what this plan accomplishes"},"steps":{"type":"array","minItems":1,"items":{"type":"object","properties":{"title":{"type":"string","description":"One concrete, human-readable step"},"operation":{"type":"string","description":"Optional operation slug tying this step to a concrete tool/action"}},"required":["title"]}},"supersedes":{"type":"string","description":"Optional plan_id of an earlier proposal in this same turn that this one replaces"}},"required":["summary","steps"]}"#.to_owned(),
+        },
     ];
     // `tickets.create` deliberately stays absent here. A compiled adapter or
     // environment configuration is not an actor grant, and the owner catalog
@@ -4226,6 +4244,9 @@ mod tests {
         replayed_run_status: Option<String>,
         plan_transitions: Vec<(i32, i32)>, // (from, to)
         approvals: Vec<(String, String)>,  // (step_id, reason)
+        /// `(thread_id, summary, step_count)` — every `ProposePlan` call
+        /// `MockOrchestration` observed, for `plan.propose` dispatch tests.
+        propose_plan_calls: Vec<(String, String, usize)>,
         decisions: Vec<(String, i32)>,     // (approval_id, decision) — DecideApproval
         /// Fixture for `MockSession::list_agent_skills`; empty unless a
         /// `fetch_skill_context` test populates it.
@@ -4626,6 +4647,17 @@ mod tests {
             _: Request<pb::DeleteSpaceThreadsRequest>,
         ) -> Result<Response<pb::DeleteSpaceThreadsResponse>, Status> {
             Err(Status::unimplemented("delete_space_threads not used"))
+        }
+
+        // Stub added only to satisfy the `SessionCore` trait after an
+        // in-flight, unrelated change to `sessions.proto` (not part of
+        // plan-gate) added this RPC — same placeholder convention as every
+        // other never-exercised-here method in this mock.
+        async fn prepare_user_owned_thread(
+            &self,
+            _: Request<pb::PrepareUserOwnedThreadRequest>,
+        ) -> Result<Response<pb::PrepareUserOwnedThreadResponse>, Status> {
+            Err(Status::unimplemented("prepare_user_owned_thread not used"))
         }
 
         async fn prepare_scheduled_run_thread(
@@ -5062,6 +5094,18 @@ mod tests {
                 already_terminal: false,
             }))
         }
+
+        // Only the Gateway completes a direct run with its message; an agent
+        // run records a metadata-only receipt. Unimplemented, so a caller that
+        // starts using it here fails loudly.
+        async fn complete_direct_run_with_message(
+            &self,
+            _: Request<pb::CompleteDirectRunWithMessageRequest>,
+        ) -> Result<Response<pb::CompleteDirectRunWithMessageResponse>, Status> {
+            Err(Status::unimplemented(
+                "execution-core does not complete gateway-direct runs",
+            ))
+        }
     }
 
     // --- Orchestration mock: records PlanTransitioned events. ---
@@ -5128,6 +5172,42 @@ mod tests {
             _: Request<pb::TransitionPlanRequest>,
         ) -> Result<Response<pb::TransitionPlanResponse>, Status> {
             Err(Status::unimplemented("transition_plan not used"))
+        }
+
+        async fn propose_plan(
+            &self,
+            request: Request<pb::ProposePlanRequest>,
+        ) -> Result<Response<pb::ProposePlanResponse>, Status> {
+            let req = request.into_inner();
+            let steps: Vec<pb::PlanStep> = req
+                .steps
+                .iter()
+                .enumerate()
+                .map(|(i, s)| pb::PlanStep {
+                    id: format!("step_{i}"),
+                    title: s.title.clone(),
+                    operation: s.operation.clone(),
+                    state: pb::PlanStepState::Pending as i32,
+                    ..Default::default()
+                })
+                .collect();
+            self.rec.lock().unwrap().propose_plan_calls.push((
+                req.thread_id.clone(),
+                req.summary.clone(),
+                steps.len(),
+            ));
+            Ok(Response::new(pb::ProposePlanResponse {
+                plan: Some(pb::Plan {
+                    id: "plan_test123".to_owned(),
+                    run_id: req.run_id,
+                    thread_id: req.thread_id,
+                    author: req.user_id,
+                    state: pb::PlanState::Proposed as i32,
+                    summary: req.summary,
+                    steps,
+                    ..Default::default()
+                }),
+            }))
         }
 
         async fn list_todos(
@@ -7380,6 +7460,91 @@ mod tests {
             r.completed.is_empty(),
             "plan mode must refuse before any step is dispatched/recorded: {:?}",
             r.completed
+        );
+    }
+
+    #[tokio::test]
+    async fn plan_propose_dispatches_even_while_plan_mode_blocks_risky_tools() {
+        // plan-gate §2.1: `plan.propose` is the plan-mode run's own way of
+        // acting -- it must dispatch normally even though plan mode refuses
+        // every risky/destructive tool at this same call site (the test right
+        // above this one), because `plan.propose` is read-only from the
+        // run's own permission-ladder point of view: it is never matched by
+        // `permission::is_risky_call`/`is_restricted_context_write`, so the
+        // plan-mode refusal at :1332-1354 never fires for it.
+        let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
+        let session_channel = spawn_session_channel(rec.clone()).await;
+        let inference_channel = spawn_inference_channel(vec![
+            Scripted::ToolCalls {
+                content: String::new(),
+                calls: vec![pb::ToolCall {
+                    id: "propose-1".to_owned(),
+                    name: "plan.propose".to_owned(),
+                    arguments_json: serde_json::json!({
+                        "summary": "Send the overdue invoice",
+                        "steps": [
+                            {"title": "Draft the email"},
+                            {"title": "Send it", "operation": "email_send"},
+                        ],
+                    })
+                    .to_string(),
+                }],
+            },
+            Scripted::Answer("I've proposed a plan for your review.".to_owned()),
+        ])
+        .await;
+        let state = crate::state::StateStore::new();
+
+        let mut req = sample_request();
+        req.mode = "auto".to_owned();
+        req.plan_mode = true;
+        // `run_agent_with_tools` (unlike the public `run_agent`) takes an
+        // EXPLICIT injected tool set as the purpose-lock allowlist — it does
+        // not call `offered_tool_defs()` itself (see its own doc comment) —
+        // so the tool under test must be listed here, the same way the
+        // sibling risky-tool test above lists `delete_records`.
+        let plan_tools = vec![pb::ToolDefinition {
+            name: crate::plan::PROPOSE_TOOL.to_owned(),
+            description: String::new(),
+            parameters_json: "{}".to_owned(),
+        }];
+        let resp = run_agent_with_tools(
+            &state,
+            session_channel,
+            inference_channel,
+            req,
+            plan_tools,
+            None,
+            Some("session-token".to_owned()),
+            "inference-token".to_owned(),
+            &ALLOW_CAPABILITY_POLICY,
+            &STATIC_TERMINAL_TOKENS,
+            None,
+            None,
+            &test_sandbox_manager_client(),
+            "test-backend",
+            None,
+            &test_sandbox_tokens(),
+            None,
+        )
+        .await
+        .expect("plan.propose must dispatch and the run must complete");
+
+        assert_eq!(resp.status, "completed");
+        assert_eq!(
+            resp.final_output,
+            "I've proposed a plan for your review."
+        );
+
+        let r = rec.lock().unwrap();
+        assert_eq!(
+            r.propose_plan_calls,
+            vec![(
+                "thread_test".to_owned(),
+                "Send the overdue invoice".to_owned(),
+                2
+            )],
+            "plan.propose must reach session-core's ProposePlan with the model's summary and step count"
         );
     }
 

@@ -264,12 +264,18 @@ func TestUnknownOperationFailsClosedBeforeOAuthOrProvider(t *testing.T) {
 	cfg, repo, oauthService := testOAuthStack(t)
 	cfg.MicrosoftGraphBaseURL = providerServer.URL
 	_, _ = repo.UpsertConnection(t.Context(), store.Connection{
-		ID: "conn-unknown-action", ProviderKey: "microsoft", ConnectorType: "microsoft-graph", OrganizationID: "org-1", Status: "active",
+		ID: "conn-unknown-action", ProviderKey: "microsoft", ConnectorType: "microsoft-graph", OrganizationID: "org-1", UserID: "user-1", Status: "active",
 	})
 	app := NewServer(ServerConfig{Config: cfg, Repo: repo, OAuth: oauthService, Actions: actions.NewService(cfg, providerServer.Client())})
 	req := httptest.NewRequest("POST", "/api/v1/connections/conn-unknown-action/actions", strings.NewReader(`{"operation":"mail.delete-all"}`))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Internal-API-Key", "dev-key")
+	// Owner ruling (5): this is a personal Microsoft connection, so the
+	// internal caller must name its owner before the unknown-operation
+	// check below is even reached — this test is about that later check,
+	// not about ownership, so it supplies a real owner like every other
+	// fixture here.
+	req.Header.Set("X-User-ID", "user-1")
 	response, err := app.Test(req)
 	if err != nil {
 		t.Fatalf("app.Test error: %v", err)

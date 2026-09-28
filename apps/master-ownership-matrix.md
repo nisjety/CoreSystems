@@ -22,6 +22,18 @@
 
 ## 0. Decision Rules
 
+> **Learning extension (2026-09-24):** `apps/learning-plane` owns human-learning
+> course definitions/revisions, assignments, attempts, formative progress,
+> compatibility validation and teaching-assistance intent/receipts. Data still
+> owns source materials/assets/retrieval; Model owns reasoning, speech execution and agent
+> runs; Control owns identity, authorization, canonical audit and the planned shared
+> WhisperFlow service API/job metadata/processing policy; Application
+> owns realtime projections/notifications; Support remains transport-only.
+> `apps/Frontend Plane/learn-core` owns Teachme's Next.js marketing, Vite/Solid 2
+> dashboard and native C#/.NET Windows companion. These are foundation sources,
+> not runtime acceptance. See [ADR-001](learning-plane/docs/ADR-001-learning-plane.md).
+
+
 | Question | Owner |
 |---|---|
 | Does it fetch, browse, screenshot, render, crawl, replay, or produce deterministic source evidence? | **Quarry v2** |

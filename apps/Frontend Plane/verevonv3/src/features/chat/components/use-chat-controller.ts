@@ -59,8 +59,9 @@ import {
   listApprovals,
   resumeRun,
   type ApprovalDecision,
+  type PlanStepEdit,
 } from '@/shared/api/orchestration-client'
-import { listRuns } from '@/shared/api/runs-client'
+import { getRun, listRuns } from '@/shared/api/runs-client'
 import { getRunProofBundle } from '@/shared/api/run-console-client'
 import {
   cancelInvocation,
@@ -71,6 +72,7 @@ import {
   getThreadMessages,
   listChatThreads,
   approvePlan,
+  rejectPlan,
   listModels,
   queueInvocationInput,
   resumeStream,
@@ -79,11 +81,17 @@ import {
   submitFeedback,
   VEREVON_BALANCE_MODE_ID,
   type AutonomyRung,
+  type ChatConnectedEvent,
+  type ChatErrorEvent,
   type ChatFeedbackRating,
   type ChatStreamHandlers,
   type ChatThreadEvent,
 } from '@/shared/api/chat-client'
+import { OPENAI_CODEX_SUBSCRIPTION_PROVIDER } from '@/shared/api/chatgpt-subscription-client'
+import { resolveReplaySubscriptionConnectionId } from '@/shared/ai/model-selection'
+import { getSession } from '@/shared/session/session-store'
 import { blobToDataUrl } from '@/shared/lib/blob-data'
+import { useI18n } from '@/shared/i18n'
 import type { VerevonUiEvent } from '@/shared/chat/verevon-ui-events'
 import {
   ApiError,
@@ -116,7 +124,10 @@ import {
   humanizeToolName,
   mergeServerTurnsWithCachedMetadata,
   messageToTurn,
-  cancelledRunTurn,
+  ACTIVE_RUN_STATUSES,
+  failedRunMessage,
+  savedAnswerForTrailingTurn,
+  unsettledRunTurn,
   missingSearchResultStep,
   normalizeArtifact,
   normalizeCitation,
@@ -126,6 +137,7 @@ import {
   readBrowseWebPreference,
   searchCompletionDetail,
   searchQueryFromArgs,
+  streamFailurePresentation,
   summarizeGrounding,
   summarizeToolResult,
   taskStepsToTranscript,
@@ -146,6 +158,7 @@ import {
 } from './chat-normalizers'
 import type {
   AgentTaskStep,
+  ChatCancelFailure,
   ChatState,
   ChatTab,
   ChatTurn,
@@ -159,6 +172,18 @@ import type { ChatEffectClass } from '@/shared/chat/effect-class'
 import { isEffectfulChatTurn } from '@/shared/chat/effect-class'
 import { readPinnedMessages, togglePinnedMessage } from '../lib/chat-pinned-messages'
 import { CHAT_SURFACE_IDS, chatSurfaceSpec, isChatTab } from '../lib/chat-surfaces'
+
+/**
+ * Stream error codes that describe the CONNECTION, not the run. The browser's
+ * own fetch failing (`connection_error`) and the BFF losing its upstream byte
+ * stream mid-answer (`upstream_unavailable`) both leave Model Gateway's
+ * producer running — a disconnect is not a cancel — so the turn must be
+ * reattached to its original invocation, never settled as a server failure
+ * and never re-sent.
+ */
+export function isTransportLossCode(code: string | undefined): boolean {
+  return code === 'connection_error' || code === 'upstream_unavailable'
+}
 
 function safeBranchBoundary(turns: readonly ChatTurn[], requestedIndex: number): number {
   const requestedTurn = turns[requestedIndex]
@@ -185,7 +210,19 @@ export function buildContinuationModelContent(userContent: string, partialAnswer
   return `${userContent}\n\n[System: Svaret ditt ble avbrutt før det var ferdig. Du hadde allerede skrevet nøyaktig følgende, og det er allerede vist til brukeren — ikke gjenta noe av det:\n"""\n${partialAnswer}\n"""\nFortsett svaret nøyaktig der det slapp. Ikke skriv en innledning, ikke oppsummer det som står over, og ikke start på nytt — skriv bare den direkte fortsettelsen, som om teksten aldri stoppet.]`
 }
 
+/**
+ * The numeric sequence behind an SSE `id:`. Model Gateway numbers every
+ * buffered frame from one per-stream counter, so ids compare as numbers; an id
+ * of any other shape is not comparable and is never used to drop a frame.
+ */
+export function frameSequence(id: string | undefined): number | undefined {
+  return id && /^\d+$/.test(id) ? Number(id) : undefined
+}
+
 export function useChatController() {
+  // Resolved once, like any hook: the controller runs inside the chat page,
+  // which is inside the app's locale provider.
+  const i18n = useI18n()
   /**
    * Monotonic stream generation. Bumped by every send, so a stream can tell
    * whether it has been superseded on its OWN thread — which a thread-id check
@@ -239,6 +276,13 @@ export function useChatController() {
   const [browseWeb, setBrowseWeb] = createSignal(readBrowseWebPreference())
   const [selectedSourceScope, setSourceScope] = createSignal<import('@/shared/actions/chat-source-scope').ChatSourceScope>('workspace')
   const sourceScope = () => state.turns.find(turn => turn.role === 'user')?.sourceScope ?? (state.turns.length ? 'workspace' : selectedSourceScope())
+  // Per-turn retrieval-source filter (chat-wave2 scope spec), orthogonal to
+  // `sourceScope` above. Deliberately NOT read off the first user turn — this
+  // axis is "for a chat turn" (Perplexity-Focus style) and must be freely
+  // changeable every send, unlike `sourceScope`'s thread-locked privacy
+  // commitment.
+  const [selectedRetrievalScope, setRetrievalScope] = createSignal<import('@/shared/actions/chat-source-scope').RetrievalScope>('auto')
+  const retrievalScope = () => selectedRetrievalScope()
   // Temporary chat (ChatGPT's "Temporary Chat" = Verevon's already-enforced
   // Zero Data Retention mode): `temporaryChat` is the composer TOGGLE state
   // for the NEXT send. `temporaryThreadIds` is the set of thread ids THIS
@@ -302,6 +346,25 @@ export function useChatController() {
   }
   let feedbackNoticeTimer: number | undefined
   let abortController: AbortController | undefined
+  /**
+   * Set when the chat unmounts. A stream, resume or wait still unwinding then
+   * belongs to a controller nobody sees: it must not start a new wait, and
+   * must not write a snapshot from its stale state over the one the remounted
+   * controller keeps for the same thread.
+   */
+  let disposed = false
+  /**
+   * Set by a send that has not received `connected` yet: calling it defers
+   * that send's Stop until the frame carrying its request id arrives (see
+   * `sendContent`). Cleared once the send connects or ends.
+   */
+  let deferStopUntilConnected: (() => boolean) | undefined
+  /**
+   * How long a deferred Stop keeps the stream open waiting for `connected`.
+   * On the recorded route that frame arrives within about a second; past this
+   * bound the stream is let go and the run detaches, as it did before.
+   */
+  const STOP_BEFORE_CONNECT_WAIT_MS = 20_000
   let messageListRef: HTMLDivElement | undefined
   const setMessageListRef = (el: HTMLDivElement) => {
     messageListRef = el
@@ -499,6 +562,9 @@ export function useChatController() {
     // Stream callbacks and the resource persistence effect run in Solid 2's
     // untracked phase. Materialize store-backed inputs once at this boundary so
     // the normalizers and JSON storage never read a live proxy from that phase.
+    // After unmount, this is a late write from a stream or wait that was
+    // still unwinding; see `disposed`.
+    if (disposed) return
     const stableTurns = untrack(() => snapshot(turns))
     const stableTaskSteps = untrack(() => snapshot(taskSteps ?? state.taskSteps))
     // Temporary (ZDR) chat: never persisted, full stop. This is the single
@@ -977,19 +1043,27 @@ export function useChatController() {
         cachedTurns,
       )
       let turns = fillMissingTurnTimestamps(mergedTurns, threadId, cachedUpdatedAt)
-      // Cancelling private validation may leave no canonical assistant text.
-      // Recover its status from the server-owned run, never from browser draft
-      // content (the BFF intentionally does not persist presentation snapshots).
+      // Cancelling private validation may leave no canonical assistant text,
+      // and so may a run that failed, or one still working when this device
+      // lost its local tail. Recover the status from the server-owned run,
+      // never from browser draft content (the BFF intentionally does not
+      // persist presentation snapshots). A still-active run is followed below
+      // until its saved answer lands.
       const latest = listed.find((thread) => thread.threadId === threadId)
       const lastMessage = history.at(-1)
+      let activeRunTail: ChatTurn | null = null
       if (turns.at(-1)?.role === 'user' && lastMessage?.role === 'user'
-        && latest?.latestRunStatus === 'cancelled' && latest.latestRunId
+        && latest?.latestRunId && latest.latestRunStatus
+        && (latest.latestRunStatus === 'cancelled' || latest.latestRunStatus === 'failed' || ACTIVE_RUN_STATUSES.has(latest.latestRunStatus))
         && !isTemporaryThread(threadId) && !isForeignOriginThread(threadId)) {
         const runs = await listRuns({ threadId, limit: 1 }).catch(() => null)
         if (seq !== threadLoadSequence || state.threadId !== threadId) return
         const run = runs?.runs[0]
-        const stopped = run && cancelledRunTurn(threadId, latest.latestRunId, lastMessage, run)
-        if (stopped) turns = [...turns, stopped]
+        const tail = run && unsettledRunTurn(threadId, latest.latestRunId, lastMessage, run)
+        if (tail) {
+          turns = [...turns, tail]
+          if (tail.status === 'waiting') activeRunTail = tail
+        }
       }
       // Clear the guard BEFORE the turns land: setState runs the snapshot
       // effect synchronously, and that very run is the one that must persist
@@ -1014,6 +1088,7 @@ export function useChatController() {
       restoreSurfaceTab(threadId)
       hydrateRunApprovals(threadId, turns, seq)
       maybeResumeStream(threadId, turns)
+      if (activeRunTail) void followUnresumableRun(threadId, activeRunTail.id, activeRunTail.runId)
     } catch (error) {
       if (seq !== threadLoadSequence) return
       // A 404 (thread_not_found) means session-core no longer has this thread
@@ -1082,6 +1157,305 @@ export function useChatController() {
   }
 
   /**
+   * Session Core terminalises a managed run whose producer stops renewing it
+   * within this window (`MANAGED_DEADLINE_SECS`, session-core
+   * `terminalization.rs`). A run still active after that long has no producer
+   * left to finish it, so waiting longer could not change what the turn became.
+   */
+  const DURABLE_OUTCOME_DEADLINE_MS = 15 * 60_000
+  /** Poll spacing while a run is still active: prompt at first, then calm. */
+  const durableOutcomeDelayMs = (attempt: number) => Math.min(15_000, 1_000 * 2 ** attempt)
+  /** Every open wait, so unmounting the chat stops polling for it. */
+  const durableWatches = new Set<AbortController>()
+  onCleanup(() => {
+    disposed = true
+    // The live stream or resume too: left open, it would end later and start
+    // a wait of its own, which nothing would abort.
+    abortController?.abort()
+    abortController = undefined
+    for (const watch of durableWatches) watch.abort()
+    durableWatches.clear()
+  })
+
+  const sleepUnlessAborted = (ms: number, signal: AbortSignal) => new Promise<void>((resolve) => {
+    if (signal.aborted) {
+      resolve()
+      return
+    }
+    const finish = () => {
+      clearTimeout(timer)
+      signal.removeEventListener('abort', finish)
+      resolve()
+    }
+    const timer = setTimeout(finish, ms)
+    signal.addEventListener('abort', finish, { once: true })
+  })
+
+  /**
+   * Read the answer the server saved for a turn, if any.
+   *
+   * `unreadable` (the transcript read failed) is distinct from `none` (read,
+   * nothing saved for this turn): only the second is evidence about the run.
+   */
+  const readSavedAnswer = async (
+    threadId: string,
+    assistantId: string,
+  ): Promise<{ kind: 'found'; answer: ChatTurn } | { kind: 'none' } | { kind: 'unreadable' }> => {
+    const transcript = await getChatThreadTranscript(threadId).catch(() => undefined)
+    if (transcript === undefined) return { kind: 'unreadable' }
+    const serverTurns = dedupeChatTurns((transcript?.turns ?? []).map((turn) =>
+      transcriptTurnToChatTurn(turn as ChatThreadTranscriptTurn),
+    ))
+    const answer = savedAnswerForTrailingTurn(state.turns, assistantId, serverTurns)
+    return answer ? { kind: 'found', answer } : { kind: 'none' }
+  }
+
+  /**
+   * Replace a turn's browser-side ending with the answer the server saved.
+   * The saved text, artifacts and sources are durable, so they win over any
+   * partial the stream delivered; the turn's own metadata is kept. Ownership
+   * is checked here, with no await between the check and the write.
+   */
+  const adoptSavedAnswer = async (
+    threadId: string,
+    assistantId: string,
+    owned: () => boolean,
+  ): Promise<'adopted' | 'none' | 'unreadable'> => {
+    const saved = await readSavedAnswer(threadId, assistantId)
+    if (saved.kind !== 'found') return saved.kind
+    if (!owned()) return 'none'
+    const { answer } = saved
+    setState((s) => {
+      const turn = s.turns.find((candidate) => candidate.id === assistantId)
+      if (!turn) return
+      turn.content = answer.content
+      turn.streaming = false
+      turn.status = undefined
+      turn.stopReason = undefined
+      if ((answer.artifacts?.length ?? 0) > 0) turn.artifacts = answer.artifacts
+      if ((answer.citations?.length ?? 0) > 0) turn.citations = answer.citations
+      if (answer.grounding) turn.grounding = answer.grounding
+      if (answer.confidence != null) turn.confidence = answer.confidence
+    })
+    return 'adopted'
+  }
+
+  type DurableOutcome =
+    | { kind: 'adopted' }
+    | { kind: 'failed'; message: string }
+    | { kind: 'cancelled' }
+    /** The run could not be read, finished without a matching saved answer, or outlived the deadline. */
+    | { kind: 'unknown' }
+    /** Superseded here: a thread switch, a newer turn, a Stop, or unmount. */
+    | { kind: 'aborted' }
+
+  /**
+   * Ask the server what became of a turn the browser could not settle itself.
+   *
+   * The run's status is the authority. While it is active, the thread is
+   * re-read too, because the gateway saves the answer BEFORE it acknowledges
+   * the run as complete — an active run can already have one. Bounded by
+   * Session Core's terminalisation deadline; `owned` is re-checked after every
+   * await so a turn the user has moved past is never rewritten.
+   */
+  const awaitDurableOutcome = async (
+    threadId: string,
+    assistantId: string,
+    runId: string,
+    signal: AbortSignal,
+    owned: () => boolean,
+  ): Promise<DurableOutcome> => {
+    const stillOwned = () => !signal.aborted && owned()
+    const deadline = Date.now() + DURABLE_OUTCOME_DEADLINE_MS
+    for (let attempt = 0; ; attempt += 1) {
+      if (!stillOwned()) return { kind: 'aborted' }
+      let run: Awaited<ReturnType<typeof getRun>> | undefined
+      try {
+        run = await getRun(runId, signal)
+      } catch (error) {
+        if (!stillOwned()) return { kind: 'aborted' }
+        // A missing or refused run cannot be settled from here; any other
+        // read failure is transient and the next poll may succeed.
+        if (error instanceof ApiError && [401, 403, 404].includes(error.status)) return { kind: 'unknown' }
+      }
+      if (!stillOwned()) return { kind: 'aborted' }
+      const status = run?.status
+      if (status === 'cancelled') return { kind: 'cancelled' }
+      if (status === 'failed') {
+        // A failed check writes its fixed explanation to the thread; report
+        // that when it is there, the translated run code when it is not. It is
+        // read, not adopted: how a failure is shown is the caller's to decide
+        // (a Stop, for one, stays a stop).
+        const saved = await readSavedAnswer(threadId, assistantId)
+        if (!stillOwned()) return { kind: 'aborted' }
+        const explanation = saved.kind === 'found' ? saved.answer.content.trim() : ''
+        return { kind: 'failed', message: explanation || failedRunMessage(run?.error) }
+      }
+      if (status === 'completed' || (status && ACTIVE_RUN_STATUSES.has(status))) {
+        const saved = await adoptSavedAnswer(threadId, assistantId, stillOwned)
+        if (saved === 'adopted') return { kind: 'adopted' }
+        if (!stillOwned()) return { kind: 'aborted' }
+        if (status === 'completed' && saved === 'none') return { kind: 'unknown' }
+      }
+      if (Date.now() >= deadline) return { kind: 'unknown' }
+      await sleepUnlessAborted(durableOutcomeDelayMs(attempt), signal)
+    }
+  }
+
+  /**
+   * Settle a turn that was held pending while its run was asked for its
+   * outcome. `unresolved` is how the turn settled before this reconciliation
+   * existed, and still is whenever the server cannot say more.
+   */
+  const settleAwaitedTurn = (
+    threadId: string,
+    assistantId: string,
+    runId: string | undefined,
+    outcome: DurableOutcome,
+    unresolved: { detail: string; markFailed: boolean },
+  ) => {
+    if (outcome.kind === 'aborted' || state.threadId !== threadId) return
+    const updateTurn = (update: (turn: ChatTurn) => void) => setState((s) => {
+      const turn = s.turns.find((candidate) => candidate.id === assistantId)
+      if (turn) update(turn)
+    })
+    if (outcome.kind === 'failed') {
+      setState((s) => { s.error = outcome.message })
+      updateTurn((turn) => {
+        turn.streaming = false
+        turn.status = 'error'
+        turn.content = turn.content || outcome.message
+      })
+      markOpenSteps('error', outcome.message, assistantId)
+      updateLocalRunHint(threadId, 'failed', runId)
+      setState((s) => { s.status = 'error' })
+      writeThreadSnapshot(threadId, state.turns)
+      return
+    }
+    if (outcome.kind === 'adopted') {
+      markOpenSteps('done', 'Completed.', assistantId)
+      updateLocalRunHint(threadId, 'completed', runId)
+    } else if (outcome.kind === 'cancelled') {
+      updateTurn((turn) => {
+        turn.streaming = false
+        turn.status = 'stopped'
+      })
+      markOpenSteps('stopped', 'The run stopped before completion.', assistantId)
+      updateLocalRunHint(threadId, 'cancelled', runId)
+    } else {
+      updateTurn((turn) => {
+        turn.streaming = false
+        turn.status = 'stopped'
+      })
+      markOpenSteps('stopped', unresolved.detail, assistantId)
+      if (unresolved.markFailed) updateLocalRunHint(threadId, 'failed', runId)
+    }
+    setState((s) => { s.status = 'idle' })
+    writeThreadSnapshot(threadId, state.turns)
+  }
+
+  /**
+   * Keep a turn pending while its durable run is still working, when no
+   * stream can be reattached to it: the resume buffer expired or lives on
+   * another replica, or a reload found an active run with no local tail.
+   *
+   * The composer stays in its streaming state, exactly as for a live stream,
+   * so Stop works and a message typed meanwhile is held rather than racing the
+   * run. `abortController` is the wait's own, so Stop and a thread switch end
+   * it the same way they end a stream.
+   */
+  const followUnresumableRun = async (
+    threadId: string,
+    assistantId: string,
+    runId: string | undefined,
+    unresolved = { detail: 'The connection was lost before this answer finished.', markFailed: true },
+    /** The caller's own "still mine" test; the thread match when omitted. */
+    isCurrent?: () => boolean,
+  ) => {
+    if (disposed) return
+    const owned = () => (isCurrent ? isCurrent() : state.threadId === threadId)
+      && state.turns.at(-1)?.id === assistantId
+      && state.turns.at(-1)?.status === 'waiting'
+    // Store writes reach a plain read only once flushed; judge ownership on
+    // the committed state. Something else (a Stop, a newer turn) may already
+    // have settled it.
+    flush()
+    if (!owned()) return
+    if (!runId || isTemporaryThread(threadId) || isForeignOriginThread(threadId)) {
+      settleAwaitedTurn(threadId, assistantId, runId, { kind: 'unknown' }, unresolved)
+      return
+    }
+    const wait = new AbortController()
+    abortController = wait
+    durableWatches.add(wait)
+    setState((s) => {
+      s.status = 'streaming'
+      const turn = s.turns.find((candidate) => candidate.id === assistantId)
+      if (turn) turn.streaming = true
+    })
+    try {
+      const outcome = await awaitDurableOutcome(threadId, assistantId, runId, wait.signal, owned)
+      settleAwaitedTurn(threadId, assistantId, runId, outcome, unresolved)
+    } finally {
+      durableWatches.delete(wait)
+    }
+  }
+
+  /**
+   * After a Stop, find out whether the server honoured it.
+   *
+   * Stop answers immediately in the UI, but the cancel can lose a race with
+   * publication (the save and the terminal acknowledgement are separate calls)
+   * or reach a gateway that no longer holds the stream. If the run completed
+   * and its answer was saved anyway, showing "Stoppet" over a saved answer is
+   * false; the saved answer is shown instead. A cancelled or failed run leaves
+   * the stop as it is.
+   */
+  const reconcileStoppedTurn = async (threadId: string, assistantId: string, runId: string | undefined) => {
+    if (disposed || !runId || isTemporaryThread(threadId) || isForeignOriginThread(threadId)) return
+    const watch = new AbortController()
+    durableWatches.add(watch)
+    const owned = () => state.threadId === threadId
+      && state.turns.at(-1)?.id === assistantId
+      && state.turns.at(-1)?.status === 'stopped'
+    // Called straight after Stop's own store writes, which a plain read sees
+    // only once flushed.
+    flush()
+    try {
+      const outcome = await awaitDurableOutcome(threadId, assistantId, runId, watch.signal, owned)
+      if (outcome.kind !== 'adopted' || state.threadId !== threadId) return
+      const index = state.turns.findIndex((candidate) => candidate.id === assistantId)
+      const question = state.turns.slice(0, index).reverse().find((candidate) => candidate.role === 'user')
+      upsertTaskStep(createTurnStep(
+        assistantId,
+        createPreview(question?.content ?? '', 58),
+        'saved-after-stop',
+        'Answer saved by the server',
+        'The stop arrived after the Model Plane had saved this answer; showing the saved version.',
+        'done',
+      ))
+      updateLocalRunHint(threadId, 'completed', runId)
+      writeThreadSnapshot(threadId, state.turns)
+    } finally {
+      durableWatches.delete(watch)
+    }
+  }
+
+  /** Record, without content, a cancel request the server did not confirm. */
+  const recordCancelFailure = (turnId: string | undefined, target: ChatCancelFailure['target'], error: unknown) => {
+    if (!turnId) return
+    const failure: ChatCancelFailure = {
+      target,
+      ...(error instanceof ApiError ? { status: error.status, ...(error.code ? { code: error.code } : {}) } : {}),
+      at: new Date().toISOString(),
+    }
+    setState((s) => {
+      const turn = s.turns.find((candidate) => candidate.id === turnId)
+      if (turn) turn.cancelFailures = [...(turn.cancelFailures ?? []), failure]
+    })
+  }
+
+  /**
    * The resume endpoint (`model-gateway`'s `stream_buffer.rs`) replays the
    * buffered SSE frames (rich events as well as text) and the final `done`
    * frame when the stream has already finished. A cursor is tracked while a
@@ -1092,13 +1466,26 @@ export function useChatController() {
    * through the same normalized UI-event handlers as a live stream.
    *
    * Best-effort: a 404 (`stream not resumable` — the run genuinely finished
-   * outside the buffer's TTL, or never existed) or any other resume failure
-   * settles the turn as `stopped`, same as a normal failed/finished stream —
-   * never a stuck spinner. Guards against a thread switch landing mid-resume:
+   * outside the buffer's TTL, or never existed) or any other transport-level
+   * resume failure settles the turn as `stopped` — never a stuck spinner. A
+   * replayed server `error` frame is the run's real outcome and settles the
+   * turn as `error` with the server's message, exactly like the live stream.
+   * Guards against a thread switch landing mid-resume:
    * every mutation checks `state.threadId === threadId` first.
+   *
+   * The replay carries the tool phase too (tool calls and results, steps,
+   * citations, verification, queued input), so it must never add a second
+   * copy of anything the turn already holds:
+   *  - with a cursor, a frame at or below the highest id already applied is
+   *    refused outright (`acceptFrame`), whatever the server resends;
+   *  - without one (after a reload), everything is replayed from the start,
+   *    and each handler lands on the stable identity it used the first time:
+   *    tool call id, citation id/url, step id (or the carrying frame's id),
+   *    artifact version. Only the two append-only streams, answer text and
+   *    reasoning, are cleared on their first replayed delta instead.
    */
   const attemptResumeStream = async (threadId: string, turn: ChatTurn, reconnectActive = false) => {
-    if (!turn.requestId || (state.status === 'streaming' && !reconnectActive) || isTemporaryThread(threadId)) return
+    if (disposed || !turn.requestId || (state.status === 'streaming' && !reconnectActive) || isTemporaryThread(threadId)) return
     const assistantId = turn.id
     const resumeGeneration = streamGeneration
     const isActiveThread = () => state.threadId === threadId && streamGeneration === resumeGeneration
@@ -1127,11 +1514,19 @@ export function useChatController() {
     setState((s) => { s.status = 'streaming' })
 
     let settled = false
+    let transportLost = false
     let replayStarted = false
+    let reasoningReplayStarted = false
     // Snapshotted before the stream opens: `onFrameId` mutates the turn's
     // cursor during replay, so the turn is not a reliable record of what we
     // asked the server to skip.
     const resumedFrom = turn.lastFrameId
+    // The highest frame this turn has applied. Starts at the cursor and only
+    // moves forward, so a frame the server sends again (an overlap between
+    // its replay and its live tail, or a replica that ignored the cursor)
+    // is dropped instead of doubling a tool call, a source or a step.
+    let appliedThrough = frameSequence(resumedFrom)
+    const evidence = createEvidenceHandlers({ assistantId, turnTitle, threadId })
     const stopStreaming = (status?: ChatTurn['status']) => {
       if (!isActiveThread()) return
       setState((s) => {
@@ -1152,7 +1547,30 @@ export function useChatController() {
         // and usage frame into nothing, so reloading mid-answer produced a
         // turn with text but no sources, no Output and no cost — while the
         // Work feed kept scrolling, because `onUiEvent` alone still fired.
-        ...createEvidenceHandlers({ assistantId, turnTitle, threadId }),
+        ...evidence,
+        acceptFrame: (id) => {
+          const sequence = frameSequence(id)
+          if (sequence === undefined) return true
+          if (appliedThrough !== undefined && sequence <= appliedThrough) return false
+          appliedThrough = sequence
+          return true
+        },
+        onReasoning: (event) => {
+          if (!event.delta || !isActiveThread()) return
+          if (!reasoningReplayStarted) {
+            reasoningReplayStarted = true
+            // Reasoning is append-only like the answer text, and buffered
+            // like it: a replay from the start re-sends all of it, so the
+            // cached copy is cleared first (only then, as for the text).
+            if (!resumedFrom) {
+              setState((s) => {
+                const t = s.turns.find((candidate) => candidate.id === assistantId)
+                if (t) t.reasoning = undefined
+              })
+            }
+          }
+          evidence.onReasoning(event)
+        },
         onUiEvent: (event) => {
           if (!isActiveThread()) return
           appendUiEvent(event)
@@ -1214,14 +1632,28 @@ export function useChatController() {
           setState((s) => { s.status = 'idle' })
           writeThreadSnapshot(threadId, state.turns)
         },
-        onError: () => {
+        onError: (failure) => {
+          const { code } = failure
+          // The outcome already arrived in this replay; a connection that
+          // breaks afterwards says nothing more about the run.
+          if (isTransportLossCode(code) && settled) return
           settled = true
           if (!isActiveThread()) return
-          stopStreaming('stopped')
-          markOpenSteps('stopped', 'The connection was lost before this answer finished.', assistantId)
-          updateLocalRunHint(threadId, 'failed', turn.runId)
-          setState((s) => { s.status = 'idle' })
-          writeThreadSnapshot(threadId, state.turns)
+          if (!isTransportLossCode(code)) {
+            // A replayed SERVER outcome — e.g. a draft that failed its source
+            // check and was deliberately not published. It is the run's real
+            // result, so present it exactly as the live stream would have
+            // (the whole event, so a usage limit's reset time survives too).
+            // Settling it as a lost connection hid the reason and invited a
+            // blind resend of the whole task.
+            settleServerFailure({ assistantId, turnTitle, threadId }, failure)
+            writeThreadSnapshot(threadId, state.turns)
+            return
+          }
+          // The resume itself failed (a 404 for an expired or foreign buffer,
+          // or the connection again). That says nothing about the run, so it
+          // is settled below from the run's own record, not from this error.
+          transportLost = true
         },
         onFrameId: (id) => {
           setState((s) => {
@@ -1234,14 +1666,35 @@ export function useChatController() {
       turn.lastFrameId,
     )
 
-    if (!settled && isActiveThread()) {
-      // The stream closed with no terminal event at all (e.g. the buffer was
-      // already empty and nothing else arrived) — do not leave the bubble
-      // spinning forever.
-      stopStreaming('stopped')
-      markOpenSteps('stopped', 'Connection closed before this answer finished.', assistantId)
-      setState((s) => { s.status = 'idle' })
-      writeThreadSnapshot(threadId, state.turns)
+    if ((transportLost || !settled) && isActiveThread()) {
+      // No terminal frame reached us: the resume failed, or the stream closed
+      // without one (e.g. the buffer was already empty and nothing else
+      // arrived). A disconnect is not a cancel, so the run may still be
+      // working or may already have saved its answer. Ask Session Core before
+      // settling — never leave the bubble spinning past the run's own deadline,
+      // and never call a saved answer "stopped".
+      //
+      // A clean close is not a lost connection. The gateway now closes a
+      // resume right after the buffered frames of a stream that ended on an
+      // error or a stop, so an empty replay means "nothing after the cursor",
+      // and the run's own status says how it ended. Only when the server
+      // cannot say is the turn left stopped — and then without blaming the
+      // connection.
+      await followUnresumableRun(
+        threadId,
+        assistantId,
+        state.turns.find((candidate) => candidate.id === assistantId)?.runId ?? turn.runId,
+        transportLost
+          ? { detail: 'The connection was lost before this answer finished.', markFailed: true }
+          : {
+              detail: i18n.tr(
+                'Svaret ble ikke fullført, og tjenesten kunne ikke si hvordan kjøringen endte.',
+                'The answer did not finish, and the service could not say how the run ended.',
+              ),
+              markFailed: false,
+            },
+        isActiveThread,
+      )
     }
   }
 
@@ -1547,12 +2000,14 @@ export function useChatController() {
     turnId: string,
     rung: AutonomyRung,
     justification: string,
+    steps?: PlanStepEdit[],
   ) => {
     // Cross-surface transcripts are continuity views, not writable Chat
     // sessions. Do not let a plan approval mutate a run owned by another
     // workspace even if an old transcript still contains its approval card.
     if (isForeignOriginThread(state.threadId)) return
-    const runId = state.turns.find((turn) => turn.id === turnId)?.runId
+    const turnBefore = state.turns.find((turn) => turn.id === turnId)
+    const runId = turnBefore?.runId
     if (!runId) {
       setPlanApprovalError((prev) => ({
         ...prev,
@@ -1567,7 +2022,13 @@ export function useChatController() {
       return next
     })
     try {
-      const result = await approvePlan(runId, rung, justification)
+      const result = await approvePlan(
+        runId,
+        rung,
+        justification,
+        turnBefore?.proposedPlan?.planId,
+        steps,
+      )
       setState((s) => {
         const turn = s.turns.find((turn) => turn.id === turnId)
         if (turn) turn.grantedRung = result.grantedRung
@@ -1586,6 +2047,50 @@ export function useChatController() {
       setPlanApprovalError((prev) => ({
         ...prev,
         [turnId]: error instanceof Error ? error.message : 'Godkjenningen gikk ikke gjennom.',
+      }))
+    } finally {
+      setPlanApprovalPending(null)
+    }
+  }
+
+  /**
+   * Reject a proposed plan (plan-gate §2.3): grants nothing. The composer's
+   * plan-mode toggle is turned off the same way an approve does — owner
+   * ruling (2026-09-27): no revise-after-reject in this wave, so the user
+   * must ask again in a fresh message rather than silently retrying.
+   */
+  const rejectTurnPlan = async (turnId: string, reason: string) => {
+    if (isForeignOriginThread(state.threadId)) return
+    const turnBefore = state.turns.find((turn) => turn.id === turnId)
+    const planId = turnBefore?.proposedPlan?.planId
+    if (!planId) {
+      setPlanApprovalError((prev) => ({
+        ...prev,
+        [turnId]: 'Denne planen har ingen forslag å avvise.',
+      }))
+      return
+    }
+    const runId = turnBefore?.runId
+    if (!runId) {
+      setPlanApprovalError((prev) => ({
+        ...prev,
+        [turnId]: 'Denne planen har ingen kjøring å avvise.',
+      }))
+      return
+    }
+    setPlanApprovalPending(turnId)
+    setPlanApprovalError((prev) => {
+      const next = { ...prev }
+      delete next[turnId]
+      return next
+    })
+    try {
+      await rejectPlan(runId, planId, reason)
+      setPlanMode(false)
+    } catch (error) {
+      setPlanApprovalError((prev) => ({
+        ...prev,
+        [turnId]: error instanceof Error ? error.message : 'Avvisningen gikk ikke gjennom.',
       }))
     } finally {
       setPlanApprovalPending(null)
@@ -1631,8 +2136,17 @@ export function useChatController() {
     options: SendOptions
   }
   const [deferredSends, setDeferredSends] = createSignal<DeferredSend[]>([])
+  /** Mid-run messages whose `queueInvocationInput` call has not answered yet. */
+  const [midRunDeliveries, setMidRunDeliveries] = createSignal(0)
+  /**
+   * A message sent during a run is not answered by that run yet: it is still
+   * being delivered, or the run could not take it and it waits to go out as
+   * the next turn. Voice mode reads this so it waits for the turn that really
+   * answers a spoken message instead of taking the run that was streaming.
+   */
+  const followUpPending = createMemo(() => midRunDeliveries() > 0 || deferredSends().length > 0)
 
-  const noteQueuedInput = (id: string, next: QueuedInput['state'], note?: string) => {
+  const noteQueuedInput =(id: string, next: QueuedInput['state'], note?: string) => {
     setState((s) => {
       s.queuedInputs = s.queuedInputs.map((entry) =>
         entry.id === id ? { ...entry, state: next, note } : entry,
@@ -1656,10 +2170,18 @@ export function useChatController() {
       noteQueuedInput(id, 'pending', 'Venter på at kjøringen starter.')
       return
     }
-    const result = await queueInvocationInput(requestId, content, {
-      threadId: state.threadId ?? undefined,
-      spaceRef: scopedThreadRefs.get(state.threadId ?? ''),
-    })
+    setMidRunDeliveries((count) => count + 1)
+    let result: Awaited<ReturnType<typeof queueInvocationInput>>
+    try {
+      result = await queueInvocationInput(requestId, content, {
+        threadId: state.threadId ?? undefined,
+        spaceRef: scopedThreadRefs.get(state.threadId ?? ''),
+      })
+    } finally {
+      // Settled in the same batch as the outcome below, so a deferral is
+      // already visible when this stops counting.
+      setMidRunDeliveries((count) => count - 1)
+    }
     if (result.outcome === 'queued') {
       noteQueuedInput(
         id,
@@ -1747,6 +2269,7 @@ export function useChatController() {
           id: createId('user'),
           role: 'user',
           sourceScope: options.sourceScope ?? sourceScope(),
+          retrievalScope: options.retrievalScope ?? retrievalScope(),
           content,
           createdAt: submittedAt,
           streaming: false,
@@ -1769,6 +2292,11 @@ export function useChatController() {
       // Captured at SEND time so a toggle flipped later cannot retroactively
       // change what a finished turn was.
       planMode: planMode(),
+      // Same reasoning: `deriveConversationNodes`'s scope badge prefers the
+      // server's own `scopeApplied` confirmation but falls back to this while
+      // streaming/before that frame arrives — a fallback that only works if
+      // the assistant turn actually carries the value it was sent under.
+      retrievalScope: options.retrievalScope ?? retrievalScope(),
       status: 'waiting',
       model,
       provider: options.provider,
@@ -1832,6 +2360,10 @@ export function useChatController() {
 
     let settled = false
     let reconnectRequested = false
+    // A server terminal frame (`done`, `stopped` or a server `error`) has been
+    // applied. After it, a broken connection is not a reason to reattach: the
+    // outcome is known, and a resume past it would only reopen a settled turn.
+    let terminalSeen = false
     const captureRequestId = (requestId?: string) => {
       if (!requestId) return
       setState((s) => { s.requestId = requestId })
@@ -1849,6 +2381,102 @@ export function useChatController() {
         const turn = s.turns.find((t) => t.id === assistantId)
         if (turn) turn.status = status
       })
+    }
+    // Take the server's durable thread id in place of the provisional one.
+    const adoptServerThread = (serverThreadId: string, runId?: string) => {
+      // Session Core commonly preserves the client session key, but it
+      // is allowed to mint a different durable id. Protect either form
+      // until this first stream reaches a terminal state.
+      if (isNewThread) startingThreadIds.add(serverThreadId)
+      const priorThreadId = activeThreadId
+      if (serverThreadId !== activeThreadId) {
+        const provisionalThreadId = activeThreadId
+        removeChatThreadHistoryItem(provisionalThreadId)
+        removeChatThreadTranscript(provisionalThreadId)
+        // A provisional client id only correlates this open browser
+        // stream. It is never a durable Session Core thread, so
+        // clearing its local projection is sufficient; a remote delete
+        // would only add a spurious 404 after the durable id arrives.
+        // The provisional id may have been the one just marked
+        // temporary above — carry that marking to the server's real
+        // id so the lock and the persistence guard both survive the
+        // swap. (In practice a ZDR turn's `connected` event never
+        // carries a `thread_id` at all — ZDR creates no session/
+        // thread server-side — so this is defensive, not the normal
+        // path.)
+        renameTemporaryThread(provisionalThreadId, serverThreadId)
+      }
+      activeThreadId = serverThreadId
+      if (requestedSpaceRef) {
+        scopedThreadRefs.delete(priorThreadId)
+        scopedThreadRefs.set(serverThreadId, requestedSpaceRef)
+      }
+      setState((s) => { s.threadId = serverThreadId })
+      if (!isTemporaryThread(serverThreadId)) setActiveChatThreadId(serverThreadId)
+      writeThreadSnapshot(serverThreadId, state.turns, { preview: content, updatedAt: submittedAt })
+      if (runId) updateLocalRunHint(serverThreadId, 'running', runId)
+    }
+
+    // A Stop pressed before `connected` has no request id to cancel, and
+    // aborting the fetch then only detaches: the gateway finishes the run and
+    // publishes it behind a turn that says "Stoppet". The one identity that
+    // can cancel it arrives in the `connected` frame, so the stream is kept
+    // open — silenced — until that frame, cancelled with its id, then closed.
+    // Bounded, so a gateway that never sends `connected` is still let go.
+    let stopBeforeConnect = false
+    let stopBeforeConnectTimer: ReturnType<typeof setTimeout> | undefined
+    const deferStop = () => {
+      if (!stopBeforeConnect) {
+        stopBeforeConnect = true
+        stopBeforeConnectTimer = setTimeout(() => controller.abort(), STOP_BEFORE_CONNECT_WAIT_MS)
+      }
+      return true
+    }
+    const releaseDeferredStop = () => {
+      if (deferStopUntilConnected === deferStop) deferStopUntilConnected = undefined
+      if (stopBeforeConnectTimer !== undefined) clearTimeout(stopBeforeConnectTimer)
+      stopBeforeConnectTimer = undefined
+    }
+    deferStopUntilConnected = deferStop
+    const cancelOnceConnected = ({ requestId, threadId: serverThreadId, runId }: ChatConnectedEvent) => {
+      releaseDeferredStop()
+      setState((s) => {
+        const turn = s.turns.find((t) => t.id === assistantId)
+        if (turn && requestId) turn.requestId = requestId
+        if (turn && runId) turn.runId = runId
+      })
+      // Commit the ids before the snapshot and the reconciliation below read
+      // the turn back.
+      flush()
+      // Still the visible conversation: keep it addressable under its durable
+      // id, exactly as a connected stream would, so the next message and the
+      // reconciliation below both reach the thread the server created.
+      if (serverThreadId && projection.accepts()) adoptServerThread(serverThreadId)
+      if (requestId) {
+        void cancelInvocation(requestId).catch((error: unknown) => recordCancelFailure(assistantId, 'invocation', error))
+      }
+      // Every turn with a durable run, not only Work turns: the run cancel is
+      // what the gateway honours across its own paths (it now also stops the
+      // live stream), so it is sent whatever surface the turn is shown on.
+      if (runId && !isTemporaryThread(activeThreadId)) {
+        updateLocalRunHint(activeThreadId, 'cancelled', runId)
+        void cancelRun(runId).catch((error: unknown) => recordCancelFailure(assistantId, 'run', error))
+      }
+      controller.abort()
+      if (projection.accepts()) void reconcileStoppedTurn(activeThreadId, assistantId, runId)
+    }
+    // Once a Stop is deferred, every frame but `connected` is ignored: the
+    // turn was already settled as stopped, and nothing may reopen it.
+    const silencedAfterStop = (handlers: ChatStreamHandlers): ChatStreamHandlers => {
+      const guarded: Record<string, unknown> = {}
+      for (const [name, handler] of Object.entries(handlers)) {
+        if (typeof handler !== 'function') continue
+        guarded[name] = (...args: unknown[]) => {
+          if (stopBeforeConnect && name !== 'onConnected') return undefined
+          return (handler as (...values: unknown[]) => unknown)(...args)
+        }
+      }
+      return guarded as ChatStreamHandlers
     }
 
     try {
@@ -1869,6 +2497,7 @@ export function useChatController() {
           spaceRef: requestedSpaceRef,
           browseWeb: options.browseWeb,
           sourceScope: options.sourceScope ?? sourceScope(),
+          retrievalScope: options.retrievalScope ?? retrievalScope(),
           deepResearch: options.deepResearch,
           generateImage: options.generateImage,
           attachments: options.attachments,
@@ -1886,12 +2515,18 @@ export function useChatController() {
           // pinned when it is actually sent.
           pinnedMessageIds: pinnedMessages(),
         },
-        {
+        silencedAfterStop({
           onUiEvent: (event) => {
             if (!projection.accepts()) return
             appendUiEvent(event)
           },
-          onConnected: ({ requestId, threadId: serverThreadId, model: connectedModel, runId }) => {
+          onConnected: (connected) => {
+            if (stopBeforeConnect) {
+              cancelOnceConnected(connected)
+              return
+            }
+            releaseDeferredStop()
+            const { requestId, threadId: serverThreadId, model: connectedModel, runId } = connected
             captureRequestId(requestId)
             // An agentic / plan-mode turn learns its durable orchestration run
             // id here — this is what lets the live agent panel attach to
@@ -1901,39 +2536,7 @@ export function useChatController() {
               setTurnRunId(assistantId, runId)
               updateLocalRunHint(serverThreadId ?? activeThreadId, 'running', runId)
             }
-            if (serverThreadId) {
-              // Session Core commonly preserves the client session key, but it
-              // is allowed to mint a different durable id. Protect either form
-              // until this first stream reaches a terminal state.
-              if (isNewThread) startingThreadIds.add(serverThreadId)
-              const priorThreadId = activeThreadId
-              if (serverThreadId !== activeThreadId) {
-                const provisionalThreadId = activeThreadId
-                removeChatThreadHistoryItem(provisionalThreadId)
-                removeChatThreadTranscript(provisionalThreadId)
-                // A provisional client id only correlates this open browser
-                // stream. It is never a durable Session Core thread, so
-                // clearing its local projection is sufficient; a remote delete
-                // would only add a spurious 404 after the durable id arrives.
-                // The provisional id may have been the one just marked
-                // temporary above — carry that marking to the server's real
-                // id so the lock and the persistence guard both survive the
-                // swap. (In practice a ZDR turn's `connected` event never
-                // carries a `thread_id` at all — ZDR creates no session/
-                // thread server-side — so this is defensive, not the normal
-                // path.)
-                renameTemporaryThread(provisionalThreadId, serverThreadId)
-              }
-              activeThreadId = serverThreadId
-              if (requestedSpaceRef) {
-                scopedThreadRefs.delete(priorThreadId)
-                scopedThreadRefs.set(serverThreadId, requestedSpaceRef)
-              }
-              setState((s) => { s.threadId = serverThreadId })
-              if (!isTemporaryThread(serverThreadId)) setActiveChatThreadId(serverThreadId)
-              writeThreadSnapshot(serverThreadId, state.turns, { preview: content, updatedAt: submittedAt })
-              if (runId) updateLocalRunHint(serverThreadId, 'running', runId)
-            }
+            if (serverThreadId) adoptServerThread(serverThreadId, runId)
             if (connectedModel) {
               setState((s) => {
                 const turn = s.turns.find((t) => t.id === assistantId)
@@ -1951,6 +2554,12 @@ export function useChatController() {
             if (connectedModel) {
               upsertTaskStep(createTurnStep(assistantId, turnTitle, 'model', 'Model selected', prettyModel(connectedModel), 'done'))
             }
+            // Commit the durable thread id now. One network read can carry
+            // `connected` and the frames after it, all dispatched in a row;
+            // an early failure right behind it (`turn_timing` + `error` from a
+            // pre-tool check) would otherwise meet the ownership check before
+            // the new id is readable and be dropped, leaving the turn waiting.
+            flush()
           },
           onMessage: ({ content: delta, requestId }) => {
             captureRequestId(requestId)
@@ -1963,50 +2572,11 @@ export function useChatController() {
           // Evidence handlers live in `createEvidenceHandlers` so the resume
           // path registers exactly the same set; see the note there.
           ...createEvidenceHandlers({ assistantId, turnTitle, threadId: activeThreadId }),
-          onQueuedInput: ({ messages }) => {
-            // The agent now has it. Matched by content rather than by id: the
-            // backend echoes the text it delivered, and the id is ours alone —
-            // matching on text is what makes this correct even for a message
-            // queued by another tab on the same run.
-            const delivered = new Set(messages.map((message) => message.trim()))
-            setState((s) => {
-              s.queuedInputs = s.queuedInputs.map((entry) =>
-                delivered.has(entry.content.trim()) && entry.state === 'pending'
-                  ? { ...entry, state: 'delivered', note: undefined }
-                  : entry,
-              )
-            })
-          },
-          onMemoryRecall: ({ count, latencyMs, memories }) => {
-            // Deterministic, model-independent "memory was used" signal. Shown
-            // because a user cannot otherwise tell an answer that drew on
-            // remembered context from one that guessed — and a wrong remembered
-            // fact is only correctable if you know it was used.
-            setState((s) => {
-              const turn = s.turns.find((turn) => turn.id === assistantId)
-              if (turn) turn.memoryRecallCount = count
-            })
-            if (memories.length > 0) {
-              setState((s) => {
-                const turn = s.turns.find((turn) => turn.id === assistantId)
-                if (turn) turn.recalledMemories = memories
-              })
-            }
-            upsertTaskStep(
-              createTurnStep(
-                assistantId,
-                turnTitle,
-                'memory',
-                count === 1 ? 'Hentet 1 minne' : `Hentet ${count} minner`,
-                latencyMs != null ? `${latencyMs} ms` : '',
-                'done',
-              ),
-            )
-          },
           onStopped: ({ reason }) => {
             // A SERVER-side stop. Distinct from onDone on purpose: routing it
             // there rendered a halted run as a finished answer.
             settled = true
+            terminalSeen = true
             setState((s) => {
               const turn = s.turns.find((turn) => turn.id === assistantId)
               if (turn) turn.status = 'stopped'
@@ -2050,8 +2620,19 @@ export function useChatController() {
               if (turn) turn.followUps = suggestions.slice(0, 3)
             })
           },
+          onPlanProposed: ({ planId, summary, steps }) => {
+            // plan-gate §2.1. Last-proposed-wins (owner ruling, 2026-09-27): a
+            // second `plan.propose` call in the same turn REPLACES this,
+            // it does not append — a plain assignment already does that.
+            if (!planId || !summary) return
+            setState((s) => {
+              const turn = s.turns.find((t) => t.id === assistantId)
+              if (turn) turn.proposedPlan = { planId, summary, steps }
+            })
+          },
           onDone: ({ requestId, modelUsed, outputTokens, stopReason }) => {
             settled = true
+            terminalSeen = true
             captureRequestId(requestId)
               if (modelUsed) {
                 setState((s) => {
@@ -2101,7 +2682,8 @@ export function useChatController() {
               writeThreadSnapshot(state.threadId ?? activeThreadId, state.turns)
             }
           },
-          onError: ({ code, message }) => {
+          onError: (failure) => {
+            const { code } = failure
             // Thread switched away mid-stream: loadThread already aborted us and
             // reset the shared machine for the new thread, so finalise nothing
             // here (a global error/status write or a fallback retry would land
@@ -2110,24 +2692,22 @@ export function useChatController() {
               settled = true
               return
             }
+            // The run's outcome already arrived. A connection that breaks
+            // after it changes nothing, and reattaching would reopen a turn
+            // that is settled (a resume past a terminal frame has nothing to
+            // replay, and used to end as "connection lost").
+            if (isTransportLossCode(code) && terminalSeen) return
             // A lost HTTP connection does not mean the server's run failed.
             // Reattach to that invocation once; never repeat its tools or silently
             // change the user's provider. Provider fallback belongs to Inference.
-            if (code === 'connection_error' && !controller.signal.aborted) {
+            if (isTransportLossCode(code) && !controller.signal.aborted) {
               settled = true
               reconnectRequested = true
               return
             }
             settled = true
-            setState((s) => { s.error = message })
-            setState((s) => { s.status = 'error' })
-            setState((s) => {
-              const turn = s.turns.find((t) => t.id === assistantId)
-              if (turn) turn.content = turn.content || message
-            })
-            stopStreaming('error')
-            markOpenSteps('error', message, assistantId)
-            updateLocalRunHint(activeThreadId, 'failed', state.turns.find((turn) => turn.id === assistantId)?.runId)
+            terminalSeen = true
+            settleServerFailure({ assistantId, turnTitle, threadId: activeThreadId }, failure)
             writeThreadSnapshot(state.threadId ?? activeThreadId, state.turns)
           },
           // Track the cursor on the LIVE stream too, not just on resume: the
@@ -2139,7 +2719,7 @@ export function useChatController() {
               if (turn) turn.lastFrameId = id
             })
           },
-        },
+        }),
         controller.signal,
       )
 
@@ -2165,13 +2745,19 @@ export function useChatController() {
         // `controller.signal.aborted` (exactly like the `catch` block just
         // below) keeps a genuine user stop as 'stopped'. Q08 additionally
         // treats a non-aborted EOF as incomplete and replays the same run once.
-        const aborted = controller.signal.aborted
-        stopStreaming('stopped')
+        // A Stop deferred until `connected` is a user stop too, even when the
+        // stream ended before that frame and so was never aborted.
+        const aborted = controller.signal.aborted || stopBeforeConnect
         if (aborted) {
+          stopStreaming('stopped')
           markOpenSteps('stopped', 'Stopped by the user.', assistantId)
         } else {
+          // Closed without an outcome, which settles nothing yet: the
+          // reattach below asks the server. The turn and its open steps stay
+          // open for it, instead of being stamped "connection closed" first —
+          // a stamp that then outlived whatever the resume found (a replayed
+          // failure, a saved answer, a still-working run).
           reconnectRequested = true
-          markOpenSteps('stopped', 'Connection closed before completion.', assistantId)
         }
         // Same ownership guard as onDone: an aborted stream (e.g. a thread
         // switch) lands here with `!settled`, and must not flip the visible
@@ -2194,12 +2780,13 @@ export function useChatController() {
         }
       }
     } catch {
-      stopStreaming(controller.signal.aborted ? 'stopped' : 'error')
+      const userStopped = controller.signal.aborted || stopBeforeConnect
+      stopStreaming(userStopped ? 'stopped' : 'error')
       // If the user switched threads, this send no longer owns the shared
       // machine — settle its own turn's flag above but never write global
       // status/error or a snapshot onto the now-visible thread.
       if (!projection.accepts()) return
-      if (controller.signal.aborted) {
+      if (userStopped) {
         markOpenSteps('stopped', 'Stopped by the user.', assistantId)
         setState((s) => { s.status = 'idle' })
         writeThreadSnapshot(state.threadId ?? activeThreadId, state.turns)
@@ -2210,6 +2797,7 @@ export function useChatController() {
       markOpenSteps('error', 'Stream interrupted', assistantId)
       writeThreadSnapshot(state.threadId ?? activeThreadId, state.turns)
     } finally {
+      releaseDeferredStop()
       if (isNewThread) {
         startingThreadIds.delete(provisionalThreadId)
         startingThreadIds.delete(activeThreadId)
@@ -2245,6 +2833,7 @@ export function useChatController() {
       modelContent,
       browseWeb: payload.tools.includes('search') || payload.tools.includes('research'),
       sourceScope: payload.sourceScope,
+      retrievalScope: payload.retrievalScope,
       deepResearch: payload.tools.includes('research'),
       displayAttachments,
       generateImage: payload.tools.includes('image'),
@@ -2281,14 +2870,41 @@ export function useChatController() {
     }))
   }
 
+  /**
+   * Stop answers at once — the turn reads "Stoppet" and the composer is free —
+   * but the server decides what the turn really became. So a Stop also:
+   *  - cancels the invocation it is actually stopping, including a resumed or
+   *    still-pending one whose id lives only on its turn;
+   *  - before `connected`, when no id exists yet, holds the stream open until
+   *    the id arrives and cancels with it, instead of detaching the run;
+   *  - cancels the durable run of every turn that has one, Ask turns included,
+   *    not only Work turns: the gateway stops the live stream on that cancel,
+   *    so it is what makes a Stop authoritative rather than a request;
+   *  - records a cancel request the server did not confirm, without content;
+   *  - then asks the server whether the answer was saved anyway, and shows
+   *    the saved answer if it was.
+   */
   const handleStop = () => {
     if (isForeignOriginThread(state.threadId)) return
-    const durableRunId = liveRunId()
     const durableThreadId = state.threadId
+    const stoppedTurn = state.turns.at(-1)?.role === 'assistant' && state.turns.at(-1)?.status === 'waiting'
+      ? state.turns.at(-1)
+      : undefined
+    const stoppedTurnId = stoppedTurn?.id
+    const stoppedRunId = stoppedTurn?.runId
+    // The stopped turn's own run first; with no waiting tail, the run the
+    // Work panel watches, as before.
+    const durableRunId = stoppedRunId ?? liveRunId()
     const canCancelDurableRun = Boolean(durableRunId && !isTemporaryThread(state.threadId))
-    abortController?.abort()
-    if (state.requestId) {
-      void cancelInvocation(state.requestId).catch(() => undefined)
+    // The stopped turn's own id first: `state.requestId` is only reset by a
+    // new send, so after a thread switch it can still name another thread's
+    // invocation, while a resumed turn carries its id only on itself.
+    const requestId = stoppedTurn?.requestId ?? state.requestId
+    const deferred = !requestId && deferStopUntilConnected ? deferStopUntilConnected() : false
+    deferStopUntilConnected = undefined
+    if (!deferred) abortController?.abort()
+    if (requestId) {
+      void cancelInvocation(requestId).catch((error: unknown) => recordCancelFailure(stoppedTurnId, 'invocation', error))
     }
     setState((s) => {
       for (const turn of s.turns) {
@@ -2316,11 +2932,17 @@ export function useChatController() {
             reason: 'user_requested',
           })
         })
-        .catch(() => {
+        .catch((error: unknown) => {
           // The chat stream is already stopped locally. Keep the failure out of
           // the answer error surface; Trace will remain honest because no
           // cancellation receipt is rendered until the authority confirms it.
+          // The turn records that the cancel was not confirmed.
+          recordCancelFailure(stoppedTurnId, 'run', error)
         })
+    }
+    // A deferred Stop reconciles once `connected` has named the run.
+    if (!deferred && stoppedTurnId && durableThreadId) {
+      void reconcileStoppedTurn(durableThreadId, stoppedTurnId, stoppedRunId)
     }
   }
 
@@ -2424,6 +3046,12 @@ export function useChatController() {
         summonSurface('sources')
         addAssistantCitation(assistantId, turnTitle, citation)
       },
+      onSourceScopeApplied: (event: Parameters<NonNullable<ChatStreamHandlers['onSourceScopeApplied']>>[0]) => {
+        setState((s) => {
+          const turn = s.turns.find((t) => t.id === assistantId)
+          if (turn) turn.scopeApplied = { scope: event.scope, excludedTools: event.excludedTools }
+        })
+      },
       onGrounding: ({ value }: Parameters<NonNullable<ChatStreamHandlers['onGrounding']>>[0]) => {
         const grounding = normalizeGrounding(value)
         if (!grounding) return
@@ -2518,13 +3146,134 @@ export function useChatController() {
             turn.inputTokens = usage.inputTokens
             turn.outputTokens = usage.outputTokens
             turn.latencyMs = usage.latencyMs
-            turn.costUsd = usage.costUsd
+            // A subscription carries the provider call: the gateway prices
+            // nothing and its 0.0 is a wire placeholder. Dropped here, once,
+            // so no surface (live, snapshot or reload) can show it as "$0".
+            turn.costUsd = usage.costBasis === 'subscription' ? undefined : usage.costUsd
+            turn.costBasis = usage.costBasis
             turn.confidence = usage.confidence
           }
         })
         upsertTaskStep(createTurnStep(assistantId, turnTitle, 'usage', 'Usage recorded', formatUsageSummary(usage), 'done'))
       },
+      onTurnTiming: (timing: Parameters<NonNullable<ChatStreamHandlers['onTurnTiming']>>[0]) => {
+        setState((s) => {
+          const turn = s.turns.find((t) => t.id === assistantId)
+          if (turn) turn.timing = timing
+        })
+      },
+      onResultReceipt: ({ receipt }: Parameters<NonNullable<ChatStreamHandlers['onResultReceipt']>>[0]) => {
+        setState((s) => {
+          const turn = s.turns.find((t) => t.id === assistantId)
+          if (turn) turn.resultReceipt = receipt
+        })
+      },
+      // Both below are shared with resume for the same reason as the rest:
+      // the gateway now buffers `queued_input`, and `memory_recall` was
+      // always replayed, so a resume that could not hear them left a
+      // delivered message showing as pending and a recall unshown. Each is
+      // idempotent — a status promotion and two plain assignments — so a
+      // replay from the start changes nothing it already set.
+      onQueuedInput: ({ messages }: Parameters<NonNullable<ChatStreamHandlers['onQueuedInput']>>[0]) => {
+        // The agent now has it. Matched by content rather than by id: the
+        // backend echoes the text it delivered, and the id is ours alone —
+        // matching on text is what makes this correct even for a message
+        // queued by another tab on the same run.
+        const delivered = new Set(messages.map((message) => message.trim()))
+        setState((s) => {
+          s.queuedInputs = s.queuedInputs.map((entry) =>
+            delivered.has(entry.content.trim()) && entry.state === 'pending'
+              ? { ...entry, state: 'delivered', note: undefined }
+              : entry,
+          )
+        })
+      },
+      onMemoryRecall: ({ count, latencyMs, memories }: Parameters<NonNullable<ChatStreamHandlers['onMemoryRecall']>>[0]) => {
+        // Deterministic, model-independent "memory was used" signal. Shown
+        // because a user cannot otherwise tell an answer that drew on
+        // remembered context from one that guessed — and a wrong remembered
+        // fact is only correctable if you know it was used.
+        setState((s) => {
+          const turn = s.turns.find((turn) => turn.id === assistantId)
+          if (turn) turn.memoryRecallCount = count
+        })
+        if (memories.length > 0) {
+          setState((s) => {
+            const turn = s.turns.find((turn) => turn.id === assistantId)
+            if (turn) turn.recalledMemories = memories
+          })
+        }
+        upsertTaskStep(
+          createTurnStep(
+            assistantId,
+            turnTitle,
+            'memory',
+            count === 1 ? 'Hentet 1 minne' : `Hentet ${count} minner`,
+            latencyMs != null ? `${latencyMs} ms` : '',
+            'done',
+          ),
+        )
+      },
     } satisfies Partial<ChatStreamHandlers>
+  }
+
+  /**
+   * Settle a turn on a failure the SERVER reported, from the live stream and
+   * from a resume replay alike (one place, so the two cannot drift again).
+   *
+   * Some codes change what the reader is told (see `streamFailurePresentation`):
+   *  - when the server saved nothing, answer text that already streamed moves
+   *    to `unsavedContent` and the turn reads as the explanation, so a turn
+   *    ended by `session_liveness_failed` cannot look like a saved answer;
+   *  - when the model service did not answer (`response_validation_unavailable`)
+   *    the open steps are stopped, not failed, and a service step says why:
+   *    no check failed, so none is named as the failure;
+   *  - a ChatGPT-subscription refusal records what the reader can do
+   *    (`failureAction`: wait for the usage-limit reset, reconnect, retry, or
+   *    nothing) and, for a wait, when (`retryAt`). Nothing here retries: the
+   *    retry control is the reader's, and it stays disabled until `retryAt`.
+   */
+  const settleServerFailure = (
+    context: { assistantId: string; turnTitle: string; threadId: string },
+    failure: ChatErrorEvent,
+  ) => {
+    const { assistantId, turnTitle, threadId } = context
+    const shown = streamFailurePresentation(failure.code, failure.message, i18n.tr, {
+      retryAfterMs: failure.retryAfterMs,
+      resetsAt: failure.resetsAt,
+      locale: i18n.locale(),
+      now: Date.now(),
+    })
+    setState((s) => { s.error = shown.message })
+    setState((s) => {
+      const turn = s.turns.find((candidate) => candidate.id === assistantId)
+      if (!turn) return
+      if (shown.unsaved && turn.content.trim()) {
+        turn.unsavedContent = turn.content
+        turn.content = shown.message
+      } else {
+        turn.content = turn.content || shown.message
+      }
+      turn.streaming = false
+      turn.status = 'error'
+      if (shown.action) turn.failureAction = shown.action
+      if (shown.retryAt) turn.retryAt = shown.retryAt
+    })
+    if (shown.unavailable) {
+      markOpenSteps('stopped', shown.message, assistantId)
+      upsertTaskStep(createTurnStep(
+        assistantId,
+        turnTitle,
+        'service-unavailable',
+        shown.serviceTitle ?? i18n.tr('Modelltjenesten svarte ikke', 'The model service did not answer'),
+        shown.message,
+        'stopped',
+      ))
+    } else {
+      markOpenSteps('error', shown.message, assistantId)
+    }
+    updateLocalRunHint(threadId, 'failed', state.turns.find((turn) => turn.id === assistantId)?.runId)
+    setState((s) => { s.status = 'error' })
   }
 
   const appendSearchEvidence = (turnId: string, citation: Citation) => {
@@ -2643,18 +3392,73 @@ export function useChatController() {
     }
   }
 
-  const regenerateLatest = () => {
-    if (isForeignOriginThread(state.threadId)) return
-    if (isStreaming()) return
+  /**
+   * The subscription connection a turn is sent on again. A ChatGPT-subscription
+   * turn's stored id can be stale, because reconnecting creates a new
+   * connection (see `resolveReplaySubscriptionConnectionId`), so it is looked up
+   * again. That is the only case that waits on a lookup. Every other route keeps
+   * its stored id, synchronously. The provider is never changed here.
+   */
+  const replayConnectionId = (
+    turn: Readonly<{ provider?: string; subscriptionConnectionId?: string }>,
+  ): string | undefined | Promise<string | undefined> =>
+    turn.provider === OPENAI_CODEX_SUBSCRIPTION_PROVIDER
+      ? resolveReplaySubscriptionConnectionId(getSession().activeOrg?.id ?? '', turn.subscriptionConnectionId)
+      : turn.subscriptionConnectionId
+
+  /**
+   * Run `next` with the connection a turn is sent on again: in the same tick
+   * when no lookup is needed (so a plain regenerate stays synchronous, see
+   * F-12 below), or once the lookup answers.
+   */
+  const withReplayConnection = (
+    turn: Readonly<{ provider?: string; subscriptionConnectionId?: string }>,
+    next: (subscriptionConnectionId: string | undefined) => void,
+  ): void | Promise<void> => {
+    const resolved = replayConnectionId(turn)
+    return resolved instanceof Promise ? resolved.then(next) : next(resolved)
+  }
+
+  /** The final exchange, when it may be sent again: the last user turn and what follows it. */
+  const latestExchange = () => {
+    if (isForeignOriginThread(state.threadId) || isStreaming()) return undefined
     const anchorIndex = lastUserIndex(state.turns)
-    if (anchorIndex < 0) return
-    const lastUser = state.turns[anchorIndex]
-    if (!lastUser) return
-    const outgoingAssistant = state.turns[anchorIndex + 1]
-    if (isEffectfulChatTurn(outgoingAssistant?.effectClass)) {
+    const lastUser = anchorIndex < 0 ? undefined : state.turns[anchorIndex]
+    if (!lastUser) return undefined
+    return { anchorIndex, lastUser, outgoingAssistant: state.turns[anchorIndex + 1] }
+  }
+
+  /**
+   * Whether the exchange a click targeted is still the final one after the
+   * connection lookup. The reader may have sent, switched thread, or clicked
+   * twice while it ran, and a stale click must not truncate the transcript.
+   */
+  const isSameExchange = (
+    threadId: string | null,
+    exchange: { anchorIndex: number; lastUser: ChatTurn; outgoingAssistant?: ChatTurn },
+  ) => {
+    const current = latestExchange()
+    return state.threadId === threadId
+      && current?.anchorIndex === exchange.anchorIndex
+      && current.lastUser.id === exchange.lastUser.id
+      && current.outgoingAssistant?.id === exchange.outgoingAssistant?.id
+  }
+
+  const regenerateLatest = () => {
+    const exchange = latestExchange()
+    if (!exchange) return
+    if (isEffectfulChatTurn(exchange.outgoingAssistant?.effectClass)) {
       showFeedbackNotice('Denne turen har dokumentert effekt og kan ikke regenereres på stedet. Start en ny tur eller bruk kvitteringen i Trace.')
       return
     }
+    const threadId = state.threadId
+    return withReplayConnection(exchange.lastUser, (subscriptionConnectionId) => {
+      if (!isSameExchange(threadId, exchange)) return
+      regenerateExchange(exchange.anchorIndex, exchange.lastUser, subscriptionConnectionId)
+    })
+  }
+
+  const regenerateExchange = (anchorIndex: number, lastUser: ChatTurn, subscriptionConnectionId: string | undefined) => {
     // Snapshot the outgoing exchange as a version BEFORE truncating it away —
     // see chat-versions.ts. Must run before the slice below, which is itself
     // the fix for a real bug this uncovered: `sendContent` with
@@ -2686,7 +3490,8 @@ export function useChatController() {
       generateImage: lastUser.tools.includes('image'),
       tools: lastUser.tools,
       provider: lastUser.provider,
-      subscriptionConnectionId: lastUser.subscriptionConnectionId,
+      // Looked up again for a subscription turn: a reconnect replaces the id.
+      subscriptionConnectionId,
       // Regenerating within an already-temporary thread must keep sending
       // ZDR — the thread-level lock, not the (possibly since-toggled)
       // composer state, decides.
@@ -2723,13 +3528,9 @@ export function useChatController() {
    * replacement, so this must not feed the same classifier as a discard.
    */
   const continueGeneration = (turnId: string) => {
-    if (isForeignOriginThread(state.threadId)) return
-    if (isStreaming()) return
-    const anchorIndex = lastUserIndex(state.turns)
-    if (anchorIndex < 0) return
-    const lastUser = state.turns[anchorIndex]
-    if (!lastUser) return
-    const outgoingAssistant = state.turns[anchorIndex + 1]
+    const exchange = latestExchange()
+    if (!exchange) return
+    const { anchorIndex, lastUser, outgoingAssistant } = exchange
     // Only the trailing STOPPED turn is continuable. `ChatMessages.tsx` gates
     // the "Fortsett" control the same way (stopped + non-empty content), but
     // the controller re-checks rather than trusting the caller — `turnId` is
@@ -2746,6 +3547,19 @@ export function useChatController() {
       showFeedbackNotice('Denne turen har dokumentert effekt og kan ikke fortsettes på stedet. Start en ny tur eller bruk kvitteringen i Trace.')
       return
     }
+    const threadId = state.threadId
+    return withReplayConnection(lastUser, (subscriptionConnectionId) => {
+      if (!isSameExchange(threadId, exchange) || outgoingAssistant.status !== 'stopped') return
+      continueExchange(anchorIndex, lastUser, partial, subscriptionConnectionId)
+    })
+  }
+
+  const continueExchange = (
+    anchorIndex: number,
+    lastUser: ChatTurn,
+    partial: string,
+    subscriptionConnectionId: string | undefined,
+  ) => {
     // Same versioning + truncate-then-flush shape as `regenerateLatest` — see
     // its comments for why the flush is load-bearing (F-12).
     setVersionState((prev) => beginNewVersion(prev, snapshot(state.turns), state.threadId))
@@ -2761,7 +3575,7 @@ export function useChatController() {
       generateImage: lastUser.tools.includes('image'),
       tools: lastUser.tools,
       provider: lastUser.provider,
-      subscriptionConnectionId: lastUser.subscriptionConnectionId,
+      subscriptionConnectionId,
       zdr: isTemporaryThread(state.threadId),
       seedContent: partial,
       modelContent: buildContinuationModelContent(lastUser.content, partial),
@@ -2780,7 +3594,14 @@ export function useChatController() {
     if (!assistant || assistant.role !== 'assistant' || !isEffectfulChatTurn(assistant.effectClass)) return
     const user = [...state.turns.slice(0, assistantIndex)].reverse().find((turn) => turn.role === 'user')
     if (!user) return
-    const attachments = await toStreamAttachments(user.attachments)
+    const route = {
+      provider: user.provider ?? assistant.provider,
+      subscriptionConnectionId: user.subscriptionConnectionId ?? assistant.subscriptionConnectionId,
+    }
+    const [attachments, subscriptionConnectionId] = await Promise.all([
+      toStreamAttachments(user.attachments),
+      replayConnectionId(route),
+    ])
     await sendContent(user.content, user.model ?? assistant.model, {
       attachments: attachments.length > 0 ? attachments : undefined,
       browseWeb: user.tools.includes('search') || user.tools.includes('research'),
@@ -2788,10 +3609,26 @@ export function useChatController() {
       displayAttachments: user.attachments,
       generateImage: user.tools.includes('image'),
       tools: user.tools,
-      provider: user.provider ?? assistant.provider,
-      subscriptionConnectionId: user.subscriptionConnectionId ?? assistant.subscriptionConnectionId,
+      provider: route.provider,
+      subscriptionConnectionId,
       zdr: isTemporaryThread(state.threadId),
     })
+  }
+
+  /**
+   * Resolve an assistant turn id to the exact original user request that
+   * produced it — the same turnId -> preceding-user-turn walk
+   * `rerunAsNewTurn` already does, reused rather than re-derived a second way
+   * (chat-wave2 "schedule" spec §2.1, "Planlegg dette"). `null` when the turn
+   * cannot be found or has no preceding user turn (mirrors `rerunAsNewTurn`'s
+   * own early-return guards).
+   */
+  const resolveScheduleSeedForTurn = (turnId: string): string | null => {
+    const assistantIndex = state.turns.findIndex((turn) => turn.id === turnId)
+    const assistant = state.turns[assistantIndex]
+    if (!assistant) return null
+    const user = [...state.turns.slice(0, assistantIndex)].reverse().find((turn) => turn.role === 'user')
+    return user?.content ?? null
   }
 
   const editAndResubmit = async (turnId: string, text: string) => {
@@ -2821,7 +3658,10 @@ export function useChatController() {
       if (!confirmed) return
     }
     abortController?.abort()
-    const attachments = await toStreamAttachments(original.attachments)
+    const [attachments, subscriptionConnectionId] = await Promise.all([
+      toStreamAttachments(original.attachments),
+      replayConnectionId(original),
+    ])
     if (isFinalExchange) {
       // Editing the FINAL exchange: snapshot it as a version before it's
       // truncated away, same as regenerateLatest. Editing an EARLIER turn
@@ -2847,7 +3687,7 @@ export function useChatController() {
       generateImage: original.tools.includes('image'),
       tools: original.tools,
       provider: original.provider,
-      subscriptionConnectionId: original.subscriptionConnectionId,
+      subscriptionConnectionId,
       // Same thread-level ZDR lock as `regenerateLatest`.
       zdr: isTemporaryThread(state.threadId),
       // The edit happened in the composer and never reached the server as a
@@ -2942,6 +3782,7 @@ export function useChatController() {
   return {
     hasMessages,
     isStreaming,
+    followUpPending,
     evidenceSources,
     latestGrounding,
     artifactItems,
@@ -2966,6 +3807,7 @@ export function useChatController() {
     regenerateLatest,
     continueGeneration,
     rerunAsNewTurn,
+    resolveScheduleSeedForTurn,
     editAndResubmit,
     branchAt,
     finalExchangeVersion,
@@ -2983,12 +3825,15 @@ export function useChatController() {
     setImageMode,
     planMode,
     approveTurnPlan,
+    rejectTurnPlan,
     planApprovalPending,
     planApprovalError,
     setPlanMode,
     browseWeb,
     sourceScope,
     setSourceScope,
+    retrievalScope,
+    setRetrievalScope,
     setBrowseWeb,
     temporaryChat,
     setTemporaryChat,

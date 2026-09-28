@@ -50,6 +50,23 @@ describe('gateway HTTP client auth headers', () => {
     window.removeEventListener(SESSION_EXPIRED_EVENT, expired)
   })
 
+  it('keeps a top-level code beside a string error, as model-gateway sends for no speech', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => jsonResponse({
+      error: 'no speech detected in the audio',
+      code: 'no_speech_detected',
+    }, 422)))
+
+    const failure = await requestJson('/api/v1/ai/dictate', { method: 'POST', body: '{}' }).catch((error: unknown) => error)
+    expect(failure).toBeInstanceOf(ApiError)
+    expect(failure).toMatchObject({ status: 422, code: 'no_speech_detected', message: 'no speech detected in the audio' })
+  })
+
+  it('leaves the code empty for a bare string error', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => jsonResponse({ error: 'upstream failed' }, 502)))
+
+    await expect(requestJson('/api/v1/ai/dictate')).rejects.toMatchObject({ status: 502, code: null, message: 'upstream failed' })
+  })
+
   it('does not signal session expiry for an invalid sign-in attempt', async () => {
     const expired = vi.fn()
     window.addEventListener(SESSION_EXPIRED_EVENT, expired)

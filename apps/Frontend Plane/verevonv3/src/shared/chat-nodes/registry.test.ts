@@ -17,6 +17,7 @@ const ALL_KINDS: ConversationNodeKind[] = [
   'grounding',
   'confidence',
   'memory-recall',
+  'source-scope',
   'truncated',
   'tool-chips',
   'attachments',

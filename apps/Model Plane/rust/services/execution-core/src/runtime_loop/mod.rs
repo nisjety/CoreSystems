@@ -72,6 +72,13 @@ const SAVE_MEMORY_TOOL: &str = "save_memory";
 /// way); the chat path instead prefetches per turn.
 const RECALL_MEMORY_TOOL: &str = "recall_memory";
 
+/// Plan-mode's control tool (chat-wave2-specs plan-gate §2.1): the model
+/// emits its plan as structured data via session-core's `ProposePlan` RPC
+/// instead of leaving it as unstructured markdown the browser would have to
+/// parse. Writes a durable row, so it is refused on ZDR runs the same way
+/// `SAVE_MEMORY_TOOL` is.
+const PLAN_PROPOSE_TOOL: &str = crate::plan::PROPOSE_TOOL;
+
 /// Read one of the org's skill instructions back in full.
 ///
 /// Offered in BOTH loops because the skill budget is shared: `skill_budget`
@@ -642,6 +649,18 @@ async fn execute_step_inner(
         .await
     } else if tool_name == REATTACH_SKILL_TOOL {
         execute_reattach_skill(tool_input, org_id, session_channel.as_ref(), session_bearer).await
+    } else if tool_name == PLAN_PROPOSE_TOOL {
+        execute_propose_plan(
+            tool_input,
+            org_id,
+            user_id,
+            thread_id,
+            run_id,
+            zdr,
+            session_channel.as_ref(),
+            session_bearer,
+        )
+        .await
     } else if tool_name == subagent_results::LIST_TOOL {
         subagent_results::execute_list(
             org_id,
@@ -702,7 +721,7 @@ async fn execute_step_inner(
     } else if tool_name == PUBLISH_SOCIAL_POST_TOOL {
         execute_publish_social_post(tool_input, org_id, user_id, run_id).await
     } else if tool_name == LIST_PROVIDER_ACTIONS_TOOL {
-        execute_list_provider_actions(org_id).await
+        execute_list_provider_actions(org_id, session_bearer).await
     } else if tool_name == EXECUTE_PROVIDER_ACTION_TOOL {
         execute_provider_action(
             tool_input,
@@ -1564,13 +1583,16 @@ async fn execute_company_lookup(tool_input: &str) -> tool_bridge::ToolExecution 
 /// `list_provider_actions` tool — read-only discovery of the org's connected
 /// providers and their callable operations. `org_id` comes from the run
 /// context (tenant scope). No approval gate.
-async fn execute_list_provider_actions(org_id: &str) -> tool_bridge::ToolExecution {
+async fn execute_list_provider_actions(
+    org_id: &str,
+    session_bearer: Option<&str>,
+) -> tool_bridge::ToolExecution {
     let Some(client) = crate::integration_tools::IntegrationActionsClient::from_env() else {
         return tool_error(
             "list_provider_actions unavailable: integration client could not be built".to_owned(),
         );
     };
-    match client.list_provider_actions(org_id).await {
+    match client.list_provider_actions(org_id, session_bearer).await {
         Ok(output) => tool_bridge::ToolExecution {
             output,
             error: None,
@@ -1666,6 +1688,7 @@ async fn execute_provider_action(
             input.body,
             user_id,
             approval_ref.as_deref(),
+            session_bearer,
         )
         .await
     {
@@ -1865,6 +1888,87 @@ mod memory_tool_tests {
             .error
             .expect("must refuse")
             .contains("must not be empty"));
+    }
+
+    #[tokio::test]
+    async fn plan_propose_is_refused_on_zdr_with_an_honest_explanation() {
+        // Same posture as save_memory: ZDR is checked before channel/bearer,
+        // so a plan-mode run on a ZDR credential gets the real reason instead
+        // of a plumbing error.
+        let out = execute_propose_plan(
+            r#"{"summary":"Send the invoice","steps":[{"title":"Draft the email"}]}"#,
+            "org-1",
+            "user-1",
+            "thread-1",
+            "run-1",
+            true,
+            None,
+            Some("bearer"),
+        )
+        .await;
+        let error = out.error.expect("must refuse");
+        assert!(error.contains("Zero-Data-Retention"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn plan_propose_validates_input_before_any_precondition_noise() {
+        let out = execute_propose_plan(
+            "not json", "org-1", "user-1", "thread-1", "run-1", false, None, None,
+        )
+        .await;
+        assert!(out
+            .error
+            .expect("must refuse")
+            .contains("invalid plan.propose input"));
+
+        let out = execute_propose_plan(
+            r#"{"summary":"  ","steps":[{"title":"x"}]}"#,
+            "org-1",
+            "user-1",
+            "thread-1",
+            "run-1",
+            false,
+            None,
+            None,
+        )
+        .await;
+        assert!(out
+            .error
+            .expect("must refuse")
+            .contains("summary must not be empty"));
+
+        let out = execute_propose_plan(
+            r#"{"summary":"Send the invoice","steps":[]}"#,
+            "org-1",
+            "user-1",
+            "thread-1",
+            "run-1",
+            false,
+            None,
+            None,
+        )
+        .await;
+        assert!(out
+            .error
+            .expect("must refuse")
+            .contains("at least one step is required"));
+    }
+
+    #[tokio::test]
+    async fn plan_propose_fails_closed_without_a_thread_context() {
+        let out = execute_propose_plan(
+            r#"{"summary":"Send the invoice","steps":[{"title":"Draft the email"}]}"#,
+            "org-1",
+            "user-1",
+            "",
+            "run-1",
+            false,
+            None,
+            Some("bearer"),
+        )
+        .await;
+        let error = out.error.expect("must refuse");
+        assert!(error.contains("agent-loop thread context"), "{error}");
     }
 }
 
@@ -2091,6 +2195,120 @@ async fn execute_save_memory(
             error: None,
         },
         Err(status) => tool_error(format!("save_memory failed: {}", status.message())),
+    }
+}
+
+/// `plan.propose` — input JSON
+/// `{"summary": string, "steps": [{"title": string, "operation"?: string}], "supersedes"?: string}`.
+///
+/// Plan-mode's control tool (chat-wave2-specs plan-gate §2.1): lets the model
+/// emit its plan as DATA instead of unstructured markdown, so the browser can
+/// offer a real editable review surface instead of parsing the model's prose
+/// client-side — the exact thing this codebase's own `chat-nodes/derive.ts`
+/// already refuses to do for follow-up chips ("inferring one from free text
+/// in the browser would be the fabrication this codebase forbids"). Calls
+/// session-core's `ProposePlan`, which creates the plan directly in
+/// `PLAN_STATE_PROPOSED` with real steps — a SEPARATE plan row from the
+/// zero-step `draft` plan session-core auto-creates at run start for the
+/// retrospective execution log (`orchestration_store::create_plan`).
+///
+/// Writes a durable `plans`/`plan_steps` row, so — like `save_memory` — it is
+/// refused outright on a Zero-Data-Retention run via the same
+/// [`memory_tool_preflight`] rather than silently dropped.
+///
+/// This tool is read-only from the run's own permission-ladder point of
+/// view — it does not ACT, so it is never in
+/// `permission::is_risky_call`/`is_restricted_context_write` and runs under
+/// `ask` posture with no approval gate, matching `list_subagent_results`'s
+/// treatment.
+async fn execute_propose_plan(
+    tool_input: &str,
+    org_id: &str,
+    user_id: &str,
+    thread_id: &str,
+    run_id: &str,
+    zdr: bool,
+    session_channel: Option<&Channel>,
+    session_bearer: Option<&str>,
+) -> tool_bridge::ToolExecution {
+    #[derive(serde::Deserialize)]
+    struct ProposedStepInput {
+        title: String,
+        #[serde(default)]
+        operation: String,
+    }
+    #[derive(serde::Deserialize)]
+    struct ProposePlanInput {
+        summary: String,
+        #[serde(default)]
+        steps: Vec<ProposedStepInput>,
+        #[serde(default)]
+        supersedes: String,
+    }
+    let input: ProposePlanInput = match serde_json::from_str(tool_input) {
+        Ok(i) => i,
+        Err(e) => return tool_error(format!("invalid plan.propose input: {e}")),
+    };
+    if input.summary.trim().is_empty() {
+        return tool_error("plan.propose: summary must not be empty".to_owned());
+    }
+    if input.steps.is_empty() {
+        return tool_error("plan.propose: at least one step is required".to_owned());
+    }
+
+    let (channel, bearer) = match memory_tool_preflight(
+        PLAN_PROPOSE_TOOL,
+        org_id,
+        thread_id,
+        zdr,
+        session_channel,
+        session_bearer,
+    ) {
+        Ok(ok) => ok,
+        Err(refusal) => return refusal,
+    };
+
+    let request = pb::ProposePlanRequest {
+        thread_id: thread_id.to_owned(),
+        run_id: run_id.to_owned(),
+        org_id: org_id.to_owned(),
+        user_id: user_id.to_owned(),
+        author: "agent".to_owned(),
+        summary: input.summary,
+        steps: input
+            .steps
+            .into_iter()
+            .map(|s| pb::ProposedPlanStep {
+                title: s.title,
+                operation: s.operation,
+            })
+            .collect(),
+        supersedes: input.supersedes,
+    };
+    let request = match authenticated_session_request(request, &bearer) {
+        Ok(r) => r,
+        Err(e) => return tool_error(format!("plan.propose unavailable: {e}")),
+    };
+    match OrchestrationCoreServiceClient::new(channel.clone())
+        .propose_plan(request)
+        .await
+    {
+        Ok(response) => {
+            let (plan_id, state, step_count) = match response.into_inner().plan {
+                Some(p) => (p.id, p.state, p.steps.len()),
+                None => (String::new(), 0, 0),
+            };
+            tool_bridge::ToolExecution {
+                output: serde_json::json!({
+                    "plan_id": plan_id,
+                    "state": state,
+                    "step_count": step_count,
+                })
+                .to_string(),
+                error: None,
+            }
+        }
+        Err(status) => tool_error(format!("plan.propose failed: {}", status.message())),
     }
 }
 

@@ -1,4 +1,6 @@
 import { createEffect, createMemo, createSignal, For, Show } from 'solid-js'
+import { ChatGptSubscriptionPanel } from '@/features/integrations/components/ChatGptSubscriptionPanel'
+import { MailTaskAddressSection } from '@/features/settings/components/MailTaskAddressSection'
 import { PasskeySecuritySection } from '@/features/settings/components/PasskeySecuritySection'
 import { PrivacyDataSection } from '@/features/settings/components/PrivacyDataSection'
 import { TwoFactorEnrollmentSection } from '@/features/settings/components/TwoFactorEnrollmentSection'
@@ -21,6 +23,7 @@ import {
   type UserProfile,
 } from '@/shared/api/settings-client'
 import { useI18n } from '@/shared/i18n'
+import { getSession } from '@/shared/session/session-store'
 
 type FormState = {
   displayName: string
@@ -252,8 +255,10 @@ export default function AccountSettingsPage() {
       <PreferencesSection form={form} onField={updateField} />
       <AvailabilitySection form={form} onField={updateField} />
       <ConnectedAccountsSection profile={profile} />
+      <ChatGptSubscriptionSection />
       <TwoFactorEnrollmentSection />
       <PasskeySecuritySection />
+      <MailTaskAddressSection />
       <PrivacySection />
       <PrivacyDataSection />
       <SettingsSaveActions
@@ -525,6 +530,30 @@ function ConnectedAccountsSection(props: {
           )}
         </For>
       </div>
+    </section>
+  )
+}
+
+/**
+ * The reader's own ChatGPT subscription. A connection belongs to the person
+ * who signed in to ChatGPT (only they can renew or remove it), so it is
+ * managed here, on a page every member can open. Workspace settings are
+ * admin-only, and the chat's "Koble til ChatGPT på nytt" link sends members
+ * here instead.
+ */
+function ChatGptSubscriptionSection() {
+  const i18n = useI18n()
+  const orgId = () => getSession().activeOrg?.id ?? ''
+  return (
+    <section id="ai-subscription" class="verevon-settings-section">
+      <SectionHeader
+        title={i18n.tr('ChatGPT-abonnement', 'ChatGPT subscription')}
+        description={i18n.tr(
+          'Din egen ChatGPT-tilkobling for AI-svar. Bare du kan koble den til, fornye den eller koble den fra.',
+          'Your own ChatGPT connection for AI answers. Only you can connect, renew, or disconnect it.',
+        )}
+      />
+      <ChatGptSubscriptionPanel orgId={orgId()} />
     </section>
   )
 }

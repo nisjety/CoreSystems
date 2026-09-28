@@ -1964,6 +1964,13 @@ pub fn citation_events(sources: &[ResearchSource]) -> Vec<ChatEvent> {
             title: source.title.clone(),
             url: source.url.clone(),
             snippet: source.snippet.clone(),
+            source_group_id: crate::url_domain::web_domain(&source.url),
+            source_group_label: None,
+            number: source.number.and_then(|n| u32::try_from(n).ok()),
+            claim_id: None,
+            start: None,
+            end: None,
+            origin: "web".to_owned(),
         })
         .collect();
 
@@ -1977,6 +1984,16 @@ pub fn citation_events(sources: &[ResearchSource]) -> Vec<ChatEvent> {
             // page is indistinguishable from one that grounded a claim. The
             // machine-readable half of the same fact is in the id.
             snippet: unread_citation_snippet(source),
+            source_group_id: crate::url_domain::web_domain(&source.url),
+            source_group_label: None,
+            // Deliberately excluded from the numbered range: an unread lead
+            // was never assigned a `[n]` the model could cite (see the
+            // `dr-unread-` id and this fn's own doc comment above).
+            number: None,
+            claim_id: None,
+            start: None,
+            end: None,
+            origin: "web".to_owned(),
         });
     }
     events
@@ -3780,18 +3797,22 @@ mod tests {
         let events = citation_events(&sources);
         assert_eq!(events.len(), 2);
         for event in &events {
-            let ChatEvent::Citation { id, url, .. } = event else {
+            let ChatEvent::Citation { id, url, number, source_group_id, .. } = event else {
                 panic!("expected a citation, got {event:?}");
             };
-            let number: usize = id
+            let event_number: usize = id
                 .strip_prefix("dr-")
                 .and_then(|rest| rest.parse().ok())
                 .unwrap_or_else(|| panic!("citation id {id} is not dr-<n>"));
             let matched = sources
                 .iter()
-                .find(|source| source.number == Some(number))
+                .find(|source| source.number == Some(event_number))
                 .expect("every emitted number belongs to a source");
             assert_eq!(&matched.url, url);
+            // The anchor pass resolves a model-cited `[n]` by this field, not
+            // by array position (chat-wave2 citations spec §2.4).
+            assert_eq!(*number, u32::try_from(event_number).ok());
+            assert_eq!(source_group_id, &crate::url_domain::web_domain(url));
         }
         // Emitted in citation order, so [1] is the first Kilder row.
         assert!(matches!(&events[0], ChatEvent::Citation { id, .. } if id == "dr-1"));
@@ -3813,7 +3834,7 @@ mod tests {
 
         let events = citation_events(&sources);
         assert_eq!(events.len(), 2);
-        let ChatEvent::Citation { id, snippet, .. } = &events[1] else {
+        let ChatEvent::Citation { id, snippet, number, .. } = &events[1] else {
             panic!("expected a citation");
         };
         assert_eq!(id, "dr-unread-fetch-failed-1");
@@ -3824,6 +3845,10 @@ mod tests {
             "an unread id must not parse as a citation number"
         );
         assert!(snippet.starts_with("[not read: JavaScript-rendered]"));
+        assert_eq!(
+            *number, None,
+            "an unread lead is deliberately excluded from the numbered range"
+        );
     }
 
     /// The audit's actual complaint: the client could see that a source was

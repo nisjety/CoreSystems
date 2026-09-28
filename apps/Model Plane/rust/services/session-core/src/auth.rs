@@ -775,24 +775,36 @@ fn rsa_modulus_bits(modulus: &[u8]) -> usize {
     (modulus.len() - index - 1) * 8 + (8 - first.leading_zeros() as usize)
 }
 
+/// Credentials shaped exactly as Auth Core issues them, for tests elsewhere in
+/// the crate that must go through the production verifier instead of a
+/// hand-built [`VerifiedIdentity`].
+///
+/// A hand-built identity lets a test pick claim values the issuer never
+/// produces. That is how a check on a service token's `zdr` passed every test
+/// and refused every live atomic save: the tests gave Model Gateway `zdr:
+/// false`, and Auth Core never does.
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use jsonwebtoken::{encode, EncodingKey, Header};
+pub(crate) mod test_support {
+    use std::sync::{Arc, OnceLock};
+
+    use base64::Engine as _;
+    use jsonwebtoken::{encode, jwk::JwkSet, Algorithm, EncodingKey, Header};
     use rand::thread_rng;
     use rsa::{
         pkcs8::{EncodePrivateKey, LineEnding},
         traits::PublicKeyParts,
     };
     use serde_json::{json, Value};
-    use tonic::Code;
-    use wiremock::{
-        matchers::{method, path},
-        Mock, MockServer, ResponseTemplate,
-    };
+    use tonic::{Request, Status};
 
-    fn rsa_keypair() -> &'static (String, String, String) {
-        static KEYS: std::sync::OnceLock<(String, String, String)> = std::sync::OnceLock::new();
+    use super::{validated_keys, JwtVerifier, DEFAULT_DATA_PLANE_AUDIENCE};
+
+    pub(crate) const ISSUER: &str = "auth-core";
+    pub(crate) const KID: &str = "key-1";
+
+    /// (private PKCS#8 PEM, modulus, exponent), generated once per test binary.
+    pub(crate) fn rsa_keypair() -> &'static (String, String, String) {
+        static KEYS: OnceLock<(String, String, String)> = OnceLock::new();
         KEYS.get_or_init(|| {
             let private = rsa::RsaPrivateKey::new(&mut thread_rng(), 2048).expect("RSA key");
             let public = rsa::RsaPublicKey::from(&private);
@@ -805,6 +817,134 @@ mod tests {
                 base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(public.e().to_bytes_be()),
             )
         })
+    }
+
+    pub(crate) fn now() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("time")
+            .as_secs()
+    }
+
+    /// Sign `claims` as Auth Core does: RS256 with a `kid` header.
+    pub(crate) fn sign(claims: &Value, kid: &str) -> String {
+        let mut header = Header::new(Algorithm::RS256);
+        header.kid = Some(kid.to_owned());
+        encode(
+            &header,
+            claims,
+            &EncodingKey::from_rsa_pem(rsa_keypair().0.as_bytes()).expect("encoding key"),
+        )
+        .expect("JWT")
+    }
+
+    /// A verifier for `audience` that trusts [`rsa_keypair`], built from a JWKS
+    /// through the key validation `JwtVerifier::from_config` applies to Auth
+    /// Core's; only the HTTP fetch is skipped.
+    pub(crate) fn verifier(audience: &str) -> JwtVerifier {
+        let (_, n, e) = rsa_keypair();
+        let jwks: JwkSet = serde_json::from_value(json!({"keys": [{
+            "kty": "RSA", "use": "sig", "alg": "RS256", "kid": KID, "n": n, "e": e
+        }]}))
+        .expect("JWKS");
+        JwtVerifier {
+            issuer: Arc::from(ISSUER),
+            audience: Arc::from(audience),
+            data_plane_audience: Arc::from(DEFAULT_DATA_PLANE_AUDIENCE),
+            leeway_secs: 0,
+            keys: Arc::new(validated_keys(&jwks).expect("usable JWKS")),
+        }
+    }
+
+    /// The payload Auth Core's `issuePlaneToken` signs for a registered service
+    /// principal on `POST /api/<audience>/internal-token`, claim for claim:
+    /// `sub` and `service_id` are `service:<id>`, there is no `user_id`, the
+    /// requested scopes and reason are echoed, and `zdr` is the registry's
+    /// `retentionByAudience[<audience>] == "zdr"`.
+    pub(crate) fn service_principal_claims(
+        audience: &str,
+        org_id: &str,
+        service_id: &str,
+        scopes: &[&str],
+        reason: &str,
+        zdr: bool,
+    ) -> Value {
+        let subject = format!("service:{service_id}");
+        let now = now();
+        json!({
+            "iss": ISSUER, "aud": audience, "sub": &subject,
+            "iat": now, "nbf": now - 5, "exp": now + 300,
+            "org_id": org_id, "principal_type": "service", "service_id": &subject,
+            "reason": reason, "scopes": scopes, "zdr": zdr,
+        })
+    }
+
+    /// The token Model Gateway's `SessionTerminalTokenProvider::terminalize_token`
+    /// gets for `org_id`. `zdr` is `true` because
+    /// `config/plane-service-principals.json` gives `model-gateway` the posture
+    /// `zdr` for `session-core`; Auth Core's audit of the live 2026-09-24 mint
+    /// records exactly this.
+    pub(crate) fn model_gateway_terminalize_claims(org_id: &str) -> Value {
+        service_principal_claims(
+            "session-core",
+            org_id,
+            "model-gateway",
+            &["session:terminalize"],
+            "model-gateway managed-run terminalization",
+            true,
+        )
+    }
+
+    /// An interactive user's token, as Auth Core's session path issues it.
+    pub(crate) fn user_claims(audience: &str, org_id: &str, user_id: &str, zdr: bool) -> Value {
+        let now = now();
+        json!({
+            "iss": ISSUER, "aud": audience, "sub": user_id,
+            "iat": now, "nbf": now - 5, "exp": now + 300,
+            "org_id": org_id, "user_id": user_id, "principal_type": "user",
+            "zdr": zdr,
+        })
+    }
+
+    /// `message` exactly as tonic hands it to a handler served behind
+    /// `with_interceptor(.., verifier)`: the bearer goes through
+    /// [`JwtVerifier::intercept`], whose extensions travel with the message.
+    ///
+    /// # Errors
+    ///
+    /// The interceptor's refusal, as the caller would receive it.
+    #[allow(clippy::result_large_err)]
+    pub(crate) fn authenticate<T>(
+        verifier: &JwtVerifier,
+        token: &str,
+        message: T,
+    ) -> Result<Request<T>, Status> {
+        let mut request = Request::new(());
+        request.metadata_mut().insert(
+            "authorization",
+            format!("Bearer {token}").parse().expect("bearer metadata"),
+        );
+        let (metadata, extensions, ()) = verifier.intercept(request)?.into_parts();
+        Ok(Request::from_parts(metadata, extensions, message))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use jsonwebtoken::{encode, EncodingKey, Header};
+    use rand::thread_rng;
+    use rsa::pkcs8::{EncodePrivateKey, LineEnding};
+    use serde_json::{json, Value};
+    use tonic::Code;
+    use wiremock::{
+        matchers::{method, path},
+        Mock, MockServer, ResponseTemplate,
+    };
+
+    /// One key per test binary, shared with [`super::test_support`].
+    fn rsa_keypair() -> &'static (String, String, String) {
+        super::test_support::rsa_keypair()
     }
 
     fn now() -> u64 {
@@ -1079,6 +1219,36 @@ mod tests {
             .get::<VerifiedIdentity>()
             .expect("identity")
             .zdr());
+    }
+
+    /// The terminalize token Model Gateway really holds, through the verifier
+    /// production builds (JWKS over HTTP): a service identity whose `zdr` is
+    /// the registry's posture, `true`. That marker still keeps it out of every
+    /// generic durable write, `AppendMessage` included; only the atomic save,
+    /// which takes retention from the run, may write with it.
+    #[tokio::test]
+    async fn model_gateways_terminalize_token_is_a_zdr_marked_service_identity() {
+        let verifier = test_verifier("session-core").await;
+        let token = sign(
+            &test_support::model_gateway_terminalize_claims("org-1"),
+            "key-1",
+        );
+        let request =
+            test_support::authenticate(&verifier, &token, ()).expect("Auth Core-issued token");
+        let caller = identity(&request).expect("identity");
+
+        assert!(caller.is_service());
+        assert_eq!(caller.principal_id(), "service:model-gateway");
+        assert_eq!(caller.org_id(), "org-1");
+        assert_eq!(caller.user_id(), None);
+        assert!(caller.has_scope("session:terminalize"));
+        assert!(caller.zdr(), "the registry posture, not the turn's");
+        assert_eq!(
+            authorize_operation(&caller, "session:write")
+                .expect_err("a ZDR-marked credential makes no generic durable write")
+                .code(),
+            Code::FailedPrecondition
+        );
     }
 
     // ── System-owned runs ───────────────────────────────────────────────────

@@ -15,6 +15,8 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -265,29 +267,123 @@ func (c *Client) List(ctx context.Context, orgID, userID string, topK int32) ([]
 	return hits, nil
 }
 
-// Delete removes a single long-term memory by id.
+// Delete removes a single long-term memory owned by userID in orgID and
+// reports whether one was removed.
 //
-// orgID and userID are accepted for interface parity and observability, but
-// the agent-memory-server delete endpoint takes only an id (see
-// redis.github.io/agent-memory-server) -- it has no namespace/user filter to
-// enforce here. This is safe in practice because the only caller,
-// session-core's MemoryGrpc, always verifies ownership of memoryID against
-// its own `agent_memory` table (scoped to org_id + owner) before ever
-// reaching this call, and today's ids are correlated 1:1 across both stores
-// (see memory.proto's IndexMemoryRequest.memory_id) -- so a caller can only
-// ever cause this delete to run for an id they already own locally.
+// The agent-memory-server delete endpoint takes only ids and deletes them
+// across every namespace, so the scope is checked first, the same scope Put
+// writes (namespace = orgID, user_id = userID) and List reads: the record is
+// fetched by id and must carry both. A memory that does not exist, belongs to
+// another org or user, or is owned by nobody (an org-level memory) returns
+// (false, nil) and nothing is deleted. The caller cannot tell those cases
+// apart, as with memstore and pgstore.
+//
+// session-core calls this even when its durable row is already gone (a
+// memory can exist only in this tier), so this check is the only thing that
+// keeps one user from erasing another user's semantic memory by id.
+//
+// deleted reflects what the server actually removed, taken from its
+// "deleted N memories" acknowledgement: a memory removed by someone else
+// between the check and the delete reports false.
 func (c *Client) Delete(ctx context.Context, orgID, userID, memoryID string) (bool, error) {
-	_ = orgID
-	_ = userID
 	if memoryID == "" {
 		return false, fmt.Errorf("agentmemory delete: memoryID is required")
 	}
-	values := url.Values{}
-	values.Add("memory_ids", memoryID)
-	if _, err := c.delete(ctx, "/v1/long-term-memory?"+values.Encode()); err != nil {
+	if orgID == "" || userID == "" {
+		return false, nil
+	}
+	record, found, err := c.getMemory(ctx, memoryID)
+	if err != nil {
 		return false, err
 	}
-	return true, nil
+	if !found || record.ID != memoryID || record.Namespace != orgID || record.UserID != userID {
+		return false, nil
+	}
+
+	values := url.Values{}
+	values.Add("memory_ids", memoryID)
+	raw, err := c.delete(ctx, "/v1/long-term-memory?"+values.Encode())
+	if err != nil {
+		return false, err
+	}
+	if count, ok := deletedCount(raw); ok {
+		return count > 0, nil
+	}
+	// An acknowledgement this client cannot read: the record is deleted
+	// exactly when it is gone now.
+	_, stillThere, err := c.getMemory(ctx, memoryID)
+	if err != nil {
+		return false, err
+	}
+	return !stillThere, nil
+}
+
+// storedMemory is the part of a stored long-term memory record that Delete
+// checks the caller's scope against.
+type storedMemory struct {
+	ID        string `json:"id"`
+	Namespace string `json:"namespace"`
+	UserID    string `json:"user_id"`
+}
+
+// getMemory fetches one long-term memory by id. found is false when the
+// server has no memory with that id (404).
+func (c *Client) getMemory(ctx context.Context, memoryID string) (storedMemory, bool, error) {
+	path := "/v1/long-term-memory/" + url.PathEscape(memoryID)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+path, nil)
+	if err != nil {
+		return storedMemory{}, false, fmt.Errorf("agentmemory new request: %w", err)
+	}
+	req.Header.Set("Accept", "application/json")
+	if c.apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+c.apiKey)
+	}
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return storedMemory{}, false, fmt.Errorf("agentmemory GET %s: %w", path, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return storedMemory{}, false, fmt.Errorf("agentmemory read body: %w", err)
+	}
+	if resp.StatusCode == http.StatusNotFound {
+		return storedMemory{}, false, nil
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return storedMemory{}, false, fmt.Errorf("agentmemory GET %s: status %d: %s", path, resp.StatusCode, strings.TrimSpace(string(data)))
+	}
+	var record storedMemory
+	if err := json.Unmarshal(data, &record); err != nil {
+		return storedMemory{}, false, fmt.Errorf("agentmemory decode memory: %w", err)
+	}
+	return record, true, nil
+}
+
+// deletedCountPattern reads the count out of the delete endpoint's
+// acknowledgement, `{"status": "ok, deleted N memories"}`.
+var deletedCountPattern = regexp.MustCompile(`\bdeleted (\d+) memor`)
+
+// deletedCount returns how many memories a delete acknowledgement reports
+// removed. ok is false when the body does not say.
+func deletedCount(raw []byte) (count int, ok bool) {
+	var ack struct {
+		Status string `json:"status"`
+	}
+	if err := json.Unmarshal(raw, &ack); err != nil {
+		return 0, false
+	}
+	match := deletedCountPattern.FindStringSubmatch(ack.Status)
+	if match == nil {
+		return 0, false
+	}
+	count, err := strconv.Atoi(match[1])
+	if err != nil {
+		return 0, false
+	}
+	return count, true
 }
 
 // scoreFromDist maps a vector distance (0 = identical) to a [0,1] similarity

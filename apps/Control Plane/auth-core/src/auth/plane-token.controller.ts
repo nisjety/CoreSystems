@@ -52,13 +52,19 @@ import type { Request } from 'express';
 import { DirectNatsService } from '../nats/direct-nats.service';
 import { issuedTokenAuditIdentity } from './audit-event-identity';
 import { auth } from './auth';
-import { ConvexTokenService } from './convex-token.service';
+import {
+  ConvexTokenService,
+  type VerifiedPlaneSubjectToken,
+  type PlaneAudience,
+} from './convex-token.service';
 import { resolveInteractiveRetentionPosture } from './interactive-retention-policy';
 import {
   authorizePlaneServicePrincipal,
+  authorizePlaneServiceTokenExchange,
   loadPlaneServicePrincipalRegistry,
   ServicePrincipalConfigurationError,
   type AuthorizedPlaneServicePrincipal,
+  type AuthorizedPlaneServiceTokenExchange,
 } from './plane-service-principal';
 import {
   resolveCanonicalTokenContext,
@@ -92,6 +98,40 @@ interface PlaneInternalTokenBody {
   scopes?: readonly string[];
   reason?: string;
 }
+
+/**
+ * Delegated-identity token exchange (auth-core §1). RFC 8693 shapes the
+ * body deliberately follows: `subjectToken` is the caller's own
+ * already-verified `aud=session-core` bearer (execution-core's delegated
+ * session bearer), never a caller-selected identity.
+ */
+interface PlaneTokenExchangeBody {
+  orgId?: string;
+  scopes?: readonly string[];
+  reason?: string;
+  subjectToken?: string;
+  subjectTokenType?: string;
+}
+
+const TOKEN_EXCHANGE_SUBJECT_TOKEN_TYPE =
+  'urn:ietf:params:oauth:token-type:jwt';
+
+/**
+ * Hard-coded, not registry-derived (T-3): the only subject-token audience
+ * `verifyPlaneSubjectToken` will ever cryptographically accept for a token
+ * exchange, regardless of what any principal's `tokenExchange` registry
+ * entry claims. A registry entry can narrow which SERVICE PRINCIPALS may
+ * use this capability at all, but can never widen which subject audiences
+ * are acceptable in the first place.
+ */
+const TOKEN_EXCHANGE_ALLOWED_SUBJECT_AUDIENCES: readonly PlaneAudience[] = [
+  'session-core',
+];
+
+/** Shorter than every audience's normal `/internal-token` default (300s) —
+ * minted fresh per tool call, never cached, for a read that completes in
+ * one HTTP round trip. See design-2 §1.3. */
+const TOKEN_EXCHANGE_TTL_SECONDS = 90;
 
 @ApiTags('Plane Auth')
 @Controller('api')
@@ -327,6 +367,152 @@ export class PlaneTokenController {
       );
       throw new ServiceUnavailableException(
         'Service-principal issuance audit is unavailable',
+      );
+    }
+    return response;
+  }
+
+  /**
+   * RFC 8693-style token exchange (delegated-identity design 2, §1). A
+   * registered service principal presents its own, already-independently-
+   * verified `aud=session-core` bearer as `subjectToken` and receives back a
+   * new, narrower, short-lived token for `audience` that additionally
+   * carries `acting_user_id` — the subject token's own user, never a
+   * caller-selected value.
+   *
+   * Distinct code path from `issueInternalToken` above (T-5): the minted
+   * token's `zdr` is the SUBJECT token's own verified claim, not the
+   * registry's `retentionByAudience` default, and reaching this endpoint at
+   * all additionally requires the principal's `tokenExchange` registry
+   * field to name the subject token's audience for this target — absent by
+   * default, so no currently-registered principal gains this capability
+   * until a deployment explicitly opts it in.
+   */
+  @Post(':audience/token-exchange')
+  @ApiOperation({
+    summary:
+      'RFC 8693 token exchange: mint a delegated plane token bound to a verified subject token\'s acting user',
+  })
+  async issueTokenExchange(
+    @Param('audience') audience: string,
+    @NestHeaders('x-service-id') serviceId: string | undefined,
+    @NestHeaders('x-service-api-key') credential: string | undefined,
+    @Body() body: PlaneTokenExchangeBody,
+  ) {
+    if (!this.convexTokenService.isKnownPlaneAudience(audience)) {
+      throw new NotFoundException(`Unknown plane audience: ${audience}`);
+    }
+
+    const subjectToken = (body.subjectToken ?? '').trim();
+    const subjectTokenType = (body.subjectTokenType ?? '').trim();
+    if (!subjectToken || subjectTokenType !== TOKEN_EXCHANGE_SUBJECT_TOKEN_TYPE) {
+      throw new BadRequestException(
+        'subjectToken and subjectTokenType are required for token exchange',
+      );
+    }
+
+    let subject: VerifiedPlaneSubjectToken;
+    try {
+      subject = this.convexTokenService.verifyPlaneSubjectToken(
+        subjectToken,
+        TOKEN_EXCHANGE_ALLOWED_SUBJECT_AUDIENCES,
+      );
+    } catch {
+      throw new UnauthorizedException('Subject token is not verifiable');
+    }
+
+    const orgId = (body.orgId ?? '').trim();
+    if (!orgId || orgId !== subject.orgId) {
+      throw new BadRequestException(
+        'Request orgId does not match the subject token',
+      );
+    }
+
+    const scopes = Array.isArray(body.scopes) ? body.scopes : [];
+    const reason = (body.reason ?? '').trim();
+    let principal: AuthorizedPlaneServiceTokenExchange;
+    try {
+      principal = authorizePlaneServiceTokenExchange(
+        loadPlaneServicePrincipalRegistry(),
+        {
+          serviceId: serviceId ?? '',
+          credential: credential ?? '',
+          audience,
+          orgId,
+          requestedScopes: scopes,
+          reason,
+          subjectAudience: subject.audience,
+        },
+      );
+    } catch (error) {
+      if (error instanceof ServicePrincipalConfigurationError) {
+        this.logger.error(
+          'Service-principal registry unavailable; refusing token exchange',
+        );
+        throw new ServiceUnavailableException(
+          'Service-principal issuance is unavailable',
+        );
+      }
+      throw new ForbiddenException(
+        'Service principal is not authorized for this token exchange',
+      );
+    }
+
+    const response = this.convexTokenService.issuePlaneToken(audience, {
+      userId: principal.subject,
+      orgId: principal.orgId,
+      scopes: principal.scopes,
+      principalType: 'service',
+      serviceId: principal.serviceId,
+      reason: principal.reason,
+      actingUserId: subject.userId,
+      // Deliberately the SUBJECT token's own zdr, not the registry default
+      // — bypasses issuedTokenZdr's normal service-principal-registry
+      // sourcing on purpose (T-5). A ZDR-scoped user's run can never mint a
+      // persistent-posture delegated token through this path.
+      retentionPosture: { zdr: subject.zdr, authority: 'service-principal-policy' },
+      ttlSecondsOverride: TOKEN_EXCHANGE_TTL_SECONDS,
+    });
+
+    const event = 'plane_service_token_exchanged';
+    let audited = false;
+    try {
+      const auditIdentity = issuedTokenAuditIdentity(
+        response.token,
+        'plane-token',
+      );
+      await this.directNats.publishAuditDurable(
+        `verevon.audit.v2.control.auth-core.${event}`,
+        {
+          occurred_at: auditIdentity.occurredAt,
+          event_id: auditIdentity.eventId,
+          org_id: principal.orgId,
+          actor_role: 'service',
+          plane: 'control',
+          producer: 'auth-core',
+          event,
+          subject: principal.subject,
+          resource_id: audience,
+          outcome: 'ok',
+          details: {
+            audience,
+            scopes: principal.scopes,
+            reason: principal.reason,
+            acting_user_id: subject.userId,
+            subject_audience: subject.audience,
+          },
+        },
+      );
+      audited = true;
+    } catch {
+      // Missing/failed PubAck preserves the endpoint's fail-closed contract.
+    }
+    if (!audited) {
+      this.logger.error(
+        'Durable audit unavailable; refusing token-exchange issuance',
+      );
+      throw new ServiceUnavailableException(
+        'Token-exchange issuance audit is unavailable',
       );
     }
     return response;

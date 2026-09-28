@@ -1,0 +1,1155 @@
+diff --git a/src/features/core/components/CoreShell.tsx b/src/features/core/components/CoreShell.tsx
+--- a/src/features/core/components/CoreShell.tsx
++++ b/src/features/core/components/CoreShell.tsx
+@@ -6,7 +6,7 @@
+ import { CoreNavbar } from '@/features/core/components/CoreNavbar'
+ import { CoreSidebar, SIDEBAR_EXPANDED_WIDTH, SIDEBAR_MINIMIZED_WIDTH } from '@/features/core/components/CoreSidebar'
+ import { FeedbackWidget } from '@/features/core/components/FeedbackWidget'
+-import { chatAppearanceTokens } from '@/features/chat/lib/chat-appearance-preview'
++import { chatAppearanceActive, chatAppearanceTokens } from '@/features/chat/lib/chat-appearance-preview'
+ import { OrgDeletionBanner } from '@/features/core/components/OrgDeletionBanner'
+ import {
+   fallbackWorkspaceIdentity,
+@@ -87,7 +87,8 @@
+     <AgentsProvider routeLocation={location}>
+       <div
+         class="core-product-shell"
+-        data-chat-appearance={activeRoute() === '/chat' ? chatAppearanceTokens() : undefined}
++        data-chat-appearance={activeRoute() === '/chat' ? chatAppearanceTokens() : chatAppearanceActive('navigation') ? 'navigation' : undefined}
++        data-sidebar-expanded={sidebarExpanded() ? 'true' : 'false'}
+         style={{
+           '--dashboard-navbar-height': deletionBannerVisible()
+             ? `${56 + DELETION_BANNER_HEIGHT_PX}px`
+@@ -105,12 +106,17 @@
+           searchOpen={searchOpen()}
+           onSearchOpenChange={setSearchOpen}
+           workspace={workspace()}
++          sidebarExpanded={sidebarExpanded()}
++          onSidebarToggle={() => setSidebarExpanded((expanded) => !expanded)}
+         />
+         <Show when={deletionBannerVisible()}>
+           <OrgDeletionBanner
+             status={deletionStatus.latest ?? deletionStatus()}
+             onRefetch={() => void refetchDeletionStatus()}
+           />
++        </Show>
++        <Show when={chatAppearanceActive('navigation') && sidebarExpanded()}>
++          <button type="button" class="core-sidebar-mobile-scrim" aria-label="Close navigation" onClick={() => setSidebarExpanded(false)} />
+         </Show>
+         <CoreSidebar
+           activeRoute={activeRoute()}
+diff --git a/src/features/core/components/CoreNavbar.tsx b/src/features/core/components/CoreNavbar.tsx
+--- a/src/features/core/components/CoreNavbar.tsx
++++ b/src/features/core/components/CoreNavbar.tsx
+@@ -9,6 +9,8 @@
+   Languages,
+   MessageSquareMore,
+   MoonStar,
++  PanelLeftClose,
++  PanelLeftOpen,
+   Search,
+   Slash,
+   Sparkles,
+@@ -41,6 +43,8 @@
+ import { useI18n } from '@/shared/i18n'
+ import { cn } from '@/shared/lib/cn'
+ import { ChatAppearancePreview } from '@/features/chat/components/ChatAppearancePreview'
++import { chatAppearanceActive } from '@/features/chat/lib/chat-appearance-preview'
++import { CoreNavbarMore } from './CoreNavbarMore'
+ 
+ type OpenPanel = 'assistant' | 'messages' | 'notifications' | 'calendar' | 'profile' | 'workspace' | null
+ 
+@@ -55,6 +59,8 @@
+   onNavbarRefresh?: () => void
+   onSearchOpenChange?: (open: boolean) => void
+   searchOpen?: boolean
++  sidebarExpanded?: boolean
++  onSidebarToggle?: () => void
+   workspace: WorkspaceIdentity
+ }) {
+   let headerRef: HTMLElement | undefined
+@@ -64,6 +70,14 @@
+   const [openPanel, setOpenPanel] = createSignal<OpenPanel>(null)
+   const [theme, setTheme] = createSignal<ThemePayload['theme']>('system')
+   const [localSearchOpen, setLocalSearchOpen] = createSignal(false)
++  const refinedNavigation = () => chatAppearanceActive('navigation') && Boolean(props.onSidebarToggle)
++  const changeTheme = (nextTheme: ThemePayload['theme']) => {
++    setTheme(nextTheme)
++    applyThemePreference(nextTheme)
++    void saveNavbarTheme(nextTheme, props.workspace.accentColor)
++      .then(() => props.onNavbarRefresh?.())
++      .catch(() => undefined)
++  }
+   const labels = () => getNavbarLabels(props.activeRoute, i18n.locale())
+   const profileInitial = () => (props.workspace.userName ?? props.workspace.userEmail ?? props.workspace.name).trim().charAt(0).toUpperCase() || props.workspace.initial
+   const messageUnreadCount = () => props.navbarData?.notifications.messages.filter((message) => !message.read).length ?? 0
+@@ -153,6 +167,7 @@
+       <header ref={headerRef} class="dashboard-navbar-bg core-navbar">
+         <div class="core-navbar__inner">
+           <div class="core-navbar__left">
++            <Show when={!refinedNavigation()}>
+             <a
+               href="/dashboard"
+               link
+@@ -167,11 +182,22 @@
+                 class="core-navbar__home-logo"
+               />
+             </a>
++            </Show>
+ 
+             <HistoryNav
+               onBack={() => window.history.back()}
+               onForward={() => window.history.forward()}
+             />
++
++            <Show when={refinedNavigation()}>
++              <button type="button" class="core-navbar__sidebar-toggle"
++                aria-label={props.sidebarExpanded ? i18n.tr('Slå sammen sidefelt', 'Collapse sidebar') : i18n.tr('Utvid sidefelt', 'Expand sidebar')}
++                title={props.sidebarExpanded ? i18n.tr('Slå sammen sidefelt', 'Collapse sidebar') : i18n.tr('Utvid sidefelt', 'Expand sidebar')}
++                aria-expanded={props.sidebarExpanded ? 'true' : 'false'} aria-controls="core-workspace-sidebar"
++                onClick={() => props.onSidebarToggle?.()}>
++                <Show when={props.sidebarExpanded} fallback={<PanelLeftOpen size={20} />}><PanelLeftClose size={20} /></Show>
++              </button>
++            </Show>
+ 
+             <Breadcrumb
+               moduleLabel={labels().moduleLabel}
+@@ -189,7 +215,7 @@
+           </div>
+ 
+           <div class="core-navbar__actions">
+-            <Show when={import.meta.env.DEV && props.activeRoute === '/chat'}>
++            <Show when={import.meta.env.DEV && props.activeRoute === '/chat' && !refinedNavigation()}>
+               <ChatAppearancePreview />
+             </Show>
+             <NavbarActionButton
+@@ -200,7 +226,7 @@
+               <Search class="size-4" strokeWidth={1.9} />
+             </NavbarActionButton>
+ 
+-            <div class="core-navbar__action-group">
++            <Show when={refinedNavigation()} fallback={<div class="core-navbar__action-group">
+               <NavDivider />
+ 
+               <NavbarActionButton
+@@ -290,7 +316,24 @@
+                   </Show>
+                 </span>
+               </button>
+-            </div>
++            </div>}>
++              <div class="core-navbar__action-group core-navbar__action-group--refined">
++                <button type="button" aria-label={i18n.tr('Åpne profilmeny', 'Open profile menu')} title={i18n.tr('Åpne profilmeny', 'Open profile menu')}
++                  onClick={() => openExclusivePanel('profile')} class="core-navbar__profile">
++                  <span aria-hidden="true" class="core-navbar__profile-ring" />
++                  <span class="core-navbar__profile-avatar"><Show when={props.workspace.userAvatar} fallback={profileInitial()}>{(src) => <img class="core-navbar__profile-avatar-img" src={src()} alt="" />}</Show></span>
++                </button>
++                <BadgeButton count={notificationUnreadCount()} label={i18n.tr('Varsler', 'Notifications')} i18n={i18n}>
++                  <NavbarActionButton label={i18n.tr(`${notificationUnreadCount()} uleste varsler`, `${notificationUnreadCount()} unread notifications`)} active={openPanel() === 'notifications'} onClick={() => openExclusivePanel('notifications')}><Bell size={19} strokeWidth={1.8} /></NavbarActionButton>
++                </BadgeButton>
++                <NavbarActionButton label={i18n.tr('Kalender', 'Calendar')} active={openPanel() === 'calendar'} onClick={() => openExclusivePanel('calendar')}><CalendarDays size={19} strokeWidth={1.8} /></NavbarActionButton>
++                <BadgeButton count={messageUnreadCount()} label={i18n.tr('Hurtigmeldinger', 'Quick messages')} i18n={i18n}>
++                  <NavbarActionButton label={i18n.tr(`${messageUnreadCount()} uleste meldinger`, `${messageUnreadCount()} unread messages`)} active={openPanel() === 'messages'} onClick={() => openExclusivePanel('messages')}><MessageSquareMore size={19} strokeWidth={1.8} /></NavbarActionButton>
++                </BadgeButton>
++                <NavDivider />
++                <CoreNavbarMore theme={theme()} onThemeChange={changeTheme} onAssistant={() => openExclusivePanel('assistant')} />
++              </div>
++            </Show>
+ 
+             <Show when={visibleNavbarPanel()}>
+               {(panel) => (
+@@ -515,7 +558,7 @@
+       <Search class="verevon-navbar-search-icon" strokeWidth={1.8} />
+       <span class="verevon-navbar-search-label">{i18n.tr('Søk i kunnskapsbasen', 'Search knowledge base')}</span>
+       <span class="verevon-navbar-shortcut-key verevon-navbar-shortcut-key-min">/</span>
+-      <span class="verevon-navbar-shortcut-key verevon-navbar-shortcut-key-wide">CMD+K</span>
++      <span class="verevon-navbar-shortcut-key verevon-navbar-shortcut-key-wide">{typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.platform) ? '⌘ K' : 'Ctrl K'}</span>
+     </button>
+   )
+ }
+diff --git a/src/features/core/components/CoreSidebar.tsx b/src/features/core/components/CoreSidebar.tsx
+--- a/src/features/core/components/CoreSidebar.tsx
++++ b/src/features/core/components/CoreSidebar.tsx
+@@ -4,6 +4,7 @@
+   ChevronDown,
+   ChevronRight,
+   CircleUserRound,
++  Folder,
+   Mail,
+   MessageSquarePlus,
+   MoreVertical,
+@@ -67,6 +68,9 @@
+ import { cn } from '@/shared/lib/cn'
+ import { shouldShowWorkspaceAdminNavigation } from '@/shared/session/access'
+ import { getSession } from '@/shared/session/session-store'
++import { chatAppearanceActive } from '@/features/chat/lib/chat-appearance-preview'
++import { FilledRailIcon } from './FilledRailIcon'
++import { ChatSidebarOrganizer } from './sidebar/ChatSidebarOrganizer'
+ 
+ export const SIDEBAR_MINIMIZED_WIDTH = 60
+ export const SIDEBAR_EXPANDED_WIDTH = 320
+@@ -94,7 +98,7 @@
+   const openSection = () => props.onExpandedChange(true)
+ 
+   return (
+-    <aside class="verevon-sidebar-themed core-sidebar verevon-sidebar-type" style={{ width: width() }} aria-label={i18n.tr('Primærnavigasjon', 'Primary navigation')}>
++    <aside id="core-workspace-sidebar" class="verevon-sidebar-themed core-sidebar verevon-sidebar-type" style={{ width: width() }} aria-label={i18n.tr('Primærnavigasjon', 'Primary navigation')}>
+       <div class="core-sidebar__body">
+         <div class="core-sidebar__rail">
+           <div class="core-sidebar__top-actions">
+@@ -528,7 +532,7 @@
+     }
+   }
+ 
+-  const sessionRow = (item: ChatThreadHistoryItem) => (
++  const sessionRow = (item: ChatThreadHistoryItem, onMoveToProject?: () => void) => (
+     <div class="core-chat-session-row">
+       <Show
+         when={renamingThreadId() !== item.threadId}
+@@ -636,6 +640,7 @@
+           open={openMenuThreadId() === item.threadId}
+           onOpenChange={(open) => setOpenMenuThreadId(open ? item.threadId : null)}
+           onRenameStart={() => startRename(item)}
++          onMoveToProject={onMoveToProject}
+           onDelete={() => void deleteThread(item.threadId)}
+         />
+       </Show>
+@@ -644,20 +649,23 @@
+ 
+   return (
+     <div class="core-chat-sidebar">
++      <Show when={!chatAppearanceActive('organizer')}>
+       <a href="/chat" link class="core-chat-sidebar__new" onClick={startNewChat}>
+         <span>
+           <MessageSquarePlus class="size-[15px]" strokeWidth={1.75} />
+         </span>
+         Ny samtale
+       </a>
++      </Show>
+ 
+       {/* The empty-state fallback below already surfaces `error()` when there
+           is nothing else to show. This banner covers the opposite case -- a
+           pin/rename/delete failing while OTHER threads are still listed,
+           which the fallback branch never renders at all. */}
+-      <Show when={error() && sessionCount() > 0}>
++      <Show when={error() && (sessionCount() > 0 || chatAppearanceActive('organizer'))}>
+         <p class="core-sidebar-empty verevon-sidebar-row-normal" role="alert">{error()}</p>
+       </Show>
++      <Show when={chatAppearanceActive('organizer')} fallback={
+       <nav class="core-chat-sidebar__sessions" aria-label={i18n.tr('Chat-samtaler', 'Chat conversations')}>
+         <Show when={!loading()} fallback={<div class="core-sidebar-empty verevon-sidebar-row-normal">{i18n.tr('Laster samtaler ...', 'Loading conversations ...')}</div>}>
+           <Show
+@@ -666,12 +674,15 @@
+           >
+             <Show when={pinnedSessions().length > 0}>
+               <span class="verevon-sidebar-group-title">{i18n.tr('Pinnet', 'Pinned')}</span>
+-              <For each={pinnedSessions()}>{sessionRow}</For>
++              <For each={pinnedSessions()}>{(item) => sessionRow(item)}</For>
+             </Show>
+-            <For each={unpinnedSessions()}>{sessionRow}</For>
++            <For each={unpinnedSessions()}>{(item) => sessionRow(item)}</For>
+           </Show>
+         </Show>
+       </nav>
++      }>
++        <ChatSidebarOrganizer sessions={visibleSessions()} loading={loading()} onNewChat={startNewChat} renderRow={sessionRow} />
++      </Show>
+ 
+       <button type="button" class="core-chat-sidebar__clear" onClick={clearHistory}>
+         <Trash2 class="size-3.5" />
+@@ -700,6 +711,7 @@
+   open: boolean
+   onOpenChange: (open: boolean) => void
+   onRenameStart: () => void
++  onMoveToProject?: () => void
+   onDelete: () => void
+ }) {
+   const i18n = useI18n()
+@@ -775,6 +787,14 @@
+               {i18n.tr('Gi nytt navn', 'Rename')}
+             </button>
+           </li>
++          <Show when={props.onMoveToProject}>
++            <li role="presentation">
++              <button type="button" role="menuitem" class="core-chat-session__menu-item" onClick={() => { close(false); props.onMoveToProject?.() }}>
++                <Folder class="size-3.5" />
++                {i18n.tr('Flytt til prosjekt', 'Move to project')}
++              </button>
++            </li>
++          </Show>
+           <li role="presentation">
+             <SpaceConfirmButton
+               role="menuitem"
+@@ -1055,7 +1075,9 @@
+       title={props.section.label}
+       class={cn('core-mini-nav-button', props.active ? 'verevon-sidebar-mini-active' : '')}
+     >
+-      <Dynamic component={props.section.icon} class="size-[18px]" strokeWidth={props.active ? 2 : 1.6} />
++      <Show when={props.active && chatAppearanceActive('navigation')} fallback={<Dynamic component={props.section.icon} class="size-[18px]" strokeWidth={props.active ? 2 : 1.6} />}>
++        <FilledRailIcon name={props.section.id} />
++      </Show>
+     </a>
+   )
+ }
+@@ -1071,7 +1093,7 @@
+       title={props.i18n.tr('Konto', 'Account')}
+       class={cn('core-mini-nav-button', props.active ? 'verevon-sidebar-mini-active' : '')}
+     >
+-      {props.children}
++      <Show when={props.active && chatAppearanceActive('navigation')} fallback={props.children}><FilledRailIcon name="account" /></Show>
+     </a>
+   )
+ }
+diff --git a/src/features/dashboard/home/DashboardComposer.tsx b/src/features/dashboard/home/DashboardComposer.tsx
+--- a/src/features/dashboard/home/DashboardComposer.tsx
++++ b/src/features/dashboard/home/DashboardComposer.tsx
+@@ -1,3 +1,4 @@
++import { chatAppearanceActive } from "@/features/chat/lib/chat-appearance-preview";
+ import { useNavigate } from "@solidjs/router";
+ import {
+ 	AlignCenter,
+@@ -2841,10 +2842,10 @@
+ 								setSuggestionsOpen(false);
+ 							}}
+ 							variant="chip"
++							class={props.appearance === "chat" && chatAppearanceActive("context") ? "dashboard-composer-context-button" : undefined}
+ 													>
+ 														<BookOpen class="size-3.5" />
+-													</ComposerIconButton>
+-													<span class={`dashboard-composer-context-label${conversationOnly() ? ' dashboard-composer-context-label--restricted' : ''}`} aria-hidden="true">
++													<Show when={props.appearance === 'chat' && chatAppearanceActive('context')}><span class={`dashboard-composer-context-label${conversationOnly() ? ' dashboard-composer-context-label--restricted' : ''}`} aria-hidden="true">
+ 														{conversationOnly()
+ 															? i18n.tr("Kun samtalen", "Conversation only")
+ 															: retrievalScope() === 'knowledge_only'
+@@ -2852,7 +2853,17 @@
+ 																: retrievalScope() === 'web_only'
+ 																	? i18n.tr("Kun nett", "Web only")
+ 																	: browseWeb() ? i18n.tr("Kunnskap + nett", "Knowledge + web") : i18n.tr("Kunnskap", "Knowledge")}
+-													</span>
++													</span></Show>
++													</ComposerIconButton>
++													<Show when={!(props.appearance === 'chat' && chatAppearanceActive('context'))}><span class={`dashboard-composer-context-label${conversationOnly() ? ' dashboard-composer-context-label--restricted' : ''}`} aria-hidden="true">
++														{conversationOnly()
++															? i18n.tr("Kun samtalen", "Conversation only")
++															: retrievalScope() === 'knowledge_only'
++																? i18n.tr("Kun organisasjon", "Organization only")
++																: retrievalScope() === 'web_only'
++																	? i18n.tr("Kun nett", "Web only")
++																	: browseWeb() ? i18n.tr("Kunnskap + nett", "Knowledge + web") : i18n.tr("Kunnskap", "Knowledge")}
++													</span></Show>
+ 						<Show when={contextScopeOpen()}>
+ 							<div class="dashboard-composer-context-panel verevon-popover" role="dialog" aria-label={i18n.tr("Kontekst for svaret", "Answer context")}>
+ 								<div class="dashboard-composer-context-panel__heading">
+@@ -5640,6 +5651,7 @@
+ type ComposerIconButtonVariant = "chip" | "toolbar";
+ 
+ function ComposerIconButton(props: {
++	class?: string;
+ 	active?: boolean;
+ 	/** For returning focus here, e.g. when a dialog this button opened closes. */
+ 	buttonRef?: (element: HTMLButtonElement) => void;
+@@ -5683,6 +5695,7 @@
+ 			}}
+ 			class={cn(
+ 				baseClass(),
++				props.class,
+ 				props.active ? `${baseClass()}--active` : "",
+ 			)}
+ 		>
+diff --git a/src/features/chat/lib/chat-appearance-preview.ts b/src/features/chat/lib/chat-appearance-preview.ts
+--- a/src/features/chat/lib/chat-appearance-preview.ts
++++ b/src/features/chat/lib/chat-appearance-preview.ts
+@@ -2,23 +2,23 @@
+ import { readClientJson, removeClientValue, writeClientJson } from '@/shared/session/client-storage'
+ 
+ export const CHAT_APPEARANCE_KEY = 'verevon.chat-appearance-preview.v1'
+-export const chatAppearanceKeys = ['welcome', 'dock', 'composer', 'history', 'navigation'] as const
++export const chatAppearanceKeys = ['welcome', 'dock', 'composer', 'history', 'navigation', 'organizer', 'context'] as const
+ export type ChatAppearanceKey = typeof chatAppearanceKeys[number]
+ export type ChatAppearanceChoices = Record<ChatAppearanceKey, boolean>
+ 
+ const original: ChatAppearanceChoices = {
+-  welcome: false, dock: false, composer: false, history: false, navigation: false,
++  welcome: false, dock: false, composer: false, history: false, navigation: false, organizer: false, context: false,
+ }
+ 
+-function isChoices(value: unknown): value is ChatAppearanceChoices {
++function isChoices(value: unknown): value is Partial<ChatAppearanceChoices> {
+   return typeof value === 'object' && value !== null &&
+-    chatAppearanceKeys.every((key) => typeof (value as Record<string, unknown>)[key] === 'boolean')
++    chatAppearanceKeys.every((key) => !(key in value) || typeof (value as Record<string, unknown>)[key] === 'boolean')
+ }
+ 
+ // This experiment is opt-in and local to the development browser. Production
+ // always renders the existing appearance, even if this key exists in storage.
+ export const [chatAppearanceChoices, setChoices] = createSignal<ChatAppearanceChoices>(
+-  import.meta.env.DEV ? readClientJson(CHAT_APPEARANCE_KEY, isChoices) ?? original : original,
++  import.meta.env.DEV ? { ...original, ...readClientJson(CHAT_APPEARANCE_KEY, isChoices) } : original,
+ )
+ export const [comparingOriginal, compareChatOriginal] = createSignal(false)
+ 
+diff --git a/src/features/chat/components/ChatAppearancePreview.tsx b/src/features/chat/components/ChatAppearancePreview.tsx
+--- a/src/features/chat/components/ChatAppearancePreview.tsx
++++ b/src/features/chat/components/ChatAppearancePreview.tsx
+@@ -11,19 +11,22 @@
+   type ChatAppearanceKey,
+ } from '../lib/chat-appearance-preview'
+ import './chat-appearance-preview.css'
++import './chat-appearance-refinements.css'
+ 
+ /** Development-only appearance comparison. No workspace settings or chat
+  * state are written, and toggles leave the mounted composer intact. */
+-export function ChatAppearancePreview() {
++export function ChatAppearancePreview(props: { embedded?: boolean } = {}) {
+   const i18n = useI18n()
+   let root: HTMLDetailsElement | undefined
+   let trigger: HTMLElement | undefined
+   const options = (): { key: ChatAppearanceKey; label: string; description: string }[] => [
+-    { key: 'welcome', label: i18n.tr('Enklere velkomst', 'Simpler welcome'), description: i18n.tr('Sentrert hilsen, eksempler ved behov.', 'Centered greeting, prompt ideas on demand.') },
++    { key: 'welcome', label: i18n.tr('Enklere velkomst', 'Simpler welcome'), description: i18n.tr('Venstrestilt hilsen, eksempler ved behov.', 'Left-aligned greeting, prompt ideas on demand.') },
+     { key: 'dock', label: i18n.tr('Skrivefelt nederst', 'Bottom composer'), description: i18n.tr('Mer luft, skrivefeltet nær bunnen.', 'More breathing room, input near the bottom.') },
+     { key: 'composer', label: i18n.tr('Flatere skrivefelt', 'Flatter composer'), description: i18n.tr('Samlet flate med diskrete kanter.', 'One surface with subtle edges.') },
+     { key: 'history', label: i18n.tr('Kompakt historikk', 'Compact history'), description: i18n.tr('Renere rader, datoer ved pek eller fokus.', 'Cleaner rows, dates on hover or focus.') },
+-    { key: 'navigation', label: i18n.tr('Roligere navigasjon', 'Softer navigation'), description: i18n.tr('Færre rammer rundt de samme kontrollene.', 'Less framing around the same controls.') },
++    { key: 'navigation', label: i18n.tr('Roligere navigasjon', 'Softer navigation'), description: i18n.tr('Tydelig søk, sidefeltknapp og en Mer-meny.', 'Clear search, sidebar toggle and a More menu.') },
++    { key: 'organizer', label: i18n.tr('Organiser samtaler', 'Chat organizer'), description: i18n.tr('Søk, sorter, grupper og samle i prosjekter.', 'Search, sort, group and organize into projects.') },
++    { key: 'context', label: i18n.tr('Samlet kontekstknapp', 'Combined context button'), description: i18n.tr('Ikon og kunnskapstekst i samme knapp.', 'Knowledge icon and text inside one button.') },
+   ]
+ 
+   createEffect(() => undefined, () => {
+@@ -44,7 +47,7 @@
+   })
+ 
+   return (
+-    <details ref={root} class="chat-appearance-preview">
++    <details ref={root} class={`chat-appearance-preview${props.embedded ? ' chat-appearance-preview--embedded' : ''}`}>
+       <summary ref={trigger} title={i18n.tr('Sammenlign chat-utseende', 'Compare chat appearance')}>
+         <SlidersHorizontal size={16} aria-hidden="true" />
+         <span>{i18n.tr('Utseende', 'Appearance')}</span>
+diff --git a/src/features/chat/components/chat-appearance-preview.css b/src/features/chat/components/chat-appearance-preview.css
+--- a/src/features/chat/components/chat-appearance-preview.css
++++ b/src/features/chat/components/chat-appearance-preview.css
+@@ -51,14 +51,14 @@
+ .chat-appearance-ideas-toggle:focus-visible { outline: 2px solid var(--verevon-accent-ink); outline-offset: 3px; }
+ 
+ /* 1. Welcome: one focal greeting. Supporting material remains reachable. */
+-[data-chat-appearance~='welcome'] .verevon-chat-empty__heading { text-align: center; margin-bottom: 32px; }
++[data-chat-appearance~='welcome'] .verevon-chat-empty__heading { text-align: left; margin-bottom: 32px; }
+ [data-chat-appearance~='welcome'] .verevon-chat-empty__heading h1 { max-width: none; font-size: clamp(26px, 3vw, 34px); font-weight: 450; line-height: 1.2; letter-spacing: -0.025em; text-wrap: balance; }
+-[data-chat-appearance~='welcome'] .verevon-chat-empty__brand { display: flex; justify-content: center; margin-bottom: 24px; color: var(--verevon-e-muted); }
++[data-chat-appearance~='welcome'] .verevon-chat-empty__brand { display: flex; justify-content: flex-start; margin-bottom: 24px; color: var(--verevon-e-muted); }
+ [data-chat-appearance~='welcome'] .verevon-chat-empty__brand > span:last-child { display: none; }
+ [data-chat-appearance~='welcome'] .verevon-chat-empty__mark,
+ [data-chat-appearance~='welcome'] .verevon-chat-empty__mark > span { width: 36px; height: 36px; }
+-[data-chat-appearance~='welcome'] .verevon-chat-empty__heading > p { margin-inline: auto; }
+-[data-chat-appearance~='welcome'] [data-ideas-open='false'] :is(.verevon-chat-empty__heading > p, .verevon-chat-empty__resume, .verevon-chat-empty__prompts, .verevon-chat-empty__trust) { display: none; }
++[data-chat-appearance~='welcome'] .verevon-chat-empty__heading > p { margin: 16px 0 0; color: var(--verevon-j-text-soft); font-size: 14px; line-height: 1.6; }
++[data-chat-appearance~='welcome'] [data-ideas-open='false'] :is(.verevon-chat-empty__resume, .verevon-chat-empty__prompts, .verevon-chat-empty__trust) { display: none; }
+ .chat-appearance-ideas-toggle { display: flex; min-height: 44px; align-items: center; justify-content: center; gap: 4px; align-self: center; margin: 8px auto 0; padding: 0 12px; border: 0; border-radius: 8px; background: transparent; color: var(--verevon-e-muted); font: inherit; font-size: 12px; cursor: pointer; }
+ .chat-appearance-ideas-toggle:hover { color: var(--verevon-j-text); background: var(--verevon-surface-soft); }
+ .chat-appearance-ideas-toggle[aria-expanded='true'] svg { transform: rotate(90deg); }
+@@ -110,13 +110,10 @@
+ 
+ /* 5. Navigation: retain every destination and action; quiet the frames. */
+ [data-chat-appearance~='navigation'] .core-navbar { border-bottom-color: transparent; }
+-[data-chat-appearance~='navigation'] .core-nav-divider { background: transparent; }
+ [data-chat-appearance~='navigation'] .core-navbar__home-mark,
+-[data-chat-appearance~='navigation'] .core-history-nav,
+-[data-chat-appearance~='navigation'] .verevon-navbar-search-trigger { background: transparent; border-color: transparent; box-shadow: none; }
+-[data-chat-appearance~='navigation'] .verevon-navbar-search-trigger:hover { background: var(--verevon-surface-soft); }
++[data-chat-appearance~='navigation'] .core-history-nav { background: transparent; border-color: transparent; box-shadow: none; }
+ [data-chat-appearance~='navigation'] .core-mini-nav-button:not(.verevon-sidebar-mini-active) { color: var(--sidebar-muted); }
+-[data-chat-appearance~='navigation'] .core-navbar__profile-ring { opacity: 0; }
++[data-chat-appearance~='navigation'] .core-navbar__profile-ring { opacity: 1; }
+ 
+ @media (max-width: 767px) {
+   /* Keep the development control out of the already compact mobile toolbar. */
+diff --git a/src/features/chat/components/chat-appearance-refinements.css b/src/features/chat/components/chat-appearance-refinements.css
+new file mode 100644
+--- /dev/null
++++ b/src/features/chat/components/chat-appearance-refinements.css
+@@ -0,0 +1,94 @@
++/* Review pass 2. All product styling is controlled by the existing preview
++   tokens; the More menu keeps the comparison controls available everywhere. */
++[data-chat-appearance~='navigation'] .core-navbar__left { gap: 8px; }
++[data-chat-appearance~='navigation'] .core-navbar__inner { gap: 24px; }
++[data-chat-appearance~='navigation'] .core-navbar__action-group { gap: 4px; padding-left: 0; }
++[data-chat-appearance~='navigation'] .core-navbar__actions { gap: 4px; flex-shrink: 0; }
++[data-chat-appearance~='navigation'] .core-navbar__search { max-width: 560px; }
++[data-chat-appearance~='navigation'] .core-breadcrumb { min-width: 0; gap: 8px; }
++[data-chat-appearance~='navigation'] .core-breadcrumb__workspace > span { max-width: 160px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
++[data-chat-appearance~='navigation'] .core-navbar__sidebar-toggle,
++.core-navbar-more > summary { display: inline-flex; width: var(--verevon-touch-target, 44px); min-height: var(--verevon-touch-target, 44px); flex-shrink: 0; align-items: center; justify-content: center; border: 0; border-radius: 10px; background: transparent; color: var(--verevon-text); cursor: pointer; list-style: none; }
++.core-navbar-more > summary::-webkit-details-marker { display: none; }
++[data-chat-appearance~='navigation'] :is(.core-navbar__sidebar-toggle, .core-navbar-more > summary):hover { background: var(--verevon-surface-soft); }
++[data-chat-appearance~='navigation'] .core-navbar__action-group--refined .verevon-navbar-action-button { min-width: var(--verevon-touch-target, 44px); min-height: var(--verevon-touch-target, 44px); color: var(--verevon-text); }
++[data-chat-appearance~='navigation'] .core-navbar__profile { margin-inline: 4px; }
++[data-chat-appearance~='navigation'] .core-nav-divider { display: block; height: 24px; width: 1px; margin-inline: 8px; background: var(--verevon-border); }
++[data-chat-appearance~='navigation'] .core-sidebar__top-actions { display: none; }
++[data-chat-appearance~='navigation'] .core-sidebar__mini-nav { padding-top: 8px; }
++[data-chat-appearance~='navigation'] .core-mini-nav-button.verevon-sidebar-mini-active { color: var(--verevon-text); }
++.core-rail-filled-icon { flex-shrink: 0; }
++
++/* A recognizable input-shaped trigger with explicit text/icon contrast. */
++[data-chat-appearance~='navigation'] .verevon-navbar-search-trigger { min-height: var(--verevon-touch-target, 44px); border: 1px solid color-mix(in srgb, var(--verevon-text) 50%, var(--panel)); border-radius: 999px; background: var(--panel); padding-inline: 18px; box-shadow: 0 1px 3px rgb(0 0 0 / 3%); }
++[data-chat-appearance~='navigation'] .verevon-navbar-search-trigger :is(.verevon-navbar-search-icon, .verevon-navbar-search-label, .verevon-navbar-shortcut-key) { color: var(--verevon-text); }
++[data-chat-appearance~='navigation'] .verevon-navbar-search-label { font-size: 14px; }
++[data-chat-appearance~='navigation'] .verevon-navbar-shortcut-key { background: transparent; border-color: transparent; font-size: 11px; }
++[data-chat-appearance~='navigation'] .verevon-navbar-shortcut-key-min { display: none; }
++[data-chat-appearance~='navigation'] .verevon-navbar-search-trigger:focus-visible,
++[data-chat-appearance~='navigation'] :is(.core-navbar__sidebar-toggle, .core-navbar-more > summary, .core-mini-nav-button):focus-visible { outline: 2px solid var(--verevon-accent-ink); outline-offset: 3px; box-shadow: none; }
++
++.core-navbar-more { position: relative; }
++.core-navbar-more__panel { position: absolute; top: calc(100% + 8px); right: 0; width: 324px; max-height: calc(100dvh - 80px); overflow-y: auto; padding: 8px; border: 1px solid var(--verevon-border); border-radius: 16px; background: var(--panel); color: var(--verevon-text); box-shadow: var(--shadow-md); }
++.core-navbar-more__panel > button { display: flex; align-items: center; width: 100%; min-height: 44px; gap: 12px; padding: 8px 12px; border: 0; border-radius: 8px; background: transparent; color: inherit; font: inherit; font-size: 14px; text-align: left; cursor: pointer; }
++.core-navbar-more__panel > button small { margin-left: auto; color: var(--verevon-text-muted); }
++.core-navbar-more__panel > button:hover { background: var(--verevon-surface-soft); }
++.core-navbar-more__theme { display: flex; gap: 4px; margin: 8px 0; padding: 12px 8px; border: 0; border-block: 1px solid var(--verevon-border-soft); }
++.core-navbar-more__theme legend { padding: 0 4px; color: var(--verevon-text-muted); font-size: 12px; }
++.core-navbar-more__theme button { display: flex; flex: 1; min-height: 40px; gap: 6px; align-items: center; justify-content: center; border: 1px solid transparent; border-radius: 8px; background: transparent; color: inherit; font: inherit; font-size: 12px; cursor: pointer; }
++.core-navbar-more__theme button[aria-pressed='true'] { background: var(--verevon-surface-soft); border-color: var(--verevon-border); }
++.core-navbar-more__panel button:focus-visible { outline: 2px solid var(--verevon-accent-ink); outline-offset: 1px; }
++.core-navbar-more .chat-appearance-preview--embedded { position: static; }
++.core-navbar-more .chat-appearance-preview--embedded > summary { width: 100%; min-height: 44px; justify-content: flex-start; gap: 12px; padding: 8px 12px; border: 0; background: transparent; color: var(--verevon-text); font-size: 14px; }
++.core-navbar-more .chat-appearance-preview--embedded > summary > span { display: inline; }
++.core-navbar-more .chat-appearance-preview--embedded .chat-appearance-preview__panel { position: static; width: auto; max-height: none; padding: 12px; border: 0; border-radius: 8px; box-shadow: none; }
++.core-navbar-more .chat-appearance-preview--embedded .chat-appearance-preview__option { min-height: 60px; }
++.core-sidebar-mobile-scrim { display: none; }
++
++/* The existing shell's ink tokens are light-only. Keep the new controls'
++   dark palette local, rather than changing tokens for unrelated screens. */
++.dark [data-chat-appearance~='navigation'] :is(.core-navbar, .core-sidebar__rail),
++.dark :is(.chat-organizer, .chat-project-dialog, .chat-appearance-preview) {
++  --verevon-text: #f5f5f5;
++  --verevon-text-soft: #e3e4e8;
++  --verevon-text-muted: #c5c7cc;
++  --verevon-text-subtle: #b3b6be;
++  --verevon-surface-soft: #383b43;
++  --verevon-surface-muted: #454851;
++  --verevon-border: #767a85;
++  --verevon-border-soft: #454851;
++  --panel: #26282e;
++  --background: #22242a;
++  --text: #f5f5f5;
++  --ink: #f5f5f5;
++}
++.dark [data-chat-appearance~='navigation'] .verevon-navbar-search-trigger { background: #26282e; border-color: #8a8e99; }
++.dark [data-chat-appearance~='navigation'] .verevon-navbar-search-trigger:hover { background: #2e3037; }
++.dark [data-chat-appearance~='navigation'] .verevon-navbar-shortcut-key { background: transparent; border-color: transparent; }
++.dark [data-chat-appearance~='navigation'] .verevon-navbar-action-button:hover { color: var(--verevon-text); background: var(--verevon-surface-soft); }
++.dark .chat-organizer .core-chat-session span { color: var(--verevon-text); }
++.dark .chat-organizer .core-chat-session__menu-trigger:hover { color: var(--verevon-text); }
++.dark .chat-organizer .core-chat-session__menu-item:is(:hover, :focus-visible) { background: var(--verevon-surface-soft); }
++
++[data-chat-appearance~='context'] .dashboard-composer-root--chat .dashboard-composer-context-button { display: inline-flex; width: auto; min-width: 0; min-height: 36px; padding: 0 10px; gap: 6px; border-radius: 10px; color: var(--verevon-text); }
++[data-chat-appearance~='context'] .dashboard-composer-root--chat .dashboard-composer-context-button .dashboard-composer-context-label { display: inline; max-width: 150px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: inherit; font-size: 12px; }
++.dark [data-chat-appearance~='context'] .dashboard-composer-root--chat .dashboard-composer-context-button { color: #f5f5f5; background: #2f3239; border-color: #767a85; }
++
++@media (max-width: 1100px) {
++  [data-chat-appearance~='navigation'] .core-navbar__inner { gap: 12px; }
++  [data-chat-appearance~='navigation'] .core-breadcrumb__workspace > span { max-width: 112px; }
++  [data-chat-appearance~='navigation'] .core-breadcrumb > a,
++  [data-chat-appearance~='navigation'] .core-breadcrumb > svg { display: none; }
++}
++@media (max-width: 767px) {
++  [data-chat-appearance~='navigation'] .core-navbar__inner { padding-inline: 8px; gap: 4px; }
++  [data-chat-appearance~='navigation'] .core-history-nav { display: none; }
++  [data-chat-appearance~='navigation'] .core-navbar__actions { flex: 1; justify-content: flex-end; gap: 0; }
++  [data-chat-appearance~='navigation'] .core-navbar__action-group { gap: 0; }
++  [data-chat-appearance~='navigation'] .core-navbar__action-group--refined .verevon-navbar-action-button { min-width: 40px; min-height: 44px; }
++  [data-chat-appearance~='navigation'] .core-nav-divider { margin-inline: 4px; }
++  .core-navbar-more__panel { position: fixed; inset: 64px 8px auto; width: auto; max-height: calc(100dvh - 80px); }
++  [data-chat-appearance~='navigation'][data-sidebar-expanded='true'] .core-sidebar { display: block; max-width: calc(100vw - 48px); z-index: 60; box-shadow: var(--shadow-md); }
++  [data-chat-appearance~='navigation'] .core-sidebar-mobile-scrim { display: block; position: fixed; inset: 56px 0 0; z-index: 59; border: 0; background: rgb(0 0 0 / 24%); }
++  [data-chat-appearance~='context'] .dashboard-composer-root--chat .dashboard-composer-context-button .dashboard-composer-context-label { max-width: 114px; }
++}
+diff --git a/src/shared/actions/chat-organization.ts b/src/shared/actions/chat-organization.ts
+new file mode 100644
+--- /dev/null
++++ b/src/shared/actions/chat-organization.ts
+@@ -0,0 +1,27 @@
++import { z } from 'zod'
++
++// Personal presentation contracts for the reversible browser-only organizer.
++// These never grant access, change a thread's server metadata or invoke a model.
++const id = z.string().trim().min(1).max(200)
++const name = z.string().trim().min(1).max(80)
++export const chatOrganizationViewSchema = z.object({
++  sort: z.enum(['recent', 'oldest', 'title']).default('recent'),
++  group: z.enum(['project', 'date', 'none']).default('project'),
++  filter: z.enum(['all', 'pinned', 'active', 'attention']).default('all'),
++})
++export const chatOrganizationSchema = z.object({
++  version: z.literal(1),
++  projects: z.array(z.object({ id, name, pinned: z.boolean().default(false) })).max(100),
++  assignments: z.record(z.string(), z.string()),
++  view: chatOrganizationViewSchema,
++})
++export const chatOrganizationActionSchema = z.discriminatedUnion('type', [
++  z.object({ type: z.literal('project.create'), id, name }),
++  z.object({ type: z.literal('project.rename'), id, name }),
++  z.object({ type: z.literal('project.remove'), id }),
++  z.object({ type: z.literal('project.pin'), id, pinned: z.boolean() }),
++  z.object({ type: z.literal('thread.move'), threadId: id, projectId: id.nullable() }),
++  z.object({ type: z.literal('view.update'), view: chatOrganizationViewSchema }),
++])
++export type ChatOrganization = z.infer<typeof chatOrganizationSchema>
++export type ChatOrganizationAction = z.infer<typeof chatOrganizationActionSchema>
+diff --git a/src/features/chat/lib/chat-organization.ts b/src/features/chat/lib/chat-organization.ts
+new file mode 100644
+--- /dev/null
++++ b/src/features/chat/lib/chat-organization.ts
+@@ -0,0 +1,69 @@
++import { chatOrganizationActionSchema, chatOrganizationSchema, type ChatOrganization, type ChatOrganizationAction } from '@/shared/actions/chat-organization'
++import { readClientValue, writeClientJson } from '@/shared/session/client-storage'
++import type { ChatThreadHistoryItem } from './chat-thread-history'
++
++export function emptyChatOrganization(): ChatOrganization {
++  return { version: 1, projects: [], assignments: {}, view: { group: 'project', sort: 'recent', filter: 'all' } }
++}
++export function chatOrganizationStorageKey(userId: string | undefined, orgId: string | undefined): string | null {
++  return userId && orgId ? `verevon.chat-organization.v1:${encodeURIComponent(orgId)}:${encodeURIComponent(userId)}` : null
++}
++export function readChatOrganization(key: string | null): ChatOrganization {
++  if (!key) return emptyChatOrganization()
++  try {
++    const result = chatOrganizationSchema.safeParse(JSON.parse(readClientValue(key) ?? 'null'))
++    return result.success ? result.data : emptyChatOrganization()
++  } catch { return emptyChatOrganization() }
++}
++export function saveChatOrganization(key: string, state: ChatOrganization) { writeClientJson(key, state) }
++
++export function applyChatOrganizationAction(state: ChatOrganization, input: ChatOrganizationAction): ChatOrganization {
++  const action = chatOrganizationActionSchema.parse(input)
++  if (action.type === 'view.update') return { ...state, view: action.view }
++  if (action.type === 'thread.move') {
++    if (action.projectId && !state.projects.some((project) => project.id === action.projectId)) throw new Error('Project not found.')
++    const assignments = { ...state.assignments }
++    if (action.projectId) assignments[action.threadId] = action.projectId
++    else delete assignments[action.threadId]
++    return { ...state, assignments }
++  }
++  if (action.type === 'project.create' || action.type === 'project.rename') {
++    if (state.projects.some((project) => project.id !== (action.type === 'project.rename' ? action.id : null) && project.name.toLocaleLowerCase() === action.name.toLocaleLowerCase())) throw new Error('A project with this name already exists.')
++  }
++  if (action.type === 'project.create') {
++    if (state.projects.length >= 100) throw new Error('The preview supports up to 100 projects.')
++    if (state.projects.some((project) => project.id === action.id)) throw new Error('Project already exists.')
++    return { ...state, projects: [...state.projects, { id: action.id, name: action.name, pinned: false }] }
++  }
++  if (!state.projects.some((project) => project.id === action.id)) throw new Error('Project not found.')
++  if (action.type === 'project.remove') return {
++    ...state,
++    projects: state.projects.filter((project) => project.id !== action.id),
++    assignments: Object.fromEntries(Object.entries(state.assignments).filter(([, projectId]) => projectId !== action.id)),
++  }
++  return { ...state, projects: state.projects.map((project) => project.id !== action.id ? project : action.type === 'project.rename' ? { ...project, name: action.name } : { ...project, pinned: action.pinned }) }
++}
++
++const activeStatuses = new Set(['running', 'in_progress', 'queued', 'pending'])
++const attentionStatuses = new Set(['failed', 'timed_out', 'denied', 'rejected', 'awaiting_approval', 'waiting_approval', 'paused', 'blocked', 'ambiguous'])
++export function selectOrganizedChats(items: ChatThreadHistoryItem[], state: ChatOrganization, query: string): ChatThreadHistoryItem[] {
++  const needle = query.trim().toLocaleLowerCase()
++  const matches = items.filter((item) => {
++    const projectName = state.projects.find((project) => project.id === state.assignments[item.threadId])?.name ?? ''
++    if (needle && !`${item.title} ${item.preview} ${projectName}`.toLocaleLowerCase().includes(needle)) return false
++    const status = item.latestRunStatus?.trim().toLowerCase() ?? ''
++    return state.view.filter === 'all' || (state.view.filter === 'pinned' && item.pinned === true) || (state.view.filter === 'active' && activeStatuses.has(status)) || (state.view.filter === 'attention' && attentionStatuses.has(status))
++  })
++  return matches.sort((a, b) => {
++    if (state.view.sort === 'title') return a.title.localeCompare(b.title) || a.threadId.localeCompare(b.threadId)
++    const time = (Date.parse(a.updatedAt) || 0) - (Date.parse(b.updatedAt) || 0)
++    return (state.view.sort === 'oldest' ? time : -time) || a.threadId.localeCompare(b.threadId)
++  })
++}
++
++export function chatDateGroup(updatedAt: string, now = new Date()): 'today' | 'week' | 'earlier' {
++  const time = new Date(updatedAt)
++  if (time.toDateString() === now.toDateString()) return 'today'
++  const weekStart = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 6).getTime()
++  return time.getTime() >= weekStart && time.getTime() <= now.getTime() ? 'week' : 'earlier'
++}
+diff --git a/src/features/chat/lib/chat-organization.test.ts b/src/features/chat/lib/chat-organization.test.ts
+new file mode 100644
+--- /dev/null
++++ b/src/features/chat/lib/chat-organization.test.ts
+@@ -0,0 +1,85 @@
++import { beforeEach, describe, expect, it } from 'vitest'
++import { applyChatOrganizationAction as apply, chatDateGroup, chatOrganizationStorageKey, emptyChatOrganization, readChatOrganization, saveChatOrganization, selectOrganizedChats } from './chat-organization'
++import type { ChatThreadHistoryItem } from './chat-thread-history'
++
++const rows: ChatThreadHistoryItem[] = [
++  { threadId: 'a', title: 'Zulu', preview: 'Quarterly report', updatedAt: '2026-09-26T12:00:00Z', latestRunStatus: 'completed', pinned: true },
++  { threadId: 'b', title: 'Alpha', preview: 'Budget review', updatedAt: '2026-09-28T12:00:00Z', latestRunStatus: 'running' },
++  { threadId: 'c', title: 'Beta', preview: 'Support issue', updatedAt: '2026-09-27T12:00:00Z', latestRunStatus: 'awaiting_approval' },
++]
++const ids = (items: ChatThreadHistoryItem[]) => items.map((item) => item.threadId)
++
++describe('personal chat organization', () => {
++  beforeEach(() => { localStorage.clear(); sessionStorage.clear() })
++
++  it('scopes saved projects to both account and workspace and survives a reload', () => {
++    const key = chatOrganizationStorageKey('user-a', 'org-a')!
++    const state = apply(emptyChatOrganization(), { type: 'project.create', id: 'work', name: '  Work  ' })
++    saveChatOrganization(key, state)
++    expect(readChatOrganization(key).projects[0]?.name).toBe('Work')
++    expect(readChatOrganization(chatOrganizationStorageKey('user-b', 'org-a')).projects).toEqual([])
++    expect(readChatOrganization(chatOrganizationStorageKey('user-a', 'org-b')).projects).toEqual([])
++    expect(chatOrganizationStorageKey(undefined, 'org-a')).toBeNull()
++    expect(chatOrganizationStorageKey('user-a', undefined)).toBeNull()
++  })
++
++  it('recovers gracefully from malformed or unsupported stored data', () => {
++    localStorage.setItem('bad-json', '{')
++    localStorage.setItem('bad-version', JSON.stringify({ ...emptyChatOrganization(), version: 2 }))
++    expect(readChatOrganization('bad-json')).toEqual(emptyChatOrganization())
++    expect(readChatOrganization('bad-version')).toEqual(emptyChatOrganization())
++  })
++
++  it('renames and pins projects without mutating earlier states', () => {
++    const initial = apply(emptyChatOrganization(), { type: 'project.create', id: 'work', name: 'Work' })
++    const renamed = apply(initial, { type: 'project.rename', id: 'work', name: 'Research' })
++    const pinned = apply(renamed, { type: 'project.pin', id: 'work', pinned: true })
++    expect(initial.projects[0]).toEqual({ id: 'work', name: 'Work', pinned: false })
++    expect(pinned.projects[0]).toEqual({ id: 'work', name: 'Research', pinned: true })
++    expect(() => apply(pinned, { type: 'project.create', id: 'duplicate', name: ' research ' })).toThrow('already exists')
++    expect(() => apply(pinned, { type: 'project.rename', id: 'missing', name: 'Something' })).toThrow('not found')
++    expect(() => apply(pinned, { type: 'project.rename', id: 'work', name: ' ' })).toThrow()
++  })
++
++  it('moves and unassigns chats, and removes a project without altering conversations or other projects', () => {
++    let state = apply(emptyChatOrganization(), { type: 'project.create', id: 'work', name: 'Work' })
++    state = apply(state, { type: 'project.create', id: 'other', name: 'Other' })
++    state = apply(state, { type: 'thread.move', threadId: 'a', projectId: 'work' })
++    state = apply(state, { type: 'thread.move', threadId: 'b', projectId: 'other' })
++    const removed = apply(state, { type: 'project.remove', id: 'work' })
++    expect(removed.assignments).toEqual({ b: 'other' })
++    expect(ids(selectOrganizedChats(rows, removed, ''))).toEqual(['b', 'c', 'a'])
++    expect(apply(removed, { type: 'thread.move', threadId: 'b', projectId: null }).assignments).toEqual({})
++    expect(() => apply(removed, { type: 'thread.move', threadId: 'a', projectId: 'missing' })).toThrow('not found')
++    expect(state.assignments).toEqual({ a: 'work', b: 'other' })
++  })
++
++  it('searches titles, previews and project names, combined with meaningful status filters', () => {
++    let state = apply(emptyChatOrganization(), { type: 'project.create', id: 'work', name: 'Finance' })
++    state = apply(state, { type: 'thread.move', threadId: 'b', projectId: 'work' })
++    expect(ids(selectOrganizedChats(rows, state, ' QUARTERLY '))).toEqual(['a'])
++    expect(ids(selectOrganizedChats(rows, state, 'finance'))).toEqual(['b'])
++    expect(ids(selectOrganizedChats(rows, state, 'beta'))).toEqual(['c'])
++    for (const [filter, expected] of [['active', 'b'], ['attention', 'c'], ['pinned', 'a']] as const) {
++      const filtered = apply(state, { type: 'view.update', view: { ...state.view, filter } })
++      expect(ids(selectOrganizedChats(rows, filtered, ''))).toEqual([expected])
++      expect(ids(selectOrganizedChats(rows, filtered, 'no match'))).toEqual([])
++    }
++  })
++
++  it('sorts deterministically without rearranging the source history', () => {
++    const state = emptyChatOrganization()
++    expect(ids(selectOrganizedChats(rows, state, ''))).toEqual(['b', 'c', 'a'])
++    expect(ids(selectOrganizedChats(rows, { ...state, view: { ...state.view, sort: 'oldest' } }, ''))).toEqual(['a', 'c', 'b'])
++    expect(ids(selectOrganizedChats(rows, { ...state, view: { ...state.view, sort: 'title' } }, ''))).toEqual(['b', 'c', 'a'])
++    expect(ids(rows)).toEqual(['a', 'b', 'c'])
++  })
++
++  it('groups by local calendar dates across month boundaries', () => {
++    const now = new Date(2026, 9, 2, 12)
++    expect(chatDateGroup(new Date(2026, 9, 2, 1).toISOString(), now)).toBe('today')
++    expect(chatDateGroup(new Date(2026, 8, 26, 0).toISOString(), now)).toBe('week')
++    expect(chatDateGroup(new Date(2026, 8, 25, 23, 59).toISOString(), now)).toBe('earlier')
++    expect(chatDateGroup('not a date', now)).toBe('earlier')
++  })
++})
+diff --git a/src/features/core/components/CoreNavbarMore.tsx b/src/features/core/components/CoreNavbarMore.tsx
+new file mode 100644
+--- /dev/null
++++ b/src/features/core/components/CoreNavbarMore.tsx
+@@ -0,0 +1,53 @@
++import { createEffect, Show } from 'solid-js'
++import { Languages, MoreHorizontal, MoonStar, Sparkles, Sun } from '@/shared/icons'
++import { useI18n } from '@/shared/i18n'
++import { ChatAppearancePreview } from '@/features/chat/components/ChatAppearancePreview'
++import type { ThemePayload } from '@/shared/api/navbar-client'
++
++export function CoreNavbarMore(props: {
++  theme: ThemePayload['theme']
++  onThemeChange: (theme: ThemePayload['theme']) => void
++  onAssistant: () => void
++}) {
++  const i18n = useI18n()
++  let root: HTMLDetailsElement | undefined
++  let trigger: HTMLElement | undefined
++  createEffect(() => undefined, () => {
++    const outside = (event: PointerEvent) => {
++      if (event.target instanceof Node && root?.open && !root.contains(event.target)) root.open = false
++    }
++    document.addEventListener('pointerdown', outside)
++    return () => document.removeEventListener('pointerdown', outside)
++  })
++  return (
++    <details ref={root} class="core-navbar-more" onKeyDown={(event) => {
++      if (event.key === 'Escape' && root?.open) {
++        event.stopPropagation()
++        root.open = false
++        trigger?.focus()
++      }
++      if (!root?.open || !['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return
++      const controls = [...root.querySelectorAll<HTMLElement>('button:not(:disabled), summary, input')].filter((item) => item !== trigger && item.getClientRects().length)
++      if (!controls.length) return
++      event.preventDefault()
++      const index = controls.indexOf(document.activeElement as HTMLElement)
++      const next = event.key === 'Home' ? 0 : event.key === 'End' ? controls.length - 1 : (index + (event.key === 'ArrowDown' ? 1 : -1) + controls.length) % controls.length
++      controls[next]?.focus()
++    }}>
++      <summary ref={trigger} title={i18n.tr('Flere valg', 'More options')} aria-label={i18n.tr('Flere valg', 'More options')}>
++        <MoreHorizontal size={21} />
++      </summary>
++      <section class="core-navbar-more__panel" aria-label={i18n.tr('Flere valg', 'More options')}>
++        <Show when={import.meta.env.DEV}><ChatAppearancePreview embedded /></Show>
++        <button type="button" onClick={i18n.toggleLocale}><Languages size={18} /><span>{i18n.tr('Språk', 'Language')}</span><small>{i18n.localeCode()}</small></button>
++        <fieldset class="core-navbar-more__theme">
++          <legend>{i18n.tr('Fargetema', 'Theme')}</legend>
++          <button type="button" aria-pressed={props.theme === 'light' ? 'true' : 'false'} onClick={() => props.onThemeChange('light')}><Sun size={16} />{i18n.tr('Lyst', 'Light')}</button>
++          <button type="button" aria-pressed={props.theme === 'dark' ? 'true' : 'false'} onClick={() => props.onThemeChange('dark')}><MoonStar size={16} />{i18n.tr('Mørkt', 'Dark')}</button>
++          <button type="button" aria-pressed={props.theme === 'system' ? 'true' : 'false'} onClick={() => props.onThemeChange('system')}>{i18n.tr('System', 'System')}</button>
++        </fieldset>
++        <button type="button" onClick={() => { if (root) root.open = false; props.onAssistant() }}><Sparkles size={18} /><span>{i18n.tr('AI-assistent', 'AI assistant')}</span></button>
++      </section>
++    </details>
++  )
++}
+diff --git a/src/features/core/components/FilledRailIcon.tsx b/src/features/core/components/FilledRailIcon.tsx
+new file mode 100644
+--- /dev/null
++++ b/src/features/core/components/FilledRailIcon.tsx
+@@ -0,0 +1,21 @@
++/** Solid variants of the rail's existing metaphors. Interior cutouts remain
++ * readable instead of applying fill to Lucide's open outline paths. */
++const paths: Record<string, string> = {
++  overview: 'M12 2 2 10v2h2v9h6v-7h4v7h6v-9h2v-2L12 2Z',
++  messages: 'M5 3a3 3 0 0 0-3 3v16l5-4h12a3 3 0 0 0 3-3V6a3 3 0 0 0-3-3H5Z',
++  spaces: 'M9 2a4 4 0 1 0 0 8 4 4 0 0 0 0-8Zm9 2a3 3 0 1 0 0 6 3 3 0 0 0 0-6ZM2 20v-3a6 6 0 0 1 12 0v3H2Zm14 0v-3a8 8 0 0 0-1-4h3a4 4 0 0 1 4 4v3h-6Z',
++  inbox: 'M5 3h14l3 9v7a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2v-7l3-9Zm1.5 2L4 12h5v3h6v-3h5l-2.5-7h-11Z',
++  marketing: 'M3 2h18v15h-8v3l4 2h-4l-1-1-1 1H7l4-2v-3H3V2Zm2 3v9h14V5H5Z',
++  agents: 'M7 3h10l2 7H5l2-7ZM2 11h20v2H2v-2Zm4 4a4 4 0 1 0 3.87 5H14.13A4 4 0 1 0 14 18h-4a4 4 0 0 0-4-3Zm0 2a2 2 0 1 0 0 4 2 2 0 0 0 0-4Zm12 0a2 2 0 1 0 0 4 2 2 0 0 0 0-4Z',
++  studio: 'M3 3h7v7H3V3Zm11 1h7v7h-7V4ZM4 14h7v7H4v-7Z',
++  social: 'M5 2h2v3h10V2h2v3h1a2 2 0 0 1 2 2v13a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2h1V2Zm0 8v2h14v-2H5Zm1 5v2h2v-2H6Zm5 0v2h2v-2h-2Zm5 0v2h2v-2h-2Z',
++  ingestions: 'M12 2a10 10 0 1 0 10 10h-2a8 8 0 1 1-8-8V2Zm0 5a5 5 0 1 0 5 5h-2a3 3 0 1 1-3-3V7Zm1 4 8-8 1 1-8 8v1h-3v-3h2v1Z',
++  knowledge: 'M2 3h3c3 0 5 1 6 3v16c-2-2-4-3-9-3V3Zm20 0h-3c-3 0-5 1-6 3v16c2-2 4-3 9-3V3Z',
++  insights: 'M2 3h2v17h18v2H2V3Zm4 9h4v6H6v-6Zm6-7h4v13h-4V5Zm6 4h4v9h-4V9Z',
++  settings: 'm10 1-1 3-3 1-3-1-2 4 2 2v4l-2 2 2 4 3-1 3 1 1 3h4l1-3 3-1 3 1 2-4-2-2v-4l2-2-2-4-3 1-3-1-1-3h-4Zm2 7a4 4 0 1 0 0 8 4 4 0 0 0 0-8Z',
++  account: 'M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20Zm0 3a3 3 0 1 0 0 6 3 3 0 0 0 0-6Zm-6 13h12a6 6 0 0 0-12 0Z',
++}
++
++export function FilledRailIcon(props: { name: string }) {
++  return <svg class="core-rail-filled-icon" width="20" height="20" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path fill-rule="evenodd" clip-rule="evenodd" d={paths[props.name] ?? paths.messages} /></svg>
++}
+diff --git a/src/features/core/components/sidebar/ChatSidebarOrganizer.tsx b/src/features/core/components/sidebar/ChatSidebarOrganizer.tsx
+new file mode 100644
+--- /dev/null
++++ b/src/features/core/components/sidebar/ChatSidebarOrganizer.tsx
+@@ -0,0 +1,177 @@
++import { createEffect, createMemo, createSignal, For, Show } from 'solid-js'
++import type { JSX } from '@solidjs/web'
++import { Folder, FolderPlus, MessageSquarePlus, MoreHorizontal, Pin, Search, SlidersHorizontal, X } from '@/shared/icons'
++import { useI18n } from '@/shared/i18n'
++import { getSession } from '@/shared/session/session-store'
++import type { ChatOrganizationAction } from '@/shared/actions/chat-organization'
++import { applyChatOrganizationAction, chatDateGroup, chatOrganizationStorageKey, emptyChatOrganization, readChatOrganization, saveChatOrganization, selectOrganizedChats } from '@/features/chat/lib/chat-organization'
++import type { ChatThreadHistoryItem } from '@/features/chat/lib/chat-thread-history'
++import './chat-sidebar-organizer.css'
++
++type DialogMode = { kind: 'create' } | { kind: 'project'; id: string } | { kind: 'move'; thread: ChatThreadHistoryItem }
++type ChatGroup = { id: string; label: string; project: boolean; pinned?: boolean; items: ChatThreadHistoryItem[] }
++
++export function ChatSidebarOrganizer(props: {
++  sessions: ChatThreadHistoryItem[]
++  loading: boolean
++  onNewChat: () => void
++  renderRow: (item: ChatThreadHistoryItem, onMove?: () => void) => JSX.Element
++}) {
++  const i18n = useI18n()
++  const session = getSession()
++  const scope = createMemo(() => chatOrganizationStorageKey(session.user?.id, session.activeOrg?.id))
++  const [organization, setOrganization] = createSignal(emptyChatOrganization())
++  const [query, setQuery] = createSignal('')
++  const [searchOpen, setSearchOpen] = createSignal(false)
++  const [mode, setMode] = createSignal<DialogMode | null>(null)
++  const [draftName, setDraftName] = createSignal('')
++  const [destination, setDestination] = createSignal('')
++  const [error, setError] = createSignal('')
++  let dialog: HTMLDialogElement | undefined
++  let nameInput: HTMLInputElement | undefined
++  let searchInput: HTMLInputElement | undefined
++  let viewMenu: HTMLDetailsElement | undefined
++
++  createEffect(scope, (key) => {
++    setOrganization(readChatOrganization(key))
++    setMode(null)
++    const storageChanged = (event: StorageEvent) => {
++      if (event.key === key || event.key === null) setOrganization(readChatOrganization(key))
++    }
++    window.addEventListener('storage', storageChanged)
++    return () => window.removeEventListener('storage', storageChanged)
++  })
++  createEffect(mode, (next) => {
++    if (next) queueMicrotask(() => { if (dialog && !dialog.open) dialog.showModal(); nameInput?.focus() })
++    else if (dialog?.open) dialog.close()
++  })
++  createEffect(() => undefined, () => {
++    const outside = (event: PointerEvent) => {
++      if (viewMenu?.open && event.target instanceof Node && !viewMenu.contains(event.target)) viewMenu.open = false
++    }
++    document.addEventListener('pointerdown', outside)
++    return () => document.removeEventListener('pointerdown', outside)
++  })
++
++  const dispatch = (...actions: ChatOrganizationAction[]) => {
++    const key = scope()
++    if (!key) throw new Error(i18n.tr('Logg inn på et arbeidsområde først.', 'Sign in to a workspace first.'))
++    // Solid batches signal writes. Apply related changes in one transaction so
++    // a view update cannot overwrite a project created in the same event.
++    const next = actions.reduce(applyChatOrganizationAction, organization())
++    saveChatOrganization(key, next)
++    setOrganization(next)
++  }
++  const updateView = (patch: Partial<ReturnType<typeof organization>['view']>) => {
++    const next = applyChatOrganizationAction(organization(), { type: 'view.update', view: { ...organization().view, ...patch } })
++    const key = scope()
++    if (key) saveChatOrganization(key, next)
++    setOrganization(next)
++  }
++  const matches = createMemo(() => selectOrganizedChats(props.sessions, organization(), query()))
++  const groups = createMemo<ChatGroup[]>(() => {
++    const staticState = organization()
++    const rows = matches()
++    const groups: ChatGroup[] = []
++    const pinned = rows.filter((item) => item.pinned)
++    if (pinned.length) groups.push({ id: 'pinned', label: i18n.tr('Festet', 'Pinned'), project: false, items: pinned })
++    const rest = rows.filter((item) => !item.pinned)
++    if (staticState.view.group === 'project') {
++      const projects = [...staticState.projects].sort((a, b) => Number(b.pinned) - Number(a.pinned) || a.name.localeCompare(b.name))
++      for (const project of projects) {
++        const items = rest.filter((item) => staticState.assignments[item.threadId] === project.id)
++        if (items.length || (!query().trim() && staticState.view.filter === 'all')) groups.push({ id: project.id, label: project.name, project: true, pinned: project.pinned, items })
++      }
++      const recent = rest.filter((item) => !staticState.projects.some((project) => project.id === staticState.assignments[item.threadId]))
++      if (recent.length) groups.push({ id: 'recent', label: i18n.tr('Nylige', 'Recent'), project: false, items: recent })
++    } else if (staticState.view.group === 'date') {
++      for (const [id, label] of [['today', i18n.tr('I dag', 'Today')], ['week', i18n.tr('Siste 7 dager', 'Last 7 days')], ['earlier', i18n.tr('Tidligere', 'Earlier')]] as const) {
++        const items = rest.filter((item) => chatDateGroup(item.updatedAt) === id)
++        if (items.length) groups.push({ id, label, project: false, items })
++      }
++    } else if (rest.length) groups.push({ id: 'all', label: i18n.tr('Samtaler', 'Conversations'), project: false, items: rest })
++    return groups
++  })
++  const beginProject = (id?: string) => {
++    setError('')
++    setDraftName(id ? organization().projects.find((project) => project.id === id)?.name ?? '' : '')
++    setMode(id ? { kind: 'project', id } : { kind: 'create' })
++  }
++  const beginMove = (thread: ChatThreadHistoryItem) => {
++    setError('')
++    setDestination(organization().assignments[thread.threadId] ?? '')
++    setMode({ kind: 'move', thread })
++  }
++  const submit = () => {
++    const current = mode()
++    if (!current) return
++    try {
++      if (current.kind === 'move') dispatch({ type: 'thread.move', threadId: current.thread.threadId, projectId: destination() || null })
++      else if (current.kind === 'project') dispatch({ type: 'project.rename', id: current.id, name: draftName() })
++      else {
++        dispatch(
++          { type: 'project.create', id: crypto.randomUUID(), name: draftName() },
++          { type: 'view.update', view: { ...organization().view, group: 'project', filter: 'all' } },
++        )
++        setQuery('')
++      }
++      setMode(null)
++    } catch (reason) { setError(reason instanceof Error ? reason.message : i18n.tr('Kunne ikke lagre.', 'Could not save.')) }
++  }
++
++  return (
++    <div class="chat-organizer">
++      <div class="chat-organizer__header">
++        <strong>{i18n.tr('Samtaler', 'Chats')}</strong>
++        <button type="button" aria-label={i18n.tr('Søk i samtaler', 'Search chats')} title={i18n.tr('Søk i samtaler', 'Search chats')} aria-expanded={searchOpen() ? 'true' : 'false'} onClick={() => { setSearchOpen((open) => !open); queueMicrotask(() => searchInput?.focus()) }}><Search size={17} /></button>
++        <details ref={viewMenu} class="chat-organizer__view" onKeyDown={(event) => { if (event.key === 'Escape' && viewMenu?.open) { viewMenu.open = false; viewMenu.querySelector('summary')?.focus() } }}>
++          <summary title={i18n.tr('Grupper, sorter og filtrer', 'Group, sort and filter')} aria-label={i18n.tr('Grupper, sorter og filtrer', 'Group, sort and filter')}><SlidersHorizontal size={17} /></summary>
++          <div class="chat-organizer__view-panel">
++            <label>{i18n.tr('Grupper etter', 'Group by')}<select value={organization().view.group} onChange={(event) => updateView({ group: event.currentTarget.value as 'project' | 'date' | 'none' })}><option value="project">{i18n.tr('Prosjekt', 'Project')}</option><option value="date">{i18n.tr('Dato', 'Date')}</option><option value="none">{i18n.tr('Ingen gruppering', 'No grouping')}</option></select></label>
++            <label>{i18n.tr('Sorter etter', 'Sort by')}<select value={organization().view.sort} onChange={(event) => updateView({ sort: event.currentTarget.value as 'recent' | 'oldest' | 'title' })}><option value="recent">{i18n.tr('Sist oppdatert', 'Recently updated')}</option><option value="oldest">{i18n.tr('Eldste først', 'Oldest first')}</option><option value="title">{i18n.tr('Tittel A–Å', 'Title A–Z')}</option></select></label>
++            <label>{i18n.tr('Vis', 'Show')}<select value={organization().view.filter} onChange={(event) => updateView({ filter: event.currentTarget.value as 'all' | 'pinned' | 'active' | 'attention' })}><option value="all">{i18n.tr('Alle samtaler', 'All chats')}</option><option value="pinned">{i18n.tr('Bare festede', 'Pinned only')}</option><option value="active">{i18n.tr('Aktive kjøringer', 'Active runs')}</option><option value="attention">{i18n.tr('Trenger oppmerksomhet', 'Needs attention')}</option></select></label>
++          </div>
++        </details>
++        <button type="button" aria-label={i18n.tr('Nytt prosjekt', 'New project')} title={i18n.tr('Nytt prosjekt', 'New project')} disabled={!scope()} onClick={() => beginProject()}><FolderPlus size={18} /></button>
++      </div>
++      <Show when={searchOpen()}>
++        <div class="chat-organizer__search"><Search size={15} /><input ref={searchInput} type="search" aria-label={i18n.tr('Søk i samtaler', 'Search chats')} placeholder={i18n.tr('Søk i samtaler …', 'Search chats…')} value={query()} onInput={(event) => setQuery(event.currentTarget.value)} /><button type="button" aria-label={i18n.tr('Lukk samtalesøk', 'Close chat search')} onClick={() => { setQuery(''); setSearchOpen(false) }}><X size={14} /></button></div>
++      </Show>
++      <a href="/chat" link class="core-chat-sidebar__new" onClick={() => props.onNewChat()}><MessageSquarePlus size={17} />{i18n.tr('Ny samtale', 'New chat')}</a>
++      <Show when={organization().view.filter !== 'all' || query().trim()}><button type="button" class="chat-organizer__clear-filter" onClick={() => { setQuery(''); updateView({ filter: 'all' }) }}>{i18n.tr('Fjern filtre', 'Clear filters')} · {matches().length}<X size={12} /></button></Show>
++      <nav class="chat-organizer__list core-chat-sidebar__sessions" aria-label={i18n.tr('Chat-samtaler', 'Chat conversations')}>
++        <Show when={!props.loading} fallback={<p class="chat-organizer__empty">{i18n.tr('Laster samtaler …', 'Loading chats…')}</p>}>
++          <Show when={groups().length} fallback={<p class="chat-organizer__empty">{i18n.tr('Ingen samtaler passer dette utvalget.', 'No chats match this view.')}</p>}>
++            <For each={groups()}>{(group) => (
++              <details class="chat-organizer__group" open>
++                <summary><Show when={group.project} fallback={<Show when={group.id === 'pinned'}><Pin size={13} /></Show>}><Folder size={16} /></Show><span>{group.label}</span><Show when={group.pinned}><Pin size={12} /></Show><small>{group.items.length}</small></summary>
++                <Show when={group.project}><button type="button" class="chat-organizer__project-menu" aria-label={i18n.tr(`Administrer prosjektet ${group.label}`, `Manage project ${group.label}`)} title={i18n.tr('Administrer prosjekt', 'Manage project')} onClick={() => beginProject(group.id)}><MoreHorizontal size={16} /></button></Show>
++                <For each={group.items}>{(item) => <>{props.renderRow(item, () => beginMove(item))}</>}</For>
++                <Show when={group.project && !group.items.length}><p class="chat-organizer__empty">{i18n.tr('Flytt samtaler hit fra samtalens meny.', 'Move chats here from their options menu.')}</p></Show>
++              </details>
++            )}</For>
++          </Show>
++        </Show>
++      </nav>
++      <p class="chat-organizer__local-note">{i18n.tr('Prosjekter lagres i denne nettleseren.', 'Projects are saved in this browser.')}</p>
++
++      <dialog ref={dialog} class="chat-project-dialog" aria-labelledby="chat-project-dialog-title" onClose={() => setMode(null)} onCancel={() => setMode(null)}>
++        <form onSubmit={(event) => { event.preventDefault(); submit() }}>
++          <h2 id="chat-project-dialog-title">{mode()?.kind === 'move' ? i18n.tr('Flytt til prosjekt', 'Move to project') : mode()?.kind === 'project' ? i18n.tr('Administrer prosjekt', 'Manage project') : i18n.tr('Nytt prosjekt', 'New project')}</h2>
++          <p>{i18n.tr('Organiser samtalene dine i denne nettleseren. Samtalens innhold endres ikke.', 'Organize your chats in this browser. Conversation content stays unchanged.')}</p>
++          <Show when={mode()?.kind === 'move'} fallback={<label>{i18n.tr('Prosjektnavn', 'Project name')}<input ref={nameInput} required maxlength={80} value={draftName()} onInput={(event) => setDraftName(event.currentTarget.value)} /></label>}>
++            <label>{i18n.tr('Prosjekt', 'Project')}<select value={destination()} onChange={(event) => setDestination(event.currentTarget.value)}><option value="">{i18n.tr('Ingen prosjekt (nylige)', 'No project (Recent)')}</option><For each={organization().projects}>{(project) => <option value={project.id}>{project.name}</option>}</For></select></label>
++          </Show>
++          <Show when={error()}><p role="alert">{error()}</p></Show>
++          <Show when={mode()?.kind === 'project'}>
++            <div class="chat-project-dialog__manage">
++              <button type="button" onClick={() => { const staticCurrent = mode(); if (staticCurrent?.kind !== 'project') return; const pinned = organization().projects.find((project) => project.id === staticCurrent.id)?.pinned; try { dispatch({ type: 'project.pin', id: staticCurrent.id, pinned: !pinned }) } catch (reason) { setError(String(reason)) } }}>{organization().projects.find((project) => project.id === (mode() as { id?: string })?.id)?.pinned ? i18n.tr('Løsne prosjekt', 'Unpin project') : i18n.tr('Fest prosjekt', 'Pin project')}</button>
++              <button type="button" onClick={() => { const current = mode(); if (current?.kind !== 'project') return; try { dispatch({ type: 'project.remove', id: current.id }); setMode(null) } catch (reason) { setError(String(reason)) } }}>{i18n.tr('Fjern prosjekt, behold samtaler', 'Remove project, keep chats')}</button>
++            </div>
++          </Show>
++          <div class="chat-project-dialog__footer"><button type="button" onClick={() => setMode(null)}>{i18n.tr('Avbryt', 'Cancel')}</button><button type="submit">{mode()?.kind === 'create' ? i18n.tr('Opprett prosjekt', 'Create project') : i18n.tr('Lagre', 'Save')}</button></div>
++        </form>
++      </dialog>
++    </div>
++  )
++}
+diff --git a/src/features/core/components/sidebar/ChatSidebarOrganizer.test.tsx b/src/features/core/components/sidebar/ChatSidebarOrganizer.test.tsx
+new file mode 100644
+--- /dev/null
++++ b/src/features/core/components/sidebar/ChatSidebarOrganizer.test.tsx
+@@ -0,0 +1,70 @@
++import { cleanup, fireEvent, render, screen, waitFor } from '@solidjs/testing-library'
++import { flush } from 'solid-js'
++import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
++import { ChatSidebarOrganizer } from './ChatSidebarOrganizer'
++import { chatOrganizationStorageKey, readChatOrganization } from '@/features/chat/lib/chat-organization'
++
++vi.mock('@/shared/i18n', () => ({ useI18n: () => ({ tr: (_no: string, en: string) => en }) }))
++vi.mock('@/shared/session/session-store', () => ({ getSession: () => ({ user: { id: 'user-test' }, activeOrg: { id: 'org-test' } }) }))
++
++const key = chatOrganizationStorageKey('user-test', 'org-test')!
++const thread = { threadId: 'thread-a', title: 'Planning', preview: 'A draft', updatedAt: '2026-09-28T12:00:00Z' }
++function mount() {
++  return render(() => <ChatSidebarOrganizer sessions={[thread]} loading={false} onNewChat={() => {}} renderRow={(item, onMove) => <button type="button" onClick={() => onMove?.()}>Move {item.title}</button>} />)
++}
++
++beforeEach(() => {
++  localStorage.clear()
++  sessionStorage.clear()
++  HTMLDialogElement.prototype.showModal = function () { this.setAttribute('open', '') }
++  HTMLDialogElement.prototype.close = function () { this.removeAttribute('open') }
++})
++afterEach(cleanup)
++
++describe('chat organizer interactions', () => {
++  it('creates a project and switches the view atomically, preserving it after remount', async () => {
++    const first = mount()
++    flush()
++    fireEvent.click(screen.getByRole('button', { name: 'New project' }))
++    flush()
++    const input = await screen.findByRole('textbox', { name: 'Project name' })
++    fireEvent.input(input, { target: { value: 'Research' } })
++    flush()
++    fireEvent.submit(input.closest('form')!)
++    flush()
++    await waitFor(() => expect(screen.getByText('Research')).toBeTruthy())
++    expect(readChatOrganization(key).projects).toHaveLength(1)
++    first.unmount()
++    mount()
++    flush()
++    expect(await screen.findByText('Research')).toBeTruthy()
++  })
++
++  it('assigns a chat to a project and retains the chat when that folder is removed', async () => {
++    mount()
++    flush()
++    fireEvent.click(screen.getByRole('button', { name: 'New project' }))
++    flush()
++    const input = await screen.findByRole('textbox', { name: 'Project name' })
++    fireEvent.input(input, { target: { value: 'Work' } })
++    flush()
++    fireEvent.submit(input.closest('form')!)
++    flush()
++    fireEvent.click(screen.getByRole('button', { name: 'Move Planning' }))
++    flush()
++    const select = await screen.findByRole('combobox', { name: /^Project$/ })
++    const project = readChatOrganization(key).projects[0]!
++    fireEvent.change(select, { target: { value: project.id } })
++    flush()
++    fireEvent.submit(select.closest('form')!)
++    flush()
++    expect(readChatOrganization(key).assignments['thread-a']).toBe(project.id)
++    fireEvent.click(screen.getByRole('button', { name: 'Manage project Work' }))
++    flush()
++    fireEvent.click(await screen.findByRole('button', { name: 'Remove project, keep chats' }))
++    flush()
++    expect(readChatOrganization(key).projects).toEqual([])
++    expect(readChatOrganization(key).assignments).toEqual({})
++    expect(screen.getByRole('button', { name: 'Move Planning' })).toBeTruthy()
++  })
++})
+diff --git a/src/features/core/components/sidebar/chat-sidebar-organizer.css b/src/features/core/components/sidebar/chat-sidebar-organizer.css
+new file mode 100644
+--- /dev/null
++++ b/src/features/core/components/sidebar/chat-sidebar-organizer.css
+@@ -0,0 +1,48 @@
++.chat-organizer { display: flex; flex: 1; min-width: 0; min-height: 0; flex-direction: column; color: var(--verevon-text); }
++.chat-organizer__header { display: flex; align-items: center; gap: 2px; margin-bottom: 6px; }
++.chat-organizer__header > strong { min-width: 0; flex: 1; padding-left: 10px; font-size: 15px; font-weight: 600; }
++.chat-organizer__header button,
++.chat-organizer__view > summary { display: grid; place-items: center; width: 36px; min-height: 40px; flex-shrink: 0; padding: 0; border: 0; border-radius: 8px; color: inherit; background: transparent; cursor: pointer; list-style: none; }
++.chat-organizer__view > summary::-webkit-details-marker,
++.chat-organizer__group > summary::-webkit-details-marker { display: none; }
++.chat-organizer__header button:hover,
++.chat-organizer__view > summary:hover,
++.chat-organizer__group > summary:hover { background: var(--verevon-surface-soft); }
++.chat-organizer__header button:disabled { opacity: .45; cursor: default; }
++.chat-organizer :is(button, summary, input, select, a):focus-visible { outline: 2px solid var(--verevon-accent-ink); outline-offset: 2px; }
++.chat-organizer__view { position: relative; }
++.chat-organizer__view-panel { position: absolute; z-index: 20; top: calc(100% + 6px); right: -38px; width: 224px; padding: 16px; border: 1px solid var(--verevon-border); border-radius: 12px; background: var(--panel); box-shadow: var(--shadow-md); }
++.chat-organizer__view-panel label { display: grid; gap: 6px; font-size: 12px; font-weight: 600; }
++.chat-organizer__view-panel label + label { margin-top: 14px; }
++.chat-organizer__view-panel select { width: 100%; min-height: 38px; padding: 6px 8px; border: 1px solid var(--verevon-border); border-radius: 7px; color: var(--verevon-text); background: var(--background); font: inherit; font-size: 13px; font-weight: 400; }
++.chat-organizer__search { display: flex; align-items: center; gap: 6px; min-height: 40px; margin: 0 4px 8px; padding: 0 6px 0 10px; border: 1px solid var(--verevon-border); border-radius: 9px; background: var(--panel); }
++.chat-organizer__search input { min-width: 0; width: 100%; min-height: 36px; border: 0; background: transparent; color: inherit; font: inherit; font-size: 13px; }
++.chat-organizer__search input::placeholder { color: var(--verevon-text-muted); opacity: 1; }
++.chat-organizer__search > button { display: grid; place-items: center; flex-shrink: 0; width: 28px; min-height: 32px; border: 0; border-radius: 5px; background: transparent; color: inherit; cursor: pointer; }
++.chat-organizer > .core-chat-sidebar__new { flex-shrink: 0; height: 42px; gap: 10px; margin: 0 0 12px; background: transparent; color: inherit; font-size: 13px; font-weight: 500; }
++.chat-organizer > .core-chat-sidebar__new:hover { background: var(--verevon-surface-soft); }
++.chat-organizer__list { padding: 2px; }
++.chat-organizer__group { position: relative; flex-shrink: 0; margin-bottom: 12px; }
++.chat-organizer__group > summary { display: flex; min-height: 36px; align-items: center; gap: 8px; padding: 4px 38px 4px 9px; border-radius: 8px; color: var(--verevon-text-muted); font-size: 12px; font-weight: 600; list-style: none; cursor: pointer; }
++.chat-organizer__group > summary > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
++.chat-organizer__group > summary > svg { flex-shrink: 0; }
++.chat-organizer__group > summary > small { margin-left: auto; font-size: 11px; font-variant-numeric: tabular-nums; }
++.chat-organizer__group > summary::after { content: ''; width: 5px; height: 5px; flex-shrink: 0; border-right: 1px solid currentColor; border-bottom: 1px solid currentColor; transform: rotate(-45deg); }
++.chat-organizer__group[open] > summary::after { transform: rotate(45deg); }
++.chat-organizer__project-menu { display: grid; position: absolute; top: 2px; right: 2px; place-items: center; width: 32px; height: 32px; border: 0; border-radius: 7px; color: var(--verevon-text-muted); background: transparent; cursor: pointer; }
++.chat-organizer__project-menu:hover { color: var(--verevon-text); background: var(--verevon-surface-soft); }
++.chat-organizer__empty { padding: 10px; margin: 0; color: var(--verevon-text-muted); font-size: 12px; line-height: 1.6; }
++.chat-organizer__clear-filter { display: flex; align-items: center; align-self: flex-start; gap: 6px; min-height: 32px; margin: 0 8px 6px; padding: 4px 8px; border: 1px solid var(--verevon-border); border-radius: 6px; background: var(--panel); color: inherit; font-size: 11px; cursor: pointer; }
++.chat-organizer__local-note { flex-shrink: 0; margin: 8px 10px 2px; color: var(--verevon-text-muted); font-size: 11px; line-height: 1.5; }
++.chat-project-dialog { width: min(440px, calc(100vw - 32px)); max-height: calc(100dvh - 32px); margin: auto; overflow-y: auto; padding: 24px; border: 1px solid var(--verevon-border); border-radius: 18px; background: var(--panel); color: var(--verevon-text); box-shadow: var(--shadow-md); }
++.chat-project-dialog::backdrop { background: rgb(0 0 0 / 35%); }
++.chat-project-dialog h2 { margin: 0 0 10px; font-size: 20px; font-weight: 600; }
++.chat-project-dialog p { margin: 0 0 20px; color: var(--verevon-text-muted); font-size: 14px; line-height: 1.6; }
++.chat-project-dialog label { display: grid; gap: 8px; font-size: 13px; font-weight: 500; }
++.chat-project-dialog :is(input, select) { width: 100%; min-height: 44px; padding: 8px 12px; border: 1px solid var(--verevon-border); border-radius: 8px; background: var(--background); color: inherit; font: inherit; font-size: 14px; }
++.chat-project-dialog button { min-height: 40px; padding: 8px 12px; border: 1px solid var(--verevon-border); border-radius: 8px; background: transparent; color: inherit; font: inherit; font-size: 13px; cursor: pointer; }
++.chat-project-dialog button:hover { background: var(--verevon-surface-soft); }
++.chat-project-dialog :is(button, input, select):focus-visible { outline: 2px solid var(--verevon-accent-ink); outline-offset: 2px; }
++.chat-project-dialog__manage { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; margin-top: 20px; }
++.chat-project-dialog__footer { display: flex; justify-content: flex-end; gap: 8px; margin-top: 24px; }
++.chat-project-dialog__footer button[type='submit'] { background: var(--verevon-text); color: var(--panel); border-color: var(--verevon-text); }

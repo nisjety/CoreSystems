@@ -23,6 +23,8 @@ struct CancelEntry {
     flag: Arc<AtomicBool>,
     org_id: String,
     user_id: String,
+    /// The durable run this stream produces; empty when it has none.
+    run_id: String,
 }
 
 impl CancelRegistry {
@@ -35,6 +37,20 @@ impl CancelRegistry {
     /// the stream loop polls; call [`finish`](Self::finish) when the stream ends.
     #[must_use]
     pub fn register(&self, request_id: &str, org_id: &str, user_id: &str) -> Arc<AtomicBool> {
+        self.register_run(request_id, org_id, user_id, "")
+    }
+
+    /// [`register`](Self::register) for a stream that produces the durable run
+    /// `run_id`, so a durable cancel of that run
+    /// ([`cancel_run_for`](Self::cancel_run_for)) stops the stream as well.
+    #[must_use]
+    pub fn register_run(
+        &self,
+        request_id: &str,
+        org_id: &str,
+        user_id: &str,
+        run_id: &str,
+    ) -> Arc<AtomicBool> {
         let flag = Arc::new(AtomicBool::new(false));
         self.inner.insert(
             request_id.to_owned(),
@@ -42,9 +58,33 @@ impl CancelRegistry {
                 flag: flag.clone(),
                 org_id: org_id.to_owned(),
                 user_id: user_id.to_owned(),
+                run_id: run_id.to_owned(),
             },
         );
         flag
+    }
+
+    /// Request cancellation of this caller's live stream for durable run
+    /// `run_id`, after Session Core has cancelled the run itself. Returns
+    /// `true` if such a stream was running in this process.
+    ///
+    /// The durable cancel and the stream used to be independent: a Stop that
+    /// cancelled the run left the stream to save its answer and only then fail
+    /// to terminalize a run that was already cancelled. Owner-scoped like
+    /// [`cancel_for`](Self::cancel_for); another replica's stream is not
+    /// visible here and relies on its own liveness check before the save.
+    pub fn cancel_run_for(&self, run_id: &str, org_id: &str, user_id: &str) -> bool {
+        if run_id.is_empty() {
+            return false;
+        }
+        let mut found = false;
+        for entry in self.inner.iter() {
+            if entry.run_id == run_id && entry.org_id == org_id && entry.user_id == user_id {
+                entry.flag.store(true, Ordering::Relaxed);
+                found = true;
+            }
+        }
+        found
     }
 
     /// Request cancellation of an in-flight stream. Returns `true` if a matching
@@ -71,6 +111,22 @@ impl CancelRegistry {
     /// Stop tracking a finished stream (idempotent).
     pub fn finish(&self, request_id: &str) {
         self.inner.remove(request_id);
+    }
+
+    /// Whether this caller's stream is still being produced in THIS process.
+    ///
+    /// Bound to the same tenant/user as [`cancel_for`](Self::cancel_for), so a
+    /// request id cannot be used to probe another caller's streams. The resume
+    /// tail uses it to keep following a producer that is working quietly — the
+    /// tool phase, source review and bounded repair can buffer nothing for
+    /// minutes — instead of mistaking that silence for a dead stream. Another
+    /// replica's producer is not visible here; callers keep their inactivity
+    /// fallback for that case.
+    #[must_use]
+    pub fn is_live_for(&self, request_id: &str, org_id: &str, user_id: &str) -> bool {
+        self.inner
+            .get(request_id)
+            .is_some_and(|entry| entry.org_id == org_id && entry.user_id == user_id)
     }
 
     /// Internal cooperative polling; callers use the already-authorized run id.
@@ -118,6 +174,37 @@ mod tests {
         assert!(!reg.cancel_for("req-tenant", "org-a", "user-b"));
         assert!(!flag.load(Ordering::Relaxed));
         assert!(reg.cancel_for("req-tenant", "org-a", "user-a"));
+    }
+
+    #[test]
+    fn liveness_is_scoped_to_its_owner_and_ends_with_the_stream() {
+        let reg = CancelRegistry::new();
+        let _flag = reg.register("req-live", "org-a", "user-a");
+        assert!(reg.is_live_for("req-live", "org-a", "user-a"));
+        assert!(!reg.is_live_for("req-live", "org-b", "user-a"), "no cross-tenant probe");
+        assert!(!reg.is_live_for("req-live", "org-a", "user-b"), "no cross-user probe");
+        assert!(!reg.is_live_for("req-other", "org-a", "user-a"));
+        reg.finish("req-live");
+        assert!(!reg.is_live_for("req-live", "org-a", "user-a"));
+    }
+
+    #[test]
+    fn a_durable_run_cancel_reaches_only_its_owners_stream() {
+        let reg = CancelRegistry::new();
+        let flag = reg.register_run("req-run", "org-a", "user-a", "run-1");
+        let other = reg.register_run("req-other", "org-a", "user-a", "run-2");
+        let unbound = reg.register("req-plain", "org-a", "user-a");
+        // Neither another tenant, another user nor a stream without a run.
+        assert!(!reg.cancel_run_for("run-1", "org-b", "user-a"));
+        assert!(!reg.cancel_run_for("run-1", "org-a", "user-b"));
+        assert!(!reg.cancel_run_for("", "org-a", "user-a"));
+        assert!(!flag.load(Ordering::Relaxed));
+        assert!(reg.cancel_run_for("run-1", "org-a", "user-a"));
+        assert!(flag.load(Ordering::Relaxed), "the stream observes the Stop");
+        assert!(!other.load(Ordering::Relaxed) && !unbound.load(Ordering::Relaxed));
+        reg.finish("req-run");
+        // A finished stream is no longer reachable.
+        assert!(!reg.cancel_run_for("run-1", "org-a", "user-a"));
     }
 
     #[test]

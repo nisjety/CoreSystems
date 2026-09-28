@@ -3,6 +3,8 @@ import { SupportAIModeError, runAssist } from "./inbox-ai";
 import { buildModelContextPack } from "@/shared/context-packs/context-pack";
 import { rememberAiModelSelection, resetAiModelSelectionForTests } from "@/shared/ai/model-selection";
 import { OPENAI_CODEX_SUBSCRIPTION_PROVIDER } from "@/shared/api/chatgpt-subscription-client";
+import type { PrivacyTier } from "@/shared/api/privacy-tier";
+import { CATALOGUE_TIER_WAIT_MS } from "@/features/dashboard/home/submit-privacy-tier";
 
 afterEach(() => {
 	vi.unstubAllGlobals();
@@ -579,5 +581,148 @@ describe("runAssist", () => {
 		expect(String(fetchMock.mock.calls[0]?.[0])).toBe(
 			"/api/v1/orgs/org-ai-off",
 		);
+	});
+});
+
+// Inbox assist sends a catalogue model's tier as `min_privacy_tier`, resolved
+// exactly as the main composer resolves it (`submit-privacy-tier.ts`). Before
+// this, a catalogue model went out with no tier at all: unconstrained.
+describe("runAssist — a catalogue model's privacy tier rides the invoke", () => {
+	const orgId = "org-tier";
+	const euModel = { id: "m-eu", name: "EU Model", provider: "eu-host", privacy_tier: "eu_resident" };
+	const plainModel = { id: "m-plain", name: "Plain Model", provider: "plain-host" };
+
+	afterEach(() => {
+		vi.useRealTimers();
+		resetAiModelSelectionForTests(orgId);
+	});
+
+	/** The selection the picker stored, with or without its last-known tier. */
+	function storeSelection(privacyTier?: PrivacyTier, model: { id: string; name: string; provider: string } = euModel) {
+		rememberAiModelSelection(orgId, {
+			model: model.id,
+			label: model.name,
+			provider: model.provider,
+			...(privacyTier ? { privacyTier } : {}),
+		});
+	}
+
+	/** The org's settings and the invoke; `/api/v1/models` answers with `models()`. */
+	function stubGateway(models: () => Promise<Response>) {
+		const invokes: Array<Record<string, unknown>> = [];
+		const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+			const url = String(input);
+			if (url === `/api/v1/orgs/${orgId}`) {
+				return jsonResponse({ id: orgId, metadata: { interactiveRetention: { zdr: false } } });
+			}
+			if (url === "/api/v1/models") return models();
+			if (url === "/api/v1/chat/invoke") {
+				invokes.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+				return jsonResponse({ content: "Answer", sources: [] });
+			}
+			throw new Error(`Unexpected request ${url}`);
+		});
+		vi.stubGlobal("fetch", fetchMock);
+		return {
+			invokes,
+			modelRequests: () => fetchMock.mock.calls.filter(([input]) => String(input) === "/api/v1/models").length,
+		};
+	}
+
+	const assist = () => runAssist(orgId, "summarize", [{ agent: false, body: "Help" }]);
+
+	describe("before the catalogue has loaded", () => {
+		it("holds the invoke for the catalogue and sends the model's own tier", async () => {
+			storeSelection("global");
+			let answer!: (response: Response) => void;
+			const gateway = stubGateway(() => new Promise((resolve) => { answer = resolve; }));
+
+			const result = assist();
+			await vi.waitFor(() => expect(gateway.modelRequests()).toBe(1));
+			expect(gateway.invokes).toHaveLength(0);
+
+			answer(jsonResponse([euModel, plainModel]));
+			await expect(result).resolves.toMatchObject({ text: "Answer" });
+			// The wire carries the proto ordinal: eu_resident = 2.
+			expect(gateway.invokes[0]).toMatchObject({ model: "m-eu", min_privacy_tier: 2 });
+		});
+
+		it("sends the last-known tier once the bounded wait runs out", async () => {
+			storeSelection("zdr_contractual");
+			vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+			const gateway = stubGateway(() => new Promise(() => {}));
+
+			const result = assist();
+			await vi.waitFor(() => expect(gateway.modelRequests()).toBe(1));
+			expect(gateway.invokes).toHaveLength(0);
+			await vi.advanceTimersByTimeAsync(CATALOGUE_TIER_WAIT_MS);
+			vi.useRealTimers();
+
+			await expect(result).resolves.toMatchObject({ text: "Answer" });
+			expect(gateway.invokes[0]).toMatchObject({ model: "m-eu", min_privacy_tier: 3 });
+		});
+
+		it("fails closed to the strictest tier when nothing is known about the model", async () => {
+			storeSelection();
+			vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+			const gateway = stubGateway(() => new Promise(() => {}));
+
+			const result = assist();
+			await vi.waitFor(() => expect(gateway.modelRequests()).toBe(1));
+			await vi.advanceTimersByTimeAsync(CATALOGUE_TIER_WAIT_MS);
+			vi.useRealTimers();
+
+			await expect(result).resolves.toMatchObject({ text: "Answer" });
+			expect(gateway.invokes[0]).toMatchObject({ model: "m-eu", min_privacy_tier: 4 });
+		});
+
+		it("never asks for the catalogue, nor sends a tier, for an intent mode", async () => {
+			// Default selection: Verevon Balance, resolved server-side.
+			const gateway = stubGateway(() => Promise.reject(new Error("must not be requested")));
+
+			await expect(assist()).resolves.toMatchObject({ text: "Answer" });
+			expect(gateway.modelRequests()).toBe(0);
+			expect(gateway.invokes[0]).not.toHaveProperty("min_privacy_tier");
+		});
+	});
+
+	describe("after the catalogue has loaded", () => {
+		it("sends the listed tier, even over a different last-known one", async () => {
+			storeSelection("sovereign");
+			const gateway = stubGateway(async () => jsonResponse([euModel, plainModel]));
+
+			await expect(assist()).resolves.toMatchObject({ text: "Answer" });
+			expect(gateway.invokes[0]).toMatchObject({ model: "m-eu", min_privacy_tier: 2 });
+		});
+
+		it("sends no tier for a listed model that claims none, as before", async () => {
+			storeSelection("sovereign", plainModel);
+			const gateway = stubGateway(async () => jsonResponse([euModel, plainModel]));
+
+			await expect(assist()).resolves.toMatchObject({ text: "Answer" });
+			expect(gateway.invokes[0]).toMatchObject({ model: "m-plain" });
+			expect(gateway.invokes[0]).not.toHaveProperty("min_privacy_tier");
+		});
+	});
+
+	describe("when the catalogue request fails", () => {
+		it("sends the last-known tier without waiting", async () => {
+			storeSelection("global");
+			// With the timer faked, sitting out the bound would never end.
+			vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+			const gateway = stubGateway(async () => jsonResponse({ message: "down" }, 503));
+
+			await expect(assist()).resolves.toMatchObject({ text: "Answer" });
+			expect(gateway.invokes[0]).toMatchObject({ model: "m-eu", min_privacy_tier: 1 });
+		});
+
+		it("fails closed when nothing is known about the model", async () => {
+			storeSelection();
+			vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+			const gateway = stubGateway(async () => jsonResponse({ message: "down" }, 503));
+
+			await expect(assist()).resolves.toMatchObject({ text: "Answer" });
+			expect(gateway.invokes[0]).toMatchObject({ model: "m-eu", min_privacy_tier: 4 });
+		});
 	});
 });

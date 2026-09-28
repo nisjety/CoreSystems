@@ -68,6 +68,36 @@ async fn can_author_skills(state: &AppState, user: &AuthenticatedUser) -> bool {
     has_authorized_org_role(user, &["owner", "admin"])
 }
 
+/// Whether the caller may create/update/delete THIS cron schedule (chat-wave2
+/// "schedule" spec §2.2, owner ruling 2026-09-28 #1: "schedules may be
+/// created by the creator in their own personal Space, admins keep org-wide
+/// control").
+///
+/// `schedule_creator_subject_id` is `None` for a create call (the schedule
+/// does not exist yet) and `Some` for update/delete (the resolved owner of
+/// the existing row). An org admin/owner always passes, unchanged from
+/// before; a non-admin passes only when they are that exact schedule's own
+/// creator.
+fn can_author_own_schedule(user: &AuthenticatedUser, schedule_creator_subject_id: Option<&str>) -> bool {
+    has_authorized_org_role(user, &["owner", "admin"])
+        || schedule_creator_subject_id.is_some_and(|id| id == user.user_id)
+}
+
+/// A cron-create body naming an explicit `space_ref` — a Space Room, since
+/// the chat-facing surface (`schedule-from-chat.ts`) never sends this field
+/// and always resolves to the caller's own personal Space — still requires
+/// the admin gate. Only the personal-Space path (no `space_ref` at all) is
+/// relaxed to "any org member, for their own schedule": that relaxation is
+/// exactly what `inject_personal_schedule_create_context` already verifies
+/// server-side before minting the Control decision (it resolves the caller's
+/// OWN personal Space, never an arbitrary one), so this is a narrowing of an
+/// over-broad BFF-side pre-check, not a new authorization surface.
+fn cron_create_names_explicit_space(body: &Value) -> bool {
+    body.get("space_ref")
+        .and_then(Value::as_str)
+        .is_some_and(|value| !value.trim().is_empty())
+}
+
 /// Rebuild a forwardable query string from the incoming params, dropping empty
 /// values. Upstream handlers read `q`, `kind`, `limit`, `after_id`.
 fn build_query(params: &HashMap<String, String>) -> String {
@@ -417,20 +447,25 @@ async fn list_cron(
 }
 
 /// Create a cron schedule (`name`, `schedule_expr`, `timezone`, `task_template`,
-/// `enabled`). Admin-gated; proxied to model-gateway `/v1/cron` → capability-core.
-/// capability-core validates the cron expression and seeds next_fire_at.
+/// `enabled`). Proxied to model-gateway `/v1/cron` → capability-core, which
+/// validates the cron expression and seeds next_fire_at.
+///
+/// Admin-gated for an explicit (Space Room) `space_ref`, unchanged. Relaxed
+/// for the personal-Space path (no `space_ref` at all): any authenticated org
+/// member may create their OWN personal schedule from chat (owner ruling
+/// 2026-09-28 #1) — see `can_author_own_schedule`'s doc.
 async fn create_cron(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
     headers: HeaderMap,
     Json(mut body): Json<Value>,
 ) -> impl IntoResponse {
-    if !can_author_skills(&state, &user).await {
+    if cron_create_names_explicit_space(&body) && !can_author_skills(&state, &user).await {
         return (
             StatusCode::FORBIDDEN,
             Json(error(
                 "forbidden",
-                "Only organization admins can create cron schedules.",
+                "Only organization admins can create cron schedules in a shared Space.",
             )),
         )
             .into_response();
@@ -487,7 +522,56 @@ async fn create_cron(
     .into_response()
 }
 
-/// Update a cron schedule (enable/disable, edit expression). Admin-gated.
+/// Resolve `cron_id`'s `creator_subject_id` via a cheap `GET /v1/cron/{id}`
+/// (already proxied 1:1 to capability-core) and apply
+/// `can_author_own_schedule`. An org admin/owner short-circuits without the
+/// lookup, unchanged from before. Returns `Err` with the exact response to
+/// send back: either the lookup's own failure propagated as-is (a 404 for an
+/// id that does not exist or is outside the caller's org stays a 404, not a
+/// misleading 403), or a 403 when the caller is neither an admin nor this
+/// schedule's own creator.
+async fn authorize_own_schedule(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    cron_id: &str,
+    token: Option<&str>,
+    capability: &str,
+    forbidden_message: &'static str,
+) -> Result<(), (StatusCode, Json<Value>)> {
+    if has_authorized_org_role(user, &["owner", "admin"]) {
+        return Ok(());
+    }
+    let url = format!(
+        "{}/v1/cron/{}",
+        state.model_gateway_url,
+        urlencoding::encode(cron_id)
+    );
+    let (status, Json(schedule)) = shared::proxy_model_json_with_capability(
+        state,
+        Method::GET,
+        &url,
+        None,
+        token,
+        Some(capability),
+        user,
+    )
+    .await;
+    if !status.is_success() {
+        return Err((status, Json(schedule)));
+    }
+    let creator = schedule.get("creator_subject_id").and_then(Value::as_str);
+    if can_author_own_schedule(user, creator) {
+        return Ok(());
+    }
+    Err((
+        StatusCode::FORBIDDEN,
+        Json(error("forbidden", forbidden_message)),
+    ))
+}
+
+/// Update a cron schedule (enable/disable, edit expression). Admin-gated for
+/// anyone else's schedule; relaxed for the caller's own (owner ruling
+/// 2026-09-28 #1) — see `authorize_own_schedule`.
 async fn update_cron(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
@@ -495,21 +579,23 @@ async fn update_cron(
     Path(cron_id): Path<String>,
     Json(body): Json<Value>,
 ) -> impl IntoResponse {
-    if !can_author_skills(&state, &user).await {
-        return (
-            StatusCode::FORBIDDEN,
-            Json(error(
-                "forbidden",
-                "Only organization admins can change cron schedules.",
-            )),
-        )
-            .into_response();
-    }
     let token = shared::model_token(&state, &user, &headers).await;
     let capability = match shared::required_capability_token(&state, &user, &headers).await {
         Ok(token) => token,
         Err(err) => return shared::delegated_auth_unavailable(err).into_response(),
     };
+    if let Err(response) = authorize_own_schedule(
+        &state,
+        &user,
+        &cron_id,
+        token.as_deref(),
+        &capability,
+        "Only an organization admin or this schedule's own creator can change it.",
+    )
+    .await
+    {
+        return response.into_response();
+    }
     let url = format!(
         "{}/v1/cron/{}",
         state.model_gateway_url,
@@ -528,28 +614,32 @@ async fn update_cron(
     .into_response()
 }
 
-/// Delete a cron schedule. Admin-gated.
+/// Delete a cron schedule. Admin-gated for anyone else's schedule; relaxed
+/// for the caller's own (owner ruling 2026-09-28 #1) — see
+/// `authorize_own_schedule`.
 async fn delete_cron(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
     headers: HeaderMap,
     Path(cron_id): Path<String>,
 ) -> impl IntoResponse {
-    if !can_author_skills(&state, &user).await {
-        return (
-            StatusCode::FORBIDDEN,
-            Json(error(
-                "forbidden",
-                "Only organization admins can delete cron schedules.",
-            )),
-        )
-            .into_response();
-    }
     let token = shared::model_token(&state, &user, &headers).await;
     let capability = match shared::required_capability_token(&state, &user, &headers).await {
         Ok(token) => token,
         Err(err) => return shared::delegated_auth_unavailable(err).into_response(),
     };
+    if let Err(response) = authorize_own_schedule(
+        &state,
+        &user,
+        &cron_id,
+        token.as_deref(),
+        &capability,
+        "Only an organization admin or this schedule's own creator can delete it.",
+    )
+    .await
+    {
+        return response.into_response();
+    }
     let url = format!(
         "{}/v1/cron/{}",
         state.model_gateway_url,
@@ -594,4 +684,78 @@ async fn list_capabilities(
         &user,
     )
     .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{can_author_own_schedule, cron_create_names_explicit_space};
+    use crate::middleware::AuthenticatedUser;
+    use serde_json::json;
+
+    fn member(user_id: &str) -> AuthenticatedUser {
+        AuthenticatedUser {
+            user_id: user_id.to_owned(),
+            user_email: "user@example.com".to_owned(),
+            user_name: "User".to_owned(),
+            user_image: None,
+            email_verified: true,
+            auth_role: Some("member".to_owned()),
+            active_org_id: Some("org-1".to_owned()),
+            authorized_membership: None,
+        }
+    }
+
+    fn owner(user_id: &str) -> AuthenticatedUser {
+        AuthenticatedUser {
+            // has_authorized_org_role reads the live Control membership
+            // decision, never auth_role or a cached session role — see its
+            // own doc comment.
+            authorized_membership: Some(crate::middleware::AuthorizedMembership {
+                organization_id: "org-1".to_owned(),
+                role: "owner".to_owned(),
+            }),
+            ..member(user_id)
+        }
+    }
+
+    // can_author_own_schedule — the shared gate behind create_cron's
+    // personal-Space path and authorize_own_schedule's update/delete lookup.
+
+    #[test]
+    fn own_schedule_author_check_allows_an_admin_for_any_schedule() {
+        assert!(can_author_own_schedule(&owner("admin-1"), Some("someone-else")));
+        assert!(can_author_own_schedule(&owner("admin-1"), None));
+    }
+
+    #[test]
+    fn own_schedule_author_check_allows_the_exact_creator() {
+        assert!(can_author_own_schedule(&member("user-1"), Some("user-1")));
+    }
+
+    #[test]
+    fn own_schedule_author_check_refuses_a_member_on_someone_elses_schedule() {
+        assert!(!can_author_own_schedule(&member("user-1"), Some("user-2")));
+    }
+
+    #[test]
+    fn own_schedule_author_check_refuses_a_member_when_no_creator_is_known_yet() {
+        // The create-time shape: nothing to compare against, so a non-admin
+        // must be refused rather than let through by a missing comparison.
+        assert!(!can_author_own_schedule(&member("user-1"), None));
+    }
+
+    // cron_create_names_explicit_space — what routes create_cron through the
+    // relaxed personal-Space path vs. the unchanged admin-gated Space-Room path.
+
+    #[test]
+    fn create_cron_with_no_space_ref_is_the_personal_space_path() {
+        assert!(!cron_create_names_explicit_space(&json!({"name": "x"})));
+        assert!(!cron_create_names_explicit_space(&json!({"space_ref": ""})));
+        assert!(!cron_create_names_explicit_space(&json!({"space_ref": "   "})));
+    }
+
+    #[test]
+    fn create_cron_with_an_explicit_space_ref_still_requires_admin() {
+        assert!(cron_create_names_explicit_space(&json!({"space_ref": "space-1"})));
+    }
 }

@@ -906,6 +906,7 @@ fn parse_response(request_id: &str, json: &serde_json::Value) -> InferResponse {
         token_confidence: None,
         cache_read_input_tokens: cache_read_input_tokens(&json["usage"]),
         cache_creation_input_tokens: cache_creation_input_tokens(&json["usage"]),
+        provider_timing: None,
     }
 }
 
@@ -1170,6 +1171,7 @@ impl ProviderRouter for AnthropicProvider {
                                 },
                                 cache_read_input_tokens: cache_read_tokens,
                                 cache_creation_input_tokens: cache_creation_tokens,
+                                provider_timing: None,
                             };
                             let _ = tx.send(final_chunk).await;
                             return;
@@ -1236,6 +1238,7 @@ impl ProviderRouter for AnthropicProvider {
                                     reasoning_delta,
                                     cache_read_input_tokens: 0,
                                     cache_creation_input_tokens: 0,
+                                    provider_timing: None,
                                 };
                                 if tx.send(chunk).await.is_err() {
                                     return;
@@ -1260,6 +1263,7 @@ impl ProviderRouter for AnthropicProvider {
                                     },
                                     cache_read_input_tokens: cache_read_tokens,
                                     cache_creation_input_tokens: cache_creation_tokens,
+                                    provider_timing: None,
                                 };
                                 let _ = tx.send(final_chunk).await;
                                 return;
@@ -1293,6 +1297,7 @@ impl ProviderRouter for AnthropicProvider {
                 },
                 cache_read_input_tokens: cache_read_tokens,
                 cache_creation_input_tokens: cache_creation_tokens,
+                provider_timing: None,
             };
             let _ = tx.send(final_chunk).await;
         });

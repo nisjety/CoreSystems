@@ -23,6 +23,7 @@ pub mod llm_planner;
 pub mod mcp_gateway;
 pub mod org_directory;
 pub mod permission;
+pub mod plan;
 pub mod policy;
 pub mod postcondition;
 pub mod process_host;

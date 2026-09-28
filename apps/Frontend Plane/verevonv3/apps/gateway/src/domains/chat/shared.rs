@@ -567,6 +567,7 @@ pub(crate) async fn proxy_model_json_with_session(
 /// `proxy_model_json_with_session` itself: that function has many unrelated
 /// callers outside the chat-stream path that have no capability bearer to
 /// give it.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn proxy_model_json_with_session_and_capability(
     state: &AppState,
     method: Method,
@@ -799,6 +800,15 @@ mod tests {
             studio_store: crate::domains::studio::StudioStore::new(),
             allow_dev_actor_headers: false,
             allow_dev_auth_bypass,
+            mail_task_ingest_service_token: "mail-task-test-secret-at-least-32-bytes".into(),
+            mail_task_rate_limiter: crate::rate_limit::RateLimiter::from_cache_with_rpm(
+                &ResultCache::disabled(),
+                20.0,
+            ),
+            mail_task_nats_url: String::new(),
+            mail_task_nats_user: String::new(),
+            mail_task_nats_password: String::new(),
+            mail_task_pipeline: None,
         }
     }
 

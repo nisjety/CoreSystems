@@ -2,7 +2,7 @@ import { expect, test } from '@playwright/test'
 import { readFileSync, readdirSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { openFresh, restrictSources, send, transcript, latestArtifacts, type Transcript } from './product-acceptance-helpers'
-import { containsRoundedNumber, grossProfitChangeClaims } from './product-sales-oracle'
+import { acceptableProfitChange, containsRoundedNumber, grossProfitChangeClaims } from './product-sales-oracle'
 import { scenarioRecording } from './product-recording-camera'
 import { unsupportedDatedApprovalRows } from './product-project-oracle'
 
@@ -14,12 +14,16 @@ const output = (value: Transcript | null) => latestArtifacts(value).map(a => a.c
 
 // Independent calculation from the maintained CSV; never ask the model to
 // grade its own arithmetic or use an expected answer as input to the task.
-function salesOracle() {
+// `withChannels` adds the sales channels as scopes too, for checking the
+// prose's change claims only: a report may break a change down by channel
+// ("Nettbutikken … bruttofortjenesten +7 360 kr", Q16b 02 take 16), but it
+// is never required to list every channel's figures.
+function salesOracle(withChannels = false) {
   const rows = readFileSync(resolve(root, '02-salgsrapport/salg.csv'), 'utf8').trim().split(/\r?\n/).slice(1)
   const totals = new Map<string, { revenue: number; cost: number }>()
   for (const row of rows) {
-    const [week, group, , , revenue, cost] = row.split(',')
-    for (const key of [`${week}/${group}`, `${week}/Totalt`]) {
+    const [week, group, channel, , revenue, cost] = row.split(',')
+    for (const key of [`${week}/${group}`, ...(withChannels ? [`${week}/${channel}`] : []), `${week}/Totalt`]) {
       const total = totals.get(key) ?? { revenue: 0, cost: 0 }
       total.revenue += Number(revenue); total.cost += Number(cost); totals.set(key, total)
     }
@@ -33,14 +37,16 @@ function containsNumber(text: string, number: number) {
 }
 
 function checkSalesNarrative(text: string) {
-  const totals = salesOracle()
+  const totals = salesOracle(true)
   // Correct table cells cannot excuse a contradictory change in the summary.
   const groups = [...new Set(totals.map(row => row.key.split('/')[1]))].filter(group => group !== 'Totalt')
+  const changes = Object.fromEntries(['Totalt', ...groups].map(group => [group,
+    totals.find(row => row.key === `37/${group}`)!.profit - totals.find(row => row.key === `36/${group}`)!.profit]))
   for (const claim of grossProfitChangeClaims(text, groups)) {
     const before = totals.find(row => row.key === `36/${claim.group}`)!
     const after = totals.find(row => row.key === `37/${claim.group}`)!
     const profitChange = after.profit - before.profit
-    expect(claim.amount, `${claim.group} gross-profit change in the prose must match the CSV`).toBe(profitChange)
+    expect(acceptableProfitChange(claim, changes), `${claim.group} (${claim.scope}) gross-profit change ${claim.amount} in the prose must match the CSV (${profitChange})`).toBe(true)
     if (claim.percentage) {
       expect(containsRoundedNumber(claim.percentage, 100 * profitChange / before.profit), `${claim.group} gross-profit percentage change in the prose`).toBe(true)
     }

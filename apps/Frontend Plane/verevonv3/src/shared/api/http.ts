@@ -44,7 +44,9 @@ function applyDevAuth(headers: Headers): void {
 /**
  * Extract a `{ code, message }` pair from any error body shape we receive:
  *  - gateway standard envelope: `{ error: { code, message } }`
- *  - gateway string error:      `{ error: "..." }`
+ *  - gateway string error:      `{ error: "...", code? }` — upstream bodies the
+ *    gateway passes through, e.g. model-gateway's 422
+ *    `{ error, code: "no_speech_detected" }`, keep their top-level code
  *  - Better Auth passthrough:   `{ code, message }` (auth routes are proxied
  *    verbatim by the gateway, so the SPA sees Better Auth's native shape)
  */
@@ -54,7 +56,7 @@ export function extractError(body: unknown, status: number): { code: string | nu
 
     const errorField = record.error
     if (typeof errorField === 'string' && errorField.trim()) {
-      return { code: null, message: errorField }
+      return { code: typeof record.code === 'string' && record.code.trim() ? record.code : null, message: errorField }
     }
     if (errorField && typeof errorField === 'object') {
       const e = errorField as Record<string, unknown>

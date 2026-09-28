@@ -175,6 +175,76 @@ export function collectEvidenceSources(turns: ChatTurn[]): EvidenceSource[] {
   return result
 }
 
+/**
+ * The domain/provider grouping key for one citation (chat-wave2 citations
+ * spec §2.6): the server's own `sourceGroupId` when set, falling back to
+ * `hostname(url)` for a citation from a not-yet-updated gateway — so a chip
+ * or Kilder row NEVER goes ungrouped, it just groups by hostname the way it
+ * always implicitly did before this field existed.
+ */
+export function citationGroupKey(citation: Citation): string {
+  return citation.sourceGroupId ?? hostname(citation.url)
+}
+
+/**
+ * The human label for `citationGroupKey`'s group: the server's own
+ * already-localized `sourceGroupLabel` when set (currently only a
+ * knowledge-base source), falling back to the hostname itself — same rule
+ * `hostname()` domain labels already follow: never translated, shown as-is.
+ */
+export function citationGroupLabel(citation: Citation): string {
+  return citation.sourceGroupLabel ?? hostname(citation.url)
+}
+
+/**
+ * The same grouping key extended to a knowledge-base `EvidenceSource`, which
+ * arrives on the separate `Grounding` event (`ChatGroundingSource`) and so
+ * never carries `sourceGroupId` of its own — it groups by its already-present
+ * `provider` instead, prefixed the same way the server prefixes a KB
+ * `Citation.sourceGroupId` (`kb:{provider}`), so a KB source's group never
+ * collides with a web source's hostname-keyed group.
+ */
+export function evidenceSourceGroupKey(source: EvidenceSource): string {
+  return source.kind === 'knowledge' ? `kb:${source.provider}` : citationGroupKey(source)
+}
+
+/** The human label for `evidenceSourceGroupKey`'s group. */
+export function evidenceSourceGroupLabel(source: EvidenceSource): string {
+  return source.kind === 'knowledge' ? source.provider : citationGroupLabel(source)
+}
+
+/** One domain/provider group, preserving first-seen order of both groups and items within a group. */
+export type SourceGroup<T> = {
+  key: string
+  label: string
+  items: T[]
+}
+
+/**
+ * Groups `items` by a caller-supplied key/label pair, preserving first-seen
+ * order for both the groups themselves and the items within a group. Shared
+ * by `InlineCitationMarker`'s popover (grouping `Citation`s) and
+ * `SourcesPanel`'s read/unread lists (grouping `EvidenceSource`s wrapped
+ * with their display index), so the two surfaces group identically.
+ */
+export function groupBySourceGroupId<T>(
+  items: readonly T[],
+  keyOf: (item: T) => string,
+  labelOf: (item: T) => string,
+): SourceGroup<T>[] {
+  const groups = new Map<string, SourceGroup<T>>()
+  for (const item of items) {
+    const key = keyOf(item)
+    const existing = groups.get(key)
+    if (existing) {
+      existing.items.push(item)
+      continue
+    }
+    groups.set(key, { key, label: labelOf(item), items: [item] })
+  }
+  return [...groups.values()]
+}
+
 export function groupTaskSteps(steps: AgentTaskStep[]): AgentTaskStepSection[] {
   const sections = new Map<string, AgentTaskStepSection>()
   for (const step of steps) {
@@ -666,16 +736,6 @@ export function formatToolArgs(args: unknown): string {
   }
 }
 
-export function readAloud(text: string) {
-  if (!('speechSynthesis' in window)) return
-  const clean = text.trim()
-  if (!clean) return
-  window.speechSynthesis.cancel()
-  const utterance = new SpeechSynthesisUtterance(clean)
-  utterance.lang = 'nb-NO'
-  window.speechSynthesis.speak(utterance)
-}
-
 export function getTaskStepIcon(status: TaskStepStatus): { className: string; node: JSX.Element } {
   if (status === 'done') return { className: 'is-done', node: <CheckCircle2 size={14} /> }
   if (status === 'active') return { className: 'is-active', node: <Clock3 size={14} /> }
@@ -1062,6 +1122,8 @@ export function isMarkdownBlockStart(line: string, nextLine?: string) {
  * described in the chat plan can replace this lightweight marker path later
  * without changing the source-card surface.
  */
+type IndexedCitation = { citation: Citation; index: number }
+
 export function InlineCitationMarker(props: {
   citations: Citation[]
   indexes: number[]
@@ -1069,25 +1131,37 @@ export function InlineCitationMarker(props: {
   const i18n = useI18n()
   const first = props.citations[0]
   if (!first) return null
-  const label = `${hostname(first.url)}${props.citations.length > 1 ? ` +${props.citations.length - 1}` : ''}`
+  const label = `${citationGroupLabel(first)}${props.citations.length > 1 ? ` +${props.citations.length - 1}` : ''}`
+  const groups = () => groupBySourceGroupId<IndexedCitation>(
+    props.citations.map((citation, i) => ({ citation, index: props.indexes[i] ?? i + 1 })),
+    (entry) => citationGroupKey(entry.citation),
+    (entry) => citationGroupLabel(entry.citation),
+  )
   return (
     <details class="verevon-chat-citation-chip">
       <summary aria-label={i18n.tr(`Kilde ${props.indexes.join(', ')}`, `Source ${props.indexes.join(', ')}`)}>{label}</summary>
       <div class="verevon-chat-citation-chip__popover" role="group" aria-label={i18n.tr('Kildedetaljer', 'Source details')}>
-        <For each={props.citations}>
-          {(citation, index) => (
-            <a
-              href={citation.url}
-              target="_blank"
-              rel="noopener noreferrer"
-              class="verevon-chat-citation-chip__source"
-            >
-              <span class="verevon-chat-citation-chip__index">{props.indexes[index()]}</span>
-              <span class="verevon-chat-citation-chip__body">
-                <strong>{citation.title || hostname(citation.url)}</strong>
-                {citation.snippet ? <span>{citation.snippet}</span> : null}
-              </span>
-            </a>
+        <For each={groups()}>
+          {(group) => (
+            <div class="verevon-chat-citation-chip__group">
+              <p class="verevon-chat-citation-chip__group-label">{group.label}</p>
+              <For each={group.items}>
+                {(entry) => (
+                  <a
+                    href={entry.citation.url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    class="verevon-chat-citation-chip__source"
+                  >
+                    <span class="verevon-chat-citation-chip__index">{entry.index}</span>
+                    <span class="verevon-chat-citation-chip__body">
+                      <strong>{entry.citation.title || hostname(entry.citation.url)}</strong>
+                      {entry.citation.snippet ? <span>{entry.citation.snippet}</span> : null}
+                    </span>
+                  </a>
+                )}
+              </For>
+            </div>
           )}
         </For>
       </div>
@@ -1175,6 +1249,7 @@ export function parseInline(text: string, citations?: readonly Citation[]): Arra
       // A parse error falls back to the raw `$...$` source rather than
       // dropping the expression or crashing the whole message render.
       const html = renderInlineMath(token.slice(1, -1))
+      // eslint-disable-next-line solid/no-innerhtml -- KaTeX's own HTML output, rendered with its default trust: false (see renderKatex), so the LaTeX source cannot embed markup, links or images.
       nodes.push(html ? <span class="verevon-chat-math verevon-chat-math--inline" innerHTML={html} /> : token)
     } else if (citations && /^\[\d+(?:\s*,\s*\d+)*\]$/.test(token)) {
       const indexes = token

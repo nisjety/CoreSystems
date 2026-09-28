@@ -32,9 +32,22 @@ export function HeroSection() {
 			return;
 		}
 
-		void video.play().catch(() => {
-			// The supporting copy remains usable when autoplay is blocked.
+		let visible = false;
+		const syncPlayback = () => {
+			if (!visible || document.hidden) video.pause();
+			else void video.play().catch(() => {});
+		};
+		const observer = new IntersectionObserver(([entry]) => {
+			visible = entry.isIntersecting;
+			syncPlayback();
 		});
+		observer.observe(video);
+		document.addEventListener("visibilitychange", syncPlayback);
+		return () => {
+			observer.disconnect();
+			document.removeEventListener("visibilitychange", syncPlayback);
+			video.pause();
+		};
 	}, [prefersReducedMotion]);
 
 	return (

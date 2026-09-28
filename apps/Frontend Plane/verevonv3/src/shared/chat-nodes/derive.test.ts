@@ -43,6 +43,31 @@ describe('deriveConversationNodes', () => {
     )
     const answer = nodes.find((node) => node.kind === 'answer')
     expect(answer).toEqual({ kind: 'answer', answer: { state: 'failed', message: 'upstream unavailable' } })
+    // No action keys on an ordinary failure: its shape is what it always was.
+    expect(Object.keys((answer as Extract<typeof answer, { kind: 'answer' }>).answer)).toEqual(['state', 'message'])
+  })
+
+  it('carries what the reader can do about a failure, and when, onto the failed answer', () => {
+    const answer = deriveConversationNodes(assistantTurn({
+      status: 'error',
+      content: 'Den tilkoblede ChatGPT-planen har nådd bruksgrensen for Codex.',
+      failureAction: 'wait',
+      retryAt: '2026-09-26T01:21:00Z',
+    })).find((node) => node.kind === 'answer')
+    expect(answer).toEqual({
+      kind: 'answer',
+      answer: {
+        state: 'failed',
+        message: 'Den tilkoblede ChatGPT-planen har nådd bruksgrensen for Codex.',
+        action: 'wait',
+        retryAt: '2026-09-26T01:21:00Z',
+      },
+    })
+    // Session-only: a reload never brings a wait back.
+    const [stored] = turnsToTranscript([assistantTurn({ status: 'error', failureAction: 'reconnect', retryAt: '2026-09-26T01:21:00Z' })])
+    expect(stored).not.toHaveProperty('failureAction')
+    expect(stored).not.toHaveProperty('retryAt')
+    expect(transcriptTurnToChatTurn(stored!)).not.toHaveProperty('failureAction')
   })
 
   it('a waiting turn with nothing yet is pending, not empty content', () => {
@@ -126,6 +151,136 @@ describe('deriveConversationNodes', () => {
     ])
     // No 'follow-ups' tail: see the suppression test above.
     expect(kinds(rich)).not.toContain('follow-ups')
+  })
+})
+
+/**
+ * plan-gate §2.5: the `plan-approval` node derives for every FINISHED
+ * plan-mode turn, exactly as it did before plan-gate existed — a proposed
+ * plan (once the model's `plan.propose` call completes) is layered on top of
+ * that same node, never a precondition for it. Requiring `proposedPlan`
+ * would strand the run in plan mode with no way to grant or reject any
+ * authority whenever the model never calls the tool (it is instructed to,
+ * never guaranteed to) or the browser reloads before the ephemeral
+ * `proposedPlan` field — never persisted into thread history — survives the
+ * round trip; either way the turn is genuinely finished and needs an exit.
+ */
+describe('plan-approval node', () => {
+  it('derives the rung-only node for a finished plan-mode turn with no proposed plan', () => {
+    // Covers both a model that never called `plan.propose` and a reload that
+    // lost the ephemeral field — in both cases `PlanApprovalControl` itself
+    // degrades to the rung-only control (its own `hasStructuredPlan()` is
+    // `Boolean(props.planId)`), which is the whole point: the node must
+    // still exist so the run is never stuck in plan mode with no way out.
+    const turn = assistantTurn({ planMode: true, streaming: false })
+    const node = deriveConversationNodes(turn).find((n) => n.kind === 'plan-approval')
+    expect(node).toEqual({
+      kind: 'plan-approval',
+      planId: undefined,
+      summary: undefined,
+      steps: undefined,
+      grantedRung: undefined,
+      pending: false,
+      error: undefined,
+    })
+  })
+
+  it('derives nothing while the plan-mode turn is still streaming, even with a proposed plan', () => {
+    const turn = assistantTurn({
+      planMode: true,
+      streaming: true,
+      proposedPlan: {
+        planId: 'plan_1',
+        summary: 'Send the overdue invoice',
+        steps: [{ id: 'step_1', title: 'Draft the email' }],
+      },
+    })
+    expect(kinds(turn)).not.toContain('plan-approval')
+  })
+
+  it('derives a plan-approval node carrying the proposed steps once finished', () => {
+    const turn = assistantTurn({
+      planMode: true,
+      streaming: false,
+      proposedPlan: {
+        planId: 'plan_1',
+        summary: 'Send the overdue invoice',
+        steps: [
+          { id: 'step_1', title: 'Draft the email' },
+          { id: 'step_2', title: 'Send it', operation: 'email_send' },
+        ],
+      },
+    })
+    const node = deriveConversationNodes(turn).find((n) => n.kind === 'plan-approval')
+    expect(node).toEqual({
+      kind: 'plan-approval',
+      planId: 'plan_1',
+      summary: 'Send the overdue invoice',
+      steps: [
+        { id: 'step_1', title: 'Draft the email' },
+        { id: 'step_2', title: 'Send it', operation: 'email_send' },
+      ],
+      grantedRung: undefined,
+      pending: false,
+      error: undefined,
+    })
+  })
+
+  it('carries the granted rung once the plan has been approved', () => {
+    const turn = assistantTurn({
+      planMode: true,
+      streaming: false,
+      grantedRung: 'workspace_write',
+      proposedPlan: {
+        planId: 'plan_1',
+        summary: 'Send the overdue invoice',
+        steps: [{ id: 'step_1', title: 'Draft the email' }],
+      },
+    })
+    const node = deriveConversationNodes(turn).find((n) => n.kind === 'plan-approval')
+    expect(node && 'grantedRung' in node ? node.grantedRung : undefined).toBe('workspace_write')
+  })
+
+  it('is absent entirely for an ordinary (non-plan-mode) turn', () => {
+    const turn = assistantTurn({
+      proposedPlan: {
+        planId: 'plan_1',
+        summary: 'Should never render without planMode',
+        steps: [{ id: 'step_1', title: 'x' }],
+      },
+    })
+    expect(kinds(turn)).not.toContain('plan-approval')
+  })
+})
+
+/** chat-wave2 scope spec §2.2: the per-turn retrieval-source filter receipt. */
+describe('source-scope node', () => {
+  it('is absent for an ordinary (auto) turn', () => {
+    expect(kinds(assistantTurn())).not.toContain('source-scope')
+    expect(kinds(assistantTurn({ retrievalScope: 'auto' }))).not.toContain('source-scope')
+  })
+
+  it("prefers the server's own confirmation (scopeApplied) over the client-sent request", () => {
+    const node = deriveConversationNodes(assistantTurn({
+      retrievalScope: 'knowledge_only',
+      scopeApplied: { scope: 'web_only', excludedTools: ['knowledge_search'] },
+    })).find((entry) => entry.kind === 'source-scope')
+    expect(node).toEqual({ kind: 'source-scope', scope: 'web_only', excludedTools: ['knowledge_search'] })
+  })
+
+  it('falls back to the client-sent retrievalScope before the receipt frame arrives', () => {
+    const node = deriveConversationNodes(assistantTurn({ retrievalScope: 'web_only' }))
+      .find((entry) => entry.kind === 'source-scope')
+    expect(node).toEqual({ kind: 'source-scope', scope: 'web_only', excludedTools: [] })
+  })
+
+  it('is suppressed mid-stream, like confidence/memory-recall/truncated', () => {
+    const streaming = assistantTurn({
+      status: 'waiting',
+      retrievalScope: 'knowledge_only',
+      scopeApplied: { scope: 'knowledge_only', excludedTools: ['web_search'] },
+    })
+    expect(kinds(streaming)).not.toContain('source-scope')
   })
 })
 
@@ -363,10 +518,15 @@ describe('recalled memories survive every path', () => {
     const live = assistantTurn({ memoryRecallCount: 1, recalledMemories: recalled })
     const [persisted] = turnsToTranscript([live])
     const rehydrated = transcriptTurnToChatTurn(persisted!)
-    expect(rehydrated.recalledMemories).toEqual(recalled)
+    // Which memory, never its text: a memory forgotten or corrected after this
+    // turn must not come back from the stored copy (the chip reads the current
+    // text when it is opened).
+    const withoutText = recalled.map((memory) => ({ ...memory, preview: '' }))
+    expect(rehydrated.recalledMemories).toEqual(withoutText)
+    expect(JSON.stringify(persisted)).not.toContain('Prefers metric units')
 
     const node = deriveConversationNodes(rehydrated).find((entry) => entry.kind === 'memory-recall')
-    expect(node).toMatchObject({ count: 1, memories: recalled })
+    expect(node).toMatchObject({ count: 1, memories: withoutText })
   })
 
   it('survives a thread refresh, which the server cannot repopulate', async () => {

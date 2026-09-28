@@ -1,0 +1,364 @@
+--- a/src/features/core/components/CoreShell.tsx
++++ b/src/features/core/components/CoreShell.tsx
+@@ -6,6 +6,7 @@
+ import { CoreNavbar } from '@/features/core/components/CoreNavbar'
+ import { CoreSidebar, SIDEBAR_EXPANDED_WIDTH, SIDEBAR_MINIMIZED_WIDTH } from '@/features/core/components/CoreSidebar'
+ import { FeedbackWidget } from '@/features/core/components/FeedbackWidget'
++import { chatAppearanceTokens } from '@/features/chat/lib/chat-appearance-preview'
+ import { OrgDeletionBanner } from '@/features/core/components/OrgDeletionBanner'
+ import {
+   fallbackWorkspaceIdentity,
+@@ -86,6 +87,7 @@
+     <AgentsProvider routeLocation={location}>
+       <div
+         class="core-product-shell"
++        data-chat-appearance={activeRoute() === '/chat' ? chatAppearanceTokens() : undefined}
+         style={{
+           '--dashboard-navbar-height': deletionBannerVisible()
+             ? `${56 + DELETION_BANNER_HEIGHT_PX}px`
+--- a/src/features/core/components/CoreNavbar.tsx
++++ b/src/features/core/components/CoreNavbar.tsx
+@@ -40,6 +40,7 @@
+ import { clearSession, getSession, loadSession } from '@/shared/session/session-store'
+ import { useI18n } from '@/shared/i18n'
+ import { cn } from '@/shared/lib/cn'
++import { ChatAppearancePreview } from '@/features/chat/components/ChatAppearancePreview'
+ 
+ type OpenPanel = 'assistant' | 'messages' | 'notifications' | 'calendar' | 'profile' | 'workspace' | null
+ 
+@@ -188,6 +189,9 @@
+           </div>
+ 
+           <div class="core-navbar__actions">
++            <Show when={import.meta.env.DEV && props.activeRoute === '/chat'}>
++              <ChatAppearancePreview />
++            </Show>
+             <NavbarActionButton
+               label={i18n.tr('Åpne kunnskapssøk', 'Open knowledge search')}
+               onClick={() => setSearchOpen(true)}
+--- a/src/features/chat/components/ChatMessages.tsx
++++ b/src/features/chat/components/ChatMessages.tsx
+@@ -54,6 +54,7 @@
+ } from '@/shared/chat-nodes'
+ import type { AutonomyRung, MemoryOrigin, RecalledMemory } from '@/shared/api/chat-client'
+ import { readChatThreadHistory } from '../lib/chat-thread-history'
++import { chatAppearanceActive } from '../lib/chat-appearance-preview'
+ import { MIN_PLAN_JUSTIFICATION_CHARS } from '@/shared/api/chat-client'
+ import { correctMemory, deleteMemory, listMemories } from '@/shared/api/memory-client'
+ import { ApiError } from '@/shared/api/http'
+@@ -3352,6 +3353,7 @@
+   userName?: string
+ }) {
+   const i18n = useI18n()
++  const [ideasOpen, setIdeasOpen] = createSignal(false)
+   // Solid 2 evaluates component bodies untracked. Capture the prop through a
+   // memo before handing it to <Show>, instead of reading the reactive prop
+   // directly in the component body (STRICT_READ_UNTRACKED).
+@@ -3428,7 +3430,7 @@
+ 
+   return (
+     <div class="verevon-chat-empty">
+-      <div class="verevon-chat-empty__inner">
++      <div class="verevon-chat-empty__inner" data-ideas-open={ideasOpen() ? 'true' : 'false'}>
+         <div class="verevon-chat-empty__heading">
+           <div class="verevon-chat-empty__brand" aria-hidden="true">
+             <span class="verevon-chat-empty__mark"><span /></span>
+@@ -3468,7 +3470,19 @@
+           </Show>
+         </div>
+         <div class="verevon-chat-empty__composer">{props.children}</div>
+-        <div class="verevon-chat-empty__prompts">
++        <Show when={chatAppearanceActive('welcome')}>
++          <button
++            type="button"
++            class="chat-appearance-ideas-toggle"
++            aria-expanded={ideasOpen() ? 'true' : 'false'}
++            aria-controls="chat-appearance-prompt-ideas"
++            onClick={() => setIdeasOpen((open) => !open)}
++          >
++            {ideasOpen() ? i18n.tr('Skjul eksempler', 'Hide prompt ideas') : i18n.tr('Vis eksempler', 'Show prompt ideas')}
++            <ChevronRight size={14} aria-hidden="true" />
++          </button>
++        </Show>
++        <div class="verevon-chat-empty__prompts" id="chat-appearance-prompt-ideas">
+           <span class="verevon-chat-empty__prompt-label">{i18n.tr('Prøv for eksempel', 'Try one of these')}</span>
+           <For each={starterPrompts()}>
+             {({ label, description, prompt, icon: Icon }) => (
+--- a/src/features/core/components/CoreSidebar.tsx
++++ b/src/features/core/components/CoreSidebar.tsx
+@@ -593,6 +593,7 @@
+           class={['core-chat-session', { 'core-chat-session--active': item.threadId === activeThreadId() }]}
+           onClick={() => openThread(item.threadId)}
+           aria-current={item.threadId === activeThreadId() ? 'page' : undefined}
++          title={`${item.title} · ${formatChatUpdatedAt(item.updatedAt, i18n)}`}
+         >
+           <div class="core-chat-session__summary">
+             <span class="verevon-sidebar-row-strong" title={item.title}>{item.title}</span>
+--- /dev/null
++++ b/src/features/chat/lib/chat-appearance-preview.ts
+@@ -0,0 +1,53 @@
++import { createSignal } from 'solid-js'
++import { readClientJson, removeClientValue, writeClientJson } from '@/shared/session/client-storage'
++
++export const CHAT_APPEARANCE_KEY = 'verevon.chat-appearance-preview.v1'
++export const chatAppearanceKeys = ['welcome', 'dock', 'composer', 'history', 'navigation'] as const
++export type ChatAppearanceKey = typeof chatAppearanceKeys[number]
++export type ChatAppearanceChoices = Record<ChatAppearanceKey, boolean>
++
++const original: ChatAppearanceChoices = {
++  welcome: false, dock: false, composer: false, history: false, navigation: false,
++}
++
++function isChoices(value: unknown): value is ChatAppearanceChoices {
++  return typeof value === 'object' && value !== null &&
++    chatAppearanceKeys.every((key) => typeof (value as Record<string, unknown>)[key] === 'boolean')
++}
++
++// This experiment is opt-in and local to the development browser. Production
++// always renders the existing appearance, even if this key exists in storage.
++export const [chatAppearanceChoices, setChoices] = createSignal<ChatAppearanceChoices>(
++  import.meta.env.DEV ? readClientJson(CHAT_APPEARANCE_KEY, isChoices) ?? original : original,
++)
++export const [comparingOriginal, compareChatOriginal] = createSignal(false)
++
++export function chatAppearanceActive(key: ChatAppearanceKey): boolean {
++  return import.meta.env.DEV && !comparingOriginal() && chatAppearanceChoices()[key]
++}
++
++export function chatAppearanceTokens(): string {
++  return chatAppearanceKeys.filter(chatAppearanceActive).join(' ')
++}
++
++export function chooseChatAppearance(key: ChatAppearanceKey, enabled: boolean) {
++  setChoices((current) => {
++    const next = { ...current, [key]: enabled }
++    writeClientJson(CHAT_APPEARANCE_KEY, next)
++    return next
++  })
++  compareChatOriginal(false)
++}
++
++export function tryAllChatAppearance() {
++  const next = Object.fromEntries(chatAppearanceKeys.map((key) => [key, true])) as ChatAppearanceChoices
++  writeClientJson(CHAT_APPEARANCE_KEY, next)
++  setChoices(next)
++  compareChatOriginal(false)
++}
++
++export function resetChatAppearance() {
++  removeClientValue(CHAT_APPEARANCE_KEY)
++  setChoices({ ...original })
++  compareChatOriginal(false)
++}
+--- /dev/null
++++ b/src/features/chat/components/ChatAppearancePreview.tsx
+@@ -0,0 +1,75 @@
++import { For, createEffect } from 'solid-js'
++import { SlidersHorizontal } from '@/shared/icons'
++import { useI18n } from '@/shared/i18n'
++import {
++  chatAppearanceChoices,
++  chooseChatAppearance,
++  compareChatOriginal,
++  comparingOriginal,
++  resetChatAppearance,
++  tryAllChatAppearance,
++  type ChatAppearanceKey,
++} from '../lib/chat-appearance-preview'
++import './chat-appearance-preview.css'
++
++/** Development-only appearance comparison. No workspace settings or chat
++ * state are written, and toggles leave the mounted composer intact. */
++export function ChatAppearancePreview() {
++  const i18n = useI18n()
++  let root: HTMLDetailsElement | undefined
++  let trigger: HTMLElement | undefined
++  const options = (): { key: ChatAppearanceKey; label: string; description: string }[] => [
++    { key: 'welcome', label: i18n.tr('Enklere velkomst', 'Simpler welcome'), description: i18n.tr('Sentrert hilsen, eksempler ved behov.', 'Centered greeting, prompt ideas on demand.') },
++    { key: 'dock', label: i18n.tr('Skrivefelt nederst', 'Bottom composer'), description: i18n.tr('Mer luft, skrivefeltet nær bunnen.', 'More breathing room, input near the bottom.') },
++    { key: 'composer', label: i18n.tr('Flatere skrivefelt', 'Flatter composer'), description: i18n.tr('Samlet flate med diskrete kanter.', 'One surface with subtle edges.') },
++    { key: 'history', label: i18n.tr('Kompakt historikk', 'Compact history'), description: i18n.tr('Renere rader, datoer ved pek eller fokus.', 'Cleaner rows, dates on hover or focus.') },
++    { key: 'navigation', label: i18n.tr('Roligere navigasjon', 'Softer navigation'), description: i18n.tr('Færre rammer rundt de samme kontrollene.', 'Less framing around the same controls.') },
++  ]
++
++  createEffect(() => undefined, () => {
++    const closeOutside = (event: PointerEvent) => {
++      if (root?.open && event.target instanceof Node && !root.contains(event.target)) root.open = false
++    }
++    const closeOnEscape = (event: KeyboardEvent) => {
++      if (event.key !== 'Escape' || !root?.open) return
++      root.open = false
++      trigger?.focus()
++    }
++    document.addEventListener('pointerdown', closeOutside)
++    document.addEventListener('keydown', closeOnEscape)
++    return () => {
++      document.removeEventListener('pointerdown', closeOutside)
++      document.removeEventListener('keydown', closeOnEscape)
++    }
++  })
++
++  return (
++    <details ref={root} class="chat-appearance-preview">
++      <summary ref={trigger} title={i18n.tr('Sammenlign chat-utseende', 'Compare chat appearance')}>
++        <SlidersHorizontal size={16} aria-hidden="true" />
++        <span>{i18n.tr('Utseende', 'Appearance')}</span>
++      </summary>
++      <section class="chat-appearance-preview__panel" aria-label={i18n.tr('Forhåndsvis chat-utseende', 'Chat appearance preview')}>
++        <h2>{i18n.tr('Finn din balanse', 'Find your balance')}</h2>
++        <p>{i18n.tr('Prøv én endring om gangen. Valgene lagres bare i denne nettleseren.', 'Try one change at a time. Choices stay in this browser.')}</p>
++        <div class="chat-appearance-preview__compare" role="group" aria-label={i18n.tr('Sammenlign utseende', 'Compare appearance')}>
++          <button type="button" aria-pressed={comparingOriginal() ? 'true' : 'false'} onClick={() => compareChatOriginal(true)}>{i18n.tr('Original', 'Original')}</button>
++          <button type="button" aria-pressed={comparingOriginal() ? 'false' : 'true'} onClick={() => compareChatOriginal(false)}>{i18n.tr('Ditt valg', 'Your mix')}</button>
++        </div>
++        <fieldset>
++          <legend class="sr-only">{i18n.tr('Visuelle endringer', 'Visual changes')}</legend>
++          <For each={options()}>{(option) => (
++            <label class="chat-appearance-preview__option">
++              <span><strong>{option.label}</strong><small>{option.description}</small></span>
++              <input type="checkbox" checked={chatAppearanceChoices()[option.key]} onChange={(event) => chooseChatAppearance(option.key, event.currentTarget.checked)} />
++            </label>
++          )}</For>
++        </fieldset>
++        <div class="chat-appearance-preview__footer">
++          <button type="button" onClick={resetChatAppearance}>{i18n.tr('Tilbakestill', 'Reset all')}</button>
++          <button type="button" onClick={tryAllChatAppearance}>{i18n.tr('Prøv alle', 'Try all')}</button>
++        </div>
++      </section>
++    </details>
++  )
++}
+--- /dev/null
++++ b/src/features/chat/components/chat-appearance-preview.css
+@@ -0,0 +1,131 @@
++/* Opt-in, chat-only experiment. Each token is independent; an empty token
++   list restores the existing cascade. No shared/global tokens are changed. */
++
++/* Review controls: native disclosure/checkboxes preserve keyboard behavior. */
++.chat-appearance-preview { position: relative; flex-shrink: 0; }
++.chat-appearance-preview > summary {
++  display: inline-flex;
++  min-height: 40px;
++  align-items: center;
++  gap: 6px;
++  padding: 0 10px;
++  border-radius: 8px;
++  color: var(--verevon-text-muted);
++  font-size: 12px;
++  cursor: pointer;
++  list-style: none;
++}
++.chat-appearance-preview > summary::-webkit-details-marker { display: none; }
++.chat-appearance-preview > summary:hover,
++.chat-appearance-preview[open] > summary { background: var(--verevon-surface-soft); color: var(--verevon-text); }
++.chat-appearance-preview__panel {
++  position: absolute;
++  top: calc(100% + 8px);
++  right: 0;
++  width: min(344px, calc(100vw - 32px));
++  max-height: calc(100dvh - 88px);
++  overflow-y: auto;
++  padding: 20px;
++  border: 1px solid var(--verevon-border);
++  border-radius: 16px;
++  background: var(--panel);
++  color: var(--text);
++  box-shadow: var(--shadow-md);
++}
++.chat-appearance-preview__panel h2 { margin: 0; font-size: 17px; font-weight: 600; letter-spacing: -0.02em; }
++.chat-appearance-preview__panel p { margin: 8px 0 16px; color: var(--verevon-text-muted); font-size: 12px; line-height: 1.5; }
++.chat-appearance-preview__compare { display: flex; padding: 4px; gap: 4px; border-radius: 10px; background: var(--verevon-surface-soft); }
++.chat-appearance-preview__panel button { min-height: 40px; border: 0; border-radius: 8px; padding: 0 12px; background: transparent; color: inherit; font: inherit; font-size: 12px; cursor: pointer; }
++.chat-appearance-preview__compare button { flex: 1; }
++.chat-appearance-preview__compare button[aria-pressed='true'] { background: var(--panel); box-shadow: 0 1px 3px rgb(0 0 0 / 6%); font-weight: 600; }
++.chat-appearance-preview__panel fieldset { margin: 12px 0; padding: 0; border: 0; }
++.chat-appearance-preview__option { display: flex; min-height: 64px; align-items: center; gap: 16px; cursor: pointer; }
++.chat-appearance-preview__option > span { flex: 1; }
++.chat-appearance-preview__option strong { display: block; font-size: 13px; font-weight: 550; }
++.chat-appearance-preview__option small { display: block; margin-top: 4px; color: var(--verevon-text-muted); font-size: 11px; line-height: 1.4; }
++.chat-appearance-preview__option input { width: 18px; height: 18px; flex-shrink: 0; accent-color: var(--verevon-accent-ink); cursor: pointer; }
++.chat-appearance-preview__footer { display: flex; justify-content: space-between; gap: 8px; padding-top: 12px; border-top: 1px solid var(--verevon-border-soft); }
++.chat-appearance-preview__footer button:last-child { background: var(--verevon-surface-soft); font-weight: 600; }
++.chat-appearance-preview__panel button:hover { background: var(--verevon-surface-muted); }
++.chat-appearance-preview :is(summary, button, input):focus-visible,
++.chat-appearance-ideas-toggle:focus-visible { outline: 2px solid var(--verevon-accent-ink); outline-offset: 3px; }
++
++/* 1. Welcome: one focal greeting. Supporting material remains reachable. */
++[data-chat-appearance~='welcome'] .verevon-chat-empty__heading { text-align: center; margin-bottom: 32px; }
++[data-chat-appearance~='welcome'] .verevon-chat-empty__heading h1 { max-width: none; font-size: clamp(26px, 3vw, 34px); font-weight: 450; line-height: 1.2; letter-spacing: -0.025em; text-wrap: balance; }
++[data-chat-appearance~='welcome'] .verevon-chat-empty__brand { display: flex; justify-content: center; margin-bottom: 24px; color: var(--verevon-e-muted); }
++[data-chat-appearance~='welcome'] .verevon-chat-empty__brand > span:last-child { display: none; }
++[data-chat-appearance~='welcome'] .verevon-chat-empty__mark,
++[data-chat-appearance~='welcome'] .verevon-chat-empty__mark > span { width: 36px; height: 36px; }
++[data-chat-appearance~='welcome'] .verevon-chat-empty__heading > p { margin-inline: auto; }
++[data-chat-appearance~='welcome'] [data-ideas-open='false'] :is(.verevon-chat-empty__heading > p, .verevon-chat-empty__resume, .verevon-chat-empty__prompts, .verevon-chat-empty__trust) { display: none; }
++.chat-appearance-ideas-toggle { display: flex; min-height: 44px; align-items: center; justify-content: center; gap: 4px; align-self: center; margin: 8px auto 0; padding: 0 12px; border: 0; border-radius: 8px; background: transparent; color: var(--verevon-e-muted); font: inherit; font-size: 12px; cursor: pointer; }
++.chat-appearance-ideas-toggle:hover { color: var(--verevon-j-text); background: var(--verevon-surface-soft); }
++.chat-appearance-ideas-toggle[aria-expanded='true'] svg { transform: rotate(90deg); }
++[data-chat-appearance~='welcome'] .verevon-chat-empty__prompts { margin-top: 4px; }
++
++/* 2. Dock: normal flex flow, never a fixed overlay over drafts or suggestions. */
++[data-chat-appearance~='dock'] .verevon-chat-empty { align-items: stretch; padding: 24px 24px 16px; overflow-y: auto; }
++[data-chat-appearance~='dock'] .verevon-chat-empty__inner { display: flex; flex-direction: column; flex: 1; min-height: min-content; transform: none; }
++[data-chat-appearance~='dock'] .verevon-chat-empty__heading { display: flex; min-height: 180px; flex: 1 0 auto; flex-direction: column; justify-content: center; align-items: stretch; gap: 0; margin-bottom: 32px; }
++[data-chat-appearance~='dock'] .verevon-chat-empty__composer { flex-shrink: 0; }
++
++/* 3. Composer: join the existing controls and input visually, without
++   remounting/reordering the form or changing its submit/voice/upload state. */
++[data-chat-appearance~='composer'] .dashboard-composer-root--chat .dashboard-composer-controls {
++  gap: 8px;
++  margin-bottom: 0;
++  padding: 8px 12px;
++  border: 1px solid var(--verevon-border);
++  border-bottom: 0;
++  border-radius: 18px 18px 0 0;
++  background: var(--verevon-surface-soft);
++}
++[data-chat-appearance~='composer'] .dashboard-composer-root--chat .verevon-composer-shell {
++  border: 1px solid var(--verevon-border);
++  border-top: 0;
++  border-radius: 0 0 18px 18px;
++  padding: 12px 16px;
++  background: var(--verevon-surface-soft);
++  box-shadow: none;
++}
++[data-chat-appearance~='composer'] .dashboard-composer-root--chat .verevon-composer-shell:focus-within { box-shadow: inset 0 0 0 1px var(--verevon-chat-fjord); }
++[data-chat-appearance~='composer'] .dashboard-composer-root--chat .verevon-composer-shell::before,
++[data-chat-appearance~='composer'] .dashboard-composer-root--chat .verevon-composer-shell::after { display: none; }
++[data-chat-appearance~='composer'] .dashboard-composer-root--chat .verevon-composer-control { border-color: transparent; background: transparent; box-shadow: none; }
++[data-chat-appearance~='composer'] .dashboard-composer-root--chat .verevon-composer-control:hover { background: var(--verevon-i-surface); }
++[data-chat-appearance~='composer'] .dashboard-composer-root--chat .dashboard-composer-intent-segment { background: transparent; }
++[data-chat-appearance~='composer'] .dashboard-composer-root--chat .dashboard-composer-intent-segment button.is-active { box-shadow: none; }
++
++/* 4. History: titles lead. Status remains visible; timestamp stays in the
++   accessible name and native tooltip and returns on hover/keyboard focus. */
++[data-chat-appearance~='history'] .core-chat-sidebar__sessions { gap: 4px; scrollbar-width: thin; scrollbar-color: transparent transparent; }
++[data-chat-appearance~='history'] .core-chat-sidebar__sessions:hover,
++[data-chat-appearance~='history'] .core-chat-sidebar__sessions:focus-within { scrollbar-color: var(--sidebar-muted) transparent; }
++[data-chat-appearance~='history'] .core-chat-session { position: relative; min-height: 40px; padding-block: 10px; }
++[data-chat-appearance~='history'] .core-chat-session > em { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
++[data-chat-appearance~='history'] .core-chat-session:is(:hover, :focus-visible) > em { position: static; width: auto; height: auto; margin: 2px 0 0; clip-path: none; }
++[data-chat-appearance~='history'] .core-chat-session__status { font-weight: 450; }
++[data-chat-appearance~='history'] .core-chat-session-row:focus-within .core-chat-session__pin { opacity: 1; }
++
++/* 5. Navigation: retain every destination and action; quiet the frames. */
++[data-chat-appearance~='navigation'] .core-navbar { border-bottom-color: transparent; }
++[data-chat-appearance~='navigation'] .core-nav-divider { background: transparent; }
++[data-chat-appearance~='navigation'] .core-navbar__home-mark,
++[data-chat-appearance~='navigation'] .core-history-nav,
++[data-chat-appearance~='navigation'] .verevon-navbar-search-trigger { background: transparent; border-color: transparent; box-shadow: none; }
++[data-chat-appearance~='navigation'] .verevon-navbar-search-trigger:hover { background: var(--verevon-surface-soft); }
++[data-chat-appearance~='navigation'] .core-mini-nav-button:not(.verevon-sidebar-mini-active) { color: var(--sidebar-muted); }
++[data-chat-appearance~='navigation'] .core-navbar__profile-ring { opacity: 0; }
++
++@media (max-width: 767px) {
++  /* Keep the development control out of the already compact mobile toolbar. */
++  .chat-appearance-preview { position: fixed; top: 68px; left: 12px; }
++  .chat-appearance-preview > summary { width: 40px; padding: 0; justify-content: center; background: var(--panel); border: 1px solid var(--verevon-border-soft); }
++  .chat-appearance-preview > summary > span { display: none; }
++  .chat-appearance-preview__panel { position: fixed; inset: 116px 12px auto; width: auto; max-height: calc(100dvh - 132px); }
++  [data-chat-appearance~='dock'] .verevon-chat-empty { padding: 20px 12px 12px; }
++  [data-chat-appearance~='dock'] .verevon-chat-empty__heading { min-height: 160px; margin-bottom: 24px; }
++  [data-chat-appearance~='composer'] .dashboard-composer-root--chat .dashboard-composer-controls { flex-wrap: wrap; padding-inline: 8px; }
++  [data-chat-appearance~='composer'] .dashboard-composer-root--chat .verevon-composer-shell { padding: 12px 8px; }
++}

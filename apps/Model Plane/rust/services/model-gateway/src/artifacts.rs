@@ -144,6 +144,11 @@ pub struct ArtifactVersionStore {
     titles: Arc<DashMap<(String, String), String>>,
     /// `(thread, artifact id)` → title + current text.
     known: Arc<DashMap<(String, String), StoredArtifact>>,
+    /// `(thread, artifact id)` → the accepted source review that produced the
+    /// CURRENT version's content, when a source-bound check ran one. Read by
+    /// `prior_review` only when it still matches `versions`, so a stale entry
+    /// left behind by a version this thread has moved past is never returned.
+    reviews: Arc<DashMap<(String, String), crate::source_validation::PriorAcceptedReview>>,
 }
 
 /// Id comparison key for near-miss resolution: letters and digits only,
@@ -185,6 +190,9 @@ impl ArtifactVersionStore {
                 fork.seed_persisted(thread_id, &artifact.id, &artifact.title, &content, version);
                 if let Some(kind) = self.kind_of(thread_id, &artifact.id) {
                     fork.remember_kind(thread_id, &artifact.id, kind);
+                }
+                if let Some(review) = self.prior_review(thread_id, &artifact.id) {
+                    fork.reviews.insert((thread_id.to_owned(), artifact.id.clone()), review);
                 }
             }
         }
@@ -315,6 +323,63 @@ impl ArtifactVersionStore {
         self.known
             .get(&(thread_id.to_owned(), artifact_id.to_owned()))
             .and_then(|entry| entry.kind)
+    }
+
+    /// Records the accepted source review that produced `version`'s content,
+    /// for a LATER turn's revision-turn reuse (`source_validation`). Call
+    /// once a source-bound check accepts a candidate, alongside `remember`.
+    /// Storing against a version this thread has not actually reached yet (a
+    /// check whose candidate is never committed) is harmless: `prior_review`
+    /// only ever returns an entry that still matches `current_version`.
+    pub fn remember_review(
+        &self,
+        thread_id: &str,
+        artifact_id: &str,
+        version: u32,
+        accepted: &str,
+        receipt: &crate::source_validation::SourceReceipt,
+        levers: crate::latency_levers::LatencyLevers,
+    ) {
+        if version == 0 {
+            return;
+        }
+        let review = crate::source_validation::PriorAcceptedReview::from_receipt(accepted, receipt, levers)
+            .at_version(version);
+        self.reviews
+            .insert((thread_id.to_owned(), artifact_id.to_owned()), review);
+    }
+
+    /// The accepted review for artifact_id's CURRENT (`current_version`)
+    /// content, when a source-bound check produced one and this store has
+    /// not moved past it. `None` for a first-time create, an artifact never
+    /// source-checked, or a version this store no longer holds a review for.
+    #[must_use]
+    pub fn prior_review(
+        &self,
+        thread_id: &str,
+        artifact_id: &str,
+    ) -> Option<crate::source_validation::PriorAcceptedReview> {
+        let review = self
+            .reviews
+            .get(&(thread_id.to_owned(), artifact_id.to_owned()))?
+            .clone();
+        (self.current_version(thread_id, artifact_id) == Some(review.version)).then_some(review)
+    }
+
+    /// Publishes `run`'s accepted review of `artifact_id` into this store at
+    /// the durable commit, so a LATER turn's revision reuse can find it. A
+    /// run checks and records its review in its private workspace
+    /// (`fork_thread`); the commit republishes only the text, so without this
+    /// every next turn started with no prior review at all. Adopted only when
+    /// this store now holds the very version and text that review accepted.
+    pub fn adopt_review(&self, run: &Self, thread_id: &str, artifact_id: &str) {
+        let Some(review) = run.prior_review(thread_id, artifact_id) else { return };
+        let accepted = self.current_version(thread_id, artifact_id) == Some(review.version)
+            && self.content_of(thread_id, artifact_id)
+                .is_some_and(|content| crate::result_validation::content_hash(&content) == review.content_hash);
+        if accepted {
+            self.reviews.insert((thread_id.to_owned(), artifact_id.to_owned()), review);
+        }
     }
 
     /// The id already used in `thread_id` for an artifact titled `title`, if any.
@@ -748,5 +813,155 @@ mod tests {
             }
             other => panic!("expected attachment, got {other:?}"),
         }
+    }
+
+    fn stub_receipt(source_hash: &str) -> crate::source_validation::SourceReceipt {
+        crate::source_validation::SourceReceipt {
+            id: "receipt-1".into(),
+            checker: crate::source_validation::CHECKER,
+            review_rule: None,
+            scope: "semantic_source_review",
+            content_hash: "content-hash".into(),
+            source_hash: source_hash.into(),
+            reviewed_segments: 3,
+            reconfirmed_segments: 0,
+            evidence: Vec::new(),
+            review_input_tokens: 0,
+            review_output_tokens: 0,
+            review_ms: 0,
+            review_attempts: 1,
+            review_routes: Vec::new(),
+            validation_ms: 0,
+            review_passes: 1,
+            repairs: 0,
+            reviewer_edits: 0,
+            document_checks: Vec::new(),
+            reused_segments: 0,
+            reused_from_receipt: None,
+            carried_in_turn_segments: 0,
+        }
+    }
+
+    /// A revision turn (`source_validation::check_artifact`) reads back
+    /// exactly the accepted review of the artifact's CURRENT version, and
+    /// nothing once a later version has moved past it.
+    #[test]
+    fn prior_review_matches_only_the_current_version_and_moves_on() {
+        let store = ArtifactVersionStore::new();
+        assert_eq!(store.prior_review("t1", "doc"), None, "nothing before any check ran");
+        store.next_version("t1", "doc");
+        store.remember_review("t1", "doc", 1, "v1 body", &stub_receipt("source-hash-a"), crate::latency_levers::LatencyLevers::ALL_ON);
+        let review = store.prior_review("t1", "doc").expect("version 1's review");
+        assert_eq!(review.version, 1);
+        assert_eq!(review.source_hash, "source-hash-a");
+        assert_eq!(review.checker, crate::source_validation::CHECKER);
+        assert_eq!(review.segment_count, crate::source_validation::segments_for_test("v1 body", crate::latency_levers::LatencyLevers::ALL_ON).len());
+        assert_eq!(review.id, "receipt-1");
+        // The thread moves to version 2 without a matching review stored yet
+        // (e.g. a create/update with no source context): the stale version-1
+        // review must not be handed back as if it were the current one.
+        store.next_version("t1", "doc");
+        assert_eq!(store.prior_review("t1", "doc"), None);
+        // A different artifact and a different thread never see it either.
+        assert_eq!(store.prior_review("t1", "other"), None);
+        assert_eq!(store.prior_review("t2", "doc"), None);
+    }
+
+    /// A private run's fork sees the base's already-accepted review too, so a
+    /// revision turn started inside that run can still reuse it.
+    #[test]
+    fn forked_threads_carry_the_current_review_forward() {
+        let store = ArtifactVersionStore::new();
+        store.seed_persisted("t1", "doc", "Report", "v2 body", 2);
+        store.remember_review("t1", "doc", 2, "v2 body", &stub_receipt("source-hash-b"), crate::latency_levers::LatencyLevers::ALL_ON);
+        let fork = store.fork_thread("t1");
+        let review = fork.prior_review("t1", "doc").expect("forked review");
+        assert_eq!(review.version, 2);
+        assert_eq!(review.source_hash, "source-hash-b");
+    }
+
+    /// The durable commit publishes a run's accepted review with its text, so
+    /// the next turn's fork finds it; a review of other text or another
+    /// version is never published.
+    #[test]
+    fn the_commit_publishes_only_a_review_of_the_committed_text() {
+        let receipt = |content: &str| crate::source_validation::SourceReceipt {
+            content_hash: crate::result_validation::content_hash(content),
+            ..stub_receipt("source-hash-c")
+        };
+        let committed = ArtifactVersionStore::new();
+        let run = committed.fork_thread("t1");
+        run.seed_persisted("t1", "doc", "Report", "v1 body", 1);
+        run.remember_review("t1", "doc", 1, "v1 body", &receipt("v1 body"), crate::latency_levers::LatencyLevers::ALL_ON);
+        assert_eq!(committed.prior_review("t1", "doc"), None, "nothing published before the commit");
+
+        committed.seed_persisted("t1", "doc", "Report", "v1 body", 1);
+        committed.adopt_review(&run, "t1", "doc");
+        let next_turn = committed.fork_thread("t1");
+        assert_eq!(next_turn.prior_review("t1", "doc").map(|review| review.version), Some(1));
+
+        // Other committed text at the same version: not adopted.
+        let other = ArtifactVersionStore::new();
+        other.seed_persisted("t1", "doc", "Report", "v1 body, edited elsewhere", 1);
+        other.adopt_review(&run, "t1", "doc");
+        assert_eq!(other.prior_review("t1", "doc"), None);
+        // Another committed version: not adopted.
+        let later = ArtifactVersionStore::new();
+        later.seed_persisted("t1", "doc", "Report", "v1 body", 2);
+        later.adopt_review(&run, "t1", "doc");
+        assert_eq!(later.prior_review("t1", "doc"), None);
+        // A receipt whose own content hash is not the text: not adopted.
+        let run_mismatch = ArtifactVersionStore::new();
+        run_mismatch.seed_persisted("t1", "doc", "Report", "v1 body", 1);
+        run_mismatch.remember_review("t1", "doc", 1, "v1 body", &receipt("something else"), crate::latency_levers::LatencyLevers::ALL_ON);
+        let committed_mismatch = ArtifactVersionStore::new();
+        committed_mismatch.seed_persisted("t1", "doc", "Report", "v1 body", 1);
+        committed_mismatch.adopt_review(&run_mismatch, "t1", "doc");
+        assert_eq!(committed_mismatch.prior_review("t1", "doc"), None);
+    }
+
+    /// `adopt_review` must refuse to adopt when this store has no recorded
+    /// TEXT for the version it otherwise matches on — a version bumped by a
+    /// path that never actually supplied non-empty content (`content_of`
+    /// returns `None` there even though `current_version` is `Some`). Every
+    /// other existing `adopt_review` test drives a non-empty committed body,
+    /// so this `None` arm of the content-hash guard (`is_some_and`) was
+    /// never exercised: a mutation defaulting it to accept on `None` (e.g.
+    /// `map_or(true, ...)`) would adopt a review no comparison against the
+    /// receipt's `contentHash` ever actually ran — exactly the
+    /// silent-reuse-without-verification the 2026-09-26 owner ruling
+    /// ("reuse requires ... bound to that version's receipt") forbids.
+    #[test]
+    fn adopt_review_refuses_when_the_matching_version_has_no_recorded_content() {
+        let receipt = stub_receipt("source-hash-d");
+        let run = ArtifactVersionStore::new();
+        run.seed_persisted("t1", "doc", "Report", "v1 body", 1);
+        run.remember_review("t1", "doc", 1, "v1 body", &receipt, crate::latency_levers::LatencyLevers::ALL_ON);
+        assert!(run.prior_review("t1", "doc").is_some(), "the run's own review is there");
+
+        // The version counter reaches 1, but through a path that supplies no
+        // non-empty content (`remember`/`seed_persisted` both leave stored
+        // content alone when given an empty string) — so `current_version`
+        // is `Some(1)` while `content_of` is `None`.
+        let committed = ArtifactVersionStore::new();
+        committed.next_version("t1", "doc");
+        assert_eq!(committed.current_version("t1", "doc"), Some(1));
+        assert_eq!(committed.content_of("t1", "doc"), None, "no text was ever recorded for this version");
+
+        committed.adopt_review(&run, "t1", "doc");
+        assert_eq!(
+            committed.prior_review("t1", "doc"), None,
+            "must never adopt a review this store could not itself verify against any recorded text"
+        );
+    }
+
+    /// Version 0 is never a real artifact version (`seed_persisted` already
+    /// treats it the same way); storing against it must not create a ghost
+    /// entry another lookup could somehow match.
+    #[test]
+    fn version_zero_is_never_remembered() {
+        let store = ArtifactVersionStore::new();
+        store.remember_review("t1", "doc", 0, "body", &stub_receipt("hash"), crate::latency_levers::LatencyLevers::ALL_ON);
+        assert_eq!(store.prior_review("t1", "doc"), None);
     }
 }

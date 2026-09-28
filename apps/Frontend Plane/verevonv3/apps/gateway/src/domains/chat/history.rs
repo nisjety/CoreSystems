@@ -20,6 +20,14 @@ use super::shared;
 
 const MAX_THREADS: usize = 80;
 
+/// Persona spec: absence of `persona_enabled` on the wire (a legacy thread
+/// row from before the column existed, or a durable-thread response a caller
+/// built by hand) must read as "on", the same "unset != off" convention
+/// `pinned`'s tri-state uses at the request layer.
+fn default_true() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ChatThreadSummary {
@@ -42,6 +50,11 @@ struct ChatThreadSummary {
     /// nothing on the client reads it, only `chat_history_sessions` below does.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     origin: String,
+    /// Persona spec: the per-thread override of the global persona switch.
+    /// Session Core owns this column the same way it owns `pinned` above;
+    /// absent on the wire (a pre-persona thread row) reads as enabled.
+    #[serde(default = "default_true")]
+    persona_enabled: bool,
     /// Session Core's newest run projection. The Chat surface uses this only
     /// for a quiet history-rail status hint; the run endpoint remains the
     /// authority for detailed state and actions.
@@ -76,6 +89,10 @@ pub(crate) struct SaveThreadRequest {
     pub(crate) pinned: Option<bool>,
     #[serde(default)]
     pub(crate) preview: Option<String>,
+    /// Same "omit = leave unchanged" contract as `pinned` above — the
+    /// per-thread persona override (persona spec).
+    #[serde(default)]
+    pub(crate) persona_enabled: Option<bool>,
 }
 
 #[derive(Debug, Serialize)]
@@ -122,6 +139,8 @@ struct DurableThreadSummary {
     space_id: String,
     #[serde(default)]
     origin: String,
+    #[serde(default = "default_true", alias = "personaEnabled")]
+    persona_enabled: bool,
     #[serde(default, alias = "latestRunId")]
     latest_run_id: String,
     #[serde(default, alias = "latestRunStatus")]
@@ -219,7 +238,11 @@ pub(crate) async fn save_thread(
         return bad_request("thread_id is required.");
     }
 
-    if body.title.is_some() || body.preview.is_some() || body.pinned.is_some() {
+    if body.title.is_some()
+        || body.preview.is_some()
+        || body.pinned.is_some()
+        || body.persona_enabled.is_some()
+    {
         if let Err(response) = update_durable_presentation(
             &state,
             &user,
@@ -228,6 +251,7 @@ pub(crate) async fn save_thread(
             body.title.as_deref(),
             body.preview.as_deref(),
             body.pinned,
+            body.persona_enabled,
         )
         .await
         {
@@ -378,6 +402,7 @@ fn durable_to_summary(item: DurableThreadSummary, now: &str) -> Option<ChatThrea
         pinned: item.pinned,
         space_ref: item.space_id.trim().to_owned(),
         origin: item.origin.trim().to_owned(),
+        persona_enabled: item.persona_enabled,
         latest_run_id: item.latest_run_id,
         latest_run_status: item.latest_run_status,
         latest_run_updated_at: item.latest_run_updated_at,
@@ -395,6 +420,7 @@ pub(crate) async fn update_durable_presentation(
     title: Option<&str>,
     preview: Option<&str>,
     pinned: Option<bool>,
+    persona_enabled: Option<bool>,
 ) -> Result<(), Response> {
     let token = shared::model_token(state, user, headers).await;
     let session_token = shared::required_session_token(state, user, headers)
@@ -413,6 +439,11 @@ pub(crate) async fn update_durable_presentation(
             "title": title,
             "preview": preview,
             "pinned": pinned,
+            // model-gateway's `UpdateThreadPresentationBody` is
+            // `#[serde(rename_all = "camelCase", deny_unknown_fields)]` —
+            // this key must be camelCase, unlike the single-word fields
+            // above where snake_case and camelCase happen to coincide.
+            "personaEnabled": persona_enabled,
         })),
         token.as_deref(),
         Some(&session_token),
@@ -516,6 +547,14 @@ struct CanonicalMessagesResponse {
 struct CanonicalMessage {
     #[serde(default)]
     source_scope: Option<String>,
+    /// Per-turn retrieval-source filter this message was recorded under
+    /// (chat-wave2 scope spec §2.5), relayed the same one-line way
+    /// `source_scope` is above: Model Gateway's `ThreadMessage` flattens
+    /// session-core's `messages.metadata` onto the top level, so this key
+    /// arrives already flattened, never nested. Absent for every turn
+    /// recorded before this field existed, or one that used `auto`.
+    #[serde(default)]
+    retrieval_scope: Option<String>,
     /// Durable message id from session-core, relayed by Model Gateway.
     ///
     /// Empty for rows written before the conversation read returned ids; the
@@ -627,6 +666,11 @@ fn canonical_messages_to_transcript(
                 "content": message.content,
             });
             if message.source_scope.as_deref() == Some("conversation") { turn["sourceScope"] = json!("conversation"); }
+            if let Some(scope) = message.retrieval_scope.as_deref() {
+                if scope == "knowledge_only" || scope == "web_only" {
+                    turn["retrievalScope"] = json!(scope);
+                }
+            }
             if !message.agent_name.trim().is_empty() {
                 turn["agentName"] = json!(message.agent_name);
             }
@@ -751,7 +795,7 @@ mod tests {
     use super::{
         canonical_messages_to_transcript, chat_history_sessions, durable_to_summary,
         enforce_support_thread_policy, strip_support_thread_capabilities, CanonicalMessage,
-        DurableThreadSummary,
+        DurableThreadSummary, SaveThreadRequest,
     };
     use serde_json::{json, Value};
 
@@ -766,6 +810,7 @@ mod tests {
                 updated_at: now.to_owned(),
                 created_at: now.to_owned(),
                 pinned: false,
+                persona_enabled: true,
                 space_id: "space_room_1".to_owned(),
                 origin: "space".to_owned(),
                 latest_run_id: String::new(),
@@ -783,6 +828,7 @@ mod tests {
                 updated_at: now.to_owned(),
                 created_at: now.to_owned(),
                 pinned: false,
+                persona_enabled: true,
                 space_id: String::new(),
                 origin: "chat".to_owned(),
                 latest_run_id: String::new(),
@@ -819,6 +865,7 @@ mod tests {
                     updated_at: now.to_owned(),
                     created_at: now.to_owned(),
                     pinned: false,
+                    persona_enabled: true,
                     space_id: String::new(),
                     origin: origin.to_owned(),
                     latest_run_id: String::new(),
@@ -860,6 +907,7 @@ mod tests {
                 updated_at: now.to_owned(),
                 created_at: now.to_owned(),
                 pinned: false,
+                persona_enabled: true,
                 space_id: String::new(),
                 origin: String::new(),
                 latest_run_id: String::new(),
@@ -883,6 +931,7 @@ mod tests {
                 updated_at: "2026-08-11T10:00:00Z".to_owned(),
                 created_at: "2026-08-10T10:00:00Z".to_owned(),
                 pinned: true,
+                persona_enabled: true,
                 space_id: "space_1".to_owned(),
                 origin: "space".to_owned(),
                 latest_run_id: "run_1".to_owned(),
@@ -904,6 +953,52 @@ mod tests {
             summary.latest_run_updated_at.as_deref(),
             Some("2026-08-11T11:00:00Z")
         );
+    }
+
+    /// Persona spec: a `PATCH .../threads/{id}` body that only sets
+    /// `personaEnabled` must deserialize with `title`/`preview`/`pinned`
+    /// still `None` — the same "omit = leave unchanged" contract `pinned`
+    /// already has, so `save_thread`'s dirty-check picks up the write
+    /// without touching the other durable fields.
+    #[test]
+    fn save_thread_updates_persona_enabled_without_touching_title_or_pin() {
+        let body: SaveThreadRequest =
+            serde_json::from_value(json!({"personaEnabled": false})).expect("valid request");
+
+        assert_eq!(body.persona_enabled, Some(false));
+        assert!(body.title.is_none());
+        assert!(body.preview.is_none());
+        assert!(body.pinned.is_none());
+        assert!(
+            body.title.is_some() || body.preview.is_some() || body.pinned.is_some() || body.persona_enabled.is_some(),
+            "the dirty-check must still fire on a persona-only write"
+        );
+    }
+
+    /// A thread row from before the `persona_enabled` column existed (or a
+    /// Session Core response an old binary produced) carries no
+    /// `personaEnabled` field at all. That must read as enabled, not
+    /// disabled — the same direction `pinned`'s absence already defaults to
+    /// "leave as is", and the proto-level rationale documented in the
+    /// persona spec's §5 ("proto3 bool zero-value trap").
+    #[test]
+    fn thread_listing_reports_persona_enabled_default_true_for_legacy_threads() {
+        let now = "2026-08-16T12:00:00Z";
+        let legacy: DurableThreadSummary = serde_json::from_value(json!({
+            "threadId": "thread_legacy",
+            "title": "Before persona shipped",
+            "preview": "",
+            "updatedAt": now,
+            "createdAt": now,
+            "pinned": false,
+            "spaceId": "",
+            "origin": "chat",
+            // no personaEnabled key at all
+        }))
+        .expect("valid legacy record");
+
+        let summary = durable_to_summary(legacy, now).expect("valid record");
+        assert!(summary.persona_enabled);
     }
 
     #[test]
@@ -961,6 +1056,7 @@ mod tests {
             vec![
                 CanonicalMessage {
                     source_scope: None,
+                    retrieval_scope: None,
                     message_id: "01JABCDEF".into(),
                     role: "user".into(),
                     content: "Question".into(),
@@ -970,6 +1066,8 @@ mod tests {
                     artifacts: None,
                 },
                 CanonicalMessage {
+                    source_scope: None,
+                    retrieval_scope: None,
                     // A row written before the conversation read returned ids.
                     message_id: "   ".into(),
                     role: "assistant".into(),
@@ -994,6 +1092,7 @@ mod tests {
             vec![
                 CanonicalMessage {
                     source_scope: None,
+                    retrieval_scope: None,
                     message_id: String::new(),
                     role: "user".into(),
                     content: "Question".into(),
@@ -1004,6 +1103,7 @@ mod tests {
                 },
                 CanonicalMessage {
                     source_scope: None,
+                    retrieval_scope: None,
                     message_id: String::new(),
                     role: "assistant".into(),
                     content: "Answer".into(),
@@ -1038,6 +1138,7 @@ mod tests {
             vec![
                 CanonicalMessage {
                     source_scope: None,
+                    retrieval_scope: None,
                     message_id: String::new(),
                     role: "user".into(),
                     content: "Which pram is best?".into(),
@@ -1048,6 +1149,7 @@ mod tests {
                 },
                 CanonicalMessage {
                     source_scope: None,
+                    retrieval_scope: None,
                     message_id: String::new(),
                     role: "assistant".into(),
                     content: "The Nuna TRIV LX.".into(),
@@ -1062,6 +1164,7 @@ mod tests {
                 },
                 CanonicalMessage {
                     source_scope: None,
+                    retrieval_scope: None,
                     message_id: String::new(),
                     role: "assistant".into(),
                     content: "Ungrounded reply".into(),
@@ -1082,6 +1185,70 @@ mod tests {
         assert!(transcript.turns[2].get("grounding").is_none());
     }
 
+    /// chat-wave2 scope spec §2.5: a turn's per-turn retrieval-source filter
+    /// relays the same one-line way `source_scope` does above — present only
+    /// for a known, non-`auto` value, absent (not `null`) otherwise.
+    #[test]
+    fn canonical_messages_carry_persisted_retrieval_scope() {
+        let transcript = canonical_messages_to_transcript(
+            "thread-1",
+            vec![
+                CanonicalMessage {
+                    source_scope: None,
+                    retrieval_scope: Some("knowledge_only".into()),
+                    message_id: String::new(),
+                    role: "user".into(),
+                    content: "Hva sier retningslinjene om dette?".into(),
+                    agent_name: String::new(),
+                    grounding: None,
+                    citations: None,
+                    artifacts: None,
+                },
+                CanonicalMessage {
+                    source_scope: None,
+                    retrieval_scope: Some("web_only".into()),
+                    message_id: String::new(),
+                    role: "user".into(),
+                    content: "Hva skjer i nyhetene i dag?".into(),
+                    agent_name: String::new(),
+                    grounding: None,
+                    citations: None,
+                    artifacts: None,
+                },
+                CanonicalMessage {
+                    source_scope: None,
+                    retrieval_scope: None,
+                    message_id: String::new(),
+                    role: "user".into(),
+                    content: "Ordinary turn.".into(),
+                    agent_name: String::new(),
+                    grounding: None,
+                    citations: None,
+                    artifacts: None,
+                },
+                CanonicalMessage {
+                    // An unrecognized value must never be relayed verbatim —
+                    // the SPA's own union type only knows the two real ones.
+                    source_scope: None,
+                    retrieval_scope: Some("bogus".into()),
+                    message_id: String::new(),
+                    role: "user".into(),
+                    content: "Stale/unknown scope value.".into(),
+                    agent_name: String::new(),
+                    grounding: None,
+                    citations: None,
+                    artifacts: None,
+                },
+            ],
+        )
+        .expect("canonical conversation should render");
+
+        assert_eq!(transcript.turns[0]["retrievalScope"], "knowledge_only");
+        assert_eq!(transcript.turns[1]["retrievalScope"], "web_only");
+        assert!(transcript.turns[2].get("retrievalScope").is_none());
+        assert!(transcript.turns[3].get("retrievalScope").is_none());
+    }
+
     /// The Resultat panel was empty on every reopened thread because the
     /// canonical read carried no artifacts (RUN-LOG finding 3). A persisted
     /// list is relayed as-is; an empty one must not create the key.
@@ -1092,6 +1259,7 @@ mod tests {
             vec![
                 CanonicalMessage {
                     source_scope: None,
+                    retrieval_scope: None,
                     message_id: String::new(),
                     role: "assistant".into(),
                     content: "Rapporten ligger i sidepanelet.".into(),
@@ -1104,6 +1272,7 @@ mod tests {
                 },
                 CanonicalMessage {
                     source_scope: None,
+                    retrieval_scope: None,
                     message_id: String::new(),
                     role: "assistant".into(),
                     content: "Ingen artefakter.".into(),
@@ -1131,6 +1300,7 @@ mod tests {
             vec![
                 CanonicalMessage {
                     source_scope: None,
+                    retrieval_scope: None,
                     message_id: String::new(),
                     role: "assistant".into(),
                     content: "Oslo.".into(),
@@ -1143,6 +1313,7 @@ mod tests {
                 },
                 CanonicalMessage {
                     source_scope: None,
+                    retrieval_scope: None,
                     message_id: String::new(),
                     role: "assistant".into(),
                     content: "No sources used.".into(),

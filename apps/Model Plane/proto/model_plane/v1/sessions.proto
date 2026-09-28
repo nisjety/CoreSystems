@@ -33,6 +33,20 @@ service SessionCore {
   // this RPC and is never persisted or forwarded to Temporal.
   rpc PrepareScheduledRunThread(PrepareScheduledRunThreadRequest) returns (PrepareScheduledRunThreadResponse);
 
+  // Create-or-reuse a durable thread owned by a REAL user (never a service
+  // principal), with a caller-named origin, keyed by session_key for
+  // idempotency (chat-wave2 "schedule"/"mail-task" specs, 2026-09-28 —
+  // the reusable "service creates or reuses a thread owned by user U,
+  // readable by U, with a named origin" seam). Unlike
+  // PrepareScheduledRunThread, which always mints a service-owned,
+  // Space-authority-bound thread, this RPC's thread IS owned by the given
+  // user_id, so it is trivially readable through the existing owner-bound
+  // path (ListThreads' default user_id filter) -- no Control decision, no
+  // Space authority, is required to read it back. Restricted to an allow-
+  // listed set of trusted service callers; never reachable by a live user's
+  // own bearer.
+  rpc PrepareUserOwnedThread(PrepareUserOwnedThreadRequest) returns (PrepareUserOwnedThreadResponse);
+
   // Record completion of a single step within a run.
   rpc CompleteStep(CompleteStepRequest) returns (CompleteStepResponse);
 
@@ -163,6 +177,20 @@ service ManagedRunLifecycle {
   // authorized, separately auditable act of writing content — and it is refused
   // outright for a zero-retention caller, which was promised no durable trace.
   rpc RecordRunOutput(RecordRunOutputRequest) returns (RecordRunOutputResponse);
+
+  // Save a gateway-direct run's final assistant message and record its
+  // Completed terminal receipt in ONE transaction.
+  //
+  // Replaces AppendMessage followed by RecordTerminalOutcome for a completed
+  // direct turn. Two calls let a durable cancel land between them, leaving a
+  // saved answer on a cancelled run, and the append rode a short-lived
+  // delegated user bearer that a long turn could outlive. This call uses the
+  // Gateway's own scoped terminalization credential: Session Core derives the
+  // tenant and owner from the durable run and appends to that run's own
+  // thread only. A run that is no longer active answers already_terminal and
+  // writes nothing. It is refused for a zero-retention run, whose turns have
+  // no durable transcript.
+  rpc CompleteDirectRunWithMessage(CompleteDirectRunWithMessageRequest) returns (CompleteDirectRunWithMessageResponse);
 }
 
 // --- CreateThread ---
@@ -395,6 +423,30 @@ message PrepareScheduledRunThreadResponse {
   string owner_id = 3;
 }
 
+message PrepareUserOwnedThreadRequest {
+  string org_id = 1;
+  string user_id = 2;
+  // Must be one of session-core's validated thread origins (grpc.rs
+  // THREAD_ORIGINS) and must NOT be "space" -- this RPC never sets a
+  // space_id, so a "space" origin would fail the server's own
+  // origin/space_id consistency check by construction.
+  string origin = 3;
+  string session_key = 4;
+  // Delegated-identity design (Gap B, 03-design-2-token-exchange.md §2.5).
+  // Additive, field 5 was free. Required and verified ONLY when origin ==
+  // "mail_task": a signed "mail-task-v1" Control decision (distinct
+  // envelope from the "v2" Space-decision family) binding this exact
+  // (org_id, user_id, session_key, origin) — minted by user-core's
+  // IssueMailTaskThreadDecision at alias-resolve time, never by anything
+  // that reads the inbound email itself. Every other current
+  // USER_OWNED_THREAD_CALLERS origin is unaffected and ignores this field.
+  string control_decision_token = 5;
+}
+
+message PrepareUserOwnedThreadResponse {
+  string thread_id = 1;
+}
+
 // --- Managed run terminalization ---
 
 // The producer that is allowed to submit a run's terminal outcome. The server
@@ -517,6 +569,50 @@ message HeartbeatManagedRunResponse {
   google.protobuf.Timestamp renewed_until = 1;
   // True when the run is already terminal; the heartbeat made no mutation.
   bool already_terminal = 2;
+}
+
+// Completes a gateway-direct run with its final assistant message. There are
+// deliberately no org, user, role, or source fields: the owner comes from the
+// durable run, the role is always "assistant", and the source is always
+// MANAGED_RUN_SOURCE_GATEWAY_DIRECT.
+message CompleteDirectRunWithMessageRequest {
+  // The gateway-direct run to complete.
+  string run_id = 1;
+
+  // Must be the durable run's own thread.
+  string thread_id = 2;
+
+  // Assistant message content, stored exactly as AppendMessage stores it.
+  // Empty after trimming completes the run without saving a message, as the
+  // two-call path did for an empty answer.
+  string content = 3;
+
+  // Persona display name; same meaning as AppendMessageRequest.agent_name.
+  string agent_name = 4;
+
+  // Turn evidence; same meaning as AppendMessageRequest.metadata.
+  google.protobuf.Struct metadata = 5;
+
+  // Opaque caller operation key (the Gateway request id), never derived from
+  // content. A retry with the same key after success returns the original
+  // receipt and sequence and saves no second message.
+  string idempotency_key = 6;
+}
+
+// What CompleteDirectRunWithMessage did: either nothing, because the run was
+// no longer active, or the answer and its Completed receipt, now or earlier.
+message CompleteDirectRunWithMessageResponse {
+  // True when the run was no longer active (cancelled, failed, recovered, or
+  // completed by another operation). Nothing was written and the other
+  // fields are empty.
+  bool already_terminal = 1;
+
+  // The Completed terminal receipt, as RecordTerminalOutcome returns it.
+  // receipt.already_applied is true on an idempotent replay.
+  RecordTerminalOutcomeResponse receipt = 2;
+
+  // Sequence of the saved assistant message; 0 when no message was saved.
+  uint64 message_sequence = 3;
 }
 
 // --- CompleteStep ---
@@ -663,6 +759,16 @@ message GetContextAssemblyResponse {
 
   // Estimated total token count of the assembled context.
   uint32 estimated_tokens = 2;
+
+  // Persona spec (chat-wave2, 2026-09-28): the per-thread override of the
+  // caller's global persona switch, read from the `threads` row this RPC
+  // already scopes to. `optional`, NOT a bare `bool`: proto3's zero-value
+  // for a bare bool is `false`, which would silently read as "disabled" for
+  // every response from an unupgraded session-core replica during a rolling
+  // deploy — an `optional` field forces this service to set it explicitly
+  // on every response, so the caller can tell "unset" (fail open, treat as
+  // enabled) from a genuine "off".
+  optional bool persona_enabled = 3;
 }
 
 // A single segment of the assembled context window.
@@ -896,6 +1002,17 @@ message ThreadSummary {
   // so a shared listing can attribute a thread whose transcript the reader has
   // not fetched yet; presentation only, and never a grant.
   string owner_subject_id = 13;
+
+  // Persona spec (chat-wave2, 2026-09-28): the per-thread override of the
+  // caller's global persona switch, mirroring `pinned` above — list-level
+  // visibility so the sidebar/composer can show current state without
+  // opening the context inspector. Bare `bool` (unlike
+  // `GetContextAssemblyResponse.persona_enabled`'s `optional`): this is
+  // populated straight from the `threads` table's `NOT NULL DEFAULT true`
+  // column on every row a current session-core binary returns, so there is
+  // no "caller said nothing" state to distinguish here the way the
+  // read/write RPCs above must.
+  bool persona_enabled = 14;
 }
 
 message ListThreadsResponse {
@@ -917,6 +1034,14 @@ message UpdateThreadPresentationRequest {
   optional string preview = 4;
   // Optional pin state. Omission leaves the existing state unchanged.
   optional bool pinned = 5;
+  // Persona spec (chat-wave2, 2026-09-28): optional per-thread override of
+  // the global persona switch. Omission leaves the existing state
+  // unchanged — same tri-state contract as `pinned` above. Rejected
+  // outright for a ZDR caller, same as every other field here (see this
+  // RPC's ZDR guard) — a temporary thread cannot durably persist this
+  // column, only the persona TEXT (a different, unconditional layer) fires
+  // on a ZDR turn by default.
+  optional bool persona_enabled = 6;
 }
 
 // Receipt for a durable presentation update.

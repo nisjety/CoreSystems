@@ -578,6 +578,11 @@ func TestConnectionCapabilitiesCanBeUpdated(t *testing.T) {
 	req := httptest.NewRequest("PATCH", "/api/v1/connections/conn-microsoft/capabilities", strings.NewReader(`{"capabilities":["profile.read","mail.read"]}`))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Internal-API-Key", "dev-key")
+	// Owner ruling (5): this is a personal Microsoft connection, so the
+	// internal caller must name the connection's own owner — exactly what
+	// the gateway's real internal proxy calls always attach (see
+	// gateway::domains::ingestions::shared::fetch_internal_json).
+	req.Header.Set("X-User-ID", "user-1")
 	resp, err := app.Test(req)
 	if err != nil {
 		t.Fatalf("app.Test error: %v", err)
@@ -610,6 +615,7 @@ func TestConnectionCapabilitiesRejectUnknownCapability(t *testing.T) {
 	req := httptest.NewRequest("PATCH", "/api/v1/connections/conn-microsoft/capabilities", strings.NewReader(`{"capabilities":["raw.proxy"]}`))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Internal-API-Key", "dev-key")
+	req.Header.Set("X-User-ID", "user-1")
 	resp, err := app.Test(req)
 	if err != nil {
 		t.Fatalf("app.Test error: %v", err)
@@ -1492,6 +1498,10 @@ func TestMicrosoftSyncJobWaitsForFinspoHandoff(t *testing.T) {
 
 	req := httptest.NewRequest("POST", "/api/v1/connections/conn-ms/sync", nil)
 	req.Header.Set("X-Internal-API-Key", "dev-key")
+	// Owner ruling (5): a personal Microsoft connection requires the
+	// internal caller to name its owner (the gateway always attaches this
+	// header on its real internal proxy calls).
+	req.Header.Set("X-User-ID", "user-1")
 	resp, err := app.Test(req)
 	if err != nil {
 		t.Fatalf("app.Test error: %v", err)
@@ -1532,6 +1542,7 @@ func TestInboxSyncQueuesAuthorizedMailboxForEmailWorker(t *testing.T) {
 	req := httptest.NewRequest("POST", "/api/v1/connections/conn-google-mail/inbox-sync", strings.NewReader(`{"channel":"email"}`))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Internal-API-Key", "dev-key")
+	req.Header.Set("X-User-ID", "user-1")
 	resp, err := app.Test(req)
 	if err != nil {
 		t.Fatalf("app.Test error: %v", err)
@@ -1568,6 +1579,7 @@ func TestInboxSyncRejectsChannelWithoutGrantedInboxRead(t *testing.T) {
 	req := httptest.NewRequest("POST", "/api/v1/connections/conn-google-profile/inbox-sync", strings.NewReader(`{"channel":"email"}`))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Internal-API-Key", "dev-key")
+	req.Header.Set("X-User-ID", "user-1")
 	resp, err := app.Test(req)
 	if err != nil {
 		t.Fatalf("app.Test error: %v", err)
@@ -1588,6 +1600,7 @@ func TestExtendTeamsInboxHistoryQueuesNextThirtyDays(t *testing.T) {
 	for requestNumber, wantDays := range []int{60, 90} {
 		req := httptest.NewRequest("POST", "/api/v1/connections/conn-ms/inbox-history", nil)
 		req.Header.Set("X-Internal-API-Key", "dev-key")
+		req.Header.Set("X-User-ID", "user-1")
 		resp, err := app.Test(req)
 		if err != nil {
 			t.Fatalf("request %d error: %v", requestNumber+1, err)
@@ -1667,6 +1680,7 @@ func TestMicrosoftSyncJobCarriesSharePointSourceIdentifiers(t *testing.T) {
 	req := httptest.NewRequest("POST", "/api/v1/sync-jobs", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Internal-API-Key", "dev-key")
+	req.Header.Set("X-User-ID", "user-1")
 	resp, err := app.Test(req)
 	if err != nil {
 		t.Fatalf("app.Test create error: %v", err)
@@ -1842,6 +1856,7 @@ func TestFinspoWorkerClaimsMicrosoftSyncJob(t *testing.T) {
 
 	req := httptest.NewRequest("POST", "/api/v1/connections/conn-ms/sync", nil)
 	req.Header.Set("X-Internal-API-Key", "dev-key")
+	req.Header.Set("X-User-ID", "user-1")
 	resp, err := app.Test(req)
 	if err != nil {
 		t.Fatalf("app.Test create error: %v", err)
@@ -2972,6 +2987,65 @@ func TestSnapchatActionCapabilityAndApprovalGates(t *testing.T) {
 				t.Fatalf("alias requiredCapabilityForOperation = %q/%v, want %q/%v", gotCapAlias, sensitiveAlias, tt.wantCap, tt.wantSensitive)
 			}
 		})
+	}
+}
+
+// TestRequireActionCapabilityAllowsNewContentReadOperations pins the
+// connector-picker content-read operations (drive.file.content,
+// mail.messages.get, gmail.messages.get) to the SAME capability their
+// listing sibling already requires — reading one item must never demand more
+// than listing the collection it came from already does, and without a case
+// arm here requireActionCapability returns errActionOperationUnsupported for
+// every one of these (requiredCapabilityForOperation's zero value).
+func TestRequireActionCapabilityAllowsNewContentReadOperations(t *testing.T) {
+	tests := []struct {
+		providerKey   string
+		operation     string
+		wantCap       string
+		wantSensitive bool
+	}{
+		{providerKey: "microsoft", operation: "drive.file.content", wantCap: "sharepoint.read"},
+		{providerKey: "microsoft", operation: "microsoft.drive.file.content", wantCap: "sharepoint.read"},
+		{providerKey: "microsoft", operation: "mail.messages.get", wantCap: "mail.read", wantSensitive: true},
+		{providerKey: "microsoft", operation: "microsoft.mail.messages.get", wantCap: "mail.read", wantSensitive: true},
+		{providerKey: "google", operation: "drive.file.content", wantCap: "drive.read"},
+		{providerKey: "google", operation: "google.drive.file.content", wantCap: "drive.read"},
+		{providerKey: "google", operation: "gmail.messages.get", wantCap: "gmail.read", wantSensitive: true},
+		{providerKey: "google", operation: "google.gmail.messages.get", wantCap: "gmail.read", wantSensitive: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.providerKey+"/"+tt.operation, func(t *testing.T) {
+			gotCap, sensitive := requiredCapabilityForOperation(tt.providerKey, tt.operation)
+			if gotCap != tt.wantCap || sensitive != tt.wantSensitive {
+				t.Fatalf("requiredCapabilityForOperation(%q, %q) = %q/%v, want %q/%v", tt.providerKey, tt.operation, gotCap, sensitive, tt.wantCap, tt.wantSensitive)
+			}
+		})
+	}
+}
+
+// TestExecuteConnectionActionNewReadOpsNeverRequireApproval guards against a
+// future accidental reclassification of a connector-picker read as a write:
+// actionRequiresApproval must stay false for every one of these seven
+// operation strings (its zero-value default, since none of them appear in
+// any provider's switch there).
+func TestExecuteConnectionActionNewReadOpsNeverRequireApproval(t *testing.T) {
+	newReadOps := []struct {
+		providerKey string
+		operation   string
+	}{
+		{"microsoft", "drive.file.content"},
+		{"microsoft", "microsoft.drive.file.content"},
+		{"microsoft", "mail.messages.get"},
+		{"microsoft", "microsoft.mail.messages.get"},
+		{"google", "drive.file.content"},
+		{"google", "google.drive.file.content"},
+		{"google", "gmail.messages.get"},
+		{"google", "google.gmail.messages.get"},
+	}
+	for _, op := range newReadOps {
+		if actionRequiresApproval(op.providerKey, op.operation) {
+			t.Fatalf("actionRequiresApproval(%q, %q) = true, want false (a read must never demand write attestation)", op.providerKey, op.operation)
+		}
 	}
 }
 

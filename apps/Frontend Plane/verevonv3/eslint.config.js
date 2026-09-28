@@ -7,6 +7,29 @@ import tseslint from 'typescript-eslint'
 // tsconfig), failing every file with a parse error. Pin it to this directory.
 const tsconfigRootDir = fileURLToPath(new URL('.', import.meta.url))
 
+const WEB_SPEECH_MESSAGE =
+  'Browser speech APIs send audio and text to the browser vendor. Use Verevon’s governed speech path (features/voice: /api/v1/ai/dictate to record, speech-playback to read aloud).'
+const WEB_SPEECH_NAMES = ['SpeechRecognition', 'webkitSpeechRecognition', 'speechSynthesis', 'SpeechSynthesisUtterance']
+const WEB_SPEECH_GLOBALS = WEB_SPEECH_NAMES.map((name) => ({ name, message: WEB_SPEECH_MESSAGE }))
+const WEB_SPEECH_PROPERTIES = ['window', 'globalThis', 'self'].flatMap((object) =>
+  WEB_SPEECH_NAMES.map((property) => ({ object, property, message: WEB_SPEECH_MESSAGE })),
+)
+// The two rules above only see a bare global or a property read straight off
+// `window`, `globalThis` or `self`. TypeScript reaches a vendor-prefixed API
+// by casting the global or aliasing it first (`const win = window as …;
+// win.webkitSpeechRecognition`), which is how the removed recogniser did it.
+// These catch the name wherever it appears: read off any object, as a string
+// (`'speechSynthesis' in window`, `Reflect.get`, a computed key) or declared
+// in an ad-hoc type shim.
+const WEB_SPEECH_NAME_PATTERN = `/^(${WEB_SPEECH_NAMES.join('|')})$/`
+const WEB_SPEECH_SYNTAX = [
+  `MemberExpression[property.name=${WEB_SPEECH_NAME_PATTERN}]`,
+  `Literal[value=${WEB_SPEECH_NAME_PATTERN}]`,
+  `TemplateElement[value.cooked=${WEB_SPEECH_NAME_PATTERN}]`,
+  `TSPropertySignature[key.name=${WEB_SPEECH_NAME_PATTERN}]`,
+  `TSTypeReference[typeName.name=${WEB_SPEECH_NAME_PATTERN}]`,
+].map((selector) => ({ selector, message: WEB_SPEECH_MESSAGE }))
+
 export default tseslint.config(
   {
     // `apps/*` are separate sub-projects (the Rust gateway, and any sub-app)
@@ -78,7 +101,16 @@ export default tseslint.config(
           message:
             'Fabricated security/compliance posture: a security control may not be hardcoded enabled from a boolean literal (Phase 4 A8). Read real org-security state or render a disabled/unknown state.',
         },
+        // Governed speech (see below). Kept in this array because a second
+        // `no-restricted-syntax` key in this block would replace the A8 rule.
+        ...WEB_SPEECH_SYNTAX,
       ],
+      // Governed speech only. The browser's recognisers and online voices send
+      // audio and reply text to the browser vendor, outside Verevon's provider
+      // and audit controls, so they are not a fallback either. Use the
+      // dictate route and the governed player (features/voice) instead.
+      'no-restricted-globals': ['error', ...WEB_SPEECH_GLOBALS],
+      'no-restricted-properties': ['error', ...WEB_SPEECH_PROPERTIES],
     },
   },
 )

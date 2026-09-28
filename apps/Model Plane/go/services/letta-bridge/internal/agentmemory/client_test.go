@@ -3,9 +3,12 @@ package agentmemory
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -141,29 +144,235 @@ func TestList_RequiresUserID(t *testing.T) {
 	}
 }
 
-func TestDelete_SendsMemoryIDsAsQueryParam(t *testing.T) {
-	var gotMethod, gotQuery string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotMethod = r.Method
-		gotQuery = r.URL.RawQuery
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`{"status":"ok"}`))
-	}))
-	defer srv.Close()
+// fakeMemoryServer emulates the agent-memory-server 0.15.1 routes Delete
+// uses. GET /v1/long-term-memory/{id} returns the record or 404. DELETE
+// /v1/long-term-memory?memory_ids=... removes by id alone, in every
+// namespace, and acknowledges "ok, deleted N memories".
+type fakeMemoryServer struct {
+	mu      sync.Mutex
+	records map[string]storedMemory
+	// deletes holds the raw query of every DELETE the server received.
+	deletes []string
+	gets    int
+	auth    []string
+	// ack, when set, replaces the acknowledgement's status text.
+	ack string
+	// keepOnDelete makes DELETE acknowledge without removing anything.
+	keepOnDelete bool
+}
 
-	c, _ := New(Config{BaseURL: srv.URL})
+func newFakeMemoryServer(t *testing.T, records ...storedMemory) (*fakeMemoryServer, *Client) {
+	t.Helper()
+	fake := &fakeMemoryServer{records: map[string]storedMemory{}}
+	for _, record := range records {
+		fake.records[record.ID] = record
+	}
+	srv := httptest.NewServer(fake)
+	t.Cleanup(srv.Close)
+	client, ok := New(Config{BaseURL: srv.URL, APIKey: "tok"})
+	if !ok {
+		t.Fatal("New returned ok=false")
+	}
+	return fake, client
+}
+
+func (f *fakeMemoryServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.auth = append(f.auth, r.Header.Get("Authorization"))
+	nullable := func(value string) any {
+		if value == "" {
+			return nil
+		}
+		return value
+	}
+	switch {
+	case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/v1/long-term-memory/"):
+		f.gets++
+		record, ok := f.records[strings.TrimPrefix(r.URL.Path, "/v1/long-term-memory/")]
+		if !ok {
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = io.WriteString(w, `{"detail":"Memory not found"}`)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id": record.ID, "text": "remembered", "memory_type": "semantic",
+			"namespace": nullable(record.Namespace), "user_id": nullable(record.UserID),
+		})
+	case r.Method == http.MethodDelete && r.URL.Path == "/v1/long-term-memory":
+		f.deletes = append(f.deletes, r.URL.RawQuery)
+		removed := 0
+		for _, id := range r.URL.Query()["memory_ids"] {
+			if _, ok := f.records[id]; ok && !f.keepOnDelete {
+				delete(f.records, id)
+				removed++
+			}
+		}
+		status := fmt.Sprintf("ok, deleted %d memories", removed)
+		if f.ack != "" {
+			status = f.ack
+		}
+		_ = json.NewEncoder(w).Encode(map[string]string{"status": status})
+	default:
+		w.WriteHeader(http.StatusNotFound)
+	}
+}
+
+func (f *fakeMemoryServer) has(id string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	_, ok := f.records[id]
+	return ok
+}
+
+// calls returns what the server has received so far.
+func (f *fakeMemoryServer) calls() (gets int, deletes, auth []string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.gets, append([]string(nil), f.deletes...), append([]string(nil), f.auth...)
+}
+
+func (f *fakeMemoryServer) configure(ack string, keepOnDelete bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.ack, f.keepOnDelete = ack, keepOnDelete
+}
+
+func TestDelete_SendsMemoryIDsAsQueryParam(t *testing.T) {
+	fake, c := newFakeMemoryServer(t, storedMemory{ID: "m1", Namespace: "org1", UserID: "user1"})
 	deleted, err := c.Delete(context.Background(), "org1", "user1", "m1")
 	if err != nil {
 		t.Fatalf("Delete: %v", err)
 	}
 	if !deleted {
-		t.Error("expected deleted=true on a 200 response")
+		t.Error("expected deleted=true for the caller's own memory")
 	}
-	if gotMethod != http.MethodDelete {
-		t.Errorf("method = %q, want DELETE", gotMethod)
+	_, deletes, auths := fake.calls()
+	if len(deletes) != 1 || deletes[0] != "memory_ids=m1" {
+		t.Errorf("DELETE queries = %q, want [memory_ids=m1]", deletes)
 	}
-	if gotQuery != "memory_ids=m1" {
-		t.Errorf("query = %q, want memory_ids=m1", gotQuery)
+	for _, auth := range auths {
+		if auth != "Bearer tok" {
+			t.Errorf("auth = %q, want Bearer tok on every call", auth)
+		}
+	}
+	if fake.has("m1") {
+		t.Error("m1 should be gone")
+	}
+}
+
+// The upstream delete is by id across every namespace, so without the scope
+// check any caller could erase any memory whose id it knew, and every 2xx
+// reported deleted=true even when nothing matched.
+func TestDelete_RemovesOnlyTheCallersOwnMemory(t *testing.T) {
+	fake, c := newFakeMemoryServer(t,
+		storedMemory{ID: "mine", Namespace: "org1", UserID: "user1"},
+		storedMemory{ID: "other-user", Namespace: "org1", UserID: "user2"},
+		storedMemory{ID: "other-org", Namespace: "org2", UserID: "user1"},
+		storedMemory{ID: "org-level", Namespace: "org1"},
+		storedMemory{ID: "thread1:MEMORY:1759312345", Namespace: "org1", UserID: "user1"},
+	)
+	for _, test := range []struct {
+		id   string
+		want bool
+	}{
+		{"other-user", false},
+		{"other-org", false},
+		{"org-level", false},
+		{"never-existed", false},
+		{"mine", true},
+		{"mine", false}, // already gone
+		{"thread1:MEMORY:1759312345", true},
+	} {
+		deleted, err := c.Delete(context.Background(), "org1", "user1", test.id)
+		if err != nil {
+			t.Fatalf("Delete(%q): %v", test.id, err)
+		}
+		if deleted != test.want {
+			t.Errorf("Delete(%q) = %v, want %v", test.id, deleted, test.want)
+		}
+	}
+	for _, id := range []string{"other-user", "other-org", "org-level"} {
+		if !fake.has(id) {
+			t.Errorf("%s was deleted by a caller outside its scope", id)
+		}
+	}
+	if _, deletes, _ := fake.calls(); len(deletes) != 2 {
+		t.Errorf("DELETE calls = %q, want only the two owned memories", deletes)
+	}
+}
+
+func TestDelete_ReportsWhatTheServerActuallyRemoved(t *testing.T) {
+	fake, c := newFakeMemoryServer(t, storedMemory{ID: "m1", Namespace: "org1", UserID: "user1"})
+	// The memory passes the scope check but is gone by the time the delete
+	// runs, so the server removes nothing.
+	fake.configure("ok, deleted 0 memories", false)
+	deleted, err := c.Delete(context.Background(), "org1", "user1", "m1")
+	if err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	if deleted {
+		t.Error("expected deleted=false when the server deleted 0 memories")
+	}
+}
+
+func TestDelete_ConfirmsAnUnreadableAcknowledgementByReadingBack(t *testing.T) {
+	fake, c := newFakeMemoryServer(t,
+		storedMemory{ID: "m1", Namespace: "org1", UserID: "user1"},
+		storedMemory{ID: "m2", Namespace: "org1", UserID: "user1"},
+	)
+	fake.configure("ok", false)
+	deleted, err := c.Delete(context.Background(), "org1", "user1", "m1")
+	if err != nil || !deleted {
+		t.Fatalf("Delete(m1) = %v, %v; want true once the read-back finds it gone", deleted, err)
+	}
+
+	fake.configure("ok", true)
+	deleted, err = c.Delete(context.Background(), "org1", "user1", "m2")
+	if err != nil || deleted {
+		t.Fatalf("Delete(m2) = %v, %v; want false while the memory is still there", deleted, err)
+	}
+}
+
+func TestDelete_WithoutOrgOrUserMatchesNothing(t *testing.T) {
+	fake, c := newFakeMemoryServer(t, storedMemory{ID: "m1", Namespace: "org1"})
+	for _, scope := range [][2]string{{"", "user1"}, {"org1", ""}} {
+		deleted, err := c.Delete(context.Background(), scope[0], scope[1], "m1")
+		if err != nil || deleted {
+			t.Fatalf("Delete(%q, %q) = %v, %v; want false, nil", scope[0], scope[1], deleted, err)
+		}
+	}
+	if gets, deletes, _ := fake.calls(); gets != 0 || len(deletes) != 0 || !fake.has("m1") {
+		t.Fatalf("an unscoped delete reached the server: gets=%d deletes=%q", gets, deletes)
+	}
+}
+
+func TestDelete_ServerErrorIsReportedNotSwallowed(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+	c, _ := New(Config{BaseURL: srv.URL})
+	if deleted, err := c.Delete(context.Background(), "org1", "user1", "m1"); err == nil || deleted {
+		t.Fatalf("Delete = %v, %v; want an error", deleted, err)
+	}
+}
+
+func TestDeletedCount(t *testing.T) {
+	for raw, want := range map[string]struct {
+		count int
+		ok    bool
+	}{
+		`{"status":"ok, deleted 1 memories"}`:  {1, true},
+		`{"status":"ok, deleted 0 memories"}`:  {0, true},
+		`{"status":"ok, deleted 12 memories"}`: {12, true},
+		`{"status":"ok"}`:                      {0, false},
+		`not json`:                             {0, false},
+	} {
+		count, ok := deletedCount([]byte(raw))
+		if count != want.count || ok != want.ok {
+			t.Errorf("deletedCount(%s) = (%d, %v), want (%d, %v)", raw, count, ok, want.count, want.ok)
+		}
 	}
 }
 

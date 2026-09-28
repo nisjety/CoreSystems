@@ -626,9 +626,25 @@ impl MemoryService for MemoryGrpc {
         // Scoped to (org_id, user_id) in the SQL WHERE clause itself (see
         // dreaming::delete_user_memory), so this can never delete another
         // user's or another org's memory even if a memory_id were guessed.
-        let deleted = crate::dreaming::delete_user_memory(&self.pool, org_id, user_id, memory_id)
+        // A user-scope row and a row bound to one of the user's threads are
+        // both theirs; retired ancestors of the row go with it.
+        let deletion = crate::dreaming::delete_user_memory(&self.pool, org_id, user_id, memory_id)
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
+        let ancestor_ids: &[String] = match &deletion {
+            crate::dreaming::MemoryDeletion::Deleted { ids } => &ids[1..],
+            crate::dreaming::MemoryDeletion::Absent => &[],
+            // The durable row exists and is someone else's (or the org's).
+            // Its semantic copy is not this caller's to erase either:
+            // letta-bridge's delete has no owner filter of its own and relies
+            // on this check. Reporting it as erased -- as this did when the
+            // mirror delete "succeeded" -- told the user a memory was gone
+            // while it kept being injected.
+            crate::dreaming::MemoryDeletion::NotOwned => {
+                return Err(Status::not_found("memory not found"));
+            }
+        };
+        let deleted = deletion.deleted();
 
         // The semantic tier is asked even when the durable row was already
         // gone, because `ListMemory` merges BOTH tiers: a row the user can see
@@ -647,6 +663,22 @@ impl MemoryService for MemoryGrpc {
 
         if !deleted && !erased_semantically {
             return Err(Status::not_found("memory not found"));
+        }
+
+        // The deleted ancestors are already recorded as forgotten, so their
+        // mirrors are filtered from every read; removing them is best-effort.
+        let mut ancestor_degradation = None;
+        if let Some(letta) = self.letta.as_ref() {
+            for ancestor_id in ancestor_ids {
+                let outcome = letta.delete_detailed(org_id, user_id, ancestor_id).await;
+                if outcome.degradation_reason.is_some() {
+                    tracing::warn!(
+                        memory_id = %ancestor_id,
+                        "retired ancestor mirror cleanup degraded; recall remains suppressed"
+                    );
+                    ancestor_degradation = ancestor_degradation.or(outcome.degradation_reason);
+                }
+            }
         }
 
         // Best-effort: the durable record is already gone and is the source
@@ -674,7 +706,10 @@ impl MemoryService for MemoryGrpc {
             None
         };
 
-        Ok(Response::new(delete_response(true, degradation_reason)))
+        Ok(Response::new(delete_response(
+            true,
+            degradation_reason.or(ancestor_degradation),
+        )))
     }
 
     async fn health(
@@ -1026,6 +1061,97 @@ mod tests {
         assert_eq!(health.status, "degraded");
         assert!(!health.ready);
         assert_eq!(health.memory_status, "DEGRADED_LETTA_NOT_CONFIGURED");
+    }
+
+    /// `deleted` must describe what happened to the durable row. Before this,
+    /// the SQL matched `scope = 'user'` only, so a thread memory "deleted"
+    /// here survived in Postgres (and kept being injected into its thread)
+    /// while the RPC reported `deleted: true` off the semantic mirror alone.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres"]
+    async fn delete_memory_reports_what_happened_to_the_durable_row() {
+        let pool = PgPool::connect(&std::env::var("DATABASE_URL").expect("disposable database required"))
+            .await
+            .unwrap();
+        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+        let org = format!("delete-rpc-{}", mp_ids::new_ulid());
+        let (own_thread, foreign_thread) = (mp_ids::new_ulid(), mp_ids::new_ulid());
+        for (thread, user) in [(&own_thread, "user-a"), (&foreign_thread, "user-b")] {
+            sqlx::query("INSERT INTO threads (id, session_key, org_id, user_id) VALUES ($1, $1, $2, $3)")
+                .bind(thread)
+                .bind(&org)
+                .bind(user)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        let insert = |id: String, session: Option<String>, scope: &'static str, owner: &'static str| {
+            let pool = pool.clone();
+            let org = org.clone();
+            async move {
+                sqlx::query(
+                    "INSERT INTO agent_memory (id, org_id, session_id, scope, key, content, owner) \
+                     VALUES ($1, $2, $3, $4, $1, 'content', $5)",
+                )
+                .bind(&id)
+                .bind(&org)
+                .bind(session)
+                .bind(scope)
+                .bind(owner)
+                .execute(&pool)
+                .await
+                .unwrap();
+                id
+            }
+        };
+        let own_thread_memory = insert(mp_ids::new_ulid(), Some(own_thread.clone()), "thread", "").await;
+        let foreign_thread_memory = insert(mp_ids::new_ulid(), Some(foreign_thread.clone()), "thread", "").await;
+        let org_memory = insert(mp_ids::new_ulid(), None, "org", "").await;
+
+        let service = MemoryGrpc::new(pool.clone(), None);
+        let caller = || VerifiedIdentity::user_for_test(&org, "user-a");
+        let exists = |id: String| {
+            let pool = pool.clone();
+            async move {
+                sqlx::query_scalar::<_, bool>("SELECT EXISTS (SELECT 1 FROM agent_memory WHERE id = $1)")
+                    .bind(id)
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap()
+            }
+        };
+
+        let response = service
+            .delete_memory(request(delete_request(&org, "user-a", &own_thread_memory), caller()))
+            .await
+            .expect("the caller's own thread memory is deletable")
+            .into_inner();
+        assert!(response.deleted);
+        assert!(!exists(own_thread_memory.clone()).await, "the durable thread row must be gone");
+        let forgotten: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM forgotten_memory_ids WHERE org_id = $1 AND user_id = 'user-a' AND memory_id = $2)",
+        )
+        .bind(&org)
+        .bind(&own_thread_memory)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(forgotten);
+
+        for not_theirs in [&foreign_thread_memory, &org_memory] {
+            let error = service
+                .delete_memory(request(delete_request(&org, "user-a", not_theirs), caller()))
+                .await
+                .expect_err("another user's or the org's memory is not the caller's to delete");
+            assert_eq!(error.code(), tonic::Code::NotFound);
+            assert!(exists(not_theirs.clone()).await, "a refused delete must leave the row alone");
+        }
+
+        let error = service
+            .delete_memory(request(delete_request(&org, "user-a", "never-existed"), caller()))
+            .await
+            .expect_err("nothing durable and no semantic tier configured");
+        assert_eq!(error.code(), tonic::Code::NotFound);
     }
 
     #[test]

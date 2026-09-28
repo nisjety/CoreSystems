@@ -244,6 +244,226 @@ pub fn errors(computed: &[Value], candidate: &str) -> Vec<String> {
             }
         }
         let lower = line.to_lowercase();
+        // A change/percentage-point claim stated without an explicit
+        // "fra ... til" equation (a bare "falt/økte ... X" instead) is not
+        // matched above: a false Q16 acceptance stated exactly this shape,
+        // correctly, and no deterministic check bound it to the CSV either
+        // way. Bind it directly to the exact CSV total or named group,
+        // comparing the computed ground truth, never a re-derived
+        // before/after. Ambiguous or unresolved scope is left to semantic
+        // review rather than guessed, matching the ratio-word branch below.
+        static DIRECT_CHANGE: LazyLock<regex::Regex> = LazyLock::new(|| {
+            regex::Regex::new(concat!(
+                r"(?i)\b(?P<metric>bruttofortjenesten?|gross profit|omsetningen?|revenue|varekost(?:en)?|cost|(?:brutto)?marginen?|margin)",
+                r"[^\n!?]{0,80}?\b(?P<verb>økte|steg|vokste|rose|increased|grew|gikk opp|falt|sank|fell|decreased|dropped|gikk ned)\b",
+                r"\s*(?:med\s+|by\s+)?(?P<amount>[+−-]?\d[\d .,\x{00a0}\x{202f}]*?)\s*(?P<unit>NOK|kr|USD|EUR|prosentpoeng|percentage\s+points|%)"
+            )).unwrap()
+        });
+        // The metric->verb gap above is only bounded by newline/!/?, so a lazy
+        // match can cross an entire other sentence to reach a verb whose
+        // amount happens to parse, including a verb that belongs to a
+        // DIFFERENT metric's own clause (a false Q16 acceptance's mirror
+        // image: a false rejection that bound one metric's verb+amount to
+        // another metric word entirely). classify_metric lets the loop below
+        // refuse any match whose gap itself contains another metric's word.
+        fn classify_metric(word: &str) -> &'static str {
+            let word = word.to_lowercase();
+            if word.contains("margin") {
+                "margin"
+            } else if word.contains("bruttofortjeneste") || word.contains("gross profit") {
+                "grossProfit"
+            } else if word.contains("omsetning") || word.contains("revenue") {
+                "revenue"
+            } else {
+                "cost"
+            }
+        }
+        static METRIC_WORD: LazyLock<regex::Regex> = LazyLock::new(|| {
+            regex::Regex::new(
+                r"(?i)\b(?:bruttofortjenesten?|gross profit|omsetningen?|revenue|varekost(?:en)?|cost|(?:brutto)?marginen?|margin)\b",
+            )
+            .unwrap()
+        });
+        // A per-unit/average/otherwise differently-scoped figure that merely
+        // shares a metric word with the CSV total is not the CSV's own
+        // tracked total; leave it to semantic review rather than binding it.
+        let disqualified_scope = [
+            "per enhet", "per unit", "per stk", "per stykk", "gjennomsnitt", "average",
+            "per order", "per ordre",
+        ]
+        .iter()
+        .any(|term| lower.contains(term));
+        if computed.len() == 1 {
+            if let Some(comparisons) = computed[0]["comparisons"].as_array() {
+                for claim in DIRECT_CHANGE.captures_iter(line) {
+                    if disqualified_scope {
+                        continue;
+                    }
+                    let metric = classify_metric(&claim["metric"]);
+                    let gap = &line[claim.name("metric").unwrap().end()..claim.name("verb").unwrap().start()];
+                    if METRIC_WORD.find_iter(gap).any(|other| classify_metric(other.as_str()) != metric) {
+                        continue;
+                    }
+                    let unit = claim["unit"].to_lowercase();
+                    let is_points = unit.contains("prosentpoeng") || unit.contains("percentage");
+                    let is_percent = unit == "%";
+                    // Margin moves in percentage points; the other metrics
+                    // never do (a bare "%" for them is a relative change).
+                    if metric == "margin" {
+                        if !is_points {
+                            continue;
+                        }
+                    } else if is_points {
+                        continue;
+                    }
+                    // The CSV's own figures are always NOK; a currency literal
+                    // that is not kr/NOK is not directly comparable and needs
+                    // scoped source review instead, matching the EQUATION
+                    // branch's currency-consistency guard above.
+                    if !is_points && !is_percent && unit != "nok" && unit != "kr" {
+                        continue;
+                    }
+                    // The regex matches both Norwegian and English verbs; parse
+                    // the claimed amount with the format that verb implies
+                    // instead of hardcoding Norwegian for every match.
+                    let english = matches!(
+                        claim["verb"].to_lowercase().as_str(),
+                        "increased" | "grew" | "fell" | "decreased" | "dropped" | "rose"
+                    );
+                    let Some(amount) = decimal(claim["amount"].trim(), english) else {
+                        continue;
+                    };
+                    let down = ["falt", "sank", "fell", "decreased", "dropped", "gikk ned"]
+                        .iter()
+                        .any(|word| claim["verb"].eq_ignore_ascii_case(word));
+                    // An explicit sign in the prose is preserved as typed; a
+                    // bare magnitude takes the verb's own direction.
+                    let signed_units = if claim["amount"].trim().starts_with(['+', '-', '−']) {
+                        amount.units
+                    } else if down {
+                        -amount.units.abs()
+                    } else {
+                        amount.units.abs()
+                    };
+                    let mut product_values = std::collections::BTreeSet::new();
+                    let mut channel_values = std::collections::BTreeSet::new();
+                    for entry in comparisons {
+                        if let Some(dimensions) = entry["dimensions"].as_object() {
+                            for (key, value) in dimensions {
+                                if let Some(value) = value
+                                    .as_str()
+                                    .filter(|value| word_present(&lower, &value.to_lowercase()))
+                                {
+                                    match key.as_str() {
+                                        "produktgruppe" | "product_group" => {
+                                            product_values.insert(value.to_owned());
+                                        }
+                                        "kanal" | "channel" => {
+                                            channel_values.insert(value.to_owned());
+                                        }
+                                        _ => {}
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    // More than one named group in scope, or no CSV row that
+                    // matches, has no single ground truth to bind to.
+                    if product_values.len() > 1 || channel_values.len() > 1 {
+                        continue;
+                    }
+                    let matches: Vec<_> = comparisons
+                        .iter()
+                        .filter(|entry| {
+                            let dimensions = &entry["dimensions"];
+                            let product = dimensions
+                                .get("produktgruppe")
+                                .or_else(|| dimensions.get("product_group"))
+                                .and_then(Value::as_str);
+                            let channel = dimensions
+                                .get("kanal")
+                                .or_else(|| dimensions.get("channel"))
+                                .and_then(Value::as_str);
+                            let product_ok = match product {
+                                Some(v) => product_values.contains(v),
+                                None => product_values.is_empty(),
+                            };
+                            let channel_ok = match channel {
+                                Some(v) => channel_values.contains(v),
+                                None => channel_values.is_empty(),
+                            };
+                            product_ok && channel_ok
+                        })
+                        .collect();
+                    if matches.len() != 1 {
+                        continue;
+                    }
+                    let entry = matches[0];
+                    if is_percent || is_points {
+                        // Reconstruct the exact numerator/denominator from the
+                        // cents already available, and compare with tolerance
+                        // for the claim's own rounding precision instead of
+                        // cross-multiplying against relativeChangePercent's
+                        // pre-rounded 4-decimal display string: correctly
+                        // rounded prose stated at a coarser precision must
+                        // still pass.
+                        let Some((numerator, denominator)) = (|| {
+                            if metric == "margin" {
+                                let revenue_before = entry["metrics"]["revenue"]["before"].as_str().and_then(cents)?;
+                                let revenue_after = entry["metrics"]["revenue"]["after"].as_str().and_then(cents)?;
+                                let cost_before = entry["metrics"]["cost"]["before"].as_str().and_then(cents)?;
+                                let cost_after = entry["metrics"]["cost"]["after"].as_str().and_then(cents)?;
+                                if revenue_before == 0 || revenue_after == 0 {
+                                    return None; // zero baseline/undefined: no ground truth to bind to
+                                }
+                                Some((
+                                    100 * ((revenue_after - cost_after) * revenue_before
+                                        - (revenue_before - cost_before) * revenue_after),
+                                    revenue_after * revenue_before,
+                                ))
+                            } else {
+                                let metric_before = entry["metrics"][metric]["before"].as_str().and_then(cents)?;
+                                let metric_after = entry["metrics"][metric]["after"].as_str().and_then(cents)?;
+                                if metric_before == 0 {
+                                    return None; // zero baseline/undefined: no ground truth to bind to
+                                }
+                                Some(((metric_after - metric_before) * 100, metric_before))
+                            }
+                        })() else {
+                            continue;
+                        };
+                        let claimed = Decimal { units: signed_units, scale: amount.scale };
+                        if !rounded_ratio_matches(&claimed, numerator, denominator) {
+                            let text = ratio(numerator, denominator)
+                                .unwrap_or_else(|| "undefined (zero baseline)".into());
+                            errors.push(format!(
+                                "The stated {metric} change of {}{} does not match the computed {} for {} between {} and {}. Bind changes to computedCsv, never a restated before/after.",
+                                claim["amount"].trim(), if metric == "margin" { " percentage points" } else { "%" }, text, entry["dimensions"], entry["fromPeriod"], entry["toPeriod"]
+                            ));
+                        }
+                    } else {
+                        let Some(text) = entry["metrics"][metric]["change"].as_str() else {
+                            continue;
+                        };
+                        let Some(expected) = cents(text) else {
+                            continue;
+                        };
+                        let (Some(lhs), Some(rhs)) = (
+                            signed_units.checked_mul(100),
+                            expected.checked_mul(amount.scale),
+                        ) else {
+                            continue;
+                        };
+                        if lhs != rhs {
+                            errors.push(format!(
+                                "The stated {metric} change of {} {} does not match the computed change of {} for {} between {} and {}. Bind changes to computedCsv, never a restated before/after.",
+                                claim["amount"].trim(), claim["unit"].trim(), money(expected), entry["dimensions"], entry["fromPeriod"], entry["toPeriod"]
+                            ));
+                        }
+                    }
+                }
+            }
+        }
         let factor = if ["halverte", "halvert", "halved"]
             .iter()
             .any(|word| word_present(&lower, word))
@@ -472,6 +692,172 @@ mod tests {
         assert!(
             errors(&data, "Omsetningen ble halvert.").is_empty(),
             "ambiguous product scope remains semantic review"
+        );
+    }
+    /// The real failing shape from the Q16 false-acceptance investigation, in
+    /// generic form: a bare "falt/økte ... X" claim with no "fra ... til"
+    /// equation. A wrong total must fail, correct group and total figures
+    /// (currency and percentage-point) must pass, and a number with no
+    /// recognized CSV metric word must never be flagged.
+    #[test]
+    fn direct_change_claims_bind_to_the_csv_total_or_named_group() {
+        let data = ledger(concat!(
+            "week,produktgruppe,revenue,cost\n",
+            "36,Belysning,120000,72000\n37,Belysning,150000,90000\n",
+            "36,Skrivebord,180000,126000\n37,Skrivebord,126000,90720\n",
+            "36,Oppbevaring,60000,39000\n37,Oppbevaring,84000,54600\n",
+        ));
+        // A wrong total change must fail. Totalt actually rose 1 680 kr; this
+        // sentence names no group, so it binds to the grand total and is
+        // contradicted by it (this is the exact wrong number a real
+        // per-group claim carried, mis-scoped here to the total on purpose).
+        assert!(!errors(&data, "Bruttofortjenesten falt 18 720 kr i perioden.").is_empty());
+        // Correct figures must pass: the real total claim,
+        assert!(errors(
+            &data,
+            "Bruttofortjenesten økte med 1 680 kr til 124 680 kr."
+        )
+        .is_empty());
+        // and the real per-group claim, scoped by a group name stated
+        // earlier in the same bullet/paragraph (not a re-split "sentence").
+        assert!(errors(
+            &data,
+            "Skrivebord sto for hele nettofallet. Bruttofortjenesten falt 18 720 kr, og marginen gikk ned 2,00 prosentpoeng."
+        )
+        .is_empty());
+        // A wrong group figure still fails once scoped.
+        assert!(!errors(&data, "Skrivebord: Bruttofortjenesten falt 20 000 kr.").is_empty());
+        // Correct and wrong relative-percent claims for a named group.
+        assert!(errors(&data, "Skrivebord: Omsetningen falt 30 %.").is_empty());
+        assert!(!errors(&data, "Skrivebord: Omsetningen falt 25 %.").is_empty());
+        // Unrelated numbers, with no recognized CSV metric word, are never
+        // flagged even though they share the same change-verb shape.
+        assert!(errors(&data, "Antall ansatte økte med 1 680 til 5 000.").is_empty());
+        assert!(errors(&data, "Belysning: Antall enheter falt 12 000 stk.").is_empty());
+        // Ambiguous (multi-group) scope is left to semantic review, not guessed.
+        assert!(errors(
+            &data,
+            "Belysning og Skrivebord: Bruttofortjenesten falt 18 720 kr."
+        )
+        .is_empty());
+    }
+    /// The exact take-04 false-rejection shape: the metric->verb gap is only
+    /// bounded by newline/!/?, so a lazy match can leap over an intervening,
+    /// differently-named metric's own clause and bind that metric's verb and
+    /// amount to the first metric word instead, producing a phantom claim
+    /// that never matches the CSV. Both reproduced shapes (an immediately
+    /// adjacent but downstream-failing verb, and a verb reached only because
+    /// an even later one's amount happens to parse) must be left unbound
+    /// rather than falsely rejected.
+    #[test]
+    fn direct_change_never_binds_a_verb_across_another_metrics_own_clause() {
+        let data = ledger("week,revenue,cost\n36,100,70\n37,100,65");
+        // Revenue is unchanged; grossProfit genuinely rose by 5 (70->65 cost).
+        // The bug bound grossProfit's own "økte med 5 kr" to "Omsetningen"
+        // (revenue), wrongly flagging a revenue change of 5 against 0.00.
+        assert!(errors(
+            &data,
+            "Omsetningen var uendret på 100 kr i uke 37. Bruttofortjenesten økte med 5 kr til 35 kr."
+        )
+        .is_empty());
+        let data = ledger("week,revenue,cost\n36,100,50\n37,200,50");
+        // grossProfit rose by 100 kr; cost is unchanged. The bug skipped the
+        // immediately-adjacent, correct verb ("økte", whose amount can't
+        // parse because "fordi" intervenes) and backtracked all the way to
+        // cost's own "falt med 5 kr", inverting the sign and metric both.
+        assert!(errors(
+            &data,
+            "Total bruttofortjeneste økte fordi varekost falt med 5 kr."
+        )
+        .is_empty());
+    }
+    /// The percent/margin-points comparison must tolerate the claim's own
+    /// rounding precision (rounded_ratio_matches), not demand exact equality
+    /// to relativeChangePercent's pre-rounded 4-decimal display string.
+    #[test]
+    fn direct_change_percent_tolerates_the_claims_own_rounding_precision() {
+        // True change is 30/70 = 42.857142...%.
+        let data = ledger("week,revenue,cost\n1,70,10\n2,100,10");
+        assert!(
+            errors(&data, "Revenue increased by 42.86%.").is_empty(),
+            "a textbook-correct 2-decimal rounding of the true percentage must pass"
+        );
+        assert!(
+            errors(&data, "Revenue increased by 42.8571%.").is_empty(),
+            "the ground truth's own 4-decimal precision must still pass"
+        );
+        assert!(
+            !errors(&data, "Revenue increased by 40%.").is_empty(),
+            "a genuinely wrong percentage must still fail"
+        );
+    }
+    /// DIRECT_CHANGE matches both Norwegian and English verbs but must parse
+    /// the claimed amount using the number format that verb implies, not
+    /// hardcode Norwegian formatting for every match.
+    #[test]
+    fn direct_change_parses_the_amount_in_the_verbs_own_language() {
+        let data = ledger("week,revenue,cost\n1,1000,0\n2,2234,0");
+        assert!(
+            errors(&data, "Revenue increased by 1,234 NOK.").is_empty(),
+            "an English comma-thousands amount must not be misread as a decimal fraction"
+        );
+        assert!(
+            errors(&data, "Revenue increased by 1,234.00 NOK.").is_empty(),
+            "full English formatting (comma-thousands, period-decimal) must parse"
+        );
+        assert!(
+            !errors(&data, "Revenue increased by 1,999.00 NOK.").is_empty(),
+            "a genuinely wrong English-formatted amount must still be caught"
+        );
+    }
+    /// DIRECT_CHANGE must not compare a claim's magnitude directly against
+    /// the NOK CSV when the claim's own currency literal is something else;
+    /// that requires scoped source review, not cross-currency subtraction,
+    /// matching the EQUATION branch's own currency-consistency guard.
+    #[test]
+    fn direct_change_stands_aside_on_a_mismatched_currency_literal() {
+        let data = ledger("week,revenue,cost\n1,1000,0\n2,2234,0");
+        assert!(
+            errors(&data, "Revenue increased by 5000 USD.").is_empty(),
+            "mixed currencies require scoped source review, not direct subtraction"
+        );
+    }
+    /// A figure that merely shares a metric word with the CSV total, but is
+    /// qualified as per-unit or average, is not the CSV's own tracked total
+    /// and must be left to semantic review rather than bound to it.
+    #[test]
+    fn direct_change_excludes_per_unit_and_average_qualified_figures() {
+        let data = ledger(concat!(
+            "week,produktgruppe,revenue,cost\n",
+            "36,Belysning,120000,72000\n37,Belysning,150000,90000\n",
+            "36,Skrivebord,180000,126000\n37,Skrivebord,126000,90720\n",
+            "36,Oppbevaring,60000,39000\n37,Oppbevaring,84000,54600\n",
+        ));
+        // Actual total cost change is -1 680 kr; these wildly different
+        // per-unit/average figures must never be bound to it.
+        assert!(errors(&data, "Cost per unit fell 999 999 kr this week.").is_empty());
+        assert!(errors(&data, "Varekost per enhet falt 999 999 kr denne uken.").is_empty());
+    }
+    /// DIRECT_CHANGE (and the pre-existing ratio-word branch) only bind a
+    /// claim when exactly one CSV source is attached (`computed.len() == 1`).
+    /// With two attached CSVs the check is a documented no-op: a wrong claim
+    /// is silently left unchecked rather than guessed against either source.
+    #[test]
+    fn direct_change_and_ratio_words_are_a_documented_no_op_with_two_csv_sources() {
+        let computed = crate::source_facts::computed_csv(&SourceContext {
+            sources: vec![
+                Source { id: 0, name: "a.csv".into(), content: "week,revenue,cost\n1,100,50\n2,150,50".into() },
+                Source { id: 1, name: "b.csv".into(), content: "week,revenue,cost\n1,200,80\n2,100,80".into() },
+            ],
+        });
+        assert_eq!(computed.len(), 2);
+        assert!(
+            errors(&computed, "Revenue increased by 9999 kr.").is_empty(),
+            "DIRECT_CHANGE does not guess which of two attached CSVs a claim belongs to"
+        );
+        assert!(
+            errors(&computed, "Omsetningen ble doblet.").is_empty(),
+            "the pre-existing ratio-word branch has the same documented limitation"
         );
     }
     #[test]

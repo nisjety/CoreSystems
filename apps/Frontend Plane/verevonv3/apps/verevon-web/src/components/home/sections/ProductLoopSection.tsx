@@ -1,6 +1,7 @@
 "use client";
 
-import { useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import dynamic from "next/dynamic";
 import { gsap } from "gsap";
 import { ScrollTrigger } from "gsap/ScrollTrigger";
 import type { ProductRecording } from "@/lib/product-recording-contract";
@@ -21,9 +22,32 @@ import {
 
 gsap.registerPlugin(ScrollTrigger);
 
+const ProductDemo = dynamic(() => import("../product-demo/product-demo").then((module) => module.ProductDemo), { ssr: false });
+
+// Only mount the demo layout that can actually be seen. Keep its state while scrolling.
+function ResponsiveDemo({ step, desktop = false }: { step: 1 | 2 | 3; desktop?: boolean }) {
+	const root = useRef<HTMLDivElement>(null);
+	const [enabled, setEnabled] = useState(false);
+	useEffect(() => {
+		const media = window.matchMedia("(min-width: 900px) and (prefers-reduced-motion: no-preference)");
+		let near = false;
+		const update = () => setEnabled(media.matches === desktop && (near || !desktop));
+		const observer = new IntersectionObserver(([entry]) => {
+			if (entry.isIntersecting) { near = true; update(); observer.disconnect(); }
+		}, { rootMargin: "1000px" });
+		const section = root.current?.closest("[data-product-loop]");
+		if (section) observer.observe(section);
+		update();
+		media.addEventListener("change", update);
+		return () => { observer.disconnect(); media.removeEventListener("change", update); };
+	}, [desktop]);
+	return <div ref={root} className="h-full w-full">{enabled && <ProductDemo embeddedStep={step} />}</div>;
+}
+
 type LoopStage = {
 	body?: string;
-	kind: "composer" | "media";
+	kind: "composer" | "media" | "demo";
+	demoStep?: 1 | 2 | 3;
 	media?: ProductLoopMedia;
 	state: string;
 	step: string;
@@ -42,49 +66,16 @@ const loopStages: LoopStage[] = [
 			objectPosition: "center 50%",
 		},
 	},
-	{
-		step: "02",
-		state: "Arbeid",
-		title: "Verevon gjør spørsmålet om til arbeidet.",
-		body: "En oppgave blir til en arbeidsflyt med riktig kontekst, foreslåtte steg og et grunnlag teamet kan følge.",
-		kind: "media",
-		media: {
-			kind: "image",
-			src: "/verevon-mood/operator-calm-warm.jpg",
-			alt: "En person arbeider rolig gjennom en oppgave i et lyst, dempet rom.",
-			objectPosition: "center 42%",
-		},
-	},
-	{
-		step: "03",
-		state: "Kontroll",
-		title: "Risikable handlinger stopper hos dere.",
-		body: "Se kilde, policy, konsekvens og neste steg i samme flyt. Dere godkjenner før noe sendes, endres eller publiseres.",
-		kind: "media",
-		media: {
-			kind: "image",
-			src: "/hand-with-strings-of-text.jpg",
-			alt: "Hender som arbeider med tekst og informasjon i et lyst rom.",
-			objectPosition: "center 48%",
-		},
-	},
-	{
-		step: "04",
-		state: "Composer",
-		kind: "composer",
-	},
-	{
-		step: "05",
-		state: "Plattform",
-		kind: "media",
-		media: {
-			kind: "video",
-			src: "/verevon-product-shots/product-showcase.mp4",
-			poster: "/verevon-product-shots/product-showcase-poster.jpg",
-			alt: "Verevons faktiske norske composer med et eksempelspørsmål om beslutninger, kilder og neste steg.",
-			objectPosition: "center 42%",
-		},
-	},
+	{ step: "02", state: "Plan", kind: "demo", demoStep: 1,
+        title: "Fra spørsmål til en gjennomførbar plan.",
+        body: "Se ansvar, avhengigheter og frister samlet i et planutkast." },
+    { step: "03", state: "Undersøk", kind: "demo", demoStep: 2,
+        title: "Finn blokkeringen. Se løsningen.",
+        body: "Følg undersøkelsen fra kilder og logg til en endring som kan testes." },
+    { step: "04", state: "Følg opp", kind: "demo", demoStep: 3,
+        title: "Hold arbeidet i gang.",
+        body: "Se status, gjennomgå kundeutkastet og velg hvordan arbeidet skal følges opp." },
+    { step: "05", state: "Composer", kind: "composer" },
 ];
 
 const copyStages = loopStages.slice(1, 3);
@@ -102,7 +93,7 @@ function LoopComposerContent() {
 						className="verevon-eyebrow text-verevon-coral"
 						data-product-loop-composer-label=""
 					>
-						{activeComposerCopy.label}
+						{activeComposerCopy.label.replace("04 /", "05 /")}
 					</p>
 					<h2 className="verevon-home-heading mt-4 min-h-[1.8em] max-w-[14ch] text-verevon-j-text text-balance">
 						<span
@@ -146,17 +137,19 @@ function LoopMediaLayer({
 }) {
 	return (
 		<div
-			aria-hidden="true"
 			className="absolute inset-0 overflow-hidden"
 			data-product-loop-layer={index}
 			style={{
 				clipPath: index === 0 ? "inset(0% 0% 0%)" : "inset(0% 0% 100%)",
 				opacity: index === 0 ? 1 : 0,
+                visibility: index === 0 ? "visible" : "hidden",
 			}}
 		>
 			{stage.kind === "composer" ? (
 				<LoopComposerContent />
-			) : stage.media ? (
+			) : stage.kind === "demo" ? (
+				<LoopDemoPreview step={stage.demoStep!} />
+            ) : stage.media ? (
 				<ProductLoopMediaContent media={stage.media} priority={index === 0} />
 			) : null}
 			{stage.kind === "media" ? (
@@ -164,6 +157,34 @@ function LoopMediaLayer({
 			) : null}
 		</div>
 	);
+}
+
+function LoopDemoPreview({ step }: { step: 1 | 2 | 3 }) {
+	const previewRef = useRef<HTMLDivElement>(null);
+	const contentRef = useRef<HTMLDivElement>(null);
+	useLayoutEffect(() => {
+		const preview = previewRef.current;
+		const content = contentRef.current;
+		if (!preview || !content) return;
+		const resize = (width: number, height: number) => {
+			const scale = Math.min(1, width / 1100);
+			if (!scale) return;
+			const nextWidth = `${width / scale}px`;
+			const nextHeight = `${height / scale}px`;
+			if (content.style.width !== nextWidth) content.style.width = nextWidth;
+			if (content.style.height !== nextHeight) content.style.height = nextHeight;
+			content.style.transform = `scale(${scale})`;
+		};
+		const observer = new ResizeObserver(([entry]) => resize(entry.contentRect.width, entry.contentRect.height));
+		observer.observe(preview);
+		resize(preview.clientWidth, preview.clientHeight);
+		return () => observer.disconnect();
+	}, []);
+	return <div ref={previewRef} className="h-full w-full overflow-hidden">
+		<div ref={contentRef} className="h-full w-full origin-top-left">
+			<ResponsiveDemo step={step} desktop />
+		</div>
+	</div>;
 }
 
 function LoopCopyPanel({ index, stage }: { index: number; stage: LoopStage }) {
@@ -212,7 +233,7 @@ function ProductLoopMobileFallback() {
 
 	return (
 		<div
-			className="hidden max-[899px]:grid max-[899px]:gap-12"
+			className="hidden max-[899px]:grid max-[899px]:gap-12 motion-reduce:grid motion-reduce:gap-12"
 			data-product-loop-mobile-fallback=""
 		>
 			<div className="grid gap-6 border-t border-verevon-j-text/10 pt-6">
@@ -227,7 +248,7 @@ function ProductLoopMobileFallback() {
 				</div>
 			</div>
 
-			{copyStages.map((stage) => (
+			{loopStages.slice(1, 4).map((stage) => (
 				<article className="grid gap-5 border-t border-verevon-j-text/10 pt-6" key={stage.step}>
 					<p className="verevon-eyebrow text-verevon-coral">
 						{stage.step} / {stage.state}
@@ -238,16 +259,15 @@ function ProductLoopMobileFallback() {
 					<p className="max-w-[34rem] font-protokoll text-[1rem] font-light leading-[1.48] text-verevon-text-muted">
 						{stage.body}
 					</p>
-					<div className="relative aspect-[1.18] overflow-hidden rounded-[20px] bg-[#f4f3f0]">
-						<ProductLoopMediaContent media={stage.media as ProductLoopMedia} />
-					</div>
-					{stage.step === "02" ? <FeatureComposerCycle id="product-mobile-composer" /> : null}
+                    <div className="relative overflow-hidden rounded-[20px]">
+                        <ResponsiveDemo step={stage.demoStep!} />
+                    </div>
 				</article>
 			))}
 
 			<div className="grid gap-6 border-t border-verevon-j-text/10 pt-6">
 				<p className="verevon-eyebrow text-verevon-coral">
-					{activeComposerCopy.label}
+					{activeComposerCopy.label.replace("04 /", "05 /")}
 				</p>
 				<h3 className="max-w-[14ch] font-arbeit text-[clamp(2.5rem,11vw,4.4rem)] font-light leading-[0.92] tracking-[-0.065em] text-verevon-j-text">
 					{activeComposerCopy.title}
@@ -261,15 +281,6 @@ function ProductLoopMobileFallback() {
 				</p>
 			</div>
 
-			<div className="grid gap-6 border-t border-verevon-j-text/10 pt-6">
-				<p className="verevon-eyebrow text-verevon-coral">05 / Plattform</p>
-				<p className="max-w-[20ch] font-arbeit text-[clamp(2.4rem,11vw,4.4rem)] font-light leading-[0.92] tracking-[-0.065em] text-verevon-j-text">
-					Én oversikt over arbeidet som skjer.
-				</p>
-				<div className="relative aspect-[1.18] overflow-hidden rounded-[20px] bg-[#f8f8f7]">
-					<ProductLoopMediaContent media={loopStages[4].media as ProductLoopMedia} />
-				</div>
-			</div>
 		</div>
 	);
 }
@@ -352,8 +363,9 @@ export function ProductLoopSection({ recordings = [] }: { recordings?: ProductRe
 						return;
 					}
 
-					const boxFromMarker = (marker: HTMLElement) => {
-						const viewportRect = viewport.getBoundingClientRect();
+					let viewportRect = viewport.getBoundingClientRect();
+                    const markerBoxes = new Map<HTMLElement, {height: number; left: number; top: number; width: number}>();
+                    const measureMarker = (marker: HTMLElement) => {
 						const markerRect = marker.getBoundingClientRect();
 
 						return {
@@ -363,6 +375,13 @@ export function ProductLoopSection({ recordings = [] }: { recordings?: ProductRe
 							width: markerRect.width,
 						};
 					};
+
+                    const measureGeometry = () => {
+                        viewportRect = viewport.getBoundingClientRect();
+                        [...frameMarkers, ...copyMarkers].forEach(marker => markerBoxes.set(marker, measureMarker(marker)));
+                    };
+                    measureGeometry();
+                    const boxFromMarker = (marker: HTMLElement) => markerBoxes.get(marker)!;
 
 					const sectionTop = () =>
 						section.getBoundingClientRect().top + window.scrollY;
@@ -381,7 +400,6 @@ export function ProductLoopSection({ recordings = [] }: { recordings?: ProductRe
 						width: () => placeFrame(index).width,
 					});
 					const entranceStartFrame = () => {
-						const viewportRect = viewport.getBoundingClientRect();
 						const markerRect = placeFrame(0);
 
 						return {
@@ -396,7 +414,7 @@ export function ProductLoopSection({ recordings = [] }: { recordings?: ProductRe
 						width: () => entranceStartFrame().width,
 					});
 					const contentFrame = () => {
-						const rect = viewport.getBoundingClientRect();
+						const rect = viewportRect;
 						const inset = Math.max(Math.min(rect.width * 0.077, 100), (rect.width - 1512) / 2);
 						const width = rect.width - inset * 2;
 						const height = Math.min(rect.height - 160, width * 0.625);
@@ -432,10 +450,10 @@ export function ProductLoopSection({ recordings = [] }: { recordings?: ProductRe
 						xRatio: number,
 						yRatio: number,
 					) => ({
-						height: () => viewport.getBoundingClientRect().height * sizeRatio,
-						width: () => viewport.getBoundingClientRect().height * sizeRatio,
-						x: () => viewport.getBoundingClientRect().width * xRatio,
-						y: () => viewport.getBoundingClientRect().height * yRatio,
+						height: () => viewportRect.height * sizeRatio,
+						width: () => viewportRect.height * sizeRatio,
+						x: () => viewportRect.width * xRatio,
+						y: () => viewportRect.height * yRatio,
 					});
 
 					let timeline: gsap.core.Timeline | null = null;
@@ -482,9 +500,20 @@ export function ProductLoopSection({ recordings = [] }: { recordings?: ProductRe
 						});
 						gsap.set(composerCopy, { autoAlpha: 1, y: 0 });
 
+						let previousActive = -1;
 						const loopTimeline = gsap.timeline({
 							defaults: { ease: "none" },
 							paused: true,
+                            onUpdate() {
+                                const time = this.time();
+                                const active = time < 1.16 ? 0 : time < 2.06 ? 1 : time < 2.96 ? 2 : time < 3.96 ? 3 : 4;
+                                if (active === previousActive) return;
+                                previousActive = active;
+                                layers.forEach((layer, index) => {
+                                    layer.inert = index !== active;
+                                    layer.setAttribute("aria-hidden", String(index !== active));
+                                });
+                            },
 						});
 						timeline = loopTimeline;
 
@@ -498,7 +527,7 @@ export function ProductLoopSection({ recordings = [] }: { recordings?: ProductRe
 							loopTimeline
 								.to(
 									frame,
-									{ ...dynamicFramePosition(frameIndex), duration: 0.52 },
+									{ ...(frameIndex === 4 ? dynamicFullFrame() : dynamicFramePosition(frameIndex)), duration: 0.52 },
 									at,
 								)
 								.to(
@@ -639,98 +668,19 @@ export function ProductLoopSection({ recordings = [] }: { recordings?: ProductRe
 							2.72,
 						);
 
-						loopTimeline
-							.to(
-								frame,
-								{ ...dynamicFramePosition(3), duration: 0.58 },
-								2.72,
-							)
-							.to(
-								layers[2],
-								{
-									autoAlpha: 0,
-									clipPath: "inset(100% 0% 0%)",
-									duration: 0.3,
-								},
-								2.84,
-							)
-							.to(
-								layers[3],
-								{
-									autoAlpha: 1,
-									clipPath: "inset(0% 0% 0%)",
-									duration: 0.42,
-								},
-								2.9,
-							)
-							.to(
-								copyFloat,
-								{
-									autoAlpha: 0,
-									pointerEvents: "none",
-									y: -24,
-									duration: 0.24,
-								},
-								2.78,
-							)
-							.to(chrome, { autoAlpha: 0, duration: 0.18 }, 2.88)
-							.to(
-								frame,
-								{
-									backgroundColor: "transparent",
-									borderColor: "transparent",
-									borderRadius: "0px",
-									boxShadow: "none",
-									duration: 0.34,
-								},
-								2.78,
-							)
-							// Let the composer stand on the page itself, with its copy
-							// and controls above the loop ring until the platform crossfade.
-							.to(
-								circle,
-								{
-									...dynamicCircleGeometry(1.3, 0, 0),
-									autoAlpha: 0,
-									duration: 0.6,
-									rotation: 180,
-								},
-								3.72,
-							)
-							.to(
-								frame,
-								{
-									...dynamicFullFrame(),
-									backgroundColor: "#f8f8f7",
-									borderColor: "rgba(31,31,29,0.08)",
-									borderRadius: "24px",
-									boxShadow: "0 28px 96px rgba(23,23,23,0.1)",
-									duration: 0.82,
-									ease: "power3.out",
-								},
-								3.72,
-							)
-							.to(
-								layers[3],
-								{
-									autoAlpha: 0,
-									clipPath: "inset(100% 0% 0%)",
-									duration: 0.32,
-								},
-								3.86,
-							)
-							.to(
-								layers[4],
-								{
-									autoAlpha: 1,
-									clipPath: "inset(0% 0% 0%)",
-									duration: 0.46,
-								},
-								3.9,
-							);
+                        transition(2, 3, 4, null, 2.72);
+                        transition(3, 4, 3, null, 3.72);
+                        loopTimeline
+                            .to(chrome, { autoAlpha: 0, duration: 0.18 }, 3.88)
+                            .to(circle, { ...dynamicCircleGeometry(1.05, 0, 0.05), rotation: 180, duration: 0.6 }, 3.72)
+                            .to(frame, { backgroundColor: "transparent", borderColor: "transparent", borderRadius: "0px", boxShadow: "none", duration: 0.6 }, 3.72)
+                            .to({}, { duration: 0.22 }, 4.32);
+
 					}, section);
 
-					let progressFrame: number | null = null;
+					let disposed = false;
+					let cachedTop = sectionTop();
+					let cachedRange = sectionScrollRange();
 					let progressTween: gsap.core.Tween | null = null;
 					let refreshFrame: number | null = null;
 					let refreshTimeout: number | null = null;
@@ -745,9 +695,9 @@ export function ProductLoopSection({ recordings = [] }: { recordings?: ProductRe
 								window.innerHeight * PRODUCT_LOOP_ENTRANCE_VIEWPORT_RATIO,
 							entranceTimelineDuration:
 								PRODUCT_LOOP_ENTRANCE_TIMELINE_DURATION,
-							pinnedScrollRange: sectionScrollRange(),
+							pinnedScrollRange: cachedRange,
 							scrollY: window.scrollY,
-							sectionTop: sectionTop(),
+							sectionTop: cachedTop,
 							timelineDuration: timeline.duration(),
 						});
 
@@ -766,18 +716,8 @@ export function ProductLoopSection({ recordings = [] }: { recordings?: ProductRe
 						});
 					};
 
-					const queueProgress = () => {
-						if (progressFrame !== null) {
-							return;
-						}
-
-						progressFrame = window.requestAnimationFrame(() => {
-							progressFrame = null;
-							updateProgress();
-						});
-					};
-
-						const queueRefresh = () => {
+					const queueRefresh = () => {
+                            if (disposed) return;
 							if (refreshFrame !== null) {
 								return;
 							}
@@ -789,7 +729,6 @@ export function ProductLoopSection({ recordings = [] }: { recordings?: ProductRe
 								}
 								refreshTimeout = window.setTimeout(() => {
 									refreshTimeout = null;
-									timeline?.invalidate();
 									ScrollTrigger.refresh();
 									updateProgress(true);
 								}, 80);
@@ -798,8 +737,17 @@ export function ProductLoopSection({ recordings = [] }: { recordings?: ProductRe
 
 						const scrollDriver = ScrollTrigger.create({
 							trigger: section,
-							start: "top top",
-							end: () => `+=${sectionScrollRange()}`,
+							start: () => `top ${window.innerHeight * PRODUCT_LOOP_ENTRANCE_VIEWPORT_RATIO}px`,
+                            end: "bottom bottom",
+                            onRefreshInit: () => {
+                                progressTween?.kill();
+                                // Rewind before invalidating so new tween starts never capture a later card.
+                                timeline?.progress(0);
+                                measureGeometry();
+                                cachedTop = sectionTop();
+                                cachedRange = sectionScrollRange();
+                                timeline?.invalidate();
+                            },
 							onRefresh: () => updateProgress(true),
 							onUpdate: () => updateProgress(),
 						});
@@ -818,29 +766,25 @@ export function ProductLoopSection({ recordings = [] }: { recordings?: ProductRe
 						);
 						refreshTargets.forEach((target) => refreshObserver?.observe(target));
 
-						const settleRefreshTimers = [0, 250, 750, 1500].map((delay) =>
-							window.setTimeout(queueRefresh, delay),
-						);
+						queueRefresh();
 						document.fonts?.ready.then(queueRefresh);
 						window.addEventListener("load", queueRefresh, { once: true });
-					window.addEventListener("scroll", queueProgress, { passive: true });
+
 					window.addEventListener("resize", queueRefresh);
 					updateProgress(true);
 
 					return () => {
-						if (progressFrame !== null) {
-							window.cancelAnimationFrame(progressFrame);
-						}
+						disposed = true;
 						if (refreshFrame !== null) {
 							window.cancelAnimationFrame(refreshFrame);
 						}
 						if (refreshTimeout !== null) {
 							window.clearTimeout(refreshTimeout);
 						}
-						settleRefreshTimers.forEach((timer) => window.clearTimeout(timer));
+
 						progressTween?.kill();
 						scrollDriver.kill();
-						window.removeEventListener("scroll", queueProgress);
+
 						window.removeEventListener("resize", queueRefresh);
 						window.removeEventListener("load", queueRefresh);
 						refreshObserver?.disconnect();
@@ -869,7 +813,7 @@ export function ProductLoopSection({ recordings = [] }: { recordings?: ProductRe
 	return (
 		<section
 			aria-labelledby="product-loop-title"
-			className="relative isolate z-[5] -mt-[clamp(48px,6vh,88px)] h-[396svh] overflow-visible bg-background text-verevon-j-text max-[899px]:mt-0 max-[899px]:h-auto max-[899px]:overflow-hidden"
+			className="relative isolate z-[5] -mt-[clamp(48px,6vh,88px)] h-[396svh] overflow-visible bg-background text-verevon-j-text motion-reduce:mt-0 motion-reduce:h-auto max-[899px]:mt-0 max-[899px]:h-auto max-[899px]:overflow-hidden"
 			data-product-loop
 			id="flyt"
 			ref={sectionRef}
@@ -881,15 +825,15 @@ export function ProductLoopSection({ recordings = [] }: { recordings?: ProductRe
 				style={{ scrollMarginTop: PRODUCT_LOOP_ENTRANCE_SCROLL_MARGIN }}
 			/>
 
-			<div className="sticky top-0 min-h-svh overflow-hidden max-[899px]:relative max-[899px]:min-h-0" data-product-loop-pin="">
+			<div className="sticky top-0 min-h-svh overflow-hidden motion-reduce:relative motion-reduce:min-h-0 max-[899px]:relative max-[899px]:min-h-0" data-product-loop-pin="">
 				<div
-					className="relative min-h-svh overflow-hidden max-[899px]:grid max-[899px]:min-h-0 max-[899px]:gap-12 max-[899px]:px-[var(--verevon-page-pad)] max-[899px]:py-24"
+					className="relative min-h-svh overflow-hidden motion-reduce:min-h-0 motion-reduce:px-[var(--verevon-page-pad)] motion-reduce:py-24 max-[899px]:grid max-[899px]:min-h-0 max-[899px]:gap-12 max-[899px]:px-[var(--verevon-page-pad)] max-[899px]:py-24"
 					data-product-loop-viewport=""
 				>
 					<div aria-hidden="true" className="absolute inset-0 bg-[radial-gradient(circle_at_78%_28%,rgba(238,122,80,0.08),transparent_27%),radial-gradient(circle_at_14%_74%,rgba(41,64,74,0.07),transparent_28%),linear-gradient(180deg,rgba(248,248,247,0),rgba(248,248,247,0.78))]" />
 
 					<div
-						className="absolute left-[var(--verevon-edge)] top-[clamp(112px,15vh,176px)] z-40 max-w-[min(46.8vw,630px)] text-left max-[899px]:hidden"
+						className="absolute left-[var(--verevon-edge)] top-[clamp(112px,15vh,176px)] z-40 max-w-[min(46.8vw,630px)] text-left max-[899px]:hidden motion-reduce:hidden"
 						data-product-loop-header=""
 					>
 						<h2 className="verevon-home-heading max-w-[10ch] text-verevon-j-text text-balance">
@@ -901,11 +845,11 @@ export function ProductLoopSection({ recordings = [] }: { recordings?: ProductRe
 					    as the entrance plays, right as the loop circle takes over. */}
 						<div
 							aria-hidden="true"
-							className="pointer-events-none absolute left-1/2 top-0 z-10 h-[clamp(48px,9vh,140px)] w-px -translate-x-1/2 bg-[linear-gradient(180deg,transparent,color-mix(in_srgb,var(--verevon-j-text)_28%,transparent)_60%,transparent)] max-[899px]:hidden"
+							className="pointer-events-none absolute left-1/2 top-0 z-10 h-[clamp(48px,9vh,140px)] w-px -translate-x-1/2 bg-[linear-gradient(180deg,transparent,color-mix(in_srgb,var(--verevon-j-text)_28%,transparent)_60%,transparent)] max-[899px]:hidden motion-reduce:hidden"
 							data-product-loop-connector=""
 						/>
 
-					<div aria-hidden="true" className="absolute inset-0 max-[899px]:hidden">
+					<div aria-hidden="true" className="absolute inset-0 max-[899px]:hidden motion-reduce:hidden">
 						<div className="absolute left-[22%] top-[24%] h-[clamp(260px,34vh,390px)] w-[calc((100%-2*var(--verevon-edge))*0.48)]" data-product-loop-frame-marker="" />
 						<div className="absolute right-[var(--verevon-edge)] top-[clamp(142px,17vh,206px)] h-[clamp(344px,47vh,560px)] w-[calc((100%-2*var(--verevon-edge))*0.53)]" data-product-loop-frame-marker="" />
 						<div className="absolute left-[var(--verevon-edge)] top-[clamp(222px,34vh,350px)] h-[clamp(260px,34vh,390px)] w-[clamp(520px,43vw,760px)]" data-product-loop-frame-marker="" />
@@ -922,12 +866,12 @@ export function ProductLoopSection({ recordings = [] }: { recordings?: ProductRe
 					    each stage (see the circle tweens in the timeline above). */}
 					<div
 						aria-hidden="true"
-						className="pointer-events-none absolute left-1/2 top-1/2 z-10 aspect-square rounded-full border-2 border-verevon-j-text/25 max-[899px]:hidden"
+						className="pointer-events-none absolute left-1/2 top-1/2 z-10 aspect-square rounded-full border-2 border-verevon-j-text/25 max-[899px]:hidden motion-reduce:hidden"
 						data-product-loop-circle=""
 					/>
 
 					<div
-						className="absolute left-0 top-0 z-20 h-full w-full overflow-hidden rounded-[24px] border border-verevon-j-text/8 bg-[#f8f8f7] shadow-[0_28px_96px_rgba(23,23,23,0.1)] max-[899px]:hidden"
+						className="absolute left-0 top-0 z-20 h-full w-full overflow-hidden rounded-[24px] border border-verevon-j-text/8 bg-[#f8f8f7] shadow-[0_28px_96px_rgba(23,23,23,0.1)] max-[899px]:hidden motion-reduce:hidden"
 						data-product-loop-frame=""
 					>
 						<div className="relative h-full w-full">
@@ -942,7 +886,7 @@ export function ProductLoopSection({ recordings = [] }: { recordings?: ProductRe
 						<LoopFrameChrome />
 					</div>
 
-					<div className="absolute z-30 max-[899px]:hidden" data-product-loop-copy="">
+					<div className="absolute z-30 max-[899px]:hidden motion-reduce:hidden" data-product-loop-copy="">
 						{copyStages.map((stage, index) => (
 							<LoopCopyPanel index={index} key={stage.step} stage={stage} />
 						))}

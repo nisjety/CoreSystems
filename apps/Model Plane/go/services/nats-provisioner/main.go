@@ -152,6 +152,13 @@ func consumerBindings() []consumerBinding {
 			// read/write or a single outbound HTTP call, so 30s risks a live
 			// review being Nak'd by its own timeout mid-flight and redelivered
 			// as a duplicate attempt.
+			//
+			// This entry is the one source of AckWait and MaxDeliver for the
+			// review: RunConsumer reads both from the consumer at bind time,
+			// cuts each review off inside AckWait (at 100s of these 120s) and
+			// stops retrying at MaxDeliver. Changing them here is enough; nothing in
+			// capability-core repeats them except as a fallback for an
+			// unreadable consumer.
 			stream: "MODEL_PLANE_RUN_EVENTS",
 			config: nats.ConsumerConfig{
 				Durable:        "capability-core-skill-review",

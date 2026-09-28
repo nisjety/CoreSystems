@@ -22,7 +22,7 @@ import {
   spokenSourceTally,
 } from './chat-media-markdown'
 import type { RecalledMemory } from '@/shared/api/chat-client'
-import type { ChatTurn, Citation, QueuedInput } from './chat-types'
+import type { ChatGroundingSource, ChatTurn, Citation, QueuedInput } from './chat-types'
 import { deriveConversationNodes, diffText, parseUnifiedDiff } from '@/shared/chat-nodes'
 import type { ThreadContext } from '@/shared/api/chat-client'
 
@@ -52,6 +52,7 @@ vi.mock('@/shared/api/memory-client', async (importOriginal) => {
     correctMemory: vi.fn(async () => ({
       memoryId: 'mem-1-corrected',
       deleted: true,
+      original: 'removed',
       degraded: false,
       degradationReason: '',
     })),
@@ -95,7 +96,12 @@ describe('ContextWindowPanel', () => {
       <ContextWindowPanel context={context()} loading={false} failed={false} />
     ))
     const text = container.textContent ?? ''
-    expect(text).toContain('Kontekstvindu')
+    // "Samlet kontekst", not "Kontekstvindu": the budget is session-core's
+    // assembly budget, and a window label made 4 096 read as a 4k model.
+    expect(text).toContain('Samlet kontekst')
+    expect(text).not.toContain('Kontekstvindu')
+    const toggle = container.querySelector<HTMLButtonElement>('.verevon-chat-context-window__toggle')
+    expect(toggle?.title).toContain('Ikke modellens kontekstvindu')
     // 1200 / 8000 = 15%. Norwegian locale uses a non-breaking space separator,
     // so assert on the percentage rather than the formatted thousands.
     expect(text).toContain('15%')
@@ -116,6 +122,32 @@ describe('ContextWindowPanel', () => {
     // question the inspector exists for.
     expect(text).toContain('invoice excerpt')
     expect(text).toContain('900')
+    unmount()
+  })
+
+  /**
+   * Persona spec §2.5: `kind` is a free-form wire string with no allow-list,
+   * so a `"persona"`-kind segment (the BFF's synthetic prepend) needs zero
+   * special-casing to display — it renders like any other segment (content +
+   * token count), with only a cosmetic localized label swapped in.
+   */
+  it('renders a persona-kind segment like any other segment, with a localized label', () => {
+    const { container, unmount } = render(() => (
+      <ContextWindowPanel
+        context={context({
+          segments: [
+            { kind: 'persona', content: 'Always answer in bullet points.', estimatedTokens: 12 },
+          ],
+        })}
+        loading={false}
+        failed={false}
+      />
+    ))
+    open(container)
+    const text = container.textContent ?? ''
+    expect(text).toContain('Personlige instrukser')
+    expect(text).toContain('Always answer in bullet points.')
+    expect(text).toContain('12')
     unmount()
   })
 
@@ -165,6 +197,49 @@ describe('ContextWindowPanel', () => {
     expect(container.textContent).not.toContain('NaN')
     expect(container.textContent).not.toContain('%')
     unmount()
+  })
+
+  /** chat-wave2 scope spec §2.2: the concrete "shown in the receipt" surface. */
+  describe('per-turn retrieval-source filter receipt', () => {
+    it('names the excluded source class and the specific tools left out', () => {
+      const { container, unmount } = render(() => (
+        <ContextWindowPanel
+          context={context()}
+          loading={false}
+          failed={false}
+          scopeApplied={{ scope: 'knowledge_only', excludedTools: ['web_search', 'fetch_url'] }}
+        />
+      ))
+      open(container)
+      const text = container.textContent ?? ''
+      expect(text).toContain('Nett-kilder ekskludert')
+      expect(text).toContain('web_search')
+      expect(text).toContain('fetch_url')
+      unmount()
+    })
+
+    it('names the org-side exclusion for web_only', () => {
+      const { container, unmount } = render(() => (
+        <ContextWindowPanel
+          context={context()}
+          loading={false}
+          failed={false}
+          scopeApplied={{ scope: 'web_only', excludedTools: ['knowledge_search'] }}
+        />
+      ))
+      open(container)
+      expect(container.textContent).toContain('Organisasjonskilder ekskludert')
+      unmount()
+    })
+
+    it('shows nothing for an ordinary (auto) turn', () => {
+      const { container, unmount } = render(() => (
+        <ContextWindowPanel context={context()} loading={false} failed={false} />
+      ))
+      open(container)
+      expect(container.textContent).not.toContain('ekskludert')
+      unmount()
+    })
   })
 })
 
@@ -526,6 +601,55 @@ describe('MemoryRecallNotice correct/forget', () => {
     unmount()
   })
 
+  /**
+   * A restored turn stores which memories it recalled, not their text, so a
+   * memory forgotten or corrected since cannot come back from the cache. The
+   * chip reads the reader's current memories once, when first opened.
+   */
+  it('reads the current text of a restored memory when opened, and shows only the label of one that is gone', async () => {
+    vi.mocked(memoryClient.listMemories).mockResolvedValueOnce({
+      memories: [
+        {
+          memoryId: 'mem-1',
+          topic: 'USER',
+          content: 'Foretrekker metriske enheter, alltid',
+          updatedAt: '2026-01-01T00:00:00.000Z',
+          provenance: 'stated',
+        },
+      ],
+      degraded: false,
+      degradationReason: '',
+    })
+    const { container, unmount } = render(() => (
+      <MemoryRecallNotice
+        count={2}
+        threadId="thread-1"
+        memories={[memory({ preview: '' }), memory({ memoryId: 'mem-forgotten', preview: '' })]}
+      />
+    ))
+    expect(memoryClient.listMemories).not.toHaveBeenCalled()
+    openList(container)
+    await waitFor(() => expect(container.textContent).toContain('Foretrekker metriske enheter, alltid'))
+    expect(memoryClient.listMemories).toHaveBeenCalledTimes(1)
+    // The forgotten one keeps its row (this turn did recall it), with no text.
+    expect(container.querySelectorAll('.verevon-chat-memory-recall__item')).toHaveLength(2)
+    expect(container.querySelectorAll('.verevon-chat-memory-recall__preview')).toHaveLength(1)
+    // Closing and reopening does not read again.
+    openList(container)
+    openList(container)
+    expect(memoryClient.listMemories).toHaveBeenCalledTimes(1)
+    unmount()
+  })
+
+  it('does not read memories when every row already carries its text', () => {
+    const { container, unmount } = render(() => (
+      <MemoryRecallNotice count={1} threadId="thread-1" memories={[memory()]} />
+    ))
+    openList(container)
+    expect(memoryClient.listMemories).not.toHaveBeenCalled()
+    unmount()
+  })
+
   it('does not offer to save a truncated preview when the full memory cannot be loaded', async () => {
     vi.mocked(memoryClient.listMemories).mockRejectedValueOnce(new Error('unavailable'))
     const { container, unmount } = render(() => <MemoryRecallNotice count={1} threadId="thread-1" memories={[memory()]} />)
@@ -679,6 +803,191 @@ describe('PlanApprovalControl', () => {
     expect(container.textContent).toContain('Fullmakten ble avvist')
     unmount()
   })
+
+  // -----------------------------------------------------------------------
+  // plan-gate §2.5: the editable step list, only rendered when the turn's
+  // model actually proposed a structured plan (`planId` set).
+  // -----------------------------------------------------------------------
+
+  const planProps = {
+    planId: 'plan_1',
+    summary: 'Send the overdue invoice',
+    steps: [
+      { id: 'step_1', title: 'Draft the email' },
+      { id: 'step_2', title: 'Send it', operation: 'email_send' },
+    ],
+  }
+
+  const fillReason = (container: HTMLElement) => {
+    const reason = container.querySelector('textarea')!
+    fireEvent.input(reason, { target: { value: 'planen skriver rapporten til arbeidsområdet' } })
+    flush()
+  }
+
+  it('adds a blank step and edits its text', () => {
+    const onApprove = vi.fn()
+    const { container, unmount } = render(() => (
+      <PlanApprovalControl {...planProps} pending={false} onApprove={onApprove} />
+    ))
+    fireEvent.click(container.querySelector<HTMLButtonElement>('.verevon-chat-plan__add-step')!)
+    flush()
+    const inputs = container.querySelectorAll<HTMLInputElement>('.verevon-chat-plan__step-input')
+    expect(inputs).toHaveLength(3)
+    fireEvent.input(inputs[2]!, { target: { value: 'Follow up next week' } })
+    flush()
+
+    fillReason(container)
+    fireEvent.click(container.querySelector<HTMLButtonElement>('.verevon-chat-plan__approve')!)
+    flush()
+
+    const editedSteps = onApprove.mock.calls[0]![2]
+    expect(editedSteps).toHaveLength(3)
+    expect(editedSteps[2]).toEqual({
+      stepId: undefined,
+      title: 'Follow up next week',
+      operation: undefined,
+      removed: false,
+    })
+    unmount()
+  })
+
+  it('removes a step and still approves with the remaining ones', () => {
+    const onApprove = vi.fn()
+    const { container, unmount } = render(() => (
+      <PlanApprovalControl {...planProps} pending={false} onApprove={onApprove} />
+    ))
+    const removeButtons = container.querySelectorAll<HTMLButtonElement>(
+      '.verevon-chat-plan__step-remove',
+    )
+    fireEvent.click(removeButtons[0]!)
+    flush()
+    // The removed row disappears from the VISIBLE list …
+    expect(container.querySelectorAll('.verevon-chat-plan__step-input')).toHaveLength(1)
+
+    fillReason(container)
+    fireEvent.click(container.querySelector<HTMLButtonElement>('.verevon-chat-plan__approve')!)
+    flush()
+
+    // … but is still SENT, marked removed=true, so ordinals stay auditable
+    // server-side (plan-gate §2.2) — it is never silently dropped.
+    const editedSteps = onApprove.mock.calls[0]![2]
+    expect(editedSteps).toEqual([
+      { stepId: 'step_1', title: 'Draft the email', operation: undefined, removed: true },
+      { stepId: 'step_2', title: 'Send it', operation: 'email_send', removed: false },
+    ])
+    unmount()
+  })
+
+  it('moves a step up and down and preserves the new order on approve', () => {
+    const onApprove = vi.fn()
+    const { container, unmount } = render(() => (
+      <PlanApprovalControl {...planProps} pending={false} onApprove={onApprove} />
+    ))
+    // Move the SECOND step up, ahead of the first.
+    const rows = container.querySelectorAll('.verevon-chat-plan__step')
+    const moveUp = rows[1]!.querySelector<HTMLButtonElement>('button[aria-label="Flytt opp"]')!
+    fireEvent.click(moveUp)
+    flush()
+
+    const titlesAfterMove = [
+      ...container.querySelectorAll<HTMLInputElement>('.verevon-chat-plan__step-input'),
+    ].map((el) => el.value)
+    expect(titlesAfterMove).toEqual(['Send it', 'Draft the email'])
+
+    fillReason(container)
+    fireEvent.click(container.querySelector<HTMLButtonElement>('.verevon-chat-plan__approve')!)
+    flush()
+
+    const editedSteps = onApprove.mock.calls[0]![2]
+    expect(editedSteps.map((s: { stepId?: string }) => s.stepId)).toEqual(['step_2', 'step_1'])
+    unmount()
+  })
+
+  it('moves past a removed row instead of swapping into it invisibly', () => {
+    // A removed row stays in the underlying array (never deleted, see the
+    // `<For>` doc comment above) but renders nothing. A naive "swap with the
+    // raw adjacent index" reorder would swap the last VISIBLE row with that
+    // hidden removed row — changing the array but nothing the user can see,
+    // so the button looks unresponsive the first time this happens.
+    const threeSteps = {
+      planId: 'plan_1',
+      summary: 'Send the overdue invoice',
+      steps: [
+        { id: 'step_1', title: 'Draft the email' },
+        { id: 'step_2', title: 'Middle step' },
+        { id: 'step_3', title: 'Send it', operation: 'email_send' },
+      ],
+    }
+    const onApprove = vi.fn()
+    const { container, unmount } = render(() => (
+      <PlanApprovalControl {...threeSteps} pending={false} onApprove={onApprove} />
+    ))
+    // Remove the middle row, leaving "Draft the email" and "Send it" visible
+    // with a hidden removed row sitting between them in the array.
+    const removeButtons = container.querySelectorAll<HTMLButtonElement>(
+      '.verevon-chat-plan__step-remove',
+    )
+    fireEvent.click(removeButtons[1]!)
+    flush()
+    expect(
+      [...container.querySelectorAll<HTMLInputElement>('.verevon-chat-plan__step-input')].map(
+        (el) => el.value,
+      ),
+    ).toEqual(['Draft the email', 'Send it'])
+
+    // Move the last VISIBLE row ("Send it") up: it must land ahead of
+    // "Draft the email", not silently swap with the hidden removed row.
+    const rows = container.querySelectorAll('.verevon-chat-plan__step')
+    const moveUp = rows[1]!.querySelector<HTMLButtonElement>('button[aria-label="Flytt opp"]')!
+    fireEvent.click(moveUp)
+    flush()
+    expect(
+      [...container.querySelectorAll<HTMLInputElement>('.verevon-chat-plan__step-input')].map(
+        (el) => el.value,
+      ),
+    ).toEqual(['Send it', 'Draft the email'])
+    unmount()
+  })
+
+  it('rejects the plan with a reason, granting nothing', () => {
+    const onApprove = vi.fn()
+    const onReject = vi.fn()
+    const { container, unmount } = render(() => (
+      <PlanApprovalControl {...planProps} pending={false} onApprove={onApprove} onReject={onReject} />
+    ))
+    const reject = container.querySelector<HTMLButtonElement>('.verevon-chat-plan__reject')!
+    fireEvent.click(reject)
+    flush()
+
+    expect(onReject).toHaveBeenCalledWith('plan_1', expect.any(String))
+    expect(onApprove).not.toHaveBeenCalled()
+    unmount()
+  })
+
+  it('disables approve once every step has been removed', () => {
+    const onApprove = vi.fn()
+    const { container, unmount } = render(() => (
+      <PlanApprovalControl {...planProps} pending={false} onApprove={onApprove} />
+    ))
+    fillReason(container)
+    // Re-query fresh each time rather than looping over a snapshot: removing
+    // a row re-keys the visible list (each `{row, index}` wrapper is a new
+    // object), so a stale button reference from before the first removal is
+    // no longer live.
+    let remove = container.querySelector<HTMLButtonElement>('.verevon-chat-plan__step-remove')
+    while (remove) {
+      fireEvent.click(remove)
+      flush()
+      remove = container.querySelector<HTMLButtonElement>('.verevon-chat-plan__step-remove')
+    }
+    const approve = container.querySelector<HTMLButtonElement>('.verevon-chat-plan__approve')!
+    expect(approve.disabled).toBe(true)
+    fireEvent.click(approve)
+    flush()
+    expect(onApprove).not.toHaveBeenCalled()
+    expect(container.textContent).toContain('minst ett steg')
+    unmount()
+  })
 })
 
 /**
@@ -792,6 +1101,63 @@ describe('SourcesPanel read/unread grouping', () => {
     expect(text).not.toContain('Ikke lest')
     expect(text).not.toContain('kilder er lest')
     expect(container.querySelector('.verevon-chat-source-group')).toBeNull()
+    unmount()
+  })
+
+  /** chat-wave2 citations spec §2.6: domain/provider sub-grouping within the
+   * read section, keyed on `sourceGroupId` (falling back to hostname). */
+  it('renders a domain heading per group when read sources carry distinct sourceGroupId', () => {
+    const { container, unmount } = render(() => (
+      <SourcesPanel
+        sources={[
+          read({ id: 'cite-kb-1', url: 'https://intranet/refunds', sourceGroupId: 'kb:sharepoint', sourceGroupLabel: 'Microsoft 365' }),
+          read({ id: 'cite-kb-2', url: 'https://intranet/faq', sourceGroupId: 'kb:sharepoint', sourceGroupLabel: 'Microsoft 365' }),
+          read({ id: 'cite-web-1', url: 'https://www.aquatiq.com/refunds', sourceGroupId: 'aquatiq.com' }),
+        ]}
+      />
+    ))
+    const headings = Array.from(container.querySelectorAll('.verevon-chat-source-domain-group__heading'))
+      .map((node) => node.textContent)
+    expect(headings).toEqual(['Microsoft 365', 'aquatiq.com'])
+    const groups = container.querySelectorAll('.verevon-chat-source-domain-group')
+    expect(groups).toHaveLength(2)
+    expect(groups[0]?.querySelectorAll('.verevon-chat-source-card')).toHaveLength(2)
+    expect(groups[1]?.querySelectorAll('.verevon-chat-source-card')).toHaveLength(1)
+    unmount()
+  })
+
+  it('omits the domain heading when every read source falls into a single group', () => {
+    const { container, unmount } = render(() => (
+      <SourcesPanel
+        sources={[
+          read({ id: 'cite-1', url: 'https://example.com/a', sourceGroupId: 'example.com' }),
+          read({ id: 'cite-2', url: 'https://www.example.com/b', sourceGroupId: 'example.com' }),
+        ]}
+      />
+    ))
+    expect(container.querySelector('.verevon-chat-source-domain-group__heading')).toBeNull()
+    expect(container.querySelectorAll('.verevon-chat-source-card')).toHaveLength(2)
+    unmount()
+  })
+
+  it('falls back to hostname() grouping for a knowledge source with a provider and a web source with no sourceGroupId', () => {
+    const knowledgeSource: ChatGroundingSource = {
+      id: 'k1',
+      kind: 'knowledge',
+      title: 'Internrutine',
+      snippet: 'Rutine for avvik.',
+      provider: 'Notion',
+      sourceType: 'document',
+      documentId: 'doc-1',
+      href: '/knowledge/doc-1',
+      score: 0.81,
+    }
+    const { container, unmount } = render(() => (
+      <SourcesPanel sources={[knowledgeSource, read({ id: 'cite-web-1', url: 'https://example.com/a' })]} />
+    ))
+    const headings = Array.from(container.querySelectorAll('.verevon-chat-source-domain-group__heading'))
+      .map((node) => node.textContent)
+    expect(headings).toEqual(['Notion', 'example.com'])
     unmount()
   })
 

@@ -88,7 +88,35 @@ pub struct GroundingCitation {
     pub title: String,
     pub url: String,
     pub snippet: String,
+    /// Machine-stable grouping key for the inline chip and Kilder tab
+    /// (chat-wave2 citations spec §2.2/§2.6): `kb:{provider_slug}` so every
+    /// citation from the same connector groups together regardless of which
+    /// document it came from. Always `kb:`-prefixed for this producer —
+    /// `web_domain()` (the web/deep-research producers' equivalent) never
+    /// produces that prefix, so a reader can tell a KB group from a web
+    /// group by the prefix alone.
+    pub source_group_id: String,
+    /// The human, already-localized provider label (`source_label()`'s own
+    /// output) — set once here so the frontend never has to re-derive a
+    /// Norwegian/English provider name from a slug.
+    pub source_group_label: String,
+    /// The bracketed `[n]` this citation was assigned in `context_block`,
+    /// so the post-stream anchor pass (`citation_anchors.rs`) can resolve a
+    /// model-cited marker back to the source it actually names — by this
+    /// stable number, never by `citations[n-1]` position (see the
+    /// off-by-gap fix this field accompanies).
+    pub number: u32,
+    /// Source-scope provenance tag (chat-wave2 scope spec §2.3): always
+    /// `"knowledge"` for this producer — KB/RAG grounding never emits a web
+    /// citation. Threaded onto `ChatEvent::Citation::origin` so a
+    /// `knowledge_only`/`web_only` turn's Sources panel can show, and the
+    /// server can defensively verify, which family a citation actually came
+    /// from.
+    pub origin: String,
 }
+
+/// Every [`GroundingCitation`] this module produces is org-knowledge-sourced.
+pub const KNOWLEDGE_ORIGIN: &str = "knowledge";
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -351,7 +379,14 @@ fn build_context_entries(
     resp: &RetrieveResponse,
     sources_by_doc: &HashMap<&str, &Source>,
 ) -> (Vec<String>, Vec<GroundingCitation>, bool) {
-    let mut seen = HashSet::new();
+    // doc_id -> the `[n]` it was first given. A repeat chunk from the same
+    // document reuses this number instead of drawing a fresh one — see the
+    // doc comment on `add_context_entry`'s citable branch for why: drawing a
+    // new number for a repeat mention (while not pushing a second
+    // `GroundingCitation`) would let that unused number collide with the
+    // NEXT distinct citable document's real number, reintroducing the exact
+    // `[n]` <-> `citations[n-1]` mismatch this dedup path exists to prevent.
+    let mut seen: HashMap<String, u32> = HashMap::new();
     let mut entries: Vec<String> = Vec::new();
     let mut citations: Vec<GroundingCitation> = Vec::new();
     let mut injection_flagged = false;
@@ -373,6 +408,11 @@ fn build_context_entries(
                 .or_else(|| source.and_then(|item| non_empty(&item.title)))
                 .or_else(|| Some(doc_id.clone()));
             let url = source.map_or_else(String::new, |item| item.source.clone());
+            // Same field as `url` on purpose: `Source.source` doubles as the
+            // un-normalized provider slug `source_label()` expects (mirrors
+            // `build_grounding_facts`' `source_label(&item.source)` call a
+            // few lines above this function).
+            let provider_slug = url.clone();
             add_context_entry(
                 &mut entries,
                 &mut citations,
@@ -382,6 +422,7 @@ fn build_context_entries(
                 doc_id,
                 title,
                 url,
+                provider_slug,
             );
             if entries.len() >= MAX_ENTRIES {
                 break;
@@ -404,6 +445,7 @@ fn build_context_entries(
             .and_then(|item| non_empty(&item.title))
             .or_else(|| Some(doc_id.clone()));
         let url = source.map_or_else(String::new, |item| item.source.clone());
+        let provider_slug = url.clone();
         add_context_entry(
             &mut entries,
             &mut citations,
@@ -413,21 +455,24 @@ fn build_context_entries(
             doc_id,
             title,
             url,
+            provider_slug,
         );
     }
 
     (entries, citations, injection_flagged)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn add_context_entry(
     entries: &mut Vec<String>,
     citations: &mut Vec<GroundingCitation>,
-    seen: &mut HashSet<String>,
+    seen: &mut HashMap<String, u32>,
     injection_flagged: &mut bool,
     text: &str,
     doc_id: String,
     title: Option<String>,
     url: String,
+    provider_slug: String,
 ) {
     if entries.len() >= MAX_ENTRIES {
         return;
@@ -444,28 +489,55 @@ fn add_context_entry(
     if crate::moderation::scan_injection(text) {
         *injection_flagged = true;
     }
-    let number = entries.len() + 1;
     // F-13 gate: the model still sees a too-thin source (so it can name it
     // and say it was insufficient), but it never reaches `citations`, so the
     // UI can never render it as a clickable, seemingly-substantiating card.
     let citable = snippet.chars().count() >= MIN_CITABLE_CONTENT_CHARS;
     if citable {
-        entries.push(format!("[{number}] {snippet}"));
+        // The position THIS entry is about to take in `citations` — not
+        // `entries.len() + 1`. A non-citable entry earlier in the loop
+        // consumes no bracket at all (see the `else` branch below), so
+        // `entries.len()` used to run ahead of `citations.len()` the moment
+        // one appeared before a citable entry, and the model's `[n]` no
+        // longer matched `citations[n-1]` (chat-wave2 citations spec §2.2,
+        // the "off-by-gap" bug — a later citable entry's prompt-visible
+        // number could point at the wrong source, or none).
+        //
+        // A repeat chunk from a document already in `citations` reuses that
+        // document's existing number instead of drawing a fresh one: drawing
+        // a new number here without pushing a second `GroundingCitation`
+        // would leave that number unclaimed in `citations`, and the NEXT
+        // distinct citable document would then draw the SAME number
+        // (`citations.len()` never advanced for the skipped duplicate) —
+        // two different `[n]`-labeled entries in the prompt pointing at one
+        // citation, the same class of bug this fix exists to prevent.
+        if let Some(&existing_number) = seen.get(&doc_id) {
+            entries.push(format!("[{existing_number}] {snippet}"));
+        } else {
+            let number = u32::try_from(citations.len()).unwrap_or(u32::MAX).saturating_add(1);
+            entries.push(format!("[{number}] {snippet}"));
+            seen.insert(doc_id.clone(), number);
+            citations.push(GroundingCitation {
+                id: doc_id,
+                title: title.unwrap_or_else(|| "Internal knowledge".to_owned()),
+                url,
+                snippet,
+                source_group_id: format!("kb:{provider_slug}"),
+                source_group_label: source_label(&provider_slug),
+                number,
+                origin: KNOWLEDGE_ORIGIN.to_owned(),
+            });
+        }
     } else {
+        // No bracket at all: the prompt already tells the model not to cite
+        // this entry, so giving it an unused `[n]` only invited the bug
+        // above. (Previously: `[{number}] {snippet} — only ...`.)
         entries.push(format!(
-            "[{number}] {snippet} — only {} characters were retrieved for this source; too \
+            "{snippet} — only {} characters were retrieved for this source; too \
              little to substantiate an answer. You may mention it was found, but do not cite \
              it or present it as evidence.",
             snippet.chars().count()
         ));
-    }
-    if citable && seen.insert(doc_id.clone()) {
-        citations.push(GroundingCitation {
-            id: doc_id,
-            title: title.unwrap_or_else(|| "Internal knowledge".to_owned()),
-            url,
-            snippet,
-        });
     }
 }
 
@@ -1206,8 +1278,13 @@ mod tests {
                 title: "Alpha Doc".to_owned(),
                 url: "https://kb/alpha".to_owned(),
                 snippet: alpha,
+                source_group_id: "kb:https://kb/alpha".to_owned(),
+                source_group_label: source_label("https://kb/alpha"),
+                number: 1,
+                origin: KNOWLEDGE_ORIGIN.to_owned(),
             }
         );
+        assert_eq!(g.citations[1].number, 2, "second citable entry gets [2]");
     }
 
     #[test]
@@ -1289,9 +1366,14 @@ mod tests {
 
     #[test]
     fn dedupes_citations_by_document_id() {
-        // Two chunks from the same document → one citation, two context
-        // entries. Padded past MIN_CITABLE_CONTENT_CHARS — see `citable`'s
-        // doc comment.
+        // Two chunks from the same document → one citation, sharing the
+        // SAME bracket number in both context entries. Padded past
+        // MIN_CITABLE_CONTENT_CHARS — see `citable`'s doc comment.
+        //
+        // The second chunk must reuse citation #1's number, not draw a new
+        // one: a fresh, never-recorded number here would collide with the
+        // next distinct citable document's real number (see
+        // `repeat_chunk_number_does_not_collide_with_the_next_distinct_document`).
         let chunk_one = citable("Chunk one.");
         let chunk_two = citable("Chunk two.");
         let resp = RetrieveResponse {
@@ -1305,9 +1387,127 @@ mod tests {
 
         let g = build_grounding("status", &resp);
         assert!(g.context_block.contains("[1] Chunk one."));
-        assert!(g.context_block.contains("[2] Chunk two."));
+        assert!(
+            g.context_block.contains("[1] Chunk two."),
+            "a repeat chunk of an already-cited document must reuse [1], not draw a fresh, \
+             unrecorded number: {}",
+            g.context_block
+        );
+        assert!(
+            !g.context_block.contains("[2]"),
+            "no second bracket number should ever appear for a doc cited exactly once: {}",
+            g.context_block
+        );
         assert_eq!(g.citations.len(), 1, "same document cited once");
         assert_eq!(g.citations[0].id, "doc-1");
+        assert_eq!(g.citations[0].number, 1);
+    }
+
+    /// Regression: before the fix, a repeat chunk of an already-cited
+    /// document drew a fresh `[n]` in the prompt (via `citations.len() + 1`)
+    /// without ever pushing a second `GroundingCitation`, so `citations.len()`
+    /// did not advance. The NEXT distinct citable document then computed the
+    /// SAME `citations.len() + 1` and drew the identical number — two
+    /// different sources sharing one `[n]` in the model-facing prompt, with
+    /// only the second actually resolvable via `citations[n-1]`.
+    #[test]
+    fn repeat_chunk_number_does_not_collide_with_the_next_distinct_document() {
+        let chunk_one = citable("Chunk one.");
+        let chunk_two = citable("Chunk two.");
+        let other_doc = citable("Distinct fact from a second document.");
+        let resp = RetrieveResponse {
+            candidates: vec![
+                candidate("doc-1", &chunk_one, 0.9),
+                candidate("doc-1", &chunk_two, 0.85),
+                candidate("doc-2", &other_doc, 0.8),
+            ],
+            sources: vec![
+                source("doc-1", "Doc One", "https://kb/one"),
+                source("doc-2", "Doc Two", "https://kb/two"),
+            ],
+            ..Default::default()
+        };
+
+        let g = build_grounding("status", &resp);
+        assert_eq!(g.citations.len(), 2, "two distinct documents, two citations");
+        assert_eq!(g.citations[0].id, "doc-1");
+        assert_eq!(g.citations[0].number, 1);
+        assert_eq!(g.citations[1].id, "doc-2");
+        assert_eq!(
+            g.citations[1].number, 2,
+            "doc-2 must get its own, previously-unclaimed number"
+        );
+        assert!(
+            g.context_block.contains("[2] Distinct fact from a second document."),
+            "doc-2's entry must be numbered [2], matching citations[1]: {}",
+            g.context_block
+        );
+        // Exactly one context entry may claim [2]: doc-2's. If the repeat
+        // chunk of doc-1 also claimed [2] (the bug), this would find two
+        // occurrences of the literal marker in the prompt.
+        assert_eq!(
+            g.context_block.matches("[2]").count(),
+            1,
+            "only doc-2's entry may be numbered [2]: {}",
+            g.context_block
+        );
+    }
+
+    /// Regression for the entries-vs-citations off-by-gap fix (chat-wave2
+    /// citations spec §2.2): a non-citable entry ahead of a citable one used
+    /// to consume a `[n]` slot it was told not to use, so the citable entry
+    /// after it got a prompt-visible number one past its real position in
+    /// `citations` — `[2]` in the prompt but `citations[0]` in the vec. The
+    /// fix must leave the non-citable entry with no bracket at all and give
+    /// the citable entry `[1]`, matching `citations[0]`.
+    #[test]
+    fn non_citable_entry_does_not_consume_a_bracket_slot() {
+        let thin = "Too little text.";
+        let citable_text = citable("Substantial retrieved fact.");
+        let resp = RetrieveResponse {
+            candidates: vec![
+                candidate("doc-thin", thin, 0.6),
+                candidate("doc-real", &citable_text, 0.9),
+            ],
+            sources: vec![
+                source("doc-thin", "Thin", "https://kb/thin"),
+                source("doc-real", "Real", "https://kb/real"),
+            ],
+            ..Default::default()
+        };
+
+        let g = build_grounding("status", &resp);
+        assert!(
+            !g.context_block.contains("[1] Too little text."),
+            "a non-citable entry must never be given a bracket: {}",
+            g.context_block
+        );
+        assert!(
+            g.context_block.contains("[1] Substantial retrieved fact."),
+            "the only citable entry must be numbered [1], matching citations[0]: {}",
+            g.context_block
+        );
+        assert_eq!(g.citations.len(), 1, "only the citable entry is cited");
+        assert_eq!(g.citations[0].id, "doc-real");
+        assert_eq!(g.citations[0].number, 1);
+    }
+
+    /// `GroundingCitation.source_group_id` is a stable machine token derived
+    /// from the un-normalized provider slug, not the localized label —
+    /// grouping must key on this, never on `source_group_label` (which is
+    /// only for display).
+    #[test]
+    fn grounding_citation_carries_kb_source_group_id_and_label() {
+        let text = citable("Refunds are accepted within 30 days.");
+        let resp = RetrieveResponse {
+            candidates: vec![candidate("doc-1", &text, 0.9)],
+            sources: vec![source("doc-1", "Refund policy", "sharepoint")],
+            ..Default::default()
+        };
+
+        let g = build_grounding("refund policy", &resp);
+        assert_eq!(g.citations[0].source_group_id, "kb:sharepoint");
+        assert_eq!(g.citations[0].source_group_label, "Microsoft 365");
     }
 
     /// F-13 regression (chat-parity audit §3.7): two real "aquatiq.com"

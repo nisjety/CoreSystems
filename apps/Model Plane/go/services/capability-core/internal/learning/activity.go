@@ -34,6 +34,7 @@ type Sink interface {
 //
 // Returns the number of skills persisted. A session that yields nothing
 // retainable persists zero — that is a valid, common outcome, not an error.
+// [RunReviewOutcome] returns the full [ReviewOutcome] instead.
 func RunReview(
 	ctx context.Context,
 	transcript string,
@@ -41,26 +42,63 @@ func RunReview(
 	reviewer Reviewer,
 	sink Sink,
 ) (int, error) {
+	outcome, err := RunReviewOutcome(ctx, transcript, existing, reviewer, sink)
+	return outcome.Persisted, err
+}
+
+// SkipReason says why a review never reached the model. Empty means it did.
+type SkipReason string
+
+const (
+	// SkipEmptyTranscript: the session left no conversation text to review.
+	SkipEmptyTranscript SkipReason = "empty_transcript"
+	// SkipConversationScope: the thread runs in conversation-only scope, whose
+	// content stays out of workspace learning, so it is never reviewed.
+	SkipConversationScope SkipReason = "conversation_scope"
+)
+
+// ReviewOutcome is what one review did, in counts only — never content — so a
+// caller can report a skipped review apart from a completed one, and a
+// completed one by how far its candidates got.
+type ReviewOutcome struct {
+	Skipped    SkipReason
+	Candidates int // proposed by the reviewer
+	Selected   int // cleared SelectForPersistence
+	Persisted  int // written by the sink
+}
+
+// RunReviewOutcome is [RunReview] returning the full [ReviewOutcome]. On error
+// the outcome keeps the counts reached before the failure, and Persisted is 0.
+func RunReviewOutcome(
+	ctx context.Context,
+	transcript string,
+	existing []ExistingSkill,
+	reviewer Reviewer,
+	sink Sink,
+) (ReviewOutcome, error) {
 	if strings.TrimSpace(transcript) == "" {
-		return 0, nil // nothing to learn from
+		return ReviewOutcome{Skipped: SkipEmptyTranscript}, nil // nothing to learn from
 	}
 	if reviewer == nil || sink == nil {
-		return 0, fmt.Errorf("learning: reviewer and sink are required")
+		return ReviewOutcome{}, fmt.Errorf("learning: reviewer and sink are required")
 	}
 
 	candidates, err := reviewer.Review(ctx, transcript, existing, ReviewPrompt)
 	if err != nil {
-		return 0, fmt.Errorf("learning: skill review failed: %w", err)
+		return ReviewOutcome{}, fmt.Errorf("learning: skill review failed: %w", err)
 	}
+	outcome := ReviewOutcome{Candidates: len(candidates)}
 
 	selected := SelectForPersistence(candidates, existing)
+	outcome.Selected = len(selected)
 	if len(selected) == 0 {
-		return 0, nil // reviewed, but nothing cleared the retention policy
+		return outcome, nil // reviewed, but nothing cleared the retention policy
 	}
 
 	persisted, err := sink.Persist(ctx, selected)
 	if err != nil {
-		return 0, fmt.Errorf("learning: persist %d skill(s): %w", len(selected), err)
+		return outcome, fmt.Errorf("learning: persist %d skill(s): %w", len(selected), err)
 	}
-	return persisted, nil
+	outcome.Persisted = persisted
+	return outcome, nil
 }

@@ -112,6 +112,7 @@ fn build_router(state: config::AppState) -> Router {
         .merge(domains::integrations::router(state.clone()))
         .merge(domains::knowledge::router(state.clone()))
         .merge(domains::leads::router(state.clone()))
+        .merge(domains::mail_task::router(state.clone()))
         .merge(domains::mcp::router(state.clone()))
         .merge(domains::memory::router(state.clone()))
         .merge(domains::monitoring::router(state.clone()))
@@ -121,6 +122,7 @@ fn build_router(state: config::AppState) -> Router {
         .merge(domains::orchestration::router(state.clone()))
         .merge(domains::orgs::router(state.clone()))
         .merge(domains::ownership::router(state.clone()))
+        .merge(domains::persona::router(state.clone()))
         .merge(domains::privacy::router(state.clone()))
         .merge(domains::remote_support::router(state.clone()))
         .merge(domains::router_policy::router(state.clone()))
@@ -368,6 +370,15 @@ mod tests {
             studio_store: crate::domains::studio::StudioStore::new(),
             allow_dev_actor_headers,
             allow_dev_auth_bypass: allow_dev_actor_headers,
+            mail_task_ingest_service_token: "mail-task-test-secret-at-least-32-bytes".into(),
+            mail_task_rate_limiter: crate::rate_limit::RateLimiter::from_cache_with_rpm(
+                &crate::cache::ResultCache::disabled(),
+                20.0,
+            ),
+            mail_task_nats_url: String::new(),
+            mail_task_nats_user: String::new(),
+            mail_task_nats_password: String::new(),
+            mail_task_pipeline: None,
         }
     }
 

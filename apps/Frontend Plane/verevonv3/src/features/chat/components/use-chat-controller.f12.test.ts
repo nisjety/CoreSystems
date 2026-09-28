@@ -197,6 +197,56 @@ describe('Q08 connection recovery', () => {
     })
   })
 
+  it('Q15 settles a replayed server failure as that failure, not as a lost connection', async () => {
+    // Connection drops while the draft is being checked; the resumed stream
+    // then replays the server's honest non-publication error.
+    mockResumeStream.mockImplementationOnce(async (_id, handlers) => handlers.onError?.({
+      code: 'response_validation_failed',
+      message: 'Et utkast kunne ikke kontrolleres mot kildene. Dette utkastet er ikke publisert.',
+      retryable: true,
+    }))
+    await withController(async (controller) => {
+      await tick()
+      await controller.handleComposerSubmit({ actions: [], attachments: [], text: 'Draft from my attachment', tools: [] })
+      await tick()
+      streams[0]!.handlers.onConnected?.({ ok: true, requestId: 'req-checking' })
+      streams[0]!.handlers.onStep?.({ id: 'draft-1:source-check', title: 'Kontrollerer utkastet mot kildene', status: 'running' })
+      await tick()
+      streams[0]!.resolve()
+      await tick(8)
+      expect(mockStreamChat).toHaveBeenCalledTimes(1)
+      expect(mockResumeStream).toHaveBeenCalledTimes(1)
+      expect(controller.state.turns.at(-1)?.status).toBe('error')
+      expect(controller.state.turns.at(-1)?.content).toContain('ikke publisert')
+      expect(controller.state.status).toBe('error')
+      expect(controller.state.taskSteps.filter(step => step.status === 'active')).toHaveLength(0)
+    })
+  })
+
+  it('Q15 reattaches when the BFF reports a broken upstream stream, instead of failing the turn', async () => {
+    mockResumeStream.mockImplementationOnce(async (_id, handlers) => {
+      handlers.onMessage?.({ content: ' and the rest.' })
+      handlers.onDone?.({})
+    })
+    await withController(async (controller) => {
+      await tick()
+      await controller.handleComposerSubmit({ actions: [], attachments: [], text: 'Read this', tools: [] })
+      await tick()
+      streams[0]!.handlers.onConnected?.({ ok: true, requestId: 'req-bff-break' })
+      streams[0]!.handlers.onMessage?.({ content: 'Partial' })
+      streams[0]!.handlers.onFrameId?.('4')
+      streams[0]!.handlers.onError?.({ code: 'upstream_unavailable', message: 'The upstream service is unavailable.' })
+      await tick()
+      streams[0]!.resolve()
+      await tick(8)
+      expect(mockStreamChat).toHaveBeenCalledTimes(1)
+      expect(mockResumeStream).toHaveBeenCalledWith('req-bff-break', expect.any(Object), expect.any(AbortSignal), '4')
+      expect(controller.state.turns.at(-1)?.content).toBe('Partial and the rest.')
+      expect(controller.state.turns.at(-1)?.status).toBeUndefined()
+      expect(controller.state.error).toBeNull()
+    })
+  })
+
   it('does not repeat an invocation after a tool failure', async () => {
     await withController(async (controller) => {
       await tick()

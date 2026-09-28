@@ -1115,3 +1115,45 @@ org-wide. So there genuinely is no single page listing all 184 runs at once —
 this confirms the doc's own framing ("the console has plenty to witness," not
 "shows one flat list") rather than exposing a new gap. (2), the ticket-lane
 routing gap itself, was not touched this pass.
+
+---
+
+## 2026-09-24 — pointers only; no ratio re-measured
+
+This is a pointer, not a re-verification. No clause ratio was re-derived.
+Nothing below is deployed yet. It ships with the launcher rebuild
+(`build-verevon-services.sh --from model`, which covers the Model,
+Application, Ingestion and Frontend planes). Live validation follows: the
+104-case review matrix, the 10 recheck controls, note-turn runs and one smoke
+turn, all before the build freeze. Q16 qualification streaks start only after
+the freeze.
+
+### Clause 1 · Contract — no id added or removed
+
+`audio.dictate`'s input now accepts `m4a` and an optional `zdr`. Its
+dispatcher forwards both and never forwards a model override. This round's
+diff to `action-registry.ts` adds or removes no id.
+
+### Clause 4 · Witness — things that happened silently are now visible
+
+- Skill reviews skipped for conversation-only threads are logged as skips with
+  a reason, not as "completed"
+  ([`LEARNING_EDGE_FEATURES_2026-09-17.md`](LEARNING_EDGE_FEATURES_2026-09-17.md) §7.3).
+- Memory delete and "Rediger" report what actually happened, including "the
+  original was not removed" (same document, §7.7).
+- Subscription turns report real tokens and show "Inkludert i abonnementet"
+  instead of $0.00. OpenAI routes report cached tokens
+  ([`CACHE_COMPACTION_AUDIT_2026-09-17.md`](CACHE_COMPACTION_AUDIT_2026-09-17.md) §8.4).
+- The context panel says "Samlet kontekst", not "Kontekstvindu"
+  ([`CHAT_PARITY_AUDIT_2026-09-15.md`](CHAT_PARITY_AUDIT_2026-09-15.md) §0.3).
+
+### Also recorded in those documents
+
+- Voice mode and read-aloud now run on Verevon's governed speech path, and
+  speech under ZDR is refused server-side with 412 (chat parity audit §0.3).
+- Decisions: keep `gpt-5.6-terra` via `openai-codex-subscription` (2026-09-23);
+  fix Voice mode on the governed path, not remove it (2026-09-23); the direct
+  ChatGPT-OAuth transport is built but opt-in (2026-09-24); subscription tokens
+  are excluded from org token caps (2026-09-24); four latency levers ship on
+  behind env kill-switches (2026-09-24). See cache audit §8.1 and chat parity
+  audit §0.3.

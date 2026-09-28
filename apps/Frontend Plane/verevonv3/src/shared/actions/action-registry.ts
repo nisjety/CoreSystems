@@ -1064,11 +1064,17 @@ const audioTranscribeInput = z.object({
   language: z.string().trim().min(1),
 })
 
+// Dictation also takes Safari's AAC-in-mp4 recordings (labelled m4a), and a
+// Zero Data Retention flag the gateway forwards (and raises to the org's
+// standing posture).
+const audioDictateFormat = z.enum(['webm', 'ogg', 'wav', 'mp3', 'm4a'])
+
 const audioDictateInput = z.object({
   audioBase64: z.string().min(1),
-  format: audioFormat,
+  format: audioDictateFormat,
   language: z.string().trim().min(1),
   context: z.string().trim().optional(),
+  zdr: z.boolean().optional(),
 })
 
 const orchestrationDecideApprovalInput = z.object({

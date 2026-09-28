@@ -33,13 +33,12 @@ export function HomeClientShell({
 	useEffect(() => {
 		let frame: number | null = null;
 		lastFogScrollY.current = window.scrollY;
+		const motionPreference = window.matchMedia("(prefers-reduced-motion: reduce)");
 
 		const updateScrollState = () => {
 			const nextScrollY = window.scrollY;
 			const delta = nextScrollY - lastFogScrollY.current;
-			const reduceMotion = window.matchMedia(
-				"(prefers-reduced-motion: reduce)",
-			).matches;
+			const reduceMotion = motionPreference.matches;
 			const fogTrigger = Math.max(224, window.innerHeight * 0.6);
 			let nextHeroFogScrolled = heroFogScrolledRef.current;
 
@@ -177,14 +176,18 @@ export function HomeClientShell({
 		let frame: number | null = null;
 
 		const updateTextFades = () => {
-			for (const element of fadeTargets) {
+			// Finish all geometry reads before touching styles.
+			const positions = fadeTargets.map((element) => {
 				const rect = element.getBoundingClientRect();
 				const maskY = -rect.top + 90;
-				const position = `0px ${maskY.toFixed(3)}px`;
-
+				return `0px ${maskY.toFixed(3)}px`;
+			});
+			fadeTargets.forEach((element, index) => {
+				const position = positions[index];
+				if (element.style.maskPosition === position) return;
 				element.style.setProperty("mask-position", position);
 				element.style.setProperty("-webkit-mask-position", position);
-			}
+			});
 
 			frame = null;
 		};

@@ -132,17 +132,6 @@ export const sidebarSections: SidebarSection[] = [
     ],
   },
   {
-    // Its own rail section, not only a shortcut in the Hjem panel. The Hjem
-    // panel is a customizable shortcut list — a surface whose only entry point
-    // is a shortcut someone can remove has no home of its own.
-    id: 'spaces',
-    label: 'Rom',
-    href: '/spaces',
-    icon: Users,
-    description: 'Delt rom for samtaler, arbeid, kunnskap og medlemmer.',
-    panelGroups: [],
-  },
-  {
     // The ONE sidebar destination for Chat. Five further `/chat` shortcuts used
     // to sit inside unrelated sections (Overview, Agents, Ingestions,
     // Knowledge, plus a redundant "Ny samtale" inside this very section),
@@ -164,6 +153,17 @@ export const sidebarSections: SidebarSection[] = [
         ],
       },
     ],
+  },
+  {
+    // Its own rail section, not only a shortcut in the Hjem panel. The Hjem
+    // panel is a customizable shortcut list — a surface whose only entry point
+    // is a shortcut someone can remove has no home of its own.
+    id: 'spaces',
+    label: 'Rom',
+    href: '/spaces',
+    icon: Users,
+    description: 'Delt rom for samtaler, arbeid, kunnskap og medlemmer.',
+    panelGroups: [],
   },
   {
     id: 'inbox',

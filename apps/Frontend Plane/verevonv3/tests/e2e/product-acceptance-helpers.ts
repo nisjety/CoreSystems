@@ -1,5 +1,6 @@
 import { expect, type Page, type TestInfo } from '@playwright/test'
 import { requireProductSubscription, PRODUCT_MODEL, PRODUCT_PROVIDER } from './product-subscription-route'
+import { phaseWorkload, productPhaseReport, type BrowserClockCapture } from './product-phase-timing'
 
 export const composer = (page: Page) => page.locator('form textarea').first()
 export type Artifact = { id: string; content: string; version: number; title: string }
@@ -59,34 +60,88 @@ export async function send(page: Page, prompt: string, info: TestInfo, label: st
   // when the proxy omits an explicit charset. Capture with the browser's
   // Fetch UTF-8 decoder, matching the application, so Norwegian evidence and
   // offline word counts are not corrupted. This wrapper exists only in QA.
+  //
+  // Q14 Phase 0: the stream is read frame by frame instead of as one text, and
+  // every read is stamped with this page's `performance.now()`, as are the
+  // submit click and the response headers. The joined reads are byte-for-byte
+  // the text `response.text()` produced, so every assertion below is unchanged.
   await page.evaluate(() => {
-    const target = window as typeof window & { productStream?: Promise<string>; restoreProductFetch?: () => void }
+    type Clock = { clickAt: number | null; fetchStartedAt: number | null; headersAt: number | null; endAt: number | null; chunks: Array<{ at: number; text: string }> }
+    const target = window as typeof window & { productStream?: Promise<string>; productClock?: Clock; restoreProductFetch?: () => void }
     target.restoreProductFetch?.()
     delete target.productStream
+    const clock: Clock = { clickAt: null, fetchStartedAt: null, headersAt: null, endAt: null, chunks: [] }
+    target.productClock = clock
+    // Capture phase, so the click is stamped before the app handles it.
+    const onClick = (event: Event) => {
+      if (clock.clickAt === null && event.target instanceof Element && event.target.closest('form button[type="submit"]')) clock.clickAt = performance.now()
+    }
+    document.addEventListener('click', onClick, true)
     const original = window.fetch.bind(window)
     window.fetch = async (...args: Parameters<typeof fetch>) => {
-      const response = await original(...args)
       const input = args[0]
       const url = input instanceof Request ? input.url : String(input)
-      if (new URL(url, location.href).pathname === '/api/v1/chat/stream') target.productStream = response.clone().text()
+      const isStream = new URL(url, location.href).pathname === '/api/v1/chat/stream'
+      const requestedAt = performance.now()
+      const response = await original(...args)
+      if (isStream) {
+        // The last stream request wins, as it did with `text()`; a superseded
+        // reader keeps writing only into its own list.
+        const chunks: Clock['chunks'] = []
+        Object.assign(clock, { fetchStartedAt: requestedAt, headersAt: performance.now(), endAt: null, chunks })
+        const body = response.clone().body
+        target.productStream = (async () => {
+          const decoder = new TextDecoder('utf-8')
+          let text = ''
+          const reader = body?.getReader()
+          while (reader) {
+            const { done, value } = await reader.read()
+            if (done) break
+            const chunk = decoder.decode(value, { stream: true })
+            if (chunk) { chunks.push({ at: performance.now(), text: chunk }); text += chunk }
+          }
+          const tail = decoder.decode()
+          if (tail) { chunks.push({ at: performance.now(), text: tail }); text += tail }
+          if (clock.chunks === chunks) clock.endAt = performance.now()
+          return text
+        })()
+      }
       return response
     }
-    target.restoreProductFetch = () => { window.fetch = original }
+    target.restoreProductFetch = () => { window.fetch = original; document.removeEventListener('click', onClick, true) }
   })
   await page.evaluate(() => {
-    const target = window as typeof window & { q08Timing?: { stop: () => { acknowledgementMs: number | null; firstAnswerMs: number | null } } }
+    type Marks = { acknowledgementAt: number | null; firstAnswerAt: number | null; artifactRenderedAt: number | null }
+    const target = window as typeof window & { q08Timing?: { stop: () => { acknowledgementMs: number | null; firstAnswerMs: number | null }; marks?: () => Marks } }
     target.q08Timing?.stop()
     const started = performance.now()
     const existing = new Set(document.querySelectorAll('.verevon-chat-message--assistant'))
     const users = document.querySelectorAll('.verevon-chat-message--user').length
-    let acknowledgementMs: number | null = null; let firstAnswerMs: number | null = null
+    // A revision turn opens with the previous version already on screen; only
+    // a body that was not there at submit counts as this turn's rendering.
+    const documentBody = () => document.querySelector('.verevon-chat-artifact-view__body .verevon-chat-markdown')
+    const initialBody = documentBody()
+    const initialText = initialBody?.textContent?.trim() ?? ''
+    let acknowledgementMs: number | null = null; let firstAnswerMs: number | null = null; let artifactRenderedAt: number | null = null
     const observer = new MutationObserver(() => {
       if (acknowledgementMs === null && document.querySelectorAll('.verevon-chat-message--user').length > users) acknowledgementMs = performance.now() - started
       const last = Array.from(document.querySelectorAll('.verevon-chat-message--assistant')).at(-1)
       if (firstAnswerMs === null && last && !existing.has(last) && last.querySelector('.verevon-chat-markdown')?.textContent?.trim()) firstAnswerMs = performance.now() - started
+      if (artifactRenderedAt === null) {
+        const body = documentBody()
+        const text = body?.textContent?.trim() ?? ''
+        if (text && (body !== initialBody || text !== initialText)) artifactRenderedAt = performance.now()
+      }
     })
     observer.observe(document.body, { childList: true, subtree: true, characterData: true })
-    target.q08Timing = { stop: () => { observer.disconnect(); return { acknowledgementMs, firstAnswerMs } } }
+    target.q08Timing = {
+      stop: () => { observer.disconnect(); return { acknowledgementMs, firstAnswerMs } },
+      marks: () => ({
+        acknowledgementAt: acknowledgementMs === null ? null : started + acknowledgementMs,
+        firstAnswerAt: firstAnswerMs === null ? null : started + firstAnswerMs,
+        artifactRenderedAt,
+      }),
+    }
   })
   const started = Date.now()
   const responsePending = page.waitForResponse(r => r.url().endsWith('/api/v1/chat/stream') && r.request().method() === 'POST', { timeout: 60_000 })
@@ -95,16 +150,28 @@ export async function send(page: Page, prompt: string, info: TestInfo, label: st
   const headersMs = Date.now() - started
   expect(response.status()).toBe(200)
   await response.finished()
-  const stream = await page.evaluate(async () => {
-    const target = window as typeof window & { productStream?: Promise<string>; restoreProductFetch?: () => void }
+  const { stream, clock } = await page.evaluate(async () => {
+    const target = window as typeof window & { productStream?: Promise<string>; productClock?: object; restoreProductFetch?: () => void }
     try {
       if (!target.productStream) throw new Error('The browser did not capture the chat response')
-      return await target.productStream
+      return { stream: await target.productStream, clock: target.productClock }
     } finally { target.restoreProductFetch?.() }
   })
   await info.attach(`${label}-stream`, { body: stream, contentType: 'text/plain' })
-  const rendered = await page.evaluate(() => (window as typeof window & { q08Timing?: { stop: () => object } }).q08Timing?.stop())
+  const { rendered, marks } = await page.evaluate(() => {
+    const timing = (window as typeof window & { q08Timing?: { stop: () => object; marks?: () => object } }).q08Timing
+    const rendered = timing?.stop()
+    return { rendered, marks: timing?.marks?.() }
+  })
   await info.attach(`${label}-timing`, { body: JSON.stringify({ elapsedMs: Date.now() - started, headersMs, ...rendered }), contentType: 'application/json' })
+  // Attached before any assertion, so a failed turn keeps its phases and the
+  // cohort report can count it.
+  const phases = productPhaseReport({
+    label,
+    workload: phaseWorkload(info.file, info.title, label),
+    capture: { ...((clock as BrowserClockCapture | undefined) ?? { chunks: [] }), ...(marks ?? {}) },
+  })
+  await info.attach(`${label}-phases`, { body: JSON.stringify(phases), contentType: 'application/json' })
   await info.attach(`${label}-observed-transcript`, { body: JSON.stringify(await transcript(page)), contentType: 'application/json' })
   const frames = stream.split(/\r?\n\r?\n/).flatMap(frame => {
     const event = /^event: (.+)$/m.exec(frame)?.[1]

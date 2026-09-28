@@ -4681,6 +4681,7 @@ pub(super) async fn dispatch_chat_save_thread_snapshot(
             .get("preview")
             .and_then(Value::as_str)
             .map(str::to_owned),
+        persona_enabled: input.get("personaEnabled").and_then(Value::as_bool),
     };
     let response = save_chat_thread(
         StateExtractor(state.clone()),
@@ -4803,19 +4804,20 @@ pub(super) async fn dispatch_audio_transcribe(
     owner_json_response_to_envelope("audio.transcribe", user, status, payload)
 }
 
-pub(super) async fn dispatch_audio_dictate(
-    state: &AppState,
-    user: &AuthenticatedUser,
-    headers: &HeaderMap,
-    input: &Value,
-) -> Response {
+/// Build the dictate route's body from an `audio.dictate` action input, or
+/// `None` when the input is not a dictation it can carry.
+///
+/// `m4a` is Safari's AAC-in-mp4 recording, which model-gateway and
+/// inference-core both take. `zdr` (a Temporary-chat dictation) is forwarded;
+/// `proxy_dictate` then raises it to the organisation's standing posture, and
+/// nothing here can lower it. The dictate route's client-controllable
+/// clean-up `model` override is never forwarded.
+fn audio_dictate_body(input: &Value) -> Option<Value> {
     let audio_base64 = ticket_string(input, "audioBase64");
     let format = ticket_string(input, "format");
     let language = ticket_string(input, "language");
-    if audio_base64.is_empty() || !matches!(format, "webm" | "ogg" | "wav" | "mp3") {
-        return ticket_bad_request(
-            "audio.dictate requires 'audioBase64' and format of webm, ogg, wav, or mp3",
-        );
+    if audio_base64.is_empty() || !matches!(format, "webm" | "ogg" | "wav" | "mp3" | "m4a") {
+        return None;
     }
     let mut body = serde_json::Map::new();
     body.insert(
@@ -4827,11 +4829,28 @@ pub(super) async fn dispatch_audio_dictate(
     if let Some(context) = input.get("context").and_then(Value::as_str) {
         body.insert("context".to_owned(), Value::String(context.to_owned()));
     }
+    if let Some(zdr) = input.get("zdr").and_then(Value::as_bool) {
+        body.insert("zdr".to_owned(), Value::Bool(zdr));
+    }
+    Some(Value::Object(body))
+}
+
+pub(super) async fn dispatch_audio_dictate(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+    input: &Value,
+) -> Response {
+    let Some(body) = audio_dictate_body(input) else {
+        return ticket_bad_request(
+            "audio.dictate requires 'audioBase64' and format of webm, ogg, wav, mp3, or m4a",
+        );
+    };
     let response = proxy_dictate(
         StateExtractor(state.clone()),
         ExtensionExtractor(user.clone()),
         headers.clone(),
-        Json(Value::Object(body)),
+        Json(body),
     )
     .await
     .into_response();
@@ -5923,6 +5942,43 @@ fn social_execution(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn audio_dictate_forwards_safari_recordings_and_the_retention_flag() {
+        let body = audio_dictate_body(&json!({
+            "audioBase64": "AAAA",
+            "format": "m4a",
+            "language": "nb-NO",
+            "context": "chat message",
+            "zdr": true,
+            // The dictate route's clean-up override is client-controllable;
+            // the action surface never passes it on.
+            "model": "some-other-model",
+        }))
+        .expect("an m4a dictation is accepted");
+        assert_eq!(
+            body,
+            json!({
+                "audio_base64": "AAAA",
+                "format": "m4a",
+                "language": "nb-NO",
+                "context": "chat message",
+                "zdr": true,
+            })
+        );
+
+        // No flag in, no flag out: `proxy_dictate` still applies the org posture.
+        let ordinary = audio_dictate_body(&json!({
+            "audioBase64": "AAAA",
+            "format": "webm",
+            "language": "nb-NO",
+        }))
+        .expect("a webm dictation is accepted");
+        assert!(ordinary.get("zdr").is_none());
+
+        assert!(audio_dictate_body(&json!({ "audioBase64": "AAAA", "format": "flac" })).is_none());
+        assert!(audio_dictate_body(&json!({ "audioBase64": "", "format": "webm" })).is_none());
+    }
 
     #[tokio::test]
     async fn upload_files_action_rejects_json_execution() {

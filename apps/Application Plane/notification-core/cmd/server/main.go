@@ -237,6 +237,20 @@ func main() {
 		defer conversationFollowSubscriber.Stop()
 	}
 
+	// Mail-task spec §3.5 (chat-wave2, owner ruling 2026-09-28: Postmark
+	// inbound, self-forward only). Same Application-Plane-local bus as the
+	// conversation-follow subscriber above; single-recipient, not a follower
+	// fan-out. Off in practice until the gateway's own mail-task pipeline is
+	// wired (apps/gateway/src/domains/mail_task.rs) and actually publishes —
+	// starting the subscriber now is harmless and means notification-core
+	// needs no further deploy once that lands.
+	mailTaskDraftedSubscriber := consumers.NewMailTaskDraftedSubscriber(natsClient.JS, notificationService)
+	if err := mailTaskDraftedSubscriber.Start(consumerCtx); err != nil {
+		log.Printf("notification-core: mail-task-drafted subscriber disabled: %v", err)
+	} else {
+		defer mailTaskDraftedSubscriber.Stop()
+	}
+
 	// Most shared-bus notification consumers (ControlSessionSubscriber,
 	// SocialPublishFailedSubscriber, IdentitySyncSubscriber) remain off
 	// until workload-signed, revisioned authority events and subject ACLs

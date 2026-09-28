@@ -17,6 +17,7 @@ pub mod policy_client;
 pub mod realtime;
 pub mod routing_policy;
 pub mod speech;
+pub mod timing;
 pub mod translation;
 pub mod video;
 pub mod vision;
@@ -25,6 +26,7 @@ pub mod zdr;
 #[allow(unused_imports)]
 // ArtifactStore is part of the intended provider surface; not yet consumed
 pub use artifact_ref::{ArtifactRef, ArtifactStore};
+pub use timing::ProviderTiming;
 
 use tokio::sync::mpsc;
 
@@ -255,6 +257,11 @@ pub struct InferResponse {
     /// when not cached). Same fold-in relationship to `input_tokens` as
     /// `cache_read_input_tokens`.
     pub cache_creation_input_tokens: i32,
+    /// Where this call's wall time went. Stamped by the fallback chain on the
+    /// response it returns; an adapter leaves it `None` unless it has
+    /// upstream phase durations (see [`ProviderTiming::upstream`]) or a usage
+    /// report to pass on, which is all the chain keeps from it.
+    pub provider_timing: Option<ProviderTiming>,
 }
 
 /// A single streaming chunk.
@@ -298,6 +305,10 @@ pub struct InferChunk {
     /// Tokens newly written to the provider's prompt cache by this request,
     /// populated on the FINAL chunk only. 0 when not cached.
     pub cache_creation_input_tokens: i32,
+    /// Where the stream's wall time went, stamped by the fallback chain on
+    /// the FINAL chunk only (same rule as the token counts). `None` on every
+    /// other chunk.
+    pub provider_timing: Option<ProviderTiming>,
 }
 
 /// A unified embedding request used internally across providers.
@@ -891,8 +902,41 @@ mod privacy_tier_tests {
     }
 }
 
+/// Why the ChatGPT subscription broker refused a call, in its own
+/// content-free vocabulary.
+///
+/// Each reason is a fact about the connected ChatGPT account or its upstream,
+/// not about this request's route, so none of them is ever answered by trying
+/// another provider or model: the subscription route never silently swaps.
+/// Codex has already retried a transient upstream failure by the time the
+/// broker reports it, so the chain does not retry any of them either.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SubscriptionRefusal {
+    /// The plan's Codex usage limit is exhausted, or the plan has no Codex use.
+    UsageLimit,
+    /// The ChatGPT sign-in must be renewed in Integrations.
+    ReauthRequired,
+    /// ChatGPT or Codex failed transiently after Codex's own retries.
+    UpstreamUnavailable,
+    /// ChatGPT rejected the request itself (a 400/422 or a policy refusal).
+    BadRequest,
+}
+
+impl SubscriptionRefusal {
+    /// The stable reason code every layer relays, from the broker to the SPA.
+    #[must_use]
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::UsageLimit => "subscription_usage_limit",
+            Self::ReauthRequired => "subscription_reauth_required",
+            Self::UpstreamUnavailable => "subscription_upstream_unavailable",
+            Self::BadRequest => "subscription_bad_request",
+        }
+    }
+}
+
 /// Errors from provider operations.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Clone, thiserror::Error)]
 pub enum ProviderError {
     #[error("http error: {0}")]
     Http(String),
@@ -900,11 +944,38 @@ pub enum ProviderError {
     #[error("rate limited: retry after {retry_after_ms}ms")]
     RateLimited { retry_after_ms: u64 },
 
+    /// The ChatGPT subscription refused the call for a structured reason.
+    ///
+    /// Carries only the reason and, where the broker knows them, when a retry
+    /// could succeed: never the broker's or Codex's text. `resets_at` is set
+    /// for [`SubscriptionRefusal::UsageLimit`] only, and only when the broker
+    /// reported a plausible reset time.
+    #[error("subscription refused: {}", .reason.code())]
+    SubscriptionRefused {
+        reason: SubscriptionRefusal,
+        retry_after_ms: Option<u64>,
+        resets_at: Option<chrono::DateTime<chrono::Utc>>,
+    },
+
     #[error("invalid response: {0}")]
     InvalidResponse(String),
 
     #[error("provider unavailable: {0}")]
     Unavailable(String),
+
+    /// The `ChatGPT` subscription broker failed a turn it had already started,
+    /// for a reason it did not type, or its stream ended after the turn began.
+    ///
+    /// Final for this call, as [`ProviderError::SubscriptionRefused`] is: the
+    /// Codex turn may already have used the plan's quota, the failures behind
+    /// an untyped code (an empty answer, a served-model mismatch, a request
+    /// `ChatGPT` rejected, an interrupted turn) mostly repeat on a retry, and no
+    /// other provider may answer for the account. So the chain neither retries
+    /// it nor walks on. On the wire it is the plain `Unavailable` that
+    /// [`ProviderError::Unavailable`] is; only the call count differs. The
+    /// message names the broker's code token and nothing the broker wrote.
+    #[error("provider unavailable: {0}")]
+    SubscriptionFailed(String),
 
     /// The prompt exceeded the provider's input limit. Distinguished from
     /// [`ProviderError::Http`] so callers can shed history and retry instead of

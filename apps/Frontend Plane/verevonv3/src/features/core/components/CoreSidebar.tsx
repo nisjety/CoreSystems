@@ -1,14 +1,22 @@
-import { useLocation } from '@solidjs/router'
+import { useLocation, useSearchParams } from '@solidjs/router'
 import {
+  Check,
   ChevronDown,
   ChevronRight,
   CircleUserRound,
+  Fingerprint,
+  Folder,
+  Mail,
+  MessageCircleMore,
   MessageSquarePlus,
+  MoreVertical,
   PanelLeftClose,
   PanelLeftOpen,
+  PenLine,
   Pin,
   PinOff,
   Trash2,
+  X,
 } from '@/shared/icons'
 import type { JSX } from '@solidjs/web'
 import { Dynamic } from '@solidjs/web'
@@ -18,16 +26,23 @@ import {
   CHAT_ACTIVE_THREAD_KEY,
   CHAT_THREAD_HISTORY_CHANGED_EVENT,
   CHAT_THREAD_HISTORY_KEY,
+  CHAT_THREAD_TITLE_MAX_LENGTH,
   clearActiveChatThreadId,
   clearChatThreadHistory,
   readActiveChatThreadId,
   readChatThreadTranscript,
   readChatThreadHistory,
+  removeChatThreadHistoryItem,
+  renameChatThreadLocally,
   replaceChatThreadHistory,
   selectChatThread,
+  togglePersonaEnabledChatThread,
   togglePinnedChatThread,
+  upsertChatThreadHistory,
+  upsertChatThreadTranscript,
   type ChatThreadHistoryItem,
 } from '@/features/chat/lib/chat-thread-history'
+import { SpaceConfirmButton } from '@/features/spaces/components/SpaceConfirmButton'
 import { AgentsExpandedSidebarPanel } from '@/features/core/components/sidebar/CoreSidebarAgentsPanel'
 import { KnowledgeExpandedSidebarPanel } from '@/features/core/components/sidebar/CoreSidebarKnowledgePanel'
 import { SupportExpandedSidebarPanel } from '@/features/core/components/sidebar/CoreSidebarSupportPanel'
@@ -51,11 +66,15 @@ import {
   type SidebarPanelItem,
   type SidebarSection,
 } from '@/features/core/lib/sidebar-navigation'
-import { clearChatThreads, listChatThreads, saveChatThreadSnapshot } from '@/shared/api/chat-client'
+import { clearChatThreads, deleteChatThread, listChatThreads, saveChatThreadSnapshot } from '@/shared/api/chat-client'
 import { useI18n } from '@/shared/i18n'
 import { cn } from '@/shared/lib/cn'
 import { shouldShowWorkspaceAdminNavigation } from '@/shared/session/access'
 import { getSession } from '@/shared/session/session-store'
+import { chatAppearanceActive } from '@/features/chat/lib/chat-appearance-preview'
+import { FilledRailIcon } from './FilledRailIcon'
+import { ChatSidebarOrganizer } from './sidebar/ChatSidebarOrganizer'
+import { homeOverviewActionSchema, homeOverviewGroup, homeOverviewSidebarItems, parseHomeOverview } from '@/shared/actions/home-overview'
 
 export const SIDEBAR_MINIMIZED_WIDTH = 60
 export const SIDEBAR_EXPANDED_WIDTH = 320
@@ -83,7 +102,7 @@ export function CoreSidebar(props: {
   const openSection = () => props.onExpandedChange(true)
 
   return (
-    <aside class="verevon-sidebar-themed core-sidebar verevon-sidebar-type" style={{ width: width() }} aria-label={i18n.tr('Primærnavigasjon', 'Primary navigation')}>
+    <aside id="core-workspace-sidebar" class="verevon-sidebar-themed core-sidebar verevon-sidebar-type" style={{ width: width() }} aria-label={i18n.tr('Primærnavigasjon', 'Primary navigation')}>
       <div class="core-sidebar__body">
         <div class="core-sidebar__rail">
           <div class="core-sidebar__top-actions">
@@ -167,7 +186,9 @@ function ExpandedSidebarPanel(props: {
   const [searchQuery, setSearchQuery] = createSignal('')
   const [activeTabId, setActiveTabId] = createSignal<string | null>(null)
   const panelTabs = () => props.activeSection.panelTabs ?? []
-  const firstPanelTabId = () => panelTabs()[0]?.id ?? null
+  const firstPanelTabId = () => props.activeSection.id === 'overview' && chatAppearanceActive('dashboard')
+    ? homeOverviewGroup(parseHomeOverview(new URLSearchParams(props.pathname.split('?')[1] ?? '').get('overview')))
+    : panelTabs()[0]?.id ?? null
   const panelKind = createMemo(() => {
     if (props.activeSection.id === 'messages') return 'messages'
     if (props.activeSection.id === 'spaces') return 'spaces'
@@ -275,12 +296,20 @@ function GenericSidebarPanel(props: {
   )
 }
 
-function ChatSidebarPanel(props: { onCollapse: () => void }) {
+export function ChatSidebarPanel(props: { onCollapse: () => void }) {
   const i18n = useI18n()
   const [error, setError] = createSignal<string | null>(null)
   const [loading, setLoading] = createSignal(false)
   const [sessions, setSessions] = createSignal<ChatThreadHistoryItem[]>([])
   const [activeThreadId, setActiveThreadId] = createSignal<string | null>(null)
+  // Which row's "more options" popover is open, keyed by threadId. A single
+  // signal (rather than local state per row) guarantees at most one is open
+  // at a time -- opening a second closes the first automatically.
+  const [openMenuThreadId, setOpenMenuThreadId] = createSignal<string | null>(null)
+  // Which row is mid-rename, and its live draft text. Also single-flight: a
+  // second rename cannot start while one is already in progress.
+  const [renamingThreadId, setRenamingThreadId] = createSignal<string | null>(null)
+  const [renameDraft, setRenameDraft] = createSignal('')
 
   const refreshLocalSessions = () => {
     setActiveThreadId(readActiveChatThreadId())
@@ -419,50 +448,250 @@ function ChatSidebarPanel(props: { onCollapse: () => void }) {
     })
   }
 
-  const sessionRow = (item: ChatThreadHistoryItem) => (
+  /**
+   * Persona spec — the per-thread override of the user's global persona
+   * switch, next to the pin toggle above (same optimistic-write-with-revert
+   * shape: `saveChatThreadSnapshot` is the load-bearing call, the local flip
+   * is UI-only and would otherwise be silently reverted by the next resync).
+   * `session-core` rejects this write outright for a ZDR/temporary thread
+   * (`update_thread_presentation`'s ZDR guard) — but a temporary chat is
+   * never saved to this durable list in the first place, so every row this
+   * menu can reach is already a persisted, non-ZDR thread.
+   */
+  const togglePersona = (threadId: string) => {
+    const next = !(sessions().find((item) => item.threadId === threadId)?.personaEnabled ?? true)
+    setSessions(togglePersonaEnabledChatThread(threadId))
+    void saveChatThreadSnapshot(threadId, { personaEnabled: next }).catch(() => {
+      setSessions(togglePersonaEnabledChatThread(threadId))
+      setError(i18n.tr('Kunne ikke endre persona for samtalen.', 'Could not change persona for the conversation.'))
+    })
+  }
+
+  const startRename = (item: ChatThreadHistoryItem) => {
+    setOpenMenuThreadId(null)
+    setRenameDraft(item.title)
+    setRenamingThreadId(item.threadId)
+  }
+
+  const cancelRename = () => {
+    setRenamingThreadId(null)
+    setRenameDraft('')
+  }
+
+  /**
+   * Commit the in-progress rename. Trimmed and capped to the same length the
+   * store would otherwise silently truncate to (`CHAT_THREAD_TITLE_MAX_LENGTH`,
+   * `normalizeHistoryInput`); an empty result is treated as a cancel rather
+   * than a save, matching Escape's behaviour, since "renaming to nothing" has
+   * no clear meaning and normalizing it would fall back to a generic label
+   * the user never asked for.
+   *
+   * Writes through `saveChatThreadSnapshot` with `{ title }` ONLY -- omitting
+   * `pinned`/`preview` the same way the pin toggle above omits everything but
+   * `pinned` -- so `save_thread` (gateway) leaves every other field untouched
+   * (see `SaveThreadRequest` in `domains/chat/history.rs`: absent fields are
+   * "leave as is", not "clear").
+   */
+  const commitRename = (threadId: string) => {
+    const trimmed = renameDraft().trim()
+    setRenamingThreadId(null)
+    setRenameDraft('')
+    if (!trimmed) return
+    const current = sessions().find((item) => item.threadId === threadId)
+    if (!current) return
+    const next = trimmed.length > CHAT_THREAD_TITLE_MAX_LENGTH
+      ? trimmed.slice(0, CHAT_THREAD_TITLE_MAX_LENGTH)
+      : trimmed
+    if (next === current.title) return
+    const previousTitle = current.title
+    setSessions(renameChatThreadLocally(threadId, next))
+    void saveChatThreadSnapshot(threadId, { title: next }).catch(() => {
+      setSessions(renameChatThreadLocally(threadId, previousTitle))
+      setError(i18n.tr('Kunne ikke endre navn på samtalen.', 'Could not rename the conversation.'))
+    })
+  }
+
+  /**
+   * Permanently delete one thread (explicit confirmation happens in the row
+   * menu via `SpaceConfirmButton` before this ever runs). Removed from the
+   * local cache optimistically -- reinserted on a failed server delete, same
+   * revert shape as `togglePin` and `commitRename` above -- and, when the
+   * deleted thread was the open one, the active pointer is cleared so the
+   * user lands on a fresh chat rather than a dead one. `use-chat-controller`
+   * already listens for `CHAT_ACTIVE_THREAD_CHANGED_EVENT` and resets the
+   * chat view itself; this only has to clear the pointer.
+   *
+   * On a failed server delete, the revert must undo BOTH side effects of the
+   * optimistic removal, not just the history-list entry:
+   * `removeChatThreadHistoryItem` also drops the thread's cached transcript
+   * (see its own implementation), so that is captured up front and put back
+   * alongside the history row -- otherwise a thread that in fact was never
+   * deleted would reload from a cold server fetch instead of its cache next
+   * time it is opened. And if the deleted thread was the one open, clearing
+   * the active pointer already navigated the reader to a fresh chat before
+   * the request even settled; a failure means that thread was NOT deleted, so
+   * leaving them stranded on a fresh chat -- while the very same thread
+   * reappears in the list above them -- is its own bug. Restore the pointer
+   * the same way `openThread` does.
+   */
+  const deleteThread = async (threadId: string) => {
+    const current = sessions().find((item) => item.threadId === threadId)
+    const transcript = readChatThreadTranscript(threadId)
+    const wasActive = activeThreadId() === threadId
+    setSessions(removeChatThreadHistoryItem(threadId))
+    if (wasActive) {
+      clearActiveChatThreadId()
+      setActiveThreadId(null)
+    }
+    setError(null)
+    try {
+      await deleteChatThread(threadId)
+    } catch {
+      if (current) setSessions(upsertChatThreadHistory(current))
+      if (transcript) upsertChatThreadTranscript(transcript)
+      if (wasActive) {
+        selectChatThread(threadId)
+        setActiveThreadId(threadId)
+      }
+      setError(i18n.tr('Kunne ikke slette samtalen.', 'Could not delete the conversation.'))
+    }
+  }
+
+  const sessionRow = (item: ChatThreadHistoryItem, onMoveToProject?: () => void) => (
     <div class="core-chat-session-row">
-      <button
-        type="button"
-        class={['core-chat-session', { 'core-chat-session--active': item.threadId === activeThreadId() }]}
-        onClick={() => openThread(item.threadId)}
-        aria-current={item.threadId === activeThreadId() ? 'page' : undefined}
+      <Show
+        when={renamingThreadId() !== item.threadId}
+        fallback={
+          <form
+            class="core-chat-session__rename"
+            onSubmit={(event) => {
+              event.preventDefault()
+              commitRename(item.threadId)
+            }}
+          >
+            <input
+              ref={(element) => {
+                // Autofocus + select-all on the same tick the field mounts,
+                // mirroring the popover's own focus-on-open handling below --
+                // `focus()` before layout is a no-op, so this waits one
+                // microtask rather than trying it synchronously in the ref.
+                queueMicrotask(() => {
+                  element.focus()
+                  element.select()
+                })
+              }}
+              class="core-chat-session__rename-input"
+              value={renameDraft()}
+              maxlength={CHAT_THREAD_TITLE_MAX_LENGTH}
+              aria-label={i18n.tr('Nytt navn på samtalen', 'New conversation name')}
+              onInput={(event) => setRenameDraft(event.currentTarget.value)}
+              onKeyDown={(event) => {
+                if (event.key !== 'Escape') return
+                event.preventDefault()
+                cancelRename()
+              }}
+            />
+            <button
+              type="submit"
+              class="core-chat-session__rename-action"
+              aria-label={i18n.tr('Lagre navn', 'Save name')}
+              title={i18n.tr('Lagre navn', 'Save name')}
+              // A pointerdown-triggered blur would exit rename mode (and
+              // unmount this very button) before its own click ever fires --
+              // keeping focus on the input until the click completes is what
+              // makes the mouse path work at all, not just the keyboard one.
+              onMouseDown={(event) => event.preventDefault()}
+            >
+              <Check class="size-3.5" />
+            </button>
+            <button
+              type="button"
+              class="core-chat-session__rename-action core-chat-session__rename-action--danger"
+              aria-label={i18n.tr('Avbryt', 'Cancel')}
+              title={i18n.tr('Avbryt', 'Cancel')}
+              onMouseDown={(event) => event.preventDefault()}
+              onClick={cancelRename}
+            >
+              <X class="size-3.5" />
+            </button>
+          </form>
+        }
       >
-        <div class="core-chat-session__summary">
-          <span class="verevon-sidebar-row-strong" title={item.title}>{item.title}</span>
-          <Show when={chatRunStatusChip(item.latestRunStatus, i18n)}>
-            {(chip) => (
-              <small class="core-chat-session__status" data-tone={chip().tone} role="status">
-                <i aria-hidden="true" />
-                {chip().label}
-              </small>
-            )}
+        <button
+          type="button"
+          class={['core-chat-session', { 'core-chat-session--active': item.threadId === activeThreadId() }]}
+          onClick={() => openThread(item.threadId)}
+          aria-current={item.threadId === activeThreadId() ? 'page' : undefined}
+          title={`${item.title} · ${formatChatUpdatedAt(item.updatedAt, i18n)}`}
+        >
+          <div class="core-chat-session__summary">
+            <span class="verevon-sidebar-row-strong" title={item.title}>{item.title}</span>
+            <Show when={item.origin === 'mail_task'}>
+              <span
+                class="verevon-trust-chip"
+                title={i18n.tr(
+                  'Denne samtalen ble startet fra en videresendt e-post.',
+                  'This thread was started from a forwarded email.',
+                )}
+              >
+                <Mail class="size-3" aria-hidden="true" />
+                {i18n.tr('Fra e-post', 'From email')}
+              </span>
+            </Show>
+            <Show when={chatRunStatusChip(item.latestRunStatus, i18n)}>
+              {(chip) => (
+                <small class="core-chat-session__status" data-tone={chip().tone} role="status">
+                  <i aria-hidden="true" />
+                  {chip().label}
+                </small>
+              )}
+            </Show>
+          </div>
+          <em>{formatChatUpdatedAt(item.updatedAt, i18n)}</em>
+        </button>
+        <button
+          type="button"
+          class={['core-chat-session__pin', { 'core-chat-session__pin--active': Boolean(item.pinned) }]}
+          aria-label={item.pinned ? i18n.tr('Løsne fra topp', 'Unpin from top') : i18n.tr('Fest til topp', 'Pin to top')}
+          title={item.pinned ? i18n.tr('Løsne fra topp', 'Unpin from top') : i18n.tr('Fest til topp', 'Pin to top')}
+          onClick={(event) => togglePin(event, item.threadId)}
+        >
+          <Show when={item.pinned} fallback={<Pin class="size-3.5" />}>
+            <PinOff class="size-3.5" />
           </Show>
-        </div>
-        <em>{formatChatUpdatedAt(item.updatedAt, i18n)}</em>
-      </button>
-      <button
-        type="button"
-        class={['core-chat-session__pin', { 'core-chat-session__pin--active': Boolean(item.pinned) }]}
-        aria-label={item.pinned ? i18n.tr('Løsne fra topp', 'Unpin from top') : i18n.tr('Fest til topp', 'Pin to top')}
-        title={item.pinned ? i18n.tr('Løsne fra topp', 'Unpin from top') : i18n.tr('Fest til topp', 'Pin to top')}
-        onClick={(event) => togglePin(event, item.threadId)}
-      >
-        <Show when={item.pinned} fallback={<Pin class="size-3.5" />}>
-          <PinOff class="size-3.5" />
-        </Show>
-      </button>
+        </button>
+        <ChatSessionMenu
+          item={item}
+          open={openMenuThreadId() === item.threadId}
+          onOpenChange={(open) => setOpenMenuThreadId(open ? item.threadId : null)}
+          onRenameStart={() => startRename(item)}
+          onMoveToProject={onMoveToProject}
+          onTogglePersona={() => togglePersona(item.threadId)}
+          onDelete={() => void deleteThread(item.threadId)}
+        />
+      </Show>
     </div>
   )
 
   return (
     <div class="core-chat-sidebar">
+      <Show when={!chatAppearanceActive('organizer')}>
       <a href="/chat" link class="core-chat-sidebar__new" onClick={startNewChat}>
         <span>
           <MessageSquarePlus class="size-[15px]" strokeWidth={1.75} />
         </span>
         Ny samtale
       </a>
+      </Show>
 
+      {/* The empty-state fallback below already surfaces `error()` when there
+          is nothing else to show. This banner covers the opposite case -- a
+          pin/rename/delete failing while OTHER threads are still listed,
+          which the fallback branch never renders at all. */}
+      <Show when={error() && (sessionCount() > 0 || chatAppearanceActive('organizer'))}>
+        <p class="core-sidebar-empty verevon-sidebar-row-normal" role="alert">{error()}</p>
+      </Show>
+      <Show when={chatAppearanceActive('organizer')} fallback={
       <nav class="core-chat-sidebar__sessions" aria-label={i18n.tr('Chat-samtaler', 'Chat conversations')}>
         <Show when={!loading()} fallback={<div class="core-sidebar-empty verevon-sidebar-row-normal">{i18n.tr('Laster samtaler ...', 'Loading conversations ...')}</div>}>
           <Show
@@ -471,17 +700,164 @@ function ChatSidebarPanel(props: { onCollapse: () => void }) {
           >
             <Show when={pinnedSessions().length > 0}>
               <span class="verevon-sidebar-group-title">{i18n.tr('Pinnet', 'Pinned')}</span>
-              <For each={pinnedSessions()}>{sessionRow}</For>
+              <For each={pinnedSessions()}>{(item) => sessionRow(item)}</For>
             </Show>
-            <For each={unpinnedSessions()}>{sessionRow}</For>
+            <For each={unpinnedSessions()}>{(item) => sessionRow(item)}</For>
           </Show>
         </Show>
       </nav>
+      }>
+        <ChatSidebarOrganizer sessions={visibleSessions()} loading={loading()} onNewChat={startNewChat} renderRow={sessionRow} />
+      </Show>
 
       <button type="button" class="core-chat-sidebar__clear" onClick={clearHistory}>
         <Trash2 class="size-3.5" />
         {i18n.tr('Tøm chathistorikk', 'Clear chat history')}
       </button>
+    </div>
+  )
+}
+
+/**
+ * A thread row's "more options" popover: Rename and Delete. Controlled by the
+ * parent (`open`/`onOpenChange`) rather than owning its own open state, so the
+ * panel can guarantee at most one row's menu is open at a time -- the same
+ * reason `CoreSidebarKnowledgePanel`'s combobox tracks `open` next to its
+ * trigger rather than inside a `For` callback.
+ *
+ * Unlike that combobox (a listbox where focus never leaves the trigger while
+ * arrow keys move a highlighted index), this is a command menu: opening it
+ * moves real focus onto its first action, Tab/Shift+Tab walk its two buttons
+ * natively, and Escape closes it and returns focus to the trigger -- the
+ * standard ARIA menu-button pattern, appropriate here because the two things
+ * inside it are commands to run, not values to pick.
+ */
+function ChatSessionMenu(props: {
+  item: ChatThreadHistoryItem
+  open: boolean
+  onOpenChange: (open: boolean) => void
+  onRenameStart: () => void
+  onMoveToProject?: () => void
+  onTogglePersona: () => void
+  onDelete: () => void
+}) {
+  const i18n = useI18n()
+  let rootRef: HTMLDivElement | undefined
+  let triggerRef: HTMLButtonElement | undefined
+  let firstItemRef: HTMLButtonElement | undefined
+
+  const close = (refocusTrigger: boolean) => {
+    props.onOpenChange(false)
+    if (refocusTrigger) triggerRef?.focus()
+  }
+
+  createEffect(
+    () => props.open,
+    (isOpen) => {
+      if (!isOpen) return
+      queueMicrotask(() => firstItemRef?.focus())
+
+      const closeOnOutsidePointer = (event: PointerEvent) => {
+        const target = event.target as Node | null
+        if (target && rootRef?.contains(target)) return
+        close(false)
+      }
+      const closeOnEscape = (event: KeyboardEvent) => {
+        if (event.key !== 'Escape') return
+        event.stopPropagation()
+        close(true)
+      }
+
+      document.addEventListener('pointerdown', closeOnOutsidePointer, true)
+      window.addEventListener('keydown', closeOnEscape, true)
+      return () => {
+        document.removeEventListener('pointerdown', closeOnOutsidePointer, true)
+        window.removeEventListener('keydown', closeOnEscape, true)
+      }
+    },
+  )
+
+  return (
+    <div ref={rootRef} class="core-chat-session__menu-root">
+      <button
+        ref={triggerRef}
+        type="button"
+        class="core-chat-session__menu-trigger"
+        aria-label={i18n.tr(`Flere valg for ${props.item.title}`, `More options for ${props.item.title}`)}
+        aria-haspopup="menu"
+        aria-expanded={props.open ? 'true' : 'false'}
+        onClick={(event) => {
+          event.stopPropagation()
+          props.onOpenChange(!props.open)
+        }}
+      >
+        <MoreVertical class="size-3.5" />
+      </button>
+      <Show when={props.open}>
+        <menu
+          class="verevon-popover core-chat-session__menu"
+          role="menu"
+          aria-label={i18n.tr(`Handlinger for ${props.item.title}`, `Actions for ${props.item.title}`)}
+        >
+          <li role="presentation">
+            <button
+              ref={firstItemRef}
+              type="button"
+              role="menuitem"
+              class="core-chat-session__menu-item"
+              onClick={(event) => {
+                event.stopPropagation()
+                props.onRenameStart()
+              }}
+            >
+              <PenLine class="size-3.5" />
+              {i18n.tr('Gi nytt navn', 'Rename')}
+            </button>
+          </li>
+          <Show when={props.onMoveToProject}>
+            <li role="presentation">
+              <button type="button" role="menuitem" class="core-chat-session__menu-item" onClick={() => { close(false); props.onMoveToProject?.() }}>
+                <Folder class="size-3.5" />
+                {i18n.tr('Flytt til prosjekt', 'Move to project')}
+              </button>
+            </li>
+          </Show>
+          <li role="presentation">
+            <button
+              type="button"
+              role="menuitemcheckbox"
+              aria-checked={props.item.personaEnabled === false ? 'false' : 'true'}
+              class="core-chat-session__menu-item"
+              onClick={(event) => {
+                event.stopPropagation()
+                close(false)
+                props.onTogglePersona()
+              }}
+            >
+              <Fingerprint class="size-3.5" />
+              {props.item.personaEnabled === false
+                ? i18n.tr('Slå på persona for denne samtalen', 'Turn persona on for this thread')
+                : i18n.tr('Slå av persona for denne samtalen', 'Turn persona off for this thread')}
+            </button>
+          </li>
+          <li role="presentation">
+            <SpaceConfirmButton
+              role="menuitem"
+              label={i18n.tr('Slett', 'Delete')}
+              consequence={i18n.tr(
+                'Slettes for godt og kan ikke gjenopprettes.',
+                'Deleted permanently and cannot be recovered.',
+              )}
+              confirmLabel={i18n.tr(
+                `Bekreft sletting av «${props.item.title}»`,
+                `Confirm deleting "${props.item.title}"`,
+              )}
+              class="core-chat-session__menu-item core-chat-session__menu-item--danger"
+              onConfirm={() => props.onDelete()}
+            />
+          </li>
+        </menu>
+      </Show>
     </div>
   )
 }
@@ -697,6 +1073,10 @@ function SidebarPanelLink(props: {
   expanded: boolean
   onToggle: () => void
 }) {
+  const [searchParams, setSearchParams] = useSearchParams()
+  const homeSection = () => chatAppearanceActive('dashboard') && props.pathname.split('?')[0] === '/dashboard'
+    ? homeOverviewSidebarItems[props.item.id] : undefined
+  const homeActive = () => parseHomeOverview(searchParams.overview) === homeSection()
   const active = () => isSidebarPathActive(props.pathname, props.item.href, props.item.aliases, props.item.exactPathMatch)
   const hasSubItems = () => Boolean(props.item.subItems?.length)
 
@@ -721,10 +1101,18 @@ function SidebarPanelLink(props: {
         </div>
       }
     >
-      <a href={props.item.href} link aria-current={active() ? 'page' : undefined} class={cn('core-sidebar-panel-link', active() ? 'verevon-sidebar-panel-active core-sidebar-panel-link--active' : '')}>
+      <Show when={homeSection()} fallback={<a href={props.item.href} link aria-current={active() ? 'page' : undefined} class={cn('core-sidebar-panel-link', active() ? 'verevon-sidebar-panel-active core-sidebar-panel-link--active' : '')}>
         <PanelItemIcon icon={props.item.icon} active={active()} />
         <span class={cn('core-sidebar-panel-link__label', active() ? 'verevon-sidebar-row' : 'verevon-sidebar-row-normal')}>{props.item.label}</span>
-      </a>
+      </a>}>
+        <button type="button" aria-pressed={homeActive() ? 'true' : 'false'} class={cn('core-sidebar-panel-link', homeActive() && 'verevon-sidebar-panel-active core-sidebar-panel-link--active')} onClick={() => {
+          const action = homeOverviewActionSchema.parse({ type: 'home.overview.select', section: homeSection() })
+          setSearchParams({ overview: action.section === 'home' ? undefined : action.section }, { scroll: false })
+        }}>
+          <PanelItemIcon icon={props.item.icon} active={homeActive()} />
+          <span class={cn('core-sidebar-panel-link__label', homeActive() ? 'verevon-sidebar-row' : 'verevon-sidebar-row-normal')}>{props.item.label}</span>
+        </button>
+      </Show>
     </Show>
   )
 }
@@ -744,7 +1132,9 @@ function MiniSectionLink(props: { section: SidebarSection; active: boolean; onOp
       title={props.section.label}
       class={cn('core-mini-nav-button', props.active ? 'verevon-sidebar-mini-active' : '')}
     >
-      <Dynamic component={props.section.icon} class="size-[18px]" strokeWidth={props.active ? 2 : 1.6} />
+      <Show when={props.active && chatAppearanceActive('navigation')} fallback={<Dynamic component={props.section.id === 'messages' && chatAppearanceActive('navigation') ? MessageCircleMore : props.section.icon} class="size-[18px]" strokeWidth={props.active ? 2 : 1.6} />}>
+        <FilledRailIcon name={props.section.id} />
+      </Show>
     </a>
   )
 }
@@ -760,7 +1150,7 @@ function MiniAccountLink(props: { active: boolean; children: JSX.Element; i18n: 
       title={props.i18n.tr('Konto', 'Account')}
       class={cn('core-mini-nav-button', props.active ? 'verevon-sidebar-mini-active' : '')}
     >
-      {props.children}
+      <Show when={props.active && chatAppearanceActive('navigation')} fallback={props.children}><FilledRailIcon name="account" /></Show>
     </a>
   )
 }

@@ -1,9 +1,21 @@
 //! Opt-in component evaluation using fictional fixtures and the same review
 //! function as production. Requires an authenticated local Playwright session.
 //! Never runs in the ordinary test suite or writes credentials to the report.
+//!
+//! `MODEL_GATEWAY_REVIEW_PROPOSAL_RULE` (off or on) is read from the
+//! environment, as the gateway reads it, so the same matrix runs in both
+//! states; every row records the state, the author guidance and the levers.
+//!
+//! Only rows with confirmed labels decide the exit status. The proposal-rule
+//! controls' labels are still proposed, so their rows, their per-set totals
+//! and their twin-conditional evidence are reported, never counted, and a run
+//! with the rule off (whose accept controls are expected to be falsely
+//! rejected) still exits on the confirmed bar alone.
 use base64::Engine;
-use model_gateway::source_validation::{review, Source, SourceContext};
-use mp_contracts::model_plane::v1::{inference_core_client::InferenceCoreClient, InferRequest};
+use model_gateway::result_validation::{content_hash, VALIDATION_FAILED};
+use model_gateway::review_proposal_rule::{ReviewProposalRule, PROPOSAL_RULE_ID};
+use model_gateway::source_validation::{check_artifact, review, CheckSettings, Source, SourceContext};
+use mp_contracts::model_plane::v1::{inference_core_client::InferenceCoreClient, ChatMessage, InferRequest};
 use serde_json::{json, Value};
 use std::{
     sync::{atomic::{AtomicBool, Ordering}, Arc, Mutex},
@@ -14,6 +26,10 @@ const STATUS: &str = "Team Fjord har 8 medarbeidere. Pilotmålet er 24. septembe
 const PRODUCT: &str = "Fiktiv produktbrief: Lampen har tre lysstyrker, knapp på foten og justerbar arm. Foten er 16 cm i diameter. Fargene er sand og grafitt. Pris: 1 000 kr eks. mva. Leveringstid bekreftes ved bestilling; lagerstatus varierer. Ingen dokumentasjon for produktivitets-, helse-, energi- eller bærekraftspåstander. Upublisert idé, ikke godkjent: Dobbelt så produktiv og alltid levert neste dag.";
 const MUSEUM: &str = "A museum inspection can finish on Monday, 5 October 2026. Packing needs one full working day starting the next working day after inspection. Dispatch can occur on the next working day after packing. Working days are Monday to Friday. Dispatch requires director approval. Whether approval has been granted is unknown. There is no confirmed dispatch date.";
 const INSPECTION: &str = "The operator carries out inspection. No inspection approval authority is specified. All faults requiring technical repair must be corrected before dispatch. Only blocking faults must be closed to complete inspection.";
+
+/// The paired proposal-rule controls, with labels still marked proposed.
+#[path = "support/proposal_rule_controls.rs"]
+mod proposal_rule_controls;
 
 #[tokio::test]
 #[ignore = "uses local authenticated inference and provider quota; set VEREVON_REVIEW_EVAL_STATE and VEREVON_REVIEW_EVAL_REPORT"]
@@ -51,6 +67,20 @@ async fn labeled_live_review() -> anyhow::Result<()> {
     let assertion_experiment =
         std::env::var("VEREVON_REVIEW_EVAL_ASSERTIONS").as_deref() == Ok("1");
     anyhow::ensure!(!assertion_experiment, "legacy tool-protocol experiment is not qualified for subscription evaluation");
+    // The settings `review()` runs with, read from the environment once, as
+    // the gateway reads them.
+    let proposal_rule = ReviewProposalRule::from_env();
+    let author_guidance = model_gateway::author_guidance::AuthorGuidance::from_env();
+    let levers = model_gateway::latency_levers::LatencyLevers::from_env();
+    // What `review()` runs with, for the controls played as documents.
+    let settings = CheckSettings { levers, qualifier_scope: author_guidance.qualifier_scope(), proposal_rule };
+    // An instruction experiment replaces the whole system instruction, the
+    // rule included, so the row would not measure the state it records.
+    anyhow::ensure!(
+        experiment_instruction.is_none() || proposal_rule == ReviewProposalRule::Off,
+        "an instruction experiment replaces the proposal rule"
+    );
+    println!("review proposal rule: {}", proposal_rule.name());
     let route_violation = Arc::new(AtomicBool::new(false));
     // Paired controls include past production failures and independent wording.
     // Labels are human specified; a protocol error never counts as a rejection.
@@ -94,7 +124,9 @@ async fn labeled_live_review() -> anyhow::Result<()> {
         ("table-multiple-defects-v16", INSPECTION, "| Rule | Value |\n|---|---|\n| Inspection approval authority | Operator |\n| Mandatory repairs before dispatch | Only blocking faults |", false),
         ("table-distinct-gates-valid-v16", INSPECTION, "| Rule | Value |\n|---|---|\n| Inspection approval authority | Not specified in the source |\n| Mandatory repairs before dispatch | All faults requiring technical repair |", true),
     ];
-    let mut cases: Vec<_> = cases
+    // (id, sources, candidate, expected, request). A request plays the case
+    // as a document through `check_artifact`; the others go through `review()`.
+    let mut cases: Vec<(String, SourceContext, String, bool, Option<String>)> = cases
         .into_iter()
         .map(|(id, source, candidate, expected)| {
             (
@@ -108,6 +140,7 @@ async fn labeled_live_review() -> anyhow::Result<()> {
                 },
                 candidate.to_owned(),
                 expected,
+                None,
             )
         })
         .collect();
@@ -115,7 +148,28 @@ async fn labeled_live_review() -> anyhow::Result<()> {
         let mut parts = vec!["# Proposed plan".to_owned(), "T1: Complete and approve testing.".to_owned(), format!("T2: Send invitations after {predecessor} is complete.")];
         parts.extend((0..20).map(|index| format!("## Review note {index}")));
         parts.push("T3: Start the pilot after T2 is complete.".to_owned());
-        cases.push((id.to_owned(), SourceContext { sources:vec![Source { id:0,name:"dependency-brief.txt".into(),content:"Invitations require approved testing. Pilot start requires invitations.".into() }] }, parts.join("\n\n"), expected));
+        cases.push((id.to_owned(), SourceContext { sources:vec![Source { id:0,name:"dependency-brief.txt".into(),content:"Invitations require approved testing. Pilot start requires invitations.".into() }] }, parts.join("\n\n"), expected, None));
+    }
+    // Paired proposal-rule controls. Their labels are PROPOSED until the owner
+    // confirms them; every row says so. They are reported apart from the
+    // original cases, whose bar stays comparable, and decide no exit status.
+    let mut proposal_controls = std::collections::BTreeMap::new();
+    for control in proposal_rule_controls::matrix_controls() {
+        proposal_controls.insert(control.id.to_owned(), (control.required_rejections.to_vec(), control.twin, control.reason_terms));
+        cases.push((
+            control.id.to_owned(),
+            SourceContext {
+                sources: control
+                    .sources
+                    .iter()
+                    .enumerate()
+                    .map(|(id, (name, content))| Source { id, name: (*name).into(), content: (*content).into() })
+                    .collect(),
+            },
+            control.candidate,
+            control.expected,
+            control.request.map(str::to_owned),
+        ));
     }
     // Explicitly labelled, fictional saved failures can be replayed with their
     // complete multi-file source context. Labels never enter the model request.
@@ -152,11 +206,11 @@ async fn labeled_live_review() -> anyhow::Result<()> {
                     })
                     .collect(),
             };
-            cases.push((saved.id, context, saved.candidate, saved.expected_accepted));
+            cases.push((saved.id, context, saved.candidate, saved.expected_accepted, None));
         }
     }
     let mut results = Vec::new();
-    for (id, context, candidate, expected) in cases {
+    for (id, context, candidate, expected, user_request) in cases {
         if filter
             .as_ref()
             .is_some_and(|filter| !filter.split(',').any(|item| item == id))
@@ -217,23 +271,39 @@ async fn labeled_live_review() -> anyhow::Result<()> {
             .parse()
             .map_err(|_| anyhow::anyhow!("token metadata format"))?;
         let responses = Arc::new(Mutex::new(Vec::<Value>::new()));
+        // A case played as a document is judged on its first review alone:
+        // the recheck of a reviewer edit or the author's repair would judge
+        // another text. Any later call is stopped before it reaches the model,
+        // and marks that the first review rejected the candidate.
+        let first_review = format!("-source-review-{}", &content_hash(&candidate)[..16]);
+        let stopped_after_review = Arc::new(AtomicBool::new(false));
         let mut infer = |mut request: InferRequest| {
-            if let Some(instruction) = &experiment_instruction {
-                request.messages[0].content = instruction.clone();
-            }
-            if let Some(tokens) = experiment_thinking {
-                request.thinking_budget_tokens = tokens;
-                request.tool_choice = "auto".into();
-            }
-            let review_data: Value = serde_json::from_str(&request.messages[1].content).unwrap();
-            if assertion_experiment {
-                assertion_review_request(&mut request);
-            }
+            let beyond_first_review = user_request.is_some() && !request.request_id.contains(&first_review);
+            let review_data = if beyond_first_review {
+                stopped_after_review.store(true, Ordering::SeqCst);
+                Value::Null
+            } else {
+                if let Some(instruction) = &experiment_instruction {
+                    request.messages[0].content = instruction.clone();
+                }
+                if let Some(tokens) = experiment_thinking {
+                    request.thinking_budget_tokens = tokens;
+                    request.tool_choice = "auto".into();
+                }
+                let review_data: Value = serde_json::from_str(&request.messages[1].content).unwrap();
+                if assertion_experiment {
+                    assertion_review_request(&mut request);
+                }
+                review_data
+            };
             let mut client = client.clone();
             let authorization = authorization.clone();
             let responses = Arc::clone(&responses);
             let route_violation = Arc::clone(&route_violation);
             async move {
+                if beyond_first_review {
+                    return Err(tonic::Status::failed_precondition(VALIDATION_FAILED));
+                }
                 if request.model != "gpt-5.6-terra" || request.provider_hint != "openai-codex-subscription" || request.subscription_connection_id.is_empty() {
                     route_violation.store(true, Ordering::SeqCst);
                     return Err(tonic::Status::failed_precondition("blocked non-Terra evaluation request"));
@@ -265,10 +335,25 @@ async fn labeled_live_review() -> anyhow::Result<()> {
             }
         };
         let start = Instant::now();
-        let result = tokio::time::timeout(
-            Duration::from_secs(75),
-            review(&context, &request, &candidate, &mut infer),
-        )
+        let result = tokio::time::timeout(Duration::from_secs(75), async {
+            let Some(prompt) = &user_request else {
+                return review(&context, &request, &candidate, &mut infer).await;
+            };
+            // As the tool loop checks a document: the request is the active
+            // request and the one user message, so the review gets it as
+            // activeRequest and userRequests.
+            let mut document = request.clone();
+            document.messages = vec![ChatMessage { role: "user".into(), content: prompt.clone(), ..Default::default() }];
+            match check_artifact(settings, Some(&context), &document, prompt, None, None, &candidate, &mut infer).await {
+                Ok((content, Some(receipt))) if content == candidate => Ok(Ok(receipt)),
+                Ok(_) => Ok(Err("accepted only a changed or unreviewed text".to_owned())),
+                // Stopped after a first review that rejected the candidate.
+                Err(status) if status.message() == VALIDATION_FAILED && stopped_after_review.load(Ordering::SeqCst) => {
+                    Ok(Err("the first review rejected the candidate".to_owned()))
+                }
+                Err(status) => Err(status),
+            }
+        })
         .await;
         let (accepted, error) = match result {
             Ok(Ok(Ok(_))) => (Some(true), None),
@@ -279,7 +364,11 @@ async fn labeled_live_review() -> anyhow::Result<()> {
             ),
             Err(_) => (None, Some("timeout".into())),
         };
-        let required_rejections = if id == "table-multiple-defects-v16" { vec![1_u64, 2] } else { Vec::new() };
+        let proposal_control = proposal_controls.get(&id);
+        let required_rejections: Vec<u64> = match id.as_str() {
+            "table-multiple-defects-v16" => vec![1, 2],
+            _ => proposal_control.map(|(required, ..)| required.clone()).unwrap_or_default(),
+        };
         let rejected_indexes: std::collections::BTreeSet<_> = responses.lock().unwrap().iter().filter_map(|response|
             serde_json::from_str::<Value>(response["content"].as_str()?).ok()).flat_map(|report|
             report["checks"].as_array().cloned().unwrap_or_default()).filter(|check|
@@ -287,19 +376,52 @@ async fn labeled_live_review() -> anyhow::Result<()> {
             .filter_map(|check| check.get("i").or_else(|| check.get("index")).and_then(Value::as_u64)).collect();
         let correct = accepted == Some(expected) && required_rejections.iter().all(|index| rejected_indexes.contains(index));
         let ms = start.elapsed().as_millis();
-        results.push(
-            json!({"id":id,"requestedModel":eval_model,"expectedAccepted":expected,"accepted":accepted,"correct":correct,
+        let (case_set, label_status) = if proposal_control.is_some() {
+            (proposal_rule_controls::CASE_SET, proposal_rule_controls::LABEL_STATUS)
+        } else {
+            ("original", "confirmed")
+        };
+        let mut row = json!({"id":id,"caseSet":case_set,"labelStatus":label_status,"requestedModel":eval_model,"expectedAccepted":expected,"accepted":accepted,"correct":correct,
             "requiredRejectedIndexes":required_rejections,"rejectedIndexes":rejected_indexes,
-            "elapsedMs":ms,"error":error,"experimentThinking":experiment_thinking,"experimentInstruction":experiment_instruction.is_some(),"assertionExperiment":assertion_experiment,"responses":*responses.lock().unwrap()}),
-        );
+            "reviewProposalRule":proposal_rule.name(),"reviewRuleId":(proposal_rule == ReviewProposalRule::On).then_some(PROPOSAL_RULE_ID),"authorGuidance":author_guidance.name(),
+            "levers":{"soleNotePrefetch":levers.sole_note_prefetch,"recheckProposesEdits":levers.recheck_proposes_edits,"balancedReviewBatches":levers.balanced_review_batches},
+            "request":user_request,
+            "elapsedMs":ms,"error":error,"experimentThinking":experiment_thinking,"experimentInstruction":experiment_instruction.is_some(),"assertionExperiment":assertion_experiment,"responses":*responses.lock().unwrap()});
+        if let Some((_, twin, terms)) = proposal_control {
+            // A rejection is evidence for the changed clause only when its
+            // reason names it; `annotate_twins` adds whether the twin passed.
+            let reasons = proposal_rule_controls::rejection_reasons(&responses.lock().unwrap());
+            row["twin"] = json!(twin);
+            row["reasonTerms"] = json!(terms);
+            row["reasonNamesChange"] = json!(twin.is_some() && proposal_rule_controls::reason_names_change(&reasons, terms));
+            row["rejectionReasons"] = json!(reasons);
+        }
+        results.push(row);
+        proposal_rule_controls::annotate_twins(&mut results);
         std::fs::write(&report_path, serde_json::to_vec_pretty(&results)?)?;
         println!("{id}: correct={correct} accepted={accepted:?} elapsed_ms={ms}");
         anyhow::ensure!(!route_violation.load(Ordering::SeqCst), "evaluation stopped after a subscription route violation; no further cases were invoked");
     }
-    let failed = results.iter().filter(|r| r["correct"] != true).count();
+    proposal_rule_controls::annotate_twins(&mut results);
+    std::fs::write(&report_path, serde_json::to_vec_pretty(&results)?)?;
+    for case_set in ["original", proposal_rule_controls::CASE_SET] {
+        let rows: Vec<_> = results.iter().filter(|r| r["caseSet"] == case_set).collect();
+        let correct = rows.iter().filter(|r| r["correct"] == true).count();
+        println!("{case_set}: {correct}/{} correct (review proposal rule {})", rows.len(), proposal_rule.name());
+    }
+    // Twin-conditional results, apart: a reject control whose twin was
+    // accepted in this run and whose reason names the changed clause.
+    let twinned: Vec<_> = results.iter().filter(|r| r["twin"].is_string()).collect();
+    let evidence = twinned.iter().filter(|r| r["evidence"] == true).count();
+    let twin_accepted = twinned.iter().filter(|r| r["twinAccepted"] == true).count();
+    println!("{}: {evidence}/{} reject controls are twin-conditional evidence ({twin_accepted} twins accepted; labels {})",
+        proposal_rule_controls::CASE_SET, twinned.len(), proposal_rule_controls::LABEL_STATUS);
+    // Only confirmed labels decide the run.
+    let failed = proposal_rule_controls::gating_failures(&results);
     anyhow::ensure!(
-        failed == 0,
-        "{failed} labeled cases failed; inspect private report"
+        failed.is_empty(),
+        "{} labeled cases with confirmed labels failed; inspect private report",
+        failed.len()
     );
     Ok(())
 }

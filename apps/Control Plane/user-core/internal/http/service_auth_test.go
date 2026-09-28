@@ -169,6 +169,7 @@ func TestServiceScopeForRequest(t *testing.T) {
 		{name: "Space effect policy", method: http.MethodPut, path: "/api/v1/internal/spaces/effect-policy", want: "spaces:policy:write"},
 		{name: "membership write", method: http.MethodPost, path: "/api/v1/internal/memberships/ensure", want: "memberships:write"},
 		{name: "user sync", method: http.MethodPost, path: "/api/v1/internal/users/enrich-from-provider", want: "users:sync"},
+		{name: "mail-task alias resolve", method: http.MethodGet, path: "/api/v1/internal/mail-task/resolve", want: "mail-task:resolve"},
 		{name: "read any", method: http.MethodGet, path: "/api/v1/users/id", want: "users:read:any"},
 		{name: "read self requires delegation", method: http.MethodGet, path: "/api/v1/users/me", userID: "subject", want: "users:read:self"},
 		{name: "write any", method: http.MethodPost, path: "/api/v1/users", want: "users:write:any"},

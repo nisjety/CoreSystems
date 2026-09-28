@@ -1,6 +1,7 @@
 //! Conditional scheduling for a small, explicitly stated dependency graph.
 //! Unrecognized/ambiguous inputs produce no computed schedule. Source dates
 //! remain possible approvals/targets; calculation never approves or books work.
+use crate::source_facts::{clauses, QualifierScope};
 use crate::source_validation::SourceContext;
 use chrono::{Datelike, Duration, NaiveDate};
 use serde::Serialize;
@@ -391,8 +392,17 @@ pub fn computed_schedule(context: &SourceContext) -> Option<Value> {
 }
 
 /// Only explicit earliest-possible, no-repair claims and invented repair
-/// minima are rejected here. Chosen later proposals remain legal.
+/// minima are rejected here. Chosen later proposals remain legal. A
+/// conditional or proposal word exempts its whole line from the repair-minimum
+/// check ([`QualifierScope::Line`]).
 pub fn errors(schedule: Option<&Value>, candidate: &str) -> Vec<String> {
+    errors_scoped(schedule, candidate, QualifierScope::Line)
+}
+
+/// [`errors`] with a conditional or proposal word reaching as far as `scope`
+/// says. Under [`QualifierScope::Clause`], "Feilretting tar minst én dag.
+/// Forslag: …" still asserts a repair minimum in its first sentence.
+pub fn errors_scoped(schedule: Option<&Value>, candidate: &str, scope: QualifierScope) -> Vec<String> {
     let Some(schedule) = schedule else {
         return vec![];
     };
@@ -416,11 +426,20 @@ pub fn errors(schedule: Option<&Value>, candidate: &str) -> Vec<String> {
                 r"(?i)\b{}(?:en|et)?\b[^.;!?\n]{{0,60}}?\b(?:tar|trenger|krever|takes|requires|needs)\s+(?:minst|at least)\s+(?:\d|en\b|én\b|ett\b|to\b|tre\b|one\b|two\b|three\b)",
                 regex::escape(task)
             )).expect("escaped task name");
-            if minimum.is_match(line)
-                && !["hvis ", "dersom ", "if ", "forslag", "proposal", "hypotes"]
+            let qualified = |text: &str| {
+                ["hvis ", "dersom ", "if ", "forslag", "proposal", "hypotes"]
                     .iter()
-                    .any(|word| lower.contains(word))
-            {
+                    .any(|word| text.contains(word))
+            };
+            let asserted = if qualified(&lower) {
+                scope == QualifierScope::Clause
+                    && clauses(line).into_iter().any(|clause| {
+                        minimum.is_match(clause) && !qualified(&clause.to_lowercase())
+                    })
+            } else {
+                minimum.is_match(line)
+            };
+            if asserted {
                 errors.push(format!("No duration is supplied for {task}. Do not assert a minimum repair duration/date range. Keep it unestimated; a suggested buffer is not an estimate."));
             }
         }
@@ -559,6 +578,39 @@ mod tests {
             "Hvis feilretting tar minst to dager, må planen revurderes."
         )
         .is_empty());
+    }
+    /// v2 ends every risk bullet with a labelled proposal. Under `Line` the
+    /// proposal word exempts the whole line, so an invented repair minimum
+    /// before it passes; under `Clause` only the proposal's own cell or
+    /// sentence is exempt. A conditional in the same sentence still exempts
+    /// the claim, and `Clause` never reports less than `Line`.
+    #[test]
+    fn a_proposal_exempts_only_its_own_sentence_under_clause_scope() {
+        let schedule = computed_schedule(&context(PLAN)).expect("complete explicit chain");
+        let clause = |text: &str| errors_scoped(Some(&schedule), text, QualifierScope::Clause);
+        for defect in [
+            "- Risiko: feilretting tar minst én dag. Forslag: sett av tid etter testen.",
+            "- Risiko: feilretting trenger minst to dager; forslag: avklar dekningen.",
+            "| Feilretting tar minst to dager | ikke oppgitt | forslag: etter testen |",
+        ] {
+            assert!(errors(Some(&schedule), defect).is_empty(), "{defect}");
+            assert!(!clause(defect).is_empty(), "{defect}");
+        }
+        for clean in [
+            "Hvis feilretting tar minst én dag, flyttes invitasjonen. Forslag: avklar varigheten.",
+            "Feilretting er ikke estimert. Forslag: sett av 24.–25. september som buffer.",
+            "- Risiko: feilretting har ingen oppgitt varighet og kan forsinke invitasjonen. Forslag: avklar varigheten.",
+        ] {
+            assert_eq!(clause(clean), Vec::<String>::new(), "{clean}");
+        }
+        for line in [
+            "Feilretting med påfølgende kontroll tar minst 24.–25. september.",
+            "Hvis skjemaet godkjennes 16. september: Tidligste mulige avsendingsdato for invitasjoner er fredag 25. september (forutsatt ingen blokkerende feil i brukertest).",
+        ] {
+            let line_errors = errors(Some(&schedule), line);
+            assert!(!line_errors.is_empty(), "{line}");
+            assert_eq!(clause(line), line_errors, "{line}");
+        }
     }
     #[test]
     fn changed_names_durations_absence_and_cycles_are_not_fixture_answers() {

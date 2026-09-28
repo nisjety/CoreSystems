@@ -257,10 +257,17 @@ pub async fn handle_enter_plan_mode<P: EventPublisher>(
 ///
 /// Returns `Status::invalid_argument` if `req.run_id` is empty. Event-publish
 /// failures are logged and non-fatal, not surfaced as an `Err`.
+///
+/// `plan_id` is the durable receipt/lineage binding plan-gate adds (§2.3):
+/// the id of the `Plan` row this grant was approved against, or empty for a
+/// caller with no plan-gate plan (the pre-existing gRPC `ExitPlanMode` path,
+/// and coordinator's own tests). It is a plain Rust parameter, not a proto
+/// field — `sessions.proto`'s `ExitPlanModeRequest` stays untouched.
 pub async fn handle_exit_plan_mode<P: EventPublisher>(
     store: &PlanModeStore,
     publisher: &P,
     req: ExitPlanModeRequest,
+    plan_id: &str,
 ) -> Result<ExitPlanModeResponse, Status> {
     if req.run_id.is_empty() {
         return Err(Status::invalid_argument("run_id is required"));
@@ -308,6 +315,13 @@ pub async fn handle_exit_plan_mode<P: EventPublisher>(
                 // changed.
                 "granted_rung": mp_contracts::autonomy::label(escalation.to()),
                 "justification": escalation.justification(),
+                // plan-gate §2.3: the pointer from this durable, correlation-
+                // id-bearing grant event to the exact `Plan` row (with its
+                // edited `PlanStep`s) it was approved against — the
+                // rung-grant's receipt/lineage binding. Omitted (not merely
+                // empty-stringed) when there is no plan, so an older reader
+                // doing `payload.get("plan_id")` sees an honest absence.
+                "plan_id": (!plan_id.is_empty()).then(|| plan_id.to_owned()),
             }),
             zdr: false,
         };
@@ -644,6 +658,7 @@ mod tests {
                 granted_rung: mp_contracts::model_plane::v1::AutonomyRung::WorkspaceWrite as i32,
                 justification: "the approved plan writes its report into the workspace".to_owned(),
             },
+            "plan_abc123",
         )
         .await
         .expect("exit plan mode");
@@ -651,6 +666,7 @@ mod tests {
         assert_eq!(exited.len(), 1);
         assert_eq!(exited[0].0, "mp.v1.run.run-1.event");
         assert_eq!(exited[0].1.event_type, "RUN_PLAN_MODE_EXITED");
+        assert_eq!(exited[0].1.payload["plan_id"], "plan_abc123");
     }
 
     #[test]
@@ -796,6 +812,7 @@ mod tests {
                 granted_rung: mp_contracts::model_plane::v1::AutonomyRung::WorkspaceWrite as i32,
                 justification: "the plan only writes a report".to_owned(),
             },
+            "",
         )
         .await
         .expect("a justified escalation from READ_ONLY is valid");
@@ -804,6 +821,21 @@ mod tests {
             store.granted_rung("org-1", "thread-1"),
             Some(mp_contracts::model_plane::v1::AutonomyRung::WorkspaceWrite),
             "the next run on this thread must see the rung the human granted"
+        );
+        // An empty plan_id (a caller with no plan-gate plan, e.g. the
+        // pre-existing gRPC ExitPlanMode path) is OMITTED, not empty-stringed
+        // — a reader doing payload.get("plan_id") sees an honest absence
+        // rather than a value that looks like a real, empty plan id.
+        let exited = publisher.drain();
+        assert_eq!(exited.len(), 1);
+        assert!(
+            exited[0]
+                .1
+                .payload
+                .get("plan_id")
+                .map_or(true, |v| v.is_null()),
+            "empty plan_id must not appear as a truthy/present field: {:?}",
+            exited[0].1.payload
         );
     }
 }

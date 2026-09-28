@@ -170,6 +170,15 @@ fn test_state(quarry_edge_url: String) -> AppState {
         studio_store: crate::domains::studio::StudioStore::new(),
         allow_dev_actor_headers: false,
         allow_dev_auth_bypass: false,
+        mail_task_ingest_service_token: "mail-task-test-secret-at-least-32-bytes".into(),
+        mail_task_rate_limiter: crate::rate_limit::RateLimiter::from_cache_with_rpm(
+            &ResultCache::disabled(),
+            20.0,
+        ),
+        mail_task_nats_url: String::new(),
+        mail_task_nats_user: String::new(),
+        mail_task_nats_password: String::new(),
+        mail_task_pipeline: None,
     }
 }
 

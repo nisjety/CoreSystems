@@ -164,3 +164,40 @@ func IssueSharedThreadReadDecision(
 		[]string{"thread:read"}, evidence.Privacy.ZeroDataRetention, now,
 	), nil
 }
+
+// IssueOwnScheduledThreadReadDecision authorizes one short-lived read of a
+// personal Space's OWN owner over the system-owned (schedule) threads inside
+// their own Space (chat-wave2 "schedule" spec §2.4).
+//
+// Deliberately reuses the identical action id, schema hash, permission, and
+// payload-digest formula as IssueSharedThreadReadDecision (model.thread.read
+// / sha256:thread-read-v1 / thread:read / sharedThreadReadPayloadDigest — the
+// digest function binds whatever evidence it is given, it does not care
+// whether that evidence came from a shared-room or a personal-Space
+// resolver). Session Core's existing verifier therefore needs NO change: it
+// already just checks the signed decision's action/schema/digest, not which
+// issuance path produced it. What differs is only the evidence and the
+// validator: ValidateForOwnScheduledThreadRead requires KindPersonal + role
+// "owner" instead of ValidateForSharedThreadRead's "non-personal, current
+// audience member" — so a token minted here can never be mistaken for, or
+// replayed as, a shared-room read grant.
+func IssueOwnScheduledThreadReadDecision(
+	evidence PersonalThreadDecisionEvidence,
+	request SharedThreadReadDecisionRequest,
+	now time.Time,
+) (Decision, error) {
+	if err := evidence.ValidateForOwnScheduledThreadRead(); err != nil {
+		return Decision{}, err
+	}
+	if err := request.Validate(); err != nil {
+		return Decision{}, err
+	}
+	if now.IsZero() {
+		return Decision{}, fmt.Errorf("own scheduled thread read decision issuance time is required")
+	}
+	return newEvidenceDecision(
+		evidence, request.DecisionRef, request.Audience(), threadReadAction, threadReadSchema,
+		sharedThreadReadPayloadDigest(evidence, request), request.IdempotencyKey, request.Nonce,
+		[]string{"thread:read"}, evidence.Privacy.ZeroDataRetention, now,
+	), nil
+}

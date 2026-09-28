@@ -119,10 +119,11 @@ func Catalog() []Provider {
 	})
 }
 
-// OpenAICodexSubscription is not in OAuthCatalog: the official Codex
-// app-server owns its ChatGPT device-code exchange and refreshed auth state.
-// Integration Core persists only a connection reference and brokers bounded
-// text inference for Model Plane.
+// OpenAICodexSubscription is not in OAuthCatalog: the Codex CLI runs its
+// ChatGPT device-code sign-in, and Integration Core keeps and refreshes the
+// resulting sign-in in its own per-connection storage. The database holds
+// only a connection reference, and Integration Core brokers bounded text
+// inference for Model Plane without ever sharing the ChatGPT token.
 func OpenAICodexSubscription() Provider {
 	return Provider{
 		Key:              "openai-codex-subscription",
@@ -134,7 +135,7 @@ func OpenAICodexSubscription() Provider {
 		Capabilities: []Capability{{
 			Key:         "model.inference",
 			Label:       "Subscription-backed text inference",
-			Description: "Use the connected ChatGPT subscription through the official Codex app-server. CoreSystem never receives a reusable ChatGPT token.",
+			Description: "Use the connected ChatGPT subscription for text inference. Integration Core holds the sign-in in its own storage and never shares the ChatGPT token with other CoreSystem services.",
 			Sensitive:   true,
 		}},
 		Bundles: []Bundle{{
@@ -1843,6 +1844,33 @@ func NormalizeKey(key string) string {
 	default:
 		return normalized
 	}
+}
+
+// personalProviderKeys are the normalized catalog keys (see NormalizeKey)
+// of providers whose connections are scoped to the individual end user who
+// authorized them — their own OneDrive/Google Drive, mailbox, calendar, and
+// contacts — rather than to the organization as a whole. Every other
+// provider (Slack, GitHub, Notion, Shopify, Stripe, Meta, ...) represents
+// an org-wide/shared connector: whoever connected it did so on the
+// organization's behalf, and any org member with access may use it.
+//
+// Owner ruling (security-personal-connections, 2026-09-28): a personal
+// connection is usable ONLY by the user who connected it, including when
+// an agent acts "for" that user — never another org member, an org
+// admin/owner, or a service call that names no end user. See
+// integration-corev2's internal/api.assertConnectionAccess for the
+// enforcement built on top of IsPersonalProvider.
+var personalProviderKeys = map[string]bool{
+	"microsoft": true,
+	"google":    true,
+}
+
+// IsPersonalProvider reports whether providerKey — or any of its known
+// aliases/connector-type spellings normalized by NormalizeKey (e.g.
+// "microsoft-graph", "onedrive", "outlook", "google-workspace", "gmail") —
+// identifies a personal, single-user connection.
+func IsPersonalProvider(providerKey string) bool {
+	return personalProviderKeys[NormalizeKey(providerKey)]
 }
 
 func ResolveCapabilities(provider Provider, requestedCapabilities, requestedBundles []string) []string {

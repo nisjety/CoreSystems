@@ -189,8 +189,8 @@ func TestCodexSubscriptionInferMarksMissingAuthenticationForReconnect(t *testing
 	if err := json.NewDecoder(resp.Body).Decode(&decoded); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
-	if decoded.Error.Code != "subscription_reauthentication_required" {
-		t.Fatalf("error code = %q, want subscription_reauthentication_required", decoded.Error.Code)
+	if decoded.Error.Code != "subscription_reauth_required" {
+		t.Fatalf("error code = %q, want subscription_reauth_required", decoded.Error.Code)
 	}
 	connection, err := repo.GetConnection(t.Context(), "conn-stale-subscription")
 	if err != nil {
@@ -201,10 +201,87 @@ func TestCodexSubscriptionInferMarksMissingAuthenticationForReconnect(t *testing
 	}
 }
 
+func TestCodexSubscriptionReportsUsageAndPhasesOnBothRoutes(t *testing.T) {
+	cfg, repo, service := testOAuthStack(t)
+	runner := &apiCodexRunner{
+		usage:  &codexsubscription.TokenUsage{InputTokens: 1800, CachedInputTokens: 1024, CacheWriteInputTokens: 256, OutputTokens: 120, ReasoningOutputTokens: 40},
+		phases: map[string]int64{codexsubscription.PhaseSpawn: 41, codexsubscription.PhaseTurnTotal: 9000},
+	}
+	manager, err := codexsubscription.NewManager(codexsubscription.Config{Enabled: true, Home: t.TempDir()}, runner)
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	if _, err := repo.UpsertConnection(t.Context(), store.Connection{
+		ID:             "conn-usage",
+		ProviderKey:    codexsubscription.ProviderKey,
+		ConnectorType:  codexsubscription.ConnectorType,
+		OrganizationID: "org-1",
+		UserID:         "user-1",
+		Status:         "active",
+		Capabilities:   []string{codexsubscription.Capability},
+	}); err != nil {
+		t.Fatalf("UpsertConnection: %v", err)
+	}
+	app := NewServer(ServerConfig{Config: cfg, Repo: repo, OAuth: service, CodexSubscriptions: manager})
+	body := `{"organizationId":"org-1","userId":"user-1","connectionId":"conn-usage","requestId":"req-usage","model":"gpt-5.6-terra","messages":[{"role":"user","content":"hello"}]}`
+	send := func(path string) string {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-Internal-API-Key", "codex-subscription-test-key")
+		resp, err := app.Test(req)
+		if err != nil {
+			t.Fatalf("app.Test %s: %v", path, err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("%s status = %d, want 200", path, resp.StatusCode)
+		}
+		payload, err := io.ReadAll(resp.Body)
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		return string(payload)
+	}
+	const usage = `"usage":{"inputTokens":1800,"cachedInputTokens":1024,"cacheWriteInputTokens":256,"outputTokens":120,"reasoningOutputTokens":40}`
+	const phases = `"phasesMs":{"spawn":41,"turn_total":9000}`
+
+	unary := send("/internal/model-subscriptions/openai-codex/infer")
+	if !strings.Contains(unary, usage) || !strings.Contains(unary, phases) {
+		t.Fatalf("unary envelope lacks usage or phases: %s", unary)
+	}
+
+	stream := send("/internal/model-subscriptions/openai-codex/infer/stream")
+	done := strings.Index(stream, `"type":"done"`)
+	if done < 0 {
+		t.Fatalf("stream has no done event: %s", stream)
+	}
+	doneEvent := stream[done:]
+	if !strings.Contains(doneEvent, usage) || !strings.Contains(doneEvent, phases) {
+		t.Fatalf("done event lacks usage or phases: %s", doneEvent)
+	}
+	if head := stream[:done]; strings.Contains(head, `"usage"`) || strings.Contains(head, `"phasesMs"`) {
+		t.Fatalf("usage or phases leaked onto a non-terminal event: %s", head)
+	}
+}
+
+func TestCodexSubscriptionDoneEventOmitsUnreportedUsage(t *testing.T) {
+	encoded, err := json.Marshal(codexSubscriptionStreamEvent{Type: "done", RequestID: "req-1", ModelUsed: "gpt-5.6-terra"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// An older Model Plane build parses exactly this shape.
+	if string(encoded) != `{"type":"done","requestId":"req-1","modelUsed":"gpt-5.6-terra"}` {
+		t.Fatalf("done event = %s", encoded)
+	}
+}
+
 type apiCodexRunner struct {
 	lastRequest codexsubscription.InvokeRequest
 	invocations int
 	invokeErr   error
+	usage       *codexsubscription.TokenUsage
+	phases      map[string]int64
 }
 
 func (r *apiCodexRunner) BeginDeviceLogin(context.Context, string) (codexsubscription.LoginProcess, codexsubscription.DeviceCode, error) {
@@ -217,7 +294,7 @@ func (r *apiCodexRunner) Invoke(_ context.Context, _ string, request codexsubscr
 	if r.invokeErr != nil {
 		return codexsubscription.InvokeResponse{}, r.invokeErr
 	}
-	return codexsubscription.InvokeResponse{RequestID: request.RequestID, Content: "subscription answer", ModelUsed: request.Model}, nil
+	return codexsubscription.InvokeResponse{RequestID: request.RequestID, Content: "subscription answer", ModelUsed: request.Model, Usage: r.usage, PhasesMs: r.phases}, nil
 }
 
 func (r *apiCodexRunner) InvokeStream(_ context.Context, _ string, request codexsubscription.InvokeRequest, onDelta func(string) error) (codexsubscription.InvokeResponse, error) {
@@ -231,7 +308,7 @@ func (r *apiCodexRunner) InvokeStream(_ context.Context, _ string, request codex
 	if err := onDelta("answer"); err != nil {
 		return codexsubscription.InvokeResponse{}, err
 	}
-	return codexsubscription.InvokeResponse{RequestID: request.RequestID, Content: "subscription answer", ModelUsed: request.Model}, nil
+	return codexsubscription.InvokeResponse{RequestID: request.RequestID, Content: "subscription answer", ModelUsed: request.Model, Usage: r.usage, PhasesMs: r.phases}, nil
 }
 
 func (r *apiCodexRunner) Logout(context.Context, string) error { return nil }

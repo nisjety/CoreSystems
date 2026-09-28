@@ -77,57 +77,36 @@ const INTERACTIVE_RUN_CHOICE: WorkflowChoice = {
     'Trenger ingen egen input: målet utledes fra oppgavetittelen og beskrivelsen. Fyll bare ut hvis du vil overstyre.',
 }
 
-const WORKFLOW_CHOICES: readonly WorkflowChoice[] = [
-  INTERACTIVE_RUN_CHOICE,
-  {
-    value: 'DeepTaskWorkflow',
-    label: 'DeepTaskWorkflow — flere steg etter hverandre',
-    needsInput: true,
-    deniesZdr: false,
-    inputExample: '{\n  "steps": [\n    { "goal": "Hent tallene" },\n    { "goal": "Skriv sammendraget" }\n  ]\n}',
-    inputHelp: 'Krever «steps» med minst ett steg, og hvert steg må ha en ikke-tom «goal».',
-  },
-  {
-    value: 'WideResearchWorkflow',
-    label: 'WideResearchWorkflow — parallelle søk som flettes',
-    needsInput: true,
-    deniesZdr: false,
-    inputExample: '{\n  "queries": ["marked 2026", "konkurrenter"],\n  "merge_strategy": "dedupe"\n}',
-    inputHelp: 'Krever «queries» med minst ett ikke-tomt søk. «merge_strategy»: concat, dedupe eller summarize.',
-  },
-  {
-    value: 'EvaluatorOptimizerWorkflow',
-    label: 'EvaluatorOptimizerWorkflow — generer, vurder, forbedre',
-    needsInput: true,
-    deniesZdr: false,
-    inputExample: '{\n  "task": "Skriv ukesrapporten",\n  "rubric": "Presis, kortfattet, med kilder",\n  "max_rounds": 3\n}',
-    inputHelp: 'Krever «task» (ikke «goal»). «rubric», «max_rounds» og «pass_threshold» er valgfrie.',
-  },
-  {
-    value: 'MemoryConsolidationWorkflow',
-    label: 'MemoryConsolidationWorkflow — rydd i minnet',
-    needsInput: true,
-    deniesZdr: true,
-    inputExample: '{\n  "max_items": 200\n}',
-    inputHelp: 'Trenger ingen felter — «{}» er nok. «max_items» begrenser hvor mye som konsolideres per kjøring.',
-  },
-  {
-    value: 'SkillPromotionWorkflow',
-    label: 'SkillPromotionWorkflow — forfremme en skill',
-    needsInput: true,
-    deniesZdr: true,
-    inputExample: '{\n  "skill_id": "skill_...",\n  "to_scope": "org"\n}',
-    inputHelp: 'Krever både «skill_id» og «to_scope».',
-  },
-  {
-    value: 'FeedbackPromotionWorkflow',
-    label: 'FeedbackPromotionWorkflow — forfremme lært mønster',
-    needsInput: true,
-    deniesZdr: true,
-    inputExample: '{\n  "min_samples": 20,\n  "promote_threshold": 0.8\n}',
-    inputHelp: 'Trenger ingen felter — «{}» er nok. «min_samples» og «promote_threshold» styrer terskelen.',
-  },
-]
+// DEFECT (chat-wave2 "schedule" spec §1, confirmed real and pre-existing,
+// independent of that spec's own feature): of the seven workflow types this
+// form used to offer, capability-core's `workflow_dispatcher.go` —
+// `reauthorizeScheduleFire` — hard-rejects every scoped scheduled fire whose
+// `workflow_type` is not exactly `InteractiveRunSupervision` the moment
+// `PrepareScheduledRunThread` returns a prepared thread (which it always
+// does once a schedule fires):
+//   if req.GetWorkflowType() != DefaultWorkflowType {
+//       return fmt.Errorf("taskexec: scoped scheduled run %s requires %s, got %s", …)
+//   }
+// So DeepTaskWorkflow, WideResearchWorkflow, EvaluatorOptimizerWorkflow,
+// MemoryConsolidationWorkflow, SkillPromotionWorkflow and
+// FeedbackPromotionWorkflow fail EVERY fire of a schedule that names them —
+// silently, from this form's point of view: the schedule is accepted at
+// creation time and only shows the failure later, per-fire, in
+// `cron_fires.status`/`task_events`, nowhere this UI surfaces. Fixing the
+// dispatcher itself (making those types actually fireable) is a Model-Plane
+// change out of scope here; this stops OFFERING the six that can never work,
+// which is the minimum "at least stop shipping a guaranteed footgun" fix.
+// `INTERACTIVE_RUN_CHOICE` — the one type `workflow_dispatcher.go` accepts —
+// is left as the array's only entry so `workflowChoice()`'s lookup/fallback
+// and the (now-dead-but-harmless) `needsInput`/`inputExample` machinery below
+// keep working unchanged for it, and an EXISTING schedule created earlier
+// with one of the six broken types still displays correctly in the list
+// (`scheduleWorkflowType`/`workflowChoice` fall back to
+// `INTERACTIVE_RUN_CHOICE`'s label only for an unrecognized value, which is
+// not quite right for those six specifically, but showing a plain string
+// stored on the row is preferable to `<option>` re-adding the ability to
+// pick a workflow that cannot fire).
+const WORKFLOW_CHOICES: readonly WorkflowChoice[] = [INTERACTIVE_RUN_CHOICE]
 
 const DEFAULT_WORKFLOW = INTERACTIVE_RUN_CHOICE.value
 

@@ -2,6 +2,8 @@
 
 > **Execution update — 2026-09-19:** [Q05–Q07](../product-recordings/evidence/PRODUCT_RECORDING_Q05_Q07_2026-09-19.md) supersedes the older delivery/parse/retry and memory edit/forget findings below. Source isolation, deletion across a background cycle, schema-bearing skill reviews and one delayed retry recovery were verified locally. Historical exhausted events are not all recovered; grounding remains disabled and audit outbox delivery is still unhealthy. [Q08–Q10](../product-recordings/evidence/PRODUCT_RECORDING_Q08_Q10_2026-09-19.md) tracks the current product recording gate. The research and earlier observations remain historical evidence.
 
+> **Execution update — 2026-09-24:** §7 root-causes the §5.5 parse failure and records the parser fix, corrects the §5.4 default-model claim, and adds the memory lineage and deletion fixes and the `memory-dedup` tool. `MEMORY_GROUNDING_ENABLED` is still off. None of it is deployed yet.
+
 Research and design pass, cross-referencing `CACHE_COMPACTION_AUDIT_2026-09-17.md`,
 `LEARNING_SYSTEM_REDESIGN_2026-09-17.md`, the chat design/UX/implementation docs, and
 `CHAT_PARITY_AUDIT_2026-09-15.md` against 4 additional Hermes Agent docs pages and 7 external
@@ -446,3 +448,202 @@ when explicitly asked" rule.
 whether the "same fact under six keys" pattern actually stops recurring — nothing in this pass
 exercised the feature live against a real conversation, only unit-level proof that its logic and
 safety properties are correct.
+
+## 7. Skill-review parse fix, memory lineage fixes and the dedup tool — 2026-09-24
+
+Two read-only investigations ran on 2026-09-23, one on skill review and one on memory duplicates.
+The fixes followed on 2026-09-24, then a cross-cutting review. **Nothing in this section is
+deployed.** capability-core, session-core, letta-bridge and the Frontend Plane changes ship with
+the launcher rebuild (`build-verevon-services.sh --from model`), and then need live checks. No
+live skill review with the new code, and no dedup run against the live database, has happened.
+
+### 7.1 §5.5 root-caused: why the review reply had no JSON
+
+- The review prompt of 2026-09-17 never asked for JSON. It ended with "Output only the skill
+  candidates you are confident improve future performance." There were no tools, and the JSON
+  shape existed only in a Go comment the model never sees. Claude answered in prose, and
+  `ParseReviewResponse` found no `{`.
+- It looked deterministic because §5.3 set `Zdr: false`, which turned on inference-core's 300 s
+  response cache for the review call. The instant `Nak` redeliveries were served the same cached
+  reply.
+- That was already fixed on 2026-09-19 in the running image. The prompt requires a JSON object,
+  the model must answer through the `submit_skill_review` tool with a schema, `MaxTokens` is 4096,
+  and truncation and refusal are detected. §5.5's `reviewMaxTokens: 2048` question is answered.
+- **A second parse bug was still live.** `extractJSONObject` (`internal/learning/reviewer.go`)
+  cut the reply at the first triple backtick anywhere, including inside a skill's own text, and it
+  also ran on tool-call arguments. A skill containing a fenced `bash` block or one inline triple
+  backtick failed with "review response contained no JSON object". A fenced `json` example failed
+  as "schema invalid". This was reproduced against the repo code with `go test -overlay`. The
+  first useful procedural skill with a code block would have been retried and then dropped.
+- §5.5's backoff gap is closed. `NakWithDelay` retries after 30 s, 2 min, 10 min and 30 min, and
+  configuration and permission errors are terminated instead of retried.
+
+### 7.2 Live state on 2026-09-23 (read-only)
+
+- capability-core logged 319 "learning review completed" since 2026-09-19 14:15Z, all with
+  `skills_persisted: 0`. "no JSON object" appeared 0 times.
+- 309 of those 319 runs were in conversation-only threads. Those reviews return before calling the
+  model, but were logged as "completed". Only 10 reviews reached the model, all on 2026-09-19, all
+  2-message chats. None errored and none persisted a skill.
+- Every thread created since 2026-09-20 is conversation-only (240 threads). The recording and e2e
+  journeys choose "Kun samtalen", while the UI default is workspace (`DashboardComposer.tsx`). So
+  no recorded run is reviewed for skills.
+- `agent_skills` = 0 rows. The JetStream consumer was fully caught up: 0 pending, 0 redelivered.
+
+### 7.3 Fixes F1–F6 (capability-core)
+
+- **F1, parser** (`internal/learning/reviewer.go`). A new strict `ParseReviewJSON` handles tool-call
+  arguments whenever a tool call is present, and reply text next to a tool call is ignored. The
+  text path tries a JSON decode at each `{` and returns the first complete object with a `skills`
+  key. It no longer slices on backticks or braces, and its total decoding work is bounded: a
+  hostile 64 KiB reply of unclosed nesting went from 4.1 s to about 1 ms. Fenced `bash`, inline
+  triple backticks, fenced `json` and brace text now parse. Truncated objects, `{}`, bad
+  candidates and oversized replies are still rejected.
+- **F2, diagnostics.** Parse failures return a typed `ParseError` with a reason: `no_json`,
+  `syntax`, `missing_skills`, `candidate_invalid` or `size`. `llmreviewer.ResponseError` logs the
+  source (tool or text), the raw length and the reason, never reply content. The skillsink upsert
+  error no longer quotes the model-written skill name.
+- **F3, cache.** The review call sends gRPC metadata `cache-control: no-store`. inference-core
+  honours it and neither reads nor writes its response cache for that call.
+- **F4, visibility.** A skipped run logs "learning review skipped" with `reason` =
+  `conversation_scope`, `empty_transcript`, `retention_posture` or `provider_refusal`. "learning
+  review completed" is logged only when the model was called, now with `candidates` and
+  `selected` next to `skills_persisted`. The retention-skip line quoted in §4.2 no longer exists in
+  that form.
+- **F5, timeout.** Each message first gets `msg.InProgress()`, then a review deadline of AckWait
+  minus 20 s (100 s of the provisioned 120 s). A review that hits the deadline is retried with a
+  delay, never terminated. A slow review can no longer be redelivered mid-flight and reviewed
+  twice.
+- **F6, limit.** `RunConsumer` reads AckWait and MaxDeliver from the consumer info at bind time.
+  The hard-coded 5 is gone. If the read fails, it falls back to 120 s and 5 with a warning.
+- Side fix: `GET /api/v1/tasks` caps `limit` (0 or less, or over 200, becomes 50).
+- The full capability-core suite passes (31 packages with tests). The new parser tests failed
+  against the old parser (3 tests, 7 subtests). The live-NATS tests were not run.
+- Live check after the rebuild: a multi-turn chat in workspace scope (not "Kun samtalen") that
+  teaches a procedure with a code block. Expect no "cache hit" for the review in inference-core,
+  `agent_skills` above 0 with origin `background_review`, and 0 redeliveries.
+
+### 7.4 Correction to §5.4: the default model
+
+§5.4 says `DEFAULT_ANTHROPIC_MODEL` (`claude-sonnet-4-20250514`) is the "Verevon Auto" fallback for
+both `anthropic` and `azure-anthropic`, so any unpinned azure-anthropic request would 404. That is
+wrong.
+
+- `DEFAULT_ANTHROPIC_MODEL` applies only to the direct `anthropic` provider
+  (`inference-core/src/provider/fallback.rs`, `default_model_for`).
+- `azure-anthropic` has its own default, `ProviderDefaults.azure_anthropic`. It is
+  `claude-haiku-4-5` (`DEFAULT_AZURE_ANTHROPIC_MODEL`) when that name is in
+  `AZURE_ANTHROPIC_DEPLOYMENTS`, and otherwise the first configured deployment
+  (`azure_default_deployment`). An unpinned azure-anthropic request therefore resolves to a real
+  deployment.
+- The 404 in §5.4 came from capability-core itself: `llmreviewer.DefaultModel` sends
+  `claude-sonnet-4-20250514` as an explicit model. The Compose default
+  `LEARNING_REVIEW_MODEL=claude-sonnet-4-5` still covers that.
+- The separate look §5.4 asked for is not needed for azure-anthropic.
+
+### 7.5 Memory duplicates: live state on 2026-09-23 (read-only)
+
+- Migration 0037 is applied (2026-09-17 21:35:34 UTC) and its checksum matches the file. No row
+  uses the lineage yet: 51 of 51 rows are `is_latest = true` and none has `supersedes_id`.
+- 8 near-duplicate clusters hold 20 rows. 12 of them could be retired, taking 51 current rows to
+  39. The clusters were found with a lexical score and checked by reading. No classifier calls
+  were made.
+- The biggest clusters restate the product-recording journey prompts: drafts only, source notes in
+  a separate internal note, the Fjordform pilot. The extractor never saw the existing slot names,
+  so every new thread minted new keys.
+- The set is frozen for now. Every new thread since 2026-09-19 15:00 is conversation-scope, and
+  Dreaming skips those (782 `skipped_conversation_scope` runs).
+- Grounding is off in `model-plane-session-core-1` (`MEMORY_GROUNDING_ENABLED=0`).
+
+### 7.6 `MEMORY_GROUNDING_ENABLED` is still off, and enabling it would not clean these rows
+
+The flag stays at its Compose default of `0` (`apps/Model Plane/deploy/docker-compose.yml`).
+Turning it on would not remove the existing duplicates:
+
+1. It runs only on new background candidates. Nothing re-reads stored rows, so all 12 redundant
+   rows would stay current.
+2. Its key tier matches none of the eight clusters. Run over the live keys, it matches one pair,
+   `employer`/`employer_sector`, which is not a duplicate.
+3. Its semantic tier for user scope asks for the 5 most recently updated entries, not the 5 most
+   similar (`list_detailed(org, user, 5)`). With the flag off, user-scope rows were never mirrored
+   to the semantic store, so today's duplicates are probably not there to find. (The semantic
+   store was not queried.)
+4. Other write paths stay ungrounded: the AppendMessage phrase matcher, manual
+   `save_memory`/IndexMemory, and "Rediger".
+5. Candidates from the same extraction are not compared with each other.
+
+The path for existing rows is the dedup tool (7.8).
+
+### 7.7 Lineage and deletion fixes (session-core, letta-bridge, BFF, SPA)
+
+1. **Retired rows no longer come back through the semantic store.**
+   `memory_control::filter_forgotten` also drops semantic entries whose durable row is retired
+   (`is_latest = false`). That covers SearchMemory, ListMemory, grounding's semantic tier and chat
+   context assembly. A lineage write now also removes the retired row's mirror.
+2. **DeleteMemory deletes what the caller owns.** `delete_user_memory` returns Deleted, Absent or
+   NotOwned, with the ownership check inside the SQL: user-scope rows the caller owns, and
+   thread-scope rows in the caller's own threads. Before, a "deleted" thread-scope row survived in
+   Postgres and kept being injected, while the RPC said `deleted: true`. Retired ancestors go with
+   the row (a recursive CTE with a CYCLE guard), and each is recorded as forgotten. NotOwned
+   returns NOT_FOUND without touching the semantic tier.
+3. **letta-bridge Delete is scoped** to the caller's org and user, checked with a GET first, and
+   `deleted` comes from the server's reply. Before, it could erase another user's memory by id and
+   reported erasures that never happened.
+4. **Writes on a retired key go to the lineage head**, or revive an orphaned row, so a correction
+   cannot disappear into a hidden row. They are counted in
+   `mp_session_memory_retired_key_writes_total`.
+5. **The extractor sees the existing slot names**: the user's and the thread's current `llm` slot
+   names (names only, newest 40 per scope), with one instruction to reuse them.
+6. **"Rediger" and "Glem" report what happened.** The BFF `correct_memory` response gains
+   `original: removed | not_found | not_removed`, and the SPA keeps the original row when it was
+   not removed. The cross-review also stopped recalled-memory text from being saved in browser
+   storage, so a forgotten memory cannot come back on reload.
+
+session-core passes 370 unit tests plus 12 DB tests run on a throwaway Postgres 16.14 container.
+letta-bridge passes 61. None of it ran against the live database.
+
+### 7.8 The `session-core memory-dedup` tool
+
+A subcommand of the session-core binary. It opens only a database pool: no gRPC, HTTP, NATS,
+workers or migrations.
+
+- **`plan`** (the default mode) runs in a `REPEATABLE READ READ ONLY` transaction and refuses to
+  run without migration 0037. It compares current, accepted, unexpired, non-forgotten rows inside
+  their unique-index partitions and keeps the top 5 lexical neighbours per row. It writes
+  `plan.json` to `/tmp`: ids, keys, content SHA-256, `updated_at`, before-state and evidence, but no
+  content. `--classifier off` is deterministic and puts every cluster in the review tier. The
+  default reuses the grounding classifier (`claude-haiku-4-5` through inference-core) without
+  turning grounding on. A cluster is auto tier only if every retired row is a NOOP against the
+  survivor.
+- **Survivor rule:** a user-stated row beats an unknown one, which beats an inferred one; then the
+  newest `updated_at`, higher confidence, longer content, then id. It ignores `kind`, so a cluster
+  whose survivor should be a preference-kind row needs a manual swap in the plan.
+- **`apply --plan <file>`** runs one transaction per auto-tier cluster. It locks the rows and skips
+  the cluster as stale if anything changed since the plan. It flips `is_latest`, chains
+  `supersedes_id` only where it is empty, and never touches `updated_at` or content. It checks
+  that exactly one current row remains and there is no cycle, then writes a `dream_runs` ledger
+  row (`trigger = memory_dedup_backfill`, ids and booleans only). A re-run skips clusters already
+  applied. `--dry-run` reports and rolls back.
+- **`rollback --plan-id <id> [--cluster <id>]`** works from the ledger and reverts only rows still
+  in their after-state.
+
+**Procedure, dry run first.** Only after the launcher rebuild; not yet run live.
+
+1. `docker exec -e RUST_LOG=warn model-plane-session-core-1 session-core memory-dedup plan
+   --classifier off`. The `-e RUST_LOG=warn` matters: the container logs at debug to stdout.
+   Add `--show-content` for previews. Copy the plan out with `docker cp`.
+2. A person reviews `plan.json`, removes clusters or swaps survivors, and sets the chosen clusters'
+   tier to `auto`.
+3. `session-core memory-dedup apply --plan <file> --dry-run`, and read the report.
+4. `session-core memory-dedup apply --plan <file>`.
+5. If needed, `session-core memory-dedup rollback --plan-id <id>`, optionally with `--cluster`.
+
+Caveat: a DeleteMemory after an apply also removes retired ancestors, and a later rollback cannot
+bring them back. It reports them as missing, by design.
+
+### 7.9 Next
+
+1. After the rebuild: the skill-review check in 7.3, and a dry-run `plan` against the live
+   database.
+2. Open product question: whether any recording journey should use workspace scope. Today no
+   recorded run is reviewed for skills, and Dreaming skips every conversation-scope thread.

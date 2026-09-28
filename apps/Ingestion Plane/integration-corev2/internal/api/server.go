@@ -32,6 +32,7 @@ import (
 	"github.com/triodelab/integration-corev2/internal/events"
 	"github.com/triodelab/integration-corev2/internal/handoff"
 	"github.com/triodelab/integration-corev2/internal/hotpath"
+	"github.com/triodelab/integration-corev2/internal/mailtask"
 	"github.com/triodelab/integration-corev2/internal/oauth"
 	"github.com/triodelab/integration-corev2/internal/providers"
 	"github.com/triodelab/integration-corev2/internal/store"
@@ -63,7 +64,14 @@ type ServerConfig struct {
 	// library registered yet) and answer 409 no_sources_registered instead.
 	// Nil-safe: without it the route queues as before.
 	Finspo FinspoSourceLister
-	Logger *zerolog.Logger
+	// MailTask is the inbound "forward an email to create a task" pipeline
+	// (chat-wave2 mail-task spec, owner ruling 2026-09-28: Postmark inbound,
+	// self-forward only). Nil-safe: a nil Handler (and a Handler with
+	// Provider/WebhookSecret unset) both make the route answer 404 without
+	// processing anything -- off by default until the owner finishes the
+	// Postmark account + DNS setup.
+	MailTask *mailtask.Handler
+	Logger   *zerolog.Logger
 }
 
 // FinspoSourceLister is the finspo-core surface the API needs: the org's
@@ -129,6 +137,9 @@ func NewServer(cfg ServerConfig) *fiber.App {
 				"actions":           cfg.Actions != nil,
 				"webhookHotPath":    cfg.HotPath != nil,
 			},
+		}
+		if kind := cfg.CodexSubscriptions.TransportKind(); kind != "" {
+			response["codexSubscriptionTransport"] = string(kind)
 		}
 		if auditMonitor != nil {
 			auditStatus, err := auditMonitor.Status(c.UserContext())
@@ -314,6 +325,12 @@ func NewServer(cfg ServerConfig) *fiber.App {
 			return apiError(c, fiber.StatusInternalServerError, "connections_list_failed", err.Error())
 		}
 		connections = filterConnectionsByCategory(connections, firstNonEmpty(c.Query("category"), c.Query("providerCategory")))
+		// Owner ruling (5): a listing never surfaces another user's personal
+		// Microsoft/Google connection, org-wide connectors unaffected. This
+		// runs regardless of the userId query filter above — including for
+		// an internal/service caller — so it cannot be bypassed by asking
+		// for someone else's userId explicitly.
+		connections = filterPersonalConnectionsForCaller(c, connections)
 		return success(c, fiber.Map{"connections": connectionViews(c.UserContext(), cfg.Repo, organizationID, connections)})
 	})
 
@@ -322,7 +339,7 @@ func NewServer(cfg ServerConfig) *fiber.App {
 		if err != nil {
 			return storeError(c, err, "connection_not_found")
 		}
-		if err := auth.AssertOrgAccess(c, connection.OrganizationID); err != nil {
+		if err := assertConnectionAccess(c, connection); err != nil {
 			return authAwareError(c, err)
 		}
 		return success(c, fiber.Map{"connection": connectionView1(c.UserContext(), cfg.Repo, connection)})
@@ -333,7 +350,7 @@ func NewServer(cfg ServerConfig) *fiber.App {
 		if err != nil {
 			return storeError(c, err, "connection_not_found")
 		}
-		if err := auth.AssertOrgAccess(c, connection.OrganizationID); err != nil {
+		if err := assertConnectionAccess(c, connection); err != nil {
 			return authAwareError(c, err)
 		}
 		return success(c, fiber.Map{
@@ -483,7 +500,7 @@ func NewServer(cfg ServerConfig) *fiber.App {
 		if err != nil {
 			return storeError(c, err, "connection_not_found")
 		}
-		if err := auth.AssertOrgAccess(c, connection.OrganizationID); err != nil {
+		if err := assertConnectionAccess(c, connection); err != nil {
 			return authAwareError(c, err)
 		}
 		token, err := cfg.OAuth.AccessTokenForConnection(c.UserContext(), connection.ID)
@@ -540,7 +557,7 @@ func NewServer(cfg ServerConfig) *fiber.App {
 		if err != nil {
 			return storeError(c, err, "connection_not_found")
 		}
-		if err := auth.AssertOrgAccess(c, connection.OrganizationID); err != nil {
+		if err := assertConnectionAccess(c, connection); err != nil {
 			return authAwareError(c, err)
 		}
 		_, err = cfg.OAuth.DisconnectConnection(c.UserContext(), c.Params("id"), "user_requested")
@@ -558,7 +575,7 @@ func NewServer(cfg ServerConfig) *fiber.App {
 		if connection.DeletedAt != nil {
 			return apiError(c, fiber.StatusNotFound, "connection_not_found", "Connection was not found.")
 		}
-		if err := auth.AssertOrgAccess(c, connection.OrganizationID); err != nil {
+		if err := assertConnectionAccess(c, connection); err != nil {
 			return authAwareError(c, err)
 		}
 		// A metadata-less Microsoft sync is handed to finspo-core, which fans
@@ -592,7 +609,7 @@ func NewServer(cfg ServerConfig) *fiber.App {
 		if connection.DeletedAt != nil {
 			return apiError(c, fiber.StatusNotFound, "connection_not_found", "Connection was not found.")
 		}
-		if err := auth.AssertOrgAccess(c, connection.OrganizationID); err != nil {
+		if err := assertConnectionAccess(c, connection); err != nil {
 			return authAwareError(c, err)
 		}
 		if connection.Status != "active" {
@@ -622,16 +639,15 @@ func NewServer(cfg ServerConfig) *fiber.App {
 		if connection.DeletedAt != nil {
 			return storeError(c, store.ErrNotFound, "connection_not_found")
 		}
-		if err := auth.AssertOrgAccess(c, connection.OrganizationID); err != nil {
+		// Teams history is read through a personal Microsoft connection, so
+		// the centralized owner-ruling-5 gate applies: only the connecting
+		// user (or a caller that names them as the delegated acting user)
+		// may load it. This replaces the route's former bespoke check,
+		// which also exempted an org admin/owner — the current owner
+		// ruling is stricter ("ONLY the user who connected it"), so that
+		// exemption no longer applies here either.
+		if err := assertConnectionAccess(c, connection); err != nil {
 			return authAwareError(c, err)
-		}
-		if !auth.IsInternalCall(c) {
-			principal, ok := auth.PrincipalFromContext(c)
-			role := strings.ToLower(strings.TrimSpace(principal.Role))
-			privileged := role == "owner" || role == "admin"
-			if !ok || (principal.UserID != connection.UserID && !privileged) {
-				return apiError(c, fiber.StatusForbidden, "teams_history_forbidden", "Only the connection owner or a workspace administrator can load this Teams history.")
-			}
 		}
 		teamsReadable := slices.Contains(connection.Capabilities, "teams.messages.read") ||
 			slices.ContainsFunc(connection.Scopes, func(scope string) bool {
@@ -881,6 +897,54 @@ func NewServer(cfg ServerConfig) *fiber.App {
 			return apiError(c, fiber.StatusInternalServerError, "sync_progress_failed", err.Error())
 		}
 		return success(c, fiber.Map{"syncJob": updated})
+	})...)
+
+	// Inbound "forward an email to create a task" webhook (chat-wave2
+	// mail-task spec, owner ruling 2026-09-28: Postmark inbound, self-forward
+	// only). Registered before the generic /api/v1/webhooks/:provider route
+	// below so it never falls through to that handler's provider registry.
+	// Every outcome except a genuinely malformed payload or an unavailable
+	// downstream (the gateway, or the alias resolver itself) answers 200 --
+	// including a dropped forgery -- so a provider retry storm is never
+	// triggered by content this receiver correctly rejected (spec §3.2:
+	// "reject (200 + drop, never leak *why* to the sender)"); the real reason
+	// is only ever logged server-side. A downstream OUTAGE is the opposite
+	// case on purpose: it must be retryable (5xx), not silently dropped,
+	// since it says nothing about whether the message itself is legitimate.
+	app.Post("/api/v1/webhooks/mail-task/:provider", chainHandlers(rateLimited, func(c *fiber.Ctx) error {
+		providerKey := strings.ToLower(strings.TrimSpace(c.Params("provider")))
+		if providerKey != "postmark" || cfg.MailTask == nil {
+			return apiError(c, fiber.StatusNotFound, "mail_task_not_configured", "Mail-task is not configured for this provider.")
+		}
+		result := cfg.MailTask.HandleInboundPostmark(c.UserContext(), c.Get("Authorization"), append([]byte(nil), c.Body()...))
+		if cfg.Logger != nil {
+			event := cfg.Logger.Info()
+			if result.Err != nil {
+				event = cfg.Logger.Warn().Err(result.Err)
+			}
+			event.Str("reason", string(result.Reason)).Msg("mail-task inbound webhook")
+		}
+		switch result.Reason {
+		case mailtask.ReasonDisabled:
+			return apiError(c, fiber.StatusNotFound, "mail_task_not_configured", "Mail-task is not configured.")
+		case mailtask.ReasonUnauthorized:
+			return apiError(c, fiber.StatusUnauthorized, "invalid_webhook_signature", "Invalid webhook credentials.")
+		case mailtask.ReasonPayloadTooLarge, mailtask.ReasonInvalidPayload:
+			return apiError(c, fiber.StatusBadRequest, "invalid_payload", "Payload could not be parsed.")
+		case mailtask.ReasonGatewayUnavailable:
+			return apiError(c, fiber.StatusServiceUnavailable, "gateway_unavailable", "Downstream gateway is unavailable; retry delivery.")
+		case mailtask.ReasonAliasResolverUnavailable:
+			// Distinct from ReasonAliasNotFound (which must answer 200, see
+			// below) -- this is the resolver itself malfunctioning, not a
+			// verdict that the alias doesn't exist, so it must be retryable
+			// like ReasonGatewayUnavailable rather than silently dropped.
+			return apiError(c, fiber.StatusServiceUnavailable, "alias_resolver_unavailable", "Alias resolver is unavailable; retry delivery.")
+		default:
+			// ReasonWrongDomain, ReasonAliasNotFound, ReasonSenderNotVerified,
+			// ReasonDuplicate, ReasonAccepted all answer 200 -- see the
+			// registration comment above for why.
+			return success(c, fiber.Map{"accepted": result.Reason == mailtask.ReasonAccepted || result.Reason == mailtask.ReasonDuplicate})
+		}
 	})...)
 
 	app.Post("/api/v1/webhooks/:provider", chainHandlers(rateLimited, func(c *fiber.Ctx) error {
@@ -1473,7 +1537,7 @@ func scopedConnection(c *fiber.Ctx, cfg ServerConfig, connectionID string) (stor
 	if connection.DeletedAt != nil {
 		return store.Connection{}, store.ErrNotFound
 	}
-	if err := auth.AssertOrgAccess(c, connection.OrganizationID); err != nil {
+	if err := assertConnectionAccess(c, connection); err != nil {
 		return store.Connection{}, err
 	}
 	return connection, nil
@@ -2223,6 +2287,23 @@ func scopedSyncJob(c *fiber.Ctx, cfg ServerConfig, id string) (store.SyncJob, er
 	if err := auth.AssertOrgAccess(c, job.OrganizationID); err != nil {
 		return store.SyncJob{}, err
 	}
+	// Owner ruling (5): a sync job for a personal Microsoft/Google connection
+	// carries that connection's own ownership — ProviderKey/UserID
+	// snapshotted onto the job at creation time (see createSyncJob) — and is
+	// gated the same way as the connection itself: its status, checkpoint
+	// refs (source/external IDs from the owner's mailbox or drive), and the
+	// ability to cancel or retry it are all "using" that connection, not
+	// merely org-level metadata. assertPersonalConnectionOwner is a no-op
+	// for an org-wide connector's job (e.g. Slack), so this changes nothing
+	// there.
+	principal, authenticated := auth.PrincipalFromContext(c)
+	actingUserID := ""
+	if authenticated {
+		actingUserID = principal.EffectiveUserID(auth.IsInternalCall(c))
+	}
+	if err := assertPersonalConnectionOwner(store.Connection{ProviderKey: job.ProviderKey, UserID: job.UserID}, actingUserID, authenticated); err != nil {
+		return store.SyncJob{}, err
+	}
 	return job, nil
 }
 
@@ -2929,11 +3010,26 @@ func executeConnectionAction(c *fiber.Ctx, cfg ServerConfig, connectionID string
 	if err := auth.AssertOrgAccess(c, connection.OrganizationID); err != nil {
 		return actions.ExecuteResult{}, err
 	}
+	idempotencyKey := strings.TrimSpace(body.IdempotencyKey)
+	writeAction := actionRequiresApproval(connection.ProviderKey, body.Operation)
+	if !writeAction {
+		// A read has no write attestation to carry a cryptographically
+		// verified acting user, so owner ruling (5) is enforced from the
+		// ordinary bearer/session identity right away, before the
+		// capability check — same placement as every other connection
+		// route's assertConnectionAccess.
+		principal, authenticated := auth.PrincipalFromContext(c)
+		actingUserID := ""
+		if authenticated {
+			actingUserID = principal.EffectiveUserID(auth.IsInternalCall(c))
+		}
+		if err := assertPersonalConnectionOwner(connection, actingUserID, authenticated); err != nil {
+			return actions.ExecuteResult{}, err
+		}
+	}
 	if err := requireActionCapability(c, connection, body); err != nil {
 		return actions.ExecuteResult{}, err
 	}
-	idempotencyKey := strings.TrimSpace(body.IdempotencyKey)
-	writeAction := actionRequiresApproval(connection.ProviderKey, body.Operation)
 	if writeAction {
 		if _, err := requireWritePresenter(c); err != nil {
 			return actions.ExecuteResult{}, err
@@ -2953,6 +3049,16 @@ func executeConnectionAction(c *fiber.Ctx, cfg ServerConfig, connectionID string
 		}
 		verifiedAttestation, err = verifyWriteAttestation(c, cfg, connection, body, requestSHA256)
 		if err != nil {
+			return actions.ExecuteResult{}, err
+		}
+		// Owner ruling (5): a write's acting user is the attestation's
+		// cryptographically bound ActorID — the human whose approval
+		// authorized THIS action (see execution-core's write-attestation
+		// signer, which binds actor_id to the run's real owning user) —
+		// never the bearer principal's own identity, which for a write is
+		// typically a presenting service (conversation-core,
+		// execution-core) acting on that human's behalf, not the human.
+		if err := assertPersonalConnectionOwner(connection, verifiedAttestation.ActorID, true); err != nil {
 			return actions.ExecuteResult{}, err
 		}
 		claimedReceipt, acquired, err := cfg.Repo.ClaimActionReceipt(ctx, store.ActionReceipt{
@@ -3271,7 +3377,11 @@ func requiredCapabilityForOperation(providerKey, operation string) (string, bool
 			return "calendar.read", true
 		case "mail.messages", "microsoft.mail.messages":
 			return "mail.read", true
+		case "mail.messages.get", "microsoft.mail.messages.get":
+			return "mail.read", true
 		case "drive.files", "microsoft.drive.files":
+			return "sharepoint.read", false
+		case "drive.file.content", "microsoft.drive.file.content":
 			return "sharepoint.read", false
 		case "mail.send", "microsoft.mail.send":
 			return "mail.send", true
@@ -3293,11 +3403,15 @@ func requiredCapabilityForOperation(providerKey, operation string) (string, bool
 			return "profile.read", false
 		case "gmail.messages", "google.gmail.messages":
 			return "gmail.read", true
+		case "gmail.messages.get", "google.gmail.messages.get":
+			return "gmail.read", true
 		case "gmail.send", "google.gmail.send":
 			return "gmail.send", true
 		case "calendar.events", "google.calendar.events":
 			return "calendar.read", true
 		case "drive.files", "google.drive.files":
+			return "drive.read", false
+		case "drive.file.content", "google.drive.file.content":
 			return "drive.read", false
 		}
 	case "github":
@@ -3854,12 +3968,21 @@ func storeError(c *fiber.Ctx, err error, code string) error {
 }
 
 func apiError(c *fiber.Ctx, status int, code, message string) error {
+	return apiErrorWithDetails(c, status, code, message, nil)
+}
+
+// apiErrorWithDetails is apiError with optional extra fields merged into the
+// error object. code and message cannot be overridden by a detail.
+func apiErrorWithDetails(c *fiber.Ctx, status int, code, message string, details fiber.Map) error {
+	errorBody := fiber.Map{}
+	for key, value := range details {
+		errorBody[key] = value
+	}
+	errorBody["code"] = code
+	errorBody["message"] = message
 	body := fiber.Map{
 		"success": false,
-		"error": fiber.Map{
-			"code":    code,
-			"message": message,
-		},
+		"error":   errorBody,
 	}
 	if requestID := requestIDFromFiber(c); requestID != "" {
 		body["meta"] = fiber.Map{"requestId": requestID}

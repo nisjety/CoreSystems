@@ -49,10 +49,23 @@ USER root
 # Pin the official Codex CLI used by the ChatGPT subscription broker. Build
 # automation may override this only after reviewing the release.
 ARG CODEX_VERSION=0.153.4
+# The npm `codex` command is a Node launcher (bin/codex.js) that only resolves
+# the vendored native binary for this architecture and spawns it. Resolve that
+# binary once here, the way the launcher does (deploy/codex/resolve-native.cjs,
+# bind-mounted so it stays out of the image), and link it at a stable path. The
+# compose default CODEX_APP_SERVER_COMMAND starts it directly, without one Node
+# process per call, and the broker adds the two variables the launcher would
+# set. The build fails when the binary cannot be resolved or does not report the
+# launcher's version. `codex` stays installed for CODEX_APP_SERVER_COMMAND=codex.
 RUN --mount=type=cache,target=/var/cache/apk \
+    --mount=type=bind,source=deploy/codex/resolve-native.cjs,target=/tmp/resolve-native.cjs \
     apk add --no-cache nodejs npm && \
     npm install --global --omit=dev "@openai/codex@${CODEX_VERSION}" && \
-    codex --version
+    codex --version && \
+    codex_native="$(node /tmp/resolve-native.cjs "$(readlink -f "$(command -v codex)")")" && \
+    test -x "$codex_native" && \
+    ln -s "$codex_native" /usr/local/bin/codex-native && \
+    test "$(/usr/local/bin/codex-native --version)" = "$(codex --version)"
 USER app
 COPY --from=build /out/integration-corev2 /app/integration-corev2
 EXPOSE 3026

@@ -218,6 +218,91 @@ func TestAuthClientVerifyTokenRejectsMissingRequiredIdentityTimeClaims(t *testin
 	}
 }
 
+// Owner ruling (security-personal-connections, 2026-09-28): a service
+// principal's scoped token can name the human end user it acts FOR, via an
+// acting_user_id claim distinct from its own service_id — auth-core does
+// not issue this claim yet (see execution-core's mint_ingestion_token,
+// which sends only orgId+scopes), so this exercises the verification side
+// against the claim shape the issuance side will eventually produce.
+func TestAuthClientVerifyTokenPopulatesDelegatedUserIDFromActingUserClaimForServicePrincipal(t *testing.T) {
+	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("GenerateKey: %v", err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"keys": []map[string]any{jwksTestKey("test-key", &privateKey.PublicKey)}})
+	}))
+	defer server.Close()
+	now := time.Now().UTC()
+	token := jwt.NewWithClaims(jwt.SigningMethodRS256, jwt.MapClaims{
+		"iss": server.URL + "/api/convex-auth", "aud": "ingestion", "sub": "service:execution-core",
+		"iat": now.Unix(), "nbf": now.Add(-time.Second).Unix(), "exp": now.Add(5 * time.Minute).Unix(),
+		"org_id": "org-1", "service_id": "service:execution-core", "principal_type": "service",
+		"acting_user_id": "user-1", "scopes": []string{"integration:read"},
+	})
+	token.Header["kid"] = "test-key"
+	signed, err := token.SignedString(privateKey)
+	if err != nil {
+		t.Fatalf("SignedString: %v", err)
+	}
+	principal, err := NewAuthClient(testControlPlaneConfig(server.URL), server.Client()).VerifyToken(t.Context(), signed)
+	if err != nil {
+		t.Fatalf("VerifyToken: %v", err)
+	}
+	// The service's own identity stays in UserID (service_id) — only a
+	// dedicated field carries the delegated end user, so nothing that
+	// reads Principal.UserID directly is silently redefined by this claim.
+	if principal.UserID != "service:execution-core" {
+		t.Fatalf("UserID = %q, want the service's own identity unchanged", principal.UserID)
+	}
+	if principal.DelegatedUserID != "user-1" {
+		t.Fatalf("DelegatedUserID = %q, want user-1", principal.DelegatedUserID)
+	}
+	// false: a verified bearer token never counts as the legacy
+	// internal-API-key call path (see auth.Principal.EffectiveUserID).
+	if got := principal.EffectiveUserID(false); got != "user-1" {
+		t.Fatalf("EffectiveUserID(false) = %q, want user-1", got)
+	}
+}
+
+// The claim is honored only for a service principal. Auth-core never signs
+// it for an interactive/session principal, but if a stray claim were ever
+// present on one, it must not be treated as a delegation — a real user's
+// own UserID is already the answer, and DelegatedUserID has no meaning for
+// that principal type.
+func TestAuthClientVerifyTokenIgnoresActingUserClaimForUserPrincipal(t *testing.T) {
+	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("GenerateKey: %v", err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"keys": []map[string]any{jwksTestKey("test-key", &privateKey.PublicKey)}})
+	}))
+	defer server.Close()
+	now := time.Now().UTC()
+	token := jwt.NewWithClaims(jwt.SigningMethodRS256, jwt.MapClaims{
+		"iss": server.URL + "/api/convex-auth", "aud": "ingestion", "sub": "user-1",
+		"iat": now.Unix(), "nbf": now.Add(-time.Second).Unix(), "exp": now.Add(5 * time.Minute).Unix(),
+		"org_id": "org-1", "user_id": "user-1", "principal_type": "user",
+		"acting_user_id": "someone-else",
+	})
+	token.Header["kid"] = "test-key"
+	signed, err := token.SignedString(privateKey)
+	if err != nil {
+		t.Fatalf("SignedString: %v", err)
+	}
+	principal, err := NewAuthClient(testControlPlaneConfig(server.URL), server.Client()).VerifyToken(t.Context(), signed)
+	if err != nil {
+		t.Fatalf("VerifyToken: %v", err)
+	}
+	if principal.DelegatedUserID != "" {
+		t.Fatalf("DelegatedUserID = %q, want empty for a user principal", principal.DelegatedUserID)
+	}
+	if got := principal.EffectiveUserID(false); got != "user-1" {
+		t.Fatalf("EffectiveUserID(false) = %q, want the real session user user-1", got)
+	}
+}
+
 func TestProductionInternalOrBearerAcceptsCanonicalServicePrincipalAndRejectsLegacyTenantKey(t *testing.T) {
 	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {

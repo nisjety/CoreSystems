@@ -70,3 +70,77 @@ func TestRatesIncludesDefaultFirst(t *testing.T) {
 		t.Fatalf("expected default first, got %q", rates[0].Model)
 	}
 }
+
+// Mirrors model-gateway pricing.rs `cache_rates_list_only_the_documented_openai_models`
+// so the ledgered cost and the streamed display cost apply the same rates.
+func TestCacheRatesMirrorModelGateway(t *testing.T) {
+	flat := cacheRates{read: CacheReadDiscount, write: 1.0}
+	half := cacheRates{read: 0.5, write: 1.0}
+	gpt5 := cacheRates{read: 0.1, write: 1.0}
+	gpt56 := cacheRates{read: 0.1, write: 1.25}
+	for _, test := range []struct {
+		model string
+		want  cacheRates
+	}{
+		{"gpt-4o-mini", half},
+		{"gpt-4o-mini-2024-07-18", half},
+		{" GPT-4o-Mini ", half},
+		{"gpt-5", gpt5},
+		{"gpt-5-mini", gpt5},
+		{"gpt-5-nano", gpt5},
+		{"gpt-5.2", gpt5},
+		{"gpt-5.5", gpt5},
+		{"gpt-5.6", gpt56},
+		{"gpt-5.6-terra", gpt56},
+		{"gpt-5.10", gpt56},
+		// Not confirmed, so unchanged from the flat rate.
+		{"gpt-4o", flat},
+		{"gpt-4.1-mini", flat},
+		{"o4-mini", flat},
+		{"model-router", flat},
+		{"claude-sonnet-4-6", flat},
+		{"", flat},
+	} {
+		if got := cacheRatesFor(test.model); got != test.want {
+			t.Errorf("cacheRatesFor(%q) = %+v, want %+v", test.model, got, test.want)
+		}
+	}
+}
+
+func TestCostWithCacheZeroCacheTokensMatchesCostForEveryCacheTier(t *testing.T) {
+	r := Default()
+	for _, model := range []string{"claude-sonnet-4-6", "gpt-4o-mini", "gpt-5.6-terra"} {
+		approx(t, r.CostWithCache(model, 1_000, 500, 0, 0), r.Cost(model, 1_000, 500))
+	}
+}
+
+// The numbers of pricing.rs `gpt_4o_mini_cache_reads_are_billed_at_half_the_input_rate`.
+func TestCostWithCacheBillsGpt4oMiniCacheReadsAtHalfTheInputRate(t *testing.T) {
+	r := Default()
+	got := r.CostWithCache("gpt-4o-mini-2024-07-18", 1_566, 2, 1_408, 0)
+	want := 158.0/1_000_000.0*0.15 + // fresh input
+		1_408.0/1_000_000.0*0.15*0.5 + // cached input, half rate
+		2.0/1_000_000.0*0.60
+	approx(t, got, want)
+}
+
+// The numbers of pricing.rs `gpt_5_6_cache_writes_are_surcharged_to_one_and_a_quarter`.
+// gpt-5.6 has no catalogue row, so it prices against `default` (3.00/15.00).
+func TestCostWithCacheSurchargesGpt56CacheWrites(t *testing.T) {
+	r := Default()
+	// 2,000 prompt tokens: 1,024 read from the cache, 512 written to it, 464
+	// plain input.
+	got := r.CostWithCache("gpt-5.6", 2_000, 50, 1_024, 512)
+	want := 464.0/1_000_000.0*3.0 +
+		1_024.0/1_000_000.0*3.0*0.1 +
+		512.0/1_000_000.0*3.0*1.25 +
+		50.0/1_000_000.0*15.0
+	approx(t, got, want)
+}
+
+func TestCostWithCacheWriteLegIsPlainInputForModelsThatDoNotBillWrites(t *testing.T) {
+	r := Default()
+	for _, model := range []string{"claude-sonnet-4-6", "gpt-5.2", "gpt-4o-mini"} {
+		approx(t, r.CostWithCache(model, 2_000, 50, 0, 512), r.CostWithCache(model, 2_000, 50, 0, 0))
+	}
+}

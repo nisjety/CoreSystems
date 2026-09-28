@@ -45,6 +45,11 @@ pub struct RepairWordBudget {
 pub struct SectionRepair {
     pub range: std::ops::Range<usize>,
     pub reason: String,
+    /// This piece's own counted body words and its adopted bounds, for a
+    /// content-free diagnostic log (never the section's heading or body text).
+    pub words: usize,
+    pub minimum: usize,
+    pub maximum: usize,
 }
 
 #[derive(Debug)]
@@ -181,10 +186,39 @@ impl CampaignContract {
         (contract.posts.is_some() || contract.email.is_some()).then_some(contract)
     }
 
+    /// How many body checks a complete campaign document passes: every post
+    /// the brief enumerates plus its one email. `None` when the brief names
+    /// posts without saying how many, so no count of checks can show that
+    /// the document holds the whole campaign.
+    pub fn piece_count(&self) -> Option<usize> {
+        let posts = match self.posts {
+            Some(_) => self.post_count?,
+            None => 0,
+        };
+        Some(posts + usize::from(self.email.is_some())).filter(|pieces| *pieces > 0)
+    }
+
+    /// The author's and the repair's statement of the adopted checks. Each
+    /// range is stated with its target in words, and what the local count
+    /// excludes is named, since only the body counts ([`body_text`]): a draft
+    /// that counts its status and date lines lands under the minimum.
     pub fn guidance(&self) -> String {
-        let target = |range: Option<(usize, usize)>| range.map(|(minimum, maximum)| minimum + (maximum - minimum) / 2);
-        format!("The adopted campaign brief has local body checks: LinkedIn {:?}, email {:?}, expected posts {:?}. Draft toward these BODY-ONLY word targets: LinkedIn {:?}, email {:?}. Headings, dates, subject, preview text and source notes do not count toward those body targets. Use one ## LinkedIn heading per post (include its date), and one ## E-post/Email heading. Put metadata above the prose. Label the email body 'Brødtekst:' or 'Body:'. Put internal source notes under a separate ### Kilder/Sources heading. Do not include estimated word-count labels. Use only sourced facts and relevant invitations, never invented benefits or repetitive padding. If the brief requests a relatable situation, frame undocumented situations as questions or explicit possibilities; do not invent actual customer experiences, recipient circumstances or a product effect. Then state the documented feature directly, without claiming that it solves a problem or produces an undocumented benefit. Keep the exact body inside the requested bounds after every repair. Plural address required: {}. No URLs: {}. No emoji: {}. Hashtag maximum: {:?}. Prohibited wording: {:?}.",
-            self.posts, self.email, self.post_count, target(self.posts), target(self.email), self.plural, self.no_urls, self.no_emoji, self.hashtags, self.prohibited)
+        let range = |(minimum, maximum): (usize, usize)| {
+            format!("{minimum}–{maximum} words, target about {}", minimum + (maximum - minimum) / 2)
+        };
+        let mut pieces = Vec::new();
+        if let Some(posts) = self.posts {
+            pieces.push(match self.post_count {
+                Some(count) => format!("{count} LinkedIn posts, each with a body of {}", range(posts)),
+                None => format!("each LinkedIn post with a body of {}", range(posts)),
+            });
+        }
+        if let Some(email) = self.email {
+            pieces.push(format!("one email with a body of {}", range(email)));
+        }
+        let hashtags = self.hashtags.map_or_else(|| "not stated".to_owned(), |maximum| maximum.to_string());
+        format!("The adopted campaign brief has local BODY-ONLY word checks: {}. Only the reader-facing prose under each piece's heading counts, hashtags included. The heading, labelled metadata lines (such as a status, date, channel, audience, recipient, subject or preview line), the email body label and the source notes are not counted, so write each body to about its target in prose; a body under its minimum is rejected before publication. Use one ## LinkedIn heading per post (include its date), and one ## E-post/Email heading. Put metadata above the prose. Label the email body 'Brødtekst:' or 'Body:'. Put internal source notes under a separate ### Kilder/Sources heading. Do not include estimated word-count labels. Use only sourced facts and relevant invitations, never invented benefits or repetitive padding. If the brief requests a relatable situation, frame undocumented situations as questions or explicit possibilities; do not invent actual customer experiences, recipient circumstances or a product effect. Then state the documented feature directly, without claiming that it solves a problem or produces an undocumented benefit. Keep the exact body inside the requested bounds after every repair. Plural address required: {}. No URLs: {}. No emoji: {}. Hashtag maximum per post: {hashtags}. Prohibited wording: {:?}.",
+            pieces.join("; "), self.plural, self.no_urls, self.no_emoji, self.prohibited)
     }
 
     pub(crate) fn repair_budgets(&self, candidate: &str, parts: &[&str], failed: &[usize]) -> Vec<RepairWordBudget> {
@@ -324,6 +358,9 @@ impl CampaignContract {
                 repairs.push(SectionRepair {
                     range: start..start + content.len(),
                     reason: format!("{} Replace only this section's content; preserve its metadata and source notes, and keep its body within {minimum}–{maximum} words. Do not add another deliverable or rename its heading.", failures[prior_failures..].join(" ")),
+                    words,
+                    minimum,
+                    maximum,
                 });
             }
             checks.push(BodyCheck {
@@ -415,15 +452,14 @@ fn body_text(content: &str, email: bool) -> String {
                 Some((start, line.to_lowercase()))
             })
             .find_map(|(start, line)| {
-                ["brødtekst:", "body:", "e-posttekst:"]
-                    .iter()
-                    .find_map(|label| {
-                        line.trim_start()
-                            .trim_start_matches('#')
-                            .trim_start()
-                            .strip_prefix(label)
-                            .map(|_| start + line.find(':').unwrap() + 1)
-                    })
+                // "Brødtekst:", "### Body:" or "Tekst (utkast):". The whole
+                // label before the colon must match; the body follows it.
+                let colon = line.find(':')?;
+                let label = line[..colon].trim().trim_start_matches('#');
+                let label = label.split_once('(').map_or(label, |(label, _)| label);
+                ["brødtekst", "body", "e-posttekst", "tekst"]
+                    .contains(&label.trim())
+                    .then_some(start + colon + 1)
             })
         {
             content = &content[index..];
@@ -475,6 +511,9 @@ fn body_text(content: &str, email: bool) -> String {
         {
             continue;
         }
+        if metadata_line(&lower) {
+            continue;
+        }
         if lower
             .trim_matches(['(', ')'])
             .split_once(' ')
@@ -485,6 +524,44 @@ fn body_text(content: &str, email: bool) -> String {
         lines.push(line);
     }
     lines.join("\n").trim().to_owned()
+}
+
+/// A brief's "60–90 ord" is the copy a reader receives. Reviewer metadata such
+/// as "**Status:** Utkast til gjennomgang" or "Dato (forslag): 23. september"
+/// is not part of it. Only the whole label before the first colon is compared,
+/// so prose that merely starts with such a word ("Statusen er: ...") counts.
+fn metadata_line(lower: &str) -> bool {
+    const LABELS: [&str; 25] = [
+        "status",
+        "dato",
+        "date",
+        "publiseringsdato",
+        "foreslått dato",
+        "publication date",
+        "kanal",
+        "channel",
+        "målgruppe",
+        "audience",
+        "til",
+        "to",
+        "mottaker",
+        "mottakere",
+        "recipient",
+        "recipients",
+        "kilde",
+        "source",
+        "maks emneknagger",
+        "rekkevidde",
+        "ord",
+        "ordantall",
+        "ordtall",
+        "ord brødtekst",
+        "word count",
+    ];
+    lower.split_once(':').is_some_and(|(label, _)| {
+        let label = label.split_once('(').map_or(label, |(label, _)| label);
+        LABELS.contains(&label.trim())
+    })
 }
 
 #[cfg(test)]
@@ -601,6 +678,13 @@ mod tests {
         let failed = contract.validate_scoped(candidate).unwrap_err();
         assert_eq!(failed.sections.len(), 1);
         assert_eq!(&candidate[failed.sections[0].range.clone()], "For kort.");
+        // The section's own counted words and its adopted (minimum, maximum)
+        // bounds, read straight off `SectionRepair` -- distinct fields, not
+        // merely three numbers that happen to parse (a minimum/maximum swap
+        // must fail this, not just a non-numeric value).
+        assert_eq!(failed.sections[0].words, 2, "\"For kort.\" is two words");
+        assert_eq!(failed.sections[0].minimum, 5, "the LinkedIn post's adopted minimum, 5-9 ord");
+        assert_eq!(failed.sections[0].maximum, 9, "the LinkedIn post's adopted maximum, 5-9 ord");
         let mut repaired = candidate.to_owned();
         repaired.replace_range(
             failed.sections[0].range.clone(),
@@ -630,6 +714,8 @@ mod tests {
             "### **Brødtekst:**",
             "### Body:",
             "### E-posttekst:",
+            "**Tekst:**",
+            "**Brødtekst (utkast):**",
         ] {
             let candidate = format!("## LinkedIn 7. oktober\nDere kan be om produktarket hos oss.\n\n## LinkedIn 9. oktober\nHer finner dere informasjon om bordlampen vår.\n\n## E-post\n**Til:** Kontoransvarlige og små bedrifter som skal innrede kontorer\n**Emne:** Et arbeidslys\n\n{label}\n\nHei og takk.\n\n### Kilder\nLang intern merknad som heller ikke skal telle med.");
             let rejected = contract.validate_scoped(&candidate).unwrap_err();
@@ -639,11 +725,148 @@ mod tests {
                 rejected.message
             );
             assert_eq!(rejected.sections.len(), 1);
+            assert_eq!(rejected.sections[0].words, 3, "\"Hei og takk.\" is three words");
+            assert_eq!(rejected.sections[0].minimum, 8, "the E-post's adopted minimum, 8-14 ord");
+            assert_eq!(rejected.sections[0].maximum, 14, "the E-post's adopted maximum, 8-14 ord");
             let corrected = candidate.replace(
                 "Hei og takk.",
                 "Takk for interessen. Dere kan be oss om produktarket nå.",
             );
             assert_eq!(contract.validate(&corrected).unwrap()[2].words, 10);
         }
+    }
+
+    /// The brief grammar of a live campaign run: body-only ranges per piece.
+    fn brief_fixture() -> (Vec<ChatMessage>, SourceContext) {
+        (vec![ChatMessage { role: "user".into(), content: "Bruk kampanjebriefen og språkprofilen til tre LinkedIn-innlegg og én e-post.".into(), ..Default::default() }],
+        SourceContext { sources: vec![crate::source_validation::Source { id: 0, name: "brief".into(), content: "LinkedIn: tre innlegg, 60–90 ord hver, med ulike vinkler.\nE-post: emnefelt, forhåndsvisningstekst og brødtekst på 80–120 ord.\nSnakk til «dere».\nIngen emojier. Maks to emneknagger per LinkedIn-innlegg.\nIkke oppgi nettadresse.".into() }] })
+    }
+
+    /// Plain plural-address prose of exactly `words` words.
+    fn prose(words: usize) -> String {
+        const WORDS: [&str; 8] = ["dere", "kan", "vurdere", "lampen", "med", "tre", "lysnivåer", "her"];
+        let text: Vec<_> = (0..words).map(|index| WORDS[index % WORDS.len()]).collect();
+        format!("{}.", text.join(" "))
+    }
+
+    /// The published shape of a live campaign document: each piece carries a
+    /// review status above its copy, and each post ends with one hashtag line.
+    fn campaign(post_words: [usize; 3], email_words: usize) -> String {
+        let mut text = "# Kampanjeutkast\n\n**Status:** Utkast til gjennomgang. Datoene er forslag.\n\n## Foreslått publiseringsoversikt\n\n| Dato (forslag) | Kanal | Vinkel |\n|---|---|---|\n| 7. oktober 2026 | LinkedIn | Plass |\n| 9. oktober 2026 | LinkedIn | Delte arbeidsplasser |\n| 11. oktober 2026 | LinkedIn | Produktopplysninger |\n| 11. oktober 2026 | E-post | Introduksjon |\n".to_owned();
+        for (day, words) in [7, 9, 11].into_iter().zip(post_words) {
+            // The body is the prose plus its hashtag, whose text is one word.
+            text += &format!("\n## LinkedIn – {day}. oktober 2026\n\n**Status:** Utkast til gjennomgang\n\n{}\n\n#arbeidsplass\n", prose(words - 1));
+        }
+        text += &format!("\n## E-post\n\n**Status:** Utkast til gjennomgang\n\n**Emnefelt:** Lys bordlampe til arbeidsplassen deres\n\n**Forhåndsvisningstekst:** Se konkrete produktopplysninger.\n\n**Brødtekst:**\n\n{}\n\n### Kilder\n\nTekstene bygger på produktarket og kampanjebriefen.\n", prose(email_words));
+        text
+    }
+
+    #[test]
+    fn review_status_and_date_labels_are_not_post_body_words() {
+        let (messages, source) = brief_fixture();
+        let contract = CampaignContract::from_messages(&messages, &source).unwrap();
+        // Live failure: a 59-word post under "**Status:** Utkast til
+        // gjennomgang" was counted as 63 words and published as in range.
+        let short = campaign([66, 59, 63], 82);
+        let rejected = contract.validate_scoped(&short).unwrap_err();
+        assert_eq!(
+            rejected.message,
+            "linkedin – 9. oktober 2026: body has 59 words, needs 60–90."
+        );
+        assert_eq!(rejected.sections.len(), 1);
+        assert!(short[rejected.sections[0].range.clone()]
+            .starts_with("**Status:** Utkast til gjennomgang\n\n"));
+        // The repair allowance uses the same body meaning as the check.
+        let parts: Vec<_> = copy_sections(&short)
+            .into_iter()
+            .map(|(_, content)| content.trim())
+            .collect();
+        let budget = &contract.repair_budgets(&short, &parts, &[1])[0];
+        assert_eq!(
+            (budget.current_body_words, budget.minimum_replacement_body_words),
+            (59, 60)
+        );
+        let enough = campaign([66, 60, 63], 82);
+        assert_eq!(
+            contract
+                .validate(&enough)
+                .unwrap()
+                .iter()
+                .map(|check| check.words)
+                .collect::<Vec<_>>(),
+            [66, 60, 63, 82]
+        );
+        for label in [
+            "**Dato:** 9. oktober 2026",
+            "**Dato (forslag):** 9. oktober 2026",
+            "Publiseringsdato: 9. oktober 2026",
+            "**Kanal:** LinkedIn",
+        ] {
+            let labelled = |text: &str| {
+                text.replace(
+                    "## LinkedIn – 9. oktober 2026\n\n",
+                    &format!("## LinkedIn – 9. oktober 2026\n\n{label}\n\n"),
+                )
+            };
+            assert!(
+                contract
+                    .validate(&labelled(&short))
+                    .unwrap_err()
+                    .contains("body has 59 words"),
+                "{label}"
+            );
+            assert_eq!(contract.validate(&labelled(&enough)).unwrap()[1].words, 60, "{label}");
+        }
+    }
+
+    /// The author is told each body range with its target in words, and what
+    /// the count leaves out, in plain text rather than Rust debug values.
+    #[test]
+    fn guidance_states_each_body_range_its_target_and_what_is_not_counted() {
+        let (messages, source) = brief_fixture();
+        let contract = CampaignContract::from_messages(&messages, &source).unwrap();
+        let guidance = contract.guidance();
+        assert!(guidance.contains("3 LinkedIn posts, each with a body of 60–90 words, target about 75"), "{guidance}");
+        assert!(guidance.contains("one email with a body of 80–120 words, target about 100"), "{guidance}");
+        assert!(guidance.contains("labelled metadata lines (such as a status, date"), "{guidance}");
+        assert!(guidance.contains("Hashtag maximum per post: 2."), "{guidance}");
+        assert!(!guidance.contains("Some("), "{guidance}");
+        let (messages, source) = fixture();
+        let open = CampaignContract::from_messages(&messages, &source).unwrap();
+        assert!(open.guidance().contains("2 LinkedIn posts, each with a body of 5–9 words, target about 7"));
+    }
+
+    /// A complete campaign document passes one body check per enumerated
+    /// post plus its email; a brief that leaves the post count open has no
+    /// such number.
+    #[test]
+    fn piece_count_is_every_enumerated_post_and_the_email() {
+        let (messages, source) = brief_fixture();
+        let contract = CampaignContract::from_messages(&messages, &source).unwrap();
+        assert_eq!(contract.piece_count(), Some(4));
+        assert_eq!(contract.validate(&campaign([66, 60, 63], 82)).unwrap().len(), 4);
+        let (messages, source) = fixture();
+        assert_eq!(CampaignContract::from_messages(&messages, &source).unwrap().piece_count(), Some(3));
+        let open = |content: &str| SourceContext { sources: vec![crate::source_validation::Source { id: 0, name: "brief".into(), content: content.into() }] };
+        assert_eq!(CampaignContract::from_messages(&messages, &open("LinkedIn: innlegg på 5–9 ord.\nE-post: brødtekst på 8–14 ord.")).unwrap().piece_count(), None);
+        assert_eq!(CampaignContract::from_messages(&messages, &open("E-post: brødtekst på 8–14 ord.")).unwrap().piece_count(), Some(1));
+    }
+
+    #[test]
+    fn only_whole_metadata_labels_are_excluded_from_copy() {
+        let (messages, source) = fixture();
+        let contract = CampaignContract::from_messages(&messages, &source).unwrap();
+        // Prose that merely starts with a label word still counts, and an
+        // email without a body label still drops its recipient and status.
+        let candidate = "## LinkedIn 7. oktober\n**Status:** Utkast til gjennomgang\nDere kan be om produktarket hos oss.\n\n## LinkedIn 9. oktober\nStatusen er enkel: dere kan be om arket.\n\n## E-post\n**Til:** Kontoransvarlige og små bedrifter\n**Status:** Utkast\n**Emne:** Et emne\nTakk for interessen. Dere kan be oss om produktarket nå.\n";
+        assert_eq!(
+            contract
+                .validate(candidate)
+                .unwrap()
+                .iter()
+                .map(|check| check.words)
+                .collect::<Vec<_>>(),
+            [7, 8, 10]
+        );
     }
 }

@@ -1,0 +1,40 @@
+--- a/src/features/dashboard/home/DashboardHomeChrome.tsx
++++ b/src/features/dashboard/home/DashboardHomeChrome.tsx
+@@ -34,8 +34,8 @@
+ }) {
+   const i18n = useI18n()
+   const tabLabel = (tab: DashboardTab) => {
+-    if (tab === 'Søk') return i18n.tr('Søk', 'Search')
+-    if (tab === 'Crawl') return i18n.tr('Innhent', 'Crawl')
++    if (tab === 'Søk') return i18n.tr('Nett', 'Web')
++    if (tab === 'Crawl') return i18n.tr('Hent ut', 'Extract')
+     return i18n.tr('Chat', 'Chat')
+   }
+ 
+--- a/src/features/dashboard/home/DashboardSearchPanel.tsx
++++ b/src/features/dashboard/home/DashboardSearchPanel.tsx
+@@ -849,7 +849,7 @@
+     >
+       <div class="verevon-panel-in relative transition-all duration-500 ease-out">
+         <form onSubmit={submit} class="relative z-[1] w-full">
+-          <label class="sr-only" for="dashboard-search">{i18n.tr('Søk i selskapets kunnskap', 'Search company knowledge')}</label>
++          <label class="sr-only" for="dashboard-search">{i18n.tr('Søk på nettet eller spør', 'Search on the web or ask')}</label>
+           <div class="dashboard-search-row">
+             <button
+               type="button"
+@@ -866,13 +866,13 @@
+               <input
+                 id="dashboard-search"
+                 role="combobox"
+-                aria-label={i18n.tr('Søk i selskapets kunnskap', 'Search company knowledge')}
++                aria-label={i18n.tr('Søk på nettet eller spør', 'Search on the web or ask')}
+                 aria-expanded={isDropdownOpen() ? 'true' : 'false'}
+                 autocomplete="off"
+                 value={query()}
+                 onInput={(event) => updateQuery(event.currentTarget.value)}
+                 class="dashboard-search-input"
+-                placeholder={i18n.tr('Søk eller spør ...', 'Search or ask ...')}
++                placeholder={i18n.tr('Søk på nettet eller spør…', 'Search on the web or ask…')}
+               />
+               <button
+                 type="submit"

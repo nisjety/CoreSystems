@@ -1,0 +1,96 @@
+/* Review pass 2. All product styling is controlled by the existing preview
+   tokens; the More menu keeps the comparison controls available everywhere. */
+[data-chat-appearance~='navigation'] .core-navbar__left { gap: 8px; }
+[data-chat-appearance~='navigation'] .core-navbar__inner { gap: 24px; }
+[data-chat-appearance~='navigation'] .core-navbar__action-group { gap: 4px; padding-left: 0; }
+[data-chat-appearance~='navigation'] .core-navbar__actions { gap: 4px; flex-shrink: 0; }
+[data-chat-appearance~='navigation'] .core-navbar__search { max-width: 420px; }
+[data-chat-appearance~='navigation'] .core-breadcrumb { min-width: 0; gap: 8px; }
+[data-chat-appearance~='navigation'] .core-breadcrumb__workspace > span { max-width: 160px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+[data-chat-appearance~='navigation'] .core-navbar__sidebar-toggle,
+.core-navbar-more > summary { display: inline-flex; width: var(--verevon-touch-target, 44px); min-height: var(--verevon-touch-target, 44px); flex-shrink: 0; align-items: center; justify-content: center; border: 0; border-radius: 10px; background: transparent; color: var(--verevon-text); cursor: pointer; list-style: none; }
+.core-navbar-more > summary::-webkit-details-marker { display: none; }
+[data-chat-appearance~='navigation'] :is(.core-navbar__sidebar-toggle, .core-navbar-more > summary):hover { background: var(--verevon-surface-soft); }
+[data-chat-appearance~='navigation'] .core-navbar__action-group--refined .verevon-navbar-action-button { min-width: var(--verevon-touch-target, 44px); min-height: var(--verevon-touch-target, 44px); color: var(--verevon-text); }
+[data-chat-appearance~='navigation'] .core-navbar__profile { margin-inline: 4px; }
+[data-chat-appearance~='navigation'] .core-nav-divider { display: block; height: 24px; width: 1px; margin-inline: 8px; background: var(--verevon-border); }
+[data-chat-appearance~='navigation'] .core-sidebar__top-actions { display: none; }
+[data-chat-appearance~='navigation'] .core-sidebar__mini-nav { padding-top: 8px; }
+[data-chat-appearance~='navigation'] .core-mini-nav-button.verevon-sidebar-mini-active { color: #737373; }
+.dark [data-chat-appearance~='navigation'] .core-mini-nav-button.verevon-sidebar-mini-active { color: #b8b8b8; }
+.core-rail-filled-icon { flex-shrink: 0; }
+
+/* A recognizable input-shaped trigger with explicit text/icon contrast. */
+[data-chat-appearance~='navigation'] .verevon-navbar-search-trigger { height: 36px; min-height: 36px; border: 0; border-radius: 999px; background: var(--panel); padding-inline: 14px; gap: 8px; font: inherit; font-size: 13px; font-weight: 400; line-height: 1.4; box-shadow: 0 1px 3px rgb(0 0 0 / 3%); }
+[data-chat-appearance~='navigation'] .verevon-navbar-search-trigger :is(.verevon-navbar-search-icon, .verevon-navbar-search-label, .verevon-navbar-shortcut-key) { color: var(--verevon-text); }
+[data-chat-appearance~='navigation'] .verevon-navbar-search-label { font: inherit; }
+[data-chat-appearance~='navigation'] .verevon-navbar-search-icon { width: 14px; height: 14px; }
+[data-chat-appearance~='navigation'] .verevon-navbar-shortcut-key { background: transparent; border-color: transparent; font-family: inherit; font-size: 10px; }
+[data-chat-appearance~='navigation'] .verevon-navbar-shortcut-key-min { display: none; }
+[data-chat-appearance~='navigation'] .verevon-navbar-search-trigger:focus-visible,
+[data-chat-appearance~='navigation'] :is(.core-navbar__sidebar-toggle, .core-navbar-more > summary, .core-mini-nav-button):focus-visible { outline: 2px solid var(--verevon-accent-ink); outline-offset: 3px; box-shadow: none; }
+
+.core-navbar-more { position: relative; }
+.core-navbar-more__panel { position: absolute; top: calc(100% + 8px); right: 0; width: 324px; max-height: calc(100dvh - 80px); overflow-y: auto; padding: 8px; border: 1px solid var(--verevon-border); border-radius: 16px; background: var(--panel); color: var(--verevon-text); box-shadow: var(--shadow-md); }
+.core-navbar-more__panel > button { display: flex; align-items: center; width: 100%; min-height: 44px; gap: 12px; padding: 8px 12px; border: 0; border-radius: 8px; background: transparent; color: inherit; font: inherit; font-size: 14px; text-align: left; cursor: pointer; }
+.core-navbar-more__panel > button small { margin-left: auto; color: var(--verevon-text-muted); }
+.core-navbar-more__panel > button:hover { background: var(--verevon-surface-soft); }
+.core-navbar-more__theme { display: flex; gap: 4px; margin: 8px 0; padding: 12px 8px; border: 0; border-block: 1px solid var(--verevon-border-soft); }
+.core-navbar-more__theme legend { padding: 0 4px; color: var(--verevon-text-muted); font-size: 12px; }
+.core-navbar-more__theme button { display: flex; flex: 1; min-height: 40px; gap: 6px; align-items: center; justify-content: center; border: 1px solid transparent; border-radius: 8px; background: transparent; color: inherit; font: inherit; font-size: 12px; cursor: pointer; }
+.core-navbar-more__theme button[aria-pressed='true'] { background: var(--verevon-surface-soft); border-color: var(--verevon-border); }
+.core-navbar-more__panel button:focus-visible { outline: 2px solid var(--verevon-accent-ink); outline-offset: 1px; }
+.core-navbar-more .chat-appearance-preview--embedded { position: static; }
+.core-navbar-more .chat-appearance-preview--embedded > summary { width: 100%; min-height: 44px; justify-content: flex-start; gap: 12px; padding: 8px 12px; border: 0; background: transparent; color: var(--verevon-text); font-size: 14px; }
+.core-navbar-more .chat-appearance-preview--embedded > summary > span { display: inline; }
+.core-navbar-more .chat-appearance-preview--embedded .chat-appearance-preview__panel { position: static; width: auto; max-height: none; padding: 12px; border: 0; border-radius: 8px; box-shadow: none; }
+.core-navbar-more .chat-appearance-preview--embedded .chat-appearance-preview__option { min-height: 60px; }
+.core-sidebar-mobile-scrim { display: none; }
+
+/* The existing shell's ink tokens are light-only. Keep the new controls'
+   dark palette local, rather than changing tokens for unrelated screens. */
+.dark [data-chat-appearance~='navigation'] :is(.core-navbar, .core-sidebar__rail),
+.dark :is(.chat-organizer, .chat-project-dialog, .chat-appearance-preview) {
+  --verevon-text: #f5f5f5;
+  --verevon-text-soft: #e3e4e8;
+  --verevon-text-muted: #c5c7cc;
+  --verevon-text-subtle: #b3b6be;
+  --verevon-surface-soft: #383b43;
+  --verevon-surface-muted: #454851;
+  --verevon-border: #767a85;
+  --verevon-border-soft: #454851;
+  --panel: #26282e;
+  --background: #22242a;
+  --text: #f5f5f5;
+  --ink: #f5f5f5;
+}
+.dark [data-chat-appearance~='navigation'] .verevon-navbar-search-trigger { background: #26282e; border: 0; }
+.dark [data-chat-appearance~='navigation'] .verevon-navbar-search-trigger:hover { background: #2e3037; }
+.dark [data-chat-appearance~='navigation'] .verevon-navbar-shortcut-key { background: transparent; border-color: transparent; }
+.dark [data-chat-appearance~='navigation'] .verevon-navbar-action-button:hover { color: var(--verevon-text); background: var(--verevon-surface-soft); }
+.dark .chat-organizer .core-chat-session span { color: var(--verevon-text); }
+.dark .chat-organizer .core-chat-session__menu-trigger:hover { color: var(--verevon-text); }
+.dark .chat-organizer .core-chat-session__menu-item:is(:hover, :focus-visible) { background: var(--verevon-surface-soft); }
+
+[data-chat-appearance~='context'] .dashboard-composer-root--chat .dashboard-composer-context-button { display: inline-flex; width: auto; min-width: 0; min-height: 36px; padding: 0 10px; gap: 6px; border-radius: 10px; color: var(--verevon-text); }
+[data-chat-appearance~='context'] .dashboard-composer-root--chat .dashboard-composer-context-button .dashboard-composer-context-label { display: inline; max-width: 150px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: inherit; font-size: 12px; }
+.dark [data-chat-appearance~='context'] .dashboard-composer-root--chat .dashboard-composer-context-button { color: #f5f5f5; background: #2f3239; border-color: #767a85; }
+
+@media (max-width: 1100px) {
+  [data-chat-appearance~='navigation'] .core-navbar__inner { gap: 12px; }
+  [data-chat-appearance~='navigation'] .core-breadcrumb__workspace > span { max-width: 112px; }
+  [data-chat-appearance~='navigation'] .core-breadcrumb > a,
+  [data-chat-appearance~='navigation'] .core-breadcrumb > svg { display: none; }
+}
+@media (max-width: 767px) {
+  [data-chat-appearance~='navigation'] .core-navbar__inner { padding-inline: 8px; gap: 4px; }
+  [data-chat-appearance~='navigation'] .core-history-nav { display: none; }
+  [data-chat-appearance~='navigation'] .core-navbar__actions { flex: 1; justify-content: flex-end; gap: 0; }
+  [data-chat-appearance~='navigation'] .core-navbar__action-group { gap: 0; }
+  [data-chat-appearance~='navigation'] .core-navbar__action-group--refined .verevon-navbar-action-button { min-width: 40px; min-height: 44px; }
+  [data-chat-appearance~='navigation'] .core-nav-divider { margin-inline: 4px; }
+  .core-navbar-more__panel { position: fixed; inset: 64px 8px auto; width: auto; max-height: calc(100dvh - 80px); }
+  [data-chat-appearance~='navigation'][data-sidebar-expanded='true'] .core-sidebar { display: block; max-width: calc(100vw - 48px); z-index: 60; box-shadow: var(--shadow-md); }
+  [data-chat-appearance~='navigation'] .core-sidebar-mobile-scrim { display: block; position: fixed; inset: 56px 0 0; z-index: 59; border: 0; background: rgb(0 0 0 / 24%); }
+  [data-chat-appearance~='context'] .dashboard-composer-root--chat .dashboard-composer-context-button .dashboard-composer-context-label { max-width: 114px; }
+}

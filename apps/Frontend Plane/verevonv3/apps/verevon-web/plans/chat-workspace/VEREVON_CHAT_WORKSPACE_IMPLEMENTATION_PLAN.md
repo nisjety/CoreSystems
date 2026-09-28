@@ -2,6 +2,8 @@
 
 > **Execution update — 2026-09-19:** Start with [product recording readiness](../product-recordings/evidence/PRODUCT_RECORDING_READINESS_2026-09-19.md), [Q01–Q04 verification](../product-recordings/evidence/PRODUCT_RECORDING_Q01_Q04_2026-09-19.md), [Q05–Q07 verification](../product-recordings/evidence/PRODUCT_RECORDING_Q05_Q07_2026-09-19.md), and [Q08–Q10 execution](../product-recordings/evidence/PRODUCT_RECORDING_Q08_Q10_2026-09-19.md). The old authentication and attachment gaps have newer fixes/evidence. Campaign conformance, repeated release-build passes, connected business data, audit delivery and performance still prevent recording sign-off. Earlier checkpoints remain dated history, not an overall release certification.
 
+> **Execution update — 2026-09-24:** Q14 phase timing, Q15 recovery fixes and an atomic save for direct chat turns are in the working tree but not deployed. See [§24](#24-phase-timing-recovery-and-the-atomic-save-2026-09-24). It also corrects the `RUN_CANCEL_REQUESTED` statement in the cancellation-receipt follow-up below.
+
 **Status:** Backend wiring checkpoint complete — A2A provider contract remains gated  
 **Date:** 2026-08-30  
 **Target:** `apps/Frontend Plane/verevonv3` and its same-origin gateway/runtime dependencies  
@@ -42,6 +44,8 @@ Durable Trace replay follow-up: the Model Gateway now exposes a read-only `/v1/t
 Durable browser replay follow-up: browser-agent action/observation/pause/resume/approval/verification events emitted through the existing `RecordOrchestrationEvent` RPC are now persisted as an allowlisted, reference-only projection in Session Core's canonical event log. Model Gateway exposes `/v1/runs/:run_id/events/replay`, authorizes the run first, filters the `ReplayThread` stream back to that run, and returns only the safe browser payload plus a page cursor; the Frontend Gateway carries the existing model/session audiences at `/api/v1/runs/:run_id/events/replay`. The Work watcher hydrates those pages before opening the live SSE tail and resumes with the canonical cursor, so a completed browser run can restore its step timeline and artifact frames after reload without exposing DOM bytes, provider credentials, or a second browser transport. The live stream remains authoritative for new events; persisted replay is a return-after-navigation path, not a replacement gateway.
 
 Cancellation-receipt follow-up: authorized run cancellation now calls Session Core's existing `RunService.CancelRun` instead of relying on a gateway-only NATS request notification. Session Core atomically flips the run to `cancelled` and appends a `RUN_CANCELLED` event; the returned event id is a durable receipt and is safe to return on idempotent retries. Model Gateway preserves the legacy `RUN_CANCEL_REQUESTED` fan-out as an optional notification, but no longer treats notification delivery as the status authority. Chat's Stop action cancels a durable Work run when one is active and records the confirmed receipt in the Trace projection; temporary/ZDR turns remain local and never call the durable mutation.
+
+> **Correction (2026-09-24):** nothing consumes `RUN_CANCEL_REQUESTED`. The gateway still publishes it on `mp.v1.orchestration.run`, but the `mp.v1.orchestration.>` subscribers in session-core and orchestrator-core do not decode it as an orchestration event, so it stops nothing (see the `cancel_run` comment in `model-gateway/src/http_routes.rs`). The paragraph above calls it an optional fan-out; in fact it has no consumer. See §24.7.
 
 Typed-pause follow-up: the Solid event adapter now carries an explicit `blocked` / `approval` / `ambiguous` pause kind when the server event provides that evidence (approval pauses are classified by their authoritative event family; browser pauses are classified only from an explicit reason/status). The Trace label keeps the kind visible without turning an untyped pause into a guessed policy state. Missing evidence remains untyped, so the client does not manufacture a pause reason.
 
@@ -942,3 +946,279 @@ tables, invisible to this console) was not re-investigated this pass.
 
 (3), the per-unproxied-route product-intent decision, was not picked up this pass —
 still open.
+
+## 24. Phase timing, recovery and the atomic save (2026-09-24)
+
+**None of this is deployed.** Every change below is uncommitted working-tree
+code in `C:\dev\CoresSystem` on `fix/ui-premium-restore`. The running
+containers still behave as before. The stack must be rebuilt through the
+launcher (`--from model` covers the Model, Application, Ingestion and Frontend
+planes) and then validated live: the 104-case review matrix, the 10 recheck
+controls, note-turn runs and one smoke turn. Only then is the build frozen.
+Q16 qualification streaks start after the freeze. This section claims no live
+result, no latency after the changes and no qualification progress. The tests
+it names ran against mocks and fakes.
+
+### 24.1 Product-owner decisions
+
+- **2026-09-23 — keep the route.** gpt-5.6-terra via `openai-codex-subscription`
+  stays the product and recording route. No model switch. Latency work stays
+  inside that route.
+- **2026-09-23 — fix Voice mode on the governed speech path, do not remove it.**
+  Voice mode no longer uses the browser's Web Speech API. It records a take and
+  sends it through `/api/v1/ai/dictate` (`src/features/voice/VoiceModeDialog.tsx`),
+  and it is disabled in Temporary chat.
+- **2026-09-24 — the direct transport is opt-in.** The broker's direct
+  ChatGPT-OAuth Responses transport is built but off by default
+  (`CODEX_SUBSCRIPTION_TRANSPORT` defaults to `app-server` in
+  `integration-corev2/internal/config/config.go`). The hardened Codex app-server
+  stays the default until OpenAI confirms hosted multi-user use. OpenAI's public
+  statements cover individuals using their own account in a client. Its
+  2026-08-21 statement says re-serving a subscription as API traffic gets
+  flagged.
+- **2026-09-24 — four model-visible latency levers ship on, behind env
+  kill-switches.** Note-turn plan prefetch (`MODEL_GATEWAY_SOLE_NOTE_PREFETCH`),
+  recheck proposes edits (`MODEL_GATEWAY_RECHECK_PROPOSES_EDITS`), balanced
+  review batches (`MODEL_GATEWAY_BALANCED_REVIEW_BATCHES`) and thread/start
+  effort (`CODEX_APP_SERVER_THREAD_EFFORT`). All four change what the model
+  sees on the recorded route, so the live validation above must run with them
+  on. Each is on unless its variable is set off (`0`, `off`, `false`, `no` or
+  `disabled` for the three gateway levers, `model-gateway/src/latency_levers.rs`;
+  `false` for the broker lever, `integration-corev2/internal/config/config.go`).
+  Off restores the request sent before that lever, by configuration and a
+  restart, without a rebuild. The values are read once per process. The
+  switches were being wired in the same pass as this note, so confirm each one
+  reaches its call site before the rebuild.
+- **2026-09-24 — subscription tokens are left out of org token caps.** This
+  restores the earlier behaviour. The broker now reports real Codex usage, so
+  cost-core's budget check compares only metered tokens
+  (`MeteredInputTokens`/`MeteredOutputTokens`,
+  `cost-core/internal/server/server.go`). Usage reports still include
+  subscription tokens.
+
+### 24.2 Q14: what the Pass 6 logs show
+
+Measured. Reconstructed from gateway and inference-core logs for the five
+final-build Pass 6 journeys (v53–v57, 10 successful turns). These are the only
+measured latency numbers in this section.
+
+- 98.8–99.7% of server time was spent waiting on the provider. Orchestration
+  took 0.16–0.51 s per turn. Browser, BFF and harness overhead was 0.34–0.73 s.
+- A plan is two provider calls in sequence: the author call, which writes the
+  whole document, and the high-effort source review. Validation was 54–77% of
+  plan time. Each rejected review added about 25–31 s.
+- The fastest plan was 43.2 s (author 19.9 s plus review 23.3 s). Q14's target
+  of p95 ≤30 s for a source-attached plan therefore cannot be reached on this
+  route through orchestration or frontend work.
+- v54's artifact check took 89.5 s against the 90 s deadline, with about
+  0.45 s to spare. Its saved receipt said `reviewMs=25422, attempts=1` for
+  three passes and a repair.
+
+Limits: "provider" here is the whole broker path, including Codex process
+setup, not model time alone; broker internals were not visible; only
+successful turns were in the retained log window; the edge figure mixes the
+Windows host clock with the Docker VM clock.
+
+### 24.3 Q14: phase timing, as built
+
+- **`ProviderTiming` (inference-core).** An additive proto message on
+  `InferResponse.provider_timing = 14` and the final
+  `InferChunk.provider_timing = 15` (`proto/model_plane/v1/inference.proto`),
+  measured in `inference-core/src/provider/timing.rs`. It carries handler,
+  routing, provider, accept and first-token milliseconds, attempts,
+  failed-attempt and retry-wait time, a cache-hit flag, `usage_reported` and
+  `upstream_ms`. The span guards held across `.await` in `fallback.rs` are
+  replaced with `.instrument(...)`, so provider log lines now carry the right
+  request id.
+- **Broker phases.** The Integration Core broker times `spawn`, `initialize`,
+  `thread_start`, `turn_start`, `first_delta` and `turn_total` for each Codex
+  app-server call and returns them with the call's token usage
+  (`integration-corev2/internal/codexsubscription/appserver.go`). inference-core
+  maps them into `upstream_ms`, plus `broker_ready` on streams. Each broker
+  call on the subscription route now reports real tokens instead of zero.
+- **`turn_timing` (model-gateway).** New module `model-gateway/src/turn_timing.rs`.
+  One monotonic clock per turn, started where the request id is minted. It
+  holds up to 64 phase spans (admission, session prepare, context, tool
+  decision, generation, local validation, review, repair, dispatch, answer
+  stream, verification, commit lock, durable append, terminal ack, publish,
+  title, follow-ups), marks and counts. `provider_ms` is the union of
+  provider-call intervals, so parallel review batches count once;
+  `orchestration_ms` is the rest of `server_ms`.
+- **The `turn_timing` SSE event.** It is in the `usage` family and goes through
+  `emit_and_buffer`, so a resume replays it. It is sent just before `done`, or
+  before the terminal `error` or `stopped` frame. The usage envelope gains a
+  `timing` summary; `latency_ms` is unchanged. One content-free `turn timing`
+  log line is written on every exit, including failures and timeouts. Timing
+  is not put into `resultReceipt`.
+- **Modelltid and Systemtid.** When `turn_timing` is present, the Details
+  popover shows `Modelltid` (`provider_ms`) and `Systemtid`
+  (`orchestration_ms`) next to `Total tid` (`ChatMessages.tsx`, parsed by
+  `parseTurnTiming` in `src/shared/api/chat-client.ts`). The totals and the
+  cost basis survive a reload. A subscription turn shows "Kostnad: Inkludert i
+  abonnementet", never `$0`.
+- **Truthful review receipts.** The source-review receipt keeps `reviewMs` and
+  `reviewAttempts` for the accepted pass and adds whole-check totals:
+  `validationMs`, `reviewPasses`, `repairs` and `reviewerEdits`
+  (`model-gateway/src/source_validation.rs`). The SPA stores the receipt but
+  does not render these fields yet.
+- **Harness per-frame capture.** Each acceptance `send()` reads the stream
+  chunk by chunk and writes a `<label>-phases` attachment before any assertion,
+  so failed runs keep their data (`tests/e2e/product-acceptance-helpers.ts`,
+  `tests/e2e/product-phase-timing.ts`). It holds every frame's event, id and
+  browser-clock `atMs` from the submit click, phase marks, the outcome and the
+  verbatim `turn_timing` payload. It holds no answer text.
+- **Cohort report.** `node tests/e2e/product-phase-report.ts <report.json |
+  attachment dir> [--json]` prints p50, p95 and max per workload. Failed,
+  stopped and incomplete runs stay in the cohort. p95 is withheld below 20
+  samples, following Q14's rule.
+- **Deadlines.** The 90 s artifact-check and 150 s tool-phase deadlines are
+  unchanged by default. They can now be set with
+  `MODEL_GATEWAY_ARTIFACT_CHECK_TIMEOUT_SECS` and
+  `MODEL_GATEWAY_TOOL_PHASE_TIMEOUT_SECS`.
+
+Not covered yet: the unary gRPC and HTTP invoke envelopes carry no timing
+summary; the ZDR, vision, image and agentic stream paths emit no
+`turn_timing`; deep-research pipeline calls count as orchestration; the usage
+event still counts only the answer call, so artifact turns show 0 tokens there
+(review and repair tokens appear only in the receipt); recording mode does not
+yet fail when `turn_timing` is missing.
+
+### 24.4 Q15: recovery fixed in the gateway
+
+- **Tool-phase progress is buffered.** Tool calls and results, steps,
+  citations, verification and queued input now get SSE ids in the stream's
+  single sequence and go to the resume buffer, so a reload during checking or
+  repair replays them (`RichEventSink::buffering`, `model-gateway/src/sse_events.rs`).
+- **`done` comes last.** It is recorded with the same sequence it is sent with,
+  after the usage, title and follow-up frames. Before, a client resuming from
+  those frames never received `done`.
+- **Resume follows a live producer.** In the same process it no longer answers
+  404 before anything is buffered, and it follows the producer for up to
+  15 minutes (`CancelRegistry::is_live_for`). It ends on `error` or `stopped`
+  as well as `done`.
+- **Every failed exit ends the buffer.** A new `StreamEnd` marker (Redis key
+  `mp:gw:stream:<key>:ended`, `stream_buffer.rs`) lets a resume close right after the buffered frames instead of
+  tailing. Early failures and fallback errors are buffered too.
+- **Stop is honoured in more places:** during the tool-decision call, between
+  the final chunk and the save, and on the fallback path. The fallback now
+  detaches on disconnect instead of cancelling, continues the stream's
+  sequence, and refuses to publish chat text without its staged documents.
+- **A durable cancel stops the live stream.** `cancel_run` now also trips the
+  owner's live stream for that run (`CancelRegistry::cancel_run_for`,
+  `model-gateway/src/http_routes.rs`). The stream ends `stopped` and saves
+  nothing.
+- **Liveness is checked right before the save.** Combined with the atomic save
+  in §24.6, a run that ended in the meantime saves nothing.
+- **Tool timeouts.** In a source-bound phase, read tools stop at the remaining
+  validation deadline. A failed read no longer withholds the fixed completion
+  text of a checked document; only a failed document write does.
+
+### 24.5 Q15: recovery fixed in the SPA
+
+- **A failed resume asks the server first** (`followUnresumableRun`,
+  `use-chat-controller.ts`). An active run keeps the turn pending and adopts
+  the saved answer when it lands, for up to 15 minutes (Session Core's
+  `MANAGED_DEADLINE_SECS`). A failed run shows its failure. Reload now handles
+  failed and active runs, not only cancelled ones.
+- **Stop tells the truth** (`reconcileStoppedTurn`). If the server saved the
+  answer anyway, the turn shows it. Stop cancels by the stopped turn's own
+  request id and sends `cancelRun` for every turn with a run id, not only Work
+  turns. A refused cancel is recorded on the turn without content.
+- **Stop before `connected`** holds the stream open, ignoring frames, until
+  `connected` arrives (at most 20 s), then cancels with that request id.
+- **Transport loss is not a server error.** The proxy's nested
+  `upstream_unavailable` now triggers a resume (`isTransportLossCode`). A real
+  server error replayed during resume shows as that error, not as "connection
+  lost". 401 and 403 show "Logg inn på nytt".
+- **Replay never duplicates.** Resume drops any frame whose numeric SSE id is at
+  or below the highest id already applied (`acceptFrame` in `chat-client.ts`).
+  There is no reattach after a terminal frame. An unmounted chat aborts its
+  stream and starts no new polling.
+- **`result_receipt`** is parsed and stored on the turn instead of logging an
+  unknown-event warning.
+
+**Still open in Q15, gateway and SPA together:**
+
+- **Cross-replica cancel.** The cancel registry is per process. A durable
+  cancel served by another replica does not stop the stream mid-phase. The
+  pre-save liveness check and the atomic save still prevent a save onto the
+  cancelled run. A NATS cancel subject or a liveness poll in the tool loop
+  would close the gap.
+- **Other two-call save paths.** gRPC Invoke (`model-gateway/src/grpc.rs`),
+  unary HTTP `/v1/invoke` (`http_routes.rs`) and the vision and
+  image-generation SSE paths (`sse.rs`) still append with the delegated bearer
+  and terminalize in a second call. They can move to the atomic call.
+- **Stop before `connected` needs an idempotency-key design.** The SPA sends no
+  `idempotency_key`, and cancel exists only by request id or run id, which both
+  arrive in `connected`. A turn whose `connected` never arrives cannot be
+  cancelled. Closing this needs an owner-scoped cancel by idempotency key, plus
+  a BFF route. Sending the key also changes managed-start key derivation and
+  adds duplicate-in-flight and replay behaviour, so it must be designed, not
+  bolted on.
+
+### 24.6 The atomic save: `CompleteDirectRunWithMessage`
+
+- **New Session Core RPC** `ManagedRunLifecycle.CompleteDirectRunWithMessage`
+  (`proto/model_plane/v1/sessions.proto`, `session-core/src/terminalization.rs`).
+  One transaction checks that the run is still active, belongs to this thread
+  and is owned by GatewayDirect. It appends the assistant message through the
+  same code as `AppendMessage` and writes the Completed receipt. Migration
+  `0040_direct_run_completion_key.sql` stores the idempotency key (the gateway
+  request id) and the message sequence.
+- **Outcomes.** A run that is no longer active returns `already_terminal`, and
+  nothing is saved. A retry with the same key returns the same receipt without
+  a second message. ZDR runs are refused.
+- **Gateway use.** The main SSE save path and `run_infer_fallback` call it
+  through `session_flow::complete_direct_inference_run_with_message`, with the
+  gateway's own `session:terminalize` token. This closes two Q15 gaps: a
+  cancel landing between the save and the receipt, and a turn that outlives
+  its 300 s delegated bearer.
+- **Bounds and rollout.** Each attempt has a 30 s limit, with one retry on the
+  same key after an ambiguous failure. Until session-core is rebuilt it answers
+  UNIMPLEMENTED, and the gateway falls back to the old two-call path.
+  `turn_timing` reports the call as `durable_append` with an empty
+  `terminal_ack` span.
+- **Scope.** `session:terminalize` now also authorizes this one final
+  assistant-message write for a run the gateway owns. A dedicated scope is an
+  open Control Plane choice.
+- **Rollback.** After migration 0040 is applied, the previous session-core
+  image fails at boot on the unknown migration. The freeze runbook needs
+  `DELETE FROM _sqlx_migrations WHERE version = 40;` before starting an older
+  image.
+
+### 24.7 New error codes and a correction
+
+| Code | What it means | How the SPA shows it |
+|---|---|---|
+| `response_validation_unavailable` | New. The provider or subscription did not answer (Unavailable, ResourceExhausted or DeadlineExceeded) during a document's source review or repair. Nothing is published. It replaces the "failed check" wording, which blamed the draft. On the subscription route the Norwegian message names the ChatGPT subscription and says no other model was used. The durable failure is `provider_unavailable`. Retryable. | Keeps the server's message. Open steps show stopped, not failed. Work reads "Modelltjenesten svarte ikke. Ingenting ble publisert." |
+| `inference_stream_ended_without_terminal` | New on the wire. The provider stream closed without its final chunk. Before, the client got no terminal frame at all. Now a buffered `turn_timing` and this `error` follow. The durable outcome is unchanged. Retryable. | Own Norwegian/English copy. Text that already streamed moves behind a closed "Vis teksten som ikke ble lagret" disclosure and is never persisted. |
+| `session_liveness_failed` | Existing code, wider use. The run is no longer active, or its activity could not be confirmed, so nothing was saved. It now also comes from the pre-save heartbeat and from an atomic save that returns `already_terminal` (with a local Stop the stream ends `stopped` instead). Answer text may already have streamed live; it was not saved. Retryable. | Same handling as the row above. |
+
+The SPA also treats `assistant_persist_failed` and `artifact_revision_conflict`
+as unsaved, so streamed text is never presented as a saved answer.
+
+**Correction: nothing consumes `RUN_CANCEL_REQUESTED`.** The 2026-08-30
+cancellation-receipt follow-up near the top of this plan says Model Gateway
+keeps the legacy `RUN_CANCEL_REQUESTED` fan-out as an optional notification.
+The gateway does still publish it on `mp.v1.orchestration.run`, but nothing in
+the repository acts on it: the `mp.v1.orchestration.>` subscribers in
+session-core and orchestrator-core do not decode it as an orchestration event
+(`cancel_run` comment, `model-gateway/src/http_routes.rs`). Session Core's
+`RunService.CancelRun` remains the status authority. Since this pass, a
+durable cancel stops a live chat stream through `CancelRegistry::cancel_run_for`,
+and only in the replica that served the cancel (§24.5, still open).
+
+### 24.8 Next steps, in order
+
+1. Rebuild through the launcher with `--from model`.
+2. Validate live on the rebuilt stack: the 104-case review matrix, the 10
+   recheck controls, note-turn runs and one smoke turn, with the four levers
+   on.
+3. Freeze one identified build and route. Before the freeze commit, `git add`
+   the new untracked build inputs (for example `turn_timing.rs`,
+   `provider/timing.rs` and migration `0040`), or the committed tree will not
+   compile. Regenerate `apps/Model Plane/docs/sse-event-taxonomy.md`, which
+   lacks `turn_timing`, `result_receipt` and `verification`, or the SSE
+   taxonomy CI check fails.
+4. Start the Q16 qualification streaks on the frozen build. Report Q14
+   latency only from `-phases` cohorts with at least 20 samples per workload.

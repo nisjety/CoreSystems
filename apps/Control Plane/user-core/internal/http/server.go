@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/I-Dacosta/AquatiqCMS/apps/user-service-go/internal/clients"
+	"github.com/I-Dacosta/AquatiqCMS/apps/user-service-go/internal/mailtask"
 	"github.com/I-Dacosta/AquatiqCMS/apps/user-service-go/internal/nats"
 	rediscache "github.com/I-Dacosta/AquatiqCMS/apps/user-service-go/internal/redis"
 	"github.com/I-Dacosta/AquatiqCMS/apps/user-service-go/internal/spaces"
@@ -31,6 +32,9 @@ type Server struct {
 	removeMembershipProjection func(context.Context, string, string) error
 	aclRepo                    *users.AclRepository
 	spaceRepo                  *spaces.Repository
+	mailTaskService            *mailtask.Service
+	mailTaskUserLookup         MailTaskUserLookup
+	mailTaskEffectPolicy       MailTaskEffectPolicyResolver
 	runActionAuthority         RunActionAuthorityResolver
 	scheduledStepAuthority     ScheduledStepAuthorityResolver
 	port                       string
@@ -57,6 +61,11 @@ func (s *Server) SetAuthInternalCredential(credential clients.AuthInternalClient
 // authority must not be represented as an owner-resource ACL.
 func (s *Server) SetSpaceRepository(repository *spaces.Repository) {
 	s.spaceRepo = repository
+	// *spaces.Repository already satisfies MailTaskEffectPolicyResolver
+	// (mail_task_handlers.go) -- wiring it here means production callers
+	// need no separate setter call, while tests can still substitute a fake
+	// via the narrow interface without touching this field.
+	s.mailTaskEffectPolicy = repository
 }
 
 // RunActionAuthorityResolver fetches the content-free run binding from Session
@@ -115,6 +124,10 @@ func NewServer(userService *users.Service, aclRepo *users.AclRepository, sharedP
 	}
 	if userService != nil {
 		s.removeMembershipProjection = userService.RemoveMembership
+		// *users.Service satisfies MailTaskUserLookup already; wiring it here
+		// means resolveMailTaskAlias needs no separate production setter, and
+		// tests can still override the unexported field directly with a fake.
+		s.mailTaskUserLookup = userService
 	}
 
 	if s.orgService == "" {
@@ -298,6 +311,18 @@ func (s *Server) setupRoutes() {
 			providers.POST("", s.linkProviderAccount)
 		}
 
+		// Self-service personal inbound-mail alias (chat-wave2 mail-task spec,
+		// owner ruling 2026-09-28: Postmark inbound, self-forward only). Every
+		// handler 503s while MAIL_TASK_RECEIVING_DOMAIN is unset or no
+		// mailTaskService is wired -- both true by default until the owner
+		// finishes the Postmark account + DNS setup.
+		mailTask := v1.Group("/users/me/mail-task-address")
+		{
+			mailTask.GET("", s.mailTaskAddress)
+			mailTask.POST("", s.mailTaskAddress)
+			mailTask.DELETE("", s.revokeMailTaskAddress)
+		}
+
 		// Internal orchestration endpoints (idempotent hooks from auth pipeline).
 		// Service-principal ONLY for the WHOLE group: these mutate org membership and
 		// user profile, so a plain user Bearer token must NEVER reach them — else
@@ -308,6 +333,12 @@ func (s *Server) setupRoutes() {
 		{
 			internal.POST("/memberships/ensure", s.ensureMembership)
 			internal.POST("/users/enrich-from-provider", s.enrichUserFromProvider)
+
+			// GET /api/v1/internal/mail-task/resolve?alias= -- integration-corev2's
+			// inbound webhook receiver's only way to turn an alias back into
+			// (org_id, user_id, verified_email). Service-principal gated by the
+			// enclosing group, same as every other internal route here.
+			internal.GET("/mail-task/resolve", s.resolveMailTaskAlias)
 
 			spacesGroup := internal.Group("/spaces")
 			{

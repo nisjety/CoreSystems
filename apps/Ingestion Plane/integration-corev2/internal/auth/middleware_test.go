@@ -60,3 +60,76 @@ type staticVerifier struct {
 func (v staticVerifier) VerifyToken(context.Context, string) (Principal, error) {
 	return v.principal, nil
 }
+
+// Owner ruling (security-personal-connections, 2026-09-28): EffectiveUserID
+// is the single place that decides "who is this request acting for" for the
+// personal-connection ownership gate (internal/api.assertConnectionAccess).
+// Every branch of that decision is pinned here, including the isInternalCall
+// split — PrincipalType alone cannot tell apart the legacy internal-API-key
+// path (where UserID IS the delegation) from a verified service-principal
+// bearer token (where UserID is the service's own identity, never a human).
+func TestPrincipalEffectiveUserID(t *testing.T) {
+	cases := []struct {
+		name           string
+		principal      Principal
+		isInternalCall bool
+		want           string
+	}{
+		{
+			name:           "interactive session principal always uses its own UserID",
+			principal:      Principal{PrincipalType: "user", UserID: "user-1"},
+			isInternalCall: false,
+			want:           "user-1",
+		},
+		{
+			name:           "bearer service principal with a verified acting_user_id delegation uses it",
+			principal:      Principal{PrincipalType: "service", UserID: "service:execution-core", DelegatedUserID: "user-1"},
+			isInternalCall: false,
+			want:           "user-1",
+		},
+		{
+			name:           "bearer service principal never falls back to its own service identity",
+			principal:      Principal{PrincipalType: "service", UserID: "service:execution-core"},
+			isInternalCall: false,
+			want:           "",
+		},
+		{
+			name:           "legacy internal-key synthetic principal with a caller-supplied userId is delegated",
+			principal:      Principal{PrincipalType: "service", UserID: "user-1"},
+			isInternalCall: true,
+			want:           "user-1",
+		},
+		{
+			name:           "legacy internal-key synthetic principal with no userId names no one (the sentinel)",
+			principal:      Principal{PrincipalType: "service", UserID: internalUserID},
+			isInternalCall: true,
+			want:           "",
+		},
+		{
+			name: "a stray DelegatedUserID is ignored on the legacy internal-key path " +
+				"(that path's delegation is UserID itself, never this field)",
+			principal:      Principal{PrincipalType: "service", UserID: internalUserID, DelegatedUserID: "user-1"},
+			isInternalCall: true,
+			want:           "",
+		},
+		{
+			name:           "an unauthenticated/zero-value principal names no one",
+			principal:      Principal{},
+			isInternalCall: false,
+			want:           "",
+		},
+		{
+			name:           "whitespace-only UserID on a user principal is treated as empty",
+			principal:      Principal{PrincipalType: "user", UserID: "   "},
+			isInternalCall: false,
+			want:           "",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.principal.EffectiveUserID(tc.isInternalCall); got != tc.want {
+				t.Fatalf("EffectiveUserID(%v) = %q, want %q", tc.isInternalCall, got, tc.want)
+			}
+		})
+	}
+}

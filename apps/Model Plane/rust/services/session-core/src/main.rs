@@ -24,6 +24,7 @@ mod learning_events;
 mod letta_adapter;
 mod memory_erasure;
 mod memory_control;
+mod memory_dedup;
 mod memory_grounding;
 mod memory_grpc;
 mod nats;
@@ -41,6 +42,20 @@ mod terminalization;
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // `session-core memory-dedup ...` is an operator-run maintenance command:
+    // it opens a database pool and nothing else -- no listener, NATS
+    // consumer, background worker or migration run. Every other invocation,
+    // including the container's plain `session-core`, starts the service
+    // exactly as before.
+    if memory_dedup::is_invocation(std::env::args_os().nth(1).as_deref()) {
+        let _otel_guard = mp_telemetry::init("session-core-memory-dedup")?;
+        let args: Vec<String> = std::env::args_os()
+            .skip(2)
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        return memory_dedup::run(&args).await;
+    }
+
     let _otel_guard = mp_telemetry::init("session-core")?;
     info!("session-core starting");
 

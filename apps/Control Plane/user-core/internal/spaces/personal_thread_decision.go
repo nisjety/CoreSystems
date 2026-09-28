@@ -214,6 +214,35 @@ func (e PersonalThreadDecisionEvidence) ValidateForSharedThreadRead() error {
 	return e.Privacy.Validate()
 }
 
+// ValidateForOwnScheduledThreadRead authorizes a personal Space's own owner to
+// read the system-owned (schedule) threads inside their own Space.
+//
+// Deliberately NOT a relaxation of ValidateForSharedThreadRead, which stays
+// "non-personal only" and keeps protecting the Space-Room multi-member
+// semantics it was built for. This validator never crosses a membership
+// boundary — the caller IS the Space's only member — so it has no audience-
+// join requirement, unlike the shared-room path. It exists because a
+// schedule's result thread is created by a trusted SERVICE
+// (service:orchestrator-core, via session-core's PrepareScheduledRunThread),
+// not by the human owner, so the owner-bound "list my own threads" path that
+// already covers every thread a personal Space's member created themselves
+// does not cover this one. This closes exactly that gap, for read only.
+func (e PersonalThreadDecisionEvidence) ValidateForOwnScheduledThreadRead() error {
+	if err := e.Membership.Validate(); err != nil {
+		return err
+	}
+	if e.Membership.Kind != KindPersonal {
+		return fmt.Errorf("this decision is for a personal Space only")
+	}
+	if !matchesOneOf(e.Membership.Role, "owner") {
+		return fmt.Errorf("only the Space's own owner may read it")
+	}
+	if strings.TrimSpace(e.ResourceAuthorizationRef) == "" || !e.ThreadReadEntitled {
+		return fmt.Errorf("own scheduled thread read authority is incomplete")
+	}
+	return e.Privacy.Validate()
+}
+
 // ValidateForRetrieval keeps retrieval authorization distinct from durable
 // thread creation. A deployment must opt into both effect classes explicitly.
 func (e PersonalThreadDecisionEvidence) ValidateForRetrieval() error {

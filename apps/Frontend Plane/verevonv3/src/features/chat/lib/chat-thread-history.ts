@@ -24,6 +24,16 @@ const maxTranscriptContentLength = 32_000
 const maxTranscriptDetailLength = 32_000
 
 /**
+ * The cap a rename UI should enforce on the input itself.
+ *
+ * Exported rather than re-declared: `normalizeHistoryInput` already truncates
+ * a stored title to this length (with an ellipsis), so a rename control that
+ * used a different number could accept text the store would then silently
+ * shorten out from under it.
+ */
+export const CHAT_THREAD_TITLE_MAX_LENGTH = maxTitleLength
+
+/**
  * How a history item's title was produced.
  * - `generated`: AI summary from the model-gateway `title` SSE event — locked:
  *   a later `preview` write must not clobber it.
@@ -44,6 +54,20 @@ export type ChatThreadHistoryItem = {
   latestRunUpdatedAt?: string
   /** User-pinned to the top of the sidebar (see `togglePinnedChatThread`). Local-only — never synced from the server. */
   pinned?: boolean
+  /**
+   * Persona spec — the per-thread override of the user's global persona
+   * switch. Absent means enabled (the opposite convention from `pinned`,
+   * which stores `true` and omits `false`): see `withPersonaEnabledCarry`.
+   * Server-owned via `ChatThreadSession.personaEnabled`
+   * (`chat-client.ts`), same as `pinned`.
+   */
+  personaEnabled?: boolean
+  /** Which surface created this thread (session-core's `ThreadSummary.origin`
+   * — see `ChatThreadSession.origin` in chat-client.ts). Set once at
+   * creation and never changes, so it always carries forward once known
+   * (see `withOriginCarry`) rather than needing an explicit resend like
+   * `pinned` does. */
+  origin?: string
 }
 
 export type ChatThreadHistoryInput = {
@@ -58,16 +82,36 @@ export type ChatThreadHistoryInput = {
   latestRunUpdatedAt?: string
   /** Omit to leave the stored pin state untouched (see `withPinnedCarry`). */
   pinned?: boolean
+  /** Omit to leave the stored persona-enabled state untouched (see
+   * `withPersonaEnabledCarry`). */
+  personaEnabled?: boolean
+  /** Omit to leave the stored origin untouched (see `withOriginCarry`) — a
+   * local snapshot write never knows it and must not erase it. */
+  origin?: string
 }
 
 export type ChatThreadTranscriptTurn = {
   sourceScope?: import('@/shared/actions/chat-source-scope').ChatSourceScope
+  /** See `ChatMessage.retrievalScope`. */
+  retrievalScope?: import('@/shared/actions/chat-source-scope').RetrievalScope
   attachments?: unknown[]
   artifacts?: unknown[]
   citations?: unknown[]
   content: string
   createdAt: string
   costUsd?: number
+  /**
+   * How the cost was reached. Persisted because a subscription turn stores no
+   * `costUsd` at all, and without its basis a reload could no longer say
+   * "included in the subscription": the cost row would silently vanish.
+   */
+  costBasis?: 'metered' | 'subscription'
+  /**
+   * The `turn_timing` totals (wire `server_ms`, `provider_ms`,
+   * `orchestration_ms`), so "Modelltid" and "Systemtid" survive a reload. The
+   * span list stays live-only.
+   */
+  timing?: ChatThreadTranscriptTiming
   /** Server-derived effect evidence from the durable run proof bundle. */
   effectClass?: ChatEffectClass
   confidence?: number
@@ -122,6 +166,13 @@ export type ChatThreadTranscriptTurn = {
   stopReason?: string
   toolCalls?: unknown[]
   tools?: string[]
+}
+
+/** A turn's server time split, in milliseconds on the gateway's own clock. */
+export type ChatThreadTranscriptTiming = {
+  serverMs: number
+  providerMs: number
+  orchestrationMs: number
 }
 
 export type ChatThreadTranscriptStep = {
@@ -183,7 +234,7 @@ export function upsertChatThreadHistory(input: ChatThreadHistoryInput): ChatThre
 
   const existing = readChatThreadHistory()
   const current = existing.find((candidate) => candidate.threadId === item.threadId)
-  const resolved = withLatestRunCarry(withPinnedCarry(withTitleLock(item, current), current), current)
+  const resolved = withOriginCarry(withLatestRunCarry(withPersonaEnabledCarry(withPinnedCarry(withTitleLock(item, current), current), current), current), current)
 
   // Replace in place, then order by activity. Position derives from
   // `updatedAt`, never from write order — selecting an old thread rewrites its
@@ -222,6 +273,70 @@ export function togglePinnedChatThread(threadId: string): ChatThreadHistoryItem[
   })
 }
 
+/**
+ * Toggle a thread's per-thread persona override. Mirrors
+ * {@link togglePinnedChatThread} exactly (same no-op guard, same
+ * `upsertChatThreadHistory` plumbing) — see `withPersonaEnabledCarry` for
+ * why the toggled value here is fine to pass explicitly even though it
+ * carries the opposite default from `pinned`.
+ */
+export function togglePersonaEnabledChatThread(threadId: string): ChatThreadHistoryItem[] {
+  const normalized = normalizeId(threadId)
+  if (!normalized) return readChatThreadHistory()
+  const current = readChatThreadHistory().find((item) => item.threadId === normalized)
+  if (!current) return readChatThreadHistory()
+  return upsertChatThreadHistory({
+    threadId: current.threadId,
+    title: current.title,
+    titleKind: current.titleKind,
+    preview: current.preview,
+    updatedAt: current.updatedAt,
+    latestRunId: current.latestRunId,
+    latestRunStatus: current.latestRunStatus,
+    latestRunUpdatedAt: current.latestRunUpdatedAt,
+    pinned: current.pinned,
+    personaEnabled: !(current.personaEnabled ?? true),
+  })
+}
+
+/**
+ * Apply a user-typed rename to a thread's local cache entry.
+ *
+ * A no-op when the thread has no history entry yet — same guard as
+ * {@link togglePinnedChatThread}, which this otherwise mirrors. Goes through
+ * {@link upsertChatThreadHistory} for the sort/change-event plumbing, but
+ * always writes `titleKind: 'generated'` rather than passing the caller's own
+ * kind through.
+ *
+ * An explicit rename is a stronger signal than either kind
+ * {@link ChatThreadTitleKind} was built for — it is neither the model's own
+ * summary nor the untouched first-message fallback — and it must survive the
+ * exact same title lock a real AI title relies on ({@link withTitleLock}):
+ * without it, the next routine preview snapshot (a composer autosave, a
+ * server resync) would silently overwrite what the person just typed. The one
+ * cost is that undoing a rename after a failed server write has to go through
+ * this same function (with the pre-rename title) rather than
+ * `upsertChatThreadHistory` directly — otherwise the revert write would itself
+ * be blocked by the lock it just installed.
+ */
+export function renameChatThreadLocally(threadId: string, title: string): ChatThreadHistoryItem[] {
+  const normalized = normalizeId(threadId)
+  if (!normalized) return readChatThreadHistory()
+  const current = readChatThreadHistory().find((item) => item.threadId === normalized)
+  if (!current) return readChatThreadHistory()
+  return upsertChatThreadHistory({
+    threadId: current.threadId,
+    title,
+    titleKind: 'generated',
+    preview: current.preview,
+    updatedAt: current.updatedAt,
+    latestRunId: current.latestRunId,
+    latestRunStatus: current.latestRunStatus,
+    latestRunUpdatedAt: current.latestRunUpdatedAt,
+    pinned: current.pinned,
+  })
+}
+
 export function replaceChatThreadHistory(inputs: ChatThreadHistoryInput[]): ChatThreadHistoryItem[] {
   const stored = readChatThreadHistory()
   const seen = new Set<string>()
@@ -246,7 +361,7 @@ export function replaceChatThreadHistory(inputs: ChatThreadHistoryInput[]): Chat
     // Do not "restore" a local carry here — it would resurrect pins the user
     // removed on another device.
     const matchingStored = stored.find((candidate) => candidate.threadId === item.threadId)
-    collected.push(withLatestRunCarry(withPinnedCarry(withTitleLock(item, matchingStored), matchingStored), matchingStored))
+    collected.push(withOriginCarry(withLatestRunCarry(withPersonaEnabledCarry(withPinnedCarry(withTitleLock(item, matchingStored), matchingStored), matchingStored), matchingStored), matchingStored))
   }
   // Sort BEFORE truncating, exactly as `upsertChatThreadHistory` already does.
   // Truncating first — which this used to do, breaking out of the loop at the
@@ -334,6 +449,11 @@ function normalizeHistoryInput(input: ChatThreadHistoryInput): ChatThreadHistory
     // (undefined) means "unspecified", which `withPinnedCarry` resolves
     // against whatever is already stored rather than treating it as unpin.
     ...(typeof input.pinned === 'boolean' ? { pinned: input.pinned } : {}),
+    // Same "only when explicit" contract as `pinned` above — absent means
+    // "unspecified", which `withPersonaEnabledCarry` resolves against
+    // whatever is already stored rather than treating it as enabled.
+    ...(typeof input.personaEnabled === 'boolean' ? { personaEnabled: input.personaEnabled } : {}),
+    ...(normalizeOptionalText(input.origin) ? { origin: normalizeOptionalText(input.origin) } : {}),
   }
 }
 
@@ -379,6 +499,30 @@ function withPinnedCarry(
 }
 
 /**
+ * Persona-enabled carry, mirroring {@link withPinnedCarry} but with the
+ * INVERSE stored polarity: `pinned` stores `true` and omits `false` (default
+ * unpinned); persona stores `false` and omits `true` (default enabled) — so
+ * a routine write that never mentions persona (a snapshot autosave, a
+ * rename) cannot silently re-enable a persona the user turned off for this
+ * thread, and an item that was never touched stores no key at all, same as
+ * one explicitly left enabled.
+ */
+function withPersonaEnabledCarry(
+  item: ChatThreadHistoryItem,
+  current: ChatThreadHistoryItem | undefined,
+): ChatThreadHistoryItem {
+  if (item.personaEnabled !== undefined) {
+    if (item.personaEnabled) {
+      const enabled: ChatThreadHistoryItem = { ...item }
+      delete enabled.personaEnabled
+      return enabled
+    }
+    return item
+  }
+  return current?.personaEnabled === false ? { ...item, personaEnabled: false } : item
+}
+
+/**
  * Snapshot writes usually carry title/preview only. Preserve the last
  * server-owned run hint in that case so a local transcript refresh cannot
  * erase the status chip before the next authoritative thread-list read.
@@ -393,6 +537,22 @@ function withLatestRunCarry(
     ...(item.latestRunStatus === undefined && current?.latestRunStatus ? { latestRunStatus: current.latestRunStatus } : {}),
     ...(item.latestRunUpdatedAt === undefined && current?.latestRunUpdatedAt ? { latestRunUpdatedAt: current.latestRunUpdatedAt } : {}),
   }
+}
+
+/**
+ * Origin carry: unlike `pinned`, origin is set once at thread creation and
+ * never changes (see session-core's `ThreadSummary.origin` doc), so a write
+ * that does not mention it (any local snapshot, a rename) must always keep
+ * whatever was already stored rather than needing an explicit resend.
+ */
+function withOriginCarry(
+  item: ChatThreadHistoryItem,
+  current: ChatThreadHistoryItem | undefined,
+): ChatThreadHistoryItem {
+  if (item.origin === undefined && current?.origin) {
+    return { ...item, origin: current.origin }
+  }
+  return item
 }
 
 /**
@@ -452,12 +612,21 @@ function normalizeTranscriptTurn(turn: ChatThreadTranscriptTurn): ChatThreadTran
     citations: Array.isArray(turn.citations) ? turn.citations : undefined,
     confidence: normalizeOptionalNumber(turn.confidence),
     costUsd: normalizeOptionalNumber(turn.costUsd),
+    costBasis: turn.costBasis === 'metered' || turn.costBasis === 'subscription' ? turn.costBasis : undefined,
+    timing: normalizeTranscriptTiming(turn.timing),
     effectClass: normalizeEffectClass(turn.effectClass),
     createdAt: normalizeTimestamp(turn.createdAt),
     files: Array.isArray(turn.files) ? turn.files : undefined,
     grounding: isRecord(turn.grounding) ? turn.grounding : undefined,
     inputTokens: normalizeOptionalNumber(turn.inputTokens),
     latencyMs: normalizeOptionalNumber(turn.latencyMs),
+    // The four the field comments above promise to keep across a reload.
+    // They used to be dropped right here, on the way into storage, so each
+    // survived only as long as the tab that streamed it.
+    memoryRecallCount: normalizeRecallCount(turn.memoryRecallCount),
+    recalledMemories: Array.isArray(turn.recalledMemories) ? turn.recalledMemories.map(recalledMemoryWithoutText) : undefined,
+    stopReason: normalizeOptionalText(turn.stopReason),
+    verification: normalizeTranscriptVerification(turn.verification),
     model: normalizeOptionalText(turn.model),
     modelUsed: normalizeOptionalText(turn.modelUsed),
     provider: normalizeOptionalText(turn.provider),
@@ -543,6 +712,51 @@ function normalizeOptionalNumber(value: number | undefined): number | undefined 
   return typeof value === 'number' && Number.isFinite(value) ? value : undefined
 }
 
+/** All three totals, each a finite non-negative number, or nothing at all. */
+function normalizeTranscriptTiming(value: unknown): ChatThreadTranscriptTiming | undefined {
+  if (!isRecord(value)) return undefined
+  const serverMs = normalizeNonNegative(value.serverMs)
+  const providerMs = normalizeNonNegative(value.providerMs)
+  const orchestrationMs = normalizeNonNegative(value.orchestrationMs)
+  if (serverMs === undefined || providerMs === undefined || orchestrationMs === undefined) return undefined
+  return { serverMs, providerMs, orchestrationMs }
+}
+
+function normalizeNonNegative(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : undefined
+}
+
+/**
+ * Which memory a turn recalled, never its text. Forgetting or correcting a
+ * memory changes the memory, not the turns that recalled it, so a stored
+ * preview would bring the old text back on the next reload.
+ */
+function recalledMemoryWithoutText(value: unknown): unknown {
+  if (!isRecord(value)) return value
+  return { memoryId: value.memoryId, role: value.role, origin: value.origin, label: value.label, preview: '' }
+}
+
+/** The backend emits a recall notice only for a real recall, so 0 is no count. */
+function normalizeRecallCount(value: number | undefined): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? Math.floor(value) : undefined
+}
+
+/**
+ * Only the three verdicts the backend defines, as the wire normalizer does:
+ * a stored value this build cannot read must not render as "checked".
+ */
+function normalizeTranscriptVerification(value: unknown): ChatThreadTranscriptTurn['verification'] {
+  if (!isRecord(value)) return undefined
+  const verdict = value.verdict
+  if (verdict !== 'supports' && verdict !== 'contradicts' && verdict !== 'unrelated') return undefined
+  return {
+    verdict,
+    kbCitations: normalizeNonNegative(value.kbCitations) ?? 0,
+    webCitations: normalizeNonNegative(value.webCitations) ?? 0,
+    webAllowed: value.webAllowed === true,
+  }
+}
+
 function normalizeEffectClass(value: ChatEffectClass | undefined): ChatEffectClass | undefined {
   return value === 'read_only'
     || value === 'proposed_effect'
@@ -599,7 +813,9 @@ function isChatThreadHistoryItem(value: unknown): value is ChatThreadHistoryItem
     (record.latestRunUpdatedAt === undefined || (
       typeof record.latestRunUpdatedAt === 'string' && !Number.isNaN(Date.parse(record.latestRunUpdatedAt))
     )) &&
-    (record.pinned === undefined || typeof record.pinned === 'boolean')
+    (record.pinned === undefined || typeof record.pinned === 'boolean') &&
+    (record.personaEnabled === undefined || typeof record.personaEnabled === 'boolean') &&
+    (record.origin === undefined || typeof record.origin === 'string')
   )
 }
 
@@ -647,6 +863,12 @@ function isChatThreadTranscriptTurn(value: unknown): value is ChatThreadTranscri
     (record.outputTokens === undefined || typeof record.outputTokens === 'number') &&
     (record.latencyMs === undefined || typeof record.latencyMs === 'number') &&
     (record.costUsd === undefined || typeof record.costUsd === 'number') &&
+    (record.costBasis === undefined || record.costBasis === 'metered' || record.costBasis === 'subscription') &&
+    (record.timing === undefined || isRecord(record.timing)) &&
+    (record.stopReason === undefined || typeof record.stopReason === 'string') &&
+    (record.memoryRecallCount === undefined || typeof record.memoryRecallCount === 'number') &&
+    (record.recalledMemories === undefined || Array.isArray(record.recalledMemories)) &&
+    (record.verification === undefined || isRecord(record.verification)) &&
     (record.effectClass === undefined || record.effectClass === 'read_only' || record.effectClass === 'proposed_effect' || record.effectClass === 'effectful' || record.effectClass === 'external_receipt' || record.effectClass === 'unknown') &&
     (record.confidence === undefined || typeof record.confidence === 'number') &&
     (record.reasoning === undefined || typeof record.reasoning === 'string') &&

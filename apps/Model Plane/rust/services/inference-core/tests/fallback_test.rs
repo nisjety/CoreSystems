@@ -2,6 +2,7 @@
 
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use inference_core::config::InferenceConfig;
 use inference_core::provider::fallback::{FallbackChain, ProviderRouterDyn};
@@ -75,6 +76,7 @@ impl ProviderRouterDyn for MockProvider {
                     token_confidence: None,
                     cache_read_input_tokens: 0,
                     cache_creation_input_tokens: 0,
+                    provider_timing: None,
                 })
                 .await;
         });
@@ -102,6 +104,129 @@ impl ProviderRouterDyn for MockProvider {
             ..Default::default()
         }]
     }
+}
+
+/// A mock provider whose calls take a fixed time: `delay` before a unary
+/// answer (or failure), and for streams a delta at `delay` and the final
+/// chunk at `2 * delay`. Tests run it on tokio's paused clock, so every
+/// duration below is exact.
+struct TimedProvider {
+    delay: Duration,
+    /// Every call fails with an HTTP error after `delay`.
+    fail: bool,
+    /// Rate-limit this many calls before answering.
+    rate_limit_first: AtomicU32,
+    /// Token counts to report; `(0, 0)` reports no usage, like the
+    /// subscription broker.
+    tokens: (i32, i32),
+}
+
+impl TimedProvider {
+    fn ok(delay_ms: u64) -> Self {
+        Self {
+            delay: Duration::from_millis(delay_ms),
+            fail: false,
+            rate_limit_first: AtomicU32::new(0),
+            tokens: (10, 5),
+        }
+    }
+
+    fn failing(delay_ms: u64) -> Self {
+        Self {
+            fail: true,
+            ..Self::ok(delay_ms)
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl ProviderRouterDyn for TimedProvider {
+    async fn infer_dyn(&self, req: &InferRequest) -> Result<InferResponse, ProviderError> {
+        if self
+            .rate_limit_first
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+            .is_ok()
+        {
+            return Err(ProviderError::RateLimited {
+                retry_after_ms: 1_000,
+            });
+        }
+        tokio::time::sleep(self.delay).await;
+        if self.fail {
+            return Err(ProviderError::Http("upstream reset".to_owned()));
+        }
+        Ok(InferResponse {
+            request_id: req.request_id.clone(),
+            content: "timed".to_owned(),
+            model_used: req.model.clone(),
+            stop_reason: "end_turn".to_owned(),
+            input_tokens: self.tokens.0,
+            output_tokens: self.tokens.1,
+            ..Default::default()
+        })
+    }
+
+    async fn infer_stream_dyn(
+        &self,
+        req: &InferRequest,
+    ) -> Result<mpsc::Receiver<InferChunk>, ProviderError> {
+        let (tx, rx) = mpsc::channel(4);
+        let delay = self.delay;
+        let (input_tokens, output_tokens) = self.tokens;
+        let chunk = move |request_id: &str, delta: &str, done: bool| InferChunk {
+            compaction_summary: String::new(),
+            request_id: request_id.to_owned(),
+            delta: delta.to_owned(),
+            done,
+            model_used: String::new(),
+            input_tokens: if done { input_tokens } else { 0 },
+            output_tokens: if done { output_tokens } else { 0 },
+            stop_reason: if done {
+                "end_turn".to_owned()
+            } else {
+                String::new()
+            },
+            reasoning_delta: String::new(),
+            provider_used: String::new(),
+            residency: String::new(),
+            token_confidence: None,
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
+            provider_timing: None,
+        };
+        let request_id = req.request_id.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(delay).await;
+            let _ = tx.send(chunk(&request_id, "hei", false)).await;
+            tokio::time::sleep(delay).await;
+            let _ = tx.send(chunk(&request_id, "", true)).await;
+        });
+        Ok(rx)
+    }
+
+    async fn create_embedding_dyn(
+        &self,
+        _req: &EmbedRequest,
+    ) -> Result<EmbedResponse, ProviderError> {
+        Err(ProviderError::UnsupportedModel("chat only".to_owned()))
+    }
+
+    fn list_models_dyn(&self) -> Vec<ModelInfo> {
+        Vec::new()
+    }
+}
+
+fn timed_chain(providers: Vec<(&str, TimedProvider)>) -> FallbackChain {
+    let providers: Vec<(String, Arc<dyn ProviderRouterDyn>)> = providers
+        .into_iter()
+        .map(|(name, provider)| {
+            (
+                name.to_owned(),
+                Arc::new(provider) as Arc<dyn ProviderRouterDyn>,
+            )
+        })
+        .collect();
+    FallbackChain::new_with_providers(providers, 1)
 }
 
 fn sample_request() -> InferRequest {
@@ -209,6 +334,146 @@ async fn retries_within_provider_before_fallback() {
     assert!(result.is_ok());
     // Should succeed on primary's second attempt, never reaching secondary
     assert_eq!(result.unwrap().content, "from primary");
+}
+
+#[tokio::test(start_paused = true)]
+async fn unary_timing_covers_the_provider_call() {
+    let chain = timed_chain(vec![("primary", TimedProvider::ok(30))]);
+
+    let response = chain.infer(&sample_request()).await.expect("served");
+
+    let timing = response
+        .provider_timing
+        .expect("a served call carries its timing");
+    assert!(timing.provider >= Duration::from_millis(30), "{timing:?}");
+    assert_eq!(
+        timing.provider,
+        Duration::from_millis(30),
+        "the paused clock makes it exact"
+    );
+    assert_eq!(timing.attempts, 1);
+    assert_eq!(timing.failed_attempts, Duration::ZERO);
+    assert_eq!(timing.retry_wait, Duration::ZERO);
+    assert_eq!(
+        timing.routing,
+        Duration::ZERO,
+        "no time passes before the attempt"
+    );
+    assert!(!timing.response_cache_hit);
+    assert!(timing.usage_reported);
+    assert_eq!(timing.first_token, None, "unary calls have no first token");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_failed_first_provider_is_charged_separately_from_the_serving_one() {
+    let chain = timed_chain(vec![
+        ("primary", TimedProvider::failing(5)),
+        ("secondary", TimedProvider::ok(30)),
+    ]);
+
+    let response = chain
+        .infer(&sample_request())
+        .await
+        .expect("secondary serves");
+
+    let timing = response.provider_timing.expect("timing");
+    assert_eq!(timing.attempts, 2);
+    assert!(timing.failed_attempts > Duration::ZERO, "{timing:?}");
+    assert_eq!(timing.failed_attempts, Duration::from_millis(5));
+    assert_eq!(
+        timing.provider,
+        Duration::from_millis(30),
+        "only the serving call"
+    );
+    assert_eq!(
+        timing.routing,
+        Duration::ZERO,
+        "routing ends at the FIRST attempt"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_retry_after_wait_is_recorded_as_retry_wait() {
+    let provider = TimedProvider::ok(10);
+    provider.rate_limit_first.store(1, Ordering::SeqCst);
+    let chain = timed_chain(vec![("primary", provider)]);
+
+    let response = chain
+        .infer(&sample_request())
+        .await
+        .expect("served after the wait");
+
+    let timing = response.provider_timing.expect("timing");
+    assert_eq!(
+        timing.retry_wait,
+        Duration::from_secs(1),
+        "the provider's retry-after"
+    );
+    assert_eq!(timing.attempts, 2, "the throttled call and the serving one");
+    assert_eq!(
+        timing.failed_attempts,
+        Duration::ZERO,
+        "the 429 came back at once"
+    );
+    assert_eq!(timing.provider, Duration::from_millis(10));
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_response_cache_hit_reports_no_provider_time() {
+    let chain = timed_chain(vec![("primary", TimedProvider::ok(30))]);
+    let first = chain.infer(&sample_request()).await.expect("served");
+    assert!(!first.provider_timing.expect("timing").response_cache_hit);
+
+    let cached = chain.infer(&sample_request()).await.expect("cached");
+
+    let timing = cached
+        .provider_timing
+        .expect("a cache hit still carries timing");
+    assert!(timing.response_cache_hit);
+    assert_eq!(timing.attempts, 0, "not the stored copy's attempt count");
+    assert_eq!(timing.provider, Duration::ZERO);
+    assert!(
+        timing.usage_reported,
+        "the cached response keeps its reported counts"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn stream_timing_marks_the_first_token_and_the_final_chunk() {
+    let mut provider = TimedProvider::ok(20);
+    provider.tokens = (0, 0);
+    let chain = timed_chain(vec![("primary", provider)]);
+
+    let mut rx = chain
+        .infer_stream(&sample_request())
+        .await
+        .expect("stream opens");
+    let mut chunks = Vec::new();
+    while let Some(chunk) = rx.recv().await {
+        let done = chunk.done;
+        chunks.push(chunk);
+        if done {
+            break;
+        }
+    }
+
+    assert_eq!(chunks.len(), 2);
+    assert!(
+        chunks[0].provider_timing.is_none(),
+        "deltas carry no timing"
+    );
+    let timing = chunks[1]
+        .provider_timing
+        .clone()
+        .expect("the final chunk carries timing");
+    assert_eq!(timing.accept, Duration::ZERO, "the mock accepts at once");
+    assert_eq!(timing.first_token, Some(Duration::from_millis(20)));
+    assert_eq!(timing.provider, Duration::from_millis(40));
+    assert_eq!(timing.attempts, 1);
+    assert!(
+        !timing.usage_reported,
+        "no token counts means unknown usage"
+    );
 }
 
 #[tokio::test]

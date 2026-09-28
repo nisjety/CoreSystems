@@ -8,7 +8,12 @@ export async function prepareChatAttachments(attachments: PendingChatAttachment[
   let total = 0
   for (const file of attachments) {
     let url: string
-    let extractedText: string | undefined
+    // A connector-attach picker result already extracted its text at pick
+    // time (the network fetch already happened there; see connector-picker
+    // spec §2.4) — carry that forward instead of re-sending it through
+    // extractChatDocument a second time. Only string | undefined here: a
+    // pre-populated value skips the pdf/docx branch below outright.
+    let extractedText: string | undefined = file.extractedText
     try {
       if (file.size > 1_000_000) throw new Error('too large')
       url = file.url.startsWith('blob:') ? await objectUrlToDataUrl(file.url) : file.url
@@ -16,10 +21,12 @@ export async function prepareChatAttachments(attachments: PendingChatAttachment[
       if (!response.ok) throw new Error('unreadable')
       if (file.type.startsWith('image/') && !parseDataUrl(url)?.base64) throw new Error('invalid image encoding')
       if (!file.type.startsWith('image/')) {
-        if (/\.(pdf|docx)$/i.test(file.name)) {
-          const parsed = parseDataUrl(url)
-          if (!parsed) throw new Error('unreadable')
-          extractedText = (await extractChatDocument(file.name, parsed.base64, file.type)).content
+        if (/\.(pdf|docx|xlsx|pptx)$/i.test(file.name)) {
+          if (extractedText === undefined) {
+            const parsed = parseDataUrl(url)
+            if (!parsed) throw new Error('unreadable')
+            extractedText = (await extractChatDocument(file.name, parsed.base64, file.type)).content
+          }
         } else if (file.type.startsWith('text/') || /\.(txt|md|markdown|csv|json|html|htm)$/i.test(file.name)) {
           extractedText = (await response.text()).replace(/\r\n/g, '\n').trim()
         } else throw new Error('unsupported')

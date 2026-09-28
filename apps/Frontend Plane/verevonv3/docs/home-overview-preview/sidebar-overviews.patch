@@ -1,0 +1,601 @@
+--- a/src/features/dashboard/home/DashboardHome.tsx
++++ b/src/features/dashboard/home/DashboardHome.tsx
+@@ -1,5 +1,6 @@
+ import { ChevronDown, ChevronUp, MessageCircleMore, Minus, MoreHorizontal, Plus } from '@/shared/icons'
+ import { createEffect, createMemo, createSignal, Show } from 'solid-js'
++import { useSearchParams } from '@solidjs/router'
+ import { DashboardCardsRail } from '@/features/dashboard/home/DashboardCards'
+ import { DashboardComposerPanel, DashboardHomeHeader, DashboardTabs } from '@/features/dashboard/home/DashboardHomeChrome'
+ import { dashboardCards, type DashboardCard } from '@/features/dashboard/home/dashboard-cards'
+@@ -15,6 +16,9 @@
+ import { cn } from '@/shared/lib/cn'
+ import { chatAppearanceActive } from '@/features/chat/lib/chat-appearance-preview'
+ import { DashboardOverview } from './DashboardOverview'
++import { DashboardSectionOverview } from './DashboardSectionOverview'
++import { homeOverviewLabel, parseHomeOverview } from '@/shared/actions/home-overview'
++import { homeSectionDescription, type HomeWorkSection } from './home-section-data'
+ import './dashboard-overview.css'
+ 
+ const cardsPerPage = 3
+@@ -22,7 +26,8 @@
+ export default function DashboardHome(props: { workspace?: WorkspaceIdentity } = {}) {
+   const i18n = useI18n()
+   const shellWorkspace = useCoreWorkspace()
+-  const [activeTab, setActiveTab] = createSignal<DashboardTab>('Chat')
++  const [searchParams] = useSearchParams()
++  const [homeTool, setActiveTab] = createSignal<DashboardTab>('Chat')
+   const [isLaunching, setIsLaunching] = createSignal(false)
+   const [message, setMessage] = createSignal('')
+   const [cardPage, setCardPage] = createSignal(0)
+@@ -33,6 +38,9 @@
+   const [dockExpanded, setDockExpanded] = createSignal(false)
+   const [dockMinimized, setDockMinimized] = createSignal(false)
+   const overview = () => chatAppearanceActive('dashboard')
++  const section = () => overview() ? parseHomeOverview(searchParams.overview) : 'home'
++  const workSection = () => section() !== 'home' ? section() as HomeWorkSection : null
++  const activeTab = () => workSection() ? 'Chat' : homeTool()
+   // Warm the chat route chunk so the first composer→chat View Transition morph
+   // finds its target already mounted (no lazy/Suspense gap on the first launch).
+   createEffect(
+@@ -45,6 +53,7 @@
+   const displayName = () => firstName(workspace().userName ?? workspace().userEmail)
+   const planLabel = () => formatPlanLabel(workspace().plan)
+   const homeTitle = () => {
++    if (workSection()) return homeOverviewLabel(section(), i18n.tr)
+     if (activeTab() === 'Søk') return i18n.tr('Søk på nett og i Verevon', 'Search the web and Verevon')
+     if (activeTab() === 'Crawl') return i18n.tr('Hent inn kunnskap', 'Bring in knowledge')
+ 
+@@ -63,7 +72,7 @@
+   // preview. The expanded Søk results page is excluded — it takes over the stage
+   // on its own.
+   const resultPresent = () =>
+-    !searchExpanded()
++    !workSection() && !searchExpanded()
+     && ((activeTab() === 'Søk' && searchPreviewActive())
+       || (activeTab() === 'Crawl' && knowledgePreviewActive()))
+   // Default when a result appears: show the result, hide the cards. The chevron
+@@ -81,12 +90,12 @@
+   )
+ 
+   const bandsClass = () => {
+-    if (searchExpanded()) return 'verevon-home-bands verevon-home-bands--expanded min-h-0 flex-1'
++    if (!workSection() && searchExpanded()) return 'verevon-home-bands verevon-home-bands--expanded min-h-0 flex-1'
+     if (resultsView()) return 'verevon-home-bands verevon-home-bands--results min-h-0 flex-1'
+     return 'verevon-home-bands min-h-0 flex-1'
+   }
+   const composerSectionClass = () => {
+-    if (searchExpanded()) return 'verevon-home-composer-section verevon-home-composer-section--expanded'
++    if (!workSection() && searchExpanded()) return 'verevon-home-composer-section verevon-home-composer-section--expanded'
+     if (knowledgeBrowserHeaderInline()) return 'verevon-home-composer-section verevon-home-composer-section--results verevon-home-composer-section--knowledge-browser'
+     if (resultsView()) return 'verevon-home-composer-section verevon-home-composer-section--results'
+     return 'verevon-home-composer-section verevon-home-band verevon-home-band-middle px-4 transition-[padding] duration-500'
+@@ -115,24 +124,25 @@
+   }
+ 
+   return (
+-    <div class={cn('verevon-dashboard-surface dashboard-home', overview() && 'dashboard-home--overview')} data-home-tab={activeTab()}>
++    <div class={cn('verevon-dashboard-surface dashboard-home', overview() && 'dashboard-home--overview')} data-home-tab={activeTab()} data-home-section={section()}>
+       <div class="pointer-events-none absolute inset-0 dashboard-home-grid" aria-hidden="true" />
+ 
+       <div class={cn('verevon-home-stage relative flex h-full min-h-0 flex-col overflow-hidden', isLaunching() && 'verevon-home-launching')}>
+         <Show when={overview()}>
+           <header class="home-overview-heading">
+-            <div><span class="home-eyebrow">{workspace().name} <span aria-hidden="true">/</span> {i18n.tr('Oversikt', 'Overview')}</span><h1>{homeTitle()}</h1><p>{activeTab() === 'Chat' ? i18n.tr('Det siste arbeidet ditt og dagens oppdateringer.', 'Your recent work and today’s updates.') : activeTab() === 'Søk' ? i18n.tr('Finn svar i arbeidsområdet og på nettet.', 'Find answers across your workspace and the web.') : i18n.tr('Gjør nettsider og dokumenter til kunnskap.', 'Turn websites and documents into knowledge.')}</p></div>
++            <div><span class="home-eyebrow">{workspace().name} <span aria-hidden="true">/</span> {i18n.tr('Oversikt', 'Overview')}</span><h1>{homeTitle()}</h1><p>{workSection() ? homeSectionDescription(workSection()!, i18n.tr) : activeTab() === 'Chat' ? i18n.tr('Det siste arbeidet ditt og dagens oppdateringer.', 'Your recent work and today’s updates.') : activeTab() === 'Søk' ? i18n.tr('Finn svar i arbeidsområdet og på nettet.', 'Find answers across your workspace and the web.') : i18n.tr('Gjør nettsider og dokumenter til kunnskap.', 'Turn websites and documents into knowledge.')}</p></div>
+             <time datetime={new Date().toISOString()}>{new Date().toLocaleDateString(i18n.locale() === 'no' ? 'nb-NO' : 'en-GB', { weekday: 'long', day: 'numeric', month: 'long' })}</time>
+           </header>
+         </Show>
+-        <DashboardTabs activeTab={activeTab()} onTabChange={changeActiveTab} />
++        <Show when={!workSection()}><DashboardTabs activeTab={activeTab()} onTabChange={changeActiveTab} /></Show>
+ 
+         <div class={bandsClass()}>
+           <Show when={!overview() && !searchExpanded() && !knowledgeBrowserHeaderInline()}>
+             <DashboardHomeHeader compact={resultsView()} planLabel={planLabel()} planTrial={workspace().planTrial} title={homeTitle()} />
+           </Show>
+ 
+-          <Show when={overview() && (activeTab() === 'Chat' || (!searchExpanded() && !resultPresent()))}><DashboardOverview onPrompt={applyCardPrompt} /></Show>
++          <Show when={overview() && !workSection() && (activeTab() === 'Chat' || (!searchExpanded() && !resultPresent()))}><DashboardOverview onPrompt={applyCardPrompt} /></Show>
++          <Show when={workSection()}>{(selected) => <DashboardSectionOverview section={selected()} />}</Show>
+ 
+           <section class={cn(composerSectionClass(), overview() && activeTab() === 'Chat' && 'home-chat-dock')} data-dock-expanded={dockExpanded() ? 'true' : 'false'} data-dock-minimized={dockMinimized() ? 'true' : 'false'} aria-label={overview() && activeTab() === 'Chat' ? i18n.tr('Spør Verevon', 'Ask Verevon') : undefined}>
+             <Show when={overview() && activeTab() === 'Chat'}>
+@@ -155,7 +165,7 @@
+               onSearchExpandedChange={setSearchExpanded}
+               onSearchPreviewActiveChange={setSearchPreviewActive}
+               previewCollapsed={cardsRevealed()}
+-              searchExpanded={searchExpanded()}
++              searchExpanded={!workSection() && searchExpanded()}
+             />
+           </section>
+ 
+--- a/src/features/core/components/CoreSidebar.tsx
++++ b/src/features/core/components/CoreSidebar.tsx
+@@ -1,4 +1,4 @@
+-import { useLocation } from '@solidjs/router'
++import { useLocation, useSearchParams } from '@solidjs/router'
+ import {
+   Check,
+   ChevronDown,
+@@ -74,6 +74,7 @@
+ import { chatAppearanceActive } from '@/features/chat/lib/chat-appearance-preview'
+ import { FilledRailIcon } from './FilledRailIcon'
+ import { ChatSidebarOrganizer } from './sidebar/ChatSidebarOrganizer'
++import { homeOverviewActionSchema, homeOverviewGroup, homeOverviewSidebarItems, parseHomeOverview } from '@/shared/actions/home-overview'
+ 
+ export const SIDEBAR_MINIMIZED_WIDTH = 60
+ export const SIDEBAR_EXPANDED_WIDTH = 320
+@@ -185,7 +186,9 @@
+   const [searchQuery, setSearchQuery] = createSignal('')
+   const [activeTabId, setActiveTabId] = createSignal<string | null>(null)
+   const panelTabs = () => props.activeSection.panelTabs ?? []
+-  const firstPanelTabId = () => panelTabs()[0]?.id ?? null
++  const firstPanelTabId = () => props.activeSection.id === 'overview' && chatAppearanceActive('dashboard')
++    ? homeOverviewGroup(parseHomeOverview(new URLSearchParams(props.pathname.split('?')[1] ?? '').get('overview')))
++    : panelTabs()[0]?.id ?? null
+   const panelKind = createMemo(() => {
+     if (props.activeSection.id === 'messages') return 'messages'
+     if (props.activeSection.id === 'spaces') return 'spaces'
+@@ -1070,6 +1073,10 @@
+   expanded: boolean
+   onToggle: () => void
+ }) {
++  const [searchParams, setSearchParams] = useSearchParams()
++  const homeSection = () => chatAppearanceActive('dashboard') && props.pathname.split('?')[0] === '/dashboard'
++    ? homeOverviewSidebarItems[props.item.id] : undefined
++  const homeActive = () => parseHomeOverview(searchParams.overview) === homeSection()
+   const active = () => isSidebarPathActive(props.pathname, props.item.href, props.item.aliases, props.item.exactPathMatch)
+   const hasSubItems = () => Boolean(props.item.subItems?.length)
+ 
+@@ -1094,10 +1101,18 @@
+         </div>
+       }
+     >
+-      <a href={props.item.href} link aria-current={active() ? 'page' : undefined} class={cn('core-sidebar-panel-link', active() ? 'verevon-sidebar-panel-active core-sidebar-panel-link--active' : '')}>
++      <Show when={homeSection()} fallback={<a href={props.item.href} link aria-current={active() ? 'page' : undefined} class={cn('core-sidebar-panel-link', active() ? 'verevon-sidebar-panel-active core-sidebar-panel-link--active' : '')}>
+         <PanelItemIcon icon={props.item.icon} active={active()} />
+         <span class={cn('core-sidebar-panel-link__label', active() ? 'verevon-sidebar-row' : 'verevon-sidebar-row-normal')}>{props.item.label}</span>
+-      </a>
++      </a>}>
++        <button type="button" aria-pressed={homeActive() ? 'true' : 'false'} class={cn('core-sidebar-panel-link', homeActive() && 'verevon-sidebar-panel-active core-sidebar-panel-link--active')} onClick={() => {
++          const action = homeOverviewActionSchema.parse({ type: 'home.overview.select', section: homeSection() })
++          setSearchParams({ overview: action.section === 'home' ? undefined : action.section }, { scroll: false })
++        }}>
++          <PanelItemIcon icon={props.item.icon} active={homeActive()} />
++          <span class={cn('core-sidebar-panel-link__label', homeActive() ? 'verevon-sidebar-row' : 'verevon-sidebar-row-normal')}>{props.item.label}</span>
++        </button>
++      </Show>
+     </Show>
+   )
+ }
+--- a/src/features/core/components/CoreNavbar.tsx
++++ b/src/features/core/components/CoreNavbar.tsx
+@@ -1,4 +1,4 @@
+-import { useNavigate } from '@solidjs/router'
++import { useNavigate, useSearchParams } from '@solidjs/router'
+ import {
+   Bell,
+   Building2,
+@@ -45,6 +45,7 @@
+ import { ChatAppearancePreview } from '@/features/chat/components/ChatAppearancePreview'
+ import { chatAppearanceActive } from '@/features/chat/lib/chat-appearance-preview'
+ import { CoreNavbarMore } from './CoreNavbarMore'
++import { homeOverviewLabel, parseHomeOverview } from '@/shared/actions/home-overview'
+ 
+ type OpenPanel = 'assistant' | 'messages' | 'notifications' | 'calendar' | 'profile' | 'workspace' | null
+ 
+@@ -66,6 +67,7 @@
+   let headerRef: HTMLElement | undefined
+   const i18n = useI18n()
+   const navigate = useNavigate()
++  const [searchParams] = useSearchParams()
+   const session = getSession()
+   const [openPanel, setOpenPanel] = createSignal<OpenPanel>(null)
+   const [theme, setTheme] = createSignal<ThemePayload['theme']>('system')
+@@ -78,7 +80,8 @@
+       .then(() => props.onNavbarRefresh?.())
+       .catch(() => undefined)
+   }
+-  const labels = () => getNavbarLabels(props.activeRoute, i18n.locale())
++  const homeOverview = () => props.activeRoute === '/dashboard' && chatAppearanceActive('dashboard') ? parseHomeOverview(searchParams.overview) : 'home'
++  const labels = createMemo(() => ({ ...getNavbarLabels(props.activeRoute, i18n.locale()), ...(homeOverview() !== 'home' ? { tabLabel: homeOverviewLabel(homeOverview(), i18n.tr) } : {}) }))
+   const profileInitial = () => (props.workspace.userName ?? props.workspace.userEmail ?? props.workspace.name).trim().charAt(0).toUpperCase() || props.workspace.initial
+   const messageUnreadCount = () => props.navbarData?.notifications.messages.filter((message) => !message.read).length ?? 0
+   const notificationUnreadCount = () =>
+@@ -204,7 +207,7 @@
+               moduleHref={props.activeRoute}
+               onWorkspaceClick={() => openExclusivePanel('workspace')}
+               tabLabel={labels().tabLabel}
+-              tabHref={props.activeRoute}
++              tabHref={homeOverview() !== 'home' ? `/dashboard?overview=${homeOverview()}` : props.activeRoute}
+               workspace={props.workspace}
+               workspaceActive={openPanel() === 'workspace'}
+             />
+@@ -568,7 +571,7 @@
+   moduleHref: VerevonRoute
+   onWorkspaceClick?: () => void
+   tabLabel: string
+-  tabHref: VerevonRoute
++  tabHref: string
+   workspace: WorkspaceIdentity
+   workspaceActive?: boolean
+ }) {
+--- /dev/null
++++ b/src/shared/actions/home-overview.ts
+@@ -0,0 +1,34 @@
++import { z } from 'zod'
++
++// Presentation-only selection. It neither changes workspace membership nor
++// invokes a tool; the owning workspace still authorizes each subsequent action.
++export const homeOverviewSectionSchema = z.enum(['home', 'spaces', 'studio', 'support', 'social', 'knowledge', 'insights', 'leads', 'agents'])
++export type HomeOverviewSection = z.infer<typeof homeOverviewSectionSchema>
++export const homeOverviewActionSchema = z.object({
++  type: z.literal('home.overview.select'),
++  section: homeOverviewSectionSchema,
++})
++
++export function parseHomeOverview(value: unknown): HomeOverviewSection {
++  const parsed = homeOverviewSectionSchema.safeParse(value)
++  return parsed.success ? parsed.data : 'home'
++}
++
++export const homeOverviewSidebarItems: Readonly<Record<string, HomeOverviewSection>> = {
++  'overview-home': 'home', 'overview-spaces': 'spaces', 'overview-studio': 'studio',
++  'overview-inbox': 'support', 'overview-social': 'social', 'overview-knowledge': 'knowledge',
++  'overview-insights': 'insights', 'overview-leads': 'leads', 'overview-agents': 'agents',
++}
++
++export function homeOverviewGroup(section: HomeOverviewSection) {
++  return ['home', 'spaces', 'studio', 'support'].includes(section) ? 'my-account' : 'shared'
++}
++
++export function homeOverviewLabel(section: HomeOverviewSection, tr: (no: string, en: string) => string): string {
++  const labels: Record<HomeOverviewSection, [string, string]> = {
++    home: ['Hjem', 'Home'], spaces: ['Rom', 'Rom'], studio: ['Studio', 'Studio'],
++    support: ['Support', 'Support'], social: ['Sosialt', 'Social'], knowledge: ['Kunnskap', 'Knowledge'],
++    insights: ['Innsikt', 'Insights'], leads: ['Leads', 'Leads'], agents: ['Agenter', 'Agents'],
++  }
++  return tr(...labels[section])
++}
+--- /dev/null
++++ b/src/features/dashboard/home/home-section-data.ts
+@@ -0,0 +1,78 @@
++import type { HomeOverviewSection } from '@/shared/actions/home-overview'
++
++export type HomeWorkSection = Exclude<HomeOverviewSection, 'home'>
++export type HomeSectionItem = { id: string; title: string; detail?: string; status?: string; href?: string; updatedAt?: string; value?: string }
++export type HomeSectionData = {
++  items: HomeSectionItem[]
++  metrics: { label: string; value: number | string }[]
++  note?: string
++}
++type Translate = (no: string, en: string) => string
++const newest = <T extends { updatedAt?: string }>(items: T[]) => [...items].sort((a, b) => (Date.parse(b.updatedAt ?? '') || 0) - (Date.parse(a.updatedAt ?? '') || 0))
++
++export function homeSectionDescription(section: HomeWorkSection, tr: Translate): string {
++  const descriptions: Record<HomeWorkSection, [string, string]> = {
++    spaces: ['Samtaler og samarbeid i rommene dine.', 'Conversations and collaboration across your rooms.'],
++    studio: ['Dine visuelle prosjekter og arbeidet som er underveis.', 'Your visual projects and work in progress.'],
++    support: ['Nylige kundesamtaler og oppfølging.', 'Recent customer conversations and follow-up.'],
++    social: ['Innhold, publisering og tilkoblede kanaler.', 'Content, publishing and connected channels.'],
++    knowledge: ['Kildene arbeidsområdet kan hente svar fra.', 'The sources your workspace can draw answers from.'],
++    insights: ['Registrerte målinger fra arbeidsområdet.', 'Recorded measurements from your workspace.'],
++    leads: ['Lagrede bedriftslister og muligheter å følge opp.', 'Saved company lists and opportunities to follow up.'],
++    agents: ['Status for planlagte kjøringer og bakgrunnsarbeid.', 'Status of scheduled runs and background work.'],
++  }
++  return tr(...descriptions[section])
++}
++
++export function homeSectionContent(section: HomeWorkSection, tr: Translate) {
++  const content: Record<HomeWorkSection, { title: string; empty: string; href: string; links: { label: string; href: string }[] }> = {
++    spaces: { title: tr('Rommene dine', 'Your rooms'), empty: tr('Ingen rom er tilgjengelige ennå.', 'No rooms are available yet.'), href: '/spaces', links: [{ label: tr('Se alle rom', 'Browse rooms'), href: '/spaces' }] },
++    studio: { title: tr('Prosjekter under arbeid', 'Work in progress'), empty: tr('Ingen studioprosjekter ennå.', 'No studio projects yet.'), href: '/studio/canvas', links: [{ label: 'Canvas', href: '/studio/canvas' }, { label: tr('Kampanjer', 'Campaigns'), href: '/studio/campaigns' }, { label: tr('Maler', 'Templates'), href: '/studio/templates' }] },
++    support: { title: tr('Nylige samtaler', 'Recent conversations'), empty: tr('Ingen kundesamtaler ennå.', 'No customer conversations yet.'), href: '/support', links: [{ label: tr('Samtaler', 'Conversations'), href: '/support' }, { label: tr('Saker', 'Tickets'), href: '/support?surface=tickets' }, { label: tr('AI-utkast', 'AI drafts'), href: '/support?surface=drafts' }] },
++    social: { title: tr('Innhold og publisering', 'Content & publishing'), empty: tr('Ingen innlegg ennå.', 'No posts yet.'), href: '/social/calendar', links: [{ label: tr('Kalender', 'Calendar'), href: '/social/calendar' }, { label: tr('Utkast', 'Drafts'), href: '/social/drafts' }, { label: tr('Godkjenninger', 'Approvals'), href: '/social/approvals' }] },
++    knowledge: { title: tr('Kilder i arbeidsområdet', 'Workspace sources'), empty: tr('Ingen kunnskapskilder ennå.', 'No knowledge sources yet.'), href: '/knowledge', links: [{ label: tr('Kilder og dokumenter', 'Sources & documents'), href: '/knowledge' }, { label: tr('Innhentinger', 'Ingestions'), href: '/ingestions' }] },
++    insights: { title: tr('Registrerte målinger', 'Recorded measurements'), empty: tr('Ingen målinger er registrert ennå.', 'No measurements have been recorded yet.'), href: '/insights/overview', links: [{ label: tr('Alle målinger', 'All measurements'), href: '/insights/overview' }] },
++    leads: { title: tr('Lagrede bedriftslister', 'Saved company lists'), empty: tr('Ingen lagrede bedriftslister ennå.', 'No saved company lists yet.'), href: '/leads', links: [{ label: tr('Finn bedrifter', 'Find companies'), href: '/leads' }] },
++    agents: { title: tr('Planlagte kjøringer og bakgrunnskjøringer', 'Scheduled & background runs'), empty: tr('Ingen bakgrunnskjøringer ennå.', 'No background runs yet.'), href: '/agents/runs', links: [{ label: tr('Kjørekonsoll', 'Run console'), href: '/agents/runs' }, { label: tr('Alle agenter', 'All agents'), href: '/agents' }, { label: tr('Kostnad', 'Cost'), href: '/agents/cost' }] },
++  }
++  return content[section]
++}
++
++/** Load only the selected overview through existing owner-scoped clients.
++ * A page count is labelled as such; it is never presented as an org total. */
++export async function loadHomeSection(section: HomeWorkSection, orgId: string, tr: Translate): Promise<HomeSectionData> {
++  switch (section) {
++    case 'spaces': {
++      const spaces = await (await import('@/shared/api/spaces-client')).listSpaces()
++      return { items: spaces.map((space) => ({ id: space.space_ref, title: space.name, detail: space.kind === 'personal' ? tr('Personlig rom', 'Personal room') : space.kind === 'shared' ? tr('Delt rom', 'Shared room') : space.kind === 'room' ? tr('Rom', 'Room') : space.kind, status: space.lifecycle, href: `/spaces/${encodeURIComponent(space.space_ref)}` })), metrics: [{ label: tr('Tilgjengelige rom', 'Available rooms'), value: spaces.length }, { label: tr('Aktive rom', 'Active rooms'), value: spaces.filter((space) => space.lifecycle === 'active').length }] }
++    }
++    case 'studio': {
++      const { projects } = await (await import('@/shared/api/studio-client')).listStudioProjects(orgId)
++      return { items: newest(projects).map((project) => ({ id: project.id, title: project.title, detail: tr(`${project.blocks.length} elementer`, `${project.blocks.length} elements`), status: project.status, updatedAt: project.updatedAt })), metrics: [{ label: tr('Prosjekter', 'Projects'), value: projects.length }], note: projects.some((project) => project.persistence === 'ephemeral') ? tr('Studio lagrer for tiden prosjekter midlertidig. De kan forsvinne ved en omstart av tjenesten.', 'Studio currently stores projects temporarily. They may be lost when the service restarts.') : undefined }
++    }
++    case 'support': {
++      const { tickets, nextCursor } = await (await import('@/shared/api/inbox-client')).listConversations(orgId, { limit: 6 })
++      return { items: tickets.map((ticket) => ({ id: ticket.conversationId, title: ticket.title, detail: ticket.lastMessagePreview, status: ticket.state?.name, updatedAt: ticket.updated_at, href: `/support?conversation_id=${encodeURIComponent(ticket.conversationId)}` })), metrics: [{ label: tr('Samtaler i denne oversikten', 'Conversations in this view'), value: tickets.length }], note: nextCursor ? tr('Viser de siste seks samtalene. Åpne Support for hele køen.', 'Showing the six most recent conversations. Open Support for the full queue.') : undefined }
++    }
++    case 'social': {
++      const { posts, accounts } = await (await import('@/shared/api/social-client')).getSocialCalendar(orgId)
++      return { items: posts.map((post) => ({ id: post.id, title: post.title, detail: post.platforms.join(' · '), status: post.status, updatedAt: post.scheduledAt })), metrics: [{ label: tr('Planlagte innlegg', 'Scheduled posts'), value: posts.filter((post) => post.status === 'scheduled').length }, { label: tr('Tilkoblede kanaler', 'Connected channels'), value: accounts.filter((account) => account.status === 'connected').length }] }
++    }
++    case 'knowledge': {
++      const sources = await (await import('@/shared/api/knowledge-client')).listSources(orgId)
++      return { items: sources.map((source) => ({ id: source.id, title: source.name, detail: source.type, status: source.status, updatedAt: source.lastSync, href: `/knowledge?source=${encodeURIComponent(source.id)}` })), metrics: [{ label: tr('Kilder i denne oversikten', 'Sources in this view'), value: sources.length }] }
++    }
++    case 'insights': {
++      const data = await (await import('@/shared/api/insights-client')).getInsightsOverview()
++      return { items: data.scorecards.map((metric) => ({ id: metric.id, title: metric.label || metric.metric, detail: metric.source, value: `${metric.value.toLocaleString()} ${metric.unit}`.trim() })), metrics: [{ label: tr('Registrerte målinger', 'Recorded measurements'), value: data.scorecards.length }] }
++    }
++    case 'leads': {
++      const lists = await (await import('@/shared/api/leads-client')).listLeadLists()
++      return { items: newest(lists.map((list) => ({ id: list.id, title: list.name, detail: tr(`${list.company_count} bedrifter`, `${list.company_count} companies`), updatedAt: list.updated_at }))), metrics: [{ label: tr('Lagrede lister', 'Saved lists'), value: lists.length }] }
++    }
++    case 'agents': {
++      const { runs, hasMore } = await (await import('@/shared/api/runs-client')).listSystemRuns({ limit: 6 })
++      return { items: runs.map((run) => ({ id: run.runId, title: run.goal || run.runId, detail: run.agentId, status: run.status, updatedAt: run.updatedAt })), metrics: [{ label: tr('Bakgrunnskjøringer i denne oversikten', 'Background runs in this view'), value: runs.length }], note: tr('Denne oversikten viser planlagte kjøringer og bakgrunnskjøringer. Åpne kjørekonsollen for flere detaljer.', 'This overview shows scheduled and background runs. Open the run console for more detail.') + (hasMore ? tr(' Flere kjøringer er tilgjengelige.', ' More runs are available.') : '') }
++    }
++  }
++}
+--- /dev/null
++++ b/src/features/dashboard/home/DashboardSectionOverview.tsx
+@@ -0,0 +1,68 @@
++import { createEffect, createSignal, For, Show } from 'solid-js'
++import { ArrowUpRight, RefreshCw } from '@/shared/icons'
++import { getSession } from '@/shared/session/session-store'
++import { useI18n } from '@/shared/i18n'
++import { homeOverviewLabel } from '@/shared/actions/home-overview'
++import { homeSectionContent, loadHomeSection, type HomeSectionData, type HomeWorkSection } from './home-section-data'
++
++export function DashboardSectionOverview(props: { section: HomeWorkSection }) {
++  const i18n = useI18n()
++  const session = getSession()
++  const [data, setData] = createSignal<HomeSectionData | null>(null)
++  const [loading, setLoading] = createSignal(true)
++  const [failed, setFailed] = createSignal(false)
++  const [refresh, setRefresh] = createSignal(0)
++  const content = () => homeSectionContent(props.section, i18n.tr)
++  const label = () => homeOverviewLabel(props.section, i18n.tr)
++  const hasWorkspace = () => Boolean(session.user?.id && session.activeOrg?.id)
++
++  createEffect(
++    () => ({ section: props.section, org: session.activeOrg?.id, user: session.user?.id, refresh: refresh(), locale: i18n.locale() }),
++    ({ section, org, user }) => {
++      let cancelled = false
++      setData(null)
++      setFailed(false)
++      setLoading(Boolean(org && user))
++      if (org && user) void loadHomeSection(section, org, i18n.tr)
++        .then((result) => { if (!cancelled) setData(result) })
++        .catch(() => { if (!cancelled) setFailed(true) })
++        .finally(() => { if (!cancelled) setLoading(false) })
++      return () => { cancelled = true }
++    },
++  )
++  const dateLabel = (value: string) => {
++    const date = new Date(value)
++    return Number.isNaN(date.getTime()) ? '' : date.toLocaleDateString(i18n.locale() === 'no' ? 'nb-NO' : 'en-GB', { day: 'numeric', month: 'short' })
++  }
++
++  return (
++    <section class="home-section-grid" aria-label={i18n.tr(`${label()} oversikt`, `${label()} overview`)} aria-busy={loading() ? 'true' : 'false'}>
++      <section class="home-overview-card home-section-work" aria-labelledby="home-section-work-title">
++        <header class="home-overview-card__header">
++          <div><span class="home-eyebrow">{i18n.tr('Arbeidsområdet ditt', 'Your workspace')}</span><h2 id="home-section-work-title">{content().title}</h2></div>
++          <button type="button" class="home-quiet-button" disabled={loading() || !hasWorkspace()} aria-label={i18n.tr('Oppdater oversikt', 'Refresh overview')} onClick={() => setRefresh((value) => value + 1)}><RefreshCw size={16} /></button>
++        </header>
++        <Show when={hasWorkspace()} fallback={<div class="home-section-state" role="status">{i18n.tr('Velg et arbeidsområde for å se oversikten.', 'Select a workspace to see this overview.')}</div>}>
++          <Show when={!loading()} fallback={<div class="home-section-state" role="status">{i18n.tr('Henter oversikten …', 'Loading your overview…')}</div>}>
++            <Show when={!failed()} fallback={<div class="home-section-state" role="status"><strong>{i18n.tr('Oversikten er ikke tilgjengelig akkurat nå.', 'This overview is unavailable right now.')}</strong><p>{i18n.tr('Prøv igjen, eller åpne arbeidsområdet direkte.', 'Try again, or open the workspace directly.')}</p><button type="button" class="home-quiet-button" onClick={() => setRefresh((value) => value + 1)}><RefreshCw size={14} />{i18n.tr('Prøv igjen', 'Try again')}</button></div>}>
++              <Show when={data()?.items.length} fallback={<div class="home-section-state"><strong>{content().empty}</strong><p>{i18n.tr('Arbeid du har tilgang til, vises her når det er tilgjengelig.', 'Work you have access to will appear here when it is available.')}</p></div>}>
++                <div class="home-section-list"><For each={data()?.items.slice(0, 6)}>{(item) => (
++                  <div class="home-section-row">
++                    <div class="home-section-row__copy"><Show when={item.href} fallback={<strong>{item.title}</strong>}><a link href={item.href}><strong>{item.title}</strong></a></Show><Show when={item.detail}><p>{item.detail}</p></Show></div>
++                    <div class="home-section-row__meta"><Show when={item.value}><strong>{item.value}</strong></Show><Show when={item.status}><span>{item.status?.replaceAll('_', ' ')}</span></Show><Show when={item.updatedAt && dateLabel(item.updatedAt)}><time datetime={item.updatedAt}>{dateLabel(item.updatedAt!)}</time></Show></div>
++                    <Show when={item.href}><a link href={item.href} aria-label={i18n.tr(`Åpne ${item.title}`, `Open ${item.title}`)}><ArrowUpRight size={15} /></a></Show>
++                  </div>
++                )}</For></div>
++              </Show>
++            </Show>
++          </Show>
++        </Show>
++        <footer class="home-section-footer"><a link href={content().href}>{i18n.tr(`Åpne ${label()}`, `Open ${label()}`)}<ArrowUpRight size={15} /></a><Show when={(data()?.items.length ?? 0) > 6}><span>{i18n.tr(`Viser 6 av ${data()?.items.length}`, `Showing 6 of ${data()?.items.length}`)}</span></Show></footer>
++      </section>
++      <aside class="home-section-aside" aria-label={i18n.tr('Oppsummering og snarveier', 'Summary and shortcuts')}>
++        <Show when={data()}>{(result) => <section class="home-overview-card home-section-summary"><span class="home-eyebrow">{i18n.tr('Et overblikk', 'At a glance')}</span><dl><For each={result().metrics}>{(metric) => <div><dt>{metric.label}</dt><dd>{metric.value}</dd></div>}</For></dl><Show when={result().note}><p>{result().note}</p></Show></section>}</Show>
++        <section class="home-overview-card home-destinations"><span class="home-eyebrow">{i18n.tr('Fortsett arbeidet', 'Continue your work')}</span><h2>{i18n.tr(`Utforsk ${label()}`, `Explore ${label()}`)}</h2><nav aria-label={i18n.tr(`${label()} snarveier`, `${label()} shortcuts`)}><For each={content().links}>{(link) => <a link href={link.href}><span><strong>{link.label}</strong></span><ArrowUpRight size={15} /></a>}</For></nav></section>
++      </aside>
++    </section>
++  )
++}
+--- /dev/null
++++ b/src/features/dashboard/home/DashboardSectionOverview.test.tsx
+@@ -0,0 +1,124 @@
++// @vitest-environment jsdom
++import { createRouter, memoryHistory, useLocation } from '@solidjs/router'
++import { fireEvent, render, screen, waitFor, within } from '@solidjs/testing-library'
++import { createSignal, createStore, flush } from 'solid-js'
++import { beforeEach, describe, expect, it, vi } from 'vitest'
++import { homeOverviewSectionSchema } from '@/shared/actions/home-overview'
++import type { HomeSectionData } from './home-section-data'
++
++vi.mock('@/shared/i18n', () => ({ useI18n: () => ({ tr: (_no: string, en: string) => en, locale: () => 'en' }) }))
++vi.mock('@/shared/session/session-store', () => ({ getSession: () => identity }))
++vi.mock('@/features/chat/lib/chat-appearance-preview', () => ({ chatAppearanceActive: () => preview() }))
++vi.mock('@/features/chat/components/ChatPage', () => ({ default: () => null }))
++vi.mock('./DashboardComposer', () => ({ DashboardComposer: (props: { message: string; onMessageChange: (value: string) => void }) => {
++  const [attached, setAttached] = createSignal(false)
++  return <><input aria-label="Draft" value={props.message} onInput={(event) => props.onMessageChange(event.currentTarget.value)} /><button onClick={() => setAttached(true)}>Attach fixture</button><span>{attached() ? 'Attachment retained' : ''}</span></>
++} }))
++vi.mock('./DashboardSearchPanel', () => ({ SearchPanel: () => <p>Web tool</p> }))
++vi.mock('./KnowledgeComposer', () => ({ KnowledgeComposer: () => <p>Extract tool</p> }))
++vi.mock('./DashboardCards', () => ({ DashboardCardsRail: () => null }))
++vi.mock('./DashboardOverview', () => ({ DashboardOverview: () => <p>Home overview</p> }))
++vi.mock('./home-section-data', async (importOriginal) => ({ ...await importOriginal<typeof import('./home-section-data')>(), loadHomeSection: vi.fn() }))
++import { loadHomeSection } from './home-section-data'
++import { DashboardSectionOverview } from './DashboardSectionOverview'
++import DashboardHome from './DashboardHome'
++import { CoreSidebar } from '@/features/core/components/CoreSidebar'
++
++const [identity, setIdentity] = createStore({ user: { id: 'user-a' }, activeOrg: { id: 'org-a', role: 'owner' } })
++const [preview, setPreview] = createSignal(true)
++const empty: HomeSectionData = { items: [], metrics: [] }
++beforeEach(() => {
++  vi.mocked(loadHomeSection).mockReset().mockResolvedValue(empty)
++  setIdentity((state) => { state.activeOrg.id = 'org-a' })
++  setPreview(true)
++  flush()
++})
++
++function setup(path = '/dashboard') {
++  const history = memoryHistory(path)
++  const TestRouter = createRouter({ history, explicitLinks: true, routes: [{ path: '/*all', component: () => {
++    const location = useLocation()
++    return <><CoreSidebar activeRoute="/dashboard" expanded onExpandedChange={() => undefined} onOpenSearch={() => undefined} /><DashboardHome /><output data-testid="location">{location.pathname}{location.search}</output></>
++  } }] })
++  const view = render(() => <TestRouter>{(props) => props.children}</TestRouter>)
++  return { history, ...view }
++}
++
++describe('Home section navigation', () => {
++  it('selects all sidebar overviews in Home and preserves the composer draft and attachment', async () => {
++    setup()
++    const draft = screen.getByLabelText('Draft')
++    fireEvent.input(draft, { target: { value: 'Keep this draft' } })
++    fireEvent.click(screen.getByText('Attach fixture')); flush()
++    for (const [label, section] of [['Rom', 'spaces'], ['Studio', 'studio'], ['Support', 'support']]) {
++      fireEvent.click(within(screen.getByRole('navigation', { name: 'Home navigation' })).getByRole('button', { name: label })); flush()
++      await waitFor(() => expect(screen.getByRole('heading', { level: 1, name: label })).toBeTruthy())
++      expect(screen.getByTestId('location').textContent).toBe(`/dashboard?overview=${section}`)
++      expect(screen.getByLabelText('Draft')).toBe(draft)
++    }
++    fireEvent.click(screen.getByRole('button', { name: 'Shared with me' })); flush()
++    for (const [label, section] of [['Social', 'social'], ['Knowledge', 'knowledge'], ['Insights', 'insights'], ['Leads', 'leads'], ['Agents', 'agents']]) {
++      fireEvent.click(within(screen.getByRole('navigation', { name: 'Home navigation' })).getByRole('button', { name: label })); flush()
++      await waitFor(() => expect(screen.getByRole('heading', { level: 1, name: label })).toBeTruthy())
++      expect(screen.getByTestId('location').textContent).toBe(`/dashboard?overview=${section}`)
++    }
++    fireEvent.click(screen.getByRole('button', { name: 'My account' })); flush()
++    fireEvent.click(within(screen.getByRole('navigation', { name: 'Home navigation' })).getByRole('button', { name: 'Home' })); flush()
++    await waitFor(() => expect(screen.getByText('Home overview')).toBeTruthy())
++    expect(screen.getByLabelText('Draft')).toBe(draft)
++    expect((draft as HTMLInputElement).value).toBe('Keep this draft')
++    expect(screen.getByText('Attachment retained')).toBeTruthy()
++    expect(loadHomeSection).toHaveBeenCalledTimes(homeOverviewSectionSchema.options.length - 1)
++  })
++
++  it('restores a shared overview from the URL and returns to ordinary links when disabled', async () => {
++    setup('/dashboard?overview=knowledge')
++    await waitFor(() => expect(screen.getByRole('heading', { level: 1, name: 'Knowledge' })).toBeTruthy())
++    expect(within(screen.getByRole('navigation', { name: 'Home navigation' })).getByRole('button', { name: 'Knowledge' }).getAttribute('aria-pressed')).toBe('true')
++    setPreview(false); flush()
++    expect(within(screen.getByRole('navigation', { name: 'Home navigation' })).getByRole('link', { name: 'Rom' }).getAttribute('href')).toBe('/spaces')
++    expect(screen.queryByRole('heading', { level: 1, name: 'Knowledge' })).toBeNull()
++  })
++
++  it('falls back to Home for an invalid section', () => {
++    setup('/dashboard?overview=unknown')
++    expect(screen.getByText('Home overview')).toBeTruthy()
++    expect(loadHomeSection).not.toHaveBeenCalled()
++  })
++
++  it('restores the selected overview with Back and Forward', async () => {
++    const { history } = setup()
++    const navigation = within(screen.getByRole('navigation', { name: 'Home navigation' }))
++    fireEvent.click(navigation.getByRole('button', { name: 'Rom' })); flush()
++    await waitFor(() => expect(screen.getByRole('heading', { level: 1, name: 'Rom' })).toBeTruthy())
++    fireEvent.click(navigation.getByRole('button', { name: 'Studio' })); flush()
++    await waitFor(() => expect(screen.getByRole('heading', { level: 1, name: 'Studio' })).toBeTruthy())
++    history.back(); flush()
++    await waitFor(() => expect(screen.getByRole('heading', { level: 1, name: 'Rom' })).toBeTruthy())
++    history.forward(); flush()
++    await waitFor(() => expect(screen.getByRole('heading', { level: 1, name: 'Studio' })).toBeTruthy())
++  })
++})
++
++describe('Home section data states', () => {
++  it('retries an unavailable source without showing a false zero summary', async () => {
++    vi.mocked(loadHomeSection).mockRejectedValueOnce(new Error('offline')).mockResolvedValueOnce(empty)
++    render(() => <DashboardSectionOverview section="spaces" />)
++    await waitFor(() => expect(screen.getByText('This overview is unavailable right now.')).toBeTruthy())
++    expect(screen.queryByText('At a glance')).toBeNull()
++    fireEvent.click(screen.getByRole('button', { name: 'Try again' })); flush()
++    await waitFor(() => expect(screen.getByText('No rooms are available yet.')).toBeTruthy())
++  })
++
++  it('ignores a late response from a previous workspace', async () => {
++    let resolveOld!: (data: HomeSectionData) => void
++    vi.mocked(loadHomeSection).mockImplementationOnce(() => new Promise((resolve) => { resolveOld = resolve }))
++      .mockResolvedValueOnce({ items: [{ id: 'current', title: 'Current room', href: '/spaces/current' }], metrics: [] })
++    render(() => <DashboardSectionOverview section="spaces" />); flush()
++    setIdentity((state) => { state.activeOrg.id = 'org-b' }); flush()
++    await waitFor(() => expect(screen.getByText('Current room')).toBeTruthy())
++    resolveOld({ items: [{ id: 'old', title: 'Previous organization room', href: '/spaces/old' }], metrics: [] })
++    await Promise.resolve(); flush()
++    expect(screen.queryByText('Previous organization room')).toBeNull()
++  })
++})
+--- /dev/null
++++ b/src/features/dashboard/home/home-section-data.test.ts
+@@ -0,0 +1,27 @@
++import { describe, expect, it, vi } from 'vitest'
++vi.mock('@/shared/api/spaces-client', () => ({ listSpaces: vi.fn() }))
++vi.mock('@/shared/api/inbox-client', () => ({ listConversations: vi.fn() }))
++import { listSpaces } from '@/shared/api/spaces-client'
++import { listConversations } from '@/shared/api/inbox-client'
++import { loadHomeSection } from './home-section-data'
++const tr = (_no: string, en: string) => en
++
++describe('Home overview owner data', () => {
++  it('reports lifecycle status without inferring sharing from the open-ended room kind', async () => {
++    vi.mocked(listSpaces).mockResolvedValue([
++      { space_ref: 'space/a', name: 'Team room', kind: 'room', lifecycle: 'active' },
++      { space_ref: 'archived', name: 'Archived room', kind: 'room', lifecycle: 'archived' },
++    ])
++    const data = await loadHomeSection('spaces', 'org-a', tr)
++    expect(data.metrics).toEqual([{ label: 'Available rooms', value: 2 }, { label: 'Active rooms', value: 1 }])
++    expect(data.items[0]).toMatchObject({ detail: 'Room', href: '/spaces/space%2Fa' })
++  })
++
++  it('labels a partial support queue as a view count, not a workspace total', async () => {
++    vi.mocked(listConversations).mockResolvedValue({ tickets: [], total: 0, nextCursor: { id: 'more', updated: '2026-09-28' } })
++    const data = await loadHomeSection('support', 'org-a', tr)
++    expect(listConversations).toHaveBeenCalledWith('org-a', { limit: 6 })
++    expect(data.metrics[0]?.label).toBe('Conversations in this view')
++    expect(data.note).toContain('Open Support for the full queue.')
++  })
++})
+--- a/src/features/dashboard/home/dashboard-overview.css
++++ b/src/features/dashboard/home/dashboard-overview.css
+@@ -189 +189,31 @@
+ @media (prefers-reduced-motion: reduce) { .dashboard-home--overview *, .dashboard-home--overview *::before, .dashboard-home--overview *::after { animation: none !important; transition: none !important; } }
++
++/* Home section overviews share the same warm surfaces and persistent chat dock. */
++.home-section-grid { display: grid; grid-template-columns: minmax(0, 2fr) minmax(240px, 1fr); gap: 16px; align-items: start; }
++.home-section-work { display: flex; flex-direction: column; min-height: 380px; }
++.home-section-aside { display: flex; min-width: 0; flex-direction: column; gap: 16px; }
++.home-section-aside .home-destinations nav { display: flex; gap: 0; }
++.home-section-aside .home-destinations a { min-height: 44px; }
++.home-section-list { margin-top: 20px; }
++.home-section-row { display: flex; align-items: center; gap: 16px; min-height: 68px; border-bottom: 1px solid var(--home-line); padding: 12px 0; }
++.home-section-row:last-child { border-bottom: 0; }
++.home-section-row__copy { flex: 1; min-width: 0; }
++.home-section-row__copy strong { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 14px; font-weight: 500; }
++.home-section-row__copy p { margin: 5px 0 0; color: var(--home-muted); font-size: 12px; line-height: 1.5; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; overflow-wrap: anywhere; }
++.home-section-row a { color: inherit; }
++.home-section-row a:hover { text-decoration: underline; text-underline-offset: 3px; }
++.home-section-row > a { display: grid; place-items: center; flex: 0 0 28px; min-height: 32px; color: var(--home-muted); }
++.home-section-row__meta { display: flex; flex-direction: column; gap: 6px; align-items: flex-end; max-width: 35%; color: var(--home-muted); font-size: 11px; text-align: right; }
++.home-section-row__meta strong { color: var(--home-ink); font-size: 20px; font-weight: 450; font-variant-numeric: tabular-nums; }
++.home-section-state { display: flex; flex: 1; min-height: 250px; flex-direction: column; justify-content: center; align-items: flex-start; gap: 10px; color: var(--home-muted); font-size: 13px; line-height: 1.6; }
++.home-section-state strong { color: var(--home-ink); font-size: 16px; font-weight: 450; }
++.home-section-state p { margin: 0; max-width: 40ch; }
++.home-section-footer { display: flex; justify-content: space-between; gap: 16px; margin-top: auto; padding-top: 20px; font-size: 12px; }
++.home-section-footer a { display: inline-flex; align-items: center; gap: 10px; min-height: 36px; color: var(--home-ink); }
++.home-section-footer span { color: var(--home-muted); align-self: center; }
++.home-section-summary dl { display: flex; flex-wrap: wrap; gap: 24px; margin: 20px 0 0; }
++.home-section-summary dl > div { flex: 1 1 120px; }
++.home-section-summary dt { font-size: 12px; color: var(--home-muted); line-height: 1.5; }
++.home-section-summary dd { font-size: 36px; font-weight: 400; letter-spacing: -.04em; margin: 8px 0 0; font-variant-numeric: tabular-nums; }
++.home-section-summary > p { margin: 20px 0 0; color: var(--home-muted); font-size: 12px; line-height: 1.6; }
++@media (max-width: 850px) { .home-section-grid { grid-template-columns: minmax(0, 1fr); } .home-section-work { min-height: 320px; } }

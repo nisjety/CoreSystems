@@ -294,3 +294,116 @@ Feilforsøkene er like viktige for status: v34, v36, v40, v42, v45 og v48 viste 
 På siste gateway-image `sha256:d5c2ceba6f568d1c018984032cda28cd4bed0a77668830ea0f3883bce91ed9c6` bestod v53–v57 **5/5 sammenhengende private** prosjektforløp med uendrede kilder. Første plan tok 44,0–116,0 sekunder; intern status 29,3–45,5 sekunder. Dette er sterkere privat korrekthetsbevis, men ikke den kvalifiserte publiseringsserien for alle fire oppgaver eller en etablert p95-ytelse.
 
 Publiseringsstatus er fortsatt **0/5** kvalifiserte sammenhengende kjøringer per scenario og **20/20** tomme offentlige mediefelt. Nytt arbeid er å bevise gjentatt stabilitet på ett valgt bygg, deretter fullføre ytelse, gjenoppretting, tilgjengelighet, faglig/visuell filmkontroll og nettsidekontroll.
+
+## 26.09.2026 — Q16-serie på fryst bygg: alle fire oppgaver 5/5 sammenhengende
+
+Bygget ble fryst 26.09.2026 kl. 06:36 UTC. Image-ID-er, bryterinnstillinger og fingeravtrykk for arbeidstreet står i [beredskapsrapporten](evidence/PRODUCT_RECORDING_READINESS_2026-09-24.md). Endringene er ikke committet.
+
+Serien ble kjørt med `scripts/capture-product.mjs --mode rehearsal` på `gpt-5.6-terra` via `openai-codex-subscription`, med uendrede kildefiler (13/13 hasher stemmer) og uten automatisk omkjøring. Alle forsøk er beholdt privat under `C:/private/verevon-recordings/q16-20260926T0636Z`.
+
+| Oppgave | Resultat | Forsøk | Feil underveis |
+|---|---|---|---|
+| 01-kundesvar | 5/5 sammenhengende | 5 | ingen |
+| 02-salgsrapport | 5/5 sammenhengende | 7 | forsøk 2: testen feilet, men rapporten var riktig — fasitens `grossProfitChangeClaims` knyttet Skrivebords −18 720 til «Totalt» (feil i testfasiten, ikke falsk godkjenning; korrigert 26.09) |
+| 03-kampanje | 5/5 sammenhengende | 10 | forsøk 5: tidsavbrudd i dokumentkontrollen |
+| 04-prosjektplan | 5/5 sammenhengende | 5 | ingen |
+
+Før frysingen ble to feil i kampanjeforløpet funnet live og rettet:
+- statuslinjer ble talt som innleggsord;
+- et allerede godkjent dokument ble skrevet på nytt i samme tur.
+
+Gjentakbarhetsporten er satt til `passed` i manifestet. Publisering er fortsatt blokkert:
+- **Korrekthet:** fasitfeilen i 02-testen må rettes, og gatewayen mangler en deterministisk kontroll av tall mot CSV-en (den legges til).
+- **Ytelse:** produktgrensen for svartid er ikke fastsatt.
+- **Varighet og gjenoppretting:** ikke dokumentert.
+- **Opplevelse:** ikke dokumentert.
+- **Medier:** alle offentlige mediefelt er tomme.
+
+En rettelse etter frysingen nullstiller seriene.
+
+## 26.09.2026 — Q16b-serie på nytt fryst bygg med gjenbruk av godkjenninger ved revisjon
+
+Bygget ble fryst på nytt 26.09.2026 kl. 17:42 UTC med gjenbruk av tidligere godkjenninger for uendrede avsnitt i revisjonsturer (eierens avgjørelse samme dag). Image-ID-er og brytere står i [beredskapsrapporten](evidence/PRODUCT_RECORDING_READINESS_2026-09-24.md). Endringene er ikke committet.
+
+Serien hadde 20 forsøk per oppgave med `scripts/capture-product.mjs --mode rehearsal` på `gpt-5.6-terra` via `openai-codex-subscription`, uten automatisk omkjøring. Kildefilene var uendret (13/13 hasher). Alt er beholdt privat under `C:/private/verevon-recordings/q16b-20260926T1744Z`.
+
+| Oppgave | Bestått | 5 på rad ved forsøk | Svartid oppfølging p95 | Feil |
+|---|---|---|---|---|
+| 01-kundesvar | 20/20 | 5 | 51,9 s | ingen |
+| 02-salgsrapport | 15/20 + 5/5 påfyll | 5 | 41,6 s | 5 falske feil i testfasiten; rapportene var riktige |
+| 03-kampanje | 18/20 | 5 | 117,4 s | forsøk 13: revidert innlegg mistet «flere team»; forsøk 17: tidsavbrudd |
+| 04-prosjektplan | 18/20 + 3/3 påfyll | 8 | 56,8 s | forsøk 3: dokumentkontrollen godkjente ikke utkastet; forsøk 15: risiko uten tiltak |
+
+**Testfasiten for 02** leste fem riktige rapporter feil og ble rettet underveis. Den fant ikke:
+- beløp foran «bruttofortjeneste»;
+- spenn av typen «fra … til …»;
+- tall per salgskanal («Nettbutikken»).
+
+Alle 20 forsøk er kjørt på nytt mot den endelige fasiten, uten avvisninger.
+
+**Svartid:** alle førsteturer og oppfølgingene i 01, 02 og 04 er innenfor eierens grenser. Oppfølgingen i 03 er ikke det: gjenbruken kuttet arbeidet, men ikke ventetiden. Én samlet kontroll av rundt ti avsnitt tar like lang tid som fire parallelle.
+
+**Porter på dette bygget:**
+- **Varighet:** bestått. 20 kvalifiserende tråder åpnet likt før og etter en kontrollert omstart.
+- **Gjenoppretting:** bestått. 9/9 i `product-recovery.spec.ts`, pluss live gjenopptak etter omlasting.
+- **Opplevelse:** mobil, desktop, tastatur og redusert bevegelse er bestått (9/9). Tekstspor og redaksjonell gjennomgang av filmene gjenstår.
+
+Status er fortsatt blokkert:
+- **Korrekthet:** forsøk 13 i 03 og forsøk 15 i 04.
+- **Ytelse:** oppfølgingen i 03.
+- **Tillit:** ikke dokumentert på nytt på dette bygget.
+- **Medier:** ingen er godkjent.
+
+## 27.09.2026 — Q16c-serie på tredje fryste bygg med eierens avgjørelser for avgrensede revisjoner
+
+Bygget ble fryst 27.09.2026 kl. 04:30 UTC. Det inneholder eierens avgjørelser samme dag:
+- avsnitt som ligger fast, beholder godkjenningen sin;
+- etter en rettelse i samme tur kontrolleres bare innlegget som endres, og det som avhenger av det;
+- en vakt hindrer at en redigering fjerner ønsket innramming;
+- skriveveiledningen forblir v1.
+
+Endringene er ikke committet. Serien hadde 20 forsøk per oppgave, pluss påfyll på samme bygg, slik at hver tur har minst 20 målinger. Alt ligger privat under `C:/private/verevon-recordings/q16c-20260927T0432Z`.
+
+| Oppgave | Bestått | 5 på rad ved forsøk | Første tur p95 | Oppfølging p95 | Feil |
+|---|---|---|---|---|---|
+| 01-kundesvar | 18/20 + 2/2 | 8 | 64,8 s | 54,5 s | 2: lengdereparasjonen kom ikke innenfor grensen |
+| 02-salgsrapport | 20/20 | 5 | 81,4 s | 47,5 s | ingen |
+| 03-kampanje | 18/20 + 3/3 | 5 | 113,0 s | 74,7 s | 2 i første tur: kontrollen avviste ulike avsnitt hver gang (én gang med tidsavbrudd) |
+| 04-prosjektplan | 16/20 + 3/3 | 6 | 92,5 s | 63,3 s | 2 i det nye notatet (samme mønster); 2 planer uten «tidligste mulige» dato |
+
+**Revisjonen i 03 er vesentlig raskere:** oppfølgingen har p50 44,1 s og p95 74,7 s, mot 69,6 s og 117,4 s på forrige bygg. Gjenbruken slo inn i alle 18 revisjonene.
+
+**Porter:**
+- **Varighet:** bestått. 20 tråder åpnet likt før og etter en kontrollert omstart.
+- **Gjenoppretting:** bestått. 9/9, pluss live gjenopptak.
+- **Opplevelse:** mobil, desktop, tastatur og redusert bevegelse er bestått (9/9). Tekstspor og redaksjonell gjennomgang gjenstår.
+
+Status er fortsatt blokkert:
+- **Ytelse:** oppfølgingen i 03 ligger på 74,7 s mot grensen på 70 s, og 03 hadde ett tidsavbrudd.
+- **Korrekthet:** avvisningskjeder der dokumentet kontrolleres i sin helhet på nytt, og to planformuleringer.
+- **Tillit:** ikke dokumentert på nytt.
+- **Medier:** ingen er godkjent.
+
+## 2026-09-28 — femte frys (chat bølge 1), Q16e
+
+Bygget har chat bølge 1:
+- eksport til Word, Excel, PowerPoint og PDF fra svar og Resultat-panelet;
+- fargelagte kodeblokker;
+- omdøp og slett per samtale;
+- opplasting av .xlsx og .pptx;
+- lese-verktøy for Outlook, Gmail og OneDrive.
+
+Frosset 02:01 UTC. Serien gikk 02:02–05:17 UTC med gpt-5.6-terra via abonnementet.
+
+**Resultat:**
+- **01, 02 og 03:** 20/20 hver, alle kvalifisert på forsøk 5.
+- **04:** 18/20, kvalifisert på forsøk 5. De to feilene var planformulering, altså at stedfortreder/buffer manglet, ikke tid.
+
+**Ytelse:**
+- **Første tur:** p95 er innenfor 120 s på alle fire (01 39,3 s, 02 70,2 s, 03 105,4 s, 04 75,8 s).
+- **Oppfølging:** p95 er over 70 s på 03 (76,3 s) og 04 (74,6 s). Alle tre oppfølginger over 70 s var reparasjonsturer, der kontroll, reparasjon og ny kontroll tok 45–60 s etter at utkastet var ferdig.
+- **Tidsavbrudd:** ingen.
+
+**Status:** fortsatt blokkert på oppfølgingstiden. Hele Q16-prosedyren kjøres på neste frys, etter chat bølge 2.
+
+Fjerde frys ble avbrutt. Først startet maskinen på nytt, deretter stoppet jeg serien feilaktig, etter 01 20/20. Frontenden laster ikke inn kodeendringer uten omstart, så appen var aldri påvirket.

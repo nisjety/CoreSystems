@@ -1482,22 +1482,46 @@ pub(crate) async fn proxy_integration_json(
 /// a generic failure.
 const INTEGRATION_ERROR_CODE_ALLOWLIST: &[&str] = &["no_sources_registered"];
 
+/// Owner ruling (security-personal-connections, 2026-09-28): codes that are
+/// NEVER a plan gate, regardless of status code or a plan-worded message
+/// riding along — checked, and returned, BEFORE the plan gate below, the
+/// opposite precedence from `INTEGRATION_ERROR_CODE_ALLOWLIST` (whose codes,
+/// like `no_sources_registered`, CAN legitimately be plan-gated, so the plan
+/// gate must keep winning for those — see `plan_gate_outranks_the_allow_list`).
+/// A personal-connection-ownership 403 is a deterministic identity decision —
+/// no plan the org could buy changes it — so collapsing it into "upgrade your
+/// plan" would be actively misleading. integration-corev2 always returns
+/// these at 403, which is exactly the status this function would otherwise
+/// route to PLAN_REQUIRED.
+const NEVER_PLAN_GATED_INTEGRATION_ERROR_CODES: &[&str] = &[
+    "personal_connection_forbidden",
+    "personal_connection_no_delegated_user",
+];
+
 /// Choose the browser-visible error code for an integration-core failure. The
 /// plan gate keeps precedence over the allow-list: a 402/403 must always route
-/// the user to upgrade, whatever code the upstream attached.
+/// the user to upgrade, whatever code the upstream attached — except for the
+/// never-plan-gated codes above, which are decided first.
 fn integration_error_code(raw: &Value, status: StatusCode, message: &str) -> &'static str {
-    if status.as_u16() == 402
-        || status.as_u16() == 403
-        || message.to_ascii_lowercase().contains("plan")
-    {
-        return "PLAN_REQUIRED";
-    }
     let upstream_code = raw
         .get("error")
         .and_then(|error| error.get("code"))
         .and_then(Value::as_str)
         .map(str::trim)
         .unwrap_or_default();
+    if let Some(code) = NEVER_PLAN_GATED_INTEGRATION_ERROR_CODES
+        .iter()
+        .copied()
+        .find(|allowed| allowed.eq_ignore_ascii_case(upstream_code))
+    {
+        return code;
+    }
+    if status.as_u16() == 402
+        || status.as_u16() == 403
+        || message.to_ascii_lowercase().contains("plan")
+    {
+        return "PLAN_REQUIRED";
+    }
     INTEGRATION_ERROR_CODE_ALLOWLIST
         .iter()
         .copied()
@@ -1948,6 +1972,32 @@ mod tests {
             "a plan-worded message still routes to upgrade"
         );
     }
+
+    /// Owner ruling (security-personal-connections, 2026-09-28): the
+    /// opposite precedence from `plan_gate_outranks_the_allow_list` above —
+    /// a personal-connection-ownership 403 must reach the SPA as its own
+    /// code, never collapsed into PLAN_REQUIRED, even though integration-
+    /// corev2 always returns it at 403 (the exact status this function
+    /// otherwise treats as a plan gate).
+    #[test]
+    fn personal_connection_ownership_codes_outrank_the_plan_gate() {
+        for code in [
+            "personal_connection_forbidden",
+            "personal_connection_no_delegated_user",
+        ] {
+            let raw = json!({
+                "success": false,
+                "error": { "code": code, "message": "This personal connection belongs to a different user." }
+            });
+            let message = integration_error_message(&raw);
+            assert_eq!(
+                integration_error_code(&raw, StatusCode::FORBIDDEN, &message),
+                code,
+                "{code} must reach the SPA verbatim, not PLAN_REQUIRED"
+            );
+        }
+    }
+
     use crate::middleware::AuthenticatedUser;
     use axum::http::{HeaderMap, HeaderValue};
 

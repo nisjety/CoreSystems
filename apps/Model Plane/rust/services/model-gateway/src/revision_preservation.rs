@@ -185,6 +185,23 @@ impl Preservation {
         Ok(None)
     }
 
+    /// The instruction's specific dated-post target, when it names exactly
+    /// one via the recognized "make/revise the post for D. Month" phrasing,
+    /// as a byte range into `before` — for `source_validation`'s revision-turn
+    /// reuse, which must not treat any OTHER instruction as naming a single
+    /// piece (a whole-document or unrecognised request stays whole-document,
+    /// "when in doubt, review it"). `Ok(None)` means no such piece is named.
+    /// `Err` only when the named piece cannot be uniquely resolved, exactly
+    /// as [`Self::from_prompt`] would error on it.
+    pub(crate) fn targeted_piece(prompt: &str, before: &str) -> Result<Option<Range<usize>>, String> {
+        Ok(match Self::from_prompt(prompt, before)? {
+            Some(Self::DatedPost { day, month, .. }) => {
+                Some(unique_section(before, |label| dated(label, &day, &month))?)
+            }
+            _ => None,
+        })
+    }
+
     pub fn apply(&self, candidate: &str) -> Result<String, String> {
         match self {
             Self::InternalNotes { before } => {
@@ -315,6 +332,30 @@ mod tests {
             "# Intern merknad\na\n# Intern merknad\nb"
         )
         .is_err());
+    }
+
+    #[test]
+    fn targeted_piece_resolves_only_a_recognized_single_dated_post() {
+        let before = "# Plan\nOverview\n\n## LinkedIn 7. oktober\nFirst\n\n## LinkedIn 9. oktober\nSecond\n\n## E-post\nThird\n";
+        let range = Preservation::targeted_piece("Gjør innlegget for 9. oktober mer konkret.", before)
+            .unwrap()
+            .unwrap();
+        assert_eq!(&before[range], "## LinkedIn 9. oktober\nSecond\n\n");
+        assert_eq!(
+            Preservation::targeted_piece("Gjør hele dokumentet kortere.", before).unwrap(),
+            None,
+            "a whole-document instruction names no piece"
+        );
+        assert_eq!(
+            Preservation::targeted_piece(
+                "Gjør innlegget for 9. oktober mer konkret og oppdater e-posten.",
+                before
+            )
+            .unwrap(),
+            None,
+            "a mixed instruction stays whole-document"
+        );
+        assert!(Preservation::targeted_piece("Gjør innlegget for 31. oktober mer konkret.", before).is_err());
     }
 
     #[test]

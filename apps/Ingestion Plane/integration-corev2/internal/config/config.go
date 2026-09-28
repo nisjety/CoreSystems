@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -14,16 +15,16 @@ import (
 )
 
 type Config struct {
-	Port                             string
-	ServiceName                      string
-	Environment                      string
-	DatabaseURL                      string
-	InternalAPIKey                   string
-	InternalAPIKeyHeader             string
-	AllowLegacyTenantKey             bool
-	AuthCoreURL                      string
-	AuthCoreInternalAPIKey           string
-	AuthCoreJWKSURL                  string
+	Port                   string
+	ServiceName            string
+	Environment            string
+	DatabaseURL            string
+	InternalAPIKey         string
+	InternalAPIKeyHeader   string
+	AllowLegacyTenantKey   bool
+	AuthCoreURL            string
+	AuthCoreInternalAPIKey string
+	AuthCoreJWKSURL        string
 	// AuthCoreOAuth* identify integration-corev2 to auth-core's scoped
 	// `/internal/oauth/*` surface (principal registry
 	// AUTH_INTERNAL_SERVICE_CREDENTIALS). Used to re-mint a Microsoft
@@ -47,6 +48,22 @@ type Config struct {
 	FinspoCoreAPIKeyHeader           string
 	ConversationIngestURL            string
 	ConversationIngestServiceToken   string
+	// MailTask* configures the inbound "forward an email to create a task"
+	// receiver (chat-wave2 mail-task spec, owner ruling 2026-09-28: Postmark
+	// inbound, self-forward only). Off by default: an empty MailTaskProvider
+	// or MailTaskWebhookSecret disables the whole feature -- the webhook route
+	// stays registered (so a probe gets a stable 404, not a routing error) but
+	// never authenticates or processes a payload.
+	MailTaskProvider             string // "postmark" only for v1; anything else is treated as disabled
+	MailTaskWebhookSecret        string
+	MailTaskReceivingDomain      string
+	MailTaskUserCoreURL          string
+	MailTaskUserCoreServiceID    string
+	MailTaskUserCoreServiceToken string
+	MailTaskGatewayIngestURL     string
+	MailTaskGatewayServiceToken  string
+	MailTaskImportsCoreURL       string
+	MailTaskImportsCoreToken     string
 	EmailSyncInterval                time.Duration
 	EmailSyncBackfillWindow          time.Duration
 	EmailSyncGraphFullBackfill       bool
@@ -79,14 +96,33 @@ type Config struct {
 	RateLimitWindow                  time.Duration
 	TokenLeaseConsumers              []string
 
-	// Codex subscription auth is retained by the official Codex app-server in
-	// this service-owned directory, never copied into the integration database.
+	// Codex subscription sign-in state lives in this service-owned directory
+	// (one Codex auth.json per connection, written by the Codex CLI sign-in
+	// and refreshed in place by the broker), never in the integration
+	// database.
 	CodexSubscriptionEnabled           bool
 	CodexAppServerCommand              string
 	CodexSubscriptionHome              string
 	CodexSubscriptionModelPlaneAPIKey  string
 	CodexSubscriptionLoginTTL          time.Duration
 	CodexSubscriptionInvocationTimeout time.Duration
+	// Non-secret broker knobs (see README "ChatGPT subscription connections").
+	// Transport is "direct" (default) or "app-server".
+	CodexSubscriptionTransport                   string
+	CodexSubscriptionDirectBaseURL               string
+	CodexSubscriptionDirectOriginator            string
+	CodexSubscriptionDirectRequestShape          string
+	CodexSubscriptionDirectPromptMode            string
+	CodexSubscriptionDirectMaxRetries            int
+	CodexSubscriptionRefreshSkew                 time.Duration
+	CodexSubscriptionMaxConcurrency              int
+	CodexSubscriptionMaxConcurrencyPerConnection int
+	CodexSubscriptionQueueTimeout                time.Duration
+	CodexAppServerHardened                       bool
+	CodexAppServerThreadEffort                   bool
+	// codexSubscriptionUnparsed names broker knobs whose value did not parse;
+	// ValidateRuntime rejects them instead of silently using the default.
+	codexSubscriptionUnparsed []string
 
 	MicrosoftTenantID         string
 	MicrosoftClientID         string
@@ -232,6 +268,8 @@ func Load() (Config, error) {
 		facebookClientSecret,
 	)
 
+	codexKnobs := loadCodexSubscriptionKnobs()
+
 	return Config{
 		Port:                             envOr("PORT", "3026"),
 		ServiceName:                      envOr("SERVICE_NAME", "integration-corev2"),
@@ -262,6 +300,16 @@ func Load() (Config, error) {
 		FinspoCoreAPIKeyHeader:           envOr("FINSPO_API_KEY_HEADER", "X-API-Key"),
 		ConversationIngestURL:            strings.TrimRight(envOr("CONVERSATION_INGEST_URL", "http://conversation-ingest-rs:3161"), "/"),
 		ConversationIngestServiceToken:   strings.TrimSpace(os.Getenv("CONVERSATION_EMAIL_INGEST_SERVICE_TOKEN")),
+		MailTaskProvider:                 strings.ToLower(strings.TrimSpace(os.Getenv("MAIL_TASK_PROVIDER"))),
+		MailTaskWebhookSecret:            strings.TrimSpace(os.Getenv("MAIL_TASK_WEBHOOK_SECRET")),
+		MailTaskReceivingDomain:          strings.ToLower(strings.TrimSpace(os.Getenv("MAIL_TASK_RECEIVING_DOMAIN"))),
+		MailTaskUserCoreURL:              strings.TrimRight(envOr("MAIL_TASK_USER_CORE_URL", envOr("USER_CORE_URL", "http://user-core:3012")), "/"),
+		MailTaskUserCoreServiceID:        strings.TrimSpace(envOr("MAIL_TASK_USER_CORE_SERVICE_ID", "integration-mail-task-worker")),
+		MailTaskUserCoreServiceToken:     strings.TrimSpace(os.Getenv("MAIL_TASK_USER_CORE_SERVICE_TOKEN")),
+		MailTaskGatewayIngestURL:         strings.TrimRight(envOr("MAIL_TASK_GATEWAY_INGEST_URL", "http://verevon-gateway-rs:3185"), "/"),
+		MailTaskGatewayServiceToken:      strings.TrimSpace(os.Getenv("MAIL_TASK_GATEWAY_SERVICE_TOKEN")),
+		MailTaskImportsCoreURL:           strings.TrimRight(envOr("MAIL_TASK_IMPORTS_CORE_URL", "http://imports-api:3025"), "/"),
+		MailTaskImportsCoreToken:         strings.TrimSpace(os.Getenv("MAIL_TASK_IMPORTS_CORE_TOKEN")),
 		EmailSyncInterval:                envDuration("EMAIL_SYNC_INTERVAL", 60*time.Second),
 		EmailSyncBackfillWindow:          envDuration("EMAIL_SYNC_BACKFILL_WINDOW", 24*time.Hour),
 		EmailSyncGraphFullBackfill:       envBool("EMAIL_SYNC_GRAPH_FULL_BACKFILL", true),
@@ -303,6 +351,20 @@ func Load() (Config, error) {
 		CodexSubscriptionModelPlaneAPIKey:  strings.TrimSpace(os.Getenv("CODEX_SUBSCRIPTION_MODEL_PLANE_API_KEY")),
 		CodexSubscriptionLoginTTL:          envDuration("CODEX_SUBSCRIPTION_LOGIN_TTL", 10*time.Minute),
 		CodexSubscriptionInvocationTimeout: envDuration("CODEX_SUBSCRIPTION_INVOCATION_TIMEOUT", 90*time.Second),
+
+		CodexSubscriptionTransport:                   strings.ToLower(envOr("CODEX_SUBSCRIPTION_TRANSPORT", "app-server")),
+		CodexSubscriptionDirectBaseURL:               envOr("CODEX_SUBSCRIPTION_DIRECT_BASE_URL", "https://chatgpt.com/backend-api/codex"),
+		CodexSubscriptionDirectOriginator:            envOr("CODEX_SUBSCRIPTION_DIRECT_ORIGINATOR", "verevon"),
+		CodexSubscriptionDirectRequestShape:          strings.ToLower(envOr("CODEX_SUBSCRIPTION_DIRECT_REQUEST_SHAPE", "classic")),
+		CodexSubscriptionDirectPromptMode:            strings.ToLower(envOr("CODEX_SUBSCRIPTION_DIRECT_PROMPT_MODE", "roles")),
+		CodexSubscriptionDirectMaxRetries:            codexKnobs.maxRetries,
+		CodexSubscriptionRefreshSkew:                 codexKnobs.refreshSkew,
+		CodexSubscriptionMaxConcurrency:              codexKnobs.maxConcurrency,
+		CodexSubscriptionMaxConcurrencyPerConnection: codexKnobs.maxPerConnection,
+		CodexSubscriptionQueueTimeout:                codexKnobs.queueTimeout,
+		CodexAppServerHardened:                       codexKnobs.hardened,
+		CodexAppServerThreadEffort:                   codexKnobs.threadEffort,
+		codexSubscriptionUnparsed:                    codexKnobs.unparsed,
 
 		MicrosoftTenantID:         tenant,
 		MicrosoftClientID:         envOr("AZURE_CLIENT_ID", os.Getenv("MICROSOFT_CLIENT_ID")),
@@ -434,6 +496,9 @@ func (c Config) ValidateRuntime() error {
 		}
 		if c.CodexSubscriptionInvocationTimeout <= 0 {
 			return fmt.Errorf("CODEX_SUBSCRIPTION_INVOCATION_TIMEOUT must be positive")
+		}
+		if problems := c.codexSubscriptionKnobProblems(); len(problems) > 0 {
+			return fmt.Errorf("%s %s", problems[0].env, problems[0].reason)
 		}
 	}
 	if c.OrgCoreURL == "" {
@@ -795,8 +860,176 @@ func (c Config) ProviderReadiness() map[string][]string {
 		if strings.TrimSpace(c.CodexSubscriptionModelPlaneAPIKey) == "" {
 			readiness["openai-codex-subscription"] = append(readiness["openai-codex-subscription"], "CODEX_SUBSCRIPTION_MODEL_PLANE_API_KEY")
 		}
+		for _, problem := range c.codexSubscriptionKnobProblems() {
+			readiness["openai-codex-subscription"] = append(readiness["openai-codex-subscription"], problem.env)
+		}
 	}
 	return readiness
+}
+
+type codexSubscriptionKnobProblem struct {
+	env    string
+	reason string
+}
+
+// codexImpersonatedOriginators are first-party or other third-party client
+// names the broker must never claim to be.
+var codexImpersonatedOriginators = map[string]struct{}{
+	"codex_cli_rs": {}, "codex-tui": {}, "codex_vscode": {}, "codex_exec": {}, "codex_sdk_ts": {},
+	"opencode": {}, "crush": {}, "pi": {},
+}
+
+var codexOriginatorPattern = regexp.MustCompile(`^[a-z][a-z0-9_-]{1,63}$`)
+
+// codexSubscriptionKnobProblems validates the non-secret broker knobs. Each
+// problem names the env var, so readiness can list it.
+func (c Config) codexSubscriptionKnobProblems() []codexSubscriptionKnobProblem {
+	var problems []codexSubscriptionKnobProblem
+	add := func(env, reason string) {
+		problems = append(problems, codexSubscriptionKnobProblem{env: env, reason: reason})
+	}
+	for _, env := range c.codexSubscriptionUnparsed {
+		add(env, "is not a valid value")
+	}
+	switch strings.ToLower(strings.TrimSpace(c.CodexSubscriptionTransport)) {
+	case "", "direct", "app-server":
+	default:
+		add("CODEX_SUBSCRIPTION_TRANSPORT", "must be direct or app-server")
+	}
+	if !validCodexDirectBaseURL(c.CodexSubscriptionDirectBaseURL) {
+		add("CODEX_SUBSCRIPTION_DIRECT_BASE_URL", "must be an https URL on host chatgpt.com without userinfo, query, or fragment")
+	}
+	if !validCodexOriginator(c.CodexSubscriptionDirectOriginator) {
+		add("CODEX_SUBSCRIPTION_DIRECT_ORIGINATOR", "must match ^[a-z][a-z0-9_-]{1,63}$ and must not name another client")
+	}
+	switch strings.ToLower(strings.TrimSpace(c.CodexSubscriptionDirectRequestShape)) {
+	case "", "classic", "lite":
+	default:
+		add("CODEX_SUBSCRIPTION_DIRECT_REQUEST_SHAPE", "must be classic or lite")
+	}
+	switch strings.ToLower(strings.TrimSpace(c.CodexSubscriptionDirectPromptMode)) {
+	case "", "roles", "flattened":
+	default:
+		add("CODEX_SUBSCRIPTION_DIRECT_PROMPT_MODE", "must be roles or flattened")
+	}
+	if c.CodexSubscriptionDirectMaxRetries < 0 || c.CodexSubscriptionDirectMaxRetries > 3 {
+		add("CODEX_SUBSCRIPTION_DIRECT_MAX_RETRIES", "must be between 0 and 3")
+	}
+	if c.CodexSubscriptionRefreshSkew < time.Minute || c.CodexSubscriptionRefreshSkew > 24*time.Hour {
+		add("CODEX_SUBSCRIPTION_REFRESH_SKEW", "must be between 1m and 24h")
+	}
+	if c.CodexSubscriptionMaxConcurrency < 1 {
+		add("CODEX_SUBSCRIPTION_MAX_CONCURRENCY", "must be at least 1")
+	}
+	if c.CodexSubscriptionMaxConcurrencyPerConnection < 1 || c.CodexSubscriptionMaxConcurrencyPerConnection > max(c.CodexSubscriptionMaxConcurrency, 1) {
+		add("CODEX_SUBSCRIPTION_MAX_CONCURRENCY_PER_CONNECTION", "must be between 1 and CODEX_SUBSCRIPTION_MAX_CONCURRENCY")
+	}
+	if c.CodexSubscriptionQueueTimeout <= 0 || (c.CodexSubscriptionInvocationTimeout > 0 && c.CodexSubscriptionQueueTimeout > c.CodexSubscriptionInvocationTimeout) {
+		add("CODEX_SUBSCRIPTION_QUEUE_TIMEOUT", "must be positive and no more than CODEX_SUBSCRIPTION_INVOCATION_TIMEOUT")
+	}
+	return problems
+}
+
+// CodexSubscriptionWarnings are startup warnings for knobs that are valid
+// but risky. A refresh skew below Codex's own 5-minute window plus the call
+// timeout lets the app-server fallback refresh a token mid-call, which makes
+// the broker no longer the only refresher.
+func (c Config) CodexSubscriptionWarnings() []string {
+	if !c.CodexSubscriptionEnabled {
+		return nil
+	}
+	var warnings []string
+	if c.CodexSubscriptionRefreshSkew < 5*time.Minute+c.CodexSubscriptionInvocationTimeout {
+		warnings = append(warnings, "CODEX_SUBSCRIPTION_REFRESH_SKEW is below 5m plus CODEX_SUBSCRIPTION_INVOCATION_TIMEOUT; the app-server fallback may refresh a token during a call")
+	}
+	return warnings
+}
+
+func validCodexDirectBaseURL(raw string) bool {
+	parsed, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil {
+		return false
+	}
+	return parsed.Scheme == "https" && parsed.Host == "chatgpt.com" && parsed.User == nil &&
+		parsed.RawQuery == "" && !parsed.ForceQuery && parsed.Fragment == "" && !strings.Contains(raw, "#")
+}
+
+func validCodexOriginator(raw string) bool {
+	value := strings.TrimSpace(raw)
+	if !codexOriginatorPattern.MatchString(value) || strings.HasPrefix(value, "codex") {
+		return false
+	}
+	_, impersonated := codexImpersonatedOriginators[value]
+	return !impersonated
+}
+
+// codexSubscriptionKnobs are the broker knobs whose values are validated at
+// startup rather than silently replaced by a default. They are read before
+// the Config literal so every unparsed name is collected first.
+type codexSubscriptionKnobs struct {
+	maxRetries       int
+	refreshSkew      time.Duration
+	maxConcurrency   int
+	maxPerConnection int
+	queueTimeout     time.Duration
+	hardened         bool
+	threadEffort     bool
+	unparsed         []string
+}
+
+func loadCodexSubscriptionKnobs() codexSubscriptionKnobs {
+	var knobs codexSubscriptionKnobs
+	knobs.maxRetries = strictEnvInt("CODEX_SUBSCRIPTION_DIRECT_MAX_RETRIES", 2, &knobs.unparsed)
+	knobs.refreshSkew = strictEnvDuration("CODEX_SUBSCRIPTION_REFRESH_SKEW", 10*time.Minute, &knobs.unparsed)
+	knobs.maxConcurrency = strictEnvInt("CODEX_SUBSCRIPTION_MAX_CONCURRENCY", 16, &knobs.unparsed)
+	knobs.maxPerConnection = strictEnvInt("CODEX_SUBSCRIPTION_MAX_CONCURRENCY_PER_CONNECTION", 4, &knobs.unparsed)
+	knobs.queueTimeout = strictEnvDuration("CODEX_SUBSCRIPTION_QUEUE_TIMEOUT", 30*time.Second, &knobs.unparsed)
+	knobs.hardened = strictEnvBool("CODEX_APP_SERVER_HARDENED", true, &knobs.unparsed)
+	knobs.threadEffort = strictEnvBool("CODEX_APP_SERVER_THREAD_EFFORT", true, &knobs.unparsed)
+	return knobs
+}
+
+// strictEnvInt reads an integer knob, keeping zero and negative values for
+// range validation and recording an unparseable value in unparsed.
+func strictEnvInt(key string, fallback int, unparsed *[]string) int {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return fallback
+	}
+	parsed, err := strconv.Atoi(value)
+	if err != nil {
+		*unparsed = append(*unparsed, key)
+		return fallback
+	}
+	return parsed
+}
+
+// strictEnvDuration reads a duration knob like strictEnvInt.
+func strictEnvDuration(key string, fallback time.Duration, unparsed *[]string) time.Duration {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return fallback
+	}
+	parsed, err := time.ParseDuration(value)
+	if err != nil {
+		*unparsed = append(*unparsed, key)
+		return fallback
+	}
+	return parsed
+}
+
+// strictEnvBool reads a boolean knob like strictEnvInt.
+func strictEnvBool(key string, fallback bool, unparsed *[]string) bool {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return fallback
+	}
+	parsed, err := strconv.ParseBool(value)
+	if err != nil {
+		*unparsed = append(*unparsed, key)
+		return fallback
+	}
+	return parsed
 }
 
 func (c Config) snapchatHTTPSRedirectBaseURL() string {

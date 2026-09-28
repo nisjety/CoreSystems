@@ -22,17 +22,21 @@ asserted, not just reported.
 | `attachment` | `artifacts` | `ChatEvent::Attachment` | ✅ |
 | `citation` | `citations` | `ChatEvent::Citation` | ✅ |
 | `error` | — (control) | `ChatEvent::Error` | ✅ |
+| `error` | — (control) | `ChatEvent::SubscriptionError` | ✅ |
 | `follow_ups` | — (control) | `ChatEvent::FollowUps` | ✅ |
 | `grounding` | `citations` | `ChatEvent::Grounding` | ✅ |
 | `memory_recall` | `memory` | `ChatEvent::MemoryRecall` | ✅ |
 | `queued_input` | — (control) | `ChatEvent::QueuedInput` | ✅ |
 | `reasoning_delta` | `reasoning` | `ChatEvent::ReasoningDelta` | ✅ |
+| `result_receipt` | `usage` | `ChatEvent::ResultReceipt` | ✅ |
 | `step_update` | `steps` | `ChatEvent::StepUpdate` | ✅ |
 | `stopped` | — (control) | `ChatEvent::Stopped` | ✅ |
 | `title` | — (control) | `ChatEvent::Title` | ✅ |
 | `tool_call` | `tools` | `ChatEvent::ToolCall` | ✅ |
 | `tool_result` | `tools` | `ChatEvent::ToolResult` | ✅ |
+| `turn_timing` | `usage` | `ChatEvent::TurnTiming` | ✅ |
 | `usage` | `usage` | `ChatEvent::Usage` | ✅ |
+| `verification` | `citations` | `ChatEvent::Verification` | ✅ |
 
 ## Handled by the SPA but not defined by `ChatEvent`
 

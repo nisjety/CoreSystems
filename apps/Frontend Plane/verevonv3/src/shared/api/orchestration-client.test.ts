@@ -1,5 +1,10 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { decideApproval, listApprovals } from './orchestration-client'
+import {
+  decideApproval,
+  listApprovals,
+  normalizePlan,
+  planStepEditToWire,
+} from './orchestration-client'
 
 function jsonResponse(data: unknown, status = 200): Response {
   return new Response(JSON.stringify({ data }), {
@@ -105,5 +110,77 @@ describe('decideApproval', () => {
     expect(init.method).toBe('POST')
     expect(JSON.parse(init.body as string)).toEqual({ decision: 'approve', reason: '' })
     expect(result?.status).toBe('GRANTED')
+  })
+})
+
+/** plan-gate §2.2/§2.3: the wire shape `approvePlan`/`rejectPlan` share. */
+describe('planStepEditToWire', () => {
+  it('defaults an empty stepId and operation to empty strings, never undefined', () => {
+    expect(planStepEditToWire({ title: 'New step' })).toEqual({
+      step_id: '',
+      title: 'New step',
+      operation: '',
+      removed: false,
+    })
+  })
+
+  it('carries every field through explicitly', () => {
+    expect(
+      planStepEditToWire({
+        stepId: 'step_1',
+        title: 'Draft the email',
+        operation: 'email_send',
+        removed: true,
+      }),
+    ).toEqual({
+      step_id: 'step_1',
+      title: 'Draft the email',
+      operation: 'email_send',
+      removed: true,
+    })
+  })
+})
+
+describe('normalizePlan', () => {
+  it('reads the full plan_value wire shape model-gateway serializes', () => {
+    const plan = normalizePlan({
+      id: 'plan_1',
+      run_id: 'run_1',
+      thread_id: 'thread_1',
+      author: 'user_1',
+      state: 'PLAN_STATE_PROPOSED',
+      summary: 'Send the overdue invoice',
+      steps: [
+        {
+          id: 'step_1',
+          title: 'Draft the email',
+          operation: '',
+          state: 'PLAN_STEP_STATE_PENDING',
+          detail: null,
+        },
+      ],
+      supersedes: null,
+    })
+    expect(plan).toEqual({
+      id: 'plan_1',
+      runId: 'run_1',
+      threadId: 'thread_1',
+      author: 'user_1',
+      state: 'PLAN_STATE_PROPOSED',
+      summary: 'Send the overdue invoice',
+      steps: [
+        {
+          id: 'step_1',
+          title: 'Draft the email',
+          operation: undefined,
+          state: 'PLAN_STEP_STATE_PENDING',
+          detail: undefined,
+        },
+      ],
+    })
+  })
+
+  it('returns null for a payload with no readable id', () => {
+    expect(normalizePlan({ summary: 'no id here' })).toBeNull()
   })
 })

@@ -311,3 +311,98 @@ export function getIntegrationProfile(orgId: string): Promise<IntegrationProfile
     headers: { 'x-verevon-org-id': orgId },
   })
 }
+
+// --- Connector-attach picker (composer "Fra en tilkoblet kilde" row) ---
+// Browser-reachable list/search + single-item content read, added for the
+// composer's connector-attach picker. Both routes are a thin passthrough to
+// integration-corev2's existing action executor, gated by a fixed read-only
+// operation allowlist on the gateway (defence in depth on top of
+// integration-corev2's own capability gate) — see apps/gateway's
+// domains/integrations/browse.rs.
+
+/** Read-only listing/search operations the picker may send to `/browse`. */
+export type ConnectorBrowseOperation =
+  | 'mail.messages'
+  | 'gmail.messages'
+  | 'drive.files'
+  | 'calendar.events'
+
+/** Read-only single-item content-fetch operations the picker may send to `/content`. */
+export type ConnectorContentOperation =
+  | 'drive.file.content'
+  | 'microsoft.drive.file.content'
+  | 'google.drive.file.content'
+  | 'mail.messages.get'
+  | 'microsoft.mail.messages.get'
+  | 'google.gmail.messages.get'
+  | 'gmail.messages.get'
+
+/** Passthrough of integration-corev2's own `{ action: {...} } }` envelope. */
+export interface ConnectorActionResult {
+  providerKey: string
+  operation: string
+  result: unknown
+}
+
+export interface ConnectorPickerTab {
+  connectionId: string
+  providerKey: 'microsoft' | 'google'
+  /** Connection's own displayName — the tab label, so two Microsoft
+   * connections (or a personal + a Workspace Google connection) stay
+   * distinguishable rather than colliding under one generic provider name. */
+  label: string
+}
+
+/** Active Microsoft/Google connections the composer's connector-attach
+ * picker may show a tab for. SharePoint team-site libraries are out of scope
+ * for this picker (owner decision, connector-picker spec §6.1) — every
+ * connection still renders one tab regardless of which scopes it holds; a
+ * OneDrive-only Microsoft connection simply has nothing under "Filer"
+ * beyond its personal drive. */
+export async function listConnectorPickerTabs(orgId: string): Promise<ConnectorPickerTab[]> {
+  const connections = await listConnections(orgId)
+  return connections
+    .filter((connection): connection is IntegrationConnection & { providerKey: 'microsoft' | 'google' } =>
+      (connection.providerKey === 'microsoft' || connection.providerKey === 'google')
+      && connection.status === 'active')
+    .map((connection) => ({
+      connectionId: connection.id,
+      providerKey: connection.providerKey,
+      label: connection.displayName || connection.providerEmail
+        || (connection.providerKey === 'microsoft' ? 'Microsoft' : 'Google'),
+    }))
+}
+
+export async function browseConnection(
+  orgId: string,
+  connectionId: string,
+  operation: ConnectorBrowseOperation,
+  params: Record<string, unknown> = {},
+): Promise<ConnectorActionResult> {
+  const payload = await requestJson<{ action: ConnectorActionResult }>(
+    `/api/v1/integrations/connections/${encodeURIComponent(connectionId)}/browse`,
+    {
+      method: 'POST',
+      body: JSON.stringify({ operation, params }),
+      headers: { 'x-verevon-org-id': orgId },
+    },
+  )
+  return payload.action
+}
+
+export async function fetchConnectionContent(
+  orgId: string,
+  connectionId: string,
+  operation: ConnectorContentOperation,
+  params: Record<string, unknown>,
+): Promise<ConnectorActionResult> {
+  const payload = await requestJson<{ action: ConnectorActionResult }>(
+    `/api/v1/integrations/connections/${encodeURIComponent(connectionId)}/content`,
+    {
+      method: 'POST',
+      body: JSON.stringify({ operation, params }),
+      headers: { 'x-verevon-org-id': orgId },
+    },
+  )
+  return payload.action
+}

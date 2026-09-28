@@ -122,10 +122,70 @@ pub fn source_constraints(context: &SourceContext) -> Vec<Value> {
     constraints
 }
 
+/// How far a qualifier word ("når", "forslag", "ikke", "hvis" …) reaches in
+/// the local guards ([`unsupported_approved_dates_scoped`],
+/// `crate::schedule_evidence::errors_scoped`).
+///
+/// `Line` is how the guards stood before author guidance v2: a qualifier
+/// anywhere in a line exempts the whole line. `Clause`, which v2 selects
+/// (`crate::author_guidance::AuthorGuidance::qualifier_scope`), checks a line
+/// with no qualifier exactly as `Line` does; in a line that has one, it also
+/// checks each table cell or sentence that has none. v2 asks for a labelled
+/// proposal at the end of every risk bullet and a condition in every
+/// dependency cell, so under `Line` its formats would exempt the rest of
+/// their line from both guards. `Clause` never reports less than `Line`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum QualifierScope {
+    /// A qualifier exempts its whole line.
+    #[default]
+    Line,
+    /// A qualifier exempts only its own table cell or sentence.
+    Clause,
+}
+
+/// A line's clauses: its table cells, split again at `;`, `!`, `?` and at a
+/// full stop that ends a sentence. A full stop after a digit does not, so the
+/// date "22. september" stays in one clause. Each clause keeps its own
+/// terminator; empty clauses are dropped.
+pub(crate) fn clauses(line: &str) -> Vec<&str> {
+    let mut found = Vec::new();
+    let mut start = 0;
+    let mut previous: Option<char> = None;
+    let mut chars = line.char_indices().peekable();
+    while let Some((index, ch)) = chars.next() {
+        let next = chars.peek().map(|&(_, next)| next);
+        let ends = match ch {
+            '|' | ';' | '!' | '?' => true,
+            '.' => {
+                !previous.is_some_and(|previous| previous.is_ascii_digit())
+                    && next.is_none_or(char::is_whitespace)
+            }
+            _ => false,
+        };
+        if ends {
+            found.push(&line[start..index + ch.len_utf8()]);
+            start = index + ch.len_utf8();
+        }
+        previous = Some(ch);
+    }
+    found.push(&line[start..]);
+    found.retain(|clause| !clause.trim_matches(|ch: char| ch.is_whitespace() || ch == '|').is_empty());
+    found
+}
+
 /// An explicit approved-date label needs an actual approval statement, not
 /// merely a proposed/possible date somewhere in the source. This narrow guard
 /// supplements semantic review; it does not parse general project scheduling.
+/// A qualifier exempts its whole line ([`QualifierScope::Line`]).
 pub fn unsupported_approved_dates(context: &SourceContext, text: &str) -> Vec<String> {
+    unsupported_approved_dates_scoped(context, text, QualifierScope::Line)
+}
+
+/// [`unsupported_approved_dates`] with a qualifier reaching as far as `scope`
+/// says. Under [`QualifierScope::Clause`], a line whose qualifier is in another
+/// cell or sentence is checked for the dates of each unqualified cell or
+/// sentence that states an approval.
+pub fn unsupported_approved_dates_scoped(context: &SourceContext, text: &str, scope: QualifierScope) -> Vec<String> {
     static DATE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(||
         regex::Regex::new(r"(?i)\b([0-3]?\d)\.\s*(jan(?:uar)?|feb(?:ruar)?|mar(?:s)?|apr(?:il)?|mai|jun(?:i)?|jul(?:i)?|aug(?:ust)?|sep(?:tember)?|okt(?:ober)?|nov(?:ember)?|des(?:ember)?)\b").unwrap());
     static APPROVAL_TAG: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(||
@@ -145,8 +205,17 @@ pub fn unsupported_approved_dates(context: &SourceContext, text: &str) -> Vec<St
         let approved_label = lower.contains("[vedtatt]") && !lower.contains("ikke [vedtatt]");
         let approved_tag = APPROVAL_TAG.is_match(&lower);
         let approved_prefix = lower.split('|').any(|cell| APPROVAL_PREFIX.is_match(cell) && !qualified(cell));
-        if !approved_cell && !approved_label && !approved_tag && !approved_prefix && !(affirmative(&lower) && !qualified(&lower)) { continue; }
-        for (day, month) in dates(&lower) {
+        let claimed = if approved_cell || approved_label || approved_tag || approved_prefix || (affirmative(&lower) && !qualified(&lower)) {
+            dates(&lower)
+        } else if scope == QualifierScope::Clause {
+            clauses(&lower).into_iter()
+                .filter(|clause| (affirmative(clause) || APPROVAL_PREFIX.is_match(clause)) && !qualified(clause))
+                .flat_map(dates)
+                .collect()
+        } else {
+            continue;
+        };
+        for (day, month) in claimed {
             let explicit = context.sources.iter().any(|source| source.content.lines().any(|line| {
                 let line = line.to_lowercase();
                 ((affirmative(&line) || APPROVAL_PREFIX.is_match(&line)) && !qualified(&line))
@@ -259,5 +328,65 @@ mod tests {
         assert!(unsupported_approved_dates(&approved,"| Skjema | 12. okt | [vedtatt] |").is_empty());
         let labeled=context("plan.md","Intern gjennomgang: vedtatt dato 28. september.");
         assert!(unsupported_approved_dates(&labeled,"Intern gjennomgang – vedtatt dato 28. september").is_empty());
+    }
+
+    #[test]
+    fn clauses_are_cells_and_sentences_and_keep_dates_whole() {
+        let bare = |line| clauses(line).into_iter().map(|clause| clause.trim_matches(|ch: char| ch.is_whitespace() || ch == '|')).collect::<Vec<_>>();
+        assert_eq!(bare("| 16. sep: skjemaet er godkjent | når arbeidet er startet |"), ["16. sep: skjemaet er godkjent", "når arbeidet er startet"]);
+        assert_eq!(bare("| ikke oppgitt; forslag: en rolle |"), ["ikke oppgitt;", "forslag: en rolle"]);
+        assert_eq!(bare("Konflikt: møtet 22. september er vedtatt. Forslag: avklar datoen."), ["Konflikt: møtet 22. september er vedtatt.", "Forslag: avklar datoen."]);
+        assert_eq!(bare("Frist 21.–23. sep! Hvorfor? Uklart"), ["Frist 21.–23. sep!", "Hvorfor?", "Uklart"]);
+        assert_eq!(bare("Versjon 2.1 er klar."), ["Versjon 2.1 er klar."]);
+    }
+
+    /// v2's formats put a qualifier word ("forslag", "når", "ikke") in every
+    /// risk bullet and dependency cell. Under `Line` that exempts the rest of
+    /// the line, so an unsupported approval next to it goes unchecked; under
+    /// `Clause` it is still caught. A line `Line` already checks is checked the
+    /// same way under `Clause`, and clean v2 lines pass both.
+    #[test]
+    fn a_qualifier_exempts_only_its_own_cell_or_sentence_under_clause_scope() {
+        let c = context("plan.md", "Skjemaet kan godkjennes 16. september.\nSalgsansvarlig foreslår å invitere 22. september.");
+        let scoped = |text: &str| unsupported_approved_dates_scoped(&c, text, QualifierScope::Clause);
+        for defect in [
+            "| 16. sep: skjemaet er godkjent | produktansvarlig | ingen | felt godkjent av produktansvarlig |",
+            "| 16. sep: skjemaet er godkjent | produktansvarlig | når arbeidet er startet | felt godkjent av produktansvarlig |",
+            "| 16. sep: skjemaet er godkjent | ikke oppgitt; forslag: produktansvarlig | ingen | felt godkjent av produktansvarlig |",
+            "- Konflikt: invitasjonen 22. september er vedtatt. Forslag: flytt den til etter testen.",
+            "- Konflikt: skjemaet ble vedtatt 16. sep; forslag: bekreft datoen.",
+            "| Skjema godkjent 16. sep | produktansvarlig | når feltene er klare | forslag: felt kontrollert |",
+        ] {
+            assert!(!scoped(defect).is_empty(), "{defect}");
+        }
+        for (defect, line_scope_misses_it) in [
+            ("| 16. sep: skjemaet er godkjent | produktansvarlig | ingen | felt godkjent av produktansvarlig |", false),
+            ("| 16. sep: skjemaet er godkjent | produktansvarlig | når arbeidet er startet | felt godkjent av produktansvarlig |", true),
+            ("| 16. sep: skjemaet er godkjent | ikke oppgitt; forslag: produktansvarlig | ingen | felt godkjent av produktansvarlig |", true),
+            ("- Konflikt: invitasjonen 22. september er vedtatt. Forslag: flytt den til etter testen.", true),
+        ] {
+            assert_eq!(unsupported_approved_dates(&c, defect).is_empty(), line_scope_misses_it, "{defect}");
+        }
+        for clean in [
+            "| Invitasjon 24. sep (betinget forslag) | ikke oppgitt; forslag: en oppgitt rolle | når testen er godkjent og veiledningen er klar | utkastet er klart |",
+            "| Eksport 17.–18. sep (betinget forslag) | teknisk rolle | når skjemaet er godkjent (mulig 16. sep) | uttrekket samsvarer med godkjent skjema |",
+            "- Risiko: skjemaet kan bli godkjent senere enn 16. sep. Forslag: avklar datoen.",
+            "Hvis skjemaet er godkjent 16. sep, kan arbeidet starte 17. sep.",
+            "Skjemaet kan godkjennes 16. september; datoen er ikke vedtatt.",
+        ] {
+            assert_eq!(scoped(clean), Vec::<String>::new(), "{clean}");
+            assert_eq!(unsupported_approved_dates(&c, clean), Vec::<String>::new(), "{clean}");
+        }
+        // `Clause` never reports less than `Line`.
+        for line in [
+            "| Skjema | 16. sep | [vedtatt] |",
+            "Skjemaet er godkjent 16. september.",
+            "16. sep (mandag) — **vedtatt mål**",
+            "| Skjema | 16. sep | Vedtatt | forslag: en rolle |",
+        ] {
+            let line_errors = unsupported_approved_dates(&c, line);
+            assert!(!line_errors.is_empty(), "{line}");
+            assert_eq!(scoped(line), line_errors, "{line}");
+        }
     }
 }

@@ -29,19 +29,23 @@
 
 use std::path::{Path, PathBuf};
 
+/// Every reader normalises CRLF to LF: a Windows checkout (`core.autocrlf`)
+/// materialises these sources with CRLF, and the markers below end in `\n`.
 fn read(relative: &str) -> String {
     let path: PathBuf = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .expect("execution-core's parent is rust/services")
         .join(relative);
-    std::fs::read_to_string(&path).unwrap_or_else(|error| {
-        panic!(
-            "cannot read {} ({error}). If it moved, re-point this test; do not \
-             delete it — it is the only thing keeping the two loops' compaction \
-             from drifting apart.",
-            path.display()
-        )
-    })
+    std::fs::read_to_string(&path)
+        .unwrap_or_else(|error| {
+            panic!(
+                "cannot read {} ({error}). If it moved, re-point this test; do not \
+                 delete it — it is the only thing keeping the two loops' compaction \
+                 from drifting apart.",
+                path.display()
+            )
+        })
+        .replace("\r\n", "\n")
 }
 
 /// Value of a `usize`/`&str` const or struct field, by name, searching only
@@ -359,7 +363,8 @@ fn the_prompt_and_the_enforcement_agree_on_which_tools_need_user_supplied_values
             .expect("execution-core -> services -> rust")
             .join("crates/mp-contracts/src/tool_arguments.rs"),
     )
-    .expect("cannot read tool_arguments.rs");
+    .expect("cannot read tool_arguments.rs")
+    .replace("\r\n", "\n");
 
     let prompt_list = between(&agent, "const USER_SUPPLIED_ARG_TOOLS: &[&str] = &[", "];");
     let check_list = between(&contracts, "const GROUNDED_ARGUMENT_PATHS", "];\n");
@@ -720,6 +725,7 @@ fn read_contracts(file: &str) -> String {
         .join(file);
     std::fs::read_to_string(&path)
         .unwrap_or_else(|error| panic!("cannot read {} ({error})", path.display()))
+        .replace("\r\n", "\n")
 }
 
 /// A memory write must stay SYNCHRONOUS — awaited, with its result reaching the

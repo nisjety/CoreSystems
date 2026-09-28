@@ -10,9 +10,11 @@ import {
   readChatThreadTranscript,
   removeChatThreadHistoryItem,
   removeChatThreadTranscript,
+  renameChatThreadLocally,
   replaceChatThreadHistory,
   selectChatThread,
   setActiveChatThreadId,
+  togglePersonaEnabledChatThread,
   togglePinnedChatThread,
   upsertChatThreadHistory,
   upsertChatThreadTranscript,
@@ -596,8 +598,230 @@ describe('chat thread history', () => {
     expect(after.find((item) => item.threadId === 'thread-2')?.pinned).toBe(true)
   })
 
+  // ── Persona spec: the per-thread override ──────────────────────────────
+  // Same shape as the pin tests above, but with the INVERSE stored polarity
+  // (`withPersonaEnabledCarry`): absent means enabled, so a toggle stores
+  // `personaEnabled: false` and clears the key again on the way back to
+  // enabled — the opposite of pinned's "store true, omit false".
+
+  it('turns persona off for a thread, storing personaEnabled: false', () => {
+    upsertChatThreadHistory({
+      threadId: 'thread-1',
+      title: 'First chat',
+      preview: 'Answer one',
+      updatedAt: '2026-06-17T09:00:00.000Z',
+    })
+
+    togglePersonaEnabledChatThread('thread-1')
+
+    expect(readChatThreadHistory()[0]).toMatchObject({ threadId: 'thread-1', personaEnabled: false })
+  })
+
+  it('turns persona back on on a second toggle, clearing the stored key', () => {
+    upsertChatThreadHistory({
+      threadId: 'thread-1',
+      title: 'First chat',
+      preview: 'Answer one',
+      updatedAt: '2026-06-17T09:00:00.000Z',
+    })
+
+    togglePersonaEnabledChatThread('thread-1')
+    togglePersonaEnabledChatThread('thread-1')
+
+    expect(readChatThreadHistory().find((item) => item.threadId === 'thread-1')?.personaEnabled).toBeUndefined()
+  })
+
+  it('does not silently re-enable persona on a routine snapshot upsert that omits `personaEnabled`', () => {
+    upsertChatThreadHistory({
+      threadId: 'thread-1',
+      title: 'First chat',
+      preview: 'Answer one',
+      updatedAt: '2026-06-17T09:00:00.000Z',
+    })
+    togglePersonaEnabledChatThread('thread-1')
+
+    // A routine periodic-snapshot-shaped write, exactly like
+    // `writeThreadSnapshot` performs — it never mentions `personaEnabled`.
+    upsertChatThreadHistory({
+      threadId: 'thread-1',
+      title: 'First chat',
+      preview: 'A later answer',
+      updatedAt: '2026-06-17T09:05:00.000Z',
+    })
+
+    expect(readChatThreadHistory().find((item) => item.threadId === 'thread-1')).toMatchObject({
+      personaEnabled: false,
+      preview: 'A later answer',
+    })
+  })
+
+  it('carries a disabled persona across a resync that omits personaEnabled entirely', () => {
+    upsertChatThreadHistory({
+      threadId: 'thread-1',
+      title: 'First chat',
+      preview: 'Answer one',
+      updatedAt: '2026-06-17T09:00:00.000Z',
+    })
+    togglePersonaEnabledChatThread('thread-1')
+
+    replaceChatThreadHistory([
+      { threadId: 'thread-1', title: 'First chat', preview: 'Server-synced answer', updatedAt: '2026-06-17T09:10:00.000Z' },
+      { threadId: 'thread-2', title: 'Second chat', preview: 'b', updatedAt: '2026-06-17T09:20:00.000Z' },
+    ])
+
+    expect(readChatThreadHistory().find((item) => item.threadId === 'thread-1')).toMatchObject({
+      personaEnabled: false,
+      preview: 'Server-synced answer',
+    })
+  })
+
+  /**
+   * Mirrors the pin test's own regression note: an explicit server value must
+   * win over a stale local one, in EITHER direction — a device that never
+   * saw the toggle must not resurrect it, and a device that has a stale
+   * "disabled" must not keep it once the server reports enabled again.
+   */
+  it('lets an explicit server personaEnabled win over a stale local value in either direction', () => {
+    upsertChatThreadHistory({
+      threadId: 'thread-1',
+      title: 'First chat',
+      preview: 'Answer one',
+      updatedAt: '2026-06-17T09:00:00.000Z',
+    })
+    togglePersonaEnabledChatThread('thread-1')
+    expect(readChatThreadHistory()[0]).toMatchObject({ personaEnabled: false })
+
+    replaceChatThreadHistory([
+      { threadId: 'thread-1', title: 'First chat', preview: 'Server-synced answer', updatedAt: '2026-06-17T09:10:00.000Z', personaEnabled: true },
+      { threadId: 'thread-2', title: 'Second chat', preview: 'b', updatedAt: '2026-06-17T09:20:00.000Z', personaEnabled: false },
+    ])
+
+    const after = readChatThreadHistory()
+    expect(after.find((item) => item.threadId === 'thread-1')?.personaEnabled).toBeUndefined()
+    expect(after.find((item) => item.threadId === 'thread-2')?.personaEnabled).toBe(false)
+  })
+
+  /**
+   * `origin` (e.g. "mail_task" — see CoreSidebar's "Fra e-post" badge) is set
+   * once at thread creation and never changes, unlike `pinned`. A snapshot
+   * upsert (periodic saves while chatting) never mentions it, so it must
+   * always carry forward from whatever was already stored rather than being
+   * erased the moment a write omits it.
+   */
+  it('carries origin across an upsert that omits it entirely', () => {
+    upsertChatThreadHistory({
+      threadId: 'thread-1',
+      title: 'First chat',
+      preview: 'Answer one',
+      updatedAt: '2026-06-17T09:00:00.000Z',
+      origin: 'mail_task',
+    })
+    expect(readChatThreadHistory()[0]).toMatchObject({ origin: 'mail_task' })
+
+    upsertChatThreadHistory({
+      threadId: 'thread-1',
+      title: 'First chat',
+      preview: 'Snapshot answer',
+      updatedAt: '2026-06-17T09:05:00.000Z',
+    })
+
+    expect(readChatThreadHistory()[0]).toMatchObject({ origin: 'mail_task', preview: 'Snapshot answer' })
+  })
+
+  it('carries origin across a server resync (replaceChatThreadHistory) for a thread the resync omits it for', () => {
+    upsertChatThreadHistory({
+      threadId: 'thread-1',
+      title: 'First chat',
+      preview: 'Answer one',
+      updatedAt: '2026-06-17T09:00:00.000Z',
+      origin: 'mail_task',
+    })
+
+    replaceChatThreadHistory([
+      { threadId: 'thread-1', title: 'First chat', preview: 'Server-synced answer', updatedAt: '2026-06-17T09:10:00.000Z' },
+      { threadId: 'thread-2', title: 'Second chat', preview: 'b', updatedAt: '2026-06-17T09:20:00.000Z', origin: 'chat' },
+    ])
+
+    const after = readChatThreadHistory()
+    expect(after.find((item) => item.threadId === 'thread-1')).toMatchObject({ origin: 'mail_task', preview: 'Server-synced answer' })
+    expect(after.find((item) => item.threadId === 'thread-2')).toMatchObject({ origin: 'chat' })
+  })
+
   it('is a no-op when toggling a thread with no history entry', () => {
     expect(togglePinnedChatThread('does-not-exist')).toEqual([])
+  })
+
+  it('renames a thread and locks the new title against a later preview overwrite', () => {
+    upsertChatThreadHistory({
+      threadId: 'thread-1',
+      title: 'Kan du sjekke i Visma om faktura 1234...',
+      titleKind: 'preview',
+      preview: 'Answer one',
+      updatedAt: '2026-06-17T09:00:00.000Z',
+    })
+
+    const next = renameChatThreadLocally('thread-1', 'Visma fakturastatus')
+
+    expect(next.find((item) => item.threadId === 'thread-1')).toMatchObject({
+      title: 'Visma fakturastatus',
+      titleKind: 'generated',
+    })
+
+    // A routine preview snapshot after the rename -- exactly the shape a
+    // periodic composer autosave writes -- must not silently revert it.
+    upsertChatThreadHistory({
+      threadId: 'thread-1',
+      title: 'Kan du sjekke i Visma om faktura 1234...',
+      titleKind: 'preview',
+      preview: 'A later answer',
+      updatedAt: '2026-06-17T09:05:00.000Z',
+    })
+
+    expect(readChatThreadHistory().find((item) => item.threadId === 'thread-1')).toMatchObject({
+      title: 'Visma fakturastatus',
+      titleKind: 'generated',
+      preview: 'A later answer',
+    })
+  })
+
+  it('lets a second rename revert the first, including after it locked the title', () => {
+    upsertChatThreadHistory({
+      threadId: 'thread-1',
+      title: 'Original title',
+      preview: 'Answer one',
+      updatedAt: '2026-06-17T09:00:00.000Z',
+    })
+
+    renameChatThreadLocally('thread-1', 'Renamed once')
+    expect(readChatThreadHistory().find((item) => item.threadId === 'thread-1')?.title).toBe('Renamed once')
+
+    // Simulates CoreSidebar reverting an optimistic rename after the server
+    // write failed -- the revert has to go through the same lock the first
+    // rename installed, or it would be blocked by its own titleKind.
+    renameChatThreadLocally('thread-1', 'Original title')
+    expect(readChatThreadHistory().find((item) => item.threadId === 'thread-1')?.title).toBe('Original title')
+  })
+
+  it('does not disturb pin state or preview when renaming', () => {
+    upsertChatThreadHistory({
+      threadId: 'thread-1',
+      title: 'Original title',
+      preview: 'Answer one',
+      updatedAt: '2026-06-17T09:00:00.000Z',
+    })
+    togglePinnedChatThread('thread-1')
+
+    renameChatThreadLocally('thread-1', 'Renamed')
+
+    expect(readChatThreadHistory().find((item) => item.threadId === 'thread-1')).toMatchObject({
+      title: 'Renamed',
+      pinned: true,
+      preview: 'Answer one',
+    })
+  })
+
+  it('is a no-op when renaming a thread with no history entry', () => {
+    expect(renameChatThreadLocally('does-not-exist', 'New title')).toEqual([])
   })
 
   it('clears transcript storage with history', () => {

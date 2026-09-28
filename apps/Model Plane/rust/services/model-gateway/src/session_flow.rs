@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use mp_contracts::model_plane::v1::{
-    AppendMessageRequest, CancelRunRequest, CreateThreadRequest, HeartbeatManagedRunRequest,
+    AppendMessageRequest, CancelRunRequest, CompleteDirectRunWithMessageRequest,
+    CompleteDirectRunWithMessageResponse, CreateThreadRequest, HeartbeatManagedRunRequest,
     ManagedRunSource, RecordTerminalOutcomeRequest, ResolveRunOwnerRequest, StartManagedRunRequest,
     StartRunRequest, TerminalOutcome,
 };
@@ -19,6 +20,17 @@ pub(crate) const MANAGED_RUN_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(
 /// alive indefinitely. The next interval may retry only while the caller is
 /// still otherwise active; initial liveness always fails closed.
 const MANAGED_RUN_HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(10);
+/// Bound on one attempt of the atomic save-and-complete call. It does what an
+/// append and a terminal receipt did, in one transaction, so it gets more room
+/// than a heartbeat; a lost or slow answer is retried once with the same key.
+const DIRECT_COMPLETION_TIMEOUT: Duration = Duration::from_secs(30);
+/// Attempts of the atomic call. The idempotency key makes a retry after a lost
+/// response return the original result instead of saving a second message.
+const DIRECT_COMPLETION_ATTEMPTS: usize = 2;
+/// Session Core answers UNIMPLEMENTED for `CompleteDirectRunWithMessage` until
+/// it is rebuilt; the Gateway then uses the two-call path and says so once.
+static DIRECT_COMPLETION_UNIMPLEMENTED_LOGGED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 const MAX_MANAGED_GOAL_BYTES: usize = 60 * 1024;
 
 /// Session Core stores a run goal as single-line metadata and rejects control
@@ -209,6 +221,31 @@ fn missing_thread_append_error(error: &tonic::Status) -> bool {
     error.code() == Code::Internal && error.message().to_ascii_lowercase().contains("foreign key")
 }
 
+/// Builds the durable `messages.metadata` Struct for the first-persisted user
+/// turn (chat-wave2 scope spec §2.4): `source_scope` when the thread is
+/// conversation-only, plus `retrieval_scope` when this turn's per-turn filter
+/// is not `auto` — mirrored, not merged, with the immutable `source_scope`
+/// write, since a `conversation_only` turn never carries a meaningful
+/// `retrieval_scope` (that mode already excludes both source families).
+/// `None` when there is nothing to record, matching today's byte-identical
+/// absent-metadata behavior.
+fn user_message_metadata(
+    conversation_only: bool,
+    retrieval_scope: Option<&str>,
+) -> Option<prost_types::Struct> {
+    let mut fields = std::collections::BTreeMap::new();
+    if conversation_only {
+        fields.insert("source_scope".to_owned(), json_to_prost_value(&serde_json::json!("conversation")));
+    } else if let Some(scope) = retrieval_scope.filter(|s| !s.is_empty()) {
+        fields.insert("retrieval_scope".to_owned(), json_to_prost_value(&serde_json::json!(scope)));
+    }
+    if fields.is_empty() {
+        None
+    } else {
+        Some(prost_types::Struct { fields })
+    }
+}
+
 async fn append_user_message(
     client: &mut mp_contracts::model_plane::v1::session_core_client::SessionCoreClient<
         tonic::transport::Channel,
@@ -218,6 +255,7 @@ async fn append_user_message(
     bearer: Option<&str>,
     space: Option<&ThreadSpaceContext>,
     conversation_only: bool,
+    retrieval_scope: Option<&str>,
 ) -> Result<(), tonic::Status> {
     let space = space.cloned().unwrap_or_else(|| ThreadSpaceContext {
         space_id: String::new(),
@@ -239,9 +277,7 @@ async fn append_user_message(
             thread_id: thread_id.to_owned(),
             role: "user".to_owned(),
             content: goal.to_owned(),
-            metadata: conversation_only.then(|| prost_types::Struct {
-                fields: [("source_scope".to_owned(), json_to_prost_value(&serde_json::json!("conversation")))].into(),
-            }),
+            metadata: user_message_metadata(conversation_only, retrieval_scope),
             agent_name: String::new(),
             space_id: space.space_id,
             space_decision_ref: space.space_decision_ref,
@@ -339,6 +375,12 @@ pub async fn prepare_managed_run_authenticated(
     space: Option<&ThreadSpaceContext>,
     append_space: Option<&ThreadSpaceContext>,
     conversation_only: bool,
+    // Per-turn retrieval-source filter (chat-wave2 scope spec), threaded
+    // only from the plain HTTP/SSE chat path — see `sse.rs`'s
+    // `retrieval_scope` (already forced to `None`-equivalent under
+    // `conversation_only` before it reaches here). `None` for every other
+    // caller of this function, matching today's byte-identical behavior.
+    retrieval_scope: Option<&str>,
 ) -> Result<SessionRun> {
     prepare_managed_run_with_bearer(
         state,
@@ -356,6 +398,7 @@ pub async fn prepare_managed_run_authenticated(
         space,
         append_space,
         conversation_only,
+        retrieval_scope,
     )
     .await
 }
@@ -394,6 +437,7 @@ pub(crate) async fn prepare_managed_run_with_token(
         None,
         None,
         false,
+        None,
     )
     .await
 }
@@ -415,6 +459,7 @@ async fn prepare_managed_run_with_bearer(
     space: Option<&ThreadSpaceContext>,
     append_space: Option<&ThreadSpaceContext>,
     conversation_only: bool,
+    retrieval_scope: Option<&str>,
 ) -> Result<SessionRun> {
     let thread_id = if zdr {
         // Do not persist a caller-provided thread id or prompt before Session
@@ -437,7 +482,7 @@ async fn prepare_managed_run_with_bearer(
             .await?
         };
         if let Err(error) =
-            append_user_message(&mut session_client, &thread_id, goal, bearer, append_space, conversation_only).await
+            append_user_message(&mut session_client, &thread_id, goal, bearer, append_space, conversation_only, retrieval_scope).await
         {
             if non_empty(requested_thread_id).is_some() && missing_thread_append_error(&error) {
                 tracing::info!(
@@ -453,7 +498,7 @@ async fn prepare_managed_run_with_bearer(
                     space,
                 )
                 .await?;
-                append_user_message(&mut session_client, &thread_id, goal, bearer, append_space, conversation_only)
+                append_user_message(&mut session_client, &thread_id, goal, bearer, append_space, conversation_only, retrieval_scope)
                     .await
                     .context("session-core append_message(user) failed")?;
             } else {
@@ -589,7 +634,7 @@ async fn prepare_run_with_bearer(
         .await?
     };
 
-    if let Err(error) = append_user_message(&mut client, &thread_id, goal, bearer, None, false).await {
+    if let Err(error) = append_user_message(&mut client, &thread_id, goal, bearer, None, false, None).await {
         if non_empty(requested_thread_id).is_some() && missing_thread_append_error(&error) {
             tracing::info!(
                 requested_thread_id = %thread_id,
@@ -604,7 +649,7 @@ async fn prepare_run_with_bearer(
                 None,
             )
             .await?;
-            append_user_message(&mut client, &thread_id, goal, bearer, None, false)
+            append_user_message(&mut client, &thread_id, goal, bearer, None, false, None)
                 .await
                 .context("session-core append_message(user) failed")?;
         } else {
@@ -772,9 +817,26 @@ fn direct_terminal_outcome(terminal: DirectInferenceTerminal) -> (TerminalOutcom
         // Preserve a bounded, content-free classification. The original code
         // is intentionally not forwarded because Session Core's durable
         // contract accepts only its fixed failure vocabulary.
-        DirectInferenceTerminal::Failed("inference_unavailable" | "vision_unavailable") => {
-            (TerminalOutcome::Failed, "provider_unavailable")
-        }
+        // A draft whose check or repair the provider could not answer is a
+        // provider outage too, not a rejected draft.
+        DirectInferenceTerminal::Failed(
+            "inference_unavailable" | "vision_unavailable" | "response_validation_unavailable",
+        ) => (TerminalOutcome::Failed, "provider_unavailable"),
+        // A ChatGPT subscription that refused or could not answer is a
+        // provider outage in Session Core's fixed vocabulary; the reason
+        // itself reached the client on the stream. A request ChatGPT rejected
+        // is the request's own failure.
+        DirectInferenceTerminal::Failed(
+            crate::subscription_failure::SUBSCRIPTION_USAGE_LIMIT
+            | crate::subscription_failure::SUBSCRIPTION_REAUTH_REQUIRED
+            | crate::subscription_failure::SUBSCRIPTION_UPSTREAM_UNAVAILABLE
+            | crate::subscription_failure::RATE_LIMITED
+            | crate::subscription_failure::SUBSCRIPTION_ROUTE_UNAVAILABLE,
+        ) => (TerminalOutcome::Failed, "provider_unavailable"),
+        DirectInferenceTerminal::Failed(
+            crate::subscription_failure::SUBSCRIPTION_BAD_REQUEST
+            | crate::subscription_failure::PROMPT_TOO_LONG,
+        ) => (TerminalOutcome::Failed, "inference_failed"),
         DirectInferenceTerminal::Failed("assistant_persist_failed" | "ingress_publish_failed") => {
             (TerminalOutcome::Failed, "execution_failed")
         }
@@ -837,6 +899,241 @@ pub(crate) async fn terminalize_direct_inference_run_with_token(
     bearer: &str,
 ) -> Result<()> {
     terminalize_direct_inference_run_with_bearer(state, run, terminal, Some(bearer)).await
+}
+
+/// The final assistant message of a completed direct turn.
+pub(crate) struct DirectAnswer<'a> {
+    pub content: &'a str,
+    pub agent_name: Option<&'a str>,
+    /// Build with `turn_evidence_metadata(...)`, as for an append.
+    pub metadata: Option<prost_types::Struct>,
+}
+
+/// How completing a direct run with its answer ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DirectCompletion {
+    /// The answer (when it had content) and the Completed receipt are durable.
+    Completed,
+    /// Session Core reports the run no longer active. Nothing was saved and no
+    /// receipt may be attempted for it.
+    AlreadyTerminal,
+}
+
+/// Why completing a direct run with its answer failed.
+#[derive(Debug)]
+pub(crate) enum DirectCompletionError {
+    /// The answer was not saved: the atomic call failed, or on the two-call
+    /// path the append failed. The run is still open.
+    Persist(anyhow::Error),
+    /// Two-call path only: the answer was saved but its terminal receipt was
+    /// not recorded.
+    Terminal(anyhow::Error),
+}
+
+/// Codes after which a retry with the same key is both safe and useful: the
+/// call may or may not have committed, or failed transiently.
+fn direct_completion_is_retryable(error: &anyhow::Error) -> bool {
+    if error
+        .downcast_ref::<tokio::time::error::Elapsed>()
+        .is_some()
+    {
+        return true;
+    }
+    error.downcast_ref::<tonic::Status>().is_some_and(|status| {
+        matches!(
+            status.code(),
+            Code::Unavailable
+                | Code::DeadlineExceeded
+                | Code::Unknown
+                | Code::Cancelled
+                | Code::Aborted
+                | Code::Internal
+        )
+    })
+}
+
+/// Only UNIMPLEMENTED, and only on the first attempt, selects the two-call
+/// path: the atomic call provably did not run. A refusal (PERMISSION_DENIED,
+/// FAILED_PRECONDITION, UNAUTHENTICATED, ...) never does, even though it wrote
+/// nothing. Routing around it would save with the delegated user bearer what
+/// Session Core refused to save (another thread, another producer's run, a
+/// zero-retention run), and it would hide a broken atomic path behind a quiet
+/// return of the cancel race and the stale-bearer failure it exists to close.
+fn direct_completion_is_unimplemented(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<tonic::Status>()
+        .is_some_and(|status| status.code() == Code::Unimplemented)
+}
+
+/// A Session Core failure for a log line: every context layer, with a gRPC
+/// status reduced to its code and Session Core's own reason, never its
+/// metadata or details. No layer carries request content.
+pub(crate) fn session_error_chain(error: &anyhow::Error) -> String {
+    error
+        .chain()
+        .map(|cause| match cause.downcast_ref::<tonic::Status>() {
+            Some(status) => format!("status {:?}: {}", status.code(), status.message()),
+            None => cause.to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join(": ")
+}
+
+/// The gRPC code of a Session Core failure, or `none` when the call got no
+/// status (a timeout, or no service credential to make it with).
+pub(crate) fn session_error_code(error: &anyhow::Error) -> String {
+    error.downcast_ref::<tonic::Status>().map_or_else(
+        || "none".to_owned(),
+        |status| format!("{:?}", status.code()),
+    )
+}
+
+/// One attempt of `CompleteDirectRunWithMessage` with the Gateway's own
+/// terminalization credential, the one `RecordTerminalOutcome` uses.
+async fn complete_direct_run_rpc(
+    state: &AppState,
+    run: &SessionRun,
+    request: &CompleteDirectRunWithMessageRequest,
+) -> Result<CompleteDirectRunWithMessageResponse> {
+    let provider = state.session_terminal_tokens.as_ref().context(
+        "managed terminalization service credential unavailable; refusing delegated-user fallback",
+    )?;
+    let service_token = provider
+        .terminalize_token(&run.org_id)
+        .await
+        .context("unable to mint managed terminalization service credential")?;
+    let mut client = state.managed_run_client.clone();
+    let response = tokio::time::timeout(
+        DIRECT_COMPLETION_TIMEOUT,
+        client.complete_direct_run_with_message(service_request(request.clone(), &service_token)?),
+    )
+    .await
+    .context("session-core direct run completion timed out")?
+    .context("session-core direct run completion failed")?;
+    Ok(response.into_inner())
+}
+
+/// Save a completed direct turn's answer and record its Completed receipt in
+/// one Session Core transaction.
+///
+/// This closes two gaps of the two-call path: a durable cancel that landed
+/// between the append and the receipt left a saved answer on a cancelled run,
+/// and the append rode the delegated user bearer minted at the start of the
+/// request, which a long turn can outlive. The atomic call uses the Gateway's
+/// scoped service credential instead; Session Core derives the owner from the
+/// run. `idempotency_key` (the request id) makes a retry after a lost response
+/// return the original result, so one retry is made on an ambiguous failure.
+///
+/// While Session Core answers UNIMPLEMENTED (not yet rebuilt), the old path
+/// runs: append with `bearer`, then the heartbeat-guarded terminal receipt.
+///
+/// With `timing`, the atomic call is recorded as `durable_append` and the
+/// receipt, which arrives with it, as an empty `terminal_ack` at its end; the
+/// two-call path records each call as before.
+pub(crate) async fn complete_direct_inference_run_with_message(
+    state: &AppState,
+    run: &SessionRun,
+    answer: DirectAnswer<'_>,
+    idempotency_key: &str,
+    bearer: &VerifiedSessionBearer,
+    timing: Option<&crate::turn_timing::TurnTiming>,
+) -> std::result::Result<DirectCompletion, DirectCompletionError> {
+    use crate::turn_timing::Phase;
+
+    require_gateway_owned_source(run, ManagedRunSource::GatewayDirect)
+        .map_err(DirectCompletionError::Persist)?;
+    let content = answer.content.trim();
+    let agent_name = answer.agent_name.unwrap_or_default().trim();
+    let request = CompleteDirectRunWithMessageRequest {
+        run_id: run.run_id.clone(),
+        thread_id: run.thread_id.clone(),
+        content: content.to_owned(),
+        agent_name: agent_name.to_owned(),
+        metadata: answer.metadata,
+        idempotency_key: idempotency_key.to_owned(),
+    };
+
+    let started = timing.map(crate::turn_timing::TurnTiming::now_ms);
+    let mut attempt = 0;
+    let outcome = loop {
+        attempt += 1;
+        match complete_direct_run_rpc(state, run, &request).await {
+            Err(error)
+                if attempt < DIRECT_COMPLETION_ATTEMPTS
+                    && direct_completion_is_retryable(&error) =>
+            {
+                tracing::warn!(
+                    error = %session_error_chain(&error),
+                    grpc_code = %session_error_code(&error),
+                    run_id = %run.run_id,
+                    request_id = %idempotency_key,
+                    attempt,
+                    "direct run completion failed; retrying with the same key"
+                );
+            }
+            other => break other,
+        }
+    };
+    match outcome {
+        Ok(response) => {
+            if let (Some(timing), Some(started)) = (timing, started) {
+                let ended = timing.close(Phase::DurableAppend, started);
+                timing.close(Phase::TerminalAck, ended);
+            }
+            Ok(if response.already_terminal {
+                DirectCompletion::AlreadyTerminal
+            } else {
+                DirectCompletion::Completed
+            })
+        }
+        // Only when the FIRST attempt was refused as unknown. A retry that
+        // reaches a not-yet-rebuilt replica after an ambiguous first attempt
+        // may follow a commit; appending then could save the answer twice, so
+        // that case stays an unsaved-answer failure below.
+        Err(error) if attempt == 1 && direct_completion_is_unimplemented(&error) => {
+            if !DIRECT_COMPLETION_UNIMPLEMENTED_LOGGED
+                .swap(true, std::sync::atomic::Ordering::Relaxed)
+            {
+                tracing::warn!(
+                    run_id = %run.run_id,
+                    "Session Core does not implement CompleteDirectRunWithMessage yet; saving the answer and completing the run in two calls until it is rebuilt"
+                );
+            }
+            let append_started = timing.map(crate::turn_timing::TurnTiming::now_ms);
+            let appended = append_assistant_message_with_bearer(
+                state,
+                &run.thread_id,
+                content,
+                Some(bearer.as_str()),
+                Some(agent_name),
+                request.metadata,
+            )
+            .await;
+            if let (Some(timing), Some(started)) = (timing, append_started) {
+                timing.close(Phase::DurableAppend, started);
+            }
+            appended.map_err(DirectCompletionError::Persist)?;
+            let ack_started = timing.map(crate::turn_timing::TurnTiming::now_ms);
+            let acknowledged = terminalize_direct_inference_run_with_bearer(
+                state,
+                run,
+                DirectInferenceTerminal::Completed,
+                Some(bearer.as_str()),
+            )
+            .await;
+            if let (Some(timing), Some(started)) = (timing, ack_started) {
+                timing.close(Phase::TerminalAck, started);
+            }
+            acknowledged.map_err(DirectCompletionError::Terminal)?;
+            Ok(DirectCompletion::Completed)
+        }
+        Err(error) => {
+            if let (Some(timing), Some(started)) = (timing, started) {
+                timing.close(Phase::DurableAppend, started);
+            }
+            Err(DirectCompletionError::Persist(error))
+        }
+    }
 }
 
 /// Why a prepared agent run is being closed without ever having run.
@@ -1110,6 +1407,76 @@ pub(crate) fn persisted_compaction_summary(metadata: Option<&prost_types::Struct
     }
 }
 
+/// Metadata key for a token-budget compaction summary
+/// (`compaction::StoredHeadSummary`).
+const HEAD_SUMMARY_KEY: &str = "head_summary";
+
+/// Persist a compaction summary with the answer of the turn that wrote it, so
+/// later turns send the same summary again instead of writing a new one.
+/// Skipped under ZDR and over the same size cap as the native checkpoint.
+pub(crate) fn with_head_summary(
+    metadata: Option<prost_types::Struct>,
+    record: Option<&crate::compaction::StoredHeadSummary>,
+    zdr: bool,
+) -> Option<prost_types::Struct> {
+    let Some(record) = record else {
+        return metadata;
+    };
+    if zdr
+        || record.summary.trim().is_empty()
+        || record.through_id.trim().is_empty()
+        || record.summary.len() > 128_000
+    {
+        return metadata;
+    }
+    let mut metadata = metadata.unwrap_or_default();
+    metadata.fields.insert(HEAD_SUMMARY_KEY.to_owned(), json_to_prost_value(&serde_json::json!({
+        "summary": record.summary, "through_id": record.through_id, "pinned_ids": record.pinned_ids,
+    })));
+    Some(metadata)
+}
+
+/// The compaction summary a turn persisted, if its record is complete.
+pub(crate) fn persisted_head_summary(
+    metadata: Option<&prost_types::Struct>,
+) -> Option<crate::compaction::StoredHeadSummary> {
+    use prost_types::value::Kind;
+    let Some(Kind::StructValue(record)) = metadata?.fields.get(HEAD_SUMMARY_KEY)?.kind.as_ref()
+    else {
+        return None;
+    };
+    let text = |key: &str| match record.fields.get(key).and_then(|v| v.kind.as_ref()) {
+        Some(Kind::StringValue(value)) => Some(value.clone()),
+        _ => None,
+    };
+    let (summary, through_id) = (text("summary")?, text("through_id")?);
+    if summary.trim().is_empty() || summary.len() > 128_000 || through_id.trim().is_empty() {
+        return None;
+    }
+    // Every record lists its pins, an empty list included; one that does not
+    // cannot say which pins its summary left out.
+    let Some(Kind::ListValue(pins)) = record
+        .fields
+        .get("pinned_ids")
+        .and_then(|v| v.kind.as_ref())
+    else {
+        return None;
+    };
+    let pinned_ids = pins
+        .values
+        .iter()
+        .map(|value| match &value.kind {
+            Some(Kind::StringValue(id)) => Some(id.clone()),
+            _ => None,
+        })
+        .collect::<Option<Vec<String>>>()?;
+    Some(crate::compaction::StoredHeadSummary {
+        summary,
+        through_id,
+        pinned_ids,
+    })
+}
+
 pub(crate) fn turn_evidence_metadata(
     grounding: Option<&crate::retrieval::Grounding>,
     citations: &[crate::sse_events::RecordedCitation],
@@ -1248,6 +1615,13 @@ pub async fn append_queued_user_message(
         Some(bearer.as_str()),
         space,
         conversation_only,
+        // Deliberately `None`: chat-wave2 scope spec §5's mid-run rule
+        // already has the in-flight stream enforce its OWN retrieval_scope
+        // (fixed at stream start) against a queued message; persisting a
+        // scope value for the queued message's own durable row is not part
+        // of this item's receipt/citation guarantee (see `EnqueueOutcome`'s
+        // doc comment in `queued_input.rs`).
+        None,
     )
     .await
     .map_err(|error| {
@@ -1282,6 +1656,129 @@ mod tests {
         assert!(super::with_compaction_summary(None, "private source", true).is_none());
         assert!(super::with_compaction_summary(None, &"x".repeat(128_001), false).is_none());
         assert!(super::persisted_compaction_summary(None).is_empty());
+    }
+
+    /// A reload shows a failed run by its recorded code, so a draft the
+    /// provider could not check must read as a provider outage there too.
+    #[test]
+    fn a_draft_check_the_provider_could_not_answer_is_recorded_as_an_outage() {
+        use super::{direct_terminal_outcome, DirectInferenceTerminal, TerminalOutcome};
+        let unavailable = crate::result_validation::VALIDATION_UNAVAILABLE;
+        assert_eq!(
+            direct_terminal_outcome(DirectInferenceTerminal::Failed(unavailable)),
+            (TerminalOutcome::Failed, "provider_unavailable")
+        );
+        let rejected = crate::result_validation::VALIDATION_FAILED;
+        assert_eq!(
+            direct_terminal_outcome(DirectInferenceTerminal::Failed(rejected)),
+            (TerminalOutcome::Failed, "inference_failed")
+        );
+    }
+
+    /// Session Core's durable vocabulary is fixed, so each subscription code
+    /// lands on the nearest allowed one: an unanswered subscription is a
+    /// provider outage, a request ChatGPT rejected is the request's failure.
+    #[test]
+    fn subscription_failures_map_onto_the_fixed_durable_vocabulary() {
+        use super::{direct_terminal_outcome, DirectInferenceTerminal, TerminalOutcome};
+        use crate::subscription_failure as sf;
+        for (code, durable) in [
+            (sf::SUBSCRIPTION_USAGE_LIMIT, "provider_unavailable"),
+            (sf::SUBSCRIPTION_REAUTH_REQUIRED, "provider_unavailable"),
+            (sf::SUBSCRIPTION_UPSTREAM_UNAVAILABLE, "provider_unavailable"),
+            (sf::RATE_LIMITED, "provider_unavailable"),
+            (sf::SUBSCRIPTION_ROUTE_UNAVAILABLE, "provider_unavailable"),
+            (sf::SUBSCRIPTION_BAD_REQUEST, "inference_failed"),
+            (sf::PROMPT_TOO_LONG, "inference_failed"),
+        ] {
+            assert_eq!(
+                direct_terminal_outcome(DirectInferenceTerminal::Failed(code)),
+                (TerminalOutcome::Failed, durable),
+                "{code}"
+            );
+            assert_eq!(
+                crate::turn_timing::Outcome::of_failure(code),
+                crate::turn_timing::Outcome::Failed,
+                "{code}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_head_summary_survives_durable_metadata_encoding_and_respects_zdr() {
+        use prost::Message;
+        let record = crate::compaction::StoredHeadSummary {
+            summary: "K3; 9 packed; NOK".to_owned(),
+            through_id: "msg-17".to_owned(),
+            pinned_ids: vec!["msg-3".to_owned()],
+        };
+        let metadata = super::with_head_summary(None, Some(&record), false).unwrap();
+        let reloaded = prost_types::Struct::decode(metadata.encode_to_vec().as_slice()).unwrap();
+        assert_eq!(
+            super::persisted_head_summary(Some(&reloaded)),
+            Some(record.clone())
+        );
+        // Beside the other keys, never instead of them.
+        let native = super::with_compaction_summary(None, "checkpoint", false);
+        let both = super::with_head_summary(native, Some(&record), false).unwrap();
+        assert_eq!(
+            super::persisted_compaction_summary(Some(&both)),
+            "checkpoint"
+        );
+        assert_eq!(
+            super::persisted_head_summary(Some(&both)),
+            Some(record.clone())
+        );
+        // ZDR, an empty or oversized summary, or no record: nothing is written.
+        assert!(super::with_head_summary(None, Some(&record), true).is_none());
+        assert!(super::with_head_summary(None, None, false).is_none());
+        let empty = crate::compaction::StoredHeadSummary {
+            summary: "  ".to_owned(),
+            ..record.clone()
+        };
+        assert!(super::with_head_summary(None, Some(&empty), false).is_none());
+        let huge = crate::compaction::StoredHeadSummary {
+            summary: "x".repeat(128_001),
+            ..record.clone()
+        };
+        assert!(super::with_head_summary(None, Some(&huge), false).is_none());
+        let unanchored = crate::compaction::StoredHeadSummary {
+            through_id: String::new(),
+            ..record
+        };
+        assert!(super::with_head_summary(None, Some(&unanchored), false).is_none());
+        assert!(super::persisted_head_summary(None).is_none());
+    }
+
+    #[test]
+    fn an_incomplete_head_summary_record_is_ignored() {
+        let record = |value: serde_json::Value| prost_types::Struct {
+            fields: [(
+                "head_summary".to_owned(),
+                super::json_to_prost_value(&value),
+            )]
+            .into_iter()
+            .collect(),
+        };
+        for value in [
+            serde_json::json!("just text"),
+            serde_json::json!({ "summary": "s", "through_id": "m1" }),
+            serde_json::json!({ "summary": "s", "through_id": "m1", "pinned_ids": "m2" }),
+            serde_json::json!({ "summary": "s", "through_id": "m1", "pinned_ids": [7] }),
+            serde_json::json!({ "summary": "", "through_id": "m1", "pinned_ids": [] }),
+            serde_json::json!({ "summary": "s", "through_id": " ", "pinned_ids": [] }),
+        ] {
+            assert!(
+                super::persisted_head_summary(Some(&record(value.clone()))).is_none(),
+                "{value}"
+            );
+        }
+        let complete =
+            record(serde_json::json!({ "summary": "s", "through_id": "m1", "pinned_ids": [] }));
+        assert_eq!(
+            super::persisted_head_summary(Some(&complete)).map(|r| r.pinned_ids.len()),
+            Some(0)
+        );
     }
 
     use super::{
@@ -1343,6 +1840,16 @@ mod tests {
         {
             Err(Status::unimplemented("not needed by managed-start test"))
         }
+
+        async fn complete_direct_run_with_message(
+            &self,
+            _: Request<mp_contracts::model_plane::v1::CompleteDirectRunWithMessageRequest>,
+        ) -> Result<
+            Response<mp_contracts::model_plane::v1::CompleteDirectRunWithMessageResponse>,
+            Status,
+        > {
+            Err(Status::unimplemented("not needed by managed-start test"))
+        }
     }
 
     async fn managed_lifecycle_client(
@@ -1392,6 +1899,169 @@ mod tests {
                 .contains("service credential unavailable; refusing delegated-user fallback"),
             "expected service-token-only managed lifecycle failure, got: {error:#}"
         );
+    }
+
+    /// The atomic completion writes content, so it must not quietly fall back
+    /// to the delegated user bearer when the service credential is missing:
+    /// that bearer is what a long turn outlives.
+    #[tokio::test]
+    async fn direct_completion_never_falls_back_to_a_delegated_user_bearer() {
+        let outcome = super::complete_direct_inference_run_with_message(
+            &AppState::new(),
+            &SessionRun {
+                thread_id: "thread-1".to_owned(),
+                run_id: "run-1".to_owned(),
+                org_id: "org-1".to_owned(),
+                already_started: false,
+                terminal_source: ManagedRunSource::GatewayDirect,
+            },
+            super::DirectAnswer {
+                content: "Svar.",
+                agent_name: None,
+                metadata: None,
+            },
+            "01J00000000000000000000000",
+            &crate::auth::VerifiedSessionBearer::for_test("delegated-user-session-token"),
+            None,
+        )
+        .await;
+
+        let Err(super::DirectCompletionError::Persist(error)) = outcome else {
+            panic!("expected an unsaved-answer failure, got {outcome:?}");
+        };
+        assert!(
+            format!("{error:#}")
+                .contains("service credential unavailable; refusing delegated-user fallback"),
+            "{error:#}"
+        );
+    }
+
+    /// Another producer's run is refused before any Session Core call.
+    #[tokio::test]
+    async fn direct_completion_is_only_for_gateway_direct_runs() {
+        let outcome = super::complete_direct_inference_run_with_message(
+            &AppState::new(),
+            &SessionRun {
+                thread_id: "thread-1".to_owned(),
+                run_id: "run-1".to_owned(),
+                org_id: "org-1".to_owned(),
+                already_started: false,
+                terminal_source: ManagedRunSource::GatewayBrowser,
+            },
+            super::DirectAnswer {
+                content: "Svar.",
+                agent_name: None,
+                metadata: None,
+            },
+            "01J00000000000000000000000",
+            &crate::auth::VerifiedSessionBearer::for_test("delegated-user-session-token"),
+            None,
+        )
+        .await;
+        assert!(
+            matches!(outcome, Err(super::DirectCompletionError::Persist(_))),
+            "{outcome:?}"
+        );
+    }
+
+    /// Only a failure after which the call may or may not have committed, or a
+    /// transient one, is retried with the same key; a refusal is final, and
+    /// UNIMPLEMENTED selects the two-call path instead.
+    #[tokio::test]
+    async fn direct_completion_retries_only_ambiguous_failures() {
+        use anyhow::Context as _;
+        let status = |code: tonic::Code| {
+            Err::<(), _>(tonic::Status::new(code, "x"))
+                .context("session-core direct run completion failed")
+                .unwrap_err()
+        };
+        for code in [
+            tonic::Code::Unavailable,
+            tonic::Code::DeadlineExceeded,
+            tonic::Code::Unknown,
+            tonic::Code::Cancelled,
+            tonic::Code::Aborted,
+            tonic::Code::Internal,
+        ] {
+            assert!(
+                super::direct_completion_is_retryable(&status(code)),
+                "{code:?}"
+            );
+        }
+        for code in [
+            tonic::Code::InvalidArgument,
+            tonic::Code::NotFound,
+            tonic::Code::PermissionDenied,
+            tonic::Code::FailedPrecondition,
+            tonic::Code::Unauthenticated,
+            tonic::Code::Unimplemented,
+        ] {
+            assert!(
+                !super::direct_completion_is_retryable(&status(code)),
+                "{code:?}"
+            );
+        }
+        assert!(super::direct_completion_is_unimplemented(&status(
+            tonic::Code::Unimplemented
+        )));
+        // A refusal is never routed around through the two-call path.
+        for code in [
+            tonic::Code::Unavailable,
+            tonic::Code::PermissionDenied,
+            tonic::Code::FailedPrecondition,
+            tonic::Code::Unauthenticated,
+            tonic::Code::InvalidArgument,
+            tonic::Code::NotFound,
+        ] {
+            assert!(
+                !super::direct_completion_is_unimplemented(&status(code)),
+                "{code:?}"
+            );
+        }
+        let elapsed = tokio::time::timeout(std::time::Duration::ZERO, std::future::pending::<()>())
+            .await
+            .context("session-core direct run completion timed out")
+            .unwrap_err();
+        assert!(super::direct_completion_is_retryable(&elapsed));
+        assert!(!super::direct_completion_is_retryable(&anyhow::anyhow!(
+            "unable to mint managed terminalization service credential"
+        )));
+    }
+
+    /// The 2026-09-24 log line said only "session-core direct run completion
+    /// failed", the outer context. The rendering keeps every layer and the
+    /// status code and reason, and drops the status metadata.
+    #[tokio::test]
+    async fn a_failed_direct_completion_logs_its_whole_chain_and_code_without_metadata() {
+        use anyhow::Context as _;
+        let mut refused = tonic::Status::failed_precondition(
+            "ZDR credentials cannot access durable session writes",
+        );
+        refused
+            .metadata_mut()
+            .insert("x-response-secret", "must-not-be-logged".parse().unwrap());
+        let error = Err::<(), _>(refused)
+            .context("session-core direct run completion failed")
+            .unwrap_err();
+
+        assert_eq!(
+            super::session_error_chain(&error),
+            "session-core direct run completion failed: status FailedPrecondition: \
+             ZDR credentials cannot access durable session writes"
+        );
+        assert_eq!(super::session_error_code(&error), "FailedPrecondition");
+        assert!(!super::session_error_chain(&error).contains("must-not-be-logged"));
+
+        let timed_out =
+            tokio::time::timeout(std::time::Duration::ZERO, std::future::pending::<()>())
+                .await
+                .context("session-core direct run completion timed out")
+                .unwrap_err();
+        assert_eq!(
+            super::session_error_chain(&timed_out),
+            "session-core direct run completion timed out: deadline has elapsed"
+        );
+        assert_eq!(super::session_error_code(&timed_out), "none");
     }
 
     #[tokio::test]

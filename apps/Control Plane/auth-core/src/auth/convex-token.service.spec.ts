@@ -521,3 +521,155 @@ describe('ConvexTokenService production key and principal posture', () => {
     expect(decodePayload(unlisted.token).zdr).toBe(false);
   });
 });
+
+describe('ConvexTokenService delegated-identity token exchange (verifyPlaneSubjectToken)', () => {
+  const originalEnv = { ...process.env };
+
+  afterEach(() => {
+    process.env = { ...originalEnv };
+  });
+
+  it('round-trips a valid session-core subject token', () => {
+    process.env.NODE_ENV = 'test';
+    for (const name of keyEnvNames) delete process.env[name];
+    const service = new ConvexTokenService();
+    const bundle = service.issuePlaneToken('session-core', {
+      userId: 'user-a',
+      orgId: 'org-a',
+      retentionPosture: {
+        zdr: true,
+        authority: 'interactive-org-retention-policy',
+      },
+    });
+
+    expect(
+      service.verifyPlaneSubjectToken(bundle.token, ['session-core']),
+    ).toEqual({
+      orgId: 'org-a',
+      userId: 'user-a',
+      zdr: true,
+      audience: 'session-core',
+    });
+  });
+
+  it('rejects a subject token whose audience is not in the allow-list', () => {
+    process.env.NODE_ENV = 'test';
+    for (const name of keyEnvNames) delete process.env[name];
+    const service = new ConvexTokenService();
+    const bundle = service.issuePlaneToken('execution-core', {
+      userId: 'user-a',
+      orgId: 'org-a',
+    });
+
+    expect(() =>
+      service.verifyPlaneSubjectToken(bundle.token, ['session-core']),
+    ).toThrow(/claims are invalid/i);
+  });
+
+  it('rejects a service-principal token presented as a subject token', () => {
+    process.env.NODE_ENV = 'test';
+    for (const name of keyEnvNames) delete process.env[name];
+    const service = new ConvexTokenService();
+    const bundle = service.issuePlaneToken('session-core', {
+      userId: 'service:model-execution',
+      orgId: 'org-a',
+      principalType: 'service',
+      serviceId: 'model-execution',
+      reason: 'not a real user',
+    });
+
+    expect(() =>
+      service.verifyPlaneSubjectToken(bundle.token, ['session-core']),
+    ).toThrow(/claims are invalid/i);
+  });
+
+  it.each([
+    {
+      name: 'expired',
+      issueAtOffsetMs: 0,
+      verifyAtOffsetMs: 400_000, // past session-core's 300s default TTL
+    },
+    {
+      name: 'not-yet-valid',
+      issueAtOffsetMs: 100_000, // token minted "in the future" relative to verification time
+      verifyAtOffsetMs: 0,
+    },
+  ])(
+    'rejects an $name subject token',
+    ({ issueAtOffsetMs, verifyAtOffsetMs }) => {
+      process.env.NODE_ENV = 'test';
+      for (const name of keyEnvNames) delete process.env[name];
+      const service = new ConvexTokenService();
+      const realNow = Date.now();
+      const nowSpy = jest.spyOn(Date, 'now');
+      try {
+        nowSpy.mockReturnValue(realNow + issueAtOffsetMs);
+        const bundle = service.issuePlaneToken('session-core', {
+          userId: 'user-a',
+          orgId: 'org-a',
+        });
+
+        nowSpy.mockReturnValue(realNow + verifyAtOffsetMs);
+        expect(() =>
+          service.verifyPlaneSubjectToken(bundle.token, ['session-core']),
+        ).toThrow(/claims are invalid/i);
+      } finally {
+        nowSpy.mockRestore();
+      }
+    },
+  );
+
+  it('rejects a replayed subject token within its own TTL — single-use marker (T-2/A-1)', () => {
+    process.env.NODE_ENV = 'test';
+    for (const name of keyEnvNames) delete process.env[name];
+    const service = new ConvexTokenService();
+    const bundle = service.issuePlaneToken('session-core', {
+      userId: 'user-a',
+      orgId: 'org-a',
+    });
+
+    expect(
+      service.verifyPlaneSubjectToken(bundle.token, ['session-core']),
+    ).toMatchObject({ userId: 'user-a' });
+    expect(() =>
+      service.verifyPlaneSubjectToken(bundle.token, ['session-core']),
+    ).toThrow(/already been exchanged/i);
+  });
+
+  it('does not let a replayed-then-retried DIFFERENT valid token get caught by the same marker', () => {
+    process.env.NODE_ENV = 'test';
+    for (const name of keyEnvNames) delete process.env[name];
+    const service = new ConvexTokenService();
+    const first = service.issuePlaneToken('session-core', {
+      userId: 'user-a',
+      orgId: 'org-a',
+    });
+    const second = service.issuePlaneToken('session-core', {
+      userId: 'user-b',
+      orgId: 'org-b',
+    });
+
+    expect(
+      service.verifyPlaneSubjectToken(first.token, ['session-core']),
+    ).toMatchObject({ userId: 'user-a' });
+    expect(
+      service.verifyPlaneSubjectToken(second.token, ['session-core']),
+    ).toMatchObject({ userId: 'user-b' });
+  });
+
+  it('fails closed for empty, malformed, and undecodable subject tokens', () => {
+    process.env.NODE_ENV = 'test';
+    for (const name of keyEnvNames) delete process.env[name];
+    const service = new ConvexTokenService();
+
+    expect(() =>
+      service.verifyPlaneSubjectToken('', ['session-core']),
+    ).toThrow(/not verifiable/i);
+    expect(() =>
+      service.verifyPlaneSubjectToken('a.b.*', ['session-core']),
+    ).toThrow(/malformed/i);
+    expect(() =>
+      service.verifyPlaneSubjectToken('a.b.c', ['session-core']),
+    ).toThrow(/verification failed/i);
+  });
+});

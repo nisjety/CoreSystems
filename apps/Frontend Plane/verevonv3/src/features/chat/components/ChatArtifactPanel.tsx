@@ -23,6 +23,7 @@ import {
   FileText,
   Globe,
   Image as ImageIcon,
+  Presentation,
 } from '@/shared/icons'
 import {
   For,
@@ -37,7 +38,10 @@ import {
 import {
   ChatMarkdown,
   DiffView,
+  MessageMenu,
+  type MessageMenuItem,
 } from './ChatMessages'
+import { exportChatAnswer, type ExportFormat } from '../lib/chat-export'
 import { diffText } from '@/shared/chat-nodes'
 import {
   EmptyPanel,
@@ -169,6 +173,7 @@ export function ArtifactViewer(props: { item: ArtifactPanelItem }) {
    */
   const [showDiff, setShowDiff] = createSignal(false)
   const [imageFailed, setImageFailed] = createSignal(false)
+  const [exportFailed, setExportFailed] = createSignal(false)
 
   const artifact = () => props.item.artifact
   const versions = createMemo(() => artifactVersions(artifact()))
@@ -217,8 +222,39 @@ export function ArtifactViewer(props: { item: ArtifactPanelItem }) {
       setShowDiff(false)
       setImageFailed(false)
       setCopyState('idle')
+      setExportFailed(false)
     },
   )
+
+  // Word/Excel/PowerPoint/PDF for a document artifact, built in the browser
+  // from the revision on screen (lib/chat-export). The same four choices an
+  // answer offers, and the ones that matter more here: in Verevon the draft
+  // usually lives in this panel while the reply is a one-line note. PDF
+  // prints the rendered document below (`documentRef`).
+  let documentRef: HTMLDivElement | undefined
+
+  const runExport = (format: ExportFormat) => {
+    setExportFailed(false)
+    try {
+      exportChatAnswer(format, {
+        content: displayed().content,
+        title: title(),
+        createdAt: props.item.turn.createdAt,
+        sources: (props.item.turn.citations ?? []).map((citation) => ({ title: citation.title || citation.url, url: citation.url })),
+        element: format === 'pdf' ? (documentRef ?? null) : undefined,
+        locale: i18n.locale(),
+      })
+    } catch {
+      setExportFailed(true)
+    }
+  }
+
+  const exportItems = (): MessageMenuItem[] => [
+    { label: i18n.tr('Eksporter til Word', 'Export to Word'), icon: <FileText size={16} />, onClick: () => runExport('docx') },
+    { label: i18n.tr('Eksporter til Excel', 'Export to Excel'), icon: <FileSpreadsheet size={16} />, onClick: () => runExport('xlsx') },
+    { label: i18n.tr('Eksporter til PowerPoint', 'Export to PowerPoint'), icon: <Presentation size={16} />, onClick: () => runExport('pptx') },
+    { label: i18n.tr('Lagre som PDF', 'Save as PDF'), icon: <Download size={16} />, onClick: () => runExport('pdf') },
+  ]
 
   let copyTimer: number | undefined
   onCleanup(() => window.clearTimeout(copyTimer))
@@ -243,7 +279,7 @@ export function ArtifactViewer(props: { item: ArtifactPanelItem }) {
   }
 
   return (
-    <section class="verevon-chat-artifact-view" aria-label={i18n.tr(`Artefakt ${title()}`, `Artifact ${title()}`)}>
+    <section class="verevon-chat-artifact-view" data-menu-boundary aria-label={i18n.tr(`Artefakt ${title()}`, `Artifact ${title()}`)}>
       <header class="verevon-chat-artifact-view__head">
         <div class="verevon-chat-artifact-view__title">
           <span class="verevon-chat-artifact-view__icon">{kindIcon(renderKind())}</span>
@@ -337,6 +373,19 @@ export function ArtifactViewer(props: { item: ArtifactPanelItem }) {
               </Switch>
             </button>
           </Show>
+          <Show when={renderKind() === 'document' && !missing()}>
+            <MessageMenu
+              align="auto"
+              direction="down"
+              trigger={{
+                icon: <FileText size={14} />,
+                label: i18n.tr('Eksporter dokumentet', 'Export the document'),
+                text: i18n.tr('Eksporter', 'Export'),
+                class: 'verevon-chat-artifact-action',
+              }}
+              items={exportItems()}
+            />
+          </Show>
           <Show when={fileMeta()}>
             {(meta) => (
               <a
@@ -351,6 +400,11 @@ export function ArtifactViewer(props: { item: ArtifactPanelItem }) {
           </Show>
         </div>
       </header>
+      <Show when={exportFailed()}>
+        <p class="verevon-chat-feedback-reasons__note" role="alert">
+          {i18n.tr('Eksport mislyktes. Prøv igjen.', 'Export failed. Please try again.')}
+        </p>
+      </Show>
 
       <div class="verevon-chat-artifact-view__body">
         <Show when={!missing()} fallback={<ArtifactLoadFailure kind={artifact().kind} />}>
@@ -363,7 +417,7 @@ export function ArtifactViewer(props: { item: ArtifactPanelItem }) {
               <ArtifactCodeView content={displayed().content} language={artifactLanguage(displayed())} />
             </Match>
             <Match when={renderKind() === 'document'}>
-              <div class="verevon-chat-artifact-document">
+              <div ref={documentRef} class="verevon-chat-artifact-document">
                 <ChatMarkdown content={displayed().content} />
               </div>
             </Match>

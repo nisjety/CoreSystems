@@ -1225,10 +1225,11 @@ var SessionCore_ServiceDesc = grpc.ServiceDesc{
 }
 
 const (
-	ManagedRunLifecycle_StartManagedRun_FullMethodName       = "/model_plane.v1.ManagedRunLifecycle/StartManagedRun"
-	ManagedRunLifecycle_RecordTerminalOutcome_FullMethodName = "/model_plane.v1.ManagedRunLifecycle/RecordTerminalOutcome"
-	ManagedRunLifecycle_HeartbeatManagedRun_FullMethodName   = "/model_plane.v1.ManagedRunLifecycle/HeartbeatManagedRun"
-	ManagedRunLifecycle_RecordRunOutput_FullMethodName       = "/model_plane.v1.ManagedRunLifecycle/RecordRunOutput"
+	ManagedRunLifecycle_StartManagedRun_FullMethodName              = "/model_plane.v1.ManagedRunLifecycle/StartManagedRun"
+	ManagedRunLifecycle_RecordTerminalOutcome_FullMethodName        = "/model_plane.v1.ManagedRunLifecycle/RecordTerminalOutcome"
+	ManagedRunLifecycle_HeartbeatManagedRun_FullMethodName          = "/model_plane.v1.ManagedRunLifecycle/HeartbeatManagedRun"
+	ManagedRunLifecycle_RecordRunOutput_FullMethodName              = "/model_plane.v1.ManagedRunLifecycle/RecordRunOutput"
+	ManagedRunLifecycle_CompleteDirectRunWithMessage_FullMethodName = "/model_plane.v1.ManagedRunLifecycle/CompleteDirectRunWithMessage"
 )
 
 // ManagedRunLifecycleClient is the client API for ManagedRunLifecycle service.
@@ -1257,6 +1258,19 @@ type ManagedRunLifecycleClient interface {
 	// authorized, separately auditable act of writing content — and it is refused
 	// outright for a zero-retention caller, which was promised no durable trace.
 	RecordRunOutput(ctx context.Context, in *RecordRunOutputRequest, opts ...grpc.CallOption) (*RecordRunOutputResponse, error)
+	// Save a gateway-direct run's final assistant message and record its
+	// Completed terminal receipt in ONE transaction.
+	//
+	// Replaces AppendMessage followed by RecordTerminalOutcome for a completed
+	// direct turn. Two calls let a durable cancel land between them, leaving a
+	// saved answer on a cancelled run, and the append rode a short-lived
+	// delegated user bearer that a long turn could outlive. This call uses the
+	// Gateway's own scoped terminalization credential: Session Core derives the
+	// tenant and owner from the durable run and appends to that run's own
+	// thread only. A run that is no longer active answers already_terminal and
+	// writes nothing. It is refused for a zero-retention run, whose turns have
+	// no durable transcript.
+	CompleteDirectRunWithMessage(ctx context.Context, in *CompleteDirectRunWithMessageRequest, opts ...grpc.CallOption) (*CompleteDirectRunWithMessageResponse, error)
 }
 
 type managedRunLifecycleClient struct {
@@ -1307,6 +1321,16 @@ func (c *managedRunLifecycleClient) RecordRunOutput(ctx context.Context, in *Rec
 	return out, nil
 }
 
+func (c *managedRunLifecycleClient) CompleteDirectRunWithMessage(ctx context.Context, in *CompleteDirectRunWithMessageRequest, opts ...grpc.CallOption) (*CompleteDirectRunWithMessageResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(CompleteDirectRunWithMessageResponse)
+	err := c.cc.Invoke(ctx, ManagedRunLifecycle_CompleteDirectRunWithMessage_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // ManagedRunLifecycleServer is the server API for ManagedRunLifecycle service.
 // All implementations must embed UnimplementedManagedRunLifecycleServer
 // for forward compatibility.
@@ -1333,6 +1357,19 @@ type ManagedRunLifecycleServer interface {
 	// authorized, separately auditable act of writing content — and it is refused
 	// outright for a zero-retention caller, which was promised no durable trace.
 	RecordRunOutput(context.Context, *RecordRunOutputRequest) (*RecordRunOutputResponse, error)
+	// Save a gateway-direct run's final assistant message and record its
+	// Completed terminal receipt in ONE transaction.
+	//
+	// Replaces AppendMessage followed by RecordTerminalOutcome for a completed
+	// direct turn. Two calls let a durable cancel land between them, leaving a
+	// saved answer on a cancelled run, and the append rode a short-lived
+	// delegated user bearer that a long turn could outlive. This call uses the
+	// Gateway's own scoped terminalization credential: Session Core derives the
+	// tenant and owner from the durable run and appends to that run's own
+	// thread only. A run that is no longer active answers already_terminal and
+	// writes nothing. It is refused for a zero-retention run, whose turns have
+	// no durable transcript.
+	CompleteDirectRunWithMessage(context.Context, *CompleteDirectRunWithMessageRequest) (*CompleteDirectRunWithMessageResponse, error)
 	mustEmbedUnimplementedManagedRunLifecycleServer()
 }
 
@@ -1354,6 +1391,9 @@ func (UnimplementedManagedRunLifecycleServer) HeartbeatManagedRun(context.Contex
 }
 func (UnimplementedManagedRunLifecycleServer) RecordRunOutput(context.Context, *RecordRunOutputRequest) (*RecordRunOutputResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method RecordRunOutput not implemented")
+}
+func (UnimplementedManagedRunLifecycleServer) CompleteDirectRunWithMessage(context.Context, *CompleteDirectRunWithMessageRequest) (*CompleteDirectRunWithMessageResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method CompleteDirectRunWithMessage not implemented")
 }
 func (UnimplementedManagedRunLifecycleServer) mustEmbedUnimplementedManagedRunLifecycleServer() {}
 func (UnimplementedManagedRunLifecycleServer) testEmbeddedByValue()                             {}
@@ -1448,6 +1488,24 @@ func _ManagedRunLifecycle_RecordRunOutput_Handler(srv interface{}, ctx context.C
 	return interceptor(ctx, in, info, handler)
 }
 
+func _ManagedRunLifecycle_CompleteDirectRunWithMessage_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CompleteDirectRunWithMessageRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ManagedRunLifecycleServer).CompleteDirectRunWithMessage(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ManagedRunLifecycle_CompleteDirectRunWithMessage_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ManagedRunLifecycleServer).CompleteDirectRunWithMessage(ctx, req.(*CompleteDirectRunWithMessageRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // ManagedRunLifecycle_ServiceDesc is the grpc.ServiceDesc for ManagedRunLifecycle service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -1470,6 +1528,10 @@ var ManagedRunLifecycle_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "RecordRunOutput",
 			Handler:    _ManagedRunLifecycle_RecordRunOutput_Handler,
+		},
+		{
+			MethodName: "CompleteDirectRunWithMessage",
+			Handler:    _ManagedRunLifecycle_CompleteDirectRunWithMessage_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

@@ -215,6 +215,99 @@ services:
       # or both). Set DEFAULT_MODEL to pin a specific model org-wide.
       DEFAULT_MODEL: ${DEFAULT_MODEL:-}
       RATE_LIMIT_RPM: "100"
+      # Kill-switches for the review-latency levers. Empty keeps a lever ON;
+      # 0/off/false/no/disabled turns it off at the next restart, no rebuild.
+      MODEL_GATEWAY_SOLE_NOTE_PREFETCH: ${MODEL_GATEWAY_SOLE_NOTE_PREFETCH:-}
+      # Off by default (2026-09-25 live A/B on gpt-5.6-terra): with it on, the
+      # sample-expanded recheck control missed the invalidated dependent claim
+      # in 2 of 4 runs (0 of 3 with it off).
+      MODEL_GATEWAY_RECHECK_PROPOSES_EDITS: ${MODEL_GATEWAY_RECHECK_PROPOSES_EDITS:-0}
+      # Off by default (same A/B): the balanced split falsely rejected the
+      # unapproved-quoted-as-warning matrix case in 3 of 6 runs (0 of 5 off).
+      MODEL_GATEWAY_BALANCED_REVIEW_BATCHES: ${MODEL_GATEWAY_BALANCED_REVIEW_BATCHES:-0}
+      # On by default (owner ruling, 2026-09-26: "receipt-bound reuse on
+      # revision turns"): a revision turn on an already-accepted, source-
+      # reviewed artifact version reuses that version's segment approvals for
+      # byte-identical, unaffected segments, instead of reviewing the whole
+      # document again. 0/off/false/no/disabled restores today's full review
+      # byte-for-byte. Never applies to a within-turn repair or recheck.
+      # Above this line, the reuse lever now also carries owner rulings
+      # 2026-09-27 ("scoped revisions, recheck scope"): a preserved segment
+      # outside a scoped revision's targeted post keeps its receipt-bound
+      # approval unless it shares a changed date, amount or proper name; the
+      # recheck after an in-turn edit or repair covers only the targeted
+      # post and its dependents, recomputed fresh every attempt; and a
+      # preserved-segment rejection gets at most one targeted repair before
+      # failing fast instead of looping. 0/off/false/no/disabled restores
+      # today's full review and complete recheck byte for byte, as before.
+      MODEL_GATEWAY_REVISION_REVIEW_REUSE: ${MODEL_GATEWAY_REVISION_REVIEW_REUSE:-}
+      # On by default (owner ruling 2026-09-27, "framing guard"): on a
+      # scoped revision, a reviewer edit inside the targeted post that
+      # deletes requested framing/audience wording named in the revision
+      # instruction is refused; the check then falls back to a model repair
+      # that is told to keep the named terms. Independent of the reuse
+      # lever above. 0/off/false/no/disabled restores today's edit handling
+      # byte for byte.
+      MODEL_GATEWAY_REVISION_FRAMING_GUARD: ${MODEL_GATEWAY_REVISION_FRAMING_GUARD:-}
+      # On by default (owner ruling 2026-09-27, "in-turn recheck scope on
+      # every turn"): after an edit or repair within a turn, on ANY turn --
+      # a first-time draft or a new note included, not only a scoped
+      # revision -- the recheck assigns only the segments changed since the
+      # immediately previous reviewed candidate and their dependents (same
+      # section, or a shared changed date, amount or proper name); a segment
+      # that pass approved and that stays byte-identical is carried with its
+      # evidence instead of being resent. On the third freeze, complete
+      # rechecks caused 4 of 8 failed attempts as rejection cascades, each
+      # rejecting a different segment (0 cascades on scoped-revision
+      # rechecks). 0/off/false/no/disabled restores today's independent
+      # complete recheck byte for byte.
+      MODEL_GATEWAY_INTURN_SCOPED_RECHECK: ${MODEL_GATEWAY_INTURN_SCOPED_RECHECK:-}
+      # On by default (perf-quick, freeze-5 investigation): a first-pass
+      # source review of a candidate with fewer than REUSED_REVIEW_BATCH_MIN
+      # (3) segments is not offered the private-edit tool, since there is
+      # nothing left to narrow the resulting full recheck by -- a rejection
+      # goes straight to the model repair instead. Measured: journey
+      # 04-prosjektplan attempt 4 spent ~26.5s of its 74.6s tail on exactly
+      # this pattern (a free edit that failed, forcing one wasted full
+      # review pass) on a 2-segment candidate. 0/off/false/no/disabled
+      # restores today's behavior: every pass that can still be repaired may
+      # propose edits regardless of segment count.
+      MODEL_GATEWAY_TINY_CANDIDATE_SKIPS_PROPOSE_EDITS: ${MODEL_GATEWAY_TINY_CANDIDATE_SKIPS_PROPOSE_EDITS:-}
+      # On by default (perf-quick, freeze-5 investigation): a source-review
+      # repair's request carries only the failed segment(s), the same
+      # targeted payload a campaign_contract document-check repair already
+      # gets, instead of resending every segment in the document.
+      # 0/off/false/no/disabled restores today's behavior: a source-review
+      # repair always resends every segment.
+      MODEL_GATEWAY_TARGETED_SOURCE_REPAIR: ${MODEL_GATEWAY_TARGETED_SOURCE_REPAIR:-}
+      # On by default (perf-list-segments, freeze-5 investigation): a
+      # Markdown list block splits into one review segment per top-level
+      # item, exactly parallel to how a table already splits into one
+      # segment per row. Measured: all three of freeze-5's slow repair-tail
+      # follow-up turns rejected one kind-`list` segment, forcing the
+      # reviewer to examine every bullet in one call (25-28s batches) and
+      # the repair/recheck to re-cover the whole list for a single bad item.
+      # 0/off/false/no/disabled restores today's behavior: a list stays one
+      # segment.
+      MODEL_GATEWAY_LIST_ITEM_SEGMENTS: ${MODEL_GATEWAY_LIST_ITEM_SEGMENTS:-}
+      # Author-guidance version for source-bound drafting: v1 (the text and
+      # local checks before 2026-09-25) or v2. v1 by default, and for any
+      # unrecognised value: v2 is opt-in until it passes a held-out validation
+      # (product-recordings Q16). Choosing v2 restarts qualification of
+      # journeys 02 and 04.
+      MODEL_GATEWAY_AUTHOR_GUIDANCE: ${MODEL_GATEWAY_AUTHOR_GUIDANCE:-v1}
+      # Source-review rule for labelled author proposals (proposal-rule-2): on,
+      # or off (empty and any other value) until validated.
+      MODEL_GATEWAY_REVIEW_PROPOSAL_RULE: ${MODEL_GATEWAY_REVIEW_PROPOSAL_RULE:-}
+      # Cache/compaction options for OpenAI-API routes only (never the Codex
+      # subscription route). Empty keeps each one OFF.
+      MODEL_GATEWAY_CACHE_STABLE_PROMPT_ORDER: ${MODEL_GATEWAY_CACHE_STABLE_PROMPT_ORDER:-}
+      MODEL_GATEWAY_COMPACTION_TOKEN_BUDGET: ${MODEL_GATEWAY_COMPACTION_TOKEN_BUDGET:-}
+      MODEL_GATEWAY_DEDUP_CONTEXT_HISTORY: ${MODEL_GATEWAY_DEDUP_CONTEXT_HISTORY:-}
+      # Source-check deadlines in seconds. Empty keeps 90 (per artifact) and
+      # 150 (shared tool phase).
+      MODEL_GATEWAY_ARTIFACT_CHECK_TIMEOUT_SECS: ${MODEL_GATEWAY_ARTIFACT_CHECK_TIMEOUT_SECS:-}
+      MODEL_GATEWAY_TOOL_PHASE_TIMEOUT_SECS: ${MODEL_GATEWAY_TOOL_PHASE_TIMEOUT_SECS:-}
       # Local-dev auth bypass is defined in ../.env, but compose was not
       # forwarding it, so Verevon's `dev-bypass` bearer was rejected before
       # inference. Production should leave this empty and configure JWKS.
@@ -380,7 +473,8 @@ services:
       # then, and SEMANTIC_CACHE_URL was interpolating a live Dragonfly credential
       # (MODEL_DRAGONFLY_PASSWORD) into a variable nothing consumed, failing the
       # whole compose file if that secret was absent. See
-      # docs/CACHE_COMPACTION_AUDIT_2026-09-17.md §4.4. DATAPLANE_RETRIEVAL_HTTP_URL
+      # apps/Frontend Plane/verevonv3/apps/verevon-web/plans/system-audits/
+      # CACHE_COMPACTION_AUDIT_2026-09-17.md §4.4. DATAPLANE_RETRIEVAL_HTTP_URL
       # (below)/DATAPLANE_INTERNAL_KEY (above) stay — they are real, live inputs to
       # retrieval.rs's grounding path, not part of the dead cache.
       DATAPLANE_RETRIEVAL_HTTP_URL: ${DATAPLANE_RETRIEVAL_HTTP_URL:-http://dpv2-retrieval-engine:8004}

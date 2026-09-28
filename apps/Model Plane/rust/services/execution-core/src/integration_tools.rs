@@ -99,6 +99,7 @@ const CATALOG: &[(&str, &[CatalogOp])] = &[
         "google",
         &[
             CatalogOp { operation: "gmail.send", is_write: true, summary: "Send an email via Gmail. body.{to,subject,bodyText}." },
+            CatalogOp { operation: "gmail.messages", is_write: false, summary: "Read-only: list Gmail message ids in the mailbox (Gmail users.messages.list — id + threadId only, no subject/snippet). params.maxResults (default 10, max 100). No server-side query/search filter is implemented yet." },
             CatalogOp { operation: "calendar.events", is_write: false, summary: "List upcoming Google Calendar events." },
             CatalogOp { operation: "drive.files", is_write: false, summary: "List Google Drive files." },
         ],
@@ -107,6 +108,8 @@ const CATALOG: &[(&str, &[CatalogOp])] = &[
         "microsoft",
         &[
             CatalogOp { operation: "mail.send", is_write: true, summary: "Send an Outlook email. body.{to,subject,bodyText}." },
+            CatalogOp { operation: "mail.messages", is_write: false, summary: "Read-only: list recent Outlook messages (Microsoft Graph /me/messages — id, subject, from, receivedDateTime, webLink). params.maxResults (default 10, max 100). No server-side query/search filter is implemented yet." },
+            CatalogOp { operation: "drive.files", is_write: false, summary: "Read-only: list files in the connected OneDrive root folder (Microsoft Graph /me/drive/root/children — id, name, webUrl, file/folder metadata, lastModifiedDateTime). params.maxResults (default 10, max 100)." },
             CatalogOp { operation: "calendar.events", is_write: false, summary: "List Outlook calendar events." },
         ],
     ),
@@ -228,12 +231,16 @@ impl IntegrationActionsClient {
     /// GET /api/v1/connections?organizationId=<org> — the org's live provider
     /// connections. Rendered together with the static catalog so the model can
     /// see what is connected and what it can call on each.
-    pub async fn list_provider_actions(&self, org_id: &str) -> Result<String, String> {
+    pub async fn list_provider_actions(
+        &self,
+        org_id: &str,
+        session_bearer: Option<&str>,
+    ) -> Result<String, String> {
         if org_id.trim().is_empty() {
             return Err("list_provider_actions requires a run org_id (tenant scope)".to_owned());
         }
         let token = self
-            .mint_ingestion_token(org_id, "integration:read")
+            .resolve_ingestion_token(org_id, "integration:read", session_bearer)
             .await?;
         let resp = self
             .http
@@ -267,9 +274,10 @@ impl IntegrationActionsClient {
         &self,
         org_id: &str,
         connection_id: &str,
+        session_bearer: Option<&str>,
     ) -> Result<String, String> {
         let token = self
-            .mint_ingestion_token(org_id, "integration:read")
+            .resolve_ingestion_token(org_id, "integration:read", session_bearer)
             .await?;
         let resp = self
             .http
@@ -322,6 +330,7 @@ impl IntegrationActionsClient {
         mut body: Value,
         actor_id: &str,
         approval_ref: Option<&str>,
+        session_bearer: Option<&str>,
     ) -> Result<ActionOutcome, String> {
         if connection_id.trim().is_empty() {
             return Err("execute_provider_action requires connection_id".to_owned());
@@ -349,7 +358,7 @@ impl IntegrationActionsClient {
             .filter(|value| !value.is_empty());
         if let Some(approval) = approval {
             let provider_key = self
-                .provider_key_for_connection(org_id, connection_id)
+                .provider_key_for_connection(org_id, connection_id, session_bearer)
                 .await?;
             let payload_sha256 = attestation::payload_sha256(
                 org_id,
@@ -386,12 +395,21 @@ impl IntegrationActionsClient {
                 );
             }
         }
-        let scope = if approval_ref.is_some() {
+        let scope = if approval.is_some() {
             "integration:write"
         } else {
             "integration:read"
         };
-        let token = self.mint_ingestion_token(org_id, scope).await?;
+        // Only the read branch is eligible for delegated, per-user credentials
+        // (design's Gap A scope) -- a write already carries real,
+        // cryptographically-bound authorization via the attestation signed
+        // above, so it keeps minting the plain org-scoped credential.
+        let token = if approval.is_some() {
+            self.mint_ingestion_token(org_id, scope).await?
+        } else {
+            self.resolve_ingestion_token(org_id, scope, session_bearer)
+                .await?
+        };
         let mut outbound = self
             .http
             .post(format!(
@@ -456,6 +474,7 @@ impl IntegrationActionsClient {
         connection_id: &str,
         operation: &str,
         params: Value,
+        session_bearer: Option<&str>,
     ) -> Result<Value, String> {
         if connection_id.trim().is_empty() {
             return Err("read_action_json requires connection_id".to_owned());
@@ -469,7 +488,7 @@ impl IntegrationActionsClient {
             "body": serde_json::json!({}),
         });
         let token = self
-            .mint_ingestion_token(org_id, "integration:read")
+            .resolve_ingestion_token(org_id, "integration:read", session_bearer)
             .await?;
         let resp = self
             .http
@@ -534,7 +553,118 @@ impl IntegrationActionsClient {
         }
         Ok(token)
     }
+
+    /// Delegated-identity design (Gap A, 03-design-2-token-exchange.md §1.2).
+    /// RFC 8693 token exchange: presents this run's own, already-verified
+    /// `aud=session-core` bearer (`session_bearer`) as proof of the acting
+    /// user, and receives back a strictly narrower `integration`-audience
+    /// token that additionally carries `acting_user_id`. Auth-core re-verifies
+    /// a signature it itself minted minutes earlier for this exact run — this
+    /// is never execution-core vouching for the user on its own say-so.
+    ///
+    /// `zdr` on the returned token is the SUBJECT bearer's own claim, never
+    /// this service's registry default — a ZDR-scoped user's run can never
+    /// mint a persistent-posture credential through this path (design §1.6).
+    async fn mint_delegated_ingestion_token(
+        &self,
+        org_id: &str,
+        scope: &str,
+        session_bearer: &str,
+    ) -> Result<String, String> {
+        let org_id = org_id.trim();
+        if org_id.is_empty() {
+            return Err("integration request blocked: run organization is required".to_owned());
+        }
+        if session_bearer.trim().is_empty() {
+            return Err(
+                "delegated ingestion credential unavailable: no session bearer for this run"
+                    .to_owned(),
+            );
+        }
+        let response = self
+            .http
+            .post(format!(
+                "{}/api/ingestion/token-exchange",
+                self.auth_core_url
+            ))
+            .header("x-service-id", &self.service_id)
+            .header("x-service-api-key", &self.service_credential)
+            .json(&serde_json::json!({
+                "orgId": org_id,
+                "scopes": [scope],
+                "reason": format!("execution-core {scope}"),
+                "subjectToken": session_bearer,
+                "subjectTokenType": "urn:ietf:params:oauth:token-type:jwt",
+            }))
+            .send()
+            .await
+            .map_err(|error| format!("Auth Core token-exchange request failed: {error}"))?;
+        let status = response.status();
+        if status == reqwest::StatusCode::FORBIDDEN {
+            // Distinguished from every other failure on purpose: 403 here
+            // means the `service:model-execution` principal's registry row
+            // has no `tokenExchange` entry for this audience yet (deploy
+            // step 4, not shipped with this code change) -- NOT that the
+            // subject bearer itself is invalid. The caller falls back to the
+            // org-only credential in exactly that one case, so shipping this
+            // client change is genuinely zero-behavior-change until the
+            // registry is updated (design §1.7), and never silently
+            // downgrades a real subject-token failure (401/400 below).
+            return Err(DELEGATION_NOT_CONFIGURED.to_owned());
+        }
+        if !status.is_success() {
+            return Err(format!(
+                "Auth Core refused the delegated integration credential ({status})"
+            ));
+        }
+        let token = response
+            .json::<PlaneTokenResponse>()
+            .await
+            .map_err(|error| format!("Auth Core token-exchange response was invalid: {error}"))?
+            .token;
+        if token.trim().is_empty() {
+            return Err("Auth Core returned an empty delegated integration credential".to_owned());
+        }
+        Ok(token)
+    }
+
+    /// Single choke point the four read call sites mint through
+    /// (`list_provider_actions`, `provider_key_for_connection`,
+    /// `read_action_json`, `execute_action`'s read branch). Prefers the
+    /// delegated, per-user credential whenever a `session_bearer` is
+    /// available for this run; falls back to the plain org-scoped credential
+    /// only when delegation is not yet configured for this deployment (see
+    /// `mint_delegated_ingestion_token`'s doc) or no bearer was forwarded at
+    /// all (a run that lost its delegated session credential — the same
+    /// condition that already produces "delegation memory skipped" elsewhere
+    /// in this codebase). A real subject-token failure is never swallowed
+    /// into this fallback.
+    async fn resolve_ingestion_token(
+        &self,
+        org_id: &str,
+        scope: &str,
+        session_bearer: Option<&str>,
+    ) -> Result<String, String> {
+        let Some(session_bearer) = session_bearer.map(str::trim).filter(|b| !b.is_empty()) else {
+            return self.mint_ingestion_token(org_id, scope).await;
+        };
+        match self
+            .mint_delegated_ingestion_token(org_id, scope, session_bearer)
+            .await
+        {
+            Ok(token) => Ok(token),
+            Err(message) if message == DELEGATION_NOT_CONFIGURED => {
+                self.mint_ingestion_token(org_id, scope).await
+            }
+            Err(message) => Err(message),
+        }
+    }
 }
+
+/// Sentinel returned internally by `mint_delegated_ingestion_token` for the
+/// one failure mode `resolve_ingestion_token` treats as "fall back," never
+/// surfaced to a tool caller directly.
+const DELEGATION_NOT_CONFIGURED: &str = "__delegation_not_configured__";
 
 fn parse_connections(value: &Value) -> Vec<ConnectionSummary> {
     // Envelope tolerance: {data:{connections:[…]}}, {connections:[…]}, or a
@@ -847,11 +977,466 @@ mod tests {
     }
 
     #[test]
+    fn mailread_operations_are_catalogued_as_reads_never_writes() {
+        // Outlook mail, Gmail, and OneDrive listing are pure reads in
+        // integration-corev2's executor (service.go executeMicrosoft /
+        // executeGoogle) — they must classify as reads here too, or the
+        // agent runtime would pause every mail-read call for human approval
+        // the same way it gates mail.send.
+        assert_eq!(operation_is_write("mail.messages"), Some(false));
+        assert_eq!(operation_is_write("microsoft.mail.messages"), Some(false));
+        assert_eq!(operation_is_write("gmail.messages"), Some(false));
+        assert_eq!(operation_is_write("google.gmail.messages"), Some(false));
+        assert_eq!(operation_is_write("drive.files"), Some(false));
+        assert_eq!(operation_is_write("microsoft.drive.files"), Some(false));
+        assert_eq!(operation_is_write("google.drive.files"), Some(false));
+        // The write siblings are unaffected.
+        assert_eq!(operation_is_write("mail.send"), Some(true));
+        assert_eq!(operation_is_write("gmail.send"), Some(true));
+    }
+
+    #[test]
+    fn renders_microsoft_and_google_read_ops_without_write_marker() {
+        let conns = vec![
+            ConnectionSummary {
+                id: "conn_ms_1".to_owned(),
+                provider_key: "microsoft".to_owned(),
+                display_name: "Contoso".to_owned(),
+                status: "active".to_owned(),
+            },
+            ConnectionSummary {
+                id: "conn_g_1".to_owned(),
+                provider_key: "google".to_owned(),
+                display_name: "Aquatiq Google".to_owned(),
+                status: "active".to_owned(),
+            },
+        ];
+        let s = render_provider_actions(&conns);
+        // New reads render without a [write] marker …
+        assert!(s.contains("mail.messages: Read-only"));
+        assert!(!s.contains("mail.messages [write]"));
+        assert!(s.contains("gmail.messages: Read-only"));
+        assert!(!s.contains("gmail.messages [write]"));
+        assert!(s.contains("drive.files: Read-only"));
+        assert!(!s.contains("drive.files [write]"));
+        // … while the existing write ops are still marked.
+        assert!(s.contains("mail.send [write]"));
+        assert!(s.contains("gmail.send [write]"));
+    }
+
+    #[test]
     fn operation_is_write_returns_none_for_unknown_and_empty() {
         // Unknown / uncatalogued operations are None — callers gate them as writes.
         assert_eq!(operation_is_write("okta.user.suspend"), None); // not catalogued here
         assert_eq!(operation_is_write("totally.made.up"), None);
         assert_eq!(operation_is_write(""), None);
         assert_eq!(operation_is_write("   "), None);
+    }
+
+    // -------------------------------------------------------------------
+    // Delegated-identity design, Gap A (03-design-2-token-exchange.md §1).
+    // -------------------------------------------------------------------
+
+    use wiremock::matchers::{body_json, header, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn test_client(auth_core_url: &str, integration_url: &str) -> IntegrationActionsClient {
+        IntegrationActionsClient {
+            base_url: integration_url.trim_end_matches('/').to_owned(),
+            auth_core_url: auth_core_url.trim_end_matches('/').to_owned(),
+            service_id: "model-execution".to_owned(),
+            service_credential: "test-only-execution-service-key".to_owned(),
+            http: reqwest::Client::builder()
+                .timeout(Duration::from_secs(5))
+                .build()
+                .expect("build test http client"),
+            write_attestor: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn mint_delegated_ingestion_token_requires_a_session_bearer() {
+        let client = test_client("http://unused.invalid", "http://unused.invalid");
+        let error = client
+            .mint_delegated_ingestion_token("org-1", "integration:read", "   ")
+            .await
+            .expect_err("an empty/whitespace-only session bearer must be refused");
+        assert!(error.contains("no session bearer"), "unexpected error: {error}");
+    }
+
+    #[tokio::test]
+    async fn mint_delegated_ingestion_token_sends_the_rfc8693_exchange_request_and_returns_the_token(
+    ) {
+        let auth_core = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/ingestion/token-exchange"))
+            .and(header("x-service-id", "model-execution"))
+            .and(header("x-service-api-key", "test-only-execution-service-key"))
+            .and(body_json(serde_json::json!({
+                "orgId": "org-1",
+                "scopes": ["integration:read"],
+                "reason": "execution-core integration:read",
+                "subjectToken": "run-owns-session-core-bearer",
+                "subjectTokenType": "urn:ietf:params:oauth:token-type:jwt",
+            })))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"token": "delegated-token-1"})),
+            )
+            .expect(1)
+            .mount(&auth_core)
+            .await;
+
+        let client = test_client(&auth_core.uri(), "http://unused.invalid");
+        let token = client
+            .mint_delegated_ingestion_token(
+                "org-1",
+                "integration:read",
+                "run-owns-session-core-bearer",
+            )
+            .await
+            .expect("exchange succeeds");
+        assert_eq!(token, "delegated-token-1");
+    }
+
+    #[tokio::test]
+    async fn resolve_ingestion_token_falls_back_to_the_org_scoped_credential_when_delegation_is_not_yet_configured(
+    ) {
+        // 403 from the exchange endpoint == "this deployment's registry has
+        // no tokenExchange entry yet" (T-4/§1.7) -- must fall back, not fail.
+        let auth_core = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/ingestion/token-exchange"))
+            .respond_with(ResponseTemplate::new(403))
+            .expect(1)
+            .mount(&auth_core)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/ingestion/internal-token"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"token": "org-scoped-fallback-token"})),
+            )
+            .expect(1)
+            .mount(&auth_core)
+            .await;
+
+        let client = test_client(&auth_core.uri(), "http://unused.invalid");
+        let token = client
+            .resolve_ingestion_token("org-1", "integration:read", Some("some-session-bearer"))
+            .await
+            .expect("falls back to the org-scoped credential");
+        assert_eq!(token, "org-scoped-fallback-token");
+    }
+
+    #[tokio::test]
+    async fn resolve_ingestion_token_never_falls_back_on_a_real_subject_token_failure() {
+        // 401 (an actually invalid/expired/wrong-org subject bearer) must
+        // NEVER be silently downgraded to the org-only credential (T-2/§1.5)
+        // -- unlike the 403 "not configured yet" case above.
+        let auth_core = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/ingestion/token-exchange"))
+            .respond_with(ResponseTemplate::new(401))
+            .expect(1)
+            .mount(&auth_core)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/ingestion/internal-token"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(0)
+            .mount(&auth_core)
+            .await;
+
+        let client = test_client(&auth_core.uri(), "http://unused.invalid");
+        let error = client
+            .resolve_ingestion_token("org-1", "integration:read", Some("expired-bearer"))
+            .await
+            .expect_err("a real subject-token failure must never fall back");
+        assert!(
+            error.contains("refused the delegated"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_ingestion_token_uses_the_org_scoped_credential_when_no_bearer_is_forwarded() {
+        // A run with no delegated session credential forwarded (or one that
+        // lost it) uses the plain org-scoped path directly -- the exchange
+        // endpoint is never even called.
+        let auth_core = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/ingestion/token-exchange"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(0)
+            .mount(&auth_core)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/ingestion/internal-token"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"token": "org-scoped-token"})),
+            )
+            .expect(1)
+            .mount(&auth_core)
+            .await;
+
+        let client = test_client(&auth_core.uri(), "http://unused.invalid");
+        let token = client
+            .resolve_ingestion_token("org-1", "integration:read", None)
+            .await
+            .expect("org-scoped path succeeds");
+        assert_eq!(token, "org-scoped-token");
+    }
+
+    fn connections_body(connection_id: &str, display_name: &str) -> serde_json::Value {
+        serde_json::json!({"data": {"connections": [
+            {"id": connection_id, "providerKey": "microsoft", "displayName": display_name, "status": "active"},
+        ]}})
+    }
+
+    /// list_provider_actions_and_read_action_json_succeed_for_the_runs_own_user_and_fail_for_a_different_users_personal_connection
+    /// (Gap A "Exact tests"). Two independent fake services: auth-core's
+    /// exchange mints a distinguishable token PER subject bearer (mirroring
+    /// its real `acting_user_id` binding), and integration-corev2 only
+    /// answers a personal connection's data to the caller whose token names
+    /// its owner -- exactly `assertPersonalConnectionOwner`'s real shape,
+    /// modeled at the HTTP boundary since this is execution-core's own test.
+    #[tokio::test]
+    async fn list_provider_actions_succeeds_for_the_runs_own_user_and_fails_for_a_different_users_personal_connection(
+    ) {
+        let auth_core = MockServer::start().await;
+        let integration = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/ingestion/token-exchange"))
+            .and(body_json(serde_json::json!({
+                "orgId": "org-1", "scopes": ["integration:read"],
+                "reason": "execution-core integration:read",
+                "subjectToken": "bearer-for-user-a",
+                "subjectTokenType": "urn:ietf:params:oauth:token-type:jwt",
+            })))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"token": "delegated-for-user-a"})),
+            )
+            .mount(&auth_core)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/connections"))
+            .and(header("authorization", "Bearer delegated-for-user-a"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(connections_body("conn_user_a", "User A's personal Outlook")),
+            )
+            .mount(&integration)
+            .await;
+        // Any OTHER (or missing) bearer is a different/no user -- the fake
+        // integration-corev2 refuses exactly like the real
+        // personal_connection_no_delegated_user fail-closed default.
+        Mock::given(method("GET"))
+            .and(path("/api/v1/connections"))
+            .respond_with(ResponseTemplate::new(403).set_body_json(serde_json::json!({
+                "error": {"code": "personal_connection_no_delegated_user"}
+            })))
+            .mount(&integration)
+            .await;
+        // A run with no delegated bearer at all falls back to the plain
+        // org-scoped credential (resolve_ingestion_token's None branch) --
+        // still a real token, but not user A's, so it hits the catch-all
+        // refusal above, never the personal connection.
+        Mock::given(method("POST"))
+            .and(path("/api/ingestion/internal-token"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"token": "org-scoped-token"})),
+            )
+            .mount(&auth_core)
+            .await;
+
+        let client = test_client(&auth_core.uri(), &integration.uri());
+
+        let own_user = client
+            .list_provider_actions("org-1", Some("bearer-for-user-a"))
+            .await
+            .expect("the run's own user reads their own personal connection");
+        assert!(own_user.contains("conn_user_a"));
+
+        // No delegated bearer at all -> resolve_ingestion_token's fallback
+        // mints the plain org credential, which the fake integration-corev2
+        // (correctly) does not recognize as any particular user either.
+        let no_bearer = client.list_provider_actions("org-1", None).await;
+        assert!(no_bearer.is_err(), "an unrecognized credential must be refused");
+    }
+
+    /// The other half of
+    /// list_provider_actions_and_read_action_json_succeed_for_the_runs_own_user_and_fail_for_a_different_users_personal_connection:
+    /// `read_action_json` goes through the exact same `resolve_ingestion_token`
+    /// choke point, proven here against a personal-connection-shaped POST
+    /// action endpoint the same way the GET /connections case above proves it.
+    #[tokio::test]
+    async fn read_action_json_succeeds_for_the_runs_own_user_and_fails_for_a_different_users_personal_connection(
+    ) {
+        let auth_core = MockServer::start().await;
+        let integration = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/ingestion/token-exchange"))
+            .and(body_json(serde_json::json!({
+                "orgId": "org-1", "scopes": ["integration:read"],
+                "reason": "execution-core integration:read",
+                "subjectToken": "bearer-for-user-a",
+                "subjectTokenType": "urn:ietf:params:oauth:token-type:jwt",
+            })))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"token": "delegated-for-user-a"})),
+            )
+            .mount(&auth_core)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/ingestion/token-exchange"))
+            .and(body_json(serde_json::json!({
+                "orgId": "org-1", "scopes": ["integration:read"],
+                "reason": "execution-core integration:read",
+                "subjectToken": "bearer-for-user-b",
+                "subjectTokenType": "urn:ietf:params:oauth:token-type:jwt",
+            })))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"token": "delegated-for-user-b"})),
+            )
+            .mount(&auth_core)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/connections/conn_user_a/actions"))
+            .and(header("authorization", "Bearer delegated-for-user-a"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": {"messages": [{"id": "msg_1"}]},
+            })))
+            .mount(&integration)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/connections/conn_user_a/actions"))
+            .respond_with(ResponseTemplate::new(403).set_body_json(serde_json::json!({
+                "error": {"code": "personal_connection_no_delegated_user"}
+            })))
+            .mount(&integration)
+            .await;
+
+        let client = test_client(&auth_core.uri(), &integration.uri());
+
+        let own_user = client
+            .read_action_json(
+                "org-1",
+                "conn_user_a",
+                "mail.messages",
+                serde_json::json!({}),
+                Some("bearer-for-user-a"),
+            )
+            .await
+            .expect("the run's own user reads their own personal connection");
+        assert_eq!(own_user["data"]["messages"][0]["id"], "msg_1");
+
+        let different_user = client
+            .read_action_json(
+                "org-1",
+                "conn_user_a",
+                "mail.messages",
+                serde_json::json!({}),
+                Some("bearer-for-user-b"),
+            )
+            .await;
+        assert!(
+            different_user.is_err(),
+            "a different user's delegated bearer must never read this personal connection"
+        );
+    }
+
+    /// two_concurrent_runs_for_two_different_users_never_cross_contaminate_the_delegated_read_credential
+    /// (Gap A "Exact tests", closes A-2 — the single concurrency test neither
+    /// original design's test list included). `IntegrationActionsClient` is
+    /// `Clone` and carries no shared mutable per-call state; every method
+    /// takes `org_id`/`session_bearer` as plain arguments. This spins up many
+    /// interleaved concurrent calls for TWO different users against fakes
+    /// that only answer the correct per-user token, and asserts every single
+    /// call — across the whole run — resolved its OWN user's connection,
+    /// never the other user's.
+    #[tokio::test]
+    async fn two_concurrent_runs_for_two_different_users_never_cross_contaminate_the_delegated_read_credential(
+    ) {
+        let auth_core = MockServer::start().await;
+        let integration = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/ingestion/token-exchange"))
+            .and(body_json(serde_json::json!({
+                "orgId": "org-1", "scopes": ["integration:read"],
+                "reason": "execution-core integration:read",
+                "subjectToken": "bearer-user-a",
+                "subjectTokenType": "urn:ietf:params:oauth:token-type:jwt",
+            })))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"token": "token-user-a"})),
+            )
+            .mount(&auth_core)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/ingestion/token-exchange"))
+            .and(body_json(serde_json::json!({
+                "orgId": "org-1", "scopes": ["integration:read"],
+                "reason": "execution-core integration:read",
+                "subjectToken": "bearer-user-b",
+                "subjectTokenType": "urn:ietf:params:oauth:token-type:jwt",
+            })))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"token": "token-user-b"})),
+            )
+            .mount(&auth_core)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/connections"))
+            .and(header("authorization", "Bearer token-user-a"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(connections_body("conn_user_a", "User A")),
+            )
+            .mount(&integration)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/connections"))
+            .and(header("authorization", "Bearer token-user-b"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(connections_body("conn_user_b", "User B")),
+            )
+            .mount(&integration)
+            .await;
+
+        let client = test_client(&auth_core.uri(), &integration.uri());
+        let mut handles = Vec::new();
+        for i in 0..40 {
+            let client = client.clone();
+            let (bearer, expected_connection) = if i % 2 == 0 {
+                ("bearer-user-a", "conn_user_a")
+            } else {
+                ("bearer-user-b", "conn_user_b")
+            };
+            handles.push(tokio::spawn(async move {
+                let result = client
+                    .list_provider_actions("org-1", Some(bearer))
+                    .await
+                    .expect("concurrent call succeeds");
+                (result, expected_connection)
+            }));
+        }
+        for handle in handles {
+            let (result, expected_connection) = handle.await.expect("task did not panic");
+            assert!(
+                result.contains(expected_connection),
+                "expected {expected_connection} in result, got: {result}"
+            );
+            // The single most important assertion: never the OTHER user's
+            // connection id, under any interleaving.
+            let other = if expected_connection == "conn_user_a" {
+                "conn_user_b"
+            } else {
+                "conn_user_a"
+            };
+            assert!(
+                !result.contains(other),
+                "cross-contamination: {other} leaked into a call scoped to {expected_connection}"
+            );
+        }
     }
 }

@@ -142,6 +142,13 @@ func serviceScopeForRequest(request *http.Request) string {
 		return "memberships:write"
 	case path == "/api/v1/internal/users/enrich-from-provider":
 		return "users:sync"
+	case path == "/api/v1/internal/mail-task/resolve":
+		// Deliberately its own least-privilege scope, not "users:read:any" --
+		// this endpoint is the alias-enumeration/anti-spoofing gate for the
+		// mail-task inbound pipeline (chat-wave2 mail-task spec §6). A
+		// credential scoped only for general user reads must not also be able
+		// to probe mail-task aliases, and vice versa.
+		return "mail-task:resolve"
 	case method == http.MethodGet || method == http.MethodHead:
 		if strings.TrimSpace(request.Header.Get("X-User-Id")) == "" {
 			return "users:read:any"

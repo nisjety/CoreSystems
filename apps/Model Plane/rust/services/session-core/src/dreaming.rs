@@ -24,7 +24,7 @@
 //! takes the exact code path it always has — [`persist_candidates`] and
 //! [`upsert_agent_memory`] are untouched by grounding's existence.
 
-use crate::dream_extractor::{DreamExtractor, WindowMessage, LLM_SOURCE_LINK};
+use crate::dream_extractor::{DreamExtractor, ExistingSlots, WindowMessage, LLM_SOURCE_LINK};
 use crate::letta_adapter::LettaMemoryAdapter;
 use crate::memory_grounding::{ExistingMatch, GroundingAction, GroundingClassifier};
 use chrono::{DateTime, Utc};
@@ -230,7 +230,12 @@ pub(crate) async fn dream_once(
         let extracted = match extractor {
             Some(extractor) => {
                 let window = extraction_window(pool, &thread_id, &group).await;
-                extractor.extract(&org_id, &thread_id, &window).await
+                let existing = if window.is_empty() {
+                    ExistingSlots::default()
+                } else {
+                    existing_slots(pool, &org_id, &last.user_id, &thread_id).await
+                };
+                extractor.extract(&org_id, &thread_id, &existing, &window).await
             }
             None => Vec::new(),
         };
@@ -251,6 +256,7 @@ pub(crate) async fn dream_once(
             // transaction below. With the flag off this whole branch does not
             // exist at runtime: the `else` arm is `persist_candidates`
             // unchanged, exactly as it was before grounding existed.
+            let mut retired_ids = Vec::new();
             let (_saved, persisted) = if let Some(classifier) = grounding {
                 let actions = ground_candidates(
                     pool,
@@ -271,6 +277,7 @@ pub(crate) async fn dream_once(
                     &message.message_id,
                     &candidates,
                     &actions,
+                    &mut retired_ids,
                 )
                 .await?;
                 record_dream_run(
@@ -320,6 +327,18 @@ pub(crate) async fn dream_once(
                     &persisted,
                 )
                 .await;
+                // After commit, never inside the transaction: this is a
+                // network call. Reads already hide these rows' mirrors
+                // (`memory_control::filter_forgotten`); this removes them.
+                if let Some(letta) = letta {
+                    crate::memory_control::erase_retired_mirrors(
+                        letta,
+                        &message.org_id,
+                        &message.user_id,
+                        &retired_ids,
+                    )
+                    .await;
+                }
             } else {
                 sync_persisted_candidates_to_letta(
                     pool,
@@ -384,6 +403,48 @@ async fn extraction_window(
         window.clear();
     }
     window
+}
+
+/// How many stored keys are read to find this user's existing slot names.
+/// [`ExistingSlots::from_keys`] keeps a smaller, fixed number of them.
+const EXISTING_SLOT_KEYS_READ: i64 = 200;
+
+/// The slot names this user (and this thread) already has current memories
+/// under, so the extractor can reuse one instead of minting a near-duplicate
+/// key. Keys only, never content, newest first before
+/// [`ExistingSlots::from_keys`] bounds and sorts them.
+///
+/// A read failure costs the extractor the hint, not the extraction.
+async fn existing_slots(
+    pool: &PgPool,
+    org_id: &str,
+    user_id: &str,
+    thread_id: &str,
+) -> ExistingSlots {
+    let keys = sqlx::query_scalar::<_, String>(
+        "SELECT key FROM agent_memory \
+         WHERE org_id = $1 \
+           AND review_state = 'accepted' \
+           AND is_latest = true \
+           AND (expires_at IS NULL OR expires_at > now()) \
+           AND ((session_id IS NULL AND scope = 'user' AND owner = $2 AND key LIKE 'user:llm:%') \
+                OR (session_id = $3 AND scope = 'thread' AND key LIKE 'thread:llm:%')) \
+         ORDER BY updated_at DESC \
+         LIMIT $4",
+    )
+    .bind(org_id)
+    .bind(user_id)
+    .bind(thread_id)
+    .bind(EXISTING_SLOT_KEYS_READ)
+    .fetch_all(pool)
+    .await;
+    match keys {
+        Ok(keys) => ExistingSlots::from_keys(&keys),
+        Err(error) => {
+            warn!(%error, %thread_id, "dreaming could not read existing memory slots");
+            ExistingSlots::default()
+        }
+    }
 }
 
 /// Fold extracted candidates into the deterministic ones.
@@ -729,6 +790,10 @@ pub(crate) async fn persist_candidates(
 /// -- this is a parallel path, not a modification of it, so the flag-off
 /// behaviour it backs stays byte-for-byte identical to before this module
 /// existed.
+///
+/// Every row an EXTEND/SUPERSEDE retires is pushed onto `retired_ids`, so the
+/// caller can remove its semantic mirror once this transaction commits.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn apply_grounded_candidates(
     tx: &mut Transaction<'_, Postgres>,
     org_id: &str,
@@ -737,6 +802,7 @@ pub(crate) async fn apply_grounded_candidates(
     message_id: &str,
     candidates: &[DreamMemoryCandidate],
     actions: &[GroundingAction],
+    retired_ids: &mut Vec<String>,
 ) -> Result<(i64, Vec<PersistedMemoryId>), sqlx::Error> {
     if candidates.is_empty() || !crate::memory_control::permits_extraction(tx, org_id, user_id, message_id).await? {
         return Ok((0, Vec::new()));
@@ -770,13 +836,19 @@ pub(crate) async fn apply_grounded_candidates(
             }
             GroundingAction::Extend { target_id, content } => {
                 source_links.push("lineage:extend".to_owned());
-                write_lineage_memory(tx, org_id, owner, candidate, &source_links, target_id, content)
-                    .await?
+                let (memory_id, retired) =
+                    write_lineage_memory(tx, org_id, owner, candidate, &source_links, target_id, content)
+                        .await?;
+                retired_ids.extend(retired);
+                memory_id
             }
             GroundingAction::Supersede { target_id, content } => {
                 source_links.push("lineage:supersede".to_owned());
-                write_lineage_memory(tx, org_id, owner, candidate, &source_links, target_id, content)
-                    .await?
+                let (memory_id, retired) =
+                    write_lineage_memory(tx, org_id, owner, candidate, &source_links, target_id, content)
+                        .await?;
+                retired_ids.extend(retired);
+                memory_id
             }
         };
         saved += i64::from(!memory_id.is_empty());
@@ -813,18 +885,22 @@ pub(crate) async fn apply_grounded_candidates(
 /// a hard constraint-violation error aborting the whole Dreaming cycle for
 /// this message.
 ///
-/// Known, narrow, and deliberately accepted limitation: if a key that was
-/// previously superseded (`is_latest` flipped to `false` by an earlier
-/// grounding decision) is later written again by the ordinary, ungrounded
-/// exact-key path (ADD's ordinary `upsert_agent_memory`, taken when tier 1
-/// above matches it), that row's content refreshes but `is_latest` is left as
-/// `upsert_agent_memory` already leaves any column it does not mention:
-/// unchanged, i.e. still `false`. The alternative -- having the ordinary
-/// upsert always force `is_latest = true` -- risks the opposite and larger
-/// failure this feature exists to prevent: a plain re-write reviving a
-/// deliberately retired row alongside whatever superseded it, producing two
-/// competing `is_latest = true` rows again. Retiring a key is treated as
-/// closer to permanent than reviving it is treated as safe.
+/// The key is resolved BEFORE `target_id` is flipped, because the upsert
+/// below would otherwise take over whatever row already holds
+/// `candidate.key`:
+///
+///   * a RETIRED row (`is_latest = false`): reviving it with
+///     `supersedes_id = target_id` resurrects a fact something already
+///     replaced, and when that row is `target_id`'s own ancestor it closes a
+///     `target -> retired -> target` cycle. The write goes through
+///     [`upsert_agent_memory`] instead, which redirects it to the retired
+///     row's lineage head, and `target_id` is left alone;
+///   * a current row that `target_id`'s chain already reaches (including
+///     `target_id` itself): pointing it at `target_id` would close a cycle,
+///     so the row's content is refreshed in place and nothing is flipped.
+///
+/// Returns the written row's id and, when `target_id` was actually retired,
+/// that id -- its semantic mirror is the caller's to remove after commit.
 async fn write_lineage_memory(
     tx: &mut Transaction<'_, Postgres>,
     org_id: &str,
@@ -833,7 +909,33 @@ async fn write_lineage_memory(
     source_links: &[String],
     target_id: &str,
     content: &str,
-) -> Result<String, sqlx::Error> {
+) -> Result<(String, Option<String>), sqlx::Error> {
+    let mut resolved = candidate.clone();
+    resolved.content = content.to_owned();
+
+    if let Some((occupant_id, occupant_is_latest)) =
+        key_occupant(tx, org_id, owner, candidate).await?
+    {
+        if !occupant_is_latest {
+            info!(
+                target_memory_id = %target_id,
+                retired_memory_id = %occupant_id,
+                "lineage write landed on a retired key; writing through the key's lineage instead"
+            );
+            let memory_id = upsert_agent_memory(tx, org_id, owner, &resolved, source_links).await?;
+            return Ok((memory_id, None));
+        }
+        if lineage_reaches(tx, org_id, target_id, &occupant_id).await? {
+            warn!(
+                target_memory_id = %target_id,
+                occupant_memory_id = %occupant_id,
+                "lineage write would close a supersedes cycle; refreshing the key's row instead"
+            );
+            let memory_id = upsert_agent_memory(tx, org_id, owner, &resolved, source_links).await?;
+            return Ok((memory_id, None));
+        }
+    }
+
     let flipped = sqlx::query(
         "UPDATE agent_memory SET is_latest = false, updated_at = now() \
          WHERE id = $1 AND org_id = $2 AND is_latest = true",
@@ -843,11 +945,9 @@ async fn write_lineage_memory(
     .execute(&mut **tx)
     .await?;
 
-    let mut resolved = candidate.clone();
-    resolved.content = content.to_owned();
-
     if flipped.rows_affected() == 0 {
-        return upsert_agent_memory(tx, org_id, owner, &resolved, source_links).await;
+        let memory_id = upsert_agent_memory(tx, org_id, owner, &resolved, source_links).await?;
+        return Ok((memory_id, None));
     }
 
     if resolved.session_id.is_some() {
@@ -881,7 +981,7 @@ async fn write_lineage_memory(
         .bind(target_id)
         .fetch_one(&mut **tx)
         .await?;
-        return Ok(row.0);
+        return Ok((row.0, Some(target_id.to_owned())));
     }
 
     let row: (String,) = sqlx::query_as(
@@ -913,7 +1013,187 @@ async fn write_lineage_memory(
     .bind(target_id)
     .fetch_one(&mut **tx)
     .await?;
-    Ok(row.0)
+    Ok((row.0, Some(target_id.to_owned())))
+}
+
+/// The row that currently holds `candidate.key` in its unique-index
+/// partition, locked for the rest of the transaction, with its `is_latest`.
+async fn key_occupant(
+    tx: &mut Transaction<'_, Postgres>,
+    org_id: &str,
+    owner: &str,
+    candidate: &DreamMemoryCandidate,
+) -> Result<Option<(String, bool)>, sqlx::Error> {
+    if let Some(session_id) = candidate.session_id.as_deref() {
+        return sqlx::query_as(
+            "SELECT id, is_latest FROM agent_memory \
+             WHERE org_id = $1 AND session_id = $2 AND scope = $3 AND key = $4 \
+             FOR UPDATE",
+        )
+        .bind(org_id)
+        .bind(session_id)
+        .bind(candidate.scope)
+        .bind(&candidate.key)
+        .fetch_optional(&mut **tx)
+        .await;
+    }
+    sqlx::query_as(
+        "SELECT id, is_latest FROM agent_memory \
+         WHERE org_id = $1 AND session_id IS NULL AND scope = $2 AND owner = $3 AND key = $4 \
+         FOR UPDATE",
+    )
+    .bind(org_id)
+    .bind(candidate.scope)
+    .bind(owner)
+    .bind(&candidate.key)
+    .fetch_optional(&mut **tx)
+    .await
+}
+
+/// Whether `needle` is `start` or one of its ancestors through
+/// `supersedes_id`. Pointing `needle` at `start` would then close a cycle.
+async fn lineage_reaches(
+    tx: &mut Transaction<'_, Postgres>,
+    org_id: &str,
+    start: &str,
+    needle: &str,
+) -> Result<bool, sqlx::Error> {
+    sqlx::query_scalar(
+        "WITH RECURSIVE chain(id, supersedes_id) AS ( \
+             SELECT id, supersedes_id FROM agent_memory WHERE id = $1 AND org_id = $2 \
+           UNION ALL \
+             SELECT m.id, m.supersedes_id FROM agent_memory m \
+             JOIN chain c ON m.id = c.supersedes_id \
+             WHERE m.org_id = $2 \
+         ) CYCLE id SET is_cycle USING path \
+         SELECT EXISTS (SELECT 1 FROM chain WHERE id = $3)",
+    )
+    .bind(start)
+    .bind(org_id)
+    .bind(needle)
+    .fetch_one(&mut **tx)
+    .await
+}
+
+/// The current head of the lineage `retired_id` belongs to: the newest
+/// `is_latest` row reachable by following `supersedes_id` forwards (rows that
+/// carry `retired_id` forward, then rows that carry those forward, ...),
+/// restricted to the same unique-index partition and cycle-guarded.
+async fn lineage_head(
+    tx: &mut Transaction<'_, Postgres>,
+    org_id: &str,
+    owner: &str,
+    candidate: &DreamMemoryCandidate,
+    retired_id: &str,
+) -> Result<Option<String>, sqlx::Error> {
+    sqlx::query_scalar(
+        "WITH RECURSIVE descendants(id, depth) AS ( \
+             SELECT id, 1 FROM agent_memory WHERE supersedes_id = $1 AND org_id = $2 \
+           UNION ALL \
+             SELECT m.id, d.depth + 1 FROM agent_memory m \
+             JOIN descendants d ON m.supersedes_id = d.id \
+             WHERE m.org_id = $2 \
+         ) CYCLE id SET is_cycle USING path \
+         SELECT m.id FROM descendants d JOIN agent_memory m ON m.id = d.id \
+         WHERE NOT d.is_cycle AND m.id <> $1 AND m.is_latest \
+           AND m.review_state = 'accepted' \
+           AND m.scope = $3 \
+           AND m.session_id IS NOT DISTINCT FROM $4 \
+           AND (m.session_id IS NOT NULL OR m.owner = $5) \
+         ORDER BY d.depth DESC, m.updated_at DESC, m.id DESC \
+         LIMIT 1",
+    )
+    .bind(retired_id)
+    .bind(org_id)
+    .bind(candidate.scope)
+    .bind(candidate.session_id.as_deref())
+    .bind(owner)
+    .fetch_optional(&mut **tx)
+    .await
+}
+
+/// [`upsert_agent_memory`]'s answer when `candidate.key` belongs to a retired
+/// row: refreshing that row in place would store the write where no reader
+/// looks, so a correction would silently vanish.
+///
+/// When the retired row's lineage has a current head, the write lands on the
+/// head instead -- the same content refresh an exact-key upsert performs,
+/// applied to the row that now represents this slot. Nothing is flipped and
+/// no `supersedes_id` changes, so this can never form a cycle or a second
+/// current row. When the lineage has no head any more (its current row was
+/// deleted, and the delete's `ON DELETE SET NULL` left this one orphaned)
+/// there is nothing to compete with, and the retired row itself is refreshed
+/// and made current again.
+async fn write_on_retired_key(
+    tx: &mut Transaction<'_, Postgres>,
+    org_id: &str,
+    owner: &str,
+    candidate: &DreamMemoryCandidate,
+    source_links: &[String],
+) -> Result<String, sqlx::Error> {
+    // The conflict arm locked this row, so it is still here and still
+    // retired; the re-check only keeps a surprise from being written blind.
+    let Some((retired_id, false)) = key_occupant(tx, org_id, owner, candidate).await? else {
+        return upsert_current_key(tx, org_id, owner, candidate, source_links)
+            .await?
+            .ok_or(sqlx::Error::RowNotFound);
+    };
+
+    if let Some(head_id) = lineage_head(tx, org_id, owner, candidate, &retired_id).await? {
+        let memory_id: String = sqlx::query_scalar(
+            "UPDATE agent_memory SET \
+               content = $2, \
+               kind = $3, \
+               confidence = GREATEST(confidence, $4), \
+               source_links = $5, \
+               review_state = 'accepted', \
+               updated_at = now() \
+             WHERE id = $1 \
+             RETURNING id",
+        )
+        .bind(&head_id)
+        .bind(&candidate.content)
+        .bind(candidate.kind)
+        .bind(candidate.confidence)
+        .bind(source_links)
+        .fetch_one(&mut **tx)
+        .await?;
+        counter!("mp_session_memory_retired_key_writes_total", "outcome" => "redirected").increment(1);
+        info!(
+            retired_memory_id = %retired_id,
+            head_memory_id = %memory_id,
+            "memory write on a retired key redirected to its lineage head"
+        );
+        return Ok(memory_id);
+    }
+
+    let memory_id: String = sqlx::query_scalar(
+        "UPDATE agent_memory SET \
+           content = $2, \
+           kind = $3, \
+           confidence = GREATEST(confidence, $4), \
+           owner = $5, \
+           source_links = $6, \
+           review_state = 'accepted', \
+           is_latest = true, \
+           updated_at = now() \
+         WHERE id = $1 \
+         RETURNING id",
+    )
+    .bind(&retired_id)
+    .bind(&candidate.content)
+    .bind(candidate.kind)
+    .bind(candidate.confidence)
+    .bind(owner)
+    .bind(source_links)
+    .fetch_one(&mut **tx)
+    .await?;
+    counter!("mp_session_memory_retired_key_writes_total", "outcome" => "revived").increment(1);
+    info!(
+        retired_memory_id = %memory_id,
+        "memory write on a retired key made it current again: its lineage has no current head"
+    );
+    Ok(memory_id)
 }
 
 pub(crate) async fn record_dream_run(
@@ -1289,6 +1569,12 @@ pub(crate) async fn index_agent_memory(
     Ok(memory_id)
 }
 
+/// Insert `candidate`, or refresh the row that already holds its key.
+///
+/// A key held by a retired row (`is_latest = false`) is not refreshed in
+/// place: see [`write_on_retired_key`]. Until a lineage write or the dedup
+/// backfill retires something, every key is current and this is the single
+/// upsert statement it has always been.
 async fn upsert_agent_memory(
     tx: &mut Transaction<'_, Postgres>,
     org_id: &str,
@@ -1296,8 +1582,24 @@ async fn upsert_agent_memory(
     candidate: &DreamMemoryCandidate,
     source_links: &[String],
 ) -> Result<String, sqlx::Error> {
+    if let Some(memory_id) = upsert_current_key(tx, org_id, owner, candidate, source_links).await? {
+        return Ok(memory_id);
+    }
+    write_on_retired_key(tx, org_id, owner, candidate, source_links).await
+}
+
+/// The upsert itself. The conflict arm only fires on a current row
+/// (`WHERE agent_memory.is_latest`); on a retired one Postgres still locks the
+/// row but updates nothing and returns no id, which is the caller's cue.
+async fn upsert_current_key(
+    tx: &mut Transaction<'_, Postgres>,
+    org_id: &str,
+    owner: &str,
+    candidate: &DreamMemoryCandidate,
+    source_links: &[String],
+) -> Result<Option<String>, sqlx::Error> {
     if candidate.session_id.is_some() {
-        let row: (String,) = sqlx::query_as(
+        return sqlx::query_scalar(
             "INSERT INTO agent_memory \
              (id, org_id, session_id, scope, key, content, kind, confidence, owner, source_links, review_state) \
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'accepted') \
@@ -1310,6 +1612,7 @@ async fn upsert_agent_memory(
                source_links = EXCLUDED.source_links, \
                review_state = 'accepted', \
                updated_at = now() \
+             WHERE agent_memory.is_latest \
              RETURNING id",
         )
         .bind(new_ulid())
@@ -1322,12 +1625,11 @@ async fn upsert_agent_memory(
         .bind(candidate.confidence)
         .bind(owner)
         .bind(source_links)
-        .fetch_one(&mut **tx)
-        .await?;
-        return Ok(row.0);
+        .fetch_optional(&mut **tx)
+        .await;
     }
 
-    let row: (String,) = sqlx::query_as(
+    sqlx::query_scalar(
         "INSERT INTO agent_memory \
          (id, org_id, session_id, scope, key, content, kind, confidence, owner, source_links, review_state) \
          VALUES ($1, $2, NULL, $3, $4, $5, $6, $7, $8, $9, 'accepted') \
@@ -1340,6 +1642,7 @@ async fn upsert_agent_memory(
            source_links = EXCLUDED.source_links, \
            review_state = 'accepted', \
            updated_at = now() \
+         WHERE agent_memory.is_latest \
          RETURNING id",
     )
     .bind(new_ulid())
@@ -1351,9 +1654,8 @@ async fn upsert_agent_memory(
     .bind(candidate.confidence)
     .bind(owner)
     .bind(source_links)
-    .fetch_one(&mut **tx)
-    .await?;
-    Ok(row.0)
+    .fetch_optional(&mut **tx)
+    .await
 }
 
 /// Lists durable `agent_memory` rows owned directly by a user
@@ -1405,30 +1707,108 @@ pub(crate) async fn list_user_memory(
         .collect())
 }
 
-/// Deletes a single `agent_memory` row owned directly by a user
-/// (`scope = 'user'`). Returns whether a row existed and was removed.
-/// `(org_id, owner)` is part of the `WHERE` clause itself, not just checked
-/// after the fact, so a caller can never delete another user's or another
-/// org's memory by guessing an id.
+/// What [`delete_user_memory`] found and did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum MemoryDeletion {
+    /// The row was deleted, together with every retired ancestor its
+    /// `supersedes_id` chain reached, and each was recorded as forgotten.
+    /// The requested id comes first.
+    Deleted { ids: Vec<String> },
+    /// No row with this id exists in the org. The id is still recorded as
+    /// forgotten: the semantic tier can hold memories the durable index never
+    /// had, and a late mirror of one must not come back.
+    Absent,
+    /// A row with this id exists in the org but is not the caller's -- another
+    /// user's, or an org-wide memory. Nothing was changed or recorded.
+    NotOwned,
+}
+
+impl MemoryDeletion {
+    pub(crate) fn deleted(&self) -> bool {
+        matches!(self, Self::Deleted { .. })
+    }
+}
+
+/// Deletes one `agent_memory` row the caller owns, in either scope a user
+/// can own a memory in:
+///
+///   * `scope = 'user'` rows (no session), owned when `owner` is the caller;
+///   * thread-bound rows (`session_id` set). These are written with
+///     `owner = ''`, so ownership is the thread's: the row belongs to the
+///     caller when `threads.user_id` of its `session_id` is the caller, in the
+///     same org -- the same boundary `SearchMemory` recalls them under.
+///
+/// This used to match `scope = 'user'` only, so a thread memory the user
+/// deleted survived here and kept being injected into that thread.
+///
+/// The row's retired ancestors (reachable through `supersedes_id`,
+/// `is_latest = false`, owned by the same caller) go with it: forgetting the
+/// one visible version of a fact must not leave hidden copies behind that a
+/// later write or a rollback could bring back. The walk is cycle-guarded.
+///
+/// Ownership is part of the `WHERE` clause itself, not checked after the
+/// fact, so a caller can never delete another user's or another org's memory
+/// by guessing an id.
 pub(crate) async fn delete_user_memory(
     pool: &PgPool,
     org_id: &str,
     owner_user_id: &str,
     memory_id: &str,
-) -> Result<bool, sqlx::Error> {
+) -> Result<MemoryDeletion, sqlx::Error> {
     let mut tx = pool.begin().await?;
     crate::memory_control::record_forgetting(&mut tx, org_id, owner_user_id, memory_id).await?;
-    let result = sqlx::query(
-        "DELETE FROM agent_memory \
-         WHERE id = $1 AND org_id = $2 AND owner = $3 AND scope = 'user'",
+    let deleted: Vec<String> = sqlx::query_scalar(
+        "WITH RECURSIVE lineage(id, supersedes_id) AS ( \
+             SELECT m.id, m.supersedes_id FROM agent_memory m \
+             WHERE m.id = $1 AND m.org_id = $2 \
+               AND ((m.session_id IS NULL AND m.scope = 'user' AND m.owner = $3) \
+                    OR (m.session_id IS NOT NULL AND EXISTS ( \
+                          SELECT 1 FROM threads t \
+                          WHERE t.id = m.session_id AND t.org_id = m.org_id AND t.user_id = $3))) \
+           UNION ALL \
+             SELECT a.id, a.supersedes_id FROM agent_memory a \
+             JOIN lineage l ON a.id = l.supersedes_id \
+             WHERE a.org_id = $2 AND a.is_latest = false \
+               AND ((a.session_id IS NULL AND a.scope = 'user' AND a.owner = $3) \
+                    OR (a.session_id IS NOT NULL AND EXISTS ( \
+                          SELECT 1 FROM threads t \
+                          WHERE t.id = a.session_id AND t.org_id = a.org_id AND t.user_id = $3))) \
+         ) CYCLE id SET is_cycle USING path \
+         DELETE FROM agent_memory \
+         WHERE id IN (SELECT id FROM lineage WHERE NOT is_cycle) \
+         RETURNING id",
     )
     .bind(memory_id)
     .bind(org_id)
     .bind(owner_user_id)
-    .execute(&mut *tx)
+    .fetch_all(&mut *tx)
     .await?;
+
+    if deleted.iter().any(|id| id == memory_id) {
+        let mut ids = vec![memory_id.to_owned()];
+        let mut ancestors: Vec<String> = deleted.into_iter().filter(|id| id != memory_id).collect();
+        ancestors.sort();
+        for ancestor in &ancestors {
+            crate::memory_control::record_forgetting(&mut tx, org_id, owner_user_id, ancestor).await?;
+        }
+        tx.commit().await?;
+        ids.extend(ancestors);
+        return Ok(MemoryDeletion::Deleted { ids });
+    }
+
+    let exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM agent_memory WHERE id = $1 AND org_id = $2)",
+    )
+    .bind(memory_id)
+    .bind(org_id)
+    .fetch_one(&mut *tx)
+    .await?;
+    if exists {
+        tx.rollback().await?;
+        return Ok(MemoryDeletion::NotOwned);
+    }
     tx.commit().await?;
-    Ok(result.rows_affected() > 0)
+    Ok(MemoryDeletion::Absent)
 }
 
 fn extract_user_candidates(content: &str) -> Vec<DreamMemoryCandidate> {
@@ -1961,7 +2341,7 @@ mod tests {
             ),
             (
                 "pub(crate) async fn list_user_memory(",
-                "/// Deletes a single `agent_memory` row",
+                "/// What [`delete_user_memory`] found and did.",
             ),
         ] {
             let start = source
@@ -2009,5 +2389,348 @@ mod tests {
         let body = &source[start..end];
         assert!(body.contains("if pool_rows.iter().any(|row| row.key == candidate.key) {"));
         assert!(body.contains("return GroundingAction::Add;"));
+    }
+
+    // ---- lineage and deletion, against a disposable database ----
+
+    async fn disposable_pool() -> PgPool {
+        let pool = PgPool::connect(&std::env::var("DATABASE_URL").expect("disposable database required"))
+            .await
+            .unwrap();
+        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+        pool
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn seed_memory(
+        pool: &PgPool,
+        org: &str,
+        session: Option<&str>,
+        scope: &str,
+        owner: &str,
+        key: &str,
+        is_latest: bool,
+        supersedes: Option<&str>,
+    ) -> String {
+        let id = new_ulid();
+        sqlx::query(
+            "INSERT INTO agent_memory (id, org_id, session_id, scope, key, content, owner, is_latest, supersedes_id) \
+             VALUES ($1, $2, $3, $4, $5, 'seeded', $6, $7, $8)",
+        )
+        .bind(&id)
+        .bind(org)
+        .bind(session)
+        .bind(scope)
+        .bind(key)
+        .bind(owner)
+        .bind(is_latest)
+        .bind(supersedes)
+        .execute(pool)
+        .await
+        .unwrap();
+        id
+    }
+
+    async fn seed_user_memory(pool: &PgPool, org: &str, key: &str, is_latest: bool, supersedes: Option<&str>) -> String {
+        seed_memory(pool, org, None, "user", "user-a", key, is_latest, supersedes).await
+    }
+
+    async fn seed_thread(pool: &PgPool, org: &str, user: &str) -> String {
+        let thread = new_ulid();
+        sqlx::query("INSERT INTO threads (id, session_key, org_id, user_id) VALUES ($1, $1, $2, $3)")
+            .bind(&thread)
+            .bind(org)
+            .bind(user)
+            .execute(pool)
+            .await
+            .unwrap();
+        thread
+    }
+
+    /// `(content, is_latest, supersedes_id)`, or `None` once deleted.
+    async fn memory_state(pool: &PgPool, id: &str) -> Option<(String, bool, Option<String>)> {
+        sqlx::query_as("SELECT content, is_latest, supersedes_id FROM agent_memory WHERE id = $1")
+            .bind(id)
+            .fetch_optional(pool)
+            .await
+            .unwrap()
+    }
+
+    fn user_candidate(key: &str, content: &str) -> DreamMemoryCandidate {
+        DreamMemoryCandidate {
+            scope: "user",
+            session_id: None,
+            key: key.to_owned(),
+            content: content.to_owned(),
+            kind: "fact",
+            confidence: 0.85,
+            inferred: true,
+        }
+    }
+
+    fn links() -> Vec<String> {
+        vec!["thread:t".to_owned(), LLM_SOURCE_LINK.to_owned()]
+    }
+
+    /// The extractor re-using a slot the dedup backfill retired used to
+    /// refresh the hidden row, so a real correction became invisible. It now
+    /// lands on the row that represents the slot today.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres"]
+    async fn a_write_on_a_retired_key_lands_on_its_lineage_head() {
+        let pool = disposable_pool().await;
+        let org = format!("retired-key-{}", new_ulid());
+        let retired = seed_user_memory(&pool, &org, "user:llm:tools", false, None).await;
+        let middle = seed_user_memory(&pool, &org, "user:llm:recurring_tool", false, Some(&retired)).await;
+        let head = seed_user_memory(&pool, &org, "user:llm:tool_use", true, Some(&middle)).await;
+
+        let mut tx = pool.begin().await.unwrap();
+        let written = upsert_agent_memory(
+            &mut tx,
+            &org,
+            "user-a",
+            &user_candidate("user:llm:tools", "User now uses Tripletex."),
+            &links(),
+        )
+        .await
+        .unwrap();
+        tx.commit().await.unwrap();
+
+        assert_eq!(written, head);
+        assert_eq!(
+            memory_state(&pool, &head).await,
+            Some(("User now uses Tripletex.".to_owned(), true, Some(middle.clone())))
+        );
+        assert_eq!(
+            memory_state(&pool, &retired).await,
+            Some(("seeded".to_owned(), false, None)),
+            "the retired row is neither refreshed nor revived"
+        );
+    }
+
+    /// With no current head left (it was deleted and `ON DELETE SET NULL`
+    /// orphaned the row), nothing competes with the retired row, and the new
+    /// write must not vanish into it.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres"]
+    async fn a_write_on_an_orphaned_retired_key_makes_it_current_again() {
+        let pool = disposable_pool().await;
+        let org = format!("orphan-key-{}", new_ulid());
+        let orphan = seed_user_memory(&pool, &org, "user:llm:tone", false, None).await;
+
+        let mut tx = pool.begin().await.unwrap();
+        let written = upsert_agent_memory(
+            &mut tx,
+            &org,
+            "user-a",
+            &user_candidate("user:llm:tone", "User prefers a warmer tone."),
+            &links(),
+        )
+        .await
+        .unwrap();
+        tx.commit().await.unwrap();
+
+        assert_eq!(written, orphan);
+        assert_eq!(
+            memory_state(&pool, &orphan).await,
+            Some(("User prefers a warmer tone.".to_owned(), true, None))
+        );
+    }
+
+    async fn has_cycle(pool: &PgPool, ids: &[&str]) -> bool {
+        sqlx::query_scalar(
+            "WITH RECURSIVE chain(id, supersedes_id) AS ( \
+                 SELECT id, supersedes_id FROM agent_memory WHERE id = ANY($1) \
+               UNION ALL \
+                 SELECT m.id, m.supersedes_id FROM agent_memory m JOIN chain c ON m.id = c.supersedes_id \
+             ) CYCLE id SET is_cycle USING path \
+             SELECT EXISTS (SELECT 1 FROM chain WHERE is_cycle)",
+        )
+        .bind(ids)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+    }
+
+    /// A SUPERSEDE whose candidate key is the target's own retired
+    /// ancestor used to revive that ancestor with `supersedes_id = target`
+    /// while retiring the target: `target -> ancestor -> target`. A target
+    /// whose own key the candidate carries used to point at itself.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres"]
+    async fn a_lineage_write_never_closes_a_supersedes_cycle() {
+        let pool = disposable_pool().await;
+        let org = format!("lineage-cycle-{}", new_ulid());
+        let ancestor = seed_user_memory(&pool, &org, "user:llm:tools", false, None).await;
+        let target = seed_user_memory(&pool, &org, "user:llm:tool_use", true, Some(&ancestor)).await;
+
+        for key in ["user:llm:tools", "user:llm:tool_use"] {
+            let mut tx = pool.begin().await.unwrap();
+            let (written, retired) = write_lineage_memory(
+                &mut tx,
+                &org,
+                "user-a",
+                &user_candidate(key, "unused candidate text"),
+                &links(),
+                &target,
+                "User uses Visma.net daily.",
+            )
+            .await
+            .unwrap();
+            tx.commit().await.unwrap();
+
+            assert_eq!(written, target, "{key}: the write lands on the current head");
+            assert_eq!(retired, None, "{key}: nothing was retired");
+            assert!(!has_cycle(&pool, &[&ancestor, &target]).await, "{key}");
+            assert_eq!(
+                memory_state(&pool, &target).await,
+                Some(("User uses Visma.net daily.".to_owned(), true, Some(ancestor.clone())))
+            );
+            assert_eq!(memory_state(&pool, &ancestor).await, Some(("seeded".to_owned(), false, None)));
+        }
+    }
+
+    /// The id a lineage write retires is handed back, so its semantic mirror
+    /// can be removed after commit.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres"]
+    async fn a_lineage_write_reports_the_row_it_retired() {
+        let pool = disposable_pool().await;
+        let org = format!("lineage-retire-{}", new_ulid());
+        let target = seed_user_memory(&pool, &org, "user:llm:employer", true, None).await;
+
+        let mut tx = pool.begin().await.unwrap();
+        let (written, retired) = write_lineage_memory(
+            &mut tx,
+            &org,
+            "user-a",
+            &user_candidate("user:llm:employer_name", "User works at Nordvik."),
+            &links(),
+            &target,
+            "User works at Nordvik.",
+        )
+        .await
+        .unwrap();
+        tx.commit().await.unwrap();
+
+        assert_ne!(written, target);
+        assert_eq!(retired.as_deref(), Some(target.as_str()));
+        assert_eq!(memory_state(&pool, &target).await, Some(("seeded".to_owned(), false, None)));
+        assert_eq!(
+            memory_state(&pool, &written).await,
+            Some(("User works at Nordvik.".to_owned(), true, Some(target.clone())))
+        );
+    }
+
+    async fn is_forgotten(pool: &PgPool, org: &str, user: &str, id: &str) -> bool {
+        sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM forgotten_memory_ids WHERE org_id = $1 AND user_id = $2 AND memory_id = $3)",
+        )
+        .bind(org)
+        .bind(user)
+        .bind(id)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres"]
+    async fn deleting_a_memory_takes_its_retired_ancestors_and_nothing_else() {
+        let pool = disposable_pool().await;
+        let org = format!("delete-lineage-{}", new_ulid());
+        let oldest = seed_user_memory(&pool, &org, "user:llm:tools", false, None).await;
+        let older = seed_user_memory(&pool, &org, "user:llm:recurring_tool", false, Some(&oldest)).await;
+        let head = seed_user_memory(&pool, &org, "user:llm:tool_use", true, Some(&older)).await;
+        let unrelated = seed_user_memory(&pool, &org, "user:llm:employer", true, None).await;
+
+        let outcome = delete_user_memory(&pool, &org, "user-a", &head).await.unwrap();
+        let mut expected = vec![head.clone()];
+        let mut ancestors = vec![older.clone(), oldest.clone()];
+        ancestors.sort();
+        expected.extend(ancestors);
+        assert_eq!(outcome, MemoryDeletion::Deleted { ids: expected });
+        for id in [&head, &older, &oldest] {
+            assert_eq!(memory_state(&pool, id).await, None);
+            assert!(is_forgotten(&pool, &org, "user-a", id).await);
+        }
+        assert!(memory_state(&pool, &unrelated).await.is_some());
+
+        // A cycle through retired rows cannot make the walk run forever (the
+        // requested row is always included, current or not: a stale mirror
+        // id can name a retired row).
+        let loop_a = seed_user_memory(&pool, &org, "user:llm:loop_a", false, None).await;
+        let loop_b = seed_user_memory(&pool, &org, "user:llm:loop_b", false, Some(&loop_a)).await;
+        sqlx::query("UPDATE agent_memory SET supersedes_id = $2 WHERE id = $1")
+            .bind(&loop_a)
+            .bind(&loop_b)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let outcome = delete_user_memory(&pool, &org, "user-a", &loop_a).await.unwrap();
+        assert_eq!(outcome, MemoryDeletion::Deleted { ids: vec![loop_a.clone(), loop_b.clone()] });
+
+        // An ancestor that is not the caller's is never deleted with theirs.
+        let foreign = seed_memory(&pool, &org, None, "user", "user-b", "user:llm:foreign", false, None).await;
+        let own = seed_user_memory(&pool, &org, "user:llm:own", true, Some(&foreign)).await;
+        let outcome = delete_user_memory(&pool, &org, "user-a", &own).await.unwrap();
+        assert_eq!(outcome, MemoryDeletion::Deleted { ids: vec![own] });
+        assert!(memory_state(&pool, &foreign).await.is_some());
+    }
+
+    /// A thread memory is owned through its thread. It used to be skipped by
+    /// the `scope = 'user'` delete and survive.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres"]
+    async fn a_thread_memory_is_deleted_by_the_threads_user_and_nobody_else() {
+        let pool = disposable_pool().await;
+        let org = format!("delete-thread-{}", new_ulid());
+        let thread = seed_thread(&pool, &org, "user-a").await;
+        let memory = seed_memory(&pool, &org, Some(&thread), "thread", "", "thread:llm:project", true, None).await;
+
+        assert_eq!(
+            delete_user_memory(&pool, &org, "user-b", &memory).await.unwrap(),
+            MemoryDeletion::NotOwned
+        );
+        assert!(memory_state(&pool, &memory).await.is_some());
+        assert!(!is_forgotten(&pool, &org, "user-b", &memory).await, "a refused delete records nothing");
+        assert_eq!(
+            delete_user_memory(&pool, "another-org", "user-a", &memory).await.unwrap(),
+            MemoryDeletion::Absent,
+            "another org cannot see the row at all"
+        );
+
+        assert!(delete_user_memory(&pool, &org, "user-a", &memory).await.unwrap().deleted());
+        assert_eq!(memory_state(&pool, &memory).await, None);
+        assert!(is_forgotten(&pool, &org, "user-a", &memory).await);
+
+        let semantic_only = new_ulid();
+        assert_eq!(
+            delete_user_memory(&pool, &org, "user-a", &semantic_only).await.unwrap(),
+            MemoryDeletion::Absent
+        );
+        assert!(
+            is_forgotten(&pool, &org, "user-a", &semantic_only).await,
+            "a semantic-only memory is still recorded as forgotten"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres"]
+    async fn the_extractor_sees_only_this_users_current_slot_names() {
+        let pool = disposable_pool().await;
+        let org = format!("slots-{}", new_ulid());
+        let thread = seed_thread(&pool, &org, "user-a").await;
+        let other_thread = seed_thread(&pool, &org, "user-a").await;
+        seed_user_memory(&pool, &org, "user:llm:tool_use", true, None).await;
+        seed_user_memory(&pool, &org, "user:llm:tools", false, None).await;
+        seed_user_memory(&pool, &org, "user:name", true, None).await;
+        seed_memory(&pool, &org, None, "user", "user-b", "user:llm:someone_else", true, None).await;
+        seed_memory(&pool, &org, Some(&thread), "thread", "", "thread:llm:project_context", true, None).await;
+        seed_memory(&pool, &org, Some(&other_thread), "thread", "", "thread:llm:other_thread", true, None).await;
+
+        let slots = existing_slots(&pool, &org, "user-a", &thread).await;
+        assert_eq!(slots.user, ["tool_use"]);
+        assert_eq!(slots.thread, ["project_context"]);
     }
 }

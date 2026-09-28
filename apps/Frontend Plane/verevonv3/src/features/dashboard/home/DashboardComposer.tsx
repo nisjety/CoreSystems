@@ -1,3 +1,4 @@
+import { chatAppearanceActive } from "@/features/chat/lib/chat-appearance-preview";
 import { useNavigate } from "@solidjs/router";
 import {
 	AlignCenter,
@@ -11,6 +12,7 @@ import {
 	BookOpen,
 	Camera,
 	Calendar,
+	CalendarClock,
 	Check,
 	ChevronDown,
 	ChevronRight,
@@ -23,6 +25,7 @@ import {
 	Lightbulb,
 	LayoutGrid,
 	Loader2,
+	Mail,
 	Maximize2,
 	MessageSquare,
 	Minimize2,
@@ -35,6 +38,7 @@ import {
 	Square,
 	Telescope,
 	Upload,
+	UploadCloud,
 	WandSparkles,
 	X,
 	Zap,
@@ -44,6 +48,7 @@ import {
 	createEffect,
 	createMemo,
 	createSignal,
+	createUniqueId,
 	flush,
 	For,
 	Match,
@@ -68,9 +73,30 @@ import {
 	type ComposerSettingsItem,
 } from "@/shared/api/composer-settings-client";
 import { selectChatThread } from "@/features/chat/lib/chat-thread-history";
+import {
+	VoiceModeDialog,
+	type VoiceReply,
+	type VoiceSendResult,
+} from "@/features/voice/VoiceModeDialog";
+import {
+	classifyDictateError,
+	voiceErrorFromMic,
+	voiceErrorMessage,
+	voiceInputBlockedMessage,
+	voiceModeBlockedMessage,
+} from "@/features/voice/voice-mode-state";
+import {
+	classifyMicError,
+	createVoiceRecorder,
+	type VoiceRecorder,
+	type VoiceRecording,
+} from "@/features/voice/voice-recorder";
+import { speechPlayer } from "@/features/voice/speech-playback";
 import { PendingChatLaunchError, writePendingChatLaunch } from "@/features/chat/lib/pending-chat-launch";
+import { ScheduleDialog } from "@/features/chat/components/ScheduleDialog";
 import { prepareChatAttachments } from "@/features/chat/lib/prepare-chat-attachments";
 import {
+	extractChatDocument,
 	groupChatModels,
 	hasZeroRetentionModel,
 	isExpensiveModel,
@@ -85,6 +111,14 @@ import {
 	type ModelInfo,
 } from "@/shared/api/chat-client";
 import {
+	browseConnection,
+	fetchConnectionContent,
+	listConnectorPickerTabs,
+	type ConnectorBrowseOperation,
+	type ConnectorContentOperation,
+	type ConnectorPickerTab,
+} from "@/shared/api/integrations-client";
+import {
 	listChatGptSubscriptions,
 	OPENAI_CODEX_SUBSCRIPTION_PROVIDER,
 } from "@/shared/api/chatgpt-subscription-client";
@@ -96,13 +130,23 @@ import {
 	sovereignCatalogNotice,
 	type PrivacyTier,
 } from "@/shared/api/privacy-tier";
-import { useI18n } from "@/shared/i18n";
+import { translateApiError, useI18n } from "@/shared/i18n";
+import { ApiError } from "@/shared/api/http";
 import { cn } from "@/shared/lib/cn";
 import { getSession } from "@/shared/session/session-store";
 import {
+	lastKnownAiModelPrivacyTier,
 	readAiModelSelection,
+	rememberAiModelPrivacyTier,
 	rememberAiModelSelection,
 } from "@/shared/ai/model-selection";
+import {
+	CATALOGUE_TIER_WAIT_MS,
+	isIntentModeSelection,
+	rememberedPrivacyTier,
+	resolveSubmitPrivacyTier,
+	waitForCatalogue,
+} from "./submit-privacy-tier";
 
 type ResponseMode = "auto" | "quick" | "deep";
 
@@ -121,12 +165,39 @@ type ResponseModeOption = {
 
 type ComposerTone = "concise" | "balanced" | "detailed";
 
+/**
+ * Where a connector-attach picker result came from. Undefined for an
+ * ordinary local upload/paste/screenshot — only a picked item carries one.
+ */
+export type ComposerAttachmentSource =
+	| "onedrive"
+	| "gmail"
+	| "outlook"
+	| "gdrive"
+	| "gcal"
+	| "outlook-cal";
+
 type ComposerFile = {
 	id: string;
 	name: string;
 	size: number;
 	type: string;
 	url: string;
+	/**
+	 * Set at pick time for a connector-sourced binary document (the network
+	 * fetch already happened in the picker, so extracting immediately is
+	 * free — see connector-picker spec §2.4). Undefined for a local upload,
+	 * which is still extracted lazily at submit time.
+	 */
+	extractedText?: string;
+	/** Provenance for a connector-attach picker result; see ComposerAttachmentSource. */
+	source?: ComposerAttachmentSource;
+	/** Opaque id of the picked item at its provider (Graph item id, Drive file id, message id, event id). */
+	sourceItemId?: string;
+	/** Integration Core connection id the item was fetched through. */
+	connectionId?: string;
+	/** ISO timestamp of when the content/browse call actually ran. */
+	fetchedAt?: string;
 };
 
 type ComposerTurn = {
@@ -137,6 +208,10 @@ type ComposerTurn = {
 	createdAtIso: string;
 	deepSearch: boolean;
 	files: string[];
+	/** Parallel to `files` (same index) — a connector-attach picker source
+	 * when that attachment was picked, undefined for a local upload. Used
+	 * only for the receipt's per-source breakdown line. */
+	fileSources: Array<ComposerAttachmentSource | undefined>;
 	model: string;
 	responseMode: ResponseMode;
 };
@@ -159,7 +234,7 @@ type ComposerSettings = {
 	voiceLang: string;
 };
 
-type SettingsView = "main" | "skills" | "connectors";
+type SettingsView = "main" | "skills" | "connectors" | "attach-source";
 type EntityKind = "date" | "file";
 
 type EntityToken = {
@@ -182,7 +257,7 @@ export type ComposerCommand = {
 	aliases: string[];
 	argument?: ComposerCommandArgument;
 	/** Local composer behaviour; absent for a backend skill/capability/connector. */
-	builtin?: "deep_research" | "file" | "image" | "web_search";
+	builtin?: "deep_research" | "file" | "image" | "schedule" | "web_search";
 	description: { en: string; no: string };
 	icon: Component<LucideProps>;
 	id: string;
@@ -221,6 +296,14 @@ export type DashboardComposerAttachment = {
 	size: number;
 	type: string;
 	url: string;
+	/** Provenance for a connector-attach picker result; see ComposerAttachmentSource. */
+	source?: ComposerAttachmentSource;
+	/** Opaque id of the picked item at its provider (Graph item id, Drive file id, message id, event id). */
+	sourceItemId?: string;
+	/** Integration Core connection id the item was fetched through. */
+	connectionId?: string;
+	/** ISO timestamp of when the content/browse call actually ran. */
+	fetchedAt?: string;
 };
 
 /** A skill/capability/connector activated via the `/` menu. */
@@ -232,6 +315,13 @@ export type ComposerActiveAction = {
 
 export type DashboardComposerSubmitPayload = {
     sourceScope?: import('@/shared/actions/chat-source-scope').ChatSourceScope;
+    /**
+     * Per-turn retrieval-source filter (chat-wave2 scope spec), orthogonal to
+     * `sourceScope`: never locked, changeable every send. Omitted (or
+     * `'auto'`) when the conversation-only toggle is on, or the picker never
+     * left its default.
+     */
+    retrievalScope?: import('@/shared/actions/chat-source-scope').RetrievalScope;
 	actions: ComposerActiveAction[];
 	attachments: DashboardComposerAttachment[];
 	model?: string;
@@ -253,7 +343,10 @@ export type DashboardComposerSubmitPayload = {
 	 * Privacy tier of the SELECTED CATALOG MODEL, carried only when the user
 	 * picked one (intent modes carry none — the backend resolves them
 	 * server-side). Omitted from the wire unless set: unspecified means no
-	 * constraint, byte-identical to today's behavior.
+	 * constraint, byte-identical to today's behavior. A catalogue model whose
+	 * tier the composer cannot find out (catalogue slow or down, no tier
+	 * stored for it) carries the strictest tier, never none — see
+	 * `submit-privacy-tier.ts`.
 	 */
 	minPrivacyTier?: PrivacyTier;
 	/**
@@ -416,6 +509,25 @@ const BUILTIN_COMMANDS: ComposerCommand[] = [
 		label: "Deep research",
 		name: "research",
 	},
+	{
+		aliases: ["planlegg", "gjenta", "recurring"],
+		argument: {
+			hint: {
+				no: "hva som skal gjentas (valgfritt — bruker utkastet)",
+				en: "what to repeat (optional — uses the draft)",
+			},
+			required: false,
+		},
+		builtin: "schedule",
+		description: {
+			no: "Gjør denne forespørselen om til en planlagt kjøring.",
+			en: "Turn this request into a recurring job.",
+		},
+		icon: CalendarClock,
+		id: "builtin:schedule",
+		label: "Schedule",
+		name: "schedule",
+	},
 ];
 
 // The `/` menu opens only when the slash starts the draft. A slash typed inside
@@ -543,6 +655,12 @@ type ComposerSubmitState = {
 	voiceRecording: boolean;
 };
 
+/**
+ * What a submit attempt came to. Voice mode shows a failure in its own dialog,
+ * because the composer's alert renders behind the modal.
+ */
+type ComposerSubmitResult = VoiceSendResult;
+
 function dashboardComposerRootClass(input: { dragActive: boolean; appearance?: "chat" | "default" }) {
 	return cn(
 		"dashboard-composer-root",
@@ -584,6 +702,20 @@ function textareaOverlayStyle(hasEntities: boolean): JSX.CSSProperties {
 		color: hasEntities ? "transparent" : undefined,
 		"caret-color": "currentColor",
 	};
+}
+
+// Strips the most common markdown syntax and returns the first ~40 characters
+// as a schedule name, mirroring the "short, user-editable" name field
+// `ScheduleDialog` prefills (chat-wave2 "schedule" spec §2.1). No shared
+// title-from-content helper exists elsewhere in this codebase to reuse.
+const SCHEDULE_TITLE_MAX_CHARS = 40;
+function scheduleTitleFrom(text: string): string {
+	const stripped = text
+		.replace(/[`*_#>~[\]]/g, "")
+		.replace(/\s+/g, " ")
+		.trim();
+	if (stripped.length <= SCHEDULE_TITLE_MAX_CHARS) return stripped;
+	return `${stripped.slice(0, SCHEDULE_TITLE_MAX_CHARS).trimEnd()}…`;
 }
 
 function modeAnnouncementDisplay(announcement: string | null, message: string) {
@@ -707,8 +839,17 @@ export function DashboardComposer(props: {
     sourceScope?: import('@/shared/actions/chat-source-scope').ChatSourceScope;
     onSourceScopeChange?: (value: import('@/shared/actions/chat-source-scope').ChatSourceScope) => void;
     sourceScopeLocked?: boolean;
+    /**
+     * Per-turn retrieval-source filter (chat-wave2 scope spec), mirroring the
+     * `sourceScope`/`onSourceScopeChange` pair above — deliberately no
+     * "Locked" prop: this one is never locked, unlike `sourceScope`.
+     */
+    retrievalScope?: import('@/shared/actions/chat-source-scope').RetrievalScope;
+    onRetrievalScopeChange?: (value: import('@/shared/actions/chat-source-scope').RetrievalScope) => void;
 	/** Calm, conversation-first presentation used by the dedicated chat page. */
 	appearance?: "chat" | "default";
+	/** Compact Home dock; only changes the input's initial presentation. */
+	compact?: boolean;
 	browseWeb?: boolean;
 	imageMode?: boolean;
 	message: string;
@@ -748,6 +889,12 @@ export function DashboardComposer(props: {
 	disabled?: boolean;
 	/** Explicitly persist selected files as durable organisation knowledge. */
 	onKnowledgeImport?: (attachments: DashboardComposerAttachment[]) => Promise<void> | void;
+	/**
+	 * The latest assistant turn, on a surface that shows replies (chat). Voice
+	 * mode waits on it after a spoken turn and shows the reply; left undefined
+	 * where a send navigates away (the dashboard), so Voice mode closes instead.
+	 */
+	voiceReply?: VoiceReply | null;
 }) {
 	const i18n = useI18n();
 	const navigate = useNavigate();
@@ -756,14 +903,37 @@ export function DashboardComposer(props: {
 	let historyTriggerRef: HTMLSpanElement | undefined;
 	let settingsTriggerRef: HTMLSpanElement | undefined;
 	let textareaRef: HTMLTextAreaElement | undefined;
+	let voiceModeButtonRef: HTMLButtonElement | undefined;
 	let modeAnnouncementTimer: number | undefined;
-	let mediaRecorder: MediaRecorder | undefined;
-	let audioChunks: Blob[] = [];
+	// Voice input's take and its dictate call. The recorder is Voice mode's
+	// (features/voice): one take, the 60 s / 1.4 MB caps, the tracks always
+	// stopped, and a stream that arrives after a cancel handed straight back.
+	let voiceInputTake: VoiceRecorder | undefined;
+	let voiceInputDictation: AbortController | undefined;
+	let composerDisposed = false;
 	let pendingFilePosition: number | null = null;
 	const [internalBrowseWeb, setInternalBrowseWeb] = createSignal(false);
 	const [internalSourceScope, setInternalSourceScope] = createSignal<import('@/shared/actions/chat-source-scope').ChatSourceScope>('workspace');
 	const sourceScope = () => props.sourceScope ?? internalSourceScope();
 	const conversationOnly = () => sourceScope() === 'conversation';
+	// Per-turn retrieval-source filter (chat-wave2 scope spec) — never locked,
+	// unlike `sourceScope` above, so there is no analog of `sourceScopeLocked`.
+	const [internalRetrievalScope, setInternalRetrievalScope] = createSignal<import('@/shared/actions/chat-source-scope').RetrievalScope>('auto');
+	const retrievalScope = () => props.retrievalScope ?? internalRetrievalScope();
+	const setRetrievalScope = (value: import('@/shared/actions/chat-source-scope').RetrievalScope) => {
+		setInternalRetrievalScope(value);
+		props.onRetrievalScopeChange?.(value);
+		// Plan mode dispatches to execution-core's own agentic run — a separate
+		// pipeline this per-turn source filter cannot reach (chat-wave2 scope
+		// spec), so model-gateway rejects the combination outright. Turn Plan
+		// mode back off here rather than let the next send hit that error.
+		if (value !== 'auto') props.onPlanModeChange?.(false);
+	};
+	// `conversationOnly` already excludes both source families outright, so a
+	// stale `knowledge_only`/`web_only` pick must not silently survive the
+	// switch to "Kun samtalen" — mirrors the `temporaryChat()` reset pattern
+	// used elsewhere in this file.
+	createEffect(() => conversationOnly(), (restricted) => { if (restricted) setInternalRetrievalScope('auto'); });
 	const browseWeb = () => !subscriptionBacked() && (props.browseWeb ?? internalBrowseWeb());
 	const setBrowseWeb = (next: boolean | ((current: boolean) => boolean)) => {
 		const value = typeof next === "function" ? next(browseWeb()) : next;
@@ -774,6 +944,15 @@ export function DashboardComposer(props: {
 		createSignal<AutocompleteState | null>(null);
 	const [autocompleteIndex, setAutocompleteIndex] = createSignal(0);
 	const [deepSearch, setDeepSearch] = createSignal(false);
+	// "/schedule" / "Planlegg dette" — `origin` is carried through only for
+	// its own test/debug value today (schedule-from-chat.ts's
+	// `threadOriginHint`); it does not yet change behaviour.
+	const [scheduleDialogOpen, setScheduleDialogOpen] = createSignal(false);
+	const [scheduleSeed, setScheduleSeed] = createSignal<{
+		title: string;
+		goal: string;
+		origin: "composer" | "message-action";
+	}>({ title: "", goal: "", origin: "composer" });
 	const [dragActive, setDragActive] = createSignal(false);
 	const [entities, setEntities] = createSignal<EntityToken[]>([]);
 	const [files, setFiles] = createSignal<ComposerFile[]>([]);
@@ -825,9 +1004,45 @@ export function DashboardComposer(props: {
 		subscriptionBacked()
 			? { opacity: 0.5, cursor: "not-allowed" }
 			: undefined;
+	// "Kun nett" makes web search unconditional for this turn — the toggle
+	// becomes redundant, so it is shown permanently on and disabled, the same
+	// visual treatment `subscriptionDisabledTitle`/`subscriptionDisabledStyle`
+	// already give a control the user cannot change right now.
+	const webOnlyForcedTitle = () =>
+		i18n.tr(
+			"Nett er slått på for denne meldingen (kildefilter: kun nett)",
+			"Web is on for this message (source filter: web only)",
+		);
+	// One catalogue request, shared by the picker and by a send that has to
+	// wait for it (see `resolveTurnPrivacyTier`). `settledCatalogue` is a plain
+	// variable, not the resource, so a send reads the answer the moment the
+	// request settles: `undefined` while in flight, `null` once it failed.
+	let catalogueRequest: Promise<ModelInfo[]> | undefined;
+	let settledCatalogue: ModelInfo[] | null | undefined;
+	const requestCatalogue = (): Promise<ModelInfo[]> => {
+		if (!catalogueRequest) {
+			let request: Promise<ModelInfo[]>;
+			try {
+				request = Promise.resolve(listModels());
+			} catch (error) {
+				request = Promise.reject(error);
+			}
+			catalogueRequest = request;
+			// Registered first, so it runs before the resource sees the result.
+			request.then(
+				(list) => {
+					settledCatalogue = Array.isArray(list) ? list : null;
+				},
+				() => {
+					settledCatalogue = null;
+				},
+			);
+		}
+		return catalogueRequest;
+	};
 	const [models] = createResource(async () => {
 		try {
-			return await listModels();
+			return await requestCatalogue();
 		} catch {
 			// Gateway unavailable / old shape → empty catalog. The pinned Verevon intent
 			// modes still render (they don't depend on /v1/models), so the picker works.
@@ -905,7 +1120,9 @@ export function DashboardComposer(props: {
 	};
 	// The selected model's attested privacy tier, if any. Only a real catalog
 	// selection can carry one: the pinned intent modes are resolved server-side,
-	// so they never claim a tier here.
+	// so they never claim a tier here. Display only (the sovereign notice): the
+	// tier a turn sends comes from `resolveTurnPrivacyTier`, which does not
+	// read `undefined` from a catalogue that has not loaded yet.
 	const selectedPrivacyTier = createMemo(() => selectedCatalogModel()?.privacyTier);
 	const selectedSubscriptionRoute = createMemo(() => {
 		const connection = activeSubscriptionConnection();
@@ -932,9 +1149,26 @@ export function DashboardComposer(props: {
 			...(provider === OPENAI_CODEX_SUBSCRIPTION_PROVIDER && activeSubscriptionConnection()
 				? { subscriptionConnectionId: activeSubscriptionConnection()!.id }
 				: {}),
+			// The last-known tier a turn falls back on if a later page load
+			// sends before the catalogue answers.
+			...(catalogModel ? { privacyTier: rememberedPrivacyTier(catalogModel) } : {}),
 		});
 		setModelOpen(false);
 	};
+	// Keep that last-known tier current: every time the catalogue lists the
+	// selected model, store what it says now. This also gives a selection
+	// saved before the tier was stored (or by another picker) its tier.
+	createEffect(
+		() => selectedCatalogModel(),
+		(listed) => {
+			if (!listed) return;
+			rememberAiModelPrivacyTier(
+				activeOrgId() || "",
+				{ model: listed.id, provider: listed.provider },
+				rememberedPrivacyTier(listed),
+			);
+		},
+	);
 	// A disconnected subscription remains the user's selection. Explain what
 	// needs reconnecting; never silently change the model or billing route.
 	createEffect(
@@ -956,6 +1190,23 @@ export function DashboardComposer(props: {
 	const [turns, setTurns] = createSignal<ComposerTurn[]>([]);
 	const [voiceMode, setVoiceMode] = createSignal(false);
 	const [voiceRecording, setVoiceRecording] = createSignal(false);
+	// Voice input is waiting on the microphone permission prompt. It already
+	// counts as holding the microphone, so Voice mode cannot open under it.
+	const [voiceInputStarting, setVoiceInputStarting] = createSignal(false);
+	// Voice input's failures, for screen readers: the visible copy is the
+	// mode announcement, which is aria-hidden and hidden once the draft has text.
+	const [voiceInputError, setVoiceInputError] = createSignal("");
+	// A tap on Voice input in Temporary chat: say why it is off, visibly.
+	const [voiceInputBlockedShown, setVoiceInputBlockedShown] = createSignal(false);
+	const voiceInputBlockedId = createUniqueId();
+	const voiceModeBlockedId = createUniqueId();
+	/** Drop Voice input's take, recording or still on the prompt; nothing is sent. */
+	const cancelVoiceInputTake = () => {
+		const take = voiceInputTake;
+		voiceInputTake = undefined;
+		setVoiceInputStarting(false);
+		take?.cancel();
+	};
 	const [activeActions, setActiveActions] = createSignal<
 		ComposerActiveAction[]
 	>([]);
@@ -1009,6 +1260,12 @@ export function DashboardComposer(props: {
 	);
 	const imageMode = createMemo(() => !subscriptionBacked() && (props.imageMode ?? false));
 	const planMode = createMemo(() => !subscriptionBacked() && (props.planMode ?? false));
+	// Mirrors the `conversationOnly` reset above: Plan mode may also be turned
+	// on directly (e.g. the segmented Ask/Do control), not only through
+	// `setRetrievalScope`, so a stale `knowledge_only`/`web_only` pick must not
+	// silently survive that switch either — model-gateway rejects the
+	// combination outright (chat-wave2 scope spec).
+	createEffect(() => planMode(), (planning) => { if (planning) setInternalRetrievalScope('auto'); });
 	// Locked-true once the parent says the active thread is temporary — a
 	// disabled control could theoretically still be flipped by, e.g., a
 	// synthetic click, so the memo itself also refuses to report anything but
@@ -1021,6 +1278,53 @@ export function DashboardComposer(props: {
 	const temporaryChatUnavailable = createMemo(
 		() => !props.temporaryChatLocked && zeroRetentionAvailable() === false,
 	);
+	// Voice mode and Voice input fail closed in Temporary chat: the speech path
+	// cannot yet attest zero data retention, so no audio is captured there at
+	// all. Voice mode still opens, in its blocked state, which says why and
+	// never asks for the microphone; Voice input stays focusable
+	// (aria-disabled) and says why when pressed. Each also waits while the
+	// other holds the microphone, so only one of them ever records.
+	const voiceInputHoldsMic = createMemo(
+		() => voiceRecording() || voiceInputStarting(),
+	);
+	const voiceModeTitle = () => {
+		if (temporaryChat()) return voiceModeBlockedMessage(i18n.tr);
+		if (voiceInputHoldsMic())
+			return i18n.tr(
+				"Stemmemodus er utilgjengelig mens stemmeinndata tar opp.",
+				"Voice mode is unavailable while Voice input is recording.",
+			);
+		return i18n.tr("Stemmemodus", "Voice mode");
+	};
+	const voiceInputTitle = () => {
+		if (temporaryChat()) return voiceInputBlockedMessage(i18n.tr);
+		if (voiceMode())
+			return i18n.tr(
+				"Stemmeinndata er utilgjengelig mens stemmemodus er åpen.",
+				"Voice input is unavailable while Voice mode is open.",
+			);
+		return undefined;
+	};
+	createEffect(
+		() => temporaryChat(),
+		(temporary) => {
+			if (!temporary) {
+				setVoiceInputBlockedShown(false);
+				return;
+			}
+			// Temporary chat started mid-take: drop the take, nothing is sent.
+			// A dictation already on its way was an ordinary one and may finish.
+			cancelVoiceInputTake();
+		},
+	);
+	const voiceLanguageLabel = () => {
+		const language = voiceLanguages.find(
+			(candidate) => candidate.value === settings().voiceLang,
+		);
+		return language
+			? i18n.tr(language.label.no, language.label.en)
+			: settings().voiceLang;
+	};
 	const hasEntityOverlay = createMemo(() => entities().length > 0);
 	const [textareaExpanded, setTextareaExpanded] = createSignal(false);
 	const [hasOverflow, setHasOverflow] = createSignal(false);
@@ -1167,6 +1471,12 @@ export function DashboardComposer(props: {
 			setDeepSearch(true);
 			return;
 		}
+		// "schedule" deliberately has no effect here, unlike the other builtins
+		// above: picking it from the menu only inserts the "/schedule " prefix
+		// (the same as any other parameterised command — see `selectCommand`),
+		// and there is nothing useful to seed a dialog with until the goal text
+		// after it is actually typed. `submitComposer` intercepts the finished
+		// "/schedule <goal>" line instead — see the comment there.
 		const action = command.specialized;
 		if (!action || action.kind === "builtin") return;
 		const kind = action.kind;
@@ -1184,7 +1494,7 @@ export function DashboardComposer(props: {
 	// and textareaExpanded()), and the effect keeps the original read-then-write
 	// DOM sequence untouched.
 	createEffect(
-		() => ({ message: props.message, expanded: textareaExpanded() }),
+		() => ({ message: props.message, expanded: textareaExpanded(), compact: props.compact }),
 		({ expanded }) => {
 			const element = textareaRef;
 			if (!element) return;
@@ -1358,6 +1668,13 @@ export function DashboardComposer(props: {
 		});
 	};
 
+	/** Connector-attach picker result: same `files` signal a local upload
+	 * uses, so AttachmentPreview/removeFile/submit are all reused unchanged
+	 * (connector-picker spec §2.4 step 5). */
+	const attachConnectorFile = (file: ComposerFile) => {
+		setFiles((current) => [...current, file]);
+	};
+
 	const enhanceAttachments = () => {
 		if (files().length === 0) return;
 
@@ -1416,85 +1733,111 @@ export function DashboardComposer(props: {
 
 	const toggleRecording = async () => {
 		if (voiceRecording()) {
-			mediaRecorder?.stop();
+			// Ends the take; its dictation then runs as below.
+			voiceInputTake?.stop();
 			return;
 		}
-
-		if (
-			typeof MediaRecorder === "undefined" ||
-			!navigator.mediaDevices?.getUserMedia
-		) {
-			setModeAnnouncement(
-				i18n.tr(
-					"Stemmeopptak støttes ikke i denne nettleseren.",
-					"Voice recording is not supported in this browser.",
-				),
-			);
+		if (voiceInputStarting()) {
+			// A second tap while the permission prompt is open: nothing is
+			// recorded, and a stream granted after this is released at once.
+			cancelVoiceInputTake();
 			return;
 		}
+		// Voice mode holds the microphone while its dialog is open.
+		if (voiceMode()) return;
 
+		const reportVoiceInputError = (message: string) => {
+			setModeAnnouncement(message);
+			setVoiceInputError(message);
+		};
+		setVoiceInputError("");
+
+		// Fails closed in Temporary chat, before the microphone is asked for:
+		// the speech path cannot yet attest zero data retention for the audio.
+		if (temporaryChat()) {
+			setVoiceInputBlockedShown(true);
+			setVoiceInputError(voiceInputBlockedMessage(i18n.tr));
+			return;
+		}
+		setVoiceInputBlockedShown(false);
+
+		// Never record over a reply that is being read aloud: the take would
+		// transcribe it. Pressing the mic is a clear request to speak instead.
+		const player = speechPlayer();
+		if (player.playingId() !== null) player.stop();
+
+		const onTranscript = props.onMessageChange;
+		const take = createVoiceRecorder({ silence: false });
+		voiceInputTake = take;
+		setVoiceInputStarting(true);
 		try {
-			const onTranscript = props.onMessageChange;
-			const stream = await navigator.mediaDevices.getUserMedia({
-				audio: true,
-			});
-			audioChunks = [];
-			const recorder = new MediaRecorder(stream);
-			mediaRecorder = recorder;
-
-			recorder.ondataavailable = (event) => {
-				if (event.data.size > 0)
-					audioChunks = [...audioChunks, event.data];
-			};
-			recorder.onstop = () => {
-				const audio = new Blob(audioChunks, {
-					type: recorder.mimeType || "audio/webm",
-				});
-				audioChunks = [];
-				stream.getTracks().forEach((track) => track.stop());
-				mediaRecorder = undefined;
-
-				// Verevon Flow: STT + LLM cleanup in one round trip (fillers stripped,
-				// punctuation fixed, self-corrections applied). Keep `voiceRecording`
-				// on through the cleanup so the textarea stays locked and the loading
-				// bar covers the processing phase; APPEND to the draft (the voice-modal
-				// pattern) instead of overwriting whatever was already typed.
-				void dictateAudioBlob(audio, settings().voiceLang, "chat message")
-					.then((dictation) => {
-						const text = dictation.text || dictation.rawText;
-						if (!text) return;
-						const trimmed = props.message.trim();
-						onTranscript(trimmed ? `${trimmed} ${text}` : text);
-						focusTextareaAtNextFrame();
-					})
-					.catch(() => {
-						setModeAnnouncement(
-							i18n.tr(
-								"Diktering er utilgjengelig.",
-								"Dictation is unavailable.",
-							),
-						);
-					})
-					.finally(() => {
-						setVoiceRecording(false);
-					});
-			};
-			recorder.onerror = () => {
-				stream.getTracks().forEach((track) => track.stop());
-				mediaRecorder = undefined;
-				setVoiceRecording(false);
-			};
-
-			recorder.start();
-			setVoiceRecording(true);
-		} catch {
-			setVoiceRecording(false);
-			setModeAnnouncement(
-				i18n.tr(
-					"Mikrofontilgang var ikke tilgjengelig.",
-					"Microphone access was not available.",
-				),
+			await take.start();
+		} catch (error) {
+			// Cancelled meanwhile: whoever cancelled it has reset the state.
+			if (voiceInputTake !== take) return;
+			voiceInputTake = undefined;
+			setVoiceInputStarting(false);
+			reportVoiceInputError(
+				voiceErrorMessage(voiceErrorFromMic(classifyMicError(error)), i18n.tr),
 			);
+			return;
+		}
+		// Cancelled while the prompt was open (a second tap, Temporary chat,
+		// the composer going away): `start` already handed the stream back.
+		if (voiceInputTake !== take) return;
+		// Belt and braces: Voice mode cannot open while this waits, and
+		// Temporary chat cancels the take, but nothing records under either.
+		if (composerDisposed || voiceMode() || temporaryChat()) {
+			cancelVoiceInputTake();
+			return;
+		}
+		setVoiceInputStarting(false);
+		setVoiceRecording(true);
+
+		let recording: VoiceRecording | null;
+		try {
+			recording = await take.result;
+		} catch {
+			recording = null;
+			if (!composerDisposed)
+				reportVoiceInputError(voiceErrorMessage("mic-failed", i18n.tr));
+		}
+		if (voiceInputTake === take) voiceInputTake = undefined;
+		// A cancel, or Temporary chat started mid-take: nothing is sent.
+		if (!recording || composerDisposed || temporaryChat()) {
+			setVoiceRecording(false);
+			return;
+		}
+
+		// Verevon Flow: STT + LLM cleanup in one round trip (fillers stripped,
+		// punctuation fixed, self-corrections applied). Keep `voiceRecording`
+		// on through the cleanup so the textarea stays locked and the loading
+		// bar covers the processing phase; APPEND to the draft (the voice-modal
+		// pattern) instead of overwriting whatever was already typed. Only
+		// the "chat message" context goes with it, never a clean-up model.
+		const controller = new AbortController();
+		voiceInputDictation = controller;
+		try {
+			const dictation = await dictateAudioBlob(
+				recording.blob,
+				settings().voiceLang,
+				"chat message",
+				controller.signal,
+				temporaryChat(),
+			);
+			if (composerDisposed || controller.signal.aborted) return;
+			const text = dictation.text || dictation.rawText;
+			if (!text) return;
+			const trimmed = props.message.trim();
+			onTranscript(trimmed ? `${trimmed} ${text}` : text);
+			focusTextareaAtNextFrame();
+		} catch (error: unknown) {
+			const kind = classifyDictateError(error);
+			if (kind !== "aborted" && !composerDisposed)
+				reportVoiceInputError(voiceErrorMessage(kind, i18n.tr));
+		} finally {
+			if (voiceInputDictation === controller) voiceInputDictation = undefined;
+			if (!composerDisposed) setVoiceRecording(false);
 		}
 	};
 
@@ -1913,8 +2256,52 @@ export function DashboardComposer(props: {
 		};
 	};
 
-	const submitComposer = async () => {
-		if (props.disabled || handoffPending() || subscriptionConnectionPending()) return;
+	/**
+	 * The `minPrivacyTier` this turn carries. It used to be read straight off
+	 * the loaded catalogue, so a turn sent before `/api/v1/models` answered
+	 * went out with no tier: the loosest constraint rather than the model's.
+	 * Now a catalogue model waits for the catalogue (bounded), then falls back
+	 * to the tier last stored for this model, then to the strictest tier. An
+	 * intent mode never waits: it carries no tier either way.
+	 *
+	 * Synchronous whenever no wait is needed (an intent mode, or a catalogue
+	 * that has settled), so those sends reach `onSubmit` in the same tick as
+	 * before; a Promise only while the catalogue is still in flight.
+	 */
+	const resolveTurnPrivacyTier = (
+		model: string,
+		provider: string | undefined,
+	): PrivacyTier | undefined | Promise<PrivacyTier | undefined> => {
+		if (isIntentModeSelection(model)) return undefined;
+		const resolve = () =>
+			resolveSubmitPrivacyTier({
+				model,
+				provider,
+				catalogue: settledCatalogue ?? undefined,
+				lastKnownTier: lastKnownAiModelPrivacyTier(activeOrgId() || "", {
+					model,
+					provider,
+				}),
+			}).tier;
+		if (settledCatalogue !== undefined) return resolve();
+		return waitForCatalogue(requestCatalogue(), CATALOGUE_TIER_WAIT_MS).then(
+			resolve,
+		);
+	};
+
+	const submitComposer = async (opts?: {
+		/** A Voice mode turn: the dialog that locks the composer is the one sending. */
+		fromVoiceMode?: boolean;
+	}): Promise<ComposerSubmitResult> => {
+		if (props.disabled || handoffPending()) return { ok: false };
+		if (subscriptionConnectionPending())
+			return {
+				ok: false,
+				message: i18n.tr(
+					"Kontrollerer ChatGPT-abonnementet … Prøv igjen om et øyeblikk.",
+					"Checking your ChatGPT subscription … Try again in a moment.",
+				),
+			};
 		// A deliberately-opened menu (slash commands / actions) still blocks a
 		// send — the user is mid-command. The ambient "date" suggestion must
 		// NOT: it is the other half of the F-03 fix above. Without this, Enter
@@ -1926,23 +2313,40 @@ export function DashboardComposer(props: {
 		if (
 			(pendingAutocomplete && !isScheduleAutocomplete(pendingAutocomplete)) ||
 			!hasContent() ||
-			voiceMode() ||
+			(voiceMode() && !opts?.fromVoiceMode) ||
 			voiceRecording() ||
 			(props.submitting && !props.allowMidRunSubmit)
 		)
-			return;
+			return { ok: false };
 
 		// A command whose required argument is still empty is unfinished, not a
 		// message — sending it would ship the bare "/image" as prose. The hint
 		// strip stays up and says what is missing.
 		const pendingCommand = draftCommand();
 		if (pendingCommand?.command.argument?.required && !pendingCommand.argument)
-			return;
+			return { ok: false };
 		// Typed commands apply even when the menu was never opened: "/image en
 		// rød katt" straight off the keyboard must carry the image tool, and
 		// "/kvalitet rapport uke 12" must carry the skill.
 		const commandBuiltin = pendingCommand?.command.builtin;
 		const commandAction = pendingCommand?.command.specialized;
+
+		// "/schedule" (and its Norwegian aliases) never becomes a chat turn: it
+		// turns the typed request into a recurring job instead. Unlike
+		// "web_search"/"deep_research"/"image" above, which just set a flag on
+		// an otherwise-normal send, this must intercept BEFORE the normal
+		// send machinery below ever runs — the goal is whatever followed the
+		// command name (falling back to the raw draft for a bare "/schedule"
+		// with no menu match, matching the argument's own "optional — uses the
+		// draft" hint in `BUILTIN_COMMANDS`).
+		if (commandBuiltin === "schedule") {
+			const goal = (pendingCommand?.argument || props.message).trim();
+			if (!goal) return { ok: false };
+			setScheduleSeed({ title: scheduleTitleFrom(goal), goal, origin: "composer" });
+			setScheduleDialogOpen(true);
+			resetComposerDraft();
+			return { ok: true };
+		}
 
 		const initialSnapshot = createSubmissionSnapshot();
 		const submittedActions =
@@ -1970,16 +2374,18 @@ export function DashboardComposer(props: {
 		const subscriptionRoute = selectedSubscriptionRoute();
 		if (subscriptionBacked() && !subscriptionRoute) {
 			setStaleSubscriptionNotice(true);
-			setSubmitError(i18n.tr("Koble til ChatGPT-abonnementet i Integrasjoner før du sender. Utkastet er beholdt.", "Connect your ChatGPT subscription in Integrations before sending. Your draft has been kept."));
-			return;
+			const message = i18n.tr("Koble til ChatGPT-abonnementet under Profil → ChatGPT-abonnement før du sender. Utkastet er beholdt.", "Connect your ChatGPT subscription under Profile → ChatGPT subscription before sending. Your draft has been kept.");
+			setSubmitError(message);
+			return { ok: false, message };
 		}
-		const payload = createComposerSubmitPayload({
+		// Everything the payload is built from is read here, before the tier
+		// lookup below may wait on the catalogue.
+		const payloadInput = {
 			actions: submittedActions,
 			browseWeb: initialEffectiveBrowseWeb,
 			deepSearch: initialEffectiveDeepSearch,
 			files: initialSnapshot.files,
 			imageMode: imageMode() || commandBuiltin === "image",
-			minPrivacyTier: selectedPrivacyTier(),
 			model: selectedModel(),
 			provider: subscriptionRoute?.provider,
 			responseMode: responseMode(),
@@ -1987,16 +2393,33 @@ export function DashboardComposer(props: {
 			text: initialSnapshot.submittedText,
 			tone: settings().tone,
 			zdr: temporaryChat(),
-		});
-		payload.sourceScope = sourceScope();
-		if (conversationOnly()) {
-			payload.tools = [];
-			payload.actions = [];
-		}
+		};
+		const modelProvider = selectedModelProvider();
+		const submittedSourceScope = sourceScope();
+		const submittedConversationOnly = conversationOnly();
+		const submittedRetrievalScope = retrievalScope();
 
+		// Pending from here, so the composer is inert (and a second Enter is
+		// refused) while the tier lookup waits.
 		setHandoffPending(true);
 		setSubmitError(null);
 		try {
+			const turnTier = resolveTurnPrivacyTier(payloadInput.model, modelProvider);
+			const payload = createComposerSubmitPayload({
+				...payloadInput,
+				minPrivacyTier: turnTier instanceof Promise ? await turnTier : turnTier,
+			});
+			payload.sourceScope = submittedSourceScope;
+			// Omitted when 'auto' or conversation-only, matching the same
+			// omit-when-default convention already used for effort/verbosity/
+			// minPrivacyTier — a plain send stays byte-identical on the wire.
+			if (!submittedConversationOnly && submittedRetrievalScope !== 'auto') {
+				payload.retrievalScope = submittedRetrievalScope;
+			}
+			if (submittedConversationOnly) {
+				payload.tools = [];
+				payload.actions = [];
+			}
 			if (payload.attachments.length > 0) payload.attachments = await prepareChatAttachments(payload.attachments);
 			if (props.onSubmit) await props.onSubmit(payload);
 			else await writePendingChatLaunch(payload);
@@ -2009,7 +2432,7 @@ export function DashboardComposer(props: {
 						: i18n.tr('Kunne ikke overføre utkastet. Frigjør nettleserlagring og prøv igjen. Teksten og filene er beholdt.', 'Could not transfer the draft. Free browser storage and retry. Your text and files have been kept.')
 				: error instanceof Error ? error.message : i18n.tr('Kunne ikke sende. Prøv igjen.', 'Could not send. Please retry.');
 			setSubmitError(message);
-			return;
+			return { ok: false, message };
 		} finally {
 			setHandoffPending(false);
 		}
@@ -2031,7 +2454,7 @@ export function DashboardComposer(props: {
 
 		if (props.onSubmit) {
 			resetComposerDraft();
-			return;
+			return { ok: true };
 		}
 
 		resetComposerDraft();
@@ -2041,10 +2464,55 @@ export function DashboardComposer(props: {
 		// place into the chat page's composer instead of fading out first and
 		// crossfading the whole route. Reduced-motion users get a plain navigate.
 		navigateToChat(navigate);
+		return { ok: true };
+	};
+
+	/**
+	 * A spoken turn goes through the composer's own submit, so the model, the
+	 * subscription route, Temporary chat, the source scope and the tools are
+	 * exactly those of a typed message. Anything already typed is kept and sent
+	 * with it, the way Voice input appends to the draft.
+	 */
+	const submitVoiceTurn = async (text: string): Promise<ComposerSubmitResult> => {
+		const spoken = text.trim();
+		if (!spoken) return { ok: false };
+		const previousDraft = props.message;
+		const typed = previousDraft.trim();
+		flush(() => {
+			// A menu left open behind the dialog is not a command in progress.
+			setAutocomplete(null);
+			props.onMessageChange(typed ? `${typed} ${spoken}` : spoken);
+		});
+		const result = await submitComposer({ fromVoiceMode: true });
+		// The transcript stays in the dialog for another try; put back what was
+		// typed so a retry does not send the spoken part twice.
+		if (!result.ok) flush(() => props.onMessageChange(previousDraft));
+		return result;
+	};
+
+	const closeVoiceMode = () => {
+		flush(() => setVoiceMode(false));
+		voiceModeButtonRef?.focus();
+	};
+
+	const insertVoiceTranscript = (text: string) => {
+		const trimmed = props.message.trim();
+		flush(() => {
+			props.onMessageChange(trimmed ? `${trimmed} ${text}` : text);
+			setVoiceMode(false);
+		});
+		focusTextareaAtNextFrame();
 	};
 
 	onCleanup(() => {
-		mediaRecorder?.stream.getTracks().forEach((track) => track.stop());
+		composerDisposed = true;
+		// Mid-take or still on the permission prompt: either way the microphone
+		// is released, including a stream granted after this point.
+		const take = voiceInputTake;
+		voiceInputTake = undefined;
+		take?.cancel();
+		voiceInputDictation?.abort();
+		voiceInputDictation = undefined;
 		if (modeAnnouncementTimer) window.clearTimeout(modeAnnouncementTimer);
 		files().forEach(revokeFilePreviewUrl);
 	});
@@ -2121,8 +2589,8 @@ export function DashboardComposer(props: {
 					<Zap class="size-3.5" />
 					<span>
 						{i18n.tr(
-							"ChatGPT-abonnementet er ikke lenger tilkoblet. Koble til i Integrasjoner eller velg en annen modell.",
-							"The ChatGPT subscription is no longer connected. Reconnect in Integrations or choose another model.",
+							"ChatGPT-abonnementet er ikke lenger tilkoblet. Koble til på nytt under Profil → ChatGPT-abonnement, eller velg en annen modell.",
+							"The ChatGPT subscription is no longer connected. Reconnect under Profile → ChatGPT subscription, or choose another model.",
 						)}
 					</span>
 				</div>
@@ -2365,8 +2833,8 @@ export function DashboardComposer(props: {
 							active={contextScopeOpen()}
 							expanded={contextScopeOpen()}
 													label={i18n.tr(
-														`Kontekst for dette svaret: ${conversationOnly() ? "kun samtalen" : browseWeb() ? "kunnskap og nett" : "kunnskap"}`,
-														`Context for this answer: ${conversationOnly() ? "conversation only" : browseWeb() ? "knowledge and web" : "knowledge"}`,
+														`Kontekst for dette svaret: ${conversationOnly() ? "kun samtalen" : retrievalScope() === 'knowledge_only' ? "kun organisasjon" : retrievalScope() === 'web_only' ? "kun nett" : browseWeb() ? "kunnskap og nett" : "kunnskap"}`,
+														`Context for this answer: ${conversationOnly() ? "conversation only" : retrievalScope() === 'knowledge_only' ? "organization only" : retrievalScope() === 'web_only' ? "web only" : browseWeb() ? "knowledge and web" : "knowledge"}`,
 													)}
 							onClick={() => {
 								setContextScopeOpen((current) => !current);
@@ -2376,12 +2844,28 @@ export function DashboardComposer(props: {
 								setSuggestionsOpen(false);
 							}}
 							variant="chip"
+							class={props.appearance === "chat" && chatAppearanceActive("context") ? "dashboard-composer-context-button" : undefined}
 													>
 														<BookOpen class="size-3.5" />
+													<Show when={props.appearance === 'chat' && chatAppearanceActive('context')}><span class={`dashboard-composer-context-label${conversationOnly() ? ' dashboard-composer-context-label--restricted' : ''}`} aria-hidden="true">
+														{conversationOnly()
+															? i18n.tr("Kun samtalen", "Conversation only")
+															: retrievalScope() === 'knowledge_only'
+																? i18n.tr("Kun organisasjon", "Organization only")
+																: retrievalScope() === 'web_only'
+																	? i18n.tr("Kun nett", "Web only")
+																	: browseWeb() ? i18n.tr("Kunnskap + nett", "Knowledge + web") : i18n.tr("Kunnskap", "Knowledge")}
+													</span></Show>
 													</ComposerIconButton>
-													<span class={`dashboard-composer-context-label${conversationOnly() ? ' dashboard-composer-context-label--restricted' : ''}`} aria-hidden="true">
-														{conversationOnly() ? i18n.tr("Kun samtalen", "Conversation only") : browseWeb() ? i18n.tr("Kunnskap + nett", "Knowledge + web") : i18n.tr("Kunnskap", "Knowledge")}
-													</span>
+													<Show when={!(props.appearance === 'chat' && chatAppearanceActive('context'))}><span class={`dashboard-composer-context-label${conversationOnly() ? ' dashboard-composer-context-label--restricted' : ''}`} aria-hidden="true">
+														{conversationOnly()
+															? i18n.tr("Kun samtalen", "Conversation only")
+															: retrievalScope() === 'knowledge_only'
+																? i18n.tr("Kun organisasjon", "Organization only")
+																: retrievalScope() === 'web_only'
+																	? i18n.tr("Kun nett", "Web only")
+																	: browseWeb() ? i18n.tr("Kunnskap + nett", "Knowledge + web") : i18n.tr("Kunnskap", "Knowledge")}
+													</span></Show>
 						<Show when={contextScopeOpen()}>
 							<div class="dashboard-composer-context-panel verevon-popover" role="dialog" aria-label={i18n.tr("Kontekst for svaret", "Answer context")}>
 								<div class="dashboard-composer-context-panel__heading">
@@ -2400,6 +2884,19 @@ export function DashboardComposer(props: {
 										<option value="conversation">{i18n.tr("Kun samtalen og vedlegg", "Conversation and attachments only")}</option>
 									</select>
 								</label>
+								<Show when={!conversationOnly()}>
+									<label class="grid gap-2 text-sm">
+										<span>{i18n.tr("Kildefilter for denne meldingen", "Source filter for this message")}</span>
+										<select class="rounded-md border border-current/20 bg-transparent p-2" value={retrievalScope()} disabled={props.submitting} onChange={(event) => {
+											const raw = event.currentTarget.value;
+											setRetrievalScope(raw === 'knowledge_only' || raw === 'web_only' ? raw : 'auto');
+										}}>
+											<option value="auto">{i18n.tr("Kunnskap + nett", "Knowledge + web")}</option>
+											<option value="knowledge_only">{i18n.tr("Kun organisasjon", "Organization only")}</option>
+											<option value="web_only">{i18n.tr("Kun nett", "Web only")}</option>
+										</select>
+									</label>
+								</Show>
 								<Show when={conversationOnly()}>
 									<p>{i18n.tr("Bare tekst og vedlegg i denne samtalen brukes. Minner, organisasjonskunnskap, nettkilder og tilkoblede tjenester er av. Samtalen lagres, men brukes ikke til nye minner eller læring.", "Only this conversation and its attachments are used. Memory, workspace knowledge, web sources and connected services are off. The conversation is saved, but does not create memories or learned skills.")}</p>
 								</Show>
@@ -2549,7 +3046,7 @@ export function DashboardComposer(props: {
 						fileInputRef = element;
 					}}
 					type="file"
-					accept="image/*,.pdf,.docx,.txt,.md,.markdown,.csv,.json,.html,.htm"
+					accept="image/*,.pdf,.docx,.xlsx,.pptx,.txt,.md,.markdown,.csv,.json,.html,.htm"
 					multiple
 					class="sr-only"
 					aria-label={i18n.tr("Legg til filer", "Add files")}
@@ -2697,6 +3194,13 @@ export function DashboardComposer(props: {
 					<Show when={submitError()}>
 						<p class="dashboard-composer-attachments__notice" role="alert">{submitError()}</p>
 					</Show>
+					{/* Seen after a press on Voice input in Temporary chat; screen
+					    readers get the same words from its description and status. */}
+					<Show when={temporaryChat() && voiceInputBlockedShown()}>
+						<p class="dashboard-composer-attachments__notice" aria-hidden="true">
+							{voiceInputBlockedMessage(i18n.tr)}
+						</p>
+					</Show>
 					<AttachmentPreview
 						attachments={files()}
 						i18n={i18n}
@@ -2779,12 +3283,12 @@ export function DashboardComposer(props: {
 							)}
 							class="verevon-dashboard-textarea"
 							aria-busy={voiceRecording() ? "true" : "false"}
-							placeholder={textareaPlaceholder(
+							placeholder={props.compact ? i18n.tr("Spør om hva som helst …", "Ask anything…") : textareaPlaceholder(
 								modeAnnouncement(),
 								i18n,
 								activeSuggestion(),
 							)}
-							rows="3"
+							rows={props.compact ? '1' : '3'}
 							style={textareaOverlayStyle(hasEntityOverlay())}
 							value={props.message}
 							onInput={(event) =>
@@ -2829,6 +3333,17 @@ export function DashboardComposer(props: {
 							<span />
 						</div>
 					</Show>
+					<p class="sr-only" role="status">
+						{voiceInputError()}
+					</p>
+					<Show when={temporaryChat()}>
+						<span id={voiceModeBlockedId} class="sr-only">
+							{voiceModeBlockedMessage(i18n.tr)}
+						</span>
+						<span id={voiceInputBlockedId} class="sr-only">
+							{voiceInputBlockedMessage(i18n.tr)}
+						</span>
+					</Show>
 
 					<div class="dashboard-composer-toolbar">
 						<div class="dashboard-composer-toolbar__left">
@@ -2865,11 +3380,13 @@ export function DashboardComposer(props: {
 							</ComposerIconButton>
 							<ComposerIconButton
 								active={deepSearch()}
-								disabled={subscriptionBacked() || conversationOnly()}
+								disabled={subscriptionBacked() || conversationOnly() || retrievalScope() === 'knowledge_only'}
 								label={
 									subscriptionBacked()
 										? `${i18n.tr("Dyp research", "Deep search")} — ${subscriptionDisabledTitle()}`
-										: i18n.tr("Dyp research", "Deep search")
+										: retrievalScope() === 'knowledge_only'
+											? `${i18n.tr("Dyp research", "Deep search")} — ${i18n.tr("Ikke tilgjengelig med kildefilteret Kun organisasjon", "Not available with the Organization only source filter")}`
+											: i18n.tr("Dyp research", "Deep search")
 								}
 								onClick={() =>
 									setDeepSearch((current) => !current)
@@ -2880,23 +3397,27 @@ export function DashboardComposer(props: {
 							</ComposerIconButton>
 							<button
 								type="button"
-								aria-pressed={browseWeb() ? "true" : "false"}
+								aria-pressed={(browseWeb() || retrievalScope() === 'web_only') ? "true" : "false"}
 								aria-label={
 									subscriptionBacked()
 										? `${i18n.tr("Søk på nett", "Browse web")} — ${subscriptionDisabledTitle()}`
-										: i18n.tr("Søk på nett", "Browse web")
+										: retrievalScope() === 'web_only'
+											? `${i18n.tr("Søk på nett", "Browse web")} — ${webOnlyForcedTitle()}`
+											: i18n.tr("Søk på nett", "Browse web")
 								}
 								title={
 									subscriptionBacked()
 										? subscriptionDisabledTitle()
-										: i18n.tr("Søk på nett", "Browse web")
+										: retrievalScope() === 'web_only'
+											? webOnlyForcedTitle()
+											: i18n.tr("Søk på nett", "Browse web")
 								}
-								disabled={subscriptionBacked() || conversationOnly()}
+								disabled={subscriptionBacked() || conversationOnly() || retrievalScope() === 'web_only'}
 								onClick={() =>
 									setBrowseWeb((current) => !current)
 								}
-								class={composerWebButtonClass(browseWeb())}
-								style={subscriptionDisabledStyle()}
+								class={composerWebButtonClass(browseWeb() || retrievalScope() === 'web_only')}
+								style={retrievalScope() === 'web_only' ? { opacity: 0.85, cursor: "not-allowed" } : subscriptionDisabledStyle()}
 							>
 								<Globe2 class="size-4" />
 								{i18n.tr("Søk", "Search")}
@@ -2970,18 +3491,33 @@ export function DashboardComposer(props: {
 									</select>
 								</label>
 							</Show>
+							{/* In Temporary chat this opens Voice mode in its blocked
+							    state, which says why and never asks for the microphone. */}
 							<ComposerIconButton
 								active={voiceMode()}
+								buttonRef={(element) => {
+									voiceModeButtonRef = element;
+								}}
+								describedBy={temporaryChat() ? voiceModeBlockedId : undefined}
+								disabled={voiceInputHoldsMic()}
+								hasPopup="dialog"
 								label={i18n.tr("Stemmemodus", "Voice mode")}
 								onClick={() => setVoiceMode(true)}
+								title={voiceModeTitle()}
 								variant="toolbar"
 							>
 								<AudioWaveform class="size-4" />
 							</ComposerIconButton>
+							{/* aria-disabled in Temporary chat: focusable, so the
+							    reason is announced, and a press shows it. */}
 							<ComposerIconButton
 								active={voiceRecording()}
+								describedBy={temporaryChat() ? voiceInputBlockedId : undefined}
+								disabled={voiceMode()}
 								label={i18n.tr("Stemmeinndata", "Voice input")}
 								onClick={() => void toggleRecording()}
+								title={voiceInputTitle()}
+								unavailable={temporaryChat()}
 								variant="toolbar"
 							>
 								<Mic class="size-4" />
@@ -3058,10 +3594,12 @@ export function DashboardComposer(props: {
 						i18n={i18n}
 						position={settingsPanelPosition()}
 						settings={settings()}
+						temporaryChat={temporaryChat()}
 						onAddFiles={() => {
 							setSettingsOpen(false);
 							openFileDialog();
 						}}
+						onAttachFile={attachConnectorFile}
 						onScreenshot={() => {
 							setSettingsOpen(false);
 							void addScreenshotFile();
@@ -3072,18 +3610,28 @@ export function DashboardComposer(props: {
 			</Show>
 			<Show when={voiceMode()}>
 				<Portal>
-					<RealtimeVoiceModal
-						i18n={i18n}
+					<VoiceModeDialog
+						awaitReply={props.voiceReply !== undefined}
 						language={settings().voiceLang}
+						languageLabel={voiceLanguageLabel()}
 						model={selectedModelLabel()}
-						onClose={() => setVoiceMode(false)}
-						onListeningChange={setVoiceRecording}
-						onTranscript={(text) => {
-							const trimmed = props.message.trim();
-							props.onMessageChange(
-								trimmed ? `${trimmed} ${text}` : text,
-							);
-						}}
+						onClose={closeVoiceMode}
+						onInsert={insertVoiceTranscript}
+						onSend={submitVoiceTurn}
+						onStop={props.onStop}
+						reply={props.voiceReply}
+						submitting={props.submitting}
+						temporaryChat={temporaryChat()}
+					/>
+				</Portal>
+			</Show>
+			<Show when={scheduleDialogOpen()}>
+				<Portal>
+					<ScheduleDialog
+						onClose={() => setScheduleDialogOpen(false)}
+						seedTitle={scheduleSeed().title}
+						seedGoal={scheduleSeed().goal}
+						threadOriginHint={scheduleSeed().origin}
 					/>
 				</Portal>
 			</Show>
@@ -3190,6 +3738,13 @@ function createComposerSubmitPayload(input: {
 			size: file.size,
 			type: file.type || "application/octet-stream",
 			url: file.url,
+			...(file.extractedText !== undefined
+				? { extractedText: file.extractedText }
+				: {}),
+			...(file.source ? { source: file.source } : {}),
+			...(file.sourceItemId ? { sourceItemId: file.sourceItemId } : {}),
+			...(file.connectionId ? { connectionId: file.connectionId } : {}),
+			...(file.fetchedAt ? { fetchedAt: file.fetchedAt } : {}),
 		})),
 			model: input.model || undefined,
 			...(input.provider ? { provider: input.provider } : {}),
@@ -3240,6 +3795,7 @@ function createComposerTurn(input: {
 		createdAtIso: input.now.toISOString(),
 		deepSearch: input.deepSearch,
 		files: input.files.map((file) => file.name),
+		fileSources: input.files.map((file) => file.source),
 		model: input.model,
 		responseMode: input.responseMode,
 	};
@@ -3463,272 +4019,6 @@ function AutocompleteDropdown(props: {
 	);
 }
 
-type SpeechResultLike = {
-	readonly 0: { transcript: string };
-	isFinal: boolean;
-};
-type SpeechEventLike = {
-	resultIndex: number;
-	results: ArrayLike<SpeechResultLike>;
-};
-type SpeechRecognitionLike = {
-	continuous: boolean;
-	interimResults: boolean;
-	lang: string;
-	onend: (() => void) | null;
-	onerror: (() => void) | null;
-	onresult: ((event: SpeechEventLike) => void) | null;
-	start: () => void;
-	stop: () => void;
-};
-type SpeechRecognitionCtor = new () => SpeechRecognitionLike;
-
-function getSpeechRecognitionCtor(): SpeechRecognitionCtor | null {
-	const win = window as unknown as {
-		SpeechRecognition?: SpeechRecognitionCtor;
-		webkitSpeechRecognition?: SpeechRecognitionCtor;
-	};
-	return win.SpeechRecognition ?? win.webkitSpeechRecognition ?? null;
-}
-
-function RealtimeVoiceModal(props: {
-	i18n: ReturnType<typeof useI18n>;
-	language: string;
-	model: string;
-	onClose: () => void;
-	onListeningChange: (listening: boolean) => void;
-	onTranscript: (text: string) => void;
-}) {
-	let recognition: SpeechRecognitionLike | null = null;
-	const [interim, setInterim] = createSignal("");
-	const [listening, setListening] = createSignal(false);
-	const [transcript, setTranscript] = createSignal("");
-	const supported = () => getSpeechRecognitionCtor() !== null;
-	const liveText = () =>
-		`${transcript()}${interim() ? ` ${interim()}` : ""}`.trim();
-
-	const stop = () => {
-		recognition?.stop();
-		recognition = null;
-		setListening(false);
-		props.onListeningChange(false);
-		setInterim("");
-	};
-
-	const startListening = () => {
-		const Ctor = getSpeechRecognitionCtor();
-		if (!Ctor) return;
-		const nextRecognition = new Ctor();
-		nextRecognition.lang = props.language || "nb-NO";
-		nextRecognition.continuous = true;
-		nextRecognition.interimResults = true;
-		nextRecognition.onresult = (event) => {
-			let finalChunk = "";
-			let interimChunk = "";
-			for (
-				let index = event.resultIndex;
-				index < event.results.length;
-				index += 1
-			) {
-				const result = event.results[index];
-				if (!result) continue;
-				const text = result[0]?.transcript ?? "";
-				if (result.isFinal) finalChunk += text;
-				else interimChunk += text;
-			}
-			if (finalChunk) {
-				setTranscript((current) =>
-					current
-						? `${current} ${finalChunk.trim()}`
-						: finalChunk.trim(),
-				);
-			}
-			setInterim(interimChunk);
-		};
-		nextRecognition.onend = () => {
-			setListening(false);
-			props.onListeningChange(false);
-		};
-		nextRecognition.onerror = () => {
-			setListening(false);
-			props.onListeningChange(false);
-		};
-		recognition = nextRecognition;
-		setListening(true);
-		props.onListeningChange(true);
-		nextRecognition.start();
-	};
-
-	const close = () => {
-		stop();
-		setTranscript("");
-		props.onClose();
-	};
-
-	const insert = () => {
-		const text = liveText();
-		if (text) props.onTranscript(text);
-		close();
-	};
-
-	let dialogRef: HTMLDialogElement | undefined;
-	onCleanup(() => {
-		stop();
-		// Close the native modal so it leaves the top layer cleanly on unmount.
-		dialogRef?.close();
-	});
-
-	return (
-		<dialog
-			// Use the native modal (showModal) instead of the static `open` attribute
-			// so the browser provides Escape-to-close, focus trapping, and an inert
-			// backdrop — none of which a plain `<dialog open>` receives. Routing the
-			// `cancel` event (Escape) through close() also stops the recogniser and
-			// clears the transcript, matching the scrim/X buttons.
-			ref={(el) => {
-				dialogRef = el;
-				queueMicrotask(() => {
-					if (!el.open) el.showModal();
-				});
-			}}
-			class="realtime-voice-modal"
-			aria-label={props.i18n.tr("Stemmemodus", "Voice mode")}
-			data-dashboard-modal="true"
-			onCancel={(event: Event) => {
-				event.preventDefault();
-				close();
-			}}
-		>
-			<button
-				type="button"
-				aria-label={props.i18n.tr(
-					"Lukk stemmebakgrunn",
-					"Dismiss voice backdrop",
-				)}
-				class="realtime-voice-modal__scrim"
-				onClick={close}
-			/>
-			<div class="realtime-voice-modal__panel verevon-panel-in">
-				<div class="realtime-voice-modal__header">
-					<span>
-						<AudioWaveform class="size-5" />
-					</span>
-					<div>
-						<p>{props.i18n.tr("Stemmemodus", "Voice mode")}</p>
-						<small>
-							{props.model} · {props.language}
-						</small>
-					</div>
-					<button
-						type="button"
-						onClick={close}
-						aria-label={props.i18n.tr(
-							"Lukk stemmemodus",
-							"Close voice mode",
-						)}
-					>
-						<X class="size-4" />
-					</button>
-				</div>
-
-				<div class="realtime-voice-modal__body">
-					<button
-						type="button"
-						onClick={() =>
-							listening() ? stop() : startListening()
-						}
-						disabled={!supported()}
-						class={cn(
-							"realtime-voice-modal__mic",
-							listening()
-								? "realtime-voice-modal__mic--listening verevon-voice-pulse"
-								: "",
-						)}
-						aria-label={
-							listening()
-								? props.i18n.tr(
-										"Stopp diktering",
-										"Stop dictation",
-									)
-								: props.i18n.tr(
-										"Start diktering",
-										"Start dictation",
-									)
-						}
-					>
-						<Mic class="size-6" />
-					</button>
-					<Show
-						when={liveText()}
-						fallback={
-							<>
-								<p>
-									{listening()
-										? props.i18n.tr(
-												"Lytter ...",
-												"Listening ...",
-											)
-										: supported()
-											? props.i18n.tr(
-													"Klar for diktering",
-													"Ready for dictation",
-												)
-											: props.i18n.tr(
-													"Stemme støttes ikke i denne nettleseren",
-													"Voice is not supported in this browser",
-												)}
-								</p>
-								<small>
-									{supported()
-										? props.i18n.tr(
-												"Snakk fritt. Teksten settes inn i meldingen.",
-												"Speak freely. The text will be inserted into the message.",
-											)
-										: props.i18n.tr(
-												"Prøv Chrome/Edge, eller skriv meldingen i stedet.",
-												"Try Chrome/Edge, or type the message instead.",
-											)}
-								</small>
-							</>
-						}
-					>
-						<p class="realtime-voice-modal__transcript">
-							{transcript()}
-							<Show when={interim()}>
-								{(text) => <span> {text()}</span>}
-							</Show>
-						</p>
-					</Show>
-				</div>
-
-				<div class="realtime-voice-modal__actions">
-					<button
-						type="button"
-						onClick={() =>
-							listening() ? stop() : startListening()
-						}
-						disabled={!supported()}
-					>
-						{listening()
-							? props.i18n.tr("Stopp", "Stop")
-							: props.i18n.tr(
-									"Start diktering",
-									"Start dictation",
-								)}
-					</button>
-					<button
-						type="button"
-						onClick={insert}
-						disabled={!liveText()}
-					>
-						{props.i18n.tr("Sett inn", "Insert")}
-					</button>
-				</div>
-			</div>
-		</dialog>
-	);
-}
-
 function prefersReducedMotion() {
 	return (
 		typeof window.matchMedia === "function" &&
@@ -3765,6 +4055,22 @@ function createFilePreviewUrl(file: File) {
 	return URL.createObjectURL(file);
 }
 
+/**
+ * Sibling of createFilePreviewUrl for a Blob that never was a browser File —
+ * the connector-attach picker builds one from a fetched provider file's
+ * base64 content or from a synthesized mail/calendar text block.
+ */
+function createFilePreviewUrlFromBlob(blob: Blob) {
+	if (
+		typeof URL === "undefined" ||
+		typeof URL.createObjectURL !== "function"
+	) {
+		return "";
+	}
+
+	return URL.createObjectURL(blob);
+}
+
 function revokeFilePreviewUrl(file: ComposerFile) {
 	if (
 		!file.url ||
@@ -3799,7 +4105,10 @@ function AttachmentPreview(props: {
 				<div class="dashboard-composer-attachments__list">
 					<For each={props.attachments}>
 						{(attachment) => (
-							<div class="dashboard-composer-attachment">
+							<div
+								class="dashboard-composer-attachment"
+								data-attachment-source={attachment.source}
+							>
 								<Show
 									when={
 										attachment.type.startsWith("image/") &&
@@ -3884,6 +4193,35 @@ function responseModeReceiptLabel(
 	return option ? i18n.tr(option.label.no, option.label.en) : mode;
 }
 
+const CONNECTOR_SOURCE_LABELS: Record<ComposerAttachmentSource, { no: string; en: string }> = {
+	onedrive: { no: "OneDrive", en: "OneDrive" },
+	gdrive: { no: "Google Disk", en: "Google Drive" },
+	gmail: { no: "Gmail", en: "Gmail" },
+	outlook: { no: "Outlook", en: "Outlook" },
+	gcal: { no: "Google Kalender", en: "Google Calendar" },
+	"outlook-cal": { no: "Outlook-kalender", en: "Outlook Calendar" },
+};
+
+/** "(1 fra OneDrive, 1 fra Outlook)" — empty string when no attachment in
+ * the turn carries provenance (an ordinary local upload/paste/screenshot
+ * turn stays byte-identical to today's receipt line). */
+function connectorSourceBreakdown(
+	sources: Array<ComposerAttachmentSource | undefined>,
+	i18n: ReturnType<typeof useI18n>,
+): string {
+	const counts = new Map<ComposerAttachmentSource, number>();
+	for (const source of sources) {
+		if (!source) continue;
+		counts.set(source, (counts.get(source) ?? 0) + 1);
+	}
+	if (counts.size === 0) return "";
+	const parts = Array.from(counts.entries()).map(([source, count]) => {
+		const label = CONNECTOR_SOURCE_LABELS[source];
+		return i18n.tr(`${count} fra ${label.no}`, `${count} from ${label.en}`);
+	});
+	return ` (${parts.join(", ")})`;
+}
+
 function TurnReceipt(props: {
 	i18n: ReturnType<typeof useI18n>;
 	turn: ComposerTurn;
@@ -3917,6 +4255,7 @@ function TurnReceipt(props: {
 								`${props.turn.files.length} vedlegg lagt til.`,
 								`${props.turn.files.length} attachment${props.turn.files.length === 1 ? "" : "s"} added.`,
 							)}
+							{connectorSourceBreakdown(props.turn.fileSources, props.i18n)}
 						</small>
 					</Show>
 				</div>
@@ -4199,10 +4538,15 @@ function HistoryPanel(props: {
 function SettingsPanel(props: {
 	i18n: ReturnType<typeof useI18n>;
 	onAddFiles: () => void;
+	onAttachFile: (file: ComposerFile) => void;
 	onScreenshot: () => void;
 	onSettingsChange: (settings: ComposerSettings) => void;
 	position: PanelPosition;
 	settings: ComposerSettings;
+	/** ZDR gate (connector-picker spec §4): a temporary-chat turn must never
+	 * be able to pull in durable-account connector content — fail closed by
+	 * disabling the picker's attach action, not just hiding a row. */
+	temporaryChat: boolean;
 }) {
 	const [view, setView] = createSignal<SettingsView>("main");
 	const currentLangLabel = () => {
@@ -4349,6 +4693,20 @@ function SettingsPanel(props: {
 								onClick={() => setView("connectors")}
 								right={<ChevronRight class="size-3.5" />}
 							/>
+							<ComposerMenuRow
+								icon={
+									<UploadCloud
+										class="size-[17px]"
+										strokeWidth={1.7}
+									/>
+								}
+								label={props.i18n.tr(
+									"Fra en tilkoblet kilde",
+									"From a connected source",
+								)}
+								onClick={() => setView("attach-source")}
+								right={<ChevronRight class="size-3.5" />}
+							/>
 						</div>
 					</Match>
 
@@ -4392,6 +4750,22 @@ function SettingsPanel(props: {
 									"Connect more",
 								)}
 								i18n={props.i18n}
+							/>
+						</SettingsSubView>
+					</Match>
+
+					<Match when={view() === "attach-source"}>
+						<SettingsSubView
+							title={props.i18n.tr(
+								"Fra en tilkoblet kilde",
+								"From a connected source",
+							)}
+							onBack={() => setView("main")}
+						>
+							<ConnectorAttachPicker
+								i18n={props.i18n}
+								disabled={props.temporaryChat}
+								onAttach={props.onAttachFile}
 							/>
 						</SettingsSubView>
 					</Match>
@@ -4565,6 +4939,700 @@ function RemoteSettingsItemRow(props: {
 	);
 }
 
+// --- Connector-attach picker ("Fra en tilkoblet kilde") ---
+// Composer entry point for attaching a file, mail message or calendar event
+// read live from a connected OneDrive-personal / Google-My-Drive / Outlook /
+// Gmail / Google-Calendar / Outlook-Calendar connection. SharePoint team-site
+// libraries are explicitly out of scope for this picker (owner decision,
+// connector-picker spec §6.1). See connector-picker.md for the full design.
+
+type ConnectorBrowseKind = "files" | "mail" | "calendar";
+
+/** Un-resolved {no, en} labels, resolved with i18n.tr at render time (inside
+ * JSX, a tracked scope) rather than once at component setup — otherwise a
+ * language switch would leave these three tab labels stale. */
+const CONNECTOR_KIND_OPTIONS: Array<{
+	value: ConnectorBrowseKind;
+	label: { no: string; en: string };
+	icon: Component<LucideProps>;
+}> = [
+	{ value: "files", label: { no: "Filer", en: "Files" }, icon: FileText },
+	{ value: "mail", label: { no: "E-post", en: "Mail" }, icon: Mail },
+	{ value: "calendar", label: { no: "Kalender", en: "Calendar" }, icon: Calendar },
+];
+
+type ConnectorBrowseRow = {
+	id: string;
+	title: string;
+	subtitle?: string;
+	/** Undefined when the provider's listing never carries a size (a native
+	 * Google Doc/Sheet/Slide, or Gmail's message list) — the row shows "—"
+	 * rather than fabricating a number, and the actual cap is still enforced
+	 * server-side on the content fetch either way. */
+	sizeBytes?: number;
+	mimeType?: string;
+	raw: Record<string, unknown>;
+};
+
+function stringOf(value: unknown): string | undefined {
+	return typeof value === "string" && value.trim() ? value : undefined;
+}
+
+function numberOf(value: unknown): number | undefined {
+	return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function recordOf(value: unknown): Record<string, unknown> | undefined {
+	return value && typeof value === "object" && !Array.isArray(value)
+		? (value as Record<string, unknown>)
+		: undefined;
+}
+
+function browseOperationFor(
+	providerKey: "microsoft" | "google",
+	kind: ConnectorBrowseKind,
+): ConnectorBrowseOperation {
+	if (kind === "files") return "drive.files";
+	if (kind === "calendar") return "calendar.events";
+	return providerKey === "microsoft" ? "mail.messages" : "gmail.messages";
+}
+
+/** Graph/Drive/Gmail/Calendar each name their list array differently. */
+function browseResultArray(
+	providerKey: "microsoft" | "google",
+	kind: ConnectorBrowseKind,
+	result: unknown,
+): Record<string, unknown>[] {
+	const record = recordOf(result);
+	if (!record) return [];
+	const key =
+		providerKey === "microsoft"
+			? "value" // Graph list responses always wrap in { value: [...] }
+			: kind === "files"
+				? "files"
+				: kind === "calendar"
+					? "items"
+					: "messages";
+	const array = record[key];
+	return Array.isArray(array)
+		? array.filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object")
+		: [];
+}
+
+function connectorBrowseRow(
+	i18n: ReturnType<typeof useI18n>,
+	providerKey: "microsoft" | "google",
+	kind: ConnectorBrowseKind,
+	item: Record<string, unknown>,
+): ConnectorBrowseRow | null {
+	const id = stringOf(item.id);
+	if (!id) return null;
+
+	if (kind === "files") {
+		if (providerKey === "microsoft") {
+			if (item.folder) return null; // a folder cannot be attached
+			return {
+				id,
+				title: stringOf(item.name) ?? i18n.tr("uten navn", "untitled"),
+				subtitle: formatConnectorRowDate(stringOf(item.lastModifiedDateTime) ?? ""),
+				sizeBytes: numberOf(item.size),
+				mimeType: stringOf(recordOf(item.file)?.mimeType),
+				raw: item,
+			};
+		}
+		const mimeType = stringOf(item.mimeType);
+		if (mimeType === "application/vnd.google-apps.folder") return null;
+		return {
+			id,
+			title: stringOf(item.name) ?? i18n.tr("uten navn", "untitled"),
+			subtitle: formatConnectorRowDate(stringOf(item.modifiedTime) ?? ""),
+			sizeBytes: numberOf(item.size),
+			mimeType,
+			raw: item,
+		};
+	}
+
+	if (kind === "mail") {
+		if (providerKey === "microsoft") {
+			const emailAddress = recordOf(recordOf(item.from)?.emailAddress);
+			const from = emailAddress && (stringOf(emailAddress.name) ?? stringOf(emailAddress.address));
+			return {
+				id,
+				title: stringOf(item.subject) ?? i18n.tr("uten emne", "no subject"),
+				subtitle: from ?? formatConnectorRowDate(stringOf(item.receivedDateTime) ?? ""),
+				raw: item,
+			};
+		}
+		// Gmail's own list endpoint returns only id + threadId (confirmed in
+		// connector-picker spec §1 — a search limitation, not something a
+		// caller-supplied param fixes). A subject/from would have to come
+		// from a further per-message get, which would turn a search result
+		// page into N extra network calls; showing a generic label here
+		// instead of fabricating fields the list never carries is the
+		// honest reading.
+		return { id, title: `${i18n.tr("E-post", "Mail")} ${id.slice(0, 10)}`, raw: item };
+	}
+
+	// calendar
+	if (providerKey === "microsoft") {
+		const start = stringOf(recordOf(item.start)?.dateTime);
+		return {
+			id,
+			title: stringOf(item.subject) ?? i18n.tr("uten tittel", "untitled"),
+			subtitle: start ? formatConnectorRowDate(start) : undefined,
+			raw: item,
+		};
+	}
+	const start = stringOf(recordOf(item.start)?.dateTime) ?? stringOf(recordOf(item.start)?.date);
+	return {
+		id,
+		title: stringOf(item.summary) ?? i18n.tr("uten tittel", "untitled"),
+		subtitle: start ? formatConnectorRowDate(start) : undefined,
+		raw: item,
+	};
+}
+
+function formatConnectorRowDate(value: string): string {
+	if (!value) return "";
+	const date = new Date(value);
+	if (Number.isNaN(date.getTime())) return value;
+	return date.toLocaleString(undefined, {
+		day: "2-digit",
+		month: "2-digit",
+		year: "numeric",
+		hour: "2-digit",
+		minute: "2-digit",
+	});
+}
+
+/** Minimal client-side HTML→text rendering for a calendar event's
+ * description (Graph's `/me/events` never trims/strips the body — see
+ * connector-picker spec §1). Display-quality only; the durable-record
+ * HTML-stripping the mail path relies on lives server-side in
+ * integration-corev2's internal/htmlstrip package. */
+function stripHtmlClient(html: string): string {
+	return html
+		.replace(/<(script|style)[^>]*>[\s\S]*?<\/\1>/gi, " ")
+		.replace(/<br\s*\/?>/gi, "\n")
+		.replace(/<\/(p|div|li)>/gi, "\n")
+		.replace(/<[^>]+>/g, " ")
+		.replace(/&nbsp;/g, " ")
+		.replace(/&amp;/g, "&")
+		.replace(/&lt;/g, "<")
+		.replace(/&gt;/g, ">")
+		.replace(/&quot;/g, '"')
+		.replace(/&#39;/g, "'")
+		.replace(/[ \t]+/g, " ")
+		.replace(/\n{3,}/g, "\n\n")
+		.trim();
+}
+
+function base64ToUint8Array(base64: string): Uint8Array<ArrayBuffer> {
+	const binary = atob(base64);
+	const bytes = new Uint8Array(binary.length);
+	for (let index = 0; index < binary.length; index += 1) {
+		bytes[index] = binary.charCodeAt(index);
+	}
+	return bytes;
+}
+
+/** Synthesizes the mail attachment's plain-text body: "Emne/Fra/Dato" then
+ * the message body. Microsoft's mail.messages.get result is the raw Graph
+ * message (+ an added bodyText field); Google's is a flat synthesized
+ * object — see integration-corev2's service.go for both shapes. */
+function formatConnectorMailText(
+	i18n: ReturnType<typeof useI18n>,
+	providerKey: "microsoft" | "google",
+	result: unknown,
+): { subject: string; text: string } {
+	const record = recordOf(result) ?? {};
+	const bodyText = stringOf(record.bodyText) ?? "";
+	let subject: string;
+	let from: string;
+	let date: string;
+	if (providerKey === "microsoft") {
+		subject = stringOf(record.subject) ?? "";
+		const emailAddress = recordOf(recordOf(record.from)?.emailAddress);
+		from = (emailAddress && (stringOf(emailAddress.name) ?? stringOf(emailAddress.address))) ?? "";
+		date = stringOf(record.receivedDateTime) ?? "";
+	} else {
+		subject = stringOf(record.subject) ?? "";
+		from = stringOf(record.from) ?? "";
+		date = stringOf(record.date) ?? "";
+	}
+	const text = [
+		`${i18n.tr("Emne", "Subject")}: ${subject}`,
+		`${i18n.tr("Fra", "From")}: ${from}`,
+		`${i18n.tr("Dato", "Date")}: ${formatConnectorRowDate(date) || date}`,
+		"",
+		bodyText,
+	].join("\n");
+	return { subject: subject || i18n.tr("uten emne", "no subject"), text };
+}
+
+/** Synthesizes the calendar attachment's plain-text body. Calendar never
+ * calls the content endpoint — the browse step's row already carries the
+ * full event (connector-picker spec §1's finding that neither provider
+ * trims the event resource), so this reads straight from `row.raw`. */
+function formatConnectorEventText(
+	i18n: ReturnType<typeof useI18n>,
+	providerKey: "microsoft" | "google",
+	raw: Record<string, unknown>,
+): { title: string; text: string } {
+	let title: string;
+	let time: string;
+	let location: string;
+	let attendees: string;
+	let description: string;
+	if (providerKey === "microsoft") {
+		title = stringOf(raw.subject) ?? "";
+		time = stringOf(recordOf(raw.start)?.dateTime) ?? "";
+		location = stringOf(recordOf(raw.location)?.displayName) ?? "";
+		attendees = (Array.isArray(raw.attendees) ? raw.attendees : [])
+			.map((entry) => {
+				const emailAddress = recordOf(recordOf(entry)?.emailAddress);
+				return emailAddress && (stringOf(emailAddress.name) ?? stringOf(emailAddress.address));
+			})
+			.filter((value): value is string => Boolean(value))
+			.join(", ");
+		const bodyField = recordOf(raw.body);
+		const rawDescription = bodyField ? (stringOf(bodyField.content) ?? "") : "";
+		description = stringOf(bodyField?.contentType)?.toLowerCase() === "html"
+			? stripHtmlClient(rawDescription)
+			: rawDescription;
+	} else {
+		title = stringOf(raw.summary) ?? "";
+		time = stringOf(recordOf(raw.start)?.dateTime) ?? stringOf(recordOf(raw.start)?.date) ?? "";
+		location = stringOf(raw.location) ?? "";
+		attendees = (Array.isArray(raw.attendees) ? raw.attendees : [])
+			.map((entry) => {
+				const record = recordOf(entry);
+				return record && (stringOf(record.displayName) ?? stringOf(record.email));
+			})
+			.filter((value): value is string => Boolean(value))
+			.join(", ");
+		description = stringOf(raw.description) ?? "";
+	}
+	const text = [
+		`${i18n.tr("Møte", "Meeting")}: ${title}`,
+		`${i18n.tr("Tid", "Time")}: ${formatConnectorRowDate(time) || time}`,
+		`${i18n.tr("Sted", "Location")}: ${location}`,
+		`${i18n.tr("Deltakere", "Attendees")}: ${attendees}`,
+		"",
+		description,
+	].join("\n");
+	return { title: title || i18n.tr("uten tittel", "untitled"), text };
+}
+
+const CONNECTOR_TEXT_EXTRACT_EXTENSIONS = /\.(pdf|docx|xlsx|pptx)$/i;
+const CONNECTOR_TEXT_INGEST_EXTENSIONS = /\.(txt|md|markdown|csv|json|html|htm)$/i;
+
+/**
+ * Turns one picked search result into a ComposerFile pushed onto the same
+ * `files` signal a local upload uses (connector-picker spec §2.4 step 5) —
+ * everything downstream (AttachmentPreview, removeFile, submit) is reused
+ * unchanged. Throws a localized, user-facing message on any failure; the
+ * caller is responsible for catching it and never lets a bad pick silently
+ * become an unreadable chip.
+ */
+async function buildComposerFileFromPick(input: {
+	i18n: ReturnType<typeof useI18n>;
+	orgId: string;
+	tab: ConnectorPickerTab;
+	kind: ConnectorBrowseKind;
+	row: ConnectorBrowseRow;
+}): Promise<ComposerFile> {
+	const { i18n, orgId, tab, kind, row } = input;
+	const fetchedAt = new Date().toISOString();
+	const fileId = `connector-${tab.providerKey}-${row.id}-${Date.now()}`;
+
+	if (kind === "calendar") {
+		const { title, text } = formatConnectorEventText(i18n, tab.providerKey, row.raw);
+		const blob = new Blob([text], { type: "text/plain" });
+		return {
+			id: fileId,
+			name: `${i18n.tr("Kalender", "Calendar")} – ${title}.txt`,
+			size: blob.size,
+			type: "text/plain",
+			url: createFilePreviewUrlFromBlob(blob),
+			source: tab.providerKey === "microsoft" ? "outlook-cal" : "gcal",
+			sourceItemId: row.id,
+			connectionId: tab.connectionId,
+			fetchedAt,
+		};
+	}
+
+	if (kind === "mail") {
+		const operation: ConnectorContentOperation =
+			tab.providerKey === "microsoft" ? "mail.messages.get" : "gmail.messages.get";
+		const params = tab.providerKey === "microsoft" ? { messageId: row.id } : { id: row.id };
+		const { result } = await fetchConnectionContent(orgId, tab.connectionId, operation, params);
+		const { subject, text } = formatConnectorMailText(i18n, tab.providerKey, result);
+		const blob = new Blob([text], { type: "text/plain" });
+		return {
+			id: fileId,
+			name: `${i18n.tr("E-post", "Mail")} – ${subject}.txt`,
+			size: blob.size,
+			type: "text/plain",
+			url: createFilePreviewUrlFromBlob(blob),
+			source: tab.providerKey === "microsoft" ? "outlook" : "gmail",
+			sourceItemId: row.id,
+			connectionId: tab.connectionId,
+			fetchedAt,
+		};
+	}
+
+	// files
+	const operation: ConnectorContentOperation = "drive.file.content";
+	const params =
+		tab.providerKey === "microsoft"
+			? { itemId: row.id }
+			: { fileId: row.id, mimeType: row.mimeType };
+	const { result } = await fetchConnectionContent(orgId, tab.connectionId, operation, params);
+	const content = recordOf(result) ?? {};
+	const contentBase64 = stringOf(content.content_base64) ?? "";
+	const mimeType = stringOf(content.mime_type) || row.mimeType || "application/octet-stream";
+	const exportExtension = stringOf(content.export_extension) ?? "";
+	const name =
+		exportExtension && !row.title.toLowerCase().endsWith(exportExtension)
+			? `${row.title}${exportExtension}`
+			: row.title;
+
+	if (mimeType.startsWith("image/")) {
+		return {
+			id: fileId,
+			name,
+			size: numberOf(content.size) ?? 0,
+			type: mimeType,
+			url: `data:${mimeType};base64,${contentBase64}`,
+			source: tab.providerKey === "microsoft" ? "onedrive" : "gdrive",
+			sourceItemId: row.id,
+			connectionId: tab.connectionId,
+			fetchedAt,
+		};
+	}
+
+	const bytes = base64ToUint8Array(contentBase64);
+	const blob = new Blob([bytes], { type: mimeType });
+	let extractedText: string | undefined;
+	if (CONNECTOR_TEXT_EXTRACT_EXTENSIONS.test(name)) {
+		// Pre-flight readability check (connector-picker spec §6.2): the
+		// network fetch already happened above, so extracting immediately is
+		// free and lets the picker refuse a bad file before it becomes a
+		// chip, instead of failing silently at send time.
+		try {
+			extractedText = (await extractChatDocument(name, contentBase64, mimeType)).content;
+		} catch {
+			throw new Error(
+				i18n.tr(
+					`Kunne ikke lese «${name}». Prøv igjen eller velg en annen fil.`,
+					`Could not read "${name}". Try again or choose a different file.`,
+				),
+			);
+		}
+	} else if (mimeType.startsWith("text/") || CONNECTOR_TEXT_INGEST_EXTENSIONS.test(name)) {
+		// Already have the bytes — decoding locally is free, no second
+		// network round trip needed for a plain-text file.
+		extractedText = new TextDecoder("utf-8").decode(bytes).trim();
+	}
+
+	return {
+		id: fileId,
+		name,
+		size: blob.size,
+		type: mimeType,
+		url: createFilePreviewUrlFromBlob(blob),
+		...(extractedText !== undefined ? { extractedText } : {}),
+		source: tab.providerKey === "microsoft" ? "onedrive" : "gdrive",
+		sourceItemId: row.id,
+		connectionId: tab.connectionId,
+		fetchedAt,
+	};
+}
+
+function ConnectorAttachPicker(props: {
+	i18n: ReturnType<typeof useI18n>;
+	disabled?: boolean;
+	onAttach: (file: ComposerFile) => void;
+}) {
+	const orgId = () => getSession().activeOrg?.id?.trim() || "";
+	// ZDR gate: while disabled (temporary chat), the source returns null and
+	// createResource never fetches at all — fail closed all the way down,
+	// not just at the UI layer (connector-picker spec §4/§5.10).
+	const [tabsResource] = createResource(
+		() => (props.disabled ? null : orgId()),
+		(id) => (id ? listConnectorPickerTabs(id) : Promise.resolve([])),
+	);
+	const tabs = createMemo(() => tabsResource() ?? []);
+
+	const [activeConnectionId, setActiveConnectionId] = createSignal<string | null>(null);
+	createEffect(
+		() => tabs(),
+		(list) => {
+			const first = list[0];
+			if (!first) return;
+			if (!list.some((tab) => tab.connectionId === activeConnectionId())) {
+				setActiveConnectionId(first.connectionId);
+			}
+		},
+	);
+	const activeTab = createMemo(() => tabs().find((tab) => tab.connectionId === activeConnectionId()) ?? null);
+
+	const [kind, setKind] = createSignal<ConnectorBrowseKind>("files");
+	const [queryInput, setQueryInput] = createSignal("");
+	const [debouncedQuery, setDebouncedQuery] = createSignal("");
+	let debounceHandle: ReturnType<typeof setTimeout> | undefined;
+	onCleanup(() => {
+		if (debounceHandle) clearTimeout(debounceHandle);
+	});
+	const onQueryInput = (value: string) => {
+		setQueryInput(value);
+		if (debounceHandle) clearTimeout(debounceHandle);
+		debounceHandle = setTimeout(() => setDebouncedQuery(value), 300);
+	};
+
+	const [rowsResource] = createResource(
+		() => {
+			const tab = activeTab();
+			return tab ? ([orgId(), tab.connectionId, tab.providerKey, kind(), debouncedQuery()] as const) : null;
+		},
+		async ([id, connectionId, providerKey, activeKind, query]) => {
+			const { result } = await browseConnection(
+				id,
+				connectionId,
+				browseOperationFor(providerKey, activeKind),
+				query ? { query } : {},
+			);
+			return browseResultArray(providerKey, activeKind, result)
+				.map((item) => connectorBrowseRow(props.i18n, providerKey, activeKind, item))
+				.filter((row): row is ConnectorBrowseRow => row !== null);
+		},
+	);
+
+	const [pendingRowId, setPendingRowId] = createSignal<string | null>(null);
+	const [pickError, setPickError] = createSignal<string | null>(null);
+
+	const pick = async (row: ConnectorBrowseRow) => {
+		if (props.disabled || pendingRowId()) return;
+		const tab = activeTab();
+		const id = orgId();
+		if (!tab || !id) return;
+		setPendingRowId(row.id);
+		setPickError(null);
+		try {
+			const file = await buildComposerFileFromPick({ i18n: props.i18n, orgId: id, tab, kind: kind(), row });
+			props.onAttach(file);
+		} catch (err) {
+			if (
+				err instanceof ApiError
+				&& (err.code === "personal_connection_forbidden" || err.code === "personal_connection_no_delegated_user")
+			) {
+				// Owner ruling (5): the connection is no longer the caller's own
+				// (e.g. ownership changed mid-session) — a clear, specific
+				// message via the shared error-copy seam, not the raw English
+				// gateway text and not the generic stale-pick copy below.
+				setPickError(translateApiError(err, props.i18n.tr));
+			} else if (err instanceof ApiError && err.status === 404) {
+				setPickError(
+					props.i18n.tr(
+						"Elementet er ikke lenger tilgjengelig. Søk på nytt.",
+						"That item is no longer available. Search again.",
+					),
+				);
+			} else if (err instanceof Error) {
+				setPickError(err.message);
+			} else {
+				setPickError(translateApiError(err, props.i18n.tr));
+			}
+		} finally {
+			setPendingRowId(null);
+		}
+	};
+
+
+	return (
+		<div class="dashboard-composer-connector-picker">
+			<Show when={props.disabled}>
+				<div class="dashboard-composer-settings-empty">
+					{props.i18n.tr(
+						"Ikke tilgjengelig i midlertidig chat.",
+						"Not available in temporary chat.",
+					)}
+				</div>
+			</Show>
+			<Show when={!props.disabled}>
+				<Show
+					when={!tabsResource.loading}
+					fallback={
+						<div class="dashboard-composer-settings-loading">
+							<Loader2 class="size-3.5" />
+							<span>{props.i18n.tr("Laster ...", "Loading ...")}</span>
+						</div>
+					}
+				>
+					<Show
+						when={tabs().length > 0}
+						fallback={
+							<div class="dashboard-composer-settings-empty">
+								{props.i18n.tr(
+									"Ingen tilkoblede kilder ennå. Koble til OneDrive, Google Drive, Outlook eller Gmail under Koblinger.",
+									"No connected sources yet. Connect OneDrive, Google Drive, Outlook or Gmail under Connectors.",
+								)}
+							</div>
+						}
+					>
+						<div class="dashboard-composer-connector-tabs" role="tablist">
+							<For each={tabs()}>
+								{(tab) => (
+									<button
+										type="button"
+										role="tab"
+										aria-selected={activeTab()?.connectionId === tab.connectionId ? "true" : "false"}
+										class={cn("dashboard-composer-connector-tab", {
+											"dashboard-composer-connector-tab--active":
+												activeTab()?.connectionId === tab.connectionId,
+										})}
+										onClick={() => setActiveConnectionId(tab.connectionId)}
+									>
+										{tab.label}
+									</button>
+								)}
+							</For>
+						</div>
+
+						<div class="dashboard-composer-connector-kinds" role="tablist">
+							<For each={CONNECTOR_KIND_OPTIONS}>
+								{(option) => (
+									<button
+										type="button"
+										role="tab"
+										aria-selected={kind() === option.value ? "true" : "false"}
+										class={cn("dashboard-composer-connector-kind", {
+											"dashboard-composer-connector-kind--active": kind() === option.value,
+										})}
+										onClick={() => setKind(option.value)}
+									>
+										<Dynamic component={option.icon} class="size-3.5" strokeWidth={1.8} />
+										<span>{props.i18n.tr(option.label.no, option.label.en)}</span>
+									</button>
+								)}
+							</For>
+						</div>
+
+						<input
+							type="search"
+							class="dashboard-composer-connector-search"
+							placeholder={props.i18n.tr("Søk ...", "Search ...")}
+							value={queryInput()}
+							onInput={(event) => onQueryInput(event.currentTarget.value)}
+						/>
+
+						<Show when={pickError()}>
+							<div class="dashboard-composer-settings-error">
+								<p>{pickError()}</p>
+							</div>
+						</Show>
+
+						<div class="dashboard-composer-connector-results">
+							<Show
+								when={!rowsResource.loading}
+								fallback={
+									<div class="dashboard-composer-settings-loading">
+										<Loader2 class="size-3.5" />
+										<span>{props.i18n.tr("Søker ...", "Searching ...")}</span>
+									</div>
+								}
+							>
+								<Show
+									when={!rowsResource.error}
+									fallback={
+										<div class="dashboard-composer-settings-error">
+											{/* Owner ruling (5): a stale tab whose connection stopped being the
+											   caller's own (personal_connection_forbidden /
+											   personal_connection_no_delegated_user) gets that specific
+											   message; every other browse failure keeps the generic one. */}
+											<p>
+												{translateApiError(rowsResource.error, props.i18n.tr, {
+													no: "Kunne ikke søke.",
+													en: "Could not search.",
+												})}
+											</p>
+										</div>
+									}
+								>
+									<Show
+										when={(rowsResource() ?? []).length > 0}
+										fallback={
+											<div class="dashboard-composer-settings-empty">
+												{props.i18n.tr("Ingen treff.", "No results.")}
+											</div>
+										}
+									>
+										<For each={rowsResource()}>
+											{(row) => {
+												const overCap = () =>
+													typeof row.sizeBytes === "number" && row.sizeBytes > 1_000_000;
+												return (
+													<button
+														type="button"
+														disabled={overCap() || pendingRowId() !== null}
+														title={
+															overCap()
+																? props.i18n.tr(
+																		"Filen er over 1 MB og kan ikke legges ved.",
+																		"The file is over 1MB and cannot be attached.",
+																	)
+																: undefined
+														}
+														class={cn(
+															"verevon-menu-row dashboard-composer-settings-data-row dashboard-composer-connector-row",
+															{ "dashboard-composer-connector-row--disabled": overCap() },
+														)}
+														onClick={() => void pick(row)}
+													>
+														<span class="dashboard-composer-settings-item-icon">
+															<Show
+																when={pendingRowId() === row.id}
+																fallback={
+																	<Dynamic
+																		component={
+																			CONNECTOR_KIND_OPTIONS.find((o) => o.value === kind())?.icon ?? FileText
+																		}
+																		class="size-3.5"
+																	/>
+																}
+															>
+																<Loader2 class="size-3.5 dashboard-composer-connector-spinner" />
+															</Show>
+														</span>
+														<span class="dashboard-composer-settings-item-copy">
+															<span class="verevon-menu-label">{row.title}</span>
+															<Show when={row.subtitle}>
+																<span class="verevon-menu-meta">{row.subtitle}</span>
+															</Show>
+														</span>
+														<Show when={kind() === "files"}>
+															<span class="verevon-menu-meta dashboard-composer-connector-size">
+																{typeof row.sizeBytes === "number"
+																	? formatFileSize(row.sizeBytes)
+																	: "—"}
+															</span>
+														</Show>
+													</button>
+												);
+											}}
+										</For>
+									</Show>
+								</Show>
+							</Show>
+						</div>
+					</Show>
+				</Show>
+			</Show>
+		</div>
+	);
+}
+
 function SplitText(props: { text: string }) {
 	return (
 		<span>
@@ -4585,12 +5653,26 @@ function SplitText(props: { text: string }) {
 type ComposerIconButtonVariant = "chip" | "toolbar";
 
 function ComposerIconButton(props: {
+	class?: string;
 	active?: boolean;
+	/** For returning focus here, e.g. when a dialog this button opened closes. */
+	buttonRef?: (element: HTMLButtonElement) => void;
 	children: JSX.Element;
+	/** Id of an element that says more, e.g. why the button is unavailable. */
+	describedBy?: string;
 	disabled?: boolean;
 	expanded?: boolean;
+	hasPopup?: "dialog";
 	label: string;
 	onClick: () => void;
+	/** Tooltip when it should say more than the label, e.g. why the button is disabled. */
+	title?: string;
+	/**
+	 * Off, but still focusable and pressable (aria-disabled), so the reason in
+	 * `describedBy` is announced and `onClick` can show it. `disabled` is for
+	 * a control that is only briefly off and needs no explanation.
+	 */
+	unavailable?: boolean;
 	variant: ComposerIconButtonVariant;
 }) {
 	const baseClass = () =>
@@ -4600,17 +5682,22 @@ function ComposerIconButton(props: {
 
 	return (
 		<button
+			ref={(element) => props.buttonRef?.(element)}
 			type="button"
 			aria-label={props.label}
 			aria-pressed={props.active ? "true" : "false"}
 			aria-expanded={props.expanded == null ? undefined : props.expanded ? "true" : "false"}
+			aria-haspopup={props.hasPopup}
+			aria-disabled={props.unavailable ? "true" : undefined}
+			aria-describedby={props.describedBy}
 			disabled={props.disabled}
-			title={props.label}
+			title={props.title ?? props.label}
 			onClick={() => {
 				if (!props.disabled) props.onClick();
 			}}
 			class={cn(
 				baseClass(),
+				props.class,
 				props.active ? `${baseClass()}--active` : "",
 			)}
 		>

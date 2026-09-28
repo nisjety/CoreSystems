@@ -142,7 +142,17 @@ async fn prepared_direct_failure_stream(
 /// honest error goes out on the live channel instead — and the run is still
 /// durably terminalized, because a swallowed failure here would leave the caller
 /// on a dead stream and the run queued forever.
-#[allow(clippy::too_many_arguments)] // mirrors prepared_direct_failure_stream, plus the live channel
+///
+/// The error is BUFFERED under the stream's shared cursor like every other
+/// frame. It used to go out on the live channel only, so a client that had
+/// reloaded during source review or repair resumed into a stream whose honest
+/// "not published" outcome it could never receive, and settled the turn as a
+/// lost connection instead.
+///
+/// The turn's `turn_timing` frame goes out just before the error, with the
+/// outcome the failure code stands for. The error is the stream's last frame,
+/// so the buffer is then marked ended (see [`end_resume_buffer`]).
+#[allow(clippy::too_many_arguments)] // mirrors prepared_direct_failure_stream, plus the live channel, its resume buffer and the turn clock
 async fn emit_prepared_failure(
     tx: &tokio::sync::mpsc::Sender<Result<Event, Infallible>>,
     state: &AppState,
@@ -152,6 +162,8 @@ async fn emit_prepared_failure(
     failure_code: &'static str,
     message: &str,
     retryable: bool,
+    timing: &crate::turn_timing::TurnTiming,
+    resume: (&crate::stream_buffer::StreamBufferStore, &str, &mut u64, &[String]),
 ) {
     let terminalized = terminalize_prepared_failure(state, run, bearer, failure_code).await;
     let (code, message, retryable) =
@@ -161,7 +173,35 @@ async fn emit_prepared_failure(
         message: message.to_owned(),
         retryable,
     };
-    let _ = tx.send(Ok(event.to_sse(request_id))).await;
+    let (buffers, buffer_key, seq, features) = resume;
+    let outcome = crate::turn_timing::Outcome::of_failure(failure_code);
+    emit_turn_timing(
+        tx,
+        timing,
+        outcome,
+        request_id,
+        (buffers, buffer_key, &mut *seq, features),
+    )
+    .await;
+    emit_and_buffer(tx, buffers, buffer_key, seq, features, request_id, event).await;
+    end_resume_buffer(buffers, buffer_key, *seq).await;
+}
+
+/// Mark the resume buffer of a stream that closed on an `error` or `stopped`
+/// frame, once that frame is buffered and nothing else will be.
+///
+/// Only a completed stream used to finish its buffer. A resume of any other
+/// kept tailing it: a client that had already seen the error, or one on
+/// another replica, waited out the whole inactivity window, and a failure
+/// such as `session_terminalization_failed` left the buffer looking live.
+async fn end_resume_buffer(
+    buffers: &crate::stream_buffer::StreamBufferStore,
+    buffer_key: &str,
+    seq: u64,
+) {
+    buffers
+        .end(buffer_key, crate::stream_buffer::StreamEnd { seq })
+        .await;
 }
 
 async fn terminalize_prepared_failure(
@@ -191,9 +231,91 @@ async fn terminalize_prepared_failure(
     }
 }
 
+/// Emit a ChatGPT-subscription failure as the stream's terminal `error`,
+/// after durably terminalizing the run with its code.
+///
+/// The twin of [`emit_prepared_failure`] for a failure that carries timing:
+/// the frame is a [`crate::sse_events::ChatEvent::SubscriptionError`], so the
+/// SPA can say when a retry can work. If terminalization fails, the client is
+/// told that instead, exactly as `emit_prepared_failure` would.
+#[allow(clippy::too_many_arguments)] // mirrors emit_prepared_failure
+async fn emit_subscription_failure(
+    tx: &tokio::sync::mpsc::Sender<Result<Event, Infallible>>,
+    state: &AppState,
+    run: &crate::session_flow::SessionRun,
+    bearer: &VerifiedModelBearer,
+    request_id: &str,
+    failure: &crate::subscription_failure::SubscriptionFailure,
+    message: &str,
+    timing: &crate::turn_timing::TurnTiming,
+    resume: (&crate::stream_buffer::StreamBufferStore, &str, &mut u64, &[String]),
+) {
+    let terminalized = terminalize_prepared_failure(state, run, bearer, failure.code).await;
+    let event = if terminalized {
+        crate::sse_events::ChatEvent::subscription_error(failure, message.to_owned())
+    } else {
+        let (code, message, retryable) = prepared_failure_report(failure.code, message, false, false);
+        crate::sse_events::ChatEvent::Error {
+            code: code.to_owned(),
+            message: message.to_owned(),
+            retryable,
+        }
+    };
+    let (buffers, buffer_key, seq, features) = resume;
+    emit_turn_timing(
+        tx,
+        timing,
+        crate::turn_timing::Outcome::of_failure(failure.code),
+        request_id,
+        (buffers, buffer_key, &mut *seq, features),
+    )
+    .await;
+    emit_and_buffer(tx, buffers, buffer_key, seq, features, request_id, event).await;
+    end_resume_buffer(buffers, buffer_key, *seq).await;
+}
+
 /// Safe public explanations for private draft failures. Keep an elapsed deadline
 /// distinct from a rejected candidate without exposing source/provider text.
-fn tool_phase_failure(reason: &str) -> (&'static str, &'static str) {
+/// A model service that did not answer during the check is a third case: the
+/// draft was never judged, so the user is not told to change it. `subscription`
+/// names the selected subscription connection instead of a model service.
+///
+/// A subscription reason (a typed refusal, or the generic
+/// `subscription_route_unavailable`) is worded by `subscription_failure`, from
+/// the refusal the tool loop kept on the sink (`typed`) when it matches, and
+/// carries that code's own retryability: a usage limit is not retried as it
+/// stands. Returns the code, the explanation and whether a retry is offered.
+fn tool_phase_failure(
+    reason: &str,
+    subscription: bool,
+    typed: Option<&(
+        crate::subscription_failure::SubscriptionFailure,
+        crate::subscription_failure::FailureContext,
+    )>,
+) -> (&'static str, String, bool) {
+    if let Some(code) = crate::subscription_failure::known_code(reason) {
+        let (failure, context) = typed
+            .filter(|(failure, _)| failure.code == code)
+            .map_or_else(
+                || {
+                    (
+                        crate::subscription_failure::SubscriptionFailure::bare(code),
+                        crate::subscription_failure::FailureContext::ToolRound,
+                    )
+                },
+                |(failure, context)| (failure.clone(), *context),
+            );
+        return (
+            code,
+            crate::subscription_failure::message(&failure, context),
+            crate::subscription_failure::retryable(code),
+        );
+    }
+    let (code, message) = tool_phase_explanation(reason, subscription);
+    (code, message.to_owned(), true)
+}
+
+fn tool_phase_explanation(reason: &str, subscription: bool) -> (&'static str, &'static str) {
     match reason {
         crate::result_validation::VALIDATION_TIMEOUT => (
             crate::result_validation::VALIDATION_TIMEOUT,
@@ -203,9 +325,13 @@ fn tool_phase_failure(reason: &str) -> (&'static str, &'static str) {
             crate::result_validation::VALIDATION_FAILED,
             "Et utkast kunne ikke kontrolleres mot kildene innen forsøksgrensen. Dette utkastet er ikke publisert. Prøv igjen med en mindre endring eller tydeligere kilder.",
         ),
-        "subscription_route_unavailable" => (
-            "subscription_route_unavailable",
-            "Den valgte ChatGPT-abonnementstilkoblingen kunne ikke fullføre. Koble til abonnementet på nytt og prøv igjen. Ingen annen modell er brukt.",
+        crate::result_validation::VALIDATION_UNAVAILABLE if subscription => (
+            crate::result_validation::VALIDATION_UNAVAILABLE,
+            "Den valgte ChatGPT-abonnementstilkoblingen svarte ikke mens utkastet ble kontrollert mot kildene. Dette utkastet er ikke publisert. Prøv igjen om litt. Ingen annen modell er brukt.",
+        ),
+        crate::result_validation::VALIDATION_UNAVAILABLE => (
+            crate::result_validation::VALIDATION_UNAVAILABLE,
+            "Modelltjenesten svarte ikke mens utkastet ble kontrollert mot kildene. Dette utkastet er ikke publisert. Prøv igjen om litt.",
         ),
         _ => ("audit_persistence_failed", "Tool action could not be durably audited"),
     }
@@ -349,6 +475,24 @@ async fn emit_and_buffer(
     *seq += 1;
 }
 
+/// Emit the turn's `turn_timing` frame (Q14), once: just before its terminal
+/// `done`, `error` or `stopped` frame, while the stream is still open.
+/// Buffered like every other frame, so a resumed stream replays it, and gated
+/// exactly like `usage`. A second terminal frame finds it already sent.
+async fn emit_turn_timing(
+    tx: &tokio::sync::mpsc::Sender<Result<Event, Infallible>>,
+    timing: &crate::turn_timing::TurnTiming,
+    outcome: crate::turn_timing::Outcome,
+    req_id: &str,
+    resume: (&crate::stream_buffer::StreamBufferStore, &str, &mut u64, &[String]),
+) {
+    if let Some(report) = timing.report(outcome) {
+        let (buffers, buffer_key, seq, features) = resume;
+        let event = crate::sse_events::ChatEvent::TurnTiming { report };
+        emit_and_buffer(tx, buffers, buffer_key, seq, features, req_id, event).await;
+    }
+}
+
 /// True when a model turn's final chunk carries no usable answer after a
 /// genuine user prompt — the condition F-01 (chat-parity audit §3.1) needs
 /// caught BEFORE the empty output is scored and verified like a real answer.
@@ -385,6 +529,32 @@ fn subscription_scoped_request(mut request: InferRequest, route: &InferRequest) 
     request
 }
 
+/// Let a streamed answer after tool rounds share the last round's prompt
+/// prefix (`prompt_context`, stable prompt order only).
+///
+/// The tools lead an `OpenAI` prompt, so a tool-less answer shares no prefix
+/// with the rounds just before it. Resending the last round's tools with
+/// `tool_choice: "none"` makes it repeat everything but the round's closing
+/// instruction, and the model still cannot call a tool. `enabled` carries the
+/// option and whether this answer streams from a provider at all (not a
+/// synthetic artifact answer or a checked word-range candidate). Never on the
+/// subscription route, whose broker takes no tools on a streamed answer, and
+/// not with a structured-output schema, which the rounds did not send.
+fn share_tool_round_prefix(
+    request: &mut InferRequest,
+    enabled: bool,
+    last_round_tools: Vec<ToolDefinition>,
+) {
+    if enabled
+        && request.subscription_connection_id.trim().is_empty()
+        && request.structured_output_schema.trim().is_empty()
+        && !last_round_tools.is_empty()
+    {
+        request.tools = last_round_tools;
+        "none".clone_into(&mut request.tool_choice);
+    }
+}
+
 #[cfg(test)]
 mod subscription_route_tests {
     use super::*;
@@ -402,6 +572,56 @@ mod subscription_route_tests {
         let ordinary=subscription_scoped_request(InferRequest {model:"gpt-4o-mini".into(),..Default::default()}, &InferRequest::default());
         assert_eq!(ordinary.model,"gpt-4o-mini");
     }
+
+    #[test]
+    fn an_answer_resends_the_tool_rounds_tools_only_when_it_can_share_their_prefix() {
+        let tools = vec![
+            ToolDefinition {
+                name: "knowledge_search".into(),
+                ..Default::default()
+            },
+            ToolDefinition {
+                name: "finish_tool_phase".into(),
+                ..Default::default()
+            },
+        ];
+        let answer = || InferRequest {
+            model: "gpt-5-mini".into(),
+            provider_hint: "azure-openai".into(),
+            ..Default::default()
+        };
+
+        let mut shared = answer();
+        share_tool_round_prefix(&mut shared, true, tools.clone());
+        assert_eq!(shared.tools, tools, "the same tools, in the same order");
+        assert_eq!(shared.tool_choice, "none", "and the model cannot call one");
+
+        // Option off, or no provider stream to share with: the request is untouched.
+        let mut off = answer();
+        share_tool_round_prefix(&mut off, false, tools.clone());
+        assert_eq!(off, answer());
+        // No tool round reached the model.
+        let mut none = answer();
+        share_tool_round_prefix(&mut none, true, Vec::new());
+        assert_eq!(none, answer());
+        // The subscription route, and a structured-output answer.
+        let subscription = || InferRequest {
+            subscription_connection_id: "conn-1".into(),
+            provider_hint: "openai-codex-subscription".into(),
+            model: "gpt-5.6-terra".into(),
+            ..Default::default()
+        };
+        let mut codex = subscription();
+        share_tool_round_prefix(&mut codex, true, tools.clone());
+        assert_eq!(codex, subscription());
+        let schema = || InferRequest {
+            structured_output_schema: r#"{"type":"object"}"#.into(),
+            ..answer()
+        };
+        let mut structured = schema();
+        share_tool_round_prefix(&mut structured, true, tools);
+        assert_eq!(structured, schema());
+    }
 }
 
 pub async fn invoke_stream_sse(
@@ -418,6 +638,16 @@ pub async fn invoke_stream_sse(
     axum::Json(req): axum::Json<InvokeRequest>,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
     let request_id = new_ulid();
+    // The turn's clock starts with its id, so admission shares the origin of
+    // everything after it (`turn_timing`). It moves into the stream task below.
+    let timing = crate::turn_timing::TurnTiming::start(&request_id);
+    // Every rejection before the stream task starts is a failed turn for the
+    // timing record. Shadowing the helper means a new early return cannot
+    // forget to say so.
+    let error_stream = |request_id: &str, code: &str, message: &str, retryable: bool| {
+        timing.fail();
+        error_stream(request_id, code, message, retryable)
+    };
     // Resolve the model the SAME way as the unary path (DEFAULT_MODEL env), not
     // the literal "default" — providers have no deployment named "default", so
     // sending it 404s and exhausts the chain (live-verified bug).
@@ -441,6 +671,35 @@ pub async fn invoke_stream_sse(
         || features.iter().any(|f| f == "agentic")) {
         return error_stream(&request_id, "source_scope_conflict",
             "Conversation-only tasks support drafting and calculation. Start a new conversation to use connected tools.", false);
+    }
+    // Per-turn retrieval-source filter (chat-wave2 scope spec). Meaningless
+    // and always forced to `Auto` under `conversation_only`, which already
+    // excludes both families outright — the wire field is never trusted to
+    // override that.
+    let retrieval_scope = if conversation_only {
+        crate::normalize::RetrievalScope::Auto
+    } else {
+        crate::normalize::retrieval_scope(req.retrieval_scope.as_deref())
+    };
+    // The agentic run dispatches to `agentic_run_stream` below and from there
+    // entirely to execution-core (`spawn_run_dispatch`/`RunAgentRequest`) — a
+    // separate pipeline that is never given `retrieval_scope` and offers its
+    // own built-in + MCP + client tool set with no per-turn source filtering.
+    // `tool_defs.retain(tool_allowed_for_retrieval_scope(...))` below, this
+    // item's whole server-enforcement chokepoint, never runs on that path, so
+    // a restrictive scope would silently not be honored — no filtered tool
+    // list, no rejected hallucinated call, and no `SourceScopeApplied` receipt
+    // (that code is downstream of the `agentic_requested` early return too).
+    // Rather than ship a filter that looks server-enforced but does nothing
+    // under Plan mode, reject the combination outright — exactly mirroring how
+    // `conversation_only` already rejects `agentic` above.
+    if !retrieval_scope.is_auto() && features.iter().any(|f| f == "agentic") {
+        return error_stream(&request_id, "source_scope_conflict",
+            "Org-knowledge-only and web-only turns don't support Plan mode yet. Turn off Plan mode, or switch the source filter back to Kunnskap + nett, to continue.", false);
+    }
+    if retrieval_scope == crate::normalize::RetrievalScope::KnowledgeOnly && req.deep_research {
+        return error_stream(&request_id, "source_scope_conflict",
+            "Org-knowledge-only turns can't run web research. Switch to Kunnskap + nett or Kun nett to use Dyp research.", false);
     }
     // Normalize and validate BEFORE branching: an unknown tier numeric must
     // fail closed on both the durable and the persistence-free path, and the
@@ -502,7 +761,10 @@ pub async fn invoke_stream_sse(
                 false,
             );
         }
-        let grounding = if !conversation_only && crate::retrieval::wants_grounding(&features) {
+        let grounding = if !conversation_only
+            && retrieval_scope != crate::normalize::RetrievalScope::WebOnly
+            && crate::retrieval::wants_grounding(&features)
+        {
             let Some(bearer) = data_plane_bearer.as_ref() else {
                 return error_stream(
                     &request_id,
@@ -565,6 +827,7 @@ pub async fn invoke_stream_sse(
         // The persistence-free path still honors the caller's privacy floor:
         // retention and geography are independent axes. The tier was validated
         // by normalize() before this branch, so no constraint is silently lost.
+        timing.hand_off("zdr_direct");
         return zdr_direct_stream(
             state,
             request_id,
@@ -677,6 +940,7 @@ pub async fn invoke_stream_sse(
     {
         Some(key) => match state.idempotency.claim(&org_id, &user_id, key) {
             crate::idempotency_registry::Claim::Cached(v) => {
+                timing.hand_off("idempotent_replay");
                 return replay_cached_stream(v, request_id);
             }
             crate::idempotency_registry::Claim::InFlight => {
@@ -754,6 +1018,7 @@ pub async fn invoke_stream_sse(
     } else {
         mp_contracts::model_plane::v1::ManagedRunSource::GatewayDirect
     };
+    let admitted_ms = timing.close(crate::turn_timing::Phase::Admission, 0);
     let session_run = match crate::session_flow::prepare_managed_run_authenticated(
         &state,
         req.thread_id.as_deref(),
@@ -774,6 +1039,11 @@ pub async fn invoke_stream_sse(
         req.space_context.as_ref(),
         req.space_append_context.as_ref(),
         conversation_only,
+        (!retrieval_scope.is_auto()).then(|| match retrieval_scope {
+            crate::normalize::RetrievalScope::KnowledgeOnly => "knowledge_only",
+            crate::normalize::RetrievalScope::WebOnly => "web_only",
+            crate::normalize::RetrievalScope::Auto => unreachable!("excluded by is_auto() above"),
+        }),
     )
     .await
     {
@@ -813,6 +1083,8 @@ pub async fn invoke_stream_sse(
         }
     }
     let thread_scope = session_run.thread_id.clone();
+    let prepared_ms = timing.close(crate::turn_timing::Phase::SessionPrepare, admitted_ms);
+    timing.set_run(&session_run.run_id);
 
     // Planmodus: record plan mode against THIS run, in both the authoritative
     // in-memory store the tool-dispatch middleware consults (`is_plan_mode`) and
@@ -828,6 +1100,7 @@ pub async fn invoke_stream_sse(
     // the turn through inference-core AnalyzeImage (the vision owner) with the
     // user message as the prompt and stream the analysis as the answer.
     if let Some(image) = crate::vision::select_image(&req.attachments) {
+        timing.hand_off("vision");
         return vision_stream(
             state.clone(),
             request_id,
@@ -845,6 +1118,7 @@ pub async fn invoke_stream_sse(
     // chat-parity §2: explicit image generation. Routes the prompt to
     // inference-core GenerateImage (the image owner) and emits an `artifact`.
     if req.generate_image {
+        timing.hand_off("image_generation");
         return image_gen_stream(
             state.clone(),
             request_id,
@@ -901,6 +1175,7 @@ pub async fn invoke_stream_sse(
             .or(req.space_append_context.as_ref())
             .map(|context| context.space_id.clone())
             .unwrap_or_default();
+        timing.hand_off("agentic");
         return agentic_run_stream(
             state.clone(),
             session_run,
@@ -934,8 +1209,11 @@ pub async fn invoke_stream_sse(
     // even when the caller didn't opt in (see below), so a plain chat turn
     // still checks the org's knowledge base before falling back to an
     // ungrounded answer.
-    let explicit_grounding_requested = !conversation_only && crate::retrieval::wants_grounding(&features);
+    let explicit_grounding_requested = !conversation_only
+        && retrieval_scope != crate::normalize::RetrievalScope::WebOnly
+        && crate::retrieval::wants_grounding(&features);
     if explicit_grounding_requested && data_plane_bearer.is_none() {
+        timing.fail();
         return prepared_direct_failure_stream(
             &state,
             &session_run,
@@ -957,7 +1235,15 @@ pub async fn invoke_stream_sse(
         req.content.clone()
     };
 
-    let context_assembly_messages = if conversation_only { None } else { load_context_assembly_messages(
+    // Prefix-cache options for this turn. All off unless the turn is pinned to
+    // an OpenAI-API chat-completions provider and the operator set the flag
+    // (see `prompt_context`); off, everything below builds today's prompt.
+    let cache_options = crate::prompt_context::CacheOptions::for_turn(
+        &provider_hint,
+        &subscription_connection_id,
+        &model,
+    );
+    let (context_assembly_messages, persona_enabled) = if conversation_only || retrieval_scope == crate::normalize::RetrievalScope::WebOnly { (None, true) } else { load_context_assembly_messages(
         &state,
         &session_run.thread_id,
         &session_run.run_id,
@@ -968,7 +1254,7 @@ pub async fn invoke_stream_sse(
         sovereign_retrieval,
     )
     .await };
-    let recent_thread_messages = load_recent_thread_messages(
+    let recent_thread = load_recent_thread_messages(
         &state,
         &org_id,
         &session_run.thread_id,
@@ -984,9 +1270,23 @@ pub async fn invoke_stream_sse(
             conversation_only,
             min_privacy_tier: min_privacy_tier_wire,
             inference_bearer: &inference_bearer,
+            token_budget: cache_options.compaction_token_budget,
         },
     )
     .await;
+    // A summary written this turn, persisted with the answer so later turns
+    // send the same bytes instead of summarising the same head again.
+    let head_summary = recent_thread.head_summary;
+    let recent_thread_messages = recent_thread.messages;
+    // The context block repeats recent history the prompt already carries as
+    // messages. With the dedup option those repeats are left out.
+    let context_assembly_messages = if cache_options.dedup_context_history {
+        context_assembly_messages.and_then(|assembly| {
+            assembly.without_sent_history(&recent_thread_messages, &req.content, &user_content)
+        })
+    } else {
+        context_assembly_messages
+    };
     // First-exchange detection for the AI thread title: the loaded
     // conversation carries no assistant reply yet. (It is never literally
     // empty — `load_recent_thread_messages` always splices in the current
@@ -1002,27 +1302,35 @@ pub async fn invoke_stream_sse(
     // `assembly_supplied_grounding` is deliberately NOT "assembly ran". Assembly
     // almost always returns something (identity, history), so the old boolean was
     // effectively always true and suppressed the grounding path below.
-    let (mut messages, assembly_supplied_grounding) = match context_assembly_messages {
+    let (history, context_assembly, assembly_supplied_grounding) = match context_assembly_messages {
         Some(assembly) => {
             let grounded = assembly.grounded;
-            let mut combined: Vec<ChatMessage> = assembly
+            let context_assembly: Vec<ChatMessage> = assembly
                 .messages
                 .into_iter()
                 .filter(|message| message.role == "system")
                 .collect();
-            if recent_thread_messages.is_empty() {
-                combined.push(ChatMessage {
+            let history = if recent_thread_messages.is_empty() {
+                vec![ChatMessage {
                     compaction_summary: String::new(),
                     role: "user".to_owned(),
                     content: user_content.clone(),
                     name: String::new(),
-                });
+                }]
             } else {
-                combined.extend(recent_thread_messages);
-            }
-            (combined, grounded)
+                recent_thread_messages
+            };
+            (history, context_assembly, grounded)
         }
-        None => (recent_thread_messages, false),
+        None => (recent_thread_messages, Vec::new(), false),
+    };
+    // The prompt's blocks, each filled in below and put in order once the
+    // offered tools are known (`PromptContext::render`). The legacy order is
+    // byte-identical to the insertions these slots replaced.
+    let mut prompt = crate::prompt_context::PromptContext {
+        context_assembly,
+        history,
+        ..Default::default()
     };
 
     // Long-term memory prefetch (harness-adoption §7.9): the SSE chat path —
@@ -1030,7 +1338,7 @@ pub async fn invoke_stream_sse(
     // now; only the gRPC Invoke path had it. Skipped for trivial prompts
     // ("ja", "thanks!") where recalled context can only derail the reply, and
     // timeout-bounded so a slow backend costs the recall, never the turn.
-    let memory_recall_status = if conversation_only || crate::memory_prefetch::is_trivial_prompt(&req.content) {
+    let memory_recall_status = if conversation_only || retrieval_scope == crate::normalize::RetrievalScope::WebOnly || crate::memory_prefetch::is_trivial_prompt(&req.content) {
         None
     } else {
         let (memory_entries, recall_status) = fetch_chat_memory_context(
@@ -1044,22 +1352,15 @@ pub async fn invoke_stream_sse(
         if let Some(memory_block) = crate::memory_provenance::memory_context_block(&memory_entries)
         {
             // Same block format as grpc.rs's `build_messages`, so both paths
-            // present memory identically to the model. Inserted after the
-            // leading system context (assembly/grounding stay first) and
-            // before conversation history.
-            let insert_at = messages
-                .iter()
-                .position(|message| message.role != "system")
-                .unwrap_or(messages.len());
-            messages.insert(
-                insert_at,
-                ChatMessage {
-                    compaction_summary: String::new(),
-                    role: "system".to_owned(),
-                    content: memory_block,
-                    name: String::new(),
-                },
-            );
+            // present memory identically to the model. The legacy order puts
+            // it after the leading system context (assembly/grounding stay
+            // first) and before conversation history.
+            prompt.memory = Some(ChatMessage {
+                compaction_summary: String::new(),
+                role: "system".to_owned(),
+                content: memory_block,
+                name: String::new(),
+            });
         }
         recall_status
     };
@@ -1087,7 +1388,7 @@ pub async fn invoke_stream_sse(
             }
             None => None,
         }
-    } else if !conversation_only && !assembly_supplied_grounding {
+    } else if !conversation_only && retrieval_scope != crate::normalize::RetrievalScope::WebOnly && !assembly_supplied_grounding {
         // Best-effort fallback: assembly returned no Data Plane evidence for this
         // thread, so directly check Data Plane before concluding there is no
         // grounding at all. Degrades silently (no bearer, no error) — a
@@ -1155,58 +1456,50 @@ pub async fn invoke_stream_sse(
         // the explicit-grounding path, where the caller asked for it -- so a
         // retrieve that worked still produced an ungrounded answer.
         if !assembly_supplied_grounding {
-            messages.insert(
-                0,
-                ChatMessage {
-                    compaction_summary: String::new(),
-                    role: "system".to_owned(),
-                    content: context_block,
-                    name: String::new(),
-                },
-            );
+            prompt.grounding = Some(ChatMessage {
+                compaction_summary: String::new(),
+                role: "system".to_owned(),
+                content: context_block,
+                name: String::new(),
+            });
         }
-    } else if !conversation_only && !assembly_supplied_grounding && crate::retrieval::is_effectively_empty(&grounding) {
+    } else if !conversation_only && retrieval_scope != crate::normalize::RetrievalScope::WebOnly && !assembly_supplied_grounding && crate::retrieval::is_effectively_empty(&grounding) {
         // Neither session-core context assembly nor a direct Data Plane
         // retrieval found anything for this turn — tell the model to be
         // honest about that instead of silently guessing from general
         // training-data knowledge (the exact failure mode this fixes).
-        messages.insert(
-            0,
-            ChatMessage {
-                compaction_summary: String::new(),
-                role: "system".to_owned(),
-                content: crate::retrieval::NO_GROUNDING_SYSTEM_NOTICE.to_owned(),
-                name: String::new(),
-            },
-        );
+        prompt.grounding = Some(ChatMessage {
+            compaction_summary: String::new(),
+            role: "system".to_owned(),
+            content: crate::retrieval::NO_GROUNDING_SYSTEM_NOTICE.to_owned(),
+            name: String::new(),
+        });
     }
     // Temporal grounding: always present, unlike identity_context_message
     // below, which can legitimately be absent when org_name isn't resolved.
     // Whether the model knows what day it is must never depend on an
     // unrelated lookup succeeding. See temporal_awareness_message's doc
     // comment for the failure this closes.
-    messages.insert(0, temporal_awareness_message());
-    if let Some(calendar) = crate::calendar_context::reference_calendar(&messages) {
-        messages.insert(0, ChatMessage {
-            role: "system".to_owned(), content: calendar, ..Default::default()
+    prompt.date_notice = Some(temporal_awareness_message());
+    // Reads the user turns only, which all live in the history.
+    prompt.calendar =
+        crate::calendar_context::reference_calendar(&prompt.history).map(|calendar| ChatMessage {
+            role: "system".to_owned(),
+            content: calendar,
+            ..Default::default()
         });
-    }
-    // Identity context: who the model is talking to. Inserted last of the
-    // position-0 messages so it lands FIRST overall, ahead of the grounding
-    // content it primes — the model should know "we"/"our" means org_name
-    // before it reads org-scoped retrieved text. Absent (org_name unset, e.g.
-    // a caller that bypasses the BFF gateway) → no message, unchanged behavior.
-    if let Some(identity_message) = identity_context_message(&req) {
-        messages.insert(0, identity_message);
-    }
-    // Authored instructions go first of all — ahead of identity context — so
-    // the platform/org/Space/agent hierarchy is the first thing the model
-    // reads, exactly the way `identity_context_message` primes the grounding
-    // content that follows it. Absent only when every layer is empty (ADR-0003,
-    // `apps/AUTHORED_INSTRUCTIONS_ADR_2026-08-19.md`).
-    if let Some(instructions_message) = authored_instructions_message(&state, &req) {
-        messages.insert(0, instructions_message);
-    }
+    // Identity context: who the model is talking to. The legacy order puts it
+    // ahead of the grounding content it primes — the model should know
+    // "we"/"our" means org_name before it reads org-scoped retrieved text.
+    // Absent (org_name unset, e.g. a caller that bypasses the BFF gateway) →
+    // no message, unchanged behavior.
+    prompt.identity = identity_context_message(&req);
+    // Authored instructions go ahead of identity context — so the
+    // platform/org/Space/agent hierarchy is the first standing context the
+    // model reads, exactly the way `identity_context_message` primes the
+    // grounding content that follows it. Absent only when every layer is
+    // empty (ADR-0003, `apps/AUTHORED_INSTRUCTIONS_ADR_2026-08-19.md`).
+    prompt.authored_instructions = authored_instructions_message(&state, &req, persona_enabled);
     // Skills: match this turn against the org's skill catalogue (disk-loaded +
     // learned) and inject the top matches as system context so a triggered skill
     // actually steers the model. This is the load-bearing Claude-Code skill
@@ -1214,7 +1507,7 @@ pub async fn invoke_stream_sse(
     let SkillContext {
         blocks: skill_context,
         requested_ids: requested_skill_ids,
-    } = if conversation_only { SkillContext::default() } else { fetch_skill_context(
+    } = if conversation_only || retrieval_scope == crate::normalize::RetrievalScope::WebOnly { SkillContext::default() } else { fetch_skill_context(
         &state,
         &model_bearer,
         &org_id,
@@ -1255,71 +1548,41 @@ pub async fn invoke_stream_sse(
     );
     if !skill_context.is_empty() {
         let joined = skill_context.join("\n\n");
-        let insert_at = messages
-            .iter()
-            .position(|message| message.role != "system")
-            .unwrap_or(messages.len());
-        messages.insert(
-            insert_at,
-            ChatMessage {
-                compaction_summary: String::new(),
-                role: "system".to_owned(),
-                content: format!(
-                    "You have access to the following skills relevant to this request. Apply their guidance when it fits:\n\n{joined}"
-                ),
-                name: String::new(),
-            },
-        );
+        prompt.skills = Some(ChatMessage {
+            compaction_summary: String::new(),
+            role: "system".to_owned(),
+            content: format!(
+                "You have access to the following skills relevant to this request. Apply their guidance when it fits:\n\n{joined}"
+            ),
+            name: String::new(),
+        });
     }
     // Verbosity / response-style directive (token-efficiency layer): inject the
     // selected profile's directive as system context so the model trades
     // thoroughness for tokens on request. `normal`/unset injects nothing.
-    if let Some(directive) = req
+    prompt.verbosity = req
         .verbosity
         .as_deref()
         .and_then(crate::verbosity::directive)
-    {
-        let insert_at = messages
-            .iter()
-            .position(|message| message.role != "system")
-            .unwrap_or(messages.len());
-        messages.insert(
-            insert_at,
-            ChatMessage {
-                compaction_summary: String::new(),
-                role: "system".to_owned(),
-                content: directive.to_owned(),
-                name: String::new(),
-            },
-        );
-    }
+        .map(|directive| ChatMessage {
+            compaction_summary: String::new(),
+            role: "system".to_owned(),
+            content: directive.to_owned(),
+            name: String::new(),
+        });
     // Response discipline: reuse figures verbatim, keep explicit limits, and
     // say when a tool failed. Standing guidance, so it sits with the other
     // system context rather than in history. See the constant's doc for the
     // three observed failures it answers.
-    {
-        let insert_at = messages
-            .iter()
-            .position(|message| message.role != "system")
-            .unwrap_or(messages.len());
-        messages.insert(
-            insert_at,
-            ChatMessage {
-                compaction_summary: String::new(),
-                role: "system".to_owned(),
-                content: crate::tool_loop::RESPONSE_DISCIPLINE_NOTICE.to_owned(),
-                name: String::new(),
-            },
-        );
-    }
+    prompt.response_discipline = Some(ChatMessage {
+        compaction_summary: String::new(),
+        role: "system".to_owned(),
+        content: crate::tool_loop::RESPONSE_DISCIPLINE_NOTICE.to_owned(),
+        name: String::new(),
+    });
+    // Reads the assistant turns only, which all live in the history.
     if crate::tool_loop::asks_about_conversation_state(&req.content) {
-        if let Some(message) = generated_image_state_message(&messages) {
-            let insert_at = messages
-                .iter()
-                .position(|message| message.role != "system")
-                .unwrap_or(messages.len());
-            messages.insert(insert_at, message);
-        }
+        prompt.generated_image_state = generated_image_state_message(&prompt.history);
     }
 
     // chat-parity §2 — function-calling tool loop. When the client supplies
@@ -1327,11 +1590,12 @@ pub async fn invoke_stream_sse(
     // infer → execute via gateway handlers → inject results), then stream the
     // final answer with tools withheld. Reuses gateway tool handlers — no new
     // runtime. Inference outage degrades to a normal ungrounded answer.
-    if let Some(inventory) = state.artifact_versions.inventory_context(&session_run.thread_id) {
-        messages.insert(0, ChatMessage {
+    prompt.artifact_inventory = state
+        .artifact_versions
+        .inventory_context(&session_run.thread_id)
+        .map(|inventory| ChatMessage {
             role: "system".to_owned(), content: inventory, ..Default::default()
         });
-    }
     let client_requested_web_search =
         req.browse_web || req.tools.iter().any(|tool| tool.name == "web_search");
     // `should_force_web_search` used to be evaluated further down (see its call
@@ -1349,8 +1613,12 @@ pub async fn invoke_stream_sse(
     // searches, and the loop afterwards must be able to close a named gap the
     // report could not fill.
     let deep_research_requested = req.deep_research;
-    let web_search_available = !conversation_only &&
-        (client_requested_web_search || web_search_signal || deep_research_requested);
+    let web_search_available = !conversation_only
+        && retrieval_scope != crate::normalize::RetrievalScope::KnowledgeOnly
+        && (retrieval_scope == crate::normalize::RetrievalScope::WebOnly
+            || client_requested_web_search
+            || web_search_signal
+            || deep_research_requested);
     let mut tool_defs: Vec<ToolDefinition> = if features.iter().any(|f| f == "tools") {
         let mut defs: Vec<ToolDefinition> = req
             .tools
@@ -1402,33 +1670,68 @@ pub async fn invoke_stream_sse(
     }
     if conversation_only {
         tool_defs.retain(|tool| crate::tool_loop::conversation_tool_allowed(&tool.name));
-        messages.insert(0, ChatMessage {
+        prompt.conversation_scope = Some(ChatMessage {
             role: "system".to_owned(),
             content: crate::source_validation::CONVERSATION_SCOPE_NOTICE.to_owned(),
             ..Default::default()
         });
     }
+    // Per-turn retrieval-source filter (chat-wave2 scope spec §2.3): reuses
+    // the exact same enforcement chokepoint `conversation_only` uses above
+    // (`tool_defs.retain` + the dispatch-time `offered_tools` re-check in
+    // `tool_loop.rs`), so a hallucinated call to a pruned tool is rejected
+    // server-side even if the model never should have been able to name it.
+    // Computed even when `conversation_only` already ran, so the excluded
+    // list below is always accurate against the tools that survived it —
+    // though in that case `retrieval_scope` is forced to `Auto` and this is
+    // a no-op.
+    let excluded_by_retrieval_scope: Vec<String> = if retrieval_scope == crate::normalize::RetrievalScope::Auto {
+        Vec::new()
+    } else {
+        tool_defs
+            .iter()
+            .filter(|tool| !crate::tool_loop::tool_allowed_for_retrieval_scope(&tool.name, retrieval_scope))
+            .map(|tool| tool.name.clone())
+            .collect()
+    };
+    if !conversation_only && retrieval_scope != crate::normalize::RetrievalScope::Auto {
+        tool_defs.retain(|tool| crate::tool_loop::tool_allowed_for_retrieval_scope(&tool.name, retrieval_scope));
+        let notice = match retrieval_scope {
+            crate::normalize::RetrievalScope::KnowledgeOnly => {
+                crate::source_validation::KNOWLEDGE_ONLY_SCOPE_NOTICE
+            }
+            crate::normalize::RetrievalScope::WebOnly => crate::source_validation::WEB_ONLY_SCOPE_NOTICE,
+            crate::normalize::RetrievalScope::Auto => unreachable!("Auto excluded by the branch guard above"),
+        };
+        prompt.conversation_scope = Some(ChatMessage {
+            role: "system".to_owned(),
+            content: notice.to_owned(),
+            ..Default::default()
+        });
+    }
+    // The tools lead an OpenAI prompt, so with the stable order the ones
+    // offered on some turns only go last and the rest stay one prefix.
+    if cache_options.stable_prompt_order {
+        tool_defs = crate::prompt_context::conditional_tools_last(tool_defs);
+    }
     // Tool-argument elicitation guidance, gated on the FINAL offered set (after
     // the client/builtin merge and the web_search append above) so the prompt
-    // never warns about a tool this turn cannot call. Inserted before the first
-    // non-system turn like the memory block: guidance is context, not history.
-    if let Some(notice) = crate::tool_loop::user_supplied_args_notice(&tool_defs) {
-        let insert_at = messages
-            .iter()
-            .position(|message| message.role != "system")
-            .unwrap_or(messages.len());
-        messages.insert(insert_at, notice);
-    }
+    // never warns about a tool this turn cannot call. Guidance is context, not
+    // history: it goes with the system blocks.
+    prompt.user_supplied_args = crate::tool_loop::user_supplied_args_notice(&tool_defs);
+    let mut messages = prompt.render(cache_options.prompt_order());
 
     // chat-parity §4: register this stream so POST /v1/invoke/{id}/cancel can
     // stop it cooperatively. `cancels` is moved into the task to finish() on end.
+    // Bound to the run too, so a durable cancel of the run (POST
+    // /v1/orchestration/runs/{id}/cancel) stops it the same way.
     let cancels = state.cancels.clone();
-    let cancel_flag = cancels.register(&request_id, &org_id, &user_id);
+    let cancel_flag = cancels.register_run(&request_id, &org_id, &user_id, &session_run.run_id);
     // Accept mid-run input for this stream. The thread id is recorded HERE, from
     // the prepared run, so the enqueue endpoint never has to trust a
     // client-supplied thread — see `queued_input::enqueue_for`.
     let queued_inputs = state.queued_inputs.clone();
-    queued_inputs.register(&request_id, &org_id, &user_id, &session_run.thread_id, conversation_only);
+    queued_inputs.register(&request_id, &org_id, &user_id, &session_run.thread_id, conversation_only, retrieval_scope);
 
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(32);
     let session_state = state.clone();
@@ -1474,12 +1777,21 @@ pub async fn invoke_stream_sse(
     // once this handler returns, so doing that work here held the whole response
     // back: with a 12-round tool budget a multi-step ERP question showed a dead
     // spinner for the entire phase and then dumped everything at once.
+    timing.close(crate::turn_timing::Phase::Context, prepared_ms);
     tokio::spawn(async move {
         // Keep tool writes private until the assistant message is durable.
         let committed_artifacts = session_state.artifact_versions.clone();
         let artifact_base = committed_artifacts.fork_thread(&session_thread_id);
         let mut session_state = session_state;
         session_state.artifact_versions = artifact_base.fork_thread(&session_thread_id);
+        // Frozen as of THIS instant, before this turn's own dispatch can
+        // touch any artifact — owner ruling 2026-09-26: revision-turn review
+        // reuse may only ever look at what was true before the turn began
+        // (see the field's own doc comment in `state.rs`). `artifact_base`
+        // itself is never mutated after this point, only read, so sharing
+        // its handles here is exactly a frozen snapshot, not another live
+        // fork.
+        session_state.artifact_review_base = artifact_base.clone();
 
         // One monotonic SSE `id:` counter for EVERY frame this stream emits —
         // text and rich events alike. Declared at the top of the task because a
@@ -1515,6 +1827,9 @@ pub async fn invoke_stream_sse(
                 request_id = %req_id,
                 "client disconnected before connected frame; detaching and finishing for resume"
             );
+        }
+        if client_connected {
+            timing.mark(crate::turn_timing::Mark::Connected);
         }
 
         if let Some(payload) = grounding.clone().filter(|g| !g.is_empty()) {
@@ -1565,6 +1880,13 @@ pub async fn invoke_stream_sse(
                 title: c.title,
                 url: c.url,
                 snippet: c.snippet,
+                source_group_id: c.source_group_id,
+                source_group_label: Some(c.source_group_label),
+                number: Some(c.number),
+                claim_id: None,
+                start: None,
+                end: None,
+                origin: c.origin,
             };
             emit_and_buffer(
                 &tx,
@@ -1583,8 +1905,59 @@ pub async fn invoke_stream_sse(
         // user watches the work instead of a spinner. The loop returns no
         // buffered events when a sink is supplied, which is what guarantees
         // nothing is emitted twice.
-        let sink =
-            crate::sse_events::RichEventSink::staging_artifacts(tx.clone(), features.clone(), req_id.clone());
+        //
+        // It buffers what it sends under this stream's own cursor, so a reload
+        // during the tool phase, source review or repair replays that progress.
+        // The cursor is handed over with `sync_cursor` before each stretch in
+        // which the sink emits and taken back right after it.
+        let sink = crate::sse_events::RichEventSink::staging_artifacts(
+            tx.clone(),
+            features.clone(),
+            req_id.clone(),
+        )
+        .with_timing(timing.clone())
+        .buffering(stream_buffers.clone(), buffer_key.clone(), seq);
+
+        // Grounding's citations were already sent on the wire above (chat-
+        // parity §8, "emit retrieved sources up front"), via `emit_and_buffer`
+        // directly on `tx` because `sink` did not exist yet at that point.
+        // Seed them into the sink now so `recorded_citations()` — the anchor
+        // pass (chat-wave2 citations spec §2.4) and persisted
+        // `turn_evidence_metadata` both read it — actually sees KB/RAG
+        // citations instead of only whatever web_search/deep-research/
+        // verification-retry adds later via `sink.emit()`.
+        if let Some(payload) = grounding.as_ref() {
+            sink.seed_recorded_citations(payload.citations.iter().map(|c| {
+                crate::sse_events::RecordedCitation {
+                    id: c.id.clone(),
+                    title: c.title.clone(),
+                    url: c.url.clone(),
+                    snippet: c.snippet.clone(),
+                    source_group_id: c.source_group_id.clone(),
+                    source_group_label: Some(c.source_group_label.clone()),
+                    number: Some(c.number),
+                    origin: c.origin.clone(),
+                }
+            }));
+        }
+
+        // Per-turn retrieval-source filter receipt (chat-wave2 scope spec
+        // §2.2/§2.3): the concrete "shown in the receipt" surface, emitted
+        // once per turn right alongside the citations it's most relevant
+        // next to. Never fires under `conversation_only`, which already has
+        // its own long-standing disclosure via `CONVERSATION_SCOPE_NOTICE`
+        // and offers no separate receipt frame.
+        if retrieval_scope != crate::normalize::RetrievalScope::Auto {
+            sink.emit(crate::sse_events::ChatEvent::SourceScopeApplied {
+                scope: match retrieval_scope {
+                    crate::normalize::RetrievalScope::KnowledgeOnly => "knowledge_only".to_owned(),
+                    crate::normalize::RetrievalScope::WebOnly => "web_only".to_owned(),
+                    crate::normalize::RetrievalScope::Auto => unreachable!("Auto excluded by the guard above"),
+                },
+                excluded_tools: excluded_by_retrieval_scope.clone(),
+            })
+            .await;
+        }
 
         // Starts as the requested id (possibly a `verevon-*` mode); the tool phase
         // replaces it with the concrete model it resolved.
@@ -1605,6 +1978,7 @@ pub async fn invoke_stream_sse(
         // than failing the turn.
         let mut deep_research_ran = false;
         if deep_research_requested {
+            seq = sink.sync_cursor(seq).await;
             let research = crate::deep_research::run_deep_research(
                 &session_state,
                 &req_id,
@@ -1623,6 +1997,7 @@ pub async fn invoke_stream_sse(
                 Some(&sink),
             )
             .await;
+            seq = sink.sync_cursor(seq).await;
             let Ok(research) = research else {
                 emit_prepared_failure(
                     &tx,
@@ -1633,6 +2008,8 @@ pub async fn invoke_stream_sse(
                     "audit_persistence_failed",
                     "Tool action could not be durably audited",
                     true,
+                    &timing,
+                    (&stream_buffers, &buffer_key, &mut seq, &features),
                 )
                 .await;
                 finish_stream_registrations(&cancels, &queued_inputs, &req_id);
@@ -1642,6 +2019,14 @@ pub async fn invoke_stream_sse(
             // than answering from evidence the user already declined to wait
             // for. Same terminal shape as the streaming loop's cancel branch.
             if research.cancelled {
+                emit_turn_timing(
+                    &tx,
+                    &timing,
+                    crate::turn_timing::Outcome::Cancelled,
+                    &req_id,
+                    (&stream_buffers, &buffer_key, &mut seq, &features),
+                )
+                .await;
                 let stopped = crate::sse_events::ChatEvent::Stopped {
                     reason: "client cancelled".to_owned(),
                 };
@@ -1655,6 +2040,7 @@ pub async fn invoke_stream_sse(
                     stopped,
                 )
                 .await;
+                end_resume_buffer(&stream_buffers, &buffer_key, seq).await;
                 if let Err(error) = crate::session_flow::cancel_direct_inference_run_authenticated(
                     &session_state,
                     &session_run_for_terminal,
@@ -1693,6 +2079,8 @@ pub async fn invoke_stream_sse(
             && !deep_research_ran
             && tool_defs.iter().any(|tool| tool.name == "web_search")
         {
+            let search_started = timing.now_ms();
+            seq = sink.sync_cursor(seq).await;
             let forced = crate::tool_loop::run_forced_web_search_for_model(
                 &session_state,
                 &req_id,
@@ -1716,6 +2104,15 @@ pub async fn invoke_stream_sse(
                 Some(&sink),
             )
             .await;
+            seq = sink.sync_cursor(seq).await;
+            timing.record(
+                crate::turn_timing::PhaseSpan::new(
+                    crate::turn_timing::Phase::Dispatch,
+                    search_started,
+                    timing.now_ms(),
+                )
+                .with_tools(vec!["web_search".to_owned()]),
+            );
             let Ok(forced) = forced else {
                 emit_prepared_failure(
                     &tx,
@@ -1726,6 +2123,8 @@ pub async fn invoke_stream_sse(
                     "audit_persistence_failed",
                     "Tool action could not be durably audited",
                     true,
+                    &timing,
+                    (&stream_buffers, &buffer_key, &mut seq, &features),
                 )
                 .await;
                 finish_stream_registrations(&cancels, &queued_inputs, &req_id);
@@ -1754,7 +2153,13 @@ pub async fn invoke_stream_sse(
             }).collect();
         let subscription_tool_round = !subscription_connection_id.trim().is_empty();
         let mut artifact_checks = Vec::new();
+        // The tools the last tool round sent, for an answer that shares its prefix.
+        let mut last_round_tools: Vec<ToolDefinition> = Vec::new();
+        // Failed document writes this turn. Unlike a failed read, one withholds
+        // the fixed completion text of a checked document.
+        let mut document_tool_failures: u32 = 0;
         if !tool_defs.is_empty() {
+            seq = sink.sync_cursor(seq).await;
             let rounds = crate::tool_loop::run_tool_rounds_for_model(
                 &session_state,
                 &req_id,
@@ -1793,10 +2198,20 @@ pub async fn invoke_stream_sse(
                 Some(&sink),
             )
             .await;
+            seq = sink.sync_cursor(seq).await;
             let rounds = match rounds { Ok(rounds) => rounds, Err(reason) => {
                 if reason == "client_cancelled" {
+                    emit_turn_timing(
+                        &tx,
+                        &timing,
+                        crate::turn_timing::Outcome::Cancelled,
+                        &req_id,
+                        (&stream_buffers, &buffer_key, &mut seq, &features),
+                    )
+                    .await;
                     emit_and_buffer(&tx, &stream_buffers, &buffer_key, &mut seq, &features, &req_id,
                         crate::sse_events::ChatEvent::Stopped { reason: "client cancelled".to_owned() }).await;
+                    end_resume_buffer(&stream_buffers, &buffer_key, seq).await;
                     if let Err(error) = crate::session_flow::cancel_direct_inference_run_authenticated(
                         &session_state, &session_run_for_terminal, &session_bearer).await {
                         tracing::warn!(%error, "failed to terminalize cancelled artifact check");
@@ -1804,27 +2219,52 @@ pub async fn invoke_stream_sse(
                     finish_stream_registrations(&cancels, &queued_inputs, &req_id);
                     return;
                 }
-                let (failure_code, failure_message) = tool_phase_failure(reason);
+                let typed_failure = sink.take_subscription_failure();
+                let (failure_code, failure_message, failure_retryable) =
+                    tool_phase_failure(reason, subscription_tool_round, typed_failure.as_ref());
                 // A failed draft still needs an honest durable reply. Persist
                 // only this fixed explanation, never the private candidate.
                 if !effective_zdr {
                     if let Err(error) = crate::session_flow::append_assistant_message_authenticated(
-                        &session_state, &session_thread_id, failure_message, &session_bearer,
+                        &session_state, &session_thread_id, &failure_message, &session_bearer,
                         session_agent_name.as_deref(), None).await {
                         tracing::warn!(%error, request_id = %req_id, "failed to persist draft failure explanation");
                     }
                 }
-                emit_prepared_failure(
-                    &tx,
-                    &session_state,
-                    &session_run_for_terminal,
-                    &session_bearer,
-                    &req_id,
-                    failure_code,
-                    failure_message,
-                    true,
-                )
-                .await;
+                if crate::subscription_failure::known_code(failure_code).is_some() {
+                    // A subscription failure's frame carries the timing the
+                    // tool loop kept, so the SPA can say when to retry.
+                    let failure = typed_failure
+                        .map(|(failure, _)| failure)
+                        .filter(|failure| failure.code == failure_code)
+                        .unwrap_or_else(|| crate::subscription_failure::SubscriptionFailure::bare(failure_code));
+                    emit_subscription_failure(
+                        &tx,
+                        &session_state,
+                        &session_run_for_terminal,
+                        &session_bearer,
+                        &req_id,
+                        &failure,
+                        &failure_message,
+                        &timing,
+                        (&stream_buffers, &buffer_key, &mut seq, &features),
+                    )
+                    .await;
+                } else {
+                    emit_prepared_failure(
+                        &tx,
+                        &session_state,
+                        &session_run_for_terminal,
+                        &session_bearer,
+                        &req_id,
+                        failure_code,
+                        &failure_message,
+                        failure_retryable,
+                        &timing,
+                        (&stream_buffers, &buffer_key, &mut seq, &features),
+                    )
+                    .await;
+                }
                 finish_stream_registrations(&cancels, &queued_inputs, &req_id);
                 return;
             }};
@@ -1832,7 +2272,9 @@ pub async fn invoke_stream_sse(
             turn_evidence.tool_successes += rounds.tool_successes;
             turn_evidence.tool_failures += rounds.tool_failures;
             turn_evidence.web_citations += rounds.web_citations;
+            document_tool_failures = rounds.document_tool_failures;
             messages = rounds.messages;
+            last_round_tools = rounds.last_round_tools;
             // Intent modes retain their resolved model. A subscription remains
             // pinned to the selected model and connection throughout the turn.
             if !subscription_tool_round {
@@ -1868,6 +2310,13 @@ pub async fn invoke_stream_sse(
             thinking_budget_tokens,
             ..Default::default()
         };
+        // Read before any retry rewrites the request: on a subscription route
+        // the turn is never priced from API list prices, including an
+        // artifact turn whose synthetic answer names no serving provider.
+        let route_cost_basis = crate::pricing::CostBasis::of_route(
+            &grpc_req.provider_hint,
+            &grpc_req.subscription_connection_id,
+        );
 
         // No response cache is consulted here, deliberately. A prompt-keyed
         // answer cache used to sit at exactly this point and was removed
@@ -1902,8 +2351,12 @@ pub async fn invoke_stream_sse(
         let recorded = sink.recorded_artifacts();
         artifact_checks.retain(|check| recorded.iter().any(|artifact| check["artifactId"] == artifact.id
             && check["contentHash"] == crate::result_validation::content_hash(&artifact.content)));
+        // A failed read (a search, a fetch) does not change what the checked
+        // document says, so only a failed document write withholds its fixed
+        // completion text. Any failure used to, and the chat text about the
+        // held document then streamed as unchecked model prose.
         let artifact_completion = crate::result_validation::revision_completion(
-            &tool_phase_query, &previous_artifacts, &recorded, turn_evidence.tool_failures)
+            &tool_phase_query, &previous_artifacts, &recorded, document_tool_failures)
             .map(|(summary, receipt)| (summary, serde_json::to_value(receipt).unwrap_or_default()))
             .or_else(|| {
                 // Questions inside attached evidence are not a second request
@@ -1912,7 +2365,7 @@ pub async fn invoke_stream_sse(
                 let summary_language = crate::result_validation::summary_request_language(&instruction);
                 let draft_only = crate::result_validation::draft_only_response(&instruction);
                 if recorded.len() != 1 || artifact_checks.len() != 1
-                    || turn_evidence.tool_failures > 0 || (!draft_only && instruction.contains('?'))
+                    || document_tool_failures > 0 || (!draft_only && instruction.contains('?'))
                     || (!draft_only && ["forklar", "explain", "fortell", "tell me", "svar på", "answer", "hvorfor", "why"].iter().any(|word| instruction.contains(word)))
                     || (summary_language.is_none() && !["lag ", "bruk ", "gjør ", "skriv ", "create ", "draft ", "write ", "make ", "turn "].iter().any(|prefix| instruction.starts_with(prefix))) { return None; }
                 let artifact = &recorded[0];
@@ -1939,6 +2392,18 @@ pub async fn invoke_stream_sse(
                     status: "running".to_owned(),
                 }).await;
         }
+        share_tool_round_prefix(
+            &mut grpc_req,
+            cache_options.stable_prompt_order
+                && artifact_completion.is_none()
+                && word_range.is_none(),
+            last_round_tools,
+        );
+        // The streamed answer's provider call, from its first attempt to its
+        // final chunk. The synthetic artifact answer makes none, and the
+        // word-range candidates time their own calls below.
+        let mut answer_call = (artifact_completion.is_none() && word_range.is_none())
+            .then(|| timing.call(crate::turn_timing::Phase::AnswerStream));
         let mut length_retries: usize = 0;
         let stream: Option<std::pin::Pin<Box<dyn Stream<Item = Result<mp_contracts::model_plane::v1::InferChunk, tonic::Status>> + Send>>> =
         if let Some((summary, mut receipt)) = artifact_completion {
@@ -1955,14 +2420,21 @@ pub async fn invoke_stream_sse(
             let prompt = tool_phase_query.clone();
             let receipt = result_receipt.clone();
             let cancelled = cancel_flag.clone();
+            // Each candidate, review and repair call is timed and classified
+            // by the id it was minted with; the first candidate is the answer.
+            let answer_clock = timing.check(crate::turn_timing::Phase::AnswerStream, Some(60_000));
             // Release only the checked candidate. The existing terminal path
             // still owns persistence, replay, heartbeat and run state.
             Some(Box::pin(futures::stream::once(async move {
                 let check = crate::result_validation::check_with_repair(request, &prompt, range, |candidate| {
                     let mut client = client.clone();
+                    let call = answer_clock.call(&candidate.request_id);
                     let authenticated = authenticated_inference_request(candidate, &bearer);
                     async move {
-                        crate::result_validation::infer_candidate(&mut client, authenticated).await
+                        let response =
+                            crate::result_validation::infer_candidate(&mut client, authenticated).await;
+                        call.finish_response(&response);
+                        response
                     }
                 });
                 let stopped = async {
@@ -1970,11 +2442,20 @@ pub async fn invoke_stream_sse(
                         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
                     }
                 };
-                let (chunk, checked) = tokio::select! {
-                    _ = stopped => return Err(tonic::Status::cancelled("client cancelled")),
-                    result = tokio::time::timeout(std::time::Duration::from_secs(60), check) =>
-                        result.map_err(|_| tonic::Status::deadline_exceeded(crate::result_validation::VALIDATION_TIMEOUT))??,
+                let checked = tokio::select! {
+                    () = stopped => Err(tonic::Status::cancelled("client cancelled")),
+                    result = tokio::time::timeout(std::time::Duration::from_secs(60), check) => match result {
+                        Ok(checked) => checked,
+                        Err(_) => Err(tonic::Status::deadline_exceeded(crate::result_validation::VALIDATION_TIMEOUT)),
+                    },
                 };
+                answer_clock.finish(match &checked {
+                    Ok(_) => "accepted",
+                    Err(status) if status.code() == tonic::Code::Cancelled => "cancelled",
+                    Err(status) if status.code() == tonic::Code::DeadlineExceeded => "timeout",
+                    Err(_) => "failed",
+                });
+                let (chunk, checked) = checked?;
                 if !checked.matches(&chunk.delta) {
                     return Err(tonic::Status::failed_precondition(crate::result_validation::VALIDATION_FAILED));
                 }
@@ -1995,6 +2476,58 @@ pub async fn invoke_stream_sse(
                 Ok(response) => break Some(Box::pin(response.into_inner()) as std::pin::Pin<Box<dyn Stream<Item = Result<mp_contracts::model_plane::v1::InferChunk, tonic::Status>> + Send>>),
                 Err(error) => error,
             };
+            // On the subscription route a failed open is the turn's outcome.
+            // A typed refusal names its reason; any other failure except an
+            // overflow (compacted below) is the generic route failure. There
+            // is no unary fallback: it would ask the same refused account
+            // again, and no other model or provider may answer instead.
+            let subscription_failure = crate::subscription_failure::on_route(&error, subscription_tool_round)
+                .or_else(|| {
+                    (subscription_tool_round && !crate::compaction::is_context_length_status(&error)).then_some(
+                        crate::subscription_failure::SubscriptionFailure::bare(
+                            crate::subscription_failure::SUBSCRIPTION_ROUTE_UNAVAILABLE,
+                        ),
+                    )
+                });
+            if let Some(failure) = subscription_failure {
+                tracing::warn!(
+                    request_id = %req_id,
+                    code = failure.code,
+                    "subscription answer stream failed; no fallback"
+                );
+                if let Some(call) = answer_call.take() {
+                    call.finish("error", None);
+                }
+                // A turn whose checked artifacts are still staged publishes
+                // nothing, and says so, as the unavailable branch below does.
+                let context = if hold_artifact_answer {
+                    crate::subscription_failure::FailureContext::Draft
+                } else {
+                    crate::subscription_failure::FailureContext::Answer
+                };
+                let message = crate::subscription_failure::message(&failure, context);
+                if hold_artifact_answer && !effective_zdr {
+                    if let Err(error) = crate::session_flow::append_assistant_message_authenticated(
+                        &session_state, &session_thread_id, &message, &session_bearer,
+                        session_agent_name.as_deref(), None).await {
+                        tracing::warn!(%error, request_id = %req_id, "failed to persist unpublished draft explanation");
+                    }
+                }
+                emit_subscription_failure(
+                    &tx,
+                    &session_state,
+                    &session_run_for_terminal,
+                    &session_bearer,
+                    &req_id,
+                    &failure,
+                    &message,
+                    &timing,
+                    (&stream_buffers, &buffer_key, &mut seq, &features),
+                )
+                .await;
+                finish_stream_registrations(&cancels, &queued_inputs, &req_id);
+                return;
+            }
             if !crate::compaction::is_context_length_status(&error) {
                 // Streaming RPC unavailable. Do NOT emit a bare `done` — that
                 // reads as a successful *empty* completion and forces every
@@ -2010,8 +2543,16 @@ pub async fn invoke_stream_sse(
                 );
                 break None;
             }
+            // The stable order puts the per-turn system blocks (grounding,
+            // memory) between the prior history and the current turn, where
+            // a plain group drop would take them with the oldest turns.
+            let shed = if cache_options.stable_prompt_order {
+                crate::compaction::drop_oldest_history_group
+            } else {
+                crate::compaction::drop_oldest_group
+            };
             if length_retries >= MAX_CONTEXT_LENGTH_RETRIES
-                || !crate::compaction::drop_oldest_group(
+                || !shed(
                     &mut grpc_req.messages,
                     CONTEXT_LENGTH_DROP_GROUP,
                     CONTEXT_LENGTH_KEEP_TAIL,
@@ -2023,17 +2564,32 @@ pub async fn invoke_stream_sse(
                     length_retries,
                     "prompt still exceeds the provider's input limit after compaction"
                 );
+                // The subscription is pinned to one model, so "choose a model
+                // with a larger context window" is not advice it can take.
+                let message = if subscription_tool_round {
+                    crate::subscription_failure::message(
+                        &crate::subscription_failure::SubscriptionFailure::bare(
+                            crate::subscription_failure::PROMPT_TOO_LONG,
+                        ),
+                        crate::subscription_failure::FailureContext::Answer,
+                    )
+                } else {
+                    "This conversation is too long for the selected model, even after \
+                     compacting it. Start a new thread, or choose a model with a larger \
+                     context window."
+                        .to_owned()
+                };
                 emit_prepared_failure(
                     &tx,
                     &session_state,
                     &session_run_for_terminal,
                     &session_bearer,
                     &req_id,
-                    "prompt_too_long",
-                    "This conversation is too long for the selected model, even after \
-                     compacting it. Start a new thread, or choose a model with a larger \
-                     context window.",
+                    crate::subscription_failure::PROMPT_TOO_LONG,
+                    &message,
                     false,
+                    &timing,
+                    (&stream_buffers, &buffer_key, &mut seq, &features),
                 )
                 .await;
                 finish_stream_registrations(&cancels, &queued_inputs, &req_id);
@@ -2049,8 +2605,43 @@ pub async fn invoke_stream_sse(
         }};
 
         let Some(mut grpc_stream) = stream else {
+            // The streaming call itself failed; the fallback times its own.
+            if let Some(call) = answer_call.take() {
+                call.finish("error", None);
+            }
+            // The fallback persists and publishes answer TEXT only. For a turn
+            // whose checked artifacts are still staged it would store a chat
+            // reply that may describe a document while silently dropping the
+            // document itself — a false completion. Fail honestly instead:
+            // nothing unchecked or incomplete is published.
+            if hold_artifact_answer {
+                let message = "Svaret kunne ikke fullføres fordi modelltjenesten ikke svarte. Dokumentutkastet er ikke publisert. Prøv igjen.";
+                if !effective_zdr {
+                    if let Err(error) = crate::session_flow::append_assistant_message_authenticated(
+                        &session_state, &session_thread_id, message, &session_bearer,
+                        session_agent_name.as_deref(), None).await {
+                        tracing::warn!(%error, request_id = %req_id, "failed to persist unpublished draft explanation");
+                    }
+                }
+                emit_prepared_failure(
+                    &tx,
+                    &session_state,
+                    &session_run_for_terminal,
+                    &session_bearer,
+                    &req_id,
+                    "inference_unavailable",
+                    message,
+                    true,
+                    &timing,
+                    (&stream_buffers, &buffer_key, &mut seq, &features),
+                )
+                .await;
+                finish_stream_registrations(&cancels, &queued_inputs, &req_id);
+                return;
+            }
             // Grounding, citations, and every tool event already went out above,
-            // so the fallback must not replay them.
+            // so the fallback must not replay them. It continues this stream's
+            // cursor rather than restarting at 0.
             run_infer_fallback(
                 &tx,
                 &session_state,
@@ -2066,6 +2657,9 @@ pub async fn invoke_stream_sse(
                 &session_run_for_terminal,
                 &inference_bearer,
                 &session_bearer,
+                seq,
+                &timing,
+                head_summary.as_ref(),
             )
             .await;
             finish_stream_registrations(&cancels, &queued_inputs, &req_id);
@@ -2079,6 +2673,11 @@ pub async fn invoke_stream_sse(
         let mut assistant_output = String::new();
         let mut terminal_assigned = false;
         let mut cancelled = false;
+        // Session Core reported the run already terminal. There is then no
+        // outcome left to record, and an attempt only fails and tells the
+        // client the run "remains retriable".
+        let mut run_already_terminal = false;
+        let mut first_token_marked = false;
         // chat-parity §3b (resume): a client disconnect (tab closed, network
         // drop, reload) is NOT a cancel. When `tx.send` first fails we flip
         // this to false and KEEP draining the provider stream — deltas keep
@@ -2105,6 +2704,15 @@ pub async fn invoke_stream_sse(
                         Ok(true) => continue 'stream,
                         Ok(false) => {
                             failure_code = "session_liveness_failed";
+                            run_already_terminal = true;
+                            emit_turn_timing(
+                                &tx,
+                                &timing,
+                                crate::turn_timing::Outcome::Failed,
+                                &req_id,
+                                (&stream_buffers, &buffer_key, &mut seq, &features),
+                            )
+                            .await;
                             let event = crate::sse_events::ChatEvent::Error {
                                 code: failure_code.to_owned(),
                                 message: "The chat run is no longer active. Please retry.".to_owned(),
@@ -2117,6 +2725,14 @@ pub async fn invoke_stream_sse(
                         Err(error) => {
                             tracing::warn!(%error, run_id = %session_run_for_terminal.run_id, "SSE direct stream liveness heartbeat failed");
                             failure_code = "session_liveness_failed";
+                            emit_turn_timing(
+                                &tx,
+                                &timing,
+                                crate::turn_timing::Outcome::Failed,
+                                &req_id,
+                                (&stream_buffers, &buffer_key, &mut seq, &features),
+                            )
+                            .await;
                             let event = crate::sse_events::ChatEvent::Error {
                                 code: failure_code.to_owned(),
                                 message: "Unable to confirm the chat run is active. Please retry.".to_owned(),
@@ -2130,12 +2746,48 @@ pub async fn invoke_stream_sse(
                 }
             };
             let Some(result) = next else {
+                // The provider stream closed without its final chunk. Every
+                // other way out of this loop sends a terminal frame first;
+                // this one sent none, so neither the live client nor a resume
+                // could tell the turn had failed.
+                emit_turn_timing(
+                    &tx,
+                    &timing,
+                    crate::turn_timing::Outcome::Failed,
+                    &req_id,
+                    (&stream_buffers, &buffer_key, &mut seq, &features),
+                )
+                .await;
+                let event = crate::sse_events::ChatEvent::Error {
+                    code: failure_code.to_owned(),
+                    message: "The answer stream ended before it was complete. Please try again."
+                        .to_owned(),
+                    retryable: true,
+                };
+                emit_and_buffer(
+                    &tx,
+                    &stream_buffers,
+                    &buffer_key,
+                    &mut seq,
+                    &features,
+                    &req_id,
+                    event,
+                )
+                .await;
                 break;
             };
             // chat-parity §4: cooperative cancel — the cancel endpoint flipped
             // this flag; emit a terminal `stopped` and end the stream.
             if cancel_flag.load(std::sync::atomic::Ordering::Relaxed) {
                 cancelled = true;
+                emit_turn_timing(
+                    &tx,
+                    &timing,
+                    crate::turn_timing::Outcome::Cancelled,
+                    &req_id,
+                    (&stream_buffers, &buffer_key, &mut seq, &features),
+                )
+                .await;
                 let stopped = crate::sse_events::ChatEvent::Stopped {
                     reason: "client cancelled".to_owned(),
                 };
@@ -2153,6 +2805,13 @@ pub async fn invoke_stream_sse(
             }
             match result {
                 Ok(chunk) if !chunk.done => {
+                    if !first_token_marked
+                        && answer_call.is_some()
+                        && (!chunk.delta.is_empty() || !chunk.reasoning_delta.is_empty())
+                    {
+                        timing.mark(crate::turn_timing::Mark::FirstToken);
+                        first_token_marked = true;
+                    }
                     // Extended thinking, on its own event and NEVER appended to
                     // `assistant_output`: reasoning is the model's scratchpad,
                     // not part of the answer, and it must not reach the
@@ -2213,6 +2872,15 @@ pub async fn invoke_stream_sse(
                     seq += 1;
                 }
                 Ok(chunk) => {
+                    if let Some(call) = answer_call.take() {
+                        if !first_token_marked && !chunk.delta.is_empty() {
+                            timing.mark(crate::turn_timing::Mark::FirstToken);
+                        }
+                        call.finish("ok", chunk.provider_timing.as_ref());
+                    }
+                    // A word-range candidate carries its call's report too; a
+                    // synthetic artifact answer carries none.
+                    timing.answer_tokens(chunk.provider_timing.as_ref());
                     // The provider contract is that reasoning arrives only on
                     // non-final chunks (a thinking block closes before
                     // `message_stop`). Not silently tolerated if that changes:
@@ -2268,6 +2936,7 @@ pub async fn invoke_stream_sse(
                     // answered and under what residency, stamped on the usage
                     // envelope below.
                     let provider_used = chunk.provider_used.clone();
+                    let cost_basis = route_cost_basis.served_by(&provider_used);
                     let residency = chunk.residency.clone();
                     let model_used = if chunk.model_used.is_empty() {
                         model_clone.clone()
@@ -2321,6 +2990,14 @@ pub async fn invoke_stream_sse(
                              prompt; reporting a stream error instead of scoring an empty answer"
                         );
                         failure_code = "inference_stream_error";
+                        emit_turn_timing(
+                            &tx,
+                            &timing,
+                            crate::turn_timing::Outcome::Failed,
+                            &req_id,
+                            (&stream_buffers, &buffer_key, &mut seq, &features),
+                        )
+                        .await;
                         let event = crate::sse_events::ChatEvent::Error {
                             code: failure_code.to_owned(),
                             message: "The model did not return an answer this time. Please try again."
@@ -2365,7 +3042,7 @@ pub async fn invoke_stream_sse(
                     // whole stream and carried on this final chunk. `None` for
                     // providers that report no logprobs (Anthropic).
                     let certainty = model_certainty(chunk.token_confidence.as_ref());
-                    let answer_budget = answer_token_budget().max(0) as u32;
+                    let answer_budget = truncation_budget(cost_basis);
                     let mut weak_retrieval = grounding.as_ref().is_some_and(|g| g.low_confidence);
                     let mut confidence = crate::confidence::score_with_retrieval_confidence(
                         &assistant_output,
@@ -2423,6 +3100,10 @@ pub async fn invoke_stream_sse(
                     // apart.
                     let mut reproduced = None;
                     if let Some(query) = verification_query.as_deref() {
+                        let verification_started = timing.now_ms();
+                        // The pass emits only through the sink, which takes
+                        // the cursor for its length and hands it back below.
+                        seq = sink.sync_cursor(seq).await;
                         // Step one: the org's own knowledge, queried with what
                         // the answer asserted.
                         if let Some(bearer) = verify_bearer.as_ref() {
@@ -2451,6 +3132,7 @@ pub async fn invoke_stream_sse(
                                             format!("{} — {}", citation.title, citation.snippet)
                                         })
                                         .collect();
+                                    let judge_started = timing.now_ms();
                                     verdict = judge_sources(
                                         &grpc_req,
                                         &session_state,
@@ -2463,6 +3145,7 @@ pub async fn invoke_stream_sse(
                                         effective_zdr,
                                     )
                                     .await;
+                                    timing.provider_interval(judge_started, 1);
                                     // Emitted whichever way the verdict went:
                                     // sources that DISAGREE are exactly what a
                                     // reader needs to see. Only the score
@@ -2474,6 +3157,15 @@ pub async fn invoke_stream_sse(
                                                 title: citation.title.clone(),
                                                 url: citation.url.clone(),
                                                 snippet: citation.snippet.clone(),
+                                                source_group_id: citation.source_group_id.clone(),
+                                                source_group_label: Some(
+                                                    citation.source_group_label.clone(),
+                                                ),
+                                                number: Some(citation.number),
+                                                claim_id: None,
+                                                start: None,
+                                                end: None,
+                                                origin: citation.origin.clone(),
                                             })
                                             .await;
                                         }
@@ -2553,6 +3245,7 @@ pub async fn invoke_stream_sse(
                                         format!("{} — {}", citation.title, citation.snippet)
                                     })
                                     .collect();
+                                let judge_started = timing.now_ms();
                                 verdict = judge_sources(
                                     &grpc_req,
                                     &session_state,
@@ -2565,6 +3258,7 @@ pub async fn invoke_stream_sse(
                                     effective_zdr,
                                 )
                                 .await;
+                                timing.provider_interval(judge_started, 1);
                                 if verdict.is_support() {
                                     evidence.web_citations = evidence
                                         .web_citations
@@ -2594,6 +3288,7 @@ pub async fn invoke_stream_sse(
                         if crate::verification::should_verify(confidence)
                             && crate::verification::self_consistency_applies(output_tokens, verdict)
                         {
+                            let resample_started = timing.now_ms();
                             let samples = resample_answer(
                                 &grpc_req,
                                 &session_state,
@@ -2606,6 +3301,11 @@ pub async fn invoke_stream_sse(
                                 effective_zdr,
                             )
                             .await;
+                            // One call per sample; a failed sample ends the set.
+                            timing.provider_interval(
+                                resample_started,
+                                u32::try_from(samples.len().max(1)).unwrap_or(u32::MAX),
+                            );
                             if !samples.is_empty() {
                                 let agrees = crate::verification::samples_agree(
                                     &assistant_output,
@@ -2637,6 +3337,10 @@ pub async fn invoke_stream_sse(
                         // did not) is only trustworthy if the reader can tell
                         // "we checked and found nothing" from "we never
                         // looked".
+                        timing.close(
+                            crate::turn_timing::Phase::Verification,
+                            verification_started,
+                        );
                         sink.emit(crate::sse_events::ChatEvent::Verification {
                             verdict: verdict.as_str(),
                             kb_citations: evidence.kb_citations,
@@ -2644,57 +3348,110 @@ pub async fn invoke_stream_sse(
                             web_allowed: verify_web_allowed,
                         })
                         .await;
+                        seq = sink.sync_cursor(seq).await;
                     }
 
+                    // A Stop that landed after the final chunk — while scoring,
+                    // verification or source lookups above ran — still precedes
+                    // publication: nothing is persisted yet. Honour it here, or
+                    // the user sees "stopped" while the answer and its staged
+                    // artifacts are durably published behind them.
+                    if cancel_flag.load(std::sync::atomic::Ordering::Relaxed) {
+                        cancelled = true;
+                        emit_turn_timing(
+                            &tx,
+                            &timing,
+                            crate::turn_timing::Outcome::Cancelled,
+                            &req_id,
+                            (&stream_buffers, &buffer_key, &mut seq, &features),
+                        )
+                        .await;
+                        emit_and_buffer(&tx, &stream_buffers, &buffer_key, &mut seq, &features, &req_id,
+                            crate::sse_events::ChatEvent::Stopped { reason: "client cancelled".to_owned() }).await;
+                        break;
+                    }
+                    let lock_started = timing.now_ms();
                     let _artifact_commit_guard = committed_artifacts.lock_commit(&session_thread_id).await;
+                    timing.close(crate::turn_timing::Phase::CommitLock, lock_started);
                     if sink.recorded_artifacts().iter().any(|artifact|
                         !committed_artifacts.unchanged_from(&artifact_base, &session_thread_id, &artifact.id)) {
                         failure_code = "artifact_revision_conflict";
+                        emit_turn_timing(
+                            &tx,
+                            &timing,
+                            crate::turn_timing::Outcome::Failed,
+                            &req_id,
+                            (&stream_buffers, &buffer_key, &mut seq, &features),
+                        )
+                        .await;
                         emit_and_buffer(&tx, &stream_buffers, &buffer_key, &mut seq, &features, &req_id,
                             crate::sse_events::ChatEvent::Error { code: failure_code.to_owned(),
                                 message: "Dokumentet ble oppdatert av en annen kjøring. Last inn den nyeste versjonen og prøv endringen igjen.".to_owned(),
                                 retryable: true }).await;
                         break;
                     }
-                    if let Err(error) = crate::session_flow::append_assistant_message_authenticated(
+                    // Session Core may have ended the run while the answer was
+                    // produced: a durable Stop, possibly handled by another
+                    // replica, or its own deadline. The save and the terminal
+                    // receipt are still two calls, so saving now would leave an
+                    // assistant message on a finished run and then fail its
+                    // terminalization. Confirm the run is live first, and stop
+                    // without saving when it is not.
+                    let run_live = crate::session_flow::heartbeat_direct_inference_run(
                         &session_state,
-                        &session_thread_id,
-                        &assistant_output,
-                        &session_bearer,
-                        session_agent_name.as_deref(),
-                        crate::session_flow::with_compaction_summary(crate::session_flow::with_result_receipt(crate::session_flow::turn_evidence_metadata(
-                            session_grounding.as_ref(),
-                            &sink.recorded_citations(),
-                            &sink.recorded_artifacts(),
-                            // Scored, and where applicable verified, just
-                            // above — so the durable turn carries the same
-                            // number the stream reported, and a reader who
-                            // opens this thread on another device sees why.
-                            crate::session_flow::TurnQuality {
-                                confidence,
-                                verification: verification_decision.should_verify().then(|| {
-                                    crate::session_flow::TurnVerification {
-                                        verdict: verdict.as_str(),
-                                        kb_citations: evidence.kb_citations,
-                                        web_citations: evidence.web_citations,
-                                        web_allowed: verify_web_allowed,
-                                    }
-                                }),
-                            },
-                        ), result_receipt.lock().ok().and_then(|receipt| receipt.clone()).as_ref()), &chunk.compaction_summary, effective_zdr),
+                        &session_run_for_terminal,
                     )
-                    .await
-                    {
-                        tracing::warn!(
-                            %error,
-                            request_id = %req_id,
-                            thread_id = %session_thread_id,
-                            "failed to persist streamed assistant message"
-                        );
-                        failure_code = "assistant_persist_failed";
+                    .await;
+                    // A Stop that arrived during that call wins, as above.
+                    if cancel_flag.load(std::sync::atomic::Ordering::Relaxed) {
+                        cancelled = true;
+                        emit_turn_timing(
+                            &tx,
+                            &timing,
+                            crate::turn_timing::Outcome::Cancelled,
+                            &req_id,
+                            (&stream_buffers, &buffer_key, &mut seq, &features),
+                        )
+                        .await;
+                        let stopped = crate::sse_events::ChatEvent::Stopped {
+                            reason: "client cancelled".to_owned(),
+                        };
+                        emit_and_buffer(
+                            &tx,
+                            &stream_buffers,
+                            &buffer_key,
+                            &mut seq,
+                            &features,
+                            &req_id,
+                            stopped,
+                        )
+                        .await;
+                        break;
+                    }
+                    let not_live = match run_live {
+                        Ok(true) => None,
+                        Ok(false) => {
+                            run_already_terminal = true;
+                            Some("The chat run is no longer active. Please retry.")
+                        }
+                        Err(error) => {
+                            tracing::warn!(%error, run_id = %session_run_for_terminal.run_id, "SSE direct stream pre-save liveness check failed");
+                            Some("Unable to confirm the chat run is active. Please retry.")
+                        }
+                    };
+                    if let Some(message) = not_live {
+                        failure_code = "session_liveness_failed";
+                        emit_turn_timing(
+                            &tx,
+                            &timing,
+                            crate::turn_timing::Outcome::Failed,
+                            &req_id,
+                            (&stream_buffers, &buffer_key, &mut seq, &features),
+                        )
+                        .await;
                         let event = crate::sse_events::ChatEvent::Error {
                             code: failure_code.to_owned(),
-                            message: "Unable to persist the assistant response.".to_owned(),
+                            message: message.to_owned(),
                             retryable: true,
                         };
                         emit_and_buffer(
@@ -2709,36 +3466,198 @@ pub async fn invoke_stream_sse(
                         .await;
                         break;
                     }
-
-                    if let Err(error) =
-                        crate::session_flow::terminalize_direct_inference_run_authenticated(
+                    // One Session Core transaction saves the answer and records
+                    // the Completed receipt, so a durable cancel can no longer
+                    // land between the two, and the save rides the Gateway's
+                    // scoped service credential rather than the delegated
+                    // bearer minted when the request began. The heartbeat
+                    // above stays as the cheap early exit.
+                    let completion =
+                        crate::session_flow::complete_direct_inference_run_with_message(
                             &session_state,
                             &session_run_for_terminal,
-                            crate::session_flow::DirectInferenceTerminal::Completed,
-                            &session_bearer,
-                        )
-                        .await
-                    {
-                        tracing::warn!(%error, run_id = %session_run_for_terminal.run_id, "failed to terminalize completed direct inference stream");
-                        let event = crate::sse_events::ChatEvent::Error {
-                            code: "session_terminalization_failed".to_owned(),
-                            message: "Unable to finalize the chat run.".to_owned(),
-                            retryable: true,
-                        };
-                        emit_and_buffer(
-                            &tx,
-                            &stream_buffers,
-                            &buffer_key,
-                            &mut seq,
-                            &features,
+                            crate::session_flow::DirectAnswer {
+                                content: &assistant_output,
+                                agent_name: session_agent_name.as_deref(),
+                                metadata: crate::session_flow::with_head_summary(
+                                    crate::session_flow::with_compaction_summary(
+                                        crate::session_flow::with_result_receipt(
+                                            crate::session_flow::turn_evidence_metadata(
+                                                session_grounding.as_ref(),
+                                                &sink.recorded_citations(),
+                                                &sink.recorded_artifacts(),
+                                                // Scored, and where applicable verified, just
+                                                // above — so the durable turn carries the same
+                                                // number the stream reported, and a reader who
+                                                // opens this thread on another device sees why.
+                                                crate::session_flow::TurnQuality {
+                                                    confidence,
+                                                    verification: verification_decision
+                                                        .should_verify()
+                                                        .then(|| {
+                                                            crate::session_flow::TurnVerification {
+                                                                verdict: verdict.as_str(),
+                                                                kb_citations: evidence.kb_citations,
+                                                                web_citations: evidence
+                                                                    .web_citations,
+                                                                web_allowed: verify_web_allowed,
+                                                            }
+                                                        }),
+                                                },
+                                            ),
+                                            result_receipt
+                                                .lock()
+                                                .ok()
+                                                .and_then(|receipt| receipt.clone())
+                                                .as_ref(),
+                                        ),
+                                        &chunk.compaction_summary,
+                                        effective_zdr,
+                                    ),
+                                    head_summary.as_ref(),
+                                    effective_zdr,
+                                ),
+                            },
                             &req_id,
-                            event,
+                            &session_bearer,
+                            Some(&timing),
                         )
                         .await;
-                        finish_stream_registrations(&cancels, &queued_inputs, &req_id);
-                        return;
+                    match completion {
+                        Ok(crate::session_flow::DirectCompletion::Completed) => {}
+                        Ok(crate::session_flow::DirectCompletion::AlreadyTerminal) => {
+                            // Session Core ended the run after the heartbeat
+                            // above: nothing was saved. The same outcome as
+                            // that heartbeat reporting it, Stop included.
+                            if cancel_flag.load(std::sync::atomic::Ordering::Relaxed) {
+                                cancelled = true;
+                                emit_turn_timing(
+                                    &tx,
+                                    &timing,
+                                    crate::turn_timing::Outcome::Cancelled,
+                                    &req_id,
+                                    (&stream_buffers, &buffer_key, &mut seq, &features),
+                                )
+                                .await;
+                                let stopped = crate::sse_events::ChatEvent::Stopped {
+                                    reason: "client cancelled".to_owned(),
+                                };
+                                emit_and_buffer(
+                                    &tx,
+                                    &stream_buffers,
+                                    &buffer_key,
+                                    &mut seq,
+                                    &features,
+                                    &req_id,
+                                    stopped,
+                                )
+                                .await;
+                                break;
+                            }
+                            run_already_terminal = true;
+                            failure_code = "session_liveness_failed";
+                            emit_turn_timing(
+                                &tx,
+                                &timing,
+                                crate::turn_timing::Outcome::Failed,
+                                &req_id,
+                                (&stream_buffers, &buffer_key, &mut seq, &features),
+                            )
+                            .await;
+                            let event = crate::sse_events::ChatEvent::Error {
+                                code: failure_code.to_owned(),
+                                message: "The chat run is no longer active. Please retry."
+                                    .to_owned(),
+                                retryable: true,
+                            };
+                            emit_and_buffer(
+                                &tx,
+                                &stream_buffers,
+                                &buffer_key,
+                                &mut seq,
+                                &features,
+                                &req_id,
+                                event,
+                            )
+                            .await;
+                            break;
+                        }
+                        Err(crate::session_flow::DirectCompletionError::Persist(error)) => {
+                            tracing::warn!(
+                                error = %crate::session_flow::session_error_chain(&error),
+                                grpc_code = %crate::session_flow::session_error_code(&error),
+                                request_id = %req_id,
+                                run_id = %session_run_for_terminal.run_id,
+                                thread_id = %session_thread_id,
+                                "failed to persist streamed assistant message"
+                            );
+                            failure_code = "assistant_persist_failed";
+                            emit_turn_timing(
+                                &tx,
+                                &timing,
+                                crate::turn_timing::Outcome::Failed,
+                                &req_id,
+                                (&stream_buffers, &buffer_key, &mut seq, &features),
+                            )
+                            .await;
+                            let event = crate::sse_events::ChatEvent::Error {
+                                code: failure_code.to_owned(),
+                                message: "Unable to persist the assistant response.".to_owned(),
+                                retryable: true,
+                            };
+                            emit_and_buffer(
+                                &tx,
+                                &stream_buffers,
+                                &buffer_key,
+                                &mut seq,
+                                &features,
+                                &req_id,
+                                event,
+                            )
+                            .await;
+                            break;
+                        }
+                        // Only the two-call path used while Session Core
+                        // lacks the atomic call: saved, but not acknowledged.
+                        Err(crate::session_flow::DirectCompletionError::Terminal(error)) => {
+                            tracing::warn!(
+                                error = %crate::session_flow::session_error_chain(&error),
+                                grpc_code = %crate::session_flow::session_error_code(&error),
+                                request_id = %req_id,
+                                run_id = %session_run_for_terminal.run_id,
+                                "failed to terminalize completed direct inference stream"
+                            );
+                            emit_turn_timing(
+                                &tx,
+                                &timing,
+                                crate::turn_timing::Outcome::Failed,
+                                &req_id,
+                                (&stream_buffers, &buffer_key, &mut seq, &features),
+                            )
+                            .await;
+                            let event = crate::sse_events::ChatEvent::Error {
+                                code: "session_terminalization_failed".to_owned(),
+                                message: "Unable to finalize the chat run.".to_owned(),
+                                retryable: true,
+                            };
+                            emit_and_buffer(
+                                &tx,
+                                &stream_buffers,
+                                &buffer_key,
+                                &mut seq,
+                                &features,
+                                &req_id,
+                                event,
+                            )
+                            .await;
+                            end_resume_buffer(&stream_buffers, &buffer_key, seq).await;
+                            finish_stream_registrations(&cancels, &queued_inputs, &req_id);
+                            return;
+                        }
                     }
                     terminal_assigned = true;
+                    timing.mark(crate::turn_timing::Mark::Durable);
+                    let publish_started = timing.now_ms();
 
                     // The exact text and its receipt are now in the durable
                     // assistant message. Publish only the last selected version
@@ -2750,6 +3669,9 @@ pub async fn invoke_stream_sse(
                         if let Some(kind) = crate::artifacts::ArtifactKind::parse(&artifact.kind) {
                             committed_artifacts.remember_kind(&session_thread_id, &artifact.id, kind);
                         }
+                        // The accepted review travels with its text, for a
+                        // later revision turn's receipt-bound reuse.
+                        committed_artifacts.adopt_review(&session_state.artifact_versions, &session_thread_id, &artifact.id);
                         }
                         emit_and_buffer(&tx, &stream_buffers, &buffer_key, &mut seq, &features, &req_id,
                             crate::sse_events::ChatEvent::Artifact { id: artifact.id, kind: artifact.kind,
@@ -2800,7 +3722,7 @@ pub async fn invoke_stream_sse(
                         tracing::warn!(error = %e, "failed to publish STREAM_CLOSED");
                     }
 
-                    let usage_envelope = build_usage_envelope(
+                    let mut usage_envelope = build_usage_envelope(
                         &req_id,
                         &org_clone,
                         &user_clone,
@@ -2813,7 +3735,10 @@ pub async fn invoke_stream_sse(
                         residency,
                         cache_read_tokens,
                         cache_creation_tokens,
+                        cost_basis,
                     );
+                    // A summary as of now, beside the unchanged `latency_ms`.
+                    usage_envelope.payload["timing"] = timing.summary();
                     if let Err(e) = publisher
                         .publish(&subjects::usage_subject(&org_clone), &usage_envelope)
                         .await
@@ -2828,26 +3753,23 @@ pub async fn invoke_stream_sse(
                         "SSE stream completed"
                     );
 
-                    stream_buffers
-                        .finish(
-                            &buffer_key,
-                            crate::stream_buffer::StreamDone {
-                                seq,
-                                model_used: model_used.clone(),
-                                input_tokens,
-                                output_tokens,
-                            },
-                        )
-                        .await;
+                    // The buffer's terminal frame is recorded just before the
+                    // live `done` below, with the SAME id. Recording it here
+                    // gave `done` a lower cursor than the usage/title/follow-up
+                    // frames buffered after it, so a client that had seen any of
+                    // them and reconnected never received `done` at all.
 
                     // chat-parity §17: opt-in usage event (real tokens + latency)
                     // before the terminal done. Phase 7 B5 — cost_usd is priced
                     // from cost-core's catalogue (same source as the durable
                     // ledger); `None` only when cost-core is unreachable, never
-                    // faked. Phase 7 B6 — confidence is a heuristic answer-quality
-                    // score over the real completion (grounded = carried citations).
+                    // faked. A subscription turn is never priced from API list
+                    // prices (`CostBasis`). Phase 7 B6 — confidence is a heuristic
+                    // answer-quality score over the real completion (grounded =
+                    // carried citations).
                     let cost_usd = pricing
-                        .cost_usd(
+                        .cost_usd_for(
+                            cost_basis,
                             &model_used,
                             i64::from(input_tokens),
                             i64::from(output_tokens),
@@ -2901,10 +3823,35 @@ pub async fn invoke_stream_sse(
                         confidence,
                         "answer token certainty"
                     );
+                    // chat-wave2 citations spec §2.4: now that the answer is
+                    // complete, locate each recorded citation's `[n]` marker
+                    // and re-emit it carrying `claim_id`/`start`/`end`. Runs
+                    // AFTER the durable persist above (so the persisted
+                    // snapshot is the pre-anchor citation list — the anchor
+                    // is a live-stream/resume-buffer enrichment only, see the
+                    // module doc) and right before `usage`/`turn_timing`,
+                    // the same place/pattern as those two frames.
+                    for anchored in crate::citation_anchors::anchor_citations(
+                        &assistant_output,
+                        &req_id,
+                        &sink.recorded_citations(),
+                    ) {
+                        emit_and_buffer(
+                            &tx,
+                            &stream_buffers,
+                            &buffer_key,
+                            &mut seq,
+                            &features,
+                            &req_id,
+                            anchored,
+                        )
+                        .await;
+                    }
                     let usage_event = crate::sse_events::ChatEvent::Usage {
                         input_tokens,
                         output_tokens,
                         cost_usd,
+                        cost_basis: Some(cost_basis),
                         latency_ms,
                         confidence,
                     };
@@ -2918,6 +3865,7 @@ pub async fn invoke_stream_sse(
                         usage_event,
                     )
                     .await;
+                    timing.close(crate::turn_timing::Phase::Publish, publish_started);
 
                     // The finished answer used to be written to the prompt-keyed
                     // response cache here. Nothing reads such an entry (see the
@@ -2945,16 +3893,22 @@ pub async fn invoke_stream_sse(
                         let title = if deterministic_completion {
                             let artifacts = sink.recorded_artifacts();
                             (artifacts.len() == 1).then(|| sanitize_thread_title(&artifacts[0].title)).flatten()
-                        } else { generate_thread_title(
-                            &grpc_req,
-                            &session_state,
-                            &req_id,
-                            &org_clone,
-                            &title_user_content,
-                            &assistant_output,
-                            &inference_bearer,
-                        )
-                        .await };
+                        } else {
+                            let title_call = timing.call(crate::turn_timing::Phase::Title);
+                            let title = generate_thread_title(
+                                &grpc_req,
+                                &session_state,
+                                &req_id,
+                                &org_clone,
+                                &title_user_content,
+                                &assistant_output,
+                                &inference_bearer,
+                            )
+                            .await;
+                            let outcome = if title.is_some() { "ok" } else { "error" };
+                            title_call.finish(outcome, None);
+                            title
+                        };
                         if let Some(title) = title {
                             let event = crate::sse_events::ChatEvent::Title { title };
                             emit_and_buffer(
@@ -2989,6 +3943,7 @@ pub async fn invoke_stream_sse(
                         && !deterministic_completion
                         && confidence.is_none_or(|score| score >= FOLLOW_UPS_MIN_CONFIDENCE)
                     {
+                        let follow_ups_call = timing.call(crate::turn_timing::Phase::FollowUps);
                         let suggestions = generate_follow_ups(
                             &grpc_req,
                             &session_state,
@@ -2999,6 +3954,8 @@ pub async fn invoke_stream_sse(
                             &inference_bearer,
                         )
                         .await;
+                        let outcome = if suggestions.is_empty() { "error" } else { "ok" };
+                        follow_ups_call.finish(outcome, None);
                         if !suggestions.is_empty() {
                             let event = crate::sse_events::ChatEvent::FollowUps { suggestions };
                             emit_and_buffer(
@@ -3014,6 +3971,29 @@ pub async fn invoke_stream_sse(
                         }
                     }
 
+                    // The timing frame goes out last, so it covers the title and
+                    // follow-up calls above, and `done` follows it directly.
+                    emit_turn_timing(
+                        &tx,
+                        &timing,
+                        crate::turn_timing::Outcome::Completed,
+                        &req_id,
+                        (&stream_buffers, &buffer_key, &mut seq, &features),
+                    )
+                    .await;
+                    // Every frame this stream will ever buffer is buffered now,
+                    // so the terminal cursor is the id `done` is sent with.
+                    stream_buffers
+                        .finish(
+                            &buffer_key,
+                            crate::stream_buffer::StreamDone {
+                                seq,
+                                model_used: model_used.clone(),
+                                input_tokens,
+                                output_tokens,
+                            },
+                        )
+                        .await;
                     let done_chunk = SseChunk {
                         request_id: req_id.clone(),
                         delta: String::new(),
@@ -3033,8 +4013,53 @@ pub async fn invoke_stream_sse(
                 }
                 Err(e) => {
                     tracing::error!(error = %e, request_id = %req_id, "gRPC stream error");
+                    // A typed refusal mid-stream (a word-range candidate, or
+                    // its review or repair, refused by the subscription) ends
+                    // the turn on its own reason and timing. The candidate's
+                    // status propagates unchanged, so no further candidate is
+                    // asked for.
+                    if let Some(failure) = crate::subscription_failure::on_route(&e, subscription_tool_round) {
+                        failure_code = failure.code;
+                        if let Some(call) = answer_call.take() {
+                            call.finish("error", None);
+                        }
+                        emit_turn_timing(
+                            &tx,
+                            &timing,
+                            crate::turn_timing::Outcome::of_failure(failure_code),
+                            &req_id,
+                            (&stream_buffers, &buffer_key, &mut seq, &features),
+                        )
+                        .await;
+                        let message = crate::subscription_failure::message(
+                            &failure,
+                            crate::subscription_failure::FailureContext::Answer,
+                        );
+                        emit_and_buffer(
+                            &tx,
+                            &stream_buffers,
+                            &buffer_key,
+                            &mut seq,
+                            &features,
+                            &req_id,
+                            crate::sse_events::ChatEvent::subscription_error(&failure, message),
+                        )
+                        .await;
+                        break;
+                    }
                     let (code, message) = checked_stream_failure(e.message(), tool_phase_query.to_lowercase().contains("chatten"));
                     failure_code = code;
+                    if let Some(call) = answer_call.take() {
+                        call.finish("error", None);
+                    }
+                    emit_turn_timing(
+                        &tx,
+                        &timing,
+                        crate::turn_timing::Outcome::of_failure(failure_code),
+                        &req_id,
+                        (&stream_buffers, &buffer_key, &mut seq, &features),
+                    )
+                    .await;
                     let event = crate::sse_events::ChatEvent::Error {
                         code: failure_code.to_owned(),
                         message: message.to_owned(),
@@ -3055,6 +4080,21 @@ pub async fn invoke_stream_sse(
             }
         }
         if !terminal_assigned {
+            // Already sent before a terminal frame above; this covers a stream
+            // that ended without one.
+            let outcome = if cancelled {
+                crate::turn_timing::Outcome::Cancelled
+            } else {
+                crate::turn_timing::Outcome::of_failure(failure_code)
+            };
+            emit_turn_timing(
+                &tx,
+                &timing,
+                outcome,
+                &req_id,
+                (&stream_buffers, &buffer_key, &mut seq, &features),
+            )
+            .await;
             if cancelled {
                 if let Err(error) = crate::session_flow::cancel_direct_inference_run_authenticated(
                     &session_state,
@@ -3065,6 +4105,12 @@ pub async fn invoke_stream_sse(
                 {
                     tracing::warn!(%error, run_id = %session_run_for_terminal.run_id, "failed to cancel direct inference stream");
                 }
+            } else if run_already_terminal {
+                tracing::info!(
+                    run_id = %session_run_for_terminal.run_id,
+                    failure_code,
+                    "direct inference run was already terminal; no failed outcome recorded"
+                );
             } else if let Err(error) =
                 crate::session_flow::terminalize_direct_inference_run_authenticated(
                     &session_state,
@@ -3092,6 +4138,8 @@ pub async fn invoke_stream_sse(
                 )
                 .await;
             }
+            // Every frame, the terminalization error included, is buffered.
+            end_resume_buffer(&stream_buffers, &buffer_key, seq).await;
         }
         // chat-parity §4: stop tracking this stream for cancellation.
         finish_stream_registrations(&cancels, &queued_inputs, &req_id);
@@ -3203,6 +4251,18 @@ fn answer_token_budget() -> i32 {
         .clamp(MIN_ANSWER_TOKENS, MAX_ANSWER_TOKENS)
 }
 
+/// The budget the confidence score's truncation check compares output tokens
+/// with. Reaching it means a cut-off answer only where the provider enforces
+/// it. The subscription broker does not (Codex takes no output cap) and
+/// counts reasoning inside its output tokens, so on that route the check gets
+/// no budget (0) and a long answer is not scored as truncated.
+fn truncation_budget(cost_basis: crate::pricing::CostBasis) -> u32 {
+    match cost_basis {
+        crate::pricing::CostBasis::Subscription => 0,
+        crate::pricing::CostBasis::Metered => u32::try_from(answer_token_budget()).unwrap_or(0),
+    }
+}
+
 pub(crate) fn context_assembly_budget() -> u32 {
     std::env::var("MODEL_GATEWAY_CONTEXT_ASSEMBLY_TOKENS")
         .ok()
@@ -3220,6 +4280,109 @@ pub(crate) fn context_assembly_budget() -> u32 {
 struct ContextAssemblyMessages {
     messages: Vec<ChatMessage>,
     grounded: bool,
+    /// What the block was built from, so it can be rebuilt without history
+    /// the prompt already carries (see `without_sent_history`).
+    segments: Vec<ContextSegment>,
+    estimated_tokens: u32,
+}
+
+/// Persona spec: the per-thread override, read off the SAME
+/// `get_context_assembly` response [`load_context_assembly_messages`]
+/// already fetches — no extra RPC. Returned alongside the `Option` (rather
+/// than folded into [`ContextAssemblyMessages`]) because that struct is
+/// dropped on several legitimate early-return paths (an empty rendered
+/// block, `without_sent_history` leaving nothing) that must NOT also drop
+/// this bit; a fresh thread with nothing to say yet still has an opinion on
+/// whether persona is on.
+type ContextAssemblyLoad = (Option<ContextAssemblyMessages>, bool);
+
+impl ContextAssemblyMessages {
+    /// This assembly without the `thread` segments that repeat a message the
+    /// prompt already sends as history, with session-core's token estimate
+    /// reduced by what was left out.
+    ///
+    /// session-core renders each recent message as `role: content`, from the
+    /// same table the history is read from, so a repeat is an exact match.
+    /// Only exact repeats go: a message compaction took out of the history is
+    /// not in `history`, so its segment stays. Unchanged when nothing repeats;
+    /// `None` when nothing is left to send, as for an empty block.
+    fn without_sent_history(
+        self,
+        history: &[ChatMessage],
+        raw_user_content: &str,
+        current_user_content: &str,
+    ) -> Option<Self> {
+        let sent: std::collections::HashSet<String> = history
+            .iter()
+            .filter(|message| message.role != "system")
+            .map(|message| {
+                format!("{}: {}", message.role, message.content)
+                    .trim()
+                    .to_owned()
+            })
+            .collect();
+        let repeats = |segment: &ContextSegment| {
+            segment.kind.trim() == "thread" && {
+                let content = segment.content.trim();
+                sent.contains(content)
+                    || sent.contains(
+                        sanitized_context_segment(
+                            content.to_owned(),
+                            raw_user_content,
+                            current_user_content,
+                        )
+                        .trim(),
+                    )
+            }
+        };
+        if !self.segments.iter().any(repeats) {
+            return Some(self);
+        }
+        let (dropped, kept): (Vec<ContextSegment>, Vec<ContextSegment>) = self
+            .segments
+            .into_iter()
+            .partition(|segment| repeats(segment));
+        let estimated_tokens = self.estimated_tokens.saturating_sub(
+            dropped
+                .iter()
+                .map(|segment| segment.estimated_tokens)
+                .fold(0, u32::saturating_add),
+        );
+        let context = render_context_assembly_block(
+            &kept,
+            estimated_tokens,
+            raw_user_content,
+            current_user_content,
+        );
+        if context.block.trim().is_empty() {
+            return None;
+        }
+        Some(Self {
+            messages: context_assembly_chat_messages(context.block, current_user_content),
+            grounded: context.grounded,
+            segments: kept,
+            estimated_tokens,
+        })
+    }
+}
+
+/// The two messages context assembly contributes: its block, and the current
+/// user turn it was assembled for.
+fn context_assembly_chat_messages(block: String, current_user_content: &str) -> Vec<ChatMessage> {
+    vec![
+        ChatMessage {
+            compaction_summary: String::new(),
+            role: "system".to_owned(),
+            content: block,
+            name: String::new(),
+        },
+        ChatMessage {
+            compaction_summary: String::new(),
+            role: "user".to_owned(),
+            content: current_user_content.to_owned(),
+            name: String::new(),
+        },
+    ]
 }
 
 /// Attach the end user's delegated Data Plane credential so session-core can
@@ -3263,7 +4426,7 @@ async fn load_context_assembly_messages(
     // retrieval fan-out inherits the same posture as every other Data Plane
     // call this turn makes, instead of falling back to a no-signal default.
     sovereign_required: bool,
-) -> Option<ContextAssemblyMessages> {
+) -> ContextAssemblyLoad {
     // session-core's gRPC interceptor requires the caller's verified session
     // bearer as `authorization` metadata (auth.rs extract_bearer); a bare call
     // 401s "verified caller credential required", silently dropping durable
@@ -3283,7 +4446,9 @@ async fn load_context_assembly_messages(
         Ok(request) => request,
         Err(error) => {
             tracing::warn!(%error, %thread_id, %run_id, "session-core context assembly credential unavailable; using recent thread messages");
-            return None;
+            // Fail OPEN on persona display: a missing credential here must
+            // never look like the user turned their own persona off.
+            return (None, true);
         }
     };
     // Separately, session-core needs a `data-plane`-audience credential to reach
@@ -3317,37 +4482,34 @@ async fn load_context_assembly_messages(
         Ok(response) => response.into_inner(),
         Err(error) => {
             tracing::warn!(%error, %thread_id, %run_id, "session-core context assembly failed; using recent thread messages");
-            return None;
+            return (None, true);
         }
     };
+    // `optional bool` on the wire (see the field's own proto comment for the
+    // proto3 zero-value rationale) — `unwrap_or(true)` covers only an
+    // unupgraded session-core replica during a rolling deploy, never a
+    // deliberate "off" (which is always explicitly set).
+    let persona_enabled = response.persona_enabled.unwrap_or(true);
 
-    let context = build_context_assembly_block(
-        response.segments,
+    let context = render_context_assembly_block(
+        &response.segments,
         response.estimated_tokens,
         raw_user_content,
         current_user_content,
     );
     if context.block.trim().is_empty() {
-        return None;
+        return (None, persona_enabled);
     }
 
-    Some(ContextAssemblyMessages {
-        messages: vec![
-            ChatMessage {
-                compaction_summary: String::new(),
-                role: "system".to_owned(),
-                content: context.block,
-                name: String::new(),
-            },
-            ChatMessage {
-                compaction_summary: String::new(),
-                role: "user".to_owned(),
-                content: current_user_content.to_owned(),
-                name: String::new(),
-            },
-        ],
-        grounded: context.grounded,
-    })
+    (
+        Some(ContextAssemblyMessages {
+            messages: context_assembly_chat_messages(context.block, current_user_content),
+            grounded: context.grounded,
+            segments: response.segments,
+            estimated_tokens: response.estimated_tokens,
+        }),
+        persona_enabled,
+    )
 }
 
 /// Segment kinds that carry actual Data Plane evidence, as opposed to identity,
@@ -3375,8 +4537,23 @@ struct ContextAssemblyBlock {
     grounded: bool,
 }
 
+#[cfg(test)]
 fn build_context_assembly_block(
     segments: Vec<ContextSegment>,
+    estimated_tokens: u32,
+    raw_user_content: &str,
+    current_user_content: &str,
+) -> ContextAssemblyBlock {
+    render_context_assembly_block(
+        &segments,
+        estimated_tokens,
+        raw_user_content,
+        current_user_content,
+    )
+}
+
+fn render_context_assembly_block(
+    segments: &[ContextSegment],
     estimated_tokens: u32,
     raw_user_content: &str,
     current_user_content: &str,
@@ -3386,7 +4563,7 @@ fn build_context_assembly_block(
     let mut grounded = false;
     let mut kinds: Vec<&str> = Vec::new();
 
-    for segment in &segments {
+    for segment in segments {
         let kind = segment.kind.trim();
         let content = sanitized_context_segment(
             segment.content.clone(),
@@ -3487,6 +4664,18 @@ struct SummarizerContext<'a> {
     /// caller's floor without re-deriving it.
     min_privacy_tier: i32,
     inference_bearer: &'a VerifiedInferenceBearer,
+    /// Compact by estimated tokens against this budget instead of by message
+    /// count, and reuse a persisted summary (`prompt_context::CacheOptions`).
+    /// `None` keeps the 24/23 message-count compaction.
+    token_budget: Option<usize>,
+}
+
+/// The loaded thread, and a compaction summary written for it this turn.
+struct RecentThread {
+    messages: Vec<ChatMessage>,
+    /// Set only in token-budget mode, when this turn wrote a new summary; the
+    /// answer's persisted metadata carries it so later turns can reuse it.
+    head_summary: Option<crate::compaction::StoredHeadSummary>,
 }
 
 /// How much of the about-to-be-discarded head is used as the memory query.
@@ -3772,7 +4961,7 @@ async fn load_recent_thread_messages(
     pinned_message_ids: &[String],
     bearer: &VerifiedModelBearer,
     summarizer: &SummarizerContext<'_>,
-) -> Vec<ChatMessage> {
+) -> RecentThread {
     use mp_contracts::model_plane::v1::ListConversationRequest;
 
     // Forward the verified session bearer — session-core's interceptor rejects
@@ -3794,9 +4983,14 @@ async fn load_recent_thread_messages(
         Ok(request) => request,
         Err(error) => {
             tracing::warn!(%error, %thread_id, "session-core list_conversation credential unavailable; using current turn only");
-            return Vec::new();
+            return RecentThread {
+                messages: Vec::new(),
+                head_summary: None,
+            };
         }
     };
+    // The newest summary an earlier turn persisted, read only in budget mode.
+    let mut stored_summary: Option<crate::compaction::StoredHeadSummary> = None;
     // `message_id` is carried alongside each turn only as far as the pin
     // resolution below; `ChatMessage` (what the provider sees) has no field for
     // our identifiers and must not gain one.
@@ -3820,6 +5014,13 @@ async fn load_recent_thread_messages(
                 // conversation's `update_artifact` (see
                 // `ArtifactVersionStore::seed_persisted`).
                 rehydrate_persisted_artifacts(state, thread_id, message.metadata.as_ref());
+                if summarizer.token_budget.is_some() && message.role == "assistant" {
+                    if let Some(stored) =
+                        crate::session_flow::persisted_head_summary(message.metadata.as_ref())
+                    {
+                        stored_summary = Some(stored);
+                    }
+                }
                 crate::compaction::IdentifiedMessage {
                 id: message.message_id,
                 message: ChatMessage {
@@ -3857,6 +5058,21 @@ async fn load_recent_thread_messages(
                 name: String::new(),
             },
         }),
+    }
+
+    if let Some(budget) = summarizer.token_budget {
+        return budget_compacted_thread(
+            state,
+            org_id,
+            thread_id,
+            loaded,
+            stored_summary.as_ref(),
+            pinned_message_ids,
+            bearer,
+            summarizer,
+            budget,
+        )
+        .await;
     }
 
     // Keep message-count recovery available on every route. Native token-based
@@ -3934,48 +5150,112 @@ async fn load_recent_thread_messages(
         .flatten()
     {
         let transcript = crate::compaction::render_head_transcript(&messages, head);
-        // `on_pre_compress`: let memory flag what the summarizer must not drop
-        // before the head is destroyed. Best-effort — an empty directive
-        // yields exactly the pre-hook prompt.
-        let memory_directive = if summarizer.conversation_only { String::new() } else {
-            fetch_compaction_memory_directive(state, org_id, thread_id, &transcript, bearer).await
-        };
-        // Bounded because this runs BEFORE the stream opens: an unbounded
-        // summarization call would reintroduce the dead spinner that moving the
-        // tool phase into the stream task just removed. On timeout we take the
-        // truncation fallback, which is exactly the pre-compaction behaviour.
-        let summary = tokio::time::timeout(
-            COMPACTION_SUMMARY_TIMEOUT,
-            direct_infer(
-                state,
-                &format!("{}-compaction", summarizer.request_id),
-                org_id,
-                summarizer.model,
-                summarizer.provider_hint,
-                summarizer.subscription_connection_id,
-                &crate::compaction::summary_prompt_with_memory(&transcript, &memory_directive),
-                summarizer.zdr,
-                summarizer.min_privacy_tier,
-                summarizer.inference_bearer,
-            ),
-        )
-        .await
-        // A timeout and a provider error are the same outcome here — no summary
-        // — and compaction is best-effort by contract, so both collapse to
-        // `None` and take the truncation fallback.
-        .map_err(|_| ())
-        .and_then(|result| result.map_err(|_| ()))
-        .ok();
-        if summary.is_none() {
-            tracing::warn!(
-                %thread_id,
-                "thread compaction summary unavailable; falling back to truncation"
-            );
-        }
+        let summary =
+            summarize_head(state, org_id, thread_id, &transcript, bearer, summarizer).await;
         messages = crate::compaction::apply_head_summary(messages, head, summary.as_deref());
     }
 
-    messages
+    RecentThread {
+        messages,
+        head_summary: None,
+    }
+}
+
+/// The tier-2 summary of a head transcript, or `None` when the summarizer
+/// failed or timed out.
+async fn summarize_head(
+    state: &AppState,
+    org_id: &str,
+    thread_id: &str,
+    transcript: &str,
+    bearer: &VerifiedModelBearer,
+    summarizer: &SummarizerContext<'_>,
+) -> Option<String> {
+    // `on_pre_compress`: let memory flag what the summarizer must not drop
+    // before the head is destroyed. Best-effort — an empty directive
+    // yields exactly the pre-hook prompt.
+    let memory_directive = if summarizer.conversation_only {
+        String::new()
+    } else {
+        fetch_compaction_memory_directive(state, org_id, thread_id, transcript, bearer).await
+    };
+    // Bounded because this runs BEFORE the stream opens: an unbounded
+    // summarization call would reintroduce the dead spinner that moving the
+    // tool phase into the stream task just removed. On timeout we take the
+    // truncation fallback, which is exactly the pre-compaction behaviour.
+    let summary = tokio::time::timeout(
+        COMPACTION_SUMMARY_TIMEOUT,
+        direct_infer(
+            state,
+            &format!("{}-compaction", summarizer.request_id),
+            org_id,
+            summarizer.model,
+            summarizer.provider_hint,
+            summarizer.subscription_connection_id,
+            &crate::compaction::summary_prompt_with_memory(transcript, &memory_directive),
+            // The summary becomes a prefix later turns repeat; on an adapter
+            // that forwards a temperature, sampling must not vary it.
+            crate::compaction::SUMMARY_TEMPERATURE,
+            summarizer.zdr,
+            summarizer.min_privacy_tier,
+            summarizer.inference_bearer,
+        ),
+    )
+    .await
+    // A timeout and a provider error are the same outcome here — no summary
+    // — and compaction is best-effort by contract, so both collapse to
+    // `None` and take the truncation fallback.
+    .map_err(|_| ())
+    .and_then(|result| result.map_err(|_| ()))
+    .ok();
+    if summary.is_none() {
+        tracing::warn!(
+            %thread_id,
+            "thread compaction summary unavailable; falling back to truncation"
+        );
+    }
+    summary
+}
+
+/// Token-budget compaction (`prompt_context::CacheOptions`): reuse the
+/// newest persisted summary byte for byte, and summarise again only when the
+/// history it does not cover exceeds the budget. The new summary, if any, is
+/// handed back for the answer's metadata. Pure planning lives in
+/// `compaction::prepare_budget_compaction`.
+#[allow(clippy::too_many_arguments)] // the thread loader's own context, split out
+async fn budget_compacted_thread(
+    state: &AppState,
+    org_id: &str,
+    thread_id: &str,
+    loaded: Vec<crate::compaction::IdentifiedMessage>,
+    stored: Option<&crate::compaction::StoredHeadSummary>,
+    pinned_message_ids: &[String],
+    bearer: &VerifiedModelBearer,
+    summarizer: &SummarizerContext<'_>,
+    budget: usize,
+) -> RecentThread {
+    let plan =
+        crate::compaction::prepare_budget_compaction(loaded, stored, pinned_message_ids, budget);
+    tracing::debug!(
+        %thread_id,
+        budget,
+        reused_summary = plan.reused,
+        summarising = plan.head.is_some(),
+        "token-budget compaction planned"
+    );
+    let Some(head) = plan.head else {
+        return RecentThread {
+            messages: plan.messages,
+            head_summary: None,
+        };
+    };
+    let transcript = crate::compaction::render_head_transcript(&plan.messages, head);
+    let summary = summarize_head(state, org_id, thread_id, &transcript, bearer, summarizer).await;
+    let head_summary = summary.as_deref().and_then(|summary| plan.record(summary));
+    RecentThread {
+        messages: crate::compaction::apply_head_summary(plan.messages, head, summary.as_deref()),
+        head_summary,
+    }
 }
 
 /// Match this org's skills (disk-loaded + learned) against the user's turn and
@@ -4682,10 +5962,26 @@ fn non_empty_trimmed(value: &str) -> Option<&str> {
 /// answering as" framing) — only its firing condition (mention-gated) stays
 /// as-is; it is simply the last section here instead of the sole message.
 ///
-/// `None` only when platform, org, Space, and agent are ALL empty —
+/// `None` only when platform, org, Space, persona, and agent are ALL empty —
 /// preserving today's silent-no-message behavior for a deployment/org/Space
 /// that has authored nothing and a turn nobody mentioned.
-fn authored_instructions_message(state: &AppState, req: &InvokeRequest) -> Option<ChatMessage> {
+///
+/// `persona_enabled` is the PER-THREAD override (session-core's
+/// `threads.persona_enabled`, read from the same context-assembly response
+/// `load_context_assembly_messages` already fetches earlier in this request
+/// — no extra RPC). The GLOBAL switch (`users.personaEnabled`) is already
+/// applied upstream, by the BFF gateway: when it is off, `req.persona_instructions`
+/// itself is simply absent, so this function only ever has to gate on the
+/// thread-level bit. persona.md's owner ruling: persona text follows the
+/// existing org-instructions precedent and fires on a ZDR/temporary turn
+/// like every other layer here — only the per-thread *toggle* is
+/// ZDR-blocked (`update_thread_presentation` rejects ZDR callers outright,
+/// enforced in session-core, not here).
+fn authored_instructions_message(
+    state: &AppState,
+    req: &InvokeRequest,
+    persona_enabled: bool,
+) -> Option<ChatMessage> {
     let mut sections: Vec<String> = Vec::new();
 
     if let Some(platform) = non_empty_trimmed(&state.platform_instructions) {
@@ -4704,6 +6000,22 @@ fn authored_instructions_message(state: &AppState, req: &InvokeRequest) -> Optio
         sections.push(format!(
             "--- Space instructions (may add to, but must not override, the platform or organization instructions above) ---\n{space}"
         ));
+    }
+    // Persona spec — the user layer, subordinate to org/Space but still
+    // ahead of an explicitly-summoned Space agent's own character (the next
+    // section): a mentioned agent's persona still wins on that turn, mirroring
+    // today's org/Space precedent (persona.md §6.3, owner ruling: "an
+    // explicitly summoned agent wins").
+    if persona_enabled {
+        if let Some(persona) = req
+            .persona_instructions
+            .as_deref()
+            .and_then(non_empty_trimmed)
+        {
+            sections.push(format!(
+                "--- Your personal instructions (may add to, but must not override, the platform, organization or Space instructions above) ---\n{persona}"
+            ));
+        }
     }
     if let Some(persona) = agent_persona_message(req) {
         sections.push(persona.content);
@@ -4814,6 +6126,15 @@ async fn run_infer_fallback(
     run: &crate::session_flow::SessionRun,
     inference_bearer: &VerifiedInferenceBearer,
     session_bearer: &VerifiedModelBearer,
+    // The caller's next resume cursor. Grounding, citations and step frames
+    // were already buffered under 0..first_seq; restarting at 0 made these
+    // chunks collide with them, so a client resuming with its Last-Event-ID
+    // filtered the fallback answer out entirely.
+    first_seq: u64,
+    // The turn's clock: the fallback call is the turn's answer call.
+    timing: &crate::turn_timing::TurnTiming,
+    // A compaction summary written this turn, persisted with the answer.
+    head_summary: Option<&crate::compaction::StoredHeadSummary>,
 ) {
     let publisher = state.publisher.clone();
     let buffers = state.stream_buffers.clone();
@@ -4823,12 +6144,25 @@ async fn run_infer_fallback(
     // envelope so the fallback stamps the same provenance as the live stream.
     let min_privacy_tier = grpc_req.min_privacy_tier;
     let fallback_zdr = grpc_req.zdr;
+    let subscription_route = !grpc_req.subscription_connection_id.trim().is_empty();
+    let route_cost_basis = crate::pricing::CostBasis::of_route(
+        &grpc_req.provider_hint,
+        &grpc_req.subscription_connection_id,
+    );
+    let answer_call = timing.call(crate::turn_timing::Phase::AnswerStream);
     let result = state
         .inference_client
         .clone()
         .infer(authenticated_inference_request(grpc_req, inference_bearer))
         .await;
     let latency_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
+    let answer_timing = result
+        .as_ref()
+        .ok()
+        .and_then(|response| response.get_ref().provider_timing.clone());
+    let outcome = if result.is_ok() { "ok" } else { "error" };
+    answer_call.finish(outcome, answer_timing.as_ref());
+    timing.answer_tokens(answer_timing.as_ref());
 
     match result {
         Ok(resp) => {
@@ -4845,8 +6179,16 @@ async fn run_infer_fallback(
             let cache_read_tokens = u32::try_from(resp.cache_read_input_tokens).unwrap_or(0);
             let cache_creation_tokens =
                 u32::try_from(resp.cache_creation_input_tokens).unwrap_or(0);
+            let cost_basis = route_cost_basis.served_by(&resp.provider_used);
 
-            let mut seq: u64 = 0;
+            let mut seq = first_seq;
+            // Same contract as the streaming path: a dropped receiver (reload,
+            // closed tab, network blip) is a DETACH, not a cancel. Treating it
+            // as a cancel discarded an answer the provider had already
+            // produced — and a reload during the (long) unary Infer call above
+            // made the very first send fail. A deliberate Stop arrives through
+            // the cancel registry and is honoured below, before persistence.
+            let mut client_connected = true;
             for piece in chunk_for_stream(&resp.content, 48) {
                 let sse_chunk = SseChunk {
                     request_id: request_id.to_owned(),
@@ -4860,27 +6202,117 @@ async fn run_infer_fallback(
                 // Buffer before sending so a reconnect never races ahead of
                 // what was retained.
                 buffers.append(&buffer_key, seq, "chunk", &data).await;
-                if tx
-                    .send(Ok(Event::default()
-                        .id(seq.to_string())
-                        .event("chunk")
-                        .data(data)))
-                    .await
-                    .is_err()
+                if client_connected
+                    && tx
+                        .send(Ok(Event::default()
+                            .id(seq.to_string())
+                            .event("chunk")
+                            .data(data)))
+                        .await
+                        .is_err()
                 {
+                    client_connected = false;
+                    tracing::info!(
+                        request_id = %request_id,
+                        "client disconnected during fallback reveal; detaching and finishing for resume"
+                    );
+                }
+                seq += 1;
+            }
+            if state.cancels.is_cancelled(request_id) {
+                emit_turn_timing(
+                    tx,
+                    timing,
+                    crate::turn_timing::Outcome::Cancelled,
+                    request_id,
+                    (&buffers, &buffer_key, &mut seq, features),
+                )
+                .await;
+                let stopped = crate::sse_events::ChatEvent::Stopped {
+                    reason: "client cancelled".to_owned(),
+                };
+                emit_and_buffer(tx, &buffers, &buffer_key, &mut seq, features, request_id, stopped)
+                    .await;
+                end_resume_buffer(&buffers, &buffer_key, seq).await;
+                if let Err(error) = crate::session_flow::cancel_direct_inference_run_authenticated(
+                    state,
+                    run,
+                    session_bearer,
+                )
+                .await
+                {
+                    tracing::warn!(%error, run_id = %run.run_id, "failed to cancel stopped fallback inference stream");
+                }
+                return;
+            }
+            // The streaming path's pre-save liveness check: never save onto a
+            // run Session Core has already ended.
+            let run_live = crate::session_flow::heartbeat_direct_inference_run(state, run).await;
+            if !matches!(run_live, Ok(true)) {
+                let message = match &run_live {
+                    Ok(_) => "The chat run is no longer active. Please retry.",
+                    Err(error) => {
+                        tracing::warn!(%error, run_id = %run.run_id, "fallback pre-save liveness check failed");
+                        "Unable to confirm the chat run is active. Please retry."
+                    }
+                };
+                emit_turn_timing(
+                    tx,
+                    timing,
+                    crate::turn_timing::Outcome::Failed,
+                    request_id,
+                    (&buffers, &buffer_key, &mut seq, features),
+                )
+                .await;
+                let event = crate::sse_events::ChatEvent::Error {
+                    code: "session_liveness_failed".to_owned(),
+                    message: message.to_owned(),
+                    retryable: true,
+                };
+                emit_and_buffer(
+                    tx,
+                    &buffers,
+                    &buffer_key,
+                    &mut seq,
+                    features,
+                    request_id,
+                    event,
+                )
+                .await;
+                // A run Session Core already ended has no outcome left to record.
+                if run_live.is_err() {
                     if let Err(error) =
-                        crate::session_flow::cancel_direct_inference_run_authenticated(
+                        crate::session_flow::terminalize_direct_inference_run_authenticated(
                             state,
                             run,
+                            crate::session_flow::DirectInferenceTerminal::Failed(
+                                "session_liveness_failed",
+                            ),
                             session_bearer,
                         )
                         .await
                     {
-                        tracing::warn!(%error, run_id = %run.run_id, "failed to cancel disconnected fallback inference stream");
+                        tracing::warn!(%error, run_id = %run.run_id, "failed to terminalize fallback liveness failure");
+                        let event = crate::sse_events::ChatEvent::Error {
+                            code: "session_terminalization_failed".to_owned(),
+                            message: "Unable to record the failed chat run; it remains retriable."
+                                .to_owned(),
+                            retryable: true,
+                        };
+                        emit_and_buffer(
+                            tx,
+                            &buffers,
+                            &buffer_key,
+                            &mut seq,
+                            features,
+                            request_id,
+                            event,
+                        )
+                        .await;
                     }
-                    return;
                 }
-                seq += 1;
+                end_resume_buffer(&buffers, &buffer_key, seq).await;
+                return;
             }
             // Scored before the persist for the same reason as the streaming
             // path: the durable turn must carry the number the stream
@@ -4899,83 +6331,213 @@ async fn run_infer_fallback(
             let confidence = crate::confidence::score_with_retrieval_confidence(
                 &resp.content,
                 output_tokens,
-                answer_token_budget().max(0) as u32,
+                truncation_budget(cost_basis),
                 evidence,
                 grounding.as_ref().is_some_and(|g| g.low_confidence),
                 model_certainty(resp.token_confidence.as_ref()),
             );
-            if let Err(error) = crate::session_flow::append_assistant_message_authenticated(
-                state,
-                &thread_id,
-                &resp.content,
-                session_bearer,
-                None,
-                // The fallback path runs no tool loop, so retrieval grounding
-                // is the only evidence it can have — and it runs no
-                // verification pass either, so there is no verdict to record.
-                crate::session_flow::with_compaction_summary(crate::session_flow::turn_evidence_metadata(
-                    grounding,
-                    &[],
-                    &[],
-                    crate::session_flow::TurnQuality {
-                        confidence,
-                        verification: None,
-                    },
-                ), &resp.compaction_summary, fallback_zdr),
-            )
-            .await
-            {
-                tracing::warn!(
-                    %error,
-                    request_id = %request_id,
-                    thread_id = %thread_id,
-                    "failed to persist fallback assistant message"
-                );
-                if let Err(terminal_error) =
-                    crate::session_flow::terminalize_direct_inference_run_authenticated(
-                        state,
-                        run,
-                        crate::session_flow::DirectInferenceTerminal::Failed(
-                            "assistant_persist_failed",
-                        ),
-                        session_bearer,
-                    )
-                    .await
-                {
-                    tracing::warn!(%terminal_error, run_id = %run.run_id, "failed to terminalize fallback assistant persistence failure");
-                    let event = crate::sse_events::ChatEvent::Error {
-                        code: "session_terminalization_failed".to_owned(),
-                        message: "Unable to record the failed chat run; it remains retriable."
-                            .to_owned(),
-                        retryable: true,
-                    };
-                    let _ = tx.send(Ok(event.to_sse(request_id))).await;
-                    return;
-                }
-                let event = crate::sse_events::ChatEvent::Error {
-                    code: "assistant_persist_failed".to_owned(),
-                    message: "Unable to persist the assistant response.".to_owned(),
-                    retryable: true,
-                };
-                let _ = tx.send(Ok(event.to_sse(request_id))).await;
-                return;
-            }
-            if let Err(error) = crate::session_flow::terminalize_direct_inference_run_authenticated(
+            // The streaming path's atomic save-and-complete: the answer and
+            // the Completed receipt commit together or not at all.
+            let completion = crate::session_flow::complete_direct_inference_run_with_message(
                 state,
                 run,
-                crate::session_flow::DirectInferenceTerminal::Completed,
+                crate::session_flow::DirectAnswer {
+                    content: &resp.content,
+                    agent_name: None,
+                    // The fallback path runs no tool loop, so retrieval grounding
+                    // is the only evidence it can have — and it runs no
+                    // verification pass either, so there is no verdict to record.
+                    metadata: crate::session_flow::with_head_summary(
+                        crate::session_flow::with_compaction_summary(
+                            crate::session_flow::turn_evidence_metadata(
+                                grounding,
+                                &[],
+                                &[],
+                                crate::session_flow::TurnQuality {
+                                    confidence,
+                                    verification: None,
+                                },
+                            ),
+                            &resp.compaction_summary,
+                            fallback_zdr,
+                        ),
+                        head_summary,
+                        fallback_zdr,
+                    ),
+                },
+                request_id,
                 session_bearer,
+                None,
             )
-            .await
-            {
-                tracing::warn!(%error, run_id = %run.run_id, "failed to terminalize completed fallback inference run");
-                let event = crate::sse_events::ChatEvent::Error {
-                    code: "session_terminalization_failed".to_owned(),
-                    message: "Unable to finalize the chat run.".to_owned(),
-                    retryable: true,
-                };
-                let _ = tx.send(Ok(event.to_sse(request_id))).await;
-                return;
+            .await;
+            match completion {
+                Ok(crate::session_flow::DirectCompletion::Completed) => {}
+                Ok(crate::session_flow::DirectCompletion::AlreadyTerminal) => {
+                    // Session Core ended the run after the heartbeat above:
+                    // nothing was saved, and there is no outcome left to record.
+                    if state.cancels.is_cancelled(request_id) {
+                        emit_turn_timing(
+                            tx,
+                            timing,
+                            crate::turn_timing::Outcome::Cancelled,
+                            request_id,
+                            (&buffers, &buffer_key, &mut seq, features),
+                        )
+                        .await;
+                        let stopped = crate::sse_events::ChatEvent::Stopped {
+                            reason: "client cancelled".to_owned(),
+                        };
+                        emit_and_buffer(
+                            tx,
+                            &buffers,
+                            &buffer_key,
+                            &mut seq,
+                            features,
+                            request_id,
+                            stopped,
+                        )
+                        .await;
+                        end_resume_buffer(&buffers, &buffer_key, seq).await;
+                        return;
+                    }
+                    emit_turn_timing(
+                        tx,
+                        timing,
+                        crate::turn_timing::Outcome::Failed,
+                        request_id,
+                        (&buffers, &buffer_key, &mut seq, features),
+                    )
+                    .await;
+                    let event = crate::sse_events::ChatEvent::Error {
+                        code: "session_liveness_failed".to_owned(),
+                        message: "The chat run is no longer active. Please retry.".to_owned(),
+                        retryable: true,
+                    };
+                    emit_and_buffer(
+                        tx,
+                        &buffers,
+                        &buffer_key,
+                        &mut seq,
+                        features,
+                        request_id,
+                        event,
+                    )
+                    .await;
+                    end_resume_buffer(&buffers, &buffer_key, seq).await;
+                    return;
+                }
+                Err(crate::session_flow::DirectCompletionError::Persist(error)) => {
+                    tracing::warn!(
+                        error = %crate::session_flow::session_error_chain(&error),
+                        grpc_code = %crate::session_flow::session_error_code(&error),
+                        request_id = %request_id,
+                        run_id = %run.run_id,
+                        thread_id = %thread_id,
+                        "failed to persist fallback assistant message"
+                    );
+                    if let Err(terminal_error) =
+                        crate::session_flow::terminalize_direct_inference_run_authenticated(
+                            state,
+                            run,
+                            crate::session_flow::DirectInferenceTerminal::Failed(
+                                "assistant_persist_failed",
+                            ),
+                            session_bearer,
+                        )
+                        .await
+                    {
+                        tracing::warn!(%terminal_error, run_id = %run.run_id, "failed to terminalize fallback assistant persistence failure");
+                        emit_turn_timing(
+                            tx,
+                            timing,
+                            crate::turn_timing::Outcome::Failed,
+                            request_id,
+                            (&buffers, &buffer_key, &mut seq, features),
+                        )
+                        .await;
+                        let event = crate::sse_events::ChatEvent::Error {
+                            code: "session_terminalization_failed".to_owned(),
+                            message: "Unable to record the failed chat run; it remains retriable."
+                                .to_owned(),
+                            retryable: true,
+                        };
+                        emit_and_buffer(
+                            tx,
+                            &buffers,
+                            &buffer_key,
+                            &mut seq,
+                            features,
+                            request_id,
+                            event,
+                        )
+                        .await;
+                        end_resume_buffer(&buffers, &buffer_key, seq).await;
+                        return;
+                    }
+                    let event = crate::sse_events::ChatEvent::Error {
+                        code: "assistant_persist_failed".to_owned(),
+                        message: "Unable to persist the assistant response.".to_owned(),
+                        retryable: true,
+                    };
+                    emit_turn_timing(
+                        tx,
+                        timing,
+                        crate::turn_timing::Outcome::Failed,
+                        request_id,
+                        (&buffers, &buffer_key, &mut seq, features),
+                    )
+                    .await;
+                    // Buffered, so a client that resumed after a reload learns the
+                    // answer was NOT saved instead of tailing until inactivity.
+                    emit_and_buffer(
+                        tx,
+                        &buffers,
+                        &buffer_key,
+                        &mut seq,
+                        features,
+                        request_id,
+                        event,
+                    )
+                    .await;
+                    end_resume_buffer(&buffers, &buffer_key, seq).await;
+                    return;
+                }
+                // Only the two-call path used while Session Core lacks the
+                // atomic call: saved, but not acknowledged.
+                Err(crate::session_flow::DirectCompletionError::Terminal(error)) => {
+                    tracing::warn!(
+                        error = %crate::session_flow::session_error_chain(&error),
+                        grpc_code = %crate::session_flow::session_error_code(&error),
+                        request_id = %request_id,
+                        run_id = %run.run_id,
+                        "failed to terminalize completed fallback inference run"
+                    );
+                    emit_turn_timing(
+                        tx,
+                        timing,
+                        crate::turn_timing::Outcome::Failed,
+                        request_id,
+                        (&buffers, &buffer_key, &mut seq, features),
+                    )
+                    .await;
+                    let event = crate::sse_events::ChatEvent::Error {
+                        code: "session_terminalization_failed".to_owned(),
+                        message: "Unable to finalize the chat run.".to_owned(),
+                        retryable: true,
+                    };
+                    emit_and_buffer(
+                        tx,
+                        &buffers,
+                        &buffer_key,
+                        &mut seq,
+                        features,
+                        request_id,
+                        event,
+                    )
+                    .await;
+                    end_resume_buffer(&buffers, &buffer_key, seq).await;
+                    return;
+                }
             }
 
             let close =
@@ -4983,7 +6545,7 @@ async fn run_infer_fallback(
             let _ = publisher
                 .publish(&subjects::stream_subject("closed"), &close)
                 .await;
-            let usage = build_usage_envelope(
+            let mut usage = build_usage_envelope(
                 request_id,
                 org_id,
                 user_id,
@@ -4996,30 +6558,23 @@ async fn run_infer_fallback(
                 resp.residency.clone(),
                 cache_read_tokens,
                 cache_creation_tokens,
+                cost_basis,
             );
+            usage.payload["timing"] = timing.summary();
             let _ = publisher
                 .publish(&subjects::usage_subject(org_id), &usage)
                 .await;
             gateway_metrics::stream_closed();
-            buffers
-                .finish(
-                    &buffer_key,
-                    crate::stream_buffer::StreamDone {
-                        seq,
-                        model_used: model_used.clone(),
-                        input_tokens,
-                        output_tokens,
-                    },
-                )
-                .await;
 
             // chat-parity §17: opt-in usage event (real tokens + latency).
             // Phase 7 B5 — price cost_usd off cost-core's catalogue (same
-            // source as the durable ledger); `None` only when unreachable.
+            // source as the durable ledger); `None` only when unreachable, and
+            // never a list price on a subscription turn.
             // Phase 7 B6 — confidence is the heuristic answer-quality score.
             let cost_usd = state
                 .pricing
-                .cost_usd(
+                .cost_usd_for(
+                    cost_basis,
                     &model_used,
                     i64::from(input_tokens),
                     i64::from(output_tokens),
@@ -5032,12 +6587,43 @@ async fn run_infer_fallback(
                 input_tokens,
                 output_tokens,
                 cost_usd,
+                cost_basis: Some(cost_basis),
                 latency_ms,
                 confidence,
             };
-            if usage_event.should_emit(features) {
-                let _ = tx.send(Ok(usage_event.to_sse(request_id))).await;
-            }
+            // Buffered like the chunks around it, so a resumed fallback turn
+            // replays its tokens, latency, confidence and cost basis too.
+            emit_and_buffer(
+                tx,
+                &buffers,
+                &buffer_key,
+                &mut seq,
+                features,
+                request_id,
+                usage_event,
+            )
+            .await;
+            emit_turn_timing(
+                tx,
+                timing,
+                crate::turn_timing::Outcome::Completed,
+                request_id,
+                (&buffers, &buffer_key, &mut seq, features),
+            )
+            .await;
+            // Recorded after the timing frame, which is the last one buffered,
+            // so the terminal cursor is the id `done` is sent with.
+            buffers
+                .finish(
+                    &buffer_key,
+                    crate::stream_buffer::StreamDone {
+                        seq,
+                        model_used: model_used.clone(),
+                        input_tokens,
+                        output_tokens,
+                    },
+                )
+                .await;
 
             let done_chunk = SseChunk {
                 request_id: request_id.to_owned(),
@@ -5061,22 +6647,43 @@ async fn run_infer_fallback(
                 request_id = %request_id,
                 "infer fallback also failed; emitting error event"
             );
+            // On the subscription route the reason is typed, or the generic
+            // route failure: never the raw status text.
+            let subscription_failure = crate::subscription_failure::on_route(&e, subscription_route)
+                .or_else(|| {
+                    subscription_route.then_some(crate::subscription_failure::SubscriptionFailure::bare(
+                        crate::subscription_failure::SUBSCRIPTION_ROUTE_UNAVAILABLE,
+                    ))
+                });
+            let terminal_code = subscription_failure
+                .as_ref()
+                .map_or("inference_unavailable", |failure| failure.code);
+            let mut seq = first_seq;
             if let Err(error) = crate::session_flow::terminalize_direct_inference_run_authenticated(
                 state,
                 run,
-                crate::session_flow::DirectInferenceTerminal::Failed("inference_unavailable"),
+                crate::session_flow::DirectInferenceTerminal::Failed(terminal_code),
                 session_bearer,
             )
             .await
             {
                 tracing::warn!(%error, run_id = %run.run_id, "failed to terminalize unavailable fallback inference run");
+                emit_turn_timing(
+                    tx,
+                    timing,
+                    crate::turn_timing::Outcome::Failed,
+                    request_id,
+                    (&buffers, &buffer_key, &mut seq, features),
+                )
+                .await;
                 let event = crate::sse_events::ChatEvent::Error {
                     code: "session_terminalization_failed".to_owned(),
                     message: "Unable to record the failed chat run; it remains retriable."
                         .to_owned(),
                     retryable: true,
                 };
-                let _ = tx.send(Ok(event.to_sse(request_id))).await;
+                emit_and_buffer(tx, &buffers, &buffer_key, &mut seq, features, request_id, event).await;
+                end_resume_buffer(&buffers, &buffer_key, seq).await;
                 return;
             }
             let close = build_stream_envelope(request_id, "STREAM_CLOSED", org_id, user_id, model);
@@ -5087,12 +6694,33 @@ async fn run_infer_fallback(
             // chat-parity §20: structured error — stable `code` + `retryable`
             // so the client can branch (the `message` field is preserved for
             // back-compat with existing error handlers).
-            let err_evt = crate::sse_events::ChatEvent::Error {
-                code: "model_plane_unavailable".to_owned(),
-                message: e.message().to_owned(),
-                retryable: true,
+            let err_evt = match &subscription_failure {
+                Some(failure) => crate::sse_events::ChatEvent::subscription_error(
+                    failure,
+                    crate::subscription_failure::message(
+                        failure,
+                        crate::subscription_failure::FailureContext::Answer,
+                    ),
+                ),
+                None => crate::sse_events::ChatEvent::Error {
+                    code: "model_plane_unavailable".to_owned(),
+                    message: e.message().to_owned(),
+                    retryable: true,
+                },
             };
-            let _ = tx.send(Ok(err_evt.to_sse(request_id))).await;
+            // Buffered like every other terminal frame: a client that resumed
+            // after a reload must learn the provider failed, not tail until
+            // the inactivity limit and report a lost connection.
+            emit_turn_timing(
+                tx,
+                timing,
+                crate::turn_timing::Outcome::Failed,
+                request_id,
+                (&buffers, &buffer_key, &mut seq, features),
+            )
+            .await;
+            emit_and_buffer(tx, &buffers, &buffer_key, &mut seq, features, request_id, err_evt).await;
+            end_resume_buffer(&buffers, &buffer_key, seq).await;
         }
     }
 }
@@ -5107,21 +6735,99 @@ mod fallback_tests {
     #[test]
     fn validation_deadlines_are_distinct_but_do_not_hide_terminalization_failure() {
         use crate::result_validation::{VALIDATION_FAILED, VALIDATION_TIMEOUT};
-        let (code, message) = super::tool_phase_failure(VALIDATION_TIMEOUT);
+        let (code, message, retryable) = super::tool_phase_failure(VALIDATION_TIMEOUT, false, None);
         assert_eq!(code, VALIDATION_TIMEOUT);
+        assert!(retryable);
         assert!(message.contains("tok for lang tid"));
         assert!(message.contains("ikke publisert"));
         assert!(!message.contains("forsøksgrensen"));
-        assert_eq!(prepared_failure_report(code, message, true, true), (code, message, true));
-        assert_eq!(prepared_failure_report(code, message, true, false).0, "session_terminalization_failed");
-        assert_eq!(super::tool_phase_failure(VALIDATION_FAILED).0, VALIDATION_FAILED);
-        assert_eq!(super::tool_phase_failure("subscription_route_unavailable").0, "subscription_route_unavailable");
-        assert_eq!(super::tool_phase_failure("audit_write_failed").0, "audit_persistence_failed");
+        assert_eq!(prepared_failure_report(code, &message, true, true), (code, message.as_str(), true));
+        assert_eq!(prepared_failure_report(code, &message, true, false).0, "session_terminalization_failed");
+        assert_eq!(super::tool_phase_failure(VALIDATION_FAILED, false, None).0, VALIDATION_FAILED);
+        assert_eq!(super::tool_phase_failure("subscription_route_unavailable", true, None).0, "subscription_route_unavailable");
+        assert_eq!(super::tool_phase_failure("audit_write_failed", false, None).0, "audit_persistence_failed");
         for norwegian in [true, false] {
             assert_eq!(super::checked_stream_failure(VALIDATION_TIMEOUT, norwegian).0, VALIDATION_TIMEOUT);
             assert_eq!(super::checked_stream_failure(VALIDATION_FAILED, norwegian).0, VALIDATION_FAILED);
             assert_eq!(super::checked_stream_failure("provider disconnected", norwegian).0, "inference_stream_error");
         }
+    }
+
+    /// Q15: a provider or subscription that stopped answering during source
+    /// review or repair was reported as a failed check, telling the user to
+    /// try a smaller change or clearer sources for a draft nobody judged.
+    #[test]
+    fn a_provider_outage_during_a_check_is_not_blamed_on_the_draft() {
+        use crate::result_validation::{
+            check_failure_reason, VALIDATION_FAILED, VALIDATION_UNAVAILABLE,
+        };
+        let status = tonic::Status::unavailable("subscription broker unreachable");
+        let reason = check_failure_reason(&status);
+        let (failed, _, _) = super::tool_phase_failure(VALIDATION_FAILED, true, None);
+        for subscription in [true, false] {
+            let (code, message, retryable) = super::tool_phase_failure(reason, subscription, None);
+            assert_eq!(code, VALIDATION_UNAVAILABLE);
+            assert_ne!(code, failed);
+            assert!(retryable);
+            assert!(message.contains("ikke publisert"), "{message}");
+            assert!(!message.contains("tydeligere kilder"), "{message}");
+            assert!(!message.contains("mindre endring"), "{message}");
+            assert_eq!(message.contains("abonnementstilkoblingen"), subscription);
+            assert_eq!(message.contains("Ingen annen modell er brukt"), subscription);
+        }
+    }
+
+    /// A tool phase that ended on a typed subscription refusal is explained
+    /// by that refusal, with the timing the tool loop kept and the code's own
+    /// retryability. The generic route failure no longer tells the user to
+    /// reconnect, which only a sign-in refusal calls for.
+    #[test]
+    fn a_tool_phase_subscription_refusal_is_explained_by_its_reason() {
+        use crate::subscription_failure::{
+            FailureContext, SubscriptionFailure, SUBSCRIPTION_BAD_REQUEST, SUBSCRIPTION_REAUTH_REQUIRED,
+            SUBSCRIPTION_ROUTE_UNAVAILABLE, SUBSCRIPTION_UPSTREAM_UNAVAILABLE, SUBSCRIPTION_USAGE_LIMIT,
+        };
+        let usage = SubscriptionFailure {
+            resets_at: chrono::DateTime::parse_from_rfc3339("2026-09-26T01:21:00Z")
+                .ok()
+                .map(|at| at.with_timezone(&chrono::Utc)),
+            ..SubscriptionFailure::bare(SUBSCRIPTION_USAGE_LIMIT)
+        };
+        let (code, message, retryable) = super::tool_phase_failure(
+            SUBSCRIPTION_USAGE_LIMIT,
+            true,
+            Some(&(usage.clone(), FailureContext::ToolRound)),
+        );
+        assert_eq!(code, SUBSCRIPTION_USAGE_LIMIT);
+        assert!(!retryable, "a usage limit waits for its reset");
+        assert_eq!(message, crate::subscription_failure::message(&usage, FailureContext::ToolRound));
+        assert!(message.contains("26.09.2026 kl. 01:21 UTC"), "{message}");
+
+        // A refusal during the source check says the draft was not published.
+        let (_, draft, _) = super::tool_phase_failure(
+            SUBSCRIPTION_USAGE_LIMIT,
+            true,
+            Some(&(usage, FailureContext::Draft)),
+        );
+        assert!(draft.contains("Utkastet er ikke publisert."), "{draft}");
+
+        // Without a kept refusal the code alone still words it.
+        for (reason, retryable) in [
+            (SUBSCRIPTION_REAUTH_REQUIRED, false),
+            (SUBSCRIPTION_UPSTREAM_UNAVAILABLE, true),
+            (SUBSCRIPTION_BAD_REQUEST, false),
+            ("rate_limited", true),
+            (SUBSCRIPTION_ROUTE_UNAVAILABLE, true),
+        ] {
+            let (code, message, offered) = super::tool_phase_failure(reason, true, None);
+            assert_eq!(code, reason);
+            assert_eq!(offered, retryable, "{reason}");
+            assert!(message.ends_with("Ingen annen modell ble brukt."), "{message}");
+        }
+        let (_, generic, _) = super::tool_phase_failure(SUBSCRIPTION_ROUTE_UNAVAILABLE, true, None);
+        assert!(!generic.contains("Koble til"), "{generic}");
+        let (_, reauth, _) = super::tool_phase_failure(SUBSCRIPTION_REAUTH_REQUIRED, true, None);
+        assert!(reauth.contains("Koble til ChatGPT på nytt"), "{reauth}");
     }
 
     #[test]
@@ -5209,8 +6915,9 @@ mod fallback_tests {
 ///
 /// Replays buffered deltas with `seq > Last-Event-Id` and, when the original
 /// stream has finished, the terminal `done` event. Returns 404 when the
-/// `request_id` is unknown (evicted past TTL or never existed) so the client
-/// restarts the request instead of silently hanging.
+/// `request_id` is unknown (evicted past TTL or never existed) AND no producer
+/// for this caller is still running in this process, so the client settles the
+/// turn instead of silently hanging.
 ///
 /// # Errors
 ///
@@ -5244,7 +6951,17 @@ pub async fn invoke_resume_sse(
         .stream_buffers
         .replay_after(&buffer_key, after_seq)
         .await;
-    if !replay.found {
+    // Whether the ORIGINAL producer is still running in this process, bound to
+    // the same verified caller as the buffer key. A stream that has buffered
+    // nothing yet — a first tool call, source review or repair can run for a
+    // long time before its first progress frame — is still resumable while its
+    // producer runs. Answering 404 there told a reloaded browser its answer was
+    // gone while the server went on to publish it.
+    let cancels = state.cancels.clone();
+    let (live_org, live_user) = (claims.org_id.clone(), claims.user_id.clone());
+    let live_request = request_id.clone();
+    let producer_live = move || cancels.is_live_for(&live_request, &live_org, &live_user);
+    if !replay.found && !producer_live() {
         return Err((
             StatusCode::NOT_FOUND,
             Json(json!({ "error": "stream not resumable; restart the request" })),
@@ -5302,10 +7019,22 @@ pub async fn invoke_resume_sse(
                 .data(data)))
         };
 
+        // `error` and `stopped` end a stream just as `done` does, but the
+        // producer never records them as the buffer's terminal frame. Seeing
+        // one used to leave the tail polling a finished stream for the whole
+        // inactivity window.
+        let is_terminal = |frame: &crate::stream_buffer::BufferedEvent| {
+            matches!(frame.event.as_str(), "error" | "stopped")
+        };
+        let mut terminal_at: Option<std::time::Instant> = None;
+
         // Highest seq forwarded so far — the cursor for the tail below.
         let mut cursor = after_seq;
         for frame in replay.deltas {
             cursor = Some(cursor.map_or(frame.seq, |c| c.max(frame.seq)));
+            if is_terminal(&frame) {
+                terminal_at.get_or_insert_with(std::time::Instant::now);
+            }
             if send_frame(frame).await.is_err() {
                 return;
             }
@@ -5314,27 +7043,48 @@ pub async fn invoke_resume_sse(
             let _ = send_done(done).await;
             return;
         }
+        // Ended on an `error` or `stopped` frame, which the loop above has
+        // already replayed unless this client saw it. Nothing more will come,
+        // so there is nothing to tail.
+        if replay.ended.is_some() {
+            return;
+        }
 
         // The original stream has not finished: the producer detached from a
-        // disconnected client and is still draining the provider (see
-        // `client_connected` in the invoke producer). TAIL the buffer until
-        // the terminal `done` lands, so a reload mid-answer picks the stream
-        // back up live instead of settling a partial answer as stopped.
-        // Bounded: a producer that dies without `finish` (gateway restart)
-        // stops appending, and the inactivity window below closes the tail —
-        // the client then settles the turn exactly as before this tail existed.
+        // disconnected client and is still working (see `client_connected` in
+        // the invoke producer). TAIL the buffer until the terminal frame lands,
+        // so a reload mid-answer — or mid source review — picks the stream back
+        // up live instead of settling it as stopped.
+        //
+        // Bounded three ways. A producer still registered in this process is
+        // followed for as long as it runs (up to TAIL_MAX), however quiet: one
+        // review or repair call can buffer nothing for minutes. Without that
+        // proof of life — a gateway restart, or a producer on another replica —
+        // the inactivity window closes the tail as before. After an
+        // `error`/`stopped` frame, the tail waits only for the producer to
+        // finish, so a trailing terminalization error still reaches the client;
+        // a producer that marked its buffer ended closes the tail at once.
         const TAIL_POLL: std::time::Duration = std::time::Duration::from_millis(300);
         const TAIL_INACTIVITY_LIMIT: std::time::Duration = std::time::Duration::from_secs(120);
+        const TAIL_MAX: std::time::Duration = std::time::Duration::from_secs(15 * 60);
+        const TERMINAL_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
+        let tail_started = std::time::Instant::now();
         let mut last_progress = std::time::Instant::now();
         loop {
             tokio::time::sleep(TAIL_POLL).await;
             if tx.is_closed() {
                 return; // client went away again; the next resume replays from its cursor
             }
+            // Sampled BEFORE the read: a producer seen finished here wrote its
+            // last frame before it unregistered, so the read below has it.
+            let live = producer_live();
             let tail = buffers.replay_after(&tail_key, cursor).await;
             for frame in tail.deltas {
                 cursor = Some(cursor.map_or(frame.seq, |c| c.max(frame.seq)));
                 last_progress = std::time::Instant::now();
+                if is_terminal(&frame) {
+                    terminal_at.get_or_insert_with(std::time::Instant::now);
+                }
                 if send_frame(frame).await.is_err() {
                     return;
                 }
@@ -5343,7 +7093,19 @@ pub async fn invoke_resume_sse(
                 let _ = send_done(done).await;
                 return;
             }
-            if last_progress.elapsed() >= TAIL_INACTIVITY_LIMIT {
+            if tail.ended.is_some() {
+                return;
+            }
+            if let Some(at) = terminal_at {
+                if !live || at.elapsed() >= TERMINAL_GRACE {
+                    return;
+                }
+                continue;
+            }
+            if tail_started.elapsed() >= TAIL_MAX {
+                return;
+            }
+            if !live && last_progress.elapsed() >= TAIL_INACTIVITY_LIMIT {
                 return;
             }
         }
@@ -5509,6 +7271,7 @@ async fn direct_infer(
     provider_hint: &str,
     subscription_connection_id: &str,
     content: &str,
+    temperature: f32,
     zdr: bool,
     min_privacy_tier: i32,
     inference_bearer: &VerifiedInferenceBearer,
@@ -5528,7 +7291,7 @@ async fn direct_infer(
                     content: content.to_owned(),
                     name: String::new(),
                 }],
-                temperature: 0.7,
+                temperature,
                 // Agentic fallback still produces the answer the user reads.
                 max_tokens: answer_token_budget(),
                 structured_output_schema: String::new(),
@@ -5722,30 +7485,31 @@ async fn resample_answer(
     let mut samples = Vec::new();
     for index in 0..crate::verification::SELF_CONSISTENCY_SAMPLES {
         let mut client = state.inference_client.clone();
-        let response = tokio::time::timeout(
-            VERIFICATION_JUDGE_TIMEOUT,
-            client.infer(authenticated_inference_request(
-                subscription_scoped_request(InferRequest {
-                    request_id: format!("{request_id}-resample-{index}"),
-                    org_id: org_id.to_owned(),
-                    model: model.to_owned(),
-                    provider_hint: String::new(),
-                    messages: vec![ChatMessage {
-                        compaction_summary: String::new(),
-                        role: "user".to_owned(),
-                        content: question.to_owned(),
-                        name: String::new(),
-                    }],
-                    temperature: 1.0,
-                    max_tokens,
-                    structured_output_schema: String::new(),
-                    zdr,
-                    ..Default::default()
-                }, route),
-                inference_bearer,
-            )),
-        )
-        .await;
+        let mut request = authenticated_inference_request(
+            subscription_scoped_request(InferRequest {
+                request_id: format!("{request_id}-resample-{index}"),
+                org_id: org_id.to_owned(),
+                model: model.to_owned(),
+                provider_hint: String::new(),
+                messages: vec![ChatMessage {
+                    compaction_summary: String::new(),
+                    role: "user".to_owned(),
+                    content: question.to_owned(),
+                    name: String::new(),
+                }],
+                temperature: 1.0,
+                max_tokens,
+                structured_output_schema: String::new(),
+                zdr,
+                ..Default::default()
+            }, route),
+            inference_bearer,
+        );
+        // Every draw sends the same messages, so inference-core's response cache
+        // would hand back the first sample again and the agreement measured here
+        // would be a copy agreeing with itself.
+        request.metadata_mut().insert("cache-control", "no-store".parse().expect("static metadata"));
+        let response = tokio::time::timeout(VERIFICATION_JUDGE_TIMEOUT, client.infer(request)).await;
         match response {
             Ok(Ok(resp)) => samples.push(resp.into_inner().content),
             _ => {
@@ -6091,6 +7855,7 @@ async fn zdr_direct_stream(
         "",
         "",
         &content,
+        0.7,
         true,
         min_privacy_tier,
         &inference_bearer,
@@ -6148,6 +7913,13 @@ async fn zdr_direct_stream(
                     title: citation.title,
                     url: citation.url,
                     snippet: citation.snippet,
+                    source_group_id: citation.source_group_id,
+                    source_group_label: Some(citation.source_group_label),
+                    number: Some(citation.number),
+                    claim_id: None,
+                    start: None,
+                    end: None,
+                    origin: citation.origin,
                 };
                 if event.should_emit(&features) {
                     let _ = tx.send(Ok(event.to_sse(&request_id))).await;
@@ -6284,6 +8056,151 @@ fn authenticated_run_agent_request(
     Ok(request)
 }
 
+/// Fetch the thread's latest `PLAN_STATE_APPROVED` plan (plan-gate §2.4) —
+/// proposed and reviewed on an EARLIER plan-mode run of this same thread, so
+/// a run_id-scoped lookup cannot find it — and format it as a system-style
+/// context block for the executing run. Marks the plan `PLAN_STATE_EXECUTING`
+/// immediately afterward (reusing the same `TransitionPlan` RPC the browser's
+/// own approve/reject flow uses) so a LATER run on this thread can never
+/// re-find and re-inject the same approved plan.
+///
+/// Best-effort throughout: any failure returns `None` and the run proceeds on
+/// ordinary conversation history alone, exactly as it did before plan-gate
+/// existed — this must never block or fail an otherwise-ready dispatch.
+async fn approved_plan_context(
+    state: &AppState,
+    org_id: &str,
+    thread_id: &str,
+    bearer: &VerifiedModelBearer,
+) -> Option<String> {
+    let request = authenticated_session_request(
+        mp_contracts::model_plane::v1::ListPlansRequest {
+            run_id: String::new(),
+            thread_id: thread_id.to_owned(),
+        },
+        bearer,
+    )
+    .ok()?;
+    let plans = state
+        .orchestration_client
+        .clone()
+        .list_plans(request)
+        .await
+        .ok()?
+        .into_inner()
+        .plans;
+    let plan = plans
+        .into_iter()
+        .find(|p| p.state == PlanState::Approved as i32)?;
+
+    let mut lines = Vec::with_capacity(plan.steps.len() + 1);
+    lines.push(format!(
+        "Approved plan (edited by the user; treat deviating from it as something to explain, \
+         not something to hide): {}",
+        plan.summary
+    ));
+    let mut ordinal = 0usize;
+    for step in &plan.steps {
+        // Removed steps are marked SKIPPED, never deleted (plan-gate §2.2) —
+        // they must not resurface here as something the run is expected to
+        // do.
+        if step.state == mp_contracts::model_plane::v1::PlanStepState::Skipped as i32 {
+            continue;
+        }
+        ordinal += 1;
+        lines.push(format!("{ordinal}. {}", step.title));
+    }
+    let block = lines.join("\n");
+
+    if let Ok(request) = authenticated_session_request(
+        mp_contracts::model_plane::v1::TransitionPlanRequest {
+            plan_id: plan.id.clone(),
+            target_state: PlanState::Executing as i32,
+            actor: "model-gateway".to_owned(),
+            reason: "consumed by the executing run".to_owned(),
+            edited_steps: Vec::new(),
+        },
+        bearer,
+    ) {
+        if let Err(error) = state
+            .orchestration_client
+            .clone()
+            .transition_plan(request)
+            .await
+        {
+            tracing::warn!(
+                %error,
+                plan_id = %plan.id,
+                org_id,
+                thread_id,
+                "plan-gate: failed to mark the approved plan EXECUTING after context injection"
+            );
+        }
+    }
+
+    Some(block)
+}
+
+/// Fetch this run's `PLAN_STATE_PROPOSED` plan, if its `plan.propose` tool
+/// call created one (plan-gate §2.1). `RunAgentResponse` carries no
+/// per-tool-call detail — only `status`/`final_output`/`rounds_executed` — so
+/// the proposed plan is recovered by `run_id` once the run itself is known to
+/// have finished, rather than observed mid-round; a plan-mode turn's whole
+/// point is proposing a plan, so nothing else in the response arrives before
+/// this matters anyway. Best-effort: a lookup failure just means no
+/// `plan_proposed` frame is sent, degrading to today's rung-only
+/// `PlanApprovalControl` (plan-gate §4 rollout note).
+///
+/// `list_plans` (run-scoped) returns rows ordered OLDEST first
+/// (`list_plans_by_run`'s `ORDER BY created_at ASC` — unlike the thread-scoped
+/// branch this file's `approved_plan_context` uses, which is newest-first).
+/// The owner ruling for a same-turn revision is last-proposed-wins, so this
+/// must return the LAST matching plan in that order, not the first: taking
+/// the first would surface the model's ABANDONED first draft instead of its
+/// revised plan whenever `plan.propose` is called more than once in one
+/// plan-mode turn.
+async fn proposed_plan_for_run(
+    state: &AppState,
+    run_id: &str,
+    bearer: &VerifiedModelBearer,
+) -> Option<mp_contracts::model_plane::v1::Plan> {
+    let request = authenticated_session_request(
+        mp_contracts::model_plane::v1::ListPlansRequest {
+            run_id: run_id.to_owned(),
+            thread_id: String::new(),
+        },
+        bearer,
+    )
+    .ok()?;
+    let plans = state
+        .orchestration_client
+        .clone()
+        .list_plans(request)
+        .await
+        .ok()?
+        .into_inner()
+        .plans;
+    latest_proposed_plan(plans)
+}
+
+/// Picks the most recently proposed `PLAN_STATE_PROPOSED` plan out of a
+/// run-scoped `ListPlans` response. Factored out of [`proposed_plan_for_run`]
+/// so the ordering fix below is unit-testable without a database or a mocked
+/// gRPC client.
+///
+/// `plans` is assumed OLDEST-first (`list_plans_by_run`'s `ORDER BY
+/// created_at ASC`) — the last matching entry is therefore the newest one,
+/// which is what the last-proposed-wins owner ruling requires when a
+/// plan-mode turn calls `plan.propose` more than once.
+fn latest_proposed_plan(
+    plans: Vec<mp_contracts::model_plane::v1::Plan>,
+) -> Option<mp_contracts::model_plane::v1::Plan> {
+    plans
+        .into_iter()
+        .rev()
+        .find(|p| p.state == PlanState::Proposed as i32)
+}
+
 /// Start dispatch of a prepared run to Execution Core's governed agent driver.
 ///
 /// A successfully created task only proves that the client RPC has been
@@ -6311,12 +8228,26 @@ fn spawn_run_dispatch(
     inference_bearer: &VerifiedInferenceBearer,
     space_id: &str,
     sandbox_bearer: Option<&VerifiedSandboxBearer>,
+    // plan-gate §2.4: the thread's latest approved plan, pre-formatted, when
+    // one exists and this run is not itself in plan mode. `None` for every
+    // run today that predates plan-gate or has no approved plan to consume.
+    approved_plan_context: Option<&str>,
 ) -> Result<tokio::task::JoinHandle<Result<RunAgentResponse, tonic::Status>>, tonic::Status> {
     let mut execution_client = state.execution_client.clone();
     let run_agent_req = RunAgentRequest {
         run_id: run.run_id.clone(),
         thread_id: run.thread_id.clone(),
-        goal: content.to_owned(),
+        // plan-gate §2.4: an approved, user-edited plan is prepended as a
+        // system-style context block. This is necessary because the model's
+        // original plan-mode prose is immutable under the effectful-turn lock
+        // (`src/shared/chat/effect-class.ts`'s "can't be silently edited or
+        // regenerated" invariant) — the edited plan must not be smuggled in
+        // by rewriting that earlier assistant message, only added as new
+        // context on THIS new run's own request.
+        goal: match approved_plan_context {
+            Some(block) => format!("{block}\n\n{content}"),
+            None => content.to_owned(),
+        },
         org_id: org_id.to_owned(),
         user_id: user_id.to_owned(),
         model: model.to_owned(),
@@ -6508,6 +8439,17 @@ fn agentic_run_stream(
                 .data(connected.to_string())))
             .await;
 
+        // plan-gate §2.4: only worth an extra gRPC round trip when a rung was
+        // actually granted on this thread (the same condition `autonomy_rung`
+        // below already branches on) and this run is not itself plan-mode
+        // (which has no authority to consume a plan with yet).
+        let plan_context = if !plan_mode && state.plan_mode.granted_rung(&org_id, &thread_id).is_some()
+        {
+            approved_plan_context(&state, &org_id, &thread_id, &model_bearer).await
+        } else {
+            None
+        };
+
         // Construct the authenticated request before reporting the run as
         // started. A deterministic local credential/metadata failure is a
         // confirmed pre-dispatch rejection, not an ambiguous remote outage.
@@ -6529,6 +8471,7 @@ fn agentic_run_stream(
             &inference_bearer,
             &space_id,
             sandbox_bearer.as_ref(),
+            plan_context.as_deref(),
         ) {
             Ok(dispatch) => dispatch,
             Err(error) => {
@@ -6868,6 +8811,32 @@ fn agentic_run_stream(
             AgenticRunOutcome::Completed => {}
         }
 
+        // plan-gate §2.1: when this run was in plan mode, surface any plan
+        // the model proposed to the browser alongside its prose answer, so
+        // `PlanApprovalControl` can render the real, editable step list
+        // instead of a bare rung/justification prompt. See
+        // `proposed_plan_for_run`'s own doc for why this is recovered by
+        // run_id here rather than observed live mid-round.
+        if plan_mode {
+            if let Some(proposed) = proposed_plan_for_run(&state, &run.run_id, &model_bearer).await
+            {
+                let event = crate::sse_events::ChatEvent::PlanProposed {
+                    plan_id: proposed.id,
+                    summary: proposed.summary,
+                    steps: json!(proposed
+                        .steps
+                        .iter()
+                        .map(|s| json!({
+                            "id": s.id,
+                            "title": s.title,
+                            "operation": s.operation,
+                        }))
+                        .collect::<Vec<_>>()),
+                };
+                let _ = tx.send(Ok(event.to_sse(&request_id))).await;
+            }
+        }
+
         // Execution owns the assistant append. Its response is preferred; the
         // durable conversation is a recovery read only, never a direct-infer
         // substitute. A completed response without an answer is surfaced as a
@@ -6934,6 +8903,8 @@ fn agentic_run_stream(
             input_tokens: 0,
             output_tokens: 0,
             cost_usd: None,
+            // Nor its basis: execution-core's own envelopes carry both.
+            cost_basis: None,
             latency_ms,
             confidence: crate::confidence::score(
                 &final_text,
@@ -7007,6 +8978,7 @@ fn build_usage_envelope(
     residency: String,
     cache_read_input_tokens: u32,
     cache_creation_input_tokens: u32,
+    cost_basis: crate::pricing::CostBasis,
 ) -> Envelope {
     Envelope {
         event_id: new_ulid(),
@@ -7042,6 +9014,9 @@ fn build_usage_envelope(
             // always read it without an existence check.
             "cache_read_input_tokens": cache_read_input_tokens,
             "cache_creation_input_tokens": cache_creation_input_tokens,
+            // How the ledger should cost these tokens: a subscription turn
+            // must not be priced from API list prices.
+            "cost_basis": cost_basis.as_str(),
         }),
         zdr: false,
     }
@@ -7515,12 +9490,56 @@ mod tests {
     use super::{
         agent_persona_message, authored_instructions_message, build_stream_envelope,
         build_usage_envelope, classify_agentic_run_outcome, dispatch_never_reached_execution_core,
-        is_confirmed_agent_dispatch_rejection, orchestration_event_to_step_update,
-        sanitize_follow_up_suggestions, sanitize_thread_title, stream_ended_with_no_content,
-        AgenticRunOutcome,
+        is_confirmed_agent_dispatch_rejection, latest_proposed_plan,
+        orchestration_event_to_step_update, sanitize_follow_up_suggestions, sanitize_thread_title,
+        stream_ended_with_no_content, AgenticRunOutcome, PlanState,
     };
     use crate::http_routes::InvokeRequest;
     use crate::state::AppState;
+
+    // ── plan-gate: last-proposed-wins must survive oldest-first ordering ──
+
+    fn plan_fixture(id: &str, state: PlanState) -> mp_contracts::model_plane::v1::Plan {
+        mp_contracts::model_plane::v1::Plan {
+            id: id.to_owned(),
+            state: state as i32,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn latest_proposed_plan_picks_the_last_match_not_the_first() {
+        // `list_plans_by_run` returns oldest-first: a model that called
+        // `plan.propose` twice in one turn produces exactly this shape when
+        // (a superseding call notwithstanding) both rows are still
+        // PLAN_STATE_PROPOSED. The SECOND one is the model's actual current
+        // intent; surfacing the first would show the user an abandoned draft.
+        let plans = vec![
+            plan_fixture("plan_first", PlanState::Proposed),
+            plan_fixture("plan_second", PlanState::Proposed),
+        ];
+        let picked = latest_proposed_plan(plans).expect("one PROPOSED plan must be found");
+        assert_eq!(picked.id, "plan_second");
+    }
+
+    #[test]
+    fn latest_proposed_plan_skips_non_proposed_rows_regardless_of_position() {
+        let plans = vec![
+            plan_fixture("plan_old_approved", PlanState::Approved),
+            plan_fixture("plan_the_one", PlanState::Proposed),
+        ];
+        let picked = latest_proposed_plan(plans).expect("the PROPOSED plan must be found");
+        assert_eq!(picked.id, "plan_the_one");
+    }
+
+    #[test]
+    fn latest_proposed_plan_is_none_when_nothing_is_proposed() {
+        let plans = vec![
+            plan_fixture("plan_a", PlanState::Rejected),
+            plan_fixture("plan_b", PlanState::Executing),
+        ];
+        assert!(latest_proposed_plan(plans).is_none());
+    }
 
     #[tokio::test]
     async fn durable_artifact_kind_survives_restart_and_stale_history_without_text_sniffing() {
@@ -7656,14 +9675,14 @@ mod tests {
     async fn no_authored_instructions_message_when_every_layer_is_empty() {
         let state = state_with_platform_instructions("");
         let req = invoke_request(serde_json::json!({}));
-        assert!(authored_instructions_message(&state, &req).is_none());
+        assert!(authored_instructions_message(&state, &req, true).is_none());
     }
 
     #[tokio::test]
     async fn platform_only_produces_the_bare_platform_text() {
         let state = state_with_platform_instructions("Never discuss competitor pricing.");
         let req = invoke_request(serde_json::json!({}));
-        let message = authored_instructions_message(&state, &req).expect("message");
+        let message = authored_instructions_message(&state, &req, true).expect("message");
         assert_eq!(message.role, "system");
         assert_eq!(message.content, "Never discuss competitor pricing.");
     }
@@ -7674,7 +9693,7 @@ mod tests {
         let req = invoke_request(
             serde_json::json!({ "org_instructions": "Always answer in Norwegian." }),
         );
-        let message = authored_instructions_message(&state, &req).expect("message");
+        let message = authored_instructions_message(&state, &req, true).expect("message");
         assert!(message.content.contains("Always answer in Norwegian."));
         assert!(message.content.contains("Organization instructions"));
         assert!(message.content.contains("must not override"));
@@ -7689,7 +9708,7 @@ mod tests {
             "agent_name": "Driftsassistent",
             "agent_system_prompt": "Agent rule.",
         }));
-        let message = authored_instructions_message(&state, &req).expect("message");
+        let message = authored_instructions_message(&state, &req, true).expect("message");
         let platform_at = message.content.find("Platform rule.").expect("platform");
         let org_at = message.content.find("Org rule.").expect("org");
         let space_at = message.content.find("Space rule.").expect("space");
@@ -7706,7 +9725,80 @@ mod tests {
             "org_instructions": "   ",
             "space_instructions": "   ",
         }));
-        assert!(authored_instructions_message(&state, &req).is_none());
+        assert!(authored_instructions_message(&state, &req, true).is_none());
+    }
+
+    // ── Persona spec: the user layer ────────────────────────────────────────
+
+    #[tokio::test]
+    async fn persona_layer_sits_between_space_and_agent_persona() {
+        let state = state_with_platform_instructions("Platform rule.");
+        let req = invoke_request(serde_json::json!({
+            "org_instructions": "Org rule.",
+            "space_instructions": "Space rule.",
+            "persona_instructions": "Always be terse.",
+            "agent_name": "Driftsassistent",
+            "agent_system_prompt": "Agent rule.",
+        }));
+        let message = authored_instructions_message(&state, &req, true).expect("message");
+        let space_at = message.content.find("Space rule.").expect("space");
+        let persona_at = message.content.find("Always be terse.").expect("persona");
+        let agent_at = message.content.find("Agent rule.").expect("agent");
+        assert!(
+            space_at < persona_at,
+            "persona must be subordinate to org/Space, composed after them"
+        );
+        assert!(
+            persona_at < agent_at,
+            "an explicitly-summoned agent's own character still wins over the \
+             user's personal persona (persona.md owner ruling)"
+        );
+        assert!(message.content.contains("Your personal instructions"));
+        assert!(message.content.contains("must not override"));
+    }
+
+    #[tokio::test]
+    async fn persona_layer_absent_when_thread_persona_disabled() {
+        let state = state_with_platform_instructions("");
+        let req = invoke_request(serde_json::json!({
+            "persona_instructions": "Always be terse.",
+        }));
+        // `persona_enabled: false` simulates the per-thread toggle being off,
+        // even though the text itself is present on the request.
+        assert!(authored_instructions_message(&state, &req, false).is_none());
+    }
+
+    #[tokio::test]
+    async fn persona_layer_absent_when_persona_instructions_blank() {
+        let state = state_with_platform_instructions("");
+        let req = invoke_request(serde_json::json!({
+            "persona_instructions": "   ",
+        }));
+        assert!(authored_instructions_message(&state, &req, true).is_none());
+    }
+
+    #[tokio::test]
+    async fn agent_persona_still_overrides_personal_persona_on_a_mentioned_turn() {
+        // Regression guard for the compose order itself, independent of the
+        // "sits between" test above: an @-mentioned agent's persona message
+        // must still be present and last, even when a personal persona is
+        // also authored for this turn.
+        let state = state_with_platform_instructions("");
+        let req = invoke_request(serde_json::json!({
+            "persona_instructions": "Always be terse.",
+            "agent_name": "Driftsassistent",
+        }));
+        let message = authored_instructions_message(&state, &req, true).expect("message");
+        assert!(message.content.contains("You are currently answering as Driftsassistent"));
+        let persona_at = message
+            .content
+            .find("Always be terse.")
+            .expect("personal persona still present");
+        let agent_at = message
+            .content
+            .find("You are currently answering as Driftsassistent")
+            .expect("agent persona present");
+        assert!(persona_at < agent_at);
     }
 
     // ── AI thread-title sanitizer ───────────────────────────────────────────
@@ -7973,6 +10065,7 @@ mod tests {
             String::new(),
             0,
             0,
+            crate::pricing::CostBasis::Metered,
         );
         assert_eq!(env.correlation_id, "req-ABC");
         assert_eq!(env.producer, "model-gateway");
@@ -7998,6 +10091,7 @@ mod tests {
             String::new(),
             8_000,
             400,
+            crate::pricing::CostBasis::Metered,
         );
         assert_eq!(env.payload["cache_read_input_tokens"], 8_000);
         assert_eq!(env.payload["cache_creation_input_tokens"], 400);
@@ -8015,6 +10109,7 @@ mod tests {
             String::new(),
             0,
             0,
+            crate::pricing::CostBasis::Metered,
         );
         assert_eq!(uncached.payload["cache_read_input_tokens"], 0);
         assert_eq!(uncached.payload["cache_creation_input_tokens"], 0);
@@ -8038,10 +10133,64 @@ mod tests {
             "norway".to_owned(),
             0,
             0,
+            crate::pricing::CostBasis::Metered,
         );
         assert_eq!(env.payload["provider_used"], "azure-norway-eu");
         assert_eq!(env.payload["residency"], "norway");
         assert_eq!(env.payload["min_privacy_tier"], 4);
+        assert_eq!(env.payload["cost_basis"], "metered");
+    }
+
+    /// Subscription tokens reach the ledger as real usage, marked so that
+    /// cost-core does not price them from API list prices.
+    #[test]
+    fn usage_envelope_marks_subscription_tokens_as_not_list_priced() {
+        let env = build_usage_envelope(
+            "req-SUB",
+            "org-1",
+            "user-1",
+            "gpt-5.6-terra",
+            1_800,
+            120,
+            9_000,
+            0,
+            "openai-codex-subscription".to_owned(),
+            "global".to_owned(),
+            1_024,
+            256,
+            crate::pricing::CostBasis::Subscription,
+        );
+        assert_eq!(env.payload["cost_basis"], "subscription");
+        assert_eq!(env.payload["input_tokens"], 1_800);
+        assert_eq!(env.payload["output_tokens"], 120);
+        assert_eq!(env.payload["cache_read_input_tokens"], 1_024);
+        assert_eq!(env.payload["cache_creation_input_tokens"], 256);
+        // cost-core decodes a missing `cost_usd` as 0; none is sent.
+        assert!(env.payload.get("cost_usd").is_none());
+    }
+
+    /// Real subscription token counts must not start scoring long answers as
+    /// cut off: that broker enforces no output cap, and its output count
+    /// includes reasoning. Metered routes keep the real answer budget.
+    #[test]
+    fn subscription_answers_are_never_scored_as_truncated_by_length() {
+        use super::{answer_token_budget, truncation_budget};
+        use crate::confidence::{score, Evidence};
+        use crate::pricing::CostBasis;
+        let answer = "Oslo har omtrent 720 000 innbyggere.";
+        let long = u32::try_from(answer_token_budget()).unwrap() + 1_000;
+        let none = Evidence::default();
+        let scored = |tokens, basis| score(answer, tokens, truncation_budget(basis), none);
+        assert_eq!(truncation_budget(CostBasis::Subscription), 0);
+        assert_eq!(
+            scored(long, CostBasis::Subscription),
+            scored(0, CostBasis::Metered),
+            "a long subscription answer scores like the zero-token answers it replaced"
+        );
+        assert!(
+            scored(long, CostBasis::Metered) < scored(0, CostBasis::Metered),
+            "a metered answer at its budget is still penalized as truncated"
+        );
     }
 
     #[test]
@@ -8062,6 +10211,7 @@ mod tests {
             String::new(),
             0,
             0,
+            crate::pricing::CostBasis::Metered,
         );
         assert_eq!(opened.correlation_id, usage.correlation_id);
         assert_eq!(opened.correlation_id, request_id);
@@ -8300,6 +10450,101 @@ mod tests {
             before,
             "the estimated-token line moves the block with no change to content"
         );
+    }
+
+    fn assembly_of(
+        segments: Vec<super::ContextSegment>,
+        estimated_tokens: u32,
+    ) -> super::ContextAssemblyMessages {
+        let context = super::render_context_assembly_block(&segments, estimated_tokens, "", "");
+        super::ContextAssemblyMessages {
+            messages: super::context_assembly_chat_messages(context.block, "current question"),
+            grounded: context.grounded,
+            segments,
+            estimated_tokens,
+        }
+    }
+
+    fn thread_segment(content: &str, estimated_tokens: u32) -> super::ContextSegment {
+        super::ContextSegment {
+            kind: "thread".to_owned(),
+            content: content.to_owned(),
+            estimated_tokens,
+        }
+    }
+
+    /// The dedup option leaves out exactly the recent-history lines the prompt
+    /// already sends as messages, and nothing else.
+    #[test]
+    fn the_context_block_can_leave_out_history_the_prompt_already_carries() {
+        let history = vec![
+            super::ChatMessage {
+                role: "user".into(),
+                content: "hva koster frakt?".into(),
+                ..Default::default()
+            },
+            super::ChatMessage {
+                role: "assistant".into(),
+                content: "Frakt koster 149 kr.".into(),
+                ..Default::default()
+            },
+            super::ChatMessage {
+                role: "user".into(),
+                content: "current question".into(),
+                ..Default::default()
+            },
+        ];
+        let assembly = assembly_of(
+            vec![
+                super::ContextSegment {
+                    kind: "user".into(),
+                    content: "user:usr-1".into(),
+                    estimated_tokens: 5,
+                },
+                // Compacted out of the history, so it is not a repeat.
+                thread_segment("user: eldre spørsmål", 7),
+                thread_segment("user: hva koster frakt?", 8),
+                thread_segment("assistant: Frakt koster 149 kr.", 9),
+                super::ContextSegment {
+                    kind: "retrieval".into(),
+                    content: "Fraktprisliste 2026".into(),
+                    estimated_tokens: 11,
+                },
+            ],
+            40,
+        );
+        let before = assembly.messages[0].content.clone();
+        let deduped = assembly
+            .without_sent_history(&history, "", "current question")
+            .expect("something is left to send");
+        let block = &deduped.messages[0].content;
+        assert!(!block.contains("hva koster frakt?"), "{block}");
+        assert!(!block.contains("Frakt koster 149 kr."), "{block}");
+        assert!(block.contains("user: eldre spørsmål"));
+        assert!(block.contains("user:usr-1") && block.contains("Fraktprisliste 2026"));
+        assert!(
+            block.contains("Estimated tokens: 23"),
+            "40 less the 17 left out: {block}"
+        );
+        assert!(deduped.grounded);
+        assert_eq!(deduped.messages[1].content, "current question");
+        assert_ne!(*block, before);
+
+        // Nothing repeats: the assembly is returned exactly as it was.
+        let unrelated = assembly_of(vec![thread_segment("user: noe annet", 3)], 3);
+        let unchanged = unrelated
+            .without_sent_history(&history, "", "current question")
+            .expect("kept");
+        assert_eq!(
+            unchanged.messages,
+            assembly_of(vec![thread_segment("user: noe annet", 3)], 3).messages
+        );
+
+        // Only repeats: nothing is left to send.
+        let only_history = assembly_of(vec![thread_segment("user: hva koster frakt?", 8)], 8);
+        assert!(only_history
+            .without_sent_history(&history, "", "current question")
+            .is_none());
     }
 
     /// Context assembly must delegate the END USER's Data Plane credential, and

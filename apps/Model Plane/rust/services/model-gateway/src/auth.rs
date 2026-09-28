@@ -1283,6 +1283,13 @@ pub async fn require_auth(mut req: Request, next: Next) -> Result<Response, Stat
 const SERVICE_SCOPE_MODELS_INVOKE: &str = "models:invoke";
 const SERVICE_SCOPE_MODEL_SPACE_DELETE: &str = "model:space-delete";
 const CONTROL_SPACE_DELETION_SERVICE: &str = "service:control-space-deletion";
+/// Delegated-identity design, Gap B (§2.4(ii)): the ONLY caller allowed to
+/// reach the internal mail-task thread-prepare bridge. The gateway BFF
+/// (Frontend Plane, `verevon-gateway`) mints this via auth-core's existing
+/// `POST /api/model-plane/internal-token`, the same way it already
+/// authenticates to audit-core/org-core/billing-core.
+const MAIL_TASK_BRIDGE_CALLER_SERVICE: &str = "service:verevon-gateway";
+const SERVICE_SCOPE_MAIL_TASK_PREPARE_THREAD: &str = "mail-task:prepare-thread";
 
 /// Restrict service principals to the two non-persisting unary machine routes.
 /// Users retain the existing route policy. This must run after [`require_auth`].
@@ -1305,6 +1312,10 @@ pub async fn authorize_principal_route(req: Request, next: Next) -> Result<Respo
                 (&axum::http::Method::POST, "/v1/internal/space-deletion/threads") => {
                     claims.sub == CONTROL_SPACE_DELETION_SERVICE
                         && claims.has_scope(SERVICE_SCOPE_MODEL_SPACE_DELETE)
+                }
+                (&axum::http::Method::POST, "/v1/internal/mail-task/prepare-thread") => {
+                    claims.sub == MAIL_TASK_BRIDGE_CALLER_SERVICE
+                        && claims.has_scope(SERVICE_SCOPE_MAIL_TASK_PREPARE_THREAD)
                 }
                 _ => false,
             };
@@ -2845,6 +2856,80 @@ mod tests {
                     HttpRequest::builder()
                         .method("POST")
                         .uri("/v1/internal/space-deletion/threads")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        }
+    }
+
+    #[tokio::test]
+    async fn only_the_gateway_bff_reaches_the_internal_mail_task_bridge_route() {
+        async fn ok_handler() -> &'static str {
+            "ok"
+        }
+
+        fn service(service_id: &str, scopes: &[&str]) -> Claims {
+            Claims {
+                sub: service_id.to_owned(),
+                iss: "auth-core".to_owned(),
+                exp: now_secs() + 60,
+                org_id: "org-test".to_owned(),
+                user_id: String::new(),
+                nbf: None,
+                aud: Some("model-gateway".to_owned()),
+                scopes: scopes.iter().map(|scope| (*scope).to_owned()).collect(),
+                zdr: false,
+                sovereign: None,
+                principal_type: Some("service".to_owned()),
+                service_id: Some(service_id.to_owned()),
+                reason: Some("prepare a mail-task-origin thread".to_owned()),
+            }
+        }
+
+        fn app(claims: Claims) -> Router {
+            Router::new()
+                .route(
+                    "/v1/internal/mail-task/prepare-thread",
+                    axum::routing::post(ok_handler),
+                )
+                .layer(middleware::from_fn(authorize_principal_route))
+                .layer(axum::Extension(claims))
+        }
+
+        let allowed = app(service(
+            MAIL_TASK_BRIDGE_CALLER_SERVICE,
+            &[SERVICE_SCOPE_MAIL_TASK_PREPARE_THREAD],
+        ))
+        .oneshot(
+            HttpRequest::builder()
+                .method("POST")
+                .uri("/v1/internal/mail-task/prepare-thread")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(allowed.status(), StatusCode::OK);
+
+        for claims in [
+            // A real, correctly-scoped service credential -- just not the
+            // one this route allow-lists. Holding SOME valid service
+            // credential must never be enough on its own.
+            service(
+                "service:some-other-workload",
+                &[SERVICE_SCOPE_MAIL_TASK_PREPARE_THREAD],
+            ),
+            service(MAIL_TASK_BRIDGE_CALLER_SERVICE, &[]),
+            service(MAIL_TASK_BRIDGE_CALLER_SERVICE, &[SERVICE_SCOPE_MODELS_INVOKE]),
+        ] {
+            let response = app(claims)
+                .oneshot(
+                    HttpRequest::builder()
+                        .method("POST")
+                        .uri("/v1/internal/mail-task/prepare-thread")
                         .body(Body::empty())
                         .unwrap(),
                 )

@@ -30,9 +30,11 @@ type Store interface {
 	// empty result rather than risk a cross-user leak; see each
 	// implementation's own doc comment.
 	List(ctx context.Context, orgID, userID string, topK int32) ([]memstore.Hit, error)
-	// Delete removes a single memory by id. Returns whether a record was
-	// found and removed. Never returns an error for "not found" -- that is a
-	// valid, informational false, not a failure.
+	// Delete removes a single memory by id, scoped to the memory owned by
+	// userID in orgID: a memory of another org or user is never removed.
+	// Returns whether a record was found in that scope and removed. Never
+	// returns an error for "not found" -- that is a valid, informational
+	// false, not a failure.
 	Delete(ctx context.Context, orgID, userID, memoryID string) (bool, error)
 }
 

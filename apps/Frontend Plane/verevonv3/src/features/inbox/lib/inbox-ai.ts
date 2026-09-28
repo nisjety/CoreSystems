@@ -5,7 +5,9 @@ import type { ModelContextPack, SupportAssistantContext } from '@/shared/context
 import { supportQuestionEnvelope } from '@/shared/chat/support-context-envelope'
 import { newSupportChatThreadId } from '@/shared/chat/support-chat-thread'
 import { OPENAI_CODEX_SUBSCRIPTION_PROVIDER } from '@/shared/api/chatgpt-subscription-client'
+import { privacyTierWireValue } from '@/shared/api/privacy-tier'
 import { resolveAiModelSelection } from '@/shared/ai/model-selection'
+import { createTurnPrivacyTierResolver } from '@/features/dashboard/home/submit-privacy-tier'
 
 /**
  * Inbox AI assist — real model-plane calls.
@@ -327,6 +329,11 @@ export async function runAssist(
   if (subscriptionBacked && !selectedModel.subscriptionConnectionId) {
     throw new SubscriptionAssistUnavailableError('subscription_connection_unavailable')
   }
+  // A catalogue model's tier rides the invoke as `min_privacy_tier`, resolved
+  // as the main composer resolves it. Started before the knowledge lookup so
+  // the catalogue request runs alongside it; an intent mode requests nothing.
+  const turnTier = createTurnPrivacyTierResolver({ orgId })
+    .resolve(selectedModel.model, selectedModel.provider)
   const enrichedOpts = await addKnowledgeContext(orgId, mode, messages, opts)
   const content = buildPrompt(mode, messages, enrichedOpts)
   const requestedThreadId = opts.threadId?.trim()
@@ -334,6 +341,7 @@ export async function runAssist(
   const threadId = readOnlySupportAssist
     ? requestedThreadId?.startsWith('support_') ? requestedThreadId : newSupportChatThreadId()
     : requestedThreadId
+  const { tier } = await turnTier
   const payload = await requestJson<Record<string, unknown>>('/api/v1/chat/invoke', {
     method: 'POST',
     headers: { 'x-verevon-org-id': orgId },
@@ -353,6 +361,9 @@ export async function runAssist(
       tools: [],
       attachments: [],
       zdr,
+      // Absent means unconstrained downstream: left off only for an intent
+      // mode, or a model the catalogue says (or last said) claims no tier.
+      ...(tier ? { min_privacy_tier: privacyTierWireValue(tier) } : {}),
     }),
   })
   const data = (payload?.data as Record<string, unknown> | undefined) ?? payload

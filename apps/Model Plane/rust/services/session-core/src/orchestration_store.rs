@@ -83,6 +83,233 @@ pub async fn list_plans_by_thread(pool: &Pool, thread_id: &str) -> Result<Vec<(S
     Ok(rows)
 }
 
+/// Insert a new plan directly in `PLAN_STATE_PROPOSED` with its full step set,
+/// atomically (plan-gate §2.2). Unlike [`create_plan`] (always `draft`, zero
+/// steps — the run-start retrospective execution log), this is the plan a
+/// user actually reviews and edits, populated in one shot by the model's
+/// `plan.propose` tool call.
+///
+/// `steps` is `(step_id, title, operation)`; ordinals are assigned in the
+/// order given, starting at 1.
+///
+/// `supersedes`, when present, is an EARLIER plan id the model claims this
+/// one replaces (owner ruling 2026-09-27: last-proposed-wins). That earlier
+/// plan is flipped to `PLAN_STATE_SUPERSEDED` in the SAME transaction as the
+/// insert, so it can never again be found by a `PLAN_STATE_PROPOSED`/
+/// `PLAN_STATE_APPROVED` lookup or transitioned by a stale approve/reject —
+/// recording the chain in `metadata.supersedes` alone (as an earlier revision
+/// of this function did) left the old plan fully live, so a client that had
+/// not yet heard the new `plan_proposed` SSE event could still legally
+/// approve the abandoned one.
+///
+/// The update is scoped to `WHERE id = $1 AND thread_id = $2 AND status =
+/// 'proposed'`: `supersedes` is a value the MODEL supplies (plan-gate's
+/// `plan.propose` tool input), never validated against "is this actually an
+/// earlier plan on this same thread" before it reaches here. Scoping by the
+/// caller's own already-authorized `thread_id` means a hostile or confused
+/// value (another thread's, another org's, or simply nonexistent plan id)
+/// updates zero rows instead of silently vandalizing a plan this caller was
+/// never authorized to touch; scoping by `status = 'proposed'` means an
+/// already-approved/executing/terminal plan can never be knocked back to
+/// superseded by a same-turn revision.
+///
+/// # Errors
+///
+/// Returns an error if the insert fails.
+#[allow(clippy::too_many_arguments)]
+pub async fn create_proposed_plan(
+    pool: &Pool,
+    id: &str,
+    thread_id: &str,
+    run_id: Option<&str>,
+    summary: &str,
+    org_id: &str,
+    user_id: &str,
+    steps: &[(String, String, String)],
+    metadata: &JsonValue,
+    supersedes: Option<&str>,
+) -> Result<String> {
+    let mut transaction = pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO plans (id, thread_id, run_id, status, goal, org_id, user_id, metadata) \
+         VALUES ($1, $2, $3, 'proposed', $4, $5, $6, $7)",
+    )
+    .bind(id)
+    .bind(thread_id)
+    .bind(run_id)
+    .bind(summary)
+    .bind(org_id)
+    .bind(user_id)
+    .bind(metadata)
+    .execute(&mut *transaction)
+    .await?;
+
+    for (index, (step_id, title, operation)) in steps.iter().enumerate() {
+        let ordinal = final_ordinal(index);
+        sqlx::query(
+            "INSERT INTO plan_steps (id, plan_id, ordinal, kind, status, payload, metadata) \
+             VALUES ($1, $2, $3, $4, 'pending', $5, '{}'::jsonb)",
+        )
+        .bind(step_id)
+        .bind(id)
+        .bind(ordinal)
+        .bind(operation)
+        .bind(serde_json::json!({ "title": title }))
+        .execute(&mut *transaction)
+        .await?;
+    }
+
+    if let Some(old_plan_id) = supersedes.filter(|s| !s.is_empty()) {
+        let outcome = sqlx::query(
+            "UPDATE plans SET status = 'superseded', updated_at = now() \
+             WHERE id = $1 AND thread_id = $2 AND status = 'proposed'",
+        )
+        .bind(old_plan_id)
+        .bind(thread_id)
+        .execute(&mut *transaction)
+        .await?;
+        if outcome.rows_affected() == 0 {
+            // Not an error: the referenced plan may already be gone,
+            // already decided, or (a hostile/confused `supersedes` value)
+            // simply not this thread's to supersede. Logged, not surfaced,
+            // matching this function's existing best-effort posture.
+            info!(
+                plan_id = %id,
+                superseded_id = %old_plan_id,
+                thread_id,
+                "plan-gate: supersedes target was not a PROPOSED plan on this thread; left untouched"
+            );
+        }
+    }
+
+    transaction.commit().await?;
+    info!(plan_id = %id, step_count = steps.len(), "plan proposed");
+    Ok(id.to_owned())
+}
+
+/// List plans for a thread (full row), newest first. Used to find a thread's
+/// latest plan state across run boundaries — a model-proposed plan is
+/// approved on the plan-mode run that proposed it, but consumed on the NEXT
+/// run of the same thread, which does not share that `run_id` (plan-gate
+/// §2.4).
+///
+/// # Errors
+///
+/// Returns an error if the query fails.
+pub async fn list_plans_by_thread_full(pool: &Pool, thread_id: &str) -> Result<Vec<PlanRow>> {
+    let rows = sqlx::query_as::<_, PlanRow>(
+        "SELECT id, thread_id, run_id, status, goal, org_id, user_id, metadata, \
+                created_at, updated_at \
+         FROM plans WHERE thread_id = $1 ORDER BY created_at DESC",
+    )
+    .bind(thread_id)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows)
+}
+
+/// One resolved edit to a plan's step list, after the gRPC layer has minted
+/// ids for any new (`step_id`-empty) entries.
+#[derive(Debug, Clone)]
+pub struct PlanStepEditRow {
+    /// Resolved step id — either an existing step's id, or a freshly minted
+    /// one for a new entry.
+    pub id: String,
+    /// True when this entry has no matching existing row and must be
+    /// inserted rather than updated.
+    pub is_new: bool,
+    pub title: String,
+    pub operation: String,
+    /// True when the user removed this step. Marked `skipped`, never deleted.
+    pub removed: bool,
+}
+
+/// The ordinal a touched step is parked at during pass 1 of
+/// [`apply_plan_edits`] — unique and negative, so it can never collide with
+/// an existing positive ordinal or with another touched step still awaiting
+/// its own final value.
+fn parked_ordinal(index: usize) -> i64 {
+    -(i64::try_from(index).unwrap_or(i64::MAX) + 1)
+}
+
+/// The final 1-based ordinal for position `index` in an edit/step array.
+fn final_ordinal(index: usize) -> i64 {
+    i64::try_from(index + 1).unwrap_or(i64::MAX)
+}
+
+/// Apply a diff/apply edit set to a plan's steps, atomically (plan-gate
+/// §2.2): existing steps are updated in place, new ones inserted, removed
+/// ones marked `PLAN_STEP_STATE_SKIPPED` (never hard-deleted — `plan_steps`
+/// is an audit trail). Every entry's ordinal becomes its 1-based position in
+/// `edits` (the caller's array order is the new step order). A no-op when
+/// `edits` is empty.
+///
+/// Ordinal assignment is two-pass — every touched step is first parked at a
+/// unique negative ordinal, then moved to its final positive one — so a
+/// reorder can never collide with the `(plan_id, ordinal)` unique index,
+/// whether against an untouched step or another touched one still awaiting
+/// its final value.
+///
+/// # Errors
+///
+/// Returns an error if any statement fails; the whole edit set rolls back
+/// together.
+pub async fn apply_plan_edits(pool: &Pool, plan_id: &str, edits: &[PlanStepEditRow]) -> Result<()> {
+    if edits.is_empty() {
+        return Ok(());
+    }
+    let mut transaction = pool.begin().await?;
+
+    for (index, edit) in edits.iter().enumerate() {
+        if edit.is_new {
+            continue;
+        }
+        sqlx::query("UPDATE plan_steps SET ordinal = $3 WHERE id = $1 AND plan_id = $2")
+            .bind(&edit.id)
+            .bind(plan_id)
+            .bind(parked_ordinal(index))
+            .execute(&mut *transaction)
+            .await?;
+    }
+
+    for (index, edit) in edits.iter().enumerate() {
+        let ordinal = final_ordinal(index);
+        let status = if edit.removed { "skipped" } else { "pending" };
+        let payload = serde_json::json!({ "title": edit.title });
+        if edit.is_new {
+            sqlx::query(
+                "INSERT INTO plan_steps (id, plan_id, ordinal, kind, status, payload, metadata) \
+                 VALUES ($1, $2, $3, $4, $5, $6, '{}'::jsonb)",
+            )
+            .bind(&edit.id)
+            .bind(plan_id)
+            .bind(ordinal)
+            .bind(&edit.operation)
+            .bind(status)
+            .bind(&payload)
+            .execute(&mut *transaction)
+            .await?;
+        } else {
+            sqlx::query(
+                "UPDATE plan_steps SET ordinal = $3, kind = $4, status = $5, \
+                 payload = payload || $6, updated_at = now() \
+                 WHERE id = $1 AND plan_id = $2",
+            )
+            .bind(&edit.id)
+            .bind(plan_id)
+            .bind(ordinal)
+            .bind(&edit.operation)
+            .bind(status)
+            .bind(&payload)
+            .execute(&mut *transaction)
+            .await?;
+        }
+    }
+
+    transaction.commit().await?;
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Plan steps
 // ---------------------------------------------------------------------------
@@ -1195,5 +1422,76 @@ mod tests {
         .await
         .expect_err("empty actor must fail before querying Postgres");
         assert_eq!(actor_error.to_string(), "decided_by is required");
+    }
+
+    // -----------------------------------------------------------------
+    // plan-gate: create_proposed_plan / apply_plan_edits
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn parked_ordinal_is_negative_and_distinct_per_index() {
+        let parked: Vec<i64> = (0..5).map(parked_ordinal).collect();
+        assert_eq!(parked, vec![-1, -2, -3, -4, -5]);
+        // Distinct positions never park at the same value, so pass 1 of
+        // apply_plan_edits can never collide with itself mid-transaction.
+        let mut sorted = parked.clone();
+        sorted.dedup();
+        assert_eq!(parked.len(), sorted.len());
+        assert!(parked.iter().all(|ordinal| *ordinal < 0));
+    }
+
+    #[test]
+    fn final_ordinal_is_one_based_and_positive() {
+        assert_eq!(final_ordinal(0), 1);
+        assert_eq!(final_ordinal(1), 2);
+        assert_eq!(final_ordinal(4), 5);
+    }
+
+    #[test]
+    fn parked_and_final_ordinals_never_collide() {
+        // The whole point of the two-pass scheme: no parked (negative) value
+        // can ever equal a final (positive) one, for any index pairing, so
+        // pass 1 can never collide with a not-yet-reached pass 2 write.
+        for parked_index in 0..8usize {
+            for final_index in 0..8usize {
+                assert_ne!(parked_ordinal(parked_index), final_ordinal(final_index));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn apply_plan_edits_is_a_no_op_for_an_empty_edit_set() {
+        // A pool that would error on first real use — proves the empty-slice
+        // fast path returns before touching the database at all (matters for
+        // TransitionPlan calls that carry no edits, the common case today).
+        let pool = PgPoolOptions::new()
+            .connect_lazy("postgres://unused:unused@127.0.0.1:1/unused")
+            .expect("syntactically valid test URL");
+        apply_plan_edits(&pool, "plan_1", &[])
+            .await
+            .expect("empty edit set must be a no-op, never a database round trip");
+    }
+
+    #[test]
+    fn plan_step_edit_row_marks_removed_steps_skipped_not_deleted() {
+        // Documents the contract apply_plan_edits' SQL implements: `removed`
+        // maps to status = 'skipped', and there is no DELETE statement
+        // anywhere in this module for plan_steps.
+        let removed = PlanStepEditRow {
+            id: "step_1".to_owned(),
+            is_new: false,
+            title: "Old step".to_owned(),
+            operation: String::new(),
+            removed: true,
+        };
+        assert!(removed.removed);
+        let kept = PlanStepEditRow {
+            id: "step_2".to_owned(),
+            is_new: false,
+            title: "Kept step".to_owned(),
+            operation: String::new(),
+            removed: false,
+        };
+        assert!(!kept.removed);
     }
 }

@@ -20,6 +20,10 @@ describe('attachment restoration from durable thread content', () => {
     const turn = messageToTurn({ id: 'one', role: 'user', content: appendInlinedAttachments(prompt, [{ name: 'source.pdf', content: 'Full extracted text' }]), createdAt: '' })
     expect(turn.attachments[0]).toMatchObject({ name: 'source.pdf.txt', type: 'text/plain' })
   })
+  it.each(['docx', 'xlsx', 'pptx'])('labels a %s text copy honestly when no original binary is retained', (extension) => {
+    const turn = messageToTurn({ id: 'one', role: 'user', content: appendInlinedAttachments(prompt, [{ name: `source.${extension}`, content: 'Full extracted text' }]), createdAt: '' })
+    expect(turn.attachments[0]).toMatchObject({ name: `source.${extension}.txt`, type: 'text/plain' })
+  })
   it('never hides incomplete or unrecognized suffix text', () => {
     for (const value of [content.replace('SLUTT PÅ', 'SLUTT'), `${content}\nImportant extra instruction`]) {
       expect(splitInlinedAttachments(value)).toEqual({ text: value, attachments: [] })

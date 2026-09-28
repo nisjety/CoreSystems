@@ -62,21 +62,24 @@ func TestParseRunCompleted_RejectsNonTriggers(t *testing.T) {
 type fakeSrc struct {
 	transcript string
 	existing   []learning.ExistingSkill
+	skip       learning.SkipReason
 	err        error
 	gotRef     SessionRef
 }
 
-func (f *fakeSrc) Fetch(_ context.Context, ref SessionRef) (string, []learning.ExistingSkill, error) {
+func (f *fakeSrc) Fetch(_ context.Context, ref SessionRef) (Transcript, error) {
 	f.gotRef = ref
-	return f.transcript, f.existing, f.err
+	return Transcript{Text: f.transcript, Existing: f.existing, Skip: f.skip}, f.err
 }
 
 type fakeReviewer struct {
-	out []learning.SkillCandidate
-	err error
+	out   []learning.SkillCandidate
+	err   error
+	calls int
 }
 
 func (f *fakeReviewer) Review(_ context.Context, _ string, _ []learning.ExistingSkill, _ string) ([]learning.SkillCandidate, error) {
+	f.calls++
 	return f.out, f.err
 }
 
@@ -96,12 +99,12 @@ func TestOnRunCompleted_FetchesThenReviewsAndPersists(t *testing.T) {
 	}}
 	sink := &fakeSink{}
 
-	n, err := OnRunCompleted(context.Background(), ref, src, reviewer, sink)
+	outcome, err := OnRunCompleted(context.Background(), ref, src, reviewer, sink)
 	if err != nil {
 		t.Fatalf("OnRunCompleted: %v", err)
 	}
-	if n != 1 {
-		t.Fatalf("expected 1 persisted, got %d", n)
+	if outcome != (learning.ReviewOutcome{Candidates: 1, Selected: 1, Persisted: 1}) {
+		t.Fatalf("expected 1 candidate selected and persisted, got %+v", outcome)
 	}
 	if src.gotRef != ref {
 		t.Fatalf("ref not forwarded to source: %+v", src.gotRef)
@@ -117,6 +120,23 @@ func TestOnRunCompleted_FetchErrorIsWrapped(t *testing.T) {
 		&fakeReviewer{}, &fakeSink{})
 	if err == nil || !strings.Contains(err.Error(), "fetch transcript") {
 		t.Fatalf("expected wrapped fetch error, got %v", err)
+	}
+}
+
+func TestOnRunCompleted_SourceSkipNeverReachesReviewer(t *testing.T) {
+	for _, skip := range []learning.SkipReason{learning.SkipConversationScope, learning.SkipEmptyTranscript} {
+		reviewer := &fakeReviewer{out: []learning.SkillCandidate{
+			{Name: "Cache", Content: "use the cache", Confidence: 0.9},
+		}}
+		sink := &fakeSink{}
+		outcome, err := OnRunCompleted(context.Background(), SessionRef{RunID: "r-1"},
+			&fakeSrc{skip: skip}, reviewer, sink)
+		if err != nil || outcome != (learning.ReviewOutcome{Skipped: skip}) {
+			t.Fatalf("%s: outcome = %+v err=%v", skip, outcome, err)
+		}
+		if reviewer.calls != 0 || len(sink.got) != 0 {
+			t.Fatalf("%s: a skipped run was reviewed (%d calls) or persisted (%d)", skip, reviewer.calls, len(sink.got))
+		}
 	}
 }
 

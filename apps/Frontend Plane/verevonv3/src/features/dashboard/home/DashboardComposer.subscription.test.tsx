@@ -166,7 +166,7 @@ describe('connected subscription model picker', () => {
     flush()
     expect(submitted).toHaveLength(0)
     expect(input.value).toBe('Keep this draft while checking')
-    expect(screen.queryByText(/koble til.*integrasjoner|ikke lenger tilkoblet/i)).toBeNull()
+    expect(screen.queryByText(/koble til.*(integrasjoner|profil)|ikke lenger tilkoblet/i)).toBeNull()
 
     resolveConnections([{ id: 'conn', providerKey: 'openai-codex-subscription', status: 'active' }])
     await waitFor(() => expect(submit.disabled).toBe(false))
@@ -263,7 +263,7 @@ describe('a persisted subscription model whose connection has lapsed', () => {
     fireEvent.input(input, { target: { value: 'Keep this draft' } })
     flush()
     fireEvent.submit(input.closest('form')!)
-    await screen.findByText(/koble til chatgpt-abonnementet i integrasjoner før du sender|connect your chatgpt subscription in integrations before sending/i)
+    await screen.findByText(/koble til chatgpt-abonnementet under profil → chatgpt-abonnement før du sender|connect your chatgpt subscription under profile → chatgpt subscription before sending/i)
     expect(submitted).toEqual([])
     expect(input.value).toBe('Keep this draft')
   })

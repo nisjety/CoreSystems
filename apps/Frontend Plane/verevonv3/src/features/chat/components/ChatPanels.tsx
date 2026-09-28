@@ -36,8 +36,11 @@ import {
   imageArtifactSrc,
 } from './chat-artifacts'
 import {
+  evidenceSourceGroupKey,
+  evidenceSourceGroupLabel,
   evidenceSourceSnippet,
   formatTime,
+  groupBySourceGroupId,
   groupTaskSteps,
   hostname,
   partitionEvidenceSources,
@@ -364,6 +367,21 @@ export function SourcesPanel(props: { grounding?: ChatKnowledgeGrounding | null;
     source,
     index: groups().read.length + index + 1,
   })))
+  // Domain/provider sub-grouping (chat-wave2 citations spec §2.6), within
+  // each read/unread section so the F-16 read/unread split stays the
+  // outermost distinction — a group never mixes a read source with an
+  // unread one. Each entry keeps the running index computed above.
+  type SourceEntry = { source: EvidenceSource; index: number }
+  const readGroups = createMemo(() => groupBySourceGroupId<SourceEntry>(
+    readEntries(),
+    (entry) => evidenceSourceGroupKey(entry.source),
+    (entry) => evidenceSourceGroupLabel(entry.source),
+  ))
+  const unreadGroups = createMemo(() => groupBySourceGroupId<SourceEntry>(
+    unreadEntries(),
+    (entry) => evidenceSourceGroupKey(entry.source),
+    (entry) => evidenceSourceGroupLabel(entry.source),
+  ))
   return (
     <Show
       when={props.sources.length > 0 || props.grounding}
@@ -395,11 +413,20 @@ export function SourcesPanel(props: { grounding?: ChatKnowledgeGrounding | null;
           <Show when={hasUnread() && groups().read.length > 0}>
             <h2 class="verevon-chat-source-group__heading">{i18n.tr('Lest og brukt', 'Read and used')}</h2>
           </Show>
-          <For each={readEntries()}>
-            {(entry) => (
-              entry.source.kind === 'knowledge'
-                ? <KnowledgeSourceCard source={entry.source} index={entry.index} />
-                : <WebSourceCard source={entry.source} index={entry.index} />
+          <For each={readGroups()}>
+            {(group) => (
+              <section class="verevon-chat-source-domain-group">
+                <Show when={readGroups().length > 1}>
+                  <h3 class="verevon-chat-source-domain-group__heading">{group.label}</h3>
+                </Show>
+                <For each={group.items}>
+                  {(entry) => (
+                    entry.source.kind === 'knowledge'
+                      ? <KnowledgeSourceCard source={entry.source} index={entry.index} />
+                      : <WebSourceCard source={entry.source} index={entry.index} />
+                  )}
+                </For>
+              </section>
             )}
           </For>
           <Show when={hasUnread()}>
@@ -411,11 +438,20 @@ export function SourcesPanel(props: { grounding?: ChatKnowledgeGrounding | null;
                   'Found but never fetched. These were not used as evidence for the answer.',
                 )}
               </p>
-              <For each={unreadEntries()}>
-                {(entry) => (
-                  entry.source.kind === 'knowledge'
-                    ? <KnowledgeSourceCard source={entry.source} index={entry.index} />
-                    : <WebSourceCard source={entry.source} index={entry.index} />
+              <For each={unreadGroups()}>
+                {(group) => (
+                  <section class="verevon-chat-source-domain-group">
+                    <Show when={unreadGroups().length > 1}>
+                      <h3 class="verevon-chat-source-domain-group__heading">{group.label}</h3>
+                    </Show>
+                    <For each={group.items}>
+                      {(entry) => (
+                        entry.source.kind === 'knowledge'
+                          ? <KnowledgeSourceCard source={entry.source} index={entry.index} />
+                          : <WebSourceCard source={entry.source} index={entry.index} />
+                      )}
+                    </For>
+                  </section>
                 )}
               </For>
             </section>
@@ -518,8 +554,11 @@ export function WebSourceCard(props: { source: Citation & { kind: 'web' }; index
 }
 
 /**
- * Context inspector: what is actually in the model's window for this thread,
- * itemized by segment with per-segment token estimates.
+ * Context inspector: the context session-core assembled for this thread
+ * (memory, grounding, history), itemized by segment with per-segment token
+ * estimates. The budget is the assembly budget (`context_assembly_budget` in
+ * model-gateway), not the model's context window — labelled accordingly, since
+ * "3 131 / 4 096 tokens" under a "context window" heading read as a 4k model.
  *
  * The data (`GetContextAssembly`) has existed all along and the gateway already
  * called it to BUILD prompts — it was simply never exposed, so the one surface
@@ -529,10 +568,52 @@ export function WebSourceCard(props: { source: Citation & { kind: 'web' }; index
  * Segment content is shown, not just sizes. "1,200 tokens of grounding" does not
  * answer the question the inspector exists for.
  */
+/**
+ * `ContextSegment.kind` is a free-form wire string (session-core's
+ * `assemble_segments`, plus the persona spec's synthetic `"persona"` segment
+ * the BFF prepends) — the inspector renders whatever it gets with no
+ * allow-list, so an unmapped kind still shows (its own raw string) rather
+ * than disappearing. This only swaps the handful of known kinds for a
+ * localized label; not load-bearing (persona.md §2.5's "optional polish").
+ */
+function contextSegmentKindLabel(kind: string, i18n: ReturnType<typeof useI18n>): string {
+  switch (kind) {
+    case 'persona':
+      return i18n.tr('Personlige instrukser', 'Personal instructions')
+    case 'policy':
+      return i18n.tr('Policy', 'Policy')
+    case 'workspace':
+      return i18n.tr('Arbeidsområde', 'Workspace')
+    case 'agent':
+      return i18n.tr('Agent', 'Agent')
+    case 'user':
+      return i18n.tr('Bruker', 'User')
+    case 'thread':
+      return i18n.tr('Samtale', 'Thread')
+    case 'episodic':
+      return i18n.tr('Minne', 'Memory')
+    case 'retrieval':
+      return i18n.tr('Kilder', 'Sources')
+    case 'knowledge':
+      return i18n.tr('Kunnskap', 'Knowledge')
+    case 'graph':
+      return i18n.tr('Graf', 'Graph')
+    default:
+      return kind
+  }
+}
+
 export function ContextWindowPanel(props: {
   context: ThreadContext | undefined
   loading: boolean
   failed: boolean
+  /**
+   * Per-turn retrieval-source filter receipt (chat-wave2 scope spec §2.2's
+   * "shown in the receipt" requirement) — the concrete transparency surface
+   * for the excluded tool classes, sourced from the turn's own
+   * `source_scope_applied` SSE frame. Absent for an `auto` turn.
+   */
+  scopeApplied?: { scope: 'knowledge_only' | 'web_only'; excludedTools: string[] }
 }) {
   const i18n = useI18n()
   const [open, setOpen] = createSignal(false)
@@ -548,10 +629,14 @@ export function ContextWindowPanel(props: {
         type="button"
         class="verevon-chat-context-window__toggle"
         aria-expanded={open() ? 'true' : 'false'}
+        title={i18n.tr(
+          'Tokens i konteksten Verevon satte sammen for samtalen (minner, kilder, historikk), målt mot budsjettet for sammenstillingen. Ikke modellens kontekstvindu.',
+          'Tokens in the context Verevon assembled for this conversation (memories, sources, history), measured against the assembly budget. Not the model’s context window.',
+        )}
         onClick={() => setOpen((value) => !value)}
       >
         <Layers size={14} />
-        <span>Kontekstvindu</span>
+        <span>{i18n.tr('Samlet kontekst', 'Assembled context')}</span>
         <Show when={props.context}>
           <em>
             {used().toLocaleString('nb-NO')}
@@ -563,15 +648,27 @@ export function ContextWindowPanel(props: {
         <ChevronRight size={14} class={{ 'verevon-chat-rotate': open() }} />
       </button>
       <Show when={open()}>
+        <Show when={props.scopeApplied}>
+          {(scopeApplied) => (
+            <p class="verevon-chat-context-window__note">
+              {scopeApplied().scope === 'knowledge_only'
+                ? i18n.tr('Nett-kilder ekskludert for dette svaret (kildefilter: kun organisasjon).', 'Web sources excluded for this answer (source filter: organization only).')
+                : i18n.tr('Organisasjonskilder ekskludert for dette svaret (kildefilter: kun nett).', 'Organization sources excluded for this answer (source filter: web only).')}
+              <Show when={scopeApplied().excludedTools.length > 0}>
+                {` (${scopeApplied().excludedTools.join(', ')})`}
+              </Show>
+            </p>
+          )}
+        </Show>
         <Switch>
           <Match when={props.loading}>
-            <p class="verevon-chat-context-window__note">Laster …</p>
+            <p class="verevon-chat-context-window__note">{i18n.tr('Laster …', 'Loading …')}</p>
           </Match>
           <Match when={props.failed}>
             {/* Named, not blank: a failed read and an empty window look the
                 same otherwise, and only one of them is a problem. */}
             <p class="verevon-chat-context-window__note">
-              Kunne ikke hente kontekstvinduet.
+              {i18n.tr('Kunne ikke hente den samlede konteksten.', 'Could not load the assembled context.')}
             </p>
           </Match>
           <Match when={!props.context}>
@@ -584,7 +681,10 @@ export function ContextWindowPanel(props: {
                 rather than between siblings, so Switch only ever sees Match
                 children. */}
             <p class="verevon-chat-context-window__note">
-              Kontekstvinduet er ikke hentet for denne samtalen ennå.
+              {i18n.tr(
+                'Den samlede konteksten er ikke hentet for denne samtalen ennå.',
+                'The assembled context has not been loaded for this conversation yet.',
+              )}
             </p>
           </Match>
           <Match when={props.context?.segments.length === 0}>
@@ -597,7 +697,7 @@ export function ContextWindowPanel(props: {
                   {(segment) => (
                     <li class="verevon-chat-context-window__item">
                       <div class="verevon-chat-context-window__head">
-                        <span class="verevon-chat-context-window__kind">{segment.kind}</span>
+                        <span class="verevon-chat-context-window__kind">{contextSegmentKindLabel(segment.kind, i18n)}</span>
                         <span class="verevon-chat-context-window__tokens">
                           {segment.estimatedTokens.toLocaleString('nb-NO')} tokens
                         </span>
@@ -645,8 +745,24 @@ export function StepsPanel(props: {
   const waitingStep = () => props.steps.find((step) => step.status === 'waiting')
   const activeStep = () => props.steps.find((step) => step.status === 'active')
   const failedStep = () => [...props.steps].reverse().find((step) => step.status === 'error')
+  // The model service not answering is an outage, not a failed check: the
+  // controller stops the open steps and records this one instead, so the
+  // line names the service rather than the check it interrupted.
+  const serviceUnavailable = () => {
+    const latest = [...props.steps].reverse().find((step) => step.status === 'error' || step.id.endsWith(':service-unavailable'))
+    return latest?.id.endsWith(':service-unavailable') ? latest : undefined
+  }
   const statusLine = () => {
     if (props.turnStatus === 'stopped') return i18n.tr('Stoppet', 'Stopped')
+    const service = props.turnStatus === 'error' ? serviceUnavailable() : undefined
+    if (service) {
+      // The step's own title when the route named the reason (the ChatGPT
+      // plan's usage limit, a sign-in to renew), so the line does not claim
+      // an outage for what was a refusal.
+      const title = service.title.trim().replace(/\.$/, '')
+      if (title) return i18n.tr(`${title}. Ingenting ble publisert.`, `${title}. Nothing was published.`)
+      return i18n.tr('Modelltjenesten svarte ikke. Ingenting ble publisert.', 'The model service did not answer. Nothing was published.')
+    }
     if (props.turnStatus === 'error' && !failedStep()) return i18n.tr('Arbeidet ble ikke fullført', 'The work did not finish')
     if (waitingStep()) return i18n.tr('Venter på deg', 'Waiting for you')
     const active = activeStep()

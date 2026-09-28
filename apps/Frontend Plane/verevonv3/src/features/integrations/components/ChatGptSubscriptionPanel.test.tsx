@@ -4,7 +4,7 @@ import { flush } from 'solid-js'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ChatGptSubscriptionPanel } from './ChatGptSubscriptionPanel'
 import { ApiError } from '@/shared/api/http'
-import { getChatGptSubscriptionStatus, startChatGptSubscription } from '@/shared/api/chatgpt-subscription-client'
+import { getChatGptSubscriptionStatus, listChatGptSubscriptions, startChatGptSubscription } from '@/shared/api/chatgpt-subscription-client'
 
 vi.mock('@/shared/i18n', () => ({ useI18n: () => ({ tr: (_no: string, en: string) => en }) }))
 vi.mock('@/shared/api/chatgpt-subscription-client', () => ({
@@ -119,5 +119,47 @@ describe('ChatGPT subscription recovery', () => {
     await vi.advanceTimersByTimeAsync(20_000)
     expect(getChatGptSubscriptionStatus).toHaveBeenCalledTimes(2)
     expect(vi.getTimerCount()).toBe(0)
+  })
+})
+
+describe('the reconnect target the chat links to', () => {
+  const scrollIntoView = vi.fn()
+  beforeEach(() => {
+    scrollIntoView.mockReset()
+    Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', { configurable: true, writable: true, value: scrollIntoView })
+  })
+  afterEach(() => {
+    cleanup()
+    window.history.replaceState(null, '', '#')
+    delete (HTMLElement.prototype as { scrollIntoView?: unknown }).scrollIntoView
+    vi.mocked(listChatGptSubscriptions).mockReset().mockResolvedValue([])
+  })
+
+  it('is anchored at #chatgpt-subscription and scrolled into view when the link lands there', async () => {
+    window.history.replaceState(null, '', '#chatgpt-subscription')
+    const { container } = render(() => <ChatGptSubscriptionPanel orgId="org-1" />)
+    await settle()
+    const section = container.querySelector('section')
+    expect(section?.id).toBe('chatgpt-subscription')
+    expect(scrollIntoView).toHaveBeenCalledTimes(1)
+    expect(scrollIntoView.mock.contexts[0]).toBe(section)
+  })
+
+  it('does not scroll on an ordinary visit to Integrations', async () => {
+    render(() => <ChatGptSubscriptionPanel orgId="org-1" />)
+    await settle()
+    expect(scrollIntoView).not.toHaveBeenCalled()
+  })
+
+  it('says a connection whose sign-in expired needs reconnecting, and offers to connect', async () => {
+    vi.mocked(listChatGptSubscriptions).mockResolvedValue([
+      { id: 'conn-1', providerKey: 'openai-codex-subscription', status: 'needs_refresh' },
+    ] as Awaited<ReturnType<typeof listChatGptSubscriptions>>)
+    render(() => <ChatGptSubscriptionPanel orgId="org-1" />)
+    await settle()
+    await settle()
+    expect(screen.getByText('Needs reconnecting')).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Connect ChatGPT' })).toBeTruthy()
+    expect(screen.queryByRole('button', { name: 'Disconnect' })).toBeNull()
   })
 })

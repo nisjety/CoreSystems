@@ -18,9 +18,11 @@ import { useI18n } from '@/shared/i18n'
 import {
   DEFAULT_AI_MODEL_SELECTION,
   readAiModelSelection,
+  rememberAiModelPrivacyTier,
   rememberAiModelSelection,
   type AiModelSelection,
 } from '@/shared/ai/model-selection'
+import { rememberedPrivacyTier } from '@/features/dashboard/home/submit-privacy-tier'
 import { cn } from '@/shared/lib/cn'
 
 export function AiModelPicker(props: {
@@ -28,6 +30,12 @@ export function AiModelPicker(props: {
   class?: string
   /** Support transcripts must honor the organization's no-retention posture. */
   respectOrgZdr?: boolean
+  /**
+   * The catalogue request to render from, when the parent's sends read the
+   * same catalogue (`createTurnPrivacyTierResolver`). Defaults to its own
+   * `listModels` request.
+   */
+  catalogue?: () => Promise<ModelInfo[]>
   onChange?: (selection: AiModelSelection) => void
 }) {
   const i18n = useI18n()
@@ -35,7 +43,7 @@ export function AiModelPicker(props: {
   const [selected, setSelected] = createSignal<AiModelSelection>(DEFAULT_AI_MODEL_SELECTION)
   const [models] = createResource(async () => {
     try {
-      return await listModels()
+      return await (untrack(() => props.catalogue) ?? listModels)()
     } catch {
       return [] as ModelInfo[]
     }
@@ -76,10 +84,29 @@ export function AiModelPicker(props: {
   // Sending through another provider requires a new user choice; the request
   // resolver/backend reports an unavailable subscription instead.
 
+  const selectedCatalogModel = createMemo(() =>
+    flatModels().find((model) => model.id === selected().model && model.provider === selected().provider),
+  )
+
+  // Keep the stored last-known tier current while the catalogue lists the
+  // selection, as the main composer does: a send falls back on it when a later
+  // catalogue is slow or down (`submit-privacy-tier.ts`).
+  createEffect(
+    () => selectedCatalogModel(),
+    (listed) => {
+      if (!listed) return
+      rememberAiModelPrivacyTier(
+        props.orgId,
+        { model: listed.id, provider: listed.provider },
+        rememberedPrivacyTier(listed),
+      )
+    },
+  )
+
   const selectedLabel = createMemo(() => {
     const current = selected()
     return verevonModeById(current.model)?.label
-      ?? flatModels().find((model) => model.id === selected().model && model.provider === selected().provider)?.name
+      ?? selectedCatalogModel()?.name
       ?? current.label
   })
 
@@ -99,6 +126,7 @@ export function AiModelPicker(props: {
       model: model.id,
       label: model.name,
       ...(model.provider ? { provider: model.provider } : {}),
+      privacyTier: rememberedPrivacyTier(model),
     })
   }
 

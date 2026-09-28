@@ -1,0 +1,12 @@
+<Window x:Class="Teachme.Windows.MainWindow" xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" Title="Teachme — Your learning companion" Width="580" Height="600" MinWidth="430" MinHeight="480" Background="#F4F3EC" WindowStartupLocation="CenterScreen" FontFamily="Segoe UI" PreviewKeyDown="Window_KeyDown">
+  <ScrollViewer VerticalScrollBarVisibility="Auto"><StackPanel Margin="34,28">
+    <DockPanel><TextBlock Text="teachme" FontSize="28" FontWeight="SemiBold"/><Border DockPanel.Dock="Right" HorizontalAlignment="Right" Background="#E6EADB" CornerRadius="12" Padding="10,5"><TextBlock Text="Windows foundation" FontSize="10" VerticalAlignment="Center"/></Border></DockPanel>
+    <TextBlock Text="A little guidance.&#x0a;Your next discovery." FontFamily="Georgia" FontSize="34" LineHeight="39" Margin="0,30,0,14"/>
+    <TextBlock Text="Open this window with Ctrl+Alt+Space. Type what you want to learn, at your own pace." FontSize="13" Foreground="#737B71" LineHeight="21"/>
+    <Label Content="What would you like to learn?" Target="{Binding ElementName=RequestText}" Padding="0" Margin="0,24,0,9" Foreground="{StaticResource Ink}"/>
+    <TextBox x:Name="RequestText" AutomationProperties.Name="Learning request" AcceptsReturn="True" TextWrapping="Wrap" VerticalScrollBarVisibility="Auto" MinHeight="90" MaxHeight="180" MaxLength="2000" Padding="12" Background="#FFFEFA" BorderBrush="#C7CEC0" FontSize="14"/>
+    <Button Content="Ask for guidance" Click="RequestGuidance_Click" Margin="0,14,0,0" HorizontalAlignment="Left" Background="{StaticResource Forest}" Foreground="White" BorderThickness="0"/>
+    <Border Background="#E9ECDF" Padding="15" CornerRadius="7" Margin="0,22,0,0"><StackPanel><TextBlock x:Name="StatusText" Text="Guidance service not connected. Your request stays in this window." FontSize="12" LineHeight="19" AutomationProperties.LiveSetting="Polite"/><TextBlock Text="Screen capture: off · Microphone: off · Remote control: off" FontSize="10" Foreground="#65735F" Margin="0,10,0,0"/></StackPanel></Border>
+    <TextBlock x:Name="ShortcutText" Text="Ctrl+Alt+Space to open · Escape to clear and minimize" FontSize="10" Foreground="#737B71" Margin="0,18,0,0"/>
+  </StackPanel></ScrollViewer>
+</Window>

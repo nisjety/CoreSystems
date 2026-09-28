@@ -278,30 +278,38 @@ impl GroundingClassifier {
         if !memory_grounding_enabled() {
             return None;
         }
+        Self::from_connection_env()
+    }
+
+    /// The same classifier, built from the same inference-core/Auth Core
+    /// environment, WITHOUT consulting [`GROUNDING_ENABLED_ENV`].
+    ///
+    /// Only for the operator-run `memory-dedup` backfill, which classifies
+    /// existing rows and writes nothing on its own: turning write-time
+    /// grounding on for the whole service just to review a plan would change
+    /// the Dreaming loop's behaviour as a side effect.
+    pub(crate) fn from_connection_env() -> Option<Self> {
         let Some(endpoint) =
             optional_env("INFERENCE_CORE_ADDR").or_else(|| optional_env("INFERENCE_CORE_URL"))
         else {
-            warn!(
-                "MEMORY_GROUNDING_ENABLED is on but no inference-core address is configured; \
-                 grounding is off"
-            );
+            warn!("memory grounding classifier has no inference-core address configured; classifier is off");
             return None;
         };
         let Some(auth_core_url) = optional_env("AUTH_CORE_URL") else {
-            warn!("MEMORY_GROUNDING_ENABLED is on but AUTH_CORE_URL is unset; grounding is off");
+            warn!("memory grounding classifier needs AUTH_CORE_URL, which is unset; classifier is off");
             return None;
         };
         let Some(service_id) = optional_env("SESSION_CORE_SERVICE_ID") else {
             warn!(
-                "MEMORY_GROUNDING_ENABLED is on but SESSION_CORE_SERVICE_ID is unset; \
-                 grounding is off"
+                "memory grounding classifier needs SESSION_CORE_SERVICE_ID, which is unset; \
+                 classifier is off"
             );
             return None;
         };
         let Some(credential) = optional_env("SESSION_CORE_SERVICE_API_KEY") else {
             warn!(
-                "MEMORY_GROUNDING_ENABLED is on but SESSION_CORE_SERVICE_API_KEY is unset; \
-                 grounding is off"
+                "memory grounding classifier needs SESSION_CORE_SERVICE_API_KEY, which is unset; \
+                 classifier is off"
             );
             return None;
         };
@@ -309,10 +317,15 @@ impl GroundingClassifier {
         match Self::new(&endpoint, &auth_core_url, &service_id, &credential) {
             Ok(classifier) => Some(classifier),
             Err(error) => {
-                warn!(%error, "memory grounding classifier could not be configured; grounding is off");
+                warn!(%error, "memory grounding classifier could not be configured; classifier is off");
                 None
             }
         }
+    }
+
+    /// The model this classifier asks, for the backfill plan's provenance.
+    pub(crate) fn model(&self) -> &str {
+        &self.model
     }
 
     fn new(

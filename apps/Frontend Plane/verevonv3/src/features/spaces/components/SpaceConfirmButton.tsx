@@ -33,6 +33,14 @@ export interface SpaceConfirmButtonProps {
   readonly onConfirm: () => void
   readonly disabled?: boolean
   readonly class?: string
+  /**
+   * ARIA role override for the button, e.g. `'menuitem'` when this is reused
+   * inside a `role="menu"` popover (see `CoreSidebar`'s per-thread menu).
+   * Omitted keeps the native `<button>` role, exactly as every existing
+   * caller renders today. Typed as the literal the only current caller uses
+   * (rather than a bare `string`) so it satisfies Solid's ARIA role union.
+   */
+  readonly role?: 'menuitem'
 }
 
 export function SpaceConfirmButton(props: SpaceConfirmButtonProps) {
@@ -40,14 +48,24 @@ export function SpaceConfirmButton(props: SpaceConfirmButtonProps) {
   const [armed, setArmed] = createSignal(false)
   let timer: number | undefined
 
+  const clearDisarmTimer = () => {
+    if (timer === undefined) return
+    window.clearTimeout(timer)
+    timer = undefined
+  }
+
   const disarm = () => {
-    if (timer !== undefined) {
-      window.clearTimeout(timer)
-      timer = undefined
-    }
+    clearDisarmTimer()
     setArmed(false)
   }
-  onCleanup(disarm)
+  // Cleanup only cancels the pending timer -- it must NOT also write `armed`.
+  // The common case that exercises this is the button's own `onConfirm`
+  // removing the row it lives in (e.g. CoreSidebar's per-thread delete): that
+  // reactively disposes this component from INSIDE another computation's own
+  // update, and a plain signal write from a cleanup running in that position
+  // is a `[REACTIVE_WRITE_IN_OWNED_SCOPE]` error under Solid 2's signals --
+  // harmless here anyway, since nothing reads `armed` again once disposed.
+  onCleanup(clearDisarmTimer)
 
   const click = () => {
     if (props.disabled) return
@@ -66,6 +84,7 @@ export function SpaceConfirmButton(props: SpaceConfirmButtonProps) {
         type="button"
         class={props.class}
         disabled={props.disabled}
+        role={props.role}
         aria-label={armed() ? props.confirmLabel : undefined}
         onClick={click}
         onBlur={disarm}

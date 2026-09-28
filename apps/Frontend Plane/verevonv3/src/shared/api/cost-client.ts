@@ -20,6 +20,12 @@ export type CostEntry = {
   inputTokens: number
   outputTokens: number
   costUsd: number
+  /**
+   * How the cost was reached. A `subscription` row (the user's own ChatGPT
+   * subscription) has real tokens and cost 0, which is not free spend. `null`
+   * when the producer did not say.
+   */
+  costBasis?: 'metered' | 'subscription' | null
   createdAt: string
 }
 

@@ -2,19 +2,36 @@
 //! The known prior assessment and private repair are scripted; ONLY the
 //! subsequent recheck uses live inference. The separately labelled inline-repair
 //! control uses live reviews throughout; none is an authoring benchmark.
+//!
+//! `MODEL_GATEWAY_REVIEW_PROPOSAL_RULE` (off or on) is read from the
+//! environment, so the same controls run in both states; every row records it.
+//! Only rows with confirmed labels decide the exit status: the proposal-rule
+//! controls' labels are still proposed, so their rows are reported, not
+//! counted.
 use base64::Engine;
-use model_gateway::source_validation::{check_artifact, Source, SourceContext};
+use model_gateway::review_proposal_rule::ReviewProposalRule;
+use model_gateway::source_validation::{check_artifact, CheckSettings, Source, SourceContext};
 use mp_contracts::model_plane::v1::{inference_core_client::InferenceCoreClient, InferRequest, InferResponse};
 use serde_json::{json, Value};
 use std::sync::{atomic::{AtomicBool, AtomicUsize, Ordering}, Arc, Mutex};
 use std::time::{Duration, Instant};
 
-fn rejects_dependent_passage(report: &Value) -> bool {
+/// The paired proposal-rule controls, with labels still marked proposed.
+#[path = "support/proposal_rule_controls.rs"]
+mod proposal_rule_controls;
+
+/// Whether `report` rejects segment `index` with a reason.
+fn rejects_segment(report: &Value, index: u64) -> bool {
     report["checks"].as_array().is_some_and(|checks| checks.iter().any(|check| {
-        check.get("index").or_else(|| check.get("i")).and_then(Value::as_u64) == Some(2)
+        check.get("index").or_else(|| check.get("i")).and_then(Value::as_u64) == Some(index)
             && matches!(check.get("status").or_else(|| check.get("v")).and_then(Value::as_str), Some("unsupported" | "u"))
             && check.get("reason").or_else(|| check.get("r")).and_then(Value::as_str).is_some_and(|reason| !reason.trim().is_empty())
     }))
+}
+
+/// Whether `report` rejects the unchanged dependent passage (index 2).
+fn rejects_dependent_passage(report: &Value) -> bool {
+    rejects_segment(report, 2)
 }
 
 #[test]
@@ -33,6 +50,23 @@ fn dependent_rejection_diagnostic_accepts_both_wire_formats() {
     ] {
         assert!(!rejects_dependent_passage(&json!({"checks":[check]})));
     }
+    // A relabel control must reject the relabelled segment itself.
+    assert!(rejects_segment(&json!({"checks":[{"i":1,"v":"u","r":"Gives sign-off authority."}]}), 1));
+    assert!(!rejects_segment(&json!({"checks":[{"i":2,"v":"u","r":"Other."}]}), 1));
+}
+
+/// Only confirmed labels decide a recheck run: a proposed control's miss is
+/// reported, not counted.
+#[test]
+fn only_confirmed_recheck_rows_fail_the_run() {
+    let rows = [
+        json!({"id":"reference-preserved","labelStatus":"confirmed","correct":true}),
+        json!({"id":"proposal-relabel-signoff","labelStatus":proposal_rule_controls::LABEL_STATUS,"correct":false}),
+    ];
+    assert_eq!(proposal_rule_controls::LABEL_STATUS, "proposed");
+    assert!(proposal_rule_controls::gating_failures(&rows).is_empty());
+    let failed = [json!({"id":"reference-changed","labelStatus":"confirmed","correct":false})];
+    assert_eq!(proposal_rule_controls::gating_failures(&failed), ["reference-changed"]);
 }
 
 #[tokio::test]
@@ -47,7 +81,16 @@ async fn context_changes_must_invalidate_otherwise_identical_passages() -> anyho
     anyhow::ensure!(!cookies.is_empty(), "local authenticated session required");
     let http = reqwest::Client::new();
     let client = InferenceCoreClient::connect("http://127.0.0.1:9092").await?;
-    let cases = [
+    // The process's settings, as production would send this check. The
+    // qualifier scope is the line-wide one `From<LatencyLevers>` gave before
+    // the rule; the rule comes from the environment.
+    let settings = CheckSettings {
+        levers: model_gateway::latency_levers::LatencyLevers::from_env(),
+        qualifier_scope: model_gateway::source_facts::QualifierScope::Line,
+        proposal_rule: ReviewProposalRule::from_env(),
+    };
+    println!("review proposal rule: {}", settings.proposal_rule.name());
+    let mut cases = vec![
         ("reference-preserved", "The Ridge package includes screws. The Lake package includes brackets and excludes screws.",
             "The Ridge package includes screws and weighs 10 kg.", "It includes screws.", "The Ridge package includes screws.", true, false),
         ("reference-changed", "The Ridge package includes screws. The Lake package includes brackets and excludes screws.",
@@ -69,8 +112,17 @@ async fn context_changes_must_invalidate_otherwise_identical_passages() -> anyho
         ("inline-reference-live", "The Atlas exhibition opens on 12 October. The Meadow exhibition opens on 20 October.",
             "The Meadow exhibition opens on 20 October.", "It opens on 12 October.", "The Meadow exhibition opens on 20 October.", true, false),
     ];
+    // Proposal-rule controls, PROPOSED labels, reported apart from the
+    // original ten. A relabel control's repair only adds a label to the
+    // rejected segment, so its rejection must reject that segment (index 1).
+    let original = cases.len();
+    cases.extend(proposal_rule_controls::RECHECK_CONTROLS);
+    let relabel: std::collections::BTreeSet<&str> = proposal_rule_controls::RELABEL_CONTROLS.iter().map(|control| control.0).collect();
+    cases.extend(proposal_rule_controls::RELABEL_CONTROLS.map(|(id, source, faulty, dependent, replacement, expected)| (id, source, faulty, dependent, replacement, expected, false)));
     let mut results = Vec::new();
-    for (id, source, faulty, dependent, replacement, expected, independent) in cases {
+    for (case, (id, source, faulty, dependent, replacement, expected, independent)) in cases.into_iter().enumerate() {
+        let (case_set, label_status) = if case < original { ("original", "confirmed") } else { (proposal_rule_controls::CASE_SET, proposal_rule_controls::LABEL_STATUS) };
+        let must_reject: u64 = if relabel.contains(id) { 1 } else { 2 };
         let live_initial = matches!(id, "inline-repair-live" | "inline-reference-live");
         let response = http.get("http://localhost:3011/api/inference-core/token").header("Cookie", &cookies).send().await?;
         anyhow::ensure!(response.status().is_success(), "inference authentication unavailable");
@@ -165,8 +217,8 @@ async fn context_changes_must_invalidate_otherwise_identical_passages() -> anyho
             }
         };
         let started = Instant::now();
-        let result = tokio::time::timeout(Duration::from_secs(90), check_artifact(Some(&context), &request,
-            "Write a note using only the supplied attachment.", None, &candidate, &mut infer)).await;
+        let result = tokio::time::timeout(Duration::from_secs(90), check_artifact(settings, Some(&context), &request,
+            "Write a note using only the supplied attachment.", None, None, &candidate, &mut infer)).await;
         let (accepted, content, receipt, error) = match result {
             Ok(Ok((content, receipt))) => (Some(true), Some(content), receipt, None),
             Ok(Err(status)) if status.message() == model_gateway::result_validation::VALIDATION_FAILED =>
@@ -175,10 +227,14 @@ async fn context_changes_must_invalidate_otherwise_identical_passages() -> anyho
             Err(_) => (None, None, None, Some("timeout".to_owned())),
         };
         let live = responses.lock().unwrap();
-        let invalidated_unchanged_passage = live.iter().any(|response| {
+        let rejects_live = |index: u64| live.iter().any(|response| {
             let Ok(report) = serde_json::from_str::<Value>(response["content"].as_str().unwrap_or_default()) else { return false; };
-            rejects_dependent_passage(&report)
+            rejects_segment(&report, index)
         });
+        let invalidated_unchanged_passage = rejects_live(2);
+        // What a rejection must reject: the dependent passage, or for a
+        // relabel control the relabelled segment itself.
+        let rejected_required_segment = rejects_live(must_reject);
         // A timeout, malformed report or rejection of only the edited paragraph
         // is NOT evidence that the unchanged dependent claim was re-evaluated.
         let expected_content = if id == "inline-reference-live" { candidate.replace("It opens on 12 October.", "It opens on 20 October.") }
@@ -187,12 +243,15 @@ async fn context_changes_must_invalidate_otherwise_identical_passages() -> anyho
             .is_some_and(|report| report["checks"].as_array().is_some_and(|checks| checks.iter().any(|check| check["x"].as_array().is_some_and(|edits| !edits.is_empty()))));
         let correct = accepted == Some(expected) && !live.is_empty()
             && live.iter().all(|response| response["previousChecks"] == if independent { 2 } else { 0 })
-            && (expected || invalidated_unchanged_passage)
+            && (expected || rejected_required_segment)
             && (!expected || content.as_deref() == Some(expected_content.as_str()))
             && (id != "inline-reference-live" || invalidated_unchanged_passage)
             && (!live_initial || (live.len() >= 2 && private_proposal && live.iter().all(|response| response["repairCall"] == false)));
-        results.push(json!({"id":id,"expectedAccepted":expected,"accepted":accepted,"correct":correct,"elapsedMs":started.elapsed().as_millis(),
+        results.push(json!({"id":id,"caseSet":case_set,"labelStatus":label_status,"reviewProposalRule":settings.proposal_rule.name(),
+            "levers":{"soleNotePrefetch":settings.levers.sole_note_prefetch,"recheckProposesEdits":settings.levers.recheck_proposes_edits,"balancedReviewBatches":settings.levers.balanced_review_batches},
+            "expectedAccepted":expected,"accepted":accepted,"correct":correct,"elapsedMs":started.elapsed().as_millis(),
             "content":content,"receipt":receipt,"error":error,"invalidatedUnchangedPassage":invalidated_unchanged_passage,
+            "requiredRejectionIndex":must_reject,"rejectedRequiredSegment":rejected_required_segment,
             "liveInitialReview":live_initial,"privateProposal":private_proposal,
             "injected":*injected.lock().unwrap(),"responses":*live}));
         drop(live);
@@ -200,6 +259,13 @@ async fn context_changes_must_invalidate_otherwise_identical_passages() -> anyho
         println!("{id}: correct={correct} accepted={accepted:?}");
         anyhow::ensure!(!violated.load(Ordering::SeqCst), "route violation; stopped evaluation");
     }
-    anyhow::ensure!(results.iter().all(|row| row["correct"] == true), "context-sensitive recheck controls failed");
+    for case_set in ["original", proposal_rule_controls::CASE_SET] {
+        let rows: Vec<_> = results.iter().filter(|row| row["caseSet"] == case_set).collect();
+        let correct = rows.iter().filter(|row| row["correct"] == true).count();
+        println!("{case_set}: {correct}/{} correct (review proposal rule {})", rows.len(), settings.proposal_rule.name());
+    }
+    // Only confirmed labels decide the run.
+    let failed = proposal_rule_controls::gating_failures(&results);
+    anyhow::ensure!(failed.is_empty(), "context-sensitive recheck controls with confirmed labels failed: {failed:?}");
     Ok(())
 }

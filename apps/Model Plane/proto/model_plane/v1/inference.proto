@@ -299,6 +299,11 @@ message InferResponse {
   int32 cache_read_input_tokens = 11;
   int32 cache_creation_input_tokens = 12;
   string compaction_summary = 13;
+
+  // Where inference-core's share of this call's wall time went. Set on every
+  // successful response; unset from a server that predates the field. See
+  // ProviderTiming.
+  ProviderTiming provider_timing = 14;
 }
 
 // InferChunk — a single chunk in a streaming inference response.
@@ -357,6 +362,75 @@ message InferChunk {
   int32 cache_creation_input_tokens = 13;
   // Complete checkpoint on the final chunk only; never an answer delta.
   string compaction_summary = 14;
+
+  // Where inference-core's share of this stream's wall time went, populated on
+  // the final chunk only (same rule as the token counts above). Unset on every
+  // non-final chunk. See ProviderTiming.
+  ProviderTiming provider_timing = 15;
+}
+
+// ProviderTiming — where inference-core's share of one Infer or InferStream
+// call's wall time went. Durations and counts only: it never carries prompt
+// text, content, tool arguments or tool results, so it is safe to log and to
+// forward on zero-data-retention and temporary turns.
+//
+// Every duration is whole milliseconds (truncated) on inference-core's
+// monotonic clock, measured from one of two origins; each field names its own:
+//   - the handler origin: the gRPC handler's entry, before authorization;
+//   - the attempt origin: the start of the provider attempt that finally
+//     served the call.
+// A caller's transport overhead is its own wall time for the call minus
+// `handler_ms`. inference-core's own overhead is `handler_ms` minus
+// `provider_ms`, `failed_attempts_ms` and `retry_wait_ms`.
+message ProviderTiming {
+  // From the handler origin until the response was ready (unary) or the final
+  // chunk was forwarded (stream).
+  uint64 handler_ms = 1;
+
+  // From the handler origin until the first provider attempt started:
+  // authorization, intent resolution, the response-cache lookup and the
+  // routing gates. On a response-cache hit, until the cached response was
+  // found, since no attempt starts.
+  uint64 routing_ms = 2;
+
+  // From the attempt origin until the provider's answer was complete: the
+  // returned response (unary) or the final chunk (stream, so it includes
+  // `accept_ms` and the whole streamed generation). 0 on a response-cache hit.
+  uint64 provider_ms = 3;
+
+  // Streams only: from the attempt origin until the provider accepted the
+  // stream, which is when its response headers arrived. 0 for unary calls.
+  uint64 accept_ms = 4;
+
+  // Streams only: from the attempt origin until the first non-empty content
+  // or reasoning delta. 0 when none arrived, and for unary calls.
+  uint64 first_token_ms = 5;
+
+  // Provider calls made for this request, the serving one included. 0 on a
+  // response-cache hit.
+  uint32 attempts = 6;
+
+  // Summed duration of the provider attempts that failed before the serving
+  // one: errors, rate limits and prompt-too-long rejections.
+  uint64 failed_attempts_ms = 7;
+
+  // Time spent honoring a provider's retry-after before walking the providers
+  // a second time.
+  uint64 retry_wait_ms = 8;
+
+  // True when the response came from inference-core's completed-response
+  // cache and no provider was called.
+  bool response_cache_hit = 9;
+
+  // False when the provider reported no token usage (both token counts 0),
+  // which is how the Codex subscription broker reports today. The token
+  // counts then mean "unknown", not "free".
+  bool usage_reported = 10;
+
+  // Durations an upstream reported about its own phases, keyed by phase name
+  // (for example a subscription broker's process start). Empty when the
+  // upstream reports none, which is every provider today.
+  map<string, uint64> upstream_ms = 11;
 }
 
 // CreateEmbeddingRequest — text to embed via a provider-owned model/deployment.
@@ -476,6 +550,12 @@ message SynthesizeSpeechRequest {
 
   // Optional language hint, e.g. "en-US" or "nb-NO".
   string language = 8;
+
+  // Zero Data Retention: the text must not reach a retaining provider.
+  // Combined with the caller token's own ZDR claim; while no speech
+  // deployment is attested, a ZDR request is refused (FAILED_PRECONDITION)
+  // before any provider call.
+  bool zdr = 9;
 }
 
 // SynthesizeSpeechResponse — generated audio and serving metadata.
@@ -521,6 +601,12 @@ message TranscribeSpeechRequest {
 
   // Optional language hint. Empty means auto-detect when supported.
   string language = 7;
+
+  // Zero Data Retention: the audio must not reach a retaining provider.
+  // Combined with the caller token's own ZDR claim; while no speech
+  // deployment is attested, a ZDR request is refused (FAILED_PRECONDITION)
+  // before any provider call.
+  bool zdr = 8;
 }
 
 // TranscribeSpeechResponse — recognized text and serving metadata.

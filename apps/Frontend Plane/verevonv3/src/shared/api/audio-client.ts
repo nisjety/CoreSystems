@@ -59,6 +59,16 @@ export async function dictateAudioBlob(
   language: string,
   context?: string,
   signal?: AbortSignal,
+  /**
+   * Zero Data Retention for this dictation — `true` inside a Temporary chat.
+   * Today Model Gateway's dictate route honours it only for the text clean-up
+   * pass: the speech-to-text request carries no retention flag, so the audio
+   * itself is NOT processed with zero retention. Voice mode therefore stays
+   * off in Temporary chat until the server refuses or attests speech ZDR.
+   * Omitted (not `false`) when unset, so an ordinary dictation's body is
+   * unchanged.
+   */
+  zdr?: boolean,
 ): Promise<DictationResult> {
   const dataUrl = await blobToDataUrl(blob)
   const parsed = parseDataUrl(dataUrl)
@@ -71,6 +81,7 @@ export async function dictateAudioBlob(
       format: audioFormatFromMime(blob.type || parsed.mime),
       language,
       ...(context ? { context } : {}),
+      ...(zdr ? { zdr: true } : {}),
     }),
     signal,
   })
@@ -89,5 +100,7 @@ function audioFormatFromMime(mime: string): string {
   if (normalized.includes('ogg')) return 'ogg'
   if (normalized.includes('wav')) return 'wav'
   if (normalized.includes('mpeg') || normalized.includes('mp3')) return 'mp3'
+  // Safari records AAC in an mp4 container; the speech providers take it as m4a.
+  if (normalized.includes('mp4') || normalized.includes('aac') || normalized.includes('m4a')) return 'm4a'
   return 'webm'
 }

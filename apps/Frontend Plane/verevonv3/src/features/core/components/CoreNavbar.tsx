@@ -1,4 +1,4 @@
-import { useNavigate } from '@solidjs/router'
+import { useNavigate, useSearchParams } from '@solidjs/router'
 import {
   Bell,
   Building2,
@@ -9,6 +9,8 @@ import {
   Languages,
   MessageSquareMore,
   MoonStar,
+  PanelLeftClose,
+  PanelLeftOpen,
   Search,
   Slash,
   Sparkles,
@@ -40,6 +42,10 @@ import { shouldShowWorkspaceAdminNavigation } from '@/shared/session/access'
 import { clearSession, getSession, loadSession } from '@/shared/session/session-store'
 import { useI18n } from '@/shared/i18n'
 import { cn } from '@/shared/lib/cn'
+import { ChatAppearancePreview } from '@/features/chat/components/ChatAppearancePreview'
+import { chatAppearanceActive } from '@/features/chat/lib/chat-appearance-preview'
+import { CoreNavbarMore } from './CoreNavbarMore'
+import { homeOverviewLabel, parseHomeOverview } from '@/shared/actions/home-overview'
 
 type OpenPanel = 'assistant' | 'messages' | 'notifications' | 'calendar' | 'profile' | 'workspace' | null
 
@@ -54,16 +60,28 @@ export function CoreNavbar(props: {
   onNavbarRefresh?: () => void
   onSearchOpenChange?: (open: boolean) => void
   searchOpen?: boolean
+  sidebarExpanded?: boolean
+  onSidebarToggle?: () => void
   workspace: WorkspaceIdentity
 }) {
   let headerRef: HTMLElement | undefined
   const i18n = useI18n()
   const navigate = useNavigate()
+  const [searchParams] = useSearchParams()
   const session = getSession()
   const [openPanel, setOpenPanel] = createSignal<OpenPanel>(null)
   const [theme, setTheme] = createSignal<ThemePayload['theme']>('system')
   const [localSearchOpen, setLocalSearchOpen] = createSignal(false)
-  const labels = () => getNavbarLabels(props.activeRoute, i18n.locale())
+  const refinedNavigation = () => chatAppearanceActive('navigation') && Boolean(props.onSidebarToggle)
+  const changeTheme = (nextTheme: ThemePayload['theme']) => {
+    setTheme(nextTheme)
+    applyThemePreference(nextTheme)
+    void saveNavbarTheme(nextTheme, props.workspace.accentColor)
+      .then(() => props.onNavbarRefresh?.())
+      .catch(() => undefined)
+  }
+  const homeOverview = () => props.activeRoute === '/dashboard' && chatAppearanceActive('dashboard') ? parseHomeOverview(searchParams.overview) : 'home'
+  const labels = createMemo(() => ({ ...getNavbarLabels(props.activeRoute, i18n.locale()), ...(homeOverview() !== 'home' ? { tabLabel: homeOverviewLabel(homeOverview(), i18n.tr) } : {}) }))
   const profileInitial = () => (props.workspace.userName ?? props.workspace.userEmail ?? props.workspace.name).trim().charAt(0).toUpperCase() || props.workspace.initial
   const messageUnreadCount = () => props.navbarData?.notifications.messages.filter((message) => !message.read).length ?? 0
   const notificationUnreadCount = () =>
@@ -152,6 +170,7 @@ export function CoreNavbar(props: {
       <header ref={headerRef} class="dashboard-navbar-bg core-navbar">
         <div class="core-navbar__inner">
           <div class="core-navbar__left">
+            <Show when={!refinedNavigation()}>
             <a
               href="/dashboard"
               link
@@ -166,18 +185,29 @@ export function CoreNavbar(props: {
                 class="core-navbar__home-logo"
               />
             </a>
+            </Show>
 
             <HistoryNav
               onBack={() => window.history.back()}
               onForward={() => window.history.forward()}
             />
 
+            <Show when={refinedNavigation()}>
+              <button type="button" class="core-navbar__sidebar-toggle"
+                aria-label={props.sidebarExpanded ? i18n.tr('Slå sammen sidefelt', 'Collapse sidebar') : i18n.tr('Utvid sidefelt', 'Expand sidebar')}
+                title={props.sidebarExpanded ? i18n.tr('Slå sammen sidefelt', 'Collapse sidebar') : i18n.tr('Utvid sidefelt', 'Expand sidebar')}
+                aria-expanded={props.sidebarExpanded ? 'true' : 'false'} aria-controls="core-workspace-sidebar"
+                onClick={() => props.onSidebarToggle?.()}>
+                <Show when={props.sidebarExpanded} fallback={<PanelLeftOpen size={20} />}><PanelLeftClose size={20} /></Show>
+              </button>
+            </Show>
+
             <Breadcrumb
               moduleLabel={labels().moduleLabel}
               moduleHref={props.activeRoute}
               onWorkspaceClick={() => openExclusivePanel('workspace')}
               tabLabel={labels().tabLabel}
-              tabHref={props.activeRoute}
+              tabHref={homeOverview() !== 'home' ? `/dashboard?overview=${homeOverview()}` : props.activeRoute}
               workspace={props.workspace}
               workspaceActive={openPanel() === 'workspace'}
             />
@@ -188,6 +218,9 @@ export function CoreNavbar(props: {
           </div>
 
           <div class="core-navbar__actions">
+            <Show when={import.meta.env.DEV && props.activeRoute === '/chat' && !refinedNavigation()}>
+              <ChatAppearancePreview />
+            </Show>
             <NavbarActionButton
               label={i18n.tr('Åpne kunnskapssøk', 'Open knowledge search')}
               onClick={() => setSearchOpen(true)}
@@ -196,7 +229,7 @@ export function CoreNavbar(props: {
               <Search class="size-4" strokeWidth={1.9} />
             </NavbarActionButton>
 
-            <div class="core-navbar__action-group">
+            <Show when={refinedNavigation()} fallback={<div class="core-navbar__action-group">
               <NavDivider />
 
               <NavbarActionButton
@@ -286,7 +319,24 @@ export function CoreNavbar(props: {
                   </Show>
                 </span>
               </button>
-            </div>
+            </div>}>
+              <div class="core-navbar__action-group core-navbar__action-group--refined">
+                <button type="button" aria-label={i18n.tr('Åpne profilmeny', 'Open profile menu')} title={i18n.tr('Åpne profilmeny', 'Open profile menu')}
+                  onClick={() => openExclusivePanel('profile')} class="core-navbar__profile">
+                  <span aria-hidden="true" class="core-navbar__profile-ring" />
+                  <span class="core-navbar__profile-avatar"><Show when={props.workspace.userAvatar} fallback={profileInitial()}>{(src) => <img class="core-navbar__profile-avatar-img" src={src()} alt="" />}</Show></span>
+                </button>
+                <BadgeButton count={notificationUnreadCount()} label={i18n.tr('Varsler', 'Notifications')} i18n={i18n}>
+                  <NavbarActionButton label={i18n.tr(`${notificationUnreadCount()} uleste varsler`, `${notificationUnreadCount()} unread notifications`)} active={openPanel() === 'notifications'} onClick={() => openExclusivePanel('notifications')}><Bell size={19} strokeWidth={1.8} /></NavbarActionButton>
+                </BadgeButton>
+                <NavbarActionButton label={i18n.tr('Kalender', 'Calendar')} active={openPanel() === 'calendar'} onClick={() => openExclusivePanel('calendar')}><CalendarDays size={19} strokeWidth={1.8} /></NavbarActionButton>
+                <BadgeButton count={messageUnreadCount()} label={i18n.tr('Hurtigmeldinger', 'Quick messages')} i18n={i18n}>
+                  <NavbarActionButton label={i18n.tr(`${messageUnreadCount()} uleste meldinger`, `${messageUnreadCount()} unread messages`)} active={openPanel() === 'messages'} onClick={() => openExclusivePanel('messages')}><MessageSquareMore size={19} strokeWidth={1.8} /></NavbarActionButton>
+                </BadgeButton>
+                <NavDivider />
+                <CoreNavbarMore theme={theme()} onThemeChange={changeTheme} onAssistant={() => openExclusivePanel('assistant')} />
+              </div>
+            </Show>
 
             <Show when={visibleNavbarPanel()}>
               {(panel) => (
@@ -511,7 +561,7 @@ function SearchTrigger(props: { onOpen: () => void }) {
       <Search class="verevon-navbar-search-icon" strokeWidth={1.8} />
       <span class="verevon-navbar-search-label">{i18n.tr('Søk i kunnskapsbasen', 'Search knowledge base')}</span>
       <span class="verevon-navbar-shortcut-key verevon-navbar-shortcut-key-min">/</span>
-      <span class="verevon-navbar-shortcut-key verevon-navbar-shortcut-key-wide">CMD+K</span>
+      <span class="verevon-navbar-shortcut-key verevon-navbar-shortcut-key-wide">{typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.platform) ? '⌘ K' : 'Ctrl K'}</span>
     </button>
   )
 }
@@ -521,7 +571,7 @@ function Breadcrumb(props: {
   moduleHref: VerevonRoute
   onWorkspaceClick?: () => void
   tabLabel: string
-  tabHref: VerevonRoute
+  tabHref: string
   workspace: WorkspaceIdentity
   workspaceActive?: boolean
 }) {

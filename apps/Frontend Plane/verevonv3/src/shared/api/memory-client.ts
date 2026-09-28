@@ -120,17 +120,42 @@ export interface CorrectMemoryResult {
   memoryId: string
   /** Whether the original entry was actually removed (see `degraded`). */
   deleted: boolean
+  /**
+   * What became of the original, so the caller never claims it was replaced
+   * when it was not:
+   *  - `removed`: deleted; the correction replaced it.
+   *  - `not_found`: not the caller's to remove (an organisation entry or
+   *    another user's; session-core answers 404 for those exactly as for a
+   *    missing one), or already gone. It may still be recalled.
+   *  - `not_removed`: the delete failed or was declined.
+   */
+  original: CorrectedOriginal
   degraded: boolean
   degradationReason: string
 }
+
+export type CorrectedOriginal = 'removed' | 'not_found' | 'not_removed'
 
 interface CorrectMemoryResponse {
   memory_id?: string
   memoryId?: string
   deleted?: boolean
+  original?: string
   degraded?: boolean
   degradation_reason?: string
   degradationReason?: string
+}
+
+/**
+ * Read the original's fate. An older BFF sends only `deleted`; its `false`
+ * cannot say why, so it reads as `not_removed`, never as removed.
+ */
+function correctedOriginal(response: CorrectMemoryResponse): CorrectedOriginal {
+  if (response.original === 'removed' || response.original === 'not_found' || response.original === 'not_removed') {
+    // `removed` is believed only alongside the boolean that means the same.
+    return response.original === 'removed' && response.deleted !== true ? 'not_removed' : response.original
+  }
+  return response.deleted === true ? 'removed' : 'not_removed'
 }
 
 /**
@@ -153,9 +178,11 @@ export async function correctMemory(
       body: JSON.stringify({ threadId, content }),
     },
   )
+  const original = correctedOriginal(response)
   return {
     memoryId: response.memory_id ?? response.memoryId ?? '',
-    deleted: response.deleted ?? false,
+    deleted: original === 'removed',
+    original,
     degraded: response.degraded ?? false,
     degradationReason: response.degradation_reason ?? response.degradationReason ?? '',
   }

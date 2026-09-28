@@ -2,6 +2,8 @@
 
 > **Execution update — 2026-09-19:** [Q01–Q04](../product-recordings/evidence/PRODUCT_RECORDING_Q01_Q04_2026-09-19.md) records durable attachment/artifact checks; [Q05–Q07](../product-recordings/evidence/PRODUCT_RECORDING_Q05_Q07_2026-09-19.md) records verified memory edit/forget and source isolation. [Q08–Q10](../product-recordings/evidence/PRODUCT_RECORDING_Q08_Q10_2026-09-19.md) contains the latest interrupted-stream, stop/continue/regenerate, rendering and recording-gate results. Original findings and their earlier remediation notes below remain historical evidence; they do not establish the latest release gate.
 
+> **Execution update — 2026-09-24:** §0.3 (at the end of this document) classifies the unproxied Model Plane routes (none is class A), records the dictation ZDR fix, the server-side 412 refusal of speech under ZDR, governed Voice mode and read-aloud in place of the Web Speech API, and the "Samlet kontekst" label. None of it is deployed yet.
+
 > **Scope.** Test, audit and document — no code was changed for this document.
 > Builds on the 2026-08-01 ten-harness study
 > (`apps/Model Plane/docs/VEREVON_CHAT_PARITY_BACKLOG.md`, items #1–#26) and the
@@ -764,5 +766,136 @@ these features without the user's own confirmation it's intentional.
 **Next**: rebuild and redeploy the Frontend Plane (frontend bundle + gateway) from current source
 so the `correct_memory` PATCH route actually exists in the running binary, then re-verify Rediger
 live. Separately, fix the `writePendingChatLaunch` blob-URL bug for non-image attachments.
+
+---
+
+## 0.3 Unproxied routes, governed voice and the context label — 2026-09-24
+
+A read-only investigation ran on 2026-09-23. The fixes followed on 2026-09-24, then a
+cross-cutting review. **Nothing in this section is deployed.** The SPA, BFF, model-gateway and
+inference-core changes ship with the launcher rebuild (`build-verevon-services.sh --from model`),
+and then need live checks. Nothing below was tried in a real browser.
+
+### Unproxied Model Plane routes: none is class A
+
+The inventory listed seven Model Plane routes the BFF does not proxy. Class A would mean the chat
+page needs a route and breaks without a proxy. None is class A: no SPA code calls any of them, and
+nothing on the chat page breaks for lack of a proxy. The Action column says what each other class
+means for its route. A completeness diff
+(129 authenticated model-gateway paths, 391 BFF `/api` route literals, every SPA `/api` literal)
+found nothing the chat page calls that is missing.
+
+Three corrections to the inventory:
+- Translate is already reached, from onboarding: BFF `onboarding/lookup/plan.rs` calls
+  `/v1/ai/translate`.
+- The "video" hit both audits counted is Quarry video search (BFF `domains/search.rs`), not
+  `/v1/ai/video/*`.
+- "Seven routes" is 27 paths: realtime 3, translate 3, language 7, document AI 6, tasks 3, toon 1,
+  video 4.
+
+| Route | Class | Action |
+|---|---|---|
+| Realtime `/v1/ai/realtime{,/session,/models}` | D | **Keep unproxied.** It is a real broker, not a placeholder: it hands the browser a provider `client_secret`, which would skip grounding, tools, audit, moderation, budget and thread persistence. Its OpenAI fallback has no EU gate. Voice mode now uses the governed dictate and speech routes instead (below). |
+| Translate `/v1/ai/translate{,/detect,/languages}` | C for chat | **No chat proxy.** The model already translates inside a turn. Onboarding keeps its BFF use. Its default endpoint is Azure's global translator, not the EU one; not changed. |
+| Language `/v1/ai/language/*` | C | **No proxy.** No caller and no product surface. PII redaction already runs in the gateway. |
+| Document AI analyze, layout, forms, receipts, invoices | B, conditional | **Not built.** Proposed: no browser route. When imports-core returns 422 for a scanned file, the BFF (`domains/chat/documents.rs`) falls back server-side to `/v1/ai/documents/layout`, refused in Temporary chat, size-capped and metered, with an OCR marker on the chip. Precondition: an EU-region Document Intelligence deployment, since the extract route promises no third-party egress. |
+| Document ingest `POST /v1/ai/documents` | dead | Always fails: it calls a Data Plane gRPC method that is disabled. |
+| Tasks `/v1/tasks{,/:id,/:id/cancel}` | D | **Keep unproxied.** A POST starts an autonomous workflow with no user identity and no fresh Control decision, PATCH accepts any status, and tasks are scoped to the org, not the user. Chat's "Oppgaver" is served by orchestration todos. Hardened anyway: the gateway list proxy now encodes `status` and `org_id` as data (`capability_query_path`), and capability-core caps `limit` (0 or less, or over 200, becomes 50). |
+| Toon `/v1/toon/encode` | C | **Remove from the inventory.** An internal encoder with planned priority "none". |
+| Video `/v1/ai/video/*` | C, unsafe as-is | **Keep unproxied.** Job ids are provider-wide with no org ownership check, and Sora cost is not metered. Not changed; video is on the cut list. |
+
+Also found, not changed:
+- Dead model-gateway routes: `POST /v1/chat/documents`, `POST /v1/ai/documents`,
+  `POST /v1/documents`, `/v1/documents/bulk` and `DELETE /v1/documents/:id` forward to disabled Data
+  Plane methods.
+- Dead SPA clients with no BFF route and no production importer: `/api/quarry` and
+  `/api/v1/security/*`.
+- Doc corrections outside this folder: realtime is a real broker, not a "placeholder"
+  (`Model Plane/MODEL_PLANE_DEEP_DIVE.md`, `verevonv3/docs/endpoint-map.md`), and tasks should be
+  class D in `endpoint-map.md` and `gateway-integration-plan.md`.
+
+The capability-core memory proxy (`GET /v1/memory`) got the same encoding fix for `scope`.
+
+### Dictation in Temporary chat
+
+- **Found:** "Stemmeinndata" goes through the proxied `/api/v1/ai/dictate`, but `dictateAudioBlob`
+  never sent `zdr`, and the composer did not pass `temporaryChat()`. The clean-up pass of a
+  Temporary-chat dictation ran as an ordinary request.
+- **Fixed:** `dictateAudioBlob` takes an optional `zdr` (`shared/api/audio-client.ts`), and
+  `DashboardComposer` passes `temporaryChat()`. The BFF forwards the body, and model-gateway applies
+  it through `claims.effective_zdr(req.zdr)`.
+- That covered only the clean-up pass. The audio itself still reached speech-to-text without zero
+  retention, which the next change closes.
+
+### Speech under ZDR is now refused server-side (HTTP 412)
+
+- `SynthesizeSpeechRequest` and `TranscribeSpeechRequest` gain a `zdr` field (`inference.proto`).
+  inference-core's `reject_unattested_zdr_modality` refuses when the effective ZDR is set, from the
+  token or the request, before any audio or text reaches a provider. model-gateway maps that
+  FAILED_PRECONDITION to 412.
+- `/v1/ai/speech` and `/v1/ai/dictate` send the effective ZDR on both the text-to-speech and the
+  speech-to-text call. A ZDR dictation stops at 412 and never reaches the clean-up pass.
+- The BFF applies the org's standing ZDR posture to dictation and speech
+  (`apply_org_zdr_posture`). It fails closed: during an org-core outage both return 412.
+- Effect: Temporary chat, and orgs that require ZDR, have no dictation or read-aloud until an
+  attested speech deployment exists. Before, dictation worked but sent the audio to a retaining
+  provider. Non-ZDR speech is unchanged on the wire.
+- The SPA blocks all three voice features in Temporary chat and says why. "Stemmeinndata" and
+  "Les høyt" are aria-disabled with the reason as their description. "Stemmemodus" opens its
+  dialog in a blocked state that never asks for the microphone.
+- The audio routes accept 8 MiB bodies in both model-gateway and the BFF. The real ceiling is about
+  4 MiB of decoded audio, because tonic's default 4 MiB gRPC decode limit is not raised; above it
+  the caller gets HTTP 500. The SPA's own 1.4 MB recording cap keeps users below it.
+
+### Voice mode and read-aloud on the governed speech path
+
+**Decision, 2026-09-23:** fix Voice mode on the governed speech path; do not remove it.
+
+Before, "Stemmemodus" opened `RealtimeVoiceModal`, which used the browser's Web Speech API. In
+Chrome that sends audio to Google, outside Verevon's provider, residency and ZDR controls, and it
+was not gated on Temporary chat. "Les høyt" used the browser's `speechSynthesis` the same way.
+
+- **Voice mode** (`features/voice/VoiceModeDialog.tsx`, replacing `RealtimeVoiceModal`): tap to
+  talk, review and edit the transcript, then send through the composer's normal submit. Each take
+  is one governed `/api/v1/ai/dictate` call. A take stops about 1.5 s after speech ends and is
+  capped at 60 s or 1.4 MB. "Send automatisk" and "Les opp svar" are off by default. After a send
+  it shows "Verevon svarer …" with "Stopp svaret".
+- **Read-aloud** ("Les høyt", and "Les opp svar" in Voice mode): `shared/api/speech-client.ts`
+  posts to `/api/v1/ai/speech` with provider `azure-speech` and mp3, in chunks of at most 800
+  characters. `features/voice/speech-playback.ts` plays only from `blob:` URLs and never falls back
+  to browser voices. Norwegian uses `nb-NO-PernilleNeural`, English `en-GB-SoniaNeural`. On failure
+  it shows "Opplesing er utilgjengelig. Svaret vises i chatten." and the reply stays.
+- **Guard:** an ESLint rule bans `SpeechRecognition`, `webkitSpeechRecognition`,
+  `speechSynthesis` and `SpeechSynthesisUtterance` in `src/`, including through casts, aliases and
+  string keys. Nothing in `src/` uses them now.
+- **BFF:** `proxy_speech` pins text-to-speech to `azure-speech` and drops `model`; any other TTS
+  provider gets 400 `speech_provider_not_allowed`. `proxy_dictate` drops `model` and keeps
+  `context` only when it is "chat message", "email" or "document".
+- **Voice input** now uses the same recorder, so the caps apply and the microphone is always
+  released.
+- **Cross-review fixes:** the dialog no longer closes on the first spoken message of a new chat
+  (ChatPage keeps one composer instance across the switch). Focus stays on a live control while
+  sending and waiting. Voice mode waits for the turn that actually answers a deferred spoken
+  message. The entrance animation is off under reduced motion.
+- **Tests:** the voice, chat, dashboard and API vitest suites and the BFF cargo suite pass.
+  `tests/e2e/chat-voice-mode.spec.ts` is written but was not run (`pnpm test:e2e --project=chat
+  chat-voice-mode` needs the Docker dev stack). Safari's m4a labelling, the silence threshold on
+  real microphones and iOS audio unlocking are covered only by fakes.
+
+§3.16's "Voice mode / voice input — not tested" still stands for live use.
+
+### Context panel label: "Samlet kontekst"
+
+This closes the §3.13 side observation. The Work tab's context panel (`ContextWindowPanel`,
+`ChatPanels.tsx`) read "Kontekstvindu" over "751 / 4 096 tokens", which looks like a 4k model. The
+4,096 is the budget for the context session-core assembles (`context_assembly_budget` in
+model-gateway), not the model's window. The label is now "Samlet kontekst" / "Assembled context",
+and its tooltip ends "Ikke modellens kontekstvindu." The loading, failure and empty notes use the
+same wording. `ChatPanels.test.tsx` pins that "Kontekstvindu" is gone.
+
+### Status
+
+Built and unit-tested; not deployed. After the launcher rebuild, check live: a dictation and a
+Voice mode turn in an ordinary chat, a "Les høyt", and the blocked state in Temporary chat.
 
 ---

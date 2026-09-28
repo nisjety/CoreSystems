@@ -22,6 +22,17 @@ function isConnected(status: string): boolean {
   return ['active', 'connected'].includes(status.trim().toLowerCase())
 }
 
+/** Integration Core marks a connection whose ChatGPT sign-in must be renewed. */
+function needsReconnect(status: string): boolean {
+  return status.trim().toLowerCase() === 'needs_refresh'
+}
+
+/**
+ * The panel's anchor. The chat links here when ChatGPT refuses a turn because
+ * the sign-in must be renewed (`subscription_reauth_required`).
+ */
+export const CHATGPT_SUBSCRIPTION_ANCHOR = 'chatgpt-subscription'
+
 function isTerminalLogin(status: ChatGptDeviceLogin['status']): boolean {
   return status === 'connected' || status === 'failed' || status === 'expired'
 }
@@ -54,7 +65,10 @@ export function ChatGptSubscriptionPanel(props: ChatGptSubscriptionPanelProps) {
     try {
       const subscriptions = await listChatGptSubscriptions(orgId)
       if (disposed || orgId !== props.orgId) return
+      // A connection whose sign-in must be renewed is shown as such, so a
+      // reader sent here from the chat sees why, not just "not connected".
       const active = subscriptions.find((candidate) => isConnected(candidate.status))
+        ?? subscriptions.find((candidate) => needsReconnect(candidate.status))
       if (active) setConnection(active)
     } catch {
       // This panel remains usable if the generic list projection is temporarily
@@ -194,16 +208,33 @@ export function ChatGptSubscriptionPanel(props: ChatGptSubscriptionPanelProps) {
     stopPolling()
   })
 
+  // Arriving from the chat's "Koble til ChatGPT på nytt" link: the router
+  // renders this page after the browser's own hash scroll has passed, so bring
+  // the panel into view once it is mounted. Solid v2 has no onMount; a
+  // two-phase effect with a constant compute runs once after mount.
+  let section: HTMLElement | undefined
+  createEffect(
+    () => undefined,
+    () => {
+      if (typeof window === 'undefined' || window.location.hash !== `#${CHATGPT_SUBSCRIPTION_ANCHOR}`) return
+      const reduce = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false
+      section?.scrollIntoView?.({ behavior: reduce ? 'auto' : 'smooth', block: 'start' })
+    },
+  )
+
   const connected = () => Boolean(connection() && isConnected(connection()!.status))
   const awaitingSignIn = () => Boolean(login() && !isTerminalLogin(login()!.status))
   const statusLabel = () => {
     if (connected()) return i18n.tr('Tilkoblet', 'Connected')
     if (awaitingSignIn()) return i18n.tr('Venter på pålogging', 'Waiting for sign-in')
+    if (connection() && needsReconnect(connection()!.status)) return i18n.tr('Må kobles til på nytt', 'Needs reconnecting')
     return i18n.tr('Ikke tilkoblet', 'Not connected')
   }
 
   return (
     <section
+      ref={section}
+      id={CHATGPT_SUBSCRIPTION_ANCHOR}
       class={['verevon-chatgpt-subscription', `verevon-chatgpt-subscription--${props.variant ?? 'settings'}`]}
       aria-labelledby="chatgpt-subscription-title"
     >

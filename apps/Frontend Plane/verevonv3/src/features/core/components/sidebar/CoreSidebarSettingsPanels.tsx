@@ -6,6 +6,7 @@ import {
   CheckCircle2,
   CircleUserRound,
   CreditCard,
+  Fingerprint,
   Globe2,
   KeyRound,
   Package,
@@ -52,6 +53,7 @@ const settingsSidebarSections: SettingsLinkSection[] = [
   { id: 'finetune', label: 'Fine-tune jobs', icon: TestTubeDiagonal, href: '/settings/finetune' },
   { id: 'mcp', label: 'MCP-servere', icon: ServerCog, href: '/settings/mcp' },
   { id: 'skills', label: 'Ferdigheter', icon: Sparkles, href: '/settings/skills' },
+  { id: 'persona', label: 'Persona', icon: Fingerprint, href: '/settings/persona' },
   { id: 'plugins', label: 'Plugin-pakker', icon: Package, href: '/settings/plugins' },
   { id: 'cron', label: 'Planlagte kjøringer', icon: CalendarClock, href: '/settings/cron' },
   { id: 'memory', label: 'Minne', icon: Brain, href: '/settings/memory' },
@@ -273,6 +275,8 @@ function settingsSectionLabel(id: string, fallback: string, i18n: ReturnType<typ
       return i18n.tr('MCP-servere', 'MCP servers')
     case 'skills':
       return i18n.tr('Ferdigheter', 'Skills')
+    case 'persona':
+      return i18n.tr('Persona', 'Persona')
     case 'plugins':
       return i18n.tr('Plugin-pakker', 'Plugins')
     case 'cron':

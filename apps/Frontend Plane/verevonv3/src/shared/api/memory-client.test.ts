@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { deleteMemory, listMemories } from './memory-client'
+import { correctMemory, deleteMemory, listMemories } from './memory-client'
 
 function jsonResponse(data: unknown, status = 200): Response {
   return new Response(JSON.stringify(data), {
@@ -135,5 +135,51 @@ describe('deleteMemory', () => {
     vi.stubGlobal('fetch', fetchMock)
 
     await expect(deleteMemory('gone')).rejects.toThrow('memory not found')
+  })
+})
+
+describe('correctMemory', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('reports the original as removed only when the BFF says so', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      jsonResponse({ memory_id: 'mem_2', deleted: true, original: 'removed', degraded: false, degradation_reason: '' }),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    const result = await correctMemory('mem 1', 'thread-1', 'Ny tekst')
+
+    const [path, init] = fetchMock.mock.calls[0] as [string, RequestInit]
+    expect(path).toBe('/api/v1/memory/mem%201')
+    expect(init.method).toBe('PATCH')
+    expect(result).toEqual({ memoryId: 'mem_2', deleted: true, original: 'removed', degraded: false, degradationReason: '' })
+  })
+
+  it('keeps a not-found original as not_found, never as removed', async () => {
+    // Session-core answers 404 for a memory that exists but is not the
+    // caller's; the BFF reports that as `original: "not_found"`.
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(
+      jsonResponse({ memory_id: 'mem_2', deleted: false, original: 'not_found', degraded: false, degradation_reason: '' }),
+    ))
+
+    const result = await correctMemory('org-mem', 'thread-1', 'Ny tekst')
+
+    expect(result.deleted).toBe(false)
+    expect(result.original).toBe('not_found')
+  })
+
+  it('reads an older BFF without `original` from `deleted` alone', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse({ memory_id: 'mem_2', deleted: false })))
+    expect((await correctMemory('mem_1', 'thread-1', 'x')).original).toBe('not_removed')
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse({ memory_id: 'mem_2', deleted: true })))
+    expect((await correctMemory('mem_1', 'thread-1', 'x')).original).toBe('removed')
+  })
+
+  it('does not believe `removed` without the boolean that means the same', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse({ memory_id: 'mem_2', deleted: false, original: 'removed' })))
+    const result = await correctMemory('mem_1', 'thread-1', 'x')
+    expect(result).toMatchObject({ deleted: false, original: 'not_removed' })
   })
 })

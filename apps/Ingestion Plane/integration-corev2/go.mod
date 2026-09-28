@@ -9,6 +9,7 @@ require (
 	github.com/jackc/pgx/v5 v5.9.2
 	github.com/nats-io/nats.go v1.52.0
 	github.com/pashagolub/pgxmock/v4 v4.9.0
+	github.com/pelletier/go-toml/v2 v2.2.2
 	github.com/rs/zerolog v1.34.0
 )
 

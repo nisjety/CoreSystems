@@ -103,6 +103,12 @@ async fn stream_agent_ui(
     {
         return (status, body).into_response();
     }
+    // Persona spec — user layer, independent of org/Space resolution.
+    if let Err((status, body)) =
+        crate::domains::spaces::inject_persona_instructions(&state, &user, &mut body).await
+    {
+        return (status, body).into_response();
+    }
     if let Err((status, body)) =
         crate::domains::spaces::inject_personal_thread_context(&state, &user, &org_id, &mut body)
             .await
@@ -298,7 +304,7 @@ async fn relay_ag_ui_response(
             let chunk = match chunk {
                 Ok(chunk) => chunk,
                 Err(_) => {
-                    for event in map_error(&mut run, "The upstream service is unavailable.".to_owned()) {
+                    for event in map_error(&mut run, "The upstream service is unavailable.".to_owned(), None) {
                         yield Ok::<Event, std::convert::Infallible>(event);
                     }
                     break;
@@ -832,6 +838,7 @@ fn map_upstream_frame(run: &mut AgUiRunState, frame: SseFrame) -> Vec<Event> {
         "error" => map_error(
             run,
             string_field(&payload, "message").unwrap_or_else(|| "Stream error".to_owned()),
+            Some(&payload),
         ),
         "tool_call" => {
             let tool_call_id =
@@ -931,7 +938,7 @@ fn attach_event_ids(events: Vec<Event>, upstream_id: Option<String>) -> Vec<Even
         .collect()
 }
 
-fn map_error(run: &mut AgUiRunState, message: String) -> Vec<Event> {
+fn map_error(run: &mut AgUiRunState, message: String, native: Option<&Value>) -> Vec<Event> {
     let mut events = Vec::new();
     if run.text_started {
         events.push(ag_ui_event(json!({
@@ -941,12 +948,55 @@ fn map_error(run: &mut AgUiRunState, message: String) -> Vec<Event> {
         })));
     }
     run.text_started = false;
-    events.push(ag_ui_event(json!({
+    events.push(ag_ui_event(run_error_value(run, message, native)));
+    events
+}
+
+/// The `RUN_ERROR` body for a native `error` frame.
+///
+/// From the native frame only its content-free fields travel: the stable
+/// reason `code` (AG-UI's own optional field), whether a retry is offered,
+/// and when one could succeed. Without them an AG-UI consumer could only say
+/// "run_error" and show the gateway's UTC wording with no action. The timing
+/// fields are additive and camelCased like this adapter's other fields; each
+/// is left out unless it has the gateway's shape (a code token, a whole
+/// number of milliseconds, an RFC 3339 instant), so nothing else rides along.
+fn run_error_value(run: &AgUiRunState, message: String, native: Option<&Value>) -> Value {
+    let mut value = json!({
         "type": "RUN_ERROR",
         "runId": run_id(run),
         "message": message,
-    })));
-    events
+    });
+    let Some(native) = native else {
+        return value;
+    };
+    if let Some(code) = string_field(native, "code").filter(|code| is_code_token(code)) {
+        value["code"] = json!(code);
+    }
+    if let Some(retryable) = native.get("retryable").and_then(Value::as_bool) {
+        value["retryable"] = json!(retryable);
+    }
+    if let Some(retry_after_ms) = native.get("retry_after_ms").and_then(Value::as_u64) {
+        value["retryAfterMs"] = json!(retry_after_ms);
+    }
+    for (native_field, field) in [("resets_at", "resetsAt"), ("retry_at", "retryAt")] {
+        if let Some(at) = string_field(native, native_field)
+            .filter(|at| chrono::DateTime::parse_from_rfc3339(at).is_ok())
+        {
+            value[field] = json!(at);
+        }
+    }
+    value
+}
+
+/// A stable machine code: lowercase ASCII letters, digits and underscores,
+/// at most 64 of them, as the gateway spells every failure code.
+fn is_code_token(code: &str) -> bool {
+    !code.is_empty()
+        && code.len() <= 64
+        && code
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
 }
 
 fn ag_ui_event(mut data: Value) -> Event {
@@ -1004,7 +1054,78 @@ fn message_id(run: &AgUiRunState) -> String {
 mod tests {
     use serde_json::json;
 
-    use super::{map_upstream_frame, normalize_agent_input, AgUiRunState, SseFrame};
+    use super::{map_upstream_frame, normalize_agent_input, run_error_value, AgUiRunState, SseFrame};
+
+    /// A subscription refusal keeps its reason and timing across the bridge,
+    /// so an AG-UI consumer can say what to do and when, not "run_error".
+    #[test]
+    fn a_native_error_keeps_its_code_retryability_and_timing_on_run_error() {
+        let run = AgUiRunState {
+            run_id: Some("run_1".into()),
+            ..AgUiRunState::default()
+        };
+        let native = json!({
+            "code": "subscription_usage_limit",
+            "message": "Den tilkoblede ChatGPT-planen har nådd bruksgrensen for Codex.",
+            "retryable": false,
+            "resets_at": "2026-09-26T01:21:00Z",
+            "retry_after_ms": 52_260_000_u64,
+            "retry_at": "2026-09-26T01:21:00Z",
+            "request_id": "req_1",
+        });
+        let value = run_error_value(&run, "Grensen er nådd.".into(), Some(&native));
+        assert_eq!(
+            value,
+            json!({
+                "type": "RUN_ERROR",
+                "runId": "run_1",
+                "message": "Grensen er nådd.",
+                "code": "subscription_usage_limit",
+                "retryable": false,
+                "retryAfterMs": 52_260_000_u64,
+                "resetsAt": "2026-09-26T01:21:00Z",
+                "retryAt": "2026-09-26T01:21:00Z",
+            })
+        );
+
+        // Only the gateway's shapes cross: no prose in `code`, no free text
+        // in a timestamp, no negative wait.
+        let odd = json!({
+            "code": "Try again at 3:05 PM",
+            "retryable": "yes",
+            "resets_at": "tomorrow",
+            "retry_after_ms": -5,
+        });
+        let value = run_error_value(&run, "Feil.".into(), Some(&odd));
+        assert_eq!(
+            value,
+            json!({ "type": "RUN_ERROR", "runId": "run_1", "message": "Feil." })
+        );
+
+        // A transport failure has no native frame and stays as it was.
+        assert_eq!(
+            run_error_value(&run, "The upstream service is unavailable.".into(), None),
+            json!({
+                "type": "RUN_ERROR",
+                "runId": "run_1",
+                "message": "The upstream service is unavailable.",
+            })
+        );
+    }
+
+    #[test]
+    fn a_native_error_frame_is_one_run_error() {
+        let mut run = AgUiRunState::default();
+        let events = map_upstream_frame(
+            &mut run,
+            SseFrame {
+                event: Some("error".into()),
+                id: None,
+                data: r#"{"code":"rate_limited","message":"Vent.","retryable":true,"retry_after_ms":1000}"#.into(),
+            },
+        );
+        assert_eq!(events.len(), 1);
+    }
 
     #[test]
     fn normalizes_tanstack_run_agent_input_to_model_invoke_body() {

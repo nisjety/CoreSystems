@@ -52,10 +52,11 @@ const BROWSER_WORKSPACE_SPECS = /browser-workspace-.*\.spec\.ts/
  * reason: that is the stack this checkout actually runs, and `local@verevon.dev`
  * is the account the dev seed provisions. If the :5199 stack is brought up,
  * move this regex out of the `e2e` project's testIgnore and drop the `chat`
- * project — the specs themselves are stack-agnostic.
+ * project — the specs themselves are stack-agnostic. `chat-voice-mode` runs
+ * with every speech and model call mocked (`page.route` plus voice-fakes.ts).
  */
-const CHAT_WORKSPACE_SPECS = /chat-workspace\.spec\.ts/
-const PRODUCT_READINESS_SPECS = /product-(?:readiness|scenarios|memory|connected|experience|latency)\.spec\.ts/
+const CHAT_WORKSPACE_SPECS = /chat-(?:workspace|voice-mode)\.spec\.ts/
+const PRODUCT_READINESS_SPECS = /product-(?:readiness|scenarios|memory|connected|experience|latency|durability|recovery|journeys-viewport)\.spec\.ts/
 const PRODUCT_RECORDING_SPEC = /product-recording\.spec\.ts/
 if (process.env.PRODUCT_RECORDING_CAPTURE === '1' && process.env.PRODUCT_RECORDING_MODE === 'rehearsal') throw new Error('Do not combine release capture and rehearsal flags')
 const capture = productCaptureSettings(process.env.PRODUCT_RECORDING_MODE || (process.env.PRODUCT_RECORDING_CAPTURE === '1' ? 'release' : undefined),

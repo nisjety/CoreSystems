@@ -7,7 +7,7 @@ use std::{env, fmt::Write as _};
 
 use axum::{
     body::{Body, Bytes},
-    extract::{Path, Query, State},
+    extract::{DefaultBodyLimit, Path, Query, State},
     http::{header::CONTENT_TYPE, HeaderMap, HeaderValue, StatusCode},
     middleware,
     response::{IntoResponse, Redirect, Response},
@@ -28,7 +28,7 @@ use mp_contracts::model_plane::v1::{
     ListMcpServersRequest, ListModelsRequest, ListPlansRequest, ListRunsRequest,
     ListSpeechVoicesRequest, ListSystemRunsRequest, ListTodosRequest,
     ListProcessesRequest, ListTranslationLanguagesRequest, McpServer, Plan, PlanState, PlanStep,
-    PlanStepState, Process as MpProcess, ProcessState as MpProcessState,
+    PlanStepEdit, PlanStepState, Process as MpProcess, ProcessState as MpProcessState,
     ProcessStream as MpProcessStream, ReadProcessOutputRequest,
     RegisterMcpServerRequest, ReplayThreadRequest, ResumeRunRequest, ResumeRunResponse, RunDetail,
     RunProofBundle, StreamVideoGenerationContentRequest, SubagentLineage, SubagentRole,
@@ -139,6 +139,15 @@ pub fn build_router_with_readiness(
         .route(
             "/v1/internal/space-deletion/threads",
             post(delete_space_threads_for_deletion_coordinator),
+        )
+        // Delegated-identity design, Gap B (§2.4(ii)): the internal HTTP→gRPC
+        // bridge the gateway BFF (Frontend Plane, no tonic/mp-contracts
+        // dependency) reaches to call session-core's PrepareUserOwnedThread.
+        // Allowed only for `service:verevon-gateway` by
+        // `auth::authorize_principal_route`.
+        .route(
+            "/v1/internal/mail-task/prepare-thread",
+            post(prepare_mail_task_thread_for_gateway_bff),
         )
         .route("/v1/threads/:thread_id/messages", get(list_thread_messages))
         // Read-only replay of Session Core's canonical event log. The route
@@ -366,6 +375,12 @@ fn proxy_routes() -> Router<AppState> {
         )
 }
 
+/// Request body cap for the two audio routes, `/v1/ai/dictate` and
+/// `/v1/ai/speech`. Their audio arrives base64-encoded inside JSON, so axum's
+/// 2 MiB default held a recording to about 1.5 MiB. 8 MiB matches the BFF's
+/// limit on the same routes; every other route keeps the default.
+const AI_AUDIO_BODY_LIMIT_BYTES: usize = 8 * 1024 * 1024;
+
 /// `/v1/ai/*` modality routes (chat, embeddings, images, speech, translate,
 /// documents, language, realtime, video). Merged into the auth-gated router.
 fn ai_routes() -> Router<AppState> {
@@ -377,8 +392,14 @@ fn ai_routes() -> Router<AppState> {
         .route("/v1/ai/images", post(ai_images))
         .route("/v1/ai/images/analyze", post(ai_images_analyze))
         .route("/v1/ai/images/ocr", post(ai_images_ocr))
-        .route("/v1/ai/speech", post(ai_speech))
-        .route("/v1/ai/dictate", post(ai_dictate))
+        .route(
+            "/v1/ai/speech",
+            post(ai_speech).layer(DefaultBodyLimit::max(AI_AUDIO_BODY_LIMIT_BYTES)),
+        )
+        .route(
+            "/v1/ai/dictate",
+            post(ai_dictate).layer(DefaultBodyLimit::max(AI_AUDIO_BODY_LIMIT_BYTES)),
+        )
         .route("/v1/ai/speech/voices", get(ai_speech_voices))
         .route("/v1/ai/translate", post(ai_translate))
         .route("/v1/ai/translate/detect", post(ai_translate_detect))
@@ -533,6 +554,84 @@ async fn version() -> Json<Value> {
 }
 
 type HttpJsonError = (StatusCode, Json<Value>);
+
+/// `/v1/invoke`'s error: a status and JSON body as elsewhere, plus a
+/// `Retry-After` header for a subscription failure whose wait is known.
+pub(crate) struct InvokeError {
+    status: StatusCode,
+    body: Json<Value>,
+    retry_after_secs: Option<u64>,
+}
+
+impl From<HttpJsonError> for InvokeError {
+    fn from((status, body): HttpJsonError) -> Self {
+        Self {
+            status,
+            body,
+            retry_after_secs: None,
+        }
+    }
+}
+
+impl IntoResponse for InvokeError {
+    fn into_response(self) -> Response {
+        let mut response = (self.status, self.body).into_response();
+        if let Some(seconds) = self.retry_after_secs {
+            if let Ok(value) = HeaderValue::from_str(&seconds.to_string()) {
+                response
+                    .headers_mut()
+                    .insert(axum::http::header::RETRY_AFTER, value);
+            }
+        }
+        response
+    }
+}
+
+/// The unary answer to a failed inference call.
+///
+/// A subscription failure is worded and statused by its code, with its
+/// content-free timing in the body and a `Retry-After` header when known.
+/// The body also carries `retry_at`, the absolute instant the wait ends,
+/// because a proxy may not pass the header on. `/v1/invoke` sends one message,
+/// so it is worded as a request rather than a thread. Anything else is a 502
+/// carrying the status message alone: never the tonic `Display`, which prints
+/// the trailers too.
+fn invoke_inference_error(
+    error: &tonic::Status,
+    subscription: Option<&crate::subscription_failure::SubscriptionFailure>,
+) -> InvokeError {
+    let Some(failure) = subscription else {
+        return (
+            StatusCode::BAD_GATEWAY,
+            Json(json!({ "error": error.message() })),
+        )
+            .into();
+    };
+    let now = Utc::now();
+    let mut body = json!({
+        "error": crate::subscription_failure::message_at(
+            failure,
+            crate::subscription_failure::FailureContext::Request,
+            now,
+        ),
+        "code": failure.code,
+        "retryable": crate::subscription_failure::retryable(failure.code),
+    });
+    if let Some(resets_at) = failure.resets_at_label() {
+        body["resets_at"] = json!(resets_at);
+    }
+    if let Some(retry_after_ms) = failure.retry_after_ms {
+        body["retry_after_ms"] = json!(retry_after_ms);
+    }
+    if let Some(retry_at) = failure.retry_at_label(now) {
+        body["retry_at"] = json!(retry_at);
+    }
+    InvokeError {
+        status: crate::subscription_failure::http_status(failure.code),
+        body: Json(body),
+        retry_after_secs: crate::subscription_failure::retry_after_header_secs(failure, now),
+    }
+}
 
 /// Attach the separately verified `aud=inference-core` credential to one
 /// downstream RPC. A verified compact JWT uses only metadata-safe characters;
@@ -752,7 +851,10 @@ async fn list_plans(
         .orchestration_client
         .clone()
         .list_plans(authenticated_session_request(
-            ListPlansRequest { run_id },
+            ListPlansRequest {
+                run_id,
+                thread_id: String::new(),
+            },
             &bearer,
         )?)
         .await
@@ -1280,6 +1382,7 @@ async fn approve_plan(
                 target_state: target as i32,
                 actor: claims.user_id.clone(),
                 reason: body.reason,
+                edited_steps: Vec::new(),
             },
             &bearer,
         )?)
@@ -1306,6 +1409,7 @@ async fn reject_plan(
                 target_state: PlanState::Rejected as i32,
                 actor: claims.user_id.clone(),
                 reason: body.reason,
+                edited_steps: Vec::new(),
             },
             &bearer,
         )?)
@@ -1448,38 +1552,82 @@ async fn decide_approval(
     Ok(Json(body))
 }
 
-/// Cancel a run through Session Core's authoritative RunService.
+/// Cancel a run through Session Core's authoritative `RunService`.
 ///
-/// The gateway still emits the legacy `RUN_CANCEL_REQUESTED` notification for
-/// downstream observers, but that event is no longer the source of truth: the
-/// RunService transaction flips the status and returns the durable
-/// `RUN_CANCELLED` event id as the receipt.
+/// The `RunService` transaction flips the status and returns the durable
+/// `RUN_CANCELLED` event id as the receipt; that is the source of truth. The
+/// gateway also still publishes the legacy `RUN_CANCEL_REQUESTED` notification
+/// on the run subject, but nothing in the repository acts on it today: the
+/// `mp.v1.orchestration.>` subscribers in session-core and orchestrator-core
+/// receive it and do not decode it as an orchestration event.
+///
+/// A successful cancel also stops this caller's chat stream for the run when
+/// it is live in this process (`CancelRegistry::cancel_run_for`), so the
+/// stream ends as `stopped` instead of saving onto the cancelled run.
+///
+/// Every call writes one info line with the run id, the receipt id when there
+/// is one, and the outcome (`zdr_rejected`, `owner_rejected`, `cancelled`,
+/// `already_terminal`, or `error` with the gRPC code). Ids and codes only. The
+/// browser drops this route's errors, so without the line a Stop that never
+/// reached the durable cancel leaves no trace.
 async fn cancel_run(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
     session_bearer: VerifiedModelBearer,
     Path(run_id): Path<String>,
 ) -> Result<Json<Value>, HttpJsonError> {
-    require_non_zdr_durable_mutation(&claims)?;
-    require_durable_run_owner(&state, &claims, &run_id, &session_bearer).await?;
+    if let Err(rejection) = require_non_zdr_durable_mutation(&claims) {
+        info!(run_id = %run_id, outcome = "zdr_rejected", "run cancel");
+        return Err(rejection);
+    }
+    if let Err(error) = session_flow::require_durable_run_owner_with_token(
+        &state,
+        &run_id,
+        &claims.org_id,
+        &claims.user_id,
+        session_bearer.as_str(),
+    )
+    .await
+    {
+        if error.code() == tonic::Code::PermissionDenied {
+            info!(run_id = %run_id, outcome = "owner_rejected", "run cancel");
+        } else {
+            info!(run_id = %run_id, outcome = "error", code = ?error.code(), stage = "owner", "run cancel");
+        }
+        return Err(grpc_status_to_http(&error));
+    }
 
-    let cancellation = state
-        .run_client
-        .clone()
-        .cancel_run(authenticated_session_request(
-            CancelRunRequest {
-                run_id: run_id.clone(),
-                reason: "user_requested".to_owned(),
-            },
-            &session_bearer,
-        )?)
-        .await
-        .map_err(|error| grpc_status_to_http(&error))?
-        .into_inner();
+    let request = authenticated_session_request(
+        CancelRunRequest {
+            run_id: run_id.clone(),
+            reason: "user_requested".to_owned(),
+        },
+        &session_bearer,
+    )
+    .inspect_err(|_| {
+        info!(run_id = %run_id, outcome = "error", stage = "credential", "run cancel");
+    })?;
+    let cancellation = match state.run_client.clone().cancel_run(request).await {
+        Ok(response) => response.into_inner(),
+        Err(error) => {
+            info!(run_id = %run_id, outcome = "error", code = ?error.code(), stage = "cancel", "run cancel");
+            return Err(grpc_status_to_http(&error));
+        }
+    };
 
-    // Keep the existing notification for consumers that watch the run subject,
-    // but never turn a successful durable cancellation into a 500 merely
-    // because an optional fan-out is unavailable.
+    // A stream still producing this run in this process must stop as well.
+    // The durable cancel alone left it to save its answer onto the cancelled
+    // run and then fail to terminalize it, with a replay buffer that never
+    // finished. Owner-scoped like the stream's own cancel route; a stream on
+    // another replica is caught by its liveness check before the save.
+    let live_stream = cancellation.cancelled
+        && state
+            .cancels
+            .cancel_run_for(&run_id, &claims.org_id, &claims.user_id);
+
+    // Keep the legacy notification on the run subject (nothing acts on it
+    // today, see above), but never turn a successful durable cancellation into
+    // a 500 merely because an optional fan-out is unavailable.
     if cancellation.cancelled {
         let envelope = mp_events::envelope::Envelope {
             event_id: new_ulid(),
@@ -1513,6 +1661,7 @@ async fn cancel_run(
     } else {
         "already_terminal"
     };
+    info!(run_id = %run_id, receipt_id = %cancellation.receipt_id, outcome = status, live_stream, "run cancel");
     return Ok(Json(json!({
         "run_id": run_id,
         "status": status,
@@ -1707,6 +1856,11 @@ struct AiSpeechRequest {
     language: Option<String>,
     model: Option<String>,
     provider: Option<String>,
+    /// Zero Data Retention for this call (Temporary chat). Combined with the
+    /// token's own claim and sent on to inference-core, which refuses ZDR
+    /// speech until a speech deployment is attested.
+    #[serde(default)]
+    zdr: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -3759,6 +3913,10 @@ async fn ai_dictate(
                 model: String::new(),
                 provider_hint: hint.to_owned(),
                 language: language.clone(),
+                // The audio is under the same retention posture as the
+                // clean-up pass below; inference-core refuses it (412) while
+                // no speech deployment is attested for zero retention.
+                zdr,
             },
             &inference_bearer,
         );
@@ -3891,6 +4049,7 @@ async fn ai_speech(
     use base64::{engine::general_purpose::STANDARD, Engine as _};
 
     let request_id = new_ulid();
+    let zdr = claims.effective_zdr(req.zdr);
     let operation = req
         .operation
         .as_deref()
@@ -3926,6 +4085,7 @@ async fn ai_speech(
                     model: req.model.unwrap_or_default(),
                     provider_hint: req.provider.unwrap_or_default(),
                     language: req.language.unwrap_or_default(),
+                    zdr,
                 },
                 &inference_bearer,
             ))
@@ -3974,6 +4134,7 @@ async fn ai_speech(
                 model: req.model.unwrap_or_default(),
                 provider_hint: req.provider.unwrap_or_default(),
                 language: req.language.unwrap_or_default(),
+                zdr,
             },
             &inference_bearer,
         ))
@@ -5035,16 +5196,31 @@ fn capability_grpc_request<T>(
     Ok(request)
 }
 
+/// `resource?query` for [`proxy_to_capability_core`], each value encoded as a
+/// query component. A caller's value is data: a raw `&` or `=` in it would
+/// otherwise become another parameter, such as a second `org_id`.
+fn capability_query_path(resource: &str, pairs: &[(&str, &str)]) -> String {
+    // `reqwest::Url` is the encoder this crate already uses for query strings;
+    // the base is a placeholder and only the encoded query is kept.
+    let mut url =
+        reqwest::Url::parse("http://capability-core.invalid/").expect("a static base URL parses");
+    url.query_pairs_mut().extend_pairs(pairs);
+    match url.query() {
+        Some(query) if !query.is_empty() => format!("{resource}?{query}"),
+        _ => resource.to_owned(),
+    }
+}
+
 async fn list_tasks_proxy(
     State(s): State<AppState>,
     Extension(c): Extension<Claims>,
     bearer: VerifiedCapabilityBearer,
     Query(q): Query<std::collections::HashMap<String, String>>,
 ) -> Result<Json<Value>, HttpJsonError> {
-    let path = format!(
-        "tasks?org_id={}&status={}",
-        c.org_id,
-        q.get("status").cloned().unwrap_or_default()
+    let status = q.get("status").map(String::as_str).unwrap_or_default();
+    let path = capability_query_path(
+        "tasks",
+        &[("org_id", c.org_id.as_str()), ("status", status)],
     );
     proxy_to_capability_core(&s, &c, &bearer, &path, "GET", None).await
 }
@@ -5355,16 +5531,9 @@ async fn list_memory_proxy(
     bearer: VerifiedCapabilityBearer,
     Query(q): Query<std::collections::HashMap<String, String>>,
 ) -> Result<Json<Value>, HttpJsonError> {
-    let scope = q.get("scope").cloned().unwrap_or_default();
-    proxy_to_capability_core(
-        &s,
-        &c,
-        &bearer,
-        &format!("memory?org_id={}&scope={scope}", c.org_id),
-        "GET",
-        None,
-    )
-    .await
+    let scope = q.get("scope").map(String::as_str).unwrap_or_default();
+    let path = capability_query_path("memory", &[("org_id", c.org_id.as_str()), ("scope", scope)]);
+    proxy_to_capability_core(&s, &c, &bearer, &path, "GET", None).await
 }
 async fn create_memory_proxy(
     State(s): State<AppState>,
@@ -5568,6 +5737,9 @@ pub(crate) fn grpc_status_to_http(error: &tonic::Status) -> HttpJsonError {
         tonic::Code::PermissionDenied => StatusCode::FORBIDDEN,
         tonic::Code::DeadlineExceeded => StatusCode::GATEWAY_TIMEOUT,
         tonic::Code::Unavailable => StatusCode::BAD_GATEWAY,
+        // A throttle or an exhausted quota: the caller may retry later, which
+        // a bare 500 did not say.
+        tonic::Code::ResourceExhausted => StatusCode::TOO_MANY_REQUESTS,
         other => {
             // F-11 (chat-parity audit §3.4, §3.10): every code not explicitly
             // mapped above used to fall silently into a bare 500, which is how
@@ -5605,6 +5777,7 @@ mod grpc_status_to_http_tests {
             (tonic::Code::PermissionDenied, StatusCode::FORBIDDEN),
             (tonic::Code::DeadlineExceeded, StatusCode::GATEWAY_TIMEOUT),
             (tonic::Code::Unavailable, StatusCode::BAD_GATEWAY),
+            (tonic::Code::ResourceExhausted, StatusCode::TOO_MANY_REQUESTS),
         ];
         for (code, expected) in cases {
             let status = tonic::Status::new(code, "detail");
@@ -6418,6 +6591,12 @@ pub struct InvokeRequest {
     /// its tool set, whether or not the Search toggle is also on.
     #[serde(default, alias = "deepResearch")]
     pub deep_research: bool,
+    /// Per-turn retrieval-source filter (Perplexity-Focus style). Absent/unknown
+    /// → "auto" (today's behavior, byte-identical). Meaningless and ignored
+    /// when `conversation_only` is in effect — that mode already excludes both
+    /// organization knowledge and the public web.
+    #[serde(default, alias = "retrievalScope")]
+    pub retrieval_scope: Option<String>,
     /// The client asked to regenerate the previous answer rather than send a new
     /// message.
     ///
@@ -6543,6 +6722,15 @@ pub struct InvokeRequest {
     /// as `agent_name`.
     #[serde(default)]
     pub space_instructions: Option<String>,
+    /// Persona spec — the user layer of the authored-instruction hierarchy,
+    /// resolved server-side (Convex `users.personaInstructions`) by the BFF
+    /// gateway on every turn, gated on the caller's global persona switch.
+    /// Same provenance/trust notes as `org_instructions`: never
+    /// client-suppliable, framing text only. The PER-THREAD override is a
+    /// separate bit (`persona_enabled` on the context-assembly response),
+    /// not carried here — this field is the text alone.
+    #[serde(default)]
+    pub persona_instructions: Option<String>,
 }
 
 /// A tool/function definition supplied by the client (chat-parity §2).
@@ -6688,15 +6876,128 @@ struct PlanApprovalRequest {
     /// `read_only` | `workspace_write` | `danger_full_access`. A keyword rather
     /// than a number on the HTTP edge: a browser sending `2` and meaning
     /// something else is a silent mis-grant, and an unknown keyword is refused
-    /// rather than guessed at.
+    /// rather than guessed at. Required for `decision: "approve"` (the
+    /// default); ignored for `"reject"`, which grants nothing.
+    #[serde(default)]
     granted_rung: String,
-    /// Why. Required and required to be substantive — see
-    /// `mp_contracts::autonomy`.
+    /// Why. Required and required to be substantive for an approve — see
+    /// `mp_contracts::autonomy`. Also carried as the plan transition's
+    /// `reason` for both decisions.
     justification: String,
+    /// The proposed plan being approved or rejected (plan-gate §2.3). Empty
+    /// when this turn never proposed a structured plan — the request then
+    /// degrades to today's pure rung grant, unchanged, so a stale frontend
+    /// talking to a rebuilt backend (or vice versa) keeps working.
+    #[serde(default)]
+    plan_id: String,
+    /// The user's edit set (reorder/rewrite/add/remove), applied atomically
+    /// before the plan transitions. Empty means the plan is
+    /// approved/rejected exactly as proposed.
+    #[serde(default)]
+    edited_steps: Vec<PlanStepEditWire>,
+    /// `"approve"` (default — every caller that predates plan-gate never set
+    /// this field and always meant approve) or `"reject"`.
+    #[serde(default = "default_plan_approval_decision")]
+    decision: String,
 }
 
-/// Approve a plan: take the run out of plan mode at a named autonomy rung, with
-/// a stated reason.
+fn default_plan_approval_decision() -> String {
+    "approve".to_owned()
+}
+
+#[derive(Debug, Deserialize)]
+struct PlanStepEditWire {
+    /// Existing step id being edited. Empty means this entry is a NEW step
+    /// inserted at this position.
+    #[serde(default)]
+    step_id: String,
+    title: String,
+    #[serde(default)]
+    operation: String,
+    /// True when the user removed this step (marked skipped server-side,
+    /// never deleted).
+    #[serde(default)]
+    removed: bool,
+}
+
+impl From<PlanStepEditWire> for PlanStepEdit {
+    fn from(wire: PlanStepEditWire) -> Self {
+        PlanStepEdit {
+            step_id: wire.step_id,
+            title: wire.title,
+            operation: wire.operation,
+            removed: wire.removed,
+        }
+    }
+}
+
+#[cfg(test)]
+mod plan_approval_wire_tests {
+    use super::{PlanApprovalRequest, PlanStepEdit, PlanStepEditWire};
+
+    #[test]
+    fn decision_defaults_to_approve_for_every_caller_that_predates_plan_gate() {
+        // Every request body plan-gate shipped before this field existed
+        // omits it entirely; the default must keep behaving as a pure rung
+        // grant with no plan involved.
+        let body: PlanApprovalRequest = serde_json::from_str(
+            r#"{"granted_rung":"workspace_write","justification":"writes its report"}"#,
+        )
+        .expect("legacy body without decision/plan_id/edited_steps must still parse");
+        assert_eq!(body.decision, "approve");
+        assert_eq!(body.plan_id, "");
+        assert!(body.edited_steps.is_empty());
+    }
+
+    #[test]
+    fn full_wire_body_round_trips_every_field() {
+        let body: PlanApprovalRequest = serde_json::from_str(
+            r#"{
+                "granted_rung": "workspace_write",
+                "justification": "writes its report",
+                "plan_id": "plan_abc",
+                "decision": "reject",
+                "edited_steps": [
+                    {"step_id": "step_1", "title": "Renamed step", "operation": "web_search", "removed": false},
+                    {"title": "New step", "removed": true}
+                ]
+            }"#,
+        )
+        .expect("full wire body must parse");
+        assert_eq!(body.decision, "reject");
+        assert_eq!(body.plan_id, "plan_abc");
+        assert_eq!(body.edited_steps.len(), 2);
+        assert_eq!(body.edited_steps[0].step_id, "step_1");
+        assert!(!body.edited_steps[0].removed);
+        // A new entry's step_id defaults to empty ("" means "insert"), and
+        // `removed` on a brand-new entry is carried through even though the
+        // UI is not expected to produce one — the wire type stays honest
+        // about what the proto itself allows.
+        assert_eq!(body.edited_steps[1].step_id, "");
+        assert!(body.edited_steps[1].removed);
+    }
+
+    #[test]
+    fn wire_edit_maps_field_for_field_onto_the_proto_message() {
+        let wire = PlanStepEditWire {
+            step_id: "step_9".to_owned(),
+            title: "Send the invoice".to_owned(),
+            operation: "email_send".to_owned(),
+            removed: true,
+        };
+        let proto: PlanStepEdit = wire.into();
+        assert_eq!(proto.step_id, "step_9");
+        assert_eq!(proto.title, "Send the invoice");
+        assert_eq!(proto.operation, "email_send");
+        assert!(proto.removed);
+    }
+}
+
+/// Approve OR reject a plan (plan-gate §2.3). Approving takes the run out of
+/// plan mode at a named autonomy rung, with a stated reason; rejecting grants
+/// nothing. When the turn proposed a structured plan (`plan_id` set), the
+/// user's edits are applied and the plan transitions BEFORE any authority is
+/// granted — an edited plan IS what the rung is being granted to run.
 ///
 /// # Why this route exists at all
 ///
@@ -6722,6 +7023,64 @@ async fn plan_approval(
         (StatusCode::BAD_REQUEST, Json(json!({ "error": message })))
     };
 
+    // Only the run's own owner may act on it. Without this, a run id would be
+    // enough to decide someone else's run.
+    crate::session_flow::require_durable_run_owner_with_token(
+        &state,
+        &run_id,
+        &claims.org_id,
+        &claims.user_id,
+        bearer.as_str(),
+    )
+    .await
+    .map_err(|error| grpc_status_to_http(&error))?;
+
+    let edited_steps: Vec<PlanStepEdit> = body
+        .edited_steps
+        .into_iter()
+        .map(PlanStepEdit::from)
+        .collect();
+
+    // --- Reject: grants nothing. No rung escalation, no set_run_mode — the
+    // BFF route stays the single POST .../plan-approval, but a reject has no
+    // authority to hand back, only a plan to close out. ---
+    if body.decision == "reject" {
+        if body.plan_id.is_empty() {
+            return Err(bad_request(
+                "decision \"reject\" requires plan_id: there is no plan to reject".to_owned(),
+            ));
+        }
+        let resp = state
+            .orchestration_client
+            .clone()
+            .transition_plan(authenticated_session_request(
+                TransitionPlanRequest {
+                    plan_id: body.plan_id.clone(),
+                    target_state: PlanState::Rejected as i32,
+                    actor: claims.user_id.clone(),
+                    reason: body.justification.clone(),
+                    edited_steps,
+                },
+                &bearer,
+            )?)
+            .await
+            .map_err(|e| grpc_status_to_http(&e))?
+            .into_inner();
+        let plan = resp.plan.ok_or_else(|| not_found("plan not found"))?;
+        return Ok(Json(json!({
+            "run_id": run_id,
+            "decision": "reject",
+            "plan": plan_value(&plan),
+        })));
+    }
+    if body.decision != "approve" {
+        return Err(bad_request(format!(
+            "unknown decision '{}': expected approve or reject",
+            body.decision
+        )));
+    }
+
+    // --- Approve: unchanged rung/justification validation. ---
     // A keyword on the HTTP edge rather than a number: a browser sending `2` and
     // meaning something else is a silent mis-grant, and an unknown keyword is
     // refused rather than guessed at — guessing turns a typo into a grant.
@@ -6736,17 +7095,33 @@ async fn plan_approval(
         AutonomyEscalation::request(AutonomyRung::ReadOnly, requested, &body.justification)
             .map_err(|refusal| bad_request(refusal.message()))?;
 
-    // Only the run's own owner may grant it authority. Without this, a run id
-    // would be enough to widen someone else's run.
-    crate::session_flow::require_durable_run_owner_with_token(
-        &state,
-        &run_id,
-        &claims.org_id,
-        &claims.user_id,
-        bearer.as_str(),
-    )
-    .await
-    .map_err(|error| grpc_status_to_http(&error))?;
+    // plan-gate §2.3: approve the plan's CONTENT before granting any
+    // authority — an autonomy grant with no corresponding approved plan is
+    // exactly the "rubber stamp" this control exists to prevent. Refuse the
+    // whole request (400, via `grpc_status_to_http`) rather than granting a
+    // rung to a plan that failed to transition.
+    let approved_plan = if body.plan_id.is_empty() {
+        None
+    } else {
+        let resp = state
+            .orchestration_client
+            .clone()
+            .transition_plan(authenticated_session_request(
+                TransitionPlanRequest {
+                    plan_id: body.plan_id.clone(),
+                    target_state: PlanState::Approved as i32,
+                    actor: claims.user_id.clone(),
+                    reason: body.justification.clone(),
+                    edited_steps,
+                },
+                &bearer,
+            )?)
+            .await
+            .map_err(|e| grpc_status_to_http(&e))?
+            .into_inner()
+            .plan;
+        Some(resp.ok_or_else(|| not_found("plan not found"))?)
+    };
 
     // In-process: this IS the gateway, so calling the coordinator directly
     // rather than dialling our own gRPC surface keeps one code path and one
@@ -6784,6 +7159,7 @@ async fn plan_approval(
             granted_rung: escalation.to() as i32,
             justification: escalation.justification().to_owned(),
         },
+        &body.plan_id,
     )
     .await
     .map_err(|error| grpc_status_to_http(&error))?;
@@ -6816,6 +7192,7 @@ async fn plan_approval(
         "granted_rung": label(escalation.to()),
         "justification": escalation.justification(),
         "persisted": persisted.is_ok(),
+        "plan": approved_plan.map(|plan| plan_value(&plan)),
     })))
 }
 
@@ -6903,8 +7280,15 @@ async fn invoke_queue_input(
         &claims.user_id,
         &body.content,
     );
+    // `retrieval_scope` rides on `EnqueueOutcome::Queued` for parity with
+    // `conversation_only` (chat-wave2 scope spec §2.3's queued_input.rs
+    // note), but is not threaded into `append_queued_user_message` here: the
+    // in-flight stream already enforces it from its OWN `retrieval_scope`
+    // (computed once at stream start, see `sse.rs`), and a queued message's
+    // durable metadata is not part of this item's "shown in the receipt /
+    // reflected in citations" surface the way the turn's own persistence is.
     let (pending, thread_id, conversation_only) = match outcome {
-        EnqueueOutcome::Queued { pending, thread_id, conversation_only } => (pending, thread_id, conversation_only),
+        EnqueueOutcome::Queued { pending, thread_id, conversation_only, .. } => (pending, thread_id, conversation_only),
         EnqueueOutcome::NoActiveStream => {
             return (
                 StatusCode::NOT_FOUND,
@@ -7225,6 +7609,13 @@ struct ThreadSummaryResponse {
     /// `ThreadSummary.origin`. Relayed so a caller can defensively re-check
     /// scope on the response rather than trusting the request-side filter alone.
     origin: String,
+    /// Persona spec — the per-thread override of the global persona switch,
+    /// list-level so the sidebar/composer can show current state without
+    /// opening the context inspector. `optional bool` on the wire
+    /// (`ThreadSummary.persona_enabled` in `sessions.proto`) defaults to
+    /// `true` here for a pre-persona session-core replica during a rolling
+    /// deploy — fail open, never silently disable persona fleet-wide.
+    persona_enabled: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -7238,6 +7629,10 @@ struct UpdateThreadPresentationBody {
     title: Option<String>,
     preview: Option<String>,
     pinned: Option<bool>,
+    /// Persona spec — the per-thread override. `None` means "leave as is",
+    /// same tri-state contract as `pinned`.
+    #[serde(default)]
+    persona_enabled: Option<bool>,
 }
 
 #[derive(Debug, Serialize)]
@@ -7320,6 +7715,13 @@ struct ThreadContextResponse {
     /// full the window is rather than guessing.
     budget_tokens: u32,
     segments: Vec<ContextSegmentResponse>,
+    /// Persona spec — the per-thread override, relayed from session-core's
+    /// `GetContextAssemblyResponse.persona_enabled` (an `optional bool`; see
+    /// that field's own doc comment for the proto3 zero-value rationale).
+    /// Defaults `true` when the RPC left it unset (an old session-core
+    /// binary during a rolling deploy) — fail OPEN for display, never fail
+    /// closed and hide a persona the user turned on.
+    persona_enabled: bool,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -7375,6 +7777,7 @@ async fn get_thread_context(
         thread_id,
         estimated_tokens: response.estimated_tokens,
         budget_tokens: budget,
+        persona_enabled: response.persona_enabled.unwrap_or(true),
         segments: response
             .segments
             .into_iter()
@@ -7433,6 +7836,7 @@ async fn list_threads(
                 .map(|value| timestamp_to_rfc3339(Some(value))),
             origin: thread.origin,
             owner_subject_id: thread.owner_subject_id,
+            persona_enabled: thread.persona_enabled,
         })
         .collect();
 
@@ -7469,6 +7873,7 @@ async fn update_thread_presentation(
                 title: body.title,
                 preview: body.preview,
                 pinned: body.pinned,
+                persona_enabled: body.persona_enabled,
             },
             &bearer,
         )?)
@@ -7733,6 +8138,115 @@ async fn delete_space_threads_for_deletion_coordinator(
         semantic_memory_attempted_count: response.semantic_memory_attempted_count,
         semantic_memory_unconfirmed_count: response.semantic_memory_unconfirmed_count,
         remaining_work,
+    }))
+}
+
+#[derive(Debug, Deserialize)]
+struct PrepareMailTaskThreadRequestBody {
+    org_id: String,
+    user_id: String,
+    origin: String,
+    session_key: String,
+    /// Forwarded opaquely all the way from user-core's
+    /// `IssueMailTaskThreadDecision` through integration-corev2 and the
+    /// gateway BFF — this handler never reads or interprets it, only passes
+    /// it to session-core's `PrepareUserOwnedThreadRequest.control_decision_token`
+    /// unmodified (delegated-identity design, Gap B §2.4(ii)).
+    control_decision_token: String,
+}
+
+#[derive(Debug, Serialize)]
+struct PrepareMailTaskThreadResponseBody {
+    thread_id: String,
+}
+
+fn authenticated_session_request_with_bearer<T>(
+    value: T,
+    bearer: &str,
+) -> Result<tonic::Request<T>, HttpJsonError> {
+    let mut request = tonic::Request::new(value);
+    let authorization = format!("Bearer {bearer}").parse().map_err(|_| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": "mail-task bridge credential is not forwardable"})),
+        )
+    })?;
+    request
+        .metadata_mut()
+        .insert("authorization", authorization);
+    Ok(request)
+}
+
+/// Delegated-identity design, Gap B (§2.4(ii)) — the internal HTTP→gRPC
+/// bridge the gateway BFF (Frontend Plane, which has no `tonic`/
+/// `mp-contracts` dependency) reaches to call session-core's
+/// `PrepareUserOwnedThread` for an inbound mail-task message. Authenticated
+/// via the existing HTTP `Claims`/`service_id` middleware
+/// (`auth::authorize_principal_route`), gated to exactly
+/// `service:verevon-gateway`; mints/reuses model-gateway's OWN, distinct
+/// `aud=session-core` credential (`mail_task_bridge_auth`) rather than
+/// trusting anything the BFF presents as proof of a session-core identity.
+async fn prepare_mail_task_thread_for_gateway_bff(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    Json(body): Json<PrepareMailTaskThreadRequestBody>,
+) -> Result<Json<PrepareMailTaskThreadResponseBody>, HttpJsonError> {
+    use mp_contracts::model_plane::v1::PrepareUserOwnedThreadRequest;
+
+    if body.org_id.trim().is_empty()
+        || body.user_id.trim().is_empty()
+        || body.origin.trim().is_empty()
+        || body.session_key.trim().is_empty()
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "org_id, user_id, origin and session_key are required"})),
+        ));
+    }
+    // Same tenant-fencing shape as delete_space_threads_for_deletion_coordinator
+    // above: the verified service credential's own org_id must match the
+    // request it is presenting, so a bridge credential minted for one org
+    // can never be replayed to prepare a thread in a different one.
+    if claims.org_id != body.org_id {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(json!({"error": "mail-task bridge request tenant does not match verified service identity"})),
+        ));
+    }
+
+    let Some(tokens) = state.mail_task_bridge_tokens.as_ref() else {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"error": "mail-task thread bridge is not configured"})),
+        ));
+    };
+    let bearer = tokens.token(&body.org_id).await.map_err(|error| {
+        tracing::error!(%error, "mail-task bridge session-core credential mint failed");
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"error": "mail-task thread bridge credential is unavailable"})),
+        )
+    })?;
+
+    let response = state
+        .session_client
+        .clone()
+        .prepare_user_owned_thread(authenticated_session_request_with_bearer(
+            PrepareUserOwnedThreadRequest {
+                org_id: body.org_id,
+                user_id: body.user_id,
+                origin: body.origin,
+                session_key: body.session_key,
+                control_decision_token: body.control_decision_token,
+            },
+            &bearer,
+        )?)
+        .await
+        .map_err(|error| session_thread_error("session-core prepare_user_owned_thread failed", &error))?
+        .into_inner();
+
+    Ok(Json(PrepareMailTaskThreadResponseBody {
+        thread_id: response.thread_id,
     }))
 }
 
@@ -8199,11 +8713,11 @@ async fn invoke(
     capability_bearer: Option<Extension<VerifiedCapabilityBearer>>,
     cost_bearer: Option<Extension<VerifiedCostBearer>>,
     Json(req): Json<InvokeRequest>,
-) -> Result<Json<InvokeResponse>, (StatusCode, Json<serde_json::Value>)> {
+) -> Result<Json<InvokeResponse>, InvokeError> {
     if req.features.iter().any(|f| f == "conversation_only") {
         return Err((StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": {
             "code": "source_scope_requires_stream", "message": "Conversation-only tasks require the streaming chat endpoint."
-        }}))));
+        }}))).into());
     }
     let start = std::time::Instant::now();
 
@@ -8265,10 +8779,13 @@ async fn invoke(
             ))
             .await
             .map_err(|error| {
-                (
-                    StatusCode::BAD_GATEWAY,
-                    Json(serde_json::json!({"error": error.to_string()})),
-                )
+                // No run was prepared on this path, so there is nothing to
+                // terminalize; a typed refusal is still worded by its code.
+                let subscription = crate::subscription_failure::on_route(
+                    &error,
+                    !normalized.subscription_connection_id.trim().is_empty(),
+                );
+                invoke_inference_error(&error, subscription.as_ref())
             })?
             .into_inner();
 
@@ -8315,7 +8832,7 @@ async fn invoke(
                     Json(serde_json::json!({
                         "error": "duplicate request in flight for this idempotency_key",
                     })),
-                ));
+                ).into());
             }
             crate::idempotency_registry::Claim::Rejected(
                 crate::idempotency_registry::ClaimRejection::InvalidKey,
@@ -8325,7 +8842,7 @@ async fn invoke(
                     Json(serde_json::json!({
                         "error": "idempotency_key is invalid or too large",
                     })),
-                ));
+                ).into());
             }
             crate::idempotency_registry::Claim::Rejected(
                 crate::idempotency_registry::ClaimRejection::CapacityExceeded,
@@ -8335,7 +8852,7 @@ async fn invoke(
                     Json(serde_json::json!({
                         "error": "idempotency protection is temporarily unavailable",
                     })),
-                ));
+                ).into());
             }
             crate::idempotency_registry::Claim::Proceed(guard) => Some(guard),
         },
@@ -8393,6 +8910,7 @@ async fn invoke(
         normalized.space_context.as_ref(),
         normalized.space_append_context.as_ref(),
         false,
+        None,
     )
     .await
     .map_err(|error| {
@@ -8410,7 +8928,7 @@ async fn invoke(
                 "error": "managed run already exists; observe or resume the existing run",
                 "run_id": session_run.run_id,
             })),
-        ));
+        ).into());
     }
     // Do not contact a provider until Session Core has accepted a
     // GatewayDirect heartbeat using the Gateway's fixed-scope workload token.
@@ -8465,7 +8983,7 @@ async fn invoke(
         return Err((
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({"error": "internal server error"})),
-        ));
+        ).into());
     }
 
     // Safety policy is resolved from capability-core per request; client
@@ -8511,11 +9029,21 @@ async fn invoke(
         match response {
             Ok(response) => response.into_inner(),
             Err(error) => {
+                // On the subscription route the reason is typed, an overflow
+                // is `prompt_too_long` (not retried, closed as the request's
+                // own failure), and anything else is the generic route
+                // failure; the run records its code.
+                let subscription_route = !normalized.subscription_connection_id.trim().is_empty();
+                let subscription_failure =
+                    crate::subscription_failure::on_route_or_generic(&error, subscription_route);
+                let terminal_code = subscription_failure
+                    .as_ref()
+                    .map_or("inference_unavailable", |failure| failure.code);
                 if let Err(terminal_error) =
                     session_flow::terminalize_direct_inference_run_authenticated(
                         &state,
                         &session_run,
-                        session_flow::DirectInferenceTerminal::Failed("inference_unavailable"),
+                        session_flow::DirectInferenceTerminal::Failed(terminal_code),
                         &model_bearer,
                     )
                     .await
@@ -8524,12 +9052,9 @@ async fn invoke(
                     return Err((
                         StatusCode::BAD_GATEWAY,
                         Json(serde_json::json!({"error": "session-core terminalization failed"})),
-                    ));
+                    ).into());
                 }
-                return Err((
-                    StatusCode::BAD_GATEWAY,
-                    Json(serde_json::json!({"error": error.to_string()})),
-                ));
+                return Err(invoke_inference_error(&error, subscription_failure.as_ref()));
             }
         }
     };
@@ -8564,7 +9089,7 @@ async fn invoke(
                 Json(
                     serde_json::json!({"error": format!("session-core append assistant failed: {error}")}),
                 ),
-            ));
+            ).into());
         }
     }
 
@@ -8586,13 +9111,20 @@ async fn invoke(
     info!(run_id = %session_run.run_id, thread_id = %session_run.thread_id, request_id = %request_id, "http invoke completed");
 
     let latency_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
+    // A subscription call is never priced from API list prices.
+    let cost_basis = crate::pricing::CostBasis::of_route(
+        &normalized.provider_hint,
+        &normalized.subscription_connection_id,
+    )
+    .served_by(&infer_resp.provider_used);
     let usage = invoke_usage(
         &infer_resp.content,
         infer_resp.input_tokens,
         infer_resp.output_tokens,
         state
             .pricing
-            .cost_usd(
+            .cost_usd_for(
+                cost_basis,
                 &infer_resp.model_used,
                 i64::from(infer_resp.input_tokens.max(0)),
                 i64::from(infer_resp.output_tokens.max(0)),
@@ -8635,6 +9167,7 @@ async fn invoke(
             // durable ledger. 0 (never absent) when this turn used no cache.
             "cache_read_input_tokens": infer_resp.cache_read_input_tokens,
             "cache_creation_input_tokens": infer_resp.cache_creation_input_tokens,
+            "cost_basis": cost_basis.as_str(),
         }),
         zdr: effective_zdr,
     };
@@ -9131,6 +9664,180 @@ mod capability_contract_tests {
         task.abort();
     }
 
+    #[test]
+    fn capability_query_values_are_encoded_as_data() {
+        assert_eq!(
+            capability_query_path("tasks", &[("org_id", "org-a"), ("status", "open")]),
+            "tasks?org_id=org-a&status=open",
+            "an ordinary value must reach Capability Core unchanged"
+        );
+        assert_eq!(
+            capability_query_path("tasks", &[("org_id", "org-a"), ("status", "")]),
+            "tasks?org_id=org-a&status=",
+            "no status still means every status"
+        );
+        assert_eq!(
+            capability_query_path(
+                "tasks",
+                &[
+                    ("org_id", "org-a"),
+                    ("status", "open&org_id=org-b&limit=100000")
+                ]
+            ),
+            "tasks?org_id=org-a&status=open%26org_id%3Dorg-b%26limit%3D100000"
+        );
+    }
+
+    /// The caller's `status` used to be spliced into the upstream query raw, so
+    /// `&limit=` inside it reached Capability Core as its own parameter.
+    #[tokio::test]
+    async fn task_list_status_reaches_capability_core_as_one_value() {
+        let seen = Arc::new(std::sync::Mutex::new(None::<String>));
+        let app = Router::new().fallback(axum::routing::any({
+            let seen = Arc::clone(&seen);
+            move |uri: axum::http::Uri| {
+                let seen = Arc::clone(&seen);
+                async move {
+                    *seen.lock().expect("query capture lock") = uri.query().map(str::to_owned);
+                    Json(json!({ "tasks": [] }))
+                }
+            }
+        }));
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind capability task list");
+        let address = listener.local_addr().expect("capability task list address");
+        let task = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve capability task list");
+        });
+        let mut state = AppState::new();
+        state.capability_core_base_url = format!("http://{address}");
+
+        let query = std::collections::HashMap::from([(
+            "status".to_owned(),
+            "open&org_id=org-b&limit=100000".to_owned(),
+        )]);
+        let _ = list_tasks_proxy(
+            State(state),
+            Extension(proxy_claims(false)),
+            VerifiedCapabilityBearer::for_test("capability-test-bearer"),
+            Query(query),
+        )
+        .await
+        .expect("task listing forwards to Capability Core");
+        task.abort();
+
+        let raw = seen
+            .lock()
+            .expect("query capture lock")
+            .clone()
+            .expect("Capability Core received a query string");
+        let parsed = reqwest::Url::parse(&format!("http://upstream.test/tasks?{raw}"))
+            .expect("the forwarded query parses");
+        let pairs: Vec<(String, String)> = parsed
+            .query_pairs()
+            .map(|(key, value)| (key.into_owned(), value.into_owned()))
+            .collect();
+        assert_eq!(
+            pairs,
+            [
+                ("org_id".to_owned(), "org-a".to_owned()),
+                (
+                    "status".to_owned(),
+                    "open&org_id=org-b&limit=100000".to_owned()
+                ),
+            ]
+        );
+    }
+
+    /// The raw query string Capability Core receives for one
+    /// `GET /v1/memory` whose caller query is `query`.
+    async fn memory_list_upstream_query(
+        query: std::collections::HashMap<String, String>,
+    ) -> String {
+        let seen = Arc::new(std::sync::Mutex::new(None::<String>));
+        let app = Router::new().fallback(axum::routing::any({
+            let seen = Arc::clone(&seen);
+            move |uri: axum::http::Uri| {
+                let seen = Arc::clone(&seen);
+                async move {
+                    *seen.lock().expect("query capture lock") = uri.query().map(str::to_owned);
+                    Json(json!({ "memory": [] }))
+                }
+            }
+        }));
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind capability memory list");
+        let address = listener
+            .local_addr()
+            .expect("capability memory list address");
+        let task = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve capability memory list");
+        });
+        let mut state = AppState::new();
+        state.capability_core_base_url = format!("http://{address}");
+
+        let _ = list_memory_proxy(
+            State(state),
+            Extension(proxy_claims(false)),
+            VerifiedCapabilityBearer::for_test("capability-test-bearer"),
+            Query(query),
+        )
+        .await
+        .expect("memory listing forwards to Capability Core");
+        task.abort();
+
+        let raw = seen.lock().expect("query capture lock").clone();
+        raw.expect("Capability Core received a query string")
+    }
+
+    /// The caller's `scope` used to be spliced into the upstream query raw, so
+    /// `&org_id=` inside it reached Capability Core as its own parameter.
+    #[tokio::test]
+    async fn memory_list_scope_reaches_capability_core_as_one_value() {
+        let raw = memory_list_upstream_query(std::collections::HashMap::from([(
+            "scope".to_owned(),
+            "user&org_id=org-b&limit=100000".to_owned(),
+        )]))
+        .await;
+        let parsed = reqwest::Url::parse(&format!("http://upstream.test/memory?{raw}"))
+            .expect("the forwarded query parses");
+        let pairs: Vec<(String, String)> = parsed
+            .query_pairs()
+            .map(|(key, value)| (key.into_owned(), value.into_owned()))
+            .collect();
+        assert_eq!(
+            pairs,
+            [
+                ("org_id".to_owned(), "org-a".to_owned()),
+                (
+                    "scope".to_owned(),
+                    "user&org_id=org-b&limit=100000".to_owned()
+                ),
+            ]
+        );
+
+        // Ordinary scopes, and no scope at all, reach Capability Core exactly
+        // as the old format! string sent them.
+        assert_eq!(
+            memory_list_upstream_query(std::collections::HashMap::from([(
+                "scope".to_owned(),
+                "user".to_owned(),
+            )]))
+            .await,
+            "org_id=org-a&scope=user"
+        );
+        assert_eq!(
+            memory_list_upstream_query(std::collections::HashMap::new()).await,
+            "org_id=org-a&scope="
+        );
+    }
+
     #[tokio::test]
     async fn space_deletion_requires_capability_bearer_before_session_core_call() {
         let error = delete_space_threads_for_deletion_coordinator(
@@ -9236,13 +9943,18 @@ mod run_owner_publish_tests {
                 ));
             }
             let request = request.into_inner();
-            if request.run_id != "run-owned" {
-                return Err(Status::not_found("run not found"));
+            match request.run_id.as_str() {
+                "run-owned" => Ok(TonicResponse::new(CancelRunResponse {
+                    cancelled: true,
+                    receipt_id: "receipt-cancel-1".to_owned(),
+                })),
+                // Already finished: Session Core returns the existing receipt.
+                "run-finished" => Ok(TonicResponse::new(CancelRunResponse {
+                    cancelled: false,
+                    receipt_id: "receipt-existing".to_owned(),
+                })),
+                _ => Err(Status::not_found("run not found")),
             }
-            Ok(TonicResponse::new(CancelRunResponse {
-                cancelled: true,
-                receipt_id: "receipt-cancel-1".to_owned(),
-            }))
         }
 
         async fn resolve_run_owner(
@@ -9259,9 +9971,13 @@ mod run_owner_publish_tests {
                 ));
             }
             let request = request.into_inner();
+            // `run-vanished` is owned but unknown to `CancelRun`, so a cancel
+            // of it exercises the route's gRPC error path.
             Ok(TonicResponse::new(ResolveRunOwnerResponse {
-                authorized: request.run_id == "run-owned"
-                    && request.org_id == "org-owner"
+                authorized: matches!(
+                    request.run_id.as_str(),
+                    "run-owned" | "run-finished" | "run-vanished"
+                ) && request.org_id == "org-owner"
                     && request.user_id == "user-owner",
             }))
         }
@@ -9623,6 +10339,7 @@ mod run_owner_publish_tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(run_cancel_log)]
     async fn foreign_run_ids_are_rejected_before_http_run_event_publishes() {
         let (state, publisher) = test_state().await;
         let foreign_user = claims("org-owner", "user-other");
@@ -9690,6 +10407,7 @@ mod run_owner_publish_tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(run_cancel_log)]
     async fn durable_http_run_owner_can_publish_cancel_and_feedback_events() {
         let (state, publisher) = test_state().await;
         let owner = claims("org-owner", "user-owner");
@@ -9718,6 +10436,158 @@ mod run_owner_publish_tests {
         assert!(events.iter().all(|(subject, _)| {
             subject == mp_events::subjects::SUBJECT_RUN || subject == "mp.v1.feedback.rated"
         }));
+    }
+
+    /// Q15: a durable cancel that won the race against its own stream left the
+    /// stream to save the answer onto the cancelled run and then fail to
+    /// terminalize it. A successful cancel now also stops the owner's stream
+    /// for that run in this process — and nobody else's.
+    #[tokio::test]
+    #[serial_test::serial(run_cancel_log)]
+    async fn a_durable_cancel_stops_the_owners_live_stream_for_the_run() {
+        use std::sync::atomic::Ordering;
+        let (state, _publisher) = test_state().await;
+        let register = |request: &str, user: &str, run: &str| {
+            state.cancels.register_run(request, "org-owner", user, run)
+        };
+        let stream = register("req-owned", "user-owner", "run-owned");
+        let colleague = register("req-colleague", "user-other", "run-owned");
+        let finished = register("req-finished", "user-owner", "run-finished");
+
+        for run_id in ["run-finished", "run-owned"] {
+            let _ = cancel_run(
+                State(state.clone()),
+                Extension(claims("org-owner", "user-owner")),
+                VerifiedSessionBearer::for_test("test-session-bearer"),
+                Path(run_id.to_owned()),
+            )
+            .await
+            .expect("the owner may cancel");
+        }
+
+        assert!(stream.load(Ordering::Relaxed), "the stream stops");
+        assert!(
+            !colleague.load(Ordering::Relaxed),
+            "another user's stream is never reached"
+        );
+        assert!(
+            !finished.load(Ordering::Relaxed),
+            "an already-terminal run was not cancelled by this call"
+        );
+    }
+
+    /// One captured log line as `(field, value)` pairs.
+    type LogLine = Vec<(String, String)>;
+
+    /// Collects the fields of every `run cancel` line written on this thread.
+    #[derive(Clone, Default)]
+    struct CancelLines(Arc<std::sync::Mutex<Vec<LogLine>>>);
+
+    struct Fields<'a>(&'a mut Vec<(String, String)>);
+
+    impl tracing::field::Visit for Fields<'_> {
+        fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+            self.0.push((field.name().to_owned(), value.to_owned()));
+        }
+
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            self.0.push((field.name().to_owned(), format!("{value:?}")));
+        }
+    }
+
+    impl tracing::Subscriber for CancelLines {
+        fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
+            metadata.is_event() && *metadata.level() == tracing::Level::INFO
+        }
+
+        fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+
+        fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+
+        fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+
+        fn event(&self, event: &tracing::Event<'_>) {
+            let mut fields = Vec::new();
+            event.record(&mut Fields(&mut fields));
+            if fields
+                .iter()
+                .any(|(name, value)| name == "message" && value == "run cancel")
+            {
+                self.0.lock().expect("log capture lock").push(fields);
+            }
+        }
+
+        fn enter(&self, _: &tracing::span::Id) {}
+
+        fn exit(&self, _: &tracing::span::Id) {}
+    }
+
+    /// The browser drops this route's errors, so the log line is the only
+    /// record of what a Stop actually did. One line per call, whichever way it
+    /// ends, and it carries ids and codes, never a credential.
+    ///
+    /// Serialised with the other tests that call `cancel_run`: while this
+    /// thread-local subscriber is the only one registered, a callsite first hit
+    /// on another thread caches the interest of that thread's no-op default,
+    /// and the line would be lost here.
+    #[tokio::test]
+    #[serial_test::serial(run_cancel_log)]
+    async fn cancel_run_logs_one_outcome_line_per_call() {
+        let (state, _publisher) = test_state().await;
+        let owner = claims("org-owner", "user-owner");
+        let mut zdr_owner = owner.clone();
+        zdr_owner.zdr = true;
+        let lines = CancelLines::default();
+        let _guard = tracing::subscriber::set_default(lines.clone());
+
+        for (caller, run_id) in [
+            (owner.clone(), "run-owned"),
+            (owner.clone(), "run-finished"),
+            (owner, "run-vanished"),
+            (claims("org-owner", "user-other"), "run-owned"),
+            (zdr_owner, "run-owned"),
+        ] {
+            let _ = cancel_run(
+                State(state.clone()),
+                Extension(caller),
+                VerifiedSessionBearer::for_test("test-session-bearer"),
+                Path(run_id.to_owned()),
+            )
+            .await;
+        }
+
+        let lines = lines.0.lock().expect("log capture lock").clone();
+        // `[run_id, outcome, receipt_id, code]`, empty where the line has none.
+        let outcomes: Vec<[String; 4]> = lines
+            .iter()
+            .map(|line| {
+                ["run_id", "outcome", "receipt_id", "code"].map(|name| {
+                    line.iter()
+                        .find(|(key, _)| key == name)
+                        .map(|(_, value)| value.clone())
+                        .unwrap_or_default()
+                })
+            })
+            .collect();
+        assert_eq!(
+            outcomes,
+            [
+                ["run-owned", "cancelled", "receipt-cancel-1", ""],
+                ["run-finished", "already_terminal", "receipt-existing", ""],
+                ["run-vanished", "error", "", "NotFound"],
+                ["run-owned", "owner_rejected", "", ""],
+                ["run-owned", "zdr_rejected", "", ""],
+            ]
+        );
+        assert!(
+            lines
+                .iter()
+                .flatten()
+                .all(|(_, value)| !value.contains("test-session-bearer")),
+            "a cancel log line must never carry the credential: {lines:?}"
+        );
     }
 }
 
@@ -9912,5 +10782,569 @@ mod durable_trace_projection_tests {
 
             assert_eq!(durable_thread_event_type(&event), expected);
         }
+    }
+}
+
+#[cfg(test)]
+// The inference-core stand-in answers with `tonic::Status`, as the trait does.
+#[allow(clippy::result_large_err)]
+mod speech_route_tests {
+    //! The two audio routes, `/v1/ai/dictate` and `/v1/ai/speech`: zero
+    //! retention reaches inference-core on every speech call, and their body
+    //! limit is raised without touching any other route.
+    use super::*;
+    use crate::auth::VerifiedInferenceBearer;
+    use mp_contracts::model_plane::v1 as pb;
+    use std::{
+        pin::Pin,
+        sync::{Arc, Mutex},
+    };
+    use tokio::net::TcpListener;
+    use tokio_stream::wrappers::TcpListenerStream;
+    use tower::ServiceExt as _;
+
+    type InferStream =
+        Pin<Box<dyn futures::Stream<Item = Result<pb::InferChunk, tonic::Status>> + Send>>;
+    type VideoStream = Pin<
+        Box<
+            dyn futures::Stream<
+                    Item = Result<pb::StreamVideoGenerationContentResponse, tonic::Status>,
+                > + Send,
+        >,
+    >;
+
+    /// Inference-core stand-in. It records every speech and clean-up request
+    /// and, like the real service while no speech deployment is attested,
+    /// refuses speech that asks for zero retention. `attested` stands for a
+    /// future attested deployment that serves ZDR speech.
+    #[derive(Clone, Default)]
+    struct SpeechInference {
+        attested: bool,
+        transcribe: Arc<Mutex<Vec<pb::TranscribeSpeechRequest>>>,
+        synthesize: Arc<Mutex<Vec<pb::SynthesizeSpeechRequest>>>,
+        infer: Arc<Mutex<Vec<pb::InferRequest>>>,
+    }
+
+    impl SpeechInference {
+        fn refuse_unattested(&self, zdr: bool, operation: &str) -> Result<(), tonic::Status> {
+            if zdr && !self.attested {
+                return Err(tonic::Status::failed_precondition(format!(
+                    "ZDR {operation} is unavailable because no provider deployment is independently attested"
+                )));
+            }
+            Ok(())
+        }
+
+        fn transcriptions(&self) -> Vec<pb::TranscribeSpeechRequest> {
+            self.transcribe
+                .lock()
+                .expect("transcription capture")
+                .clone()
+        }
+
+        fn syntheses(&self) -> Vec<pb::SynthesizeSpeechRequest> {
+            self.synthesize.lock().expect("synthesis capture").clone()
+        }
+
+        fn cleanups(&self) -> Vec<pb::InferRequest> {
+            self.infer.lock().expect("clean-up capture").clone()
+        }
+    }
+
+    fn unused<T>() -> Result<tonic::Response<T>, tonic::Status> {
+        Err(tonic::Status::unimplemented(
+            "not used by the speech route tests",
+        ))
+    }
+
+    #[tonic::async_trait]
+    impl pb::inference_core_server::InferenceCore for SpeechInference {
+        type InferStreamStream = InferStream;
+        type StreamVideoGenerationContentStream = VideoStream;
+
+        async fn infer(
+            &self,
+            request: tonic::Request<pb::InferRequest>,
+        ) -> Result<tonic::Response<pb::InferResponse>, tonic::Status> {
+            self.infer
+                .lock()
+                .expect("clean-up capture")
+                .push(request.into_inner());
+            Ok(tonic::Response::new(pb::InferResponse {
+                content: "Hei der.".to_owned(),
+                model_used: "cleanup-model".to_owned(),
+                ..Default::default()
+            }))
+        }
+
+        async fn infer_stream(
+            &self,
+            _request: tonic::Request<pb::InferRequest>,
+        ) -> Result<tonic::Response<Self::InferStreamStream>, tonic::Status> {
+            unused()
+        }
+
+        async fn create_embedding(
+            &self,
+            _request: tonic::Request<pb::CreateEmbeddingRequest>,
+        ) -> Result<tonic::Response<pb::CreateEmbeddingResponse>, tonic::Status> {
+            unused()
+        }
+
+        async fn list_models(
+            &self,
+            _request: tonic::Request<pb::ListModelsRequest>,
+        ) -> Result<tonic::Response<pb::ListModelsResponse>, tonic::Status> {
+            unused()
+        }
+
+        async fn synthesize_speech(
+            &self,
+            request: tonic::Request<pb::SynthesizeSpeechRequest>,
+        ) -> Result<tonic::Response<pb::SynthesizeSpeechResponse>, tonic::Status> {
+            let request = request.into_inner();
+            let zdr = request.zdr;
+            self.synthesize
+                .lock()
+                .expect("synthesis capture")
+                .push(request);
+            self.refuse_unattested(zdr, "speech synthesis")?;
+            Ok(tonic::Response::new(pb::SynthesizeSpeechResponse {
+                audio: b"mp3-bytes".to_vec(),
+                format: "mp3".to_owned(),
+                ..Default::default()
+            }))
+        }
+
+        async fn transcribe_speech(
+            &self,
+            request: tonic::Request<pb::TranscribeSpeechRequest>,
+        ) -> Result<tonic::Response<pb::TranscribeSpeechResponse>, tonic::Status> {
+            let request = request.into_inner();
+            let zdr = request.zdr;
+            self.transcribe
+                .lock()
+                .expect("transcription capture")
+                .push(request);
+            self.refuse_unattested(zdr, "speech transcription")?;
+            Ok(tonic::Response::new(pb::TranscribeSpeechResponse {
+                text: "eh hei der".to_owned(),
+                detected_language: "nb".to_owned(),
+                model_used: "stt-model".to_owned(),
+                provider_used: "azure-openai".to_owned(),
+                ..Default::default()
+            }))
+        }
+
+        async fn list_speech_voices(
+            &self,
+            _request: tonic::Request<pb::ListSpeechVoicesRequest>,
+        ) -> Result<tonic::Response<pb::ListSpeechVoicesResponse>, tonic::Status> {
+            unused()
+        }
+
+        async fn translate_text(
+            &self,
+            _request: tonic::Request<pb::TranslateTextRequest>,
+        ) -> Result<tonic::Response<pb::TranslateTextResponse>, tonic::Status> {
+            unused()
+        }
+
+        async fn batch_translate_text(
+            &self,
+            _request: tonic::Request<pb::BatchTranslateTextRequest>,
+        ) -> Result<tonic::Response<pb::BatchTranslateTextResponse>, tonic::Status> {
+            unused()
+        }
+
+        async fn detect_text_language(
+            &self,
+            _request: tonic::Request<pb::DetectTextLanguageRequest>,
+        ) -> Result<tonic::Response<pb::DetectTextLanguageResponse>, tonic::Status> {
+            unused()
+        }
+
+        async fn list_translation_languages(
+            &self,
+            _request: tonic::Request<pb::ListTranslationLanguagesRequest>,
+        ) -> Result<tonic::Response<pb::ListTranslationLanguagesResponse>, tonic::Status> {
+            unused()
+        }
+
+        async fn generate_image(
+            &self,
+            _request: tonic::Request<pb::GenerateImageRequest>,
+        ) -> Result<tonic::Response<pb::GenerateImageResponse>, tonic::Status> {
+            unused()
+        }
+
+        async fn analyze_image(
+            &self,
+            _request: tonic::Request<pb::AnalyzeImageRequest>,
+        ) -> Result<tonic::Response<pb::AnalyzeImageResponse>, tonic::Status> {
+            unused()
+        }
+
+        async fn extract_image_text(
+            &self,
+            _request: tonic::Request<pb::ExtractImageTextRequest>,
+        ) -> Result<tonic::Response<pb::ExtractImageTextResponse>, tonic::Status> {
+            unused()
+        }
+
+        async fn analyze_document(
+            &self,
+            _request: tonic::Request<pb::AnalyzeDocumentRequest>,
+        ) -> Result<tonic::Response<pb::AnalyzeDocumentResponse>, tonic::Status> {
+            unused()
+        }
+
+        async fn analyze_language(
+            &self,
+            _request: tonic::Request<pb::AnalyzeLanguageRequest>,
+        ) -> Result<tonic::Response<pb::AnalyzeLanguageResponse>, tonic::Status> {
+            unused()
+        }
+
+        async fn create_realtime_session(
+            &self,
+            _request: tonic::Request<pb::CreateRealtimeSessionRequest>,
+        ) -> Result<tonic::Response<pb::CreateRealtimeSessionResponse>, tonic::Status> {
+            unused()
+        }
+
+        async fn create_video_generation_job(
+            &self,
+            _request: tonic::Request<pb::CreateVideoGenerationJobRequest>,
+        ) -> Result<tonic::Response<pb::CreateVideoGenerationJobResponse>, tonic::Status> {
+            unused()
+        }
+
+        async fn get_video_generation_job(
+            &self,
+            _request: tonic::Request<pb::GetVideoGenerationJobRequest>,
+        ) -> Result<tonic::Response<pb::GetVideoGenerationJobResponse>, tonic::Status> {
+            unused()
+        }
+
+        async fn stream_video_generation_content(
+            &self,
+            _request: tonic::Request<pb::StreamVideoGenerationContentRequest>,
+        ) -> Result<tonic::Response<Self::StreamVideoGenerationContentStream>, tonic::Status>
+        {
+            unused()
+        }
+    }
+
+    /// An `AppState` whose inference client talks to `inference`.
+    async fn state_with(inference: SpeechInference) -> AppState {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind inference stand-in");
+        let address = listener.local_addr().expect("inference stand-in address");
+        tokio::spawn(async move {
+            tonic::transport::Server::builder()
+                .add_service(pb::inference_core_server::InferenceCoreServer::new(
+                    inference,
+                ))
+                .serve_with_incoming(TcpListenerStream::new(listener))
+                .await
+                .ok();
+        });
+        let channel = tonic::transport::Endpoint::from_shared(format!("http://{address}"))
+            .expect("inference stand-in endpoint")
+            .connect()
+            .await
+            .expect("connect inference stand-in");
+        let mut state = AppState::new();
+        state.inference_client = pb::inference_core_client::InferenceCoreClient::new(channel);
+        state
+    }
+
+    fn claims(zdr: bool) -> Claims {
+        Claims {
+            sub: "user-a".to_owned(),
+            iss: "test-issuer".to_owned(),
+            exp: i64::MAX,
+            org_id: "org-a".to_owned(),
+            user_id: "user-a".to_owned(),
+            nbf: None,
+            aud: Some("model-gateway".to_owned()),
+            scopes: Vec::new(),
+            zdr,
+            sovereign: None,
+            principal_type: Some("user".to_owned()),
+            service_id: None,
+            reason: None,
+        }
+    }
+
+    fn bearer() -> VerifiedInferenceBearer {
+        VerifiedInferenceBearer::for_test("inference-test-bearer")
+    }
+
+    /// The body the SPA's dictation client sends, parsed the way the route
+    /// parses it.
+    fn dictation(zdr: bool) -> AiDictateRequest {
+        serde_json::from_value(json!({
+            "audio_base64": STANDARD.encode(b"webm-audio"),
+            "format": "webm",
+            "language": "nb-NO",
+            "context": "chat message",
+            "zdr": zdr,
+        }))
+        .expect("a dictation body parses")
+    }
+
+    fn speech(body: Value) -> AiSpeechRequest {
+        serde_json::from_value(body).expect("a speech body parses")
+    }
+
+    /// Temporary chat sets `zdr` in the body; an organisation that requires
+    /// zero retention sets it in the token. Either way the audio travels with
+    /// the flag, inference-core refuses it, and no clean-up pass runs.
+    #[tokio::test]
+    async fn zdr_dictation_sends_the_flag_with_the_audio_and_is_refused() {
+        for (token_zdr, body_zdr) in [(false, true), (true, false)] {
+            let case = format!("token_zdr={token_zdr} body_zdr={body_zdr}");
+            let inference = SpeechInference::default();
+            let state = state_with(inference.clone()).await;
+
+            let error = ai_dictate(
+                State(state),
+                Extension(claims(token_zdr)),
+                bearer(),
+                Json(dictation(body_zdr)),
+            )
+            .await
+            .expect_err("ZDR dictation must be refused while speech is unattested");
+            assert_eq!(error.0, StatusCode::PRECONDITION_FAILED, "{case}");
+
+            let sent = inference.transcriptions();
+            assert_eq!(sent.len(), 1, "{case}");
+            assert!(sent[0].zdr, "{case}: the audio must carry the ZDR flag");
+            assert!(
+                inference.cleanups().is_empty(),
+                "{case}: a refused transcript must not reach the clean-up pass"
+            );
+        }
+    }
+
+    /// Once a speech deployment is attested, both legs of one dictation carry
+    /// the same flag.
+    #[tokio::test]
+    async fn attested_zdr_dictation_carries_the_flag_on_both_legs() {
+        let inference = SpeechInference {
+            attested: true,
+            ..SpeechInference::default()
+        };
+        let state = state_with(inference.clone()).await;
+
+        let Json(body) = ai_dictate(
+            State(state),
+            Extension(claims(false)),
+            bearer(),
+            Json(dictation(true)),
+        )
+        .await
+        .expect("an attested stand-in serves ZDR dictation");
+        assert_eq!(body["cleaned"], true);
+
+        let sent = inference.transcriptions();
+        let cleanups = inference.cleanups();
+        assert_eq!((sent.len(), cleanups.len()), (1, 1));
+        assert!(sent[0].zdr, "speech-to-text leg");
+        assert!(cleanups[0].zdr, "clean-up leg");
+    }
+
+    #[tokio::test]
+    async fn ordinary_dictation_is_transcribed_and_cleaned_without_zdr() {
+        let inference = SpeechInference::default();
+        let state = state_with(inference.clone()).await;
+
+        let Json(body) = ai_dictate(
+            State(state),
+            Extension(claims(false)),
+            bearer(),
+            Json(dictation(false)),
+        )
+        .await
+        .expect("ordinary dictation succeeds");
+        assert_eq!(body["text"], "Hei der.");
+        assert_eq!(body["raw_text"], "eh hei der");
+        assert_eq!(body["cleaned"], true);
+
+        let sent = inference.transcriptions();
+        assert_eq!(sent.len(), 1);
+        assert!(!sent[0].zdr);
+        assert_eq!(sent[0].audio, b"webm-audio");
+        assert_eq!(sent[0].provider_hint, "azure-openai");
+        let cleanups = inference.cleanups();
+        assert_eq!(cleanups.len(), 1);
+        assert!(!cleanups[0].zdr);
+    }
+
+    /// `/v1/ai/speech` read no `zdr` at all before, so Temporary chat's flag
+    /// was dropped for both read-aloud and transcription.
+    #[tokio::test]
+    async fn zdr_speech_route_sends_the_flag_and_is_refused() {
+        for (token_zdr, body_zdr) in [(false, true), (true, false)] {
+            let case = format!("token_zdr={token_zdr} body_zdr={body_zdr}");
+            let inference = SpeechInference::default();
+            let state = state_with(inference.clone()).await;
+
+            let tts = ai_speech(
+                State(state.clone()),
+                Extension(claims(token_zdr)),
+                bearer(),
+                Json(speech(json!({
+                    "operation": "tts",
+                    "text": "Hei der.",
+                    "voice": "nb-NO-PernilleNeural",
+                    "format": "mp3",
+                    "provider": "azure-speech",
+                    "zdr": body_zdr,
+                }))),
+            )
+            .await
+            .expect_err("ZDR synthesis must be refused while speech is unattested");
+            assert_eq!(tts.0, StatusCode::PRECONDITION_FAILED, "{case}");
+
+            let stt = ai_speech(
+                State(state),
+                Extension(claims(token_zdr)),
+                bearer(),
+                Json(speech(json!({
+                    "operation": "stt",
+                    "audio_base64": STANDARD.encode(b"mp3-audio"),
+                    "zdr": body_zdr,
+                }))),
+            )
+            .await
+            .expect_err("ZDR transcription must be refused while speech is unattested");
+            assert_eq!(stt.0, StatusCode::PRECONDITION_FAILED, "{case}");
+
+            let syntheses = inference.syntheses();
+            let transcriptions = inference.transcriptions();
+            assert_eq!((syntheses.len(), transcriptions.len()), (1, 1), "{case}");
+            assert!(syntheses[0].zdr, "{case}: text-to-speech");
+            assert!(transcriptions[0].zdr, "{case}: speech-to-text");
+        }
+    }
+
+    #[tokio::test]
+    async fn ordinary_speech_route_calls_are_served_without_zdr() {
+        let inference = SpeechInference::default();
+        let state = state_with(inference.clone()).await;
+
+        let Json(tts) = ai_speech(
+            State(state.clone()),
+            Extension(claims(false)),
+            bearer(),
+            Json(speech(
+                json!({ "text": "Hei der.", "provider": "azure-speech" }),
+            )),
+        )
+        .await
+        .expect("ordinary synthesis succeeds");
+        assert_eq!(tts["audio_base64"], STANDARD.encode(b"mp3-bytes"));
+
+        let Json(stt) = ai_speech(
+            State(state),
+            Extension(claims(false)),
+            bearer(),
+            Json(speech(
+                json!({ "audio_base64": STANDARD.encode(b"mp3-audio") }),
+            )),
+        )
+        .await
+        .expect("ordinary transcription succeeds");
+        assert_eq!(stt["text"], "eh hei der");
+
+        assert!(!inference.syntheses()[0].zdr);
+        assert!(!inference.transcriptions()[0].zdr);
+    }
+
+    /// `ai_routes()` with the identity the auth middleware would attach, so a
+    /// request reaches the handler's body extractor.
+    fn ai_router(state: AppState) -> Router {
+        ai_routes()
+            .with_state(state)
+            .layer(Extension(claims(false)))
+            .layer(Extension(bearer()))
+    }
+
+    /// A JSON body of at least `size` bytes whose valid base64 `field` fills it.
+    fn base64_body(size: usize, field: &str) -> Vec<u8> {
+        let prefix = format!("{{\"format\":\"webm\",\"{field}\":\"");
+        let suffix = "\"}";
+        let quads = (size - prefix.len() - suffix.len()).div_ceil(4);
+        let mut body = prefix.into_bytes();
+        body.resize(body.len() + quads * 4, b'A');
+        body.extend_from_slice(suffix.as_bytes());
+        body
+    }
+
+    async fn post_json(router: Router, uri: &str, body: Vec<u8>) -> StatusCode {
+        let request = axum::http::Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header(CONTENT_TYPE, "application/json")
+            .body(Body::from(body))
+            .expect("request builds");
+        router
+            .oneshot(request)
+            .await
+            .expect("the router answers")
+            .status()
+    }
+
+    const MIB: usize = 1024 * 1024;
+
+    /// Base64 in JSON held recordings to about 1.5 MiB under axum's 2 MiB
+    /// default. The audio routes now take 8 MiB bodies.
+    #[tokio::test]
+    async fn audio_routes_accept_a_3_mib_body_and_refuse_9_mib_with_413() {
+        let inference = SpeechInference::default();
+        let state = state_with(inference.clone()).await;
+
+        for uri in ["/v1/ai/dictate", "/v1/ai/speech"] {
+            let accepted = post_json(
+                ai_router(state.clone()),
+                uri,
+                base64_body(3 * MIB, "audio_base64"),
+            )
+            .await;
+            assert_eq!(accepted, StatusCode::OK, "{uri}: 3 MiB reaches the handler");
+
+            let refused = post_json(
+                ai_router(state.clone()),
+                uri,
+                base64_body(9 * MIB, "audio_base64"),
+            )
+            .await;
+            assert_eq!(refused, StatusCode::PAYLOAD_TOO_LARGE, "{uri}: 9 MiB");
+        }
+
+        let sent = inference.transcriptions();
+        assert_eq!(sent.len(), 2, "only the two 3 MiB bodies were transcribed");
+        assert!(
+            sent.iter().all(|request| request.audio.len() > 2 * MIB),
+            "each take carries more audio than a whole 2 MiB body could"
+        );
+    }
+
+    /// The raised limit is scoped to the audio routes.
+    #[tokio::test]
+    async fn other_ai_routes_keep_the_2_mib_default() {
+        let state = state_with(SpeechInference::default()).await;
+
+        let status = post_json(
+            ai_router(state),
+            "/v1/ai/images/ocr",
+            base64_body(3 * MIB, "content_base64"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
     }
 }
