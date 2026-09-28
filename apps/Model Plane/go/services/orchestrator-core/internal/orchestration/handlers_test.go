@@ -35,6 +35,7 @@ type stubClient struct {
 	ackApprovalDeliveryResp      *mpv1.AcknowledgeApprovalDeliveryResponse
 	getSubagentLineageResp       *mpv1.GetSubagentLineageResponse
 	attachSubagentResp           *mpv1.AttachSubagentResponse
+	getRunProofBundleResp        *mpv1.GetRunProofBundleResponse
 }
 
 func (s *stubClient) ListPlans(ctx context.Context, in *mpv1.ListPlansRequest, opts ...grpc.CallOption) (*mpv1.ListPlansResponse, error) {
@@ -90,18 +91,17 @@ func (s *stubClient) ClaimApprovalDeliveries(ctx context.Context, in *mpv1.Claim
 	return s.claimApprovalDeliveriesResp, s.err
 }
 
-// The approval-continuation trio. These handlers do not exercise them, but a
-// stub must satisfy the whole client interface or the package fails to build.
-// GetRunProofBundle and GetVerificationMetrics predate this stub's own
-// completeness: the Go bindings for both were only just regenerated from a
-// .proto contract that had already declared them (GetRunProofBundle since
-// P1.2's proof bundle; GetVerificationMetrics new here for P1.5) - neither
-// method reaches this handler path, but a stub must satisfy the whole
-// client interface or the package fails to build.
+// GetRunProofBundle is now proxied by Handlers (F-15 fix) and exercised by
+// the tests below like every other unary RPC.
 func (s *stubClient) GetRunProofBundle(ctx context.Context, in *mpv1.GetRunProofBundleRequest, opts ...grpc.CallOption) (*mpv1.GetRunProofBundleResponse, error) {
 	s.lastReq = in
-	return nil, s.err
+	return s.getRunProofBundleResp, s.err
 }
+
+// GetVerificationMetrics predates this stub's own completeness: the Go
+// bindings were only just regenerated from a .proto contract that had
+// already declared it (P1.5) - it does not yet reach a handler path, but a
+// stub must satisfy the whole client interface or the package fails to build.
 func (s *stubClient) GetVerificationMetrics(ctx context.Context, in *mpv1.GetVerificationMetricsRequest, opts ...grpc.CallOption) (*mpv1.GetVerificationMetricsResponse, error) {
 	s.lastReq = in
 	return nil, s.err
@@ -159,6 +159,7 @@ func TestHandlers_NilClient(t *testing.T) {
 		{"DecideApproval", func() error { _, e := h.DecideApproval(ctx, &mpv1.DecideApprovalRequest{}); return e }},
 		{"GetSubagentLineage", func() error { _, e := h.GetSubagentLineage(ctx, &mpv1.GetSubagentLineageRequest{}); return e }},
 		{"AttachSubagent", func() error { _, e := h.AttachSubagent(ctx, &mpv1.AttachSubagentRequest{}); return e }},
+		{"GetRunProofBundle", func() error { _, e := h.GetRunProofBundle(ctx, &mpv1.GetRunProofBundleRequest{}); return e }},
 	}
 	for _, c := range calls {
 		t.Run(c.name, func(t *testing.T) {
@@ -187,6 +188,7 @@ func TestHandlers_ProxyToClient(t *testing.T) {
 		decideApprovalResp:     &mpv1.DecideApprovalResponse{},
 		getSubagentLineageResp: &mpv1.GetSubagentLineageResponse{},
 		attachSubagentResp:     &mpv1.AttachSubagentResponse{},
+		getRunProofBundleResp:  &mpv1.GetRunProofBundleResponse{Bundle: &mpv1.RunProofBundle{RunId: "run_01"}},
 	}
 	h := NewHandlers(nil, stub)
 	ctx := context.Background()
@@ -256,6 +258,12 @@ func TestHandlers_ProxyToClient(t *testing.T) {
 	require.NoError(t, err)
 	assert.Same(t, stub.attachSubagentResp, resp11)
 	assert.Same(t, attachSubagentReq, stub.lastReq)
+
+	getRunProofBundleReq := &mpv1.GetRunProofBundleRequest{RunId: "run_01", OrgId: "org_01"}
+	resp12, err := h.GetRunProofBundle(ctx, getRunProofBundleReq)
+	require.NoError(t, err)
+	assert.Same(t, stub.getRunProofBundleResp, resp12)
+	assert.Same(t, getRunProofBundleReq, stub.lastReq)
 }
 
 // TestHandlers_PropagatesUpstreamError verifies upstream errors surface unchanged.

@@ -26,11 +26,11 @@ type userServiceHandler struct {
 
 // convertBetterAuthUser converts a Better Auth user to internal User type
 func convertBetterAuthUser(baUser *clients.User) *users.User {
-	var status users.UserStatus
+	var userStatus users.UserStatus
 	if baUser.Banned {
-		status = users.UserStatusBlocked
+		userStatus = users.UserStatusBlocked
 	} else {
-		status = users.UserStatusActive
+		userStatus = users.UserStatusActive
 	}
 
 	user := &users.User{
@@ -38,7 +38,7 @@ func convertBetterAuthUser(baUser *clients.User) *users.User {
 		Email:         baUser.Email,
 		Name:          baUser.Name,
 		EmailVerified: baUser.EmailVerified,
-		Status:        status,
+		Status:        userStatus,
 		CreatedAt:     baUser.CreatedAt,
 		UpdatedAt:     baUser.UpdatedAt,
 	}
@@ -151,7 +151,7 @@ func (h *userServiceHandler) CreateUser(ctx context.Context, req *pb.CreateUserR
 
 	// Publish user created event
 	if h.publisher != nil {
-		metadata := map[string]interface{}{
+		metadata := map[string]any{
 			"source": "grpc",
 		}
 		if err := h.publisher.PublishUserCreated(ctx, user.ID, user.Email, user.Name, string(user.Status), metadata); err != nil {
@@ -197,16 +197,16 @@ func (h *userServiceHandler) GetUserByEmail(ctx context.Context, req *pb.GetUser
 		Limit:  1,
 	}
 
-	users, _, err := h.betterAuthClient.ListUsers(ctx, listReq)
+	foundUsers, _, err := h.betterAuthClient.ListUsers(ctx, listReq)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "failed to search user: %v", err)
 	}
 
-	if len(users) == 0 {
+	if len(foundUsers) == 0 {
 		return nil, status.Error(codes.NotFound, "user not found")
 	}
 
-	user := convertBetterAuthUser(&users[0])
+	user := convertBetterAuthUser(&foundUsers[0])
 
 	return &pb.GetUserByEmailResponse{
 		User: user.ToProto(),
@@ -749,23 +749,32 @@ func (h *userServiceHandler) RemoveRole(ctx context.Context, req *pb.RemoveRoleR
 	return &pb.RemoveRoleResponse{Success: true}, nil
 }
 
-// RegisterDevice, ListDevices, UpdateDevice, DeactivateDevice are not implemented.
-// Device tracking is handled by better-auth session metadata (user_agent / ip_address).
+// RegisterDevice is not implemented: device tracking is handled by
+// better-auth session metadata (user_agent / ip_address).
 func (h *userServiceHandler) RegisterDevice(_ context.Context, _ *pb.RegisterDeviceRequest) (*pb.RegisterDeviceResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "device management not required; use session user_agent/ip tracking")
 }
+
+// ListDevices is not implemented: device tracking is handled by better-auth
+// session metadata (user_agent / ip_address).
 func (h *userServiceHandler) ListDevices(_ context.Context, _ *pb.ListDevicesRequest) (*pb.ListDevicesResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "device management not required; use session user_agent/ip tracking")
 }
+
+// UpdateDevice is not implemented: device tracking is handled by better-auth
+// session metadata (user_agent / ip_address).
 func (h *userServiceHandler) UpdateDevice(_ context.Context, _ *pb.UpdateDeviceRequest) (*pb.UpdateDeviceResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "device management not required; use session user_agent/ip tracking")
 }
+
+// DeactivateDevice is not implemented: device tracking is handled by
+// better-auth session metadata (user_agent / ip_address).
 func (h *userServiceHandler) DeactivateDevice(_ context.Context, _ *pb.DeactivateDeviceRequest) (*pb.DeactivateDeviceResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "device management not required; use session user_agent/ip tracking")
 }
 
 // HealthCheck performs a health check
-func (h *userServiceHandler) HealthCheck(ctx context.Context, req *pb.HealthCheckRequest) (*pb.HealthCheckResponse, error) {
+func (h *userServiceHandler) HealthCheck(_ context.Context, _ *pb.HealthCheckRequest) (*pb.HealthCheckResponse, error) {
 	return &pb.HealthCheckResponse{
 		Status:  pb.HealthCheckResponse_SERVING,
 		Message: "User Service is healthy",

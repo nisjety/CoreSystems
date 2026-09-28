@@ -321,6 +321,53 @@ func TestGoogleKnowledgeBundleUsesDriveReadScope(t *testing.T) {
 	}
 }
 
+// Owner ruling (security-personal-connections, 2026-09-28): IsPersonalProvider
+// is the one place that decides which connections owner ruling 5 ("usable
+// ONLY by the user who connected it") applies to. Only Microsoft and Google
+// are personal; every other catalog provider is org-wide/shared.
+func TestIsPersonalProvider(t *testing.T) {
+	personal := []string{
+		"microsoft", "microsoft-graph", "onedrive", "outlook", "teams", "sharepoint", "m365",
+		"google", "google-workspace", "gmail", "drive", "gdrive",
+		// Case/whitespace must not matter: real callers pass ProviderKey or
+		// ConnectorType exactly as stored, but NormalizeKey underneath
+		// already handles this — pinned here since the ownership gate
+		// depends on it.
+		"MICROSOFT", " google ",
+	}
+	for _, key := range personal {
+		if !IsPersonalProvider(key) {
+			t.Errorf("IsPersonalProvider(%q) = false, want true", key)
+		}
+	}
+
+	orgWide := []string{
+		"slack", "github", "notion", "shopify", "stripe", "linkedin", "x",
+		"meta", "instagram", "facebook", "whatsapp", "meta-ads", "tiktok",
+		"snapchat", "okta", "scim", "openai-codex-subscription",
+		"", "not-a-real-provider",
+	}
+	for _, key := range orgWide {
+		if IsPersonalProvider(key) {
+			t.Errorf("IsPersonalProvider(%q) = true, want false (org-wide/shared)", key)
+		}
+	}
+}
+
+// Every provider actually returned by the live catalog must agree with
+// IsPersonalProvider on exactly Microsoft and Google — this is the
+// regression guard for "a new catalog entry silently becomes personal (or
+// stops being personal) without anyone deciding that on purpose".
+func TestIsPersonalProviderMatchesCatalogForExactlyMicrosoftAndGoogle(t *testing.T) {
+	want := map[string]bool{"microsoft": true, "google": true}
+	for _, provider := range Catalog() {
+		got := IsPersonalProvider(provider.Key)
+		if got != want[provider.Key] {
+			t.Errorf("IsPersonalProvider(%q) = %v, want %v", provider.Key, got, want[provider.Key])
+		}
+	}
+}
+
 func TestMetaInboxScopesIncludeInstagramMessaging(t *testing.T) {
 	meta, ok := FindOAuth("meta")
 	if !ok {

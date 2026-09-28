@@ -1,0 +1,30 @@
+--- a/src/features/core/components/FilledRailIcon.tsx
++++ b/src/features/core/components/FilledRailIcon.tsx
+@@ -2,7 +2,7 @@
+  * readable instead of applying fill to Lucide's open outline paths. */
+ const paths: Record<string, string> = {
+   overview: 'M12 2 2 10v2h2v9h6v-7h4v7h6v-9h2v-2L12 2Z',
+-  messages: 'M5 3a3 3 0 0 0-3 3v16l5-4h12a3 3 0 0 0 3-3V6a3 3 0 0 0-3-3H5Z',
++  messages: 'M12 2a10 10 0 0 0-8.5 15.3L2 22l4.7-1.5A10 10 0 1 0 12 2ZM7 11a1 1 0 1 1 0 2 1 1 0 0 1 0-2Zm5 0a1 1 0 1 1 0 2 1 1 0 0 1 0-2Zm5 0a1 1 0 1 1 0 2 1 1 0 0 1 0-2Z',
+   spaces: 'M9 2a4 4 0 1 0 0 8 4 4 0 0 0 0-8Zm9 2a3 3 0 1 0 0 6 3 3 0 0 0 0-6ZM2 20v-3a6 6 0 0 1 12 0v3H2Zm14 0v-3a8 8 0 0 0-1-4h3a4 4 0 0 1 4 4v3h-6Z',
+   inbox: 'M5 3h14l3 9v7a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2v-7l3-9Zm1.5 2L4 12h5v3h6v-3h5l-2.5-7h-11Z',
+   marketing: 'M3 2h18v15h-8v3l4 2h-4l-1-1-1 1H7l4-2v-3H3V2Zm2 3v9h14V5H5Z',
+--- a/src/features/core/components/CoreSidebar.tsx
++++ b/src/features/core/components/CoreSidebar.tsx
+@@ -7,6 +7,7 @@
+   Fingerprint,
+   Folder,
+   Mail,
++  MessageCircleMore,
+   MessageSquarePlus,
+   MoreVertical,
+   PanelLeftClose,
+@@ -1116,7 +1117,7 @@
+       title={props.section.label}
+       class={cn('core-mini-nav-button', props.active ? 'verevon-sidebar-mini-active' : '')}
+     >
+-      <Show when={props.active && chatAppearanceActive('navigation')} fallback={<Dynamic component={props.section.icon} class="size-[18px]" strokeWidth={props.active ? 2 : 1.6} />}>
++      <Show when={props.active && chatAppearanceActive('navigation')} fallback={<Dynamic component={props.section.id === 'messages' && chatAppearanceActive('navigation') ? MessageCircleMore : props.section.icon} class="size-[18px]" strokeWidth={props.active ? 2 : 1.6} />}>
+         <FilledRailIcon name={props.section.id} />
+       </Show>
+     </a>

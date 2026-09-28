@@ -230,7 +230,7 @@ describe('v2 dashboard shell port', () => {
     )).toBe(true)
   })
 
-  it('stores submitted dashboard composer turns in the v2-style history panel', () => {
+  it('stores submitted dashboard composer turns in the v2-style history panel', async () => {
     renderWithRouter(() => <DashboardHome workspace={demoWorkspaceIdentity} />)
 
     fireEvent.input(screen.getByRole('textbox', { name: 'Meld Verevon' }), {
@@ -240,7 +240,10 @@ describe('v2 dashboard shell port', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Send melding' }))
     flush()
 
-    expect(screen.getByText('Oppsummer kundesaker')).toBeTruthy()
+    // The send is async: the turn is recorded once the pending-chat handoff
+    // (`writePendingChatLaunch`) resolves, a tick after the click. Verevon
+    // Balance is an intent mode, so there is no catalogue tier wait here.
+    expect(await screen.findByText('Oppsummer kundesaker')).toBeTruthy()
     // The composer model selector defaults to the "Verevon Balance" intent mode
     // (resolved server-side, cost-aware); no concrete catalog model is shown until
     // the user picks one.

@@ -2,6 +2,13 @@
 
 Updated: 2026-07-13
 
+> **Learning foundation added 2026-09-24:** [Learning Plane](learning-plane/README.md)
+> owns human-learning courses, revisions, assignments and attempts. Its first
+> consumer is [Teachme / Learn Core](Frontend%20Plane/learn-core/README.md):
+> Next.js marketing, Vite/Solid 2 dashboard and native C#/.NET Windows companion.
+> This is a source foundation, not an integrated school deployment. Existing
+> plane runtime statements below retain their original verification dates.
+
 > **Model Plane runtime correction (2026-07-13):** ownership and target
 > architecture below remain valid, but the running `model-gateway:9090` and
 > `inference-core:9092` listeners are absent despite green HTTP health. Current
@@ -24,6 +31,8 @@ Scope:
 - `apps/Model Plane`
 - `apps/Ingestion Plane`
 - `apps/Frontend Plane/verevonv3`
+- `apps/learning-plane` — human-learning domain foundation; integrations pending.
+- `apps/Frontend Plane/learn-core` — Teachme marketing, dashboard and Windows clients.
 
 Reference-only:
 - `apps/Channel Plane` remains future/docs-only.

@@ -471,6 +471,10 @@ services:
             DATABASE_URL: postgresql://${APPLICATION_PLANE_DB_USER:-${NOTIFICATION_DB_USER:-notifuser}}:${APPLICATION_PLANE_DB_PASSWORD:?APPLICATION_PLANE_DB_PASSWORD must be set}@application-postgres:5432/${APPLICATION_PLANE_DB_NAME:-${NOTIFICATION_DB_NAME:-notifications}}
             CONVERSATION_GATEWAY_SERVICE_TOKEN: ${CONVERSATION_GATEWAY_SERVICE_TOKEN:?CONVERSATION_GATEWAY_SERVICE_TOKEN must be set for signed gateway delegation}
             CONVERSATION_CORE_INGEST_SERVICE_TOKEN: ${CONVERSATION_CORE_INGEST_SERVICE_TOKEN:?CONVERSATION_CORE_INGEST_SERVICE_TOKEN must be set for signed ingest delegation}
+            # Optional, unlike the two above: unset simply means this deployment
+            # registers no model-gateway principal, and Verevon chat reports the
+            # inbox as unconfigured instead of failing a turn.
+            CONVERSATION_MODEL_GATEWAY_SERVICE_TOKEN: ${CONVERSATION_MODEL_GATEWAY_SERVICE_TOKEN:-}
             VEREVON_NATS_URL: nats://application-nats:4222
             NATS_USER: application-conversation
             NATS_PASSWORD: ${APPLICATION_CONVERSATION_NATS_PASSWORD:?APPLICATION_CONVERSATION_NATS_PASSWORD must be set}

@@ -1055,13 +1055,13 @@ type OrchestratorWorkflowServiceClient interface {
 	//
 	// Before this RPC existed, every workflow the worker registers had zero
 	// production callers. It is deliberately narrow:
-	//   - `workflow_type` is matched against a server-side ALLOWLIST of the
+	//   * `workflow_type` is matched against a server-side ALLOWLIST of the
 	//     names the worker actually registers. An unknown name is rejected by
 	//     name; a caller string is never handed to Temporal as a workflow type.
-	//   - tenancy is server-authoritative. `org_id`/`user_id` are taken from the
+	//   * tenancy is server-authoritative. `org_id`/`user_id` are taken from the
 	//     verified caller and overwrite whatever `input` carries, so a caller
 	//     cannot start work in another organization.
-	//   - the workflow id is derived deterministically from
+	//   * the workflow id is derived deterministically from
 	//     (workflow_type, org_id, run_id | idempotency_key), so a retried call
 	//     attaches to the existing execution instead of double-starting a run.
 	StartWorkflow(ctx context.Context, in *StartWorkflowRequest, opts ...grpc.CallOption) (*StartWorkflowResponse, error)
@@ -1103,13 +1103,13 @@ type OrchestratorWorkflowServiceServer interface {
 	//
 	// Before this RPC existed, every workflow the worker registers had zero
 	// production callers. It is deliberately narrow:
-	//   - `workflow_type` is matched against a server-side ALLOWLIST of the
+	//   * `workflow_type` is matched against a server-side ALLOWLIST of the
 	//     names the worker actually registers. An unknown name is rejected by
 	//     name; a caller string is never handed to Temporal as a workflow type.
-	//   - tenancy is server-authoritative. `org_id`/`user_id` are taken from the
+	//   * tenancy is server-authoritative. `org_id`/`user_id` are taken from the
 	//     verified caller and overwrite whatever `input` carries, so a caller
 	//     cannot start work in another organization.
-	//   - the workflow id is derived deterministically from
+	//   * the workflow id is derived deterministically from
 	//     (workflow_type, org_id, run_id | idempotency_key), so a retried call
 	//     attaches to the existing execution instead of double-starting a run.
 	StartWorkflow(context.Context, *StartWorkflowRequest) (*StartWorkflowResponse, error)

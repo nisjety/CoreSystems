@@ -6,8 +6,8 @@
 -- string fields. `GetOrCreateUser` then treated *any* GetByID error as
 -- "user doesn't exist", attempted INSERT, and hit a primary-key violation.
 --
--- §8.23 applied a band-aid by wrapping the 8 SELECT/RETURNING queries in
--- `COALESCE(col, '')`. This migration makes that band-aid unnecessary by
+-- §8.23 applied a Band-Aid by wrapping the 8 SELECT/RETURNING queries in
+-- `COALESCE(col, '')`. This migration makes that Band-Aid unnecessary by
 -- enforcing the in-app contract at the schema level: both columns are
 -- non-null with an empty-string default. Empty string is already the
 -- sentinel `GetOrCreateUser` writes for OAuth users (see

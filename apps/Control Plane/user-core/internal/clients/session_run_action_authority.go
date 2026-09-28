@@ -50,7 +50,7 @@ func NewSessionRunActionAuthorityClient(addr, bearer string, transport SessionRu
 		return nil, nil
 	}
 	if strings.HasPrefix(strings.ToLower(bearer), "bearer ") {
-		return nil, fmt.Errorf("Control Session Core bearer must not include an authorization scheme")
+		return nil, fmt.Errorf("the Control Session Core bearer must not include an authorization scheme")
 	}
 	transportCredentials, err := sessionRunActionAuthorityTransportCredentials(addr, transport)
 	if err != nil {
@@ -85,7 +85,7 @@ func sessionRunActionAuthorityTransportCredentials(addr string, transport Sessio
 		}
 		roots := x509.NewCertPool()
 		if !roots.AppendCertsFromPEM(pem) {
-			return nil, fmt.Errorf("Session Core run authority TLS CA is invalid")
+			return nil, fmt.Errorf("the Session Core run authority TLS CA is invalid")
 		}
 		tlsConfig.RootCAs = roots
 	}
@@ -114,7 +114,7 @@ func (c *SessionRunActionAuthorityClient) Close() error {
 // error so the HTTP issuer does not turn an absent run into permissive state.
 func (c *SessionRunActionAuthorityClient) ResolveRunActionAuthority(ctx context.Context, runID, orgID string) (spaces.RunActionAuthority, error) {
 	if c == nil || c.client == nil || strings.TrimSpace(c.bearer) == "" {
-		return spaces.RunActionAuthority{}, fmt.Errorf("Session Core run action authority client is not configured")
+		return spaces.RunActionAuthority{}, fmt.Errorf("the Session Core run action authority client is not configured")
 	}
 	runID = strings.TrimSpace(runID)
 	orgID = strings.TrimSpace(orgID)
@@ -136,7 +136,7 @@ func (c *SessionRunActionAuthorityClient) ResolveRunActionAuthority(ctx context.
 // subject; Session Core derives it from the durable prepared-run metadata.
 func (c *SessionRunActionAuthorityClient) ResolveScheduledStepAuthority(ctx context.Context, intent spaces.ScheduledStepIntent) (spaces.ScheduledStepAuthority, error) {
 	if c == nil || c.client == nil || strings.TrimSpace(c.bearer) == "" {
-		return spaces.ScheduledStepAuthority{}, fmt.Errorf("Session Core scheduled step authority client is not configured")
+		return spaces.ScheduledStepAuthority{}, fmt.Errorf("the Session Core scheduled step authority client is not configured")
 	}
 	if err := intent.ValidateAuthorityRequest(); err != nil {
 		return spaces.ScheduledStepAuthority{}, fmt.Errorf("invalid scheduled step authority request: %w", err)
@@ -158,7 +158,7 @@ func (c *SessionRunActionAuthorityClient) ResolveScheduledStepAuthority(ctx cont
 
 func scheduledStepAuthorityFromResponse(response *mpv1.ResolveScheduledStepAuthorityResponse) (spaces.ScheduledStepAuthority, error) {
 	if response == nil || !response.GetResolved() {
-		return spaces.ScheduledStepAuthority{}, fmt.Errorf("Session Core did not resolve the requested scheduled step authority")
+		return spaces.ScheduledStepAuthority{}, fmt.Errorf("the requested scheduled step authority was not resolved by Session Core")
 	}
 	authority := spaces.ScheduledStepAuthority{
 		RunID: response.GetRunId(), ThreadID: response.GetThreadId(), OrgID: response.GetOrgId(),
@@ -175,10 +175,10 @@ func scheduledStepAuthorityFromResponse(response *mpv1.ResolveScheduledStepAutho
 
 func runActionAuthorityFromResponse(response *mpv1.ResolveRunActionAuthorityResponse) (spaces.RunActionAuthority, error) {
 	if response == nil || !response.GetResolved() {
-		return spaces.RunActionAuthority{}, fmt.Errorf("Session Core did not resolve the requested run authority")
+		return spaces.RunActionAuthority{}, fmt.Errorf("the requested run authority was not resolved by Session Core")
 	}
 	if response.GetRecipientAudienceRevision() > math.MaxInt64 || response.GetAuthorityRevision() > math.MaxInt64 {
-		return spaces.RunActionAuthority{}, fmt.Errorf("Session Core run action authority revision is out of range")
+		return spaces.RunActionAuthority{}, fmt.Errorf("the Session Core run action authority revision is out of range")
 	}
 	authority := spaces.RunActionAuthority{
 		RunID: response.GetRunId(), OrgID: response.GetOrgId(), SubjectID: response.GetSubjectId(),

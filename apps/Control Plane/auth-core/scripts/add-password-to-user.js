@@ -15,7 +15,8 @@
  * bcrypt hash is printed, which is what the SQL needs.
  */
 const bcrypt = require('bcrypt');
-const crypto = require('crypto');
+
+// crypto.randomUUID comes from the Node global (>= v19); no import needed.
 
 const SALT_ROUNDS = 10;
 

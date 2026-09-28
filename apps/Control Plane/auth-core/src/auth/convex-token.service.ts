@@ -1,5 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import {
+  createHash,
   createPrivateKey,
   createPublicKey,
   createSign,
@@ -176,6 +177,22 @@ type PlaneJwtClaims = {
   serviceId?: string;
   reason?: string;
   retentionPosture?: ServiceRetentionPosture | InteractiveRetentionPosture;
+  /**
+   * Delegated-identity token exchange (auth-core §1, `verifyPlaneSubjectToken`
+   * / `/api/:audience/token-exchange`). Set only on the exchanged service
+   * token so the downstream consumer (e.g. integration-corev2's
+   * `VerifyToken`) can read a real, cryptographically-bound acting user
+   * alongside the service identity. `principal_type` stays `"service"` —
+   * this is an additive claim, not a different token shape.
+   */
+  actingUserId?: string;
+  /**
+   * Lets one call site mint a token shorter-lived than the audience's
+   * configured default (never longer — any value `>=` the audience default
+   * is ignored). Used by the token-exchange endpoint to mint a 90s token
+   * distinct from `/internal-token`'s normal TTL for the same audience.
+   */
+  ttlSecondsOverride?: number;
 };
 
 type PlaneTokenBundle = {
@@ -197,6 +214,20 @@ export type VerifiedPlaneServicePrincipal = {
   orgId: string;
   scopes: readonly string[];
   reason: string;
+};
+
+/**
+ * Result of `verifyPlaneSubjectToken` — the delegated-identity token-exchange
+ * subject check (auth-core §1). `audience` is the subject token's own raw
+ * `aud` claim (one of `allowedAudiences`, matched during verification) so a
+ * caller can gate further authorization (e.g. a registry's `tokenExchange`
+ * map) on exactly which audience the subject token was issued for.
+ */
+export type VerifiedPlaneSubjectToken = {
+  orgId: string;
+  userId: string;
+  zdr: boolean;
+  audience: string;
 };
 
 export class PlaneTokenVerificationError extends Error {}
@@ -398,6 +429,22 @@ export class ConvexTokenService {
   private readonly publicKey: KeyObject;
   private readonly publicJwk: Record<string, unknown>;
 
+  /**
+   * Single-use marker for `verifyPlaneSubjectToken` (delegated-identity
+   * token exchange, §1/T-2). Keyed by a SHA-256 digest of the raw subject
+   * token string (subject tokens mint with no `jti` today, so the full
+   * token is the only value guaranteed unique per mint — its `iat` makes
+   * two independently-minted tokens for the same claims collide only if
+   * minted within the same wall-clock second, which `nbf`/`exp` bounds
+   * already require to also match, i.e. never in practice for two distinct
+   * mints). In-memory and process-local by design: it only has to survive
+   * the token's own short TTL, not a restart — mirrors the pattern
+   * `conversation-ingest-rs`'s `ReplayCache` already uses elsewhere in this
+   * codebase. Value is the token's own `exp` in epoch milliseconds, used to
+   * prune stale entries so the map never grows unbounded.
+   */
+  private readonly subjectTokenExchangeSeen = new Map<string, number>();
+
   constructor() {
     const keyPair = this.loadKeyPair();
     this.privateKey = keyPair.privateKey;
@@ -562,7 +609,22 @@ export class ConvexTokenService {
     if (principalType === 'user' && claims.serviceId) {
       throw new Error('User token cannot carry a service identity');
     }
+    if (claims.actingUserId !== undefined && principalType !== 'service') {
+      throw new Error(
+        'Acting-user identity can only be carried on a service token',
+      );
+    }
     const zdr = issuedTokenZdr(principalType, claims);
+    // Never lengthens a token beyond the audience's configured default —
+    // only a strictly shorter override is honored, so a caller-supplied
+    // value can only narrow the exposure window, never widen it.
+    const ttlSeconds =
+      claims.ttlSecondsOverride !== undefined &&
+      Number.isFinite(claims.ttlSecondsOverride) &&
+      claims.ttlSecondsOverride > 0 &&
+      claims.ttlSecondsOverride < config.ttlSeconds
+        ? claims.ttlSecondsOverride
+        : config.ttlSeconds;
     const now = Math.floor(Date.now() / 1000);
     const payload = {
       iss: this.planeIssuer,
@@ -570,11 +632,14 @@ export class ConvexTokenService {
       sub: claims.userId,
       iat: now,
       nbf: now - 5,
-      exp: now + config.ttlSeconds,
+      exp: now + ttlSeconds,
       org_id: claims.orgId,
       ...(principalType === 'user' ? { user_id: claims.userId } : {}),
       principal_type: principalType,
       ...(principalType === 'service' ? { service_id: claims.userId } : {}),
+      ...(principalType === 'service' && claims.actingUserId
+        ? { acting_user_id: claims.actingUserId }
+        : {}),
       ...(claims.reason ? { reason: claims.reason } : {}),
       ...(claims.email ? { email: claims.email } : {}),
       ...(claims.scopes && claims.scopes.length > 0
@@ -597,12 +662,12 @@ export class ConvexTokenService {
     signer.end();
 
     const signature = signer.sign(this.privateKey).toString('base64url');
-    const expiresAt = new Date((now + config.ttlSeconds) * 1000).toISOString();
+    const expiresAt = new Date((now + ttlSeconds) * 1000).toISOString();
 
     return {
       token: `${signingInput}.${signature}`,
       expiresAt,
-      expiresInSeconds: config.ttlSeconds,
+      expiresInSeconds: ttlSeconds,
       issuer: this.planeIssuer,
       audience: config.audience,
     };
@@ -712,6 +777,145 @@ export class ConvexTokenService {
         throw error;
       }
       throw new PlaneTokenVerificationError('Plane token verification failed');
+    }
+  }
+
+  private pruneSubjectTokenExchangeSeen(now: number): void {
+    for (const [key, expiresAtMs] of this.subjectTokenExchangeSeen) {
+      if (expiresAtMs <= now) {
+        this.subjectTokenExchangeSeen.delete(key);
+      }
+    }
+  }
+
+  /**
+   * Delegated-identity token exchange, subject-token half (auth-core §1).
+   * Verifies a `principal_type=="user"` token THIS authority already issued
+   * (same signature/kid check as `verifyPlaneServiceToken`), requires it be
+   * *currently* valid (`nbf <= now < exp`, not just well-formed), requires
+   * its `aud` be one of `allowedAudiences`, and enforces single-use: a
+   * second call with the identical raw token — even a legitimately valid
+   * one — is rejected for as long as the token itself remains unexpired
+   * (closes T-2/A-1: the exchanged token this subject token is about to
+   * mint is a complete standalone bearer, so limiting the subject token to
+   * one exchange bounds the blast radius of a captured copy to a single
+   * grant instead of unlimited re-mints within the token's window).
+   *
+   * Returns the subject's own `{orgId, userId, zdr}` — callers must use
+   * THESE values (never the registry's own defaults) for the exchanged
+   * token's org/acting-user/zdr claims.
+   */
+  verifyPlaneSubjectToken(
+    token: string,
+    allowedAudiences: readonly PlaneAudience[],
+  ): VerifiedPlaneSubjectToken {
+    if (!token || allowedAudiences.length === 0) {
+      throw new PlaneTokenVerificationError(
+        'Plane subject token is not verifiable',
+      );
+    }
+    const allowedAudienceValues = new Set(
+      allowedAudiences
+        .map((audience) => this.planeAudiences[audience]?.audience)
+        .filter((value): value is string => typeof value === 'string'),
+    );
+    if (allowedAudienceValues.size === 0) {
+      throw new PlaneTokenVerificationError(
+        'Plane subject token audience allow-list is empty',
+      );
+    }
+
+    try {
+      const segments = token.split('.');
+      if (
+        segments.length !== 3 ||
+        segments.some(
+          (segment) => !segment || !/^[A-Za-z0-9_-]+$/.test(segment),
+        )
+      ) {
+        throw new PlaneTokenVerificationError(
+          'Plane subject token is malformed',
+        );
+      }
+      const [encodedHeader, encodedPayload, encodedSignature] = segments;
+      const protectedHeader = JSON.parse(
+        Buffer.from(encodedHeader, 'base64url').toString('utf8'),
+      ) as Record<string, unknown>;
+      const payload = JSON.parse(
+        Buffer.from(encodedPayload, 'base64url').toString('utf8'),
+      ) as Record<string, unknown>;
+      const signature = Buffer.from(encodedSignature, 'base64url');
+      const verifier = createVerify('RSA-SHA256');
+      verifier.update(`${encodedHeader}.${encodedPayload}`);
+      verifier.end();
+
+      if (
+        protectedHeader.alg !== 'RS256' ||
+        protectedHeader.typ !== 'JWT' ||
+        protectedHeader.kid !== this.kid ||
+        !verifier.verify(this.publicKey, signature)
+      ) {
+        throw new PlaneTokenVerificationError(
+          'Plane subject token key is not trusted',
+        );
+      }
+
+      const audience = payload.aud;
+      const subject = payload.sub;
+      const orgId = payload.org_id;
+      const userId = payload.user_id;
+      const zdr = payload.zdr;
+      const numericDates = [payload.iat, payload.nbf, payload.exp];
+      const now = Math.floor(Date.now() / 1000);
+      if (
+        payload.iss !== this.planeIssuer ||
+        typeof audience !== 'string' ||
+        !allowedAudienceValues.has(audience) ||
+        payload.principal_type !== 'user' ||
+        payload.service_id !== undefined ||
+        typeof subject !== 'string' ||
+        subject.startsWith('service:') ||
+        typeof userId !== 'string' ||
+        !userId.trim() ||
+        userId !== subject ||
+        typeof orgId !== 'string' ||
+        !orgId.trim() ||
+        orgId.trim() !== orgId ||
+        typeof zdr !== 'boolean' ||
+        numericDates.some(
+          (value) => !Number.isSafeInteger(value) || (value as number) <= 0,
+        ) ||
+        (payload.nbf as number) > now ||
+        (payload.iat as number) > now + 5 ||
+        (payload.exp as number) <= now ||
+        (payload.nbf as number) > (payload.iat as number) ||
+        (payload.iat as number) >= (payload.exp as number)
+      ) {
+        throw new PlaneTokenVerificationError(
+          'Plane subject token claims are invalid',
+        );
+      }
+
+      const seenKey = createHash('sha256').update(token).digest('hex');
+      this.pruneSubjectTokenExchangeSeen(Date.now());
+      if (this.subjectTokenExchangeSeen.has(seenKey)) {
+        throw new PlaneTokenVerificationError(
+          'Plane subject token has already been exchanged',
+        );
+      }
+      this.subjectTokenExchangeSeen.set(
+        seenKey,
+        (payload.exp as number) * 1000,
+      );
+
+      return { orgId, userId, zdr, audience };
+    } catch (error) {
+      if (error instanceof PlaneTokenVerificationError) {
+        throw error;
+      }
+      throw new PlaneTokenVerificationError(
+        'Plane subject token verification failed',
+      );
     }
   }
 

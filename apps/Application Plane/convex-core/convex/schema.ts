@@ -68,10 +68,22 @@ export default defineSchema({
     sourceRevision: v.optional(v.number()),
     sourceEventId: v.optional(v.string()),
     sourceFingerprint: v.optional(v.string()),
-    
+
     createdAt: v.number(),
     lastSeenAt: v.number(),
     deletedAt: v.optional(v.number()),
+
+    // Persona: per-user always-on custom instructions, composed into every
+    // chat turn's system message as the layer beneath the platform/org/Space
+    // authored-instruction hierarchy (ADR-0003) and beneath an explicitly
+    // summoned Space agent's own persona. Self-owned -- no admin/membership
+    // gate, mirrors `organizations.instructions` above but keyed by the
+    // user's own row instead of the org's. `personaEnabled` undefined/absent
+    // means enabled (same "absence == default true" convention the org layer
+    // does not need but persona's per-thread override does).
+    personaInstructions: v.optional(v.string()),
+    personaEnabled: v.optional(v.boolean()),
+    personaUpdatedAt: v.optional(v.number()),
   })
     .index("by_external_auth_id", ["externalAuthId"])
     .index("by_org", ["orgId"])

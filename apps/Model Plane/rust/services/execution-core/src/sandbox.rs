@@ -100,6 +100,16 @@ pub struct LaunchOptions<'a> {
     pub cwd: Option<&'a Path>,
     /// Environment derivation. Defaults to [`SandboxEnv::Inherit`].
     pub env: SandboxEnv<'a>,
+    /// Additional `(host_path, mount_path)` pairs bound read-only, each as
+    /// its own `--ro-bind host mount` — for mounting a durable, shared
+    /// layer (e.g. an org's read-only workspace files, S3.3 durable
+    /// workspace design §3) at a distinct path from the policy's own
+    /// writable root, rather than only ever getting the whole-filesystem
+    /// `--ro-bind / /` baseline. Emitted after the writable-root binds, so
+    /// those still win where a path overlaps (same ordering rule as the
+    /// existing writable-root/read-only-root relationship below). Empty by
+    /// default — every existing caller is unaffected.
+    pub extra_ro_binds: &'a [(PathBuf, PathBuf)],
 }
 
 /// Build the bubblewrap argument vector for `policy`, wrapping `program args`.
@@ -188,6 +198,15 @@ fn assemble_argv(
         argv.push(p);
     }
 
+    // Extra read-only layers (e.g. a durable Space workspace's org-level
+    // files) bound at their own distinct mount paths, after the writable
+    // roots so a real writable root always wins if a path ever overlapped.
+    for (host, mount) in options.extra_ro_binds {
+        argv.push("--ro-bind".into());
+        argv.push(host.to_string_lossy().into_owned());
+        argv.push(mount.to_string_lossy().into_owned());
+    }
+
     // Only an unshared net namespace fully blocks egress. `AllowDomains` keeps
     // the namespace (so the egress proxy is reachable) and relies on the
     // network-proxy layer to enforce the allowlist; `AllowAll` shares the host
@@ -274,9 +293,59 @@ pub struct SandboxCapabilityProfile {
     pub credential_mode: &'static str,
 }
 
+/// A canonical, order-stable digest of the measured profile, bound into the
+/// Control-issued Space capability decision's payload digest (see
+/// `apps/Frontend Plane/verevonv3/docs/S3_2_SANDBOX_LEASE_CLOSEOUT_DESIGN_2026-09-10.md`
+/// §1). Serializing the struct directly (rather than hand-listing fields) is
+/// safe here only because every field has a fixed, small set of possible
+/// values and `#[derive(Serialize)]` emits struct fields in declaration
+/// order, which `serde_json` preserves — this is not a general-purpose
+/// canonicalization and must not be copied for a type with a `HashMap` field
+/// or other genuinely unordered data.
+#[must_use]
+pub fn capability_profile_digest(profile: &SandboxCapabilityProfile) -> String {
+    use sha2::{Digest, Sha256};
+    let canonical =
+        serde_json::to_vec(profile).expect("SandboxCapabilityProfile fields are all primitives");
+    format!("sha256:{:x}", Sha256::digest(canonical))
+}
+
+/// Bounded one-shot children only: nothing outlives the call that started it.
+/// What every execution-core reports unless S4.2's host is switched on.
+pub const PROCESSES_BOUNDED_ONESHOT: &str = "bounded_oneshot";
+/// Reattachable background processes (S4.2). Control validates this claim
+/// against a closed vocabulary before signing, and sandbox-manager compares
+/// the same spelling; all three must agree.
+pub const PROCESSES_BACKGROUND_REGISTRY: &str = "background_registry";
+
+/// Whether this instance is configured to host background processes.
+///
+/// Read once, like [`is_supported`], because the answer is a property of the
+/// deployment rather than of a request. Default off: an operator opts in, and
+/// until they do every existing deployment reports exactly what it did before.
+#[must_use]
+pub fn process_host_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        process_host_enabled_from(std::env::var("EXECUTION_CORE_PROCESS_HOST").ok().as_deref())
+    })
+}
+
+/// The pure half of [`process_host_enabled`] — env mutation is forbidden in
+/// this crate, so the parsing is tested through here instead.
+fn process_host_enabled_from(value: Option<&str>) -> bool {
+    value.is_some_and(|raw| raw.trim().eq_ignore_ascii_case("enabled"))
+}
+
 /// Return the substrate contract measured on this process. This is intentionally
 /// independent of a Space lease: a lease must pin this profile (or a stronger
 /// external profile) before it is used for an effect.
+///
+/// `processes` is the one field that can change without a code change, and it
+/// is deliberately the AND of two independent facts: the operator asked for
+/// background processes, and bwrap can actually isolate them here. Reporting
+/// the stronger value on a host that cannot sandbox would be advertising
+/// something Control would then authorize and every spawn would refuse.
 #[must_use]
 pub fn capability_profile() -> SandboxCapabilityProfile {
     let local_isolation_available = is_supported();
@@ -288,7 +357,11 @@ pub fn capability_profile() -> SandboxCapabilityProfile {
         },
         local_isolation_available,
         persistence: "ephemeral",
-        processes: "bounded_oneshot",
+        processes: if local_isolation_available && process_host_enabled() {
+            PROCESSES_BACKGROUND_REGISTRY
+        } else {
+            PROCESSES_BOUNDED_ONESHOT
+        },
         backup: false,
         egress: "disabled_by_default",
         credential_mode: "credential_free",
@@ -373,10 +446,74 @@ mod tests {
         assert!(matches!(profile.backend, "bubblewrap" | "unavailable"));
         assert_eq!(profile.local_isolation_available, is_supported());
         assert_eq!(profile.persistence, "ephemeral");
-        assert_eq!(profile.processes, "bounded_oneshot");
         assert!(!profile.backup);
         assert_eq!(profile.egress, "disabled_by_default");
         assert_eq!(profile.credential_mode, "credential_free");
+        // `processes` is the one field an operator can change, so this asserts
+        // the RELATIONSHIP rather than a constant: it may report the stronger
+        // value only when background processes were asked for AND bwrap can
+        // actually isolate them here. Advertising more than that is what the
+        // whole S4.2 authority chain is built on not doing.
+        let expected = if is_supported() && process_host_enabled() {
+            PROCESSES_BACKGROUND_REGISTRY
+        } else {
+            PROCESSES_BOUNDED_ONESHOT
+        };
+        assert_eq!(profile.processes, expected);
+    }
+
+    #[test]
+    fn the_process_host_is_opt_in_and_exact() {
+        // Not truthy-parsing: "true"/"1"/"yes" do NOT enable a capability
+        // whose claim Control signs and two services act on.
+        assert!(process_host_enabled_from(Some("enabled")));
+        assert!(process_host_enabled_from(Some("  ENABLED  ")));
+        for value in [
+            None,
+            Some(""),
+            Some("true"),
+            Some("1"),
+            Some("yes"),
+            Some("on"),
+            Some("disabled"),
+        ] {
+            assert!(
+                !process_host_enabled_from(value),
+                "value {value:?} should not enable the process host"
+            );
+        }
+    }
+
+    #[test]
+    fn a_host_without_bubblewrap_never_advertises_background_processes() {
+        // The two conditions are ANDed, so this holds on any platform: where
+        // isolation is unavailable the profile must stay bounded_oneshot even
+        // with the flag on.
+        let profile = capability_profile();
+        if !profile.local_isolation_available {
+            assert_eq!(profile.processes, PROCESSES_BOUNDED_ONESHOT);
+        }
+    }
+
+    /// The S3.2 close-out design's "backend loss/downgrade" verification
+    /// scenario: `backend` must never claim `"bubblewrap"` while
+    /// `local_isolation_available` is false, or vice versa — the field pair
+    /// is what `http_health::capability_profile` gates a decision request on
+    /// (never requesting one when isolation is unavailable), so a
+    /// disagreement here would be exactly the kind of silent backend
+    /// downgrade this substrate contract exists to rule out. `is_supported()`
+    /// is a real, cached, non-overridable probe (Linux-only, `None` result on
+    /// every other OS including this Windows dev host), so this asserts the
+    /// invariant against whatever it genuinely reports here rather than
+    /// forcing a specific branch.
+    #[test]
+    fn capability_profile_backend_field_agrees_with_local_isolation_available() {
+        let profile = capability_profile();
+        if profile.local_isolation_available {
+            assert_eq!(profile.backend, "bubblewrap");
+        } else {
+            assert_eq!(profile.backend, "unavailable");
+        }
     }
 
     #[test]
@@ -403,6 +540,59 @@ mod tests {
         assert!(windowed(&argv, &["--ro-bind", "/", "/"]));
         assert!(windowed(&argv, &["--bind", "/work", "/work"]));
         assert!(windowed(&argv, &["--bind", "/tmp/agent", "/tmp/agent"]));
+    }
+
+    #[test]
+    fn extra_ro_binds_are_emitted_after_the_writable_roots() {
+        let p = MpSandboxPolicy::WorkspaceWrite {
+            writable_roots: vec![PathBuf::from("/work")],
+            network: MpNetworkPolicy::Disabled,
+        };
+        let extra_ro_binds = [(
+            PathBuf::from("/var/lib/execution-core/org-a/knowledge"),
+            PathBuf::from("/mnt/org"),
+        )];
+        let options = LaunchOptions {
+            extra_ro_binds: &extra_ro_binds,
+            ..LaunchOptions::default()
+        };
+        let argv = build_bwrap_argv_with(&p, "bash", &args(&["-c", "echo hi"]), options)
+            .expect("wrapped");
+        assert!(windowed(&argv, &["--bind", "/work", "/work"]));
+        assert!(windowed(
+            &argv,
+            &[
+                "--ro-bind",
+                "/var/lib/execution-core/org-a/knowledge",
+                "/mnt/org"
+            ]
+        ));
+        let bind_index = argv.iter().position(|a| a == "--bind").unwrap();
+        let last_ro_bind_index = argv.iter().rposition(|a| a == "--ro-bind").unwrap();
+        assert!(
+            last_ro_bind_index > bind_index,
+            "extra_ro_binds must be emitted after the writable-root binds: {argv:?}"
+        );
+    }
+
+    #[test]
+    fn extra_ro_binds_defaults_to_empty_and_changes_nothing() {
+        let p = MpSandboxPolicy::WorkspaceWrite {
+            writable_roots: vec![PathBuf::from("/work")],
+            network: MpNetworkPolicy::Disabled,
+        };
+        let with_default = build_bwrap_argv(&p, "true", &[]).expect("wrapped");
+        let with_explicit_empty = build_bwrap_argv_with(
+            &p,
+            "true",
+            &[],
+            LaunchOptions {
+                extra_ro_binds: &[],
+                ..LaunchOptions::default()
+            },
+        )
+        .expect("wrapped");
+        assert_eq!(with_default, with_explicit_empty);
     }
 
     /// The argv must NOT mount a fresh procfs. `--proc /proc` together with
@@ -466,6 +656,7 @@ mod tests {
             LaunchOptions {
                 cwd: Some(&ws),
                 env: SandboxEnv::Only(&allowlist),
+                ..LaunchOptions::default()
             },
         )
         .expect("wrapped");

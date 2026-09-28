@@ -47,40 +47,52 @@ func (s *Server) SetPricing(p *pricing.Resolver) {
 
 // recordRequest is the JSON body accepted by the record endpoint.
 type recordRequest struct {
-	OrgID          string  `json:"org_id"`
-	UserID         string  `json:"user_id"`
-	RunID          string  `json:"run_id"`
-	RequestID      string  `json:"request_id"`
-	Model          string  `json:"model"`
-	InputTokens    int64   `json:"input_tokens"`
-	OutputTokens   int64   `json:"output_tokens"`
-	CostUSD        float64 `json:"cost_usd"`
-	IdempotencyKey string  `json:"idempotency_key"`
+	OrgID                    string  `json:"org_id"`
+	UserID                   string  `json:"user_id"`
+	RunID                    string  `json:"run_id"`
+	RequestID                string  `json:"request_id"`
+	Model                    string  `json:"model"`
+	InputTokens              int64   `json:"input_tokens"`
+	OutputTokens             int64   `json:"output_tokens"`
+	CostUSD                  float64 `json:"cost_usd"`
+	IdempotencyKey           string  `json:"idempotency_key"`
+	CacheReadInputTokens     int64   `json:"cache_read_input_tokens"`
+	CacheCreationInputTokens int64   `json:"cache_creation_input_tokens"`
+	// CostBasis is optional: "metered", "subscription", or omitted when
+	// unknown. A subscription entry is never priced from the catalogue.
+	CostBasis string `json:"cost_basis"`
 }
 
 // usageResponse is the JSON shape returned by the usage/run/aggregate endpoints.
 type usageResponse struct {
-	OrgID             string  `json:"org_id"`
-	UserID            string  `json:"user_id,omitempty"`
-	RunID             string  `json:"run_id,omitempty"`
-	TotalInputTokens  int64   `json:"total_input_tokens"`
-	TotalOutputTokens int64   `json:"total_output_tokens"`
-	TotalCostUSD      float64 `json:"total_cost_usd"`
-	EntryCount        int64   `json:"entry_count"`
+	OrgID                         string  `json:"org_id"`
+	UserID                        string  `json:"user_id,omitempty"`
+	RunID                         string  `json:"run_id,omitempty"`
+	TotalInputTokens              int64   `json:"total_input_tokens"`
+	TotalOutputTokens             int64   `json:"total_output_tokens"`
+	TotalCostUSD                  float64 `json:"total_cost_usd"`
+	EntryCount                    int64   `json:"entry_count"`
+	TotalCacheReadInputTokens     int64   `json:"total_cache_read_input_tokens"`
+	TotalCacheCreationInputTokens int64   `json:"total_cache_creation_input_tokens"`
 }
 
 // entryResponse is the JSON shape of a single ledger entry in a list.
 type entryResponse struct {
-	OrgID        string    `json:"org_id"`
-	UserID       string    `json:"user_id"`
-	ProducerID   string    `json:"producer_id,omitempty"`
-	RunID        string    `json:"run_id,omitempty"`
-	RequestID    string    `json:"request_id,omitempty"`
-	Model        string    `json:"model,omitempty"`
-	InputTokens  int64     `json:"input_tokens"`
-	OutputTokens int64     `json:"output_tokens"`
-	CostUSD      float64   `json:"cost_usd"`
-	CreatedAt    time.Time `json:"created_at"`
+	OrgID                    string    `json:"org_id"`
+	UserID                   string    `json:"user_id"`
+	ProducerID               string    `json:"producer_id,omitempty"`
+	RunID                    string    `json:"run_id,omitempty"`
+	RequestID                string    `json:"request_id,omitempty"`
+	Model                    string    `json:"model,omitempty"`
+	InputTokens              int64     `json:"input_tokens"`
+	OutputTokens             int64     `json:"output_tokens"`
+	CostUSD                  float64   `json:"cost_usd"`
+	CreatedAt                time.Time `json:"created_at"`
+	CacheReadInputTokens     int64     `json:"cache_read_input_tokens"`
+	CacheCreationInputTokens int64     `json:"cache_creation_input_tokens"`
+	// CostBasis tells a subscription row (cost 0, real tokens) from a free
+	// one. Absent when the producer did not report it.
+	CostBasis string `json:"cost_basis,omitempty"`
 }
 
 // budgetCheckRequest is the JSON body accepted by the budget-check endpoint.
@@ -215,17 +227,25 @@ func (s *Server) handleRecord(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusBadRequest, "org_id is required")
 		return
 	}
+	costBasis, ok := ledger.NormalizeCostBasis(req.CostBasis)
+	if !ok {
+		httpError(w, http.StatusBadRequest, "cost_basis must be metered or subscription")
+		return
+	}
 
 	entry := ledger.Entry{
-		OrgID:          req.OrgID,
-		UserID:         req.UserID,
-		RunID:          req.RunID,
-		RequestID:      req.RequestID,
-		Model:          req.Model,
-		InputTokens:    req.InputTokens,
-		OutputTokens:   req.OutputTokens,
-		CostUSD:        req.CostUSD,
-		IdempotencyKey: req.IdempotencyKey,
+		OrgID:                    req.OrgID,
+		UserID:                   req.UserID,
+		RunID:                    req.RunID,
+		RequestID:                req.RequestID,
+		Model:                    req.Model,
+		InputTokens:              req.InputTokens,
+		OutputTokens:             req.OutputTokens,
+		CostUSD:                  req.CostUSD,
+		IdempotencyKey:           req.IdempotencyKey,
+		CacheReadInputTokens:     req.CacheReadInputTokens,
+		CacheCreationInputTokens: req.CacheCreationInputTokens,
+		CostBasis:                costBasis,
 	}
 	if authenticated && principal.PrincipalType == "service" {
 		entry.ProducerID = principal.ActorID
@@ -401,16 +421,19 @@ func (s *Server) handleListEntries(w http.ResponseWriter, r *http.Request) {
 	for i := range entries {
 		e := entries[i]
 		out = append(out, entryResponse{
-			OrgID:        e.OrgID,
-			UserID:       e.UserID,
-			ProducerID:   e.ProducerID,
-			RunID:        e.RunID,
-			RequestID:    e.RequestID,
-			Model:        e.Model,
-			InputTokens:  e.InputTokens,
-			OutputTokens: e.OutputTokens,
-			CostUSD:      e.CostUSD,
-			CreatedAt:    e.CreatedAt,
+			OrgID:                    e.OrgID,
+			UserID:                   e.UserID,
+			ProducerID:               e.ProducerID,
+			RunID:                    e.RunID,
+			RequestID:                e.RequestID,
+			Model:                    e.Model,
+			InputTokens:              e.InputTokens,
+			OutputTokens:             e.OutputTokens,
+			CostUSD:                  e.CostUSD,
+			CreatedAt:                e.CreatedAt,
+			CacheReadInputTokens:     e.CacheReadInputTokens,
+			CacheCreationInputTokens: e.CacheCreationInputTokens,
+			CostBasis:                e.CostBasis,
 		})
 	}
 	writeJSON(w, map[string]any{"entries": out, "count": len(out)})
@@ -483,11 +506,13 @@ func (s *Server) handleBudgetCheck(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// max_tokens caps metered tokens only: a subscription entry keeps its
+	// real token counts at cost 0 and must never exhaust the cap.
 	var currentCost float64
 	var currentTokens int64
 	if usageErr == nil && usage != nil {
 		currentCost = usage.TotalCostUSD
-		currentTokens = usage.TotalInputTokens + usage.TotalOutputTokens
+		currentTokens = usage.MeteredInputTokens + usage.MeteredOutputTokens
 	}
 
 	err := budgetDecision(req.MaxCostUSD, req.MaxTokens, currentCost, currentTokens)
@@ -556,12 +581,18 @@ func budgetDecision(maxCostUSD float64, maxTokens int64, cost float64, tokens in
 // When the event carries no pre-computed cost (the common case — the gateway
 // publishes token counts only), cost-core prices it authoritatively from the
 // catalogue so the dollar ledger and the budget posture are real, never $0.
+//
+// The exception is a subscription entry (cost_basis "subscription"): the call
+// was served by the user's own ChatGPT subscription, so there is no per-token
+// charge to price. It keeps cost 0 with its real token counts, and API list
+// prices never reach it. An entry with no basis is priced as metered.
 func (s *Server) RecordUsage(ctx context.Context, e ledger.Entry) error {
 	if err := ledger.ValidateEntry(e); err != nil {
 		return err
 	}
-	if e.CostUSD == 0 && (e.InputTokens > 0 || e.OutputTokens > 0) && s.pricing != nil {
-		e.CostUSD = s.pricing.Cost(e.Model, e.InputTokens, e.OutputTokens)
+	if e.CostUSD == 0 && (e.InputTokens > 0 || e.OutputTokens > 0) && s.pricing != nil &&
+		e.CostBasis != ledger.CostBasisSubscription {
+		e.CostUSD = s.pricing.CostWithCache(e.Model, e.InputTokens, e.OutputTokens, e.CacheReadInputTokens, e.CacheCreationInputTokens)
 	}
 	if err := ledger.ValidateEntry(e); err != nil {
 		return err
@@ -582,6 +613,9 @@ func (s *Server) RecordUsage(ctx context.Context, e ledger.Entry) error {
 		"input_tokens", e.InputTokens,
 		"output_tokens", e.OutputTokens,
 		"cost_usd", fmt.Sprintf("%.8f", e.CostUSD),
+		"cache_read_input_tokens", e.CacheReadInputTokens,
+		"cache_creation_input_tokens", e.CacheCreationInputTokens,
+		"cost_basis", e.CostBasis,
 	)
 	return nil
 }
@@ -606,13 +640,15 @@ func decodeRequestJSON(w http.ResponseWriter, r *http.Request, target any) error
 
 func usageFromLedger(u *ledger.Usage) usageResponse {
 	return usageResponse{
-		OrgID:             u.OrgID,
-		UserID:            u.UserID,
-		RunID:             u.RunID,
-		TotalInputTokens:  u.TotalInputTokens,
-		TotalOutputTokens: u.TotalOutputTokens,
-		TotalCostUSD:      u.TotalCostUSD,
-		EntryCount:        u.EntryCount,
+		OrgID:                         u.OrgID,
+		UserID:                        u.UserID,
+		RunID:                         u.RunID,
+		TotalInputTokens:              u.TotalInputTokens,
+		TotalOutputTokens:             u.TotalOutputTokens,
+		TotalCostUSD:                  u.TotalCostUSD,
+		EntryCount:                    u.EntryCount,
+		TotalCacheReadInputTokens:     u.TotalCacheReadInputTokens,
+		TotalCacheCreationInputTokens: u.TotalCacheCreationInputTokens,
 	}
 }
 

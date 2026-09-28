@@ -107,6 +107,21 @@ func (e *Engine) quoteOne(ctx context.Context, adapter Quoter, req carrier.Quote
 	defer cancel()
 
 	quotes, err := adapter.Quote(cctx, req)
+	info := adapter.Info()
+	mode := string(info.Mode)
+	if strings.HasPrefix(info.Code, "mock-") {
+		mode = string(carrier.ModeMock)
+	}
+	if mode != string(carrier.ModeMock) && mode != string(carrier.ModeSandbox) && mode != string(carrier.ModeProduction) {
+		mode = "unknown"
+	}
+	quotedAt := time.Now().UTC()
+	for i := range quotes {
+		quotes[i].Environment = mode
+		quotes[i].IsMock = mode == string(carrier.ModeMock)
+		quotes[i].QuotedAt = quotedAt
+		quotes[i].PackageCount = 1
+	}
 	e.recordProviderOutcome(adapter.Info().Code, len(quotes), err)
 	return Result{
 		CarrierCode: adapter.Info().Code,

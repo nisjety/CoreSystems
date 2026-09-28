@@ -2,6 +2,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from '@solidjs/testing-li
 import { flush } from 'solid-js'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
+import { CATALOGUE_TIER_WAIT_MS } from '@/features/dashboard/home/submit-privacy-tier'
 import { publishSpaceThreads, resetLiveWorkForTests } from '../lib/space-live-work'
 
 const chatClient = vi.hoisted(() => ({
@@ -227,6 +228,193 @@ describe('SpaceRoomComposer — subscription model routing', () => {
       spaceRef: 'room-1',
     })
     stream.finish()
+  })
+})
+
+// A room turn for a catalogue model carries the model's privacy tier, resolved
+// exactly as the main composer resolves it (`submit-privacy-tier.ts`). Without
+// it the turn reached the gateway with no `min_privacy_tier`: unconstrained.
+describe('SpaceRoomComposer — a catalogue model’s privacy tier rides the turn', () => {
+  const euModel = { id: 'm-eu', name: 'EU Model', provider: 'eu-host', privacyTier: 'eu_resident' as const }
+  const plainModel = { id: 'm-plain', name: 'Plain Model', provider: 'plain-host' }
+
+  /** The selection a previous page load stored, with or without its tier. */
+  function storeSelection(privacyTier?: string, model: { id: string; name: string; provider: string } = euModel) {
+    window.localStorage.setItem('verevon.ai-model-selection.v1:org-1', JSON.stringify({
+      model: model.id,
+      label: model.name,
+      provider: model.provider,
+      ...(privacyTier ? { privacyTier } : {}),
+    }))
+  }
+
+  /** Every pending microtask has run: a held send would have gone out by now. */
+  const settle = () => new Promise((resolve) => { setTimeout(resolve, 0) })
+
+  function storedSelection(): Record<string, unknown> {
+    return JSON.parse(window.localStorage.getItem('verevon.ai-model-selection.v1:org-1') ?? '{}') as Record<string, unknown>
+  }
+
+  /** Submit without waiting for the transport: the send may be held. */
+  function submit(text: string) {
+    const box = screen.getByRole('textbox')
+    fireEvent.input(box, { target: { value: text } })
+    flush()
+    fireEvent.submit(box.closest('form') as HTMLFormElement)
+  }
+
+  const sentRequest = () => chatClient.streamChat.mock.calls[0]?.[0] as Record<string, unknown>
+
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  describe('before the catalogue has loaded', () => {
+    it('holds the turn for the catalogue and sends the model’s own tier', async () => {
+      storeSelection()
+      let loadCatalogue!: (models: unknown[]) => void
+      chatClient.listModels.mockReturnValue(new Promise((resolve) => { loadCatalogue = resolve }))
+      const stream = scriptedStream()
+      renderComposer()
+
+      submit('Hei')
+      await settle()
+      expect(chatClient.streamChat).not.toHaveBeenCalled()
+
+      loadCatalogue([euModel])
+      await waitFor(() => expect(chatClient.streamChat).toHaveBeenCalled())
+      expect(sentRequest()).toMatchObject({ model: 'm-eu', minPrivacyTier: 'eu_resident', content: 'Hei' })
+      // One request, shared by the picker and the send.
+      expect(chatClient.listModels).toHaveBeenCalledTimes(1)
+      stream.finish()
+    })
+
+    it('sends the last-known tier once the bounded wait runs out', async () => {
+      storeSelection('zdr_contractual')
+      chatClient.listModels.mockReturnValue(new Promise(() => {}))
+      const stream = scriptedStream()
+      renderComposer()
+
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+      submit('Hei')
+      await vi.advanceTimersByTimeAsync(CATALOGUE_TIER_WAIT_MS - 1)
+      expect(chatClient.streamChat).not.toHaveBeenCalled()
+      await vi.advanceTimersByTimeAsync(1)
+      vi.useRealTimers()
+
+      await waitFor(() => expect(chatClient.streamChat).toHaveBeenCalled())
+      expect(sentRequest()).toMatchObject({ model: 'm-eu', minPrivacyTier: 'zdr_contractual' })
+      stream.finish()
+    })
+
+    it('fails closed to the strictest tier when nothing is known about the model', async () => {
+      storeSelection()
+      chatClient.listModels.mockReturnValue(new Promise(() => {}))
+      const stream = scriptedStream()
+      renderComposer()
+
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+      submit('Hei')
+      await vi.advanceTimersByTimeAsync(CATALOGUE_TIER_WAIT_MS)
+      vi.useRealTimers()
+
+      await waitFor(() => expect(chatClient.streamChat).toHaveBeenCalled())
+      expect(sentRequest()).toMatchObject({ model: 'm-eu', minPrivacyTier: 'sovereign' })
+      stream.finish()
+    })
+
+    it('sends nothing when Stop lands while the turn waits for the catalogue', async () => {
+      storeSelection()
+      let loadCatalogue!: (models: unknown[]) => void
+      chatClient.listModels.mockReturnValue(new Promise((resolve) => { loadCatalogue = resolve }))
+      scriptedStream()
+      renderComposer()
+
+      submit('Hei')
+      ;(await screen.findByRole('button', { name: 'Stopp' })).click()
+      loadCatalogue([euModel])
+
+      expect(await screen.findByText(/Avbrutt før svaret startet/)).toBeTruthy()
+      await settle()
+      expect(chatClient.streamChat).not.toHaveBeenCalled()
+    })
+
+    it('sends an intent mode at once and with no tier, as before', async () => {
+      // Default selection: Verevon Balance, resolved server-side.
+      chatClient.listModels.mockReturnValue(new Promise(() => {}))
+      const stream = scriptedStream()
+      renderComposer()
+
+      await send('Hei')
+      expect(sentRequest().minPrivacyTier).toBeUndefined()
+      stream.finish()
+    })
+  })
+
+  describe('after the catalogue has loaded', () => {
+    it('sends the listed tier, even over a different last-known one', async () => {
+      storeSelection('global')
+      chatClient.listModels.mockResolvedValue([euModel, plainModel])
+      const stream = scriptedStream()
+      renderComposer()
+      // The picker writes the listed tier once the catalogue has loaded.
+      await waitFor(() => expect(storedSelection().privacyTier).toBe('eu_resident'))
+
+      await send('Hei')
+      expect(sentRequest()).toMatchObject({ model: 'm-eu', minPrivacyTier: 'eu_resident' })
+      expect(chatClient.listModels).toHaveBeenCalledTimes(1)
+      stream.finish()
+    })
+
+    it('sends no tier for a listed model that claims none, as before', async () => {
+      storeSelection(undefined, plainModel)
+      chatClient.listModels.mockResolvedValue([euModel, plainModel])
+      const stream = scriptedStream()
+      renderComposer()
+      await waitFor(() => expect(storedSelection().privacyTier).toBe('unspecified'))
+
+      await send('Hei')
+      expect(sentRequest()).toMatchObject({ model: 'm-plain', content: 'Hei' })
+      expect(sentRequest().minPrivacyTier).toBeUndefined()
+      stream.finish()
+    })
+
+    it('stores the listed tier as the last-known one, for a later slow catalogue', async () => {
+      storeSelection()
+      chatClient.listModels.mockResolvedValue([euModel, plainModel])
+      renderComposer()
+
+      await waitFor(() => expect(storedSelection()).toMatchObject({ model: 'm-eu', privacyTier: 'eu_resident' }))
+      // Picking a model stores its tier too, "claims none" included.
+      fireEvent.click(await screen.findByRole('button', { name: /velg ai-modell/i }))
+      fireEvent.click(await screen.findByRole('button', { name: /plain model/i }))
+      expect(storedSelection()).toMatchObject({ model: 'm-plain', privacyTier: 'unspecified' })
+    })
+  })
+
+  describe('when the catalogue request fails', () => {
+    it('sends the last-known tier without waiting', async () => {
+      storeSelection('global')
+      chatClient.listModels.mockRejectedValue(new Error('Catalog unavailable'))
+      const stream = scriptedStream()
+      renderComposer()
+
+      // waitFor gives up after 1 s, well inside the 3 s bound: no wait happened.
+      await send('Hei')
+      expect(sentRequest()).toMatchObject({ model: 'm-eu', minPrivacyTier: 'global' })
+      stream.finish()
+    })
+
+    it('fails closed when nothing is known about the model', async () => {
+      storeSelection()
+      chatClient.listModels.mockRejectedValue(new Error('Catalog unavailable'))
+      const stream = scriptedStream()
+      renderComposer()
+
+      await send('Hei')
+      expect(sentRequest()).toMatchObject({ model: 'm-eu', minPrivacyTier: 'sovereign' })
+      stream.finish()
+    })
   })
 })
 

@@ -128,6 +128,76 @@ func TestNewRegistry_SeedsSandboxCommandCapabilitySeparatelyFromShell(t *testing
 	}
 }
 
+// TestNewRegistry_SeedsBackgroundProcessCapabilityAtSandboxRisk proves the S4.2
+// process family is registered, enabled, and classed at the SAME risk as the
+// per-call sandbox it extends — while cap.command.shell stays high.
+//
+// The comparison is the point. A background process is not a step towards
+// arbitrary command execution: it is the same code-body sandbox with a clock on
+// it. If this row ever drifts to `high` the family goes behind an approval
+// prompt per call and nobody will use it; if cap.command.shell ever drifts to
+// `low` the human gate on arbitrary commands disappears. Both directions are
+// worth failing a build over.
+func TestNewRegistry_SeedsBackgroundProcessCapabilityAtSandboxRisk(t *testing.T) {
+	r := newReg(t)
+
+	process, err := r.GetForOrg("cap.process.background", "", "triodelab")
+	if err != nil {
+		t.Fatalf("expected seeded cap.process.background: %v", err)
+	}
+	if process.Kind != models.KindCommand {
+		t.Fatalf("expected kind=command, got %s", process.Kind)
+	}
+	if !process.Enabled {
+		t.Fatal("expected cap.process.background to be enabled")
+	}
+	if process.IdempotencyKey != idempotencyPrefix+"cap.process.background" {
+		t.Fatalf("unexpected idempotency key %q", process.IdempotencyKey)
+	}
+
+	sandbox, err := r.GetForOrg("cap.command.sandbox", "", "triodelab")
+	if err != nil {
+		t.Fatalf("expected seeded cap.command.sandbox: %v", err)
+	}
+	if process.RiskLevel != sandbox.RiskLevel {
+		t.Fatalf(
+			"cap.process.background (%s) must carry the same risk as cap.command.sandbox (%s): it is the same code-body sandbox with a TTL, not a step towards arbitrary commands",
+			process.RiskLevel, sandbox.RiskLevel,
+		)
+	}
+	if process.RiskLevel != models.RiskLow {
+		t.Fatalf("expected cap.process.background risk=low, got %s", process.RiskLevel)
+	}
+	if process.ID == sandbox.ID {
+		t.Fatal("the background family and the per-call sandbox must be distinct capabilities")
+	}
+
+	shell, err := r.GetForOrg("cap.command.shell", "", "triodelab")
+	if err != nil {
+		t.Fatalf("expected seeded cap.command.shell: %v", err)
+	}
+	if shell.RiskLevel != models.RiskHigh {
+		t.Fatalf("cap.command.shell must stay risk=high, got %s", shell.RiskLevel)
+	}
+
+	// An operator reading the catalog has to be able to see both why this is
+	// low risk and that the capability is not the only gate — the per-Space
+	// authority behind it is what makes the classification defensible.
+	for _, constraint := range []string{
+		"read-only root filesystem",
+		"networking disabled",
+		"never a named host command",
+		"never outlives the lease",
+		"count-limited concurrency",
+		"secret-scrubbed",
+		"requires a Space lease",
+	} {
+		if !strings.Contains(process.Description, constraint) {
+			t.Fatalf("cap.process.background description must state %q", constraint)
+		}
+	}
+}
+
 func TestValidateSkill_SkillExistsAndIsValid(t *testing.T) {
 	r := newReg(t)
 	capability, errs, err := r.ValidateSkillForOrg("cap.skill.summarize", "triodelab")

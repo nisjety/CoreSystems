@@ -25,7 +25,7 @@ func NewRepository(db *database.DB) *Repository {
 
 // Ping verifies the database is reachable and this pool can authenticate, for
 // the /health probe. A stale DB password surfaces here — which a port-only
-// healthcheck silently misses while reads limp on stale pooled connections.
+// health check silently misses while reads limp on stale pooled connections.
 func (r *Repository) Ping(ctx context.Context) error {
 	return r.db.Ping(ctx)
 }
@@ -107,16 +107,11 @@ func (r *Repository) CreateWithID(ctx context.Context, id string, params CreateU
 	return user, nil
 }
 
-// GetByID retrieves a user by ID
-func (r *Repository) GetByID(ctx context.Context, id string) (*User, error) {
-	query := `
-		SELECT id, email, name, password_hash, avatar, status, email_verified, onboarding_complete, created_at, updated_at, last_login_at
-		FROM users
-		WHERE id = $1
-	`
-
+// scanUserRow scans a row from the standard users column list, mapping
+// pgx.ErrNoRows to a "user not found" error.
+func scanUserRow(row pgx.Row) (*User, error) {
 	user := &User{}
-	err := r.db.Pool.QueryRow(ctx, query, id).Scan(
+	err := row.Scan(
 		&user.ID,
 		&user.Email,
 		&user.Name,
@@ -140,6 +135,17 @@ func (r *Repository) GetByID(ctx context.Context, id string) (*User, error) {
 	return user, nil
 }
 
+// GetByID retrieves a user by ID
+func (r *Repository) GetByID(ctx context.Context, id string) (*User, error) {
+	query := `
+		SELECT id, email, name, password_hash, avatar, status, email_verified, onboarding_complete, created_at, updated_at, last_login_at
+		FROM users
+		WHERE id = $1
+	`
+
+	return scanUserRow(r.db.Pool.QueryRow(ctx, query, id))
+}
+
 // GetByEmail retrieves a user by email
 func (r *Repository) GetByEmail(ctx context.Context, email string) (*User, error) {
 	query := `
@@ -148,29 +154,7 @@ func (r *Repository) GetByEmail(ctx context.Context, email string) (*User, error
 		WHERE LOWER(BTRIM(email)) = LOWER(BTRIM($1))
 	`
 
-	user := &User{}
-	err := r.db.Pool.QueryRow(ctx, query, email).Scan(
-		&user.ID,
-		&user.Email,
-		&user.Name,
-		&user.PasswordHash,
-		&user.Avatar,
-		&user.Status,
-		&user.EmailVerified,
-		&user.OnboardingComplete,
-		&user.CreatedAt,
-		&user.UpdatedAt,
-		&user.LastLoginAt,
-	)
-
-	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, fmt.Errorf("user not found")
-		}
-		return nil, fmt.Errorf("failed to get user: %w", err)
-	}
-
-	return user, nil
+	return scanUserRow(r.db.Pool.QueryRow(ctx, query, email))
 }
 
 // ReassignID changes a user-core row to the canonical auth-service user ID.
@@ -277,7 +261,7 @@ func (r *Repository) List(ctx context.Context, params ListUsersParams) ([]*User,
 		FROM users
 	`
 	countQuery := `SELECT COUNT(*) FROM users`
-	args := []interface{}{}
+	var args []any
 	argPos := 1
 
 	if params.Status != nil {
@@ -305,7 +289,7 @@ func (r *Repository) List(ctx context.Context, params ListUsersParams) ([]*User,
 	}
 	defer rows.Close()
 
-	users := []*User{}
+	var users []*User
 	for rows.Next() {
 		user := &User{}
 		err := rows.Scan(

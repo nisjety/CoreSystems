@@ -2,6 +2,7 @@ package nats
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"strings"
 
@@ -14,16 +15,26 @@ type runtimeCredential struct {
 	Token    string
 }
 
+// validateScopedUserPassword enforces the pair/length invariants shared by
+// runtime and shared-publisher credential selection. pairName and
+// passwordName label the credential in the returned error messages.
+func validateScopedUserPassword(user, password, pairName, passwordName string) error {
+	if (user == "") != (password == "") {
+		return fmt.Errorf("%s must be configured together", pairName)
+	}
+	if user != "" && len(password) < 32 {
+		return fmt.Errorf("%s must contain at least 32 characters", passwordName)
+	}
+	return nil
+}
+
 func selectRuntimeCredential(configToken string) (runtimeCredential, error) {
 	user := strings.TrimSpace(os.Getenv("NATS_USER"))
 	password := strings.TrimSpace(os.Getenv("NATS_PASSWORD"))
-	if (user == "") != (password == "") {
-		return runtimeCredential{}, errors.New("NATS_USER and NATS_PASSWORD must be configured together")
+	if err := validateScopedUserPassword(user, password, "NATS_USER and NATS_PASSWORD", "NATS_PASSWORD"); err != nil {
+		return runtimeCredential{}, err
 	}
 	if user != "" {
-		if len(password) < 32 {
-			return runtimeCredential{}, errors.New("NATS_PASSWORD must contain at least 32 characters")
-		}
 		return runtimeCredential{User: user, Password: password}, nil
 	}
 	token := strings.TrimSpace(configToken)

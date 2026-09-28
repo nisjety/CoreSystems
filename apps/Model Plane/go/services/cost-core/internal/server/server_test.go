@@ -63,6 +63,79 @@ func TestRecordThenUsage(t *testing.T) {
 	}
 }
 
+// Cache-token telemetry (native-compaction migration prerequisite): the
+// record endpoint accepts the two new fields, rolls them up on the usage
+// endpoint, and RecordUsage's auto-priced path applies the cache-read
+// discount rather than billing the whole folded input at the full rate.
+func TestRecordThenUsageWithCacheTokenTelemetry(t *testing.T) {
+	_, mux := newTestServer()
+
+	body := `{"org_id":"org1","user_id":"u1","run_id":"run1","model":"claude-sonnet","` +
+		`input_tokens":8520,"output_tokens":42,"cache_read_input_tokens":8000,` +
+		`"cache_creation_input_tokens":400,"idempotency_key":"k-cache"}`
+	rec := do(mux, http.MethodPost, "/api/v1/cost/record", body)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("record status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+
+	rec = do(mux, http.MethodGet, "/api/v1/usage?org_id=org1&user_id=u1", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("usage status = %d", rec.Code)
+	}
+	var usage usageResponse
+	mustJSON(t, rec.Body.Bytes(), &usage)
+	if usage.TotalCacheReadInputTokens != 8_000 || usage.TotalCacheCreationInputTokens != 400 {
+		t.Fatalf("cache totals = %d/%d, want 8000/400",
+			usage.TotalCacheReadInputTokens, usage.TotalCacheCreationInputTokens)
+	}
+
+	rec = do(mux, http.MethodGet, "/api/v1/cost/entries?org_id=org1", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("entries status = %d", rec.Code)
+	}
+	var listed struct {
+		Entries []entryResponse `json:"entries"`
+	}
+	mustJSON(t, rec.Body.Bytes(), &listed)
+	if len(listed.Entries) != 1 {
+		t.Fatalf("entries = %d, want 1", len(listed.Entries))
+	}
+	if listed.Entries[0].CacheReadInputTokens != 8_000 || listed.Entries[0].CacheCreationInputTokens != 400 {
+		t.Fatalf("listed entry cache tokens = %+v", listed.Entries[0])
+	}
+}
+
+// RecordUsage's auto-priced path (no pre-computed cost_usd) must apply the
+// cache-read discount, not bill the whole folded input_tokens at the full
+// rate.
+func TestRecordUsageDirectAppliesCacheReadDiscount(t *testing.T) {
+	srv := NewServer(ledger.NewStore())
+	entry := ledger.Entry{
+		OrgID: "org1", UserID: "u1", Model: "claude-sonnet",
+		InputTokens: 8_520, OutputTokens: 42,
+		CacheReadInputTokens: 8_000, CacheCreationInputTokens: 400,
+	}
+	if err := srv.RecordUsage(context.Background(), entry); err != nil {
+		t.Fatalf("RecordUsage: %v", err)
+	}
+	u, err := srv.ledger.GetUsage(context.Background(), "org1", "u1")
+	if err != nil {
+		t.Fatalf("GetUsage: %v", err)
+	}
+	// A naive full-rate charge on all 8,520 input tokens (default seed rate
+	// 3.00/1M) would be far higher than the actual discounted cost; assert
+	// the recorded cost sits strictly below that naive figure to pin the
+	// discount is really being applied by the auto-pricing path, not just by
+	// the Resolver in isolation (already covered in pricing_test.go).
+	naive := 8_520.0/1_000_000.0*3.0 + 42.0/1_000_000.0*15.0
+	if u.TotalCostUSD >= naive {
+		t.Fatalf("cost %.8f did not reflect the cache-read discount (naive full-rate cost would be %.8f)", u.TotalCostUSD, naive)
+	}
+	if u.TotalCostUSD <= 0 {
+		t.Fatalf("cost should still be positive, got %.8f", u.TotalCostUSD)
+	}
+}
+
 func TestRunUsageEndpoint(t *testing.T) {
 	_, mux := newTestServer()
 	_ = do(mux, http.MethodPost, "/api/v1/cost/record", `{"org_id":"org1","user_id":"a","run_id":"runX","cost_usd":1.0,"input_tokens":5}`)
@@ -303,5 +376,141 @@ func mustJSON(t *testing.T, data []byte, v any) {
 	t.Helper()
 	if err := json.Unmarshal(data, v); err != nil {
 		t.Fatalf("json unmarshal: %v (body=%s)", err, string(data))
+	}
+}
+
+// A subscription turn is served by the user's own ChatGPT subscription, so it
+// must keep cost 0 with its real tokens. gpt-5.6-terra has no catalogue row:
+// re-pricing it would ledger it at the `default` list rate.
+func TestRecordUsageNeverPricesSubscriptionEntries(t *testing.T) {
+	srv := NewServer(ledger.NewStore())
+	ctx := context.Background()
+	turn := func(user, basis string) ledger.Entry {
+		return ledger.Entry{
+			OrgID: "org1", UserID: user, Model: "gpt-5.6-terra",
+			InputTokens: 1_800, OutputTokens: 120,
+			CacheReadInputTokens: 1_024, CacheCreationInputTokens: 256,
+			CostBasis: basis,
+		}
+	}
+	for user, basis := range map[string]string{
+		"sub":     ledger.CostBasisSubscription,
+		"metered": ledger.CostBasisMetered,
+		"unknown": ledger.CostBasisUnknown,
+	} {
+		if err := srv.RecordUsage(ctx, turn(user, basis)); err != nil {
+			t.Fatalf("RecordUsage(%s): %v", basis, err)
+		}
+	}
+
+	sub, err := srv.ledger.GetUsage(ctx, "org1", "sub")
+	if err != nil {
+		t.Fatalf("GetUsage: %v", err)
+	}
+	if sub.TotalCostUSD != 0 {
+		t.Fatalf("subscription turn was priced: cost %.8f", sub.TotalCostUSD)
+	}
+	if sub.TotalInputTokens != 1_800 || sub.TotalOutputTokens != 120 ||
+		sub.TotalCacheReadInputTokens != 1_024 || sub.TotalCacheCreationInputTokens != 256 {
+		t.Fatalf("subscription turn lost its real token counts: %+v", sub)
+	}
+
+	// Metered and unreported bases are still priced, never silently free.
+	want := srv.pricing.CostWithCache("gpt-5.6-terra", 1_800, 120, 1_024, 256)
+	for _, user := range []string{"metered", "unknown"} {
+		u, err := srv.ledger.GetUsage(ctx, "org1", user)
+		if err != nil {
+			t.Fatalf("GetUsage(%s): %v", user, err)
+		}
+		if want <= 0 || math.Abs(u.TotalCostUSD-want) > 1e-12 {
+			t.Fatalf("%s turn cost = %.10f, want %.10f", user, u.TotalCostUSD, want)
+		}
+	}
+}
+
+func TestRecordEndpointCarriesCostBasisToTheEntryListing(t *testing.T) {
+	_, mux := newTestServer()
+	body := `{"org_id":"org1","user_id":"u1","model":"gpt-5.6-terra","input_tokens":900,` +
+		`"output_tokens":40,"cost_basis":" Subscription ","idempotency_key":"k-sub"}`
+	if rec := do(mux, http.MethodPost, "/api/v1/cost/record", body); rec.Code != http.StatusAccepted {
+		t.Fatalf("record status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	_ = do(mux, http.MethodPost, "/api/v1/cost/record", `{"org_id":"org1","user_id":"u1","model":"gpt-4o","input_tokens":10}`)
+
+	rec := do(mux, http.MethodGet, "/api/v1/cost/entries?org_id=org1", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("entries status = %d", rec.Code)
+	}
+	var listed struct {
+		Entries []entryResponse `json:"entries"`
+	}
+	mustJSON(t, rec.Body.Bytes(), &listed)
+	byModel := map[string]entryResponse{}
+	for _, e := range listed.Entries {
+		byModel[e.Model] = e
+	}
+	sub := byModel["gpt-5.6-terra"]
+	if sub.CostBasis != ledger.CostBasisSubscription || sub.CostUSD != 0 || sub.InputTokens != 900 {
+		t.Fatalf("subscription entry = %+v", sub)
+	}
+	if legacy := byModel["gpt-4o"]; legacy.CostBasis != "" || legacy.CostUSD <= 0 {
+		t.Fatalf("unreported basis should be priced and listed without a basis: %+v", legacy)
+	}
+	if strings.Count(rec.Body.String(), `"cost_basis"`) != 1 {
+		t.Fatalf("an unknown basis must be omitted from the listing: %s", rec.Body.String())
+	}
+
+	if rec := do(mux, http.MethodPost, "/api/v1/cost/record", `{"org_id":"org1","user_id":"u1","input_tokens":1,"cost_basis":"free"}`); rec.Code != http.StatusBadRequest {
+		t.Fatalf("unknown cost_basis status = %d, want 400", rec.Code)
+	}
+}
+
+// max_tokens caps metered tokens only. A subscription turn keeps its real
+// token counts at cost 0, so a user's accumulated gpt-5.6-terra usage must
+// never exhaust an org's token cap and refuse every later chat turn.
+func TestBudgetCheckIgnoresSubscriptionTokens(t *testing.T) {
+	srv, mux := newTestServer()
+	ctx := context.Background()
+	if err := srv.RecordUsage(ctx, ledger.Entry{
+		OrgID: "org1", UserID: "u1", Model: "gpt-5.6-terra",
+		InputTokens: 900_000, OutputTokens: 90_000, CostBasis: ledger.CostBasisSubscription,
+	}); err != nil {
+		t.Fatalf("RecordUsage(subscription): %v", err)
+	}
+	checks := []string{
+		`{"org_id":"org1","user_id":"u1","max_tokens":1000}`,
+		`{"org_id":"org1","max_tokens":1000}`,
+	}
+	for _, body := range checks {
+		var resp budgetCheckResponse
+		mustJSON(t, do(mux, http.MethodPost, "/api/v1/budget/check", body).Body.Bytes(), &resp)
+		if !resp.Allowed || resp.CurrentTokens != 0 {
+			t.Fatalf("%s: subscription tokens counted against max_tokens: %+v", body, resp)
+		}
+	}
+
+	// Metered and unreported entries still count against the cap.
+	for _, basis := range []string{ledger.CostBasisMetered, ledger.CostBasisUnknown} {
+		if err := srv.RecordUsage(ctx, ledger.Entry{
+			OrgID: "org1", UserID: "u1", Model: "gpt-4o", InputTokens: 500, OutputTokens: 100, CostBasis: basis,
+		}); err != nil {
+			t.Fatalf("RecordUsage(%q): %v", basis, err)
+		}
+	}
+	for _, body := range checks {
+		var resp budgetCheckResponse
+		mustJSON(t, do(mux, http.MethodPost, "/api/v1/budget/check", body).Body.Bytes(), &resp)
+		if resp.Allowed || resp.CurrentTokens != 1_200 || resp.Reason == "" {
+			t.Fatalf("%s: metered tokens must trip max_tokens: %+v", body, resp)
+		}
+	}
+
+	// Usage reporting still counts every token.
+	usage, err := srv.ledger.GetUsage(ctx, "org1", "u1")
+	if err != nil {
+		t.Fatalf("GetUsage: %v", err)
+	}
+	if usage.TotalInputTokens != 901_000 || usage.TotalOutputTokens != 90_200 {
+		t.Fatalf("usage totals = %+v, want the subscription tokens included", usage)
 	}
 }

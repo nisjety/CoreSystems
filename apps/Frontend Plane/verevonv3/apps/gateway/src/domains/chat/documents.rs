@@ -9,6 +9,27 @@ use serde_json::{json, Value};
 
 use crate::{config::AppState, middleware::AuthenticatedUser};
 
+/// Ephemeral extraction: imports-core authenticates the ingestion audience and
+/// reads bytes in memory. No document/job is created and no storage scope is accepted.
+pub(crate) async fn extract_chat_document(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    Json(payload): Json<Value>,
+) -> Response {
+    let Some(token) = super::shared::ingestion_token(&state, &user, &headers).await else {
+        return (StatusCode::SERVICE_UNAVAILABLE, Json(crate::envelope::error(
+            "imports_auth_unavailable", "Document reading is temporarily unavailable.",
+        ))).into_response();
+    };
+    let mut response = crate::upstream::proxy_bearer_json(
+        &state, Method::POST, &format!("{}/api/v1/import/extract", state.imports_api_url),
+        Some(payload), Some(&token), &user.user_id,
+    ).await.into_response();
+    response.headers_mut().insert(axum::http::header::CACHE_CONTROL, axum::http::HeaderValue::from_static("no-store"));
+    response
+}
+
 /// Non-empty trimmed string field, or `None`.
 fn text_field(payload: &Value, key: &str) -> Option<String> {
     payload
@@ -30,7 +51,7 @@ fn text_field(payload: &Value, key: &str) -> Option<String> {
 /// unreachable rather than merely unwired. We now take the route Data Plane v2
 /// names, reusing the same documents-api leg the knowledge domain already
 /// proxies through, which mints the scoped `data-plane` audience token.
-pub(super) async fn upload_chat_document(
+pub(crate) async fn upload_chat_document(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
     headers: HeaderMap,

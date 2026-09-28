@@ -25,6 +25,11 @@ pub(crate) async fn enrich_model_body(
     user: &AuthenticatedUser,
     mut body: Value,
 ) -> Value {
+    if body.get("features").and_then(Value::as_array)
+        .is_some_and(|features| features.iter().any(|f| f == "conversation_only")) {
+        if let Some(object) = body.as_object_mut() { object.remove("support_context_query"); }
+        return body;
+    }
     let query = body
         .as_object_mut()
         .and_then(|object| object.remove("support_context_query"))

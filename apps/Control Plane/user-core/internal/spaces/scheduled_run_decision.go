@@ -74,22 +74,13 @@ func scheduledRunPayloadDigest(action, schema string, evidence PersonalThreadDec
 		hash.Write(length[:])
 		hash.Write([]byte(field.value))
 	}
-	for _, revision := range []struct {
-		name  string
-		value int64
-	}{
-		{"authority_revision", evidence.Membership.Revisions.Authority},
-		{"membership_revision", evidence.Membership.Revisions.Membership},
-		{"privacy_revision", evidence.Membership.Revisions.Privacy},
-		{"recipient_audience_revision", evidence.Membership.Revisions.RecipientAudience},
-		{"entitlement_revision", evidence.Membership.Revisions.Entitlement},
-	} {
-		hash.Write([]byte(revision.name))
-		hash.Write([]byte{0})
-		var encoded [8]byte
-		binary.BigEndian.PutUint64(encoded[:], uint64(revision.value))
-		hash.Write(encoded[:])
-	}
+	writeDigestRevisions(hash,
+		digestRevision{"authority_revision", evidence.Membership.Revisions.Authority},
+		digestRevision{"membership_revision", evidence.Membership.Revisions.Membership},
+		digestRevision{"privacy_revision", evidence.Membership.Revisions.Privacy},
+		digestRevision{"recipient_audience_revision", evidence.Membership.Revisions.RecipientAudience},
+		digestRevision{"entitlement_revision", evidence.Membership.Revisions.Entitlement},
+	)
 	return "sha256:" + hex.EncodeToString(hash.Sum(nil))
 }
 
@@ -127,7 +118,7 @@ func issueScheduledRunDecision(
 		return Decision{}, err
 	}
 	if !matchesOneOf(evidence.Membership.Role, "editor", "manager", "owner") {
-		return Decision{}, fmt.Errorf("Space role cannot run a schedule")
+		return Decision{}, fmt.Errorf("space role cannot run a schedule")
 	}
 	if !evidence.ScheduleFireEntitled {
 		return Decision{}, fmt.Errorf("schedule fire entitlement is not active")
@@ -144,19 +135,9 @@ func issueScheduledRunDecision(
 	if strings.TrimSpace(decisionRef) == "" || strings.TrimSpace(nonce) == "" || now.IsZero() {
 		return Decision{}, fmt.Errorf("scheduled run decision fields are required")
 	}
-	return Decision{
-		DecisionRef: strings.TrimSpace(decisionRef), OrgID: evidence.Membership.OrgID, SpaceRef: evidence.Membership.SpaceRef,
-		SubjectID: evidence.Membership.SubjectID, ServiceAudience: audience, ActionID: action,
-		ActionSchemaHash: schema, PayloadDigest: scheduledRunPayloadDigest(action, schema, evidence, intent, threadID), IdempotencyKey: strings.TrimSpace(intent.IdempotencyKey),
-		RecipientAudienceRef: strings.TrimSpace(evidence.RecipientAudienceRef), RecipientAudienceHash: strings.TrimSpace(evidence.RecipientAudienceHash),
-		PrivacyPolicyRef: strings.TrimSpace(evidence.Privacy.PolicyRef), ResourceAuthorizationRef: strings.TrimSpace(evidence.ResourceAuthorizationRef),
-		AuthorityRevision: evidence.Membership.Revisions.Authority, MembershipRevision: evidence.Membership.Revisions.Membership,
-		PrivacyRevision: evidence.Membership.Revisions.Privacy, RecipientAudienceRevision: evidence.Membership.Revisions.RecipientAudience,
-		EntitlementRevision: evidence.Membership.Revisions.Entitlement, Permissions: []string{permission},
-		Purpose: strings.TrimSpace(evidence.Privacy.Purpose), LawfulBasis: strings.TrimSpace(evidence.Privacy.LawfulBasis),
-		PrivacyClass: strings.TrimSpace(evidence.Privacy.PrivacyClass), ThirdPartyAllowed: evidence.Privacy.ThirdPartyAllowed,
-		RetentionClass: strings.TrimSpace(evidence.Privacy.RetentionClass), Residency: strings.TrimSpace(evidence.Privacy.Residency),
-		DeletionScope: strings.TrimSpace(evidence.Privacy.DeletionScope), ZeroDataRetention: false,
-		IssuedAt: now.UTC(), ExpiresAt: now.UTC().Add(personalDecisionLifetime), Nonce: strings.TrimSpace(nonce),
-	}, nil
+	return newEvidenceDecision(
+		evidence, decisionRef, audience, action, schema,
+		scheduledRunPayloadDigest(action, schema, evidence, intent, threadID), intent.IdempotencyKey, nonce,
+		[]string{permission}, false, now,
+	), nil
 }

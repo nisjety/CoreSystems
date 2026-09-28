@@ -31,12 +31,12 @@ type VerificationKey struct {
 // matching public key through their own deployment configuration.
 func LoadSigningKeyFromEnv(getenv func(string) string) (SigningKey, error) {
 	if getenv == nil {
-		return SigningKey{}, fmt.Errorf("Space decision environment reader is required")
+		return SigningKey{}, fmt.Errorf("space decision environment reader is required")
 	}
 	id := strings.TrimSpace(getenv("CONTROL_SPACE_DECISION_KEY_ID"))
 	raw := strings.TrimSpace(getenv("CONTROL_SPACE_DECISION_PRIVATE_KEY_BASE64"))
 	if id == "" || raw == "" || strings.IndexFunc(raw, func(r rune) bool { return r == ' ' || r == '\t' || r == '\n' || r == '\r' }) >= 0 {
-		return SigningKey{}, fmt.Errorf("Control Space decision signing key is not configured")
+		return SigningKey{}, fmt.Errorf("control Space decision signing key is not configured")
 	}
 	decoded, err := base64.RawURLEncoding.DecodeString(raw)
 	if err != nil {
@@ -47,9 +47,9 @@ func LoadSigningKeyFromEnv(getenv func(string) string) (SigningKey, error) {
 	case ed25519.SeedSize:
 		privateKey = ed25519.NewKeyFromSeed(decoded)
 	case ed25519.PrivateKeySize:
-		privateKey = ed25519.PrivateKey(decoded)
+		privateKey = decoded
 	default:
-		return SigningKey{}, fmt.Errorf("Control Space decision signing key has invalid length")
+		return SigningKey{}, fmt.Errorf("control Space decision signing key has invalid length")
 	}
 	return SigningKey{ID: id, PrivateKey: privateKey}, nil
 }
@@ -129,11 +129,11 @@ func (d Decision) Validate() error {
 		"nonce":                      d.Nonce,
 	} {
 		if strings.TrimSpace(value) == "" {
-			return fmt.Errorf("Space decision %s is required", label)
+			return fmt.Errorf("space decision %s is required", label)
 		}
 	}
 	if len(d.Permissions) == 0 {
-		return fmt.Errorf("Space decision permissions are required")
+		return fmt.Errorf("space decision permissions are required")
 	}
 	if err := (AuthorityRevision{
 		Authority: d.AuthorityRevision, Membership: d.MembershipRevision,
@@ -143,7 +143,7 @@ func (d Decision) Validate() error {
 		return err
 	}
 	if d.IssuedAt.IsZero() || d.ExpiresAt.IsZero() || !d.ExpiresAt.After(d.IssuedAt) {
-		return fmt.Errorf("Space decision expiry must be after issuance")
+		return fmt.Errorf("space decision expiry must be after issuance")
 	}
 	return nil
 }
@@ -167,6 +167,15 @@ func SignDecision(key SigningKey, decision Decision) (string, error) {
 	signed := decisionVersion + "." + encodedKeyID + "." + encoded
 	signature := ed25519.Sign(key.PrivateKey, []byte(signed))
 	return signed + "." + base64.RawURLEncoding.EncodeToString(signature), nil
+}
+
+// matchesExpectation reports whether the decision exactly binds the caller's
+// expected target service, action, and intent.
+func (d Decision) matchesExpectation(expected DecisionExpectation) bool {
+	return d.OrgID == expected.OrgID && d.SpaceRef == expected.SpaceRef &&
+		d.SubjectID == expected.SubjectID && d.ServiceAudience == expected.ServiceAudience &&
+		d.ActionID == expected.ActionID && d.ActionSchemaHash == expected.ActionSchemaHash &&
+		d.PayloadDigest == expected.PayloadDigest && d.IdempotencyKey == expected.IdempotencyKey
 }
 
 func VerifyDecision(key VerificationKey, token string, expected DecisionExpectation) (*Decision, error) {
@@ -200,20 +209,18 @@ func VerifyDecision(key VerificationKey, token string, expected DecisionExpectat
 	if err := decision.Validate(); err != nil {
 		return nil, err
 	}
-	if decision.OrgID != expected.OrgID || decision.SpaceRef != expected.SpaceRef || decision.SubjectID != expected.SubjectID || decision.ServiceAudience != expected.ServiceAudience ||
-		decision.ActionID != expected.ActionID || decision.ActionSchemaHash != expected.ActionSchemaHash ||
-		decision.PayloadDigest != expected.PayloadDigest || decision.IdempotencyKey != expected.IdempotencyKey {
-		return nil, fmt.Errorf("Space decision target does not match expected authority")
+	if !decision.matchesExpectation(expected) {
+		return nil, fmt.Errorf("space decision target does not match expected authority")
 	}
 	now := expected.Now
 	if now.IsZero() {
 		now = time.Now().UTC()
 	}
 	if !now.Before(decision.ExpiresAt) {
-		return nil, fmt.Errorf("Space decision expired")
+		return nil, fmt.Errorf("space decision expired")
 	}
 	if decision.IssuedAt.After(now.Add(time.Minute)) {
-		return nil, fmt.Errorf("Space decision issued in the future")
+		return nil, fmt.Errorf("space decision issued in the future")
 	}
 	return &decision, nil
 }

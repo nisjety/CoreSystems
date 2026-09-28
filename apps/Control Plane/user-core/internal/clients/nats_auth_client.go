@@ -25,16 +25,25 @@ type natsAuthCredential struct {
 	Token    string
 }
 
+// validateScopedNatsUserPassword enforces the pair/length invariants on the
+// NATS_USER/NATS_PASSWORD scoped credential.
+func validateScopedNatsUserPassword(user, password string) error {
+	if (user == "") != (password == "") {
+		return fmt.Errorf("NATS_USER and NATS_PASSWORD must be configured together")
+	}
+	if user != "" && len(password) < 32 {
+		return fmt.Errorf("NATS_PASSWORD must contain at least 32 characters")
+	}
+	return nil
+}
+
 func selectNatsAuthCredential() (natsAuthCredential, error) {
 	user := strings.TrimSpace(os.Getenv("NATS_USER"))
 	password := strings.TrimSpace(os.Getenv("NATS_PASSWORD"))
-	if (user == "") != (password == "") {
-		return natsAuthCredential{}, fmt.Errorf("NATS_USER and NATS_PASSWORD must be configured together")
+	if err := validateScopedNatsUserPassword(user, password); err != nil {
+		return natsAuthCredential{}, err
 	}
 	if user != "" {
-		if len(password) < 32 {
-			return natsAuthCredential{}, fmt.Errorf("NATS_PASSWORD must contain at least 32 characters")
-		}
 		return natsAuthCredential{User: user, Password: password}, nil
 	}
 
@@ -90,7 +99,7 @@ func NewNatsAuthClient(natsURL string, serviceCredential AuthInternalClientCrede
 }
 
 // Authenticate requests a service account session token from auth service
-func (c *NatsAuthClient) Authenticate(ctx context.Context) error {
+func (c *NatsAuthClient) Authenticate(_ context.Context) error {
 	// Check if we have a valid token
 	if c.sessionToken != "" && time.Now().Before(c.sessionExpiry) {
 		return nil // Token still valid

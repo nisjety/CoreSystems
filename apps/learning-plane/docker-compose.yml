@@ -1,0 +1,25 @@
+name: learning-plane
+
+services:
+  learning-postgres:
+    image: postgres:15.18-alpine3.24@sha256:3d0f7584ed7d04e27fa050d6683a74746608faf21f202be78460d679cc56461f
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: learning_owner
+      POSTGRES_PASSWORD: ${LEARNING_DB_OWNER_PASSWORD:?Set a dedicated learning owner password}
+      POSTGRES_DB: ${LEARNING_DB_NAME:-learning}
+      LEARNING_DB_APP_USER: learning_app
+      LEARNING_DB_APP_PASSWORD: ${LEARNING_DB_APP_PASSWORD:?Set a separate least-privilege learning application password}
+    ports:
+      - "127.0.0.1:${LEARNING_DB_HOST_PORT:-5546}:5432"
+    volumes:
+      - learning-postgres-data:/var/lib/postgresql/data
+      - ./postgres-init/10-learning-app-role.sh:/docker-entrypoint-initdb.d/10-learning-app-role.sh:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 8
+
+volumes:
+  learning-postgres-data:

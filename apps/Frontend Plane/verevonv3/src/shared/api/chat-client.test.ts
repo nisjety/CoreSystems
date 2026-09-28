@@ -1,14 +1,18 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
+  approvePlan,
   buildChatWireBody,
   groupChatModels,
   listModels,
+  rejectPlan,
   shouldRequestSupportContext,
   describeFeedbackFailure,
   getChatThreadTranscript,
   getThreadContext,
   listChatThreads,
+  parseTurnTiming,
   queueInvocationInput,
+  resumeStream,
   saveChatThreadSnapshot,
   streamChat,
   subscriptionModelDisplayName,
@@ -175,6 +179,74 @@ describe('chat-client stream-event coverage', () => {
     const onDone = vi.fn()
     await streamChat({ content: 'hi' }, { onDone })
     expect(onDone).toHaveBeenCalledTimes(1)
+  })
+
+  it('reads the BFF error envelope, so a broken upstream stream keeps its transport code', async () => {
+    // Byte-for-byte what the BFF's `sse_transport_error_event` writes when its
+    // upstream byte stream fails mid-answer. Read flat, this became an
+    // anonymous "Stream error" and the turn was failed instead of resumed.
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        sseResponse([
+          'event: error\ndata: {"error":{"code":"upstream_unavailable","message":"The upstream service is unavailable."}}\n\n',
+          `event: error\ndata: ${JSON.stringify({ code: 'response_validation_failed', message: 'Ikke publisert.', retryable: true })}\n\n`,
+        ]),
+      ),
+    )
+    const onError = vi.fn()
+    await streamChat({ content: 'hi' }, { onError })
+    expect(onError).toHaveBeenNthCalledWith(1, expect.objectContaining({
+      code: 'upstream_unavailable',
+      message: 'The upstream service is unavailable.',
+    }))
+    // Model Gateway's flat codes are unchanged.
+    expect(onError).toHaveBeenNthCalledWith(2, expect.objectContaining({
+      code: 'response_validation_failed',
+      message: 'Ikke publisert.',
+      retryable: true,
+    }))
+  })
+
+  it('carries a subscription refusal\'s reset time and retry delay, in either spelling', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        sseResponse([
+          // Byte-for-byte the gateway's usage-limit frame (snake_case).
+          `event: error\ndata: ${JSON.stringify({
+            code: 'subscription_usage_limit',
+            message: 'Den tilkoblede ChatGPT-planen har nådd bruksgrensen for Codex.',
+            retryable: false,
+            resets_at: '2026-09-26T01:21:00Z',
+            retry_after_ms: 52_260_000,
+            request_id: 'req-1',
+          })}\n\n`,
+          `event: error\ndata: ${JSON.stringify({ code: 'rate_limited', message: 'x', retryAfterMs: 2_000, resetsAt: '2026-09-26T01:21:00.000Z' })}\n\n`,
+          // A reset instant that does not parse, and a delay that is not a
+          // delay, are dropped rather than handed to the UI.
+          `event: error\ndata: ${JSON.stringify({ code: 'subscription_usage_limit', message: 'x', resets_at: 'tomorrow', retry_after_ms: -5 })}\n\n`,
+          `event: error\ndata: ${JSON.stringify({ code: 'subscription_upstream_unavailable', message: 'x', retry_after_ms: '100' })}\n\n`,
+        ]),
+      ),
+    )
+    const onError = vi.fn()
+    await streamChat({ content: 'hi' }, { onError })
+    expect(onError).toHaveBeenCalledTimes(4)
+    expect(onError.mock.calls[0]?.[0]).toEqual({
+      code: 'subscription_usage_limit',
+      message: 'Den tilkoblede ChatGPT-planen har nådd bruksgrensen for Codex.',
+      retryable: false,
+      runId: undefined,
+      requestId: 'req-1',
+      resetsAt: '2026-09-26T01:21:00Z',
+      retryAfterMs: 52_260_000,
+    })
+    expect(onError.mock.calls[1]?.[0]).toMatchObject({ code: 'rate_limited', retryAfterMs: 2_000, resetsAt: '2026-09-26T01:21:00.000Z' })
+    for (const call of onError.mock.calls.slice(2)) {
+      expect(call[0]).not.toHaveProperty('resetsAt')
+      expect(call[0]).not.toHaveProperty('retryAfterMs')
+    }
   })
 
   it('carries stop_reason through done so a truncated answer is visible', async () => {
@@ -395,6 +467,15 @@ describe('mid-run queued input', () => {
 })
 
 describe('chat-client tool wiring', () => {
+  it('carries conversation isolation and suppresses automatic support/web/agent context', () => {
+    const body = buildChatWireBody({ content: 'Finn oppfølging i innboksen', sourceScope: 'conversation', browseWeb: true, deepResearch: true, generateImage: true, planMode: true })
+    expect(body.features).toContain('conversation_only')
+    expect(body.features).not.toContain('agentic')
+    expect(body.support_context_query).toBeUndefined()
+    expect(body.browse_web).toBe(false)
+    expect(body.deep_research).toBe(false)
+    expect(body.generate_image).toBe(false)
+  })
   afterEach(() => {
     vi.unstubAllGlobals()
   })
@@ -441,7 +522,13 @@ describe('chat-client tool wiring', () => {
       attachments: [],
       tools: [],
     })
-    expect(body.features).not.toContain('tools')
+    // `tools` DOES stay on for a subscription turn: model-gateway routes the
+    // tool-decision round through Balance and only hands the answer off when
+    // a tool actually ran (sse.rs `subscription_tool_round`), so this is what
+    // lets a subscription turn reach get_weather/code_interpreter at all.
+    // `agentic` (the orchestration-backed plan-mode run path) is a separate,
+    // still-incompatible concern and stays off.
+    expect(body.features).toContain('tools')
     expect(body.features).not.toContain('agentic')
   })
 
@@ -506,7 +593,7 @@ describe('chat-client tool wiring', () => {
     })).not.toHaveProperty('support_context_query')
   })
 
-  it('maps batched citation events into individual citations', async () => {
+  it('maps batched citation events into individual citations (legacy payload, no claim/anchor keys)', async () => {
     const fetchMock = vi.fn().mockResolvedValue(
       sseResponse([
         `event: citations\ndata: ${JSON.stringify({
@@ -526,6 +613,44 @@ describe('chat-client tool wiring', () => {
       title: 'Result',
       url: 'https://example.com',
       snippet: 'Snippet',
+    })
+  })
+
+  it('maps a full citation payload (claim_id/source_group_id/source_group_label/start/end) through to onCitation', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      sseResponse([
+        `event: citations\ndata: ${JSON.stringify({
+          citations: [
+            {
+              id: 'c1',
+              title: 'Refund policy',
+              url: 'https://intranet/refunds',
+              snippet: 'Snippet',
+              claim_id: 'req-1:claim-0',
+              source_group_id: 'kb:sharepoint',
+              source_group_label: 'Microsoft 365',
+              start: 4,
+              end: 9,
+            },
+          ],
+        })}\n\n`,
+      ]),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    const onCitation = vi.fn()
+    await streamChat({ content: 'hi' }, { onCitation })
+
+    expect(onCitation).toHaveBeenCalledWith({
+      id: 'c1',
+      title: 'Refund policy',
+      url: 'https://intranet/refunds',
+      snippet: 'Snippet',
+      claimId: 'req-1:claim-0',
+      sourceGroupId: 'kb:sharepoint',
+      sourceGroupLabel: 'Microsoft 365',
+      start: 4,
+      end: 9,
     })
   })
 
@@ -561,6 +686,167 @@ describe('chat-client tool wiring', () => {
     await streamChat({ content: 'hi' }, { onFollowUps })
 
     expect(onFollowUps).not.toHaveBeenCalled()
+  })
+
+  /** plan-gate §2.1: the model's structured plan-mode plan. */
+  it('maps a plan_proposed event into onPlanProposed with its steps', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      sseResponse([
+        `event: plan_proposed\ndata: ${JSON.stringify({
+          plan_id: 'plan_1',
+          summary: 'Send the overdue invoice',
+          steps: [
+            { id: 'step_1', title: 'Draft the email', operation: '' },
+            { id: 'step_2', title: 'Send it', operation: 'email_send' },
+          ],
+          request_id: 'req_1',
+        })}\n\n`,
+      ]),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    const onPlanProposed = vi.fn()
+    await streamChat({ content: 'hi' }, { onPlanProposed })
+
+    expect(onPlanProposed).toHaveBeenCalledWith({
+      planId: 'plan_1',
+      summary: 'Send the overdue invoice',
+      steps: [
+        { id: 'step_1', title: 'Draft the email', operation: '' },
+        { id: 'step_2', title: 'Send it', operation: 'email_send' },
+      ],
+      requestId: 'req_1',
+    })
+  })
+
+  it('never calls onPlanProposed when the frame is missing an id or summary', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      sseResponse([`event: plan_proposed\ndata: ${JSON.stringify({ steps: [] })}\n\n`]),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    const onPlanProposed = vi.fn()
+    await streamChat({ content: 'hi' }, { onPlanProposed })
+
+    expect(onPlanProposed).not.toHaveBeenCalled()
+  })
+})
+
+describe('approvePlan / rejectPlan (plan-gate §2.3)', () => {
+  function jsonResponse(data: unknown): Response {
+    return new Response(JSON.stringify({ data }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    })
+  }
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('posts decision=approve with plan_id and wire-shaped edited_steps, and normalizes the returned plan', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      jsonResponse({
+        granted_rung: 'workspace_write',
+        was_in_plan_mode: true,
+        persisted: true,
+        plan: {
+          id: 'plan_1',
+          run_id: 'run_1',
+          thread_id: 'thread_1',
+          state: 'PLAN_STATE_APPROVED',
+          summary: 'Send the overdue invoice',
+          steps: [{ id: 'step_1', title: 'Draft the email', state: 'PLAN_STEP_STATE_PENDING' }],
+        },
+      }),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    const result = await approvePlan('run_1', 'workspace_write', 'writes its report', 'plan_1', [
+      { stepId: 'step_1', title: 'Draft the email', removed: false },
+      { title: 'A brand new step', removed: false },
+    ])
+
+    const [path, init] = fetchMock.mock.calls[0] as [string, RequestInit]
+    expect(path).toContain('/api/v1/agents/runs/run_1/plan-approval')
+    expect(init.method).toBe('POST')
+    expect(JSON.parse(init.body as string)).toEqual({
+      decision: 'approve',
+      granted_rung: 'workspace_write',
+      justification: 'writes its report',
+      plan_id: 'plan_1',
+      edited_steps: [
+        { step_id: 'step_1', title: 'Draft the email', operation: '', removed: false },
+        { step_id: '', title: 'A brand new step', operation: '', removed: false },
+      ],
+    })
+    expect(result.grantedRung).toBe('workspace_write')
+    expect(result.plan?.id).toBe('plan_1')
+    expect(result.plan?.state).toBe('PLAN_STATE_APPROVED')
+    expect(result.plan?.steps?.[0]?.title).toBe('Draft the email')
+  })
+
+  it('omits plan_id/edited_steps for the pure rung-grant path (no structured plan)', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      jsonResponse({ granted_rung: 'workspace_write', was_in_plan_mode: true, persisted: true }),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    const result = await approvePlan('run_1', 'workspace_write', 'writes its report')
+
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit]
+    expect(JSON.parse(init.body as string)).toEqual({
+      decision: 'approve',
+      granted_rung: 'workspace_write',
+      justification: 'writes its report',
+      plan_id: '',
+      edited_steps: [],
+    })
+    expect(result.plan).toBeUndefined()
+  })
+
+  it('posts decision=reject with the plan id and reason, granting nothing', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      jsonResponse({
+        plan: { id: 'plan_1', state: 'PLAN_STATE_REJECTED', summary: 'Send the overdue invoice' },
+      }),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    const result = await rejectPlan('run_1', 'plan_1', 'Ikke nødvendig lenger')
+
+    const [path, init] = fetchMock.mock.calls[0] as [string, RequestInit]
+    expect(path).toContain('/api/v1/agents/runs/run_1/plan-approval')
+    expect(JSON.parse(init.body as string)).toEqual({
+      decision: 'reject',
+      justification: 'Ikke nødvendig lenger',
+      plan_id: 'plan_1',
+      edited_steps: [],
+    })
+    expect(result.plan?.state).toBe('PLAN_STATE_REJECTED')
+  })
+})
+
+describe('buildChatWireBody — retrieval scope (chat-wave2 scope spec)', () => {
+  it('omits retrieval_scope when unset or auto, matching the byte-identical default', () => {
+    expect(buildChatWireBody({ content: 'hi' }).retrieval_scope).toBeUndefined()
+    expect(buildChatWireBody({ content: 'hi', retrievalScope: 'auto' }).retrieval_scope).toBeUndefined()
+  })
+
+  it('sends retrieval_scope when the caller picked knowledge_only or web_only', () => {
+    expect(buildChatWireBody({ content: 'hi', retrievalScope: 'knowledge_only' }).retrieval_scope).toBe('knowledge_only')
+    expect(buildChatWireBody({ content: 'hi', retrievalScope: 'web_only' }).retrieval_scope).toBe('web_only')
+  })
+
+  it('forces retrieval_scope absent when sourceScope is conversation, even if a restrictive retrievalScope was also passed', () => {
+    const body = buildChatWireBody({
+      content: 'hi',
+      sourceScope: 'conversation',
+      retrievalScope: 'web_only',
+    })
+    expect(body.retrieval_scope).toBeUndefined()
+    // Conversation-only's own exclusions still apply unchanged alongside it.
+    expect(body.features).toContain('conversation_only')
   })
 })
 
@@ -645,6 +931,9 @@ describe('chat-client server thread history', () => {
         // Absent from the payload -> false. A gateway index written before pins
         // existed must decode as unpinned, not fail the whole listing.
         pinned: false,
+        // Absent from the payload -> true, the mirror-image default: a
+        // thread saved before persona existed has always had it on.
+        personaEnabled: true,
         latestRunId: 'run_1',
         latestRunStatus: 'awaiting_approval',
         latestRunUpdatedAt: '2026-06-17T10:01:00.000Z',
@@ -758,6 +1047,65 @@ describe('chat-client server thread history', () => {
       title: 'Question',
       turns: [{ id: 'user_1', role: 'user', content: 'Question' }],
     })
+  })
+
+  /**
+   * Persona spec: `personaEnabled` on `SaveChatThreadSnapshotRequest` is
+   * optional so an ordinary snapshot save (title/preview/turns on every
+   * turn) never silently touches the per-thread toggle — same
+   * "omit = leave unchanged" contract `pinned` already has.
+   */
+  it('omits personaEnabled from the wire body when the caller does not set it', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({
+        data: {
+          session: {
+            threadId: 'thread_1',
+            title: 'Question',
+            preview: 'Answer',
+            updatedAt: '2026-06-17T10:00:00.000Z',
+          },
+        },
+      }), { headers: { 'Content-Type': 'application/json' }, status: 200 }),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    await saveChatThreadSnapshot('thread_1', {
+      title: 'Question',
+      preview: 'Answer',
+      updatedAt: '2026-06-17T10:00:00.000Z',
+    })
+
+    const init = fetchMock.mock.calls[0]?.[1]
+    expect('personaEnabled' in JSON.parse(String(init?.body))).toBe(false)
+  })
+
+  it('round-trips an explicit personaEnabled through the snapshot save', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({
+        data: {
+          session: {
+            threadId: 'thread_1',
+            title: 'Question',
+            preview: 'Answer',
+            updatedAt: '2026-06-17T10:00:00.000Z',
+            personaEnabled: false,
+          },
+        },
+      }), { headers: { 'Content-Type': 'application/json' }, status: 200 }),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    const saved = await saveChatThreadSnapshot('thread_1', {
+      title: 'Question',
+      preview: 'Answer',
+      updatedAt: '2026-06-17T10:00:00.000Z',
+      personaEnabled: false,
+    })
+
+    const init = fetchMock.mock.calls[0]?.[1]
+    expect(JSON.parse(String(init?.body))).toMatchObject({ personaEnabled: false })
+    expect(saved?.personaEnabled).toBe(false)
   })
 
   it('loads a rich server transcript when one exists', async () => {
@@ -1120,5 +1468,158 @@ describe('buildChatWireBody — explicit skills (the composer `/` picker)', () =
     expect(
       'skill_ids' in buildChatWireBody({ content: 'hi', actions: [{ id: 'cap-1', name: 'Cap', kind: 'capability' }] }),
     ).toBe(false)
+  })
+})
+
+describe('Q15 stream refusals are not connection loss', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  const refusal = (status: number) => vi.fn().mockResolvedValue(new Response(
+    JSON.stringify({ error: { code: status === 401 ? 'unauthorized' : 'forbidden', message: 'no' } }),
+    { status, headers: { 'Content-Type': 'application/json' } },
+  ))
+
+  it.each([
+    [401, 'unauthorized'],
+    [403, 'forbidden'],
+  ])('reports a %i on the live stream as %s and asks the user to sign in again', async (status, code) => {
+    vi.stubGlobal('fetch', refusal(status))
+    const onError = vi.fn()
+    await streamChat({ content: 'hi' }, { onError })
+    expect(onError).toHaveBeenCalledTimes(1)
+    expect(onError.mock.calls[0]?.[0]).toMatchObject({ code })
+    expect(onError.mock.calls[0]?.[0].message).toContain('Logg inn på nytt')
+  })
+
+  it.each([
+    [401, 'unauthorized'],
+    [403, 'forbidden'],
+  ])('reports a %i on resume as %s, not as a lost connection', async (status, code) => {
+    vi.stubGlobal('fetch', refusal(status))
+    const onError = vi.fn()
+    await resumeStream('req-1', { onError })
+    expect(onError.mock.calls[0]?.[0]).toMatchObject({ code })
+  })
+
+  it('keeps an expired resume buffer (404) and a network failure as connection loss', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(
+      JSON.stringify({ error: { code: 'not_found', message: 'stream not resumable' } }),
+      { status: 404 },
+    )))
+    const expired = vi.fn()
+    await resumeStream('req-1', { onError: expired })
+    expect(expired).toHaveBeenCalledWith({ code: 'connection_error', message: 'stream not resumable' })
+
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new TypeError('Failed to fetch')))
+    const offline = vi.fn()
+    await streamChat({ content: 'hi' }, { onError: offline })
+    expect(offline).toHaveBeenCalledWith({ code: 'connection_error', message: 'Failed to fetch' })
+  })
+})
+
+describe('turn_timing, cost_basis and result_receipt', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  const frame = (event: string, data: unknown) => `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`
+
+  const timingPayload = {
+    request_id: 'req-1',
+    outcome: 'completed',
+    server_ms: 43_440,
+    provider_ms: 43_220,
+    orchestration_ms: 220,
+    marks: { connected_ms: 88, first_draft_ms: 20_010, durable_ms: 43_300, future_mark_ms: 1 },
+    counts: { model_rounds: 1, provider_calls: 4, review_passes: 1, review_batches: 3, repairs: 0, reviewer_edits: 0 },
+    tokens_reported: false,
+    phases: [
+      {
+        phase: 'generation', start_ms: 90, end_ms: 20_010, round: 1, tools: ['create_artifact'],
+        provider: { handler_ms: 19_930, provider_ms: 19_920, attempts: 1, response_cache_hit: false, upstream_ms: { broker_ready: 40 } },
+      },
+      { phase: 'review_batch', start_ms: 20_020, end_ms: 43_240, pass: 1, batch: 2, outcome: 'accepted', unknown_field: 'kept out' },
+      { phase: '', start_ms: 1, end_ms: 2 },
+    ],
+    phases_dropped: 0,
+    brand_new_field: { anything: true },
+  }
+
+  it('parses turn_timing leniently onto camelCase, ignoring unknown fields and malformed phases', () => {
+    const timing = parseTurnTiming(timingPayload)
+    expect(timing).toMatchObject({
+      requestId: 'req-1',
+      outcome: 'completed',
+      serverMs: 43_440,
+      providerMs: 43_220,
+      orchestrationMs: 220,
+      marks: { connectedMs: 88, firstDraftMs: 20_010, durableMs: 43_300 },
+      counts: { modelRounds: 1, providerCalls: 4, reviewPasses: 1, reviewBatches: 3, repairs: 0, reviewerEdits: 0 },
+      tokensReported: false,
+      phasesDropped: 0,
+    })
+    expect(timing?.phases).toEqual([
+      {
+        phase: 'generation', startMs: 90, endMs: 20_010, round: 1, tools: ['create_artifact'],
+        provider: { handlerMs: 19_930, providerMs: 19_920, attempts: 1, responseCacheHit: false, upstreamMs: { broker_ready: 40 } },
+      },
+      { phase: 'review_batch', startMs: 20_020, endMs: 43_240, pass: 1, batch: 2, outcome: 'accepted' },
+    ])
+    expect(JSON.stringify(timing)).not.toContain('kept out')
+  })
+
+  it('rejects a payload without its totals, derives a missing orchestration time, and caps phases at 64', () => {
+    expect(parseTurnTiming({ outcome: 'completed' })).toBeNull()
+    expect(parseTurnTiming({ server_ms: 100, provider_ms: -1 })).toBeNull()
+    const many = parseTurnTiming({
+      server_ms: 1_000,
+      provider_ms: 1_200,
+      phases: Array.from({ length: 70 }, (_, index) => ({ phase: 'dispatch', start_ms: index, end_ms: index + 1 })),
+      phases_dropped: 3,
+      outcome: 'mystery',
+    })
+    expect(many?.orchestrationMs).toBe(0)
+    expect(many?.outcome).toBeUndefined()
+    expect(many?.phases).toHaveLength(64)
+    expect(many?.phasesDropped).toBe(9)
+  })
+
+  it('routes turn_timing, cost_basis and result_receipt to their handlers, not to onUnknownEvent', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(sseResponse([
+      frame('usage', { input_tokens: 10, output_tokens: 5, cost_usd: 0, latency_ms: 900, cost_basis: 'subscription' }),
+      frame('usage', { cost_usd: 0.002, cost_basis: 'something-else' }),
+      frame('turn_timing', timingPayload),
+      frame('turn_timing', { request_id: 'req-1' }),
+      frame('result_receipt', { receipt: { scope: 'direct_answer_word_range', words: 110 }, request_id: 'req-1' }),
+      frame('done', {}),
+    ])))
+    const onUsage = vi.fn()
+    const onTurnTiming = vi.fn()
+    const onResultReceipt = vi.fn()
+    const onUnknownEvent = vi.fn()
+    await streamChat({ content: 'hi' }, { onUsage, onTurnTiming, onResultReceipt, onUnknownEvent })
+    expect(onUsage.mock.calls[0]?.[0]).toMatchObject({ costUsd: 0, costBasis: 'subscription', latencyMs: 900 })
+    expect(onUsage.mock.calls[1]?.[0].costBasis).toBeUndefined()
+    // The payload without totals is dropped, not delivered as zeros.
+    expect(onTurnTiming).toHaveBeenCalledTimes(1)
+    expect(onTurnTiming.mock.calls[0]?.[0]).toMatchObject({ providerMs: 43_220, orchestrationMs: 220 })
+    expect(onResultReceipt).toHaveBeenCalledWith({ receipt: { scope: 'direct_answer_word_range', words: 110 }, requestId: 'req-1' })
+    expect(onUnknownEvent).not.toHaveBeenCalled()
+  })
+
+  it('tolerates a stream that never sends turn_timing', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(sseResponse([
+      frame('usage', { cost_usd: 0.0031 }),
+      frame('done', {}),
+    ])))
+    const onUsage = vi.fn()
+    const onTurnTiming = vi.fn()
+    const onDone = vi.fn()
+    await streamChat({ content: 'hi' }, { onUsage, onTurnTiming, onDone })
+    expect(onUsage.mock.calls[0]?.[0]).toMatchObject({ costUsd: 0.0031, costBasis: undefined })
+    expect(onTurnTiming).not.toHaveBeenCalled()
+    expect(onDone).toHaveBeenCalledTimes(1)
   })
 })

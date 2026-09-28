@@ -12,6 +12,7 @@ export const workspaceSettingsSectionIds = [
   'mcp',
   'skills',
   'org-instructions',
+  'persona',
   'plugins',
   'cron',
   'quotas',
@@ -120,6 +121,13 @@ export const workspaceSettingsSections: SectionDetail[] = [
     title: 'Organisasjonsinstrukser',
     description: 'Instrukser som gjelder for hele organisasjonen og legges til i hver samtale, sammen med rom- og agentinstrukser.',
     saveLabel: 'Lagre instrukser',
+  },
+  {
+    id: 'persona',
+    label: 'Persona',
+    title: 'Persona',
+    description: 'Dine egne, alltid-på instrukser, lagt til i hver ny samtale sammen med organisasjonens og rommets instrukser.',
+    saveLabel: 'Lagre persona',
   },
   {
     id: 'plugins',

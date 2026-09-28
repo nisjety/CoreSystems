@@ -79,6 +79,8 @@ impl PromptCache {
         for msg in &req.messages {
             hasher.update(msg.role.as_bytes());
             hasher.update(msg.content.as_bytes());
+            hasher.update(&(msg.compaction_summary.len() as u64).to_le_bytes());
+            hasher.update(msg.compaction_summary.as_bytes());
         }
         hasher.update(&req.temperature.to_le_bytes());
         hasher.update(&req.max_tokens.to_le_bytes());
@@ -194,6 +196,7 @@ mod tests {
             provider_hint: String::new(),
             model: "claude-sonnet-4-20250514".to_owned(),
             messages: vec![ChatMessage {
+                compaction_summary: String::new(),
                 role: "user".to_owned(),
                 content: "Hello".to_owned(),
                 name: String::new(),
@@ -208,6 +211,7 @@ mod tests {
 
     fn sample_response() -> InferResponse {
         InferResponse {
+            compaction_summary: String::new(),
             request_id: "req-1".to_owned(),
             content: "Hi there!".to_owned(),
             model_used: "claude-sonnet-4-20250514".to_owned(),

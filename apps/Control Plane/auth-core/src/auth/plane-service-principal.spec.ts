@@ -9,6 +9,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   authorizePlaneServicePrincipal,
+  authorizePlaneServiceTokenExchange,
   loadPlaneServicePrincipalRegistry,
 } from './plane-service-principal';
 
@@ -356,6 +357,142 @@ describe('plane service-principal issuance policy', () => {
   });
 });
 
+describe('plane service-principal token exchange authorization (delegated identity §1, T-4)', () => {
+  const exchangeConfigured = JSON.stringify({
+    'model-execution': {
+      credential: 'test-only-execution-key',
+      audiences: ['ingestion'],
+      orgIds: ['org-a'],
+      scopes: ['integration:read'],
+      tokenExchange: {
+        ingestion: ['session-core'],
+      },
+    },
+  });
+
+  it('authorizes a token exchange only when the registry names the subject audience for that target', () => {
+    expect(
+      authorizePlaneServiceTokenExchange(exchangeConfigured, {
+        serviceId: 'model-execution',
+        credential: 'test-only-execution-key',
+        audience: 'ingestion',
+        orgId: 'org-a',
+        requestedScopes: ['integration:read'],
+        reason: 'execution-core integration:read',
+        subjectAudience: 'session-core',
+      }),
+    ).toEqual({
+      serviceId: 'model-execution',
+      subject: 'service:model-execution',
+      orgId: 'org-a',
+      scopes: ['integration:read'],
+      reason: 'execution-core integration:read',
+    });
+  });
+
+  it('never carries a zdr/retention field — the exchange must source zdr from the verified subject token, not a registry default (T-5)', () => {
+    const result = authorizePlaneServiceTokenExchange(exchangeConfigured, {
+      serviceId: 'model-execution',
+      credential: 'test-only-execution-key',
+      audience: 'ingestion',
+      orgId: 'org-a',
+      requestedScopes: ['integration:read'],
+      reason: 'execution-core integration:read',
+      subjectAudience: 'session-core',
+    });
+    expect(result).not.toHaveProperty('zdr');
+  });
+
+  it('rejects a principal that is authorized for /internal-token but has no tokenExchange entry at all', () => {
+    // configured has no tokenExchange field for `graph-worker` at all.
+    expect(() =>
+      authorizePlaneServiceTokenExchange(configured, {
+        serviceId: 'graph-worker',
+        credential: 'test-only-caller-key',
+        audience: 'data-plane',
+        orgId: 'org-a',
+        requestedScopes: ['graph:read'],
+        reason: 'attempt exchange without opt-in',
+        subjectAudience: 'session-core',
+      }),
+    ).toThrow(/not authorized/i);
+  });
+
+  it.each([
+    { subjectAudience: 'execution-core' },
+    { subjectAudience: '' },
+    { audience: 'data-plane' }, // target audience has no tokenExchange entry
+    { orgId: 'org-b' },
+    { requestedScopes: ['integration:write'] },
+    { credential: 'wrong-test-key' },
+  ])('rejects an unbounded exchange request: %o', (override) => {
+    expect(() =>
+      authorizePlaneServiceTokenExchange(exchangeConfigured, {
+        serviceId: 'model-execution',
+        credential: 'test-only-execution-key',
+        audience: 'ingestion',
+        orgId: 'org-a',
+        requestedScopes: ['integration:read'],
+        reason: 'execution-core integration:read',
+        subjectAudience: 'session-core',
+        ...override,
+      }),
+    ).toThrow();
+  });
+
+  it.each([
+    // Target audience not present in the principal's own `audiences` list.
+    {
+      tokenExchange: { 'control-policy': ['session-core'] },
+    },
+    // Empty allowed-subject-audiences array for a named target.
+    { tokenExchange: { ingestion: [] } },
+    // Not an object.
+    { tokenExchange: 'session-core' },
+    { tokenExchange: ['session-core'] },
+  ])('rejects a malformed tokenExchange registry entry: %o', (override) => {
+    const malformed = JSON.stringify({
+      'model-execution': {
+        credential: 'test-only-execution-key',
+        audiences: ['ingestion'],
+        orgIds: ['org-a'],
+        scopes: ['integration:read'],
+        ...override,
+      },
+    });
+
+    expect(() =>
+      authorizePlaneServiceTokenExchange(malformed, {
+        serviceId: 'model-execution',
+        credential: 'test-only-execution-key',
+        audience: 'ingestion',
+        orgId: 'org-a',
+        requestedScopes: ['integration:read'],
+        reason: 'execution-core integration:read',
+        subjectAudience: 'session-core',
+      }),
+    ).toThrow();
+  });
+
+  it('is absent by default — no currently-registered principal gains this capability until the registry opts in', () => {
+    // `configured` (the module-level fixture used throughout this file) has
+    // no `tokenExchange` field on any entry — this pins that a principal
+    // fully authorized for /internal-token gains ZERO new capability from
+    // this feature shipping until a deployment explicitly edits the registry.
+    expect(() =>
+      authorizePlaneServiceTokenExchange(configured, {
+        serviceId: 'graph-worker',
+        credential: 'test-only-caller-key',
+        audience: 'data-plane',
+        orgId: 'org-a',
+        requestedScopes: ['graph:read'],
+        reason: 'serve graph retrieval',
+        subjectAudience: 'session-core',
+      }),
+    ).toThrow();
+  });
+});
+
 describe('plane service-principal registry loading', () => {
   let directory: string;
   let registryFile: string;
@@ -432,39 +569,49 @@ describe('plane service-principal registry loading', () => {
     ).toThrow(/both configured/);
   });
 
-  it.each([
-    ['relative path', () => 'registry.json', /normalized absolute path/],
-    [
-      'symbolic link',
-      () => {
-        const link = join(directory, 'registry-link.json');
-        symlinkSync(registryFile, link);
-        return link;
-      },
-      /private regular file/,
-    ],
-    [
-      'oversized file',
-      () => {
-        const oversized = join(directory, 'oversized.json');
-        writeFileSync(oversized, Buffer.alloc(1024 * 1024 + 1), {
-          mode: 0o600,
-        });
-        return oversized;
-      },
-      /too large/,
-    ],
-    [
-      'unreadable file',
-      () => {
-        const unreadable = join(directory, 'unreadable.json');
-        writeFileSync(unreadable, configured, { mode: 0o600 });
-        chmodSync(unreadable, 0o000);
-        return unreadable;
-      },
-      /private regular file/,
-    ],
-  ])('rejects an unsafe %s', (_name, fileFactory, expectedError) => {
+  // Windows cannot express POSIX permission/symlink hardening: chmod only
+  // toggles the read-only attribute and file symlinks need a special
+  // privilege, so those cases only run where the checks are enforceable.
+  const posixOnly = process.platform !== 'win32';
+  it.each(
+    (
+      [
+        ['relative path', () => 'registry.json', /normalized absolute path/],
+        [
+          'symbolic link',
+          () => {
+            const link = join(directory, 'registry-link.json');
+            symlinkSync(registryFile, link);
+            return link;
+          },
+          /private regular file/,
+          true,
+        ],
+        [
+          'oversized file',
+          () => {
+            const oversized = join(directory, 'oversized.json');
+            writeFileSync(oversized, Buffer.alloc(1024 * 1024 + 1), {
+              mode: 0o600,
+            });
+            return oversized;
+          },
+          /too large/,
+        ],
+        [
+          'unreadable file',
+          () => {
+            const unreadable = join(directory, 'unreadable.json');
+            writeFileSync(unreadable, configured, { mode: 0o600 });
+            chmodSync(unreadable, 0o000);
+            return unreadable;
+          },
+          /private regular file/,
+          true,
+        ],
+      ] as const
+    ).filter(([, , , posixRequired]) => posixOnly || !posixRequired),
+  )('rejects an unsafe %s', (_name, fileFactory, expectedError) => {
     expect(() =>
       loadPlaneServicePrincipalRegistry({
         PLANE_SERVICE_PRINCIPALS_FILE: fileFactory(),
@@ -472,13 +619,16 @@ describe('plane service-principal registry loading', () => {
     ).toThrow(expectedError);
   });
 
-  it('rejects a registry file readable by group or other users', () => {
-    chmodSync(registryFile, 0o644);
+  (posixOnly ? it : it.skip)(
+    'rejects a registry file readable by group or other users',
+    () => {
+      chmodSync(registryFile, 0o644);
 
-    expect(() =>
-      loadPlaneServicePrincipalRegistry({
-        PLANE_SERVICE_PRINCIPALS_FILE: registryFile,
-      }),
-    ).toThrow(/private/);
-  });
+      expect(() =>
+        loadPlaneServicePrincipalRegistry({
+          PLANE_SERVICE_PRINCIPALS_FILE: registryFile,
+        }),
+      ).toThrow(/private/);
+    },
+  );
 });

@@ -110,10 +110,28 @@ pub struct StreamDone {
     pub output_tokens: u32,
 }
 
+/// Recorded when a stream ends on an `error` or `stopped` frame instead of
+/// `done`, so a resume can tell a finished failure from a producer that is
+/// still working. It is not a frame: the terminal frame itself is buffered
+/// like any other, and replaying this marker sends nothing.
+///
+/// Kept apart from [`StreamDone`] on purpose. A failed stream must never be
+/// replayed as `done`, and a build that predates this record reads only the
+/// `done` key, so it can never mistake an ended stream for a completed one.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct StreamEnd {
+    /// The cursor just past the stream's last buffered frame, as
+    /// [`StreamDone::seq`] is for `done`.
+    pub seq: u64,
+}
+
 /// What a resume needs: deltas after the cursor and the terminal chunk.
 pub struct Replay {
     pub deltas: Vec<BufferedEvent>,
     pub done: Option<StreamDone>,
+    /// Present once the stream ended without `done`, whatever the cursor:
+    /// there is nothing left to follow.
+    pub ended: Option<StreamEnd>,
     /// False when the `request_id` is unknown (evicted or never existed).
     pub found: bool,
 }
@@ -125,7 +143,19 @@ pub struct Replay {
 struct BufferedStream {
     deltas: Vec<BufferedEvent>,
     done: Option<StreamDone>,
+    ended: Option<StreamEnd>,
     updated: Instant,
+}
+
+impl BufferedStream {
+    fn empty() -> Self {
+        Self {
+            deltas: Vec::new(),
+            done: None,
+            ended: None,
+            updated: Instant::now(),
+        }
+    }
 }
 
 #[derive(Clone, Default)]
@@ -141,11 +171,7 @@ impl InMemoryStreamBuffer {
         Self::sweep(&mut map);
         let entry = map
             .entry(request_id.to_owned())
-            .or_insert_with(|| BufferedStream {
-                deltas: Vec::new(),
-                done: None,
-                updated: Instant::now(),
-            });
+            .or_insert_with(BufferedStream::empty);
         entry.deltas.push(BufferedEvent {
             seq,
             event: event.to_owned(),
@@ -165,12 +191,19 @@ impl InMemoryStreamBuffer {
         };
         let entry = map
             .entry(request_id.to_owned())
-            .or_insert_with(|| BufferedStream {
-                deltas: Vec::new(),
-                done: None,
-                updated: Instant::now(),
-            });
+            .or_insert_with(BufferedStream::empty);
         entry.done = Some(done);
+        entry.updated = Instant::now();
+    }
+
+    fn end(&self, request_id: &str, end: StreamEnd) {
+        let Ok(mut map) = self.inner.lock() else {
+            return;
+        };
+        let entry = map
+            .entry(request_id.to_owned())
+            .or_insert_with(BufferedStream::empty);
+        entry.ended = Some(end);
         entry.updated = Instant::now();
     }
 
@@ -179,6 +212,7 @@ impl InMemoryStreamBuffer {
             return Replay {
                 deltas: Vec::new(),
                 done: None,
+                ended: None,
                 found: false,
             };
         };
@@ -186,6 +220,7 @@ impl InMemoryStreamBuffer {
             None => Replay {
                 deltas: Vec::new(),
                 done: None,
+                ended: None,
                 found: false,
             },
             Some(entry) => Replay {
@@ -207,6 +242,9 @@ impl InMemoryStreamBuffer {
                     .as_ref()
                     .filter(|done| after_seq.is_none_or(|a| done.seq > a))
                     .cloned(),
+                // Not a frame, so no cursor applies: a client that already
+                // saw the terminal error still learns the stream is over.
+                ended: entry.ended.clone(),
                 found: true,
             },
         }
@@ -233,6 +271,9 @@ impl RedisStreamBuffer {
     }
     fn done_key(request_id: &str) -> String {
         format!("{REDIS_PREFIX}{request_id}:done")
+    }
+    fn ended_key(request_id: &str) -> String {
+        format!("{REDIS_PREFIX}{request_id}:ended")
     }
 
     async fn append(&self, request_id: &str, seq: u64, event: &str, data: &str) {
@@ -274,13 +315,32 @@ impl RedisStreamBuffer {
         }
     }
 
+    async fn end(&self, request_id: &str, end: StreamEnd) {
+        let key = Self::ended_key(request_id);
+        let Ok(value) = serde_json::to_string(&end) else {
+            return;
+        };
+        let mut conn = self.conn.clone();
+        let result: redis::RedisResult<()> = conn.set_ex(&key, value, STREAM_TTL_SECS as u64).await;
+        if let Err(e) = result {
+            warn!(error = %e, request_id, "redis stream end failed");
+        }
+    }
+
     async fn replay_after(&self, request_id: &str, after_seq: Option<u64>) -> Replay {
         let mut conn = self.conn.clone();
         let list_key = Self::list_key(request_id);
         let done_key = Self::done_key(request_id);
+        let ended_key = Self::ended_key(request_id);
 
+        // The terminal records are read BEFORE the frames. The producer writes
+        // every frame before either record, so a record seen here guarantees
+        // the list read below holds the frames before it. Read the other way
+        // round, a terminal landing between the two reads ended a resume
+        // without its last frames.
+        let raw_terminal: redis::RedisResult<Vec<Option<String>>> =
+            conn.mget(&[&done_key, &ended_key]).await;
         let raw: redis::RedisResult<Vec<String>> = conn.lrange(&list_key, 0, -1).await;
-        let raw_done: redis::RedisResult<Option<String>> = conn.get(&done_key).await;
 
         let entries = match raw {
             Ok(v) => v,
@@ -289,11 +349,14 @@ impl RedisStreamBuffer {
                 return Replay {
                     deltas: Vec::new(),
                     done: None,
+                    ended: None,
                     found: false,
                 };
             }
         };
-        let raw_done = raw_done.ok().flatten();
+        let mut raw_terminal = raw_terminal.unwrap_or_default().into_iter();
+        let raw_done = raw_terminal.next().flatten();
+        let raw_ended = raw_terminal.next().flatten();
         // A terminal stream remains a known stream even when the caller's
         // cursor is already at (or beyond) the terminal frame. Keep `found`
         // independent from the cursor-filtered payload so Redis and the
@@ -302,8 +365,9 @@ impl RedisStreamBuffer {
         let parsed_done = raw_done.and_then(|s| serde_json::from_str::<StreamDone>(&s).ok());
         let done_present = parsed_done.is_some();
         let done = parsed_done.filter(|done| after_seq.is_none_or(|a| done.seq > a));
+        let ended = raw_ended.and_then(|s| serde_json::from_str::<StreamEnd>(&s).ok());
 
-        let found = !entries.is_empty() || done_present;
+        let found = !entries.is_empty() || done_present || ended.is_some();
         let deltas = entries
             .iter()
             .filter_map(|s| serde_json::from_str::<BufferedEvent>(s).ok())
@@ -313,6 +377,7 @@ impl RedisStreamBuffer {
         Replay {
             deltas,
             done,
+            ended,
             found,
         }
     }
@@ -378,6 +443,17 @@ impl StreamBufferStore {
         match self {
             Self::Memory(m) => m.finish(request_id, done),
             Self::Redis(r) => r.finish(request_id, done).await,
+        }
+    }
+
+    /// Record that the stream ended on an `error` or `stopped` frame, after
+    /// that frame was buffered. A resume then stops at the end of what is
+    /// buffered instead of tailing a stream that will never write again, and
+    /// is never shown `done`.
+    pub async fn end(&self, request_id: &str, end: StreamEnd) {
+        match self {
+            Self::Memory(m) => m.end(request_id, end),
+            Self::Redis(r) => r.end(request_id, end).await,
         }
     }
 
@@ -472,6 +548,43 @@ mod tests {
         let store = StreamBufferStore::new();
         let r = store.replay_after("nope", None).await;
         assert!(!r.found);
+        assert!(r.ended.is_none());
+    }
+
+    /// A stream that failed after its answer was buffered must never replay as
+    /// `done`, and a client that already saw its error must still learn it is
+    /// over rather than tailing a stream nothing will ever write to again.
+    #[tokio::test]
+    async fn an_ended_stream_is_finished_but_never_done() {
+        let store = StreamBufferStore::new();
+        store.append("req_failed", 0, "chunk", "answer").await;
+        store
+            .append("req_failed", 1, "error", "{\"code\":\"x\"}")
+            .await;
+        assert!(store.replay_after("req_failed", None).await.ended.is_none());
+        store.end("req_failed", StreamEnd { seq: 2 }).await;
+
+        let replay = store.replay_after("req_failed", None).await;
+        assert!(replay.found);
+        assert!(replay.done.is_none(), "a failed stream is never completed");
+        assert_eq!(replay.ended.expect("ended").seq, 2);
+        assert_eq!(replay.deltas.len(), 2);
+
+        let acknowledged = store.replay_after("req_failed", Some(1)).await;
+        assert!(acknowledged.deltas.is_empty());
+        assert!(
+            acknowledged.ended.is_some(),
+            "the end marker is not a frame, so no cursor filters it"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_stream_that_ended_before_buffering_anything_is_still_known() {
+        let store = StreamBufferStore::new();
+        store.end("req_early", StreamEnd { seq: 0 }).await;
+        let replay = store.replay_after("req_early", None).await;
+        assert!(replay.found);
+        assert!(replay.ended.is_some());
     }
 
     #[tokio::test]

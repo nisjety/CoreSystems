@@ -11,7 +11,7 @@
 //!
 //! | Field | Type | Indexing |
 //! |---|---|---|
-//! | `url` | `TEXT` | stored, tokenized — also the primary key |
+//! | `url` | `STRING` | stored, un-tokenized — also the primary key |
 //! | `title` | `TEXT` | stored, tokenized, boosted in queries |
 //! | `body` | `TEXT` | tokenized (not stored — fetch markdown via artifact ref) |
 //! | `host` | `STRING` | indexed exact, stored — for facet filters |
@@ -21,9 +21,24 @@
 //!
 //! ## Org scoping
 //!
-//! Tenant isolation is enforced at query construction: every search query
-//! is combined with an `org_id:{tenant}` filter so the index can't leak
-//! across tenants even if the schema is shared.
+//! Tenant isolation is enforced at BOTH ends, because either end alone is
+//! a leak:
+//!
+//! - **Write.** [`TantivyLocalIndex::add_document`] refuses a document whose
+//!   `org_id` is empty. There is no such tenant, so a document stored under
+//!   `""` belongs to nobody — and a document belonging to nobody is a
+//!   document belonging to whoever asks next. The write-back callers skip
+//!   such pages entirely rather than inventing a placeholder tenant.
+//! - **Read.** A query with no org is not "search everything"; it is
+//!   "caller failed to say who it is". [`TantivyLocalIndex::search_with_org`]
+//!   answers it with zero results. An operator read that genuinely wants
+//!   every tenant has to say so out loud via
+//!   [`TantivyLocalIndex::search_all_orgs`], which no request-path code
+//!   calls.
+//!
+//! Before both guards existed, an org-less scrape was stored under `""` and
+//! an org-less query ran unfiltered, so the two defects composed into a
+//! cross-tenant read. Removing either guard reopens it.
 //!
 //! ## Persistence
 //!
@@ -31,20 +46,36 @@
 //! - On-disk mode: `TantivyLocalIndex::open(path)` — production
 //!
 //! Writer is `Arc<Mutex<IndexWriter>>` so multiple `add_document` calls
-//! from concurrent PageRunner success paths serialize cheaply. `flush` is
-//! exposed for callers who need the index queryable immediately (tests);
-//! production lets Tantivy's autocommit handle it.
+//! from concurrent PageRunner success paths serialize cheaply. `flush`
+//! commits and reloads the reader; tests call it directly, and the edge
+//! runs it on a ticker (see `quarry-edge/src/main.rs`) so an unclean exit
+//! loses at most one commit interval. Relying on Tantivy's autocommit alone
+//! meant a restart could silently drop every write since the last
+//! heap-pressure flush.
+//!
+//! ## Retention
+//!
+//! The corpus is a cache of pages we happened to fetch, not a system of
+//! record — nothing downstream reconstructs state from it, so bounding it
+//! is safe. [`TantivyLocalIndex::enforce_retention`] drops documents past a
+//! maximum age and, if still over a document ceiling, evicts oldest-first.
+//! Both bounds are env-tunable; see [`RETENTION_DAYS_ENV`] / [`MAX_DOCS_ENV`].
 
+use std::ops::Bound;
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use tantivy::collector::TopDocs;
-use tantivy::query::{BooleanQuery, Occur, Query, QueryParser, TermQuery};
+use tantivy::query::{AllQuery, BooleanQuery, Occur, Query, QueryParser, RangeQuery, TermQuery};
 use tantivy::schema::{Field, IndexRecordOption, Schema, FAST, INDEXED, STORED, STRING, TEXT};
 use tantivy::time::OffsetDateTime;
-use tantivy::{doc, DateTime as TantivyDate, Index, IndexReader, IndexWriter, ReloadPolicy, Term};
+use tantivy::{
+    doc, DateTime as TantivyDate, DocAddress, Index, IndexReader, IndexWriter, Order, ReloadPolicy,
+    Term,
+};
 use tokio::sync::Mutex;
 
 use quarry_core::error::{ErrorCode, QuarryError, QuarryResult};
@@ -54,6 +85,66 @@ use crate::serp::{SearchOptions, SearchProvider, SearchResult};
 /// Tantivy writer heap budget (50 MB). Plenty for batch ingestion at our
 /// expected per-scrape document size (~few KB titles + tokenized body).
 const WRITER_HEAP_BYTES: usize = 50_000_000;
+
+/// Maximum age of an indexed document, in days. Override with
+/// [`RETENTION_DAYS_ENV`]; `0` disables age-based eviction entirely.
+///
+/// 90 days is chosen against what the corpus is *for*: it is the warm first
+/// tier of the search router, and a page we last saw a quarter ago is no
+/// longer evidence about that URL — the live fetch behind the SERP tiers is
+/// both fresher and cheap. Keeping it longer trades index size and merge
+/// cost for answers we would rather not serve.
+const DEFAULT_RETENTION_DAYS: i64 = 90;
+
+/// Hard ceiling on indexed documents. Override with [`MAX_DOCS_ENV`]; `0`
+/// disables the ceiling.
+///
+/// The age bound alone does not bound size: a heavy crawl can add millions
+/// of pages inside the retention window, and the edge runs with the index on
+/// the container's own disk. One million documents is roughly a few GB at
+/// our per-page body size — large enough that the ceiling never fires for
+/// normal product use, small enough that a runaway crawl cannot fill the
+/// volume and take the whole edge down with it.
+const DEFAULT_MAX_DOCS: u64 = 1_000_000;
+
+/// Env knob for [`DEFAULT_RETENTION_DAYS`].
+pub const RETENTION_DAYS_ENV: &str = "QUARRY_LOCAL_INDEX_RETENTION_DAYS";
+/// Env knob for [`DEFAULT_MAX_DOCS`].
+pub const MAX_DOCS_ENV: &str = "QUARRY_LOCAL_INDEX_MAX_DOCS";
+
+/// Age bound in days, or `0` when disabled. Same read-at-use-site,
+/// parse-or-default convention as `QUARRY_BROWSER_SETTLE_MS` — a malformed
+/// value falls back to the default rather than failing the process, because
+/// a typo in a tuning knob must not stop the edge from booting.
+fn retention_days() -> i64 {
+    std::env::var(RETENTION_DAYS_ENV)
+        .ok()
+        .and_then(|v| v.trim().parse::<i64>().ok())
+        .filter(|d| *d >= 0)
+        .unwrap_or(DEFAULT_RETENTION_DAYS)
+}
+
+/// Document ceiling, or `0` when disabled. See [`retention_days`].
+fn max_documents() -> u64 {
+    std::env::var(MAX_DOCS_ENV)
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .unwrap_or(DEFAULT_MAX_DOCS)
+}
+
+/// What one [`TantivyLocalIndex::enforce_retention`] pass did. Returned
+/// rather than only logged so the caller can emit it as telemetry.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RetentionOutcome {
+    /// Whether an age-based delete was issued this pass. Tantivy applies
+    /// `delete_query` lazily at merge time and reports no match count, so
+    /// there is no honest number to return here.
+    pub age_pass_ran: bool,
+    /// Documents evicted to get back under the ceiling.
+    pub evicted_by_ceiling: u64,
+    /// `doc_count()` after the pass.
+    pub docs_after: u64,
+}
 
 /// One indexed scraped page.
 #[derive(Debug, Clone)]
@@ -77,6 +168,10 @@ pub struct TantivyLocalIndex {
     index: Index,
     reader: IndexReader,
     writer: Arc<Mutex<IndexWriter>>,
+    /// Documents added since the last successful commit. The edge's commit
+    /// ticker reads this to flush on volume as well as on time, so a burst
+    /// crawl doesn't sit uncommitted for a full interval.
+    pending: Arc<AtomicU64>,
 }
 
 struct IndexSchema {
@@ -181,6 +276,7 @@ impl TantivyLocalIndex {
             index,
             reader,
             writer: Arc::new(Mutex::new(writer)),
+            pending: Arc::new(AtomicU64::new(0)),
         })
     }
 
@@ -189,7 +285,22 @@ impl TantivyLocalIndex {
     /// Replacement semantics: deletes any prior doc with the same `url`
     /// before adding the new one. This makes the index converge to "latest
     /// fetched copy of URL X" without unbounded growth on re-crawls.
+    ///
+    /// Rejects a document with an empty `org_id`. This is the write half of
+    /// the tenant guard described in the module docs: an untenanted document
+    /// is readable by any query that also fails to name a tenant, so there
+    /// is no safe way to store one. Callers are fire-and-forget and log the
+    /// error, so a mis-wired caller is loud without being fatal.
     pub async fn add_document(&self, doc: LocalDocument) -> QuarryResult<()> {
+        if doc.org_id.trim().is_empty() {
+            return Err(QuarryError::new(
+                ErrorCode::BadRequest,
+                format!(
+                    "local_index: refusing to index {} with no org_id (untenanted documents leak across tenants)",
+                    doc.url
+                ),
+            ));
+        }
         let writer = self.writer.lock().await;
         // Delete prior copies of the same URL.
         let url_term = Term::from_field_text(self.schema.url, &doc.url);
@@ -216,20 +327,39 @@ impl TantivyLocalIndex {
                     format!("local_index: add_document failed: {e}"),
                 )
             })?;
+        self.pending.fetch_add(1, AtomicOrdering::Relaxed);
         Ok(())
     }
 
-    /// Flush pending writes to disk and reload the reader. Production
-    /// callers can rely on Tantivy's autocommit; tests call this directly
-    /// so the index is visible to the very next search.
+    /// Documents added since the last successful [`Self::flush`]. Drives the
+    /// edge's "commit every N docs" trigger.
+    pub fn pending_writes(&self) -> u64 {
+        self.pending.load(AtomicOrdering::Relaxed)
+    }
+
+    /// Commit pending writes and reload the reader, making everything added
+    /// so far visible to the next search and durable across a restart.
+    ///
+    /// Tantivy's autocommit is driven by writer-heap pressure, not by time,
+    /// so at our document size a low-traffic edge could hold hours of writes
+    /// in memory and lose all of them on a restart. The edge therefore calls
+    /// this on a ticker and once on shutdown; tests call it directly.
     pub async fn flush(&self) -> QuarryResult<()> {
         let mut writer = self.writer.lock().await;
+        // Read the counter under the writer lock and subtract (rather than
+        // storing 0) after the commit. Reading it before the lock would let
+        // two concurrent flushes both observe the same N and both subtract it,
+        // wrapping the counter past zero; subtracting rather than zeroing
+        // keeps `add_document` calls that land mid-commit counted for the next
+        // flush instead of silently forgetting them.
+        let observed = self.pending.load(AtomicOrdering::Relaxed);
         writer.commit().map_err(|e| {
             QuarryError::new(
                 ErrorCode::Internal,
                 format!("local_index: commit failed: {e}"),
             )
         })?;
+        self.pending.fetch_sub(observed, AtomicOrdering::Relaxed);
         self.reader.reload().map_err(|e| {
             QuarryError::new(
                 ErrorCode::Internal,
@@ -239,13 +369,163 @@ impl TantivyLocalIndex {
         Ok(())
     }
 
-    /// Query the index. Combines the user query (title+body weighted) with
-    /// an org_id facet filter when supplied. Returns up to `limit` results,
-    /// ranked by BM25 score.
+    /// Bound the corpus by age and by document count, using the env-configured
+    /// bounds ([`RETENTION_DAYS_ENV`] / [`MAX_DOCS_ENV`]). Safe to call
+    /// repeatedly; a pass with nothing to do is cheap.
+    pub async fn enforce_retention(&self) -> QuarryResult<RetentionOutcome> {
+        self.enforce_retention_with(retention_days(), max_documents())
+            .await
+    }
+
+    /// [`Self::enforce_retention`] with the bounds passed explicitly: `days`
+    /// and `ceiling` of `0` each disable their pass.
+    ///
+    /// Split out from the env read so tests can drive both bounds
+    /// deterministically — env vars are process-global and these tests run
+    /// in parallel with every other test in the crate.
+    ///
+    /// Runs the age bound first because it is a single `delete_query` over
+    /// the whole index and usually removes enough on its own — the ceiling
+    /// pass, which has to read the oldest documents back to get their URLs,
+    /// then has less to do or nothing at all.
+    pub async fn enforce_retention_with(
+        &self,
+        days: i64,
+        ceiling: u64,
+    ) -> QuarryResult<RetentionOutcome> {
+        let mut outcome = RetentionOutcome::default();
+
+        if days > 0 {
+            let cutoff_secs = Utc::now().timestamp().saturating_sub(days * 86_400);
+            let cutoff = TantivyDate::from_utc(
+                OffsetDateTime::from_unix_timestamp(cutoff_secs)
+                    .unwrap_or(OffsetDateTime::UNIX_EPOCH),
+            );
+            let stale = RangeQuery::new(
+                Bound::Unbounded,
+                Bound::Excluded(Term::from_field_date(self.schema.fetched_at, cutoff)),
+            );
+            {
+                let writer = self.writer.lock().await;
+                writer.delete_query(Box::new(stale)).map_err(|e| {
+                    QuarryError::new(
+                        ErrorCode::Internal,
+                        format!("local_index: retention delete_query failed: {e}"),
+                    )
+                })?;
+            }
+            // Commit before measuring: `doc_count()` reads the reader, which
+            // only sees committed state, so the ceiling pass below would
+            // otherwise size itself against documents this pass just deleted.
+            self.flush().await?;
+            outcome.age_pass_ran = true;
+        }
+
+        if ceiling > 0 {
+            let current = self.doc_count();
+            if current > ceiling {
+                let excess = (current - ceiling) as usize;
+                let urls = self.oldest_urls(excess)?;
+                if !urls.is_empty() {
+                    {
+                        let writer = self.writer.lock().await;
+                        for url in &urls {
+                            writer.delete_term(Term::from_field_text(self.schema.url, url));
+                        }
+                    }
+                    outcome.evicted_by_ceiling = urls.len() as u64;
+                    self.flush().await?;
+                }
+            }
+        }
+
+        outcome.docs_after = self.doc_count();
+        Ok(outcome)
+    }
+
+    /// URLs of the `n` oldest documents by `fetched_at`, oldest first.
+    ///
+    /// Eviction goes through the URL term rather than the doc address
+    /// because `delete_term` is the only deletion Tantivy offers that
+    /// survives the segment merge a `DocAddress` does not.
+    fn oldest_urls(&self, n: usize) -> QuarryResult<Vec<String>> {
+        if n == 0 {
+            return Ok(Vec::new());
+        }
+        let searcher = self.reader.searcher();
+        let collector =
+            TopDocs::with_limit(n).order_by_fast_field::<TantivyDate>("fetched_at", Order::Asc);
+        let hits: Vec<(Option<TantivyDate>, DocAddress)> =
+            searcher.search(&AllQuery, &collector).map_err(|e| {
+                QuarryError::new(
+                    ErrorCode::Internal,
+                    format!("local_index: oldest-document scan failed: {e}"),
+                )
+            })?;
+        let mut urls = Vec::with_capacity(hits.len());
+        for (_fetched_at, address) in hits {
+            let retrieved: tantivy::TantivyDocument = searcher.doc(address).map_err(|e| {
+                QuarryError::new(
+                    ErrorCode::Internal,
+                    format!("local_index: doc fetch failed during eviction: {e}"),
+                )
+            })?;
+            if let Some(url) = field_text(&retrieved, self.schema.url) {
+                urls.push(url);
+            }
+        }
+        Ok(urls)
+    }
+
+    /// Query one tenant's documents. Combines the user query (title+body
+    /// weighted) with an `org_id` filter. Returns up to `limit` results,
+    /// ranked by BM25 score with a recency nudge.
+    ///
+    /// **An absent or empty `org_id` returns nothing.** It is not a request
+    /// to search every tenant — it is a caller that failed to say who it is,
+    /// and the only answer that cannot leak is none. Production callers
+    /// (`/v1/search`, `/v1/answer`, `/v1/answer/stream`) all thread the
+    /// verified JWT `org_id` through `SearchOptions`, so this branch means a
+    /// bug, not a legitimate mode; it logs at warn for that reason. An
+    /// operator read that really does want every tenant calls
+    /// [`Self::search_all_orgs`] instead.
     pub async fn search_with_org(
         &self,
         query: &str,
         org_id: Option<&str>,
+        opts: &SearchOptions,
+    ) -> QuarryResult<Vec<SearchResult>> {
+        let Some(org) = org_id.map(str::trim).filter(|o| !o.is_empty()) else {
+            tracing::warn!(
+                provider = "tantivy_local",
+                "local index queried with no org scope; returning no results (see search_all_orgs for operator reads)"
+            );
+            return Ok(Vec::new());
+        };
+        self.search_scoped(query, Some(org), opts).await
+    }
+
+    /// Query across EVERY tenant. Operator and diagnostic use only — health
+    /// checks, index inspection, corpus statistics.
+    ///
+    /// Deliberately not reachable from the request path and deliberately
+    /// named for what it does: the org filter is the only thing separating
+    /// tenants in a shared index, and a function that drops it should be
+    /// impossible to call by accident or by forgetting an argument.
+    pub async fn search_all_orgs(
+        &self,
+        query: &str,
+        opts: &SearchOptions,
+    ) -> QuarryResult<Vec<SearchResult>> {
+        self.search_scoped(query, None, opts).await
+    }
+
+    /// Shared query execution. `org_filter: None` means genuinely unfiltered
+    /// — only [`Self::search_all_orgs`] passes it.
+    async fn search_scoped(
+        &self,
+        query: &str,
+        org_filter: Option<&str>,
         opts: &SearchOptions,
     ) -> QuarryResult<Vec<SearchResult>> {
         let searcher = self.reader.searcher();
@@ -257,8 +537,8 @@ impl TantivyLocalIndex {
         parser.set_field_boost(self.schema.title, 3.0);
         let user_query = parser.parse_query_lenient(query).0;
 
-        let final_query: Box<dyn Query> = match org_id {
-            Some(o) if !o.is_empty() => {
+        let final_query: Box<dyn Query> = match org_filter {
+            Some(o) => {
                 let org_query = TermQuery::new(
                     Term::from_field_text(self.schema.org_id, o),
                     IndexRecordOption::Basic,
@@ -268,7 +548,7 @@ impl TantivyLocalIndex {
                     (Occur::Must, Box::new(org_query)),
                 ]))
             }
-            _ => user_query,
+            None => user_query,
         };
 
         // Over-fetch BM25 candidates so the recency rerank below has room to
@@ -407,13 +687,12 @@ mod recency_tests {
 #[async_trait]
 impl SearchProvider for TantivyLocalIndex {
     async fn search(&self, query: &str, opts: &SearchOptions) -> QuarryResult<Vec<SearchResult>> {
-        // Tenant isolation: when the caller supplies an `org_id` in
-        // `SearchOptions`, restrict results to documents tagged with
-        // that exact org_id. When unset (e.g. legacy callers that
-        // pre-date the auth middleware), fall back to the org-agnostic
-        // path. Production routes always carry the verified JWT org_id
-        // through `SearchOptions.org_id`, so this fallback only fires
-        // in test harnesses and explicit internal callers.
+        // Tenant isolation: results are restricted to `SearchOptions.org_id`.
+        // An unset org_id yields NO results rather than an unfiltered read —
+        // see `search_with_org`. This matters most here, because this impl is
+        // what `SmartSearchRouter` registers as the first search tier, so any
+        // caller anywhere that builds `SearchOptions` without an org reaches
+        // the corpus through this one line.
         self.search_with_org(query, opts.org_id.as_deref(), opts)
             .await
     }
@@ -428,7 +707,15 @@ mod tests {
     use super::*;
     use chrono::Utc;
 
+    const DAY_SECS: i64 = 86_400;
+
     fn doc(url: &str, title: &str, body: &str, org: &str) -> LocalDocument {
+        doc_aged(url, title, body, org, 0)
+    }
+
+    /// Same as [`doc`] but with `fetched_at` pushed `age_days` into the past,
+    /// so retention tests can build a corpus with a known age ordering.
+    fn doc_aged(url: &str, title: &str, body: &str, org: &str, age_days: i64) -> LocalDocument {
         LocalDocument {
             url: url.into(),
             title: title.into(),
@@ -436,7 +723,16 @@ mod tests {
             host: url.split('/').nth(2).unwrap_or("example.com").to_string(),
             org_id: org.into(),
             fingerprint: format!("blake3:{}", url),
-            fetched_at: Utc::now(),
+            fetched_at: Utc::now() - chrono::Duration::seconds(age_days * DAY_SECS),
+        }
+    }
+
+    /// Search options scoped to one tenant — what every production caller
+    /// supplies. Tests that want the unscoped path ask for it explicitly.
+    fn opts_for(org: &str) -> SearchOptions {
+        SearchOptions {
+            org_id: Some(org.to_string()),
+            ..Default::default()
         }
     }
 
@@ -453,8 +749,7 @@ mod tests {
         .unwrap();
         idx.flush().await.unwrap();
 
-        let opts = SearchOptions::default();
-        let results = idx.search("rust async", &opts).await.unwrap();
+        let results = idx.search("rust async", &opts_for("org_a")).await.unwrap();
         assert_eq!(results.len(), 1);
         assert!(results[0].url.contains("rust-async"));
         assert_eq!(results[0].provider, "tantivy_local");
@@ -465,10 +760,7 @@ mod tests {
     async fn empty_index_returns_no_results() {
         let idx = TantivyLocalIndex::in_memory().unwrap();
         idx.flush().await.unwrap();
-        let results = idx
-            .search("anything", &SearchOptions::default())
-            .await
-            .unwrap();
+        let results = idx.search("anything", &opts_for("org_a")).await.unwrap();
         assert!(results.is_empty());
     }
 
@@ -509,8 +801,108 @@ mod tests {
         assert!(results_b[0].url.ends_with("/b"));
     }
 
+    // ── tenant guard: write side ────────────────────────────────────────────
+
     #[tokio::test]
-    async fn reindex_same_url_replaces_prior_copy() {
+    async fn document_with_unknown_org_is_refused() {
+        let idx = TantivyLocalIndex::in_memory().unwrap();
+        for org in ["", "   "] {
+            let err = idx
+                .add_document(doc(
+                    "https://example.com/orphan",
+                    "orphan page",
+                    "nobody owns this",
+                    org,
+                ))
+                .await
+                .expect_err("an org-less document must be refused, not stored under \"\"");
+            assert_eq!(err.code, ErrorCode::BadRequest);
+        }
+        idx.flush().await.unwrap();
+        assert_eq!(idx.doc_count(), 0, "nothing should have been indexed");
+    }
+
+    // ── tenant guard: read side ─────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn unscoped_search_cannot_see_another_orgs_documents() {
+        let idx = TantivyLocalIndex::in_memory().unwrap();
+        idx.add_document(doc(
+            "https://example.com/secret",
+            "quarterly revenue",
+            "confidential figures for org_a",
+            "org_a",
+        ))
+        .await
+        .unwrap();
+        idx.flush().await.unwrap();
+
+        // No org on the options at all — the shape a caller that forgot to
+        // thread the JWT org_id produces. It must not see org_a's document.
+        let unscoped = idx
+            .search("quarterly revenue", &SearchOptions::default())
+            .await
+            .unwrap();
+        assert!(
+            unscoped.is_empty(),
+            "unscoped read leaked org_a documents: {unscoped:?}"
+        );
+
+        // An empty-string org is the same failure wearing a different hat.
+        let empty_org = idx
+            .search("quarterly revenue", &opts_for(""))
+            .await
+            .unwrap();
+        assert!(empty_org.is_empty(), "empty org_id leaked: {empty_org:?}");
+
+        // A different tenant asking by name sees nothing either.
+        let other = idx
+            .search("quarterly revenue", &opts_for("org_b"))
+            .await
+            .unwrap();
+        assert!(other.is_empty(), "cross-tenant read leaked: {other:?}");
+
+        // And the owner still gets its own document, so the guard above is
+        // denying the right thing rather than breaking the index.
+        let owner = idx
+            .search("quarterly revenue", &opts_for("org_a"))
+            .await
+            .unwrap();
+        assert_eq!(owner.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn search_all_orgs_is_the_explicit_operator_escape_hatch() {
+        let idx = TantivyLocalIndex::in_memory().unwrap();
+        idx.add_document(doc(
+            "https://example.com/a",
+            "shared token alpha",
+            "body",
+            "org_a",
+        ))
+        .await
+        .unwrap();
+        idx.add_document(doc(
+            "https://example.com/b",
+            "shared token beta",
+            "body",
+            "org_b",
+        ))
+        .await
+        .unwrap();
+        idx.flush().await.unwrap();
+
+        let all = idx
+            .search_all_orgs("shared token", &SearchOptions::default())
+            .await
+            .unwrap();
+        assert_eq!(all.len(), 2, "operator read sees every tenant by design");
+    }
+
+    // ── upsert ──────────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn reindex_same_url_yields_exactly_one_document() {
         let idx = TantivyLocalIndex::in_memory().unwrap();
         idx.add_document(doc(
             "https://example.com/page",
@@ -531,19 +923,225 @@ mod tests {
         .unwrap();
         idx.flush().await.unwrap();
 
-        let results = idx.search("new", &SearchOptions::default()).await.unwrap();
-        // The user-visible behavior: searching for "new" returns exactly
-        // the one current doc. The old doc was tombstoned via delete_term
-        // on the URL and won't surface in queries. Note that Tantivy's
-        // num_docs() may still report the tombstoned doc until segment
-        // merge, so doc_count() is a telemetry approximation, not an
-        // assertable invariant.
+        // One document, not two competing copies of the same URL.
+        assert_eq!(idx.doc_count(), 1);
+
+        let results = idx.search("new", &opts_for("org_a")).await.unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].title.as_deref(), Some("new title"));
-        // Also confirm the old title is no longer searchable:
-        let old_results = idx.search("old", &SearchOptions::default()).await.unwrap();
-        assert!(old_results.is_empty(), "old doc should be tombstoned");
+        let old_results = idx.search("old", &opts_for("org_a")).await.unwrap();
+        assert!(old_results.is_empty(), "old copy should be tombstoned");
     }
+
+    #[tokio::test]
+    async fn repeated_refetch_within_one_commit_still_yields_one_document() {
+        // The crawl case: the same URL re-fetched several times before the
+        // commit ticker fires. `delete_term` applies to documents added
+        // earlier in the same uncommitted batch, so this must not accumulate.
+        let idx = TantivyLocalIndex::in_memory().unwrap();
+        for i in 0..5 {
+            idx.add_document(doc(
+                "https://example.com/hot",
+                &format!("revision {i}"),
+                "body text",
+                "org_a",
+            ))
+            .await
+            .unwrap();
+        }
+        idx.flush().await.unwrap();
+        assert_eq!(idx.doc_count(), 1);
+    }
+
+    // ── retention ───────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn retention_evicts_by_age() {
+        let idx = TantivyLocalIndex::in_memory().unwrap();
+        idx.add_document(doc_aged(
+            "https://example.com/ancient",
+            "shared marker",
+            "fetched a hundred days ago",
+            "org_a",
+            100,
+        ))
+        .await
+        .unwrap();
+        idx.add_document(doc_aged(
+            "https://example.com/recent",
+            "shared marker",
+            "fetched yesterday",
+            "org_a",
+            1,
+        ))
+        .await
+        .unwrap();
+        idx.flush().await.unwrap();
+        assert_eq!(idx.doc_count(), 2);
+
+        // Ceiling disabled — this pass isolates the age bound.
+        let outcome = idx.enforce_retention_with(90, 0).await.unwrap();
+        assert!(outcome.age_pass_ran);
+        assert_eq!(outcome.docs_after, 1);
+
+        let results = idx
+            .search("shared marker", &opts_for("org_a"))
+            .await
+            .unwrap();
+        assert_eq!(results.len(), 1);
+        assert!(results[0].url.ends_with("/recent"));
+    }
+
+    #[tokio::test]
+    async fn retention_age_pass_keeps_everything_inside_the_window() {
+        let idx = TantivyLocalIndex::in_memory().unwrap();
+        for age in [1, 30, 89] {
+            idx.add_document(doc_aged(
+                &format!("https://example.com/age-{age}"),
+                "shared marker",
+                "body",
+                "org_a",
+                age,
+            ))
+            .await
+            .unwrap();
+        }
+        idx.flush().await.unwrap();
+
+        let outcome = idx.enforce_retention_with(90, 0).await.unwrap();
+        assert_eq!(outcome.docs_after, 3);
+        assert_eq!(outcome.evicted_by_ceiling, 0);
+    }
+
+    #[tokio::test]
+    async fn retention_evicts_oldest_first_to_reach_the_ceiling() {
+        let idx = TantivyLocalIndex::in_memory().unwrap();
+        // Ages 5,4,3,2,1 days — all well inside any age window, so only the
+        // ceiling can evict here.
+        for age in (1..=5).rev() {
+            idx.add_document(doc_aged(
+                &format!("https://example.com/age-{age}"),
+                "shared marker",
+                "body",
+                "org_a",
+                age,
+            ))
+            .await
+            .unwrap();
+        }
+        idx.flush().await.unwrap();
+        assert_eq!(idx.doc_count(), 5);
+
+        // Age bound disabled — this pass isolates the ceiling.
+        let outcome = idx.enforce_retention_with(0, 3).await.unwrap();
+        assert!(!outcome.age_pass_ran);
+        assert_eq!(outcome.evicted_by_ceiling, 2);
+        assert_eq!(outcome.docs_after, 3);
+
+        let results = idx
+            .search("shared marker", &opts_for("org_a"))
+            .await
+            .unwrap();
+        let surviving: Vec<&str> = results.iter().map(|r| r.url.as_str()).collect();
+        assert_eq!(surviving.len(), 3);
+        // The two oldest went first; the three newest survived.
+        for age in [5, 4] {
+            let evicted = format!("https://example.com/age-{age}");
+            assert!(
+                !surviving.contains(&evicted.as_str()),
+                "oldest document {evicted} should have been evicted, got {surviving:?}"
+            );
+        }
+        for age in [3, 2, 1] {
+            let kept = format!("https://example.com/age-{age}");
+            assert!(
+                surviving.contains(&kept.as_str()),
+                "newer document {kept} should have survived, got {surviving:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn retention_is_a_no_op_when_both_bounds_are_disabled() {
+        let idx = TantivyLocalIndex::in_memory().unwrap();
+        idx.add_document(doc_aged(
+            "https://example.com/very-old",
+            "shared marker",
+            "body",
+            "org_a",
+            5_000,
+        ))
+        .await
+        .unwrap();
+        idx.flush().await.unwrap();
+
+        let outcome = idx.enforce_retention_with(0, 0).await.unwrap();
+        assert!(!outcome.age_pass_ran);
+        assert_eq!(outcome.evicted_by_ceiling, 0);
+        assert_eq!(outcome.docs_after, 1);
+    }
+
+    #[test]
+    fn retention_defaults_are_bounded_not_disabled() {
+        // A default of 0 would silently disable the pass it belongs to, which
+        // is the exact failure this retention work exists to prevent. The env
+        // knobs themselves are read at call time and deliberately not
+        // exercised here — they are process-global and these tests run in
+        // parallel; `enforce_retention_with` is the seam that takes bounds
+        // explicitly.
+        assert!(DEFAULT_RETENTION_DAYS > 0);
+        assert!(DEFAULT_MAX_DOCS > 0);
+    }
+
+    // ── commit / durability ─────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn flush_commits_pending_writes_and_clears_the_counter() {
+        let idx = TantivyLocalIndex::in_memory().unwrap();
+        assert_eq!(idx.pending_writes(), 0);
+
+        for i in 0..3 {
+            idx.add_document(doc(
+                &format!("https://example.com/p{i}"),
+                "shared marker",
+                "body",
+                "org_a",
+            ))
+            .await
+            .unwrap();
+        }
+        assert_eq!(
+            idx.pending_writes(),
+            3,
+            "uncommitted writes must be visible to the commit ticker"
+        );
+        // Uncommitted writes are not yet searchable — which is exactly why a
+        // restart without a flush loses them.
+        let before = idx
+            .search("shared marker", &opts_for("org_a"))
+            .await
+            .unwrap();
+        assert!(before.is_empty());
+
+        idx.flush().await.unwrap();
+        assert_eq!(idx.pending_writes(), 0);
+        let after = idx
+            .search("shared marker", &opts_for("org_a"))
+            .await
+            .unwrap();
+        assert_eq!(after.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn refused_document_does_not_count_as_pending() {
+        let idx = TantivyLocalIndex::in_memory().unwrap();
+        let _ = idx
+            .add_document(doc("https://example.com/x", "t", "b", ""))
+            .await;
+        assert_eq!(idx.pending_writes(), 0);
+    }
+
+    // ── ranking ─────────────────────────────────────────────────────────────
 
     #[tokio::test]
     async fn title_boost_outranks_body_only_match() {
@@ -567,7 +1165,7 @@ mod tests {
         idx.flush().await.unwrap();
 
         let results = idx
-            .search("tokio runtime", &SearchOptions::default())
+            .search("tokio runtime", &opts_for("org_a"))
             .await
             .unwrap();
         assert_eq!(results.len(), 2);
@@ -591,7 +1189,7 @@ mod tests {
 
         let opts = SearchOptions {
             limit: 5,
-            ..Default::default()
+            ..opts_for("org_a")
         };
         let results = idx.search("shared", &opts).await.unwrap();
         assert_eq!(results.len(), 5);

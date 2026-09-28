@@ -1,0 +1,285 @@
+--- a/src/features/core/components/sidebar/ChatSidebarOrganizer.tsx
++++ b/src/features/core/components/sidebar/ChatSidebarOrganizer.tsx
+@@ -10,6 +10,7 @@
+ 
+ type DialogMode = { kind: 'create' } | { kind: 'project'; id: string } | { kind: 'move'; thread: ChatThreadHistoryItem }
+ type ChatGroup = { id: string; label: string; project: boolean; pinned?: boolean; items: ChatThreadHistoryItem[] }
++const CHAT_DRAG_TYPE = 'application/x-verevon-chat-thread'
+ 
+ export function ChatSidebarOrganizer(props: {
+   sessions: ChatThreadHistoryItem[]
+@@ -27,12 +28,22 @@
+   const [draftName, setDraftName] = createSignal('')
+   const [destination, setDestination] = createSignal('')
+   const [error, setError] = createSignal('')
++  const [draggedThreadId, setDraggedThreadId] = createSignal<string | null>(null)
++  const [dropTarget, setDropTarget] = createSignal<string | null>(null)
++  const [moveNotice, setMoveNotice] = createSignal('')
++  // Native drag events can arrive before Solid flushes its signal updates.
++  // Keep the transfer identity synchronous; signals only drive visual feedback.
++  let activeDrag: { threadId: string; scope: string } | null = null
+   let dialog: HTMLDialogElement | undefined
+   let nameInput: HTMLInputElement | undefined
+   let searchInput: HTMLInputElement | undefined
+   let viewMenu: HTMLDetailsElement | undefined
+ 
+   createEffect(scope, (key) => {
++    activeDrag = null
++    setDraggedThreadId(null)
++    setDropTarget(null)
++    setMoveNotice('')
+     setOrganization(readChatOrganization(key))
+     setMode(null)
+     const storageChanged = (event: StorageEvent) => {
+@@ -62,6 +73,64 @@
+     saveChatOrganization(key, next)
+     setOrganization(next)
+   }
++  const endDrag = () => {
++    activeDrag = null
++    setDraggedThreadId(null)
++    setDropTarget(null)
++  }
++  const canDrag = () => Boolean(scope()) && organization().view.group === 'project'
++  const startDrag = (event: DragEvent, item: ChatThreadHistoryItem) => {
++    const key = scope()
++    if (!key || !canDrag() || !event.dataTransfer ||
++      (event.target instanceof Element && event.target.closest('input, textarea, select, [contenteditable="true"]'))) {
++      event.preventDefault()
++      return
++    }
++    activeDrag = { threadId: item.threadId, scope: key }
++    event.dataTransfer.effectAllowed = 'move'
++    event.dataTransfer.setData(CHAT_DRAG_TYPE, item.threadId)
++    setDraggedThreadId(item.threadId)
++    setMoveNotice('')
++  }
++  const acceptsDrag = (event: DragEvent, group: ChatGroup) => {
++    return canDrag() && (group.project || group.id === 'recent') && activeDrag?.scope === scope() &&
++      Boolean(event.dataTransfer?.types.includes(CHAT_DRAG_TYPE)) &&
++      props.sessions.some((item) => item.threadId === activeDrag?.threadId)
++  }
++  const dragOver = (event: DragEvent, group: ChatGroup) => {
++    if (!acceptsDrag(event, group)) return
++    event.preventDefault()
++    if (event.dataTransfer) event.dataTransfer.dropEffect = 'move'
++    setDropTarget(group.id)
++  }
++  const dropChat = (event: DragEvent, group: ChatGroup) => {
++    event.preventDefault()
++    event.stopPropagation()
++    if (!acceptsDrag(event, group) || !activeDrag || event.dataTransfer?.getData(CHAT_DRAG_TYPE) !== activeDrag.threadId) {
++      endDrag()
++      return
++    }
++    const thread = props.sessions.find((item) => item.threadId === activeDrag?.threadId)
++    const projectId = group.project ? group.id : null
++    try {
++      // Reuse the same validated, scoped action as the accessible Move menu.
++      dispatch({ type: 'thread.move', threadId: activeDrag.threadId, projectId })
++      setMoveNotice(i18n.tr(`Flyttet til ${group.label}.`, `Moved to ${group.label}.`) +
++        (thread?.pinned ? i18n.tr(' Samtalen er fortsatt festet.', ' The chat stays pinned.') : ''))
++    } catch (reason) {
++      setMoveNotice(reason instanceof Error ? reason.message : i18n.tr('Kunne ikke flytte samtalen.', 'Could not move the chat.'))
++    }
++    endDrag()
++  }
++  createEffect(() => undefined, () => {
++    const cancelDrag = (event: KeyboardEvent) => { if (event.key === 'Escape') endDrag() }
++    window.addEventListener('dragend', endDrag)
++    window.addEventListener('keydown', cancelDrag)
++    return () => {
++      window.removeEventListener('dragend', endDrag)
++      window.removeEventListener('keydown', cancelDrag)
++    }
++  })
+   const updateView = (patch: Partial<ReturnType<typeof organization>['view']>) => {
+     const next = applyChatOrganizationAction(organization(), { type: 'view.update', view: { ...organization().view, ...patch } })
+     const key = scope()
+@@ -83,7 +152,8 @@
+         if (items.length || (!query().trim() && staticState.view.filter === 'all')) groups.push({ id: project.id, label: project.name, project: true, pinned: project.pinned, items })
+       }
+       const recent = rest.filter((item) => !staticState.projects.some((project) => project.id === staticState.assignments[item.threadId]))
+-      if (recent.length) groups.push({ id: 'recent', label: i18n.tr('Nylige', 'Recent'), project: false, items: recent })
++      // Keep Recent available as a destination even when every chat is filed.
++      groups.push({ id: 'recent', label: i18n.tr('Nylige', 'Recent'), project: false, items: recent })
+     } else if (staticState.view.group === 'date') {
+       for (const [id, label] of [['today', i18n.tr('I dag', 'Today')], ['week', i18n.tr('Siste 7 dager', 'Last 7 days')], ['earlier', i18n.tr('Tidligere', 'Earlier')]] as const) {
+         const items = rest.filter((item) => chatDateGroup(item.updatedAt) === id)
+@@ -120,7 +190,7 @@
+   }
+ 
+   return (
+-    <div class="chat-organizer">
++    <div class="chat-organizer" data-dragging={draggedThreadId() ? 'true' : undefined}>
+       <div class="chat-organizer__header">
+         <strong>{i18n.tr('Samtaler', 'Chats')}</strong>
+         <button type="button" aria-label={i18n.tr('Søk i samtaler', 'Search chats')} title={i18n.tr('Søk i samtaler', 'Search chats')} aria-expanded={searchOpen() ? 'true' : 'false'} onClick={() => { setSearchOpen((open) => !open); queueMicrotask(() => searchInput?.focus()) }}><Search size={17} /></button>
+@@ -143,16 +213,32 @@
+         <Show when={!props.loading} fallback={<p class="chat-organizer__empty">{i18n.tr('Laster samtaler …', 'Loading chats…')}</p>}>
+           <Show when={groups().length} fallback={<p class="chat-organizer__empty">{i18n.tr('Ingen samtaler passer dette utvalget.', 'No chats match this view.')}</p>}>
+             <For each={groups()}>{(group) => (
+-              <details class="chat-organizer__group" open>
++              <details class="chat-organizer__group" open
++                data-drop-target={group.project ? group.id : group.id === 'recent' ? 'recent' : undefined}
++                data-drop-active={dropTarget() === group.id ? 'true' : undefined}
++                onDragEnter={(event) => dragOver(event, group)}
++                onDragOver={(event) => dragOver(event, group)}
++                onDragLeave={(event) => {
++                  if (!(event.relatedTarget instanceof Node) || !event.currentTarget.contains(event.relatedTarget)) setDropTarget(null)
++                }}
++                onDrop={(event) => dropChat(event, group)}>
+                 <summary><Show when={group.project} fallback={<Show when={group.id === 'pinned'}><Pin size={13} /></Show>}><Folder size={16} /></Show><span>{group.label}</span><Show when={group.pinned}><Pin size={12} /></Show><small>{group.items.length}</small></summary>
+                 <Show when={group.project}><button type="button" class="chat-organizer__project-menu" aria-label={i18n.tr(`Administrer prosjektet ${group.label}`, `Manage project ${group.label}`)} title={i18n.tr('Administrer prosjekt', 'Manage project')} onClick={() => beginProject(group.id)}><MoreHorizontal size={16} /></button></Show>
+-                <For each={group.items}>{(item) => <>{props.renderRow(item, () => beginMove(item))}</>}</For>
+-                <Show when={group.project && !group.items.length}><p class="chat-organizer__empty">{i18n.tr('Flytt samtaler hit fra samtalens meny.', 'Move chats here from their options menu.')}</p></Show>
++                <For each={group.items}>{(item) => (
++                  <div class="chat-organizer__draggable" draggable={canDrag() ? 'true' : 'false'}
++                    data-dragged={draggedThreadId() === item.threadId ? 'true' : undefined}
++                    title={canDrag() ? i18n.tr('Dra til et prosjekt eller Nylige. Du kan også bruke Flytt til prosjekt i menyen.', 'Drag to a project or Recent. You can also use Move to project in the menu.') : undefined}
++                    onDragStart={(event) => startDrag(event, item)} onDragEnd={endDrag}>
++                    {props.renderRow(item, () => beginMove(item))}
++                  </div>
++                )}</For>
++                <Show when={(group.project || group.id === 'recent') && !group.items.length}><p class="chat-organizer__empty">{i18n.tr('Slipp en samtale her, eller bruk Flytt til prosjekt.', 'Drop a chat here, or use Move to project.')}</p></Show>
+               </details>
+             )}</For>
+           </Show>
+         </Show>
+       </nav>
++      <p class="chat-organizer__move-notice" role="status" aria-live="polite">{moveNotice()}</p>
+       <p class="chat-organizer__local-note">{i18n.tr('Prosjekter lagres i denne nettleseren.', 'Projects are saved in this browser.')}</p>
+ 
+       <dialog ref={dialog} class="chat-project-dialog" aria-labelledby="chat-project-dialog-title" onClose={() => setMode(null)} onCancel={() => setMode(null)}>
+--- a/src/features/core/components/sidebar/ChatSidebarOrganizer.test.tsx
++++ b/src/features/core/components/sidebar/ChatSidebarOrganizer.test.tsx
+@@ -2,7 +2,7 @@
+ import { flush } from 'solid-js'
+ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+ import { ChatSidebarOrganizer } from './ChatSidebarOrganizer'
+-import { chatOrganizationStorageKey, readChatOrganization } from '@/features/chat/lib/chat-organization'
++import { chatOrganizationStorageKey, emptyChatOrganization, readChatOrganization, saveChatOrganization } from '@/features/chat/lib/chat-organization'
+ 
+ vi.mock('@/shared/i18n', () => ({ useI18n: () => ({ tr: (_no: string, en: string) => en }) }))
+ vi.mock('@/shared/session/session-store', () => ({ getSession: () => ({ user: { id: 'user-test' }, activeOrg: { id: 'org-test' } }) }))
+@@ -11,6 +11,24 @@
+ const thread = { threadId: 'thread-a', title: 'Planning', preview: 'A draft', updatedAt: '2026-09-28T12:00:00Z' }
+ function mount() {
+   return render(() => <ChatSidebarOrganizer sessions={[thread]} loading={false} onNewChat={() => {}} renderRow={(item, onMove) => <button type="button" onClick={() => onMove?.()}>Move {item.title}</button>} />)
++}
++
++function seedProjects() {
++  saveChatOrganization(key, {
++    ...emptyChatOrganization(),
++    projects: [{ id: 'work', name: 'Work', pinned: false }, { id: 'later', name: 'Later', pinned: false }],
++    assignments: { 'thread-a': 'work' },
++  })
++}
++function dragTransfer() {
++  const entries = new Map<string, string>()
++  return {
++    get types() { return [...entries.keys()] },
++    effectAllowed: 'none',
++    dropEffect: 'none',
++    setData: (type: string, value: string) => entries.set(type, value),
++    getData: (type: string) => entries.get(type) ?? '',
++  }
+ }
+ 
+ beforeEach(() => {
+@@ -67,4 +85,78 @@
+     expect(readChatOrganization(key).assignments).toEqual({})
+     expect(screen.getByRole('button', { name: 'Move Planning' })).toBeTruthy()
+   })
++
++  it('drags a chat into a collapsed project and back to an empty Recent group', () => {
++    seedProjects()
++    const view = mount()
++    flush()
++    const later = view.container.querySelector<HTMLDetailsElement>('[data-drop-target="later"]')!
++    later.open = false
++    const transfer = dragTransfer()
++    const source = () => screen.getByRole('button', { name: 'Move Planning' }).closest('[draggable]')!
++    fireEvent.dragStart(source(), { dataTransfer: transfer })
++    flush()
++    expect(transfer.effectAllowed).toBe('move')
++    fireEvent.dragOver(later.querySelector('summary')!, { dataTransfer: transfer })
++    flush()
++    expect(later.getAttribute('data-drop-active')).toBe('true')
++    fireEvent.drop(later.querySelector('summary')!, { dataTransfer: transfer })
++    flush()
++    expect(readChatOrganization(key).assignments['thread-a']).toBe('later')
++    expect(screen.getByRole('status').textContent).toBe('Moved to Later.')
++    expect(view.container.querySelector('[data-dragged="true"]')).toBeNull()
++
++    // A drop destination is retained even while every chat belongs to a project.
++    const recent = view.container.querySelector('[data-drop-target="recent"]')!
++    fireEvent.dragStart(source(), { dataTransfer: transfer })
++    fireEvent.dragOver(recent, { dataTransfer: transfer })
++    fireEvent.drop(recent, { dataTransfer: transfer })
++    flush()
++    expect(readChatOrganization(key).assignments).toEqual({})
++    expect(screen.getByRole('status').textContent).toBe('Moved to Recent.')
++    expect(screen.getByRole('button', { name: 'Move Planning' })).toBeTruthy()
++  })
++
++  it('ignores external, mismatched and cancelled drags without changing assignments', () => {
++    seedProjects()
++    const view = mount()
++    flush()
++    const target = view.container.querySelector('[data-drop-target="later"]')!
++    const source = screen.getByRole('button', { name: 'Move Planning' }).closest('[draggable]')!
++    const transfer = dragTransfer()
++    transfer.setData('text/plain', 'An external file or selection')
++    fireEvent.drop(target, { dataTransfer: transfer })
++    flush()
++    expect(readChatOrganization(key).assignments['thread-a']).toBe('work')
++
++    fireEvent.dragStart(source, { dataTransfer: transfer })
++    transfer.setData('application/x-verevon-chat-thread', 'another-thread')
++    fireEvent.drop(target, { dataTransfer: transfer })
++    flush()
++    expect(readChatOrganization(key).assignments['thread-a']).toBe('work')
++
++    fireEvent.dragStart(source, { dataTransfer: transfer })
++    fireEvent.dragOver(target, { dataTransfer: transfer })
++    flush()
++    fireEvent.keyDown(window, { key: 'Escape' })
++    flush()
++    expect(view.container.querySelector('[data-drop-active="true"]')).toBeNull()
++    fireEvent.drop(target, { dataTransfer: transfer })
++    flush()
++    expect(readChatOrganization(key).assignments['thread-a']).toBe('work')
++  })
++
++  it('preserves the Move menu when the date view does not expose project drop targets', () => {
++    seedProjects()
++    const view = mount()
++    flush()
++    fireEvent.change(screen.getByLabelText('Group by'), { target: { value: 'date' } })
++    flush()
++    const source = screen.getByRole('button', { name: 'Move Planning' }).closest('[draggable]')!
++    expect(source.getAttribute('draggable')).toBe('false')
++    expect(view.container.querySelector('[data-drop-target]')).toBeNull()
++    fireEvent.click(screen.getByRole('button', { name: 'Move Planning' }))
++    flush()
++    expect(screen.getByLabelText('Project')).toBeTruthy()
++  })
+ })
+--- a/src/features/core/components/sidebar/chat-sidebar-organizer.css
++++ b/src/features/core/components/sidebar/chat-sidebar-organizer.css
+@@ -23,6 +23,14 @@
+ .chat-organizer > .core-chat-sidebar__new:hover { background: var(--verevon-surface-soft); }
+ .chat-organizer__list { padding: 2px; }
+ .chat-organizer__group { position: relative; flex-shrink: 0; margin-bottom: 12px; }
++.chat-organizer__draggable { min-width: 0; }
++.chat-organizer__draggable[draggable='true'] .core-chat-session { cursor: grab; }
++.chat-organizer__draggable[data-dragged='true'] { opacity: .45; }
++.chat-organizer[data-dragging='true'] .chat-organizer__group[data-drop-target] { border-radius: 8px; outline: 1px dashed var(--verevon-border); outline-offset: -1px; }
++.chat-organizer[data-dragging='true'] .chat-organizer__group[data-drop-active='true'] { background: var(--verevon-surface-soft); outline: 2px solid var(--verevon-accent-ink); outline-offset: -2px; }
++.chat-organizer .chat-organizer__group[data-drop-active='true'] > summary { color: var(--verevon-text); }
++.chat-organizer__move-notice { flex-shrink: 0; margin: 4px 10px; color: var(--verevon-text); font-size: 12px; line-height: 1.5; }
++.chat-organizer__move-notice:empty { display: none; }
+ .chat-organizer__group > summary { display: flex; min-height: 36px; align-items: center; gap: 8px; padding: 4px 38px 4px 9px; border-radius: 8px; color: var(--verevon-text-muted); font-size: 12px; font-weight: 600; list-style: none; cursor: pointer; }
+ .chat-organizer__group > summary > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+ .chat-organizer__group > summary > svg { flex-shrink: 0; }

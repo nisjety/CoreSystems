@@ -105,18 +105,50 @@ func TestRunCompletedSubjectIsLimitedToCanonicalRunEvents(t *testing.T) {
 
 // This is the live-bus proof for the trigger half of G7. The transcript and
 // inference boundaries stay fakes so the test does not require credentials or
-// an LLM, but the subscription, subject matching, delivery, and cancellation
-// all run against a real NATS server supplied by the release harness.
+// an LLM, but the JetStream bind, subject matching, durable delivery,
+// redelivery-on-Nak, and cancellation all run against a real NATS+JetStream
+// server supplied by the release harness.
+//
+// The stream and durable consumer are provisioned INLINE here rather than by
+// invoking nats-provisioner, so this test stays a self-contained proof of
+// RunConsumer's own bind/ack contract; their configs are kept in lockstep
+// with services/nats-provisioner/main.go's streamConfigs/consumerBindings by
+// hand (both are simple Go literals, not generated).
 func TestRunConsumerAgainstLiveNATS(t *testing.T) {
 	url := os.Getenv("NATS_URL")
 	if url == "" {
-		t.Skip("requires NATS_URL to a disposable NATS server")
+		t.Skip("requires NATS_URL to a disposable NATS+JetStream server")
 	}
 	nc, err := nats.Connect(url)
 	if err != nil {
 		t.Fatalf("connect NATS: %v", err)
 	}
 	defer nc.Close()
+	js, err := nc.JetStream()
+	if err != nil {
+		t.Fatalf("JetStream context: %v", err)
+	}
+	if _, err := js.AddStream(&nats.StreamConfig{
+		Name:      RunEventsStream,
+		Subjects:  []string{RunCompletedSubject},
+		Retention: nats.LimitsPolicy,
+		Storage:   nats.MemoryStorage,
+		MaxAge:    48 * time.Hour,
+	}); err != nil {
+		t.Fatalf("add stream %s: %v", RunEventsStream, err)
+	}
+	if _, err := js.AddConsumer(RunEventsStream, &nats.ConsumerConfig{
+		Durable:        SkillReviewDurable,
+		AckPolicy:      nats.AckExplicitPolicy,
+		AckWait:        120 * time.Second,
+		MaxDeliver:     5,
+		FilterSubject:  RunCompletedSubject,
+		DeliverPolicy:  nats.DeliverAllPolicy,
+		DeliverSubject: "deliver." + SkillReviewDurable,
+		DeliverGroup:   SkillReviewDurable,
+	}); err != nil {
+		t.Fatalf("add consumer %s/%s: %v", RunEventsStream, SkillReviewDurable, err)
+	}
 
 	sc := &fakeSessionClient{
 		convo:  &mpv1.ListConversationResponse{Messages: []*mpv1.SessionMessage{{Role: "user", Content: "live bus"}}},
@@ -126,16 +158,15 @@ func TestRunConsumerAgainstLiveNATS(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	consumerDone := make(chan error, 1)
-	go func() { consumerDone <- RunConsumer(ctx, nc, sc, ic, "test-model") }()
+	go func() { consumerDone <- RunConsumer(ctx, js, sc, ic, "test-model") }()
 
-	// Give the asynchronous subscriber a bounded head start, then flush the
-	// publish so the callback has a deterministic delivery point.
+	// Give the asynchronous subscriber a bounded head start, then publish
+	// through JetStream (not a plain nc.Publish) so the message is durably
+	// captured on RunEventsStream and the bound durable consumer delivers it --
+	// proving the actual production path, not just a live core-NATS fan-out.
 	time.Sleep(100 * time.Millisecond)
-	if err := nc.Publish("mp.v1.run.live-e2e.event", envBytes(t, "RUN_COMPLETED", "run/live-e2e", "org-live", `{"thread_id":"thread-live"}`)); err != nil {
+	if _, err := js.Publish("mp.v1.run.live-e2e.event", envBytes(t, "RUN_COMPLETED", "run/live-e2e", "org-live", `{"thread_id":"thread-live"}`)); err != nil {
 		t.Fatalf("publish RUN_COMPLETED: %v", err)
-	}
-	if err := nc.Flush(); err != nil {
-		t.Fatalf("flush NATS: %v", err)
 	}
 	deadline := time.Now().Add(3 * time.Second)
 	for len(sc.upserts) == 0 && time.Now().Before(deadline) {
@@ -152,6 +183,78 @@ func TestRunConsumerAgainstLiveNATS(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("consumer did not stop after context cancellation")
+	}
+}
+
+// The exact bug this durable exists to fix: a message published while
+// RunConsumer is NOT bound must still be delivered once it binds -- the
+// property a plain core-NATS subscribe never had, and the reason 88 real
+// RUN_COMPLETED events were silently lost in production before this fix.
+func TestRunConsumerReceivesMessagesPublishedBeforeItBound(t *testing.T) {
+	url := os.Getenv("NATS_URL")
+	if url == "" {
+		t.Skip("requires NATS_URL to a disposable NATS+JetStream server")
+	}
+	nc, err := nats.Connect(url)
+	if err != nil {
+		t.Fatalf("connect NATS: %v", err)
+	}
+	defer nc.Close()
+	js, err := nc.JetStream()
+	if err != nil {
+		t.Fatalf("JetStream context: %v", err)
+	}
+	streamName := RunEventsStream + "_REPLAY"
+	durable := SkillReviewDurable + "-replay"
+	if _, err := js.AddStream(&nats.StreamConfig{
+		Name:      streamName,
+		Subjects:  []string{"replay.run.*.event"},
+		Retention: nats.LimitsPolicy,
+		Storage:   nats.MemoryStorage,
+		MaxAge:    48 * time.Hour,
+	}); err != nil {
+		t.Fatalf("add stream %s: %v", streamName, err)
+	}
+
+	// Publish FIRST -- no consumer, durable or subscriber exists yet. This is
+	// the moment the old plain nc.Subscribe would lose the message forever.
+	if _, err := js.Publish("replay.run.replay-e2e.event", envBytes(t, "RUN_COMPLETED", "run/replay-e2e", "org-replay", `{"thread_id":"thread-replay"}`)); err != nil {
+		t.Fatalf("publish RUN_COMPLETED before any consumer exists: %v", err)
+	}
+
+	// NOW provision the durable, mirroring nats-provisioner's DeliverAllPolicy
+	// choice for this exact reason, and bind after the fact.
+	if _, err := js.AddConsumer(streamName, &nats.ConsumerConfig{
+		Durable:        durable,
+		AckPolicy:      nats.AckExplicitPolicy,
+		AckWait:        120 * time.Second,
+		MaxDeliver:     5,
+		FilterSubject:  "replay.run.*.event",
+		DeliverPolicy:  nats.DeliverAllPolicy,
+		DeliverSubject: "deliver." + durable,
+		DeliverGroup:   durable,
+	}); err != nil {
+		t.Fatalf("add consumer %s/%s: %v", streamName, durable, err)
+	}
+	sub, err := js.QueueSubscribe("replay.run.*.event", durable, func(msg *nats.Msg) {
+		_ = msg.Ack()
+	}, nats.Bind(streamName, durable), nats.ManualAck())
+	if err != nil {
+		t.Fatalf("bind %s/%s: %v", streamName, durable, err)
+	}
+	defer sub.Unsubscribe()
+
+	info, err := js.ConsumerInfo(streamName, durable)
+	deadline := time.Now().Add(3 * time.Second)
+	for (err != nil || info.Delivered.Consumer == 0) && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+		info, err = js.ConsumerInfo(streamName, durable)
+	}
+	if err != nil {
+		t.Fatalf("consumer info: %v", err)
+	}
+	if info.Delivered.Consumer == 0 {
+		t.Fatalf("a durable consumer bound AFTER publish delivered nothing: %+v", info.Delivered)
 	}
 }
 

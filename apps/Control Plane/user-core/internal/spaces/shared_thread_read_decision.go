@@ -12,7 +12,44 @@ import (
 const (
 	threadReadAction = "model.thread.read"
 	threadReadSchema = "sha256:thread-read-v1"
+
+	// ThreadReadAudienceSessionCore is the default recipient and the only one
+	// that existed before S4.2: Session Core, which owns the conversation
+	// record this decision was written for. The literal is `model-plane`
+	// rather than something service-shaped because that is the value Session
+	// Core's verifier already compares against; renaming it would invalidate
+	// every decision in flight for a cosmetic gain.
+	ThreadReadAudienceSessionCore = personalThreadCreateAudience
+
+	// ThreadReadAudienceSandboxManager names sandbox-manager as the recipient,
+	// so the Work tab can read a Space's background processes (S4.2 §7) under
+	// the authority it already holds for that room.
+	//
+	// A SECOND AUDIENCE RATHER THAN A SECOND ACTION, deliberately. The
+	// question the caller is asking is unchanged — "may this member see what
+	// this Space did?" — and processes are part of that record in the same way
+	// runs are. Minting a `model.process.read` action would have created a
+	// second authority to keep in sync with the first, and a Space where a
+	// member could read the conversation but not the work it produced (or the
+	// reverse) is not a state anyone would choose on purpose.
+	//
+	// What the audience DOES buy is that the two are not interchangeable: a
+	// decision issued for Session Core is refused by sandbox-manager and vice
+	// versa, because each verifier pins its own. So the gateway must ask for
+	// the recipient it means, and a token leaked from one path cannot be
+	// replayed against the other.
+	ThreadReadAudienceSandboxManager = "model-plane-sandbox-manager"
 )
+
+// threadReadAudiences is the closed set a caller may request. Closed rather
+// than free-form for the reason S4.2 step 3 closed the `processes` claim: an
+// unvalidated audience string is one Control would sign happily and no
+// recipient would ever accept, which surfaces as an unexplained permission
+// denial three services away.
+var threadReadAudiences = map[string]struct{}{
+	ThreadReadAudienceSessionCore:    {},
+	ThreadReadAudienceSandboxManager: {},
+}
 
 // SharedThreadReadDecisionRequest carries only the operation-bound fields the
 // verified gateway path supplies. Deliberately absent: any thread id.
@@ -28,6 +65,19 @@ type SharedThreadReadDecisionRequest struct {
 	DecisionRef    string
 	IdempotencyKey string
 	Nonce          string
+	// ServiceAudience names the Model Plane service that will verify this
+	// decision. Empty means Session Core, so every existing caller keeps the
+	// decision it always got without knowing this field exists.
+	ServiceAudience string
+}
+
+// Audience resolves the requested recipient, defaulting to Session Core.
+func (r SharedThreadReadDecisionRequest) Audience() string {
+	audience := strings.TrimSpace(r.ServiceAudience)
+	if audience == "" {
+		return ThreadReadAudienceSessionCore
+	}
+	return audience
 }
 
 func (r SharedThreadReadDecisionRequest) Validate() error {
@@ -40,12 +90,23 @@ func (r SharedThreadReadDecisionRequest) Validate() error {
 			return fmt.Errorf("shared thread read decision %s is required", label)
 		}
 	}
+	if _, ok := threadReadAudiences[r.Audience()]; !ok {
+		return fmt.Errorf("shared thread read decision service_audience %q is not a recognized Model Plane recipient", r.Audience())
+	}
 	return nil
 }
 
 // sharedThreadReadPayloadDigest binds the exact read effect Model Plane will
 // verify. Every field is length-prefixed so concatenation stays unambiguous,
 // matching personalThreadCreatePayloadDigest.
+//
+// The service audience is deliberately NOT a digest input, even though S4.2
+// made it variable. It is a signed field of the decision itself, so a tampered
+// audience fails the signature check before any digest is recomputed — and
+// adding it here would change the digest for every existing Session Core
+// decision, which Session Core recomputes independently and would then reject.
+// A formula two services must agree on is not the place to record something
+// the signature already covers.
 func sharedThreadReadPayloadDigest(evidence PersonalThreadDecisionEvidence, request SharedThreadReadDecisionRequest) string {
 	hash := sha256.New()
 	hash.Write([]byte("model.thread.read\x00v1\x00"))
@@ -68,19 +129,10 @@ func sharedThreadReadPayloadDigest(evidence PersonalThreadDecisionEvidence, requ
 		hash.Write(length[:])
 		hash.Write([]byte(field.value))
 	}
-	for _, revision := range []struct {
-		name  string
-		value int64
-	}{
-		{"authority_revision", evidence.Membership.Revisions.Authority},
-		{"recipient_audience_revision", evidence.Membership.Revisions.RecipientAudience},
-	} {
-		hash.Write([]byte(revision.name))
-		hash.Write([]byte{0})
-		var encoded [8]byte
-		binary.BigEndian.PutUint64(encoded[:], uint64(revision.value))
-		hash.Write(encoded[:])
-	}
+	writeDigestRevisions(hash,
+		digestRevision{"authority_revision", evidence.Membership.Revisions.Authority},
+		digestRevision{"recipient_audience_revision", evidence.Membership.Revisions.RecipientAudience},
+	)
 	return "sha256:" + hex.EncodeToString(hash.Sum(nil))
 }
 
@@ -106,36 +158,46 @@ func IssueSharedThreadReadDecision(
 	if now.IsZero() {
 		return Decision{}, fmt.Errorf("shared thread read decision issuance time is required")
 	}
-	return Decision{
-		DecisionRef:               strings.TrimSpace(request.DecisionRef),
-		OrgID:                     evidence.Membership.OrgID,
-		SpaceRef:                  evidence.Membership.SpaceRef,
-		SubjectID:                 evidence.Membership.SubjectID,
-		ServiceAudience:           personalThreadCreateAudience,
-		ActionID:                  threadReadAction,
-		ActionSchemaHash:          threadReadSchema,
-		PayloadDigest:             sharedThreadReadPayloadDigest(evidence, request),
-		IdempotencyKey:            strings.TrimSpace(request.IdempotencyKey),
-		RecipientAudienceRef:      strings.TrimSpace(evidence.RecipientAudienceRef),
-		RecipientAudienceHash:     strings.TrimSpace(evidence.RecipientAudienceHash),
-		PrivacyPolicyRef:          strings.TrimSpace(evidence.Privacy.PolicyRef),
-		ResourceAuthorizationRef:  strings.TrimSpace(evidence.ResourceAuthorizationRef),
-		AuthorityRevision:         evidence.Membership.Revisions.Authority,
-		MembershipRevision:        evidence.Membership.Revisions.Membership,
-		PrivacyRevision:           evidence.Membership.Revisions.Privacy,
-		RecipientAudienceRevision: evidence.Membership.Revisions.RecipientAudience,
-		EntitlementRevision:       evidence.Membership.Revisions.Entitlement,
-		Permissions:               []string{"thread:read"},
-		Purpose:                   strings.TrimSpace(evidence.Privacy.Purpose),
-		LawfulBasis:               strings.TrimSpace(evidence.Privacy.LawfulBasis),
-		PrivacyClass:              strings.TrimSpace(evidence.Privacy.PrivacyClass),
-		ThirdPartyAllowed:         evidence.Privacy.ThirdPartyAllowed,
-		RetentionClass:            strings.TrimSpace(evidence.Privacy.RetentionClass),
-		Residency:                 strings.TrimSpace(evidence.Privacy.Residency),
-		DeletionScope:             strings.TrimSpace(evidence.Privacy.DeletionScope),
-		ZeroDataRetention:         evidence.Privacy.ZeroDataRetention,
-		IssuedAt:                  now.UTC(),
-		ExpiresAt:                 now.UTC().Add(personalDecisionLifetime),
-		Nonce:                     strings.TrimSpace(request.Nonce),
-	}, nil
+	return newEvidenceDecision(
+		evidence, request.DecisionRef, request.Audience(), threadReadAction, threadReadSchema,
+		sharedThreadReadPayloadDigest(evidence, request), request.IdempotencyKey, request.Nonce,
+		[]string{"thread:read"}, evidence.Privacy.ZeroDataRetention, now,
+	), nil
+}
+
+// IssueOwnScheduledThreadReadDecision authorizes one short-lived read of a
+// personal Space's OWN owner over the system-owned (schedule) threads inside
+// their own Space (chat-wave2 "schedule" spec §2.4).
+//
+// Deliberately reuses the identical action id, schema hash, permission, and
+// payload-digest formula as IssueSharedThreadReadDecision (model.thread.read
+// / sha256:thread-read-v1 / thread:read / sharedThreadReadPayloadDigest — the
+// digest function binds whatever evidence it is given, it does not care
+// whether that evidence came from a shared-room or a personal-Space
+// resolver). Session Core's existing verifier therefore needs NO change: it
+// already just checks the signed decision's action/schema/digest, not which
+// issuance path produced it. What differs is only the evidence and the
+// validator: ValidateForOwnScheduledThreadRead requires KindPersonal + role
+// "owner" instead of ValidateForSharedThreadRead's "non-personal, current
+// audience member" — so a token minted here can never be mistaken for, or
+// replayed as, a shared-room read grant.
+func IssueOwnScheduledThreadReadDecision(
+	evidence PersonalThreadDecisionEvidence,
+	request SharedThreadReadDecisionRequest,
+	now time.Time,
+) (Decision, error) {
+	if err := evidence.ValidateForOwnScheduledThreadRead(); err != nil {
+		return Decision{}, err
+	}
+	if err := request.Validate(); err != nil {
+		return Decision{}, err
+	}
+	if now.IsZero() {
+		return Decision{}, fmt.Errorf("own scheduled thread read decision issuance time is required")
+	}
+	return newEvidenceDecision(
+		evidence, request.DecisionRef, request.Audience(), threadReadAction, threadReadSchema,
+		sharedThreadReadPayloadDigest(evidence, request), request.IdempotencyKey, request.Nonce,
+		[]string{"thread:read"}, evidence.Privacy.ZeroDataRetention, now,
+	), nil
 }

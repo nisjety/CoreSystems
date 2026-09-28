@@ -15,6 +15,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/nats-io/nats.go"
 	mpv1 "github.com/triodelab/model-plane/gen/go/model_plane/v1"
@@ -30,12 +31,14 @@ import (
 	"github.com/triodelab/model-plane/services/capability-core/internal/lettatools"
 	"github.com/triodelab/model-plane/services/capability-core/internal/notifyclient"
 	"github.com/triodelab/model-plane/services/capability-core/internal/policy"
+	"github.com/triodelab/model-plane/services/capability-core/internal/processwatch"
 	"github.com/triodelab/model-plane/services/capability-core/internal/registry"
 	"github.com/triodelab/model-plane/services/capability-core/internal/roadmap"
 	"github.com/triodelab/model-plane/services/capability-core/internal/runwatch"
 	capserver "github.com/triodelab/model-plane/services/capability-core/internal/server"
 	"github.com/triodelab/model-plane/services/capability-core/internal/sessionreview"
 	"github.com/triodelab/model-plane/services/capability-core/internal/taskexec"
+	"github.com/triodelab/model-plane/services/capability-core/internal/watch"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
@@ -53,6 +56,17 @@ func main() {
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer cancel()
+	if len(os.Args) > 1 {
+		if len(os.Args) != 3 || os.Args[1] != "--replay-learning-event" {
+			slog.Error("usage: capability-core [--replay-learning-event retained-event.json]")
+			os.Exit(2)
+		}
+		if err := replayLearningEvent(ctx, os.Args[2]); err != nil {
+			slog.Error("learning recovery failed", "error", err)
+			os.Exit(1)
+		}
+		return
+	}
 
 	authConfig, err := authConfigFromEnv()
 	if err != nil {
@@ -186,7 +200,7 @@ func main() {
 	// capability events are v1-native (no legacy mapping).
 	var recPub publisher.EventPublisher
 	if natsURL := os.Getenv("NATS_URL"); natsURL != "" {
-		nc, nerr := nats.Connect(natsURL, natsAuthOptions()...)
+		nc, nerr := connectNATSWithRetry(natsURL)
 		if nerr != nil {
 			slog.Warn("NATS connect failed; capability reconcile events disabled", "error", nerr)
 		} else {
@@ -312,6 +326,59 @@ func main() {
 		}
 	}
 
+	// Watch sweeper (S4.3): claims due space_watches, polls each one's source
+	// adapter, and commits what it saw. Single-flight across replicas via the
+	// same FOR UPDATE SKIP LOCKED claim the cron sweeper uses — except the claim
+	// commits BEFORE the poll, so no transaction is held open across an RPC.
+	//
+	// Started only when the process-output adapter can be built, because that is
+	// the only source this binary knows: a sweeper with no adapters claims rows
+	// and backs every one of them off, which is cost without work.
+	//
+	// It cannot emit anything yet regardless. Step 3 supplies the Reauthorizer,
+	// and until it does the sweeper REFUSES to observe — the record is not the
+	// authority, and a poll without a fresh authority check is the one thing
+	// this loop must never do. There is also no create path yet, so there are no
+	// rows to claim in the first place.
+	if watchStore, storeErr := watch.NewStore(pool); storeErr != nil {
+		slog.Warn("watches unavailable", "error", storeErr)
+	} else if sources, sourcesErr := watchSourcesFromEnv(os.Getenv); sourcesErr != nil {
+		// One construction for both the sweeper's adapters and the create-time
+		// resolvers, because they must agree about which kinds exist. A
+		// deployment that can create a watch it cannot poll would hand a person
+		// a watch that never reports.
+		slog.Warn("watches unavailable; no source is configured", "error", sourcesErr)
+	} else {
+		createAuthz, createErr := watchControlAuthorizerFromEnv(os.Getenv)
+		if createErr != nil {
+			// Fail closed and loudly: without Control there is no authority to
+			// create a watch under, and a surface that accepted one anyway
+			// would be recording standing intents nobody approved.
+			slog.Warn("watch creation unavailable; fresh Control authorization is required", "error", createErr)
+		} else if handler, handlerErr := watch.NewHandler(watchStore, createAuthz, sources.resolvers, newWatchID); handlerErr != nil {
+			slog.Warn("watch creation unavailable", "error", handlerErr)
+		} else {
+			handler.Register(protectedMux)
+			slog.Info("watch surface registered")
+		}
+
+		if os.Getenv("WATCH_SWEEPER_ENABLED") != "false" {
+			observeAuthz, observeErr := watchObserveAuthorizerFromEnv(os.Getenv)
+			if observeErr != nil {
+				// The sweeper is NOT started without one. It would claim rows,
+				// refuse every poll for want of a reauthorizer, and back them
+				// off — cost without work, and a log line per watch per minute
+				// saying so.
+				slog.Warn("watch sweeper not started; fresh Control authorization is required", "error", observeErr)
+			} else if sweeper, sweepErr := watch.NewSweeper(watchStore, sources.adapters, observeAuthz); sweepErr != nil {
+				slog.Warn("watch sweeper not started", "error", sweepErr)
+			} else {
+				go sweeper.Run(ctx)
+				slog.Info("watch sweeper started with fresh Control authorization", "sources", len(sources.adapters))
+			}
+		}
+	}
+
 	// Task executor: claims `created` tasks (single-flight), marks them running,
 	// and turns each into a durable Temporal run via orchestrator-core's
 	// StartWorkflow RPC — the hand-off that closes the cron → run loop.
@@ -366,7 +433,20 @@ func main() {
 		capSrv.WithLettaToolSearcher(lettaToolSearcher)
 	}
 	if signer, signerErr := capserver.NewDecisionProofSignerFromEnv(); signerErr != nil {
-		slog.Warn("capability decision evidence signer unavailable; execution allow responses will lack per-call proof", "error", signerErr)
+		// Execution Core verifies per-call evidence whenever it is configured
+		// with our public key and refuses every unsigned "allow". A service
+		// that starts without the private key therefore looks healthy while
+		// silently denying every governed tool call (observed 2026-09-14: a
+		// container recreated outside the env chain lost the key, and every
+		// code_interpreter dispatch failed as "capability policy unavailable"
+		// for three days). Fail at startup instead; the only way to run
+		// unsigned is to say so explicitly.
+		if strings.EqualFold(strings.TrimSpace(os.Getenv("CAPABILITY_CORE_ALLOW_UNSIGNED_DECISIONS")), "true") {
+			slog.Warn("capability decision evidence signer unavailable; running UNSIGNED because CAPABILITY_CORE_ALLOW_UNSIGNED_DECISIONS=true — execution-core will deny allows if it verifies evidence", "error", signerErr)
+		} else {
+			slog.Error("capability decision evidence signer unavailable; refusing to start. Set CAPABILITY_CORE_DECISION_SIGNING_KEY (see deploy/.env.generated-secrets) or, for a deliberately unsigned dev run, CAPABILITY_CORE_ALLOW_UNSIGNED_DECISIONS=true", "error", signerErr)
+			os.Exit(1)
+		}
 	} else {
 		capSrv.WithDecisionProofSigner(signer)
 		slog.Info("capability decision evidence signer enabled")
@@ -384,6 +464,34 @@ func main() {
 	slog.Info("shutting down")
 	grpcServer.GracefulStop()
 	_ = healthServer.Shutdown(context.Background())
+}
+
+// connectNATSWithRetry dials NATS with the same bounded retry
+// (60 attempts, 1s apart) services/nats-provisioner/main.go already uses for
+// its own connect, because "NATS is not accepting connections/auth yet" is a
+// known startup race across this stack's compose group, not a rare fault --
+// nats-provisioner already treats it as one. capability-core's connect here
+// used to be a single bare nats.Connect with no retry at all: verified live
+// on 2026-09-17, a transient "Authorization Violation" on the very first
+// dial attempt at boot (immediately re-dialing the SAME credentials moments
+// later succeeded, proving the credentials were never wrong) permanently
+// disabled reconcile events, the run-watch notify consumer, the task
+// completion consumer AND the G7 skill-review consumer for that process's
+// entire lifetime -- the only recovery was a full container restart. This
+// closes that: a transient failure now retries instead of giving up once.
+func connectNATSWithRetry(url string) (*nats.Conn, error) {
+	options := natsAuthOptions()
+	var nc *nats.Conn
+	var err error
+	for attempt := 1; attempt <= 60; attempt++ {
+		nc, err = nats.Connect(url, options...)
+		if err == nil {
+			return nc, nil
+		}
+		slog.Warn("NATS connect attempt failed; retrying", "attempt", attempt, "error", err)
+		time.Sleep(time.Second)
+	}
+	return nil, err
 }
 
 func natsAuthOptions() []nats.Option {
@@ -632,21 +740,30 @@ func taskExecutorEnabled(workflowBacked bool) bool {
 }
 
 // startLearningConsumer wires the G7 learning-review trigger on the shared
-// session-core + inference-core clients: spawn the RUN_COMPLETED consumer
-// (sessionreview). No-op when the clients are nil (backends unset) so the
-// service runs without the learning loop. The decode→review→persist core is
-// unit-tested; this subscribe wiring is e2e-verified only against the stack.
+// session-core + inference-core clients: bind the durable JetStream
+// RUN_COMPLETED consumer (sessionreview.RunConsumer, on
+// sessionreview.RunEventsStream/SkillReviewDurable -- must be pre-provisioned
+// by nats-provisioner). No-op when the clients are nil (backends unset) or
+// JetStream is unavailable, so the service runs without the learning loop
+// rather than failing to start. The decode→review→persist core is unit-tested;
+// this subscribe wiring is e2e-verified only against the stack.
 func startLearningConsumer(ctx context.Context, nc *nats.Conn, sc mpv1.SessionCoreClient, ic mpv1.InferenceCoreClient) {
 	if sc == nil || ic == nil {
 		slog.Info("learning-review consumer disabled (session-core/inference-core not dialed)")
 		return
 	}
+	js, err := nc.JetStream()
+	if err != nil {
+		slog.Error("JetStream context unavailable; learning-review consumer disabled", "error", err)
+		return
+	}
 	model := os.Getenv("LEARNING_REVIEW_MODEL") // empty -> llmreviewer.DefaultModel
 	go func() {
-		if rerr := sessionreview.RunConsumer(ctx, nc, sc, ic, model); rerr != nil {
-			slog.Warn("learning-review consumer stopped", "error", rerr)
+		if rerr := sessionreview.RunConsumer(ctx, js, sc, ic, model); rerr != nil {
+			slog.Warn("learning-review consumer stopped (is it pre-provisioned on "+sessionreview.RunEventsStream+"?)", "error", rerr)
 		}
 	}()
+	slog.Info("learning-review consumer started", "stream", sessionreview.RunEventsStream, "durable", sessionreview.SkillReviewDurable)
 }
 
 // dialBackends dials session-core + inference-core once (guarded on
@@ -804,6 +921,84 @@ func newBackendCredential(backend, tokenEnv string, scopes []string, reason stri
 
 // dialOption returns the unary interceptor that authenticates every outbound RPC
 // on the connection.
+// watchSources is the pair every watch kind must supply: a poll-time adapter
+// and a create-time resolver. Built together so the two can never disagree
+// about which kinds exist — a deployment that could create a watch it cannot
+// poll would hand a person a watch that never reports.
+type watchSources struct {
+	adapters  watch.AdapterSet
+	resolvers map[string]watch.SourceResolver
+}
+
+// watchSourcesFromEnv builds the S4.3 sources this binary can serve.
+//
+// Today that is exactly one: background process output, read from
+// sandbox-manager's registry. It needs a gRPC target and capability-core's own
+// `aud=sandbox-manager` credential — which Auth Core will only issue if
+// capability-core's entry in plane-service-principals.json grants that audience
+// with `sandbox:read`. Without that grant every poll is refused at
+// sandbox-manager's interceptor, and the token provider's error says so.
+func watchSourcesFromEnv(getenv func(string) string) (watchSources, error) {
+	target := strings.TrimSpace(getenv("SANDBOX_MANAGER_GRPC_ADDR"))
+	if target == "" {
+		return watchSources{}, fmt.Errorf("SANDBOX_MANAGER_GRPC_ADDR is required to watch process output")
+	}
+	serviceID := strings.TrimSpace(getenv("CAPABILITY_CORE_SERVICE_ID"))
+	if serviceID == "" {
+		serviceID = "capability-core"
+	}
+	tokens, err := processwatch.NewAuthCoreTokens(
+		getenv("AUTH_CORE_URL"), serviceID, getenv("CAPABILITY_CORE_SERVICE_API_KEY"), nil)
+	if err != nil {
+		return watchSources{}, err
+	}
+	conn, err := grpc.NewClient(target, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		return watchSources{}, fmt.Errorf("dial sandbox-manager: %w", err)
+	}
+	client := mpv1.NewSandboxManagerClient(conn)
+	adapter, err := processwatch.NewAdapter(client, tokens)
+	if err != nil {
+		return watchSources{}, err
+	}
+	resolver, err := processwatch.NewResolver(client, tokens)
+	if err != nil {
+		return watchSources{}, err
+	}
+	adapters, err := watch.NewAdapterSet(adapter)
+	if err != nil {
+		return watchSources{}, err
+	}
+	return watchSources{
+		adapters:  adapters,
+		resolvers: map[string]watch.SourceResolver{adapter.Kind(): resolver},
+	}, nil
+}
+
+// The two Control authorizers. Separate constructors rather than one, because
+// they address different endpoints for different reasons and a deployment can
+// legitimately have one working and the other not.
+func watchControlAuthorizerFromEnv(getenv func(string) string) (*watch.ControlCreateAuthorizer, error) {
+	return watch.NewControlCreateAuthorizer(
+		getenv("USER_CORE_URL"), watchServiceID(getenv), getenv("USER_CORE_SERVICE_TOKEN"), nil)
+}
+
+func watchObserveAuthorizerFromEnv(getenv func(string) string) (*watch.ControlObserveAuthorizer, error) {
+	return watch.NewControlObserveAuthorizer(
+		getenv("USER_CORE_URL"), watchServiceID(getenv), getenv("USER_CORE_SERVICE_TOKEN"), nil)
+}
+
+func watchServiceID(getenv func(string) string) string {
+	if id := strings.TrimSpace(getenv("CAPABILITY_CORE_SERVICE_ID")); id != "" {
+		return id
+	}
+	return "capability-core"
+}
+
+// newWatchID mints a watch id. ULID-shaped so the read path's id-ordered
+// listing is creation-ordered, the same property S4.2 relies on.
+func newWatchID() string { return "wch_" + strings.ReplaceAll(uuid.NewString(), "-", "") }
+
 func (b *backendCredential) dialOption() grpc.DialOption {
 	return grpc.WithChainUnaryInterceptor(b.intercept)
 }

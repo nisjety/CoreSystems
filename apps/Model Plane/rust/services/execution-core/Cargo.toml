@@ -39,6 +39,21 @@ sha2 = "0.10"
 hmac = "0.12"
 rand = "0.8"
 chrono = { workspace = true }
+# S3.3 durable-workspace CAS client (workspace_cas.rs): AWS SigV4 request
+# signing for MinIO's S3-compatible API. Deliberately the standalone
+# signing crate, not aws-sdk-s3/aws-config -- this codebase already
+# hand-rolls its own HTTP clients (ticket_tools.rs, capability_client.rs)
+# rather than pulling a full SDK for narrow needs, and aws-sigv4 pulls its
+# own independent sha2/hmac versions internally rather than sharing the
+# ones above, so this adds no conflict with the existing digest code.
+aws-sigv4 = "1"
+aws-credential-types = "1"
+
+# S4.2 background process host: SIGTERM to the sandboxed command. The
+# workspace forbids unsafe_code, so libc::kill is not an option; nix wraps the
+# same syscall safely and is already in the lock file transitively.
+[target.'cfg(unix)'.dependencies]
+nix = { version = "0.29", features = ["signal"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }

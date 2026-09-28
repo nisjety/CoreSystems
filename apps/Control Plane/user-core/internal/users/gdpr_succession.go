@@ -19,8 +19,8 @@ import (
 // future scheduled-deletion sweep).
 
 // ErrSuccessorRequired is returned when the subject is the sole owner/admin of
-// one or more organizations and no successor_user_id was supplied. Orgs lists
-// every affected organization so the caller can present a picker.
+// one or more organizations and no successor_user_id was supplied. `Orgs`
+// lists every affected organization so the caller can present a picker.
 type ErrSuccessorRequired struct {
 	Orgs []SoleAdminOrg
 }
@@ -85,9 +85,8 @@ func (s *Service) SoleAdminOrgs(ctx context.Context, userID string) ([]SoleAdmin
 // *ErrSuccessorInvalid when the supplied successor fails validation for a
 // specific org, or nil once every sole-admin org has been handed off. The
 // SAME successorID is used for every affected org — Verevon's one-org-per-user
-// model makes more than one sole-admin org a rare edge case, but when it
-// happens the caller must nominate someone who is an active member of ALL of
-// them.
+// model makes more than one sole-admin org a rare edge case. When it happens,
+// the caller must nominate someone who is an active member of ALL of them.
 func (s *Service) EnsureSuccession(ctx context.Context, targetID, successorID string) error {
 	targetID = strings.TrimSpace(targetID)
 	orgs, err := s.SoleAdminOrgs(ctx, targetID)

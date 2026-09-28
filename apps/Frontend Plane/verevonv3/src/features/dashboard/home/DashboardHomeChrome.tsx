@@ -34,8 +34,8 @@ export function DashboardTabs(props: {
 }) {
   const i18n = useI18n()
   const tabLabel = (tab: DashboardTab) => {
-    if (tab === 'Søk') return i18n.tr('Søk', 'Search')
-    if (tab === 'Crawl') return i18n.tr('Innhent', 'Crawl')
+    if (tab === 'Søk') return i18n.tr('Nett', 'Web')
+    if (tab === 'Crawl') return i18n.tr('Hent ut', 'Extract')
     return i18n.tr('Chat', 'Chat')
   }
 
@@ -64,6 +64,8 @@ export function DashboardTabs(props: {
 
 export function DashboardComposerPanel(props: {
   activeTab: DashboardTab
+  persistentChat?: boolean
+  compactChat?: boolean
   knowledgeInlinePlanLabel?: string
   knowledgeInlineTitle?: string
   message: string
@@ -77,9 +79,8 @@ export function DashboardComposerPanel(props: {
 }) {
   return (
     <div class={props.searchExpanded ? 'verevon-home-composer verevon-home-composer-expanded verevon-panel-in' : 'verevon-home-composer verevon-panel-in'}>
-      <Show
-        when={props.activeTab === 'Chat'}
-        fallback={props.activeTab === 'Søk'
+      <Show when={props.activeTab !== 'Chat'}>
+        {props.activeTab === 'Søk'
           ? (
             <SearchPanel
               expanded={props.searchExpanded}
@@ -96,12 +97,16 @@ export function DashboardComposerPanel(props: {
               previewCollapsed={props.previewCollapsed}
             />
           )}
-      >
-        <DashboardComposer
-          message={props.message}
-          onLaunchStart={props.onLaunchStart}
-          onMessageChange={props.onMessageChange}
-        />
+      </Show>
+      <Show when={props.persistentChat || props.activeTab === 'Chat'}>
+        <div hidden={props.activeTab !== 'Chat'}>
+          <DashboardComposer
+            compact={props.compactChat}
+            message={props.message}
+            onLaunchStart={props.onLaunchStart}
+            onMessageChange={props.onMessageChange}
+          />
+        </div>
       </Show>
     </div>
   )

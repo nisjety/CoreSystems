@@ -19,7 +19,7 @@ CREATE INDEX IF NOT EXISTS idx_user_settings_user_id ON user_settings(user_id);
 CREATE TABLE IF NOT EXISTS provider_accounts (
     id               UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     user_id          UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    provider         VARCHAR(50)  NOT NULL,  -- 'microsoft', 'google', 'github', etc.
+    provider         VARCHAR(50)  NOT NULL,  -- 'microsoft', 'google', 'GitHub', etc.
     provider_user_id VARCHAR(255) NOT NULL,  -- stable ID from the provider
     tenant_id        VARCHAR(255),           -- Microsoft AAD tenant / Google Workspace domain
     email            VARCHAR(255),           -- provider-side email (may differ from login email)

@@ -1,7 +1,7 @@
 -- 010_onboarding_state — server-side onboarding state for G3 + G16.
 --
 -- Today's onboarding flow (verevon's `onboarding-service.ts`) keeps the
--- multi-step wizard state in `localStorage`. That breaks two things:
+-- multistep wizard state in `localStorage`. That breaks two things:
 --   1. Refresh on a different device loses progress (G3).
 --   2. There is no server record of which step the user is on (G16) — the
 --      existing `restoreStepFromServer()` reads from `/api/user/preferences`

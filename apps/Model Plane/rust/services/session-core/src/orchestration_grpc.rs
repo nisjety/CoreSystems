@@ -419,6 +419,46 @@ pub(crate) fn plan_state_to_str(code: i32) -> Option<&'static str> {
     }
 }
 
+/// plan-gate §2.2's transition legality rule for `TransitionPlan`, factored
+/// out so it can be unit-tested without a database:
+///
+/// * Edits (`edited_steps` non-empty) are legal only when the plan is
+///   currently `PLAN_STATE_PROPOSED` — a plan already EXECUTING or terminal
+///   may have steps with real recorded outcomes, and rewriting them there
+///   would corrupt the audit trail an edited plan is supposed to strengthen.
+/// * `PLAN_STATE_APPROVED` is only reachable from `PLAN_STATE_PROPOSED` —
+///   approving IS granting the run authority to act on this plan, so it must
+///   come from a plan a human actually reviewed, never a bare DRAFT (zero
+///   steps) or an already-terminal plan.
+#[allow(clippy::result_large_err)]
+pub(crate) fn validate_plan_transition_legality(
+    prev_state: i32,
+    target_state: i32,
+    has_edits: bool,
+) -> Result<(), Status> {
+    if has_edits && prev_state != proto::PlanState::Proposed as i32 {
+        return Err(Status::failed_precondition(
+            "edited_steps can only be applied to a plan in PLAN_STATE_PROPOSED",
+        ));
+    }
+    if target_state == proto::PlanState::Approved as i32
+        && prev_state != proto::PlanState::Proposed as i32
+    {
+        return Err(Status::failed_precondition(
+            "a plan can only be approved from PLAN_STATE_PROPOSED",
+        ));
+    }
+    Ok(())
+}
+
+/// Whether an edit entry needs a newly minted step id, given the plan's
+/// existing step ids — true when `step_id` is empty OR does not match any
+/// existing step (a stale/foreign id is treated as "new" rather than
+/// silently failing, since an insert is always well-defined).
+fn plan_step_edit_is_new(step_id: &str, existing_ids: &std::collections::HashSet<&str>) -> bool {
+    step_id.is_empty() || !existing_ids.contains(step_id)
+}
+
 pub(crate) fn plan_step_state_from_str(s: &str) -> i32 {
     match s {
         "pending" => proto::PlanStepState::Pending as i32,
@@ -1531,13 +1571,26 @@ impl OrchestrationCoreService for OrchestrationGrpc {
             let caller = identity(&request)?;
             authorize_operation(&caller, "orchestration:read")?;
             let req = request.into_inner();
-            if req.run_id.is_empty() {
-                return Err(Status::invalid_argument("run_id is required"));
-            }
-            authorize_run_owner(&self.pool, &caller, &req.run_id, OwnerIntent::Read).await?;
-            let plan_rows = store::list_plans_by_run(&self.pool, &req.run_id)
-                .await
-                .map_err(|e| Status::internal(e.to_string()))?;
+            // `thread_id` is the plan-gate context-injection path (§2.4): the
+            // executing run needs the thread's latest APPROVED plan, which was
+            // proposed and approved on a DIFFERENT (earlier, plan-mode) run of
+            // the same thread, so a run_id-scoped lookup cannot find it.
+            let plan_rows = if !req.run_id.is_empty() {
+                authorize_run_owner(&self.pool, &caller, &req.run_id, OwnerIntent::Read).await?;
+                store::list_plans_by_run(&self.pool, &req.run_id)
+                    .await
+                    .map_err(|e| Status::internal(e.to_string()))?
+            } else if !req.thread_id.is_empty() {
+                authorize_thread_owner(&self.pool, &caller, &req.thread_id, OwnerIntent::Read)
+                    .await?;
+                store::list_plans_by_thread_full(&self.pool, &req.thread_id)
+                    .await
+                    .map_err(|e| Status::internal(e.to_string()))?
+            } else {
+                return Err(Status::invalid_argument(
+                    "either run_id or thread_id is required",
+                ));
+            };
             let mut plans = Vec::with_capacity(plan_rows.len());
             for row in &plan_rows {
                 let plan = assemble_plan(&self.pool, row)
@@ -1606,6 +1659,39 @@ impl OrchestrationCoreService for OrchestrationGrpc {
                 .ok_or_else(|| Status::not_found("plan not found"))?;
             let prev_state = plan_state_from_str(&before.status);
 
+            validate_plan_transition_legality(
+                prev_state,
+                req.target_state,
+                !req.edited_steps.is_empty(),
+            )?;
+
+            if !req.edited_steps.is_empty() {
+                let existing = store::list_steps_by_plan_full(&self.pool, &req.plan_id)
+                    .await
+                    .map_err(|e| Status::internal(e.to_string()))?;
+                let existing_ids: std::collections::HashSet<&str> =
+                    existing.iter().map(|s| s.id.as_str()).collect();
+                let mut resolved = Vec::with_capacity(req.edited_steps.len());
+                for edit in &req.edited_steps {
+                    let is_new = plan_step_edit_is_new(&edit.step_id, &existing_ids);
+                    let id = if is_new {
+                        format!("step_{}", mp_ids::new_ulid())
+                    } else {
+                        edit.step_id.clone()
+                    };
+                    resolved.push(store::PlanStepEditRow {
+                        id,
+                        is_new,
+                        title: edit.title.clone(),
+                        operation: edit.operation.clone(),
+                        removed: edit.removed,
+                    });
+                }
+                store::apply_plan_edits(&self.pool, &req.plan_id, &resolved)
+                    .await
+                    .map_err(|e| Status::internal(e.to_string()))?;
+            }
+
             store::update_plan_status(&self.pool, &req.plan_id, new_status)
                 .await
                 .map_err(|e| Status::internal(e.to_string()))?;
@@ -1641,6 +1727,123 @@ impl OrchestrationCoreService for OrchestrationGrpc {
         }
         .await;
         record_metrics("transition_plan", started, result.is_ok());
+        result
+    }
+
+    /// plan-gate §2.1-2.2: create a plan directly in `PLAN_STATE_PROPOSED`
+    /// with real steps, called by execution-core's `plan.propose` control
+    /// tool. Distinct from the zero-step `draft` plan auto-created at run
+    /// start for the retrospective execution log — this is a SEPARATE plan
+    /// row a user actually reviews, so it gets its own ULID-based id rather
+    /// than the deterministic `plan_<run_id>` the run-start plan uses.
+    async fn propose_plan(
+        &self,
+        request: Request<proto::ProposePlanRequest>,
+    ) -> Result<Response<proto::ProposePlanResponse>, Status> {
+        let started = Instant::now();
+        let result: Result<Response<proto::ProposePlanResponse>, Status> = async {
+            let caller = identity(&request)?;
+            authorize_operation(&caller, "orchestration:write")?;
+            let req = request.into_inner();
+            if req.thread_id.is_empty() {
+                return Err(Status::invalid_argument("thread_id is required"));
+            }
+            if req.org_id.is_empty() || req.user_id.is_empty() {
+                return Err(Status::invalid_argument("org_id and user_id are required"));
+            }
+            if req.summary.trim().is_empty() {
+                return Err(Status::invalid_argument("summary is required"));
+            }
+            if req.steps.is_empty() {
+                return Err(Status::invalid_argument("at least one step is required"));
+            }
+            // Owner check against the THREAD's own durable owner row, not the
+            // request body's claimed org_id/user_id — the same defense the
+            // sibling `attach_subagent` RPC uses, so a caller cannot forge
+            // tenancy by lying in the request.
+            authorize_thread_owner(&self.pool, &caller, &req.thread_id, OwnerIntent::Mutate)
+                .await?;
+            caller.authorize_org(&req.org_id)?;
+
+            let plan_id = format!("plan_{}", mp_ids::new_ulid());
+            // `metadata.author` records the caller's stated author label
+            // ("agent" for a model-proposed plan). It is deliberately NOT
+            // written into the `user_id` column: that column doubles as the
+            // plan's owner for `authorize_plan_owner` (every read/transition
+            // check), so it must hold the real end user, exactly like every
+            // other plan today (`create_plan`'s `author: row.user_id.clone()`
+            // already reflects this — `Plan.author` has never meant "who
+            // authored the text", only "who owns it").
+            let mut metadata = serde_json::Map::new();
+            if !req.author.is_empty() {
+                metadata.insert("author".to_owned(), JsonValue::String(req.author.clone()));
+            }
+            if !req.supersedes.is_empty() {
+                metadata.insert(
+                    "supersedes".to_owned(),
+                    JsonValue::String(req.supersedes.clone()),
+                );
+            }
+            let steps: Vec<(String, String, String)> = req
+                .steps
+                .iter()
+                .map(|s| {
+                    (
+                        format!("step_{}", mp_ids::new_ulid()),
+                        s.title.clone(),
+                        s.operation.clone(),
+                    )
+                })
+                .collect();
+
+            store::create_proposed_plan(
+                &self.pool,
+                &plan_id,
+                &req.thread_id,
+                (!req.run_id.is_empty()).then_some(req.run_id.as_str()),
+                &req.summary,
+                &req.org_id,
+                &req.user_id,
+                &steps,
+                &JsonValue::Object(metadata),
+                (!req.supersedes.is_empty()).then_some(req.supersedes.as_str()),
+            )
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+            let row = store::get_plan(&self.pool, &plan_id)
+                .await
+                .map_err(|e| Status::internal(e.to_string()))?
+                .ok_or_else(|| Status::internal("plan vanished after insert"))?;
+            let plan = assemble_plan(&self.pool, &row)
+                .await
+                .map_err(|e| Status::internal(e.to_string()))?;
+
+            // Same live-visibility wiring `transition_plan` already gives
+            // every state change, so a run-console panel or future live
+            // listener sees a proposed plan the moment it exists, not only
+            // once it is later approved or rejected.
+            broadcast_event(
+                &self.events_tx,
+                &self.replay,
+                proto::OrchestrationEvent {
+                    event_id: String::new(),
+                    at: Some(now_ts()),
+                    event: Some(orchestration_event::Event::PlanTransitioned(
+                        orchestration_event::PlanTransitioned {
+                            plan_id: plan.id.clone(),
+                            run_id: plan.run_id.clone(),
+                            from: proto::PlanState::Unspecified as i32,
+                            to: proto::PlanState::Proposed as i32,
+                        },
+                    )),
+                },
+            );
+
+            Ok(Response::new(proto::ProposePlanResponse { plan: Some(plan) }))
+        }
+        .await;
+        record_metrics("propose_plan", started, result.is_ok());
         result
     }
 
@@ -2838,6 +3041,73 @@ mod tests {
             proto::PlanState::Unspecified as i32
         );
         assert_eq!(plan_state_to_str(0), None);
+    }
+
+    // -----------------------------------------------------------------
+    // plan-gate: transition legality + step-edit id resolution
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn proposed_to_approved_with_edits_is_accepted() {
+        assert!(validate_plan_transition_legality(
+            proto::PlanState::Proposed as i32,
+            proto::PlanState::Approved as i32,
+            true,
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn approved_from_any_state_other_than_proposed_is_refused() {
+        for other in [
+            proto::PlanState::Draft,
+            proto::PlanState::Executing,
+            proto::PlanState::Completed,
+            proto::PlanState::Rejected,
+            proto::PlanState::Superseded,
+        ] {
+            let error = validate_plan_transition_legality(
+                other as i32,
+                proto::PlanState::Approved as i32,
+                false,
+            )
+            .expect_err(&format!("{other:?} -> APPROVED must be refused"));
+            assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+        }
+    }
+
+    #[test]
+    fn executing_and_completed_plans_reject_further_edited_steps() {
+        for terminalish in [proto::PlanState::Executing, proto::PlanState::Completed] {
+            let error = validate_plan_transition_legality(
+                terminalish as i32,
+                // Target state does not matter here — the edit itself is
+                // what must be refused, e.g. an attempt to append edits
+                // while also (re)rejecting an already-decided plan.
+                proto::PlanState::Rejected as i32,
+                true,
+            )
+            .expect_err(&format!("{terminalish:?} must refuse edited_steps"));
+            assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+        }
+    }
+
+    #[test]
+    fn proposed_to_rejected_needs_no_edits_and_is_accepted() {
+        assert!(validate_plan_transition_legality(
+            proto::PlanState::Proposed as i32,
+            proto::PlanState::Rejected as i32,
+            false,
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn plan_step_edit_resolves_new_vs_existing_ids() {
+        let existing: std::collections::HashSet<&str> = ["step_1", "step_2"].into_iter().collect();
+        assert!(!plan_step_edit_is_new("step_1", &existing));
+        assert!(plan_step_edit_is_new("", &existing));
+        assert!(plan_step_edit_is_new("step_unknown", &existing));
     }
 
     #[test]

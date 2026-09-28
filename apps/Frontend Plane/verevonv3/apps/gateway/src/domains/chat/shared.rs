@@ -202,6 +202,49 @@ pub(crate) async fn session_token(
     .await
 }
 
+/// True once `inject_personal_thread_context` has attached Control-issued
+/// Space authority to this turn. Only the two keys that function itself
+/// inserts count; a bare `space_ref` is the browser's *selection*, which that
+/// same function consumes before Control is ever asked, so it is never
+/// authority. Meaningful only AFTER injection has run — before it, forged
+/// copies of these keys may still be present.
+pub(crate) fn is_space_scoped_turn(body: &Value) -> bool {
+    ["space_context", "space_append_context"]
+        .iter()
+        .any(|key| matches!(body.get(*key), Some(Value::Object(_))))
+}
+
+/// Mint the interactive `aud=sandbox-manager` token — the ninth delegated
+/// user bearer — for a Space-scoped turn only. sandbox-manager's `AcquireLease`
+/// binds the Space capability decision to the CALLER's verified identity,
+/// which must be the Space member the decision names, so execution-core
+/// cannot present its own service credential for that one call; it presents
+/// this instead, and this alone (every later lease RPC uses its own token).
+/// Best-effort like `data_plane_token`: a missing credential degrades one
+/// tool (`code_interpreter` in a Space) — execution-core refuses that step
+/// rather than falling back to an unscoped workspace — never the whole turn.
+/// Nothing is minted for a non-Space turn, so the common path pays no extra
+/// auth-core round-trip. See
+/// apps/Frontend Plane/verevonv3/docs/S3_3_DURABLE_WORKSPACE_DESIGN_2026-09-11.md
+/// §3.5 phase B.2.
+pub(crate) async fn sandbox_token(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+    body: &Value,
+) -> Option<String> {
+    if !is_space_scoped_turn(body) {
+        return None;
+    }
+    get_model_service_token(
+        state,
+        &user.user_id,
+        &cookie_header(headers),
+        ModelServiceAudience::SandboxManager,
+    )
+    .await
+}
+
 async fn required_token(
     state: &AppState,
     user: &AuthenticatedUser,
@@ -217,6 +260,50 @@ pub(crate) async fn required_capability_token(
     headers: &HeaderMap,
 ) -> Result<String, RequiredAudienceTokenError> {
     required_token(state, user, headers, ModelServiceAudience::CapabilityCore).await
+}
+
+/// Best-effort `aud=capability-core` bearer for a chat-stream call site.
+///
+/// Unlike `required_inference_token`/`required_execution_token`/etc above —
+/// whose callers fail the whole turn on a mint error — a chat stream must
+/// keep working when capability-core is briefly unavailable. model-gateway's
+/// moderation.rs already fails closed (redacts everything) when this header
+/// is absent, so degrading to `None` here is safe; it only costs the org's
+/// configured PII/injection-defense policy for this one turn, instead of
+/// leaving that policy permanently unreachable from chat by construction
+/// (see apps/verevon-web/plans/system-audits/CHAT_PARITY_AUDIT_2026-09-15.md §3.9, finding F-14).
+pub(crate) async fn best_effort_capability_token(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+) -> Option<String> {
+    match required_capability_token(state, user, headers).await {
+        Ok(token) => Some(token),
+        Err(error) => {
+            tracing::warn!(
+                audience = error.audience.claim(),
+                "capability bearer mint failed for chat stream; PII/injection-defense policy lookup falls back to fail-closed redaction"
+            );
+            None
+        }
+    }
+}
+
+/// The user-bound `aud=sandbox-manager` credential, minted PER REQUEST for
+/// the Work tab (S4.2 §7).
+///
+/// Deliberately not `sandbox_token` below, which only fires inside a
+/// Control-injected turn (`is_space_scoped_turn`) — the Work tab is not a
+/// turn, so that helper would return nothing and the section would degrade to
+/// a gap row forever. This mints the same audience the chat path does, on the
+/// same per-user basis, for a caller that has a room open rather than a
+/// message in flight.
+pub(crate) async fn required_sandbox_token(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+) -> Result<String, RequiredAudienceTokenError> {
+    required_token(state, user, headers, ModelServiceAudience::SandboxManager).await
 }
 
 pub(crate) async fn required_cost_token(
@@ -306,6 +393,7 @@ pub(crate) async fn proxy_model_json(
         None,
         None,
         None,
+        None,
         user,
     )
     .await
@@ -340,6 +428,7 @@ pub(crate) async fn proxy_model_json_with_data_plane(
         cost_bearer,
         session_bearer,
         None,
+        None,
         user,
     )
     .await
@@ -360,6 +449,7 @@ pub(crate) async fn proxy_model_json_with_data_plane_request_timeout(
     execution_bearer: Option<&str>,
     cost_bearer: Option<&str>,
     session_bearer: Option<&str>,
+    sandbox_bearer: Option<&str>,
     request_timeout: Option<Duration>,
     user: &AuthenticatedUser,
 ) -> (StatusCode, Json<Value>) {
@@ -375,6 +465,7 @@ pub(crate) async fn proxy_model_json_with_data_plane_request_timeout(
         execution_bearer,
         cost_bearer,
         session_bearer,
+        sandbox_bearer,
         request_timeout,
         user,
     )
@@ -403,6 +494,38 @@ pub(crate) async fn proxy_model_json_with_capability(
         None,
         None,
         None,
+        None,
+        user,
+    )
+    .await
+}
+
+/// Proxy to model-gateway carrying the sandbox-manager delegation, for the
+/// Work tab's process reads. The same slot the chat path's Space-scoped turn
+/// uses; the difference is only which caller fills it.
+pub(crate) async fn proxy_model_json_with_sandbox(
+    state: &AppState,
+    method: Method,
+    url: &str,
+    body: Option<Value>,
+    bearer_token: Option<&str>,
+    sandbox_bearer: Option<&str>,
+    user: &AuthenticatedUser,
+) -> (StatusCode, Json<Value>) {
+    proxy_model_json_with_delegations(
+        state,
+        method,
+        url,
+        body,
+        bearer_token,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        sandbox_bearer,
+        None,
         user,
     )
     .await
@@ -429,6 +552,45 @@ pub(crate) async fn proxy_model_json_with_session(
         None,
         None,
         session_bearer,
+        None,
+        None,
+        user,
+    )
+    .await
+}
+
+/// Same as `proxy_model_json_with_session`, plus the `aud=capability-core`
+/// bearer — needed on the durable browser-event replay read (see F-14,
+/// apps/verevon-web/plans/system-audits/CHAT_PARITY_AUDIT_2026-09-15.md §3.9) so the org's PII/
+/// injection-defense policy is reachable there too, not just on the live
+/// stream. A dedicated wrapper rather than adding the parameter to
+/// `proxy_model_json_with_session` itself: that function has many unrelated
+/// callers outside the chat-stream path that have no capability bearer to
+/// give it.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn proxy_model_json_with_session_and_capability(
+    state: &AppState,
+    method: Method,
+    url: &str,
+    body: Option<Value>,
+    bearer_token: Option<&str>,
+    session_bearer: Option<&str>,
+    capability_bearer: Option<&str>,
+    user: &AuthenticatedUser,
+) -> (StatusCode, Json<Value>) {
+    proxy_model_json_with_delegations(
+        state,
+        method,
+        url,
+        body,
+        bearer_token,
+        None,
+        capability_bearer,
+        None,
+        None,
+        None,
+        session_bearer,
+        None,
         None,
         user,
     )
@@ -457,6 +619,7 @@ pub(crate) async fn proxy_model_json_with_inference(
         None,
         None,
         None,
+        None,
         user,
     )
     .await
@@ -475,6 +638,8 @@ async fn proxy_model_json_with_delegations(
     execution_bearer: Option<&str>,
     cost_bearer: Option<&str>,
     session_bearer: Option<&str>,
+    // Present only for a Space-scoped turn (see `sandbox_token`).
+    sandbox_bearer: Option<&str>,
     request_timeout: Option<Duration>,
     user: &AuthenticatedUser,
 ) -> (StatusCode, Json<Value>) {
@@ -522,6 +687,9 @@ async fn proxy_model_json_with_delegations(
     if let Some(value) = session_bearer.and_then(data_plane_authorization_value) {
         req = req.header("x-session-authorization", value);
     }
+    if let Some(value) = sandbox_bearer.and_then(data_plane_authorization_value) {
+        req = req.header("x-sandbox-authorization", value);
+    }
 
     if let Some(b) = body {
         req = req.json(&b);
@@ -567,8 +735,10 @@ mod tests {
 
     use super::{
         apply_org_zdr_posture, data_plane_authorization_value, delegated_auth_unavailable,
-        dev_bypass_model_token, normalized_model_body, proxy_model_json_with_data_plane,
-        proxy_model_json_with_data_plane_request_timeout, proxy_model_json_with_session,
+        dev_bypass_model_token, is_space_scoped_turn, normalized_model_body,
+        proxy_model_json_with_data_plane, proxy_model_json_with_data_plane_request_timeout,
+        proxy_model_json_with_session, proxy_model_json_with_session_and_capability,
+        sandbox_token,
     };
 
     fn test_state(allow_dev_auth_bypass: bool) -> AppState {
@@ -630,6 +800,15 @@ mod tests {
             studio_store: crate::domains::studio::StudioStore::new(),
             allow_dev_actor_headers: false,
             allow_dev_auth_bypass,
+            mail_task_ingest_service_token: "mail-task-test-secret-at-least-32-bytes".into(),
+            mail_task_rate_limiter: crate::rate_limit::RateLimiter::from_cache_with_rpm(
+                &ResultCache::disabled(),
+                20.0,
+            ),
+            mail_task_nats_url: String::new(),
+            mail_task_nats_user: String::new(),
+            mail_task_nats_password: String::new(),
+            mail_task_pipeline: None,
         }
     }
 
@@ -673,6 +852,258 @@ mod tests {
         assert_eq!(already["zdr"], json!(true));
     }
 
+    #[test]
+    fn a_turn_is_space_scoped_only_once_control_issued_its_context() {
+        assert!(!is_space_scoped_turn(&json!({"content": "hello"})));
+        // A bare `space_ref` is the browser's SELECTION, not authority — it is
+        // exactly what `inject_personal_thread_context` consumes before Control
+        // is asked, so it must never be enough on its own.
+        assert!(!is_space_scoped_turn(
+            &json!({"content": "hello", "space_ref": "space-1"})
+        ));
+        assert!(!is_space_scoped_turn(&json!({"space_context": null})));
+        assert!(!is_space_scoped_turn(&json!({"space_context": "space-1"})));
+        assert!(is_space_scoped_turn(
+            &json!({"space_context": {"space_id": "space-1"}})
+        ));
+        assert!(is_space_scoped_turn(
+            &json!({"space_append_context": {"space_id": "space-1"}})
+        ));
+    }
+
+    #[tokio::test]
+    async fn the_sandbox_credential_is_minted_only_for_a_space_scoped_turn() {
+        use wiremock::{
+            matchers::{method, path},
+            Mock, MockServer, ResponseTemplate,
+        };
+
+        let auth_core = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/sandbox-manager/token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "token": "sandbox-token",
+                "expiresInSeconds": 300,
+            })))
+            .expect(1)
+            .mount(&auth_core)
+            .await;
+
+        let mut state = test_state(false);
+        state.auth_core_url = auth_core.uri();
+        let user = AuthenticatedUser {
+            user_id: "user-test".to_owned(),
+            user_email: "user@example.test".to_owned(),
+            user_name: "User Test".to_owned(),
+            user_image: None,
+            email_verified: true,
+            auth_role: Some("member".to_owned()),
+            active_org_id: Some("org-test".to_owned()),
+            authorized_membership: Some(crate::middleware::AuthorizedMembership {
+                organization_id: "org-test".to_owned(),
+                role: "member".to_owned(),
+            }),
+        };
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(
+            axum::http::header::COOKIE,
+            "better-auth.session=verified".parse().expect("cookie"),
+        );
+
+        // The common, non-Space turn: no credential, and — the point — no
+        // round-trip to auth-core at all.
+        assert!(
+            sandbox_token(&state, &user, &headers, &json!({"content": "hello"}))
+                .await
+                .is_none()
+        );
+        assert!(auth_core
+            .received_requests()
+            .await
+            .expect("recording enabled")
+            .is_empty());
+
+        assert_eq!(
+            sandbox_token(
+                &state,
+                &user,
+                &headers,
+                &json!({"content": "hello", "space_context": {"space_id": "space-1"}}),
+            )
+            .await
+            .as_deref(),
+            Some("sandbox-token")
+        );
+    }
+
+    #[tokio::test]
+    async fn chat_proxy_forwards_the_sandbox_credential_in_its_own_header() {
+        use reqwest::Method;
+        use wiremock::{
+            matchers::{header, method, path},
+            Mock, MockServer, ResponseTemplate,
+        };
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/invoke"))
+            .and(header("authorization", "Bearer model-token"))
+            .and(header("x-sandbox-authorization", "Bearer sandbox-token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"ok": true})))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let state = test_state(false);
+        let user = AuthenticatedUser {
+            user_id: "user-test".to_owned(),
+            user_email: "user@example.test".to_owned(),
+            user_name: "User Test".to_owned(),
+            user_image: None,
+            email_verified: true,
+            auth_role: Some("member".to_owned()),
+            active_org_id: Some("org-test".to_owned()),
+            authorized_membership: Some(crate::middleware::AuthorizedMembership {
+                organization_id: "org-test".to_owned(),
+                role: "member".to_owned(),
+            }),
+        };
+        let (status, _) = proxy_model_json_with_data_plane_request_timeout(
+            &state,
+            Method::POST,
+            &format!("{}/invoke", server.uri()),
+            Some(json!({"prompt": "hello"})),
+            Some("model-token"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some("sandbox-token"),
+            None,
+            &user,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        // Absent credential, absent header — never an empty `Bearer `.
+        let (_, _) = proxy_model_json_with_data_plane_request_timeout(
+            &state,
+            Method::POST,
+            &format!("{}/invoke", server.uri()),
+            Some(json!({"prompt": "hello"})),
+            Some("model-token"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            &user,
+        )
+        .await;
+        let requests = server.received_requests().await.expect("recording enabled");
+        assert_eq!(requests.len(), 2);
+        assert!(!requests[1].headers.iter().any(|(name, _)| name
+            .as_str()
+            .eq_ignore_ascii_case("x-sandbox-authorization")));
+    }
+
+    #[tokio::test]
+    async fn sse_proxy_forwards_the_sandbox_credential_in_its_own_header() {
+        use reqwest::Method;
+        use wiremock::{
+            matchers::{header, method, path},
+            Mock, MockServer, ResponseTemplate,
+        };
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/invoke/stream"))
+            .and(header("authorization", "Bearer model-token"))
+            .and(header("x-sandbox-authorization", "Bearer sandbox-token"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string("data: {}\n\n"),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let state = test_state(false);
+        let response = crate::upstream::proxy_sse_stream_with_data_plane(
+            &state,
+            Method::POST,
+            &format!("{}/invoke/stream", server.uri()),
+            Some(json!({"content": "hello"})),
+            Some("model-token"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some("sandbox-token"),
+            None,
+            None,
+            false,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    // F-14 (apps/verevon-web/plans/system-audits/CHAT_PARITY_AUDIT_2026-09-15.md §3.9): `stream_chat` is the
+    // live chat-turn path — this confirms a successfully minted capability
+    // bearer reaches model-gateway on it as `x-capability-authorization`,
+    // which is what unblocks the org's PII/injection-defense policy lookup.
+    #[tokio::test]
+    async fn sse_proxy_forwards_the_capability_credential_in_its_own_header() {
+        use reqwest::Method;
+        use wiremock::{
+            matchers::{header, method, path},
+            Mock, MockServer, ResponseTemplate,
+        };
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/invoke/stream"))
+            .and(header("authorization", "Bearer model-token"))
+            .and(header("x-capability-authorization", "Bearer capability-token"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string("data: {}\n\n"),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let state = test_state(false);
+        let response = crate::upstream::proxy_sse_stream_with_data_plane(
+            &state,
+            Method::POST,
+            &format!("{}/invoke/stream", server.uri()),
+            Some(json!({"content": "hello"})),
+            Some("model-token"),
+            None,
+            Some("capability-token"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            false,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
     #[tokio::test]
     async fn session_proxy_forwards_dedicated_credential_in_separate_header() {
         use reqwest::Method;
@@ -712,6 +1143,61 @@ mod tests {
             None,
             Some("model-token"),
             Some("session-token"),
+            &user,
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+    }
+
+    // F-14 (apps/verevon-web/plans/system-audits/CHAT_PARITY_AUDIT_2026-09-15.md §3.9): the chat-stream call
+    // sites must forward `x-capability-authorization` on a successful mint so
+    // model-gateway's moderation.rs can consult the org's actual PII/
+    // injection-defense policy instead of always failing closed. This exercises
+    // `run_events_replay`'s proxy function directly, the same way
+    // `session_proxy_forwards_dedicated_credential_in_separate_header` above
+    // exercises the plain session-only variant.
+    #[tokio::test]
+    async fn session_proxy_with_capability_forwards_both_credentials_in_separate_headers() {
+        use reqwest::Method;
+        use wiremock::{
+            matchers::{header, method, path},
+            Mock, MockServer, ResponseTemplate,
+        };
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/events/replay"))
+            .and(header("authorization", "Bearer model-token"))
+            .and(header("x-session-authorization", "Bearer session-token"))
+            .and(header("x-capability-authorization", "Bearer capability-token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"ok": true})))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let state = test_state(false);
+        let user = AuthenticatedUser {
+            user_id: "user-test".to_owned(),
+            user_email: "user@example.test".to_owned(),
+            user_name: "User Test".to_owned(),
+            user_image: None,
+            email_verified: true,
+            auth_role: Some("member".to_owned()),
+            active_org_id: Some("org-test".to_owned()),
+            authorized_membership: Some(crate::middleware::AuthorizedMembership {
+                organization_id: "org-test".to_owned(),
+                role: "member".to_owned(),
+            }),
+        };
+        let (status, _) = proxy_model_json_with_session_and_capability(
+            &state,
+            Method::GET,
+            &format!("{}/events/replay", server.uri()),
+            None,
+            Some("model-token"),
+            Some("session-token"),
+            Some("capability-token"),
             &user,
         )
         .await;
@@ -831,6 +1317,7 @@ mod tests {
             None,
             None,
             None,
+            None,
             Some(Duration::from_millis(250)),
             &user,
         )
@@ -880,6 +1367,7 @@ mod tests {
             Method::POST,
             &format!("{}/timed-out-invoke", server.uri()),
             Some(json!({"prompt": "hello"})),
+            None,
             None,
             None,
             None,

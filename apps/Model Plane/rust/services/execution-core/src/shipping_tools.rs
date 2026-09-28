@@ -557,6 +557,9 @@ fn render_quotes(value: &Value) -> String {
             .and_then(Value::as_str)
             .unwrap_or("NOK");
         let transit = q.get("transit_days").and_then(Value::as_i64).unwrap_or(-1);
+        let environment = q.get("environment").and_then(Value::as_str).unwrap_or("unknown");
+        let quoted_at = q.get("quoted_at").and_then(Value::as_str).unwrap_or("unavailable");
+        let package_count = q.get("package_count").and_then(Value::as_u64);
         let eta = q
             .get("estimated_delivery")
             .and_then(Value::as_str)
@@ -578,6 +581,11 @@ fn render_quotes(value: &Value) -> String {
             cents / 100,
             (cents % 100).unsigned_abs()
         );
+        let _ = write!(s, "; environment={environment}; quoted_at={quoted_at}; package_count={}",
+            package_count.map_or_else(|| "unverified".to_owned(), |count| count.to_string()));
+        if environment != "production" {
+            s.push_str(" (not a verified production estimate)");
+        }
         if transit >= 0 {
             let _ = write!(s, ", {transit} day(s) transit");
         }
@@ -712,6 +720,22 @@ mod tests {
             render_quotes(&value),
             "No carrier returned a quote for this shipment."
         );
+    }
+
+    #[test]
+    fn quote_provenance_survives_model_rendering() {
+        for environment in ["production", "sandbox", "mock", "unknown"] {
+            let value = serde_json::json!({"quotes": [{
+                "carrier_name": "Carrier", "service_name": "Parcel",
+                "price": {"amount_cents": 12345, "currency": "NOK"},
+                "environment": environment, "quoted_at": "2026-09-19T12:00:00Z",
+                "package_count": 1
+            }]});
+            let output = render_quotes(&value);
+            assert!(output.contains(&format!("environment={environment}")));
+            assert!(output.contains("quoted_at=2026-09-19T12:00:00Z; package_count=1"));
+            assert_eq!(output.contains("not a verified production estimate"), environment != "production");
+        }
     }
 
     #[test]

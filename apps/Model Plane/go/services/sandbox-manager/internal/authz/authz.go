@@ -50,9 +50,31 @@ func Authorize(principal authctx.Principal, method string, request any) error {
 	}
 	required := ScopeRead
 	switch method {
-	case "/model_plane.v1.SandboxManager/AcquireLease", "/model_plane.v1.SandboxManager/ReleaseLease", "/model_plane.v1.SandboxManager/SnapshotSandbox":
+	// A confirmed pre-existing bug, found and fixed here (2026-09-12, S3.3
+	// step 3.5.C design doc §8 item 3.5.C): ActivateLease was never listed
+	// in this switch, so any call to it through this real interceptor was
+	// refused with "unknown sandbox-manager method" for any principal,
+	// dormant only because nothing had ever called it that way (every
+	// existing test bypasses the interceptor by calling the Server method
+	// directly). 3.5.C gives it its first real caller.
+	case "/model_plane.v1.SandboxManager/AcquireLease",
+		"/model_plane.v1.SandboxManager/ReleaseLease",
+		"/model_plane.v1.SandboxManager/SnapshotSandbox",
+		"/model_plane.v1.SandboxManager/ActivateLease",
+		"/model_plane.v1.SandboxManager/PromoteWorkspace",
+		// S4.2 process registry writes. Listed here in the same commit that
+		// added the RPCs, for the reason the comment above records.
+		"/model_plane.v1.SandboxManager/RegisterProcess",
+		"/model_plane.v1.SandboxManager/UpdateProcessState",
+		"/model_plane.v1.SandboxManager/AppendProcessOutput",
+		"/model_plane.v1.SandboxManager/ReconcileProcesses":
 		required = ScopeWrite
-	case "/model_plane.v1.SandboxManager/Health":
+	case "/model_plane.v1.SandboxManager/Health",
+		"/model_plane.v1.SandboxManager/GetWorkspaceManifest",
+		// S4.2 process registry reads.
+		"/model_plane.v1.SandboxManager/GetProcess",
+		"/model_plane.v1.SandboxManager/ListProcesses",
+		"/model_plane.v1.SandboxManager/ReadProcessOutput":
 	default:
 		return errors.New("unknown sandbox-manager method")
 	}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"shipping-core/internal/carrier"
 	"shipping-core/internal/modelplane"
@@ -94,6 +95,34 @@ func TestRecommend_HallucinatedCarrierCode_RejectedHonestly(t *testing.T) {
 	rec := Recommend(context.Background(), client, testReq(), testQuotes())
 	if rec.Available {
 		t.Fatal("expected Available=false for a carrier_code that wasn't quoted")
+	}
+}
+
+func TestRecommend_PreservesSelectedQuoteProvenance(t *testing.T) {
+	stamp := time.Date(2026, 9, 19, 12, 0, 0, 0, time.UTC)
+	quotes := testQuotes()
+	quotes[0].Environment = "mock"
+	quotes[0].IsMock = true
+	quotes[0].QuotedAt = stamp
+	quotes[0].PackageCount = 1
+	client := &fakeModelClient{configured: true, response: modelplane.InvokeResponse{
+		Content: `{"recommended_carrier_code":"mock-bring","reasoning":"Test quote only.","confidence":0.8}`,
+	}}
+	rec := Recommend(context.Background(), client, testReq(), quotes)
+	if !rec.Available || rec.Environment != "mock" || !rec.IsMock || !rec.QuotedAt.Equal(stamp) || rec.PackageCount != 1 || rec.RecommendedServiceName != "Bring Standard" {
+		t.Fatalf("quote provenance was lost: %+v", rec)
+	}
+	if !strings.Contains(client.gotPrompt, "environment=mock, package_count=1, quoted_at=2026-09-19T12:00:00Z") {
+		t.Fatal("model did not receive quote provenance")
+	}
+}
+
+func TestRecommend_UnquotedServiceRejected(t *testing.T) {
+	client := &fakeModelClient{configured: true, response: modelplane.InvokeResponse{
+		Content: `{"recommended_carrier_code":"ups","recommended_service_name":"Invented overnight","reasoning":"Fast.","confidence":0.8}`,
+	}}
+	if rec := Recommend(context.Background(), client, testReq(), testQuotes()); rec.Available {
+		t.Fatalf("unquoted service was recommended: %+v", rec)
 	}
 }
 

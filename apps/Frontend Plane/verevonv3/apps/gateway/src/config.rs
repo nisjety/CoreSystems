@@ -69,6 +69,15 @@ pub(crate) struct AppState {
     pub(crate) conversation_core_url: String,
     pub(crate) conversation_core_service_token: String,
     pub(crate) social_core_url: String,
+    /// Never read in production, and that is the point: video search used to
+    /// call SearXNG straight from the BFF, bypassing quarry-edge's router,
+    /// cache, host-diversity cap, org scoping and billing. That bypass is
+    /// closed — every search vertical now proxies through quarry-edge — and
+    /// `search_videos`' regression test keeps it closed by pointing this field
+    /// at a mock that mounts nothing and asserting the mock received no
+    /// request at all. The tripwire only works while the field still exists,
+    /// so it is deliberately retained rather than deleted with its warning.
+    #[allow(dead_code, reason = "tripwire for the closed direct-to-SearXNG bypass; see doc comment")]
     pub(crate) searxng_url: String,
     pub(crate) autocomplete_core_url: String,
     pub(crate) autocomplete_token: String,
@@ -94,6 +103,25 @@ pub(crate) struct AppState {
     pub(crate) studio_store: crate::domains::studio::StudioStore,
     pub(crate) allow_dev_actor_headers: bool,
     pub(crate) allow_dev_auth_bypass: bool,
+    /// "Forward an email to create a task" inbound pipeline (chat-wave2
+    /// mail-task spec, owner ruling 2026-09-28: Postmark inbound,
+    /// self-forward only). Empty token = the whole `/internal/mail-task/ingest`
+    /// route refuses every caller — off by default until integration-corev2's
+    /// matching `MAIL_TASK_GATEWAY_SERVICE_TOKEN` is provisioned alongside it.
+    pub(crate) mail_task_ingest_service_token: String,
+    /// Own low-ceiling limiter (mail-task runs are expensive execution-core
+    /// turns, not ordinary reads) sharing the fleet limiter's Dragonfly
+    /// backend but never its RPM budget. See `rate_limit.rs`'s
+    /// `from_cache_with_rpm`.
+    pub(crate) mail_task_rate_limiter: crate::rate_limit::RateLimiter,
+    pub(crate) mail_task_nats_url: String,
+    pub(crate) mail_task_nats_user: String,
+    pub(crate) mail_task_nats_password: String,
+    /// The actual "create the thread, post the synthesized turn, invoke
+    /// execution-core" step. Deliberately `None` in every production build
+    /// today -- see `domains/mail_task.rs`'s module doc for why this is a real
+    /// gap, not an oversight, and what unblocks it.
+    pub(crate) mail_task_pipeline: Option<std::sync::Arc<dyn crate::domains::mail_task::MailTaskPipeline>>,
 }
 
 pub(crate) async fn build_state() -> Result<AppState> {
@@ -225,11 +253,36 @@ pub(crate) async fn build_state() -> Result<AppState> {
         // Built before `cache` is moved into the struct below (literal fields
         // evaluate top-to-bottom, so this borrow happens first).
         rate_limiter: crate::rate_limit::RateLimiter::from_cache(&cache),
+        mail_task_rate_limiter: crate::rate_limit::RateLimiter::from_cache_with_rpm(
+            &cache,
+            mail_task_rate_limit_rpm(),
+        ),
         cache,
         studio_store: crate::domains::studio::StudioStore::new(),
         allow_dev_actor_headers: dev_only_flag("ALLOW_DEV_ACTOR_HEADERS"),
         allow_dev_auth_bypass: dev_only_flag("ALLOW_DEV_AUTH_BYPASS"),
+        mail_task_ingest_service_token: optional_env("MAIL_TASK_INGEST_SERVICE_TOKEN"),
+        mail_task_nats_url: optional_env("VEREVON_GATEWAY_MAIL_TASK_NATS_URL"),
+        mail_task_nats_user: optional_env("VEREVON_GATEWAY_MAIL_TASK_NATS_USER"),
+        mail_task_nats_password: optional_env("VEREVON_GATEWAY_MAIL_TASK_NATS_PASSWORD"),
+        // See the field doc comment: no production wiring yet.
+        mail_task_pipeline: None,
     })
+}
+
+/// `MAIL_TASK_RATE_LIMIT_PER_HOUR`, converted to the requests-per-minute unit
+/// `RateLimiter` uses. Deliberately low (spec §6, "an attacker who obtains a
+/// valid alias ... can drive unbounded execution-core spend") -- each mail-task
+/// run is a full execution-core turn, not an ordinary read.
+const DEFAULT_MAIL_TASK_RUNS_PER_HOUR: f64 = 20.0;
+
+fn mail_task_rate_limit_rpm() -> f64 {
+    let per_hour = env::var("MAIL_TASK_RATE_LIMIT_PER_HOUR")
+        .ok()
+        .and_then(|value| value.trim().parse::<f64>().ok())
+        .filter(|value| value.is_finite() && *value > 0.0)
+        .unwrap_or(DEFAULT_MAIL_TASK_RUNS_PER_HOUR);
+    per_hour / 60.0
 }
 
 fn standard_http_client() -> Result<reqwest::Client> {

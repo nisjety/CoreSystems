@@ -126,7 +126,7 @@ export function DashboardCardsRail(props: {
   )
 }
 
-function DashboardImageCard(props: {
+export function DashboardImageCard(props: {
   card: DashboardCard
   onPrompt: (card: DashboardCard) => void
 }) {
@@ -419,7 +419,7 @@ function InformationCardShell(props: {
   const title = () => i18n.tr(props.card.title, props.card.titleEn)
 
   return (
-    <div class="verevon-dashboard-card dashboard-info-card">
+    <div class="verevon-dashboard-card dashboard-info-card" data-information-card={props.card.id}>
       <div class="verevon-dashboard-card-label">
         {i18n.tr(props.card.category, props.card.categoryEn)}
       </div>

@@ -14,11 +14,44 @@
 //! Cheap (`DashMap` + `Instant`), no new deps. In-memory + single-replica today
 //! — promote the cache to session-core/Postgres for durable, cross-replica
 //! dedup later (same matrix-style note as `cancel_registry`).
+//!
+//! # SECURITY: the claim key is namespaced by verified identity
+//!
+//! `idempotency_key` is a *client-supplied* string and this registry is a
+//! process-global map shared by every tenant. Keying it on that string alone
+//! made a completed answer replayable by anyone who sent the same value: two
+//! users who both send `"retry-1"` (or any guessable key) collide, and the
+//! second receives the first user's `Claim::Cached` response — a cross-tenant
+//! disclosure of generated content, reachable without guessing a request id.
+//!
+//! [`claim`](IdempotencyRegistry::claim) therefore takes the verified org and
+//! user and derives the real key with [`scoped_idempotency_key`]. There is no
+//! unscoped entry point, so a caller cannot forget to namespace — the same
+//! "secure by construction" shape as `stream_buffer::scoped_stream_key`.
 
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
+
+/// Separator between the identity components of a claim key. ASCII unit
+/// separator, chosen to match `stream_buffer::KEY_SEPARATOR`.
+///
+/// The client-controlled component is deliberately **last**: the org and user
+/// are server-derived from verified claims, so a caller who smuggles a
+/// separator into their own `idempotency_key` only extends their own suffix
+/// and can never synthesize a different tenant's prefix.
+const KEY_SEPARATOR: char = '\u{1f}';
+
+/// Namespace a client idempotency key to the verified caller.
+///
+/// Deriving the key from identity means a caller in another org (or another
+/// user in the same org) computes a different key, misses, and proceeds with
+/// their own generation instead of replaying someone else's answer.
+#[must_use]
+pub fn scoped_idempotency_key(org_id: &str, user_id: &str, client_key: &str) -> String {
+    format!("{org_id}{KEY_SEPARATOR}{user_id}{KEY_SEPARATOR}{client_key}")
+}
 
 /// How long a completed result stays replayable for its key.
 const DONE_TTL: Duration = Duration::from_secs(600);
@@ -118,12 +151,20 @@ impl IdempotencyRegistry {
         })
     }
 
-    /// Claim `key` for a new request. See [`Claim`] for the three outcomes.
-    /// Expired `Done` entries and abandoned `Pending` claims are reclaimed.
-    pub fn claim(&self, key: &str) -> Claim {
-        if key.trim().is_empty() || key.len() > self.state.limits.max_key_bytes {
+    /// Claim `client_key` for a new request, namespaced to the verified caller.
+    /// See [`Claim`] for the three outcomes. Expired `Done` entries and
+    /// abandoned `Pending` claims are reclaimed.
+    ///
+    /// `org_id`/`user_id` MUST come from verified claims, never from the
+    /// request body — they are what keeps one tenant's cached answer
+    /// unreachable to another. See the module-level security note.
+    pub fn claim(&self, org_id: &str, user_id: &str, client_key: &str) -> Claim {
+        // Bound the *client* portion: the public 256-byte contract must not
+        // shrink because a long org/user prefix was prepended.
+        if client_key.trim().is_empty() || client_key.len() > self.state.limits.max_key_bytes {
             return Claim::Rejected(ClaimRejection::InvalidKey);
         }
+        let key = &scoped_idempotency_key(org_id, user_id, client_key);
         let now = Instant::now();
         let _admission = self
             .state
@@ -253,6 +294,9 @@ fn cached_value_bytes(value: &CachedInvoke) -> usize {
 mod tests {
     use super::*;
 
+    const ORG: &str = "org_A";
+    const USER: &str = "user_1";
+
     fn sample(id: &str) -> CachedInvoke {
         CachedInvoke {
             request_id: id.to_owned(),
@@ -265,12 +309,12 @@ mod tests {
     #[test]
     fn first_claim_proceeds_then_caches_on_commit() {
         let reg = IdempotencyRegistry::new();
-        match reg.claim("k1") {
+        match reg.claim(ORG, USER, "k1") {
             Claim::Proceed(guard) => guard.commit(sample("req-1")),
             _ => panic!("first claim must Proceed"),
         }
         // Second claim with the same key returns the cached result verbatim.
-        match reg.claim("k1") {
+        match reg.claim(ORG, USER, "k1") {
             Claim::Cached(v) => {
                 assert_eq!(v.request_id, "req-1");
                 assert_eq!(v.content, "hello");
@@ -283,11 +327,11 @@ mod tests {
     fn concurrent_duplicate_while_pending_is_in_flight() {
         let reg = IdempotencyRegistry::new();
         // held = still pending
-        let Claim::Proceed(_guard) = reg.claim("k2") else {
+        let Claim::Proceed(_guard) = reg.claim(ORG, USER, "k2") else {
             panic!("first claim must Proceed");
         };
         assert!(
-            matches!(reg.claim("k2"), Claim::InFlight),
+            matches!(reg.claim(ORG, USER, "k2"), Claim::InFlight),
             "a second claim while the first is in-flight is rejected"
         );
     }
@@ -296,25 +340,25 @@ mod tests {
     fn dropped_guard_without_commit_releases_the_claim() {
         let reg = IdempotencyRegistry::new();
         {
-            let Claim::Proceed(_guard) = reg.claim("k3") else {
+            let Claim::Proceed(_guard) = reg.claim(ORG, USER, "k3") else {
                 panic!("first claim must Proceed");
             };
             // guard dropped here without commit (simulates an errored request)
         }
         assert_eq!(reg.tracked(), 0, "abandoned claim is released on drop");
         // A retry after the error proceeds rather than seeing InFlight.
-        assert!(matches!(reg.claim("k3"), Claim::Proceed(_)));
+        assert!(matches!(reg.claim(ORG, USER, "k3"), Claim::Proceed(_)));
     }
 
     #[test]
     fn distinct_keys_do_not_interfere() {
         let reg = IdempotencyRegistry::new();
-        match reg.claim("a") {
+        match reg.claim(ORG, USER, "a") {
             Claim::Proceed(g) => g.commit(sample("req-a")),
             _ => panic!(),
         }
         assert!(
-            matches!(reg.claim("b"), Claim::Proceed(_)),
+            matches!(reg.claim(ORG, USER, "b"), Claim::Proceed(_)),
             "a different key is unaffected by another's cached result"
         );
     }
@@ -327,7 +371,7 @@ mod tests {
             max_cached_value_bytes: 64,
         });
         assert!(matches!(
-            reg.claim("abcde"),
+            reg.claim(ORG, USER, "abcde"),
             Claim::Rejected(ClaimRejection::InvalidKey)
         ));
         assert_eq!(reg.tracked(), 0);
@@ -340,21 +384,21 @@ mod tests {
             max_entries: 2,
             max_cached_value_bytes: 64,
         });
-        let Claim::Proceed(first) = reg.claim("first") else {
+        let Claim::Proceed(first) = reg.claim(ORG, USER, "first") else {
             panic!("first claim must proceed");
         };
-        let Claim::Proceed(_second) = reg.claim("second") else {
+        let Claim::Proceed(_second) = reg.claim(ORG, USER, "second") else {
             panic!("second claim must proceed");
         };
         assert!(
             matches!(
-                reg.claim("third"),
+                reg.claim(ORG, USER, "third"),
                 Claim::Rejected(ClaimRejection::CapacityExceeded)
             ),
             "a full registry must not silently run an unprotected duplicate"
         );
         drop(first);
-        assert!(matches!(reg.claim("third"), Claim::Proceed(_)));
+        assert!(matches!(reg.claim(ORG, USER, "third"), Claim::Proceed(_)));
     }
 
     #[test]
@@ -364,11 +408,81 @@ mod tests {
             max_entries: 2,
             max_cached_value_bytes: 8,
         });
-        let Claim::Proceed(guard) = reg.claim("key") else {
+        let Claim::Proceed(guard) = reg.claim(ORG, USER, "key") else {
             panic!("first claim must proceed");
         };
         guard.commit(sample("request-too-large"));
         assert_eq!(reg.tracked(), 0);
-        assert!(matches!(reg.claim("key"), Claim::Proceed(_)));
+        assert!(matches!(reg.claim(ORG, USER, "key"), Claim::Proceed(_)));
+    }
+    #[test]
+    fn another_orgs_identical_key_cannot_replay_a_cached_answer() {
+        let reg = IdempotencyRegistry::new();
+        // Tenant A completes a generation under a guessable key.
+        match reg.claim("org_A", "user_1", "retry-1") {
+            Claim::Proceed(g) => g.commit(sample("req-secret")),
+            _ => panic!("first claim must Proceed"),
+        }
+        // Tenant B sends the SAME client key. It must run its own generation,
+        // never receive A's cached content.
+        assert!(
+            matches!(reg.claim("org_B", "user_1", "retry-1"), Claim::Proceed(_)),
+            "a different org must not replay another tenant's cached answer"
+        );
+        // Same org, different user: also isolated.
+        assert!(
+            matches!(reg.claim("org_A", "user_2", "retry-1"), Claim::Proceed(_)),
+            "a different user must not replay another user's cached answer"
+        );
+        // The original owner still gets their own replay.
+        assert!(matches!(
+            reg.claim("org_A", "user_1", "retry-1"),
+            Claim::Cached(_)
+        ));
+    }
+
+    #[test]
+    fn another_orgs_identical_key_is_not_reported_in_flight() {
+        let reg = IdempotencyRegistry::new();
+        let Claim::Proceed(_held) = reg.claim("org_A", "user_1", "k") else {
+            panic!("first claim must Proceed");
+        };
+        // Without scoping this leaked existence: B learned A had a live request.
+        assert!(
+            matches!(reg.claim("org_B", "user_1", "k"), Claim::Proceed(_)),
+            "one tenant's in-flight key must not block or be observable by another"
+        );
+    }
+
+    #[test]
+    fn a_separator_in_the_client_key_cannot_forge_another_tenants_namespace() {
+        let reg = IdempotencyRegistry::new();
+        match reg.claim("org_A", "user_1", "k") {
+            Claim::Proceed(g) => g.commit(sample("req-secret")),
+            _ => panic!("first claim must Proceed"),
+        }
+        // Attacker in org_B smuggles separators trying to rebuild A's prefix.
+        let forged = format!("org_A{KEY_SEPARATOR}user_1{KEY_SEPARATOR}k");
+        assert!(
+            matches!(reg.claim("org_B", "user_2", &forged), Claim::Proceed(_)),
+            "the server-derived prefix leads, so a crafted key cannot impersonate"
+        );
+    }
+
+    #[test]
+    fn the_public_key_limit_is_measured_on_the_client_portion_only() {
+        let reg = IdempotencyRegistry::with_limits(RegistryLimits {
+            max_key_bytes: 8,
+            max_entries: 4,
+            max_cached_value_bytes: 64,
+        });
+        // A long org/user prefix must not consume the caller's key budget.
+        assert!(
+            matches!(
+                reg.claim("a-very-long-org-identifier", "a-very-long-user-id", "12345678"),
+                Claim::Proceed(_)
+            ),
+            "the prefix is server-side overhead, not part of the public limit"
+        );
     }
 }

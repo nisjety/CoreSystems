@@ -403,15 +403,18 @@ async fn fetch_memory_context(
 
 fn build_messages(memory_context: &[String], user_content: &str) -> Vec<ChatMessage> {
     let mut messages = Vec::with_capacity(2);
-    if !memory_context.is_empty() {
-        let joined = memory_context.join("\n---\n");
+    // Same block as the SSE path builds — one helper so the two cannot drift
+    // into framing the same recalled entries differently.
+    if let Some(block) = crate::memory_provenance::memory_context_block(memory_context) {
         messages.push(ChatMessage {
+            compaction_summary: String::new(),
             role: "system".to_owned(),
-            content: format!("Relevant memory:\n{joined}"),
+            content: block,
             name: String::new(),
         });
     }
     messages.push(ChatMessage {
+        compaction_summary: String::new(),
         role: "user".to_owned(),
         content: user_content.to_owned(),
         name: String::new(),
@@ -503,6 +506,7 @@ async fn publish_ingress_accepted(
 }
 
 /// Publish the per-request usage envelope (best-effort; publish failures are logged).
+#[allow(clippy::too_many_arguments)] // provenance and cost basis ride beside the usage counters
 async fn publish_usage_envelope(
     state: &AppState,
     request_id: &str,
@@ -512,6 +516,7 @@ async fn publish_usage_envelope(
     user_id: &str,
     zdr: bool,
     min_privacy_tier: i32,
+    cost_basis: crate::pricing::CostBasis,
 ) {
     if zdr {
         return;
@@ -543,6 +548,14 @@ async fn publish_usage_envelope(
             "provider_used": infer.provider_used.clone(),
             "residency": infer.residency.clone(),
             "min_privacy_tier": min_privacy_tier,
+            // Cache-token telemetry (native-compaction migration
+            // prerequisite): already folded into `input_tokens` above, but
+            // broken out so cache-hit rate and savings are queryable off the
+            // ledger.
+            "cache_read_input_tokens": infer.cache_read_input_tokens,
+            "cache_creation_input_tokens": infer.cache_creation_input_tokens,
+            // A subscription call must not be priced from API list prices.
+            "cost_basis": cost_basis.as_str(),
         }),
         zdr,
     };
@@ -850,6 +863,8 @@ impl ModelGateway for GatewayService {
             user_id,
             req.zdr,
             req.min_privacy_tier,
+            crate::pricing::CostBasis::of_route(&req.provider, &req.subscription_connection_id)
+                .served_by(&infer.provider_used),
         )
         .await;
 
@@ -1323,9 +1338,17 @@ impl ModelGateway for GatewayService {
         // this pair exists to remove.
         let granted_rung = req.granted_rung;
         let justification = req.justification.clone();
-        let resp =
-            coordinator::handle_exit_plan_mode(&self.state.plan_mode, &*self.state.publisher, req)
-                .await?;
+        // No plan-gate plan on this raw gRPC path — it predates plan-gate and
+        // carries no `plan_id` (sessions.proto's `ExitPlanModeRequest` stays
+        // untouched); `handle_exit_plan_mode` omits the field entirely rather
+        // than recording an empty one.
+        let resp = coordinator::handle_exit_plan_mode(
+            &self.state.plan_mode,
+            &*self.state.publisher,
+            req,
+            "",
+        )
+        .await?;
         // Exiting plan mode returns the run to 'execute' durably. Best-effort.
         // org_id is forwarded so session-core can org-scope the UPDATE.
         if !run_id.is_empty() && !org_id.is_empty() {
@@ -2315,6 +2338,9 @@ impl ModelGateway for GatewayService {
                 model: String::new(),
                 provider_hint: String::new(),
                 language: String::new(),
+                // Always false past the guard above; carried so inference-core
+                // applies the same posture if that guard is ever relaxed.
+                zdr: identity.effective_zdr(false),
             })?)
             .await?
             .into_inner();
@@ -2347,6 +2373,9 @@ impl ModelGateway for GatewayService {
                 model: String::new(),
                 provider_hint: String::new(),
                 language: req.language,
+                // Always false past the guard above; carried so inference-core
+                // applies the same posture if that guard is ever relaxed.
+                zdr: identity.effective_zdr(false),
             })?)
             .await?
             .into_inner();
@@ -2559,11 +2588,13 @@ impl ModelGateway for GatewayService {
             provider_hint: req.provider.clone(),
             messages: vec![
                 ChatMessage {
+                    compaction_summary: String::new(),
                     role: "system".to_owned(),
                     content: system_prompt,
                     name: String::new(),
                 },
                 ChatMessage {
+                    compaction_summary: String::new(),
                     role: "user".to_owned(),
                     content: user_prompt,
                     name: String::new(),
@@ -2892,6 +2923,7 @@ mod tests {
 
         async fn infer(&self, _: Request<InferRequest>) -> Result<Response<InferResponse>, Status> {
             Ok(Response::new(InferResponse {
+                compaction_summary: String::new(),
                 request_id: "req-ok".to_owned(),
                 content: "hello".to_owned(),
                 model_used: "mock".to_owned(),
@@ -2902,6 +2934,9 @@ mod tests {
                 residency: String::new(),
                 token_confidence: None,
                 tool_calls: Vec::new(),
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+                provider_timing: None,
             }))
         }
 
@@ -2911,6 +2946,7 @@ mod tests {
         ) -> Result<Response<Self::InferStreamStream>, Status> {
             Ok(Response::new(Box::pin(futures::stream::iter(vec![
                 Ok(InferChunk {
+                    compaction_summary: String::new(),
                     request_id: "req-stream".to_owned(),
                     delta: "hel".to_owned(),
                     done: false,
@@ -2922,8 +2958,12 @@ mod tests {
                     provider_used: String::new(),
                     residency: String::new(),
                     token_confidence: None,
+                    cache_read_input_tokens: 0,
+                    cache_creation_input_tokens: 0,
+                    provider_timing: None,
                 }),
                 Ok(InferChunk {
+                    compaction_summary: String::new(),
                     request_id: "req-stream".to_owned(),
                     delta: "lo".to_owned(),
                     done: true,
@@ -2935,6 +2975,9 @@ mod tests {
                     provider_used: String::new(),
                     residency: String::new(),
                     token_confidence: None,
+                    cache_read_input_tokens: 0,
+                    cache_creation_input_tokens: 0,
+                    provider_timing: None,
                 }),
             ]))))
         }
@@ -3498,6 +3541,20 @@ mod tests {
             ))
         }
 
+        // Not part of the persona spec — stubbed only so this mock keeps
+        // implementing the full `SessionCore` trait after another in-flight
+        // change added this RPC. Same "not needed in test" shape as every
+        // other stub in this block.
+        async fn prepare_user_owned_thread(
+            &self,
+            _: Request<mp_contracts::model_plane::v1::PrepareUserOwnedThreadRequest>,
+        ) -> Result<Response<mp_contracts::model_plane::v1::PrepareUserOwnedThreadResponse>, Status>
+        {
+            Err(Status::unimplemented(
+                "prepare_user_owned_thread not needed in test",
+            ))
+        }
+
         async fn complete_step(
             &self,
             _: Request<CompleteStepRequest>,
@@ -3822,6 +3879,21 @@ mod tests {
                 renewed_until: None,
                 already_terminal: false,
             }))
+        }
+
+        // The gRPC Invoke path still saves and terminalizes in two calls; only
+        // the SSE stream uses the atomic completion. Unimplemented, so a
+        // caller here fails loudly rather than appearing to save.
+        async fn complete_direct_run_with_message(
+            &self,
+            _: Request<mp_contracts::model_plane::v1::CompleteDirectRunWithMessageRequest>,
+        ) -> Result<
+            Response<mp_contracts::model_plane::v1::CompleteDirectRunWithMessageResponse>,
+            Status,
+        > {
+            Err(Status::unimplemented(
+                "the gRPC Invoke path does not use the atomic completion",
+            ))
         }
     }
 

@@ -1,0 +1,15 @@
+-- Persona spec (chat-wave2, 2026-09-28): the per-thread override of a
+-- user's global persona switch (persona.md §2.4). `NOT NULL DEFAULT true`
+-- so every existing thread row reads as "persona on" the instant this
+-- migration runs -- the same "absence == enabled" convention the BFF and
+-- model-gateway layers both assume, and consistent with `GetContextAssembly
+-- Response.persona_enabled` being `optional bool` specifically so an
+-- unmigrated replica never has to be treated as "disabled" (see that
+-- field's own proto comment for the zero-value rationale).
+--
+-- Migration numbering note: this repo's migrations ended at 0040 as of
+-- 2026-09-28; migration 0041 (`mail_task_thread_origin`) claimed the next
+-- number and its own comment anticipated persona claiming 0042 next (see
+-- chat-wave2-specs-2026-09-28/00-critique-and-sequence.md §1, Tier 3). This
+-- is that migration.
+ALTER TABLE threads ADD COLUMN persona_enabled BOOLEAN NOT NULL DEFAULT true;

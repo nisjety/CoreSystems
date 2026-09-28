@@ -14,8 +14,9 @@ import (
 	"github.com/I-Dacosta/AquatiqCMS/apps/user-service-go/internal/database"
 )
 
-var ErrInactiveOwnerMembership = errors.New("Space owner is not an active organization member")
+var ErrInactiveOwnerMembership = errors.New("space owner is not an active organization member")
 var ErrNoCurrentMembership = errors.New("no current Space membership")
+var ErrNoOrgEffectPolicy = errors.New("no Space effect policy for organization")
 
 // RegisteredSpace is Control's durable acknowledgement of an
 // Application-issued immutable Space reference.
@@ -68,10 +69,10 @@ func (r *Repository) Register(ctx context.Context, registration Registration) (*
 	defer func() { _ = tx.Rollback(ctx) }()
 
 	current, err := registeredSpaceForUpdate(ctx, tx, registration.SpaceRef)
-	if err != nil && err != pgx.ErrNoRows {
+	switch {
+	case err != nil && !errors.Is(err, pgx.ErrNoRows):
 		return nil, err
-	}
-	if err == pgx.ErrNoRows {
+	case errors.Is(err, pgx.ErrNoRows):
 		if registration.Lifecycle != LifecyclePendingRegistration {
 			return nil, fmt.Errorf("first Space lifecycle event must be pending_registration")
 		}
@@ -105,9 +106,9 @@ func (r *Repository) Register(ctx context.Context, registration Registration) (*
 		); err != nil {
 			return nil, fmt.Errorf("seed verified Space owner membership: %w", err)
 		}
-	} else {
+	default:
 		if current.OrgID != registration.OrgID || current.Kind != registration.Kind || current.OwnerPrincipalID != registration.OwnerPrincipalID {
-			return nil, fmt.Errorf("Space reference is already registered with a different organization, kind, or owner")
+			return nil, fmt.Errorf("space reference is already registered with a different organization, kind, or owner")
 		}
 		if registration.LifecycleRevision > current.ApplicationLifecycleRevision {
 			if err := tx.QueryRow(ctx, `
@@ -125,7 +126,7 @@ func (r *Repository) Register(ctx context.Context, registration Registration) (*
 				}
 			}
 		} else if registration.LifecycleRevision == current.ApplicationLifecycleRevision && current.RegistrationState != registrationState {
-			return nil, fmt.Errorf("Space lifecycle revision conflicts with registered authorization state")
+			return nil, fmt.Errorf("space lifecycle revision conflicts with registered authorization state")
 		}
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -169,7 +170,7 @@ func purgeControlSpaceProjections(ctx context.Context, tx pgx.Tx, spaceRef strin
 // its own deletion adapter and receipt.
 func (r *Repository) AuthorizeDeletion(ctx context.Context, request DeletionAuthorizationRequest) (DeletionAuthorizationReceipt, error) {
 	if r == nil || r.db == nil {
-		return DeletionAuthorizationReceipt{}, fmt.Errorf("Space authority repository unavailable")
+		return DeletionAuthorizationReceipt{}, fmt.Errorf("space authority repository unavailable")
 	}
 	if err := request.Validate(); err != nil {
 		return DeletionAuthorizationReceipt{}, err
@@ -190,14 +191,14 @@ func (r *Repository) AuthorizeDeletion(ctx context.Context, request DeletionAuth
 			return DeletionAuthorizationReceipt{}, fmt.Errorf("read existing Space deletion request: %w", err)
 		}
 		if spaceRef != request.SpaceRef || orgID != request.OrgID || ownerID != request.OwnerPrincipalID || idempotencyKey != request.IdempotencyKey {
-			return DeletionAuthorizationReceipt{}, fmt.Errorf("Space deletion request conflicts with immutable intent")
+			return DeletionAuthorizationReceipt{}, fmt.Errorf("space deletion request conflicts with immutable intent")
 		}
 		if err := tx.Commit(ctx); err != nil {
 			return DeletionAuthorizationReceipt{}, fmt.Errorf("commit Space deletion replay: %w", err)
 		}
 		return existing, nil
 	}
-	if err != pgx.ErrNoRows {
+	if !errors.Is(err, pgx.ErrNoRows) {
 		return DeletionAuthorizationReceipt{}, fmt.Errorf("lock Space deletion request: %w", err)
 	}
 
@@ -239,13 +240,13 @@ func (r *Repository) AuthorizeDeletion(ctx context.Context, request DeletionAuth
 // change creates immutable operator evidence, including an idempotent replay.
 func (r *Repository) UpsertDeletionPolicy(ctx context.Context, policy DeletionPolicy, actorPrincipalID string) (bool, error) {
 	if r == nil || r.db == nil {
-		return false, fmt.Errorf("Space authority repository unavailable")
+		return false, fmt.Errorf("space authority repository unavailable")
 	}
 	if err := policy.Validate(); err != nil {
 		return false, err
 	}
 	if strings.TrimSpace(actorPrincipalID) == "" {
-		return false, fmt.Errorf("Space deletion policy actor is required")
+		return false, fmt.Errorf("space deletion policy actor is required")
 	}
 	tx, err := r.db.Pool.Begin(ctx)
 	if err != nil {
@@ -283,13 +284,13 @@ func (r *Repository) UpsertDeletionPolicy(ctx context.Context, policy DeletionPo
 // create a hold, and records the operator action in the same transaction.
 func (r *Repository) ApplyLegalHold(ctx context.Context, hold LegalHold, actorPrincipalID string) (bool, error) {
 	if r == nil || r.db == nil {
-		return false, fmt.Errorf("Space authority repository unavailable")
+		return false, fmt.Errorf("space authority repository unavailable")
 	}
 	if err := hold.Validate(); err != nil {
 		return false, err
 	}
 	if strings.TrimSpace(actorPrincipalID) == "" {
-		return false, fmt.Errorf("Space legal hold actor is required")
+		return false, fmt.Errorf("space legal hold actor is required")
 	}
 	tx, err := r.db.Pool.Begin(ctx)
 	if err != nil {
@@ -329,10 +330,10 @@ func (r *Repository) ApplyLegalHold(ctx context.Context, hold LegalHold, actorPr
 // deletion request was blocked.
 func (r *Repository) ReleaseLegalHold(ctx context.Context, spaceRef, actorPrincipalID string) (bool, error) {
 	if r == nil || r.db == nil {
-		return false, fmt.Errorf("Space authority repository unavailable")
+		return false, fmt.Errorf("space authority repository unavailable")
 	}
 	if strings.TrimSpace(spaceRef) == "" || strings.TrimSpace(actorPrincipalID) == "" {
-		return false, fmt.Errorf("Space legal hold reference and actor are required")
+		return false, fmt.Errorf("space legal hold reference and actor are required")
 	}
 	tx, err := r.db.Pool.Begin(ctx)
 	if err != nil {
@@ -382,7 +383,7 @@ func (r *Repository) recordDeletionAuthorization(ctx context.Context, tx pgx.Tx,
 // aggregate and recipient-audience revisions, fencing old decisions.
 func (r *Repository) RegisterRecipientAudience(ctx context.Context, registration RecipientAudienceRegistration) (*RegisteredRecipientAudience, error) {
 	if r == nil || r.db == nil {
-		return nil, fmt.Errorf("Space authority repository unavailable")
+		return nil, fmt.Errorf("space authority repository unavailable")
 	}
 	if err := registration.Validate(); err != nil {
 		return nil, err
@@ -444,7 +445,7 @@ func (r *Repository) RegisterRecipientAudience(ctx context.Context, registration
 		}
 		return &existing, nil
 	}
-	if err != pgx.ErrNoRows {
+	if !errors.Is(err, pgx.ErrNoRows) {
 		return nil, fmt.Errorf("read recipient audience snapshot: %w", err)
 	}
 	var latestRevision *int64
@@ -499,7 +500,7 @@ func (r *Repository) RegisterRecipientAudience(ctx context.Context, registration
 	return &registered, nil
 }
 
-// RosterForSpace lists who is in a Space, for a caller who is in it themselves.
+// RosterForSpace returns the members of a Space, for a caller who is a member themselves.
 //
 // Membership is the gate: the roster of a room is only visible from inside it.
 // The same organization-membership backstop as the index applies, so someone
@@ -513,13 +514,13 @@ func (r *Repository) RegisterRecipientAudience(ctx context.Context, registration
 // it. Nothing here is a credential, an audience, or a decision.
 func (r *Repository) RosterForSpace(ctx context.Context, spaceRef, orgID, subjectID string) ([]RosterMember, error) {
 	if r == nil || r.db == nil {
-		return nil, fmt.Errorf("Space authority repository unavailable")
+		return nil, fmt.Errorf("space authority repository unavailable")
 	}
 	spaceRef = strings.TrimSpace(spaceRef)
 	orgID = strings.TrimSpace(orgID)
 	subjectID = strings.TrimSpace(subjectID)
 	if spaceRef == "" || orgID == "" || subjectID == "" {
-		return nil, fmt.Errorf("Space, organization and subject are required")
+		return nil, fmt.Errorf("space, organization and subject are required")
 	}
 	rows, err := r.db.Pool.Query(ctx, `
 		SELECT m.subject_type, m.subject_id, m.role, m.revision, COALESCE(u.name, '')
@@ -562,7 +563,7 @@ func (r *Repository) RosterForSpace(ctx context.Context, spaceRef, orgID, subjec
 //
 // This is the actor-filtered index: Control decides what a caller may see,
 // because Control owns memberships. Application can name and describe a Space,
-// but it must not be the thing that decides whether you are in it — a
+// but it must not be the thing that decides whether you are in it. A
 // projection can lag a revocation, and an index that lags is an index that
 // shows a room somebody was removed from.
 //
@@ -572,7 +573,7 @@ func (r *Repository) RosterForSpace(ctx context.Context, spaceRef, orgID, subjec
 // org check is the backstop that makes the sync's timing non-security-critical.
 func (r *Repository) SpacesForSubject(ctx context.Context, orgID, subjectID string) ([]SpaceIndexEntry, error) {
 	if r == nil || r.db == nil {
-		return nil, fmt.Errorf("Space authority repository unavailable")
+		return nil, fmt.Errorf("space authority repository unavailable")
 	}
 	orgID = strings.TrimSpace(orgID)
 	subjectID = strings.TrimSpace(subjectID)
@@ -615,8 +616,8 @@ func (r *Repository) SpacesForSubject(ctx context.Context, orgID, subjectID stri
 //
 // Subjects present are upserted active with their declared role. Subjects
 // absent are DEACTIVATED, not deleted: `space_memberships.active` exists so a
-// revocation stays auditable, and a delete would also drop the row's revision
-// history. Either way the subject stops resolving.
+// revocation stays auditable, and deleting the row would also drop its
+// revision history. Either way the subject stops resolving.
 //
 // # The owner is never revoked by absence
 //
@@ -625,7 +626,7 @@ func (r *Repository) SpacesForSubject(ctx context.Context, orgID, subjectID stri
 // (an organization list that does not happen to include the registrar, a
 // partially-built payload) would lock a Space's owner out of their own Space,
 // and nothing else in the system would restore it. Absence is not evidence of
-// intent to revoke ownership, so the owner is preserved unless the caller
+// intent to revoke ownership. The owner is preserved unless the caller
 // names them with a different role explicitly.
 //
 // # Revisions move only on real change
@@ -639,12 +640,12 @@ func (r *Repository) SpacesForSubject(ctx context.Context, orgID, subjectID stri
 // Space's org_id — the caller publishes a revocation event per subject so
 // other planes can invalidate resource-scoped authorization tied to this
 // Space, not just Control's own roster. org_id is returned rather than
-// re-derived from the caller's own identity because this endpoint's
-// principal (application-space-lifecycle) acts across every org's rosters,
-// not one verified-delegation org at a time.
+// re-derived from the caller's own identity. This endpoint's principal
+// (application-space-lifecycle) acts across every org's rosters, not one
+// verified-delegation org at a time.
 func (r *Repository) ReplaceMemberships(ctx context.Context, replacement MembershipReplacement) (*AuthorityRevision, []string, []string, string, error) {
 	if r == nil || r.db == nil {
-		return nil, nil, nil, "", fmt.Errorf("Space authority repository unavailable")
+		return nil, nil, nil, "", fmt.Errorf("space authority repository unavailable")
 	}
 	if err := replacement.Validate(); err != nil {
 		return nil, nil, nil, "", err
@@ -663,7 +664,7 @@ func (r *Repository) ReplaceMemberships(ctx context.Context, replacement Members
 		return nil, nil, nil, "", fmt.Errorf("lock Space for membership replacement: %w", err)
 	}
 	if space.RegistrationState != "active" {
-		return nil, nil, nil, "", fmt.Errorf("Space is not registered as active")
+		return nil, nil, nil, "", fmt.Errorf("space is not registered as active")
 	}
 	if space.Kind == KindPersonal {
 		// A personal Space has exactly one subject by construction. Letting a
@@ -688,10 +689,10 @@ func (r *Repository) ReplaceMemberships(ctx context.Context, replacement Members
 	declared := make(map[string]struct{}, len(replacement.Members)+1)
 	changed := false
 	// A subject reactivated here (previously active=FALSE, now rejoining)
-	// must have its earlier revocation event fully undone cross-plane too —
-	// otherwise a legitimately rejoined member stays permanently denied by
-	// session-core's space_membership_revocations projection, which only
-	// this repository can ever tell them to clear.
+	// must have its earlier revocation event fully undone cross-plane too.
+	// Otherwise a legitimately rejoined member stays permanently denied by
+	// session-core's space_membership_revocations projection. Only this
+	// repository can ever tell them to clear it.
 	var reactivatedUserSubjects []string
 	for _, member := range replacement.Members {
 		subjectType := strings.TrimSpace(member.SubjectType)
@@ -699,11 +700,12 @@ func (r *Repository) ReplaceMemberships(ctx context.Context, replacement Members
 		role := strings.TrimSpace(member.Role)
 		declared[subjectType+"\x00"+subjectID] = struct{}{}
 		// A roster sync must not demote the owner. The source roster almost
-		// always CONTAINS them — they are an ordinary member of the
-		// organization too — so without this the owner is silently downgraded
-		// on every single sync, and no later sync can restore them because the
-		// same list keeps naming the lower role. Preserving presence alone was
-		// not enough; the realistic harm here is demotion, not removal.
+		// always CONTAINS them, since they are an ordinary member of the
+		// organization too. Without this guard the owner is silently
+		// downgraded on every single sync, and no later sync can restore
+		// them because the same list keeps naming the lower role.
+		// Preserving presence alone was not enough; the realistic harm here
+		// is demotion, not removal.
 		//
 		// Transferring ownership is a deliberate act and needs its own path,
 		// not a side effect of a roster converging.
@@ -757,9 +759,10 @@ func (r *Repository) ReplaceMemberships(ctx context.Context, replacement Members
 		}
 		if managed != nil {
 			// Outside the caller's declared scope. org-core's roster sync knows
-			// people and nothing else, so without this an agent bound to the room
-			// is revoked the next time a human roster converges — a binding
-			// destroyed as a side effect of a sync that never knew it existed.
+			// people and nothing else. Without this scope check, an agent bound
+			// to the room is revoked the next time a human roster converges — a
+			// binding destroyed as a side effect of a sync that never knew it
+			// existed.
 			if _, owned := managed[current.SubjectType]; !owned {
 				continue
 			}
@@ -824,7 +827,7 @@ func canonicalRecipientSubjects(recipients []string) ([]string, error) {
 // separate authoritative inputs and must be intersected by a later issuer.
 func (r *Repository) ResolveCurrentUserMembership(ctx context.Context, spaceRef, orgID, subjectID string) (*CurrentMembership, error) {
 	if r == nil || r.db == nil {
-		return nil, fmt.Errorf("Space authority repository unavailable")
+		return nil, fmt.Errorf("space authority repository unavailable")
 	}
 	membership := &CurrentMembership{}
 	err := r.db.Pool.QueryRow(ctx, `
@@ -887,7 +890,7 @@ func (r *Repository) ResolvePersonalThreadDecisionEvidence(ctx context.Context, 
 // recipient at query time; a prior membership in the Space is insufficient.
 func (r *Repository) ResolveSharedThreadDecisionEvidence(ctx context.Context, spaceRef, orgID, subjectID string) (PersonalThreadDecisionEvidence, error) {
 	if r == nil || r.db == nil {
-		return PersonalThreadDecisionEvidence{}, fmt.Errorf("Space authority repository unavailable")
+		return PersonalThreadDecisionEvidence{}, fmt.Errorf("space authority repository unavailable")
 	}
 	var evidence PersonalThreadDecisionEvidence
 	err := r.db.Pool.QueryRow(ctx, `
@@ -934,6 +937,24 @@ func (r *Repository) ResolveSharedThreadDecisionEvidence(ctx context.Context, sp
 	return evidence, nil
 }
 
+// sharedDecisionEvidenceScanDestinations returns the Scan targets shared by
+// the shared-Space evidence resolvers. Each resolver selects one
+// effect-specific entitlement column last, bound through entitlement.
+func sharedDecisionEvidenceScanDestinations(evidence *PersonalThreadDecisionEvidence, entitlement *bool) []any {
+	return []any{
+		&evidence.Membership.SpaceRef, &evidence.Membership.OrgID, &evidence.Membership.SubjectID,
+		&evidence.Membership.Kind, &evidence.Membership.Role,
+		&evidence.Membership.Revisions.Authority, &evidence.Membership.Revisions.Membership,
+		&evidence.Membership.Revisions.Privacy, &evidence.Membership.Revisions.RecipientAudience,
+		&evidence.Membership.Revisions.Entitlement,
+		&evidence.RecipientAudienceRef, &evidence.RecipientAudienceHash,
+		&evidence.Privacy.PolicyRef, &evidence.Privacy.Purpose, &evidence.Privacy.LawfulBasis,
+		&evidence.Privacy.PrivacyClass, &evidence.Privacy.ThirdPartyAllowed,
+		&evidence.Privacy.RetentionClass, &evidence.Privacy.Residency, &evidence.Privacy.DeletionScope,
+		&evidence.Privacy.ZeroDataRetention, entitlement,
+	}
+}
+
 // ResolveSharedRetrievalDecisionEvidence mirrors
 // ResolveSharedThreadDecisionEvidence's current-membership and current-
 // recipient-audience resolution, but binds the independent retrieval
@@ -941,7 +962,7 @@ func (r *Repository) ResolveSharedThreadDecisionEvidence(ctx context.Context, sp
 // never fall back to the shared thread-create grant.
 func (r *Repository) ResolveSharedRetrievalDecisionEvidence(ctx context.Context, spaceRef, orgID, subjectID string) (PersonalThreadDecisionEvidence, error) {
 	if r == nil || r.db == nil {
-		return PersonalThreadDecisionEvidence{}, fmt.Errorf("Space authority repository unavailable")
+		return PersonalThreadDecisionEvidence{}, fmt.Errorf("space authority repository unavailable")
 	}
 	var evidence PersonalThreadDecisionEvidence
 	err := r.db.Pool.QueryRow(ctx, `
@@ -963,18 +984,7 @@ func (r *Repository) ResolveSharedRetrievalDecisionEvidence(ctx context.Context,
 		  AND m.subject_type='user' AND m.subject_id=$3 AND m.active=TRUE
 		  AND EXISTS (SELECT 1 FROM user_org_memberships u WHERE u.user_id=$3 AND u.org_id=$2 AND u.status='active')`,
 		strings.TrimSpace(spaceRef), strings.TrimSpace(orgID), strings.TrimSpace(subjectID),
-	).Scan(
-		&evidence.Membership.SpaceRef, &evidence.Membership.OrgID, &evidence.Membership.SubjectID,
-		&evidence.Membership.Kind, &evidence.Membership.Role,
-		&evidence.Membership.Revisions.Authority, &evidence.Membership.Revisions.Membership,
-		&evidence.Membership.Revisions.Privacy, &evidence.Membership.Revisions.RecipientAudience,
-		&evidence.Membership.Revisions.Entitlement,
-		&evidence.RecipientAudienceRef, &evidence.RecipientAudienceHash,
-		&evidence.Privacy.PolicyRef, &evidence.Privacy.Purpose, &evidence.Privacy.LawfulBasis,
-		&evidence.Privacy.PrivacyClass, &evidence.Privacy.ThirdPartyAllowed,
-		&evidence.Privacy.RetentionClass, &evidence.Privacy.Residency, &evidence.Privacy.DeletionScope,
-		&evidence.Privacy.ZeroDataRetention, &evidence.RetrievalReadEntitled,
-	)
+	).Scan(sharedDecisionEvidenceScanDestinations(&evidence, &evidence.RetrievalReadEntitled)...)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return PersonalThreadDecisionEvidence{}, ErrNoCurrentMembership
 	}
@@ -990,16 +1000,16 @@ func (r *Repository) ResolveSharedRetrievalDecisionEvidence(ctx context.Context,
 
 // ResolveSharedThreadReadDecisionEvidence resolves the authority to read a
 // shared Space's conversation record. It reuses the current-membership and
-// current-recipient-audience joins of its sibling resolvers — in particular
-// the join against space_recipient_audience_members, which is what makes a
-// removed participant stop resolving — and binds the independent
-// thread_read_entitled bit and its own resource reference.
+// current-recipient-audience joins of its sibling resolvers. In particular,
+// the join against space_recipient_audience_members is what makes a removed
+// participant stop resolving. It binds the independent thread_read_entitled
+// bit and its own resource reference.
 //
 // It must never fall back to the shared thread-create grant: writing into a
 // room and reading everyone else's turns in it are separate disclosures.
 func (r *Repository) ResolveSharedThreadReadDecisionEvidence(ctx context.Context, spaceRef, orgID, subjectID string) (PersonalThreadDecisionEvidence, error) {
 	if r == nil || r.db == nil {
-		return PersonalThreadDecisionEvidence{}, fmt.Errorf("Space authority repository unavailable")
+		return PersonalThreadDecisionEvidence{}, fmt.Errorf("space authority repository unavailable")
 	}
 	var evidence PersonalThreadDecisionEvidence
 	err := r.db.Pool.QueryRow(ctx, `
@@ -1021,18 +1031,7 @@ func (r *Repository) ResolveSharedThreadReadDecisionEvidence(ctx context.Context
 		  AND m.subject_type='user' AND m.subject_id=$3 AND m.active=TRUE
 		  AND EXISTS (SELECT 1 FROM user_org_memberships u WHERE u.user_id=$3 AND u.org_id=$2 AND u.status='active')`,
 		strings.TrimSpace(spaceRef), strings.TrimSpace(orgID), strings.TrimSpace(subjectID),
-	).Scan(
-		&evidence.Membership.SpaceRef, &evidence.Membership.OrgID, &evidence.Membership.SubjectID,
-		&evidence.Membership.Kind, &evidence.Membership.Role,
-		&evidence.Membership.Revisions.Authority, &evidence.Membership.Revisions.Membership,
-		&evidence.Membership.Revisions.Privacy, &evidence.Membership.Revisions.RecipientAudience,
-		&evidence.Membership.Revisions.Entitlement,
-		&evidence.RecipientAudienceRef, &evidence.RecipientAudienceHash,
-		&evidence.Privacy.PolicyRef, &evidence.Privacy.Purpose, &evidence.Privacy.LawfulBasis,
-		&evidence.Privacy.PrivacyClass, &evidence.Privacy.ThirdPartyAllowed,
-		&evidence.Privacy.RetentionClass, &evidence.Privacy.Residency, &evidence.Privacy.DeletionScope,
-		&evidence.Privacy.ZeroDataRetention, &evidence.ThreadReadEntitled,
-	)
+	).Scan(sharedDecisionEvidenceScanDestinations(&evidence, &evidence.ThreadReadEntitled)...)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return PersonalThreadDecisionEvidence{}, ErrNoCurrentMembership
 	}
@@ -1107,7 +1106,7 @@ func (r *Repository) ResolveAgentActionDecisionEvidence(ctx context.Context, spa
 
 func (r *Repository) resolvePersonalDecisionEvidence(ctx context.Context, spaceRef, orgID, subjectID string) (PersonalThreadDecisionEvidence, error) {
 	if r == nil || r.db == nil {
-		return PersonalThreadDecisionEvidence{}, fmt.Errorf("Space authority repository unavailable")
+		return PersonalThreadDecisionEvidence{}, fmt.Errorf("space authority repository unavailable")
 	}
 	var evidence PersonalThreadDecisionEvidence
 	err := r.db.Pool.QueryRow(ctx, `
@@ -1117,7 +1116,8 @@ func (r *Repository) resolvePersonalDecisionEvidence(ctx context.Context, spaceR
 		       p.privacy_policy_ref, p.purpose, p.lawful_basis, p.privacy_class,
 		       p.third_party_processing_allowed, p.retention_class, p.residency,
 		       p.deletion_scope, p.zero_data_retention, p.thread_create_entitled,
-		       p.retrieval_read_entitled, p.import_write_entitled, p.agent_action_entitled, p.schedule_fire_entitled
+		       p.retrieval_read_entitled, p.import_write_entitled, p.agent_action_entitled, p.schedule_fire_entitled,
+		       p.sandbox_capability_entitled, p.process_registry_entitled
 		FROM registered_spaces s
 		JOIN space_memberships m ON m.space_ref=s.space_ref
 		JOIN space_authority_revisions r ON r.space_ref=s.space_ref
@@ -1140,6 +1140,7 @@ func (r *Repository) resolvePersonalDecisionEvidence(ctx context.Context, spaceR
 		&evidence.Privacy.RetentionClass, &evidence.Privacy.Residency, &evidence.Privacy.DeletionScope,
 		&evidence.Privacy.ZeroDataRetention, &evidence.ThreadCreateEntitled,
 		&evidence.RetrievalReadEntitled, &evidence.ImportWriteEntitled, &evidence.AgentActionEntitled, &evidence.ScheduleFireEntitled,
+		&evidence.SandboxCapabilityEntitled, &evidence.ProcessRegistryEntitled,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return PersonalThreadDecisionEvidence{}, ErrNoCurrentMembership
@@ -1156,13 +1157,78 @@ func (r *Repository) resolvePersonalDecisionEvidence(ctx context.Context, spaceR
 	return evidence, nil
 }
 
+// ResolveOwnScheduledThreadReadDecisionEvidence resolves a personal Space's
+// own owner's authority to read the system-owned (schedule) threads inside
+// their own Space (chat-wave2 "schedule" spec §2.4, Phase B).
+//
+// Mirrors resolvePersonalDecisionEvidence's current-authority query exactly,
+// scanning the one additional column (thread_read_entitled) that resolver
+// does not need, and is explicitly scoped to s.space_kind='personal' rather
+// than accepting whatever kind the caller's current membership happens to
+// be — ValidateForOwnScheduledThreadRead double-checks this too, but the
+// query itself refusing to resolve for a non-personal Space keeps this
+// resolver from ever becoming a second, weaker path into a shared room.
+func (r *Repository) ResolveOwnScheduledThreadReadDecisionEvidence(ctx context.Context, spaceRef, orgID, subjectID string) (PersonalThreadDecisionEvidence, error) {
+	if r == nil || r.db == nil {
+		return PersonalThreadDecisionEvidence{}, fmt.Errorf("space authority repository unavailable")
+	}
+	var evidence PersonalThreadDecisionEvidence
+	err := r.db.Pool.QueryRow(ctx, `
+		SELECT s.space_ref, s.org_id, m.subject_id, s.space_kind, m.role,
+		       r.authority_revision, r.membership_revision,
+		       r.privacy_revision, r.recipient_audience_revision, r.entitlement_revision,
+		       p.privacy_policy_ref, p.purpose, p.lawful_basis, p.privacy_class,
+		       p.third_party_processing_allowed, p.retention_class, p.residency,
+		       p.deletion_scope, p.zero_data_retention, p.thread_read_entitled
+		FROM registered_spaces s
+		JOIN space_memberships m ON m.space_ref=s.space_ref
+		JOIN space_authority_revisions r ON r.space_ref=s.space_ref
+		JOIN space_effect_policies p ON p.org_id=s.org_id
+		WHERE s.space_ref=$1 AND s.org_id=$2 AND s.registration_state='active'
+		  AND s.space_kind='personal'
+		  AND m.subject_type='user' AND m.subject_id=$3 AND m.active=TRUE
+		  AND EXISTS (
+			SELECT 1 FROM user_org_memberships u
+			WHERE u.user_id=$3 AND u.org_id=$2 AND u.status='active'
+		  )`,
+		strings.TrimSpace(spaceRef), strings.TrimSpace(orgID), strings.TrimSpace(subjectID),
+	).Scan(
+		&evidence.Membership.SpaceRef, &evidence.Membership.OrgID, &evidence.Membership.SubjectID,
+		&evidence.Membership.Kind, &evidence.Membership.Role,
+		&evidence.Membership.Revisions.Authority, &evidence.Membership.Revisions.Membership,
+		&evidence.Membership.Revisions.Privacy, &evidence.Membership.Revisions.RecipientAudience,
+		&evidence.Membership.Revisions.Entitlement,
+		&evidence.Privacy.PolicyRef, &evidence.Privacy.Purpose, &evidence.Privacy.LawfulBasis,
+		&evidence.Privacy.PrivacyClass, &evidence.Privacy.ThirdPartyAllowed,
+		&evidence.Privacy.RetentionClass, &evidence.Privacy.Residency, &evidence.Privacy.DeletionScope,
+		&evidence.Privacy.ZeroDataRetention, &evidence.ThreadReadEntitled,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return PersonalThreadDecisionEvidence{}, ErrNoCurrentMembership
+	}
+	if err != nil {
+		return PersonalThreadDecisionEvidence{}, fmt.Errorf("resolve own scheduled thread read authority: %w", err)
+	}
+	evidence.RecipientSubjectID = evidence.Membership.SubjectID
+	evidence.RecipientAudienceRef = fmt.Sprintf("personal:%s:recipient:%d", evidence.Membership.SpaceRef, evidence.Membership.Revisions.RecipientAudience)
+	evidence.RecipientAudienceHash, err = RecipientAudienceHash(evidence.RecipientSubjectID)
+	if err != nil {
+		return PersonalThreadDecisionEvidence{}, fmt.Errorf("derive personal recipient audience hash: %w", err)
+	}
+	evidence.ResourceAuthorizationRef = fmt.Sprintf("control:%s:thread-read:%d", evidence.Membership.SpaceRef, evidence.Membership.Revisions.Authority)
+	if err := evidence.ValidateForOwnScheduledThreadRead(); err != nil {
+		return PersonalThreadDecisionEvidence{}, fmt.Errorf("invalid own scheduled thread read authority: %w", err)
+	}
+	return evidence, nil
+}
+
 // UpsertEffectPolicy stores a Control-owned privacy/entitlement floor and
 // fences every active Space in that organization when the effective policy
 // changes. Replays are idempotent: identical policy material does not make
 // outstanding decisions stale merely because a sync retried.
 func (r *Repository) UpsertEffectPolicy(ctx context.Context, policy EffectPolicy) (bool, error) {
 	if r == nil || r.db == nil {
-		return false, fmt.Errorf("Space authority repository unavailable")
+		return false, fmt.Errorf("space authority repository unavailable")
 	}
 	if err := policy.Validate(); err != nil {
 		return false, err
@@ -1177,29 +1243,30 @@ func (r *Repository) UpsertEffectPolicy(ctx context.Context, policy EffectPolicy
 		SELECT org_id, privacy_policy_ref, purpose, lawful_basis, privacy_class,
 		       third_party_processing_allowed, retention_class, residency,
 		       deletion_scope, zero_data_retention, thread_create_entitled, retrieval_read_entitled,
-		       import_write_entitled, agent_action_entitled, schedule_fire_entitled, thread_read_entitled
+		       import_write_entitled, agent_action_entitled, schedule_fire_entitled, thread_read_entitled,
+		       sandbox_capability_entitled, process_registry_entitled
 		FROM space_effect_policies WHERE org_id=$1 FOR UPDATE`, policy.OrgID,
 	).Scan(&current.OrgID, &current.PrivacyPolicyRef, &current.Purpose, &current.LawfulBasis,
 		&current.PrivacyClass, &current.ThirdPartyProcessingAllowed, &current.RetentionClass,
 		&current.Residency, &current.DeletionScope, &current.ZeroDataRetention,
 		&current.ThreadCreateEntitled, &current.RetrievalReadEntitled, &current.ImportWriteEntitled, &current.AgentActionEntitled, &current.ScheduleFireEntitled,
-		&current.ThreadReadEntitled)
-	if err != nil && err != pgx.ErrNoRows {
+		&current.ThreadReadEntitled, &current.SandboxCapabilityEntitled, &current.ProcessRegistryEntitled)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return false, fmt.Errorf("read Space effect policy: %w", err)
 	}
-	if err == pgx.ErrNoRows {
+	if errors.Is(err, pgx.ErrNoRows) {
 		if _, err := tx.Exec(ctx, `
 			INSERT INTO space_effect_policies
 			(org_id, privacy_policy_ref, purpose, lawful_basis, privacy_class,
 			 third_party_processing_allowed, retention_class, residency, deletion_scope,
 			 zero_data_retention, thread_create_entitled, retrieval_read_entitled, import_write_entitled, agent_action_entitled, schedule_fire_entitled,
-			 thread_read_entitled)
-			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)`,
+			 thread_read_entitled, sandbox_capability_entitled, process_registry_entitled)
+			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)`,
 			policy.OrgID, policy.PrivacyPolicyRef, policy.Purpose, policy.LawfulBasis,
 			policy.PrivacyClass, policy.ThirdPartyProcessingAllowed, policy.RetentionClass,
 			policy.Residency, policy.DeletionScope, policy.ZeroDataRetention,
 			policy.ThreadCreateEntitled, policy.RetrievalReadEntitled, policy.ImportWriteEntitled, policy.AgentActionEntitled, policy.ScheduleFireEntitled,
-			policy.ThreadReadEntitled); err != nil {
+			policy.ThreadReadEntitled, policy.SandboxCapabilityEntitled, policy.ProcessRegistryEntitled); err != nil {
 			return false, fmt.Errorf("insert Space effect policy: %w", err)
 		}
 		if err := tx.Commit(ctx); err != nil {
@@ -1213,31 +1280,23 @@ func (r *Repository) UpsertEffectPolicy(ctx context.Context, policy EffectPolicy
 		}
 		return false, nil
 	}
-	privacyChanged := current.PrivacyPolicyRef != policy.PrivacyPolicyRef || current.Purpose != policy.Purpose ||
-		current.LawfulBasis != policy.LawfulBasis || current.PrivacyClass != policy.PrivacyClass ||
-		current.ThirdPartyProcessingAllowed != policy.ThirdPartyProcessingAllowed || current.RetentionClass != policy.RetentionClass ||
-		current.Residency != policy.Residency || current.DeletionScope != policy.DeletionScope ||
-		current.ZeroDataRetention != policy.ZeroDataRetention
-	entitlementChanged := current.ThreadCreateEntitled != policy.ThreadCreateEntitled ||
-		current.RetrievalReadEntitled != policy.RetrievalReadEntitled ||
-		current.ImportWriteEntitled != policy.ImportWriteEntitled ||
-		current.AgentActionEntitled != policy.AgentActionEntitled ||
-		current.ScheduleFireEntitled != policy.ScheduleFireEntitled ||
-		current.ThreadReadEntitled != policy.ThreadReadEntitled
+	privacyChanged := privacyPolicyChanged(current, policy)
+	entitlementChanged := entitlementPolicyChanged(current, policy)
 	if _, err := tx.Exec(ctx, `
 		UPDATE space_effect_policies SET privacy_policy_ref=$2, purpose=$3, lawful_basis=$4,
 		privacy_class=$5, third_party_processing_allowed=$6, retention_class=$7,
 		residency=$8, deletion_scope=$9, zero_data_retention=$10,
 		thread_create_entitled=$11, retrieval_read_entitled=$12, import_write_entitled=$13, agent_action_entitled=$14, schedule_fire_entitled=$15,
-		thread_read_entitled=$16,
-		policy_revision=policy_revision + CASE WHEN $17 THEN 1 ELSE 0 END,
-		entitlement_revision=entitlement_revision + CASE WHEN $18 THEN 1 ELSE 0 END,
+		thread_read_entitled=$16, sandbox_capability_entitled=$17, process_registry_entitled=$18,
+		policy_revision=policy_revision + CASE WHEN $19 THEN 1 ELSE 0 END,
+		entitlement_revision=entitlement_revision + CASE WHEN $20 THEN 1 ELSE 0 END,
 		updated_at=NOW() WHERE org_id=$1`,
 		policy.OrgID, policy.PrivacyPolicyRef, policy.Purpose, policy.LawfulBasis,
 		policy.PrivacyClass, policy.ThirdPartyProcessingAllowed, policy.RetentionClass,
 		policy.Residency, policy.DeletionScope, policy.ZeroDataRetention,
 		policy.ThreadCreateEntitled, policy.RetrievalReadEntitled, policy.ImportWriteEntitled, policy.AgentActionEntitled, policy.ScheduleFireEntitled,
-		policy.ThreadReadEntitled, privacyChanged, entitlementChanged); err != nil {
+		policy.ThreadReadEntitled, policy.SandboxCapabilityEntitled, policy.ProcessRegistryEntitled,
+		privacyChanged, entitlementChanged); err != nil {
 		return false, fmt.Errorf("update Space effect policy: %w", err)
 	}
 	if _, err := tx.Exec(ctx, `
@@ -1255,6 +1314,63 @@ func (r *Repository) UpsertEffectPolicy(ctx context.Context, policy EffectPolicy
 		return false, fmt.Errorf("commit Space effect policy update: %w", err)
 	}
 	return true, nil
+}
+
+// ResolveOrgEffectPolicy reads an organization's current Control-owned
+// privacy/entitlement floor with no Space membership required. Mail-task
+// deliberately has no Space (see mail_task_thread_decision.go's package
+// doc) — this is the org-level read every other resolver in this file
+// gets bundled with a Space-membership JOIN, exposed standalone for that
+// one caller. Read-only; unlike UpsertEffectPolicy this takes no lock and
+// runs outside a transaction, matching every other read-only resolver here.
+func (r *Repository) ResolveOrgEffectPolicy(ctx context.Context, orgID string) (EffectPolicy, error) {
+	if r == nil || r.db == nil {
+		return EffectPolicy{}, fmt.Errorf("space authority repository unavailable")
+	}
+	var policy EffectPolicy
+	err := r.db.Pool.QueryRow(ctx, `
+		SELECT org_id, privacy_policy_ref, purpose, lawful_basis, privacy_class,
+		       third_party_processing_allowed, retention_class, residency,
+		       deletion_scope, zero_data_retention, thread_create_entitled, retrieval_read_entitled,
+		       import_write_entitled, agent_action_entitled, schedule_fire_entitled, thread_read_entitled,
+		       sandbox_capability_entitled, process_registry_entitled
+		FROM space_effect_policies WHERE org_id=$1`, strings.TrimSpace(orgID),
+	).Scan(&policy.OrgID, &policy.PrivacyPolicyRef, &policy.Purpose, &policy.LawfulBasis,
+		&policy.PrivacyClass, &policy.ThirdPartyProcessingAllowed, &policy.RetentionClass,
+		&policy.Residency, &policy.DeletionScope, &policy.ZeroDataRetention,
+		&policy.ThreadCreateEntitled, &policy.RetrievalReadEntitled, &policy.ImportWriteEntitled,
+		&policy.AgentActionEntitled, &policy.ScheduleFireEntitled,
+		&policy.ThreadReadEntitled, &policy.SandboxCapabilityEntitled, &policy.ProcessRegistryEntitled)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return EffectPolicy{}, ErrNoOrgEffectPolicy
+	}
+	if err != nil {
+		return EffectPolicy{}, fmt.Errorf("resolve org effect policy: %w", err)
+	}
+	return policy, nil
+}
+
+// privacyPolicyChanged reports whether the processing/privacy floor of the
+// policy changed. Privacy changes fence the privacy revision.
+func privacyPolicyChanged(current, next EffectPolicy) bool {
+	return current.PrivacyPolicyRef != next.PrivacyPolicyRef || current.Purpose != next.Purpose ||
+		current.LawfulBasis != next.LawfulBasis || current.PrivacyClass != next.PrivacyClass ||
+		current.ThirdPartyProcessingAllowed != next.ThirdPartyProcessingAllowed || current.RetentionClass != next.RetentionClass ||
+		current.Residency != next.Residency || current.DeletionScope != next.DeletionScope ||
+		current.ZeroDataRetention != next.ZeroDataRetention
+}
+
+// entitlementPolicyChanged reports whether any entitlement bit of the policy
+// changed. Entitlement changes fence the entitlement revision.
+func entitlementPolicyChanged(current, next EffectPolicy) bool {
+	return current.ThreadCreateEntitled != next.ThreadCreateEntitled ||
+		current.RetrievalReadEntitled != next.RetrievalReadEntitled ||
+		current.ImportWriteEntitled != next.ImportWriteEntitled ||
+		current.AgentActionEntitled != next.AgentActionEntitled ||
+		current.ScheduleFireEntitled != next.ScheduleFireEntitled ||
+		current.ThreadReadEntitled != next.ThreadReadEntitled ||
+		current.SandboxCapabilityEntitled != next.SandboxCapabilityEntitled ||
+		current.ProcessRegistryEntitled != next.ProcessRegistryEntitled
 }
 
 func registeredSpaceForUpdate(ctx context.Context, tx pgx.Tx, spaceRef string) (*RegisteredSpace, error) {

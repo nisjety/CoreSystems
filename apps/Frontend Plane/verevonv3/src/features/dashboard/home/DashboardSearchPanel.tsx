@@ -849,7 +849,7 @@ export function SearchPanel(props: {
     >
       <div class="verevon-panel-in relative transition-all duration-500 ease-out">
         <form onSubmit={submit} class="relative z-[1] w-full">
-          <label class="sr-only" for="dashboard-search">{i18n.tr('Søk i selskapets kunnskap', 'Search company knowledge')}</label>
+          <label class="sr-only" for="dashboard-search">{i18n.tr('Søk på nettet eller spør', 'Search on the web or ask')}</label>
           <div class="dashboard-search-row">
             <button
               type="button"
@@ -866,13 +866,13 @@ export function SearchPanel(props: {
               <input
                 id="dashboard-search"
                 role="combobox"
-                aria-label={i18n.tr('Søk i selskapets kunnskap', 'Search company knowledge')}
+                aria-label={i18n.tr('Søk på nettet eller spør', 'Search on the web or ask')}
                 aria-expanded={isDropdownOpen() ? 'true' : 'false'}
                 autocomplete="off"
                 value={query()}
                 onInput={(event) => updateQuery(event.currentTarget.value)}
                 class="dashboard-search-input"
-                placeholder={i18n.tr('Søk eller spør ...', 'Search or ask ...')}
+                placeholder={i18n.tr('Søk på nettet eller spør…', 'Search on the web or ask…')}
               />
               <button
                 type="submit"

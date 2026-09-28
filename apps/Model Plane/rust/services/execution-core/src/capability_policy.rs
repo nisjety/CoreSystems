@@ -742,6 +742,27 @@ pub fn trusted_capability_id(tool_name: &str) -> Option<String> {
     if tool_name.starts_with("subagent.") && tool_name.len() > "subagent.".len() {
         return Some("cap.agent.spawn".to_owned());
     }
+    // `plan.*` (plan-gate §2.1) durably writes a plan through session-core —
+    // the same mechanical shape, risk class, and ZDR gate as `save_memory`'s
+    // `cap.memory.index` below: a low-risk, org/thread-scoped, reversible
+    // durable write, refused outright under ZDR before it ever reaches this
+    // gate (`memory_tool_preflight`, the exact mechanism `save_memory` uses).
+    // Reusing that id — this function's own established convention, see
+    // `reattach_skill`/`tickets.create` below — is deliberate: an unseeded
+    // id (this arm previously returned bare `None`, on the mistaken belief
+    // that `None` means "no capability check", matching `list_subagent_results`)
+    // evaluates against no registry row and fails CLOSED in
+    // `GrpcCapabilityPolicy::evaluate_response`, which requires
+    // `trusted_capability_id` to return `Some` for every tool it ever
+    // dispatches — `list_subagent_results` itself is bound to
+    // `cap.agent.lineage.read` a few lines below, never `None`. The bare
+    // `None` here meant every real `plan.propose` call failed with "tool has
+    // no governed capability binding"; no test caught it because every test
+    // in this codebase dispatches through a permissive `AllowCapabilityPolicy`
+    // that never calls this function at all.
+    if crate::plan::is_plan_tool(tool_name) {
+        return Some("cap.memory.index".to_owned());
+    }
     let capability = match tool_name {
         "shell" => "cap.command.shell",
         // Distinct from `cap.command.shell` on purpose: `code_interpreter` runs
@@ -750,6 +771,22 @@ pub fn trusted_capability_id(tool_name: &str) -> Option<String> {
         // capability-core governs it as a LOW-risk capability while arbitrary
         // host commands stay behind the high-risk shell capability.
         "code_interpreter" => "cap.command.sandbox",
+        // The S4.2 background-process family, all five names on ONE capability
+        // because they are one authority over one object: a caller that may
+        // start a process may read what it printed, feed it stdin, stop it,
+        // and list its own Space's processes. Five ids would make "may start
+        // but may not stop" reachable by operator error.
+        //
+        // `cap.process.background` is seeded LOW by capability-core's
+        // migration 0015 for the same reasons `cap.command.sandbox` above is:
+        // same code-body-only sandbox, same read-only rootfs, same disabled
+        // network. What it adds is bounded on both axes — a TTL that never
+        // outlives the lease, and a count-limited number of them. The
+        // capability is not the whole gate either: the lease must separately
+        // carry `space:processes`, which Control grants only to an entitled
+        // Space.
+        "process_start" | "process_read" | "process_stdin" | "process_signal"
+        | "process_list" => "cap.process.background",
         // The granular MCP facade never creates raw browser authority. It is
         // governed by the same browser capability as the agent loop, while
         // BrowserBroker separately binds its opaque run grant.
@@ -930,6 +967,20 @@ mod tests {
             trusted_capability_id("subagent.research").as_deref(),
             Some("cap.agent.spawn")
         );
+        // plan-gate: `plan.propose` must resolve to a REAL, already-seeded
+        // capability id, never `None` — `GrpcCapabilityPolicy::evaluate_response`
+        // treats `None` as "tool has no governed capability binding" and
+        // refuses the call outright, so a bare `None` here would make every
+        // `plan.propose` call fail in any environment that uses the real
+        // (non-test) capability policy.
+        assert_eq!(
+            trusted_capability_id("plan.propose").as_deref(),
+            Some("cap.memory.index")
+        );
+        assert!(trusted_capability_id("plan.propose").is_some());
+        // The bare prefix is not itself a callable tool (mirrors
+        // `is_plan_tool`'s own "prefix alone is not a tool" rule).
+        assert!(trusted_capability_id("plan.").is_none());
     }
 
     #[tokio::test]

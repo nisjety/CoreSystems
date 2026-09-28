@@ -22,6 +22,7 @@ use crate::domains::browser::{
     RenameProfileBody, RestoreProbeBody, StartAiRunBody, SuggestActionBody,
     Viewport as BrowserViewport,
 };
+use crate::domains::chat::documents::upload_chat_document;
 use crate::domains::chat::history::{
     clear_threads as clear_chat_threads, delete_thread as delete_chat_thread,
     save_thread as save_chat_thread, SaveThreadRequest,
@@ -49,6 +50,7 @@ use crate::domains::integrations::model_subscriptions::{
 use crate::domains::integrations::providers::start_connect_session as start_integration_connect_session;
 use crate::domains::knowledge::documents::create_document;
 use crate::domains::knowledge::products::{extract_products, summarize_products};
+use crate::domains::knowledge::sync::register_sharepoint;
 use crate::domains::mcp::{delete_server as delete_mcp_server, share_server as share_mcp_server};
 use crate::domains::memory::delete_memory;
 use crate::domains::monitoring::{check_now, CheckRequest};
@@ -76,8 +78,10 @@ use crate::domains::social::{
     DecideApprovalBody, InboxDraftBody,
 };
 use crate::domains::spaces::{
-    bind_existing_space_agent, create_personal_space, create_space_agent, ensure_organization_room,
-    request_personal_space_deletion, update_space_instructions, DeleteSpaceRequest,
+    add_space_member, bind_existing_space_agent, create_personal_space, create_space_agent,
+    ensure_organization_room, mark_space_read, record_space_presence, remove_space_member,
+    request_personal_space_deletion, revoke_space_agent, set_space_agent_state,
+    space_thread_presentation, update_space_instructions, DeleteSpaceRequest,
     UpdateSpaceInstructionsRequest,
 };
 use crate::domains::studio::{
@@ -2367,6 +2371,49 @@ pub(super) async fn dispatch_knowledge_summarize_products(
     owner_json_response_to_envelope("knowledge.summarize_products", user, status, payload)
 }
 
+// Reuses the real sync::register_sharepoint handler (finspo-core source
+// creation followed by its first sync) rather than re-deriving that two-call
+// sequence here.
+pub(super) async fn dispatch_knowledge_register_sharepoint_source(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    input: &Value,
+) -> Response {
+    let site_id = ticket_string(input, "siteId");
+    if site_id.is_empty() {
+        return ticket_bad_request(
+            "knowledge.register_sharepoint_source requires a non-empty 'siteId'",
+        );
+    }
+    let body = ticket_remap(
+        input,
+        &[
+            ("kind", "kind"),
+            ("siteId", "siteId"),
+            ("siteWebUrl", "siteWebUrl"),
+            ("driveId", "driveId"),
+            ("driveName", "driveName"),
+            ("driveType", "driveType"),
+            ("tenantId", "tenantId"),
+            ("folderId", "folderId"),
+            ("folderPath", "folderPath"),
+        ],
+    );
+    let response = register_sharepoint(
+        StateExtractor(state.clone()),
+        ExtensionExtractor(user.clone()),
+        Json(Value::Object(body)),
+    )
+    .await;
+    let (status, payload) = response_to_status_and_json(response).await;
+    owner_json_response_to_envelope(
+        "knowledge.register_sharepoint_source",
+        user,
+        status,
+        payload,
+    )
+}
+
 // These three reuse the real social.rs handlers rather than re-deriving their
 // logic, the same reasoning as the Space and knowledge dispatchers above:
 // create_draft_from_inbox composes an actual draft title/body/source from
@@ -4634,6 +4681,7 @@ pub(super) async fn dispatch_chat_save_thread_snapshot(
             .get("preview")
             .and_then(Value::as_str)
             .map(str::to_owned),
+        persona_enabled: input.get("personaEnabled").and_then(Value::as_bool),
     };
     let response = save_chat_thread(
         StateExtractor(state.clone()),
@@ -4681,6 +4729,49 @@ pub(super) async fn dispatch_chat_submit_feedback(
     owner_json_response_to_envelope("chat.submit_feedback", user, status, payload)
 }
 
+// Ephemeral reading shares the authenticated chat handler and stores no document.
+pub(super) async fn dispatch_chat_extract_document(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+    input: &Value,
+) -> Response {
+    crate::domains::chat::documents::extract_chat_document(
+        StateExtractor(state.clone()), ExtensionExtractor(user.clone()),
+        headers.clone(), axum::Json(input.clone()),
+    ).await
+}
+
+pub(super) async fn dispatch_chat_upload_document(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+    input: &Value,
+) -> Response {
+    let title = ticket_string(input, "title");
+    let content = ticket_string(input, "content");
+    if title.is_empty() || content.is_empty() {
+        return ticket_bad_request(
+            "chat.upload_document requires non-empty 'title' and 'content'",
+        );
+    }
+    let body = json!({
+        "title": title,
+        "content": content,
+        "source": "chat-upload",
+        "type": "text",
+    });
+    let response = upload_chat_document(
+        StateExtractor(state.clone()),
+        ExtensionExtractor(user.clone()),
+        headers.clone(),
+        axum::body::Bytes::from(body.to_string()),
+    )
+    .await;
+    let (status, payload) = response_to_status_and_json(response).await;
+    owner_json_response_to_envelope("chat.upload_document", user, status, payload)
+}
+
 pub(super) async fn dispatch_audio_transcribe(
     state: &AppState,
     user: &AuthenticatedUser,
@@ -4713,19 +4804,20 @@ pub(super) async fn dispatch_audio_transcribe(
     owner_json_response_to_envelope("audio.transcribe", user, status, payload)
 }
 
-pub(super) async fn dispatch_audio_dictate(
-    state: &AppState,
-    user: &AuthenticatedUser,
-    headers: &HeaderMap,
-    input: &Value,
-) -> Response {
+/// Build the dictate route's body from an `audio.dictate` action input, or
+/// `None` when the input is not a dictation it can carry.
+///
+/// `m4a` is Safari's AAC-in-mp4 recording, which model-gateway and
+/// inference-core both take. `zdr` (a Temporary-chat dictation) is forwarded;
+/// `proxy_dictate` then raises it to the organisation's standing posture, and
+/// nothing here can lower it. The dictate route's client-controllable
+/// clean-up `model` override is never forwarded.
+fn audio_dictate_body(input: &Value) -> Option<Value> {
     let audio_base64 = ticket_string(input, "audioBase64");
     let format = ticket_string(input, "format");
     let language = ticket_string(input, "language");
-    if audio_base64.is_empty() || !matches!(format, "webm" | "ogg" | "wav" | "mp3") {
-        return ticket_bad_request(
-            "audio.dictate requires 'audioBase64' and format of webm, ogg, wav, or mp3",
-        );
+    if audio_base64.is_empty() || !matches!(format, "webm" | "ogg" | "wav" | "mp3" | "m4a") {
+        return None;
     }
     let mut body = serde_json::Map::new();
     body.insert(
@@ -4737,11 +4829,28 @@ pub(super) async fn dispatch_audio_dictate(
     if let Some(context) = input.get("context").and_then(Value::as_str) {
         body.insert("context".to_owned(), Value::String(context.to_owned()));
     }
+    if let Some(zdr) = input.get("zdr").and_then(Value::as_bool) {
+        body.insert("zdr".to_owned(), Value::Bool(zdr));
+    }
+    Some(Value::Object(body))
+}
+
+pub(super) async fn dispatch_audio_dictate(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+    input: &Value,
+) -> Response {
+    let Some(body) = audio_dictate_body(input) else {
+        return ticket_bad_request(
+            "audio.dictate requires 'audioBase64' and format of webm, ogg, wav, mp3, or m4a",
+        );
+    };
     let response = proxy_dictate(
         StateExtractor(state.clone()),
         ExtensionExtractor(user.clone()),
         headers.clone(),
-        Json(Value::Object(body)),
+        Json(body),
     )
     .await
     .into_response();
@@ -5434,6 +5543,185 @@ pub(super) async fn dispatch_space_request_personal_deletion(
     )
 }
 
+pub(super) async fn dispatch_space_update_thread_presentation(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+    input: &Value,
+) -> Response {
+    let space_ref = ticket_string(input, "spaceRef");
+    let thread_id = ticket_string(input, "threadId");
+    if space_ref.is_empty() || thread_id.is_empty() {
+        return ticket_bad_request(
+            "spaces.update_thread_presentation requires non-empty 'spaceRef' and 'threadId'",
+        );
+    }
+    let mut body = serde_json::Map::new();
+    if let Some(title) = input.get("title") {
+        body.insert("title".to_owned(), title.clone());
+    }
+    if let Some(pinned) = input.get("pinned") {
+        body.insert("pinned".to_owned(), pinned.clone());
+    }
+    let (status, Json(payload)) = space_thread_presentation(
+        StateExtractor(state.clone()),
+        ExtensionExtractor(user.clone()),
+        headers.clone(),
+        PathExtractor((space_ref.to_owned(), thread_id.to_owned())),
+        Json(Value::Object(body)),
+    )
+    .await;
+    owner_json_response_to_envelope("spaces.update_thread_presentation", user, status, payload)
+}
+
+pub(super) async fn dispatch_space_mark_read(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    input: &Value,
+) -> Response {
+    let space_ref = ticket_string(input, "spaceRef");
+    if space_ref.is_empty() {
+        return ticket_bad_request("spaces.mark_read requires a non-empty 'spaceRef'");
+    }
+    let (status, Json(payload)) = mark_space_read(
+        StateExtractor(state.clone()),
+        ExtensionExtractor(user.clone()),
+        PathExtractor(space_ref.to_owned()),
+    )
+    .await;
+    owner_json_response_to_envelope("spaces.mark_read", user, status, payload)
+}
+
+pub(super) async fn dispatch_space_record_presence(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    input: &Value,
+) -> Response {
+    let space_ref = ticket_string(input, "spaceRef");
+    if space_ref.is_empty() {
+        return ticket_bad_request("spaces.record_presence requires a non-empty 'spaceRef'");
+    }
+    let body = ticket_remap(input, &[("status", "status")]);
+    let (status, Json(payload)) = record_space_presence(
+        StateExtractor(state.clone()),
+        ExtensionExtractor(user.clone()),
+        PathExtractor(space_ref.to_owned()),
+        Json(Value::Object(body)),
+    )
+    .await;
+    owner_json_response_to_envelope("spaces.record_presence", user, status, payload)
+}
+
+pub(super) async fn dispatch_space_set_agent_state(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    input: &Value,
+) -> Response {
+    let space_ref = ticket_string(input, "spaceRef");
+    let binding_ref = ticket_string(input, "bindingRef");
+    let agent_status = ticket_string(input, "status");
+    if space_ref.is_empty() || binding_ref.is_empty() || !matches!(agent_status, "active" | "paused")
+    {
+        return ticket_bad_request(
+            "spaces.set_agent_state requires non-empty 'spaceRef', 'bindingRef', and status of active or paused",
+        );
+    }
+    let (status, Json(payload)) = set_space_agent_state(
+        StateExtractor(state.clone()),
+        ExtensionExtractor(user.clone()),
+        PathExtractor((space_ref.to_owned(), binding_ref.to_owned())),
+        Json(json!({ "status": agent_status })),
+    )
+    .await;
+    owner_json_response_to_envelope("spaces.set_agent_state", user, status, payload)
+}
+
+pub(super) async fn dispatch_space_revoke_agent(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    input: &Value,
+) -> Response {
+    let space_ref = ticket_string(input, "spaceRef");
+    let binding_ref = ticket_string(input, "bindingRef");
+    if space_ref.is_empty() || binding_ref.is_empty() {
+        return ticket_bad_request(
+            "spaces.revoke_agent requires non-empty 'spaceRef' and 'bindingRef'",
+        );
+    }
+    let (status, Json(payload)) = revoke_space_agent(
+        StateExtractor(state.clone()),
+        ExtensionExtractor(user.clone()),
+        PathExtractor((space_ref.to_owned(), binding_ref.to_owned())),
+    )
+    .await;
+    owner_json_response_to_envelope("spaces.revoke_agent", user, status, payload)
+}
+
+// `spaces.create_room` shares create_personal_space's handler and route with
+// the already-registered `spaces.create_personal_space` (the handler
+// dispatches on the body's `kind`, see the doc comment on create_personal_space
+// itself) but is registered under its own action id with its own zod schema,
+// because a room create is not a personal-space create: it requires a name
+// and is refused without one.
+pub(super) async fn dispatch_space_create_room(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    input: &Value,
+) -> Response {
+    let name = ticket_string(input, "name");
+    if name.is_empty() {
+        return ticket_bad_request("spaces.create_room requires a non-empty 'name'");
+    }
+    let (status, Json(payload)) = create_personal_space(
+        StateExtractor(state.clone()),
+        ExtensionExtractor(user.clone()),
+        Some(Json(json!({ "kind": "room", "name": name }))),
+    )
+    .await;
+    owner_json_response_to_envelope("spaces.create_room", user, status, payload)
+}
+
+pub(super) async fn dispatch_space_add_member(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    input: &Value,
+) -> Response {
+    let space_ref = ticket_string(input, "spaceRef");
+    let member_id = ticket_string(input, "memberId");
+    if space_ref.is_empty() || member_id.is_empty() {
+        return ticket_bad_request("spaces.add_member requires non-empty 'spaceRef' and 'memberId'");
+    }
+    let (status, Json(payload)) = add_space_member(
+        StateExtractor(state.clone()),
+        ExtensionExtractor(user.clone()),
+        PathExtractor(space_ref.to_owned()),
+        Json(json!({ "member_id": member_id })),
+    )
+    .await;
+    owner_json_response_to_envelope("spaces.add_member", user, status, payload)
+}
+
+pub(super) async fn dispatch_space_remove_member(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    input: &Value,
+) -> Response {
+    let space_ref = ticket_string(input, "spaceRef");
+    let member_id = ticket_string(input, "memberId");
+    if space_ref.is_empty() || member_id.is_empty() {
+        return ticket_bad_request(
+            "spaces.remove_member requires non-empty 'spaceRef' and 'memberId'",
+        );
+    }
+    let (status, Json(payload)) = remove_space_member(
+        StateExtractor(state.clone()),
+        ExtensionExtractor(user.clone()),
+        PathExtractor((space_ref.to_owned(), member_id.to_owned())),
+    )
+    .await;
+    owner_json_response_to_envelope("spaces.remove_member", user, status, payload)
+}
+
 pub(super) async fn dispatch_social_create_draft(
     state: &AppState,
     user: &AuthenticatedUser,
@@ -5654,6 +5942,43 @@ fn social_execution(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn audio_dictate_forwards_safari_recordings_and_the_retention_flag() {
+        let body = audio_dictate_body(&json!({
+            "audioBase64": "AAAA",
+            "format": "m4a",
+            "language": "nb-NO",
+            "context": "chat message",
+            "zdr": true,
+            // The dictate route's clean-up override is client-controllable;
+            // the action surface never passes it on.
+            "model": "some-other-model",
+        }))
+        .expect("an m4a dictation is accepted");
+        assert_eq!(
+            body,
+            json!({
+                "audio_base64": "AAAA",
+                "format": "m4a",
+                "language": "nb-NO",
+                "context": "chat message",
+                "zdr": true,
+            })
+        );
+
+        // No flag in, no flag out: `proxy_dictate` still applies the org posture.
+        let ordinary = audio_dictate_body(&json!({
+            "audioBase64": "AAAA",
+            "format": "webm",
+            "language": "nb-NO",
+        }))
+        .expect("a webm dictation is accepted");
+        assert!(ordinary.get("zdr").is_none());
+
+        assert!(audio_dictate_body(&json!({ "audioBase64": "AAAA", "format": "flac" })).is_none());
+        assert!(audio_dictate_body(&json!({ "audioBase64": "", "format": "webm" })).is_none());
+    }
 
     #[tokio::test]
     async fn upload_files_action_rejects_json_execution() {

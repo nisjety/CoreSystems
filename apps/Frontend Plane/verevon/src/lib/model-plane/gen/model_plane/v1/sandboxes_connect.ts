@@ -3,7 +3,7 @@
 /* eslint-disable */
 // @ts-nocheck
 
-import { AcquireLeaseRequest, AcquireLeaseResponse, ReleaseLeaseRequest, ReleaseLeaseResponse, SandboxHealthRequest, SandboxHealthResponse, SnapshotRequest, SnapshotResponse } from "./sandboxes_pbjs";
+import { AcquireLeaseRequest, AcquireLeaseResponse, ActivateLeaseRequest, ActivateLeaseResponse, GetWorkspaceManifestRequest, GetWorkspaceManifestResponse, PromoteWorkspaceRequest, PromoteWorkspaceResponse, ReleaseLeaseRequest, ReleaseLeaseResponse, SandboxHealthRequest, SandboxHealthResponse, SnapshotRequest, SnapshotResponse } from "./sandboxes_pbjs";
 import { MethodKind } from "@bufbuild/protobuf";
 
 /**
@@ -46,6 +46,54 @@ export const SandboxManager = {
       name: "SnapshotSandbox",
       I: SnapshotRequest,
       O: SnapshotResponse,
+      kind: MethodKind.Unary,
+    },
+    /**
+     * Move a lease from SCRATCH to ACTIVE once it needs more than the
+     * credential-free scratch allowlist (e.g. real backend network/egress
+     * permission per the capability decision's granted permissions). See
+     * docs/S3_2_SANDBOX_LEASE_CLOSEOUT_DESIGN_2026-09-10.md §3.
+     *
+     * @generated from rpc model_plane.v1.SandboxManager.ActivateLease
+     */
+    activateLease: {
+      name: "ActivateLease",
+      I: ActivateLeaseRequest,
+      O: ActivateLeaseResponse,
+      kind: MethodKind.Unary,
+    },
+    /**
+     * Resolve the layered workspace manifest a Space-scoped lease sees: the
+     * Space's own durable files, shadowed path-for-path by this lease's own
+     * not-yet-merged overlay. Empty for a non-Space lease. See
+     * apps/Frontend Plane/verevonv3/docs/S3_3_DURABLE_WORKSPACE_DESIGN_2026-09-11.md
+     * §8 item 3.5.C.
+     *
+     * @generated from rpc model_plane.v1.SandboxManager.GetWorkspaceManifest
+     */
+    getWorkspaceManifest: {
+      name: "GetWorkspaceManifest",
+      I: GetWorkspaceManifestRequest,
+      O: GetWorkspaceManifestResponse,
+      kind: MethodKind.Unary,
+    },
+    /**
+     * Merges a Space-scoped lease's own workspace_files overlay into the
+     * Space's durable rows, one path at a time via compare-and-swap on
+     * base_hash — never one all-or-nothing transaction across the whole
+     * overlay, so a conflict on one path never blocks any other path in the
+     * same run's overlay from merging. Deliberately its own explicit step,
+     * never an automatic side effect of SnapshotSandbox or lease release —
+     * see apps/Frontend Plane/verevonv3/docs/S3_3_DURABLE_WORKSPACE_DESIGN_2026-09-11.md
+     * §4 and §8 item 4. Safe to call more than once for the same overlay: an
+     * already-merged path is a no-op, not a false conflict.
+     *
+     * @generated from rpc model_plane.v1.SandboxManager.PromoteWorkspace
+     */
+    promoteWorkspace: {
+      name: "PromoteWorkspace",
+      I: PromoteWorkspaceRequest,
+      O: PromoteWorkspaceResponse,
       kind: MethodKind.Unary,
     },
     /**

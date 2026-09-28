@@ -3,8 +3,11 @@ package api
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/google/uuid"
@@ -16,7 +19,7 @@ import (
 
 // registerCodexSubscriptionRoutes exposes a user-owned device-code connection
 // flow and a Model-Plane-only inference route. It deliberately offers no token
-// lease: ChatGPT subscription credentials stay managed by Codex app-server.
+// lease: ChatGPT subscription credentials stay inside Integration Core.
 func registerCodexSubscriptionRoutes(
 	app *fiber.App,
 	cfg ServerConfig,
@@ -213,31 +216,37 @@ func registerCodexSubscriptionRoutes(
 
 		request := codexSubscriptionInvokeRequest(connection, body)
 		streamContext := c.UserContext()
+		// Validation and the concurrency queue run before the 200 and the
+		// ready event are committed, so a full queue is a 429 with
+		// Retry-After, exactly as on the unary route.
+		run, release, err := cfg.CodexSubscriptions.ReserveStream(streamContext, request)
+		if err != nil {
+			return subscriptionError(c, err)
+		}
 		c.Set("Content-Type", "text/event-stream")
 		c.Set("Cache-Control", "no-cache, no-transform")
 		c.Set("Connection", "keep-alive")
 		c.Set("X-Accel-Buffering", "no")
 		c.Context().SetBodyStreamWriter(func(w *bufio.Writer) {
+			defer release()
 			writeSSE(w, "subscription.ready", codexSubscriptionStreamEvent{Type: "ready", RequestID: request.RequestID, ModelUsed: request.Model})
 			if err := w.Flush(); err != nil {
 				return
 			}
 
-			response, invokeErr := cfg.CodexSubscriptions.InvokeStream(streamContext, request, func(delta string) error {
+			response, invokeErr := run(func(delta string) error {
 				writeSSE(w, "subscription.delta", codexSubscriptionStreamEvent{Type: "delta", Delta: delta})
 				return w.Flush()
 			})
+			release() // the turn is over; the deferred call is then a no-op
 			if invokeErr != nil {
 				if errors.Is(invokeErr, codexsubscription.ErrReauthenticationRequired) {
 					markCodexSubscriptionNeedsRefreshContext(streamContext, cfg, connection)
 				}
-				code := "subscription_broker_failed"
-				message := "The ChatGPT subscription broker could not complete the streamed request."
-				if errors.Is(invokeErr, codexsubscription.ErrReauthenticationRequired) {
-					code = "subscription_reauthentication_required"
-					message = "Reconnect your ChatGPT subscription in Integrations."
-				}
-				writeSSE(w, "subscription.error", codexSubscriptionStreamEvent{Type: "error", Code: code, Message: message})
+				// The 200 is already sent, so no Retry-After can follow: the
+				// event carries the same content-free fields as the unary
+				// error body. No plan type or upstream text is returned.
+				writeSSE(w, "subscription.error", subscriptionFailureStreamEvent(codexsubscription.ClassifyFailure(invokeErr, time.Now())))
 				_ = w.Flush()
 				return
 			}
@@ -251,7 +260,13 @@ func registerCodexSubscriptionRoutes(
 				ProviderKey:    connection.ProviderKey,
 				Metadata:       map[string]any{"requestId": response.RequestID, "model": response.ModelUsed, "stream": true},
 			})
-			writeSSE(w, "subscription.done", codexSubscriptionStreamEvent{Type: "done", RequestID: response.RequestID, ModelUsed: response.ModelUsed})
+			writeSSE(w, "subscription.done", codexSubscriptionStreamEvent{
+				Type:      "done",
+				RequestID: response.RequestID,
+				ModelUsed: response.ModelUsed,
+				Usage:     response.Usage,
+				PhasesMs:  response.PhasesMs,
+			})
 			_ = w.Flush()
 		})
 		return nil
@@ -266,7 +281,12 @@ func validateCodexSubscriptionInference(c *fiber.Ctx, cfg ServerConfig, body cod
 	if err != nil {
 		return store.Connection{}, err
 	}
-	if connection.ProviderKey != codexsubscription.ProviderKey || connection.ConnectorType != codexsubscription.ConnectorType || connection.DeletedAt != nil || connection.Status != "active" {
+	subscription := connection.ProviderKey == codexsubscription.ProviderKey && connection.ConnectorType == codexsubscription.ConnectorType && connection.DeletedAt == nil
+	if subscription && connection.Status == "needs_refresh" {
+		// The sign-in already needs renewing: say so before any turn runs.
+		return store.Connection{}, auth.NewError(fiber.StatusConflict, string(codexsubscription.FailureReauthRequired), "Reconnect your ChatGPT subscription in Integrations.")
+	}
+	if !subscription || connection.Status != "active" {
 		return store.Connection{}, auth.NewError(fiber.StatusConflict, "subscription_connection_inactive", "The selected ChatGPT subscription connection is not active")
 	}
 	if connection.OrganizationID != strings.TrimSpace(body.OrganizationID) || connection.UserID != strings.TrimSpace(body.UserID) {
@@ -287,6 +307,7 @@ func codexSubscriptionInvokeRequest(connection store.Connection, body codexSubsc
 		MaxTokens:       body.MaxTokens,
 		ReasoningEffort: strings.TrimSpace(body.ReasoningEffort),
 		ServiceTier:     strings.TrimSpace(body.ServiceTier),
+		OutputSchema:    body.OutputSchema,
 	}
 }
 
@@ -297,6 +318,18 @@ type codexSubscriptionStreamEvent struct {
 	ModelUsed string `json:"modelUsed,omitempty"`
 	Code      string `json:"code,omitempty"`
 	Message   string `json:"message,omitempty"`
+	// ResetsAt, RetryAfterMs, WindowMinutes and LimitReachedType ride on the
+	// error event only, when known: the same content-free fields as the unary
+	// error body.
+	ResetsAt         string `json:"resetsAt,omitempty"`
+	RetryAfterMs     int64  `json:"retryAfterMs,omitempty"`
+	WindowMinutes    int    `json:"windowMinutes,omitempty"`
+	LimitReachedType string `json:"limitReachedType,omitempty"`
+	// Usage and PhasesMs ride on the done event only, with the same meaning
+	// as on the unary InvokeResponse: token counts and content-free broker
+	// phase durations of the completed turn.
+	Usage    *codexsubscription.TokenUsage `json:"usage,omitempty"`
+	PhasesMs map[string]int64              `json:"phasesMs,omitempty"`
 }
 
 // markCodexSubscriptionNeedsRefresh reconciles database state with the
@@ -411,6 +444,7 @@ type codexSubscriptionInferBody struct {
 	MaxTokens       int                             `json:"maxTokens"`
 	ReasoningEffort string                          `json:"reasoningEffort"`
 	ServiceTier     string                          `json:"serviceTier"`
+	OutputSchema    json.RawMessage                 `json:"outputSchema,omitempty"`
 }
 
 func subscriptionError(c *fiber.Ctx, err error) error {
@@ -425,13 +459,108 @@ func subscriptionError(c *fiber.Ctx, err error) error {
 		return apiError(c, fiber.StatusGone, "subscription_login_expired", "The subscription sign-in session expired. Start a new connection.")
 	case errors.Is(err, codexsubscription.ErrInvalidRequest):
 		return apiError(c, fiber.StatusBadRequest, "invalid_subscription_request", "The subscription request is invalid.")
-	case errors.Is(err, codexsubscription.ErrReauthenticationRequired):
-		return apiError(c, fiber.StatusConflict, "subscription_reauthentication_required", "Reconnect your ChatGPT subscription in Integrations.")
-	default:
-		var authErr auth.Error
-		if errors.As(err, &authErr) {
-			return authAwareError(c, authErr)
+	}
+	var authErr auth.Error
+	if errors.As(err, &authErr) {
+		return authAwareError(c, authErr)
+	}
+	return subscriptionFailureError(c, codexsubscription.ClassifyFailure(err, time.Now()))
+}
+
+// subscriptionFailureStatus is the unary HTTP status of each public failure
+// code.
+func subscriptionFailureStatus(code codexsubscription.FailureCode) int {
+	switch code {
+	case codexsubscription.FailureUsageLimit, codexsubscription.FailureRateLimited:
+		return fiber.StatusTooManyRequests
+	case codexsubscription.FailureReauthRequired:
+		return fiber.StatusConflict
+	case codexsubscription.FailureUpstreamUnavailable:
+		return fiber.StatusServiceUnavailable
+	case codexsubscription.FailureContextTooLong:
+		return fiber.StatusRequestEntityTooLarge
+	case codexsubscription.FailureBadRequest:
+		return fiber.StatusUnprocessableEntity
+	}
+	return fiber.StatusBadGateway
+}
+
+// subscriptionFailureMessage is the fixed English message of each code. It is
+// never derived from upstream text.
+//
+// A usage limit with neither a reset nor a retry hint may also be a plan
+// without Codex (or with its credits spent): the pinned Codex app-server
+// reports all of them as usageLimitExceeded, so the message names both. rate_limited covers the broker's own concurrency queue and
+// Integration Core's request limiter as well as a short ChatGPT throttle, so
+// its message does not blame ChatGPT.
+func subscriptionFailureMessage(failure codexsubscription.Failure, streamed bool) string {
+	switch failure.Code {
+	case codexsubscription.FailureUsageLimit:
+		if failure.ResetsAt.IsZero() && failure.RetryAfter <= 0 {
+			return "The connected ChatGPT plan has reached its Codex usage limit, or does not include Codex. Check the plan in ChatGPT."
 		}
-		return apiError(c, fiber.StatusBadGateway, "subscription_broker_failed", "The ChatGPT subscription broker could not complete the request.")
+		return "The connected ChatGPT plan has reached its Codex usage limit."
+	case codexsubscription.FailureReauthRequired:
+		return "Reconnect your ChatGPT subscription in Integrations."
+	case codexsubscription.FailureUpstreamUnavailable:
+		return "ChatGPT did not answer. Try again shortly."
+	case codexsubscription.FailureContextTooLong:
+		return "The conversation is too long for the ChatGPT model."
+	case codexsubscription.FailureBadRequest:
+		return "ChatGPT rejected the request."
+	case codexsubscription.FailureRateLimited:
+		if streamed {
+			return "The ChatGPT subscription is busy. Retry later."
+		}
+		return "The ChatGPT subscription is busy. Retry after the indicated time."
+	}
+	if streamed {
+		return "The ChatGPT subscription broker could not complete the streamed request."
+	}
+	return "The ChatGPT subscription broker could not complete the request."
+}
+
+// subscriptionFailureDetails are the optional content-free fields of a
+// failure, each omitted when unknown: the reset time and window length are
+// account metadata, never content, and the plan type is never returned.
+func subscriptionFailureDetails(failure codexsubscription.Failure) fiber.Map {
+	details := fiber.Map{}
+	if resetsAt := failure.FormatResetsAt(); resetsAt != "" {
+		details["resetsAt"] = resetsAt
+	}
+	if ms := failure.RetryAfterMs(); ms > 0 {
+		details["retryAfterMs"] = ms
+	}
+	if failure.WindowMinutes > 0 {
+		details["windowMinutes"] = failure.WindowMinutes
+	}
+	if failure.LimitReachedType != "" {
+		details["limitReachedType"] = failure.LimitReachedType
+	}
+	return details
+}
+
+// subscriptionFailureError writes a classified failure. Retry-After is in
+// whole seconds: for a usage limit only when its reset (or the upstream's own
+// retry hint) is known, for a rate limit always, and for an upstream outage
+// only when the upstream sent a hint.
+func subscriptionFailureError(c *fiber.Ctx, failure codexsubscription.Failure) error {
+	if seconds, ok := failure.RetryAfterSeconds(); ok {
+		c.Set(fiber.HeaderRetryAfter, strconv.FormatInt(seconds, 10))
+	}
+	return apiErrorWithDetails(c, subscriptionFailureStatus(failure.Code), string(failure.Code), subscriptionFailureMessage(failure, false), subscriptionFailureDetails(failure))
+}
+
+// subscriptionFailureStreamEvent is the subscription.error event of a
+// classified failure after the stream's 200.
+func subscriptionFailureStreamEvent(failure codexsubscription.Failure) codexSubscriptionStreamEvent {
+	return codexSubscriptionStreamEvent{
+		Type:             "error",
+		Code:             string(failure.Code),
+		Message:          subscriptionFailureMessage(failure, true),
+		ResetsAt:         failure.FormatResetsAt(),
+		RetryAfterMs:     failure.RetryAfterMs(),
+		WindowMinutes:    failure.WindowMinutes,
+		LimitReachedType: failure.LimitReachedType,
 	}
 }

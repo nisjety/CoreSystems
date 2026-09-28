@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
-import { humanizeToolName, mergeServerTurnsWithCachedMetadata, messageToTurn, missingSearchResultStep, normalizeCitation, readBrowseWebPreference, summarizeToolArgs, transcriptTurnToChatTurn, turnsToTranscript } from './chat-normalizers'
-import type { ChatTurn } from './chat-types'
+import { cancelledRunTurn, humanizeToolName, mergeServerTurnsWithCachedMetadata, messageToTurn, missingSearchResultStep, normalizeCitation, readBrowseWebPreference, summarizeToolArgs, transcriptTurnToChatTurn, turnsToTranscript, upsertCitation } from './chat-normalizers'
+import type { RunDetail } from '@/shared/api/runs-client'
+import type { ChatTurn, Citation } from './chat-types'
 
 describe('summarizeToolArgs', () => {
   it('returns an empty string for null / undefined / empty inputs', () => {
@@ -78,6 +79,91 @@ describe('normalizeCitation', () => {
     })
 
     expect(normalizeCitation({ url: 'https://example.com/source' })).not.toHaveProperty('claimId')
+  })
+
+  it('passes through sourceGroupLabel (chat-wave2 citations spec §2.6) when set', () => {
+    expect(normalizeCitation({
+      id: 'source-1',
+      title: 'Refund policy',
+      url: 'https://intranet/refunds',
+      snippet: 'Evidence',
+      sourceGroupId: 'kb:sharepoint',
+      sourceGroupLabel: 'Microsoft 365',
+    })).toEqual({
+      id: 'source-1',
+      title: 'Refund policy',
+      url: 'https://intranet/refunds',
+      snippet: 'Evidence',
+      sourceGroupId: 'kb:sharepoint',
+      sourceGroupLabel: 'Microsoft 365',
+    })
+
+    expect(normalizeCitation({ url: 'https://example.com/source' })).not.toHaveProperty('sourceGroupLabel')
+  })
+
+  it('passes through origin (chat-wave2 scope spec §2.2) when it is a known value', () => {
+    expect(normalizeCitation({
+      id: 'source-1',
+      title: 'Refund policy',
+      url: 'https://intranet/refunds',
+      snippet: 'Evidence',
+      origin: 'knowledge',
+    })).toEqual({
+      id: 'source-1',
+      title: 'Refund policy',
+      url: 'https://intranet/refunds',
+      snippet: 'Evidence',
+      origin: 'knowledge',
+    })
+
+    expect(normalizeCitation({
+      id: 'source-2',
+      title: 'Oslo',
+      url: 'https://example.com/oslo',
+      snippet: 'Evidence',
+      origin: 'web',
+    })).toMatchObject({ origin: 'web' })
+
+    // An unrecognized value from a not-yet-updated gateway must never be
+    // trusted verbatim — the UI's own union type only knows the two real ones.
+    expect(normalizeCitation({ url: 'https://example.com/source', origin: 'bogus' })).not.toHaveProperty('origin')
+    expect(normalizeCitation({ url: 'https://example.com/source' })).not.toHaveProperty('origin')
+  })
+})
+
+describe('upsertCitation', () => {
+  it('adds a new citation when neither id nor url match an existing one', () => {
+    const first: Citation = { id: 'c1', title: 'A', url: 'https://a', snippet: 'a' }
+    const second: Citation = { id: 'c2', title: 'B', url: 'https://b', snippet: 'b' }
+    expect(upsertCitation([first], second)).toEqual([first, second])
+  })
+
+  it('merges a second sighting of the same id onto the existing row instead of dropping or duplicating it', () => {
+    // This is the exact anchor-pass scenario (chat-wave2 citations spec
+    // §2.4/§2.5): the first frame has no claimId, the second (same id)
+    // carries one — the result must be ONE row with claimId merged in, not
+    // two rows and not a silently dropped update.
+    const first: Citation = { id: 'c1', title: 'Doc', url: 'https://kb/doc', snippet: 'hello' }
+    const anchored: Citation = { ...first, claimId: 'turn-1:claim-0', start: 4, end: 7 }
+    const result = upsertCitation([first], anchored)
+    expect(result).toHaveLength(1)
+    expect(result[0]).toEqual(anchored)
+  })
+
+  it('merges by url when the id differs but the url matches', () => {
+    const first: Citation = { id: 'c1', title: 'Doc', url: 'https://kb/doc', snippet: 'hello' }
+    const update: Citation = { id: 'c1-alt', title: 'Doc', url: 'https://kb/doc', snippet: 'hello', sourceGroupId: 'kb:sharepoint' }
+    const result = upsertCitation([first], update)
+    expect(result).toHaveLength(1)
+    expect(result[0]?.sourceGroupId).toBe('kb:sharepoint')
+  })
+
+  it('leaves other citations in the list untouched', () => {
+    const untouched: Citation = { id: 'c0', title: 'Other', url: 'https://other', snippet: 'x' }
+    const first: Citation = { id: 'c1', title: 'Doc', url: 'https://kb/doc', snippet: 'hello' }
+    const anchored: Citation = { ...first, claimId: 'turn-1:claim-0' }
+    const result = upsertCitation([untouched, first], anchored)
+    expect(result).toEqual([untouched, anchored])
   })
 })
 
@@ -207,6 +293,36 @@ describe('Support thread display continuity', () => {
   })
 })
 
+describe('durable cancellation without an accepted assistant message', () => {
+  const message = { id: '01M2ZNAY077NFJY543JZ2DJZTB', role: 'user' as const, content: 'Draft from sources.\n\nAttached text.', createdAt: '' }
+  const run: RunDetail = {
+    runId: '01M2ZNAY0W48WCREHFTGPKPNV2', threadId: 'thread', status: 'cancelled', mode: 'execute',
+    goal: `Draft from sources. Attached text. [full-goal-blake3:${'a'.repeat(64)}]`,
+    createdAt: '2026-09-20T15:00:45Z', updatedAt: '2026-09-20T15:00:54Z',
+    checkpointIndex: 0, stepsCompleted: 0, inputTokens: 0, outputTokens: 0,
+  }
+  it('projects only stopped status from the matching durable run', () => {
+    expect(cancelledRunTurn('thread', run.runId, message, run)).toMatchObject({
+      role: 'assistant', content: '', status: 'stopped', streaming: false,
+      runId: run.runId, tools: [], attachments: [], createdAt: run.updatedAt,
+    })
+    expect(cancelledRunTurn('thread', run.runId, message, run)?.requestId).toBeUndefined()
+    expect(cancelledRunTurn('thread', run.runId, message, run)?.artifacts).toBeUndefined()
+  })
+  it('does not borrow a previous, foreign, unbound, active or truncated run', () => {
+    for (const invalid of [
+      { ...run, runId: '01M2ZNAX0W48WCREHFTGPKPNV2' },
+      { ...run, threadId: 'other' }, { ...run, threadId: undefined },
+      { ...run, status: 'completed' }, { ...run, status: 'running' },
+      { ...run, parentRunId: 'parent' }, { ...run, goal: 'Draft from sources.' },
+    ]) expect(cancelledRunTurn('thread', invalid.runId, message, invalid)).toBeNull()
+    expect(cancelledRunTurn('thread', 'another-run', message, run)).toBeNull()
+    expect(cancelledRunTurn('thread', run.runId, { ...message, id: 'msg-0' }, run)).toBeNull()
+    expect(cancelledRunTurn('thread', run.runId, { ...message, content: 'A new question' }, run)).toBeNull()
+    expect(cancelledRunTurn('thread', run.runId, { ...message, id: '01M2ZNAY0W7NFJY543JZ2DJZTB' }, run)).toBeNull()
+  })
+})
+
 describe('mergeServerTurnsWithCachedMetadata (resumable tail, §3b)', () => {
   const turn = (over: Partial<ChatTurn>): ChatTurn => ({
     id: 'id',
@@ -279,15 +395,26 @@ describe('mergeServerTurnsWithCachedMetadata (resumable tail, §3b)', () => {
     })
   })
 
-  it('still carries a terminal cached status onto a status-less server turn', () => {
+  // A cached 'stopped' yields to the answer the server saved: the gateway
+  // saves nothing on a cancel it honoured, so a saved answer means the Stop
+  // lost the race with publication, and "Stoppet" over it would be false (a
+  // reload before the Stop reconciliation finished used to keep it). A cached
+  // 'error' still carries: a failed check saves its fixed explanation.
+  it('lets a server-saved answer replace a cached stop, but still carries a cached error', () => {
     const server = [
       turn({ id: 'u1' }),
       turn({ id: 'srv-a1', role: 'assistant', content: 'answer' }),
     ]
-    const cached = [
+    const stopped = [
       turn({ id: 'u1' }),
       turn({ id: 'a1', role: 'assistant', content: 'answer', status: 'stopped' }),
     ]
-    expect(mergeServerTurnsWithCachedMetadata(server, cached).at(1)?.status).toBe('stopped')
+    expect(mergeServerTurnsWithCachedMetadata(server, stopped).at(1)?.status).toBeUndefined()
+    expect(mergeServerTurnsWithCachedMetadata(server, stopped).at(1)?.content).toBe('answer')
+    const failed = [
+      turn({ id: 'u1' }),
+      turn({ id: 'a1', role: 'assistant', content: 'answer', status: 'error' }),
+    ]
+    expect(mergeServerTurnsWithCachedMetadata(server, failed).at(1)?.status).toBe('error')
   })
 })

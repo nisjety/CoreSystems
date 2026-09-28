@@ -67,11 +67,14 @@ func (s *Store) RecordEntry(ctx context.Context, e ledger.Entry) error {
 	}
 
 	scopedKey := scopedIdempotencyKey(e.OrgID, e.IdempotencyKey)
+	// An unknown cost basis is stored as NULL (migration 0005), so a reader
+	// can tell "the producer did not say" from a reported basis.
 	const q = `
 		INSERT INTO cost_entries
 			(id, org_id, user_id, producer_id, run_id, request_id, model,
-			 input_tokens, output_tokens, cost_usd, idempotency_key, created_at)
-		SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12
+			 input_tokens, output_tokens, cost_usd, idempotency_key, created_at,
+			 cache_read_input_tokens, cache_creation_input_tokens, cost_basis)
+		SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $14, $15, NULLIF($16::text, '')
 		WHERE $13 = '' OR NOT EXISTS (
 			SELECT 1 FROM cost_entries
 			WHERE org_id = $2 AND idempotency_key IN ($11, $13)
@@ -81,6 +84,7 @@ func (s *Store) RecordEntry(ctx context.Context, e ledger.Entry) error {
 	_, err = s.pool.Exec(ctx, q,
 		id, e.OrgID, e.UserID, e.ProducerID, e.RunID, e.RequestID, e.Model,
 		e.InputTokens, e.OutputTokens, e.CostUSD, scopedKey, createdAt, e.IdempotencyKey,
+		e.CacheReadInputTokens, e.CacheCreationInputTokens, e.CostBasis,
 	)
 	if err != nil {
 		return fmt.Errorf("postgres ledger: insert entry: %w", err)
@@ -95,7 +99,10 @@ func (s *Store) GetUsage(ctx context.Context, orgID, userID string) (*ledger.Usa
 			COALESCE(SUM(input_tokens), 0),
 			COALESCE(SUM(output_tokens), 0),
 			COALESCE(SUM(cost_usd), 0)::double precision,
-			COUNT(*)
+			COUNT(*),
+			COALESCE(SUM(cache_read_input_tokens), 0),
+			COALESCE(SUM(cache_creation_input_tokens), 0),
+			`+meteredTokenColumns+`
 		FROM cost_entries
 		WHERE org_id = $1 AND user_id = $2`, orgID, userID)
 	if err != nil {
@@ -120,7 +127,9 @@ func (s *Store) GetRunUsage(ctx context.Context, runID string) (*ledger.Usage, e
 			COALESCE(SUM(input_tokens), 0),
 			COALESCE(SUM(output_tokens), 0),
 			COALESCE(SUM(cost_usd), 0)::double precision,
-			COUNT(*)
+			COUNT(*),
+			COALESCE(SUM(cache_read_input_tokens), 0),
+			COALESCE(SUM(cache_creation_input_tokens), 0)
 		FROM cost_entries
 		WHERE run_id = $1`, runID)
 
@@ -128,7 +137,10 @@ func (s *Store) GetRunUsage(ctx context.Context, runID string) (*ledger.Usage, e
 		orgID string
 		u     ledger.Usage
 	)
-	if err := row.Scan(&orgID, &u.TotalInputTokens, &u.TotalOutputTokens, &u.TotalCostUSD, &u.EntryCount); err != nil {
+	if err := row.Scan(
+		&orgID, &u.TotalInputTokens, &u.TotalOutputTokens, &u.TotalCostUSD, &u.EntryCount,
+		&u.TotalCacheReadInputTokens, &u.TotalCacheCreationInputTokens,
+	); err != nil {
 		return nil, fmt.Errorf("postgres ledger: run usage: %w", err)
 	}
 	if u.EntryCount == 0 {
@@ -148,7 +160,10 @@ func (s *Store) Aggregate(ctx context.Context, f ledger.AggregateFilter) (*ledge
 			COALESCE(SUM(input_tokens), 0),
 			COALESCE(SUM(output_tokens), 0),
 			COALESCE(SUM(cost_usd), 0)::double precision,
-			COUNT(*)
+			COUNT(*),
+			COALESCE(SUM(cache_read_input_tokens), 0),
+			COALESCE(SUM(cache_creation_input_tokens), 0),
+			` + meteredTokenColumns + `
 		FROM cost_entries` + where
 
 	u, _, err := s.aggregateRowArgs(ctx, q, args)
@@ -171,7 +186,9 @@ func (s *Store) ListEntries(ctx context.Context, f ledger.AggregateFilter, limit
 	q := `
 		SELECT org_id, user_id, producer_id, run_id, request_id, model,
 			input_tokens, output_tokens, cost_usd::double precision,
-			idempotency_key, created_at
+			idempotency_key, created_at,
+			cache_read_input_tokens, cache_creation_input_tokens,
+			COALESCE(cost_basis, '')
 		FROM cost_entries` + where + `
 		ORDER BY created_at DESC
 		LIMIT $` + itoa(len(args))
@@ -188,6 +205,7 @@ func (s *Store) ListEntries(ctx context.Context, f ledger.AggregateFilter, limit
 		if err := rows.Scan(
 			&e.OrgID, &e.UserID, &e.ProducerID, &e.RunID, &e.RequestID, &e.Model,
 			&e.InputTokens, &e.OutputTokens, &e.CostUSD, &e.IdempotencyKey, &e.CreatedAt,
+			&e.CacheReadInputTokens, &e.CacheCreationInputTokens, &e.CostBasis,
 		); err != nil {
 			return nil, fmt.Errorf("postgres ledger: scan entry: %w", err)
 		}
@@ -230,7 +248,7 @@ func (s *Store) CheckBudget(ctx context.Context, orgID, userID string, maxCostUS
 	if maxCostUSD > 0 && u.TotalCostUSD >= maxCostUSD {
 		return fmt.Errorf("%w: current %.6f >= limit %.6f", ledger.ErrBudgetExceededCost, u.TotalCostUSD, maxCostUSD)
 	}
-	totalTokens := u.TotalInputTokens + u.TotalOutputTokens
+	totalTokens := u.MeteredInputTokens + u.MeteredOutputTokens
 	if maxTokens > 0 && totalTokens >= maxTokens {
 		return fmt.Errorf("%w: current %d >= limit %d", ledger.ErrBudgetExceededTokens, totalTokens, maxTokens)
 	}
@@ -252,8 +270,16 @@ func (s *Store) PurgeOrg(ctx context.Context, orgID string) error {
 	return nil
 }
 
-// aggregateRow runs a fixed 4-column aggregate query and reports whether any
-// row matched (EntryCount > 0).
+// meteredTokenColumns are the last two columns of every aggregateRow query:
+// the input and output tokens of the entries that are not subscription
+// entries, which a token budget caps. A NULL cost_basis (unreported) counts
+// as metered.
+const meteredTokenColumns = `COALESCE(SUM(input_tokens) FILTER (WHERE cost_basis IS DISTINCT FROM 'subscription'), 0),
+			COALESCE(SUM(output_tokens) FILTER (WHERE cost_basis IS DISTINCT FROM 'subscription'), 0)`
+
+// aggregateRow runs a fixed 8-column aggregate query (token/cost totals, entry
+// count, the two cache-token totals, and meteredTokenColumns) and reports
+// whether any row matched (EntryCount > 0).
 func (s *Store) aggregateRow(ctx context.Context, q string, args ...any) (*ledger.Usage, bool, error) {
 	return s.aggregateRowArgs(ctx, q, args)
 }
@@ -261,7 +287,11 @@ func (s *Store) aggregateRow(ctx context.Context, q string, args ...any) (*ledge
 func (s *Store) aggregateRowArgs(ctx context.Context, q string, args []any) (*ledger.Usage, bool, error) {
 	row := s.pool.QueryRow(ctx, q, args...)
 	var u ledger.Usage
-	if err := row.Scan(&u.TotalInputTokens, &u.TotalOutputTokens, &u.TotalCostUSD, &u.EntryCount); err != nil {
+	if err := row.Scan(
+		&u.TotalInputTokens, &u.TotalOutputTokens, &u.TotalCostUSD, &u.EntryCount,
+		&u.TotalCacheReadInputTokens, &u.TotalCacheCreationInputTokens,
+		&u.MeteredInputTokens, &u.MeteredOutputTokens,
+	); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return &ledger.Usage{}, false, nil
 		}

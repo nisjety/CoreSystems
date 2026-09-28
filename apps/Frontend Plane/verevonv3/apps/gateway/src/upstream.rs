@@ -1482,22 +1482,46 @@ pub(crate) async fn proxy_integration_json(
 /// a generic failure.
 const INTEGRATION_ERROR_CODE_ALLOWLIST: &[&str] = &["no_sources_registered"];
 
+/// Owner ruling (security-personal-connections, 2026-09-28): codes that are
+/// NEVER a plan gate, regardless of status code or a plan-worded message
+/// riding along — checked, and returned, BEFORE the plan gate below, the
+/// opposite precedence from `INTEGRATION_ERROR_CODE_ALLOWLIST` (whose codes,
+/// like `no_sources_registered`, CAN legitimately be plan-gated, so the plan
+/// gate must keep winning for those — see `plan_gate_outranks_the_allow_list`).
+/// A personal-connection-ownership 403 is a deterministic identity decision —
+/// no plan the org could buy changes it — so collapsing it into "upgrade your
+/// plan" would be actively misleading. integration-corev2 always returns
+/// these at 403, which is exactly the status this function would otherwise
+/// route to PLAN_REQUIRED.
+const NEVER_PLAN_GATED_INTEGRATION_ERROR_CODES: &[&str] = &[
+    "personal_connection_forbidden",
+    "personal_connection_no_delegated_user",
+];
+
 /// Choose the browser-visible error code for an integration-core failure. The
 /// plan gate keeps precedence over the allow-list: a 402/403 must always route
-/// the user to upgrade, whatever code the upstream attached.
+/// the user to upgrade, whatever code the upstream attached — except for the
+/// never-plan-gated codes above, which are decided first.
 fn integration_error_code(raw: &Value, status: StatusCode, message: &str) -> &'static str {
-    if status.as_u16() == 402
-        || status.as_u16() == 403
-        || message.to_ascii_lowercase().contains("plan")
-    {
-        return "PLAN_REQUIRED";
-    }
     let upstream_code = raw
         .get("error")
         .and_then(|error| error.get("code"))
         .and_then(Value::as_str)
         .map(str::trim)
         .unwrap_or_default();
+    if let Some(code) = NEVER_PLAN_GATED_INTEGRATION_ERROR_CODES
+        .iter()
+        .copied()
+        .find(|allowed| allowed.eq_ignore_ascii_case(upstream_code))
+    {
+        return code;
+    }
+    if status.as_u16() == 402
+        || status.as_u16() == 403
+        || message.to_ascii_lowercase().contains("plan")
+    {
+        return "PLAN_REQUIRED";
+    }
     INTEGRATION_ERROR_CODE_ALLOWLIST
         .iter()
         .copied()
@@ -1623,6 +1647,8 @@ pub(crate) async fn proxy_sse_stream(
         None,
         None,
         None,
+        None,
+        None,
         last_event_id,
         actor,
         zdr,
@@ -1638,6 +1664,11 @@ pub(crate) async fn proxy_sse_stream_with_session(
     body: Option<Value>,
     bearer_token: Option<&str>,
     session_bearer: Option<&str>,
+    // See F-14, apps/verevon-web/plans/system-audits/CHAT_PARITY_AUDIT_2026-09-15.md §3.9: without this,
+    // model-gateway's moderation.rs never sees a bearer for the PII/
+    // injection-defense policy lookup and fails closed (redacts
+    // unconditionally) on every resumed/replayed chat stream too.
+    capability_bearer: Option<&str>,
     last_event_id: Option<&str>,
     actor: Option<(&str, &str)>,
     zdr: bool,
@@ -1649,10 +1680,12 @@ pub(crate) async fn proxy_sse_stream_with_session(
         body,
         bearer_token,
         None,
+        capability_bearer,
         None,
         None,
         None,
         session_bearer,
+        None,
         None,
         last_event_id,
         actor,
@@ -1669,11 +1702,19 @@ pub(crate) async fn proxy_sse_stream_with_data_plane(
     body: Option<Value>,
     bearer_token: Option<&str>,
     data_plane_bearer: Option<&str>,
+    // See F-14, apps/verevon-web/plans/system-audits/CHAT_PARITY_AUDIT_2026-09-15.md §3.9: the org's PII and
+    // injection-defense policies live in capability-core and are looked up by
+    // model-gateway keyed off this bearer. Absent it, moderation.rs fails
+    // closed (redacts everything, including PII the user typed themselves)
+    // rather than consult the org's actual policy.
+    capability_bearer: Option<&str>,
     inference_bearer: Option<&str>,
     execution_bearer: Option<&str>,
     cost_bearer: Option<&str>,
     session_bearer: Option<&str>,
     ingestion_bearer: Option<&str>,
+    // Present only for a Space-scoped turn (see `chat::shared::sandbox_token`).
+    sandbox_bearer: Option<&str>,
     last_event_id: Option<&str>,
     actor: Option<(&str, &str)>,
     zdr: bool,
@@ -1688,6 +1729,12 @@ pub(crate) async fn proxy_sse_stream_with_data_plane(
         .filter(|token| !token.is_empty() && !token.chars().any(char::is_whitespace))
     {
         req = req.header("x-data-plane-authorization", format!("Bearer {token}"));
+    }
+    if let Some(token) = capability_bearer
+        .map(str::trim)
+        .filter(|token| !token.is_empty() && !token.chars().any(char::is_whitespace))
+    {
+        req = req.header("x-capability-authorization", format!("Bearer {token}"));
     }
     if let Some(token) = ingestion_bearer
         .map(str::trim)
@@ -1718,6 +1765,12 @@ pub(crate) async fn proxy_sse_stream_with_data_plane(
         .filter(|token| !token.is_empty() && !token.chars().any(char::is_whitespace))
     {
         req = req.header("x-session-authorization", format!("Bearer {token}"));
+    }
+    if let Some(token) = sandbox_bearer
+        .map(str::trim)
+        .filter(|token| !token.is_empty() && !token.chars().any(char::is_whitespace))
+    {
+        req = req.header("x-sandbox-authorization", format!("Bearer {token}"));
     }
 
     if let Some((user_id, org_id)) = actor {
@@ -1919,6 +1972,32 @@ mod tests {
             "a plan-worded message still routes to upgrade"
         );
     }
+
+    /// Owner ruling (security-personal-connections, 2026-09-28): the
+    /// opposite precedence from `plan_gate_outranks_the_allow_list` above —
+    /// a personal-connection-ownership 403 must reach the SPA as its own
+    /// code, never collapsed into PLAN_REQUIRED, even though integration-
+    /// corev2 always returns it at 403 (the exact status this function
+    /// otherwise treats as a plan gate).
+    #[test]
+    fn personal_connection_ownership_codes_outrank_the_plan_gate() {
+        for code in [
+            "personal_connection_forbidden",
+            "personal_connection_no_delegated_user",
+        ] {
+            let raw = json!({
+                "success": false,
+                "error": { "code": code, "message": "This personal connection belongs to a different user." }
+            });
+            let message = integration_error_message(&raw);
+            assert_eq!(
+                integration_error_code(&raw, StatusCode::FORBIDDEN, &message),
+                code,
+                "{code} must reach the SPA verbatim, not PLAN_REQUIRED"
+            );
+        }
+    }
+
     use crate::middleware::AuthenticatedUser;
     use axum::http::{HeaderMap, HeaderValue};
 

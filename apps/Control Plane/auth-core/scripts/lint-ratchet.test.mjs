@@ -38,7 +38,10 @@ test('changed lint uses only changed TypeScript files and an empty baseline', ()
 
   assert.deepEqual(files, ['src/a.ts', 'src/z.ts', 'test/new.spec.ts']);
   assert.deepEqual(
-    buildEslintArgs({ paths: files, suppressionsPath: '.eslint-clean-suppressions.json' }),
+    buildEslintArgs({
+      paths: files,
+      suppressionsPath: '.eslint-clean-suppressions.json',
+    }),
     [
       'src/a.ts',
       'src/z.ts',

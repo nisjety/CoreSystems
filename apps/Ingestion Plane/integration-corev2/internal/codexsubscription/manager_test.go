@@ -132,6 +132,31 @@ type fakeRunner struct {
 	invokeRequest InvokeRequest
 }
 
+func TestManagerValidatesStructuredOutputBeforeStartingRunner(t *testing.T) {
+	runner := &fakeRunner{}
+	manager, err := NewManager(Config{Enabled: true, Home: t.TempDir()}, runner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := InvokeRequest{ConnectionID: "conn-1", Model: "gpt-5.6-terra", Messages: []ChatMessage{{Role: "user", Content: "Propose a document"}}}
+	for _, invalid := range []string{`null`, `[]`, `{"type":"array"}`, `{`, strings.Repeat(" ", 256*1024+1)} {
+		request.OutputSchema = []byte(invalid)
+		if _, err := manager.Invoke(t.Context(), request); !errors.Is(err, ErrInvalidRequest) {
+			t.Fatalf("expected invalid schema, got %v", err)
+		}
+		if runner.invokeHome != "" {
+			t.Fatal("invalid schema invoked runner")
+		}
+	}
+	request.OutputSchema = []byte(`{"type":"object"}`)
+	if _, err := manager.Invoke(t.Context(), request); err != nil {
+		t.Fatal(err)
+	}
+	if string(runner.invokeRequest.OutputSchema) != string(request.OutputSchema) {
+		t.Fatal("output schema lost")
+	}
+}
+
 func (f *fakeRunner) BeginDeviceLogin(_ context.Context, _ string) (LoginProcess, DeviceCode, error) {
 	if f.login == nil {
 		f.login = &fakeLogin{}

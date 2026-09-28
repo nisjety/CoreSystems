@@ -82,6 +82,21 @@ const ERROR_COPY: Record<string, ErrorCopy> = {
   fingerprint_unavailable: { no: 'Kunne ikke identifisere kilden akkurat nå.', en: 'Could not identify the source right now.' },
 
   // Integrations / delegated auth
+  // Personal-connection ownership (owner ruling 5, security-personal-
+  // connections, 2026-09-28): a personal Microsoft/Google connection (mail,
+  // OneDrive/Drive, calendar, contacts) is usable only by the user who
+  // connected it. integration-corev2 returns these two distinct codes for
+  // "wrong user" vs "no user named at all" — surfaced from the connector-
+  // attach picker (DashboardComposer.tsx's ConnectorAttachPicker) and any
+  // other caller that reads through a connection.
+  personal_connection_forbidden: {
+    no: 'Denne tilkoblingen tilhører en annen bruker og kan ikke brukes her.',
+    en: 'This connection belongs to a different user and cannot be used here.',
+  },
+  personal_connection_no_delegated_user: {
+    no: 'Denne personlige tilkoblingen krever at du er logget inn som eieren.',
+    en: 'This personal connection requires you to be signed in as its owner.',
+  },
   delegated_auth_unavailable: { no: 'Denne integrasjonen er ikke koblet til ennå.', en: 'This integration is not connected yet.' },
   integration_auth_unavailable: { no: 'Denne integrasjonen er ikke koblet til ennå.', en: 'This integration is not connected yet.' },
   imports_auth_unavailable: { no: 'Import-tilkoblingen er ikke satt opp ennå.', en: 'The import connection is not set up yet.' },

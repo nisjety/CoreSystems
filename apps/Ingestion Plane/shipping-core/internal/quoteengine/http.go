@@ -3,6 +3,7 @@ package quoteengine
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"sort"
 	"time"
@@ -126,8 +127,14 @@ func CarriersHandler(engine *Engine) http.HandlerFunc {
 func Handler(engine *Engine, scorer ReliabilityScorer) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var dto quoteRequestDTO
-		if err := json.NewDecoder(r.Body).Decode(&dto); err != nil {
+		decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64*1024))
+		decoder.DisallowUnknownFields()
+		if err := decoder.Decode(&dto); err != nil {
 			http.Error(w, `{"error":"invalid JSON body"}`, http.StatusBadRequest)
+			return
+		}
+		if decoder.Decode(&struct{}{}) != io.EOF {
+			http.Error(w, `{"error":"exactly one quote request is required"}`, http.StatusBadRequest)
 			return
 		}
 		if err := validate.Struct(dto); err != nil {

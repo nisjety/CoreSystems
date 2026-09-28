@@ -63,7 +63,7 @@ func (r OwnerGrantDecisionRequest) Validate() error {
 
 // OwnerGrantDecision is a signed, target-bound authority for a human owner to
 // create or revoke Conversation Core's own resource grant. It never grants a
-// Model effect and it never substitutes Control's Space facts for the
+// Model effect, and it never substitutes Control's Space facts for the
 // Application resource authorization that the owner plane persists.
 type OwnerGrantDecision struct {
 	DecisionRef               string    `json:"decision_ref"`

@@ -167,7 +167,18 @@ func (c *AuthClient) VerifyToken(ctx context.Context, token string) (auth.Princi
 	orgID := stringClaim(claims, "org_id")
 	principalType := stringClaim(claims, "principal_type")
 	userID := stringClaim(claims, "user_id")
+	// delegatedUserID names the end user a service principal acts FOR
+	// (owner ruling: personal Microsoft/Google connections are usable only
+	// by that named user). It is read only from the token's own verified
+	// acting_user_id claim — never from userID/service_id above, and never
+	// from anything the caller supplies outside this signed token — and
+	// only for a service principal; auth-core does not issue this claim
+	// yet, so it is empty until that issuance path exists, and every
+	// current service-principal caller is correctly treated as naming no
+	// end user until then. See auth.Principal.EffectiveUserID.
+	delegatedUserID := ""
 	if principalType == "service" {
+		delegatedUserID = stringClaim(claims, "acting_user_id")
 		userID = stringClaim(claims, "service_id")
 	}
 	if orgID == "" || userID == "" || stringClaim(claims, "sub") != userID || (principalType != "user" && principalType != "service") {
@@ -180,7 +191,7 @@ func (c *AuthClient) VerifyToken(ctx context.Context, token string) (auth.Princi
 	}
 	return auth.Principal{
 		UserID: userID, OrganizationID: orgID, Role: role, Email: stringClaim(claims, "email"),
-		PrincipalType: principalType, Scopes: scopes,
+		PrincipalType: principalType, Scopes: scopes, DelegatedUserID: delegatedUserID,
 	}, nil
 }
 

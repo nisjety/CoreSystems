@@ -1,0 +1,26 @@
+--- a/src/features/chat/components/chat-appearance-refinements.css
++++ b/src/features/chat/components/chat-appearance-refinements.css
+@@ -4,7 +4,7 @@
+ [data-chat-appearance~='navigation'] .core-navbar__inner { gap: 24px; }
+ [data-chat-appearance~='navigation'] .core-navbar__action-group { gap: 4px; padding-left: 0; }
+ [data-chat-appearance~='navigation'] .core-navbar__actions { gap: 4px; flex-shrink: 0; }
+-[data-chat-appearance~='navigation'] .core-navbar__search { max-width: 560px; }
++[data-chat-appearance~='navigation'] .core-navbar__search { max-width: 420px; }
+ [data-chat-appearance~='navigation'] .core-breadcrumb { min-width: 0; gap: 8px; }
+ [data-chat-appearance~='navigation'] .core-breadcrumb__workspace > span { max-width: 160px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+ [data-chat-appearance~='navigation'] .core-navbar__sidebar-toggle,
+@@ -21,10 +21,11 @@
+ .core-rail-filled-icon { flex-shrink: 0; }
+ 
+ /* A recognizable input-shaped trigger with explicit text/icon contrast. */
+-[data-chat-appearance~='navigation'] .verevon-navbar-search-trigger { min-height: var(--verevon-touch-target, 44px); border: 0; border-radius: 999px; background: var(--panel); padding-inline: 18px; box-shadow: 0 1px 3px rgb(0 0 0 / 3%); }
++[data-chat-appearance~='navigation'] .verevon-navbar-search-trigger { height: 36px; min-height: 36px; border: 0; border-radius: 999px; background: var(--panel); padding-inline: 14px; gap: 8px; font: inherit; font-size: 13px; font-weight: 400; line-height: 1.4; box-shadow: 0 1px 3px rgb(0 0 0 / 3%); }
+ [data-chat-appearance~='navigation'] .verevon-navbar-search-trigger :is(.verevon-navbar-search-icon, .verevon-navbar-search-label, .verevon-navbar-shortcut-key) { color: var(--verevon-text); }
+-[data-chat-appearance~='navigation'] .verevon-navbar-search-label { font-size: 14px; }
+-[data-chat-appearance~='navigation'] .verevon-navbar-shortcut-key { background: transparent; border-color: transparent; font-size: 11px; }
++[data-chat-appearance~='navigation'] .verevon-navbar-search-label { font: inherit; }
++[data-chat-appearance~='navigation'] .verevon-navbar-search-icon { width: 14px; height: 14px; }
++[data-chat-appearance~='navigation'] .verevon-navbar-shortcut-key { background: transparent; border-color: transparent; font-family: inherit; font-size: 10px; }
+ [data-chat-appearance~='navigation'] .verevon-navbar-shortcut-key-min { display: none; }
+ [data-chat-appearance~='navigation'] .verevon-navbar-search-trigger:focus-visible,
+ [data-chat-appearance~='navigation'] :is(.core-navbar__sidebar-toggle, .core-navbar-more > summary, .core-mini-nav-button):focus-visible { outline: 2px solid var(--verevon-accent-ink); outline-offset: 3px; box-shadow: none; }

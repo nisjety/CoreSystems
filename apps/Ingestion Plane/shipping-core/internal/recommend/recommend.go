@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
 	"shipping-core/internal/carrier"
 	"shipping-core/internal/modelplane"
@@ -35,14 +36,18 @@ const schema = `{"type":"object","properties":{` +
 // parse — callers must check it before trusting the other fields; this
 // package never fabricates a carrier pick to fill the gap.
 type Recommendation struct {
-	Available              bool     `json:"available"`
-	RecommendedCarrierCode string   `json:"recommended_carrier_code,omitempty"`
-	RecommendedServiceName string   `json:"recommended_service_name,omitempty"`
-	Reasoning              string   `json:"reasoning,omitempty"`
-	Confidence             float64  `json:"confidence,omitempty"`
-	Tradeoffs              []string `json:"tradeoffs,omitempty"`
-	ModelUsed              string   `json:"model_used,omitempty"`
-	UnavailableReason      string   `json:"unavailable_reason,omitempty"`
+	Environment            string    `json:"environment,omitempty"`
+	IsMock                 bool      `json:"is_mock"`
+	QuotedAt               time.Time `json:"quoted_at,omitempty"`
+	PackageCount           int       `json:"package_count,omitempty"`
+	Available              bool      `json:"available"`
+	RecommendedCarrierCode string    `json:"recommended_carrier_code,omitempty"`
+	RecommendedServiceName string    `json:"recommended_service_name,omitempty"`
+	Reasoning              string    `json:"reasoning,omitempty"`
+	Confidence             float64   `json:"confidence,omitempty"`
+	Tradeoffs              []string  `json:"tradeoffs,omitempty"`
+	ModelUsed              string    `json:"model_used,omitempty"`
+	UnavailableReason      string    `json:"unavailable_reason,omitempty"`
 }
 
 // ModelClient is the subset of modelplane.Client this package depends on
@@ -91,21 +96,25 @@ func Recommend(ctx context.Context, client ModelClient, req carrier.QuoteRequest
 	}
 	// Guard against the model naming a carrier that wasn't actually
 	// quoted — a hallucinated pick is worse than none.
-	validCode := false
+	var selected *carrier.Quote
 	for _, q := range quotes {
-		if q.CarrierCode == parsed.RecommendedCarrierCode {
-			validCode = true
+		if q.CarrierCode == parsed.RecommendedCarrierCode && (parsed.RecommendedServiceName == "" || parsed.RecommendedServiceName == q.ServiceName) {
+			selected = &q
 			break
 		}
 	}
-	if !validCode {
+	if selected == nil {
 		return Recommendation{UnavailableReason: fmt.Sprintf("model recommended carrier_code %q, which was not among the quoted options", parsed.RecommendedCarrierCode)}
 	}
 
 	return Recommendation{
+		Environment:            selected.Environment,
+		IsMock:                 selected.IsMock,
+		QuotedAt:               selected.QuotedAt,
+		PackageCount:           selected.PackageCount,
 		Available:              true,
 		RecommendedCarrierCode: parsed.RecommendedCarrierCode,
-		RecommendedServiceName: parsed.RecommendedServiceName,
+		RecommendedServiceName: selected.ServiceName,
 		Reasoning:              parsed.Reasoning,
 		Confidence:             parsed.Confidence,
 		Tradeoffs:              parsed.Tradeoffs,
@@ -129,6 +138,11 @@ func buildPrompt(req carrier.QuoteRequest, quotes []carrier.Quote) string {
 		fmt.Fprintf(&b, "- carrier_code=%s (%s), service=%s: %d.%02d %s",
 			q.CarrierCode, q.CarrierName, q.ServiceName,
 			q.Price.AmountCents/100, q.Price.AmountCents%100, q.Price.Currency)
+		environment := q.Environment
+		if environment == "" {
+			environment = "unknown"
+		}
+		fmt.Fprintf(&b, ", environment=%s, package_count=%d, quoted_at=%s", environment, q.PackageCount, q.QuotedAt.Format(time.RFC3339))
 		if q.TransitDays > 0 {
 			fmt.Fprintf(&b, ", %d day(s) transit", q.TransitDays)
 		}
@@ -144,6 +158,7 @@ func buildPrompt(req carrier.QuoteRequest, quotes []carrier.Quote) string {
 		b.WriteString("\n")
 	}
 	b.WriteString("\nRecommend the single best option using carrier_code exactly as given above. " +
+		"Copy the exact quoted service name. Production quotes are live estimates, while sandbox/mock prices are test data and unknown environment is unverified; state this explicitly and prefer production estimates for real shipments. These prices cover the quoted package count only, never an unquoted larger shipment. " +
 		"Weigh price, speed, and on-time delivery history (when present) against what this shipment " +
 		"needs — do not default to the cheapest option if a modest price difference buys materially " +
 		"better reliability or speed. Explain your reasoning in 2-3 sentences, and note any real " +

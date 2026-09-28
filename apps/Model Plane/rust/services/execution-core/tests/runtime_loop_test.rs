@@ -41,6 +41,7 @@ async fn deny_mode_blocks_execution() {
         None,
         None,
         &ALLOW_POLICY,
+        None,
     )
     .await;
     assert_eq!(outcome.status, "permission_denied");
@@ -71,6 +72,7 @@ async fn ask_mode_requires_approval_for_tools() {
         None,
         None,
         &ALLOW_POLICY,
+        None,
     )
     .await;
     assert_eq!(outcome.status, "awaiting_approval");
@@ -97,6 +99,7 @@ async fn auto_mode_executes_tool() {
         None,
         None,
         &ALLOW_POLICY,
+        None,
     )
     .await;
     assert_eq!(outcome.status, "completed");
@@ -129,6 +132,7 @@ async fn hook_can_block_step() {
         None,
         None,
         &ALLOW_POLICY,
+        None,
     )
     .await;
     assert_eq!(outcome.status, "failed");
@@ -156,6 +160,7 @@ async fn fail_tool_returns_error() {
         None,
         None,
         &ALLOW_POLICY,
+        None,
     )
     .await;
     assert_eq!(outcome.status, "failed");
@@ -187,6 +192,7 @@ async fn subagent_without_a_loop_to_delegate_into_fails_closed() {
         None,
         None,
         &ALLOW_POLICY,
+        None,
     )
     .await;
     assert_eq!(outcome.status, "failed");
@@ -229,6 +235,7 @@ async fn compaction_triggers_when_output_large() {
         None,
         None,
         &ALLOW_POLICY,
+        None,
     )
     .await;
     assert_eq!(outcome.status, "completed");
@@ -256,6 +263,7 @@ async fn reasoning_step_without_tool() {
         None,
         None,
         &ALLOW_POLICY,
+        None,
     )
     .await;
     assert_eq!(outcome.status, "completed");

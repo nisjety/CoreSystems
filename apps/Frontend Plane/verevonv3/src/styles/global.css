@@ -2579,6 +2579,183 @@ textarea:focus-visible {
   color: var(--panel);
 }
 
+/* Per-row "more options" menu (Rename / Delete). Same hover-reveal treatment
+   as the pin toggle above, but opens a small command menu instead of acting
+   in place. */
+.core-chat-session__menu-root {
+  position: relative;
+  display: flex;
+  flex-shrink: 0;
+}
+
+.core-chat-session__menu-trigger {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--sidebar-muted);
+  cursor: pointer;
+  opacity: 0;
+  transition:
+    opacity 140ms ease,
+    color 140ms ease,
+    background-color 140ms ease;
+}
+
+/* Stays visible while its own menu is open, even after the pointer leaves the
+   row -- otherwise opening the menu and moving toward it fades the trigger
+   (and the "aria-expanded" state it reflects) out from under the pointer.
+   Also stays visible on keyboard focus: a Tab-only reader landing on this
+   button while it is still opacity: 0 would have no visible focus ring at
+   all (opacity hides the whole element, ring included), same reveal-on-focus
+   treatment already used for e.g. `.verevon-inbox-ticket-row__actions`. */
+.core-chat-session-row:hover .core-chat-session__menu-trigger,
+.core-chat-session__menu-trigger:focus-visible,
+.core-chat-session__menu-trigger[aria-expanded='true'] {
+  opacity: 1;
+}
+
+.core-chat-session__menu-trigger:hover {
+  background: rgb(238 238 238 / 54%);
+  color: var(--verevon-dark-surface);
+}
+
+.dark .core-chat-session__menu-trigger:hover {
+  background: rgb(255 255 255 / 8%);
+  color: var(--panel);
+}
+
+.core-chat-session__menu {
+  position: absolute;
+  z-index: 90;
+  top: calc(100% + 4px);
+  right: 0;
+  min-width: 180px;
+  margin: 0;
+  padding: 4px;
+  list-style: none;
+}
+
+.core-chat-session__menu li {
+  list-style: none;
+}
+
+.core-chat-session__menu-item {
+  display: flex;
+  width: 100%;
+  height: 34px;
+  align-items: center;
+  gap: 8px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  padding: 0 10px;
+  color: var(--verevon-text-muted);
+  cursor: pointer;
+  font-size: 13px;
+  text-align: left;
+  white-space: nowrap;
+}
+
+.core-chat-session__menu-item:hover,
+.core-chat-session__menu-item:focus-visible {
+  background: var(--linear-main-bg);
+  color: var(--ink);
+}
+
+.core-chat-session__menu-item--danger {
+  color: var(--danger);
+}
+
+.core-chat-session__menu-item--danger:hover,
+.core-chat-session__menu-item--danger:focus-visible {
+  background: color-mix(in srgb, var(--danger) 10%, transparent);
+  color: var(--danger);
+}
+
+/* `SpaceConfirmButton` renders its own consequence line under the button once
+   armed; inside this fixed-width menu that text needs to wrap and keep the
+   menu item's own horizontal padding instead of sitting flush left. */
+.core-chat-session__menu .verevon-space-confirm {
+  display: flex;
+  width: 100%;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 2px;
+}
+
+.core-chat-session__menu .verevon-space-confirm__consequence {
+  padding: 0 10px 6px;
+  white-space: normal;
+}
+
+/* Inline rename: swaps in for the row's title button while editing, at the
+   same row height. */
+.core-chat-session__rename {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  align-items: center;
+  gap: 4px;
+  padding: 0 4px 0 10px;
+}
+
+.core-chat-session__rename-input {
+  min-width: 0;
+  flex: 1;
+  border: 1px solid var(--verevon-border-soft);
+  border-radius: 7px;
+  background: var(--panel);
+  padding: 5px 8px;
+  color: var(--verevon-dark-surface);
+  font: inherit;
+  font-size: 13px;
+}
+
+.core-chat-session__rename-input:focus-visible {
+  outline: 2px solid var(--verevon-a-earth);
+  outline-offset: 1px;
+}
+
+.dark .core-chat-session__rename-input {
+  border-color: var(--verevon-dark-surface-soft);
+  background: var(--foreground);
+  color: var(--panel);
+}
+
+.core-chat-session__rename-action {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--sidebar-muted);
+  cursor: pointer;
+}
+
+.core-chat-session__rename-action:hover {
+  background: rgb(238 238 238 / 54%);
+  color: var(--verevon-dark-surface);
+}
+
+.dark .core-chat-session__rename-action:hover {
+  background: rgb(255 255 255 / 8%);
+  color: var(--panel);
+}
+
+.core-chat-session__rename-action--danger:hover {
+  color: var(--danger);
+}
+
 .core-chat-sidebar__clear {
   display: flex;
   height: 40px;
@@ -8190,6 +8367,94 @@ textarea:focus-visible {
 .dark .dashboard-composer-settings-item-icon {
   background: rgb(255 255 255 / 10%);
   color: var(--verevon-border-warm);
+}
+
+/* Connector-attach picker ("Fra en tilkoblet kilde") */
+.dashboard-composer-connector-picker {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 4px 2px 2px;
+}
+
+.dashboard-composer-connector-tabs,
+.dashboard-composer-connector-kinds {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 0 8px;
+}
+
+.dashboard-composer-connector-tab,
+.dashboard-composer-connector-kind {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  border: 0;
+  border-radius: 999px;
+  background: rgb(0 0 0 / 4%);
+  padding: 4px 10px;
+  color: var(--verevon-text-muted);
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.dashboard-composer-connector-tab--active,
+.dashboard-composer-connector-kind--active {
+  background: var(--verevon-chat-fjord);
+  color: #fff;
+}
+
+.dashboard-composer-connector-search {
+  margin: 0 8px;
+  border: 1px solid rgb(0 0 0 / 10%);
+  border-radius: 10px;
+  background: transparent;
+  padding: 6px 10px;
+  color: var(--verevon-e-primary);
+  font-size: 12px;
+  outline: none;
+}
+
+.dashboard-composer-connector-search:focus-visible {
+  border-color: var(--verevon-chat-fjord);
+}
+
+.dashboard-composer-connector-results {
+  max-height: 220px;
+  overflow-y: auto;
+}
+
+.dashboard-composer-connector-row {
+  width: 100%;
+  text-align: left;
+  cursor: pointer;
+}
+
+.dashboard-composer-connector-row:disabled,
+.dashboard-composer-connector-row--disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.dashboard-composer-connector-size {
+  flex-shrink: 0;
+}
+
+.dashboard-composer-connector-spinner {
+  animation: verevon-spin 900ms linear infinite;
+}
+
+.dark .dashboard-composer-connector-tab,
+.dark .dashboard-composer-connector-kind {
+  background: rgb(255 255 255 / 10%);
+  color: var(--verevon-border-warm);
+}
+
+.dark .dashboard-composer-connector-search {
+  border-color: rgb(255 255 255 / 14%);
+  color: var(--verevon-text-soft);
 }
 
 .dashboard-composer-drop-overlay {
@@ -19690,6 +19955,29 @@ textarea:focus-visible {
   color: var(--panel);
 }
 
+/* Title row of the chunk panel: the document's name with its destructive
+   action pushed to the trailing edge, so "Slett fra kunnskapsbasen" reads as
+   an action ON the named document rather than a page-level control. */
+.knowledge-chunks-panel__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.knowledge-chunks-panel__delete {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--verevon-danger, #b42318);
+}
+
+.knowledge-chunks-panel__delete:hover {
+  background: color-mix(in srgb, var(--verevon-danger, #b42318) 8%, transparent);
+}
+
 .knowledge-integration-card h3 {
   margin-top: 16px;
   font-size: 16px;
@@ -22935,7 +23223,8 @@ body.verevon-chat-canvas-resizing * {
 .verevon-chat-attachment-workspace__table-wrap {
   max-height: min(62vh, 720px);
   overflow: auto;
-  background: #101217;
+  background: var(--verevon-i-surface);
+  color: var(--verevon-j-text);
 }
 
 .verevon-chat-attachment-workspace__table-wrap .verevon-chat-table {
@@ -22945,7 +23234,7 @@ body.verevon-chat-canvas-resizing * {
 
 .verevon-chat-attachment-workspace__table-wrap .verevon-chat-table caption {
   padding: 8px 14px;
-  color: var(--verevon-e-subtle);
+  color: var(--verevon-e-muted);
   font-size: 11px;
   text-align: left;
 }
@@ -22953,7 +23242,13 @@ body.verevon-chat-canvas-resizing * {
 .verevon-chat-attachment-workspace__table-wrap .verevon-chat-table th,
 .verevon-chat-attachment-workspace__table-wrap .verevon-chat-table td {
   max-width: 30ch;
+  color: var(--verevon-j-text);
   overflow-wrap: anywhere;
+}
+
+.verevon-chat-attachment-workspace__table-wrap .verevon-chat-table th {
+  background: var(--verevon-surface-soft);
+  color: var(--verevon-j-text);
 }
 
 .verevon-chat-attachment-workspace__unavailable {
@@ -24207,6 +24502,27 @@ body.verevon-chat-canvas-resizing * {
   color: var(--subtle);
 }
 
+/* The elapsed-wait counter (see ThinkingDots). Quieter than "Tenker" itself and
+   tabular, so a ticking second does not shuffle the words beside it. */
+.verevon-chat-thinking__elapsed {
+  color: var(--verevon-e-subtle, var(--subtle));
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* What the run is doing, beside the counter (see `deriveStreamActivity`). Same
+   quiet weight as the counter — a status line, not a second heading. Truncated
+   rather than wrapped: an MCP tool name is arbitrarily long, and a wrapping
+   label would push the transcript around on every tool call. */
+.verevon-chat-thinking__activity {
+  overflow: hidden;
+  max-width: 34ch;
+  color: var(--verevon-e-subtle, var(--subtle));
+  font-size: 12px;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
 .verevon-thinking-dots {
   display: inline-flex;
   align-items: center;
@@ -24521,6 +24837,10 @@ body.verevon-chat-canvas-resizing * {
 }
 
 .verevon-chat-header {
+  /* The masked message list creates a stacking context. Keep header menus
+     above it so visible menu items can receive pointer input. */
+  position: relative;
+  z-index: 2;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -25037,11 +25357,128 @@ body.verevon-chat-canvas-resizing * {
   letter-spacing: 0.02em;
 }
 
+/* The label + copy-code button share one row once a fence renders its own
+   header (see TranscriptCodeBlock in ChatMessages.tsx); the label's own
+   padding above still applies to the label-only usage in MermaidDiagram's
+   loading/error states, which have no header wrapping them. */
+.verevon-chat-codeblock__header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px 6px 16px;
+}
+
+.verevon-chat-codeblock__header .verevon-chat-codeblock__label {
+  padding: 0;
+}
+
+.verevon-chat-codeblock__copy {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 5px;
+  margin-left: auto;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  padding: 4px 10px;
+  color: var(--verevon-e-muted);
+  font-family: var(--font-sans);
+  font-size: 11px;
+  font-weight: 650;
+  cursor: pointer;
+  transition: background-color 140ms ease, color 140ms ease;
+}
+
+.verevon-chat-codeblock__copy:hover {
+  background: color-mix(in srgb, var(--verevon-e-subtle) 14%, var(--verevon-surface-soft));
+  color: var(--verevon-j-text);
+}
+
+/* Clipboard write was refused (no permission / insecure context) — the
+   control reports the failure instead of claiming a copy that never
+   happened, same convention as the Artifacts panel's copy action. */
+.verevon-chat-codeblock__copy--failed,
+.verevon-chat-codeblock__copy--failed:hover {
+  background: color-mix(in srgb, var(--danger) 12%, transparent);
+  color: var(--danger);
+}
+
 .verevon-chat-codeblock pre {
   border: 0;
   border-radius: 0;
   margin: 0;
   background: transparent;
+}
+
+/* ── Markdown math (KaTeX) ──────────────────────────────────────────────────── */
+
+.verevon-chat-math--inline {
+  /* KaTeX's own CSS already sizes/aligns the formula; this only keeps a long
+     inline expression from forcing the surrounding line to scroll off-screen
+     on narrow widths — it wraps onto the next line like any other word. */
+  display: inline-block;
+  max-width: 100%;
+  overflow-x: auto;
+  vertical-align: middle;
+}
+
+.verevon-chat-math--block {
+  margin: 4px 0 14px;
+  overflow-x: auto;
+  text-align: center;
+}
+
+.verevon-chat-math--block:last-child {
+  margin-bottom: 0;
+}
+
+/* An unclosed `$$...$$` mid-stream, or one KaTeX rejected: shown as the raw
+   source, same chrome as an ordinary code block, so a broken expression
+   reads as "still text" rather than a rendering failure. */
+.verevon-chat-math-raw {
+  overflow: hidden;
+  overflow-x: auto;
+  border: 0;
+  border-radius: var(--chat-r-md, 12px);
+  margin: 4px 0 14px;
+  padding: 12px 16px;
+  background: var(--verevon-surface-soft);
+  box-shadow: var(--verevon-chat-shadow);
+  font-family: var(--font-mono);
+  font-size: 13px;
+  white-space: pre-wrap;
+}
+
+.verevon-chat-math-raw:last-child {
+  margin-bottom: 0;
+}
+
+/* ── Markdown diagrams (Mermaid) ────────────────────────────────────────────── */
+
+.verevon-chat-mermaid {
+  overflow-x: auto;
+  margin: 4px 0 14px;
+  padding: 12px;
+  border-radius: var(--chat-r-md, 12px);
+  background: var(--verevon-surface-soft);
+  box-shadow: var(--verevon-chat-shadow);
+  text-align: center;
+}
+
+.verevon-chat-mermaid:last-child {
+  margin-bottom: 0;
+}
+
+.verevon-chat-mermaid svg {
+  max-width: 100%;
+  height: auto;
+}
+
+.verevon-chat-mermaid__placeholder {
+  padding: 8px 16px 16px;
+  color: var(--verevon-e-muted);
+  font-size: 13px;
 }
 
 /* ── Markdown tables (GFM pipe tables) ─────────────────────────────────────── */
@@ -25309,6 +25746,24 @@ body.verevon-chat-canvas-resizing * {
   line-height: 1.35;
 }
 
+/* Domain/provider sub-grouping within the popover (chat-wave2 citations
+   spec §2.6) — a group per `sourceGroupId`, falling back to hostname. */
+.verevon-chat-citation-chip__group + .verevon-chat-citation-chip__group {
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px solid var(--verevon-border-soft);
+}
+
+.verevon-chat-citation-chip__group-label {
+  margin: 0 0 2px;
+  padding: 0 6px;
+  color: var(--verevon-e-muted);
+  font-size: 9px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
 /* The chat transcript surface stays light in both themes today (see the
    "premium pass" note below), so the citation chip needs no dark override —
    it already renders correctly against --verevon-i-surface either way. */
@@ -25340,12 +25795,35 @@ body.verevon-chat-canvas-resizing * {
   outline-offset: 1px;
 }
 
+.verevon-chat-attachment-source-badge {
+  margin-left: 6px;
+  border-radius: 999px;
+  background: rgb(0 0 0 / 8%);
+  padding: 1px 7px;
+  color: var(--verevon-text-muted);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  vertical-align: middle;
+}
+
 .verevon-chat-attachment-image {
+  position: relative;
   display: block;
   overflow: hidden;
   border: 0;
   border-radius: 12px;
   box-shadow: var(--verevon-chat-shadow);
+}
+
+.verevon-chat-attachment-image .verevon-chat-attachment-source-badge {
+  position: absolute;
+  right: 4px;
+  bottom: 4px;
+  margin-left: 0;
+  background: rgb(0 0 0 / 55%);
+  color: #fff;
 }
 
 .verevon-chat-attachment-image img {
@@ -25855,6 +26333,30 @@ body.verevon-chat-canvas-resizing * {
   left: auto;
 }
 
+/* A header toolbar (the Resultat panel's Eksporter) opens its menu downward:
+   the panel clips overflow, and above the header there is no room. */
+.verevon-chat-menu__panel--down {
+  top: calc(100% + 4px);
+  bottom: auto;
+}
+
+/* A menu trigger that is a text pill like its neighbours (Kopier, Last ned)
+   rather than the 44px icon target `.verevon-chat-menu > button` sets up. */
+.verevon-chat-menu > button.verevon-chat-artifact-action {
+  display: inline-flex;
+  width: auto;
+  height: auto;
+  padding: 6px 12px;
+  background-color: var(--verevon-surface-soft);
+  background-clip: border-box;
+  color: var(--verevon-e-muted);
+}
+
+.verevon-chat-menu > button.verevon-chat-artifact-action:hover {
+  background-color: color-mix(in srgb, var(--verevon-e-subtle) 14%, var(--verevon-surface-soft));
+  color: var(--verevon-j-text);
+}
+
 .verevon-chat-menu__panel button {
   display: flex;
   width: 100%;
@@ -26140,8 +26642,27 @@ body.verevon-chat-canvas-resizing * {
 }
 
 .verevon-chat-memory-recall-notice svg,
-.verevon-chat-truncated-notice svg {
+.verevon-chat-truncated-notice svg,
+.verevon-chat-source-scope-notice svg {
   flex-shrink: 0;
+}
+
+/* Per-turn retrieval-source filter receipt (chat-wave2 scope spec §2.2).
+   Same neutral, informational tone as memory-recall above — a filter the
+   user chose, reported back, not a warning. */
+.verevon-chat-source-scope-notice {
+  display: inline-flex;
+  width: fit-content;
+  align-items: center;
+  gap: 6px;
+  margin-top: 8px;
+  border: 0;
+  border-radius: 999px;
+  background: var(--verevon-chat-fjord-soft);
+  padding: 5px 12px;
+  color: var(--verevon-chat-fjord);
+  font-size: 12px;
+  font-weight: 600;
 }
 
 /* Follow-up suggestion chips (ChatGPT-style "what to ask next"), rendered
@@ -26212,6 +26733,52 @@ body.verevon-chat-canvas-resizing * {
   color: var(--danger);
   font-size: 12px;
   font-weight: 650;
+}
+
+/* A retry that is not useful yet (a usage limit that has not reset) stays
+   visible, with its time, but cannot be pressed. */
+.verevon-chat-error-notice button:disabled {
+  cursor: not-allowed;
+  box-shadow: none;
+  color: var(--muted-foreground);
+}
+
+.verevon-chat-error-notice__actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+/* The way out of a sign-in that must be renewed: the primary action. */
+.verevon-chat-error-notice__reconnect {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border-radius: 999px;
+  background: var(--danger);
+  padding: 6px 14px;
+  color: var(--verevon-i-surface);
+  font-size: 12px;
+  font-weight: 650;
+  text-decoration: none;
+}
+
+/* Text that streamed before a failure and was not saved: muted and plain, so
+   it reads as a leftover, never as the reply. */
+.verevon-chat-error-notice__unsaved summary {
+  cursor: pointer;
+  color: var(--muted-foreground);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.verevon-chat-error-notice .verevon-chat-error-notice__unsaved p {
+  display: block;
+  margin-top: 8px;
+  color: var(--muted-foreground);
+  font-size: 13px;
+  white-space: pre-wrap;
 }
 
 .verevon-chat-edit-box {
@@ -26511,10 +27078,73 @@ body.verevon-chat-canvas-resizing * {
   text-decoration: none;
 }
 
+/* Read evidence and unread leads used to render as identical cards, so a
+   deep-research turn that read three of twenty-four pages looked like it had
+   read all of them (F-16). The unread group is deliberately flatter than the
+   cards above it: no shadow, no lift on hover, no invitation to read it as
+   evidence — it is a list of what was found, not of what was used. */
+.verevon-chat-source-tally {
+  color: var(--verevon-e-subtle);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.verevon-chat-source-group {
+  display: grid;
+  gap: 10px;
+}
+
+.verevon-chat-source-group__heading {
+  color: var(--verevon-e-muted);
+  font-size: 12px;
+  font-weight: 650;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.verevon-chat-source-group__note {
+  margin-top: -6px;
+  color: var(--verevon-e-subtle);
+  font-size: 12px;
+}
+
+/* Domain/provider sub-grouping within a read/unread section (chat-wave2
+   citations spec §2.6) — one heading per `sourceGroupId`/`provider` group,
+   omitted entirely when the section holds only one group (nothing to tell
+   apart). */
+.verevon-chat-source-domain-group {
+  display: grid;
+  gap: 10px;
+}
+
+.verevon-chat-source-domain-group__heading {
+  color: var(--verevon-e-subtle);
+  font-size: 11px;
+  font-weight: 650;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+
+.verevon-chat-source-group--unread .verevon-chat-source-card {
+  background: var(--verevon-surface-soft);
+  box-shadow: none;
+  padding: 12px 16px;
+}
+
+.verevon-chat-source-group--unread .verevon-chat-source-card:hover {
+  box-shadow: none;
+  transform: none;
+}
+
+.verevon-chat-source-group--unread .verevon-chat-source-card h2 {
+  color: var(--verevon-e-muted);
+  font-weight: 600;
+}
+
 /* ── Artefakter panel (artifact / canvas renderer) ─────────────────────────── */
 
-/* Artifact list beside the viewer. The breakpoint follows the resizable canvas
-   width, so a narrow Output panel keeps the rendered page usable. */
+/* Keep document tabs above the viewer until there is room for both the list
+   and a readable document. A 720px canvas left less than 400px for the result. */
 .verevon-chat-artifact-workspace {
   display: grid;
   min-height: 0;
@@ -26524,7 +27154,7 @@ body.verevon-chat-canvas-resizing * {
   padding: 20px 16px;
 }
 
-@container verevon-chat-workspace (min-width: 720px) {
+@container verevon-chat-workspace (min-width: 1024px) {
   .verevon-chat-artifact-workspace {
     grid-template-columns: 252px minmax(0, 1fr);
     grid-template-rows: minmax(0, 1fr);
@@ -26539,7 +27169,7 @@ body.verevon-chat-canvas-resizing * {
   padding-bottom: 4px;
 }
 
-@container verevon-chat-workspace (min-width: 720px) {
+@container verevon-chat-workspace (min-width: 1024px) {
   .verevon-chat-artifact-list {
     overflow-x: hidden;
     overflow-y: auto;
@@ -26614,6 +27244,7 @@ body.verevon-chat-canvas-resizing * {
   display: grid;
   min-width: 0;
   min-height: 0;
+  grid-template-columns: minmax(0, 1fr);
   grid-template-rows: auto minmax(0, 1fr);
   overflow: hidden;
 }
@@ -26631,8 +27262,13 @@ body.verevon-chat-canvas-resizing * {
 .verevon-chat-artifact-view__title {
   display: flex;
   min-width: 0;
+  max-width: 100%;
   align-items: flex-start;
   gap: 9px;
+}
+
+.verevon-chat-artifact-view__title > div {
+  min-width: 0;
 }
 
 .verevon-chat-artifact-view__icon {
@@ -26759,9 +27395,21 @@ body.verevon-chat-canvas-resizing * {
 }
 
 .verevon-chat-artifact-view__body {
+  min-width: 0;
   min-height: 0;
   overflow: auto;
   padding: 16px;
+}
+
+/* Reports with many columns should scroll, rather than split figures and
+   short labels into almost one character per line. */
+.verevon-chat-artifact-view .verevon-chat-table {
+  table-layout: auto;
+}
+
+.verevon-chat-artifact-view .verevon-chat-table :is(th, td) {
+  min-width: 110px;
+  overflow-wrap: normal;
 }
 
 .verevon-chat-artifact-image {
@@ -27716,6 +28364,164 @@ body.verevon-chat-canvas-resizing * {
 
   50% {
     box-shadow: 0 0 0 8px rgb(192 123 51 / 0%);
+  }
+}
+
+/* Voice mode (VoiceModeDialog): tap-to-talk states on the same panel. */
+.realtime-voice-modal__mic:disabled {
+  cursor: not-allowed;
+  opacity: 0.42;
+}
+
+.realtime-voice-modal__mic[aria-disabled="true"] {
+  cursor: progress;
+  opacity: 0.6;
+}
+
+/* Local input level only (Web Audio AnalyserNode); aria-hidden in markup. */
+.realtime-voice-modal__meter {
+  width: 128px;
+  height: 4px;
+  overflow: hidden;
+  border-radius: 999px;
+  margin: 0 auto 8px;
+  background: rgb(0 0 0 / 8%);
+}
+
+.dark .realtime-voice-modal__meter {
+  background: rgb(255 255 255 / 14%);
+}
+
+.realtime-voice-modal__meter span {
+  display: block;
+  width: 100%;
+  height: 100%;
+  background: var(--verevon-accent-strong);
+  transform-origin: left center;
+  transition: transform 80ms linear;
+}
+
+.realtime-voice-modal__body .realtime-voice-modal__timer {
+  margin: 0 0 6px;
+  color: var(--subtle);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 500;
+}
+
+.realtime-voice-modal__body .realtime-voice-modal__timer--warning {
+  color: var(--warning-ink);
+  font-weight: 700;
+}
+
+.realtime-voice-modal__body .realtime-voice-modal__error {
+  margin-top: 10px;
+  color: var(--danger);
+  font-size: 12.5px;
+  font-weight: 600;
+  line-height: 1.45;
+}
+
+.realtime-voice-modal__transcript--editable {
+  display: block;
+  width: 100%;
+  min-height: 72px;
+  max-height: 160px;
+  box-sizing: border-box;
+  border: 1px solid var(--verevon-border);
+  border-radius: 12px;
+  margin-top: 12px;
+  background: var(--panel);
+  padding: 10px 12px;
+  color: var(--verevon-dark-surface);
+  font: inherit;
+  font-size: 14px;
+  line-height: 1.45;
+  resize: vertical;
+}
+
+.dark .realtime-voice-modal__transcript--editable {
+  border-color: var(--verevon-dark-surface-soft);
+  background: var(--verevon-dark-surface);
+  color: var(--panel);
+}
+
+.realtime-voice-modal__body .realtime-voice-modal__note {
+  display: block;
+  margin-top: 6px;
+  text-align: left;
+}
+
+.realtime-voice-modal__reply {
+  max-height: 160px;
+  overflow-y: auto;
+  margin-top: 12px;
+  color: var(--verevon-dark-surface);
+  font-size: 13.5px;
+  line-height: 1.5;
+  text-align: left;
+  white-space: pre-wrap;
+}
+
+.dark .realtime-voice-modal__reply {
+  color: var(--panel);
+}
+
+.realtime-voice-modal__actions--review {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+}
+
+.realtime-voice-modal__actions--review .realtime-voice-modal__primary,
+.realtime-voice-modal__actions--review .realtime-voice-modal__quiet {
+  grid-column: 1 / -1;
+}
+
+.realtime-voice-modal__actions button.realtime-voice-modal__quiet,
+.dark .realtime-voice-modal__actions button.realtime-voice-modal__quiet {
+  border-color: transparent;
+  background: transparent;
+  color: var(--subtle);
+}
+
+.realtime-voice-modal__toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 12px;
+  color: var(--subtle);
+  cursor: pointer;
+  font-size: 12.5px;
+}
+
+.realtime-voice-modal__toggles {
+  display: flex;
+  flex-wrap: wrap;
+  column-gap: 18px;
+  margin-top: 12px;
+}
+
+.realtime-voice-modal__toggles .realtime-voice-modal__toggle {
+  margin-top: 0;
+}
+
+/* Speech controls that are off in Temporary chat stay focusable (aria-disabled)
+   so their reason can be read and shown; they still look off. */
+.dashboard-composer-toolbar-icon[aria-disabled="true"],
+.verevon-chat-menu__panel button[aria-disabled="true"] {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .verevon-voice-pulse,
+  .realtime-voice-modal__panel.verevon-panel-in {
+    animation: none;
+  }
+
+  .realtime-voice-modal__mic,
+  .realtime-voice-modal__meter span {
+    transition: none;
   }
 }
 
@@ -41566,12 +42372,15 @@ body.verevon-chat-canvas-resizing * {
   transition: bottom 200ms ease;
 }
 
-/* The chat composer dock lives in this same corner and its height is
-   unbounded (autosizing textarea, up to 50vh expanded) -- ChatPage measures
-   it live and publishes --verevon-composer-dock-height so this trigger
-   always clears the send button instead of sitting on top of it. */
+/* Chat shows this panel only after an explicit action-menu request. */
 .feedback-widget--docked {
-  bottom: calc(var(--verevon-composer-dock-height, 0px) + 20px);
+  top: calc(var(--dashboard-navbar-height, 56px) + 12px);
+  bottom: auto;
+}
+
+.feedback-widget--docked .feedback-widget__panel {
+  max-height: calc(100dvh - var(--dashboard-navbar-height, 56px) - 32px);
+  overflow-y: auto;
 }
 
 .feedback-widget__trigger {
@@ -42295,6 +43104,171 @@ body.verevon-chat-canvas-resizing * {
 .verevon-ai-review-queue__empty h2 { margin-top: 10px; color: var(--ink); font-size: 16px; }
 .verevon-ai-review-queue__empty p { margin-top: 6px; line-height: 1.5; }
 
+/* Drafts surface (/support?surface=drafts). Shares the review queue's page
+   shape deliberately — same workspace, same reading width — but its rows lead
+   with the draft's own text rather than a metadata line, because the text is
+   what a reviewer is deciding about. */
+.verevon-drafts {
+  min-height: calc(100dvh - 132px);
+  padding: 28px clamp(16px, 4vw, 56px);
+  background: var(--panel);
+}
+
+.verevon-drafts__header,
+.verevon-drafts section {
+  max-width: 760px;
+  margin: 0 auto;
+}
+
+.verevon-drafts__header { margin-bottom: 24px; }
+.verevon-drafts section + section { margin-top: 28px; }
+
+.verevon-drafts__eyebrow {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--verevon-accent-strong);
+  font-size: 12px;
+  font-weight: 750;
+}
+
+.verevon-drafts h1,
+.verevon-drafts h2,
+.verevon-drafts p { margin: 0; }
+
+.verevon-drafts h1 {
+  margin-top: 8px;
+  color: var(--ink);
+  font-size: clamp(22px, 3vw, 30px);
+  line-height: 1.18;
+}
+
+.verevon-drafts__header p {
+  margin-top: 8px;
+  color: var(--verevon-text-muted);
+  line-height: 1.5;
+}
+
+.verevon-drafts__section-title {
+  margin-bottom: 10px;
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 750;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+
+.verevon-drafts__list {
+  display: grid;
+  gap: 10px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.verevon-drafts__item {
+  padding: 16px;
+  border: 1px solid var(--verevon-border-warm);
+  border-radius: 12px;
+  background: var(--background);
+}
+
+.verevon-drafts__item-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.verevon-drafts__item-head strong { color: var(--ink); font-size: 14px; }
+
+.verevon-drafts__status {
+  flex-shrink: 0;
+  color: var(--verevon-text-muted);
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+/* Only the states a person still has to act on are tinted. Colouring every
+   status turns the list into a traffic light nobody reads. */
+.verevon-drafts__status[data-status="suggested"],
+.verevon-drafts__status[data-status="review"],
+.verevon-drafts__status[data-status="suggest_ticket"] { color: var(--verevon-accent-strong); }
+.verevon-drafts__status[data-status="failed"] { color: var(--danger); }
+
+/* The draft is prose that was written to be read as prose: newlines in the
+   stored body are meaningful, and collapsing them would show the reviewer
+   something other than what would be sent. */
+.verevon-drafts__body {
+  margin-top: 8px;
+  color: var(--ink);
+  font-size: 13px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.verevon-drafts__missing {
+  margin-top: 8px;
+  color: var(--verevon-text-muted);
+  font-size: 13px;
+  font-style: italic;
+}
+
+.verevon-drafts__meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 12px;
+}
+
+.verevon-drafts__meta small { color: var(--subtle); font-size: 11px; }
+
+.verevon-drafts__open-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+  color: var(--verevon-accent-strong);
+  font-size: 13px;
+  font-weight: 700;
+  text-decoration: none;
+}
+
+.verevon-drafts__open-link:hover { text-decoration: underline; }
+
+.verevon-drafts__state,
+.verevon-drafts__empty {
+  max-width: 760px;
+  margin: 32px auto;
+  color: var(--verevon-text-muted);
+  text-align: center;
+}
+
+.verevon-drafts__state--error { color: var(--danger); }
+.verevon-drafts__empty svg { color: var(--verevon-accent-strong); }
+.verevon-drafts__empty h2 { margin-top: 10px; color: var(--ink); font-size: 16px; }
+.verevon-drafts__empty p { margin-top: 6px; line-height: 1.5; }
+
+.verevon-drafts__disclosure {
+  max-width: 760px;
+  margin: 20px auto 0;
+  color: var(--subtle);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.dark .verevon-drafts { background: var(--ink); }
+.dark .verevon-drafts__item { background: var(--foreground); border-color: var(--verevon-dark-surface-soft); }
+.dark .verevon-drafts h1,
+.dark .verevon-drafts__section-title,
+.dark .verevon-drafts__item-head strong,
+.dark .verevon-drafts__body,
+.dark .verevon-drafts__empty h2 { color: var(--panel); }
+
 .dark .verevon-ai-review-queue { background: var(--ink); }
 .dark .verevon-ai-review-queue__item { background: var(--foreground); border-color: var(--verevon-dark-surface-soft); }
 .dark .verevon-ai-review-outcomes { background: color-mix(in srgb, var(--foreground) 88%, var(--verevon-accent-strong) 12%); border-color: var(--verevon-dark-surface-soft); }
@@ -42306,6 +43280,7 @@ body.verevon-chat-canvas-resizing * {
 
 @media (max-width: 640px) {
   .verevon-ai-review-queue { min-height: calc(100dvh - 112px); padding: 20px 16px; }
+  .verevon-drafts { min-height: calc(100dvh - 112px); padding: 20px 16px; }
   .verevon-ai-review-outcomes__metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .verevon-ai-review-queue__item { align-items: flex-start; flex-direction: column; gap: 12px; }
 }
@@ -44317,6 +45292,223 @@ so it
   opacity: 0.5;
 }
 
+.verevon-schedule-dialog {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: grid;
+  place-items: center;
+  background: rgba(15, 18, 20, 0.42);
+  padding: 20px;
+}
+
+.verevon-schedule-dialog__dialog {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  width: min(460px, 100%);
+  max-height: min(86vh, 720px);
+  overflow-y: auto;
+  border: 1px solid var(--verevon-border);
+  border-radius: 18px;
+  background: var(--verevon-surface);
+  padding: 18px 20px;
+  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.24);
+}
+
+.verevon-schedule-dialog__dialog header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.verevon-schedule-dialog__dialog header h3 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  font-size: 17px;
+  font-weight: 750;
+  letter-spacing: -0.01em;
+}
+
+.verevon-schedule-dialog__dialog header button {
+  border: none;
+  background: transparent;
+  padding: 4px;
+  color: var(--verevon-text-muted);
+}
+
+.verevon-schedule-dialog__field {
+  display: grid;
+  gap: 5px;
+}
+
+.verevon-schedule-dialog__field > span {
+  color: var(--verevon-text-muted);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.verevon-schedule-dialog__field small {
+  color: var(--verevon-text-subtle);
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.verevon-schedule-dialog__field input,
+.verevon-schedule-dialog__field select {
+  border: 1px solid var(--verevon-border);
+  border-radius: 10px;
+  background: var(--verevon-surface);
+  padding: 9px 12px;
+  color: var(--verevon-text);
+  font: inherit;
+  font-size: 14px;
+}
+
+.verevon-schedule-dialog__timezone-fixed {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  border: 1px solid var(--verevon-border);
+  border-radius: 10px;
+  padding: 9px 12px;
+  font-size: 14px;
+}
+
+.verevon-schedule-dialog__timezone-fixed button {
+  border: none;
+  background: transparent;
+  color: var(--verevon-accent-ink);
+  font-size: 12.5px;
+  font-weight: 650;
+}
+
+.verevon-schedule-dialog__policy {
+  display: grid;
+  gap: 8px;
+}
+
+.verevon-schedule-dialog__policy-option {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  border: 1px solid var(--verevon-border);
+  border-radius: 12px;
+  padding: 9px 12px;
+  font-size: 13px;
+}
+
+.verevon-schedule-dialog__policy-option--disabled {
+  opacity: 0.55;
+}
+
+.verevon-schedule-dialog__policy-option small {
+  flex-basis: 100%;
+  color: var(--verevon-text-subtle);
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.verevon-schedule-dialog__note {
+  margin: 0;
+  color: var(--verevon-text-subtle);
+  font-size: 11.5px;
+  line-height: 1.45;
+}
+
+.verevon-schedule-dialog__error {
+  margin: 0;
+  color: var(--verevon-danger, #dc2626);
+  font-size: 12.5px;
+}
+
+.verevon-schedule-dialog__dialog footer {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  align-items: stretch;
+}
+
+.verevon-schedule-dialog__submit {
+  flex: 0 0 auto;
+  border: 1px solid var(--verevon-border-strong);
+  border-radius: 999px;
+  background: var(--verevon-text);
+  padding: 8px 18px;
+  color: var(--verevon-surface);
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.verevon-schedule-dialog__submit:disabled {
+  opacity: 0.5;
+}
+
+.verevon-scheduled-runs-entry {
+  position: relative;
+  display: flex;
+  justify-content: flex-end;
+  padding: 4px 4px 0;
+}
+
+.verevon-scheduled-runs-entry__trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--verevon-border);
+  border-radius: 999px;
+  background: var(--verevon-surface);
+  padding: 5px 12px;
+  color: var(--verevon-text-muted);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.verevon-scheduled-runs-entry__panel {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 4px;
+  z-index: 40;
+  width: min(360px, 90vw);
+  max-height: 60vh;
+  overflow-y: auto;
+  border: 1px solid var(--verevon-border);
+  border-radius: 14px;
+  background: var(--verevon-surface);
+  padding: 12px;
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.18);
+}
+
+.verevon-scheduled-runs-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.verevon-scheduled-runs-panel__row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  border: 1px solid var(--verevon-border);
+  border-radius: 12px;
+  padding: 10px 12px;
+}
+
+.verevon-scheduled-runs-panel__row-meta {
+  color: var(--verevon-text-muted);
+  font-size: 12px;
+}
+
+.verevon-scheduled-runs-panel__actions {
+  display: flex;
+  gap: 6px;
+  flex: 0 0 auto;
+}
+
 .verevon-space-room-composer {
   display: flex;
   flex-direction: column;
@@ -45016,6 +46208,82 @@ so it
   line-height: 1.5;
   color: var(--verevon-text);
   overflow-wrap: anywhere;
+}
+
+/* Per-entry correct/forget — the same "found it, act on it" affordance
+   Claude/ChatGPT give their own recalled-memory lists. Text buttons, not icon-
+   only: "Rediger"/"Glem" carry meaning `title` alone would hide from a reader
+   scanning quickly, and this list is already dense enough without a tooltip
+   round trip. */
+.verevon-chat-memory-recall__actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 2px;
+}
+
+.verevon-chat-memory-recall__action {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  border: 0;
+  background: none;
+  padding: 0;
+  font: inherit;
+  font-size: 11px;
+  color: var(--verevon-text-muted);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+
+.verevon-chat-memory-recall__action:hover:not(:disabled) {
+  color: var(--verevon-text);
+}
+
+.verevon-chat-memory-recall__action:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
+/* Armed (needs a second click) and destructive-confirmed states both read as
+   "this is the one that removes something" — the same red used everywhere
+   else a destructive action is one click away. */
+.verevon-chat-memory-recall__action--danger {
+  color: var(--danger);
+}
+
+.verevon-chat-memory-recall__edit {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 4px;
+}
+
+.verevon-chat-memory-recall__edit-textarea {
+  width: 100%;
+  min-height: 52px;
+  resize: vertical;
+  font: inherit;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--verevon-text);
+  background: var(--verevon-surface);
+  border: 1px solid var(--verevon-border);
+  border-radius: var(--chat-r-sm, 8px);
+  padding: 6px 8px;
+}
+
+.verevon-chat-memory-recall__error {
+  margin: 2px 0 0;
+  font-size: 11px;
+  color: var(--danger);
+}
+
+.verevon-chat-memory-recall__notice {
+  margin: 2px 0 0;
+  font-size: 11px;
+  color: var(--muted-foreground);
 }
 
 /* Chat — messages the user sent WHILE the agent was working.
@@ -45994,6 +47262,11 @@ so it
   .dashboard-composer-root--chat .dashboard-composer-controls__right > span:not(.dashboard-composer-context-wrap),
   .dashboard-composer-root--chat .dashboard-composer-controls__right > button {
     display: none;
+  }
+
+  .dashboard-composer-root--chat .dashboard-composer-context-label--restricted {
+    display: inline;
+    font-size: 10px;
   }
 
   .dashboard-composer-root--chat .dashboard-composer-model-button {

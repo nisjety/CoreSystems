@@ -32,6 +32,10 @@ export default defineConfig({
       '@': fileURLToPath(new URL('./src', import.meta.url)),
     },
   },
+  // This SPA has one entry. The default **/*.html discovery also traverses
+  // the sibling apps, package store, and generated reports on the Windows
+  // bind mount, delaying startup before the first page can be served.
+  optimizeDeps: { entries: ['index.html'] },
   // Same-origin BFF: the browser calls /api on the dev origin; Vite forwards to
   // the gateway server-side, so Better Auth's session cookie stays first-party.
   // The proxy target is a server-only (non-VITE_) var so it is NEVER baked into
@@ -40,16 +44,24 @@ export default defineConfig({
   // it must be the gateway service name; host-run `pnpm dev` falls back to
   // 127.0.0.1:3185 (the host-mapped gateway port).
   //
-  // Known limitation on Docker Desktop for Windows: host filesystem change
-  // events don't always reach the container's inotify watcher through the
-  // bind mount — an edit lands on disk but Vite keeps serving the pre-edit
-  // module. `server.watch.usePolling` "fixes" this but pegs the event loop
-  // hard enough to make the dev server stop answering requests entirely
-  // (this tree's `.claude/worktrees/` holds several full extra monorepo
-  // checkouts, and scoping `ignored` to exclude them wasn't enough either).
-  // If an edit isn't reflected, `docker restart frontend-plane-verevonv3-frontend-1`
-  // rather than reaching for polling again.
+  // Docker Desktop does not always deliver host edits through inotify.
+  // Restart the frontend if an edit is stale; polling this large bind mount
+  // is deliberately disabled. Bound both dependency discovery and watching
+  // so unrelated app builds and package caches cannot starve HTTP startup.
   server: {
+    watch: {
+      // Ignore directory roots so chokidar prunes unrelated trees before
+      // walking them. These are separate apps, generated data, or package
+      // caches, not inputs to this SPA; linked packages remain watched.
+      ignored: [
+        '**/.pnpm-store/**',
+        '**/.claude/**',
+        '**/apps/gateway/**',
+        '**/apps/verevon-web/**',
+        '**/apps/remote-dev/**',
+        '**/test-results/**',
+      ],
+    },
     proxy: {
       '/api': {
         target: gatewayProxyTarget,

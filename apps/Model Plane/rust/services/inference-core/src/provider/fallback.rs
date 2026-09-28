@@ -5,10 +5,11 @@ use std::time::Duration;
 
 use arc_swap::ArcSwap;
 use tokio::sync::mpsc;
-use tracing::{info, warn};
+use tracing::{info, warn, Instrument};
 
 use super::policy_client::PolicyClient;
 use super::routing_policy::RoutingPolicy;
+use super::timing::{CallClock, StreamClock};
 use super::{
     anthropic::AnthropicProvider, codex_subscription::CodexSubscriptionProvider,
     endpoint_region_is_non_eu, intent, is_eu_region, normalize_region_token,
@@ -288,6 +289,13 @@ fn tier_unavailable_error(required: PrivacyTier) -> ProviderError {
     ))
 }
 
+/// A refusal's reset time for the log line: RFC 3339 UTC, or empty if unknown.
+fn reset_label(resets_at: Option<chrono::DateTime<chrono::Utc>>) -> String {
+    resets_at
+        .map(|at| at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
+        .unwrap_or_default()
+}
+
 fn rate_limit_max_wait() -> Duration {
     static MAX_WAIT: std::sync::OnceLock<Duration> = std::sync::OnceLock::new();
     *MAX_WAIT.get_or_init(|| {
@@ -320,9 +328,32 @@ struct ThrottleState {
     /// walk still CONTINUES past a TooLong on purpose: a later provider with a
     /// larger window is the recovery path, and only exhaustion reports it.
     too_long_detail: Option<String>,
+    /// The first final subscription outcome of the walk: a
+    /// [`ProviderError::SubscriptionRefused`], or a
+    /// [`ProviderError::SubscriptionFailed`] turn.
+    ///
+    /// A refusal is about the connected ChatGPT account (its usage limit, its
+    /// sign-in, its upstream), so no retry, wait or other provider can answer
+    /// it. A failed turn has already been run by the broker, so a retry would
+    /// spend another turn of the plan's quota on what is mostly a repeatable
+    /// failure. Either ends the walk, and exhaustion reports it ahead of
+    /// everything else. It is deliberately not throttling — `throttled()`
+    /// ignores it, so there is no second pass and no wait.
+    refused: Option<ProviderError>,
 }
 
 impl ThrottleState {
+    fn record_refusal(&mut self, refusal: ProviderError) {
+        if self.refused.is_none() {
+            self.refused = Some(refusal);
+        }
+    }
+
+    /// Whether a subscription refusal ended the walk.
+    fn refused(&self) -> bool {
+        self.refused.is_some()
+    }
+
     fn record(&mut self, retry_after_ms: u64) {
         self.soonest_retry_ms = Some(match self.soonest_retry_ms {
             Some(current) => current.min(retry_after_ms),
@@ -354,6 +385,12 @@ impl ThrottleState {
     /// reporting a generic failure for something that is neither permanent nor
     /// the user's fault.
     fn exhausted_error(&self, attempts: u32) -> ProviderError {
+        // A subscription refusal outranks everything: it is the one outcome
+        // that names what the user must do (wait for the reset, reconnect),
+        // and no other provider was, or may be, asked instead.
+        if let Some(refused) = &self.refused {
+            return refused.clone();
+        }
         // Priority order is deliberate. RateLimited first: a throttled provider
         // might genuinely serve this exact prompt after the wait, so "try again
         // shortly" is still the true story. TooLong next: it is deterministic —
@@ -1095,6 +1132,17 @@ impl FallbackChain {
     ///
     /// Returns `ProviderError::AllExhausted` if every provider and retry is exhausted.
     pub async fn infer(&self, req: &InferRequest) -> Result<InferResponse, ProviderError> {
+        self.infer_with_response_cache(req, true).await
+    }
+
+    /// Fresh inference for checks that must not reuse or store a completed
+    /// response. Provider prefix caching and all route/privacy gates remain.
+    pub async fn infer_without_response_cache(&self, req: &InferRequest) -> Result<InferResponse, ProviderError> {
+        self.infer_with_response_cache(req, false).await
+    }
+
+    async fn infer_with_response_cache(&self, req: &InferRequest, cache_response: bool) -> Result<InferResponse, ProviderError> {
+        let mut clock = CallClock::start();
         // Verevon intent layer: resolve a `verevon-*` mode to a concrete model
         // (complexity + budget) before anything else. A pinned model or a
         // disabled intent layer leaves `req` untouched.
@@ -1108,9 +1156,14 @@ impl FallbackChain {
         validate_min_residency(req)?;
 
         // Check cache first
-        if let Some(cached) = self.cache.get(req) {
-            info!(request_id = %req.request_id, "cache hit");
-            return Ok(cached);
+        if cache_response {
+            if let Some(mut cached) = self.cache.get(req) {
+                info!(request_id = %req.request_id, "cache hit");
+                // The stored copy may carry the timing of the call that filled
+                // the cache; this call reached no provider at all.
+                cached.provider_timing = Some(clock.cache_hit(&cached));
+                return Ok(cached);
+            }
         }
 
         let mut total_attempts: u32 = 0;
@@ -1131,7 +1184,9 @@ impl FallbackChain {
                     wait_ms = wait.as_millis(),
                     "every matching provider was rate limited; honoring retry-after once"
                 );
+                let wait_began = tokio::time::Instant::now();
                 tokio::time::sleep(wait).await;
+                clock.waited(wait_began);
                 throttle = ThrottleState::default();
             }
 
@@ -1145,16 +1200,21 @@ impl FallbackChain {
                     );
                 }
                 if let Some(response) = self
-                    .infer_one_model(req, model, &mut total_attempts, &mut throttle)
+                    .infer_one_model(req, model, &mut total_attempts, &mut throttle, &mut clock)
                     .await
                 {
-                    self.cache.put(req, &response);
+                    if cache_response { self.cache.put(req, &response); }
                     return Ok(response);
+                }
+                // A refused subscription is not answered by the next rung.
+                if throttle.refused() {
+                    break;
                 }
             }
 
-            if !throttle.throttled() {
-                // Nothing was throttled, so waiting cannot help.
+            if throttle.refused() || !throttle.throttled() {
+                // Nothing was throttled, so waiting cannot help; and a
+                // subscription refusal is never waited out here.
                 break;
             }
         }
@@ -1204,6 +1264,7 @@ impl FallbackChain {
         model: &str,
         total_attempts: &mut u32,
         throttle: &mut ThrottleState,
+        clock: &mut CallClock,
     ) -> Option<InferResponse> {
         for (name, provider) in &self.providers {
             // One capabilities() read per provider, reused by all three gates
@@ -1262,10 +1323,25 @@ impl FallbackChain {
                     attempt = attempt,
                     request_id = %req.request_id,
                 );
+                let began = clock.begin_attempt();
+                // The call is instrumented rather than run under `span.enter()`:
+                // an entered guard held across the await stays on this worker
+                // thread while the task is parked, so whatever else ran there
+                // was logged under this request, and this call's own logs lost
+                // it once the task resumed on another thread. The span is
+                // entered again only for the synchronous outcome logs below.
+                let outcome = provider
+                    .infer_dyn(call_req.as_ref())
+                    .instrument(span.clone())
+                    .await;
+                if outcome.is_err() {
+                    clock.attempt_failed(began);
+                }
                 let _enter = span.enter();
 
-                match provider.infer_dyn(call_req.as_ref()).await {
+                match outcome {
                     Ok(mut response) => {
+                        let timing = clock.served(began, *total_attempts, &mut response);
                         info!(
                             provider = %name,
                             attempt = attempt,
@@ -1288,6 +1364,7 @@ impl FallbackChain {
                         // what declared residency.
                         response.provider_used.clone_from(name);
                         caps.residency.as_str().clone_into(&mut response.residency);
+                        response.provider_timing = Some(timing);
                         return Some(response);
                     }
                     Err(ProviderError::RateLimited { retry_after_ms }) => {
@@ -1308,6 +1385,37 @@ impl FallbackChain {
                         );
                         throttle.record_too_long(&detail);
                         break; // Deterministic for this provider — retrying cannot help.
+                    }
+                    Err(ProviderError::SubscriptionRefused {
+                        reason,
+                        retry_after_ms,
+                        resets_at,
+                    }) => {
+                        warn!(
+                            provider = %name,
+                            attempt = attempt,
+                            reason = reason.code(),
+                            resets_at = %reset_label(resets_at),
+                            "subscription refused; not retrying"
+                        );
+                        throttle.record_refusal(ProviderError::SubscriptionRefused {
+                            reason,
+                            retry_after_ms,
+                            resets_at,
+                        });
+                        // One attempt, and no other provider or model may
+                        // answer for this account: the walk ends here.
+                        return None;
+                    }
+                    Err(ProviderError::SubscriptionFailed(message)) => {
+                        warn!(
+                            provider = %name,
+                            attempt = attempt,
+                            error = %message,
+                            "subscription turn failed after it started; not retrying"
+                        );
+                        throttle.record_refusal(ProviderError::SubscriptionFailed(message));
+                        return None;
                     }
                     Err(e) => {
                         warn!(
@@ -1380,10 +1488,15 @@ impl FallbackChain {
     /// chunks carry it verbatim; non-final chunks keep empty fields so callers
     /// reading only terminal frames still see the truth about who served the
     /// turn.
+    ///
+    /// This task sees every chunk, so it also finishes the stream's timing:
+    /// the first non-empty content or reasoning delta marks the first token,
+    /// and the final chunk closes the provider interval and carries it.
     fn stamp_stream_provenance(
         mut rx: mpsc::Receiver<InferChunk>,
         provider_used: String,
         residency: String,
+        mut clock: StreamClock,
     ) -> mpsc::Receiver<InferChunk> {
         let (tx, out_rx) = mpsc::channel(64);
         tokio::spawn(async move {
@@ -1392,6 +1505,7 @@ impl FallbackChain {
                     chunk.provider_used.clone_from(&provider_used);
                     chunk.residency.clone_from(&residency);
                 }
+                clock.observe(&mut chunk);
                 let done = chunk.done;
                 if tx.send(chunk).await.is_err() {
                     break;
@@ -1413,6 +1527,7 @@ impl FallbackChain {
         &self,
         req: &InferRequest,
     ) -> Result<mpsc::Receiver<InferChunk>, ProviderError> {
+        let mut clock = CallClock::start();
         // Verevon intent layer — same resolution as the unary path.
         let intent_req = self.resolve_intent(req).await;
         let ladder = intent_req
@@ -1437,7 +1552,9 @@ impl FallbackChain {
                     wait_ms = wait.as_millis(),
                     "every matching streaming provider was rate limited; honoring retry-after once"
                 );
+                let wait_began = tokio::time::Instant::now();
                 tokio::time::sleep(wait).await;
+                clock.waited(wait_began);
                 throttle = ThrottleState::default();
             }
 
@@ -1451,14 +1568,17 @@ impl FallbackChain {
                     );
                 }
                 if let Some(rx) = self
-                    .stream_one_model(req, model, &mut total_attempts, &mut throttle)
+                    .stream_one_model(req, model, &mut total_attempts, &mut throttle, &mut clock)
                     .await
                 {
                     return Ok(rx);
                 }
+                if throttle.refused() {
+                    break;
+                }
             }
 
-            if !throttle.throttled() {
+            if throttle.refused() || !throttle.throttled() {
                 break;
             }
         }
@@ -1486,6 +1606,7 @@ impl FallbackChain {
         model: &str,
         total_attempts: &mut u32,
         throttle: &mut ThrottleState,
+        clock: &mut CallClock,
     ) -> Option<mpsc::Receiver<InferChunk>> {
         for (name, provider) in &self.providers {
             let caps = provider.capabilities_dyn();
@@ -1536,10 +1657,21 @@ impl FallbackChain {
                     attempt = attempt,
                     request_id = %req.request_id,
                 );
+                let began = clock.begin_attempt();
+                // Instrumented, not entered across the await; see
+                // `infer_one_model`.
+                let outcome = provider
+                    .infer_stream_dyn(call_req.as_ref())
+                    .instrument(span.clone())
+                    .await;
+                if outcome.is_err() {
+                    clock.attempt_failed(began);
+                }
                 let _enter = span.enter();
 
-                match provider.infer_stream_dyn(call_req.as_ref()).await {
+                match outcome {
                     Ok(rx) => {
+                        let stream_clock = clock.accepted(began, *total_attempts);
                         info!(
                             provider = %name,
                             attempt = attempt,
@@ -1556,7 +1688,12 @@ impl FallbackChain {
                         let residency = caps.residency.as_str().to_owned();
                         let provider_name = name.clone();
                         let rx = Self::normalize_stream_model(rx, call_req.model.clone());
-                        return Some(Self::stamp_stream_provenance(rx, provider_name, residency));
+                        return Some(Self::stamp_stream_provenance(
+                            rx,
+                            provider_name,
+                            residency,
+                            stream_clock,
+                        ));
                     }
                     Err(ProviderError::RateLimited { retry_after_ms }) => {
                         warn!(
@@ -1576,6 +1713,38 @@ impl FallbackChain {
                         );
                         throttle.record_too_long(&detail);
                         break; // Deterministic for this provider — retrying cannot help.
+                    }
+                    Err(ProviderError::SubscriptionRefused {
+                        reason,
+                        retry_after_ms,
+                        resets_at,
+                    }) => {
+                        warn!(
+                            provider = %name,
+                            attempt = attempt,
+                            reason = reason.code(),
+                            resets_at = %reset_label(resets_at),
+                            "subscription refused; not retrying"
+                        );
+                        throttle.record_refusal(ProviderError::SubscriptionRefused {
+                            reason,
+                            retry_after_ms,
+                            resets_at,
+                        });
+                        return None;
+                    }
+                    // The broker answered the stream and had started the turn:
+                    // one attempt, as for a refusal. Only a failure before the
+                    // broker's `ready` (a transport fault) is retried below.
+                    Err(ProviderError::SubscriptionFailed(message)) => {
+                        warn!(
+                            provider = %name,
+                            attempt = attempt,
+                            error = %message,
+                            "subscription stream failed after its turn started; not retrying"
+                        );
+                        throttle.record_refusal(ProviderError::SubscriptionFailed(message));
+                        return None;
                     }
                     Err(e) => {
                         warn!(
@@ -1646,9 +1815,15 @@ impl FallbackChain {
                     // (it does NOT by itself satisfy residency).
                     zdr = req.zdr,
                 );
+                // Instrumented, not entered across the await; see
+                // `infer_one_model`.
+                let outcome = provider
+                    .create_embedding_dyn(req)
+                    .instrument(span.clone())
+                    .await;
                 let _enter = span.enter();
 
-                match provider.create_embedding_dyn(req).await {
+                match outcome {
                     Ok(response) => {
                         info!(
                             provider = %name,
@@ -2070,6 +2245,7 @@ mod resolution_tests {
         async fn infer(&self, req: &InferRequest) -> Result<InferResponse, ProviderError> {
             *self.seen_model.lock().unwrap() = Some(req.model.clone());
             Ok(InferResponse {
+                compaction_summary: String::new(),
                 request_id: req.request_id.clone(),
                 content: "ok".to_owned(),
                 model_used: req.model.clone(),
@@ -2098,6 +2274,540 @@ mod resolution_tests {
             ..RecordingProvider::default()
         });
         FallbackChain::new_with_providers(vec![("anthropic".to_owned(), provider)], 1)
+    }
+
+    #[tokio::test]
+    async fn subscription_outage_never_reaches_an_api_provider_or_intent_ladder() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .respond_with(wiremock::ResponseTemplate::new(503).set_body_json(serde_json::json!({"success":false,"error":{"code":"subscription_unavailable"}})))
+            .mount(&server).await;
+        let subscription: BoxedProvider = Arc::new(crate::provider::codex_subscription::CodexSubscriptionProvider::new(
+            server.uri(),"test-key",vec!["gpt-5.6-terra".into()]).unwrap());
+        let seen = Arc::new(Mutex::new(None));
+        let alternative: BoxedProvider = Arc::new(RecordingProvider { seen_model:seen.clone(), ..Default::default() });
+        let chain = FallbackChain::new_with_providers(vec![
+            ("openai-codex-subscription".into(),subscription), ("azure-openai".into(),alternative)
+        ],1).with_intent_enabled(true);
+        let request = InferRequest { request_id:"subscription-only".into(),model:"gpt-5.6-terra".into(),
+            provider_hint:"openai-codex-subscription".into(),subscription_connection_id:"connection".into(),
+            org_id:"org".into(),user_id:"user".into(),..Default::default() };
+        assert!(chain.infer(&request).await.is_err());
+        assert!(chain.infer_stream(&request).await.is_err());
+        assert!(seen.lock().unwrap().is_none(),"an unavailable subscription must never use another provider");
+        for sent in server.received_requests().await.unwrap() {
+            let body:serde_json::Value=serde_json::from_slice(&sent.body).unwrap();
+            assert_eq!(body["model"],"gpt-5.6-terra");
+            assert_eq!(body["connectionId"],"connection");
+        }
+    }
+
+    /// Refuses every call with one subscription refusal, counting the calls.
+    struct RefusingProvider {
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+        reason: crate::provider::SubscriptionRefusal,
+    }
+
+    impl RefusingProvider {
+        fn refusal(&self) -> ProviderError {
+            ProviderError::SubscriptionRefused {
+                reason: self.reason,
+                retry_after_ms: Some(52_260_000),
+                resets_at: chrono::DateTime::parse_from_rfc3339("2026-09-26T01:21:00Z")
+                    .ok()
+                    .map(|at| at.with_timezone(&chrono::Utc)),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ProviderRouter for RefusingProvider {
+        fn capabilities(&self) -> crate::provider::ProviderCapabilities {
+            crate::provider::ProviderCapabilities::default()
+        }
+
+        async fn infer(&self, _req: &InferRequest) -> Result<InferResponse, ProviderError> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Err(self.refusal())
+        }
+
+        async fn infer_stream(
+            &self,
+            _req: &InferRequest,
+        ) -> Result<mpsc::Receiver<InferChunk>, ProviderError> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Err(self.refusal())
+        }
+    }
+
+    /// Throttles every call with a short, affordable retry-after, counting
+    /// the calls: the case that would otherwise earn a waited second pass.
+    struct ThrottledProvider {
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl ProviderRouter for ThrottledProvider {
+        fn capabilities(&self) -> crate::provider::ProviderCapabilities {
+            crate::provider::ProviderCapabilities::default()
+        }
+
+        async fn infer(&self, _req: &InferRequest) -> Result<InferResponse, ProviderError> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Err(ProviderError::RateLimited { retry_after_ms: 1_000 })
+        }
+
+        async fn infer_stream(
+            &self,
+            _req: &InferRequest,
+        ) -> Result<mpsc::Receiver<InferChunk>, ProviderError> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Err(ProviderError::RateLimited { retry_after_ms: 1_000 })
+        }
+    }
+
+    fn assert_refused(
+        outcome: Result<(), ProviderError>,
+        reason: crate::provider::SubscriptionRefusal,
+    ) {
+        match outcome {
+            Err(ProviderError::SubscriptionRefused {
+                reason: got,
+                retry_after_ms,
+                resets_at,
+            }) => {
+                assert_eq!(got, reason);
+                assert_eq!(retry_after_ms, Some(52_260_000));
+                assert_eq!(
+                    resets_at.map(|at| at.to_rfc3339()),
+                    Some("2026-09-26T01:21:00+00:00".to_owned())
+                );
+            }
+            other => panic!("expected the {reason:?} refusal back, got {other:?}"),
+        }
+    }
+
+    /// A refusal is answered once, with no retry, no wait and no other
+    /// provider, even with an unpinned request that another provider could
+    /// serve and a throttled provider that would otherwise earn a waited
+    /// second pass.
+    #[tokio::test(start_paused = true)]
+    async fn a_subscription_refusal_is_final_on_the_first_attempt() {
+        use crate::provider::SubscriptionRefusal;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        for reason in [
+            SubscriptionRefusal::UsageLimit,
+            SubscriptionRefusal::ReauthRequired,
+            SubscriptionRefusal::UpstreamUnavailable,
+            SubscriptionRefusal::BadRequest,
+        ] {
+            let throttled_calls = Arc::new(AtomicUsize::new(0));
+            let refused_calls = Arc::new(AtomicUsize::new(0));
+            let seen = Arc::new(Mutex::new(None));
+            let chain = FallbackChain::new_with_providers(
+                vec![
+                    (
+                        "throttled".into(),
+                        Arc::new(ThrottledProvider { calls: throttled_calls.clone() })
+                            as BoxedProvider,
+                    ),
+                    (
+                        "openai-codex-subscription".into(),
+                        Arc::new(RefusingProvider { calls: refused_calls.clone(), reason })
+                            as BoxedProvider,
+                    ),
+                    (
+                        "azure-openai".into(),
+                        Arc::new(RecordingProvider { seen_model: seen.clone(), ..Default::default() })
+                            as BoxedProvider,
+                    ),
+                ],
+                3,
+            )
+            .with_intent_enabled(true);
+            let request = InferRequest {
+                request_id: "refused".into(),
+                model: "gpt-5.6-terra".into(),
+                ..Default::default()
+            };
+
+            let began = tokio::time::Instant::now();
+            assert_refused(chain.infer_without_response_cache(&request).await.map(drop), reason);
+            assert_refused(chain.infer_stream(&request).await.map(drop), reason);
+            assert_eq!(
+                began.elapsed(),
+                Duration::ZERO,
+                "{reason:?}: a refusal is never waited out"
+            );
+            assert_eq!(refused_calls.load(Ordering::SeqCst), 2, "{reason:?}: one call per route");
+            assert_eq!(throttled_calls.load(Ordering::SeqCst), 2, "{reason:?}: no second pass");
+            assert!(
+                seen.lock().unwrap().is_none(),
+                "{reason:?}: no provider after the refusal may answer"
+            );
+        }
+    }
+
+    /// The live route: each typed broker refusal reaches the caller as its own
+    /// typed error, after exactly one broker call per route, with no API
+    /// provider and no intent-ladder rung ever asked.
+    #[tokio::test]
+    async fn every_broker_refusal_is_one_call_and_never_reaches_an_api_provider() {
+        use crate::provider::SubscriptionRefusal;
+        for (status, code, reason) in [
+            (429, "subscription_usage_limit", SubscriptionRefusal::UsageLimit),
+            (409, "subscription_reauth_required", SubscriptionRefusal::ReauthRequired),
+            (503, "subscription_upstream_unavailable", SubscriptionRefusal::UpstreamUnavailable),
+            (422, "subscription_bad_request", SubscriptionRefusal::BadRequest),
+        ] {
+            let server = wiremock::MockServer::start().await;
+            wiremock::Mock::given(wiremock::matchers::method("POST"))
+                .respond_with(wiremock::ResponseTemplate::new(status).set_body_json(
+                    serde_json::json!({"success": false, "error": {"code": code}}),
+                ))
+                .expect(2)
+                .mount(&server)
+                .await;
+            let subscription: BoxedProvider = Arc::new(
+                CodexSubscriptionProvider::new(server.uri(), "test-key", vec!["gpt-5.6-terra".into()])
+                    .unwrap(),
+            );
+            let seen = Arc::new(Mutex::new(None));
+            let alternative: BoxedProvider =
+                Arc::new(RecordingProvider { seen_model: seen.clone(), ..Default::default() });
+            let chain = FallbackChain::new_with_providers(
+                vec![
+                    ("openai-codex-subscription".into(), subscription),
+                    ("azure-openai".into(), alternative),
+                ],
+                3,
+            )
+            .with_intent_enabled(true);
+            let request = InferRequest {
+                request_id: "subscription-only".into(),
+                model: "gpt-5.6-terra".into(),
+                provider_hint: "openai-codex-subscription".into(),
+                subscription_connection_id: "connection".into(),
+                org_id: "org".into(),
+                user_id: "user".into(),
+                ..Default::default()
+            };
+            for outcome in [
+                chain.infer(&request).await.map(drop),
+                chain.infer_stream(&request).await.map(drop),
+            ] {
+                assert!(
+                    matches!(outcome, Err(ProviderError::SubscriptionRefused { reason: got, .. }) if got == reason),
+                    "{code}: {outcome:?}"
+                );
+            }
+            assert!(seen.lock().unwrap().is_none(), "{code}: never another provider");
+            // `expect(2)`: one unary and one stream call, no retries.
+            server.verify().await;
+        }
+    }
+
+    /// A stream the broker answered, then failed without a typed reason, is
+    /// one broker call even with three attempts allowed: the Codex turn had
+    /// started, so each retry would cost another turn of the plan's quota.
+    /// Only a stream cut before the broker's `ready` (nothing ran yet) is
+    /// retried. None of them reaches another provider.
+    #[tokio::test]
+    async fn an_untyped_stream_failure_after_ready_is_one_broker_call() {
+        let ready = serde_json::json!({"type": "ready", "requestId": "untyped"});
+        let cases: [(&str, Vec<serde_json::Value>, u64); 4] = [
+            (
+                "untyped error event",
+                vec![
+                    ready.clone(),
+                    serde_json::json!({"type": "error", "code": "subscription_broker_failed"}),
+                ],
+                1,
+            ),
+            (
+                "error event without a code",
+                vec![ready.clone(), serde_json::json!({"type": "error"})],
+                1,
+            ),
+            ("ended after ready", vec![ready.clone()], 1),
+            ("ended before any event", Vec::new(), 3),
+        ];
+        for (case, events, broker_calls) in cases {
+            let server = wiremock::MockServer::start().await;
+            let body = events
+                .iter()
+                .map(|event| format!("data: {event}\n\n"))
+                .collect::<Vec<_>>()
+                .concat();
+            wiremock::Mock::given(wiremock::matchers::path(
+                "/internal/model-subscriptions/openai-codex/infer/stream",
+            ))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_raw(body, "text/event-stream"),
+            )
+            .expect(broker_calls)
+            .mount(&server)
+            .await;
+            let subscription: BoxedProvider = Arc::new(
+                CodexSubscriptionProvider::new(server.uri(), "test-key", vec!["gpt-5.6-terra".into()])
+                    .unwrap(),
+            );
+            let seen = Arc::new(Mutex::new(None));
+            let alternative: BoxedProvider =
+                Arc::new(RecordingProvider { seen_model: seen.clone(), ..Default::default() });
+            let chain = FallbackChain::new_with_providers(
+                vec![
+                    ("openai-codex-subscription".into(), subscription),
+                    ("azure-openai".into(), alternative),
+                ],
+                3,
+            )
+            .with_intent_enabled(true);
+            let request = InferRequest {
+                request_id: "untyped".into(),
+                model: "gpt-5.6-terra".into(),
+                provider_hint: "openai-codex-subscription".into(),
+                subscription_connection_id: "connection".into(),
+                org_id: "org".into(),
+                user_id: "user".into(),
+                ..Default::default()
+            };
+            let outcome = chain.infer_stream(&request).await.map(drop);
+            if broker_calls == 1 {
+                assert!(
+                    matches!(outcome, Err(ProviderError::SubscriptionFailed(_))),
+                    "{case}: {outcome:?}"
+                );
+            } else {
+                assert!(outcome.is_err(), "{case}: {outcome:?}");
+            }
+            assert!(seen.lock().unwrap().is_none(), "{case}: never another provider");
+            server.verify().await;
+        }
+    }
+
+    /// Whatever sits beside it, a failed subscription turn ends the walk on
+    /// the first attempt, with no waited second pass for a throttled provider
+    /// before it, and is what the caller gets back.
+    #[tokio::test(start_paused = true)]
+    async fn a_failed_subscription_turn_is_final_on_the_first_attempt() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct FailedTurnProvider {
+            calls: Arc<AtomicUsize>,
+        }
+
+        #[async_trait::async_trait]
+        impl ProviderRouter for FailedTurnProvider {
+            fn capabilities(&self) -> crate::provider::ProviderCapabilities {
+                crate::provider::ProviderCapabilities::default()
+            }
+
+            async fn infer(&self, _req: &InferRequest) -> Result<InferResponse, ProviderError> {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                Err(ProviderError::SubscriptionFailed("turn failed".into()))
+            }
+
+            async fn infer_stream(
+                &self,
+                _req: &InferRequest,
+            ) -> Result<mpsc::Receiver<InferChunk>, ProviderError> {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                Err(ProviderError::SubscriptionFailed("turn failed".into()))
+            }
+        }
+
+        let throttled_calls = Arc::new(AtomicUsize::new(0));
+        let failed_calls = Arc::new(AtomicUsize::new(0));
+        let seen = Arc::new(Mutex::new(None));
+        let chain = FallbackChain::new_with_providers(
+            vec![
+                (
+                    "throttled".into(),
+                    Arc::new(ThrottledProvider { calls: throttled_calls.clone() }) as BoxedProvider,
+                ),
+                (
+                    "openai-codex-subscription".into(),
+                    Arc::new(FailedTurnProvider { calls: failed_calls.clone() }) as BoxedProvider,
+                ),
+                (
+                    "azure-openai".into(),
+                    Arc::new(RecordingProvider { seen_model: seen.clone(), ..Default::default() })
+                        as BoxedProvider,
+                ),
+            ],
+            3,
+        );
+        let request = InferRequest {
+            request_id: "failed-turn".into(),
+            model: "gpt-5.6-terra".into(),
+            ..Default::default()
+        };
+        let began = tokio::time::Instant::now();
+        for outcome in [
+            chain.infer_without_response_cache(&request).await.map(drop),
+            chain.infer_stream(&request).await.map(drop),
+        ] {
+            assert!(
+                matches!(&outcome, Err(ProviderError::SubscriptionFailed(message)) if message == "turn failed"),
+                "{outcome:?}"
+            );
+        }
+        assert_eq!(began.elapsed(), Duration::ZERO, "a failed turn is never waited out");
+        assert_eq!(failed_calls.load(Ordering::SeqCst), 2, "one call per route");
+        assert_eq!(throttled_calls.load(Ordering::SeqCst), 2, "no second pass");
+        assert!(seen.lock().unwrap().is_none(), "no provider after the failed turn");
+    }
+
+    #[test]
+    fn a_recorded_refusal_outranks_throttling_and_overflow_at_exhaustion() {
+        let mut throttle = ThrottleState::default();
+        throttle.record(2_000);
+        throttle.record_too_long("overflow");
+        throttle.record_refusal(ProviderError::SubscriptionRefused {
+            reason: crate::provider::SubscriptionRefusal::ReauthRequired,
+            retry_after_ms: None,
+            resets_at: None,
+        });
+        // The first refusal is the one kept.
+        throttle.record_refusal(ProviderError::SubscriptionRefused {
+            reason: crate::provider::SubscriptionRefusal::UsageLimit,
+            retry_after_ms: None,
+            resets_at: None,
+        });
+        assert!(throttle.refused());
+        assert!(matches!(
+            throttle.exhausted_error(3),
+            ProviderError::SubscriptionRefused {
+                reason: crate::provider::SubscriptionRefusal::ReauthRequired,
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn subscription_usage_and_broker_phases_survive_the_chain() {
+        use wiremock::matchers::path;
+        let usage = serde_json::json!({
+            "inputTokens": 1800, "cachedInputTokens": 1024, "cacheWriteInputTokens": 256,
+            "outputTokens": 120, "reasoningOutputTokens": 40
+        });
+        let phases = serde_json::json!({"spawn": 41, "turn_total": 9000});
+        let server = wiremock::MockServer::start().await;
+        let reply = serde_json::json!({"success": true, "data": {"response": {
+            "requestId": "usage", "content": "Hei", "modelUsed": "gpt-5.6-terra",
+            "usage": usage, "phasesMs": phases
+        }}});
+        wiremock::Mock::given(path("/internal/model-subscriptions/openai-codex/infer"))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(reply))
+            .mount(&server)
+            .await;
+        let done_event = serde_json::json!({
+            "type": "done", "requestId": "usage", "modelUsed": "gpt-5.6-terra",
+            "usage": usage, "phasesMs": phases
+        });
+        let stream = [
+            serde_json::json!({"type": "ready", "requestId": "usage"}),
+            serde_json::json!({"type": "delta", "delta": "Hei"}),
+            done_event,
+        ]
+        .iter()
+        .map(|event| format!("data: {event}\n\n"))
+        .collect::<Vec<_>>()
+        .concat();
+        wiremock::Mock::given(path(
+            "/internal/model-subscriptions/openai-codex/infer/stream",
+        ))
+        .respond_with(
+            wiremock::ResponseTemplate::new(200).set_body_raw(stream, "text/event-stream"),
+        )
+        .mount(&server)
+        .await;
+        let subscription: BoxedProvider = Arc::new(
+            CodexSubscriptionProvider::new(server.uri(), "test-key", vec!["gpt-5.6-terra".into()])
+                .unwrap(),
+        );
+        let chain = FallbackChain::new_with_providers(
+            vec![("openai-codex-subscription".into(), subscription)],
+            1,
+        );
+        let request = InferRequest {
+            request_id: "usage".into(),
+            model: "gpt-5.6-terra".into(),
+            provider_hint: "openai-codex-subscription".into(),
+            subscription_connection_id: "connection".into(),
+            org_id: "org".into(),
+            user_id: "user".into(),
+            ..Default::default()
+        };
+
+        let response = chain.infer_without_response_cache(&request).await.unwrap();
+        assert_eq!(
+            (response.input_tokens, response.output_tokens),
+            (1_800, 120)
+        );
+        assert_eq!(
+            (
+                response.cache_read_input_tokens,
+                response.cache_creation_input_tokens
+            ),
+            (1_024, 256)
+        );
+        let timing = response
+            .provider_timing
+            .expect("the chain stamps the timing");
+        assert!(timing.usage_reported);
+        assert_eq!(timing.attempts, 1);
+        assert_eq!(
+            timing.upstream.get("turn_total"),
+            Some(&Duration::from_secs(9))
+        );
+
+        let mut chunks = chain.infer_stream(&request).await.unwrap();
+        let mut done = None;
+        while let Some(chunk) = chunks.recv().await {
+            if chunk.done {
+                done = Some(chunk);
+                break;
+            }
+            assert!(
+                chunk.provider_timing.is_none(),
+                "only the final chunk carries timing"
+            );
+        }
+        let done = done.expect("a final chunk");
+        assert_eq!((done.input_tokens, done.output_tokens), (1_800, 120));
+        assert_eq!(done.provider_used, "openai-codex-subscription");
+        let timing = done.provider_timing.expect("the chain stamps the timing");
+        assert!(timing.usage_reported);
+        assert_eq!(
+            timing.upstream.get("spawn"),
+            Some(&Duration::from_millis(41))
+        );
+        assert!(timing.upstream.contains_key("broker_ready"));
+    }
+
+    #[tokio::test]
+    async fn fresh_inference_neither_reads_nor_writes_response_cache_or_bypasses_zdr() {
+        let seen = Arc::new(Mutex::new(None));
+        let chain = chain_with(seen.clone());
+        let mut request = InferRequest { model: "claude-sonnet-4-6".into(), ..Default::default() };
+        for id in ["fresh-1", "fresh-2"] {
+            request.request_id = id.into();
+            assert_eq!(chain.infer_without_response_cache(&request).await.unwrap().request_id, id);
+            assert_eq!(chain.cache.len(), 0);
+        }
+        request.request_id = "cached".into();
+        chain.infer(&request).await.unwrap();
+        assert_eq!(chain.cache.len(), 1);
+        request.request_id = "fresh-3".into();
+        assert_eq!(chain.infer_without_response_cache(&request).await.unwrap().request_id, "fresh-3");
+        // The original entry was neither read nor overwritten by fresh-3.
+        assert_eq!(chain.infer(&request).await.unwrap().request_id, "cached");
+        *seen.lock().unwrap() = None;
+        request.zdr = true;
+        assert!(chain.infer_without_response_cache(&request).await.is_err());
+        assert!(seen.lock().unwrap().is_none());
     }
 
     #[tokio::test]
@@ -2160,6 +2870,7 @@ mod resolution_tests {
             request_id: "r3".to_owned(),
             model: "verevon-budget".to_owned(),
             messages: vec![crate::provider::ChatMessage {
+                compaction_summary: String::new(),
                 role: "user".to_owned(),
                 content: "hi".to_owned(),
                 name: String::new(),
@@ -2367,6 +3078,7 @@ mod resolution_tests {
             *self.reached.lock().unwrap() = true;
             let (tx, rx) = mpsc::channel(1);
             let chunk = InferChunk {
+                compaction_summary: String::new(),
                 request_id: req.request_id.clone(),
                 delta: String::new(),
                 done: true,
@@ -2380,6 +3092,9 @@ mod resolution_tests {
                 provider_used: String::new(),
                 residency: String::new(),
                 token_confidence: None,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+                provider_timing: None,
             };
             tokio::spawn(async move {
                 let _ = tx.send(chunk).await;
@@ -2956,6 +3671,7 @@ mod resolution_tests {
         async fn infer(&self, req: &InferRequest) -> Result<InferResponse, ProviderError> {
             self.record(&req.model)?;
             Ok(InferResponse {
+                compaction_summary: String::new(),
                 request_id: req.request_id.clone(),
                 content: "ok".to_owned(),
                 model_used: req.model.clone(),
@@ -3015,6 +3731,7 @@ mod resolution_tests {
             request_id: request_id.to_owned(),
             model: model.to_owned(),
             messages: vec![crate::provider::ChatMessage {
+                compaction_summary: String::new(),
                 role: "user".to_owned(),
                 content: "Kan du sjekke i Visma hva vi har tomt på lager?".to_owned(),
                 name: String::new(),
@@ -3036,6 +3753,7 @@ mod resolution_tests {
     impl ProviderRouter for VersionEchoProvider {
         async fn infer(&self, req: &InferRequest) -> Result<InferResponse, ProviderError> {
             Ok(InferResponse {
+                compaction_summary: String::new(),
                 request_id: req.request_id.clone(),
                 content: "ok".to_owned(),
                 model_used: format!("{}-2024-07-18", req.model),
@@ -3059,6 +3777,7 @@ mod resolution_tests {
                 // carrying the versioned id — the real Azure shape.
                 let _ = tx
                     .send(InferChunk {
+                        compaction_summary: String::new(),
                         request_id: request_id.clone(),
                         delta: "hei".to_owned(),
                         done: false,
@@ -3070,10 +3789,14 @@ mod resolution_tests {
                         provider_used: String::new(),
                         residency: String::new(),
                         token_confidence: None,
+                        cache_read_input_tokens: 0,
+                        cache_creation_input_tokens: 0,
+                        provider_timing: None,
                     })
                     .await;
                 let _ = tx
                     .send(InferChunk {
+                        compaction_summary: String::new(),
                         request_id,
                         delta: String::new(),
                         done: true,
@@ -3085,6 +3808,9 @@ mod resolution_tests {
                         provider_used: String::new(),
                         residency: String::new(),
                         token_confidence: None,
+                        cache_read_input_tokens: 0,
+                        cache_creation_input_tokens: 0,
+                        provider_timing: None,
                     })
                     .await;
             });

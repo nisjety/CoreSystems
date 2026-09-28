@@ -239,6 +239,17 @@ services:
             # Base Compose is the loopback development stack. Production override
             # switches this to production and requires a file-backed principal registry.
             NODE_ENV: development
+            # Built from ${DRAGONFLY_PASSWORD} — the same variable
+            # controlplane-dragonfly's own --requirepass uses — so the two
+            # cannot disagree. auth-core/.env.docker carries a DRAGONFLY_URL
+            # with the password written INLINE, and that literal silently
+            # stopped matching when the password was rotated: Dragonfly came
+            # back on the current 64-char value while auth-core kept presenting
+            # a 48-char one, every cache call failed WRONGPASS, and
+            # /api/v1/auth/session answered 500 — nobody could sign in.
+            # `environment:` wins over `env_file:`, so this entry is what the
+            # container actually gets.
+            DRAGONFLY_URL: redis://:${DRAGONFLY_PASSWORD:?DRAGONFLY_PASSWORD must be set (no change-me default)}@controlplane-dragonfly:6379/3
             VEREVON_NATS_URL: nats://control-shared-nats:4222
             NATS_SHARED_USER: auth-core-shared
             NATS_SHARED_PASSWORD: ${AUTH_SHARED_NATS_PASSWORD:?AUTH_SHARED_NATS_PASSWORD is required}
@@ -274,6 +285,10 @@ services:
             # Dedicated read-only credential for user-core's exact Better Auth
             # membership decision. It must not be reused as a general internal key.
             USER_CORE_MEMBERSHIP_SERVICE_TOKEN: ${USER_CORE_MEMBERSHIP_SERVICE_TOKEN:?USER_CORE_MEMBERSHIP_SERVICE_TOKEN is required}
+            # Dedicated exact-membership decision for Learning Core. This grants
+            # only POST /api/v1/internal/membership/decision and is not shared
+            # with User Core. Learning remains unavailable until configured.
+            LEARNING_CORE_MEMBERSHIP_SERVICE_TOKEN: ${LEARNING_CORE_MEMBERSHIP_SERVICE_TOKEN:-}
             # D-A grant administration (/api/v1/internal/org-groups/*). Required:
             # the controller fails closed rather than accepting an unauthenticated caller.
             ORG_GROUP_GRANT_SERVICE_TOKEN: ${ORG_GROUP_GRANT_SERVICE_TOKEN:?ORG_GROUP_GRANT_SERVICE_TOKEN is required}
@@ -289,7 +304,7 @@ services:
             # Better Auth CSRF/origin trust for verevonv3 via the Rust gateway (:3185)
             # plus SPA dev/Docker origins. auth.ts unions this with the built-in list
             # (incl verevonv2 :3000) — additive, does not displace existing trust.
-            BETTER_AUTH_TRUSTED_ORIGINS: ${BETTER_AUTH_TRUSTED_ORIGINS:-http://localhost:3185,http://127.0.0.1:3185,http://localhost:3186,http://127.0.0.1:3186,http://localhost:5173,http://127.0.0.1:5173,http://localhost:5199,http://127.0.0.1:5199}
+            BETTER_AUTH_TRUSTED_ORIGINS: ${BETTER_AUTH_TRUSTED_ORIGINS:-http://localhost:3185,http://127.0.0.1:3185,http://localhost:3186,http://127.0.0.1:3186,http://localhost:5173,http://127.0.0.1:5173,http://localhost:5199,http://127.0.0.1:5199,http://localhost:5201,http://127.0.0.1:5201}
             DISPOSABLE_EMAIL_BLOCKLIST_ENABLED: ${DISPOSABLE_EMAIL_BLOCKLIST_ENABLED:-true}
             DISPOSABLE_EMAIL_DOMAINS_FILE: ${DISPOSABLE_EMAIL_DOMAINS_FILE:-/app/config/security/disposable-email-domains.txt}
             # Stable RS256 signing key for the data-plane / Convex / plane JWTs +

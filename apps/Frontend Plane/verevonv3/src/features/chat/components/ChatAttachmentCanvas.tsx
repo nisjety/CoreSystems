@@ -20,8 +20,8 @@ import { useI18n } from '@/shared/i18n'
 /**
  * Viewer for files the user attached to the current conversation. Object URLs
  * belong to the composer, so the controller supplies a bounded data URL when a
- * turn is submitted. Persisted transcripts retain only metadata and therefore
- * render an honest "available in this session" note instead of a broken frame.
+ * turn is submitted. Durable text sources are restored from the thread; an
+ * unavailable original binary keeps an honest session-only preview note.
  */
 export function ChatAttachmentCanvas(props: {
   attachments: ChatTurnAttachment[]
@@ -144,7 +144,11 @@ function AttachmentViewer(props: { attachment: ChatTurnAttachment; panelId: stri
           <strong>{props.attachment.name}</strong>
           <small>{formatBytes(props.attachment.size)} · {props.attachment.type || 'fil'}</small>
           <small class="verevon-chat-attachment-workspace__provenance">
-            {isImage() ? 'Sendt til modellen' : 'Kun forhåndsvisning i denne chatten'}
+            {isImage()
+              ? i18n.tr('Sendt til modellen', 'Sent to the model')
+              : props.attachment.extractedText
+                ? i18n.tr('Teksten er inkludert i samtalegrunnlaget', 'Text is included in the conversation context')
+                : i18n.tr('Kun forhåndsvisning i denne chatten', 'Preview only in this chat')}
           </small>
         </div>
         <div class="verevon-chat-attachment-workspace__actions">

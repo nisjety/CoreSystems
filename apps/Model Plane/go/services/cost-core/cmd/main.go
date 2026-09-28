@@ -69,15 +69,41 @@ type envelope struct {
 // usagePayload is the inner payload of a USAGE_ENVELOPE event. cost_usd and
 // run_id are optional: the gateway does not always emit them, in which case
 // they default to zero/empty and cost is derived elsewhere.
+//
+// CacheReadInputTokens / CacheCreationInputTokens are cache-token telemetry
+// (a native-compaction migration prerequisite); older gateway builds that
+// predate this field simply omit the JSON keys, which decodes to the correct
+// zero value here -- no version gate needed.
+//
+// CostBasis is model-gateway's pricing::CostBasis ("metered" or
+// "subscription"). A subscription turn is never priced from API list prices
+// (see server.RecordUsage). An older gateway omits the key, which decodes to
+// the unknown basis and is priced as before.
 type usagePayload struct {
-	RequestID    string  `json:"request_id"`
-	OrgID        string  `json:"org_id"`
-	UserID       string  `json:"user_id"`
-	RunID        string  `json:"run_id"`
-	Model        string  `json:"model"`
-	InputTokens  int64   `json:"input_tokens"`
-	OutputTokens int64   `json:"output_tokens"`
-	CostUSD      float64 `json:"cost_usd"`
+	RequestID                string  `json:"request_id"`
+	OrgID                    string  `json:"org_id"`
+	UserID                   string  `json:"user_id"`
+	RunID                    string  `json:"run_id"`
+	Model                    string  `json:"model"`
+	InputTokens              int64   `json:"input_tokens"`
+	OutputTokens             int64   `json:"output_tokens"`
+	CostUSD                  float64 `json:"cost_usd"`
+	CacheReadInputTokens     int64   `json:"cache_read_input_tokens"`
+	CacheCreationInputTokens int64   `json:"cache_creation_input_tokens"`
+	CostBasis                string  `json:"cost_basis"`
+}
+
+// costBasisOf returns the payload's canonical cost basis. An unrecognised
+// value does not reject the event, which would drop its tokens from the
+// ledger: it is logged and treated as unknown, so the entry is priced like a
+// metered one and never silently counted as free.
+func costBasisOf(orgID string, p usagePayload) string {
+	basis, ok := ledger.NormalizeCostBasis(p.CostBasis)
+	if !ok {
+		slog.Warn("unrecognised usage cost_basis; pricing the entry as metered",
+			"org_id", orgID, "request_id", p.RequestID, "cost_basis_bytes", len(p.CostBasis))
+	}
+	return basis
 }
 
 func main() {
@@ -413,17 +439,20 @@ func decodeUsageMessage(subject string, data []byte, createdAt time.Time) (ledge
 	}
 
 	entry := ledger.Entry{
-		OrgID:          subjectOrgID,
-		UserID:         firstNonEmpty(p.UserID, env.UserID),
-		ProducerID:     env.Producer,
-		RunID:          p.RunID,
-		RequestID:      firstNonEmpty(p.RequestID, env.CorrelationID),
-		Model:          p.Model,
-		InputTokens:    p.InputTokens,
-		OutputTokens:   p.OutputTokens,
-		CostUSD:        p.CostUSD,
-		IdempotencyKey: env.IdempotencyKey,
-		CreatedAt:      createdAt,
+		OrgID:                    subjectOrgID,
+		UserID:                   firstNonEmpty(p.UserID, env.UserID),
+		ProducerID:               env.Producer,
+		RunID:                    p.RunID,
+		RequestID:                firstNonEmpty(p.RequestID, env.CorrelationID),
+		Model:                    p.Model,
+		InputTokens:              p.InputTokens,
+		OutputTokens:             p.OutputTokens,
+		CostUSD:                  p.CostUSD,
+		IdempotencyKey:           env.IdempotencyKey,
+		CreatedAt:                createdAt,
+		CacheReadInputTokens:     p.CacheReadInputTokens,
+		CacheCreationInputTokens: p.CacheCreationInputTokens,
+		CostBasis:                costBasisOf(subjectOrgID, p),
 	}
 	if err := ledger.ValidateEntry(entry); err != nil {
 		return ledger.Entry{}, err
@@ -478,6 +507,7 @@ func runFeedFallback(ctx context.Context, srv *server.Server) {
 				InputTokens:  p.InputTokens,
 				OutputTokens: p.OutputTokens,
 				CostUSD:      p.CostUSD,
+				CostBasis:    costBasisOf(p.OrgID, p),
 			}); err != nil {
 				slog.Warn("rejected usage feed entry", "error", err)
 			}

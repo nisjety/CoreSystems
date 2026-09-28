@@ -81,6 +81,9 @@ const (
 	EventType_EVENT_TYPE_RUN_COMPLETED EventType = 91
 	// Run failed.
 	EventType_EVENT_TYPE_RUN_FAILED EventType = 92
+	// Run cancelled by an authorized owner; the event id is the cancellation
+	// receipt exposed by the RunService cancel response.
+	EventType_EVENT_TYPE_RUN_CANCELLED EventType = 93
 	// Action lifecycle events.
 	// Action started execution.
 	EventType_EVENT_TYPE_ACTION_STARTED EventType = 100
@@ -118,6 +121,16 @@ const (
 	// Recovery events (Phase 1).
 	// Recovery attempt made.
 	EventType_EVENT_TYPE_RECOVERY_ATTEMPTED EventType = 130
+	// Browser-agent progress events. These are persisted only as the safe,
+	// reference-based projection emitted by OrchestrationCore; screenshots and
+	// DOM bytes remain artifacts behind their existing ownership-gated route.
+	EventType_EVENT_TYPE_BROWSER_ACTION_DISPATCHED        EventType = 140
+	EventType_EVENT_TYPE_BROWSER_OBSERVATION_RECEIVED     EventType = 141
+	EventType_EVENT_TYPE_BROWSER_RUN_PAUSED               EventType = 142
+	EventType_EVENT_TYPE_BROWSER_RUN_RESUMED              EventType = 143
+	EventType_EVENT_TYPE_BROWSER_ACTION_APPROVAL_REQUIRED EventType = 144
+	EventType_EVENT_TYPE_BROWSER_ACTION_DECIDED           EventType = 145
+	EventType_EVENT_TYPE_APPROVAL_CONTINUATION_VERIFIED   EventType = 146
 )
 
 // Enum value maps for EventType.
@@ -145,6 +158,7 @@ var (
 		90:  "EVENT_TYPE_RUN_STARTED",
 		91:  "EVENT_TYPE_RUN_COMPLETED",
 		92:  "EVENT_TYPE_RUN_FAILED",
+		93:  "EVENT_TYPE_RUN_CANCELLED",
 		100: "EVENT_TYPE_ACTION_STARTED",
 		101: "EVENT_TYPE_ACTION_COMPLETED",
 		110: "EVENT_TYPE_CHECKPOINT_SAVED",
@@ -160,45 +174,60 @@ var (
 		128: "EVENT_TYPE_RUN_PAUSED_FOR_APPROVAL",
 		129: "EVENT_TYPE_RUN_RESUMED_AFTER_APPROVAL",
 		130: "EVENT_TYPE_RECOVERY_ATTEMPTED",
+		140: "EVENT_TYPE_BROWSER_ACTION_DISPATCHED",
+		141: "EVENT_TYPE_BROWSER_OBSERVATION_RECEIVED",
+		142: "EVENT_TYPE_BROWSER_RUN_PAUSED",
+		143: "EVENT_TYPE_BROWSER_RUN_RESUMED",
+		144: "EVENT_TYPE_BROWSER_ACTION_APPROVAL_REQUIRED",
+		145: "EVENT_TYPE_BROWSER_ACTION_DECIDED",
+		146: "EVENT_TYPE_APPROVAL_CONTINUATION_VERIFIED",
 	}
 	EventType_value = map[string]int32{
-		"EVENT_TYPE_UNSPECIFIED":                0,
-		"EVENT_TYPE_SESSION_START":              1,
-		"EVENT_TYPE_SESSION_END":                2,
-		"EVENT_TYPE_INSTRUCTIONS_LOADED":        10,
-		"EVENT_TYPE_USER_PROMPT_SUBMIT":         11,
-		"EVENT_TYPE_PRE_TOOL_USE":               20,
-		"EVENT_TYPE_POST_TOOL_USE":              21,
-		"EVENT_TYPE_POST_TOOL_USE_FAILURE":      22,
-		"EVENT_TYPE_PERMISSION_REQUEST":         30,
-		"EVENT_TYPE_SUBAGENT_START":             40,
-		"EVENT_TYPE_SUBAGENT_STOP":              41,
-		"EVENT_TYPE_TASK_CREATED":               50,
-		"EVENT_TYPE_TASK_COMPLETED":             51,
-		"EVENT_TYPE_PRE_COMPACT":                60,
-		"EVENT_TYPE_POST_COMPACT":               61,
-		"EVENT_TYPE_STOP":                       70,
-		"EVENT_TYPE_STOP_FAILURE":               71,
-		"EVENT_TYPE_INGRESS_ACCEPTED":           80,
-		"EVENT_TYPE_INGRESS_REJECTED":           81,
-		"EVENT_TYPE_RUN_STARTED":                90,
-		"EVENT_TYPE_RUN_COMPLETED":              91,
-		"EVENT_TYPE_RUN_FAILED":                 92,
-		"EVENT_TYPE_ACTION_STARTED":             100,
-		"EVENT_TYPE_ACTION_COMPLETED":           101,
-		"EVENT_TYPE_CHECKPOINT_SAVED":           110,
-		"EVENT_TYPE_CHECKPOINT_RESTORED":        111,
-		"EVENT_TYPE_PLAN_CREATED":               120,
-		"EVENT_TYPE_APPROVAL_REQUESTED":         121,
-		"EVENT_TYPE_PLAN_TRANSITIONED":          122,
-		"EVENT_TYPE_APPROVAL_DECIDED":           123,
-		"EVENT_TYPE_TODO_CREATED":               124,
-		"EVENT_TYPE_TODO_TRANSITIONED":          125,
-		"EVENT_TYPE_SUBAGENT_ATTACHED":          126,
-		"EVENT_TYPE_SUBAGENT_STOPPED":           127,
-		"EVENT_TYPE_RUN_PAUSED_FOR_APPROVAL":    128,
-		"EVENT_TYPE_RUN_RESUMED_AFTER_APPROVAL": 129,
-		"EVENT_TYPE_RECOVERY_ATTEMPTED":         130,
+		"EVENT_TYPE_UNSPECIFIED":                      0,
+		"EVENT_TYPE_SESSION_START":                    1,
+		"EVENT_TYPE_SESSION_END":                      2,
+		"EVENT_TYPE_INSTRUCTIONS_LOADED":              10,
+		"EVENT_TYPE_USER_PROMPT_SUBMIT":               11,
+		"EVENT_TYPE_PRE_TOOL_USE":                     20,
+		"EVENT_TYPE_POST_TOOL_USE":                    21,
+		"EVENT_TYPE_POST_TOOL_USE_FAILURE":            22,
+		"EVENT_TYPE_PERMISSION_REQUEST":               30,
+		"EVENT_TYPE_SUBAGENT_START":                   40,
+		"EVENT_TYPE_SUBAGENT_STOP":                    41,
+		"EVENT_TYPE_TASK_CREATED":                     50,
+		"EVENT_TYPE_TASK_COMPLETED":                   51,
+		"EVENT_TYPE_PRE_COMPACT":                      60,
+		"EVENT_TYPE_POST_COMPACT":                     61,
+		"EVENT_TYPE_STOP":                             70,
+		"EVENT_TYPE_STOP_FAILURE":                     71,
+		"EVENT_TYPE_INGRESS_ACCEPTED":                 80,
+		"EVENT_TYPE_INGRESS_REJECTED":                 81,
+		"EVENT_TYPE_RUN_STARTED":                      90,
+		"EVENT_TYPE_RUN_COMPLETED":                    91,
+		"EVENT_TYPE_RUN_FAILED":                       92,
+		"EVENT_TYPE_RUN_CANCELLED":                    93,
+		"EVENT_TYPE_ACTION_STARTED":                   100,
+		"EVENT_TYPE_ACTION_COMPLETED":                 101,
+		"EVENT_TYPE_CHECKPOINT_SAVED":                 110,
+		"EVENT_TYPE_CHECKPOINT_RESTORED":              111,
+		"EVENT_TYPE_PLAN_CREATED":                     120,
+		"EVENT_TYPE_APPROVAL_REQUESTED":               121,
+		"EVENT_TYPE_PLAN_TRANSITIONED":                122,
+		"EVENT_TYPE_APPROVAL_DECIDED":                 123,
+		"EVENT_TYPE_TODO_CREATED":                     124,
+		"EVENT_TYPE_TODO_TRANSITIONED":                125,
+		"EVENT_TYPE_SUBAGENT_ATTACHED":                126,
+		"EVENT_TYPE_SUBAGENT_STOPPED":                 127,
+		"EVENT_TYPE_RUN_PAUSED_FOR_APPROVAL":          128,
+		"EVENT_TYPE_RUN_RESUMED_AFTER_APPROVAL":       129,
+		"EVENT_TYPE_RECOVERY_ATTEMPTED":               130,
+		"EVENT_TYPE_BROWSER_ACTION_DISPATCHED":        140,
+		"EVENT_TYPE_BROWSER_OBSERVATION_RECEIVED":     141,
+		"EVENT_TYPE_BROWSER_RUN_PAUSED":               142,
+		"EVENT_TYPE_BROWSER_RUN_RESUMED":              143,
+		"EVENT_TYPE_BROWSER_ACTION_APPROVAL_REQUIRED": 144,
+		"EVENT_TYPE_BROWSER_ACTION_DECIDED":           145,
+		"EVENT_TYPE_APPROVAL_CONTINUATION_VERIFIED":   146,
 	}
 )
 
@@ -406,7 +435,7 @@ const file_model_plane_v1_events_proto_rawDesc = "" +
 	" \x01(\tR\x06userId\x12!\n" +
 	"\fresource_ref\x18\v \x01(\tR\vresourceRef\x12.\n" +
 	"\apayload\x18\f \x01(\v2\x14.google.protobuf.AnyR\apayload\x12\x10\n" +
-	"\x03zdr\x18\r \x01(\bR\x03zdrJ\x04\b\x0e\x10\x15*\xb2\t\n" +
+	"\x03zdr\x18\r \x01(\bR\x03zdrJ\x04\b\x0e\x10\x15*\xfc\v\n" +
 	"\tEventType\x12\x1a\n" +
 	"\x16EVENT_TYPE_UNSPECIFIED\x10\x00\x12\x1c\n" +
 	"\x18EVENT_TYPE_SESSION_START\x10\x01\x12\x1a\n" +
@@ -430,7 +459,8 @@ const file_model_plane_v1_events_proto_rawDesc = "" +
 	"\x1bEVENT_TYPE_INGRESS_REJECTED\x10Q\x12\x1a\n" +
 	"\x16EVENT_TYPE_RUN_STARTED\x10Z\x12\x1c\n" +
 	"\x18EVENT_TYPE_RUN_COMPLETED\x10[\x12\x19\n" +
-	"\x15EVENT_TYPE_RUN_FAILED\x10\\\x12\x1d\n" +
+	"\x15EVENT_TYPE_RUN_FAILED\x10\\\x12\x1c\n" +
+	"\x18EVENT_TYPE_RUN_CANCELLED\x10]\x12\x1d\n" +
 	"\x19EVENT_TYPE_ACTION_STARTED\x10d\x12\x1f\n" +
 	"\x1bEVENT_TYPE_ACTION_COMPLETED\x10e\x12\x1f\n" +
 	"\x1bEVENT_TYPE_CHECKPOINT_SAVED\x10n\x12\"\n" +
@@ -445,7 +475,14 @@ const file_model_plane_v1_events_proto_rawDesc = "" +
 	"\x1bEVENT_TYPE_SUBAGENT_STOPPED\x10\x7f\x12'\n" +
 	"\"EVENT_TYPE_RUN_PAUSED_FOR_APPROVAL\x10\x80\x01\x12*\n" +
 	"%EVENT_TYPE_RUN_RESUMED_AFTER_APPROVAL\x10\x81\x01\x12\"\n" +
-	"\x1dEVENT_TYPE_RECOVERY_ATTEMPTED\x10\x82\x01\"\x06\b\xc8\x01\x10\xff\x01B\xb3\x01\n" +
+	"\x1dEVENT_TYPE_RECOVERY_ATTEMPTED\x10\x82\x01\x12)\n" +
+	"$EVENT_TYPE_BROWSER_ACTION_DISPATCHED\x10\x8c\x01\x12,\n" +
+	"'EVENT_TYPE_BROWSER_OBSERVATION_RECEIVED\x10\x8d\x01\x12\"\n" +
+	"\x1dEVENT_TYPE_BROWSER_RUN_PAUSED\x10\x8e\x01\x12#\n" +
+	"\x1eEVENT_TYPE_BROWSER_RUN_RESUMED\x10\x8f\x01\x120\n" +
+	"+EVENT_TYPE_BROWSER_ACTION_APPROVAL_REQUIRED\x10\x90\x01\x12&\n" +
+	"!EVENT_TYPE_BROWSER_ACTION_DECIDED\x10\x91\x01\x12.\n" +
+	")EVENT_TYPE_APPROVAL_CONTINUATION_VERIFIED\x10\x92\x01\"\x06\b\xc8\x01\x10\xff\x01B\xb3\x01\n" +
 	"\x12com.model_plane.v1B\vEventsProtoP\x01Z;github.com/triodelab/model-plane/gen/go/model_plane/v1;mpv1\xa2\x02\x03MXX\xaa\x02\rModelPlane.V1\xca\x02\rModelPlane\\V1\xe2\x02\x19ModelPlane\\V1\\GPBMetadata\xea\x02\x0eModelPlane::V1b\x06proto3"
 
 var (

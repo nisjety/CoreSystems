@@ -551,6 +551,14 @@ plane_env_files() {
       # build. Do not reorder steps 1-4 without re-checking this.
       owner="$CORE_ROOT/apps/Control Plane/.env.generated-secrets"
       [[ -f "$owner" ]] && printf '%s\n' "$owner"
+      # Model Gateway also signs conversation-core reads for Verevon's inbox
+      # tools, as the `model-gateway` delegation principal. conversation-core
+      # issues and validates that token, so read it from the owner's file for
+      # the same reason the verevonv3 case below does with
+      # CONVERSATION_GATEWAY_SERVICE_TOKEN: a per-plane copy is exactly the
+      # duplicate that drifts and turns every inbox read into a silent 401.
+      owner="$CORE_ROOT/apps/Application Plane/conversation-core/.env"
+      [[ -f "$owner" ]] && printf '%s\n' "$owner"
       ;;
     "verevonv3")
       # The Frontend gateway consumes Control Plane's GDPR stream with a

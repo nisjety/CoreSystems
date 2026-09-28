@@ -5,6 +5,8 @@ pub mod retry;
 pub(crate) mod skill_budget;
 pub mod subagent_results;
 
+use std::path::Path;
+
 use mp_contracts::model_plane::v1::{
     self as pb, orchestration_core_service_client::OrchestrationCoreServiceClient,
 };
@@ -69,6 +71,13 @@ const SAVE_MEMORY_TOOL: &str = "save_memory";
 /// remember something (Hermes exposes recall as a provider tool the same
 /// way); the chat path instead prefetches per turn.
 const RECALL_MEMORY_TOOL: &str = "recall_memory";
+
+/// Plan-mode's control tool (chat-wave2-specs plan-gate §2.1): the model
+/// emits its plan as structured data via session-core's `ProposePlan` RPC
+/// instead of leaving it as unstructured markdown the browser would have to
+/// parse. Writes a durable row, so it is refused on ZDR runs the same way
+/// `SAVE_MEMORY_TOOL` is.
+const PLAN_PROPOSE_TOOL: &str = crate::plan::PROPOSE_TOOL;
 
 /// Read one of the org's skill instructions back in full.
 ///
@@ -287,6 +296,7 @@ pub async fn execute_step(
     session_bearer: Option<&str>,
     inference_bearer: Option<&str>,
     capability_policy: &dyn crate::capability_policy::CapabilityPolicy,
+    sandbox: Option<&crate::sandbox_lease::SandboxLeaseContext<'_>>,
 ) -> StepOutcome {
     execute_step_inner(
         tool_name,
@@ -309,6 +319,7 @@ pub async fn execute_step(
         capability_policy,
         None,
         None,
+        sandbox,
     )
     .await
 }
@@ -344,6 +355,7 @@ pub(crate) async fn execute_step_with_browser_grant(
     inference_bearer: Option<&str>,
     capability_policy: &dyn crate::capability_policy::CapabilityPolicy,
     browser_grant: Option<&tool_bridge::ValidatedBrowserGrant>,
+    sandbox: Option<&crate::sandbox_lease::SandboxLeaseContext<'_>>,
 ) -> StepOutcome {
     execute_step_inner(
         tool_name,
@@ -366,6 +378,7 @@ pub(crate) async fn execute_step_with_browser_grant(
         capability_policy,
         browser_grant,
         None,
+        sandbox,
     )
     .await
 }
@@ -406,6 +419,7 @@ pub(crate) async fn execute_step_with_subagent(
     inference_bearer: Option<&str>,
     capability_policy: &dyn crate::capability_policy::CapabilityPolicy,
     subagent_dispatch: Option<&dyn subagent::SubagentDispatch>,
+    sandbox: Option<&crate::sandbox_lease::SandboxLeaseContext<'_>>,
 ) -> StepOutcome {
     execute_step_inner(
         tool_name,
@@ -428,6 +442,7 @@ pub(crate) async fn execute_step_with_subagent(
         capability_policy,
         None,
         subagent_dispatch,
+        sandbox,
     )
     .await
 }
@@ -460,6 +475,11 @@ async fn execute_step_inner(
     capability_policy: &dyn crate::capability_policy::CapabilityPolicy,
     browser_grant: Option<&tool_bridge::ValidatedBrowserGrant>,
     subagent_dispatch: Option<&dyn subagent::SubagentDispatch>,
+    // Present only for a Space-scoped step, and only after the caller already
+    // verified the delegated sandbox-manager bearer it carries — see
+    // `sandbox_lease::SandboxLeaseContext`'s own doc. Read by exactly one
+    // dispatch arm, `code_interpreter`, below.
+    sandbox: Option<&crate::sandbox_lease::SandboxLeaseContext<'_>>,
 ) -> StepOutcome {
     match capability_policy
         .evaluate_with_evidence(tool_name, run_id, org_id)
@@ -487,8 +507,30 @@ async fn execute_step_inner(
             return StepOutcome::permission_denied();
         }
         Err(error) => {
-            tracing::warn!(code = ?error.code(), "tool dispatch blocked because capability policy is unavailable");
-            return StepOutcome::failed("capability policy unavailable");
+            tracing::warn!(
+                code = ?error.code(),
+                message = %error.message(),
+                "tool dispatch blocked because capability policy is unavailable"
+            );
+            // Name the cause. A bare "capability policy unavailable" reached
+            // the user three times on 2026-09-14 while the real fault was a
+            // deployment error (capability-core signing no evidence), and the
+            // only place that said so was a container log. The model, and the
+            // Arbeid panel, get the same sentence so neither has to guess
+            // whether the tool is forbidden, broken, or misconfigured.
+            let cause = error.message();
+            let detail = if cause.contains("decision evidence") {
+                format!(
+                    "capability policy misconfigured: {cause}. This is a deployment fault (capability-core is not signing decisions), not a permission decision — tell the user the tool is unavailable and do not substitute manual work for it."
+                )
+            } else if error.code() == tonic::Code::Unavailable {
+                format!(
+                    "capability policy unreachable: {cause}. Retrying will not help this turn — tell the user the tool is unavailable right now."
+                )
+            } else {
+                format!("capability policy unavailable: {cause}")
+            };
+            return StepOutcome::failed(&detail);
         }
     }
 
@@ -549,11 +591,41 @@ async fn execute_step_inner(
     } else if tool_name == SHELL_TOOL {
         execute_shell(tool_input).await
     } else if tool_name == CODE_INTERPRETER_TOOL {
-        execute_code_interpreter(tool_input, run_id, step_id).await
+        let workspace_root = if let Some(sandbox) = sandbox {
+            let Some(state) = state else {
+                return StepOutcome::failed(
+                    "Space-scoped code_interpreter requires run state tracking",
+                );
+            };
+            let lease = match crate::sandbox_lease::ensure_sandbox_lease(
+                sandbox, state, run_id, org_id, user_id,
+            )
+            .await
+            {
+                Ok(lease) => lease,
+                Err(status) => return StepOutcome::failed(status.message()),
+            };
+            match crate::sandbox_lease::ensure_hydrated_workspace(
+                sandbox, state, run_id, org_id, &lease,
+            )
+            .await
+            {
+                Ok(path) => Some(path),
+                Err(status) => return StepOutcome::failed(status.message()),
+            }
+        } else {
+            None
+        };
+        execute_code_interpreter(tool_input, run_id, step_id, workspace_root.as_deref()).await
+    } else if crate::process_tools::is_process_tool(tool_name) {
+        execute_process_tool(
+            tool_name, tool_input, org_id, user_id, run_id, step_id, state, sandbox,
+        )
+        .await
     } else if matches!(tool_name, WEB_SEARCH_TOOL | QUARRY_MCP_WEB_SEARCH_TOOL) {
-        execute_web_search(tool_input, org_id).await
+        execute_web_search(tool_input, org_id, zdr).await
     } else if matches!(tool_name, WEB_FETCH_TOOL | QUARRY_MCP_WEB_READ_TOOL) {
-        execute_web_fetch(tool_input, org_id).await
+        execute_web_fetch(tool_input, org_id, zdr).await
     } else if tool_name == KNOWLEDGE_SEARCH_TOOL {
         execute_knowledge_search(
             tool_input,
@@ -577,6 +649,18 @@ async fn execute_step_inner(
         .await
     } else if tool_name == REATTACH_SKILL_TOOL {
         execute_reattach_skill(tool_input, org_id, session_channel.as_ref(), session_bearer).await
+    } else if tool_name == PLAN_PROPOSE_TOOL {
+        execute_propose_plan(
+            tool_input,
+            org_id,
+            user_id,
+            thread_id,
+            run_id,
+            zdr,
+            session_channel.as_ref(),
+            session_bearer,
+        )
+        .await
     } else if tool_name == subagent_results::LIST_TOOL {
         subagent_results::execute_list(
             org_id,
@@ -637,7 +721,7 @@ async fn execute_step_inner(
     } else if tool_name == PUBLISH_SOCIAL_POST_TOOL {
         execute_publish_social_post(tool_input, org_id, user_id, run_id).await
     } else if tool_name == LIST_PROVIDER_ACTIONS_TOOL {
-        execute_list_provider_actions(org_id).await
+        execute_list_provider_actions(org_id, session_bearer).await
     } else if tool_name == EXECUTE_PROVIDER_ACTION_TOOL {
         execute_provider_action(
             tool_input,
@@ -804,8 +888,108 @@ async fn execute_code_interpreter(
     tool_input: &str,
     run_id: &str,
     step_id: &str,
+    workspace_root: Option<&Path>,
 ) -> tool_bridge::ToolExecution {
-    match crate::code_interpreter::run(tool_input, run_id, step_id).await {
+    match crate::code_interpreter::run(tool_input, run_id, step_id, workspace_root).await {
+        Ok(output) => tool_bridge::ToolExecution {
+            output,
+            error: None,
+        },
+        Err(error) => tool_error(error),
+    }
+}
+
+/// The S4.2 `process_*` family ([`crate::process_tools`]). Space-scoped by
+/// construction: a background process runs in a Space's hydrated workspace
+/// under a lease Control granted, so there is nothing coherent to do for a run
+/// without one.
+///
+/// Only `process_start` acquires a lease and hydrates a workspace. Reading,
+/// listing, signalling and writing stdin deliberately do not — forcing a lease
+/// acquisition just to LIST would create sandbox state as a side effect of a
+/// read, and every process those calls can name exists only because an earlier
+/// `process_start` already passed the gate.
+///
+/// Note what is NOT re-checked here: `processes_permitted`. That is
+/// `process_start`'s gate alone, because the other four cannot reach a process
+/// the Space was never allowed to start.
+#[allow(clippy::too_many_arguments)]
+async fn execute_process_tool(
+    tool_name: &str,
+    tool_input: &str,
+    org_id: &str,
+    user_id: &str,
+    run_id: &str,
+    step_id: &str,
+    state: Option<&crate::state::StateStore>,
+    sandbox: Option<&crate::sandbox_lease::SandboxLeaseContext<'_>>,
+) -> tool_bridge::ToolExecution {
+    let Some(sandbox) = sandbox else {
+        return tool_error(
+            "background processes are available only on a Space-scoped run".to_owned(),
+        );
+    };
+    // Unreachable through the agent loop, which does not offer the family
+    // without a host — but the direct `ExecuteStep` RPC takes a tool name from
+    // its caller, so this refuses rather than unwrapping.
+    let Some(host) = sandbox.process_host else {
+        return tool_error(
+            "this execution backend does not host background processes".to_owned(),
+        );
+    };
+    let token = match sandbox.sandbox_tokens.token(org_id).await {
+        Ok(token) => token,
+        Err(error) => {
+            return tool_error(format!("process registry unavailable: {error}"))
+        }
+    };
+
+    let (lease, workspace) = if tool_name == crate::process_tools::PROCESS_START {
+        let Some(state) = state else {
+            return tool_error(
+                "Space-scoped process_start requires run state tracking".to_owned(),
+            );
+        };
+        let lease = match crate::sandbox_lease::ensure_sandbox_lease(
+            sandbox, state, run_id, org_id, user_id,
+        )
+        .await
+        {
+            Ok(lease) => lease,
+            Err(status) => return tool_error(status.message().to_owned()),
+        };
+        let workspace = match crate::sandbox_lease::ensure_hydrated_workspace(
+            sandbox, state, run_id, org_id, &lease,
+        )
+        .await
+        {
+            Ok(path) => path,
+            Err(status) => return tool_error(status.message().to_owned()),
+        };
+        (Some(lease), Some(workspace))
+    } else {
+        (None, None)
+    };
+
+    let start = lease.as_ref().zip(workspace.as_ref()).map(|(lease, path)| {
+        crate::process_tools::StartContext {
+            lease_id: &lease.lease_id,
+            workspace: path.as_path(),
+            processes_permitted: lease.processes_permitted,
+        }
+    });
+    let ctx = crate::process_tools::ProcessToolContext {
+        org_id,
+        space_id: sandbox.space_id,
+        run_id,
+        step_id,
+        subject_id: user_id,
+        host,
+        client: sandbox.sandbox_manager_client,
+        token: &token,
+        start,
+    };
+    match crate::process_tools::execute(tool_name, tool_input, &ctx).await {
         Ok(output) => tool_bridge::ToolExecution {
             output,
             error: None,
@@ -816,7 +1000,24 @@ async fn execute_code_interpreter(
 
 /// `web_search` tool — input JSON `{"query": String, "limit"?: u32}`. Returns a
 /// ranked result list from the Quarry edge. Read-only (no approval gate).
-async fn execute_web_search(tool_input: &str, org_id: &str) -> tool_bridge::ToolExecution {
+///
+/// `zdr` comes from the run's request, never from model-authored `tool_input`:
+/// the model must not be able to talk a ZDR tenant out of its retention
+/// posture. It reaches the edge as `SearchRequest.zdr`, which is what
+/// suppresses cache writes and durable content-bearing events there.
+/// Upper bound on the `limit` a model may ask `web_search` to send upstream.
+/// Matches `web_tools::MAX_SEARCH_RESULTS`, which is what the formatter keeps.
+const MAX_WEB_SEARCH_RESULTS: u32 = 8;
+
+/// Same treatment for the news tool, whose upstream is a third-party feed.
+const DEFAULT_NEWS_RESULTS: u32 = 10;
+const MAX_NEWS_RESULTS: u32 = 25;
+
+async fn execute_web_search(
+    tool_input: &str,
+    org_id: &str,
+    zdr: bool,
+) -> tool_bridge::ToolExecution {
     #[derive(serde::Deserialize)]
     struct SearchInput {
         query: String,
@@ -835,7 +1036,17 @@ async fn execute_web_search(tool_input: &str, org_id: &str) -> tool_bridge::Tool
         Err(error) => return tool_error(format!("web_search unavailable: {error}")),
     };
     match client
-        .search(&input.query, input.limit.unwrap_or(8), org_id)
+        // Clamped, not passed through: `limit` is model-authored, and the
+        // formatter keeps only MAX_SEARCH_RESULTS of whatever comes back, so a
+        // larger number buys nothing and bills a stranger's search engine for
+        // work this process then discards. `search_memory` below already
+        // clamps for the same reason.
+        .search(
+            &input.query,
+            input.limit.unwrap_or(MAX_WEB_SEARCH_RESULTS).clamp(1, MAX_WEB_SEARCH_RESULTS),
+            org_id,
+            zdr,
+        )
         .await
     {
         Ok(output) => tool_bridge::ToolExecution {
@@ -879,7 +1090,16 @@ async fn execute_mcp(
 
 /// `web_fetch` tool — input JSON `{"url": String}`. Returns the page's cleaned
 /// markdown from the Quarry edge. Read-only (no approval gate).
-async fn execute_web_fetch(tool_input: &str, org_id: &str) -> tool_bridge::ToolExecution {
+///
+/// `zdr` is run context, not model input — see `execute_web_search`. This is
+/// the higher-stakes of the two: `/v1/extract` returns whole fetched pages, so
+/// a dropped flag means full third-party page content lands in the edge's
+/// caches and durable events for a tenant that contracted for none.
+async fn execute_web_fetch(
+    tool_input: &str,
+    org_id: &str,
+    zdr: bool,
+) -> tool_bridge::ToolExecution {
     #[derive(serde::Deserialize)]
     struct FetchInput {
         url: String,
@@ -895,7 +1115,7 @@ async fn execute_web_fetch(tool_input: &str, org_id: &str) -> tool_bridge::ToolE
         }
         Err(error) => return tool_error(format!("web_fetch unavailable: {error}")),
     };
-    match client.fetch(&input.url, org_id).await {
+    match client.fetch(&input.url, org_id, zdr).await {
         Ok(output) => tool_bridge::ToolExecution {
             output,
             error: None,
@@ -1124,7 +1344,8 @@ async fn execute_news(tool_input: &str) -> tool_bridge::ToolExecution {
     match client
         .news(
             input.category.as_deref().unwrap_or(""),
-            input.limit.unwrap_or(10),
+            // Same reason as web_search above: model-authored, so bounded here.
+            input.limit.unwrap_or(DEFAULT_NEWS_RESULTS).clamp(1, MAX_NEWS_RESULTS),
         )
         .await
     {
@@ -1362,13 +1583,16 @@ async fn execute_company_lookup(tool_input: &str) -> tool_bridge::ToolExecution 
 /// `list_provider_actions` tool — read-only discovery of the org's connected
 /// providers and their callable operations. `org_id` comes from the run
 /// context (tenant scope). No approval gate.
-async fn execute_list_provider_actions(org_id: &str) -> tool_bridge::ToolExecution {
+async fn execute_list_provider_actions(
+    org_id: &str,
+    session_bearer: Option<&str>,
+) -> tool_bridge::ToolExecution {
     let Some(client) = crate::integration_tools::IntegrationActionsClient::from_env() else {
         return tool_error(
             "list_provider_actions unavailable: integration client could not be built".to_owned(),
         );
     };
-    match client.list_provider_actions(org_id).await {
+    match client.list_provider_actions(org_id, session_bearer).await {
         Ok(output) => tool_bridge::ToolExecution {
             output,
             error: None,
@@ -1464,6 +1688,7 @@ async fn execute_provider_action(
             input.body,
             user_id,
             approval_ref.as_deref(),
+            session_bearer,
         )
         .await
     {
@@ -1663,6 +1888,87 @@ mod memory_tool_tests {
             .error
             .expect("must refuse")
             .contains("must not be empty"));
+    }
+
+    #[tokio::test]
+    async fn plan_propose_is_refused_on_zdr_with_an_honest_explanation() {
+        // Same posture as save_memory: ZDR is checked before channel/bearer,
+        // so a plan-mode run on a ZDR credential gets the real reason instead
+        // of a plumbing error.
+        let out = execute_propose_plan(
+            r#"{"summary":"Send the invoice","steps":[{"title":"Draft the email"}]}"#,
+            "org-1",
+            "user-1",
+            "thread-1",
+            "run-1",
+            true,
+            None,
+            Some("bearer"),
+        )
+        .await;
+        let error = out.error.expect("must refuse");
+        assert!(error.contains("Zero-Data-Retention"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn plan_propose_validates_input_before_any_precondition_noise() {
+        let out = execute_propose_plan(
+            "not json", "org-1", "user-1", "thread-1", "run-1", false, None, None,
+        )
+        .await;
+        assert!(out
+            .error
+            .expect("must refuse")
+            .contains("invalid plan.propose input"));
+
+        let out = execute_propose_plan(
+            r#"{"summary":"  ","steps":[{"title":"x"}]}"#,
+            "org-1",
+            "user-1",
+            "thread-1",
+            "run-1",
+            false,
+            None,
+            None,
+        )
+        .await;
+        assert!(out
+            .error
+            .expect("must refuse")
+            .contains("summary must not be empty"));
+
+        let out = execute_propose_plan(
+            r#"{"summary":"Send the invoice","steps":[]}"#,
+            "org-1",
+            "user-1",
+            "thread-1",
+            "run-1",
+            false,
+            None,
+            None,
+        )
+        .await;
+        assert!(out
+            .error
+            .expect("must refuse")
+            .contains("at least one step is required"));
+    }
+
+    #[tokio::test]
+    async fn plan_propose_fails_closed_without_a_thread_context() {
+        let out = execute_propose_plan(
+            r#"{"summary":"Send the invoice","steps":[{"title":"Draft the email"}]}"#,
+            "org-1",
+            "user-1",
+            "",
+            "run-1",
+            false,
+            None,
+            Some("bearer"),
+        )
+        .await;
+        let error = out.error.expect("must refuse");
+        assert!(error.contains("agent-loop thread context"), "{error}");
     }
 }
 
@@ -1892,6 +2198,120 @@ async fn execute_save_memory(
     }
 }
 
+/// `plan.propose` — input JSON
+/// `{"summary": string, "steps": [{"title": string, "operation"?: string}], "supersedes"?: string}`.
+///
+/// Plan-mode's control tool (chat-wave2-specs plan-gate §2.1): lets the model
+/// emit its plan as DATA instead of unstructured markdown, so the browser can
+/// offer a real editable review surface instead of parsing the model's prose
+/// client-side — the exact thing this codebase's own `chat-nodes/derive.ts`
+/// already refuses to do for follow-up chips ("inferring one from free text
+/// in the browser would be the fabrication this codebase forbids"). Calls
+/// session-core's `ProposePlan`, which creates the plan directly in
+/// `PLAN_STATE_PROPOSED` with real steps — a SEPARATE plan row from the
+/// zero-step `draft` plan session-core auto-creates at run start for the
+/// retrospective execution log (`orchestration_store::create_plan`).
+///
+/// Writes a durable `plans`/`plan_steps` row, so — like `save_memory` — it is
+/// refused outright on a Zero-Data-Retention run via the same
+/// [`memory_tool_preflight`] rather than silently dropped.
+///
+/// This tool is read-only from the run's own permission-ladder point of
+/// view — it does not ACT, so it is never in
+/// `permission::is_risky_call`/`is_restricted_context_write` and runs under
+/// `ask` posture with no approval gate, matching `list_subagent_results`'s
+/// treatment.
+async fn execute_propose_plan(
+    tool_input: &str,
+    org_id: &str,
+    user_id: &str,
+    thread_id: &str,
+    run_id: &str,
+    zdr: bool,
+    session_channel: Option<&Channel>,
+    session_bearer: Option<&str>,
+) -> tool_bridge::ToolExecution {
+    #[derive(serde::Deserialize)]
+    struct ProposedStepInput {
+        title: String,
+        #[serde(default)]
+        operation: String,
+    }
+    #[derive(serde::Deserialize)]
+    struct ProposePlanInput {
+        summary: String,
+        #[serde(default)]
+        steps: Vec<ProposedStepInput>,
+        #[serde(default)]
+        supersedes: String,
+    }
+    let input: ProposePlanInput = match serde_json::from_str(tool_input) {
+        Ok(i) => i,
+        Err(e) => return tool_error(format!("invalid plan.propose input: {e}")),
+    };
+    if input.summary.trim().is_empty() {
+        return tool_error("plan.propose: summary must not be empty".to_owned());
+    }
+    if input.steps.is_empty() {
+        return tool_error("plan.propose: at least one step is required".to_owned());
+    }
+
+    let (channel, bearer) = match memory_tool_preflight(
+        PLAN_PROPOSE_TOOL,
+        org_id,
+        thread_id,
+        zdr,
+        session_channel,
+        session_bearer,
+    ) {
+        Ok(ok) => ok,
+        Err(refusal) => return refusal,
+    };
+
+    let request = pb::ProposePlanRequest {
+        thread_id: thread_id.to_owned(),
+        run_id: run_id.to_owned(),
+        org_id: org_id.to_owned(),
+        user_id: user_id.to_owned(),
+        author: "agent".to_owned(),
+        summary: input.summary,
+        steps: input
+            .steps
+            .into_iter()
+            .map(|s| pb::ProposedPlanStep {
+                title: s.title,
+                operation: s.operation,
+            })
+            .collect(),
+        supersedes: input.supersedes,
+    };
+    let request = match authenticated_session_request(request, &bearer) {
+        Ok(r) => r,
+        Err(e) => return tool_error(format!("plan.propose unavailable: {e}")),
+    };
+    match OrchestrationCoreServiceClient::new(channel.clone())
+        .propose_plan(request)
+        .await
+    {
+        Ok(response) => {
+            let (plan_id, state, step_count) = match response.into_inner().plan {
+                Some(p) => (p.id, p.state, p.steps.len()),
+                None => (String::new(), 0, 0),
+            };
+            tool_bridge::ToolExecution {
+                output: serde_json::json!({
+                    "plan_id": plan_id,
+                    "state": state,
+                    "step_count": step_count,
+                })
+                .to_string(),
+                error: None,
+            }
+        }
+        Err(status) => tool_error(format!("plan.propose failed: {}", status.message())),
+    }
+}
+
 /// `recall_memory` — input JSON `{"query": string, "limit"?: u32}`.
 ///
 /// The active twin of the chat path's passive per-turn prefetch: a deployed
@@ -2033,6 +2453,7 @@ mod tests {
                 None,
                 None,
                 &policy,
+                None,
             )
             .await;
             assert_eq!(out.status, expected);
@@ -2063,6 +2484,7 @@ mod tests {
                 None,
                 None,
                 &policy,
+                None,
             )
             .await;
             assert_eq!(
@@ -2090,6 +2512,7 @@ mod tests {
             None,
             None,
             &policy,
+            None,
         )
         .await;
         assert_eq!(denied.status, "permission_denied");
@@ -2121,6 +2544,7 @@ mod tests {
             None,
             None,
             &policy,
+            None,
         )
         .await;
         if crate::sandbox::is_supported() {
@@ -2158,6 +2582,7 @@ mod tests {
             None,
             None,
             &policy,
+            None,
         )
         .await;
         assert_eq!(out.status, "failed");
@@ -2185,6 +2610,7 @@ mod tests {
             None,
             None,
             &policy,
+            None,
         )
         .await;
         assert_eq!(out.status, "failed");
@@ -2212,6 +2638,7 @@ mod tests {
             None,
             None,
             &policy,
+            None,
         )
         .await;
         assert_eq!(out.status, "completed");
@@ -2240,6 +2667,7 @@ mod tests {
             None,
             None,
             &policy,
+            None,
         )
         .await;
         assert_eq!(out.status, "failed");
@@ -2329,6 +2757,7 @@ mod tests {
             None,
             None,
             &policy,
+            None,
         )
         .await;
         assert_eq!(out.status, "permission_denied");

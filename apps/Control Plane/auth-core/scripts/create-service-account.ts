@@ -2,7 +2,7 @@
 
 /**
  * Create Service Account Script
- * 
+ *
  * Creates a service account user in Better Auth with:
  * - Email: service@internal.coresystem.com
  * - Role: admin
@@ -17,8 +17,10 @@ import * as schema from '../src/db/schema';
 import { randomBytes } from 'crypto';
 
 async function createServiceAccount() {
-  const databaseUrl = process.env.DATABASE_URL || 'postgresql://postgres:postgres@localhost:5432/coresystem_auth';
-  
+  const databaseUrl =
+    process.env.DATABASE_URL ||
+    'postgresql://postgres:postgres@localhost:5432/coresystem_auth';
+
   console.log('🔌 Connecting to database...');
   const client = postgres(databaseUrl);
   const db = drizzle(client, { schema });
@@ -31,7 +33,7 @@ async function createServiceAccount() {
     const sessionId = 'session-' + randomBytes(16).toString('hex');
 
     console.log('👤 Creating service account user...');
-    
+
     // Check if service account already exists
     const existingUser = await db.query.user.findFirst({
       where: eq(schema.user.email, serviceEmail),
@@ -39,27 +41,33 @@ async function createServiceAccount() {
 
     let userId: string;
     if (existingUser) {
-      console.log('⚠️  Service account already exists, reusing:', existingUser.id);
+      console.log(
+        '⚠️  Service account already exists, reusing:',
+        existingUser.id,
+      );
       userId = existingUser.id;
-      
+
       // Delete existing sessions
       await db.delete(schema.session).where(eq(schema.session.userId, userId));
       console.log('🗑️  Deleted existing sessions');
     } else {
       // Create service account user
-      const [user] = await db.insert(schema.user).values({
-        id: serviceUserId,
-        email: serviceEmail,
-        name: serviceName,
-        emailVerified: true,
-        role: 'admin',
-        banned: false,
-        banReason: null,
-        banExpires: null,
-        createdAt: new Date(),
-        updatedAt: new Date(),
-      }).returning();
-      
+      const [user] = await db
+        .insert(schema.user)
+        .values({
+          id: serviceUserId,
+          email: serviceEmail,
+          name: serviceName,
+          emailVerified: true,
+          role: 'admin',
+          banned: false,
+          banReason: null,
+          banExpires: null,
+          createdAt: new Date(),
+          updatedAt: new Date(),
+        })
+        .returning();
+
       userId = user.id;
       console.log('✅ Service account created:', userId);
     }
@@ -89,7 +97,6 @@ async function createServiceAccount() {
     console.log(`  BETTER_AUTH_SERVICE_SESSION="${sessionToken}"`);
     console.log('\n🔧 Add to docker-compose.yml admin-service-go environment:');
     console.log(`  - BETTER_AUTH_SERVICE_SESSION=${sessionToken}`);
-    
   } catch (error) {
     console.error('❌ Failed to create service account:', error);
     process.exit(1);
@@ -98,4 +105,5 @@ async function createServiceAccount() {
   }
 }
 
-createServiceAccount();
+// Script entrypoint: errors are logged and the client closed inside.
+void createServiceAccount();

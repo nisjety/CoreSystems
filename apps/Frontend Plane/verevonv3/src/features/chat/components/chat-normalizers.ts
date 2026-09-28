@@ -19,6 +19,8 @@ import {
   writeClientValue,
 } from '@/shared/session/client-storage'
 import { supportQuestionFromPrompt } from '@/shared/chat/support-context-envelope'
+import { localeIntl, type Locale } from '@/shared/i18n/locales'
+import type { RunDetail } from '@/shared/api/runs-client'
 import {
   isChatArtifactVersion,
   mergeArtifactVersion,
@@ -50,14 +52,20 @@ import {
   type ComposerToolId,
   type GeneratedFile,
   type StreamAttachment,
+  type StreamFailureAction,
   TOOL_LABELS,
   type TaskStepStatus,
 } from './chat-types'
 
+export type { StreamFailureAction } from './chat-types'
+
 export function messageToTurn(msg: ChatMessage): ChatTurn {
+  const source = msg.role === 'user' ? splitInlinedAttachments(msg.content) : { text: msg.content, attachments: [] }
   return {
     id: msg.id,
     role: msg.role,
+    sourceScope: msg.sourceScope,
+    retrievalScope: msg.retrievalScope,
     content: visibleTurnContent(msg.role, msg.content),
     // Keep an absent server timestamp EMPTY instead of fabricating "now":
     // session-core messages carry no timestamps, so stamping the fetch time
@@ -75,8 +83,514 @@ export function messageToTurn(msg: ChatMessage): ChatTurn {
     confidence: msg.confidence,
     verification: msg.verification,
     tools: [],
+    attachments: source.attachments.map((file, index) => {
+      // The durable message contains extracted text, not the original binary.
+      // Give PDF/DOCX/XLSX/PPTX text copies an honest extension for preview/download.
+      const name = /\.(pdf|docx|xlsx|pptx)$/i.test(file.name) ? `${file.name}.txt` : file.name
+      const url = `data:text/plain;charset=utf-8,${encodeURIComponent(file.content)}`
+      return { id: `restored-${msg.id}-${index}`, name, type: 'text/plain', size: new TextEncoder().encode(file.content).length, url, previewUrl: url, extractedText: file.content }
+    }),
+  }
+}
+
+/** Restore a status-only tail from Model Plane's durable cancellation record.
+ * No cached answer, draft, tool result or authority is reconstructed. Require
+ * the exact full goal and an unambiguously newer run, so an older cancelled
+ * invocation cannot attach to a repeated or newly submitted question.
+ */
+export function cancelledRunTurn(threadId: string, latestRunId: string, message: ChatMessage, run: RunDetail): ChatTurn | null {
+  if (run.status !== 'cancelled' || !runAnswersTrailingQuestion(threadId, latestRunId, message, run)) return null
+  return {
+    id: `cancelled-run-${run.runId}`, role: 'assistant', content: '',
+    createdAt: run.updatedAt || run.createdAt || '', streaming: false,
+    status: 'stopped', stopReason: 'client_cancelled', runId: run.runId,
+    tools: [], attachments: [],
+  }
+}
+
+/** Run states Session Core still owns: the run has not terminalised yet. */
+export const ACTIVE_RUN_STATUSES: ReadonlySet<string> = new Set(['queued', 'running', 'awaiting_approval'])
+
+/**
+ * What a failed run's recorded `error` means for the reader.
+ *
+ * Session Core's durable contract stores only a fixed, content-free failure
+ * vocabulary on the run (model-gateway `session_flow.rs` maps every direct
+ * inference failure onto it), so the code is translated rather than shown.
+ */
+export function failedRunMessage(code: string | undefined): string {
+  switch (code?.trim()) {
+    case 'provider_unavailable':
+      return 'Modelltjenesten var utilgjengelig, så svaret ble ikke fullført.'
+    case 'provider_timeout':
+      return 'Modelltjenesten svarte ikke i tide, så svaret ble ikke fullført.'
+    case 'execution_failed':
+      return 'Svaret ble laget, men kunne ikke lagres.'
+    default:
+      return 'Kjøringen feilet før svaret ble lagret.'
+  }
+}
+
+/** How a server `error` frame is shown on its turn. */
+export type StreamFailurePresentation = {
+  /** What the turn says. */
+  message: string
+  /**
+   * The server saved nothing, so any answer text that already streamed must
+   * not stay on the turn as though it were the answer.
+   */
+  unsaved: boolean
+  /**
+   * The model service (a provider, or the user's ChatGPT subscription) did
+   * not answer. An outage, not a verdict: no check failed, so the Work feed
+   * must not name one as failed.
+   */
+  unavailable: boolean
+  /**
+   * What the reader can do about it. Omitted means `retry`, which is what
+   * every failure offered before the reason was known.
+   */
+  action?: StreamFailureAction
+  /** With `action: 'wait'`: the ISO instant a retry can succeed again. */
+  retryAt?: string
+  /**
+   * The Work-feed title for the service step of an `unavailable` failure,
+   * when the route has a more precise one than "the model service".
+   */
+  serviceTitle?: string
+}
+
+/** The content-free timing an `error` frame can carry, and the clock to read it by. */
+export type StreamFailureDetails = {
+  /** Milliseconds until the refusing service accepts a call again. */
+  retryAfterMs?: number
+  /** When the ChatGPT plan's usage limit resets (an ISO instant). */
+  resetsAt?: string
+  /** The reader's language for the reset time. Defaults to the one `tr` picks. */
+  locale?: Locale
+  /** Now, in epoch milliseconds. Defaults to `Date.now()`. */
+  now?: number
+  /** The zone to read the reset time in. Defaults to the viewer's own. */
+  timeZone?: string
+}
+
+/**
+ * The instant `ms` from `now`, or nothing for a delay that says nothing.
+ * Relative to when the frame is presented, which is as close as the browser
+ * can get to when the server measured it.
+ */
+function instantAfter(ms: number | undefined, now: number): string | undefined {
+  if (ms === undefined || !Number.isFinite(ms) || ms <= 0) return undefined
+  return new Date(now + ms).toISOString()
+}
+
+/** The calendar day (`YYYY-MM-DD`) an instant falls on in `timeZone`. */
+function calendarDay(ms: number, timeZone: string | undefined): string {
+  const parts = new Intl.DateTimeFormat('en-US', { timeZone, year: 'numeric', month: '2-digit', day: '2-digit' }).formatToParts(ms)
+  const part = (type: Intl.DateTimeFormatPartTypes) => parts.find((candidate) => candidate.type === type)?.value ?? ''
+  return `${part('year')}-${part('month')}-${part('day')}`
+}
+
+/** The calendar day after `day` (`YYYY-MM-DD`). */
+function nextCalendarDay(day: string): string {
+  const [year = 0, month = 1, date = 1] = day.split('-').map(Number)
+  return new Date(Date.UTC(year, month - 1, date + 1)).toISOString().slice(0, 10)
+}
+
+const MINUTE_MS = 60_000
+
+/** Every way a reset instant can be worded, and the calendar day it falls on. */
+type ResetWording = { day: string; today: string; tomorrow: string; later: string }
+
+function resetWording(iso: string, locale: Locale, timeZone: string | undefined): ResetWording | undefined {
+  const parsed = Date.parse(iso)
+  if (!Number.isFinite(parsed)) return undefined
+  // Shown to the minute, and rounded UP to the next one. A reset at 01:21:40
+  // reads 01:22, never 01:21, when a retry would still be refused. The day is
+  // read from the rounded instant too, so 23:59:30 reads "i morgen kl. 00:00".
+  const at = Math.ceil(parsed / MINUTE_MS) * MINUTE_MS
+  const intl = localeIntl(locale)
+  const norwegian = locale === 'no'
+  const time = new Intl.DateTimeFormat(intl, {
+    timeZone,
+    hour: norwegian ? '2-digit' : 'numeric',
+    minute: '2-digit',
+  }).format(at)
+  const date = new Intl.DateTimeFormat(intl, { timeZone, weekday: 'long', day: 'numeric', month: 'long' }).format(at)
+  const day = calendarDay(at, timeZone)
+  return norwegian
+    ? { day, today: `i dag kl. ${time}`, tomorrow: `i morgen kl. ${time}`, later: `${date} kl. ${time}` }
+    : { day, today: `today at ${time}`, tomorrow: `tomorrow at ${time}`, later: `${date} at ${time}` }
+}
+
+/**
+ * A reset instant in the reader's own words and zone: "i dag kl. 14:05",
+ * "i morgen kl. 01:21", or "mandag 28. september kl. 09:00" (English: "today
+ * at 2:05 PM", "tomorrow at …", "Monday, September 28 at …"). The server's
+ * UTC wording is never shown; the instant is re-read in the viewer's zone.
+ * Seconds are rounded up to the next minute. An instant that does not parse
+ * gives an empty string.
+ */
+export function formatResetTime(iso: string, locale: Locale, now: number, timeZone?: string): string {
+  const wording = resetWording(iso, locale, timeZone)
+  if (!wording) return ''
+  const today = calendarDay(now, timeZone)
+  if (wording.day === today) return wording.today
+  if (wording.day === nextCalendarDay(today)) return wording.tomorrow
+  return wording.later
+}
+
+/**
+ * `message` with the reset phrase `formatResetTime` wrote into it re-read
+ * against `now`. The phrase is relative to the day it was written, so a
+ * notice still open after midnight must not keep saying "i morgen" about
+ * what is now today. Only that phrase is replaced. A message without one (a
+ * server message, or text in another language) is returned unchanged.
+ */
+export function refreshResetTimeWording(message: string, iso: string, locale: Locale, now: number, timeZone?: string): string {
+  const wording = resetWording(iso, locale, timeZone)
+  if (!wording) return message
+  const current = formatResetTime(iso, locale, now, timeZone)
+  const written = [wording.today, wording.tomorrow, wording.later]
+    .find((phrase) => phrase !== current && message.includes(phrase))
+  return written ? message.replace(written, () => current) : message
+}
+
+/** Title of the Work-feed service step for a subscription failure. */
+function subscriptionServiceTitle(tr: (noText: string, enText: string) => string): string {
+  return tr('ChatGPT svarte ikke', 'ChatGPT did not answer')
+}
+
+/**
+ * The connected ChatGPT plan's Codex usage limit. The reset is re-rendered
+ * locally from the server's instant, so the reader sees their own time; the
+ * retry waits for it, and an instant already behind us says so instead of
+ * naming a time in the past.
+ */
+function usageLimitPresentation(
+  tr: (noText: string, enText: string) => string,
+  details: StreamFailureDetails,
+  now: number,
+): StreamFailurePresentation {
+  const base = {
+    unsaved: true,
+    unavailable: true,
+    serviceTitle: tr('ChatGPT-planen har nådd bruksgrensen', 'The ChatGPT plan reached its usage limit'),
+  }
+  const resetMs = details.resetsAt ? Date.parse(details.resetsAt) : Number.NaN
+  if (Number.isFinite(resetMs) && resetMs <= now) {
+    return {
+      ...base,
+      action: 'retry',
+      message: tr(
+        'Den tilkoblede ChatGPT-planen nådde bruksgrensen for Codex, men grensen skal nå være tilbakestilt. Prøv igjen. Ingen annen modell ble brukt.',
+        'The connected ChatGPT plan reached its Codex usage limit, but the limit should have reset by now. Try again. No other model was used.',
+      ),
+    }
+  }
+  const retryAt = Number.isFinite(resetMs) ? details.resetsAt : instantAfter(details.retryAfterMs, now)
+  if (retryAt) {
+    const locale = details.locale ?? (tr('no', 'en') === 'en' ? 'en' : 'no')
+    const time = formatResetTime(retryAt, locale, now, details.timeZone)
+    return {
+      ...base,
+      action: 'wait',
+      retryAt,
+      message: tr(
+        `Den tilkoblede ChatGPT-planen har nådd bruksgrensen for Codex. Den tilbakestilles ${time}. Ingen annen modell ble brukt.`,
+        `The connected ChatGPT plan has reached its Codex usage limit. It resets ${time}. No other model was used.`,
+      ),
+    }
+  }
+  return {
+    ...base,
+    action: 'retry',
+    message: tr(
+      'Den tilkoblede ChatGPT-planen har nådd bruksgrensen for Codex. Tidspunktet for tilbakestilling er ukjent; sjekk bruken i ChatGPT og prøv igjen senere. Ingen annen modell ble brukt.',
+      'The connected ChatGPT plan has reached its Codex usage limit. The reset time is unknown; check your usage in ChatGPT and try again later. No other model was used.',
+    ),
+  }
+}
+
+/** ChatGPT throttling the subscription for a short while. */
+function rateLimitedPresentation(
+  tr: (noText: string, enText: string) => string,
+  details: StreamFailureDetails,
+  now: number,
+): StreamFailurePresentation {
+  const base = { unsaved: true, unavailable: true, serviceTitle: subscriptionServiceTitle(tr) }
+  const delay = details.retryAfterMs
+  const retryAt = instantAfter(delay, now)
+  if (!retryAt || delay === undefined) {
+    return {
+      ...base,
+      action: 'retry',
+      message: tr(
+        'ChatGPT begrenser forespørslene akkurat nå. Prøv igjen om litt. Ingen annen modell ble brukt.',
+        'ChatGPT is limiting requests right now. Try again shortly. No other model was used.',
+      ),
+    }
+  }
+  const seconds = Math.max(1, Math.ceil(delay / 1000))
+  return {
+    ...base,
+    action: 'wait',
+    retryAt,
+    message: seconds === 1
+      ? tr(
+          'ChatGPT begrenser forespørslene akkurat nå. Prøv igjen om 1 sekund. Ingen annen modell ble brukt.',
+          'ChatGPT is limiting requests right now. Try again in 1 second. No other model was used.',
+        )
+      : tr(
+          `ChatGPT begrenser forespørslene akkurat nå. Prøv igjen om ${seconds} sekunder. Ingen annen modell ble brukt.`,
+          `ChatGPT is limiting requests right now. Try again in ${seconds} seconds. No other model was used.`,
+        ),
+  }
+}
+
+/**
+ * Presentation for a server-reported stream failure, by its code.
+ *
+ * Only the codes that change what the reader must be told are named; every
+ * other code keeps the server's own message and today's rendering.
+ *  - `response_validation_unavailable`: the provider or subscription did not
+ *    answer while a draft was checked or repaired. The gateway's message is
+ *    already Norwegian and names the route, so it is kept.
+ *  - `inference_stream_ended_without_terminal`: the provider stream closed
+ *    before its final chunk; nothing was saved.
+ *  - `session_liveness_failed`: the run was no longer active when the answer
+ *    was about to be saved, so it was NOT saved, even though its text may
+ *    already have streamed in full.
+ *  - `assistant_persist_failed`: the answer streamed in full, but saving it
+ *    failed, so it was NOT saved.
+ *  - `artifact_revision_conflict`: another run changed a document this answer
+ *    edits before the answer was saved, so nothing was saved. The gateway's
+ *    message is already Norwegian, so it is kept.
+ * `inference_stream_ended_without_terminal`, `session_liveness_failed` and
+ * `assistant_persist_failed` arrive with English operator text, so they are
+ * translated.
+ *
+ * The ChatGPT-subscription refusals (`subscription_usage_limit`,
+ * `subscription_reauth_required`, `subscription_upstream_unavailable`,
+ * `subscription_bad_request`, `rate_limited`, `subscription_route_unavailable`)
+ * carry a fixed, content-free reason, so each gets its own words in both
+ * languages and an `action`: wait for a known reset, reconnect, retry, or
+ * nothing. None of them ever retries by itself, and each says no other model
+ * was used, because the subscription route never swaps. `prompt_too_long`,
+ * `inference_stream_error` and `model_plane_unavailable` are translated too;
+ * the last one's server text is raw transport detail and is never shown.
+ */
+export function streamFailurePresentation(
+  code: string | undefined,
+  serverMessage: string,
+  tr: (noText: string, enText: string) => string,
+  details: StreamFailureDetails = {},
+): StreamFailurePresentation {
+  const server = serverMessage.trim()
+  const now = details.now ?? Date.now()
+  switch (code) {
+    case 'subscription_usage_limit':
+      return usageLimitPresentation(tr, details, now)
+    case 'rate_limited':
+      return rateLimitedPresentation(tr, details, now)
+    case 'subscription_reauth_required':
+      return {
+        message: tr(
+          'ChatGPT-tilkoblingen må fornyes. Koble til ChatGPT på nytt under Profil → ChatGPT-abonnement, og prøv igjen. Ingen annen modell ble brukt.',
+          'Your ChatGPT connection needs to be renewed. Reconnect ChatGPT under Profile → ChatGPT subscription, then try again. No other model was used.',
+        ),
+        unsaved: true,
+        unavailable: true,
+        action: 'reconnect',
+        serviceTitle: tr('ChatGPT-tilkoblingen må fornyes', 'The ChatGPT connection needs renewing'),
+      }
+    case 'subscription_upstream_unavailable':
+      return {
+        message: tr(
+          'ChatGPT svarte ikke akkurat nå. Prøv igjen om litt. Ingen annen modell ble brukt.',
+          'ChatGPT did not answer just now. Try again shortly. No other model was used.',
+        ),
+        unsaved: true,
+        unavailable: true,
+        action: 'retry',
+        serviceTitle: subscriptionServiceTitle(tr),
+      }
+    case 'subscription_route_unavailable':
+      return {
+        message: tr(
+          'Den valgte ChatGPT-abonnementstilkoblingen kunne ikke fullføre svaret. Prøv igjen om litt. Ingen annen modell ble brukt.',
+          'The selected ChatGPT subscription connection could not complete the answer. Try again shortly. No other model was used.',
+        ),
+        unsaved: true,
+        unavailable: true,
+        action: 'retry',
+        serviceTitle: subscriptionServiceTitle(tr),
+      }
+    case 'subscription_bad_request':
+      // ChatGPT answered, with a refusal of this request: not an outage, and
+      // sending the same turn again would be refused the same way.
+      return {
+        message: tr(
+          'ChatGPT avviste forespørselen. Endre eller kort ned meldingen, og prøv igjen. Ingen annen modell ble brukt.',
+          'ChatGPT rejected the request. Change or shorten the message, then try again. No other model was used.',
+        ),
+        unsaved: true,
+        unavailable: false,
+        action: 'none',
+      }
+    case 'prompt_too_long':
+      return {
+        message: tr(
+          'Samtalen er for lang for modellen, selv etter komprimering. Start en ny tråd.',
+          'This conversation is too long for the model, even after compacting it. Start a new thread.',
+        ),
+        unsaved: true,
+        unavailable: false,
+        action: 'none',
+      }
+    case 'inference_stream_error':
+      return {
+        message: tr(
+          'Modellen svarte ikke denne gangen. Prøv igjen.',
+          'The model did not return an answer this time. Try again.',
+        ),
+        unsaved: true,
+        unavailable: false,
+      }
+    case 'model_plane_unavailable':
+      // The server's text here is raw transport detail, never shown.
+      return {
+        message: tr(
+          'Modelltjenesten svarte ikke. Prøv igjen om litt.',
+          'The model service did not answer. Try again shortly.',
+        ),
+        unsaved: true,
+        unavailable: true,
+      }
+    case 'response_validation_unavailable':
+      return {
+        message: server || tr(
+          'Modelltjenesten svarte ikke mens utkastet ble kontrollert. Utkastet er ikke publisert. Prøv igjen om litt.',
+          'The model service did not answer while the draft was being checked. The draft was not published. Try again shortly.',
+        ),
+        unsaved: true,
+        unavailable: true,
+      }
+    case 'inference_stream_ended_without_terminal':
+      return {
+        message: tr(
+          'Svaret ble avbrutt før det var ferdig, og ingenting ble lagret. Prøv igjen.',
+          'The answer stopped before it was complete, and nothing was saved. Try again.',
+        ),
+        unsaved: true,
+        unavailable: false,
+      }
+    case 'session_liveness_failed':
+      return {
+        message: tr(
+          'Svaret ble ikke lagret, fordi kjøringen ikke lenger var aktiv. Prøv igjen.',
+          'The answer was not saved, because the run was no longer active. Try again.',
+        ),
+        unsaved: true,
+        unavailable: false,
+      }
+    case 'assistant_persist_failed':
+      return {
+        message: tr(
+          'Svaret ble laget, men kunne ikke lagres. Prøv igjen.',
+          'The answer was produced but could not be saved. Try again.',
+        ),
+        unsaved: true,
+        unavailable: false,
+      }
+    case 'artifact_revision_conflict':
+      return {
+        message: server || tr(
+          'Dokumentet ble oppdatert av en annen kjøring. Last inn den nyeste versjonen og prøv igjen.',
+          'The document was updated by another run. Load the latest version and try again.',
+        ),
+        unsaved: true,
+        unavailable: false,
+      }
+    default:
+      return { message: server || 'Stream error', unsaved: false, unavailable: false }
+  }
+}
+
+/**
+ * The reload tail for a durable run the thread has no assistant message for.
+ *
+ * `cancelledRunTurn` covers the cancelled case; this adds the other two a
+ * reload can find behind a trailing question. A FAILED run becomes an error
+ * turn carrying only the run's own recorded error (or a fixed notice), so the
+ * failure is shown instead of a question that looks unanswered (the run's code
+ * is translated by `failedRunMessage`, never shown raw). A run that is
+ * still ACTIVE becomes a pending turn with its run id and no request id: the
+ * caller keeps it pending, bounded, and adopts the saved answer when it lands.
+ * Same correlation rule as the cancelled case — exact goal, newer run — and,
+ * as there, no cached answer, draft, tool result or authority is rebuilt.
+ */
+export function unsettledRunTurn(threadId: string, latestRunId: string, message: ChatMessage, run: RunDetail): ChatTurn | null {
+  const cancelled = cancelledRunTurn(threadId, latestRunId, message, run)
+  if (cancelled) return cancelled
+  if (!runAnswersTrailingQuestion(threadId, latestRunId, message, run)) return null
+  const base = {
+    role: 'assistant' as const,
+    createdAt: run.updatedAt || run.createdAt || '',
+    runId: run.runId,
+    tools: [],
     attachments: [],
   }
+  if (run.status === 'failed') {
+    return {
+      ...base,
+      id: `failed-run-${run.runId}`,
+      content: failedRunMessage(run.error),
+      streaming: false,
+      status: 'error',
+    }
+  }
+  if (ACTIVE_RUN_STATUSES.has(run.status)) {
+    return { ...base, id: `active-run-${run.runId}`, content: '', streaming: true, status: 'waiting' }
+  }
+  return null
+}
+
+/**
+ * The server's saved answer for the browser's trailing assistant turn, if the
+ * durable transcript holds one.
+ *
+ * Used when the browser could not settle a turn itself — a resume that failed,
+ * or a Stop the server may not have honoured. Server messages carry no request
+ * id, so the answer is matched by position, and deliberately conservatively:
+ * the turn must be the last local turn, both sides must hold the same number
+ * of questions, and the server's last question must be the one this turn
+ * answered. Any doubt returns `null`, which leaves the turn as the browser
+ * settled it; adopting the wrong answer would be worse than not adopting one.
+ */
+export function savedAnswerForTrailingTurn(localTurns: ChatTurn[], turnId: string, serverTurns: ChatTurn[]): ChatTurn | null {
+  const index = localTurns.findIndex((turn) => turn.id === turnId)
+  if (index < 0 || index !== localTurns.length - 1 || localTurns[index]?.role !== 'assistant') return null
+  const localQuestions = localTurns.slice(0, index).filter((turn) => turn.role === 'user')
+  const serverQuestionIndexes = serverTurns.flatMap((turn, at) => (turn.role === 'user' ? [at] : []))
+  if (localQuestions.length === 0 || serverQuestionIndexes.length !== localQuestions.length) return null
+  const lastQuestionAt = serverQuestionIndexes.at(-1) as number
+  const normalize = (value: string) => value.trim().replace(/\s+/g, ' ')
+  const asked = normalize(localQuestions.at(-1)?.content ?? '')
+  const recorded = normalize(serverTurns[lastQuestionAt]?.content ?? '')
+  if (!asked || !(recorded === asked || recorded.startsWith(asked))) return null
+  const answer = serverTurns.slice(lastQuestionAt + 1).filter((turn) => turn.role === 'assistant').at(-1)
+  if (!answer || (!answer.content.trim() && (answer.artifacts?.length ?? 0) === 0)) return null
+  return answer
+}
+
+function runAnswersTrailingQuestion(threadId: string, latestRunId: string, message: ChatMessage, run: RunDetail): boolean {
+  if (message.role !== 'user' || run.threadId !== threadId || run.runId !== latestRunId || run.parentRunId) return false
+  const ulid = /^[0-7][0-9A-HJKMNP-TV-Z]{25}$/
+  if (!ulid.test(message.id) || !ulid.test(run.runId) || run.runId.slice(0, 10) <= message.id.slice(0, 10)) return false
+  const normalize = (value: string) => value.trim().replace(/\s+/g, ' ')
+  const goal = normalize(run.goal).replace(/ \[full-goal-blake3:[a-f0-9]{64}\]$/, '')
+  return Boolean(goal) && goal === normalize(message.content)
 }
 
 export function turnsToTranscript(turns: ChatTurn[]): ChatThreadTranscriptTurn[] {
@@ -100,6 +614,16 @@ export function turnsToTranscript(turns: ChatTurn[]): ChatThreadTranscriptTurn[]
       outputTokens: turn.outputTokens,
       latencyMs: turn.latencyMs,
       costUsd: turn.costUsd,
+      costBasis: turn.costBasis,
+      // The three totals only: the span list is a live diagnostic, and the
+      // Details rows ("Modelltid", "Systemtid") read nothing else.
+      timing: turn.timing
+        ? {
+            serverMs: turn.timing.serverMs,
+            providerMs: turn.timing.providerMs,
+            orchestrationMs: turn.timing.orchestrationMs,
+          }
+        : undefined,
       effectClass: turn.effectClass,
       confidence: turn.confidence,
       verification: turn.verification,
@@ -110,9 +634,11 @@ export function turnsToTranscript(turns: ChatTurn[]): ChatThreadTranscriptTurn[]
       files: turn.files,
       grounding: turn.grounding,
       memoryRecallCount: turn.memoryRecallCount,
-      recalledMemories: turn.recalledMemories,
+      recalledMemories: turn.recalledMemories?.map(recalledMemoryWithoutText),
       stopReason: turn.stopReason,
       tools: turn.tools,
+      // `unsavedContent` is deliberately absent: it is text the server did
+      // not save, and a reload must not bring it back.
       // `previewUrl` is a live data URL used by the contextual canvas. It can
       // be large and may contain private file bytes, so it never enters the
       // durable transcript/cache. The attachment metadata remains available
@@ -136,9 +662,12 @@ export function taskStepsToTranscript(steps: AgentTaskStep[]): ChatThreadTranscr
 }
 
 export function transcriptTurnToChatTurn(turn: ChatThreadTranscriptTurn): ChatTurn {
+  const attachments = (turn.attachments ?? []).filter(isComposerAttachment)
   return {
     id: turn.id,
     role: turn.role,
+    sourceScope: turn.sourceScope === 'conversation' ? 'conversation' : 'workspace',
+    retrievalScope: turn.retrievalScope === 'knowledge_only' || turn.retrievalScope === 'web_only' ? turn.retrievalScope : undefined,
     content: visibleTurnContent(turn.role, turn.content),
     createdAt: turn.createdAt,
     streaming: false,
@@ -155,6 +684,8 @@ export function transcriptTurnToChatTurn(turn: ChatThreadTranscriptTurn): ChatTu
     outputTokens: turn.outputTokens,
     latencyMs: turn.latencyMs,
     costUsd: turn.costUsd,
+    costBasis: turn.costBasis === 'metered' || turn.costBasis === 'subscription' ? turn.costBasis : undefined,
+    timing: transcriptTimingToTurnTiming(turn.timing),
     effectClass: turn.effectClass,
     confidence: turn.confidence,
       verification: turn.verification,
@@ -165,16 +696,50 @@ export function transcriptTurnToChatTurn(turn: ChatThreadTranscriptTurn): ChatTu
     files: (turn.files ?? []).filter(isGeneratedFile),
     grounding: isChatKnowledgeGrounding(turn.grounding) ? turn.grounding : undefined,
     memoryRecallCount: turn.memoryRecallCount,
-    recalledMemories: (turn.recalledMemories ?? []).filter(isRecalledMemory),
+    // Also stripped on the way back in, for a snapshot written before
+    // `turnsToTranscript` stopped storing the text.
+    recalledMemories: (turn.recalledMemories ?? []).filter(isRecalledMemory).map(recalledMemoryWithoutText),
     stopReason: turn.stopReason,
     tools: (turn.tools ?? []).filter(isComposerToolId),
-    attachments: (turn.attachments ?? []).filter(isComposerAttachment),
+    attachments: attachments.length ? attachments : messageToTurn({ id: turn.id, role: turn.role, content: turn.content, createdAt: turn.createdAt }).attachments,
   }
+}
+
+/**
+ * A stored timing summary back to the turn's shape. All three totals or none:
+ * a row missing one would show a number the server never measured.
+ */
+function transcriptTimingToTurnTiming(value: ChatThreadTranscriptTurn['timing']): ChatTurn['timing'] {
+  if (!value) return undefined
+  const { serverMs, providerMs, orchestrationMs } = value
+  const valid = [serverMs, providerMs, orchestrationMs].every((ms) => typeof ms === 'number' && Number.isFinite(ms) && ms >= 0)
+  return valid ? { serverMs, providerMs, orchestrationMs } : undefined
 }
 
 function visibleTurnContent(role: ChatTurn['role'], content: string): string {
   if (role !== 'user') return content
-  return supportQuestionFromPrompt(content) ?? content
+  const visible = splitInlinedAttachments(content).text
+  return supportQuestionFromPrompt(visible) ?? visible
+}
+
+/** Decode only complete attachment suffixes emitted by appendInlinedAttachments. */
+export function splitInlinedAttachments(content: string): { text: string; attachments: InlinedAttachment[] } {
+  const start = content.indexOf('\n\n--- VEDLEGG: ')
+  const unchanged = { text: content, attachments: [] as InlinedAttachment[] }
+  if (start < 0) return unchanged
+  let rest = content.slice(start).trimStart()
+  const attachments: InlinedAttachment[] = []
+  while (rest) {
+    const opening = /^--- VEDLEGG: ([^\r\n]+) ---\r?\n/.exec(rest)
+    if (!opening) return unchanged
+    const name = opening[1]!
+    const closing = `\n--- SLUTT PÅ VEDLEGG: ${name} ---`
+    const end = rest.indexOf(closing, opening[0].length)
+    if (end < 0) return unchanged
+    attachments.push({ name, content: rest.slice(opening[0].length, end) })
+    rest = rest.slice(end + closing.length).trim()
+  }
+  return { text: content.slice(0, start).trimEnd(), attachments }
 }
 
 export function transcriptStepToTaskStep(step: ChatThreadTranscriptStep): AgentTaskStep {
@@ -242,15 +807,16 @@ export function mergeServerTurnsWithCachedMetadata(serverTurns: ChatTurn[], cach
       planMode: serverTurn.planMode ?? cachedTurn.planMode,
       grantedRung: serverTurn.grantedRung ?? cachedTurn.grantedRung,
       effectClass: serverTurn.effectClass ?? cachedTurn.effectClass,
-      // A server-persisted assistant message is by definition COMPLETE
-      // (session-core stores it once, at stream end), so a cached in-flight
-      // 'waiting' must never leak onto it — it would render a finished
-      // answer as an eternal spinner. Terminal cached statuses still carry.
-      status: serverTurn.status ?? (cachedTurn.status === 'waiting' ? undefined : cachedTurn.status),
+      status: serverTurn.status ?? mergedCachedStatus(serverTurn, cachedTurn),
       inputTokens: serverTurn.inputTokens ?? cachedTurn.inputTokens,
       outputTokens: serverTurn.outputTokens ?? cachedTurn.outputTokens,
       latencyMs: serverTurn.latencyMs ?? cachedTurn.latencyMs,
       costUsd: serverTurn.costUsd ?? cachedTurn.costUsd,
+      // Stream-only, like the usage fields above: the server's message
+      // carries neither, so the cached copy is what survives a reload.
+      costBasis: serverTurn.costBasis ?? cachedTurn.costBasis,
+      timing: serverTurn.timing ?? cachedTurn.timing,
+      verification: serverTurn.verification ?? cachedTurn.verification,
       confidence: serverTurn.confidence ?? cachedTurn.confidence,
       reasoning: serverTurn.reasoning ?? cachedTurn.reasoning,
       citations: metadataArray(serverTurn.citations, cachedTurn.citations),
@@ -266,7 +832,8 @@ export function mergeServerTurnsWithCachedMetadata(serverTurns: ChatTurn[], cach
       recalledMemories: metadataArray(serverTurn.recalledMemories, cachedTurn.recalledMemories),
       stopReason: serverTurn.stopReason ?? cachedTurn.stopReason,
       tools: serverTurn.tools.length > 0 ? serverTurn.tools : cachedTurn.tools,
-      attachments: serverTurn.attachments.length > 0 ? serverTurn.attachments : cachedTurn.attachments,
+      attachments: cachedTurn.attachments.length > 0 && serverTurn.attachments.every(a => a.id.startsWith('restored-'))
+        ? cachedTurn.attachments : serverTurn.attachments.length > 0 ? serverTurn.attachments : cachedTurn.attachments,
     }
   })
 
@@ -291,6 +858,25 @@ export function mergeServerTurnsWithCachedMetadata(serverTurns: ChatTurn[], cach
     return [...merged, tail]
   }
   return merged
+}
+
+/**
+ * The cached status a server-matched turn keeps.
+ *
+ * A server-persisted assistant message is by definition COMPLETE (session-core
+ * stores it once, at stream end), so a cached in-flight 'waiting' never leaks
+ * onto it: it would render a finished answer as an eternal spinner. Nor does a
+ * cached 'stopped': the gateway saves nothing on a cancel it honoured, so a
+ * saved answer means the Stop lost the race with publication, and "Stoppet"
+ * over it would be false (a reload before the Stop reconciliation finished
+ * used to keep exactly that). A cached 'error' still carries: a failed check
+ * saves its fixed explanation as the assistant message, and that is still a
+ * failure.
+ */
+function mergedCachedStatus(serverTurn: ChatTurn, cachedTurn: ChatTurn): ChatTurn['status'] {
+  if (cachedTurn.status === 'waiting') return undefined
+  if (cachedTurn.status === 'stopped' && serverTurn.role === 'assistant') return undefined
+  return cachedTurn.status
 }
 
 export function metadataArray<T>(serverItems: T[] | undefined, cachedItems: T[] | undefined): T[] | undefined {
@@ -358,6 +944,11 @@ export function isComposerToolId(value: string): value is ComposerToolId {
  * bookkeeping too: failing calm is the rule's whole point.
  */
 export function isWorkStep(step: Pick<AgentTaskStep, 'id'>): boolean {
+  // Normalized event ids are `<turn>:event-<opaque upstream id>`. Upstream
+  // ids can themselves contain colons (for example `<call>:source-check`);
+  // inspecting only the final suffix would hide that work as bookkeeping.
+  const eventMarker = step.id.indexOf(':event-')
+  if (eventMarker >= 0 && step.id.length > eventMarker + ':event-'.length) return true
   const marker = step.id.lastIndexOf(':')
   if (marker < 0) return false
   const kind = step.id.slice(marker + 1)
@@ -374,6 +965,18 @@ export function isWorkStep(step: Pick<AgentTaskStep, 'id'>): boolean {
  * must read as `unrecorded` rather than as `stated` — the same rule the wire
  * normalizer applies, for the same reason.
  */
+/**
+ * A recalled memory as it may be stored: which memory, never its text.
+ *
+ * Rediger/Glem change the memory itself, not the turns that recalled it, so a
+ * stored preview would bring a forgotten memory's text, or the text a
+ * correction replaced, back on the next reload. The recall chip reads the
+ * reader's current memories when it is opened instead.
+ */
+export function recalledMemoryWithoutText(memory: RecalledMemory): RecalledMemory {
+  return { memoryId: memory.memoryId, role: memory.role, origin: memory.origin, label: memory.label, preview: '' }
+}
+
 export function isRecalledMemory(value: unknown): value is RecalledMemory {
   if (!value || typeof value !== 'object') return false
   const record = value as Record<string, unknown>
@@ -483,15 +1086,7 @@ export function unsentAttachmentNames(
     .map((attachment) => attachment.name?.trim() || 'uten navn')
 }
 
-/**
- * Attachments whose text the browser can read, so they can be ingested through
- * `POST /api/v1/chat/documents` (a JSON route taking a `content` string).
- *
- * PDF and DOCX are deliberately absent: extracting them needs a parser the
- * browser does not have, and the chat-documents route takes text rather than
- * bytes. They keep using the per-file "Add to knowledge base" action, which
- * sends real `File` bytes to imports-core and extracts server-side.
- */
+/** Text files plus PDF/DOCX/XLSX/PPTX prepared by the ephemeral reader. */
 const TEXT_INGEST_EXTENSIONS = ['.txt', '.md', '.markdown', '.csv', '.json', '.html', '.htm']
 
 export function textIngestibleAttachments(
@@ -503,9 +1098,78 @@ export function textIngestibleAttachments(
     // Trust the extension over the MIME type: browsers report `.md` and `.csv`
     // inconsistently (often `application/octet-stream`), and the accept list is
     // extension-based for the same reason.
-    return attachment.type.startsWith('text/')
+    return typeof attachment.extractedText === 'string' || attachment.type.startsWith('text/')
       || TEXT_INGEST_EXTENSIONS.some((extension) => name.endsWith(extension))
   })
+}
+
+/** Text attachment read in the browser, ready to travel inside the message. */
+export type InlinedAttachment = { name: string; content: string }
+
+/**
+ * Per-file and per-turn ceilings for inlining. Generous for the documents a
+ * chat turn is about (a brief, a CSV, a meeting note); a file over the ceiling
+ * is rejected before submission so the user can choose a smaller excerpt.
+ */
+export const INLINE_ATTACHMENT_MAX_CHARS = 60_000
+export const INLINE_ATTACHMENTS_TOTAL_MAX_CHARS = 120_000
+
+/**
+ * Reads the text attachments small enough to ride inside the user turn.
+ *
+ * Why inline at all: the retrieval route (`POST /api/v1/chat/documents`) is
+ * asynchronous — Data Plane accepts the row as `pending` and chunks it after
+ * the answer has started — so the turn that carried the file saw none of it,
+ * or one chunk. Measured live on 2026-09-14 (a 2 KB markdown attachment
+ * reached the model as its first line). Putting the text in the message is
+ * what "attach and ask" means to the person doing it.
+ *
+ * Reject unreadable, empty, or oversized files before the draft is cleared.
+ * PDF/DOCX/XLSX/PPTX arrive with text from the ephemeral extraction endpoint.
+ */
+export async function inlineTextAttachments(
+  attachments: DashboardComposerSubmitPayload['attachments'],
+): Promise<InlinedAttachment[]> {
+  const out: InlinedAttachment[] = []
+  let total = 0
+  for (const attachment of attachments.filter((file) => !file.type.startsWith('image/'))) {
+    try {
+      if (!attachment.url || !textIngestibleAttachments([attachment]).length) throw new Error('unprepared document')
+      let content = attachment.extractedText
+      if (content === undefined) {
+        const response = await fetch(attachment.url)
+        if (!response.ok) throw new Error('unreadable')
+        content = await response.text()
+      }
+      content = content.replace(/\r\n/g, '\n').trim()
+      if (!content || content.length > INLINE_ATTACHMENT_MAX_CHARS || total + content.length > INLINE_ATTACHMENTS_TOTAL_MAX_CHARS) {
+        throw new Error('empty or too large')
+      }
+      total += content.length
+      out.push({ name: attachment.name?.trim() || 'vedlegg.txt', content })
+    } catch {
+      throw new Error(`Kunne ikke lese hele «${attachment.name}». Utkastet er beholdt; prøv igjen med et lesbart, mindre vedlegg.`)
+    }
+  }
+  return out
+}
+
+/**
+ * The user's text followed by each inlined document under a labelled fence.
+ * The label names the file so the model can cite it ("ifølge kildepakke.md")
+ * and so a reader of the durable thread can see where the text came from.
+ */
+export function appendInlinedAttachments(text: string, inlined: InlinedAttachment[]): string {
+  const blocks = inlined.map((entry) => `--- VEDLEGG: ${entry.name} ---\n${entry.content}\n--- SLUTT PÅ VEDLEGG: ${entry.name} ---`)
+  return `${text.trim()}\n\n${blocks.join('\n\n')}`
+}
+
+/** Retry/edit/continue must keep sources even after the visible bubble is restored. */
+export function contentWithPreparedSources(text: string, attachments: ComposerAttachment[] = []): string {
+  if (splitInlinedAttachments(text).attachments.length > 0) return text
+  const sources = attachments.flatMap(file => typeof file.extractedText === 'string' && file.extractedText.trim()
+    ? [{ name: file.name, content: file.extractedText }] : [])
+  return sources.length ? appendInlinedAttachments(text, sources) : text
 }
 
 export async function toStreamAttachments(
@@ -513,19 +1177,21 @@ export async function toStreamAttachments(
 ): Promise<StreamAttachment[]> {
   const out: StreamAttachment[] = []
   for (const attachment of attachments) {
-    // Non-image files are not dropped silently any more — see
-    // `unsentAttachmentNames`, which the submit path reports to the user.
-    if (!attachment.url || !attachment.type.startsWith('image/')) continue
+    // Documents are included by inlineTextAttachments before inference.
+    if (!attachment.type.startsWith('image/')) continue
     try {
+      if (!attachment.url) throw new Error('missing image')
       let dataUrl = attachment.url
       if (!dataUrl.startsWith('data:')) {
         const response = await fetch(dataUrl)
+        if (!response.ok) throw new Error('unreadable image')
         dataUrl = await blobToDataUrl(await response.blob())
       }
       const parsed = parseDataUrl(dataUrl)
-      if (parsed) out.push({ kind: 'image', data_base64: parsed.base64, mime_type: parsed.mime || attachment.type })
+      if (!parsed || !parsed.base64) throw new Error('invalid image encoding')
+      out.push({ kind: 'image', data_base64: parsed.base64, mime_type: parsed.mime || attachment.type })
     } catch {
-      // skip unreadable attachments
+      throw new Error(`Kunne ikke lese bildet «${attachment.name}». Prøv igjen eller fjern bildet.`)
     }
   }
   return out
@@ -628,7 +1294,7 @@ export function normalizeGeneratedFile(event: {
   }
 }
 
-export function normalizeCitation(event: { id?: string; title?: string; url?: string; snippet?: string; claimId?: string; sourceGroupId?: string; start?: number; end?: number }): Citation | null {
+export function normalizeCitation(event: { id?: string; title?: string; url?: string; snippet?: string; claimId?: string; sourceGroupId?: string; sourceGroupLabel?: string; start?: number; end?: number; origin?: string }): Citation | null {
   if (!event.url) return null
   return {
     id: event.id ?? event.url,
@@ -637,18 +1303,24 @@ export function normalizeCitation(event: { id?: string; title?: string; url?: st
     snippet: event.snippet ?? '',
     ...(event.claimId ? { claimId: event.claimId } : {}),
     ...(event.sourceGroupId ? { sourceGroupId: event.sourceGroupId } : {}),
+    ...(event.sourceGroupLabel ? { sourceGroupLabel: event.sourceGroupLabel } : {}),
     ...(event.start !== undefined ? { start: event.start } : {}),
     ...(event.end !== undefined ? { end: event.end } : {}),
+    ...(event.origin === 'web' || event.origin === 'knowledge' ? { origin: event.origin } : {}),
   }
 }
 
 export function normalizeStep(
-  event: { id?: string; title?: string; detail?: string; status?: string },
+  event: { id?: string; title?: string; detail?: string; status?: string; frameId?: string },
   turnId?: string,
   turnTitle?: string,
 ): AgentTaskStep | null {
   if (!event.id && !event.title) return null
-  const rawId = event.id ?? createId('step')
+  // A step without an id of its own is keyed on the SSE frame that carried
+  // it: a resume replays that frame under the same id, so it updates the
+  // step it created before instead of adding a second one. A random id is
+  // left only for a frame the server sent without one (live-only).
+  const rawId = event.id ?? (event.frameId ? `frame-${event.frameId}` : createId('step'))
   return {
     id: turnId ? `${turnId}:event-${rawId}` : rawId,
     title: event.title ?? 'Agent step',
@@ -713,6 +1385,19 @@ export function humanizeToolName(name: string): string {
     .replace(/\s+/g, ' ')
     .trim()
     .replace(/^\w/, (match) => match.toUpperCase()) || 'Tool'
+}
+
+export function workStepLabel(label: string, locale: string): string {
+  const tool = label.replace(/^Tool:\s*/i, '').replace(/_/g, ' ').toLowerCase()
+  const labels: Record<string, [string, string]> = {
+    'count words': ['Tell ord', 'Count words'],
+    'create artifact': ['Opprett utkast', 'Create draft'],
+    'read artifact': ['Les utkast', 'Read draft'],
+    'update artifact': ['Oppdater utkast', 'Update draft'],
+  }
+  const translated = labels[tool]
+  if (translated) return translated[locale === 'no' ? 0 : 1]
+  return locale === 'no' ? label.replace(/^Tool:\s*/, 'Verktøy: ').replace(/^Answer:\s*/, 'Svar: ') : label
 }
 
 /**
@@ -793,6 +1478,7 @@ export function formatUsageSummary(usage: {
   inputTokens?: number
   outputTokens?: number
   costUsd?: number
+  costBasis?: 'metered' | 'subscription'
   latencyMs?: number
   confidence?: number
 }): string {
@@ -801,7 +1487,10 @@ export function formatUsageSummary(usage: {
     parts.push(`${usage.inputTokens ?? 0} in / ${usage.outputTokens ?? 0} out tokens`)
   }
   if (usage.latencyMs != null) parts.push(formatLatency(usage.latencyMs))
-  if (usage.costUsd != null) parts.push(`$${usage.costUsd.toFixed(4)}`)
+  // A subscription-carried turn has no list-price cost; its wire 0.0 is a
+  // compatibility placeholder, and printing it would read as "free".
+  if (usage.costBasis === 'subscription') parts.push('included in subscription')
+  else if (usage.costUsd != null) parts.push(`$${usage.costUsd.toFixed(4)}`)
   if (usage.confidence != null) parts.push(`${Math.round(usage.confidence * 100)}% confidence`)
   return parts.join(' · ') || 'Usage metadata received.'
 }
@@ -925,9 +1614,19 @@ export function upsertGeneratedFile(files: GeneratedFile[], file: GeneratedFile)
   return files.map((item, itemIndex) => itemIndex === index ? { ...item, ...file } : item)
 }
 
+/**
+ * Dedup-and-MERGE, not dedup-and-drop (chat-wave2 citations spec §2.5): the
+ * server's post-stream anchor pass re-emits a citation with the SAME `id`
+ * once the answer is complete, now carrying `claimId`/`sourceGroupId`/
+ * `start`/`end` — a plain no-op-on-duplicate would silently discard that
+ * update. A second sighting of the same `id` (or, absent that, the same
+ * `url`) merges its fields onto the already-recorded citation in place
+ * instead of adding a second row or being dropped.
+ */
 export function upsertCitation(citations: Citation[], citation: Citation): Citation[] {
-  if (citations.some((item) => item.id === citation.id || item.url === citation.url)) return citations
-  return [...citations, citation]
+  const index = citations.findIndex((item) => item.id === citation.id || item.url === citation.url)
+  if (index < 0) return [...citations, citation]
+  return citations.map((item, i) => (i === index ? { ...item, ...citation } : item))
 }
 
 export function upsertStepEvidence(evidence: AgentTaskStepEvidence[], item: AgentTaskStepEvidence): AgentTaskStepEvidence[] {

@@ -15,6 +15,7 @@ import { translateApiError } from '@/shared/i18n/errors'
 import { beginOwnStream, endOwnStream, liveThreadsIn, ownStream } from '../lib/space-live-work'
 import { threadTitle } from '../lib/space-thread-presentation'
 import { AiModelPicker } from '@/shared/components/AiModelPicker'
+import { createTurnPrivacyTierResolver } from '@/features/dashboard/home/submit-privacy-tier'
 import { readAiModelSelection, type AiModelSelection } from '@/shared/ai/model-selection'
 import { OPENAI_CODEX_SUBSCRIPTION_PROVIDER } from '@/shared/api/chatgpt-subscription-client'
 import { getSession } from '@/shared/session/session-store'
@@ -140,6 +141,9 @@ export function SpaceRoomComposer(props: SpaceRoomComposerProps) {
   const i18n = useI18n()
   const orgId = getSession().activeOrg?.id?.trim() ?? ''
   const [selectedModel, setSelectedModel] = createSignal<AiModelSelection>(readAiModelSelection(orgId))
+  // One catalogue request for the picker and for a send that has to wait for
+  // it, as in the main composer: a catalogue model's tier rides every turn.
+  const privacyTiers = createTurnPrivacyTierResolver({ orgId })
   const [text, setText] = createSignal('')
   const [mentionQuery, setMentionQuery] = createSignal<string | undefined>(undefined)
   const [mentionedAgentRef, setMentionedAgentRef] = createSignal<string | undefined>(undefined)
@@ -391,6 +395,10 @@ export function SpaceRoomComposer(props: SpaceRoomComposerProps) {
     beginOwnStream({ spaceRef: props.spaceRef, threadId: replyThreadId })
 
     try {
+      // May wait (bounded) for a catalogue still loading. A Stop in that
+      // window has already said so on the exchange; send nothing.
+      const turnTier = await privacyTiers.resolve(modelSelection.model, modelSelection.provider)
+      if (controller.signal.aborted) return
       await streamChat(
         {
           content,
@@ -401,6 +409,7 @@ export function SpaceRoomComposer(props: SpaceRoomComposerProps) {
           subscriptionConnectionId: modelSelection.provider === OPENAI_CODEX_SUBSCRIPTION_PROVIDER
             ? modelSelection.subscriptionConnectionId
             : undefined,
+          minPrivacyTier: turnTier.tier,
           spaceRef: props.spaceRef,
           mentionedAgentRef: agentRef,
           threadId: replyThreadId,
@@ -640,7 +649,7 @@ export function SpaceRoomComposer(props: SpaceRoomComposerProps) {
             )}
           </p>
         </Show>
-        <AiModelPicker orgId={orgId} class="verevon-space-room-composer__model-picker" onChange={setSelectedModel} />
+        <AiModelPicker orgId={orgId} class="verevon-space-room-composer__model-picker" catalogue={privacyTiers.catalogue} onChange={setSelectedModel} />
         <Show when={pickedSkills().length > 0}>
           <ul class="verevon-space-room-skills" aria-label={i18n.tr('Valgte ferdigheter', 'Chosen skills')}>
             <For each={pickedSkills()}>

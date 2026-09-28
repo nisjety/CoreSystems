@@ -7,6 +7,7 @@ const ctx: ConversationNodeContext = {
   onApprovalDecision: () => {},
   onApprovePlan: () => {},
   onRegenerate: () => {},
+  threadId: 'thread-1',
 }
 
 /** Every kind the union declares — the set a real registry must cover. */
@@ -16,6 +17,7 @@ const ALL_KINDS: ConversationNodeKind[] = [
   'grounding',
   'confidence',
   'memory-recall',
+  'source-scope',
   'truncated',
   'tool-chips',
   'attachments',

@@ -17,7 +17,7 @@ describe("features module cards", () => {
 		expect(moduleCards.map((card) => card.area)).toEqual([
 			"Kunnskap",
 			"AI og agenter",
-			"Verktøy for arbeidet",
+			"Arbeidsflate",
 			"Datamaskiner og support",
 			"Tilgang og kontroll",
 		]);
@@ -37,8 +37,9 @@ describe("features module cards", () => {
 	it("uses a distinct workplace photo for every area", () => {
 		const images = moduleCards.map((card) => card.image);
 		expect(new Set(images).size).toBe(moduleCards.length);
-		expect(images.every((image) => image.startsWith("https://images.pexels.com/") || image.startsWith("https://images.unsplash.com/"))).toBe(true);
-		expect(moduleCards.every((card) => Math.max(card.imageWidth, card.imageHeight) >= 3840)).toBe(true);
+		expect(images.every((image) => image.startsWith("https://images.pexels.com/") || image.startsWith("https://images.unsplash.com/") || image.startsWith("/verevon-mood/"))).toBe(true);
+		// The user's shortlisted Support original is 3816px tall; keep its native dimensions.
+		expect(moduleCards.every((card) => Math.max(card.imageWidth, card.imageHeight) >= 3800)).toBe(true);
 		expect(moduleCards.every((card) => card.imageAlt.length > 0)).toBe(true);
 	});
 });

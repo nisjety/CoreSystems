@@ -77,8 +77,11 @@ type InvokeRequest struct {
 	// ineligible providers in every chain path and fails closed with a typed
 	// precondition naming this tier when none remains.
 	MinPrivacyTier PrivacyTier `protobuf:"varint,22,opt,name=min_privacy_tier,json=minPrivacyTier,proto3,enum=model_plane.v1.PrivacyTier" json:"min_privacy_tier,omitempty"`
-	unknownFields  protoimpl.UnknownFields
-	sizeCache      protoimpl.SizeCache
+	// Opaque, user-owned Integration Core subscription connection. It is valid
+	// only with provider="openai-codex-subscription" and is not an OAuth token.
+	SubscriptionConnectionId string `protobuf:"bytes,23,opt,name=subscription_connection_id,json=subscriptionConnectionId,proto3" json:"subscription_connection_id,omitempty"`
+	unknownFields            protoimpl.UnknownFields
+	sizeCache                protoimpl.SizeCache
 }
 
 func (x *InvokeRequest) Reset() {
@@ -263,6 +266,13 @@ func (x *InvokeRequest) GetMinPrivacyTier() PrivacyTier {
 		return x.MinPrivacyTier
 	}
 	return PrivacyTier_PRIVACY_TIER_UNSPECIFIED
+}
+
+func (x *InvokeRequest) GetSubscriptionConnectionId() string {
+	if x != nil {
+		return x.SubscriptionConnectionId
+	}
+	return ""
 }
 
 // ContentPart — one piece of a multimodal turn (chat-parity §9 vision).
@@ -1391,9 +1401,21 @@ type WebSearchRequest struct {
 	// "navigational". Empty → auto-classify via rule-based router.
 	Intent string `protobuf:"bytes,5,opt,name=intent,proto3" json:"intent,omitempty"`
 	// Zero Data Retention — disables Quarry cache/event persistence.
-	Zdr           bool `protobuf:"varint,6,opt,name=zdr,proto3" json:"zdr,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	Zdr bool `protobuf:"varint,6,opt,name=zdr,proto3" json:"zdr,omitempty"`
+	// Whether this caller may use paid, externally-egressing search providers
+	// (Brave). SearXNG serves every tier; Brave is granted only to non-ZDR
+	// tenants on the Balance and Genius tiers.
+	//
+	// Deliberately a bool rather than a tier name. A tier string would put
+	// Verevon's product taxonomy inside the Ingestion Plane, and every tier
+	// added later would then default to whatever the edge's string match does
+	// with an unknown value — a silent security default set by a typo. A bool
+	// makes the grant explicit and the proto3 default (false) the fail-closed
+	// direction, so a caller that has not been taught about tiering yet gets
+	// free providers only.
+	AllowPaidProviders bool `protobuf:"varint,7,opt,name=allow_paid_providers,json=allowPaidProviders,proto3" json:"allow_paid_providers,omitempty"`
+	unknownFields      protoimpl.UnknownFields
+	sizeCache          protoimpl.SizeCache
 }
 
 func (x *WebSearchRequest) Reset() {
@@ -1464,6 +1486,13 @@ func (x *WebSearchRequest) GetIntent() string {
 func (x *WebSearchRequest) GetZdr() bool {
 	if x != nil {
 		return x.Zdr
+	}
+	return false
+}
+
+func (x *WebSearchRequest) GetAllowPaidProviders() bool {
+	if x != nil {
+		return x.AllowPaidProviders
 	}
 	return false
 }
@@ -8714,7 +8743,7 @@ var File_model_plane_v1_gateway_proto protoreflect.FileDescriptor
 
 const file_model_plane_v1_gateway_proto_rawDesc = "" +
 	"\n" +
-	"\x1cmodel_plane/v1/gateway.proto\x12\x0emodel_plane.v1\x1a\x1cgoogle/protobuf/struct.proto\x1a\x1emodel_plane/v1/inference.proto\x1a\x19model_plane/v1/runs.proto\"\xe2\x06\n" +
+	"\x1cmodel_plane/v1/gateway.proto\x12\x0emodel_plane.v1\x1a\x1cgoogle/protobuf/struct.proto\x1a\x1emodel_plane/v1/inference.proto\x1a\x19model_plane/v1/runs.proto\"\xa0\a\n" +
 	"\rInvokeRequest\x12\x1d\n" +
 	"\n" +
 	"request_id\x18\x01 \x01(\tR\trequestId\x12\x15\n" +
@@ -8742,7 +8771,8 @@ const file_model_plane_v1_gateway_proto_rawDesc = "" +
 	"\bfeatures\x18\x13 \x03(\tR\bfeatures\x12'\n" +
 	"\x0fidempotency_key\x18\x14 \x01(\tR\x0eidempotencyKey\x12*\n" +
 	"\x11parent_message_id\x18\x15 \x01(\tR\x0fparentMessageId\x12E\n" +
-	"\x10min_privacy_tier\x18\x16 \x01(\x0e2\x1b.model_plane.v1.PrivacyTierR\x0eminPrivacyTier\"[\n" +
+	"\x10min_privacy_tier\x18\x16 \x01(\x0e2\x1b.model_plane.v1.PrivacyTierR\x0eminPrivacyTier\x12<\n" +
+	"\x1asubscription_connection_id\x18\x17 \x01(\tR\x18subscriptionConnectionId\"[\n" +
 	"\vContentPart\x12\x12\n" +
 	"\x04type\x18\x01 \x01(\tR\x04type\x12\x12\n" +
 	"\x04text\x18\x02 \x01(\tR\x04text\x12\x10\n" +
@@ -8839,7 +8869,7 @@ const file_model_plane_v1_gateway_proto_rawDesc = "" +
 	"\finput_tokens\x18\b \x01(\x05R\vinputTokens\x12#\n" +
 	"\routput_tokens\x18\t \x01(\x05R\foutputTokens\x12#\n" +
 	"\rerror_message\x18\n" +
-	" \x01(\tR\ferrorMessage\"\x9e\x01\n" +
+	" \x01(\tR\ferrorMessage\"\xd0\x01\n" +
 	"\x10WebSearchRequest\x12\x1d\n" +
 	"\n" +
 	"request_id\x18\x01 \x01(\tR\trequestId\x12\x15\n" +
@@ -8847,7 +8877,8 @@ const file_model_plane_v1_gateway_proto_rawDesc = "" +
 	"\x05query\x18\x03 \x01(\tR\x05query\x12\x14\n" +
 	"\x05limit\x18\x04 \x01(\x05R\x05limit\x12\x16\n" +
 	"\x06intent\x18\x05 \x01(\tR\x06intent\x12\x10\n" +
-	"\x03zdr\x18\x06 \x01(\bR\x03zdr\"\x81\x01\n" +
+	"\x03zdr\x18\x06 \x01(\bR\x03zdr\x120\n" +
+	"\x14allow_paid_providers\x18\a \x01(\bR\x12allowPaidProviders\"\x81\x01\n" +
 	"\x0fWebSearchResult\x12\x10\n" +
 	"\x03url\x18\x01 \x01(\tR\x03url\x12\x14\n" +
 	"\x05title\x18\x02 \x01(\tR\x05title\x12\x18\n" +

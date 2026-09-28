@@ -68,4 +68,31 @@ describe('ActionExecutor', () => {
     expect(result.ok).toBe(false);
     expect(protocol.sentActions).toHaveLength(0);
   });
+
+  it('rejects an action revoked while asynchronous approval is pending', async () => {
+    const protocol = new MockProtocol();
+    const permissions = new PermissionManager(['input.keyboard']);
+    const executor = new ActionExecutor(protocol, permissions);
+    let approve!: () => void;
+    const approval = new Promise<void>((resolve) => { approve = resolve; });
+    executor.use(async (_action, next) => { await approval; return next(); });
+
+    const pending = executor.execute({ type: 'keyboard.type', actor: 'ai', text: 'hello' });
+    permissions.update(['screen.view']);
+    approve();
+
+    await expect(pending).rejects.toThrow(PermissionDeniedError);
+    expect(protocol.sentActions).toHaveLength(0);
+  });
+
+  it('dispatches after approval when the required grant remains valid', async () => {
+    const protocol = new MockProtocol();
+    const permissions = new PermissionManager(['input.pointer']);
+    const executor = new ActionExecutor(protocol, permissions);
+    executor.use(async (_action, next) => { await Promise.resolve(); return next(); });
+
+    const result = await executor.execute({ type: 'pointer.click', actor: 'human', x: 1, y: 2, button: 'left' });
+    expect(result.ok).toBe(true);
+    expect(protocol.sentActions).toHaveLength(1);
+  });
 });

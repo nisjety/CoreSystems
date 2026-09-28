@@ -1,6 +1,9 @@
 package spaces
 
-import "testing"
+import (
+	"strconv"
+	"testing"
+)
 
 func grant(subjectType, subjectID, role string) MemberGrant {
 	return MemberGrant{SubjectType: subjectType, SubjectID: subjectID, Role: role}
@@ -85,7 +88,7 @@ func oversizedRoster() []MemberGrant {
 	for index := 0; index <= maxSpaceMembers; index++ {
 		members = append(members, MemberGrant{
 			SubjectType: "user",
-			SubjectID:   string(rune('a'+index%26)) + itoa(index),
+			SubjectID:   string(rune('a'+index%26)) + strconv.Itoa(index),
 			Role:        "viewer",
 		})
 	}
@@ -131,16 +134,4 @@ func TestValidateAllowsEverySubjectTypeWhenNoScopeIsDeclared(t *testing.T) {
 	if err := replacement.Validate(); err != nil {
 		t.Fatalf("an unscoped replacement must accept every subject type: %v", err)
 	}
-}
-
-func itoa(value int) string {
-	if value == 0 {
-		return "0"
-	}
-	digits := ""
-	for value > 0 {
-		digits = string(rune('0'+value%10)) + digits
-		value /= 10
-	}
-	return digits
 }

@@ -5,6 +5,7 @@ import { useI18n } from '@/shared/i18n'
 import { createResource } from '@/shared/lib/create-resource-compat'
 import {
   buildSpaceWork,
+  type ProcessLikeActivitySource,
   type RunLikeActivitySource,
   type ScheduleLikeActivitySource,
 } from '../lib/activity-grammar'
@@ -40,6 +41,11 @@ export interface SpaceWorkPanelProps {
 function sectionLabel(section: string, tr: (no: string, en: string) => string): string {
   if (section === 'runs') return tr('Kjøringer: ', 'Runs: ')
   if (section === 'schedules') return tr('Planlagt arbeid: ', 'Scheduled work: ')
+  // Without this case a processes gap renders the literal English word
+  // "processes:" inside Norwegian copy — verified behaviour of the fallback
+  // below, which exists for codes this build does not know rather than for
+  // sections it ships.
+  if (section === 'processes') return tr('Bakgrunnsprosesser: ', 'Background processes: ')
   return `${section}: `
 }
 
@@ -77,6 +83,21 @@ function gapReason(
         'Denne økten kan ikke lese planlagt arbeid nå.',
         'This session cannot read scheduled work right now.',
       )
+    case 'processes_upstream_unavailable':
+      return tr(
+        'Bakgrunnsprosessene i rommet kunne ikke hentes.',
+        'This Space’s background processes could not be loaded.',
+      )
+    case 'processes_session_unavailable':
+      return tr(
+        'Denne økten kan ikke lese bakgrunnsprosesser nå.',
+        'This session cannot read background processes right now.',
+      )
+    case 'processes_read_not_authorized':
+      return tr(
+        'Du kan ikke se bakgrunnsprosessene i dette rommet.',
+        'You cannot see this Space’s background processes.',
+      )
     default:
       return gap.reason
   }
@@ -93,6 +114,7 @@ export function SpaceWorkPanel(props: SpaceWorkPanelProps) {
     return buildSpaceWork(
       current.runs as readonly RunLikeActivitySource[],
       current.schedules as readonly ScheduleLikeActivitySource[],
+      current.processes as readonly ProcessLikeActivitySource[],
     )
   }
 

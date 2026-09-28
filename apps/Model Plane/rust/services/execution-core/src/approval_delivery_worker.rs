@@ -586,6 +586,11 @@ async fn resolve_unreceipted_write(
         // never reach here.
         return (Disposition::UnreceiptedWrite, None);
     };
+    // This background worker has no live, run-scoped session bearer to
+    // forward (it durably resumes an approval well outside any one run's
+    // request lifetime) -- `None` here is honest, not a shortcut, and falls
+    // back to the plain org-scoped credential exactly as this call site
+    // already behaved before delegated identity existed.
     let Some((effect_id, outcome)) = crate::postcondition::verify_unreceipted_mutation(
         integration_client,
         org_id,
@@ -593,6 +598,7 @@ async fn resolve_unreceipted_write(
         operation,
         params,
         body,
+        None,
     )
     .await
     else {
@@ -1004,6 +1010,13 @@ async fn process_delivery(
                     input.body,
                     &descriptor.user_id,
                     Some(&delivery.approval_id),
+                    // This is always the WRITE branch (an approval was
+                    // delivered) -- writes already carry real,
+                    // cryptographically-bound authorization via the write
+                    // attestation, so no session bearer is needed here
+                    // either way (execute_action ignores this param on the
+                    // write branch).
+                    None,
                 )
                 .await;
             disposition_for_provider_action_result(execution_result)
@@ -1128,6 +1141,9 @@ async fn process_delivery(
                         params,
                         body,
                         &provider_receipt_id,
+                        // Same rationale as resolve_unreceipted_write above: no
+                        // live session bearer exists in this durable worker.
+                        None,
                     )
                     .await,
                 ),

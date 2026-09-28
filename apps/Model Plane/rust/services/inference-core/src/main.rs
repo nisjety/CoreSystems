@@ -82,10 +82,7 @@ async fn main() -> Result<()> {
     let http_handle = tokio::spawn(http_health::serve(policy_state, grpc_readiness));
 
     let shutdown = async {
-        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-            .expect("install SIGTERM handler")
-            .recv()
-            .await;
+        wait_for_terminate().await;
         info!("SIGTERM received, shutting down");
     };
 
@@ -97,4 +94,23 @@ async fn main() -> Result<()> {
 
     info!("inference-core stopped");
     Ok(())
+}
+
+/// Resolve on SIGTERM, the container runtime's stop signal.
+#[cfg(unix)]
+async fn wait_for_terminate() {
+    tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        .expect("install SIGTERM handler")
+        .recv()
+        .await;
+}
+
+/// Hosts without Unix signals (a Windows development machine) stop on Ctrl-C
+/// instead. Without this the binary does not compile there, and cargo builds
+/// the binary for every integration test, so none of them could run.
+#[cfg(not(unix))]
+async fn wait_for_terminate() {
+    tokio::signal::ctrl_c()
+        .await
+        .expect("install Ctrl-C handler");
 }

@@ -64,5 +64,47 @@ describe('dictateAudioBlob', () => {
     const body = JSON.parse(String(init.body)) as Record<string, unknown>
     expect(body.format).toBe('wav')
     expect('context' in body).toBe(false)
+    // An ordinary dictation's body is unchanged: no retention flag at all.
+    expect('zdr' in body).toBe(false)
+  })
+
+  it('carries Zero Data Retention for a Temporary-chat dictation', async () => {
+    const fetchMock = stubFetch({ text: 'Hei', raw_text: 'hei', cleaned: true })
+
+    const blob = new Blob(['fake-audio'], { type: 'audio/webm' })
+    await dictateAudioBlob(blob, 'nb-NO', 'chat message', undefined, true)
+
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit]
+    const body = JSON.parse(String(init.body)) as Record<string, unknown>
+    expect(body.zdr).toBe(true)
+    expect(body.context).toBe('chat message')
+  })
+
+  it.each([
+    ['audio/mp4', 'm4a'],
+    ['audio/mp4;codecs=mp4a.40.2', 'm4a'],
+    ['audio/aac', 'm4a'],
+    ['audio/x-m4a', 'm4a'],
+    ['audio/ogg;codecs=opus', 'ogg'],
+    ['audio/mpeg', 'mp3'],
+  ])('labels a %s recording as %s (Safari records AAC in mp4)', async (mime, format) => {
+    const fetchMock = stubFetch({ text: 'Hei', raw_text: 'hei', cleaned: true })
+
+    await dictateAudioBlob(new Blob(['fake-audio'], { type: mime }), 'nb-NO', 'chat message')
+
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit]
+    const body = JSON.parse(String(init.body)) as Record<string, unknown>
+    expect(body.format).toBe(format)
+  })
+
+  it('omits the flag when the chat is not temporary', async () => {
+    const fetchMock = stubFetch({ text: 'Hei', raw_text: 'hei', cleaned: true })
+
+    const blob = new Blob(['fake-audio'], { type: 'audio/webm' })
+    await dictateAudioBlob(blob, 'nb-NO', 'chat message', undefined, false)
+
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit]
+    const body = JSON.parse(String(init.body)) as Record<string, unknown>
+    expect('zdr' in body).toBe(false)
   })
 })

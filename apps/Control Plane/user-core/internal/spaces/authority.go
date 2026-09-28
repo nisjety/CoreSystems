@@ -103,7 +103,7 @@ func (r RecipientAudienceRegistration) Validate() error {
 
 func (r Registration) Validate() error {
 	if strings.TrimSpace(r.SpaceRef) == "" || strings.TrimSpace(r.OrgID) == "" || strings.TrimSpace(r.OwnerPrincipalID) == "" {
-		return fmt.Errorf("Space registration identity is required")
+		return fmt.Errorf("space registration identity is required")
 	}
 	switch r.Kind {
 	case KindPersonal, KindRoom, KindProject, KindCase:
@@ -111,7 +111,7 @@ func (r Registration) Validate() error {
 		return fmt.Errorf("unknown Space kind %q", r.Kind)
 	}
 	if r.LifecycleRevision <= 0 {
-		return fmt.Errorf("Space lifecycle revision must be positive")
+		return fmt.Errorf("space lifecycle revision must be positive")
 	}
 	if _, err := r.RegistrationState(); err != nil {
 		return err
@@ -171,6 +171,21 @@ type EffectPolicy struct {
 	// ThreadCreateEntitled: being allowed to speak in a room is not the same
 	// permission as reading what everyone else said in it.
 	ThreadReadEntitled bool `json:"thread_read_entitled"`
+	// SandboxCapabilityEntitled is a standing, deny-by-default floor for a
+	// Space to have its agents acquire an execution sandbox lease at all. It
+	// is independent of every other entitlement here: a Space able to create
+	// threads, fire schedules, or read history must not automatically gain
+	// its own agents' compute. See
+	// apps/Frontend Plane/verevonv3/docs/S3_2_SANDBOX_LEASE_CLOSEOUT_DESIGN_2026-09-10.md.
+	SandboxCapabilityEntitled bool `json:"sandbox_capability_entitled"`
+	// ProcessRegistryEntitled is deliberately separate from
+	// SandboxCapabilityEntitled, for the same reason ScheduleFireEntitled is
+	// separate from ThreadCreateEntitled: acquiring a sandbox is bounded work
+	// a caller waits on, while a background process keeps running after the
+	// turn that started it, retains its own output, and can be reattached to
+	// later. A Space allowed the first is not thereby allowed the second. See
+	// apps/Frontend Plane/verevonv3/docs/S4_2_PROCESS_REGISTRY_DESIGN_2026-09-13.md §4.
+	ProcessRegistryEntitled bool `json:"process_registry_entitled"`
 }
 
 func (p EffectPolicy) Validate() error {
@@ -181,16 +196,12 @@ func (p EffectPolicy) Validate() error {
 		"residency": p.Residency, "deletion_scope": p.DeletionScope,
 	} {
 		if strings.TrimSpace(value) == "" {
-			return fmt.Errorf("Space effect policy %s is required", name)
+			return fmt.Errorf("space effect policy %s is required", name)
 		}
 	}
 	return nil
 }
 
-// CurrentMembership is a current Control-owned membership fact. It is useful
-// to a resolver only as one component of effective access: callers must still
-// intersect recipient, policy, and owner-resource authorization before an
-// effect. The database result is deliberately not a signed access decision.
 // RosterMember is one participant of a Space as shown to another participant.
 //
 // `SubjectType` distinguishes a person from a service/agent identity, so the UI
@@ -272,10 +283,10 @@ const maxSpaceMembers = 5000
 
 func (m MembershipReplacement) Validate() error {
 	if strings.TrimSpace(m.SpaceRef) == "" {
-		return fmt.Errorf("Space reference is required")
+		return fmt.Errorf("space reference is required")
 	}
 	if len(m.Members) > maxSpaceMembers {
-		return fmt.Errorf("Space membership exceeds %d subjects", maxSpaceMembers)
+		return fmt.Errorf("space membership exceeds %d subjects", maxSpaceMembers)
 	}
 	seen := make(map[string]struct{}, len(m.Members))
 	for _, member := range m.Members {
@@ -286,7 +297,7 @@ func (m MembershipReplacement) Validate() error {
 			return fmt.Errorf("unknown Space member subject type %q", member.SubjectType)
 		}
 		if subjectID == "" {
-			return fmt.Errorf("Space member subject id is required")
+			return fmt.Errorf("space member subject id is required")
 		}
 		switch role {
 		case "viewer", "editor", "manager", "owner":
@@ -324,6 +335,10 @@ func (m MembershipReplacement) Validate() error {
 	return nil
 }
 
+// CurrentMembership is a current Control-owned membership fact. It is useful
+// to a resolver only as one component of effective access: callers must still
+// intersect recipient, policy, and owner-resource authorization before an
+// effect. The database result is deliberately not a signed access decision.
 type CurrentMembership struct {
 	SpaceRef  string            `json:"space_ref"`
 	OrgID     string            `json:"org_id"`
@@ -352,7 +367,7 @@ func (m CurrentMembership) Validate() error {
 
 func (r AuthorityRevision) Validate() error {
 	if r.Authority <= 0 || r.Membership <= 0 || r.Privacy <= 0 || r.RecipientAudience <= 0 || r.Entitlement <= 0 {
-		return fmt.Errorf("Space authority revisions must be positive")
+		return fmt.Errorf("space authority revisions must be positive")
 	}
 	return nil
 }

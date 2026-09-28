@@ -66,13 +66,27 @@ export function FeatureComposerCycle({
 			return;
 		}
 
+		let intersecting = false;
+		const layer = root.closest<HTMLElement>("[data-product-loop-layer]");
+		const update = () => {
+			const visible = intersecting && !document.hidden && !layer?.inert;
+			setIsVisible(visible);
+			if (!visible) setIsSwitching(false);
+		};
 		const observer = new IntersectionObserver(
-			([entry]) => setIsVisible(entry.isIntersecting),
+			([entry]) => { intersecting = entry.isIntersecting; update(); },
 			{ threshold: 0.1 },
 		);
 
 		observer.observe(root);
-		return () => observer.disconnect();
+		const layerObserver = new MutationObserver(update);
+		if (layer) layerObserver.observe(layer, { attributes: true, attributeFilter: ["inert"] });
+		document.addEventListener("visibilitychange", update);
+		return () => {
+			observer.disconnect();
+			layerObserver.disconnect();
+			document.removeEventListener("visibilitychange", update);
+		};
 	}, []);
 
 	useEffect(() => {

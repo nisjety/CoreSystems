@@ -1,0 +1,1 @@
+{"data":{"providerUsed":"openai-codex-subscription","response":{"requestId":"req_golden","content":"Hello","modelUsed":"gpt-5.6-terra","usage":{"inputTokens":1200,"cachedInputTokens":1024,"cacheWriteInputTokens":0,"outputTokens":42,"reasoningOutputTokens":30},"phasesMs":{"first_delta":20,"turn_start":10,"turn_total":40}}},"meta":{"requestId":"req_golden"},"success":true}

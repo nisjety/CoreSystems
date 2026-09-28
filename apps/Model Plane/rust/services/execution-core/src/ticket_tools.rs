@@ -13,7 +13,6 @@
 //! configuration disables the adapter, so it is safe to compile everywhere
 //! while remaining unoffered and incapable of egress in default dev.
 
-use std::net::IpAddr;
 use std::time::Duration;
 
 use base64::Engine as _;
@@ -24,6 +23,9 @@ use reqwest::{Client, Url};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::control_http_client::{
+    bounded_secret, env_flag, env_value, service_base_url, service_endpoint as endpoint,
+};
 use crate::tool_bridge::ToolExecution;
 
 pub const TOOL_NAME: &str = "tickets.create";
@@ -784,69 +786,6 @@ fn application_delegation_headers(
         );
     }
     Ok(headers)
-}
-
-fn endpoint(base: &Url, path: &str) -> Result<Url, String> {
-    let mut endpoint = base.clone();
-    endpoint.set_path(path);
-    endpoint.set_query(None);
-    endpoint.set_fragment(None);
-    Ok(endpoint)
-}
-
-fn service_base_url(value: &str, name: &str, allow_insecure_loopback: bool) -> Result<Url, String> {
-    let url =
-        Url::parse(value.trim()).map_err(|_| format!("{name} ticket action URL is invalid"))?;
-    if !matches!(url.scheme(), "http" | "https")
-        || url.host_str().is_none()
-        || !url.username().is_empty()
-        || url.password().is_some()
-        || url.query().is_some()
-        || url.fragment().is_some()
-        || !matches!(url.path(), "" | "/")
-    {
-        return Err(format!("{name} ticket action URL is invalid"));
-    }
-    if url.scheme() == "http" && (!allow_insecure_loopback || !is_loopback_url(&url)) {
-        return Err(format!(
-            "{name} ticket action URL must use HTTPS; plaintext is permitted only for an explicitly enabled IP-loopback development endpoint"
-        ));
-    }
-    Ok(url)
-}
-
-fn is_loopback_url(url: &Url) -> bool {
-    let Some(host) = url.host_str() else {
-        return false;
-    };
-    host.strip_prefix('[')
-        .and_then(|value| value.strip_suffix(']'))
-        .unwrap_or(host)
-        .parse::<IpAddr>()
-        .map(|ip| ip.is_loopback())
-        .unwrap_or(false)
-}
-
-fn bounded_secret(value: &str, name: &str) -> Result<String, String> {
-    let value = value.trim();
-    if value.len() < 32 || value.len() > 4_096 {
-        return Err(format!("{name} is invalid"));
-    }
-    Ok(value.to_owned())
-}
-
-fn env_value(name: &str) -> Option<String> {
-    std::env::var(name)
-        .ok()
-        .map(|value| value.trim().to_owned())
-        .filter(|value| !value.is_empty())
-}
-
-fn env_flag(name: &str) -> bool {
-    std::env::var(name)
-        .ok()
-        .map(|value| value.trim().eq_ignore_ascii_case("true"))
-        .unwrap_or(false)
 }
 
 fn required_bound_identifier(value: &str, name: &str) -> Result<String, String> {

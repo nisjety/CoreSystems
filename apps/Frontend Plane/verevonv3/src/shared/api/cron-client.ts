@@ -52,9 +52,13 @@ export interface CronSchedule {
 }
 
 export function listCronSchedules(orgId: string): Promise<{ schedules: CronSchedule[] }> {
-  return requestJson<{ schedules: CronSchedule[] }>('/api/v1/cron', {
+  // capability-core serialises an empty Go slice as `"schedules": null`, so an
+  // org with no schedules yet answered with null and every caller that did
+  // `result.schedules.filter(...)` threw — the chat's "Planlagte kjøringer"
+  // panel showed "Kunne ikke laste" instead of "Ingen planlagte kjøringer".
+  return requestJson<{ schedules: CronSchedule[] | null }>('/api/v1/cron', {
     headers: { 'x-verevon-org-id': orgId },
-  })
+  }).then((result) => ({ ...result, schedules: result.schedules ?? [] }))
 }
 
 /**

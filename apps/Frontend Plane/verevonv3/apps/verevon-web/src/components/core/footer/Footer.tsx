@@ -86,8 +86,6 @@ export function Footer() {
 								Distribuert team
 								<br />
 								Data i EU/EØS (Sweden Central)
-								<br />
-								Partnere: Aquatiq · Prokom
 							</p>
 						</div>
 

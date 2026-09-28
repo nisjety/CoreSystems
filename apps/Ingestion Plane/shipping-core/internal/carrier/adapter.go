@@ -93,6 +93,12 @@ type Money struct {
 // module exists (a later phase) — callers must treat nil as "unknown", not
 // "zero".
 type Quote struct {
+	// Provenance is supplied by quoteengine from the configured adapter, never
+	// from model arguments. A quote currently covers exactly one package.
+	Environment       string    `json:"environment"`
+	IsMock            bool      `json:"is_mock"`
+	QuotedAt          time.Time `json:"quoted_at"`
+	PackageCount      int       `json:"package_count"`
 	CarrierCode       string    `json:"carrier_code"`
 	CarrierName       string    `json:"carrier_name"`
 	ServiceName       string    `json:"service_name"`

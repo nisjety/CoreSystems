@@ -27,7 +27,14 @@ use serde_json::{json, Value};
 use crate::quarry_auth::TokenSource;
 
 const MAX_SEARCH_RESULTS: usize = 8;
-const MAX_SNIPPET_CHARS: usize = 300;
+// Second-stage snippet cap. The SERP providers already hand back ~150-char
+// snippets, so the previous 300 was near-invisible in the common case and
+// actively destructive on the long ones — an audit traced thin-source answers
+// back to this truncation compounding the provider's own. `model-gateway`, the
+// other client of the same edge, applies no snippet cap at all; this bound
+// exists only to stop one pathological result from crowding the step's context
+// window, not to summarize. Keep it well clear of real snippet lengths.
+const MAX_SNIPPET_CHARS: usize = 900;
 const MAX_FETCH_CHARS: usize = 8000;
 const SEARCH_SCOPES: &[&str] = &["search:read"];
 const EXTRACT_SCOPES: &[&str] = &["extract:read"];
@@ -111,11 +118,22 @@ impl WebToolsClient {
 
     /// `web_search` → POST `/v1/search`. Returns a compact ranked list (title,
     /// url, snippet). Empty result set is a successful, informative response.
-    pub async fn search(&self, query: &str, limit: u32, org_id: &str) -> Result<String, String> {
-        let body = json!({ "query": query, "limit": limit });
+    pub async fn search(
+        &self,
+        query: &str,
+        limit: u32,
+        org_id: &str,
+        zdr: bool,
+    ) -> Result<String, String> {
+        let body = search_body(query, limit, zdr);
         let value = self
             .post("/v1/search", &body, org_id, SEARCH_SCOPES)
             .await?;
+        // `results` is top-level on purpose. `quarry-edge`'s handler returns
+        // `(StatusCode::OK, Json(SearchResponse))` with no wrapping middleware,
+        // so this IS the edge's contract. The `data: {...}` envelope some
+        // callers expect is added by the BFF in front of the chat path, not by
+        // the edge — do not "harmonise" this reader toward `data.results`.
         let results = value
             .get("results")
             .and_then(Value::as_array)
@@ -125,13 +143,35 @@ impl WebToolsClient {
     }
 
     /// `web_fetch` → POST `/v1/extract` (no schema ⇒ cleaned markdown per URL).
-    pub async fn fetch(&self, url: &str, org_id: &str) -> Result<String, String> {
-        let body = json!({ "urls": [url] });
+    pub async fn fetch(&self, url: &str, org_id: &str, zdr: bool) -> Result<String, String> {
+        let body = extract_body(url, zdr);
         let value = self
             .post("/v1/extract", &body, org_id, EXTRACT_SCOPES)
             .await?;
         extract_markdown(url, &value)
     }
+}
+
+/// Body for `POST /v1/search` (pure; keeps the wire shape assertable in tests).
+///
+/// `zdr` is not optional decoration: the edge's `SearchRequest.zdr` is what
+/// makes it bypass its response cache and skip the durable content-bearing
+/// events. Omitting the key defaults it to `false` server-side, which is why
+/// agentic runs on a ZDR tenant were silently having fetched content cached
+/// and persisted until this was threaded through.
+///
+/// `allow_paid_providers` is deliberately absent. Agentic runs are free-chain
+/// only — a model-authored loop can issue searches without a human in the
+/// loop, so metered SERP providers stay off this path by construction rather
+/// than by budget. This omission is a decision, not an oversight; the chat
+/// path is where paid providers get opted into.
+fn search_body(query: &str, limit: u32, zdr: bool) -> Value {
+    json!({ "query": query, "limit": limit, "zdr": zdr })
+}
+
+/// Body for `POST /v1/extract` (pure; see `search_body` on the `zdr` key).
+fn extract_body(url: &str, zdr: bool) -> Value {
+    json!({ "urls": [url], "zdr": zdr })
 }
 
 /// Format `/v1/search` results into agent-readable text (pure; testable
@@ -252,6 +292,56 @@ mod tests {
     fn extract_no_results_is_error() {
         assert!(extract_markdown("https://x", &json!({ "results": [] })).is_err());
         assert!(extract_markdown("https://x", &json!({})).is_err());
+    }
+
+    #[test]
+    fn search_body_carries_zdr() {
+        let on = search_body("rust", 8, true);
+        assert_eq!(on["zdr"], json!(true));
+        assert_eq!(on["query"], json!("rust"));
+        assert_eq!(on["limit"], json!(8));
+        // The flag must be sent explicitly in both directions: the edge
+        // defaults a missing key to false, so an absent key is indistinguishable
+        // from "retention allowed".
+        assert_eq!(search_body("rust", 8, false)["zdr"], json!(false));
+        // Free-chain-only by construction — see `search_body`'s doc.
+        assert!(on.get("allow_paid_providers").is_none());
+    }
+
+    #[test]
+    fn extract_body_carries_zdr() {
+        let on = extract_body("https://example.com", true);
+        assert_eq!(on["zdr"], json!(true));
+        assert_eq!(on["urls"], json!(["https://example.com"]));
+        assert_eq!(
+            extract_body("https://example.com", false)["zdr"],
+            json!(false)
+        );
+    }
+
+    #[test]
+    fn long_snippet_truncates_at_current_bound() {
+        let long = "a".repeat(MAX_SNIPPET_CHARS + 50);
+        let env = json!({
+            "query": "q", "provider": "hybrid", "count": 1,
+            "results": [{"title": "T", "url": "https://x", "snippet": long}]
+        });
+        let results = env.get("results").unwrap().as_array().unwrap().clone();
+        let out = format_search_results("q", &env, &results);
+        assert!(out.contains("truncated 50 chars"));
+
+        // A snippet comfortably longer than the old 300-char cap must now
+        // survive intact — that regression is what starved answers of source
+        // text, so pin it rather than just pinning the cap constant.
+        let survivor = "b".repeat(600);
+        let env = json!({
+            "query": "q", "provider": "hybrid", "count": 1,
+            "results": [{"title": "T", "url": "https://x", "snippet": survivor}]
+        });
+        let results = env.get("results").unwrap().as_array().unwrap().clone();
+        let out = format_search_results("q", &env, &results);
+        assert!(out.contains(&survivor));
+        assert!(!out.contains("truncated"));
     }
 
     #[test]

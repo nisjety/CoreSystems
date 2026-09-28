@@ -1,0 +1,11 @@
+<profile version="1.0">
+  <option name="myName" value="CoreSystem" />
+  <!-- Grammar checking produces false positives on this codebase's Norwegian
+       email-template copy and DSL-heavy strings. Spelling stays enabled; the
+       project dictionary (dictionaries/verevon.xml) carries the domain terms. -->
+  <inspection_tool class="GrazieInspection" enabled="false" level="GRAMMAR_ERROR" enabled_by_default="false" />
+  <!-- NestJS wires controllers/providers/exports through DI metadata, so the
+       static "unused global symbol" analysis is almost entirely false
+       positives here. Local unused symbols stay enabled. -->
+  <inspection_tool class="JSUnusedGlobalSymbols" enabled="false" level="WARNING" enabled_by_default="false" />
+</profile>

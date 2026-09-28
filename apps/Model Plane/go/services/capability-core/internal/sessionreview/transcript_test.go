@@ -9,6 +9,7 @@ import (
 	mpv1 "github.com/triodelab/model-plane/gen/go/model_plane/v1"
 	"github.com/triodelab/model-plane/services/capability-core/internal/learning"
 	"google.golang.org/grpc"
+	"google.golang.org/protobuf/types/known/structpb"
 )
 
 type fakeReader struct {
@@ -70,31 +71,45 @@ func TestFetch_AssemblesTranscriptAndExisting(t *testing.T) {
 		}},
 	}
 	src := NewSessionCoreTranscriptSource(r)
-	transcript, existing, err := src.Fetch(context.Background(),
+	got, err := src.Fetch(context.Background(),
 		SessionRef{OrgID: "o", RunID: "r", ThreadID: "t"})
 	if err != nil {
 		t.Fatalf("Fetch: %v", err)
 	}
-	if !strings.Contains(transcript, "USER: hi") {
-		t.Fatalf("transcript: %q", transcript)
+	if !strings.Contains(got.Text, "USER: hi") || got.Skip != "" {
+		t.Fatalf("transcript: %+v", got)
 	}
-	if len(existing) != 1 || existing[0].Name != "Runbook" {
-		t.Fatalf("existing: %+v", existing)
+	if len(got.Existing) != 1 || got.Existing[0].Name != "Runbook" {
+		t.Fatalf("existing: %+v", got.Existing)
 	}
 }
 
 func TestFetch_WrapsRpcErrors(t *testing.T) {
 	src := NewSessionCoreTranscriptSource(&fakeReader{convoErr: errors.New("pg down")})
-	if _, _, err := src.Fetch(context.Background(), SessionRef{}); err == nil ||
+	if _, err := src.Fetch(context.Background(), SessionRef{}); err == nil ||
 		!strings.Contains(err.Error(), "list conversation") {
 		t.Fatalf("expected wrapped conversation error, got %v", err)
 	}
 	src2 := NewSessionCoreTranscriptSource(&fakeReader{
-		convo:     &mpv1.ListConversationResponse{},
+		convo:     &mpv1.ListConversationResponse{Messages: []*mpv1.SessionMessage{{Role: "user", Content: "Review this."}}},
 		skillsErr: errors.New("pg down"),
 	})
-	if _, _, err := src2.Fetch(context.Background(), SessionRef{}); err == nil ||
+	if _, err := src2.Fetch(context.Background(), SessionRef{}); err == nil ||
 		!strings.Contains(err.Error(), "list agent skills") {
 		t.Fatalf("expected wrapped skills error, got %v", err)
+	}
+}
+
+func TestFetch_ConversationOnlyDoesNotReadSkillsOrReviewContent(t *testing.T) {
+	metadata, _ := structpb.NewStruct(map[string]interface{}{"source_scope": "conversation"})
+	src := NewSessionCoreTranscriptSource(&fakeReader{
+		convo: &mpv1.ListConversationResponse{Messages: []*mpv1.SessionMessage{
+			{Role: "user", Content: "Fictional customer and prices", Metadata: metadata},
+		}},
+		skillsErr: errors.New("must not request skills for isolated tasks"),
+	})
+	got, err := src.Fetch(context.Background(), SessionRef{})
+	if err != nil || got.Text != "" || len(got.Existing) != 0 || got.Skip != learning.SkipConversationScope {
+		t.Fatalf("isolated task was not skipped as conversation_scope: %+v error=%v", got, err)
 	}
 }

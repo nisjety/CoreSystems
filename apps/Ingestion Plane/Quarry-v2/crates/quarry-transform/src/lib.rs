@@ -23,9 +23,16 @@ pub mod robots;
 pub mod sitemap;
 pub mod soft_404;
 pub mod source_trace;
+pub mod structured;
 pub mod synonyms;
 
 pub use determinism::{verify_deterministic, DeterminismError};
 pub use fingerprint::{content_fingerprint, Fingerprint};
 pub use metadata::{sidecar_path, write_sidecar, ArtifactMeta};
 pub use readability::{extract as extract_readable, html_to_readable_markdown, Readable};
+// Second extraction channel, parallel to readability: readability strips
+// `script` and keeps prose, this keeps the machine-readable facts that
+// live inside the stripped markup.
+pub use structured::{
+    extract as extract_structured, FigureSource, KeyFigure, StructuredData, Table as DataTable,
+};

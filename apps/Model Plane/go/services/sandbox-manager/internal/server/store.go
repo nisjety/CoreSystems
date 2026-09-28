@@ -1,0 +1,85 @@
+package server
+
+import (
+	"context"
+	"time"
+
+	"github.com/triodelab/model-plane/services/sandbox-manager/internal/lease"
+	"github.com/triodelab/model-plane/services/sandbox-manager/internal/process"
+	"github.com/triodelab/model-plane/services/sandbox-manager/internal/snapshot"
+	"github.com/triodelab/model-plane/services/sandbox-manager/internal/workspace"
+)
+
+// LeaseStore is the narrow surface Server actually calls — exactly
+// *lease.Store's methods this package uses. Letting Server depend on this
+// interface rather than the concrete *lease.Store means its own tests can
+// inject a fast in-memory fake instead of requiring a real Postgres pool
+// for every test — the same "seam at the consumer, not a redundant
+// abstraction on the store" shape capability-core uses for its own
+// Postgres-backed ScopeStore (policy.WithScopeResolver takes an interface,
+// not *registry.ScopeStore directly).
+//
+// GetScoped joined this interface for 3.5.C's GetWorkspaceManifest handler
+// (design doc §8 item 3.5.C) — it needs to resolve a lease's org_id/space_id
+// from a caller-supplied lease_id/backend_id, the same lookup+validate shape
+// every other method here already uses. It was real and tested on
+// *lease.Store itself well before this, just unused by Server until now.
+type LeaseStore interface {
+	Create(ctx context.Context, scopeID, scopeType, orgID, ownerID, spaceID, backendID string, grant lease.SpaceGrant, ttl time.Duration) (*lease.Lease, error)
+	Activate(ctx context.Context, id, orgID, ownerID, backendID string) (*lease.Lease, error)
+	BeginSnapshot(ctx context.Context, id, orgID, ownerID, backendID string) (*lease.Lease, error)
+	EndSnapshot(ctx context.Context, id string)
+	ReleaseScoped(ctx context.Context, id, orgID, ownerID, backendID string) (bool, error)
+	GetScoped(ctx context.Context, id, orgID, ownerID, backendID string) (*lease.Lease, error)
+	// GetAny joined this interface for step 4's PromoteWorkspace handler
+	// (design doc §8 item 4) — unlike GetScoped, it must still resolve a
+	// lease already marked DESTROYED, since merging a run's overlay is
+	// deliberately never tied to (or blocked by) the lease's own release.
+	GetAny(ctx context.Context, id, orgID, ownerID, backendID string) (*lease.Lease, error)
+}
+
+// SnapshotStore is the narrow surface Server actually calls.
+type SnapshotStore interface {
+	Create(ctx context.Context, l *lease.Lease, label string) (*snapshot.Snapshot, error)
+}
+
+// WorkspaceStore is the narrow surface Server actually calls — exactly
+// *workspace.Store's methods, the same seam-at-the-consumer shape as
+// LeaseStore/SnapshotStore above. Backs GetWorkspaceManifest and
+// SnapshotSandbox's overlay upsert (design doc §8 item 3.5.C) and
+// PromoteWorkspace's merge (§8 item 4).
+type WorkspaceStore interface {
+	GetManifest(ctx context.Context, orgID, spaceID, runID string) ([]workspace.ManifestEntry, error)
+	UpsertOverlay(ctx context.Context, orgID, spaceID, runID string, files []workspace.ChangedFile) error
+	// Promote merges runID's own overlay into the Space's durable rows,
+	// per path, and returns the paths that conflicted (every other path
+	// still merged).
+	Promote(ctx context.Context, orgID, spaceID, runID string) ([]string, error)
+}
+
+// ProcessStore is the narrow surface Server calls on the S4.2 background
+// process registry — exactly *process.Store's methods, the same
+// seam-at-the-consumer shape as the three above.
+//
+// Unlike LeaseStore and SnapshotStore there is deliberately NO in-memory
+// implementation. The other two have one for cmd/main.go's
+// ephemeral-development fallback, but a registry whose entire purpose is to
+// stay truthful across a restart has nothing to offer in a mode that
+// discards it on every boot. A Server constructed without a ProcessStore
+// refuses every process RPC with FailedPrecondition rather than serving one
+// against state that will silently vanish.
+type ProcessStore interface {
+	Register(ctx context.Context, req process.RegisterRequest) (*process.Process, error)
+	MarkStarted(ctx context.Context, f process.Fence) error
+	RequestSignal(ctx context.Context, f process.Fence, signal process.Signal) error
+	MarkEnded(ctx context.Context, f process.Fence, state process.State, exitCode *int32, endReason string, cleanupDone bool) error
+	AppendOutput(ctx context.Context, f process.Fence, chunks []process.Chunk, stdinBytesDelta int64) (*process.AppendResult, error)
+	Reconcile(ctx context.Context, backendID, hostEpoch string) (int64, error)
+	Get(ctx context.Context, orgID, processID string) (*process.Process, error)
+	List(ctx context.Context, orgID, spaceID string, includeTerminal bool, limit int32, afterID string, ceiling *process.AudienceCeiling) ([]process.Process, bool, error)
+	ReadOutput(ctx context.Context, orgID, processID string, afterSeq, maxBytes int64, ceiling *process.AudienceCeiling) (*process.OutputPage, error)
+	// KillForLease is called from ReleaseLease so a released lease leaves no
+	// row claiming to be running. The registry half only: the host does the
+	// actual killing on its own release path.
+	KillForLease(ctx context.Context, orgID, leaseID string) (int64, error)
+}

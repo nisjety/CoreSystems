@@ -52,6 +52,13 @@ var reasonCodePattern = regexp.MustCompile(`^[a-z][a-z0-9_]{0,127}$`)
 //   cap.agent.spawn                          the delegated loop runs
 //       in-process on the parent's own inference path; its one external
 //       dependency is the same session-core StartRun.
+//   cap.process.background                   the S4.2 `process_*` family runs
+//       on execution-core's own process host, under the same bubblewrap argv
+//       it already probes for cap.command.sandbox. Added 2026-09-13. It is
+//       the narrowest entry on this list: the reporter attests it only when
+//       that instance has the host ENABLED, so an execution-core that cannot
+//       host a background process cannot make the capability available — the
+//       ownership bar is not just "owns the runtime" but "is running it".
 //
 // This list stays a list precisely because widening it is a decision. Added
 // 2026-08-26 after live proof: execution-core's reporter was attesting the
@@ -66,6 +73,8 @@ var genericGlobalHealthCapabilityIDs = map[string]struct{}{
 	"cap.memory.search":   {},
 	"cap.memory.index":    {},
 	"cap.agent.spawn":     {},
+
+	"cap.process.background": {},
 }
 
 type availabilityRequest struct {

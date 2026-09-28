@@ -116,3 +116,95 @@ func TestSharedThreadReadPayloadDigestBindsAudienceRevision(t *testing.T) {
 		t.Fatal("read digest ignored the authority revision")
 	}
 }
+
+// The default audience is load-bearing for compatibility, not a detail: every
+// caller that existed before S4.2 omits the field, and Session Core's verifier
+// compares the audience against its own constant. If this ever stopped
+// defaulting to Session Core, the Work tab's conversation reads would start
+// failing at a verifier three services away with nothing pointing back here.
+func TestIssueSharedThreadReadDecisionDefaultsToSessionCoreAudience(t *testing.T) {
+	now := time.Date(2026, 9, 13, 12, 0, 0, 0, time.UTC)
+	decision, err := IssueSharedThreadReadDecision(validSharedThreadReadEvidence(), SharedThreadReadDecisionRequest{
+		DecisionRef: "read-decision-1", IdempotencyKey: "read-1", Nonce: "nonce-1",
+	}, now)
+	if err != nil {
+		t.Fatalf("IssueSharedThreadReadDecision: %v", err)
+	}
+	if decision.ServiceAudience != ThreadReadAudienceSessionCore {
+		t.Fatalf("default audience = %q, want %q", decision.ServiceAudience, ThreadReadAudienceSessionCore)
+	}
+	if decision.ServiceAudience != "model-plane" {
+		t.Fatalf("the Session Core audience literal changed to %q; Session Core's own verifier pins the old value and will refuse every decision", decision.ServiceAudience)
+	}
+}
+
+// The sandbox-manager audience carries the SAME authority to a different
+// recipient: same action, same permission, same revisions. Only the addressee
+// changes, which is what makes this a second audience rather than a second
+// kind of decision.
+func TestIssueSharedThreadReadDecisionForSandboxManagerKeepsTheSameAuthority(t *testing.T) {
+	now := time.Date(2026, 9, 13, 12, 0, 0, 0, time.UTC)
+	base := SharedThreadReadDecisionRequest{DecisionRef: "read-decision-1", IdempotencyKey: "read-1", Nonce: "nonce-1"}
+	forSession, err := IssueSharedThreadReadDecision(validSharedThreadReadEvidence(), base, now)
+	if err != nil {
+		t.Fatalf("session-core decision: %v", err)
+	}
+	scoped := base
+	scoped.ServiceAudience = ThreadReadAudienceSandboxManager
+	forSandbox, err := IssueSharedThreadReadDecision(validSharedThreadReadEvidence(), scoped, now)
+	if err != nil {
+		t.Fatalf("sandbox-manager decision: %v", err)
+	}
+	if forSandbox.ServiceAudience != "model-plane-sandbox-manager" {
+		t.Fatalf("audience = %q", forSandbox.ServiceAudience)
+	}
+	if forSandbox.ActionID != forSession.ActionID || forSandbox.ActionSchemaHash != forSession.ActionSchemaHash {
+		t.Fatal("the two audiences must describe the same effect; a different action would be a second authority to keep in sync")
+	}
+	if len(forSandbox.Permissions) != 1 || forSandbox.Permissions[0] != "thread:read" {
+		t.Fatalf("sandbox-manager read permissions = %#v; a read decision must never widen", forSandbox.Permissions)
+	}
+	if forSandbox.RecipientAudienceRevision != forSession.RecipientAudienceRevision {
+		t.Fatal("both audiences must carry the same audience-revision ceiling")
+	}
+	// The digest formula must NOT have picked up the audience: Session Core
+	// recomputes it independently, so a change here silently invalidates every
+	// decision that service has ever been issued.
+	if forSandbox.PayloadDigest != forSession.PayloadDigest {
+		t.Fatal("the payload digest changed with the audience; Session Core recomputes this formula and would reject its own decisions")
+	}
+}
+
+// An unrecognized audience is refused at issuance. Signing it instead would
+// produce a token no recipient accepts, surfacing as an unexplained denial in
+// whichever service the caller eventually tried — the same failure mode S4.2
+// step 3 closed for the `processes` claim.
+func TestIssueSharedThreadReadDecisionRefusesAnUnknownAudience(t *testing.T) {
+	// `model-plane-session-core` is in this list on purpose: it is the name the
+	// S4.2 design used for the default recipient, and it is NOT the live
+	// constant. Signing it would produce a token Session Core refuses.
+	for _, audience := range []string{"model-plane-session-core", "sandbox-manager", "data-plane", "model-plane-sandbox-manager-x"} {
+		request := SharedThreadReadDecisionRequest{
+			DecisionRef: "read-decision-1", IdempotencyKey: "read-1", Nonce: "nonce-1",
+			ServiceAudience: audience,
+		}
+		if _, err := IssueSharedThreadReadDecision(validSharedThreadReadEvidence(), request, time.Now().UTC()); err == nil {
+			t.Fatalf("audience %q was signed; it is not a recipient any Model Plane service verifies", audience)
+		}
+	}
+	// Whitespace-only is "unspecified", not "invalid" — the field is optional
+	// and every other optional string in this package is read through
+	// TrimSpace. Refusing it would make a stray space in a caller's JSON a
+	// 403 rather than the default it obviously means.
+	blank := SharedThreadReadDecisionRequest{
+		DecisionRef: "read-decision-1", IdempotencyKey: "read-1", Nonce: "nonce-1",
+		ServiceAudience: "   ",
+	}
+	decision, err := IssueSharedThreadReadDecision(validSharedThreadReadEvidence(), blank, time.Now().UTC())
+	if err != nil {
+		t.Fatalf("a blank audience must default rather than fail: %v", err)
+	}
+	if decision.ServiceAudience != ThreadReadAudienceSessionCore {
+		t.Fatalf("blank audience resolved to %q, want the Session Core default", decision.ServiceAudience)
+	}
+}

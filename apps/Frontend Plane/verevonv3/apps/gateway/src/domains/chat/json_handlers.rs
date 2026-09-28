@@ -5,7 +5,7 @@ use axum::{
     Json,
 };
 use reqwest::Method;
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::time::Duration;
 
 use crate::{config::AppState, domains::chat::shared, middleware::AuthenticatedUser};
@@ -20,12 +20,54 @@ fn chat_invoke_timeout(body: &Value) -> Option<Duration> {
         .then_some(SUBSCRIPTION_CHAT_INVOKE_TIMEOUT)
 }
 
+/// The longest `Retry-After` restored here: seven days, as Model Gateway caps it.
+const MAX_RETRY_AFTER_SECS: u64 = 604_800;
+
+/// The `Retry-After` seconds for a failed `/v1/invoke`, from its body.
+///
+/// Model Gateway answers a subscription refusal with a `Retry-After` header,
+/// which the JSON proxy does not carry. The same wait is in the body's
+/// content-free timing: `retry_at` (the absolute instant, preferred) or
+/// `retry_after_ms`. Nothing else in the body is read.
+fn retry_after_secs(status: StatusCode, body: &Value, now: chrono::DateTime<chrono::Utc>) -> Option<u64> {
+    if status.is_success() {
+        return None;
+    }
+    let whole_secs = |ms: u64| ms.div_ceil(1_000).clamp(1, MAX_RETRY_AFTER_SECS);
+    if let Some(at) = body
+        .get("retry_at")
+        .and_then(Value::as_str)
+        .and_then(|at| chrono::DateTime::parse_from_rfc3339(at).ok())
+    {
+        let ms = (at.with_timezone(&chrono::Utc) - now).num_milliseconds();
+        return Some(whole_secs(u64::try_from(ms).unwrap_or(0)));
+    }
+    body.get("retry_after_ms").and_then(Value::as_u64).map(whole_secs)
+}
+
 pub(super) async fn invoke_chat(
+    state: State<AppState>,
+    user: Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    body: Json<Value>,
+) -> axum::response::Response {
+    let (status, Json(body)) = invoke_chat_json(state, user, headers, body).await;
+    let retry_after = retry_after_secs(status, &body, chrono::Utc::now());
+    let mut response = (status, Json(body)).into_response();
+    if let Some(seconds) = retry_after {
+        response
+            .headers_mut()
+            .insert(axum::http::header::RETRY_AFTER, axum::http::HeaderValue::from(seconds));
+    }
+    response
+}
+
+async fn invoke_chat_json(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
     headers: HeaderMap,
     Json(body): Json<Value>,
-) -> impl IntoResponse {
+) -> (StatusCode, Json<Value>) {
     let token = shared::model_token(&state, &user, &headers).await;
     let data_plane_token = shared::data_plane_token(&state, &user, &headers).await;
     let inference_token = match shared::required_inference_token(&state, &user, &headers).await {
@@ -64,6 +106,13 @@ pub(super) async fn invoke_chat(
     {
         return (status, body);
     }
+    // Persona spec — user layer, independent of org/Space resolution.
+    if let Err((status, body)) =
+        crate::domains::spaces::inject_persona_instructions(&state, &user, &mut outbound_body)
+            .await
+    {
+        return (status, body);
+    }
     if let Err((status, body)) = crate::domains::spaces::inject_personal_thread_context(
         &state,
         &user,
@@ -78,6 +127,9 @@ pub(super) async fn invoke_chat(
         shared::with_identity_context(outbound_body, &user.user_name, &org_name);
     shared::apply_org_zdr_posture(&state, &user, &mut outbound_body).await;
     let request_timeout = chat_invoke_timeout(&outbound_body);
+    // After `inject_personal_thread_context`, not with the other bearers above:
+    // it is only minted once Control has actually scoped this turn to a Space.
+    let sandbox_token = shared::sandbox_token(&state, &user, &headers, &outbound_body).await;
     // Same rule as the streaming path: mark before dispatch, so a ZDR turn that
     // fails still leaves the thread non-persistable.
     shared::proxy_model_json_with_data_plane_request_timeout(
@@ -91,6 +143,7 @@ pub(super) async fn invoke_chat(
         Some(&execution_token),
         Some(&cost_token),
         Some(&session_token),
+        sandbox_token.as_deref(),
         request_timeout,
         &user,
     )
@@ -291,7 +344,7 @@ pub(super) async fn get_thread_context(
     {
         url.push_str(&format!("?run_id={}", urlencoding::encode(run_id)));
     }
-    shared::proxy_model_json_with_session(
+    let (status, Json(mut body)) = shared::proxy_model_json_with_session(
         &state,
         Method::GET,
         &url,
@@ -300,7 +353,60 @@ pub(super) async fn get_thread_context(
         session_token.as_deref(),
         &user,
     )
-    .await
+    .await;
+    // Persona spec — the context inspector's own segment for the user layer.
+    // model-gateway's response carries `persona_enabled` (the PER-THREAD
+    // override) but never the persona TEXT itself — this read-only
+    // introspection endpoint has no reason to touch Convex otherwise, so the
+    // GLOBAL switch and the text are fetched here, and only on this "thread
+    // says persona is on" path, to keep the common "disabled" case at zero
+    // extra Convex calls.
+    if status.is_success() && body.get("persona_enabled").and_then(Value::as_bool) == Some(true)
+    {
+        let persona = crate::domains::spaces::fetch_persona_instructions(&state, &user).await;
+        prepend_persona_segment(&mut body, persona);
+    }
+    (status, Json(body))
+}
+
+/// Prepends the synthetic `"persona"` segment onto an already-fetched thread
+/// context, when (and only when) the caller has authored non-empty persona
+/// text AND their GLOBAL switch (the second element of `persona`) is on. The
+/// PER-THREAD gate was already checked by the caller before this ever runs.
+/// Factored out from [`get_thread_context`] so the insertion logic is
+/// testable without a network round trip.
+fn prepend_persona_segment(body: &mut Value, persona: Option<(String, bool)>) {
+    let Some((instructions, enabled)) = persona else {
+        return;
+    };
+    if !enabled {
+        return;
+    }
+    let Some(segments) = body.get_mut("segments").and_then(Value::as_array_mut) else {
+        return;
+    };
+    segments.insert(
+        0,
+        json!({
+            "kind": "persona",
+            "content": instructions,
+            // Simple heuristic (words * 4/3): the BFF has no `mp_tokens`
+            // dependency, unlike session-core's real budget accounting for
+            // every other segment here. Approximate by design — see
+            // persona.md §5, "inspector token count is approximate".
+            "estimated_tokens": persona_segment_token_estimate(&instructions),
+        }),
+    );
+}
+
+/// `words * 4 / 3` — the same rough English/Norwegian heuristic used
+/// elsewhere in this codebase when a real tokenizer isn't available. Never
+/// the number session-core's `estimated_tokens` total (or the "used / budget"
+/// ratio the inspector shows) includes, since this segment never passed
+/// through the real budget accounting.
+fn persona_segment_token_estimate(text: &str) -> u32 {
+    let words = u32::try_from(text.split_whitespace().count()).unwrap_or(u32::MAX);
+    words.saturating_mul(4) / 3
 }
 
 #[derive(serde::Deserialize)]
@@ -413,6 +519,35 @@ mod tests {
         assert_eq!(chat_invoke_timeout(&json!({})), None);
     }
 
+    /// The JSON proxy loses Model Gateway's `Retry-After`; the chat invoke
+    /// route restores it from the body's own timing, preferring the absolute
+    /// `retry_at` so a slow proxy hop does not stretch the wait.
+    #[test]
+    fn a_failed_invoke_restores_retry_after_from_its_timing() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-09-25T10:50:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let usage = json!({
+            "code": "subscription_usage_limit",
+            "retry_at": "2026-09-25T12:50:00Z",
+            "retry_after_ms": 1_000,
+        });
+        assert_eq!(
+            retry_after_secs(StatusCode::TOO_MANY_REQUESTS, &usage, now),
+            Some(7_200),
+            "counted to retry_at, not the stale relative wait"
+        );
+        let throttled = json!({"code": "rate_limited", "retry_after_ms": 1_500});
+        assert_eq!(retry_after_secs(StatusCode::TOO_MANY_REQUESTS, &throttled, now), Some(2));
+        let passed = json!({"retry_at": "2026-09-25T10:00:00Z"});
+        assert_eq!(retry_after_secs(StatusCode::TOO_MANY_REQUESTS, &passed, now), Some(1));
+        assert_eq!(
+            retry_after_secs(StatusCode::CONFLICT, &json!({"code": "subscription_reauth_required"}), now),
+            None
+        );
+        assert_eq!(retry_after_secs(StatusCode::OK, &throttled, now), None, "only on a failure");
+    }
+
     #[test]
     fn ended_queue_race_is_a_successful_browser_protocol_response() {
         let (status, Json(body)) = normalize_queue_response((
@@ -427,6 +562,42 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["queued"], false);
         assert_eq!(body["resend_as_new_turn"], true);
+    }
+
+    #[test]
+    fn persona_segment_is_prepended_when_authored_and_globally_enabled() {
+        let mut body = json!({
+            "thread_id": "thread-1",
+            "estimated_tokens": 100,
+            "budget_tokens": 8000,
+            "segments": [{"kind": "thread", "content": "hello", "estimated_tokens": 10}],
+        });
+        prepend_persona_segment(&mut body, Some(("Always be terse.".to_owned(), true)));
+
+        assert_eq!(body["segments"][0]["kind"], "persona");
+        assert_eq!(body["segments"][0]["content"], "Always be terse.");
+        assert_eq!(body["segments"][1]["kind"], "thread", "existing segments are kept, not replaced");
+    }
+
+    #[test]
+    fn persona_segment_is_absent_when_globally_disabled() {
+        let mut body = json!({"segments": []});
+        prepend_persona_segment(&mut body, Some(("Always be terse.".to_owned(), false)));
+        assert_eq!(body["segments"].as_array().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn persona_segment_is_absent_when_nothing_authored() {
+        let mut body = json!({"segments": []});
+        prepend_persona_segment(&mut body, None);
+        assert_eq!(body["segments"].as_array().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn persona_segment_token_estimate_uses_a_words_times_four_thirds_heuristic() {
+        assert_eq!(persona_segment_token_estimate(""), 0);
+        // 3 words * 4 / 3 = 4.
+        assert_eq!(persona_segment_token_estimate("Always be terse."), 4);
     }
 
     #[test]

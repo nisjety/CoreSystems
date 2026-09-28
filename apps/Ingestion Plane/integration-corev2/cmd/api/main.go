@@ -26,6 +26,7 @@ import (
 	"github.com/triodelab/integration-corev2/internal/events"
 	"github.com/triodelab/integration-corev2/internal/handoff"
 	"github.com/triodelab/integration-corev2/internal/hotpath"
+	"github.com/triodelab/integration-corev2/internal/mailtask"
 	"github.com/triodelab/integration-corev2/internal/oauth"
 	"github.com/triodelab/integration-corev2/internal/store"
 	"github.com/triodelab/integration-corev2/internal/webhookorg"
@@ -67,15 +68,51 @@ func main() {
 	writeAttestations := attestation.NewVerifier(writeAttestationKeys, nil)
 	var codexSubscriptions *codexsubscription.Manager
 	if cfg.CodexSubscriptionEnabled {
-		codexSubscriptions, err = codexsubscription.NewManager(codexsubscription.Config{
-			Enabled:           true,
-			Home:              cfg.CodexSubscriptionHome,
-			LoginTTL:          cfg.CodexSubscriptionLoginTTL,
-			InvocationTimeout: cfg.CodexSubscriptionInvocationTimeout,
-		}, codexsubscription.NewProcessRunner(cfg.CodexAppServerCommand))
+		for _, warning := range cfg.CodexSubscriptionWarnings() {
+			logger.Warn().Str("component", "codex_subscription").Msg(warning)
+		}
+		transportKind, err := codexsubscription.ParseTransportKind(cfg.CodexSubscriptionTransport)
 		if err != nil {
 			logger.Fatal().Err(err).Msg("initialize Codex subscription broker")
 		}
+		// An image built before the codex-native link keeps working under the
+		// compose default: every spawn would otherwise fail with no such file.
+		appServerCommand, replaced := codexsubscription.AppServerCommandOrDefault(cfg.CodexAppServerCommand)
+		if replaced {
+			logger.Warn().Str("component", "codex_subscription").Str("event", "app_server_command_missing").Str("fallback", appServerCommand).Msg("CODEX_APP_SERVER_COMMAND does not exist in this image; using the npm launcher")
+		}
+		runner, err := codexsubscription.NewRunner(codexsubscription.RunnerOptions{
+			Transport:             transportKind,
+			AppServerCommand:      appServerCommand,
+			AppServerHardened:     cfg.CodexAppServerHardened,
+			AppServerThreadEffort: cfg.CodexAppServerThreadEffort,
+			Direct: codexsubscription.DirectConfig{
+				BaseURL:           cfg.CodexSubscriptionDirectBaseURL,
+				Originator:        cfg.CodexSubscriptionDirectOriginator,
+				RequestShape:      cfg.CodexSubscriptionDirectRequestShape,
+				PromptMode:        cfg.CodexSubscriptionDirectPromptMode,
+				MaxRetries:        cfg.CodexSubscriptionDirectMaxRetries,
+				InvocationTimeout: cfg.CodexSubscriptionInvocationTimeout,
+			},
+			RefreshSkew: cfg.CodexSubscriptionRefreshSkew,
+			Logger:      logger.With().Str("component", "codex_subscription").Logger(),
+		})
+		if err != nil {
+			logger.Fatal().Err(err).Msg("initialize Codex subscription broker")
+		}
+		codexSubscriptions, err = codexsubscription.NewManager(codexsubscription.Config{
+			Enabled:                     true,
+			Home:                        cfg.CodexSubscriptionHome,
+			LoginTTL:                    cfg.CodexSubscriptionLoginTTL,
+			InvocationTimeout:           cfg.CodexSubscriptionInvocationTimeout,
+			MaxConcurrency:              cfg.CodexSubscriptionMaxConcurrency,
+			MaxConcurrencyPerConnection: cfg.CodexSubscriptionMaxConcurrencyPerConnection,
+			QueueTimeout:                cfg.CodexSubscriptionQueueTimeout,
+		}, runner)
+		if err != nil {
+			logger.Fatal().Err(err).Msg("initialize Codex subscription broker")
+		}
+		logger.Info().Str("component", "codex_subscription").Str("transport", string(transportKind)).Bool("app_server_hardened", cfg.CodexAppServerHardened).Bool("app_server_thread_effort", cfg.CodexAppServerThreadEffort).Str("app_server_launcher", codexsubscription.DescribeAppServerLauncher(appServerCommand)).Msg("Codex subscription broker ready")
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
@@ -138,6 +175,31 @@ func main() {
 	auditOutbox := api.NewAuditOutbox(repo, auditClient, &logger)
 	auditOutbox.Start()
 	defer auditOutbox.Close()
+	// Inbound "forward an email to create a task" pipeline (chat-wave2
+	// mail-task spec, owner ruling 2026-09-28: Postmark inbound, self-forward
+	// only). Always constructed -- Handler itself stays off by default until
+	// MAIL_TASK_PROVIDER and MAIL_TASK_WEBHOOK_SECRET are both set (see
+	// internal/mailtask/handler.go's Handler.enabled).
+	mailTaskHandler := &mailtask.Handler{
+		Provider:        cfg.MailTaskProvider,
+		WebhookSecret:   cfg.MailTaskWebhookSecret,
+		ReceivingDomain: cfg.MailTaskReceivingDomain,
+		Resolver: &mailtask.HTTPAliasResolver{
+			BaseURL:      cfg.MailTaskUserCoreURL,
+			ServiceID:    cfg.MailTaskUserCoreServiceID,
+			ServiceToken: cfg.MailTaskUserCoreServiceToken,
+		},
+		Extractor: &mailtask.HTTPImportsExtractor{
+			BaseURL:     cfg.MailTaskImportsCoreURL,
+			BearerToken: cfg.MailTaskImportsCoreToken,
+		},
+		Gateway: &mailtask.HTTPGatewayIngestClient{
+			BaseURL:      cfg.MailTaskGatewayIngestURL,
+			ServiceToken: cfg.MailTaskGatewayServiceToken,
+		},
+		Replay: mailtask.NewReplayGuard(30 * time.Minute),
+	}
+
 	app := api.NewServer(api.ServerConfig{
 		Config:      cfg,
 		Repo:        repo,
@@ -163,7 +225,8 @@ func main() {
 		// sync route answer 409 no_sources_registered instead of queuing a
 		// Microsoft job that has no library to sync. ErrNotConfigured (no
 		// FINSPO_API_KEY) falls through to the normal queue path.
-		Finspo: handoff.NewFinspoClientFromConfig(cfg, controlPlaneClient),
+		Finspo:   handoff.NewFinspoClientFromConfig(cfg, controlPlaneClient),
+		MailTask: mailTaskHandler,
 		WebhookOrg: &webhookorg.Resolver{
 			Store: repo,
 			Meta: &webhookorg.GraphAssetLister{
@@ -202,6 +265,8 @@ func main() {
 	if err := api.Shutdown(shutdownCtx, app); err != nil && !errors.Is(err, context.Canceled) {
 		logger.Error().Err(err).Msg("shutdown failed")
 	}
+	// Ends pending Codex sign-in processes, removing their throwaway state.
+	_ = codexSubscriptions.Close()
 	logger.Info().Msg("integration-corev2 stopped")
 }
 

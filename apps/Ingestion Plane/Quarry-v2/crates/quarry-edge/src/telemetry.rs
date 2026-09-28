@@ -2,6 +2,20 @@
 //!
 //! When `OTEL_EXPORTER_OTLP_ENDPOINT` is set, exports spans via gRPC.
 //! Otherwise falls back to tracing-subscriber's JSON fmt layer only.
+//!
+//! Before adding counters anywhere in this crate: the `metrics` and
+//! `metrics-exporter-prometheus` dependencies in `Cargo.toml` are inert. No
+//! recorder is ever installed and no `/metrics` endpoint is served, so
+//! `metrics::counter!` compiles fine, records nothing, and leaves the call
+//! site reading as instrumented — which is how the search path shipped with
+//! no per-provider observability at all. Until a recorder is installed here,
+//! per-request observability goes out as `tracing` events with explicit
+//! low-cardinality fields (see the `search.upstream` / `search.result_shape`
+//! events in `search_routes`), which the layers below already export.
+//!
+//! This module is declared in `main.rs` only, not in `lib.rs`, so the source
+//! files shared by both targets cannot reference it — hence those helpers
+//! living next to their call site rather than here.
 
 use opentelemetry::trace::TracerProvider;
 use opentelemetry_otlp::SpanExporter;

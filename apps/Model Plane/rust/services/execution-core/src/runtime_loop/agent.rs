@@ -353,6 +353,20 @@ struct LoopContext<'a> {
     inference_bearer: &'a str,
     capability_policy: &'a dyn crate::capability_policy::CapabilityPolicy,
     terminal_tokens: &'a dyn ManagedRunTokenProvider,
+    /// Present only when `req.space_id` is non-empty — see
+    /// `auth::authenticate_delegated_sandbox_manager`'s doc for why this
+    /// specific bearer must be user-bound. Read only by the `code_interpreter`
+    /// dispatch arm in `run_rounds`, and only when `req.space_id` is set.
+    sandbox_bearer: Option<&'a str>,
+    capability_client: Option<&'a crate::capability_client::CapabilityClient>,
+    sandbox_manager_client: &'a crate::sandbox_manager_client::SandboxManagerClient,
+    backend_id: &'a str,
+    cas_client: Option<&'a crate::workspace_cas::CasClient>,
+    sandbox_tokens: &'a crate::sandbox_lease::SandboxManagerTokenProvider,
+    /// Absent unless this instance hosts background processes. Read by the
+    /// `process_*` dispatch arm and by the run-end lease release, which must
+    /// stop a lease's children BEFORE the workspace is diffed and uploaded.
+    process_host: Option<&'a crate::process_host::ProcessHost>,
     agent_model: String,
     permission_wire: &'static str,
     /// Nesting depth: 0 is the user-facing run, 1 a delegated subagent. Bounds
@@ -427,6 +441,13 @@ pub(crate) async fn run_agent(
     inference_bearer: String,
     capability_policy: &dyn crate::capability_policy::CapabilityPolicy,
     terminal_tokens: &dyn ManagedRunTokenProvider,
+    sandbox_bearer: Option<String>,
+    capability_client: Option<&crate::capability_client::CapabilityClient>,
+    sandbox_manager_client: &crate::sandbox_manager_client::SandboxManagerClient,
+    backend_id: &str,
+    cas_client: Option<&crate::workspace_cas::CasClient>,
+    sandbox_tokens: &crate::sandbox_lease::SandboxManagerTokenProvider,
+    process_host: Option<&crate::process_host::ProcessHost>,
 ) -> Result<pb::RunAgentResponse, tonic::Status> {
     let tools = merged_tool_defs(
         &req.run_id,
@@ -434,6 +455,7 @@ pub(crate) async fn run_agent(
         &req.user_id,
         &req.tools,
         capability_policy,
+        !req.space_id.trim().is_empty(),
     )
     .await;
     run_agent_with_tools(
@@ -447,6 +469,13 @@ pub(crate) async fn run_agent(
         inference_bearer,
         capability_policy,
         terminal_tokens,
+        sandbox_bearer,
+        capability_client,
+        sandbox_manager_client,
+        backend_id,
+        cas_client,
+        sandbox_tokens,
+        process_host,
     )
     .await
 }
@@ -463,8 +492,22 @@ async fn merged_tool_defs(
     user_id: &str,
     client_tools: &[pb::ToolDefinition],
     capability_policy: &dyn crate::capability_policy::CapabilityPolicy,
+    space_scoped: bool,
 ) -> Vec<pb::ToolDefinition> {
     let mut tools = offered_tool_defs();
+    // The S4.2 process family is conditional where everything else above is
+    // unconditional, and on BOTH halves of the condition for different
+    // reasons. Without a Space there is no lease, no hydrated workspace and no
+    // authority to run under, so the tools could only fail. Without the host
+    // enabled this instance genuinely cannot keep a process alive past the
+    // call — and it says so in its capability profile, so offering the family
+    // anyway would advertise something the profile Control signs denies.
+    //
+    // Offering is not the authority gate; `process_start` is (§4). This is
+    // about not showing a model a tool that cannot work for it.
+    if space_scoped && crate::sandbox::process_host_enabled() {
+        tools.extend(process_tool_defs());
+    }
     if let Some(client) = crate::mcp_gateway::McpGatewayClient::from_env() {
         for tool in client.list_tools(org_id, user_id).await {
             append_untrusted_tool_defs(&mut tools, &[tool]);
@@ -561,6 +604,13 @@ async fn run_agent_with_tools(
     inference_bearer: String,
     capability_policy: &dyn crate::capability_policy::CapabilityPolicy,
     terminal_tokens: &dyn ManagedRunTokenProvider,
+    sandbox_bearer: Option<String>,
+    capability_client: Option<&crate::capability_client::CapabilityClient>,
+    sandbox_manager_client: &crate::sandbox_manager_client::SandboxManagerClient,
+    backend_id: &str,
+    cas_client: Option<&crate::workspace_cas::CasClient>,
+    sandbox_tokens: &crate::sandbox_lease::SandboxManagerTokenProvider,
+    process_host: Option<&crate::process_host::ProcessHost>,
 ) -> Result<pb::RunAgentResponse, tonic::Status> {
     let plan_id = format!("plan_{}", req.run_id);
 
@@ -622,6 +672,13 @@ async fn run_agent_with_tools(
         inference_bearer: &inference_bearer,
         capability_policy,
         terminal_tokens,
+        sandbox_bearer: sandbox_bearer.as_deref(),
+        capability_client,
+        sandbox_manager_client,
+        backend_id,
+        cas_client,
+        sandbox_tokens,
+        process_host,
         agent_model,
         permission_wire,
         depth: 0,
@@ -643,7 +700,7 @@ async fn run_agent_with_tools(
         }
     };
 
-    finalize(
+    let response = finalize(
         state,
         &session_channel,
         &plan_id,
@@ -656,7 +713,32 @@ async fn run_agent_with_tools(
         session_bearer.as_deref(),
         terminal_tokens,
     )
-    .await
+    .await?;
+
+    // Only reached once `finalize` actually made the run terminal (it
+    // returns `Err` — never mutating `StateStore` — when the durable receipt
+    // itself failed, per its own doc). One release call here covers every
+    // Space-scoped `code_interpreter` call this run made, including all of
+    // its delegated subagents': they share this SAME `req.run_id` (a
+    // subagent's `LoopContext.req` is `parent.req` verbatim, never its own),
+    // so `state.sandbox_lease` was cached under the one key this run has
+    // ever used.
+    // The real host, as of S4.2 step 5 — this argument was `None` until the
+    // `process_*` tools existed to give a lease children. It must stay real:
+    // release diffs and uploads the workspace, and a process still writing
+    // into it would make the promoted snapshot a picture of a moving target.
+    crate::sandbox_lease::release_sandbox_lease_if_any(
+        state,
+        sandbox_manager_client,
+        sandbox_tokens,
+        cas_client,
+        process_host,
+        &req.run_id,
+        &req.org_id,
+    )
+    .await;
+
+    Ok(response)
 }
 
 /// How many matched skills to inject per run — mirrors model-gateway's own
@@ -847,11 +929,13 @@ async fn run_rounds(
     // never reaches the parent's context, only its conclusion does.
     let mut messages = vec![
         pb::ChatMessage {
+            compaction_summary: String::new(),
             role: "system".to_owned(),
             content: compose_system_prompt(&ctx.allowlist),
             name: String::new(),
         },
         pb::ChatMessage {
+            compaction_summary: String::new(),
             role: "user".to_owned(),
             content: goal.to_owned(),
             name: String::new(),
@@ -871,6 +955,7 @@ async fn run_rounds(
         messages.insert(
             1,
             pb::ChatMessage {
+                compaction_summary: String::new(),
                 role: "system".to_owned(),
                 content: format!(
                     "You have access to the following skills relevant to this request. Apply their guidance when it fits:\n\n{}",
@@ -956,6 +1041,10 @@ async fn run_rounds(
             // Governed agent loops cannot select a user-owned ChatGPT
             // subscription; only an explicit user chat request may do so.
             subscription_connection_id: String::new(),
+            // The priority tier is a subscription speed control, so it has no
+            // meaning without a subscription connection. `false` is also what
+            // this loop sent before the field existed.
+            prefer_priority_service_tier: false,
         });
         infer_request.metadata_mut().insert(
             "authorization",
@@ -1325,6 +1414,32 @@ async fn run_rounds(
                     // ambiguous, so replaying a write is how one booking
                     // becomes two — and for any non-transient failure, where a
                     // second identical attempt can only fail identically.
+                    // Present only when this run is Space-scoped AND the call
+                    // about to dispatch is one of the tools that reads it:
+                    // `code_interpreter`, and since S4.2 step 5 the
+                    // `process_*` family. Built fresh per call rather than
+                    // once per round: `ctx.req.space_id`/`ctx.sandbox_bearer`
+                    // never change within a run, but constructing the borrow
+                    // only where it is used keeps the "absent unless relevant"
+                    // invariant visible at the call sites that care.
+                    let reads_sandbox = call.name == "code_interpreter"
+                        || crate::process_tools::is_process_tool(&call.name);
+                    let sandbox = if reads_sandbox && !ctx.req.space_id.is_empty() {
+                        ctx.sandbox_bearer.map(|sandbox_bearer| {
+                            crate::sandbox_lease::SandboxLeaseContext {
+                                space_id: &ctx.req.space_id,
+                                sandbox_bearer,
+                                capability_client: ctx.capability_client,
+                                sandbox_manager_client: ctx.sandbox_manager_client,
+                                backend_id: ctx.backend_id,
+                                cas_client: ctx.cas_client,
+                                sandbox_tokens: ctx.sandbox_tokens,
+                                process_host: ctx.process_host,
+                            }
+                        })
+                    } else {
+                        None
+                    };
                     let mut outcome = None;
                     for attempt in 1..=runtime_loop::retry::MAX_TOOL_ATTEMPTS {
                         if attempt > 1 {
@@ -1353,6 +1468,7 @@ async fn run_rounds(
                             Some(ctx.inference_bearer),
                             ctx.capability_policy,
                             Some(dispatch),
+                            sandbox.as_ref(),
                         )
                         .await;
                         let retryable = attempt < runtime_loop::retry::MAX_TOOL_ATTEMPTS
@@ -1516,12 +1632,14 @@ async fn run_rounds(
         // tool outcomes so the next round can answer from them.
         if !response.content.trim().is_empty() {
             messages.push(pb::ChatMessage {
+                compaction_summary: String::new(),
                 role: "assistant".to_owned(),
                 content: response.content,
                 name: String::new(),
             });
         }
         messages.push(pb::ChatMessage {
+            compaction_summary: String::new(),
             role: "user".to_owned(),
             content: format_tool_context(&outcomes),
             name: String::new(),
@@ -2024,6 +2142,13 @@ async fn run_subagent(
         inference_bearer: parent.inference_bearer,
         capability_policy: parent.capability_policy,
         terminal_tokens: parent.terminal_tokens,
+        sandbox_bearer: parent.sandbox_bearer,
+        capability_client: parent.capability_client,
+        sandbox_manager_client: parent.sandbox_manager_client,
+        backend_id: parent.backend_id,
+        cas_client: parent.cas_client,
+        sandbox_tokens: parent.sandbox_tokens,
+        process_host: parent.process_host,
         agent_model: parent.agent_model.clone(),
         permission_wire: parent.permission_wire,
         depth: parent.depth + 1,
@@ -2612,7 +2737,7 @@ mod system_prompt_composition {
 
 #[cfg(test)]
 mod capability_binding_contract {
-    use super::offered_tool_defs;
+    use super::{offered_tool_defs, pb, process_tool_defs};
     use crate::capability_policy::trusted_capability_id;
     use std::path::Path;
 
@@ -2621,9 +2746,19 @@ mod capability_binding_contract {
     /// use through this mapping.
     const EXPECTED_UNBOUND: &[&str] = &[];
 
+    /// Both sets, because the conditional one is exactly where an unbound
+    /// tool would hide: the process family is offered only for a Space-scoped
+    /// run on a host with the flag set, so a missing binding would surface in
+    /// production for a subset of deployments and never in a default one.
+    fn every_offerable_tool_def() -> Vec<pb::ToolDefinition> {
+        let mut all = offered_tool_defs();
+        all.extend(process_tool_defs());
+        all
+    }
+
     #[test]
     fn every_offered_tool_has_a_capability_binding() {
-        let unbound: Vec<String> = offered_tool_defs()
+        let unbound: Vec<String> = every_offerable_tool_def()
             .into_iter()
             .map(|def| def.name)
             .filter(|name| trusted_capability_id(name).is_none())
@@ -2762,7 +2897,7 @@ mod capability_binding_contract {
         ];
 
         let mut unattested = Vec::new();
-        for def in offered_tool_defs() {
+        for def in every_offerable_tool_def() {
             let Some(capability) = trusted_capability_id(&def.name) else {
                 continue; // covered by the binding test above
             };
@@ -2838,7 +2973,7 @@ mod capability_binding_contract {
 
         // Every offered tool's id, plus the two reachable only through
         // special-cased paths rather than a plain match arm.
-        let mut ids: Vec<String> = offered_tool_defs()
+        let mut ids: Vec<String> = every_offerable_tool_def()
             .into_iter()
             .filter_map(|def| trusted_capability_id(&def.name))
             .collect();
@@ -2866,6 +3001,49 @@ mod capability_binding_contract {
              call is refused with nothing to evaluate: {missing:?}"
         );
     }
+}
+
+/// The S4.2 background-process family, offered only for a Space-scoped run on
+/// a host that can actually host one (see [`merged_tool_defs`]).
+///
+/// Kept separate from [`offered_tool_defs`] rather than folded in behind a
+/// flag because these are the only conditional tools in the loop, and the
+/// conditional set is exactly the thing worth being able to name in a test.
+/// All three contract tests below iterate BOTH, so the family gets the same
+/// advertised -> bound -> seeded -> attested chain everything else does.
+///
+/// The descriptions state the real contract, for the same reason
+/// `code_interpreter`'s does: a model that assumes it will be handed output as
+/// the process produces it writes a plan that silently never completes. It has
+/// to know that reading is a pull with a cursor.
+fn process_tool_defs() -> Vec<pb::ToolDefinition> {
+    vec![
+        pb::ToolDefinition {
+            name: "process_start".to_owned(),
+            description: "Start a LONG-RUNNING background process in this Space's persistent workspace and return immediately with a process_id. Use it for work that outlives one tool call - a build, a test suite, a watcher, a server, a long computation - where code_interpreter's per-call timeout would kill it. The program is Python (or POSIX sh), same sandbox as code_interpreter: NO NETWORK, read-only system, and it can only write this Space's workspace. Unlike code_interpreter the workspace PERSISTS, so files it writes are still there for later calls. It does NOT stream output to you: collect output with process_read using the returned process_id. The process is killed at its TTL (30 minutes by default, 1 hour maximum, and never past this Space's sandbox lease), so treat it as bounded work, not a permanent service.".to_owned(),
+            parameters_json: r#"{"type":"object","properties":{"language":{"type":"string","enum":["python","sh"],"description":"Defaults to python"},"code":{"type":"string","description":"The complete program to run in the background"},"args":{"type":"array","items":{"type":"string"},"description":"Optional arguments passed to the program"},"ttl_secs":{"type":"integer","description":"Seconds before the process is stopped; default 1800, max 3600"},"stdin":{"type":"boolean","description":"Keep stdin open so process_stdin can write to it later; default false"}},"required":["code"]}"#.to_owned(),
+        },
+        pb::ToolDefinition {
+            name: "process_read".to_owned(),
+            description: "Read a background process's output, from a cursor. Returns the chunks after after_seq plus next_cursor to pass next time, and the process's current state and exit_code - so a finished process answers with its outcome rather than an error. Call it again with next_cursor to follow a running process. If gap_before is true, output between your cursor and the first chunk was dropped by retention and is gone: say so rather than summarising the log as if it were complete.".to_owned(),
+            parameters_json: r#"{"type":"object","properties":{"process_id":{"type":"string","description":"From process_start or process_list"},"after_seq":{"type":"integer","description":"Exclusive cursor; omit or 0 to read from the beginning of what is retained"},"max_bytes":{"type":"integer","description":"Byte budget for this page; default 32768, max 262144"}},"required":["process_id"]}"#.to_owned(),
+        },
+        pb::ToolDefinition {
+            name: "process_stdin".to_owned(),
+            description: "Write to a running background process's standard input - for a program that prompts, or one waiting on a command stream. Only works if the process was started with stdin: true, and only on a process this backend is hosting. Set close: true to send end-of-input when there is nothing more to write; a program blocked on reading stdin will wait forever without it.".to_owned(),
+            parameters_json: r#"{"type":"object","properties":{"process_id":{"type":"string","description":"From process_start or process_list"},"data":{"type":"string","description":"Text to write to the process's stdin"},"close":{"type":"boolean","description":"Close stdin after writing, signalling end-of-input; default false"}},"required":["process_id","data"]}"#.to_owned(),
+        },
+        pb::ToolDefinition {
+            name: "process_signal".to_owned(),
+            description: "Stop a running background process. \"term\" asks it to shut down and gives it a grace period to clean up - prefer it, because a program that writes files or holds a lock should get the chance to finish. \"kill\" stops it immediately with no chance to clean up; use it only when term did not work. This is a REQUEST: it returns as soon as the signal is sent, so call process_read afterwards to see the process's actual state rather than assuming it stopped.".to_owned(),
+            parameters_json: r#"{"type":"object","properties":{"process_id":{"type":"string","description":"From process_start or process_list"},"signal":{"type":"string","enum":["term","kill"],"description":"term asks it to stop cleanly; kill stops it immediately"}},"required":["process_id","signal"]}"#.to_owned(),
+        },
+        pb::ToolDefinition {
+            name: "process_list".to_owned(),
+            description: "List this Space's background processes with their state, exit code and redacted command. Use it to find a process_id you no longer have - processes survive the turn that started them, so one may have been started by an earlier conversation in this Space. Finished processes are hidden unless include_finished is true.".to_owned(),
+            parameters_json: r#"{"type":"object","properties":{"include_finished":{"type":"boolean","description":"Include processes that have already ended; default false"},"limit":{"type":"integer","description":"Max processes to return; default 20, max 100"},"after_process_id":{"type":"string","description":"Cursor: the last process_id of the previous page"}},"required":[]}"#.to_owned(),
+        },
+    ]
 }
 
 fn offered_tool_defs() -> Vec<pb::ToolDefinition> {
@@ -3048,6 +3226,20 @@ fn offered_tool_defs() -> Vec<pb::ToolDefinition> {
             name: "subagent.task".to_owned(),
             description: "Delegate a self-contained sub-task to a subagent that runs its own tool loop with the SAME tools you have, then returns only its final answer. Its work happens in an isolated context, so use it when a sub-task needs many tool calls whose intermediate output you do not need (e.g. 'find every carrier that ships dangerous goods to Svalbard and summarise the cheapest'). Give it one clear, self-contained goal — it cannot see this conversation, cannot ask you questions, and cannot delegate further (nesting is capped at one level). It may ONLY use read/analysis tools: any side-effecting or destructive action (delete, write, send, deploy, book, publish, execute a provider action, drive a browser, run a shell command, ...) is refused outright, even if this run's own permission mode is 'auto' — delegating that kind of step does not skip its gate, it just fails, so do it yourself instead. Its rounds come out of THIS run's budget, so do not delegate work you can do in a call or two yourself.".to_owned(),
             parameters_json: r#"{"type":"object","properties":{"goal":{"type":"string","description":"The complete, self-contained task for the subagent, including any context it needs"},"max_rounds":{"type":"integer","minimum":1,"description":"Optional cap on the subagent's tool rounds; capped by this run's remaining budget"}},"required":["goal"]}"#.to_owned(),
+        },
+        // Plan-mode's control tool (chat-wave2-specs plan-gate §2.1). Offered
+        // UNCONDITIONALLY, the same way plan mode itself gates risky tools by
+        // classification rather than by hiding their definitions
+        // (`is_risky_call`/`is_restricted_context_write` at :1332-1354) — the
+        // description alone signals when it matters, so a non-plan-mode run
+        // that calls it anyway still gets a real, structured plan out of it.
+        // It is never in the risky/restricted-write classifiers (matching
+        // `list_subagent_results`'s treatment), so it is dispatched under
+        // `ask` posture with no approval gate.
+        pb::ToolDefinition {
+            name: crate::plan::PROPOSE_TOOL.to_owned(),
+            description: "Propose your plan as STRUCTURED DATA instead of prose, for the user to review, edit (reorder, rewrite, add or remove steps), and approve before you may act. Use this ONCE you know what you intend to do in a plan-mode run — do not describe the plan in your text answer AND call this; this call is the plan. If you change your mind about the plan later in the same turn, call it again: the new call supersedes the earlier one (last-proposed-wins).".to_owned(),
+            parameters_json: r#"{"type":"object","properties":{"summary":{"type":"string","description":"One or two sentences: what this plan accomplishes"},"steps":{"type":"array","minItems":1,"items":{"type":"object","properties":{"title":{"type":"string","description":"One concrete, human-readable step"},"operation":{"type":"string","description":"Optional operation slug tying this step to a concrete tool/action"}},"required":["title"]}},"supersedes":{"type":"string","description":"Optional plan_id of an earlier proposal in this same turn that this one replaces"}},"required":["summary","steps"]}"#.to_owned(),
         },
     ];
     // `tickets.create` deliberately stays absent here. A compiled adapter or
@@ -3980,7 +4172,7 @@ mod tests {
 
     #[tokio::test]
     async fn merged_tool_defs_accepts_ticket_only_from_the_run_bound_policy_view() {
-        let tools = merged_tool_defs("run-1", "org-1", "user-1", &[], &TicketViewPolicy).await;
+        let tools = merged_tool_defs("run-1", "org-1", "user-1", &[], &TicketViewPolicy, false).await;
         assert!(tools
             .iter()
             .any(|tool| tool.name == crate::ticket_tools::TOOL_NAME));
@@ -4052,6 +4244,9 @@ mod tests {
         replayed_run_status: Option<String>,
         plan_transitions: Vec<(i32, i32)>, // (from, to)
         approvals: Vec<(String, String)>,  // (step_id, reason)
+        /// `(thread_id, summary, step_count)` — every `ProposePlan` call
+        /// `MockOrchestration` observed, for `plan.propose` dispatch tests.
+        propose_plan_calls: Vec<(String, String, usize)>,
         decisions: Vec<(String, i32)>,     // (approval_id, decision) — DecideApproval
         /// Fixture for `MockSession::list_agent_skills`; empty unless a
         /// `fetch_skill_context` test populates it.
@@ -4099,6 +4294,31 @@ mod tests {
     }
 
     static STATIC_TERMINAL_TOKENS: StaticTerminalTokens = StaticTerminalTokens;
+
+    /// A lazily-connecting client to an address nothing listens on. Every
+    /// `run_agent`/`run_agent_with_tools` test below is non-Space (`space_id`
+    /// empty on `sample_request()` by default), so `sandbox_lease::
+    /// ensure_sandbox_lease` is never reached — this exists only to satisfy
+    /// the signature.
+    fn test_sandbox_manager_client() -> crate::sandbox_manager_client::SandboxManagerClient {
+        crate::sandbox_manager_client::SandboxManagerClient::new(
+            tonic::transport::Endpoint::from_shared("http://127.0.0.1:1")
+                .expect("valid endpoint")
+                .connect_lazy(),
+        )
+    }
+
+    /// Same reasoning as `test_sandbox_manager_client` above: every test
+    /// below is non-Space, so no run ever acquires a lease for `finalize`'s
+    /// own release-on-completion call to find, meaning this credential
+    /// provider is never actually asked to mint anything.
+    fn test_sandbox_tokens() -> crate::sandbox_lease::SandboxManagerTokenProvider {
+        crate::sandbox_lease::SandboxManagerTokenProvider::new_for_test(
+            "http://127.0.0.1:1",
+            "execution-core",
+            "test-service-secret-at-least-32-bytes",
+        )
+    }
 
     /// One scripted inference outcome the mock returns per round.
     #[derive(Clone)]
@@ -4210,6 +4430,7 @@ mod tests {
                 .unwrap_or_else(|| Scripted::Answer("done".to_owned()));
             match step {
                 Scripted::Answer(content) => Ok(Response::new(pb::InferResponse {
+                    compaction_summary: String::new(),
                     request_id: "req".to_owned(),
                     content,
                     model_used: "mock".to_owned(),
@@ -4221,6 +4442,7 @@ mod tests {
                 })),
                 Scripted::TruncatedToolCalls { content, calls } => {
                     Ok(Response::new(pb::InferResponse {
+                        compaction_summary: String::new(),
                         request_id: "req".to_owned(),
                         content,
                         model_used: "mock".to_owned(),
@@ -4237,6 +4459,7 @@ mod tests {
                     }))
                 }
                 Scripted::ToolCalls { content, calls } => Ok(Response::new(pb::InferResponse {
+                    compaction_summary: String::new(),
                     request_id: "req".to_owned(),
                     content,
                     model_used: "mock".to_owned(),
@@ -4424,6 +4647,17 @@ mod tests {
             _: Request<pb::DeleteSpaceThreadsRequest>,
         ) -> Result<Response<pb::DeleteSpaceThreadsResponse>, Status> {
             Err(Status::unimplemented("delete_space_threads not used"))
+        }
+
+        // Stub added only to satisfy the `SessionCore` trait after an
+        // in-flight, unrelated change to `sessions.proto` (not part of
+        // plan-gate) added this RPC — same placeholder convention as every
+        // other never-exercised-here method in this mock.
+        async fn prepare_user_owned_thread(
+            &self,
+            _: Request<pb::PrepareUserOwnedThreadRequest>,
+        ) -> Result<Response<pb::PrepareUserOwnedThreadResponse>, Status> {
+            Err(Status::unimplemented("prepare_user_owned_thread not used"))
         }
 
         async fn prepare_scheduled_run_thread(
@@ -4860,6 +5094,18 @@ mod tests {
                 already_terminal: false,
             }))
         }
+
+        // Only the Gateway completes a direct run with its message; an agent
+        // run records a metadata-only receipt. Unimplemented, so a caller that
+        // starts using it here fails loudly.
+        async fn complete_direct_run_with_message(
+            &self,
+            _: Request<pb::CompleteDirectRunWithMessageRequest>,
+        ) -> Result<Response<pb::CompleteDirectRunWithMessageResponse>, Status> {
+            Err(Status::unimplemented(
+                "execution-core does not complete gateway-direct runs",
+            ))
+        }
     }
 
     // --- Orchestration mock: records PlanTransitioned events. ---
@@ -4926,6 +5172,42 @@ mod tests {
             _: Request<pb::TransitionPlanRequest>,
         ) -> Result<Response<pb::TransitionPlanResponse>, Status> {
             Err(Status::unimplemented("transition_plan not used"))
+        }
+
+        async fn propose_plan(
+            &self,
+            request: Request<pb::ProposePlanRequest>,
+        ) -> Result<Response<pb::ProposePlanResponse>, Status> {
+            let req = request.into_inner();
+            let steps: Vec<pb::PlanStep> = req
+                .steps
+                .iter()
+                .enumerate()
+                .map(|(i, s)| pb::PlanStep {
+                    id: format!("step_{i}"),
+                    title: s.title.clone(),
+                    operation: s.operation.clone(),
+                    state: pb::PlanStepState::Pending as i32,
+                    ..Default::default()
+                })
+                .collect();
+            self.rec.lock().unwrap().propose_plan_calls.push((
+                req.thread_id.clone(),
+                req.summary.clone(),
+                steps.len(),
+            ));
+            Ok(Response::new(pb::ProposePlanResponse {
+                plan: Some(pb::Plan {
+                    id: "plan_test123".to_owned(),
+                    run_id: req.run_id,
+                    thread_id: req.thread_id,
+                    author: req.user_id,
+                    state: pb::PlanState::Proposed as i32,
+                    summary: req.summary,
+                    steps,
+                    ..Default::default()
+                }),
+            }))
         }
 
         async fn list_todos(
@@ -5226,6 +5508,9 @@ mod tests {
             // No graded constraint stated, which is what an ordinary run sends —
             // the ladder narrows a run only when a grant put it there.
             autonomy_rung: 0,
+            // Non-Space by default, matching every other unconstrained field
+            // above — the tests that DO care set it explicitly.
+            space_id: String::new(),
         }
     }
 
@@ -5429,6 +5714,13 @@ mod tests {
             "inference-token".to_owned(),
             &ALLOW_CAPABILITY_POLICY,
             &STATIC_TERMINAL_TOKENS,
+            None,
+            None,
+            &test_sandbox_manager_client(),
+            "test-backend",
+            None,
+            &test_sandbox_tokens(),
+            None,
         )
         .await
         .expect("ordinary agent run should succeed");
@@ -5510,6 +5802,13 @@ mod tests {
             "inference-token".to_owned(),
             &ALLOW_CAPABILITY_POLICY,
             &STATIC_TERMINAL_TOKENS,
+            None,
+            None,
+            &test_sandbox_manager_client(),
+            "test-backend",
+            None,
+            &test_sandbox_tokens(),
+            None,
         )
         .await
         .expect("ZDR agent run should succeed");
@@ -5576,6 +5875,13 @@ mod tests {
             "inference-token".to_owned(),
             &ALLOW_CAPABILITY_POLICY,
             &STATIC_TERMINAL_TOKENS,
+            None,
+            None,
+            &test_sandbox_manager_client(),
+            "test-backend",
+            None,
+            &test_sandbox_tokens(),
+            None,
         )
         .await
         .expect("tier-constrained agent run should succeed");
@@ -5607,6 +5913,13 @@ mod tests {
             "inference-token".to_owned(),
             &ALLOW_CAPABILITY_POLICY,
             &STATIC_TERMINAL_TOKENS,
+            None,
+            None,
+            &test_sandbox_manager_client(),
+            "test-backend",
+            None,
+            &test_sandbox_tokens(),
+            None,
         )
         .await
         .expect("inference failure should be finalized as a response");
@@ -5671,6 +5984,13 @@ mod tests {
             "inference-token".to_owned(),
             &ALLOW_CAPABILITY_POLICY,
             &STATIC_TERMINAL_TOKENS,
+            None,
+            None,
+            &test_sandbox_manager_client(),
+            "test-backend",
+            None,
+            &test_sandbox_tokens(),
+            None,
         )
         .await
         .expect_err("a missing durable terminal receipt must fail the agent run");
@@ -5734,6 +6054,13 @@ mod tests {
             "inference-token".to_owned(),
             &ALLOW_CAPABILITY_POLICY,
             &STATIC_TERMINAL_TOKENS,
+            None,
+            None,
+            &test_sandbox_manager_client(),
+            "test-backend",
+            None,
+            &test_sandbox_tokens(),
+            None,
         )
         .await
         .expect("multi-tool agent run should succeed");
@@ -5822,6 +6149,13 @@ mod tests {
             "inference-token".to_owned(),
             &ALLOW_CAPABILITY_POLICY,
             &STATIC_TERMINAL_TOKENS,
+            None,
+            None,
+            &test_sandbox_manager_client(),
+            "test-backend",
+            None,
+            &test_sandbox_tokens(),
+            None,
         )
         .await
         .expect("duplicate retrieval run should succeed");
@@ -5882,6 +6216,13 @@ mod tests {
             "inference-token".to_owned(),
             &ALLOW_CAPABILITY_POLICY,
             &STATIC_TERMINAL_TOKENS,
+            None,
+            None,
+            &test_sandbox_manager_client(),
+            "test-backend",
+            None,
+            &test_sandbox_tokens(),
+            None,
         )
         .await
         .expect("durable approval should pause the run");
@@ -5946,6 +6287,13 @@ mod tests {
             "inference-token".to_owned(),
             &ALLOW_CAPABILITY_POLICY,
             &STATIC_TERMINAL_TOKENS,
+            None,
+            None,
+            &test_sandbox_manager_client(),
+            "test-backend",
+            None,
+            &test_sandbox_tokens(),
+            None,
         )
         .await
         .expect_err("an unpersisted approval must fail the agent HITL path");
@@ -6021,6 +6369,13 @@ mod tests {
             "inference-token".to_owned(),
             &ALLOW_CAPABILITY_POLICY,
             &STATIC_TERMINAL_TOKENS,
+            None,
+            None,
+            &test_sandbox_manager_client(),
+            "test-backend",
+            None,
+            &test_sandbox_tokens(),
+            None,
         )
         .await
         .expect("provider write run should succeed");
@@ -6145,6 +6500,13 @@ mod tests {
             "inference-token".to_owned(),
             &ALLOW_CAPABILITY_POLICY,
             &STATIC_TERMINAL_TOKENS,
+            None,
+            None,
+            &test_sandbox_manager_client(),
+            "test-backend",
+            None,
+            &test_sandbox_tokens(),
+            None,
         )
         .await
         .expect("a delegating run must not fail because bookkeeping did");
@@ -6221,6 +6583,13 @@ mod tests {
             "inference-token".to_owned(),
             &ALLOW_CAPABILITY_POLICY,
             &STATIC_TERMINAL_TOKENS,
+            None,
+            None,
+            &test_sandbox_manager_client(),
+            "test-backend",
+            None,
+            &test_sandbox_tokens(),
+            None,
         )
         .await
         .expect("a ZDR delegation still runs");
@@ -6279,6 +6648,13 @@ mod tests {
             "inference-token".to_owned(),
             &ALLOW_CAPABILITY_POLICY,
             &STATIC_TERMINAL_TOKENS,
+            None,
+            None,
+            &test_sandbox_manager_client(),
+            "test-backend",
+            None,
+            &test_sandbox_tokens(),
+            None,
         )
         .await
         .expect("a delegating run must not fail because bookkeeping did");
@@ -6351,6 +6727,13 @@ mod tests {
             "inference-token".to_owned(),
             &ALLOW_CAPABILITY_POLICY,
             &STATIC_TERMINAL_TOKENS,
+            None,
+            None,
+            &test_sandbox_manager_client(),
+            "test-backend",
+            None,
+            &test_sandbox_tokens(),
+            None,
         )
         .await
         .expect("a delegating agent run should succeed");
@@ -6579,6 +6962,13 @@ mod tests {
             "inference-token".to_owned(),
             &ALLOW_CAPABILITY_POLICY,
             &STATIC_TERMINAL_TOKENS,
+            None,
+            None,
+            &test_sandbox_manager_client(),
+            "test-backend",
+            None,
+            &test_sandbox_tokens(),
+            None,
         )
         .await
         .expect("a refused nested delegation must not fail the run");
@@ -6720,6 +7110,13 @@ mod tests {
             "inference-token".to_owned(),
             &ALLOW_CAPABILITY_POLICY,
             &STATIC_TERMINAL_TOKENS,
+            None,
+            None,
+            &test_sandbox_manager_client(),
+            "test-backend",
+            None,
+            &test_sandbox_tokens(),
+            None,
         )
         .await
         .expect("a refused record read inside a subagent must not fail the run");
@@ -6796,6 +7193,13 @@ mod tests {
             "inference-token".to_owned(),
             &ALLOW_CAPABILITY_POLICY,
             &STATIC_TERMINAL_TOKENS,
+            None,
+            None,
+            &test_sandbox_manager_client(),
+            "test-backend",
+            None,
+            &test_sandbox_tokens(),
+            None,
         )
         .await
         .expect("a refused rung must not fail the run");
@@ -6872,6 +7276,13 @@ mod tests {
             "inference-token".to_owned(),
             &ALLOW_CAPABILITY_POLICY,
             &STATIC_TERMINAL_TOKENS,
+            None,
+            None,
+            &test_sandbox_manager_client(),
+            "test-backend",
+            None,
+            &test_sandbox_tokens(),
+            None,
         )
         .await
         .expect("a refused risky tool inside a subagent must not fail the run");
@@ -6945,6 +7356,13 @@ mod tests {
             "inference-token".to_owned(),
             &ALLOW_CAPABILITY_POLICY,
             &STATIC_TERMINAL_TOKENS,
+            None,
+            None,
+            &test_sandbox_manager_client(),
+            "test-backend",
+            None,
+            &test_sandbox_tokens(),
+            None,
         )
         .await
         .expect("a truncated round must not fail the run");
@@ -7018,6 +7436,13 @@ mod tests {
             "inference-token".to_owned(),
             &ALLOW_CAPABILITY_POLICY,
             &STATIC_TERMINAL_TOKENS,
+            None,
+            None,
+            &test_sandbox_manager_client(),
+            "test-backend",
+            None,
+            &test_sandbox_tokens(),
+            None,
         )
         .await
         .expect("a refused plan-mode tool call must not fail the run");
@@ -7035,6 +7460,91 @@ mod tests {
             r.completed.is_empty(),
             "plan mode must refuse before any step is dispatched/recorded: {:?}",
             r.completed
+        );
+    }
+
+    #[tokio::test]
+    async fn plan_propose_dispatches_even_while_plan_mode_blocks_risky_tools() {
+        // plan-gate §2.1: `plan.propose` is the plan-mode run's own way of
+        // acting -- it must dispatch normally even though plan mode refuses
+        // every risky/destructive tool at this same call site (the test right
+        // above this one), because `plan.propose` is read-only from the
+        // run's own permission-ladder point of view: it is never matched by
+        // `permission::is_risky_call`/`is_restricted_context_write`, so the
+        // plan-mode refusal at :1332-1354 never fires for it.
+        let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
+        let session_channel = spawn_session_channel(rec.clone()).await;
+        let inference_channel = spawn_inference_channel(vec![
+            Scripted::ToolCalls {
+                content: String::new(),
+                calls: vec![pb::ToolCall {
+                    id: "propose-1".to_owned(),
+                    name: "plan.propose".to_owned(),
+                    arguments_json: serde_json::json!({
+                        "summary": "Send the overdue invoice",
+                        "steps": [
+                            {"title": "Draft the email"},
+                            {"title": "Send it", "operation": "email_send"},
+                        ],
+                    })
+                    .to_string(),
+                }],
+            },
+            Scripted::Answer("I've proposed a plan for your review.".to_owned()),
+        ])
+        .await;
+        let state = crate::state::StateStore::new();
+
+        let mut req = sample_request();
+        req.mode = "auto".to_owned();
+        req.plan_mode = true;
+        // `run_agent_with_tools` (unlike the public `run_agent`) takes an
+        // EXPLICIT injected tool set as the purpose-lock allowlist — it does
+        // not call `offered_tool_defs()` itself (see its own doc comment) —
+        // so the tool under test must be listed here, the same way the
+        // sibling risky-tool test above lists `delete_records`.
+        let plan_tools = vec![pb::ToolDefinition {
+            name: crate::plan::PROPOSE_TOOL.to_owned(),
+            description: String::new(),
+            parameters_json: "{}".to_owned(),
+        }];
+        let resp = run_agent_with_tools(
+            &state,
+            session_channel,
+            inference_channel,
+            req,
+            plan_tools,
+            None,
+            Some("session-token".to_owned()),
+            "inference-token".to_owned(),
+            &ALLOW_CAPABILITY_POLICY,
+            &STATIC_TERMINAL_TOKENS,
+            None,
+            None,
+            &test_sandbox_manager_client(),
+            "test-backend",
+            None,
+            &test_sandbox_tokens(),
+            None,
+        )
+        .await
+        .expect("plan.propose must dispatch and the run must complete");
+
+        assert_eq!(resp.status, "completed");
+        assert_eq!(
+            resp.final_output,
+            "I've proposed a plan for your review."
+        );
+
+        let r = rec.lock().unwrap();
+        assert_eq!(
+            r.propose_plan_calls,
+            vec![(
+                "thread_test".to_owned(),
+                "Send the overdue invoice".to_owned(),
+                2
+            )],
+            "plan.propose must reach session-core's ProposePlan with the model's summary and step count"
         );
     }
 
@@ -7076,6 +7586,13 @@ mod tests {
             "inference-token".to_owned(),
             &ALLOW_CAPABILITY_POLICY,
             &STATIC_TERMINAL_TOKENS,
+            None,
+            None,
+            &test_sandbox_manager_client(),
+            "test-backend",
+            None,
+            &test_sandbox_tokens(),
+            None,
         )
         .await
         .expect("a failed delegation must not fail the parent run");
@@ -7142,6 +7659,13 @@ mod tests {
             "inference-token".to_owned(),
             &ALLOW_CAPABILITY_POLICY,
             &STATIC_TERMINAL_TOKENS,
+            None,
+            None,
+            &test_sandbox_manager_client(),
+            "test-backend",
+            None,
+            &test_sandbox_tokens(),
+            None,
         )
         .await
         .expect("an exhausted run is still finalized");
@@ -7229,6 +7753,13 @@ mod tests {
             "inference-token".to_owned(),
             &ALLOW_CAPABILITY_POLICY,
             &STATIC_TERMINAL_TOKENS,
+            None,
+            None,
+            &test_sandbox_manager_client(),
+            "test-backend",
+            None,
+            &test_sandbox_tokens(),
+            None,
         )
         .await
         .expect("a resumed delegation completes the run");
@@ -7303,6 +7834,13 @@ mod tests {
             "inference-token".to_owned(),
             &ALLOW_CAPABILITY_POLICY,
             &STATIC_TERMINAL_TOKENS,
+            None,
+            None,
+            &test_sandbox_manager_client(),
+            "test-backend",
+            None,
+            &test_sandbox_tokens(),
+            None,
         )
         .await
         .expect("a refused replay must not fail the run");
@@ -7362,6 +7900,13 @@ mod tests {
             "inference-token".to_owned(),
             &ALLOW_CAPABILITY_POLICY,
             &STATIC_TERMINAL_TOKENS,
+            None,
+            None,
+            &test_sandbox_manager_client(),
+            "test-backend",
+            None,
+            &test_sandbox_tokens(),
+            None,
         )
         .await
         .expect("an in-flight replay must not fail the run");
@@ -7427,6 +7972,13 @@ mod tests {
             "inference-token".to_owned(),
             &ALLOW_CAPABILITY_POLICY,
             &STATIC_TERMINAL_TOKENS,
+            None,
+            None,
+            &test_sandbox_manager_client(),
+            "test-backend",
+            None,
+            &test_sandbox_tokens(),
+            None,
         )
         .await
         .expect("a refused delegation must not fail the run");
@@ -7501,6 +8053,13 @@ mod tests {
             "inference-token".to_owned(),
             &ALLOW_CAPABILITY_POLICY,
             &STATIC_TERMINAL_TOKENS,
+            None,
+            None,
+            &test_sandbox_manager_client(),
+            "test-backend",
+            None,
+            &test_sandbox_tokens(),
+            None,
         )
         .await
         .expect("an exhausted run is still finalized");
@@ -7583,6 +8142,13 @@ mod tests {
             "inference-token".to_owned(),
             &ALLOW_CAPABILITY_POLICY,
             &STATIC_TERMINAL_TOKENS,
+            None,
+            None,
+            &test_sandbox_manager_client(),
+            "test-backend",
+            None,
+            &test_sandbox_tokens(),
+            None,
         )
         .await
         .expect("durable approval should pause the run");
@@ -7652,6 +8218,13 @@ mod tests {
             "inference-token".to_owned(),
             &ALLOW_CAPABILITY_POLICY,
             &STATIC_TERMINAL_TOKENS,
+            None,
+            None,
+            &test_sandbox_manager_client(),
+            "test-backend",
+            None,
+            &test_sandbox_tokens(),
+            None,
         )
         .await
         .expect("durable approval should pause the run");

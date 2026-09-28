@@ -132,6 +132,35 @@ describe('settings profile page', () => {
     expect(screen.queryByRole('heading', { name: /delete account/i })).toBeNull()
   })
 
+  it('lets a member without admin rights renew their own ChatGPT sign-in on the profile page', async () => {
+    // The chat's "Koble til ChatGPT på nytt" link lands here: workspace
+    // settings are admin-only, but a member's ChatGPT connection is their own.
+    setSessionUser({ id: 'member_1', email: 'member@example.com', name: 'Member', emailVerified: true })
+    flush()
+    markSessionOnboardingComplete({ id: 'org_1', name: 'Acme', role: 'member' })
+    flush()
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, _init?: RequestInit) => {
+      const url = String(input)
+      if (url.endsWith('/api/v1/integrations/connections')) {
+        return new Response(JSON.stringify({
+          connections: [{ id: 'conn_old', providerKey: 'openai-codex-subscription', status: 'needs_refresh' }],
+        }), { headers: { 'Content-Type': 'application/json' }, status: 200 })
+      }
+      return new Response(JSON.stringify({}), { headers: { 'Content-Type': 'application/json' }, status: 200 })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    const { container } = render(() => <AccountSettingsPage />)
+
+    expect(screen.getByRole('heading', { name: /^chatgpt-abonnement$/i })).toBeTruthy()
+    const panel = container.querySelector<HTMLElement>('#chatgpt-subscription')
+    expect(panel).toBeTruthy()
+    await waitFor(() => expect(within(panel!).getByText('Må kobles til på nytt')).toBeTruthy())
+    expect(within(panel!).getByRole('button', { name: /^koble til chatgpt$/i })).toBeTruthy()
+    const listed = fetchMock.mock.calls.find(([input]) => String(input).endsWith('/api/v1/integrations/connections'))
+    expect(new Headers(listed?.[1]?.headers).get('x-verevon-org-id')).toBe('org_1')
+  })
+
   it('includes sticky scroll fade layers for the account settings surface', () => {
     render(() => <AccountSettingsPage />)
 

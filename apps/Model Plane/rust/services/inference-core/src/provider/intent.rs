@@ -435,6 +435,7 @@ mod tests {
 
     fn user(content: &str) -> ChatMessage {
         ChatMessage {
+            compaction_summary: String::new(),
             role: "user".to_owned(),
             content: content.to_owned(),
             name: String::new(),

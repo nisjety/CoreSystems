@@ -96,6 +96,12 @@ const MIN_CONFIDENCE: f64 = 0.7;
 const MAX_CONFIDENCE: f64 = 0.85;
 const MAX_CONTENT_CHARS: usize = 280;
 const MAX_SLOT_CHARS: usize = 32;
+/// How many existing slot names per scope the model is shown. Enough for a
+/// user's standing profile; a longer list is a prompt-size cost on every call
+/// and a sign the slots themselves need cleaning up.
+const MAX_EXISTING_SLOTS: usize = 40;
+const USER_SLOT_PREFIX: &str = "user:llm:";
+const THREAD_SLOT_PREFIX: &str = "thread:llm:";
 /// Room for [`MAX_CANDIDATES`] JSON objects and nothing else.
 const MAX_OUTPUT_TOKENS: i32 = 1_024;
 
@@ -130,10 +136,24 @@ const EXTRACTION_SYSTEM_PROMPT: &str = concat!(
     "payment details, health or other special-category personal data, or ",
     "facts about people other than the user.\n",
     "\n",
+    "Documents, data and briefs the user hands over are the SUBJECT OF THEIR ",
+    "WORK, not a description of them. Never conclude an employer, role, ",
+    "customer, project or deadline from the content of such material, from a ",
+    "company named in it, or from the user writing \"we\"/\"our\" about it — a ",
+    "person can work on a case, a client, a test file or a fictional example ",
+    "without it being true of them. Record a fact about the user only when the ",
+    "user states it about themselves in their own words.\n",
+    "\n",
     "Give each memory a `slot`: a short lowercase snake_case name for WHAT KIND ",
     "of thing it is (`employer`, `job_title`, `working_language`, ",
     "`reporting_cadence`). The same fact learned again later must reuse the ",
     "same slot so it updates instead of duplicating.\n",
+    "\n",
+    "The input may start with EXISTING SLOTS: the slot names this user already ",
+    "has memories under. When a memory is the same kind of thing as one of ",
+    "them, use that exact slot name, even if you would have named it ",
+    "differently. Name a new slot only for a genuinely different kind of fact. ",
+    "The list is names only; it is never a reason to record anything.\n",
     "\n",
     "`scope` is \"user\" for anything true of the person across conversations, ",
     "\"thread\" for something true only of this conversation.\n",
@@ -198,6 +218,90 @@ const EXTRACTION_SCHEMA: &str = r#"{
 pub(crate) struct WindowMessage {
     pub role: String,
     pub content: String,
+}
+
+/// Slot names this user (and this thread) already has current memories
+/// under.
+///
+/// The prompt has always asked the model to reuse a slot for the same fact,
+/// but the model only ever saw the transcript, so every new thread minted
+/// fresh names (`tools`, `recurring_tool`, `tool_use` for one fact) and the
+/// unique key never matched. Showing the names turns a restatement into an
+/// exact-key update of the stored row. Names only: no content ever leaves the
+/// table this way.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct ExistingSlots {
+    pub(crate) user: Vec<String>,
+    pub(crate) thread: Vec<String>,
+}
+
+impl ExistingSlots {
+    /// Build from stored `agent_memory` keys, most relevant (newest) first.
+    ///
+    /// Only this module's own namespaces carry model-chosen slots; other keys
+    /// (`user:name`, `user:preference:...`, `manual:...`) are not names the
+    /// model can produce and are skipped. A stored slot is re-validated rather
+    /// than trusted, so nothing but `[a-z0-9_]` reaches the prompt. The first
+    /// [`MAX_EXISTING_SLOTS`] distinct names per scope are kept, then sorted
+    /// so the prompt does not reorder from one cycle to the next.
+    pub(crate) fn from_keys<S: AsRef<str>>(keys: &[S]) -> Self {
+        fn collect<S: AsRef<str>>(keys: &[S], prefix: &str) -> Vec<String> {
+            let mut slots: Vec<String> = Vec::new();
+            for key in keys {
+                let Some(slot) = key.as_ref().strip_prefix(prefix) else {
+                    continue;
+                };
+                if sanitize_slot(slot).as_deref() != Some(slot) || slots.iter().any(|s| s == slot) {
+                    continue;
+                }
+                slots.push(slot.to_owned());
+                if slots.len() == MAX_EXISTING_SLOTS {
+                    break;
+                }
+            }
+            slots.sort();
+            slots
+        }
+        Self {
+            user: collect(keys, USER_SLOT_PREFIX),
+            thread: collect(keys, THREAD_SLOT_PREFIX),
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.user.is_empty() && self.thread.is_empty()
+    }
+
+    /// The EXISTING SLOTS block the system prompt refers to, or `None` when
+    /// there is nothing to show -- the request is then exactly what it was
+    /// before existing slots were shown at all.
+    fn render(&self) -> Option<String> {
+        if self.is_empty() {
+            return None;
+        }
+        let mut out = String::from("EXISTING SLOTS\n");
+        for (scope, slots) in [("user", &self.user), ("thread", &self.thread)] {
+            if slots.is_empty() {
+                continue;
+            }
+            out.push_str(scope);
+            out.push_str(": ");
+            out.push_str(&slots.join(", "));
+            out.push('\n');
+        }
+        Some(out)
+    }
+}
+
+/// The user turn of an extraction call: the existing-slot block, when there
+/// is one, ahead of the labelled transcript. `None` when the window has
+/// nothing to read -- slots alone never justify an inference call.
+fn build_user_message(existing: &ExistingSlots, window: &[WindowMessage]) -> Option<String> {
+    let transcript = render_window(window)?;
+    Some(match existing.render() {
+        Some(slots) => format!("{slots}\nCONVERSATION\n{transcript}"),
+        None => transcript,
+    })
 }
 
 #[derive(Deserialize)]
@@ -324,9 +428,10 @@ impl DreamExtractor {
         &self,
         org_id: &str,
         thread_id: &str,
+        existing: &ExistingSlots,
         window: &[WindowMessage],
     ) -> Vec<DreamMemoryCandidate> {
-        let Some(transcript) = render_window(window) else {
+        let Some(transcript) = build_user_message(existing, window) else {
             return Vec::new();
         };
         let token = match self.tokens.token(org_id, INFERENCE_SCOPES).await {
@@ -343,11 +448,13 @@ impl DreamExtractor {
             model: self.model.clone(),
             messages: vec![
                 ChatMessage {
+                    compaction_summary: String::new(),
                     role: "system".to_owned(),
                     content: EXTRACTION_SYSTEM_PROMPT.to_owned(),
                     ..ChatMessage::default()
                 },
                 ChatMessage {
+                    compaction_summary: String::new(),
                     role: "user".to_owned(),
                     content: transcript,
                     ..ChatMessage::default()
@@ -412,7 +519,97 @@ impl DreamExtractor {
     }
 }
 
+/// Stands in for document text removed from a user turn before extraction.
+const ELIDED_DOCUMENT: &str = "[attached document removed before extraction]";
+
+/// Openers of a document the user attached or pasted into their own turn.
+///
+/// The gateway wraps an inlined attachment in `--- VEDLEGG: name ---` /
+/// `--- SLUTT PÅ VEDLEGG: name ---`; a pasted source bundle opens with
+/// `--- KILDE: name ---` and runs to the end of the message.
+const ATTACHMENT_OPEN: &str = "--- VEDLEGG:";
+const ATTACHMENT_CLOSE: &str = "--- SLUTT PÅ VEDLEGG:";
+const PASTED_SOURCE_OPEN: &str = "--- KILDE:";
+
+/// Remove document text from a user turn, keeping what the user actually wrote.
+///
+/// # Why this exists
+///
+/// The prompt already says to record only what the conversation tells us about
+/// the USER, and not to record the current task. It could not hold: when a user
+/// attaches a source pack and asks for a report, the document is most of the
+/// window, so the extractor read the DOCUMENT as a description of the person.
+/// Measured on 2026-09-14 after four demo runs against a fictional company, the
+/// user's durable memory contained "User works at Fjordform." (they do not),
+/// "User is involved with a customer portal pilot project scheduled for
+/// 30 September 2026." and "Campaign targets office managers…" — the contents of
+/// three demo packs, stored as standing facts about a real person and recalled
+/// into later, unrelated conversations.
+///
+/// A fact about the user can only be evidenced by what the user says in their
+/// own words. Material they hand over is the subject of the work, not a
+/// statement about themselves, so it never reaches the extractor.
+pub(crate) fn strip_document_blocks(content: &str) -> String {
+    let mut out = String::with_capacity(content.len());
+    let mut rest = content;
+    let mut elided = false;
+
+    loop {
+        let open = rest.find(ATTACHMENT_OPEN);
+        let pasted = rest.find(PASTED_SOURCE_OPEN);
+        // Whichever marker comes first decides how the remainder is read.
+        let attachment_first = match (open, pasted) {
+            (Some(open_at), Some(pasted_at)) => open_at <= pasted_at,
+            (Some(_), None) => true,
+            (None, Some(_)) => false,
+            (None, None) => {
+                out.push_str(rest);
+                break;
+            }
+        };
+
+        if attachment_first {
+            let Some(at) = open else { break };
+            out.push_str(&rest[..at]);
+            elided = true;
+            // Resume after the closing marker's line; an unterminated block (a
+            // truncated turn) swallows the remainder rather than leaking half a
+            // document into the extractor.
+            let after_open = &rest[at + ATTACHMENT_OPEN.len()..];
+            let Some(close) = after_open.find(ATTACHMENT_CLOSE) else {
+                break;
+            };
+            let after_close = &after_open[close + ATTACHMENT_CLOSE.len()..];
+            rest = match after_close.find('\n') {
+                Some(end) => &after_close[end + 1..],
+                None => "",
+            };
+        } else {
+            // A pasted source bundle has no terminator: everything from its
+            // header onwards is document.
+            let Some(at) = pasted else { break };
+            out.push_str(&rest[..at]);
+            elided = true;
+            break;
+        }
+    }
+
+    let mut cleaned = out.trim().to_owned();
+    if elided {
+        if !cleaned.is_empty() {
+            cleaned.push('\n');
+        }
+        cleaned.push_str(ELIDED_DOCUMENT);
+    }
+    cleaned
+}
+
 /// Render the window as a labelled transcript.
+///
+/// User turns are stripped of attached/pasted document text first — see
+/// [`strip_document_blocks`]. Assistant turns are left intact: they are the
+/// assistant's own words, and the prompt already forbids recording those as
+/// facts about the user.
 ///
 /// Returns `None` when there is nothing to read, so a thread whose pending
 /// messages are all empty costs no inference call.
@@ -420,15 +617,23 @@ fn render_window(window: &[WindowMessage]) -> Option<String> {
     let mut rendered = String::new();
     let start = window.len().saturating_sub(MAX_WINDOW_MESSAGES);
     for message in &window[start..] {
-        let content = message.content.trim();
-        if content.is_empty() {
-            continue;
-        }
         let label = match message.role.trim().to_ascii_lowercase().as_str() {
             "assistant" => "Assistant",
             "user" => "User",
             _ => continue,
         };
+        let owned;
+        let content = if label == "User" {
+            owned = strip_document_blocks(message.content.trim());
+            owned.as_str()
+        } else {
+            message.content.trim()
+        };
+        // A turn that was nothing but an attachment leaves only the placeholder,
+        // which says nothing about the user and is not worth a line.
+        if content.is_empty() || content == ELIDED_DOCUMENT {
+            continue;
+        }
         rendered.push_str(label);
         rendered.push_str(": ");
         rendered.push_str(&truncate_chars(content, MAX_MESSAGE_CHARS));
@@ -636,6 +841,76 @@ mod tests {
         assert!(candidates[0].confidence < 0.86);
     }
 
+    /// The 2026-09-14 incident: four demo runs against a fictional company left
+    /// "User works at Fjordform." in a real person's durable memory. The
+    /// document must never reach the extractor; the user's own sentence must.
+    #[test]
+    fn an_attached_document_is_removed_but_the_users_own_words_survive() {
+        let turn = "Lag en kort salgsrapport for uke 37.\n\n\
+             --- VEDLEGG: kildepakke.md ---\n\
+             # Fjordform — ukentlig salgsgrunnlag\n\
+             Vi selger belysning og skrivebord.\n\
+             --- SLUTT PÅ VEDLEGG: kildepakke.md ---\n\n\
+             Svar på norsk.";
+        let stripped = strip_document_blocks(turn);
+        assert!(stripped.contains("Lag en kort salgsrapport"));
+        assert!(stripped.contains("Svar på norsk"));
+        assert!(!stripped.contains("Fjordform"), "document text reached the extractor: {stripped}");
+        assert!(stripped.contains(ELIDED_DOCUMENT));
+    }
+
+    /// A pasted source bundle has no closing marker — everything after its
+    /// header is document, including any company name inside it.
+    #[test]
+    fn a_pasted_source_bundle_is_cut_at_its_header() {
+        let turn = "Gjør møtenotatet om til en prosjektplan.\n\n\
+             --- KILDE: kildepakke.md ---\n\
+             # Fjordform — kundeportalpilot\n\
+             Pilot for tre kunder 30. september.";
+        let stripped = strip_document_blocks(turn);
+        assert!(stripped.starts_with("Gjør møtenotatet"));
+        assert!(!stripped.contains("Fjordform"));
+        assert!(!stripped.contains("kundeportalpilot"));
+    }
+
+    /// An unterminated attachment (a truncated turn) must swallow the rest
+    /// rather than leak half a document.
+    #[test]
+    fn an_unterminated_attachment_swallows_the_remainder() {
+        let stripped = strip_document_blocks("Se vedlegget.\n--- VEDLEGG: a.md ---\nFjordform AS");
+        assert!(stripped.starts_with("Se vedlegget."));
+        assert!(!stripped.contains("Fjordform"));
+    }
+
+    /// A turn with no attachment is untouched, so ordinary conversation still
+    /// yields memories.
+    #[test]
+    fn a_plain_turn_is_unchanged() {
+        let turn = "For ordens skyld: jeg er innkjøpssjef hos Nordvik.";
+        assert_eq!(strip_document_blocks(turn), turn);
+    }
+
+    /// A turn that is ONLY an attachment says nothing about the user and is
+    /// dropped from the window entirely.
+    #[test]
+    fn an_attachment_only_turn_is_dropped_from_the_window() {
+        let window = vec![
+            WindowMessage {
+                role: "user".to_owned(),
+                content: "--- VEDLEGG: a.md ---\nFjordform AS\n--- SLUTT PÅ VEDLEGG: a.md ---"
+                    .to_owned(),
+            },
+            WindowMessage {
+                role: "user".to_owned(),
+                content: "Jeg jobber i Aquatiq.".to_owned(),
+            },
+        ];
+        let rendered = render_window(&window).expect("one real turn remains");
+        assert!(!rendered.contains("Fjordform"));
+        assert!(rendered.contains("User: Jeg jobber i Aquatiq."));
+        assert_eq!(rendered.lines().count(), 1);
+    }
+
     #[test]
     fn a_guess_below_the_confidence_floor_is_dropped() {
         assert!(parse(&[memory("employer", "user", "fact", 0.69)]).is_empty());
@@ -751,6 +1026,73 @@ mod tests {
             rendered.trim().chars().count(),
             MAX_MESSAGE_CHARS + "User: ".len()
         );
+    }
+
+    /// The duplicate clusters in the live data (`tools` / `recurring_tool` /
+    /// `tool_use` for one fact) came from a model that never saw the slots
+    /// already stored. It now does -- names only, from this module's own
+    /// namespaces, validated, bounded and sorted.
+    #[test]
+    fn existing_slots_are_names_from_the_llm_namespaces_only_sorted_and_bounded() {
+        let keys = [
+            "user:llm:tool_use",
+            "user:llm:approval_preference",
+            "user:name",
+            "user:preference:korte_svar",
+            "manual:user:corrected_51210cea",
+            "user:llm:tool_use",
+            "user:llm:Bad Slot",
+            "user:llm:user:name",
+            "thread:llm:project_context",
+            "user:llm:employer",
+        ];
+        let slots = ExistingSlots::from_keys(&keys);
+        assert_eq!(slots.user, ["approval_preference", "employer", "tool_use"]);
+        assert_eq!(slots.thread, ["project_context"]);
+
+        let many: Vec<String> = (0..MAX_EXISTING_SLOTS + 10)
+            .map(|index| format!("user:llm:slot_{index:03}"))
+            .collect();
+        let bounded = ExistingSlots::from_keys(&many);
+        assert_eq!(bounded.user.len(), MAX_EXISTING_SLOTS);
+        // Newest first in, so the first names read are the ones kept.
+        assert!(bounded.user.contains(&"slot_000".to_owned()));
+        assert!(!bounded.user.contains(&format!("slot_{:03}", MAX_EXISTING_SLOTS)));
+    }
+
+    #[test]
+    fn the_slot_block_precedes_the_transcript_and_carries_no_content() {
+        let window = vec![WindowMessage {
+            role: "user".to_owned(),
+            content: "Jeg bruker Visma.net hver dag.".to_owned(),
+        }];
+        let slots = ExistingSlots {
+            user: vec!["employer".to_owned(), "tool_use".to_owned()],
+            thread: vec!["project_context".to_owned()],
+        };
+        let message = build_user_message(&slots, &window).expect("a readable window");
+        assert!(message.starts_with("EXISTING SLOTS\nuser: employer, tool_use\nthread: project_context\n"));
+        assert!(message.ends_with("CONVERSATION\nUser: Jeg bruker Visma.net hver dag.\n"));
+        assert!(EXTRACTION_SYSTEM_PROMPT.contains("EXISTING SLOTS"));
+    }
+
+    /// No stored slots, no change: the request is byte-for-byte the
+    /// transcript it always was, and an empty window still costs no call.
+    #[test]
+    fn without_existing_slots_the_user_turn_is_unchanged() {
+        let window = vec![WindowMessage {
+            role: "user".to_owned(),
+            content: "Jeg jobber i Aquatiq.".to_owned(),
+        }];
+        assert_eq!(
+            build_user_message(&ExistingSlots::default(), &window),
+            render_window(&window)
+        );
+        let slots = ExistingSlots {
+            user: vec!["employer".to_owned()],
+            thread: Vec::new(),
+        };
+        assert!(build_user_message(&slots, &[]).is_none());
     }
 
     #[test]

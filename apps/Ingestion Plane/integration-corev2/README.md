@@ -434,28 +434,92 @@ keeping OAuth, tokens, refresh, revocation, audit, and token leasing first-party
 ## ChatGPT subscription connections (Codex broker)
 
 `openai-codex-subscription` is an opt-in, text-only provider for a user who
-chooses to use their eligible ChatGPT plan through OpenAI's official Codex
-app-server. It is intentionally not an API-key importer and does not scrape a
-ChatGPT browser session.
+chooses to use their own eligible ChatGPT plan. It is intentionally not an
+API-key importer and does not scrape a ChatGPT browser session.
 
-Integration Core starts the documented device-code flow at
+**Sign-in.** Integration Core starts the Codex CLI device-code flow at
 `POST /api/v1/model-subscriptions/openai-codex/connect`, returns the
 verification URL and user code, and reports completion through
 `GET /api/v1/model-subscriptions/openai-codex/connect/{connectionId}/{loginId}`.
 The authenticated caller owns the resulting opaque `conn_*` connection. A
 caller can revoke it with `DELETE
-/api/v1/model-subscriptions/openai-codex/connections/{connectionId}`.
+/api/v1/model-subscriptions/openai-codex/connections/{connectionId}`, which
+runs Codex `account/logout` (revoke and delete). Login and logout still use the
+Codex device-code flow; a native device-code login is a later phase.
 
-The Codex CLI/app-server keeps its managed ChatGPT sign-in state in the
-connection's `CODEX_HOME` below `CODEX_SUBSCRIPTION_HOME`. The database stores
-only opaque connection metadata, capability consent, lifecycle status, and
-metadata-only audit events. There is no credential-lease endpoint for this
-provider, and Model Plane never receives a ChatGPT access token, refresh token,
-or browser cookie.
+**Two inference transports.**
+
+- `direct` (opt-in) sends plain Responses API requests to
+  `https://chatgpt.com/backend-api/codex/responses` over HTTP SSE with the
+  connection's ChatGPT OAuth access token, the way OpenCode, Crush and pi do.
+  It identifies itself honestly as `originator: verevon` with a `verevon/...`
+  User-Agent, always sends `store:false` and `stream:true`, and never sends
+  `max_output_tokens`, tools, or sampling parameters. A unary call is the same
+  stream, collected into one answer. There is no process spawn per call.
+- `app-server` (default) spawns the pinned Codex app-server per call. It stays
+  the default until OpenAI confirms the direct transport for a hosted,
+  multi-user product; its public statements so far cover individuals using
+  their own account in a client. Every Codex process the broker starts
+  (sign-in, sign-out, fallback) runs hardened: process-level `-c` flags turn
+  off plugins, remote plugins, apps and connectors, skills, hooks, tool
+  suggestion, shell and exec tools, web search, memories, analytics, feedback
+  and history. Every MCP server the connection's `config.toml` declares is
+  turned off by name (`-c mcp_servers.<name>.enabled=false`; an empty
+  `mcp_servers={}` override would merge away to nothing). The broker decodes
+  `config.toml` as TOML to find them, and refuses a fallback turn when the
+  file does not decode or declares MCP servers it cannot turn off by name.
+  A Codex process never inherits the broker's own secrets: `DATABASE_URL`
+  and every variable whose name has a `KEY`, `TOKEN`, `SECRET`, `PASSWORD`
+  or `CREDENTIAL` word are left out of its environment.
+  `CODEX_SQLITE_HOME` and `-c sqlite_home` point at a per-process directory
+  that is deleted afterwards, and startup removes any such directory a crash
+  or redeploy left behind, so no `logs_2.sqlite` prompt log survives. The
+  whole process group is killed on close, and shutdown ends pending sign-in
+  processes. Compose runs the API with `init: true` so PID 1 reaps those
+  processes. The API image links the vendored native Codex binary at
+  `/usr/local/bin/codex-native`, resolved at build time the way the npm
+  launcher (`bin/codex.js`) resolves it, and Compose points
+  `CODEX_APP_SERVER_COMMAND` there, so a call starts no Node process; the
+  broker then sets the launcher's `CODEX_MANAGED_PACKAGE_ROOT` and
+  `CODEX_MANAGED_BY_NPM=1` itself. `thread/start` carries the model, service
+  tier and reasoning effort (`model_reasoning_effort`) that `turn/start` uses,
+  so Codex's startup-prewarm request can match the turn's first request; a
+  turn with an output schema still differs from it in its text format, which
+  the pinned protocol cannot set at `thread/start`. The broker logs
+  `thread_effort_differs` when Codex reports another thread effort.
+  `CODEX_APP_SERVER_THREAD_EFFORT=false` leaves the effort out of
+  `thread/start` again (its earlier params, byte for byte; `turn/start` still
+  sets it) and skips that check.
+
+Switch to the direct transport without a rebuild by setting
+`CODEX_SUBSCRIPTION_TRANSPORT=direct` and recreating the container.
+
+**Token custody.** The Codex sign-in writes the connection's `auth.json` in its
+`CODEX_HOME` below `CODEX_SUBSCRIPTION_HOME`. The broker is the only refresher
+of that file: it re-reads it under a per-connection lock (plus a file lock
+against a second broker process), refreshes 10 minutes before expiry and once
+after a 401, and writes it back atomically in the Codex layout with mode 0600.
+It also refreshes before spawning the fallback, so Codex never refreshes during
+a call; when that refresh fails and Codex would refresh the token during the
+call itself, no fallback process is started. A refresh that was sent always
+completes and is stored, even when its caller gave up; if the file cannot be
+written, the rotated token is kept in memory and written on the next call, and
+no fallback process starts until it is, since Codex would read the consumed
+refresh token from the file.
+After a transient refresh failure the connection keeps its still-valid token
+for 30 seconds instead of retrying on every call. Refresh tokens rotate, and
+reusing one revokes the whole family, so run one broker replica per volume and
+never run Codex by hand against a live connection home. Tokens never leave Integration Core: the database stores only
+opaque connection metadata, capability consent, lifecycle status, and
+metadata-only audit events; there is no credential-lease endpoint for this
+provider; and Model Plane never receives a ChatGPT access token, refresh token,
+or browser cookie. Logs carry only content-free fields (ids, status, timings,
+token counts, sanitized error codes). Mount encrypted persistent storage at
+`CODEX_SUBSCRIPTION_HOME`.
 
 The Compose API image installs a pinned, reviewed release of the official
-`codex` CLI (override `CODEX_VERSION` only after reviewing a release). Mount
-encrypted persistent storage at `CODEX_SUBSCRIPTION_HOME`, and configure a unique
+`codex` CLI (override `CODEX_VERSION` only after reviewing a release, and
+re-run the offline hardening check). Configure a unique
 `CODEX_SUBSCRIPTION_MODEL_PLANE_API_KEY`. Model Plane must use the same value as
 `CODEX_SUBSCRIPTION_INTERNAL_API_KEY`, set
 `CODEX_SUBSCRIPTION_INTEGRATION_CORE_URL`, allow-list models in
@@ -464,19 +528,120 @@ encrypted persistent storage at `CODEX_SUBSCRIPTION_HOME`, and configure a uniqu
 verified ZDR commitment, so deployments that use Model Plane's strict residency
 gate must explicitly allow that posture before registering it.
 
-Callers select the connection by setting `provider_hint` to
+**Knobs.** The non-secret knobs are owned by the `integration-api` environment
+block in `../docker-compose.yml`. An invalid value fails startup and is listed
+in the provider's readiness.
+
+| Env | Default | Meaning |
+|---|---|---|
+| `CODEX_SUBSCRIPTION_TRANSPORT` | `app-server` | `app-server` or `direct` |
+| `CODEX_SUBSCRIPTION_DIRECT_BASE_URL` | `https://chatgpt.com/backend-api/codex` | https on host `chatgpt.com` only; no userinfo, query or fragment |
+| `CODEX_SUBSCRIPTION_DIRECT_ORIGINATOR` | `verevon` | `^[a-z][a-z0-9_-]{1,63}$`; Codex, OpenCode, Crush and pi names are rejected |
+| `CODEX_SUBSCRIPTION_DIRECT_REQUEST_SHAPE` | `classic` | `classic` (top-level instructions) or `lite` (Codex's lite shape) |
+| `CODEX_SUBSCRIPTION_DIRECT_PROMPT_MODE` | `roles` | `roles` (system, developer, user and assistant items) or `flattened` (one user turn, as the app-server sent it) |
+| `CODEX_SUBSCRIPTION_DIRECT_MAX_RETRIES` | `2` | 0 to 3 extra attempts, only before any answer text |
+| `CODEX_SUBSCRIPTION_REFRESH_SKEW` | `10m` | 1m to 24h; a startup warning below 5m plus the invocation timeout |
+| `CODEX_SUBSCRIPTION_MAX_CONCURRENCY` | `16` | concurrent calls across all connections |
+| `CODEX_SUBSCRIPTION_MAX_CONCURRENCY_PER_CONNECTION` | `4` | 1 up to the global value |
+| `CODEX_SUBSCRIPTION_QUEUE_TIMEOUT` | `30s` | wait for a slot, at most the invocation timeout; then 429 `rate_limited` |
+| `CODEX_APP_SERVER_HARDENED` | `true` | `false` restores the pre-hardening Codex arguments |
+| `CODEX_APP_SERVER_THREAD_EFFORT` | `true` | `thread/start` sends the turn's `model_reasoning_effort` so the startup prewarm matches the turn; `false` restores the earlier `thread/start` params |
+| `CODEX_APP_SERVER_COMMAND` | `/usr/local/bin/codex-native` (Compose; `codex` in code) | the Codex executable; `codex` runs the npm Node launcher, and startup falls back to it (warning `app_server_command_missing`) when an absolute path does not exist in the image |
+| `INTEGRATION_API_CPU_LIMIT` / `INTEGRATION_API_MEMORY_LIMIT` | `6.0` / `4G` | container limits, sized for per-call app-server spawns |
+| `CODEX_SUBSCRIPTION_INVOCATION_TIMEOUT` | `90s` | whole call, including queue, refresh and retries (unchanged) |
+| `CODEX_SUBSCRIPTION_LOGIN_TTL` | `10m` | device-code window (unchanged) |
+
+**Errors.** Every failed call carries one content-free reason code, which
+Model Plane relays to the chat UI. Nothing else of an upstream error is kept,
+logged or returned: not Codex's `message` or `additionalDetails`, an upstream
+body, a JSON-RPC `error.message`, or the plan type.
+
+| Code | Unary status | Meaning |
+|---|---|---|
+| `subscription_usage_limit` | 429 | the plan's Codex usage limit is exhausted, or the plan has no Codex usage or no credits left (see below) |
+| `rate_limited` | 429 | the broker's own concurrency queue timed out, Integration Core's request limiter refused the call, or ChatGPT throttled it briefly; it does not say which, so copy for it must not blame ChatGPT |
+| `subscription_reauth_required` | 409 | the ChatGPT sign-in must be renewed; the connection is marked `needs_refresh` |
+| `subscription_upstream_unavailable` | 503 | a transient ChatGPT or Codex failure (after their own retries), or the invocation deadline; a retry may still fail |
+| `subscription_context_too_long` | 413 | the prompt exceeds the model's context window |
+| `subscription_bad_request` | 422 | ChatGPT rejected the request (a 400/422 or a policy refusal) |
+| `subscription_broker_failed` | 502 | anything else |
+
+When known, the error object also carries `resetsAt` (RFC3339 UTC, whole
+seconds), `retryAfterMs`, `windowMinutes` and `limitReachedType`, each omitted
+when unknown; they are account metadata, never content. An integer
+`Retry-After` is sent for `rate_limited`, for a usage limit whose reset is
+known (there is no made-up default), and for an upstream outage only when the
+upstream sent a hint. The stream route checks the connection and takes its
+queue slot before it sends the 200 and `ready`; a failure after `ready` is one
+`subscription.error` event with the same code and fields. A connection already
+`needs_refresh` is refused up front with 409 `subscription_reauth_required`;
+any other inactive state stays 409 `subscription_connection_inactive`.
+
+On the app-server transport a usage limit takes its reset from Codex's
+`account/rateLimits/updated` notification (the exhausted window, the later one
+when both are), else from one `account/rateLimits/read` (a non-model usage
+read, bounded to 3s) on the still-open process; a failed read leaves it
+unknown. The direct transport reads the reset from `resets_at`,
+`resets_in_seconds`, the exhausted window of the active `x-codex-*` rate-limit
+header family, then `Retry-After`. On both, a reset more than 7 days ahead,
+from any of these sources, is unknown rather than clamped, so no reset time
+earlier than the real one is shown.
+
+The pinned Codex app-server reports an exhausted limit, spent credits and a
+plan without Codex all as `usageLimitExceeded`, so they cannot be told apart
+there, and all are `subscription_usage_limit`. The direct transport does tell
+them apart and logs a plan without Codex as `error_kind` `usage_not_included`,
+but returns the same public code, so that every layer keeps one vocabulary.
+Without a reset the message therefore names both causes; copy shown to the
+user must too.
+
+A 401 gets the broker's one forced token refresh on either transport: a
+refresh the token endpoint refuses (or a sign-in for another account) is
+`subscription_reauth_required`, and a successful one leaves a transient
+`subscription_upstream_unavailable`, whether the retried request still got a
+401 or the 401 came after answer text (direct transport, `error_kind`
+`unauthorized_after_recovery`), so a passing 401 never disconnects the user.
+
+Codex retries any unexpected HTTP status and then fails the turn as `other`,
+which names no status. Its retry notifications do name one, so a turn failed
+as `other` after retries is `subscription_upstream_unavailable` only when the
+latest retry named no status (a dropped stream, a timeout), a 5xx, or 408, 425
+or 429. A retried persistent client error, such as a 403 from a workspace
+without Codex or a 404, is `subscription_broker_failed`, because a retry
+would fail the same way. The latest retry stands in for the final attempt,
+which Codex does not describe; the trade-off is that a final attempt failing
+differently from the retry before it is labelled by that retry.
+
+Each failed call logs one `codex_subscription_upstream` warning with `reason`,
+`error_kind` and `error_code`, and for a usage limit `resets_at`,
+`window_mins` and `limit_reached_type`. The app-server line also carries
+`upstream_retries`, `retry_http_status` and `rate_limits_source`.
+
+Model Plane's inference-core spells these codes and the `code`, `resetsAt` and
+`retryAfterMs` fields as its own literals.
+`internal/api/codex_subscription_contract_test.go` reads its adapter
+(`Model Plane/rust/services/inference-core/src/provider/codex_subscription.rs`)
+and fails when a code the broker sends, other than
+`subscription_broker_failed`, or one of those field names, or the pre-flight
+`subscription_connection_inactive`, is not what inference-core reads. A code
+it does not read would reach the chat UI as the generic failure.
+
+**Scope.** Callers select the connection by setting `provider_hint` to
 `openai-codex-subscription` and `subscription_connection_id` on Model Plane's
 `InferRequest`. Model Gateway exposes the same selector as `provider` and
 `subscription_connection_id` (or `subscriptionConnectionId`) on its normal
 invoke and streaming contracts. The broker checks the verified org and user
-scope before every turn, runs Codex with a per-connection read-only empty
-workspace and approvals disabled, and audits only the request id and model —
-never message content.
-Tools, structured output, vision, embeddings, and ZDR requests are rejected,
-rather than silently using a less constrained route. ChatGPT plan availability,
-model availability, rate limits, and terms remain governed by the user's OpenAI
-subscription; this avoids API-token spend for an eligible run but does not make
-usage unlimited or guaranteed free.
+scope before every turn and audits only the request id and model, never
+message content. Structured output (a JSON schema, sent as strict
+`json_schema`) and tool proposals (JSON data validated by Model Gateway) are
+supported; vision, embeddings, and ZDR requests are rejected rather than
+silently using a less constrained route.
+
+**Policy.** Each connection must be the end user's own ChatGPT account: no
+sharing, pooling, or falling back to another connection's credential. ChatGPT
+plan availability, model availability, rate limits, and terms remain governed by
+the user's OpenAI subscription; this avoids API-token spend for an eligible run
+but does not make usage unlimited or guaranteed free.
 
 ## Unified-service replacement
 

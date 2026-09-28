@@ -36,6 +36,8 @@ use std::sync::{Arc, Mutex};
 
 use dashmap::DashMap;
 
+use crate::normalize::RetrievalScope;
+
 /// The instruction that turns delivery into a pause rather than an interruption.
 ///
 /// Both failure modes are named explicitly because both were observed in
@@ -72,7 +74,17 @@ pub const MAX_QUEUED_MESSAGES: usize = 3;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EnqueueOutcome {
     /// Accepted. `pending` counts everything now waiting, including this one.
-    Queued { pending: usize, thread_id: String },
+    Queued {
+        pending: usize,
+        thread_id: String,
+        conversation_only: bool,
+        /// The stream's own retrieval scope (chat-wave2 scope spec §5's
+        /// mid-run rule): a message queued mid-stream always inherits the
+        /// scope the run STARTED with, same as `conversation_only` already
+        /// does above — a picker change mid-stream only takes effect on the
+        /// next turn, never the in-flight one.
+        retrieval_scope: RetrievalScope,
+    },
     /// No active stream owned by this tenant/user has that request id.
     NoActiveStream,
     /// [`MAX_QUEUED_MESSAGES`] already waiting.
@@ -88,6 +100,8 @@ struct QueuedEntry {
     org_id: String,
     user_id: String,
     thread_id: String,
+    conversation_only: bool,
+    retrieval_scope: RetrievalScope,
 }
 
 /// Tracks the mid-run input queue for each active stream, by `request_id`.
@@ -104,7 +118,15 @@ impl QueuedInputRegistry {
 
     /// Start accepting mid-run input for `request_id`. Call
     /// [`finish`](Self::finish) when the stream ends.
-    pub fn register(&self, request_id: &str, org_id: &str, user_id: &str, thread_id: &str) {
+    pub fn register(
+        &self,
+        request_id: &str,
+        org_id: &str,
+        user_id: &str,
+        thread_id: &str,
+        conversation_only: bool,
+        retrieval_scope: RetrievalScope,
+    ) {
         self.inner.insert(
             request_id.to_owned(),
             QueuedEntry {
@@ -112,6 +134,8 @@ impl QueuedInputRegistry {
                 org_id: org_id.to_owned(),
                 user_id: user_id.to_owned(),
                 thread_id: thread_id.to_owned(),
+                conversation_only,
+                retrieval_scope,
             },
         );
     }
@@ -176,6 +200,8 @@ impl QueuedInputRegistry {
         EnqueueOutcome::Queued {
             pending: queue.len(),
             thread_id: entry.thread_id.clone(),
+            conversation_only: entry.conversation_only,
+            retrieval_scope: entry.retrieval_scope,
         }
     }
 
@@ -223,11 +249,13 @@ pub fn delivery_messages(queued: &[String]) -> Vec<mp_contracts::model_plane::v1
     }
     let mut messages = Vec::with_capacity(queued.len() + 1);
     messages.push(ChatMessage {
+        compaction_summary: String::new(),
         role: "system".to_owned(),
         content: QUEUED_INPUT_PAUSE.to_owned(),
         name: String::new(),
     });
     messages.extend(queued.iter().map(|text| ChatMessage {
+        compaction_summary: String::new(),
         role: "user".to_owned(),
         content: text.clone(),
         name: String::new(),
@@ -241,7 +269,7 @@ mod tests {
 
     fn registry() -> QueuedInputRegistry {
         let registry = QueuedInputRegistry::new();
-        registry.register("req-1", "org-a", "user-a", "thread-1");
+        registry.register("req-1", "org-a", "user-a", "thread-1", false, RetrievalScope::Auto);
         registry
     }
 
@@ -254,9 +282,44 @@ mod tests {
             EnqueueOutcome::Queued {
                 pending: 1,
                 thread_id: "thread-1".to_owned(),
+                conversation_only: false,
+                retrieval_scope: RetrievalScope::Auto,
             }
         );
         assert_eq!(registry.drain("req-1"), vec!["hold on, use EUR".to_owned()]);
+    }
+
+    #[test]
+    fn queued_input_inherits_the_authorized_stream_source_scope() {
+        let registry = QueuedInputRegistry::new();
+        registry.register("isolated", "org-a", "user-a", "thread-1", true, RetrievalScope::Auto);
+        assert_eq!(registry.enqueue_for("isolated", "org-a", "user-a", "shorten the draft"),
+            EnqueueOutcome::Queued {
+                pending: 1,
+                thread_id: "thread-1".to_owned(),
+                conversation_only: true,
+                retrieval_scope: RetrievalScope::Auto,
+            });
+        assert_eq!(registry.enqueue_for("isolated", "org-b", "user-a", "widen sources"), EnqueueOutcome::NoActiveStream);
+    }
+
+    /// chat-wave2 scope spec §5's mid-run rule: a message queued mid-stream
+    /// always inherits the STREAM's retrieval scope, exactly the way
+    /// `conversation_only` already does above — a picker change mid-stream
+    /// only takes effect on the next turn, never the in-flight one.
+    #[test]
+    fn queued_input_inherits_the_streams_own_retrieval_scope() {
+        let registry = QueuedInputRegistry::new();
+        registry.register("req-1", "org-a", "user-a", "thread-1", false, RetrievalScope::WebOnly);
+        assert_eq!(
+            registry.enqueue_for("req-1", "org-a", "user-a", "check the news"),
+            EnqueueOutcome::Queued {
+                pending: 1,
+                thread_id: "thread-1".to_owned(),
+                conversation_only: false,
+                retrieval_scope: RetrievalScope::WebOnly,
+            }
+        );
     }
 
     /// The whole point: nothing is silently dropped. An unknown or foreign

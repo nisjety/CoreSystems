@@ -11,6 +11,16 @@ export type ChatContextualTab = Exclude<ChatTab, 'chat'>
 
 export type ChatSurfaceAvailability = {
   sourceCount: number
+  /**
+   * Sources actually READ, as opposed to found-but-never-fetched leads. Deep
+   * research can list two dozen candidates and read three of them, and a lead
+   * is not evidence -- so it may populate the tab (`available`) without being
+   * worth pulling the user out of the conversation for (`claimsFocus`).
+   * Optional and, when absent, treated as "none read" rather than falling back
+   * to `sourceCount`: guessing is what made the panel open on a lead in the
+   * first place, and the same reasoning applies here as to `workStepCount`.
+   */
+  readSourceCount?: number
   hasGrounding: boolean
   artifactCount: number
   attachmentCount: number
@@ -101,8 +111,11 @@ export const CHAT_SURFACE_REGISTRY: readonly ChatSurfaceSpec[] = [
     icon: Link2,
     priority: 30,
     available: (state) => state.sourceCount > 0 || state.hasGrounding,
-    // A grounding summary with no sources is not evidence worth interrupting for.
-    claimsFocus: (state) => state.sourceCount > 0,
+    // A grounding summary with no sources is not evidence worth interrupting
+    // for -- and neither is a source we found but never read. Offering the tab
+    // uses the full count above; claiming focus uses only what was actually
+    // read, so the panel cannot pop open to show a page nobody fetched.
+    claimsFocus: (state) => (state.readSourceCount ?? 0) > 0,
   },
   {
     id: 'trace',

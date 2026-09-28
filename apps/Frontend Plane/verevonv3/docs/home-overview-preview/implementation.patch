@@ -1,0 +1,603 @@
+--- a/src/features/dashboard/home/DashboardHome.tsx
++++ b/src/features/dashboard/home/DashboardHome.tsx
+@@ -1,4 +1,4 @@
+-import { ChevronDown, ChevronUp } from '@/shared/icons'
++import { ChevronDown, ChevronUp, MessageCircleMore, Minus, MoreHorizontal, Plus } from '@/shared/icons'
+ import { createEffect, createMemo, createSignal, Show } from 'solid-js'
+ import { DashboardCardsRail } from '@/features/dashboard/home/DashboardCards'
+ import { DashboardComposerPanel, DashboardHomeHeader, DashboardTabs } from '@/features/dashboard/home/DashboardHomeChrome'
+@@ -13,6 +13,9 @@
+ import { useCoreWorkspace } from '@/features/core/lib/workspace-context'
+ import { useI18n } from '@/shared/i18n'
+ import { cn } from '@/shared/lib/cn'
++import { chatAppearanceActive } from '@/features/chat/lib/chat-appearance-preview'
++import { DashboardOverview } from './DashboardOverview'
++import './dashboard-overview.css'
+ 
+ const cardsPerPage = 3
+ 
+@@ -27,6 +30,9 @@
+   const [searchPreviewActive, setSearchPreviewActive] = createSignal(false)
+   const [knowledgePreviewActive, setKnowledgePreviewActive] = createSignal(false)
+   const [cardsRevealed, setCardsRevealed] = createSignal(false)
++  const [dockExpanded, setDockExpanded] = createSignal(false)
++  const [dockMinimized, setDockMinimized] = createSignal(false)
++  const overview = () => chatAppearanceActive('dashboard')
+   // Warm the chat route chunk so the first composer→chat View Transition morph
+   // finds its target already mounted (no lazy/Suspense gap on the first launch).
+   createEffect(
+@@ -89,6 +95,9 @@
+   const applyCardPrompt = (card: DashboardCard) => {
+     setActiveTab('Chat')
+     setMessage(i18n.tr(card.prompt, card.promptEn))
++    setDockMinimized(false)
++    setDockExpanded(true)
++    queueMicrotask(() => document.getElementById('verevon-dashboard-input')?.focus())
+   }
+ 
+   const changeActiveTab = (tab: DashboardTab) => {
+@@ -106,19 +115,36 @@
+   }
+ 
+   return (
+-    <div class="verevon-dashboard-surface dashboard-home">
++    <div class={cn('verevon-dashboard-surface dashboard-home', overview() && 'dashboard-home--overview')} data-home-tab={activeTab()}>
+       <div class="pointer-events-none absolute inset-0 dashboard-home-grid" aria-hidden="true" />
+ 
+       <div class={cn('verevon-home-stage relative flex h-full min-h-0 flex-col overflow-hidden', isLaunching() && 'verevon-home-launching')}>
++        <Show when={overview()}>
++          <header class="home-overview-heading">
++            <div><span class="home-eyebrow">{workspace().name} <span aria-hidden="true">/</span> {i18n.tr('Oversikt', 'Overview')}</span><h1>{homeTitle()}</h1><p>{activeTab() === 'Chat' ? i18n.tr('Det siste arbeidet ditt og dagens oppdateringer.', 'Your recent work and today’s updates.') : activeTab() === 'Søk' ? i18n.tr('Finn svar i arbeidsområdet og på nettet.', 'Find answers across your workspace and the web.') : i18n.tr('Gjør nettsider og dokumenter til kunnskap.', 'Turn websites and documents into knowledge.')}</p></div>
++            <time datetime={new Date().toISOString()}>{new Date().toLocaleDateString(i18n.locale() === 'no' ? 'nb-NO' : 'en-GB', { weekday: 'long', day: 'numeric', month: 'long' })}</time>
++          </header>
++        </Show>
+         <DashboardTabs activeTab={activeTab()} onTabChange={changeActiveTab} />
+ 
+         <div class={bandsClass()}>
+-          <Show when={!searchExpanded() && !knowledgeBrowserHeaderInline()}>
++          <Show when={!overview() && !searchExpanded() && !knowledgeBrowserHeaderInline()}>
+             <DashboardHomeHeader compact={resultsView()} planLabel={planLabel()} planTrial={workspace().planTrial} title={homeTitle()} />
+           </Show>
+ 
+-          <section class={composerSectionClass()}>
++          <Show when={overview() && (activeTab() === 'Chat' || (!searchExpanded() && !resultPresent()))}><DashboardOverview onPrompt={applyCardPrompt} /></Show>
++
++          <section class={cn(composerSectionClass(), overview() && activeTab() === 'Chat' && 'home-chat-dock')} data-dock-expanded={dockExpanded() ? 'true' : 'false'} data-dock-minimized={dockMinimized() ? 'true' : 'false'} aria-label={overview() && activeTab() === 'Chat' ? i18n.tr('Spør Verevon', 'Ask Verevon') : undefined}>
++            <Show when={overview() && activeTab() === 'Chat'}>
++              <div class="home-chat-dock__header">
++                <button type="button" aria-label={dockMinimized() ? i18n.tr('Åpne skrivefelt', 'Expand chat bar') : i18n.tr('Minimer skrivefelt', 'Minimize chat bar')} aria-expanded={dockMinimized() ? 'false' : 'true'} onClick={() => setDockMinimized((value) => !value)}><Show when={dockMinimized()} fallback={<Minus size={16} />}><Plus size={16} /></Show></button>
++                <MessageCircleMore size={16} /><strong>{i18n.tr('Spør Verevon', 'Ask Verevon')}</strong><span>{i18n.tr('Ny samtale', 'New conversation')}</span>
++                <button type="button" aria-label={i18n.tr('Flere chattevalg', 'More chat options')} title={i18n.tr('Modell, kontekst og verktøy', 'Model, context and tools')} aria-expanded={dockExpanded() ? 'true' : 'false'} onClick={() => { setDockMinimized(false); setDockExpanded((value) => !value) }}><MoreHorizontal size={18} /></button>
++              </div>
++            </Show>
+             <DashboardComposerPanel
++              persistentChat={overview()}
++              compactChat={overview() && !dockExpanded()}
+               activeTab={activeTab()}
+               knowledgeInlinePlanLabel={knowledgeBrowserHeaderInline() ? formatPlanBadge(workspace().plan, workspace().planTrial, i18n.tr) : undefined}
+               knowledgeInlineTitle={knowledgeBrowserHeaderInline() ? homeTitle() : undefined}
+@@ -133,7 +159,7 @@
+             />
+           </section>
+ 
+-          <Show when={!searchExpanded()}>
++          <Show when={!overview() && !searchExpanded()}>
+             <DashboardCardsRail
+               hidden={resultsView()}
+               hideNext={resultPresent()}
+@@ -144,7 +170,7 @@
+           </Show>
+         </div>
+ 
+-        <Show when={resultPresent()}>
++        <Show when={!overview() && resultPresent()}>
+           <button
+             type="button"
+             class="verevon-home-results-toggle"
+--- a/src/features/dashboard/home/DashboardHomeChrome.tsx
++++ b/src/features/dashboard/home/DashboardHomeChrome.tsx
+@@ -64,6 +64,8 @@
+ 
+ export function DashboardComposerPanel(props: {
+   activeTab: DashboardTab
++  persistentChat?: boolean
++  compactChat?: boolean
+   knowledgeInlinePlanLabel?: string
+   knowledgeInlineTitle?: string
+   message: string
+@@ -77,9 +79,8 @@
+ }) {
+   return (
+     <div class={props.searchExpanded ? 'verevon-home-composer verevon-home-composer-expanded verevon-panel-in' : 'verevon-home-composer verevon-panel-in'}>
+-      <Show
+-        when={props.activeTab === 'Chat'}
+-        fallback={props.activeTab === 'Søk'
++      <Show when={props.activeTab !== 'Chat'}>
++        {props.activeTab === 'Søk'
+           ? (
+             <SearchPanel
+               expanded={props.searchExpanded}
+@@ -96,12 +97,16 @@
+               previewCollapsed={props.previewCollapsed}
+             />
+           )}
+-      >
+-        <DashboardComposer
+-          message={props.message}
+-          onLaunchStart={props.onLaunchStart}
+-          onMessageChange={props.onMessageChange}
+-        />
++      </Show>
++      <Show when={props.persistentChat || props.activeTab === 'Chat'}>
++        <div hidden={props.activeTab !== 'Chat'}>
++          <DashboardComposer
++            compact={props.compactChat}
++            message={props.message}
++            onLaunchStart={props.onLaunchStart}
++            onMessageChange={props.onMessageChange}
++          />
++        </div>
+       </Show>
+     </div>
+   )
+--- a/src/features/dashboard/home/DashboardCards.tsx
++++ b/src/features/dashboard/home/DashboardCards.tsx
+@@ -126,7 +126,7 @@
+   )
+ }
+ 
+-function DashboardImageCard(props: {
++export function DashboardImageCard(props: {
+   card: DashboardCard
+   onPrompt: (card: DashboardCard) => void
+ }) {
+@@ -419,7 +419,7 @@
+   const title = () => i18n.tr(props.card.title, props.card.titleEn)
+ 
+   return (
+-    <div class="verevon-dashboard-card dashboard-info-card">
++    <div class="verevon-dashboard-card dashboard-info-card" data-information-card={props.card.id}>
+       <div class="verevon-dashboard-card-label">
+         {i18n.tr(props.card.category, props.card.categoryEn)}
+       </div>
+--- a/src/features/dashboard/home/DashboardComposer.tsx
++++ b/src/features/dashboard/home/DashboardComposer.tsx
+@@ -848,6 +848,8 @@
+     onRetrievalScopeChange?: (value: import('@/shared/actions/chat-source-scope').RetrievalScope) => void;
+ 	/** Calm, conversation-first presentation used by the dedicated chat page. */
+ 	appearance?: "chat" | "default";
++	/** Compact Home dock; only changes the input's initial presentation. */
++	compact?: boolean;
+ 	browseWeb?: boolean;
+ 	imageMode?: boolean;
+ 	message: string;
+@@ -1492,7 +1494,7 @@
+ 	// and textareaExpanded()), and the effect keeps the original read-then-write
+ 	// DOM sequence untouched.
+ 	createEffect(
+-		() => ({ message: props.message, expanded: textareaExpanded() }),
++		() => ({ message: props.message, expanded: textareaExpanded(), compact: props.compact }),
+ 		({ expanded }) => {
+ 			const element = textareaRef;
+ 			if (!element) return;
+@@ -3281,12 +3283,12 @@
+ 							)}
+ 							class="verevon-dashboard-textarea"
+ 							aria-busy={voiceRecording() ? "true" : "false"}
+-							placeholder={textareaPlaceholder(
++							placeholder={props.compact ? i18n.tr("Spør om hva som helst …", "Ask anything…") : textareaPlaceholder(
+ 								modeAnnouncement(),
+ 								i18n,
+ 								activeSuggestion(),
+ 							)}
+-							rows="3"
++							rows={props.compact ? '1' : '3'}
+ 							style={textareaOverlayStyle(hasEntityOverlay())}
+ 							value={props.message}
+ 							onInput={(event) =>
+--- a/src/features/chat/lib/chat-appearance-preview.ts
++++ b/src/features/chat/lib/chat-appearance-preview.ts
+@@ -2,12 +2,12 @@
+ import { readClientJson, removeClientValue, writeClientJson } from '@/shared/session/client-storage'
+ 
+ export const CHAT_APPEARANCE_KEY = 'verevon.chat-appearance-preview.v1'
+-export const chatAppearanceKeys = ['welcome', 'dock', 'composer', 'history', 'navigation', 'organizer', 'context'] as const
++export const chatAppearanceKeys = ['welcome', 'dock', 'composer', 'history', 'navigation', 'organizer', 'context', 'dashboard'] as const
+ export type ChatAppearanceKey = typeof chatAppearanceKeys[number]
+ export type ChatAppearanceChoices = Record<ChatAppearanceKey, boolean>
+ 
+ const original: ChatAppearanceChoices = {
+-  welcome: false, dock: false, composer: false, history: false, navigation: false, organizer: false, context: false,
++  welcome: false, dock: false, composer: false, history: false, navigation: false, organizer: false, context: false, dashboard: false,
+ }
+ 
+ function isChoices(value: unknown): value is Partial<ChatAppearanceChoices> {
+--- a/src/features/chat/components/ChatAppearancePreview.tsx
++++ b/src/features/chat/components/ChatAppearancePreview.tsx
+@@ -27,6 +27,7 @@
+     { key: 'navigation', label: i18n.tr('Roligere navigasjon', 'Softer navigation'), description: i18n.tr('Tydelig søk, sidefeltknapp og en Mer-meny.', 'Clear search, sidebar toggle and a More menu.') },
+     { key: 'organizer', label: i18n.tr('Organiser samtaler', 'Chat organizer'), description: i18n.tr('Søk, sorter, grupper og samle i prosjekter.', 'Search, sort, group and organize into projects.') },
+     { key: 'context', label: i18n.tr('Samlet kontekstknapp', 'Combined context button'), description: i18n.tr('Ikon og kunnskapstekst i samme knapp.', 'Knowledge icon and text inside one button.') },
++    { key: 'dashboard', label: i18n.tr('Ny startside', 'Dashboard overview'), description: i18n.tr('Nylig arbeid, rolige kort og et kompakt skrivefelt.', 'Recent work, quiet panels and a compact chat dock.') },
+   ]
+ 
+   createEffect(() => undefined, () => {
+--- /dev/null
++++ b/src/features/dashboard/home/DashboardOverview.tsx
+@@ -0,0 +1,82 @@
++import { createEffect, createMemo, createSignal, For, Show } from 'solid-js'
++import { ArrowUpRight, BookOpen, Folder, MessageCircleMore, Pin, RefreshCw, Sparkles } from '@/shared/icons'
++import { listChatThreads } from '@/shared/api/chat-client'
++import { getSession } from '@/shared/session/session-store'
++import { useI18n } from '@/shared/i18n'
++import { selectChatThread, type ChatThreadHistoryItem } from '@/features/chat/lib/chat-thread-history'
++import { DashboardImageCard } from './DashboardCards'
++import { dashboardCards, type DashboardCard } from './dashboard-cards'
++
++/** Read-only overview. Uses the same scoped history API as Chat; it never
++ * writes snapshots or manufactures metrics from the browser's history cap. */
++export function DashboardRecentWork() {
++  const i18n = useI18n()
++  const session = getSession()
++  const [threads, setThreads] = createSignal<ChatThreadHistoryItem[]>([])
++  const [loading, setLoading] = createSignal(true)
++  const [error, setError] = createSignal(false)
++  const [pinnedOnly, setPinnedOnly] = createSignal(false)
++  const [refresh, setRefresh] = createSignal(0)
++  createEffect(
++    () => ({ user: session.user?.id, org: session.activeOrg?.id, refresh: refresh() }),
++    ({ user, org }) => {
++      let cancelled = false
++      setThreads([])
++      setError(false)
++      setLoading(Boolean(user && org))
++      if (user && org) void listChatThreads().then((items) => {
++        if (!cancelled) setThreads(items)
++      }).catch(() => { if (!cancelled) setError(true) })
++        .finally(() => { if (!cancelled) setLoading(false) })
++      return () => { cancelled = true }
++    },
++  )
++  const visible = createMemo(() => [...threads()]
++    .filter((thread) => !pinnedOnly() || thread.pinned)
++    .sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt))
++    .slice(0, 4))
++  const dateLabel = (value: string) => {
++    const date = new Date(value)
++    return Number.isNaN(date.getTime()) ? '' : date.toLocaleDateString(i18n.locale() === 'no' ? 'nb-NO' : 'en-GB', { day: 'numeric', month: 'short' })
++  }
++  return (
++    <section class="home-overview-card home-recent" aria-labelledby="home-recent-title" aria-busy={loading() ? 'true' : 'false'}>
++      <header class="home-overview-card__header">
++        <div><span class="home-eyebrow">{i18n.tr('Arbeidsområdet ditt', 'Your workspace')}</span><h2 id="home-recent-title">{i18n.tr('Fortsett der du slapp', 'Pick up where you left off')}</h2></div>
++        <button type="button" class="home-quiet-button" aria-pressed={pinnedOnly() ? 'true' : 'false'} onClick={() => setPinnedOnly((value) => !value)} title={i18n.tr('Vis festede samtaler', 'Show pinned conversations')}><Pin size={14} />{i18n.tr('Festet', 'Pinned')}</button>
++      </header>
++      <Show when={!loading()} fallback={<div class="home-recent__empty" role="status">{i18n.tr('Henter samtalene dine …', 'Loading your conversations…')}</div>}>
++        <Show when={!error()} fallback={<div class="home-recent__empty" role="status"><p>{i18n.tr('Samtalene kunne ikke lastes.', 'Conversations could not be loaded.')}</p><button type="button" class="home-quiet-button" onClick={() => setRefresh((value) => value + 1)}><RefreshCw size={14} />{i18n.tr('Prøv igjen', 'Try again')}</button></div>}>
++          <Show when={visible().length} fallback={<div class="home-recent__empty"><MessageCircleMore size={24} /><p>{pinnedOnly() ? i18n.tr('Ingen festede samtaler ennå.', 'No pinned conversations yet.') : i18n.tr('Det neste du jobber med, starter her.', 'Your next piece of work starts here.')}</p><span>{i18n.tr('Still et spørsmål i skrivefeltet nedenfor.', 'Ask a question in the chat bar below.')}</span></div>}>
++            <div class="home-recent__list"><For each={visible()}>{(thread) => (
++              <a link href="/chat" class="home-recent__row" onClick={() => selectChatThread(thread.threadId)}>
++                <span class="home-recent__icon"><MessageCircleMore size={18} /></span>
++                <span class="home-recent__copy"><strong>{thread.title}</strong><small>{thread.preview && thread.preview !== thread.title ? thread.preview : i18n.tr('Fortsett samtalen', 'Continue conversation')}</small></span>
++                <time datetime={thread.updatedAt}>{dateLabel(thread.updatedAt)}</time><ArrowUpRight size={14} />
++              </a>
++            )}</For></div>
++          </Show>
++        </Show>
++      </Show>
++      <footer><a link href="/chat">{i18n.tr('Alle samtaler', 'All conversations')}<ArrowUpRight size={14} /></a><span>{i18n.tr('Nylig oppdatert', 'Recently updated')}</span></footer>
++    </section>
++  )
++}
++
++export function DashboardOverview(props: { onPrompt: (card: DashboardCard) => void }) {
++  const i18n = useI18n()
++  return (
++    <section class="home-overview-grid" aria-label={i18n.tr('Oversikt over arbeidsområdet', 'Workspace overview')}>
++      <DashboardRecentWork />
++      <For each={dashboardCards.filter((card) => ['weather', 'news', 'traffic'].includes(card.id))}>{(card) => <DashboardImageCard card={card} onPrompt={props.onPrompt} />}</For>
++      <section class="home-overview-card home-destinations" aria-labelledby="home-destinations-title">
++        <header><span class="home-eyebrow">{i18n.tr('Verktøyene dine', 'Your tools')}</span><h2 id="home-destinations-title">{i18n.tr('Klar for neste steg', 'Ready for what’s next')}</h2></header>
++        <nav aria-label={i18n.tr('Snarveier i arbeidsområdet', 'Workspace shortcuts')}>
++          <a link href="/knowledge"><BookOpen size={18} /><span><strong>{i18n.tr('Kunnskap', 'Knowledge')}</strong><small>{i18n.tr('Kilder og dokumenter', 'Sources & documents')}</small></span><ArrowUpRight size={14} /></a>
++          <a link href="/agents"><Sparkles size={18} /><span><strong>{i18n.tr('Agenter', 'Agents')}</strong><small>{i18n.tr('Arbeidsflyter og kjøringer', 'Workflows & runs')}</small></span><ArrowUpRight size={14} /></a>
++          <a link href="/spaces"><Folder size={18} /><span><strong>{i18n.tr('Rom', 'Spaces')}</strong><small>{i18n.tr('Arbeid sammen', 'Work together')}</small></span><ArrowUpRight size={14} /></a>
++        </nav>
++      </section>
++    </section>
++  )
++}
+--- /dev/null
++++ b/src/features/dashboard/home/dashboard-overview.css
+@@ -0,0 +1,189 @@
++/* Home preview: warm paper surfaces, an asymmetric workspace board, and a
++   compact chat dock. Every rule stays inside the independent Home switch. */
++.dashboard-home--overview {
++  --home-canvas: var(--panel);
++  --home-card: color-mix(in srgb, var(--panel) 96%, var(--verevon-text));
++  --home-line: color-mix(in srgb, var(--verevon-text) 9%, transparent);
++  --home-ink: var(--verevon-text);
++  --home-muted: var(--verevon-text-muted);
++  --home-weather: color-mix(in srgb, var(--verevon-accent) 16%, var(--panel));
++  background: var(--home-canvas);
++  color: var(--home-ink);
++  --dashboard-home-h1-size: 36px;
++  --dashboard-home-h2-size: 20px;
++  --dashboard-home-h3-size: 15px;
++  --dashboard-home-body-size: 13px;
++}
++.dark .dashboard-home--overview {
++  color-scheme: dark;
++  --home-canvas: #20211f;
++  --home-card: #2a2b28;
++  --home-ink: #f0f0eb;
++  --home-muted: #babbb4;
++  --home-line: rgb(240 240 235 / 12%);
++  --home-weather: color-mix(in srgb, var(--verevon-accent) 10%, var(--home-card));
++}
++.dark .home-chat-dock .verevon-dashboard-textarea { color: var(--home-ink); }
++.dark .home-chat-dock .verevon-dashboard-textarea::placeholder { color: var(--home-muted); }
++.dashboard-home--overview .dashboard-home-grid { display: none; }
++.dashboard-home--overview .verevon-home-stage { overflow-y: auto; padding: 40px 40px 24px; scrollbar-gutter: stable; }
++.home-overview-heading { display: flex; flex-shrink: 0; align-items: flex-start; justify-content: space-between; gap: 24px; width: 100%; max-width: 1240px; margin: 0 auto 24px; }
++.home-eyebrow { display: block; color: var(--home-muted); font-size: 11px; font-weight: 500; line-height: 16px; letter-spacing: .015em; }
++.home-eyebrow > span { padding: 0 8px; color: var(--home-line); }
++.home-overview-heading h1 { margin: 12px 0 8px; font-size: clamp(26px, 2.6vw, 36px); font-weight: 400; line-height: 1.2; letter-spacing: -.035em; }
++.home-overview-heading p { margin: 0; color: var(--home-muted); font-size: 13px; }
++.home-overview-heading > time { padding-top: 3px; color: var(--home-muted); font-size: 12px; white-space: nowrap; }
++.dashboard-home--overview .verevon-home-tabs { position: static; width: 100%; max-width: 1240px; height: auto; min-height: 44px; margin: 0 auto 20px; padding: 0; flex-shrink: 0; }
++.dashboard-home--overview .dashboard-home-tabs__inner { justify-content: flex-start; width: 100%; max-width: none; padding: 0; }
++.dashboard-home--overview .dashboard-home-tabs__pill { gap: 6px; padding: 0; border: 0; background: transparent; box-shadow: none; }
++.dashboard-home--overview .dashboard-home-tabs__pill button { min-width: 76px; min-height: 40px; padding: 8px 18px; border: 0; border-radius: 8px; color: var(--home-muted); background: transparent; font-size: 13px; font-weight: 500; box-shadow: none; }
++.dashboard-home--overview .dashboard-home-tabs__pill button:hover { background: var(--home-card); color: var(--home-ink); }
++.dashboard-home--overview .dashboard-home-tabs__pill .dashboard-home-tabs__tab--active { background: var(--home-card) !important; color: var(--home-ink) !important; }
++.dashboard-home--overview .verevon-home-bands { position: relative; inset: auto; height: auto; display: flex; flex: 1 0 auto; flex-direction: column; width: 100%; max-width: 1240px; margin: 0 auto; padding: 0; overflow: visible; gap: 28px; }
++.home-overview-grid { display: grid; grid-template-columns: repeat(12, minmax(0, 1fr)); gap: 16px; align-items: stretch; }
++.home-overview-card,
++.home-overview-grid .verevon-dashboard-card { min-width: 0; border: 0; border-radius: 12px; background: var(--home-card); box-shadow: none; }
++.home-overview-card { padding: 20px; }
++.home-overview-card h2 { margin: 8px 0 0; font-size: 18px; font-weight: 450; line-height: 1.3; letter-spacing: -.025em; }
++.home-overview-card__header { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
++.home-recent { grid-column: span 8; display: flex; flex-direction: column; }
++.home-quiet-button { display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-height: 36px; padding: 6px 10px; border: 0; border-radius: 7px; background: transparent; color: var(--home-muted); font: inherit; font-size: 12px; cursor: pointer; }
++.home-quiet-button:hover, .home-quiet-button[aria-pressed='true'] { background: var(--home-canvas); color: var(--home-ink); }
++.home-recent__list { margin-top: 14px; }
++.home-recent__row { display: flex; align-items: center; gap: 12px; min-height: 48px; padding: 6px 0; border-bottom: 1px solid var(--home-line); color: inherit; text-decoration: none; }
++.home-recent__row:last-child { border-bottom: 0; }
++.home-recent__row:hover .home-recent__copy strong { text-decoration: underline; text-underline-offset: 3px; }
++.home-recent__icon { display: grid; flex: 0 0 32px; place-items: center; color: var(--home-muted); }
++.home-recent__copy { min-width: 0; flex: 1; }
++.home-recent__copy strong, .home-recent__copy small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
++.home-recent__copy strong { font-size: 13px; font-weight: 500; line-height: 18px; }
++.home-recent__copy small { margin-top: 4px; color: var(--home-muted); font-size: 11px; line-height: 14px; }
++.home-recent__row time, .home-recent__row > svg { flex-shrink: 0; color: var(--home-muted); font-size: 11px; font-variant-numeric: tabular-nums; }
++.home-recent > footer { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-top: auto; padding-top: 12px; font-size: 11px; color: var(--home-muted); }
++.home-recent > footer > a { display: inline-flex; min-height: 28px; align-items: center; gap: 8px; color: var(--home-ink); }
++.home-recent__empty { display: flex; min-height: 230px; flex-direction: column; align-items: flex-start; justify-content: center; gap: 8px; color: var(--home-muted); font-size: 13px; }
++.home-recent__empty p { margin: 0; }
++.home-recent__empty > span { font-size: 12px; }
++.home-overview-grid [data-information-card='weather'] { grid-column: span 4; }
++.home-overview-grid [data-information-card='news'] { grid-column: span 5; order: 1; }
++.home-overview-grid [data-information-card='traffic'] { grid-column: span 4; order: 2; }
++.home-destinations { grid-column: span 3; order: 3; }
++.home-destinations nav { display: flex; flex-direction: column; gap: 4px; margin-top: 16px; }
++.home-destinations a { display: flex; align-items: center; gap: 12px; min-height: 56px; padding: 8px 0; color: var(--home-muted); }
++.home-destinations a > span { flex: 1; min-width: 0; }
++.home-destinations a > svg { flex-shrink: 0; }
++.home-destinations strong, .home-destinations small { display: block; }
++.home-destinations strong { color: var(--home-ink); font-size: 13px; font-weight: 500; }
++.home-destinations small { margin-top: 4px; font-size: 11px; line-height: 1.4; }
++.home-destinations a:hover strong { text-decoration: underline; text-underline-offset: 3px; }
++/* Keep the existing live feeds, but remove the cards-inside-cards decoration. */
++.home-overview-grid .dashboard-info-card { position: relative; display: flex; flex-direction: column; height: auto; min-height: 280px; padding: 20px; overflow: hidden; }
++.home-overview-grid .verevon-dashboard-card-label { position: static; align-self: flex-start; padding: 0; border: 0; border-radius: 0; background: transparent; color: var(--home-muted); box-shadow: none; font-size: 11px; font-weight: 500; }
++.home-overview-grid .dashboard-info-card__surface { flex: 1; min-height: 0; overflow: visible; border-radius: 0; padding: 10px 0 0; background: transparent; }
++.home-overview-grid .dashboard-info-card__head { margin-bottom: 8px; gap: 8px; }
++.home-overview-grid .dashboard-info-card__head h3 { font-size: 16px; line-height: 1.3; font-weight: 450; color: var(--home-ink); }
++.home-overview-grid .dashboard-info-card__refresh { width: 32px; height: 32px; background: transparent; color: var(--home-muted); border-radius: 8px; cursor: pointer; }
++.home-overview-grid .dashboard-info-card__refresh:hover { color: var(--home-ink); background: var(--home-canvas); }
++.home-overview-grid .dashboard-info-card__ask { position: static; align-self: flex-end; flex-shrink: 0; min-height: 28px; margin-top: 8px; padding: 4px 0 0; background: transparent; border: 0; border-radius: 4px; box-shadow: none; color: var(--home-muted); font-size: 11px; cursor: pointer; }
++.home-overview-grid .dashboard-info-card__ask:hover { color: var(--home-ink); text-decoration: underline; }
++.home-overview-grid [data-information-card='weather'] { background: radial-gradient(ellipse 120% 65% at 50% 110%, var(--home-weather), transparent), var(--home-card); }
++.home-overview-grid .dashboard-info-card__weather { align-items: flex-start; position: relative; margin: 0 0 16px; }
++.home-overview-grid .dashboard-info-card__weather p { color: var(--home-ink); font-size: 13px; }
++.home-overview-grid .dashboard-info-card__weather small { color: var(--home-muted); font-size: 10px; }
++.home-overview-grid .dashboard-info-card__weather > div > div { gap: 12px; margin-top: 16px; }
++.home-overview-grid .dashboard-info-card__weather div div strong { color: var(--home-ink); font-size: 64px; font-weight: 350; letter-spacing: -.06em; }
++.home-overview-grid .dashboard-info-card__weather .dashboard-info-card__weather-readout { flex-direction: column; align-items: flex-start; gap: 6px; margin-top: 0; }
++.home-overview-grid .dashboard-info-card__weather > div > div > span { order: 1; padding-bottom: 23px; color: var(--home-muted); }
++.home-overview-grid .dashboard-info-card__updated { padding: 0; border: 0; border-radius: 0; background: transparent; box-shadow: none; }
++.home-overview-grid .dashboard-info-card__updated small { text-transform: none; letter-spacing: 0; }
++.home-overview-grid .dashboard-info-card__updated strong { color: var(--home-muted); font-weight: 400; }
++.home-overview-grid .dashboard-info-card__metrics { gap: 12px; }
++.home-overview-grid .dashboard-info-metric { padding: 0; border: 0; border-radius: 0; background: transparent; box-shadow: none; }
++.home-overview-grid .dashboard-info-metric > div { gap: 4px; color: var(--home-muted); font-size: 10px; text-transform: none; letter-spacing: 0; }
++.home-overview-grid .dashboard-info-metric > div > svg { display: none; }
++.home-overview-grid .dashboard-info-metric p { margin-top: 6px; color: var(--home-ink); font-size: 13px; font-weight: 400; font-variant-numeric: tabular-nums; }
++.home-overview-grid .dashboard-info-list { gap: 0; }
++.home-overview-grid .dashboard-info-row { display: flex; flex-wrap: wrap; gap: 6px; padding: 12px 0; border: 0; border-bottom: 1px solid var(--home-line); border-radius: 0; background: transparent; }
++.home-overview-grid .dashboard-info-row:last-child { border-bottom: 0; }
++.home-overview-grid .dashboard-info-row > span { flex: 1 1 120px; }
++.home-overview-grid .dashboard-info-row strong { color: var(--home-ink); font-size: 12px; font-weight: 500; white-space: normal; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
++.home-overview-grid .dashboard-info-row small { color: var(--home-muted); font-size: 10px; white-space: normal; }
++.home-overview-grid .dashboard-info-row em { max-width: 100%; color: var(--home-muted); font-size: 10px; }
++.home-overview-grid .dashboard-info-row__metric { flex-basis: 100%; text-align: left; }
++.home-overview-grid .dashboard-info-scroll { max-height: 140px; overflow-x: hidden; scrollbar-width: thin; }
++.home-overview-grid [data-information-card='traffic'] .dashboard-info-list { max-height: 176px; overflow-y: auto; scrollbar-width: thin; }
++.home-overview-grid .dashboard-info-card__select { height: 32px; min-height: 32px; width: auto; justify-self: start; max-width: 100%; margin-bottom: 4px; padding: 4px 24px 4px 8px; border-color: var(--home-line); border-radius: 6px; background: var(--home-canvas); color: var(--home-ink); box-shadow: none; font: inherit; font-size: 11px; }
++/* The sticky dock reserves space in flow, leaving the last cards reachable. */
++.dashboard-home--overview .verevon-home-composer-section { display: block; flex: 0 0 auto; min-height: 0; padding: 0; margin: 0; border: 0; }
++.dashboard-home--overview .verevon-home-composer { width: 100%; max-width: none; min-width: 0; margin: 0; animation: none; }
++.dashboard-home--overview .home-chat-dock { position: sticky; bottom: 0; z-index: 50; align-self: center; width: min(680px, 100%); margin-top: auto; border: 1px solid var(--home-line); border-radius: 18px; background: var(--home-canvas); box-shadow: 0 8px 32px color-mix(in srgb, var(--home-ink) 7%, transparent); }
++.home-chat-dock__header { display: flex; align-items: center; gap: 10px; min-height: 44px; padding: 2px 8px; border-bottom: 1px solid var(--home-line); color: var(--home-muted); font-size: 12px; }
++.home-chat-dock__header > strong { color: var(--home-ink); font-size: 12px; font-weight: 500; }
++.home-chat-dock__header > span { margin-left: auto; font-size: 11px; }
++.home-chat-dock__header button { display: grid; place-items: center; flex-shrink: 0; width: 36px; height: 36px; border: 0; border-radius: 8px; color: inherit; background: transparent; cursor: pointer; }
++.home-chat-dock__header button:hover { background: var(--home-card); color: var(--home-ink); }
++.home-chat-dock .dashboard-composer-root { gap: 0; }
++.home-chat-dock .dashboard-composer-controls { padding: 12px 12px 0; margin-bottom: 8px; }
++.home-chat-dock .dashboard-composer-card { border: 0; border-radius: 0 0 18px 18px; background: transparent; box-shadow: none; }
++.home-chat-dock .dashboard-composer-model-button { max-width: 240px; }
++.home-chat-dock .dashboard-composer-model-menu { top: auto; bottom: calc(100% + 8px); max-height: min(460px, 60vh); overflow-y: auto; }
++.home-chat-dock[data-dock-minimized='true'] > .verevon-home-composer { display: none; }
++.home-chat-dock[data-dock-minimized='true'] .home-chat-dock__header { border-bottom: 0; }
++.home-chat-dock[data-dock-expanded='false'] .dashboard-composer-controls { display: none; }
++.home-chat-dock[data-dock-expanded='false'] .dashboard-composer-card { display: grid; grid-template-columns: 36px minmax(0, 1fr) auto; align-items: center; gap: 4px; padding: 8px 10px; }
++.home-chat-dock[data-dock-expanded='false'] .dashboard-composer-textarea-wrap { grid-column: 2; grid-row: 1; min-width: 0; }
++.home-chat-dock[data-dock-expanded='false'] .verevon-dashboard-textarea { min-height: 36px; height: 36px !important; max-height: 36px; padding: 9px 6px; font-size: 13px; line-height: 18px; overflow-y: auto !important; }
++.home-chat-dock[data-dock-expanded='false'] .dashboard-composer-toolbar,
++.home-chat-dock[data-dock-expanded='false'] .dashboard-composer-toolbar__left { display: contents; }
++.home-chat-dock[data-dock-expanded='false'] .dashboard-composer-toolbar__left > :not(.dashboard-composer-attach),
++.home-chat-dock[data-dock-expanded='false'] .dashboard-composer-attach > span:last-child,
++.home-chat-dock[data-dock-expanded='false'] .dashboard-composer-response-group { display: none; }
++.home-chat-dock[data-dock-expanded='false'] .dashboard-composer-attach { grid-column: 1; grid-row: 1; width: 36px; height: 36px; padding: 0; justify-content: center; }
++.home-chat-dock[data-dock-expanded='false'] .dashboard-composer-toolbar__right { grid-column: 3; grid-row: 1; display: flex; align-items: center; gap: 4px; }
++.home-chat-dock[data-dock-expanded='false'] .dashboard-composer-toolbar-icon,
++.home-chat-dock[data-dock-expanded='false'] .dashboard-composer-submit-button { width: 36px; height: 36px; }
++.home-chat-dock[data-dock-expanded='false'] .dashboard-composer-card > :not(.dashboard-composer-textarea-wrap):not(.dashboard-composer-toolbar):not(.sr-only) { grid-column: 1 / -1; }
++.dashboard-home--overview[data-home-tab='Søk'] .verevon-home-composer-section,
++.dashboard-home--overview[data-home-tab='Crawl'] .verevon-home-composer-section { flex: 0 0 auto; order: 0; padding: 24px; border-radius: 12px; background: var(--home-card); }
++.dashboard-home--overview:not([data-home-tab='Chat']) .home-overview-grid { order: 1; }
++.dashboard-home--overview .verevon-home-composer-section--expanded { min-height: 580px; }
++.dashboard-home--overview .verevon-home-composer-section--knowledge-browser { min-height: 660px; }
++.dashboard-home--overview :is(button, a, select, textarea):focus-visible { outline: 2px solid var(--verevon-accent-ink); outline-offset: 3px; }
++.dashboard-home--overview [hidden] { display: none; }
++@media (min-width: 1600px) { .dashboard-home--overview .verevon-home-stage { padding: 48px 56px 32px; } .home-overview-heading { margin-bottom: 32px; } }
++@media (max-width: 1200px) {
++  .dashboard-home--overview .verevon-home-stage { padding: 28px 24px 20px; }
++  .home-overview-card, .home-overview-grid .dashboard-info-card { padding: 20px; }
++  .home-overview-grid [data-information-card='news'], .home-overview-grid [data-information-card='traffic'] { grid-column: span 6; }
++  .home-destinations { grid-column: 1 / -1; }
++  .home-destinations nav { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 24px; }
++}
++@media (max-width: 850px) {
++  .home-overview-heading > time { display: none; }
++  .home-recent { grid-column: span 7; }
++  .home-overview-grid [data-information-card='weather'] { grid-column: span 5; }
++  .home-recent__row > time { display: none; }
++}
++@media (max-width: 640px) {
++  .dashboard-home--overview .verevon-home-stage { padding: 24px 16px 20px; }
++  .home-overview-heading { margin-bottom: 16px; }
++  .home-overview-heading h1 { font-size: 28px; }
++  .home-overview-grid { grid-template-columns: minmax(0, 1fr); gap: 12px; }
++  .home-overview-grid > .home-overview-card, .home-overview-grid > .dashboard-info-card { grid-column: 1; }
++  .home-recent { min-height: 330px; }
++  .home-overview-grid .dashboard-info-card { min-height: 260px; }
++  .home-destinations nav { grid-template-columns: 1fr; gap: 0; }
++  .home-recent__row > time { display: block; }
++  .dashboard-home--overview .verevon-home-bands { gap: 20px; }
++  .home-chat-dock__header > span { display: none; }
++  .dashboard-home--overview .home-chat-dock { bottom: 48px; margin-bottom: 48px; }
++  .home-chat-dock__header > button:last-child { margin-left: auto; }
++  .home-chat-dock[data-dock-expanded='false'] .dashboard-composer-toolbar__right { gap: 0; }
++  .home-chat-dock[data-dock-expanded='false'] .dashboard-composer-toolbar-icon { width: 30px; }
++  .home-chat-dock .dashboard-composer-controls { flex-wrap: wrap; }
++  .home-chat-dock .dashboard-composer-model-button { max-width: 180px; }
++  .home-chat-dock .dashboard-composer-model-menu { max-height: min(340px, 45dvh); }
++  .dashboard-home--overview[data-home-tab='Søk'] .verevon-home-composer-section,
++  .dashboard-home--overview[data-home-tab='Crawl'] .verevon-home-composer-section { padding: 16px; }
++}
++@media (prefers-reduced-motion: reduce) { .dashboard-home--overview *, .dashboard-home--overview *::before, .dashboard-home--overview *::after { animation: none !important; transition: none !important; } }
+--- /dev/null
++++ b/src/features/dashboard/home/DashboardOverview.test.tsx
+@@ -0,0 +1,59 @@
++// @vitest-environment jsdom
++import { fireEvent, render, screen, waitFor } from '@solidjs/testing-library'
++import { createStore, flush } from 'solid-js'
++import { beforeEach, describe, expect, it, vi } from 'vitest'
++import type { ChatThreadSession } from '@/shared/api/chat-client'
++
++vi.mock('@/shared/api/chat-client', () => ({ listChatThreads: vi.fn() }))
++vi.mock('./DashboardCards', () => ({ DashboardImageCard: () => null }))
++vi.mock('@/shared/i18n', () => ({ useI18n: () => ({ tr: (_no: string, en: string) => en, locale: () => 'en' }) }))
++vi.mock('@/shared/session/session-store', () => ({ getSession: () => identity }))
++import { listChatThreads } from '@/shared/api/chat-client'
++import { DashboardRecentWork } from './DashboardOverview'
++
++const [identity, setIdentity] = createStore({ user: { id: 'user-a' }, activeOrg: { id: 'org-a' } })
++const thread = (threadId: string, title: string, updatedAt: string, pinned = false) => ({ threadId, title, preview: '', updatedAt, pinned }) as ChatThreadSession
++beforeEach(() => {
++  vi.mocked(listChatThreads).mockReset()
++  setIdentity((state) => { state.user.id = 'user-a'; state.activeOrg.id = 'org-a' })
++  flush()
++})
++describe('Home recent work', () => {
++  it('shows real recent threads in update order and filters pinned threads', async () => {
++    vi.mocked(listChatThreads).mockResolvedValue([
++      thread('older', 'Older work', '2026-09-20T10:00:00Z', true),
++      thread('newer', 'Newer work', '2026-09-28T10:00:00Z'),
++    ])
++    const view = render(() => <DashboardRecentWork />)
++    await waitFor(() => expect(view.container.querySelectorAll('.home-recent__row')).toHaveLength(2))
++    expect(view.container.querySelector('.home-recent__row')?.textContent).toContain('Newer work')
++    fireEvent.click(screen.getByRole('button', { name: 'Pinned' }))
++    flush()
++    expect(screen.queryByText('Newer work')).toBeNull()
++    expect(screen.getByText('Older work')).toBeTruthy()
++  })
++  it('shows a recoverable error rather than a fabricated empty or metric', async () => {
++    vi.mocked(listChatThreads).mockRejectedValueOnce(new Error('offline')).mockResolvedValueOnce([])
++    render(() => <DashboardRecentWork />)
++    await waitFor(() => expect(screen.getByText('Conversations could not be loaded.')).toBeTruthy())
++    fireEvent.click(screen.getByRole('button', { name: 'Try again' }))
++    flush()
++    await waitFor(() => expect(screen.getByText('Your next piece of work starts here.')).toBeTruthy())
++    expect(listChatThreads).toHaveBeenCalledTimes(2)
++  })
++  it('ignores an old workspace response after the workspace changes', async () => {
++    let resolveOld: (value: ChatThreadSession[]) => void = () => undefined
++    vi.mocked(listChatThreads).mockImplementationOnce(() => new Promise((resolve) => { resolveOld = resolve }))
++      .mockResolvedValueOnce([thread('new-org', 'Current workspace work', '2026-09-28T10:00:00Z')])
++    render(() => <DashboardRecentWork />)
++    flush()
++    setIdentity((state) => { state.activeOrg.id = 'org-b' })
++    flush()
++    await waitFor(() => expect(screen.getByText('Current workspace work')).toBeTruthy())
++    resolveOld([thread('old-org', 'Old workspace work', '2026-09-28T11:00:00Z')])
++    await Promise.resolve()
++    flush()
++    expect(screen.queryByText('Old workspace work')).toBeNull()
++    expect(screen.getByText('Current workspace work')).toBeTruthy()
++  })
++})
+--- /dev/null
++++ b/src/features/dashboard/home/DashboardHomeChrome.test.tsx
+@@ -0,0 +1,37 @@
++// @vitest-environment jsdom
++import { fireEvent, render, screen } from '@solidjs/testing-library'
++import { createSignal, flush } from 'solid-js'
++import { describe, expect, it, vi } from 'vitest'
++import type { DashboardTab } from './dashboard-home-types'
++
++vi.mock('./DashboardComposer', () => ({ DashboardComposer: (props: { message: string; onMessageChange: (value: string) => void }) => {
++  const [attachment, setAttachment] = createSignal(false)
++  return <><input aria-label="Draft" value={props.message} onInput={(event) => props.onMessageChange(event.currentTarget.value)} /><button onClick={() => setAttachment(true)}>Attach test file</button><span>{attachment() ? 'File retained' : 'No file'}</span></>
++} }))
++vi.mock('./DashboardSearchPanel', () => ({ SearchPanel: () => <p>Search tool</p> }))
++vi.mock('./KnowledgeComposer', () => ({ KnowledgeComposer: () => <p>Crawl tool</p> }))
++import { DashboardComposerPanel } from './DashboardHomeChrome'
++
++describe('Home tool switching', () => {
++  it('keeps the chat draft and attachment state through Search, Crawl and layout comparison', () => {
++    const [tab, setTab] = createSignal<DashboardTab>('Chat')
++    const [message, setMessage] = createSignal('')
++    const [preview, setPreview] = createSignal(true)
++    const noop = () => undefined
++    render(() => <DashboardComposerPanel activeTab={tab()} persistentChat={preview()} message={message()} onMessageChange={setMessage} onKnowledgePreviewActiveChange={noop} onLaunchStart={noop} onSearchExpandedChange={noop} onSearchPreviewActiveChange={noop} previewCollapsed={false} searchExpanded={false} />)
++    const draft = screen.getByLabelText('Draft')
++    fireEvent.input(draft, { target: { value: 'Keep this draft' } })
++    fireEvent.click(screen.getByRole('button', { name: 'Attach test file' }))
++    flush()
++    setTab('Søk'); flush()
++    expect(screen.getByText('Search tool')).toBeTruthy()
++    expect(draft.closest('[hidden]')).toBeTruthy()
++    setTab('Crawl'); flush()
++    expect(screen.getByText('Crawl tool')).toBeTruthy()
++    setTab('Chat'); flush()
++    setPreview(false); flush()
++    expect(screen.getByLabelText('Draft')).toBe(draft)
++    expect((draft as HTMLInputElement).value).toBe('Keep this draft')
++    expect(screen.getByText('File retained')).toBeTruthy()
++  })
++})

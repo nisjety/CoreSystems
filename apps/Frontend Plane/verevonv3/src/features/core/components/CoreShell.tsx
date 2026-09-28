@@ -6,6 +6,7 @@ import { AgentsProvider } from '@/features/agents/lib/use-agent-selection'
 import { CoreNavbar } from '@/features/core/components/CoreNavbar'
 import { CoreSidebar, SIDEBAR_EXPANDED_WIDTH, SIDEBAR_MINIMIZED_WIDTH } from '@/features/core/components/CoreSidebar'
 import { FeedbackWidget } from '@/features/core/components/FeedbackWidget'
+import { chatAppearanceActive, chatAppearanceTokens } from '@/features/chat/lib/chat-appearance-preview'
 import { OrgDeletionBanner } from '@/features/core/components/OrgDeletionBanner'
 import {
   fallbackWorkspaceIdentity,
@@ -86,6 +87,8 @@ export function CoreShell(props: { children?: JSX.Element }) {
     <AgentsProvider routeLocation={location}>
       <div
         class="core-product-shell"
+        data-chat-appearance={activeRoute() === '/chat' ? chatAppearanceTokens() : chatAppearanceActive('navigation') ? 'navigation' : undefined}
+        data-sidebar-expanded={sidebarExpanded() ? 'true' : 'false'}
         style={{
           '--dashboard-navbar-height': deletionBannerVisible()
             ? `${56 + DELETION_BANNER_HEIGHT_PX}px`
@@ -103,12 +106,17 @@ export function CoreShell(props: { children?: JSX.Element }) {
           searchOpen={searchOpen()}
           onSearchOpenChange={setSearchOpen}
           workspace={workspace()}
+          sidebarExpanded={sidebarExpanded()}
+          onSidebarToggle={() => setSidebarExpanded((expanded) => !expanded)}
         />
         <Show when={deletionBannerVisible()}>
           <OrgDeletionBanner
             status={deletionStatus.latest ?? deletionStatus()}
             onRefetch={() => void refetchDeletionStatus()}
           />
+        </Show>
+        <Show when={chatAppearanceActive('navigation') && sidebarExpanded()}>
+          <button type="button" class="core-sidebar-mobile-scrim" aria-label="Close navigation" onClick={() => setSidebarExpanded(false)} />
         </Show>
         <CoreSidebar
           activeRoute={activeRoute()}

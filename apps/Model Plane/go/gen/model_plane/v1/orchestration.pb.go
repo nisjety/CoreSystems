@@ -612,7 +612,17 @@ type PlanStep struct {
 	// Creation timestamp.
 	CreatedAt *timestamppb.Timestamp `protobuf:"bytes,5,opt,name=created_at,json=createdAt,proto3" json:"created_at,omitempty"`
 	// Last update timestamp.
-	UpdatedAt     *timestamppb.Timestamp `protobuf:"bytes,6,opt,name=updated_at,json=updatedAt,proto3" json:"updated_at,omitempty"`
+	UpdatedAt *timestamppb.Timestamp `protobuf:"bytes,6,opt,name=updated_at,json=updatedAt,proto3" json:"updated_at,omitempty"`
+	// What actually happened, in one line: the failure reason when the step
+	// failed, otherwise a short summary of its output. Empty when the step
+	// recorded neither.
+	//
+	// Execution steps already store their real detail in `plan_steps.payload`
+	// (the tool's error and output), but nothing carried it out to a caller — so
+	// a plan whose every step failed on "permission denied by policy" rendered
+	// as an unexplained list of identical `tool_execution` rows. The payload
+	// itself is deliberately NOT exposed: it holds raw, untruncated tool output.
+	Detail        string `protobuf:"bytes,7,opt,name=detail,proto3" json:"detail,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -687,6 +697,13 @@ func (x *PlanStep) GetUpdatedAt() *timestamppb.Timestamp {
 		return x.UpdatedAt
 	}
 	return nil
+}
+
+func (x *PlanStep) GetDetail() string {
+	if x != nil {
+		return x.Detail
+	}
+	return ""
 }
 
 // A durable plan record.
@@ -5205,7 +5222,7 @@ var File_model_plane_v1_orchestration_proto protoreflect.FileDescriptor
 
 const file_model_plane_v1_orchestration_proto_rawDesc = "" +
 	"\n" +
-	"\"model_plane/v1/orchestration.proto\x12\x0emodel_plane.v1\x1a\x1fgoogle/protobuf/timestamp.proto\x1a\x1cgoogle/protobuf/struct.proto\x1a%model_plane/v1/verified_outcome.proto\x1a!model_plane/v1/proof_bundle.proto\"\xf9\x01\n" +
+	"\"model_plane/v1/orchestration.proto\x12\x0emodel_plane.v1\x1a\x1fgoogle/protobuf/timestamp.proto\x1a\x1cgoogle/protobuf/struct.proto\x1a%model_plane/v1/verified_outcome.proto\x1a!model_plane/v1/proof_bundle.proto\"\x91\x02\n" +
 	"\bPlanStep\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x14\n" +
 	"\x05title\x18\x02 \x01(\tR\x05title\x12\x1c\n" +
@@ -5214,7 +5231,8 @@ const file_model_plane_v1_orchestration_proto_rawDesc = "" +
 	"\n" +
 	"created_at\x18\x05 \x01(\v2\x1a.google.protobuf.TimestampR\tcreatedAt\x129\n" +
 	"\n" +
-	"updated_at\x18\x06 \x01(\v2\x1a.google.protobuf.TimestampR\tupdatedAt\"\xa8\x03\n" +
+	"updated_at\x18\x06 \x01(\v2\x1a.google.protobuf.TimestampR\tupdatedAt\x12\x16\n" +
+	"\x06detail\x18\a \x01(\tR\x06detail\"\xa8\x03\n" +
 	"\x04Plan\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x15\n" +
 	"\x06run_id\x18\x02 \x01(\tR\x05runId\x12\x1b\n" +

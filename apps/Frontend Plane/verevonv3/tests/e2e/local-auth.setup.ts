@@ -14,7 +14,7 @@ import { test as setup, expect } from '@playwright/test'
  *
  * Prereq: the account must exist — it's created automatically by
  *   bash "apps/Frontend Plane/verevonv3/build-verevon-services.sh"
- * (SEED_DEV_ACCOUNT=1 by default). Override via LOCAL_E2E_EMAIL/LOCAL_E2E_PASSWORD
+ * (opt in with SEED_DEV_ACCOUNT=1). Override via LOCAL_E2E_EMAIL/LOCAL_E2E_PASSWORD
  * if the local stack's seed differs from the default.
  */
 const EMAIL = process.env.LOCAL_E2E_EMAIL || 'local@verevon.dev'
@@ -24,6 +24,13 @@ const STORAGE_STATE = 'tests/e2e/.auth/local-state.json'
 setup('authenticate local@verevon.dev', async ({ page, baseURL }) => {
   const origin = baseURL ?? 'http://localhost:5173'
   const api = page.request
+
+  // A TCP listener can open before Vite's proxy answers after a cold rebuild.
+  // Check the same-origin HTTP path before attempting a stateful sign-in.
+  await expect.poll(async () => {
+    try { return (await api.get('/health', { timeout: 3_000 })).status() }
+    catch { return 0 }
+  }, { timeout: 30_000, message: 'same-origin gateway must answer before sign-in' }).toBe(200)
 
   // 1. Sign in through the same-origin gateway (Better Auth needs Origin).
   const signin = await api.post('/api/v1/auth/sign-in', {
@@ -51,6 +58,27 @@ setup('authenticate local@verevon.dev', async ({ page, baseURL }) => {
     ).toBeTruthy()
   }
 
-  // 4. Persist cookies (session + active-org) for the `local` project.
+  // Login and membership do not finish onboarding. Use the same owner-backed
+  // lifecycle as auth.setup.ts; otherwise every chat test lands on the wizard.
+  const current = await api.get('/api/v1/session/current')
+  expect(current.status(), 'active organization should resolve').toBe(200)
+  const currentBody = await current.json() as { data?: { org?: { id?: string | null } | null } }
+  const orgId = currentBody.data?.org?.id
+  expect(orgId, 'an active organization is required for acceptance tests').toBeTruthy()
+  const completed = await api.post('/api/v1/onboarding/complete', {
+    headers: { 'content-type': 'application/json', origin },
+    data: { orgId, plan: 'trial', source: 'verevon-local-e2e' },
+  })
+  expect(completed.status(), 'onboarding completion should be durable').toBe(200)
+  const refreshed = await api.get('/api/v1/session/current')
+  expect(refreshed.status()).toBe(200)
+  const refreshedBody = await refreshed.json() as { data?: { onboardingStatus?: string } }
+  expect(refreshedBody.data?.onboardingStatus).toBe('COMPLETED')
+
+  // Prove the fixture reaches the intended product before running dependent tests.
+  await page.goto('/chat')
+  await expect(page.locator('.verevon-chat-page')).toBeVisible()
+
+  // Persist cookies (session + active-org) for the local and chat projects.
   await page.context().storageState({ path: STORAGE_STATE })
 })

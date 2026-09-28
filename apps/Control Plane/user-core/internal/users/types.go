@@ -41,7 +41,7 @@ type UserProfile struct {
 	Location  string
 	Timezone  string
 	Language  string
-	Metadata  map[string]interface{}
+	Metadata  map[string]any
 	UpdatedAt time.Time
 }
 
@@ -125,7 +125,7 @@ type UpdateProfileParams struct {
 	Location *string
 	Timezone *string
 	Language *string
-	Metadata map[string]interface{}
+	Metadata map[string]any
 }
 
 // ============================================
@@ -137,7 +137,7 @@ type UserSettings struct {
 	ID        string
 	UserID    string
 	Category  string
-	Settings  map[string]interface{}
+	Settings  map[string]any
 	CreatedAt time.Time
 	UpdatedAt time.Time
 }
@@ -146,7 +146,7 @@ type UserSettings struct {
 type UpsertSettingsParams struct {
 	UserID   string
 	Category string
-	Settings map[string]interface{}
+	Settings map[string]any
 }
 
 // ============================================
@@ -168,7 +168,7 @@ type ProviderAccount struct {
 	ScopesGranted     []string // granted OAuth scopes snapshot
 	TokenRef          string   // opaque reference to token storage in auth-core
 	LastSyncedAt      *time.Time
-	Metadata          map[string]interface{} // extra provider claims: job title, dept, photo, etc.
+	Metadata          map[string]any // extra provider claims: job title, dept, photo, etc.
 	CreatedAt         time.Time
 	UpdatedAt         time.Time
 }
@@ -185,7 +185,7 @@ type UpsertProviderAccountParams struct {
 	DisplayName       string
 	ScopesGranted     []string
 	TokenRef          string
-	Metadata          map[string]interface{}
+	Metadata          map[string]any
 }
 
 // UserOrgMembership tracks a user's membership and role in an organization.
@@ -227,7 +227,7 @@ type ActivityLog struct {
 	UserID    string
 	Action    string
 	Resource  string
-	Details   map[string]interface{}
+	Details   map[string]any
 	IPAddress string
 	UserAgent string
 	CreatedAt time.Time
@@ -238,7 +238,7 @@ type LogActivityParams struct {
 	UserID    string
 	Action    string
 	Resource  string
-	Details   map[string]interface{}
+	Details   map[string]any
 	IPAddress string
 	UserAgent string
 }

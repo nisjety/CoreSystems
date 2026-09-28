@@ -4,6 +4,8 @@ import {
 import {
   type AutonomyRung,
   type ChatAction,
+  type ChatCostBasis,
+  type ChatTurnTiming,
   type ChatVerificationEvent,
   type RecalledMemory,
 } from '@/shared/api/chat-client'
@@ -37,6 +39,15 @@ export type ComposerAttachment = DashboardComposerSubmitPayload['attachments'][n
 export type ChatTurnAttachment = ComposerAttachment & { previewUrl?: string }
 export type ChatTab = 'chat' | 'sources' | 'artifacts' | 'steps' | 'trace'
 export type TaskStepStatus = 'done' | 'active' | 'waiting' | 'error' | 'stopped'
+/** A cancel request a Stop sent that the server did not confirm. */
+export type ChatCancelFailure = {
+  /** `invocation` is the live stream's cancel; `run` is the durable run cancel. */
+  target: 'invocation' | 'run'
+  /** HTTP status, when the request got an answer at all. */
+  status?: number
+  code?: string
+  at: string
+}
 export type IconComponent = (props: LucideProps) => JSX.Element
 
 /** One revision of an artifact, as emitted by a single `artifact` SSE event. */
@@ -83,9 +94,46 @@ export type Citation = {
   /** Optional server-issued claim binding. The current gateway may omit it;
    * the UI must never infer these values from prose. */
   claimId?: string
+  /**
+   * Machine-stable grouping key (chat-wave2 citations spec §2.2/§2.6):
+   * `kb:{provider}` for a knowledge-base source, `web_domain(url)`-shaped for
+   * a web/deep-research one. Absent from a not-yet-updated gateway — group
+   * by `hostname(url)` in that case (`InlineCitationMarker`,
+   * `collectEvidenceSources`), never leave a citation ungrouped.
+   */
   sourceGroupId?: string
+  /**
+   * Human, already-localized label for `sourceGroupId` (currently only set
+   * for a knowledge-base source, e.g. "Microsoft 365"). Absent for a web/
+   * deep-research citation, which renders its hostname as the label instead.
+   */
+  sourceGroupLabel?: string
+  /**
+   * The marker's own UTF-8 BYTE offset range within the complete answer
+   * text (Rust `regex::Match::start`/`end` — NOT a JS string index: a
+   * Norwegian character like æ/ø/å is 2 UTF-8 bytes but 1 UTF-16 code unit,
+   * so these numbers do not line up with a JS `string.slice()` call), set
+   * once by the server's post-stream anchor pass alongside `claimId`.
+   * INFORMATIONAL ONLY — never use these to slice or highlight the answer:
+   * chip placement is still the client's own regex match over already-split
+   * markdown blocks, whose own start offset within the full answer text is
+   * not tracked, so `start`/`end` cannot be resolved against a block
+   * substring without recomputing a block-relative offset first (and, even
+   * then, without first converting from a UTF-8 byte offset to a UTF-16
+   * index).
+   */
   start?: number
   end?: number
+  /**
+   * Source-scope provenance (chat-wave2 scope spec §2.2): `'web'` for a
+   * web_search/deep-research/fetch_url source, `'knowledge'` for a
+   * knowledge-base or org-connected-search source. Always set by an updated
+   * gateway; absent from a not-yet-updated one. Drives the "Kilder: kun
+   * organisasjonskunnskap" / "Kilder: kun nett" receipt badge and lets the
+   * Kilder tab defensively flag a citation whose family disagrees with the
+   * turn's active `retrievalScope`.
+   */
+  origin?: 'web' | 'knowledge'
 }
 
 export type GeneratedFile = {
@@ -179,7 +227,26 @@ export type ChatKnowledgeGrounding = {
  */
 export const LOW_CONFIDENCE_ANSWER_THRESHOLD = 0.75
 
+/**
+ * What the reader can do about a failed turn.
+ *  - `retry`: try again now (the default when absent).
+ *  - `reconnect`: renew the ChatGPT sign-in first, then try again.
+ *  - `wait`: the refusing service accepts calls again at a known instant; the
+ *    retry control stays disabled until then and never fires by itself.
+ *  - `none`: sending the same turn again cannot help, so no retry is offered.
+ */
+export type StreamFailureAction = 'retry' | 'reconnect' | 'wait' | 'none'
+
+/**
+ * One conversation turn as the chat renders it.
+ *
+ * Every field is named. Server message metadata is never spread onto a turn:
+ * keys such as `head_summary` (the gateway's compaction summary of earlier
+ * turns, persisted on an assistant message) are model context, not something
+ * to render, and have no field here on purpose.
+ */
 export type ChatTurn = {
+  sourceScope?: import('@/shared/actions/chat-source-scope').ChatSourceScope
   id: string
   role: 'user' | 'assistant'
   content: string
@@ -210,6 +277,52 @@ export type ChatTurn = {
   outputTokens?: number
   latencyMs?: number
   costUsd?: number
+  /**
+   * How `costUsd` was reached. On a subscription-carried turn the gateway
+   * computes no list-price cost and `costUsd` is left unset here, so no surface
+   * can render the wire's compatibility 0.0 as a real "$0".
+   */
+  costBasis?: ChatCostBasis
+  /**
+   * Where the turn's server time went (`turn_timing`). Absent when the gateway
+   * did not report it; the metrics rows that read it are then not shown at all.
+   * A restored transcript keeps only the three totals.
+   */
+  timing?: ChatTurnTiming
+  /**
+   * Answer text that streamed live and was then NOT saved: the server ended
+   * the turn with an error that says so (`session_liveness_failed`, for one,
+   * can arrive after the whole answer streamed). `content` then carries the
+   * explanation, so the turn cannot read as a saved answer, and this keeps the
+   * text reachable behind an explicit "not saved" disclosure. Session-only:
+   * `turnsToTranscript` drops it, so a reload never resurrects it.
+   */
+  unsavedContent?: string
+  /**
+   * What the reader can do about this failed turn, from the server's failure
+   * code (see `streamFailurePresentation`). Absent means an ordinary retry.
+   * Session-only, like `unsavedContent`: `turnsToTranscript` drops it.
+   */
+  failureAction?: StreamFailureAction
+  /**
+   * With `failureAction: 'wait'`, the instant (ISO) the refusing service
+   * accepts calls again, such as the ChatGPT plan's usage-limit reset.
+   * Session-only: `turnsToTranscript` drops it.
+   */
+  retryAt?: string
+  /**
+   * The gateway's publication receipt (`result_receipt`) for a checked answer
+   * or document. Session-only: the durable copy lives on the saved assistant
+   * message, and this is only what the live stream reported.
+   */
+  resultReceipt?: Record<string, unknown>
+  /**
+   * Cancel requests a Stop sent for this turn that the server did not confirm.
+   * Metadata only — status and code, never content — so a Stop the server may
+   * not have honoured is on record while the reconciliation that follows it
+   * decides what the turn really became.
+   */
+  cancelFailures?: ChatCancelFailure[]
   confidence?: number
   /**
    * What the backend's verification pass found after scoring this answer low.
@@ -272,6 +385,20 @@ export type ChatTurn = {
    */
   grantedRung?: AutonomyRung
   /**
+   * The model's structured plan (plan-gate §2.1), from the `plan_proposed`
+   * SSE event — populated by `onPlanProposed` alongside the existing
+   * `onFollowUps` wiring. Absent while the model is still deciding (a
+   * finished plan-mode turn with no proposed plan yet derives no
+   * `plan-approval` node — see `chat-nodes/derive.ts`). A second
+   * `plan.propose` call in the same turn REPLACES this (last-proposed-wins,
+   * owner ruling 2026-09-27), it does not append.
+   */
+  proposedPlan?: {
+    planId: string
+    summary: string
+    steps: import('@/shared/api/chat-client').ChatPlanStep[]
+  }
+  /**
    * AI-generated follow-up question suggestions (composer chips), from the
    * `follow_ups` SSE event. Session-only by design — not persisted into the
    * thread transcript/history, so a reloaded thread simply shows none rather
@@ -280,6 +407,21 @@ export type ChatTurn = {
   followUps?: string[]
   /** Server-derived effect evidence from the durable run proof bundle. */
   effectClass?: ChatEffectClass
+  /**
+   * Per-turn retrieval-source filter this turn was SENT with (chat-wave2
+   * scope spec). Captured at send time, like `planMode` above — a picker
+   * changed afterward must not retroactively relabel a finished turn. Also
+   * read back on history playback (`ChatMessage.retrievalScope`).
+   */
+  retrievalScope?: import('@/shared/actions/chat-source-scope').RetrievalScope
+  /**
+   * The server's own confirmation of `retrievalScope` (`source_scope_applied`
+   * SSE event) — the concrete "shown in the receipt" surface. Absent until
+   * the event arrives, and never emitted at all for a turn whose effective
+   * scope was `auto`/omitted. `excludedTools` names the builtin tool classes
+   * this turn's offered set did NOT include because of the filter.
+   */
+  scopeApplied?: { scope: 'knowledge_only' | 'web_only'; excludedTools: string[] }
 }
 
 export type AgentTaskStep = {
@@ -350,6 +492,9 @@ export type StreamAttachment = {
 }
 
 export type SendOptions = {
+  sourceScope?: import('@/shared/actions/chat-source-scope').ChatSourceScope
+  /** See `ChatInvokeRequest.retrievalScope`. Per-turn, unlike `sourceScope`. */
+  retrievalScope?: import('@/shared/actions/chat-source-scope').RetrievalScope
   actions?: ChatAction[]
   /** Explicit provider route for a connected user-owned model subscription. */
   provider?: string
@@ -364,6 +509,15 @@ export type SendOptions = {
   tone?: 'concise' | 'detailed'
 
   attachments?: StreamAttachment[]
+  /**
+   * What the MODEL receives as the user turn, when it differs from what the
+   * user typed: the typed text followed by the full text of small attached
+   * documents. The transcript keeps showing the typed text (with the
+   * attachment chips); the model gets the content in the same turn instead of
+   * waiting for asynchronous indexing that finishes after the answer
+   * (RUN-LOG finding 1). Absent means "send the typed text as-is".
+   */
+  modelContent?: string
   browseWeb?: boolean
   deepResearch?: boolean
   createdAt?: string
@@ -398,6 +552,15 @@ export type SendOptions = {
    * otherwise, so unspecified stays byte-identical on the wire.
    */
   minPrivacyTier?: PrivacyTier
+  /**
+   * "Fortsett" (continue-after-stop): pre-fills the new assistant turn's
+   * DISPLAYED content with this text instead of starting from `''`, so the
+   * partial answer a stopped turn already produced is never lost — streamed
+   * deltas simply append after it, exactly as they would after an empty turn.
+   * Absent for every other send. See `continueGeneration` in
+   * use-chat-controller.ts, the only caller.
+   */
+  seedContent?: string
 }
 
 export type EvidenceSource = (Citation & { kind: 'web' }) | ChatGroundingSource
@@ -408,21 +571,64 @@ export type MarkdownListItem = {
   /** Marker family of this item; nested items may differ from the block's. */
   ordered: boolean
   text: string
+  /**
+   * GFM task-list state ("- [ ]" / "- [x]"), undefined for an ordinary item.
+   * `text` has already had the "[ ]"/"[x]" marker stripped off the front.
+   */
+  checked?: boolean
 }
 
 export type MarkdownTableAlign = 'center' | 'left' | 'right' | null
 
+/**
+ * One line of a (possibly nested) blockquote, mirroring `MarkdownListItem`'s
+ * depth field so nested quotes (">" then ">>", or "> >") can recurse the same
+ * way nested lists do instead of collapsing to a single level.
+ */
+export type MarkdownQuoteLine = {
+  /** Nesting level derived from the count of leading '>' markers (1 = top level). */
+  depth: number
+  text: string
+}
+
 export type MarkdownBlock =
-  | { kind: 'code'; lang: string; text: string }
+  | {
+      kind: 'code'
+      lang: string
+      text: string
+      /**
+       * False when the fence never closed before the source ran out (an
+       * in-progress fence mid-stream). A ```mermaid``` block only ever goes
+       * through the actual diagram renderer once `closed`; while streaming
+       * it renders as a plain code block, same as any other language, so an
+       * incomplete/invalid partial diagram never reaches `mermaid.render`.
+       */
+      closed: boolean
+    }
   // Raw `<details>`/`<summary>` HTML written by the model (e.g. "Se alle
   // tilbud" behind a shipping-quote table). Rendered as a real collapsible
   // instead of escaped tag soup; `blocks` is the parsed inner markdown.
   | { kind: 'details'; summary: string; blocks: MarkdownBlock[] }
   | { kind: 'heading'; level: 1 | 2 | 3; text: string }
   | { kind: 'hr' }
-  | { kind: 'list'; ordered: boolean; items: MarkdownListItem[] }
+  | {
+      kind: 'list'
+      ordered: boolean
+      items: MarkdownListItem[]
+      /**
+       * The integer parsed off the FIRST item's marker when `ordered`
+       * (e.g. "391." -> 391) so a leading number is preserved as `<ol
+       * start>` instead of every list silently renumbering from 1.
+       */
+      startNumber?: number
+    }
+  // Block ("display") math, `$$...$$`. `closed` mirrors the code fence's
+  // field: false while the closing `$$` hasn't arrived yet (mid-stream), so
+  // the renderer shows the raw source instead of feeding a half-written
+  // LaTeX expression to KaTeX.
+  | { kind: 'math'; text: string; closed: boolean }
   | { kind: 'paragraph'; text: string }
-  | { kind: 'quote'; text: string }
+  | { kind: 'quote'; lines: MarkdownQuoteLine[] }
   | { kind: 'table'; align: MarkdownTableAlign[]; header: string[]; rows: string[][] }
 
 // ── Prompt chips ──────────────────────────────────────────────────────────────

@@ -1,8 +1,22 @@
 import { objectUrlToDataUrl } from '@/shared/lib/blob-data'
 import { normalizePrivacyTier, type PrivacyTier } from '@/shared/api/privacy-tier'
-import { readClientJson, removeClientValue, writeClientJson } from '@/shared/session/client-storage'
+import { removeClientValue } from '@/shared/session/client-storage'
 
 const pendingLaunchKey = 'verevon.chat.pendingLaunch'
+// Keep normal launches tab-local and bounded. Temporary chats never touch storage.
+export const MAX_PENDING_LAUNCH_CHARS = 2_000_000
+let temporaryLaunch: PendingChatLaunch | null = null
+
+export class PendingChatLaunchError extends Error {
+  readonly reason: 'unreadable' | 'too_large' | 'storage'
+  readonly filename?: string
+  constructor(reason: 'unreadable' | 'too_large' | 'storage', filename?: string) {
+    super(reason)
+    this.reason = reason
+    this.filename = filename
+    this.name = 'PendingChatLaunchError'
+  }
+}
 
 export type PendingChatTool = 'image' | 'research' | 'search'
 
@@ -13,6 +27,7 @@ export type PendingChatAction = {
 }
 
 export type PendingChatAttachment = {
+  extractedText?: string
   id: string
   name: string
   size: number
@@ -27,6 +42,7 @@ export type PendingSupportHandoff = {
 }
 
 export type PendingChatLaunch = {
+  sourceScope?: import('@/shared/actions/chat-source-scope').ChatSourceScope
   actions?: PendingChatAction[]
   attachments?: PendingChatAttachment[]
   createdAt?: string
@@ -53,24 +69,49 @@ export async function writePendingChatLaunch(payload: PendingChatLaunch): Promis
   for (const attachment of payload.attachments ?? []) {
     let url = attachment.url
     try {
-      if (url.startsWith('blob:') && attachment.type.startsWith('image/')) {
+      if (url.startsWith('blob:')) {
         url = await objectUrlToDataUrl(url)
       }
+      if (!url) throw new Error('missing attachment URL')
     } catch {
-      if (attachment.type.startsWith('image/')) continue
+      throw new PendingChatLaunchError('unreadable', attachment.name)
     }
     attachments.push({ ...attachment, url })
   }
 
-  writeClientJson(pendingLaunchKey, {
+  const launch = {
     ...payload,
     attachments,
     createdAt: payload.createdAt ?? new Date().toISOString(),
-  })
+  }
+  const serialized = JSON.stringify(launch)
+  if (serialized.length > MAX_PENDING_LAUNCH_CHARS) throw new PendingChatLaunchError('too_large')
+  if (payload.zdr) {
+    removeClientValue(pendingLaunchKey)
+    temporaryLaunch = launch
+    return
+  }
+  try {
+    // Do not use the best-effort preferences writer: the composer may clear its
+    // draft only after this write succeeds. A quota/security error must reject.
+    window.sessionStorage.setItem(pendingLaunchKey, serialized)
+  } catch {
+    throw new PendingChatLaunchError('storage')
+  }
+  temporaryLaunch = null
+  // Remove content left by versions that persisted launches in localStorage.
+  try { window.localStorage.removeItem(pendingLaunchKey) } catch { /* unavailable */ }
 }
 
 export function consumePendingChatLaunch(): PendingChatLaunch | null {
-  const launch = readClientJson(pendingLaunchKey, isPendingChatLaunch)
+  let launch: PendingChatLaunch | null = temporaryLaunch
+  temporaryLaunch = null
+  if (!launch) {
+    try {
+      const stored: unknown = JSON.parse(window.sessionStorage.getItem(pendingLaunchKey) ?? 'null')
+      if (isPendingChatLaunch(stored)) launch = stored
+    } catch { /* no readable launch */ }
+  }
   removeClientValue(pendingLaunchKey)
   if (!launch) return null
   return {
@@ -85,6 +126,7 @@ export function consumePendingChatLaunch(): PendingChatLaunch | null {
     subscriptionConnectionId: normalizeOptionalString(launch.subscriptionConnectionId),
     supportHandoff: normalizePendingSupportHandoff(launch.supportHandoff),
     text: launch.text,
+    sourceScope: launch.sourceScope === 'conversation' ? 'conversation' : 'workspace',
     tone: normalizeTone(launch.tone),
     tools: normalizePendingTools(launch.tools),
     zdr: launch.zdr === true,

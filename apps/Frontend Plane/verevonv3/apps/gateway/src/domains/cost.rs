@@ -81,6 +81,13 @@ fn normalize_entry(entry: &Value) -> Value {
         "inputTokens": num("input_tokens"),
         "outputTokens": num("output_tokens"),
         "costUsd": entry.get("cost_usd").and_then(Value::as_f64).unwrap_or(0.0),
+        // A subscription row has real tokens and cost 0; without its basis the
+        // SPA would show it as free spend. Only the two known values pass, and
+        // an entry whose producer did not say is `null`.
+        "costBasis": entry
+            .get("cost_basis")
+            .and_then(Value::as_str)
+            .filter(|basis| *basis == "metered" || *basis == "subscription"),
         "createdAt": str_field("created_at"),
     })
 }
@@ -275,6 +282,27 @@ mod tests {
         assert_eq!(got["inputTokens"], json!(100));
         assert_eq!(got["costUsd"], json!(0.00005));
         assert_eq!(got["createdAt"], json!("2026-06-26T10:00:00Z"));
+        // No basis reported: null, never a guessed one.
+        assert_eq!(got["costBasis"], Value::Null);
+    }
+
+    #[test]
+    fn normalize_entry_carries_only_a_known_cost_basis() {
+        let subscription = json!({
+            "model": "gpt-5.6-terra",
+            "input_tokens": 1200,
+            "output_tokens": 300,
+            "cost_usd": 0.0,
+            "cost_basis": "subscription",
+        });
+        assert_eq!(
+            normalize_entry(&subscription)["costBasis"],
+            json!("subscription")
+        );
+        let metered = json!({ "cost_usd": 0.01, "cost_basis": "metered" });
+        assert_eq!(normalize_entry(&metered)["costBasis"], json!("metered"));
+        let unknown = json!({ "cost_usd": 0.0, "cost_basis": "free" });
+        assert_eq!(normalize_entry(&unknown)["costBasis"], Value::Null);
     }
 
     #[test]

@@ -49,3 +49,11 @@ func TestParseReviewResponse_ForcesBackgroundReviewOrigin(t *testing.T) {
 		t.Fatalf("origin must be forced to background_review: %+v", got)
 	}
 }
+
+func TestParseReviewResponse_RejectsMissingAndInvalidSchema(t *testing.T) {
+	for _, raw := range []string{`{}`, `{"skills":null}`, `{"skills":[{"name":"X","content":"c"}]}`, `{"skills":[{"name":"X","content":"c","confidence":1.5}]}`, `{"skills":[{"name":"","content":"c","confidence":0.9}]}`} {
+		if _, err := ParseReviewResponse(raw); err == nil {
+			t.Fatalf("accepted invalid review: %s", raw)
+		}
+	}
+}

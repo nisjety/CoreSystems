@@ -1,5 +1,7 @@
 //! In-memory run state store for execution-core.
 
+use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use dashmap::{mapref::entry::Entry, DashMap};
@@ -57,10 +59,50 @@ impl RunSnapshot {
     }
 }
 
+/// A sandbox-manager lease acquired for one run's Space-scoped
+/// `code_interpreter` calls. `AcquireLease` mints a fresh lease (and lease
+/// id) on every call — it is not idempotent by scope — so a run's FIRST
+/// Space-scoped step caches its result here and every later step in the same
+/// run reuses it, mirroring `owners`' own "insert-once, read-many" idiom.
+/// See `sandbox_lease::ensure_sandbox_lease`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SandboxLease {
+    pub lease_id: String,
+    /// The backend this lease is pinned to; `SnapshotSandbox`/`ReleaseLease`
+    /// must present the same value back (S3.2's own backend-pin invariant).
+    pub backend_id: String,
+    /// Whether this lease may host S4.2 background processes, as
+    /// `AcquireLease` reported it.
+    ///
+    /// Cached rather than re-derived because the authority it reflects is not
+    /// re-readable from here: sandbox-manager decided it once, from a Control
+    /// decision this process no longer holds, and every later process RPC
+    /// travels on execution-core's own service token with no decision in hand.
+    /// So this is a copy of the row's answer, kept for one purpose — refusing
+    /// `process_start` with the real reason instead of preparing a spawn the
+    /// registry would deny. `RegisterProcess` checks the row again and that
+    /// check, not this one, is authoritative.
+    pub processes_permitted: bool,
+}
+
+/// A run's Space-scoped `code_interpreter` workspace, hydrated once onto
+/// local disk and reused across every call in the run. `baseline` is
+/// `hydrate`'s own `path -> content_hash` return value, captured at hydrate
+/// time — kept here so the run's eventual `diff_and_upload` (at release
+/// time) compares against what THIS run actually observed, not whatever
+/// the Space's rows say by then. See `sandbox_lease::ensure_hydrated_workspace`.
+#[derive(Debug, Clone)]
+pub struct HydratedWorkspace {
+    pub path: PathBuf,
+    pub baseline: HashMap<String, String>,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct StateStore {
     runs: Arc<DashMap<String, RunSnapshot>>,
     owners: Arc<DashMap<String, RunOwner>>,
+    leases: Arc<DashMap<String, SandboxLease>>,
+    workspaces: Arc<DashMap<String, HydratedWorkspace>>,
 }
 
 impl StateStore {
@@ -167,6 +209,56 @@ impl StateStore {
         self.update(next);
         true
     }
+
+    #[must_use]
+    pub fn sandbox_lease(&self, run_id: &str) -> Option<SandboxLease> {
+        self.leases.get(run_id).map(|entry| entry.clone())
+    }
+
+    /// Cache the lease this run acquired for its first Space-scoped
+    /// `code_interpreter` step. Unconditional insert-or-replace: a caller that
+    /// already checked `sandbox_lease` and found nothing is the only caller
+    /// that should reach this, so there is no existing value worth preserving
+    /// over a fresh one (unlike `cache_verified_owner`, which must never let a
+    /// second principal silently rebind an owner).
+    pub fn cache_sandbox_lease(&self, run_id: &str, lease: SandboxLease) {
+        self.leases.insert(run_id.to_owned(), lease);
+    }
+
+    /// Remove and return this run's sandbox lease, if it ever acquired one.
+    /// Used only at a run's actual end (cancel or terminal completion) —
+    /// removing rather than merely reading means a second release attempt for
+    /// the same `run_id` sees `None` and is a no-op, and the map does not grow
+    /// forever for runs that ever used `code_interpreter` in a Space.
+    #[must_use]
+    pub fn take_sandbox_lease(&self, run_id: &str) -> Option<SandboxLease> {
+        self.leases.remove(run_id).map(|(_, lease)| lease)
+    }
+
+    /// Read this run's already-hydrated Space workspace, if any.
+    #[must_use]
+    pub fn hydrated_workspace(&self, run_id: &str) -> Option<HydratedWorkspace> {
+        self.workspaces.get(run_id).map(|entry| entry.clone())
+    }
+
+    /// Cache the workspace this run hydrated for its first Space-scoped
+    /// `code_interpreter` call. Unconditional insert-or-replace, mirroring
+    /// `cache_sandbox_lease`: only a caller that already checked
+    /// `hydrated_workspace` and found nothing reaches here.
+    pub fn cache_hydrated_workspace(&self, run_id: &str, workspace: HydratedWorkspace) {
+        self.workspaces.insert(run_id.to_owned(), workspace);
+    }
+
+    /// Remove and return this run's hydrated workspace, if it ever created
+    /// one. Used only at a run's actual end, alongside `take_sandbox_lease` —
+    /// removing rather than reading means a second release attempt finds
+    /// nothing and does not try to re-upload or re-delete the directory.
+    #[must_use]
+    pub fn take_hydrated_workspace(&self, run_id: &str) -> Option<HydratedWorkspace> {
+        self.workspaces
+            .remove(run_id)
+            .map(|(_, workspace)| workspace)
+    }
 }
 
 #[cfg(test)]
@@ -261,6 +353,72 @@ mod tests {
         assert_eq!(store.resume_approved("run_paused"), None);
         assert_eq!(store.resume_paused("run_paused"), Some(2));
         assert_eq!(store.resume_approved("run_approval"), Some(7));
+    }
+
+    #[test]
+    fn a_run_with_no_lease_yet_reads_as_absent() {
+        let store = StateStore::new();
+        assert_eq!(store.sandbox_lease("run-1"), None);
+    }
+
+    #[test]
+    fn a_cached_lease_is_reused_by_later_reads_for_the_same_run() {
+        let store = StateStore::new();
+        let lease = SandboxLease {
+            lease_id: "lease-1".to_owned(),
+            backend_id: "backend-1".to_owned(),
+            processes_permitted: false,
+        };
+        store.cache_sandbox_lease("run-1", lease.clone());
+        assert_eq!(store.sandbox_lease("run-1"), Some(lease));
+        assert_eq!(store.sandbox_lease("run-2"), None);
+    }
+
+    #[test]
+    fn taking_a_lease_removes_it_so_a_second_release_is_a_no_op() {
+        let store = StateStore::new();
+        let lease = SandboxLease {
+            lease_id: "lease-1".to_owned(),
+            backend_id: "backend-1".to_owned(),
+            processes_permitted: false,
+        };
+        store.cache_sandbox_lease("run-1", lease.clone());
+        assert_eq!(store.take_sandbox_lease("run-1"), Some(lease));
+        assert_eq!(store.take_sandbox_lease("run-1"), None);
+        assert_eq!(store.sandbox_lease("run-1"), None);
+    }
+
+    #[test]
+    fn a_run_with_no_hydrated_workspace_yet_reads_as_absent() {
+        let store = StateStore::new();
+        assert!(store.hydrated_workspace("run-1").is_none());
+    }
+
+    #[test]
+    fn a_cached_hydrated_workspace_is_reused_by_later_reads_for_the_same_run() {
+        let store = StateStore::new();
+        let workspace = HydratedWorkspace {
+            path: PathBuf::from("/tmp/ws-1"),
+            baseline: HashMap::from([("a.txt".to_owned(), "sha256:aaa".to_owned())]),
+        };
+        store.cache_hydrated_workspace("run-1", workspace.clone());
+        let read = store.hydrated_workspace("run-1").expect("cached workspace");
+        assert_eq!(read.path, workspace.path);
+        assert_eq!(read.baseline, workspace.baseline);
+        assert!(store.hydrated_workspace("run-2").is_none());
+    }
+
+    #[test]
+    fn taking_a_hydrated_workspace_removes_it_so_a_second_release_is_a_no_op() {
+        let store = StateStore::new();
+        let workspace = HydratedWorkspace {
+            path: PathBuf::from("/tmp/ws-1"),
+            baseline: HashMap::new(),
+        };
+        store.cache_hydrated_workspace("run-1", workspace);
+        assert!(store.take_hydrated_workspace("run-1").is_some());
+        assert!(store.take_hydrated_workspace("run-1").is_none());
+        assert!(store.hydrated_workspace("run-1").is_none());
     }
 
     #[test]

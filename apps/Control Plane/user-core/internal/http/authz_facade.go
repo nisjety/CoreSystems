@@ -96,23 +96,34 @@ func (s *Server) authzVisible(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"ids": vis.IDs, "all_org": vis.AllOrg})
 }
 
-// authzCheck: GET /api/v1/internal/authz/check?org_id=&resource_type=&resource_id=&subject_id=[&subject_type=user]
-// Returns { "allowed": bool, "role": "view"|"edit"|"" }.
-func (s *Server) authzCheck(c *gin.Context) {
-	orgID := strings.TrimSpace(c.Query("org_id"))
-	resourceType := strings.TrimSpace(c.Query("resource_type"))
-	resourceID := strings.TrimSpace(c.Query("resource_id"))
-	subjectID := strings.TrimSpace(c.Query("subject_id"))
-	subjectType := strings.TrimSpace(c.Query("subject_type"))
+// authzGrantQuerySelectors reads and validates the grant query selectors
+// shared by the check/revoke endpoints, defaulting subject_type to user.
+// Writes the error response and returns ok=false when invalid or unwired.
+func (s *Server) authzGrantQuerySelectors(c *gin.Context) (orgID, resourceType, resourceID, subjectID, subjectType string, ok bool) {
+	orgID = strings.TrimSpace(c.Query("org_id"))
+	resourceType = strings.TrimSpace(c.Query("resource_type"))
+	resourceID = strings.TrimSpace(c.Query("resource_id"))
+	subjectID = strings.TrimSpace(c.Query("subject_id"))
+	subjectType = strings.TrimSpace(c.Query("subject_type"))
 	if subjectType == "" {
 		subjectType = "user"
 	}
 	if orgID == "" || resourceType == "" || resourceID == "" || subjectID == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "org_id, resource_type, resource_id and subject_id are required"})
-		return
+		return "", "", "", "", "", false
 	}
 	if s.aclRepo == nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "authz facade not configured"})
+		return "", "", "", "", "", false
+	}
+	return orgID, resourceType, resourceID, subjectID, subjectType, true
+}
+
+// authzCheck: GET /api/v1/internal/authz/check?org_id=&resource_type=&resource_id=&subject_id=[&subject_type=user]
+// Returns { "allowed": bool, "role": "view"|"edit"|"" }.
+func (s *Server) authzCheck(c *gin.Context) {
+	orgID, resourceType, resourceID, subjectID, subjectType, ok := s.authzGrantQuerySelectors(c)
+	if !ok {
 		return
 	}
 
@@ -207,20 +218,8 @@ func (s *Server) authzGrant(c *gin.Context) {
 // authzRevoke: DELETE /api/v1/internal/authz/grant?org_id=&resource_type=&resource_id=&subject_id=[&subject_type=user]
 // Removes an explicit grant (the ShareDialog "remove" action). Idempotent.
 func (s *Server) authzRevoke(c *gin.Context) {
-	orgID := strings.TrimSpace(c.Query("org_id"))
-	resourceType := strings.TrimSpace(c.Query("resource_type"))
-	resourceID := strings.TrimSpace(c.Query("resource_id"))
-	subjectID := strings.TrimSpace(c.Query("subject_id"))
-	subjectType := strings.TrimSpace(c.Query("subject_type"))
-	if subjectType == "" {
-		subjectType = "user"
-	}
-	if orgID == "" || resourceType == "" || resourceID == "" || subjectID == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "org_id, resource_type, resource_id and subject_id are required"})
-		return
-	}
-	if s.aclRepo == nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "authz facade not configured"})
+	orgID, resourceType, resourceID, subjectID, subjectType, ok := s.authzGrantQuerySelectors(c)
+	if !ok {
 		return
 	}
 

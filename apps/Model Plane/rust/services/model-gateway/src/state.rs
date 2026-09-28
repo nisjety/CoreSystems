@@ -107,6 +107,15 @@ pub struct AppState {
     /// terminal receipts and heartbeats. `None` is permitted solely for the
     /// in-memory unit-test constructor; `from_env` fails closed when absent.
     pub(crate) session_terminal_tokens: Option<Arc<SessionTerminalTokenProvider>>,
+    /// Delegated-identity design, Gap B (§2.4(i)) — the mail-task internal
+    /// bridge's OWN `aud=session-core` credential, distinct from
+    /// `session_terminal_tokens` (see `mail_task_bridge_auth`'s module doc
+    /// for why). `None` when `MAIL_TASK_BRIDGE_SERVICE_API_KEY` is unset,
+    /// which keeps `POST /internal/mail-task/prepare-thread` answering a
+    /// clear 503 rather than ever reaching session-core unauthenticated —
+    /// matches `mail_task.rs`'s existing `MailTaskPipeline: None` default on
+    /// the gateway BFF side of this same, still-not-fully-wired pipeline.
+    pub(crate) mail_task_bridge_tokens: Option<Arc<crate::mail_task_bridge_auth::MailTaskBridgeTokenProvider>>,
     /// Keyed, opaque transformer for all values persisted as managed start
     /// identities. This prevents public request/idempotency strings from
     /// becoming durable data (including on ZDR paths).
@@ -158,6 +167,15 @@ pub struct AppState {
     /// posts, and campaigns), e.g. "<http://social-core:3162>". Used by the
     /// `social.list_*` read tools.
     pub social_core_base_url: String,
+    /// Base URL of conversation-core's HTTP API (the shared inbox), e.g.
+    /// "<http://conversation-core-go:3160>". Used by the `inbox_*` read tools.
+    pub conversation_core_base_url: String,
+    /// HMAC secret this service signs conversation-core reads with, as the
+    /// `model-gateway` delegation principal. conversation-core refuses the
+    /// shared internal API key outright, so there is no unsigned fallback:
+    /// empty means the `inbox_*` tools report the inbox as unconfigured for
+    /// this deployment instead of making a call that can only 401.
+    pub conversation_core_service_token: String,
     /// Shared `x-internal-api-key` header value for calls to the Application
     /// Plane cores that gate on it (insight-core, social-core). Both read
     /// `INTERNAL_API_KEY` on their own side, so this defaults to the same
@@ -248,7 +266,30 @@ pub struct AppState {
     /// gateway assigns versions because the model cannot reliably remember what
     /// it emitted earlier in a thread; see `artifacts.rs` for the trade-off this
     /// in-memory store accepts.
+    ///
+    /// This is the turn's OWN private workspace: `sse.rs` forks it per turn
+    /// (`fork_thread`), and every round of THIS turn's own tool dispatch
+    /// (`create_artifact`/`update_artifact`) writes into it before the
+    /// durable commit at the end of the turn.
     pub artifact_versions: crate::artifacts::ArtifactVersionStore,
+    /// Snapshot of every artifact exactly as this turn STARTED — before this
+    /// turn's own dispatch could touch any of it. `sse.rs` sets this once,
+    /// from the pre-fork base it takes at the top of the turn, and nothing
+    /// in the turn ever mutates it afterward (unlike `artifact_versions`
+    /// above).
+    ///
+    /// Owner ruling 2026-09-26 ("receipt-bound reuse on revision turns"):
+    /// reuse applies ONLY on a genuine cross-turn revision, never within a
+    /// turn. `source_validation`'s revision-turn reuse must look up a prior
+    /// accepted review against THIS store, not `artifact_versions` — that
+    /// live per-turn fork is exactly what a later round of the SAME turn
+    /// (e.g. a mid-run queued correction naming one piece) already mutated,
+    /// so looking the prior review up there let that later round silently
+    /// read back an earlier round's own, never-durably-committed review
+    /// (reproduced in a router test: a single turn's second round reused 9 of 13 segments
+    /// from its own first round). Looked up here, that same-turn artifact
+    /// simply does not exist yet, so no prior review is ever found for it.
+    pub artifact_review_base: crate::artifacts::ArtifactVersionStore,
     /// §23.6 tool result handles — oversized tool results held out of model
     /// context and queried by handle. Keyed `(org, user, handle)` and TTL'd;
     /// deliberately never populated on a ZDR turn (see
@@ -287,6 +328,19 @@ pub struct AppState {
     /// `Semaphore` itself does not — every clone still shares the same
     /// bound, which is the point.
     pub screening_semaphore: Arc<tokio::sync::Semaphore>,
+    /// The latency levers' kill-switches, read once from the environment
+    /// (`crate::latency_levers`). A test sets them on the state it builds
+    /// rather than in the process environment.
+    pub latency_levers: crate::latency_levers::LatencyLevers,
+    /// Which version of the author guidance the tool rounds send, read once
+    /// from the environment (`crate::author_guidance`). A test sets it on the
+    /// state it builds rather than in the process environment.
+    pub author_guidance: crate::author_guidance::AuthorGuidance,
+    /// Whether the turn's source reviews get the rule for labelled author
+    /// proposals, read once from the environment
+    /// (`crate::review_proposal_rule`). A test sets it on the state it builds
+    /// rather than in the process environment.
+    pub review_proposal_rule: crate::review_proposal_rule::ReviewProposalRule,
 }
 
 /// Cap on establishing a downstream gRPC connection, including the HTTP/2
@@ -343,6 +397,7 @@ impl AppState {
             session_client: SessionCoreClient::new(session_channel),
             managed_run_client: ManagedRunLifecycleClient::new(managed_run_channel),
             session_terminal_tokens: None,
+            mail_task_bridge_tokens: None,
             managed_start_keys: ManagedStartKeyDeriver::test_only(),
             run_client: RunServiceClient::new(run_channel),
             orchestration_client: OrchestrationCoreServiceClient::new(orchestration_channel),
@@ -360,6 +415,8 @@ impl AppState {
             org_core_service_token: String::new(),
             insight_core_base_url: "http://localhost:3163".to_owned(),
             social_core_base_url: "http://localhost:3162".to_owned(),
+            conversation_core_base_url: "http://localhost:3160".to_owned(),
+            conversation_core_service_token: String::new(),
             application_core_internal_key: String::new(),
             verevon_public_origin: "http://localhost:5173".to_owned(),
             mcp_oauth_service_token: String::new(),
@@ -391,6 +448,7 @@ impl AppState {
             lsp: crate::lsp::BridgeClient::new(""),
             approvals: crate::approvals::ApprovalStore::new(),
             artifact_versions: crate::artifacts::ArtifactVersionStore::new(),
+            artifact_review_base: crate::artifacts::ArtifactVersionStore::new(),
             tool_results: crate::tool_result_handles::ToolResultStore::new(),
             trajectories: crate::trajectory::TrajectoryStore::new(),
             stream_buffers: crate::stream_buffer::StreamBufferStore::new(),
@@ -406,6 +464,9 @@ impl AppState {
             screening_semaphore: Arc::new(tokio::sync::Semaphore::new(
                 crate::moderation::SCREENING_CONCURRENCY,
             )),
+            latency_levers: crate::latency_levers::LatencyLevers::from_env(),
+            author_guidance: crate::author_guidance::AuthorGuidance::from_env(),
+            review_proposal_rule: crate::review_proposal_rule::ReviewProposalRule::from_env(),
         }
     }
 
@@ -551,6 +612,10 @@ impl AppState {
             .unwrap_or_else(|_| "http://insight-core:3163".to_owned());
         let social_core_base_url = std::env::var("SOCIAL_CORE_URL")
             .unwrap_or_else(|_| "http://social-core:3162".to_owned());
+        let conversation_core_base_url = std::env::var("CONVERSATION_CORE_URL")
+            .unwrap_or_else(|_| "http://conversation-core-go:3160".to_owned());
+        let conversation_core_service_token =
+            std::env::var("CONVERSATION_MODEL_GATEWAY_SERVICE_TOKEN").unwrap_or_default();
         let application_core_internal_key = std::env::var("APPLICATION_CORE_INTERNAL_KEY")
             .or_else(|_| std::env::var("INTERNAL_API_KEY"))
             .unwrap_or_default();
@@ -615,6 +680,29 @@ impl AppState {
             );
         }
 
+        // Delegated-identity design, Gap B (§2.4(i)) — optional, distinct
+        // from `session_terminal_tokens` above (see the module's doc for
+        // why it cannot reuse that principal). Absent env vars leave the
+        // mail-task bridge route answering 503, exactly like every other
+        // optional dependency here (azure_finetune, lsp_client, quarry) —
+        // model-gateway must still start today, before the Postmark
+        // account/domain exist (owner decision #1, still pending).
+        let mail_task_bridge_tokens =
+            match crate::mail_task_bridge_auth::MailTaskBridgeTokenProvider::from_env() {
+                Ok(provider) => {
+                    tracing::info!("mail-task bridge session-core credential configured");
+                    Some(Arc::new(provider))
+                }
+                Err(error) => {
+                    tracing::info!(
+                        %error,
+                        "mail-task bridge session-core credential not configured; \
+                         /internal/mail-task/prepare-thread will answer 503"
+                    );
+                    None
+                }
+            };
+
         // Wave 9 — Quarry edge for Fetch + ExtractStructured. Empty
         // QUARRY_EDGE_URL → client reports Available() == false and
         // the gRPC handlers return Unimplemented; safe in dev.
@@ -651,6 +739,7 @@ impl AppState {
             state.session_client = session_client;
             state.managed_run_client = managed_run_client;
             state.session_terminal_tokens = Some(session_terminal_tokens);
+            state.mail_task_bridge_tokens = mail_task_bridge_tokens.clone();
             state.managed_start_keys = managed_start_keys;
             state.run_client = run_client;
             state.orchestration_client = orchestration_client;
@@ -668,6 +757,8 @@ impl AppState {
             state.org_core_service_token = org_core_service_token.clone();
             state.insight_core_base_url = insight_core_base_url.clone();
             state.social_core_base_url = social_core_base_url.clone();
+            state.conversation_core_base_url = conversation_core_base_url.clone();
+            state.conversation_core_service_token = conversation_core_service_token.clone();
             state.application_core_internal_key = application_core_internal_key.clone();
             state.verevon_public_origin = verevon_public_origin.clone();
             state.mcp_oauth_service_token = mcp_oauth_service_token.clone();
@@ -696,6 +787,7 @@ impl AppState {
             state.session_client = session_client;
             state.managed_run_client = managed_run_client;
             state.session_terminal_tokens = Some(session_terminal_tokens);
+            state.mail_task_bridge_tokens = mail_task_bridge_tokens;
             state.managed_start_keys = managed_start_keys;
             state.run_client = run_client;
             state.orchestration_client = orchestration_client;
@@ -713,6 +805,8 @@ impl AppState {
             state.org_core_service_token = org_core_service_token;
             state.insight_core_base_url = insight_core_base_url;
             state.social_core_base_url = social_core_base_url;
+            state.conversation_core_base_url = conversation_core_base_url;
+            state.conversation_core_service_token = conversation_core_service_token;
             state.application_core_internal_key = application_core_internal_key;
             state.verevon_public_origin = verevon_public_origin.clone();
             state.mcp_oauth_service_token = mcp_oauth_service_token.clone();

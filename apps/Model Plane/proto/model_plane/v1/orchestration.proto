@@ -23,6 +23,14 @@ service OrchestrationCoreService {
   // Transition a plan to a new state. Rejects illegal transitions.
   rpc TransitionPlan(TransitionPlanRequest) returns (TransitionPlanResponse);
 
+  // Create a plan directly in PROPOSED state with real steps, supplied by the
+  // model via the `plan.propose` control tool during a plan-mode run
+  // (chat-wave2-specs plan-gate §2.1-2.2). Unlike the zero-step `draft` plan
+  // session-core auto-creates at run start for the retrospective execution
+  // log (`create_plan`), this is the plan a user actually reviews and edits
+  // before granting an autonomy rung.
+  rpc ProposePlan(ProposePlanRequest) returns (ProposePlanResponse);
+
   // List todos for a thread (and optionally scoped to a run).
   rpc ListTodos(ListTodosRequest) returns (ListTodosResponse);
 
@@ -444,8 +452,16 @@ message SubagentLineage {
 // --- ListPlans ---
 
 message ListPlansRequest {
-  // Run whose plans are being listed.
+  // Run whose plans are being listed. Mutually exclusive with `thread_id`;
+  // the request is refused when both are empty.
   string run_id = 1;
+
+  // Thread whose plans are being listed, newest first (plan-gate §2.4). Used
+  // by the executing run's context-injection path to find the thread's
+  // latest APPROVED plan across run boundaries — a model-proposed plan is
+  // approved on the plan-mode run that proposed it but consumed by the NEXT
+  // run on the same thread, which does not share that run_id.
+  string thread_id = 2;
 }
 
 message ListPlansResponse {
@@ -479,10 +495,81 @@ message TransitionPlanRequest {
 
   // Optional reason for the transition.
   string reason = 4;
+
+  // Ordered edit set applied atomically before the state transition
+  // (plan-gate §2.2). Only legal when the plan is currently
+  // PLAN_STATE_PROPOSED — refused otherwise. The array's order becomes the
+  // plan's new step order; removed entries are included, in their old
+  // position, with removed=true, so ordinals stay auditable. Empty for a
+  // transition that carries no edits (e.g. PROPOSED -> REJECTED with nothing
+  // changed).
+  repeated PlanStepEdit edited_steps = 5;
+}
+
+// One user edit to a proposed plan's step list (plan-gate §2.2).
+message PlanStepEdit {
+  // Existing step id being edited. Empty means this entry is a NEW step
+  // inserted at this array position.
+  string step_id = 1;
+
+  // Edited (or new) title.
+  string title = 2;
+
+  // Edited (or new) operation slug. Empty is valid.
+  string operation = 3;
+
+  // True when the user removed this step. A removed step is marked
+  // PLAN_STEP_STATE_SKIPPED, never hard-deleted — `plan_steps` is an audit
+  // trail, and a removed step is a decided-against step, not an erased one.
+  bool removed = 4;
 }
 
 message TransitionPlanResponse {
   // Updated plan record.
+  Plan plan = 1;
+}
+
+// --- ProposePlan ---
+
+// One step of a model-proposed plan, before it has a durable id.
+message ProposedPlanStep {
+  // Human-readable title.
+  string title = 1;
+
+  // Optional operation slug tying this step to an execution op.
+  string operation = 2;
+}
+
+message ProposePlanRequest {
+  // Owning thread identifier.
+  string thread_id = 1;
+
+  // Owning run identifier — the plan-mode run that is proposing.
+  string run_id = 2;
+
+  // Tenant + actor for the durable record.
+  string org_id = 3;
+  string user_id = 4;
+
+  // Author of the plan. Typically "agent" for a model-proposed plan.
+  string author = 5;
+
+  // Plan summary / intent.
+  string summary = 6;
+
+  // Ordered proposed steps. At least one step is required.
+  repeated ProposedPlanStep steps = 7;
+
+  // Optional id of an earlier plan on the same thread this one supersedes.
+  // Owner ruling (2026-09-27): a second `plan.propose` call in one plan-mode
+  // turn supersedes the first (last-proposed-wins) rather than appending or
+  // being refused; the client shows a notice when it had unsaved edits on
+  // the superseded plan.
+  string supersedes = 8;
+}
+
+message ProposePlanResponse {
+  // The created plan, state = PLAN_STATE_PROPOSED.
   Plan plan = 1;
 }
 

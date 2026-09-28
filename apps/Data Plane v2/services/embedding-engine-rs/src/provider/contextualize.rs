@@ -387,6 +387,9 @@ impl Contextualizer {
                 role: "user".to_string(),
                 content: build_prompt(&bounded, chunk_text),
                 name: String::new(),
+                // Provider-native compaction checkpoint; a one-shot user
+                // prompt never carries one.
+                compaction_summary: String::new(),
             }],
             // Zero temperature: the same chunk in the same document must
             // produce the same context, or a reindex silently changes what got
@@ -419,6 +422,10 @@ impl Contextualizer {
             min_privacy_tier: model_plane::v1::PrivacyTier::Unspecified as i32,
             min_residency: String::new(),
             thinking_budget_tokens: 0,
+            // Subscription routing belongs to a user's own chat, never to
+            // background contextualization: no subscription connection, normal tier.
+            subscription_connection_id: String::new(),
+            prefer_priority_service_tier: false,
         };
 
         let mut req = tonic::Request::new(request);

@@ -89,8 +89,12 @@ fn grpc_compatibility_ports_are_loopback_only_and_absent_in_production() {
         }
     }
 
+    // A Windows checkout may carry the overlay with CRLF endings, and the
+    // service-header split below is LF-only. Normalise first so the assertion
+    // reads the file's content, not its line endings.
+    let production = COMPOSE_PRODUCTION.replace("\r\n", "\n");
     for service in ["model-gateway", "inference-core", "execution-core"] {
-        let rest = COMPOSE_PRODUCTION
+        let rest = production
             .split(&format!("\n  {service}:\n"))
             .nth(1)
             .unwrap_or_else(|| panic!("{service} must be present in the production overlay"));

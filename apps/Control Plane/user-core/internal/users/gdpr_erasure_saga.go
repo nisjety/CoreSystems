@@ -98,12 +98,12 @@ func validateAuthErasureReceipt(raw []byte, expectedUserID string) error {
 	}
 	if receipt.Success == nil || !*receipt.Success {
 		if strings.TrimSpace(receipt.Error) != "" {
-			return fmt.Errorf("Auth erasure receipt reported failure")
+			return fmt.Errorf("auth erasure receipt reported failure")
 		}
-		return fmt.Errorf("Auth erasure receipt success must be true")
+		return fmt.Errorf("auth erasure receipt success must be true")
 	}
 	if strings.TrimSpace(receipt.UserID) != expectedUserID {
-		return fmt.Errorf("Auth erasure receipt returned unexpected user")
+		return fmt.Errorf("auth erasure receipt returned unexpected user")
 	}
 	return nil
 }
@@ -213,15 +213,16 @@ func (s *Service) executeErasure(ctx context.Context, requested ErasureOperation
 		receipt := erasureReceipt(operation)
 		return &receipt, fmt.Errorf("erasure operation is pending retry")
 	}
-	operation, err = s.processClaimedErasure(ctx, operation)
-	receipt := erasureReceipt(operation)
+	processed, err := s.processClaimedErasure(ctx, operation)
 	if err != nil {
-		nextAttempt := time.Now().UTC().Add(erasureRetryDelay(operation.Attempts))
-		if recordErr := s.erasureStore.FailErasureOperation(ctx, operation.OperationID, operation.Attempts, nextAttempt, err.Error()); recordErr != nil {
+		receipt := erasureReceipt(processed)
+		nextAttempt := time.Now().UTC().Add(erasureRetryDelay(processed.Attempts))
+		if recordErr := s.erasureStore.FailErasureOperation(ctx, processed.OperationID, processed.Attempts, nextAttempt, err.Error()); recordErr != nil {
 			return &receipt, fmt.Errorf("%v; persist erasure retry: %w", err, recordErr)
 		}
 		return &receipt, err
 	}
+	receipt := erasureReceipt(processed)
 	return &receipt, nil
 }
 
@@ -362,10 +363,7 @@ func erasureRetryDelay(attempt int) time.Duration {
 	if attempt < 1 {
 		attempt = 1
 	}
-	seconds := attempt * attempt
-	if seconds > 300 {
-		seconds = 300
-	}
+	seconds := min(attempt*attempt, 300)
 	return time.Duration(seconds) * time.Second
 }
 
@@ -399,7 +397,7 @@ func (worker *erasureWorker) run(ctx context.Context) {
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
 	for {
-		for index := 0; index < 20; index++ {
+		for range 20 {
 			operation, found, err := worker.service.erasureStore.ClaimNextErasureOperation(ctx)
 			if err != nil || !found {
 				if err != nil && !errors.Is(err, context.Canceled) {

@@ -22,12 +22,15 @@ use crate::auth::{
     delegated_session_bearer, AuthenticatedService, AuthenticatedUser, DelegatedBrowserBearer,
     DelegatedSessionBearer, JwtVerifier,
 };
+use crate::capability_client::CapabilityClient;
 use crate::http_health::Readiness;
 use crate::runtime_loop;
+use crate::sandbox_manager_client::SandboxManagerClient;
 use crate::scheduled_inference_auth::ScheduledInferenceTokenProvider;
 use crate::scheduled_step_decision::ScheduledStepDecisionVerifier;
 use crate::session_terminal_auth::{ManagedRunTokenProvider, SessionTerminalTokenProvider};
 use crate::state::{RunSnapshot, RunStatus, StateStore};
+use crate::workspace_cas::CasClient;
 
 pub(crate) struct ExecutionService {
     state: StateStore,
@@ -40,6 +43,32 @@ pub(crate) struct ExecutionService {
     terminal_tokens: Arc<dyn ManagedRunTokenProvider>,
     scheduled_step_decision_verifier: Option<ScheduledStepDecisionVerifier>,
     scheduled_inference_tokens: Option<Arc<ScheduledInferenceTokenProvider>>,
+    /// Absent exactly when `CapabilityClient::from_env` found no Control
+    /// Plane configuration — a valid disabled state. A Space-scoped
+    /// `code_interpreter` step fails closed without it (see
+    /// `sandbox_lease::ensure_sandbox_lease`); every other step is unaffected.
+    capability_client: Option<CapabilityClient>,
+    sandbox_manager_client: SandboxManagerClient,
+    /// Absent exactly when `CasClient::from_env` found no MinIO
+    /// configuration — a valid disabled state, same convention as
+    /// `capability_client` above. 3.5.C's own `code_interpreter.rs` rewrite
+    /// (not yet landed) is this field's first real reader; nothing consumes
+    /// it yet.
+    cas_client: Option<CasClient>,
+    /// This instance's own stable identifier — see
+    /// `http_health::resolve_backend_id`'s doc for why the SAME value must be
+    /// presented on every request from this process.
+    backend_id: String,
+    /// Mints execution-core's own `sandbox:write` service credential for
+    /// `ReleaseLease` at a run's actual end (`cancel_run`, `run_agent`'s own
+    /// `finalize()`) — never for `AcquireLease`, which needs the delegated
+    /// user-bound bearer instead. See `sandbox_lease`'s module doc.
+    sandbox_tokens: Arc<crate::sandbox_lease::SandboxManagerTokenProvider>,
+    /// S4.2's background process host, or `None` when this instance does not
+    /// run background processes (the default). Its only reader today is the
+    /// lease-release path, which stops a lease's children before the
+    /// workspace is uploaded; the tools that start one arrive in step 5.
+    process_host: Option<Arc<crate::process_host::ProcessHost>>,
 }
 
 #[tonic::async_trait]
@@ -86,50 +115,7 @@ impl RunOwnershipResolver for SessionCoreRunOwnershipResolver {
 }
 
 impl ExecutionService {
-    pub(crate) fn new(
-        state: StateStore,
-        auth: JwtVerifier,
-        session_channel: tonic::transport::Channel,
-        inference_channel: tonic::transport::Channel,
-        browser_channel: tonic::transport::Channel,
-        capability_policy: Arc<dyn crate::capability_policy::CapabilityPolicy>,
-        terminal_tokens: Arc<dyn ManagedRunTokenProvider>,
-    ) -> Self {
-        Self::new_with_scheduled_step_verifier(
-            state,
-            auth,
-            session_channel,
-            inference_channel,
-            browser_channel,
-            capability_policy,
-            terminal_tokens,
-            None,
-        )
-    }
-
-    pub(crate) fn new_with_scheduled_step_verifier(
-        state: StateStore,
-        auth: JwtVerifier,
-        session_channel: tonic::transport::Channel,
-        inference_channel: tonic::transport::Channel,
-        browser_channel: tonic::transport::Channel,
-        capability_policy: Arc<dyn crate::capability_policy::CapabilityPolicy>,
-        terminal_tokens: Arc<dyn ManagedRunTokenProvider>,
-        scheduled_step_decision_verifier: Option<ScheduledStepDecisionVerifier>,
-    ) -> Self {
-        Self::new_with_scheduled_step_runtime(
-            state,
-            auth,
-            session_channel,
-            inference_channel,
-            browser_channel,
-            capability_policy,
-            terminal_tokens,
-            scheduled_step_decision_verifier,
-            None,
-        )
-    }
-
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new_with_scheduled_step_runtime(
         state: StateStore,
         auth: JwtVerifier,
@@ -140,10 +126,26 @@ impl ExecutionService {
         terminal_tokens: Arc<dyn ManagedRunTokenProvider>,
         scheduled_step_decision_verifier: Option<ScheduledStepDecisionVerifier>,
         scheduled_inference_tokens: Option<Arc<ScheduledInferenceTokenProvider>>,
+        capability_client: Option<CapabilityClient>,
+        sandbox_manager_client: SandboxManagerClient,
+        cas_client: Option<CasClient>,
+        backend_id: String,
+        sandbox_tokens: Arc<crate::sandbox_lease::SandboxManagerTokenProvider>,
     ) -> Self {
         let ownership = Arc::new(SessionCoreRunOwnershipResolver {
             channel: session_channel.clone(),
         });
+        // Built here rather than passed in: everything it needs is already an
+        // argument, so no caller grows a parameter for a capability that is
+        // off by default. `None` is the ordinary case — see
+        // `ProcessHost::from_env`, which returns it unless an operator asked
+        // for background processes AND bwrap can actually isolate them.
+        let process_host = crate::process_host::ProcessHost::from_env(
+            sandbox_manager_client.clone(),
+            sandbox_tokens.clone(),
+            &backend_id,
+        )
+        .map(Arc::new);
         Self {
             state,
             auth,
@@ -155,6 +157,12 @@ impl ExecutionService {
             terminal_tokens,
             scheduled_step_decision_verifier,
             scheduled_inference_tokens,
+            capability_client,
+            sandbox_manager_client,
+            cas_client,
+            backend_id,
+            sandbox_tokens,
+            process_host,
         }
     }
 
@@ -490,6 +498,7 @@ fn scheduled_inference_request(
         model: "verevon-balance".to_owned(),
         messages: vec![
             pb::ChatMessage {
+                compaction_summary: String::new(),
                 role: "system".to_owned(),
                 content:
                     "Execute one bounded scheduled step. Do not call tools or external effects."
@@ -497,6 +506,7 @@ fn scheduled_inference_request(
                 name: String::new(),
             },
             pb::ChatMessage {
+                compaction_summary: String::new(),
                 role: "user".to_owned(),
                 content: goal.to_owned(),
                 name: String::new(),
@@ -593,6 +603,33 @@ fn authenticated_browser_request<T>(value: T, bearer: &str) -> Result<Request<T>
 /// session-core cannot durably create the approval record. Callers must return
 /// the error before they checkpoint or expose `AwaitingApproval` state.
 #[allow(clippy::result_large_err)]
+/// A lazily-connected channel that cannot hang on an unreachable peer.
+///
+/// `connect_lazy` on a bare `Endpoint` applies NO bound to establishing the
+/// connection, so a call against a peer that is down waits on the OS TCP stack
+/// — which refuses fast on Linux and retries SYN for seconds on Windows. That
+/// difference is why this looked like a flaky test rather than the missing
+/// bound it is: `direct_hitl_rejects_an_undurable_approval_pause` asserts a
+/// direct human-in-the-loop approval fails FAST when `orchestration-core` is
+/// unreachable, because the alternative is a run that neither pauses nor
+/// proceeds while a human waits on it. Every other channel in this crate
+/// already bounds itself this way (`auth.rs`, `capability_client.rs`,
+/// `capability_policy.rs`); these four were the exception.
+///
+/// Connection setup is bounded for every peer. A per-REQUEST timeout is the
+/// caller's business and deliberately not set here: session and capability
+/// calls are short, but an inference or browser call can legitimately run for
+/// minutes, and a blanket request timeout would abort exactly the work this
+/// service exists to do.
+fn lazy_bounded_channel(url: String) -> Result<tonic::transport::Channel, tonic::transport::Error> {
+    Ok(tonic::transport::Endpoint::from_shared(url)?
+        .connect_timeout(GRPC_CONNECT_TIMEOUT)
+        .connect_lazy())
+}
+
+/// Matches the 3 s used by every other outbound channel in this crate.
+const GRPC_CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
+
 async fn create_durable_approval(
     session_channel: &tonic::transport::Channel,
     approval: pb::CreateApprovalRequest,
@@ -787,6 +824,23 @@ impl ExecutionCore for ExecutionService {
         } else {
             None
         };
+        // Demanded only for a Space-scoped code_interpreter step — every
+        // other step, and a non-Space code_interpreter step, is unaffected.
+        // sandbox-manager's own AcquireLease binds a Space capability
+        // decision to the CALLING principal, so a service-level credential
+        // could never pass it; this is the one delegated bearer that must be
+        // user-bound (S3_3_DURABLE_WORKSPACE_DESIGN_2026-09-11.md §3.5 B.2).
+        let sandbox_bearer = if request.get_ref().tool_name == "code_interpreter"
+            && !request.get_ref().space_id.is_empty()
+        {
+            Some(
+                self.auth
+                    .authenticate_delegated_sandbox_manager(&request, &caller)
+                    .await?,
+            )
+        } else {
+            None
+        };
         let req = request.into_inner();
         caller.authorize(&req.org_id, Some(&req.user_id))?;
         self.authorize_run(&caller, &req.run_id, &session_bearer)
@@ -820,6 +874,19 @@ impl ExecutionCore for ExecutionService {
         )
         .with_verified_bearer(session_bearer.as_str());
 
+        let sandbox = sandbox_bearer.as_ref().map(|sandbox_bearer| {
+            crate::sandbox_lease::SandboxLeaseContext {
+                space_id: &req.space_id,
+                sandbox_bearer: sandbox_bearer.as_str(),
+                capability_client: self.capability_client.as_ref(),
+                sandbox_manager_client: &self.sandbox_manager_client,
+                backend_id: &self.backend_id,
+                cas_client: self.cas_client.as_ref(),
+                sandbox_tokens: &self.sandbox_tokens,
+                process_host: self.process_host.as_deref(),
+            }
+        });
+
         let outcome = runtime_loop::execute_step_with_browser_grant(
             &req.tool_name,
             &req.tool_input,
@@ -848,6 +915,7 @@ impl ExecutionCore for ExecutionService {
             Some(inference_bearer.as_str()),
             self.capability_policy.as_ref(),
             browser_grant.as_ref(),
+            sandbox.as_ref(),
         )
         .await;
 
@@ -1044,6 +1112,20 @@ impl ExecutionCore for ExecutionService {
             .await?;
         let cancelled = self.state.cancel(&req.run_id, Some(req.reason));
 
+        // Best-effort: a cancelled run whose lease fails to release is not a
+        // failed cancellation — sandbox-manager's own TTL is the backstop.
+        // No-op when this run never acquired a lease at all.
+        crate::sandbox_lease::release_sandbox_lease_if_any(
+            &self.state,
+            &self.sandbox_manager_client,
+            &self.sandbox_tokens,
+            self.cas_client.as_ref(),
+            self.process_host.as_deref(),
+            &req.run_id,
+            &caller.org_id,
+        )
+        .await;
+
         // Execution Core owns only the in-memory cancellation latch. Session
         // Core is the receipt authority, so this service deliberately returns
         // an empty receipt id; model-gateway calls the durable RunService after
@@ -1075,14 +1157,17 @@ impl ExecutionCore for ExecutionService {
         Ok(Response::new(pb::PauseRunResponse { paused }))
     }
 
-    /// Drive a whole agent run to a terminal answer (MVP no-tool slice).
+    /// Drive a whole agent run to a terminal answer through a governed
+    /// multi-tool loop.
     ///
     /// Delegates to [`runtime_loop::agent::run_agent`], which transitions the
-    /// run's draft plan to executing, runs a single `InferenceCore.Infer`
-    /// round, persists the assistant answer when retention permits, and records
-    /// one immutable managed terminal receipt. A run is never left `'queued'`:
-    /// failures take the graceful path and produce a durable `"failed"` outcome,
-    /// while receipt failures remain explicitly unavailable rather than claiming
+    /// run's draft plan to executing, loops `Infer` → dispatch tool calls →
+    /// feed outcomes back (the SAME `execute_step_inner` core `ExecuteStep`
+    /// itself dispatches through) up to its round budget, persists the
+    /// assistant answer when retention permits, and records one immutable
+    /// managed terminal receipt. A run is never left `'queued'`: failures take
+    /// the graceful path and produce a durable `"failed"` outcome, while
+    /// receipt failures remain explicitly unavailable rather than claiming
     /// terminal completion.
     async fn run_agent(
         &self,
@@ -1098,6 +1183,22 @@ impl ExecutionCore for ExecutionService {
             .auth
             .authenticate_delegated_inference(&request, &caller)
             .await?;
+        // Demanded whenever the run is Space-scoped, regardless of which
+        // tools it ends up calling — unlike ExecuteStep's per-call gate, a
+        // governed run decides tool-by-tool only once the loop is already
+        // running, so there is no earlier point to conditionally demand this
+        // on a per-tool basis. Mirrors the mandatory data-plane/inference
+        // bearers above, which every ExecuteStep call already requires
+        // unconditionally for the identical reason.
+        let sandbox_bearer = if request.get_ref().space_id.is_empty() {
+            None
+        } else {
+            Some(
+                self.auth
+                    .authenticate_delegated_sandbox_manager(&request, &caller)
+                    .await?,
+            )
+        };
         let req = request.into_inner();
         caller.authorize(&req.org_id, Some(&req.user_id))?;
         self.authorize_run(&caller, &req.run_id, &session_bearer)
@@ -1107,7 +1208,7 @@ impl ExecutionCore for ExecutionService {
             run_id = %req.run_id,
             thread_id = %req.thread_id,
             mode = %req.mode,
-            "run_agent: driving agent run (no-tool slice)"
+            "run_agent: driving agent run through the governed multi-tool loop"
         );
         let response = runtime_loop::agent::run_agent(
             &self.state,
@@ -1119,6 +1220,15 @@ impl ExecutionCore for ExecutionService {
             inference_bearer.as_str().to_owned(),
             self.capability_policy.as_ref(),
             self.terminal_tokens.as_ref(),
+            sandbox_bearer
+                .as_ref()
+                .map(|bearer| bearer.as_str().to_owned()),
+            self.capability_client.as_ref(),
+            &self.sandbox_manager_client,
+            &self.backend_id,
+            self.cas_client.as_ref(),
+            &self.sandbox_tokens,
+            self.process_host.as_deref(),
         )
         .await?;
         Ok(Response::new(response))
@@ -1189,8 +1299,7 @@ pub async fn serve(
         .unwrap_or_else(|_| "http://browser-broker:9095".to_owned());
     let capability_url = std::env::var("CAPABILITY_CORE_ADDR")
         .unwrap_or_else(|_| "http://capability-core:9097".to_owned());
-    let capability_channel =
-        tonic::transport::Endpoint::from_shared(capability_url)?.connect_lazy();
+    let capability_channel = lazy_bounded_channel(capability_url)?;
     let capability_policy = Arc::new(crate::capability_policy::GrpcCapabilityPolicy::from_env(
         capability_channel,
     )?);
@@ -1210,6 +1319,32 @@ pub async fn serve(
             None
         }
     };
+    // Same Control Plane client `http_health.rs`'s `/capability-profile`
+    // endpoint already uses — absent configuration is a valid disabled state
+    // there, and identically so here: a Space-scoped `code_interpreter` step
+    // fails closed (see `sandbox_lease::ensure_sandbox_lease`) rather than the
+    // whole process refusing to start.
+    let capability_client = CapabilityClient::from_env()
+        .map_err(|error| anyhow::anyhow!("sandbox capability client configuration: {error}"))?;
+    let sandbox_manager_client = SandboxManagerClient::from_env()
+        .map_err(|error| anyhow::anyhow!("sandbox-manager client configuration: {error}"))?;
+    // Absent configuration is a valid disabled state (§1's own convention) —
+    // a Space-scoped code_interpreter step fails closed without it, same as
+    // an absent capability_client above; nothing reads this yet (3.5.C.5).
+    let cas_client = CasClient::from_env()
+        .map_err(|error| anyhow::anyhow!("CAS client configuration: {error}"))?;
+    let backend_id = crate::http_health::resolve_backend_id();
+    // Same deployment service principal capability_policy's own
+    // ServiceTokenProvider already requires (EXECUTION_CORE_SERVICE_ID/
+    // EXECUTION_CORE_SERVICE_API_KEY/AUTH_CORE_URL) — construction above
+    // already fails startup closed without them, so requiring them again
+    // here for a different audience changes nothing about what a deployment
+    // must configure.
+    let sandbox_tokens = Arc::new(
+        crate::sandbox_lease::SandboxManagerTokenProvider::from_env().map_err(|error| {
+            anyhow::anyhow!("sandbox-manager service token provider configuration: {error}")
+        })?,
+    );
 
     serve_with_listener(
         state,
@@ -1223,10 +1358,16 @@ pub async fn serve(
         terminal_tokens,
         scheduled_step_decision_verifier,
         scheduled_inference_tokens,
+        capability_client,
+        sandbox_manager_client,
+        cas_client,
+        backend_id,
+        sandbox_tokens,
     )
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn serve_with_listener(
     state: StateStore,
     readiness: Readiness,
@@ -1239,10 +1380,15 @@ async fn serve_with_listener(
     terminal_tokens: Arc<dyn ManagedRunTokenProvider>,
     scheduled_step_decision_verifier: Option<ScheduledStepDecisionVerifier>,
     scheduled_inference_tokens: Option<Arc<ScheduledInferenceTokenProvider>>,
+    capability_client: Option<CapabilityClient>,
+    sandbox_manager_client: SandboxManagerClient,
+    cas_client: Option<CasClient>,
+    backend_id: String,
+    sandbox_tokens: Arc<crate::sandbox_lease::SandboxManagerTokenProvider>,
 ) -> anyhow::Result<()> {
-    let session_channel = tonic::transport::Endpoint::from_shared(session_url)?.connect_lazy();
-    let inference_channel = tonic::transport::Endpoint::from_shared(inference_url)?.connect_lazy();
-    let browser_channel = tonic::transport::Endpoint::from_shared(browser_url)?.connect_lazy();
+    let session_channel = lazy_bounded_channel(session_url)?;
+    let inference_channel = lazy_bounded_channel(inference_url)?;
+    let browser_channel = lazy_bounded_channel(browser_url)?;
 
     readiness.set_grpc_ready(true);
     let _readiness_guard = ReadinessGuard(readiness);
@@ -1260,6 +1406,11 @@ async fn serve_with_listener(
                 terminal_tokens,
                 scheduled_step_decision_verifier,
                 scheduled_inference_tokens,
+                capability_client,
+                sandbox_manager_client,
+                cas_client,
+                backend_id,
+                sandbox_tokens,
             ),
         ))
         .serve_with_incoming(TcpListenerStream::new(listener))
@@ -1652,13 +1803,15 @@ mod auth_tests {
             .expect("bind ephemeral listener");
         let address = listener.local_addr().expect("listener address");
         drop(listener);
-        let channel = tonic::transport::Endpoint::from_shared(format!("http://{address}"))
-            .expect("endpoint")
-            .connect_lazy();
+        // Built through the SAME helper production uses: a channel the test
+        // bounded by itself would prove nothing about the service.
+        let channel = lazy_bounded_channel(format!("http://{address}")).expect("endpoint");
         let state = StateStore::new();
 
+        // Comfortably above GRPC_CONNECT_TIMEOUT and far below "hangs": the
+        // point is that SOME application-level bound exists, not its exact value.
         let error = tokio::time::timeout(
-            std::time::Duration::from_secs(2),
+            GRPC_CONNECT_TIMEOUT + Duration::from_secs(5),
             create_durable_approval(
                 &channel,
                 pb::CreateApprovalRequest {
@@ -1701,6 +1854,17 @@ mod auth_tests {
             Arc::new(StaticTerminalTokens),
             None,
             None,
+            None,
+            SandboxManagerClient::from_env().expect("valid default sandbox-manager endpoint"),
+            None,
+            "test-backend".to_owned(),
+            std::sync::Arc::new(
+                crate::sandbox_lease::SandboxManagerTokenProvider::new_for_test(
+                    "http://127.0.0.1:1",
+                    "execution-core",
+                    "test-service-secret-at-least-32-bytes",
+                ),
+            ),
         ));
 
         tokio::time::timeout(std::time::Duration::from_secs(2), async {

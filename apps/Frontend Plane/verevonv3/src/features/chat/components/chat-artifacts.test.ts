@@ -50,6 +50,18 @@ const XLSX_MIME = 'application/vnd.openxmlformats-officedocument.spreadsheetml.s
 const DOCX_MIME = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
 
 describe('upsertArtifact version history', () => {
+  it('retains incoming snapshot history, including when its current revision is omitted', () => {
+    const snapshot = artifact({ content: 'third', version: 3, history: [
+      { content: 'first', title: 'first.py', version: 1 },
+      { content: 'second', title: 'second.py', version: 2 },
+    ] })
+    expect(artifactVersions(mergeArtifactVersion(undefined, snapshot)).map(entry => entry.content))
+      .toEqual(['first', 'second', 'third'])
+    const merged = mergeArtifactVersion(artifact({ content: 'fourth', version: 4 }), snapshot)
+    expect(artifactVersions(merged).map(entry => entry.content)).toEqual(['first', 'second', 'third', 'fourth'])
+    expect(merged.version).toBe(4)
+  })
+
   it('appends a version for a repeated id instead of duplicating the entry', () => {
     let list = upsertArtifact([], artifact({ content: 'v1', version: 1 }))
     list = upsertArtifact(list, artifact({ content: 'v2', version: 2 }))

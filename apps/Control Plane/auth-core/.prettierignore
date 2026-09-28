@@ -1,0 +1,5 @@
+# Generated protobuf/grpc stubs (ts-proto) — regenerated, formatting is churn.
+# Hand-written grpc code lives directly in src/grpc/ and stays formatted.
+src/grpc/auth/v1/**
+src/grpc/google/**
+src/grpc/proto/**

@@ -1889,3 +1889,1565 @@ It strips comments before matching — third parser in that file to need it, aft
 `str_const` and the taxonomy generator.
 
 Matrix **29 ✅ / 3 🟡 / 4 ❌** of 37. Workspace green at 2,338.
+
+## Sandbox lease identity — a ninth delegated user bearer, not a service token or token exchange (2026-09-11) — **decided; B.1 client shipped, B.2 wiring not started**
+
+**Context.** S3.3 step 3.5 phase B needs execution-core to call sandbox-manager's
+`AcquireLease` for a Space-scoped `code_interpreter` run. Building the client
+(`execution-core/src/sandbox_manager_client.rs`, commit `218c1f68`) surfaced
+that the obvious credential — a self-minted service token, the
+`capability_policy.rs` `ServiceTokenProvider` pattern execution-core uses for
+capability-core — can never work for this call.
+
+**Why.** `sandbox-manager/internal/server/server.go::AcquireLease` runs
+`capabilityVerify(decision, claims, {SubjectID: principal.ActorID, …})`, and
+`internal/authz/capability_verifier.go::Verify` requires
+`decision.SubjectID == expect.SubjectID`. `ActorID` comes from the caller's
+verified bearer (`pkg/authctx/authctx.go:31-32`: "Request headers, query
+strings, and bodies are never used to construct it"); for a service token it is
+the service id. Control's issuer
+(`user-core/internal/http/spaces.go::issueSpaceCapabilityDecision`) only signs
+a decision whose subject is a current personal-Space member
+(`ResolvePersonalThreadDecisionEvidence` → `ErrNoCurrentMembership`, 403). A
+service principal is never that member. Deterministic PermissionDenied on every
+real request — not a configuration issue.
+
+**Decision.** Add a ninth delegated user-bound bearer, `x-sandbox-authorization`,
+following the eight that already exist end to end:
+- Minted by the **V3 BFF** from the user's Better Auth session via
+  `GET /api/sandbox-manager/token` — which **already works today**: auth-core
+  lists `sandbox-manager` in `PlaneAudience` (`convex-token.service.ts:104`,
+  config `:360-369`, TTL default 300 s), `isInteractivePlaneAudience` admits
+  it, and `plane-token-scopes.ts:55` gives it an empty scope list, matching
+  `authz.go:59-61` (user principals need no scope). The BFF's closed
+  `ModelServiceAudience` enum already carries `SandboxManager`
+  (`audience_tokens.rs:27`). **No Auth Core change.**
+- Minted **only for Space-scoped turns** — `streams.rs::stream_chat` already
+  knows, because it is the handler that calls `inject_personal_thread_context`
+  — so ~all turns pay no extra Auth Core round-trip.
+- Verified at **model-gateway** via the existing generic
+  `verify_delegated_user_bearer` (`auth.rs:883-903`) and forwarded as gRPC
+  metadata by `tools.rs::handle_code_interpreter`; verified at
+  **execution-core** by a hand-written `authenticate_delegated_sandbox_manager`
+  (same shape as `authenticate_delegated_data_plane`, `auth.rs:446-462`,
+  including the easy-to-miss `zdr` equality), demanded **only when
+  `tool_name == "code_interpreter"` and `space_id` is set** — the browser
+  bearer's conditional pattern (`grpc.rs:778-789`). Absent → fail closed.
+- Used for **`AcquireLease` only**. `ActivateLease`/`SnapshotSandbox`/`ReleaseLease`
+  never consult the capability verifier and owner-filter only user principals
+  (`lease.go:148,247`: `($3 = '' OR owner_id = $3)`; `authz.go::OwnerFilter`
+  is `""` for services), so execution-core runs the rest of the lifecycle with
+  its OWN `sandbox:write` service token from
+  `POST /api/sandbox-manager/internal-token`. Lease lifetime is thereby
+  decoupled from the user bearer's 300 s TTL.
+- The capability decision is requested by execution-core (service-authenticated,
+  as `capability_client.rs` already does) with `subject_id = req.user_id`
+  immediately before acquire — it lives 2 minutes
+  (`personal_thread_decision.go:19`). user-core already returns the `claims`
+  sidecar the request needs (`spaces.go:1229`); the Rust client currently
+  drops it.
+
+**Rejected.**
+- *Service token for `AcquireLease`* — fails the subject check, above.
+- *Token exchange / on-behalf-of in execution-core* — no such mechanism exists
+  in the Model Plane (zero hits for `on_behalf`/`obo`/`token_exchange` across
+  Rust and Go), and the 2026-08-26 dev-bypass CORRECTION above already settled
+  the rule it would violate: every delegated bearer is a user credential
+  minted at the BFF from the session; no downstream service synthesises one
+  from another token. OBO is a second identity path Auth Core does not own.
+- *model-gateway mints it* — it holds no session cookie, only forwarded
+  bearers; and the same rule forbids it.
+- *Relax sandbox-manager's binding* (accept a body `subject_id` or an
+  `on_behalf_of` claim from a service) — undoes S3.2 step 4: verification is
+  against verified identity, never a request-body assertion.
+- *Mint on every turn unconditionally* — one more sequential Auth Core call
+  per chat turn for a credential most turns never use.
+
+**Also found, adjacent, not fixed here.** `convex-token.service.ts`'s
+`isInteractivePlaneAudience` (`:732-734`) excludes only `control-policy`, while
+its `InteractivePlaneAudience` type and doc comment (`:110-126`) say
+`orchestrator-core` must be excluded too ("its StartWorkflow lets a NON-service
+caller start any run-scoped workflow"). The spec asserts only `control-policy`.
+Type/runtime divergence on an auth gate — filed separately.
+
+Full mechanism and implementation order:
+`apps/Frontend Plane/verevonv3/docs/S3_3_DURABLE_WORKSPACE_DESIGN_2026-09-11.md` §3.5 B.2.
+
+## S3.3 step 3.5 slices (a)-(c) implemented same day — RunAgent's own "MVP no-tool slice" doc comment was stale (2026-09-11)
+
+Followed through on the decision above. Slices (a) (BFF mint) and (b)
+(model-gateway verify/forward) landed first; slice (c) — execution-core
+verification + `AcquireLease` itself — surfaced one finding worth recording on
+its own, because it changed the slice's actual scope for the better.
+
+**The finding.** `RunAgentRequest`'s field-8 proto comment
+("`max_rounds` ... reserved for the multi-tool loop; the MVP no-tool slice
+executes a single round") and `grpc.rs::run_agent`'s own doc comment/log line
+("driving agent run (no-tool slice)") both describe a state the code moved
+past. Tracing the actual call graph —
+`runtime_loop::agent::run_agent_with_tools` → `run_rounds` → dispatch via
+`runtime_loop::execute_step_with_subagent` — shows it reaches the EXACT SAME
+`execute_step_inner` core the direct `ExecuteStep` RPC dispatches through,
+tool calls (including `code_interpreter`) included. This is not a new gap;
+it is a stale comment that would have led anyone reading it before writing code
+to under-scope this slice — build the lease wiring for `ExecuteStep` only,
+call it done, and leave `RunAgent`'s identical `code_interpreter` calls with
+no lease path at all.
+
+**Consequence, positive.** Because both callers share one dispatch core,
+threading a single `SandboxLeaseContext` bundle (space_id + verified bearer +
+the two sandbox-manager-adjacent clients + backend_id) through
+`execute_step_with_browser_grant`/`execute_step_with_subagent` →
+`execute_step_inner` covers both `ExecuteStep` and `RunAgent` with one
+implementation. This closed the design doc's own loose end (e)(2)
+("`RunAgentRequest` has no `space_id` at all... decide, don't drift") as a
+side effect of doing (c) correctly, rather than as separately-scheduled
+follow-up work.
+
+**A verified-not-assumed precondition turned out to be unmet.** The B.2 design
+flagged, but did not check, whether Auth Core's service-principal registry
+grants execution-core `sandbox:write` for the `sandbox-manager` audience (it
+needs this later, for slice (d)'s release lifecycle). It did not:
+`apps/Control Plane/config/plane-service-principals.json`'s `execution-core`
+entry listed only `capability-core`/`session-core`/`quarry`. Fixed by adding
+the audience with `sandbox:read`+`sandbox:write` and
+`retentionByAudience: "persistent"` — policy-only, reviewable in git per this
+registry's own split-from-credentials design; `scripts/run-control-plane.sh`
+reuses the already-minted credential.
+
+**Also found while wiring RunAgent's side, and fixed in the same commit.**
+model-gateway's `sse.rs::spawn_run_dispatch` — the ONLY constructor of
+`RunAgentRequest` — never read `req.space_context`/`space_append_context` at
+all. Left unfixed, the new `space_id` proto field would have gone out empty on
+every real agentic-run call, making every line of the execution-core work
+above unreachable in production despite compiling and testing clean in
+isolation. Threaded `space_id` and slice (b)'s already-verified
+`sandbox_bearer` through `agentic_run_stream` → `spawn_run_dispatch` →
+`authenticated_run_agent_request`'s conditional `x-sandbox-authorization`
+header — same shape `tools.rs::handle_code_interpreter` already uses for
+`ExecuteStep`. Caught by asking "who actually calls this and do they have the
+data" rather than trusting that adding a proto field plus a consumer was
+sufficient.
+
+Full detail: design doc §3.5's B.2 sub-bullets and §8 item 3.5.B.2.
+
+## S3.3 step 3.5 slice (d) — release the lease at the two points execution-core can actually see a run end (2026-09-11)
+
+Closed out phase B.2 the same day as (a)-(c). `sandbox_lease.rs` could acquire
+a lease but never released one — every lease from a real run would sit until
+its own TTL (`LEASE_TTL`, 1 hour) expired server-side, correct as a backstop
+but not as the only mechanism.
+
+**New `SandboxManagerTokenProvider`, deliberately not shared with
+`capability_policy.rs`'s `ServiceTokenProvider`.** `ActivateLease`/
+`SnapshotSandbox`/`ReleaseLease` owner-filter only user principals
+(`lease.go`: `$3 = '' OR owner_id = $3`; a service principal's filter is
+always `""`), so — unlike `AcquireLease` — execution-core's own service
+credential works fine for release. Rather than generalize the existing
+provider to take an audience parameter, wrote an independent copy: this
+matches the codebase's own established convention (six independent
+per-audience token providers already exist on the model-gateway side alone,
+per the 2026-09-11 B.2 decision entry above), not an oversight or duplicated
+effort. Same `EXECUTION_CORE_SERVICE_ID`/`EXECUTION_CORE_SERVICE_API_KEY`
+env vars `ServiceTokenProvider` already requires — no new deployment
+configuration.
+
+**Release is wired at exactly the two points execution-core can observe a
+run's actual end, found by tracing the call graph rather than assumed:**
+`grpc.rs::cancel_run` (any run, regardless of how its lease was acquired —
+`state.take_sandbox_lease` removes-and-returns, so a second cancel or a
+retried release finds nothing and is a no-op) and `RunAgent`'s own
+`finalize()`, called only AFTER it has made the run terminal — `finalize`
+returns `Err` without touching `StateStore` at all when the durable receipt
+write itself fails, so a lease is never released for a run that is not
+actually over. One release call per `RunAgent` invocation covers every
+delegated subagent it spawned too: a subagent's `LoopContext.req` is
+`parent.req` verbatim (never a fresh value), so it shares the parent's exact
+`run_id` and therefore the same cached lease — there is no second lease to
+separately release.
+
+**A real, bounded gap, stated rather than hidden.** The inline `ExecuteStep`
+chat path — `code_interpreter` dispatched directly by model-gateway's
+`tools.rs`, never through `RunAgent` — has no observable "this run is over"
+signal inside execution-core at all; a run driven that way simply stops being
+called. A lease acquired on that path relies entirely on `LEASE_TTL` unless
+the same run_id is explicitly cancelled. This is a delayed-cleanup gap (up to
+one hour), not an unbounded leak, and it is recorded in `sandbox_lease.rs`'s
+own module doc so a future reader finds the reason instead of re-deriving it
+or mistaking the TTL for an oversight.
+
+Tests: `cargo test -p execution-core` across all 8 targets — 561 passed, same
+pre-existing unrelated failures as slice (c) (none touch the 4 files this
+slice changed: `grpc.rs`, `runtime_loop/agent.rs`, `sandbox_lease.rs`,
+`state.rs`). fmt/clippy clean.
+
+Full detail: design doc §8 item 3.5.B.2's slice (d) paragraph.
+
+## S3.3 step 3.5.C designed, plus a confirmed pre-existing authz bug found along the way (2026-09-12) — **decided; not yet implemented**
+
+Designing `code_interpreter.rs`'s Space-scoped rewrite (3.5.C: use the
+lease's hydrated workspace instead of an ephemeral one) surfaced a bug that
+predates this initiative and was never caught, because nothing had ever
+exercised the code path it lives in: `sandbox-manager/internal/authz/
+authz.go`'s `Authorize()` method-name switch has explicit cases only for
+`AcquireLease`/`ReleaseLease`/`SnapshotSandbox` (`ScopeWrite`) and `Health`
+(falls through to the `ScopeRead` default) — every other method name hits
+`default: return errors.New("unknown sandbox-manager method")`, confirmed by
+`authz_test.go:35`'s own `.../FutureMethod` case demonstrating exactly this.
+`ActivateLease`'s real gRPC method name is not in either case, so a call to
+it through the real interceptor (`authz.UnaryInterceptor`, wired at
+`cmd/main.go:128`) is refused today for any principal. Every existing
+`ActivateLease` test bypasses the interceptor by calling the method directly
+on the `*Server` struct, and `SandboxManagerClient::activate_lease` (Rust,
+built in B.1) has zero real callers today — B.2 deliberately never calls it,
+since `code_interpreter` stays SCRATCH (hermetic, no capability needs more).
+3.5.C is the first phase that gives `ActivateLease` a real caller, and per
+`lease.go`'s `BeginSnapshot` gate, every Space-scoped `SnapshotSandbox` call
+would fail closed with `FailedPrecondition` without it. Fix (part of 3.5.C's
+own sub-slice C.3, not a separate patch): add `ActivateLease`'s method name
+to the `ScopeWrite` case.
+
+**3.5.C's own design, in brief** (full detail in the design doc, §8 item
+3.5.C): a new `GetWorkspaceManifest(lease_id, backend_id)` RPC returning the
+two-layer manifest view (Space rows shadowed by this run's overlay, via a
+`DISTINCT ON (path) ... ORDER BY path, run_id IS NULL ASC` query — no
+existing precedent for this shape in the Go codebase, written from scratch);
+`SnapshotRequest` gains `repeated WorkspaceChangedFile changed_files`
+(`path`, `content_hash`, `size_bytes`, `base_hash` — captured at hydrate
+time in execution-core, not re-derived at snapshot time, since step 4's
+compare-and-swap merge depends on what the run actually observed); a new
+`internal/workspace/store.go` mirroring `scope_store.go`'s template exactly;
+`lease.Store.GetScoped` (real, tested, previously uncalled by `Server`) gets
+added to the `LeaseStore` interface to resolve `space_id` from `lease_id`;
+execution-core gains its first `CasClient` constructed outside a test; and
+`code_interpreter.rs` gets a Space-scoped-only persistent-per-lease-run
+workspace directory, hydrated once and diffed/uploaded at the same two
+release points B.2 slice (d) already wired (`cancel_run`, `finalize()`) —
+the non-Space ephemeral `Workspace::create`/`Drop` path is explicitly
+untouched.
+
+Sub-phases: C.1 (Go store + `GetScoped` on the interface, self-contained) →
+C.2 (proto regen) → C.3 (server.go wiring + both authz.go fixes) → C.4
+(Rust client + `CasClient` startup wiring) → C.5 (`code_interpreter.rs`
+rewrite). Not yet implemented as of this entry.
+
+Full detail: design doc §8 item 3.5.C.
+
+## S3.3 step 3.5.C.1-C.4 implemented same day — the ActivateLease authz fix is now regression-locked (2026-09-12)
+
+Sub-slices C.1 (Go workspace store), C.2 (proto), C.3 (Go server wiring +
+both `authz.go` fixes), and C.4 (Rust client + `CasClient` startup wiring)
+all landed together, since C.2's proto change does not compile in Rust
+without C.4's client update — see the design doc's §8 item 3.5.C for full
+per-slice detail. Highlights not already in the prior entry:
+
+- The `ActivateLease` fix (adding it to `authz.go`'s `ScopeWrite` case) now
+  has direct regression coverage: a JWT-independent `Authorize()` unit test,
+  plus two new rows in the existing interceptor table test proving it is
+  reachable with the right scope and refused without it — the exact
+  scenario that was silently broken before this fix, now locked so it
+  cannot regress unnoticed a second time.
+- `SnapshotSandbox`'s new `changed_files` upsert runs *before*
+  `snapshots.Create` deliberately: fail closed rather than let a snapshot
+  record reference workspace content whose overlay row was never durably
+  written. A non-Space lease never attempts the write at all (proven with
+  a workspace-store stub that fails the test if `UpsertOverlay` is ever
+  called for one).
+- `execution-core` gained its first non-test `CasClient` in this slice,
+  constructed but not yet consumed — the same "ship the primitive, wire
+  the caller next" position `capability_client` and `sandbox_manager_client`
+  were each in for exactly one commit before their own first real caller
+  landed. C.5 (not yet started) is that caller.
+
+Tests: sandbox-manager's full `go test ./...` green (`cmd`, `authz`,
+`lease`, `server`, `snapshot`, `workspace`); `execution-core --lib` 541
+passed, same 2 pre-existing unrelated failures as every prior slice this
+initiative. `gofmt -l`/`cargo fmt --check` diffs on touched files
+double-checked against `git show HEAD` + a plain reformat — all differences
+confirmed as this Windows checkout's pre-existing CRLF-driven drift (line
+endings only, verified via `gofmt -d`), not real content changes; nothing
+new introduced.
+
+Full detail: design doc §8 item 3.5.C.
+
+## S3.3 step 3.5.C.5 implemented — code_interpreter.rs now uses a durable, hydrated workspace when Space-scoped (2026-09-12)
+
+The final sub-slice. `code_interpreter.rs`'s `run`/`run_with_timeout` gained
+an `Option<&Path>` workspace-root parameter: `None` keeps the exact original
+ephemeral `Workspace::create`/`Drop` lifecycle (ordinary, non-Space calls are
+byte-for-byte unchanged); `Some(root)` runs against a persistent directory
+`sandbox_lease::ensure_hydrated_workspace` already hydrated and owns the
+lifetime of. Both paths share one new `run_in_root` helper, distinguished by
+a `persistent: bool` that controls exactly two things: scratch-directory
+creation tolerates `AlreadyExists` (a reused directory's second call finds
+`.tmp`/`.mplconfig` already present), and output collection excludes a file
+that already existed, byte-for-byte unchanged, before THIS call started —
+without that, every call in a run would re-report every file any earlier
+call (or hydrate) ever produced. A file that existed before but was modified
+this call is still reported; only an identical re-existing one is
+suppressed.
+
+`ensure_hydrated_workspace` (new, `sandbox_lease.rs`) is this codebase's
+first real caller of both `ActivateLease` (SCRATCH → ACTIVE — the lease
+promotion the 2026-09-12 authz.go fix above exists for) and
+`GetWorkspaceManifest`. `release_sandbox_lease_if_any` is now also the first
+real caller of `SnapshotSandbox`: before releasing the lease, it
+`diff_and_upload`s the workspace and reports the result via
+`SnapshotSandbox`'s `changed_files`, then removes the local directory either
+way. Everything here is best-effort by the same rule the rest of this
+release path already follows: an upload or snapshot failure must never fail
+the `CancelRun`/`RunAgent` response it rides with.
+
+**A known, pre-existing gap this phase did not introduce, restated
+accurately rather than left to rot in a stale comment**: the inline
+`ExecuteStep` chat path (`code_interpreter` outside `RunAgent`) has no
+observable "run ended" signal at all (documented at B.2's own release
+slice). Such a run's hydrated workspace, if it ever creates one, is now
+never uploaded OR deleted by this module — its edits are lost and its local
+directory persists until the container restarts. This is the same root
+cause as the already-documented lease-TTL gap, not a new one; the module's
+own doc comment says so explicitly rather than implying a safety net that
+does not exist.
+
+`SandboxLeaseContext` gained `cas_client`/`sandbox_tokens` fields, threaded
+through the same seams B.2 already established for `capability_client`/
+`sandbox_manager_client`/`backend_id` (both construction sites, `LoopContext`,
+the subagent inheritance). ~25 mechanical test-call-site fixes in `agent.rs`
+via one `replace_all` on an identical trailing-argument pattern — the same
+compile-error-driven approach every slice this initiative has used.
+
+Tests: new coverage in all three touched modules (`state.rs`'s
+`HydratedWorkspace` cache trio; `sandbox_lease.rs`'s cache-hit, CAS-not-
+configured-fails-closed, and release-still-cleans-up-without-CAS cases;
+`code_interpreter.rs`'s cross-call persistence and no-stale-re-report
+tests) plus the full existing suite, unchanged pass count aside from the
+new tests and the same 2 pre-existing unrelated failures as every prior
+slice. `rustfmt --check` clean on every touched file (none had pre-existing
+drift, unlike several files in earlier slices).
+
+**With C.1-C.5 done, S3.3 step 3.5 (wiring a real caller) is fully
+implemented** — every RPC the design named now has a real caller, and
+`code_interpreter.rs` genuinely uses a durable CAS-backed workspace for
+Space-scoped calls. Steps 4 (`PromoteWorkspace` merge) and 5 (Data Plane v2
+promotion) are the only work left in this initiative.
+
+Full detail: design doc §8 item 3.5.C.
+
+## S3.3 step 4 implemented — PromoteWorkspace merges a run's overlay into its Space (2026-09-12)
+
+Research before implementing (parallel fan-out, not sequential) confirmed
+three things worth recording: (1) `PromoteWorkspace` was genuinely
+greenfield — 15 hits repo-wide, all doc-comments in three languages
+forward-referencing it, zero implementation or caller anywhere; (2) no Space
+UI, files/workspace tab, or frontend conflict-data shape exists at all
+(`SpaceCockpit.tsx`'s six tabs have no `files`/`workspace` entry) — the
+design doc's own "needs product input, not resolved here" framing for
+conflict UX is confirmed still accurate, not stale; (3) the closest existing
+compare-and-swap precedent in this codebase,
+`billing-core/internal/billing/repository.go`'s `RecordUsage`, already
+separates "same request replayed" from "genuine conflict" via a hash
+comparison after an `INSERT ... ON CONFLICT DO NOTHING` — the same shape
+this RPC's own merge needed, not invented from nothing.
+
+**A correctness bug caught before shipping, not after**: a first-draft
+compare-and-swap (`UPDATE ... WHERE content_hash = base_hash`, exactly this
+section's own original SQL sketch) is not idempotent — after a successful
+merge, the Space's hash equals the run's OWN new content, not `base_hash`
+anymore, so a second `PromoteWorkspace` call for the same unchanged overlay
+would report every already-merged path as a false conflict. Fixed by folding
+the whole compare-and-swap into one `INSERT ... ON CONFLICT ... DO UPDATE
+... WHERE content_hash = base_hash OR content_hash = EXCLUDED.content_hash`
+per path, letting Postgres's own WHERE-suppressed-upsert semantics report
+"applied" vs. "conflict" via `RowsAffected()`. A dedicated integration test
+(`TestWorkspaceStore_PromoteIsIdempotentForAnAlreadyMergedPath`) written
+specifically to catch a regression of this exact bug passes against real
+Postgres.
+
+**A second design gap resolved along the way**: `PromoteWorkspace` must
+resolve which Space a lease's overlay belongs to even after `ReleaseLease`
+has already marked the lease DESTROYED (`GetScoped`, every other RPC's
+lookup, explicitly excludes DESTROYED). `lease.Store` gained `GetAny` — a
+destroyed-tolerant, expiry-tolerant lookup whose only consumer is this RPC —
+sharing its query with `ReleaseScoped`'s own already-existing precedent for
+exactly this shape (extracted into one `lookupIgnoringDestroyedState`
+helper rather than kept as two copies). Proven end to end against real
+Postgres and at the handler level: a lease released BEFORE promotion is
+attempted still promotes correctly.
+
+Deliberately no execution-core caller wired for `PromoteWorkspace` — the
+design doc's own "merging is its own explicit step, not an automatic side
+effect" framing, and this initiative's established "ship the primitive,
+wire the caller once a concrete consumer exists" precedent. The Rust client
+method (`SandboxManagerClient::promote_workspace`) exists and is
+independently callable.
+
+Tests: sandbox-manager `go test ./...` and `-tags=integration` both green
+across every package (new: `workspace.Store.Promote` unit + integration,
+`lease.Store.GetAny` unit + integration, handler-level `PromoteWorkspace`
+tests including the design doc's own two named scenarios —
+`TestPromoteWorkspaceReportsConflictWithoutOverwriting`,
+`TestPromoteWorkspaceMergesNonConflictingPathsIndependently` — plus the
+after-release case). `execution-core` compiles clean with the new
+`promote_workspace` client method and its own blank-lease-id test.
+
+**Follow-up, same day: a real lost-update race found by an adversarial-review
+workflow pass, fixed before this ever shipped.** Three independent Explore
+agents reviewed the freshly-written code (SQL/race correctness, authz/tenant
+isolation, test-coverage gaps) against the actual files, not a description of
+them. The SQL-correctness lens found a genuine bug: `Promote`'s first draft
+read the whole overlay in one query, then looped over Go-captured values to
+issue one `Exec` per path — a concurrent `SnapshotSandbox` call landing
+between that read and a given path's write would have its newer content
+silently discarded (Promote would write the stale value, report success, and
+leave the Space matching neither write, false-conflicting a later, perfectly
+mergeable call). Fixed by folding the per-path read into the SAME statement
+as the compare-and-swap write (a one-row CTE), so a write always reflects
+whatever the overlay holds at THAT statement's execution — closing the
+window structurally, not by trying to detect the race after the fact. The
+test-coverage lens separately found the successful UPDATE branch (a
+pre-existing, differing Space row merged via a matching base_hash) had zero
+real-Postgres coverage — every prior test's "success" case was either a
+brand-new INSERT or an idempotent re-merge. Both are now covered by one new
+test exercising both branches together in a single `Promote` call. The
+authz/tenancy lens found no cross-tenant bug (org_id always from the verified
+principal, lease lookups always filter on it, ID collision blocked by both
+128-bit randomness and the same org_id filter) but flagged a real, pre-existing,
+shared characteristic worth recording: no write RPC on this service except
+`AcquireLease` re-verifies a fresh capability decision per call — see the
+design doc's own Open Questions entry for the full reasoning; not a
+regression this step introduced, not fixed here, flagged for a future,
+broader design pass.
+
+Full detail: design doc §4 and §8 item 4.
+
+## S3.3 step 5 implemented — Data Plane v2 promotion client, and S3.3 is now complete (2026-09-12)
+
+The final step of this initiative. `execution-core/src/workspace_promote.rs`
+mirrors `model-gateway/src/dataplane.rs`'s already-shipped `create_document`/
+`bulk_ingest` client shape directly, per the design doc's own long-standing
+instruction to do so rather than invent a new pattern. Two things confirmed
+before writing any code, not assumed: `mp-contracts` (the shared proto crate
+execution-core already depends on for every other RPC this initiative
+touched) already generates `dataplane::documents_v2` bindings — model-gateway
+itself proves the same generated code compiles and works, so this needed
+zero proto/build changes; and `docker-compose.yml`'s own `execution-core`
+service block already sets `DATAPLANE_RETRIEVAL_URL_EXEC` (defaulting to
+`http://retrieval-engine:50052`), the exact address model-gateway's own
+`document_client` reads for the identical multiplexed-gRPC-endpoint reason —
+so this needed zero deployment configuration either. `promote_on_use.rs`,
+this crate's only other "promote" concept, was read in full and confirmed to
+be a completely different mechanism (Quarry's HTTP `/v1/scrape?ingest=true`
+for repeatedly-fetched web pages) — not something to reuse or reconcile with.
+
+The ZDR gate is its own independent copy of `dataplane.rs`'s logic (not a
+shared cross-service helper, and not execution-core's own
+`enforce_persistence_free_execution` either, which takes a whole
+`AuthenticatedUser` this module never has) — matching this codebase's
+established convention of small per-context copies over a premature shared
+abstraction. `DelegatedDataPlaneBearer` (execution-core's own existing
+delegated bearer type) gained a `for_test()` constructor, mirroring its
+sibling bearer types' identical pattern, since it had none before this.
+
+Deliberately no execution-core caller wired, matching the "ship the
+primitive, wire the caller once a concrete consumer exists" position every
+other primitive this initiative built was in before its own first caller
+landed.
+
+Tests: 9 in `workspace_promote.rs` — the ZDR gate's own logic; blank-field
+and empty-batch validation; ZDR-before-any-network-call for both single and
+batch calls (batch: one flagged document rejects the whole batch); and one
+genuine real-server round-trip test (a `tonic` server backed by a recording
+`DocumentService` fake, mirroring `dataplane.rs`'s own real-server test
+shape) proving a non-ZDR call actually reaches the server, forwards the
+bearer as an `authorization` header, and returns its response — confirming
+the success path works, not just that rejection short-circuits before ever
+trying it. `cargo test -p execution-core --lib`: full suite green, same 2
+pre-existing unrelated failures as every prior slice this initiative, no
+new ones.
+
+**With steps 1-5 all done, S3.3 (durable workspace) is complete.** Every
+primitive the design named exists in code and is tested: the CAS client,
+the Postgres-backed manifest/lease/snapshot stores, the hydrate/diff
+mechanism, all five sandbox-manager lease RPCs with real callers,
+`code_interpreter.rs`'s actual Space-scoped rewrite, the compute-state
+merge, and the knowledge-durable promotion client. What remains is exactly
+what the design doc's own Open Questions section says it is — product
+decisions and cross-cutting design questions this initiative was never
+scoped to resolve unilaterally — not unfinished implementation work.
+
+Full detail: design doc §5 and §8 item 5.
+
+## S4.2 durable process registry designed, plus a confirmed S3.3 scope bug found and fixed along the way (2026-09-13) — **decided; not yet implemented**
+
+**State:** `proposed` (design doc `apps/Frontend Plane/verevonv3/docs/S4_2_PROCESS_REGISTRY_DESIGN_2026-09-13.md`); the bug fix below is `implemented`.
+
+**The bug, first.** `execution-core/src/sandbox_lease.rs`'s
+`SandboxManagerTokenProvider` requested `scopes: ["sandbox:write"]` only.
+sandbox-manager's `authz.go` gates `GetWorkspaceManifest` on `sandbox:read`
+with an exact `slices.Contains` (no write-implies-read), and Auth Core
+issues exactly the requested scopes (`plane-service-principal.ts:359`,
+`scopes: requestedScopes` — the registry allowlist lists both, the request
+narrowed to one). So S3.3 step 3.5.C.5's hydrate path
+(`ensure_hydrated_workspace` → `get_workspace_manifest`) was refused at the
+real interceptor in any deployment, invisible to every Rust test because
+none crosses the Go boundary — while `authz_test.go:151` ("GetWorkspaceManifest
+missing read scope") had already pinned exactly that refusal on the Go side.
+Same shape as the `ActivateLease` switch bug found while designing 3.5.C: a
+cross-service contract each side tests correctly in isolation and nothing
+tests across. Fixed: the provider now requests `["sandbox:read",
+"sandbox:write"]`; `service_token_requests_both_sandbox_scopes_and_is_cached`
+pins the request body. Left open, deliberately: a cross-language contract
+test (the `health_attest.rs`-reads-`availability.go` shape) asserting the
+provider's scope set covers every method it is used for — worth doing when
+S4.2 adds seven more methods to the same token.
+
+**The ownership decision** (`docs/capability-ownership-matrix.md`'s
+2026-06-03 ruling made concrete for a capability that sits across its line):
+sandbox-manager (Go) owns the **rows** — durable process metadata, the output
+log with host-assigned cursors, retention, the state machine, cleanup state,
+and the human read path; execution-core (Rust) owns the **OS process** —
+spawn under the existing bwrap argv, stdio pipes, signals, TTL timer,
+boot-time reconcile. Neither side grows the other's job: sandbox-manager
+still spawns nothing; execution-core persists nothing itself.
+
+**"Durable" means the registry, not the processes.** Children run under
+`--die-with-parent` by design and die with execution-core; a restart makes
+the rows truthful (`LOST`, output readable to the last committed chunk,
+`cleanup_state = done`), never a `RUNNING` row for a dead process. Process
+survival across restarts is the trigger for the deferred `SandboxBackend`
+trait (2026-08-22 entry), recorded as a non-goal, not built. No trait is
+introduced: one backend, new lifecycle.
+
+**Authority reuses the `egress` template rather than inventing one.**
+Control's `IssueSpaceCapabilityDecision` grants `space:processes` when the
+backend claims `processes: "background_registry"` AND the Space's new
+`process_registry_entitled` policy column (migration `028`, default FALSE)
+is set — and unlike `egress`, does **not** refuse the decision otherwise,
+because a process-capable backend is still a valid one-shot substrate.
+sandbox-manager persists the derived `processes_permitted` on the lease at
+`AcquireLease` (the `leases` table discards every claim today; only
+`backend_id` survives) and gates `RegisterProcess` on it. `processes` gets
+its first enum validation (`bounded_oneshot | background_registry`), closing
+for one dimension the S3.2 doc's never-implemented policy allowlist.
+
+**Credentials follow the 2026-09-11 ruling exactly.** A background process
+outlives the 300 s user bearer, and that bearer exists only inside a
+Control-injected chat turn (`is_space_scoped_turn`), so every host↔registry
+RPC rides execution-core's service token; the user-bound decision enters at
+`AcquireLease` alone, as today. Human reads reuse the Work tab's existing
+`model.thread.read` decision with a second `service_audience`
+(sandbox-manager), verified by the owner — the `ListRuns` pattern — and the
+V3 gateway mints `aud=sandbox-manager` per `/work` request as it already
+mints `aud=capability-core` for `/v1/cron`.
+
+**Rejected / not proposed:** sandbox-manager spawning (`exec.Command` in a
+container without bwrap or the interpreter stack); a `MAX+1` trigger for the
+cursor (session-core's own `0002` names the single-writer caveat; the host
+IS the single writer, so it assigns `seq` and `ON CONFLICT DO NOTHING` makes
+retries idempotent); `mp-eventlog::Cursor` (zero consumers); refusing the
+lease when processes are claimed but not entitled; naming the stdin tool
+`process_write` (`permission::is_risky_tool`'s substring list would route it
+to `ask` on the name alone — it is `process_stdin`); a chat-loop offering in
+the first slice (`ExecuteStep`'s bearer gate is a literal
+`tool_name == "code_interpreter"`; `RunAgent` already demands the bearer for
+any Space-scoped run and is where background work belongs).
+
+**Step 1 implemented 2026-09-13** — see the entry below.
+
+**Genuinely new mechanisms, named as such:** TERM→grace→KILL for a child
+(the repo signals only itself today; mechanism for reaching the sandboxed
+command's PID is resolved on the Linux runtime image in step 4, contract
+fixed regardless — KILL is guaranteed via `--die-with-parent`'s PDEATHSIG
+chain); a `--flag value` argv redaction rule (existing patterns key on
+`[:=]`); sandbox-manager's first background goroutine (a single idempotent
+staleness UPDATE, no claims). Sequencing: registry → RPCs/authz/lease column
+→ Control → host (flag-gated, default off) → tools/capability → human read
+path. Full detail: design doc §§1-10.
+## S4.2 step 1 implemented — the durable process registry, and a bug only a real planner could find (2026-09-13)
+
+**State:** `implemented` (design doc §2, §10 step 1). No RPC reaches it yet;
+this is the primitive, in the same "ship it tested and uninvoked" shape every
+S3.3 slice used.
+
+**What landed.** Migration `0003_process_registry` (`sandbox_processes` +
+`sandbox_process_output`, plus `leases.processes_permitted` defaulting to
+FALSE so every lease acquired before Control could grant `space:processes`
+reads as not permitted rather than being grandfathered in);
+`internal/process` (the store, and sandbox-manager's first background
+goroutine); `internal/redact` (the scrub pattern set promoted out of
+`internal/snapshot`, which keeps calling it — its existing tests are the
+regression lock on the move — plus the one rule neither language had:
+`--token abc123` as SEPARATE argv elements, unreachable by every existing
+pattern because they all key on a `:` or `=` separator).
+
+**No transactions, deliberately.** This store has a concurrent-writer problem
+`lease.Store` does not: a superseded host must not append to a process a newer
+boot has taken over. Rather than introduce `Begin`/`FOR UPDATE` into a package
+family that has never used them, every host-side write carries its fence
+(`id + org + backend_id + host_epoch + a live state`) INSIDE the statement —
+the same "fold the read into the write" shape `workspace.Store.Promote`
+adopted after an adversarial review found its lost-update window. A fenced
+write by a stale host matches zero rows and lands nothing, proven against real
+Postgres rather than asserted.
+
+**Host-assigned cursors.** The precedents were weighed, not defaulted to:
+session-core's `events.step_ordinal` MAX+1 trigger names its own
+single-writer caveat and makes consumers retry on unique violations;
+`messages.sequence` is race-free but not idempotent across a retried batch;
+`mp-eventlog::Cursor` has zero consumers. The host is the single writer by
+construction (the fence says so), so it assigns `seq` and the primary key on
+`(process_id, seq)` turns an ambiguous retry into `ON CONFLICT DO NOTHING` —
+idempotency with no batch-id table.
+
+**A bug unit tests structurally could not catch.** `ttl_seconds` was bound
+once and used both as its `INTEGER` column and inside `$n::bigint * interval
+'1 second'`. Postgres deduces a parameter's type from every use and rejects
+the statement (`42P08`, "inconsistent types deduced"). The stub-based tests
+asserted the SQL text and the bound arguments — both correct — and passed;
+14 of 17 integration tests failed on the first run with one root cause. Fixed
+by binding the TTL a second time as its own parameter. Worth recording
+because it is the second time in this initiative that a cross-boundary
+contract each side tested correctly in isolation was wrong in the middle (the
+first being S3.3's `sandbox:read` scope): the lesson is not "write more unit
+tests" but "the integration test is the only thing that can see the seam."
+
+**A design error found by writing a test rather than by reviewing the
+design.** `GapBefore` originally compared the reader's cursor only against
+`retained_from_seq` — which can never fire, because protecting the head means
+a trim leaves its hole in the MIDDLE of the stream. A reader resuming from
+inside the surviving head would have received the surviving tail with no
+indication anything was dropped between them: exactly the silent
+discontinuity the field exists to prevent. It now also reports a gap whenever
+the first returned chunk is not `cursor + 1`.
+
+**Deliberately not built yet, with reasons:** no `MemoryProcessStore` (its
+two consumers — `server_test.go` and the ephemeral-development fallback —
+arrive with step 2's handlers, and a registry that exists to survive restarts
+has nothing to offer in a mode that discards it); no `ProcessDecisionsTotal`
+counter (emitted by handlers that do not exist; an unread counter is not
+evidence); `internal/lease` and `internal/workspace`'s integration migration
+lists unchanged (neither reads `processes_permitted` until step 2).
+
+Verification: 25 unit tests, 17 real-Postgres integration tests via
+testcontainers covering every word of the plan's own list — reattach, cursor
+resume, worker restart, TTL/heartbeat staleness, secret redaction, concurrent
+readers (20 goroutines paging one stream, each asserting contiguity and
+assembling the identical output) — plus `go build`, `go vet`, and `gofmt`
+clean on every new file. The pre-existing CRLF `gofmt` noise on untouched
+files is unchanged and was verified as line-endings-only, not content drift.
+
+Full detail: design doc §2 and §10 step 1.
+## S4.2 step 2 implemented — the process RPCs, and the Space stops being a parameter (2026-09-13)
+
+**State:** `implemented` (design doc §4 sandbox-manager half, §5, §10 step 2).
+Seven RPCs, their authz cases and interceptor rows, `Verify` returning the
+decision's permissions, `AcquireLease` persisting `processes_permitted`, and
+the Rust client methods. Still no host: nothing calls any of it.
+
+**The Space is no longer a parameter anywhere.** Step 1's `RegisterRequest`
+carried a `SpaceID`; it is gone. sandbox-manager reads the Space from the
+lease row inside the same statement that inserts the process, so a caller
+cannot name a Space at all — which means it cannot name the wrong one. Same
+move as the write fence and the live-count limits, and the same one
+`workspace.Store.Promote` made after a review found its lost-update window:
+when a check and the write it guards are separable, eventually something
+separates them. A non-Space lease is now refused by that join rather than by
+a predicate someone could forget to write.
+
+**All seven are service-principal only, and the reads say why.** The four
+writes are permanently service-only: the caller is an execution host
+reporting what an OS process it owns actually did, and a user bearer cannot
+observe any of it. The three reads are service-only *for now*, returning
+`FailedPrecondition` that names the missing Space read decision rather than a
+generic denial. Admitting a user bearer before step 6 wires that decision
+would let any member of an organization read any process's output in it; the
+alternative to refusing was shipping the hole and writing it down, which is
+how holes survive. Step 6 replaces the refusal with verification, not with
+nothing.
+
+**`ErrProcessesNotPermitted` split out of `ErrLeaseNotEligible`.** "This
+Space was never granted `space:processes`" is `PermissionDenied`; "the lease
+is expired, SCRATCH, or on another backend" is `FailedPrecondition`. One
+sentinel would have collapsed retry-never and retry-later into the same
+answer, and the caller that has to choose between them is a background host
+with no human watching.
+
+**`Verify` now returns `VerifiedCapability{Claims, Permissions}`** rather
+than claims alone, and `AllowsBackgroundProcesses()` requires both halves:
+the backend must claim `processes: "background_registry"` AND Control must
+have granted `space:processes`. Deliberately NOT a refusal when the backend
+claims the capability and the Space is not entitled — unlike `egress`, where
+an egress-capable backend must not serve a non-entitled Space at all, a
+process-capable backend is still a perfectly good one-shot substrate. The
+lease is granted; only the process RPCs are refused. The answer is persisted
+on the lease row because a process RPC arrives later on execution-core's own
+service token with no decision in hand, and `leases` otherwise keeps nothing
+from the decision but `backend_id`.
+
+**Still no `MemoryProcessStore`.** Step 1 deferred it to "when the handlers
+need it"; the handlers turned out not to. Their tests use a recording stub,
+because the registry's real semantics are already proven against Postgres and
+a second hand-written copy would be a thing that can disagree with the
+original rather than extra assurance — the opposite of what
+`MemoryWorkspaceStore` is for, which is a runtime fallback with a real
+consumer. `cmd/main.go` passes no registry in ephemeral-development mode, and
+every process RPC fails closed there rather than serving state a restart
+discards.
+
+**A contract test for the enum numbering.** The handlers cast
+`process.State` ↔ `mpv1.ProcessState` directly, which is sound only because
+both are the numbers migration 0003 stores. Three declarations, three files,
+and drift would surface as a process silently reported in the wrong state —
+so `process_test.go` asserts every pairing explicitly, the same
+cross-boundary-invariant-as-a-test shape `cross_service_loop_contract.rs`
+established.
+
+**The proto additions are lint-clean.** buf's config here wants a doc comment
+on every field, message, enum value and oneof, plus an enum-name prefix on
+every value. The first draft added 105 new violations to a file that had 31;
+the shipped one adds zero, and `buf breaking` against the baseline is clean
+(new RPCs, messages and enums only). Go regeneration used
+`buf.gen.go-only.yaml` with `--path`, so exactly two generated files changed
+and the Python/TS outputs were untouched — the usual ~90-unrelated-files
+churn avoided rather than reverted afterwards. Per-field docs earn their
+place on a cross-plane contract surface even where this repo's general style
+discourages narration.
+
+Verification: the full sandbox-manager suite plus 14 new interceptor rows
+(one valid + one wrong-scope per new method — the `ActivateLease` bug is why
+that is a rule, not a habit), handler tests covering identity, validation,
+conversion and every error mapping, the enum contract test, and the
+real-Postgres integration suite including a new non-Space-lease refusal.
+`cargo check`/`clippy`/`rustfmt` clean on the Rust client; its one clippy hit
+(`result_large_err` on `Result<_, Status>`) fires on the pre-existing
+`authorize` in the same file and is the crate-wide pattern.
+
+Full detail: design doc §5 and §10 step 2.
+## S4.2 step 3 implemented — Control grants space:processes, and the `processes` claim gets its first validation (2026-09-13)
+
+**State:** `implemented` (design doc §4 first layer, §10 step 3). Control
+Plane user-core only; independent of step 2, since a decision without the new
+permission is exactly what every caller already gets.
+
+**`process_registry_entitled` is its own deny-by-default column** (migration
+`028`), not a widening of `sandbox_capability_entitled` — the same separation
+`ScheduleFireEntitled` has from `ThreadCreateEntitled`, and for the same
+reason. Acquiring a sandbox is bounded work a caller waits on. A background
+process keeps running after the turn that started it, retains its own output,
+and can be reattached to later. A Space allowed the first is not thereby
+allowed the second, and inheriting would have made the entitlement mean
+something different from what its name says. It participates in
+`entitlementChanged`, so granting or revoking it bumps `entitlement_revision`
+and invalidates authority material already issued — the fencing every other
+entitlement class gets.
+
+**The grant is deliberately NOT symmetric with egress.** An egress-capable
+claim without the entitlement is refused outright by sandbox-manager's
+verifier, because a backend that can reach the network must not serve a Space
+that was never allowed network reach. A process-capable backend is different:
+it is still a perfectly good bounded one-shot substrate for a Space not
+entitled to background work. So the decision is signed, the lease is granted,
+and only `space:processes` is withheld; sandbox-manager records the absence on
+the lease row and refuses the process RPCs alone. Getting this backwards would
+have made a backend upgrade silently break every non-entitled Space's
+ordinary `code_interpreter`.
+
+**`processes` gets its first validation ever — closing a gap S3.2 promised
+and never built.** That design's §1 described a policy allowlist checking the
+measured profile before signing; what shipped validated `processes` only for
+non-emptiness, so Control would sign a decision for a backend claiming
+anything at all. The test's `"isolated"` case is not invented: it is the value
+sandbox-manager's own capability-verifier fixture uses, which is exactly how
+nobody noticed the claim was never checked — each side was internally
+consistent and nothing compared them. The vocabulary is now closed
+(`bounded_oneshot` | `background_registry`), spelled identically in three
+services, and a test asserts the claim actually changes the payload digest so
+a process-capable profile cannot be swapped under a signature issued for a
+one-shot one.
+
+**Still open, named rather than quietly left:** `persistence`, `backup` and
+`credential_mode` remain free-form and unvalidated. This slice closes one
+dimension because one dimension is what it needs; the rest of S3.2's promised
+allowlist is still owed.
+
+**No HTTP change was needed** — `upsertSpaceEffectPolicy` decodes straight
+into `spaces.EffectPolicy`, so the field is settable the moment the struct has
+it. Migrations are applied by lexicographic scan of `*.up.sql`, so `028`
+needs no registration.
+
+Verification: full user-core `go build`/`go vet`/`go test`, with new coverage
+for the four-way grant matrix (claimed×entitled), the independence of the
+process entitlement from the sandbox one (it cannot substitute for it), the
+rejected-vocabulary table, and the digest binding. The pre-existing gofmt
+CRLF debt across `internal/spaces` is unchanged and was verified as
+predating this change rather than introduced by it.
+
+Full detail: design doc §4 and §10 step 3.
+
+## S4.2 step 4 implemented — the process host, and a negative result that saved a silently broken TERM (2026-09-13)
+
+**State:** `implemented` (design doc §3, §10 step 4). execution-core only,
+behind `EXECUTION_CORE_PROCESS_HOST=enabled`, default off — every existing
+deployment reports the same capability profile and the same digest it did
+before, and `capability_profile_never_claims_durable_or_credentialed_workspace`
+now asserts that relationship rather than a constant.
+
+**The design's one deferred open question was answered by measurement, and
+the useful half of the answer is the negative one.** §3.4 could not decide
+from a Windows checkout whether a signal sent to bubblewrap's monitor would
+reach the sandboxed command, because with `--unshare-pid` a signal from
+outside a namespace reaches its init only if init handles it. A probe under
+real bwrap on Linux settled it three ways:
+
+- SIGTERM to the pid found by walking `/proc/<pid>/task/<pid>/children`
+  twice — monitor → sandbox init → command — **does** fire the command's
+  trap. Mechanism (a) stands; the `--json-status-fd` fallback is not needed.
+- SIGTERM to the bwrap monitor **does not reach the command at all.**
+- SIGKILL to the monitor still leaves nothing alive, via the
+  `--die-with-parent` PDEATHSIG chain the argv already uses.
+
+The second line is why the probe exists. "Signal the child we spawned" is the
+implementation anyone writes first; it returns success, logs nothing unusual,
+and would have made every `term` request a no-op — the process running on
+until the grace timer escalated to KILL, skipping the graceful shutdown the
+escalation exists to offer. A dev server's cleanup would simply never run,
+and nothing in the state machine would look wrong: the row still reaches a
+terminal state, just always the violent one. A probe asserting only the
+positive result would pass against that broken code, so it asserts the
+negative too. This is the same reasoning `cross_service_loop_contract.rs`
+applies to cross-service constants — the assertion has to be able to fail.
+
+**The verification script was checking an argv the service does not emit.**
+`verify-sandbox-isolation.sh`'s `BASE` still carried `--proc /proc`, which
+`sandbox.rs` dropped some time ago: under `--unshare-pid` it needs
+`CAP_SYS_ADMIN`, the container runs `CapEff=0`, and the removal is pinned by
+`the_argv_never_mounts_a_fresh_proc`. A script verifying a stale argv verifies
+nothing, and here it was worse than nothing — a fresh procfs inside the
+sandbox is exactly what would break the host-side `/proc` child walk the new
+probe depends on, so the probe could have failed for a reason the real
+service does not have, and the obvious "fix" would have been to abandon a
+mechanism that works. Removed, with the reasoning recorded in the script so
+it does not come back.
+
+**Reconcile is lazy, not at boot — a deliberate deviation from §3.5.**
+`ReconcileProcesses` needs a sandbox-manager token, and
+`SandboxManagerTokenProvider::token()` is per-org. A host that has just
+booted has no org to mint one for, and choosing one would be a lie about who
+is asking — the same honesty constraint that made the profile flag
+`OnceLock`-read rather than per-request. So the reconcile is `OnceCell`-guarded
+and runs on the first `start()`: the first moment an org exists, and equally
+the first moment a stale row could be mistaken for a live one. The cost is a
+window where a restarted host's previous rows still read `RUNNING`. That
+window is precisely what step 1's staleness sweeper was built for, which is
+why it runs on a timer rather than only behind a reconcile — the backstop
+existed before the thing it backs stopped being eager. `/readyz` keeps its
+current meaning instead of acquiring a precondition it cannot satisfy.
+
+**Kill before diff, not after.** `release_sandbox_lease_if_any` awaits
+`kill_for_lease` ahead of the workspace diff and upload. A background process
+still writing into the workspace would make the promoted snapshot a picture of
+a moving target, and S3.3's promote contract assumes the tree is quiescent
+when it is read. The ordering is load-bearing, not tidiness.
+
+**`nix`, not `libc`.** The workspace sets `unsafe_code = "forbid"`, so
+`libc::kill` is unreachable from this crate — `nix` with only its `signal`
+feature, `cfg(unix)`-gated, is the smallest safe alternative, and the design
+already preferred a library call to spawning `/bin/kill`.
+
+**Nothing calls the host yet, on purpose.** `runtime_loop/agent.rs` passes
+`None`; step 5 adds the tool that can start a process and owns replacing it.
+The call site names step 5 in a comment so the gap is discoverable rather
+than merely absent — the same no-caller-ahead-of-its-step rule S3.2 and S3.3
+followed.
+
+**Clippy caught a doc comment changing owner.** `child_env_for` is a
+`pub(crate)` delegation added so the host and `code_interpreter` share one
+environment allowlist rather than maintaining two. Inserting it directly above
+`child_env` silently handed it `child_env`'s doc comment — the long
+explanation of why execution-core's own environment must never be inherited,
+and why `TMPDIR`/`MPLCONFIGDIR` have to be workspace *subdirectories* — and
+left the function that actually builds the allowlist undocumented. The code
+was correct and every test passed; only clippy's doc lints noticed that a
+list had quietly acquired a new paragraph. This is the second time in S4.2 that
+inserting an item above an existing declaration stole its doc comment (step 2
+did it to a test in `store_integration_test.go`), so it is recorded as a
+pattern rather than an incident: on a security surface the reasoning is the
+artifact, and it belongs to the implementation, not to whatever wrapper ends
+up in front of it.
+
+Verification: `cargo test -p execution-core --lib` — 574 passed, 2 failed,
+both the known pre-existing Windows failures (`cwd_applies_and_the_inherited_
+environment_is_replaced`, `direct_hitl_rejects_an_undurable_approval_pause`),
+unchanged from before this step; 16 of those tests are new. The full
+`verify-sandbox-isolation.sh` ran on real Linux with all six checks passing —
+the three original isolation checks and the three new signal checks. rustfmt
+drift was triaged against `HEAD` rather than assumed: the two sites in
+`sandbox.rs` that this change introduced are formatted, the one that predates
+it is left alone, as is the wider execution-core drift in `workspace_*`,
+`capability_client` and `control_http_client`. `cargo clippy --lib`
+(pedantic, warn-level) reports 96 warnings, none of them in this change's
+files; the five it did raise against them were fixed rather than allowed.
+
+Full detail: design doc §3 and §10 step 4.
+
+## S4.2 step 5 implemented — the process_* tool family, and why the Space check had to live in execution-core (2026-09-13)
+
+**State:** `implemented` (design doc §6, §10 step 5). capability-core seeds
+`cap.process.background`; execution-core offers, binds, attests and dispatches
+the five tools. First point at which a model can start a background process.
+
+**One capability for five names, because they are one authority over one
+object.** A caller that may start a background process may read what it
+printed, feed it stdin, stop it, and list its own Space's processes. Five rows
+would make "may start but may not stop" an operator-reachable posture, which
+is not a state anyone would choose on purpose — it is a state a schema makes
+possible by accident. `trusted_capability_id` maps all five here, and migration
+`0015` records the whole family in the row so the decision is visible to
+someone reading the catalog rather than only to someone reading this file.
+
+**`low` risk, inherited rather than re-argued.** The honest comparison is not
+`cap.command.shell` (arbitrary host commands, correctly `high` and correctly
+`ask`) but `cap.command.sandbox` (0010, `low`). A background process runs the
+same code body — never a named host command — under the same bubblewrap argv:
+read-only rootfs, no network, scrubbed output. What it adds is bounded on both
+axes it widens: a TTL of at most an hour that never outlives the lease, and a
+registry-enforced count limit. Its workspace persists where a per-call one does
+not, which is more persistence but strictly less reach — it still cannot touch
+the image.
+
+**And the capability is deliberately not the whole gate**, which is what makes
+`low` defensible to state plainly: a call also needs a lease whose
+`processes_permitted` is true, which sandbox-manager sets only from a Control
+decision carrying `space:processes`, granted only to an entitled Space. The
+migration records that second gate in the row itself and a test asserts it
+stays there, because a `low` row for something that outlives its call reads
+permissive on its own.
+
+**No `is_risky_tool` entry, and the name is why.** `process_stdin` is not
+called `process_write`: `permission::is_risky_tool` matches the substring
+`write`, so that name would route every call to the approval branch on its NAME
+alone — before any authority check ran and regardless of the capability row.
+The tool would still work; it would just ask a human every time it fed a line
+to a process the same human approved starting. A test asserts no family name
+trips the substring gate, so a future rename cannot quietly reintroduce it.
+
+**The load-bearing decision: the Space check lives in execution-core, not
+sandbox-manager.** Every call the tools make travels on execution-core's own
+service token, which is ORG-WIDE — the registry will resolve any process id in
+the organization for it, and correctly so, because the caller genuinely is the
+service that owns the registry. The reads are service-principal-only precisely
+because admitting a user bearer before step 6 would have been worse. But that
+means the only thing between a model naming an arbitrary ULID and another
+Space's output is the check in `process_tools::authorize_in_space`: resolve the
+row, refuse unless its `space_id` equals the run's own.
+
+Two details of that check are deliberate. The refusal for "no such process" and
+for "a process in another Space" is IDENTICAL, because distinguishing them
+makes the tool an oracle for which ULIDs exist in the organization — the same
+class of leak the check exists to close. And `process_list` needs no such
+check at all: the Space is a parameter of the RPC rather than a property of the
+answer, and the id comes from the run rather than from the model.
+
+**`AcquireLeaseResponse` gained `processes_permitted`.** The design had the
+host read this "on the cached `SandboxLease`", but nothing ever put it there —
+the field existed only on the Go row. Now the response carries it and the host
+caches it, so `process_start` refuses with the real reason instead of preparing
+a spawn `RegisterProcess` would deny. The registry's refusal stays
+authoritative; this one exists so the model is told something it can act on.
+
+**The conditional tool set is its own function, and all three contract tests
+iterate both.** `process_tool_defs` is offered only for a Space-scoped run on a
+host with the flag set — the only conditional tools in the loop. That is
+exactly where an unbound, unseeded or unattested tool would hide: it would
+surface in production for a subset of deployments and never in a default one.
+The advertised → bound → seeded → attested chain that caught `save_memory` and
+`cap.agent.spawn` now covers the family too.
+
+**The attestation depends on the DEPLOYMENT, not just a probe.** Every
+execution-core can run bubblewrap; only an instance an operator opted in can
+keep a process alive past the call. So `cap.process.background` is attested
+only when `EXECUTION_CORE_PROCESS_HOST` is enabled AND both probes pass — the
+same flag that decides what the capability profile advertises, so the profile
+Control signs and the capability row's health say the same thing about the same
+instance. It is the narrowest entry on capability-core's attestation allowlist,
+and `availability.go` records why.
+
+**Not done, stated rather than passed over: the ZDR gate this doc listed.**
+`process_start` writes no durable content of its own beyond output the registry
+retains, and the ZDR posture for that retention is the same question as the
+workspace's, which S3.3 already answers at the lease. A gate in the tool would
+have been a second, narrower answer to a question answered elsewhere. If that
+reading is wrong the fix belongs at `RegisterProcess`, where the Space is
+known — not in the tool.
+
+Verification: `cargo test -p execution-core --lib` — 581 passed, 2 failed, both
+the known pre-existing Windows failures, unchanged; 7 of those tests are new.
+capability-core `go build`/`go vet`/`go test` green, with new coverage for the
+0015 migration (family membership, the second gate, the risk justification, and
+that the upsert cannot clobber a live attestation) and the registry seed
+(process risk == sandbox risk, shell still high). One pre-existing failure in
+that package is unrelated and predates this change: `internal/registry`'s
+0007 migration test asserts an LF-joined substring against a CRLF file nobody
+here touched.
+
+Full detail: design doc §6 and §10 step 5.
+
+## S4.2 step 6 implemented — a human can read a Space's processes, under the same ceiling its runs get (2026-09-13)
+
+**State:** `implemented` (design doc §7, §10 step 6). Control, sandbox-manager,
+model-gateway, the V3 gateway and the Work tab. Read-only in the room.
+
+**A second AUDIENCE, not a second action.** The Work tab already holds a
+`model.thread.read` decision to list a Space's runs. A process is part of the
+same record — it is work this Space did, and its output is content in the same
+sense a turn is — so the question being asked is unchanged. Minting a
+`model.process.read` action would have created a second authority to keep in
+sync with the first, and a Space where a member could read the conversation but
+not the work it produced is not a state anyone would choose.
+
+What the audience buys is that the two are NOT interchangeable: Session Core
+refuses a decision addressed to sandbox-manager and this verifier refuses one
+addressed to Session Core. So the gateway must ask for the recipient it means,
+and a token leaked from one path cannot be replayed against the other. That
+costs a second Control call per `/work` request, which is the honest price.
+
+**The design's name for the default audience was wrong, and following it would
+have broken Session Core.** This doc said `model-plane-session-core`; the live
+constant is `model-plane`, and Session Core's verifier pins it. The vocabulary
+shipped as `{"model-plane" (default), "model-plane-sandbox-manager"}`, closed
+and validated at issuance, with a test asserting the literal — the same
+closed-vocabulary move step 3 made for the `processes` claim, and for the same
+reason: an unvalidated audience is one Control signs happily and no recipient
+ever accepts, surfacing as an unexplained denial three services away.
+
+**The audience is deliberately NOT a payload-digest input.** Adding it would
+change the digest for every existing Session Core decision, which that service
+recomputes independently and would then reject. The audience is already a
+signed field, so tampering fails the signature before any digest is recomputed.
+A formula two services must agree on is not the place to record something the
+signature already covers.
+
+**The audience ceiling: the open question resolved narrowly.** Session Core
+filters runs by `t.recipient_audience_revision <= $n`, where `$n` is the
+revision on the reader's own decision — a record produced under an audience the
+current reader's decision predates is not returned. Processes needed the
+identical rule, and had nowhere to get the revision from: a process registers
+on a service token with no Control decision at all. So migration `0004` puts
+`recipient_audience_revision` on `leases` (captured at `AcquireLease`, the last
+point at which a decision is in hand) and on `sandbox_processes`, which
+inherits it through the same join that already gives a process its Space.
+
+Only this ONE revision, not the whole `Permissions` list and all five revisions
+the open question offered. It is the only value the read path consumes, and a
+column nothing reads is a column that drifts out of meaning. `SpaceGrant`
+groups it with `processes_permitted` because they have one source and one
+lifetime — a call site that set one and forgot the other would produce a lease
+allowed to run processes nobody can read.
+
+**The ceiling is a pointer, and that is not a style choice.** Zero is a real
+and DIFFERENT answer from absent: a decision whose revision parsed as zero must
+never be silently promoted to "unbounded". The verifier refuses such a decision
+outright, and the pointer makes bypassing that impossible by forgetting a
+check. A service principal reads unbounded because it is not a disclosure
+recipient — it is the thing that produced the record, and it applies its own
+Space check before showing anything to a model (step 5).
+
+**The ceiling is folded into the SQL rather than applied after the fact.**
+Filtering in Go would let a page fill with rows the reader may not see and then
+return fewer than `limit`, which a caller reads as "end of list" rather than
+"some were withheld". A nil ceiling binds `-1` so the predicate is inert rather
+than absent: one query plan, one code path, no branch that could drop the bound.
+
+**`GetProcess` stays service-only**, where §7 implied all three reads would
+admit a human. It resolves one process by bare id — what execution-core needs
+for its own Space check — while the human path pages a list and reads output.
+Admitting a human there would add an authority path with no caller, in the one
+shape most useful for probing which ids exist.
+
+**`ReadProcessOutput` gained a `space_id`, and the reason is subtle enough to
+record.** A process id names no Space; the decision authorizes exactly one.
+Reading the Space off the ROW and verifying the decision against that would let
+a caller present a decision for a Space they legitimately belong to and have it
+checked against itself — the verifier would compare the token to whatever the
+row said and pass. So the Space comes from the REQUEST and the row is checked
+against it, refused as NotFound rather than PermissionDenied for the same
+oracle reason as step 5.
+
+**`/v1/processes` is the first real caller of model-gateway's
+`sandbox_client`**, constructed and unused since `state.rs:122`. S3.3's §3.5
+amendment flagged it; S4.2 is what finally gives it a job. The bearer is the
+user-bound `aud=sandbox-manager` credential the V3 gateway mints per `/work`
+request — not the chat path's `sandbox_token` helper, which only fires inside a
+Control-injected turn, and the Work tab is not a turn.
+
+**The `/work` section follows the SCHEDULES precedent, not the runs one.** A
+missing credential degrades to a named gap row; the runs section's 503 shape
+would take the whole Work tab down with it, and a room whose processes cannot
+be read is still a usable room. Both the Go `nil`→`null` guard and a
+`processes` case in `sectionLabel` were needed — without the latter a gap
+renders the literal English word `processes:` inside Norwegian copy.
+
+**`LOST` is `critical` in the room's grammar, above a plain failure**, for the
+same reason the operation grammar makes `unknown` critical: it means the host
+that owned the process went away and nobody can say what happened to it. A
+supervisor who reads past that has been misled. And a live process is shown by
+when it will STOP rather than when it started — "what needs me" is answered by
+the deadline; a start time three hours ago is not actionable.
+
+**Read-only in the room**, as specified. No signal or stdin controls, no new
+`ActionDescriptor`s. Writes against work the room may not own is a separate
+authority question, and this slice does not answer it.
+
+Verification: sandbox-manager `go build`/`go vet`/`go test` green, including 8
+new verifier tests (wrong audience, wrong subject/Space/org/ref, a read
+carrying write permissions, zero/incomplete/expired claims, a mismatched
+digest, an untrusted key, and mangled envelopes) and 6 new handler tests (the
+ceiling actually reaching the store, service reads staying unbounded, a
+rejected decision never touching the registry, and a process outside the
+decision's Space answering NotFound). user-core `go build` green with 3 new
+audience tests. model-gateway and the V3 gateway build clean. verevonv3:
+`pnpm typecheck` clean, 246 spaces tests pass including 6 new ones for the
+process activity adapter.
+
+Full detail: design doc §7 and §10 step 6.
+
+## S4.3 general Watch primitive designed — capability-core owns it, and the duplicate it does not delete (2026-09-14)
+
+**State:** `proposed` (design doc `apps/Frontend Plane/verevonv3/docs/S4_3_WATCH_PRIMITIVE_DESIGN_2026-09-14.md`). Nothing implemented. S4.2 was its only blocker and is complete.
+
+**capability-core owns the Watch record, and the evidence is that a Watch IS a
+Schedule.** The ownership matrix had no watch row and this ledger had no prior
+ruling, so this was a decision to make rather than look up. Compare what
+capability-core already runs: a `cron_schedules` row is created by a Space
+member under a Control decision, stores the Space ref plus all five authority
+revisions plus `delivery_target_ref`, is advanced by a sweeper claiming rows
+`FOR UPDATE SKIP LOCKED`, and is reauthorized freshly per fire because — in the
+sweeper's own words — *a long-lived schedule record is not authority by itself*.
+Every one of those sentences is true of a watch. The single difference is the
+trigger: a clock versus a source's cursor moving.
+
+Rows land in the shared `session_core` Postgres beside `cron_schedules`, created
+by a session-core migration and operated by capability-core — the split that
+already exists for cron, and inside one plane, so no plane database boundary is
+crossed. No new service.
+
+**`run_watch_subscriptions` is NOT deleted, and this is the part worth
+recording.** capability-core already owns a watch: AUTO-2's fire-once "notify me
+when a run finishes" trigger, one row per (org, run, user), no Space, no cursor,
+no predicate. The new `space_watches` is a cursor-bearing stream subscription:
+Space-scoped, authority-bound, resumable. They answer different questions, and
+the new one only becomes a superset of the old when the Model-runs adapter
+exists — a later slice. Retiring AUTO-2 before then would ship a regression for
+its users in exchange for tidiness.
+
+So the duplication is deliberate and bounded: one owner, two records, and the
+Model-runs adapter is the named retirement path. This is the letta-bridge
+memory-adapter and sandbox-backend-trait precedent applied again — build the
+seam when the second real implementation lands, not before — and it is written
+down so the next reader finds a decision rather than an oversight.
+
+**The first adapter POLLS, against the plan's stated preference for owner
+events, and the argument is that S4.2 already built the better mechanism.** The
+process registry has host-assigned monotonic cursors, `(process_id, seq)`
+idempotency, `gap_before`, `retained_from_seq`, and a terminal state on every
+row; `ReadProcessOutput(after_seq)` is idempotent by construction, so "crash
+before cursor commit" is satisfied by re-reading with nothing to reconcile. An
+event per output chunk would be a firehose — the host flushes every 250ms per
+stream per process — and would need its own dedup and its own retention,
+re-solving what the registry solves. sandbox-manager also publishes nothing to
+NATS today, so the event route needs a publisher, a stream, and a provisioner
+change before the adapter could be written at all.
+
+The plan permits polling "only behind an adapter with explicit lag/rate/budget
+behavior", so the design states them: 2s base interval, ×2 backoff to a 30s
+ceiling on idle, one ≤32 KiB page per poll, 8 concurrent process-output watches
+per Space, and a failure budget that backs off rather than cancelling. The
+honest cost is stated too: up to 2s of lag on the first event and 30s on a quiet
+process. A watch is not a live tail, and if the Work tab ever needs one, that is
+a different mechanism rather than a smaller interval.
+
+**No regular expressions in the predicate grammar.** A watch predicate runs
+against output a model wrote, on a shared sweeper, where a model-created watch
+could supply both the pattern and the subject — a ReDoS surface with the
+attacker on both ends. Literal substring, stream selector, and state-change
+cover what people actually want ("tell me when it says ERROR"). If more is
+needed later the honest addition is a fixed set of named predicates, not an
+expression language.
+
+**Matching is on COMPLETE lines only.** S4.2 carries `ends_with_newline` on
+every chunk precisely so this is decidable. A predicate evaluated against a
+partial line fires on a prefix the next chunk completes into something else —
+the same class of error as scrubbing a secret cut in half, which is the
+documented reason S4.2 scrubs at line boundaries in the first place.
+
+**A deployment dependency found while designing, not while debugging.**
+capability-core cannot address sandbox-manager at all today: the policy half of
+the service-principal registry (`apps/Control Plane/config/plane-service-principals.json`,
+in git and reviewable) grants it `session-core`, `inference-core` and
+`orchestrator-core`. Auth Core issues exactly the scopes requested, narrowed by
+that allowlist, so the first poll would refuse at sandbox-manager's interceptor.
+
+This is the same shape as the bug S3.3 shipped and S4.2 found a slice later —
+`sandbox:write` requested, `sandbox:read` required, refused at the real
+interceptor while every Rust test passed. The design names the exact edit
+(`sandbox:read` only, `persistent` retention, modelled on execution-core's
+entry) and attaches it to the step that first reads, with the explicit note that
+no Go unit test can see that file. The check that could is an Auth Core
+integration test in the shape S3.3's postmortem asked for and nobody has built.
+
+**Destination stops at `recorded`.** S4.4 owns `pending | claimed |
+sent_unconfirmed | acknowledged | failed | unknown` and the reconciliation that
+makes them mean something. A watch that sent a notification today would promise
+at-least-once delivery with no outbox, claim or receipt, and the first transient
+notification-core outage would lose events silently. `delivery_target_ref` is
+stored and unused; the existing runwatch consumer keeps its own notification
+path until S4.4 gives it somewhere better to stand.
+
+**Content trust is a first-class field, not a convention.** Process output is
+unscreened by construction — bytes a model chose, from a program a model wrote.
+Every emitted event carries `trust`: `unscreened_source_payload` for anything
+derived from watched content, `owner_metadata` for facts the owning plane
+asserts. Redaction is not trust: S4.2 already scrubbed the line, and a scrubbed
+line is still attacker-chosen text. A watch is the first thing that carries
+process output OUT of the run that produced it, which is why the rule is written
+down rather than assumed.
+
+**Deliberately not in this pass, with reasons:** a `watch_*` tool family (a
+model creating a standing intent addressed to a human, before delivery has
+semantics, is the wrong order — ship human-created watches first and see what
+people watch); `trigger_mode='continuous'` (a delivery-rate problem, which is
+S4.4's); and every adapter past process output.
+
+Full detail, including the state machine, the record, the authority argument and
+the per-verification test plan: the design doc.
+
+## S4.3 step 1 implemented — the Watch core, and a claim that does not hold locks across the network (2026-09-14)
+
+**State:** `implemented` (design doc §3, §9 step 1). session-core migration
+`0036` and `capability-core/internal/watch`. Nothing fires: no adapter is
+registered, no create path exists, and the sweeper is deliberately not wired.
+
+**The claim commits BEFORE the work, which is where this departs from the cron
+sweeper it otherwise copies.** That sweeper does everything inside one
+transaction — including an HTTP call to Control — while holding row locks on
+every one of up to 100 claimed schedules. At one fire per minute that is
+survivable. A watch polls every two seconds and its work is a remote read, so
+the same shape would hold locks across an RPC for the whole fleet at once.
+
+So `ClaimDue` is its own short transaction: select `FOR UPDATE SKIP LOCKED`,
+push `next_poll_at` forward by the current backoff, commit. A second replica
+then cannot re-pick the row and no transaction is open while an adapter talks to
+the network. The cost is stated rather than hidden: a sweeper that dies after
+claiming delays that watch by one interval — invisible next to a 2–30s poll, and
+much cheaper than the alternative.
+
+**`next_poll_at` is both the due-time and the claim**, exactly as
+`cron_schedules.next_fire_at` already is. The design's draft schema had
+`last_polled_at` but nothing the claim could order or filter by, so the backoff
+§7.1 specifies was not actually expressible. `idle_polls` is the backoff LEVEL
+rather than a stored duration, so there is one source of truth: a counter and a
+duration side by side are two things that can disagree, and the one that
+disagrees silently is the duration.
+
+**The commit ordering is the whole correctness argument, and it is one
+transaction.** The event insert and the cursor move happen together, event
+first:
+
+- an event without a committed cursor is re-derived next poll (adapters are
+  idempotent in the cursor) and deduplicated by the unique index on
+  `(watch_id, cursor_value, kind)` — harmless;
+- a committed cursor without its event silently skips a match, and nothing
+  downstream could ever discover it.
+
+That asymmetry is why the order is fixed. A terminal state is applied in the
+same transaction as the final event, because a separate call would leave a
+window where the watch polls a source it has already reported as gone.
+
+**The unwatch race is resolved in favour of the person who asked to stop.** The
+cursor UPDATE is fenced on the watch still being ACTIVE, so a cancellation that
+lands mid-poll wins: the update matches nothing, the cursor does not move, and
+the watch stays cancelled. Events already inserted remain — they are a true
+account of what was observed — but the watch does not resume.
+
+**A partial unique index on ACTIVE watches**, keyed on `(org, space, source,
+predicate, creator)`. Watching the same thing for the same reason twice is a
+duplicate rather than two answers, and without the index a retried create
+silently doubles the events a person receives. `Create` surfaces that as its own
+error, because the right response is to show the existing watch: the person
+asked to be told about something and they already will be. Terminal watches fall
+outside the index, so re-watching after one ends is a new row carrying new
+authority — which is the point.
+
+**A `match` may not be labelled owner metadata, and the code refuses it.** The
+trust column exists so a consumer can tell a program's own bytes from the owning
+plane's assertions. Without a pairing rule an adapter could launder a payload
+into the label a consumer renders as trustworthy, which would defeat the column
+entirely. `validateEmission` enforces it and a test asserts it directly. The
+same reasoning put `state_change` on the predicate side of that line:
+`MatchLine` returns false for it unconditionally, so no program can emit text
+that forges a lifecycle event.
+
+**No regular expressions, and the migration enforces the closure too.** The
+predicate vocabulary is a CHECK constraint, not only a Go switch — a future
+adapter that wants a new predicate has to change a line of SQL, which is the
+review it deserves. Go validates the same rules anyway, because a constraint
+violation arrives as an opaque Postgres error several layers from the caller and
+"a contains predicate requires a value" is a sentence a caller can act on.
+
+**`delivery_state` carries a CHECK pinning it to `'recorded'`.** The design said
+S4.4 owns everything past it; the constraint makes that enforceable rather than
+a convention, and forces S4.4 to widen the vocabulary deliberately instead of
+writing a state nothing else understands.
+
+**The sweeper is built, tested, and NOT wired into `cmd/main.go`.** There is no
+create path until step 3, so no row can exist, so a wired sweeper would tick
+every second over an empty table forever. It ships inert; step 2 wires it when
+it has an adapter. This is the no-caller-ahead-of-its-step rule S3.2, S3.3 and
+S4.2 all followed, applied to a case where the design's own step list implied
+otherwise.
+
+**An unadapted watch backs off rather than terminating.** A binary older than a
+watch's `source_kind` is a deployment-ordering question, and ending a person's
+watch is the wrong answer to it. The same reasoning governs failures: five
+consecutive ones push the watch to the ceiling interval and no further. The only
+things that end a watch are the member, the clock, and the source.
+
+Verification: 24 unit tests over the state machine, the predicate grammar and
+the emission contract — all pure, no database. Plus 12 integration tests under
+`-tags integration` against a throwaway Postgres, because the store's SQL is
+where this repo has actually been bitten: S4.2's process store passed every stub
+test (right text, right bound arguments) and still failed 14 of 17 integration
+tests on a type deduction only a real planner performs. A 25-parameter INSERT, a
+`FOR UPDATE SKIP LOCKED` claim, and a fenced UPDATE are all in that category.
+The migration was separately proven to apply, re-apply idempotently, and
+actually refuse each of the twelve things its constraints claim to refuse.
+
+Full detail: design doc §3 and §9 step 1.
+
+## S4.3 step 2 implemented — the process-output adapter, and a ceiling only one reader could see (2026-09-14)
+
+**State:** `implemented` (design doc §7, §9 step 2). `capability-core/internal/processwatch`, the service-principal grant, and one proto field. The sweeper is wired and still cannot observe anything: step 3 supplies the reauthorizer, and until it does the loop refuses.
+
+**S4.2 exposed a ceiling it could not share.** Step 6 put
+`recipient_audience_revision` on the process row and enforced it INSIDE
+sandbox-manager's own read path — but never put it on the wire. The watch
+sweeper resolves a process through `GetProcess` on a service credential and has
+to refuse content recorded under an audience its watch's decision predates;
+without the field that refusal was not expressible at all.
+
+A ceiling only one reader can see is a ceiling the next reader silently does not
+have. `Process` now carries it, and the field's own doc comment says why it is
+exposed rather than internal, so the next service to read the registry finds the
+rule instead of rediscovering the gap.
+
+**The deployment dependency §8.1 named is in this commit, not in a runbook.**
+capability-core's entry in `plane-service-principals.json` now grants the
+`sandbox-manager` audience with `sandbox:read` and `persistent` retention.
+`sandbox:read` ONLY — the sweeper never writes to the registry, and
+`sandbox:write` would let a bug in a poller move a process's state. The token
+provider's failure message names that file, because a 403 from Auth Core reads
+as a sandbox-manager problem and is not one. Still owed, and said plainly rather
+than treated as done: a real token minted and presented end to end. No Go unit
+test can see that file.
+
+**At most ONE match event per cursor position — a correctness requirement, not
+a throttle.** A chunk is a flush of many lines, so several matching lines
+commonly share one seq, and the event key is `(watch_id, cursor_value, kind)`.
+One event per line makes the second collide with the first and be silently
+dropped by `ON CONFLICT DO NOTHING` — which LOSES a match rather than
+deduplicating a replay, and loses it in the direction nobody notices. Step 1
+could not see this; attributing lines to chunk seqs is what made it reachable,
+which is the argument for building the adapter before trusting the core.
+
+**The committed cursor waits for EVERY stream to be clean.** stdout and stderr
+interleave in one seq sequence, so a stderr fragment opened at seq 1 holds the
+cursor at 0 even while stdout advances — because chunks at or below the cursor
+are never re-read and the fragment's continuation arrives later. Fragments are
+tracked per stream for a sharper reason: joining a stdout fragment to a stderr
+chunk would fabricate a line neither stream ever emitted, and with a `contains`
+predicate could manufacture a match out of two innocent halves.
+
+**A `system` chunk is consumed but never surfaced.** S4.2's registry writes its
+own "host lost" marker on that stream. An `any` watch firing on it would report
+the REGISTRY as the thing that spoke, and a `contains` watch could be matched by
+text the process never wrote — payload and owner metadata swapping places, which
+is the failure the trust column exists to prevent, arriving through a door the
+trust column does not cover. The cursor still advances past the marker so it
+cannot stall a watch, and nothing is lost: what it means is already carried by
+the process's state.
+
+**A terminal process is only DRAINED once a read comes back empty.** Reporting
+terminal while output remains ends the watch before its last lines, which is
+exactly where a failing build says why it failed.
+
+**An unterminated fragment is cut at 64 KiB.** Without a bound a program writing
+megabytes with no newline stalls the cursor forever — the watch never consumes
+anything and never progresses. S4.2's host already made the same compromise on
+the writing side and recorded the residual risk; this is the reader's half.
+
+**`ErrSourceGone` moved into the core**, because the sweeper acts on it and the
+core cannot import an adapter. It is the ONLY adapter error that ends a watch:
+everything else backs off, because terminating on an unreachable service would
+silently cancel a person's watch over an outage. The two conditions it covers —
+"no such process" and "a process in another Space" — are one indistinguishable
+error, so a watch cannot become an oracle for which ids exist in an
+organization.
+
+**A missing reauthorizer now REFUSES rather than skips**, correcting step 1.
+That code checked `authz != nil` and fell through to observing when it was —
+the kind of default that ships and is then forgotten, and what it defaults past
+is the check that stops a watch created weeks ago under a membership since
+revoked. The sweeper is wired into `cmd/main.go` in this step and, correctly,
+observes nothing until step 3.
+
+Verification: 24 new unit tests across line assembly and the adapter — partial
+lines held back and rejoined, fragments never crossing streams, the cursor
+waiting on every stream, the system stream dropped but consumed, CRLF trimmed,
+blank lines kept, the endless-fragment bound, the Space refusal, the audience
+ceiling, indistinguishable refusals, drain-then-terminate, and transient errors
+never reading as gone. Plus 7 new sweeper integration tests against a throwaway
+Postgres covering the loop itself: no reauthorizer never observes, revoked
+authority ends without observing, a match emits and commits with the right
+trust label, source-gone terminates, a transient error only backs off, an
+unadapted kind backs off, and a drained source records its last match AND its
+terminal event.
+
+**A regression this step found and fixed, recorded because the lesson is
+general: `96eecbef` shipped an execution-core that did not compile.** S4.2 step
+6 added `space_read_decision_ref`/`space_read_decision_token` to
+`ListProcessesRequest` and those plus `space_id` to `ReadProcessOutputRequest`.
+prost generates Rust structs with no defaults, so every struct literal of a
+changed message must be updated — and `sandbox_manager_client.rs` builds both by
+literal. The Go side, model-gateway, the V3 gateway and the frontend were all
+re-verified after that proto change; execution-core was verified BEFORE it and
+never again, so a green result from earlier in the same session was reported as
+if it still held.
+
+The rule that would have caught it: a proto change invalidates every consumer in
+every language, and "it passed earlier in this session" is not the same claim as
+"it passed after the change". The fix also improved the call — `read_process_output`
+now takes the Space it is reading for and states it in the request, rather than
+relying on sandbox-manager ignoring the field for service principals.
+
+Full detail: design doc §7, §8.1 and §9 step 2.
+
+## S4.3 step 3 implemented — a watch can exist, and the authority check moved from the read to the disclosure (2026-09-14)
+
+**State:** `implemented` (design doc §8, §9 step 3). Control's watch decision pair, capability-core's create/list/cancel surface, both authorizers, and the create-time source resolver. This is the first point at which a watch can exist and observe.
+
+**The reauthorization moved from the READ to the DISCLOSURE, correcting step 1.**
+That code checked authority before every poll. At a two-second cadence that is
+one Control call per watch per two seconds — where the cron sweeper it copies
+makes one per FIRE, roughly once a minute. The difference is three orders of
+magnitude, against an identity plane that is on the critical path for every
+other service in the fleet.
+
+The check belongs where the disclosure is. A poll that matches nothing reads
+into the sweeper's memory on capability-core's own service credential, bound to
+the watch's Space by the adapter, and discards it: nothing durable is written
+and no human sees anything. What needs fresh human authority is turning that
+read into a RECORDED, readable event — so the check sits immediately before the
+commit, and a quiet watch costs Control nothing.
+
+The cost of that placement is stated rather than hidden: a member whose
+membership was revoked keeps polling until their watch's first would-be event,
+rather than until its next poll. Nothing is disclosed meanwhile and `expires_at`
+bounds it in the worst case. If that window ever needs closing, the fix is a
+periodic revalidation sweep — not moving this check back in front of every read,
+which would trade a real cost for a theoretical one.
+
+**`ErrAuthorityUnavailable` separates "Control said no" from "Control could not
+answer", and the distinction is load-bearing.** A refusal means the member's
+authority no longer covers this watch and it should end. Control being briefly
+unreachable means nothing about the member at all — and terminating on it would
+cancel every watch in the fleet during one deployment of the identity plane.
+
+An unavailable authority backs off WITHOUT committing the cursor. The adapter is
+idempotent in the cursor, so the pending events are re-derived and recorded once
+Control is reachable; committing there would skip a match permanently, which is
+the failure mode nobody notices.
+
+**Two Control actions, not one.** `model.watch.create` runs with a human present
+— Control resolves the subject from the verified delegation rather than being
+told who it is — and its answer is RECORDED on the row as the authority binding
+the sweeper will later compare against. `model.watch.observe` runs with nobody
+present, names its subject in the intent for Control to check against its own
+store, and its answer is used once and discarded. The action id and schema hash
+are digest inputs, so a create token cannot satisfy an observe check even when
+every other bound fact is identical.
+
+**The predicate is bound as a digest, never sent as a rule.** Control does not
+need the matching rule to enforce Space policy, and binding the digest is what
+stops a watch approved for "tell me when it says ERROR" from becoming "tell me
+everything" — which, for a watch, is the difference between a notification and a
+transcript. The matched CONTENT is absent from both requests for a sharper
+reason: Control authorizes the disclosure, it does not review it, and sending a
+program's output to the identity plane would put unscreened payload somewhere it
+has no business being.
+
+**A viewer may watch, where schedule creation requires editor.** A watch
+observes and creates no effect in the Space; reading the shared record is what a
+viewer role is for, and the thread-read decision already says so in as many
+words. A test asserts the contrast against schedule creation directly, because a
+rule this surface-level is exactly the kind that gets "tidied" into consistency
+with the wrong neighbour.
+
+**No new entitlement — the open question, answered narrowly.** A shared-Space
+watch reuses `ThreadReadEntitled`: a standing read of a room is still a read of
+that room, so a Space not entitled to shared reads should not get standing ones.
+And the thing that genuinely needed its own switch already has one — a
+background process cannot exist without `process_registry_entitled`, so a watch
+on a process a Space may not run has nothing to watch. A second switch for the
+same disclosure would be a setting nobody could explain against the first. The
+per-Space count stays a quota rather than an authority.
+
+**Create checks authority BEFORE the source**, and the order is the point: a
+caller who may not watch a Space at all must not be able to use the source check
+as a probe for which resources exist in it. The resolver's refusals are one
+indistinguishable error — missing, foreign, and above the audience ceiling all
+read alike — for the same no-oracle reason the adapter already uses.
+
+**Creating a watch resolves a STARTING cursor rather than beginning at zero.** A
+watch created on a process that has been running an hour must not replay that
+hour: the person asked what happens next, and dumping the backlog into the room
+as events would bury the thing they were waiting for. The cost is that output
+produced before the watch existed is never matched, which is intended — a watch
+is not a search.
+
+**Only the creator may cancel, reported as not-found.** A watch is one person's
+standing intent addressed to that person. Cancelling someone else's is a write
+against their intent, a different authority question this slice does not answer;
+not-found rather than forbidden because the id belongs to someone and saying
+which is a disclosure of its own. Cancelling is idempotent, because the caller's
+intent is already satisfied and a failure would invite a retry that can never
+succeed.
+
+**`authctx` gained `ContextWithPrincipal`.** The package exported a principal
+READER and no writer, which made every downstream handler untestable without
+standing up the verifier and a signed token — an asymmetry in a package whose
+whole job is carrying a principal through a context. The exported counterpart
+performs no verification and its doc says so: production code uses the
+middleware, tests use this.
+
+**Two mistakes made and corrected while building this, recorded because one has
+a general lesson.** A Python edit script called `nl.join()` on a plain string
+instead of a list, which joins its CHARACTERS with newlines — it destroyed
+`store.go`, restored from HEAD with the day's 58 added lines re-applied. And
+`git checkout` restored that file as CRLF while the rest of the package is LF,
+per `.gitattributes`; the committed bytes are identical either way, but the
+worktree file then failed `gofmt -l` for reasons that have nothing to do with
+its content. Normalised back. The general lesson is the first one: a scripted
+edit that can silently produce syntactically valid garbage needs its output
+checked, not just its exit code.
+
+Verification: 11 new handler integration tests against a throwaway Postgres —
+authority before source, an unresolvable source refused at create, an unservable
+kind refused, invalid predicates refused with their reason, the per-Space limit,
+duplicates, creator-only cancel, idempotent cancel, service identities refused,
+and terminal watches hidden from the default list. Plus 10 new Control decision
+tests covering the create/observe separation, the viewer contrast, ZDR, digest
+binding of both predicate and source, and intent-versus-current-authority
+mismatch. capability-core and user-core build, vet and test green apart from
+capability-core's one known pre-existing CRLF failure in `internal/registry`.
+
+Full detail: design doc §8 and §9 step 3.

@@ -2,6 +2,7 @@ package redis
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"time"
@@ -41,6 +42,7 @@ func NewClient(cfg Config) (*Client, error) {
 	defer cancel()
 
 	if err := client.Ping(ctx).Err(); err != nil {
+		_ = client.Close()
 		return nil, fmt.Errorf("failed to connect to Redis at %s: %w", addr, err)
 	}
 
@@ -63,16 +65,17 @@ func (c *Client) Close() error {
 // Get retrieves a value from Redis by key.
 func (c *Client) Get(ctx context.Context, key string) (string, error) {
 	val, err := c.client.Get(ctx, key).Result()
-	if err == redis.Nil {
+	if errors.Is(err, redis.Nil) {
 		return "", fmt.Errorf("key %s does not exist", key)
-	} else if err != nil {
+	}
+	if err != nil {
 		return "", fmt.Errorf("failed to get key %s: %w", key, err)
 	}
 	return val, nil
 }
 
 // Set stores a value in Redis with an expiration duration.
-func (c *Client) Set(ctx context.Context, key string, value interface{}, expiration time.Duration) error {
+func (c *Client) Set(ctx context.Context, key string, value any, expiration time.Duration) error {
 	if err := c.client.Set(ctx, key, value, expiration).Err(); err != nil {
 		return fmt.Errorf("failed to set key %s: %w", key, err)
 	}

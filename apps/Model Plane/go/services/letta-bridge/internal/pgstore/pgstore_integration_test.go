@@ -77,7 +77,7 @@ func TestPgStorePutSearchRoundTrip(t *testing.T) {
 		t.Fatalf("put m2: %v", err)
 	}
 
-	hits, err := store.Search(ctx, org, "", "dark", nil, time.Time{}, 10)
+	hits, err := store.Search(ctx, org, "", "", "dark", nil, time.Time{}, 10)
 	if err != nil {
 		t.Fatalf("search: %v", err)
 	}
@@ -89,7 +89,7 @@ func TestPgStorePutSearchRoundTrip(t *testing.T) {
 	}
 
 	// Prefix match scores 1.0.
-	prefixHits, err := store.Search(ctx, org, "", "user", nil, time.Time{}, 10)
+	prefixHits, err := store.Search(ctx, org, "", "", "user", nil, time.Time{}, 10)
 	if err != nil {
 		t.Fatalf("search prefix: %v", err)
 	}
@@ -108,7 +108,7 @@ func TestPgStoreUpsertOverwrites(t *testing.T) {
 	if _, err := store.Put(ctx, org, "t1", "MEMORY", "dup", "", "v2"); err != nil {
 		t.Fatalf("put v2: %v", err)
 	}
-	hits, err := store.Search(ctx, org, "", "", nil, time.Time{}, 10)
+	hits, err := store.Search(ctx, org, "", "", "", nil, time.Time{}, 10)
 	if err != nil {
 		t.Fatalf("search: %v", err)
 	}
@@ -134,7 +134,7 @@ func TestPgStoreScopingAndFilters(t *testing.T) {
 	mustPut("t1", "NOTE", "c", "gamma")
 
 	// thread filter
-	hits, err := store.Search(ctx, org, "t1", "", nil, time.Time{}, 10)
+	hits, err := store.Search(ctx, org, "t1", "", "", nil, time.Time{}, 10)
 	if err != nil {
 		t.Fatalf("thread search: %v", err)
 	}
@@ -143,7 +143,7 @@ func TestPgStoreScopingAndFilters(t *testing.T) {
 	}
 
 	// topic filter
-	topicHits, err := store.Search(ctx, org, "", "", []string{"NOTE"}, time.Time{}, 10)
+	topicHits, err := store.Search(ctx, org, "", "", "", []string{"NOTE"}, time.Time{}, 10)
 	if err != nil {
 		t.Fatalf("topic search: %v", err)
 	}
@@ -153,7 +153,7 @@ func TestPgStoreScopingAndFilters(t *testing.T) {
 
 	// org isolation: a different org sees nothing.
 	otherOrg := "other-" + org
-	otherHits, err := store.Search(ctx, otherOrg, "", "", nil, time.Time{}, 10)
+	otherHits, err := store.Search(ctx, otherOrg, "", "", "", nil, time.Time{}, 10)
 	if err != nil {
 		t.Fatalf("other org search: %v", err)
 	}
@@ -162,7 +162,7 @@ func TestPgStoreScopingAndFilters(t *testing.T) {
 	}
 
 	// limit
-	limited, err := store.Search(ctx, org, "", "", nil, time.Time{}, 1)
+	limited, err := store.Search(ctx, org, "", "", "", nil, time.Time{}, 1)
 	if err != nil {
 		t.Fatalf("limited search: %v", err)
 	}
@@ -244,7 +244,7 @@ func TestPgStoreLiteralWildcards(t *testing.T) {
 		t.Fatalf("put: %v", err)
 	}
 	// "%" must be matched literally, not as an ILIKE wildcard.
-	hits, err := store.Search(ctx, org, "", "50%", nil, time.Time{}, 10)
+	hits, err := store.Search(ctx, org, "", "", "50%", nil, time.Time{}, 10)
 	if err != nil {
 		t.Fatalf("search: %v", err)
 	}

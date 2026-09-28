@@ -170,6 +170,82 @@ impl ScrapeOptions {
     }
 }
 
+/// Per-call search knobs: the subset of `quarry-edge`'s `SearchRequest`
+/// (`quarry-edge/src/search_routes.rs`) the Model Plane has a caller for.
+/// Added as a struct rather than more positional parameters for the same
+/// reason as [`ScrapeOptions`].
+///
+/// The field names below are the edge's own and must stay spelled that way:
+/// its `SearchRequest` derives `Deserialize` without `deny_unknown_fields`,
+/// so a misspelled key is dropped in silence on arrival. The failure mode of
+/// a typo here is therefore not an error anyone sees — it is a Norwegian
+/// question searched with an English bias, exactly the bug these fields
+/// exist to fix.
+///
+/// Every *narrowing* field is optional and is omitted from the request body
+/// when unset, so a call that supplies no options sends no query-shaping keys
+/// at all and cannot narrow a result set against an edge build that predates
+/// them. [`Self::allow_paid_providers`] is the deliberate exception and is
+/// always on the wire — see its own note for why that is worth the one key.
+#[derive(Debug, Clone, Default)]
+pub struct SearchOptions {
+    /// Query language, as a bare code or a full locale (`"nb"`, `"nb-NO"`).
+    /// Deliberately not folded to one form here — each provider wants a
+    /// different one (Brave answers 422 to `"nb-NO"`, `SearXNG` wants the full
+    /// locale) and `quarry-runtime`'s `serp` module already normalises per
+    /// provider, so a second normalisation here could only disagree with it.
+    pub language: Option<String>,
+    /// Region bias, as alpha-2 or a full locale (`"NO"`, `"nb-NO"`).
+    pub country: Option<String>,
+    /// Topic vertical: `"general"`, `"news"` or `"finance"`.
+    pub topic: Option<String>,
+    /// Recency window: `"day"`, `"week"`, `"month"` or `"year"`. The edge
+    /// lowercases this and validates it against that closed set, dropping
+    /// anything else, so an unrecognised value degrades to "no window"
+    /// rather than to a rejected request.
+    pub time_range: Option<String>,
+    /// Restrict results to these domains (applied as `site:` operators).
+    /// Empty = no restriction.
+    pub include_domains: Vec<String>,
+    /// Exclude these domains (applied as `-site:` operators). Empty = no
+    /// exclusion.
+    pub exclude_domains: Vec<String>,
+    /// Whether the edge may reach a paid, externally-egressing provider
+    /// (Brave) for this call. `false` — the [`Default`] — leaves `SearXNG`,
+    /// which every tier gets.
+    ///
+    /// Unlike every field above this one is **always serialised**. The edge
+    /// treats an absent field as "no paid providers", so skipping it when
+    /// false would be correct-by-accident and unreadable on the wire: a
+    /// captured request body would not distinguish "this tenant is not
+    /// entitled" from "this client is too old to know about tiering". One
+    /// always-present boolean makes the grant self-describing in logs and in
+    /// the edge's own request records, which is what an egress decision needs
+    /// to be auditable after the fact.
+    pub allow_paid_providers: bool,
+}
+
+/// Trimmed value, or `None` when the caller supplied nothing usable.
+///
+/// These options originate in model-authored tool arguments, which routinely
+/// carry `""`. A blank is not merely equivalent to absent: the edge's search
+/// cache key is built from the *option* (`lg=Some("")` vs `lg=None`), so
+/// sending blanks would split otherwise identical queries across separate
+/// cache entries while changing no result.
+fn non_blank(value: Option<&String>) -> Option<&str> {
+    value.map(|v| v.trim()).filter(|v| !v.is_empty())
+}
+
+/// The non-blank entries of a domain filter list. Same cache-key reasoning
+/// as [`non_blank`]: `[""]` and `[]` are distinct keys upstream.
+fn non_blank_domains(values: &[String]) -> Vec<&str> {
+    values
+        .iter()
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .collect()
+}
+
 /// Projected `SearchResult`. Returned by [`Client::search`]; the full
 /// Quarry envelope is kept under `raw` so callers can read additional
 /// fields (rank features, provider-specific scores) without a new
@@ -208,6 +284,16 @@ pub struct SearchResult {
     /// Empty when the hit was not reranked. Better evidence of *why* a hit
     /// matched than a provider snippet, which is often boilerplate.
     pub highlights: Vec<String>,
+    /// The upstream engines that returned this URL, as Quarry's metasearch saw
+    /// them. Empty until the Ingestion Plane side ships the field.
+    ///
+    /// Cross-engine agreement is the main quality signal a metasearch has —
+    /// one URL returned by four independent engines is a stronger hit than one
+    /// engine's top result — and it is a signal no single provider's own score
+    /// can express. Projected now, ahead of any consumer, so that the day the
+    /// edge starts sending it the data is already here rather than being
+    /// dropped on the floor by an older gateway.
+    pub engines: Vec<String>,
     pub raw: Value,
 }
 
@@ -646,9 +732,22 @@ impl Client {
         Ok(raw)
     }
 
-    /// Call `/v1/search` and return the projected results. The edge's
-    /// `SmartSearchRouter` picks the provider (local Tantivy, Tavily,
-    /// Bing, Google) based on the `intent` hint and operator config.
+    /// Call `/v1/search` with no per-call options and return the projected
+    /// results. Equivalent to [`Client::search_with_options`] with a default
+    /// [`SearchOptions`], and kept as its own entry point so existing callers
+    /// stay unchanged.
+    ///
+    /// The edge's `SmartSearchRouter` picks the provider (local Tantivy,
+    /// Tavily, Bing, Google). `intent` is a **hint only**: the edge accepts
+    /// and logs it, but its router reaches the handler as
+    /// `Arc<dyn SearchProvider>`, whose `search(query, &SearchOptions)` has
+    /// no intent slot — so routing is still re-derived from the query text.
+    /// Values are matched against the router's `QueryIntent` vocabulary
+    /// (`navigational`, `fresh`/`news`/`recent`, `phrase`/`exact`,
+    /// `research`, `comparative`/`compare`, `local`, `code`,
+    /// `default`/`general`); anything else is logged and dropped there
+    /// rather than rejected, so an unknown value costs nothing but is also
+    /// worth nothing.
     ///
     /// Limit is capped at 50 to keep responses sane; callers needing
     /// more should paginate via the underlying provider.
@@ -665,6 +764,33 @@ impl Client {
         org_id: &str,
         zdr: bool,
     ) -> Result<Vec<SearchResult>, QuarryError> {
+        self.search_with_options(
+            query,
+            limit,
+            intent,
+            org_id,
+            zdr,
+            &SearchOptions::default(),
+        )
+        .await
+    }
+
+    /// Call `/v1/search` with explicit [`SearchOptions`] — language, region,
+    /// topic vertical, recency window and domain filters.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`QuarryError`] if the edge is unavailable, the query is empty,
+    /// the upstream returns a non-2xx status, or the response cannot be decoded.
+    pub async fn search_with_options(
+        &self,
+        query: &str,
+        limit: i32,
+        intent: &str,
+        org_id: &str,
+        zdr: bool,
+        options: &SearchOptions,
+    ) -> Result<Vec<SearchResult>, QuarryError> {
         #[derive(Serialize)]
         struct Body<'a> {
             query: &'a str,
@@ -672,6 +798,28 @@ impl Client {
             #[serde(skip_serializing_if = "str::is_empty")]
             intent: &'a str,
             zdr: bool,
+            /// Never skipped — see [`SearchOptions::allow_paid_providers`].
+            /// Grouped with `zdr` rather than with the narrowing options below
+            /// because, like `zdr`, it is a standing property of the caller
+            /// that belongs on every request, not a per-query refinement.
+            allow_paid_providers: bool,
+            // Everything below is additive and declared last so it is skipped
+            // wholesale under a default `SearchOptions`: the body then carries
+            // no query-shaping keys at all, which is what lets `search` stay a
+            // safe passthrough against an edge deployment that has not shipped
+            // these fields.
+            #[serde(skip_serializing_if = "Option::is_none")]
+            language: Option<&'a str>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            country: Option<&'a str>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            topic: Option<&'a str>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            time_range: Option<&'a str>,
+            #[serde(skip_serializing_if = "Vec::is_empty")]
+            include_domains: Vec<&'a str>,
+            #[serde(skip_serializing_if = "Vec::is_empty")]
+            exclude_domains: Vec<&'a str>,
         }
 
         if !self.available() {
@@ -692,6 +840,13 @@ impl Client {
             limit: effective_limit,
             intent,
             zdr,
+            allow_paid_providers: options.allow_paid_providers,
+            language: non_blank(options.language.as_ref()),
+            country: non_blank(options.country.as_ref()),
+            topic: non_blank(options.topic.as_ref()),
+            time_range: non_blank(options.time_range.as_ref()),
+            include_domains: non_blank_domains(&options.include_domains),
+            exclude_domains: non_blank_domains(&options.exclude_domains),
         };
 
         let endpoint = format!("{}/v1/search", self.base_url);
@@ -731,14 +886,33 @@ impl Client {
     }
 }
 
+/// Read the result rows out of a `/v1/search` response body.
+///
+/// Top-level `results` is checked FIRST because it is the only shape the edge
+/// actually produces: `quarry-edge`'s search handler returns
+/// `Json(SearchResponse)` — `{query, provider, results, count, ...}` — and the
+/// route carries no response-wrapping middleware (auth, trace, body-limit and
+/// timeout layers only). The `data` envelope is `/v1/scrape`'s, built by that
+/// handler itself, which is where the reversed order here came from; it left
+/// the live search path running entirely on what was written as a fallback.
+///
+/// The `data` branch is kept, not deleted: the Frontend Plane BFF wraps
+/// upstream payloads in `{data: ...}`, so a body that has been through it
+/// still parses. model-gateway does not call search through the BFF today —
+/// this is compatibility, not a supported second contract.
 fn extract_search_results(payload: &Value) -> Vec<Value> {
     payload
-        .get("data")
-        .and_then(Value::as_object)
-        .and_then(|data| data.get("results"))
+        .get("results")
         .and_then(Value::as_array)
         .cloned()
-        .or_else(|| payload.get("results").and_then(Value::as_array).cloned())
+        .or_else(|| {
+            payload
+                .get("data")
+                .and_then(Value::as_object)
+                .and_then(|data| data.get("results"))
+                .and_then(Value::as_array)
+                .cloned()
+        })
         .unwrap_or_default()
 }
 
@@ -771,19 +945,8 @@ fn project_search_result(v: &Value) -> SearchResult {
             .and_then(Value::as_u64)
             .and_then(|n| u32::try_from(n).ok())
             .unwrap_or(0),
-        highlights: obj
-            .get("highlights")
-            .and_then(Value::as_array)
-            .map(|items| {
-                items
-                    .iter()
-                    .filter_map(Value::as_str)
-                    .map(str::trim)
-                    .filter(|text| !text.is_empty())
-                    .map(ToOwned::to_owned)
-                    .collect()
-            })
-            .unwrap_or_default(),
+        highlights: string_array(&obj, "highlights"),
+        engines: string_array(&obj, "engines"),
         raw: Value::Object(obj),
     }
 }
@@ -878,6 +1041,25 @@ fn artifact_ref(data: &Value, key: &str) -> Option<ArtifactRef> {
         artifact_id,
         bytes: entry.get("bytes").and_then(Value::as_u64).unwrap_or(0),
     })
+}
+
+/// The non-blank string entries of `obj[key]`, or an empty vec when the key is
+/// absent or is not an array. Blanks are dropped rather than carried: an empty
+/// highlight is not evidence and an unnamed engine is not a vote, so keeping
+/// them would only inflate whatever counts them downstream.
+fn string_array(obj: &serde_json::Map<String, Value>, key: &str) -> Vec<String> {
+    obj.get(key)
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::trim)
+                .filter(|text| !text.is_empty())
+                .map(ToOwned::to_owned)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn string_field(obj: &serde_json::Map<String, Value>, key: &str) -> String {
@@ -1377,8 +1559,249 @@ mod tests {
         assert_eq!(r.text, "# hello"); // text falls back to markdown
     }
 
+    /// An empty `/v1/search` response in the edge's real shape — top-level
+    /// `results` beside `query`/`provider`/`count`, no `data` wrapper. The
+    /// wire tests below assert request bodies, but they should still be
+    /// answered with something an edge could actually have sent.
+    fn search_ok() -> serde_json::Value {
+        serde_json::json!({
+            "query": "",
+            "provider": "smart_router",
+            "results": [],
+            "count": 0,
+        })
+    }
+
+    /// The narrowing search options must be invisible until someone sets one.
+    /// `body_json` is an exact match, so a stray key — or an option
+    /// serialised as `null` instead of being skipped — fails here rather
+    /// than reaching an edge build that predates these fields.
+    /// `allow_paid_providers` is the one key that is always present.
+    #[tokio::test]
+    async fn search_without_options_adds_no_narrowing_keys() {
+        let quarry = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/search"))
+            .and(body_json(serde_json::json!({
+                "query": "kpi norge",
+                "limit": 5,
+                "intent": "research",
+                "zdr": false,
+                "allow_paid_providers": false,
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(search_ok()))
+            .expect(1)
+            .mount(&quarry)
+            .await;
+
+        test_client(quarry.uri())
+            .search("kpi norge", 5, "research", "org-a", false)
+            .await
+            .expect("search succeeds");
+    }
+
+    /// The same must hold for the options-taking entry point when the
+    /// options are left at their defaults — otherwise every call site that
+    /// migrates to it silently changes its wire shape.
+    #[tokio::test]
+    async fn default_options_add_no_narrowing_keys() {
+        let quarry = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/search"))
+            .and(body_json(serde_json::json!({
+                "query": "kpi norge",
+                "limit": 5,
+                "intent": "research",
+                "zdr": false,
+                "allow_paid_providers": false,
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(search_ok()))
+            .expect(1)
+            .mount(&quarry)
+            .await;
+
+        test_client(quarry.uri())
+            .search_with_options(
+                "kpi norge",
+                5,
+                "research",
+                "org-a",
+                false,
+                &SearchOptions::default(),
+            )
+            .await
+            .expect("search succeeds");
+    }
+
+    /// Pins the exact field names `quarry-edge`'s `SearchRequest` declares.
+    /// It deserialises without `deny_unknown_fields`, so a renamed or
+    /// misspelled key here would be discarded upstream without an error —
+    /// this assertion is the only place that mismatch can be caught.
+    #[tokio::test]
+    async fn set_options_serialize_with_quarry_edges_field_names() {
+        let quarry = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/search"))
+            .and(body_json(serde_json::json!({
+                "query": "konsumprisindeksen",
+                "limit": 5,
+                "intent": "fresh",
+                "zdr": false,
+                "allow_paid_providers": false,
+                "language": "nb",
+                "country": "NO",
+                "topic": "news",
+                "time_range": "week",
+                "include_domains": ["ssb.no", "regjeringen.no"],
+                "exclude_domains": ["pinterest.com"],
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(search_ok()))
+            .expect(1)
+            .mount(&quarry)
+            .await;
+
+        test_client(quarry.uri())
+            .search_with_options(
+                "konsumprisindeksen",
+                5,
+                "fresh",
+                "org-a",
+                false,
+                &SearchOptions {
+                    language: Some("nb".to_owned()),
+                    country: Some("NO".to_owned()),
+                    topic: Some("news".to_owned()),
+                    time_range: Some("week".to_owned()),
+                    include_domains: vec!["ssb.no".to_owned(), "regjeringen.no".to_owned()],
+                    exclude_domains: vec!["pinterest.com".to_owned()],
+                    allow_paid_providers: false,
+                },
+            )
+            .await
+            .expect("search succeeds");
+    }
+
+    /// Blank options come from model-authored tool arguments and must drop
+    /// out entirely: `Some("")` is a different edge cache key from `None`,
+    /// so a blank would fragment the cache without changing a result.
+    #[tokio::test]
+    async fn blank_options_are_omitted_rather_than_sent_empty() {
+        let quarry = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/search"))
+            .and(body_json(serde_json::json!({
+                "query": "kpi norge",
+                "limit": 5,
+                "intent": "research",
+                "zdr": false,
+                "allow_paid_providers": false,
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(search_ok()))
+            .expect(1)
+            .mount(&quarry)
+            .await;
+
+        test_client(quarry.uri())
+            .search_with_options(
+                "kpi norge",
+                5,
+                "research",
+                "org-a",
+                false,
+                &SearchOptions {
+                    language: Some("  ".to_owned()),
+                    country: Some(String::new()),
+                    topic: None,
+                    time_range: Some(String::new()),
+                    include_domains: vec![String::new(), "   ".to_owned()],
+                    exclude_domains: Vec::new(),
+                    allow_paid_providers: false,
+                },
+            )
+            .await
+            .expect("search succeeds");
+    }
+
+    /// Whitespace around a real value is trimmed rather than forwarded: the
+    /// edge matches `time_range` against a closed set and would drop
+    /// `" week"` as unrecognised, silently losing the recency window.
+    #[tokio::test]
+    async fn option_values_are_trimmed() {
+        let quarry = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/search"))
+            .and(body_json(serde_json::json!({
+                "query": "statsbudsjettet",
+                "limit": 5,
+                "zdr": false,
+                "allow_paid_providers": false,
+                "time_range": "week",
+                "include_domains": ["ssb.no"],
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(search_ok()))
+            .expect(1)
+            .mount(&quarry)
+            .await;
+
+        test_client(quarry.uri())
+            .search_with_options(
+                "statsbudsjettet",
+                5,
+                "",
+                "org-a",
+                false,
+                &SearchOptions {
+                    time_range: Some(" week ".to_owned()),
+                    include_domains: vec![" ssb.no ".to_owned(), "  ".to_owned()],
+                    ..SearchOptions::default()
+                },
+            )
+            .await
+            .expect("search succeeds");
+    }
+
+    /// The live contract: `quarry-edge` returns `Json(SearchResponse)`, so
+    /// `results` sits at the top level next to `query`/`provider`/`count`.
+    /// This is the shape every production search response actually has.
+    /// The grant must be on the wire even when it is denied. An absent field
+    /// means "no paid providers" on the edge, so a skipped `false` would still
+    /// be *obeyed* — but it would be indistinguishable from a client too old to
+    /// know about tiering, which is not a thing an egress decision may be
+    /// ambiguous about after the fact.
+    #[tokio::test]
+    async fn the_paid_provider_grant_is_always_on_the_wire() {
+        let quarry = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/search"))
+            .and(body_json(serde_json::json!({
+                "query": "kpi norge",
+                "limit": 5,
+                "zdr": false,
+                "allow_paid_providers": true,
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(search_ok()))
+            .expect(1)
+            .mount(&quarry)
+            .await;
+
+        test_client(quarry.uri())
+            .search_with_options(
+                "kpi norge",
+                5,
+                "",
+                "org-a",
+                false,
+                &SearchOptions {
+                    allow_paid_providers: true,
+                    ..SearchOptions::default()
+                },
+            )
+            .await
+            .expect("search succeeds");
+    }
+
     #[test]
-    fn extract_search_results_accepts_bare_search_responses() {
+    fn extract_search_results_reads_the_edges_top_level_results() {
         let payload = serde_json::json!({
             "query": "OpenAI",
             "provider": "smart_router",
@@ -1404,8 +1827,16 @@ mod tests {
         assert_eq!(results[0].source, "brave");
     }
 
+    /// BFF compatibility only — NOT a shape any edge produces.
+    ///
+    /// The `{data: ...}` wrapper is the Frontend Plane BFF's, and
+    /// model-gateway does not reach search through the BFF. This test used to
+    /// be read as pinning the edge's contract, which is how the client came to
+    /// try `data.results` first and run the entire live path on its fallback.
+    /// It is kept so a payload relayed through the BFF still parses, and for
+    /// no stronger claim than that.
     #[test]
-    fn extract_search_results_accepts_enveloped_search_responses() {
+    fn extract_search_results_still_accepts_a_bff_wrapped_response() {
         let payload = serde_json::json!({
             "data": {
                 "results": [{
@@ -1427,6 +1858,77 @@ mod tests {
         assert_eq!(results[0].url, "https://example.com/docs");
         assert_eq!(results[0].source, "searxng");
         assert!((results[0].score - 0.82).abs() < f32::EPSILON);
+    }
+
+    /// A response carrying BOTH shapes must be read from the top level. Every
+    /// other test here would pass under either ordering — a body with only
+    /// top-level `results` parses fine as a fallback — so this is the one that
+    /// actually pins which branch is primary, and the one that fails if the
+    /// `data`-first order is ever restored.
+    #[test]
+    fn top_level_results_win_over_a_wrapped_copy() {
+        let payload = serde_json::json!({
+            "query": "kpi",
+            "provider": "smart_router",
+            "results": [{"url": "https://edge.example/", "title": "edge"}],
+            "count": 1,
+            "data": {"results": [{"url": "https://bff.example/", "title": "bff"}]}
+        });
+
+        let results: Vec<SearchResult> = extract_search_results(&payload)
+            .iter()
+            .map(project_search_result)
+            .collect();
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(
+            results[0].url, "https://edge.example/",
+            "the edge's own top-level results must be preferred over a wrapper"
+        );
+    }
+
+    /// Cross-engine agreement is the signal, so the engine list has to survive
+    /// the projection rather than being left in `raw` for someone to rediscover.
+    #[test]
+    fn engines_survive_the_projection() {
+        let payload = serde_json::json!({
+            "results": [{
+                "url": "https://www.ssb.no/kpi",
+                "title": "KPI",
+                "engines": ["brave", "duckduckgo", "  ", "google", ""]
+            }]
+        });
+
+        let results: Vec<SearchResult> = extract_search_results(&payload)
+            .iter()
+            .map(project_search_result)
+            .collect();
+
+        assert_eq!(
+            results[0].engines,
+            vec![
+                "brave".to_owned(),
+                "duckduckgo".to_owned(),
+                "google".to_owned()
+            ],
+            "blank entries are not votes and must not inflate the agreement count"
+        );
+    }
+
+    /// Until the Ingestion Plane ships the field, every response omits it. That
+    /// has to project as "no engines reported", not fail the whole row.
+    #[test]
+    fn an_absent_engine_list_projects_as_empty() {
+        let payload = serde_json::json!({
+            "results": [{"url": "https://a.no/", "title": "A", "rank": 1}]
+        });
+
+        let results: Vec<SearchResult> = extract_search_results(&payload)
+            .iter()
+            .map(project_search_result)
+            .collect();
+
+        assert!(results[0].engines.is_empty());
     }
 
     /// Quarry's `rank`, reranker `score` and `highlights` were all reaching this

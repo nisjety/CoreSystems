@@ -85,39 +85,13 @@ func IssuePersonalImportDecision(
 	if now.IsZero() {
 		return Decision{}, fmt.Errorf("personal import decision issuance time is required")
 	}
-	return Decision{
-		DecisionRef:               strings.TrimSpace(request.DecisionRef),
-		OrgID:                     evidence.Membership.OrgID,
-		SpaceRef:                  evidence.Membership.SpaceRef,
-		SubjectID:                 evidence.Membership.SubjectID,
-		ServiceAudience:           personalImportAudience,
-		ActionID:                  personalImportAction,
-		ActionSchemaHash:          personalImportSchema,
-		PayloadDigest:             personalImportPayloadDigest(evidence, request),
-		IdempotencyKey:            strings.TrimSpace(request.IdempotencyKey),
-		RecipientAudienceRef:      strings.TrimSpace(evidence.RecipientAudienceRef),
-		RecipientAudienceHash:     strings.TrimSpace(evidence.RecipientAudienceHash),
-		PrivacyPolicyRef:          strings.TrimSpace(evidence.Privacy.PolicyRef),
-		ResourceAuthorizationRef:  strings.TrimSpace(evidence.ResourceAuthorizationRef),
-		AuthorityRevision:         evidence.Membership.Revisions.Authority,
-		MembershipRevision:        evidence.Membership.Revisions.Membership,
-		PrivacyRevision:           evidence.Membership.Revisions.Privacy,
-		RecipientAudienceRevision: evidence.Membership.Revisions.RecipientAudience,
-		EntitlementRevision:       evidence.Membership.Revisions.Entitlement,
-		Permissions:               []string{"ingestion:import"},
-		Purpose:                   strings.TrimSpace(evidence.Privacy.Purpose),
-		LawfulBasis:               strings.TrimSpace(evidence.Privacy.LawfulBasis),
-		PrivacyClass:              strings.TrimSpace(evidence.Privacy.PrivacyClass),
-		ThirdPartyAllowed:         evidence.Privacy.ThirdPartyAllowed,
-		RetentionClass:            strings.TrimSpace(evidence.Privacy.RetentionClass),
-		Residency:                 strings.TrimSpace(evidence.Privacy.Residency),
-		DeletionScope:             strings.TrimSpace(evidence.Privacy.DeletionScope),
-		ImportSourceType:          strings.TrimSpace(request.SourceType),
-		ZeroDataRetention:         evidence.Privacy.ZeroDataRetention,
-		IssuedAt:                  now.UTC(),
-		ExpiresAt:                 now.UTC().Add(personalDecisionLifetime),
-		Nonce:                     strings.TrimSpace(request.Nonce),
-	}, nil
+	decision := newEvidenceDecision(
+		evidence, request.DecisionRef, personalImportAudience, personalImportAction, personalImportSchema,
+		personalImportPayloadDigest(evidence, request), request.IdempotencyKey, request.Nonce,
+		[]string{"ingestion:import"}, evidence.Privacy.ZeroDataRetention, now,
+	)
+	decision.ImportSourceType = strings.TrimSpace(request.SourceType)
+	return decision, nil
 }
 
 // PersonalImportExecutionIntent is the non-secret immutable information held
@@ -179,37 +153,11 @@ func IssuePersonalImportExecutionDecision(
 	if strings.TrimSpace(decisionRef) == "" || strings.TrimSpace(nonce) == "" || now.IsZero() {
 		return Decision{}, fmt.Errorf("personal import execution decision fields are required")
 	}
-	return Decision{
-		DecisionRef:               strings.TrimSpace(decisionRef),
-		OrgID:                     evidence.Membership.OrgID,
-		SpaceRef:                  evidence.Membership.SpaceRef,
-		SubjectID:                 evidence.Membership.SubjectID,
-		ServiceAudience:           personalImportExecutionAudience,
-		ActionID:                  personalImportAction,
-		ActionSchemaHash:          personalImportSchema,
-		PayloadDigest:             strings.TrimSpace(intent.PayloadDigest),
-		IdempotencyKey:            strings.TrimSpace(intent.IdempotencyKey),
-		RecipientAudienceRef:      strings.TrimSpace(evidence.RecipientAudienceRef),
-		RecipientAudienceHash:     strings.TrimSpace(evidence.RecipientAudienceHash),
-		PrivacyPolicyRef:          strings.TrimSpace(evidence.Privacy.PolicyRef),
-		ResourceAuthorizationRef:  strings.TrimSpace(evidence.ResourceAuthorizationRef),
-		AuthorityRevision:         evidence.Membership.Revisions.Authority,
-		MembershipRevision:        evidence.Membership.Revisions.Membership,
-		PrivacyRevision:           evidence.Membership.Revisions.Privacy,
-		RecipientAudienceRevision: evidence.Membership.Revisions.RecipientAudience,
-		EntitlementRevision:       evidence.Membership.Revisions.Entitlement,
-		Permissions:               []string{"documents:write"},
-		Purpose:                   strings.TrimSpace(evidence.Privacy.Purpose),
-		LawfulBasis:               strings.TrimSpace(evidence.Privacy.LawfulBasis),
-		PrivacyClass:              strings.TrimSpace(evidence.Privacy.PrivacyClass),
-		ThirdPartyAllowed:         evidence.Privacy.ThirdPartyAllowed,
-		RetentionClass:            strings.TrimSpace(evidence.Privacy.RetentionClass),
-		Residency:                 strings.TrimSpace(evidence.Privacy.Residency),
-		DeletionScope:             strings.TrimSpace(evidence.Privacy.DeletionScope),
-		ImportSourceType:          strings.TrimSpace(intent.SourceType),
-		ZeroDataRetention:         evidence.Privacy.ZeroDataRetention,
-		IssuedAt:                  now.UTC(),
-		ExpiresAt:                 now.UTC().Add(personalDecisionLifetime),
-		Nonce:                     strings.TrimSpace(nonce),
-	}, nil
+	decision := newEvidenceDecision(
+		evidence, decisionRef, personalImportExecutionAudience, personalImportAction, personalImportSchema,
+		intent.PayloadDigest, intent.IdempotencyKey, nonce,
+		[]string{"documents:write"}, evidence.Privacy.ZeroDataRetention, now,
+	)
+	decision.ImportSourceType = strings.TrimSpace(intent.SourceType)
+	return decision, nil
 }

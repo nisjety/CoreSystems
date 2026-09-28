@@ -3,8 +3,16 @@
 import { fireEvent, render, screen } from '@solidjs/testing-library'
 import { flush } from 'solid-js'
 import { describe, expect, it, vi } from 'vitest'
+
+const exportChatAnswerMock = vi.hoisted(() => vi.fn())
+vi.mock('../lib/chat-export', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../lib/chat-export')>()),
+  exportChatAnswer: (...args: unknown[]) => exportChatAnswerMock(...args),
+}))
+
 import { ArtifactsPanel } from './ChatArtifactPanel'
 import { mergeArtifactVersion } from './chat-artifacts'
+import { collectArtifactItems } from './chat-media-markdown'
 import type { ArtifactPanelItem, ChatArtifact, ChatTurn } from './chat-types'
 
 function turn(overrides: Partial<ChatTurn> = {}): ChatTurn {
@@ -38,6 +46,51 @@ function versioned(revisions: Array<{ content: string; title: string; version: n
 }
 
 describe('ArtifactsPanel', () => {
+  it('navigates revisions restored on separate server turns, even out of order', () => {
+    const first: ChatArtifact = { content: 'Første serverutkast', title: 'Kundesvar', id: 'reply', kind: 'document', version: 1 }
+    const latest = { ...first, content: 'Revidert serverutkast', version: 2 }
+    const latestTurn = turn({ id: 'later', artifacts: [latest] })
+    const items = collectArtifactItems([latestTurn, turn({ artifacts: [first] })])
+    expect(items).toHaveLength(1)
+    expect(items[0]?.turn).toBe(latestTurn)
+    render(() => <ArtifactsPanel items={items} />)
+    expect(screen.getByText('Revidert serverutkast')).toBeTruthy()
+    screen.getByRole('button', { name: 'Forrige versjon' }).click()
+    flush()
+    expect(screen.getByText('Første serverutkast')).toBeTruthy()
+    screen.getByRole('button', { name: 'Neste versjon' }).click()
+    flush()
+    expect(screen.getByText('Revidert serverutkast')).toBeTruthy()
+  })
+
+  it('exports a document artifact to Word, PowerPoint or PDF under its own title', () => {
+    exportChatAnswerMock.mockReset()
+    const draft: ChatArtifact = { content: '## Salgsrapport\n\nOmsetningen økte.', title: 'Utkast til salgsrapport', id: 'draft', kind: 'document', version: 1 }
+    render(() => <ArtifactsPanel items={[item(draft)]} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Eksporter dokumentet' }))
+    flush()
+    fireEvent.click(screen.getByRole('button', { name: 'Eksporter til Word' }))
+    flush()
+    const [format, input] = exportChatAnswerMock.mock.calls[0] as [string, { content: string; title: string; element?: HTMLElement | null }]
+    expect(format).toBe('docx')
+    expect(input.content).toBe(draft.content)
+    expect(input.title).toBe('Utkast til salgsrapport')
+    expect(input.element).toBeUndefined()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Eksporter dokumentet' }))
+    flush()
+    fireEvent.click(screen.getByRole('button', { name: 'Lagre som PDF' }))
+    flush()
+    const [, pdfInput] = exportChatAnswerMock.mock.calls[1] as [string, { element?: HTMLElement | null }]
+    expect(pdfInput.element?.textContent).toContain('Omsetningen økte.')
+  })
+
+  it('offers no document export for a code artifact', () => {
+    const code: ChatArtifact = { content: 'print(1)', title: 'solve.py', id: 'code', kind: 'code', version: 1 }
+    render(() => <ArtifactsPanel items={[item(code)]} />)
+    expect(screen.queryByRole('button', { name: 'Eksporter dokumentet' })).toBeNull()
+  })
+
   it('shows the honest empty state when the conversation has no artifacts', () => {
     render(() => <ArtifactsPanel items={[]} />)
     expect(screen.getByText('Ingen artefakter ennå')).toBeTruthy()

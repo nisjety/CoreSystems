@@ -106,18 +106,35 @@ impl FallbackDriver {
                         best_block = Some(resp);
                         continue;
                     }
-                    // Firecrawl parity: detect JS-shell pages (Next.js etc) that
-                    // need browser rendering. Static fetch returns 200 with shell
-                    // HTML (__NEXT_DATA__) but readability yields <1k chars of
-                    // real content. Fall through to browser for full render.
-                    if is_js_shell_needing_browser(&resp.body, resp.status)
+                    // Detect pages that answered 200 but withheld their
+                    // content, and re-fetch them through a browser.
+                    //
+                    // `StructuredYield::Unknown`: the structured harvest
+                    // (quarry-transform `structured.rs`) runs downstream of
+                    // the driver, so at this point nobody has looked inside
+                    // the embedded JSON yet. When the harvest result becomes
+                    // available here, pass it — a `Found` suppresses the
+                    // browser round trip entirely.
+                    if needs_browser_escalation(&resp.body, resp.status, StructuredYield::Unknown)
                         && idx < order.len() - 1
                         && *kind != DriverKind::Browser
                     {
-                        // Find next browser driver in chain, skip Tls if it's also static
-                        let has_browser_ahead = order[idx + 1..].contains(&DriverKind::Browser);
+                        // A browser must be REGISTERED, not merely named in
+                        // the plan's chain. Deployments running
+                        // QUARRY_EDGE__BROWSER_PROVIDER=static still get
+                        // `DriverKind::Browser` in every plan while the
+                        // registry holds none; treating that as "escalation
+                        // possible" parks a perfectly serviceable static body
+                        // in `best_shell` and rotates through the rest of the
+                        // chain to reach a driver that does not exist.
+                        let has_browser_ahead = order[idx + 1..]
+                            .iter()
+                            .any(|k| *k == DriverKind::Browser && self.drivers.contains_key(k));
                         if has_browser_ahead {
-                            attempts.push((*kind, "js-shell detected — needs browser rendering".into()));
+                            attempts.push((
+                                *kind,
+                                "js-shell detected — needs browser rendering".into(),
+                            ));
                             warn!(
                                 driver = ?kind,
                                 status = resp.status,
@@ -306,20 +323,120 @@ impl Driver for FallbackDriver {
 /// shell, however many hydration markers and scripts it carries.
 pub(crate) const SHELL_MAX_TEXT_CHARS: usize = 2_000;
 
-/// Detect JS-shell pages (Next.js, SPA) that need browser rendering.
-/// Static fetch returns 200 with shell HTML containing __NEXT_DATA__ but
-/// readability yields truncated content. Trigger browser fallback.
-pub(crate) fn is_js_shell_needing_browser(body: &[u8], status: u16) -> bool {
+/// Below this a body is never a shell: a shell is markup plus a hydration
+/// payload, and that does not fit in 8 KB. First test in the predicate so
+/// the overwhelmingly common small-page case costs one length compare.
+const SHELL_MIN_BODY_BYTES: usize = 8_000;
+
+/// The symptom branch wants a body at least this large before it spends a
+/// browser session. Between 8 KB and 20 KB a text-thin page is far more
+/// likely to be a genuinely short one — a redirect notice, an error page, a
+/// login form, a paywall — than a document being withheld from us.
+const SHELL_SYMPTOM_MIN_BODY_BYTES: usize = 20_000;
+
+/// Symptom branch: visible text may be at most 1/50th (2%) of the body.
+/// Measured on www.ssb.no/kommunefakta/oslo — 620 966 body bytes against
+/// ~130 visible characters (0.02%), because 74% of that page was hydration
+/// JSON inside `<script type="application/json">`, which readability strips.
+/// A page spending fifty bytes per readable character has not handed us its
+/// content. Prose pages sit an order of magnitude higher (aquatiq.com:
+/// 219 KB / ~4 800 chars ≈ 2.2%, and the text gate excludes it anyway).
+const SHELL_MAX_TEXT_BYTES_PER_CHAR: usize = 50;
+
+/// Embedded-JSON branch: this many bytes inside `<script type="…json">` is a
+/// hydration payload, not a sprinkle of schema.org markup. SSB carried
+/// 461 890 bytes across 29 such blocks; a typical JSON-LD block is 1–3 KB.
+const SHELL_MIN_EMBEDDED_JSON_BYTES: usize = 16_000;
+
+/// What a structured-data harvest (quarry-transform `structured.rs`) made of
+/// this body, when one has run.
+///
+/// Escalating to a browser costs a session lease plus a hydration settle;
+/// harvesting the JSON the page already shipped costs a parse and yields
+/// typed values. So the harvest wins whenever it produces anything, and the
+/// browser is reserved for the case where the page withheld its prose AND
+/// carried nothing harvestable. A caller that has already harvested says so;
+/// one that has not passes `Unknown` and gets the pre-harvest behaviour.
+// `Found`/`Empty` are built by whoever owns the harvest result; until that
+// call site threads it down here only `Unknown` is constructed in this crate.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StructuredYield {
+    /// No harvest has run at this point in the chain. The fallback driver
+    /// itself is here: it sees bytes, not extraction results.
+    Unknown,
+    /// The harvest produced usable typed values — the page HAS given us its
+    /// content, just not as prose. A browser would only re-render what we
+    /// already hold.
+    Found,
+    /// The harvest ran and came back with nothing usable.
+    Empty,
+}
+
+/// Should this statically-fetched body be re-fetched through a browser?
+///
+/// This used to be an allowlist of vendor markers (`__NEXT_DATA__`,
+/// `__NUXT__`, `_next/static`, …). www.ssb.no runs Enonic XP, scored zero on
+/// all six, and sailed through as a good fetch while 74% of the page sat
+/// unread in hydration JSON — the answer to "Oslo's population" was in there
+/// and got discarded with the markup. An allowlist of framework names can
+/// only ever describe the CMSes someone already met, so the markers are kept
+/// as a cheap positive signal and the actual gate is the symptom: a body
+/// large enough to be carrying a document that nonetheless exposes almost no
+/// readable text has not given us its content, whoever built it.
+pub(crate) fn needs_browser_escalation(body: &[u8], status: u16, harvest: StructuredYield) -> bool {
     if status != 200 {
         return false;
     }
-    // Fast path: check for Next.js / SPA markers without full parse
-    // 16KB shell is typical; 97808 for aquatiq. Small bodies are not JS shells.
-    if body.len() < 8000 {
+    if body.len() < SHELL_MIN_BODY_BYTES {
         return false;
     }
-    // Look for JS framework shell markers
-    let markers: &[&[u8]] = &[
+    // Plenty of framework sites — aquatiq.com among them — server-render the
+    // whole page AND ship the hydration bundle, so they trip every marker
+    // while already exposing thousands of characters of real text.
+    // Escalating those costs a browser session plus a hydration settle per
+    // page and returns nothing extra (the live logs said so: "browser
+    // fallback rendered no more readable text than the static shell"), which
+    // pushed a 4-page crawl past the onboarding preview's event-poll ceiling
+    // so only the seed page ever reached the wizard.
+    let text = visible_text_len(body);
+    if text >= SHELL_MAX_TEXT_CHARS {
+        return false;
+    }
+    // The page withheld its prose, but the harvester already recovered the
+    // values from the payload it shipped. Rendering it would cost a browser
+    // round trip to arrive back at data we are holding.
+    if harvest == StructuredYield::Found {
+        return false;
+    }
+    // Cheap positive: a known hydration marker on a text-thin body is
+    // conclusive, and costs six substring scans instead of the measurements
+    // below. Never the sole gate — that was the SSB bug.
+    if has_hydration_marker(body) {
+        return true;
+    }
+    if body.len() < SHELL_SYMPTOM_MIN_BODY_BYTES {
+        return false;
+    }
+    if text.saturating_mul(SHELL_MAX_TEXT_BYTES_PER_CHAR) <= body.len() {
+        return true;
+    }
+    // Ratio alone misses a page that pairs a real hydration payload with a
+    // page's worth of chrome (nav, footer, cookie banner) — the text is not
+    // proportionally tiny, but the document still lives in the JSON.
+    embedded_json_bytes(body) >= SHELL_MIN_EMBEDDED_JSON_BYTES
+}
+
+/// Pre-harvest form of [`needs_browser_escalation`], for call sites that
+/// only have the bytes.
+pub(crate) fn is_js_shell_needing_browser(body: &[u8], status: u16) -> bool {
+    needs_browser_escalation(body, status, StructuredYield::Unknown)
+}
+
+/// Known client-rendering markers. A positive short-circuits the
+/// measurements; a negative proves nothing (SSB scored zero on all six).
+fn has_hydration_marker(body: &[u8]) -> bool {
+    const MARKERS: &[&[u8]] = &[
         b"__NEXT_DATA__",
         b"data-next-head",
         b"_next/static",
@@ -327,31 +444,39 @@ pub(crate) fn is_js_shell_needing_browser(body: &[u8], status: u16) -> bool {
         b"id=\"__next\"",
         b"id=\"root\"", // generic SPA root
     ];
-    let is_shell = markers.iter().any(|m| {
-        // Simple substring search
-        body.windows(m.len()).any(|w| w == *m)
-    });
-    if !is_shell {
-        return false;
+    MARKERS
+        .iter()
+        .any(|m| body.windows(m.len()).any(|w| w == *m))
+}
+
+/// Total bytes held inside `<script type="…json…">` blocks — the hydration
+/// payloads readability strips and the structured harvester reads. Single
+/// forward pass, no DOM, and it runs only after the marker and ratio tests
+/// have both declined, so the settle-poll path never pays for it.
+fn embedded_json_bytes(body: &[u8]) -> usize {
+    let mut total = 0usize;
+    let mut i = 0usize;
+    while let Some(start) = find_ci(body, i, b"<script") {
+        let open_end = match find(body, start, b">") {
+            Some(c) => c,
+            None => break,
+        };
+        let content_start = open_end + 1;
+        let content_end = match find_ci(body, content_start, b"</script") {
+            Some(e) => e,
+            None => break,
+        };
+        // Matching "json" anywhere in the open tag covers every spelling in
+        // the wild — `application/json`, `application/ld+json`, `text/json`,
+        // SSB's `type="application/json" data-portal-component=…` — without
+        // an attribute parser. `application/javascript` does not contain it,
+        // so executable scripts stay out of the count.
+        if find_ci(&body[start..open_end], 0, b"json").is_some() {
+            total += content_end - content_start;
+        }
+        i = content_end + 1;
     }
-    // Confirm shell by checking high script-to-content ratio:
-    // Shells have huge <script> blocks and tiny visible text.
-    // Heuristic: if body has >3 script tags and >20000 bytes, it's a shell
-    let script_count = body.windows(b"<script".len()).filter(|w| w == b"<script").count();
-    if script_count < 3 || body.len() <= 20000 {
-        return false;
-    }
-    // The premise of every check above is that the shell carries almost no
-    // readable content. Plenty of framework sites — aquatiq.com among them —
-    // server-render the whole page AND ship the hydration bundle, so they
-    // trip every marker while already exposing thousands of characters of
-    // real text. Escalating those costs a browser session plus a hydration
-    // settle per page and returns nothing extra (the live logs said so:
-    // "browser fallback rendered no more readable text than the static
-    // shell"), which pushed a 4-page crawl past the onboarding preview's
-    // event-poll ceiling so only the seed page ever reached the wizard.
-    // Only a genuinely content-less shell needs a browser.
-    visible_text_len(body) < SHELL_MAX_TEXT_CHARS
+    total
 }
 
 /// Rough count of user-visible text characters in an HTML body: everything
@@ -432,7 +557,11 @@ fn find_ci(hay: &[u8], from: usize, needle_lower: &[u8]) -> Option<usize> {
     }
     hay[from..]
         .windows(needle_lower.len())
-        .position(|w| w.iter().zip(needle_lower).all(|(a, b)| a.to_ascii_lowercase() == *b))
+        .position(|w| {
+            w.iter()
+                .zip(needle_lower)
+                .all(|(a, b)| a.to_ascii_lowercase() == *b)
+        })
         .map(|p| p + from)
 }
 
@@ -702,7 +831,9 @@ mod tests {
     /// heuristic, with almost no visible text.
     fn shell_body() -> Vec<u8> {
         let mut b = Vec::new();
-        b.extend_from_slice(b"<html><head><title>aquatiq.com</title></head><body><div id=\"__next\"></div>");
+        b.extend_from_slice(
+            b"<html><head><title>aquatiq.com</title></head><body><div id=\"__next\"></div>",
+        );
         for _ in 0..3 {
             b.extend_from_slice(b"<script>");
             b.extend_from_slice(&vec![b'x'; 8_000]);
@@ -758,6 +889,187 @@ mod tests {
         assert!(is_js_shell_needing_browser(&shell_body(), 200));
     }
 
+    /// The measured www.ssb.no/kommunefakta/oslo shape: a ~465 KB body whose
+    /// content lives in 29 `<script type="application/json">` hydration
+    /// blobs, a line of chrome around them, and not one vendor marker — SSB
+    /// runs Enonic XP, so the old allowlist scored zero and the page sailed
+    /// through as a good fetch.
+    fn ssb_shaped_body() -> Vec<u8> {
+        let mut b = Vec::new();
+        b.extend_from_slice(b"<html><head><title>Kommunefakta Oslo</title></head><body>");
+        b.extend_from_slice(b"<nav>Hopp til innhold Meny Statistikkbanken Kontakt oss</nav>");
+        b.extend_from_slice(b"<main><h1>Kommunefakta Oslo</h1></main>");
+        for _ in 0..29 {
+            b.extend_from_slice(
+                b"<script type=\"application/json\" data-portal-component=\"part\">",
+            );
+            b.extend_from_slice(
+                format!(
+                    "{{\"folketallet\":\"729 437\",\"tid\":\"2. kvartal 2026\",\"pad\":\"{}\"}}",
+                    "x".repeat(15_900)
+                )
+                .as_bytes(),
+            );
+            b.extend_from_slice(b"</script>");
+        }
+        b.extend_from_slice(b"</body></html>");
+        b
+    }
+
+    /// The incident: fetched successfully (620 966 bytes), answered "could
+    /// not find it". No vendor marker, so only the symptom test can catch it.
+    #[test]
+    fn ssb_shape_is_detected_without_any_vendor_marker() {
+        let body = ssb_shaped_body();
+        assert!(
+            !has_hydration_marker(&body),
+            "fixture must not smuggle in a vendor marker, or it proves nothing"
+        );
+        assert!(body.len() > 400_000);
+        assert!(visible_text_len(&body) < 200);
+        assert!(embedded_json_bytes(&body) > 400_000);
+        assert!(is_js_shell_needing_browser(&body, 200));
+    }
+
+    #[test]
+    fn small_bodies_are_never_shells() {
+        let mut body = b"<html><body><p>Kort side.</p>".to_vec();
+        body.extend_from_slice(&vec![b' '; 4_000]);
+        body.extend_from_slice(b"</body></html>");
+        assert!(body.len() < SHELL_MIN_BODY_BYTES);
+        assert!(!is_js_shell_needing_browser(&body, 200));
+    }
+
+    #[test]
+    fn a_large_page_full_of_visible_text_is_not_a_shell() {
+        let body = "<html><body><article><p>Folketalet i Oslo var 729 437 personar ved utgangen av andre kvartal 2026. </p></article></body></html>"
+            .repeat(900)
+            .into_bytes();
+        assert!(body.len() > SHELL_SYMPTOM_MIN_BODY_BYTES);
+        assert!(visible_text_len(&body) >= SHELL_MAX_TEXT_CHARS);
+        assert!(!is_js_shell_needing_browser(&body, 200));
+    }
+
+    /// Guard against escalating every heavy page: bytes spent on a base64
+    /// image or inline CSS are not a withheld document, and a browser would
+    /// return exactly the same text at the cost of a session.
+    #[test]
+    fn a_large_page_whose_bytes_are_markup_not_payload_is_not_escalated() {
+        let mut body = Vec::new();
+        body.extend_from_slice(b"<html><body>");
+        body.extend_from_slice(b"<img alt=\"\" src=\"data:image/png;base64,");
+        body.extend_from_slice(&vec![b'A'; 24_000]);
+        body.extend_from_slice(b"\">");
+        body.extend_from_slice(
+            "<p>Kontaktinformasjon og opningstider </p>"
+                .repeat(30)
+                .as_bytes(),
+        );
+        body.extend_from_slice(b"</body></html>");
+        assert!(body.len() > SHELL_SYMPTOM_MIN_BODY_BYTES);
+        assert!(visible_text_len(&body) < SHELL_MAX_TEXT_CHARS);
+        assert_eq!(embedded_json_bytes(&body), 0);
+        assert!(!is_js_shell_needing_browser(&body, 200));
+    }
+
+    /// A hydration payload paired with a page's worth of chrome (nav,
+    /// footer, cookie banner) is not proportionally text-thin, so the ratio
+    /// declines it; the payload itself is what gives it away.
+    #[test]
+    fn a_hydration_payload_behind_ordinary_chrome_is_caught_by_the_json_branch() {
+        let mut body = Vec::new();
+        body.extend_from_slice(b"<html><body>");
+        body.extend_from_slice(
+            "<p>Kontaktinformasjon og opningstider </p>"
+                .repeat(26)
+                .as_bytes(),
+        );
+        body.extend_from_slice(b"<script type=\"application/ld+json\">");
+        body.extend_from_slice(&vec![b'z'; 24_000]);
+        body.extend_from_slice(b"</script></body></html>");
+        let text = visible_text_len(&body);
+        assert!(text < SHELL_MAX_TEXT_CHARS);
+        assert!(
+            text.saturating_mul(SHELL_MAX_TEXT_BYTES_PER_CHAR) > body.len(),
+            "this fixture must fail the ratio test so it exercises the JSON branch"
+        );
+        assert!(is_js_shell_needing_browser(&body, 200));
+    }
+
+    /// The ordering the sibling harvester (quarry-transform `structured.rs`)
+    /// makes possible: the JSON is free and typed, the browser is not.
+    #[test]
+    fn a_successful_structured_harvest_suppresses_the_browser_round_trip() {
+        let body = ssb_shaped_body();
+        assert!(needs_browser_escalation(&body, 200, StructuredYield::Empty));
+        assert!(!needs_browser_escalation(
+            &body,
+            200,
+            StructuredYield::Found
+        ));
+    }
+
+    #[test]
+    fn non_200_responses_are_never_shells() {
+        assert!(!is_js_shell_needing_browser(&ssb_shaped_body(), 404));
+    }
+
+    /// BROWSER_PROVIDER=static: every plan still names `Browser`, the
+    /// registry holds none. A true positive must come back as the best
+    /// static response we have — never an error, never an empty body.
+    #[tokio::test]
+    async fn a_detected_shell_with_no_browser_registered_returns_the_static_response() {
+        let static_shell = Arc::new(BodyDriver {
+            kind: DriverKind::Static,
+            body: ssb_shaped_body(),
+            calls: AtomicU32::new(0),
+        });
+        let tls = Arc::new(OkDriver::new(DriverKind::Tls));
+        let mut drivers: HashMap<DriverKind, Arc<dyn Driver>> = HashMap::new();
+        drivers.insert(DriverKind::Static, static_shell.clone());
+        drivers.insert(DriverKind::Tls, tls.clone());
+        let fb = FallbackDriver::new(
+            DriverKind::Static,
+            vec![DriverKind::Tls, DriverKind::Browser],
+            drivers,
+        );
+        let resp = fb
+            .fetch(&"https://www.ssb.no/kommunefakta/oslo".parse().unwrap())
+            .await
+            .expect("no browser to escalate to must degrade to the static body, not an error");
+        assert_eq!(resp.status, 200);
+        assert_eq!(resp.served_by, DriverKind::Static);
+        assert!(resp.body.len() > 400_000);
+        assert_eq!(
+            tls.calls.load(Ordering::Relaxed),
+            0,
+            "with nothing to escalate to there is no reason to rotate off a 200"
+        );
+    }
+
+    /// Same true positive, but a browser IS registered and fails: the static
+    /// body still wins over an error.
+    #[tokio::test]
+    async fn a_detected_shell_with_a_failing_browser_returns_the_static_response() {
+        let static_shell = Arc::new(BodyDriver {
+            kind: DriverKind::Static,
+            body: ssb_shaped_body(),
+            calls: AtomicU32::new(0),
+        });
+        let browser = Arc::new(FailDriver::new(DriverKind::Browser));
+        let mut drivers: HashMap<DriverKind, Arc<dyn Driver>> = HashMap::new();
+        drivers.insert(DriverKind::Static, static_shell.clone());
+        drivers.insert(DriverKind::Browser, browser.clone());
+        let fb = FallbackDriver::new(DriverKind::Static, vec![DriverKind::Browser], drivers);
+        let resp = fb
+            .fetch(&"https://www.ssb.no/kommunefakta/oslo".parse().unwrap())
+            .await
+            .expect("browser failure after detection must return the static body");
+        assert_eq!(resp.served_by, DriverKind::Static);
+        assert!(resp.body.len() > 400_000);
+        assert_eq!(browser.calls.load(Ordering::Relaxed), 1);
+    }
+
     #[test]
     fn visible_text_len_ignores_scripts_styles_and_tags() {
         let html = b"<html><head><style>.a{color:red}</style><script>var x = 'lots of code';</script></head><body><h1>Hei  verden</h1><!-- c --><p>tekst <b>her</b></p><noscript>nei</noscript></body></html>";
@@ -803,7 +1115,10 @@ mod tests {
         drivers.insert(DriverKind::Static, static_shell);
         drivers.insert(DriverKind::Browser, browser);
         let fb = FallbackDriver::new(DriverKind::Static, vec![DriverKind::Browser], drivers);
-        let resp = fb.fetch(&"https://example.com".parse().unwrap()).await.unwrap();
+        let resp = fb
+            .fetch(&"https://example.com".parse().unwrap())
+            .await
+            .unwrap();
         assert_eq!(resp.served_by, DriverKind::Static);
         assert!(resp.body.len() > 20_000);
     }
@@ -824,7 +1139,10 @@ mod tests {
         drivers.insert(DriverKind::Static, static_shell);
         drivers.insert(DriverKind::Browser, browser);
         let fb = FallbackDriver::new(DriverKind::Static, vec![DriverKind::Browser], drivers);
-        let resp = fb.fetch(&"https://example.com".parse().unwrap()).await.unwrap();
+        let resp = fb
+            .fetch(&"https://example.com".parse().unwrap())
+            .await
+            .unwrap();
         assert_eq!(resp.served_by, DriverKind::Browser);
     }
 
@@ -883,7 +1201,10 @@ mod tests {
             vec![DriverKind::Tls, DriverKind::Browser],
             drivers,
         );
-        let resp = fb.fetch(&"https://example.com".parse().unwrap()).await.unwrap();
+        let resp = fb
+            .fetch(&"https://example.com".parse().unwrap())
+            .await
+            .unwrap();
         assert_eq!(tls_redirect.calls.load(Ordering::Relaxed), 1);
         assert_eq!(browser.calls.load(Ordering::Relaxed), 1);
         assert_eq!(resp.served_by, DriverKind::Browser);
@@ -915,7 +1236,10 @@ mod tests {
             vec![DriverKind::Tls, DriverKind::Browser],
             drivers,
         );
-        let resp = fb.fetch(&"https://example.com".parse().unwrap()).await.unwrap();
+        let resp = fb
+            .fetch(&"https://example.com".parse().unwrap())
+            .await
+            .unwrap();
         assert_eq!(resp.served_by, DriverKind::Static);
         assert_eq!(resp.status, 200);
         assert!(resp.body.len() > 20_000);
@@ -934,7 +1258,10 @@ mod tests {
         let mut drivers: HashMap<DriverKind, Arc<dyn Driver>> = HashMap::new();
         drivers.insert(DriverKind::Tls, tls_redirect);
         let fb = FallbackDriver::new(DriverKind::Tls, vec![], drivers);
-        let resp = fb.fetch(&"https://example.com".parse().unwrap()).await.unwrap();
+        let resp = fb
+            .fetch(&"https://example.com".parse().unwrap())
+            .await
+            .unwrap();
         assert_eq!(resp.status, 301);
     }
 

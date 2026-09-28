@@ -231,7 +231,10 @@ func TestGraph_InitialDeltaWalksToDeltaLink(t *testing.T) {
 	if msg.ProviderThreadID != "conv-1" || msg.MessageIDHeader != "<g1@outlook>" {
 		t.Errorf("threading fields: %+v", msg)
 	}
-	if msg.BodyHTML != "<p>hei</p>" || msg.BodyText != "preview text" {
+	// body_text is the RENDERED body, not Graph's bodyPreview: the preview
+	// field is capped at 255 characters by Microsoft, so asserting it here
+	// pinned a silent truncation of every HTML mail in the inbox.
+	if msg.BodyHTML != "<p>hei</p>" || msg.BodyText != "hei" {
 		t.Errorf("bodies: text=%q html=%q", msg.BodyText, msg.BodyHTML)
 	}
 	if msg.From.Email != "ola@x.no" || len(msg.To) != 1 || msg.To[0].Email != "support@verevon.no" {

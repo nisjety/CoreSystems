@@ -24,6 +24,7 @@ use quarry_runtime::ai_formats::AiFormatRunner;
 use quarry_runtime::driver::FetchHints;
 use quarry_runtime::driver_plan::{plan_from_signals, DriverSignals};
 use quarry_runtime::mp_client::ModelPlaneClient;
+use quarry_transform::structured::StructuredData;
 
 use crate::api_error::ApiError;
 use crate::state::AppState;
@@ -66,6 +67,13 @@ pub struct ExtractItem {
     pub data: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub markdown: Option<String>,
+    /// Machine-readable facts harvested from the page's markup, when the page
+    /// carried any. Additive and absent otherwise, so a source with no
+    /// structured data serializes exactly as it did before this channel
+    /// existed. Independent of `status`: a schema-guided extraction and a
+    /// markdown one read the same page, and the harvest belongs to the page.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub structured: Option<StructuredData>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
@@ -112,13 +120,29 @@ pub(crate) fn expand_targets(urls: &[String], max: usize) -> Vec<String> {
     out
 }
 
-async fn fetch_markdown(
+/// Largest index at or below `at` that `s` can be split on.
+fn nearest_char_boundary(s: &str, at: usize) -> usize {
+    (0..=at.min(s.len()))
+        .rev()
+        .find(|i| s.is_char_boundary(*i))
+        .unwrap_or(0)
+}
+
+/// One fetched page, read by both extraction channels.
+struct ExtractedPage {
+    markdown: String,
+    /// `None` when the harvest found nothing — the overwhelming majority of
+    /// pages — so the field never reaches the wire for them.
+    structured: Option<StructuredData>,
+}
+
+async fn fetch_page(
     state: &AppState,
     url: &Url,
     org_id: &str,
     privacy: PrivacyPolicy,
     signals: DriverSignals,
-) -> Result<String, QuarryError> {
+) -> Result<ExtractedPage, QuarryError> {
     let plan = plan_from_signals(signals);
     let driver = state.drivers.build_driver(&plan);
     let hints = FetchHints {
@@ -129,11 +153,26 @@ async fn fetch_markdown(
     match driver.fetch_conditional(url, &hints).await {
         Ok(resp) if (200..300).contains(&resp.status) => {
             let html = String::from_utf8_lossy(&resp.body);
+            // Second channel over the same document. Readability strips
+            // `script`, so a page that publishes its numbers as hydration
+            // state returns a nav shell and nothing else — this is where
+            // those numbers are recovered. The harvester is infallible by
+            // contract (a malformed payload is skipped, the rest of the page
+            // proceeds), so it cannot fail a fetch that otherwise succeeded.
+            let structured = quarry_transform::extract_structured(&html);
             let mut md = quarry_transform::readability::html_to_readable_markdown(&html);
             if md.len() > MARKDOWN_CAP {
-                md.truncate(MARKDOWN_CAP);
+                // `String::truncate` panics when the byte cap lands inside a
+                // multi-byte char — one accented word straddling 20 000 bytes
+                // is enough, and Norwegian sources supply them — so back off
+                // to the nearest boundary. A panic here would take the whole
+                // batch down, not just this source.
+                md.truncate(nearest_char_boundary(&md, MARKDOWN_CAP));
             }
-            Ok(md)
+            Ok(ExtractedPage {
+                markdown: md,
+                structured: Some(structured).filter(|s| !s.is_empty()),
+            })
         }
         Ok(resp) => Err(QuarryError::new(
             ErrorCode::UpstreamBlocked,
@@ -202,7 +241,7 @@ pub async fn extract(
             Ok(u) => u,
             Err(_) => continue,
         };
-        let item = match fetch_markdown(
+        let item = match fetch_page(
             &state,
             &url,
             &claims.org_id,
@@ -229,12 +268,19 @@ pub async fn extract(
                     status: "error".into(),
                     data: None,
                     markdown: None,
+                    structured: None,
                     error: Some(e.message),
                 }
             }
-            Ok(md) => match (&req.schema, &runner) {
+            // Destructured up front so the two channels move independently:
+            // the schema branch hands the prose to the model and keeps the
+            // harvest for the response.
+            Ok(ExtractedPage {
+                markdown,
+                structured,
+            }) => match (&req.schema, &runner) {
                 (Some(schema), Some(r)) => match r
-                    .json_for_org(&claims.org_id, &md, schema.clone(), ZdrMode::Off)
+                    .json_for_org(&claims.org_id, &markdown, schema.clone(), ZdrMode::Off)
                     .await
                 {
                     Ok(jr) => ExtractItem {
@@ -242,6 +288,7 @@ pub async fn extract(
                         status: "ok".into(),
                         data: Some(jr.data),
                         markdown: None,
+                        structured,
                         error: None,
                     },
                     Err(e) => {
@@ -249,10 +296,8 @@ pub async fn extract(
                         // envelope shape so the caller can act on a
                         // single consistent signal across the route.
                         if e.code == ErrorCode::RateLimited {
-                            rate_limited.get_or_insert(QuarryError::new(
-                                ErrorCode::RateLimited,
-                                e.message,
-                            ));
+                            rate_limited
+                                .get_or_insert(QuarryError::new(ErrorCode::RateLimited, e.message));
                             break;
                         }
                         ExtractItem {
@@ -260,6 +305,11 @@ pub async fn extract(
                             status: "error".into(),
                             data: None,
                             markdown: None,
+                            // The page was read; the model call is what
+                            // failed. The harvest is still the page's, and
+                            // dropping it would throw away the one channel
+                            // that needed no model at all.
+                            structured,
                             error: Some(e.message),
                         }
                     }
@@ -268,7 +318,8 @@ pub async fn extract(
                     url: raw.clone(),
                     status: "fetched".into(),
                     data: None,
-                    markdown: Some(md),
+                    markdown: Some(markdown),
+                    structured,
                     error: None,
                 },
             },
@@ -279,7 +330,10 @@ pub async fn extract(
     if let Some(e) = rate_limited {
         return (
             StatusCode::TOO_MANY_REQUESTS,
-            Json(ApiError::rate_limited(e.message, RATE_LIMITED_RETRY_AFTER_S)),
+            Json(ApiError::rate_limited(
+                e.message,
+                RATE_LIMITED_RETRY_AFTER_S,
+            )),
         )
             .into_response();
     }
@@ -317,6 +371,117 @@ pub async fn extract(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use async_trait::async_trait;
+    use quarry_core::output::DriverKind;
+    use quarry_core::QuarryResult;
+    use quarry_runtime::driver::Driver;
+    use quarry_runtime::fetch::FetchResponse;
+
+    /// Driver answering 200 with a caller-chosen body. `test_support`'s stub
+    /// serves one fixed page, and these tests are precisely about what
+    /// different page shapes produce.
+    struct HtmlDriver(String);
+
+    #[async_trait]
+    impl Driver for HtmlDriver {
+        fn kind(&self) -> DriverKind {
+            DriverKind::Static
+        }
+        async fn fetch(&self, url: &Url) -> QuarryResult<FetchResponse> {
+            Ok(FetchResponse {
+                status: 200,
+                final_url: url.clone(),
+                headers: vec![],
+                body: self.0.clone().into_bytes(),
+                duration_ms: 1,
+                served_by: DriverKind::Static,
+            })
+        }
+    }
+
+    async fn extract_one(body: &str) -> serde_json::Value {
+        let state = crate::test_support::test_state(Arc::new(HtmlDriver(body.to_string())));
+        let response = extract(
+            State(state),
+            Extension(crate::test_support::claims_for_org("org_alpha")),
+            Json(ExtractRequest {
+                urls: vec!["https://ssb.example/kommunefakta".into()],
+                schema: None,
+                prompt: None,
+                max_urls: None,
+                zdr: None,
+                privacy: None,
+                signals: None,
+            }),
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+        crate::test_support::response_json(response).await["results"][0].clone()
+    }
+
+    #[tokio::test]
+    async fn page_without_structured_data_serializes_as_before() {
+        let item =
+            extract_one("<html><body><article><p>Just prose here.</p></article></body></html>")
+                .await;
+        assert_eq!(
+            crate::test_support::json_keys(&item),
+            vec!["markdown", "status", "url"],
+            "a source with no harvest must carry no new key"
+        );
+    }
+
+    #[tokio::test]
+    async fn hydration_figures_reach_the_caller() {
+        // The incident shape: the figure exists only inside an
+        // `application/json` payload, which readability strips.
+        let item = extract_one(
+            "<html><body><article><p>Kommunefakta.</p></article>\
+             <script type=\"application/json\">\
+             {\"keyFigureTitle\":\"Folketallet\",\"number\":\"729 437\",\
+             \"numberDescription\":\"personer\",\"time\":\"2. kvartal 2026\"}\
+             </script></body></html>",
+        )
+        .await;
+        let figure = &item["structured"]["figures"][0];
+        assert_eq!(figure["label"], "Folketallet");
+        assert_eq!(figure["value"], "729 437");
+        assert_eq!(figure["unit"], "personer");
+        assert_eq!(figure["period"], "2. kvartal 2026");
+        // The prose channel is untouched by the addition.
+        assert!(item["markdown"]
+            .as_str()
+            .is_some_and(|m| m.contains("Kommunefakta")));
+    }
+
+    #[tokio::test]
+    async fn malformed_payload_does_not_fail_the_extraction() {
+        let item = extract_one(
+            "<html><body><article><p>Readable prose survives.</p></article>\
+             <script type=\"application/json\">{\"broken\": </script>\
+             </body></html>",
+        )
+        .await;
+        assert_eq!(item["status"], "fetched");
+        assert!(item["markdown"]
+            .as_str()
+            .is_some_and(|m| m.contains("Readable prose survives")));
+        assert!(item.get("error").is_none());
+    }
+
+    #[test]
+    fn markdown_cap_backs_off_to_a_char_boundary() {
+        // `String::truncate` panics mid-codepoint, so the byte cap can never
+        // be applied raw to text with multi-byte chars.
+        let s = "æøå".repeat(10); // two bytes per char
+        assert_eq!(nearest_char_boundary(&s, 5), 4, "an index inside a char");
+        assert_eq!(nearest_char_boundary(&s, 6), 6, "an index already on one");
+        assert_eq!(nearest_char_boundary(&s, s.len() + 99), s.len());
+        let mut t = s.clone();
+        t.truncate(nearest_char_boundary(&s, 5));
+        assert_eq!(t.chars().count(), 2);
+    }
 
     #[test]
     fn expand_dedups_and_caps() {
@@ -363,10 +528,7 @@ mod tests {
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         let body = crate::test_support::response_json(response).await;
         // Structured envelope: exactly {error, code} — no rate-limit fields.
-        assert_eq!(
-            crate::test_support::json_keys(&body),
-            vec!["code", "error"]
-        );
+        assert_eq!(crate::test_support::json_keys(&body), vec!["code", "error"]);
         assert_eq!(body["code"], "BAD_REQUEST");
     }
 

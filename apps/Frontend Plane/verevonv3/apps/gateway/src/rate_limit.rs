@@ -150,13 +150,27 @@ impl RateLimiter {
         }
     }
 
+    /// Build a limiter sharing the same distributed backend as [`from_cache`]
+    /// but with its own fixed rate rather than `GATEWAY_RATE_LIMIT_RPM` — for a
+    /// narrower caller (e.g. mail-task's per-user ingest ceiling) that needs a
+    /// much lower bound than the fleet-wide inbound limit. `rpm` must be > 0;
+    /// non-positive values fall back to [`DEFAULT_RPM`] like the env parser
+    /// does, rather than silently disabling the limit.
+    pub(crate) fn from_cache_with_rpm(cache: &crate::cache::ResultCache, rpm: f64) -> Self {
+        Self {
+            conn: cache.connection(),
+            buckets: Arc::new(DashMap::new()),
+            rpm: if rpm.is_finite() && rpm > 0.0 { rpm } else { DEFAULT_RPM },
+        }
+    }
+
     /// Try to consume one token for `key`. Returns `Ok(())` if allowed, or
     /// `Err(retry_after_secs)` (>= 1) if the bucket is exhausted.
     ///
     /// Prefers the distributed (Dragonfly) bucket so the limit holds fleet-wide.
     /// Any connection error — or no connection at all — transparently falls back
     /// to the in-process bucket (fail-open: a Redis blip never rejects traffic).
-    async fn try_acquire(&self, key: &str) -> Result<(), u64> {
+    pub(crate) async fn try_acquire(&self, key: &str) -> Result<(), u64> {
         if let Some(conn) = self.conn.clone() {
             match tokio::time::timeout(
                 DISTRIBUTED_RATE_LIMIT_TIMEOUT,

@@ -19,10 +19,20 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	SandboxManager_AcquireLease_FullMethodName    = "/model_plane.v1.SandboxManager/AcquireLease"
-	SandboxManager_ReleaseLease_FullMethodName    = "/model_plane.v1.SandboxManager/ReleaseLease"
-	SandboxManager_SnapshotSandbox_FullMethodName = "/model_plane.v1.SandboxManager/SnapshotSandbox"
-	SandboxManager_Health_FullMethodName          = "/model_plane.v1.SandboxManager/Health"
+	SandboxManager_AcquireLease_FullMethodName         = "/model_plane.v1.SandboxManager/AcquireLease"
+	SandboxManager_ReleaseLease_FullMethodName         = "/model_plane.v1.SandboxManager/ReleaseLease"
+	SandboxManager_SnapshotSandbox_FullMethodName      = "/model_plane.v1.SandboxManager/SnapshotSandbox"
+	SandboxManager_ActivateLease_FullMethodName        = "/model_plane.v1.SandboxManager/ActivateLease"
+	SandboxManager_GetWorkspaceManifest_FullMethodName = "/model_plane.v1.SandboxManager/GetWorkspaceManifest"
+	SandboxManager_PromoteWorkspace_FullMethodName     = "/model_plane.v1.SandboxManager/PromoteWorkspace"
+	SandboxManager_RegisterProcess_FullMethodName      = "/model_plane.v1.SandboxManager/RegisterProcess"
+	SandboxManager_UpdateProcessState_FullMethodName   = "/model_plane.v1.SandboxManager/UpdateProcessState"
+	SandboxManager_AppendProcessOutput_FullMethodName  = "/model_plane.v1.SandboxManager/AppendProcessOutput"
+	SandboxManager_ReconcileProcesses_FullMethodName   = "/model_plane.v1.SandboxManager/ReconcileProcesses"
+	SandboxManager_GetProcess_FullMethodName           = "/model_plane.v1.SandboxManager/GetProcess"
+	SandboxManager_ListProcesses_FullMethodName        = "/model_plane.v1.SandboxManager/ListProcesses"
+	SandboxManager_ReadProcessOutput_FullMethodName    = "/model_plane.v1.SandboxManager/ReadProcessOutput"
+	SandboxManager_Health_FullMethodName               = "/model_plane.v1.SandboxManager/Health"
 )
 
 // SandboxManagerClient is the client API for SandboxManager service.
@@ -38,6 +48,50 @@ type SandboxManagerClient interface {
 	ReleaseLease(ctx context.Context, in *ReleaseLeaseRequest, opts ...grpc.CallOption) (*ReleaseLeaseResponse, error)
 	// Snapshot the current sandbox state for resumability.
 	SnapshotSandbox(ctx context.Context, in *SnapshotRequest, opts ...grpc.CallOption) (*SnapshotResponse, error)
+	// Move a lease from SCRATCH to ACTIVE once it needs more than the
+	// credential-free scratch allowlist (e.g. real backend network/egress
+	// permission per the capability decision's granted permissions). See
+	// docs/S3_2_SANDBOX_LEASE_CLOSEOUT_DESIGN_2026-09-10.md §3.
+	ActivateLease(ctx context.Context, in *ActivateLeaseRequest, opts ...grpc.CallOption) (*ActivateLeaseResponse, error)
+	// Resolve the layered workspace manifest a Space-scoped lease sees: the
+	// Space's own durable files, shadowed path-for-path by this lease's own
+	// not-yet-merged overlay. Empty for a non-Space lease. See
+	// apps/Frontend Plane/verevonv3/docs/S3_3_DURABLE_WORKSPACE_DESIGN_2026-09-11.md
+	// §8 item 3.5.C.
+	GetWorkspaceManifest(ctx context.Context, in *GetWorkspaceManifestRequest, opts ...grpc.CallOption) (*GetWorkspaceManifestResponse, error)
+	// Merges a Space-scoped lease's own workspace_files overlay into the
+	// Space's durable rows, one path at a time via compare-and-swap on
+	// base_hash — never one all-or-nothing transaction across the whole
+	// overlay, so a conflict on one path never blocks any other path in the
+	// same run's overlay from merging. Deliberately its own explicit step,
+	// never an automatic side effect of SnapshotSandbox or lease release —
+	// see apps/Frontend Plane/verevonv3/docs/S3_3_DURABLE_WORKSPACE_DESIGN_2026-09-11.md
+	// §4 and §8 item 4. Safe to call more than once for the same overlay: an
+	// already-merged path is a no-op, not a false conflict.
+	PromoteWorkspace(ctx context.Context, in *PromoteWorkspaceRequest, opts ...grpc.CallOption) (*PromoteWorkspaceResponse, error)
+	// Reserve a process row before the host spawns, so lease eligibility, the
+	// TTL clamp and the live-count limits are all decided before anything runs.
+	RegisterProcess(ctx context.Context, in *RegisterProcessRequest, opts ...grpc.CallOption) (*RegisterProcessResponse, error)
+	// Report a host-driven lifecycle transition: spawned, signal requested, or
+	// a terminal outcome.
+	UpdateProcessState(ctx context.Context, in *UpdateProcessStateRequest, opts ...grpc.CallOption) (*UpdateProcessStateResponse, error)
+	// Append output chunks and refresh the heartbeat. A batch with no chunks is
+	// a pure heartbeat, which is what keeps silence distinguishable from a dead
+	// host.
+	AppendProcessOutput(ctx context.Context, in *AppendProcessOutputRequest, opts ...grpc.CallOption) (*AppendProcessOutputResponse, error)
+	// Mark every live process this backend owns under a DIFFERENT host epoch as
+	// LOST. A restarted host calls it once before serving: its predecessor's
+	// children died with it (bwrap --die-with-parent), so the registry must say
+	// so rather than leave rows claiming to be RUNNING.
+	ReconcileProcesses(ctx context.Context, in *ReconcileProcessesRequest, opts ...grpc.CallOption) (*ReconcileProcessesResponse, error)
+	// Read one process's metadata. Descriptive, not an operational grant: a
+	// terminal process's record stays readable.
+	GetProcess(ctx context.Context, in *GetProcessRequest, opts ...grpc.CallOption) (*GetProcessResponse, error)
+	// Page a Space's processes, newest first.
+	ListProcesses(ctx context.Context, in *ListProcessesRequest, opts ...grpc.CallOption) (*ListProcessesResponse, error)
+	// Read output after a cursor. A terminal process with nothing left after the
+	// cursor returns an empty page carrying its outcome — never a not-found.
+	ReadProcessOutput(ctx context.Context, in *ReadProcessOutputRequest, opts ...grpc.CallOption) (*ReadProcessOutputResponse, error)
 	// Health check.
 	Health(ctx context.Context, in *SandboxHealthRequest, opts ...grpc.CallOption) (*SandboxHealthResponse, error)
 }
@@ -80,6 +134,106 @@ func (c *sandboxManagerClient) SnapshotSandbox(ctx context.Context, in *Snapshot
 	return out, nil
 }
 
+func (c *sandboxManagerClient) ActivateLease(ctx context.Context, in *ActivateLeaseRequest, opts ...grpc.CallOption) (*ActivateLeaseResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ActivateLeaseResponse)
+	err := c.cc.Invoke(ctx, SandboxManager_ActivateLease_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *sandboxManagerClient) GetWorkspaceManifest(ctx context.Context, in *GetWorkspaceManifestRequest, opts ...grpc.CallOption) (*GetWorkspaceManifestResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetWorkspaceManifestResponse)
+	err := c.cc.Invoke(ctx, SandboxManager_GetWorkspaceManifest_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *sandboxManagerClient) PromoteWorkspace(ctx context.Context, in *PromoteWorkspaceRequest, opts ...grpc.CallOption) (*PromoteWorkspaceResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(PromoteWorkspaceResponse)
+	err := c.cc.Invoke(ctx, SandboxManager_PromoteWorkspace_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *sandboxManagerClient) RegisterProcess(ctx context.Context, in *RegisterProcessRequest, opts ...grpc.CallOption) (*RegisterProcessResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(RegisterProcessResponse)
+	err := c.cc.Invoke(ctx, SandboxManager_RegisterProcess_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *sandboxManagerClient) UpdateProcessState(ctx context.Context, in *UpdateProcessStateRequest, opts ...grpc.CallOption) (*UpdateProcessStateResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(UpdateProcessStateResponse)
+	err := c.cc.Invoke(ctx, SandboxManager_UpdateProcessState_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *sandboxManagerClient) AppendProcessOutput(ctx context.Context, in *AppendProcessOutputRequest, opts ...grpc.CallOption) (*AppendProcessOutputResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(AppendProcessOutputResponse)
+	err := c.cc.Invoke(ctx, SandboxManager_AppendProcessOutput_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *sandboxManagerClient) ReconcileProcesses(ctx context.Context, in *ReconcileProcessesRequest, opts ...grpc.CallOption) (*ReconcileProcessesResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ReconcileProcessesResponse)
+	err := c.cc.Invoke(ctx, SandboxManager_ReconcileProcesses_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *sandboxManagerClient) GetProcess(ctx context.Context, in *GetProcessRequest, opts ...grpc.CallOption) (*GetProcessResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetProcessResponse)
+	err := c.cc.Invoke(ctx, SandboxManager_GetProcess_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *sandboxManagerClient) ListProcesses(ctx context.Context, in *ListProcessesRequest, opts ...grpc.CallOption) (*ListProcessesResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListProcessesResponse)
+	err := c.cc.Invoke(ctx, SandboxManager_ListProcesses_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *sandboxManagerClient) ReadProcessOutput(ctx context.Context, in *ReadProcessOutputRequest, opts ...grpc.CallOption) (*ReadProcessOutputResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ReadProcessOutputResponse)
+	err := c.cc.Invoke(ctx, SandboxManager_ReadProcessOutput_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *sandboxManagerClient) Health(ctx context.Context, in *SandboxHealthRequest, opts ...grpc.CallOption) (*SandboxHealthResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(SandboxHealthResponse)
@@ -103,6 +257,50 @@ type SandboxManagerServer interface {
 	ReleaseLease(context.Context, *ReleaseLeaseRequest) (*ReleaseLeaseResponse, error)
 	// Snapshot the current sandbox state for resumability.
 	SnapshotSandbox(context.Context, *SnapshotRequest) (*SnapshotResponse, error)
+	// Move a lease from SCRATCH to ACTIVE once it needs more than the
+	// credential-free scratch allowlist (e.g. real backend network/egress
+	// permission per the capability decision's granted permissions). See
+	// docs/S3_2_SANDBOX_LEASE_CLOSEOUT_DESIGN_2026-09-10.md §3.
+	ActivateLease(context.Context, *ActivateLeaseRequest) (*ActivateLeaseResponse, error)
+	// Resolve the layered workspace manifest a Space-scoped lease sees: the
+	// Space's own durable files, shadowed path-for-path by this lease's own
+	// not-yet-merged overlay. Empty for a non-Space lease. See
+	// apps/Frontend Plane/verevonv3/docs/S3_3_DURABLE_WORKSPACE_DESIGN_2026-09-11.md
+	// §8 item 3.5.C.
+	GetWorkspaceManifest(context.Context, *GetWorkspaceManifestRequest) (*GetWorkspaceManifestResponse, error)
+	// Merges a Space-scoped lease's own workspace_files overlay into the
+	// Space's durable rows, one path at a time via compare-and-swap on
+	// base_hash — never one all-or-nothing transaction across the whole
+	// overlay, so a conflict on one path never blocks any other path in the
+	// same run's overlay from merging. Deliberately its own explicit step,
+	// never an automatic side effect of SnapshotSandbox or lease release —
+	// see apps/Frontend Plane/verevonv3/docs/S3_3_DURABLE_WORKSPACE_DESIGN_2026-09-11.md
+	// §4 and §8 item 4. Safe to call more than once for the same overlay: an
+	// already-merged path is a no-op, not a false conflict.
+	PromoteWorkspace(context.Context, *PromoteWorkspaceRequest) (*PromoteWorkspaceResponse, error)
+	// Reserve a process row before the host spawns, so lease eligibility, the
+	// TTL clamp and the live-count limits are all decided before anything runs.
+	RegisterProcess(context.Context, *RegisterProcessRequest) (*RegisterProcessResponse, error)
+	// Report a host-driven lifecycle transition: spawned, signal requested, or
+	// a terminal outcome.
+	UpdateProcessState(context.Context, *UpdateProcessStateRequest) (*UpdateProcessStateResponse, error)
+	// Append output chunks and refresh the heartbeat. A batch with no chunks is
+	// a pure heartbeat, which is what keeps silence distinguishable from a dead
+	// host.
+	AppendProcessOutput(context.Context, *AppendProcessOutputRequest) (*AppendProcessOutputResponse, error)
+	// Mark every live process this backend owns under a DIFFERENT host epoch as
+	// LOST. A restarted host calls it once before serving: its predecessor's
+	// children died with it (bwrap --die-with-parent), so the registry must say
+	// so rather than leave rows claiming to be RUNNING.
+	ReconcileProcesses(context.Context, *ReconcileProcessesRequest) (*ReconcileProcessesResponse, error)
+	// Read one process's metadata. Descriptive, not an operational grant: a
+	// terminal process's record stays readable.
+	GetProcess(context.Context, *GetProcessRequest) (*GetProcessResponse, error)
+	// Page a Space's processes, newest first.
+	ListProcesses(context.Context, *ListProcessesRequest) (*ListProcessesResponse, error)
+	// Read output after a cursor. A terminal process with nothing left after the
+	// cursor returns an empty page carrying its outcome — never a not-found.
+	ReadProcessOutput(context.Context, *ReadProcessOutputRequest) (*ReadProcessOutputResponse, error)
 	// Health check.
 	Health(context.Context, *SandboxHealthRequest) (*SandboxHealthResponse, error)
 	mustEmbedUnimplementedSandboxManagerServer()
@@ -123,6 +321,36 @@ func (UnimplementedSandboxManagerServer) ReleaseLease(context.Context, *ReleaseL
 }
 func (UnimplementedSandboxManagerServer) SnapshotSandbox(context.Context, *SnapshotRequest) (*SnapshotResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method SnapshotSandbox not implemented")
+}
+func (UnimplementedSandboxManagerServer) ActivateLease(context.Context, *ActivateLeaseRequest) (*ActivateLeaseResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ActivateLease not implemented")
+}
+func (UnimplementedSandboxManagerServer) GetWorkspaceManifest(context.Context, *GetWorkspaceManifestRequest) (*GetWorkspaceManifestResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetWorkspaceManifest not implemented")
+}
+func (UnimplementedSandboxManagerServer) PromoteWorkspace(context.Context, *PromoteWorkspaceRequest) (*PromoteWorkspaceResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method PromoteWorkspace not implemented")
+}
+func (UnimplementedSandboxManagerServer) RegisterProcess(context.Context, *RegisterProcessRequest) (*RegisterProcessResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method RegisterProcess not implemented")
+}
+func (UnimplementedSandboxManagerServer) UpdateProcessState(context.Context, *UpdateProcessStateRequest) (*UpdateProcessStateResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method UpdateProcessState not implemented")
+}
+func (UnimplementedSandboxManagerServer) AppendProcessOutput(context.Context, *AppendProcessOutputRequest) (*AppendProcessOutputResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method AppendProcessOutput not implemented")
+}
+func (UnimplementedSandboxManagerServer) ReconcileProcesses(context.Context, *ReconcileProcessesRequest) (*ReconcileProcessesResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ReconcileProcesses not implemented")
+}
+func (UnimplementedSandboxManagerServer) GetProcess(context.Context, *GetProcessRequest) (*GetProcessResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetProcess not implemented")
+}
+func (UnimplementedSandboxManagerServer) ListProcesses(context.Context, *ListProcessesRequest) (*ListProcessesResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ListProcesses not implemented")
+}
+func (UnimplementedSandboxManagerServer) ReadProcessOutput(context.Context, *ReadProcessOutputRequest) (*ReadProcessOutputResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ReadProcessOutput not implemented")
 }
 func (UnimplementedSandboxManagerServer) Health(context.Context, *SandboxHealthRequest) (*SandboxHealthResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method Health not implemented")
@@ -202,6 +430,186 @@ func _SandboxManager_SnapshotSandbox_Handler(srv interface{}, ctx context.Contex
 	return interceptor(ctx, in, info, handler)
 }
 
+func _SandboxManager_ActivateLease_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ActivateLeaseRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SandboxManagerServer).ActivateLease(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SandboxManager_ActivateLease_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SandboxManagerServer).ActivateLease(ctx, req.(*ActivateLeaseRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _SandboxManager_GetWorkspaceManifest_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetWorkspaceManifestRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SandboxManagerServer).GetWorkspaceManifest(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SandboxManager_GetWorkspaceManifest_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SandboxManagerServer).GetWorkspaceManifest(ctx, req.(*GetWorkspaceManifestRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _SandboxManager_PromoteWorkspace_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(PromoteWorkspaceRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SandboxManagerServer).PromoteWorkspace(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SandboxManager_PromoteWorkspace_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SandboxManagerServer).PromoteWorkspace(ctx, req.(*PromoteWorkspaceRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _SandboxManager_RegisterProcess_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RegisterProcessRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SandboxManagerServer).RegisterProcess(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SandboxManager_RegisterProcess_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SandboxManagerServer).RegisterProcess(ctx, req.(*RegisterProcessRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _SandboxManager_UpdateProcessState_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(UpdateProcessStateRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SandboxManagerServer).UpdateProcessState(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SandboxManager_UpdateProcessState_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SandboxManagerServer).UpdateProcessState(ctx, req.(*UpdateProcessStateRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _SandboxManager_AppendProcessOutput_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(AppendProcessOutputRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SandboxManagerServer).AppendProcessOutput(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SandboxManager_AppendProcessOutput_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SandboxManagerServer).AppendProcessOutput(ctx, req.(*AppendProcessOutputRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _SandboxManager_ReconcileProcesses_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ReconcileProcessesRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SandboxManagerServer).ReconcileProcesses(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SandboxManager_ReconcileProcesses_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SandboxManagerServer).ReconcileProcesses(ctx, req.(*ReconcileProcessesRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _SandboxManager_GetProcess_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetProcessRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SandboxManagerServer).GetProcess(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SandboxManager_GetProcess_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SandboxManagerServer).GetProcess(ctx, req.(*GetProcessRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _SandboxManager_ListProcesses_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListProcessesRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SandboxManagerServer).ListProcesses(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SandboxManager_ListProcesses_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SandboxManagerServer).ListProcesses(ctx, req.(*ListProcessesRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _SandboxManager_ReadProcessOutput_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ReadProcessOutputRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SandboxManagerServer).ReadProcessOutput(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SandboxManager_ReadProcessOutput_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SandboxManagerServer).ReadProcessOutput(ctx, req.(*ReadProcessOutputRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _SandboxManager_Health_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(SandboxHealthRequest)
 	if err := dec(in); err != nil {
@@ -238,6 +646,46 @@ var SandboxManager_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "SnapshotSandbox",
 			Handler:    _SandboxManager_SnapshotSandbox_Handler,
+		},
+		{
+			MethodName: "ActivateLease",
+			Handler:    _SandboxManager_ActivateLease_Handler,
+		},
+		{
+			MethodName: "GetWorkspaceManifest",
+			Handler:    _SandboxManager_GetWorkspaceManifest_Handler,
+		},
+		{
+			MethodName: "PromoteWorkspace",
+			Handler:    _SandboxManager_PromoteWorkspace_Handler,
+		},
+		{
+			MethodName: "RegisterProcess",
+			Handler:    _SandboxManager_RegisterProcess_Handler,
+		},
+		{
+			MethodName: "UpdateProcessState",
+			Handler:    _SandboxManager_UpdateProcessState_Handler,
+		},
+		{
+			MethodName: "AppendProcessOutput",
+			Handler:    _SandboxManager_AppendProcessOutput_Handler,
+		},
+		{
+			MethodName: "ReconcileProcesses",
+			Handler:    _SandboxManager_ReconcileProcesses_Handler,
+		},
+		{
+			MethodName: "GetProcess",
+			Handler:    _SandboxManager_GetProcess_Handler,
+		},
+		{
+			MethodName: "ListProcesses",
+			Handler:    _SandboxManager_ListProcesses_Handler,
+		},
+		{
+			MethodName: "ReadProcessOutput",
+			Handler:    _SandboxManager_ReadProcessOutput_Handler,
 		},
 		{
 			MethodName: "Health",

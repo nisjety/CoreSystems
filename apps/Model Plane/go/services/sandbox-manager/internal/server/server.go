@@ -2,14 +2,15 @@ package server
 
 import (
 	"context"
+	"strings"
 	"time"
 
 	mpv1 "github.com/triodelab/model-plane/gen/go/model_plane/v1"
 	"github.com/triodelab/model-plane/pkg/authctx"
 	"github.com/triodelab/model-plane/services/sandbox-manager/internal/authz"
 	"github.com/triodelab/model-plane/services/sandbox-manager/internal/lease"
-	"github.com/triodelab/model-plane/services/sandbox-manager/internal/snapshot"
 	"github.com/triodelab/model-plane/services/sandbox-manager/internal/telemetry"
+	"github.com/triodelab/model-plane/services/sandbox-manager/internal/workspace"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 	"google.golang.org/grpc"
@@ -18,18 +19,65 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
-// Server implements SandboxManagerServer backed by in-memory lease and
-// snapshot stores.
+// Server implements SandboxManagerServer over LeaseStore/SnapshotStore/
+// WorkspaceStore — the real Postgres-backed implementations in production
+// (lease.Store/snapshot.Store/workspace.Store), a fast in-memory fake in
+// this package's own tests (see server_test.go).
 type Server struct {
 	mpv1.UnimplementedSandboxManagerServer
-	leases    *lease.Store
-	snapshots *snapshot.Store
+	leases    LeaseStore
+	snapshots SnapshotStore
+	workspace WorkspaceStore
 	principal func(context.Context) (authctx.Principal, error)
+	// capabilityVerify verifies a Space capability decision + its unsigned
+	// claims sidecar, mirroring authz.SpaceCapabilityVerifier.Verify. A
+	// func field, not the concrete type, so tests can inject a fake without
+	// a real Ed25519 keypair — the same pattern as principal above. Nil
+	// means "not configured": any AcquireLease request naming a space_id is
+	// then refused, never served unverified.
+	capabilityVerify func(token, claimsJSON string, expect authz.CapabilityExpectation) (authz.VerifiedCapability, error)
+	// spaceReadVerify verifies a Control model.thread.read decision addressed
+	// to this service, admitting a HUMAN to a Space's processes (S4.2 §7). A
+	// func field for the same reason as capabilityVerify: tests inject a fake
+	// rather than an Ed25519 keypair. Nil means "not configured", and a user
+	// identity is then refused rather than served unverified.
+	spaceReadVerify func(token string, expect authz.SpaceReadExpectation) (authz.VerifiedSpaceRead, error)
+	// backendID is this instance's own SANDBOX_MANAGER_BACKEND_ID. Empty
+	// only when capabilityVerify is also nil (an unconfigured instance).
+	backendID string
+	// processes is the S4.2 background process registry. Nil means this
+	// instance has none (no durable database), in which case every process
+	// RPC is refused rather than served against state a restart discards.
+	processes ProcessStore
 }
 
-// NewServer constructs a Server with the given stores.
-func NewServer(leases *lease.Store, snaps *snapshot.Store) *Server {
-	return &Server{leases: leases, snapshots: snaps, principal: authz.Principal}
+// NewServer constructs a Server with the given stores. Space capability
+// verification starts disabled; call WithCapabilityVerifier to enable it.
+func NewServer(leases LeaseStore, snaps SnapshotStore, workspace WorkspaceStore) *Server {
+	return &Server{leases: leases, snapshots: snaps, workspace: workspace, principal: authz.Principal}
+}
+
+// WithCapabilityVerifier wires Space capability-decision verification and
+// this instance's own backend id into AcquireLease.
+func (s *Server) WithCapabilityVerifier(verify func(token, claimsJSON string, expect authz.CapabilityExpectation) (authz.VerifiedCapability, error), backendID string) *Server {
+	s.capabilityVerify = verify
+	s.backendID = backendID
+	return s
+}
+
+// WithSpaceReadVerifier wires human read authority for the process registry.
+// Without it a user identity cannot read processes at all, which is the
+// correct fail-closed state — it is not the same as reading without a ceiling.
+func (s *Server) WithSpaceReadVerifier(verify func(token string, expect authz.SpaceReadExpectation) (authz.VerifiedSpaceRead, error)) *Server {
+	s.spaceReadVerify = verify
+	return s
+}
+
+// WithProcessStore wires the S4.2 background process registry. Without it
+// every process RPC fails closed; see the processes field.
+func (s *Server) WithProcessStore(processes ProcessStore) *Server {
+	s.processes = processes
+	return s
 }
 
 // AcquireLease creates a new lease for the requested scope.
@@ -61,7 +109,44 @@ func (s *Server) AcquireLease(ctx context.Context, req *AcquireLeaseRequest) (*A
 	if ttl <= 0 {
 		return nil, status.Error(codes.InvalidArgument, "ttl must be greater than zero")
 	}
-	l, err := s.leases.Create(req.GetScopeId(), req.GetScopeType(), principal.OrganizationID, principal.ActorID, ttl)
+
+	spaceID := strings.TrimSpace(req.GetSpaceId())
+	backendID := ""
+	processesPermitted := false
+	var grant lease.SpaceGrant
+	if spaceID != "" {
+		if s.capabilityVerify == nil {
+			return nil, status.Error(codes.FailedPrecondition, "Space capability verification is not configured")
+		}
+		verified, err := s.capabilityVerify(req.GetCapabilityDecision(), req.GetCapabilityClaimsJson(), authz.CapabilityExpectation{
+			OrgID: principal.OrganizationID, SpaceRef: spaceID, SubjectID: principal.ActorID, Now: time.Now().UTC(),
+		})
+		if err != nil {
+			telemetry.LeaseDecisionsTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("outcome", "capability_denied")))
+			return nil, status.Error(codes.PermissionDenied, err.Error())
+		}
+		if verified.Claims.BackendID != s.backendID {
+			telemetry.LeaseDecisionsTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("outcome", "backend_mismatch")))
+			return nil, mapErr(lease.ErrLeaseBackendMismatch)
+		}
+		backendID = verified.Claims.BackendID
+		// Decided once, here, and persisted on the lease: a process RPC
+		// arrives later on execution-core's own service token with no
+		// decision in hand, so the lease row is the only thing it can check.
+		// Deliberately NOT a refusal when the backend claims the capability
+		// but the Space is not entitled — unlike egress, a process-capable
+		// backend is still a perfectly good one-shot substrate, so the lease
+		// is granted and only the process RPCs are refused.
+		processesPermitted = verified.AllowsBackgroundProcesses()
+		// The audience the decision was signed under. Captured here for the
+		// same reason as the line above — this is the last point at which a
+		// Control decision is in hand — and it becomes the ceiling the human
+		// read path applies to every process this lease admits (0004).
+		grant.RecipientAudienceRevision = verified.RecipientAudienceRevision
+	}
+	grant.ProcessesPermitted = processesPermitted
+
+	l, err := s.leases.Create(ctx, req.GetScopeId(), req.GetScopeType(), principal.OrganizationID, principal.ActorID, spaceID, backendID, grant, ttl)
 	if err != nil {
 		telemetry.LeaseDecisionsTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("outcome", leaseOutcome(err))))
 		return nil, mapErr(err)
@@ -71,6 +156,16 @@ func (s *Server) AcquireLease(ctx context.Context, req *AcquireLeaseRequest) (*A
 		LeaseId:   l.ID,
 		Endpoint:  l.Endpoint,
 		ExpiresAt: timestamppb.New(l.ExpiresAt),
+		BackendId: l.BackendID,
+		State:     l.State,
+		// Read back off the created lease, which is the same value every
+		// later process RPC checks: false for a non-Space lease (the local
+		// above is only ever set inside the Space branch), and otherwise
+		// whatever the verified decision allowed. Telling the host this here
+		// lets it refuse `process_start` with the real reason instead of
+		// preparing a spawn `RegisterProcess` would deny; that denial remains
+		// the authoritative one.
+		ProcessesPermitted: l.ProcessesPermitted,
 	}, nil
 }
 
@@ -84,10 +179,22 @@ func (s *Server) ReleaseLease(ctx context.Context, req *ReleaseLeaseRequest) (*R
 	if req.GetLeaseId() == "" {
 		return nil, status.Error(codes.InvalidArgument, "lease_id is required")
 	}
-	ok, err := s.leases.ReleaseScoped(req.GetLeaseId(), principal.OrganizationID, authz.OwnerFilter(principal))
+	ok, err := s.leases.ReleaseScoped(ctx, req.GetLeaseId(), principal.OrganizationID, authz.OwnerFilter(principal), req.GetBackendId())
 	if err != nil {
 		telemetry.LeaseDecisionsTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("outcome", leaseOutcome(err))))
 		return nil, mapErr(err)
+	}
+	// A released lease must leave no row claiming to still be running. This
+	// is the registry half only — the host does the actual killing on its
+	// own release path — so a failure here is logged as an outcome and never
+	// fails the release itself: the lease IS gone, and the sweeper will
+	// catch any row this missed once its host stops heartbeating.
+	if s.processes != nil {
+		if killed, killErr := s.processes.KillForLease(ctx, principal.OrganizationID, req.GetLeaseId()); killErr != nil {
+			processDecision(ctx, processOutcome(killErr))
+		} else if killed > 0 {
+			processDecision(ctx, "killed_with_lease")
+		}
 	}
 	telemetry.LeaseDecisionsTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("outcome", "released")))
 	return &ReleaseLeaseResponse{Released: ok}, nil
@@ -106,12 +213,33 @@ func (s *Server) SnapshotSandbox(ctx context.Context, req *SnapshotRequest) (*Sn
 	if req.GetLabel() == "" {
 		return nil, status.Error(codes.InvalidArgument, "label is required")
 	}
-	l, err := s.leases.GetScoped(req.GetLeaseId(), principal.OrganizationID, authz.OwnerFilter(principal))
+	l, err := s.leases.BeginSnapshot(ctx, req.GetLeaseId(), principal.OrganizationID, authz.OwnerFilter(principal), req.GetBackendId())
 	if err != nil {
 		telemetry.SnapshotDecisionsTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("outcome", snapshotLeaseOutcome(err))))
 		return nil, mapErr(err)
 	}
-	sn, err := s.snapshots.Create(l, req.GetLabel())
+	defer s.leases.EndSnapshot(ctx, l.ID)
+	// Record this run's overlay BEFORE creating the snapshot record — fail
+	// closed rather than risk a snapshot referencing content whose overlay
+	// row was never durably written. Upserting is idempotent, so if
+	// snapshots.Create itself fails next, leaving these rows in place is
+	// safe (design doc §8 item 3.5.C).
+	if l.SpaceID != "" && len(req.GetChangedFiles()) > 0 {
+		files := make([]workspace.ChangedFile, 0, len(req.GetChangedFiles()))
+		for _, f := range req.GetChangedFiles() {
+			files = append(files, workspace.ChangedFile{
+				Path:        f.GetPath(),
+				ContentHash: f.GetContentHash(),
+				SizeBytes:   f.GetSizeBytes(),
+				BaseHash:    f.GetBaseHash(),
+			})
+		}
+		if err := s.workspace.UpsertOverlay(ctx, principal.OrganizationID, l.SpaceID, l.ID, files); err != nil {
+			telemetry.SnapshotDecisionsTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("outcome", "workspace_overlay_failed")))
+			return nil, status.Errorf(codes.Internal, "record workspace overlay: %v", err)
+		}
+	}
+	sn, err := s.snapshots.Create(ctx, l, req.GetLabel())
 	if err != nil {
 		telemetry.SnapshotDecisionsTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("outcome", snapshotCreateOutcome(err))))
 		return nil, mapErr(err)
@@ -121,6 +249,91 @@ func (s *Server) SnapshotSandbox(ctx context.Context, req *SnapshotRequest) (*Sn
 		SnapshotId: sn.ID,
 		ObjectKey:  sn.ObjectKey,
 	}, nil
+}
+
+// ActivateLease promotes a Space-scoped lease from SCRATCH to ACTIVE — the
+// first time a caller needs more than the credential-free scratch
+// allowlist (e.g. real backend network/egress permission per the
+// capability decision's granted Permissions). A no-op returning the
+// lease's current state if it is already ACTIVE or SNAPSHOTTING.
+func (s *Server) ActivateLease(ctx context.Context, req *ActivateLeaseRequest) (*ActivateLeaseResponse, error) {
+	telemetry.RequestsTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("method", "ActivateLease")))
+	principal, err := s.principal(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if req.GetLeaseId() == "" {
+		return nil, status.Error(codes.InvalidArgument, "lease_id is required")
+	}
+	l, err := s.leases.Activate(ctx, req.GetLeaseId(), principal.OrganizationID, authz.OwnerFilter(principal), req.GetBackendId())
+	if err != nil {
+		telemetry.LeaseDecisionsTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("outcome", leaseOutcome(err))))
+		return nil, mapErr(err)
+	}
+	telemetry.LeaseDecisionsTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("outcome", "activated")))
+	return &ActivateLeaseResponse{State: l.State}, nil
+}
+
+// GetWorkspaceManifest resolves the layered workspace manifest a
+// Space-scoped lease sees: the Space's own durable files shadowed
+// path-for-path by this lease's own not-yet-merged overlay. Returns an
+// empty entries list for a non-Space lease — the same exemption
+// BeginSnapshot already grants that case.
+func (s *Server) GetWorkspaceManifest(ctx context.Context, req *GetWorkspaceManifestRequest) (*GetWorkspaceManifestResponse, error) {
+	telemetry.RequestsTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("method", "GetWorkspaceManifest")))
+	principal, err := s.principal(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if req.GetLeaseId() == "" {
+		return nil, status.Error(codes.InvalidArgument, "lease_id is required")
+	}
+	l, err := s.leases.GetScoped(ctx, req.GetLeaseId(), principal.OrganizationID, authz.OwnerFilter(principal), req.GetBackendId())
+	if err != nil {
+		return nil, mapErr(err)
+	}
+	if l.SpaceID == "" {
+		return &GetWorkspaceManifestResponse{}, nil
+	}
+	entries, err := s.workspace.GetManifest(ctx, principal.OrganizationID, l.SpaceID, l.ID)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "get workspace manifest: %v", err)
+	}
+	out := make([]*WorkspaceManifestEntry, 0, len(entries))
+	for _, e := range entries {
+		out = append(out, &WorkspaceManifestEntry{Path: e.Path, ContentHash: e.ContentHash})
+	}
+	return &GetWorkspaceManifestResponse{Entries: out}, nil
+}
+
+// PromoteWorkspace merges a Space-scoped lease's own workspace_files
+// overlay into the Space's durable rows — S3.3 step 4 (design doc §4, §8
+// item 4). Deliberately its own explicit step: not called from
+// SnapshotSandbox or ReleaseLease, and resolves the lease via GetAny (not
+// GetScoped) precisely so it keeps working after ReleaseLease has already
+// marked the lease DESTROYED — merging must not race losing against, or
+// depend on ordering before, the lease's own automatic release.
+func (s *Server) PromoteWorkspace(ctx context.Context, req *PromoteWorkspaceRequest) (*PromoteWorkspaceResponse, error) {
+	telemetry.RequestsTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("method", "PromoteWorkspace")))
+	principal, err := s.principal(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if req.GetLeaseId() == "" {
+		return nil, status.Error(codes.InvalidArgument, "lease_id is required")
+	}
+	l, err := s.leases.GetAny(ctx, req.GetLeaseId(), principal.OrganizationID, authz.OwnerFilter(principal), req.GetBackendId())
+	if err != nil {
+		return nil, mapErr(err)
+	}
+	if l.SpaceID == "" {
+		return nil, status.Error(codes.FailedPrecondition, "lease is not Space-scoped; nothing to promote")
+	}
+	conflicts, err := s.workspace.Promote(ctx, principal.OrganizationID, l.SpaceID, l.ID)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "promote workspace: %v", err)
+	}
+	return &PromoteWorkspaceResponse{ConflictingPaths: conflicts}, nil
 }
 
 // Health reports serving status.

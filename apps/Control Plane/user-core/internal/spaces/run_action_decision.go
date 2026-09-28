@@ -185,14 +185,13 @@ func IssueRunActionDecision(evidence PersonalThreadDecisionEvidence, authority R
 	// is current Control policy and neither reference authorizes a target owner
 	// resource.
 	expectedSourceRef := fmt.Sprintf("control:%s:thread-create:%d", evidence.Membership.SpaceRef, evidence.Membership.Revisions.Authority)
-	if authority.OrgID != evidence.Membership.OrgID || authority.SubjectID != evidence.Membership.SubjectID ||
-		authority.SpaceRef != evidence.Membership.SpaceRef || authority.RecipientAudienceRef != evidence.RecipientAudienceRef ||
-		authority.RecipientAudienceRevision != evidence.Membership.Revisions.RecipientAudience ||
-		authority.RecipientAudienceHash != evidence.RecipientAudienceHash ||
-		authority.PrivacyPolicyRef != evidence.Privacy.PolicyRef ||
-		authority.AuthorityRevision != evidence.Membership.Revisions.Authority ||
-		authority.RunContextAuthorizationRef != expectedSourceRef ||
-		evidence.ResourceAuthorizationRef != expectedSourceRef {
+	if !runClaimsMatchEvidence(
+		evidence, expectedSourceRef,
+		authority.OrgID, authority.SpaceRef, authority.SubjectID,
+		authority.RecipientAudienceRef, authority.RecipientAudienceHash, authority.PrivacyPolicyRef,
+		authority.RunContextAuthorizationRef,
+		authority.RecipientAudienceRevision, authority.AuthorityRevision,
+	) || evidence.ResourceAuthorizationRef != expectedSourceRef {
 		return RunActionDecision{}, fmt.Errorf("run action authority does not match current Control authority")
 	}
 	audience, _ := runActionTarget(request.ActionID)
@@ -243,17 +242,15 @@ func ValidateCurrentRunActionDecision(evidence PersonalThreadDecisionEvidence, d
 		return fmt.Errorf("run action decision is invalid: %w", err)
 	}
 	expectedSourceRef := fmt.Sprintf("control:%s:thread-create:%d", evidence.Membership.SpaceRef, evidence.Membership.Revisions.Authority)
-	if decision.OrgID != evidence.Membership.OrgID ||
-		decision.SpaceRef != evidence.Membership.SpaceRef ||
-		decision.SubjectID != evidence.Membership.SubjectID ||
+	if !runClaimsMatchEvidence(
+		evidence, expectedSourceRef,
+		decision.OrgID, decision.SpaceRef, decision.SubjectID,
+		decision.RecipientAudienceRef, decision.RecipientAudienceHash, decision.PrivacyPolicyRef,
+		decision.RunContextAuthorizationRef,
+		decision.RecipientAudienceRevision, decision.AuthorityRevision,
+	) ||
 		decision.ServiceAudience != ticketsCreateServiceAudience ||
 		decision.ActionID != "tickets.create" ||
-		decision.RecipientAudienceRef != evidence.RecipientAudienceRef ||
-		decision.RecipientAudienceHash != evidence.RecipientAudienceHash ||
-		decision.RecipientAudienceRevision != evidence.Membership.Revisions.RecipientAudience ||
-		decision.PrivacyPolicyRef != evidence.Privacy.PolicyRef ||
-		decision.AuthorityRevision != evidence.Membership.Revisions.Authority ||
-		decision.RunContextAuthorizationRef != expectedSourceRef ||
 		decision.Purpose != evidence.Privacy.Purpose ||
 		decision.LawfulBasis != evidence.Privacy.LawfulBasis ||
 		decision.PrivacyClass != evidence.Privacy.PrivacyClass ||
@@ -319,6 +316,25 @@ func VerifyRunActionDecision(key SigningKey, token string, now time.Time) (RunAc
 		return RunActionDecision{}, fmt.Errorf("run action decision is invalid or expired")
 	}
 	return decision, nil
+}
+
+// runClaimsMatchEvidence reports whether the immutable run/action claims a
+// caller presents still match Control's freshly resolved Space evidence.
+// Issuance and effect-time revalidation must answer this identically.
+func runClaimsMatchEvidence(
+	evidence PersonalThreadDecisionEvidence,
+	expectedSourceRef, orgID, spaceRef, subjectID, audienceRef, audienceHash, policyRef, sourceRef string,
+	audienceRevision, authorityRevision int64,
+) bool {
+	return orgID == evidence.Membership.OrgID &&
+		spaceRef == evidence.Membership.SpaceRef &&
+		subjectID == evidence.Membership.SubjectID &&
+		audienceRef == evidence.RecipientAudienceRef &&
+		audienceHash == evidence.RecipientAudienceHash &&
+		audienceRevision == evidence.Membership.Revisions.RecipientAudience &&
+		policyRef == evidence.Privacy.PolicyRef &&
+		authorityRevision == evidence.Membership.Revisions.Authority &&
+		sourceRef == expectedSourceRef
 }
 
 func runActionTarget(actionID string) (string, bool) {

@@ -19,6 +19,7 @@ use super::dispatchers::{
     dispatch_browser_suggest_action, dispatch_chat_approve_plan, dispatch_chat_cancel_invocation,
     dispatch_chat_clear_threads, dispatch_chat_delete_thread, dispatch_chat_queue_invocation_input,
     dispatch_chat_save_thread_snapshot, dispatch_chat_submit_feedback,
+    dispatch_chat_upload_document, dispatch_chat_extract_document,
     dispatch_finetune_cancel_job, dispatch_finetune_create_job, dispatch_finetune_deploy_job,
     dispatch_inbox_add_tag, dispatch_inbox_claim_draft_lease,
     dispatch_inbox_create_draft_reply_proposal, dispatch_inbox_create_incident_proposal,
@@ -34,7 +35,8 @@ use super::dispatchers::{
     dispatch_integrations_extend_inbox_history, dispatch_integrations_start_chatgpt_subscription,
     dispatch_integrations_start_connect_session, dispatch_integrations_trigger_inbox_sync,
     dispatch_integrations_trigger_sync, dispatch_knowledge_create_document,
-    dispatch_knowledge_extract_products, dispatch_knowledge_summarize_products,
+    dispatch_knowledge_extract_products, dispatch_knowledge_register_sharepoint_source,
+    dispatch_knowledge_summarize_products,
     dispatch_leads_create_list, dispatch_leads_delete_list, dispatch_mcp_delete_server,
     dispatch_mcp_share_server, dispatch_membership_invite_member,
     dispatch_membership_remove_member, dispatch_membership_update_member_role,
@@ -54,9 +56,13 @@ use super::dispatchers::{
     dispatch_settings_delete_api_key, dispatch_settings_update_me,
     dispatch_settings_update_preferences, dispatch_settings_update_setting,
     dispatch_social_create_campaign, dispatch_social_create_draft_from_inbox,
-    dispatch_social_decide_approval, dispatch_space_bind_agent, dispatch_space_create_agent,
-    dispatch_space_create_personal, dispatch_space_ensure_organization_room,
-    dispatch_space_request_personal_deletion, dispatch_space_update_instructions,
+    dispatch_social_decide_approval, dispatch_space_add_member, dispatch_space_bind_agent,
+    dispatch_space_create_agent, dispatch_space_create_personal, dispatch_space_create_room,
+    dispatch_space_ensure_organization_room, dispatch_space_mark_read,
+    dispatch_space_record_presence, dispatch_space_remove_member,
+    dispatch_space_request_personal_deletion, dispatch_space_revoke_agent,
+    dispatch_space_set_agent_state, dispatch_space_update_instructions,
+    dispatch_space_update_thread_presentation,
     dispatch_studio_create_project, dispatch_studio_export_social_draft,
     dispatch_studio_save_project,
 };
@@ -118,6 +124,9 @@ pub(super) async fn execute_action(
         }
         "knowledge.summarize_products" => {
             dispatch_knowledge_summarize_products(&state, &user, &headers, &body.input).await
+        }
+        "knowledge.register_sharepoint_source" => {
+            dispatch_knowledge_register_sharepoint_source(&state, &user, &body.input).await
         }
         "brreg_lookup_organization" | "brreg.lookup_organization" => {
             dispatch_brreg_lookup(&state, &user, &body.input).await
@@ -333,6 +342,12 @@ pub(super) async fn execute_action(
         "chat.submit_feedback" => {
             dispatch_chat_submit_feedback(&state, &user, &headers, &body.input).await
         }
+        "chat.upload_document" => {
+            dispatch_chat_upload_document(&state, &user, &headers, &body.input).await
+        }
+        "chat.extract_document" => {
+            dispatch_chat_extract_document(&state, &user, &headers, &body.input).await
+        }
         "audio.transcribe" => dispatch_audio_transcribe(&state, &user, &headers, &body.input).await,
         "audio.dictate" => dispatch_audio_dictate(&state, &user, &headers, &body.input).await,
         "orchestration.decide_approval" => {
@@ -474,6 +489,20 @@ pub(super) async fn execute_action(
         "spaces.request_personal_space_deletion" => {
             dispatch_space_request_personal_deletion(&state, &user, &body.input).await
         }
+        "spaces.update_thread_presentation" => {
+            dispatch_space_update_thread_presentation(&state, &user, &headers, &body.input).await
+        }
+        "spaces.mark_read" => dispatch_space_mark_read(&state, &user, &body.input).await,
+        "spaces.record_presence" => {
+            dispatch_space_record_presence(&state, &user, &body.input).await
+        }
+        "spaces.set_agent_state" => {
+            dispatch_space_set_agent_state(&state, &user, &body.input).await
+        }
+        "spaces.revoke_agent" => dispatch_space_revoke_agent(&state, &user, &body.input).await,
+        "spaces.create_room" => dispatch_space_create_room(&state, &user, &body.input).await,
+        "spaces.add_member" => dispatch_space_add_member(&state, &user, &body.input).await,
+        "spaces.remove_member" => dispatch_space_remove_member(&state, &user, &body.input).await,
         // Social actions -> social-core via the dedicated dispatchers (real
         // ApprovalState is enforced by social-core before publish/schedule).
         "social.create_draft" => dispatch_social_create_draft(&state, &user, &body.input).await,

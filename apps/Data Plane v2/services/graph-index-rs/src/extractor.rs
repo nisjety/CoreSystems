@@ -260,11 +260,15 @@ impl ModelPlaneExtractor {
                     role: "system".to_string(),
                     content: SYSTEM_PROMPT.to_string(),
                     name: String::new(),
+                    // Provider-native compaction checkpoint; only assistant
+                    // history ever carries one, never this two-message prompt.
+                    compaction_summary: String::new(),
                 },
                 model_plane::v1::ChatMessage {
                     role: "user".to_string(),
                     content: prompt.to_string(),
                     name: String::new(),
+                    compaction_summary: String::new(),
                 },
             ],
             temperature: 0.1,
@@ -290,6 +294,10 @@ impl ModelPlaneExtractor {
             min_privacy_tier: model_plane::v1::PrivacyTier::Unspecified as i32,
             min_residency: String::new(),
             thinking_budget_tokens: 0,
+            // Subscription routing belongs to a user's own chat, never to
+            // background extraction: no subscription connection, normal tier.
+            subscription_connection_id: String::new(),
+            prefer_priority_service_tier: false,
         }
     }
 

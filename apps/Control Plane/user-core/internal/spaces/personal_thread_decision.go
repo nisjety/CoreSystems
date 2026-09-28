@@ -5,6 +5,8 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"fmt"
+	"hash"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -79,7 +81,7 @@ func (p PrivacyPolicySnapshot) Validate() error {
 		"deletion_scope":     p.DeletionScope,
 	} {
 		if strings.TrimSpace(value) == "" {
-			return fmt.Errorf("Space privacy policy %s is required", label)
+			return fmt.Errorf("space privacy policy %s is required", label)
 		}
 	}
 	return nil
@@ -90,18 +92,20 @@ func (p PrivacyPolicySnapshot) Validate() error {
 // member as recipient. Linked documents, connectors, and shared Spaces have
 // different owners/audiences and must use their own issuer path.
 type PersonalThreadDecisionEvidence struct {
-	Membership               CurrentMembership
-	RecipientAudienceRef     string
-	RecipientAudienceHash    string
-	RecipientSubjectID       string
-	Privacy                  PrivacyPolicySnapshot
-	ThreadCreateEntitled     bool
-	ThreadReadEntitled       bool
-	RetrievalReadEntitled    bool
-	ImportWriteEntitled      bool
-	AgentActionEntitled      bool
-	ScheduleFireEntitled     bool
-	ResourceAuthorizationRef string
+	Membership                CurrentMembership
+	RecipientAudienceRef      string
+	RecipientAudienceHash     string
+	RecipientSubjectID        string
+	Privacy                   PrivacyPolicySnapshot
+	ThreadCreateEntitled      bool
+	ThreadReadEntitled        bool
+	RetrievalReadEntitled     bool
+	ImportWriteEntitled       bool
+	AgentActionEntitled       bool
+	ScheduleFireEntitled      bool
+	SandboxCapabilityEntitled bool
+	ProcessRegistryEntitled   bool
+	ResourceAuthorizationRef  string
 }
 
 func (e PersonalThreadDecisionEvidence) validatePersonalAuthority() error {
@@ -112,7 +116,7 @@ func (e PersonalThreadDecisionEvidence) validatePersonalAuthority() error {
 		return fmt.Errorf("personal decision requires a personal Space")
 	}
 	if !matchesOneOf(e.Membership.Role, "viewer", "editor", "manager", "owner") {
-		return fmt.Errorf("Space role %q cannot access a personal Space", e.Membership.Role)
+		return fmt.Errorf("space role %q cannot access a personal Space", e.Membership.Role)
 	}
 	if strings.TrimSpace(e.RecipientAudienceRef) == "" || strings.TrimSpace(e.RecipientAudienceHash) == "" || e.RecipientSubjectID != e.Membership.SubjectID {
 		return fmt.Errorf("personal Space recipient audience must be exactly the current subject")
@@ -128,7 +132,7 @@ func (e PersonalThreadDecisionEvidence) Validate() error {
 		return err
 	}
 	if !matchesOneOf(e.Membership.Role, "editor", "manager", "owner") {
-		return fmt.Errorf("Space role %q cannot create a thread", e.Membership.Role)
+		return fmt.Errorf("space role %q cannot create a thread", e.Membership.Role)
 	}
 	if !e.ThreadCreateEntitled {
 		return fmt.Errorf("thread creation entitlement is not active")
@@ -148,7 +152,7 @@ func (e PersonalThreadDecisionEvidence) ValidateForSharedThread() error {
 		return fmt.Errorf("shared thread decision requires a non-personal Space")
 	}
 	if !matchesOneOf(e.Membership.Role, "editor", "manager", "owner") {
-		return fmt.Errorf("Space role %q cannot create a shared thread", e.Membership.Role)
+		return fmt.Errorf("space role %q cannot create a shared thread", e.Membership.Role)
 	}
 	if strings.TrimSpace(e.RecipientAudienceRef) == "" || strings.TrimSpace(e.RecipientAudienceHash) == "" {
 		return fmt.Errorf("shared Space recipient audience is required")
@@ -171,7 +175,7 @@ func (e PersonalThreadDecisionEvidence) ValidateForSharedRetrieval() error {
 		return fmt.Errorf("shared retrieval decision requires a non-personal Space")
 	}
 	if !matchesOneOf(e.Membership.Role, "viewer", "editor", "manager", "owner") {
-		return fmt.Errorf("Space role %q cannot retrieve in a shared Space", e.Membership.Role)
+		return fmt.Errorf("space role %q cannot retrieve in a shared Space", e.Membership.Role)
 	}
 	if strings.TrimSpace(e.RecipientAudienceRef) == "" || strings.TrimSpace(e.RecipientAudienceHash) == "" {
 		return fmt.Errorf("shared Space recipient audience is required")
@@ -189,8 +193,8 @@ func (e PersonalThreadDecisionEvidence) ValidateForSharedRetrieval() error {
 // what a viewer is for. What it does NOT relax is the audience join. Control
 // resolves this evidence only when the caller appears in the Space's CURRENT
 // recipient audience, so a removed participant stops being able to read the
-// moment their membership or the audience revision changes, without the
-// reading service needing its own copy of the participant list.
+// moment their membership or the audience revision changes. The reading
+// service never needs its own copy of the participant list.
 func (e PersonalThreadDecisionEvidence) ValidateForSharedThreadRead() error {
 	if err := e.Membership.Validate(); err != nil {
 		return err
@@ -199,13 +203,42 @@ func (e PersonalThreadDecisionEvidence) ValidateForSharedThreadRead() error {
 		return fmt.Errorf("shared thread read decision requires a non-personal Space")
 	}
 	if !matchesOneOf(e.Membership.Role, "viewer", "editor", "manager", "owner") {
-		return fmt.Errorf("Space role %q cannot read a shared Space", e.Membership.Role)
+		return fmt.Errorf("space role %q cannot read a shared Space", e.Membership.Role)
 	}
 	if strings.TrimSpace(e.RecipientAudienceRef) == "" || strings.TrimSpace(e.RecipientAudienceHash) == "" {
 		return fmt.Errorf("shared Space recipient audience is required")
 	}
 	if strings.TrimSpace(e.ResourceAuthorizationRef) == "" || !e.ThreadReadEntitled {
 		return fmt.Errorf("shared Space thread read authority is incomplete")
+	}
+	return e.Privacy.Validate()
+}
+
+// ValidateForOwnScheduledThreadRead authorizes a personal Space's own owner to
+// read the system-owned (schedule) threads inside their own Space.
+//
+// Deliberately NOT a relaxation of ValidateForSharedThreadRead, which stays
+// "non-personal only" and keeps protecting the Space-Room multi-member
+// semantics it was built for. This validator never crosses a membership
+// boundary — the caller IS the Space's only member — so it has no audience-
+// join requirement, unlike the shared-room path. It exists because a
+// schedule's result thread is created by a trusted SERVICE
+// (service:orchestrator-core, via session-core's PrepareScheduledRunThread),
+// not by the human owner, so the owner-bound "list my own threads" path that
+// already covers every thread a personal Space's member created themselves
+// does not cover this one. This closes exactly that gap, for read only.
+func (e PersonalThreadDecisionEvidence) ValidateForOwnScheduledThreadRead() error {
+	if err := e.Membership.Validate(); err != nil {
+		return err
+	}
+	if e.Membership.Kind != KindPersonal {
+		return fmt.Errorf("this decision is for a personal Space only")
+	}
+	if !matchesOneOf(e.Membership.Role, "owner") {
+		return fmt.Errorf("only the Space's own owner may read it")
+	}
+	if strings.TrimSpace(e.ResourceAuthorizationRef) == "" || !e.ThreadReadEntitled {
+		return fmt.Errorf("own scheduled thread read authority is incomplete")
 	}
 	return e.Privacy.Validate()
 }
@@ -230,7 +263,7 @@ func (e PersonalThreadDecisionEvidence) ValidateForImport() error {
 		return err
 	}
 	if !matchesOneOf(e.Membership.Role, "editor", "manager", "owner") {
-		return fmt.Errorf("Space role %q cannot import content", e.Membership.Role)
+		return fmt.Errorf("space role %q cannot import content", e.Membership.Role)
 	}
 	if !e.ImportWriteEntitled {
 		return fmt.Errorf("import entitlement is not active")
@@ -238,7 +271,7 @@ func (e PersonalThreadDecisionEvidence) ValidateForImport() error {
 	return nil
 }
 
-// ValidateForAgentAction is intentionally independent from a thread-create
+// ValidateForAgentAction is intentionally independent of a thread-create
 // decision. A Model run can request a target-specific owner action only when
 // the current Control policy permits it; the target owner must still authorize
 // its own resource immediately before the effect.
@@ -251,7 +284,7 @@ func (e PersonalThreadDecisionEvidence) ValidateForAgentAction() error {
 		return err
 	}
 	if !matchesOneOf(e.Membership.Role, "editor", "manager", "owner") {
-		return fmt.Errorf("Space role %q cannot request an agent action", e.Membership.Role)
+		return fmt.Errorf("space role %q cannot request an agent action", e.Membership.Role)
 	}
 	if !e.AgentActionEntitled {
 		return fmt.Errorf("agent action entitlement is not active")
@@ -272,7 +305,7 @@ type PersonalThreadDecisionRequest struct {
 	Nonce          string
 }
 
-// ThreadAppendDecisionRequest contains no content. The BFF provides only a
+// ThreadAppendDecisionRequest contains no content. The BFF provides only an
 // SHA-256 commitment to the exact message bytes; Control binds it into the
 // decision while Session Core recomputes the commitment before persistence.
 // This preserves ZDR minimization while avoiding a browser-chosen authority
@@ -318,19 +351,10 @@ func threadAppendPayloadDigest(evidence PersonalThreadDecisionEvidence, request 
 		hash.Write(length[:])
 		hash.Write([]byte(field.value))
 	}
-	for _, revision := range []struct {
-		name  string
-		value int64
-	}{
-		{"authority_revision", evidence.Membership.Revisions.Authority},
-		{"recipient_audience_revision", evidence.Membership.Revisions.RecipientAudience},
-	} {
-		hash.Write([]byte(revision.name))
-		hash.Write([]byte{0})
-		var encoded [8]byte
-		binary.BigEndian.PutUint64(encoded[:], uint64(revision.value))
-		hash.Write(encoded[:])
-	}
+	writeDigestRevisions(hash,
+		digestRevision{"authority_revision", evidence.Membership.Revisions.Authority},
+		digestRevision{"recipient_audience_revision", evidence.Membership.Revisions.RecipientAudience},
+	)
 	return "sha256:" + hex.EncodeToString(hash.Sum(nil))
 }
 
@@ -348,22 +372,11 @@ func IssueThreadAppendDecision(evidence PersonalThreadDecisionEvidence, request 
 	if err := request.Validate(); err != nil || now.IsZero() {
 		return Decision{}, fmt.Errorf("thread append decision request is invalid")
 	}
-	return Decision{
-		DecisionRef: strings.TrimSpace(request.DecisionRef), OrgID: evidence.Membership.OrgID, SpaceRef: evidence.Membership.SpaceRef,
-		SubjectID: evidence.Membership.SubjectID, ServiceAudience: personalThreadCreateAudience,
-		ActionID: threadAppendAction, ActionSchemaHash: threadAppendSchema,
-		PayloadDigest: threadAppendPayloadDigest(evidence, request), IdempotencyKey: strings.TrimSpace(request.IdempotencyKey),
-		RecipientAudienceRef: strings.TrimSpace(evidence.RecipientAudienceRef), RecipientAudienceHash: strings.TrimSpace(evidence.RecipientAudienceHash),
-		PrivacyPolicyRef: strings.TrimSpace(evidence.Privacy.PolicyRef), ResourceAuthorizationRef: strings.TrimSpace(evidence.ResourceAuthorizationRef),
-		AuthorityRevision: evidence.Membership.Revisions.Authority, MembershipRevision: evidence.Membership.Revisions.Membership,
-		PrivacyRevision: evidence.Membership.Revisions.Privacy, RecipientAudienceRevision: evidence.Membership.Revisions.RecipientAudience,
-		EntitlementRevision: evidence.Membership.Revisions.Entitlement, Permissions: []string{"thread:append"},
-		Purpose: strings.TrimSpace(evidence.Privacy.Purpose), LawfulBasis: strings.TrimSpace(evidence.Privacy.LawfulBasis),
-		PrivacyClass: strings.TrimSpace(evidence.Privacy.PrivacyClass), ThirdPartyAllowed: evidence.Privacy.ThirdPartyAllowed,
-		RetentionClass: strings.TrimSpace(evidence.Privacy.RetentionClass), Residency: strings.TrimSpace(evidence.Privacy.Residency),
-		DeletionScope: strings.TrimSpace(evidence.Privacy.DeletionScope), ZeroDataRetention: evidence.Privacy.ZeroDataRetention,
-		IssuedAt: now.UTC(), ExpiresAt: now.UTC().Add(personalDecisionLifetime), Nonce: strings.TrimSpace(request.Nonce),
-	}, nil
+	return newEvidenceDecision(
+		evidence, request.DecisionRef, personalThreadCreateAudience, threadAppendAction, threadAppendSchema,
+		threadAppendPayloadDigest(evidence, request), request.IdempotencyKey, request.Nonce,
+		[]string{"thread:append"}, evidence.Privacy.ZeroDataRetention, now,
+	), nil
 }
 
 func (r PersonalThreadDecisionRequest) Validate() error {
@@ -434,38 +447,11 @@ func IssuePersonalThreadCreateDecision(
 	if now.IsZero() {
 		return Decision{}, fmt.Errorf("personal thread decision issuance time is required")
 	}
-	return Decision{
-		DecisionRef:               strings.TrimSpace(request.DecisionRef),
-		OrgID:                     evidence.Membership.OrgID,
-		SpaceRef:                  evidence.Membership.SpaceRef,
-		SubjectID:                 evidence.Membership.SubjectID,
-		ServiceAudience:           personalThreadCreateAudience,
-		ActionID:                  personalThreadCreateAction,
-		ActionSchemaHash:          personalThreadCreateSchema,
-		PayloadDigest:             personalThreadCreatePayloadDigest(evidence, request),
-		IdempotencyKey:            strings.TrimSpace(request.IdempotencyKey),
-		RecipientAudienceRef:      strings.TrimSpace(evidence.RecipientAudienceRef),
-		RecipientAudienceHash:     strings.TrimSpace(evidence.RecipientAudienceHash),
-		PrivacyPolicyRef:          strings.TrimSpace(evidence.Privacy.PolicyRef),
-		ResourceAuthorizationRef:  strings.TrimSpace(evidence.ResourceAuthorizationRef),
-		AuthorityRevision:         evidence.Membership.Revisions.Authority,
-		MembershipRevision:        evidence.Membership.Revisions.Membership,
-		PrivacyRevision:           evidence.Membership.Revisions.Privacy,
-		RecipientAudienceRevision: evidence.Membership.Revisions.RecipientAudience,
-		EntitlementRevision:       evidence.Membership.Revisions.Entitlement,
-		Permissions:               []string{"thread:create"},
-		Purpose:                   strings.TrimSpace(evidence.Privacy.Purpose),
-		LawfulBasis:               strings.TrimSpace(evidence.Privacy.LawfulBasis),
-		PrivacyClass:              strings.TrimSpace(evidence.Privacy.PrivacyClass),
-		ThirdPartyAllowed:         evidence.Privacy.ThirdPartyAllowed,
-		RetentionClass:            strings.TrimSpace(evidence.Privacy.RetentionClass),
-		Residency:                 strings.TrimSpace(evidence.Privacy.Residency),
-		DeletionScope:             strings.TrimSpace(evidence.Privacy.DeletionScope),
-		ZeroDataRetention:         evidence.Privacy.ZeroDataRetention,
-		IssuedAt:                  now.UTC(),
-		ExpiresAt:                 now.UTC().Add(personalDecisionLifetime),
-		Nonce:                     strings.TrimSpace(request.Nonce),
-	}, nil
+	return newEvidenceDecision(
+		evidence, request.DecisionRef, personalThreadCreateAudience, personalThreadCreateAction, personalThreadCreateSchema,
+		personalThreadCreatePayloadDigest(evidence, request), request.IdempotencyKey, request.Nonce,
+		[]string{"thread:create"}, evidence.Privacy.ZeroDataRetention, now,
+	), nil
 }
 
 // IssueSharedThreadCreateDecision uses the same exact Model effect digest as
@@ -483,16 +469,56 @@ func IssueSharedThreadCreateDecision(
 	if err := request.Validate(); err != nil || now.IsZero() {
 		return Decision{}, fmt.Errorf("shared thread decision request is invalid")
 	}
+	return newEvidenceDecision(
+		evidence, request.DecisionRef, personalThreadCreateAudience, personalThreadCreateAction, personalThreadCreateSchema,
+		personalThreadCreatePayloadDigest(evidence, request), request.IdempotencyKey, request.Nonce,
+		[]string{"thread:create"}, evidence.Privacy.ZeroDataRetention, now,
+	), nil
+}
+
+func matchesOneOf(value string, allowed ...string) bool {
+	return slices.Contains(allowed, value)
+}
+
+// digestRevision is one named integer bound into a payload digest.
+type digestRevision struct {
+	name  string
+	value int64
+}
+
+// writeDigestRevisions binds revisions into a payload digest as name, NUL
+// separator and 8-byte big-endian value so every issuer commits to the same
+// encoding.
+func writeDigestRevisions(h hash.Hash, revisions ...digestRevision) {
+	for _, revision := range revisions {
+		h.Write([]byte(revision.name))
+		h.Write([]byte{0})
+		var encoded [8]byte
+		binary.BigEndian.PutUint64(encoded[:], uint64(revision.value))
+		h.Write(encoded[:])
+	}
+}
+
+// newEvidenceDecision assembles the common evidence-derived fields of every
+// short-lived Space decision so each issuer only binds its operation-specific
+// action, audience, payload digest, and permissions.
+func newEvidenceDecision(
+	evidence PersonalThreadDecisionEvidence,
+	decisionRef, audience, actionID, schema, payloadDigest, idempotencyKey, nonce string,
+	permissions []string,
+	zeroDataRetention bool,
+	now time.Time,
+) Decision {
 	return Decision{
-		DecisionRef:               strings.TrimSpace(request.DecisionRef),
+		DecisionRef:               strings.TrimSpace(decisionRef),
 		OrgID:                     evidence.Membership.OrgID,
 		SpaceRef:                  evidence.Membership.SpaceRef,
 		SubjectID:                 evidence.Membership.SubjectID,
-		ServiceAudience:           personalThreadCreateAudience,
-		ActionID:                  personalThreadCreateAction,
-		ActionSchemaHash:          personalThreadCreateSchema,
-		PayloadDigest:             personalThreadCreatePayloadDigest(evidence, request),
-		IdempotencyKey:            strings.TrimSpace(request.IdempotencyKey),
+		ServiceAudience:           audience,
+		ActionID:                  actionID,
+		ActionSchemaHash:          schema,
+		PayloadDigest:             strings.TrimSpace(payloadDigest),
+		IdempotencyKey:            strings.TrimSpace(idempotencyKey),
 		RecipientAudienceRef:      strings.TrimSpace(evidence.RecipientAudienceRef),
 		RecipientAudienceHash:     strings.TrimSpace(evidence.RecipientAudienceHash),
 		PrivacyPolicyRef:          strings.TrimSpace(evidence.Privacy.PolicyRef),
@@ -502,7 +528,7 @@ func IssueSharedThreadCreateDecision(
 		PrivacyRevision:           evidence.Membership.Revisions.Privacy,
 		RecipientAudienceRevision: evidence.Membership.Revisions.RecipientAudience,
 		EntitlementRevision:       evidence.Membership.Revisions.Entitlement,
-		Permissions:               []string{"thread:create"},
+		Permissions:               permissions,
 		Purpose:                   strings.TrimSpace(evidence.Privacy.Purpose),
 		LawfulBasis:               strings.TrimSpace(evidence.Privacy.LawfulBasis),
 		PrivacyClass:              strings.TrimSpace(evidence.Privacy.PrivacyClass),
@@ -510,18 +536,9 @@ func IssueSharedThreadCreateDecision(
 		RetentionClass:            strings.TrimSpace(evidence.Privacy.RetentionClass),
 		Residency:                 strings.TrimSpace(evidence.Privacy.Residency),
 		DeletionScope:             strings.TrimSpace(evidence.Privacy.DeletionScope),
-		ZeroDataRetention:         evidence.Privacy.ZeroDataRetention,
+		ZeroDataRetention:         zeroDataRetention,
 		IssuedAt:                  now.UTC(),
 		ExpiresAt:                 now.UTC().Add(personalDecisionLifetime),
-		Nonce:                     strings.TrimSpace(request.Nonce),
-	}, nil
-}
-
-func matchesOneOf(value string, allowed ...string) bool {
-	for _, candidate := range allowed {
-		if value == candidate {
-			return true
-		}
+		Nonce:                     strings.TrimSpace(nonce),
 	}
-	return false
 }

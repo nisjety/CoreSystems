@@ -55,8 +55,10 @@ func TestReview_ParsesCandidatesAndBuildsRequest(t *testing.T) {
 	if fake.got.GetModel() != DefaultModel {
 		t.Fatalf("empty model should default to %q, got %q", DefaultModel, fake.got.GetModel())
 	}
-	if !fake.got.GetZdr() {
-		t.Fatal("learning review must set ZDR (transcript may be sensitive)")
+	if fake.got.GetZdr() {
+		t.Fatal("learning review must NOT request ZDR: the upstream retention gate already " +
+			"guarantees the run declared zdr:false, and requesting ZDR here would require a " +
+			"provider deployment attestation most environments cannot satisfy")
 	}
 	msgs := fake.got.GetMessages()
 	if len(msgs) != 2 || msgs[0].GetRole() != "system" || msgs[1].GetRole() != "user" {
@@ -104,5 +106,29 @@ func TestReview_MalformedModelReplyPropagatesParseError(t *testing.T) {
 	r := NewReviewer(fake, "m", "org-1")
 	if _, err := r.Review(context.Background(), "t", nil, "p"); err == nil {
 		t.Fatal("a reply with no JSON object must error")
+	}
+}
+
+func TestReview_StructuredToolResultAndBoundedDiagnostics(t *testing.T) {
+	fake := &fakeInferer{resp: &mpv1.InferResponse{StopReason: "tool_use", ToolCalls: []*mpv1.ToolCall{{Name: reviewTool, ArgumentsJson: `{"skills":[]}`}}}}
+	got, err := NewReviewer(fake, "m", "org-1").Review(context.Background(), "customer-secret", nil, learning.ReviewPrompt)
+	if err != nil || len(got) != 0 {
+		t.Fatalf("tool response: %v %v", got, err)
+	}
+	if fake.got.GetToolChoice() != reviewTool || len(fake.got.GetTools()) != 1 {
+		t.Fatal("review must request the output contract")
+	}
+	for _, stop := range []string{"max_tokens", "refusal"} {
+		fake.resp = &mpv1.InferResponse{StopReason: stop, Content: `{"skills":[]}`, OutputTokens: 4096}
+		_, err = NewReviewer(fake, "m", "org-1").Review(context.Background(), "customer-secret", nil, "p")
+		var typed *ResponseError
+		if !errors.As(err, &typed) || strings.Contains(err.Error(), "customer-secret") {
+			t.Fatalf("bounded typed failure: %v", err)
+		}
+	}
+	fake.resp = &mpv1.InferResponse{Content: `{"skills":[{"name":"private raw answer"}]}`}
+	_, err = NewReviewer(fake, "m", "org-1").Review(context.Background(), "t", nil, "p")
+	if err == nil || strings.Contains(err.Error(), "private raw answer") {
+		t.Fatalf("schema failure leaked response: %v", err)
 	}
 }

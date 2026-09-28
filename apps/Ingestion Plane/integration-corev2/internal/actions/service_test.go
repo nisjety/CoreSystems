@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	neturl "net/url"
 	"reflect"
 	"strings"
 	"testing"
@@ -895,5 +897,432 @@ func TestExecuteInstagramMessagesSendNoLinkedPageFailsClosed(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("want error when no linked page matches the IG account")
+	}
+}
+
+// --- connector-attach picker: content-read operations ---
+
+func TestExecuteMicrosoftDriveFileContentBase64EncodesResponse(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1.0/me/drive/items/item-42/content" {
+			t.Fatalf("path = %s, want the Graph content endpoint", r.URL.Path)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer token-1" {
+			t.Fatalf("Authorization = %q, want Bearer token-1", got)
+		}
+		w.Header().Set("Content-Type", "image/png")
+		_, _ = w.Write([]byte("PNGDATA"))
+	}))
+	defer server.Close()
+
+	service := NewService(config.Config{MicrosoftGraphBaseURL: server.URL}, server.Client())
+	result, err := service.Execute(context.Background(), ExecuteInput{
+		Connection: store.Connection{ProviderKey: "microsoft"}, AccessToken: "token-1", Operation: "drive.file.content",
+		Params: map[string]any{"itemId": "item-42"},
+	})
+	if err != nil {
+		t.Fatalf("Execute error: %v", err)
+	}
+	payload, ok := result.Result.(map[string]any)
+	if !ok {
+		t.Fatalf("result = %#v, want a map", result.Result)
+	}
+	if payload["mime_type"] != "image/png" {
+		t.Fatalf("mime_type = %#v, want image/png", payload["mime_type"])
+	}
+	if payload["size"] != int64(len("PNGDATA")) {
+		t.Fatalf("size = %#v, want %d", payload["size"], len("PNGDATA"))
+	}
+	if payload["truncated"] != false {
+		t.Fatalf("truncated = %#v, want false", payload["truncated"])
+	}
+	decoded, err := base64.StdEncoding.DecodeString(payload["content_base64"].(string))
+	if err != nil || string(decoded) != "PNGDATA" {
+		t.Fatalf("content_base64 decodes to %q (err %v), want PNGDATA", decoded, err)
+	}
+}
+
+func TestExecuteMicrosoftDriveFileContentRejectsOverCap(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Declares far more than the 1MB cap via Content-Length, then writes
+		// only a few bytes: getBearerBinaryBase64 must reject BEFORE reading
+		// any body, on the Content-Length check alone, or this test would
+		// hang/EOF-error waiting for bytes that never arrive.
+		w.Header().Set("Content-Length", "2000000")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("short"))
+	}))
+	defer server.Close()
+
+	service := NewService(config.Config{MicrosoftGraphBaseURL: server.URL}, server.Client())
+	_, err := service.Execute(context.Background(), ExecuteInput{
+		Connection: store.Connection{ProviderKey: "microsoft"}, AccessToken: "token-1", Operation: "drive.file.content",
+		Params: map[string]any{"itemId": "item-42"},
+	})
+	if err == nil {
+		t.Fatal("want an error for a Content-Length above the 1MB cap")
+	}
+	if !strings.Contains(err.Error(), "exceeds") {
+		t.Fatalf("error = %v, want an 'exceeds' message", err)
+	}
+}
+
+// allowContentRedirectHostForTest temporarily widens
+// contentRedirectAllowedHostSuffixes so a test's own httptest server (always
+// on loopback, never a real Microsoft domain) can stand in as a redirect
+// target. Restores the production list on cleanup — this is a package-level
+// var specifically so tests have a seam here without NewService taking a
+// production-facing parameter for it.
+func allowContentRedirectHostForTest(t *testing.T, host string) {
+	t.Helper()
+	previous := contentRedirectAllowedHostSuffixes
+	contentRedirectAllowedHostSuffixes = append(append([]string{}, previous...), host)
+	t.Cleanup(func() { contentRedirectAllowedHostSuffixes = previous })
+}
+
+func TestExecuteMicrosoftDriveFileContentFollowsGraphRedirect(t *testing.T) {
+	// Regression test for the egress.SafeClient redirect gap: Graph's
+	// /content commonly answers with a 302 to a pre-authenticated download
+	// URL on a DIFFERENT host. The content client must follow it.
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/download" {
+			t.Fatalf("target path = %s, want /download", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/pdf")
+		_, _ = w.Write([]byte("PDF-BYTES"))
+	}))
+	defer target.Close()
+	targetURL, err := neturl.Parse(target.URL)
+	if err != nil {
+		t.Fatalf("parse target.URL: %v", err)
+	}
+	allowContentRedirectHostForTest(t, targetURL.Hostname())
+
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1.0/me/drive/items/item-7/content" {
+			t.Fatalf("origin path = %s", r.URL.Path)
+		}
+		http.Redirect(w, r, target.URL+"/download", http.StatusFound)
+	}))
+	defer origin.Close()
+
+	service := NewService(config.Config{MicrosoftGraphBaseURL: origin.URL}, origin.Client())
+	result, err := service.Execute(context.Background(), ExecuteInput{
+		Connection: store.Connection{ProviderKey: "microsoft"}, AccessToken: "token-1", Operation: "drive.file.content",
+		Params: map[string]any{"itemId": "item-7"},
+	})
+	if err != nil {
+		t.Fatalf("Execute error: %v", err)
+	}
+	payload, _ := result.Result.(map[string]any)
+	decoded, err := base64.StdEncoding.DecodeString(payload["content_base64"].(string))
+	if err != nil || string(decoded) != "PDF-BYTES" {
+		t.Fatalf("content_base64 decodes to %q (err %v), want the redirect target's bytes", decoded, err)
+	}
+	if payload["mime_type"] != "application/pdf" {
+		t.Fatalf("mime_type = %#v, want the redirect target's Content-Type", payload["mime_type"])
+	}
+}
+
+func TestExecuteMicrosoftDriveFileContentRefusesRedirectToUndocumentedHost(t *testing.T) {
+	// The redirect-abuse counterpart to the regression test above: a redirect
+	// target that is NOT on the documented Microsoft download-host allowlist
+	// (contentRedirectAllowedHostSuffixes) must never be followed, even
+	// though the underlying egress Transport would happily dial it (it isn't
+	// a private/metadata address, just an unexpected public host).
+	evil := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatalf("the disallowed redirect target must never be reached, got a request for %s", r.URL.Path)
+	}))
+	defer evil.Close()
+
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, evil.URL+"/steal", http.StatusFound)
+	}))
+	defer origin.Close()
+
+	service := NewService(config.Config{MicrosoftGraphBaseURL: origin.URL}, origin.Client())
+	_, err := service.Execute(context.Background(), ExecuteInput{
+		Connection: store.Connection{ProviderKey: "microsoft"}, AccessToken: "token-1", Operation: "drive.file.content",
+		Params: map[string]any{"itemId": "item-7"},
+	})
+	if err == nil {
+		t.Fatal("want an error when the redirect target is not on the documented download-host allowlist")
+	}
+}
+
+func TestRedirectFollowingClientAllowsDocumentedMicrosoftHosts(t *testing.T) {
+	client := redirectFollowingClient(&http.Client{})
+	original, err := http.NewRequest(http.MethodGet, "https://graph.microsoft.com/v1.0/me/drive/items/x/content", nil)
+	if err != nil {
+		t.Fatalf("build original request: %v", err)
+	}
+	for _, host := range []string{
+		"graph.microsoft.com",
+		"contoso-my.sharepoint.com",
+		"public.bn1303.storage.live.com",
+		"my.1drv.com",
+		"1drv.com",
+	} {
+		redirectReq, err := http.NewRequest(http.MethodGet, "https://"+host+"/download", nil)
+		if err != nil {
+			t.Fatalf("build redirect request for %s: %v", host, err)
+		}
+		if err := client.CheckRedirect(redirectReq, []*http.Request{original}); err != nil {
+			t.Errorf("host %s should be allowed, got %v", host, err)
+		}
+	}
+}
+
+func TestRedirectFollowingClientRejectsUndocumentedHost(t *testing.T) {
+	client := redirectFollowingClient(&http.Client{})
+	original, err := http.NewRequest(http.MethodGet, "https://graph.microsoft.com/v1.0/me/drive/items/x/content", nil)
+	if err != nil {
+		t.Fatalf("build original request: %v", err)
+	}
+	for _, host := range []string{
+		"evil-sharepoint.com",   // must not match as a "sharepoint.com" suffix
+		"notsharepoint.com",     // ditto — dot-boundary check
+		"attacker.example.com",
+	} {
+		redirectReq, err := http.NewRequest(http.MethodGet, "https://"+host+"/download", nil)
+		if err != nil {
+			t.Fatalf("build redirect request for %s: %v", host, err)
+		}
+		if err := client.CheckRedirect(redirectReq, []*http.Request{original}); err == nil {
+			t.Errorf("host %s should be rejected", host)
+		}
+	}
+}
+
+func TestRedirectFollowingClientRejectsHTTPSToHTTPDowngrade(t *testing.T) {
+	client := redirectFollowingClient(&http.Client{})
+	original, err := http.NewRequest(http.MethodGet, "https://graph.microsoft.com/v1.0/me/drive/items/x/content", nil)
+	if err != nil {
+		t.Fatalf("build original request: %v", err)
+	}
+	redirectReq, err := http.NewRequest(http.MethodGet, "http://graph.microsoft.com/downgraded", nil)
+	if err != nil {
+		t.Fatalf("build redirect request: %v", err)
+	}
+	if err := client.CheckRedirect(redirectReq, []*http.Request{original}); err == nil {
+		t.Fatal("want an error when a redirect downgrades an https request to http")
+	}
+}
+
+func TestRedirectFollowingClientStopsAfterMaxRedirects(t *testing.T) {
+	client := redirectFollowingClient(&http.Client{})
+	original, err := http.NewRequest(http.MethodGet, "https://graph.microsoft.com/v1.0/me/drive/items/x/content", nil)
+	if err != nil {
+		t.Fatalf("build original request: %v", err)
+	}
+	redirectReq, err := http.NewRequest(http.MethodGet, "https://graph.microsoft.com/hop", nil)
+	if err != nil {
+		t.Fatalf("build redirect request: %v", err)
+	}
+	via := make([]*http.Request, maxContentRedirects)
+	for i := range via {
+		via[i] = original
+	}
+	if err := client.CheckRedirect(redirectReq, via); err == nil {
+		t.Fatal("want an error once maxContentRedirects hops have already happened")
+	}
+}
+
+func TestExecuteMicrosoftMailMessagesGetStripsHTMLBody(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasPrefix(r.URL.Path, "/v1.0/me/messages/msg-1") {
+			t.Fatalf("path = %s", r.URL.Path)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id":      "msg-1",
+			"subject": "Hei",
+			"body":    map[string]any{"contentType": "html", "content": "<p>Hei <strong>der</strong></p>"},
+		})
+	}))
+	defer server.Close()
+
+	service := NewService(config.Config{MicrosoftGraphBaseURL: server.URL}, server.Client())
+	result, err := service.Execute(context.Background(), ExecuteInput{
+		Connection: store.Connection{ProviderKey: "microsoft"}, AccessToken: "token-1", Operation: "mail.messages.get",
+		Params: map[string]any{"messageId": "msg-1"},
+	})
+	if err != nil {
+		t.Fatalf("Execute error: %v", err)
+	}
+	payload, _ := result.Result.(map[string]any)
+	if payload["bodyText"] != "Hei der" {
+		t.Fatalf("bodyText = %#v, want the HTML-stripped body", payload["bodyText"])
+	}
+}
+
+func TestExecuteGoogleDriveFileContentUsesExportForNativeDocs(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/drive/v3/files/doc-1/export" {
+			t.Fatalf("path = %s, want the Drive export endpoint (not alt=media)", r.URL.Path)
+		}
+		wantMIME := "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+		if got := r.URL.Query().Get("mimeType"); got != wantMIME {
+			t.Fatalf("mimeType query = %q, want %q", got, wantMIME)
+		}
+		w.Header().Set("Content-Type", "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+		_, _ = w.Write([]byte("DOCX-BYTES"))
+	}))
+	defer server.Close()
+
+	service := NewService(config.Config{GoogleAPIBaseURL: server.URL}, server.Client())
+	result, err := service.Execute(context.Background(), ExecuteInput{
+		Connection: store.Connection{ProviderKey: "google"}, AccessToken: "token-1", Operation: "drive.file.content",
+		Params: map[string]any{"fileId": "doc-1", "mimeType": "application/vnd.google-apps.document"},
+	})
+	if err != nil {
+		t.Fatalf("Execute error: %v", err)
+	}
+	payload, _ := result.Result.(map[string]any)
+	if payload["export_extension"] != ".docx" {
+		t.Fatalf("export_extension = %#v, want .docx", payload["export_extension"])
+	}
+	decoded, err := base64.StdEncoding.DecodeString(payload["content_base64"].(string))
+	if err != nil || string(decoded) != "DOCX-BYTES" {
+		t.Fatalf("content_base64 decodes to %q (err %v), want DOCX-BYTES", decoded, err)
+	}
+}
+
+func TestExecuteGoogleDriveFilesHonorsQueryAndFolderParams(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/drive/v3/files" {
+			t.Fatalf("path = %s", r.URL.Path)
+		}
+		want := "name contains 'report' and trashed=false and 'folder-1' in parents"
+		if got := r.URL.Query().Get("q"); got != want {
+			t.Fatalf("q = %q, want %q", got, want)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"files": []any{}})
+	}))
+	defer server.Close()
+
+	service := NewService(config.Config{GoogleAPIBaseURL: server.URL}, server.Client())
+	_, err := service.Execute(context.Background(), ExecuteInput{
+		Connection: store.Connection{ProviderKey: "google"}, AccessToken: "token-1", Operation: "drive.files",
+		Params: map[string]any{"query": "report", "folderId": "folder-1"},
+	})
+	if err != nil {
+		t.Fatalf("Execute error: %v", err)
+	}
+}
+
+func TestExecuteGoogleGmailMessagesGetParsesFullFormat(t *testing.T) {
+	bodyData := base64.URLEncoding.WithPadding(base64.NoPadding).EncodeToString([]byte("Hello there"))
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/gmail/v1/users/me/messages/msg-9" {
+			t.Fatalf("path = %s", r.URL.Path)
+		}
+		if got := r.URL.Query().Get("format"); got != "full" {
+			t.Fatalf("format = %q, want full", got)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id":       "msg-9",
+			"threadId": "thread-1",
+			"payload": map[string]any{
+				"mimeType": "text/plain",
+				"headers": []any{
+					map[string]any{"name": "Subject", "value": "Hi"},
+					map[string]any{"name": "From", "value": "a@example.com"},
+					map[string]any{"name": "Date", "value": "Mon, 1 Jan 2026 00:00:00 +0000"},
+				},
+				"body": map[string]any{"data": bodyData},
+			},
+		})
+	}))
+	defer server.Close()
+
+	service := NewService(config.Config{GoogleAPIBaseURL: server.URL}, server.Client())
+	result, err := service.Execute(context.Background(), ExecuteInput{
+		Connection: store.Connection{ProviderKey: "google"}, AccessToken: "token-1", Operation: "gmail.messages.get",
+		Params: map[string]any{"id": "msg-9"},
+	})
+	if err != nil {
+		t.Fatalf("Execute error: %v", err)
+	}
+	payload, _ := result.Result.(map[string]any)
+	if payload["subject"] != "Hi" {
+		t.Fatalf("subject = %#v, want Hi", payload["subject"])
+	}
+	if payload["from"] != "a@example.com" {
+		t.Fatalf("from = %#v", payload["from"])
+	}
+	if payload["bodyText"] != "Hello there" {
+		t.Fatalf("bodyText = %#v, want Hello there", payload["bodyText"])
+	}
+}
+
+func TestExecuteMicrosoftCalendarEventsEscapesEmbeddedQuoteInSearchPhrase(t *testing.T) {
+	// A literal double quote in the search text must not be able to close
+	// Graph's $search="..." phrase early and inject additional $search
+	// syntax — regression test for reusing odataEscape (single-quote-only)
+	// in this double-quote-delimited context.
+	var gotSearch string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotSearch = r.URL.Query().Get("$search")
+		if got := r.Header.Get("ConsistencyLevel"); got != "eventual" {
+			t.Fatalf("ConsistencyLevel header = %q, want eventual", got)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"value": []any{}})
+	}))
+	defer server.Close()
+
+	service := NewService(config.Config{MicrosoftGraphBaseURL: server.URL}, server.Client())
+	_, err := service.Execute(context.Background(), ExecuteInput{
+		Connection: store.Connection{ProviderKey: "microsoft"}, AccessToken: "token-1", Operation: "calendar.events",
+		Params: map[string]any{"query": `budget" OR subject:secret`},
+	})
+	if err != nil {
+		t.Fatalf("Execute error: %v", err)
+	}
+	want := `"budget\" OR subject:secret"`
+	if gotSearch != want {
+		t.Fatalf("$search = %q, want %q (the embedded quote must be backslash-escaped, not left to close the phrase early)", gotSearch, want)
+	}
+}
+
+func TestExecuteGoogleDriveFileContentExportFallsBackToExportMimeWhenContentTypeMissing(t *testing.T) {
+	// When the export response carries no Content-Type header, the reported
+	// mime_type must fall back to the EXPORT mime type (.docx), not the
+	// native application/vnd.google-apps.document type the file actually is
+	// — reporting the native type would mislabel the exported bytes. Writes
+	// a raw response via Hijack rather than w.Write: an ordinary
+	// http.ResponseWriter.Write auto-sniffs and sets a Content-Type when the
+	// handler never set one, which would silently skip the very branch this
+	// test exists to exercise.
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/drive/v3/files/doc-1/export" {
+			t.Fatalf("path = %s, want the Drive export endpoint", r.URL.Path)
+		}
+		hijacker, ok := w.(http.Hijacker)
+		if !ok {
+			t.Fatal("httptest server response writer does not support hijacking")
+		}
+		conn, buf, err := hijacker.Hijack()
+		if err != nil {
+			t.Fatalf("hijack: %v", err)
+		}
+		defer conn.Close()
+		const body = "DOCX-BYTES"
+		fmt.Fprintf(buf, "HTTP/1.1 200 OK\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s", len(body), body)
+		_ = buf.Flush()
+	}))
+	defer server.Close()
+
+	service := NewService(config.Config{GoogleAPIBaseURL: server.URL}, server.Client())
+	result, err := service.Execute(context.Background(), ExecuteInput{
+		Connection: store.Connection{ProviderKey: "google"}, AccessToken: "token-1", Operation: "drive.file.content",
+		Params: map[string]any{"fileId": "doc-1", "mimeType": "application/vnd.google-apps.document"},
+	})
+	if err != nil {
+		t.Fatalf("Execute error: %v", err)
+	}
+	payload, _ := result.Result.(map[string]any)
+	want := "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+	if payload["mime_type"] != want {
+		t.Fatalf("mime_type = %#v, want the export mime type %q (not the native Google type)", payload["mime_type"], want)
 	}
 }

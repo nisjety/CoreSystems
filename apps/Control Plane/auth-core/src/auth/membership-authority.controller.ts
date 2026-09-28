@@ -96,6 +96,19 @@ export function requireApplicationReconcilerSecret(
   );
 }
 
+export function requireOptionalLearningMembershipSecret(
+  value?: string,
+  forbiddenValues: Array<string | undefined> = [],
+): string | undefined {
+  const secret = (value ?? '').trim();
+  if (!secret) return undefined;
+  return requireDedicatedSecret(
+    'LEARNING_CORE_MEMBERSHIP_SERVICE_TOKEN',
+    secret,
+    forbiddenValues,
+  );
+}
+
 export function buildMembershipDecision(
   membership: MembershipRecord | null,
 ): MembershipDecision {
@@ -215,6 +228,23 @@ export class MembershipAuthorityController {
       ],
     );
 
+  // Learning gets its own narrow credential. It may ask whether one exact
+  // user is a member of one exact organization; it cannot list memberships.
+  // Optional so existing Control Plane deployments remain bootable until the
+  // Learning service is provisioned.
+  private readonly learningCoreToken = requireOptionalLearningMembershipSecret(
+    process.env.LEARNING_CORE_MEMBERSHIP_SERVICE_TOKEN,
+    [
+      process.env.INTERNAL_API_KEY,
+      process.env.INTERNAL_SERVICE_SECRET,
+      process.env.USER_CORE_SERVICE_TOKEN,
+      process.env.USER_CORE_MEMBERSHIP_SERVICE_TOKEN,
+      process.env.ORG_CORE_SERVICE_TOKEN,
+      process.env.BILLING_CORE_SERVICE_TOKEN,
+      process.env.APPLICATION_RECONCILER_AUTH_TOKEN,
+    ],
+  );
+
   // This is a membership *decision* lookup, not a resource creation. NestJS
   // defaults @Post to 201; user-core's canonical-authority client treats any
   // non-200 as "authority unavailable" (-> 503), so pin it to 200.
@@ -222,9 +252,18 @@ export class MembershipAuthorityController {
   @HttpCode(HttpStatus.OK)
   async decide(
     @Headers('x-user-core-membership-token') callerToken: string | undefined,
+    @Headers('x-learning-core-membership-token') learningCallerToken: string | undefined,
     @Body() body: unknown,
   ): Promise<MembershipDecision> {
-    if (!credentialMatches(this.expectedToken, callerToken)) {
+    const hasUserCoreCredential = Boolean(callerToken?.trim());
+    const hasLearningCredential = Boolean(learningCallerToken?.trim());
+    const authorized =
+      hasUserCoreCredential !== hasLearningCredential &&
+      (hasUserCoreCredential
+        ? credentialMatches(this.expectedToken, callerToken)
+        : this.learningCoreToken !== undefined &&
+          credentialMatches(this.learningCoreToken, learningCallerToken));
+    if (!authorized) {
       throw new UnauthorizedException(
         'Valid membership authority credential required',
       );

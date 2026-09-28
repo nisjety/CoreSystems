@@ -1,6 +1,7 @@
 package http
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/base64"
 	"errors"
@@ -131,6 +132,22 @@ func (s *Server) requireSpaceScheduleFireReauthorizer(c *gin.Context) {
 	c.Next()
 }
 
+// requireSpaceSandboxCapabilityReauthorizer gives only execution-core's
+// service identity access to the sandbox capability decision endpoint. A
+// Space's standing sandbox entitlement does not let a backend silently
+// upgrade what it claims to offer: execution-core must present a freshly
+// measured substrate claim on every request, and Control independently
+// checks that claim against policy before signing.
+func (s *Server) requireSpaceSandboxCapabilityReauthorizer(c *gin.Context) {
+	if c.GetString("auth_method") != "service_principal" ||
+		c.GetString("service_id") != executionCorePrincipal ||
+		!hasServiceScope(c, "spaces:sandbox:capability") {
+		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "execution-core sandbox capability principal required"})
+		return
+	}
+	c.Next()
+}
+
 // requireSpaceScheduledRunExecutor gives only Orchestrator Core a fresh,
 // effect-time decision for a run Capability Core has already prepared. It is
 // deliberately distinct from the scheduler's reauthorization capability.
@@ -223,8 +240,7 @@ func (s *Server) registerSpace(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	if s.spaceRepo == nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Space authority repository unavailable"})
+	if !s.spaceRepoAvailable(c) {
 		return
 	}
 	registered, err := s.spaceRepo.Register(c.Request.Context(), registration)
@@ -239,10 +255,9 @@ func (s *Server) registerSpace(c *gin.Context) {
 	c.JSON(http.StatusCreated, gin.H{"data": registered})
 }
 
-// spaceRoster answers who is in a Space, to someone who is in it.
+// spaceRoster returns a Space's member list to a caller who is in it.
 func (s *Server) spaceRoster(c *gin.Context) {
-	if s.spaceRepo == nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Space authority repository unavailable"})
+	if !s.spaceRepoAvailable(c) {
 		return
 	}
 	members, err := s.spaceRepo.RosterForSpace(
@@ -268,8 +283,7 @@ func (s *Server) spaceRoster(c *gin.Context) {
 // scope already requires, never from a query parameter — an index keyed on a
 // caller-supplied id is an enumeration endpoint.
 func (s *Server) listSpacesForSubject(c *gin.Context) {
-	if s.spaceRepo == nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Space authority repository unavailable"})
+	if !s.spaceRepoAvailable(c) {
 		return
 	}
 	entries, err := s.spaceRepo.SpacesForSubject(c.Request.Context(), c.GetString("org_id"), c.GetString("user_id"))
@@ -288,8 +302,7 @@ func (s *Server) listSpacesForSubject(c *gin.Context) {
 // the resource, and accepting a second copy in the payload would let the two
 // disagree.
 func (s *Server) replaceSpaceMemberships(c *gin.Context) {
-	if s.spaceRepo == nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Space authority repository unavailable"})
+	if !s.spaceRepoAvailable(c) {
 		return
 	}
 	var replacement spaces.MembershipReplacement
@@ -314,14 +327,14 @@ func (s *Server) replaceSpaceMemberships(c *gin.Context) {
 	// Fire-and-forget, after the roster change is durably committed: other
 	// planes invalidate (revoked) or clear (reactivated) their own
 	// resource-scoped authorization on this Space for these subjects. A
-	// missed publish (broker down, process restart) only means the change
-	// isn't caught until the next membership change touches the same
-	// subject — never a regression from today's unconditional org+user
-	// check, and never a permanent lockout for a legitimately rejoined
-	// member either. orgID comes from the Space record ReplaceMemberships
-	// just resolved, not the caller's own identity: this endpoint's
-	// principal (application-space-lifecycle) syncs rosters across every
-	// org, not one verified-delegation org at a time.
+	// missed publication (broker down, process restart) only means the
+	// change isn't caught until the next membership change touches the same
+	// subject. That is never a regression from today's unconditional
+	// org+user check, and never a permanent lockout for a legitimately
+	// rejoined member either. orgID comes from the Space record
+	// ReplaceMemberships just resolved, not the caller's own identity: this
+	// endpoint's principal (application-space-lifecycle) syncs rosters
+	// across every org, not one verified-delegation org at a time.
 	for _, subjectID := range revokedUserSubjects {
 		s.publisher.PublishSpaceMembershipChanged(c.Request.Context(), replacement.SpaceRef, orgID, subjectID, false)
 	}
@@ -336,8 +349,7 @@ func (s *Server) replaceSpaceMemberships(c *gin.Context) {
 }
 
 func (s *Server) registerRecipientAudience(c *gin.Context) {
-	if s.spaceRepo == nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Space authority repository unavailable"})
+	if !s.spaceRepoAvailable(c) {
 		return
 	}
 	var registration spaces.RecipientAudienceRegistration
@@ -358,8 +370,7 @@ func (s *Server) registerRecipientAudience(c *gin.Context) {
 }
 
 func (s *Server) authorizeSpaceDeletion(c *gin.Context) {
-	if s.spaceRepo == nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Space authority repository unavailable"})
+	if !s.spaceRepoAvailable(c) {
 		return
 	}
 	var request spaces.DeletionAuthorizationRequest
@@ -380,8 +391,7 @@ func (s *Server) authorizeSpaceDeletion(c *gin.Context) {
 }
 
 func (s *Server) upsertSpaceDeletionPolicy(c *gin.Context) {
-	if s.spaceRepo == nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Space authority repository unavailable"})
+	if !s.spaceRepoAvailable(c) {
 		return
 	}
 	var policy spaces.DeletionPolicy
@@ -398,8 +408,7 @@ func (s *Server) upsertSpaceDeletionPolicy(c *gin.Context) {
 }
 
 func (s *Server) applySpaceLegalHold(c *gin.Context) {
-	if s.spaceRepo == nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Space authority repository unavailable"})
+	if !s.spaceRepoAvailable(c) {
 		return
 	}
 	var hold spaces.LegalHold
@@ -421,8 +430,7 @@ func (s *Server) applySpaceLegalHold(c *gin.Context) {
 }
 
 func (s *Server) releaseSpaceLegalHold(c *gin.Context) {
-	if s.spaceRepo == nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Space authority repository unavailable"})
+	if !s.spaceRepoAvailable(c) {
 		return
 	}
 	updated, err := s.spaceRepo.ReleaseLegalHold(c.Request.Context(), c.Param("space_ref"), c.GetString("service_id"))
@@ -438,8 +446,7 @@ func (s *Server) releaseSpaceLegalHold(c *gin.Context) {
 }
 
 func (s *Server) resolveCurrentSpaceMembership(c *gin.Context) {
-	if s.spaceRepo == nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Space authority repository unavailable"})
+	if !s.spaceRepoAvailable(c) {
 		return
 	}
 	membership, err := s.spaceRepo.ResolveCurrentUserMembership(
@@ -463,7 +470,7 @@ type personalThreadDecisionRequest struct {
 }
 
 // threadAppendDecisionRequest has only the identifiers needed to bind the
-// target effect. Content is represented by a SHA-256 commitment, so Control
+// target effect. Content is represented by an SHA-256 commitment, so Control
 // does not become a transcript processor and an old create decision cannot be
 // substituted for a later append.
 type threadAppendDecisionRequest struct {
@@ -479,39 +486,19 @@ type threadAppendDecisionRequest struct {
 // those are resolved or minted by Control. A missing policy/key/membership is
 // unavailable or forbidden; it can never turn into a permissive decision.
 func (s *Server) issuePersonalThreadDecision(c *gin.Context) {
-	if s.spaceRepo == nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Space authority repository unavailable"})
+	if !s.spaceRepoAvailable(c) {
 		return
 	}
 	var request personalThreadDecisionRequest
-	if err := c.ShouldBindJSON(&request); err != nil || strings.TrimSpace(request.SpaceRef) == "" || strings.TrimSpace(request.IdempotencyKey) == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "space_ref and idempotency_key are required"})
+	if !bindSpaceDecisionBody(c, &request, "space_ref and idempotency_key are required", request.SpaceRef, request.IdempotencyKey) {
 		return
 	}
-	evidence, err := s.spaceRepo.ResolvePersonalThreadDecisionEvidence(
-		c.Request.Context(), request.SpaceRef, c.GetString("org_id"), c.GetString("user_id"),
-	)
-	if errors.Is(err, spaces.ErrNoCurrentMembership) {
-		c.JSON(http.StatusForbidden, gin.H{"error": "current personal Space authority required"})
+	evidence, ok := s.resolvePersonalThreadEvidence(c, request.SpaceRef, c.GetString("org_id"), c.GetString("user_id"), "personal Space authority unavailable")
+	if !ok {
 		return
 	}
-	if err != nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "personal Space authority unavailable"})
-		return
-	}
-	key, err := spaces.LoadSigningKeyFromEnv(os.Getenv)
-	if err != nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Space decision signer unavailable"})
-		return
-	}
-	decisionRef, err := randomDecisionPart()
-	if err != nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Space decision entropy unavailable"})
-		return
-	}
-	nonce, err := randomDecisionPart()
-	if err != nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Space decision entropy unavailable"})
+	key, decisionRef, nonce, ok := spaceDecisionMaterial(c)
+	if !ok {
 		return
 	}
 	decision, err := spaces.IssuePersonalThreadCreateDecision(evidence, spaces.PersonalThreadDecisionRequest{
@@ -521,9 +508,8 @@ func (s *Server) issuePersonalThreadDecision(c *gin.Context) {
 		c.JSON(http.StatusForbidden, gin.H{"error": "personal Space thread creation is not authorized"})
 		return
 	}
-	token, err := spaces.SignDecision(key, decision)
-	if err != nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Space decision signing failed"})
+	token, ok := signSpaceDecision(c, key, decision)
+	if !ok {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"data": gin.H{"decision": decision, "token": token}})
@@ -535,51 +521,26 @@ func (s *Server) issuePersonalThreadDecision(c *gin.Context) {
 // recipients, policy, resource authorization, revisions, nonce, and digest
 // are all resolved or minted here.
 func (s *Server) issueThreadDecision(c *gin.Context) {
-	if s.spaceRepo == nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Space authority repository unavailable"})
+	if !s.spaceRepoAvailable(c) {
 		return
 	}
 	var request personalThreadDecisionRequest
-	if err := c.ShouldBindJSON(&request); err != nil || strings.TrimSpace(request.SpaceRef) == "" || strings.TrimSpace(request.IdempotencyKey) == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "space_ref and idempotency_key are required"})
+	if !bindSpaceDecisionBody(c, &request, "space_ref and idempotency_key are required", request.SpaceRef, request.IdempotencyKey) {
 		return
 	}
-	membership, err := s.spaceRepo.ResolveCurrentUserMembership(c.Request.Context(), request.SpaceRef, c.GetString("org_id"), c.GetString("user_id"))
-	if errors.Is(err, spaces.ErrNoCurrentMembership) {
-		c.JSON(http.StatusForbidden, gin.H{"error": "current Space authority required"})
+	evidence, membership, ok := s.resolveKindEvidence(c, request.SpaceRef,
+		s.spaceRepo.ResolvePersonalThreadDecisionEvidence, s.spaceRepo.ResolveSharedThreadDecisionEvidence,
+		"current recipient audience authority required")
+	if !ok {
 		return
 	}
-	if err != nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Space authority unavailable"})
-		return
-	}
-	var evidence spaces.PersonalThreadDecisionEvidence
-	if membership.Kind == spaces.KindPersonal {
-		evidence, err = s.spaceRepo.ResolvePersonalThreadDecisionEvidence(c.Request.Context(), request.SpaceRef, c.GetString("org_id"), c.GetString("user_id"))
-	} else {
-		evidence, err = s.spaceRepo.ResolveSharedThreadDecisionEvidence(c.Request.Context(), request.SpaceRef, c.GetString("org_id"), c.GetString("user_id"))
-	}
-	if err != nil {
-		c.JSON(http.StatusForbidden, gin.H{"error": "current recipient audience authority required"})
-		return
-	}
-	key, err := spaces.LoadSigningKeyFromEnv(os.Getenv)
-	if err != nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Space decision signer unavailable"})
-		return
-	}
-	decisionRef, err := randomDecisionPart()
-	if err != nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Space decision entropy unavailable"})
-		return
-	}
-	nonce, err := randomDecisionPart()
-	if err != nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Space decision entropy unavailable"})
+	key, decisionRef, nonce, ok := spaceDecisionMaterial(c)
+	if !ok {
 		return
 	}
 	issuerRequest := spaces.PersonalThreadDecisionRequest{DecisionRef: decisionRef, SessionKey: request.SessionKey, IdempotencyKey: request.IdempotencyKey, Nonce: nonce}
 	var decision spaces.Decision
+	var err error
 	if membership.Kind == spaces.KindPersonal {
 		decision, err = spaces.IssuePersonalThreadCreateDecision(evidence, issuerRequest, time.Now().UTC())
 	} else {
@@ -589,9 +550,8 @@ func (s *Server) issueThreadDecision(c *gin.Context) {
 		c.JSON(http.StatusForbidden, gin.H{"error": "Space thread creation is not authorized"})
 		return
 	}
-	token, err := spaces.SignDecision(key, decision)
-	if err != nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Space decision signing failed"})
+	token, ok := signSpaceDecision(c, key, decision)
+	if !ok {
 		return
 	}
 	// space_kind travels in the envelope, not the signed decision, for any
@@ -609,47 +569,22 @@ func (s *Server) issueThreadDecision(c *gin.Context) {
 // policy, or effect digest; all except the content commitment are derived from
 // the signed gateway delegation and Control's current authority state.
 func (s *Server) issueThreadAppendDecision(c *gin.Context) {
-	if s.spaceRepo == nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Space authority repository unavailable"})
+	if !s.spaceRepoAvailable(c) {
 		return
 	}
 	var request threadAppendDecisionRequest
-	if err := c.ShouldBindJSON(&request); err != nil || strings.TrimSpace(request.SpaceRef) == "" || strings.TrimSpace(request.ThreadID) == "" || strings.TrimSpace(request.ContentDigest) == "" || strings.TrimSpace(request.IdempotencyKey) == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "space_ref, thread_id, content_digest, and idempotency_key are required"})
+	if !bindSpaceDecisionBody(c, &request, "space_ref, thread_id, content_digest, and idempotency_key are required",
+		request.SpaceRef, request.ThreadID, request.ContentDigest, request.IdempotencyKey) {
 		return
 	}
-	membership, err := s.spaceRepo.ResolveCurrentUserMembership(c.Request.Context(), request.SpaceRef, c.GetString("org_id"), c.GetString("user_id"))
-	if errors.Is(err, spaces.ErrNoCurrentMembership) {
-		c.JSON(http.StatusForbidden, gin.H{"error": "current Space authority required"})
+	evidence, _, ok := s.resolveKindEvidence(c, request.SpaceRef,
+		s.spaceRepo.ResolvePersonalThreadDecisionEvidence, s.spaceRepo.ResolveSharedThreadDecisionEvidence,
+		"current recipient audience authority required")
+	if !ok {
 		return
 	}
-	if err != nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Space authority unavailable"})
-		return
-	}
-	var evidence spaces.PersonalThreadDecisionEvidence
-	if membership.Kind == spaces.KindPersonal {
-		evidence, err = s.spaceRepo.ResolvePersonalThreadDecisionEvidence(c.Request.Context(), request.SpaceRef, c.GetString("org_id"), c.GetString("user_id"))
-	} else {
-		evidence, err = s.spaceRepo.ResolveSharedThreadDecisionEvidence(c.Request.Context(), request.SpaceRef, c.GetString("org_id"), c.GetString("user_id"))
-	}
-	if err != nil {
-		c.JSON(http.StatusForbidden, gin.H{"error": "current recipient audience authority required"})
-		return
-	}
-	key, err := spaces.LoadSigningKeyFromEnv(os.Getenv)
-	if err != nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Space decision signer unavailable"})
-		return
-	}
-	decisionRef, err := randomDecisionPart()
-	if err != nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Space decision entropy unavailable"})
-		return
-	}
-	nonce, err := randomDecisionPart()
-	if err != nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Space decision entropy unavailable"})
+	key, decisionRef, nonce, ok := spaceDecisionMaterial(c)
+	if !ok {
 		return
 	}
 	decision, err := spaces.IssueThreadAppendDecision(evidence, spaces.ThreadAppendDecisionRequest{
@@ -660,9 +595,8 @@ func (s *Server) issueThreadAppendDecision(c *gin.Context) {
 		c.JSON(http.StatusForbidden, gin.H{"error": "Space thread append is not authorized"})
 		return
 	}
-	token, err := spaces.SignDecision(key, decision)
-	if err != nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Space decision signing failed"})
+	token, ok := signSpaceDecision(c, key, decision)
+	if !ok {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"data": gin.H{"decision": decision, "token": token}})
@@ -671,62 +605,75 @@ func (s *Server) issueThreadAppendDecision(c *gin.Context) {
 type sharedThreadReadDecisionRequest struct {
 	SpaceRef       string `json:"space_ref"`
 	IdempotencyKey string `json:"idempotency_key"`
+	// Optional; empty means Session Core, which is what every caller before
+	// S4.2 asked for implicitly. `model-plane-sandbox-manager` targets the
+	// background-process registry instead. Validated against a closed set in
+	// spaces.SharedThreadReadDecisionRequest.Validate, so an unknown value is
+	// refused here rather than signed into a token nothing accepts.
+	ServiceAudience string `json:"service_audience"`
 }
 
 // issueThreadReadDecision authorizes one short-lived read of a SHARED Space's
 // conversation record.
 //
-// Personal Spaces are refused rather than served, and that is not an omission:
-// a personal Space's threads are already readable by their only member through
-// the existing owner-bound path, so issuing a read decision there would add a
-// second, weaker way to reach the same rows. Model Plane keeps the owner check
-// for anything without one of these decisions.
+// Personal Spaces are refused on THIS path rather than served, and that is
+// not an omission: a personal Space's own threads are already readable by
+// their only member through the existing owner-bound path, so issuing a
+// shared-room read decision there would add a second, weaker way to reach
+// the same rows. Model Plane keeps the owner check for anything without one
+// of these decisions.
+//
+// What the owner-bound path does NOT cover is a thread a trusted SERVICE
+// created inside the owner's own personal Space on their behalf — concretely,
+// a schedule's result thread, owned by "service:orchestrator-core" per
+// session-core's PrepareScheduledRunThread (chat-wave2 "schedule" spec §1,
+// §2.4). There was previously no decision that Space's own owner could obtain
+// to read it: this is the smallest safe fix, not a relaxation of the shared
+// path above. When the shared-room resolution fails — which it always does
+// for a personal Space, since that resolver's own query excludes
+// space_kind='personal' — fall back to the narrow, owner-only
+// ResolveOwnScheduledThreadReadDecisionEvidence/IssueOwnScheduledThreadReadDecision
+// pair (same action id and schema as the shared path, so Session Core's
+// verifier needs no change) before giving up. A caller who is neither a
+// shared-room member nor that personal Space's own owner still gets the
+// original 403.
 func (s *Server) issueThreadReadDecision(c *gin.Context) {
-	if s.spaceRepo == nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Space authority repository unavailable"})
+	if !s.spaceRepoAvailable(c) {
 		return
 	}
 	var request sharedThreadReadDecisionRequest
-	if err := c.ShouldBindJSON(&request); err != nil || strings.TrimSpace(request.SpaceRef) == "" || strings.TrimSpace(request.IdempotencyKey) == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "space_ref and idempotency_key are required"})
+	if !bindSpaceDecisionBody(c, &request, "space_ref and idempotency_key are required", request.SpaceRef, request.IdempotencyKey) {
 		return
 	}
-	evidence, err := s.spaceRepo.ResolveSharedThreadReadDecisionEvidence(
-		c.Request.Context(), request.SpaceRef, c.GetString("org_id"), c.GetString("user_id"),
-	)
-	if errors.Is(err, spaces.ErrNoCurrentMembership) {
-		c.JSON(http.StatusForbidden, gin.H{"error": "current shared Space authority required"})
-		return
-	}
+	orgID, userID := c.GetString("org_id"), c.GetString("user_id")
+	issue := spaces.IssueSharedThreadReadDecision
+	evidence, err := s.spaceRepo.ResolveSharedThreadReadDecisionEvidence(c.Request.Context(), request.SpaceRef, orgID, userID)
 	if err != nil {
-		c.JSON(http.StatusForbidden, gin.H{"error": "shared Space read authority is not available"})
+		ownEvidence, ownErr := s.spaceRepo.ResolveOwnScheduledThreadReadDecisionEvidence(c.Request.Context(), request.SpaceRef, orgID, userID)
+		if ownErr != nil {
+			// Report the ORIGINAL shared-path error, which is the one whose
+			// message ("current shared Space authority required") matches
+			// what most callers of this endpoint are actually asking for; the
+			// own-scheduled fallback is the exception, not the norm.
+			writeSpaceEvidenceError(c, err, "current shared Space authority required", http.StatusForbidden, "shared Space read authority is not available")
+			return
+		}
+		evidence, issue = ownEvidence, spaces.IssueOwnScheduledThreadReadDecision
+	}
+	key, decisionRef, nonce, ok := spaceDecisionMaterial(c)
+	if !ok {
 		return
 	}
-	key, err := spaces.LoadSigningKeyFromEnv(os.Getenv)
-	if err != nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Space decision signer unavailable"})
-		return
-	}
-	decisionRef, err := randomDecisionPart()
-	if err != nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Space decision entropy unavailable"})
-		return
-	}
-	nonce, err := randomDecisionPart()
-	if err != nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Space decision entropy unavailable"})
-		return
-	}
-	decision, err := spaces.IssueSharedThreadReadDecision(evidence, spaces.SharedThreadReadDecisionRequest{
+	decision, err := issue(evidence, spaces.SharedThreadReadDecisionRequest{
 		DecisionRef: decisionRef, IdempotencyKey: request.IdempotencyKey, Nonce: nonce,
+		ServiceAudience: request.ServiceAudience,
 	}, time.Now().UTC())
 	if err != nil {
 		c.JSON(http.StatusForbidden, gin.H{"error": "Space thread read is not authorized"})
 		return
 	}
-	token, err := spaces.SignDecision(key, decision)
-	if err != nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Space decision signing failed"})
+	token, ok := signSpaceDecision(c, key, decision)
+	if !ok {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"data": gin.H{"decision": decision, "token": token}})
@@ -742,39 +689,21 @@ type personalRetrievalDecisionRequest struct {
 // and Control derives all resource, audience, privacy, and entitlement claims
 // from current state before Data sees the signed result.
 func (s *Server) issuePersonalRetrievalDecision(c *gin.Context) {
-	if s.spaceRepo == nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Space authority repository unavailable"})
+	if !s.spaceRepoAvailable(c) {
 		return
 	}
 	var request personalRetrievalDecisionRequest
-	if err := c.ShouldBindJSON(&request); err != nil || strings.TrimSpace(request.SpaceRef) == "" || strings.TrimSpace(request.IdempotencyKey) == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "space_ref and idempotency_key are required"})
+	if !bindSpaceDecisionBody(c, &request, "space_ref and idempotency_key are required", request.SpaceRef, request.IdempotencyKey) {
 		return
 	}
 	evidence, err := s.spaceRepo.ResolvePersonalRetrievalDecisionEvidence(
 		c.Request.Context(), request.SpaceRef, c.GetString("org_id"), c.GetString("user_id"),
 	)
-	if errors.Is(err, spaces.ErrNoCurrentMembership) {
-		c.JSON(http.StatusForbidden, gin.H{"error": "current personal Space authority required"})
+	if writeSpaceEvidenceError(c, err, "current personal Space authority required", http.StatusServiceUnavailable, "personal Space retrieval authority unavailable") {
 		return
 	}
-	if err != nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "personal Space retrieval authority unavailable"})
-		return
-	}
-	key, err := spaces.LoadSigningKeyFromEnv(os.Getenv)
-	if err != nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Space decision signer unavailable"})
-		return
-	}
-	decisionRef, err := randomDecisionPart()
-	if err != nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Space decision entropy unavailable"})
-		return
-	}
-	nonce, err := randomDecisionPart()
-	if err != nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Space decision entropy unavailable"})
+	key, decisionRef, nonce, ok := spaceDecisionMaterial(c)
+	if !ok {
 		return
 	}
 	decision, err := spaces.IssuePersonalRetrievalDecision(evidence, spaces.PersonalRetrievalDecisionRequest{
@@ -784,9 +713,8 @@ func (s *Server) issuePersonalRetrievalDecision(c *gin.Context) {
 		c.JSON(http.StatusForbidden, gin.H{"error": "personal Space retrieval is not authorized"})
 		return
 	}
-	token, err := spaces.SignDecision(key, decision)
-	if err != nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Space decision signing failed"})
+	token, ok := signSpaceDecision(c, key, decision)
+	if !ok {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"data": gin.H{"decision": decision, "token": token}})
@@ -799,51 +727,26 @@ func (s *Server) issuePersonalRetrievalDecision(c *gin.Context) {
 // call this one instead so a Space's own kind — not a caller's own guess —
 // decides which retrieval authority gets resolved.
 func (s *Server) issueRetrievalDecision(c *gin.Context) {
-	if s.spaceRepo == nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Space authority repository unavailable"})
+	if !s.spaceRepoAvailable(c) {
 		return
 	}
 	var request personalRetrievalDecisionRequest
-	if err := c.ShouldBindJSON(&request); err != nil || strings.TrimSpace(request.SpaceRef) == "" || strings.TrimSpace(request.IdempotencyKey) == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "space_ref and idempotency_key are required"})
+	if !bindSpaceDecisionBody(c, &request, "space_ref and idempotency_key are required", request.SpaceRef, request.IdempotencyKey) {
 		return
 	}
-	membership, err := s.spaceRepo.ResolveCurrentUserMembership(c.Request.Context(), request.SpaceRef, c.GetString("org_id"), c.GetString("user_id"))
-	if errors.Is(err, spaces.ErrNoCurrentMembership) {
-		c.JSON(http.StatusForbidden, gin.H{"error": "current Space authority required"})
+	evidence, membership, ok := s.resolveKindEvidence(c, request.SpaceRef,
+		s.spaceRepo.ResolvePersonalRetrievalDecisionEvidence, s.spaceRepo.ResolveSharedRetrievalDecisionEvidence,
+		"current retrieval authority required")
+	if !ok {
 		return
 	}
-	if err != nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Space authority unavailable"})
-		return
-	}
-	var evidence spaces.PersonalThreadDecisionEvidence
-	if membership.Kind == spaces.KindPersonal {
-		evidence, err = s.spaceRepo.ResolvePersonalRetrievalDecisionEvidence(c.Request.Context(), request.SpaceRef, c.GetString("org_id"), c.GetString("user_id"))
-	} else {
-		evidence, err = s.spaceRepo.ResolveSharedRetrievalDecisionEvidence(c.Request.Context(), request.SpaceRef, c.GetString("org_id"), c.GetString("user_id"))
-	}
-	if err != nil {
-		c.JSON(http.StatusForbidden, gin.H{"error": "current retrieval authority required"})
-		return
-	}
-	key, err := spaces.LoadSigningKeyFromEnv(os.Getenv)
-	if err != nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Space decision signer unavailable"})
-		return
-	}
-	decisionRef, err := randomDecisionPart()
-	if err != nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Space decision entropy unavailable"})
-		return
-	}
-	nonce, err := randomDecisionPart()
-	if err != nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Space decision entropy unavailable"})
+	key, decisionRef, nonce, ok := spaceDecisionMaterial(c)
+	if !ok {
 		return
 	}
 	issuerRequest := spaces.PersonalRetrievalDecisionRequest{DecisionRef: decisionRef, IdempotencyKey: request.IdempotencyKey, Nonce: nonce}
 	var decision spaces.Decision
+	var err error
 	if membership.Kind == spaces.KindPersonal {
 		decision, err = spaces.IssuePersonalRetrievalDecision(evidence, issuerRequest, time.Now().UTC())
 	} else {
@@ -853,9 +756,8 @@ func (s *Server) issueRetrievalDecision(c *gin.Context) {
 		c.JSON(http.StatusForbidden, gin.H{"error": "Space retrieval is not authorized"})
 		return
 	}
-	token, err := spaces.SignDecision(key, decision)
-	if err != nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Space decision signing failed"})
+	token, ok := signSpaceDecision(c, key, decision)
+	if !ok {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"data": gin.H{"decision": decision, "token": token}})
@@ -874,43 +776,136 @@ type scheduleCreateDecisionRequest struct {
 	IdempotencyKey string `json:"idempotency_key"`
 }
 
+type watchCreateDecisionRequest struct {
+	SpaceRef        string `json:"space_ref"`
+	WatchID         string `json:"watch_id"`
+	SourceKind      string `json:"source_kind"`
+	SourceRef       string `json:"source_ref"`
+	PredicateDigest string `json:"predicate_digest"`
+	IdempotencyKey  string `json:"idempotency_key"`
+}
+
+// issueWatchCreateDecision authorizes exactly one durable S4.3 watch.
+//
+// The predicate travels as a DIGEST, never as the matching rule itself: Control
+// does not need it to enforce Space policy, and binding the digest is what stops
+// a watch approved for "tell me when it says ERROR" from becoming "tell me
+// everything" after approval — which, for a watch, is the difference between a
+// notification and a transcript.
+func (s *Server) issueWatchCreateDecision(c *gin.Context) {
+	if !s.spaceRepoAvailable(c) {
+		return
+	}
+	var request watchCreateDecisionRequest
+	if !bindSpaceDecisionBody(c, &request,
+		"space_ref, watch_id, source_kind, source_ref, predicate_digest, and idempotency_key are required",
+		request.SpaceRef, request.WatchID, request.SourceKind, request.SourceRef,
+		request.PredicateDigest, request.IdempotencyKey) {
+		return
+	}
+	evidence, ok := s.resolvePersonalThreadEvidence(c, request.SpaceRef, c.GetString("org_id"), c.GetString("user_id"), "Space watch authority unavailable")
+	if !ok {
+		return
+	}
+	key, decisionRef, nonce, ok := spaceDecisionMaterial(c)
+	if !ok {
+		return
+	}
+	decision, err := spaces.IssueWatchCreateDecision(evidence, spaces.WatchCreateRequest{
+		DecisionRef: decisionRef, WatchID: request.WatchID,
+		SourceKind: request.SourceKind, SourceRef: request.SourceRef,
+		PredicateDigest: request.PredicateDigest,
+		IdempotencyKey:  request.IdempotencyKey, Nonce: nonce,
+	}, time.Now().UTC())
+	if err != nil {
+		c.JSON(http.StatusForbidden, gin.H{"error": "Space watch creation is not authorized"})
+		return
+	}
+	token, ok := signSpaceDecision(c, key, decision)
+	if !ok {
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"data": gin.H{"decision": decision, "token": token}})
+}
+
+type watchObserveDecisionRequest struct {
+	Intent struct {
+		OrgID           string `json:"org_id"`
+		SpaceRef        string `json:"space_ref"`
+		SubjectID       string `json:"subject_id"`
+		WatchID         string `json:"watch_id"`
+		SourceKind      string `json:"source_kind"`
+		SourceRef       string `json:"source_ref"`
+		PredicateDigest string `json:"predicate_digest"`
+		IdempotencyKey  string `json:"idempotency_key"`
+	} `json:"intent"`
+}
+
+// issueWatchObserveDecision is service-delegated: capability-core's sweeper
+// presents an immutable view of a watch record immediately before it records
+// anything a human can read.
+//
+// Unlike the create path there is no browser here, so the SUBJECT comes from
+// the intent and is checked against Control's own current membership rather
+// than taken on trust — the same shape the scheduled-run decision uses. The
+// matched content is deliberately absent: Control authorizes the disclosure, it
+// does not review it, and sending a program's output to the identity plane
+// would put unscreened payload somewhere it has no business being.
+func (s *Server) issueWatchObserveDecision(c *gin.Context) {
+	if !s.spaceRepoAvailable(c) {
+		return
+	}
+	var request watchObserveDecisionRequest
+	if !bindSpaceDecisionBody(c, &request,
+		"intent.org_id, intent.space_ref, intent.subject_id, intent.watch_id, and intent.idempotency_key are required",
+		request.Intent.OrgID, request.Intent.SpaceRef, request.Intent.SubjectID,
+		request.Intent.WatchID, request.Intent.IdempotencyKey) {
+		return
+	}
+	evidence, ok := s.resolvePersonalThreadEvidence(c, request.Intent.SpaceRef, request.Intent.OrgID, request.Intent.SubjectID, "Space watch authority unavailable")
+	if !ok {
+		return
+	}
+	key, decisionRef, nonce, ok := spaceDecisionMaterial(c)
+	if !ok {
+		return
+	}
+	decision, err := spaces.IssueWatchObserveDecision(evidence, spaces.WatchObserveIntent{
+		OrgID: request.Intent.OrgID, SpaceRef: request.Intent.SpaceRef,
+		SubjectID: request.Intent.SubjectID, WatchID: request.Intent.WatchID,
+		SourceKind: request.Intent.SourceKind, SourceRef: request.Intent.SourceRef,
+		PredicateDigest: request.Intent.PredicateDigest,
+		IdempotencyKey:  request.Intent.IdempotencyKey,
+	}, decisionRef, nonce, time.Now().UTC())
+	if err != nil {
+		c.JSON(http.StatusForbidden, gin.H{"error": "Space watch observation is not authorized"})
+		return
+	}
+	token, ok := signSpaceDecision(c, key, decision)
+	if !ok {
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"data": gin.H{"decision": decision, "token": token}})
+}
+
 // issueScheduleCreateDecision is gateway-delegated. The authenticated user is
 // resolved from the verified delegation; the browser cannot select a creator,
 // authority revision, audience, privacy policy, or model service audience.
 func (s *Server) issueScheduleCreateDecision(c *gin.Context) {
-	if s.spaceRepo == nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Space authority repository unavailable"})
+	if !s.spaceRepoAvailable(c) {
 		return
 	}
 	var request scheduleCreateDecisionRequest
-	if err := c.ShouldBindJSON(&request); err != nil || strings.TrimSpace(request.SpaceRef) == "" || strings.TrimSpace(request.ScheduleID) == "" || strings.TrimSpace(request.TemplateDigest) == "" || strings.TrimSpace(request.IdempotencyKey) == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "space_ref, schedule_id, template_digest, and idempotency_key are required"})
+	if !bindSpaceDecisionBody(c, &request, "space_ref, schedule_id, template_digest, and idempotency_key are required",
+		request.SpaceRef, request.ScheduleID, request.TemplateDigest, request.IdempotencyKey) {
 		return
 	}
-	evidence, err := s.spaceRepo.ResolvePersonalThreadDecisionEvidence(
-		c.Request.Context(), request.SpaceRef, c.GetString("org_id"), c.GetString("user_id"),
-	)
-	if errors.Is(err, spaces.ErrNoCurrentMembership) {
-		c.JSON(http.StatusForbidden, gin.H{"error": "current personal Space authority required"})
+	evidence, ok := s.resolvePersonalThreadEvidence(c, request.SpaceRef, c.GetString("org_id"), c.GetString("user_id"), "personal Space schedule authority unavailable")
+	if !ok {
 		return
 	}
-	if err != nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "personal Space schedule authority unavailable"})
-		return
-	}
-	key, err := spaces.LoadSigningKeyFromEnv(os.Getenv)
-	if err != nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Space decision signer unavailable"})
-		return
-	}
-	decisionRef, err := randomDecisionPart()
-	if err != nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Space decision entropy unavailable"})
-		return
-	}
-	nonce, err := randomDecisionPart()
-	if err != nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Space decision entropy unavailable"})
+	key, decisionRef, nonce, ok := spaceDecisionMaterial(c)
+	if !ok {
 		return
 	}
 	decision, err := spaces.IssueScheduleCreateDecision(evidence, spaces.ScheduleCreateRequest{
@@ -921,9 +916,8 @@ func (s *Server) issueScheduleCreateDecision(c *gin.Context) {
 		c.JSON(http.StatusForbidden, gin.H{"error": "Space schedule creation is not authorized"})
 		return
 	}
-	token, err := spaces.SignDecision(key, decision)
-	if err != nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Space decision signing failed"})
+	token, ok := signSpaceDecision(c, key, decision)
+	if !ok {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"data": gin.H{"decision": decision, "token": token}})
@@ -934,39 +928,22 @@ func (s *Server) issueScheduleCreateDecision(c *gin.Context) {
 // or resource reference. The separate Ingestion/Data owners must still
 // reauthorize a queued job immediately before each durable write.
 func (s *Server) issuePersonalImportDecision(c *gin.Context) {
-	if s.spaceRepo == nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Space authority repository unavailable"})
+	if !s.spaceRepoAvailable(c) {
 		return
 	}
 	var request personalImportDecisionRequest
-	if err := c.ShouldBindJSON(&request); err != nil || strings.TrimSpace(request.SpaceRef) == "" || strings.TrimSpace(request.IdempotencyKey) == "" || strings.TrimSpace(request.SourceType) == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "space_ref, source_type, and idempotency_key are required"})
+	if !bindSpaceDecisionBody(c, &request, "space_ref, source_type, and idempotency_key are required",
+		request.SpaceRef, request.IdempotencyKey, request.SourceType) {
 		return
 	}
 	evidence, err := s.spaceRepo.ResolvePersonalImportDecisionEvidence(
 		c.Request.Context(), request.SpaceRef, c.GetString("org_id"), c.GetString("user_id"),
 	)
-	if errors.Is(err, spaces.ErrNoCurrentMembership) {
-		c.JSON(http.StatusForbidden, gin.H{"error": "current personal Space authority required"})
+	if writeSpaceEvidenceError(c, err, "current personal Space authority required", http.StatusServiceUnavailable, "personal Space import authority unavailable") {
 		return
 	}
-	if err != nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "personal Space import authority unavailable"})
-		return
-	}
-	key, err := spaces.LoadSigningKeyFromEnv(os.Getenv)
-	if err != nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Space decision signer unavailable"})
-		return
-	}
-	decisionRef, err := randomDecisionPart()
-	if err != nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Space decision entropy unavailable"})
-		return
-	}
-	nonce, err := randomDecisionPart()
-	if err != nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Space decision entropy unavailable"})
+	key, decisionRef, nonce, ok := spaceDecisionMaterial(c)
+	if !ok {
 		return
 	}
 	decision, err := spaces.IssuePersonalImportDecision(evidence, spaces.PersonalImportDecisionRequest{
@@ -976,9 +953,8 @@ func (s *Server) issuePersonalImportDecision(c *gin.Context) {
 		c.JSON(http.StatusForbidden, gin.H{"error": "personal Space import is not authorized"})
 		return
 	}
-	token, err := spaces.SignDecision(key, decision)
-	if err != nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Space decision signing failed"})
+	token, ok := signSpaceDecision(c, key, decision)
+	if !ok {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"data": gin.H{"decision": decision, "token": token}})
@@ -1051,13 +1027,11 @@ type scheduledRunIntent struct {
 // target-bound decision for just that fire. A durable schedule's original
 // creation decision is never accepted here.
 func (s *Server) issueScheduleFireDecision(c *gin.Context) {
-	if s.spaceRepo == nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Space authority repository unavailable"})
+	if !s.spaceRepoAvailable(c) {
 		return
 	}
 	var request scheduleFireDecisionRequest
-	if err := c.ShouldBindJSON(&request); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "valid schedule fire intent is required"})
+	if !bindSpaceDecisionBody(c, &request, "valid schedule fire intent is required") {
 		return
 	}
 	intent := spaces.ScheduleFireIntent{
@@ -1069,30 +1043,12 @@ func (s *Server) issueScheduleFireDecision(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "valid schedule fire intent is required"})
 		return
 	}
-	evidence, err := s.spaceRepo.ResolvePersonalThreadDecisionEvidence(
-		c.Request.Context(), intent.SpaceRef, intent.OrgID, intent.SubjectID,
-	)
-	if errors.Is(err, spaces.ErrNoCurrentMembership) {
-		c.JSON(http.StatusForbidden, gin.H{"error": "current personal Space authority required"})
+	evidence, ok := s.resolvePersonalThreadEvidence(c, intent.SpaceRef, intent.OrgID, intent.SubjectID, "personal Space schedule authority unavailable")
+	if !ok {
 		return
 	}
-	if err != nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "personal Space schedule authority unavailable"})
-		return
-	}
-	key, err := spaces.LoadSigningKeyFromEnv(os.Getenv)
-	if err != nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Space decision signer unavailable"})
-		return
-	}
-	decisionRef, err := randomDecisionPart()
-	if err != nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Space decision entropy unavailable"})
-		return
-	}
-	nonce, err := randomDecisionPart()
-	if err != nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Space decision entropy unavailable"})
+	key, decisionRef, nonce, ok := spaceDecisionMaterial(c)
+	if !ok {
 		return
 	}
 	decision, err := spaces.IssueScheduleFireDecision(evidence, intent, decisionRef, nonce, time.Now().UTC())
@@ -1100,25 +1056,106 @@ func (s *Server) issueScheduleFireDecision(c *gin.Context) {
 		c.JSON(http.StatusForbidden, gin.H{"error": "Space schedule fire is not authorized"})
 		return
 	}
-	token, err := spaces.SignDecision(key, decision)
-	if err != nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Space decision signing failed"})
+	token, ok := signSpaceDecision(c, key, decision)
+	if !ok {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"data": gin.H{"decision": decision, "token": token}})
+}
+
+type sandboxCapabilityDecisionRequest struct {
+	Intent sandboxCapabilityIntent `json:"intent"`
+}
+
+type sandboxCapabilityIntent struct {
+	OrgID          string `json:"org_id"`
+	SpaceRef       string `json:"space_ref"`
+	SubjectID      string `json:"subject_id"`
+	BackendID      string `json:"backend_id"`
+	ProfileDigest  string `json:"profile_digest"`
+	Persistence    string `json:"persistence"`
+	Processes      string `json:"processes"`
+	Backup         bool   `json:"backup"`
+	Egress         string `json:"egress"`
+	CredentialMode string `json:"credential_mode"`
+	IdempotencyKey string `json:"idempotency_key"`
+}
+
+// sandboxCapabilityClaims is the unsigned sidecar returned alongside the
+// signed decision token. The decision's PayloadDigest binds to exactly these
+// values (see spaces.spaceCapabilityPayloadDigest); sandbox-manager
+// recomputes that digest from this JSON before trusting BackendID, so
+// tampering with the plaintext claims invalidates the digest check even
+// though the claims are not signed directly.
+type sandboxCapabilityClaims struct {
+	BackendID      string `json:"backend_id"`
+	ProfileDigest  string `json:"profile_digest"`
+	Persistence    string `json:"persistence"`
+	Processes      string `json:"processes"`
+	Backup         bool   `json:"backup"`
+	Egress         string `json:"egress"`
+	CredentialMode string `json:"credential_mode"`
+}
+
+// issueSpaceCapabilityDecision is deliberately execution-core-only. It
+// re-checks current personal-Space sandbox entitlement before binding a
+// freshly measured substrate claim to one backend, closing S3.2's "bind this
+// substrate truth to a signed Space capability profile and backend-pinned
+// lease" requirement — see
+// apps/Frontend Plane/verevonv3/docs/S3_2_SANDBOX_LEASE_CLOSEOUT_DESIGN_2026-09-10.md.
+func (s *Server) issueSpaceCapabilityDecision(c *gin.Context) {
+	if !s.spaceRepoAvailable(c) {
+		return
+	}
+	var request sandboxCapabilityDecisionRequest
+	if !bindSpaceDecisionBody(c, &request, "valid space capability intent is required") {
+		return
+	}
+	intent := spaces.SpaceCapabilityIntent{
+		OrgID: request.Intent.OrgID, SpaceRef: request.Intent.SpaceRef, SubjectID: request.Intent.SubjectID,
+		BackendID: request.Intent.BackendID, ProfileDigest: request.Intent.ProfileDigest,
+		Persistence: request.Intent.Persistence, Processes: request.Intent.Processes,
+		Backup: request.Intent.Backup, Egress: request.Intent.Egress,
+		CredentialMode: request.Intent.CredentialMode, IdempotencyKey: request.Intent.IdempotencyKey,
+	}
+	if err := intent.Validate(); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "valid space capability intent is required"})
+		return
+	}
+	evidence, ok := s.resolvePersonalThreadEvidence(c, intent.SpaceRef, intent.OrgID, intent.SubjectID, "personal Space sandbox authority unavailable")
+	if !ok {
+		return
+	}
+	key, decisionRef, nonce, ok := spaceDecisionMaterial(c)
+	if !ok {
+		return
+	}
+	decision, err := spaces.IssueSpaceCapabilityDecision(evidence, intent, decisionRef, nonce, time.Now().UTC())
+	if err != nil {
+		c.JSON(http.StatusForbidden, gin.H{"error": "Space sandbox capability is not authorized"})
+		return
+	}
+	token, ok := signSpaceDecision(c, key, decision)
+	if !ok {
+		return
+	}
+	claims := sandboxCapabilityClaims{
+		BackendID: intent.BackendID, ProfileDigest: intent.ProfileDigest,
+		Persistence: intent.Persistence, Processes: intent.Processes,
+		Backup: intent.Backup, Egress: intent.Egress, CredentialMode: intent.CredentialMode,
+	}
+	c.JSON(http.StatusOK, gin.H{"data": gin.H{"decision": token, "claims": claims}})
 }
 
 // issueScheduledRunDecision authorizes only preparation of the service-owned
 // thread/run for one already-claimed fire. It is not user delegation and the
 // returned bearer must travel only on Capability Core's direct Session Core RPC.
 func (s *Server) issueScheduledRunDecision(c *gin.Context) {
-	if s.spaceRepo == nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Space authority repository unavailable"})
+	if !s.spaceRepoAvailable(c) {
 		return
 	}
 	var request scheduledRunDecisionRequest
-	if err := c.ShouldBindJSON(&request); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "valid scheduled run intent is required"})
+	if !bindSpaceDecisionBody(c, &request, "valid scheduled run intent is required") {
 		return
 	}
 	intent := spaces.ScheduledRunIntent{
@@ -1130,28 +1167,12 @@ func (s *Server) issueScheduledRunDecision(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "valid scheduled run intent is required"})
 		return
 	}
-	evidence, err := s.spaceRepo.ResolvePersonalThreadDecisionEvidence(c.Request.Context(), intent.SpaceRef, intent.OrgID, intent.SubjectID)
-	if errors.Is(err, spaces.ErrNoCurrentMembership) {
-		c.JSON(http.StatusForbidden, gin.H{"error": "current personal Space authority required"})
+	evidence, ok := s.resolvePersonalThreadEvidence(c, intent.SpaceRef, intent.OrgID, intent.SubjectID, "personal Space scheduled run authority unavailable")
+	if !ok {
 		return
 	}
-	if err != nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "personal Space scheduled run authority unavailable"})
-		return
-	}
-	key, err := spaces.LoadSigningKeyFromEnv(os.Getenv)
-	if err != nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Space decision signer unavailable"})
-		return
-	}
-	decisionRef, err := randomDecisionPart()
-	if err != nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Space decision entropy unavailable"})
-		return
-	}
-	nonce, err := randomDecisionPart()
-	if err != nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Space decision entropy unavailable"})
+	key, decisionRef, nonce, ok := spaceDecisionMaterial(c)
+	if !ok {
 		return
 	}
 	decision, err := spaces.IssueScheduledRunDecision(evidence, intent, decisionRef, nonce, time.Now().UTC())
@@ -1159,9 +1180,8 @@ func (s *Server) issueScheduledRunDecision(c *gin.Context) {
 		c.JSON(http.StatusForbidden, gin.H{"error": "Space scheduled run is not authorized"})
 		return
 	}
-	token, err := spaces.SignDecision(key, decision)
-	if err != nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Space decision signing failed"})
+	token, ok := signSpaceDecision(c, key, decision)
+	if !ok {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"data": gin.H{
@@ -1174,13 +1194,11 @@ func (s *Server) issueScheduledRunDecision(c *gin.Context) {
 // Session Core run-creation boundary. Its bearer is direct-hop only and never
 // belongs in Temporal history, task rows, or events.
 func (s *Server) issueScheduledRunExecutionDecision(c *gin.Context) {
-	if s.spaceRepo == nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Space authority repository unavailable"})
+	if !s.spaceRepoAvailable(c) {
 		return
 	}
 	var request scheduledRunExecutionDecisionRequest
-	if err := c.ShouldBindJSON(&request); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "valid scheduled run execution intent is required"})
+	if !bindSpaceDecisionBody(c, &request, "valid scheduled run execution intent is required") {
 		return
 	}
 	intent := spaces.ScheduledRunIntent{
@@ -1192,28 +1210,12 @@ func (s *Server) issueScheduledRunExecutionDecision(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "valid scheduled run execution intent is required"})
 		return
 	}
-	evidence, err := s.spaceRepo.ResolvePersonalThreadDecisionEvidence(c.Request.Context(), intent.SpaceRef, intent.OrgID, intent.SubjectID)
-	if errors.Is(err, spaces.ErrNoCurrentMembership) {
-		c.JSON(http.StatusForbidden, gin.H{"error": "current personal Space authority required"})
+	evidence, ok := s.resolvePersonalThreadEvidence(c, intent.SpaceRef, intent.OrgID, intent.SubjectID, "personal Space scheduled run authority unavailable")
+	if !ok {
 		return
 	}
-	if err != nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "personal Space scheduled run authority unavailable"})
-		return
-	}
-	key, err := spaces.LoadSigningKeyFromEnv(os.Getenv)
-	if err != nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Space decision signer unavailable"})
-		return
-	}
-	decisionRef, err := randomDecisionPart()
-	if err != nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Space decision entropy unavailable"})
-		return
-	}
-	nonce, err := randomDecisionPart()
-	if err != nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Space decision entropy unavailable"})
+	key, decisionRef, nonce, ok := spaceDecisionMaterial(c)
+	if !ok {
 		return
 	}
 	decision, err := spaces.IssueScheduledRunExecutionDecision(evidence, intent, request.Intent.ThreadID, decisionRef, nonce, time.Now().UTC())
@@ -1221,9 +1223,8 @@ func (s *Server) issueScheduledRunExecutionDecision(c *gin.Context) {
 		c.JSON(http.StatusForbidden, gin.H{"error": "Space scheduled run execution is not authorized"})
 		return
 	}
-	token, err := spaces.SignDecision(key, decision)
-	if err != nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Space decision signing failed"})
+	token, ok := signSpaceDecision(c, key, decision)
+	if !ok {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"data": gin.H{"decision": decision, "token": token}})
@@ -1234,13 +1235,15 @@ func (s *Server) issueScheduledRunExecutionDecision(c *gin.Context) {
 // returned only to the authenticated Orchestrator workload; it is never a
 // user delegation and never authorizes an owner-plane effect by itself.
 func (s *Server) issueScheduledStepDecision(c *gin.Context) {
-	if s.spaceRepo == nil || s.scheduledStepAuthority == nil {
+	if !s.spaceRepoAvailable(c) {
+		return
+	}
+	if s.scheduledStepAuthority == nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Space authority repository unavailable"})
 		return
 	}
 	var request scheduledStepDecisionRequest
-	if err := c.ShouldBindJSON(&request); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "valid scheduled step intent is required"})
+	if !bindSpaceDecisionBody(c, &request, "valid scheduled step intent is required") {
 		return
 	}
 	intent := spaces.ScheduledStepIntent{
@@ -1276,28 +1279,12 @@ func (s *Server) issueScheduledStepDecision(c *gin.Context) {
 		c.JSON(http.StatusForbidden, gin.H{"error": "prepared scheduled step authority is invalid"})
 		return
 	}
-	evidence, err := s.spaceRepo.ResolvePersonalThreadDecisionEvidence(c.Request.Context(), intent.SpaceRef, intent.OrgID, intent.SubjectID)
-	if errors.Is(err, spaces.ErrNoCurrentMembership) {
-		c.JSON(http.StatusForbidden, gin.H{"error": "current personal Space authority required"})
+	evidence, ok := s.resolvePersonalThreadEvidence(c, intent.SpaceRef, intent.OrgID, intent.SubjectID, "personal Space scheduled step authority unavailable")
+	if !ok {
 		return
 	}
-	if err != nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "personal Space scheduled step authority unavailable"})
-		return
-	}
-	key, err := spaces.LoadSigningKeyFromEnv(os.Getenv)
-	if err != nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Space decision signer unavailable"})
-		return
-	}
-	decisionRef, err := randomDecisionPart()
-	if err != nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Space decision entropy unavailable"})
-		return
-	}
-	nonce, err := randomDecisionPart()
-	if err != nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Space decision entropy unavailable"})
+	key, decisionRef, nonce, ok := spaceDecisionMaterial(c)
+	if !ok {
 		return
 	}
 	decision, err := spaces.IssueScheduledStepDecision(evidence, intent, decisionRef, nonce, time.Now().UTC())
@@ -1305,9 +1292,8 @@ func (s *Server) issueScheduledStepDecision(c *gin.Context) {
 		c.JSON(http.StatusForbidden, gin.H{"error": "scheduled step is not authorized"})
 		return
 	}
-	token, err := spaces.SignDecision(key, decision)
-	if err != nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Space decision signing failed"})
+	token, ok := signSpaceDecision(c, key, decision)
+	if !ok {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"data": gin.H{"decision": decision, "token": token}})
@@ -1331,13 +1317,11 @@ type personalImportExecutionIntent struct {
 // worker uses it immediately and never stores it. A service credential alone
 // cannot substitute different current policy, resource, or audience claims.
 func (s *Server) issuePersonalImportExecutionDecision(c *gin.Context) {
-	if s.spaceRepo == nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Space authority repository unavailable"})
+	if !s.spaceRepoAvailable(c) {
 		return
 	}
 	var request personalImportExecutionDecisionRequest
-	if err := c.ShouldBindJSON(&request); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "valid import execution intent is required"})
+	if !bindSpaceDecisionBody(c, &request, "valid import execution intent is required") {
 		return
 	}
 	intent := spaces.PersonalImportExecutionIntent{
@@ -1353,27 +1337,11 @@ func (s *Server) issuePersonalImportExecutionDecision(c *gin.Context) {
 	evidence, err := s.spaceRepo.ResolvePersonalImportDecisionEvidence(
 		c.Request.Context(), intent.SpaceRef, intent.OrgID, intent.SubjectID,
 	)
-	if errors.Is(err, spaces.ErrNoCurrentMembership) {
-		c.JSON(http.StatusForbidden, gin.H{"error": "current personal Space authority required"})
+	if writeSpaceEvidenceError(c, err, "current personal Space authority required", http.StatusServiceUnavailable, "personal Space import authority unavailable") {
 		return
 	}
-	if err != nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "personal Space import authority unavailable"})
-		return
-	}
-	key, err := spaces.LoadSigningKeyFromEnv(os.Getenv)
-	if err != nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Space decision signer unavailable"})
-		return
-	}
-	decisionRef, err := randomDecisionPart()
-	if err != nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Space decision entropy unavailable"})
-		return
-	}
-	nonce, err := randomDecisionPart()
-	if err != nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Space decision entropy unavailable"})
+	key, decisionRef, nonce, ok := spaceDecisionMaterial(c)
+	if !ok {
 		return
 	}
 	decision, err := spaces.IssuePersonalImportExecutionDecision(evidence, intent, decisionRef, nonce, time.Now().UTC())
@@ -1381,17 +1349,15 @@ func (s *Server) issuePersonalImportExecutionDecision(c *gin.Context) {
 		c.JSON(http.StatusForbidden, gin.H{"error": "personal Space import execution is not authorized"})
 		return
 	}
-	token, err := spaces.SignDecision(key, decision)
-	if err != nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Space decision signing failed"})
+	token, ok := signSpaceDecision(c, key, decision)
+	if !ok {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"data": gin.H{"decision": decision, "token": token}})
 }
 
 func (s *Server) upsertSpaceEffectPolicy(c *gin.Context) {
-	if s.spaceRepo == nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Space authority repository unavailable"})
+	if !s.spaceRepoAvailable(c) {
 		return
 	}
 	var policy spaces.EffectPolicy
@@ -1417,4 +1383,113 @@ func randomDecisionPart() (string, error) {
 		return "", err
 	}
 	return base64.RawURLEncoding.EncodeToString(bytes), nil
+}
+
+// spaceRepoAvailable writes a 503 and returns false when the Space authority
+// repository is not wired.
+func (s *Server) spaceRepoAvailable(c *gin.Context) bool {
+	if s.spaceRepo == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Space authority repository unavailable"})
+		return false
+	}
+	return true
+}
+
+// bindSpaceDecisionBody decodes the request body and enforces the listed
+// fields as non-empty, writing a 400 with errMsg and returning false on
+// failure.
+func bindSpaceDecisionBody(c *gin.Context, request any, errMsg string, required ...string) bool {
+	if err := c.ShouldBindJSON(request); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": errMsg})
+		return false
+	}
+	for _, value := range required {
+		if strings.TrimSpace(value) == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": errMsg})
+			return false
+		}
+	}
+	return true
+}
+
+// spaceDecisionMaterial loads the Space decision signing key and mints the
+// decision reference and nonce, writing a 503 and returning ok=false on
+// failure.
+func spaceDecisionMaterial(c *gin.Context) (key spaces.SigningKey, decisionRef, nonce string, ok bool) {
+	key, err := spaces.LoadSigningKeyFromEnv(os.Getenv)
+	if err != nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Space decision signer unavailable"})
+		return spaces.SigningKey{}, "", "", false
+	}
+	decisionRef, err = randomDecisionPart()
+	if err != nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Space decision entropy unavailable"})
+		return spaces.SigningKey{}, "", "", false
+	}
+	nonce, err = randomDecisionPart()
+	if err != nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Space decision entropy unavailable"})
+		return spaces.SigningKey{}, "", "", false
+	}
+	return key, decisionRef, nonce, true
+}
+
+// signSpaceDecision signs the decision, writing a 503 and returning ok=false
+// on failure.
+func signSpaceDecision(c *gin.Context, key spaces.SigningKey, decision spaces.Decision) (string, bool) {
+	token, err := spaces.SignDecision(key, decision)
+	if err != nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Space decision signing failed"})
+		return "", false
+	}
+	return token, true
+}
+
+// writeSpaceEvidenceError maps an evidence-resolution failure to its
+// fail-closed response, returning true when the handler must stop.
+func writeSpaceEvidenceError(c *gin.Context, err error, membershipMsg string, otherStatus int, otherMsg string) bool {
+	if errors.Is(err, spaces.ErrNoCurrentMembership) {
+		c.JSON(http.StatusForbidden, gin.H{"error": membershipMsg})
+		return true
+	}
+	if err != nil {
+		c.JSON(otherStatus, gin.H{"error": otherMsg})
+		return true
+	}
+	return false
+}
+
+// resolvePersonalThreadEvidence loads current personal-Space thread evidence,
+// writing the fail-closed response and returning ok=false on error.
+func (s *Server) resolvePersonalThreadEvidence(c *gin.Context, spaceRef, orgID, subjectID, unavailableMsg string) (spaces.PersonalThreadDecisionEvidence, bool) {
+	evidence, err := s.spaceRepo.ResolvePersonalThreadDecisionEvidence(c.Request.Context(), spaceRef, orgID, subjectID)
+	if writeSpaceEvidenceError(c, err, "current personal Space authority required", http.StatusServiceUnavailable, unavailableMsg) {
+		return spaces.PersonalThreadDecisionEvidence{}, false
+	}
+	return evidence, true
+}
+
+// resolveKindEvidence resolves the current user's Space membership and then
+// dispatches to the personal or shared evidence resolver for its kind,
+// writing the fail-closed response and returning ok=false on error.
+func (s *Server) resolveKindEvidence(
+	c *gin.Context,
+	spaceRef string,
+	personal, shared func(ctx context.Context, spaceRef, orgID, subjectID string) (spaces.PersonalThreadDecisionEvidence, error),
+	audienceMsg string,
+) (spaces.PersonalThreadDecisionEvidence, *spaces.CurrentMembership, bool) {
+	membership, err := s.spaceRepo.ResolveCurrentUserMembership(c.Request.Context(), spaceRef, c.GetString("org_id"), c.GetString("user_id"))
+	if writeSpaceEvidenceError(c, err, "current Space authority required", http.StatusServiceUnavailable, "Space authority unavailable") {
+		return spaces.PersonalThreadDecisionEvidence{}, nil, false
+	}
+	resolver := shared
+	if membership.Kind == spaces.KindPersonal {
+		resolver = personal
+	}
+	evidence, err := resolver(c.Request.Context(), spaceRef, c.GetString("org_id"), c.GetString("user_id"))
+	if err != nil {
+		c.JSON(http.StatusForbidden, gin.H{"error": audienceMsg})
+		return spaces.PersonalThreadDecisionEvidence{}, nil, false
+	}
+	return evidence, membership, true
 }

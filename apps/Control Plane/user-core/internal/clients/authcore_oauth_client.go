@@ -103,7 +103,7 @@ func (c *AuthCoreOAuthClient) RefreshTokenByRef(ctx context.Context, tokenRef st
 	if err != nil {
 		return nil, fmt.Errorf("call auth-core refresh: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -184,7 +184,7 @@ func (c *AuthCoreOAuthClient) GetTokenByRef(ctx context.Context, tokenRef string
 	if err != nil {
 		return nil, fmt.Errorf("call auth-core: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {

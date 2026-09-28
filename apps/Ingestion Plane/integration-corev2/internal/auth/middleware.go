@@ -40,6 +40,16 @@ type Principal struct {
 	Email          string   `json:"email"`
 	PrincipalType  string   `json:"principalType"`
 	Scopes         []string `json:"scopes"`
+	// DelegatedUserID is the end user a service principal names itself as
+	// acting for, never trusted from the caller's own claim of identity.
+	// It is populated only from a verified `acting_user_id` claim on an
+	// auth-core-issued scoped service token (see
+	// controlplane.AuthClient.VerifyToken) — a bare service credential with
+	// no delegation leaves this empty. Never set for an interactive/session
+	// principal (PrincipalType == "user"): that principal's own UserID is
+	// already the verified end user. Read this only through
+	// Principal.EffectiveUserID, never directly.
+	DelegatedUserID string `json:"-"`
 }
 
 func (p Principal) HasScope(scope string) bool {
@@ -49,6 +59,45 @@ func (p Principal) HasScope(scope string) bool {
 		}
 	}
 	return false
+}
+
+// EffectiveUserID returns the human end-user identity this request is
+// acting for, or "" when no end user is named. Used to enforce owner ruling
+// (5): a personal Microsoft/Google connection (mail, OneDrive/Drive,
+// calendar, contacts) is usable only by the user who connected it,
+// including when a service acts "for" that user — so a bare service
+// credential with no named end user must resolve to "", never to a
+// wildcard or to the service's own identity.
+//
+// isInternalCall must be IsInternalCall(c) for the very same request: it is
+// the one signal that tells apart the two paths that both produce
+// PrincipalType == "service" but give UserID a different meaning on each.
+//
+//   - isInternalCall == true (legacy internal-API-key path,
+//     syntheticInternalPrincipal): UserID itself IS the delegation — the
+//     caller-supplied userId (from X-User-ID / body / query — see
+//     requestValue) — unless it is the internal-service sentinel, in which
+//     case no end user was named.
+//   - isInternalCall == false (a verified bearer token — interactive
+//     session or an auth-core-issued scoped service token):
+//   - PrincipalType == "user": always its own UserID — a verified end
+//     user by construction.
+//   - PrincipalType == "service" (e.g. execution-core's scoped ingestion
+//     token): DelegatedUserID only, set only from a verified
+//     acting_user_id claim. UserID on this path holds the SERVICE's own
+//     subject (service_id — see controlplane.AuthClient.VerifyToken),
+//     never a human, so it is never used here.
+func (p Principal) EffectiveUserID(isInternalCall bool) string {
+	if isInternalCall {
+		if userID := strings.TrimSpace(p.UserID); userID != "" && userID != internalUserID {
+			return userID
+		}
+		return ""
+	}
+	if p.PrincipalType == "user" {
+		return strings.TrimSpace(p.UserID)
+	}
+	return strings.TrimSpace(p.DelegatedUserID)
 }
 
 type TokenVerifier interface {

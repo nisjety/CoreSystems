@@ -416,6 +416,22 @@ export async function createDocument(
   })
 }
 
+/**
+ * Remove one document from the knowledge base.
+ *
+ * The knowledge base was append-only from the product's side until this
+ * existed: a chat attachment is ingested as a durable, org-wide document, and
+ * nothing in the UI could take it back out again — a demo source pack uploaded
+ * once kept surfacing in unrelated conversations' knowledge search.
+ */
+export async function deleteDocument(orgId: string, id: string, signal?: AbortSignal): Promise<void> {
+  await requestJson<unknown>(`/api/v1/knowledge/documents/${encodeURIComponent(id)}`, {
+    method: 'DELETE',
+    headers: orgHeaders(orgId),
+    signal,
+  })
+}
+
 export async function startCrawl(
   orgId: string,
   body: CrawlRequest,

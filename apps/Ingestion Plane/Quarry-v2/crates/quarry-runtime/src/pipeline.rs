@@ -64,7 +64,9 @@ pub struct PageRunner {
     /// hits return instantly without going to live SERPs.
     /// Indexing is best-effort + fire-and-forget — index failures never
     /// fail the scrape. Skipped entirely when `zdr=on` (the local index
-    /// is a durable artifact; ZDR forbids durable writes).
+    /// is a durable artifact; ZDR forbids durable writes), and skipped for
+    /// this run when [`Self::org_id`] is unset: see [`LocalIndexWriteback`]
+    /// for why an untenanted document cannot be stored at all.
     pub local_index: Option<TantivyLocalIndex>,
     /// Cycle 21 / cluster #2 — RunPolicy bag (Determinism + sub-policies).
     /// Defaults to `best_effort`. Stamped into output meta so consumers
@@ -109,7 +111,151 @@ fn page_event_persistence_allowed(zdr_mode: ZdrMode) -> bool {
     zdr::guard(zdr_mode, WriteKind::Event).is_ok()
 }
 
+/// A successfully fetched and extracted page, ready for the local corpus.
+///
+/// Deliberately not `NormalizedOutput`: the point of this type is that any
+/// path which ends up holding a URL, a title and some markdown can write back
+/// without first assembling a full pipeline output. The answer pipeline and
+/// the `/v1/search` page-read path have exactly that much and no more.
+pub struct IndexedPage {
+    /// Final (post-redirect) URL. Doubles as the corpus primary key, so it
+    /// must be the URL we actually read, not the one that was requested.
+    pub url: String,
+    pub title: Option<String>,
+    pub markdown: String,
+    pub fingerprint: String,
+    pub fetched_at: chrono::DateTime<Utc>,
+    /// Verified tenant. `None` means "not known here" — such a page is
+    /// dropped, never stored under a placeholder. See [`WritebackDecision`].
+    pub org_id: Option<String>,
+}
+
+/// Why a page was, or was not, written back to the local corpus.
+///
+/// Split out from the spawn so the rules are unit-testable without an index,
+/// a runtime, or a fetch — and so a future caller adding a write-back site
+/// cannot accidentally implement a *different* set of rules.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WritebackDecision {
+    Index,
+    /// No local index configured (test harnesses, dev runs without a corpus).
+    SkippedNoIndex,
+    /// The local corpus is a durable artifact and ZDR forbids durable writes.
+    SkippedZdr,
+    /// No verified tenant for this page. Indexing it would either invent an
+    /// empty-string tenant or require an unscoped read to retrieve it — both
+    /// of which are cross-tenant leaks. Dropping the page is the only safe
+    /// option; a thinner corpus is the correct trade.
+    SkippedUnknownOrg,
+    /// Nothing worth indexing: extraction produced no text.
+    SkippedEmptyBody,
+}
+
+/// Fire-and-forget write-back into the local Tantivy corpus.
+///
+/// Every path that successfully fetches and extracts a page should submit it
+/// here. Previously only the scrape pipeline did, which is why the local tier
+/// stayed thin no matter how heavily `/v1/search` and `/v1/answer` were used:
+/// those paths fetch and extract pages too, and threw the text away.
+///
+/// The write is spawned, never awaited, and never surfaces an error to the
+/// caller — a corpus write must not add latency to, or fail, a user-facing
+/// request. That also means it must not be given a bounded channel or any
+/// other backpressure that could push back into the request path.
+///
+/// The scrape pipeline submits here. The answer pipeline and the `/v1/search`
+/// page-read path do not yet: their fetch goes through
+/// [`crate::answer::MarkdownFetcher`], whose `(url, zdr)` signature carries no
+/// tenant, and a write-back with no tenant is exactly what this hook refuses.
+/// Closing that gap means threading the verified `org_id` to those fetch sites;
+/// the hook is ready for them as-is.
+#[derive(Clone, Default)]
+pub struct LocalIndexWriteback {
+    index: Option<TantivyLocalIndex>,
+    zdr: ZdrMode,
+}
+
+impl LocalIndexWriteback {
+    pub fn new(index: Option<TantivyLocalIndex>, zdr: ZdrMode) -> Self {
+        Self { index, zdr }
+    }
+
+    /// Whether a submission could reach an index at all. Callers can use this
+    /// to skip assembling an [`IndexedPage`] they know will be dropped.
+    pub fn is_enabled(&self) -> bool {
+        self.index.is_some() && zdr::guard(self.zdr, WriteKind::Artifact).is_ok()
+    }
+
+    /// Classify a page without performing any write.
+    pub fn decide(&self, page: &IndexedPage) -> WritebackDecision {
+        if self.index.is_none() {
+            return WritebackDecision::SkippedNoIndex;
+        }
+        if zdr::guard(self.zdr, WriteKind::Artifact).is_err() {
+            return WritebackDecision::SkippedZdr;
+        }
+        match page.org_id.as_deref().map(str::trim) {
+            Some(org) if !org.is_empty() => {}
+            _ => return WritebackDecision::SkippedUnknownOrg,
+        }
+        if page.markdown.trim().is_empty() {
+            return WritebackDecision::SkippedEmptyBody;
+        }
+        WritebackDecision::Index
+    }
+
+    /// Submit a page. Returns the decision so callers and tests can observe
+    /// it synchronously; the actual index write happens on a detached task.
+    pub fn submit(&self, page: IndexedPage) -> WritebackDecision {
+        let decision = self.decide(&page);
+        if decision != WritebackDecision::Index {
+            tracing::debug!(
+                url = %page.url,
+                decision = ?decision,
+                "local index write-back skipped"
+            );
+            return decision;
+        }
+        // `decide` already established both of these, but re-deriving them by
+        // pattern rather than by `expect` keeps a future edit to `decide` from
+        // turning a skip into a panic on a user-facing request path.
+        let Some(idx) = self.index.clone() else {
+            return WritebackDecision::SkippedNoIndex;
+        };
+        let org_id = match page.org_id.as_deref().map(str::trim) {
+            Some(org) if !org.is_empty() => org.to_string(),
+            _ => return WritebackDecision::SkippedUnknownOrg,
+        };
+        let host = Url::parse(&page.url)
+            .ok()
+            .and_then(|u| u.host_str().map(|s| s.to_string()))
+            .unwrap_or_default();
+        let doc = LocalDocument {
+            url: page.url,
+            title: page.title.unwrap_or_default(),
+            body: page.markdown,
+            host,
+            org_id,
+            fingerprint: page.fingerprint,
+            fetched_at: page.fetched_at,
+        };
+        tokio::spawn(async move {
+            if let Err(e) = idx.add_document(doc).await {
+                tracing::warn!(error = %e, "local index add_document failed (non-fatal)");
+            }
+        });
+        decision
+    }
+}
+
 impl PageRunner {
+    /// The corpus write-back hook for this run, carrying this run's ZDR
+    /// posture. Built per call rather than stored so it can never drift out
+    /// of sync with `self.zdr`.
+    fn local_index_writeback(&self) -> LocalIndexWriteback {
+        LocalIndexWriteback::new(self.local_index.clone(), self.zdr)
+    }
+
     async fn emit_page_event(
         &self,
         run_id: RunKind,
@@ -695,31 +841,16 @@ impl PageRunner {
 
         // Cycle 19 / cluster #16: index successful scrape into the local
         // Tantivy corpus so subsequent `/v1/search` queries hit warm.
-        // Best-effort + fire-and-forget — index failures never fail the
-        // scrape. Skipped under ZDR (the index is a durable artifact;
-        // ZDR forbids durable writes).
-        if let Some(idx) = self.local_index.clone() {
-            if zdr::guard(self.zdr, WriteKind::Artifact).is_ok() {
-                let host = url::Url::parse(resp.final_url.as_ref())
-                    .ok()
-                    .and_then(|u| u.host_str().map(|s| s.to_string()))
-                    .unwrap_or_default();
-                let doc = LocalDocument {
-                    url: resp.final_url.to_string(),
-                    title: output.metadata.title.clone().unwrap_or_default(),
-                    body: md.clone(),
-                    host,
-                    org_id: self.org_id.clone().unwrap_or_default(),
-                    fingerprint: fp.0.clone(),
-                    fetched_at,
-                };
-                tokio::spawn(async move {
-                    if let Err(e) = idx.add_document(doc).await {
-                        tracing::warn!(error = %e, "local index add_document failed (non-fatal)");
-                    }
-                });
-            }
-        }
+        // Everything about the decision — ZDR, tenant, empty body — lives in
+        // the shared hook; see [`LocalIndexWriteback`].
+        self.local_index_writeback().submit(IndexedPage {
+            url: resp.final_url.to_string(),
+            title: output.metadata.title.clone(),
+            markdown: md.clone(),
+            fingerprint: fp.0.clone(),
+            fetched_at,
+            org_id: self.org_id.clone(),
+        });
 
         if let (Some(ingest), Some(org_id)) = (&self.ingest, &self.org_id) {
             if zdr::guard(self.zdr, WriteKind::Artifact).is_ok() {
@@ -745,7 +876,9 @@ impl PageRunner {
                         quarry_core::contracts::FieldTrace {
                             field: "description".into(),
                             source_url: resp.final_url.to_string(),
-                            selector: Some("meta[property='og:description'], meta[name='description']".into()),
+                            selector: Some(
+                                "meta[property='og:description'], meta[name='description']".into(),
+                            ),
                         },
                         quarry_core::contracts::FieldTrace {
                             field: "content".into(),
@@ -760,7 +893,10 @@ impl PageRunner {
                 let ingest_metadata = {
                     let mut m = serde_json::Map::new();
                     if let Some(desc) = &output.metadata.description {
-                        m.insert("description".into(), serde_json::Value::String(desc.clone()));
+                        m.insert(
+                            "description".into(),
+                            serde_json::Value::String(desc.clone()),
+                        );
                     }
                     if let Some(author) = &output.metadata.author {
                         m.insert("author".into(), serde_json::Value::String(author.clone()));
@@ -772,21 +908,39 @@ impl PageRunner {
                         m.insert("content_type".into(), serde_json::Value::String(ct.clone()));
                     }
                     if let Some(pub_at) = &output.metadata.published_at {
-                        m.insert("published_at".into(), serde_json::Value::String(pub_at.clone()));
+                        m.insert(
+                            "published_at".into(),
+                            serde_json::Value::String(pub_at.clone()),
+                        );
                     }
                     if let Some(mod_at) = &output.metadata.modified_at {
-                        m.insert("modified_at".into(), serde_json::Value::String(mod_at.clone()));
+                        m.insert(
+                            "modified_at".into(),
+                            serde_json::Value::String(mod_at.clone()),
+                        );
                     }
                     if let Some(canonical) = &output.metadata.canonical_url {
-                        m.insert("canonical_url".into(), serde_json::Value::String(canonical.clone()));
+                        m.insert(
+                            "canonical_url".into(),
+                            serde_json::Value::String(canonical.clone()),
+                        );
                     } else if let Some(canonical) = &output.url.canonical {
-                        m.insert("canonical_url".into(), serde_json::Value::String(canonical.clone()));
+                        m.insert(
+                            "canonical_url".into(),
+                            serde_json::Value::String(canonical.clone()),
+                        );
                     }
                     if let Some(keywords) = &output.metadata.keywords {
-                        m.insert("keywords".into(), serde_json::Value::String(keywords.clone()));
+                        m.insert(
+                            "keywords".into(),
+                            serde_json::Value::String(keywords.clone()),
+                        );
                     }
                     if let Some(og_image) = &output.metadata.og_image {
-                        m.insert("og_image".into(), serde_json::Value::String(og_image.clone()));
+                        m.insert(
+                            "og_image".into(),
+                            serde_json::Value::String(og_image.clone()),
+                        );
                     }
                     if let Some(robots) = &output.metadata.robots {
                         m.insert("robots".into(), serde_json::Value::String(robots.clone()));
@@ -802,8 +956,14 @@ impl PageRunner {
                         m.insert("branding".into(), branding.clone());
                     }
                     // Persist driver provenance for debugging
-                    m.insert("driver_kind".into(), serde_json::Value::String(format!("{:?}", output.driver.kind)));
-                    m.insert("fetched_at".into(), serde_json::Value::String(fetched_at.to_rfc3339()));
+                    m.insert(
+                        "driver_kind".into(),
+                        serde_json::Value::String(format!("{:?}", output.driver.kind)),
+                    );
+                    m.insert(
+                        "fetched_at".into(),
+                        serde_json::Value::String(fetched_at.to_rfc3339()),
+                    );
                     serde_json::Value::Object(m)
                 };
 
@@ -1113,5 +1273,231 @@ mod page_extracted_tests {
             live_types.contains(&EventType::PageExtracted),
             "{live_types:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod local_index_writeback_tests {
+    use super::*;
+    use crate::artifact_store::InMemoryStore;
+    use crate::driver::Driver;
+    use crate::fetch::FetchResponse;
+    use crate::local_index::TantivyLocalIndex;
+    use crate::serp::SearchOptions;
+    use async_trait::async_trait;
+    use quarry_core::output::DriverKind;
+    use tokio::sync::mpsc;
+
+    const PAGE: &str = "<html lang=\"en\"><head><title>Tokio runtime guide</title></head><body><main><h1>Tokio runtime guide</h1><p>The runtime drives futures to completion across a work-stealing scheduler, with timers and IO drivers attached to each worker thread.</p></main></body></html>";
+
+    struct StaticPageDriver;
+
+    #[async_trait]
+    impl Driver for StaticPageDriver {
+        fn kind(&self) -> DriverKind {
+            DriverKind::Static
+        }
+        async fn fetch(&self, url: &Url) -> QuarryResult<FetchResponse> {
+            Ok(FetchResponse {
+                status: 200,
+                final_url: url.clone(),
+                headers: vec![("content-type".into(), "text/html; charset=utf-8".into())],
+                body: PAGE.as_bytes().to_vec(),
+                duration_ms: 2,
+                served_by: DriverKind::Static,
+            })
+        }
+    }
+
+    fn runner(
+        tx: mpsc::Sender<quarry_core::event::Event>,
+        org_id: Option<&str>,
+        index: Option<TantivyLocalIndex>,
+        zdr: ZdrMode,
+    ) -> PageRunner {
+        PageRunner {
+            driver: Arc::new(StaticPageDriver),
+            security: Arc::new(
+                quarry_security::preflight::DefaultEngine::new().with_allow_private_hosts(true),
+            ),
+            artifacts: Arc::new(InMemoryStore::new()),
+            event_sink: EventSink::new(tx),
+            zdr,
+            ingest: None,
+            org_id: org_id.map(|o| o.to_string()),
+            user_id: None,
+            privacy: PrivacyPolicy::default(),
+            cancel_token: None,
+            local_index: index,
+            policy: RunPolicy::default(),
+            scheduler: None,
+            autoscale: None,
+            render: RenderHints::default(),
+            page_renderer: None,
+            source_registrar: None,
+            title_enricher: None,
+        }
+    }
+
+    fn page(org_id: Option<&str>) -> IndexedPage {
+        IndexedPage {
+            url: "https://example.com/doc".into(),
+            title: Some("Doc".into()),
+            markdown: "# Doc\n\nSome real body text.".into(),
+            fingerprint: "blake3:deadbeef".into(),
+            fetched_at: Utc::now(),
+            org_id: org_id.map(|o| o.to_string()),
+        }
+    }
+
+    /// Wait for the detached write-back task to land, so the assertions below
+    /// test the write rather than the scheduler.
+    async fn await_pending(idx: &TantivyLocalIndex, expected: u64) {
+        for _ in 0..200 {
+            if idx.pending_writes() >= expected {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        panic!(
+            "write-back did not reach the index: pending={}",
+            idx.pending_writes()
+        );
+    }
+
+    // ── decision rules ──────────────────────────────────────────────────────
+
+    #[test]
+    fn unknown_org_is_never_indexed() {
+        let idx = TantivyLocalIndex::in_memory().unwrap();
+        let hook = LocalIndexWriteback::new(Some(idx), ZdrMode::Off);
+        // Absent, empty, and whitespace-only all mean the same thing: we do
+        // not know whose page this is.
+        for org in [None, Some(""), Some("   ")] {
+            assert_eq!(
+                hook.decide(&page(org)),
+                WritebackDecision::SkippedUnknownOrg,
+                "org {org:?} must not be indexed"
+            );
+        }
+        assert_eq!(
+            hook.decide(&page(Some("org_a"))),
+            WritebackDecision::Index,
+            "a page with a verified tenant is still indexed"
+        );
+    }
+
+    #[test]
+    fn zdr_blocks_the_write_back() {
+        let idx = TantivyLocalIndex::in_memory().unwrap();
+        let hook = LocalIndexWriteback::new(Some(idx), ZdrMode::On);
+        assert_eq!(
+            hook.decide(&page(Some("org_a"))),
+            WritebackDecision::SkippedZdr
+        );
+        assert!(!hook.is_enabled());
+    }
+
+    #[test]
+    fn no_index_and_empty_body_are_distinguished() {
+        let hook = LocalIndexWriteback::new(None, ZdrMode::Off);
+        assert_eq!(
+            hook.decide(&page(Some("org_a"))),
+            WritebackDecision::SkippedNoIndex
+        );
+
+        let idx = TantivyLocalIndex::in_memory().unwrap();
+        let hook = LocalIndexWriteback::new(Some(idx), ZdrMode::Off);
+        let mut empty = page(Some("org_a"));
+        empty.markdown = "   \n  ".into();
+        assert_eq!(hook.decide(&empty), WritebackDecision::SkippedEmptyBody);
+    }
+
+    #[test]
+    fn zdr_is_checked_before_the_tenant() {
+        // Ordering matters for the reason a skip is reported, and ZDR is the
+        // stronger statement: under ZDR nothing is written regardless of who
+        // the page belongs to.
+        let idx = TantivyLocalIndex::in_memory().unwrap();
+        let hook = LocalIndexWriteback::new(Some(idx), ZdrMode::On);
+        assert_eq!(hook.decide(&page(None)), WritebackDecision::SkippedZdr);
+    }
+
+    // ── through the pipeline ────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn successful_scrape_with_a_tenant_reaches_the_corpus() {
+        let idx = TantivyLocalIndex::in_memory().unwrap();
+        let (tx, _rx) = mpsc::channel(64);
+        let runner = runner(tx, Some("org_a"), Some(idx.clone()), ZdrMode::Off);
+        let run_id: RunKind = quarry_core::ids::Id::new();
+        let url: Url = "https://example.com/tokio".parse().unwrap();
+        runner.run(&run_id, &url, None).await.expect("run ok");
+
+        await_pending(&idx, 1).await;
+        idx.flush().await.unwrap();
+        assert_eq!(idx.doc_count(), 1);
+
+        let opts = SearchOptions {
+            org_id: Some("org_a".into()),
+            ..Default::default()
+        };
+        let hits = idx.search("tokio runtime", &opts).await.unwrap();
+        assert_eq!(hits.len(), 1);
+        assert!(hits[0].url.contains("/tokio"));
+    }
+
+    #[tokio::test]
+    async fn scrape_without_a_tenant_indexes_nothing() {
+        let idx = TantivyLocalIndex::in_memory().unwrap();
+        let (tx, _rx) = mpsc::channel(64);
+        let runner = runner(tx, None, Some(idx.clone()), ZdrMode::Off);
+        let run_id: RunKind = quarry_core::ids::Id::new();
+        let url: Url = "https://example.com/tokio".parse().unwrap();
+        runner.run(&run_id, &url, None).await.expect("run ok");
+
+        // Nothing was submitted, so there is nothing to wait for; give any
+        // stray task a chance to run before asserting the corpus is empty.
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert_eq!(idx.pending_writes(), 0);
+        idx.flush().await.unwrap();
+        assert_eq!(idx.doc_count(), 0);
+
+        // And the document is not reachable by an unscoped read either —
+        // the failure mode this whole guard exists to prevent.
+        let unscoped = idx
+            .search_all_orgs("tokio runtime", &SearchOptions::default())
+            .await
+            .unwrap();
+        assert!(unscoped.is_empty(), "leaked into the shared corpus");
+    }
+
+    #[tokio::test]
+    async fn zdr_scrape_indexes_nothing() {
+        let idx = TantivyLocalIndex::in_memory().unwrap();
+        let (tx, _rx) = mpsc::channel(64);
+        let runner = runner(tx, Some("org_a"), Some(idx.clone()), ZdrMode::On);
+        let run_id: RunKind = quarry_core::ids::Id::new();
+        let url: Url = "https://example.com/tokio".parse().unwrap();
+        runner.run(&run_id, &url, None).await.expect("run ok");
+
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        idx.flush().await.unwrap();
+        assert_eq!(idx.doc_count(), 0, "ZDR run must leave no durable trace");
+    }
+
+    #[tokio::test]
+    async fn re_scraping_the_same_url_does_not_accumulate_copies() {
+        let idx = TantivyLocalIndex::in_memory().unwrap();
+        let url: Url = "https://example.com/tokio".parse().unwrap();
+        for _ in 0..3 {
+            let (tx, _rx) = mpsc::channel(64);
+            let runner = runner(tx, Some("org_a"), Some(idx.clone()), ZdrMode::Off);
+            let run_id: RunKind = quarry_core::ids::Id::new();
+            runner.run(&run_id, &url, None).await.expect("run ok");
+            await_pending(&idx, 1).await;
+            idx.flush().await.unwrap();
+        }
+        assert_eq!(idx.doc_count(), 1, "re-fetch must upsert, not append");
     }
 }

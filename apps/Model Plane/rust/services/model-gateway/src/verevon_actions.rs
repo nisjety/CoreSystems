@@ -34,6 +34,11 @@ use crate::{auth::VerifiedDataPlaneBearer as VerifiedBearer, state::AppState};
 /// Max rows any one list tool inlines into the conversation.
 const MAX_ROWS: usize = 25;
 
+/// conversation-core's read-only lane for this service. Not `/api/v1`: that
+/// group is bound to the `verevon-gateway` principal and is where every
+/// conversation write lives.
+const VEREVON_READ_LANE: &str = "/internal/v1/verevon";
+
 /// Max chars for a free-text field (post body, document title) in a summary.
 const MAX_FIELD_CHARS: usize = 180;
 
@@ -169,6 +174,93 @@ async fn application_core_get(
         .json::<Value>()
         .await
         .map_err(|err| format!("{upstream} returned an unparseable response: {err}"))
+}
+
+/// GET conversation-core's Verevon read lane with a signed delegation.
+///
+/// conversation-core takes no shared internal key — it refuses one explicitly —
+/// so this signs as the `model-gateway` principal, whose lane over there is two
+/// org-scoped GETs and nothing else. The organization and user come from the
+/// verified request at the call site and are covered by the signature, so
+/// neither a model argument nor a rewritten header can move the read to another
+/// tenant.
+async fn conversation_core_get(
+    state: &AppState,
+    path: &str,
+    org_id: &str,
+    user_id: &str,
+    query: &[(&str, String)],
+) -> Result<Value, String> {
+    let org_id = org_id.trim();
+    if org_id.is_empty() {
+        return Err(
+            "the inbox read requires a verified organization; this chat turn has none".to_owned(),
+        );
+    }
+    if state.conversation_core_service_token.trim().is_empty() {
+        return Err(
+            "the shared inbox is not configured for this deployment (CONVERSATION_MODEL_GATEWAY_SERVICE_TOKEN is unset)"
+                .to_owned(),
+        );
+    }
+
+    // The signature covers the request-URI, so the query string is built once
+    // here and used for both the signing input and the wire request. Letting
+    // reqwest append `query` separately would sign a path the server never
+    // sees.
+    let base = state.conversation_core_base_url.trim_end_matches('/');
+    let mut url = reqwest::Url::parse(&format!("{base}{VEREVON_READ_LANE}{path}"))
+        .map_err(|err| format!("conversation-core URL is not valid: {err}"))?;
+    if !query.is_empty() {
+        let mut pairs = url.query_pairs_mut();
+        for (key, value) in query {
+            pairs.append_pair(key, value);
+        }
+    }
+    let request_uri = match url.query() {
+        Some(query) => format!("{}?{query}", url.path()),
+        None => url.path().to_owned(),
+    };
+
+    let headers = crate::conversation_delegation::sign_get(
+        &state.conversation_core_service_token,
+        &request_uri,
+        user_id,
+        org_id,
+        chrono::Utc::now(),
+    );
+    let response = state
+        .http_client
+        .get(url)
+        .header("x-service-id", headers.service_id)
+        .header("x-user-id", headers.user_id.as_str())
+        .header("x-org-id", headers.org_id.as_str())
+        .header("x-delegation-timestamp", headers.timestamp.as_str())
+        .header("x-delegation-nonce", headers.nonce.as_str())
+        .header("x-delegation-body-sha256", headers.body_sha256.as_str())
+        .header("x-delegation-signature", headers.signature.as_str())
+        .header("accept", "application/json")
+        .send()
+        .await
+        .map_err(|err| format!("conversation-core unreachable: {err}"))?;
+
+    let status = response.status();
+    if !status.is_success() {
+        // 401/403 here means the delegation was refused, which is a deployment
+        // fault (wrong or missing token), not something the model did. Say so,
+        // so a turn does not retry a call that can never succeed.
+        if status.as_u16() == 401 || status.as_u16() == 403 {
+            return Err(
+                "conversation-core refused this service's inbox delegation; the deployment's CONVERSATION_MODEL_GATEWAY_SERVICE_TOKEN does not match"
+                    .to_owned(),
+            );
+        }
+        return Err(format!("conversation-core returned HTTP {}", status.as_u16()));
+    }
+    response
+        .json::<Value>()
+        .await
+        .map_err(|err| format!("conversation-core returned an unparseable response: {err}"))
 }
 
 /// Unwrap the `{ "data": … }` envelope both cores use.
@@ -446,6 +538,205 @@ pub async fn social_list_campaigns(
 }
 
 // ============================================================================
+// conversation-core — the shared inbox
+// ============================================================================
+
+/// Most conversation messages one read returns. A long email thread is the
+/// point of reading it, but a whole thread of forwarded quoted replies will
+/// otherwise crowd out the rest of the turn's context.
+const MAX_CONVERSATION_MESSAGES: usize = 20;
+
+/// Most characters of one message body handed back.
+const MAX_MESSAGE_BODY_CHARS: usize = 4_000;
+
+/// Max characters of message text one `inbox_get_conversation` may return in
+/// total, across all messages.
+///
+/// The per-message cap alone is not a budget: twenty messages at the per-message
+/// limit is eighty thousand characters, and the tool loop re-sends every
+/// accumulated tool result on each subsequent round, so that is paid again and
+/// again within one turn. Spent newest-first, because a thread's meaning is at
+/// its end.
+const MAX_CONVERSATION_TEXT_CHARS: usize = 16_000;
+
+/// `inbox_search` → conversation-core `GET /internal/v1/verevon/conversations`.
+///
+/// Read-only, and org-scoped by the `x-org-id` header set from the VERIFIED
+/// request org — never from model input, so a turn cannot read another
+/// tenant's mail. Returns the conversation list only; bodies come from
+/// [`inbox_get_conversation`] for one named conversation, so a broad search
+/// cannot pull every mailbox body into the prompt at once.
+///
+/// # Errors
+///
+/// Returns an error when conversation-core is unreachable or rejects the read.
+pub async fn inbox_search(
+    state: &AppState,
+    org_id: &str,
+    user_id: &str,
+    query: &str,
+    limit: i64,
+) -> Result<String, String> {
+    let limit = limit.clamp(1, 50);
+    let mut params: Vec<(&str, String)> = vec![("limit", limit.to_string())];
+    let query = query.trim();
+    if !query.is_empty() {
+        params.push(("q", query.to_owned()));
+    }
+    let body = conversation_core_get(state, "/conversations", org_id, user_id, &params).await?;
+    let rows = data_rows(&body);
+    let (conversations, withheld) = capped_rows(
+        &rows,
+        &[
+            "id",
+            "channel",
+            "title",
+            "status",
+            "priority",
+            "contact",
+            "last_message_at",
+            "last_message_preview",
+        ],
+    );
+    Ok(json!({
+        "upstream": "conversation-core /internal/v1/verevon/conversations",
+        "query": query,
+        "matched": rows.len(),
+        "shown": conversations.len(),
+        "withheld_by_output_cap": withheld,
+        "conversations": conversations,
+        "note": "Use inbox_get_conversation with an id to read the messages.",
+    })
+    .to_string())
+}
+
+/// Whether a model-supplied string may be used as a conversation id.
+///
+/// Validated rather than escaped: the id goes into a URL PATH, and the only
+/// ids conversation-core issues are `conv_<hex>`. Refusing anything else keeps
+/// a model-supplied string from walking the path (`../`) into another
+/// conversation-core route — which percent-encoding alone would not prevent if
+/// an upstream ever normalised the path before routing.
+fn is_conversation_id(candidate: &str) -> bool {
+    !candidate.is_empty()
+        && candidate.len() <= 128
+        && candidate
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+}
+
+/// Index of the oldest message that still fits the whole-thread text budget.
+///
+/// Spends [`MAX_CONVERSATION_TEXT_CHARS`] newest-first and returns how many of
+/// the oldest messages must be dropped. A message that does not fit is dropped
+/// WHOLE rather than reduced to a sliver: two words of an email tell a reader
+/// nothing and still cost a line of prompt.
+///
+/// The newest message is always kept, however long. Answering "what did they
+/// write" with nothing is worse than answering with a body that is truncated
+/// and says so.
+fn first_message_within_budget(messages: &[&Value]) -> usize {
+    let mut budget = MAX_CONVERSATION_TEXT_CHARS;
+    let mut keep_from = messages.len();
+    for (index, message) in messages.iter().enumerate().rev() {
+        let length = message
+            .get("body_text")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .chars()
+            .count()
+            .min(MAX_MESSAGE_BODY_CHARS);
+        if index + 1 < messages.len() && length > budget {
+            break;
+        }
+        budget = budget.saturating_sub(length);
+        keep_from = index;
+    }
+    keep_from
+}
+
+/// `inbox_get_conversation` → conversation-core `GET /internal/v1/verevon/conversations/{id}`.
+///
+/// Returns the conversation with its messages, newest last, bounded by
+/// [`MAX_CONVERSATION_MESSAGES`] and [`MAX_MESSAGE_BODY_CHARS`]. `body_html` is
+/// dropped on purpose: the model reads text, and forwarding raw mail HTML into
+/// a prompt is both noise and an injection surface.
+///
+/// Org-scoped exactly like [`inbox_search`]; the id is a selector inside the
+/// caller's own org, never a cross-tenant reach.
+///
+/// # Errors
+///
+/// Returns an error when the id is empty, or conversation-core rejects the read.
+pub async fn inbox_get_conversation(
+    state: &AppState,
+    org_id: &str,
+    user_id: &str,
+    conversation_id: &str,
+) -> Result<String, String> {
+    let conversation_id = conversation_id.trim();
+    if conversation_id.is_empty() {
+        return Err("inbox_get_conversation requires a conversation id".to_owned());
+    }
+    if !is_conversation_id(conversation_id) {
+        return Err(format!(
+            "'{conversation_id}' is not a conversation id; use an id returned by inbox_search"
+        ));
+    }
+    let path = format!("/conversations/{conversation_id}");
+    let body = conversation_core_get(state, &path, org_id, user_id, &[]).await?;
+    let conversation = body.get("data").unwrap_or(&body);
+    let all = conversation
+        .get("messages")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    // Keep the NEWEST messages: a reply thread's meaning is at its end, and
+    // truncating from the front is what makes a model answer last week's
+    // question.
+    let skipped = all.len().saturating_sub(MAX_CONVERSATION_MESSAGES);
+    let recent: Vec<&Value> = all.iter().skip(skipped).collect();
+
+    let dropped_for_budget = first_message_within_budget(&recent);
+    let keep_from = dropped_for_budget;
+    let messages: Vec<Value> = recent
+        .into_iter()
+        .skip(keep_from)
+        .map(|message| {
+            let text = message
+                .get("body_text")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let truncated = text.chars().count() > MAX_MESSAGE_BODY_CHARS;
+            let body_text: String = text.chars().take(MAX_MESSAGE_BODY_CHARS).collect();
+            json!({
+                "id": message.get("id"),
+                "direction": message.get("direction"),
+                "internal": message.get("internal"),
+                "sender_name": message.get("sender_name"),
+                "sender_email": message.get("sender_email"),
+                "occurred_at": message.get("occurred_at"),
+                "body_text": body_text,
+                "body_truncated": truncated,
+            })
+        })
+        .collect();
+    Ok(json!({
+        "upstream": "conversation-core /internal/v1/verevon/conversations/{id}",
+        "id": conversation.get("id"),
+        "channel": conversation.get("channel"),
+        "title": conversation.get("title"),
+        "status": conversation.get("status"),
+        "contact": conversation.get("contact"),
+        "message_count": all.len(),
+        "shown": messages.len(),
+        "older_messages_withheld": skipped + dropped_for_budget,
+        "messages": messages,
+    })
+    .to_string())
+}
+
+// ============================================================================
 // Data Plane v2 — knowledge base document inventory
 // ============================================================================
 
@@ -527,6 +818,64 @@ pub async fn knowledge_list_documents(
 
 #[cfg(test)]
 mod tests {
+
+    fn message_of(chars: usize) -> Value {
+        json!({ "body_text": "a".repeat(chars) })
+    }
+
+    /// A thread of full-length bodies must not put the whole per-message cap
+    /// times twenty into the prompt -- the tool loop re-sends every
+    /// accumulated result on each round, so that cost is paid repeatedly.
+    #[test]
+    fn thread_budget_drops_oldest_messages_until_the_total_fits() {
+        let owned: Vec<Value> = (0..20).map(|_| message_of(4_000)).collect();
+        let messages: Vec<&Value> = owned.iter().collect();
+
+        let keep_from = first_message_within_budget(&messages);
+
+        let kept: usize = messages
+            .iter()
+            .skip(keep_from)
+            .map(|m| m["body_text"].as_str().unwrap().chars().count())
+            .sum();
+        assert!(keep_from > 0, "nothing was dropped for a 80k-char thread");
+        assert!(
+            kept <= MAX_CONVERSATION_TEXT_CHARS,
+            "kept {kept} chars, over the {MAX_CONVERSATION_TEXT_CHARS} budget"
+        );
+    }
+
+    #[test]
+    fn thread_budget_keeps_every_message_when_the_thread_is_small() {
+        let owned: Vec<Value> = (0..5).map(|_| message_of(100)).collect();
+        let messages: Vec<&Value> = owned.iter().collect();
+        assert_eq!(first_message_within_budget(&messages), 0);
+    }
+
+    /// The question is almost always about the latest message, so some message
+    /// always survives the budget no matter how long the thread or its bodies.
+    ///
+    /// With today's constants the newest one cannot overrun the budget on its
+    /// own -- the per-message cap clamps it to a quarter of the total first --
+    /// so the guard inside the loop is a safety net for a future where the two
+    /// constants move closer together. This asserts the property either way.
+    #[test]
+    fn thread_budget_always_keeps_the_newest_message() {
+        for (count, chars) in [(2_usize, 40_000_usize), (20, 4_000), (200, 10_000)] {
+            let owned: Vec<Value> = (0..count).map(|_| message_of(chars)).collect();
+            let messages: Vec<&Value> = owned.iter().collect();
+            let keep_from = first_message_within_budget(&messages);
+            assert!(
+                keep_from < count,
+                "every message was dropped for {count} x {chars} chars"
+            );
+        }
+    }
+
+    #[test]
+    fn thread_budget_handles_an_empty_thread() {
+        assert_eq!(first_message_within_budget(&[]), 0);
+    }
     use super::*;
 
     #[test]
@@ -569,6 +918,25 @@ mod tests {
             "unlisted field dropped"
         );
         assert!(projected.get("handle").is_none(), "null field dropped");
+    }
+
+    /// The id reaches conversation-core inside a URL PATH, so anything that
+    /// could steer that path must be refused rather than escaped.
+    #[test]
+    fn only_a_real_conversation_id_is_accepted() {
+        assert!(is_conversation_id("conv_195d583525a34df1c860940c"));
+        assert!(is_conversation_id("conv-1"));
+        for bad in [
+            "../../api/v1/inboxes",
+            "conv_1/messages",
+            "conv 1",
+            "conv%2f1",
+            "conv_1?x=1",
+            "",
+        ] {
+            assert!(!is_conversation_id(bad), "{bad:?} must be refused");
+        }
+        assert!(!is_conversation_id(&"a".repeat(129)), "over-long id");
     }
 
     #[test]

@@ -22,6 +22,8 @@ from app.knowledge_sync import KnowledgeSyncer
 from app.m365_provider_handler import get_m365_handler
 from app.orchestration import orchestrator
 from app.parsers import UnsupportedFileTypeError, parse_uploaded_file
+from app.chat_extract import ChatExtractRequest, extract_chat_document
+from starlette.concurrency import run_in_threadpool
 from app.progress import progress_hub
 from app.schemas import JobDetailResponse, JobItemResponse, JobResponse, SourceImportRequest
 from app.space_import_authority import SpaceImportIngressDenied, verify_space_import_ingress_decision
@@ -197,6 +199,17 @@ async def ready() -> JSONResponse:
             }
         },
     )
+
+
+@app.post("/api/v1/import/extract")
+async def extract_chat_attachment(
+    request: ChatExtractRequest,
+    auth: AuthContext = Depends(require_internal_auth),
+) -> JSONResponse:
+    # This operation is ephemeral even for persistent sessions. No storage,
+    # embedding, model call, or Tika/third-party egress is involved.
+    result = await run_in_threadpool(extract_chat_document, request)
+    return JSONResponse(content=result, headers={"Cache-Control": "no-store"})
 
 
 @app.post("/api/v1/import/jobs/upload", response_model=JobResponse)

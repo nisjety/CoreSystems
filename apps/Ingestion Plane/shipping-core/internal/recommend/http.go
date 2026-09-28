@@ -2,6 +2,7 @@ package recommend
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
 	"sort"
 
@@ -83,8 +84,14 @@ type recommendResponse struct {
 func Handler(engine *quoteengine.Engine, scorer quoteengine.ReliabilityScorer, client ModelClient, publisher events.Publisher) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var dto quoteRequestDTO
-		if err := json.NewDecoder(r.Body).Decode(&dto); err != nil {
+		decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64*1024))
+		decoder.DisallowUnknownFields()
+		if err := decoder.Decode(&dto); err != nil {
 			http.Error(w, `{"error":"invalid JSON body"}`, http.StatusBadRequest)
+			return
+		}
+		if decoder.Decode(&struct{}{}) != io.EOF {
+			http.Error(w, `{"error":"exactly one quote request is required"}`, http.StatusBadRequest)
 			return
 		}
 		if err := validate.Struct(dto); err != nil {

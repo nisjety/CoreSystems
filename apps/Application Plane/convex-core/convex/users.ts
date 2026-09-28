@@ -11,6 +11,8 @@ import { v } from "convex/values";
 import { assertServiceKey } from "./authz";
 import { normalizeProjectionRole, shouldApplyMembershipAdd } from "./membershipProjection";
 
+const MAX_PERSONA_INSTRUCTIONS_LENGTH = 1500;
+
 /**
  * Query: Get user by external auth ID
  * Used internally to check if a user has already been synced
@@ -259,6 +261,79 @@ export const updateLastSeen = mutation({
   handler: async (ctx, args) => {
     assertServiceKey(args.serviceKey);
     await ctx.db.patch(args.userId, { lastSeenAt: Date.now() });
+  },
+});
+
+/**
+ * Persona: the user layer of the authored-instruction hierarchy (ADR-0003
+ * extended -- see chat-wave2-specs-2026-09-28/persona.md). Self-service:
+ * a user only ever reads/writes their own row, so unlike
+ * `organizations.instructionsForGateway` there is no membership/admin gate
+ * beyond `assertServiceKey`. Looks up by `externalAuthId` alone (a user may
+ * have multiple org-membership rows; persona is global to the person, not
+ * per-org, so the first non-deleted row is authoritative). `null`/`true` are
+ * the safe defaults when no row exists yet, matching the org layer's
+ * "nothing authored -> no segment" behavior.
+ */
+export const personaForGateway = query({
+  args: {
+    externalAuthId: v.string(),
+    serviceKey: v.string(),
+  },
+  handler: async (ctx, args) => {
+    assertServiceKey(args.serviceKey);
+    const users = await ctx.db
+      .query("users")
+      .withIndex("by_external_auth_id", (q) => q.eq("externalAuthId", args.externalAuthId))
+      .collect();
+    const user = users.find((candidate) => candidate.syncStatus !== "deleted");
+    if (!user) return { instructions: null, enabled: true };
+    return {
+      instructions: user.personaInstructions ?? null,
+      enabled: user.personaEnabled ?? true,
+    };
+  },
+});
+
+/**
+ * Persona write. The gateway authenticates the caller (session cookie) and
+ * passes their own `externalAuthId` -- there is no cross-user write path,
+ * so (unlike `setInstructionsForGateway`) no `requireGatewayMember`
+ * re-verification is needed here.
+ */
+export const setPersonaForGateway = mutation({
+  args: {
+    serviceKey: v.string(),
+    externalAuthId: v.string(),
+    instructions: v.optional(v.string()),
+    enabled: v.optional(v.boolean()),
+  },
+  handler: async (ctx, args) => {
+    assertServiceKey(args.serviceKey);
+    const users = await ctx.db
+      .query("users")
+      .withIndex("by_external_auth_id", (q) => q.eq("externalAuthId", args.externalAuthId))
+      .collect();
+    const user = users.find((candidate) => candidate.syncStatus !== "deleted");
+    if (!user) {
+      throw new Error(`User not found: ${args.externalAuthId}`);
+    }
+
+    const instructions = args.instructions?.trim() || undefined;
+    if ((instructions?.length ?? 0) > MAX_PERSONA_INSTRUCTIONS_LENGTH) {
+      throw new Error(`Persona instructions must be ${MAX_PERSONA_INSTRUCTIONS_LENGTH} characters or fewer`);
+    }
+
+    await ctx.db.patch(user._id, {
+      ...(args.instructions !== undefined ? { personaInstructions: instructions } : {}),
+      ...(args.enabled !== undefined ? { personaEnabled: args.enabled } : {}),
+      personaUpdatedAt: Date.now(),
+    });
+
+    return {
+      instructions: args.instructions !== undefined ? (instructions ?? null) : (user.personaInstructions ?? null),
+      enabled: args.enabled !== undefined ? args.enabled : (user.personaEnabled ?? true),
+    };
   },
 });
 

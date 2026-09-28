@@ -59,7 +59,7 @@ type navbarSupportRequest struct {
 	CreatedAt string `json:"createdAt"`
 }
 
-func decodeCalendarState(settings map[string]interface{}) navbarCalendarState {
+func decodeCalendarState(settings map[string]any) navbarCalendarState {
 	state := navbarCalendarState{Events: []navbarCalendarEvent{}, Notes: []navbarCalendarNote{}}
 	data, err := json.Marshal(settings)
 	if err != nil {
@@ -69,7 +69,7 @@ func decodeCalendarState(settings map[string]interface{}) navbarCalendarState {
 	return state
 }
 
-func decodeSupportRequests(settings map[string]interface{}) []navbarSupportRequest {
+func decodeSupportRequests(settings map[string]any) []navbarSupportRequest {
 	out := struct {
 		Requests []navbarSupportRequest `json:"requests"`
 	}{Requests: []navbarSupportRequest{}}
@@ -104,9 +104,9 @@ func (s *Server) listNavbarCalendarState(c *gin.Context) {
 		return
 	}
 
-	settings, err := s.userService.GetSettings(c.Request.Context(), userID, "calendar", map[string]interface{}{
-		"events": []interface{}{},
-		"notes":  []interface{}{},
+	settings, err := s.userService.GetSettings(c.Request.Context(), userID, "calendar", map[string]any{
+		"events": []any{},
+		"notes":  []any{},
 	})
 	if err != nil {
 		log.Error().Err(err).Str("user_id", userID).Msg("failed to get calendar settings")
@@ -136,9 +136,9 @@ func (s *Server) createNavbarCalendarEvent(c *gin.Context) {
 		return
 	}
 
-	settings, err := s.userService.GetSettings(c.Request.Context(), userID, "calendar", map[string]interface{}{
-		"events": []interface{}{},
-		"notes":  []interface{}{},
+	settings, err := s.userService.GetSettings(c.Request.Context(), userID, "calendar", map[string]any{
+		"events": []any{},
+		"notes":  []any{},
 	})
 	if err != nil {
 		log.Error().Err(err).Str("user_id", userID).Msg("failed to read calendar before append")
@@ -171,7 +171,7 @@ func (s *Server) createNavbarCalendarEvent(c *gin.Context) {
 		nextState.Events = nextState.Events[:100]
 	}
 
-	if _, err := s.userService.UpsertSettings(c.Request.Context(), userID, "calendar", map[string]interface{}{
+	if _, err := s.userService.UpsertSettings(c.Request.Context(), userID, "calendar", map[string]any{
 		"events": nextState.Events,
 		"notes":  nextState.Notes,
 	}); err != nil {
@@ -202,9 +202,9 @@ func (s *Server) createNavbarCalendarNote(c *gin.Context) {
 		return
 	}
 
-	settings, err := s.userService.GetSettings(c.Request.Context(), userID, "calendar", map[string]interface{}{
-		"events": []interface{}{},
-		"notes":  []interface{}{},
+	settings, err := s.userService.GetSettings(c.Request.Context(), userID, "calendar", map[string]any{
+		"events": []any{},
+		"notes":  []any{},
 	})
 	if err != nil {
 		log.Error().Err(err).Str("user_id", userID).Msg("failed to read calendar notes before append")
@@ -232,7 +232,7 @@ func (s *Server) createNavbarCalendarNote(c *gin.Context) {
 		nextState.Notes = nextState.Notes[:100]
 	}
 
-	if _, err := s.userService.UpsertSettings(c.Request.Context(), userID, "calendar", map[string]interface{}{
+	if _, err := s.userService.UpsertSettings(c.Request.Context(), userID, "calendar", map[string]any{
 		"events": nextState.Events,
 		"notes":  nextState.Notes,
 	}); err != nil {
@@ -264,8 +264,8 @@ func (s *Server) createNavbarSupportRequest(c *gin.Context) {
 		return
 	}
 
-	settings, err := s.userService.GetSettings(c.Request.Context(), userID, "support", map[string]interface{}{
-		"requests": []interface{}{},
+	settings, err := s.userService.GetSettings(c.Request.Context(), userID, "support", map[string]any{
+		"requests": []any{},
 	})
 	if err != nil {
 		log.Error().Err(err).Str("user_id", userID).Msg("failed to read support requests before append")
@@ -288,7 +288,7 @@ func (s *Server) createNavbarSupportRequest(c *gin.Context) {
 		nextRequests = nextRequests[:100]
 	}
 
-	if _, err := s.userService.UpsertSettings(c.Request.Context(), userID, "support", map[string]interface{}{
+	if _, err := s.userService.UpsertSettings(c.Request.Context(), userID, "support", map[string]any{
 		"requests": nextRequests,
 	}); err != nil {
 		log.Error().Err(err).Str("user_id", userID).Msg("failed to persist support request")

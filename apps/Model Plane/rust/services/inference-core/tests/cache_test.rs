@@ -9,6 +9,7 @@ fn make_request(model: &str, content: &str) -> InferRequest {
         provider_hint: String::new(),
         model: model.to_owned(),
         messages: vec![ChatMessage {
+            compaction_summary: String::new(),
             role: "user".to_owned(),
             content: content.to_owned(),
             name: String::new(),
@@ -23,6 +24,7 @@ fn make_request(model: &str, content: &str) -> InferRequest {
 
 fn make_response(content: &str) -> InferResponse {
     InferResponse {
+        compaction_summary: String::new(),
         request_id: "req-1".to_owned(),
         content: content.to_owned(),
         model_used: "test-model".to_owned(),

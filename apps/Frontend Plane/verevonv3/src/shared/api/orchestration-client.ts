@@ -187,7 +187,38 @@ export type Todo = {
   blockedBy?: string[]
 }
 
-function normalizePlan(raw: RawPlan): Plan | null {
+/**
+ * One user edit to a proposed plan's step list (plan-gate §2.2), sent to
+ * `POST /api/v1/agents/runs/{run_id}/plan-approval`'s `edited_steps`. Exported
+ * so `chat-client.ts`'s `approvePlan`/`rejectPlan` (the only callers today)
+ * share this exact wire shape instead of drifting.
+ */
+export type PlanStepEdit = {
+  /** Existing step id being edited. Omit/empty for a NEW step. */
+  stepId?: string
+  title: string
+  operation?: string
+  /** True when the user removed this step (marked skipped server-side). */
+  removed?: boolean
+}
+
+/** `PlanStepEdit` → the exact snake_case shape the plan-approval route expects. */
+export function planStepEditToWire(edit: PlanStepEdit): Record<string, unknown> {
+  return {
+    step_id: edit.stepId ?? '',
+    title: edit.title,
+    operation: edit.operation ?? '',
+    removed: edit.removed === true,
+  }
+}
+
+/**
+ * Normalize a model-gateway plan object (snake_case) to our camelCase shape.
+ * Exported so `chat-client.ts`'s `approvePlan`/`rejectPlan` responses (which
+ * carry the same `plan_value` wire shape as `listPlans`) parse identically
+ * instead of duplicating this logic.
+ */
+export function normalizePlan(raw: RawPlan): Plan | null {
   const id = str(raw.id) ?? str(raw.plan_id) ?? str(raw.planId)
   if (!id) return null
   const plan: Plan = {

@@ -15,8 +15,8 @@ vi.mock('@/features/tickets/components/TicketingPage', () => ({
   default: () => <div>Ticket workspace</div>,
 }))
 
-vi.mock('@/features/support/components/AiReviewQueue', () => ({
-  AiReviewQueue: () => <div>Legacy AI review</div>,
+vi.mock('@/features/support/components/VerevonDraftsQueue', () => ({
+  VerevonDraftsQueue: () => <div>Drafts workspace</div>,
 }))
 
 afterEach(cleanup)
@@ -38,6 +38,25 @@ describe('SupportPage navigation', () => {
     expect(screen.getByRole('tab', { name: /ticketing|saksbehandling/i }).getAttribute('href')).toBe('/support?surface=tickets')
     expect(screen.getByRole('tab', { name: /outbound|utgående/i }).getAttribute('href')).toBe('/support?surface=outbound')
     expect(screen.queryByRole('tab', { name: /AI review|AI-gjennomgang/i })).toBeNull()
+  })
+
+  it('gives Verevon drafts their own surface, reachable only from the support workspace', () => {
+    const TestRouter = createRouter({
+      routes: [{ path: '/support', component: SupportPage }],
+      history: memoryHistory('/support?surface=drafts'),
+      explicitLinks: true,
+    })
+    render(() => (
+      <I18nProvider>
+        <TestRouter>{(props) => <>{props.children}</>}</TestRouter>
+      </I18nProvider>
+    ))
+
+    expect(screen.getByRole('tab', { name: /drafts|utkast/i }).getAttribute('href')).toBe('/support?surface=drafts')
+    expect(screen.getByText('Drafts workspace')).toBeTruthy()
+    // The drafts surface replaces the conversation list rather than sitting
+    // beside it: a draft is support work, and the chat page must never show it.
+    expect(screen.queryByText('Conversation workspace')).toBeNull()
   })
 
   it('keeps functional center and right-rail tabs in the three-pane Outbound workspace', () => {

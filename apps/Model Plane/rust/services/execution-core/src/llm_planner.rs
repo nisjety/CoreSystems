@@ -163,11 +163,13 @@ impl LlmPlanner {
             model: self.model.clone(),
             messages: vec![
                 ChatMessage {
+                    compaction_summary: String::new(),
                     role: "system".to_owned(),
                     content: system,
                     ..Default::default()
                 },
                 ChatMessage {
+                    compaction_summary: String::new(),
                     role: "user".to_owned(),
                     content: observation_text,
                     ..Default::default()

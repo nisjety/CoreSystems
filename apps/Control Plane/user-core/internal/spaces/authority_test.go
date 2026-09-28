@@ -37,7 +37,7 @@ func TestRegistrationLifecycleIsExplicitAndCannotInventAnUnknownState(t *testing
 	if err := valid.Validate(); err != nil {
 		t.Fatalf("deleting lifecycle registration rejected: %v", err)
 	}
-	valid.Lifecycle = SpaceLifecycle("forged")
+	valid.Lifecycle = "forged"
 	if err := valid.Validate(); err == nil {
 		t.Fatal("unknown Application lifecycle was accepted")
 	}
@@ -147,7 +147,7 @@ func TestAdvanceAuthorityRevisionRejectsUnknownChangeAndInvalidState(t *testing.
 	if _, err := (AuthorityRevision{}).Advance(ChangeMembership); err == nil {
 		t.Fatal("zero revision unexpectedly advanced")
 	}
-	if _, err := (AuthorityRevision{Authority: 1, Membership: 1, Privacy: 1, RecipientAudience: 1, Entitlement: 1}).Advance(AuthorityChange("unknown")); err == nil {
+	if _, err := (AuthorityRevision{Authority: 1, Membership: 1, Privacy: 1, RecipientAudience: 1, Entitlement: 1}).Advance("unknown"); err == nil {
 		t.Fatal("unknown authority change unexpectedly advanced")
 	}
 }

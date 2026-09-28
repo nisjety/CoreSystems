@@ -1,4 +1,11 @@
 import { ApiError, requestJson } from './http'
+import {
+  normalizePlan,
+  planStepEditToWire,
+  type Plan,
+  type PlanStepEdit,
+} from './orchestration-client'
+
 import { readSseStream, type SseEvent } from './sse'
 import {
   isSelectablePrivacyTier,
@@ -16,6 +23,12 @@ import {
 } from '@/features/chat/lib/chat-retention'
 
 // ── Wire contract ───────────────────────────────────────────────────────────
+export async function extractChatDocument(filename: string, content_base64: string, content_type: string): Promise<{ content: string }> {
+  return requestJson('/api/v1/chat/documents/extract', {
+    method: 'POST', body: JSON.stringify({ filename, content_base64, content_type }),
+  })
+}
+
 // The gateway forwards the chat body verbatim to model-gateway `/v1/invoke/*`,
 // whose `InvokeRequest` is snake_case with `tools: ToolSpec[]`. This client owns
 // the logical→wire translation so callers stay ergonomic (camelCase + intent).
@@ -42,6 +55,14 @@ export type ChatAttachment = {
 }
 
 export type ChatInvokeRequest = {
+  sourceScope?: import('@/shared/actions/chat-source-scope').ChatSourceScope
+  /**
+   * Per-turn retrieval-source filter (chat-wave2 scope spec), orthogonal to
+   * `sourceScope`. Omitted or `'auto'` reproduces today's behavior
+   * byte-identically; forced to `'auto'`/omitted on the wire whenever
+   * `sourceScope === 'conversation'`, which already excludes both families.
+   */
+  retrievalScope?: import('@/shared/actions/chat-source-scope').RetrievalScope
   content: string
   model?: string
   /** Explicit provider route for a user-owned model subscription. */
@@ -224,6 +245,18 @@ export type ChatErrorEvent = {
   /** Correlation preserved when an error belongs to a durable run. */
   runId?: string
   requestId?: string
+  /**
+   * How long, in whole milliseconds from when the frame was sent, until the
+   * refusing service accepts a call again (a throttle, or a usage limit whose
+   * reset is known). Content-free account metadata; absent when unknown.
+   */
+  retryAfterMs?: number
+  /**
+   * When the connected ChatGPT plan's usage limit resets, as the server's
+   * RFC 3339 instant. Kept only when it parses, so a renderer never has to
+   * re-validate it.
+   */
+  resetsAt?: string
 }
 export type ChatArtifactEvent = {
   id?: string
@@ -247,8 +280,11 @@ export type ChatCitationEvent = {
   snippet?: string
   claimId?: string
   sourceGroupId?: string
+  sourceGroupLabel?: string
   start?: number
   end?: number
+  /** See `Citation.origin` (chat-wave2 scope spec §2.2). */
+  origin?: string
 }
 export type ChatGroundingEvent = { value: unknown }
 export type ChatStepEvent = {
@@ -256,6 +292,12 @@ export type ChatStepEvent = {
   title?: string
   detail?: string
   status?: string
+  /**
+   * The SSE `id:` of the frame that carried this step, when it had one. A step
+   * the server sent without an id of its own is keyed on it, so the same frame
+   * replayed by a resume updates the step it created instead of adding a twin.
+   */
+  frameId?: string
 }
 export type ChatAttachmentEvent = {
   id?: string
@@ -265,14 +307,235 @@ export type ChatAttachmentEvent = {
   url?: string
   size?: number
 }
+/**
+ * How a turn's cost was reached. `subscription` means a user-owned model
+ * subscription carried the provider call: the gateway computes no list-price
+ * cost for it and keeps `cost_usd` at 0.0 only for wire compatibility, so that
+ * zero is "included in the subscription", never "free". Absent on older
+ * gateways, where the reported cost stays as it always was.
+ */
+export type ChatCostBasis = 'metered' | 'subscription'
+
 export type ChatUsageEvent = {
   inputTokens?: number
   outputTokens?: number
   costUsd?: number
+  costBasis?: ChatCostBasis
   latencyMs?: number
   confidence?: number
   cacheReadTokens?: number
   cacheWriteTokens?: number
+}
+
+function costBasisValue(value: unknown): ChatCostBasis | undefined {
+  return value === 'metered' || value === 'subscription' ? value : undefined
+}
+
+export type TurnTimingOutcome = 'completed' | 'failed' | 'cancelled' | 'timeout'
+
+/** Provider-side timing for one provider call, as reported by Inference Core. */
+export type TurnTimingProvider = {
+  handlerMs: number
+  providerMs: number
+  firstTokenMs?: number
+  attempts: number
+  responseCacheHit: boolean
+  upstreamMs?: Record<string, number>
+}
+
+/** One bounded span of a turn, in milliseconds from the gateway's turn origin. */
+export type TurnTimingPhase = {
+  phase: string
+  startMs: number
+  endMs: number
+  round?: number
+  pass?: number
+  batch?: number
+  attempt?: number
+  outcome?: string
+  tools?: string[]
+  provider?: TurnTimingProvider
+}
+
+/**
+ * Where a turn's server time went, from the gateway's `turn_timing` event.
+ *
+ * Emitted once per turn just before `done` (and before `error`/`stopped` on a
+ * failed, timed-out or cancelled turn), in the same opt-in family as `usage`.
+ * Every value is milliseconds on the gateway's own monotonic clock, measured
+ * from the moment the request id was minted, so the numbers are comparable
+ * with each other but never with a browser timestamp. It carries ids, names and
+ * durations only — no prompt, message, tool argument or tool result.
+ *
+ * Only the three totals are required. A restored transcript keeps just those,
+ * which is why the breakdown fields are optional here.
+ */
+export type ChatTurnTiming = {
+  requestId?: string
+  outcome?: TurnTimingOutcome
+  /** Admission to the end of the turn, on the gateway. */
+  serverMs: number
+  /** Union of provider-call intervals; parallel review batches count once. */
+  providerMs: number
+  /** Server time spent outside provider calls. */
+  orchestrationMs: number
+  marks?: {
+    connectedMs?: number
+    sourceReadyMs?: number
+    firstTokenMs?: number
+    firstDraftMs?: number
+    firstValidatedMs?: number
+    durableMs?: number
+  }
+  counts?: {
+    modelRounds: number
+    providerCalls: number
+    reviewPasses: number
+    reviewBatches: number
+    repairs: number
+    reviewerEdits: number
+  }
+  tokensReported?: boolean
+  phases?: TurnTimingPhase[]
+  phasesDropped?: number
+}
+
+/** Mirrors the gateway's span bound; anything beyond it is counted, not kept. */
+const MAX_TURN_TIMING_PHASES = 64
+
+function millis(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : undefined
+}
+
+function countValue(value: unknown): number {
+  return millis(value) ?? 0
+}
+
+function turnTimingProvider(value: unknown): TurnTimingProvider | undefined {
+  const raw = objectValue(value)
+  if (!raw) return undefined
+  const handlerMs = millis(raw.handler_ms)
+  const providerMs = millis(raw.provider_ms)
+  if (handlerMs === undefined || providerMs === undefined) return undefined
+  const upstream = objectValue(raw.upstream_ms)
+  const upstreamMs = upstream
+    ? Object.fromEntries(Object.entries(upstream).flatMap(([key, entry]) => {
+        const ms = millis(entry)
+        return ms === undefined ? [] : [[key, ms] as const]
+      }))
+    : undefined
+  return {
+    handlerMs,
+    providerMs,
+    ...(millis(raw.first_token_ms) !== undefined ? { firstTokenMs: millis(raw.first_token_ms) } : {}),
+    attempts: countValue(raw.attempts),
+    responseCacheHit: raw.response_cache_hit === true,
+    ...(upstreamMs && Object.keys(upstreamMs).length > 0 ? { upstreamMs } : {}),
+  }
+}
+
+function turnTimingPhase(value: unknown): TurnTimingPhase | null {
+  const raw = objectValue(value)
+  const phase = str(raw?.phase)?.trim()
+  const startMs = millis(raw?.start_ms)
+  const endMs = millis(raw?.end_ms)
+  if (!raw || !phase || startMs === undefined || endMs === undefined) return null
+  const optionalCount = (key: string) => {
+    const count = millis(raw[key])
+    return count === undefined ? {} : { [key]: count }
+  }
+  const tools = Array.isArray(raw.tools)
+    ? raw.tools.filter((tool): tool is string => typeof tool === 'string' && tool.trim().length > 0)
+    : []
+  const provider = turnTimingProvider(raw.provider)
+  return {
+    phase,
+    startMs,
+    endMs: Math.max(startMs, endMs),
+    ...optionalCount('round'),
+    ...optionalCount('pass'),
+    ...optionalCount('batch'),
+    ...optionalCount('attempt'),
+    ...(str(raw.outcome) ? { outcome: str(raw.outcome) } : {}),
+    ...(tools.length > 0 ? { tools } : {}),
+    ...(provider ? { provider } : {}),
+  }
+}
+
+/**
+ * Read a `turn_timing` payload leniently.
+ *
+ * Unknown fields are ignored and malformed phases dropped, so a newer gateway
+ * cannot break an older client. Only a payload without the server and provider
+ * totals is rejected (`null`): the metrics rows it exists for would otherwise
+ * show a number the server never measured.
+ */
+export function parseTurnTiming(payload: Record<string, unknown>): ChatTurnTiming | null {
+  const serverMs = millis(payload.server_ms)
+  const providerMs = millis(payload.provider_ms)
+  if (serverMs === undefined || providerMs === undefined) return null
+  const outcome = str(payload.outcome)
+  const marksRaw = objectValue(payload.marks) ?? {}
+  const marks: NonNullable<ChatTurnTiming['marks']> = {}
+  for (const [wire, key] of [
+    ['connected_ms', 'connectedMs'],
+    ['source_ready_ms', 'sourceReadyMs'],
+    ['first_token_ms', 'firstTokenMs'],
+    ['first_draft_ms', 'firstDraftMs'],
+    ['first_validated_ms', 'firstValidatedMs'],
+    ['durable_ms', 'durableMs'],
+  ] as const) {
+    const ms = millis(marksRaw[wire])
+    if (ms !== undefined) marks[key] = ms
+  }
+  const countsRaw = objectValue(payload.counts) ?? {}
+  const rawPhases = Array.isArray(payload.phases) ? payload.phases : []
+  const phases = rawPhases
+    .map(turnTimingPhase)
+    .filter((phase): phase is TurnTimingPhase => phase !== null)
+  return {
+    requestId: str(payload.request_id),
+    outcome: outcome === 'completed' || outcome === 'failed' || outcome === 'cancelled' || outcome === 'timeout'
+      ? outcome
+      : undefined,
+    serverMs,
+    providerMs,
+    orchestrationMs: millis(payload.orchestration_ms) ?? Math.max(0, serverMs - providerMs),
+    marks,
+    counts: {
+      modelRounds: countValue(countsRaw.model_rounds),
+      providerCalls: countValue(countsRaw.provider_calls),
+      reviewPasses: countValue(countsRaw.review_passes),
+      reviewBatches: countValue(countsRaw.review_batches),
+      repairs: countValue(countsRaw.repairs),
+      reviewerEdits: countValue(countsRaw.reviewer_edits),
+    },
+    tokensReported: typeof payload.tokens_reported === 'boolean' ? payload.tokens_reported : undefined,
+    phases: phases.slice(0, MAX_TURN_TIMING_PHASES),
+    phasesDropped: countValue(payload.phases_dropped) + Math.max(0, phases.length - MAX_TURN_TIMING_PHASES),
+  }
+}
+
+/**
+ * The gateway's record of what it checked before publishing a turn (word
+ * range, revision scope, source review). Kept as the server sent it: the
+ * receipt is content-derived evidence, and reshaping it here would make the
+ * browser's copy disagree with the durable one on the assistant message.
+ */
+export type ChatResultReceiptEvent = {
+  receipt: Record<string, unknown>
+  requestId?: string
+}
+/**
+ * Per-turn retrieval-source filter transparency frame (chat-wave2 scope
+ * spec §2.2/§2.3's "shown in the receipt" requirement, `source_scope_applied`
+ * family `citations`). Emitted at most once per turn, only when the turn's
+ * effective `RetrievalScope` was not `auto`. Consumed by `ChatMessages.tsx`'s
+ * scope badge and `ChatPanels.tsx`'s assembled-context inspector line.
+ */
+export type ChatSourceScopeAppliedEvent = {
+  scope: 'knowledge_only' | 'web_only'
+  excludedTools: string[]
 }
 /**
  * AI-generated thread title, emitted once by model-gateway after a thread's
@@ -287,6 +550,21 @@ export type ChatTitleEvent = { title: string; requestId?: string }
  * numbering. Never emitted for a ZDR turn.
  */
 export type ChatFollowUpsEvent = { suggestions: string[]; requestId?: string }
+
+/** One step of a model-proposed plan, as carried on the `plan_proposed` SSE event. */
+export type ChatPlanStep = { id: string; title: string; operation?: string }
+
+/**
+ * The model's structured plan-mode plan (plan-gate §2.1), emitted once a
+ * plan-mode turn finishes when its `plan.propose` tool call created one. See
+ * `sse_events.rs`'s `ChatEvent::PlanProposed` for the server side.
+ */
+export type ChatPlanProposedEvent = {
+  planId: string
+  summary: string
+  steps: ChatPlanStep[]
+  requestId?: string
+}
 
 /**
  * Read the recalled-memory list off the wire.
@@ -344,9 +622,17 @@ export type ChatStreamHandlers = {
   onUsage?: (event: ChatUsageEvent) => void
   onTitle?: (event: ChatTitleEvent) => void
   onFollowUps?: (event: ChatFollowUpsEvent) => void
+  /** See `ChatPlanProposedEvent`. */
+  onPlanProposed?: (event: ChatPlanProposedEvent) => void
   onStopped?: (event: ChatStoppedEvent) => void
   onMemoryRecall?: (event: ChatMemoryRecallEvent) => void
   onVerification?: (event: ChatVerificationEvent) => void
+  /** Where the turn's server time went (`turn_timing`, `usage` family). */
+  onTurnTiming?: (event: ChatTurnTiming) => void
+  /** What the gateway checked before it published the turn (`result_receipt`). */
+  onResultReceipt?: (event: ChatResultReceiptEvent) => void
+  /** See `ChatSourceScopeAppliedEvent`. */
+  onSourceScopeApplied?: (event: ChatSourceScopeAppliedEvent) => void
   /**
    * A message the user sent mid-run has reached the agent. Emitted at delivery
    * rather than at enqueue: the POST already confirmed acceptance, and what the
@@ -372,9 +658,24 @@ export type ChatStreamHandlers = {
    * first replayed delta precisely because it knew everything was coming again.
    */
   onFrameId?: (id: string) => void
+  /**
+   * Asked before every frame is dispatched, with the frame's SSE `id:` (or
+   * `undefined` for a live-only frame). Returning `false` drops the frame
+   * entirely: no `onFrameId`, no `onUiEvent`, no focused callback.
+   *
+   * A resume uses it to refuse a frame it already applied. The server filters
+   * by `Last-Event-ID`, but a replay that overlaps its live tail, or a
+   * replica that ignores the cursor, would otherwise land the same tool call,
+   * citation or step in the Work feed twice.
+   */
+  acceptFrame?: (id: string | undefined) => boolean
 }
 
 export type ChatMessage = {
+  sourceScope?: import('@/shared/actions/chat-source-scope').ChatSourceScope
+  /** See `ChatInvokeRequest.retrievalScope`. Read back on history playback
+   * so a reopened thread's past turns can show their own receipt badge. */
+  retrievalScope?: import('@/shared/actions/chat-source-scope').RetrievalScope
   id: string
   role: 'user' | 'assistant'
   content: string
@@ -402,6 +703,14 @@ export type ChatThreadSession = {
    * existed.
    */
   pinned: boolean
+  /**
+   * Persona spec — the per-thread override of the user's global persona
+   * switch (Settings → Persona). Server-owned, same "absent == true" default
+   * as `pinned` false defaults to unpinned: a thread saved before this field
+   * existed has always had its persona on. Disabled (not hidden) in the UI
+   * for a temporary/ZDR chat, which cannot durably persist this toggle.
+   */
+  personaEnabled: boolean
   /** Newest run projection from Session Core, when the thread has one. */
   latestRunId?: string
   latestRunStatus?: string
@@ -409,6 +718,12 @@ export type ChatThreadSession = {
   /** Non-secret Space routing reference for a scoped thread. The BFF still
    * resolves fresh Control authority before an append. */
   spaceRef?: string
+  /** Which surface created this thread (session-core's `ThreadSummary.origin`
+   * — "chat" | "space" | "agent_run" | "support" | "system" | "mail_task").
+   * Empty/absent for a thread that predates this field, which is exactly
+   * "chat" in practice (see history.rs's backfill note). Read today only to
+   * show the "Fra e-post / From email" badge on a mail-task thread. */
+  origin?: string
 }
 
 export type ChatThreadTranscriptSnapshot = {
@@ -449,6 +764,11 @@ export type SaveChatThreadSnapshotRequest = {
    * the thread on the user's next message.
    */
   pinned?: boolean
+  /**
+   * OMIT to leave the per-thread persona toggle untouched — same
+   * "omission = leave unchanged" contract as `pinned` above.
+   */
+  personaEnabled?: boolean
 }
 
 export type ModelModality = 'chat' | 'image' | 'video' | 'audio' | 'embedding' | 'other'
@@ -566,6 +886,23 @@ function objectValue(value: unknown): Record<string, unknown> | undefined {
   return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : undefined
 }
 
+/**
+ * The content-free retry timing on an `error` frame: when a refusing service
+ * (the ChatGPT plan's usage limit, or a throttle) accepts calls again. Both
+ * spellings are read, as elsewhere in this client. A delay that is not a
+ * non-negative finite number, or a reset instant that does not parse, is
+ * dropped rather than passed on for the UI to misread. Keys are present only
+ * when known, so an error without them keeps its exact shape.
+ */
+function failureTiming(payload: Record<string, unknown>): Pick<ChatErrorEvent, 'retryAfterMs' | 'resetsAt'> {
+  const delay = num(payload.retry_after_ms) ?? num(payload.retryAfterMs)
+  const resetsAt = str(payload.resets_at) ?? str(payload.resetsAt)
+  return {
+    ...(delay !== undefined && Number.isFinite(delay) && delay >= 0 ? { retryAfterMs: delay } : {}),
+    ...(resetsAt !== undefined && Number.isFinite(Date.parse(resetsAt)) ? { resetsAt } : {}),
+  }
+}
+
 function emitCitation(value: unknown, handlers: ChatStreamHandlers): void {
   const payload = objectValue(value)
   if (!payload) return
@@ -576,8 +913,10 @@ function emitCitation(value: unknown, handlers: ChatStreamHandlers): void {
     snippet: str(payload.snippet) ?? str(payload.description),
     claimId: str(payload.claim_id) ?? str(payload.claimId),
     sourceGroupId: str(payload.source_group_id) ?? str(payload.sourceGroupId),
+    sourceGroupLabel: str(payload.source_group_label) ?? str(payload.sourceGroupLabel),
     start: num(payload.start) ?? num(payload.start_offset) ?? num(payload.startOffset),
     end: num(payload.end) ?? num(payload.end_offset) ?? num(payload.endOffset),
+    origin: str(payload.origin),
   })
 }
 
@@ -646,31 +985,51 @@ export function shouldRequestSupportContext(content: string): boolean {
 }
 
 export function buildChatWireBody(request: ChatInvokeRequest): Record<string, unknown> {
+  const conversationOnly = request.sourceScope === 'conversation'
+  // Per-turn retrieval-source filter (chat-wave2 scope spec): conversation
+  // always wins — that mode already excludes both source families outright,
+  // so a `retrievalScope` also passed alongside it is never sent. Narrowed
+  // inline rather than trusted, same as `conversationOnly` above: the server
+  // fails safe to `auto` for an unrecognized value regardless, but a caller
+  // that bypassed the `RetrievalScope` type (e.g. a value round-tripped
+  // through storage) must not put an arbitrary string on the wire.
+  const retrievalScope = conversationOnly
+    ? 'auto'
+    : request.retrievalScope === 'knowledge_only' || request.retrievalScope === 'web_only'
+      ? request.retrievalScope
+      : 'auto'
   const threadId = request.threadId?.trim() || undefined
   const supportReadOnly = isSupportChatThread(threadId)
   const subscriptionBacked = request.provider === 'openai-codex-subscription'
   const tools = supportReadOnly || subscriptionBacked ? [] : buildToolSpecs(request)
   const features = new Set(request.features ?? DEFAULT_FEATURES)
+  if (conversationOnly) features.add('conversation_only')
+  else features.delete('conversation_only')
   // Request the tools family by default, even with zero client-declared specs.
   // Support-derived threads are the exception because their durable history
   // contains customer-authored transcript text and must remain read-only.
   // model-gateway merges its own builtins (tool_loop::builtin_tool_defs —
-  // fetch_url, knowledge_search) into the tool list whenever this feature is
-  // present, regardless of what the client sent (sse.rs). Without it, a plain
-  // chat turn never gets knowledge_search attached, so the model can't ground
-  // answers in the org's own ingested knowledge base unless the user happens
-  // to also toggle Browse or an action first. web_search stays gated behind
-  // its own explicit-Search-toggle check server-side, so this does not grant
-  // unrestricted web access — only the safe, always-useful builtins turn on.
-  if (supportReadOnly || subscriptionBacked) features.delete('tools')
+  // fetch_url, knowledge_search, get_weather, code_interpreter) into the tool
+  // list whenever this feature is present, regardless of what the client
+  // sent (sse.rs). Without it, a plain chat turn never gets knowledge_search
+  // attached, so the model can't ground answers in the org's own ingested
+  // knowledge base unless the user happens to also toggle Browse or an
+  // action first. web_search stays gated behind its own explicit-Search-
+  // toggle check server-side, so this does not grant unrestricted web access
+  // — only the safe, always-useful builtins turn on.
+  //
+  // Subscription models propose tool calls through the scoped broker. Model
+  // Gateway keeps execution, authorization and audit ownership; decision and
+  // answer inference retain the selected subscription model and connection.
+  if (supportReadOnly) features.delete('tools')
   else features.add('tools')
   // Plan mode → agentic run path (orchestration-backed, supports approval gates
   // + run pause/resume). Without it the gateway uses the direct tool loop, which
   // never pauses for human approval.
-  if (request.planMode && !supportReadOnly && !subscriptionBacked) features.add('agentic')
+  if (request.planMode && !conversationOnly && !supportReadOnly && !subscriptionBacked) features.add('agentic')
   else features.delete('agentic')
 
-  const supportContextQuery = !supportReadOnly && shouldRequestSupportContext(request.content)
+  const supportContextQuery = !conversationOnly && !supportReadOnly && shouldRequestSupportContext(request.content)
     ? request.content.trim().slice(0, 240)
     : undefined
 
@@ -688,8 +1047,8 @@ export function buildChatWireBody(request: ChatInvokeRequest): Record<string, un
     // `[]` — so a turn that names no skill is byte-for-byte what it was before
     // this field existed.
     ...(supportReadOnly || subscriptionBacked ? {} : skillIdsField(request.actions)),
-    browse_web: supportReadOnly || subscriptionBacked ? false : request.browseWeb ?? false,
-    generate_image: supportReadOnly || subscriptionBacked ? false : request.generateImage ?? false,
+    browse_web: conversationOnly || supportReadOnly || subscriptionBacked ? false : request.browseWeb ?? false,
+    generate_image: conversationOnly || supportReadOnly || subscriptionBacked ? false : request.generateImage ?? false,
     // Sent as a real field, not just as the `agentic` feature above: the
     // gateway needs it to mark the run itself (in-memory plan-mode store +
     // session-core's durable `run.mode`). Without this the toggle only widened
@@ -700,7 +1059,7 @@ export function buildChatWireBody(request: ChatInvokeRequest): Record<string, un
     // used to set only browseWeb, so it was indistinguishable from a plain
     // Search turn — the same failure planMode had. The gateway keys the
     // multi-round research pipeline off this flag.
-    deep_research: supportReadOnly || subscriptionBacked ? false : (request.deepResearch ?? false),
+    deep_research: conversationOnly || supportReadOnly || subscriptionBacked ? false : (request.deepResearch ?? false),
     // Omitted entirely when unset or `standard`: the gateway treats an absent
     // effort as "no thinking", and sending `standard` explicitly would be a
     // no-op field on every ordinary turn.
@@ -713,6 +1072,11 @@ export function buildChatWireBody(request: ChatInvokeRequest): Record<string, un
     ...(request.verbosity && request.verbosity !== 'balanced'
       ? { verbosity: request.verbosity }
       : {}),
+    // Same omit-when-default convention as `effort`/`verbosity` above: the
+    // gateway reads an absent value as `auto` (today's byte-identical
+    // behavior), so this is only ever sent for a real `knowledge_only`/
+    // `web_only` pick on a `workspace`-scope thread.
+    ...(retrievalScope !== 'auto' ? { retrieval_scope: retrievalScope } : {}),
     attachments: subscriptionBacked ? [] : request.attachments ?? [],
     // Opt-in only, like `min_privacy_tier` below: omitted entirely when
     // nothing is pinned, so an ordinary turn's body is byte-identical to
@@ -917,10 +1281,24 @@ function dispatchAgUiEvent(
             snippet: str(value.snippet) ?? str(value.description),
             claimId: str(value.claim_id) ?? str(value.claimId),
             sourceGroupId: str(value.source_group_id) ?? str(value.sourceGroupId),
+            sourceGroupLabel: str(value.source_group_label) ?? str(value.sourceGroupLabel),
             start: num(value.start) ?? num(value.start_offset) ?? num(value.startOffset),
             end: num(value.end) ?? num(value.end_offset) ?? num(value.endOffset),
+            origin: str(value.origin),
           })
           break
+        case 'source_scope_applied': {
+          const scope = str(value.scope)
+          if (scope === 'knowledge_only' || scope === 'web_only') {
+            handlers.onSourceScopeApplied?.({
+              scope,
+              excludedTools: Array.isArray(value.excluded_tools)
+                ? value.excluded_tools.filter((name): name is string => typeof name === 'string')
+                : [],
+            })
+          }
+          break
+        }
         case 'grounding':
           handlers.onGrounding?.({ value: value.grounding ?? value })
           break
@@ -945,6 +1323,7 @@ function dispatchAgUiEvent(
             inputTokens: num(value.input_tokens),
             outputTokens: num(value.output_tokens),
             costUsd: num(value.cost_usd),
+            costBasis: costBasisValue(value.cost_basis),
             latencyMs: num(value.latency_ms),
             confidence: num(value.confidence),
             cacheReadTokens: num(value.cache_read_tokens) ?? num(value.cacheReadTokens),
@@ -1077,15 +1456,26 @@ function dispatchEvent(event: SseEvent, handlers: ChatStreamHandlers): void {
         handlers.onDone?.({ requestId: str(payload.request_id) })
       }
       break
-    case 'error':
+    case 'error': {
+      // Model Gateway sends its codes flat. The BFF reports a broken upstream
+      // byte stream in its JSON error envelope instead
+      // (`{"error":{"code":"upstream_unavailable",...}}`, see the gateway's
+      // `sse_transport_error_event`). Reading only the flat fields turned that
+      // transport break into an anonymous terminal "Stream error", so the
+      // controller never attempted the resume a lost connection deserves.
+      const envelope = payload.error && typeof payload.error === 'object'
+        ? payload.error as Record<string, unknown>
+        : undefined
       handlers.onError?.({
-        code: str(payload.code) ?? 'error',
-        message: str(payload.message) ?? 'Stream error',
+        code: str(payload.code) ?? str(envelope?.code) ?? 'error',
+        message: str(payload.message) ?? str(envelope?.message) ?? 'Stream error',
         retryable: typeof payload.retryable === 'boolean' ? payload.retryable : undefined,
         runId: str(payload.run_id) ?? str(payload.runId),
         requestId: str(payload.request_id) ?? str(payload.requestId),
+        ...failureTiming(payload),
       })
       break
+    }
     case 'artifact':
       handlers.onArtifact?.({
         id: str(payload.id),
@@ -1126,6 +1516,18 @@ function dispatchEvent(event: SseEvent, handlers: ChatStreamHandlers): void {
     case 'citation':
       emitCitation(payload, handlers)
       break
+    case 'source_scope_applied': {
+      const scope = str(payload.scope)
+      if (scope === 'knowledge_only' || scope === 'web_only') {
+        handlers.onSourceScopeApplied?.({
+          scope,
+          excludedTools: Array.isArray(payload.excluded_tools)
+            ? payload.excluded_tools.filter((name): name is string => typeof name === 'string')
+            : [],
+        })
+      }
+      break
+    }
     case 'citations':
     case 'search_results': {
       const citations = Array.isArray(payload.citations)
@@ -1145,6 +1547,7 @@ function dispatchEvent(event: SseEvent, handlers: ChatStreamHandlers): void {
         title: str(payload.title) ?? str(payload.name),
         detail: str(payload.detail) ?? str(payload.message),
         status: str(payload.status),
+        ...(event.id ? { frameId: event.id } : {}),
       })
       break
     case 'awaiting_approval':
@@ -1156,6 +1559,7 @@ function dispatchEvent(event: SseEvent, handlers: ChatStreamHandlers): void {
         title: 'Approval',
         detail: 'Awaiting approval',
         status: 'awaiting_approval',
+        ...(event.id ? { frameId: event.id } : {}),
       })
       break
     case 'usage':
@@ -1163,12 +1567,27 @@ function dispatchEvent(event: SseEvent, handlers: ChatStreamHandlers): void {
         inputTokens: num(payload.input_tokens),
         outputTokens: num(payload.output_tokens),
         costUsd: num(payload.cost_usd),
+        costBasis: costBasisValue(payload.cost_basis),
         latencyMs: num(payload.latency_ms),
         confidence: num(payload.confidence),
         cacheReadTokens: num(payload.cache_read_tokens) ?? num(payload.cacheReadTokens),
         cacheWriteTokens: num(payload.cache_write_tokens) ?? num(payload.cacheWriteTokens),
       })
       break
+    case 'turn_timing': {
+      // Optional by contract: an older gateway never sends it, and a payload
+      // without its totals is dropped rather than shown as a zero.
+      const timing = parseTurnTiming(payload)
+      if (timing) handlers.onTurnTiming?.(timing)
+      break
+    }
+    case 'result_receipt': {
+      // Named explicitly: it used to fall through to `onUnknownEvent` and a
+      // console warning on every checked turn.
+      const receipt = objectValue(payload.receipt)
+      if (receipt) handlers.onResultReceipt?.({ receipt, requestId: str(payload.request_id) })
+      break
+    }
     case 'title': {
       const title = str(payload.title)?.trim()
       if (title) handlers.onTitle?.({ title, requestId: str(payload.request_id) })
@@ -1180,6 +1599,29 @@ function dispatchEvent(event: SseEvent, handlers: ChatStreamHandlers): void {
         : []
       if (suggestions.length > 0) {
         handlers.onFollowUps?.({ suggestions, requestId: str(payload.request_id) })
+      }
+      break
+    }
+    case 'plan_proposed': {
+      const planId = str(payload.plan_id)
+      const summary = str(payload.summary)
+      const rawSteps = Array.isArray(payload.steps) ? payload.steps : []
+      const steps = rawSteps
+        .map((item): ChatPlanStep | null => {
+          const step = objectValue(item)
+          if (!step) return null
+          const id = str(step.id)
+          const title = str(step.title)
+          if (!id || !title) return null
+          return { id, title, operation: str(step.operation) }
+        })
+        .filter((step): step is ChatPlanStep => step !== null)
+      // A plan with no readable id/summary is a malformed frame, not a real
+      // proposal — dropping it degrades to today's rung-only
+      // PlanApprovalControl, exactly the fallback plan-gate's rollout note
+      // calls for, rather than rendering a broken edit surface.
+      if (planId && summary) {
+        handlers.onPlanProposed?.({ planId, summary, steps, requestId: str(payload.request_id) })
       }
       break
     }
@@ -1245,6 +1687,38 @@ function dispatchEvent(event: SseEvent, handlers: ChatStreamHandlers): void {
   }
 }
 
+/**
+ * The `onError` a failed stream connection reports.
+ *
+ * Only a genuine transport failure is `connection_error`, which the chat
+ * controller answers by reattaching to the same invocation. A 401 or 403 means
+ * the browser session is no longer accepted: the run itself is unaffected, but
+ * no reconnect can succeed until the user signs in again, so reporting it as a
+ * lost connection told them the wrong thing and retried into the same refusal.
+ */
+function streamConnectionFailure(err: unknown, fallback: string): ChatErrorEvent {
+  if (err instanceof ApiError && err.status === 401) {
+    return {
+      code: 'unauthorized',
+      message: 'Økten din er utløpt. Logg inn på nytt for å se svaret.',
+    }
+  }
+  if (err instanceof ApiError && err.status === 403) {
+    return {
+      code: 'forbidden',
+      message: 'Du har ikke lenger tilgang til denne samtalen. Logg inn på nytt og prøv igjen.',
+    }
+  }
+  return { code: 'connection_error', message: err instanceof Error ? err.message : fallback }
+}
+
+/** One SSE frame: the resume filter first, then the cursor, then the event. */
+function dispatchFrame(event: SseEvent, handlers: ChatStreamHandlers): void {
+  if (handlers.acceptFrame && !handlers.acceptFrame(event.id || undefined)) return
+  if (event.id) handlers.onFrameId?.(event.id)
+  dispatchEvent(event, handlers)
+}
+
 export async function streamChat(
   request: ChatInvokeRequest,
   handlers: ChatStreamHandlers,
@@ -1261,18 +1735,14 @@ export async function streamChat(
       signal,
       lastEventId,
     },
-    (event) => {
-      if (event.id) handlers.onFrameId?.(event.id)
-      dispatchEvent(event, handlers)
-    },
+    (event) => dispatchFrame(event, handlers),
     (err) => {
       connError = err
     },
   )
 
   if (connError) {
-    const msg = connError instanceof Error ? connError.message : 'Connection failed'
-    handlers.onError?.({ code: 'connection_error', message: msg })
+    handlers.onError?.(streamConnectionFailure(connError, 'Connection failed'))
   }
 }
 
@@ -1287,18 +1757,14 @@ export async function resumeStream(
   await readSseStream(
     `/api/v1/chat/stream/resume/${encodeURIComponent(requestId)}`,
     { method: 'GET', signal, lastEventId },
-    (event) => {
-      if (event.id) handlers.onFrameId?.(event.id)
-      dispatchEvent(event, handlers)
-    },
+    (event) => dispatchFrame(event, handlers),
     (err) => {
       connError = err
     },
   )
 
   if (connError) {
-    const msg = connError instanceof Error ? connError.message : 'Resume failed'
-    handlers.onError?.({ code: 'connection_error', message: msg })
+    handlers.onError?.(streamConnectionFailure(connError, 'Resume failed'))
   }
 }
 
@@ -1336,34 +1802,80 @@ export type PlanApprovalResult = {
    * and the agent would refuse work it was just authorized to do.
    */
   persisted: boolean
+  /** The finalized, post-edit plan (plan-gate §2.3) — absent when this turn
+   * never proposed a structured plan (the pure rung-grant path, unchanged). */
+  plan?: Plan
 }
 
 /**
  * Approve a planning run: grant it the authority to execute, at a named rung,
- * with a stated reason.
+ * with a stated reason. When `planId` is set (a structured plan was proposed,
+ * plan-gate §2.1), the user's `editedSteps` are applied and the plan
+ * transitions to APPROVED atomically before the rung is granted — an
+ * autonomy grant with no corresponding approved plan is exactly the
+ * "rubber stamp" this control exists to prevent.
  *
- * Both are required by the Model Plane — an approval with no reason, or a reason
- * granting nothing, is refused rather than recorded as an empty justification.
+ * Both `grantedRung`/`justification` are required by the Model Plane — an
+ * approval with no reason, or a reason granting nothing, is refused rather
+ * than recorded as an empty justification.
  */
 export async function approvePlan(
   runId: string,
   grantedRung: AutonomyRung,
   justification: string,
+  planId?: string,
+  editedSteps?: PlanStepEdit[],
 ): Promise<PlanApprovalResult> {
   const raw = await requestJson<Record<string, unknown>>(
     `/api/v1/agents/runs/${encodeURIComponent(runId)}/plan-approval`,
     {
       method: 'POST',
-      body: JSON.stringify({ granted_rung: grantedRung, justification }),
+      body: JSON.stringify({
+        decision: 'approve',
+        granted_rung: grantedRung,
+        justification,
+        plan_id: planId ?? '',
+        edited_steps: (editedSteps ?? []).map(planStepEditToWire),
+      }),
     },
   )
+  const plan = objectValue(raw.plan)
   return {
     grantedRung: (typeof raw.granted_rung === 'string'
       ? raw.granted_rung
       : grantedRung) as AutonomyRung,
     wasInPlanMode: raw.was_in_plan_mode === true,
     persisted: raw.persisted !== false,
+    plan: plan ? (normalizePlan(plan) ?? undefined) : undefined,
   }
+}
+
+/**
+ * Reject a proposed plan (plan-gate §2.3): grants nothing, closes the plan out
+ * as REJECTED. The composer's plan-mode toggle is turned off the same way an
+ * approve does, so the user must ask again in a fresh message rather than
+ * silently retrying the same turn (owner ruling, 2026-09-27: no
+ * revise-after-reject in this wave).
+ */
+export async function rejectPlan(
+  runId: string,
+  planId: string,
+  reason: string,
+): Promise<{ plan?: Plan }> {
+  const raw = await requestJson<Record<string, unknown>>(
+    `/api/v1/agents/runs/${encodeURIComponent(runId)}/plan-approval`,
+    {
+      method: 'POST',
+      body: JSON.stringify({
+        decision: 'reject',
+        justification: reason,
+        plan_id: planId,
+        edited_steps: [],
+      }),
+    },
+  )
+  const plan = objectValue(raw.plan)
+  return { plan: plan ? (normalizePlan(plan) ?? undefined) : undefined }
 }
 
 /**
@@ -1675,6 +2187,11 @@ function normalizeThreadMessages(raw: unknown): ChatMessage[] {
       ? (raw as { messages: unknown[] }).messages
       : []
 
+  // Fields are read by name, never spread: the message's `metadata` map is
+  // forwarded whole to the thread owner and carries gateway bookkeeping that
+  // must never render. `head_summary` (the budget compaction's summary of
+  // earlier turns) and `native_compaction_summary` are model context, not
+  // anything the user said or was told, so neither is read here.
   return source
     .filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === 'object')
     .map((item, index) => ({
@@ -1683,6 +2200,15 @@ function normalizeThreadMessages(raw: unknown): ChatMessage[] {
       content: str(item.content) ?? '',
       model: str(item.model) ?? str(item.model_used),
       createdAt: str(item.created_at) ?? str(item.createdAt) ?? '',
+      sourceScope: (item.source_scope ?? objectValue(item.metadata)?.source_scope) === 'conversation' ? 'conversation' : 'workspace',
+      // See `ChatInvokeRequest.retrievalScope`. Undefined (not `'auto'`) for
+      // a turn that used the default, or one recorded before this field
+      // existed — omitted from the type is the same "nothing to show"
+      // signal `sourceScope`'s absence-of-'conversation' already relies on.
+      retrievalScope: (() => {
+        const raw = item.retrieval_scope ?? objectValue(item.metadata)?.retrieval_scope
+        return raw === 'knowledge_only' ? 'knowledge_only' : raw === 'web_only' ? 'web_only' : undefined
+      })(),
       // Turn metadata the backend flattens onto the message. Present only for
       // assistant turns recorded since the score became durable, so a missing
       // field means "not recorded" — never a score of zero.
@@ -1740,10 +2266,15 @@ function normalizeChatThreadSession(raw: unknown): ChatThreadSession | null {
     preview: str(item.preview) ?? '',
     updatedAt: normalizeIsoTimestamp(str(item.updatedAt) ?? str(item.updated_at)),
     pinned: item.pinned === true,
+    // Absent (a legacy thread the BFF never saw a personaEnabled key for, or
+    // a snapshot response that omits it) reads as enabled, the mirror image
+    // of `pinned` defaulting to false — see this field's own doc comment.
+    personaEnabled: item.personaEnabled !== false,
     ...(latestRunId ? { latestRunId } : {}),
     ...(latestRunStatus ? { latestRunStatus } : {}),
     ...(latestRunUpdatedAt ? { latestRunUpdatedAt } : {}),
     spaceRef: str(item.spaceRef) ?? str(item.space_ref),
+    origin: str(item.origin),
   }
 }
 

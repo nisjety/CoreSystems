@@ -78,6 +78,14 @@ entry is `persistent` precisely because approval receipts are durable by nature,
 while its `quarry` entry stays `zdr`. Change these with whoever owns retention
 policy, not to make an error go away.
 
+The marker is the principal's posture, fixed per audience, not any user's or
+turn's. One session-core call therefore does not read it: `model-gateway`'s
+`session-core` credential is always `zdr`, and
+`ManagedRunLifecycle.CompleteDirectRunWithMessage` (the gateway saving a
+direct turn's answer with its receipt) takes retention from the run instead,
+which recorded the user's posture when it started, and refuses a zero-retention
+run. Every other durable write still refuses a `zdr` credential.
+
 ### Requires `jq`
 
 The generator assembles JSON with `jq` and **fails loudly** if it is absent

@@ -1,0 +1,10 @@
+node_modules/
+.next/
+dist/
+.tools/
+artifacts/
+**/bin/
+**/obj/
+*.tsbuildinfo
+.env
+.env.local

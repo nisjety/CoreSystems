@@ -405,21 +405,25 @@ mod tests {
     fn the_question_is_the_last_user_message() {
         let messages = vec![
             super::super::ChatMessage {
+                compaction_summary: String::new(),
                 role: "system".to_owned(),
                 content: "kontekst".to_owned(),
                 name: String::new(),
             },
             super::super::ChatMessage {
+                compaction_summary: String::new(),
                 role: "user".to_owned(),
                 content: "første".to_owned(),
                 name: String::new(),
             },
             super::super::ChatMessage {
+                compaction_summary: String::new(),
                 role: "assistant".to_owned(),
                 content: "svar".to_owned(),
                 name: String::new(),
             },
             super::super::ChatMessage {
+                compaction_summary: String::new(),
                 role: "user".to_owned(),
                 content: "siste spørsmål".to_owned(),
                 name: String::new(),

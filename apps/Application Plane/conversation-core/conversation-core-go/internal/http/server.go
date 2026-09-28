@@ -154,6 +154,22 @@ func newRouter(handler *Handler, verifier *delegation.Verifier) *gin.Engine {
 	agentActions.POST("/agent-ticket-operations", handler.CreateAgentTicketOperation)
 	agentActions.POST("/agent-ticket-operations/reconcile", handler.ReconcileAgentTicketOperation)
 
+	// The Model Plane's chat runtime reads the inbox so Verevon can answer
+	// questions about it. It gets its own lane rather than a seat on the
+	// gateway group, because the gateway group is where every write lives:
+	// a principal added there would be one route-registration away from
+	// being able to send mail, and the whole point of this lane is that a
+	// model-driven turn cannot. Only these two reads exist here, so the
+	// authorization is structural rather than a role check a future refactor
+	// could loosen.
+	//
+	// Scoped by organization, not by user: the caller is a server-side runtime
+	// acting inside one verified tenant, and it carries no verified role to
+	// gate on — exactly the ingest lane's shape, so it uses the same guard.
+	verevonReads := router.Group("/internal/v1/verevon", delegated, requireServicePrincipal("model-gateway"), requireOrganizationPrincipal())
+	verevonReads.GET("/conversations", handler.ListConversations)
+	verevonReads.GET("/conversations/:id", handler.GetConversation)
+
 	return router
 }
 

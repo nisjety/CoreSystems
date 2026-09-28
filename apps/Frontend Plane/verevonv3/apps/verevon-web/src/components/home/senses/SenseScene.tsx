@@ -1,6 +1,7 @@
 import type { CSSProperties, ReactNode } from "react";
 import { AbsoluteFill, Easing, interpolate, Sequence, staticFile, useCurrentFrame } from "remotion";
 import { ArrowUpRight, Check, FileText, Mail, MousePointer2, Search, ShieldCheck, Sparkles } from "lucide-react";
+import { VerevonMark } from "../sections/VerevonMark";
 
 export type SenseKind = "delegate" | "learn" | "oversee";
 export const SENSE_DURATION = 540;
@@ -19,7 +20,7 @@ const panel: CSSProperties = { background: paper, border: "1px solid rgba(255,25
 const row: CSSProperties = { display: "flex", alignItems: "center", gap: 14 };
 
 function Brand({ small = false }: { small?: boolean }) {
-	return <span style={{ display: "inline-grid", placeItems: "center", flexShrink: 0, width: small ? 30 : 44, height: small ? 30 : 44, background: ink, color: "#fffefa", borderRadius: small ? 8 : 12, fontSize: small ? 19 : 26, fontWeight: 400 }}>V</span>;
+	return <span style={{ display: "inline-grid", placeItems: "center", flexShrink: 0, width: small ? 30 : 44, height: small ? 30 : 44, background: ink, color: paper, borderRadius: small ? 8 : 12 }}><VerevonMark style={{ display: "block", width: "100%", height: "100%", transform: "scale(1.3)" }} /></span>;
 }
 
 function Chip({ children, done = false }: { children: ReactNode; done?: boolean }) {

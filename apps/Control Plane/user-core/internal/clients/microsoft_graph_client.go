@@ -94,7 +94,7 @@ func (c *MicrosoftGraphClient) GetMe(ctx context.Context, accessToken string) (*
 	if err != nil {
 		return nil, fmt.Errorf("call graph /me: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -115,7 +115,7 @@ func (c *MicrosoftGraphClient) GetMe(ctx context.Context, accessToken string) (*
 	return &profile, nil
 }
 
-// GraphPhoto holds the bytes + MIME type of a user's photo.
+// GraphPhoto holds the bytes + MIME type of the user's photo.
 type GraphPhoto struct {
 	ContentType string
 	Bytes       []byte
@@ -154,7 +154,7 @@ func (c *MicrosoftGraphClient) GetPhotoValue(ctx context.Context, accessToken st
 	if err != nil {
 		return nil, fmt.Errorf("call graph /me/photo: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode == http.StatusNotFound {
 		// User has no photo set in Entra. Common; not an error.

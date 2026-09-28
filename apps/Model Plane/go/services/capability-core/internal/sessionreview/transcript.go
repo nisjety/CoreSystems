@@ -35,33 +35,57 @@ func NewSessionCoreTranscriptSource(client sessionCoreReader) *SessionCoreTransc
 }
 
 // Fetch implements [TranscriptSource]: render the thread's conversation as the
-// transcript and map the org's skills to the existing-skill baseline.
+// transcript and map the org's skills to the existing-skill baseline. A
+// conversation-only thread, or one with nothing to render, comes back as a
+// skip — and in both cases the org's skills are not even listed.
 func (s *SessionCoreTranscriptSource) Fetch(
 	ctx context.Context,
 	ref SessionRef,
-) (string, []learning.ExistingSkill, error) {
+) (Transcript, error) {
 	convo, err := s.client.ListConversation(ctx, &mpv1.ListConversationRequest{
 		OrgId:    ref.OrgID,
 		ThreadId: ref.ThreadID,
 	})
 	if err != nil {
-		return "", nil, fmt.Errorf("sessionreview: list conversation for thread %s: %w", ref.ThreadID, err)
+		return Transcript{}, fmt.Errorf("sessionreview: list conversation for thread %s: %w", ref.ThreadID, err)
+	}
+	if conversationScoped(convo.GetMessages()) {
+		return Transcript{Skip: learning.SkipConversationScope}, nil
+	}
+	transcript := RenderTranscript(convo.GetMessages())
+	if transcript == "" {
+		return Transcript{Skip: learning.SkipEmptyTranscript}, nil
 	}
 	skills, err := s.client.ListAgentSkills(ctx, &mpv1.ListAgentSkillsRequest{
 		OrgId:       ref.OrgID,
 		EnabledOnly: false,
 	})
 	if err != nil {
-		return "", nil, fmt.Errorf("sessionreview: list agent skills for org %s: %w", ref.OrgID, err)
+		return Transcript{}, fmt.Errorf("sessionreview: list agent skills for org %s: %w", ref.OrgID, err)
 	}
-	return RenderTranscript(convo.GetMessages()), toExistingSkills(skills.GetSkills()), nil
+	return Transcript{Text: transcript, Existing: toExistingSkills(skills.GetSkills())}, nil
+}
+
+// conversationScoped reports whether any turn was written in conversation-only
+// scope. Such a thread is kept out of workspace learning, so one such turn is
+// enough to keep the whole thread out of review.
+func conversationScoped(msgs []*mpv1.SessionMessage) bool {
+	for _, m := range msgs {
+		if m.GetMetadata().GetFields()["source_scope"].GetStringValue() == "conversation" {
+			return true
+		}
+	}
+	return false
 }
 
 // RenderTranscript renders conversation turns as a readable transcript for the
 // skill-extraction reviewer: "ROLE: content" blocks in order. Best-judgment
 // format — refine if review quality calls for richer rendering (e.g. tool
-// call/result framing).
+// call/result framing). A conversation-scoped thread renders empty.
 func RenderTranscript(msgs []*mpv1.SessionMessage) string {
+	if conversationScoped(msgs) {
+		return ""
+	}
 	var b strings.Builder
 	for _, m := range msgs {
 		b.WriteString(strings.ToUpper(m.GetRole()))

@@ -2,11 +2,18 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	mpv1 "github.com/triodelab/model-plane/gen/go/model_plane/v1"
+	"github.com/triodelab/model-plane/services/letta-bridge/internal/agentmemory"
 	"github.com/triodelab/model-plane/services/letta-bridge/internal/memstore"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -232,5 +239,86 @@ func TestDeleteMemory_Success(t *testing.T) {
 	}
 	if !resp.Deleted {
 		t.Fatal("expected Deleted=true")
+	}
+}
+
+// DeleteMemory on the agent-memory backend must honour the request's org and
+// user. The upstream delete endpoint takes only ids, so before the client
+// checked the scope, this RPC erased any memory whose id the caller knew and
+// answered Deleted=true for ids that matched nothing.
+func TestDeleteMemory_AgentMemoryBackendIsScopedToTheCallersOrgAndUser(t *testing.T) {
+	var mu sync.Mutex
+	records := map[string][2]string{ // id -> {namespace, user_id}
+		"mine":       {"org-a", "user-a"},
+		"other-user": {"org-a", "user-b"},
+		"other-org":  {"org-b", "user-a"},
+	}
+	deleteCalls := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		switch {
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/v1/long-term-memory/"):
+			id := strings.TrimPrefix(r.URL.Path, "/v1/long-term-memory/")
+			scope, ok := records[id]
+			if !ok {
+				w.WriteHeader(http.StatusNotFound)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]string{"id": id, "text": "t", "namespace": scope[0], "user_id": scope[1]})
+		case r.Method == http.MethodDelete && r.URL.Path == "/v1/long-term-memory":
+			deleteCalls++
+			removed := 0
+			for _, id := range r.URL.Query()["memory_ids"] {
+				if _, ok := records[id]; ok {
+					delete(records, id)
+					removed++
+				}
+			}
+			_ = json.NewEncoder(w).Encode(map[string]string{"status": fmt.Sprintf("ok, deleted %d memories", removed)})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer upstream.Close()
+
+	client, ok := agentmemory.New(agentmemory.Config{BaseURL: upstream.URL})
+	if !ok {
+		t.Fatal("agentmemory.New returned ok=false")
+	}
+	srv := NewServerWithBackend(client, "agent-memory", true)
+	deleteMemory := func(memoryID string) bool {
+		t.Helper()
+		resp, err := srv.DeleteMemory(context.Background(), &mpv1.DeleteMemoryRequest{
+			OrgId: "org-a", UserId: "user-a", MemoryId: memoryID,
+		})
+		if err != nil {
+			t.Fatalf("DeleteMemory(%q): %v", memoryID, err)
+		}
+		return resp.Deleted
+	}
+
+	for _, id := range []string{"other-user", "other-org", "never-existed"} {
+		if deleteMemory(id) {
+			t.Errorf("DeleteMemory(%q) reported Deleted=true outside the caller's scope", id)
+		}
+	}
+	if !deleteMemory("mine") {
+		t.Error("DeleteMemory(mine) = false, want true")
+	}
+	if deleteMemory("mine") {
+		t.Error("a second DeleteMemory(mine) = true, want false once it is gone")
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if _, ok := records["other-user"]; !ok {
+		t.Error("another user's memory was erased")
+	}
+	if _, ok := records["other-org"]; !ok {
+		t.Error("another org's memory was erased")
+	}
+	if deleteCalls != 1 {
+		t.Errorf("upstream DELETE calls = %d, want 1 (only the caller's own memory)", deleteCalls)
 	}
 }

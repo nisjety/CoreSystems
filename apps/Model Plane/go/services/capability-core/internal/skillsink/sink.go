@@ -45,7 +45,7 @@ func NewSessionCoreSink(client skillUpserter, orgID string) *SessionCoreSink {
 // guard and learning.SelectForPersistence.
 func (s *SessionCoreSink) Persist(ctx context.Context, skills []learning.SkillCandidate) (int, error) {
 	persisted := 0
-	for _, sk := range skills {
+	for i, sk := range skills {
 		resp, err := s.client.UpsertAgentSkill(ctx, &mpv1.UpsertAgentSkillRequest{
 			OrgId:           s.orgID,
 			Name:            sk.Name,
@@ -56,7 +56,9 @@ func (s *SessionCoreSink) Persist(ctx context.Context, skills []learning.SkillCa
 			Origin:          string(sk.Origin),
 		})
 		if err != nil {
-			return persisted, fmt.Errorf("upsert skill %q: %w", sk.Name, err)
+			// By position, not name: the name is model output derived from the
+			// conversation, and this error ends up in the consumer's logs.
+			return persisted, fmt.Errorf("upsert skill %d of %d: %w", i+1, len(skills), err)
 		}
 		if resp != nil && !resp.GetSkippedProtected() {
 			persisted++

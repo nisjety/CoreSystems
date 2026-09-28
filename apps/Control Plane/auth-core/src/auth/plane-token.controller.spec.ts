@@ -1,7 +1,9 @@
 import {
   BadRequestException,
+  ForbiddenException,
   NotFoundException,
   ServiceUnavailableException,
+  UnauthorizedException,
 } from '@nestjs/common';
 import { createHash } from 'node:crypto';
 
@@ -390,5 +392,243 @@ describe('PlaneTokenController interactive capability scope issuance', () => {
         },
       }),
     );
+  });
+});
+
+describe('PlaneTokenController delegated-identity token exchange (issueTokenExchange)', () => {
+  const originalRegistry = process.env.PLANE_SERVICE_PRINCIPALS_JSON;
+  const issuedAt = '2026-09-28T00:00:00.000Z';
+  const mintedToken = [
+    'header',
+    Buffer.from(
+      JSON.stringify({ iat: Math.floor(Date.parse(issuedAt) / 1000) }),
+    ).toString('base64url'),
+    'signature',
+  ].join('.');
+  const validSubject = {
+    orgId: 'org-a',
+    userId: 'user-a',
+    zdr: false,
+    audience: 'session-core',
+  };
+
+  beforeEach(() => {
+    process.env.PLANE_SERVICE_PRINCIPALS_JSON = JSON.stringify({
+      'model-execution': {
+        credential: 'test-only-execution-key',
+        audiences: ['ingestion'],
+        orgIds: ['org-a'],
+        scopes: ['integration:read'],
+        retentionByAudience: { ingestion: 'persistent' },
+        tokenExchange: { ingestion: ['session-core'] },
+      },
+    });
+  });
+
+  afterEach(() => {
+    if (originalRegistry === undefined) {
+      delete process.env.PLANE_SERVICE_PRINCIPALS_JSON;
+    } else {
+      process.env.PLANE_SERVICE_PRINCIPALS_JSON = originalRegistry;
+    }
+  });
+
+  function buildController(overrides: {
+    verifyPlaneSubjectToken?: jest.Mock;
+    issuePlaneToken?: jest.Mock;
+    publishAuditDurable?: jest.Mock;
+  } = {}) {
+    const tokens = {
+      isKnownPlaneAudience: jest.fn().mockReturnValue(true),
+      verifyPlaneSubjectToken:
+        overrides.verifyPlaneSubjectToken ??
+        jest.fn().mockReturnValue(validSubject),
+      issuePlaneToken:
+        overrides.issuePlaneToken ??
+        jest.fn().mockReturnValue({ token: mintedToken }),
+    };
+    const audit = {
+      publishAuditDurable:
+        overrides.publishAuditDurable ??
+        jest.fn().mockResolvedValue({
+          stream: 'VEREVON_CONTROL_OBSERVABILITY',
+          seq: 1,
+        }),
+    };
+    return { controller: new PlaneTokenController(tokens as never, audit as never), tokens, audit };
+  }
+
+  const validBody = {
+    orgId: 'org-a',
+    scopes: ['integration:read'],
+    reason: 'execution-core integration:read',
+    subjectToken: 'subject.token.value',
+    subjectTokenType: 'urn:ietf:params:oauth:token-type:jwt',
+  };
+
+  it('mints a delegated token carrying the subject token acting user and publishes an audit event', async () => {
+    const { controller, tokens, audit } = buildController();
+
+    await expect(
+      controller.issueTokenExchange(
+        'ingestion',
+        'model-execution',
+        'test-only-execution-key',
+        validBody,
+      ),
+    ).resolves.toEqual({ token: mintedToken });
+
+    expect(tokens.verifyPlaneSubjectToken).toHaveBeenCalledWith(
+      'subject.token.value',
+      ['session-core'],
+    );
+    expect(tokens.issuePlaneToken).toHaveBeenCalledWith(
+      'ingestion',
+      expect.objectContaining({
+        userId: 'service:model-execution',
+        orgId: 'org-a',
+        actingUserId: 'user-a',
+        principalType: 'service',
+        ttlSecondsOverride: 90,
+      }),
+    );
+    expect(audit.publishAuditDurable).toHaveBeenCalledWith(
+      'verevon.audit.v2.control.auth-core.plane_service_token_exchanged',
+      expect.objectContaining({
+        subject: 'service:model-execution',
+        resource_id: 'ingestion',
+        details: expect.objectContaining({ acting_user_id: 'user-a' }),
+      }),
+    );
+  });
+
+  it('token_exchange_rejects_a_subject_token_for_a_different_org_than_the_request_body', async () => {
+    const { controller, tokens } = buildController();
+
+    await expect(
+      controller.issueTokenExchange(
+        'ingestion',
+        'model-execution',
+        'test-only-execution-key',
+        { ...validBody, orgId: 'org-different' },
+      ),
+    ).rejects.toBeInstanceOf(BadRequestException);
+    expect(tokens.issuePlaneToken).not.toHaveBeenCalled();
+  });
+
+  it('token_exchange_preserves_the_subject_tokens_own_zdr_even_when_the_registry_default_differs', async () => {
+    // Registry's own retentionByAudience for `ingestion` is 'persistent'
+    // (zdr:false) — the subject token below claims zdr:true, which MUST win.
+    const { controller, tokens } = buildController({
+      verifyPlaneSubjectToken: jest
+        .fn()
+        .mockReturnValue({ ...validSubject, zdr: true }),
+    });
+
+    await expect(
+      controller.issueTokenExchange(
+        'ingestion',
+        'model-execution',
+        'test-only-execution-key',
+        validBody,
+      ),
+    ).resolves.toEqual({ token: mintedToken });
+    expect(tokens.issuePlaneToken).toHaveBeenCalledWith(
+      'ingestion',
+      expect.objectContaining({
+        retentionPosture: { zdr: true, authority: 'service-principal-policy' },
+      }),
+    );
+  });
+
+  it('rejects an unverifiable subject token before ever consulting the registry', async () => {
+    const { controller, tokens } = buildController({
+      verifyPlaneSubjectToken: jest.fn().mockImplementation(() => {
+        throw new Error('Plane subject token claims are invalid');
+      }),
+    });
+
+    await expect(
+      controller.issueTokenExchange(
+        'ingestion',
+        'model-execution',
+        'test-only-execution-key',
+        validBody,
+      ),
+    ).rejects.toBeInstanceOf(UnauthorizedException);
+    expect(tokens.issuePlaneToken).not.toHaveBeenCalled();
+  });
+
+  it('rejects a request missing subjectToken/subjectTokenType before verifying anything', async () => {
+    const { controller, tokens } = buildController();
+
+    await expect(
+      controller.issueTokenExchange(
+        'ingestion',
+        'model-execution',
+        'test-only-execution-key',
+        { ...validBody, subjectToken: '' },
+      ),
+    ).rejects.toBeInstanceOf(BadRequestException);
+    expect(tokens.verifyPlaneSubjectToken).not.toHaveBeenCalled();
+    expect(tokens.issuePlaneToken).not.toHaveBeenCalled();
+  });
+
+  it('rejects a principal with no tokenExchange registry entry for this target audience', async () => {
+    process.env.PLANE_SERVICE_PRINCIPALS_JSON = JSON.stringify({
+      'model-execution': {
+        credential: 'test-only-execution-key',
+        audiences: ['ingestion'],
+        orgIds: ['org-a'],
+        scopes: ['integration:read'],
+        // no tokenExchange field at all — absent by default (T-4/§1.2).
+      },
+    });
+    const { controller, tokens } = buildController();
+
+    await expect(
+      controller.issueTokenExchange(
+        'ingestion',
+        'model-execution',
+        'test-only-execution-key',
+        validBody,
+      ),
+    ).rejects.toBeInstanceOf(ForbiddenException);
+    expect(tokens.issuePlaneToken).not.toHaveBeenCalled();
+  });
+
+  it('rejects unknown audiences before consulting the subject token or registry', async () => {
+    const tokens = {
+      isKnownPlaneAudience: jest.fn().mockReturnValue(false),
+      verifyPlaneSubjectToken: jest.fn(),
+    };
+    const controller = new PlaneTokenController(tokens as never, {} as never);
+
+    await expect(
+      controller.issueTokenExchange(
+        'unknown-plane',
+        'model-execution',
+        'test-only-execution-key',
+        validBody,
+      ),
+    ).rejects.toBeInstanceOf(NotFoundException);
+    expect(tokens.verifyPlaneSubjectToken).not.toHaveBeenCalled();
+  });
+
+  it('fails closed when the durable audit PubAck is unavailable', async () => {
+    const { controller } = buildController({
+      publishAuditDurable: jest
+        .fn()
+        .mockRejectedValue(new Error('PubAck timeout')),
+    } as never);
+
+    await expect(
+      controller.issueTokenExchange(
+        'ingestion',
+        'model-execution',
+        'test-only-execution-key',
+        validBody,
+      ),
+    ).rejects.toBeInstanceOf(ServiceUnavailableException);
   });
 });

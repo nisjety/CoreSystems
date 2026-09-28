@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
@@ -110,12 +111,14 @@ func serviceScopeForRequest(request *http.Request) string {
 		return "spaces:audience:publish"
 	case method == http.MethodGet && strings.HasPrefix(path, "/api/v1/internal/spaces/") && strings.HasSuffix(path, "/membership"):
 		return "spaces:resolve"
-	case path == "/api/v1/internal/spaces/personal-thread-decision" || path == "/api/v1/internal/spaces/thread-decision" || path == "/api/v1/internal/spaces/thread-append-decision" || path == "/api/v1/internal/spaces/thread-read-decision" || path == "/api/v1/internal/spaces/personal-retrieval-decision" || path == "/api/v1/internal/spaces/personal-import-decision" || path == "/api/v1/internal/spaces/schedule-create-decision" || path == "/api/v1/internal/spaces/owner-grant-decision":
+	case path == "/api/v1/internal/spaces/personal-thread-decision" || path == "/api/v1/internal/spaces/thread-decision" || path == "/api/v1/internal/spaces/thread-append-decision" || path == "/api/v1/internal/spaces/thread-read-decision" || path == "/api/v1/internal/spaces/personal-retrieval-decision" || path == "/api/v1/internal/spaces/personal-import-decision" || path == "/api/v1/internal/spaces/schedule-create-decision" || path == "/api/v1/internal/spaces/watch-create-decision" || path == "/api/v1/internal/spaces/watch-observe-decision" || path == "/api/v1/internal/spaces/owner-grant-decision":
 		return "spaces:issue"
 	case path == "/api/v1/internal/spaces/import-execution-decision":
 		return "spaces:import:reauthorize"
 	case path == "/api/v1/internal/spaces/schedule-fire-decision" || path == "/api/v1/internal/spaces/scheduled-run-decision":
 		return "spaces:schedule:reauthorize"
+	case path == "/api/v1/internal/spaces/sandbox-capability-decision":
+		return "spaces:sandbox:capability"
 	case path == "/api/v1/internal/spaces/scheduled-run-execution-decision":
 		return "spaces:schedule:execute"
 	case path == "/api/v1/internal/spaces/scheduled-step-decision":
@@ -139,6 +142,13 @@ func serviceScopeForRequest(request *http.Request) string {
 		return "memberships:write"
 	case path == "/api/v1/internal/users/enrich-from-provider":
 		return "users:sync"
+	case path == "/api/v1/internal/mail-task/resolve":
+		// Deliberately its own least-privilege scope, not "users:read:any" --
+		// this endpoint is the alias-enumeration/anti-spoofing gate for the
+		// mail-task inbound pipeline (chat-wave2 mail-task spec §6). A
+		// credential scoped only for general user reads must not also be able
+		// to probe mail-task aliases, and vice versa.
+		return "mail-task:resolve"
 	case method == http.MethodGet || method == http.MethodHead:
 		if strings.TrimSpace(request.Header.Get("X-User-Id")) == "" {
 			return "users:read:any"
@@ -225,10 +235,5 @@ func hasServiceScope(c *gin.Context, required string) bool {
 	if !ok {
 		return false
 	}
-	for _, scope := range scopes {
-		if scope == required {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(scopes, required)
 }

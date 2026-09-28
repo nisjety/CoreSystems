@@ -746,6 +746,7 @@ impl LlmTranslationProvider {
                 provider_hint: self.provider_name.to_owned(),
                 model: model.to_owned(),
                 messages: vec![ChatMessage {
+                    compaction_summary: String::new(),
                     role: "user".to_owned(),
                     content: prompt,
                     name: String::new(),

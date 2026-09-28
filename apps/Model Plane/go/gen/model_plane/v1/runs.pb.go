@@ -277,16 +277,31 @@ func (x *ScheduledStepContext) GetStatus() string {
 
 type ListRunsRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// Thread to list runs for.
+	// Thread to list runs for. Required UNLESS a Space read decision is supplied
+	// below, in which case it is an optional extra narrowing within that Space.
 	ThreadId string `protobuf:"bytes,1,opt,name=thread_id,json=threadId,proto3" json:"thread_id,omitempty"`
 	// Filter by status (empty = all).
 	StatusFilter string `protobuf:"bytes,2,opt,name=status_filter,json=statusFilter,proto3" json:"status_filter,omitempty"`
 	// Pagination cursor (ULID of last seen run).
 	AfterRunId string `protobuf:"bytes,3,opt,name=after_run_id,json=afterRunId,proto3" json:"after_run_id,omitempty"`
 	// Maximum results.
-	Limit         uint32 `protobuf:"varint,4,opt,name=limit,proto3" json:"limit,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	Limit uint32 `protobuf:"varint,4,opt,name=limit,proto3" json:"limit,omitempty"`
+	// Optional Control-issued authority to read a SHARED Space's record, the
+	// same `model.thread.read` decision the conversation read takes.
+	//
+	// Reused rather than given its own permission on purpose: the runs this
+	// returns are exactly the runs of the threads that decision already admits,
+	// so it grants no reach the caller did not already have on the conversation.
+	// Session Core enforces that by listing runs THROUGH those threads rather
+	// than by trusting `space_id` as a filter.
+	//
+	// Without it this listing is unchanged: `thread_id` is required and the
+	// caller must own the thread.
+	SpaceId                string `protobuf:"bytes,5,opt,name=space_id,json=spaceId,proto3" json:"space_id,omitempty"`
+	SpaceReadDecisionRef   string `protobuf:"bytes,6,opt,name=space_read_decision_ref,json=spaceReadDecisionRef,proto3" json:"space_read_decision_ref,omitempty"`
+	SpaceReadDecisionToken string `protobuf:"bytes,7,opt,name=space_read_decision_token,json=spaceReadDecisionToken,proto3" json:"space_read_decision_token,omitempty"`
+	unknownFields          protoimpl.UnknownFields
+	sizeCache              protoimpl.SizeCache
 }
 
 func (x *ListRunsRequest) Reset() {
@@ -345,6 +360,27 @@ func (x *ListRunsRequest) GetLimit() uint32 {
 		return x.Limit
 	}
 	return 0
+}
+
+func (x *ListRunsRequest) GetSpaceId() string {
+	if x != nil {
+		return x.SpaceId
+	}
+	return ""
+}
+
+func (x *ListRunsRequest) GetSpaceReadDecisionRef() string {
+	if x != nil {
+		return x.SpaceReadDecisionRef
+	}
+	return ""
+}
+
+func (x *ListRunsRequest) GetSpaceReadDecisionToken() string {
+	if x != nil {
+		return x.SpaceReadDecisionToken
+	}
+	return ""
 }
 
 type ListRunsResponse struct {
@@ -531,7 +567,11 @@ func (x *CancelRunRequest) GetReason() string {
 type CancelRunResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// True if the run was successfully cancelled.
-	Cancelled     bool `protobuf:"varint,1,opt,name=cancelled,proto3" json:"cancelled,omitempty"`
+	Cancelled bool `protobuf:"varint,1,opt,name=cancelled,proto3" json:"cancelled,omitempty"`
+	// Identifier of the durable RUN_CANCELLED event when the cancellation was
+	// recorded. Empty is allowed for an idempotent request against a legacy
+	// already-terminal run that predates cancellation receipts.
+	ReceiptId     string `protobuf:"bytes,2,opt,name=receipt_id,json=receiptId,proto3" json:"receipt_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -571,6 +611,13 @@ func (x *CancelRunResponse) GetCancelled() bool {
 		return x.Cancelled
 	}
 	return false
+}
+
+func (x *CancelRunResponse) GetReceiptId() string {
+	if x != nil {
+		return x.ReceiptId
+	}
+	return ""
 }
 
 type ResolveRunOwnerRequest struct {
@@ -1443,13 +1490,16 @@ const file_model_plane_v1_runs_proto_rawDesc = "" +
 	"\tthread_id\x18\x02 \x01(\tR\bthreadId\x12\x15\n" +
 	"\x06org_id\x18\x03 \x01(\tR\x05orgId\x12\x12\n" +
 	"\x04goal\x18\x04 \x01(\tR\x04goal\x12\x16\n" +
-	"\x06status\x18\x05 \x01(\tR\x06status\"\x8b\x01\n" +
+	"\x06status\x18\x05 \x01(\tR\x06status\"\x98\x02\n" +
 	"\x0fListRunsRequest\x12\x1b\n" +
 	"\tthread_id\x18\x01 \x01(\tR\bthreadId\x12#\n" +
 	"\rstatus_filter\x18\x02 \x01(\tR\fstatusFilter\x12 \n" +
 	"\fafter_run_id\x18\x03 \x01(\tR\n" +
 	"afterRunId\x12\x14\n" +
-	"\x05limit\x18\x04 \x01(\rR\x05limit\"\\\n" +
+	"\x05limit\x18\x04 \x01(\rR\x05limit\x12\x19\n" +
+	"\bspace_id\x18\x05 \x01(\tR\aspaceId\x125\n" +
+	"\x17space_read_decision_ref\x18\x06 \x01(\tR\x14spaceReadDecisionRef\x129\n" +
+	"\x19space_read_decision_token\x18\a \x01(\tR\x16spaceReadDecisionToken\"\\\n" +
 	"\x10ListRunsResponse\x12-\n" +
 	"\x04runs\x18\x01 \x03(\v2\x19.model_plane.v1.RunDetailR\x04runs\x12\x19\n" +
 	"\bhas_more\x18\x02 \x01(\bR\ahasMore\"\x8b\x01\n" +
@@ -1461,9 +1511,11 @@ const file_model_plane_v1_runs_proto_rawDesc = "" +
 	"\x05limit\x18\x04 \x01(\rR\x05limit\"A\n" +
 	"\x10CancelRunRequest\x12\x15\n" +
 	"\x06run_id\x18\x01 \x01(\tR\x05runId\x12\x16\n" +
-	"\x06reason\x18\x02 \x01(\tR\x06reason\"1\n" +
+	"\x06reason\x18\x02 \x01(\tR\x06reason\"P\n" +
 	"\x11CancelRunResponse\x12\x1c\n" +
-	"\tcancelled\x18\x01 \x01(\bR\tcancelled\"_\n" +
+	"\tcancelled\x18\x01 \x01(\bR\tcancelled\x12\x1d\n" +
+	"\n" +
+	"receipt_id\x18\x02 \x01(\tR\treceiptId\"_\n" +
 	"\x16ResolveRunOwnerRequest\x12\x15\n" +
 	"\x06run_id\x18\x01 \x01(\tR\x05runId\x12\x15\n" +
 	"\x06org_id\x18\x02 \x01(\tR\x05orgId\x12\x17\n" +

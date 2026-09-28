@@ -677,8 +677,12 @@ func (h *TasksHandler) listOrCreate(w http.ResponseWriter, r *http.Request) {
 		q := r.URL.Query()
 		orgID := verifiedOrganizationID(r)
 		status := q.Get("status")
+		// Same bound as the other list endpoints in this service: a missing,
+		// non-positive or oversized limit falls back to the default page, so
+		// a caller can neither ask for the whole table nor hand Postgres a
+		// negative LIMIT.
 		limit, _ := strconv.Atoi(q.Get("limit"))
-		if limit == 0 {
+		if limit <= 0 || limit > 200 {
 			limit = 50
 		}
 		rows, err := h.pool.Query(r.Context(), `

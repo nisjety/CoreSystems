@@ -5,6 +5,15 @@ name: frontend-plane-verevonv3
 # bus used across planes. The browser talks to the same origin and nginx
 # reverse-proxies `/api` to `verevon-gateway-rs` over the shared inter-plane
 # network.
+#
+# BUILD AND START THIS STACK WITH ./build-verevon-services.sh (--from frontend),
+# never a bare `docker compose build|up` here. Several values below are owned by
+# OTHER planes -- GATEWAY_ORG_CORE_SERVICE_TOKEN and
+# VEREVON_GATEWAY_GDPR_NATS_PASSWORD come from Control Plane's persisted secrets,
+# the Convex and conversation/notification tokens from Application Plane's
+# per-core files -- and only that script resolves the full chain (see
+# `plane_env_files`). A hand-assembled `--env-file` list either fails on an
+# unset required variable or, worse, starts a container against a drifted copy.
 x-build-metadata: &build-metadata
   SOURCE_REVISION: ${SOURCE_REVISION:-unverified}
   BUILD_DATE: ${BUILD_DATE:-unknown}
@@ -278,46 +287,12 @@ services:
       VITE_ALLOW_DEV_AUTH_BYPASS: ${VITE_ALLOW_DEV_AUTH_BYPASS:-false}
       VITE_TURNSTILE_SITE_KEY: ${VITE_TURNSTILE_SITE_KEY:-}
     healthcheck:
-      # Probe the TCP listener, NOT `GET /`.
-      #
-      # 127.0.0.1 is a correct target: `vite --host 0.0.0.0` binds the wildcard
-      # address (verified in-container - /proc/net/tcp shows 00000000:1435), so
-      # loopback is served. The address was never the problem.
-      #
-      # Widening the HTTP budget is not enough either, and that was measured, not
-      # assumed: `GET /` on this host does not run slow, it HANGS. Probe failures
-      # land on curl's own ceiling at exactly whatever you set - observed at 5s,
-      # 20s, 25s and once 42s - and over 10 samples `/` hung 6/10 times while
-      # `nc -z` returned in 0ms every time. Two back-to-back requests (`/` then
-      # `/@vite/client`) each hung 25s, so it is the whole HTTP surface. During a
-      # stall the container burns 30-60% CPU with RSS climbing: Vite is saturating
-      # its event loop transforming this large, OneDrive-backed module graph and
-      # is not servicing connections. Warm, `/` answers in ~18ms - but a
-      # file-mtime touch on the synced bind mount re-invalidates it and the stall
-      # returns, so this recurs indefinitely rather than only at boot.
-      #
-      # A tried-and-rejected HTTP variant: --max-time 20 / timeout 35s /
-      # retries 5 / start_period 120s STILL let FailingStreak climb to 3
-      # repeatedly. There is no HTTP budget that is both meaningful and stable
-      # here.
-      #
-      # A TCP probe is the only non-flapping signal available, and it is the one
-      # `depends_on: service_healthy` actually needs: "the dev server is up and
-      # accepting connections". Verified from a cold --force-recreate: healthy at
-      # t+16s, streak 0 sustained well past start_period. It deliberately does
-      # NOT assert that a page renders - assert that from tests/e2e, not from a
-      # 30s container probe.
-      #
-      # `nc` is BusyBox built into node:*-alpine (no package to add) and it does
-      # discriminate: closed port -> rc=1, open port -> rc=0.
-      #
-      # timeout is 20s rather than a few seconds because `docker exec` overhead
-      # alone measured ~7s on this host (a probe took 12.08s wall while curl's own
-      # ceiling was 5s), and start_period covers `pnpm dev` re-verifying the
-      # lockfile before it even execs vite.
-      test: ["CMD-SHELL", "nc -z 127.0.0.1 5173 || exit 1"]
+      # An open TCP socket can still belong to a stalled Vite event loop.
+      # Assert that same-origin HTTP and the BFF proxy actually respond.
+      # Browser acceptance separately checks module loading and rendering.
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:5173/health', {signal: AbortSignal.timeout(5000)}).then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"]
       interval: 30s
-      timeout: 20s
+      timeout: 10s
       retries: 3
       start_period: 60s
     logging:

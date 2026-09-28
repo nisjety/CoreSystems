@@ -18,6 +18,18 @@ type ServicePrincipalConfig = {
   scopes: readonly string[];
   scopesByAudience?: Readonly<Record<string, readonly string[]>>;
   retentionByAudience?: Readonly<Record<string, 'zdr' | 'persistent'>>;
+  /**
+   * Delegated-identity token exchange (auth-core §1, T-4). Keyed by the
+   * TARGET audience being exchanged into (must be a member of `audiences`);
+   * each value is the set of SUBJECT-token audiences this principal may
+   * present as proof of an acting user for that target. Absent by default —
+   * no principal gains token-exchange capability until a deployment
+   * explicitly adds this field. The endpoint additionally hard-restricts
+   * which subject audiences it will ever cryptographically accept
+   * (`verifyPlaneSubjectToken`'s own allow-list); this map can only narrow
+   * that further per-principal, never widen it.
+   */
+  tokenExchange?: Readonly<Record<string, readonly string[]>>;
 };
 
 type ServicePrincipalRegistry = Record<string, ServicePrincipalConfig>;
@@ -52,10 +64,20 @@ export class ServicePrincipalConfigurationError extends Error {}
 export class ServicePrincipalAuthorizationError extends Error {}
 
 function privateRegistryFile(stats: Stats): boolean {
+  if (!stats.isFile()) {
+    return false;
+  }
+  if (process.platform === 'win32') {
+    // Node synthesizes mode/uid from the read-only attribute on Windows, so
+    // POSIX owner/permission hardening cannot be expressed or enforced there.
+    // Deployment targets are Linux; on Windows the file is protected by the
+    // user-profile ACL instead. The isFile/symlink/size checks above and
+    // below still apply on every platform.
+    return true;
+  }
   const currentUserId =
     typeof process.getuid === 'function' ? process.getuid() : stats.uid;
   return (
-    stats.isFile() &&
     stats.uid === currentUserId &&
     (stats.mode & 0o400) === 0o400 &&
     (stats.mode & 0o077) === 0
@@ -247,6 +269,29 @@ function validAudienceRetentionMap(
   );
 }
 
+function validTokenExchangeMap(config: Partial<ServicePrincipalConfig>): boolean {
+  if (config.tokenExchange === undefined) {
+    // Absent by default — no principal gains token-exchange capability
+    // until a deployment explicitly opts it in.
+    return true;
+  }
+  if (
+    !config.tokenExchange ||
+    typeof config.tokenExchange !== 'object' ||
+    Array.isArray(config.tokenExchange) ||
+    !nonEmptyStrings(config.audiences)
+  ) {
+    return false;
+  }
+
+  const audiences = new Set(config.audiences);
+  const entries = Object.entries(config.tokenExchange);
+  return entries.every(
+    ([targetAudience, subjectAudiences]) =>
+      audiences.has(targetAudience) && nonEmptyStrings(subjectAudiences),
+  );
+}
+
 function parseRegistry(raw: string): ServicePrincipalRegistry {
   if (!raw.trim()) {
     throw new ServicePrincipalConfigurationError(
@@ -292,7 +337,8 @@ function parseRegistry(raw: string): ServicePrincipalRegistry {
       !Array.isArray(config.orgIds) ||
       !nonEmptyStrings(config.scopes) ||
       !validAudienceScopeMap(config) ||
-      !validAudienceRetentionMap(config)
+      !validAudienceRetentionMap(config) ||
+      !validTokenExchangeMap(config)
     ) {
       throw new ServicePrincipalConfigurationError(
         'PLANE_SERVICE_PRINCIPALS_JSON contains an invalid principal policy',
@@ -358,5 +404,90 @@ export function authorizePlaneServicePrincipal(
     scopes: requestedScopes,
     reason,
     zdr: retentionPosture === 'zdr',
+  };
+}
+
+export type PlaneServiceTokenExchangeRequest = {
+  serviceId: string;
+  credential: string;
+  /** TARGET audience being exchanged into, e.g. "ingestion". */
+  audience: string;
+  orgId: string;
+  requestedScopes: readonly string[];
+  reason: string;
+  /**
+   * The already-cryptographically-verified subject token's own `aud` claim
+   * (from `ConvexTokenService.verifyPlaneSubjectToken`'s result) — never a
+   * caller-supplied value.
+   */
+  subjectAudience: string;
+};
+
+/**
+ * Result of a successful token-exchange authorization. Deliberately carries
+ * NO `zdr`/retention field at all — unlike `AuthorizedPlaneServicePrincipal`,
+ * whose `zdr` reflects the registry's own default. The exchanged token's
+ * `zdr` must come from the verified SUBJECT token instead (T-5); omitting
+ * the field here removes the temptation/possibility of a caller
+ * accidentally reusing the registry default for this path.
+ */
+export type AuthorizedPlaneServiceTokenExchange = {
+  serviceId: string;
+  subject: string;
+  orgId: string;
+  scopes: readonly string[];
+  reason: string;
+};
+
+/**
+ * Authorizes an RFC 8693-style token exchange: a registered service
+ * principal presenting an already-verified subject token as proof of an
+ * acting user, requesting a new, narrower token for `request.audience`.
+ * Distinct from `authorizePlaneServicePrincipal` (used by `/internal-token`)
+ * per T-5 — this is the one place `tokenExchange` is checked, and its
+ * result never carries a `zdr`/retention default the caller could
+ * mistakenly reuse in place of the subject token's own.
+ */
+export function authorizePlaneServiceTokenExchange(
+  rawRegistry: string,
+  request: PlaneServiceTokenExchangeRequest,
+): AuthorizedPlaneServiceTokenExchange {
+  const registry = parseRegistry(rawRegistry);
+  const serviceId = request.serviceId.trim();
+  const orgId = request.orgId.trim();
+  const reason = request.reason.trim();
+  const requestedScopes = normalizedUnique(request.requestedScopes);
+  const principal = registry[serviceId];
+  const allowedScopes = principal?.scopesByAudience
+    ? principal.scopesByAudience[request.audience]
+    : principal?.scopes;
+  const allowedSubjectAudiences = principal?.tokenExchange?.[request.audience];
+
+  if (
+    !principal ||
+    !request.credential ||
+    !secureEqual(principal.credential, request.credential) ||
+    !principal.audiences.includes(request.audience) ||
+    !allowedSubjectAudiences ||
+    !allowedSubjectAudiences.includes(request.subjectAudience) ||
+    !orgId ||
+    (principal.allowAnyOrg !== true && !principal.orgIds.includes(orgId)) ||
+    requestedScopes.length === 0 ||
+    !allowedScopes ||
+    requestedScopes.some((scope) => !allowedScopes.includes(scope)) ||
+    reason.length < 3 ||
+    reason.length > 500
+  ) {
+    throw new ServicePrincipalAuthorizationError(
+      'Service principal token exchange is not authorized',
+    );
+  }
+
+  return {
+    serviceId,
+    subject: `service:${serviceId}`,
+    orgId,
+    scopes: requestedScopes,
+    reason,
   };
 }

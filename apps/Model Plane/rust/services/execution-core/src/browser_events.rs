@@ -534,6 +534,12 @@ mod tests {
         ) -> Result<Response<TransitionPlanResponse>, Status> {
             Err(Status::unimplemented("not needed in this test"))
         }
+        async fn propose_plan(
+            &self,
+            _: TonicRequest<mp_contracts::model_plane::v1::ProposePlanRequest>,
+        ) -> Result<Response<mp_contracts::model_plane::v1::ProposePlanResponse>, Status> {
+            Err(Status::unimplemented("not needed in this test"))
+        }
         async fn list_todos(
             &self,
             _: TonicRequest<ListTodosRequest>,

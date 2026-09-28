@@ -137,20 +137,17 @@ func TestEnsureSuccessionRejectsInvalidSuccessors(t *testing.T) {
 	svc.SetOrgCoreClient(client)
 
 	err := svc.EnsureSuccession(context.Background(), "u-sole", "u-sole")
-	var invalidSelf *ErrSuccessorInvalid
-	if !errors.As(err, &invalidSelf) {
+	if _, ok := errors.AsType[*ErrSuccessorInvalid](err); !ok {
 		t.Fatalf("EnsureSuccession(self as successor) error = %v, want *ErrSuccessorInvalid", err)
 	}
 
 	err = svc.EnsureSuccession(context.Background(), "u-sole", "u-not-a-member")
-	var invalidStranger *ErrSuccessorInvalid
-	if !errors.As(err, &invalidStranger) {
+	if _, ok := errors.AsType[*ErrSuccessorInvalid](err); !ok {
 		t.Fatalf("EnsureSuccession(non-member successor) error = %v, want *ErrSuccessorInvalid", err)
 	}
 
 	err = svc.EnsureSuccession(context.Background(), "u-sole", "u-removed")
-	var invalidRemoved *ErrSuccessorInvalid
-	if !errors.As(err, &invalidRemoved) {
+	if _, ok := errors.AsType[*ErrSuccessorInvalid](err); !ok {
 		t.Fatalf("EnsureSuccession(removed-member successor) error = %v, want *ErrSuccessorInvalid", err)
 	}
 

@@ -122,6 +122,7 @@ mod tests {
 
     fn tool_result(chars: usize) -> ChatMessage {
         ChatMessage {
+            compaction_summary: String::new(),
             role: "user".to_owned(),
             content: format!(
                 "{TOOL_RESULT_PREFIX} your previous request:\n{}",
@@ -133,6 +134,7 @@ mod tests {
 
     fn user(content: &str) -> ChatMessage {
         ChatMessage {
+            compaction_summary: String::new(),
             role: "user".to_owned(),
             content: content.to_owned(),
             name: String::new(),

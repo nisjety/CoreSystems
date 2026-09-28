@@ -36,7 +36,10 @@ use mp_contracts::model_plane::v1::{
 use mp_events::publisher::InMemoryPublisher;
 use std::{
     pin::Pin,
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc, Mutex,
+    },
 };
 use tokio::net::TcpListener;
 use tokio_stream::wrappers::TcpListenerStream;
@@ -177,6 +180,9 @@ struct CaptureState {
     list_plans_run_id: Arc<Mutex<Option<String>>>,
     get_plan_id: Arc<Mutex<Option<String>>>,
     transition_plan: CapturedTransition,
+    /// `(thread_id, summary, step_count)` from the last `ProposePlan` call
+    /// (plan-gate §2.1).
+    propose_plan: Arc<Mutex<Option<(String, String, usize)>>>,
     list_todos: Arc<Mutex<Option<(String, String)>>>,
     get_todo_id: Arc<Mutex<Option<String>>>,
     transition_todo: CapturedTransition,
@@ -279,6 +285,52 @@ impl OrchestrationCoreService for MockOrchestration {
                 updated_at: None,
             }),
         }))
+    }
+
+    async fn propose_plan(
+        &self,
+        request: TonicRequest<mp_contracts::model_plane::v1::ProposePlanRequest>,
+    ) -> Result<
+        Response<mp_contracts::model_plane::v1::ProposePlanResponse>,
+        Status,
+    > {
+        let request = request.into_inner();
+        *self.state.propose_plan.lock().unwrap() = Some((
+            request.thread_id.clone(),
+            request.summary.clone(),
+            request.steps.len(),
+        ));
+        let steps: Vec<mp_contracts::model_plane::v1::PlanStep> = request
+            .steps
+            .iter()
+            .enumerate()
+            .map(|(i, s)| mp_contracts::model_plane::v1::PlanStep {
+                id: format!("step-{i}"),
+                title: s.title.clone(),
+                operation: s.operation.clone(),
+                state: mp_contracts::model_plane::v1::PlanStepState::Pending as i32,
+                created_at: None,
+                updated_at: None,
+                detail: String::new(),
+            })
+            .collect();
+        Ok(Response::new(
+            mp_contracts::model_plane::v1::ProposePlanResponse {
+                plan: Some(Plan {
+                    id: "plan-proposed-1".into(),
+                    run_id: request.run_id,
+                    thread_id: request.thread_id,
+                    author: request.user_id,
+                    state: PlanState::Proposed as i32,
+                    summary: request.summary,
+                    steps,
+                    supersedes: request.supersedes,
+                    metadata: None,
+                    created_at: None,
+                    updated_at: None,
+                }),
+            },
+        ))
     }
 
     async fn list_todos(
@@ -649,7 +701,14 @@ fn make_state(
     state
 }
 
-struct MockRunOwner;
+/// Session Core's `RunService` as the run routes see it. Ownership resolves for
+/// `run-owned` and its owner alone, and `CancelRun` answers only the owner's
+/// forwarded session credential. Every `CancelRun` that arrives is counted, so
+/// a test can prove a rejected caller never reached the durable cancel.
+struct MockRunOwner {
+    cancel_bearer: String,
+    cancel_calls: Arc<AtomicUsize>,
+}
 
 #[tonic::async_trait]
 impl RunService for MockRunOwner {
@@ -673,9 +732,29 @@ impl RunService for MockRunOwner {
 
     async fn cancel_run(
         &self,
-        _: TonicRequest<CancelRunRequest>,
+        request: TonicRequest<CancelRunRequest>,
     ) -> Result<Response<CancelRunResponse>, Status> {
-        Err(Status::unimplemented("cancel_run not needed in test"))
+        self.cancel_calls.fetch_add(1, Ordering::SeqCst);
+        let bearer = request
+            .metadata()
+            .get("authorization")
+            .and_then(|value| value.to_str().ok());
+        if bearer != Some(self.cancel_bearer.as_str()) {
+            return Err(Status::unauthenticated(
+                "verified session credential required",
+            ));
+        }
+        let request = request.into_inner();
+        if request.run_id != "run-owned" {
+            return Err(Status::not_found("run not found"));
+        }
+        if request.reason != "user_requested" {
+            return Err(Status::invalid_argument("unexpected cancel reason"));
+        }
+        Ok(Response::new(CancelRunResponse {
+            cancelled: true,
+            receipt_id: "receipt-cancel-1".into(),
+        }))
     }
 
     async fn resolve_run_owner(
@@ -736,14 +815,14 @@ impl RunService for MockRunOwner {
     }
 }
 
-async fn spawn_run_owner_mock() -> RunServiceClient<tonic::transport::Channel> {
+async fn spawn_run_owner_mock(owner: MockRunOwner) -> RunServiceClient<tonic::transport::Channel> {
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind run ownership mock");
     let addr = listener.local_addr().expect("run ownership mock addr");
     tokio::spawn(async move {
         Server::builder()
-            .add_service(RunServiceServer::new(MockRunOwner))
+            .add_service(RunServiceServer::new(owner))
             .serve_with_incoming(TcpListenerStream::new(listener))
             .await
             .ok();
@@ -756,12 +835,21 @@ async fn spawn_run_owner_mock() -> RunServiceClient<tonic::transport::Channel> {
     RunServiceClient::new(channel)
 }
 
-async fn run_owner_state() -> (AppState, Arc<DynPublisher>) {
+/// `owner_session_token` is the only credential the mock's `CancelRun` accepts,
+/// which pins that the route forwards the verified session bearer.
+async fn run_owner_state(
+    owner_session_token: &str,
+) -> (AppState, Arc<DynPublisher>, Arc<AtomicUsize>) {
     let publisher = Arc::new(DynPublisher::InMemory(InMemoryPublisher::new()));
+    let cancel_calls = Arc::new(AtomicUsize::new(0));
     let mut state = AppState::new();
     state.publisher = publisher.clone();
-    state.run_client = spawn_run_owner_mock().await;
-    (state, publisher)
+    state.run_client = spawn_run_owner_mock(MockRunOwner {
+        cancel_bearer: format!("Bearer {owner_session_token}"),
+        cancel_calls: cancel_calls.clone(),
+    })
+    .await;
+    (state, publisher, cancel_calls)
 }
 
 #[tokio::test]
@@ -1011,6 +1099,15 @@ impl OrchestrationCoreService for OrgScopedMock {
         &self,
         _: TonicRequest<TransitionPlanRequest>,
     ) -> Result<Response<TransitionPlanResponse>, Status> {
+        Err(Status::unimplemented("not needed in this test"))
+    }
+    async fn propose_plan(
+        &self,
+        _: TonicRequest<mp_contracts::model_plane::v1::ProposePlanRequest>,
+    ) -> Result<
+        Response<mp_contracts::model_plane::v1::ProposePlanResponse>,
+        Status,
+    > {
         Err(Status::unimplemented("not needed in this test"))
     }
     async fn list_todos(
@@ -1369,24 +1466,28 @@ async fn http_run_event_routes_require_a_durable_owner_before_publish() {
     let owner = AuthFixture::user_tokens("org-owner", "owner-user");
     let same_org_other_user = AuthFixture::user_tokens("org-owner", "user-other");
     let other_org = AuthFixture::user_tokens("org-other", "user-other");
-    let (state, publisher) = run_owner_state().await;
+    let (state, publisher, cancel_calls) = run_owner_state(&owner.session).await;
     let app = build_router(state, None);
 
-    let cancel = Request::builder()
-        .method("POST")
-        .uri("/v1/orchestration/runs/run-owned/cancel")
-        .header(
-            AUTHORIZATION,
-            format!("Bearer {}", same_org_other_user.model),
-        )
-        .header(
-            "x-session-authorization",
-            format!("Bearer {}", same_org_other_user.session),
-        )
-        .body(Body::empty())
-        .unwrap();
-    let cancel = app.clone().oneshot(cancel).await.unwrap();
-    assert_eq!(cancel.status(), StatusCode::FORBIDDEN);
+    for foreign in [&same_org_other_user, &other_org] {
+        let cancel = Request::builder()
+            .method("POST")
+            .uri("/v1/orchestration/runs/run-owned/cancel")
+            .header(AUTHORIZATION, format!("Bearer {}", foreign.model))
+            .header(
+                "x-session-authorization",
+                format!("Bearer {}", foreign.session),
+            )
+            .body(Body::empty())
+            .unwrap();
+        let cancel = app.clone().oneshot(cancel).await.unwrap();
+        assert_eq!(cancel.status(), StatusCode::FORBIDDEN);
+    }
+    assert_eq!(
+        cancel_calls.load(Ordering::SeqCst),
+        0,
+        "a foreign cancel must be refused before it reaches Session Core's CancelRun"
+    );
 
     let feedback = Request::builder()
         .method("POST")
@@ -1440,6 +1541,22 @@ async fn http_run_event_routes_require_a_durable_owner_before_publish() {
         .unwrap();
     let owner_cancel = app.clone().oneshot(owner_cancel).await.unwrap();
     assert_eq!(owner_cancel.status(), StatusCode::OK);
+    let owner_cancel = to_bytes(owner_cancel.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let owner_cancel: serde_json::Value = serde_json::from_slice(&owner_cancel).unwrap();
+    assert_eq!(owner_cancel["run_id"], "run-owned");
+    assert_eq!(owner_cancel["status"], "cancelled");
+    assert_eq!(owner_cancel["cancelled"], true);
+    assert_eq!(
+        owner_cancel["receipt_id"], "receipt-cancel-1",
+        "the durable RUN_CANCELLED receipt must reach the caller"
+    );
+    assert_eq!(
+        cancel_calls.load(Ordering::SeqCst),
+        1,
+        "the owner's cancel reaches CancelRun exactly once"
+    );
 
     let owner_feedback = Request::builder()
         .method("POST")
@@ -1460,5 +1577,6 @@ async fn http_run_event_routes_require_a_durable_owner_before_publish() {
     let events = publisher.drain();
     assert_eq!(events.len(), 2);
     assert_eq!(events[0].1.event_type, "RUN_CANCEL_REQUESTED");
+    assert_eq!(events[0].1.causation_id, "receipt-cancel-1");
     assert_eq!(events[1].1.event_type, "FEEDBACK_RATED");
 }

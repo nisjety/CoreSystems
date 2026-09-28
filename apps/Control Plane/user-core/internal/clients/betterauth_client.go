@@ -69,29 +69,29 @@ func (c *BetterAuthClient) SetServicePrincipal(credential AuthInternalClientCred
 
 // User represents a Better Auth user
 type User struct {
-	ID            string                 `json:"id"`
-	Email         string                 `json:"email"`
-	Name          string                 `json:"name"`
-	EmailVerified bool                   `json:"emailVerified"`
-	Image         *string                `json:"image,omitempty"`
-	Role          string                 `json:"role"` // "user", "admin", "superadmin"
-	Banned        bool                   `json:"banned"`
-	BanReason     *string                `json:"banReason,omitempty"`
-	BanExpires    *time.Time             `json:"banExpires,omitempty"`
-	CreatedAt     time.Time              `json:"createdAt"`
-	UpdatedAt     time.Time              `json:"updatedAt"`
-	Metadata      map[string]interface{} `json:"metadata,omitempty"`
+	ID            string         `json:"id"`
+	Email         string         `json:"email"`
+	Name          string         `json:"name"`
+	EmailVerified bool           `json:"emailVerified"`
+	Image         *string        `json:"image,omitempty"`
+	Role          string         `json:"role"` // "user", "admin", "superadmin"
+	Banned        bool           `json:"banned"`
+	BanReason     *string        `json:"banReason,omitempty"`
+	BanExpires    *time.Time     `json:"banExpires,omitempty"`
+	CreatedAt     time.Time      `json:"createdAt"`
+	UpdatedAt     time.Time      `json:"updatedAt"`
+	Metadata      map[string]any `json:"metadata,omitempty"`
 }
 
 // CreateUserRequest represents a create user request
 type CreateUserRequest struct {
-	Email         string                 `json:"email"`
-	Name          string                 `json:"name"`
-	Password      *string                `json:"password,omitempty"`
-	EmailVerified bool                   `json:"emailVerified"`
-	Role          string                 `json:"role"` // "user", "admin", "superadmin"
-	Image         *string                `json:"image,omitempty"`
-	Metadata      map[string]interface{} `json:"metadata,omitempty"`
+	Email         string         `json:"email"`
+	Name          string         `json:"name"`
+	Password      *string        `json:"password,omitempty"`
+	EmailVerified bool           `json:"emailVerified"`
+	Role          string         `json:"role"` // "user", "admin", "superadmin"
+	Image         *string        `json:"image,omitempty"`
+	Metadata      map[string]any `json:"metadata,omitempty"`
 }
 
 // BetterAuthResponse wraps all Better Auth API responses
@@ -107,19 +107,19 @@ type BetterAuthError struct {
 	Code    string `json:"code,omitempty"`
 }
 
-// CreateUserResponse represents a create user response
+// CreateUserResponse represents a user creation response
 type CreateUserResponse struct {
 	User User `json:"user"`
 }
 
 // UpdateUserRequest represents an update user request
 type UpdateUserRequest struct {
-	UserID   string                 `json:"userId"`
-	Name     *string                `json:"name,omitempty"`
-	Email    *string                `json:"email,omitempty"`
-	Image    *string                `json:"image,omitempty"`
-	Role     *string                `json:"role,omitempty"`
-	Metadata map[string]interface{} `json:"metadata,omitempty"`
+	UserID   string         `json:"userId"`
+	Name     *string        `json:"name,omitempty"`
+	Email    *string        `json:"email,omitempty"`
+	Image    *string        `json:"image,omitempty"`
+	Role     *string        `json:"role,omitempty"`
+	Metadata map[string]any `json:"metadata,omitempty"`
 }
 
 // UpdateUserResponse represents an update user response
@@ -253,7 +253,7 @@ type ErrorResponse struct {
 // ========== HTTP Helper Methods ==========
 
 // doRequest performs an HTTP request with error handling
-func (c *BetterAuthClient) doRequest(ctx context.Context, method, path string, body interface{}, response interface{}) error {
+func (c *BetterAuthClient) doRequest(ctx context.Context, method, path string, body any, response any) error {
 	var reqBody io.Reader
 	if body != nil {
 		jsonData, err := json.Marshal(body)
@@ -290,7 +290,7 @@ func (c *BetterAuthClient) doRequest(ctx context.Context, method, path string, b
 	if err != nil {
 		return fmt.Errorf("request failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	// Read response body
 	respBody, err := io.ReadAll(resp.Body)
@@ -305,7 +305,7 @@ func (c *BetterAuthClient) doRequest(ctx context.Context, method, path string, b
 		if err := json.Unmarshal(respBody, &errResp); err != nil {
 			return fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(respBody))
 		}
-		return fmt.Errorf("Better Auth error: %s (code: %s)", errResp.Message, errResp.Code)
+		return fmt.Errorf("better auth error: %s (code: %s)", errResp.Message, errResp.Code)
 	}
 
 	// Parse Better Auth response wrapper
@@ -315,7 +315,7 @@ func (c *BetterAuthClient) doRequest(ctx context.Context, method, path string, b
 		if err := json.Unmarshal(respBody, &wrapped); err == nil {
 			// Check for error in response body
 			if wrapped.Error != nil && wrapped.Error.Message != "" {
-				return fmt.Errorf("Better Auth error: %s (code: %s)", wrapped.Error.Message, wrapped.Error.Code)
+				return fmt.Errorf("better auth error: %s (code: %s)", wrapped.Error.Message, wrapped.Error.Code)
 			}
 
 			// If we have data field, unmarshal it into the response
@@ -409,7 +409,7 @@ func (c *BetterAuthClient) DeleteUser(ctx context.Context, userID string) error 
 	// Better Auth uses the remove endpoint for deletion
 	req := map[string]string{"userId": userID}
 
-	var resp map[string]interface{}
+	var resp map[string]any
 	if err := c.doRequest(ctx, http.MethodPost, adminRemoveUserPath, req, &resp); err != nil {
 		return fmt.Errorf("failed to delete user: %w", err)
 	}
@@ -511,12 +511,12 @@ func (c *BetterAuthClient) Health(ctx context.Context) error {
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("Better Auth server unreachable: %w", err)
+		return fmt.Errorf("better auth server unreachable: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("Better Auth health check failed: HTTP %d", resp.StatusCode)
+		return fmt.Errorf("better auth health check failed: HTTP %d", resp.StatusCode)
 	}
 
 	return nil

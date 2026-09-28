@@ -3,6 +3,7 @@ package handlers
 import (
 	"context"
 	"log"
+	"maps"
 	"strings"
 	"time"
 
@@ -48,7 +49,7 @@ func isSocialProvider(provider string) bool {
 	case "", "email", "password", "credentials", "magic-link":
 		return false
 	default:
-		return true // microsoft, google, github, apple, etc.
+		return true // Microsoft, Google, GitHub, Apple, etc.
 	}
 }
 
@@ -104,6 +105,23 @@ func (h *EventHandler) HandleUserRegistered(ctx context.Context, event *nats.Use
 	return nil
 }
 
+// mergeProfileHints copies non-empty avatar/locale/timezone profile hints into
+// the provider-account metadata map.
+func mergeProfileHints(metadata map[string]any, hints *nats.ProviderProfileHints) {
+	if hints == nil {
+		return
+	}
+	if avatar := strings.TrimSpace(hints.Avatar); avatar != "" {
+		metadata["avatar"] = avatar
+	}
+	if locale := strings.TrimSpace(hints.Locale); locale != "" {
+		metadata["locale"] = locale
+	}
+	if timezone := strings.TrimSpace(hints.Timezone); timezone != "" {
+		metadata["timeZone"] = timezone
+	}
+}
+
 // upsertProviderFromRegistered extracts provider info from a registration event and persists it
 func (h *EventHandler) upsertProviderFromRegistered(ctx context.Context, userCoreID string, event *nats.UserRegisteredEvent) {
 	providerUserID := strings.TrimSpace(event.UserID)
@@ -134,21 +152,9 @@ func (h *EventHandler) upsertProviderFromRegistered(ctx context.Context, userCor
 		emailFromProvider = strings.TrimSpace(event.Email)
 	}
 
-	metadata := map[string]interface{}{}
-	for key, value := range event.Metadata {
-		metadata[key] = value
-	}
-	if event.ProfileHints != nil {
-		if avatar := strings.TrimSpace(event.ProfileHints.Avatar); avatar != "" {
-			metadata["avatar"] = avatar
-		}
-		if locale := strings.TrimSpace(event.ProfileHints.Locale); locale != "" {
-			metadata["locale"] = locale
-		}
-		if timezone := strings.TrimSpace(event.ProfileHints.Timezone); timezone != "" {
-			metadata["timeZone"] = timezone
-		}
-	}
+	metadata := map[string]any{}
+	maps.Copy(metadata, event.Metadata)
+	mergeProfileHints(metadata, event.ProfileHints)
 
 	tokenRef := strings.TrimSpace(event.TokenRef)
 	if tokenRef == "" {
@@ -203,7 +209,7 @@ func (h *EventHandler) HandleUserLogin(ctx context.Context, event *nats.UserLogi
 			Provider:       event.Provider,
 			ProviderUserID: event.UserID, // auth-service stable user ID
 			Email:          event.Email,
-			Metadata: map[string]interface{}{
+			Metadata: map[string]any{
 				"deviceInfo": event.DeviceInfo,
 				"ipAddress":  event.IPAddress,
 				"userAgent":  event.UserAgent,
@@ -215,7 +221,7 @@ func (h *EventHandler) HandleUserLogin(ctx context.Context, event *nats.UserLogi
 	}
 
 	// Log activity
-	details := map[string]interface{}{
+	details := map[string]any{
 		"provider":  event.Provider,
 		"sessionId": event.SessionID,
 	}
@@ -243,7 +249,7 @@ func (h *EventHandler) HandleUserLogout(ctx context.Context, event *nats.UserLog
 	}
 
 	// Log activity
-	details := map[string]interface{}{
+	details := map[string]any{
 		"sessionId": event.SessionID,
 		"reason":    event.Reason,
 	}
@@ -349,7 +355,7 @@ func (h *EventHandler) HandleSessionEnded(ctx context.Context, event *nats.Sessi
 	}
 
 	// Log activity
-	details := map[string]interface{}{
+	details := map[string]any{
 		"sessionId": event.SessionID,
 		"reason":    event.Reason,
 	}
@@ -396,20 +402,12 @@ func (h *EventHandler) HandleUserProviderLinked(ctx context.Context, event *nats
 		providerUserID = event.UserID // fall back to auth-service user ID
 	}
 
-	metadata := map[string]interface{}{"linkedAt": event.Timestamp}
+	metadata := map[string]any{"linkedAt": event.Timestamp}
 	displayName := ""
 	if event.ProfileHints != nil {
 		displayName = strings.TrimSpace(event.ProfileHints.DisplayName)
-		if avatar := strings.TrimSpace(event.ProfileHints.Avatar); avatar != "" {
-			metadata["avatar"] = avatar
-		}
-		if locale := strings.TrimSpace(event.ProfileHints.Locale); locale != "" {
-			metadata["locale"] = locale
-		}
-		if timezone := strings.TrimSpace(event.ProfileHints.Timezone); timezone != "" {
-			metadata["timeZone"] = timezone
-		}
 	}
+	mergeProfileHints(metadata, event.ProfileHints)
 
 	if displayName == "" {
 		displayName = strings.TrimSpace(event.Email)
@@ -603,11 +601,11 @@ func isGraphAuthError(err error) bool {
 // graphMetadata folds Graph fields that don't fit the typed columns into the
 // `user_profiles.metadata` JSONB bag so they're queryable without a schema
 // change. Skipping empty strings keeps the metadata clean for UI consumers.
-func graphMetadata(profile *clients.GraphProfile) map[string]interface{} {
+func graphMetadata(profile *clients.GraphProfile) map[string]any {
 	if profile == nil {
 		return nil
 	}
-	m := make(map[string]interface{})
+	m := make(map[string]any)
 	if v := strings.TrimSpace(profile.JobTitle); v != "" {
 		m["jobTitle"] = v
 	}

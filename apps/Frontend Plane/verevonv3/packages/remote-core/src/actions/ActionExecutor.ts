@@ -29,7 +29,12 @@ export class ActionExecutor {
   async execute(action: RemoteAction): Promise<ActionResult> {
     this.permissions.require(requiredPermissionFor(action));
 
-    const terminal = (): Promise<ActionResult> => this.protocol.sendAction(action);
+    const terminal = (): Promise<ActionResult> => {
+      // An approval middleware may await user input while the device revokes
+      // access. Recheck at dispatch so an earlier grant cannot survive that wait.
+      this.permissions.require(requiredPermissionFor(action));
+      return this.protocol.sendAction(action);
+    };
     const chain = this.middlewares.reduceRight<() => Promise<ActionResult>>(
       (next, middleware) => () => middleware(action, next),
       terminal,

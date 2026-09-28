@@ -117,34 +117,24 @@ func (v ModelActionView) Validate() error {
 	return nil
 }
 
-// IssueModelActionView intersects fresh Control evidence with Session Core's
-// content-free run authority. No browser/Model caller chooses the action,
-// subject, Space, recipient audience, or policy attributes.
-func IssueModelActionView(evidence PersonalThreadDecisionEvidence, authority RunActionAuthority, request ModelActionViewRequest, now time.Time) (ModelActionView, error) {
-	if err := evidence.ValidateForAgentAction(); err != nil {
-		return ModelActionView{}, err
-	}
-	if err := authority.Validate(); err != nil {
-		return ModelActionView{}, err
-	}
-	if err := request.Validate(); err != nil || now.IsZero() {
-		return ModelActionView{}, fmt.Errorf("model action view request is invalid")
-	}
-	expectedSourceRef := fmt.Sprintf("control:%s:thread-create:%d", evidence.Membership.SpaceRef, evidence.Membership.Revisions.Authority)
-	if authority.OrgID != evidence.Membership.OrgID || authority.SubjectID != evidence.Membership.SubjectID ||
-		authority.SpaceRef != evidence.Membership.SpaceRef || authority.RecipientAudienceRef != evidence.RecipientAudienceRef ||
-		authority.RecipientAudienceRevision != evidence.Membership.Revisions.RecipientAudience ||
-		authority.RecipientAudienceHash != evidence.RecipientAudienceHash ||
-		authority.PrivacyPolicyRef != evidence.Privacy.PolicyRef ||
-		authority.AuthorityRevision != evidence.Membership.Revisions.Authority ||
-		authority.RunContextAuthorizationRef != expectedSourceRef ||
-		evidence.ResourceAuthorizationRef != expectedSourceRef {
-		return ModelActionView{}, fmt.Errorf("model action view authority does not match current Control authority")
-	}
+// authorityMatchesEvidence reports whether Session Core's run authority
+// exactly corresponds to the fresh Control evidence and its source-context
+// binding.
+func authorityMatchesEvidence(authority RunActionAuthority, evidence PersonalThreadDecisionEvidence, expectedSourceRef string) bool {
+	return authority.OrgID == evidence.Membership.OrgID && authority.SubjectID == evidence.Membership.SubjectID &&
+		authority.SpaceRef == evidence.Membership.SpaceRef && authority.RecipientAudienceRef == evidence.RecipientAudienceRef &&
+		authority.RecipientAudienceRevision == evidence.Membership.Revisions.RecipientAudience &&
+		authority.RecipientAudienceHash == evidence.RecipientAudienceHash &&
+		authority.PrivacyPolicyRef == evidence.Privacy.PolicyRef &&
+		authority.AuthorityRevision == evidence.Membership.Revisions.Authority &&
+		authority.RunContextAuthorizationRef == expectedSourceRef &&
+		evidence.ResourceAuthorizationRef == expectedSourceRef
+}
+
+// newModelActionView builds the evidence-bound fields of the view. The caller
+// fills the request- and authority-carried identifiers.
+func newModelActionView(evidence PersonalThreadDecisionEvidence, expectedSourceRef string, now time.Time) ModelActionView {
 	return ModelActionView{
-		DecisionRef:                strings.TrimSpace(request.DecisionRef),
-		RunID:                      strings.TrimSpace(authority.RunID),
-		ThreadID:                   strings.TrimSpace(authority.ThreadID),
 		OrgID:                      evidence.Membership.OrgID,
 		SpaceRef:                   evidence.Membership.SpaceRef,
 		SubjectID:                  evidence.Membership.SubjectID,
@@ -168,8 +158,32 @@ func IssueModelActionView(evidence PersonalThreadDecisionEvidence, authority Run
 		ZeroDataRetention:          false,
 		IssuedAt:                   now.UTC(),
 		ExpiresAt:                  now.UTC().Add(personalDecisionLifetime),
-		Nonce:                      strings.TrimSpace(request.Nonce),
-	}, nil
+	}
+}
+
+// IssueModelActionView intersects fresh Control evidence with Session Core's
+// content-free run authority. No browser/Model caller chooses the action,
+// subject, Space, recipient audience, or policy attributes.
+func IssueModelActionView(evidence PersonalThreadDecisionEvidence, authority RunActionAuthority, request ModelActionViewRequest, now time.Time) (ModelActionView, error) {
+	if err := evidence.ValidateForAgentAction(); err != nil {
+		return ModelActionView{}, err
+	}
+	if err := authority.Validate(); err != nil {
+		return ModelActionView{}, err
+	}
+	if err := request.Validate(); err != nil || now.IsZero() {
+		return ModelActionView{}, fmt.Errorf("model action view request is invalid")
+	}
+	expectedSourceRef := fmt.Sprintf("control:%s:thread-create:%d", evidence.Membership.SpaceRef, evidence.Membership.Revisions.Authority)
+	if !authorityMatchesEvidence(authority, evidence, expectedSourceRef) {
+		return ModelActionView{}, fmt.Errorf("model action view authority does not match current Control authority")
+	}
+	view := newModelActionView(evidence, expectedSourceRef, now)
+	view.DecisionRef = strings.TrimSpace(request.DecisionRef)
+	view.RunID = strings.TrimSpace(authority.RunID)
+	view.ThreadID = strings.TrimSpace(authority.ThreadID)
+	view.Nonce = strings.TrimSpace(request.Nonce)
+	return view, nil
 }
 
 // SignModelActionView has a dedicated envelope. A recipient must never accept

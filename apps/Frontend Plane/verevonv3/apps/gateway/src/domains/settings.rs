@@ -1,4 +1,5 @@
 pub(crate) mod api_keys;
+mod mail_task;
 mod preferences;
 mod session;
 mod settings_handlers;
@@ -34,5 +35,18 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
         .route("/api/v1/api-keys/{id}", delete(api_keys::delete_api_key))
         // Session refresh — `/session/current` + `/api/v1/me` are owned by domains::auth
         .route("/api/v1/session/refresh", post(session::session_refresh))
+        // Mail-task personal inbound alias (chat-wave2 mail-task spec §3.6)
+        .route(
+            "/api/v1/users/me/mail-task-address",
+            get(mail_task::get_mail_task_address),
+        )
+        .route(
+            "/api/v1/users/me/mail-task-address",
+            post(mail_task::create_mail_task_address),
+        )
+        .route(
+            "/api/v1/users/me/mail-task-address",
+            delete(mail_task::revoke_mail_task_address),
+        )
         .route_layer(axum::middleware::from_fn_with_state(state, require_session))
 }

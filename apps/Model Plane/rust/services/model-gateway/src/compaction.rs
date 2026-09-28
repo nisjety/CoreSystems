@@ -134,6 +134,29 @@ pub fn clear_stale_tool_results(messages: &mut [ChatMessage], budget: ToolPayloa
     indices.len()
 }
 
+/// Family hint for protecting pins; not proof of native compaction support.
+#[must_use]
+pub fn is_anthropic_family_model(model: &str) -> bool {
+    model.trim().to_ascii_lowercase().starts_with("claude")
+}
+
+/// Keep local recovery available through native-off rollback and provider fallback.
+#[must_use]
+pub fn should_run_local_compaction(_model: &str) -> bool {
+    // Routing can substitute a different provider, and native support/flags
+    // belong to inference-core. A model-name guess must never remove recovery.
+    true
+}
+
+/// Bound tool payloads on every route; compatibility wrapper for existing callers.
+pub fn clear_stale_tool_results_unless_native(
+    _model: &str,
+    messages: &mut [ChatMessage],
+    budget: ToolPayloadBudget,
+) -> usize {
+    clear_stale_tool_results(messages, budget)
+}
+
 /// The slice of a conversation tier 2 replaces with one summary message.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HeadSummary {
@@ -168,6 +191,108 @@ pub fn plan_head_summary(
         return None;
     }
     Some(HeadSummary { start, end })
+}
+
+/// Framing tokens counted per message on top of its content.
+const BUDGET_TOKENS_PER_MESSAGE: usize = 4;
+
+/// Fewest history messages token-budget compaction acts on. Low on purpose:
+/// two turns carrying one pasted 60 KB table must be able to compact, which a
+/// floor of eight plus a 23-message tail never could.
+pub const BUDGET_MIN_MESSAGES: usize = 6;
+
+/// Most messages the verbatim tail keeps: the message-count path's tail.
+pub const BUDGET_MAX_TAIL_MESSAGES: usize = 23;
+
+/// Fewest messages the verbatim tail keeps: the current turn and the one
+/// before it, however large.
+pub const BUDGET_MIN_TAIL_MESSAGES: usize = 2;
+
+/// A history longer than this compacts whatever it weighs, so a long thread
+/// of one-word replies still stays bounded.
+pub const BUDGET_MESSAGE_CEILING: usize = 96;
+
+/// Opening of an attached source inside a user turn: the marker
+/// `source_validation::SourceContext::from_messages` reads sources from.
+const SOURCE_ATTACHMENT_OPENING: &str = "\n\n--- VEDLEGG: ";
+
+/// Whether a message carries an attached source the source review reads.
+///
+/// The review checks a draft against each attachment's exact text, found in
+/// the user turns of the prompt, so a turn carrying one is never summarised:
+/// a summary of a source is not the source.
+#[must_use]
+pub fn carries_source_attachment(message: &ChatMessage) -> bool {
+    message.role == "user" && message.content.contains(SOURCE_ATTACHMENT_OPENING)
+}
+
+/// Estimated tokens for one message: UTF-8 bytes over four, rounded up, plus
+/// [`BUDGET_TOKENS_PER_MESSAGE`]. The `bytes/4` heuristic the Anthropic
+/// adapter already uses; no tokenizer dependency.
+#[must_use]
+pub fn estimated_message_tokens(message: &ChatMessage) -> usize {
+    message.content.len().div_ceil(4) + BUDGET_TOKENS_PER_MESSAGE
+}
+
+/// [`plan_head_summary`] by estimated tokens instead of message count.
+///
+/// Counts the history only, after the leading system messages (pins, a
+/// summary, anything else already standing context); the context block and
+/// the tools are bounded on their own. Compacts when that history exceeds
+/// `budget_tokens` and has at least [`BUDGET_MIN_MESSAGES`] messages, or has
+/// more than [`BUDGET_MESSAGE_CEILING`] whatever it weighs. The verbatim tail
+/// keeps the newest messages up to [`BUDGET_MAX_TAIL_MESSAGES`] while they fit
+/// half the budget, and never fewer than [`BUDGET_MIN_TAIL_MESSAGES`], which
+/// leaves the other half as headroom: the turns right after a compaction do
+/// not compact again.
+///
+/// The head stops at the first message it must not take: a system message,
+/// or a turn carrying an attached source (see [`carries_source_attachment`]).
+/// Everything from there on stays verbatim.
+#[must_use]
+pub fn plan_head_summary_by_budget(
+    messages: &[ChatMessage],
+    budget_tokens: usize,
+) -> Option<HeadSummary> {
+    let messages: Vec<&ChatMessage> = messages.iter().collect();
+    plan_by_budget(&messages, budget_tokens)
+}
+
+fn plan_by_budget(messages: &[&ChatMessage], budget_tokens: usize) -> Option<HeadSummary> {
+    let start = messages
+        .iter()
+        .position(|message| message.role != "system")
+        .unwrap_or(messages.len());
+    let history = &messages[start..];
+    let estimated: usize = history
+        .iter()
+        .map(|message| estimated_message_tokens(message))
+        .sum();
+    let over_budget = estimated > budget_tokens && history.len() >= BUDGET_MIN_MESSAGES;
+    if !over_budget && history.len() <= BUDGET_MESSAGE_CEILING {
+        return None;
+    }
+    let tail_budget = budget_tokens / 2;
+    let mut tail = 0usize;
+    let mut spent = 0usize;
+    for message in history.iter().rev() {
+        let cost = estimated_message_tokens(message);
+        if tail >= BUDGET_MAX_TAIL_MESSAGES
+            || (tail >= BUDGET_MIN_TAIL_MESSAGES && spent + cost > tail_budget)
+        {
+            break;
+        }
+        spent += cost;
+        tail += 1;
+    }
+    let mut end = messages.len() - tail;
+    if let Some(offset) = messages[start..end]
+        .iter()
+        .position(|message| message.role == "system" || carries_source_attachment(message))
+    {
+        end = start + offset;
+    }
+    (end.saturating_sub(start) >= 2).then_some(HeadSummary { start, end })
 }
 
 /// Render the head as a plain transcript for the summarizer.
@@ -224,21 +349,40 @@ pub fn summary_prompt_with_memory(transcript: &str, directive: &str) -> String {
          the excerpt does not say.";
     let directive = directive.trim();
     if directive.is_empty() {
-        return format!("{base}\n\nEXCERPT:\n{transcript}");
+        return format!("{base} {SUMMARY_STABILITY_CLAUSE}\n\nEXCERPT:\n{transcript}");
     }
     format!(
-        "{base}\n\nThe user has previously established the topics below. If — and only if — \
-         the excerpt touches any of them, preserve what it says about them verbatim. These are \
-         a hint about what matters, NOT facts to add: never state anything from this list that \
-         the excerpt itself does not say.\n\nPREVIOUSLY ESTABLISHED:\n{directive}\
-         \n\nEXCERPT:\n{transcript}"
+        "{base} {SUMMARY_STABILITY_CLAUSE}\n\nThe user has previously established the topics \
+         below. If — and only if — the excerpt touches any of them, preserve what it says about \
+         them verbatim. These are a hint about what matters, NOT facts to add: never state \
+         anything from this list that the excerpt itself does not say.\n\nPREVIOUSLY \
+         ESTABLISHED:\n{directive}\n\nEXCERPT:\n{transcript}"
     )
 }
+
+/// Closes the summary instruction on every route (cache audit §4.3).
+///
+/// A summary is sent again on later turns: as the head of the prompt until
+/// the thread compacts again, and, with token-budget compaction, byte for
+/// byte from the persisted copy. Anything in it that would differ on an
+/// identical rerun — today's date, a message count, a remark about the
+/// summarising itself — makes that prefix unrepeatable and is not in the
+/// excerpt anyway.
+pub const SUMMARY_STABILITY_CLAUSE: &str = "These notes become a fixed prefix that later turns \
+     reuse unchanged, so copy only what the excerpt states and never add the current date or \
+     time, message counts or remarks about the summary itself.";
+
+/// Sampling temperature for a summary call, for the same reason as
+/// [`SUMMARY_STABILITY_CLAUSE`]. It reaches only an adapter that forwards a
+/// temperature: `OpenAI` non-reasoning models. Reasoning models, Claude and
+/// the subscription broker send none.
+pub const SUMMARY_TEMPERATURE: f32 = 0.0;
 
 /// The single retained message a successful summary becomes.
 #[must_use]
 pub fn summary_message(summary: &str) -> ChatMessage {
     ChatMessage {
+        compaction_summary: String::new(),
         role: "system".to_owned(),
         content: format!("{SUMMARY_PREFIX}\n{}", summary.trim()),
         name: String::new(),
@@ -264,6 +408,7 @@ pub fn apply_head_summary(
     let replacement = match summary.map(str::trim).filter(|value| !value.is_empty()) {
         Some(value) => summary_message(value),
         None => ChatMessage {
+            compaction_summary: String::new(),
             role: "system".to_owned(),
             content: DROPPED_HISTORY_NOTICE.to_owned(),
             name: String::new(),
@@ -348,8 +493,36 @@ pub fn hoist_pinned_messages(
     pinned_ids: &[String],
     protect_below: usize,
 ) -> Vec<ChatMessage> {
+    hoist_pinned_identified(loaded, pinned_ids, protect_below)
+        .messages
+        .into_iter()
+        .map(|entry| entry.message)
+        .collect()
+}
+
+/// [`hoist_pinned_messages`] with the durable ids kept, and the pins it moved.
+#[derive(Clone, Debug)]
+pub struct HoistedPins {
+    /// The messages in order. A hoisted pin is new system context and has no
+    /// durable id of its own; every other entry keeps its id.
+    pub messages: Vec<IdentifiedMessage>,
+    /// Ids of the pins moved into the leading system block, in pin order.
+    pub hoisted_ids: Vec<String>,
+}
+
+/// [`hoist_pinned_messages`], keeping ids so a caller can still name the
+/// messages it compacts.
+#[must_use]
+pub fn hoist_pinned_identified(
+    loaded: Vec<IdentifiedMessage>,
+    pinned_ids: &[String],
+    protect_below: usize,
+) -> HoistedPins {
     if pinned_ids.is_empty() || protect_below == 0 {
-        return loaded.into_iter().map(|entry| entry.message).collect();
+        return HoistedPins {
+            messages: loaded,
+            hoisted_ids: Vec::new(),
+        };
     }
     // Preserve the caller's pin order, not conversation order: the user chose
     // which to pin, and with a cap in play the earliest choices are the ones
@@ -365,9 +538,10 @@ pub fn hoist_pinned_messages(
         }
     }
 
-    let mut hoisted: Vec<ChatMessage> = Vec::new();
-    let mut body: Vec<ChatMessage> = Vec::with_capacity(loaded.len());
-    let mut pinned_by_id: Vec<(usize, ChatMessage)> = Vec::new();
+    let mut hoisted: Vec<IdentifiedMessage> = Vec::new();
+    let mut hoisted_ids: Vec<String> = Vec::new();
+    let mut body: Vec<IdentifiedMessage> = Vec::with_capacity(loaded.len());
+    let mut pinned_by_id: Vec<(usize, IdentifiedMessage)> = Vec::new();
 
     for (index, entry) in loaded.into_iter().enumerate() {
         // Three reasons not to hoist: a `system` message is already protected by
@@ -383,22 +557,23 @@ pub fn hoist_pinned_messages(
             wanted.iter().position(|id| **id == entry.id)
         };
         match position {
-            Some(rank) => pinned_by_id.push((rank, entry.message)),
-            None => body.push(entry.message),
+            Some(rank) => pinned_by_id.push((rank, entry)),
+            None => body.push(entry),
         }
     }
 
     pinned_by_id.sort_by_key(|(rank, _)| *rank);
 
     let mut budget = MAX_PINNED_CHARS;
-    for (_, message) in pinned_by_id {
+    for (_, entry) in pinned_by_id {
         if budget == 0 {
             // Out of budget: the message stays in the body where it was, rather
             // than vanishing. It is then droppable like any other turn, which is
             // honest — it was not protected.
-            body.insert(0, message);
+            body.insert(0, entry);
             continue;
         }
+        let IdentifiedMessage { id, message } = entry;
         let trimmed = message.content.trim();
         let (content, shortened) = if trimmed.chars().count() > budget {
             (
@@ -413,15 +588,197 @@ pub fn hoist_pinned_messages(
         if shortened {
             block.push_str(PINNED_TRUNCATION_NOTICE);
         }
-        hoisted.push(ChatMessage {
-            role: "system".to_owned(),
-            content: block,
-            name: String::new(),
+        hoisted.push(IdentifiedMessage {
+            id: String::new(),
+            message: ChatMessage {
+                compaction_summary: String::new(),
+                role: "system".to_owned(),
+                content: block,
+                name: String::new(),
+            },
         });
+        hoisted_ids.push(id);
     }
 
     hoisted.extend(body);
-    hoisted
+    HoistedPins {
+        messages: hoisted,
+        hoisted_ids,
+    }
+}
+
+/// A tier-2 summary persisted with the assistant message of the turn that
+/// wrote it (token-budget mode), so later turns send the same bytes instead
+/// of summarising the same head again.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct StoredHeadSummary {
+    /// The summary text, trimmed: exactly what [`summary_message`] wraps.
+    pub summary: String,
+    /// Durable id of the last message the summary covers. It covers every
+    /// history message from the first non-system one through this one.
+    pub through_id: String,
+    /// Pins hoisted out of that stretch when it was summarised. The summary
+    /// does not contain them, so it is reused only while they are all still
+    /// pinned and hoisted again.
+    pub pinned_ids: Vec<String>,
+}
+
+/// What token-budget compaction sends, before any new summary is written.
+#[derive(Clone, Debug)]
+pub struct BudgetCompaction {
+    /// The thread with a reusable persisted summary spliced in and pins
+    /// hoisted. Final unless [`Self::head`] is set.
+    pub messages: Vec<ChatMessage>,
+    /// A head still to summarise, in `messages` coordinates. When a summary
+    /// was reused, the head starts at it, so the new summary carries the old
+    /// one forward.
+    pub head: Option<HeadSummary>,
+    /// Whether a persisted summary was reused.
+    pub reused: bool,
+    /// Durable id of the head's last message.
+    through_id: Option<String>,
+    /// Pins hoisted this turn.
+    hoisted_ids: Vec<String>,
+}
+
+impl BudgetCompaction {
+    /// The record to persist once `summary` has replaced [`Self::head`].
+    /// `None` without a head, for an empty summary, or when the head's last
+    /// message has no durable id to name.
+    #[must_use]
+    pub fn record(&self, summary: &str) -> Option<StoredHeadSummary> {
+        let summary = summary.trim();
+        let through_id = self.through_id.as_deref()?.trim();
+        if self.head.is_none() || summary.is_empty() || through_id.is_empty() {
+            return None;
+        }
+        Some(StoredHeadSummary {
+            summary: summary.to_owned(),
+            through_id: through_id.to_owned(),
+            pinned_ids: self.hoisted_ids.clone(),
+        })
+    }
+}
+
+/// Plan token-budget compaction for a loaded thread (ending with the current
+/// turn). Pure; the summarizer call stays at the caller's IO edge.
+///
+/// A `stored` summary is reused when the message it covers through is still
+/// in the thread before the current turn, nothing it covers carries an
+/// attached source, and every pin it left out is still pinned. Reused, it
+/// replaces the stretch it covers with exactly the message it produced before
+/// ([`summary_message`]), and only the history after it counts against the
+/// budget. Covered messages that are pinned stay, for the hoist to lift out as
+/// it did when the summary was written.
+#[must_use]
+pub fn prepare_budget_compaction(
+    loaded: Vec<IdentifiedMessage>,
+    stored: Option<&StoredHeadSummary>,
+    pinned_ids: &[String],
+    budget_tokens: usize,
+) -> BudgetCompaction {
+    let start = loaded
+        .iter()
+        .position(|entry| entry.message.role != "system")
+        .unwrap_or(loaded.len());
+    let reusable = stored.and_then(|stored| {
+        reusable_through(&loaded, start, stored, pinned_ids).map(|through| (stored, through))
+    });
+    let (view, summary_at) = match reusable {
+        Some((stored, through)) => {
+            let is_pinned = |entry: &IdentifiedMessage| {
+                entry.message.role != "system"
+                    && !entry.id.trim().is_empty()
+                    && pinned_ids.contains(&entry.id)
+            };
+            let mut view = Vec::with_capacity(loaded.len());
+            let mut summary_at = None;
+            for (index, entry) in loaded.into_iter().enumerate() {
+                if (start..=through).contains(&index) {
+                    if is_pinned(&entry) {
+                        view.push(entry);
+                    }
+                    continue;
+                }
+                if index == through + 1 {
+                    summary_at = Some(view.len());
+                    view.push(IdentifiedMessage {
+                        id: String::new(),
+                        message: summary_message(&stored.summary),
+                    });
+                }
+                view.push(entry);
+            }
+            (view, summary_at)
+        }
+        None => (loaded, None),
+    };
+
+    // How far the shed region reaches, measured before hoisting as the
+    // message-count path measures it; a reused summary's pins are inside it.
+    let refs: Vec<&ChatMessage> = view.iter().map(|entry| &entry.message).collect();
+    let planned_end = plan_by_budget(&refs, budget_tokens).map_or(0, |head| head.end);
+    let protect_below = summary_at.map_or(planned_end, |at| planned_end.max(at + 1));
+    let HoistedPins {
+        messages: hoisted,
+        hoisted_ids,
+    } = hoist_pinned_identified(view, pinned_ids, protect_below);
+
+    let summary_index = reusable.and_then(|(stored, _)| {
+        let content = summary_message(&stored.summary).content;
+        hoisted.iter().position(|entry| {
+            entry.id.is_empty()
+                && entry.message.role == "system"
+                && entry.message.content == content
+        })
+    });
+    let refs: Vec<&ChatMessage> = hoisted.iter().map(|entry| &entry.message).collect();
+    let head = plan_by_budget(&refs, budget_tokens).map(|mut head| {
+        if summary_index.is_some_and(|at| at + 1 == head.start) {
+            head.start -= 1;
+        }
+        head
+    });
+    let through_id = head
+        .and_then(|head| hoisted.get(head.end.checked_sub(1)?))
+        .map(|entry| entry.id.clone());
+    BudgetCompaction {
+        messages: hoisted.into_iter().map(|entry| entry.message).collect(),
+        head,
+        reused: summary_at.is_some(),
+        through_id,
+        hoisted_ids,
+    }
+}
+
+/// Index of the message `stored` covers through, when it may be reused.
+fn reusable_through(
+    loaded: &[IdentifiedMessage],
+    start: usize,
+    stored: &StoredHeadSummary,
+    pinned_ids: &[String],
+) -> Option<usize> {
+    let through_id = stored.through_id.trim();
+    if through_id.is_empty() || stored.summary.trim().is_empty() {
+        return None;
+    }
+    let through = loaded.iter().position(|entry| entry.id == through_id)?;
+    // The summary stands in for whole turns ahead of the current one.
+    if through < start || through + 1 >= loaded.len() {
+        return None;
+    }
+    let covered = &loaded[start..=through];
+    if covered
+        .iter()
+        .any(|entry| entry.message.role == "system" || carries_source_attachment(&entry.message))
+    {
+        return None;
+    }
+    stored
+        .pinned_ids
+        .iter()
+        .all(|id| pinned_ids.contains(id))
+        .then_some(through)
 }
 
 /// Drop the oldest droppable group after a provider rejected the prompt for
@@ -451,6 +808,52 @@ pub fn drop_oldest_group(messages: &mut Vec<ChatMessage>, group: usize, keep_tai
         messages.insert(
             start,
             ChatMessage {
+                compaction_summary: String::new(),
+                role: "system".to_owned(),
+                content: DROPPED_HISTORY_NOTICE.to_owned(),
+                name: String::new(),
+            },
+        );
+    }
+    true
+}
+
+/// [`drop_oldest_group`] for a prompt whose per-turn system blocks sit
+/// between the prior history and the current turn
+/// (`prompt_context::PromptOrder::StablePrefix`).
+///
+/// Drops the oldest `group` non-system messages outside the protected tail
+/// and leaves every system message where it is, so grounding and memory are
+/// not shed along with the history around them. Same notice, and the same
+/// `false` once nothing droppable is left.
+pub fn drop_oldest_history_group(
+    messages: &mut Vec<ChatMessage>,
+    group: usize,
+    keep_tail: usize,
+) -> bool {
+    let start = messages
+        .iter()
+        .position(|message| message.role != "system")
+        .unwrap_or(messages.len());
+    let limit = messages.len().saturating_sub(keep_tail);
+    let droppable: Vec<usize> = (start..limit)
+        .filter(|index| messages[*index].role != "system")
+        .take(group.max(1))
+        .collect();
+    if droppable.is_empty() {
+        return false;
+    }
+    for index in droppable.into_iter().rev() {
+        messages.remove(index);
+    }
+    if !messages
+        .iter()
+        .any(|message| message.content == DROPPED_HISTORY_NOTICE)
+    {
+        messages.insert(
+            start,
+            ChatMessage {
+                compaction_summary: String::new(),
                 role: "system".to_owned(),
                 content: DROPPED_HISTORY_NOTICE.to_owned(),
                 name: String::new(),
@@ -520,8 +923,9 @@ const NOT_LENGTH_MARKERS: &[&str] = &[
 /// failure. Duplicated as a literal rather than imported: model-gateway and
 /// inference-core are separately deployed crates with no dependency either way,
 /// exactly as with the tool-retry vocabularies. A contract test pins the two
-/// spellings together.
-const PROVIDER_ERROR_KIND_TRAILER: &str = "x-mp-provider-error";
+/// spellings together. `subscription_failure` reads the same key for a
+/// subscription refusal's reason.
+pub(crate) const PROVIDER_ERROR_KIND_TRAILER: &str = "x-mp-provider-error";
 
 /// Trailer value meaning "the prompt exceeded the provider's input limit".
 const PROVIDER_ERROR_TOO_LONG: &str = "too_long";
@@ -572,6 +976,7 @@ mod tests {
 
     fn message(role: &str, content: &str) -> ChatMessage {
         ChatMessage {
+            compaction_summary: String::new(),
             role: role.to_owned(),
             content: content.to_owned(),
             name: String::new(),
@@ -649,6 +1054,92 @@ mod tests {
         assert!(is_tool_result_message(&messages[4]));
         assert!(is_tool_result_message(&messages[5]));
         assert_eq!(messages.len(), 6, "shape is preserved; only payloads went");
+    }
+
+    // --- native-compaction migration: the Anthropic-family dispatch --------
+
+    #[test]
+    fn anthropic_family_models_are_recognized_case_and_whitespace_insensitively() {
+        for model in [
+            "claude-sonnet-4-6",
+            "Claude-Opus-4-8",
+            "  claude-haiku-4-5  ",
+            "CLAUDE-3-5-SONNET-20241022",
+        ] {
+            assert!(
+                is_anthropic_family_model(model),
+                "{model:?} should be recognized as Anthropic-family"
+            );
+        }
+    }
+
+    #[test]
+    fn non_anthropic_and_unspecified_models_are_not_anthropic_family() {
+        for model in ["gpt-4o-mini", "model-router", "gemini-1.5-pro", "", "   "] {
+            assert!(
+                !is_anthropic_family_model(model),
+                "{model:?} must not be treated as Anthropic-family"
+            );
+        }
+    }
+
+    #[test]
+    fn local_recovery_does_not_depend_on_a_provider_name_guess() {
+        assert!(should_run_local_compaction("claude-sonnet-4-6"));
+        assert!(should_run_local_compaction("claude-haiku-4-5"));
+        assert!(should_run_local_compaction("gpt-4o-mini"));
+        // An empty/unspecified model cannot be trusted to resolve to
+        // Anthropic, so the SAFE default is to keep running the existing
+        // hand-rolled path rather than silently skip it.
+        assert!(should_run_local_compaction(""));
+    }
+
+    /// **Migration test 1:** a turn resolved to the Anthropic family does NOT
+    /// also run the hand-rolled tier-1 clearing — inference-core's native
+    /// `clear_tool_uses_20250919` edit owns that job for this provider.
+    #[test]
+    fn anthropic_turn_keeps_local_tool_payload_recovery() {
+        let budget = ToolPayloadBudget {
+            max_chars: 10,
+            keep_recent: 0,
+        };
+        let mut messages = vec![tool_result(500), tool_result(500), tool_result(500)];
+
+        let cleared =
+            clear_stale_tool_results_unless_native("claude-sonnet-4-6", &mut messages, budget);
+
+        assert_eq!(cleared, 3);
+        assert!(messages.iter().all(|message| message.content.contains(CLEARED_TOOL_RESULT_NOTICE)));
+    }
+
+    /// **Migration test 2:** a turn resolved to a non-Anthropic model still
+    /// runs the existing hand-rolled clearing, unchanged — proven by
+    /// asserting `clear_stale_tool_results_unless_native` behaves byte-for-
+    /// byte like the pre-migration `clear_stale_tool_results` on the exact
+    /// fixture `over_budget_clears_oldest_and_keeps_the_newest_results` uses.
+    #[test]
+    fn a_non_anthropic_turn_still_runs_the_hand_rolled_clearing_unchanged() {
+        let budget = ToolPayloadBudget {
+            max_chars: 2_500,
+            keep_recent: 2,
+        };
+        let mut via_wrapper = vec![
+            message("system", "grounding"),
+            message("user", "question"),
+            tool_result(1_000),
+            tool_result(1_000),
+            tool_result(1_000),
+            tool_result(1_000),
+        ];
+        let mut via_direct = via_wrapper.clone();
+
+        let cleared_by_wrapper =
+            clear_stale_tool_results_unless_native("gpt-4o-mini", &mut via_wrapper, budget);
+        let cleared_directly = clear_stale_tool_results(&mut via_direct, budget);
+
+        assert_eq!(cleared_by_wrapper, cleared_directly);
+        assert_eq!(via_wrapper, via_direct);
+        assert_eq!(cleared_by_wrapper, 2);
     }
 
     #[test]
@@ -1058,5 +1549,429 @@ mod tests {
             .filter(|m| m.content == "turn 37")
             .collect();
         assert_eq!(in_place.len(), 1);
+    }
+
+    // --- cache stability of the summary (all routes) ---------------------
+
+    #[test]
+    fn both_summary_prompt_variants_carry_the_stability_clause() {
+        let transcript = "user: bruk NOK\nassistant: notert\n";
+        for prompt in [
+            summary_prompt(transcript),
+            summary_prompt_with_memory(transcript, "- prefers invoices in NOK\n"),
+        ] {
+            assert!(prompt.contains(SUMMARY_STABILITY_CLAUSE), "{prompt}");
+            assert!(
+                prompt.find(SUMMARY_STABILITY_CLAUSE) < prompt.find("EXCERPT:"),
+                "the clause is part of the instruction, not the excerpt"
+            );
+        }
+        assert!(SUMMARY_STABILITY_CLAUSE.contains("fixed prefix"));
+        assert!(SUMMARY_STABILITY_CLAUSE.contains("never add the current date or time"));
+        assert!(SUMMARY_STABILITY_CLAUSE.contains("message counts"));
+        assert!(SUMMARY_TEMPERATURE.abs() < f32::EPSILON);
+    }
+
+    // --- token-budget compaction -----------------------------------------
+
+    const BUDGET: usize = 12_000;
+
+    fn sized(role: &str, label: &str, bytes: usize) -> ChatMessage {
+        message(role, &format!("{label} {}", "x".repeat(bytes)))
+    }
+
+    fn with_attachment(instruction: &str, name: &str, body: &str) -> String {
+        format!(
+            "{instruction}\n\n--- VEDLEGG: {name} ---\n{body}\n--- SLUTT PÅ VEDLEGG: {name} ---"
+        )
+    }
+
+    #[test]
+    fn thirty_one_word_messages_are_not_compacted_by_budget() {
+        let messages: Vec<ChatMessage> = (0..30)
+            .map(|i| message(if i % 2 == 0 { "user" } else { "assistant" }, "ok"))
+            .collect();
+        assert_eq!(plan_head_summary_by_budget(&messages, BUDGET), None);
+        // The message-count path would have compacted this thread.
+        assert!(plan_head_summary(&messages, 24, 23).is_some());
+    }
+
+    #[test]
+    fn a_pasted_table_compacts_a_short_thread_and_keeps_the_current_turn() {
+        let mut messages = vec![
+            message("system", "identity"),
+            message("user", "hei"),
+            message("assistant", "hei"),
+            sized("user", "tabell:", 60_000),
+            message("assistant", "notert"),
+        ];
+        for turn in ["q1", "a1", "q2", "a2"] {
+            messages.push(message(
+                if turn.starts_with('q') {
+                    "user"
+                } else {
+                    "assistant"
+                },
+                turn,
+            ));
+        }
+        messages.push(message("user", "current question"));
+        assert_eq!(messages.len() - 1, 9, "nine history messages");
+
+        let head =
+            plan_head_summary_by_budget(&messages, BUDGET).expect("the table is over budget");
+        assert_eq!(
+            head,
+            HeadSummary { start: 1, end: 4 },
+            "the head ends with the table"
+        );
+        let compacted = apply_head_summary(messages, head, Some("user pasted a stock table"));
+        assert_eq!(compacted[0].content, "identity");
+        assert!(compacted[1].content.starts_with(SUMMARY_PREFIX));
+        assert!(!compacted.iter().any(|m| m.content.starts_with("tabell:")));
+        assert_eq!(
+            compacted.last().map(|m| m.content.as_str()),
+            Some("current question")
+        );
+    }
+
+    #[test]
+    fn leading_system_messages_are_never_compacted_by_budget() {
+        let mut messages = vec![message("system", "identity"), message("system", "pin")];
+        messages.extend((0..40).map(|i| sized("user", &format!("turn {i}"), 2_000)));
+        let head = plan_head_summary_by_budget(&messages, BUDGET).expect("40 x 500 tokens");
+        assert_eq!(head.start, 2);
+        let compacted = apply_head_summary(messages, head, Some("summary"));
+        assert_eq!(compacted[0].content, "identity");
+        assert_eq!(compacted[1].content, "pin");
+    }
+
+    #[test]
+    fn a_fresh_budget_compaction_does_not_trigger_again_on_the_next_turn() {
+        let mut messages = vec![message("system", "identity")];
+        messages.extend((0..40).map(|i| {
+            sized(
+                if i % 2 == 0 { "user" } else { "assistant" },
+                &format!("turn {i}"),
+                1_200,
+            )
+        }));
+        let head = plan_head_summary_by_budget(&messages, BUDGET).expect("over budget");
+        let mut compacted = apply_head_summary(messages, head, Some("summary"));
+        let history: usize = compacted[2..].iter().map(estimated_message_tokens).sum();
+        assert!(
+            history <= BUDGET / 2,
+            "the tail fits half the budget: {history}"
+        );
+        compacted.push(message("assistant", "answer"));
+        compacted.push(message("user", "next question"));
+        assert_eq!(plan_head_summary_by_budget(&compacted, BUDGET), None);
+    }
+
+    #[test]
+    fn the_verbatim_tail_is_bounded_both_ways() {
+        // Cheap messages: the tail stops at 23.
+        let cheap: Vec<ChatMessage> = (0..97).map(|i| message("user", &i.to_string())).collect();
+        let head = plan_head_summary_by_budget(&cheap, BUDGET).expect("past the ceiling");
+        assert_eq!(cheap.len() - head.end, BUDGET_MAX_TAIL_MESSAGES);
+        // Huge final turns: the tail still keeps two.
+        let mut heavy: Vec<ChatMessage> = (0..6).map(|i| message("user", &i.to_string())).collect();
+        heavy.push(sized("assistant", "report", 30_000));
+        heavy.push(sized("user", "follow-up with a pasted log", 30_000));
+        let head = plan_head_summary_by_budget(&heavy, BUDGET).expect("over budget");
+        assert_eq!(heavy.len() - head.end, BUDGET_MIN_TAIL_MESSAGES);
+    }
+
+    #[test]
+    fn the_message_ceiling_compacts_a_long_cheap_thread() {
+        let at_ceiling: Vec<ChatMessage> = (0..BUDGET_MESSAGE_CEILING)
+            .map(|i| message("user", &i.to_string()))
+            .collect();
+        assert_eq!(plan_head_summary_by_budget(&at_ceiling, BUDGET), None);
+        let mut past = at_ceiling;
+        past.push(message("user", "one more"));
+        assert!(plan_head_summary_by_budget(&past, BUDGET).is_some());
+    }
+
+    #[test]
+    fn the_attachment_marker_is_what_the_source_review_reads() {
+        let scope = message(
+            "system",
+            crate::source_validation::CONVERSATION_SCOPE_NOTICE,
+        );
+        let attached = message(
+            "user",
+            &with_attachment("Lag et svar.", "kilde.md", "9 lamper"),
+        );
+        assert!(carries_source_attachment(&attached));
+        assert!(crate::source_validation::SourceContext::from_messages(&[
+            scope.clone(),
+            attached.clone()
+        ])
+        .is_some());
+        let plain = message("user", "Lag et svar.");
+        assert!(!carries_source_attachment(&plain));
+        assert!(
+            crate::source_validation::SourceContext::from_messages(&[scope.clone(), plain])
+                .is_none()
+        );
+        // The review reads user turns only, and so does the protection.
+        let quoted = message("assistant", &attached.content);
+        assert!(!carries_source_attachment(&quoted));
+        assert!(crate::source_validation::SourceContext::from_messages(&[scope, quoted]).is_none());
+    }
+
+    #[test]
+    fn source_bound_turns_keep_their_sources() {
+        let scope = message(
+            "system",
+            crate::source_validation::CONVERSATION_SCOPE_NOTICE,
+        );
+        let attached = message(
+            "user",
+            &with_attachment(
+                "Svar kunden.",
+                "kildepakke.md",
+                "9 lamper er plukket og pakket",
+            ),
+        );
+
+        // Sources in the first turn: nothing ahead of them to compact.
+        let mut first = vec![scope.clone(), attached.clone()];
+        first.extend((0..40).map(|i| sized("assistant", &format!("draft {i}"), 1_500)));
+        first.push(message("user", "current"));
+        assert_eq!(plan_head_summary_by_budget(&first, BUDGET), None);
+
+        // Sources mid-thread: the head stops right before them.
+        let mut messages = vec![scope];
+        messages.extend((0..12).map(|i| sized("user", &format!("chatter {i}"), 1_500)));
+        let attached_at = messages.len();
+        messages.push(attached);
+        messages.extend((0..40).map(|i| sized("assistant", &format!("draft {i}"), 1_500)));
+        messages.push(message("user", "current"));
+        let before = crate::source_validation::SourceContext::from_messages(&messages)
+            .expect("the thread is source-bound")
+            .hash();
+
+        let head = plan_head_summary_by_budget(&messages, BUDGET).expect("over budget");
+        assert_eq!(
+            head,
+            HeadSummary {
+                start: 1,
+                end: attached_at
+            }
+        );
+        let compacted = apply_head_summary(messages, head, Some("chatter summary"));
+        let after = crate::source_validation::SourceContext::from_messages(&compacted)
+            .expect("the sources survive compaction")
+            .hash();
+        assert_eq!(after, before);
+    }
+
+    fn long_identified(turns: usize, bytes: usize) -> Vec<IdentifiedMessage> {
+        let mut out = vec![identified("", "system", "You are Verevon")];
+        for index in 0..turns {
+            out.push(identified(
+                &format!("m{index}"),
+                if index % 2 == 0 { "user" } else { "assistant" },
+                &format!("turn {index} {}", "x".repeat(bytes)),
+            ));
+        }
+        out
+    }
+
+    fn plain(entries: &[IdentifiedMessage]) -> Vec<ChatMessage> {
+        entries.iter().map(|entry| entry.message.clone()).collect()
+    }
+
+    /// Turn N writes a summary; turn N+1 sends it again byte for byte, with no
+    /// summary call, and its prompt opens with everything turn N sent.
+    #[test]
+    fn a_stored_summary_is_reused_byte_for_byte_without_a_new_summary_call() {
+        let loaded = long_identified(41, 1_200);
+        let turn_n = prepare_budget_compaction(loaded.clone(), None, &[], BUDGET);
+        assert!(!turn_n.reused);
+        let head = turn_n.head.expect("over budget");
+        let record = turn_n.record("  K3; 9 packed; NOK  ").expect("a record");
+        assert_eq!(record.summary, "K3; 9 packed; NOK");
+        assert_eq!(
+            record.through_id,
+            format!("m{}", head.end - 2),
+            "ids follow the leading system message"
+        );
+        let sent_n = apply_head_summary(turn_n.messages, head, Some("  K3; 9 packed; NOK  "));
+
+        let mut next = loaded;
+        next.push(identified("m41", "assistant", "answer"));
+        next.push(identified("m42", "user", "next question"));
+        let turn_next = prepare_budget_compaction(next, Some(&record), &[], BUDGET);
+        assert!(turn_next.reused);
+        assert_eq!(
+            turn_next.head, None,
+            "nothing to summarise, so no summary call"
+        );
+        assert_eq!(&turn_next.messages[..sent_n.len()], sent_n.as_slice());
+        assert_eq!(
+            turn_next.messages.last().map(|m| m.content.as_str()),
+            Some("next question")
+        );
+    }
+
+    #[test]
+    fn a_reused_summary_is_carried_into_the_next_one_only_past_the_budget() {
+        let loaded = long_identified(41, 1_200);
+        let turn_n = prepare_budget_compaction(loaded.clone(), None, &[], BUDGET);
+        let record = turn_n.record("old summary").expect("a record");
+
+        let mut next = loaded;
+        for index in 41..71 {
+            next.push(identified(
+                &format!("m{index}"),
+                if index % 2 == 0 { "user" } else { "assistant" },
+                &format!("turn {index} {}", "y".repeat(1_200)),
+            ));
+        }
+        let plan = prepare_budget_compaction(next, Some(&record), &[], BUDGET);
+        assert!(plan.reused);
+        let head = plan
+            .head
+            .expect("the uncovered history is over budget again");
+        assert!(plan.messages[head.start]
+            .content
+            .starts_with(SUMMARY_PREFIX));
+        assert!(render_head_transcript(&plan.messages, head).contains("old summary"));
+        let renewed = plan.record("new summary").expect("a record");
+        assert_ne!(renewed.through_id, record.through_id);
+        let compacted = apply_head_summary(plan.messages, head, Some("new summary"));
+        assert_eq!(
+            compacted
+                .iter()
+                .filter(|m| m.content.starts_with(SUMMARY_PREFIX))
+                .count(),
+            1,
+            "the new summary replaces the old one"
+        );
+    }
+
+    #[test]
+    fn a_stale_summary_is_not_reused() {
+        let loaded = long_identified(41, 1_200);
+        let fresh =
+            contents(&prepare_budget_compaction(loaded.clone(), None, &[], BUDGET).messages);
+        let stale = |stored: StoredHeadSummary, loaded: Vec<IdentifiedMessage>, pins: &[String]| {
+            let plan = prepare_budget_compaction(loaded, Some(&stored), pins, BUDGET);
+            assert!(!plan.reused, "{stored:?}");
+            plan
+        };
+        let stored = |through: &str, pins: &[&str]| StoredHeadSummary {
+            summary: "old".to_owned(),
+            through_id: through.to_owned(),
+            pinned_ids: pins.iter().map(|id| (*id).to_owned()).collect(),
+        };
+        // The covered message is gone.
+        assert_eq!(
+            contents(&stale(stored("gone", &[]), loaded.clone(), &[]).messages),
+            fresh
+        );
+        // It names the current turn.
+        stale(stored("m40", &[]), loaded.clone(), &[]);
+        // A pin it left out is no longer pinned, so the summary lacks it.
+        stale(stored("m10", &["m3"]), loaded.clone(), &[]);
+        // It covers an attached source.
+        let mut attached = loaded;
+        attached[1].message.content = with_attachment("Svar.", "kilde.md", "fakta");
+        stale(stored("m10", &[]), attached, &[]);
+    }
+
+    fn contents(messages: &[ChatMessage]) -> Vec<String> {
+        messages.iter().map(|m| m.content.clone()).collect()
+    }
+
+    #[test]
+    fn pins_survive_budget_compaction_and_its_reuse() {
+        let loaded = long_identified(41, 1_200);
+        let pins = vec!["m3".to_owned()];
+        let turn_n = prepare_budget_compaction(loaded.clone(), None, &pins, BUDGET);
+        let head = turn_n.head.expect("over budget");
+        assert!(turn_n.messages[0].content.contains("Pinned by the user"));
+        assert!(turn_n.messages[0].content.contains("turn 3 "));
+        let record = turn_n.record("summary").expect("a record");
+        assert_eq!(record.pinned_ids, pins);
+        let sent_n = apply_head_summary(turn_n.messages, head, Some("summary"));
+
+        let mut next = loaded;
+        next.push(identified("m41", "assistant", "answer"));
+        next.push(identified("m42", "user", "next"));
+        let reused = prepare_budget_compaction(next, Some(&record), &pins, BUDGET);
+        assert!(reused.reused);
+        assert_eq!(&reused.messages[..sent_n.len()], sent_n.as_slice());
+        assert_eq!(
+            reused
+                .messages
+                .iter()
+                .filter(|m| m.content.contains("turn 3 "))
+                .count(),
+            1,
+            "hoisted again, once"
+        );
+    }
+
+    #[test]
+    fn the_identified_hoist_matches_the_plain_one_and_names_what_it_moved() {
+        let pins = ["m9".to_owned(), "m3".to_owned()];
+        let hoisted = hoist_pinned_identified(long_conversation(), &pins, 41);
+        assert_eq!(hoisted.hoisted_ids, ["m9", "m3"]);
+        assert_eq!(
+            plain(&hoisted.messages),
+            hoist_pinned_messages(long_conversation(), &pins, 41)
+        );
+        assert!(hoisted.messages[..2]
+            .iter()
+            .all(|entry| entry.id.is_empty()));
+        assert!(hoisted.messages[2..]
+            .iter()
+            .all(|entry| entry.message.role == "system" || !entry.id.is_empty()));
+    }
+
+    #[test]
+    fn dropping_history_keeps_the_per_turn_system_blocks() {
+        let mut messages = vec![
+            message("system", "standing"),
+            message("user", "old question"),
+            message("assistant", "old answer"),
+            message("system", "grounding"),
+            message("system", "memory"),
+            message("user", "current"),
+        ];
+        messages.extend((0..4).map(|_| tool_result(100)));
+        assert!(drop_oldest_history_group(&mut messages, 6, 4));
+        while drop_oldest_history_group(&mut messages, 6, 4) {}
+        for kept in ["standing", "grounding", "memory"] {
+            assert!(
+                messages.iter().any(|m| m.content == kept),
+                "{kept} was shed"
+            );
+        }
+        assert_eq!(
+            messages
+                .iter()
+                .filter(|m| m.content == DROPPED_HISTORY_NOTICE)
+                .count(),
+            1
+        );
+        assert!(!messages.iter().any(|m| m.content == "old question"));
+        assert!(
+            messages.len() >= 4 + 3,
+            "the tail and the system blocks remain"
+        );
+        // The plain drop takes the per-turn blocks with the history.
+        let mut plain_drop = vec![
+            message("system", "standing"),
+            message("user", "old question"),
+            message("system", "grounding"),
+            message("user", "current"),
+        ];
+        assert!(drop_oldest_group(&mut plain_drop, 6, 1));
+        assert!(!plain_drop.iter().any(|m| m.content == "grounding"));
     }
 }

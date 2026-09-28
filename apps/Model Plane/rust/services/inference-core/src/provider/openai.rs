@@ -366,6 +366,36 @@ fn to_i32_or_max(value: i64) -> i32 {
     i32::try_from(value).unwrap_or(i32::MAX)
 }
 
+/// The prompt-cache legs of an OpenAI-family `usage` object, as `(read, write)`.
+///
+/// Chat Completions reports them in `prompt_tokens_details`: `cached_tokens`,
+/// plus `cache_write_tokens` from GPT-5.6 on. The Responses API names the same
+/// object `input_tokens_details`, which is read when the first is absent. A
+/// missing or `null` field counts as 0.
+///
+/// `OpenAI` counts both legs inside `prompt_tokens`, which is the fold-in the
+/// gateway's pricing expects, so `input_tokens` is left as reported and the
+/// legs are capped to it: reads first, then writes to what remains. A
+/// malformed report can then never make the uncached share negative.
+fn openai_cache_tokens(usage: &serde_json::Value) -> (i32, i32) {
+    let Some(details) = ["prompt_tokens_details", "input_tokens_details"]
+        .iter()
+        .map(|key| &usage[*key])
+        .find(|details| details.is_object())
+    else {
+        return (0, 0);
+    };
+    let count = |value: &serde_json::Value| value.as_i64().unwrap_or(0).max(0);
+    let prompt = count(if usage["prompt_tokens"].is_null() {
+        &usage["input_tokens"]
+    } else {
+        &usage["prompt_tokens"]
+    });
+    let read = count(&details["cached_tokens"]).min(prompt);
+    let write = count(&details["cache_write_tokens"]).min(prompt - read);
+    (to_i32_or_max(read), to_i32_or_max(write))
+}
+
 /// This chunk's `finish_reason`, if the model set one on this choice.
 ///
 /// OpenAI-family streaming carries it at `choices[0].finish_reason` — `null`
@@ -681,6 +711,8 @@ impl ProviderRouter for OpenAiProvider {
             .to_owned();
         let input_tokens = to_i32_or_max(json["usage"]["prompt_tokens"].as_i64().unwrap_or(0));
         let output_tokens = to_i32_or_max(json["usage"]["completion_tokens"].as_i64().unwrap_or(0));
+        let (cache_read_input_tokens, cache_creation_input_tokens) =
+            openai_cache_tokens(&json["usage"]);
         let tool_calls = parse_tool_calls(&json);
         // `None` whenever we did not ask, the deployment ignored the parameter,
         // or the field was unusable — never a fabricated value. The question is
@@ -694,6 +726,7 @@ impl ProviderRouter for OpenAiProvider {
         info!(model = %req.model, provider = "openai", "infer completed");
 
         Ok(InferResponse {
+            compaction_summary: String::new(),
             request_id: req.request_id.clone(),
             content,
             model_used,
@@ -705,6 +738,11 @@ impl ProviderRouter for OpenAiProvider {
             provider_used: String::new(),
             residency: String::new(),
             token_confidence,
+            // Already inside `input_tokens`; see `openai_cache_tokens`.
+            cache_read_input_tokens,
+            cache_creation_input_tokens,
+            // Stamped by the fallback chain, not the raw adapter.
+            provider_timing: None,
         })
     }
 
@@ -762,6 +800,9 @@ impl ProviderRouter for OpenAiProvider {
             // first; the usage chunk (empty choices) comes after it, then [DONE].
             let mut input_tokens = 0i32;
             let mut output_tokens = 0i32;
+            // The prompt-cache legs arrive in the same usage chunk.
+            let mut cache_read_input_tokens = 0i32;
+            let mut cache_creation_input_tokens = 0i32;
             let mut model_used = model.clone();
             // Set from the choice's own `finish_reason` once a content-bearing
             // chunk carries one (OpenAI-family streams put it on the last
@@ -803,6 +844,7 @@ impl ProviderRouter for OpenAiProvider {
                             );
                             let _ = tx
                                 .send(InferChunk {
+                                    compaction_summary: String::new(),
                                     reasoning_delta: String::new(),
                                     request_id: request_id.clone(),
                                     delta: String::new(),
@@ -820,6 +862,11 @@ impl ProviderRouter for OpenAiProvider {
                                     provider_used: String::new(),
                                     residency: String::new(),
                                     token_confidence: token_logprobs.summarize(),
+                                    // From the usage chunk; 0 when the stream
+                                    // carried none.
+                                    cache_read_input_tokens,
+                                    cache_creation_input_tokens,
+                                    provider_timing: None,
                                 })
                                 .await;
                             return;
@@ -840,6 +887,8 @@ impl ProviderRouter for OpenAiProvider {
                                 {
                                     output_tokens = to_i32_or_max(c);
                                 }
+                                (cache_read_input_tokens, cache_creation_input_tokens) =
+                                    openai_cache_tokens(&json["usage"]);
                             }
                             if let Some(m) = json["model"].as_str() {
                                 model_used = m.to_owned();
@@ -867,6 +916,7 @@ impl ProviderRouter for OpenAiProvider {
                             // only on [DONE] / stream end so the usage chunk is read.
                             if !delta.is_empty() {
                                 let chunk = InferChunk {
+                                    compaction_summary: String::new(),
                                     request_id: request_id.clone(),
                                     delta,
                                     done: false,
@@ -879,6 +929,9 @@ impl ProviderRouter for OpenAiProvider {
                                     residency: String::new(),
                                     // Answer-level; carried on the final chunk.
                                     token_confidence: None,
+                                    cache_read_input_tokens: 0,
+                                    cache_creation_input_tokens: 0,
+                                    provider_timing: None,
                                 };
                                 if tx.send(chunk).await.is_err() {
                                     return;
@@ -897,6 +950,7 @@ impl ProviderRouter for OpenAiProvider {
             // would misreport an incomplete answer as a clean one.
             let _ = tx
                 .send(InferChunk {
+                    compaction_summary: String::new(),
                     reasoning_delta: String::new(),
                     request_id,
                     delta: String::new(),
@@ -917,6 +971,9 @@ impl ProviderRouter for OpenAiProvider {
                     // covers the tokens that actually arrived, which is what
                     // the caller scored.
                     token_confidence: token_logprobs.summarize(),
+                    cache_read_input_tokens,
+                    cache_creation_input_tokens,
+                    provider_timing: None,
                 })
                 .await;
         });
@@ -1069,6 +1126,7 @@ mod tests {
             provider_hint: String::new(),
             model: model.to_owned(),
             messages: vec![crate::provider::ChatMessage {
+                compaction_summary: String::new(),
                 role: "user".to_owned(),
                 content: "hello".to_owned(),
                 name: String::new(),
@@ -1297,6 +1355,171 @@ mod tests {
         let streamed = build_request_body(&make_request("gpt-4o-mini"), true, true);
         assert_eq!(streamed["logprobs"], true);
         assert_eq!(streamed["stream"], true);
+    }
+
+    #[test]
+    fn cache_tokens_read_the_plain_openai_shape() {
+        let usage = serde_json::json!({
+            "prompt_tokens": 1566,
+            "completion_tokens": 20,
+            "prompt_tokens_details": {"cached_tokens": 1408, "audio_tokens": 0}
+        });
+        assert_eq!(openai_cache_tokens(&usage), (1408, 0));
+    }
+
+    #[test]
+    fn cache_tokens_read_the_gpt_5_6_write_leg() {
+        // Azure GPT-5.6 reports cache writes beside the reads.
+        let usage = serde_json::json!({
+            "prompt_tokens": 2000,
+            "completion_tokens": 50,
+            "prompt_tokens_details": {"cached_tokens": 1024, "cache_write_tokens": 512}
+        });
+        assert_eq!(openai_cache_tokens(&usage), (1024, 512));
+    }
+
+    #[test]
+    fn cache_tokens_fall_back_to_the_responses_api_details() {
+        let usage = serde_json::json!({
+            "input_tokens": 300,
+            "output_tokens": 9,
+            "input_tokens_details": {"cached_tokens": 256}
+        });
+        assert_eq!(openai_cache_tokens(&usage), (256, 0));
+    }
+
+    #[test]
+    fn missing_or_null_cache_details_count_as_zero() {
+        for usage in [
+            serde_json::json!({"prompt_tokens": 10, "completion_tokens": 2}),
+            serde_json::json!({"prompt_tokens": 10, "prompt_tokens_details": null}),
+            serde_json::json!({
+                "prompt_tokens": 10,
+                "prompt_tokens_details": {"cached_tokens": null, "cache_write_tokens": null}
+            }),
+            serde_json::Value::Null,
+        ] {
+            assert_eq!(openai_cache_tokens(&usage), (0, 0), "{usage}");
+        }
+    }
+
+    #[test]
+    fn cache_legs_never_exceed_the_prompt_they_are_part_of() {
+        let usage = serde_json::json!({
+            "prompt_tokens": 100,
+            "prompt_tokens_details": {"cached_tokens": 150, "cache_write_tokens": 20}
+        });
+        assert_eq!(openai_cache_tokens(&usage), (100, 0));
+
+        let usage = serde_json::json!({
+            "prompt_tokens": 100,
+            "prompt_tokens_details": {"cached_tokens": 90, "cache_write_tokens": 20}
+        });
+        assert_eq!(
+            openai_cache_tokens(&usage),
+            (90, 10),
+            "writes get what the reads left"
+        );
+    }
+
+    mod cached_tokens_over_http {
+        use super::*;
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        async fn provider_for(response: ResponseTemplate) -> (MockServer, OpenAiProvider) {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/chat/completions"))
+                .respond_with(response)
+                .mount(&server)
+                .await;
+            let provider = OpenAiProvider::new("k", Some(server.uri())).expect("provider");
+            (server, provider)
+        }
+
+        #[tokio::test]
+        async fn unary_infer_reports_both_cache_legs() {
+            let (_server, provider) =
+                provider_for(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "id": "chatcmpl-1",
+                    "model": "gpt-4o-mini-2024-07-18",
+                    "choices": [{
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "ok"},
+                        "finish_reason": "stop"
+                    }],
+                    "usage": {
+                        "prompt_tokens": 2000,
+                        "completion_tokens": 5,
+                        "prompt_tokens_details": {"cached_tokens": 1024, "cache_write_tokens": 512}
+                    }
+                })))
+                .await;
+
+            let response = provider
+                .infer(&make_request("gpt-4o-mini"))
+                .await
+                .expect("infer");
+
+            assert_eq!(
+                response.input_tokens, 2000,
+                "input stays as reported, legs inside it"
+            );
+            assert_eq!(response.cache_read_input_tokens, 1024);
+            assert_eq!(response.cache_creation_input_tokens, 512);
+        }
+
+        fn sse(with_done: bool) -> String {
+            let mut body = String::new();
+            for event in [
+                r#"{"id":"c1","model":"gpt-4o-mini-2024-07-18","choices":[{"index":0,"delta":{"content":"Hei"},"finish_reason":null}]}"#,
+                r#"{"id":"c1","model":"gpt-4o-mini-2024-07-18","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}"#,
+                r#"{"id":"c1","model":"gpt-4o-mini-2024-07-18","choices":[],"usage":{"prompt_tokens":1566,"completion_tokens":2,"prompt_tokens_details":{"cached_tokens":1408}}}"#,
+            ] {
+                body.push_str("data: ");
+                body.push_str(event);
+                body.push_str("\n\n");
+            }
+            if with_done {
+                body.push_str("data: [DONE]\n\n");
+            }
+            body
+        }
+
+        async fn final_chunk(with_done: bool) -> InferChunk {
+            let (_server, provider) = provider_for(
+                ResponseTemplate::new(200).set_body_raw(sse(with_done), "text/event-stream"),
+            )
+            .await;
+            let mut rx = provider
+                .infer_stream(&make_request("gpt-4o-mini"))
+                .await
+                .expect("stream opens");
+            while let Some(chunk) = rx.recv().await {
+                if chunk.done {
+                    return chunk;
+                }
+            }
+            panic!("the stream ended without a final chunk");
+        }
+
+        #[tokio::test]
+        async fn a_streamed_usage_chunk_reaches_the_final_chunk() {
+            let done = final_chunk(true).await;
+            assert_eq!(done.input_tokens, 1566);
+            assert_eq!(done.cache_read_input_tokens, 1408);
+            assert_eq!(done.cache_creation_input_tokens, 0);
+            assert_eq!(done.stop_reason, "stop");
+        }
+
+        #[tokio::test]
+        async fn a_stream_without_done_still_reports_the_cache_legs() {
+            let done = final_chunk(false).await;
+            assert_eq!(done.input_tokens, 1566);
+            assert_eq!(done.cache_read_input_tokens, 1408);
+            assert_eq!(done.stop_reason, "stop", "a real finish_reason still wins");
+        }
     }
 
     #[test]

@@ -7,6 +7,7 @@ import {
   listCostEntries,
   getCostPricing,
 } from '@/shared/api/cost-client'
+import { useI18n } from '@/shared/i18n'
 
 // Org-wide cost & usage dashboard (Phase 7 B5). Renders real ledger spend from
 // cost-core via the gateway `/api/v1/cost/*` proxy: a rolled-up summary, the
@@ -32,6 +33,7 @@ function fmtClock(at: string): string {
 }
 
 export default function CostDashboardPage() {
+  const i18n = useI18n()
   const [summary] = createResource(getCostSummary)
   const [entries] = createResource(() => listCostEntries(50))
   const [pricing] = createResource(getCostPricing)
@@ -115,7 +117,11 @@ export default function CostDashboardPage() {
                       <td class="verevon-cost__model">{row.model || '—'}</td>
                       <td class="verevon-cost__num">{fmtInt(row.inputTokens)}</td>
                       <td class="verevon-cost__num">{fmtInt(row.outputTokens)}</td>
-                      <td class="verevon-cost__num verevon-cost__cost">{fmtUsd(row.costUsd)}</td>
+                      <td class="verevon-cost__num verevon-cost__cost">
+                        {row.costBasis === 'subscription'
+                          ? i18n.tr('Inkludert i abonnementet', 'Included in the subscription')
+                          : fmtUsd(row.costUsd)}
+                      </td>
                     </tr>
                   )}
                 </For>

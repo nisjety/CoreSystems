@@ -167,6 +167,24 @@ pub(super) async fn get_status(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::http::StatusCode;
+    use crate::middleware::AuthorizedMembership;
+
+    fn member_of(org_id: &str, role: &str) -> AuthenticatedUser {
+        AuthenticatedUser {
+            user_id: "user-1".to_owned(),
+            user_email: "user@example.invalid".to_owned(),
+            user_name: "User".to_owned(),
+            user_image: None,
+            email_verified: true,
+            auth_role: Some(role.to_owned()),
+            active_org_id: Some(org_id.to_owned()),
+            authorized_membership: Some(AuthorizedMembership {
+                organization_id: org_id.to_owned(),
+                role: role.to_owned(),
+            }),
+        }
+    }
 
     #[test]
     fn builds_gdpr_deletion_urls_without_the_api_v1_organizations_prefix() {
@@ -209,5 +227,52 @@ mod tests {
             deletion_url("http://org-core:8080/", "org_1", "restore"),
             "http://org-core:8080/orgs/org_1/gdpr/restore"
         );
+    }
+
+    // org.restore is owner-gated the same way soft_delete is (`require_org_admin`,
+    // see the module doc comment above). The mechanism itself — has_any_role +
+    // require_active_org — has never had a dedicated regression test proving a
+    // non-admin member, or an admin of the wrong org, is actually turned away
+    // before `restore` reaches `proxy_json`. `test_state`'s `org_core_url` is an
+    // unreachable loopback address (`http://127.0.0.1:1`): if `require_org_admin`
+    // ever stopped gating here, these calls would hang or come back as a 502
+    // Bad Gateway from a real proxy attempt, never a clean, immediate 403. Modeled
+    // on `orgs::members::non_admin_mutation_is_denied_with_stable_error_envelope`.
+
+    #[tokio::test]
+    async fn restore_rejects_a_non_admin_member_in_the_correct_org_before_reaching_org_core() {
+        let state = crate::tests::test_state(false);
+        let member = member_of("org-active", "member");
+
+        let (status, Json(body)) = restore(
+            State(state),
+            Extension(member),
+            Path("org-active".to_owned()),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body["error"]["code"], "forbidden");
+    }
+
+    #[tokio::test]
+    async fn restore_rejects_an_admin_authorized_for_a_different_org() {
+        // Same forged-actor shape `upstream::active_membership_uses_control_role_and_requires_exact_scope`
+        // already proves generically for org.mark_exported / org.acknowledge_deletion
+        // (a mismatched org never resolves into `authorized_membership`), exercised
+        // directly against org.restore's own gate: an owner-role membership live for
+        // "org-other" must not authorize acting on "org-active".
+        let state = crate::tests::test_state(false);
+        let admin_of_a_different_org = member_of("org-other", "owner");
+
+        let (status, Json(body)) = restore(
+            State(state),
+            Extension(admin_of_a_different_org),
+            Path("org-active".to_owned()),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body["error"]["code"], "forbidden");
     }
 }

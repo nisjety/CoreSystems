@@ -1,9 +1,10 @@
 // Package llmreviewer is the concrete learning.Reviewer (matrix §G7): it calls
 // inference-core's InferenceCore.Infer with the review prompt + session
 // transcript and parses the model's reply into skill candidates via
-// learning.ParseReviewResponse. The learning package stays pure (no gRPC, no
-// model); this adapter bridges it to inference-core — mirroring how
-// internal/skillsink bridges the Sink side to session-core.
+// learning.ParseReviewJSON (the forced tool call) or
+// learning.ParseReviewResponse (a text reply). The learning package stays
+// pure (no gRPC, no model); this adapter bridges it to inference-core —
+// mirroring how internal/skillsink bridges the Sink side to session-core.
 //
 // Scope: this is the full LLM-call glue and is unit-tested against a fake
 // inferer (no live model needed). It is deliberately decoupled from the
@@ -15,12 +16,14 @@ package llmreviewer
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
 	mpv1 "github.com/triodelab/model-plane/gen/go/model_plane/v1"
 	"github.com/triodelab/model-plane/services/capability-core/internal/learning"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/metadata"
 )
 
 // DefaultModel is used when NewReviewer is given an empty model, so the model
@@ -29,7 +32,54 @@ const DefaultModel = "claude-sonnet-4-20250514"
 
 // reviewMaxTokens caps the review reply. Skill candidates are short JSON; this
 // is generous without inviting a runaway generation.
-const reviewMaxTokens = 2048
+const reviewMaxTokens = 4096
+
+const reviewTool = "submit_skill_review"
+const reviewSchema = `{"type":"object","properties":{"skills":{"type":"array","maxItems":8,"items":{"type":"object","properties":{"name":{"type":"string","minLength":1,"maxLength":160},"description":{"type":"string","maxLength":1000},"content":{"type":"string","minLength":1,"maxLength":8000},"trigger_keywords":{"type":"array","maxItems":12,"items":{"type":"string","maxLength":120}},"confidence":{"type":"number","minimum":0,"maximum":1}},"required":["name","description","content","trigger_keywords","confidence"],"additionalProperties":false}}},"required":["skills"],"additionalProperties":false}`
+
+// ResponseError exposes bounded, content-free diagnostics and retry policy.
+// Never log a transcript, generated skill, provider message or raw response.
+type ResponseError struct {
+	Kind         string
+	Model        string
+	StopReason   string
+	OutputTokens int32
+	// Set once a reply was read: Source is where it came from ("tool" for the
+	// submit_skill_review arguments, "text" for the reply content), RawLength
+	// its size in bytes, and Reason, for invalid_schema, the parser's fixed
+	// classification. None of them carries any of the reply.
+	Source    string
+	RawLength int
+	Reason    learning.ParseReason
+}
+
+func (e *ResponseError) Error() string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "llmreviewer: %s (model=%s stop=%s output_tokens=%d", e.Kind, e.Model, e.StopReason, e.OutputTokens)
+	if e.Source != "" {
+		fmt.Fprintf(&b, " source=%s raw_len=%d", e.Source, e.RawLength)
+	}
+	if e.Reason != "" {
+		fmt.Fprintf(&b, " reason=%s", e.Reason)
+	}
+	b.WriteString(")")
+	return b.String()
+}
+
+func responseError(kind string, resp *mpv1.InferResponse) *ResponseError {
+	// Only recognized metadata is reported; model IDs are bounded, not body text.
+	model := resp.GetModelUsed()
+	if len(model) > 100 {
+		model = "unknown"
+	}
+	stop := resp.GetStopReason()
+	switch stop {
+	case "end_turn", "stop", "tool_use", "tool_calls", "max_tokens", "length", "refusal", "content_filter", "":
+	default:
+		stop = "unknown"
+	}
+	return &ResponseError{Kind: kind, Model: model, StopReason: stop, OutputTokens: resp.GetOutputTokens()}
+}
 
 // inferer is the single method of the inference-core client this reviewer
 // needs. Interface segregation keeps it unit-testable with a tiny fake and
@@ -61,8 +111,9 @@ func NewReviewer(client inferer, model, orgID string) *Reviewer {
 
 // Review calls inference-core with the review prompt (system) + the transcript
 // and existing-skill list (user), then parses the reply. The reply is UNTRUSTED
-// model text; learning.ParseReviewResponse tolerates fences/prose and forces
-// Origin=background_review, so a hostile reply can never mint a "user" skill.
+// model output; the learning parsers (strict for the tool call, fence- and
+// prose-tolerant for text) force Origin=background_review, so a hostile reply
+// can never mint a "user" skill.
 func (r *Reviewer) Review(
 	ctx context.Context,
 	transcript string,
@@ -82,17 +133,66 @@ func (r *Reviewer) Review(
 		// Deterministic extraction — this is structured parsing, not creative.
 		Temperature: 0,
 		MaxTokens:   reviewMaxTokens,
-		// Don't durably cache/log the transcript — it may carry sensitive data.
-		Zdr: true,
+		Tools:       []*mpv1.ToolDefinition{{Name: reviewTool, Description: "Submit the structured session review, or an empty skills array when nothing qualifies.", ParametersJson: reviewSchema}},
+		ToolChoice:  reviewTool,
+		// Not ZDR: HandleRunCompleted's retention gate (see
+		// sessionreview.RetentionPosture.AllowsDerivedPersistence) already
+		// refuses to reach this call at all unless the run's own envelope
+		// declared an explicit `zdr: false` — i.e. the org/user already
+		// consented to Verevon deriving and persisting artifacts from this
+		// conversation. Requesting a ZDR-scoped inference call for it would
+		// only add a requirement no deployment in most environments can
+		// satisfy (inference-core's ZDR gate needs a real, evidence-bound
+		// provider attestation — see rust/services/inference-core/src/
+		// provider/zdr.rs) without protecting anything the upstream gate
+		// hasn't already cleared.
+		Zdr: false,
 	}
+	// no-store: inference-core neither serves this call from its response
+	// cache nor stores the reply in it (grpc.rs infer). A review is retried
+	// because its last reply was unusable, and the delayed redeliveries land
+	// inside the cache window, so a cached reply would replay the same failure
+	// instead of asking the model again. A reply derived from a customer
+	// transcript has no reason to sit in a shared cache either.
+	ctx = metadata.AppendToOutgoingContext(ctx, "cache-control", "no-store")
 	resp, err := r.client.Infer(ctx, req)
 	if err != nil {
 		return nil, fmt.Errorf("llmreviewer: infer call: %w", err)
 	}
-	if resp == nil || strings.TrimSpace(resp.GetContent()) == "" {
-		return nil, fmt.Errorf("llmreviewer: empty inference response")
+	if resp == nil {
+		return nil, responseError("empty_response", resp)
 	}
-	return learning.ParseReviewResponse(resp.GetContent())
+	switch resp.GetStopReason() {
+	case "max_tokens", "length":
+		return nil, responseError("truncated", resp)
+	case "refusal", "content_filter":
+		return nil, responseError("refused", resp)
+	}
+	source, raw, parse := "text", resp.GetContent(), learning.ParseReviewResponse
+	if calls := resp.GetToolCalls(); len(calls) > 0 {
+		if len(calls) != 1 || calls[0].GetName() != reviewTool {
+			return nil, responseError("unexpected_tool_response", resp)
+		}
+		// The forced tool call is the answer: any reply text beside it is
+		// ignored, and its arguments are one JSON object, parsed strictly.
+		source, raw, parse = "tool", calls[0].GetArgumentsJson(), learning.ParseReviewJSON
+	}
+	if strings.TrimSpace(raw) == "" {
+		failure := responseError("empty_response", resp)
+		failure.Source, failure.RawLength = source, len(raw)
+		return nil, failure
+	}
+	candidates, err := parse(raw)
+	if err != nil {
+		failure := responseError("invalid_schema", resp)
+		failure.Source, failure.RawLength = source, len(raw)
+		var parseErr *learning.ParseError
+		if errors.As(err, &parseErr) {
+			failure.Reason = parseErr.Reason
+		}
+		return nil, failure
+	}
+	return candidates, nil
 }
 
 // buildUserMessage assembles the transcript plus the names of already-registered

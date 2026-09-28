@@ -47,6 +47,35 @@ const (
 	MaxIdempotencyKeyBytes = 512
 )
 
+// Cost bases an entry may carry: how its cost_usd was established. They are
+// the wire values of model-gateway's `pricing::CostBasis` on the
+// USAGE_ENVELOPE payload's `cost_basis` field.
+const (
+	// CostBasisUnknown is an entry whose producer did not say, such as a
+	// gateway build older than the field. It is priced like a metered entry
+	// and persisted as NULL.
+	CostBasisUnknown = ""
+	// CostBasisMetered is an API route, priced per token from the catalogue.
+	CostBasisMetered = "metered"
+	// CostBasisSubscription is a call served by the user's own ChatGPT
+	// subscription. It has no per-token charge: its cost stays 0 and its
+	// token counts are usage, not spend. It is never priced from the
+	// catalogue.
+	CostBasisSubscription = "subscription"
+)
+
+// NormalizeCostBasis maps a reported cost basis to its canonical value.
+// Surrounding space and case are ignored. ok is false for a non-empty value
+// that is not a known basis; the returned basis is then CostBasisUnknown.
+func NormalizeCostBasis(raw string) (basis string, ok bool) {
+	switch value := strings.ToLower(strings.TrimSpace(raw)); value {
+	case CostBasisUnknown, CostBasisMetered, CostBasisSubscription:
+		return value, true
+	default:
+		return CostBasisUnknown, false
+	}
+}
+
 // Entry is a single cost-bearing event written to the ledger.
 type Entry struct {
 	OrgID          string
@@ -60,6 +89,20 @@ type Entry struct {
 	CostUSD        float64
 	IdempotencyKey string
 	CreatedAt      time.Time
+	// CacheReadInputTokens and CacheCreationInputTokens are prompt-cache
+	// telemetry (a native-compaction migration prerequisite): tokens served
+	// from / newly written to the serving provider's prompt cache. Both are
+	// already folded into InputTokens by the serving adapter; carried here
+	// separately so cache-hit rate and cost savings are queryable off the
+	// durable ledger. 0 for an event that reports no cache usage -- always
+	// present, never a nullable column a reader must existence-check.
+	CacheReadInputTokens     int64
+	CacheCreationInputTokens int64
+	// CostBasis says how CostUSD was established: one of the CostBasis*
+	// constants. A CostBasisSubscription entry keeps its real token counts
+	// with a cost of 0; the other bases are priced from the catalogue when
+	// they arrive without a cost.
+	CostBasis string
 }
 
 // ValidateEntry rejects values that can poison aggregates, overflow durable
@@ -94,8 +137,15 @@ func ValidateEntry(e Entry) error {
 		e.InputTokens > MaxTokensPerEntry-e.OutputTokens {
 		return fmt.Errorf("%w: token counts must be nonnegative and total at most %d", ErrInvalidEntry, MaxTokensPerEntry)
 	}
+	if e.CacheReadInputTokens < 0 || e.CacheCreationInputTokens < 0 ||
+		e.CacheReadInputTokens > MaxTokensPerEntry || e.CacheCreationInputTokens > MaxTokensPerEntry {
+		return fmt.Errorf("%w: cache token counts must be nonnegative and at most %d", ErrInvalidEntry, MaxTokensPerEntry)
+	}
 	if math.IsNaN(e.CostUSD) || math.IsInf(e.CostUSD, 0) || e.CostUSD < 0 || e.CostUSD > MaxCostUSD {
 		return fmt.Errorf("%w: cost_usd must be finite and between 0 and %.0f", ErrInvalidEntry, MaxCostUSD)
+	}
+	if basis, ok := NormalizeCostBasis(e.CostBasis); !ok || basis != e.CostBasis {
+		return fmt.Errorf("%w: cost_basis must be empty, %q or %q", ErrInvalidEntry, CostBasisMetered, CostBasisSubscription)
 	}
 	return nil
 }
@@ -147,6 +197,27 @@ type Usage struct {
 	TotalOutputTokens int64
 	TotalCostUSD      float64
 	EntryCount        int64
+	// TotalCacheReadInputTokens and TotalCacheCreationInputTokens roll up
+	// Entry.CacheReadInputTokens / Entry.CacheCreationInputTokens the same
+	// way TotalInputTokens rolls up InputTokens. Already included in
+	// TotalInputTokens; broken out for cache-hit-rate reporting.
+	TotalCacheReadInputTokens     int64
+	TotalCacheCreationInputTokens int64
+	// MeteredInputTokens and MeteredOutputTokens roll up the tokens of every
+	// entry that is not CostBasisSubscription (an unreported basis counts as
+	// metered). Token budgets cap these: a subscription call is usage, not
+	// spend, so it never exhausts max_tokens. The Total* fields still report
+	// every entry.
+	MeteredInputTokens  int64
+	MeteredOutputTokens int64
+}
+
+// meteredTokens is the part of e's token counts that a token budget caps.
+func meteredTokens(e Entry) (input, output int64) {
+	if e.CostBasis == CostBasisSubscription {
+		return 0, 0
+	}
+	return e.InputTokens, e.OutputTokens
 }
 
 // AggregateFilter narrows an Aggregate/List query. Empty string fields are
@@ -259,14 +330,19 @@ func (s *Store) RecordEntry(_ context.Context, e Entry) error {
 		u.EntryCount == math.MaxInt64 || math.IsInf(u.TotalCostUSD+e.CostUSD, 0) {
 		return fmt.Errorf("%w: aggregate would overflow", ErrInvalidEntry)
 	}
+	meteredInput, meteredOutput := meteredTokens(e)
 	next := &Usage{
-		OrgID:             u.OrgID,
-		UserID:            u.UserID,
-		RunID:             u.RunID,
-		TotalInputTokens:  u.TotalInputTokens + e.InputTokens,
-		TotalOutputTokens: u.TotalOutputTokens + e.OutputTokens,
-		TotalCostUSD:      u.TotalCostUSD + e.CostUSD,
-		EntryCount:        u.EntryCount + 1,
+		OrgID:                         u.OrgID,
+		UserID:                        u.UserID,
+		RunID:                         u.RunID,
+		TotalInputTokens:              u.TotalInputTokens + e.InputTokens,
+		TotalOutputTokens:             u.TotalOutputTokens + e.OutputTokens,
+		TotalCostUSD:                  u.TotalCostUSD + e.CostUSD,
+		EntryCount:                    u.EntryCount + 1,
+		TotalCacheReadInputTokens:     u.TotalCacheReadInputTokens + e.CacheReadInputTokens,
+		TotalCacheCreationInputTokens: u.TotalCacheCreationInputTokens + e.CacheCreationInputTokens,
+		MeteredInputTokens:            u.MeteredInputTokens + meteredInput,
+		MeteredOutputTokens:           u.MeteredOutputTokens + meteredOutput,
 	}
 	s.usage[k] = next
 	s.entries = append(s.entries, e)
@@ -313,6 +389,8 @@ func (s *Store) GetRunUsage(_ context.Context, runID string) (*Usage, error) {
 		out.TotalOutputTokens += e.OutputTokens
 		out.TotalCostUSD += e.CostUSD
 		out.EntryCount++
+		out.TotalCacheReadInputTokens += e.CacheReadInputTokens
+		out.TotalCacheCreationInputTokens += e.CacheCreationInputTokens
 	}
 	if !found {
 		return nil, ErrUsageNotFound
@@ -335,6 +413,11 @@ func (s *Store) Aggregate(_ context.Context, f AggregateFilter) (*Usage, error) 
 		out.TotalOutputTokens += e.OutputTokens
 		out.TotalCostUSD += e.CostUSD
 		out.EntryCount++
+		out.TotalCacheReadInputTokens += e.CacheReadInputTokens
+		out.TotalCacheCreationInputTokens += e.CacheCreationInputTokens
+		meteredInput, meteredOutput := meteredTokens(e)
+		out.MeteredInputTokens += meteredInput
+		out.MeteredOutputTokens += meteredOutput
 	}
 	return out, nil
 }
@@ -383,7 +466,7 @@ func (s *Store) CheckBudget(_ context.Context, orgID, userID string, maxCostUSD 
 	if maxCostUSD > 0 && u.TotalCostUSD >= maxCostUSD {
 		return fmt.Errorf("%w: current %.6f >= limit %.6f", ErrBudgetExceededCost, u.TotalCostUSD, maxCostUSD)
 	}
-	totalTokens := u.TotalInputTokens + u.TotalOutputTokens
+	totalTokens := u.MeteredInputTokens + u.MeteredOutputTokens
 	if maxTokens > 0 && totalTokens >= maxTokens {
 		return fmt.Errorf("%w: current %d >= limit %d", ErrBudgetExceededTokens, totalTokens, maxTokens)
 	}

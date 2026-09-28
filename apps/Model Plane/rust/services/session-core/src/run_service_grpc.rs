@@ -1585,8 +1585,8 @@ mod tests {
         sqlx::query(
             "INSERT INTO threads (id, session_key, org_id, user_id, space_id, space_decision_ref, \
              recipient_audience_ref, privacy_policy_ref, resource_authorization_ref, authority_revision, \
-             recipient_audience_revision, recipient_audience_hash) \
-             VALUES ($1, $1, $2, $3, $4, 'decision-1', 'audience-1', 'policy-1', 'resource-1', 1, 1, 'audience-hash-1') \
+             recipient_audience_revision, recipient_audience_hash, origin) \
+             VALUES ($1, $1, $2, $3, $4, 'decision-1', 'audience-1', 'policy-1', 'resource-1', 1, 1, 'audience-hash-1', 'space') \
              ON CONFLICT (id) DO NOTHING",
         )
         .bind(&thread_id)

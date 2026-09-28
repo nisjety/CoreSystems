@@ -26,7 +26,8 @@
  * serializable if a future surface ever needs to ship one over the wire.
  */
 
-import type { AutonomyRung } from '@/shared/api/chat-client'
+import type { AutonomyRung, ChatPlanStep } from '@/shared/api/chat-client'
+import type { PlanStepEdit } from '@/shared/api/orchestration-client'
 import type { JSX } from '@solidjs/web'
 import type {
   ChatArtifact,
@@ -38,9 +39,11 @@ import type {
   GeneratedFile,
   GeneratedImagePreview,
   Citation,
+  StreamFailureAction,
 } from '@/features/chat/components/chat-types'
 import type { Approval, ApprovalDecision } from '@/shared/api/orchestration-client'
 import type { RecalledMemory } from '@/shared/api/chat-client'
+import type { StreamActivity } from '@/features/chat/lib/stream-activity'
 
 
 /**
@@ -52,10 +55,31 @@ import type { RecalledMemory } from '@/shared/api/chat-client'
  * impossible.
  */
 export type AnswerState =
-  /** Waiting with nothing to show yet — the thinking indicator. */
-  | { state: 'pending' }
-  /** The stream failed; the content field holds the error text. */
-  | { state: 'failed'; message: string }
+  /**
+   * Waiting with nothing to show yet — the thinking indicator.
+   *
+   * `since` is the turn's own start, carried on the node rather than captured
+   * when the indicator mounts. `<For>` in the transcript keys on item identity
+   * and every derivation builds fresh node objects, so the indicator is torn
+   * down and rebuilt on each one; a clock anchored to mount therefore restarted
+   * on every streamed tool call. On the deep-research routes the counter exists
+   * for — one call every few hundred milliseconds — it never survived long
+   * enough to cross the ten-second threshold at all.
+   *
+   * `activity` is what the run is doing, when the stream has said. Absent means
+   * nothing has been reported yet — the state the plain subscription route sits
+   * in for its whole 90-second wait — and the indicator then shows elapsed time
+   * alone rather than an invented phase.
+   */
+  | { state: 'pending'; since: string; activity?: StreamActivity }
+  /**
+   * The stream failed; the content field holds the error text. `unsaved` is
+   * answer text that streamed before a failure the server saved nothing for:
+   * shown only behind an explicit "not saved" disclosure, never as the answer.
+   * `action` is what the reader can do (absent = retry); with `wait`,
+   * `retryAt` is the instant the retry control is enabled again.
+   */
+  | { state: 'failed'; message: string; unsaved?: string; action?: StreamFailureAction; retryAt?: string }
   /** Real content (possibly still streaming, possibly stopped early). */
   | { state: 'content'; content: string; streaming: boolean; stopped: boolean }
 
@@ -81,6 +105,14 @@ export type ConversationNode =
       }
     }
   | { kind: 'memory-recall'; count: number; memories: RecalledMemory[] }
+  /**
+   * Per-turn retrieval-source filter receipt (chat-wave2 scope spec §2.2):
+   * the concrete "shown in the receipt" surface. Only ever present when the
+   * turn's effective scope was `knowledge_only`/`web_only` — an `auto` turn
+   * produces no node, exactly like `memory-recall` above produces none when
+   * nothing was recalled.
+   */
+  | { kind: 'source-scope'; scope: 'knowledge_only' | 'web_only'; excludedTools: string[] }
   | { kind: 'truncated'; stopReason: string }
   | { kind: 'tool-chips'; tools: ComposerToolId[] }
   | { kind: 'attachments'; attachments: ComposerAttachment[] }
@@ -92,8 +124,27 @@ export type ConversationNode =
    * Derived rather than stored: whether a turn planned is a fact about the turn,
    * and whether it has been granted authority is a fact about its run. Recomputed
    * so a grant made after the turn rendered shows up without a migration.
+   *
+   * `planId`/`summary`/`steps` (plan-gate §2.1) are present once the model's
+   * `plan.propose` tool call completed. They are additive, never a
+   * precondition for the node itself: a finished plan-mode turn derives this
+   * node regardless of whether they arrived (the model is only INSTRUCTED to
+   * call `plan.propose`, never guaranteed to, and the fields are session-only
+   * — a page reload can lose them even when it did) — otherwise a run could
+   * be stranded in plan mode with no control left to grant or reject any
+   * authority. Absent, `PlanApprovalControl` degrades to the plain
+   * rung/justification prompt every plan-mode turn had before plan-gate
+   * existed (see `derive.ts`).
    */
-  | { kind: 'plan-approval'; grantedRung?: AutonomyRung; pending: boolean; error?: string }
+  | {
+      kind: 'plan-approval'
+      planId?: string
+      summary?: string
+      steps?: ChatPlanStep[]
+      grantedRung?: AutonomyRung
+      pending: boolean
+      error?: string
+    }
   | { kind: 'image-previews'; previews: GeneratedImagePreview[] }
   | { kind: 'files'; files: GeneratedFile[] }
   | { kind: 'artifacts'; artifacts: ChatArtifact[] }
@@ -107,13 +158,31 @@ export type ConversationNodeContext = {
   /** Open the contextual attachment canvas without replacing the transcript. */
   onViewAttachments?: (attachmentId: string) => void
   onApprovalDecision: (approvalId: string, decision: ApprovalDecision) => void
-  /** Grant this turn's run the authority to execute its plan. */
-  onApprovePlan: (rung: AutonomyRung, justification: string) => void
+  /**
+   * Grant this turn's run the authority to execute its plan. `steps` is the
+   * user's (possibly edited) step list, in final order — omitted/undefined
+   * when the turn carries no structured plan (the pure rung-grant path).
+   */
+  onApprovePlan: (rung: AutonomyRung, justification: string, steps?: PlanStepEdit[]) => void
+  /**
+   * Reject a proposed plan (plan-gate §2.3): grants nothing. Only meaningful
+   * when the node carries a `planId` — undefined for the pure rung-grant path
+   * (a plan-less plan-approval node has nothing to reject).
+   */
+  onRejectPlan?: (planId: string, reason: string) => void
   onSelectFollowUp?: (text: string) => void
   onRegenerate: () => void
   /** Explicit `[n]` answer markers can resolve only against this turn's
    * validated citation list; absent entries stay as plain text. */
   citations?: readonly Citation[]
+  /**
+   * The thread this turn belongs to. `memory-recall`'s per-entry "Rediger"
+   * needs it to satisfy the write path's thread-ownership check when saving a
+   * correction (see `correctMemory` in `memory-client.ts`); null on a surface
+   * with no thread yet (e.g. a not-yet-persisted first turn), which disables
+   * the edit action there rather than sending an empty id.
+   */
+  threadId: string | null
 }
 
 /** One node kind's renderer. */

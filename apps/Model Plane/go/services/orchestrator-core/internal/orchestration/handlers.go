@@ -141,6 +141,24 @@ func (h *Handlers) AttachSubagent(ctx context.Context, req *mpv1.AttachSubagentR
 	return h.client.AttachSubagent(ctx, req)
 }
 
+// GetRunProofBundle assembles the Verevon Proof Bundle for one run (F-15,
+// CHAT_PARITY_AUDIT_2026-09-15.md §3.10/§3.11). Like CreateApproval /
+// ListPendingApprovals / RecordOrchestrationEvent above, this RPC was left to
+// the embedded UnimplementedOrchestrationCoreServiceServer — every call
+// answered codes.Unimplemented, which model-gateway's grpc_status_to_http
+// catch-all turns into a bare 500 with no diagnostic, so the SPA's Trace/
+// receipt panel failed on every run even though session-core has fully
+// implemented get_run_proof_bundle (orchestration_grpc.rs) since the proof
+// bundle's .proto landed. Proxy it like every other read RPC here; session-
+// core is the sole owner of the approval/continuation-evidence tables the
+// bundle is assembled from.
+func (h *Handlers) GetRunProofBundle(ctx context.Context, req *mpv1.GetRunProofBundleRequest) (*mpv1.GetRunProofBundleResponse, error) {
+	if err := h.requireClient(); err != nil {
+		return nil, err
+	}
+	return h.client.GetRunProofBundle(ctx, req)
+}
+
 func (h *Handlers) StreamRunEvents(req *mpv1.StreamRunEventsRequest, stream grpc.ServerStreamingServer[mpv1.OrchestrationEvent]) error {
 	if err := h.requireClient(); err != nil {
 		return err

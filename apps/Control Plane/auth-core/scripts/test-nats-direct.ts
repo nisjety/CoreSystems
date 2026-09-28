@@ -2,7 +2,7 @@
 
 /**
  * Test NATS Direct Request-Reply Pattern
- * 
+ *
  * This script tests direct NATS request-reply without NestJS microservices layer
  * to understand the message format and reply mechanism.
  */
@@ -11,8 +11,8 @@ import { connect, StringCodec } from 'nats';
 
 async function testNatsRequestReply() {
   console.log('🔌 Connecting to NATS...');
-  
-  const nc = await connect({ 
+
+  const nc = await connect({
     servers: process.env.NATS_URL || 'nats://localhost:4222',
     maxReconnectAttempts: 3,
     reconnectTimeWait: 1000,
@@ -29,23 +29,24 @@ async function testNatsRequestReply() {
 
   // Set up subscriber that mimics what NestJS should do
   console.log('👂 Setting up subscriber for service.authenticate...');
-  
+
   const sub = nc.subscribe('service.authenticate');
-  
-  (async () => {
+
+  // Runs for the script's lifetime; intentionally not awaited.
+  void (async () => {
     for await (const msg of sub) {
       console.log('\n📨 Received message:');
       console.log('  Subject:', msg.subject);
       console.log('  Reply:', msg.reply);
       console.log('  Data:', sc.decode(msg.data));
-      
+
       // Send reply
       const response = JSON.stringify({
         authenticated: true,
         serviceSecret: sharedInternalSecret,
         serviceId: 'admin-service',
       });
-      
+
       if (msg.reply) {
         console.log('📤 Sending reply to:', msg.reply);
         msg.respond(sc.encode(response));
@@ -57,7 +58,7 @@ async function testNatsRequestReply() {
   })();
 
   // Give subscriber time to register
-  await new Promise(resolve => setTimeout(resolve, 500));
+  await new Promise((resolve) => setTimeout(resolve, 500));
 
   // Send request (simulating Go client)
   console.log('\n📤 Sending request...');
@@ -70,9 +71,9 @@ async function testNatsRequestReply() {
     const response = await nc.request(
       'service.authenticate',
       sc.encode(request),
-      { timeout: 5000 }
+      { timeout: 5000 },
     );
-    
+
     console.log('\n✅ Got response:');
     console.log('  Data:', sc.decode(response.data));
   } catch (error) {

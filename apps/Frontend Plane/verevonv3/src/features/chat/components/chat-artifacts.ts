@@ -441,9 +441,10 @@ export function isChatArtifactVersion(value: unknown): value is ChatArtifactVers
  * single revision — the viewer never has to special-case that.
  */
 export function artifactVersions(artifact: ChatArtifact): ChatArtifactVersion[] {
-  const history = (artifact.history ?? []).filter(isChatArtifactVersion)
-  if (history.length === 0) return [versionOf(artifact)]
-  return [...history].sort((left, right) => left.version - right.version)
+  const byVersion = new Map((artifact.history ?? []).filter(isChatArtifactVersion)
+    .map((entry) => [entry.version, entry]))
+  byVersion.set(artifact.version, versionOf(artifact))
+  return [...byVersion.values()].sort((left, right) => left.version - right.version)
 }
 
 /** The revision the viewer shows by default: the newest one. */
@@ -476,10 +477,12 @@ export function artifactVersionAt(artifact: ChatArtifact, version: number | null
  */
 export function mergeArtifactVersion(existing: ChatArtifact | undefined, incoming: ChatArtifact): ChatArtifact {
   const revision = versionOf(incoming)
-  if (!existing) return { ...incoming, history: [revision] }
-
-  const previous = artifactVersions(existing)
-  const history = [...previous.filter((entry) => entry.version !== incoming.version), revision]
+  // Server transcripts carry revisions on separate turns; local snapshots may
+  // already carry a complete history. Preserve both forms when they meet.
+  const byVersion = new Map((existing ? artifactVersions(existing) : [])
+    .map((entry) => [entry.version, entry]))
+  for (const entry of artifactVersions(incoming)) byVersion.set(entry.version, entry)
+  const history = [...byVersion.values()]
     .sort((left, right) => left.version - right.version)
   const newest = history[history.length - 1] ?? revision
   return {
@@ -498,8 +501,7 @@ export function findArtifactById(lists: Array<ChatArtifact[] | undefined>, id: s
   for (const list of lists) {
     for (const artifact of list ?? []) {
       if (artifact.id !== id) continue
-      // Later turns win: the newest carrier of the id holds the fullest history.
-      if (!found || artifact.version >= found.version) found = artifact
+      found = mergeArtifactVersion(found, artifact)
     }
   }
   return found

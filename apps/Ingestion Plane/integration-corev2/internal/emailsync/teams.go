@@ -5,13 +5,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"html"
 	"net/http"
 	"net/url"
 	"slices"
 	"strings"
 	"time"
 
+	"github.com/triodelab/integration-corev2/internal/htmlstrip"
 	"github.com/triodelab/integration-corev2/internal/store"
 )
 
@@ -630,19 +630,12 @@ func (m teamsMessage) normalize(threadID, subject string, watermark time.Time, i
 }
 
 // stripHTMLTags is a minimal HTML→text rendering for the required body_text
-// field: drop tags, unescape entities, collapse surrounding whitespace.
+// field. The implementation lives in internal/htmlstrip (StripHTMLTags) so
+// internal/actions can reuse the exact same rendering for the
+// connector-attach picker's mail.messages.get/gmail.messages.get operations
+// without importing this package (a background sync, different
+// lifecycle/auth than a per-request action executor). This wrapper keeps the
+// unqualified call sites in this file (and in graph_body_test.go) unchanged.
 func stripHTMLTags(s string) string {
-	var b strings.Builder
-	inTag := false
-	for _, r := range s {
-		switch {
-		case r == '<':
-			inTag = true
-		case r == '>':
-			inTag = false
-		case !inTag:
-			b.WriteRune(r)
-		}
-	}
-	return strings.TrimSpace(html.UnescapeString(b.String()))
+	return htmlstrip.StripHTMLTags(s)
 }

@@ -90,7 +90,11 @@ func (s *Server) resolveMembershipFromAuthCore(
 	if err != nil {
 		return "", "", err
 	}
-	defer response.Body.Close()
+	defer func() {
+		// The decision payload is already decoded (or the status rejected);
+		// a close error on an idle response body is not actionable.
+		_ = response.Body.Close()
+	}()
 	if response.StatusCode != http.StatusOK {
 		return "", "", fmt.Errorf("canonical membership authority returned %d", response.StatusCode)
 	}
@@ -133,7 +137,7 @@ func (s *Server) callCanonicalMembershipAuthority(ctx context.Context, body []by
 	const retryDelay = 50 * time.Millisecond
 	url := s.authMembershipService + "/api/v1/internal/membership/decision"
 
-	for attempt := 0; attempt < attempts; attempt++ {
+	for attempt := range attempts {
 		request, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 		if err != nil {
 			return nil, fmt.Errorf("build canonical membership request: %w", err)
@@ -200,19 +204,8 @@ func (s *Server) handleMembershipResolutionError(
 // GET /api/v1/users/me
 func (s *Server) getCurrentUserProfile(c *gin.Context) {
 	// Extract user ID from context (set by auth middleware)
-	userID, exists := c.Get("user_id")
-	if !exists {
-		c.JSON(http.StatusUnauthorized, gin.H{
-			"error": "User ID not found in context",
-		})
-		return
-	}
-
-	userIDStr, ok := userID.(string)
+	userIDStr, ok := requireContextUserID(c)
 	if !ok {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"error": "Invalid user ID type",
-		})
 		return
 	}
 
@@ -270,7 +263,7 @@ func (s *Server) getCurrentUserProfile(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"user": map[string]interface{}{
+		"user": map[string]any{
 			"id":                  user.ID,
 			"email":               user.Email,
 			"name":                user.Name,
@@ -374,27 +367,13 @@ type UpdateUserProfileRequest struct {
 // updateCurrentUserProfile updates the current authenticated user's profile
 // PATCH /api/v1/users/me
 func (s *Server) updateCurrentUserProfile(c *gin.Context) {
-	userID, exists := c.Get("user_id")
-	if !exists {
-		c.JSON(http.StatusUnauthorized, gin.H{
-			"error": "User ID not found in context",
-		})
-		return
-	}
-
-	userIDStr, ok := userID.(string)
+	userIDStr, ok := requireContextUserID(c)
 	if !ok {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"error": "Invalid user ID type",
-		})
 		return
 	}
 
 	var req UpdateUserProfileRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"error": "Invalid request body",
-		})
+	if !bindJSONRequest(c, &req, "Invalid request body") {
 		return
 	}
 
@@ -450,7 +429,7 @@ func (s *Server) updateCurrentUserProfile(c *gin.Context) {
 		return
 	}
 
-	metadata := map[string]interface{}{}
+	metadata := map[string]any{}
 	if req.FirstName != nil {
 		metadata["firstName"] = *req.FirstName
 	}
@@ -519,7 +498,7 @@ func (s *Server) updateCurrentUserProfile(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"user": map[string]interface{}{
+		"user": map[string]any{
 			"id":             user.ID,
 			"email":          user.Email,
 			"name":           user.Name,
@@ -580,7 +559,7 @@ func (s *Server) getUserByID(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"user": map[string]interface{}{
+		"user": map[string]any{
 			"id":             user.ID,
 			"email":          user.Email,
 			"name":           user.Name,
@@ -614,7 +593,7 @@ func (s *Server) getUserByEmail(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"user": map[string]interface{}{
+		"user": map[string]any{
 			"id":             user.ID,
 			"email":          user.Email,
 			"name":           user.Name,
@@ -728,27 +707,13 @@ type CreateAPIKeyRequest struct {
 // createAPIKey creates a new API key for the current user
 // POST /api/v1/api-keys
 func (s *Server) createAPIKey(c *gin.Context) {
-	userID, exists := c.Get("user_id")
-	if !exists {
-		c.JSON(http.StatusUnauthorized, gin.H{
-			"error": "User ID not found in context",
-		})
-		return
-	}
-
-	userIDStr, ok := userID.(string)
+	userIDStr, ok := requireContextUserID(c)
 	if !ok {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"error": "Invalid user ID type",
-		})
 		return
 	}
 
 	var req CreateAPIKeyRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"error": "Invalid request body",
-		})
+	if !bindJSONRequest(c, &req, "Invalid request body") {
 		return
 	}
 
@@ -776,7 +741,7 @@ func (s *Server) createAPIKey(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusCreated, gin.H{
-		"api_key": map[string]interface{}{
+		"api_key": map[string]any{
 			"id":          result.Key.ID,
 			"name":        result.Key.Name,
 			"description": result.Key.Description,
@@ -792,19 +757,8 @@ func (s *Server) createAPIKey(c *gin.Context) {
 // listAPIKeys lists all API keys for the current user
 // GET /api/v1/api-keys
 func (s *Server) listAPIKeys(c *gin.Context) {
-	userID, exists := c.Get("user_id")
-	if !exists {
-		c.JSON(http.StatusUnauthorized, gin.H{
-			"error": "User ID not found in context",
-		})
-		return
-	}
-
-	userIDStr, ok := userID.(string)
+	userIDStr, ok := requireContextUserID(c)
 	if !ok {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"error": "Invalid user ID type",
-		})
 		return
 	}
 
@@ -815,9 +769,9 @@ func (s *Server) listAPIKeys(c *gin.Context) {
 		return
 	}
 
-	result := make([]map[string]interface{}, 0, len(keys))
+	result := make([]map[string]any, 0, len(keys))
 	for _, k := range keys {
-		result = append(result, map[string]interface{}{
+		result = append(result, map[string]any{
 			"id":           k.ID,
 			"name":         k.Name,
 			"description":  k.Description,
@@ -873,26 +827,15 @@ func (s *Server) revokeAPIKey(c *gin.Context) {
 // getPreferences retrieves user preferences
 // GET /api/v1/preferences
 func (s *Server) getPreferences(c *gin.Context) {
-	userID, exists := c.Get("user_id")
-	if !exists {
-		c.JSON(http.StatusUnauthorized, gin.H{
-			"error": "User ID not found in context",
-		})
-		return
-	}
-
-	userIDStr, ok := userID.(string)
+	userIDStr, ok := requireContextUserID(c)
 	if !ok {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"error": "Invalid user ID type",
-		})
 		return
 	}
 
 	// Aggregate preferences from the existing settings categories
-	appearanceDefaults := map[string]interface{}{"theme": "light", "colorScheme": "blue", "fontSize": "medium", "compactMode": false}
-	langDefaults := map[string]interface{}{"language": "en-US", "region": "US", "dateFormat": "MM/DD/YYYY", "timeFormat": "12h"}
-	notifDefaults := map[string]interface{}{"emailNotifications": true, "pushNotifications": true, "teamsNotifications": true, "calendarReminders": true, "quietHours": map[string]interface{}{"enabled": false, "start": "22:00", "end": "08:00"}}
+	appearanceDefaults := map[string]any{"theme": "light", "colorScheme": "blue", "fontSize": "medium", "compactMode": false}
+	langDefaults := map[string]any{"language": "en-US", "region": "US", "dateFormat": "MM/DD/YYYY", "timeFormat": "12h"}
+	notifDefaults := map[string]any{"emailNotifications": true, "pushNotifications": true, "teamsNotifications": true, "calendarReminders": true, "quietHours": map[string]any{"enabled": false, "start": "22:00", "end": "08:00"}}
 
 	appearance, err := s.userService.GetSettings(c.Request.Context(), userIDStr, "appearance", appearanceDefaults)
 	if err != nil {
@@ -920,7 +863,7 @@ func (s *Server) getPreferences(c *gin.Context) {
 	// and onboarding previews never consult this preference and stay
 	// working-set-only. Users can still pick "never"/"prompt" in Settings;
 	// this default only applies while the preference is genuinely unset.
-	knowledgeDefaults := map[string]interface{}{"crawlIngestMode": "auto"}
+	knowledgeDefaults := map[string]any{"crawlIngestMode": "auto"}
 	knowledgeSettings, err := s.userService.GetSettings(c.Request.Context(), userIDStr, "knowledge", knowledgeDefaults)
 	if err != nil {
 		log.Error().Err(err).Str("user_id", userIDStr).Msg("Failed to get knowledge settings")
@@ -933,7 +876,7 @@ func (s *Server) getPreferences(c *gin.Context) {
 	notifPush, _ := notifSettings["pushNotifications"].(bool)
 
 	c.JSON(http.StatusOK, gin.H{
-		"preferences": map[string]interface{}{
+		"preferences": map[string]any{
 			"theme":           appearance["theme"],
 			"language":        langSettings["language"],
 			"timezone":        langSettings["region"],
@@ -961,38 +904,26 @@ type UpdatePreferencesRequest struct {
 // updatePreferences updates user preferences
 // PATCH /api/v1/preferences
 func (s *Server) updatePreferences(c *gin.Context) {
-	userID, exists := c.Get("user_id")
-	if !exists {
-		c.JSON(http.StatusUnauthorized, gin.H{
-			"error": "User ID not found in context",
-		})
-		return
-	}
-
-	userIDStr, ok := userID.(string)
+	userIDStr, ok := requireContextUserID(c)
 	if !ok {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"error": "Invalid user ID type",
-		})
 		return
 	}
 
 	var req UpdatePreferencesRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body"})
+	if !bindJSONRequest(c, &req, "Invalid request body") {
 		return
 	}
 
 	// Route each field to the appropriate settings category
 	if req.Theme != nil {
-		if _, err := s.userService.UpsertSettings(c.Request.Context(), userIDStr, "appearance", map[string]interface{}{"theme": *req.Theme}); err != nil {
+		if _, err := s.userService.UpsertSettings(c.Request.Context(), userIDStr, "appearance", map[string]any{"theme": *req.Theme}); err != nil {
 			log.Error().Err(err).Str("user_id", userIDStr).Msg("Failed to update appearance preference")
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to save preferences"})
 			return
 		}
 	}
 	if req.Language != nil || req.Timezone != nil {
-		langPatch := map[string]interface{}{}
+		langPatch := map[string]any{}
 		if req.Language != nil {
 			langPatch["language"] = *req.Language
 		}
@@ -1006,7 +937,7 @@ func (s *Server) updatePreferences(c *gin.Context) {
 		}
 	}
 	if len(req.Notifications) > 0 {
-		notifPatch := map[string]interface{}{}
+		notifPatch := map[string]any{}
 		for k, v := range req.Notifications {
 			notifPatch[k] = v
 		}
@@ -1025,7 +956,7 @@ func (s *Server) updatePreferences(c *gin.Context) {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "crawlIngestMode must be one of: auto, never, prompt"})
 			return
 		}
-		if _, err := s.userService.UpsertSettings(c.Request.Context(), userIDStr, "knowledge", map[string]interface{}{"crawlIngestMode": mode}); err != nil {
+		if _, err := s.userService.UpsertSettings(c.Request.Context(), userIDStr, "knowledge", map[string]any{"crawlIngestMode": mode}); err != nil {
 			log.Error().Err(err).Str("user_id", userIDStr).Msg("Failed to update knowledge preference")
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to save preferences"})
 			return
@@ -1085,18 +1016,18 @@ type NotificationSettings struct {
 // SETTINGS HELPERS
 // ============================================
 
-// structToMap converts any struct to map[string]interface{} via JSON (used to build JSONB patches)
-func structToMap(v interface{}) (map[string]interface{}, error) {
+// structToMap converts any struct to map[string]any via JSON (used to build JSONB patches)
+func structToMap(v any) (map[string]any, error) {
 	data, err := json.Marshal(v)
 	if err != nil {
 		return nil, err
 	}
-	var m map[string]interface{}
+	var m map[string]any
 	return m, json.Unmarshal(data, &m)
 }
 
 // mapToStruct populates a typed struct from a map via JSON
-func mapToStruct(m map[string]interface{}, v interface{}) error {
+func mapToStruct(m map[string]any, v any) error {
 	data, err := json.Marshal(m)
 	if err != nil {
 		return err
@@ -1114,6 +1045,74 @@ func getUserIDFromContext(c *gin.Context) (string, bool) {
 	return id, ok
 }
 
+// requireContextUserID reads the user_id set by authContextMiddleware,
+// writing the 401/500 response and returning ok=false when it is missing or
+// not a string.
+func requireContextUserID(c *gin.Context) (string, bool) {
+	userID, exists := c.Get("user_id")
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{
+			"error": "User ID not found in context",
+		})
+		return "", false
+	}
+
+	userIDStr, ok := userID.(string)
+	if !ok {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error": "Invalid user ID type",
+		})
+		return "", false
+	}
+	return userIDStr, true
+}
+
+// requireAuthenticatedUserID is the fail-closed guard for handlers that treat
+// a missing or invalid context identity as unauthenticated.
+func requireAuthenticatedUserID(c *gin.Context) (string, bool) {
+	userID, ok := getUserIDFromContext(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "authentication required"})
+		return "", false
+	}
+	return userID, true
+}
+
+// bindJSONRequest decodes the JSON body into req, writing a 400 with errMsg
+// and returning false on failure.
+func bindJSONRequest(c *gin.Context, req any, errMsg string) bool {
+	if err := c.ShouldBindJSON(req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": errMsg})
+		return false
+	}
+	return true
+}
+
+// bindSettingsPatch decodes a settings body into req and encodes it as a
+// patch map, writing the error response and returning ok=false on failure.
+func bindSettingsPatch(c *gin.Context, req any) (map[string]any, bool) {
+	if !bindJSONRequest(c, req, "invalid request body") {
+		return nil, false
+	}
+	patch, err := structToMap(req)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to encode settings"})
+		return nil, false
+	}
+	return patch, true
+}
+
+// writeSettingsResponse maps stored settings into the typed response and
+// writes it, or a 500 when the stored shape no longer decodes.
+func writeSettingsResponse[T any](c *gin.Context, settings map[string]any) {
+	var result T
+	if err := mapToStruct(settings, &result); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to decode settings"})
+		return
+	}
+	c.JSON(http.StatusOK, result)
+}
+
 func isAdminRequest(c *gin.Context) bool {
 	role, exists := c.Get("user_role")
 	if !exists {
@@ -1123,7 +1122,7 @@ func isAdminRequest(c *gin.Context) bool {
 	if !ok {
 		return false
 	}
-	for _, value := range strings.Split(roleStr, ",") {
+	for value := range strings.SplitSeq(roleStr, ",") {
 		switch strings.ToLower(strings.TrimSpace(value)) {
 		case "admin", "superadmin":
 			return true
@@ -1134,12 +1133,11 @@ func isAdminRequest(c *gin.Context) bool {
 
 // GET /api/v1/settings/appearance
 func (s *Server) getAppearanceSettings(c *gin.Context) {
-	userID, ok := getUserIDFromContext(c)
+	userID, ok := requireAuthenticatedUserID(c)
 	if !ok {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "authentication required"})
 		return
 	}
-	defaults := map[string]interface{}{
+	defaults := map[string]any{
 		"theme": "light", "colorScheme": "blue", "fontSize": "medium", "compactMode": false,
 	}
 	settings, err := s.userService.GetSettings(c.Request.Context(), userID, "appearance", defaults)
@@ -1148,29 +1146,18 @@ func (s *Server) getAppearanceSettings(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to retrieve settings"})
 		return
 	}
-	var result AppearanceSettings
-	if err := mapToStruct(settings, &result); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to decode settings"})
-		return
-	}
-	c.JSON(http.StatusOK, result)
+	writeSettingsResponse[AppearanceSettings](c, settings)
 }
 
 // PUT /api/v1/settings/appearance
 func (s *Server) updateAppearanceSettings(c *gin.Context) {
-	userID, ok := getUserIDFromContext(c)
+	userID, ok := requireAuthenticatedUserID(c)
 	if !ok {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "authentication required"})
 		return
 	}
 	var req AppearanceSettings
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
-		return
-	}
-	patch, err := structToMap(req)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to encode settings"})
+	patch, ok := bindSettingsPatch(c, &req)
+	if !ok {
 		return
 	}
 	updated, err := s.userService.UpsertSettings(c.Request.Context(), userID, "appearance", patch)
@@ -1186,12 +1173,11 @@ func (s *Server) updateAppearanceSettings(c *gin.Context) {
 
 // GET /api/v1/settings/language
 func (s *Server) getLanguageSettings(c *gin.Context) {
-	userID, ok := getUserIDFromContext(c)
+	userID, ok := requireAuthenticatedUserID(c)
 	if !ok {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "authentication required"})
 		return
 	}
-	defaults := map[string]interface{}{
+	defaults := map[string]any{
 		"language": "en-US", "region": "US", "dateFormat": "MM/DD/YYYY", "timeFormat": "12h",
 	}
 	settings, err := s.userService.GetSettings(c.Request.Context(), userID, "language", defaults)
@@ -1200,29 +1186,18 @@ func (s *Server) getLanguageSettings(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to retrieve settings"})
 		return
 	}
-	var result LanguageSettings
-	if err := mapToStruct(settings, &result); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to decode settings"})
-		return
-	}
-	c.JSON(http.StatusOK, result)
+	writeSettingsResponse[LanguageSettings](c, settings)
 }
 
 // PUT /api/v1/settings/language
 func (s *Server) updateLanguageSettings(c *gin.Context) {
-	userID, ok := getUserIDFromContext(c)
+	userID, ok := requireAuthenticatedUserID(c)
 	if !ok {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "authentication required"})
 		return
 	}
 	var req LanguageSettings
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
-		return
-	}
-	patch, err := structToMap(req)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to encode settings"})
+	patch, ok := bindSettingsPatch(c, &req)
+	if !ok {
 		return
 	}
 	updated, err := s.userService.UpsertSettings(c.Request.Context(), userID, "language", patch)
@@ -1238,12 +1213,11 @@ func (s *Server) updateLanguageSettings(c *gin.Context) {
 
 // GET /api/v1/settings/privacy
 func (s *Server) getPrivacySettings(c *gin.Context) {
-	userID, ok := getUserIDFromContext(c)
+	userID, ok := requireAuthenticatedUserID(c)
 	if !ok {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "authentication required"})
 		return
 	}
-	defaults := map[string]interface{}{
+	defaults := map[string]any{
 		"shareStatus": true, "shareActivity": false, "allowAnalytics": true,
 		"dataRetention": "90days", "telemetryEnabled": true, "crashReporting": true,
 	}
@@ -1253,29 +1227,18 @@ func (s *Server) getPrivacySettings(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to retrieve settings"})
 		return
 	}
-	var result PrivacySettings
-	if err := mapToStruct(settings, &result); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to decode settings"})
-		return
-	}
-	c.JSON(http.StatusOK, result)
+	writeSettingsResponse[PrivacySettings](c, settings)
 }
 
 // PUT /api/v1/settings/privacy
 func (s *Server) updatePrivacySettings(c *gin.Context) {
-	userID, ok := getUserIDFromContext(c)
+	userID, ok := requireAuthenticatedUserID(c)
 	if !ok {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "authentication required"})
 		return
 	}
 	var req PrivacySettings
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
-		return
-	}
-	patch, err := structToMap(req)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to encode settings"})
+	patch, ok := bindSettingsPatch(c, &req)
+	if !ok {
 		return
 	}
 	updated, err := s.userService.UpsertSettings(c.Request.Context(), userID, "privacy", patch)
@@ -1291,15 +1254,14 @@ func (s *Server) updatePrivacySettings(c *gin.Context) {
 
 // GET /api/v1/settings/notifications
 func (s *Server) getNotificationSettings(c *gin.Context) {
-	userID, ok := getUserIDFromContext(c)
+	userID, ok := requireAuthenticatedUserID(c)
 	if !ok {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "authentication required"})
 		return
 	}
-	defaults := map[string]interface{}{
+	defaults := map[string]any{
 		"emailNotifications": true, "pushNotifications": true,
 		"teamsNotifications": true, "calendarReminders": true,
-		"quietHours": map[string]interface{}{"enabled": false, "start": "22:00", "end": "08:00"},
+		"quietHours": map[string]any{"enabled": false, "start": "22:00", "end": "08:00"},
 	}
 	settings, err := s.userService.GetSettings(c.Request.Context(), userID, "notifications", defaults)
 	if err != nil {
@@ -1307,29 +1269,18 @@ func (s *Server) getNotificationSettings(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to retrieve settings"})
 		return
 	}
-	var result NotificationSettings
-	if err := mapToStruct(settings, &result); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to decode settings"})
-		return
-	}
-	c.JSON(http.StatusOK, result)
+	writeSettingsResponse[NotificationSettings](c, settings)
 }
 
 // PUT /api/v1/settings/notifications
 func (s *Server) updateNotificationSettings(c *gin.Context) {
-	userID, ok := getUserIDFromContext(c)
+	userID, ok := requireAuthenticatedUserID(c)
 	if !ok {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "authentication required"})
 		return
 	}
 	var req NotificationSettings
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
-		return
-	}
-	patch, err := structToMap(req)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to encode settings"})
+	patch, ok := bindSettingsPatch(c, &req)
+	if !ok {
 		return
 	}
 	updated, err := s.userService.UpsertSettings(c.Request.Context(), userID, "notifications", patch)
@@ -1356,12 +1307,11 @@ type SecuritySettings struct {
 
 // GET /api/v1/settings/security
 func (s *Server) getSecuritySettings(c *gin.Context) {
-	userID, ok := getUserIDFromContext(c)
+	userID, ok := requireAuthenticatedUserID(c)
 	if !ok {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "authentication required"})
 		return
 	}
-	defaults := map[string]interface{}{
+	defaults := map[string]any{
 		"twoFactorEnabled": false, "sessionTimeout": "4hours",
 		"loginAlerts": true, "trustedDevicesEnabled": true,
 	}
@@ -1371,29 +1321,18 @@ func (s *Server) getSecuritySettings(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to retrieve settings"})
 		return
 	}
-	var result SecuritySettings
-	if err := mapToStruct(settings, &result); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to decode settings"})
-		return
-	}
-	c.JSON(http.StatusOK, result)
+	writeSettingsResponse[SecuritySettings](c, settings)
 }
 
 // PUT /api/v1/settings/security
 func (s *Server) updateSecuritySettings(c *gin.Context) {
-	userID, ok := getUserIDFromContext(c)
+	userID, ok := requireAuthenticatedUserID(c)
 	if !ok {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "authentication required"})
 		return
 	}
 	var req SecuritySettings
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
-		return
-	}
-	patch, err := structToMap(req)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to encode settings"})
+	patch, ok := bindSettingsPatch(c, &req)
+	if !ok {
 		return
 	}
 	updated, err := s.userService.UpsertSettings(c.Request.Context(), userID, "security", patch)
@@ -1420,12 +1359,11 @@ type AccessibilitySettings struct {
 
 // GET /api/v1/settings/accessibility
 func (s *Server) getAccessibilitySettings(c *gin.Context) {
-	userID, ok := getUserIDFromContext(c)
+	userID, ok := requireAuthenticatedUserID(c)
 	if !ok {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "authentication required"})
 		return
 	}
-	defaults := map[string]interface{}{
+	defaults := map[string]any{
 		"highContrast": false, "reducedMotion": false,
 		"screenReaderOptimized": false, "keyboardShortcutsEnabled": true,
 	}
@@ -1435,29 +1373,18 @@ func (s *Server) getAccessibilitySettings(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to retrieve settings"})
 		return
 	}
-	var result AccessibilitySettings
-	if err := mapToStruct(settings, &result); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to decode settings"})
-		return
-	}
-	c.JSON(http.StatusOK, result)
+	writeSettingsResponse[AccessibilitySettings](c, settings)
 }
 
 // PUT /api/v1/settings/accessibility
 func (s *Server) updateAccessibilitySettings(c *gin.Context) {
-	userID, ok := getUserIDFromContext(c)
+	userID, ok := requireAuthenticatedUserID(c)
 	if !ok {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "authentication required"})
 		return
 	}
 	var req AccessibilitySettings
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
-		return
-	}
-	patch, err := structToMap(req)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to encode settings"})
+	patch, ok := bindSettingsPatch(c, &req)
+	if !ok {
 		return
 	}
 	updated, err := s.userService.UpsertSettings(c.Request.Context(), userID, "accessibility", patch)
@@ -1485,12 +1412,11 @@ type AISettings struct {
 
 // GET /api/v1/settings/ai
 func (s *Server) getAISettings(c *gin.Context) {
-	userID, ok := getUserIDFromContext(c)
+	userID, ok := requireAuthenticatedUserID(c)
 	if !ok {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "authentication required"})
 		return
 	}
-	defaults := map[string]interface{}{
+	defaults := map[string]any{
 		"aiEnabled": true, "modelPreference": "auto",
 		"dataCollectionEnabled": true, "personalizationEnabled": true, "memoryEnabled": false,
 	}
@@ -1500,29 +1426,18 @@ func (s *Server) getAISettings(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to retrieve settings"})
 		return
 	}
-	var result AISettings
-	if err := mapToStruct(settings, &result); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to decode settings"})
-		return
-	}
-	c.JSON(http.StatusOK, result)
+	writeSettingsResponse[AISettings](c, settings)
 }
 
 // PUT /api/v1/settings/ai
 func (s *Server) updateAISettings(c *gin.Context) {
-	userID, ok := getUserIDFromContext(c)
+	userID, ok := requireAuthenticatedUserID(c)
 	if !ok {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "authentication required"})
 		return
 	}
 	var req AISettings
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
-		return
-	}
-	patch, err := structToMap(req)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to encode settings"})
+	patch, ok := bindSettingsPatch(c, &req)
+	if !ok {
 		return
 	}
 	updated, err := s.userService.UpsertSettings(c.Request.Context(), userID, "ai", patch)
@@ -1549,12 +1464,11 @@ type StorageSettings struct {
 
 // GET /api/v1/settings/storage
 func (s *Server) getStorageSettings(c *gin.Context) {
-	userID, ok := getUserIDFromContext(c)
+	userID, ok := requireAuthenticatedUserID(c)
 	if !ok {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "authentication required"})
 		return
 	}
-	defaults := map[string]interface{}{
+	defaults := map[string]any{
 		"autoSync": true, "clearCacheOnLogout": false,
 		"compressionEnabled": true, "offlineAccessEnabled": false,
 	}
@@ -1564,29 +1478,18 @@ func (s *Server) getStorageSettings(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to retrieve settings"})
 		return
 	}
-	var result StorageSettings
-	if err := mapToStruct(settings, &result); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to decode settings"})
-		return
-	}
-	c.JSON(http.StatusOK, result)
+	writeSettingsResponse[StorageSettings](c, settings)
 }
 
 // PUT /api/v1/settings/storage
 func (s *Server) updateStorageSettings(c *gin.Context) {
-	userID, ok := getUserIDFromContext(c)
+	userID, ok := requireAuthenticatedUserID(c)
 	if !ok {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "authentication required"})
 		return
 	}
 	var req StorageSettings
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
-		return
-	}
-	patch, err := structToMap(req)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to encode settings"})
+	patch, ok := bindSettingsPatch(c, &req)
+	if !ok {
 		return
 	}
 	updated, err := s.userService.UpsertSettings(c.Request.Context(), userID, "storage", patch)
@@ -1606,16 +1509,16 @@ func (s *Server) updateStorageSettings(c *gin.Context) {
 
 // LinkProviderAccountRequest is the payload when linking a social sign-in identity
 type LinkProviderAccountRequest struct {
-	Provider          string                 `json:"provider"        binding:"required"`
-	ProviderUserID    string                 `json:"providerUserId"  binding:"required"`
-	TenantID          string                 `json:"tenantId"`
-	MicrosoftTenantID string                 `json:"microsoftTenantId"`
-	Email             string                 `json:"email"`
-	EmailFromProvider string                 `json:"emailFromProvider"`
-	DisplayName       string                 `json:"displayName"`
-	ScopesGranted     []string               `json:"scopesGranted"`
-	TokenRef          string                 `json:"tokenRef"`
-	Metadata          map[string]interface{} `json:"metadata"`
+	Provider          string         `json:"provider"        binding:"required"`
+	ProviderUserID    string         `json:"providerUserId"  binding:"required"`
+	TenantID          string         `json:"tenantId"`
+	MicrosoftTenantID string         `json:"microsoftTenantId"`
+	Email             string         `json:"email"`
+	EmailFromProvider string         `json:"emailFromProvider"`
+	DisplayName       string         `json:"displayName"`
+	ScopesGranted     []string       `json:"scopesGranted"`
+	TokenRef          string         `json:"tokenRef"`
+	Metadata          map[string]any `json:"metadata"`
 }
 
 type providerProfileHints struct {
@@ -1627,9 +1530,8 @@ type providerProfileHints struct {
 
 // GET /api/v1/providers — list all linked OAuth providers for the authenticated user
 func (s *Server) listProviderAccounts(c *gin.Context) {
-	userID, ok := getUserIDFromContext(c)
+	userID, ok := requireAuthenticatedUserID(c)
 	if !ok {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "authentication required"})
 		return
 	}
 	accounts, err := s.userService.GetProviderAccounts(c.Request.Context(), userID)
@@ -1648,9 +1550,8 @@ func (s *Server) listProviderAccounts(c *gin.Context) {
 // POST /api/v1/providers — link a social provider identity
 // Internal: called from the NATS auth event handler on first social sign-in
 func (s *Server) linkProviderAccount(c *gin.Context) {
-	userID, ok := getUserIDFromContext(c)
+	userID, ok := requireAuthenticatedUserID(c)
 	if !ok {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "authentication required"})
 		return
 	}
 	var req LinkProviderAccountRequest
@@ -1715,18 +1616,18 @@ func (s *Server) ensureMembership(c *gin.Context) {
 // POST /api/v1/internal/users/enrich-from-provider
 func (s *Server) enrichUserFromProvider(c *gin.Context) {
 	var req struct {
-		UserID            string                 `json:"userId" binding:"required"`
-		Provider          string                 `json:"provider" binding:"required"`
-		ProviderUserID    string                 `json:"providerUserId" binding:"required"`
-		TenantID          string                 `json:"tenantId"`
-		MicrosoftTenantID string                 `json:"microsoftTenantId"`
-		Email             string                 `json:"email"`
-		EmailFromProvider string                 `json:"emailFromProvider"`
-		DisplayName       string                 `json:"displayName"`
-		ScopesGranted     []string               `json:"scopesGranted"`
-		TokenRef          string                 `json:"tokenRef"`
-		Metadata          map[string]interface{} `json:"metadata"`
-		ProfileHints      *providerProfileHints  `json:"profileHints"`
+		UserID            string                `json:"userId" binding:"required"`
+		Provider          string                `json:"provider" binding:"required"`
+		ProviderUserID    string                `json:"providerUserId" binding:"required"`
+		TenantID          string                `json:"tenantId"`
+		MicrosoftTenantID string                `json:"microsoftTenantId"`
+		Email             string                `json:"email"`
+		EmailFromProvider string                `json:"emailFromProvider"`
+		DisplayName       string                `json:"displayName"`
+		ScopesGranted     []string              `json:"scopesGranted"`
+		TokenRef          string                `json:"tokenRef"`
+		Metadata          map[string]any        `json:"metadata"`
+		ProfileHints      *providerProfileHints `json:"profileHints"`
 	}
 
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -1753,7 +1654,7 @@ func (s *Server) enrichUserFromProvider(c *gin.Context) {
 			req.ScopesGranted = strings.Fields(tokenResult.Scope)
 		}
 		if req.Metadata == nil {
-			req.Metadata = map[string]interface{}{}
+			req.Metadata = map[string]any{}
 		}
 		if strings.TrimSpace(tokenResult.ExpiresAt) != "" {
 			req.Metadata["authCoreTokenExpiresAt"] = tokenResult.ExpiresAt
@@ -1765,7 +1666,7 @@ func (s *Server) enrichUserFromProvider(c *gin.Context) {
 			req.DisplayName = strings.TrimSpace(req.ProfileHints.DisplayName)
 		}
 		if req.Metadata == nil {
-			req.Metadata = map[string]interface{}{}
+			req.Metadata = map[string]any{}
 		}
 		if strings.TrimSpace(req.ProfileHints.Avatar) != "" {
 			req.Metadata["avatar"] = strings.TrimSpace(req.ProfileHints.Avatar)
@@ -1929,7 +1830,10 @@ func (s *Server) fetchAuthCoreTokenByRef(ctx context.Context, tokenRef string) (
 	if err != nil {
 		return nil, fmt.Errorf("call auth-core token endpoint: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		// Body is fully read below before any use; close errors are not actionable.
+		_ = resp.Body.Close()
+	}()
 
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -1955,9 +1859,8 @@ func (s *Server) fetchAuthCoreTokenByRef(ctx context.Context, tokenRef string) (
 // deleteCurrentUser handles DELETE /api/v1/users/me
 // It deletes the authenticated user's own account from the system.
 func (s *Server) deleteCurrentUser(c *gin.Context) {
-	userID, ok := getUserIDFromContext(c)
+	userID, ok := requireAuthenticatedUserID(c)
 	if !ok {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "authentication required"})
 		return
 	}
 	if err := s.userService.DeleteUser(c.Request.Context(), userID); err != nil {

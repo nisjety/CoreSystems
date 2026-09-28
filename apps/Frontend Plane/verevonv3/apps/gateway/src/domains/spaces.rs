@@ -1249,11 +1249,34 @@ async fn list_space_threads(
 /// Everything else propagates. An unreachable or erroring Control must never
 /// be read as "not entitled" — the same rule the retrieval decision follows
 /// above, and the reason this returns a Result rather than an Option.
+/// `service_audience` values Control will sign a thread-read decision for.
+/// Empty means Session Core, which is what every caller before S4.2 asked for
+/// implicitly and what the runs section still asks for.
+const READ_AUDIENCE_SANDBOX_MANAGER: &str = "model-plane-sandbox-manager";
+
 async fn shared_thread_read_decision(
     state: &AppState,
     user: &AuthenticatedUser,
     org_id: &str,
     space_ref: &str,
+) -> Result<Option<(String, String)>, (StatusCode, Json<Value>)> {
+    shared_thread_read_decision_for(state, user, org_id, space_ref, "").await
+}
+
+/// The same read authority, addressed to a named Model Plane recipient.
+///
+/// Two decisions are minted for one `/work` request rather than one reused,
+/// because each recipient's verifier pins its own audience: a decision Session
+/// Core accepts is refused by sandbox-manager and vice versa. That is the
+/// point — a token leaked from one path cannot be replayed against the other —
+/// and the cost is one extra Control call on a page that already makes
+/// several.
+async fn shared_thread_read_decision_for(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    org_id: &str,
+    space_ref: &str,
+    service_audience: &str,
 ) -> Result<Option<(String, String)>, (StatusCode, Json<Value>)> {
     let actor = ActionActor {
         user_id: user.user_id.clone(),
@@ -1275,6 +1298,7 @@ async fn shared_thread_read_decision(
             // an idempotent effect to dedupe, it just needs a unique operation
             // name, and the clock gives one without a new dependency.
             "idempotency_key": format!("space-read-{}", unix_nanos()),
+            "service_audience": service_audience,
         })),
         Some(org_id),
         Some(&actor),
@@ -1896,7 +1920,7 @@ async fn space_read_marker(
 /// first, so someone removed from a room stops appearing in it. Application is
 /// only ever told the caller's own identity — presence cannot be written for
 /// anyone else.
-async fn record_space_presence(
+pub(crate) async fn record_space_presence(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
     Path(space_ref): Path<String>,
@@ -2025,7 +2049,7 @@ async fn record_space_presence(
 /// else: not which threads exist, not what they say. The same lifecycle and
 /// membership checks as every other Space read run first, so a former member
 /// cannot keep advancing a marker in a room they were removed from.
-async fn mark_space_read(
+pub(crate) async fn mark_space_read(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
     Path(space_ref): Path<String>,
@@ -2145,7 +2169,7 @@ async fn mark_space_read(
 /// post is the next slice: it needs a Space-authorized presentation write in
 /// Session Core, mirroring how a room reply is admitted through a Control
 /// `model.thread.append` decision, and is deliberately not faked here.
-async fn space_thread_presentation(
+pub(crate) async fn space_thread_presentation(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
     headers: axum::http::HeaderMap,
@@ -2240,7 +2264,7 @@ async fn space_thread_presentation(
         return (membership_status, Json(membership));
     }
     match crate::domains::chat::history::update_durable_presentation(
-        &state, &user, &headers, thread_id, title, None, pinned,
+        &state, &user, &headers, thread_id, title, None, pinned, None,
     )
     .await
     {
@@ -2479,6 +2503,78 @@ async fn space_work(
         })),
     }
 
+    // ---- background processes, under the room's own read authority -------
+    //
+    // Follows the SCHEDULES precedent, not the runs one: a missing credential
+    // degrades to a gap row rather than failing the whole page. A room whose
+    // processes cannot be read is still a usable room, and the runs section's
+    // 503 shape would take the rest of the Work tab down with it.
+    //
+    // This needs its own Control decision because sandbox-manager pins a
+    // different audience than Session Core — see shared_thread_read_decision_for.
+    let mut processes = Value::Array(vec![]);
+    match crate::domains::chat::shared::required_sandbox_token(&state, &user, &headers).await {
+        Ok(sandbox) => {
+            let process_read = shared_thread_read_decision_for(
+                &state,
+                &user,
+                &org_id,
+                space_ref,
+                READ_AUDIENCE_SANDBOX_MANAGER,
+            )
+            .await;
+            match process_read {
+                Ok(Some((decision_ref, token))) => {
+                    let url = format!(
+                        "{}/v1/processes?space_ref={}&space_read_decision_ref={}&space_read_decision_token={}",
+                        state.model_gateway_url,
+                        urlencoding::encode(space_ref),
+                        urlencoding::encode(&decision_ref),
+                        urlencoding::encode(&token),
+                    );
+                    let (status, Json(payload)) =
+                        crate::domains::chat::shared::proxy_model_json_with_sandbox(
+                            &state,
+                            Method::GET,
+                            &url,
+                            None,
+                            model_token.as_deref(),
+                            Some(&sandbox),
+                            &user,
+                        )
+                        .await;
+                    if status.is_success() {
+                        // Same `nil` -> `null` guard the schedules section
+                        // needs: a Go upstream marshals an empty slice as
+                        // null, which would reach the browser as null rather
+                        // than the empty list this endpoint promises.
+                        processes = payload
+                            .get("processes")
+                            .filter(|value| value.is_array())
+                            .cloned()
+                            .unwrap_or(Value::Array(vec![]));
+                    } else {
+                        unavailable.push(json!({
+                            "section": "processes",
+                            "code": "processes_upstream_unavailable",
+                            "reason": "Model Plane could not return this room's background processes.",
+                        }));
+                    }
+                }
+                Ok(None) | Err(_) => unavailable.push(json!({
+                    "section": "processes",
+                    "code": "processes_read_not_authorized",
+                    "reason": "Reading this Space's background processes is not authorized.",
+                })),
+            }
+        }
+        Err(_) => unavailable.push(json!({
+            "section": "processes",
+            "code": "processes_session_unavailable",
+            "reason": "This session cannot read background processes right now.",
+        })),
+    }
+
     (
         StatusCode::OK,
         Json(json!({
@@ -2487,6 +2583,7 @@ async fn space_work(
                 "membership": crate::envelope::unwrap_data(&membership),
                 "runs": runs,
                 "schedules": schedules,
+                "processes": processes,
                 // Always present, empty when nothing is missing: a reader must
                 // be able to tell "this room has no work" from "we could not
                 // find out", and an absent key makes those look the same.
@@ -3403,7 +3500,7 @@ async fn apply_room_membership(
 }
 
 /// `POST /api/v1/spaces/{space_ref}/members` — add one person to a named room.
-async fn add_space_member(
+pub(crate) async fn add_space_member(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
     Path(space_ref): Path<String>,
@@ -3418,7 +3515,7 @@ async fn add_space_member(
 }
 
 /// `DELETE /api/v1/spaces/{space_ref}/members/{member_id}` — remove one person.
-async fn remove_space_member(
+pub(crate) async fn remove_space_member(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
     Path((space_ref, member_id)): Path<(String, String)>,
@@ -3521,7 +3618,7 @@ async fn apply_space_agent_state(
 /// than a third status here: it is the one irreversible option, it is the one
 /// that changes Control's roster, and putting it behind its own verb keeps a
 /// mistyped status from removing an agent.
-async fn set_space_agent_state(
+pub(crate) async fn set_space_agent_state(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
     Path((space_ref, binding_ref)): Path<(String, String)>,
@@ -3550,7 +3647,7 @@ async fn set_space_agent_state(
 /// audit history and never renders it as a participant. What is removed is the
 /// agent's membership in Control's roster, which is what actually stops it
 /// acting here.
-async fn revoke_space_agent(
+pub(crate) async fn revoke_space_agent(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
     Path((space_ref, binding_ref)): Path<(String, String)>,
@@ -4215,6 +4312,71 @@ pub(crate) async fn inject_authored_instructions(
     Ok(())
 }
 
+/// Persona spec (chat-wave2, `persona.md`) — the user layer beneath org/Space
+/// in the authored-instruction hierarchy. `None` when the caller has never
+/// written any persona text, or when Convex cannot be reached (same fail-open
+/// shape as the org/Space fetchers: an outage silently omits the layer rather
+/// than failing the turn). The bool is the caller's GLOBAL on/off switch
+/// (`users.personaEnabled`, Settings → Persona) — distinct from the
+/// PER-THREAD override, which lives in session-core's `threads.persona_enabled`
+/// and is applied downstream by model-gateway from the same context-assembly
+/// call it already makes, not from here.
+pub(crate) async fn fetch_persona_instructions(
+    state: &AppState,
+    user: &AuthenticatedUser,
+) -> Option<(String, bool)> {
+    let value = convex_gateway_call(
+        state,
+        "query",
+        "users:personaForGateway",
+        json!({ "externalAuthId": user.user_id }),
+    )
+    .await
+    .ok()?;
+    let text = value
+        .get("instructions")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    let enabled = value.get("enabled").and_then(Value::as_bool).unwrap_or(true);
+    text.filter(|t| !t.trim().is_empty()).map(|t| (t, enabled))
+}
+
+/// Stamps `persona_instructions` onto the outbound turn — the field
+/// `model-gateway`'s composed authored-instructions message reads for the
+/// user layer, inserted only when the persona has text AND the caller's
+/// global switch is on. Any client-supplied `persona_instructions`/
+/// `persona_enabled` is discarded first: same trust class as
+/// `org_instructions`/`space_instructions`, never client-suppliable.
+///
+/// Unlike [`inject_authored_instructions`], this needs no `org_id` — persona
+/// is global to the user, not scoped to an organization or Space — so it can
+/// run independently of Space resolution. Call it from the same three
+/// injection sites as `inject_authored_instructions`.
+pub(crate) async fn inject_persona_instructions(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    body: &mut Value,
+) -> Result<(), (StatusCode, Json<Value>)> {
+    let object = body.as_object_mut().ok_or_else(|| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(error(
+                "invalid_chat_request",
+                "Chat request must be an object.",
+            )),
+        )
+    })?;
+    object.remove("persona_instructions");
+    object.remove("persona_enabled");
+
+    if let Some((instructions, enabled)) = fetch_persona_instructions(state, user).await {
+        if enabled {
+            object.insert("persona_instructions".to_owned(), json!(instructions));
+        }
+    }
+    Ok(())
+}
+
 /// Exchange a client-supplied `@` mention for a Control- and
 /// Application-verified agent persona, injected into the outbound turn as
 /// `agent_name`/`agent_system_prompt` — the two fields
@@ -4755,7 +4917,8 @@ async fn space_actions(
 mod tests {
     use super::{
         forward_owner_grant_mutation, inject_authored_instructions,
-        inject_mentioned_space_agent_persona, inject_personal_schedule_create_context,
+        inject_mentioned_space_agent_persona, inject_persona_instructions,
+        inject_personal_schedule_create_context,
         inject_personal_thread_context, personal_import_ingress_decision, space_actions,
         thread_items_match_space, OwnerGrantMutationRequest, UpdateSpaceInstructionsRequest,
     };
@@ -6614,11 +6777,18 @@ mod tests {
     }
 
     /// Drive `GET /spaces/space-room/work` with a given Control answer to the
-    /// shared-read decision and given upstream outcomes for runs and schedules.
+    /// shared-read decision and given upstream outcomes for runs, schedules and
+    /// background processes.
+    ///
+    /// One Control mock answers BOTH read decisions the handler now mints —
+    /// one addressed to Session Core for runs, one to sandbox-manager for
+    /// processes. A test that cares which audience was asked for inspects the
+    /// recorded request bodies rather than needing two mocks.
     async fn space_work_response(
         read_decision: ResponseTemplate,
         runs: ResponseTemplate,
         schedules: ResponseTemplate,
+        processes: ResponseTemplate,
     ) -> (u16, Value, MockServer) {
         let auth = MockServer::start().await;
         Mock::given(wm_method("GET"))
@@ -6629,7 +6799,7 @@ mod tests {
             })))
             .mount(&auth)
             .await;
-        for slug in ["session-core", "capability-core"] {
+        for slug in ["session-core", "capability-core", "sandbox-manager"] {
             Mock::given(wm_method("GET"))
                 .and(wm_path(format!("/api/{slug}/token")))
                 .respond_with(
@@ -6677,6 +6847,11 @@ mod tests {
             .respond_with(schedules)
             .mount(&model_gateway)
             .await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/v1/processes"))
+            .respond_with(processes)
+            .mount(&model_gateway)
+            .await;
         let mut state = crate::tests::test_state(false);
         state.application_convex_url = application.uri();
         state.application_convex_service_key = "application-test-key".into();
@@ -6715,12 +6890,16 @@ mod tests {
             ResponseTemplate::new(200).set_body_json(json!({
                 "schedules": [{"id": "c1", "name": "Daglig rapport", "enabled": true}]
             })),
+            ResponseTemplate::new(200).set_body_json(json!({
+                "processes": [{"process_id": "p1", "state": "RUNNING", "command": "python3 build.py"}]
+            })),
         )
         .await;
 
         assert_eq!(status, 200);
         assert_eq!(body["data"]["runs"][0]["goal"], "Send varsel");
         assert_eq!(body["data"]["schedules"][0]["name"], "Daglig rapport");
+        assert_eq!(body["data"]["processes"][0]["command"], "python3 build.py");
         assert!(
             body["data"]["unavailable"]
                 .as_array()
@@ -6749,6 +6928,20 @@ mod tests {
             .query()
             .unwrap_or_default()
             .contains("space_ref=space-room"));
+        // Processes travel under their OWN decision, not the runs one. Both
+        // are model.thread.read; only the audience differs, and sandbox-manager
+        // refuses a decision addressed to Session Core — so reusing the runs
+        // token here would fail at the verifier rather than here.
+        let processes = requests
+            .iter()
+            .find(|request| request.url.path() == "/v1/processes")
+            .expect("processes request");
+        let query = processes.url.query().unwrap_or_default().to_owned();
+        assert!(query.contains("space_ref=space-room"), "query = {query}");
+        assert!(
+            query.contains("space_read_decision_token=v2.a.b.c"),
+            "query = {query}"
+        );
     }
 
     /// Either upstream can fail alone. Showing what resolved with a named gap
@@ -6764,6 +6957,7 @@ mod tests {
                 "runs": [{"id": "r1", "goal": "Kjører", "status": "running"}]
             })),
             ResponseTemplate::new(503).set_body_json(json!({"error": "down"})),
+            ResponseTemplate::new(200).set_body_json(json!({"processes": []})),
         )
         .await;
 
@@ -6772,6 +6966,65 @@ mod tests {
         let gaps = body["data"]["unavailable"].as_array().expect("gaps");
         assert_eq!(gaps.len(), 1);
         assert_eq!(gaps[0]["section"], "schedules");
+    }
+
+    /// A processes upstream that fails must not take the rest of the tab with
+    /// it. This follows the SCHEDULES precedent, not the runs one: a room whose
+    /// background processes cannot be read is still a usable room, and the runs
+    /// section's 503 shape would blank the whole page.
+    #[tokio::test]
+    async fn space_work_names_a_failed_processes_read_and_keeps_the_rest() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let (status, body, _mg) = space_work_response(
+            ResponseTemplate::new(200).set_body_json(json!({
+                "data": {"decision": {"decision_ref": "read-1"}, "token": "v2.a.b.c"}
+            })),
+            ResponseTemplate::new(200).set_body_json(json!({
+                "runs": [{"id": "r1", "goal": "Kjører", "status": "running"}]
+            })),
+            ResponseTemplate::new(200).set_body_json(json!({"schedules": []})),
+            ResponseTemplate::new(503).set_body_json(json!({"error": "down"})),
+        )
+        .await;
+
+        assert_eq!(status, 200, "a partial answer is still an answer");
+        assert_eq!(body["data"]["runs"][0]["goal"], "Kjører");
+        let gaps = body["data"]["unavailable"].as_array().expect("gaps");
+        assert_eq!(gaps.len(), 1);
+        assert_eq!(gaps[0]["section"], "processes");
+        assert_eq!(gaps[0]["code"], "processes_upstream_unavailable");
+        assert!(
+            body["data"]["processes"]
+                .as_array()
+                .is_some_and(|rows| rows.is_empty()),
+            "a failed read must be an empty list plus a named gap, never null"
+        );
+    }
+
+    /// A Go upstream marshals an empty slice as `null`. Without the array
+    /// guard that reaches the browser as `null` rather than the empty list this
+    /// endpoint promises, and the Work tab's adapter would throw on it.
+    #[tokio::test]
+    async fn space_work_turns_a_null_processes_payload_into_an_empty_list() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let (status, body, _mg) = space_work_response(
+            ResponseTemplate::new(200).set_body_json(json!({
+                "data": {"decision": {"decision_ref": "read-1"}, "token": "v2.a.b.c"}
+            })),
+            ResponseTemplate::new(200).set_body_json(json!({"runs": []})),
+            ResponseTemplate::new(200).set_body_json(json!({"schedules": []})),
+            ResponseTemplate::new(200).set_body_json(json!({"processes": null})),
+        )
+        .await;
+
+        assert_eq!(status, 200);
+        assert!(
+            body["data"]["processes"]
+                .as_array()
+                .is_some_and(|rows| rows.is_empty()),
+            "processes = {}, want an empty array",
+            body["data"]["processes"]
+        );
     }
 
     /// Control declining the shared read is a real answer: the caller can take
@@ -6784,12 +7037,18 @@ mod tests {
             ResponseTemplate::new(403).set_body_json(json!({"error": "not entitled"})),
             ResponseTemplate::new(200).set_body_json(json!({"runs": []})),
             ResponseTemplate::new(200).set_body_json(json!({"schedules": []})),
+            ResponseTemplate::new(200).set_body_json(json!({"processes": []})),
         )
         .await;
 
         assert_eq!(status, 200);
         let gaps = body["data"]["unavailable"].as_array().expect("gaps");
         assert!(gaps.iter().any(|gap| gap["section"] == "runs"));
+        // Control declines BOTH audiences here, so the processes section is
+        // named too rather than rendering an empty list as if the room had no
+        // background work.
+        assert!(gaps.iter().any(|gap| gap["section"] == "processes"
+            && gap["code"] == "processes_read_not_authorized"));
         // And no run request was made at all — there was no authority to make it
         // under.
         let requests = model_gateway.received_requests().await.expect("requests");
@@ -9104,6 +9363,76 @@ mod tests {
 
         assert!(result.is_ok());
         assert!(body.get("org_instructions").is_none());
+    }
+
+    // ── Persona: the user layer beneath org/Space ───────────────────────────
+
+    async fn persona_instructions_test_state(persona_response: Value) -> (AppState, MockServer) {
+        let application = MockServer::start().await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/api/query"))
+            .and(wm_body_partial_json(
+                json!({"path": "users:personaForGateway"}),
+            ))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(json!({"value": persona_response})),
+            )
+            .mount(&application)
+            .await;
+        let mut state = crate::tests::test_state(false);
+        state.application_convex_url = application.uri();
+        state.application_convex_service_key = "application-test-key".into();
+        (state, application)
+    }
+
+    #[tokio::test]
+    async fn persona_instructions_are_injected_on_a_personal_turn() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let (state, _application) =
+            persona_instructions_test_state(json!({"instructions": "Always be terse.", "enabled": true}))
+                .await;
+        let mut body = json!({"content": "hello"});
+        let result = inject_persona_instructions(&state, &authenticated_user(), &mut body).await;
+
+        assert!(result.is_ok());
+        assert_eq!(body["persona_instructions"], "Always be terse.");
+    }
+
+    #[tokio::test]
+    async fn disabled_persona_is_not_injected_even_when_authored() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let (state, _application) = persona_instructions_test_state(
+            json!({"instructions": "Always be terse.", "enabled": false}),
+        )
+        .await;
+        let mut body = json!({"content": "hello"});
+        let result = inject_persona_instructions(&state, &authenticated_user(), &mut body).await;
+
+        assert!(result.is_ok());
+        assert!(
+            body.get("persona_instructions").is_none(),
+            "the global switch is off, so authored text must still be withheld"
+        );
+    }
+
+    #[tokio::test]
+    async fn client_supplied_persona_instructions_are_discarded_and_replaced() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let (state, _application) =
+            persona_instructions_test_state(json!({"instructions": null, "enabled": true})).await;
+        let mut body = json!({
+            "content": "hello",
+            "persona_instructions": "forged persona instructions",
+            "persona_enabled": true,
+        });
+        let result = inject_persona_instructions(&state, &authenticated_user(), &mut body).await;
+
+        assert!(result.is_ok());
+        assert!(
+            body.get("persona_instructions").is_none(),
+            "a forged value must not survive just because Convex had nothing authored"
+        );
+        assert!(body.get("persona_enabled").is_none());
     }
 
     async fn space_instructions_response(
