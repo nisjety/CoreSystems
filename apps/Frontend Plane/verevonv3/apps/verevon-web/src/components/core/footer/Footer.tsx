@@ -44,7 +44,7 @@ export function Footer() {
 					<div className="relative top-10 grid content-start gap-8">
 						<Link
 							aria-label="Verevon hjem"
-							className="font-arbeit text-[clamp(1.8rem,2.16vw,2.7rem)] font-light leading-none tracking-[-0.055em] text-verevon-j-text"
+							className="font-manrope text-[clamp(1.8rem,2.16vw,2.7rem)] font-light leading-none tracking-[-0.055em] text-verevon-j-text"
 							href="/#top"
 						>
 							VEREVON
@@ -65,7 +65,7 @@ export function Footer() {
 							>
 								{column.map((link) => (
 									<Link
-										className="border-t border-verevon-j-text/8 py-[18px] font-arbeit text-[clamp(0.88rem,0.9vw,1.05rem)] font-normal uppercase leading-none tracking-[0.08em] text-verevon-j-text/65 transition-colors hover:text-verevon-j-text"
+										className="border-t border-verevon-j-text/8 py-[18px] font-manrope text-[clamp(0.88rem,0.9vw,1.05rem)] font-normal uppercase leading-none tracking-[0.08em] text-verevon-j-text/65 transition-colors hover:text-verevon-j-text"
 										href={link.href}
 										key={link.label}
 									>
@@ -76,7 +76,7 @@ export function Footer() {
 						))}
 
 						<div className="col-start-1 mt-[clamp(24px,2.5vw,40px)] max-[900px]:col-start-auto max-[900px]:mt-8">
-							<h4 className="mb-8 font-arbeit text-[clamp(0.84rem,0.86vw,1rem)] font-normal uppercase tracking-[0.08em] text-verevon-j-text/70">
+							<h4 className="mb-8 font-manrope text-[clamp(0.84rem,0.86vw,1rem)] font-normal uppercase tracking-[0.08em] text-verevon-j-text/70">
 								Hovedkontor
 							</h4>
 
@@ -90,7 +90,7 @@ export function Footer() {
 						</div>
 
 						<div className="col-start-2 mt-[clamp(24px,2.5vw,40px)] max-[900px]:col-start-auto max-[900px]:mt-8">
-							<h4 className="mb-8 font-arbeit text-[clamp(0.84rem,0.86vw,1rem)] font-normal uppercase tracking-[0.08em] text-verevon-j-text/70">
+							<h4 className="mb-8 font-manrope text-[clamp(0.84rem,0.86vw,1rem)] font-normal uppercase tracking-[0.08em] text-verevon-j-text/70">
 								Kontakt oss
 							</h4>
 
@@ -112,7 +112,7 @@ export function Footer() {
 						</div>
 
 						<div className="col-start-1 self-end max-[900px]:col-start-auto">
-							<h4 className="font-arbeit text-[clamp(0.84rem,0.86vw,1rem)] font-normal uppercase tracking-[0.08em] text-verevon-j-text/70">
+							<h4 className="font-manrope text-[clamp(0.84rem,0.86vw,1rem)] font-normal uppercase tracking-[0.08em] text-verevon-j-text/70">
 								Kontakt
 							</h4>
 						</div>

@@ -5,7 +5,7 @@ import { FONT_CSS } from "./theme";
 export function VerevonProductShowcase() {
   const frame = useCurrentFrame();
   return (
-    <AbsoluteFill style={{ background: "#e9e5df", fontFamily: "Arbeit, sans-serif", color: "#171717" }}>
+    <AbsoluteFill style={{ background: "#e9e5df", fontFamily: "Manrope, sans-serif", color: "#171717" }}>
       <style>{FONT_CSS}</style>
       <Img src={staticFile("feature-film-backgrounds/connect-systems-pastel.jpg")} style={{ width: "100%", height: "100%", objectFit: "cover", opacity: 0.48, filter: "saturate(0.5)", scale: interpolate(frame, [0, 239], [1.04, 1.08]) }} />
       <AbsoluteFill style={{ justifyContent: "center", alignItems: "center", padding: 88 }}>

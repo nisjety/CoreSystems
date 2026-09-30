@@ -24,7 +24,7 @@ function TrustHero() {
 			<div className="relative z-[1] mx-auto max-w-[1680px]">
 				<Eyebrow marker>Trust Center</Eyebrow>
 
-				<h1 className="mt-7 max-w-[18ch] font-arbeit text-[clamp(2.7rem,5.2vw,5.6rem)] font-light leading-[0.96] tracking-[-0.06em] text-verevon-j-text text-balance">
+				<h1 className="mt-7 max-w-[18ch] font-manrope text-[clamp(2.7rem,5.2vw,5.6rem)] font-light leading-[0.96] tracking-[-0.06em] text-verevon-j-text text-balance">
 					Sikkerhet, personvern og AI-styring.
 				</h1>
 
@@ -182,7 +182,7 @@ function ResidencySection() {
 						<div className="mb-4 flex items-center gap-3">
 							<StatusBadge level="progress" label="Åpent oppgitt" />
 						</div>
-						<h3 className="font-arbeit text-[clamp(1.35rem,1.7vw,2rem)] font-light leading-[1.06] tracking-[-0.04em] text-verevon-j-text">
+						<h3 className="font-manrope text-[clamp(1.35rem,1.7vw,2rem)] font-light leading-[1.06] tracking-[-0.04em] text-verevon-j-text">
 							Åpenhet, ikke immunitet: CLOUD Act
 						</h3>
 						<p className="verevon-body mt-5 text-pretty">
@@ -199,7 +199,7 @@ function ResidencySection() {
 					</div>
 
 					<div className="rounded-[var(--radius-lg)] border border-verevon-j-text/10 bg-verevon-surface p-[clamp(24px,2.6vw,40px)]">
-						<h3 className="font-arbeit text-[clamp(1.2rem,1.4vw,1.6rem)] font-light leading-[1.1] tracking-[-0.04em] text-verevon-j-text">
+						<h3 className="font-manrope text-[clamp(1.2rem,1.4vw,1.6rem)] font-light leading-[1.1] tracking-[-0.04em] text-verevon-j-text">
 							ZDR — ærlig omfang
 						</h3>
 						<p className="verevon-body mt-5 text-pretty">
@@ -254,7 +254,7 @@ function SubprocessorsSection() {
 									key={sub.name}
 								>
 									<td className="py-5 pr-6">
-										<span className="block font-arbeit text-[1.05rem] font-normal leading-snug text-verevon-j-text">
+										<span className="block font-manrope text-[1.05rem] font-normal leading-snug text-verevon-j-text">
 											{sub.name}
 										</span>
 										<span className="mt-1.5 block font-protokoll text-[0.86rem] font-light leading-snug text-verevon-text-muted/85">
@@ -301,7 +301,7 @@ function ContactSection() {
 
 				<div className="flex flex-col items-start gap-5 xl:items-end">
 					<a
-						className="font-arbeit text-[clamp(1.3rem,1.6vw,1.9rem)] font-light tracking-[-0.04em] text-verevon-j-text underline-offset-[6px] transition-colors hover:text-verevon-coral-deep hover:underline"
+						className="font-manrope text-[clamp(1.3rem,1.6vw,1.9rem)] font-light tracking-[-0.04em] text-verevon-j-text underline-offset-[6px] transition-colors hover:text-verevon-coral-deep hover:underline"
 						href={`mailto:${SECURITY_EMAIL}`}
 					>
 						{SECURITY_EMAIL}

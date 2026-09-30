@@ -93,7 +93,7 @@ function TestimonialCard({
 				</div>
 
 				<div className="min-w-0">
-					<p className="m-0 font-arbeit text-[1.02rem] font-medium leading-tight text-verevon-j-text">
+					<p className="m-0 font-manrope text-[1.02rem] font-medium leading-tight text-verevon-j-text">
 						{testimonial.name}
 					</p>
 					<p className="m-0 mt-1 font-protokoll text-[0.85rem] uppercase tracking-[0.12em] text-verevon-j-text/48">
@@ -196,7 +196,7 @@ export function Testimonials() {
 					</motion.div>
 
 					<motion.h2
-						className="m-0 mt-5 font-arbeit text-[clamp(2.45rem,4vw,4.8rem)] font-light leading-[0.94] tracking-[-0.06em] text-verevon-j-text max-[899px]:text-white"
+						className="m-0 mt-5 font-manrope text-[clamp(2.45rem,4vw,4.8rem)] font-light leading-[0.94] tracking-[-0.06em] text-verevon-j-text max-[899px]:text-white"
 						initial={
 							shouldReduceMotion
 								? false

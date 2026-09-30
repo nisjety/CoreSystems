@@ -1,19 +1,21 @@
 @import "tailwindcss";
 
 @font-face {
-	font-family: Arbeit;
+	font-family: Manrope;
 	font-style: normal;
-	font-weight: 300;
-	src: url("/fonts/arbeit-pro-light/arbeit-pro-light.woff") format("woff");
+	font-weight: 200 800;
 	font-display: swap;
+	src: url("/fonts/manrope/manrope-latin-ext-variable.woff2") format("woff2");
+	unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
 }
 
 @font-face {
-	font-family: Arbeit;
+	font-family: Manrope;
 	font-style: normal;
-	font-weight: 400;
-	src: url("/fonts/arbeit-pro-book/arbeit-pro-book.woff") format("woff");
+	font-weight: 200 800;
 	font-display: swap;
+	src: url("/fonts/manrope/manrope-latin-variable.woff2") format("woff2");
+	unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
 }
 
 @font-face {
@@ -228,7 +230,7 @@
 	--color-verevon-j-text: var(--verevon-j-text);
 	--color-verevon-j-text-soft: var(--verevon-j-text-soft);
 
-	--font-arbeit: Arbeit, sans-serif;
+	--font-manrope: Manrope, sans-serif;
 	--font-protokoll: Protokoll, sans-serif;
 	--font-sans: var(--font-geist-sans);
 	--font-mono: var(--font-geist-mono);
@@ -896,7 +898,7 @@ canvas {
 }
 
 .verevon-display {
-	font-family: var(--font-arbeit), sans-serif;
+	font-family: var(--font-manrope), sans-serif;
 	font-size: var(--text-display);
 	font-weight: 300;
 	line-height: var(--text-display--line-height);
@@ -905,7 +907,7 @@ canvas {
 }
 
 .verevon-h2 {
-	font-family: var(--font-arbeit), sans-serif;
+	font-family: var(--font-manrope), sans-serif;
 	font-size: var(--text-h2);
 	font-weight: 300;
 	line-height: var(--text-h2--line-height);
@@ -914,7 +916,7 @@ canvas {
 }
 
 .verevon-h3 {
-	font-family: var(--font-arbeit), sans-serif;
+	font-family: var(--font-manrope), sans-serif;
 	font-size: var(--text-h3);
 	font-weight: 300;
 	line-height: var(--text-h3--line-height);
@@ -941,11 +943,11 @@ canvas {
 /* Main headings match the prefooter reference before this layout pass.
  * Content density is independent of display typography and control sizes. */
 .verevon-home-heading {
-	font-family: var(--font-arbeit), sans-serif;
+	font-family: var(--font-manrope), sans-serif;
 	font-size: clamp(1.45rem, 3.6vw, 4.95rem);
 	font-weight: 300;
 	line-height: 0.88;
-	letter-spacing: -0.08em;
+	letter-spacing: -0.05em;
 	font-optical-sizing: auto;
 }
 

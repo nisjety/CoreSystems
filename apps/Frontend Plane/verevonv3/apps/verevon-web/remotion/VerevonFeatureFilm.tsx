@@ -17,7 +17,7 @@ import {
 	VerevonSymbol,
 } from "./primitives";
 import { easedSegment, getLoopOpacity } from "./timeline";
-import { arbeit, COLORS, protokoll } from "./theme";
+import { manrope, COLORS, protokoll } from "./theme";
 
 export type FeatureFilmKind =
 	| "build"
@@ -374,7 +374,7 @@ function BuildFilm({ frame }: { frame: number }) {
 								opacity: 0.42 + badgeActive * 0.58,
 								scale: 0.62 + badgeActive * 0.38,
 								width: 70,
-								...arbeit,
+								...manrope,
 							}}
 						>
 							V
@@ -713,7 +713,7 @@ function GroundFilm({ frame }: { frame: number }) {
 									fontSize: 28,
 									lineHeight: 1.06,
 									marginTop: 14,
-									...arbeit,
+									...manrope,
 								}}
 							>
 								{source.label}

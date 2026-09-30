@@ -325,7 +325,7 @@ function LayerCallout({
 
 			<motion.h3
 				animate={{ opacity: active ? 1 : 0.4 }}
-				className="font-arbeit text-[clamp(1.12rem,0.96vw,1.35rem)] font-light leading-[1.08] tracking-[-0.05em] text-verevon-j-text"
+				className="font-manrope text-[clamp(1.12rem,0.96vw,1.35rem)] font-light leading-[1.08] tracking-[-0.05em] text-verevon-j-text"
 				initial={false}
 				transition={{ duration: 0.28, ease: [0.22, 1, 0.36, 1] }}
 			>

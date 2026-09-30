@@ -225,7 +225,7 @@ function FeatureOutputCard({
 				/>
 				<div className="absolute inset-0 bg-[linear-gradient(180deg,rgba(248,248,247,0.08),rgba(248,248,247,0.72))]" />
 				<div className="absolute bottom-4 left-4 right-4">
-					<h3 className="m-0 font-arbeit text-[clamp(1.45rem,2vw,2.2rem)] font-light leading-[1.04] tracking-[-0.055em] text-verevon-j-text">
+					<h3 className="m-0 font-manrope text-[clamp(1.45rem,2vw,2.2rem)] font-light leading-[1.04] tracking-[-0.055em] text-verevon-j-text">
 						{card.title}
 					</h3>
 				</div>
@@ -336,7 +336,7 @@ function FeatureHandoffIntro() {
 					Forankret handling
 				</p>
 
-				<h2 className="m-0 font-arbeit text-[clamp(2.75rem,4vw,5.35rem)] font-light leading-[0.94] tracking-[-0.068em] text-verevon-j-text">
+				<h2 className="m-0 font-manrope text-[clamp(2.75rem,4vw,5.35rem)] font-light leading-[0.94] tracking-[-0.068em] text-verevon-j-text">
 					Tenking, satt i arbeid
 				</h2>
 
@@ -394,7 +394,7 @@ function FeatureMobileFallback() {
 				<p className="mb-4 font-protokoll text-[0.7rem] font-medium uppercase leading-none tracking-[0.3em] text-verevon-j-text/38">
 					Forankret handling
 				</p>
-				<h2 className="m-0 font-arbeit text-[clamp(3rem,14vw,5rem)] font-light leading-[0.95] tracking-[-0.07em] text-verevon-j-text">
+				<h2 className="m-0 font-manrope text-[clamp(3rem,14vw,5rem)] font-light leading-[0.95] tracking-[-0.07em] text-verevon-j-text">
 					Kundearbeid, klart til godkjenning
 				</h2>
 				<p className="mx-auto mt-5 max-w-[34rem] font-protokoll text-[1rem] font-light leading-[1.48] text-verevon-text-muted">
@@ -1004,7 +1004,7 @@ export function TrustScrollSection() {
 								className="border-t border-verevon-j-text/10 pt-5"
 								key={panel.body}
 							>
-								<span className="mb-4 block font-arbeit text-[0.76rem] text-verevon-coral">
+								<span className="mb-4 block font-manrope text-[0.76rem] text-verevon-coral">
 									{String(index + 1).padStart(2, "0")}
 								</span>
 								<p className="m-0 font-protokoll text-[1.08rem] font-light leading-[1.45] text-verevon-j-text/68">

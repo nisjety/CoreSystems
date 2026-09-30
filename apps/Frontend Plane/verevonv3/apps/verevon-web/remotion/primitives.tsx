@@ -2,7 +2,7 @@ import type { CSSProperties, ReactNode } from "react";
 import { AbsoluteFill, Img, interpolate, staticFile } from "remotion";
 import { getLoopOpacity, getSignalPosition } from "./timeline";
 import {
-	arbeit,
+	manrope,
 	cardStyle,
 	COLORS,
 	FONT_CSS,
@@ -389,7 +389,7 @@ export function Heading({
 				fontWeight: 300,
 				letterSpacing: "-0.045em",
 				lineHeight: 1.02,
-				...arbeit,
+				...manrope,
 			}}
 		>
 			{children}
@@ -435,7 +435,7 @@ export function VerevonSymbol({
 					height: 94,
 					justifyContent: "center",
 					width: 94,
-					...arbeit,
+					...manrope,
 				}}
 			>
 				{glyphs[type]}

@@ -27,7 +27,7 @@ export function TechnologyVisualPanel() {
 
 			<div className="relative z-[2] flex min-h-[96svh] flex-col justify-between px-[clamp(28px,4vw,72px)] pb-[clamp(42px,5vw,74px)] pt-[clamp(56px,7vw,92px)] max-[1100px]:min-h-[720px] max-[760px]:min-h-[640px]">
 				<div>
-					<h2 className="m-0 max-w-[760px] font-arbeit text-[clamp(3.2rem,4.6vw,6rem)] font-light leading-[0.96] tracking-[-0.07em] text-verevon-j-text/20">
+					<h2 className="m-0 max-w-[760px] font-manrope text-[clamp(3.2rem,4.6vw,6rem)] font-light leading-[0.96] tracking-[-0.07em] text-verevon-j-text/20">
 						Pioneering technology
 					</h2>
 
@@ -39,7 +39,7 @@ export function TechnologyVisualPanel() {
 
 				<div className="grid w-full max-w-[980px] grid-cols-3 gap-[clamp(18px,2vw,34px)] max-[760px]:grid-cols-1">
 					<div>
-						<strong className="font-arbeit text-[clamp(2.1rem,2.2vw,3.1rem)] font-light leading-none tracking-[-0.055em] text-verevon-j-text/88">
+						<strong className="font-manrope text-[clamp(2.1rem,2.2vw,3.1rem)] font-light leading-none tracking-[-0.055em] text-verevon-j-text/88">
 							<span className="mr-2 text-[0.82em]">›</span>4{" "}
 							<sup className="relative top-[-0.14em] font-protokoll text-[0.38em] font-light tracking-normal text-verevon-j-text/72">
 								steps
@@ -52,7 +52,7 @@ export function TechnologyVisualPanel() {
 					</div>
 
 					<div>
-						<strong className="font-arbeit text-[clamp(2.1rem,2.2vw,3.1rem)] font-light leading-none tracking-[-0.055em] text-verevon-j-text/88">
+						<strong className="font-manrope text-[clamp(2.1rem,2.2vw,3.1rem)] font-light leading-none tracking-[-0.055em] text-verevon-j-text/88">
 							100{" "}
 							<sup className="relative top-[-0.14em] font-protokoll text-[0.38em] font-light tracking-normal text-verevon-j-text/72">
 								%
@@ -65,7 +65,7 @@ export function TechnologyVisualPanel() {
 					</div>
 
 					<div>
-						<strong className="font-arbeit text-[clamp(2.1rem,2.2vw,3.1rem)] font-light leading-none tracking-[-0.055em] text-verevon-j-text/88">
+						<strong className="font-manrope text-[clamp(2.1rem,2.2vw,3.1rem)] font-light leading-none tracking-[-0.055em] text-verevon-j-text/88">
 							HITL{" "}
 							<sup className="relative top-[-0.14em] font-protokoll text-[0.38em] font-light tracking-normal text-verevon-j-text/72">
 								approved

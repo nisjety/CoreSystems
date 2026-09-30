@@ -83,7 +83,7 @@ function ConversationPanel() {
 						<p className="m-0 font-protokoll text-[0.67rem] font-medium uppercase tracking-[0.14em] text-verevon-j-text/42">
 							E-post
 						</p>
-						<p className="m-0 mt-1 truncate font-arbeit text-[1rem] font-normal tracking-[-0.03em] text-verevon-j-text">
+						<p className="m-0 mt-1 truncate font-manrope text-[1rem] font-normal tracking-[-0.03em] text-verevon-j-text">
 							Levering til Nora
 						</p>
 					</div>
@@ -127,7 +127,7 @@ function SourcesPanel() {
 						<p className="m-0 font-protokoll text-[0.68rem] font-medium uppercase tracking-[0.14em] text-verevon-j-text/42">
 							Kilder i eksempelet
 						</p>
-						<p className="m-0 mt-1 font-arbeit text-[1.04rem] tracking-[-0.03em] text-verevon-j-text">
+						<p className="m-0 mt-1 font-manrope text-[1.04rem] tracking-[-0.03em] text-verevon-j-text">
 							Fire flater, én sak
 						</p>
 					</div>
@@ -144,7 +144,7 @@ function SourcesPanel() {
 				>
 					<SourceLogo source={source} />
 					<div className="min-w-0 flex-1">
-						<p className="m-0 font-arbeit text-[0.95rem] tracking-[-0.025em] text-verevon-j-text">
+						<p className="m-0 font-manrope text-[0.95rem] tracking-[-0.025em] text-verevon-j-text">
 							{[
 								"Kundens siste melding",
 								"Sporingsstatus for sendingen",
@@ -171,7 +171,7 @@ function NextStepPanel() {
 						<p className="m-0 font-protokoll text-[0.66rem] font-medium uppercase tracking-[0.15em] text-white/48">
 							Neste overlevering
 						</p>
-						<p className="m-0 mt-2 font-arbeit text-[1.25rem] font-light leading-[1.06] tracking-[-0.04em]">
+						<p className="m-0 mt-2 font-manrope text-[1.25rem] font-light leading-[1.06] tracking-[-0.04em]">
 							Svarutkast er klart
 						</p>
 					</div>
@@ -191,7 +191,7 @@ function NextStepPanel() {
 					</p>
 					<span className="size-2 rounded-full bg-verevon-coral" />
 				</div>
-				<p className="m-0 mt-2 font-arbeit text-[1rem] tracking-[-0.03em] text-verevon-j-text">
+				<p className="m-0 mt-2 font-manrope text-[1rem] tracking-[-0.03em] text-verevon-j-text">
 						Trenger kunden en alternativ leveringsdato?
 				</p>
 			</div>
@@ -201,13 +201,13 @@ function NextStepPanel() {
 					<p className="m-0 font-protokoll text-[0.66rem] uppercase tracking-[0.13em] text-verevon-j-text/42">
 						Kilder
 					</p>
-					<p className="m-0 mt-1 font-arbeit text-[1rem] tracking-[-0.03em] text-verevon-j-text">4</p>
+					<p className="m-0 mt-1 font-manrope text-[1rem] tracking-[-0.03em] text-verevon-j-text">4</p>
 				</div>
 				<div className="rounded-[16px] border border-verevon-j-text/8 bg-verevon-surface-soft/70 p-3">
 					<p className="m-0 font-protokoll text-[0.66rem] uppercase tracking-[0.13em] text-verevon-j-text/42">
 						Åpent punkt
 					</p>
-					<p className="m-0 mt-1 font-arbeit text-[1rem] tracking-[-0.03em] text-verevon-j-text">1</p>
+					<p className="m-0 mt-1 font-manrope text-[1rem] tracking-[-0.03em] text-verevon-j-text">1</p>
 				</div>
 			</div>
 		</div>
@@ -311,7 +311,7 @@ export function ContextExplorer() {
 						<div className="flex min-h-[300px] flex-col justify-between">
 							<div>
 								<p className="verevon-eyebrow">{activeView.overline}</p>
-								<h3 className="mt-5 max-w-[14ch] font-arbeit text-[clamp(1.7rem,2.1vw,2.65rem)] font-light leading-[0.98] tracking-[-0.055em] text-verevon-j-text text-balance">
+								<h3 className="mt-5 max-w-[14ch] font-manrope text-[clamp(1.7rem,2.1vw,2.65rem)] font-light leading-[0.98] tracking-[-0.055em] text-verevon-j-text text-balance">
 									{activeView.title}
 								</h3>
 							</div>

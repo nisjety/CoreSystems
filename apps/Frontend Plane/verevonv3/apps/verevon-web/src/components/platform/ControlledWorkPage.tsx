@@ -113,7 +113,7 @@ function HeroDecisionCard() {
 					<p className="m-0 font-protokoll text-[0.65rem] font-medium uppercase tracking-[0.16em] text-verevon-j-text/64">
 						Klar for beslutning
 					</p>
-					<p className="m-0 mt-2 font-arbeit text-[clamp(1.1rem,1.55vw,1.45rem)] font-normal leading-[1.04] tracking-[-0.04em] text-verevon-j-text">
+					<p className="m-0 mt-2 font-manrope text-[clamp(1.1rem,1.55vw,1.45rem)] font-normal leading-[1.04] tracking-[-0.04em] text-verevon-j-text">
 						Forslag til kundesvar
 					</p>
 				</div>
@@ -210,7 +210,7 @@ export function ControlledWorkPage() {
 									<p className="m-0 font-protokoll text-[0.68rem] font-medium uppercase tracking-[0.16em] text-verevon-j-text/64">
 										Forslag til handling
 									</p>
-									<h3 className="m-0 mt-2 font-arbeit text-[clamp(1.65rem,2.25vw,2.4rem)] font-light leading-[0.98] tracking-[-0.05em] text-verevon-j-text" id="decision-card-title">
+									<h3 className="m-0 mt-2 font-manrope text-[clamp(1.65rem,2.25vw,2.4rem)] font-light leading-[0.98] tracking-[-0.05em] text-verevon-j-text" id="decision-card-title">
 										Klargjør svar om forsinket levering
 									</h3>
 								</div>
@@ -295,7 +295,7 @@ export function ControlledWorkPage() {
 												type="button"
 												key={option.id}
 											>
-												<span className="flex items-center justify-between gap-3 font-arbeit text-[1.15rem] font-normal tracking-[-0.035em]">
+												<span className="flex items-center justify-between gap-3 font-manrope text-[1.15rem] font-normal tracking-[-0.035em]">
 													{option.label}
 											<ArrowMark className="size-4 transition-transform duration-300 group-hover:translate-x-1" />
 												</span>
@@ -374,7 +374,7 @@ export function ControlledWorkPage() {
 										<p className="m-0 font-protokoll text-[0.65rem] font-medium uppercase tracking-[0.16em] text-verevon-j-text/64">
 											Kildegrunnlag
 										</p>
-										<p className="m-0 mt-1.5 font-arbeit text-[1.12rem] tracking-[-0.035em] text-verevon-j-text">
+										<p className="m-0 mt-1.5 font-manrope text-[1.12rem] tracking-[-0.035em] text-verevon-j-text">
 											Returpolicy 04 · avsnitt 3
 										</p>
 									</div>
@@ -399,7 +399,7 @@ export function ControlledWorkPage() {
 							<p className="font-protokoll text-[0.72rem] font-medium uppercase tracking-[0.28em] text-white/46">
 								Grenser
 							</p>
-							<h2 className="mt-6 max-w-[12ch] font-arbeit text-[clamp(2.45rem,4.1vw,5rem)] font-light leading-[0.94] tracking-[-0.06em] text-white text-balance">
+							<h2 className="mt-6 max-w-[12ch] font-manrope text-[clamp(2.45rem,4.1vw,5rem)] font-light leading-[0.94] tracking-[-0.06em] text-white text-balance">
 								Verevon kan ikke utvide egne rettigheter.
 							</h2>
 							<p className="mt-7 max-w-[50ch] font-protokoll text-[var(--text-body-lg)] font-light leading-[1.52] text-white/64 text-pretty">
@@ -446,7 +446,7 @@ export function ControlledWorkPage() {
 										<p className="m-0 font-protokoll text-[0.67rem] font-medium uppercase tracking-[0.16em] text-white/48">
 											Status i dette eksempelet
 										</p>
-										<p className="m-0 mt-1.5 font-arbeit text-[1.16rem] leading-[1.08] tracking-[-0.035em] text-white">
+										<p className="m-0 mt-1.5 font-manrope text-[1.16rem] leading-[1.08] tracking-[-0.035em] text-white">
 											Rammer synlige før neste steg.
 										</p>
 									</div>

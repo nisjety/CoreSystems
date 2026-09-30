@@ -48,7 +48,7 @@ function HeroContextCard() {
 					<p className="m-0 font-protokoll text-[0.65rem] font-medium uppercase tracking-[0.16em] text-verevon-j-text/64">
 						Felles kontekst
 					</p>
-					<p className="m-0 mt-2 font-arbeit text-[clamp(1.1rem,1.55vw,1.45rem)] font-normal leading-[1.04] tracking-[-0.04em] text-verevon-j-text">
+					<p className="m-0 mt-2 font-manrope text-[clamp(1.1rem,1.55vw,1.45rem)] font-normal leading-[1.04] tracking-[-0.04em] text-verevon-j-text">
 						Levering til Nora
 					</p>
 				</div>
@@ -175,7 +175,7 @@ export function SharedContextPage() {
 										<p className="m-0 font-protokoll text-[0.65rem] font-medium uppercase tracking-[0.16em] text-verevon-j-text/64">
 											Kildegrunnlag
 										</p>
-										<p className="m-0 mt-1.5 font-arbeit text-[1.1rem] tracking-[-0.035em] text-verevon-j-text">
+										<p className="m-0 mt-1.5 font-manrope text-[1.1rem] tracking-[-0.035em] text-verevon-j-text">
 											Returpolicy 04
 										</p>
 									</div>
@@ -200,7 +200,7 @@ export function SharedContextPage() {
 							<p className="font-protokoll text-[0.72rem] font-medium uppercase tracking-[0.28em] text-white/46">
 								Overlevering
 							</p>
-							<h2 className="mt-6 max-w-[12ch] font-arbeit text-[clamp(2.45rem,4.1vw,5rem)] font-light leading-[0.94] tracking-[-0.06em] text-white text-balance">
+							<h2 className="mt-6 max-w-[12ch] font-manrope text-[clamp(2.45rem,4.1vw,5rem)] font-light leading-[0.94] tracking-[-0.06em] text-white text-balance">
 								Håndoff uten å begynne på nytt.
 							</h2>
 							<p className="mt-7 max-w-[50ch] font-protokoll text-[var(--text-body-lg)] font-light leading-[1.52] text-white/64 text-pretty">
@@ -232,7 +232,7 @@ export function SharedContextPage() {
 								<p className="m-0 font-protokoll text-[0.65rem] font-medium uppercase tracking-[0.16em] text-verevon-j-text/64">
 									Klar for overlevering
 								</p>
-								<p className="m-0 mt-1.5 font-arbeit text-[1.12rem] leading-[1.08] tracking-[-0.035em]">
+								<p className="m-0 mt-1.5 font-manrope text-[1.12rem] leading-[1.08] tracking-[-0.035em]">
 									Neste person ser hva saken trenger.
 								</p>
 							</div>

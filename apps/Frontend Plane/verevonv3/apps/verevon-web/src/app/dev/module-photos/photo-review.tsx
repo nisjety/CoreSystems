@@ -37,7 +37,7 @@ export function ModulePhotoReview() {
 				<div className="mt-10 flex flex-wrap items-end justify-between gap-6">
 					<div>
 						<p className="mb-3 text-xs tracking-[0.16em] text-verevon-text-muted">VEREVON / BILDEVALG</p>
-						<h1 className="font-arbeit text-[clamp(2rem,3.5vw,3.8rem)] font-light leading-none tracking-[-0.045em]">Fem områder. Én sammenheng.</h1>
+						<h1 className="font-manrope text-[clamp(2rem,3.5vw,3.8rem)] font-light leading-none tracking-[-0.045em]">Fem områder. Én sammenheng.</h1>
 		<p className="mt-4 max-w-2xl text-sm leading-relaxed text-verevon-text-muted">Arbeidsflate 4, Datamaskiner og support 1 og Tilgang og kontroll 2 er valgt. Kunnskap 10 og AI og agenter 6 viser de tydeligste bildene på kilder og delegering.</p>
 					</div>
 					<div className="flex flex-wrap gap-3 text-sm">

@@ -89,7 +89,7 @@
 }
 .intro h1 {
   margin: 12px 0 12px;
-  font-family: var(--font-arbeit), sans-serif;
+  font-family: var(--font-manrope), sans-serif;
   font-size: clamp(32px, 3.8vw, 58px);
   font-weight: 400;
   letter-spacing: -0.04em;
@@ -327,7 +327,7 @@
 }
 .dashboardHeading h2 {
   margin: 10px 0 8px;
-  font-family: var(--font-arbeit), sans-serif;
+  font-family: var(--font-manrope), sans-serif;
   font-size: clamp(32px, 3.2vw, 48px);
   font-weight: 400;
   letter-spacing: -0.045em;
@@ -394,7 +394,7 @@
 .dashboardFeature h3 {
   max-width: 640px;
   margin: 12px 0 8px;
-  font-family: var(--font-arbeit), sans-serif;
+  font-family: var(--font-manrope), sans-serif;
   font-size: clamp(23px, 2.4vw, 34px);
   font-weight: 400;
   letter-spacing: -0.035em;
@@ -429,7 +429,7 @@
 }
 .dashboardCard strong {
   margin-top: 10px;
-  font-family: var(--font-arbeit), sans-serif;
+  font-family: var(--font-manrope), sans-serif;
   font-size: 30px;
   font-weight: 400;
   letter-spacing: -0.04em;
@@ -467,7 +467,7 @@
 }
 .startContent h2 {
   margin: 14px 0 35px;
-  font-family: var(--font-arbeit), sans-serif;
+  font-family: var(--font-manrope), sans-serif;
   font-size: clamp(38px, 4vw, 56px);
   font-weight: 400;
   letter-spacing: -0.045em;

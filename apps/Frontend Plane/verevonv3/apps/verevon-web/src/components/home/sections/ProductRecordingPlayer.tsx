@@ -37,7 +37,7 @@ export function ProductRecordingPlayer({ recordings }: { recordings: ProductReco
 				className={`min-h-11 rounded-full border px-5 py-2 font-protokoll text-sm focus-visible:outline-2 focus-visible:outline-offset-4 ${selected === index ? 'border-[#1d1d1b] bg-[#1d1d1b] text-white' : 'border-black/20 bg-transparent text-[#1d1d1b]'}`}
 				onClick={() => { setSelected(index); setFull(false); }}>{item.label}</button>)}
 		</div>
-		<h3 className="font-arbeit text-3xl tracking-tight text-[#1d1d1b]">{recording.title}</h3>
+		<h3 className="font-manrope text-3xl tracking-tight text-[#1d1d1b]">{recording.title}</h3>
 		{/* Changing task or edit unmounts the previous video and pauses it. Never autoplay. */}
 		<RecordingVideo key={`${recording.id}-${full}`} recording={recording} full={full} />
 		<div className="flex flex-wrap items-start justify-between gap-4 font-protokoll text-sm leading-relaxed text-black/65">

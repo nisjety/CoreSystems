@@ -158,7 +158,7 @@ export function WorkflowExplorer() {
 									{String(index + 1).padStart(2, "0")}
 								</span>
 								<span>
-									<span className="block font-arbeit text-[1.08rem] font-normal tracking-[-0.035em]">
+									<span className="block font-manrope text-[1.08rem] font-normal tracking-[-0.035em]">
 										{stage.label}
 									</span>
 									<span

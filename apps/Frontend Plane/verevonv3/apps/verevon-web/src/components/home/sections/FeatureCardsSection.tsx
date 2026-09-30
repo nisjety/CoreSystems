@@ -40,7 +40,7 @@ function FeatureIntro() {
 					Verevon-arbeidsflyten
 				</p>
 
-				<h2 className="m-0 font-arbeit text-[clamp(2.75rem,4vw,5.35rem)] font-light leading-[0.94] tracking-[-0.068em] text-verevon-j-text">
+				<h2 className="m-0 font-manrope text-[clamp(2.75rem,4vw,5.35rem)] font-light leading-[0.94] tracking-[-0.068em] text-verevon-j-text">
 					Én plattform. Flere arbeidsflater.
 				</h2>
 
@@ -135,7 +135,7 @@ function FeatureOutputStage() {
 				className="col-span-4 mx-auto -translate-y-2 max-w-[760px] text-center"
 				data-feature-output-copy=""
 			>
-				<h2 className="m-0 font-arbeit text-[clamp(2rem,3vw,3.5rem)] font-light leading-[0.98] tracking-[-0.06em] text-verevon-j-text">
+				<h2 className="m-0 font-manrope text-[clamp(2rem,3vw,3.5rem)] font-light leading-[0.98] tracking-[-0.06em] text-verevon-j-text">
 					Én plattform. Flere arbeidsflater.
 				</h2>
 				<p className="mx-auto mt-3 max-w-[620px] font-protokoll text-[clamp(0.85rem,0.9vw,1rem)] font-light leading-[1.4] text-verevon-text-muted">
@@ -174,7 +174,7 @@ function FeatureMobileFallback() {
 					Verevon-arbeidsflyten
 				</p>
 
-				<h2 className="m-0 font-arbeit text-[clamp(3rem,14vw,5rem)] font-light leading-[0.95] tracking-[-0.07em] text-verevon-j-text">
+				<h2 className="m-0 font-manrope text-[clamp(3rem,14vw,5rem)] font-light leading-[0.95] tracking-[-0.07em] text-verevon-j-text">
 					Én plattform. Flere arbeidsflater.
 				</h2>
 
@@ -205,7 +205,7 @@ function FeatureMobileFallback() {
 
 			<div className="relative grid gap-8 sm:grid-cols-2 sm:gap-x-6">
 				<div className="col-span-full text-center sm:col-span-2">
-					<h2 className="m-0 font-arbeit text-[clamp(2rem,7vw,3.5rem)] font-light leading-[0.98] tracking-[-0.06em] text-verevon-j-text">
+					<h2 className="m-0 font-manrope text-[clamp(2rem,7vw,3.5rem)] font-light leading-[0.98] tracking-[-0.06em] text-verevon-j-text">
 						Én plattform. Flere arbeidsflater.
 					</h2>
 					<p className="mx-auto mt-3 max-w-[34rem] font-protokoll text-[0.95rem] font-light leading-[1.45] text-verevon-text-muted">

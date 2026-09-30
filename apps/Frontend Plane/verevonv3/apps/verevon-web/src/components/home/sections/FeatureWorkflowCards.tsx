@@ -63,7 +63,7 @@ export function ModuleWorkflowCard({
 				<ModuleVisual card={card} />
 			</div>
 
-			<h3 className="m-0 max-w-full break-words font-arbeit text-[clamp(1.18rem,1.42vw,1.6rem)] font-light leading-[1.06] tracking-[-0.05em] text-verevon-j-text" id={titleId}>
+			<h3 className="m-0 max-w-full break-words font-manrope text-[clamp(1.18rem,1.42vw,1.6rem)] font-light leading-[1.06] tracking-[-0.05em] text-verevon-j-text" id={titleId}>
 				{card.title}
 			</h3>
 
@@ -112,7 +112,7 @@ export function FeatureWorkflowCard({
 				<FeatureCardFilm kind={card.film} />
 			</div>
 
-			<h3 className="m-0 max-w-full break-words font-arbeit text-[clamp(1.25rem,1.55vw,1.75rem)] font-light leading-[1.04] tracking-[-0.055em] text-verevon-j-text">
+			<h3 className="m-0 max-w-full break-words font-manrope text-[clamp(1.25rem,1.55vw,1.75rem)] font-light leading-[1.04] tracking-[-0.055em] text-verevon-j-text">
 				{card.title}
 			</h3>
 

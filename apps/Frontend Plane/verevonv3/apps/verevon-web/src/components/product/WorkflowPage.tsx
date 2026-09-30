@@ -46,7 +46,7 @@ function HeroWorkItem() {
 						<p className="m-0 font-protokoll text-[0.65rem] font-medium uppercase tracking-[0.15em] text-verevon-j-text/64">
 							Forslag klart
 						</p>
-						<p className="m-0 mt-1.5 font-arbeit text-[clamp(1.05rem,1.5vw,1.35rem)] font-normal leading-[1.05] tracking-[-0.04em] text-verevon-j-text">
+						<p className="m-0 mt-1.5 font-manrope text-[clamp(1.05rem,1.5vw,1.35rem)] font-normal leading-[1.05] tracking-[-0.04em] text-verevon-j-text">
 							Svar på forsinket levering
 						</p>
 					</div>
@@ -109,7 +109,7 @@ export function WorkflowPage() {
 								<p className="font-protokoll text-[0.72rem] font-medium uppercase tracking-[0.28em] text-white/46">
 									Se grunnlaget
 								</p>
-								<h2 className="mt-6 font-arbeit text-[clamp(2.5rem,4.5vw,5.6rem)] font-light leading-[0.92] tracking-[-0.065em] text-white text-balance">
+								<h2 className="mt-6 font-manrope text-[clamp(2.5rem,4.5vw,5.6rem)] font-light leading-[0.92] tracking-[-0.065em] text-white text-balance">
 									Arbeid som fortsatt kan forklares etterpå.
 								</h2>
 							</div>
@@ -127,7 +127,7 @@ export function WorkflowPage() {
 									<span className="font-protokoll text-[0.7rem] font-medium tracking-[0.16em] text-verevon-coral">
 										0{index + 1}
 									</span>
-									<h3 className="mt-6 font-arbeit text-[1.45rem] font-normal leading-[1.05] tracking-[-0.04em] text-white">
+									<h3 className="mt-6 font-manrope text-[1.45rem] font-normal leading-[1.05] tracking-[-0.04em] text-white">
 										{item.title}
 									</h3>
 									<p className="mt-4 max-w-[27ch] font-protokoll text-[0.91rem] font-light leading-[1.5] text-white/58">
@@ -156,7 +156,7 @@ export function WorkflowPage() {
 								<p className="m-0 font-protokoll text-[0.65rem] font-medium uppercase tracking-[0.16em] text-verevon-j-text/64">
 									Samme arbeid, synlig i UI
 								</p>
-								<p className="m-0 mt-1.5 font-arbeit text-[1.08rem] leading-[1.1] tracking-[-0.035em] text-verevon-j-text">
+								<p className="m-0 mt-1.5 font-manrope text-[1.08rem] leading-[1.1] tracking-[-0.035em] text-verevon-j-text">
 									Endre utkastet eller fullfør selv.
 								</p>
 							</div>

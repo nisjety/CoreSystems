@@ -103,7 +103,7 @@ function DemoShell({
 	return (
 		<div className="h-full w-full overflow-hidden bg-[#f7f7f5] font-protokoll text-[#1d1d1b]">
 			<header className="flex h-[9%] min-h-8 items-center gap-[2%] border-b border-black/8 bg-white/86 px-[2.2%] backdrop-blur-xl">
-				<span className="grid aspect-square h-[54%] min-h-5 place-items-center rounded-[7px] border border-black/9 bg-[#1d1d1b] font-arbeit text-[clamp(9px,1vw,14px)] text-white">
+				<span className="grid aspect-square h-[54%] min-h-5 place-items-center rounded-[7px] border border-black/9 bg-[#1d1d1b] font-manrope text-[clamp(9px,1vw,14px)] text-white">
 					V
 				</span>
 				<span className="text-[clamp(8px,0.85vw,12px)] text-black/40">
@@ -200,7 +200,7 @@ export function ApprovalWorkspaceDemo() {
 					<div className="flex items-center gap-2 text-[clamp(7px,0.78vw,11px)] font-medium text-[#9c4b35]">
 						<ShieldCheck className="size-[clamp(10px,1.1vw,16px)]" /> Krever godkjenning
 					</div>
-					<h3 className="mt-[8%] font-arbeit text-[clamp(14px,1.75vw,27px)] font-light leading-[1.02] tracking-[-0.04em]">
+					<h3 className="mt-[8%] font-manrope text-[clamp(14px,1.75vw,27px)] font-light leading-[1.02] tracking-[-0.04em]">
 						Refunder frakt
 					</h3>
 					<p className="mt-[3%] text-[clamp(7px,0.77vw,11px)] text-black/48">149 kr · policy 04</p>
@@ -242,7 +242,7 @@ export function KnowledgeRevisionDemo() {
 					<div className="flex items-center gap-2 text-[clamp(6px,0.66vw,10px)] text-black/38">
 						<FileText className="size-[clamp(9px,0.95vw,14px)]" /> Policy · oppdatert nå
 					</div>
-					<h3 className="mt-[5%] font-arbeit text-[clamp(16px,2.2vw,34px)] font-light tracking-[-0.045em]">Forsinket levering</h3>
+					<h3 className="mt-[5%] font-manrope text-[clamp(16px,2.2vw,34px)] font-light tracking-[-0.045em]">Forsinket levering</h3>
 					<p className="mt-[7%] text-[clamp(7px,0.77vw,12px)] leading-[1.55] text-black/58">
 						Når en sending er forsinket mer enn to virkedager, kan kunden få frakten refundert.
 					</p>
@@ -259,7 +259,7 @@ export function KnowledgeRevisionDemo() {
 					<div className="grid size-[clamp(22px,2.7vw,42px)] place-items-center rounded-full bg-emerald-50 text-emerald-700">
 						<Check className="size-[48%]" />
 					</div>
-					<h3 className="mt-[8%] font-arbeit text-[clamp(13px,1.65vw,25px)] font-light leading-[1.08] tracking-[-0.035em]">Neste svar er allerede bedre.</h3>
+					<h3 className="mt-[8%] font-manrope text-[clamp(13px,1.65vw,25px)] font-light leading-[1.08] tracking-[-0.035em]">Neste svar er allerede bedre.</h3>
 					<p className="mt-[6%] text-[clamp(6px,0.7vw,10px)] leading-[1.5] text-black/48">
 						Regelen er oppdatert for 4 agenter. Endringen er sporbar og kan rulles tilbake.
 					</p>

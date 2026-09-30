@@ -13,7 +13,7 @@ export function SharedContextHeader() {
 			<div className="mx-auto flex h-[72px] max-w-[1680px] items-center justify-between px-[var(--verevon-page-pad)]">
 				<Link
 					aria-label="Verevon forside"
-					className="font-arbeit text-base font-normal uppercase leading-none tracking-[0.44em] text-verevon-j-text"
+					className="font-manrope text-base font-normal uppercase leading-none tracking-[0.44em] text-verevon-j-text"
 					href="/"
 				>
 					Verevon

@@ -42,7 +42,7 @@ export function TechnologySection() {
 				<div className="grid min-h-[calc(100svh-clamp(152px,12.8vw,236px))] grid-rows-[auto_1fr_auto]">
 					<div className="max-w-[520px]">
 						<h1
-							className="fade-out-top m-0 max-w-[500px] font-arbeit text-[clamp(3rem,3.9vw,4.7rem)] font-light leading-[1.02] tracking-[-0.055em] text-verevon-j-text"
+							className="fade-out-top m-0 max-w-[500px] font-manrope text-[clamp(3rem,3.9vw,4.7rem)] font-light leading-[1.02] tracking-[-0.055em] text-verevon-j-text"
 							data-fade-out-top
 						>
 							Se, forstå,
@@ -72,7 +72,7 @@ export function TechnologySection() {
 									className="border-b border-verevon-j-text/18 pb-[clamp(20px,2vw,28px)]"
 									key={stat.label}
 								>
-									<strong className="flex items-baseline gap-3 whitespace-nowrap font-arbeit text-[clamp(2.35rem,2.9vw,4rem)] font-light leading-none tracking-[-0.055em] text-verevon-j-text/82">
+									<strong className="flex items-baseline gap-3 whitespace-nowrap font-manrope text-[clamp(2.35rem,2.9vw,4rem)] font-light leading-none tracking-[-0.055em] text-verevon-j-text/82">
 										{stat.value}
 										<sup className="relative top-[-0.08em] font-protokoll text-[0.32em] font-light tracking-normal text-verevon-j-text/64">
 											{stat.unit}

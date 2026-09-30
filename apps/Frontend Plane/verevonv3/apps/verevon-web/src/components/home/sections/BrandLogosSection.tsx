@@ -159,18 +159,18 @@ const logoMarks = [
 
 function getLogoClassName(index: number) {
 	if ((index + 1) % 5 === 0) {
-		return "font-arbeit text-[clamp(1rem,1.55vw,1.48rem)] font-medium tracking-[-0.01em]";
+		return "font-manrope text-[clamp(1rem,1.55vw,1.48rem)] font-medium tracking-[-0.01em]";
 	}
 
 	if ((index + 1) % 3 === 0) {
-		return "font-arbeit text-[clamp(1.12rem,1.45vw,1.7rem)] font-light tracking-[0.02em]";
+		return "font-manrope text-[clamp(1.12rem,1.45vw,1.7rem)] font-light tracking-[0.02em]";
 	}
 
 	if ((index + 1) % 2 === 0) {
-		return "font-arbeit text-[clamp(0.92rem,1.35vw,1.28rem)] font-medium uppercase tracking-[0.025em]";
+		return "font-manrope text-[clamp(0.92rem,1.35vw,1.28rem)] font-medium uppercase tracking-[0.025em]";
 	}
 
-	return "font-arbeit text-[clamp(1.12rem,1.45vw,1.7rem)] font-medium tracking-[-0.045em]";
+	return "font-manrope text-[clamp(1.12rem,1.45vw,1.7rem)] font-medium tracking-[-0.045em]";
 }
 
 export function BrandLogosSection() {

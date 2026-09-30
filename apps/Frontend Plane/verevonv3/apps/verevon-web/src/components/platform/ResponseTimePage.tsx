@@ -236,7 +236,7 @@ export function ResponseTimePage() {
 								<p className="m-0 font-protokoll text-[0.65rem] font-medium uppercase tracking-[0.16em] text-verevon-j-text/64">
 									Status i dette eksempelet
 								</p>
-								<p className="m-0 mt-1.5 font-arbeit text-[1.12rem] tracking-[-0.035em] text-verevon-j-text">
+								<p className="m-0 mt-1.5 font-manrope text-[1.12rem] tracking-[-0.035em] text-verevon-j-text">
 									Fire steg samlet til ett utkast.
 								</p>
 								<div className="mt-4 grid gap-2 border-t border-verevon-j-text/8 pt-3 font-protokoll text-[0.78rem] font-light text-verevon-j-text/62 sm:grid-cols-2">

@@ -81,7 +81,7 @@
 }
 
 .content h3 {
-	font-family: var(--font-arbeit), sans-serif;
+	font-family: var(--font-manrope), sans-serif;
 	font-size: clamp(24px, 2.15vw, 32px);
 	font-weight: 300;
 	line-height: 1.08;

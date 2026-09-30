@@ -412,7 +412,7 @@ function VerevonPromptLoop({ activeIndex }: { activeIndex: number }) {
 									<p className="m-0 font-protokoll text-[0.68rem] font-medium uppercase leading-none tracking-[0.18em] text-verevon-j-text/42">
 										{step.label}
 									</p>
-									<h3 className="m-0 mt-3 max-w-[430px] font-arbeit text-[clamp(1.7rem,2.6vw,2.65rem)] font-light leading-[0.98] tracking-[-0.05em] text-verevon-j-text">
+									<h3 className="m-0 mt-3 max-w-[430px] font-manrope text-[clamp(1.7rem,2.6vw,2.65rem)] font-light leading-[0.98] tracking-[-0.05em] text-verevon-j-text">
 										{step.title}
 									</h3>
 								</div>
@@ -691,7 +691,7 @@ export function PromptSection() {
 					</p>
 
 					<h2
-						className="fade-out-top m-0 mt-5 max-w-[720px] font-arbeit text-[clamp(3rem,5vw,7.15rem)] font-light leading-[0.92] tracking-[-0.072em] text-verevon-j-text"
+						className="fade-out-top m-0 mt-5 max-w-[720px] font-manrope text-[clamp(3rem,5vw,7.15rem)] font-light leading-[0.92] tracking-[-0.072em] text-verevon-j-text"
 						data-fade-out-top
 					>
 						Verevon bygger arbeidet.

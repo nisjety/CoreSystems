@@ -253,7 +253,7 @@ function ProductLoopMobileFallback() {
 					<p className="verevon-eyebrow text-verevon-coral">
 						{stage.step} / {stage.state}
 					</p>
-					<h3 className="m-0 max-w-[11ch] font-arbeit text-[clamp(2.5rem,12vw,4.6rem)] font-light leading-[0.94] tracking-[-0.065em] text-verevon-j-text text-balance">
+					<h3 className="m-0 max-w-[11ch] font-manrope text-[clamp(2.5rem,12vw,4.6rem)] font-light leading-[0.94] tracking-[-0.065em] text-verevon-j-text text-balance">
 						{stage.title}
 					</h3>
 					<p className="max-w-[34rem] font-protokoll text-[1rem] font-light leading-[1.48] text-verevon-text-muted">
@@ -269,7 +269,7 @@ function ProductLoopMobileFallback() {
 				<p className="verevon-eyebrow text-verevon-coral">
 					{activeComposerCopy.label.replace("04 /", "05 /")}
 				</p>
-				<h3 className="max-w-[14ch] font-arbeit text-[clamp(2.5rem,11vw,4.4rem)] font-light leading-[0.92] tracking-[-0.065em] text-verevon-j-text">
+				<h3 className="max-w-[14ch] font-manrope text-[clamp(2.5rem,11vw,4.4rem)] font-light leading-[0.92] tracking-[-0.065em] text-verevon-j-text">
 					{activeComposerCopy.title}
 				</h3>
 				<FeatureComposerCycle

@@ -48,7 +48,7 @@ export function Navbar({
 			>
 				<Link
 					aria-label="Verevon hjem"
-					className="pointer-events-auto inline-flex h-11 items-center justify-self-start font-arbeit text-[0.98rem] font-normal uppercase leading-none tracking-[0.18em] max-[1050px]:text-[0.86rem] max-[1050px]:tracking-[0.16em]"
+					className="pointer-events-auto inline-flex h-11 items-center justify-self-start font-manrope text-[0.98rem] font-normal uppercase leading-none tracking-[0.18em] max-[1050px]:text-[0.86rem] max-[1050px]:tracking-[0.16em]"
 					href="/"
 				>
 					VEREVON
