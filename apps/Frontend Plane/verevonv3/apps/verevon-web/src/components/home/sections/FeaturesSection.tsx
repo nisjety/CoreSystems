@@ -450,7 +450,7 @@ export function FeaturesSection() {
 					>
 						Fra kunnskap til handling. Med kontroll hele veien.
 					</h2>
-					<p className="mx-auto mt-5 max-w-[540px] font-protokoll text-[clamp(0.95rem,1vw,1.1rem)] font-light leading-[1.45] text-verevon-text-muted">
+					<p className="mx-auto mt-5 max-w-[540px] font-geist text-[clamp(0.95rem,1vw,1.1rem)] font-light leading-[1.45] text-verevon-text-muted">
 						Fra kunnskap til handling i systemene. Se hvordan Verevon samler arbeidet
 						og holder dere i kontroll.
 					</p>

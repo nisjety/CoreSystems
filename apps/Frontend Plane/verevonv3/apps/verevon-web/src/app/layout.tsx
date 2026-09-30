@@ -1,14 +1,9 @@
 import type { Metadata } from "next";
-import { Geist, Geist_Mono } from "next/font/google";
+import { Geist_Mono } from "next/font/google";
 import Script from "next/script";
 import { RouteTransition } from "@/components/core/RouteTransition";
 import { siteDescription, siteName, siteUrl } from "@/shared/seo/site";
 import "./globals.css";
-
-const geistSans = Geist({
-	variable: "--font-geist-sans",
-	subsets: ["latin"],
-});
 
 const geistMono = Geist_Mono({
 	variable: "--font-geist-mono",
@@ -108,7 +103,7 @@ export default function RootLayout({
 					strategy="beforeInteractive"
 				/>
 			</head>
-			<body className={`${geistSans.variable} ${geistMono.variable}`}>
+			<body className={`${geistMono.variable}`}>
 				<Script
 					dangerouslySetInnerHTML={{
 						__html: JSON.stringify(structuredData).replace(/</g, "\\u003c"),

@@ -168,7 +168,7 @@ function CopyPanel({
 				visibility: index === 0 ? "visible" : "hidden",
 			}}
 		>
-			<p className="m-0 font-protokoll text-[clamp(1.12rem,1.34vw,1.52rem)] font-light leading-[1.34] text-pretty">
+			<p className="m-0 font-geist text-[clamp(1.12rem,1.34vw,1.52rem)] font-light leading-[1.34] text-pretty">
 				{panel.body}
 			</p>
 
@@ -206,7 +206,7 @@ function FeatureOutputCard({
 			href={card.href}
 			{...(animated ? { "data-feature-card": "" } : {})}
 		>
-			<div className="flex h-[15px] select-none items-center justify-between font-protokoll text-[10px] leading-none text-verevon-j-text/42">
+			<div className="flex h-[15px] select-none items-center justify-between font-geist text-[10px] leading-none text-verevon-j-text/42">
 				<span className="flex items-center gap-1">
 					<span className="size-[5px] rounded-full bg-verevon-coral/70" />
 					{card.kicker}
@@ -231,7 +231,7 @@ function FeatureOutputCard({
 				</div>
 			</div>
 
-			<p className="m-0 min-h-[4.2em] font-protokoll text-[clamp(0.92rem,0.92vw,1.02rem)] font-light leading-[1.38] text-verevon-text-muted/90">
+			<p className="m-0 min-h-[4.2em] font-geist text-[clamp(0.92rem,0.92vw,1.02rem)] font-light leading-[1.38] text-verevon-text-muted/90">
 				{card.text}
 			</p>
 
@@ -332,7 +332,7 @@ function FeatureHandoffIntro() {
 				className="absolute left-1/2 top-[clamp(150px,16.5vh,172px)] w-[min(760px,calc(100%-48px))] -translate-x-1/2 text-center"
 				data-trust-feature-copy=""
 			>
-				<p className="mb-4 font-protokoll text-[0.72rem] font-medium uppercase leading-none tracking-[0.34em] text-verevon-j-text/38">
+				<p className="mb-4 font-geist text-[0.72rem] font-medium uppercase leading-none tracking-[0.34em] text-verevon-j-text/38">
 					Forankret handling
 				</p>
 
@@ -340,7 +340,7 @@ function FeatureHandoffIntro() {
 					Tenking, satt i arbeid
 				</h2>
 
-				<p className="mx-auto mt-4 max-w-[540px] font-protokoll text-[clamp(0.95rem,0.95vw,1.08rem)] font-light leading-[1.42] text-verevon-text-muted">
+				<p className="mx-auto mt-4 max-w-[540px] font-geist text-[clamp(0.95rem,0.95vw,1.08rem)] font-light leading-[1.42] text-verevon-text-muted">
 					Ett kundesignal kan bli et svar, en rute, en policy-sjekk og
 					en revidert handling — alt med kildene synlige.
 				</p>
@@ -366,7 +366,7 @@ function FeatureSourceChrome() {
 			].join(" ")}
 			data-trust-feature-source-chrome=""
 		>
-			<div className="absolute inset-x-0 top-[-20px] flex h-[15px] select-none items-center justify-between font-protokoll text-[10px] leading-none text-verevon-j-text/38">
+			<div className="absolute inset-x-0 top-[-20px] flex h-[15px] select-none items-center justify-between font-geist text-[10px] leading-none text-verevon-j-text/38">
 				<span className="flex items-center gap-1">
 					<span className="size-[5px] rounded-full bg-verevon-coral/70" />
 					signal
@@ -391,13 +391,13 @@ function FeatureMobileFallback() {
 	return (
 		<div className="hidden max-[899px]:grid max-[899px]:gap-10 max-[899px]:pt-10">
 			<div className="text-center">
-				<p className="mb-4 font-protokoll text-[0.7rem] font-medium uppercase leading-none tracking-[0.3em] text-verevon-j-text/38">
+				<p className="mb-4 font-geist text-[0.7rem] font-medium uppercase leading-none tracking-[0.3em] text-verevon-j-text/38">
 					Forankret handling
 				</p>
 				<h2 className="m-0 font-manrope text-[clamp(3rem,14vw,5rem)] font-light leading-[0.95] tracking-[-0.07em] text-verevon-j-text">
 					Kundearbeid, klart til godkjenning
 				</h2>
-				<p className="mx-auto mt-5 max-w-[34rem] font-protokoll text-[1rem] font-light leading-[1.48] text-verevon-text-muted">
+				<p className="mx-auto mt-5 max-w-[34rem] font-geist text-[1rem] font-light leading-[1.48] text-verevon-text-muted">
 					Verevon samler kilder, lager forslag og viser hva som må godkjennes
 					før noe skjer ute hos kunden.
 				</p>
@@ -1007,7 +1007,7 @@ export function TrustScrollSection() {
 								<span className="mb-4 block font-manrope text-[0.76rem] text-verevon-coral">
 									{String(index + 1).padStart(2, "0")}
 								</span>
-								<p className="m-0 font-protokoll text-[1.08rem] font-light leading-[1.45] text-verevon-j-text/68">
+								<p className="m-0 font-geist text-[1.08rem] font-light leading-[1.45] text-verevon-j-text/68">
 									{panel.body}
 								</p>
 							</div>

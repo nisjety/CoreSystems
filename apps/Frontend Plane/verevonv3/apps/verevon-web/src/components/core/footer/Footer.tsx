@@ -50,7 +50,7 @@ export function Footer() {
 							VEREVON
 						</Link>
 
-						<p className="m-0 max-w-[320px] font-protokoll text-[clamp(0.9rem,0.95vw,1.08rem)] font-light uppercase leading-[1.32] tracking-[0.02em] text-verevon-j-text/65">
+						<p className="m-0 max-w-[320px] font-geist text-[clamp(0.9rem,0.95vw,1.08rem)] font-light uppercase leading-[1.32] tracking-[0.02em] text-verevon-j-text/65">
 							Verevon hjelper teamet å svare raskere, handle
 							tryggere og vise hvor AI-en fant grunnlaget.
 						</p>
@@ -80,7 +80,7 @@ export function Footer() {
 								Hovedkontor
 							</h4>
 
-							<p className="m-0 font-protokoll text-[clamp(1rem,1vw,1.18rem)] font-light leading-[1.35] text-verevon-j-text/65">
+							<p className="m-0 font-geist text-[clamp(1rem,1vw,1.18rem)] font-light leading-[1.35] text-verevon-j-text/65">
 								Oslo, Norge
 								<br />
 								Distribuert team
@@ -94,7 +94,7 @@ export function Footer() {
 								Kontakt oss
 							</h4>
 
-							<p className="m-0 font-protokoll text-[clamp(1rem,1vw,1.18rem)] font-light leading-[1.35] text-verevon-j-text/65">
+							<p className="m-0 font-geist text-[clamp(1rem,1vw,1.18rem)] font-light leading-[1.35] text-verevon-j-text/65">
 								<a
 									className="transition-colors hover:text-verevon-j-text"
 									href="mailto:hei@verevon.ai"
@@ -118,7 +118,7 @@ export function Footer() {
 						</div>
 
 						<Link
-							className="col-start-4 self-end justify-self-start font-protokoll text-[clamp(0.94rem,0.95vw,1.08rem)] font-light text-verevon-j-text/80 transition-colors hover:text-verevon-j-text max-[900px]:col-start-auto"
+							className="col-start-4 self-end justify-self-start font-geist text-[clamp(0.94rem,0.95vw,1.08rem)] font-light text-verevon-j-text/80 transition-colors hover:text-verevon-j-text max-[900px]:col-start-auto"
 							href="/#top"
 						>
 							<span aria-hidden="true">↑</span> Til toppen
@@ -129,7 +129,7 @@ export function Footer() {
 				<div className="grid grid-cols-[minmax(180px,0.9fr)_minmax(0,3.1fr)] gap-[clamp(48px,6vw,112px)] border-t border-verevon-j-text/8 py-4 max-[900px]:grid-cols-1">
 					<div />
 
-					<div className="grid grid-cols-3 items-center gap-6 font-protokoll text-[clamp(0.88rem,0.9vw,1rem)] font-light text-verevon-j-text/65 max-[900px]:grid-cols-1">
+					<div className="grid grid-cols-3 items-center gap-6 font-geist text-[clamp(0.88rem,0.9vw,1rem)] font-light text-verevon-j-text/65 max-[900px]:grid-cols-1">
 						<div>
 							{contactLinks.map((link, index) => (
 								<span key={link.href}>
@@ -153,7 +153,7 @@ export function Footer() {
 							Sikkerhet og tillit
 						</a>
 
-						<small className="justify-self-end font-protokoll text-[clamp(0.88rem,0.9vw,1rem)] font-light max-[900px]:justify-self-start">
+						<small className="justify-self-end font-geist text-[clamp(0.88rem,0.9vw,1rem)] font-light max-[900px]:justify-self-start">
 							© 2024–{currentYear} Verevon AS
 						</small>
 					</div>

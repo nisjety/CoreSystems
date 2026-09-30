@@ -34,7 +34,7 @@ export function DetailGallerySection() {
 					className="mt-[clamp(28px,3vw,46px)] max-w-[560px]"
 					data-fade-out-top
 				>
-					<p className="m-0 font-protokoll text-[clamp(1.02rem,1.05vw,1.22rem)] font-light leading-[1.5] text-verevon-text-muted">
+					<p className="m-0 font-geist text-[clamp(1.02rem,1.05vw,1.22rem)] font-light leading-[1.5] text-verevon-text-muted">
 						Verevon kan foreslå arbeid på tvers av kundeservice, kunnskap og drift.
 						Men handlinger med risiko stopper for vurdering, med kilder,
 						kontekst og sporbarhet ved siden av.

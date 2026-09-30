@@ -110,20 +110,20 @@ function HeroDecisionCard() {
 		<div className="absolute bottom-[clamp(18px,2.4vw,34px)] left-[clamp(18px,2.4vw,34px)] right-[clamp(18px,2.4vw,34px)] rounded-[22px] border border-white/80 bg-white/94 p-[clamp(16px,2vw,24px)] shadow-[0_24px_64px_rgba(23,23,23,0.16)] backdrop-blur-md">
 			<div className="flex items-start justify-between gap-5">
 				<div>
-					<p className="m-0 font-protokoll text-[0.65rem] font-medium uppercase tracking-[0.16em] text-verevon-j-text/64">
+					<p className="m-0 font-geist text-[0.65rem] font-medium uppercase tracking-[0.16em] text-verevon-j-text/64">
 						Klar for beslutning
 					</p>
 					<p className="m-0 mt-2 font-manrope text-[clamp(1.1rem,1.55vw,1.45rem)] font-normal leading-[1.04] tracking-[-0.04em] text-verevon-j-text">
 						Forslag til kundesvar
 					</p>
 				</div>
-				<span className="inline-flex items-center gap-1.5 rounded-full bg-amber-500/10 px-2.5 py-1 font-protokoll text-[0.68rem] font-medium text-amber-900">
+				<span className="inline-flex items-center gap-1.5 rounded-full bg-amber-500/10 px-2.5 py-1 font-geist text-[0.68rem] font-medium text-amber-900">
 					<span className="size-1.5 rounded-full bg-amber-600" />
 					Venter
 				</span>
 			</div>
 
-			<div className="mt-4 grid gap-2 border-t border-verevon-j-text/8 pt-3 font-protokoll text-[0.78rem] font-light text-verevon-j-text/62 sm:grid-cols-2">
+			<div className="mt-4 grid gap-2 border-t border-verevon-j-text/8 pt-3 font-geist text-[0.78rem] font-light text-verevon-j-text/62 sm:grid-cols-2">
 				<span>Policy P04 matchet</span>
 				<span>Grunnlag synlig</span>
 			</div>
@@ -153,14 +153,14 @@ export function ControlledWorkPage() {
 							<p className="verevon-body-lg mt-8 max-w-[48ch] text-pretty">
 								Verevon foreslår. Dere bestemmer.
 							</p>
-							<p className="mt-5 max-w-[54ch] font-protokoll text-[var(--text-body)] font-light leading-[1.55] text-verevon-j-text/60 text-pretty">
+							<p className="mt-5 max-w-[54ch] font-geist text-[var(--text-body)] font-light leading-[1.55] text-verevon-j-text/60 text-pretty">
 								Før noe sendes, endres eller publiseres, kan dere se hva forslaget bygger på, hvilken ramme som gjelder og hvem som tar neste valg.
 							</p>
 
 							<div className="mt-10 flex flex-wrap items-center gap-x-8 gap-y-5">
 								<ArrowButton href="#forslag">Prøv beslutningskortet</ArrowButton>
 								<a
-									className="font-protokoll text-[0.92rem] font-light text-verevon-j-text/62 underline-offset-4 transition-colors hover:text-verevon-j-text hover:underline focus-visible:text-verevon-j-text focus-visible:outline-none"
+									className="font-geist text-[0.92rem] font-light text-verevon-j-text/62 underline-offset-4 transition-colors hover:text-verevon-j-text hover:underline focus-visible:text-verevon-j-text focus-visible:outline-none"
 									href="#grenser"
 								>
 									Se grensene
@@ -195,7 +195,7 @@ export function ControlledWorkPage() {
 							<p className="verevon-body-lg mt-7 max-w-[48ch] text-pretty">
 								Dette er en interaktiv demonstrasjon av hvordan en sak kan holdes åpen for menneskelig vurdering. Velg det løpet som passer arbeidet deres.
 							</p>
-							<p className="mt-6 max-w-[49ch] font-protokoll text-[var(--text-body)] font-light leading-[1.55] text-verevon-j-text/62 text-pretty">
+							<p className="mt-6 max-w-[49ch] font-geist text-[var(--text-body)] font-light leading-[1.55] text-verevon-j-text/62 text-pretty">
 								Forslaget gjør ikke en handling av seg selv her. Det viser grunnlaget, rammen og valget som står igjen hos dere.
 							</p>
 						</div>
@@ -207,14 +207,14 @@ export function ControlledWorkPage() {
 						>
 							<div className="flex flex-wrap items-start justify-between gap-5 border-b border-verevon-j-text/10 px-[clamp(20px,3vw,36px)] py-[clamp(18px,2.4vw,28px)]">
 								<div>
-									<p className="m-0 font-protokoll text-[0.68rem] font-medium uppercase tracking-[0.16em] text-verevon-j-text/64">
+									<p className="m-0 font-geist text-[0.68rem] font-medium uppercase tracking-[0.16em] text-verevon-j-text/64">
 										Forslag til handling
 									</p>
 									<h3 className="m-0 mt-2 font-manrope text-[clamp(1.65rem,2.25vw,2.4rem)] font-light leading-[0.98] tracking-[-0.05em] text-verevon-j-text" id="decision-card-title">
 										Klargjør svar om forsinket levering
 									</h3>
 								</div>
-								<span className="inline-flex items-center gap-2 rounded-full border border-amber-700/15 bg-amber-500/[0.09] px-3 py-1.5 font-protokoll text-[0.72rem] font-medium text-amber-950">
+								<span className="inline-flex items-center gap-2 rounded-full border border-amber-700/15 bg-amber-500/[0.09] px-3 py-1.5 font-geist text-[0.72rem] font-medium text-amber-950">
 									<span className="size-1.5 rounded-full bg-amber-600" />
 									Middels risiko · vurdering
 								</span>
@@ -222,14 +222,14 @@ export function ControlledWorkPage() {
 
 							<div className="grid gap-0 lg:grid-cols-[minmax(0,1.02fr)_minmax(250px,0.78fr)]">
 								<div className="p-[clamp(20px,3vw,36px)]">
-									<p className="m-0 font-protokoll text-[0.78rem] font-medium uppercase tracking-[0.12em] text-verevon-j-text/64">
+									<p className="m-0 font-geist text-[0.78rem] font-medium uppercase tracking-[0.12em] text-verevon-j-text/64">
 										Hva forslaget gjør
 									</p>
-									<p className="m-0 mt-3 max-w-[47ch] font-protokoll text-[clamp(1.02rem,1.3vw,1.2rem)] font-light leading-[1.5] text-verevon-j-text/76" id="decision-card-description">
+									<p className="m-0 mt-3 max-w-[47ch] font-geist text-[clamp(1.02rem,1.3vw,1.2rem)] font-light leading-[1.5] text-verevon-j-text/76" id="decision-card-description">
 										Svarutkastet forklarer forsinkelsen, viser neste leveringssteg og ber kunden bekrefte om leveringstidspunktet fortsatt passer.
 									</p>
 
-									<blockquote className="m-0 mt-8 rounded-[18px] border border-verevon-j-text/8 bg-verevon-surface-soft px-5 py-5 font-protokoll text-[0.94rem] font-light leading-[1.5] text-verevon-j-text/70">
+									<blockquote className="m-0 mt-8 rounded-[18px] border border-verevon-j-text/8 bg-verevon-surface-soft px-5 py-5 font-geist text-[0.94rem] font-light leading-[1.5] text-verevon-j-text/70">
 										<p className="m-0 text-[0.67rem] font-medium uppercase tracking-[0.15em] text-verevon-j-text/64">
 											Kundehenvendelse
 										</p>
@@ -239,10 +239,10 @@ export function ControlledWorkPage() {
 									</blockquote>
 
 									<div className="mt-8 border-t border-verevon-j-text/10 pt-5">
-										<p className="m-0 font-protokoll text-[0.68rem] font-medium uppercase tracking-[0.16em] text-verevon-j-text/64">
+										<p className="m-0 font-geist text-[0.68rem] font-medium uppercase tracking-[0.16em] text-verevon-j-text/64">
 											Beslutningsroller i eksempelet
 										</p>
-										<div className="mt-3 grid gap-2.5 font-protokoll text-[0.88rem] font-light leading-[1.4] text-verevon-j-text/62 sm:grid-cols-3">
+										<div className="mt-3 grid gap-2.5 font-geist text-[0.88rem] font-light leading-[1.4] text-verevon-j-text/62 sm:grid-cols-3">
 											<div className="rounded-xl border border-verevon-j-text/8 px-3.5 py-3">
 												<span className="block text-[0.66rem] font-medium uppercase tracking-[0.12em] text-verevon-j-text/64">Godkjenner</span>
 												<span className="mt-1 block text-verevon-j-text/76">Nora H.</span>
@@ -260,14 +260,14 @@ export function ControlledWorkPage() {
 								</div>
 
 								<aside className="border-t border-verevon-j-text/10 bg-verevon-surface-soft p-[clamp(20px,3vw,32px)] lg:border-l lg:border-t-0" aria-label="Grunnlaget for forslaget">
-									<p className="m-0 font-protokoll text-[0.68rem] font-medium uppercase tracking-[0.16em] text-verevon-j-text/64">
+									<p className="m-0 font-geist text-[0.68rem] font-medium uppercase tracking-[0.16em] text-verevon-j-text/64">
 										Grunnlag
 									</p>
 									<dl className="m-0 mt-4 grid gap-0 border-t border-verevon-j-text/10">
 										{proofRows.map((item) => (
 											<div className="border-b border-verevon-j-text/10 py-4" key={item.label}>
-												<dt className="font-protokoll text-[0.67rem] font-medium uppercase tracking-[0.12em] text-verevon-j-text/64">{item.label}</dt>
-												<dd className="m-0 mt-1.5 font-protokoll text-[0.84rem] font-light leading-[1.45] text-verevon-j-text/68">{item.value}</dd>
+												<dt className="font-geist text-[0.67rem] font-medium uppercase tracking-[0.12em] text-verevon-j-text/64">{item.label}</dt>
+												<dd className="m-0 mt-1.5 font-geist text-[0.84rem] font-light leading-[1.45] text-verevon-j-text/68">{item.value}</dd>
 											</div>
 										))}
 									</dl>
@@ -275,7 +275,7 @@ export function ControlledWorkPage() {
 							</div>
 
 							<div className="border-t border-verevon-j-text/10 px-[clamp(20px,3vw,36px)] py-[clamp(20px,3vw,30px)]">
-								<p className="m-0 font-protokoll text-[0.68rem] font-medium uppercase tracking-[0.16em] text-verevon-j-text/64">
+								<p className="m-0 font-geist text-[0.68rem] font-medium uppercase tracking-[0.16em] text-verevon-j-text/64">
 									Velg neste steg
 								</p>
 								<div className="mt-4 grid gap-2.5 sm:grid-cols-3" role="group" aria-label="Valg for forslaget">
@@ -300,7 +300,7 @@ export function ControlledWorkPage() {
 											<ArrowMark className="size-4 transition-transform duration-300 group-hover:translate-x-1" />
 												</span>
 												<span className={[
-													"mt-2 block font-protokoll text-[0.78rem] font-light leading-[1.42]",
+													"mt-2 block font-geist text-[0.78rem] font-light leading-[1.42]",
 													isSelected ? "text-white/66" : "text-verevon-j-text/62",
 												].join(" ")}>{option.description}</span>
 											</button>
@@ -316,13 +316,13 @@ export function ControlledWorkPage() {
 										].join(" ")}>
 											<StatusMark className="mt-0.5 size-5 shrink-0" />
 											<div>
-												<p className="m-0 font-protokoll text-[0.84rem] font-medium">{outcome.label}</p>
-												<p className="m-0 mt-1.5 font-protokoll text-[0.8rem] font-light leading-[1.45] opacity-72">{outcome.description}</p>
-												<p className="m-0 mt-3 border-t border-current/10 pt-3 font-protokoll text-[0.7rem] font-medium tracking-[0.01em] opacity-62">{outcome.audit}</p>
+												<p className="m-0 font-geist text-[0.84rem] font-medium">{outcome.label}</p>
+												<p className="m-0 mt-1.5 font-geist text-[0.8rem] font-light leading-[1.45] opacity-72">{outcome.description}</p>
+												<p className="m-0 mt-3 border-t border-current/10 pt-3 font-geist text-[0.7rem] font-medium tracking-[0.01em] opacity-62">{outcome.audit}</p>
 											</div>
 										</div>
 									) : (
-										<p className="m-0 flex min-h-[96px] items-center rounded-[17px] border border-dashed border-verevon-j-text/15 px-4 font-protokoll text-[0.83rem] font-light leading-[1.45] text-verevon-j-text/62">
+										<p className="m-0 flex min-h-[96px] items-center rounded-[17px] border border-dashed border-verevon-j-text/15 px-4 font-geist text-[0.83rem] font-light leading-[1.45] text-verevon-j-text/62">
 											Velg en handling for å se det tydelige utfallet. Ingenting blir sendt eller endret i denne demonstrasjonen.
 										</p>
 									)}
@@ -352,7 +352,7 @@ export function ControlledWorkPage() {
 									"Se hvilke rammer som møtte forslaget",
 									"Se hvilken beslutning som ble valgt i eksempelet",
 								].map((item, index) => (
-									<li className="grid grid-cols-[auto_1fr] gap-4 border-b border-verevon-j-text/12 py-4 font-protokoll text-[0.94rem] font-light leading-[1.45] text-verevon-j-text/66" key={item}>
+									<li className="grid grid-cols-[auto_1fr] gap-4 border-b border-verevon-j-text/12 py-4 font-geist text-[0.94rem] font-light leading-[1.45] text-verevon-j-text/66" key={item}>
 										<span className="font-medium text-verevon-coral">0{index + 1}</span>
 										<span>{item}</span>
 									</li>
@@ -371,18 +371,18 @@ export function ControlledWorkPage() {
 							<div className="absolute bottom-5 left-5 right-5 rounded-[20px] border border-white/82 bg-white/94 p-5 shadow-[0_18px_50px_rgba(23,23,23,0.16)] backdrop-blur-md sm:bottom-7 sm:left-7 sm:right-7">
 								<div className="flex flex-wrap items-start justify-between gap-3">
 									<div>
-										<p className="m-0 font-protokoll text-[0.65rem] font-medium uppercase tracking-[0.16em] text-verevon-j-text/64">
+										<p className="m-0 font-geist text-[0.65rem] font-medium uppercase tracking-[0.16em] text-verevon-j-text/64">
 											Kildegrunnlag
 										</p>
 										<p className="m-0 mt-1.5 font-manrope text-[1.12rem] tracking-[-0.035em] text-verevon-j-text">
 											Returpolicy 04 · avsnitt 3
 										</p>
 									</div>
-									<time className="rounded-full bg-verevon-surface-soft px-2.5 py-1 font-protokoll text-[0.68rem] text-verevon-j-text/62" dateTime="2026-07-14T09:18:00+02:00">
+									<time className="rounded-full bg-verevon-surface-soft px-2.5 py-1 font-geist text-[0.68rem] text-verevon-j-text/62" dateTime="2026-07-14T09:18:00+02:00">
 										Oppdatert 14. juli
 									</time>
 								</div>
-								<p className="m-0 mt-4 font-protokoll text-[0.85rem] font-light leading-[1.45] text-verevon-j-text/62">
+								<p className="m-0 mt-4 font-geist text-[0.85rem] font-light leading-[1.45] text-verevon-j-text/62">
 									En kilde kan være synlig før en beslutning tas – ikke gjemt bak svaret etterpå.
 								</p>
 							</div>
@@ -396,13 +396,13 @@ export function ControlledWorkPage() {
 				>
 					<div className="mx-auto grid max-w-[1680px] items-center gap-x-[clamp(48px,8vw,150px)] gap-y-12 xl:grid-cols-[minmax(0,0.88fr)_minmax(480px,1.12fr)]">
 						<div className="max-w-[585px]">
-							<p className="font-protokoll text-[0.72rem] font-medium uppercase tracking-[0.28em] text-white/46">
+							<p className="font-geist text-[0.72rem] font-medium uppercase tracking-[0.28em] text-white/46">
 								Grenser
 							</p>
 							<h2 className="mt-6 max-w-[12ch] font-manrope text-[clamp(2.45rem,4.1vw,5rem)] font-light leading-[0.94] tracking-[-0.06em] text-white text-balance">
 								Verevon kan ikke utvide egne rettigheter.
 							</h2>
-							<p className="mt-7 max-w-[50ch] font-protokoll text-[var(--text-body-lg)] font-light leading-[1.52] text-white/64 text-pretty">
+							<p className="mt-7 max-w-[50ch] font-geist text-[var(--text-body-lg)] font-light leading-[1.52] text-white/64 text-pretty">
 								Verevon kan forberede arbeidet innenfor den tilgangen og arbeidsflyten dere har definert. Det kan ikke gi seg selv flere systemer, roller eller handlingsrom.
 							</p>
 							<ul className="m-0 mt-9 grid list-none border-t border-white/16 p-0">
@@ -421,10 +421,10 @@ export function ControlledWorkPage() {
 									},
 								].map((item, index) => (
 									<li className="grid grid-cols-[auto_1fr] gap-4 border-b border-white/16 py-5" key={item.title}>
-										<span className="pt-0.5 font-protokoll text-[0.8rem] font-medium text-verevon-coral">0{index + 1}</span>
+										<span className="pt-0.5 font-geist text-[0.8rem] font-medium text-verevon-coral">0{index + 1}</span>
 										<div>
-											<h3 className="m-0 font-protokoll text-[0.96rem] font-medium text-white/84">{item.title}</h3>
-											<p className="m-0 mt-1.5 max-w-[48ch] font-protokoll text-[0.9rem] font-light leading-[1.48] text-white/58">{item.body}</p>
+											<h3 className="m-0 font-geist text-[0.96rem] font-medium text-white/84">{item.title}</h3>
+											<p className="m-0 mt-1.5 max-w-[48ch] font-geist text-[0.9rem] font-light leading-[1.48] text-white/58">{item.body}</p>
 										</div>
 									</li>
 								))}
@@ -443,7 +443,7 @@ export function ControlledWorkPage() {
 								<div className="flex items-start gap-3">
 									<StatusMark className="mt-0.5 size-5 shrink-0 text-emerald-300" />
 									<div>
-										<p className="m-0 font-protokoll text-[0.67rem] font-medium uppercase tracking-[0.16em] text-white/48">
+										<p className="m-0 font-geist text-[0.67rem] font-medium uppercase tracking-[0.16em] text-white/48">
 											Status i dette eksempelet
 										</p>
 										<p className="m-0 mt-1.5 font-manrope text-[1.16rem] leading-[1.08] tracking-[-0.035em] text-white">
@@ -463,7 +463,7 @@ export function ControlledWorkPage() {
 							<h2 className="verevon-h2 mt-6 max-w-[14ch] text-balance">
 								Mer framdrift. Samme ansvar.
 							</h2>
-							<p className="mt-6 max-w-[52ch] font-protokoll text-[var(--text-body)] font-light leading-[1.55] text-verevon-j-text/60 text-pretty">
+							<p className="mt-6 max-w-[52ch] font-geist text-[var(--text-body)] font-light leading-[1.55] text-verevon-j-text/60 text-pretty">
 								Verevon kan gjøre neste steg tydeligere. Det menneskelige ansvaret og rammene blir værende hos dere.
 							</p>
 						</div>

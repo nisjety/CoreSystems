@@ -36,7 +36,7 @@ function FeatureIntro() {
 				className="absolute left-1/2 top-[clamp(150px,16vh,196px)] w-[min(760px,calc(100%-48px))] -translate-x-1/2 text-center"
 				data-feature-copy=""
 			>
-				<p className="mb-4 font-protokoll text-[0.72rem] font-medium uppercase leading-none tracking-[0.34em] text-verevon-j-text/38">
+				<p className="mb-4 font-geist text-[0.72rem] font-medium uppercase leading-none tracking-[0.34em] text-verevon-j-text/38">
 					Verevon-arbeidsflyten
 				</p>
 
@@ -44,11 +44,11 @@ function FeatureIntro() {
 					Én plattform. Flere arbeidsflater.
 				</h2>
 
-				<p className="mx-auto mt-4 max-w-[650px] font-protokoll text-[clamp(0.95rem,0.95vw,1.08rem)] font-light leading-[1.42] text-verevon-text-muted">
+				<p className="mx-auto mt-4 max-w-[650px] font-geist text-[clamp(0.95rem,0.95vw,1.08rem)] font-light leading-[1.42] text-verevon-text-muted">
 					Verevon samler agenten, kunnskapen, systemene og kontrollen rundt arbeidet dere allerede gjør.
 				</p>
 
-				<div aria-label="Chat, Crawl og Søk koblet til kunnskap, agenter og kontroll." className="mx-auto mt-6 flex max-w-[680px] flex-wrap items-center justify-center gap-x-3 gap-y-2 font-protokoll text-[0.62rem] font-medium uppercase tracking-[0.17em] text-verevon-j-text/48">
+				<div aria-label="Chat, Crawl og Søk koblet til kunnskap, agenter og kontroll." className="mx-auto mt-6 flex max-w-[680px] flex-wrap items-center justify-center gap-x-3 gap-y-2 font-geist text-[0.62rem] font-medium uppercase tracking-[0.17em] text-verevon-j-text/48">
 					<span>Start her</span>
 					<span className="text-verevon-j-text/72">Chat · Crawl · Søk</span>
 					<span aria-hidden="true" className="text-verevon-coral/70">→</span>
@@ -75,7 +75,7 @@ function FeatureSourceCard() {
 			className="invisible absolute left-1/2 top-[calc(clamp(150px,20vh,216px)_+_80px)] z-30 aspect-[3/4] w-[min(24vh,240px)] opacity-0 max-[1140px]:hidden"
 			data-feature-source=""
 		>
-			<div className="absolute inset-x-0 top-[-20px] flex h-[15px] select-none items-center justify-between font-protokoll text-[10px] leading-none text-verevon-j-text/38">
+			<div className="absolute inset-x-0 top-[-20px] flex h-[15px] select-none items-center justify-between font-geist text-[10px] leading-none text-verevon-j-text/38">
 				<span className="flex items-center gap-1">
 					<span className="size-[5px] rounded-full bg-verevon-coral/70" />
 					oppgave
@@ -138,7 +138,7 @@ function FeatureOutputStage() {
 				<h2 className="m-0 font-manrope text-[clamp(2rem,3vw,3.5rem)] font-light leading-[0.98] tracking-[-0.06em] text-verevon-j-text">
 					Én plattform. Flere arbeidsflater.
 				</h2>
-				<p className="mx-auto mt-3 max-w-[620px] font-protokoll text-[clamp(0.85rem,0.9vw,1rem)] font-light leading-[1.4] text-verevon-text-muted">
+				<p className="mx-auto mt-3 max-w-[620px] font-geist text-[clamp(0.85rem,0.9vw,1rem)] font-light leading-[1.4] text-verevon-text-muted">
 					Fra kilder og kunnskap til agenter, arbeidsflater og kontroll — samlet i Verevon.
 				</p>
 			</div>
@@ -170,7 +170,7 @@ function FeatureMobileFallback() {
 			data-feature-fallback=""
 		>
 			<div className="text-center">
-				<p className="mb-4 font-protokoll text-[0.7rem] font-medium uppercase leading-none tracking-[0.3em] text-verevon-j-text/38">
+				<p className="mb-4 font-geist text-[0.7rem] font-medium uppercase leading-none tracking-[0.3em] text-verevon-j-text/38">
 					Verevon-arbeidsflyten
 				</p>
 
@@ -178,11 +178,11 @@ function FeatureMobileFallback() {
 					Én plattform. Flere arbeidsflater.
 				</h2>
 
-				<p className="mx-auto mt-5 max-w-[34rem] font-protokoll text-[1rem] font-light leading-[1.48] text-verevon-text-muted">
+				<p className="mx-auto mt-5 max-w-[34rem] font-geist text-[1rem] font-light leading-[1.48] text-verevon-text-muted">
 					Verevon samler agenten, kunnskapen, systemene og kontrollen rundt arbeidet dere allerede gjør.
 				</p>
 
-				<div aria-label="Chat, Crawl og Søk koblet til kunnskap, agenter og kontroll." className="mx-auto mt-5 flex max-w-[34rem] flex-wrap items-center justify-center gap-x-2 gap-y-2 font-protokoll text-[0.62rem] font-medium uppercase tracking-[0.15em] text-verevon-j-text/48">
+				<div aria-label="Chat, Crawl og Søk koblet til kunnskap, agenter og kontroll." className="mx-auto mt-5 flex max-w-[34rem] flex-wrap items-center justify-center gap-x-2 gap-y-2 font-geist text-[0.62rem] font-medium uppercase tracking-[0.15em] text-verevon-j-text/48">
 					<span>Chat · Crawl · Søk</span>
 					<span aria-hidden="true" className="text-verevon-coral/70">→</span>
 					<span>Kunnskap · agenter · kontroll</span>
@@ -208,7 +208,7 @@ function FeatureMobileFallback() {
 					<h2 className="m-0 font-manrope text-[clamp(2rem,7vw,3.5rem)] font-light leading-[0.98] tracking-[-0.06em] text-verevon-j-text">
 						Én plattform. Flere arbeidsflater.
 					</h2>
-					<p className="mx-auto mt-3 max-w-[34rem] font-protokoll text-[0.95rem] font-light leading-[1.45] text-verevon-text-muted">
+					<p className="mx-auto mt-3 max-w-[34rem] font-geist text-[0.95rem] font-light leading-[1.45] text-verevon-text-muted">
 						Fra kilder og kunnskap til agenter, arbeidsflater og kontroll — samlet i Verevon.
 					</p>
 				</div>

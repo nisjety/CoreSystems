@@ -61,7 +61,7 @@ export function Navbar({
 					{navItems.map((item, index) => (
 						<Link
 							className={[
-								"relative inline-flex h-full items-center justify-center font-protokoll text-[0.78rem] font-medium uppercase leading-none tracking-[0.06em] text-current opacity-75 transition-[color,opacity] after:absolute after:bottom-[11px] after:left-1/2 after:h-px after:w-[34px] after:-translate-x-1/2 after:scale-x-50 after:bg-current after:opacity-0 after:transition after:content-[''] hover:opacity-100 hover:after:scale-x-100 hover:after:opacity-80",
+								"relative inline-flex h-full items-center justify-center font-geist text-[0.78rem] font-medium uppercase leading-none tracking-[0.06em] text-current opacity-75 transition-[color,opacity] after:absolute after:bottom-[11px] after:left-1/2 after:h-px after:w-[34px] after:-translate-x-1/2 after:scale-x-50 after:bg-current after:opacity-0 after:transition after:content-[''] hover:opacity-100 hover:after:scale-x-100 hover:after:opacity-80",
 								index === 0
 									? "opacity-100 after:scale-x-100 after:opacity-80"
 									: "",
@@ -77,7 +77,7 @@ export function Navbar({
 				<div className="pointer-events-auto flex items-center gap-[18px] justify-self-end max-[1050px]:gap-[14px]">
 					<a
 						aria-label="Åpne Verevon dashboard"
-						className="inline-flex min-h-11 items-center gap-2 rounded-full border border-current/20 px-4 font-protokoll text-[0.78rem] text-current transition-colors hover:bg-white/15 focus-visible:outline-2 focus-visible:outline-offset-4"
+						className="inline-flex min-h-11 items-center gap-2 rounded-full border border-current/20 px-4 font-geist text-[0.78rem] text-current transition-colors hover:bg-white/15 focus-visible:outline-2 focus-visible:outline-offset-4"
 						href="http://localhost:5173"
 					>
 						Dashboard <span aria-hidden="true">↗</span>

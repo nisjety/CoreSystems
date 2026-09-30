@@ -6,7 +6,7 @@ import {
 	cardStyle,
 	COLORS,
 	FONT_CSS,
-	protokoll,
+	geist,
 } from "./theme";
 
 const clamp = (value: number) => Math.min(1, Math.max(0, value));
@@ -192,7 +192,7 @@ export function PanelFrame({
 					position: "absolute",
 				right: 44,
 					top: 0,
-					...protokoll,
+					...geist,
 				}}
 			>
 				<div
@@ -367,7 +367,7 @@ export function Eyebrow({ children }: { children: ReactNode }) {
 				fontWeight: 500,
 				letterSpacing: "0.13em",
 				textTransform: "uppercase",
-				...protokoll,
+				...geist,
 			}}
 		>
 			{children}
@@ -444,7 +444,7 @@ export function VerevonSymbol({
 				style={{
 					color: COLORS.muted,
 					fontSize: 20,
-					...protokoll,
+					...geist,
 				}}
 			>
 				{label}
@@ -508,7 +508,7 @@ export function IntegrationLogo({
 				style={{
 					color: COLORS.muted,
 					fontSize: 20,
-					...protokoll,
+					...geist,
 				}}
 			>
 				{integration.label}

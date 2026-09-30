@@ -54,7 +54,7 @@ export function ModuleWorkflowCard({
 			data-feature-index={index}
 			{...(animated ? { "data-feature-card": "" } : {})}
 		>
-			<div className="flex h-[15px] select-none items-center justify-between font-protokoll text-[10px] leading-none text-verevon-j-text/42">
+			<div className="flex h-[15px] select-none items-center justify-between font-geist text-[10px] leading-none text-verevon-j-text/42">
 				<span className="tracking-[0.18em]">{card.area}</span>
 				<span>{`0${index + 1} / ${String(total).padStart(2, "0")}`}</span>
 			</div>
@@ -67,11 +67,11 @@ export function ModuleWorkflowCard({
 				{card.title}
 			</h3>
 
-			<p className="m-0 font-protokoll text-[clamp(0.82rem,0.82vw,0.94rem)] font-light leading-[1.45] text-verevon-text-muted/90">
+			<p className="m-0 font-geist text-[clamp(0.82rem,0.82vw,0.94rem)] font-light leading-[1.45] text-verevon-text-muted/90">
 				{card.text}
 			</p>
 
-			<a className="mt-auto inline-flex w-fit items-center gap-2 font-protokoll text-[0.78rem] font-light text-verevon-j-text/68 underline decoration-verevon-j-text/22 underline-offset-4 transition-colors hover:text-verevon-coral focus-visible:text-verevon-coral focus-visible:outline-none" href={card.href}>
+			<a className="mt-auto inline-flex w-fit items-center gap-2 font-geist text-[0.78rem] font-light text-verevon-j-text/68 underline decoration-verevon-j-text/22 underline-offset-4 transition-colors hover:text-verevon-coral focus-visible:text-verevon-coral focus-visible:outline-none" href={card.href}>
 				{card.linkLabel}
 				<span aria-hidden="true">→</span>
 			</a>
@@ -103,7 +103,7 @@ export function FeatureWorkflowCard({
 			href={card.href}
 			{...(animated ? { "data-feature-card": "" } : {})}
 		>
-			<div className="flex h-[15px] select-none items-center justify-between font-protokoll text-[10px] leading-none text-verevon-j-text/42">
+			<div className="flex h-[15px] select-none items-center justify-between font-geist text-[10px] leading-none text-verevon-j-text/42">
 				<span className="size-[5px] rounded-full bg-verevon-coral/70" />
 				<span>{`0${index + 1} / ${String(total).padStart(2, "0")}`}</span>
 			</div>
@@ -116,7 +116,7 @@ export function FeatureWorkflowCard({
 				{card.title}
 			</h3>
 
-			<p className="m-0 font-protokoll text-[9px] font-medium uppercase tracking-[0.17em] text-verevon-coral/80">
+			<p className="m-0 font-geist text-[9px] font-medium uppercase tracking-[0.17em] text-verevon-coral/80">
 				{card.kicker}
 			</p>
 
@@ -126,7 +126,7 @@ export function FeatureWorkflowCard({
 			>
 				{card.features.map((feature) => (
 					<span
-						className="rounded-full border border-verevon-j-text/10 px-2 py-1 font-protokoll text-[9px] uppercase tracking-[0.12em] text-verevon-j-text/58"
+						className="rounded-full border border-verevon-j-text/10 px-2 py-1 font-geist text-[9px] uppercase tracking-[0.12em] text-verevon-j-text/58"
 						key={feature}
 					>
 						{feature}
@@ -134,7 +134,7 @@ export function FeatureWorkflowCard({
 				))}
 			</div>
 
-			<p className="m-0 font-protokoll text-[clamp(0.82rem,0.82vw,0.94rem)] font-light leading-[1.4] text-verevon-text-muted/90">
+			<p className="m-0 font-geist text-[clamp(0.82rem,0.82vw,0.94rem)] font-light leading-[1.4] text-verevon-text-muted/90">
 				{card.text}
 			</p>
 		</a>

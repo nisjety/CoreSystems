@@ -90,7 +90,7 @@ export function HeroSection() {
 							<span className="block whitespace-nowrap max-[760px]:whitespace-normal">For mennesker og AI.</span>
 					</h1>
 
-							<p className="ml-[clamp(0rem,3.6vw,3.2rem)] mt-6 max-w-[30.4rem] font-protokoll text-[clamp(0.9rem,0.9vw,1.03rem)] font-light leading-[1.42] text-[color-mix(in_srgb,var(--verevon-c-white)_80%,transparent)] text-pretty max-[760px]:ml-0">
+							<p className="ml-[clamp(0rem,3.6vw,3.2rem)] mt-6 max-w-[30.4rem] font-geist text-[clamp(0.9rem,0.9vw,1.03rem)] font-light leading-[1.42] text-[color-mix(in_srgb,var(--verevon-c-white)_80%,transparent)] text-pretty max-[760px]:ml-0">
 							Verevon samler kunnskap, verktøy og oppgaver. Jobb selv, eller la Verevon ta neste steg — innenfor rammene dere setter.
 						</p>
 
@@ -111,7 +111,7 @@ export function HeroSection() {
 
 			<div
 				aria-label="Verevons systemområder"
-				className="absolute bottom-[clamp(28px,4vh,48px)] right-[clamp(5.5rem,9vw,10rem)] z-[2] max-w-[min(55vw,760px)] pb-0.5 text-right font-protokoll text-[clamp(0.62rem,0.7vw,0.78rem)] font-light uppercase tracking-[0.14em] text-[color-mix(in_srgb,var(--verevon-c-white)_72%,transparent)] max-[760px]:right-[5.5rem] max-[760px]:max-w-[calc(100vw-7.5rem)]"
+				className="absolute bottom-[clamp(28px,4vh,48px)] right-[clamp(5.5rem,9vw,10rem)] z-[2] max-w-[min(55vw,760px)] pb-0.5 text-right font-geist text-[clamp(0.62rem,0.7vw,0.78rem)] font-light uppercase tracking-[0.14em] text-[color-mix(in_srgb,var(--verevon-c-white)_72%,transparent)] max-[760px]:right-[5.5rem] max-[760px]:max-w-[calc(100vw-7.5rem)]"
 			>
 				Kilder <span className="px-1.5 text-[color-mix(in_srgb,var(--verevon-c-white)_42%,transparent)]">·</span> Kunnskap <span className="px-1.5 text-[color-mix(in_srgb,var(--verevon-c-white)_42%,transparent)]">·</span> Søk <span className="px-1.5 text-[color-mix(in_srgb,var(--verevon-c-white)_42%,transparent)]">·</span> Agenter <span className="px-1.5 text-[color-mix(in_srgb,var(--verevon-c-white)_42%,transparent)]">·</span> Systemer <span className="px-1.5 text-[color-mix(in_srgb,var(--verevon-c-white)_42%,transparent)]">·</span> Kontroll
 			</div>

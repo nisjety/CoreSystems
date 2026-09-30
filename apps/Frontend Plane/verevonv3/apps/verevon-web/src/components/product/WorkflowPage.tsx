@@ -36,25 +36,25 @@ function HeroWorkItem() {
 				src="/verevon-product-shots/dashboard-live-prompt.png"
 			/>
 			<div className="absolute inset-x-0 top-0 h-28 bg-[linear-gradient(180deg,rgba(248,248,247,0.92),rgba(248,248,247,0))]" />
-			<div className="absolute left-[clamp(16px,2.1vw,28px)] top-[clamp(16px,2.1vw,28px)] rounded-full border border-white/86 bg-white/92 px-3 py-2 font-protokoll text-[0.71rem] font-light text-verevon-j-text/64 shadow-[0_10px_24px_rgba(23,23,23,0.08)] backdrop-blur-md">
+			<div className="absolute left-[clamp(16px,2.1vw,28px)] top-[clamp(16px,2.1vw,28px)] rounded-full border border-white/86 bg-white/92 px-3 py-2 font-geist text-[0.71rem] font-light text-verevon-j-text/64 shadow-[0_10px_24px_rgba(23,23,23,0.08)] backdrop-blur-md">
 				<span className="mr-2 inline-block size-1.5 rounded-full bg-verevon-coral align-middle" />
 				Pågående arbeid
 			</div>
 			<div className="absolute bottom-[clamp(16px,2.1vw,28px)] left-[clamp(16px,2.1vw,28px)] right-[clamp(16px,2.1vw,28px)] rounded-[21px] border border-white/84 bg-white/94 p-[clamp(16px,2vw,23px)] shadow-[0_18px_56px_rgba(23,23,23,0.14)] backdrop-blur-md">
 				<div className="flex items-start justify-between gap-4">
 					<div>
-						<p className="m-0 font-protokoll text-[0.65rem] font-medium uppercase tracking-[0.15em] text-verevon-j-text/64">
+						<p className="m-0 font-geist text-[0.65rem] font-medium uppercase tracking-[0.15em] text-verevon-j-text/64">
 							Forslag klart
 						</p>
 						<p className="m-0 mt-1.5 font-manrope text-[clamp(1.05rem,1.5vw,1.35rem)] font-normal leading-[1.05] tracking-[-0.04em] text-verevon-j-text">
 							Svar på forsinket levering
 						</p>
 					</div>
-					<span className="shrink-0 rounded-full bg-verevon-coral-soft px-2.5 py-1 font-protokoll text-[0.67rem] text-verevon-a-earth">
+					<span className="shrink-0 rounded-full bg-verevon-coral-soft px-2.5 py-1 font-geist text-[0.67rem] text-verevon-a-earth">
 						Kilder vedlagt
 					</span>
 				</div>
-				<div className="mt-4 grid gap-2 border-t border-verevon-j-text/8 pt-3 font-protokoll text-[0.76rem] font-light text-verevon-j-text/62 sm:grid-cols-2">
+				<div className="mt-4 grid gap-2 border-t border-verevon-j-text/8 pt-3 font-geist text-[0.76rem] font-light text-verevon-j-text/62 sm:grid-cols-2">
 					<span>Utkast venter på vurdering</span>
 					<span>Manuelt alternativ tilgjengelig</span>
 				</div>
@@ -79,13 +79,13 @@ export function WorkflowPage() {
 							<p className="verevon-body-lg mt-8 max-w-[53ch] text-pretty">
 								Verevon samler det som gjelder, forbereder et forslag og lar riktig person ta beslutningen før noe går videre.
 							</p>
-							<p className="mt-5 max-w-[53ch] font-protokoll text-[var(--text-body)] font-light leading-[1.55] text-verevon-j-text/60 text-pretty">
+							<p className="mt-5 max-w-[53ch] font-geist text-[var(--text-body)] font-light leading-[1.55] text-verevon-j-text/60 text-pretty">
 								Det er ikke en svart boks mellom spørsmålet og resultatet. Dere kan åpne grunnlaget, endre forslaget eller gjøre samme arbeid selv.
 							</p>
 							<div className="mt-10 flex flex-wrap items-center gap-x-8 gap-y-5">
 								<ArrowButton href="#arbeidsflyt">Se arbeidsløkken</ArrowButton>
 								<Link
-									className="font-protokoll text-[0.92rem] font-light text-verevon-j-text/62 underline-offset-4 transition-colors hover:text-verevon-j-text hover:underline"
+									className="font-geist text-[0.92rem] font-light text-verevon-j-text/62 underline-offset-4 transition-colors hover:text-verevon-j-text hover:underline"
 									href="/plattform/kontrollert-arbeid"
 								>
 									Se kontrollene rundt arbeidet
@@ -106,14 +106,14 @@ export function WorkflowPage() {
 					<div className="mx-auto max-w-[1680px]">
 						<div className="grid gap-8 xl:grid-cols-[minmax(260px,0.72fr)_minmax(0,1fr)] xl:items-end">
 							<div className="max-w-[390px]">
-								<p className="font-protokoll text-[0.72rem] font-medium uppercase tracking-[0.28em] text-white/46">
+								<p className="font-geist text-[0.72rem] font-medium uppercase tracking-[0.28em] text-white/46">
 									Se grunnlaget
 								</p>
 								<h2 className="mt-6 font-manrope text-[clamp(2.5rem,4.5vw,5.6rem)] font-light leading-[0.92] tracking-[-0.065em] text-white text-balance">
 									Arbeid som fortsatt kan forklares etterpå.
 								</h2>
 							</div>
-							<p className="max-w-[58ch] font-protokoll text-[var(--text-body-lg)] font-light leading-[1.52] text-white/62 text-pretty xl:justify-self-end">
+							<p className="max-w-[58ch] font-geist text-[var(--text-body-lg)] font-light leading-[1.52] text-white/62 text-pretty xl:justify-self-end">
 								Når teamet går videre, følger grunnlaget med. Det gjør det lettere å se hva som ble brukt, hva som ble bestemt og hva som er neste naturlige forbedring.
 							</p>
 						</div>
@@ -124,13 +124,13 @@ export function WorkflowPage() {
 									className="border-b border-white/16 py-8 sm:border-r sm:px-7 sm:py-10 sm:odd:border-r-0 xl:border-b-0 xl:border-r xl:px-8 xl:last:border-r-0"
 									key={item.title}
 								>
-									<span className="font-protokoll text-[0.7rem] font-medium tracking-[0.16em] text-verevon-coral">
+									<span className="font-geist text-[0.7rem] font-medium tracking-[0.16em] text-verevon-coral">
 										0{index + 1}
 									</span>
 									<h3 className="mt-6 font-manrope text-[1.45rem] font-normal leading-[1.05] tracking-[-0.04em] text-white">
 										{item.title}
 									</h3>
-									<p className="mt-4 max-w-[27ch] font-protokoll text-[0.91rem] font-light leading-[1.5] text-white/58">
+									<p className="mt-4 max-w-[27ch] font-geist text-[0.91rem] font-light leading-[1.5] text-white/58">
 										{item.body}
 									</p>
 								</article>
@@ -153,7 +153,7 @@ export function WorkflowPage() {
 								src="/verevon-product-shots/chat-draft-sources-focus.jpg"
 							/>
 							<div className="absolute bottom-5 left-5 right-5 rounded-[18px] border border-white/84 bg-white/94 p-5 shadow-[0_18px_48px_rgba(23,23,23,0.15)] backdrop-blur-md sm:bottom-7 sm:left-7 sm:right-7">
-								<p className="m-0 font-protokoll text-[0.65rem] font-medium uppercase tracking-[0.16em] text-verevon-j-text/64">
+								<p className="m-0 font-geist text-[0.65rem] font-medium uppercase tracking-[0.16em] text-verevon-j-text/64">
 									Samme arbeid, synlig i UI
 								</p>
 								<p className="m-0 mt-1.5 font-manrope text-[1.08rem] leading-[1.1] tracking-[-0.035em] text-verevon-j-text">
@@ -177,7 +177,7 @@ export function WorkflowPage() {
 									"Gjennomfør oppgaven selv når det er riktig",
 								].map((item, index) => (
 									<li
-										className="grid grid-cols-[auto_1fr] gap-4 border-b border-verevon-j-text/12 py-4 font-protokoll text-[0.94rem] font-light leading-[1.45] text-verevon-j-text/66"
+										className="grid grid-cols-[auto_1fr] gap-4 border-b border-verevon-j-text/12 py-4 font-geist text-[0.94rem] font-light leading-[1.45] text-verevon-j-text/66"
 										key={item}
 									>
 										<span className="font-medium text-verevon-coral">0{index + 1}</span>

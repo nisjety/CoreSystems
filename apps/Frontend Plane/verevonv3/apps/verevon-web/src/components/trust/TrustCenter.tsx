@@ -28,7 +28,7 @@ function TrustHero() {
 					Sikkerhet, personvern og AI-styring.
 				</h1>
 
-				<p className="mt-8 max-w-[64ch] font-protokoll text-[var(--text-body-lg)] font-light leading-[1.5] text-verevon-text-muted text-pretty">
+				<p className="mt-8 max-w-[64ch] font-geist text-[var(--text-body-lg)] font-light leading-[1.5] text-verevon-text-muted text-pretty">
 					Verevon er bygget for virksomheter som ikke kan gå på akkord med hvor
 					dataene ligger. Her er den ærlige tilstanden: kontrollene er reelle og
 					stort sett live i dag — men vi holder ennå ingen tredjeparts­sertifiseringer.
@@ -126,7 +126,7 @@ function CertificationsSection() {
 							<div className="row-start-1 justify-self-end sm:row-start-auto sm:justify-self-start">
 								<StatusBadge level={cert.level} />
 							</div>
-							<p className="col-span-2 font-protokoll text-[var(--text-body-sm)] font-light leading-[1.5] text-verevon-text-muted text-pretty sm:col-span-1">
+							<p className="col-span-2 font-geist text-[var(--text-body-sm)] font-light leading-[1.5] text-verevon-text-muted text-pretty sm:col-span-1">
 								{cert.plan}
 							</p>
 						</li>
@@ -162,7 +162,7 @@ function ResidencySection() {
 						<ul className="flex flex-wrap gap-2.5">
 							{dataClasses.map((klass) => (
 								<li
-									className="rounded-full border border-verevon-j-text/14 bg-verevon-surface px-3.5 py-1.5 font-protokoll text-[0.82rem] font-light text-verevon-j-text/72"
+									className="rounded-full border border-verevon-j-text/14 bg-verevon-surface px-3.5 py-1.5 font-geist text-[0.82rem] font-light text-verevon-j-text/72"
 									key={klass}
 								>
 									{klass}
@@ -257,14 +257,14 @@ function SubprocessorsSection() {
 										<span className="block font-manrope text-[1.05rem] font-normal leading-snug text-verevon-j-text">
 											{sub.name}
 										</span>
-										<span className="mt-1.5 block font-protokoll text-[0.86rem] font-light leading-snug text-verevon-text-muted/85">
+										<span className="mt-1.5 block font-geist text-[0.86rem] font-light leading-snug text-verevon-text-muted/85">
 											{sub.note}
 										</span>
 									</td>
-									<td className="py-5 pr-6 font-protokoll text-[0.92rem] font-light leading-snug text-verevon-text-muted">
+									<td className="py-5 pr-6 font-geist text-[0.92rem] font-light leading-snug text-verevon-text-muted">
 										{sub.purpose}
 									</td>
-									<td className="py-5 pr-6 font-protokoll text-[0.92rem] font-light leading-snug text-verevon-text-muted">
+									<td className="py-5 pr-6 font-geist text-[0.92rem] font-light leading-snug text-verevon-text-muted">
 										{sub.region}
 									</td>
 									<td className="py-5">

@@ -146,7 +146,7 @@ export function FeatureComposerCycle({
 
 			<div
 				aria-hidden="true"
-				className="mt-3 flex items-center justify-center gap-2 font-protokoll text-[10px] font-medium uppercase tracking-[0.2em] text-verevon-j-text/44"
+				className="mt-3 flex items-center justify-center gap-2 font-geist text-[10px] font-medium uppercase tracking-[0.2em] text-verevon-j-text/44"
 			>
 				{composerModes.map((composerMode) => (
 					<span

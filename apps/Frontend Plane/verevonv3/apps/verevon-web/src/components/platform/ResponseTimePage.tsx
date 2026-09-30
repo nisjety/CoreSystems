@@ -151,7 +151,7 @@ export function ResponseTimePage() {
 							<div className="mt-10 flex flex-wrap items-center gap-x-8 gap-y-5">
 								<ArrowButton href="#losning" variant="light">Se hvordan</ArrowButton>
 								<Link
-									className="font-protokoll text-[0.92rem] font-light text-white/72 underline-offset-4 transition-colors hover:text-white hover:underline focus-visible:text-white focus-visible:outline-none"
+									className="font-geist text-[0.92rem] font-light text-white/72 underline-offset-4 transition-colors hover:text-white hover:underline focus-visible:text-white focus-visible:outline-none"
 									href="/"
 								>
 									Tilbake til forsiden
@@ -176,7 +176,7 @@ export function ResponseTimePage() {
 							</p>
 							<ul className="m-0 mt-9 grid list-none gap-0 border-t border-verevon-j-text/12 p-0">
 								{delaySteps.map((step, index) => (
-									<li className="grid grid-cols-[auto_1fr] gap-4 border-b border-verevon-j-text/12 py-4 font-protokoll text-[0.94rem] font-light leading-[1.45] text-verevon-j-text/66" key={step.title}>
+									<li className="grid grid-cols-[auto_1fr] gap-4 border-b border-verevon-j-text/12 py-4 font-geist text-[0.94rem] font-light leading-[1.45] text-verevon-j-text/66" key={step.title}>
 										<span className="font-medium text-verevon-coral">0{index + 1}</span>
 										<div>
 											<span className="block font-medium text-verevon-j-text/84">{step.title}</span>
@@ -212,7 +212,7 @@ export function ResponseTimePage() {
 							<p className="verevon-body-lg mt-7 max-w-[49ch] text-pretty">
 								Verevon kobler kunnskap, regler og verktøy til én agent som gjør de fire stegene i sammenheng — søker, sjekker og formulerer et utkast før dere tar neste steg.
 							</p>
-							<p className="mt-6 max-w-[52ch] font-protokoll text-[var(--text-body)] font-light leading-[1.55] text-verevon-j-text/60 text-pretty">
+							<p className="mt-6 max-w-[52ch] font-geist text-[var(--text-body)] font-light leading-[1.55] text-verevon-j-text/60 text-pretty">
 								Det som tidligere krevde fire separate runder, blir ett utkast klart for vurdering. Tiden som gikk til å lete, går nå til å vurdere.
 							</p>
 						</div>
@@ -233,13 +233,13 @@ export function ResponseTimePage() {
 								}
 							/>
 							<div className="absolute bottom-5 left-5 right-5 rounded-[20px] border border-white/82 bg-white/94 p-5 shadow-[0_18px_50px_rgba(23,23,23,0.16)] backdrop-blur-md sm:bottom-7 sm:left-7 sm:right-7">
-								<p className="m-0 font-protokoll text-[0.65rem] font-medium uppercase tracking-[0.16em] text-verevon-j-text/64">
+								<p className="m-0 font-geist text-[0.65rem] font-medium uppercase tracking-[0.16em] text-verevon-j-text/64">
 									Status i dette eksempelet
 								</p>
 								<p className="m-0 mt-1.5 font-manrope text-[1.12rem] tracking-[-0.035em] text-verevon-j-text">
 									Fire steg samlet til ett utkast.
 								</p>
-								<div className="mt-4 grid gap-2 border-t border-verevon-j-text/8 pt-3 font-protokoll text-[0.78rem] font-light text-verevon-j-text/62 sm:grid-cols-2">
+								<div className="mt-4 grid gap-2 border-t border-verevon-j-text/8 pt-3 font-geist text-[0.78rem] font-light text-verevon-j-text/62 sm:grid-cols-2">
 									<span>Manuelt · fire runder</span>
 									<span>Med Verevon · ett utkast</span>
 								</div>
@@ -255,7 +255,7 @@ export function ResponseTimePage() {
 							<h2 className="verevon-h2 mt-6 max-w-[14ch] text-balance">
 								Raskere er ikke det samme som ukontrollert.
 							</h2>
-							<p className="mt-6 max-w-[52ch] font-protokoll text-[var(--text-body)] font-light leading-[1.55] text-verevon-j-text/60 text-pretty">
+							<p className="mt-6 max-w-[52ch] font-geist text-[var(--text-body)] font-light leading-[1.55] text-verevon-j-text/60 text-pretty">
 								Et utkast er ikke en handling. Godkjenning og arbeidsflyten rundt svaret er de neste stegene.
 							</p>
 						</div>

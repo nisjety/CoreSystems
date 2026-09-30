@@ -54,7 +54,7 @@ export function TechnologySection() {
 							className="fade-out-top mt-[clamp(28px,2.7vw,44px)] max-w-[440px]"
 							data-fade-out-top
 						>
-							<p className="m-0 font-protokoll text-[clamp(1.02rem,1vw,1.18rem)] font-light leading-[1.55] text-verevon-text-muted">
+							<p className="m-0 font-geist text-[clamp(1.02rem,1vw,1.18rem)] font-light leading-[1.55] text-verevon-text-muted">
 								Verevon starter med et signal: en kundemelding, en oppdatert
 								nettside eller en konflikt i kunnskapen. Derfra lager den et
 								kort grunnlag, foreslår neste steg og venter når godkjenning
@@ -74,12 +74,12 @@ export function TechnologySection() {
 								>
 									<strong className="flex items-baseline gap-3 whitespace-nowrap font-manrope text-[clamp(2.35rem,2.9vw,4rem)] font-light leading-none tracking-[-0.055em] text-verevon-j-text/82">
 										{stat.value}
-										<sup className="relative top-[-0.08em] font-protokoll text-[0.32em] font-light tracking-normal text-verevon-j-text/64">
+										<sup className="relative top-[-0.08em] font-geist text-[0.32em] font-light tracking-normal text-verevon-j-text/64">
 											{stat.unit}
 										</sup>
 									</strong>
 
-									<span className="mt-5 block font-protokoll text-[clamp(0.98rem,0.95vw,1.12rem)] font-light leading-[1.25] text-verevon-text-muted">
+									<span className="mt-5 block font-geist text-[clamp(0.98rem,0.95vw,1.12rem)] font-light leading-[1.25] text-verevon-text-muted">
 										{stat.label}
 									</span>
 								</div>

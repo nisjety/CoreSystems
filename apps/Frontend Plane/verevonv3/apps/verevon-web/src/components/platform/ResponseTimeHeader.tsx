@@ -20,7 +20,7 @@ export function ResponseTimeHeader() {
 
 				<nav
 					aria-label="Svartid-navigasjon"
-					className="flex items-center gap-[clamp(18px,3vw,42px)] font-protokoll text-[0.75rem] font-medium uppercase tracking-[0.06em] text-verevon-j-text/60"
+					className="flex items-center gap-[clamp(18px,3vw,42px)] font-geist text-[0.75rem] font-medium uppercase tracking-[0.06em] text-verevon-j-text/60"
 				>
 					{pageLinks.map((link, index) => (
 						<a

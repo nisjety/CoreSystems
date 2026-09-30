@@ -53,7 +53,7 @@ function Stage({ kind, children }: { kind: SenseKind; children: ReactNode }) {
 	const dark = kind === "oversee";
 	const loopVeil = interpolate(frame, [0, 12, 516, 539], [0, 1, 1, 0], clamp);
 	return <AbsoluteFill style={{ fontFamily: "Manrope, Arial, sans-serif", fontSize: 23, color: ink, fontWeight: 400, lineHeight: 1.3, fontVariantNumeric: "tabular-nums", background: "transparent", overflow: "hidden" }}>
-		<style>{`@font-face{font-family:Manrope;src:url('${staticFile("fonts/manrope-pro-book/manrope-pro-book.woff")}') format('woff');font-weight:400}@font-face{font-family:Protokoll;src:url('${staticFile("fonts/protokoll-medium/ProtokollMedium-Web.woff2")}') format('woff2');font-weight:500}`}</style>
+		<style>{`@font-face{font-family:Manrope;src:url('${staticFile("fonts/manrope/manrope-latin-variable.woff2")}') format('woff2');font-weight:200 800}@font-face{font-family:Geist;src:url('${staticFile("fonts/geist/geist-variable.woff2")}') format('woff2');font-weight:100 900}`}</style>
 		<AbsoluteFill style={{ background: dark ? "linear-gradient(145deg,#19252299,transparent 60%,#1c1b1a99)" : "linear-gradient(150deg,#ffffff26,transparent 70%,#c3916726)" }} />
 		{/* A single signal travels around the working area, then resolves into the result. */}
 		<svg viewBox="0 0 720 640" style={{ position: "absolute", inset: 0, width: "100%", height: "100%", opacity: dark ? .4 : .27 }} fill="none">

@@ -50,7 +50,7 @@ export function StatusBadge({ level, label, className = "" }: StatusBadgeProps) 
 	return (
 		<span
 			className={[
-				"inline-flex w-fit items-center gap-2 whitespace-nowrap rounded-full px-3 py-1 font-protokoll text-[0.74rem] font-medium uppercase leading-none tracking-[0.08em]",
+				"inline-flex w-fit items-center gap-2 whitespace-nowrap rounded-full px-3 py-1 font-geist text-[0.74rem] font-medium uppercase leading-none tracking-[0.08em]",
 				className,
 			]
 				.filter(Boolean)

@@ -31,7 +31,7 @@ export function TechnologyVisualPanel() {
 						Pioneering technology
 					</h2>
 
-					<p className="m-0 mt-7 max-w-[560px] font-protokoll text-[clamp(1rem,1vw,1.18rem)] font-light leading-[1.45] text-verevon-j-text/38">
+					<p className="m-0 mt-7 max-w-[560px] font-geist text-[clamp(1rem,1vw,1.18rem)] font-light leading-[1.45] text-verevon-j-text/38">
 						Verevon turns monitored signals into source-backed briefs,
 						reviewable actions, and auditable execution paths.
 					</p>
@@ -41,11 +41,11 @@ export function TechnologyVisualPanel() {
 					<div>
 						<strong className="font-manrope text-[clamp(2.1rem,2.2vw,3.1rem)] font-light leading-none tracking-[-0.055em] text-verevon-j-text/88">
 							<span className="mr-2 text-[0.82em]">›</span>4{" "}
-							<sup className="relative top-[-0.14em] font-protokoll text-[0.38em] font-light tracking-normal text-verevon-j-text/72">
+							<sup className="relative top-[-0.14em] font-geist text-[0.38em] font-light tracking-normal text-verevon-j-text/72">
 								steps
 							</sup>
 						</strong>
-						<span className="mt-4 block font-protokoll text-[clamp(0.95rem,0.95vw,1.08rem)] font-light leading-[1.3] text-verevon-j-text/48">
+						<span className="mt-4 block font-geist text-[clamp(0.95rem,0.95vw,1.08rem)] font-light leading-[1.3] text-verevon-j-text/48">
 							AI worker loop
 						</span>
 						<span className="mt-8 block h-px w-full bg-verevon-j-text/18" />
@@ -54,11 +54,11 @@ export function TechnologyVisualPanel() {
 					<div>
 						<strong className="font-manrope text-[clamp(2.1rem,2.2vw,3.1rem)] font-light leading-none tracking-[-0.055em] text-verevon-j-text/88">
 							100{" "}
-							<sup className="relative top-[-0.14em] font-protokoll text-[0.38em] font-light tracking-normal text-verevon-j-text/72">
+							<sup className="relative top-[-0.14em] font-geist text-[0.38em] font-light tracking-normal text-verevon-j-text/72">
 								%
 							</sup>
 						</strong>
-						<span className="mt-4 block font-protokoll text-[clamp(0.95rem,0.95vw,1.08rem)] font-light leading-[1.3] text-verevon-j-text/48">
+						<span className="mt-4 block font-geist text-[clamp(0.95rem,0.95vw,1.08rem)] font-light leading-[1.3] text-verevon-j-text/48">
 							Manual parity
 						</span>
 						<span className="mt-8 block h-px w-full bg-verevon-j-text/18" />
@@ -67,11 +67,11 @@ export function TechnologyVisualPanel() {
 					<div>
 						<strong className="font-manrope text-[clamp(2.1rem,2.2vw,3.1rem)] font-light leading-none tracking-[-0.055em] text-verevon-j-text/88">
 							HITL{" "}
-							<sup className="relative top-[-0.14em] font-protokoll text-[0.38em] font-light tracking-normal text-verevon-j-text/72">
+							<sup className="relative top-[-0.14em] font-geist text-[0.38em] font-light tracking-normal text-verevon-j-text/72">
 								approved
 							</sup>
 						</strong>
-						<span className="mt-4 block font-protokoll text-[clamp(0.95rem,0.95vw,1.08rem)] font-light leading-[1.3] text-verevon-j-text/48">
+						<span className="mt-4 block font-geist text-[clamp(0.95rem,0.95vw,1.08rem)] font-light leading-[1.3] text-verevon-j-text/48">
 							Risky actions
 						</span>
 						<span className="mt-8 block h-px w-full bg-verevon-j-text/18" />

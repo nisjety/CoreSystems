@@ -16,7 +16,7 @@
 		linear-gradient(180deg, #aaaca9 0%, #858984 45%, #5a5e5a 100%);
 	color: #f8f8f7;
 	container-type: size;
-	font-family: Protokoll, var(--font-geist-sans), Arial, sans-serif;
+	font-family: Geist, var(--font-geist-sans), Arial, sans-serif;
 	isolation: isolate;
 	max-height: 100svh;
 	max-width: 100vw;

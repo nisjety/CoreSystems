@@ -101,7 +101,7 @@ function DemoShell({
 	section: string;
 }) {
 	return (
-		<div className="h-full w-full overflow-hidden bg-[#f7f7f5] font-protokoll text-[#1d1d1b]">
+		<div className="h-full w-full overflow-hidden bg-[#f7f7f5] font-geist text-[#1d1d1b]">
 			<header className="flex h-[9%] min-h-8 items-center gap-[2%] border-b border-black/8 bg-white/86 px-[2.2%] backdrop-blur-xl">
 				<span className="grid aspect-square h-[54%] min-h-5 place-items-center rounded-[7px] border border-black/9 bg-[#1d1d1b] font-manrope text-[clamp(9px,1vw,14px)] text-white">
 					V

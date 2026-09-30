@@ -112,7 +112,7 @@ function LoopComposerContent() {
 					/>
 				</div>
 				<p
-					className="mt-[clamp(22px,4vh,44px)] min-h-[3em] max-w-[42rem] shrink-0 font-protokoll text-[clamp(0.96rem,1.04vw,1.16rem)] font-light leading-[1.48] text-verevon-text-muted"
+					className="mt-[clamp(22px,4vh,44px)] min-h-[3em] max-w-[42rem] shrink-0 font-geist text-[clamp(0.96rem,1.04vw,1.16rem)] font-light leading-[1.48] text-verevon-text-muted"
 					data-product-loop-composer-copy=""
 				>
 					<span
@@ -204,7 +204,7 @@ function LoopCopyPanel({ index, stage }: { index: number; stage: LoopStage }) {
 			<h2 className="verevon-home-heading m-0 max-w-[10.5ch] text-verevon-j-text text-balance">
 				{stage.title}
 			</h2>
-			<p className="mt-[clamp(22px,2.4vw,36px)] max-w-[416px] font-protokoll text-[clamp(1rem,1.02vw,1.18rem)] font-light leading-[1.5] text-verevon-text-muted text-pretty">
+			<p className="mt-[clamp(22px,2.4vw,36px)] max-w-[416px] font-geist text-[clamp(1rem,1.02vw,1.18rem)] font-light leading-[1.5] text-verevon-text-muted text-pretty">
 				{stage.body}
 			</p>
 		</div>
@@ -256,7 +256,7 @@ function ProductLoopMobileFallback() {
 					<h3 className="m-0 max-w-[11ch] font-manrope text-[clamp(2.5rem,12vw,4.6rem)] font-light leading-[0.94] tracking-[-0.065em] text-verevon-j-text text-balance">
 						{stage.title}
 					</h3>
-					<p className="max-w-[34rem] font-protokoll text-[1rem] font-light leading-[1.48] text-verevon-text-muted">
+					<p className="max-w-[34rem] font-geist text-[1rem] font-light leading-[1.48] text-verevon-text-muted">
 						{stage.body}
 					</p>
                     <div className="relative overflow-hidden rounded-[20px]">
@@ -276,7 +276,7 @@ function ProductLoopMobileFallback() {
 					id="product-mobile-composer-control"
 					onModeChange={setActiveComposerMode}
 				/>
-				<p className="max-w-[34rem] font-protokoll text-[1rem] font-light leading-[1.48] text-verevon-text-muted">
+				<p className="max-w-[34rem] font-geist text-[1rem] font-light leading-[1.48] text-verevon-text-muted">
 					{activeComposerCopy.body}
 				</p>
 			</div>

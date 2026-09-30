@@ -31,7 +31,7 @@ export function ModulePhotoReview() {
 	const selectedCombination = combinations.find((combination) => combination.choices.every((choice, index) => choice === choices[index]));
 
 	return (
-		<main className="min-h-screen bg-[#f8f8f7] px-6 py-9 font-protokoll text-verevon-j-text md:px-9">
+		<main className="min-h-screen bg-[#f8f8f7] px-6 py-9 font-geist text-verevon-j-text md:px-9">
 			<header className="mx-auto mb-12 max-w-[1600px]">
 				<Link className="text-sm underline underline-offset-4" href="/#features">← Til forsiden</Link>
 				<div className="mt-10 flex flex-wrap items-end justify-between gap-6">

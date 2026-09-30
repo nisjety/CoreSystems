@@ -83,12 +83,12 @@ function TestimonialCard({
 				className="absolute inset-x-0 top-0 h-px bg-[linear-gradient(90deg,transparent,rgba(238,122,80,0.68),transparent)]"
 			/>
 
-			<p className="m-0 font-protokoll text-[0.98rem] font-light leading-7 text-verevon-j-text/78">
+			<p className="m-0 font-geist text-[0.98rem] font-light leading-7 text-verevon-j-text/78">
 				“{testimonial.text}”
 			</p>
 
 			<div className="mt-6 flex items-center gap-4">
-				<div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-full border border-verevon-j-text/10 bg-[linear-gradient(135deg,color-mix(in_srgb,var(--verevon-bg-soft)_72%,white),color-mix(in_srgb,var(--verevon-a-earth)_18%,white))] font-protokoll text-sm font-medium uppercase tracking-[0.18em] text-verevon-j-text/74">
+				<div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-full border border-verevon-j-text/10 bg-[linear-gradient(135deg,color-mix(in_srgb,var(--verevon-bg-soft)_72%,white),color-mix(in_srgb,var(--verevon-a-earth)_18%,white))] font-geist text-sm font-medium uppercase tracking-[0.18em] text-verevon-j-text/74">
 					{getInitials(testimonial.name)}
 				</div>
 
@@ -96,7 +96,7 @@ function TestimonialCard({
 					<p className="m-0 font-manrope text-[1.02rem] font-medium leading-tight text-verevon-j-text">
 						{testimonial.name}
 					</p>
-					<p className="m-0 mt-1 font-protokoll text-[0.85rem] uppercase tracking-[0.12em] text-verevon-j-text/48">
+					<p className="m-0 mt-1 font-geist text-[0.85rem] uppercase tracking-[0.12em] text-verevon-j-text/48">
 						{testimonial.role}
 					</p>
 				</div>
@@ -175,7 +175,7 @@ export function Testimonials() {
 					className="mx-auto flex max-w-[640px] flex-col items-center text-center"
 				>
 					<motion.div
-						className="inline-flex rounded-full border border-verevon-j-text/14 bg-white/58 px-4 py-1.5 font-protokoll text-[0.82rem] uppercase tracking-[0.14em] text-verevon-j-text/64 shadow-[0_18px_60px_rgba(21,24,26,0.08)] backdrop-blur-[10px] max-[899px]:border-white/22 max-[899px]:bg-white/10 max-[899px]:text-white/72"
+						className="inline-flex rounded-full border border-verevon-j-text/14 bg-white/58 px-4 py-1.5 font-geist text-[0.82rem] uppercase tracking-[0.14em] text-verevon-j-text/64 shadow-[0_18px_60px_rgba(21,24,26,0.08)] backdrop-blur-[10px] max-[899px]:border-white/22 max-[899px]:bg-white/10 max-[899px]:text-white/72"
 						initial={
 							shouldReduceMotion
 								? false
@@ -217,7 +217,7 @@ export function Testimonials() {
 						What our users say
 					</motion.h2>
 					<motion.p
-						className="m-0 mt-5 max-w-[560px] font-protokoll text-[clamp(1rem,1.05vw,1.16rem)] font-light leading-[1.6] text-verevon-j-text/64 max-[899px]:text-white/72"
+						className="m-0 mt-5 max-w-[560px] font-geist text-[clamp(1rem,1.05vw,1.16rem)] font-light leading-[1.6] text-verevon-j-text/64 max-[899px]:text-white/72"
 						initial={
 							shouldReduceMotion
 								? false

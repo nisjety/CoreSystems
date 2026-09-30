@@ -17,7 +17,7 @@ import {
 	VerevonSymbol,
 } from "./primitives";
 import { easedSegment, getLoopOpacity } from "./timeline";
-import { manrope, COLORS, protokoll } from "./theme";
+import { manrope, COLORS, geist } from "./theme";
 
 export type FeatureFilmKind =
 	| "build"
@@ -106,7 +106,7 @@ function CheckMark({ size = 30 }: { size?: number }) {
 				height: size,
 				justifyContent: "center",
 				width: size,
-				...protokoll,
+				...geist,
 			}}
 		>
 			✓
@@ -236,7 +236,7 @@ function SmallNode({
 				translate: `${(1 - active) * xOffset}px ${(1 - active) * yOffset}px`,
 			}}
 		>
-			<div style={{ fontSize: 23, ...protokoll }}>{label}</div>
+			<div style={{ fontSize: 23, ...geist }}>{label}</div>
 		</UiCard>
 	);
 }
@@ -316,7 +316,7 @@ function BuildFilm({ frame }: { frame: number }) {
 								color: COLORS.coralDeep,
 								fontSize: 19,
 								padding: "11px 16px",
-								...protokoll,
+								...geist,
 							}}
 						>
 							oppgave
@@ -386,7 +386,7 @@ function BuildFilm({ frame }: { frame: number }) {
 									color: "rgba(255,255,255,0.62)",
 									fontSize: 20,
 									marginTop: 9,
-									...protokoll,
+									...geist,
 								}}
 							>
 								mål · kunnskap · verktøy
@@ -607,7 +607,7 @@ function ConnectFilm({ frame }: { frame: number }) {
 					position: "absolute",
 					top: 730,
 					width: FILM_STAGE.width,
-					...protokoll,
+					...geist,
 				}}
 			>
 				<CheckMark size={27} /> Systemene er koblet
@@ -703,7 +703,7 @@ function GroundFilm({ frame }: { frame: number }) {
 									justifyContent: "center",
 									scale: stampScale,
 									width: 58,
-									...protokoll,
+									...geist,
 								}}
 							>
 								{source.reference}
@@ -761,7 +761,7 @@ function GroundFilm({ frame }: { frame: number }) {
 					>
 						<Eyebrow>Forankret svar</Eyebrow>
 						<span
-							style={{ color: COLORS.success, fontSize: 19, ...protokoll }}
+							style={{ color: COLORS.success, fontSize: 19, ...geist }}
 						>
 							3 kilder
 						</span>
@@ -776,7 +776,7 @@ function GroundFilm({ frame }: { frame: number }) {
 							color: COLORS.muted,
 							fontSize: 19,
 							marginTop: 24,
-							...protokoll,
+							...geist,
 						}}
 					>
 						[01] · [02] · [03]
@@ -864,7 +864,7 @@ function ApproveFilm({ frame }: { frame: number }) {
 									color: COLORS.muted,
 									fontSize: 20,
 									marginTop: 14,
-									...protokoll,
+									...geist,
 								}}
 							>
 								Ordre 52481
@@ -877,7 +877,7 @@ function ApproveFilm({ frame }: { frame: number }) {
 								color: COLORS.success,
 								fontSize: 19,
 								padding: "11px 16px",
-								...protokoll,
+								...geist,
 							}}
 						>
 							Policy 04 ✓
@@ -898,7 +898,7 @@ function ApproveFilm({ frame }: { frame: number }) {
 					textTransform: "uppercase",
 					top: 322,
 					width: FILM_STAGE.width,
-					...protokoll,
+					...geist,
 				}}
 			>
 				Kontrollpunkt
@@ -988,7 +988,7 @@ function ApproveFilm({ frame }: { frame: number }) {
 									color: COLORS.success,
 									fontSize: 20,
 									marginTop: 8,
-									...protokoll,
+									...geist,
 								}}
 							>
 								Ida godkjente · revisjon lagret

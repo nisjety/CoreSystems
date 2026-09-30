@@ -19,22 +19,12 @@
 }
 
 @font-face {
-	font-family: Protokoll;
+	font-family: Geist;
 	font-style: normal;
-	font-weight: 300;
-	src: url("/fonts/protokoll-light/ProtokollLight-Web.woff2") format("woff2");
+	font-weight: 100 900;
 	font-display: swap;
+	src: url("/fonts/geist/geist-variable.woff2") format("woff2");
 }
-
-@font-face {
-	font-family: Protokoll;
-	font-style: normal;
-	font-weight: 500;
-	src: url("/fonts/protokoll-medium/ProtokollMedium-Web.woff2") format("woff2");
-	font-display: swap;
-}
-
-
 
 :root {
 	color: var(--foreground);
@@ -231,7 +221,8 @@
 	--color-verevon-j-text-soft: var(--verevon-j-text-soft);
 
 	--font-manrope: Manrope, sans-serif;
-	--font-protokoll: Protokoll, sans-serif;
+	--font-geist: Geist, sans-serif;
+	--font-geist-sans: Geist, sans-serif;
 	--font-sans: var(--font-geist-sans);
 	--font-mono: var(--font-geist-mono);
 
@@ -888,7 +879,7 @@ canvas {
  * ------------------------------------------------------------------- */
 
 .verevon-eyebrow {
-	font-family: var(--font-protokoll), sans-serif;
+	font-family: var(--font-geist), sans-serif;
 	font-size: var(--text-eyebrow);
 	font-weight: 500;
 	line-height: 1;
@@ -925,7 +916,7 @@ canvas {
 }
 
 .verevon-body-lg {
-	font-family: var(--font-protokoll), sans-serif;
+	font-family: var(--font-geist), sans-serif;
 	font-size: var(--text-body-lg);
 	font-weight: 300;
 	line-height: var(--text-body-lg--line-height);
@@ -933,7 +924,7 @@ canvas {
 }
 
 .verevon-body {
-	font-family: var(--font-protokoll), sans-serif;
+	font-family: var(--font-geist), sans-serif;
 	font-size: var(--text-body);
 	font-weight: 300;
 	line-height: var(--text-body--line-height);

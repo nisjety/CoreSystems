@@ -332,10 +332,10 @@ function VerevonPromptLoop({ activeIndex }: { activeIndex: number }) {
 								<Icon aria-hidden="true" className="size-3.5" />
 							</span>
 							<span className="min-w-0">
-								<span className="block font-protokoll text-[0.68rem] font-medium uppercase leading-none tracking-[0.13em] text-verevon-j-text/52">
+								<span className="block font-geist text-[0.68rem] font-medium uppercase leading-none tracking-[0.13em] text-verevon-j-text/52">
 									{source.label}
 								</span>
-								<span className="mt-1 block truncate font-protokoll text-[0.76rem] font-light leading-none text-verevon-j-text/76">
+								<span className="mt-1 block truncate font-geist text-[0.76rem] font-light leading-none text-verevon-j-text/76">
 									{source.detail}
 								</span>
 							</span>
@@ -390,7 +390,7 @@ function VerevonPromptLoop({ activeIndex }: { activeIndex: number }) {
 						<span className="size-2 rounded-full bg-[#d8bc65]" />
 						<span className="size-2 rounded-full bg-[#6f9f8d]" />
 					</div>
-					<span className="font-protokoll text-[0.62rem] font-medium uppercase leading-none tracking-[0.18em] text-verevon-j-text/42">
+					<span className="font-geist text-[0.62rem] font-medium uppercase leading-none tracking-[0.18em] text-verevon-j-text/42">
 						Egen handling
 					</span>
 				</div>
@@ -409,7 +409,7 @@ function VerevonPromptLoop({ activeIndex }: { activeIndex: number }) {
 						>
 							<div className="flex items-start justify-between gap-5">
 								<div>
-									<p className="m-0 font-protokoll text-[0.68rem] font-medium uppercase leading-none tracking-[0.18em] text-verevon-j-text/42">
+									<p className="m-0 font-geist text-[0.68rem] font-medium uppercase leading-none tracking-[0.18em] text-verevon-j-text/42">
 										{step.label}
 									</p>
 									<h3 className="m-0 mt-3 max-w-[430px] font-manrope text-[clamp(1.7rem,2.6vw,2.65rem)] font-light leading-[0.98] tracking-[-0.05em] text-verevon-j-text">
@@ -417,7 +417,7 @@ function VerevonPromptLoop({ activeIndex }: { activeIndex: number }) {
 									</h3>
 								</div>
 								<span
-									className="mt-1 inline-flex shrink-0 items-center gap-2 border border-verevon-j-text/10 bg-white/62 px-2.5 py-2 font-protokoll text-[0.62rem] font-medium uppercase leading-none tracking-[0.14em] text-verevon-j-text/58"
+									className="mt-1 inline-flex shrink-0 items-center gap-2 border border-verevon-j-text/10 bg-white/62 px-2.5 py-2 font-geist text-[0.62rem] font-medium uppercase leading-none tracking-[0.14em] text-verevon-j-text/58"
 									style={{ color: step.accent }}
 								>
 									<span
@@ -429,10 +429,10 @@ function VerevonPromptLoop({ activeIndex }: { activeIndex: number }) {
 							</div>
 
 							<div className="mt-5 border border-verevon-j-text/8 bg-white/48 p-3.5">
-								<p className="m-0 font-protokoll text-[0.62rem] font-medium uppercase leading-none tracking-[0.16em] text-verevon-j-text/38">
+								<p className="m-0 font-geist text-[0.62rem] font-medium uppercase leading-none tracking-[0.16em] text-verevon-j-text/38">
 									Prompt
 								</p>
-								<p className="m-0 mt-2 font-protokoll text-[clamp(0.94rem,1vw,1.08rem)] font-light leading-[1.38] text-verevon-j-text/74">
+								<p className="m-0 mt-2 font-geist text-[clamp(0.94rem,1vw,1.08rem)] font-light leading-[1.38] text-verevon-j-text/74">
 									{step.prompt}
 								</p>
 							</div>
@@ -454,11 +454,11 @@ function VerevonPromptLoop({ activeIndex }: { activeIndex: number }) {
 										}}
 									/>
 									<div className="relative flex items-center justify-between gap-3">
-										<p className="m-0 font-protokoll text-[0.62rem] font-medium uppercase leading-none tracking-[0.16em] text-verevon-j-text/38">
+										<p className="m-0 font-geist text-[0.62rem] font-medium uppercase leading-none tracking-[0.16em] text-verevon-j-text/38">
 											Handling
 										</p>
 										<span
-											className="inline-flex items-center gap-1.5 font-protokoll text-[0.58rem] font-medium uppercase leading-none tracking-[0.14em]"
+											className="inline-flex items-center gap-1.5 font-geist text-[0.58rem] font-medium uppercase leading-none tracking-[0.14em]"
 											style={{ color: step.accent }}
 										>
 											<span
@@ -468,10 +468,10 @@ function VerevonPromptLoop({ activeIndex }: { activeIndex: number }) {
 											{step.status}
 										</span>
 									</div>
-									<p className="relative m-0 mt-3 truncate font-protokoll text-[0.86rem] font-medium leading-none text-verevon-j-text/76">
+									<p className="relative m-0 mt-3 truncate font-geist text-[0.86rem] font-medium leading-none text-verevon-j-text/76">
 										{step.action}
 									</p>
-									<p className="relative m-0 mt-2 font-protokoll text-[0.78rem] font-light leading-[1.4] text-verevon-j-text/54">
+									<p className="relative m-0 mt-2 font-geist text-[0.78rem] font-light leading-[1.4] text-verevon-j-text/54">
 										{step.actionDetail}
 									</p>
 								</div>
@@ -487,17 +487,17 @@ function VerevonPromptLoop({ activeIndex }: { activeIndex: number }) {
 									}}
 								>
 									<div className="flex items-center justify-between gap-3">
-										<p className="m-0 font-protokoll text-[0.62rem] font-medium uppercase leading-none tracking-[0.16em] text-verevon-j-text/38">
+										<p className="m-0 font-geist text-[0.62rem] font-medium uppercase leading-none tracking-[0.16em] text-verevon-j-text/38">
 											Resultat
 										</p>
 										<span className="grid size-6 place-items-center rounded-[6px] bg-verevon-j-text text-white">
 											<Check aria-hidden="true" className="size-3.5" />
 										</span>
 									</div>
-									<p className="m-0 mt-3 font-protokoll text-[0.94rem] font-medium leading-none text-verevon-j-text/78">
+									<p className="m-0 mt-3 font-geist text-[0.94rem] font-medium leading-none text-verevon-j-text/78">
 										{step.result}
 									</p>
-									<p className="m-0 mt-2 font-protokoll text-[0.78rem] font-light leading-[1.4] text-verevon-j-text/54">
+									<p className="m-0 mt-2 font-geist text-[0.78rem] font-light leading-[1.4] text-verevon-j-text/54">
 										{step.resultDetail}
 									</p>
 								</motion.div>
@@ -684,7 +684,7 @@ export function PromptSection() {
 			<div className="relative z-[2] mx-auto grid min-h-[100svh] w-full max-w-[1760px] grid-cols-[minmax(0,0.78fr)_minmax(420px,1fr)] items-center gap-[clamp(42px,5.6vw,112px)] px-[clamp(56px,5.55vw,208px)] py-[clamp(84px,9vh,136px)] max-[1023px]:grid-cols-1 max-[1023px]:px-[clamp(24px,4vw,56px)]">
 				<div className="min-w-0">
 					<p
-						className="fade-out-top m-0 font-protokoll text-[0.72rem] font-medium uppercase leading-none tracking-[0.32em] text-verevon-j-text/38"
+						className="fade-out-top m-0 font-geist text-[0.72rem] font-medium uppercase leading-none tracking-[0.32em] text-verevon-j-text/38"
 						data-fade-out-top
 					>
 						Skriv målet
@@ -698,7 +698,7 @@ export function PromptSection() {
 					</h2>
 
 					<p
-						className="fade-out-top m-0 mt-[clamp(24px,2.6vw,38px)] max-w-[640px] font-protokoll text-[clamp(1.02rem,1vw,1.18rem)] font-light leading-[1.5] text-verevon-text-muted"
+						className="fade-out-top m-0 mt-[clamp(24px,2.6vw,38px)] max-w-[640px] font-geist text-[clamp(1.02rem,1vw,1.18rem)] font-light leading-[1.5] text-verevon-text-muted"
 						data-fade-out-top
 					>
 						Skriv hva som skal løses. Verevon finner kilder, lager forslag og
@@ -717,7 +717,7 @@ export function PromptSection() {
 							>
 								{promptFeed.completed.map((line, index) => (
 									<p
-										className="m-0 grid grid-cols-[42px_minmax(0,1fr)] gap-4 border-t border-verevon-j-text/10 pt-4 font-protokoll text-[clamp(1.06rem,1.18vw,1.42rem)] font-light leading-[1.38] text-verevon-j-text"
+										className="m-0 grid grid-cols-[42px_minmax(0,1fr)] gap-4 border-t border-verevon-j-text/10 pt-4 font-geist text-[clamp(1.06rem,1.18vw,1.42rem)] font-light leading-[1.38] text-verevon-j-text"
 										data-promt-line
 										key={`${line}-${index}`}
 									>
@@ -731,7 +731,7 @@ export function PromptSection() {
 								{promptFeed.activeText ||
 								promptFeed.isTyping ? (
 									<p
-										className="m-0 grid grid-cols-[42px_minmax(0,1fr)] gap-4 border-t border-verevon-j-text/10 pt-4 font-protokoll text-[clamp(1.06rem,1.18vw,1.42rem)] font-light leading-[1.38] text-verevon-j-text"
+										className="m-0 grid grid-cols-[42px_minmax(0,1fr)] gap-4 border-t border-verevon-j-text/10 pt-4 font-geist text-[clamp(1.06rem,1.18vw,1.42rem)] font-light leading-[1.38] text-verevon-j-text"
 										data-promt-line
 									>
 										<span className="pt-[0.18em] text-[0.68em] leading-none tracking-[0.18em] text-verevon-j-text/32">
@@ -761,7 +761,7 @@ export function PromptSection() {
 					</ul>
 
 					<p
-						className="fade-out-top m-0 mt-5 font-protokoll text-[clamp(0.92rem,0.92vw,1.02rem)] font-light leading-none text-verevon-j-text/52"
+						className="fade-out-top m-0 mt-5 font-geist text-[clamp(0.92rem,0.92vw,1.02rem)] font-light leading-none text-verevon-j-text/52"
 						data-fade-out-top
 					>
 						<span>Åpen instruks.</span>{" "}

@@ -45,19 +45,19 @@ function HeroContextCard() {
 		<div className="absolute bottom-[clamp(18px,2.4vw,34px)] left-[clamp(18px,2.4vw,34px)] right-[clamp(18px,2.4vw,34px)] rounded-[22px] border border-white/80 bg-white/94 p-[clamp(16px,2vw,24px)] shadow-[0_24px_64px_rgba(23,23,23,0.16)] backdrop-blur-md">
 			<div className="flex items-start justify-between gap-5">
 				<div>
-					<p className="m-0 font-protokoll text-[0.65rem] font-medium uppercase tracking-[0.16em] text-verevon-j-text/64">
+					<p className="m-0 font-geist text-[0.65rem] font-medium uppercase tracking-[0.16em] text-verevon-j-text/64">
 						Felles kontekst
 					</p>
 					<p className="m-0 mt-2 font-manrope text-[clamp(1.1rem,1.55vw,1.45rem)] font-normal leading-[1.04] tracking-[-0.04em] text-verevon-j-text">
 						Levering til Nora
 					</p>
 				</div>
-				<span className="rounded-full bg-emerald-500/10 px-2.5 py-1 font-protokoll text-[0.68rem] font-medium text-emerald-800">
+				<span className="rounded-full bg-emerald-500/10 px-2.5 py-1 font-geist text-[0.68rem] font-medium text-emerald-800">
 					Klar for neste steg
 				</span>
 			</div>
 
-			<div className="mt-4 grid gap-2 border-t border-verevon-j-text/8 pt-3 font-protokoll text-[0.78rem] font-light text-verevon-j-text/62 sm:grid-cols-2">
+			<div className="mt-4 grid gap-2 border-t border-verevon-j-text/8 pt-3 font-geist text-[0.78rem] font-light text-verevon-j-text/62 sm:grid-cols-2">
 				<span>Pågående kundesamtale</span>
 				<span>Fire kilder samlet</span>
 			</div>
@@ -84,14 +84,14 @@ export function SharedContextPage() {
 							<p className="verevon-body-lg mt-8 max-w-[52ch] text-pretty">
 								Verevon samler historikken, kunnskapen og det som må skje videre — på tvers av arbeidsflatene dere allerede bruker.
 							</p>
-							<p className="mt-5 max-w-[54ch] font-protokoll text-[var(--text-body)] font-light leading-[1.55] text-verevon-j-text/60 text-pretty">
+							<p className="mt-5 max-w-[54ch] font-geist text-[var(--text-body)] font-light leading-[1.55] text-verevon-j-text/60 text-pretty">
 								Dere trenger ikke å bytte ut verdenen deres for å bruke Verevon. Dere får et felles utgangspunkt for samtalen, grunnlaget og neste steg.
 							</p>
 
 							<div className="mt-10 flex flex-wrap items-center gap-x-8 gap-y-5">
 								<ArrowButton href="#eksempel">Se et eksempel</ArrowButton>
 								<Link
-									className="font-protokoll text-[0.92rem] font-light text-verevon-j-text/62 underline-offset-4 transition-colors hover:text-verevon-j-text hover:underline"
+									className="font-geist text-[0.92rem] font-light text-verevon-j-text/62 underline-offset-4 transition-colors hover:text-verevon-j-text hover:underline"
 									href="/#kunnskap"
 								>
 									Se hvordan dette passer inn i arbeidsflyten
@@ -118,7 +118,7 @@ export function SharedContextPage() {
 					className="border-b border-verevon-j-text/8 px-[var(--verevon-edge)] py-[clamp(34px,4vw,56px)] max-[760px]:px-[var(--verevon-page-pad)]"
 				>
 					<div className="mx-auto grid max-w-[1680px] items-center gap-7 lg:grid-cols-[minmax(250px,0.72fr)_minmax(0,1fr)]">
-						<p className="m-0 max-w-[27ch] font-protokoll text-[0.9rem] font-light leading-[1.45] text-verevon-j-text/62">
+						<p className="m-0 max-w-[27ch] font-geist text-[0.9rem] font-light leading-[1.45] text-verevon-j-text/62">
 							Arbeidet fortsetter i systemene dere kjenner.
 						</p>
 						<div className="flex flex-wrap items-center justify-start gap-2.5 lg:justify-end" aria-label="Kjente systemer">
@@ -151,7 +151,7 @@ export function SharedContextPage() {
 									"Hva som fremdeles trenger en vurdering",
 								].map((item, index) => (
 									<li
-										className="grid grid-cols-[auto_1fr] gap-4 border-b border-verevon-j-text/12 py-4 font-protokoll text-[0.94rem] font-light leading-[1.45] text-verevon-j-text/66"
+										className="grid grid-cols-[auto_1fr] gap-4 border-b border-verevon-j-text/12 py-4 font-geist text-[0.94rem] font-light leading-[1.45] text-verevon-j-text/66"
 										key={item}
 									>
 										<span className="font-medium text-verevon-coral">0{index + 1}</span>
@@ -172,18 +172,18 @@ export function SharedContextPage() {
 							<div className="absolute bottom-5 left-5 right-5 rounded-[20px] border border-white/82 bg-white/94 p-5 shadow-[0_18px_50px_rgba(23,23,23,0.16)] backdrop-blur-md sm:bottom-7 sm:left-7 sm:right-7">
 								<div className="flex items-start justify-between gap-4">
 									<div>
-										<p className="m-0 font-protokoll text-[0.65rem] font-medium uppercase tracking-[0.16em] text-verevon-j-text/64">
+										<p className="m-0 font-geist text-[0.65rem] font-medium uppercase tracking-[0.16em] text-verevon-j-text/64">
 											Kildegrunnlag
 										</p>
 										<p className="m-0 mt-1.5 font-manrope text-[1.1rem] tracking-[-0.035em] text-verevon-j-text">
 											Returpolicy 04
 										</p>
 									</div>
-									<span className="rounded-full bg-verevon-surface-soft px-2.5 py-1 font-protokoll text-[0.68rem] text-verevon-j-text/62">
+									<span className="rounded-full bg-verevon-surface-soft px-2.5 py-1 font-geist text-[0.68rem] text-verevon-j-text/62">
 										Oppdatert i går
 									</span>
 								</div>
-								<p className="m-0 mt-4 font-protokoll text-[0.85rem] font-light leading-[1.45] text-verevon-j-text/62">
+								<p className="m-0 mt-4 font-geist text-[0.85rem] font-light leading-[1.45] text-verevon-j-text/62">
 									Grunnlaget er synlig før teamet tar neste beslutning.
 								</p>
 							</div>
@@ -197,13 +197,13 @@ export function SharedContextPage() {
 				>
 					<div className="mx-auto grid max-w-[1680px] items-center gap-x-[clamp(48px,8vw,150px)] gap-y-12 xl:grid-cols-[minmax(0,0.86fr)_minmax(480px,1.14fr)]">
 						<div className="max-w-[580px]">
-							<p className="font-protokoll text-[0.72rem] font-medium uppercase tracking-[0.28em] text-white/46">
+							<p className="font-geist text-[0.72rem] font-medium uppercase tracking-[0.28em] text-white/46">
 								Overlevering
 							</p>
 							<h2 className="mt-6 max-w-[12ch] font-manrope text-[clamp(2.45rem,4.1vw,5rem)] font-light leading-[0.94] tracking-[-0.06em] text-white text-balance">
 								Håndoff uten å begynne på nytt.
 							</h2>
-							<p className="mt-7 max-w-[50ch] font-protokoll text-[var(--text-body-lg)] font-light leading-[1.52] text-white/64 text-pretty">
+							<p className="mt-7 max-w-[50ch] font-geist text-[var(--text-body-lg)] font-light leading-[1.52] text-white/64 text-pretty">
 								Når noen andre tar over, trenger de ikke å grave seg bakover. De ser hva kunden har sagt, hva som ble brukt, hva som er gjort og hva som fortsatt trenger oppmerksomhet.
 							</p>
 							<ul className="m-0 mt-9 grid list-none border-t border-white/16 p-0">
@@ -212,7 +212,7 @@ export function SharedContextPage() {
 									"Kildene som bærer saken",
 									"Det tydeligste neste steget",
 								].map((item, index) => (
-									<li className="grid grid-cols-[auto_1fr] gap-4 border-b border-white/16 py-4 font-protokoll text-[0.94rem] font-light text-white/66" key={item}>
+									<li className="grid grid-cols-[auto_1fr] gap-4 border-b border-white/16 py-4 font-geist text-[0.94rem] font-light text-white/66" key={item}>
 										<span className="text-verevon-coral">0{index + 1}</span>
 										<span>{item}</span>
 									</li>
@@ -229,7 +229,7 @@ export function SharedContextPage() {
 								src="/man-talking-and-delegating.jpg"
 							/>
 							<div className="absolute bottom-5 left-5 right-5 rounded-[20px] border border-white/82 bg-white/94 p-5 text-verevon-j-text shadow-[0_18px_50px_rgba(0,0,0,0.28)] backdrop-blur-md sm:bottom-7 sm:left-7 sm:right-7">
-								<p className="m-0 font-protokoll text-[0.65rem] font-medium uppercase tracking-[0.16em] text-verevon-j-text/64">
+								<p className="m-0 font-geist text-[0.65rem] font-medium uppercase tracking-[0.16em] text-verevon-j-text/64">
 									Klar for overlevering
 								</p>
 								<p className="m-0 mt-1.5 font-manrope text-[1.12rem] leading-[1.08] tracking-[-0.035em]">

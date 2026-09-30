@@ -101,7 +101,7 @@ export function TrustBandSection() {
 					))}
 				</div>
 
-				<p className="mt-[clamp(40px,4vw,64px)] max-w-[78ch] border-t border-verevon-j-text/8 pt-7 font-protokoll text-[var(--text-body-sm)] font-light leading-[1.5] text-verevon-text-muted/85">
+				<p className="mt-[clamp(40px,4vw,64px)] max-w-[78ch] border-t border-verevon-j-text/8 pt-7 font-geist text-[var(--text-body-sm)] font-light leading-[1.5] text-verevon-text-muted/85">
 					Vi lover ikke mer enn vi kan stå for: EU-residens er ikke det samme
 					som full datasuverenitet. Derfor viser vi leverandører, dataflyt og
 					restrisiko åpent i tillitssenteret.{" "}

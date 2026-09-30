@@ -163,7 +163,7 @@ export function WorkflowExplorer() {
 									</span>
 									<span
 										className={[
-											"mt-1.5 block max-w-[23ch] font-protokoll text-[0.79rem] font-light leading-[1.35] transition-colors",
+											"mt-1.5 block max-w-[23ch] font-geist text-[0.79rem] font-light leading-[1.35] transition-colors",
 											isActive
 												? "text-verevon-j-text/68"
 												: "text-verevon-j-text/62 group-hover:text-verevon-j-text/72",
@@ -185,7 +185,7 @@ export function WorkflowExplorer() {
 					tabIndex={0}
 				>
 					<div className="max-w-[570px]">
-						<div className="flex items-center gap-3 font-protokoll text-[0.72rem] font-medium uppercase tracking-[0.18em] text-verevon-coral">
+						<div className="flex items-center gap-3 font-geist text-[0.72rem] font-medium uppercase tracking-[0.18em] text-verevon-coral">
 							<ActiveIcon aria-hidden="true" className="size-4" strokeWidth={1.6} />
 							{String(activeStageIndex + 1).padStart(2, "0")} / {activeStage.label}
 						</div>
@@ -195,10 +195,10 @@ export function WorkflowExplorer() {
 						<p className="verevon-body-lg mt-7 max-w-[49ch] text-pretty">
 							{activeStage.body}
 						</p>
-						<p className="mt-5 max-w-[49ch] font-protokoll text-[var(--text-body)] font-light leading-[1.55] text-verevon-j-text/62 text-pretty">
+						<p className="mt-5 max-w-[49ch] font-geist text-[var(--text-body)] font-light leading-[1.55] text-verevon-j-text/62 text-pretty">
 							{activeStage.detail}
 						</p>
-						<div className="mt-9 inline-flex items-center gap-3 border-y border-verevon-j-text/12 py-3 font-protokoll text-[0.82rem] font-light text-verevon-j-text/62">
+						<div className="mt-9 inline-flex items-center gap-3 border-y border-verevon-j-text/12 py-3 font-geist text-[0.82rem] font-light text-verevon-j-text/62">
 							<Check aria-hidden="true" className="size-4 text-emerald-700" strokeWidth={1.8} />
 							{activeStage.meta}
 						</div>
@@ -213,11 +213,11 @@ export function WorkflowExplorer() {
 							src={activeStage.image}
 						/>
 						<div className="absolute inset-x-0 top-0 h-24 bg-[linear-gradient(180deg,rgba(248,248,247,0.84),rgba(248,248,247,0))]" />
-						<div className="absolute left-4 top-4 flex items-center gap-2.5 rounded-full border border-white/84 bg-white/90 px-3 py-2 font-protokoll text-[0.72rem] text-verevon-j-text/66 shadow-[0_8px_20px_rgba(23,23,23,0.08)] backdrop-blur-md sm:left-6 sm:top-6">
+						<div className="absolute left-4 top-4 flex items-center gap-2.5 rounded-full border border-white/84 bg-white/90 px-3 py-2 font-geist text-[0.72rem] text-verevon-j-text/66 shadow-[0_8px_20px_rgba(23,23,23,0.08)] backdrop-blur-md sm:left-6 sm:top-6">
 							<span className="size-1.5 rounded-full bg-verevon-coral" />
 							Arbeidsflate i Verevon
 						</div>
-						<div className="absolute bottom-4 left-4 right-4 flex items-center justify-between gap-4 rounded-[16px] border border-white/80 bg-white/92 px-4 py-3 font-protokoll text-[0.74rem] font-light text-verevon-j-text/62 shadow-[0_14px_34px_rgba(23,23,23,0.10)] backdrop-blur-md sm:bottom-6 sm:left-6 sm:right-6 sm:px-5">
+						<div className="absolute bottom-4 left-4 right-4 flex items-center justify-between gap-4 rounded-[16px] border border-white/80 bg-white/92 px-4 py-3 font-geist text-[0.74rem] font-light text-verevon-j-text/62 shadow-[0_14px_34px_rgba(23,23,23,0.10)] backdrop-blur-md sm:bottom-6 sm:left-6 sm:right-6 sm:px-5">
 							<span className="truncate">{activeStage.meta}</span>
 							<ArrowRight aria-hidden="true" className="size-4 shrink-0 text-verevon-j-text/62" strokeWidth={1.5} />
 						</div>

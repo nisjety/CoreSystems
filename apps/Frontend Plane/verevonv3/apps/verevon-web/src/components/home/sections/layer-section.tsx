@@ -316,7 +316,7 @@ function LayerCallout({
 
 			<motion.span
 				animate={{ opacity: active ? 0.72 : 0.32 }}
-				className="mb-2 block font-protokoll text-[10px] font-medium uppercase tracking-[0.2em] text-verevon-text-muted"
+				className="mb-2 block font-geist text-[10px] font-medium uppercase tracking-[0.2em] text-verevon-text-muted"
 				initial={false}
 				transition={{ duration: 0.28, ease: [0.22, 1, 0.36, 1] }}
 			>
@@ -334,7 +334,7 @@ function LayerCallout({
 
 			<motion.p
 				animate={{ opacity: active ? 0.78 : 0.4 }}
-				className="mt-3 max-w-[310px] font-protokoll text-[clamp(0.9rem,0.78vw,1rem)] font-light leading-[1.42] tracking-[-0.02em] text-verevon-text-muted"
+				className="mt-3 max-w-[310px] font-geist text-[clamp(0.9rem,0.78vw,1rem)] font-light leading-[1.42] tracking-[-0.02em] text-verevon-text-muted"
 				initial={false}
 				transition={{ duration: 0.28, ease: [0.22, 1, 0.36, 1] }}
 			>
@@ -380,7 +380,7 @@ export function LayerSection() {
 
 			<div className="relative z-[1] mx-auto w-full px-[var(--verevon-edge)] max-[760px]:px-[var(--verevon-page-pad)]">
 				<header className="grid grid-cols-1 gap-x-8 gap-y-6 md:grid-cols-3">
-					<p className="pt-1 font-protokoll text-[12px] font-light leading-none text-verevon-text-muted">
+					<p className="pt-1 font-geist text-[12px] font-light leading-none text-verevon-text-muted">
 					04 / Plattform
 					</p>
 
@@ -389,7 +389,7 @@ export function LayerSection() {
 							Fire lag. Ingen av dem skjuler de andre.
 						</h2>
 
-						<p className="mt-4 max-w-[522px] font-protokoll text-[clamp(1rem,1vw,1.16rem)] font-light leading-[1.42] text-verevon-text-muted">
+						<p className="mt-4 max-w-[522px] font-geist text-[clamp(1rem,1vw,1.16rem)] font-light leading-[1.42] text-verevon-text-muted">
 							Kontroll øverst, kilder nederst, arbeidet i mellom. Velg et lag for å
 							se det løftet ut av stabelen — og hvordan et svar kan følges hele
 							veien ned til grunnlaget det kom fra.
@@ -417,7 +417,7 @@ export function LayerSection() {
 							className="absolute inset-x-[8%] top-[16%] h-[64%] rounded-full bg-[radial-gradient(circle_at_50%_50%,rgba(250,165,121,0.13),rgba(121,137,210,0.075)_38%,transparent_72%)] blur-[72px]"
 						/>
 
-						<span className="relative z-[2] block max-w-[280px] font-protokoll text-[10px] font-light uppercase leading-[1.4] tracking-[0.25em] text-verevon-text-muted/70">
+						<span className="relative z-[2] block max-w-[280px] font-geist text-[10px] font-light uppercase leading-[1.4] tracking-[0.25em] text-verevon-text-muted/70">
 							Kilder, kunnskap, agentarbeid, kontroll
 						</span>
 

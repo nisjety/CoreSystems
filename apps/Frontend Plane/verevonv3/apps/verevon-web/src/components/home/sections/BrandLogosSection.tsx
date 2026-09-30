@@ -192,7 +192,7 @@ export function BrandLogosSection() {
 			aria-label="Systemer Verevon kobler til"
 			className="grid h-[clamp(112px,12vw,154px)] grid-cols-[minmax(138px,220px)_minmax(0,1fr)] items-center gap-[clamp(34px,4.8vw,92px)] overflow-hidden bg-background px-[var(--verevon-edge)] max-[760px]:h-auto max-[760px]:grid-cols-1 max-[760px]:gap-4 max-[760px]:px-[var(--verevon-page-pad)] max-[760px]:py-7"
 		>
-			<p className="m-0 grid justify-self-start border-r border-[color-mix(in_srgb,var(--verevon-j-text)_10%,transparent)] pr-[clamp(18px,2vw,34px)] text-left font-protokoll text-[clamp(0.78rem,0.72vw,0.92rem)] font-medium uppercase leading-[1.12] tracking-[0.025em] text-[color-mix(in_srgb,var(--verevon-j-text)_58%,transparent)] max-[760px]:flex max-[760px]:gap-1.5 max-[760px]:border-r-0 max-[760px]:pr-0">
+			<p className="m-0 grid justify-self-start border-r border-[color-mix(in_srgb,var(--verevon-j-text)_10%,transparent)] pr-[clamp(18px,2vw,34px)] text-left font-geist text-[clamp(0.78rem,0.72vw,0.92rem)] font-medium uppercase leading-[1.12] tracking-[0.025em] text-[color-mix(in_srgb,var(--verevon-j-text)_58%,transparent)] max-[760px]:flex max-[760px]:gap-1.5 max-[760px]:border-r-0 max-[760px]:pr-0">
 				<span>Koblet til</span>
 				<span>systemene deres</span>
 			</p>
