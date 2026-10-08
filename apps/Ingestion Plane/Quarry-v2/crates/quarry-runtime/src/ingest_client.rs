@@ -106,11 +106,10 @@ impl IngestClient {
         // `visibility=private, owner=service:quarry-edge` — persisted but
         // invisible to every real user session (owner=self OR visibility=org
         // matches neither). The scope is granted to the quarry-edge principal in
-        // the Control Plane service-principal registry.
-        let token_request = ServiceTokenRequest::data_plane(
-            ["documents:write", "org:data:read_all"],
-            "persist verified Quarry evidence",
-        );
+        // the Control Plane service-principal registry. The request itself is the
+        // `ingest` row of contracts/cross-plane-token-requests.json, the one place
+        // it is written down.
+        let token_request = ServiceTokenRequest::from_manifest("ingest")?;
         let bearer = match &self.auth {
             IngestAuth::StaticDev(token) => token.clone(),
             IngestAuth::Dynamic(provider) => provider

@@ -23,7 +23,6 @@
 use axum::{extract::State, http::StatusCode, response::IntoResponse, Extension, Json};
 use serde::{Deserialize, Serialize};
 
-use quarry_core::zdr::ZdrMode;
 use quarry_runtime::answer::{AnswerRequest, Citation, MarkdownFetcher, SimpleHttpMarkdownFetcher};
 use quarry_runtime::mp_client::{ModelPlaneClient, ModelPlaneInvokeRequest};
 use quarry_runtime::serp::{
@@ -45,6 +44,8 @@ const SIMILAR_SEED_MAX_CHARS: usize = 2_000;
 pub struct SearchRequest {
     pub query: String,
     /// Zero Data Retention: bypass caches and durable content-bearing events.
+    /// The request can only raise the posture: a user of a ZDR organisation
+    /// runs as ZDR whatever this says (see `Claims::zdr_floor`).
     #[serde(default)]
     pub zdr: bool,
     /// Per-request permission to dispatch the paid external SERP providers
@@ -139,10 +140,6 @@ pub struct SearchRequest {
 
 fn default_safe_search() -> bool {
     true
-}
-
-const fn effective_zdr(requested: bool) -> bool {
-    requested
 }
 
 #[derive(Debug, Serialize)]
@@ -625,7 +622,10 @@ pub async fn search(
     };
 
     let effective_query = apply_exact_match(&req.query, req.exact_match);
-    let zdr = effective_zdr(req.zdr);
+    // The body flag, raised (never lowered) by the token's ZDR floor for a user
+    // of a ZDR org. A service caller's posture is the body flag alone: see
+    // `Claims::zdr_floor` for why its token claim is not read.
+    let zdr = claims.effective_zdr(req.zdr);
 
     // Caller intent hint — forwarded to the router through `SearchOptions`.
     // The rule classifier is still run here, against the *effective* query
@@ -1256,8 +1256,10 @@ pub async fn similar(
     let (seed, label) = match (text, url) {
         (Some(t), _) => (truncate_seed(t), "text".to_string()),
         (None, Some(u)) => {
+            // The request has no `zdr` field, so the posture is the token's
+            // floor alone (a user of a ZDR org): see `Claims::zdr_floor`.
             let fetched = SimpleHttpMarkdownFetcher::new()
-                .fetch_markdown(u, ZdrMode::from(false))
+                .fetch_markdown(u, claims.effective_zdr_mode(None))
                 .await
                 .map(|md| truncate_seed(&md))
                 .filter(|s| !s.is_empty());
@@ -1701,7 +1703,8 @@ mod tests {
             "allow_paid_providers": true,
             "zdr": true,
         }));
-        let opts = build_search_options(&req, "org_alpha", effective_zdr(req.zdr), None);
+        let claims = crate::test_support::claims_for_org("org_alpha");
+        let opts = build_search_options(&req, "org_alpha", claims.effective_zdr(req.zdr), None);
         assert!(
             !opts.allow_paid_providers,
             "a ZDR request must never carry paid permission to the router"
@@ -1715,9 +1718,44 @@ mod tests {
             "query": "rust",
             "allow_paid_providers": true,
         }));
-        let opts = build_search_options(&req, "org_alpha", effective_zdr(req.zdr), None);
+        let claims = crate::test_support::claims_for_org("org_alpha");
+        let opts = build_search_options(&req, "org_alpha", claims.effective_zdr(req.zdr), None);
         assert!(opts.allow_paid_providers);
         assert!(opts.paid_allowed());
+    }
+
+    #[test]
+    fn a_users_zdr_floor_closes_paid_providers_when_the_body_says_false() {
+        let req = search_request(serde_json::json!({
+            "query": "rust",
+            "zdr": false,
+            "allow_paid_providers": true,
+        }));
+        let mut claims = crate::test_support::claims_for_org("org_alpha");
+        claims.principal_type = Some("user".into());
+        claims.zdr = Some(true);
+        let opts = build_search_options(&req, "org_alpha", claims.effective_zdr(req.zdr), None);
+        assert!(opts.zdr);
+        assert!(!opts.allow_paid_providers);
+        assert!(!opts.paid_allowed());
+    }
+
+    #[test]
+    fn a_service_tokens_zdr_claim_does_not_close_paid_providers() {
+        // model-gateway / execution-core carry zdr:true by registry row for
+        // every org: the run's posture is the body flag.
+        let req = search_request(serde_json::json!({
+            "query": "rust",
+            "zdr": false,
+            "allow_paid_providers": true,
+        }));
+        let mut claims = crate::test_support::claims_for_org("org_alpha");
+        claims.principal_type = Some("service".into());
+        claims.service_id = Some("service:model-gateway".into());
+        claims.zdr = Some(true);
+        let opts = build_search_options(&req, "org_alpha", claims.effective_zdr(req.zdr), None);
+        assert!(!opts.zdr);
+        assert!(opts.allow_paid_providers);
     }
 
     #[test]
@@ -2185,7 +2223,10 @@ mod tests {
         };
         let wire = serde_json::to_string(&payload).unwrap();
         let back: CachedSearch = serde_json::from_str(&wire).unwrap();
-        let figure = &back.citations.unwrap()[0]
+        // Bound first: the temporary `Vec` must outlive the borrow below (this
+        // test did not compile without it, E0716).
+        let citations = back.citations.unwrap();
+        let figure = &citations[0]
             .structured
             .as_ref()
             .expect("harvest survives the cache")

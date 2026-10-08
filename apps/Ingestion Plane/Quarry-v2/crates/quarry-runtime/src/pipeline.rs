@@ -1283,7 +1283,7 @@ mod local_index_writeback_tests {
     use crate::driver::Driver;
     use crate::fetch::FetchResponse;
     use crate::local_index::TantivyLocalIndex;
-    use crate::serp::SearchOptions;
+    use crate::serp::{SearchOptions, SearchProvider};
     use async_trait::async_trait;
     use quarry_core::output::DriverKind;
     use tokio::sync::mpsc;

@@ -167,6 +167,7 @@ mod tests {
             nbf: None,
             aud: None,
             scopes: Vec::new(),
+            zdr: None,
         };
         let schema = build_schema();
         let req =

@@ -84,7 +84,9 @@ pub async fn answer(
         top_k: req.top_k,
         country: req.country,
         language: req.language,
-        zdr: req.zdr,
+        // Body flag raised (never lowered) by the token's ZDR floor: see
+        // `Claims::zdr_floor`.
+        zdr: Some(claims.effective_zdr(req.zdr.unwrap_or(false))),
         // Tenant isolation: server-asserted from verified JWT — clients
         // cannot bypass this even if they invent an `org_id` field.
         org_id: Some(claims.org_id.clone()),
@@ -138,7 +140,8 @@ pub async fn answer(
 /// synthesis token-by-token, preserving full-page grounding AND answer caching.
 /// Frames: `event: citations` (array), `event: delta` ({delta}), repeated,
 /// then `event: done` ({answer, cached}); `event: error` ({message}) on failure.
-/// A warm org-scoped answer-cache hit replays instantly with no LLM call.
+/// A warm org-scoped answer-cache hit replays instantly with no LLM call; a ZDR
+/// request (body flag or the token's ZDR floor) neither reads nor writes it.
 pub async fn answer_stream(
     State(state): State<AppState>,
     Extension(claims): Extension<crate::auth::Claims>,
@@ -179,18 +182,27 @@ pub async fn answer_stream(
     let query = req.query.clone();
     let org_id = claims.org_id.clone();
     let user_id = claims.user_id.clone();
-    let zdr = quarry_core::zdr::ZdrMode::from(req.zdr.unwrap_or(false));
+    // Body flag raised (never lowered) by the token's ZDR floor: see
+    // `Claims::zdr_floor`.
+    let zdr = claims.effective_zdr_mode(req.zdr);
     let pipeline_req = AnswerRequest {
         query: query.clone(),
         top_k: req.top_k,
         country: req.country.clone(),
         language: req.language.clone(),
-        zdr: req.zdr,
+        zdr: Some(zdr.is_active()),
         // Tenant isolation: server-asserted from the verified JWT.
         org_id: Some(org_id.clone()),
     };
 
-    let scache = state.redis.clone().map(crate::cache::SearchCache::new);
+    // A ZDR answer neither reads nor writes the answer cache: the cached value
+    // is the synthesized answer text itself, keyed only by org and query, so a
+    // ZDR request must not be served from (or leave behind) a durable copy.
+    let scache = if zdr.is_active() {
+        None
+    } else {
+        state.redis.clone().map(crate::cache::SearchCache::new)
+    };
     let cache_key = crate::cache::SearchCache::key(&org_id, &query, "answer:stream:v1");
     let usage = state.usage.clone();
 

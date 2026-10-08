@@ -19,7 +19,6 @@ use url::Url;
 
 use quarry_core::error::{ErrorCode, QuarryError};
 use quarry_core::privacy::PrivacyPolicy;
-use quarry_core::zdr::ZdrMode;
 use quarry_runtime::ai_formats::AiFormatRunner;
 use quarry_runtime::driver::FetchHints;
 use quarry_runtime::driver_plan::{plan_from_signals, DriverSignals};
@@ -231,7 +230,9 @@ pub async fn extract(
             .into_response();
     }
 
-    let zdr = ZdrMode::from(req.zdr.unwrap_or(false));
+    // Body flag raised (never lowered) by the token's ZDR floor: see
+    // `Claims::zdr_floor`.
+    let zdr = claims.effective_zdr_mode(req.zdr);
     let privacy = req.privacy.unwrap_or_default().with_zdr(zdr);
     let signals = req.signals.unwrap_or_default();
     let mut results = Vec::with_capacity(targets.len());
@@ -280,7 +281,7 @@ pub async fn extract(
                 structured,
             }) => match (&req.schema, &runner) {
                 (Some(schema), Some(r)) => match r
-                    .json_for_org(&claims.org_id, &markdown, schema.clone(), ZdrMode::Off)
+                    .json_for_org(&claims.org_id, &markdown, schema.clone(), zdr)
                     .await
                 {
                     Ok(jr) => ExtractItem {

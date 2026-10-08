@@ -411,7 +411,9 @@ async fn scrape(
             Json(Envelope::<()>::err(&request_id, error)).into_response(),
         ));
     }
-    let zdr = ZdrMode::from(req.zdr.unwrap_or(false));
+    // Body flag raised (never lowered) by the token's ZDR floor: see
+    // `Claims::zdr_floor`.
+    let zdr = claims.effective_zdr_mode(req.zdr);
     let privacy = effective_privacy(req.privacy.clone(), zdr);
     // Tenant isolation: ignore any client-supplied org_id and use the
     // verified JWT claim. The `ScrapeRequest.org_id` field is preserved
@@ -543,6 +545,46 @@ pub struct CrawlRequest {
     /// sets this from the user's crawl_ingest_mode (auto|never|prompt).
     #[serde(default)]
     pub ingest: Option<bool>,
+    /// Zero data retention. The durable job path cannot honour it today (see
+    /// [`refuse_durable_job_under_zdr`]), so a request that asks for it, or
+    /// that the token's ZDR floor imposes, is refused rather than ignored.
+    #[serde(default)]
+    pub zdr: Option<bool>,
+}
+
+/// Fail closed: `/v1/crawl` and `/v1/batch` are durable by construction. The
+/// job record lives in the control plane, the Temporal history carries the URLs
+/// and the per-page runs go through `/v1/internal/run_page`, which the
+/// orchestrator calls with no `zdr` field at all, so every page runs
+/// non-ZDR (artifacts, durable events, cache, optional ingest). Running such a
+/// job for a ZDR caller would silently retain what the org said must not be
+/// retained, so it is refused with the reason. Lifting this needs the
+/// orchestrator to carry the posture from the handoff to `run_page`.
+fn refuse_durable_job_under_zdr(
+    claims: &crate::auth::Claims,
+    requested: Option<bool>,
+    request_id: &str,
+    kind: &str,
+) -> Result<(), (StatusCode, Json<Envelope<()>>)> {
+    if !claims.effective_zdr(requested.unwrap_or(false)) {
+        return Ok(());
+    }
+    tracing::info!(
+        org_id = %claims.org_id,
+        kind,
+        "durable job refused: zdr active and the durable path has no zdr support"
+    );
+    let err = QuarryError::new(
+        ErrorCode::Forbidden,
+        format!(
+            "ZDR active: durable {kind} jobs are not available under zero data retention \
+             (the job record and per-page results are retained)"
+        ),
+    );
+    Err((
+        StatusCode::from_u16(err.code.http_status()).unwrap_or(StatusCode::FORBIDDEN),
+        Json(Envelope::<()>::err(request_id, err)),
+    ))
 }
 
 async fn crawl_handoff(
@@ -551,6 +593,7 @@ async fn crawl_handoff(
     Json(req): Json<CrawlRequest>,
 ) -> Result<Json<Envelope<HandoffAck>>, (StatusCode, Json<Envelope<()>>)> {
     let request_id = RequestKind::new().to_string();
+    refuse_durable_job_under_zdr(&claims, req.zdr, &request_id, "crawl")?;
     let org_id = claims.org_id.clone();
 
     // Cycle 19 / cluster #19: emit HostDiscovered for autocomplete-core
@@ -630,6 +673,9 @@ pub struct BatchRequest {
     /// = working-set only (default NEVER). Gateway sets from crawl_ingest_mode.
     #[serde(default)]
     pub ingest: Option<bool>,
+    /// See [`CrawlRequest::zdr`].
+    #[serde(default)]
+    pub zdr: Option<bool>,
 }
 
 async fn batch_handoff(
@@ -638,6 +684,7 @@ async fn batch_handoff(
     Json(req): Json<BatchRequest>,
 ) -> Result<Json<Envelope<HandoffAck>>, (StatusCode, Json<Envelope<()>>)> {
     let request_id = RequestKind::new().to_string();
+    refuse_durable_job_under_zdr(&claims, req.zdr, &request_id, "batch")?;
     let ack = crate::handoff::forward_to_orchestrator(
         &state.control_base_url,
         &request_id,
@@ -1022,7 +1069,7 @@ async fn scrape_stream(
     Extension(claims): Extension<crate::auth::Claims>,
     Json(req): Json<ScrapeRequest>,
 ) -> Sse<impl futures_util::Stream<Item = Result<Event, std::convert::Infallible>>> {
-    let zdr = ZdrMode::from(req.zdr.unwrap_or(false));
+    let zdr = claims.effective_zdr_mode(req.zdr);
     let privacy = effective_privacy(req.privacy.clone(), zdr);
     // Tenant enforcement: claim wins over any client-supplied org_id.
     let _ = &req.org_id;
@@ -1315,6 +1362,7 @@ mod tests {
             nbf: None,
             aud: None,
             scopes: Vec::new(),
+            zdr: None,
         }
     }
 

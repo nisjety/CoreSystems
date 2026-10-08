@@ -88,6 +88,8 @@ pub mod target_repair;
 #[cfg(feature = "test-site")]
 pub mod test_site;
 pub mod tls_driver;
+#[cfg(test)]
+mod token_request_contract;
 pub mod transport_fallback_driver;
 pub mod usage;
 pub mod vector_index;

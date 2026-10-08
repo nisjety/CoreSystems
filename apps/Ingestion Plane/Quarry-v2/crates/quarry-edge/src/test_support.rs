@@ -160,6 +160,7 @@ pub fn claims_for_org(org_id: &str) -> Claims {
         nbf: None,
         aud: None,
         scopes: Vec::new(),
+        zdr: None,
     }
 }
 

@@ -53,6 +53,8 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 use tracing::{error, warn};
 
+use quarry_core::zdr::ZdrMode;
+
 /// Claims extracted from a verified JWT. Every token requires `org_id` plus
 /// one unambiguous principal: user tokens carry `user_id`; service tokens carry
 /// canonical `principal_type=service` + `service_id` equal to `sub`.
@@ -74,6 +76,18 @@ pub struct Claims {
     pub aud: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub scopes: Vec<String>,
+    /// Retention posture asserted by the verified issuer. Auth Core stamps it
+    /// on every plane token: for an interactive user it is the organisation's
+    /// standing ZDR posture, for a service principal it is the registry row's
+    /// `retentionByAudience` (model-gateway and execution-core hold `zdr` for
+    /// the quarry audience, so their token says `true` for EVERY org on EVERY
+    /// call). `None` means the claim is absent (a token minted before it
+    /// existed): not an auth failure, and no floor.
+    ///
+    /// Never read this field directly for a decision. Its meaning depends on
+    /// the principal; go through [`Claims::zdr_floor`] / [`Claims::effective_zdr`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub zdr: Option<bool>,
 }
 
 impl Claims {
@@ -86,6 +100,41 @@ impl Claims {
     #[must_use]
     pub fn is_service(&self) -> bool {
         self.principal_type.as_deref() == Some("service")
+    }
+
+    /// The ZDR posture the TOKEN itself imposes, as a floor under whatever the
+    /// request body asks for.
+    ///
+    /// Only an interactive user's claim counts: it carries the organisation's
+    /// standing posture, so a caller of a ZDR org cannot lower it by sending
+    /// `zdr: false`. A service principal's claim is a property of its registry
+    /// row and audience, not of the run it is serving (see [`Claims::zdr`]),
+    /// so it is deliberately ignored: for a service caller the run's posture is
+    /// the request body flag, which the gateway or execution-core sets from the
+    /// run's resolved posture (false on a waived run). Reading it would force
+    /// ZDR onto every chat web search of every org.
+    ///
+    /// A token without a `principal_type` is the legacy user shape
+    /// (`validate_and_normalize_principal` accepts it only with a `user_id`
+    /// and no `service_id`), so everything that is not a service counts.
+    #[must_use]
+    pub fn zdr_floor(&self) -> bool {
+        !self.is_service() && self.zdr == Some(true)
+    }
+
+    /// The posture a request actually runs under: what the body asked for,
+    /// raised (never lowered) by [`Claims::zdr_floor`]. Every route that makes
+    /// a ZDR decision takes it from here, so there is one rule.
+    #[must_use]
+    pub fn effective_zdr(&self, requested: bool) -> bool {
+        requested || self.zdr_floor()
+    }
+
+    /// [`Claims::effective_zdr`] for the optional `zdr` field most request
+    /// bodies carry, as the runtime's [`ZdrMode`].
+    #[must_use]
+    pub fn effective_zdr_mode(&self, requested: Option<bool>) -> ZdrMode {
+        ZdrMode::from(self.effective_zdr(requested.unwrap_or(false)))
     }
 
     /// Canonical actor used by ownership/audit paths. `require_auth` normalizes
@@ -356,6 +405,8 @@ fn dev_bypass_stub_claims() -> Claims {
         nbf: None,
         aud: None,
         scopes: Vec::new(),
+        // The dev stub asserts no posture: it can only ever run on the body flag.
+        zdr: None,
     }
 }
 
@@ -533,6 +584,7 @@ mod tests {
             nbf: None,
             aud: None,
             scopes: Vec::new(),
+            zdr: None,
         };
         let s = serde_json::to_string(&c).unwrap();
         assert!(!s.contains("\"aud\""));
@@ -557,6 +609,7 @@ mod tests {
             nbf: None,
             aud: Some("quarry-edge".into()),
             scopes: vec!["search:read".into(), "crawl:write".into()],
+            zdr: None,
         };
         assert!(c.has_scope("search:read"));
         assert!(!c.has_scope("admin"));
@@ -577,6 +630,7 @@ mod tests {
             nbf: None,
             aud: Some("quarry".into()),
             scopes: vec!["search:read".into()],
+            zdr: None,
         };
 
         claims.validate_and_normalize_principal().unwrap();
@@ -616,6 +670,7 @@ mod tests {
             nbf: None,
             aud: Some("quarry".into()),
             scopes: vec!["search:read".into()],
+            zdr: None,
         };
         assert!(claims.validate_and_normalize_principal().is_err());
     }
@@ -646,6 +701,7 @@ mod tests {
             nbf: None,
             aud: Some("quarry".into()),
             scopes: scopes.iter().map(|s| (*s).to_owned()).collect(),
+            zdr: None,
         }
     }
 
@@ -701,6 +757,7 @@ mod tests {
             nbf: None,
             aud: Some("quarry".into()),
             scopes: vec!["search:read".into()],
+            zdr: None,
         };
 
         let search = HttpRequest::builder()
@@ -742,6 +799,7 @@ mod tests {
             nbf: None,
             aud: Some("quarry".into()),
             scopes: Vec::new(),
+            zdr: None,
         };
         let request = HttpRequest::builder()
             .uri("/v1/other")
@@ -933,6 +991,7 @@ mod tests {
             nbf: None,
             aud: None,
             scopes: Vec::new(),
+            zdr: None,
         };
         let token = sign_jwt(&claims, kid);
 
@@ -983,6 +1042,7 @@ mod tests {
             nbf: None,
             aud: None,
             scopes: Vec::new(),
+            zdr: None,
         };
         let token = sign_jwt(&claims, "unknown-kid");
 
@@ -999,6 +1059,182 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(&body[..], b"org_placeholder");
+
+        clear_env();
+        reset_jwks_cache_for_test().await;
+    }
+
+    // -----------------------------------------------------------------
+    // Z-08 — the `zdr` claim is a floor for USER principals only.
+    // -----------------------------------------------------------------
+
+    fn claims_with(principal_type: Option<&str>, zdr: Option<bool>) -> Claims {
+        let service = principal_type == Some("service");
+        Claims {
+            sub: if service {
+                "service:model-gateway".into()
+            } else {
+                "user-1".into()
+            },
+            iss: "auth-core".into(),
+            exp: i64::MAX,
+            org_id: "alpha".into(),
+            user_id: if service {
+                "service:model-gateway".into()
+            } else {
+                "user-1".into()
+            },
+            principal_type: principal_type.map(str::to_owned),
+            service_id: service.then(|| "service:model-gateway".to_owned()),
+            nbf: None,
+            aud: Some("quarry".into()),
+            scopes: Vec::new(),
+            zdr,
+        }
+    }
+
+    #[test]
+    fn zdr_claim_is_absent_by_default_and_never_an_auth_failure() {
+        let claims: Claims = serde_json::from_value(serde_json::json!({
+            "sub": "u1",
+            "iss": "auth-core",
+            "exp": 1_900_000_000_i64,
+            "org_id": "alpha",
+            "user_id": "u1",
+            "principal_type": "user"
+        }))
+        .expect("a token minted before the claim existed must still decode");
+        assert_eq!(claims.zdr, None);
+        assert!(!claims.zdr_floor());
+        // An absent claim is not serialized back either.
+        assert!(!serde_json::to_string(&claims).unwrap().contains("zdr"));
+    }
+
+    #[test]
+    fn zdr_claim_decodes_true_and_false() {
+        for (raw, expected) in [(true, Some(true)), (false, Some(false))] {
+            let claims: Claims = serde_json::from_value(serde_json::json!({
+                "sub": "u1",
+                "iss": "auth-core",
+                "exp": 1_900_000_000_i64,
+                "org_id": "alpha",
+                "user_id": "u1",
+                "principal_type": "user",
+                "zdr": raw
+            }))
+            .unwrap();
+            assert_eq!(claims.zdr, expected);
+        }
+    }
+
+    #[test]
+    fn the_floor_comes_from_a_users_claim_and_never_from_a_services() {
+        // user: the org's posture counts.
+        assert!(claims_with(Some("user"), Some(true)).zdr_floor());
+        assert!(!claims_with(Some("user"), Some(false)).zdr_floor());
+        assert!(!claims_with(Some("user"), None).zdr_floor());
+        // legacy user shape (no principal_type): validated as a user, so it counts.
+        assert!(claims_with(None, Some(true)).zdr_floor());
+        assert!(!claims_with(None, None).zdr_floor());
+        // service: the claim is a registry property (zdr:true for every org on
+        // every call for model-gateway / execution-core), so it never counts.
+        assert!(!claims_with(Some("service"), Some(true)).zdr_floor());
+        assert!(!claims_with(Some("service"), Some(false)).zdr_floor());
+        assert!(!claims_with(Some("service"), None).zdr_floor());
+    }
+
+    #[test]
+    fn effective_zdr_can_only_raise_the_posture() {
+        let zdr_user = claims_with(Some("user"), Some(true));
+        let plain_user = claims_with(Some("user"), Some(false));
+        let registry_zdr_service = claims_with(Some("service"), Some(true));
+
+        // body false cannot lower a ZDR org's user
+        assert!(zdr_user.effective_zdr(false));
+        assert!(zdr_user.effective_zdr(true));
+        // body true always raises
+        assert!(plain_user.effective_zdr(true));
+        assert!(!plain_user.effective_zdr(false));
+        // a service caller runs on its body flag in both directions
+        assert!(registry_zdr_service.effective_zdr(true));
+        assert!(!registry_zdr_service.effective_zdr(false));
+    }
+
+    #[test]
+    fn effective_zdr_mode_reads_the_optional_body_field() {
+        let zdr_user = claims_with(Some("user"), Some(true));
+        let plain_user = claims_with(Some("user"), Some(false));
+        assert_eq!(zdr_user.effective_zdr_mode(None), ZdrMode::On);
+        assert_eq!(zdr_user.effective_zdr_mode(Some(false)), ZdrMode::On);
+        assert_eq!(plain_user.effective_zdr_mode(None), ZdrMode::Off);
+        assert_eq!(plain_user.effective_zdr_mode(Some(false)), ZdrMode::Off);
+        assert_eq!(plain_user.effective_zdr_mode(Some(true)), ZdrMode::On);
+    }
+
+    fn effective_zdr_router() -> Router {
+        async fn echo(Extension(claims): Extension<Claims>) -> String {
+            format!(
+                "floor={} effective_for_body_false={}",
+                claims.zdr_floor(),
+                claims.effective_zdr(false)
+            )
+        }
+        Router::new()
+            .route("/", get(echo))
+            .layer(middleware::from_fn(require_auth))
+    }
+
+    async fn verified_posture(claims: Claims, kid: &str) -> String {
+        let server = start_jwks_mock(kid).await;
+        std::env::set_var("AUTH_CORE_JWKS_URL", format!("{}/jwks", server.uri()));
+        let token = sign_jwt(&claims, kid);
+        let req = HttpRequest::builder()
+            .uri("/")
+            .header("authorization", format!("Bearer {token}"))
+            .body(Body::empty())
+            .unwrap();
+        let res = tower::ServiceExt::oneshot(effective_zdr_router(), req)
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(res.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        String::from_utf8(body.to_vec()).unwrap()
+    }
+
+    /// The claim survives real RS256 verification and normalization with the
+    /// meaning the floor needs: a user's `zdr:true` lifts, a service's does not.
+    #[tokio::test(flavor = "current_thread")]
+    #[serial]
+    async fn verified_tokens_carry_the_zdr_claim_through_require_auth() {
+        clear_env();
+        reset_jwks_cache_for_test().await;
+        std::env::set_var("AUTH_CORE_AUDIENCE_OPTIONAL", "1");
+
+        let mut zdr_user = claims_with(Some("user"), Some(true));
+        zdr_user.exp = now_secs() + 3600;
+        assert_eq!(
+            verified_posture(zdr_user, "kid-zdr-user").await,
+            "floor=true effective_for_body_false=true"
+        );
+
+        reset_jwks_cache_for_test().await;
+        let mut service = claims_with(Some("service"), Some(true));
+        service.exp = now_secs() + 3600;
+        service.user_id = String::new();
+        assert_eq!(
+            verified_posture(service, "kid-zdr-service").await,
+            "floor=false effective_for_body_false=false"
+        );
+
+        reset_jwks_cache_for_test().await;
+        let mut absent = claims_with(Some("user"), None);
+        absent.exp = now_secs() + 3600;
+        assert_eq!(
+            verified_posture(absent, "kid-zdr-absent").await,
+            "floor=false effective_for_body_false=false"
+        );
 
         clear_env();
         reset_jwks_cache_for_test().await;

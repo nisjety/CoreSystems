@@ -66,6 +66,19 @@ pub struct AudioErrorBody {
     pub hint: Option<String>,
 }
 
+/// The `zdr` the Model Plane is told about this request. The body is forwarded
+/// as the caller wrote it, except that the token's ZDR floor (a user of a ZDR
+/// org) raises it to `true`: the caller cannot lower the org's posture. With no
+/// floor the field is passed through untouched, so an ordinary request keeps
+/// exactly the wire shape it had.
+fn raise_to_zdr_floor(claims: &crate::auth::Claims, requested: Option<bool>) -> Option<bool> {
+    if claims.zdr_floor() {
+        Some(true)
+    } else {
+        requested
+    }
+}
+
 pub async fn audio(
     State(state): State<AppState>,
     axum::Extension(claims): axum::Extension<crate::auth::Claims>,
@@ -107,14 +120,20 @@ pub async fn audio(
     };
 
     let (path, body) = match req {
-        AudioRequest::Tts(tts) => (
-            "/v1/ai/speech".to_string(),
-            serde_json::to_value(&tts).unwrap(),
-        ),
-        AudioRequest::Stt(stt) => (
-            "/v1/ai/transcribe".to_string(),
-            serde_json::to_value(&stt).unwrap(),
-        ),
+        AudioRequest::Tts(mut tts) => {
+            tts.zdr = raise_to_zdr_floor(&claims, tts.zdr);
+            (
+                "/v1/ai/speech".to_string(),
+                serde_json::to_value(&tts).unwrap(),
+            )
+        }
+        AudioRequest::Stt(mut stt) => {
+            stt.zdr = raise_to_zdr_floor(&claims, stt.zdr);
+            (
+                "/v1/ai/transcribe".to_string(),
+                serde_json::to_value(&stt).unwrap(),
+            )
+        }
         AudioRequest::Bare { url } => {
             // Bare {url} or empty body: 400 with usage hint.
             return (
@@ -130,10 +149,22 @@ pub async fn audio(
     };
 
     let url = format!("{}{}", model_plane_url.trim_end_matches('/'), path);
-    let token_request = quarry_runtime::service_tokens::ServiceTokenRequest::model_plane(
-        ["models:invoke"],
-        "invoke bounded audio primitive",
-    );
+    // The `model-audio` row of quarry-runtime's
+    // contracts/cross-plane-token-requests.json: the request is written down there
+    // and nowhere else.
+    let token_request =
+        match quarry_runtime::service_tokens::ServiceTokenRequest::from_manifest("model-audio") {
+            Ok(request) => request,
+            Err(_) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({
+                        "error": "service-token request manifest unavailable",
+                        "code": "INTERNAL",
+                    })),
+                );
+            }
+        };
     let bearer = if let Some(provider) = &state.service_token_provider {
         match provider
             .token_for_org(&claims.org_id, &token_request, false)
@@ -258,5 +289,95 @@ mod tests {
             AudioRequest::Bare { url } => assert!(url.is_none()),
             other => panic!("expected Bare(None), got {:?}", other),
         }
+    }
+
+    /// The token request the handler makes is the `model-audio` row of the
+    /// cross-plane manifest, as quarry-runtime's `token_request_contract` tests
+    /// hold every other call path to its row. The handler, the real
+    /// `AuthCoreServiceTokenProvider` and a recording Auth Core are real; the row
+    /// is read as plain JSON, not through the loader under test.
+    #[tokio::test]
+    async fn audio_asks_auth_core_for_exactly_the_audio_row() {
+        use crate::test_support::{claims_for_org, test_state, StubDriver};
+        use quarry_runtime::service_tokens::{
+            AuthCoreServiceTokenProvider, SharedServiceTokenProvider, TOKEN_REQUEST_MANIFEST_JSON,
+        };
+        use serde_json::{json, Value};
+        use std::sync::Arc;
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let auth_core = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "token": "header.payload.signature",
+                "expiresInSeconds": 300
+            })))
+            .mount(&auth_core)
+            .await;
+        let model_plane = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/ai/speech"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "ok": true })))
+            .mount(&model_plane)
+            .await;
+
+        let provider: SharedServiceTokenProvider = Arc::new(
+            AuthCoreServiceTokenProvider::new(auth_core.uri(), "credential-long-enough").unwrap(),
+        );
+        let state = AppState {
+            model_plane_url: Some(model_plane.uri()),
+            service_token_provider: Some(provider),
+            ..test_state(StubDriver::ok())
+        };
+        let request: AudioRequest = serde_json::from_value(json!({ "input": "hello" })).unwrap();
+        let (status, _) = audio(
+            State(state),
+            axum::Extension(claims_for_org("org_audio")),
+            Json(request),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let manifest: Value = serde_json::from_str(TOKEN_REQUEST_MANIFEST_JSON).unwrap();
+        let row = manifest["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["name"] == "model-audio")
+            .expect("the manifest has a model-audio row");
+        let mints = auth_core.received_requests().await.unwrap();
+        assert_eq!(mints.len(), 1, "one audio request mints exactly one token");
+        assert_eq!(mints[0].url.path(), row["mint_path"].as_str().unwrap());
+        assert_eq!(
+            mints[0]
+                .headers
+                .get("x-service-id")
+                .and_then(|value| value.to_str().ok()),
+            Some("quarry-edge")
+        );
+        // Scopes and reason are the row's and nothing else rides along: Auth Core
+        // refuses a request that names a retention posture.
+        let body: Value = serde_json::from_slice(&mints[0].body).unwrap();
+        assert_eq!(
+            body,
+            json!({
+                "orgId": "org_audio",
+                "scopes": row["scopes"],
+                "reason": row["reason"]
+            }),
+            "the audio mint request differs from the manifest row"
+        );
+        let forwarded = model_plane.received_requests().await.unwrap();
+        assert_eq!(
+            forwarded[0]
+                .headers
+                .get("authorization")
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "Bearer header.payload.signature",
+            "the token the handler minted is the one it sent to the Model Plane"
+        );
     }
 }

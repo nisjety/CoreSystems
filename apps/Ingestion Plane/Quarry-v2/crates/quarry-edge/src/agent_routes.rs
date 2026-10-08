@@ -1430,10 +1430,19 @@ mod enabled {
                 .and_then(|s| s.parse().ok())
                 .unwrap_or_else(Id::new)
         };
-        let zdr = resume_checkpoint
-            .as_ref()
-            .map(|checkpoint| checkpoint.zdr)
-            .unwrap_or_else(|| ZdrMode::from(body.zdr || execution_tier.is_ephemeral_evidence()));
+        // The token's ZDR floor (a user in a ZDR org) can only raise the run's
+        // posture, a service caller's posture is its body flag (see
+        // `Claims::zdr_floor`). A resumed run keeps its persisted posture, which
+        // is never ZDR here (ZDR checkpoints are refused above), and is raised by
+        // the floor too: an org that turned ZDR on since the run was
+        // checkpointed does not get durable state written for it any more, and
+        // a resume that needs a persistent profile is refused below.
+        let zdr = match resume_checkpoint.as_ref() {
+            Some(checkpoint) => ZdrMode::from(checkpoint.zdr.is_active() || claims.zdr_floor()),
+            None => {
+                claims.effective_zdr_mode(Some(body.zdr || execution_tier.is_ephemeral_evidence()))
+            }
+        };
         let ttl_s = constraints.max_runtime_s.unwrap_or(120);
         let viewport = normalize_viewport(
             resume_checkpoint
@@ -2029,6 +2038,7 @@ mod enabled {
                 nbf: None,
                 aud: Some("quarry".to_owned()),
                 scopes: Vec::new(),
+                zdr: None,
             };
 
             assert!(caller_owns_browser_run("org-owner", "user-owner", &claims));

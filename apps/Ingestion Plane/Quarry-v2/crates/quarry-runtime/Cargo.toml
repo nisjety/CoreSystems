@@ -77,3 +77,6 @@ wiremock = "0.6"
 bytes = "1"
 # Property tests for the DOM-summary scanner (WS2 surfaces).
 proptest = "1"
+# sha256 of the cross-plane token-request manifest, compared with the pin that
+# sits beside it (src/token_request_contract.rs, tests only).
+sha2 = { workspace = true }

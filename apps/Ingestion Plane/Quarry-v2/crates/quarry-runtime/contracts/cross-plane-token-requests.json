@@ -1,0 +1,80 @@
+{
+  "schema_version": 1,
+  "service_id": "quarry-edge",
+  "description": "Every Auth Core service-token request quarry-edge makes, in one file. It is read by the Rust loader (ServiceTokenRequest::from_manifest in crates/quarry-runtime/src/service_tokens.rs), by the tests that tie each row to its call site and to the request Auth Core really receives, and, as a byte-for-byte vendored copy pinned by the sha256 beside it, by Auth Core's contract spec (QB-T02, CR-T17). A token request that is not a row here cannot be built, and a row with no call site fails the source scan unless it is marked pending. Retention posture is never part of a request: Auth Core selects it from the registry and refuses a request that names one. granted=true means the registry must allow quarry-edge exactly this audience and these scopes. granted=false means the registry must refuse it today and every caller of the row degrades; flipping the field is then the only manifest change a grant needs. To change a row: edit this file, refresh cross-plane-token-requests.json.sha256, update the digest registered in scripts/tests/zdr-contract-sync.test.sh and re-vendor the copies listed there.",
+  "rows": [
+    {
+      "name": "vector-retrieve",
+      "audience": "data-plane",
+      "mint_path": "/api/data-plane/internal-token",
+      "scopes": ["data:read"],
+      "reason": "retrieve verified organization evidence",
+      "granted": true,
+      "used_by": ["crates/quarry-runtime/src/vector_index.rs"],
+      "feature_flags": ["QUARRY_EDGE__DATA_PLANE_URL"],
+      "notes": "Vector leg of hybrid search: POST /v1/retrieve on the Data Plane retrieval engine. Read-only. It never carries org:data:read_all: that scope marks a system write and belongs to the ingest row alone."
+    },
+    {
+      "name": "ingest",
+      "audience": "data-plane",
+      "mint_path": "/api/data-plane/internal-token",
+      "scopes": ["documents:write", "org:data:read_all"],
+      "reason": "persist verified Quarry evidence",
+      "granted": true,
+      "used_by": ["crates/quarry-runtime/src/ingest_client.rs"],
+      "feature_flags": ["QUARRY_EDGE__DATA_PLANE_INGEST_URL"],
+      "notes": "Persistence of crawled pages: POST /v1/documents on the Data Plane. org:data:read_all marks a system ingest, so documents-api stamps crawled pages visibility=org; without it they land private to service:quarry-edge and no user sees them. Never requested for a ZDR run."
+    },
+    {
+      "name": "web-rerank",
+      "audience": "data-plane",
+      "mint_path": "/api/data-plane/internal-token",
+      "scopes": ["data:rerank"],
+      "reason": "rank web search candidates",
+      "granted": true,
+      "used_by": [],
+      "pending": "QB-T09 adds the Data Plane rerank client and its call site, then fills used_by and removes this field. The registry grant of data:rerank to quarry-edge is the Control Plane principal bundle (CP wave P1, QB-T01).",
+      "feature_flags": ["QUARRY_EDGE__DATA_PLANE_URL", "QUARRY_EDGE__SEMANTIC_RERANK"],
+      "notes": "Rerank of caller-supplied web candidates: POST /v1/rerank on the Data Plane (paid Azure Cohere). A request of its own on purpose: no other scope rides with data:rerank and no other row holds it. Never audience model-gateway: reranking uses neither the Model Plane nor a subscription."
+    },
+    {
+      "name": "model-invoke",
+      "audience": "model-gateway",
+      "mint_path": "/api/model-plane/internal-token",
+      "scopes": ["models:invoke"],
+      "reason": "invoke bounded model primitive",
+      "granted": false,
+      "used_by": ["crates/quarry-runtime/src/mp_client.rs"],
+      "feature_flags": [
+        "QUARRY_EDGE__MODEL_PLANE_URL",
+        "QUARRY_EDGE__LLM_CLASSIFY_INTENT",
+        "QUARRY_EDGE__AUTOPROMPT",
+        "QUARRY_EDGE__SEMANTIC_RERANK",
+        "QUARRY_EDGE__PAGE_TITLE_ENRICH"
+      ],
+      "notes": "Model Plane POST /v1/invoke, used by intent classification, autoprompt, the semantic reranker, page titles, ai-formats and answer synthesis. The registry gives quarry-edge no model-gateway audience, so Auth Core refuses the mint with 403 and each of those callers degrades (decision D16, owned by QB-T17). Flip granted only together with a registry grant."
+    },
+    {
+      "name": "model-stream",
+      "audience": "model-gateway",
+      "mint_path": "/api/model-plane/internal-token",
+      "scopes": ["models:invoke"],
+      "reason": "stream bounded model primitive",
+      "granted": false,
+      "used_by": ["crates/quarry-runtime/src/mp_client.rs"],
+      "feature_flags": ["QUARRY_EDGE__MODEL_PLANE_URL"],
+      "notes": "Model Plane POST /v1/invoke/stream, used by streamed answers and ai-formats. Refused today for the same reason as model-invoke (D16, QB-T17)."
+    },
+    {
+      "name": "model-audio",
+      "audience": "model-gateway",
+      "mint_path": "/api/model-plane/internal-token",
+      "scopes": ["models:invoke"],
+      "reason": "invoke bounded audio primitive",
+      "granted": false,
+      "used_by": ["crates/quarry-edge/src/audio_routes.rs"],
+      "feature_flags": ["QUARRY_EDGE__MODEL_PLANE_URL"],
+      "notes": "POST /v1/audio, forwarded to /v1/ai/speech and /v1/ai/transcribe. Refused today for the same reason as model-invoke (D16, QB-T17)."
+    }
+  ]
+}

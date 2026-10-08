@@ -142,10 +142,8 @@ impl VectorIndex for DataPlaneVectorIndex {
             zdr_mode: "off",
             filters: serde_json::json!({}),
         };
-        let token_request = crate::service_tokens::ServiceTokenRequest::data_plane(
-            ["data:read"],
-            "retrieve verified organization evidence",
-        );
+        let token_request =
+            crate::service_tokens::ServiceTokenRequest::from_manifest("vector-retrieve")?;
         let bearer = match &self.token_provider {
             Some(provider) => Some(
                 provider

@@ -118,8 +118,7 @@ impl ModelPlaneClient {
         org_id: Option<&str>,
         req: &ModelPlaneInvokeRequest,
     ) -> QuarryResult<ModelPlaneInvokeResponse> {
-        let token_request =
-            ServiceTokenRequest::model_plane(["models:invoke"], "invoke bounded model primitive");
+        let token_request = ServiceTokenRequest::from_manifest("model-invoke")?;
         let bearer = self.bearer_for_org(org_id, &token_request, false).await?;
         let mut resp = self.send_invoke(req, bearer.as_deref()).await?;
         if resp.status() == reqwest::StatusCode::UNAUTHORIZED
@@ -226,8 +225,7 @@ impl ModelPlaneClient {
         org_id: Option<&str>,
         req: &ModelPlaneInvokeRequest,
     ) -> QuarryResult<impl futures::Stream<Item = QuarryResult<String>>> {
-        let token_request =
-            ServiceTokenRequest::model_plane(["models:invoke"], "stream bounded model primitive");
+        let token_request = ServiceTokenRequest::from_manifest("model-stream")?;
         let bearer = self.bearer_for_org(org_id, &token_request, false).await?;
         let mut resp = self.send_invoke_stream(req, bearer.as_deref()).await?;
         if resp.status() == reqwest::StatusCode::UNAUTHORIZED
