@@ -11,6 +11,7 @@ use crate::{
     auth::actor_from_request,
     config::AppState,
     contracts::CreateOrganizationRequest,
+    domains::orgs::settings::zdr_enable_refusal,
     envelope::error,
     middleware::AuthenticatedUser,
     upstream::{browser_origin, proxy_json},
@@ -57,6 +58,18 @@ pub(crate) async fn create_organization(
             )),
         )
             .into_response();
+    }
+
+    // The onboarding step carries the same Zero Data Retention switch as the
+    // settings page, and org-core stores `metadata.interactiveRetention` exactly
+    // as sent (create and re-mirror alike). So the attested-provider gate runs
+    // here too, BEFORE anything is created: an organization is never persisted
+    // with an intent that would refuse every request it makes, and a refusal
+    // leaves nothing half-created for the user to recover from.
+    if creation_requests_zdr(&input.metadata) {
+        if let Some(refusal) = zdr_enable_refusal(&state, &user, &headers, None).await {
+            return refusal.into_response();
+        }
     }
 
     // Better Auth's organization endpoints enforce an Origin/CSRF check, so the
@@ -312,6 +325,19 @@ fn cookie_header(headers: &HeaderMap) -> String {
         .unwrap_or("")
         .trim()
         .to_owned()
+}
+
+/// Whether the request asks for the organization to start with Zero Data
+/// Retention on: `metadata.interactiveRetention.zdr` is the JSON boolean `true`.
+/// Exactly the value org-core's posture read treats as "on"; any other shape
+/// (the string "true", a nested object, `false`) is not an on switch there and
+/// is not gated here.
+fn creation_requests_zdr(metadata: &Option<Value>) -> bool {
+    metadata
+        .as_ref()
+        .and_then(|value| value.pointer("/interactiveRetention/zdr"))
+        .and_then(Value::as_bool)
+        == Some(true)
 }
 
 /// Merge the SPA's onboarding metadata with the org-level attributes BA does not

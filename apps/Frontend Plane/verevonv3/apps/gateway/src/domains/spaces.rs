@@ -27,6 +27,8 @@ use crate::{
     upstream::{proxy_json, send_with_retry},
 };
 
+mod schedule_template;
+
 static THREAD_SCOPE_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 const FORGED_SPACE_AUTHORITY_FIELDS: &[&str] = &[
@@ -508,7 +510,17 @@ pub(crate) async fn inject_personal_schedule_create_context(
             )),
         ));
     }
-    let template_bytes = serde_json::to_vec(&template).map_err(|_| {
+    // The digest Control commits to is recomputed by Go at create, at fire and
+    // in Orchestrator, so the template must be one whose digest survives the
+    // Postgres JSONB round trip and must be hashed the way Go hashes it. See
+    // schedule_template.rs.
+    schedule_template::check_digest_stable(&template).map_err(|reason| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(error("invalid_task_template", reason)),
+        )
+    })?;
+    let template_digest = schedule_template::template_digest(&template).map_err(|_| {
         (
             StatusCode::BAD_REQUEST,
             Json(error(
@@ -517,7 +529,6 @@ pub(crate) async fn inject_personal_schedule_create_context(
             )),
         )
     })?;
-    let template_digest = format!("sha256:{}", hex::encode(Sha256::digest(template_bytes)));
     let actor = ActionActor {
         user_id: user.user_id.clone(),
         user_email: user.user_email.clone(),
@@ -5237,6 +5248,93 @@ mod tests {
             .starts_with("sha256:"));
     }
 
+    /// Runs the real create-context step against a mock Control and returns
+    /// either the `template_digest` the BFF asked Control to commit to, or the
+    /// refusal. The Control mock records every request so a refusal can also
+    /// prove nothing was asked of Control.
+    async fn schedule_create_digest_for(
+        template: Value,
+    ) -> (Result<String, (axum::http::StatusCode, Value)>, usize) {
+        let user_core = MockServer::start().await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/api/v1/internal/spaces/schedule-create-decision"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {"token": "schedule-create-token", "decision": {
+                    "space_ref": "personal-1", "subject_id": "user-1",
+                    "service_audience": "model-plane-capability-core", "action_id": "model.cron.create",
+                    "action_schema_hash": "sha256:space-cron-create-v1", "idempotency_key": "create-1"
+                }}
+            })))
+            .mount(&user_core)
+            .await;
+        let mut state = crate::tests::test_state(false);
+        state.user_core_url = user_core.uri();
+        let mut outbound = json!({
+            "space_ref": "personal-1", "name": "Nightly", "task_template": template,
+        });
+        let outcome = inject_personal_schedule_create_context(
+            &state,
+            &authenticated_user(),
+            "org-1",
+            &mut outbound,
+            "cron-1",
+            "create-1",
+        )
+        .await
+        .map_err(|(status, axum::Json(body))| (status, body));
+        let received = user_core
+            .received_requests()
+            .await
+            .expect("Control requests");
+        let digest = outcome.map(|()| {
+            let request = received.first().expect("Control was asked for a decision");
+            let body: Value = serde_json::from_slice(&request.body).expect("request JSON");
+            body["template_digest"]
+                .as_str()
+                .expect("template_digest")
+                .to_owned()
+        });
+        (digest, received.len())
+    }
+
+    #[tokio::test]
+    async fn schedule_create_digest_matches_go_for_html_and_line_separator_characters() {
+        // Capability Core recomputes this digest with Go's json.Marshal, which
+        // escapes < > & and U+2028/U+2029 as \u00XX / \u202X; serde_json does
+        // not. A different digest makes Control's decision unusable there and
+        // every create answers 403 "Space schedule creation is not authorized".
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let template: Value = serde_json::from_str(super::schedule_template::vector::TEMPLATE_JSON)
+            .expect("vector template");
+
+        let (digest, _) = schedule_create_digest_for(template).await;
+
+        assert_eq!(
+            digest.expect("a flat template is accepted"),
+            super::schedule_template::vector::GO_DIGEST
+        );
+    }
+
+    #[tokio::test]
+    async fn schedule_create_refuses_a_template_whose_digest_would_not_survive_jsonb() {
+        // Postgres JSONB re-orders the keys of a nested object (shorter keys
+        // first), so the fire-time digest of this template would differ from
+        // the one Control committed to at create time. Refuse it up front and
+        // never ask Control for a decision about it.
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let template = json!({
+            "kind": "cron", "title": "Nightly",
+            "workflow_input": {"goal": "Summarise", "ab": 1, "b": 2}
+        });
+
+        let (outcome, control_requests) = schedule_create_digest_for(template).await;
+
+        let (status, body) = outcome.expect_err("a JSONB-unstable template must be refused");
+        assert_eq!(status, axum::http::StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"]["code"], "invalid_task_template");
+        assert_eq!(control_requests, 0);
+    }
+
     #[tokio::test]
     async fn control_issuance_replaces_forged_space_authority_before_model_dispatch() {
         // Serialized with the other Space tests: the handler under test reads
@@ -7628,6 +7726,187 @@ mod tests {
                 .expect("requests")
                 .is_empty(),
             "a declined read must never reach Model Plane"
+        );
+    }
+
+    /// Drive the Space transcript route for a PERSONAL Space's scheduled thread
+    /// as `reader`. A schedule's result thread is owned by the orchestrator
+    /// workload, not by the person, so the only way in is the Control read
+    /// decision user-core's own-scheduled-thread fallback issues to the
+    /// Space's owner. `read_decision` is that answer. Returns the response, the
+    /// Model Gateway mock and the user-core mock so both hops can be asserted.
+    async fn personal_scheduled_transcript_response(
+        reader: &str,
+        read_decision: ResponseTemplate,
+    ) -> (u16, Value, MockServer, MockServer) {
+        let auth = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/auth/get-session"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "user": {"id": reader, "email": "user@example.com", "emailVerified": true},
+                "session": {"activeOrganizationId": "org-1"}
+            })))
+            .mount(&auth)
+            .await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/session-core/token"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(json!({"token": "session-core-token"})),
+            )
+            .mount(&auth)
+            .await;
+        let user_core = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/v1/me/session-context"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "userId": reader, "orgId":"org-1", "role":"member", "onboardingStatus":"COMPLETED"
+            })))
+            .mount(&user_core)
+            .await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/api/v1/internal/spaces/thread-read-decision"))
+            .respond_with(read_decision)
+            .mount(&user_core)
+            .await;
+        // Application lists every Space in the org at any kind, personal
+        // included, as a label source; this is what lets the route accept a
+        // personal Space ref at all.
+        let application = MockServer::start().await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/api/query"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"value": [
+                {"spaceRef":"space-personal","name":"Personal Space","kind":"personal","lifecycle":"active"}
+            ]})))
+            .mount(&application)
+            .await;
+        let model_gateway = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/v1/threads/thread-sched-1/messages"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "thread_id": "thread-sched-1",
+                "messages": [
+                    {"role":"user","content":"Research competitor pricing and draft a summary."},
+                    {"role":"assistant","content":"Draft: three competitors changed pricing this week."}
+                ]
+            })))
+            .mount(&model_gateway)
+            .await;
+        let mut state = crate::tests::test_state(false);
+        state.application_convex_url = application.uri();
+        state.application_convex_service_key = "application-test-key".into();
+        state.auth_core_url = auth.uri();
+        state.user_core_url = user_core.uri();
+        state.model_gateway_url = model_gateway.uri();
+        let response = crate::build_router(state)
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/spaces/space-personal/threads/thread-sched-1/transcript")
+                    .header("cookie", "better-auth.session_token=session-1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status().as_u16();
+        let body: Value =
+            serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                .unwrap_or(Value::Null);
+        (status, body, model_gateway, user_core)
+    }
+
+    /// D12, the chain that had never been run end to end: the personal Space's
+    /// owner asks Control for a read decision (user-core answers through its
+    /// own-scheduled-thread fallback, because the shared-room resolver always
+    /// refuses a personal Space), and the route forwards that decision to Model
+    /// Plane, whose session-core serves a system-owned thread only against it.
+    #[tokio::test]
+    async fn a_personal_space_owner_reads_a_scheduled_thread_through_the_space_transcript_route() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let (status, body, model_gateway, user_core) = personal_scheduled_transcript_response(
+            "user-1",
+            ResponseTemplate::new(200).set_body_json(json!({
+                "data": {
+                    "decision": {"decision_ref": "own-read-1", "space_ref": "space-personal"},
+                    "token": "v2.a.b.c"
+                }
+            })),
+        )
+        .await;
+
+        assert_eq!(status, 200, "the owner must read their scheduled thread: {body}");
+        let turns = body["data"]["transcript"]["turns"]
+            .as_array()
+            .expect("turns");
+        assert_eq!(turns.len(), 2);
+        assert_eq!(
+            turns[1]["content"],
+            "Draft: three competitors changed pricing this week."
+        );
+
+        // The decision reaches Model Plane, scoped to the personal Space and
+        // to exactly the thread the route named.
+        let forwarded = &model_gateway.received_requests().await.expect("requests");
+        assert_eq!(forwarded.len(), 1);
+        let query = forwarded[0].url.query().unwrap_or_default();
+        assert!(query.contains("space_id=space-personal"), "got {query}");
+        assert!(query.contains("space_read_decision_ref=own-read-1"), "got {query}");
+        assert!(query.contains("space_read_decision_token=v2.a.b.c"), "got {query}");
+
+        // Control is asked as the READER, for the requested Space, once.
+        let asked = user_core.received_requests().await.expect("requests");
+        let decision_requests: Vec<_> = asked
+            .iter()
+            .filter(|request| request.url.path() == "/api/v1/internal/spaces/thread-read-decision")
+            .collect();
+        assert_eq!(decision_requests.len(), 1);
+        assert_eq!(
+            decision_requests[0]
+                .headers
+                .get("x-user-id")
+                .and_then(|value| value.to_str().ok()),
+            Some("user-1"),
+            "the decision must be requested under the reader's own delegation"
+        );
+        let sent: Value =
+            serde_json::from_slice(&decision_requests[0].body).expect("decision request body");
+        assert_eq!(sent["space_ref"], "space-personal");
+    }
+
+    /// The other half of the live check: a second org member asks Control for
+    /// the same decision and is declined (neither a shared-room member nor that
+    /// personal Space's owner), and nothing is read from Model Plane. The route
+    /// says so rather than narrowing to what the reader could already see.
+    #[tokio::test]
+    async fn a_second_org_member_is_refused_a_personal_spaces_scheduled_thread() {
+        let _env = crate::config::TEST_ENV_LOCK.lock().await;
+        let (status, body, model_gateway, user_core) = personal_scheduled_transcript_response(
+            "user-2",
+            ResponseTemplate::new(403)
+                .set_body_json(json!({"error": "current shared Space authority required"})),
+        )
+        .await;
+
+        assert_eq!(status, 403, "a colleague must not read a personal Space's thread");
+        assert_eq!(body["error"]["code"], "space_read_not_authorized");
+        assert!(
+            model_gateway
+                .received_requests()
+                .await
+                .expect("requests")
+                .is_empty(),
+            "a declined read must never reach Model Plane"
+        );
+        let asked = user_core.received_requests().await.expect("requests");
+        let decision_request = asked
+            .iter()
+            .find(|request| request.url.path() == "/api/v1/internal/spaces/thread-read-decision")
+            .expect("Control is asked, as the reader");
+        assert_eq!(
+            decision_request
+                .headers
+                .get("x-user-id")
+                .and_then(|value| value.to_str().ok()),
+            Some("user-2"),
         );
     }
 

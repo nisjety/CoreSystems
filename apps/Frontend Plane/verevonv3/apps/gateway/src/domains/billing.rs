@@ -18,6 +18,7 @@ use crate::{
 pub(crate) fn router(state: AppState) -> Router<AppState> {
     Router::new()
         .route("/api/v1/billing/account", get(billing_account))
+        .route("/api/v1/billing/allowances", get(billing_allowances))
         .route(
             "/api/v1/billing/entitlements/{feature}",
             get(billing_entitlement),
@@ -50,6 +51,18 @@ async fn authorized_org_id(state: &AppState, user: &AuthenticatedUser) -> String
 }
 
 // ── Billing routes ────────────────────────────────────────────────────────────
+
+async fn billing_allowances(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+) -> (StatusCode, Json<Value>) {
+    let org_id = match require_billing_admin(&state, &user).await {
+        Ok(org_id) => org_id,
+        Err(response) => return response,
+    };
+    let url = format!("{}/api/v1/billing/orgs/{}/allowances", state.billing_core_url, org_id);
+    proxy_json(&state, Method::GET, &url, None, Some(&org_id), Some(&actor_for(&user)), None).await
+}
 
 async fn billing_account(
     State(state): State<AppState>,

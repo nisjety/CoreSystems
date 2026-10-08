@@ -305,9 +305,9 @@ pub(super) async fn execute_action(
         "org.update_instructions" => {
             dispatch_org_update_instructions(&state, &user, &body.input).await
         }
-        "org.update_zdr" => dispatch_org_update_zdr(&state, &user, &body.input).await,
+        "org.update_zdr" => dispatch_org_update_zdr(&state, &user, &headers, &body.input).await,
         "org.update_support_ai_mode" => {
-            dispatch_org_update_support_ai_mode(&state, &user, &body.input).await
+            dispatch_org_update_support_ai_mode(&state, &user, &headers, &body.input).await
         }
         "membership.invite_member" => {
             dispatch_membership_invite_member(&state, &user, &headers, &body.input).await

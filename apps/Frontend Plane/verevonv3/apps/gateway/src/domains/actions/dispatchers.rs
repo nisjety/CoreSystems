@@ -4389,6 +4389,7 @@ pub(super) async fn dispatch_org_update_instructions(
 pub(super) async fn dispatch_org_update_zdr(
     state: &AppState,
     user: &AuthenticatedUser,
+    headers: &HeaderMap,
     input: &Value,
 ) -> Response {
     let org_id = ticket_string(input, "orgId");
@@ -4398,9 +4399,13 @@ pub(super) async fn dispatch_org_update_zdr(
     if org_id.is_empty() {
         return ticket_bad_request("org.update_zdr requires a non-empty 'orgId'");
     }
+    // The headers carry the session cookie the attested-provider gate needs to
+    // read the model catalogue as this admin; the action path must pass through
+    // the very same gate as the settings route, not around it.
     let (status, Json(resp)) = update_org_settings(
         StateExtractor(state.clone()),
         ExtensionExtractor(user.clone()),
+        headers.clone(),
         PathExtractor(org_id.to_owned()),
         Json(json!({ "zeroDataRetention": zero_data_retention })),
     )
@@ -4411,6 +4416,7 @@ pub(super) async fn dispatch_org_update_zdr(
 pub(super) async fn dispatch_org_update_support_ai_mode(
     state: &AppState,
     user: &AuthenticatedUser,
+    headers: &HeaderMap,
     input: &Value,
 ) -> Response {
     let org_id = ticket_string(input, "orgId");
@@ -4423,6 +4429,7 @@ pub(super) async fn dispatch_org_update_support_ai_mode(
     let (status, Json(resp)) = update_org_settings(
         StateExtractor(state.clone()),
         ExtensionExtractor(user.clone()),
+        headers.clone(),
         PathExtractor(org_id.to_owned()),
         Json(json!({ "supportAiMode": support_ai_mode })),
     )

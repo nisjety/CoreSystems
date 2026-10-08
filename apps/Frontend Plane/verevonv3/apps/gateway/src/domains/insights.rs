@@ -19,7 +19,7 @@ use crate::{
     config::AppState,
     contracts::ActionActor,
     middleware::{require_session, AuthenticatedUser},
-    upstream::{authorized_org_id, proxy_json},
+    upstream::{authorized_org_id, proxy_json, proxy_conversation_json},
 };
 
 pub(crate) fn router(state: AppState) -> Router<AppState> {
@@ -125,11 +125,25 @@ async fn overview(
         }
     };
     let actor = insight_actor(&user);
+    // Read counts from the owner using the existing signed Conversation Core
+    // delegation. Only safe reporting filters survive; no browser-supplied
+    // metric, user identity, token or tenant header is relayed.
+    let source_url = outcome_url(&state.conversation_core_url, &params);
+    let (source_status, Json(source_body)) = proxy_conversation_json(
+        &state, Method::GET, &source_url, None, &user, None,
+    ).await;
+    let source_snapshot = if source_status.is_success() {
+        source_body.get("data").filter(|v| v.is_object()).cloned()
+    } else {
+        tracing::warn!(status = %source_status, "Support outcome verification unavailable");
+        None
+    };
+    let method = if source_snapshot.is_some() { Method::POST } else { Method::GET };
     let (status, Json(body)) = proxy_json(
         &state,
-        Method::GET,
+        method,
         &url,
-        None,
+        source_snapshot,
         Some(&org_id),
         Some(&actor),
         None,
@@ -137,6 +151,15 @@ async fn overview(
     .await;
 
     shield_upstream_credential_failure(status, body).into_response()
+}
+
+fn outcome_url(base: &str, params: &HashMap<String, String>) -> String {
+    let mut url = format!("{}/api/v1/insights/outcomes", base.trim_end_matches('/'));
+    let filters: Vec<String> = ["from", "to", "scope"].iter()
+        .filter_map(|key| params.get(*key).map(|value| format!("{key}={}", urlencoding::encode(value))))
+        .collect();
+    if !filters.is_empty() { url.push('?'); url.push_str(&filters.join("&")); }
+    url
 }
 
 // The browser may narrow an Insights read to a known reporting surface and
@@ -198,6 +221,15 @@ fn overview_url(base: &str, params: &HashMap<String, String>) -> Result<String, 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn outcome_query_drops_forged_identity_and_metric_inputs() {
+        let params = HashMap::from([
+            ("org_id".into(), "other-org".into()), ("user_id".into(), "other-user".into()),
+            ("scope".into(), "me".into()), ("resolved_tickets".into(), "999".into()),
+        ]);
+        assert_eq!(outcome_url("http://conversation-core:3160", &params), "http://conversation-core:3160/api/v1/insights/outcomes?scope=me");
+    }
 
     #[test]
     fn overview_url_forwards_only_allowlisted_measurement_filters() {

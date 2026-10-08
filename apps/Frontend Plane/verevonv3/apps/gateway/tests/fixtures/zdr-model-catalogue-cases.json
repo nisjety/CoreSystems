@@ -1,0 +1,109 @@
+{
+  "_contract": "Cases for the one question both sides must answer identically: does this GET /v1/models body show at least one chat model whose provider has a recorded zero-retention attestation? The BFF (apps/gateway/src/domains/orgs/settings.rs, catalogue_attests_zdr_chat_model) decides whether the org ZDR switch may be turned on. The SPA (src/shared/api/chat-client.ts, hasZeroRetentionModel) decides whether the composer offers Temporary chat and whether the settings toggle is enabled. They read this file, so the toggle, the composer and the BFF cannot disagree. Both test suites fail, never skip, when this file is missing.",
+  "_provenance": "Bodies follow model-gateway's ListModelsHttpResponse / ModelDescriptor wire struct (apps/Model Plane/rust/services/model-gateway/src/http_routes.rs: id, provider, modality, streaming, features[], privacy_tier label, residency) filled with what inference-core really emits: features from ProviderCapabilities::feature_flags() (usage, reasoning, tools, vision, image, zdr) plus a trailing cheap, the hardcoded tools/vision/reasoning list of the Anthropic provider's list_models, modality from the OpenAI provider's model_modality(), privacy_tier from PrivacyTier::classify(). They were NOT captured from a running stack: that needs a signed-in session. Two checks close that gap on the deployed stack: tests/e2e/zdr-org-switch-gate.spec.ts (second test) pins the live body's field names and value types, and the live proof saves one real body and diffs it against case 1 (docs/ZDR_OPERATOR_SEED_RUNBOOK.md, section 7).",
+  "cases": [
+    {
+      "name": "fleet_as_deployed_today_nothing_attested",
+      "attested_chat_model": false,
+      "body": {
+        "models": [
+          { "id": "model-router", "provider": "azure", "modality": "chat", "streaming": true, "features": ["usage", "tools", "vision", "cheap"], "privacy_tier": "eu_resident", "residency": "eu" },
+          { "id": "gpt-4o-mini", "provider": "azure", "modality": "chat", "streaming": true, "features": ["usage", "tools", "vision", "cheap"], "privacy_tier": "eu_resident", "residency": "eu" },
+          { "id": "gpt-image-1", "provider": "azure", "modality": "image", "streaming": true, "features": ["usage", "tools", "vision"], "privacy_tier": "eu_resident", "residency": "eu" },
+          { "id": "text-embedding-3-large", "provider": "azure", "modality": "embedding", "streaming": false, "features": ["cheap"], "privacy_tier": "unspecified", "residency": "" },
+          { "id": "claude-sonnet-4-6", "provider": "azure-anthropic", "modality": "chat", "streaming": true, "features": ["tools", "vision", "reasoning"], "privacy_tier": "eu_resident", "residency": "eu" },
+          { "id": "gpt-5.6-terra", "provider": "openai-codex-subscription", "modality": "chat", "streaming": true, "features": ["usage", "reasoning", "tools"], "privacy_tier": "global", "residency": "" }
+        ]
+      }
+    },
+    {
+      "name": "azure_openai_chat_model_attested",
+      "attested_chat_model": true,
+      "body": {
+        "models": [
+          { "id": "gpt-4o-mini", "provider": "azure", "modality": "chat", "streaming": true, "features": ["usage", "tools", "vision", "zdr", "cheap"], "privacy_tier": "zdr_contractual", "residency": "eu" },
+          { "id": "gpt-5.6-terra", "provider": "openai-codex-subscription", "modality": "chat", "streaming": true, "features": ["usage", "reasoning", "tools"], "privacy_tier": "global", "residency": "" }
+        ]
+      }
+    },
+    {
+      "name": "anthropic_attested_but_its_feature_list_omits_zdr_so_the_tier_decides",
+      "attested_chat_model": true,
+      "body": {
+        "models": [
+          { "id": "claude-sonnet-4-6", "provider": "azure-anthropic", "modality": "chat", "streaming": true, "features": ["tools", "vision", "reasoning"], "privacy_tier": "zdr_contractual", "residency": "eu" }
+        ]
+      }
+    },
+    {
+      "name": "sovereign_tier_without_the_feature_flag",
+      "attested_chat_model": true,
+      "body": {
+        "models": [
+          { "id": "sovereign-chat", "provider": "norway-hosted", "modality": "chat", "streaming": true, "features": ["usage"], "privacy_tier": "sovereign", "residency": "norway" }
+        ]
+      }
+    },
+    {
+      "name": "zdr_feature_with_no_tier_reported",
+      "attested_chat_model": true,
+      "body": {
+        "models": [
+          { "id": "gpt-4o", "provider": "azure", "modality": "chat", "streaming": true, "features": ["usage", "zdr"], "privacy_tier": "unspecified", "residency": "" }
+        ]
+      }
+    },
+    {
+      "name": "only_an_image_model_advertises_zdr",
+      "attested_chat_model": false,
+      "body": {
+        "models": [
+          { "id": "gpt-4o-mini", "provider": "azure", "modality": "chat", "streaming": true, "features": ["usage", "tools", "cheap"], "privacy_tier": "eu_resident", "residency": "eu" },
+          { "id": "gpt-image-1", "provider": "azure", "modality": "image", "streaming": true, "features": ["usage", "image", "zdr"], "privacy_tier": "zdr_contractual", "residency": "eu" }
+        ]
+      }
+    },
+    {
+      "name": "only_an_embedding_model_is_attested",
+      "attested_chat_model": false,
+      "body": {
+        "models": [
+          { "id": "text-embedding-3-large", "provider": "azure", "modality": "embedding", "streaming": false, "features": ["zdr", "cheap"], "privacy_tier": "zdr_contractual", "residency": "eu" }
+        ]
+      }
+    },
+    {
+      "name": "a_zdr_model_with_no_modality_is_not_a_chat_model",
+      "attested_chat_model": false,
+      "body": {
+        "models": [
+          { "id": "mystery", "provider": "azure", "streaming": true, "features": ["usage", "zdr"], "privacy_tier": "zdr_contractual", "residency": "eu" }
+        ]
+      }
+    },
+    {
+      "name": "lookalike_flags_and_tiers_are_not_attestation",
+      "attested_chat_model": false,
+      "body": {
+        "models": [
+          { "id": "a", "provider": "p", "modality": "chat", "streaming": true, "features": ["usage", "zdr_ready", "nozdr", "ZDR", " zdr"], "privacy_tier": "eu_resident", "residency": "eu" },
+          { "id": "b", "provider": "p", "modality": "chat", "streaming": true, "features": ["usage"], "privacy_tier": "zdr", "residency": "" }
+        ]
+      }
+    },
+    {
+      "name": "a_model_without_a_features_list",
+      "attested_chat_model": false,
+      "body": {
+        "models": [
+          { "id": "bare", "provider": "p", "modality": "chat", "streaming": true, "privacy_tier": "global", "residency": "" }
+        ]
+      }
+    },
+    {
+      "name": "empty_catalogue",
+      "attested_chat_model": false,
+      "body": { "models": [] }
+    }
+  ]
+}

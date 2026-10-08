@@ -1,10 +1,8 @@
 //! Cost & usage read surface (Phase 7 B5).
 //!
-//! Proxies the Model Plane cost ledger (cost-core) so the SPA can render real
-//! per-org spend: a rolled-up summary, the most recent cost-bearing entries, and
-//! the model price catalogue (rate card). The org is resolved server-side from
-//! the validated session and passed as the `org_id` filter — a client can never
-//! read another org's ledger (IDOR-clean).
+//! Proxies the Model Plane Cost Core ledger for the authenticated user's usage:
+//! a filtered rollup, recent entries, and the model price catalogue. Cost Core
+//! pins user-token reads to the token actor inside the session-resolved org.
 //!
 //! HONESTY: every figure is whatever cost-core actually recorded. cost-core
 //! prices each inference from its catalogue (migration 0002), so an org with no
@@ -26,7 +24,7 @@ use crate::{
     audience_tokens::{require_model_service_token, ModelServiceAudience},
     config::AppState,
     envelope::error,
-    middleware::{require_session, AuthenticatedUser},
+    middleware::{has_authorized_org_role, require_session, AuthenticatedUser},
     upstream::authorized_org_id,
 };
 
@@ -37,12 +35,82 @@ const MAX_ENTRY_LIMIT: u32 = 200;
 pub(crate) fn router(state: AppState) -> Router<AppState> {
     Router::new()
         .route("/api/v1/cost/summary", get(summary))
+        .route("/api/v1/cost/users", get(users))
+        .route("/api/v1/cost/analytics", get(analytics))
         .route("/api/v1/cost/entries", get(entries))
+        .route("/api/v1/cost/azure/actual", get(azure_actual))
         .route("/api/v1/cost/pricing", get(pricing))
         .route_layer(axum::middleware::from_fn_with_state(state, require_session))
 }
 
-/// The honest empty summary: no recorded cost for this org.
+/// Azure actual charges are organization billing data; only live org owners
+/// and admins can read them. The org itself is always resolved from membership.
+async fn azure_actual(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    Query(params): Query<HashMap<String, String>>,
+) -> impl IntoResponse {
+    if !has_authorized_org_role(&user, &["owner", "admin"]) {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(error("forbidden", "Organization admin access is required")),
+        )
+            .into_response();
+    }
+    let org_id = authorized_org_id(&state, &user).await;
+    if org_id.trim().is_empty() {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(error(
+                "organization_required",
+                "An active organization is required",
+            )),
+        )
+            .into_response();
+    }
+    let mut query = vec![format!("org_id={}", urlencoding::encode(&org_id))];
+    for (input, output) in [("from", "since"), ("to", "until")] {
+        if let Some(value) = params
+            .get(input)
+            .map(|value| value.trim())
+            .filter(|value| !value.is_empty())
+        {
+            query.push(format!("{output}={}", urlencoding::encode(value)));
+        }
+    }
+    let url = format!(
+        "{}/api/v1/cost/azure/actual?{}",
+        state.cost_core_url,
+        query.join("&")
+    );
+    let (status, Json(body)) = proxy_cost_json(&state, Method::GET, &url, &user, &headers).await;
+    if !status.is_success() {
+        return (status, Json(body)).into_response();
+    }
+    Json(json!({ "data": normalize_azure_actual_summary(&body), "error": null })).into_response()
+}
+
+fn normalize_azure_actual_summary(body: &Value) -> Value {
+    let totals: Vec<Value> =
+        body.get("by_currency")
+            .and_then(Value::as_array)
+            .map(|rows| {
+                rows.iter().map(|row| json!({
+        "currency": row.get("currency").and_then(Value::as_str).unwrap_or_default(),
+        "amount": row.get("amount").and_then(Value::as_f64).unwrap_or(0.0),
+    })).collect()
+            })
+            .unwrap_or_default();
+    json!({
+        "available": body.get("available").and_then(Value::as_bool).unwrap_or(false),
+        "rows": body.get("rows").and_then(Value::as_i64).unwrap_or(0),
+        "byCurrency": totals,
+        "latestUsageDate": body.get("latest_usage_date").cloned().unwrap_or(Value::Null),
+    })
+}
+
+/// Empty rollup when there is no active organization in the session.
 fn empty_summary() -> Value {
     json!({
         "totalInputTokens": 0,
@@ -52,16 +120,53 @@ fn empty_summary() -> Value {
     })
 }
 
-/// Reshape a cost-core usage rollup (`total_*` snake_case) to the SPA's camelCase
-/// summary. Missing fields collapse to zero — never a fabricated total.
+/// Reshape a Cost Core usage rollup. New basis fields are included only when
+/// every component is present, so an older Cost Core cannot look like a verified
+/// all-zero breakdown.
 fn normalize_summary(body: &Value) -> Value {
     let num = |key: &str| body.get(key).and_then(Value::as_i64).unwrap_or(0);
-    json!({
+    let mut normalized = json!({
         "totalInputTokens": num("total_input_tokens"),
         "totalOutputTokens": num("total_output_tokens"),
         "totalCostUsd": body.get("total_cost_usd").and_then(Value::as_f64).unwrap_or(0.0),
         "entryCount": num("entry_count"),
-    })
+    });
+    let has_basis_breakdown = [
+        "metered_entry_count",
+        "subscription_entry_count",
+        "unknown_basis_entry_count",
+        "subscription_input_tokens",
+        "subscription_output_tokens",
+        "unknown_basis_input_tokens",
+        "unknown_basis_output_tokens",
+        "zero_token_entry_count",
+    ]
+    .iter()
+    .all(|key| body.get(key).and_then(Value::as_i64).is_some())
+        && body
+            .get("metered_cost_usd")
+            .and_then(Value::as_f64)
+            .is_some();
+    if has_basis_breakdown {
+        normalized["basisBreakdownAvailable"] = json!(true);
+        normalized["meteredEntryCount"] = json!(num("metered_entry_count"));
+        normalized["subscriptionEntryCount"] = json!(num("subscription_entry_count"));
+        normalized["unknownBasisEntryCount"] = json!(num("unknown_basis_entry_count"));
+        normalized["meteredCostUsd"] = json!(body
+            .get("metered_cost_usd")
+            .and_then(Value::as_f64)
+            .unwrap_or(0.0));
+        normalized["subscriptionInputTokens"] = json!(num("subscription_input_tokens"));
+        normalized["subscriptionOutputTokens"] = json!(num("subscription_output_tokens"));
+        normalized["unknownBasisInputTokens"] = json!(num("unknown_basis_input_tokens"));
+        normalized["unknownBasisOutputTokens"] = json!(num("unknown_basis_output_tokens"));
+        normalized["zeroTokenEntryCount"] = json!(num("zero_token_entry_count"));
+        normalized["latestEntryAt"] = body.get("latest_entry_at").cloned().unwrap_or(Value::Null);
+    }
+    if let Some(start) = body.get("reporting_started_at").and_then(Value::as_str) {
+        normalized["reportingStartedAt"] = json!(start);
+    }
+    normalized
 }
 
 /// Reshape one cost-core ledger entry to the SPA's camelCase row.
@@ -76,6 +181,7 @@ fn normalize_entry(entry: &Value) -> Value {
     let num = |key: &str| entry.get(key).and_then(Value::as_i64).unwrap_or(0);
     json!({
         "model": str_field("model"),
+        "providerUsed": str_field("provider_used"),
         "runId": str_field("run_id"),
         "requestId": str_field("request_id"),
         "inputTokens": num("input_tokens"),
@@ -121,22 +227,60 @@ async fn summary(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
     headers: HeaderMap,
+    Query(params): Query<HashMap<String, String>>,
 ) -> impl IntoResponse {
+    let scope = params
+        .get("scope")
+        .map(|value| value.trim())
+        .unwrap_or("me");
+    if !matches!(scope, "me" | "organization") {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(error(
+                "invalid_cost_scope",
+                "scope must be me or organization",
+            )),
+        )
+            .into_response();
+    }
+    if scope == "organization" && !has_authorized_org_role(&user, &["owner", "admin"]) {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(error("forbidden", "Organization admin access is required")),
+        )
+            .into_response();
+    }
     let org_id = authorized_org_id(&state, &user).await;
     if org_id.trim().is_empty() {
         return Json(json!({ "data": empty_summary(), "error": null })).into_response();
     }
 
+    let mut query = vec![format!("org_id={}", urlencoding::encode(&org_id))];
+    if scope == "organization" {
+        query.push("scope=organization".to_string());
+    }
+    for key in ["from", "to"] {
+        if let Some(value) = params
+            .get(key)
+            .map(|value| value.trim())
+            .filter(|value| !value.is_empty())
+        {
+            let cost_core_key = if key == "from" { "since" } else { "until" };
+            query.push(format!("{cost_core_key}={}", urlencoding::encode(value)));
+        }
+    }
     let url = format!(
-        "{}/api/v1/cost/aggregate?org_id={}",
+        "{}/api/v1/cost/aggregate?reporting=current&{}",
         state.cost_core_url,
-        urlencoding::encode(&org_id)
+        query.join("&")
     );
     let (status, Json(body)) = proxy_cost_json(&state, Method::GET, &url, &user, &headers).await;
     if !status.is_success() {
         return (status, Json(body)).into_response();
     }
-    Json(json!({ "data": normalize_summary(&body), "error": null })).into_response()
+    let mut data = normalize_summary(&body);
+    data["scope"] = json!(scope);
+    Json(json!({ "data": data, "error": null })).into_response()
 }
 
 async fn entries(
@@ -174,6 +318,53 @@ async fn entries(
         .unwrap_or_default();
     let count = rows.len();
     Json(json!({ "data": rows, "meta": { "count": count }, "error": null })).into_response()
+}
+
+async fn users(
+    State(state): State<AppState>, Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap, Query(params): Query<HashMap<String, String>>,
+) -> impl IntoResponse {
+    if !has_authorized_org_role(&user, &["owner", "admin"]) {
+        return (StatusCode::FORBIDDEN, Json(error("forbidden", "Organization admin access is required"))).into_response();
+    }
+    let org_id = authorized_org_id(&state, &user).await;
+    if org_id.trim().is_empty() {
+        return (StatusCode::CONFLICT, Json(error("organization_required", "Select an organization"))).into_response();
+    }
+    let mut query = vec![format!("org_id={}", urlencoding::encode(&org_id))];
+    for (key, upstream) in [("from", "since"), ("to", "until")] {
+        if let Some(value) = params.get(key).filter(|v| !v.trim().is_empty()) {
+            query.push(format!("{upstream}={}", urlencoding::encode(value.trim())));
+        }
+    }
+    let url = format!("{}/api/v1/cost/users?{}", state.cost_core_url, query.join("&"));
+    proxy_cost_json(&state, Method::GET, &url, &user, &headers).await.into_response()
+}
+
+async fn analytics(
+    State(state): State<AppState>, Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap, Query(params): Query<HashMap<String, String>>,
+) -> impl IntoResponse {
+    let scope = params.get("scope").map(String::as_str).unwrap_or("me");
+    if !matches!(scope, "me" | "organization") {
+        return (StatusCode::BAD_REQUEST, Json(error("invalid_cost_scope", "Invalid usage scope"))).into_response();
+    }
+    if scope == "organization" && !has_authorized_org_role(&user, &["owner", "admin"]) {
+        return (StatusCode::FORBIDDEN, Json(error("forbidden", "Organization admin access is required"))).into_response();
+    }
+    let org_id = authorized_org_id(&state, &user).await;
+    if org_id.trim().is_empty() {
+        return (StatusCode::CONFLICT, Json(error("organization_required", "Select an organization"))).into_response();
+    }
+    // Browser-supplied tenant, user and reporting-baseline selectors never pass through.
+    let mut query = vec![format!("org_id={}", urlencoding::encode(&org_id)), format!("scope={scope}")];
+    for (key, upstream) in [("from", "since"), ("to", "until")] {
+        if let Some(value) = params.get(key).filter(|v| !v.trim().is_empty()) {
+            query.push(format!("{upstream}={}", urlencoding::encode(value.trim())));
+        }
+    }
+    let url = format!("{}/api/v1/cost/analytics?{}", state.cost_core_url, query.join("&"));
+    proxy_cost_json(&state, Method::GET, &url, &user, &headers).await.into_response()
 }
 
 async fn pricing(
@@ -246,6 +437,31 @@ mod tests {
     use super::*;
 
     #[test]
+    fn normalize_summary_preserves_decimal_metered_breakdown() {
+        let body = json!({
+            "entry_count": 3,
+            "metered_entry_count": 1,
+            "subscription_entry_count": 1,
+            "unknown_basis_entry_count": 1,
+            "metered_cost_usd": 0.0123,
+            "subscription_input_tokens": 20,
+            "subscription_output_tokens": 5,
+            "unknown_basis_input_tokens": 10,
+            "unknown_basis_output_tokens": 2,
+            "zero_token_entry_count": 0,
+        });
+        let normalized = normalize_summary(&body);
+        assert_eq!(normalized["basisBreakdownAvailable"], json!(true));
+        assert_eq!(normalized["meteredCostUsd"], json!(0.0123));
+        assert_eq!(normalized["unknownBasisEntryCount"], json!(1));
+        let mut missing = body;
+        missing.as_object_mut().unwrap().remove("metered_cost_usd");
+        assert!(normalize_summary(&missing)
+            .get("basisBreakdownAvailable")
+            .is_none());
+    }
+
+    #[test]
     fn normalize_summary_maps_totals_and_collapses_missing_to_zero() {
         let body = json!({
             "total_input_tokens": 1200,
@@ -267,9 +483,27 @@ mod tests {
     }
 
     #[test]
+    fn normalize_azure_actual_summary_preserves_currency_and_source_date() {
+        let normalized = normalize_azure_actual_summary(&json!({
+            "available": true,
+            "rows": 4,
+            "by_currency": [{ "currency": "NOK", "amount": 123.45 }],
+            "latest_usage_date": "2026-09-23T00:00:00Z",
+        }));
+        assert_eq!(normalized["available"], json!(true));
+        assert_eq!(normalized["rows"], json!(4));
+        assert_eq!(
+            normalized["byCurrency"][0],
+            json!({ "currency": "NOK", "amount": 123.45 })
+        );
+        assert_eq!(normalized["latestUsageDate"], json!("2026-09-23T00:00:00Z"));
+    }
+
+    #[test]
     fn normalize_entry_maps_snake_to_camel() {
         let entry = json!({
             "model": "gpt-4o-mini",
+            "provider_used": "azure-norway-eu",
             "run_id": "run_123",
             "input_tokens": 100,
             "output_tokens": 50,
@@ -278,6 +512,7 @@ mod tests {
         });
         let got = normalize_entry(&entry);
         assert_eq!(got["model"], json!("gpt-4o-mini"));
+        assert_eq!(got["providerUsed"], json!("azure-norway-eu"));
         assert_eq!(got["runId"], json!("run_123"));
         assert_eq!(got["inputTokens"], json!(100));
         assert_eq!(got["costUsd"], json!(0.00005));

@@ -30,6 +30,10 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
             "/api/v1/model-subscriptions/openai-codex/connections/{connection_id}",
             delete(model_subscriptions::disconnect_openai_codex_subscription),
         )
+        .route(
+            "/api/v1/model-subscriptions/openai-codex/connections/{connection_id}/usage",
+            get(model_subscriptions::openai_codex_subscription_usage),
+        )
         // Providers
         .route(
             "/api/v1/integrations/providers",
