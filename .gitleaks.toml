@@ -46,6 +46,7 @@ paths = [
   '''(^|/)testdata/''',
   '''Cargo\.lock$''',
   '''go\.sum$''',
+  '''go\.work\.sum$''',
   '''pnpm-lock\.yaml$''',
   '''package-lock\.json$''',
   '''yarn\.lock$''',
@@ -79,4 +80,20 @@ regexes = [
   # algorithm names, not a pattern a real credential would coincidentally
   # equal.
   '''(XSalsa20-Poly1305|ChaCha20-Poly1305|XChaCha20-Poly1305|Curve25519|Ed25519|X25519)''',
+  # Synthetic test fixtures (added 2026-10-08). The pre-commit hook scans diff text on stdin, which carries no file path,
+  # so the path allowlist above cannot apply to it. Each entry below is therefore a narrow content match that was
+  # checked against the exact strings gitleaks extracted from the real fixtures; none can match a working credential.
+  # A JWT-shaped string whose signature segment is 10-42 characters long is not a valid token: the shortest JWS
+  # signature (HS256) is 43 characters. The golden wire-shape files (inference-service-tokens.golden.json and its
+  # vendored copies in Data Plane) carry 21-byte stand-in signatures.
+  '''^eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,42}$''',
+  # Usage-envelope fixtures (usage-ledger-rs, data-orchestrator-go): envelopes signed with throwaway keys made when the
+  # fixture is generated (the private halves are never written down); each token lives two minutes. The exact header
+  # of each of the three producers' envelope signers.
+  '''^(?:eyJ0eXAiOiJKV1QiLCJhbGciOiJSUzI1NiIsImtpZCI6ImVtYmVkZGluZy1ldmVudHMtdjEifQ|eyJ0eXAiOiJKV1QiLCJhbGciOiJSUzI1NiIsImtpZCI6ImdyYXBoLWV2ZW50cy12MSJ9|eyJ0eXAiOiJKV1QiLCJhbGciOiJSUzI1NiIsImtpZCI6InJldHJpZXZhbC1ldmVudHMtdjEifQ)\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_\\/-]+$''',
+  # Exact synthetic hex test constants: two repetitions of the ascending or the descending 16-digit sequence.
+  '''^(?:0123456789abcdef|fedcba9876543210){2}$''',
+  # The exact test constant of the embedding-engine unit tests and the exact document id of the eval golden set.
+  '''^test-key-0123456789$''',
+  '''^edf42420-3863-49fb-8629-8d0e541a3b31$''',
 ]
