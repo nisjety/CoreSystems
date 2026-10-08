@@ -29,6 +29,11 @@ type MemoryRepository struct {
 	actionAuthorizationReceipts map[string]string
 
 	emailSyncStates map[string]EmailSyncState
+
+	// Model-connection ZDR capability records (by connection id) and the append-only
+	// acknowledgement ledger (insertion order); see zdr.go.
+	zdrRecords map[string]ConnectionZDR
+	zdrAcks    []ConnectionZDRAcknowledgement
 }
 
 type memorySCIMToken struct {
@@ -58,6 +63,9 @@ func NewMemoryRepository() *MemoryRepository {
 		actionAuthorizationReceipts: map[string]string{},
 
 		emailSyncStates: map[string]EmailSyncState{},
+
+		zdrRecords: map[string]ConnectionZDR{},
+		zdrAcks:    []ConnectionZDRAcknowledgement{},
 	}
 }
 

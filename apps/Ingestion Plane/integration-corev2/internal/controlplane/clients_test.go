@@ -239,6 +239,7 @@ func TestAuthClientVerifyTokenPopulatesDelegatedUserIDFromActingUserClaimForServ
 		"iat": now.Unix(), "nbf": now.Add(-time.Second).Unix(), "exp": now.Add(5 * time.Minute).Unix(),
 		"org_id": "org-1", "service_id": "service:execution-core", "principal_type": "service",
 		"acting_user_id": "user-1", "scopes": []string{"integration:read"},
+		"jti": "jti-from-exchange",
 	})
 	token.Header["kid"] = "test-key"
 	signed, err := token.SignedString(privateKey)
@@ -257,6 +258,14 @@ func TestAuthClientVerifyTokenPopulatesDelegatedUserIDFromActingUserClaimForServ
 	}
 	if principal.DelegatedUserID != "user-1" {
 		t.Fatalf("DelegatedUserID = %q, want user-1", principal.DelegatedUserID)
+	}
+	// The token's own id and expiry ride along so the middleware can make a
+	// delegated token single-use (auth/single_use.go).
+	if principal.TokenID != "jti-from-exchange" {
+		t.Fatalf("TokenID = %q, want the token's jti", principal.TokenID)
+	}
+	if principal.TokenExpiresAt.IsZero() || !principal.TokenExpiresAt.After(time.Now()) {
+		t.Fatalf("TokenExpiresAt = %v, want the token's future exp", principal.TokenExpiresAt)
 	}
 	// false: a verified bearer token never counts as the legacy
 	// internal-API-key call path (see auth.Principal.EffectiveUserID).

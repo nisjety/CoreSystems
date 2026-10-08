@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/triodelab/integration-corev2/internal/codexsubscription"
 	"github.com/triodelab/integration-corev2/internal/store"
@@ -80,6 +81,51 @@ func TestCodexSubscriptionInferIsScopedAndNeverLeasesAToken(t *testing.T) {
 	defer mismatchResp.Body.Close()
 	if mismatchResp.StatusCode != http.StatusForbidden || runner.invocations != 1 {
 		t.Fatalf("mismatch status=%d invocations=%d, want 403 and no second invocation", mismatchResp.StatusCode, runner.invocations)
+	}
+}
+
+func TestCodexSubscriptionUsageReturnsProviderWindowsWithoutAllowanceInference(t *testing.T) {
+	cfg, repo, service := testOAuthStack(t)
+	reset := time.Date(2026, 10, 1, 15, 0, 0, 0, time.UTC)
+	windowMinutes := 300
+	runner := &apiCodexRunner{rateLimits: codexsubscription.RateLimitReport{
+		ObservedAt: time.Date(2026, 10, 1, 10, 0, 0, 0, time.UTC),
+		Primary:    &codexsubscription.RateLimitWindow{UsedPercent: 42, WindowMinutes: &windowMinutes, ResetsAt: &reset},
+	}}
+	manager, err := codexsubscription.NewManager(codexsubscription.Config{Enabled: true, Home: t.TempDir()}, runner)
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	_, err = repo.UpsertConnection(t.Context(), store.Connection{
+		ID: "conn-allowance", ProviderKey: codexsubscription.ProviderKey, ConnectorType: codexsubscription.ConnectorType,
+		OrganizationID: "org-1", UserID: "user-1", Status: "connected", Capabilities: []string{codexsubscription.Capability},
+	})
+	if err != nil {
+		t.Fatalf("UpsertConnection: %v", err)
+	}
+	app := NewServer(ServerConfig{Config: cfg, Repo: repo, OAuth: service, CodexSubscriptions: manager})
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/model-subscriptions/openai-codex/connections/conn-allowance/usage", nil)
+	req.Header.Set("X-Internal-API-Key", "dev-key")
+	resp, err := app.Test(req)
+	if err != nil {
+		t.Fatalf("app.Test: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(body), `"scope":"connected_user"`) || !strings.Contains(string(body), `"usedPercent":42`) || strings.Contains(string(body), "planType") || strings.Contains(string(body), "tokenAllowance") {
+		t.Fatalf("allowance response is missing provider values or exposes inferred data: %s", body)
+	}
+	if runner.rateLimitReads != 1 || runner.invocations != 0 {
+		t.Fatalf("rate-limit reads=%d inference calls=%d", runner.rateLimitReads, runner.invocations)
+	}
+	if !runner.rateLimitHasDeadline {
+		t.Fatal("provider allowance read must have a request deadline")
 	}
 }
 
@@ -277,11 +323,14 @@ func TestCodexSubscriptionDoneEventOmitsUnreportedUsage(t *testing.T) {
 }
 
 type apiCodexRunner struct {
-	lastRequest codexsubscription.InvokeRequest
-	invocations int
-	invokeErr   error
-	usage       *codexsubscription.TokenUsage
-	phases      map[string]int64
+	lastRequest          codexsubscription.InvokeRequest
+	invocations          int
+	invokeErr            error
+	usage                *codexsubscription.TokenUsage
+	phases               map[string]int64
+	rateLimits           codexsubscription.RateLimitReport
+	rateLimitReads       int
+	rateLimitHasDeadline bool
 }
 
 func (r *apiCodexRunner) BeginDeviceLogin(context.Context, string) (codexsubscription.LoginProcess, codexsubscription.DeviceCode, error) {
@@ -312,3 +361,9 @@ func (r *apiCodexRunner) InvokeStream(_ context.Context, _ string, request codex
 }
 
 func (r *apiCodexRunner) Logout(context.Context, string) error { return nil }
+
+func (r *apiCodexRunner) ReadRateLimits(ctx context.Context, _ string) (codexsubscription.RateLimitReport, error) {
+	r.rateLimitReads++
+	_, r.rateLimitHasDeadline = ctx.Deadline()
+	return r.rateLimits, nil
+}

@@ -19,7 +19,6 @@ import (
 
 	"github.com/triodelab/integration-corev2/internal/config"
 	"github.com/triodelab/integration-corev2/internal/egress"
-	"github.com/triodelab/integration-corev2/internal/htmlstrip"
 	"github.com/triodelab/integration-corev2/internal/oauth"
 	"github.com/triodelab/integration-corev2/internal/store"
 )
@@ -97,6 +96,11 @@ type Service struct {
 	// without this second client a content read would silently return an
 	// empty/redirect body instead of the file.
 	contentClient *http.Client
+	// now is the clock the calendar operations default their time window from
+	// (calendar_read.go). It is a field, not a call to time.Now, so a test can
+	// pin "now" and assert the exact window sent to the provider; NewService
+	// sets it to time.Now.
+	now func() time.Time
 }
 
 type ExecuteInput struct {
@@ -120,7 +124,7 @@ func NewService(cfg config.Config, httpClient *http.Client) *Service {
 		// URL; egress.SafeClient vets that host before connecting.
 		httpClient = egress.SafeClient(egress.ClientConfig{RequestTimeout: defaultActionTimeout})
 	}
-	return &Service{cfg: cfg, httpClient: httpClient, contentClient: redirectFollowingClient(httpClient)}
+	return &Service{cfg: cfg, httpClient: httpClient, contentClient: redirectFollowingClient(httpClient), now: time.Now}
 }
 
 // redirectFollowingClient builds the content-read client described on
@@ -191,7 +195,7 @@ func (s *Service) Execute(ctx context.Context, input ExecuteInput) (ExecuteResul
 		err = fmt.Errorf("actions are not implemented for provider %s", input.Connection.ProviderKey)
 	}
 	if err != nil {
-		return ExecuteResult{}, err
+		return ExecuteResult{}, reconnectableError(input.Connection.ProviderKey, err)
 	}
 	return ExecuteResult{ProviderKey: input.Connection.ProviderKey, Operation: operation, Result: result}, nil
 }
@@ -202,73 +206,22 @@ func (s *Service) executeMicrosoft(ctx context.Context, token, operation string,
 	case "profile", "microsoft.profile":
 		return s.getBearer(ctx, token, base+"/me?$select=id,displayName,mail,userPrincipalName", nil)
 	case "calendar.events", "microsoft.calendar.events":
-		values := url.Values{"$top": {limitParam(params, "maxResults", 10, 100)}}
-		var headers map[string]string
-		if query := stringParam(params, "query", ""); query != "" {
-			// Graph requires $search over ConsistencyLevel: eventual rather
-			// than an ordinary query param — a plain $filter/$search without
-			// the header is rejected outright.
-			values.Set("$search", "\""+searchPhraseEscape(query)+"\"")
-			headers = map[string]string{"ConsistencyLevel": "eventual"}
-		}
-		return s.getBearer(ctx, token, base+"/me/events?"+values.Encode(), headers)
+		// Window, time zone, local search and paging params: see calendar_read.go.
+		return s.microsoftCalendarEvents(ctx, token, base, params)
 	case "mail.messages", "microsoft.mail.messages":
-		values := url.Values{
-			"$top":    {limitParam(params, "maxResults", 10, 100)},
-			"$select": {"id,subject,from,receivedDateTime,webLink"},
-		}
-		return s.getBearer(ctx, token, base+"/me/messages?"+values.Encode(), nil)
+		// Search, filter, folder and paging params: see mail_read.go.
+		return s.microsoftMailMessages(ctx, token, base, params)
 	case "mail.messages.get", "microsoft.mail.messages.get":
-		messageID, err := requiredStringParam(params, "messageId")
-		if err != nil {
-			return nil, err
-		}
-		values := url.Values{"$select": {"id,subject,from,receivedDateTime,webLink,body"}}
-		result, err := s.getBearerMap(ctx, token, base+"/me/messages/"+url.PathEscape(messageID)+"?"+values.Encode(), nil)
-		if err != nil {
-			return nil, err
-		}
-		if bodyField, ok := result["body"].(map[string]any); ok {
-			content := stringFromAny(bodyField["content"])
-			if strings.EqualFold(stringFromAny(bodyField["contentType"]), "html") {
-				result["bodyText"] = htmlstrip.StripHTMLTags(content)
-			} else {
-				result["bodyText"] = content
-			}
-		}
-		return result, nil
+		return s.microsoftMailMessageGet(ctx, token, base, params)
 	case "drive.files", "microsoft.drive.files":
-		values := url.Values{
-			"$top":    {limitParam(params, "maxResults", 10, 100)},
-			"$select": {"id,name,webUrl,file,folder,lastModifiedDateTime,size"},
-		}
-		endpoint := base + "/me/drive/root/children"
-		// A search takes priority over a folder scope: Graph's search
-		// endpoint already searches the whole drive, so there is no sane way
-		// to combine it with a folder-scoped children listing in v1.0.
-		if query := stringParam(params, "query", ""); query != "" {
-			endpoint = base + "/me/drive/root/search(q='" + odataEscape(query) + "')"
-		} else if folderID := stringParam(params, "folderId", ""); folderID != "" {
-			endpoint = base + "/me/drive/items/" + url.PathEscape(folderID) + "/children"
-		}
-		return s.getBearer(ctx, token, endpoint+"?"+values.Encode(), nil)
+		// Library (driveId), folder, search and paging params: see drive_read.go.
+		return s.microsoftDriveFiles(ctx, token, base, params)
 	case "drive.file.content", "microsoft.drive.file.content":
-		itemID, err := requiredStringParam(params, "itemId")
-		if err != nil {
-			return nil, err
-		}
-		contentB64, mimeType, size, truncated, err := s.getBearerBinaryBase64(
-			ctx, token, base+"/me/drive/items/"+url.PathEscape(itemID)+"/content", maxContentBytes, nil,
-		)
-		if err != nil {
-			return nil, err
-		}
-		return map[string]any{
-			"content_base64": contentB64,
-			"mime_type":      mimeType,
-			"size":           size,
-			"truncated":      truncated,
-		}, nil
+		return s.microsoftDriveFileContent(ctx, token, base, params)
+	case "sharepoint.sites", "microsoft.sharepoint.sites":
+		return s.microsoftSharePointSites(ctx, token, base, params)
+	case "sharepoint.drives", "microsoft.sharepoint.drives":
+		return s.microsoftSharePointDrives(ctx, token, base, params)
 	case "mail.send", "microsoft.mail.send":
 		payload, err := microsoftMailSendPayload(body)
 		if err != nil {
@@ -326,38 +279,12 @@ func (s *Service) executeGoogle(ctx context.Context, token, operation string, pa
 	case "profile", "google.profile":
 		return s.getBearer(ctx, token, base+"/oauth2/v3/userinfo", nil)
 	case "gmail.messages", "google.gmail.messages":
-		values := url.Values{"maxResults": {limitParam(params, "maxResults", 10, 100)}}
-		return s.getBearer(ctx, token, base+"/gmail/v1/users/me/messages?"+values.Encode(), nil)
+		// Search, filter, folder, paging and the opt-in headers fan-out: see
+		// mail_read.go. Without those params this is the same ids-only list as
+		// before, which execution-core's gmail.send read-back depends on.
+		return s.googleGmailMessages(ctx, token, base, params)
 	case "gmail.messages.get", "google.gmail.messages.get":
-		messageID, err := requiredStringParam(params, "id")
-		if err != nil {
-			return nil, err
-		}
-		values := url.Values{"format": {"full"}}
-		raw, err := s.getBearerMap(ctx, token, base+"/gmail/v1/users/me/messages/"+url.PathEscape(messageID)+"?"+values.Encode(), nil)
-		if err != nil {
-			return nil, err
-		}
-		payload, _ := raw["payload"].(map[string]any)
-		headers := gmailHeaderMap(payload)
-		text, html := extractGmailMessageBodies(payload)
-		bodyText := text
-		if bodyText == "" && html != "" {
-			// Gmail's own listing comment already notes the list endpoint
-			// never carries a body regardless of params — that is a search
-			// limitation, not a signal that no body exists here. format=full
-			// always returns one MIME tree; text/plain wins when present,
-			// otherwise the text/html leaf is rendered down to text.
-			bodyText = htmlstrip.StripHTMLTags(html)
-		}
-		return map[string]any{
-			"id":       raw["id"],
-			"threadId": raw["threadId"],
-			"subject":  headers["subject"],
-			"from":     headers["from"],
-			"date":     headers["date"],
-			"bodyText": bodyText,
-		}, nil
+		return s.googleGmailMessageGet(ctx, token, base, params)
 	case "gmail.send", "google.gmail.send":
 		payload, err := gmailSendPayload(body)
 		if err != nil {
@@ -365,62 +292,15 @@ func (s *Service) executeGoogle(ctx context.Context, token, operation string, pa
 		}
 		return s.postBearer(ctx, token, base+"/gmail/v1/users/me/messages/send", payload, nil)
 	case "calendar.events", "google.calendar.events":
-		values := url.Values{"maxResults": {limitParam(params, "maxResults", 10, 100)}}
-		if query := stringParam(params, "query", ""); query != "" {
-			values.Set("q", query)
-		}
-		return s.getBearer(ctx, token, base+"/calendar/v3/calendars/primary/events?"+values.Encode(), nil)
+		// Window, time zone, search and paging params: see calendar_read.go.
+		return s.googleCalendarEvents(ctx, token, base, params)
 	case "drive.files", "google.drive.files":
-		values := url.Values{
-			"pageSize": {limitParam(params, "maxResults", 10, 100)},
-			"fields":   {"files(id,name,mimeType,webViewLink,modifiedTime,size)"},
-		}
-		if q := driveQueryParam(params); q != "" {
-			values.Set("q", q)
-		}
-		return s.getBearer(ctx, token, base+"/drive/v3/files?"+values.Encode(), nil)
+		// Shared drives, text or name match, folder and paging params: see drive_read.go.
+		return s.googleDriveFiles(ctx, token, base, params)
 	case "drive.file.content", "google.drive.file.content":
-		fileID, err := requiredStringParam(params, "fileId")
-		if err != nil {
-			return nil, err
-		}
-		mimeType := stringParam(params, "mimeType", "")
-		endpoint := base + "/drive/v3/files/" + url.PathEscape(fileID) + "?alt=media"
-		exportExtension := ""
-		// Falls back to the caller-supplied mimeType (from the prior listing
-		// call) only when the response carries no Content-Type — see
-		// getBearerBinaryBase64's doc. For a native-Doc export this must be
-		// the EXPORT mime type (e.g. .docx), not the native
-		// application/vnd.google-apps.* type the file actually is: reporting
-		// the native type on an exported .docx would mislabel the very bytes
-		// this call just returned.
-		fallbackMimeType := mimeType
-		if strings.HasPrefix(mimeType, "application/vnd.google-apps.") {
-			exportMIME, extension, exportErr := googleNativeExportTarget(mimeType)
-			if exportErr != nil {
-				return nil, exportErr
-			}
-			endpoint = base + "/drive/v3/files/" + url.PathEscape(fileID) + "/export?" + url.Values{"mimeType": {exportMIME}}.Encode()
-			exportExtension = extension
-			fallbackMimeType = exportMIME
-		}
-		contentB64, respMimeType, size, truncated, err := s.getBearerBinaryBase64(ctx, token, endpoint, maxContentBytes, nil)
-		if err != nil {
-			return nil, err
-		}
-		if respMimeType == "" {
-			respMimeType = fallbackMimeType
-		}
-		result := map[string]any{
-			"content_base64": contentB64,
-			"mime_type":      respMimeType,
-			"size":           size,
-			"truncated":      truncated,
-		}
-		if exportExtension != "" {
-			result["export_extension"] = exportExtension
-		}
-		return result, nil
+		// Binary download, or the export of a Docs Editors file as Office
+		// formats (default) or text (exportAs=text): see drive_read.go.
+		return s.googleDriveFileContent(ctx, token, base, params)
 	default:
 		return nil, fmt.Errorf("unsupported Google operation %q", operation)
 	}
@@ -1464,6 +1344,10 @@ func (s *Service) getBearerBinaryBase64(ctx context.Context, token, endpoint str
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		preview, _ := io.ReadAll(io.LimitReader(resp.Body, maxProviderErrorBodyBytes))
+		if rejection := providerAuthRejection(resp, preview); rejection != nil {
+			return "", "", 0, false, rejection
+		}
 		return "", "", 0, false, fmt.Errorf("provider content endpoint returned status %d", resp.StatusCode)
 	}
 	// Check Content-Length before reading anything: an honest oversized
@@ -1496,7 +1380,7 @@ func odataEscape(value string) string {
 }
 
 // searchPhraseEscape escapes a value for Graph's double-quote-delimited
-// $search="..." phrase syntax (used for calendar.events search): backslash
+// $search="..." phrase syntax (used for the mail.messages search): backslash
 // first, then the phrase's own delimiter. Without this, a query containing a
 // literal `"` would close the phrase early and let the rest of the string be
 // interpreted as additional $search syntax rather than search text — the
@@ -1513,20 +1397,6 @@ func searchPhraseEscape(value string) string {
 func driveEscape(value string) string {
 	replacer := strings.NewReplacer(`\`, `\\`, `'`, `\'`)
 	return replacer.Replace(value)
-}
-
-// driveQueryParam builds Drive's `q` filter from the optional query/folderId
-// params. Returns "" when neither is given, preserving today's unfiltered
-// listing exactly — this is purely additive.
-func driveQueryParam(params map[string]any) string {
-	var clauses []string
-	if query := stringParam(params, "query", ""); query != "" {
-		clauses = append(clauses, "name contains '"+driveEscape(query)+"' and trashed=false")
-	}
-	if folderID := stringParam(params, "folderId", ""); folderID != "" {
-		clauses = append(clauses, "'"+driveEscape(folderID)+"' in parents")
-	}
-	return strings.Join(clauses, " and ")
 }
 
 // googleNativeExportTarget maps a Google-native (Docs/Sheets/Slides) mime
@@ -1715,6 +1585,11 @@ func (s *Service) doJSON(req *http.Request) (any, error) {
 	data, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, fmt.Errorf("read provider action response: %w", err)
+	}
+	// A refused credential or scope is classified before the body is decoded:
+	// an HTML or empty 401/403 must still say "reconnect", not "bad response".
+	if rejection := providerAuthRejection(resp, data); rejection != nil {
+		return nil, rejection
 	}
 	if len(strings.TrimSpace(string(data))) == 0 {
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {

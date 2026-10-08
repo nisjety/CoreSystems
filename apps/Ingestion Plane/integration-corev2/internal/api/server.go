@@ -175,6 +175,11 @@ func NewServer(cfg ServerConfig) *fiber.App {
 	app.Get("/metrics", internalAuth, func(c *fiber.Ctx) error {
 		c.Set("Content-Type", "text/plain; version=0.0.4")
 		body := metrics.render()
+		if cfg.MailTask != nil {
+			// Content-free mail-task outcome counters: the only place a run of
+			// sender-verification drops (answered 200) shows up as a rate.
+			body += cfg.MailTask.RenderMetrics()
+		}
 		if auditMonitor != nil {
 			body += renderAuditOutboxMetrics(c.UserContext(), auditMonitor)
 		}
@@ -232,6 +237,8 @@ func NewServer(cfg ServerConfig) *fiber.App {
 			Bundles:         body.Bundles,
 			ReturnURL:       body.ReturnURL,
 			ProviderContext: body.providerContext(),
+
+			ReplaceCapabilities: body.ReplaceCapabilities,
 		})
 		if err != nil {
 			return apiError(c, fiber.StatusBadRequest, "connect_session_failed", err.Error())
@@ -389,8 +396,15 @@ func NewServer(cfg ServerConfig) *fiber.App {
 		if !ok {
 			return apiError(c, fiber.StatusBadRequest, "provider_not_supported", "Provider is not supported.")
 		}
-		capabilities, err := normalizeCapabilityUpdate(provider, body.Capabilities)
+		capabilities, err := normalizeCapabilityUpdate(provider, connection, body.Capabilities)
 		if err != nil {
+			var notGranted *capabilityNotGrantedError
+			if errors.As(err, &notGranted) {
+				return apiErrorWithDetails(c, fiber.StatusBadRequest, "capability_not_granted", err.Error(), fiber.Map{
+					"capabilities":      notGranted.capabilities,
+					"reconnectRequired": true,
+				})
+			}
 			return apiError(c, fiber.StatusBadRequest, "invalid_capabilities", err.Error())
 		}
 		var updated store.Connection
@@ -922,6 +936,13 @@ func NewServer(cfg ServerConfig) *fiber.App {
 			if result.Err != nil {
 				event = cfg.Logger.Warn().Err(result.Err)
 			}
+			if result.Diagnostic != "" {
+				// A sender-verification drop answers 200, so this line is how a
+				// run of dropped real mail becomes visible. The diagnostic is
+				// content-free by construction: check names, verdicts and
+				// header NAMES, never a header value, subject or address.
+				event = cfg.Logger.Warn().Str("sender_diagnostic", result.Diagnostic)
+			}
 			event.Str("reason", string(result.Reason)).Msg("mail-task inbound webhook")
 		}
 		switch result.Reason {
@@ -939,6 +960,11 @@ func NewServer(cfg ServerConfig) *fiber.App {
 			// verdict that the alias doesn't exist, so it must be retryable
 			// like ReasonGatewayUnavailable rather than silently dropped.
 			return apiError(c, fiber.StatusServiceUnavailable, "alias_resolver_unavailable", "Alias resolver is unavailable; retry delivery.")
+		case mailtask.ReasonDeliveryInFlight:
+			// Another delivery of this same message id is mid-flight and may
+			// still fail, so acknowledging this one with a 200 could lose the
+			// mail. Retryable, never the default 200 below.
+			return apiError(c, fiber.StatusServiceUnavailable, "delivery_in_flight", "This message is already being processed; retry delivery.")
 		default:
 			// ReasonWrongDomain, ReasonAliasNotFound, ReasonSenderNotVerified,
 			// ReasonDuplicate, ReasonAccepted all answer 200 -- see the
@@ -1377,6 +1403,11 @@ type createConnectSessionBody struct {
 	ReturnURL       string            `json:"returnUrl"`
 	Shop            string            `json:"shop"`
 	ProviderContext map[string]string `json:"providerContext"`
+
+	// ReplaceCapabilities opts a Microsoft/Google connect out of the additive
+	// default: the connection ends up with exactly the requested capabilities
+	// instead of the union with what it already holds.
+	ReplaceCapabilities bool `json:"replaceCapabilities"`
 }
 
 func (b createConnectSessionBody) providerContext() map[string]string {
@@ -1543,26 +1574,45 @@ func scopedConnection(c *fiber.Ctx, cfg ServerConfig, connectionID string) (stor
 	return connection, nil
 }
 
-func normalizeCapabilityUpdate(provider providers.Provider, requested []string) ([]string, error) {
-	allowed := map[string]struct{}{}
+// normalizeCapabilityUpdate validates a capability-set update against the
+// catalog and against what the connection's token actually holds: a capability
+// that is not recorded yet is only accepted when every scope it needs is in
+// connection.Scopes, so a recorded capability is never one the provider did
+// not grant. Capabilities already recorded stay acceptable (a toggle of some
+// other capability must not start failing over older drift), and dropping any
+// capability is always allowed.
+func normalizeCapabilityUpdate(provider providers.Provider, connection store.Connection, requested []string) ([]string, error) {
+	definitions := map[string]providers.Capability{}
 	for _, capability := range provider.Capabilities {
-		allowed[capability.Key] = struct{}{}
+		definitions[capability.Key] = capability
+	}
+	recorded := map[string]struct{}{}
+	for _, key := range connection.Capabilities {
+		recorded[key] = struct{}{}
 	}
 	out := []string{}
 	seen := map[string]struct{}{}
+	var ungranted []string
 	for _, raw := range requested {
 		key := strings.TrimSpace(raw)
 		if key == "" {
 			continue
 		}
-		if _, ok := allowed[key]; !ok {
+		definition, ok := definitions[key]
+		if !ok {
 			return nil, errors.New("unsupported capability: " + key)
 		}
 		if _, ok := seen[key]; ok {
 			continue
 		}
 		seen[key] = struct{}{}
+		if _, alreadyRecorded := recorded[key]; !alreadyRecorded && !scopesAllGranted(definition.Scopes, connection.Scopes) {
+			ungranted = append(ungranted, key)
+		}
 		out = append(out, key)
+	}
+	if len(ungranted) > 0 {
+		return nil, &capabilityNotGrantedError{capabilities: ungranted}
 	}
 	return out, nil
 }
@@ -3383,6 +3433,11 @@ func requiredCapabilityForOperation(providerKey, operation string) (string, bool
 			return "sharepoint.read", false
 		case "drive.file.content", "microsoft.drive.file.content":
 			return "sharepoint.read", false
+		case "sharepoint.sites", "microsoft.sharepoint.sites",
+			"sharepoint.drives", "microsoft.sharepoint.drives":
+			// Site and document-library listings: Graph's Sites.Read.All, which
+			// sharepoint.read already requests next to Files.Read.All.
+			return "sharepoint.read", false
 		case "mail.send", "microsoft.mail.send":
 			return "mail.send", true
 		}
@@ -3679,6 +3734,8 @@ func actionError(c *fiber.Ctx, err error) error {
 		return apiError(c, fiber.StatusForbidden, "write_attestation_invalid", "Provider-write attestation is invalid.")
 	case errors.Is(err, errActionAttestationUnconfigured):
 		return apiError(c, fiber.StatusServiceUnavailable, "write_attestation_unconfigured", "Provider-write attestation verification is unavailable.")
+	case isProviderAuthRejection(err):
+		return reconnectRequiredError(c, err)
 	default:
 		var authErr auth.Error
 		if errors.As(err, &authErr) {

@@ -458,6 +458,31 @@ services:
       INTEGRATION_WEBHOOK_HOTPATH_URL: ${INTEGRATION_WEBHOOK_HOTPATH_URL:-http://integration-webhook-normalizer:3036}
       INTEGRATION_PUBLIC_BASE_URL: ${INTEGRATION_PUBLIC_BASE_URL:-http://localhost:3026}
       INTEGRATION_CORE_URL: ${INTEGRATION_CORE_URL:-http://integration-api:3026}
+      # Inbound "forward an email to create a task" (plan task J3, dark). The
+      # webhook route is enabled only when BOTH MAIL_TASK_PROVIDER ("postmark")
+      # and MAIL_TASK_WEBHOOK_SECRET are set (internal/mailtask/handler.go), and
+      # both are empty here, so the feature is off. Set them in the launcher's
+      # environment or this plane's own .env, NOT in integration-corev2/.env: a
+      # compose `environment` entry masks that env_file with its empty default.
+      # Do not set them before the Postmark inbound path is proven (plan J1/J2).
+      MAIL_TASK_PROVIDER: ${MAIL_TASK_PROVIDER:-}
+      MAIL_TASK_WEBHOOK_SECRET: ${MAIL_TASK_WEBHOOK_SECRET:-}
+      # Same host variable as user-core's MAIL_TASK_RECEIVING_DOMAIN, so the
+      # domain the webhook accepts and the one Settings shows cannot drift.
+      MAIL_TASK_RECEIVING_DOMAIN: ${MAIL_TASK_RECEIVING_DOMAIN:-}
+      # Presented to user-core as principal `integration-mail-task-worker` (scope
+      # mail-task:resolve alone). Control's launcher mints it once as
+      # USER_CORE_MAIL_TASK_WORKER_TOKEN; user-core validates the same value in
+      # its own USER_CORE_SERVICE_CREDENTIALS (not Auth Core's registry).
+      MAIL_TASK_USER_CORE_SERVICE_TOKEN: ${USER_CORE_MAIL_TASK_WORKER_TOKEN:-}
+      # HMAC key for this service's delegation to the gateway BFF
+      # (/internal/mail-task/ingest). The BFF reads the SAME host variable as its
+      # MAIL_TASK_INGEST_SERVICE_TOKEN, so the two ends are equal by construction.
+      # Not minted by the launcher: empty (the BFF route refuses every caller)
+      # until the owner switches mail-to-task on. 32 characters or more.
+      MAIL_TASK_GATEWAY_SERVICE_TOKEN: ${MAIL_TASK_GATEWAY_SERVICE_TOKEN:-}
+      # Bearer for imports-core attachment extraction; leave empty for text-only.
+      MAIL_TASK_IMPORTS_CORE_TOKEN: ${MAIL_TASK_IMPORTS_CORE_TOKEN:-}
       # Optional ChatGPT subscription broker configuration is supplied by the
       # integration-corev2 env file so its dedicated model-plane credential is
       # not expanded from Compose's project-wide environment. The API image

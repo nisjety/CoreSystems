@@ -1,10 +1,58 @@
 package codexsubscription
 
 import (
+	"context"
+	"errors"
 	"os"
 	"slices"
 	"testing"
+	"time"
 )
+
+type reentrantReadTestLocker struct{ locked bool }
+
+func (l *reentrantReadTestLocker) WithExclusive(_ context.Context, _ string, fn func() error) error {
+	if l.locked {
+		return errors.New("credential lock re-entered")
+	}
+	l.locked = true
+	defer func() { l.locked = false }()
+	return fn()
+}
+
+type reentrantReadTestAuthenticator struct{ locker *reentrantReadTestLocker }
+
+func (*reentrantReadTestAuthenticator) BeginDeviceLogin(context.Context, string) (LoginProcess, DeviceCode, error) {
+	return nil, DeviceCode{}, nil
+}
+func (*reentrantReadTestAuthenticator) Logout(context.Context, string) error { return nil }
+func (a *reentrantReadTestAuthenticator) ReadRateLimits(ctx context.Context, home string) (RateLimitReport, error) {
+	var report RateLimitReport
+	err := a.locker.WithExclusive(ctx, home, func() error {
+		report = RateLimitReport{ObservedAt: time.Now().UTC()}
+		return nil
+	})
+	return report, err
+}
+func (*reentrantReadTestAuthenticator) readRateLimitsFromAppServer(context.Context, string) (RateLimitReport, error) {
+	return RateLimitReport{ObservedAt: time.Now().UTC()}, nil
+}
+
+func TestComposedRunnerRateLimitReadDoesNotReenterCredentialLock(t *testing.T) {
+	locker := &reentrantReadTestLocker{}
+	runner := NewRunnerWithTransport(
+		&reentrantReadTestAuthenticator{locker: locker},
+		nil,
+		locker,
+	)
+	report, err := runner.(*composedRunner).ReadRateLimits(context.Background(), "connection-home")
+	if err != nil {
+		t.Fatalf("ReadRateLimits: %v", err)
+	}
+	if report.ObservedAt.IsZero() {
+		t.Fatal("expected provider snapshot timestamp")
+	}
+}
 
 func TestParseTransportKind(t *testing.T) {
 	for raw, want := range map[string]TransportKind{"": TransportAppServer, "direct": TransportDirect, " Direct ": TransportDirect, "app-server": TransportAppServer, "APP-SERVER": TransportAppServer} {

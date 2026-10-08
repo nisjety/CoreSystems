@@ -226,6 +226,9 @@ func TestPersonalConnectionServicePrincipalWithDelegatedUserSucceeds(t *testing.
 		Auth: fakeVerifier{principal: auth.Principal{
 			UserID: "service:execution-core", OrganizationID: "org-1", PrincipalType: "service",
 			DelegatedUserID: "owner-1", Scopes: []string{"integration:read"},
+			// Auth Core stamps a jti on every delegated token and the
+			// middleware honors each one exactly once (auth/single_use.go).
+			TokenID: "api-delegated-owner-read-1", TokenExpiresAt: time.Now().Add(90 * time.Second),
 		}},
 	})
 

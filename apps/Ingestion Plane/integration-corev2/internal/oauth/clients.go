@@ -56,6 +56,10 @@ func NewProviderClients(cfg config.Config, microsoft *MicrosoftClient, httpClien
 				// select_account. This keeps refresh-token consent while allowing
 				// an operator to choose a different Google account on reconnect.
 				"prompt": "select_account consent",
+				// A later bundle's authorization also covers what the account
+				// granted before, so its token still carries those scopes and a
+				// reconnect for one bundle does not narrow another.
+				"include_granted_scopes": "true",
 			},
 			HTTPClient: httpClient,
 		}),

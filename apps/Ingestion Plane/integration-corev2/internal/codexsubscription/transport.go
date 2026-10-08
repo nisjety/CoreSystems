@@ -160,4 +160,33 @@ func (r *composedRunner) Logout(ctx context.Context, codeHome string) error {
 	return r.creds.WithExclusive(ctx, codeHome, func() error { return r.auth.Logout(ctx, codeHome) })
 }
 
+func (r *composedRunner) ReadRateLimits(ctx context.Context, codeHome string) (RateLimitReport, error) {
+	reader, ok := r.auth.(RateLimitReader)
+	if !ok {
+		return RateLimitReport{}, errors.New("Codex allowance reader is unavailable")
+	}
+	var report RateLimitReport
+	var readErr error
+	read := func() error { report, readErr = reader.ReadRateLimits(ctx, codeHome); return readErr }
+	if r.creds == nil {
+		return report, read()
+	}
+	lockedRead := read
+	if lockedReader, ok := r.auth.(interface {
+		readRateLimitsFromAppServer(context.Context, string) (RateLimitReport, error)
+	}); ok {
+		// ProcessRunner.ReadRateLimits also ensures credentials. Since the
+		// composed runner already holds the lock, bypass that second acquisition.
+		lockedRead = func() error {
+			report, readErr = lockedReader.readRateLimitsFromAppServer(ctx, codeHome)
+			return readErr
+		}
+	}
+	err := r.creds.WithExclusive(ctx, codeHome, lockedRead)
+	if err != nil {
+		return RateLimitReport{}, err
+	}
+	return report, readErr
+}
+
 func (r *composedRunner) TransportKind() TransportKind { return r.transport.Kind() }

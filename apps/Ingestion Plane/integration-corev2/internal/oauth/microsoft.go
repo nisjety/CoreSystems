@@ -164,6 +164,7 @@ func (c *MicrosoftClient) tokenRequest(ctx context.Context, values url.Values) (
 	}
 	refreshToken, _ := raw["refresh_token"].(string)
 	scopeValue, _ := raw["scope"].(string)
+	scopes := strings.Fields(scopeValue)
 	expiresIn := expiresInSeconds(raw["expires_in"])
 	if expiresIn <= 0 {
 		expiresIn = 3600
@@ -172,9 +173,13 @@ func (c *MicrosoftClient) tokenRequest(ctx context.Context, values url.Values) (
 		AccessToken:  accessToken,
 		RefreshToken: refreshToken,
 		TokenType:    stringValue(raw["token_type"]),
-		Scope:        strings.Fields(scopeValue),
-		ExpiresAt:    time.Now().UTC().Add(time.Duration(expiresIn) * time.Second),
-		Raw:          raw,
+		Scope:        scopes,
+		// The v2 token endpoint lists the scopes the access token carries. When it
+		// does, that list is the authoritative grant; when it is absent the caller
+		// has nothing to verify and keeps trusting what was requested.
+		ScopesVerified: len(scopes) > 0,
+		ExpiresAt:      time.Now().UTC().Add(time.Duration(expiresIn) * time.Second),
+		Raw:            raw,
 	}, nil
 }
 

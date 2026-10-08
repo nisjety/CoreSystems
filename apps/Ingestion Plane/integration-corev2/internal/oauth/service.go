@@ -51,6 +51,11 @@ type CreateSessionInput struct {
 	Bundles         []string
 	ReturnURL       string
 	ProviderContext map[string]string
+	// ReplaceCapabilities opts out of the additive default for personal
+	// providers (Microsoft, Google): the session requests, and on completion
+	// records, exactly the requested capabilities instead of the union with
+	// what the user's connection already holds.
+	ReplaceCapabilities bool
 }
 
 type CreateSessionResult struct {
@@ -169,6 +174,23 @@ func (s *Service) CreateSession(ctx context.Context, input CreateSessionInput) (
 	}
 	redirectURI := s.callbackURL(provider.Key)
 	capabilities := providers.ResolveCapabilities(provider, input.Capabilities, input.Bundles)
+	// A personal connection only ever widens: asking for a new bundle must
+	// request what the user already granted too, so the new token still carries
+	// those scopes and the reconnect cannot silently drop them. Callers that
+	// really want a narrower connection say so with ReplaceCapabilities.
+	delete(providerContext, replaceCapabilitiesContextKey) // server-set only, never caller-supplied
+	sessionContext := providerContext
+	if providers.IsPersonalProvider(provider.Key) {
+		if input.ReplaceCapabilities {
+			sessionContext = contextWithReplaceMarker(providerContext)
+		} else {
+			granted, err := s.grantedCapabilitiesOnSoleConnection(ctx, provider, input.OrganizationID, input.UserID)
+			if err != nil {
+				return CreateSessionResult{}, err
+			}
+			capabilities = unionSorted(capabilities, granted)
+		}
+	}
 	scopes := providers.ResolveScopes(provider, capabilities)
 	verifierCiphertext, err := s.vault.Encrypt(verifier, []byte(sessionID))
 	if err != nil {
@@ -186,7 +208,7 @@ func (s *Service) CreateSession(ctx context.Context, input CreateSessionInput) (
 		CodeVerifierCiphertext: verifierCiphertext,
 		RedirectURI:            redirectURI,
 		ReturnURL:              strings.TrimSpace(input.ReturnURL),
-		ProviderContext:        providerContext,
+		ProviderContext:        sessionContext,
 		Capabilities:           capabilities,
 		Scopes:                 scopes,
 		ExpiresAt:              s.now().Add(s.cfg.SessionTTL),
@@ -558,6 +580,8 @@ func (s *Service) persistConnection(ctx context.Context, session store.ConnectSe
 		displayName = session.ProviderKey + " connection"
 	}
 	providerContext := reconnectProviderContext(existing.ProviderContext, session.ProviderContext)
+	replaceCapabilities := providerContext[replaceCapabilitiesContextKey] != ""
+	delete(providerContext, replaceCapabilitiesContextKey)
 	if providers.NormalizeKey(session.ProviderKey) == "notion" {
 		if workspaceID := strings.TrimSpace(stringValue(token.Raw["workspace_id"])); workspaceID != "" {
 			providerContext["notion_workspace_id"] = workspaceID
@@ -575,14 +599,21 @@ func (s *Service) persistConnection(ctx context.Context, session store.ConnectSe
 	connectionScopes := append([]string{}, session.Scopes...)
 	connectionCapabilities := append([]string{}, session.Capabilities...)
 	connectionStatus := "active"
-	if isMetaFamilyProvider(session.ProviderKey) && token.ScopesVerified {
-		connectionScopes = normalizedStrings(token.Scope)
+	if token.ScopesVerified && verifiesGrantedScopes(session.ProviderKey) {
+		connectionScopes = normalizeGrantedScopes(session.ProviderKey, token.Scope)
 		if provider, ok := providers.FindOAuth(session.ProviderKey); ok {
 			connectionCapabilities = capabilitiesAllowedByScopes(provider, session.Capabilities, connectionScopes)
 		}
 		if len(connectionCapabilities) != len(session.Capabilities) {
 			connectionStatus = "needs_refresh"
 		}
+	}
+	// Reconnecting a personal connection must not forget what it already held.
+	// Everything this authorization asked about was decided above (by the
+	// token, where the provider reports grants); what it did not ask about is
+	// carried over from the same user's connection.
+	if reconnecting && !replaceCapabilities && providers.IsPersonalProvider(session.ProviderKey) && existing.UserID == session.UserID {
+		connectionCapabilities, connectionScopes = carryUnrequestedGrants(existing, session, connectionCapabilities, connectionScopes)
 	}
 	connection := store.Connection{
 		ID:                    connectionID,
@@ -832,10 +863,107 @@ func normalizedStrings(values []string) []string {
 	return out
 }
 
+// replaceCapabilitiesContextKey marks a connect session that was created with
+// ReplaceCapabilities. It rides in the session's provider context (a session has
+// no other free-form field), is set only by CreateSession, and is stripped
+// before the connection is stored.
+const replaceCapabilitiesContextKey = "oauth_replace_capabilities"
+
+func contextWithReplaceMarker(providerContext map[string]string) map[string]string {
+	marked := make(map[string]string, len(providerContext)+1)
+	for key, value := range providerContext {
+		marked[key] = value
+	}
+	marked[replaceCapabilitiesContextKey] = "true"
+	return marked
+}
+
+// verifiesGrantedScopes reports providers whose token response is an
+// authoritative record of the scopes granted, so the capabilities recorded for a
+// connection can be derived from it instead of from what was asked for.
+func verifiesGrantedScopes(providerKey string) bool {
+	return isMetaFamilyProvider(providerKey) || providers.NormalizeKey(providerKey) == "microsoft"
+}
+
+// normalizeGrantedScopes puts a token response's scope list in the same form as
+// the catalog's scopes. Microsoft prefixes Graph scopes with the Graph URL in
+// some responses and never echoes the OIDC scopes the sign-in itself proves.
+func normalizeGrantedScopes(providerKey string, scopes []string) []string {
+	if providers.NormalizeKey(providerKey) == "microsoft" {
+		return grantedScopesForSignIn(scopes)
+	}
+	return normalizedStrings(scopes)
+}
+
+// grantedCapabilitiesOnSoleConnection returns the capabilities the user's one
+// active connection to a personal provider already holds. A user with several
+// accounts connected gets nothing back: which account the next authorization
+// will be for is only known at the callback, and no account's grants may be
+// requested on another's behalf. (persistConnection still carries the right
+// account's grants over once the callback names it.)
+func (s *Service) grantedCapabilitiesOnSoleConnection(ctx context.Context, provider providers.Provider, organizationID, userID string) ([]string, error) {
+	connections, err := s.repo.ListConnections(ctx, store.ConnectionFilter{
+		OrganizationID: strings.TrimSpace(organizationID),
+		ProviderKey:    provider.Key,
+		UserID:         strings.TrimSpace(userID),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("look up existing %s connection: %w", provider.Key, err)
+	}
+	var active []store.Connection
+	for _, connection := range connections {
+		if connection.DeletedAt == nil && (connection.Status == "active" || connection.Status == "needs_refresh") {
+			active = append(active, connection)
+		}
+	}
+	if len(active) != 1 {
+		return nil, nil
+	}
+	known := allCapabilityKeys(provider)
+	granted := make([]string, 0, len(active[0].Capabilities))
+	for _, capability := range active[0].Capabilities {
+		if slices.Contains(known, capability) {
+			granted = append(granted, capability)
+		}
+	}
+	return granted, nil
+}
+
+// carryUnrequestedGrants keeps, on a reconnect, the capabilities and scopes the
+// existing connection holds that the new authorization did not ask about. What
+// it did ask about is not carried: the token (or the request) already decided it,
+// so a grant the provider no longer reports stays dropped.
+func carryUnrequestedGrants(existing store.Connection, session store.ConnectSession, capabilities, scopes []string) ([]string, []string) {
+	requestedCapabilities := map[string]struct{}{}
+	for _, capability := range session.Capabilities {
+		requestedCapabilities[capability] = struct{}{}
+	}
+	requestedScopes := map[string]struct{}{}
+	for _, scope := range session.Scopes {
+		requestedScopes[strings.TrimSpace(scope)] = struct{}{}
+	}
+	carriedCapabilities := append([]string{}, capabilities...)
+	for _, capability := range existing.Capabilities {
+		if _, asked := requestedCapabilities[capability]; !asked {
+			carriedCapabilities = append(carriedCapabilities, capability)
+		}
+	}
+	carriedScopes := append([]string{}, scopes...)
+	for _, scope := range existing.Scopes {
+		if _, asked := requestedScopes[strings.TrimSpace(scope)]; !asked {
+			carriedScopes = append(carriedScopes, scope)
+		}
+	}
+	return normalizedStrings(carriedCapabilities), normalizedStrings(carriedScopes)
+}
+
 func capabilitiesAllowedByScopes(provider providers.Provider, requested, grantedScopes []string) []string {
+	// Scope names are matched case-insensitively: Microsoft does not promise the
+	// casing of the scopes it echoes, and a missed match here would park a
+	// healthy connection in needs_refresh.
 	granted := map[string]struct{}{}
 	for _, scope := range grantedScopes {
-		granted[strings.TrimSpace(scope)] = struct{}{}
+		granted[strings.ToLower(strings.TrimSpace(scope))] = struct{}{}
 	}
 	requestedSet := map[string]struct{}{}
 	for _, capability := range requested {
@@ -848,7 +976,7 @@ func capabilitiesAllowedByScopes(provider providers.Provider, requested, granted
 		}
 		allGranted := true
 		for _, required := range capability.Scopes {
-			if _, ok := granted[required]; !ok {
+			if _, ok := granted[strings.ToLower(strings.TrimSpace(required))]; !ok {
 				allGranted = false
 				break
 			}

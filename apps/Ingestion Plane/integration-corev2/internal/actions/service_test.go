@@ -1255,34 +1255,9 @@ func TestExecuteGoogleGmailMessagesGetParsesFullFormat(t *testing.T) {
 	}
 }
 
-func TestExecuteMicrosoftCalendarEventsEscapesEmbeddedQuoteInSearchPhrase(t *testing.T) {
-	// A literal double quote in the search text must not be able to close
-	// Graph's $search="..." phrase early and inject additional $search
-	// syntax — regression test for reusing odataEscape (single-quote-only)
-	// in this double-quote-delimited context.
-	var gotSearch string
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotSearch = r.URL.Query().Get("$search")
-		if got := r.Header.Get("ConsistencyLevel"); got != "eventual" {
-			t.Fatalf("ConsistencyLevel header = %q, want eventual", got)
-		}
-		_ = json.NewEncoder(w).Encode(map[string]any{"value": []any{}})
-	}))
-	defer server.Close()
-
-	service := NewService(config.Config{MicrosoftGraphBaseURL: server.URL}, server.Client())
-	_, err := service.Execute(context.Background(), ExecuteInput{
-		Connection: store.Connection{ProviderKey: "microsoft"}, AccessToken: "token-1", Operation: "calendar.events",
-		Params: map[string]any{"query": `budget" OR subject:secret`},
-	})
-	if err != nil {
-		t.Fatalf("Execute error: %v", err)
-	}
-	want := `"budget\" OR subject:secret"`
-	if gotSearch != want {
-		t.Fatalf("$search = %q, want %q (the embedded quote must be backslash-escaped, not left to close the phrase early)", gotSearch, want)
-	}
-}
+// The calendar.events tests (formerly a $search escaping test here, which
+// guarded a query syntax calendar.events no longer sends) are in
+// calendar_read_test.go.
 
 func TestExecuteGoogleDriveFileContentExportFallsBackToExportMimeWhenContentTypeMissing(t *testing.T) {
 	// When the export response carries no Content-Type header, the reported

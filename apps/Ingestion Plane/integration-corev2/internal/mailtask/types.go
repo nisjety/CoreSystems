@@ -34,6 +34,11 @@ type InboundMailTaskEvent struct {
 	TextBody    string
 	HTMLBody    string
 	Attachments []InboundAttachment
+
+	// AuthDiagnostic is the content-free account of how AuthResult was
+	// derived (diag.go): which rule decided, why, and which header NAMES the
+	// payload carried -- never a header value.
+	AuthDiagnostic AuthDiagnostic
 }
 
 // InboundAttachment is one attachment exactly as the provider delivered it --

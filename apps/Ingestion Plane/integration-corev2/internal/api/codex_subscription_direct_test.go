@@ -132,6 +132,22 @@ func writeDirectAuth(t *testing.T, dir string) {
 	payload, _ := json.Marshal(map[string]any{"exp": time.Now().Add(time.Hour).Unix()})
 	header := base64.RawURLEncoding.EncodeToString([]byte("{\"alg\":\"HS256\",\"typ\":\"JWT\"}"))
 	access := header + "." + base64.RawURLEncoding.EncodeToString(payload) + ".fixture"
+	idToken := header + "." + base64.RawURLEncoding.EncodeToString([]byte("{}")) + ".fixture"
+	// The shape internal/codexsubscription reads (see its testhelpers_test.go).
+	auth, err := json.Marshal(map[string]any{
+		"auth_mode":      "chatgpt",
+		"OPENAI_API_KEY": nil,
+		"tokens": map[string]any{
+			"id_token":      idToken,
+			"access_token":  access,
+			"refresh_token": "fixture-refresh",
+			"account_id":    "acct-fixture",
+		},
+		"last_refresh": time.Now().UTC().Format(time.RFC3339),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}

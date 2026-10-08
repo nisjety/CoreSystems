@@ -30,6 +30,7 @@ import (
 	"github.com/triodelab/integration-corev2/internal/oauth"
 	"github.com/triodelab/integration-corev2/internal/store"
 	"github.com/triodelab/integration-corev2/internal/webhookorg"
+	"github.com/triodelab/integration-corev2/internal/zdr"
 )
 
 // logLevelFromEnv reads LOG_LEVEL (trace|debug|info|warn|error); anything
@@ -175,6 +176,29 @@ func main() {
 	auditOutbox := api.NewAuditOutbox(repo, auditClient, &logger)
 	auditOutbox.Start()
 	defer auditOutbox.Close()
+	// Model-connection ZDR capability (Z-12). Boot-time check first: a capability contract that
+	// does not match its pinned digest, or that the strict loader rejects, stops the service
+	// rather than assessing anything with it. Then assess every live model connection. The
+	// reconcile is idempotent and writes only the side table nothing reads yet; a failure is
+	// logged and leaves connections unassessed (every reader treats that as cannot_verify), it
+	// never stops the service.
+	zdrAssessor, err := zdr.Default()
+	if err != nil {
+		logger.Fatal().Err(err).Msg("load connection ZDR capability contract")
+	}
+	reconcileCtx, cancelReconcile := context.WithTimeout(context.Background(), 60*time.Second)
+	// No inline dispatch: the audit rows are durable outbox rows the outbox worker publishes, so a
+	// slow Audit Core cannot hold the start-up up.
+	zdrResult, zdrErr := api.ReconcileConnectionZDR(reconcileCtx, api.ServerConfig{Repo: repo, Logger: &logger})
+	cancelReconcile()
+	zdrLog := logger.Info()
+	if zdrErr != nil {
+		zdrLog = logger.Error().Err(zdrErr)
+	}
+	zdrLog.Int("catalog_version", zdrAssessor.CatalogVersion()).Str("contract_sha256", zdrAssessor.PinnedSHA256()).
+		Int("examined", zdrResult.Examined).Int("created", zdrResult.Created).Int("changed", zdrResult.Changed).
+		Int("unchanged", zdrResult.Unchanged).Int("revoked", zdrResult.Revoked).Int("failed", zdrResult.Failed).
+		Msg("connection ZDR assessment reconcile")
 	// Inbound "forward an email to create a task" pipeline (chat-wave2
 	// mail-task spec, owner ruling 2026-09-28: Postmark inbound, self-forward
 	// only). Always constructed -- Handler itself stays off by default until
@@ -197,6 +221,12 @@ func main() {
 			BaseURL:      cfg.MailTaskGatewayIngestURL,
 			ServiceToken: cfg.MailTaskGatewayServiceToken,
 		},
+		// The TTL only bounds how long a finished message (accepted, or
+		// dropped as an unknown alias or unverified sender) is remembered as a
+		// duplicate. A delivery that failed downstream is never remembered, so
+		// Postmark's retry is always processed. Once thread creation is
+		// idempotent on session_key (plan task J4) this guard is an
+		// optimisation, not the idempotency guarantee.
 		Replay: mailtask.NewReplayGuard(30 * time.Minute),
 	}
 

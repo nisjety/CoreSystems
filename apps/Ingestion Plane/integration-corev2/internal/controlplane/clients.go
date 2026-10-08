@@ -172,10 +172,9 @@ func (c *AuthClient) VerifyToken(ctx context.Context, token string) (auth.Princi
 	// by that named user). It is read only from the token's own verified
 	// acting_user_id claim — never from userID/service_id above, and never
 	// from anything the caller supplies outside this signed token — and
-	// only for a service principal; auth-core does not issue this claim
-	// yet, so it is empty until that issuance path exists, and every
-	// current service-principal caller is correctly treated as naming no
-	// end user until then. See auth.Principal.EffectiveUserID.
+	// only for a service principal; auth-core issues it only from its
+	// token-exchange endpoint, and a plain scoped service token that lacks
+	// it names no end user. See auth.Principal.EffectiveUserID.
 	delegatedUserID := ""
 	if principalType == "service" {
 		delegatedUserID = stringClaim(claims, "acting_user_id")
@@ -189,9 +188,17 @@ func (c *AuthClient) VerifyToken(ctx context.Context, token string) (auth.Princi
 	if slices.Contains(scopes, "admin") {
 		role = "admin"
 	}
+	tokenExpiresAt := time.Time{}
+	if exp := numericClaim(claims, "exp"); exp > 0 {
+		tokenExpiresAt = time.Unix(exp, 0)
+	}
 	return auth.Principal{
 		UserID: userID, OrganizationID: orgID, Role: role, Email: stringClaim(claims, "email"),
 		PrincipalType: principalType, Scopes: scopes, DelegatedUserID: delegatedUserID,
+		// Carried only so a delegated token can be consumed once (see
+		// auth/single_use.go); auth-core stamps a jti on every token it
+		// exchanges for an acting user.
+		TokenID: stringClaim(claims, "jti"), TokenExpiresAt: tokenExpiresAt,
 	}, nil
 }
 

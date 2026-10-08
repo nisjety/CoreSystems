@@ -59,6 +59,8 @@ func (r *MemoryRepository) WithAuditTransaction(ctx context.Context, fn func(Aud
 	working.auditProcessing = cloneMap(r.auditProcessing)
 	working.actionReceipts = cloneMap(r.actionReceipts)
 	working.actionAuthorizationReceipts = cloneMap(r.actionAuthorizationReceipts)
+	working.zdrRecords = cloneMap(r.zdrRecords)
+	working.zdrAcks = cloneZDRAcknowledgements(r.zdrAcks)
 
 	if err := fn(working); err != nil {
 		return err
@@ -77,6 +79,8 @@ func (r *MemoryRepository) WithAuditTransaction(ctx context.Context, fn func(Aud
 	r.auditProcessing = working.auditProcessing
 	r.actionReceipts = working.actionReceipts
 	r.actionAuthorizationReceipts = working.actionAuthorizationReceipts
+	r.zdrRecords = working.zdrRecords
+	r.zdrAcks = working.zdrAcks
 	return nil
 }
 

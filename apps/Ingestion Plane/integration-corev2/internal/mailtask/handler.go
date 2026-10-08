@@ -30,8 +30,13 @@ const (
 	ReasonAliasResolverUnavailable Reason = "alias_resolver_unavailable"
 	ReasonSenderNotVerified        Reason = "sender_not_verified"
 	ReasonDuplicate                Reason = "duplicate"
-	ReasonGatewayUnavailable       Reason = "gateway_unavailable"
-	ReasonAccepted                 Reason = "accepted"
+	// ReasonDeliveryInFlight means another delivery of the same provider
+	// message id is being processed right now. The HTTP layer must map it to
+	// a retryable status, never 200: that other delivery may still fail, and
+	// acknowledging this one would tell Postmark the message was delivered.
+	ReasonDeliveryInFlight   Reason = "delivery_in_flight"
+	ReasonGatewayUnavailable Reason = "gateway_unavailable"
+	ReasonAccepted           Reason = "accepted"
 )
 
 // Result is what HandleInboundPostmark returns: enough to pick an HTTP status
@@ -39,6 +44,11 @@ const (
 type Result struct {
 	Reason Reason
 	Err    error
+	// Diagnostic is set only for ReasonSenderNotVerified: one content-free
+	// line (failing check, derived auth verdict, deciding rule, rule detail and
+	// the payload's header NAMES -- never a value) for the HTTP layer to log, so
+	// a run of dropped real mail is visible even though the webhook answers 200.
+	Diagnostic string
 }
 
 // Handler wires every collaborator the inbound pipeline needs. All fields are
@@ -59,6 +69,10 @@ type Handler struct {
 	Gateway         GatewayIngestClient
 	Replay          *ReplayGuard
 	Now             func() time.Time
+
+	// stats holds the content-free outcome counters RenderMetrics exposes. The
+	// zero value is ready to use; Handler is always used by pointer.
+	stats mailStats
 }
 
 func (h *Handler) now() time.Time {
@@ -83,7 +97,19 @@ func (h *Handler) enabled() bool {
 // verification, attachment extraction, and forwarding to the gateway. It
 // never returns partial success -- either every step passes and Gateway.Ingest
 // is called exactly once, or the pipeline stops at the first failing step.
-func (h *Handler) HandleInboundPostmark(ctx context.Context, authorizationHeader string, body []byte) Result {
+//
+// Replay handling: a provider message id is remembered only after an outcome
+// that must never be retried (rememberable). A failed delivery
+// (gateway_unavailable, alias_resolver_unavailable) is answered 503 so Postmark
+// retries it, and the retry must run the pipeline again rather than be dropped
+// as a duplicate of the attempt that failed. While one delivery of an id is in
+// flight, a second concurrent delivery of it is answered delivery_in_flight
+// (retryable) instead of reaching the gateway. wrong_receiving_domain is
+// decided before the guard is consulted, so it never touches it.
+func (h *Handler) HandleInboundPostmark(ctx context.Context, authorizationHeader string, body []byte) (result Result) {
+	// Count every terminal outcome (content-free, by closed Reason) so the drop
+	// rate is visible; see RenderMetrics. Registered first, so it runs last.
+	defer func() { h.recordInbound(result.Reason) }()
 	if !h.enabled() {
 		return Result{Reason: ReasonDisabled}
 	}
@@ -104,8 +130,25 @@ func (h *Handler) HandleInboundPostmark(ctx context.Context, authorizationHeader
 		return Result{Reason: ReasonWrongDomain}
 	}
 	now := h.now()
-	if h.Replay != nil && h.Replay.SeenBefore("postmark\x00"+event.ProviderMessageID, now) {
-		return Result{Reason: ReasonDuplicate}
+	// A payload without a MessageID has nothing to dedupe on; sharing one
+	// "empty id" key would drop every later such message as a duplicate.
+	if h.Replay != nil && event.ProviderMessageID != "" {
+		replayKey := "postmark\x00" + event.ProviderMessageID
+		switch h.Replay.Begin(replayKey, now) {
+		case BeginDuplicate:
+			return Result{Reason: ReasonDuplicate}
+		case BeginInFlight:
+			return Result{Reason: ReasonDeliveryInFlight}
+		}
+		// Runs on every exit below, including a panic: Remember first for a
+		// terminal outcome, then release the in-flight claim, so a failed
+		// delivery leaves no trace and its retry is processed.
+		defer func() {
+			if rememberable(result.Reason) {
+				h.Replay.Remember(replayKey, now)
+			}
+			h.Replay.End(replayKey)
+		}()
 	}
 	if h.Resolver == nil {
 		return Result{Reason: ReasonAliasNotFound}
@@ -124,12 +167,17 @@ func (h *Handler) HandleInboundPostmark(ctx context.Context, authorizationHeader
 		// re-introduce the distinction.
 		return Result{Reason: ReasonAliasNotFound}
 	}
-	if !VerifySender(event, resolved.VerifiedEmail) {
+	if cause := senderRejectionCause(event, resolved.VerifiedEmail); cause != "" {
 		// Dropped silently to the sender (no bounce, no content in the log --
 		// only the reason code) per spec §3.2: "reject (200 + drop, never
-		// leak *why* to the sender)".
-		return Result{Reason: ReasonSenderNotVerified}
+		// leak *why* to the sender)". The operator, unlike the sender, does get
+		// the why: a content-free diagnostic line and a counter, so a rule that
+		// does not match what Postmark really sends shows up as a run of drops
+		// instead of a quiet 100% loss.
+		h.stats.recordSenderCheck(senderOutcomeDropped, cause, event.AuthDiagnostic)
+		return Result{Reason: ReasonSenderNotVerified, Diagnostic: event.AuthDiagnostic.logLine(cause)}
 	}
+	h.stats.recordSenderCheck(senderOutcomeVerified, senderCauseNone, event.AuthDiagnostic)
 
 	extracted := ExtractAttachments(ctx, h.Extractor, event.Attachments)
 	attachments := make([]GatewayIngestAttachment, 0, len(extracted))
@@ -149,7 +197,7 @@ func (h *Handler) HandleInboundPostmark(ctx context.Context, authorizationHeader
 		UserID:            resolved.UserID,
 		ProviderMessageID: event.ProviderMessageID,
 		Subject:           event.Subject,
-		BodyText:          firstNonEmptyBody(event.TextBody, event.HTMLBody),
+		BodyText:          mailBodyText(event.TextBody, event.HTMLBody),
 		Attachments:       attachments,
 		OccurredAt:        now,
 		ThreadDecision:    resolved.ThreadDecision,
@@ -160,9 +208,18 @@ func (h *Handler) HandleInboundPostmark(ctx context.Context, authorizationHeader
 	return Result{Reason: ReasonAccepted}
 }
 
-func firstNonEmptyBody(text, html string) string {
-	if strings.TrimSpace(text) != "" {
-		return text
+// rememberable reports whether an outcome is final for its provider message id:
+// the HTTP layer answers it 200, so Postmark will not retry it, and a replay
+// should be acknowledged as a duplicate. It is an allow-list on purpose --
+// every outcome not named here (gateway_unavailable, alias_resolver_unavailable,
+// delivery_in_flight, and any reason added later) is left forgettable, because
+// remembering a retryable outcome silently drops the retry.
+// wrong_receiving_domain is final too but is decided before the replay guard
+// is consulted, so it never reaches this check.
+func rememberable(reason Reason) bool {
+	switch reason {
+	case ReasonAccepted, ReasonAliasNotFound, ReasonSenderNotVerified:
+		return true
 	}
-	return html
+	return false
 }

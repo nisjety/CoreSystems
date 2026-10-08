@@ -558,6 +558,8 @@ func TestConnectionStatusRejectsCrossOrgBearer(t *testing.T) {
 	}
 }
 
+// A capability can only be recorded when its scopes were granted (G1), so the
+// connection must hold the scopes of the capabilities it is given.
 func TestConnectionCapabilitiesCanBeUpdated(t *testing.T) {
 	cfg, repo, service := testOAuthStack(t)
 	_, err := repo.UpsertConnection(t.Context(), store.Connection{
@@ -568,6 +570,7 @@ func TestConnectionCapabilitiesCanBeUpdated(t *testing.T) {
 		WorkspaceID:          "org-1",
 		UserID:               "user-1",
 		Status:               "active",
+		Scopes:               []string{"openid", "profile", "email", "offline_access", "User.Read", "Mail.Read"},
 		AccessTokenExpiresAt: time.Now().Add(time.Hour),
 	})
 	if err != nil {

@@ -136,6 +136,35 @@ domain because its OAuth URLs are shop-scoped:
 The short form `{ "shop": "example" }` is accepted and normalized to
 `example.myshopify.com`.
 
+## Scope upgrades are additive and truthful (Microsoft, Google)
+
+A Microsoft or Google connection belongs to one user and only ever widens when
+that user connects another bundle:
+
+- `connect-session` requests the union of the requested capabilities and the
+  capabilities the user's one active connection already holds, and reconnecting
+  keeps whatever the new authorization did not ask about. A user with several
+  accounts connected gets the request as asked (the account is only known at the
+  callback), and the reconnect still carries that account's grants over.
+  `"replaceCapabilities": true` in the request body opts out: the connection
+  ends up with exactly the requested capabilities.
+- Microsoft's token response is the record of what was granted. When it carries a
+  `scope`, only the capabilities whose scopes it lists are recorded, and a
+  shortfall leaves the connection `needs_refresh`. Google requests
+  `include_granted_scopes=true`, so a later bundle's token carries earlier grants.
+  (Google's per-scope consent is not read back yet.)
+- `PATCH /api/v1/connections/{id}/capabilities` refuses (400
+  `capability_not_granted`, with `reconnectRequired: true`) a capability whose
+  scopes are not in the connection's recorded scopes. Dropping a capability, and
+  keeping one that is already recorded, are always accepted.
+- A provider answer of 401, or a 403 about permissions, to a connector action
+  comes back as 409 `reconnect_required` (with `providerStatus`, and the
+  provider's short `providerCode` when it sent one) so a client can offer
+  "reconnect to grant access". A 403 that is really throttling or quota
+  exhaustion stays a plain `action_failed`. A refused provider write still
+  leaves its receipt `unknown` (there is no failed state yet), so retrying it
+  needs a fresh approval and idempotency key.
+
 ## Running locally
 
 ```bash
@@ -232,16 +261,129 @@ Callers execute named provider operations against an exact Verevon connection:
 Supported operation families:
 
 - Microsoft: `profile`, `calendar.events`, `mail.messages`, `drive.files`,
-  `mail.send`
+  `drive.file.content`, `sharepoint.sites`, `sharepoint.drives`, `mail.send`
 - Slack: `channels.list`, `users.list`, `user`, `messages.list`,
   `message.send`
 - Google: `profile`, `gmail.messages`, `gmail.send`, `calendar.events`,
-  `drive.files`
+  `drive.files`, `drive.file.content`
 - GitHub: `user`, `orgs`, `teams`, `repos`, `repo`
 - Notion: `user`, `databases`, `pages`
 - Shopify: `shop`, `products`, `orders`
 - Stripe: `account`, `customers`, `subscriptions`, `invoices`
 - Okta: `org`, `users`, `groups`, `user.suspend`, `user.activate`
+
+### Mail read params
+
+`mail.messages` (Outlook) and `gmail.messages` (Gmail) take one neutral set of
+optional `params`, validated before any provider call (a bad value is an error,
+never silently dropped, except `maxResults`, which falls back to its default): `query` (free text in the provider's own search
+syntax, at most 500 characters), `from` (an address or a display name),
+`since` and `until` (`YYYY-MM-DD`, both days included), `folder` (`inbox`,
+`sent`, `drafts`, `archive`, `deleted`), `unread`, `maxResults` (default 10,
+at most 100; the agent read tool planned in F6 is to clamp to 25) and `pageToken`.
+
+- Outlook: with `query` or `from` the list uses `$search` (KQL) and no
+  `$filter` or `$orderby`; otherwise `$filter` plus `$orderby receivedDateTime
+  desc`. `unread` on a search is applied to the returned page (`filteredOutRead`
+  counts the dropped rows). The next page is `nextPageToken` beside `value`: the
+  `@odata.nextLink`, which must be passed back unchanged. A token is refused
+  unless it is an https mail-list link on the configured Graph host under
+  `/v1.0/me/`. `mail.messages.get` also returns `toRecipients`, `ccRecipients`,
+  `hasAttachments`, `conversationId`, `internetMessageId` and attachment
+  metadata (`attachments`: id, name, contentType, size, isInline; never bytes).
+- Gmail: `query`, `from`, `since` and `until` become `q`, `folder` and `unread`
+  become `labelIds`, and `pageToken` is Gmail's own. The list stays ids-only
+  (execution-core's `gmail.send` read-back lists 100 ids) unless `headers` is
+  true: then each listed message gains `subject`, `from`, `to`, `cc`, `date`,
+  `snippet` and `labelIds` from `messages.get?format=metadata`, at most 25 at a
+  time five wide (the page is clamped to 25), and a message that fails becomes
+  `{id, error}` without failing the list. `gmail.messages.get` also returns
+  `to`, `cc`, `snippet` and `attachments` (filename, mimeType, size,
+  attachmentId); attachment content is a separate, later operation.
+
+### Calendar read params
+
+`calendar.events` (Outlook and Google) takes `since`, `until`, `query`,
+`maxResults` (default 10, at most 100) and `pageToken`; a bad value is an error
+before any provider call. `since` and `until` are a date (`YYYY-MM-DD`: the whole
+local day, `until` included), a local date-time (`YYYY-MM-DDTHH:MM`) or RFC 3339.
+Days and local date-times are Europe/Oslo, and both providers answer in Oslo
+local time. The window defaults to now through 14 days ahead; with a `query` and
+no window it is 30 days back through 90 ahead; it is never longer than 366 days.
+Given only `since`, the window runs a default span from it; given only `until`, it
+ends there.
+
+- Outlook: `GET /me/calendarView` with the window as UTC, `$orderby
+  start/dateTime`, a trimmed `$select` and `Prefer: outlook.timezone="W. Europe
+  Standard Time"`. Events do not support `$search`, so a `query` is applied here:
+  every whitespace-separated term must appear (case-insensitive) in the subject,
+  location, organizer, attendees or body preview of the fetched page. With a query
+  `maxResults` defaults to 100 (the filter only sees the page it fetched), and the
+  result adds `scanned` and `filteredOut`. The list stays under Graph's `value`.
+- Google: `singleEvents=true`, `orderBy=startTime`, `timeZone=Europe/Oslo`, `q`
+  and a `fields` mask that drops the bulky parts. The list stays under `items`.
+- Both add `window` (start, end and zone actually used) and, with a query,
+  `query`. The next page is `nextPageToken`: the provider's own next link or
+  token wrapped together with the window and query of the first page (`cal1.` plus
+  base64 JSON), passed back unchanged and alone. Wrapping stops the default window
+  from moving between pages. An Outlook link is only admitted if it is an https
+  `/v1.0/me/calendarView` link on the configured Graph host; when Graph reports
+  more rows but the link cannot be handed on, `moreAvailable` is true without a
+  token.
+- The binary embeds the time zone database (`time/tzdata`); the runtime image has
+  no zoneinfo.
+
+### Files and SharePoint read params
+
+`drive.files`, `drive.file.content` and, for Microsoft only, `sharepoint.sites`
+and `sharepoint.drives` read the connected user's own files. They need the
+capability the file listing already needs (`sharepoint.read` for Microsoft,
+`drive.read` for Google), never ask for a write approval, and check their params
+before any provider call (a text param of the wrong type, a dot segment as an id or a
+text over 500 characters is an error; `maxResults` falls back to its default). Ids
+that go into a URL path are percent-escaped.
+
+- Microsoft `drive.files`: `query`, `folderId`, `driveId`, `maxResults` (default 10,
+  at most 100) and `pageToken`. Without `driveId` the own OneDrive is read
+  (`/me/drive`); with it the same requests go to `/drives/{driveId}`, which is how a
+  SharePoint document library is read. A `query` searches the whole drive and wins
+  over `folderId`. The search text is percent-escaped inside `search(q='...')`.
+  `parentReference` is selected, so a hit says which folder it is in.
+- Microsoft `drive.file.content`: `itemId` and an optional `driveId`. The bytes
+  come back base64 (`content_base64`, `mime_type`, `size`); anything over
+  1,000,000 bytes is refused outright, never cut. Graph's redirect to a
+  pre-authenticated download is followed only to a documented Microsoft host
+  (`sharepoint.com` included), and the bearer is not forwarded on that hop.
+- `sharepoint.sites`: `query` (default `*`, every site the user can see) and
+  `pageToken`; returns `id`, `displayName`, `webUrl`. `sharepoint.drives`: `siteId`
+  (required) and `pageToken`; returns `id`, `name`, `driveType`, `webUrl`. The
+  `siteId` of the first is the input of the second, and the library `id` of the
+  second is the `driveId` of the first.
+- Paging: a Graph listing's `nextPageToken` is its `@odata.nextLink`, passed back
+  as `pageToken` unchanged and alone, and only by the operation that produced it.
+  A link is admitted only if it is an https read-only listing (children, search,
+  sites, a site's drives) on the configured Graph host under `/v1.0/`; anything else
+  is refused before a request is made. A link Graph hands out in a shape that is
+  not recognised gives `moreAvailable: true` and no token.
+- Google `drive.files`: shared-drive items are allowed in (`supportsAllDrives`,
+  `includeItemsFromAllDrives`), but the default listing is Drive's own `user` corpus
+  (files the user created, opened or was given directly), so reading a whole shared
+  drive needs its `driveId`, which narrows the listing to that drive (`corpora=drive`). `match` is `name` (the default, the
+  picker's own file-name search) or `text` (`fullText`, inside the files). A
+  listing narrowed by a text, a folder or a drive leaves out trashed files. Each
+  file carries `parents` and, in a shared drive, `driveId`. `pageToken` and
+  `nextPageToken` are Google's own.
+- Google `drive.file.content`: `fileId`, `mimeType` and `exportAs`. A Docs Editors
+  file has no bytes of its own and is exported: `.docx`, `.xlsx` or `.pptx` by
+  default (what the picker attaches), or with `exportAs=text` as `text/plain`
+  (Docs, Slides) or `text/csv` (Sheets, first sheet only). `exportAs` changes
+  nothing for a file that is not a Docs Editors file. The result is the same shape
+  for both; `export_extension` says which export was made. When `mimeType` is
+  missing, one metadata request finds it first.
+- Not yet shown against a live tenant or Google account (task F10): path-escaped
+  site and drive ids, `$select` on the sites search, the exact shape of a drive
+  `nextLink`, a slash inside a search text, and shared-drive listing with
+  `corpora=drive`.
 
 ### Provider-write attestation v1
 
@@ -642,6 +784,56 @@ sharing, pooling, or falling back to another connection's credential. ChatGPT
 plan availability, model availability, rate limits, and terms remain governed by
 the user's OpenAI subscription; this avoids API-token spend for an eligible run
 but does not make usage unlimited or guaranteed free.
+
+### ZDR capability record (Z-12)
+
+Whether a model connection can give zero data retention (ZDR) is a recorded
+fact about that connection, kept in its own tables (migration
+`0013_model_connection_zdr.sql`) and not on the connection row:
+
+- `integration_connection_zdr` holds one row per connection: `capability`
+  (`supported`, `not_supported` or `cannot_verify`), the `basis` it rests on, the
+  contract row it came from (`basis_ref`, `catalog_version`) and a `digest`. It is
+  written only by `store.ApplyConnectionZDRAssessment`, from values computed by
+  `internal/zdr`; no generic connection write (upsert, reconnect, credential
+  refresh, the capability and provider-context patches) touches it, so a stale
+  read-modify-write cannot write a stale digest back and no client field can set
+  a capability.
+- `integration_connection_zdr_acknowledgements` is the ledger of what a user
+  was shown and accepted, bound to that digest. It has no foreign key to the
+  connection (connections are soft-deleted, and the record must not depend on
+  one), a unique index on the active row per connection and digest, and a
+  trigger that lets a row change only to record its revocation. Nothing writes
+  to it yet: the acknowledgement API ships after this change.
+
+The rule table is the shared contract
+`apps/Model Plane/api/contracts/connection-zdr-capabilities.json`, embedded from
+the byte-identical, sha256-pinned copy in `internal/zdr/testdata/`. The service
+re-hashes it against the pin and runs a strict loader at start and refuses to
+start on a mismatch. Only the exact `(provider_key, auth_mode)` pair of a row is
+assessed as that row (today only the ChatGPT subscription, `not_supported`, on
+known provider terms); anything else is `cannot_verify` with no waiver route, and
+a connection with no record at all is unassessed, which every reader must treat
+as `cannot_verify`. The auth mode is the provider catalog's, never the
+connection's own `provider_context`. The digest is computed by `internal/zdr`
+alone; other planes compare it as an opaque string.
+
+A connection is assessed when it is created (`/connect`), when it becomes
+connected, and by `api.ReconcileConnectionZDR`, which runs once at every start and
+assesses each live (not deleted) model connection. The reconcile is idempotent: a
+second pass writes nothing and audits nothing. A changed digest (a contract
+`catalog_version` bump) revokes the acknowledgements given against the old one and
+writes `subscription_connection.zdr_assessed` and
+`subscription_connection.zdr_acknowledgement_invalidated` audit rows in the same
+transaction. There is no feature switch: the record is inert until the
+acknowledgement and decision routes read it.
+
+Check it live (read-only): after the image starts,
+`SELECT capability, count(*) FROM integration_connection_zdr GROUP BY 1` shows one
+row per live subscription connection, all `not_supported`, and the start-up log
+line `connection ZDR assessment reconcile` gives the counts. To change a
+provider's capability, edit the contract, bump `catalog_version`, add the digest
+vector, re-pin and re-vendor every copy (see `apps/Model Plane/api/contracts/README.md`).
 
 ## Unified-service replacement
 

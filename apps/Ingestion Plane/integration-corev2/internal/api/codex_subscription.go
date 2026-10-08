@@ -31,6 +31,33 @@ func registerCodexSubscriptionRoutes(
 		return
 	}
 	const base = "/api/v1/model-subscriptions/openai-codex"
+	const allowanceReadTimeout = 20 * time.Second
+
+	app.Get(base+"/connections/:id/usage", chainHandlers(rateLimited, internalOrBearerAuth, func(c *fiber.Ctx) error {
+		connection, err := scopedCodexSubscriptionConnection(c, cfg, c.Params("id"), true)
+		if err != nil {
+			return subscriptionError(c, err)
+		}
+		if status := strings.ToLower(strings.TrimSpace(connection.Status)); status != "active" && status != "connected" {
+			return apiError(c, fiber.StatusConflict, "subscription_not_active", "Reconnect the ChatGPT subscription before checking its Codex allowance.")
+		}
+		// Fiber's UserContext is not necessarily canceled when a client disconnects.
+		// Bound credential-lock waits and app-server startup here so a stalled
+		// provider process cannot hold this request open past the gateway timeout.
+		ctx, cancel := context.WithTimeout(c.UserContext(), allowanceReadTimeout)
+		defer cancel()
+		report, err := cfg.CodexSubscriptions.ReadRateLimits(ctx, connection.ID)
+		if err != nil {
+			return subscriptionError(c, err)
+		}
+		recordAuditEvent(c.UserContext(), cfg, store.AuditEvent{
+			ID:             auditMutationID(c.UserContext(), "codex-subscription-usage-read", connection.ID),
+			OrganizationID: connection.OrganizationID, UserID: connection.UserID, ConnectionID: connection.ID,
+			EventType: "subscription_usage.read", ProviderKey: connection.ProviderKey,
+			Metadata: map[string]any{"source": "provider_rate_limits"},
+		})
+		return success(c, fiber.Map{"connectionId": connection.ID, "scope": "connected_user", "source": "provider_rate_limits", "usage": report})
+	})...)
 
 	app.Post(base+"/connect", chainHandlers(rateLimited, internalOrBearerAuth, func(c *fiber.Ctx) error {
 		var body codexConnectBody
@@ -57,6 +84,11 @@ func registerCodexSubscriptionRoutes(
 			var err error
 			connection, err = tx.UpsertConnection(c.UserContext(), connection)
 			if err != nil {
+				return err
+			}
+			// Assess the connection for ZDR in this same transaction: a subscription is never
+			// created without its capability record, and a failure here rolls it back.
+			if _, _, err := applyConnectionZDR(c.UserContext(), tx, persist, connection); err != nil {
 				return err
 			}
 			return persist(store.AuditEvent{
@@ -102,6 +134,12 @@ func registerCodexSubscriptionRoutes(
 				connection, saveErr = tx.UpsertConnection(c.UserContext(), connection)
 				if saveErr != nil {
 					return saveErr
+				}
+				// Assess again now that the sign-in is complete. Usually this changes nothing; a
+				// catalog change between start and connected moves the digest here, atomically
+				// with the connection becoming active.
+				if _, _, assessErr := applyConnectionZDR(c.UserContext(), tx, persist, connection); assessErr != nil {
+					return assessErr
 				}
 				return persist(store.AuditEvent{
 					ID:             auditMutationID(c.UserContext(), "codex-subscription-connected", connection.ID),

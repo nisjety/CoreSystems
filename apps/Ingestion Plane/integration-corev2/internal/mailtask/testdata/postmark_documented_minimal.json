@@ -1,0 +1,44 @@
+{
+  "_comment": "Shaped after the inbound JSON example on Postmark's Inbound webhook page (https://postmarkapp.com/developer/webhooks/inbound-webhook), whose Headers array carries only the three SpamAssassin headers. Addresses and ids are placeholders. This is NOT a captured real payload.",
+  "FromName": "Task Owner",
+  "MessageStream": "inbound",
+  "From": "owner@example.com",
+  "FromFull": {
+    "Email": "owner@example.com",
+    "Name": "Task Owner",
+    "MailboxHash": ""
+  },
+  "To": "abc123def456@tasks.verevon.ai",
+  "ToFull": [
+    {
+      "Email": "abc123def456@tasks.verevon.ai",
+      "Name": "",
+      "MailboxHash": ""
+    }
+  ],
+  "OriginalRecipient": "abc123def456@tasks.verevon.ai",
+  "Subject": "Fwd: please draft a reply",
+  "MessageID": "73e6d360-66eb-11e1-8e72-a8904824019b",
+  "ReplyTo": "owner@example.com",
+  "MailboxHash": "",
+  "Date": "Fri, 1 Aug 2014 16:45:32 -04:00",
+  "TextBody": "This is a test text body.",
+  "HtmlBody": "<html><body><p>This is a test html body.</p></body></html>",
+  "StrippedTextReply": "This is the reply text",
+  "Tag": "",
+  "Headers": [
+    {
+      "Name": "X-Spam-Status",
+      "Value": "No"
+    },
+    {
+      "Name": "X-Spam-Score",
+      "Value": "-0.1"
+    },
+    {
+      "Name": "X-Spam-Tests",
+      "Value": "DKIM_SIGNED,DKIM_VALID,DKIM_VALID_AU,SPF_PASS"
+    }
+  ],
+  "Attachments": []
+}

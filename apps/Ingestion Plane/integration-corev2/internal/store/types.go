@@ -244,6 +244,10 @@ type AuditTransaction interface {
 	BeginActionReceiptExecution(ctx context.Context, organizationID, idempotencyKey string) (ActionReceipt, error)
 	CompleteActionReceipt(ctx context.Context, organizationID, idempotencyKey, providerMessageID string) (ActionReceipt, error)
 	MarkActionReceiptUnknown(ctx context.Context, organizationID, idempotencyKey string) error
+	// ConnectionZDRStore is the model-connection ZDR record and acknowledgement ledger. Its
+	// digest-change path revokes acknowledgements, so it belongs in the same transaction as
+	// the audit intent that records the change.
+	ConnectionZDRStore
 }
 
 type Repository interface {
@@ -325,6 +329,10 @@ type Repository interface {
 	// when it is absent or already equal. It rejects deleted/inactive
 	// connections and never replaces unrelated context written concurrently.
 	BindConnectionProviderContext(ctx context.Context, id, key, value string) (Connection, error)
+	// ConnectionZDRStore keeps the ZDR capability of a model connection in a side table, not on
+	// the connection row: no read-modify-write of a Connection can write it back stale, and no
+	// generic connection route can set it.
+	ConnectionZDRStore
 	Close()
 }
 

@@ -105,6 +105,63 @@ func (r *ProcessRunner) InvokeStream(ctx context.Context, codeHome string, reque
 	return r.invoke(ctx, codeHome, request, onDelta)
 }
 
+// ReadRateLimits obtains the connected account's provider-reported Codex
+// windows. No plan type, credential, or raw app-server payload is returned.
+func (r *ProcessRunner) ReadRateLimits(ctx context.Context, codeHome string) (RateLimitReport, error) {
+	if _, err := r.ensureCredential(ctx, codeHome); err != nil {
+		return RateLimitReport{}, err
+	}
+	return r.readRateLimitsFromAppServer(ctx, codeHome)
+}
+
+// readRateLimitsFromAppServer reads allowance while the caller holds the
+// credential lock. The composed runner uses this after it has serialized the
+// read against refresh/logout; calling ReadRateLimits there would re-enter the
+// same non-reentrant lock during ensureCredential.
+func (r *ProcessRunner) readRateLimitsFromAppServer(ctx context.Context, codeHome string) (RateLimitReport, error) {
+	client, err := r.spawn(codeHome, false)
+	if err != nil {
+		return RateLimitReport{}, err
+	}
+	defer client.Close()
+	if err := client.initialize(ctx); err != nil {
+		return RateLimitReport{}, err
+	}
+	var response struct {
+		RateLimits *codexRateLimitSnapshot `json:"rateLimits"`
+	}
+	readCtx, cancel := context.WithTimeout(ctx, rateLimitsReadTimeout)
+	defer cancel()
+	if err := client.call(readCtx, "account/rateLimits/read", codexEmptyObjectParams(), &response); err != nil {
+		return RateLimitReport{}, err
+	}
+	return RateLimitReport{ObservedAt: time.Now().UTC(), Primary: publicRateLimitWindow(response.RateLimits, true), Secondary: publicRateLimitWindow(response.RateLimits, false)}, nil
+}
+
+func publicRateLimitWindow(snapshot *codexRateLimitSnapshot, primary bool) *RateLimitWindow {
+	if snapshot == nil {
+		return nil
+	}
+	window := snapshot.Secondary
+	if primary {
+		window = snapshot.Primary
+	}
+	if window == nil || window.UsedPercent < 0 || window.UsedPercent > 100 {
+		return nil
+	}
+	result := &RateLimitWindow{UsedPercent: window.UsedPercent}
+	if window.WindowDurationMins != nil && *window.WindowDurationMins > 0 && *window.WindowDurationMins <= maxWindowMinutes {
+		minutes := int(*window.WindowDurationMins)
+		result.WindowMinutes = &minutes
+	}
+	if window.ResetsAt != nil {
+		if reset, ok := unixReset(*window.ResetsAt, time.Now()); ok {
+			result.ResetsAt = &reset
+		}
+	}
+	return result
+}
+
 func (r *ProcessRunner) invoke(ctx context.Context, codeHome string, request InvokeRequest, onDelta func(string) error) (response InvokeResponse, err error) {
 	defer func() {
 		if err != nil {

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/gofiber/fiber/v2"
 )
@@ -50,6 +51,11 @@ type Principal struct {
 	// already the verified end user. Read this only through
 	// Principal.EffectiveUserID, never directly.
 	DelegatedUserID string `json:"-"`
+	// TokenID and TokenExpiresAt are the verified token's own `jti` and
+	// `exp`. They are read only to make a delegated token single-use (see
+	// single_use.go); nothing else may treat them as identity.
+	TokenID        string    `json:"-"`
+	TokenExpiresAt time.Time `json:"-"`
 }
 
 func (p Principal) HasScope(scope string) bool {
@@ -188,6 +194,13 @@ func InternalOrBearer(cfg Config) fiber.Handler {
 			}
 			if strings.TrimSpace(principal.PrincipalType) == "" {
 				principal.PrincipalType = "user"
+			}
+			// A token that names an acting end user is a complete standalone
+			// bearer for that user's personal data, so it is honored exactly
+			// once (and refused outright if it carries no id to track).
+			if strings.TrimSpace(principal.DelegatedUserID) != "" &&
+				!delegatedTokenUse.consume(principal.TokenID, principal.TokenExpiresAt) {
+				return writeError(c, fiber.StatusUnauthorized, "token_replayed", "Delegated credential is single-use and was already used")
 			}
 			c.Locals(internalLocal, false)
 			c.Locals(principalLocal, principal)

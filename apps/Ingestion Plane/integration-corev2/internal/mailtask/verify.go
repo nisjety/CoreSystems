@@ -41,14 +41,25 @@ func VerifyWebhookAuth(authorizationHeader, expectedSecret string) bool {
 // controls its own mail, not that the sender is this alias's owner (spec §6:
 // "SPF/DKIM/DMARC pass alone is not sufficient").
 func VerifySender(event InboundMailTaskEvent, resolvedVerifiedEmail string) bool {
+	return senderRejectionCause(event, resolvedVerifiedEmail) == ""
+}
+
+// senderRejectionCause is VerifySender's decision with the reason attached: ""
+// when the sender is verified, otherwise the first failing check (one of the
+// senderCause* constants, which are content-free and safe to log or count).
+// VerifySender is defined in terms of it, so the two can never disagree.
+func senderRejectionCause(event InboundMailTaskEvent, resolvedVerifiedEmail string) string {
 	if !strings.EqualFold(strings.TrimSpace(event.AuthResult), "pass") {
-		return false
+		return senderCauseAuthNotPass
 	}
 	resolvedVerifiedEmail = strings.TrimSpace(resolvedVerifiedEmail)
 	if resolvedVerifiedEmail == "" {
-		return false
+		return senderCauseNoVerifiedEmail
 	}
-	return strings.EqualFold(strings.TrimSpace(event.FromEmail), resolvedVerifiedEmail)
+	if !strings.EqualFold(strings.TrimSpace(event.FromEmail), resolvedVerifiedEmail) {
+		return senderCauseFromMismatch
+	}
+	return ""
 }
 
 // VerifyReceivingDomain checks the inbound message's To: domain against the

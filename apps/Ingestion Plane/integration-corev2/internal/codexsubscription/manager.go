@@ -156,6 +156,24 @@ type Runner interface {
 	Logout(ctx context.Context, codeHome string) error
 }
 
+// RateLimitReader is implemented by runners that can read the account's
+// provider-reported Codex allowance without making an inference request.
+type RateLimitReader interface {
+	ReadRateLimits(ctx context.Context, codeHome string) (RateLimitReport, error)
+}
+
+type RateLimitReport struct {
+	ObservedAt time.Time        `json:"observedAt"`
+	Primary    *RateLimitWindow `json:"primary,omitempty"`
+	Secondary  *RateLimitWindow `json:"secondary,omitempty"`
+}
+
+type RateLimitWindow struct {
+	UsedPercent   float64    `json:"usedPercent"`
+	WindowMinutes *int       `json:"windowMinutes,omitempty"`
+	ResetsAt      *time.Time `json:"resetsAt,omitempty"`
+}
+
 type DeviceCode struct {
 	VerificationURL string
 	UserCode        string
@@ -318,6 +336,23 @@ func (m *Manager) Invoke(ctx context.Context, request InvokeRequest) (InvokeResp
 	}
 	defer release()
 	return m.runner.Invoke(withQueueWait(invokeCtx, waited), home, request)
+}
+
+// ReadRateLimits reads the provider's own allowance windows for a managed
+// connection. It does not estimate a token allowance from Verevon's ledger.
+func (m *Manager) ReadRateLimits(ctx context.Context, connectionID string) (RateLimitReport, error) {
+	if m == nil || !m.enabled {
+		return RateLimitReport{}, ErrDisabled
+	}
+	home, err := m.connectionHome(connectionID)
+	if err != nil {
+		return RateLimitReport{}, err
+	}
+	reader, ok := m.runner.(RateLimitReader)
+	if !ok {
+		return RateLimitReport{}, errors.New("Codex allowance reporting is unavailable for this transport")
+	}
+	return reader.ReadRateLimits(ctx, home)
 }
 
 func (m *Manager) InvokeStream(ctx context.Context, request InvokeRequest, onDelta func(string) error) (InvokeResponse, error) {
