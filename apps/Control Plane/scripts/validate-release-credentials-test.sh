@@ -56,6 +56,19 @@ for required_control_credential in \
   fi
 done
 
+# The presenting-end credentials of the Data Plane principal bundle
+# (config/plane-service-principals.json `consumerEnv`): the registry holds the same
+# value, so a release missing one registers a principal nobody can present.
+for required_principal_credential in \
+  DATA_ORCHESTRATOR_COST_SERVICE_API_KEY \
+  GATEWAY_RETENTION_DECISION_SERVICE_API_KEY; do
+  if ! printf '%s\n' "${names[@]}" | grep -qx "$required_principal_credential"; then
+    printf 'credential preflight omits principal credential %s\n' \
+      "$required_principal_credential" >&2
+    exit 1
+  fi
+done
+
 base_env=()
 retired_env=()
 for index in "${!names[@]}"; do
@@ -208,6 +221,10 @@ expect_failure USER_NATS_PASSWORD USER_NATS_PASSWORD=short
 expect_failure ORG_NATS_PASSWORD ORG_NATS_PASSWORD=change-me-0123456789abcdef0123456789abcdef
 expect_failure MODEL_NATS_RUNTIME_PASSWORD MODEL_NATS_RUNTIME_PASSWORD=short
 expect_failure MODEL_GATEWAY_NATS_PASSWORD MODEL_GATEWAY_NATS_PASSWORD=short
+expect_failure DATA_ORCHESTRATOR_COST_SERVICE_API_KEY DATA_ORCHESTRATOR_COST_SERVICE_API_KEY=
+expect_failure DATA_ORCHESTRATOR_COST_SERVICE_API_KEY \
+  DATA_ORCHESTRATOR_COST_SERVICE_API_KEY=change-me-0123456789abcdef0123456789abcdef
+expect_failure GATEWAY_RETENTION_DECISION_SERVICE_API_KEY GATEWAY_RETENTION_DECISION_SERVICE_API_KEY=short
 expect_failure AUTH_GRPC_SERVICE_CREDENTIALS_FILE \
   AUTH_GRPC_SERVICE_CREDENTIALS_FILE="$runtime_dir/missing-registry.json"
 expect_failure AUTH_INTERNAL_SERVICE_CREDENTIALS_FILE \
@@ -242,6 +259,18 @@ reused_new_control='reused-new-control-credential-0123456789abcdef'
 expect_failure USER_AUTH_INTERNAL_SERVICE_TOKEN \
   AUTH_USER_CORE_GRPC_SERVICE_TOKEN="$reused_new_control" \
   USER_AUTH_INTERNAL_SERVICE_TOKEN="$reused_new_control"
+
+# One secret may not stand for two principals: the cost-core writer and the BFF's
+# decision principal each have their own, and neither may reuse another credential
+# the release holds (the two against each other, and the decision principal against
+# the gateway's user-core credential it must never be mistaken for).
+reused_principal_credential='reused-principal-credential-0123456789abcdef'
+expect_failure GATEWAY_RETENTION_DECISION_SERVICE_API_KEY \
+  DATA_ORCHESTRATOR_COST_SERVICE_API_KEY="$reused_principal_credential" \
+  GATEWAY_RETENTION_DECISION_SERVICE_API_KEY="$reused_principal_credential"
+expect_failure GATEWAY_RETENTION_DECISION_SERVICE_API_KEY \
+  USER_CORE_GATEWAY_TOKEN="$reused_principal_credential" \
+  GATEWAY_RETENTION_DECISION_SERVICE_API_KEY="$reused_principal_credential"
 
 if env "${retired_env[@]}" REQUIRE_LEGACY_BRIDGE=1 "$preflight" >/dev/null 2>&1; then
   printf 'expected legacy bridge credential failure when its profile is required\n' >&2

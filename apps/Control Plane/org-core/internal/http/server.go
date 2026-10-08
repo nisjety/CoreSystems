@@ -20,6 +20,7 @@ type Server struct {
 	httpServer       *http.Server
 	orgService       *orgcore.Service
 	rbacRepo         *rbac.Repository // U6-3 (ui-ux-verevon-gap.md §10)
+	retentionPosture retentionPostureReader
 	authService      string
 	userService      string
 	userServiceToken string
@@ -47,6 +48,11 @@ func NewServer(port int, orgService *orgcore.Service, rbacRepo *rbac.Repository,
 		userServiceToken: strings.TrimSpace(os.Getenv("USER_CORE_SERVICE_TOKEN")),
 		httpClient:       &http.Client{Timeout: 10 * time.Second},
 		brregClient:      brreg.NewClient(),
+	}
+	if orgService != nil {
+		// Assigned only when present: a typed-nil *Service in the interface
+		// would defeat the handler's nil check.
+		s.retentionPosture = orgService
 	}
 	s.setupRoutes()
 	s.httpServer = &http.Server{
@@ -155,6 +161,11 @@ func (s *Server) setupRoutes() {
 	// acting user to scope a normal /orgs read to). See listOrganizationsInternal.
 	internal.GET("/orgs", s.listOrganizationsInternal)
 	internal.GET("/orgs/:orgId", s.getOrganizationInternal)
+	// Minimal interactive-retention posture ({zdrIntent, entitled}) for Auth
+	// Core's token issuer, behind its own narrow scope org:retention:read:any
+	// (not org:read:any, which returns the whole organization record). Computed
+	// from the database on every call; see getRetentionPostureInternal.
+	internal.GET("/orgs/:orgId/retention-posture", s.getRetentionPostureInternal)
 	internal.GET("/orgs/:orgId/roles/:roleName/capabilities", s.getEffectiveCapabilities)
 	internal.GET("/orgs/by-tenant", s.getOrganizationByTenant)
 	internal.POST("/orgs/ensure-from-tenant", s.ensureOrganizationFromTenant)

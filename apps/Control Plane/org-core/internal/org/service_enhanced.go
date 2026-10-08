@@ -573,6 +573,30 @@ func PlanAllowsZeroDataRetention(plan string) bool {
 	return zeroDataRetentionPlans[strings.ToLower(strings.TrimSpace(plan))]
 }
 
+// GetRetentionPosture returns the org's interactive-retention posture (stored
+// intent and plan entitlement) for token issuers.
+//
+// It reads the database directly and deliberately bypasses the organization
+// and entitlement caches (orgCacheTTL 10 min, entitlementCacheTTL 15 min). The
+// writers invalidate those caches, but a posture read decides whether a user's
+// content is retained, so it must not depend on every present and future
+// writer remembering to; the issuer keeps its own short cache. It also does not
+// use GetEntitlements, whose cache-hit path returns before the computed
+// feature.zero_data_retention entry is appended, so that entitlement is
+// missing from a cached response.
+func (s *Service) GetRetentionPosture(ctx context.Context, id string) (*RetentionPosture, error) {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return nil, fmt.Errorf("organization id is required")
+	}
+	plan, zdrIntent, err := s.repo.GetRetentionPostureState(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	posture := NewRetentionPosture(plan, zdrIntent)
+	return &posture, nil
+}
+
 // SetInteractiveRetention persists the org's interactive Zero-Data-Retention
 // posture. Enabling ZDR (zdr=true) is a premium feature gated by plan — it is
 // rejected with ErrPlanUpgradeRequired unless the org's plan is entitled;

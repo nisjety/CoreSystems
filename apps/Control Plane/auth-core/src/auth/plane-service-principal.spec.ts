@@ -39,7 +39,9 @@ describe('plane service-principal issuance policy', () => {
       orgId: 'org-a',
       scopes: ['graph:read'],
       reason: 'serve graph retrieval',
+      retention: 'zdr',
       zdr: true,
+      orgBinding: 'fixed',
     });
   });
 
@@ -357,6 +359,131 @@ describe('plane service-principal issuance policy', () => {
   });
 });
 
+describe('tenant retention posture in the principal policy (the org decides; the controllers resolve it at mint time)', () => {
+  const tenantRegistry = JSON.stringify({
+    'background-worker': {
+      credential: 'test-only-tenant-key',
+      audiences: ['inference-core', 'data-plane'],
+      orgIds: [],
+      allowAnyOrg: true,
+      scopes: ['inference:invoke', 'graph:read'],
+      scopesByAudience: {
+        'inference-core': ['inference:invoke'],
+        'data-plane': ['graph:read'],
+      },
+      retentionByAudience: {
+        'inference-core': 'tenant',
+        'data-plane': 'persistent',
+      },
+    },
+  });
+  const tenantRequest = {
+    serviceId: 'background-worker',
+    credential: 'test-only-tenant-key',
+    audience: 'inference-core',
+    orgId: 'org-a',
+    requestedScopes: ['inference:invoke'],
+    reason: 'contextualise indexed chunks',
+  };
+
+  it('accepts tenant as a per-audience retention posture and reports it as the principal retention', () => {
+    expect(
+      authorizePlaneServicePrincipal(tenantRegistry, tenantRequest),
+    ).toMatchObject({ retention: 'tenant', orgId: 'org-a' });
+  });
+
+  it('never reports zdr:false for a tenant principal: the policy alone cannot know the org, so the safe value stands until a caller resolves it', () => {
+    // The old `zdr: retentionPosture === 'zdr'` read a 'tenant' value as
+    // persistent. A controller that forgot to resolve would then have minted a
+    // non-zero-retention token for every org, ZDR orgs included.
+    expect(
+      authorizePlaneServicePrincipal(tenantRegistry, tenantRequest).zdr,
+    ).toBe(true);
+  });
+
+  it('keeps every other audience of the same principal on its own posture', () => {
+    expect(
+      authorizePlaneServicePrincipal(tenantRegistry, {
+        ...tenantRequest,
+        audience: 'data-plane',
+        requestedScopes: ['graph:read'],
+      }),
+    ).toMatchObject({ retention: 'persistent', zdr: false });
+  });
+
+  it('reports the registry retention for zero-retention, persistent and unconfigured audiences', () => {
+    const registry = JSON.stringify({
+      'background-worker': {
+        credential: 'test-only-tenant-key',
+        audiences: ['inference-core', 'data-plane', 'session-core'],
+        orgIds: [],
+        allowAnyOrg: true,
+        scopes: ['inference:invoke'],
+        retentionByAudience: {
+          'inference-core': 'zdr',
+          'data-plane': 'persistent',
+          'session-core': 'zdr',
+        },
+      },
+      'unconfigured-worker': {
+        credential: 'test-only-unconfigured-key',
+        audiences: ['inference-core'],
+        orgIds: ['org-a'],
+        scopes: ['inference:invoke'],
+      },
+    });
+    const mint = (serviceId: string, credential: string, audience: string) =>
+      authorizePlaneServicePrincipal(registry, {
+        ...tenantRequest,
+        serviceId,
+        credential,
+        audience,
+      });
+
+    expect(
+      mint('background-worker', 'test-only-tenant-key', 'inference-core'),
+    ).toMatchObject({ retention: 'zdr', zdr: true });
+    expect(
+      mint('background-worker', 'test-only-tenant-key', 'data-plane'),
+    ).toMatchObject({ retention: 'persistent', zdr: false });
+    expect(
+      mint(
+        'unconfigured-worker',
+        'test-only-unconfigured-key',
+        'inference-core',
+      ),
+    ).toMatchObject({ retention: 'zdr', zdr: true });
+  });
+
+  it.each(['Tenant', 'TENANT', 'tenant ', 'org', 'org-policy', ''])(
+    'rejects %p as a retention posture: the vocabulary is exactly zdr, persistent, tenant',
+    (posture) => {
+      const malformed = JSON.stringify({
+        'background-worker': {
+          credential: 'test-only-tenant-key',
+          audiences: ['inference-core'],
+          orgIds: ['org-a'],
+          scopes: ['inference:invoke'],
+          retentionByAudience: { 'inference-core': posture },
+        },
+      });
+
+      expect(() =>
+        authorizePlaneServicePrincipal(malformed, tenantRequest),
+      ).toThrow();
+    },
+  );
+
+  it('still lets no caller choose the posture: a body zdr field changes nothing for a tenant principal', () => {
+    expect(
+      authorizePlaneServicePrincipal(tenantRegistry, {
+        ...tenantRequest,
+        zdr: false,
+      } as never),
+    ).toMatchObject({ retention: 'tenant', zdr: true });
+  });
+});
+
 describe('plane service-principal token exchange authorization (delegated identity §1, T-4)', () => {
   const exchangeConfigured = JSON.stringify({
     'model-execution': {
@@ -631,4 +758,185 @@ describe('plane service-principal registry loading', () => {
       ).toThrow(/private/);
     },
   );
+});
+
+// Production tenancy model (plan W0-3). A principal's organizations come from
+// exactly the sources below, and the production loader refuses only the legacy
+// "any organization, unchecked" form:
+//
+//   orgIds                 a fixed list (including a pseudo-organization such as
+//                          `global` that no directory holds). No lookup.
+//   tenancy: 'directory'   any organization org-core's directory holds. Auth
+//                          Core verifies that at mint; this module only reports
+//                          that it must (`orgBinding: 'directory'`).
+//   allowAnyOrg: true      development and tests only (refused in production).
+describe('plane service-principal organization binding', () => {
+  const directoryRegistry = (overrides: Record<string, unknown> = {}): string =>
+    JSON.stringify({
+      'embedding-engine': {
+        credential: 'test-only-embedding-key',
+        audiences: ['inference-core'],
+        orgIds: [],
+        tenancy: 'directory',
+        scopes: ['inference:invoke'],
+        ...overrides,
+      },
+    });
+
+  const request = (orgId: string) => ({
+    serviceId: 'embedding-engine',
+    credential: 'test-only-embedding-key',
+    audience: 'inference-core',
+    orgId,
+    requestedScopes: ['inference:invoke'],
+    reason: 'embed organization documents',
+  });
+
+  it('accepts a directory-bound principal for any organization and says the directory must vouch for it', () => {
+    for (const orgId of ['org-a', 'org-b']) {
+      expect(
+        authorizePlaneServicePrincipal(directoryRegistry(), request(orgId)),
+      ).toMatchObject({ orgId, orgBinding: 'directory' });
+    }
+  });
+
+  it('binds a fixed organization without a lookup even when the row is also directory-bound', () => {
+    // `global` is a pseudo-organization: no directory holds it, so it can only
+    // ever be a fixed entry.
+    const registry = directoryRegistry({ orgIds: ['global'] });
+    expect(
+      authorizePlaneServicePrincipal(registry, request('global')),
+    ).toMatchObject({ orgId: 'global', orgBinding: 'fixed' });
+    expect(
+      authorizePlaneServicePrincipal(registry, request('org-a')),
+    ).toMatchObject({ orgId: 'org-a', orgBinding: 'directory' });
+  });
+
+  it('keeps a fixed-list principal fixed: an organization outside the list is refused', () => {
+    const registry = directoryRegistry({
+      tenancy: undefined,
+      orgIds: ['org-a'],
+    });
+    expect(
+      authorizePlaneServicePrincipal(registry, request('org-a')),
+    ).toMatchObject({ orgBinding: 'fixed' });
+    expect(() =>
+      authorizePlaneServicePrincipal(registry, request('org-b')),
+    ).toThrow(/not authorized/i);
+  });
+
+  it('reports the legacy allowAnyOrg form as unchecked so audit can count it', () => {
+    const registry = directoryRegistry({
+      tenancy: undefined,
+      allowAnyOrg: true,
+    });
+    expect(
+      authorizePlaneServicePrincipal(registry, request('org-a')),
+    ).toMatchObject({ orgBinding: 'any' });
+  });
+
+  it('holds a row that carries both the directory and the unchecked form to the directory, never to the unchecked form', () => {
+    // Only a development or test registry can carry both (the production loader
+    // refuses allowAnyOrg outright). The stricter binding must win, or a leftover
+    // allowAnyOrg beside tenancy would silently switch the lookup off.
+    const registry = directoryRegistry({ allowAnyOrg: true });
+    expect(
+      authorizePlaneServicePrincipal(registry, request('org-a')),
+    ).toMatchObject({ orgId: 'org-a', orgBinding: 'directory' });
+  });
+
+  it('refuses a principal that names no organization source at all', () => {
+    const registry = directoryRegistry({ tenancy: undefined });
+    expect(() =>
+      authorizePlaneServicePrincipal(registry, request('org-a')),
+    ).toThrow(/invalid principal policy/i);
+  });
+
+  it.each(['any', 'global', '', 'Directory', true, null, ['directory']])(
+    'rejects a tenancy value other than "directory", even beside a valid fixed list: %p',
+    (tenancy) => {
+      // The fixed list is a valid organization source on its own, so the only
+      // thing wrong with this row is the tenancy value.
+      expect(() =>
+        authorizePlaneServicePrincipal(
+          directoryRegistry({ tenancy, orgIds: ['org-a'] }),
+          request('org-a'),
+        ),
+      ).toThrow(/invalid principal policy/i);
+    },
+  );
+
+  it('lets a directory-bound principal use token exchange for the organization its verified subject proves', () => {
+    const registry = directoryRegistry({
+      audiences: ['ingestion'],
+      scopes: ['integration:read'],
+      tokenExchange: { ingestion: ['session-core'] },
+    });
+    expect(
+      authorizePlaneServiceTokenExchange(registry, {
+        serviceId: 'embedding-engine',
+        credential: 'test-only-embedding-key',
+        audience: 'ingestion',
+        orgId: 'org-a',
+        requestedScopes: ['integration:read'],
+        reason: 'acting for a verified user',
+        subjectAudience: 'session-core',
+      }),
+    ).toMatchObject({ orgId: 'org-a' });
+  });
+
+  describe('production loading', () => {
+    let directory: string;
+    let registryFile: string;
+
+    beforeEach(() => {
+      directory = mkdtempSync(join(tmpdir(), 'plane-service-principals-'));
+      registryFile = join(directory, 'registry.json');
+    });
+
+    afterEach(() => {
+      rmSync(directory, { recursive: true, force: true });
+    });
+
+    const load = (raw: string, runtime: string | undefined = 'production') => {
+      writeFileSync(registryFile, raw, { mode: 0o600 });
+      return loadPlaneServicePrincipalRegistry({
+        NODE_ENV: runtime,
+        PLANE_SERVICE_PRINCIPALS_FILE: registryFile,
+      });
+    };
+
+    it.each(['production', 'staging', undefined])(
+      'accepts a directory-bound and a fixed-list registry in a %s file',
+      (runtime) => {
+        const raw = JSON.stringify({
+          ...JSON.parse(directoryRegistry()),
+          'corpus-seeder': {
+            credential: 'test-only-corpus-seeder-key',
+            audiences: ['data-plane'],
+            orgIds: ['org-corpus-baseline'],
+            allowAnyOrg: false,
+            scopes: ['data:read'],
+          },
+        });
+        expect(load(raw, runtime)).toBe(raw);
+      },
+    );
+
+    it('still refuses the legacy form, and a row that carries both forms', () => {
+      expect(() =>
+        load(directoryRegistry({ tenancy: undefined, allowAnyOrg: true })),
+      ).toThrow(/fixed organization allowlists/);
+      // A directory-bound row must not smuggle the unchecked form in beside it.
+      expect(() => load(directoryRegistry({ allowAnyOrg: true }))).toThrow(
+        /fixed organization allowlists/,
+      );
+    });
+
+    it('accepts the same directory-bound registry in development, where nothing changes', () => {
+      const raw = directoryRegistry();
+      expect(load(raw, 'development')).toBe(raw);
+      expect(load(raw, 'test')).toBe(raw);
+    });
+  });
 });

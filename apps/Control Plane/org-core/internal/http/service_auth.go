@@ -43,6 +43,11 @@ var orgServiceScopeAllowlist = map[string]struct{}{
 	"org:projection:write:any":      {},
 	"org:projection:delete:any":     {},
 	"org:membership:succession:any": {},
+	// Read-only access to one org's interactive-retention posture (the stored
+	// ZDR intent and the plan entitlement), through
+	// GET /internal/orgs/:orgId/retention-posture and nothing else. Deliberately
+	// not org:read:any, which returns the whole organization record.
+	"org:retention:read:any": {},
 }
 
 type serviceCredential struct {
@@ -191,6 +196,10 @@ func ValidateRequiredServiceCredentialRegistry(raw string) error {
 	authRequired := map[string]bool{
 		"org:projection:write:any":  false,
 		"org:projection:delete:any": false,
+		// Auth Core resolves each org's ZDR posture at token mint through this
+		// scope. Without it every org silently resolves to non-ZDR (or, now,
+		// every mint fails with 503), so a registry that lacks it must not boot.
+		"org:retention:read:any": false,
 	}
 	authCount := 0
 	for _, credential := range credentials {
@@ -348,6 +357,8 @@ func internalOrganizationScopes(method string, rest []string) []string {
 		return []string{"org:tenant:write:any"}
 	case len(rest) == 3 && rest[1] == "onboarding" && rest[2] == "state" && method == http.MethodPost:
 		return []string{"org:onboarding:write:self", "org:onboarding:write:any"}
+	case len(rest) == 2 && rest[1] == "retention-posture" && method == http.MethodGet:
+		return []string{"org:retention:read:any"}
 	case len(rest) == 2 && rest[1] == "reconcile" && method == http.MethodPost:
 		return []string{"org:projection:write:any"}
 	case len(rest) == 3 && rest[1] == "members" && rest[2] == "reconcile" && method == http.MethodPost:

@@ -1,0 +1,81 @@
+{
+  "comment": "Claims of aud=quarry tokens as minted by Auth Core (real PlaneTokenController over the real ConvexTokenService and the checked-in principal policy). Time claims are stripped: the consumer stamps iat, nbf = iat - 5 and exp = iat + ttl_seconds. Regenerate with UPDATE_GOLDENS=1 from apps/Control Plane/auth-core/src/auth/quarry-token-zdr-claims.golden.spec.ts.",
+  "cases": {
+    "user_in_zdr_org": {
+      "ttl_seconds": 300,
+      "claims": {
+        "iss": "http://localhost:3011/api/convex-auth",
+        "aud": "quarry",
+        "sub": "user-golden",
+        "org_id": "org-zdr-golden",
+        "user_id": "user-golden",
+        "principal_type": "user",
+        "email": "member@example.test",
+        "scopes": [
+          "data:read",
+          "documents:read",
+          "documents:write",
+          "wiki.read",
+          "wiki.write"
+        ],
+        "zdr": true
+      }
+    },
+    "user_in_standard_org": {
+      "ttl_seconds": 300,
+      "claims": {
+        "iss": "http://localhost:3011/api/convex-auth",
+        "aud": "quarry",
+        "sub": "user-golden",
+        "org_id": "org-standard-golden",
+        "user_id": "user-golden",
+        "principal_type": "user",
+        "email": "member@example.test",
+        "scopes": [
+          "data:read",
+          "documents:read",
+          "documents:write",
+          "wiki.read",
+          "wiki.write"
+        ],
+        "zdr": false
+      }
+    },
+    "service_model_gateway": {
+      "ttl_seconds": 300,
+      "claims": {
+        "iss": "http://localhost:3011/api/convex-auth",
+        "aud": "quarry",
+        "sub": "service:model-gateway",
+        "org_id": "org-standard-golden",
+        "principal_type": "service",
+        "service_id": "service:model-gateway",
+        "reason": "chat web search",
+        "scopes": [
+          "scrape:read",
+          "search:read"
+        ],
+        "zdr": true
+      }
+    },
+    "service_execution_core": {
+      "ttl_seconds": 300,
+      "claims": {
+        "iss": "http://localhost:3011/api/convex-auth",
+        "aud": "quarry",
+        "sub": "service:execution-core",
+        "org_id": "org-standard-golden",
+        "principal_type": "service",
+        "service_id": "service:execution-core",
+        "reason": "agent web tools",
+        "scopes": [
+          "browser:execute",
+          "extract:read",
+          "scrape:write",
+          "search:read"
+        ],
+        "zdr": true
+      }
+    }
+  }
+}

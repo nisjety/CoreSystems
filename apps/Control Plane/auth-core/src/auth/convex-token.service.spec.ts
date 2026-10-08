@@ -619,7 +619,11 @@ describe('ConvexTokenService delegated-identity token exchange (verifyPlaneSubje
     },
   );
 
-  it('rejects a replayed subject token within its own TTL — single-use marker (T-2/A-1)', () => {
+  it('verifies the same run bearer again on every tool call (the subject token is not single-use)', () => {
+    // execution-core exchanges one run-scoped bearer once per read. Replay
+    // protection (T-2/A-1) lives on the EXCHANGED token's jti at its resource
+    // server, not here: a seen-set on the subject would fail every read of a
+    // run after its first.
     process.env.NODE_ENV = 'test';
     for (const name of keyEnvNames) delete process.env[name];
     const service = new ConvexTokenService();
@@ -628,15 +632,14 @@ describe('ConvexTokenService delegated-identity token exchange (verifyPlaneSubje
       orgId: 'org-a',
     });
 
-    expect(
-      service.verifyPlaneSubjectToken(bundle.token, ['session-core']),
-    ).toMatchObject({ userId: 'user-a' });
-    expect(() =>
-      service.verifyPlaneSubjectToken(bundle.token, ['session-core']),
-    ).toThrow(/already been exchanged/i);
+    for (let call = 0; call < 3; call += 1) {
+      expect(
+        service.verifyPlaneSubjectToken(bundle.token, ['session-core']),
+      ).toMatchObject({ userId: 'user-a', orgId: 'org-a' });
+    }
   });
 
-  it('does not let a replayed-then-retried DIFFERENT valid token get caught by the same marker', () => {
+  it('keeps two different users subject tokens independent', () => {
     process.env.NODE_ENV = 'test';
     for (const name of keyEnvNames) delete process.env[name];
     const service = new ConvexTokenService();
@@ -655,6 +658,37 @@ describe('ConvexTokenService delegated-identity token exchange (verifyPlaneSubje
     expect(
       service.verifyPlaneSubjectToken(second.token, ['session-core']),
     ).toMatchObject({ userId: 'user-b' });
+  });
+
+  it('stamps a jti only when the caller supplies a token id', () => {
+    process.env.NODE_ENV = 'test';
+    for (const name of keyEnvNames) delete process.env[name];
+    const service = new ConvexTokenService();
+    const claimsOf = (token: string) =>
+      JSON.parse(
+        Buffer.from(token.split('.')[1], 'base64url').toString('utf8'),
+      ) as Record<string, unknown>;
+    const base = {
+      userId: 'service:model-execution',
+      orgId: 'org-a',
+      principalType: 'service' as const,
+      serviceId: 'model-execution',
+      reason: 'jti stamping',
+      retentionPosture: {
+        zdr: false,
+        authority: 'service-principal-policy' as const,
+      },
+    };
+
+    expect(
+      claimsOf(service.issuePlaneToken('ingestion', base).token).jti,
+    ).toBeUndefined();
+    expect(
+      claimsOf(
+        service.issuePlaneToken('ingestion', { ...base, tokenId: 'jti-123' })
+          .token,
+      ).jti,
+    ).toBe('jti-123');
   });
 
   it('fails closed for empty, malformed, and undecodable subject tokens', () => {

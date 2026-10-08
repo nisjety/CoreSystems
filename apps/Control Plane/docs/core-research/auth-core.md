@@ -5,7 +5,98 @@ Updated (source + isolated + local integration verification): 2026-07-16
 
 Scope: `apps/Control Plane/auth-core` (NestJS/TypeScript, container `auth-service`, port 3011 / gRPC 50011)
 
-## 2026-07-21 interactive retention default flipped to opt-in ZDR (current — supersedes the 07-16/07-17 addenda below)
+## 2026-10-06 per-connection ZDR waiver: decision endpoint and claim (designed, not built)
+
+**Status: not built.** Nothing of this is in the tree on 2026-10-06: no decision endpoint, no `zdr_waiver` claim, no `ZDR_WAIVER_ENABLED` flag. The only part present is a dark registry row for the BFF's own principal (`verevon-gateway-retention-decision`, audience `control-policy`, scope `retention:zdr-decide`): nothing presents it and nothing verifies the scope yet (`config/README.md`, "The Data Plane principal bundle"). This section is the contract the build must meet (ZDR task Z-14). Plane rule: master ownership matrix, rule 17. Decision record: Model Plane decision ledger, entry of 2026-10-03 (own-connection ZDR). The sections below it describe what is built.
+
+Purpose. When an organisation has ZDR on and a member runs a chat on their own connection that cannot provide ZDR (today only the ChatGPT account route), auth-core is the only service that can lower ZDR for that one run, and only after it has checked the facts itself. The BFF can ask but cannot assert, and a client can never send `zdr: false`.
+
+- **Decision endpoint** `POST /api/retention/zdr-decision`. It accepts only a service-attested caller: a dedicated BFF principal with an `aud=control-policy` token and scope `retention:zdr-decide` (checked with `verifyPlaneServiceToken`), together with the user's session cookie. The principal row is part of the Control Plane principal bundle; the existing `verevon-gateway` credential is not reused. A user cannot call it.
+- **Inputs and rule.** `{ connection_id, provider, explicit_zdr }`. auth-core resolves the organisation's posture with the same resolver as a mint (45 s fresh, the stale rule, `retention_posture_unavailable`), reads the connection's capability and acknowledgement from integration-corev2 as the session user (edge E2 in `docs/CROSS_PLANE_CONTRACT_MATRIX.md`) and returns `{ org_zdr, effective_zdr, reason, ack?, decision }`. `decision` is a 60 s RS256 JWT bound to the organisation, the user, the connection, the acknowledgement id, the capability digest and a `jti`. Effective ZDR stays the organisation's unless every one of these holds: the run names that connection, the session user owns it in the session organisation, its capability cannot provide ZDR, a valid acknowledgement of this digest and wording version stands, and the request is not an explicit ZDR request (`zdr_explicit_request_not_supported_by_connection`; a Space policy is never waivable).
+- **Mint.** The plane and model-plane token endpoints accept the header `x-retention-decision`. They verify signature, expiry, user equal to the session user and organisation equal to the session organisation, then stamp `zdr: false`, `org_zdr: true` and `zdr_waiver` (`connection_id`, `ack_id`, `provider`, `digest`, `decision_jti`), and cap the token at 300 s. Without the header a token carries the organisation's posture, so a user who mints directly can never obtain a waiver. The service routes ignore the header: the internal-token routes keep rejecting `x-zdr` and a body `zdr` with 400, and token exchange keeps inheriting the subject token's `zdr`. Every mint site of one turn carries the same decision, because the planes that compare `zdr` across delegated bearers refuse a mixed set (`zdr_posture_mismatch`).
+- **Audit.** Each decision is audited with identifiers only and a durable publish acknowledgement, the pattern of `plane_service_token_issued`. If the audit cannot be published, no decision is issued.
+- **Kill switch** `ZDR_WAIVER_ENABLED`, default off, with a boot-time check. While it is off no waiver is minted, whatever the acknowledgement: the decision is refused with `zdr_connection_not_supported` (acknowledging cannot help), and a member of a ZDR organisation gets that typed refusal. The same code covers a connection whose provider has no waiver route (today only `openai-codex-subscription` has one). Turning it off returns new mints to the organisation's posture at once; tokens already issued live at most 300 s.
+- **Failure rule.** An unreachable organisation service, integration service or audit stream refuses the decision (`zdr_decision_unavailable`, retryable) and ZDR stays on. It follows the fail-closed rule of the 2026-10-03 section below: the design's earlier alternative of minting persistent while the organisation service is down was not taken.
+- **Order.** The planes that enforce the waiver (model-gateway, inference-core, execution-core, session-core) ship before this endpoint is enabled. A plane that predates the claim ignores it and would treat a waiver token as an ordinary non-ZDR token, so the launcher refuses to enable the flag until all four report the waiver contract version (ZDR task Z-32). Roll back in the reverse order.
+- **Never.** It never writes the organisation's setting, never issues a waiver for another user's connection, for an explicit ZDR request, for a Space policy, or to a service principal, and never for an unattended run.
+
+Required tests, with the real rules and no permissive double: a spec that reads the real `plane-service-principals.json` and pins the one principal holding `retention:zdr-decide`; mints through the real controllers and signer; and the golden posture matrix (`apps/Model Plane/api/contracts/zdr-posture-matrix.json`, authored in the working tree on 2026-10-06, task Z-10) that this TypeScript code, the Rust planes and integration-corev2 each evaluate with their own function. No plane evaluates its posture rows yet (it has a strict loader and a drift check, and inference-core holds the companion capability file against its real provider).
+
+## 2026-10-03 retention posture read path repaired (current — supersedes the 07-21 read path and its "fails closed to zdr:false" rule)
+
+The 07-21 resolver below never worked on a running stack. org-core applies
+service authentication to every route; the resolver sent no service headers,
+got `401` on both lookups, read that as an outage and resolved every org to
+`zdr: false`. A ZDR org's setting never reached an interactive token, and no
+test noticed because the unit spec mocked `fetch` and enforced no
+authentication. (Live check 2026-10-03: `401` unauthenticated; `403` even with
+service headers, because Auth Core's org-core credential held only
+`org:projection:*`.)
+
+Now:
+
+- org-core serves `GET /internal/orgs/:orgId/retention-posture` ->
+  `{ "zdrIntent": boolean, "entitled": boolean }`, computed from the database
+  on every call (no cache) and nothing else about the org. It needs the new
+  scope `org:retention:read:any`, granted to the `auth-core` principal only
+  (`docker-compose.yml`, `ORG_CORE_SERVICE_CREDENTIALS`). org-core refuses to
+  start if auth-core lacks it. The resolver no longer calls the organization or
+  entitlements endpoints (the latter also drops the computed ZDR entitlement on
+  a cache hit).
+- The resolver authenticates with `x-service-id: auth-core` and
+  `x-service-token` (`ORG_CORE_SERVICE_TOKEN`). `zdr = zdrIntent && entitled`.
+- A failed lookup is never a posture and is never cached. Successes are cached
+  45 s. If org-core cannot answer, the last successful lookup for that org is
+  served: up to 24 h if it was ZDR, 15 min if it was not (measured from that
+  lookup). With nothing usable the plane and model-plane token endpoints answer
+  `503 retention_posture_unavailable` and issue no token. A known ZDR org is
+  never downgraded by an outage. Trade-off: an org not resolved in this process
+  within those windows cannot get an interactive token while org-core is
+  unreachable; Better Auth sign-in itself does not depend on org-core.
+- The wire contract is a golden file (`auth-core/src/auth/fixtures/`, vendored
+  into `org-core/internal/http/testdata/` with a sha256 pin on each copy) written
+  by the real resolver and replayed through org-core's real middleware and the
+  real compose credential block, so a header, path or scope mismatch fails a
+  test.
+
+## 2026-10-03 `tenant` retention posture for background-worker service tokens
+
+A service principal's `retentionByAudience` row is now `zdr` (default),
+`persistent` or `tenant`. For `tenant` the token's `zdr` claim is the ORG's
+posture, resolved through the same read path as interactive tokens
+(`resolveTenantServiceRetentionPosture` in `interactive-retention-policy.ts`:
+same cache, same stale rule, same 503), so a background worker acting for a ZDR
+org gets a zero-retention token and one acting for any other org does not.
+
+- Both `/internal-token` controllers (plane and Model Plane) resolve it
+  explicitly, after the caller is authorized and before signing. With nothing
+  usable for the org the answer is `503 retention_posture_unavailable` and no
+  token and no audit event; it is never a guessed `true` or `false`.
+- `authorizePlaneServicePrincipal` reports `retention` and, for `tenant`, the safe
+  `zdr: true` (the old `retention === 'zdr'` read `tenant` as persistent), so a
+  controller that forgets to resolve fails safe, not open.
+- The signer caps such a token at 60 seconds
+  (`TENANT_PRINCIPAL_TOKEN_TTL_SECONDS`), keyed on the posture's
+  `source: 'tenant-policy'` so the cap holds for every caller. Staleness window:
+  45 s cache + 60 s lifetime in normal operation; during an org-core outage the
+  stale rule above applies (up to 15 min for a remembered non-ZDR org).
+- The issuance audit event gains `details.zdr_source`: `tenant-policy` or
+  `registry`.
+- Two lanes hold `tenant` in the checked-in policy since the Data Plane principal
+  bundle (2026-10-06): `embedding-engine` and `graph-index` on `inference-core`.
+  The running registry changes only when `auth-service` is recreated with it.
+  Order matters: the Auth Core image goes first (an older one rejects the value and
+  refuses every principal), then the Data Plane inference clients that compare the
+  claim with a configured posture, then the registry rows. A client still
+  configured `persistent` refuses a ZDR organization's token (`zdr: true`) and
+  accepts every other organization's, so switching early stalls only ZDR
+  organizations' work. The `quarry` audience stays `zdr` for every principal.
+- Proven by `tenant-retention-posture.spec.ts` and the policy contract spec,
+  which mints every lane of the checked-in policy through the real controllers
+  and signer and fails if a non-tenant principal is minted with a resolved
+  posture or a tenant principal without one.
+
+## 2026-07-21 interactive retention default flipped to opt-in ZDR (superseded above for the read path and outage rule)
 
 The env-var-driven interactive retention policy described in the two
 addenda below is REMOVED. Stated business intent: ZDR is an opt-in, paid,
@@ -735,3 +826,25 @@ data, id visible in the checks above).
   cross-service projection drift between auth-core and org-core; it took a
   manual live signup+create-org+row-count-diff to find a 75% invisibility
   rate.
+
+## Production principal model (2026-10-06 source update, plan W0-3)
+
+The 2026-07-16 note above said the secure-MVP production registry "must enumerate
+each principal's permitted organizations". For a multi-tenant workload that is the
+wrong tool (a new organization would need a registry change and a secret rollout
+before its first document could be embedded), so the registry now has a second
+production-valid form: `tenancy: "directory"`. Auth Core verifies, at every mint
+and before anything is signed, that org-core holds an active record of the
+organization (403 for one it does not, 503 `organization_directory_unavailable`
+and no token when org-core cannot be read). A fixed `orgIds` list remains for
+pseudo-organizations (`global`) and fixtures, and `allowAnyOrg` remains
+development-only. The committed principal policy states every principal in the
+production-valid form, and the launcher and the central bootstrap assemble it
+through one shared program in a `development` or a `production` profile. See
+`apps/Control Plane/config/README.md` ("Organization binding").
+
+What this does not do: it stops a token for an organization that does not exist,
+not a leaked credential minting for a real one. That still needs the second proof
+described above, for the workers that have no user subject (a proof bound to the
+signed work event); `model-execution` already uses token exchange for ingestion.
+This source is not deployed: the running Auth Core image predates it.

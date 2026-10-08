@@ -283,6 +283,38 @@ var zeroDataRetentionPlans = map[string]bool{
 	"enterprise": true,
 }
 
+// RetentionPosture is the minimal, server-computed view of an organization's
+// interactive-retention posture: the two facts a token issuer needs and
+// nothing else about the organization. It is what a machine principal holding
+// the org:retention:read:any scope may read
+// (GET /internal/orgs/:orgId/retention-posture), so it must never grow
+// organization data (name, plan, members, metadata) without a new scope.
+//
+//   - ZDRIntent is the org admin's stored choice
+//     (metadata.interactiveRetention.zdr, written by SetInteractiveRetention).
+//   - Entitled is whether the org's CURRENT plan may use zero data retention
+//     (PlanAllowsZeroDataRetention), so the plan allowlist stays here and no
+//     reader re-implements it.
+//
+// The wire field names are a contract with Auth Core
+// (internal/http/testdata/auth-core-org-core-retention-posture.contract.json).
+type RetentionPosture struct {
+	ZDRIntent bool `json:"zdrIntent"`
+	Entitled  bool `json:"entitled"`
+}
+
+// NewRetentionPosture derives the posture from the two stored inputs.
+func NewRetentionPosture(plan string, zdrIntent bool) RetentionPosture {
+	return RetentionPosture{ZDRIntent: zdrIntent, Entitled: PlanAllowsZeroDataRetention(plan)}
+}
+
+// Effective reports whether interactive traffic for the org must be zero
+// retention: the org asked for it AND its plan still allows it. An org whose
+// plan lapsed keeps its stored intent but is not zero-retention.
+func (p RetentionPosture) Effective() bool {
+	return p.ZDRIntent && p.Entitled
+}
+
 var defaultQuotas = map[string]map[string]int64{
 	"free": {
 		"api_calls":  1000,

@@ -4,6 +4,15 @@ set -euo pipefail
 # Release preflight for scoped broker and HTTP service principals. Values are
 # never printed, even on failure. Run after secrets are injected and before
 # Compose interpolation or any broker/service rollout.
+#
+# Two of the names below are the presenting-end credentials of Auth Core service
+# principals (config/plane-service-principals.json, `consumerEnv`), for the Data
+# Plane principal bundle: DATA_ORCHESTRATOR_COST_SERVICE_API_KEY (data-orchestrator
+# to cost-core, scope cost:write) and GATEWAY_RETENTION_DECISION_SERVICE_API_KEY
+# (the BFF's retention-decision principal, dark). The registry holds the same
+# value, so a release that lacks one registers a principal nobody can present, or a
+# presenter with nothing registered. The array is scanned by name, so keep
+# comments out of it.
 
 credential_names=(
   AUTH_NATS_PASSWORD USER_NATS_PASSWORD ORG_NATS_PASSWORD
@@ -27,15 +36,17 @@ credential_names=(
   GATEWAY_AUTH_GRPC_SERVICE_TOKEN RETRIEVAL_AUTH_GRPC_SERVICE_TOKEN
   GATEWAY_BILLING_CORE_SERVICE_TOKEN GATEWAY_AUDIT_CORE_SERVICE_TOKEN
   AUTH_ORG_CORE_SERVICE_TOKEN AUTH_BILLING_CORE_SERVICE_TOKEN
+  COST_BILLING_CORE_SERVICE_TOKEN
   BILLING_ORG_CORE_SERVICE_TOKEN SESSION_ORG_CORE_SERVICE_TOKEN
   SESSION_BILLING_CORE_SERVICE_TOKEN INTEGRATION_ORG_CORE_SERVICE_TOKEN
   INTEGRATION_BILLING_CORE_SERVICE_TOKEN INTEGRATION_AUDIT_CORE_SERVICE_TOKEN
   USER_CORE_GATEWAY_TOKEN USER_CORE_SESSION_TOKEN USER_CORE_ORG_TOKEN
   USER_CORE_AUTH_TOKEN USER_CORE_MEMBERSHIP_SERVICE_TOKEN
   APPLICATION_RECONCILER_AUTH_TOKEN USER_CORE_DOCUMENTS_TOKEN
-  USER_CORE_RETRIEVAL_TOKEN
+  USER_CORE_RETRIEVAL_TOKEN USER_CORE_MAIL_TASK_WORKER_TOKEN
   AUTH_USER_CORE_GRPC_SERVICE_TOKEN USER_AUTH_INTERNAL_SERVICE_TOKEN
   QUARRY_AUTH_INTERNAL_SERVICE_TOKEN
+  DATA_ORCHESTRATOR_COST_SERVICE_API_KEY GATEWAY_RETENTION_DECISION_SERVICE_API_KEY
 )
 
 if [[ "${REQUIRE_LEGACY_BRIDGE:-0}" == "1" ]]; then

@@ -1,6 +1,5 @@
 import { Injectable, Logger } from '@nestjs/common';
 import {
-  createHash,
   createPrivateKey,
   createPublicKey,
   createSign,
@@ -126,10 +125,28 @@ export type InteractivePlaneAudience = Exclude<
   'control-policy' | 'orchestrator-core'
 >;
 
-type ServiceRetentionPosture = {
+export type ServiceRetentionPosture = {
   zdr: boolean;
   authority: 'service-principal-policy';
+  /**
+   * Set (by `resolveTenantServiceRetentionPosture` only) when the org's own ZDR
+   * setting, not the registry, decided `zdr`. The signer then caps the token's
+   * lifetime at `TENANT_PRINCIPAL_TOKEN_TTL_SECONDS`, so the cap holds for every
+   * caller instead of depending on each one passing a TTL.
+   */
+  source?: 'tenant-policy';
 };
+
+/**
+ * Longest a token minted for a `tenant`-retention service principal may live.
+ * Its `zdr` claim is a snapshot of the org's setting, and a consumer that caches
+ * the bearer keeps acting on that snapshot until it expires; 60 seconds (the
+ * floor `parsePositiveTtl` already enforces for every audience) bounds how long
+ * after an org turns ZDR on a worker can still hold a token that says it has
+ * not. Together with the resolver's 45 second cache that is the whole staleness
+ * window in normal operation.
+ */
+export const TENANT_PRINCIPAL_TOKEN_TTL_SECONDS = 60;
 
 type RetentionAwareClaims = {
   orgId: string;
@@ -168,6 +185,22 @@ function issuedTokenZdr(
     : true;
 }
 
+/**
+ * The lifetime cap a service token carries because its posture came from the
+ * org, or `undefined` when it has none. Read only for service tokens: a user
+ * token's posture has its own authority and never takes this path.
+ */
+function tenantTtlCapSeconds(
+  principalType: 'user' | 'service',
+  claims: RetentionAwareClaims,
+): number | undefined {
+  return principalType === 'service' &&
+    claims.retentionPosture?.authority === 'service-principal-policy' &&
+    claims.retentionPosture.source === 'tenant-policy'
+    ? TENANT_PRINCIPAL_TOKEN_TTL_SECONDS
+    : undefined;
+}
+
 type PlaneJwtClaims = {
   userId: string;
   orgId: string;
@@ -193,6 +226,14 @@ type PlaneJwtClaims = {
    * distinct from `/internal-token`'s normal TTL for the same audience.
    */
   ttlSecondsOverride?: number;
+  /**
+   * Unique token id, emitted as the `jti` claim. Set ONLY by the token-exchange
+   * endpoint, whose token is a complete standalone bearer that its resource
+   * server (integration-corev2) consumes exactly once: the `jti` is what lets
+   * that server refuse a captured copy (T-2/A-1). Ordinary plane tokens carry
+   * none, so nothing that verifies them changes.
+   */
+  tokenId?: string;
 };
 
 type PlaneTokenBundle = {
@@ -429,22 +470,6 @@ export class ConvexTokenService {
   private readonly publicKey: KeyObject;
   private readonly publicJwk: Record<string, unknown>;
 
-  /**
-   * Single-use marker for `verifyPlaneSubjectToken` (delegated-identity
-   * token exchange, §1/T-2). Keyed by a SHA-256 digest of the raw subject
-   * token string (subject tokens mint with no `jti` today, so the full
-   * token is the only value guaranteed unique per mint — its `iat` makes
-   * two independently-minted tokens for the same claims collide only if
-   * minted within the same wall-clock second, which `nbf`/`exp` bounds
-   * already require to also match, i.e. never in practice for two distinct
-   * mints). In-memory and process-local by design: it only has to survive
-   * the token's own short TTL, not a restart — mirrors the pattern
-   * `conversation-ingest-rs`'s `ReplayCache` already uses elsewhere in this
-   * codebase. Value is the token's own `exp` in epoch milliseconds, used to
-   * prune stale entries so the map never grows unbounded.
-   */
-  private readonly subjectTokenExchangeSeen = new Map<string, number>();
-
   constructor() {
     const keyPair = this.loadKeyPair();
     this.privateKey = keyPair.privateKey;
@@ -527,6 +552,11 @@ export class ConvexTokenService {
       throw new Error('User token cannot carry a service identity');
     }
     const zdr = issuedTokenZdr(principalType, claims);
+    const tenantTtlCap = tenantTtlCapSeconds(principalType, claims);
+    const ttlSeconds =
+      tenantTtlCap === undefined
+        ? this.modelPlaneTtlSeconds
+        : Math.min(this.modelPlaneTtlSeconds, tenantTtlCap);
     const now = Math.floor(Date.now() / 1000);
     const payload = {
       iss: this.modelPlaneIssuer,
@@ -534,7 +564,7 @@ export class ConvexTokenService {
       sub: claims.userId,
       iat: now,
       nbf: now - 5,
-      exp: now + this.modelPlaneTtlSeconds,
+      exp: now + ttlSeconds,
       // The gateway's `Claims` struct (auth.rs) reads these snake_case fields
       // as required top-level claims.
       org_id: claims.orgId,
@@ -548,7 +578,9 @@ export class ConvexTokenService {
         ? { scopes: claims.scopes }
         : {}),
       // Interactive posture comes from Auth Core's exact organization policy;
-      // service posture comes only from the bounded service-principal registry.
+      // service posture comes from the bounded service-principal registry, or,
+      // for a `tenant` principal, from the same organization policy resolved at
+      // mint time (the caller stamps it; see `tenantTtlCapSeconds`).
       zdr,
     };
 
@@ -564,14 +596,12 @@ export class ConvexTokenService {
     signer.end();
 
     const signature = signer.sign(this.privateKey).toString('base64url');
-    const expiresAt = new Date(
-      (now + this.modelPlaneTtlSeconds) * 1000,
-    ).toISOString();
+    const expiresAt = new Date((now + ttlSeconds) * 1000).toISOString();
 
     return {
       token: `${signingInput}.${signature}`,
       expiresAt,
-      expiresInSeconds: this.modelPlaneTtlSeconds,
+      expiresInSeconds: ttlSeconds,
       issuer: this.modelPlaneIssuer,
       audience: this.modelPlaneAudience,
     };
@@ -618,13 +648,20 @@ export class ConvexTokenService {
     // Never lengthens a token beyond the audience's configured default —
     // only a strictly shorter override is honored, so a caller-supplied
     // value can only narrow the exposure window, never widen it.
-    const ttlSeconds =
+    const requestedTtlSeconds =
       claims.ttlSecondsOverride !== undefined &&
       Number.isFinite(claims.ttlSecondsOverride) &&
       claims.ttlSecondsOverride > 0 &&
       claims.ttlSecondsOverride < config.ttlSeconds
         ? claims.ttlSecondsOverride
         : config.ttlSeconds;
+    // A token whose posture is a snapshot of the org's setting (a tenant
+    // principal) also never outlives the snapshot's bound.
+    const tenantTtlCap = tenantTtlCapSeconds(principalType, claims);
+    const ttlSeconds =
+      tenantTtlCap === undefined
+        ? requestedTtlSeconds
+        : Math.min(requestedTtlSeconds, tenantTtlCap);
     const now = Math.floor(Date.now() / 1000);
     const payload = {
       iss: this.planeIssuer,
@@ -640,13 +677,16 @@ export class ConvexTokenService {
       ...(principalType === 'service' && claims.actingUserId
         ? { acting_user_id: claims.actingUserId }
         : {}),
+      ...(claims.tokenId ? { jti: claims.tokenId } : {}),
       ...(claims.reason ? { reason: claims.reason } : {}),
       ...(claims.email ? { email: claims.email } : {}),
       ...(claims.scopes && claims.scopes.length > 0
         ? { scopes: claims.scopes }
         : {}),
       // Interactive posture comes from Auth Core's exact organization policy;
-      // service posture comes only from the bounded service-principal registry.
+      // service posture comes from the bounded service-principal registry, or,
+      // for a `tenant` principal, from the same organization policy resolved at
+      // mint time (the caller stamps it; see `tenantTtlCapSeconds`).
       zdr,
     };
 
@@ -780,26 +820,22 @@ export class ConvexTokenService {
     }
   }
 
-  private pruneSubjectTokenExchangeSeen(now: number): void {
-    for (const [key, expiresAtMs] of this.subjectTokenExchangeSeen) {
-      if (expiresAtMs <= now) {
-        this.subjectTokenExchangeSeen.delete(key);
-      }
-    }
-  }
-
   /**
    * Delegated-identity token exchange, subject-token half (auth-core §1).
    * Verifies a `principal_type=="user"` token THIS authority already issued
    * (same signature/kid check as `verifyPlaneServiceToken`), requires it be
-   * *currently* valid (`nbf <= now < exp`, not just well-formed), requires
-   * its `aud` be one of `allowedAudiences`, and enforces single-use: a
-   * second call with the identical raw token — even a legitimately valid
-   * one — is rejected for as long as the token itself remains unexpired
-   * (closes T-2/A-1: the exchanged token this subject token is about to
-   * mint is a complete standalone bearer, so limiting the subject token to
-   * one exchange bounds the blast radius of a captured copy to a single
-   * grant instead of unlimited re-mints within the token's window).
+   * *currently* valid (`nbf <= now < exp`, not just well-formed), and
+   * requires its `aud` be one of `allowedAudiences`.
+   *
+   * Deliberately NOT single-use. execution-core holds ONE session-core bearer
+   * per run and exchanges it once per tool call, so a seen-set on the subject
+   * token would let a run make exactly one delegated read and then fail every
+   * later one (and a refused attempt would burn the bearer for the legitimate
+   * caller). Replay of the exchanged token (T-2/A-1) is closed where that
+   * token is actually presented instead: each one carries its own `jti`
+   * (`PlaneJwtClaims.tokenId`) and integration-corev2 consumes it exactly
+   * once. The subject token stays bounded by its own short TTL and by the
+   * caller also having to present the service credential.
    *
    * Returns the subject's own `{orgId, userId, zdr}` — callers must use
    * THESE values (never the registry's own defaults) for the exchanged
@@ -895,18 +931,6 @@ export class ConvexTokenService {
           'Plane subject token claims are invalid',
         );
       }
-
-      const seenKey = createHash('sha256').update(token).digest('hex');
-      this.pruneSubjectTokenExchangeSeen(Date.now());
-      if (this.subjectTokenExchangeSeen.has(seenKey)) {
-        throw new PlaneTokenVerificationError(
-          'Plane subject token has already been exchanged',
-        );
-      }
-      this.subjectTokenExchangeSeen.set(
-        seenKey,
-        (payload.exp as number) * 1000,
-      );
 
       return { orgId, userId, zdr, audience };
     } catch (error) {

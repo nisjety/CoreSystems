@@ -330,6 +330,34 @@ ON CONFLICT (id) DO NOTHING`,
 	return applied, skippedOverride, err
 }
 
+// GetRetentionPostureState reads the two stored inputs of an organization's
+// interactive-retention posture straight from the table: its plan and the
+// admin's stored ZDR intent. Only an exact JSON `true` counts as intent, so a
+// malformed value ("true", 1, a nested object) reads as not-intent instead of
+// failing the read (a cast would turn bad metadata into an error and, for the
+// token issuer, into an outage). Soft-deleted organizations read as not found.
+// RLS-scoped to the organization like GetOrganization.
+func (r *Repository) GetRetentionPostureState(ctx context.Context, id string) (string, bool, error) {
+	const q = `
+SELECT plan,
+       COALESCE(metadata -> 'interactiveRetention' -> 'zdr' = 'true'::jsonb, false)
+FROM organizations
+WHERE id = $1 AND deleted_at IS NULL`
+
+	var plan string
+	var zdrIntent bool
+	err := r.db.WithOrgScope(ctx, id, func(tx pgx.Tx) error {
+		return tx.QueryRow(ctx, q, id).Scan(&plan, &zdrIntent)
+	})
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return "", false, ErrNotFound
+		}
+		return "", false, fmt.Errorf("query retention posture: %w", err)
+	}
+	return plan, zdrIntent, nil
+}
+
 // SetInteractiveRetention persists an organization's interactive Zero-Data-
 // Retention posture into organizations.metadata.interactiveRetention. This
 // records the org's durable INTENT (zdr=true is the privacy-preserving

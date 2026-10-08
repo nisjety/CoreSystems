@@ -45,8 +45,15 @@ import type { Request } from 'express';
 import { DirectNatsService } from '../nats/direct-nats.service';
 import { issuedTokenAuditIdentity } from './audit-event-identity';
 import { auth } from './auth';
-import { ConvexTokenService } from './convex-token.service';
-import { resolveInteractiveRetentionPosture } from './interactive-retention-policy';
+import {
+  ConvexTokenService,
+  type ServiceRetentionPosture,
+} from './convex-token.service';
+import {
+  assertServiceOrganizationBinding,
+  resolveInteractiveRetentionPosture,
+  resolveTenantServiceRetentionPosture,
+} from './interactive-retention-policy';
 import {
   authorizePlaneServicePrincipal,
   type AuthorizedPlaneServicePrincipal,
@@ -171,8 +178,10 @@ export class ModelPlaneTokenController {
     const scopes = modelGatewayScopesForRole(sessionContext.role);
 
     // Resolved asynchronously against org-core (stored intent + plan
-    // entitlement); fails closed to zdr:false on any org-core outage rather
-    // than blocking token issuance — see interactive-retention-policy.ts.
+    // entitlement). If org-core cannot be read and no last-known posture is
+    // usable this throws a 503 (retention_posture_unavailable) and NO token is
+    // issued; it never degrades to zdr:false. Let it propagate — see
+    // interactive-retention-policy.ts.
     const retentionPosture = await resolveInteractiveRetentionPosture(
       sessionContext.orgId,
     );
@@ -243,6 +252,21 @@ export class ModelPlaneTokenController {
       }
       throw new ForbiddenException('Service principal is not authorized');
     }
+    // A `directory`-bound principal may only mint for an organization org-core's
+    // directory holds: 403 for one it does not, 503
+    // (organization_directory_unavailable) when org-core cannot be read, and NO
+    // token in either case. Same rule, same place as the plane controller's.
+    await assertServiceOrganizationBinding(principal);
+    // A `tenant` principal's posture is the ORG's, so it is resolved here,
+    // explicitly, after the caller is authorized and before anything is signed.
+    // If org-core cannot be read and no last-known posture is usable this throws
+    // a 503 (retention_posture_unavailable) and NO token is issued; it never
+    // falls back to the registry's zdr:true default or to false. Every other
+    // principal keeps exactly what its registry row says.
+    const retentionPosture: ServiceRetentionPosture =
+      principal.retention === 'tenant'
+        ? await resolveTenantServiceRetentionPosture(principal)
+        : { zdr: principal.zdr, authority: 'service-principal-policy' };
     const response = this.convexTokenService.issueModelPlaneToken({
       userId: principal.subject,
       orgId: principal.orgId,
@@ -250,10 +274,7 @@ export class ModelPlaneTokenController {
       principalType: 'service',
       serviceId: principal.serviceId,
       reason: principal.reason,
-      retentionPosture: {
-        zdr: principal.zdr,
-        authority: 'service-principal-policy',
-      },
+      retentionPosture,
     });
     const event = 'model_service_token_issued';
     let audited = false;
@@ -279,7 +300,9 @@ export class ModelPlaneTokenController {
             audience: 'model-gateway',
             scopes: principal.scopes,
             reason: principal.reason,
-            zdr: principal.zdr,
+            zdr: retentionPosture.zdr,
+            zdr_source: retentionPosture.source ?? 'registry',
+            org_binding: principal.orgBinding,
           },
         },
       );

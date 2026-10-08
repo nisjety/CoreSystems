@@ -16,7 +16,13 @@ jest.mock('./plane-token-membership', () => ({
   resolveCanonicalTokenContext: mockResolveCanonicalTokenContext,
 }));
 const mockResolveInteractiveRetentionPosture = jest.fn();
+// Only the interactive posture is replaced; the organization-binding check stays
+// the real one (these registries are `allowAnyOrg`, which it lets through
+// without a lookup).
 jest.mock('./interactive-retention-policy', () => ({
+  ...jest.requireActual<typeof import('./interactive-retention-policy')>(
+    './interactive-retention-policy',
+  ),
   resolveInteractiveRetentionPosture: mockResolveInteractiveRetentionPosture,
 }));
 
@@ -99,6 +105,8 @@ describe('PlaneTokenController service issuance audit', () => {
           scopes: ['documents:write'],
           reason: 'persist verified import',
           zdr: false,
+          zdr_source: 'registry',
+          org_binding: 'fixed',
         },
       }),
     );
@@ -363,35 +371,31 @@ describe('PlaneTokenController interactive capability scope issuance', () => {
     );
   });
 
-  it('still succeeds and mints a normal-retention token when the org-core retention lookup is unavailable (fails closed, never blocks login)', async () => {
+  it('issues no token and answers 503 when the org retention posture cannot be verified (never a guessed zdr:false)', async () => {
     mockResolveCanonicalTokenContext.mockResolvedValue({
       orgId: 'org-a',
       role: 'member',
     });
-    // resolveInteractiveRetentionPosture never throws — an org-core outage
-    // or timeout resolves to the fail-closed posture, not a rejection.
-    mockResolveInteractiveRetentionPosture.mockResolvedValue({
-      zdr: false,
-      authority: 'interactive-org-retention-policy',
-    });
+    // resolveInteractiveRetentionPosture throws a 503 when org-core cannot be
+    // read and no last-known posture is usable. The controller must let it
+    // through: see interactive-retention-unavailable.controller.spec.ts for the
+    // same path with the real resolver.
+    mockResolveInteractiveRetentionPosture.mockRejectedValue(
+      new ServiceUnavailableException({
+        statusCode: 503,
+        error: 'retention_posture_unavailable',
+      }),
+    );
     const tokens = {
       isInteractivePlaneAudience: jest.fn().mockReturnValue(true),
-      issuePlaneToken: jest.fn().mockReturnValue({ token: 'degraded' }),
+      issuePlaneToken: jest.fn().mockReturnValue({ token: 'must-not-mint' }),
     };
     const controller = new PlaneTokenController(tokens as never, {} as never);
 
     await expect(
       controller.getToken('inference-core', { headers: {} } as never),
-    ).resolves.toMatchObject({ token: 'degraded' });
-    expect(tokens.issuePlaneToken).toHaveBeenCalledWith(
-      'inference-core',
-      expect.objectContaining({
-        retentionPosture: {
-          zdr: false,
-          authority: 'interactive-org-retention-policy',
-        },
-      }),
-    );
+    ).rejects.toBeInstanceOf(ServiceUnavailableException);
+    expect(tokens.issuePlaneToken).not.toHaveBeenCalled();
   });
 });
 
@@ -490,6 +494,7 @@ describe('PlaneTokenController delegated-identity token exchange (issueTokenExch
         actingUserId: 'user-a',
         principalType: 'service',
         ttlSecondsOverride: 90,
+        tokenId: expect.stringMatching(/^[0-9a-f-]{36}$/),
       }),
     );
     expect(audit.publishAuditDurable).toHaveBeenCalledWith(

@@ -2,8 +2,8 @@
 set -euo pipefail
 
 # Local-development runner for the Control Plane. Compose interpolation happens
-# before service env_file injection, so the deleted root .env cannot be relied
-# upon. This runner merges the service-local files and supplies development
+# before service env_file injection. This runner merges the service-local files,
+# any existing root/plane overrides, and supplies development
 # values for missing interpolation variables. Generated credentials are written
 # once to a local, gitignored, 0600 secrets store ($root/.env.generated-secrets)
 # and reused on every run, so they stay stable across bring-ups and per-service
@@ -36,6 +36,17 @@ for file in "${env_files[@]}"; do
     printf 'missing service environment file: %s\n' "$file" >&2
     exit 1
   }
+done
+
+# Match build-verevon-services.sh's optional override order. Omitting the plane
+# file during a single-service recreate can select a stale service-local cache
+# password while the already-running Dragonfly uses the plane's current one.
+# Load these files directly; never duplicate their credentials in another store.
+if [[ -f "$root/../../.env" ]]; then
+  env_files=("$root/../../.env" "${env_files[@]}")
+fi
+for file in "$root/org-core/.env.local" "$root/.env"; do
+  [[ ! -f "$file" ]] || env_files+=("$file")
 done
 
 tmp_env=$(mktemp "${TMPDIR:-/tmp}/control-plane-compose.XXXXXX")
@@ -256,6 +267,16 @@ persist_if_missing PLANE_SERVICE_PRINCIPALS_JSON '{}'
 # Credentials are never rotated by this function. An existing value is reused
 # so a re-run cannot invalidate a credential the running fleet is already
 # presenting -- the same reasoning as the persisted secrets store itself.
+#
+# The Data Plane principal bundle needs nothing special here (config/README.md,
+# "The Data Plane principal bundle"): its two new principals declare a consumerEnv,
+# so this function mints and publishes their credentials like any other.
+# DATA_ORCHESTRATOR_COST_SERVICE_API_KEY is read by the Data Plane's
+# data-orchestrator, GATEWAY_RETENTION_DECISION_SERVICE_API_KEY by the Frontend
+# gateway; both planes read this store through build-verevon-services.sh
+# (plane_env_files), so neither is copied into a plane .env. The keys exist only
+# after this script has run once: run `config` (output discarded, it prints
+# resolved secrets) before anything that expects them, such as a launcher dry run.
 # Path a NATIVE tool can open. jq/openssl on Windows are win32 binaries and
 # cannot resolve the /c/Users/... form bash hands them; `[[ -f ]]` succeeds on
 # the POSIX path while the tool fails on the very same string, so the mismatch
@@ -287,8 +308,29 @@ plane_principals_registry() {
     return 1
   fi
 
-  local existing creds='{}' name cred consumer consumer_value
-  existing=$(lookup_value PLANE_SERVICE_PRINCIPALS_JSON 2>/dev/null || printf '{}')
+  # Which registry shape to emit. `development` (the default) keeps every
+  # `tenancy: "directory"` row on the legacy allowAnyOrg the development stack has
+  # always run on; `production` emits the policy as stated, which Auth Core's
+  # production loader accepts. The assembler refuses anything else.
+  local profile="${PLANE_SERVICE_PRINCIPALS_PROFILE:-development}"
+  local filter_posix="$root/scripts/plane-principal-registry.jq" filter
+  if [[ ! -f "$filter_posix" ]]; then
+    printf 'ERROR: %s is missing; the principal registry cannot be assembled.\n' "$filter_posix" >&2
+    return 1
+  fi
+  filter=$(native_path "$filter_posix")
+
+  # The registry already assembled by an earlier run lives in THIS store and
+  # nowhere else. It is read from the store itself, not through lookup_value:
+  # lookup_value takes the first non-empty hit across every env file, so a stale
+  # PLANE_SERVICE_PRINCIPALS_JSON in the plane's own .env (the central bootstrap
+  # used to write one) shadowed the store and its credentials were adopted and
+  # written back here. That put a registry credential that no running service
+  # presented into the live registry file.
+  local existing creds='{}' name cred consumer consumer_value existing_line
+  existing_line=$(grep -E '^PLANE_SERVICE_PRINCIPALS_JSON=' "$secrets_file" 2>/dev/null | tail -n 1 || true)
+  existing=${existing_line#PLANE_SERVICE_PRINCIPALS_JSON=}
+  [[ -n "$existing" ]] || existing='{}'
   printf '%s' "$existing" | jq empty >/dev/null 2>&1 || existing='{}'
 
   while IFS= read -r name; do
@@ -322,19 +364,15 @@ plane_principals_registry() {
     creds=$(printf '%s' "$creds" | jqr --arg n "$name" --arg c "$cred" '.[$n] = $c')
   done < <(jqr -r 'keys[]' "$policy")
 
+  # The policy becomes a registry in ONE place, scripts/plane-principal-registry.jq,
+  # which the central bootstrap calls too (scripts/tests/
+  # principal-registry-parity.test.sh fails if either writer or the committed
+  # policy disagree). It copies an optional key (tokenExchange, tenancy,
+  # allowAnyOrg, ...) only when the policy declares it: Auth Core accepts an
+  # absent key as "use the default" but rejects an explicit null.
   local registry
-  registry=$(jqr -c -n --slurpfile pol "$policy" --argjson creds "$creds" '
-    reduce ($pol[0] | keys[]) as $n ({};
-      .[$n] = {
-        credential: $creds[$n],
-        audiences: $pol[0][$n].audiences,
-        orgIds: $pol[0][$n].orgIds,
-        allowAnyOrg: $pol[0][$n].allowAnyOrg,
-        scopes: $pol[0][$n].scopes,
-        scopesByAudience: $pol[0][$n].scopesByAudience,
-        retentionByAudience: $pol[0][$n].retentionByAudience
-      })
-  ') || return 1
+  registry=$(jqr -c -n --slurpfile pol "$policy" --argjson creds "$creds" \
+    --arg profile "$profile" -f "$filter") || return 1
 
   if [[ -n "$(lookup_value PLANE_SERVICE_PRINCIPALS_JSON 2>/dev/null || true)" ]]; then
     # Replace in place: the assembled value is authoritative once policy exists.
@@ -346,8 +384,8 @@ plane_principals_registry() {
   else
     printf 'PLANE_SERVICE_PRINCIPALS_JSON=%s\n' "$registry" >> "$secrets_file"
   fi
-  printf 'plane service principals: %s assembled from config/plane-service-principals.json\n' \
-    "$(printf '%s' "$registry" | jqr -r 'keys | length')" >&2
+  printf 'plane service principals: %s assembled from config/plane-service-principals.json (profile %s)\n' \
+    "$(printf '%s' "$registry" | jqr -r 'keys | length')" "$profile" >&2
 }
 plane_principals_registry
 
@@ -414,6 +452,7 @@ required_credentials=(
   VEREVON_GATEWAY_GDPR_NATS_PASSWORD
   GATEWAY_AUDIT_CORE_SERVICE_TOKEN GATEWAY_AUTH_GRPC_SERVICE_TOKEN
   GATEWAY_BILLING_CORE_SERVICE_TOKEN GATEWAY_ORG_CORE_SERVICE_TOKEN
+  COST_BILLING_CORE_SERVICE_TOKEN
   INTEGRATION_AUDIT_CORE_SERVICE_TOKEN INTEGRATION_BILLING_CORE_SERVICE_TOKEN
   INTEGRATION_ORG_CORE_SERVICE_TOKEN MODEL_GATEWAY_ORG_CORE_SERVICE_TOKEN
   MODEL_NATS_PROVISIONER_PASSWORD
@@ -427,6 +466,17 @@ required_credentials=(
   USER_CORE_GRPC_TLS_CERT_FILE USER_CORE_GRPC_TLS_KEY_FILE USER_CORE_MEMBERSHIP_SERVICE_TOKEN
   USER_CORE_ORG_TOKEN USER_CORE_RETRIEVAL_TOKEN USER_CORE_SESSION_TOKEN USER_NATS_PASSWORD
   USER_SHARED_NATS_PASSWORD
+  # Mail-to-task (plan task J3), dark. Presented BY integration-corev2 TO
+  # user-core to resolve an inbound mail alias (user-core's own registry entry
+  # `integration-mail-task-worker`, scope mail-task:resolve alone). Minted HERE,
+  # once, because it is read by BOTH ends: user-core validates it in
+  # USER_CORE_SERVICE_CREDENTIALS and integration-api presents it as
+  # MAIL_TASK_USER_CORE_SERVICE_TOKEN. user-core refuses to start on a token
+  # under 32 characters, so it cannot be an optional empty passthrough. Nothing
+  # presents it until MAIL_TASK_PROVIDER is set. The two Auth Core mail-task
+  # principals' keys are NOT listed here: plane_principals_registry mints them
+  # from their consumerEnv (config/plane-service-principals.json).
+  USER_CORE_MAIL_TASK_WORKER_TOKEN
 )
 for key in "${required_credentials[@]}"; do
   case "$key" in

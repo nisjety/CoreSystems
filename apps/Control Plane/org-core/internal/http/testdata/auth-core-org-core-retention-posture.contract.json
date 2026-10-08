@@ -1,0 +1,30 @@
+{
+  "contract": "auth-core -> org-core retention posture",
+  "version": 1,
+  "organizationId": "org-contract-fixture",
+  "tokenPlaceholder": "<ORG_CORE_SERVICE_TOKEN>",
+  "requests": [
+    {
+      "method": "GET",
+      "path": "/internal/orgs/org-contract-fixture/retention-posture",
+      "headers": {
+        "accept": "application/json",
+        "x-service-id": "auth-core",
+        "x-service-token": "<ORG_CORE_SERVICE_TOKEN>"
+      }
+    }
+  ],
+  "response": {
+    "status": 200,
+    "body": {
+      "zdrIntent": true,
+      "entitled": true
+    }
+  },
+  "notFound": {
+    "status": 404,
+    "body": {
+      "error": "organization not found"
+    }
+  }
+}

@@ -1,6 +1,6 @@
 {
   "capability-core": {
-    "allowAnyOrg": true,
+    "tenancy": "directory",
     "audiences": [
       "inference-core",
       "orchestrator-core",
@@ -43,7 +43,7 @@
     }
   },
   "conversation-core": {
-    "allowAnyOrg": true,
+    "tenancy": "directory",
     "audiences": [
       "ingestion"
     ],
@@ -93,15 +93,34 @@
       ]
     }
   },
+  "data-orchestrator": {
+    "tenancy": "directory",
+    "audiences": [
+      "cost-core"
+    ],
+    "consumerEnv": "DATA_ORCHESTRATOR_COST_SERVICE_API_KEY",
+    "orgIds": [],
+    "retentionByAudience": {
+      "cost-core": "persistent"
+    },
+    "scopes": [
+      "cost:write"
+    ],
+    "scopesByAudience": {
+      "cost-core": [
+        "cost:write"
+      ]
+    }
+  },
   "embedding-engine": {
-    "allowAnyOrg": true,
+    "tenancy": "directory",
     "audiences": [
       "inference-core"
     ],
     "consumerEnv": "MODEL_PLANE_EMBEDDING_INFERENCE_SERVICE_API_KEY",
     "orgIds": [],
     "retentionByAudience": {
-      "inference-core": "persistent"
+      "inference-core": "tenant"
     },
     "scopes": [
       "inference:invoke"
@@ -113,7 +132,7 @@
     }
   },
   "execution-core": {
-    "allowAnyOrg": true,
+    "tenancy": "directory",
     "audiences": [
       "capability-core",
       "session-core",
@@ -121,7 +140,9 @@
       "sandbox-manager"
     ],
     "consumerEnv": "EXECUTION_CORE_SERVICE_API_KEY",
-    "orgIds": [],
+    "orgIds": [
+      "global"
+    ],
     "retentionByAudience": {
       "capability-core": "persistent",
       "quarry": "zdr",
@@ -133,9 +154,11 @@
       "browser:execute",
       "capability:health:global:write",
       "capability:read",
+      "extract:read",
       "sandbox:read",
       "sandbox:write",
       "scrape:write",
+      "search:read",
       "session:heartbeat",
       "session:terminalize"
     ],
@@ -146,7 +169,9 @@
       ],
       "quarry": [
         "browser:execute",
-        "scrape:write"
+        "extract:read",
+        "scrape:write",
+        "search:read"
       ],
       "sandbox-manager": [
         "sandbox:read",
@@ -160,7 +185,7 @@
     }
   },
   "finspo-core": {
-    "allowAnyOrg": true,
+    "tenancy": "directory",
     "audiences": [
       "data-plane"
     ],
@@ -179,14 +204,14 @@
     }
   },
   "graph-index": {
-    "allowAnyOrg": true,
+    "tenancy": "directory",
     "audiences": [
       "inference-core"
     ],
     "consumerEnv": "MODEL_PLANE_INFERENCE_SERVICE_API_KEY",
     "orgIds": [],
     "retentionByAudience": {
-      "inference-core": "persistent"
+      "inference-core": "tenant"
     },
     "scopes": [
       "inference:invoke"
@@ -198,7 +223,7 @@
     }
   },
   "imports-core": {
-    "allowAnyOrg": true,
+    "tenancy": "directory",
     "audiences": [
       "data-plane"
     ],
@@ -217,7 +242,7 @@
     }
   },
   "inference-core": {
-    "allowAnyOrg": true,
+    "tenancy": "directory",
     "audiences": [
       "session-core"
     ],
@@ -236,11 +261,11 @@
     }
   },
   "model-execution": {
-    "allowAnyOrg": true,
+    "tenancy": "directory",
     "audiences": [
       "ingestion"
     ],
-    "consumerEnv": "INGESTION_SERVICE_API_KEY",
+    "consumerEnv": "MODEL_EXECUTION_SERVICE_API_KEY",
     "orgIds": [],
     "retentionByAudience": {
       "ingestion": "zdr"
@@ -254,10 +279,15 @@
         "integration:read",
         "shipping:read"
       ]
+    },
+    "tokenExchange": {
+      "ingestion": [
+        "session-core"
+      ]
     }
   },
   "model-gateway": {
-    "allowAnyOrg": true,
+    "tenancy": "directory",
     "audiences": [
       "session-core",
       "quarry"
@@ -285,8 +315,27 @@
       ]
     }
   },
+  "model-gateway-mail-task-bridge": {
+    "tenancy": "directory",
+    "audiences": [
+      "session-core"
+    ],
+    "consumerEnv": "MAIL_TASK_BRIDGE_SERVICE_API_KEY",
+    "orgIds": [],
+    "retentionByAudience": {
+      "session-core": "persistent"
+    },
+    "scopes": [
+      "session:user-owned-thread-prepare"
+    ],
+    "scopesByAudience": {
+      "session-core": [
+        "session:user-owned-thread-prepare"
+      ]
+    }
+  },
   "orchestrator-core": {
-    "allowAnyOrg": true,
+    "tenancy": "directory",
     "audiences": [
       "session-core",
       "inference-core",
@@ -329,7 +378,7 @@
     }
   },
   "quarry-edge": {
-    "allowAnyOrg": true,
+    "tenancy": "directory",
     "audiences": [
       "data-plane"
     ],
@@ -340,19 +389,21 @@
     },
     "scopes": [
       "data:read",
+      "data:rerank",
       "documents:write",
       "org:data:read_all"
     ],
     "scopesByAudience": {
       "data-plane": [
         "data:read",
+        "data:rerank",
         "documents:write",
         "org:data:read_all"
       ]
     }
   },
   "retrieval-engine": {
-    "allowAnyOrg": true,
+    "tenancy": "directory",
     "audiences": [
       "control-policy",
       "inference-core"
@@ -377,7 +428,7 @@
     }
   },
   "session-core": {
-    "allowAnyOrg": true,
+    "tenancy": "directory",
     "audiences": [
       "letta-bridge",
       "inference-core"
@@ -400,6 +451,44 @@
       "letta-bridge": [
         "memory:read",
         "memory:write"
+      ]
+    }
+  },
+  "verevon-gateway": {
+    "tenancy": "directory",
+    "audiences": [
+      "model-gateway"
+    ],
+    "consumerEnv": "MAIL_TASK_GATEWAY_BRIDGE_SERVICE_API_KEY",
+    "orgIds": [],
+    "retentionByAudience": {
+      "model-gateway": "zdr"
+    },
+    "scopes": [
+      "mail-task:prepare-thread"
+    ],
+    "scopesByAudience": {
+      "model-gateway": [
+        "mail-task:prepare-thread"
+      ]
+    }
+  },
+  "verevon-gateway-retention-decision": {
+    "tenancy": "directory",
+    "audiences": [
+      "control-policy"
+    ],
+    "consumerEnv": "GATEWAY_RETENTION_DECISION_SERVICE_API_KEY",
+    "orgIds": [],
+    "retentionByAudience": {
+      "control-policy": "zdr"
+    },
+    "scopes": [
+      "retention:zdr-decide"
+    ],
+    "scopesByAudience": {
+      "control-policy": [
+        "retention:zdr-decide"
       ]
     }
   }

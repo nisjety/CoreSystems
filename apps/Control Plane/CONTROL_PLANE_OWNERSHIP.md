@@ -337,9 +337,27 @@ const usersTable = defineTable({
 | User Authentication        | auth-core          | Not synced        | Control Plane    |
 | User Sessions              | auth-core          | Not synced        | Control Plane    |
 | Organization Membership    | auth-core          | Read-only         | Control Plane    |
+| Org zero-retention intent and plan entitlement | org-core (stores); auth-core (resolves and signs) | Not synced | Control Plane |
+| Connection ZDR capability and acknowledgement ledger (designed, not built) | integration-corev2 (Ingestion Plane); auth-core only reads | Not synced | integration-corev2 |
+| Per-run ZDR waiver claim (designed, not built) | auth-core (the only issuer) | Not synced | Control Plane |
 | **Conversations**          | **Convex**         | **Read-write**    | **Convex**       |
 | **Messages**               | **Convex**         | **Read-write**    | **Convex**       |
 | **Jobs (RAG, etc.)**       | **Convex**         | **Read-write**    | **Convex**       |
+
+---
+
+## Retention Posture Authority
+
+Whether an organisation's content may be retained (zero data retention, ZDR) is decided in the Control Plane and nowhere else. Plane-level rules: [`../master-ownership-matrix.md`](../master-ownership-matrix.md), rules 16 and 17.
+
+**Built (read on 2026-10-06).**
+
+- org-core stores the organisation's intent (`metadata.interactiveRetention.zdr`) and its plan entitlement, and serves `GET /internal/orgs/:orgId/retention-posture` to auth-core only (scope `org:retention:read:any`).
+- auth-core resolves the posture at every token mint: ZDR is intent AND entitlement. When org-core cannot answer, the last answer is served (24 h if it was ZDR, 15 min if it was not); with nothing usable the mint returns `503 retention_posture_unavailable` and no token. A service principal whose registry row says `tenant` gets the organisation's posture on a token capped at 60 seconds. Detail: [`docs/core-research/auth-core.md`](docs/core-research/auth-core.md).
+- An org admin changes the setting through the gateway, which refuses to switch ZDR on while no model provider carries a zero-retention attestation (`zdr_no_attested_provider`; `zdr_gate_unavailable` when the model catalogue cannot be read). The gate is in the gateway only: org-core itself does not enforce it (the operator seed for a test organisation writes to it directly), and org-core stores `interactiveRetention` as sent on organisation creation and on a re-mirror (decision ledger, entry of 2026-10-03 on the organisation's ZDR switch).
+- Readers outside the Control Plane still compute the posture their own way: the gateway BFF from the intent alone, conversation-core from the raw flag. Moving them onto the one read model is ZDR task Z-03 and is not built.
+
+**Designed, not built.** A user's own connection can lower ZDR for one run through a signed, acknowledged, connection-bound waiver (matrix rule 17). auth-core would be its only issuer, through a service-attested decision endpoint behind the kill switch `ZDR_WAIVER_ENABLED` (default off), a connection-bound `zdr_waiver` claim on the tokens of that one turn (header `x-retention-decision`) and a content-free audit event per decision. The record of what a connection can do and of who acknowledged what is owned by integration-corev2, not by the Control Plane (table above). auth-core reads it as the session user, an edge recorded as E2 in [`../../docs/CROSS_PLANE_CONTRACT_MATRIX.md`](../../docs/CROSS_PLANE_CONTRACT_MATRIX.md). Nothing in this design writes the organisation's setting, and an unreachable source means the decision is refused and ZDR stays on.
 
 ---
 

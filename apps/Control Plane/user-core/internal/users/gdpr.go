@@ -47,13 +47,15 @@ type DSARExport struct {
 // DSARControlPlaneDisclosure is the verbatim Art. 15 scope notice attached to
 // every DSAR export. It states plainly that the export covers Control-Plane data
 // ONLY — Model-Plane run history/conversations and Data-Plane documents are
-// handled via the cross-plane erasure fan-out, not assembled here. This honesty
-// boundary (never imply "exported/erased everywhere") is pinned verbatim by a
-// test; do not weaken it without updating that test.
+// not assembled here, and a per-user erasure does not delete them (session-core
+// acknowledges the user-subject fan-out event and deletes nothing; only an
+// organisation erasure purges them). This honesty boundary (never imply
+// "exported/erased everywhere") is pinned verbatim by a test; do not weaken it
+// without updating that test and the web app's copy of this text.
 var DSARControlPlaneDisclosure = []string{
 	"Control Plane export: profile + org memberships + API key metadata.",
 	"Audit events for this subject are retained by audit-core (verevon.audit.v2.control.user-core.*).",
-	"Model Plane run history / conversations and Data Plane documents are purged/exported via the verevon.gdpr.erasure.requested fan-out (follow-up subscribers).",
+	"Model Plane conversations and memory and Data Plane documents are not part of this export, and a per-user erasure does not delete them: their owner can delete conversations and memories while signed in, and an organisation erasure is built to remove the organisation's copies (not verified end to end).",
 }
 
 // BuildDSARExport gathers the data Control Plane owns for a subject. It never

@@ -32,7 +32,13 @@
 #     [--third-party-processing-allowed] \
 #     [--zero-data-retention] \
 #     [--thread-create-entitled] [--retrieval-read-entitled] \
-#     [--import-write-entitled] [--agent-action-entitled] [--schedule-fire-entitled]
+#     [--import-write-entitled] [--agent-action-entitled] [--schedule-fire-entitled] \
+#     [--thread-read-entitled]
+#
+# --thread-read-entitled is what lets a personal Space's owner read the result
+# thread of their own schedule (and a room's current recipients read the room's
+# conversation): without it every Control thread-read decision is refused. The
+# PUT replaces the whole policy, so pass every entitlement the org should keep.
 set -euo pipefail
 
 USER_CORE_URL="${USER_CORE_URL:-http://localhost:3021}"
@@ -53,6 +59,7 @@ retrieval_read_entitled=false
 import_write_entitled=false
 agent_action_entitled=false
 schedule_fire_entitled=false
+thread_read_entitled=false
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -71,6 +78,7 @@ while [[ $# -gt 0 ]]; do
     --import-write-entitled) import_write_entitled=true; shift ;;
     --agent-action-entitled) agent_action_entitled=true; shift ;;
     --schedule-fire-entitled) schedule_fire_entitled=true; shift ;;
+    --thread-read-entitled) thread_read_entitled=true; shift ;;
     *) echo "unknown argument: $1" >&2; exit 1 ;;
   esac
 done
@@ -106,7 +114,8 @@ status=$(curl -s -o "$body" -w '%{http_code}' \
   "retrieval_read_entitled": ${retrieval_read_entitled},
   "import_write_entitled": ${import_write_entitled},
   "agent_action_entitled": ${agent_action_entitled},
-  "schedule_fire_entitled": ${schedule_fire_entitled}
+  "schedule_fire_entitled": ${schedule_fire_entitled},
+  "thread_read_entitled": ${thread_read_entitled}
 }
 JSON
 )")

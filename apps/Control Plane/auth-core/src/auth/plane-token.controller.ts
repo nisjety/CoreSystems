@@ -47,6 +47,7 @@ import {
   UnauthorizedException,
 } from '@nestjs/common';
 import { ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
+import { randomUUID } from 'node:crypto';
 import type { Request } from 'express';
 
 import { DirectNatsService } from '../nats/direct-nats.service';
@@ -54,10 +55,15 @@ import { issuedTokenAuditIdentity } from './audit-event-identity';
 import { auth } from './auth';
 import {
   ConvexTokenService,
+  type ServiceRetentionPosture,
   type VerifiedPlaneSubjectToken,
   type PlaneAudience,
 } from './convex-token.service';
-import { resolveInteractiveRetentionPosture } from './interactive-retention-policy';
+import {
+  assertServiceOrganizationBinding,
+  resolveInteractiveRetentionPosture,
+  resolveTenantServiceRetentionPosture,
+} from './interactive-retention-policy';
 import {
   authorizePlaneServicePrincipal,
   authorizePlaneServiceTokenExchange,
@@ -130,7 +136,8 @@ const TOKEN_EXCHANGE_ALLOWED_SUBJECT_AUDIENCES: readonly PlaneAudience[] = [
 
 /** Shorter than every audience's normal `/internal-token` default (300s) —
  * minted fresh per tool call, never cached, for a read that completes in
- * one HTTP round trip. See design-2 §1.3. */
+ * one HTTP round trip. See design-2 §1.3. Each token also carries its own
+ * `jti` so the resource server can consume it exactly once. */
 const TOKEN_EXCHANGE_TTL_SECONDS = 90;
 
 @ApiTags('Plane Auth')
@@ -240,8 +247,10 @@ export class PlaneTokenController {
     const scopes = planeScopesForRole(sessionContext.role, audience);
 
     // Resolved asynchronously against org-core (stored intent + plan
-    // entitlement); fails closed to zdr:false on any org-core outage rather
-    // than blocking token issuance — see interactive-retention-policy.ts.
+    // entitlement). If org-core cannot be read and no last-known posture is
+    // usable this throws a 503 (retention_posture_unavailable) and NO token is
+    // issued; it never degrades to zdr:false. Let it propagate — see
+    // interactive-retention-policy.ts.
     const retentionPosture = await resolveInteractiveRetentionPosture(
       sessionContext.orgId,
     );
@@ -317,6 +326,25 @@ export class PlaneTokenController {
       }
       throw new ForbiddenException('Service principal is not authorized');
     }
+    // A `directory`-bound principal (the production form for a worker that acts
+    // for whichever organization the work belongs to) may only mint for an
+    // organization org-core's directory holds. Checked here, explicitly, after
+    // the caller is authorized and before anything else is resolved or signed:
+    // 403 for an organization the directory does not hold, 503
+    // (organization_directory_unavailable) when org-core cannot be read, and
+    // NO token in either case.
+    await assertServiceOrganizationBinding(principal);
+    // A `tenant` principal's posture is the ORG's, so it is resolved here,
+    // explicitly, after the caller is authorized and before anything is signed.
+    // If org-core cannot be read and no last-known posture is usable this throws
+    // a 503 (retention_posture_unavailable) and NO token is issued; it never
+    // falls back to the registry's zdr:true default, which would stall every
+    // non-ZDR org's background work, nor to false, which would persist a ZDR
+    // org's. Every other principal keeps exactly what its registry row says.
+    const retentionPosture: ServiceRetentionPosture =
+      principal.retention === 'tenant'
+        ? await resolveTenantServiceRetentionPosture(principal)
+        : { zdr: principal.zdr, authority: 'service-principal-policy' };
     const response = this.convexTokenService.issuePlaneToken(audience, {
       userId: principal.subject,
       orgId: principal.orgId,
@@ -324,10 +352,7 @@ export class PlaneTokenController {
       principalType: 'service',
       serviceId: principal.serviceId,
       reason: principal.reason,
-      retentionPosture: {
-        zdr: principal.zdr,
-        authority: 'service-principal-policy',
-      },
+      retentionPosture,
     });
     const event = 'plane_service_token_issued';
     let audited = false;
@@ -353,7 +378,9 @@ export class PlaneTokenController {
             audience,
             scopes: principal.scopes,
             reason: principal.reason,
-            zdr: principal.zdr,
+            zdr: retentionPosture.zdr,
+            zdr_source: retentionPosture.source ?? 'registry',
+            org_binding: principal.orgBinding,
           },
         },
       );
@@ -472,6 +499,11 @@ export class PlaneTokenController {
       // persistent-posture delegated token through this path.
       retentionPosture: { zdr: subject.zdr, authority: 'service-principal-policy' },
       ttlSecondsOverride: TOKEN_EXCHANGE_TTL_SECONDS,
+      // T-2/A-1: the exchanged token is a complete standalone bearer, so it
+      // carries a fresh unguessable id that integration-corev2 consumes on
+      // first use. The single-use guard belongs on THIS token (one per tool
+      // call), not on the run's session-core bearer (one per run).
+      tokenId: randomUUID(),
     });
 
     const event = 'plane_service_token_exchanged';

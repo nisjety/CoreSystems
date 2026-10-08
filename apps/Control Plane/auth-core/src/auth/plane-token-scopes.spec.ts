@@ -89,4 +89,74 @@ describe('plane user scope contract', () => {
     expect(modelGatewayScopesForRole('admin')).toEqual(['admin']);
     expect(modelGatewayScopesForRole('owner')).toEqual(['admin']);
   });
+
+  it('grants organization cost reads only to verified owners and admins', () => {
+    for (const role of ['owner', 'admin', ' ADMIN ']) {
+      expect(planeScopesForRole(role, 'cost-core')).toEqual(['cost:org:read']);
+    }
+    for (const role of ['member', 'viewer', '', null, undefined]) {
+      expect(planeScopesForRole(role, 'cost-core')).toEqual([]);
+    }
+    expect(planeScopesForRole('owner', 'cost-core')).not.toContain(
+      'cost:write',
+    );
+  });
+
+  // Scopes that exist for ONE service principal each (Control Plane principal
+  // bundle, plan W0-4; config/plane-service-principals.json holds each in one
+  // row): the web rerank of quarry-edge, the usage forwarder of data-orchestrator
+  // and the BFF's retention decision. A role-derived (interactive) token must never
+  // carry any of them, whatever the role and whichever audience it is minted for;
+  // an interactive caller reaching one of these routes with its own token is an
+  // authority nobody granted.
+  it('never derives a service-only scope for any role on any audience', () => {
+    const serviceOnly = ['data:rerank', 'cost:write', 'retention:zdr-decide'];
+    const audiences = [
+      'data-plane',
+      'quarry',
+      'ingestion',
+      'control-plane',
+      'application-plane',
+      'session-core',
+      'inference-core',
+      'execution-core',
+      'cost-core',
+      'capability-core',
+      'letta-bridge',
+      'browser-broker',
+      'sandbox-manager',
+      'bridge-core',
+    ] as const;
+    const roles = [
+      'owner',
+      'admin',
+      'member',
+      'viewer',
+      ' ADMIN ',
+      '',
+      null,
+      undefined,
+    ];
+    let combinations = 0;
+    for (const audience of audiences) {
+      for (const role of roles) {
+        const scopes = planeScopesForRole(role, audience);
+        for (const scope of serviceOnly) {
+          expect({
+            audience,
+            role,
+            scope,
+            held: scopes.includes(scope),
+          }).toEqual({ audience, role, scope, held: false });
+        }
+        combinations += 1;
+      }
+    }
+    expect(combinations).toBe(audiences.length * roles.length);
+    for (const role of roles) {
+      for (const scope of serviceOnly) {
+        expect(modelGatewayScopesForRole(role)).not.toContain(scope);
+      }
+    }
+  });
 });

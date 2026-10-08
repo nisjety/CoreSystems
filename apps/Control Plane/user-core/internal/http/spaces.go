@@ -490,7 +490,7 @@ func (s *Server) issuePersonalThreadDecision(c *gin.Context) {
 		return
 	}
 	var request personalThreadDecisionRequest
-	if !bindSpaceDecisionBody(c, &request, "space_ref and idempotency_key are required", request.SpaceRef, request.IdempotencyKey) {
+	if !bindSpaceDecisionBody(c, &request, "space_ref and idempotency_key are required", &request.SpaceRef, &request.IdempotencyKey) {
 		return
 	}
 	evidence, ok := s.resolvePersonalThreadEvidence(c, request.SpaceRef, c.GetString("org_id"), c.GetString("user_id"), "personal Space authority unavailable")
@@ -525,7 +525,7 @@ func (s *Server) issueThreadDecision(c *gin.Context) {
 		return
 	}
 	var request personalThreadDecisionRequest
-	if !bindSpaceDecisionBody(c, &request, "space_ref and idempotency_key are required", request.SpaceRef, request.IdempotencyKey) {
+	if !bindSpaceDecisionBody(c, &request, "space_ref and idempotency_key are required", &request.SpaceRef, &request.IdempotencyKey) {
 		return
 	}
 	evidence, membership, ok := s.resolveKindEvidence(c, request.SpaceRef,
@@ -574,7 +574,7 @@ func (s *Server) issueThreadAppendDecision(c *gin.Context) {
 	}
 	var request threadAppendDecisionRequest
 	if !bindSpaceDecisionBody(c, &request, "space_ref, thread_id, content_digest, and idempotency_key are required",
-		request.SpaceRef, request.ThreadID, request.ContentDigest, request.IdempotencyKey) {
+		&request.SpaceRef, &request.ThreadID, &request.ContentDigest, &request.IdempotencyKey) {
 		return
 	}
 	evidence, _, ok := s.resolveKindEvidence(c, request.SpaceRef,
@@ -642,7 +642,7 @@ func (s *Server) issueThreadReadDecision(c *gin.Context) {
 		return
 	}
 	var request sharedThreadReadDecisionRequest
-	if !bindSpaceDecisionBody(c, &request, "space_ref and idempotency_key are required", request.SpaceRef, request.IdempotencyKey) {
+	if !bindSpaceDecisionBody(c, &request, "space_ref and idempotency_key are required", &request.SpaceRef, &request.IdempotencyKey) {
 		return
 	}
 	orgID, userID := c.GetString("org_id"), c.GetString("user_id")
@@ -693,7 +693,7 @@ func (s *Server) issuePersonalRetrievalDecision(c *gin.Context) {
 		return
 	}
 	var request personalRetrievalDecisionRequest
-	if !bindSpaceDecisionBody(c, &request, "space_ref and idempotency_key are required", request.SpaceRef, request.IdempotencyKey) {
+	if !bindSpaceDecisionBody(c, &request, "space_ref and idempotency_key are required", &request.SpaceRef, &request.IdempotencyKey) {
 		return
 	}
 	evidence, err := s.spaceRepo.ResolvePersonalRetrievalDecisionEvidence(
@@ -731,7 +731,7 @@ func (s *Server) issueRetrievalDecision(c *gin.Context) {
 		return
 	}
 	var request personalRetrievalDecisionRequest
-	if !bindSpaceDecisionBody(c, &request, "space_ref and idempotency_key are required", request.SpaceRef, request.IdempotencyKey) {
+	if !bindSpaceDecisionBody(c, &request, "space_ref and idempotency_key are required", &request.SpaceRef, &request.IdempotencyKey) {
 		return
 	}
 	evidence, membership, ok := s.resolveKindEvidence(c, request.SpaceRef,
@@ -799,8 +799,8 @@ func (s *Server) issueWatchCreateDecision(c *gin.Context) {
 	var request watchCreateDecisionRequest
 	if !bindSpaceDecisionBody(c, &request,
 		"space_ref, watch_id, source_kind, source_ref, predicate_digest, and idempotency_key are required",
-		request.SpaceRef, request.WatchID, request.SourceKind, request.SourceRef,
-		request.PredicateDigest, request.IdempotencyKey) {
+		&request.SpaceRef, &request.WatchID, &request.SourceKind, &request.SourceRef,
+		&request.PredicateDigest, &request.IdempotencyKey) {
 		return
 	}
 	evidence, ok := s.resolvePersonalThreadEvidence(c, request.SpaceRef, c.GetString("org_id"), c.GetString("user_id"), "Space watch authority unavailable")
@@ -858,8 +858,8 @@ func (s *Server) issueWatchObserveDecision(c *gin.Context) {
 	var request watchObserveDecisionRequest
 	if !bindSpaceDecisionBody(c, &request,
 		"intent.org_id, intent.space_ref, intent.subject_id, intent.watch_id, and intent.idempotency_key are required",
-		request.Intent.OrgID, request.Intent.SpaceRef, request.Intent.SubjectID,
-		request.Intent.WatchID, request.Intent.IdempotencyKey) {
+		&request.Intent.OrgID, &request.Intent.SpaceRef, &request.Intent.SubjectID,
+		&request.Intent.WatchID, &request.Intent.IdempotencyKey) {
 		return
 	}
 	evidence, ok := s.resolvePersonalThreadEvidence(c, request.Intent.SpaceRef, request.Intent.OrgID, request.Intent.SubjectID, "Space watch authority unavailable")
@@ -897,7 +897,7 @@ func (s *Server) issueScheduleCreateDecision(c *gin.Context) {
 	}
 	var request scheduleCreateDecisionRequest
 	if !bindSpaceDecisionBody(c, &request, "space_ref, schedule_id, template_digest, and idempotency_key are required",
-		request.SpaceRef, request.ScheduleID, request.TemplateDigest, request.IdempotencyKey) {
+		&request.SpaceRef, &request.ScheduleID, &request.TemplateDigest, &request.IdempotencyKey) {
 		return
 	}
 	evidence, ok := s.resolvePersonalThreadEvidence(c, request.SpaceRef, c.GetString("org_id"), c.GetString("user_id"), "personal Space schedule authority unavailable")
@@ -933,7 +933,7 @@ func (s *Server) issuePersonalImportDecision(c *gin.Context) {
 	}
 	var request personalImportDecisionRequest
 	if !bindSpaceDecisionBody(c, &request, "space_ref, source_type, and idempotency_key are required",
-		request.SpaceRef, request.IdempotencyKey, request.SourceType) {
+		&request.SpaceRef, &request.IdempotencyKey, &request.SourceType) {
 		return
 	}
 	evidence, err := s.spaceRepo.ResolvePersonalImportDecisionEvidence(
@@ -1398,13 +1398,18 @@ func (s *Server) spaceRepoAvailable(c *gin.Context) bool {
 // bindSpaceDecisionBody decodes the request body and enforces the listed
 // fields as non-empty, writing a 400 with errMsg and returning false on
 // failure.
-func bindSpaceDecisionBody(c *gin.Context, request any, errMsg string, required ...string) bool {
+//
+// The required fields are POINTERS into the request on purpose. They used to be
+// passed by value (`request.SpaceRef, ...`), which Go evaluates before the call,
+// that is before the body had been decoded into `request`: every check compared
+// an empty string and every complete body was refused with a 400.
+func bindSpaceDecisionBody(c *gin.Context, request any, errMsg string, required ...*string) bool {
 	if err := c.ShouldBindJSON(request); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": errMsg})
 		return false
 	}
 	for _, value := range required {
-		if strings.TrimSpace(value) == "" {
+		if value == nil || strings.TrimSpace(*value) == "" {
 			c.JSON(http.StatusBadRequest, gin.H{"error": errMsg})
 			return false
 		}

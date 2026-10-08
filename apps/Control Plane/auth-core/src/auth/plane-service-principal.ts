@@ -10,14 +10,65 @@ import {
 } from 'node:fs';
 import { isAbsolute, normalize } from 'node:path';
 
+/**
+ * A principal's retention posture for one audience, as the deployment-owned
+ * registry states it. Exactly one of:
+ *
+ *   `zdr`        every token is zero-retention. The default for an audience the
+ *                registry says nothing about.
+ *   `persistent` every token is persistent.
+ *   `tenant`     the token's `zdr` claim is the ORG's own ZDR setting, read from
+ *                org-core when the token is minted (never a caller's choice),
+ *                and the token lives at most 60 seconds. For background workers
+ *                that act on behalf of whichever org the work belongs to.
+ *
+ * This module only authorizes: it performs no I/O, so it cannot read an org.
+ * For `tenant` it therefore reports the safe value (`zdr: true`) and leaves the
+ * resolving to the token controllers, which must call
+ * `resolveTenantServiceRetentionPosture` (interactive-retention-policy.ts)
+ * before signing. A registry carrying `tenant` is read only by an Auth Core
+ * that has this code: an older image rejects the value and refuses every
+ * principal's token, so the image is deployed before any row is switched.
+ */
+export type PrincipalRetentionPolicy = 'zdr' | 'persistent' | 'tenant';
+
+/**
+ * How a principal's token organization was bound, for one mint:
+ *
+ *   `fixed`      the organization is one of the row's own `orgIds` (including a
+ *                pseudo-organization such as `global`). Nothing to look up.
+ *   `directory`  the row says `tenancy: 'directory'` (any organization org-core's
+ *                directory holds). This module performs no I/O, so it only
+ *                reports that the organization still has to be verified; the
+ *                token controllers do that, after the caller is authorized and
+ *                before anything is signed (`assertServiceOrganizationBinding`
+ *                in interactive-retention-policy.ts).
+ *   `any`        the legacy `allowAnyOrg: true` form: nothing is checked. The
+ *                production loader refuses it; the audit event records it so a
+ *                development stack's unchecked mints can be counted.
+ */
+export type PrincipalOrgBinding = 'fixed' | 'directory' | 'any';
+
 type ServicePrincipalConfig = {
   credential: string;
   audiences: readonly string[];
+  /**
+   * Organizations this principal may act for without a lookup. Always present
+   * (it may be empty); for a `tenancy: 'directory'` row it adds the
+   * pseudo-organizations no directory holds.
+   */
   orgIds: readonly string[];
+  /** Development and tests only: the production loader refuses `true`. */
   allowAnyOrg?: boolean;
+  /**
+   * Production-valid form for a workload that acts for whichever organization
+   * the work belongs to: any organization org-core's directory holds, verified
+   * by Auth Core at every mint. The only accepted value is `directory`.
+   */
+  tenancy?: 'directory';
   scopes: readonly string[];
   scopesByAudience?: Readonly<Record<string, readonly string[]>>;
-  retentionByAudience?: Readonly<Record<string, 'zdr' | 'persistent'>>;
+  retentionByAudience?: Readonly<Record<string, PrincipalRetentionPolicy>>;
   /**
    * Delegated-identity token exchange (auth-core §1, T-4). Keyed by the
    * TARGET audience being exchanged into (must be a member of `audiences`);
@@ -57,6 +108,16 @@ export type AuthorizedPlaneServicePrincipal = {
   orgId: string;
   scopes: readonly string[];
   reason: string;
+  /** The registry's posture for the requested audience (`zdr` when it names none). */
+  retention: PrincipalRetentionPolicy;
+  /** How the requested organization was bound; `directory` is verified by the caller of this module. */
+  orgBinding: PrincipalOrgBinding;
+  /**
+   * The `zdr` claim the registry alone supports. For `tenant` it is `true`, the
+   * safe value: it stands only if a caller signs without having resolved the
+   * org's posture, and can never be a non-zero-retention token by omission.
+   * A caller that sees `retention === 'tenant'` must resolve the org instead.
+   */
   zdr: boolean;
 };
 
@@ -179,8 +240,11 @@ export function loadPlaneServicePrincipalRegistry(
           (principal) => principal.allowAnyOrg === true,
         )
       ) {
+        // The unchecked "any organization" form is refused outright, also on a
+        // row that carries `tenancy: 'directory'` beside it: a production row
+        // names its organizations (`orgIds`) or the directory, never "anyone".
         throw new ServicePrincipalConfigurationError(
-          'Production service principals require fixed organization allowlists',
+          'Production service principals require fixed organization allowlists or directory tenancy, not allowAnyOrg',
         );
       }
     }
@@ -263,10 +327,43 @@ function validAudienceRetentionMap(
     entries.every(
       ([audience, posture]) =>
         audiences.has(audience) &&
-        (posture === 'zdr' || posture === 'persistent'),
+        (posture === 'zdr' || posture === 'persistent' || posture === 'tenant'),
     ) &&
     [...audiences].every((audience) => audience in config.retentionByAudience!)
   );
+}
+
+/**
+ * A row names an organization source: a fixed list, the directory, or (legacy,
+ * development) any organization. The tenancy value, when present, must be the
+ * one production-valid form; anything else is a typo that would otherwise be
+ * ignored and leave the row bound by whatever else it says.
+ */
+function validOrgSource(config: Partial<ServicePrincipalConfig>): boolean {
+  if (config.tenancy !== undefined && config.tenancy !== 'directory') {
+    return false;
+  }
+  return (
+    config.allowAnyOrg === true ||
+    config.tenancy === 'directory' ||
+    nonEmptyStrings(config.orgIds)
+  );
+}
+
+/**
+ * How `orgId` is bound for this principal, or undefined when the principal may
+ * not act for it. A fixed entry wins over the directory, and the directory over
+ * the unchecked legacy form, so a row that carries more than one is held to the
+ * strictest that applies to the organization at hand.
+ */
+function orgBindingFor(
+  principal: ServicePrincipalConfig,
+  orgId: string,
+): PrincipalOrgBinding | undefined {
+  if (principal.orgIds.includes(orgId)) return 'fixed';
+  if (principal.tenancy === 'directory') return 'directory';
+  if (principal.allowAnyOrg === true) return 'any';
+  return undefined;
 }
 
 function validTokenExchangeMap(config: Partial<ServicePrincipalConfig>): boolean {
@@ -330,7 +427,7 @@ function parseRegistry(raw: string): ServicePrincipalRegistry {
       typeof config.credential !== 'string' ||
       config.credential.length < 16 ||
       !nonEmptyStrings(config.audiences) ||
-      (config.allowAnyOrg !== true && !nonEmptyStrings(config.orgIds)) ||
+      !validOrgSource(config) ||
       (config.allowAnyOrg !== undefined &&
         typeof config.allowAnyOrg !== 'boolean') ||
       Object.prototype.hasOwnProperty.call(config, 'allowPersistentData') ||
@@ -376,8 +473,10 @@ export function authorizePlaneServicePrincipal(
   const allowedScopes = principal?.scopesByAudience
     ? principal.scopesByAudience[request.audience]
     : principal?.scopes;
-  const retentionPosture =
+  const retentionPosture: PrincipalRetentionPolicy =
     principal?.retentionByAudience?.[request.audience] ?? 'zdr';
+  const orgBinding =
+    principal && orgId ? orgBindingFor(principal, orgId) : undefined;
 
   if (
     !principal ||
@@ -385,7 +484,7 @@ export function authorizePlaneServicePrincipal(
     !secureEqual(principal.credential, request.credential) ||
     !principal.audiences.includes(request.audience) ||
     !orgId ||
-    (principal.allowAnyOrg !== true && !principal.orgIds.includes(orgId)) ||
+    !orgBinding ||
     requestedScopes.length === 0 ||
     !allowedScopes ||
     requestedScopes.some((scope) => !allowedScopes.includes(scope)) ||
@@ -403,7 +502,12 @@ export function authorizePlaneServicePrincipal(
     orgId,
     scopes: requestedScopes,
     reason,
-    zdr: retentionPosture === 'zdr',
+    retention: retentionPosture,
+    orgBinding,
+    // Only an explicit `persistent` is non-zero-retention here. `tenant` is
+    // read as zero-retention until a controller resolves the org; the old
+    // `retentionPosture === 'zdr'` would have read it as persistent.
+    zdr: retentionPosture !== 'persistent',
   };
 }
 
@@ -471,7 +575,11 @@ export function authorizePlaneServiceTokenExchange(
     !allowedSubjectAudiences ||
     !allowedSubjectAudiences.includes(request.subjectAudience) ||
     !orgId ||
-    (principal.allowAnyOrg !== true && !principal.orgIds.includes(orgId)) ||
+    // The organization of an exchange is proven by the verified subject token
+    // (the controller refuses a request whose orgId differs from it), which is
+    // stronger evidence than a directory lookup, so a `directory` row needs no
+    // lookup here. A fixed-list row still may not exchange outside its list.
+    !orgBindingFor(principal, orgId) ||
     requestedScopes.length === 0 ||
     !allowedScopes ||
     requestedScopes.some((scope) => !allowedScopes.includes(scope)) ||

@@ -23,15 +23,15 @@ func TestGDPRSubjectContract(t *testing.T) {
 }
 
 // TestDSARDisclosureVerbatim pins the Art. 15 CP-only scope notice word-for-word.
-// The export must always disclose it covers Control-Plane data ONLY and that
-// Model/Data-Plane purge happens via the cross-plane fan-out — it must never
+// The export must always disclose it covers Control-Plane data ONLY and that a
+// per-user erasure does not delete Model/Data-Plane data — it must never
 // imply "exported/erased everywhere". Changing this copy is a deliberate act that
 // must update this test in the same change.
 func TestDSARDisclosureVerbatim(t *testing.T) {
 	want := []string{
 		"Control Plane export: profile + org memberships + API key metadata.",
 		"Audit events for this subject are retained by audit-core (verevon.audit.v2.control.user-core.*).",
-		"Model Plane run history / conversations and Data Plane documents are purged/exported via the verevon.gdpr.erasure.requested fan-out (follow-up subscribers).",
+		"Model Plane conversations and memory and Data Plane documents are not part of this export, and a per-user erasure does not delete them: their owner can delete conversations and memories while signed in, and an organisation erasure is built to remove the organisation's copies (not verified end to end).",
 	}
 	if len(DSARControlPlaneDisclosure) != len(want) {
 		t.Fatalf("disclosure has %d notes, want %d", len(DSARControlPlaneDisclosure), len(want))

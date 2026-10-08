@@ -1,0 +1,153 @@
+{
+  "contract": "auth-core issuePlaneToken (data-plane) -> retrieval-engine admission",
+  "version": 1,
+  "audience": "data-plane",
+  "issuer": "https://control.contract.test/api/convex-auth",
+  "orgId": "org-contract-fixture",
+  "frozenNowSeconds": 1790812800,
+  "tokens": {
+    "serviceQuarryEdgeDataRead": {
+      "request": {
+        "route": "POST /api/data-plane/internal-token",
+        "serviceId": "quarry-edge",
+        "scopes": [
+          "data:read"
+        ],
+        "reason": "retrieve verified organization evidence"
+      },
+      "header": {
+        "alg": "RS256",
+        "typ": "JWT",
+        "kid": "convex-auth-rs256"
+      },
+      "claims": {
+        "iss": "https://control.contract.test/api/convex-auth",
+        "aud": "data-plane",
+        "sub": "service:quarry-edge",
+        "iat": 1790812800,
+        "nbf": 1790812795,
+        "exp": 1790813100,
+        "org_id": "org-contract-fixture",
+        "principal_type": "service",
+        "service_id": "service:quarry-edge",
+        "reason": "retrieve verified organization evidence",
+        "scopes": [
+          "data:read"
+        ],
+        "zdr": false
+      },
+      "claimKeys": [
+        "aud",
+        "exp",
+        "iat",
+        "iss",
+        "nbf",
+        "org_id",
+        "principal_type",
+        "reason",
+        "scopes",
+        "service_id",
+        "sub",
+        "zdr"
+      ]
+    },
+    "interactiveMember": {
+      "request": {
+        "route": "GET /api/data-plane/token",
+        "role": "member"
+      },
+      "header": {
+        "alg": "RS256",
+        "typ": "JWT",
+        "kid": "convex-auth-rs256"
+      },
+      "claims": {
+        "iss": "https://control.contract.test/api/convex-auth",
+        "aud": "data-plane",
+        "sub": "user-contract-member",
+        "iat": 1790812800,
+        "nbf": 1790812795,
+        "exp": 1790813100,
+        "org_id": "org-contract-fixture",
+        "user_id": "user-contract-member",
+        "principal_type": "user",
+        "email": "user-contract-member@contract.test",
+        "scopes": [
+          "data:read",
+          "documents:read",
+          "documents:write",
+          "wiki.read",
+          "wiki.write"
+        ],
+        "zdr": false
+      },
+      "claimKeys": [
+        "aud",
+        "email",
+        "exp",
+        "iat",
+        "iss",
+        "nbf",
+        "org_id",
+        "principal_type",
+        "scopes",
+        "sub",
+        "user_id",
+        "zdr"
+      ]
+    },
+    "interactiveAdmin": {
+      "request": {
+        "route": "GET /api/data-plane/token",
+        "role": "admin"
+      },
+      "header": {
+        "alg": "RS256",
+        "typ": "JWT",
+        "kid": "convex-auth-rs256"
+      },
+      "claims": {
+        "iss": "https://control.contract.test/api/convex-auth",
+        "aud": "data-plane",
+        "sub": "user-contract-admin",
+        "iat": 1790812800,
+        "nbf": 1790812795,
+        "exp": 1790813100,
+        "org_id": "org-contract-fixture",
+        "user_id": "user-contract-admin",
+        "principal_type": "user",
+        "email": "user-contract-admin@contract.test",
+        "scopes": [
+          "data:read",
+          "documents:read",
+          "documents:write",
+          "wiki.read",
+          "wiki.write",
+          "admin",
+          "data:admin",
+          "data:orchestrate",
+          "data:quality:admin",
+          "org:data:read_all",
+          "org:data:write_all",
+          "wiki.approve",
+          "wiki.maintenance.write"
+        ],
+        "zdr": false
+      },
+      "claimKeys": [
+        "aud",
+        "email",
+        "exp",
+        "iat",
+        "iss",
+        "nbf",
+        "org_id",
+        "principal_type",
+        "scopes",
+        "sub",
+        "user_id",
+        "zdr"
+      ]
+    }
+  }
+}

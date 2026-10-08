@@ -138,11 +138,32 @@ func TestValidateRequiredOrgServiceCredentialRegistry(t *testing.T) {
 	)); err == nil {
 		t.Fatal("expected missing auth-core projection delete scope to fail startup validation")
 	}
+	// Without the retention read scope Auth Core's resolver can never learn an
+	// org's ZDR posture, and a bad grant would otherwise only show up as
+	// "every org is non-ZDR". Startup refuses instead.
 	if err := ValidateRequiredServiceCredentialRegistry(orgRequiredServiceTestRegistry(
 		[]string{"org:read:self", "org:provision:self", "org:settings:write:self", "org:onboarding:write:self"},
 		[]string{"org:projection:write:any", "org:projection:delete:any"},
+	)); err == nil {
+		t.Fatal("expected missing auth-core retention read scope to fail startup validation")
+	}
+	if err := ValidateRequiredServiceCredentialRegistry(orgRequiredServiceTestRegistry(
+		[]string{"org:read:self", "org:provision:self", "org:settings:write:self", "org:onboarding:write:self"},
+		[]string{"org:projection:write:any", "org:projection:delete:any", "org:retention:read:any"},
 	)); err != nil {
 		t.Fatalf("valid required registry rejected: %v", err)
+	}
+}
+
+func TestOrgRetentionReadScopeIsMachineOnly(t *testing.T) {
+	// The :any suffix keeps it off the gateway principal (which holds only
+	// delegated :self scopes) and makes it need no acting user.
+	if _, err := parseServiceCredentials(orgServiceTestRegistry("org:retention:read:any")); err == nil {
+		t.Fatal("expected org:retention:read:any to be refused for the gateway principal")
+	}
+	credentials, err := parseServiceCredentials(`[{"principal":"auth-core","audience":"org-core","token":"fedcba9876543210fedcba9876543210","scopes":["org:retention:read:any"]}]`)
+	if err != nil || len(credentials) != 1 {
+		t.Fatalf("machine principal with org:retention:read:any rejected: credentials=%d err=%v", len(credentials), err)
 	}
 }
 
@@ -194,6 +215,16 @@ func TestOrgServiceScopeForRequest(t *testing.T) {
 		{method: http.MethodPost, path: "/internal/orgs/org-1/members/reconcile", want: []string{"org:projection:write:any"}},
 		{method: http.MethodPost, path: "/internal/orgs/org-1/reconcile-delete", want: []string{"org:projection:delete:any"}},
 		{method: http.MethodPost, path: "/internal/orgs/org-1/members/user-1/succession", want: []string{"org:membership:succession:any"}},
+		// The retention posture read is one narrow scope, not org:read:any: the
+		// holder learns two booleans about one org and nothing else, and the
+		// route accepts no other verb and no deeper path.
+		{method: http.MethodGet, path: "/internal/orgs/org-1/retention-posture", want: []string{"org:retention:read:any"}},
+		{method: http.MethodPost, path: "/internal/orgs/org-1/retention-posture", want: nil},
+		{method: http.MethodPut, path: "/internal/orgs/org-1/retention-posture", want: nil},
+		{method: http.MethodDelete, path: "/internal/orgs/org-1/retention-posture", want: nil},
+		{method: http.MethodGet, path: "/internal/orgs/org-1/retention-posture/extra", want: nil},
+		{method: http.MethodGet, path: "/api/v1/organizations/org-1/retention-posture", want: nil},
+		{method: http.MethodGet, path: "/orgs/org-1/retention-posture", want: nil},
 		{method: http.MethodGet, path: "/orgs//org-1", want: nil},
 		{method: http.MethodPost, path: "/orgs/org-1/members/invite", want: nil},
 	}

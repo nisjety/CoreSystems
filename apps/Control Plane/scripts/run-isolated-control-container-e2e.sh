@@ -185,7 +185,7 @@ org_database_url="postgres://control_lifecycle:${postgres_password}@${postgres_c
 billing_database_url="postgres://control_lifecycle:${postgres_password}@${postgres_container}:5432/billing_service?sslmode=disable"
 
 org_credentials="$(printf '%s' \
-  '[{"principal":"verevon-gateway","audience":"org-core","token":"'"$org_gateway_token"'","scopes":["org:read:self","org:provision:self","org:settings:write:self","org:onboarding:write:self"]},{"principal":"auth-core","audience":"org-core","token":"'"$org_auth_token"'","scopes":["org:projection:write:any","org:projection:delete:any"]}]')"
+  '[{"principal":"verevon-gateway","audience":"org-core","token":"'"$org_gateway_token"'","scopes":["org:read:self","org:provision:self","org:settings:write:self","org:onboarding:write:self"]},{"principal":"auth-core","audience":"org-core","token":"'"$org_auth_token"'","scopes":["org:projection:write:any","org:projection:delete:any","org:retention:read:any"]}]')"
 billing_credentials="$(printf '%s' \
   '[{"principal":"verevon-gateway","audience":"billing-core","token":"'"$billing_gateway_token"'","scopes":["billing:account:read:self","billing:entitlement:read:self","billing:quota:read:self","billing:checkout:create:self","billing:checkout:confirm:self"]},{"principal":"auth-core","audience":"billing-core","token":"'"$billing_auth_token"'","scopes":["billing:organization:deactivate:any"]},{"principal":"lifecycle-writer","audience":"billing-core","token":"'"$billing_writer_token"'","scopes":["billing:account:write:any"]}]')"
 printf '%s' \

@@ -46,10 +46,14 @@ export function planeScopesForRole(
       ? ['capability:read', 'capability:write']
       : ['capability:read'];
   }
+  if (audience === 'cost-core') {
+    return normalizedRole === 'owner' || normalizedRole === 'admin'
+      ? ['cost:org:read']
+      : [];
+  }
   if (
     audience === 'session-core' ||
     audience === 'execution-core' ||
-    audience === 'cost-core' ||
     audience === 'letta-bridge' ||
     audience === 'browser-broker' ||
     audience === 'sandbox-manager' ||
