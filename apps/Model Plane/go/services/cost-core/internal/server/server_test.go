@@ -9,9 +9,20 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/triodelab/model-plane/services/cost-core/internal/azurecost"
 	"github.com/triodelab/model-plane/services/cost-core/internal/ledger"
 )
+
+type azureCostReaderStub struct{ summary azurecost.Summary }
+
+func (r azureCostReaderStub) AzureActualSummary(_ context.Context, orgID string, _, _ *time.Time) (azurecost.Summary, error) {
+	if orgID != "org-a" {
+		return azurecost.Summary{}, errors.New("unexpected organization scope")
+	}
+	return r.summary, nil
+}
 
 type aggregateFailureLedger struct {
 	*ledger.Store
@@ -60,6 +71,40 @@ func TestRecordThenUsage(t *testing.T) {
 	}
 	if usage.EntryCount != 1 {
 		t.Fatalf("entry count = %d, want 1 (idempotent)", usage.EntryCount)
+	}
+}
+
+func TestAzureActualCostEndpointIsOrgOnly(t *testing.T) {
+	srv, mux := newTestServer()
+	latest := time.Date(2026, 9, 23, 0, 0, 0, 0, time.UTC)
+	srv.SetAzureCostReader(azureCostReaderStub{summary: azurecost.Summary{
+		Available: true, Rows: 2, ByCurrency: []azurecost.CurrencyTotal{{Currency: "NOK", Amount: 12.5}}, LatestUsageDate: &latest,
+	}})
+	response := do(mux, http.MethodGet, "/api/v1/cost/azure/actual?org_id=org-a", "")
+	if response.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	var summary azurecost.Summary
+	mustJSON(t, response.Body.Bytes(), &summary)
+	if !summary.Available || summary.Rows != 2 || len(summary.ByCurrency) != 1 || summary.ByCurrency[0].Amount != 12.5 {
+		t.Fatalf("unexpected Azure summary: %#v", summary)
+	}
+	response = do(mux, http.MethodGet, "/api/v1/cost/azure/actual?org_id=org-a&user_id=user-a", "")
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("user filter status=%d", response.Code)
+	}
+}
+
+func TestAzureActualCostEndpointReportsUnconfiguredSource(t *testing.T) {
+	_, mux := newTestServer()
+	response := do(mux, http.MethodGet, "/api/v1/cost/azure/actual?org_id=org-a", "")
+	if response.Code != http.StatusOK {
+		t.Fatalf("status=%d", response.Code)
+	}
+	var summary azurecost.Summary
+	mustJSON(t, response.Body.Bytes(), &summary)
+	if summary.Available {
+		t.Fatal("unconfigured Azure source must not appear available")
 	}
 }
 

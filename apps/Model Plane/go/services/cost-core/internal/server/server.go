@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/triodelab/model-plane/pkg/authctx"
+	"github.com/triodelab/model-plane/services/cost-core/internal/azurecost"
 	"github.com/triodelab/model-plane/services/cost-core/internal/ledger"
 	"github.com/triodelab/model-plane/services/cost-core/internal/pricing"
 	"github.com/triodelab/model-plane/services/cost-core/internal/telemetry"
@@ -27,6 +28,7 @@ import (
 // event arrives without one).
 type Server struct {
 	ledger          ledger.Ledger
+	azureCosts      azurecost.Reader
 	pricing         *pricing.Resolver
 	requireIdentity bool
 }
@@ -45,6 +47,9 @@ func (s *Server) SetPricing(p *pricing.Resolver) {
 	}
 }
 
+// SetAzureCostReader attaches the optional Azure invoice-source read model.
+func (s *Server) SetAzureCostReader(reader azurecost.Reader) { s.azureCosts = reader }
+
 // recordRequest is the JSON body accepted by the record endpoint.
 type recordRequest struct {
 	OrgID                    string  `json:"org_id"`
@@ -52,6 +57,7 @@ type recordRequest struct {
 	RunID                    string  `json:"run_id"`
 	RequestID                string  `json:"request_id"`
 	Model                    string  `json:"model"`
+	ProviderUsed             string  `json:"provider_used"`
 	InputTokens              int64   `json:"input_tokens"`
 	OutputTokens             int64   `json:"output_tokens"`
 	CostUSD                  float64 `json:"cost_usd"`
@@ -65,15 +71,26 @@ type recordRequest struct {
 
 // usageResponse is the JSON shape returned by the usage/run/aggregate endpoints.
 type usageResponse struct {
-	OrgID                         string  `json:"org_id"`
-	UserID                        string  `json:"user_id,omitempty"`
-	RunID                         string  `json:"run_id,omitempty"`
-	TotalInputTokens              int64   `json:"total_input_tokens"`
-	TotalOutputTokens             int64   `json:"total_output_tokens"`
-	TotalCostUSD                  float64 `json:"total_cost_usd"`
-	EntryCount                    int64   `json:"entry_count"`
-	TotalCacheReadInputTokens     int64   `json:"total_cache_read_input_tokens"`
-	TotalCacheCreationInputTokens int64   `json:"total_cache_creation_input_tokens"`
+	ReportingStartedAt            *time.Time `json:"reporting_started_at,omitempty"`
+	OrgID                         string     `json:"org_id"`
+	UserID                        string     `json:"user_id,omitempty"`
+	RunID                         string     `json:"run_id,omitempty"`
+	TotalInputTokens              int64      `json:"total_input_tokens"`
+	TotalOutputTokens             int64      `json:"total_output_tokens"`
+	TotalCostUSD                  float64    `json:"total_cost_usd"`
+	EntryCount                    int64      `json:"entry_count"`
+	TotalCacheReadInputTokens     int64      `json:"total_cache_read_input_tokens"`
+	TotalCacheCreationInputTokens int64      `json:"total_cache_creation_input_tokens"`
+	MeteredEntryCount             int64      `json:"metered_entry_count"`
+	SubscriptionEntryCount        int64      `json:"subscription_entry_count"`
+	UnknownBasisEntryCount        int64      `json:"unknown_basis_entry_count"`
+	MeteredCostUSD                float64    `json:"metered_cost_usd"`
+	SubscriptionInputTokens       int64      `json:"subscription_input_tokens"`
+	SubscriptionOutputTokens      int64      `json:"subscription_output_tokens"`
+	UnknownBasisInputTokens       int64      `json:"unknown_basis_input_tokens"`
+	UnknownBasisOutputTokens      int64      `json:"unknown_basis_output_tokens"`
+	ZeroTokenEntryCount           int64      `json:"zero_token_entry_count"`
+	LatestEntryAt                 *time.Time `json:"latest_entry_at,omitempty"`
 }
 
 // entryResponse is the JSON shape of a single ledger entry in a list.
@@ -84,6 +101,7 @@ type entryResponse struct {
 	RunID                    string    `json:"run_id,omitempty"`
 	RequestID                string    `json:"request_id,omitempty"`
 	Model                    string    `json:"model,omitempty"`
+	ProviderUsed             string    `json:"provider_used,omitempty"`
 	InputTokens              int64     `json:"input_tokens"`
 	OutputTokens             int64     `json:"output_tokens"`
 	CostUSD                  float64   `json:"cost_usd"`
@@ -123,9 +141,57 @@ func (s *Server) registerAPIRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/v1/usage", s.handleGetUsage)
 	mux.HandleFunc("GET /api/v1/cost/run", s.handleGetRunUsage)
 	mux.HandleFunc("GET /api/v1/cost/aggregate", s.handleAggregate)
+	mux.HandleFunc("GET /api/v1/cost/users", s.handleUsers)
+	mux.HandleFunc("GET /api/v1/cost/analytics", s.handleAnalytics)
 	mux.HandleFunc("GET /api/v1/cost/entries", s.handleListEntries)
+	mux.HandleFunc("GET /api/v1/cost/azure/actual", s.handleAzureActualCosts)
 	mux.HandleFunc("GET /api/v1/pricing", s.handleListPricing)
 	mux.HandleFunc("POST /api/v1/budget/check", s.handleBudgetCheck)
+}
+
+// handleAzureActualCosts returns Azure invoice-source totals for the verified
+// organization. Provider billing rows do not carry a Verevon user identity.
+func (s *Server) handleAzureActualCosts(w http.ResponseWriter, r *http.Request) {
+	filter, err := filterFromQuery(r)
+	if err != nil {
+		httpError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if filter.OrgID == "" {
+		httpError(w, http.StatusBadRequest, "org_id is required")
+		return
+	}
+	if filter.UserID != "" || filter.RunID != "" || filter.Model != "" {
+		httpError(w, http.StatusBadRequest, "Azure actual costs are organization-level and cannot be filtered by user, run, or model")
+		return
+	}
+	principal, authenticated := s.principal(w, r)
+	if s.requireIdentity && !authenticated {
+		return
+	}
+	if authenticated {
+		if !pinOrganization(w, filter.OrgID, principal.OrganizationID) {
+			return
+		}
+		filter.OrgID = principal.OrganizationID
+	}
+	if s.azureCosts == nil {
+		writeJSON(w, azurecost.Summary{Available: false, ByCurrency: []azurecost.CurrencyTotal{}})
+		return
+	}
+	var from, to *time.Time
+	if !filter.Since.IsZero() {
+		from = &filter.Since
+	}
+	if !filter.Until.IsZero() {
+		to = &filter.Until
+	}
+	summary, err := s.azureCosts.AzureActualSummary(r.Context(), filter.OrgID, from, to)
+	if err != nil {
+		httpError(w, http.StatusInternalServerError, "Azure actual-cost summary is unavailable")
+		return
+	}
+	writeJSON(w, summary)
 }
 
 // Handler exposes public liveness and the global, non-tenant pricing catalogue.
@@ -156,6 +222,9 @@ func (s *Server) Handler(protect func(http.Handler) http.Handler) http.Handler {
 // reads and budget checks require cost:read.
 func CostAuthorizer(principal authctx.Principal, r *http.Request) error {
 	if principal.PrincipalType == "user" {
+		if r.URL.Path == "/api/v1/cost/azure/actual" && !principal.HasScope("cost:org:read") {
+			return errors.New("cost:org:read scope is required")
+		}
 		if r.Method == http.MethodGet || (r.Method == http.MethodPost && r.URL.Path == "/api/v1/budget/check") {
 			return nil
 		}
@@ -239,6 +308,7 @@ func (s *Server) handleRecord(w http.ResponseWriter, r *http.Request) {
 		RunID:                    req.RunID,
 		RequestID:                req.RequestID,
 		Model:                    req.Model,
+		ProviderUsed:             req.ProviderUsed,
 		InputTokens:              req.InputTokens,
 		OutputTokens:             req.OutputTokens,
 		CostUSD:                  req.CostUSD,
@@ -342,6 +412,11 @@ func (s *Server) handleAggregate(w http.ResponseWriter, r *http.Request) {
 		attribute.String("method", "GET"),
 		attribute.String("path", "/api/v1/cost/aggregate"),
 	))
+	scope := strings.TrimSpace(r.URL.Query().Get("scope"))
+	if scope != "" && scope != "me" && scope != "organization" {
+		httpError(w, http.StatusBadRequest, "scope must be me or organization")
+		return
+	}
 
 	f, err := filterFromQuery(r)
 	if err != nil {
@@ -357,24 +432,44 @@ func (s *Server) handleAggregate(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		f.OrgID = principal.OrganizationID
-		// Cross-user guard: a user token may only read its OWN cost rows within
-		// the org (mirrors the record path). Service principals — e.g. the
-		// budget checker — may still aggregate org-wide.
+		// Personal reads stay actor-pinned, including for admins. An explicit
+		// organization read requires Auth Core's signed, role-derived scope.
 		if principal.PrincipalType == "user" {
-			if f.UserID != "" && f.UserID != principal.ActorID {
-				httpError(w, http.StatusForbidden, "user scope does not match verified token")
-				return
+			if scope == "organization" {
+				if !principal.HasScope("cost:org:read") {
+					httpError(w, http.StatusForbidden, "organization cost read is not authorized")
+					return
+				}
+				if f.UserID != "" {
+					httpError(w, http.StatusBadRequest, "organization aggregate cannot select a user")
+					return
+				}
+			} else {
+				if f.UserID != "" && f.UserID != principal.ActorID {
+					httpError(w, http.StatusForbidden, "user scope does not match verified token")
+					return
+				}
+				f.UserID = principal.ActorID
 			}
-			f.UserID = principal.ActorID
 		}
 	}
 
+	var reportingStart *time.Time
+	if r.URL.Query().Get("reporting") == "current" {
+		f, reportingStart, err = s.reportingFilter(r.Context(), f)
+		if err != nil {
+			httpError(w, http.StatusServiceUnavailable, "usage reporting is temporarily unavailable")
+			return
+		}
+	}
 	usage, err := s.ledger.Aggregate(r.Context(), f)
 	if err != nil {
 		httpError(w, mapHTTPStatus(err), err.Error())
 		return
 	}
-	writeJSON(w, usageFromLedger(usage))
+	response := usageFromLedger(usage)
+	response.ReportingStartedAt = reportingStart
+	writeJSON(w, response)
 }
 
 // handleListEntries returns the most recent entries matching the filter.
@@ -427,6 +522,7 @@ func (s *Server) handleListEntries(w http.ResponseWriter, r *http.Request) {
 			RunID:                    e.RunID,
 			RequestID:                e.RequestID,
 			Model:                    e.Model,
+			ProviderUsed:             e.ProviderUsed,
 			InputTokens:              e.InputTokens,
 			OutputTokens:             e.OutputTokens,
 			CostUSD:                  e.CostUSD,
@@ -639,6 +735,11 @@ func decodeRequestJSON(w http.ResponseWriter, r *http.Request, target any) error
 }
 
 func usageFromLedger(u *ledger.Usage) usageResponse {
+	var latestEntryAt *time.Time
+	if u.EntryCount > 0 && !u.LatestEntryAt.IsZero() {
+		latest := u.LatestEntryAt
+		latestEntryAt = &latest
+	}
 	return usageResponse{
 		OrgID:                         u.OrgID,
 		UserID:                        u.UserID,
@@ -649,6 +750,16 @@ func usageFromLedger(u *ledger.Usage) usageResponse {
 		EntryCount:                    u.EntryCount,
 		TotalCacheReadInputTokens:     u.TotalCacheReadInputTokens,
 		TotalCacheCreationInputTokens: u.TotalCacheCreationInputTokens,
+		MeteredEntryCount:             u.MeteredEntryCount,
+		SubscriptionEntryCount:        u.SubscriptionEntryCount,
+		UnknownBasisEntryCount:        u.UnknownBasisEntryCount,
+		MeteredCostUSD:                u.MeteredCostUSD,
+		SubscriptionInputTokens:       u.SubscriptionInputTokens,
+		SubscriptionOutputTokens:      u.SubscriptionOutputTokens,
+		UnknownBasisInputTokens:       u.UnknownBasisInputTokens,
+		UnknownBasisOutputTokens:      u.UnknownBasisOutputTokens,
+		ZeroTokenEntryCount:           u.ZeroTokenEntryCount,
+		LatestEntryAt:                 latestEntryAt,
 	}
 }
 

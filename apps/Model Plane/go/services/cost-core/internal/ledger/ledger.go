@@ -84,6 +84,7 @@ type Entry struct {
 	RunID          string
 	RequestID      string
 	Model          string
+	ProviderUsed   string
 	InputTokens    int64
 	OutputTokens   int64
 	CostUSD        float64
@@ -123,6 +124,7 @@ func ValidateEntry(e Entry) error {
 		{name: "run_id", value: e.RunID, limit: MaxDimensionBytes},
 		{name: "request_id", value: e.RequestID, limit: MaxDimensionBytes},
 		{name: "model", value: e.Model, limit: MaxDimensionBytes},
+		{name: "provider_used", value: e.ProviderUsed, limit: MaxDimensionBytes},
 		{name: "idempotency_key", value: e.IdempotencyKey, limit: MaxIdempotencyKeyBytes},
 	} {
 		if err := validateString(field.name, field.value, field.required, field.limit); err != nil {
@@ -210,6 +212,18 @@ type Usage struct {
 	// every entry.
 	MeteredInputTokens  int64
 	MeteredOutputTokens int64
+	// Cost basis is kept separate from token-budget totals so reports do not
+	// mistake legacy or unknown entries for metered API usage.
+	MeteredEntryCount        int64
+	SubscriptionEntryCount   int64
+	UnknownBasisEntryCount   int64
+	MeteredCostUSD           float64
+	SubscriptionInputTokens  int64
+	SubscriptionOutputTokens int64
+	UnknownBasisInputTokens  int64
+	UnknownBasisOutputTokens int64
+	ZeroTokenEntryCount      int64
+	LatestEntryAt            time.Time
 }
 
 // meteredTokens is the part of e's token counts that a token budget caps.
@@ -279,6 +293,7 @@ type key struct {
 
 // Store is a goroutine-safe in-memory [Ledger] used as a fallback.
 type Store struct {
+	erased  map[string]struct{}
 	mu      sync.Mutex
 	usage   map[key]*Usage
 	entries []Entry
@@ -293,8 +308,9 @@ type idempotencyKey struct {
 // NewStore constructs an empty in-memory Store.
 func NewStore() *Store {
 	return &Store{
-		usage: make(map[key]*Usage),
-		seen:  make(map[idempotencyKey]struct{}),
+		erased: make(map[string]struct{}),
+		usage:  make(map[key]*Usage),
+		seen:   make(map[idempotencyKey]struct{}),
 	}
 }
 
@@ -312,6 +328,9 @@ func (s *Store) RecordEntry(_ context.Context, e Entry) error {
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if _, erased := s.erased[ErasedOrgHash(e.OrgID)]; erased {
+		return ErrOrgErased
+	}
 
 	if e.IdempotencyKey != "" {
 		idempotency := idempotencyKey{OrgID: e.OrgID, Key: e.IdempotencyKey}
@@ -343,6 +362,19 @@ func (s *Store) RecordEntry(_ context.Context, e Entry) error {
 		TotalCacheCreationInputTokens: u.TotalCacheCreationInputTokens + e.CacheCreationInputTokens,
 		MeteredInputTokens:            u.MeteredInputTokens + meteredInput,
 		MeteredOutputTokens:           u.MeteredOutputTokens + meteredOutput,
+		MeteredEntryCount:             u.MeteredEntryCount + basisCount(e.CostBasis, CostBasisMetered),
+		SubscriptionEntryCount:        u.SubscriptionEntryCount + basisCount(e.CostBasis, CostBasisSubscription),
+		UnknownBasisEntryCount:        u.UnknownBasisEntryCount + basisCount(e.CostBasis, CostBasisUnknown),
+		MeteredCostUSD:                u.MeteredCostUSD + basisCost(e, CostBasisMetered),
+		SubscriptionInputTokens:       u.SubscriptionInputTokens + basisTokens(e, CostBasisSubscription, true),
+		SubscriptionOutputTokens:      u.SubscriptionOutputTokens + basisTokens(e, CostBasisSubscription, false),
+		UnknownBasisInputTokens:       u.UnknownBasisInputTokens + basisTokens(e, CostBasisUnknown, true),
+		UnknownBasisOutputTokens:      u.UnknownBasisOutputTokens + basisTokens(e, CostBasisUnknown, false),
+		ZeroTokenEntryCount:           u.ZeroTokenEntryCount + zeroTokenCount(e),
+		LatestEntryAt:                 e.CreatedAt,
+	}
+	if u.LatestEntryAt.After(e.CreatedAt) {
+		next.LatestEntryAt = u.LatestEntryAt
 	}
 	s.usage[k] = next
 	s.entries = append(s.entries, e)
@@ -391,6 +423,18 @@ func (s *Store) GetRunUsage(_ context.Context, runID string) (*Usage, error) {
 		out.EntryCount++
 		out.TotalCacheReadInputTokens += e.CacheReadInputTokens
 		out.TotalCacheCreationInputTokens += e.CacheCreationInputTokens
+		out.MeteredEntryCount += basisCount(e.CostBasis, CostBasisMetered)
+		out.SubscriptionEntryCount += basisCount(e.CostBasis, CostBasisSubscription)
+		out.UnknownBasisEntryCount += basisCount(e.CostBasis, CostBasisUnknown)
+		out.MeteredCostUSD += basisCost(e, CostBasisMetered)
+		out.SubscriptionInputTokens += basisTokens(e, CostBasisSubscription, true)
+		out.SubscriptionOutputTokens += basisTokens(e, CostBasisSubscription, false)
+		out.UnknownBasisInputTokens += basisTokens(e, CostBasisUnknown, true)
+		out.UnknownBasisOutputTokens += basisTokens(e, CostBasisUnknown, false)
+		out.ZeroTokenEntryCount += zeroTokenCount(e)
+		if out.LatestEntryAt.IsZero() || e.CreatedAt.After(out.LatestEntryAt) {
+			out.LatestEntryAt = e.CreatedAt
+		}
 	}
 	if !found {
 		return nil, ErrUsageNotFound
@@ -418,8 +462,51 @@ func (s *Store) Aggregate(_ context.Context, f AggregateFilter) (*Usage, error) 
 		meteredInput, meteredOutput := meteredTokens(e)
 		out.MeteredInputTokens += meteredInput
 		out.MeteredOutputTokens += meteredOutput
+		out.MeteredEntryCount += basisCount(e.CostBasis, CostBasisMetered)
+		out.SubscriptionEntryCount += basisCount(e.CostBasis, CostBasisSubscription)
+		out.UnknownBasisEntryCount += basisCount(e.CostBasis, CostBasisUnknown)
+		out.MeteredCostUSD += basisCost(e, CostBasisMetered)
+		out.SubscriptionInputTokens += basisTokens(e, CostBasisSubscription, true)
+		out.SubscriptionOutputTokens += basisTokens(e, CostBasisSubscription, false)
+		out.UnknownBasisInputTokens += basisTokens(e, CostBasisUnknown, true)
+		out.UnknownBasisOutputTokens += basisTokens(e, CostBasisUnknown, false)
+		out.ZeroTokenEntryCount += zeroTokenCount(e)
+		if out.LatestEntryAt.IsZero() || e.CreatedAt.After(out.LatestEntryAt) {
+			out.LatestEntryAt = e.CreatedAt
+		}
 	}
 	return out, nil
+}
+
+func basisCount(raw, basis string) int64 {
+	if raw == basis {
+		return 1
+	}
+	return 0
+}
+
+func basisCost(entry Entry, basis string) float64 {
+	if entry.CostBasis == basis {
+		return entry.CostUSD
+	}
+	return 0
+}
+
+func basisTokens(entry Entry, basis string, input bool) int64 {
+	if entry.CostBasis != basis {
+		return 0
+	}
+	if input {
+		return entry.InputTokens
+	}
+	return entry.OutputTokens
+}
+
+func zeroTokenCount(entry Entry) int64 {
+	if entry.InputTokens == 0 && entry.OutputTokens == 0 {
+		return 1
+	}
+	return 0
 }
 
 // ListEntries returns the most recent matching entries, newest first.
@@ -476,8 +563,15 @@ func (s *Store) CheckBudget(_ context.Context, orgID, userID string, maxCostUSD 
 // PurgeOrg deletes every in-memory usage rollup, raw entry, and idempotency
 // record for orgID. Scoped strictly by orgID so other orgs are never touched.
 func (s *Store) PurgeOrg(_ context.Context, orgID string) error {
+	if err := ValidateScope(orgID, ""); err != nil {
+		return err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.erased == nil {
+		s.erased = make(map[string]struct{})
+	}
+	s.erased[ErasedOrgHash(orgID)] = struct{}{}
 
 	for k := range s.usage {
 		if k.OrgID == orgID {

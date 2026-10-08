@@ -201,6 +201,16 @@ func TestPostgresLedger_PurgeOrgIsolatesOtherOrg(t *testing.T) {
 	if usageB.TotalInputTokens != 200 || usageB.EntryCount != 1 {
 		t.Fatalf("orgB usage corrupted by orgA purge: %+v", usageB)
 	}
+	// Durable delivery can replay a usage event after erasure. Neither an old
+	// idempotency key nor a new one may recreate this organization's ledger.
+	for _, key := range []string{"purge-a-1", "purge-a-replay-new"} {
+		if err := store.RecordEntry(ctx, ledger.Entry{OrgID: orgA, UserID: "u1", InputTokens: 100, IdempotencyKey: key}); !errors.Is(err, ledger.ErrOrgErased) {
+			t.Fatalf("erased org replay %q: %v, want ErrOrgErased", key, err)
+		}
+	}
+	if err := store.RecordEntry(ctx, ledger.Entry{OrgID: orgB, UserID: "u2", InputTokens: 10, IdempotencyKey: "purge-b-after"}); err != nil {
+		t.Fatalf("other org must still accept usage after erasure: %v", err)
+	}
 
 	// Idempotent: a redelivered purge event must not error and must not touch orgB.
 	if err := store.PurgeOrg(ctx, orgA); err != nil {
@@ -213,6 +223,52 @@ func TestPostgresLedger_PurgeOrgIsolatesOtherOrg(t *testing.T) {
 
 // applyMigration runs the up migration so the test is self-contained on a fresh
 // database.
+func TestReportingPeriodIsScopedAndDoesNotEraseLedger(t *testing.T) {
+	dsn := os.Getenv("COST_CORE_TEST_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("COST_CORE_TEST_DATABASE_URL not set")
+	}
+	ctx := context.Background()
+	pool, err := Connect(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	applyMigration(ctx, t, pool)
+	store, _ := New(pool)
+	org := "reporting-test-" + time.Now().Format("150405.000000")
+	defer pool.Exec(ctx, `DELETE FROM usage_reporting_periods WHERE org_id=$1`, org)
+	defer pool.Exec(ctx, `DELETE FROM cost_entries WHERE org_id=$1`, org)
+	if err := store.RecordEntry(ctx, ledger.Entry{OrgID: org, UserID: "actor", InputTokens: 10, CostBasis: "subscription"}); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 2; i++ {
+		if _, err := pool.Exec(ctx, `INSERT INTO usage_reporting_periods(org_id,requested_by,reason) VALUES($1,'test-operator','test')`, org); err != nil {
+			t.Fatal(err)
+		}
+	}
+	start, err := store.ReportingStart(ctx, org)
+	if err != nil || start == nil {
+		t.Fatalf("missing reporting period: %v", err)
+	}
+	other, err := store.ReportingStart(ctx, org+"-other")
+	if err != nil || other != nil {
+		t.Fatal("reporting period leaked to another organization")
+	}
+	before, _ := store.Aggregate(ctx, ledger.AggregateFilter{OrgID: org})
+	after, _ := store.Aggregate(ctx, ledger.AggregateFilter{OrgID: org, Since: *start})
+	if before.EntryCount != 1 || after.EntryCount != 0 {
+		t.Fatal("reset either lost history or retained earlier usage in the new period")
+	}
+	if err := store.PurgeOrg(ctx, org); err != nil {
+		t.Fatal(err)
+	}
+	erased, err := store.ReportingStart(ctx, org)
+	if err != nil || erased != nil {
+		t.Fatal("erasure retained organization reporting metadata")
+	}
+}
+
 func applyMigration(ctx context.Context, t *testing.T, pool *pgxpool.Pool) {
 	t.Helper()
 	paths, err := filepath.Glob(filepath.Join("..", "..", "migrations", "*.up.sql"))
@@ -298,6 +354,38 @@ func TestPostgresLedger_CostBasisRoundTrip(t *testing.T) {
 	}
 	if nullRows != 1 {
 		t.Fatalf("rows with a NULL cost_basis = %d, want 1 (the unreported one)", nullRows)
+	}
+	users, err := store.AggregateUsers(ctx, ledger.AggregateFilter{OrgID: org})
+	if err != nil || len(users) != 1 || users[0].UserID != "u1" || users[0].EntryCount != 3 ||
+		users[0].MeteredEntries != 1 || users[0].SubscriptionEntries != 1 || users[0].UnknownBasisEntries != 1 ||
+		users[0].InputTokens != 5400 || users[0].OutputTokens != 360 {
+		t.Fatalf("user report must reconcile all billing bases and recorded tokens: users=%+v err=%v", users, err)
+	}
+
+	// A token budget caps metered tokens only: the subscription entry stays
+	buckets, err := store.UsageAnalytics(ctx, ledger.AggregateFilter{OrgID: org, UserID: "u1"})
+	if err != nil || len(buckets) != 3 {
+		t.Fatalf("analytics: %+v %v", buckets, err)
+	}
+	for _, b := range buckets {
+		if b.Requests != 1 || b.InputTokens != 1800 || b.OutputTokens != 120 {
+			t.Fatalf("bucket did not reconcile: %+v", b)
+		}
+		if b.Basis != "metered" && b.MeteredCostUSD != 0 {
+			t.Fatal("non-metered usage became API cost")
+		}
+	}
+	other, err := store.UsageAnalytics(ctx, ledger.AggregateFilter{OrgID: org + "-other"})
+	if err != nil || len(other) != 0 {
+		t.Fatal("analytics leaked across tenants")
+	}
+	other, err = store.UsageAnalytics(ctx, ledger.AggregateFilter{OrgID: org, UserID: "u2"})
+	if err != nil || len(other) != 0 {
+		t.Fatal("analytics leaked across users")
+	}
+	other, err = store.UsageAnalytics(ctx, ledger.AggregateFilter{OrgID: org, Since: time.Now().Add(time.Hour)})
+	if err != nil || len(other) != 0 {
+		t.Fatal("analytics ignored reporting start")
 	}
 
 	// A token budget caps metered tokens only: the subscription entry stays

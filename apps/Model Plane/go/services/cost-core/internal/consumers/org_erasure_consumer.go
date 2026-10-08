@@ -101,9 +101,9 @@ func (c *OrgErasureConsumer) handle(msg *nats.Msg) {
 // definitive no-op: this consumer NEVER triggers an org-wide purge for a
 // per-user erasure request. It is the testable core (no NATS required).
 //
-// Idempotency: PurgeOrg is a plain `DELETE ... WHERE org_id = $1` with no
-// compensating insert, so a redelivered event (NATS is at-least-once) simply
-// deletes zero rows the second time — safe to process twice for the same org.
+// Idempotency: PurgeOrg upserts the organization's replay guard and deletes its
+// ledger rows. Redelivery deletes zero rows and preserves the guard, so queued
+// usage cannot restore the erased ledger.
 func (c *OrgErasureConsumer) process(ctx context.Context, ev orgErasureEvent) outcome {
 	if strings.TrimSpace(ev.SubjectType) != "organization" {
 		return outcomeAck

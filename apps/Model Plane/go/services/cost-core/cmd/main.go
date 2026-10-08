@@ -13,6 +13,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -25,6 +26,7 @@ import (
 
 	"github.com/nats-io/nats.go"
 	"github.com/triodelab/model-plane/pkg/authctx"
+	"github.com/triodelab/model-plane/services/cost-core/internal/azurecost"
 	"github.com/triodelab/model-plane/services/cost-core/internal/consumers"
 	"github.com/triodelab/model-plane/services/cost-core/internal/ledger"
 	"github.com/triodelab/model-plane/services/cost-core/internal/postgres"
@@ -57,6 +59,8 @@ const (
 // (pkg/envelope.Envelope). cost-core decodes only the fields it needs so it
 // stays standalone-buildable (no workspace replace directives).
 type envelope struct {
+	Timestamp      time.Time       `json:"ts"`
+	ZDR            bool            `json:"zdr"`
 	EventType      string          `json:"event_type"`
 	Producer       string          `json:"producer"`
 	CorrelationID  string          `json:"correlation_id"`
@@ -85,6 +89,7 @@ type usagePayload struct {
 	UserID                   string  `json:"user_id"`
 	RunID                    string  `json:"run_id"`
 	Model                    string  `json:"model"`
+	ProviderUsed             string  `json:"provider_used"`
 	InputTokens              int64   `json:"input_tokens"`
 	OutputTokens             int64   `json:"output_tokens"`
 	CostUSD                  float64 `json:"cost_usd"`
@@ -125,7 +130,36 @@ func main() {
 		os.Exit(1)
 	}
 	srv := server.NewServer(store)
+	if base := strings.TrimSpace(os.Getenv("COST_BILLING_CORE_URL")); base != "" {
+		delivery, err := postgres.NewBillingDelivery(base, os.Getenv("COST_BILLING_CORE_SERVICE_TOKEN"))
+		if err != nil {
+			slog.Error("billing delivery configuration invalid", "error", err)
+			os.Exit(1)
+		}
+		durable, ok := store.(*postgres.Store)
+		if !ok {
+			slog.Error("billing delivery requires durable storage")
+			os.Exit(1)
+		}
+		go durable.RunBillingDelivery(ctx, delivery)
+	}
 	srv.SetPricing(buildPricing(ctx))
+	azureCostClient, azureCostErr := azurecost.FromEnv()
+	if azureCostErr != nil {
+		slog.Error("Azure cost integration configuration invalid", "error", azureCostErr)
+		os.Exit(1)
+	}
+	if azureCostClient != nil {
+		if repository, ok := store.(azurecost.Repository); ok {
+			srv.SetAzureCostReader(store.(azurecost.Reader))
+			go azureCostClient.Run(ctx, repository)
+			slog.Info("Azure Cost Management daily actual-cost sync enabled")
+		} else {
+			slog.Warn("Azure Cost Management configured but durable cost store is unavailable")
+		}
+	} else {
+		slog.Info("Azure Cost Management sync disabled; Azure cost credentials/scope/project mapping are unset")
+	}
 	// COST_CORE_AUTH_AUDIENCE is a comma-separated list (e.g.
 	// "cost-core,inference-core"). Budget checks are made by inference-core's
 	// intent layer forwarding the caller's own delegated `aud=inference-core`
@@ -280,27 +314,73 @@ func subscribeUsageEnvelopes(ctx context.Context, srv *server.Server) {
 		runFeedFallback(ctx, srv)
 		return
 	}
+	_ = retryUsageConnection(ctx, 5*time.Second, func() error {
+		return runUsageSubscription(ctx, srv, natsURL)
+	})
+}
+
+// A configured broker is authoritative. Do not silently switch sources or
+// permanently disable accounting when the broker/provisioner starts later.
+func retryUsageConnection(ctx context.Context, delay time.Duration, attempt func() error) error {
+	for ctx.Err() == nil {
+		if err := attempt(); err == nil {
+			return nil
+		} else {
+			slog.Warn("usage subscription unavailable; retrying", "error", err)
+		}
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
+	return ctx.Err()
+}
+
+func runUsageSubscription(ctx context.Context, srv *server.Server, natsURL string) error {
 
 	nc, err := nats.Connect(natsURL, natsAuthOptions()...)
 	if err != nil {
-		slog.Error("NATS connect failed; USAGE_ENVELOPE subscriber disabled", "error", err)
-		runFeedFallback(ctx, srv)
-		return
+		return fmt.Errorf("connect usage broker: %w", err)
 	}
 	defer nc.Close()
 
-	sub, err := nc.Subscribe(usageSubjectWildcard, func(msg *nats.Msg) {
-		handleUsageMessage(ctx, srv, msg.Subject, msg.Data)
-	})
+	js, err := nc.JetStream()
 	if err != nil {
-		slog.Error("NATS subscribe failed; USAGE_ENVELOPE subscriber disabled", "error", err, "subject", usageSubjectWildcard)
-		runFeedFallback(ctx, srv)
-		return
+		return fmt.Errorf("usage JetStream: %w", err)
+	}
+	sub, err := js.QueueSubscribe(usageSubjectWildcard, "cost-core-usage", func(msg *nats.Msg) {
+		createdAt := time.Now().UTC()
+		if metadata, err := msg.Metadata(); err == nil {
+			createdAt = metadata.Timestamp
+		}
+		entry, err := decodeUsageMessage(msg.Subject, msg.Data, createdAt)
+		if err != nil {
+			slog.Warn("rejected durable usage envelope", "error", err)
+			_ = msg.Term()
+			return
+		}
+		if err := srv.RecordUsage(ctx, entry); err != nil {
+			if errors.Is(err, ledger.ErrOrgErased) {
+				_ = msg.Ack()
+				return
+			}
+			slog.Error("usage write failed; retrying", "error", err)
+			_ = msg.NakWithDelay(5 * time.Second)
+			return
+		}
+		_ = msg.Ack()
+	}, nats.Bind("MODEL_PLANE_USAGE_EVENTS", "cost-core-usage"), nats.ManualAck())
+	if err != nil {
+		return fmt.Errorf("bind durable usage consumer: %w", err)
 	}
 	defer func() { _ = sub.Unsubscribe() }()
 
 	slog.Info("USAGE_ENVELOPE subscriber active", "subject", usageSubjectWildcard)
 	<-ctx.Done()
+	return nil
 }
 
 func natsAuthOptions() []nats.Option {
@@ -409,6 +489,15 @@ func decodeUsageMessage(subject string, data []byte, createdAt time.Time) (ledge
 	if env.EventType != "USAGE_ENVELOPE" {
 		return ledger.Entry{}, fmt.Errorf("unexpected event type")
 	}
+	if env.ZDR {
+		return ledger.Entry{}, fmt.Errorf("ZDR usage must not be persisted")
+	}
+	if !env.Timestamp.IsZero() {
+		if env.Timestamp.After(time.Now().UTC().Add(5 * time.Minute)) {
+			return ledger.Entry{}, fmt.Errorf("usage timestamp is in the future")
+		}
+		createdAt = env.Timestamp.UTC()
+	}
 	if env.Producer != usageEnvelopeProducer {
 		return ledger.Entry{}, fmt.Errorf("usage envelope producer is not allowed")
 	}
@@ -445,6 +534,7 @@ func decodeUsageMessage(subject string, data []byte, createdAt time.Time) (ledge
 		RunID:                    p.RunID,
 		RequestID:                firstNonEmpty(p.RequestID, env.CorrelationID),
 		Model:                    p.Model,
+		ProviderUsed:             p.ProviderUsed,
 		InputTokens:              p.InputTokens,
 		OutputTokens:             p.OutputTokens,
 		CostUSD:                  p.CostUSD,

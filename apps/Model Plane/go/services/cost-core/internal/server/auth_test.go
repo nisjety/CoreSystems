@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
+	"encoding/json"
 	"encoding/pem"
 	"net/http"
 	"net/http/httptest"
@@ -15,6 +16,45 @@ import (
 	"github.com/triodelab/model-plane/pkg/authctx"
 	"github.com/triodelab/model-plane/services/cost-core/internal/ledger"
 )
+
+func TestOrganizationCostScopeSeparatesAdminPersonalAndTenantReads(t *testing.T) {
+	handler, key := protectedCostServer(t)
+	service := costToken(t, key, costTestClaims{OrgID: "org-a", ServiceID: "model-gateway", PrincipalType: "service", Scopes: []string{"cost:write"}})
+	for _, body := range []string{
+		`{"org_id":"org-a","user_id":"user-a","input_tokens":10,"cost_usd":1}`,
+		`{"org_id":"org-a","user_id":"user-b","input_tokens":20,"cost_usd":2}`,
+	} {
+		if response := costRequest(handler, http.MethodPost, "/api/v1/cost/record", body, service, "", ""); response.Code != http.StatusAccepted {
+			t.Fatalf("record status=%d", response.Code)
+		}
+	}
+	admin := costToken(t, key, costTestClaims{OrgID: "org-a", UserID: "user-a", PrincipalType: "user", Scopes: []string{"cost:org:read"}})
+	member := costToken(t, key, costTestClaims{OrgID: "org-a", UserID: "user-a", PrincipalType: "user"})
+	for _, test := range []struct {
+		path, token string
+		status      int
+		entries     int64
+	}{
+		{"/api/v1/cost/aggregate?org_id=org-a", admin, http.StatusOK, 1},
+		{"/api/v1/cost/aggregate?org_id=org-a&scope=organization", admin, http.StatusOK, 2},
+		{"/api/v1/cost/aggregate?org_id=org-a&scope=organization", member, http.StatusForbidden, 0},
+		{"/api/v1/cost/aggregate?org_id=org-b&scope=organization", admin, http.StatusForbidden, 0},
+		{"/api/v1/cost/aggregate?org_id=org-a&scope=organization&user_id=user-b", admin, http.StatusBadRequest, 0},
+		{"/api/v1/cost/azure/actual?org_id=org-a", member, http.StatusForbidden, 0},
+		{"/api/v1/cost/azure/actual?org_id=org-b", admin, http.StatusForbidden, 0},
+	} {
+		response := costRequest(handler, http.MethodGet, test.path, "", test.token, "", "")
+		if response.Code != test.status {
+			t.Fatalf("%s status=%d want=%d", test.path, response.Code, test.status)
+		}
+		if test.entries > 0 {
+			var body usageResponse
+			if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil || body.EntryCount != test.entries {
+				t.Fatalf("%s unexpected aggregate: %s", test.path, response.Body.String())
+			}
+		}
+	}
+}
 
 const costTestIssuer = "https://auth.example.test/api/convex-auth"
 

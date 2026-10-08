@@ -29,7 +29,7 @@ func TestUsageEnvelopeMustMatchAuthenticatedSubjectScope(t *testing.T) {
 		"idempotency_key":"usage-a",
 		"org_id":"org-a",
 		"user_id":"user-a",
-		"payload":{"request_id":"request-a","org_id":"org-a","user_id":"user-a","model":"test","input_tokens":3}
+		"payload":{"request_id":"request-a","org_id":"org-a","user_id":"user-a","model":"test","provider_used":"azure-norway-eu","input_tokens":3}
 	}`)
 	entry, err := decodeUsageMessage("mp.v1.usage.org-a", valid, now)
 	if err != nil {
@@ -37,6 +37,9 @@ func TestUsageEnvelopeMustMatchAuthenticatedSubjectScope(t *testing.T) {
 	}
 	if entry.OrgID != "org-a" || entry.UserID != "user-a" || entry.ProducerID != "model-gateway" || entry.CreatedAt != now {
 		t.Fatalf("unexpected entry: %+v", entry)
+	}
+	if entry.ProviderUsed != "azure-norway-eu" {
+		t.Fatalf("provider attribution not decoded: %+v", entry)
 	}
 
 	tests := []struct {
