@@ -422,6 +422,49 @@ pub fn authorize_owner_row(
     Ok(())
 }
 
+/// [`authorize_owner_row`] for a THREAD, which is the one row that can say whose
+/// Space it lives in.
+///
+/// The org-wide read a system-owned row gets is right for a maintenance run: its
+/// content is the org's by construction. It is wrong for a system-owned thread
+/// that carries a non-empty `space_id`. Every scheduled run's result thread is
+/// one (`start_scheduled_run` refuses a thread without a Space), and its content
+/// is one person's schedule written into that person's own Space by a workload
+/// acting for them. Org equality does not make it the org's, yet that was the
+/// only test, so any `session:read` caller in the org could read it by thread id.
+///
+/// So for a user-bound reader on a [`OwnerIntent::Read`] of such a thread this
+/// answers "not found" (what a thread that does not exist answers, so the id is
+/// not even confirmed) and the only way in is the Space read-decision branch,
+/// which Control issues to the Space's own owner and which never calls this
+/// function. Everything else is exactly [`authorize_owner_row`]:
+///
+///   * the org check still comes first, so a cross-org caller is still refused
+///     with `PermissionDenied`;
+///   * a service principal keeps its existing read, as on every other row (the
+///     owning workload and the planes that act for a run need it, and a service
+///     already reads ordinary human threads in its org);
+///   * a system thread with no Space (maintenance) stays org-readable;
+///   * [`OwnerIntent::Mutate`] is untouched (only the owning workload).
+#[allow(clippy::result_large_err)]
+pub fn authorize_thread_owner_row(
+    caller: &VerifiedIdentity,
+    org_id: &str,
+    user_id: &str,
+    space_id: &str,
+    intent: OwnerIntent,
+) -> Result<(), Status> {
+    caller.authorize_org(org_id)?;
+    if intent == OwnerIntent::Read
+        && is_system_run_owner(user_id)
+        && !space_id.trim().is_empty()
+        && !caller.is_service()
+    {
+        return Err(Status::not_found("thread not found"));
+    }
+    authorize_owner_row(caller, org_id, user_id, intent)
+}
+
 /// Authorize a service principal to create a run or thread it owns itself.
 ///
 /// Returns the owner id to persist. Every condition is required; the caller
@@ -1542,5 +1585,115 @@ mod tests {
             assert!(is_system_run_owner(owner));
         }
         assert_eq!(system_run_owners().len(), SYSTEM_RUN_OWNERS.len());
+    }
+
+    /// D12: a system-owned thread inside a person's Space is that person's
+    /// content, not the org's. An org peer reading it by id is refused with
+    /// "not found", the answer a thread that does not exist gives.
+    #[test]
+    fn an_org_peer_cannot_read_a_space_scoped_system_thread() {
+        let peer = VerifiedIdentity::user_for_test("org-1", "user-2");
+        let error =
+            authorize_thread_owner_row(&peer, "org-1", ORCH, "space-personal", OwnerIntent::Read)
+                .expect_err("a colleague must not read a scheduled thread by id");
+        assert_eq!(error.code(), Code::NotFound);
+    }
+
+    /// The schedule's owner is a person, not the workload that owns the row, so
+    /// ownership does not admit them either: they come in through the Space read
+    /// decision, which is a different branch that never calls this function.
+    #[test]
+    fn the_schedule_owner_gets_no_read_from_this_predicate_either() {
+        let owner = VerifiedIdentity::user_for_test("org-1", "user-1");
+        let error =
+            authorize_thread_owner_row(&owner, "org-1", ORCH, "space-personal", OwnerIntent::Read)
+                .expect_err("the decision branch is the only way in");
+        assert_eq!(error.code(), Code::NotFound);
+    }
+
+    /// Maintenance system threads have no Space and keep the org-wide read the
+    /// system-run allowance exists for. A blank Space is no Space.
+    #[test]
+    fn a_maintenance_system_thread_with_no_space_stays_org_readable() {
+        let peer = VerifiedIdentity::user_for_test("org-1", "user-2");
+        for space in ["", "   "] {
+            authorize_thread_owner_row(&peer, "org-1", ORCH, space, OwnerIntent::Read)
+                .expect("an unscoped system thread is org-readable");
+        }
+    }
+
+    /// Services keep their existing read, as on every other row: the owning
+    /// workload and the planes that act for a run depend on it.
+    #[test]
+    fn a_service_keeps_its_read_of_a_space_scoped_system_thread() {
+        let owner = VerifiedIdentity::service_for_test_as("org-1", ORCH, &BOTH_SCOPES, false);
+        authorize_thread_owner_row(&owner, "org-1", ORCH, "space-personal", OwnerIntent::Read)
+            .expect("the owning workload reads its own thread");
+        let other = VerifiedIdentity::service_for_test_as(
+            "org-1",
+            "service:capability-core",
+            &BOTH_SCOPES,
+            false,
+        );
+        authorize_thread_owner_row(&other, "org-1", ORCH, "space-personal", OwnerIntent::Read)
+            .expect("a service principal keeps the read it has on ordinary rows");
+    }
+
+    /// Mutation is exactly what it was: only the owning workload, and a human is
+    /// still told "permission denied" rather than "not found".
+    #[test]
+    fn mutating_a_space_scoped_system_thread_is_unchanged() {
+        let human = VerifiedIdentity::user_for_test("org-1", "user-1");
+        let error = authorize_thread_owner_row(
+            &human,
+            "org-1",
+            ORCH,
+            "space-personal",
+            OwnerIntent::Mutate,
+        )
+        .expect_err("humans never drive a system thread");
+        assert_eq!(error.code(), Code::PermissionDenied);
+        let owner = VerifiedIdentity::service_for_test_as("org-1", ORCH, &BOTH_SCOPES, false);
+        authorize_thread_owner_row(&owner, "org-1", ORCH, "space-personal", OwnerIntent::Mutate)
+            .expect("the owning workload may still act on its thread");
+    }
+
+    /// R6 again: the org boundary is checked before the Space rule, so a
+    /// cross-org caller still gets the refusal it always got.
+    #[test]
+    fn the_org_check_still_comes_before_the_space_rule() {
+        let outsider = VerifiedIdentity::user_for_test("org-2", "user-2");
+        for intent in [OwnerIntent::Read, OwnerIntent::Mutate] {
+            let error =
+                authorize_thread_owner_row(&outsider, "org-1", ORCH, "space-personal", intent)
+                    .expect_err("cross-org must be refused");
+            assert_eq!(error.code(), Code::PermissionDenied);
+        }
+    }
+
+    /// The Space rule is about system-owned rows only: an ordinary thread in a
+    /// Space, and a look-alike owner, behave exactly as under `authorize_owner_row`.
+    #[test]
+    fn ordinary_threads_ignore_the_space_rule() {
+        let human = VerifiedIdentity::user_for_test("org-1", "user-1");
+        for intent in [OwnerIntent::Read, OwnerIntent::Mutate] {
+            authorize_thread_owner_row(&human, "org-1", "user-1", "space-room", intent)
+                .expect("a person's own thread in a Space");
+            assert_eq!(
+                authorize_thread_owner_row(&human, "org-1", "user-2", "space-room", intent)
+                    .expect_err("another person's thread")
+                    .code(),
+                Code::PermissionDenied,
+            );
+        }
+        let error = authorize_thread_owner_row(
+            &human,
+            "org-1",
+            "service:orchestrator-core-2",
+            "space-room",
+            OwnerIntent::Read,
+        )
+        .expect_err("a look-alike owner gets no system treatment, so the user check applies");
+        assert_eq!(error.code(), Code::PermissionDenied);
     }
 }

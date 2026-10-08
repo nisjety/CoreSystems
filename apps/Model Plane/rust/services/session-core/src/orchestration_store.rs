@@ -113,6 +113,22 @@ pub async fn list_plans_by_thread(pool: &Pool, thread_id: &str) -> Result<Vec<(S
 /// already-approved/executing/terminal plan can never be knocked back to
 /// superseded by a same-turn revision.
 ///
+/// Independently of `supersedes`, any other plan the SAME run still has
+/// `proposed` is superseded in that transaction too (last-proposed-wins does
+/// not hinge on the model volunteering the id); when none was named — or the
+/// one named matched nothing, in which case the claim is struck from the
+/// metadata — the most recent of them is recorded as this plan's
+/// `metadata.supersedes`.
+///
+/// Proposals on one thread are serialized by a transaction-scoped advisory
+/// lock taken first thing. Without it two proposals that overlap (the model
+/// may emit two `plan.propose` calls in one tool batch) each supersede only
+/// the plans that were COMMITTED when their own statement ran, so neither sees
+/// the other's uncommitted insert and both stay `proposed`: two approvable
+/// plans on one run, which is exactly what last-proposed-wins exists to
+/// prevent. The lock is keyed on the thread because both supersede statements
+/// are thread-scoped, and is released at commit or rollback.
+///
 /// # Errors
 ///
 /// Returns an error if the insert fails.
@@ -130,6 +146,12 @@ pub async fn create_proposed_plan(
     supersedes: Option<&str>,
 ) -> Result<String> {
     let mut transaction = pool.begin().await?;
+    // First statement of the transaction: a statement that runs after the lock
+    // is granted sees every proposal the previous holder committed.
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind(format!("plan-gate:propose:{thread_id}"))
+        .execute(&mut *transaction)
+        .await?;
     sqlx::query(
         "INSERT INTO plans (id, thread_id, run_id, status, goal, org_id, user_id, metadata) \
          VALUES ($1, $2, $3, 'proposed', $4, $5, $6, $7)",
@@ -159,6 +181,11 @@ pub async fn create_proposed_plan(
         .await?;
     }
 
+    // Whether the plan the caller NAMED was really superseded here. The
+    // gRPC layer stores the model's claim in `metadata.supersedes` before
+    // this runs, and the plan's public `supersedes` field is read from it, so
+    // a claim that matched nothing has to be taken back out again (below).
+    let mut named_matched = false;
     if let Some(old_plan_id) = supersedes.filter(|s| !s.is_empty()) {
         let outcome = sqlx::query(
             "UPDATE plans SET status = 'superseded', updated_at = now() \
@@ -173,12 +200,58 @@ pub async fn create_proposed_plan(
             // already decided, or (a hostile/confused `supersedes` value)
             // simply not this thread's to supersede. Logged, not surfaced,
             // matching this function's existing best-effort posture.
+            //
+            // But the chain is an audit record, so it must not carry a link
+            // that was never real: the value is the MODEL's claim, and left in
+            // `metadata.supersedes` it would be served as this plan's
+            // `supersedes` — pointing at another conversation's or tenant's
+            // plan id, or at nothing. The run-level pass below then records
+            // the real predecessor, if there was one.
+            sqlx::query("UPDATE plans SET metadata = metadata - 'supersedes' WHERE id = $1")
+                .bind(id)
+                .execute(&mut *transaction)
+                .await?;
             info!(
                 plan_id = %id,
                 superseded_id = %old_plan_id,
                 thread_id,
                 "plan-gate: supersedes target was not a PROPOSED plan on this thread; left untouched"
             );
+        } else {
+            named_matched = true;
+        }
+    }
+
+    // Last-proposed-wins must not depend on the model remembering to say so
+    // (`supersedes` is optional tool input): any OTHER plan this same run
+    // still has PROPOSED is replaced by this one, in the same transaction.
+    // Left live, an abandoned draft stayed approvable by its id for as long
+    // as a stale card offered it, and the chain the owner asked to have
+    // recorded existed only when the model volunteered it — so the immediate
+    // predecessor is recorded here when the caller named none.
+    if let Some(run_id) = run_id {
+        let replaced: Vec<(String, DateTime<Utc>)> = sqlx::query_as(
+            "UPDATE plans SET status = 'superseded', updated_at = now() \
+             WHERE run_id = $1 AND thread_id = $2 AND status = 'proposed' AND id <> $3 \
+             RETURNING id, created_at",
+        )
+        .bind(run_id)
+        .bind(thread_id)
+        .bind(id)
+        .fetch_all(&mut *transaction)
+        .await?;
+        if !named_matched {
+            if let Some((predecessor, _)) = replaced.iter().max_by_key(|(_, created_at)| *created_at)
+            {
+                sqlx::query(
+                    "UPDATE plans SET metadata = metadata || jsonb_build_object('supersedes', $2::text) \
+                     WHERE id = $1",
+                )
+                .bind(id)
+                .bind(predecessor)
+                .execute(&mut *transaction)
+                .await?;
+            }
         }
     }
 
@@ -200,7 +273,7 @@ pub async fn list_plans_by_thread_full(pool: &Pool, thread_id: &str) -> Result<V
     let rows = sqlx::query_as::<_, PlanRow>(
         "SELECT id, thread_id, run_id, status, goal, org_id, user_id, metadata, \
                 created_at, updated_at \
-         FROM plans WHERE thread_id = $1 ORDER BY created_at DESC",
+         FROM plans WHERE thread_id = $1 ORDER BY created_at DESC, id DESC",
     )
     .bind(thread_id)
     .fetch_all(pool)
@@ -237,10 +310,23 @@ fn final_ordinal(index: usize) -> i64 {
     i64::try_from(index + 1).unwrap_or(i64::MAX)
 }
 
+/// The status an edited step is written with. A removed step is marked
+/// `skipped` — a decided-against step, still on the audit trail — and is
+/// never deleted: nothing in this module issues a `DELETE` against
+/// `plan_steps`. Every other edited step is `pending`.
+fn edited_step_status(removed: bool) -> &'static str {
+    if removed {
+        "skipped"
+    } else {
+        "pending"
+    }
+}
+
 /// Apply a diff/apply edit set to a plan's steps, atomically (plan-gate
 /// §2.2): existing steps are updated in place, new ones inserted, removed
 /// ones marked `PLAN_STEP_STATE_SKIPPED` (never hard-deleted — `plan_steps`
-/// is an audit trail). Every entry's ordinal becomes its 1-based position in
+/// is an audit trail — and keeping the title and operation they were proposed
+/// with). Every entry's ordinal becomes its 1-based position in
 /// `edits` (the caller's array order is the new step order). A no-op when
 /// `edits` is empty.
 ///
@@ -259,7 +345,19 @@ pub async fn apply_plan_edits(pool: &Pool, plan_id: &str, edits: &[PlanStepEditR
         return Ok(());
     }
     let mut transaction = pool.begin().await?;
+    apply_plan_edits_in(&mut transaction, plan_id, edits).await?;
+    transaction.commit().await?;
+    Ok(())
+}
 
+/// The statements of [`apply_plan_edits`], run on a caller-owned connection
+/// so [`transition_plan_atomic`] can apply the edits and flip the plan's
+/// status inside ONE transaction, under one row lock.
+async fn apply_plan_edits_in(
+    connection: &mut sqlx::PgConnection,
+    plan_id: &str,
+    edits: &[PlanStepEditRow],
+) -> Result<()> {
     for (index, edit) in edits.iter().enumerate() {
         if edit.is_new {
             continue;
@@ -268,13 +366,13 @@ pub async fn apply_plan_edits(pool: &Pool, plan_id: &str, edits: &[PlanStepEditR
             .bind(&edit.id)
             .bind(plan_id)
             .bind(parked_ordinal(index))
-            .execute(&mut *transaction)
+            .execute(&mut *connection)
             .await?;
     }
 
     for (index, edit) in edits.iter().enumerate() {
         let ordinal = final_ordinal(index);
-        let status = if edit.removed { "skipped" } else { "pending" };
+        let status = edited_step_status(edit.removed);
         let payload = serde_json::json!({ "title": edit.title });
         if edit.is_new {
             sqlx::query(
@@ -287,7 +385,22 @@ pub async fn apply_plan_edits(pool: &Pool, plan_id: &str, edits: &[PlanStepEditR
             .bind(&edit.operation)
             .bind(status)
             .bind(&payload)
-            .execute(&mut *transaction)
+            .execute(&mut *connection)
+            .await?;
+        } else if edit.removed {
+            // A decided-against step is kept AS PROPOSED: only its place and
+            // its status change. Writing the browser's copy of the title over
+            // it would let a step be blanked or reworded on its way out, and
+            // the audit trail would then not say what the person removed.
+            sqlx::query(
+                "UPDATE plan_steps SET ordinal = $3, status = $4, updated_at = now() \
+                 WHERE id = $1 AND plan_id = $2",
+            )
+            .bind(&edit.id)
+            .bind(plan_id)
+            .bind(ordinal)
+            .bind(status)
+            .execute(&mut *connection)
             .await?;
         } else {
             sqlx::query(
@@ -301,13 +414,87 @@ pub async fn apply_plan_edits(pool: &Pool, plan_id: &str, edits: &[PlanStepEditR
             .bind(&edit.operation)
             .bind(status)
             .bind(&payload)
-            .execute(&mut *transaction)
+            .execute(&mut *connection)
             .await?;
         }
     }
-
-    transaction.commit().await?;
     Ok(())
+}
+
+/// What [`transition_plan_atomic`] did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PlanTransitionOutcome {
+    /// The edits (if any) were applied and the status flipped.
+    Applied,
+    /// The plan was not in the expected status once its row was locked —
+    /// another request decided it first, or it was never there. Nothing was
+    /// written. Carries the status the row actually held (`None`: no such
+    /// row).
+    Conflict { actual: Option<String> },
+}
+
+/// Apply a plan's step edits AND move it to `new_status`, as one
+/// compare-and-swap (plan-gate §2.2, "single use").
+///
+/// `transition_plan` used to read the plan's status, validate the transition
+/// against that read, apply the edits, and only then write the new status —
+/// three separate statements with nothing between the read and the writes. Two
+/// concurrent approvals (a double click, a retry after a timeout) both saw
+/// `proposed`, so BOTH passed the "approved only from proposed" check; and an
+/// edit set arriving after the first approval had committed was still applied
+/// to the already-approved plan, leaving a plan whose steps differ from what
+/// the granted rung was approved against.
+///
+/// Here the plan row is locked (`FOR UPDATE`) and its status re-checked
+/// against `expected_prev` INSIDE the transaction that writes the edits and
+/// the new status, so exactly one of any set of racing decisions wins and the
+/// losers write nothing.
+///
+/// `metadata_patch` is merged into the plan's `metadata` in the same write:
+/// who decided and why. That makes the plan itself the durable record of its
+/// approval — the `RUN_PLAN_MODE_EXITED` event that also names it is only
+/// published while the gateway still remembers the run being in plan mode.
+///
+/// # Errors
+///
+/// Returns an error if any statement fails; the transaction rolls back
+/// together.
+pub async fn transition_plan_atomic(
+    pool: &Pool,
+    plan_id: &str,
+    expected_prev: &str,
+    new_status: &str,
+    edits: &[PlanStepEditRow],
+    metadata_patch: &JsonValue,
+) -> Result<PlanTransitionOutcome> {
+    let mut transaction = pool.begin().await?;
+    let actual: Option<(String,)> =
+        sqlx::query_as("SELECT status FROM plans WHERE id = $1 FOR UPDATE")
+            .bind(plan_id)
+            .fetch_optional(&mut *transaction)
+            .await?;
+    match actual {
+        Some((status,)) if status == expected_prev => {}
+        other => {
+            // Dropping the transaction rolls it back (releasing the lock).
+            return Ok(PlanTransitionOutcome::Conflict {
+                actual: other.map(|(status,)| status),
+            });
+        }
+    }
+    if !edits.is_empty() {
+        apply_plan_edits_in(&mut transaction, plan_id, edits).await?;
+    }
+    sqlx::query(
+        "UPDATE plans SET status = $2, metadata = metadata || $3, updated_at = now()          WHERE id = $1",
+    )
+    .bind(plan_id)
+    .bind(new_status)
+    .bind(metadata_patch)
+    .execute(&mut *transaction)
+    .await?;
+    transaction.commit().await?;
+    Ok(PlanTransitionOutcome::Applied)
 }
 
 // ---------------------------------------------------------------------------
@@ -1473,25 +1660,8 @@ mod tests {
     }
 
     #[test]
-    fn plan_step_edit_row_marks_removed_steps_skipped_not_deleted() {
-        // Documents the contract apply_plan_edits' SQL implements: `removed`
-        // maps to status = 'skipped', and there is no DELETE statement
-        // anywhere in this module for plan_steps.
-        let removed = PlanStepEditRow {
-            id: "step_1".to_owned(),
-            is_new: false,
-            title: "Old step".to_owned(),
-            operation: String::new(),
-            removed: true,
-        };
-        assert!(removed.removed);
-        let kept = PlanStepEditRow {
-            id: "step_2".to_owned(),
-            is_new: false,
-            title: "Kept step".to_owned(),
-            operation: String::new(),
-            removed: false,
-        };
-        assert!(!kept.removed);
+    fn removed_steps_are_marked_skipped_and_kept_steps_pending() {
+        assert_eq!(edited_step_status(true), "skipped");
+        assert_eq!(edited_step_status(false), "pending");
     }
 }

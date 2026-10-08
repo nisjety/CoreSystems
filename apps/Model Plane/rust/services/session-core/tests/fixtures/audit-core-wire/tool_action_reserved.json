@@ -1,0 +1,21 @@
+{
+  "body": {
+    "details": {
+      "data_category": "customer_private",
+      "phase": "reserved",
+      "tool": "knowledge_search",
+      "zdr": false
+    },
+    "event": "tool_action_reserved",
+    "event_id": "tool:session-core:c609dfab95fc9fb5ee67ffc2e0b951f417aecbdade460fd460acd63281a8841c",
+    "occurred_at": "2026-10-03T12:00:00+00:00",
+    "org_id": "org_fixture",
+    "outcome": "reserved",
+    "plane": "model",
+    "producer": "session-core",
+    "resource_id": "act_fixture",
+    "subject": "run_fixture",
+    "user_id": "user_fixture"
+  },
+  "subject": "verevon.audit.v2.model.session-core.tool_action_reserved"
+}

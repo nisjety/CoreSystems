@@ -14,7 +14,12 @@ if grep -Fq 'user: "model-runtime"' "$NATS_CONFIG"; then
   exit 1
 fi
 grep -F '"mp.v1.usage.*"' <<<"$gateway_block" >/dev/null
-grep -F 'publish: []' <<<"$cost_block" >/dev/null
+grep -F '"$JS.API.CONSUMER.INFO.MODEL_PLANE_USAGE_EVENTS.cost-core-usage"' <<<"$cost_block" >/dev/null
+grep -F '"$JS.ACK.MODEL_PLANE_USAGE_EVENTS.cost-core-usage.>"' <<<"$cost_block" >/dev/null
+if grep -Eq '\$JS.API.(STREAM|CONSUMER.CREATE|CONSUMER.DELETE)' <<<"$cost_block"; then
+  echo 'Cost Core cannot provision streams or consumers' >&2
+  exit 1
+fi
 grep -F '"mp.v1.usage.*"' <<<"$cost_block" >/dev/null
 grep -F '_INBOX.COST_CORE_RUNTIME.>' <<<"$cost_block" >/dev/null
 grep -F 'NATS_USER: cost-core-runtime' <<<"$cost_compose" >/dev/null

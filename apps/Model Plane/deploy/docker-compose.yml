@@ -190,6 +190,14 @@ services:
 
   model-gateway:
     <<: *runtime-defaults
+    # Longer than the runtime default of 30 s because SIGTERM starts a drain
+    # (see MODEL_GATEWAY_DRAIN_SECS below): the gateway keeps running until the
+    # chat turns in flight have finished or the drain window is over, then
+    # exits by itself. This must stay above MODEL_GATEWAY_DRAIN_SECS plus about
+    # 10 s, or Docker kills the process before the drain ends and a redeploy
+    # cuts the turns again. A redeploy of this one container now takes up to
+    # this long when someone is mid-answer, and no time when nobody is.
+    stop_grace_period: 150s
     build:
       context: ..
       dockerfile: rust/services/model-gateway/Dockerfile
@@ -215,6 +223,28 @@ services:
       # or both). Set DEFAULT_MODEL to pin a specific model org-wide.
       DEFAULT_MODEL: ${DEFAULT_MODEL:-}
       RATE_LIMIT_RPM: "100"
+      # Resume buffer for chat streams (chat gap closure I3). With it the frames
+      # a turn has already sent are kept in the model plane's Dragonfly, so a
+      # gateway that is killed (OOM, node loss, a grace period that ran out)
+      # leaves a client that reconnects something to replay instead of nothing.
+      # Without it the buffer lives in this process and dies with it. The same
+      # URL capability-core uses; Dragonfly is cache-mode with 256 MB shared by
+      # three services, so an entry can be evicted: resume (the only reader of
+      # this buffer) then answers not found, as it does after any restart today,
+      # and the web app's run-status fallback has to carry the reload. Every
+      # command is bounded (250 ms) and a failure pauses Redis for 5 s, so an
+      # unreachable Dragonfly costs buffered frames, never a stalled answer.
+      # Chat text lands here for at most 10 minutes (key TTL), only for turns
+      # that are persisted anyway: the zero-data-retention path does not buffer.
+      # Dragonfly writes no snapshot on this stack; if one is ever configured
+      # for it, those 10 minutes of chat frames would be snapshotted too.
+      REDIS_URL: redis://:${MODEL_DRAGONFLY_PASSWORD:?MODEL_DRAGONFLY_PASSWORD is required}@dragonfly:6379
+      # How long a stopping gateway waits for chat turns in flight before it
+      # exits, in seconds (0 = do not wait, the behaviour before I3; above 3600
+      # is clamped). During the wait /readyz answers 503 so nothing new is
+      # routed here, and the listener stays open for resume and stop. Keep
+      # stop_grace_period above this plus about 10 s.
+      MODEL_GATEWAY_DRAIN_SECS: ${MODEL_GATEWAY_DRAIN_SECS:-120}
       # Kill-switches for the review-latency levers. Empty keeps a lever ON;
       # 0/off/false/no/disabled turns it off at the next restart, no rebuild.
       MODEL_GATEWAY_SOLE_NOTE_PREFETCH: ${MODEL_GATEWAY_SOLE_NOTE_PREFETCH:-}
@@ -290,6 +320,87 @@ services:
       # 0/off/false/no/disabled restores today's behavior: a list stays one
       # segment.
       MODEL_GATEWAY_LIST_ITEM_SEGMENTS: ${MODEL_GATEWAY_LIST_ITEM_SEGMENTS:-}
+      # ON here since the Q16h adoption run (2026-09-29: 20/20 follow-ups came
+      # back as a section, follow-up p95 41.6 s against 76 s whole-document).
+      # Its code default is off (an explicit switch: 1/on/true/yes/enabled), but
+      # `:-1` here also fills in an EMPTY value, so only an explicit 0/off/false/
+      # no/disabled turns it off: set `MODEL_GATEWAY_DATED_POST_SECTION_ONLY=0`
+      # in the environment and restart to go back to whole-document output
+      # without a rebuild. Stage 1 of the
+      # patch-revision plan (verevon-web plans/system-audits/
+      # patch-revision-2026-09-29, critic verdict section 6): on a recognised
+      # revision of ONE dated post ("Gjor innlegget for 23. september ...")
+      # the model is told to send update_artifact with only that post's
+      # section (its heading line and body) instead of the whole 3-4 KB
+      # document, and the gateway splices it into the accepted document with
+      # the same byte-for-byte preservation a whole-document candidate gets
+      # (a section whose heading line is missing gets the original heading
+      # back; a whole document still works exactly as before). The spliced
+      # document is what is checked, stored, emitted and persisted; review
+      # scope is unchanged. Off restores the tool description, the per-turn
+      # guidance and the candidate handling of every other turn byte for byte.
+      # The plan's kill criterion is fragment adoption under 90%. A section
+      # that comes back without the sub-section the accepted post had (its
+      # `### Kilder` note) is refused and repaired, because the splice would
+      # otherwise delete the note (Q16h: 3 of 3 posts that had one lost it).
+      MODEL_GATEWAY_DATED_POST_SECTION_ONLY: ${MODEL_GATEWAY_DATED_POST_SECTION_ONLY:-1}
+      # ON here since the live A/B on real journey-04 plans (2026-09-30, three
+      # runs of 20 cases per arm): verdicts were identical in quality (real plans
+      # accepted 20 of 30 in both arms, seeded defects rejected 30 of 30 in
+      # both), and calls of 2,000 or more output tokens fell from 10 of 180 to 1
+      # of 240. Review wall time did not differ measurably in that sample. The
+      # code default is off, like the switch above, and `:-1` fills in an empty
+      # value too: only an explicit 0/off/false/no/disabled, then a restart,
+      # turns it off. A split source review uses up to four batches, sized by
+      # one batch per four segments or 1,400 bytes of weight (segments plus 128
+      # bytes each), instead of one per six or 2,200; it changes nothing where
+      # the old rule already gives four. Q16k (2026-09-30): the slow review batches
+      # were the big ones (8 of 137 batches with seven segments or more took
+      # over 30 s, against 3 of 121 smaller ones), and two journey-04 first
+      # turns timed out on one 7-segment, 1,404-byte table batch that spent
+      # 4,000 to 4,600 reasoning tokens (53 to 61 s) while its neighbours
+      # finished in 11 to 13 s. At most four batches still run together.
+      MODEL_GATEWAY_FINER_REVIEW_BATCHES: ${MODEL_GATEWAY_FINER_REVIEW_BATCHES:-1}
+      # Agentic (Do mode) runs on the user's ChatGPT subscription: the
+      # kill switch, OFF by default. One variable with three readers, and the
+      # same expression in model-gateway, execution-core and inference-core
+      # below so they cannot disagree. Only an explicit 1/true/on/yes/enabled
+      # turns it on. With it off, a subscription turn that asks for the agentic
+      # feature is refused (400, code agentic_subscription_disabled), execution-
+      # core refuses a run that names the subscription route, and inference-core
+      # does not advertise the `agentic` model feature. TURN IT ON ONLY AFTER the
+      # execution-core image that reads RunAgentRequest.provider_hint and
+      # subscription_connection_id is the one running: an older execution-core
+      # skips those fields and would run the loop on EXECUTION_AGENT_MODEL (the
+      # paid model-router). ALLOW_EFFECTS (also off) lets such a run act instead
+      # of only plan; it grants nothing while the first switch is off, and plan
+      # approval must be connected before it is turned on.
+      AGENTIC_SUBSCRIPTION_ENABLED: ${AGENTIC_SUBSCRIPTION_ENABLED:-false}
+      AGENTIC_SUBSCRIPTION_ALLOW_EFFECTS: ${AGENTIC_SUBSCRIPTION_ALLOW_EFFECTS:-false}
+      # Budget of an agentic (Do mode) run, resolved here and never taken from
+      # the request: inference rounds (a parent and its delegated children
+      # together) and delegations, sent as RunAgentRequest.max_rounds and
+      # max_subagents. Empty means the code default, which is what the gateway
+      # always sent: 4 rounds and 0 subagents (0 lets execution-core apply its
+      # own default). The AGENTIC_SUBSCRIPTION_* pair applies ONLY to a turn
+      # pinned to the ChatGPT subscription and wins over the general pair
+      # there; empty falls back to the general value. Rounds are clamped to 32
+      # and subagents to 100; a value that is not a whole number, or 0 rounds,
+      # is ignored. The wall-clock side is EXECUTION_RUN_WALL_CLOCK_SECS in the
+      # execution-core block below.
+      AGENTIC_MAX_ROUNDS: ${AGENTIC_MAX_ROUNDS:-}
+      AGENTIC_MAX_SUBAGENTS: ${AGENTIC_MAX_SUBAGENTS:-}
+      AGENTIC_SUBSCRIPTION_MAX_ROUNDS: ${AGENTIC_SUBSCRIPTION_MAX_ROUNDS:-}
+      AGENTIC_SUBSCRIPTION_MAX_SUBAGENTS: ${AGENTIC_SUBSCRIPTION_MAX_SUBAGENTS:-}
+      # How long the gateway follows ONE agentic run before it ends the stream
+      # with the retryable agent_dispatch_unavailable (which now names the run;
+      # the run itself is left alone and lands its answer in the thread). Empty
+      # means 120 s, or 270 s for a turn pinned to the ChatGPT subscription
+      # (inside the 300 s lifetime of the delegated bearers its rounds run
+      # under). A whole number of seconds, 1 to 3600, applied to every route;
+      # anything else is ignored. A stack that overrides PLANE_TOKEN_TTL_*
+      # must check the subscription value against it.
+      AGENTIC_RUN_DEADLINE_SECS: ${AGENTIC_RUN_DEADLINE_SECS:-}
       # Author-guidance version for source-bound drafting: v1 (the text and
       # local checks before 2026-09-25) or v2. v1 by default, and for any
       # unrecognised value: v2 is opt-in until it passes a held-out validation
@@ -304,9 +415,15 @@ services:
       MODEL_GATEWAY_CACHE_STABLE_PROMPT_ORDER: ${MODEL_GATEWAY_CACHE_STABLE_PROMPT_ORDER:-}
       MODEL_GATEWAY_COMPACTION_TOKEN_BUDGET: ${MODEL_GATEWAY_COMPACTION_TOKEN_BUDGET:-}
       MODEL_GATEWAY_DEDUP_CONTEXT_HISTORY: ${MODEL_GATEWAY_DEDUP_CONTEXT_HISTORY:-}
-      # Source-check deadlines in seconds. Empty keeps 90 (per artifact) and
-      # 150 (shared tool phase).
-      MODEL_GATEWAY_ARTIFACT_CHECK_TIMEOUT_SECS: ${MODEL_GATEWAY_ARTIFACT_CHECK_TIMEOUT_SECS:-}
+      # Source-check deadlines in seconds. The code default is 90 per artifact
+      # and 150 for the shared tool phase, and the code treats an empty value as
+      # unset. Here `:-120` fills in an empty value too, so the per-artifact
+      # check gets 120 unless set otherwise, since Q16k (2026-09-30): two journey-04
+      # first turns timed out at 110 s after one slow review batch, a repair,
+      # a second review and the start of a second repair, about 110 s of
+      # checking in all. The shared 150 s still caps the whole turn, so this
+      # only lets a check that is working use the time the phase already had.
+      MODEL_GATEWAY_ARTIFACT_CHECK_TIMEOUT_SECS: ${MODEL_GATEWAY_ARTIFACT_CHECK_TIMEOUT_SECS:-120}
       MODEL_GATEWAY_TOOL_PHASE_TIMEOUT_SECS: ${MODEL_GATEWAY_TOOL_PHASE_TIMEOUT_SECS:-}
       # Local-dev auth bypass is defined in ../.env, but compose was not
       # forwarding it, so Verevon's `dev-bypass` bearer was rejected before
@@ -339,6 +456,16 @@ services:
       # defaulting off.
       FINETUNE_POLLER_SERVICE_ID: ${FINETUNE_POLLER_SERVICE_ID:-model-gateway-finetune-poller}
       FINETUNE_POLLER_SERVICE_API_KEY: ${FINETUNE_POLLER_SERVICE_API_KEY:-}
+      # Mail-to-task thread bridge (plan task J3, dark): the gateway's own
+      # aud=session-core credential for POST /v1/internal/mail-task/prepare-thread,
+      # distinct from MODEL_GATEWAY_SERVICE_API_KEY (zdr) because preparing a thread
+      # is a durable write and needs the Auth Core principal
+      # `model-gateway-mail-task-bridge` (retentionByAudience.session-core =
+      # persistent, scope session:user-owned-thread-prepare alone). Control's
+      # launcher mints the key from the principal's consumerEnv. Empty keeps the
+      # route answering 503, and only service:verevon-gateway can reach it at all.
+      MAIL_TASK_BRIDGE_SERVICE_ID: ${MAIL_TASK_BRIDGE_SERVICE_ID:-model-gateway-mail-task-bridge}
+      MAIL_TASK_BRIDGE_SERVICE_API_KEY: ${MAIL_TASK_BRIDGE_SERVICE_API_KEY:-}
       # Use explicit Model Plane aliases here. The gateway also joins the
       # shared inter-plane bus for Verevon, where names like `session-core`
       # can resolve to Control Plane services instead.
@@ -630,7 +757,14 @@ services:
       # address, or set DREAMING_LLM_EXTRACTION=0, and Dreaming falls back to
       # the deterministic phrase matcher alone.
       INFERENCE_CORE_ADDR: ${INFERENCE_CORE_ADDR:-http://model-plane-inference-core-1:9092}
-      DREAMING_LLM_EXTRACTION: ${DREAMING_LLM_EXTRACTION:-1}
+      # OFF on this stack (2026-10-01). With it on, Dreaming sends prompts built
+      # from conversation text to DREAMING_LLM_MODEL on the paid azure-anthropic
+      # provider, whatever route the user's chat ran on: one claude-haiku-4-5
+      # call at 21:32:28 UTC on 2026-09-30, while the gates ran live ChatGPT
+      # Terra turns. Off, Dreaming uses the deterministic phrase matcher alone.
+      # Turn it on (=1) only for a deployment that accepts a paid extraction
+      # model, or after Dreaming can run on the user's own route.
+      DREAMING_LLM_EXTRACTION: ${DREAMING_LLM_EXTRACTION:-0}
       DREAMING_LLM_MODEL: ${DREAMING_LLM_MODEL:-claude-haiku-4-5}
       # Write-time memory grounding (memory_grounding.rs). Off by default --
       # set MEMORY_GROUNDING_ENABLED=1 to let Dreaming classify a candidate as
@@ -706,6 +840,11 @@ services:
       CODEX_SUBSCRIPTION_INTEGRATION_CORE_URL: ${CODEX_SUBSCRIPTION_INTEGRATION_CORE_URL:-}
       CODEX_SUBSCRIPTION_INTERNAL_API_KEY: ${CODEX_SUBSCRIPTION_INTERNAL_API_KEY:-}
       CODEX_SUBSCRIPTION_MODELS: ${CODEX_SUBSCRIPTION_MODELS:-}
+      # The same switch model-gateway and execution-core read (see the
+      # model-gateway block). Here it only adds the `agentic` feature to the
+      # subscription models in the catalog, so the composer follows the server
+      # instead of hard-coding the provider. OFF by default.
+      AGENTIC_SUBSCRIPTION_ENABLED: ${AGENTIC_SUBSCRIPTION_ENABLED:-false}
       INFERENCE_MAX_RETRIES: ${INFERENCE_MAX_RETRIES:-3}
       INFERENCE_CACHE_TTL_SECS: ${INFERENCE_CACHE_TTL_SECS:-300}
       # Verevon intent layer — turns the verevon-budget/-balance/-genius modes into
@@ -889,6 +1028,50 @@ services:
       # handled by the router, cost-aware). Overridable per deployment; empty →
       # honor the caller's requested model. Plain chat is unaffected.
       EXECUTION_AGENT_MODEL: ${EXECUTION_AGENT_MODEL:-model-router}
+      # Agentic runs on the user's ChatGPT subscription (see the model-gateway
+      # block for the full note). OFF by default. A run that names the
+      # subscription route (RunAgentRequest.provider_hint) is refused while the
+      # switch is off, and when it is on it IGNORES EXECUTION_AGENT_MODEL: the
+      # request's own model is used, every round carries the provider and
+      # connection, and a round served by any other provider stops the run.
+      # Runs that name no route are unaffected by either value.
+      AGENTIC_SUBSCRIPTION_ENABLED: ${AGENTIC_SUBSCRIPTION_ENABLED:-false}
+      AGENTIC_SUBSCRIPTION_ALLOW_EFFECTS: ${AGENTIC_SUBSCRIPTION_ALLOW_EFFECTS:-false}
+      # Wall-clock budget of one governed run, in seconds from its start. Once
+      # it has passed no new inference round starts: the round in flight
+      # finishes, then the run ends as failed with a reply that says it reached
+      # its time limit. 0 or empty is off, which is today's behaviour. It
+      # applies to every run this process serves, not only subscription ones.
+      # The delegated bearers a run carries live 300 s by default, and a round
+      # on the ChatGPT subscription takes tens of seconds, so a proof stack sets
+      # 240. A run pinned to the subscription ALSO stops starting rounds 60 s
+      # before its earliest credential expires, whatever this is set to, so a
+      # PLANE_TOKEN_TTL_* override is followed rather than outlived.
+      EXECUTION_RUN_WALL_CLOCK_SECS: ${EXECUTION_RUN_WALL_CLOCK_SECS:-0}
+      # Post-mutation verification inside the agentic loop. OFF by default:
+      # only an explicit 1/true/on/yes/enabled turns it on. When on, after a
+      # successful provider write (execute_provider_action) or shipment booking
+      # (book_shipment) the loop reads the effect back from the system of record
+      # and appends one line to the tool output (Verified / NOT confirmed /
+      # Could not verify), which the model reads before it answers and which the
+      # step record keeps. It costs one extra read per write, capped at 15 s, and
+      # it only ever reads (integration:read / shipping:read), never writes.
+      # Turn it on only once a connected provider has been seen to answer the
+      # read-back; an outage or a missing verifier is reported as "could not
+      # verify", never as a failure.
+      EXECUTION_POST_MUTATION_VERIFY_ENABLED: ${EXECUTION_POST_MUTATION_VERIFY_ENABLED:-false}
+      # Wide-research fan-out (the subagent.research_fan_out tool). Not
+      # secrets — behaviour knobs. WIDE_RESEARCH_FAN_OUT_ENABLED=false stops
+      # the tool being offered or dispatched without a rebuild (the kill switch
+      # for when the subscription route rate-limits in practice). The
+      # concurrency value caps how many items of ONE fan-out call are in
+      # flight at once; 4 is the owner's starting point for the
+      # openai-codex-subscription seat, hard-capped at 16 in code. The Codex
+      # broker allows 4 concurrent requests per connection, so at 4 one wide
+      # fan-out starves a second chat tab on the same account (rate_limited):
+      # a first proof on the subscription sets this to 2.
+      WIDE_RESEARCH_FAN_OUT_ENABLED: ${WIDE_RESEARCH_FAN_OUT_ENABLED:-true}
+      WIDE_RESEARCH_FAN_OUT_CONCURRENCY: ${WIDE_RESEARCH_FAN_OUT_CONCURRENCY:-4}
       DATABASE_URL: postgresql://postgres:${MODEL_POSTGRES_PASSWORD:?MODEL_POSTGRES_PASSWORD is required}@postgres:5432/session_core
       MINIO_ENDPOINT: http://minio:9000
       MINIO_ACCESS_KEY: ${MODEL_MINIO_ROOT_USER:?MODEL_MINIO_ROOT_USER is required}
@@ -1009,6 +1192,12 @@ services:
       # the x-api-key credential.
       DATAPLANE_RETRIEVAL_URL: ${DATAPLANE_RETRIEVAL_URL_EXEC:-http://retrieval-engine:50052}
       DATAPLANE_INTERNAL_KEY: ${DATAPLANE_INTERNAL_KEY:-${DATA_PLANE_INTERNAL_KEY:-}}
+      # The retrieval engine's own HTTP readiness endpoint (its HTTP port, not the
+      # gRPC one above). health_attest.rs reads it each heartbeat — together with
+      # an unauthenticated probe of the gRPC endpoint above — before attesting
+      # cap.retrieval.query. Unset or blank means "cannot measure", so nothing is
+      # attested and knowledge_search stays denied at the capability gate.
+      DATAPLANE_RETRIEVAL_READY_URL: ${DATAPLANE_RETRIEVAL_READY_URL_EXEC:-http://retrieval-engine:8004/readyz}
       # Information-core (Application Plane) — backs the real news / traffic /
       # yr_weather / track_shipment agentic tools.
       INFORMATION_CORE_URL: ${INFORMATION_CORE_URL_EXEC:-http://information-core:3190}
@@ -1225,6 +1414,19 @@ services:
       # 404s ("DeploymentNotFound"). Pin the review call to a real deployment
       # explicitly rather than relying on the shared default.
       LEARNING_REVIEW_MODEL: ${LEARNING_REVIEW_MODEL:-claude-sonnet-4-5}
+      # Kill switch for the G7 learning review (true|false). The CODE default is
+      # true, so a deployment that does not set it keeps its learning loop. THIS
+      # stack defaults it to false, and the reason is cost: the review sends each
+      # completed conversation's transcript to LEARNING_REVIEW_MODEL above, which
+      # runs on azure-anthropic (claude-sonnet-4-5), a paid model, while the live
+      # gates here run their turns on the ChatGPT Terra subscription route
+      # (gpt-5.6-terra via openai-codex-subscription) and must not reach any paid
+      # provider. Observed 2026-09-30: four completed reviews, four claude-sonnet-4-5
+      # calls in inference-core. Off means startLearningConsumer logs "learning-review
+      # consumer disabled (LEARNING_REVIEW_ENABLED=false)" and never binds the durable
+      # consumer; the service credentials above are untouched. Set
+      # LEARNING_REVIEW_ENABLED=true to turn learning back on.
+      LEARNING_REVIEW_ENABLED: ${LEARNING_REVIEW_ENABLED:-false}
       # Capability Core reauthorizes every due scheduled fire directly with
       # Control before it can prepare a service-owned Session Core thread.
       # The credential must be registered only as capability-core with
@@ -1575,10 +1777,24 @@ services:
       # verifies here (see cost-core cmd/main.go for why this is read-only in
       # effect: CostAuthorizer + handleBudgetCheck pin org/user to the token).
       COST_CORE_AUTH_AUDIENCE: ${COST_CORE_AUTH_AUDIENCE:-cost-core,inference-core}
+      COST_BILLING_CORE_URL: http://billing-core:3014
+      COST_BILLING_CORE_SERVICE_TOKEN: ${COST_BILLING_CORE_SERVICE_TOKEN:?COST_BILLING_CORE_SERVICE_TOKEN is required}
+      # Optional Azure Cost Management actual-charge import. Grant this service
+      # Cost Management Reader at the configured Azure scope and map Foundry
+      # `project` tag values to Verevon organization IDs. Azure totals remain
+      # organization-level; per-user attribution comes from the Cost Core ledger.
+      AZURE_COST_TENANT_ID: ${AZURE_COST_TENANT_ID:-}
+      AZURE_COST_CLIENT_ID: ${AZURE_COST_CLIENT_ID:-}
+      AZURE_COST_CLIENT_SECRET: ${AZURE_COST_CLIENT_SECRET:-}
+      AZURE_COST_SCOPE: ${AZURE_COST_SCOPE:-}
+      AZURE_COST_SCOPES_JSON: ${AZURE_COST_SCOPES_JSON:-}
+      AZURE_COST_PROJECT_ORG_MAP_JSON: ${AZURE_COST_PROJECT_ORG_MAP_JSON:-}
       # Durable cost ledger (the migration entrypoint applies 0001_cost_ledger +
       # 0002_model_pricing on boot). Shares the Model Plane Postgres / session_core DB.
       DATABASE_URL: postgresql://postgres:${MODEL_POSTGRES_PASSWORD:?MODEL_POSTGRES_PASSWORD is required}@postgres:5432/session_core
     depends_on:
+      nats-provisioner:
+        condition: service_completed_successfully
       nats:
         condition: service_healthy
       postgres:

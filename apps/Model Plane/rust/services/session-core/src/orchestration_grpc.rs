@@ -29,7 +29,8 @@ use tonic::{Request, Response, Status};
 use tracing::warn;
 
 use crate::auth::{
-    authorize_operation, authorize_owner_row, identity, OwnerIntent, VerifiedIdentity,
+    authorize_operation, authorize_owner_row, authorize_thread_owner_row, identity, OwnerIntent,
+    VerifiedIdentity,
 };
 use crate::orchestration_store as store;
 use crate::store::Pool;
@@ -247,14 +248,17 @@ async fn authorize_thread_owner(
     thread_id: &str,
     intent: OwnerIntent,
 ) -> Result<(), Status> {
-    let owner: Option<(String, String)> =
-        sqlx::query_as("SELECT org_id, user_id FROM threads WHERE id = $1")
-            .bind(thread_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|error| Status::internal(error.to_string()))?;
-    let (org_id, user_id) = owner.ok_or_else(|| Status::not_found("thread not found"))?;
-    authorize_owner_row(caller, &org_id, &user_id, intent)
+    // `space_id` rides along because a system-owned thread inside a Space is
+    // not org-readable by id (see `authorize_thread_owner_row`).
+    let owner: Option<(String, String, String)> = sqlx::query_as(
+        "SELECT org_id, user_id, COALESCE(space_id, '') FROM threads WHERE id = $1",
+    )
+    .bind(thread_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|error| Status::internal(error.to_string()))?;
+    let (org_id, user_id, space_id) = owner.ok_or_else(|| Status::not_found("thread not found"))?;
+    authorize_thread_owner_row(caller, &org_id, &user_id, &space_id, intent)
 }
 
 async fn authorize_plan_owner(
@@ -419,6 +423,25 @@ pub(crate) fn plan_state_to_str(code: i32) -> Option<&'static str> {
     }
 }
 
+/// The domain crate's state for a wire `PlanState` code, so the RPC can ask
+/// the plan lifecycle's own transition table (`mp_orchestration::Plan::
+/// is_allowed`) instead of keeping a second, partial copy of it here.
+fn domain_plan_state(code: i32) -> Option<mp_orchestration::PlanState> {
+    use mp_orchestration::PlanState as Domain;
+    Some(match proto::PlanState::try_from(code).ok()? {
+        proto::PlanState::Unspecified => return None,
+        proto::PlanState::Draft => Domain::Draft,
+        proto::PlanState::Proposed => Domain::Proposed,
+        proto::PlanState::Approved => Domain::Approved,
+        proto::PlanState::Rejected => Domain::Rejected,
+        proto::PlanState::Executing => Domain::Executing,
+        proto::PlanState::Completed => Domain::Completed,
+        proto::PlanState::Failed => Domain::Failed,
+        proto::PlanState::Superseded => Domain::Superseded,
+        proto::PlanState::Archived => Domain::Archived,
+    })
+}
+
 /// plan-gate §2.2's transition legality rule for `TransitionPlan`, factored
 /// out so it can be unit-tested without a database:
 ///
@@ -430,6 +453,14 @@ pub(crate) fn plan_state_to_str(code: i32) -> Option<&'static str> {
 ///   approving IS granting the run authority to act on this plan, so it must
 ///   come from a plan a human actually reviewed, never a bare DRAFT (zero
 ///   steps) or an already-terminal plan.
+/// * Every other transition must be one the plan lifecycle allows
+///   (`mp_orchestration::Plan::is_allowed`): the proto documents the target
+///   as "must be reachable from the current state", but the check used to
+///   cover APPROVED alone, so a decided plan could be REJECTED again (or an
+///   EXECUTING/COMPLETED one rejected after the fact), rewriting the very
+///   record `RUN_PLAN_MODE_EXITED.plan_id` points at, and a REJECTED plan
+///   could be walked back to PROPOSED — the revise-after-reject the owner
+///   ruled out of this wave.
 #[allow(clippy::result_large_err)]
 pub(crate) fn validate_plan_transition_legality(
     prev_state: i32,
@@ -448,15 +479,212 @@ pub(crate) fn validate_plan_transition_legality(
             "a plan can only be approved from PLAN_STATE_PROPOSED",
         ));
     }
+    let (Some(from), Some(to)) = (domain_plan_state(prev_state), domain_plan_state(target_state))
+    else {
+        return Err(Status::failed_precondition(
+            "the plan or target state is not a known plan state",
+        ));
+    };
+    if !mp_orchestration::Plan::is_allowed(from, to) {
+        return Err(Status::failed_precondition(format!(
+            "a plan cannot move from {} to {}",
+            from.as_str(),
+            to.as_str()
+        )));
+    }
     Ok(())
 }
 
-/// Whether an edit entry needs a newly minted step id, given the plan's
-/// existing step ids — true when `step_id` is empty OR does not match any
-/// existing step (a stale/foreign id is treated as "new" rather than
-/// silently failing, since an insert is always well-defined).
-fn plan_step_edit_is_new(step_id: &str, existing_ids: &std::collections::HashSet<&str>) -> bool {
-    step_id.is_empty() || !existing_ids.contains(step_id)
+/// Who moved a plan into `new_status`, and why, as a `metadata` patch merged
+/// in the same write as the transition.
+///
+/// Keys are per-state (`approved_by`, `approved_reason`, `executing_by`, …)
+/// so the later `EXECUTING` claim does not overwrite the `APPROVED` decision:
+/// the plan then carries its own approval receipt — the person and their
+/// stated ground — instead of depending on the run-exit event that is only
+/// published while the gateway still remembers the run being in plan mode.
+/// `actor` is the verified principal (the handler overwrites the request's),
+/// not caller-supplied text; `reason` is bounded like every other free text
+/// on a plan.
+fn plan_decision_metadata(new_status: &str, actor: &str, reason: &str) -> JsonValue {
+    let mut patch = serde_json::Map::new();
+    if !actor.is_empty() {
+        patch.insert(format!("{new_status}_by"), JsonValue::String(actor.to_owned()));
+    }
+    let reason = reason.trim();
+    if !reason.is_empty() {
+        patch.insert(
+            format!("{new_status}_reason"),
+            JsonValue::String(reason.chars().take(1_000).collect()),
+        );
+    }
+    JsonValue::Object(patch)
+}
+
+/// Ceilings on the text of a plan, enforced HERE because the two writers of
+/// step text — the model (`plan.propose`, untrusted: it reads web pages and
+/// documents) and the browser (`edited_steps`) — are both outside this
+/// service's trust boundary, and nothing else bounds them: the columns are
+/// unbounded `TEXT`/`JSONB`, and every step is later copied into the
+/// executing run's context (`approved_plan_context`).
+pub(crate) const MAX_PLAN_STEPS: usize = 100;
+/// See [`MAX_PLAN_STEPS`]. Entries in `edited_steps` include removed and
+/// newly added steps, so the bound is wider than the step count itself.
+pub(crate) const MAX_PLAN_STEP_EDITS: usize = 2 * MAX_PLAN_STEPS;
+/// See [`MAX_PLAN_STEPS`].
+pub(crate) const MAX_PLAN_TITLE_CHARS: usize = 500;
+/// See [`MAX_PLAN_STEPS`].
+pub(crate) const MAX_PLAN_OPERATION_CHARS: usize = 120;
+/// See [`MAX_PLAN_STEPS`].
+pub(crate) const MAX_PLAN_SUMMARY_CHARS: usize = 4_000;
+/// See [`MAX_PLAN_STEPS`].
+pub(crate) const MAX_PLAN_SUPERSEDES_CHARS: usize = 128;
+
+/// The shape a model-proposed plan must have before it is stored.
+#[allow(clippy::result_large_err)]
+pub(crate) fn validate_proposed_plan_input(
+    summary: &str,
+    steps: &[proto::ProposedPlanStep],
+    supersedes: &str,
+) -> Result<(), Status> {
+    if summary.trim().is_empty() {
+        return Err(Status::invalid_argument("summary is required"));
+    }
+    if summary.chars().count() > MAX_PLAN_SUMMARY_CHARS {
+        return Err(Status::invalid_argument(format!(
+            "summary is longer than {MAX_PLAN_SUMMARY_CHARS} characters"
+        )));
+    }
+    if steps.is_empty() {
+        return Err(Status::invalid_argument("at least one step is required"));
+    }
+    if steps.len() > MAX_PLAN_STEPS {
+        return Err(Status::invalid_argument(format!(
+            "a plan may have at most {MAX_PLAN_STEPS} steps"
+        )));
+    }
+    for step in steps {
+        if step.title.trim().is_empty() {
+            return Err(Status::invalid_argument("every step needs a title"));
+        }
+        if step.title.chars().count() > MAX_PLAN_TITLE_CHARS {
+            return Err(Status::invalid_argument(format!(
+                "a step title is longer than {MAX_PLAN_TITLE_CHARS} characters"
+            )));
+        }
+        if step.operation.chars().count() > MAX_PLAN_OPERATION_CHARS {
+            return Err(Status::invalid_argument(format!(
+                "a step operation is longer than {MAX_PLAN_OPERATION_CHARS} characters"
+            )));
+        }
+    }
+    if supersedes.chars().count() > MAX_PLAN_SUPERSEDES_CHARS {
+        return Err(Status::invalid_argument("supersedes is not a plan id"));
+    }
+    Ok(())
+}
+
+/// Resolve the user's `edited_steps` against the plan's real step ids
+/// (plan-gate §2.2), or refuse them.
+///
+/// The array is the COMPLETE new step list, in order: every existing step
+/// appears exactly once (a removed one with `removed = true`), new steps have
+/// an empty `step_id`. This used to be assumed rather than checked, and the
+/// gaps were silent:
+///
+/// * a step left out of the array kept its old ordinal and stayed `pending`,
+///   so it was still in the plan the run would be told it had approved — or
+///   collided with an edited step's new ordinal and failed the whole
+///   approval with an opaque 500;
+/// * an unknown `step_id` was quietly inserted as a NEW step (a browser
+///   holding the steps of a different or superseded plan turned into extra
+///   steps in this one);
+/// * a blank title, or an approval with every step removed, went through —
+///   the "rubber stamp" the confirm gate exists to prevent, enforced only by
+///   a disabled button in the browser.
+///
+/// `require_remaining` is true for an approval: at least one step must
+/// survive. A step that was added and removed in the same editing session
+/// (empty `step_id`, `removed`) never belonged to the proposal, so it is
+/// dropped rather than recorded as a decided-against step.
+#[allow(clippy::result_large_err)]
+pub(crate) fn resolve_plan_step_edits(
+    existing_ids: &[&str],
+    edits: &[proto::PlanStepEdit],
+    require_remaining: bool,
+    mut mint_step_id: impl FnMut() -> String,
+) -> Result<Vec<store::PlanStepEditRow>, Status> {
+    if edits.len() > MAX_PLAN_STEP_EDITS {
+        return Err(Status::invalid_argument(format!(
+            "edited_steps may have at most {MAX_PLAN_STEP_EDITS} entries"
+        )));
+    }
+    let existing: std::collections::HashSet<&str> = existing_ids.iter().copied().collect();
+    let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    let mut resolved = Vec::with_capacity(edits.len());
+    for edit in edits {
+        let title = edit.title.trim();
+        let operation = edit.operation.trim();
+        if title.chars().count() > MAX_PLAN_TITLE_CHARS {
+            return Err(Status::invalid_argument(format!(
+                "a step title is longer than {MAX_PLAN_TITLE_CHARS} characters"
+            )));
+        }
+        if operation.chars().count() > MAX_PLAN_OPERATION_CHARS {
+            return Err(Status::invalid_argument(format!(
+                "a step operation is longer than {MAX_PLAN_OPERATION_CHARS} characters"
+            )));
+        }
+        let step_id = edit.step_id.trim();
+        if step_id.is_empty() {
+            if edit.removed {
+                continue;
+            }
+            if title.is_empty() {
+                return Err(Status::invalid_argument("a new step needs a title"));
+            }
+            resolved.push(store::PlanStepEditRow {
+                id: mint_step_id(),
+                is_new: true,
+                title: title.to_owned(),
+                operation: operation.to_owned(),
+                removed: false,
+            });
+            continue;
+        }
+        if !existing.contains(step_id) {
+            return Err(Status::invalid_argument(format!(
+                "edited_steps names a step that is not in this plan: {step_id}"
+            )));
+        }
+        if !seen.insert(step_id) {
+            return Err(Status::invalid_argument(format!(
+                "edited_steps lists a step twice: {step_id}"
+            )));
+        }
+        if !edit.removed && title.is_empty() {
+            return Err(Status::invalid_argument("a step needs a title"));
+        }
+        resolved.push(store::PlanStepEditRow {
+            id: step_id.to_owned(),
+            is_new: false,
+            title: title.to_owned(),
+            operation: operation.to_owned(),
+            removed: edit.removed,
+        });
+    }
+    if let Some(missing) = existing_ids.iter().find(|id| !seen.contains(**id)) {
+        return Err(Status::invalid_argument(format!(
+            "edited_steps must list every existing step (missing {missing}); \
+             mark a removed step removed=true"
+        )));
+    }
+    if require_remaining && resolved.iter().all(|row| row.removed) {
+        return Err(Status::invalid_argument(
+            "a plan cannot be approved with every step removed",
+        ));
+    }
+    Ok(resolved)
 }
 
 pub(crate) fn plan_step_state_from_str(s: &str) -> i32 {
@@ -687,6 +915,31 @@ pub(crate) fn subagent_role_to_str(code: i32) -> &'static str {
         proto::SubagentRole::Researcher => "researcher",
         proto::SubagentRole::Explorer => "explorer",
     }
+}
+
+/// The `subagent_edges.metadata` JSON for one attached edge.
+///
+/// `goal_summary`/`batch_id` (wide-research fan-out §2.4) have no dedicated
+/// columns — they ride the `metadata` JSONB column `attach_subagent` already
+/// accepted (previously always an empty object), which avoids a migration for
+/// two additive, optional fields. An unset field is ABSENT rather than stored
+/// as an empty string, so an edge from a caller that predates the fields is
+/// byte-identical to what it was before them.
+fn subagent_edge_metadata(goal_summary: &str, batch_id: &str) -> JsonValue {
+    let mut metadata = serde_json::Map::new();
+    if !goal_summary.is_empty() {
+        metadata.insert(
+            "goal_summary".to_owned(),
+            JsonValue::String(goal_summary.to_owned()),
+        );
+    }
+    if !batch_id.is_empty() {
+        metadata.insert(
+            "batch_id".to_owned(),
+            JsonValue::String(batch_id.to_owned()),
+        );
+    }
+    JsonValue::Object(metadata)
 }
 
 // ---------------------------------------------------------------------------
@@ -1530,8 +1783,15 @@ fn broadcast_approval_decision_events(
 fn event_run_id(ev: &proto::OrchestrationEvent) -> Option<&str> {
     match ev.event.as_ref()? {
         orchestration_event::Event::PlanTransitioned(p) => Some(&p.run_id),
-        orchestration_event::Event::TodoTransitioned(_)
-        | orchestration_event::Event::SubagentStopped(_) => None,
+        orchestration_event::Event::TodoTransitioned(_) => None,
+        // A stop is run-scoped only when it names the run that delegated the
+        // child (the wide-research live panel's per-item cards leave "running"
+        // on it). Before that field existed a stop named no run at all, so it
+        // was never deliverable on any run's stream — and an event recorded
+        // without it still is not.
+        orchestration_event::Event::SubagentStopped(p) => {
+            (!p.parent_run_id.is_empty()).then_some(p.parent_run_id.as_str())
+        }
         orchestration_event::Event::ApprovalStateChanged(p) => Some(&p.run_id),
         orchestration_event::Event::SubagentAttached(p) => Some(&p.parent_run_id),
         orchestration_event::Event::RunPausedForApproval(p) => Some(&p.run_id),
@@ -1571,10 +1831,12 @@ impl OrchestrationCoreService for OrchestrationGrpc {
             let caller = identity(&request)?;
             authorize_operation(&caller, "orchestration:read")?;
             let req = request.into_inner();
-            // `thread_id` is the plan-gate context-injection path (§2.4): the
-            // executing run needs the thread's latest APPROVED plan, which was
-            // proposed and approved on a DIFFERENT (earlier, plan-mode) run of
-            // the same thread, so a run_id-scoped lookup cannot find it.
+            // `thread_id` lists across run boundaries for a reader that has a
+            // conversation but no run: a model-proposed plan is proposed and
+            // approved on a DIFFERENT (earlier, plan-mode) run of the thread
+            // than the one that consumes it, so a run_id-scoped lookup cannot
+            // find it. (The gateway's own hand-over of an approved plan does
+            // not list: it fetches the one approved plan by id.)
             let plan_rows = if !req.run_id.is_empty() {
                 authorize_run_owner(&self.pool, &caller, &req.run_id, OwnerIntent::Read).await?;
                 store::list_plans_by_run(&self.pool, &req.run_id)
@@ -1665,36 +1927,45 @@ impl OrchestrationCoreService for OrchestrationGrpc {
                 !req.edited_steps.is_empty(),
             )?;
 
-            if !req.edited_steps.is_empty() {
+            let resolved = if req.edited_steps.is_empty() {
+                Vec::new()
+            } else {
                 let existing = store::list_steps_by_plan_full(&self.pool, &req.plan_id)
                     .await
                     .map_err(|e| Status::internal(e.to_string()))?;
-                let existing_ids: std::collections::HashSet<&str> =
-                    existing.iter().map(|s| s.id.as_str()).collect();
-                let mut resolved = Vec::with_capacity(req.edited_steps.len());
-                for edit in &req.edited_steps {
-                    let is_new = plan_step_edit_is_new(&edit.step_id, &existing_ids);
-                    let id = if is_new {
-                        format!("step_{}", mp_ids::new_ulid())
-                    } else {
-                        edit.step_id.clone()
-                    };
-                    resolved.push(store::PlanStepEditRow {
-                        id,
-                        is_new,
-                        title: edit.title.clone(),
-                        operation: edit.operation.clone(),
-                        removed: edit.removed,
-                    });
-                }
-                store::apply_plan_edits(&self.pool, &req.plan_id, &resolved)
-                    .await
-                    .map_err(|e| Status::internal(e.to_string()))?;
-            }
+                let existing_ids: Vec<&str> = existing.iter().map(|s| s.id.as_str()).collect();
+                resolve_plan_step_edits(
+                    &existing_ids,
+                    &req.edited_steps,
+                    req.target_state == proto::PlanState::Approved as i32,
+                    || format!("step_{}", mp_ids::new_ulid()),
+                )?
+            };
 
-            store::update_plan_status(&self.pool, &req.plan_id, new_status)
-                .await
-                .map_err(|e| Status::internal(e.to_string()))?;
+            // One compare-and-swap: the edits and the new status are written
+            // together, under a row lock, and only if the plan is STILL in
+            // the state the legality check above was made against. Two
+            // racing approvals (or an edit arriving after an approval) can
+            // no longer both pass — the loser writes nothing.
+            match store::transition_plan_atomic(
+                &self.pool,
+                &req.plan_id,
+                &before.status,
+                new_status,
+                &resolved,
+                &plan_decision_metadata(new_status, &req.actor, &req.reason),
+            )
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?
+            {
+                store::PlanTransitionOutcome::Applied => {}
+                store::PlanTransitionOutcome::Conflict { actual } => {
+                    return Err(Status::failed_precondition(format!(
+                        "the plan was decided by another request first (it is now {})",
+                        actual.as_deref().unwrap_or("gone")
+                    )));
+                }
+            }
 
             let after = store::get_plan(&self.pool, &req.plan_id)
                 .await
@@ -1751,12 +2022,7 @@ impl OrchestrationCoreService for OrchestrationGrpc {
             if req.org_id.is_empty() || req.user_id.is_empty() {
                 return Err(Status::invalid_argument("org_id and user_id are required"));
             }
-            if req.summary.trim().is_empty() {
-                return Err(Status::invalid_argument("summary is required"));
-            }
-            if req.steps.is_empty() {
-                return Err(Status::invalid_argument("at least one step is required"));
-            }
+            validate_proposed_plan_input(&req.summary, &req.steps, &req.supersedes)?;
             // Owner check against the THREAD's own durable owner row, not the
             // request body's claimed org_id/user_id — the same defense the
             // sibling `attach_subagent` RPC uses, so a caller cannot forge
@@ -1764,6 +2030,37 @@ impl OrchestrationCoreService for OrchestrationGrpc {
             authorize_thread_owner(&self.pool, &caller, &req.thread_id, OwnerIntent::Mutate)
                 .await?;
             caller.authorize_org(&req.org_id)?;
+            // `user_id` becomes the plan's OWNER column, and owner is what
+            // every later read and transition (including the approval that
+            // grants the run authority) is checked against. Left as the
+            // request body's claim, a user-bound caller could author a plan
+            // owned by someone else. A user credential therefore has to BE the
+            // user it names; a service caller (execution-core, acting for the
+            // run's user) is trusted to name it, as everywhere else in this
+            // service.
+            if !caller.is_service() {
+                caller.authorize_user(&req.user_id)?;
+            }
+            // The run the plan hangs off must be a run OF this thread: the FK
+            // only proves the run exists, so without this a plan could be
+            // attached to (and listed under) another conversation's run.
+            if !req.run_id.is_empty() {
+                let run_thread: Option<(String,)> =
+                    sqlx::query_as("SELECT thread_id FROM runs WHERE id = $1")
+                        .bind(&req.run_id)
+                        .fetch_optional(&self.pool)
+                        .await
+                        .map_err(|e| Status::internal(e.to_string()))?;
+                match run_thread {
+                    Some((thread_id,)) if thread_id == req.thread_id => {}
+                    Some(_) => {
+                        return Err(Status::permission_denied(
+                            "run_id does not belong to thread_id",
+                        ));
+                    }
+                    None => return Err(Status::not_found("run not found")),
+                }
+            }
 
             let plan_id = format!("plan_{}", mp_ids::new_ulid());
             // `metadata.author` records the caller's stated author label
@@ -1776,7 +2073,10 @@ impl OrchestrationCoreService for OrchestrationGrpc {
             // authored the text", only "who owns it").
             let mut metadata = serde_json::Map::new();
             if !req.author.is_empty() {
-                metadata.insert("author".to_owned(), JsonValue::String(req.author.clone()));
+                metadata.insert(
+                    "author".to_owned(),
+                    JsonValue::String(req.author.chars().take(64).collect()),
+                );
             }
             if !req.supersedes.is_empty() {
                 metadata.insert(
@@ -1790,8 +2090,8 @@ impl OrchestrationCoreService for OrchestrationGrpc {
                 .map(|s| {
                     (
                         format!("step_{}", mp_ids::new_ulid()),
-                        s.title.clone(),
-                        s.operation.clone(),
+                        s.title.trim().to_owned(),
+                        s.operation.trim().to_owned(),
                     )
                 })
                 .collect();
@@ -2772,12 +3072,19 @@ impl OrchestrationCoreService for OrchestrationGrpc {
                 .await?;
             let role_str = subagent_role_to_str(req.role);
 
+            // `goal_summary`/`batch_id` (wide-research fan-out §2.4) have no
+            // dedicated columns yet — reusing the existing `metadata` JSONB
+            // column `attach_subagent` already accepted (previously always
+            // an empty object) avoids a migration for two additive, optional
+            // fields. `LineageEdge`/`ListChildren` readback is unchanged in
+            // this pass (not needed by the live run panel, which reads the
+            // broadcast event below); only the live SSE path carries them.
             store::attach_subagent(
                 &self.pool,
                 &req.parent_run_id,
                 &req.child_run_id,
                 role_str,
-                &JsonValue::Object(serde_json::Map::new()),
+                &subagent_edge_metadata(&req.goal_summary, &req.batch_id),
             )
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
@@ -2803,6 +3110,8 @@ impl OrchestrationCoreService for OrchestrationGrpc {
                             parent_run_id: req.parent_run_id.clone(),
                             child_run_id: req.child_run_id.clone(),
                             role: req.role,
+                            goal_summary: req.goal_summary.clone(),
+                            batch_id: req.batch_id.clone(),
                         },
                     )),
                 },
@@ -3093,6 +3402,36 @@ mod tests {
     }
 
     #[test]
+    fn edited_steps_are_refused_on_a_move_the_lifecycle_would_otherwise_allow() {
+        // The test above cannot see the edit guard: every move it tries
+        // (EXECUTING/COMPLETED -> REJECTED) is refused by the lifecycle table
+        // anyway, so deleting the guard leaves it green. These are the moves the
+        // table DOES allow. With edits attached they must still be refused, or
+        // an already-approved plan's steps could be rewritten under the rung
+        // that was granted against the steps as approved (the claim
+        // APPROVED -> EXECUTING is the one such move the gateway makes itself).
+        for (from, to) in [
+            (proto::PlanState::Approved, proto::PlanState::Executing),
+            (proto::PlanState::Approved, proto::PlanState::Superseded),
+            (proto::PlanState::Executing, proto::PlanState::Completed),
+            (proto::PlanState::Executing, proto::PlanState::Failed),
+        ] {
+            assert!(
+                validate_plan_transition_legality(from as i32, to as i32, false).is_ok(),
+                "{from:?} -> {to:?} is a legal move without edits"
+            );
+            let error = validate_plan_transition_legality(from as i32, to as i32, true)
+                .expect_err(&format!("{from:?} -> {to:?} must refuse edited_steps"));
+            assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+            assert!(
+                error.message().contains("edited_steps"),
+                "the refusal must name the edits, not the transition: {}",
+                error.message()
+            );
+        }
+    }
+
+    #[test]
     fn proposed_to_rejected_needs_no_edits_and_is_accepted() {
         assert!(validate_plan_transition_legality(
             proto::PlanState::Proposed as i32,
@@ -3102,12 +3441,249 @@ mod tests {
         .is_ok());
     }
 
+    fn edit(step_id: &str, title: &str, removed: bool) -> proto::PlanStepEdit {
+        proto::PlanStepEdit {
+            step_id: step_id.to_owned(),
+            title: title.to_owned(),
+            operation: String::new(),
+            removed,
+        }
+    }
+
+    fn resolve(
+        existing: &[&str],
+        edits: &[proto::PlanStepEdit],
+        require_remaining: bool,
+    ) -> Result<Vec<store::PlanStepEditRow>, Status> {
+        let mut minted = 0;
+        resolve_plan_step_edits(existing, edits, require_remaining, || {
+            minted += 1;
+            format!("step_new_{minted}")
+        })
+    }
+
     #[test]
-    fn plan_step_edit_resolves_new_vs_existing_ids() {
-        let existing: std::collections::HashSet<&str> = ["step_1", "step_2"].into_iter().collect();
-        assert!(!plan_step_edit_is_new("step_1", &existing));
-        assert!(plan_step_edit_is_new("", &existing));
-        assert!(plan_step_edit_is_new("step_unknown", &existing));
+    fn plan_step_edits_resolve_new_vs_existing_ids_in_array_order() {
+        let rows = resolve(
+            &["step_1", "step_2"],
+            &[
+                edit("step_2", " Send it ", false),
+                edit("", "Follow up", false),
+                edit("step_1", "Draft the email", true),
+            ],
+            true,
+        )
+        .expect("a complete, well-formed edit set resolves");
+        let shape: Vec<(&str, bool, &str, bool)> = rows
+            .iter()
+            .map(|r| (r.id.as_str(), r.is_new, r.title.as_str(), r.removed))
+            .collect();
+        assert_eq!(
+            shape,
+            vec![
+                // Existing step keeps its id; the title is trimmed.
+                ("step_2", false, "Send it", false),
+                // An empty step_id is a NEW step and gets a minted id.
+                ("step_new_1", true, "Follow up", false),
+                // A removed step stays in the list (marked, never dropped).
+                ("step_1", false, "Draft the email", true),
+            ]
+        );
+    }
+
+    #[test]
+    fn plan_step_edits_refuse_an_unknown_step_id_instead_of_inserting_it() {
+        // Before: a stale/foreign id was silently treated as "new", so a
+        // browser holding the steps of a different or superseded plan turned
+        // into extra steps in this one.
+        let error = resolve(
+            &["step_1"],
+            &[edit("step_1", "Keep", false), edit("step_other_plan", "Ghost", false)],
+            true,
+        )
+        .expect_err("an id that is not in this plan must be refused");
+        assert_eq!(error.code(), tonic::Code::InvalidArgument);
+    }
+
+    #[test]
+    fn plan_step_edits_must_list_every_existing_step() {
+        // Before: an omitted step kept its old ordinal and stayed `pending` —
+        // still in the plan the executing run is told was approved — or
+        // collided with an edited step's new ordinal and 500'd the approval.
+        let error = resolve(&["step_1", "step_2"], &[edit("step_2", "Only this", false)], true)
+            .expect_err("a step missing from the edit set must be refused");
+        assert_eq!(error.code(), tonic::Code::InvalidArgument);
+        assert!(error.message().contains("step_1"), "{}", error.message());
+    }
+
+    #[test]
+    fn plan_step_edits_refuse_a_step_listed_twice() {
+        let error = resolve(
+            &["step_1"],
+            &[edit("step_1", "One", false), edit("step_1", "Again", false)],
+            true,
+        )
+        .expect_err("the same step twice must be refused");
+        assert_eq!(error.code(), tonic::Code::InvalidArgument);
+    }
+
+    #[test]
+    fn plan_step_edits_refuse_blank_titles_on_kept_steps() {
+        assert!(resolve(&["step_1"], &[edit("step_1", "   ", false)], true).is_err());
+        assert!(resolve(&["step_1"], &[edit("step_1", "Keep", false), edit("", "", false)], true)
+            .is_err());
+        // A REMOVED step's title is irrelevant — it is being decided against.
+        assert!(resolve(
+            &["step_1", "step_2"],
+            &[edit("step_1", "", true), edit("step_2", "Keep", false)],
+            true
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn plan_step_edits_refuse_an_approval_with_every_step_removed() {
+        let all_removed = [edit("step_1", "A", true), edit("step_2", "B", true)];
+        let error = resolve(&["step_1", "step_2"], &all_removed, true)
+            .expect_err("approving a plan with nothing left to do is a rubber stamp");
+        assert_eq!(error.code(), tonic::Code::InvalidArgument);
+        // Not an approval (e.g. a reject that carries edits): nothing to guard.
+        assert!(resolve(&["step_1", "step_2"], &all_removed, false).is_ok());
+    }
+
+    #[test]
+    fn plan_step_edits_drop_a_step_added_and_removed_in_one_session() {
+        let rows = resolve(
+            &["step_1"],
+            &[edit("step_1", "Keep", false), edit("", "Never real", true)],
+            true,
+        )
+        .expect("resolves");
+        assert_eq!(rows.len(), 1, "a never-proposed step leaves no audit row");
+        assert_eq!(rows[0].id, "step_1");
+    }
+
+    #[test]
+    fn plan_step_edits_are_bounded() {
+        let too_many: Vec<proto::PlanStepEdit> = (0..=MAX_PLAN_STEP_EDITS)
+            .map(|i| edit("", &format!("step {i}"), false))
+            .collect();
+        assert!(resolve(&[], &too_many, false).is_err());
+        let long = "x".repeat(MAX_PLAN_TITLE_CHARS + 1);
+        assert!(resolve(&["step_1"], &[edit("step_1", &long, false)], true).is_err());
+    }
+
+    fn proposed(title: &str) -> proto::ProposedPlanStep {
+        proto::ProposedPlanStep {
+            title: title.to_owned(),
+            operation: String::new(),
+        }
+    }
+
+    #[test]
+    fn proposed_plan_input_is_bounded_and_complete() {
+        assert!(validate_proposed_plan_input("Send it", &[proposed("Draft")], "").is_ok());
+        assert!(validate_proposed_plan_input("  ", &[proposed("Draft")], "").is_err());
+        assert!(validate_proposed_plan_input("Send it", &[], "").is_err());
+        assert!(validate_proposed_plan_input("Send it", &[proposed("  ")], "").is_err());
+        let many: Vec<_> = (0..=MAX_PLAN_STEPS).map(|i| proposed(&format!("s{i}"))).collect();
+        assert!(validate_proposed_plan_input("Send it", &many, "").is_err());
+        let long_title = proposed(&"x".repeat(MAX_PLAN_TITLE_CHARS + 1));
+        assert!(validate_proposed_plan_input("Send it", &[long_title], "").is_err());
+        let long_summary = "y".repeat(MAX_PLAN_SUMMARY_CHARS + 1);
+        assert!(validate_proposed_plan_input(&long_summary, &[proposed("Draft")], "").is_err());
+        let long_ref = "z".repeat(MAX_PLAN_SUPERSEDES_CHARS + 1);
+        assert!(validate_proposed_plan_input("Send it", &[proposed("Draft")], &long_ref).is_err());
+    }
+
+    #[test]
+    fn a_decided_plan_cannot_be_decided_again() {
+        // Rejecting is a decision on a PROPOSED plan. It used to be accepted
+        // from any state, so an approved (granted, being executed) or already
+        // completed plan could be flipped to REJECTED afterwards.
+        for decided in [
+            proto::PlanState::Approved,
+            proto::PlanState::Executing,
+            proto::PlanState::Completed,
+            proto::PlanState::Rejected,
+            proto::PlanState::Superseded,
+        ] {
+            let error = validate_plan_transition_legality(
+                decided as i32,
+                proto::PlanState::Rejected as i32,
+                false,
+            )
+            .expect_err(&format!("{decided:?} -> REJECTED must be refused"));
+            assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+        }
+    }
+
+    #[test]
+    fn a_rejected_plan_cannot_be_revived() {
+        // Owner ruling (2026-09-27): no revise-after-reject in this wave.
+        for revived in [
+            proto::PlanState::Proposed,
+            proto::PlanState::Draft,
+            proto::PlanState::Executing,
+        ] {
+            assert!(
+                validate_plan_transition_legality(
+                    proto::PlanState::Rejected as i32,
+                    revived as i32,
+                    false,
+                )
+                .is_err(),
+                "REJECTED -> {revived:?} must be refused"
+            );
+        }
+    }
+
+    #[test]
+    fn the_lifecycle_transitions_the_gate_relies_on_stay_legal() {
+        // propose -> approve, propose -> reject, propose -> supersede (the
+        // model revising itself) and approve -> executing (consumption by
+        // the next run) are the moves plan-gate itself makes.
+        for (from, to) in [
+            (proto::PlanState::Proposed, proto::PlanState::Approved),
+            (proto::PlanState::Proposed, proto::PlanState::Rejected),
+            (proto::PlanState::Proposed, proto::PlanState::Superseded),
+            (proto::PlanState::Approved, proto::PlanState::Executing),
+            (proto::PlanState::Approved, proto::PlanState::Superseded),
+        ] {
+            assert!(
+                validate_plan_transition_legality(from as i32, to as i32, false).is_ok(),
+                "{from:?} -> {to:?} must stay legal"
+            );
+        }
+    }
+
+    #[test]
+    fn a_decision_leaves_a_per_state_receipt_on_the_plan() {
+        let approved = plan_decision_metadata("approved", "user_42", "  writes the report  ");
+        assert_eq!(approved["approved_by"], "user_42");
+        assert_eq!(approved["approved_reason"], "writes the report");
+        // The later EXECUTING claim must not overwrite the approval's receipt.
+        let executing = plan_decision_metadata("executing", "user_42", "consumed by the run");
+        assert!(executing.get("approved_by").is_none());
+        assert_eq!(executing["executing_by"], "user_42");
+        // Nothing to say is nothing written — no empty-string keys.
+        let bare = plan_decision_metadata("rejected", "", "   ");
+        assert_eq!(bare, serde_json::json!({}));
+        // Free text is bounded.
+        let long = plan_decision_metadata("rejected", "u", &"r".repeat(5_000));
+        assert_eq!(long["rejected_reason"].as_str().map(str::len), Some(1_000));
+    }
+
+    #[test]
+    fn a_transition_to_the_same_state_is_refused_so_consumption_is_single_use() {
+        // approved_plan_context marks a plan EXECUTING before injecting it; a
+        // second run racing for the same plan must lose that transition.
+        assert!(validate_plan_transition_legality(
+            proto::PlanState::Executing as i32,
+            proto::PlanState::Executing as i32,
+            false,
+        )
+        .is_err());
     }
 
     #[test]
@@ -3276,6 +3852,29 @@ mod tests {
     }
 
     #[test]
+    fn a_subagent_edge_persists_its_goal_and_batch_only_when_set() {
+        assert_eq!(
+            subagent_edge_metadata("look up carrier docs", "run-1:tool_1_fan-1"),
+            serde_json::json!({
+                "goal_summary": "look up carrier docs",
+                "batch_id": "run-1:tool_1_fan-1",
+            })
+        );
+        // A standalone `subagent.task` has no batch to group under.
+        assert_eq!(
+            subagent_edge_metadata("summarise Q3", ""),
+            serde_json::json!({ "goal_summary": "summarise Q3" })
+        );
+        // A ZDR run (execution-core blanks the goal) or a caller that predates
+        // the fields stores the empty object it always did — no empty strings.
+        assert_eq!(subagent_edge_metadata("", ""), serde_json::json!({}));
+        assert_eq!(
+            subagent_edge_metadata("", "run-1:tool_1_fan-1"),
+            serde_json::json!({ "batch_id": "run-1:tool_1_fan-1" })
+        );
+    }
+
+    #[test]
     fn subagent_role_unknown_falls_back_to_generic() {
         assert_eq!(
             subagent_role_from_str("nonsense"),
@@ -3381,6 +3980,7 @@ mod tests {
                 orchestration_event::SubagentStopped {
                     child_run_id: "run_x".into(),
                     status: "completed".into(),
+                    parent_run_id: "run_p".into(),
                 },
             )),
         };
@@ -3430,6 +4030,37 @@ mod tests {
         assert!(
             replay.replay_after("thread_1", "").await.is_empty(),
             "thread-only event not buffered under a run"
+        );
+    }
+
+    /// The end-to-end shape of the fix: a stop that names its parent lands in
+    /// THAT run's replay buffer (and so on its live stream), and a legacy one
+    /// with no parent lands nowhere — the state every stop was in before the
+    /// field existed, which is why no card could ever leave "running".
+    #[tokio::test]
+    async fn a_subagent_stop_reaches_its_parent_runs_stream_only_when_it_names_it() {
+        let (tx, _rx) = broadcast::channel::<proto::OrchestrationEvent>(8);
+        let replay = ReplayBuffer::default();
+        let stop = |parent: &str| proto::OrchestrationEvent {
+            event_id: String::new(),
+            at: Some(now_ts()),
+            event: Some(orchestration_event::Event::SubagentStopped(
+                orchestration_event::SubagentStopped {
+                    child_run_id: "run_c".into(),
+                    status: "completed".into(),
+                    parent_run_id: parent.into(),
+                },
+            )),
+        };
+
+        broadcast_event(&tx, &replay, stop("run_p"));
+        broadcast_event(&tx, &replay, stop(""));
+
+        let buffered = replay.replay_after("run_p", "").await;
+        assert_eq!(buffered.len(), 1, "only the stop that named a parent is routed");
+        assert!(
+            replay.replay_after("", "").await.is_empty(),
+            "an unparented stop is never buffered under an empty run key"
         );
     }
 
@@ -3506,10 +4137,42 @@ mod tests {
                     parent_run_id: "run_p".into(),
                     child_run_id: "run_c".into(),
                     role: 0,
+                    goal_summary: String::new(),
+                    batch_id: String::new(),
                 },
             )),
         };
         assert_eq!(event_run_id(&attach), Some("run_p"));
+
+        // A stop that names the run that delegated the child is run-scoped, so
+        // it reaches that run's stream (wide-research live panel cards).
+        let stopped = proto::OrchestrationEvent {
+            event_id: String::new(),
+            at: None,
+            event: Some(orchestration_event::Event::SubagentStopped(
+                orchestration_event::SubagentStopped {
+                    child_run_id: "run_c".into(),
+                    status: "completed".into(),
+                    parent_run_id: "run_p".into(),
+                },
+            )),
+        };
+        assert_eq!(event_run_id(&stopped), Some("run_p"));
+
+        // One recorded without a parent (before the field existed) names no run
+        // and stays undeliverable per run — never routed under an empty key.
+        let stopped_unparented = proto::OrchestrationEvent {
+            event_id: String::new(),
+            at: None,
+            event: Some(orchestration_event::Event::SubagentStopped(
+                orchestration_event::SubagentStopped {
+                    child_run_id: "run_c".into(),
+                    status: "completed".into(),
+                    parent_run_id: String::new(),
+                },
+            )),
+        };
+        assert_eq!(event_run_id(&stopped_unparented), None);
 
         // If a future verified continuation emits RunResumedAfterApproval, it
         // remains run-scoped so it lands in the per-run replay buffer (SSE
@@ -4010,5 +4673,1306 @@ mod tests {
         assert_eq!(metrics.approvals_requested, 0);
         assert_eq!(metrics.median_seconds_receipt_to_outcome, 0);
         assert_eq!(metrics.org_id, "org-1");
+    }
+
+    // =====================================================================
+    // plan-gate against a REAL Postgres (chat gap-closure plan, task B10)
+    // =====================================================================
+    //
+    // Everything above proves the plan gate's rules against fixtures. The SQL
+    // that enforces them -- the `FOR UPDATE` compare-and-swap in
+    // `transition_plan_atomic`, the two-pass ordinal parking in
+    // `apply_plan_edits`, the supersede statements in `create_proposed_plan`
+    // and the `(plan_id, ordinal)` unique index -- never ran against Postgres.
+    // These tests call the real gRPC handlers on a real database.
+    //
+    // They are #[ignore]d so a plain `cargo test` (no database) skips them. Run
+    // them against a SCRATCH database, never the live dev one:
+    //
+    //   DATABASE_URL=postgres://.../plan_gate_test \
+    //     cargo test -p session-core --bin session-core plan_gate -- --ignored
+    //
+    // Every test works under its own org, thread and run ids, so they run in
+    // parallel on one database; the harness refuses a database whose name does
+    // not contain "test", because the tests write rows.
+    mod plan_gate_pg {
+        use super::*;
+        use std::str::FromStr as _;
+        use std::time::Duration;
+
+        /// `(ordinal, id, status, title, operation)` of one `plan_steps` row.
+        type StepRow = (i64, String, String, String, String);
+
+        fn scratch_database_url() -> String {
+            let url = std::env::var("DATABASE_URL")
+                .expect("DATABASE_URL must point at a scratch Postgres, e.g. .../plan_gate_test");
+            let database = url
+                .split('?')
+                .next()
+                .unwrap_or_default()
+                .rsplit('/')
+                .next()
+                .unwrap_or_default();
+            assert!(
+                database.contains("test"),
+                "refusing to run the plan-gate tests against database {database:?}: they write \
+                 rows. Use a scratch database whose name contains \"test\"."
+            );
+            url
+        }
+
+        fn lower_ulid() -> String {
+            mp_ids::new_ulid().to_lowercase()
+        }
+
+        fn as_person<T>(org_id: &str, user_id: &str, message: T) -> Request<T> {
+            let mut request = Request::new(message);
+            request
+                .extensions_mut()
+                .insert(VerifiedIdentity::user_for_test(org_id, user_id));
+            request
+        }
+
+        fn plan_edit(
+            step_id: &str,
+            title: &str,
+            operation: &str,
+            removed: bool,
+        ) -> proto::PlanStepEdit {
+            proto::PlanStepEdit {
+                step_id: step_id.to_owned(),
+                title: title.to_owned(),
+                operation: operation.to_owned(),
+                removed,
+            }
+        }
+
+        /// One tenant's worth of rows plus the real service on a real pool.
+        #[derive(Clone)]
+        struct PlanGateDb {
+            svc: Arc<OrchestrationGrpc>,
+            pool: Pool,
+            app_name: String,
+            org: String,
+            user: String,
+            thread: String,
+        }
+
+        impl PlanGateDb {
+            async fn connect() -> Self {
+                let url = scratch_database_url();
+                let tag = lower_ulid();
+                let app_name = format!("plan_gate_{tag}");
+                let options = sqlx::postgres::PgConnectOptions::from_str(&url)
+                    .expect("DATABASE_URL parses")
+                    .application_name(&app_name);
+                let pool = sqlx::postgres::PgPoolOptions::new()
+                    .max_connections(8)
+                    .connect_with(options)
+                    .await
+                    .expect("connect pg");
+                sqlx::migrate!("./migrations")
+                    .run(&pool)
+                    .await
+                    .expect("migrate");
+                let (events_tx, _events_rx) = broadcast::channel(64);
+                let db = Self {
+                    svc: Arc::new(OrchestrationGrpc::new(pool.clone(), events_tx)),
+                    pool,
+                    app_name,
+                    org: format!("org-pg-{tag}"),
+                    user: format!("user-pg-{tag}"),
+                    thread: format!("thread-pg-{tag}"),
+                };
+                db.seed_thread(&db.thread).await;
+                db
+            }
+
+            async fn seed_thread(&self, id: &str) {
+                sqlx::query(
+                    "INSERT INTO threads (id, session_key, org_id, user_id) VALUES ($1, $1, $2, $3)",
+                )
+                .bind(id)
+                .bind(&self.org)
+                .bind(&self.user)
+                .execute(&self.pool)
+                .await
+                .expect("seed thread");
+            }
+
+            async fn new_thread(&self) -> String {
+                let id = format!("thread-pg-{}", lower_ulid());
+                self.seed_thread(&id).await;
+                id
+            }
+
+            async fn new_run(&self, thread: &str) -> String {
+                let id = format!("run-pg-{}", lower_ulid());
+                sqlx::query(
+                    "INSERT INTO runs (id, thread_id, goal, org_id, user_id) VALUES ($1, $2, 'g', $3, $4)",
+                )
+                .bind(&id)
+                .bind(thread)
+                .bind(&self.org)
+                .bind(&self.user)
+                .execute(&self.pool)
+                .await
+                .expect("seed run");
+                id
+            }
+
+            /// execution-core's identity, as `plan.propose` calls `ProposePlan`.
+            fn as_exec_core<T>(&self, message: T) -> Request<T> {
+                let mut request = Request::new(message);
+                request
+                    .extensions_mut()
+                    .insert(VerifiedIdentity::service_for_test_as(
+                        &self.org,
+                        "service:execution-core",
+                        &["orchestration:write"],
+                        false,
+                    ));
+                request
+            }
+
+            /// The person who owns the thread, as the approving browser calls
+            /// `TransitionPlan`.
+            fn as_owner<T>(&self, message: T) -> Request<T> {
+                as_person(&self.org, &self.user, message)
+            }
+
+            async fn try_propose(
+                &self,
+                thread: &str,
+                run: &str,
+                steps: &[(&str, &str)],
+                supersedes: &str,
+            ) -> Result<proto::Plan, Status> {
+                let request = proto::ProposePlanRequest {
+                    thread_id: thread.to_owned(),
+                    run_id: run.to_owned(),
+                    org_id: self.org.clone(),
+                    user_id: self.user.clone(),
+                    author: "agent".to_owned(),
+                    summary: "Plan under test".to_owned(),
+                    steps: steps
+                        .iter()
+                        .map(|(title, operation)| proto::ProposedPlanStep {
+                            title: (*title).to_owned(),
+                            operation: (*operation).to_owned(),
+                        })
+                        .collect(),
+                    supersedes: supersedes.to_owned(),
+                };
+                self.svc
+                    .propose_plan(self.as_exec_core(request))
+                    .await
+                    .map(|response| response.into_inner().plan.expect("plan in response"))
+            }
+
+            async fn propose_with_ops(
+                &self,
+                thread: &str,
+                run: &str,
+                steps: &[(&str, &str)],
+                supersedes: &str,
+            ) -> proto::Plan {
+                self.try_propose(thread, run, steps, supersedes)
+                    .await
+                    .expect("ProposePlan")
+            }
+
+            async fn propose(
+                &self,
+                thread: &str,
+                run: &str,
+                titles: &[&str],
+                supersedes: &str,
+            ) -> proto::Plan {
+                let steps: Vec<(&str, &str)> = titles.iter().map(|t| (*t, "")).collect();
+                self.propose_with_ops(thread, run, &steps, supersedes).await
+            }
+
+            /// A plan on the owner's own thread with three untitled-operation
+            /// steps ("Step one" .. "Step three").
+            async fn propose_three(&self) -> proto::Plan {
+                self.propose(
+                    &self.thread.clone(),
+                    "",
+                    &["Step one", "Step two", "Step three"],
+                    "",
+                )
+                .await
+            }
+
+            async fn decide(
+                &self,
+                plan_id: &str,
+                target: proto::PlanState,
+                reason: &str,
+                edits: Vec<proto::PlanStepEdit>,
+            ) -> Result<proto::Plan, Status> {
+                let request = proto::TransitionPlanRequest {
+                    plan_id: plan_id.to_owned(),
+                    target_state: target as i32,
+                    actor: "forged-actor".to_owned(),
+                    reason: reason.to_owned(),
+                    edited_steps: edits,
+                };
+                self.svc
+                    .transition_plan(self.as_owner(request))
+                    .await
+                    .map(|response| response.into_inner().plan.expect("plan in response"))
+            }
+
+            async fn status_of(&self, plan_id: &str) -> String {
+                sqlx::query_scalar("SELECT status FROM plans WHERE id = $1")
+                    .bind(plan_id)
+                    .fetch_one(&self.pool)
+                    .await
+                    .expect("plan status")
+            }
+
+            async fn metadata_of(&self, plan_id: &str) -> JsonValue {
+                sqlx::query_scalar("SELECT metadata FROM plans WHERE id = $1")
+                    .bind(plan_id)
+                    .fetch_one(&self.pool)
+                    .await
+                    .expect("plan metadata")
+            }
+
+            async fn steps_of(&self, plan_id: &str) -> Vec<StepRow> {
+                sqlx::query_as(
+                    "SELECT ordinal, id, status, COALESCE(payload->>'title', ''), kind \
+                     FROM plan_steps WHERE plan_id = $1 ORDER BY ordinal",
+                )
+                .bind(plan_id)
+                .fetch_all(&self.pool)
+                .await
+                .expect("plan steps")
+            }
+
+            /// Take a row lock on the plan, exactly as a rival writer would, and
+            /// keep it until the returned transaction is ended.
+            async fn hold_plan_row(
+                &self,
+                plan_id: &str,
+            ) -> sqlx::Transaction<'static, sqlx::Postgres> {
+                let mut hold = self.pool.begin().await.expect("begin");
+                sqlx::query("SELECT id FROM plans WHERE id = $1 FOR UPDATE")
+                    .bind(plan_id)
+                    .fetch_one(&mut *hold)
+                    .await
+                    .expect("lock plan row");
+                hold
+            }
+
+            /// Wait until `expected` of this test's own backends are blocked on a
+            /// row lock, so a race is provably queued on the lock rather than
+            /// assumed to be.
+            async fn wait_for_lock_waiters(&self, expected: i64) {
+                for _ in 0..400 {
+                    let waiting: i64 = sqlx::query_scalar(
+                        "SELECT count(*) FROM pg_stat_activity \
+                         WHERE application_name = $1 AND wait_event_type = 'Lock'",
+                    )
+                    .bind(&self.app_name)
+                    .fetch_one(&self.pool)
+                    .await
+                    .expect("pg_stat_activity");
+                    if waiting >= expected {
+                        return;
+                    }
+                    tokio::time::sleep(Duration::from_millis(25)).await;
+                }
+                panic!("{expected} statements never queued on the plan row lock");
+            }
+
+            async fn cleanup(&self) {
+                for statement in [
+                    "DELETE FROM plan_steps WHERE plan_id IN (SELECT id FROM plans WHERE org_id = $1)",
+                    "DELETE FROM plans WHERE org_id = $1",
+                    "DELETE FROM runs WHERE org_id = $1",
+                    "DELETE FROM threads WHERE org_id = $1",
+                ] {
+                    sqlx::query(statement)
+                        .bind(&self.org)
+                        .execute(&self.pool)
+                        .await
+                        .expect("cleanup");
+                }
+            }
+        }
+
+        fn state(plan: &proto::Plan) -> i32 {
+            plan.state
+        }
+
+        fn ordinals(rows: &[StepRow]) -> Vec<i64> {
+            rows.iter().map(|row| row.0).collect()
+        }
+
+        /// A decision's outcome pair -> `(winner index, the loser's refusal)`.
+        /// Anything but exactly one winner is the defect under test.
+        fn single_winner(
+            first: Result<proto::Plan, Status>,
+            second: Result<proto::Plan, Status>,
+        ) -> (usize, Status) {
+            match (first, second) {
+                (Ok(_), Err(refusal)) => (0, refusal),
+                (Err(refusal), Ok(_)) => (1, refusal),
+                (Ok(_), Ok(_)) => panic!(
+                    "both racing decisions succeeded: the compare-and-swap let two requests \
+                     decide one plan"
+                ),
+                (Err(a), Err(b)) => {
+                    panic!("both racing decisions failed (first: {a}; second: {b})")
+                }
+            }
+        }
+
+        /// Fire two decisions on one plan at once. With `hold_lock` the plan row
+        /// is locked first, so both handlers are certain to have READ the plan
+        /// in its old state (a plain read is not blocked by a row lock) and to be
+        /// queued on the `FOR UPDATE` before either can commit: the loser must
+        /// then be stopped by the status re-check under the lock, not by the
+        /// handler's earlier legality check.
+        async fn race(
+            db: &PlanGateDb,
+            plan_id: &str,
+            target: proto::PlanState,
+            first: (&str, Vec<proto::PlanStepEdit>),
+            second: (&str, Vec<proto::PlanStepEdit>),
+            hold_lock: bool,
+        ) -> (Result<proto::Plan, Status>, Result<proto::Plan, Status>) {
+            let hold = if hold_lock {
+                Some(db.hold_plan_row(plan_id).await)
+            } else {
+                None
+            };
+            let spawn_decision = |(reason, edits): (&str, Vec<proto::PlanStepEdit>)| {
+                let db = db.clone();
+                let plan_id = plan_id.to_owned();
+                let reason = reason.to_owned();
+                tokio::spawn(async move { db.decide(&plan_id, target, &reason, edits).await })
+            };
+            let first = spawn_decision(first);
+            let second = spawn_decision(second);
+            if let Some(hold) = hold {
+                db.wait_for_lock_waiters(2).await;
+                assert!(
+                    !first.is_finished() && !second.is_finished(),
+                    "a decision finished while the plan row was locked: it is not waiting on the lock"
+                );
+                hold.rollback().await.expect("release plan row");
+            }
+            (
+                first.await.expect("first decision task"),
+                second.await.expect("second decision task"),
+            )
+        }
+
+        // -----------------------------------------------------------------
+        // propose
+        // -----------------------------------------------------------------
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        #[ignore = "requires DATABASE_URL to a SCRATCH Postgres (name contains \"test\")"]
+        async fn plan_gate_propose_stores_a_proposed_plan_with_ordered_pending_steps() {
+            let db = PlanGateDb::connect().await;
+            let run = db.new_run(&db.thread).await;
+            let plan = db
+                .propose_with_ops(
+                    &db.thread,
+                    &run,
+                    &[
+                        ("Draft the report", "draft"),
+                        ("Email it", "email.send"),
+                        ("File a copy", ""),
+                    ],
+                    "",
+                )
+                .await;
+
+            assert_eq!(state(&plan), proto::PlanState::Proposed as i32);
+            assert_eq!(plan.run_id, run);
+            assert_eq!(
+                plan.author, db.user,
+                "the owner column holds the real end user, never the agent label"
+            );
+            let shape: Vec<(&str, &str, i32)> = plan
+                .steps
+                .iter()
+                .map(|s| (s.title.as_str(), s.operation.as_str(), s.state))
+                .collect();
+            let pending = proto::PlanStepState::Pending as i32;
+            assert_eq!(
+                shape,
+                vec![
+                    ("Draft the report", "draft", pending),
+                    ("Email it", "email.send", pending),
+                    ("File a copy", "", pending),
+                ]
+            );
+            let rows = db.steps_of(&plan.id).await;
+            assert_eq!(ordinals(&rows), vec![1, 2, 3]);
+            assert_eq!(db.metadata_of(&plan.id).await["author"], "agent");
+            db.cleanup().await;
+        }
+
+        // -----------------------------------------------------------------
+        // approve with edits: rewrite, reorder, remove, add
+        // -----------------------------------------------------------------
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        #[ignore = "requires DATABASE_URL to a SCRATCH Postgres (name contains \"test\")"]
+        async fn plan_gate_approval_applies_rewrite_reorder_remove_and_add() {
+            let db = PlanGateDb::connect().await;
+            let plan = db
+                .propose_with_ops(
+                    &db.thread,
+                    "",
+                    &[
+                        ("Draft the report", "draft"),
+                        ("Email the report", "email.send"),
+                        ("File a copy", "files.write"),
+                        ("Archive", "archive"),
+                    ],
+                    "",
+                )
+                .await;
+            let [a, b, c, d] = [0, 1, 2, 3].map(|i| plan.steps[i].id.clone());
+
+            let approved = db
+                .decide(
+                    &plan.id,
+                    proto::PlanState::Approved,
+                    "looks right",
+                    vec![
+                        // reworded and moved to the front
+                        plan_edit(&d, "Archive the thread", "archive", false),
+                        plan_edit(&a, "Draft the summary", "draft", false),
+                        // removed: the browser's copy of the title must not overwrite the proposal
+                        plan_edit(&b, "NOT WHAT WAS PROPOSED", "", true),
+                        // brand new, between existing steps
+                        plan_edit("", "Notify the team", "chat.post", false),
+                        plan_edit(&c, "File a copy", "files.write", false),
+                    ],
+                )
+                .await
+                .expect("approval with edits");
+
+            assert_eq!(state(&approved), proto::PlanState::Approved as i32);
+            let rows = db.steps_of(&plan.id).await;
+            assert_eq!(
+                ordinals(&rows),
+                vec![1, 2, 3, 4, 5],
+                "contiguous, positive ordinals: no parked (negative) ordinal may survive"
+            );
+            assert_eq!(rows.len(), 5, "a removed step is skipped, never deleted");
+            let new_id = rows[3].1.clone();
+            assert!(
+                new_id.starts_with("step_") && ![&a, &b, &c, &d].contains(&&new_id),
+                "the new step gets a freshly minted id, got {new_id}"
+            );
+            let shape: Vec<(&str, &str, &str, &str)> = rows
+                .iter()
+                .map(|r| (r.1.as_str(), r.2.as_str(), r.3.as_str(), r.4.as_str()))
+                .collect();
+            assert_eq!(
+                shape,
+                vec![
+                    (d.as_str(), "pending", "Archive the thread", "archive"),
+                    (a.as_str(), "pending", "Draft the summary", "draft"),
+                    (b.as_str(), "skipped", "Email the report", "email.send"),
+                    (new_id.as_str(), "pending", "Notify the team", "chat.post"),
+                    (c.as_str(), "pending", "File a copy", "files.write"),
+                ],
+                "the removed step keeps the title and operation it was proposed with"
+            );
+            // the response carries the same steps, in the same order and states
+            let response_shape: Vec<(&str, i32)> = approved
+                .steps
+                .iter()
+                .map(|s| (s.id.as_str(), s.state))
+                .collect();
+            let skipped = proto::PlanStepState::Skipped as i32;
+            let pending = proto::PlanStepState::Pending as i32;
+            assert_eq!(
+                response_shape,
+                vec![
+                    (d.as_str(), pending),
+                    (a.as_str(), pending),
+                    (b.as_str(), skipped),
+                    (new_id.as_str(), pending),
+                    (c.as_str(), pending),
+                ]
+            );
+            // the approval is a receipt on the plan itself, under the VERIFIED actor
+            let metadata = db.metadata_of(&plan.id).await;
+            assert_eq!(metadata["approved_by"], db.user.as_str());
+            assert_eq!(metadata["approved_reason"], "looks right");
+            db.cleanup().await;
+        }
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        #[ignore = "requires DATABASE_URL to a SCRATCH Postgres (name contains \"test\")"]
+        async fn plan_gate_approval_without_edits_leaves_the_steps_untouched() {
+            let db = PlanGateDb::connect().await;
+            let plan = db.propose_three().await;
+            let before = db.steps_of(&plan.id).await;
+            let approved = db
+                .decide(&plan.id, proto::PlanState::Approved, "", Vec::new())
+                .await
+                .expect("plain approval");
+            assert_eq!(state(&approved), proto::PlanState::Approved as i32);
+            assert_eq!(db.steps_of(&plan.id).await, before);
+            assert_eq!(db.status_of(&plan.id).await, "approved");
+            db.cleanup().await;
+        }
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        #[ignore = "requires DATABASE_URL to a SCRATCH Postgres (name contains \"test\")"]
+        async fn plan_gate_rejection_with_every_step_removed_skips_them_all() {
+            let db = PlanGateDb::connect().await;
+            let plan = db.propose_three().await;
+            let ids: Vec<String> = plan.steps.iter().map(|s| s.id.clone()).collect();
+            let rejected = db
+                .decide(
+                    &plan.id,
+                    proto::PlanState::Rejected,
+                    "not now",
+                    ids.iter().map(|id| plan_edit(id, "", "", true)).collect(),
+                )
+                .await
+                .expect("rejection may carry removals");
+            assert_eq!(state(&rejected), proto::PlanState::Rejected as i32);
+            let rows = db.steps_of(&plan.id).await;
+            assert_eq!(rows.len(), 3);
+            assert!(rows.iter().all(|r| r.2 == "skipped"), "{rows:?}");
+            assert_eq!(
+                rows.iter().map(|r| r.3.as_str()).collect::<Vec<_>>(),
+                vec!["Step one", "Step two", "Step three"]
+            );
+            assert_eq!(db.metadata_of(&plan.id).await["rejected_reason"], "not now");
+            db.cleanup().await;
+        }
+
+        // -----------------------------------------------------------------
+        // (plan_id, ordinal) unique index survives reorders combined with removals
+        // -----------------------------------------------------------------
+
+        /// Approve a plan of `titles.len()` steps with the edit list `order`
+        /// (`(original index, removed)` per position), and check the stored
+        /// steps follow it with contiguous ordinals.
+        async fn approve_in_order(db: &PlanGateDb, titles: &[&str], order: &[(usize, bool)]) {
+            let plan = db.propose(&db.thread, "", titles, "").await;
+            let ids: Vec<String> = plan.steps.iter().map(|s| s.id.clone()).collect();
+            let edits: Vec<proto::PlanStepEdit> = order
+                .iter()
+                .map(|&(index, removed)| {
+                    plan_edit(
+                        &ids[index],
+                        if removed { "" } else { titles[index] },
+                        "",
+                        removed,
+                    )
+                })
+                .collect();
+            db.decide(&plan.id, proto::PlanState::Approved, "", edits)
+                .await
+                .unwrap_or_else(|e| {
+                    panic!("reorder {order:?} must not collide on (plan_id, ordinal): {e}")
+                });
+            let rows = db.steps_of(&plan.id).await;
+            assert_eq!(
+                ordinals(&rows),
+                (1..=i64::try_from(titles.len()).expect("small")).collect::<Vec<_>>(),
+                "order {order:?}"
+            );
+            let got: Vec<(&str, &str, &str)> = rows
+                .iter()
+                .map(|r| (r.1.as_str(), r.2.as_str(), r.3.as_str()))
+                .collect();
+            let want: Vec<(&str, &str, &str)> = order
+                .iter()
+                .map(|&(index, removed)| {
+                    (
+                        ids[index].as_str(),
+                        if removed { "skipped" } else { "pending" },
+                        titles[index],
+                    )
+                })
+                .collect();
+            assert_eq!(got, want, "order {order:?}");
+        }
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        #[ignore = "requires DATABASE_URL to a SCRATCH Postgres (name contains \"test\")"]
+        async fn plan_gate_reorder_after_a_removal_does_not_collide_on_the_ordinal_index() {
+            let db = PlanGateDb::connect().await;
+            let three = ["A", "B", "C"];
+            // reverse, with the middle step removed
+            approve_in_order(&db, &three, &[(2, false), (1, true), (0, false)]).await;
+            // rotate left; the step that wraps to the end is the removed one
+            approve_in_order(&db, &three, &[(1, false), (2, false), (0, true)]).await;
+            // the first step removed where it stands while the other two swap
+            approve_in_order(&db, &three, &[(0, true), (2, false), (1, false)]).await;
+            // the last step moved to the front and removed
+            approve_in_order(&db, &three, &[(2, true), (0, false), (1, false)]).await;
+            // a six-step full reversal with two removals: every ordinal moves
+            let six = ["s1", "s2", "s3", "s4", "s5", "s6"];
+            approve_in_order(
+                &db,
+                &six,
+                &[
+                    (5, false),
+                    (4, true),
+                    (3, false),
+                    (2, false),
+                    (1, true),
+                    (0, false),
+                ],
+            )
+            .await;
+            db.cleanup().await;
+        }
+
+        // -----------------------------------------------------------------
+        // supersede
+        // -----------------------------------------------------------------
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        #[ignore = "requires DATABASE_URL to a SCRATCH Postgres (name contains \"test\")"]
+        #[allow(clippy::too_many_lines)]
+        async fn plan_gate_propose_twice_supersedes_the_older_plan_and_only_the_newest_is_approvable(
+        ) {
+            let db = PlanGateDb::connect().await;
+            let thread = db.thread.clone();
+            let run1 = db.new_run(&thread).await;
+            let run2 = db.new_run(&thread).await;
+            let run3 = db.new_run(&thread).await;
+
+            // A proposal on ANOTHER run of the same thread is not this run's
+            // predecessor and must survive everything below.
+            let bystander = db.propose(&thread, &run2, &["Bystander"], "").await;
+
+            // (a) last-proposed-wins within one run, without the model naming
+            // the predecessor.
+            let first = db.propose(&thread, &run1, &["Draft"], "").await;
+            let second = db.propose(&thread, &run1, &["Draft v2", "Send"], "").await;
+            assert_eq!(db.status_of(&first.id).await, "superseded");
+            assert_eq!(db.status_of(&second.id).await, "proposed");
+            assert_eq!(
+                second.supersedes, first.id,
+                "the immediate predecessor is recorded even when the model did not name it"
+            );
+            assert_eq!(
+                db.status_of(&bystander.id).await,
+                "proposed",
+                "another run's proposal is not superseded"
+            );
+
+            // the superseded plan can no longer be decided, and is left exactly as it was
+            let stale = db
+                .decide(
+                    &first.id,
+                    proto::PlanState::Approved,
+                    "stale card",
+                    Vec::new(),
+                )
+                .await
+                .expect_err("a superseded plan must not be approvable");
+            assert_eq!(stale.code(), tonic::Code::FailedPrecondition);
+            assert_eq!(db.status_of(&first.id).await, "superseded");
+            assert!(db.metadata_of(&first.id).await.get("approved_by").is_none());
+
+            // only the newest is approvable
+            let approved = db
+                .decide(
+                    &second.id,
+                    proto::PlanState::Approved,
+                    "ship it",
+                    Vec::new(),
+                )
+                .await
+                .expect("the newest plan is approvable");
+            assert_eq!(state(&approved), proto::PlanState::Approved as i32);
+
+            // (b) a named supersede on the same thread (no run involved)
+            let named_old = db.propose(&thread, "", &["Old"], "").await;
+            let named_new = db.propose(&thread, "", &["New"], &named_old.id).await;
+            assert_eq!(db.status_of(&named_old.id).await, "superseded");
+            assert_eq!(named_new.supersedes, named_old.id);
+            assert_eq!(db.status_of(&named_new.id).await, "proposed");
+
+            // (c) a hostile or confused `supersedes` touches nothing and is
+            // struck from the chain: another thread's proposed plan, and a plan
+            // that is no longer PROPOSED.
+            let other_thread = db.new_thread().await;
+            let foreign = db.propose(&other_thread, "", &["Foreign"], "").await;
+            let hostile = db.propose(&thread, "", &["Hostile"], &foreign.id).await;
+            assert_eq!(
+                db.status_of(&foreign.id).await,
+                "proposed",
+                "supersede is scoped to the caller's own thread"
+            );
+            assert_eq!(hostile.supersedes, "", "an untrue claim is not recorded");
+            assert!(db
+                .metadata_of(&hostile.id)
+                .await
+                .get("supersedes")
+                .is_none());
+            let decided_target = db
+                .propose(&thread, "", &["Aimed at an approved plan"], &second.id)
+                .await;
+            assert_eq!(
+                db.status_of(&second.id).await,
+                "approved",
+                "an approved plan is never knocked back to superseded"
+            );
+            assert_eq!(decided_target.supersedes, "");
+
+            // (d) a claim that matches nothing is struck, and the run's REAL
+            // predecessor is recorded in its place.
+            let before = db.propose(&thread, &run3, &["Before"], "").await;
+            let after = db
+                .propose(&thread, &run3, &["After"], "plan_does_not_exist")
+                .await;
+            assert_eq!(db.status_of(&before.id).await, "superseded");
+            assert_eq!(after.supersedes, before.id);
+
+            assert_eq!(
+                db.status_of(&bystander.id).await,
+                "proposed",
+                "still untouched at the end"
+            );
+            db.cleanup().await;
+        }
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        #[ignore = "requires DATABASE_URL to a SCRATCH Postgres (name contains \"test\")"]
+        async fn plan_gate_concurrent_proposals_on_one_run_leave_exactly_one_proposed_plan() {
+            let db = PlanGateDb::connect().await;
+            for round in 0..24 {
+                let run = db.new_run(&db.thread).await;
+                let propose = |title: &'static str| {
+                    let db = db.clone();
+                    let run = run.clone();
+                    tokio::spawn(
+                        async move { db.propose(&db.thread.clone(), &run, &[title], "").await },
+                    )
+                };
+                let (a, b) = (propose("A"), propose("B"));
+                let (a, b) = (a.await.expect("task a"), b.await.expect("task b"));
+                let proposed: i64 = sqlx::query_scalar(
+                    "SELECT count(*) FROM plans WHERE run_id = $1 AND status = 'proposed'",
+                )
+                .bind(&run)
+                .fetch_one(&db.pool)
+                .await
+                .expect("count");
+                assert_eq!(
+                    proposed, 1,
+                    "round {round}: two concurrent proposals on one run must leave exactly one \
+                     PROPOSED plan (last-proposed-wins); {} and {} are both approvable",
+                    a.id, b.id
+                );
+            }
+            db.cleanup().await;
+        }
+
+        // -----------------------------------------------------------------
+        // compare-and-swap: concurrent approvals and execution claims
+        // -----------------------------------------------------------------
+
+        /// Two rival edit sets over a plan's three steps, with what each leaves
+        /// behind as `(id, title, status)` in ordinal order.
+        fn rival_edits(
+            ids: &[String],
+            variant: usize,
+        ) -> (
+            Vec<proto::PlanStepEdit>,
+            Vec<(String, String, &'static str)>,
+        ) {
+            if variant == 0 {
+                (
+                    vec![
+                        plan_edit(&ids[2], "X third", "", false),
+                        plan_edit(&ids[0], "X first", "", false),
+                        plan_edit(&ids[1], "ignored", "", true),
+                    ],
+                    vec![
+                        (ids[2].clone(), "X third".to_owned(), "pending"),
+                        (ids[0].clone(), "X first".to_owned(), "pending"),
+                        (ids[1].clone(), "Step two".to_owned(), "skipped"),
+                    ],
+                )
+            } else {
+                (
+                    vec![
+                        plan_edit(&ids[1], "Y second", "", false),
+                        plan_edit(&ids[2], "Y third", "", false),
+                        plan_edit(&ids[0], "Y first", "", false),
+                    ],
+                    vec![
+                        (ids[1].clone(), "Y second".to_owned(), "pending"),
+                        (ids[2].clone(), "Y third".to_owned(), "pending"),
+                        (ids[0].clone(), "Y first".to_owned(), "pending"),
+                    ],
+                )
+            }
+        }
+
+        async fn assert_only_the_winners_edits_landed(
+            db: &PlanGateDb,
+            plan: &proto::Plan,
+            winner: usize,
+            want: &[Vec<(String, String, &'static str)>; 2],
+        ) {
+            let rows = db.steps_of(&plan.id).await;
+            let got: Vec<(String, String, &str)> = rows
+                .iter()
+                .map(|r| (r.1.clone(), r.3.clone(), r.2.as_str()))
+                .collect();
+            let want: Vec<(String, String, &str)> = want[winner].clone();
+            assert_eq!(got, want, "only request {winner}'s edits may be stored");
+            assert_eq!(ordinals(&rows), vec![1, 2, 3]);
+            assert_eq!(
+                db.metadata_of(&plan.id).await["approved_reason"],
+                if winner == 0 {
+                    "decided by X"
+                } else {
+                    "decided by Y"
+                },
+                "the approval receipt belongs to the winner"
+            );
+        }
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        #[ignore = "requires DATABASE_URL to a SCRATCH Postgres (name contains \"test\")"]
+        async fn plan_gate_two_approvals_queued_on_the_row_lock_have_exactly_one_winner() {
+            let db = PlanGateDb::connect().await;
+            let plan = db.propose_three().await;
+            let ids: Vec<String> = plan.steps.iter().map(|s| s.id.clone()).collect();
+            let (edits_x, want_x) = rival_edits(&ids, 0);
+            let (edits_y, want_y) = rival_edits(&ids, 1);
+
+            let (first, second) = race(
+                &db,
+                &plan.id,
+                proto::PlanState::Approved,
+                ("decided by X", edits_x),
+                ("decided by Y", edits_y),
+                true,
+            )
+            .await;
+            let (winner, refusal) = single_winner(first, second);
+
+            assert_eq!(refusal.code(), tonic::Code::FailedPrecondition);
+            assert!(
+                refusal
+                    .message()
+                    .contains("decided by another request first"),
+                "the loser must be stopped by the compare-and-swap under the row lock (both \
+                 requests had read the plan as PROPOSED), got: {}",
+                refusal.message()
+            );
+            assert_eq!(db.status_of(&plan.id).await, "approved");
+            assert_only_the_winners_edits_landed(&db, &plan, winner, &[want_x, want_y]).await;
+            db.cleanup().await;
+        }
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        #[ignore = "requires DATABASE_URL to a SCRATCH Postgres (name contains \"test\")"]
+        async fn plan_gate_free_running_concurrent_approvals_have_exactly_one_winner() {
+            let db = PlanGateDb::connect().await;
+            let mut compare_and_swap_refusals = 0;
+            for round in 0..16 {
+                let plan = db.propose_three().await;
+                let ids: Vec<String> = plan.steps.iter().map(|s| s.id.clone()).collect();
+                let (edits_x, want_x) = rival_edits(&ids, 0);
+                let (edits_y, want_y) = rival_edits(&ids, 1);
+                let (first, second) = race(
+                    &db,
+                    &plan.id,
+                    proto::PlanState::Approved,
+                    ("decided by X", edits_x),
+                    ("decided by Y", edits_y),
+                    false,
+                )
+                .await;
+                let (winner, refusal) = single_winner(first, second);
+                assert_eq!(
+                    refusal.code(),
+                    tonic::Code::FailedPrecondition,
+                    "round {round}: {refusal}"
+                );
+                if refusal
+                    .message()
+                    .contains("decided by another request first")
+                {
+                    compare_and_swap_refusals += 1;
+                }
+                assert_eq!(db.status_of(&plan.id).await, "approved", "round {round}");
+                assert_only_the_winners_edits_landed(&db, &plan, winner, &[want_x, want_y]).await;
+            }
+            eprintln!(
+                "plan_gate: {compare_and_swap_refusals}/16 free-running losers were stopped by the \
+                 compare-and-swap itself (the rest by the handler's legality check)"
+            );
+            db.cleanup().await;
+        }
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        #[ignore = "requires DATABASE_URL to a SCRATCH Postgres (name contains \"test\")"]
+        async fn plan_gate_two_execution_claims_have_a_single_winner() {
+            let db = PlanGateDb::connect().await;
+
+            // queued on the row lock: both read APPROVED, one claim wins
+            let plan = db.propose_three().await;
+            db.decide(&plan.id, proto::PlanState::Approved, "go", Vec::new())
+                .await
+                .expect("approve");
+            let (first, second) = race(
+                &db,
+                &plan.id,
+                proto::PlanState::Executing,
+                ("claim one", Vec::new()),
+                ("claim two", Vec::new()),
+                true,
+            )
+            .await;
+            let (_, refusal) = single_winner(first, second);
+            assert_eq!(refusal.code(), tonic::Code::FailedPrecondition);
+            assert!(
+                refusal
+                    .message()
+                    .contains("decided by another request first")
+                    && refusal.message().contains("executing"),
+                "the second claim must lose the compare-and-swap, got: {}",
+                refusal.message()
+            );
+            assert_eq!(db.status_of(&plan.id).await, "executing");
+            let metadata = db.metadata_of(&plan.id).await;
+            assert_eq!(metadata["executing_by"], db.user.as_str());
+            assert!(
+                metadata["executing_reason"] == "claim one"
+                    || metadata["executing_reason"] == "claim two"
+            );
+            assert_eq!(
+                metadata["approved_reason"], "go",
+                "the claim must not overwrite the approval receipt"
+            );
+
+            // free-running rounds
+            for round in 0..16 {
+                let plan = db.propose_three().await;
+                db.decide(&plan.id, proto::PlanState::Approved, "", Vec::new())
+                    .await
+                    .expect("approve");
+                let (first, second) = race(
+                    &db,
+                    &plan.id,
+                    proto::PlanState::Executing,
+                    ("claim one", Vec::new()),
+                    ("claim two", Vec::new()),
+                    false,
+                )
+                .await;
+                let (_, refusal) = single_winner(first, second);
+                assert_eq!(
+                    refusal.code(),
+                    tonic::Code::FailedPrecondition,
+                    "round {round}: {refusal}"
+                );
+                assert_eq!(db.status_of(&plan.id).await, "executing", "round {round}");
+            }
+            db.cleanup().await;
+        }
+
+        // -----------------------------------------------------------------
+        // the compare-and-swap itself (store level)
+        // -----------------------------------------------------------------
+
+        fn step_edit_row(id: &str, title: &str, removed: bool) -> store::PlanStepEditRow {
+            store::PlanStepEditRow {
+                id: id.to_owned(),
+                is_new: false,
+                title: title.to_owned(),
+                operation: String::new(),
+                removed,
+            }
+        }
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        #[ignore = "requires DATABASE_URL to a SCRATCH Postgres (name contains \"test\")"]
+        async fn plan_gate_transition_rechecks_the_status_under_the_row_lock_and_writes_nothing_on_conflict(
+        ) {
+            let db = PlanGateDb::connect().await;
+            let plan = db.propose_three().await;
+            let ids: Vec<String> = plan.steps.iter().map(|s| s.id.clone()).collect();
+            let before = db.steps_of(&plan.id).await;
+            let metadata_before = db.metadata_of(&plan.id).await;
+
+            // A rival decides the plan while our transition (made against the
+            // status it read earlier: proposed) is already waiting for the row.
+            let mut rival = db.hold_plan_row(&plan.id).await;
+            let waiting = {
+                let pool = db.pool.clone();
+                let plan_id = plan.id.clone();
+                let edits = vec![
+                    step_edit_row(&ids[2], "Reordered", false),
+                    step_edit_row(&ids[1], "ignored", true),
+                    step_edit_row(&ids[0], "Rewritten", false),
+                ];
+                tokio::spawn(async move {
+                    store::transition_plan_atomic(
+                        &pool,
+                        &plan_id,
+                        "proposed",
+                        "approved",
+                        &edits,
+                        &serde_json::json!({ "approved_by": "late-arrival" }),
+                    )
+                    .await
+                })
+            };
+            db.wait_for_lock_waiters(1).await;
+            assert!(
+                !waiting.is_finished(),
+                "the transition must be blocked on the row lock"
+            );
+            sqlx::query("UPDATE plans SET status = 'rejected' WHERE id = $1")
+                .bind(&plan.id)
+                .execute(&mut *rival)
+                .await
+                .expect("rival decision");
+            rival.commit().await.expect("rival commit");
+
+            let outcome = waiting
+                .await
+                .expect("task")
+                .expect("a lost race is an outcome, not an SQL error");
+            assert_eq!(
+                outcome,
+                store::PlanTransitionOutcome::Conflict {
+                    actual: Some("rejected".to_owned())
+                },
+                "the status must be re-read AFTER the lock is granted"
+            );
+            assert_eq!(db.status_of(&plan.id).await, "rejected");
+            assert_eq!(
+                db.steps_of(&plan.id).await,
+                before,
+                "the losing edit set must write nothing"
+            );
+            assert_eq!(db.metadata_of(&plan.id).await, metadata_before);
+
+            // a stale expectation on an unlocked plan loses the same way
+            let stale = store::transition_plan_atomic(
+                &db.pool,
+                &plan.id,
+                "proposed",
+                "approved",
+                &[step_edit_row(&ids[0], "Late edit", false)],
+                &serde_json::json!({}),
+            )
+            .await
+            .expect("conflict is not an error");
+            assert_eq!(
+                stale,
+                store::PlanTransitionOutcome::Conflict {
+                    actual: Some("rejected".to_owned())
+                }
+            );
+            // and a plan that is not there at all
+            let missing = store::transition_plan_atomic(
+                &db.pool,
+                "plan_does_not_exist",
+                "proposed",
+                "approved",
+                &[],
+                &serde_json::json!({}),
+            )
+            .await
+            .expect("conflict is not an error");
+            assert_eq!(
+                missing,
+                store::PlanTransitionOutcome::Conflict { actual: None }
+            );
+            assert_eq!(db.steps_of(&plan.id).await, before);
+            db.cleanup().await;
+        }
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        #[ignore = "requires DATABASE_URL to a SCRATCH Postgres (name contains \"test\")"]
+        async fn plan_gate_a_failing_edit_rolls_the_whole_transition_back() {
+            let db = PlanGateDb::connect().await;
+            let plan = db.propose_three().await;
+            let ids: Vec<String> = plan.steps.iter().map(|s| s.id.clone()).collect();
+            let before = db.steps_of(&plan.id).await;
+            let metadata_before = db.metadata_of(&plan.id).await;
+
+            // The reorder succeeds statement by statement; the last entry is a
+            // "new" step whose id already exists, so its INSERT violates the
+            // primary key and the transaction must take everything back.
+            let outcome = store::transition_plan_atomic(
+                &db.pool,
+                &plan.id,
+                "proposed",
+                "approved",
+                &[
+                    step_edit_row(&ids[2], "Reordered", false),
+                    step_edit_row(&ids[1], "Reordered", false),
+                    step_edit_row(&ids[0], "Reordered", false),
+                    store::PlanStepEditRow {
+                        id: ids[0].clone(),
+                        is_new: true,
+                        title: "Duplicate id".to_owned(),
+                        operation: String::new(),
+                        removed: false,
+                    },
+                ],
+                &serde_json::json!({ "approved_by": "nobody" }),
+            )
+            .await;
+            assert!(
+                outcome.is_err(),
+                "a duplicate step id must fail the transition"
+            );
+
+            assert_eq!(db.status_of(&plan.id).await, "proposed");
+            assert_eq!(
+                db.steps_of(&plan.id).await,
+                before,
+                "ordinals, titles and statuses must be exactly as proposed"
+            );
+            assert_eq!(db.metadata_of(&plan.id).await, metadata_before);
+            // and the plan is still decidable afterwards: no lock was leaked
+            db.decide(&plan.id, proto::PlanState::Approved, "", Vec::new())
+                .await
+                .expect("the plan is still approvable after the failed attempt");
+            db.cleanup().await;
+        }
+
+        // -----------------------------------------------------------------
+        // a decided plan stays as decided; only the owner decides
+        // -----------------------------------------------------------------
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        #[ignore = "requires DATABASE_URL to a SCRATCH Postgres (name contains \"test\")"]
+        async fn plan_gate_edits_after_approval_are_refused_and_change_nothing() {
+            let db = PlanGateDb::connect().await;
+            let plan = db.propose_three().await;
+            let ids: Vec<String> = plan.steps.iter().map(|s| s.id.clone()).collect();
+            db.decide(&plan.id, proto::PlanState::Approved, "go", Vec::new())
+                .await
+                .expect("approve");
+            let approved_steps = db.steps_of(&plan.id).await;
+            let approved_metadata = db.metadata_of(&plan.id).await;
+
+            // edits riding on the claim that starts execution
+            let late_edit = db
+                .decide(
+                    &plan.id,
+                    proto::PlanState::Executing,
+                    "",
+                    vec![
+                        plan_edit(&ids[0], "Swapped under the grant", "", false),
+                        plan_edit(&ids[1], "", "", true),
+                        plan_edit(&ids[2], "Step three", "", false),
+                    ],
+                )
+                .await
+                .expect_err("an approved plan's steps cannot be rewritten");
+            assert_eq!(late_edit.code(), tonic::Code::FailedPrecondition);
+            assert!(late_edit.message().contains("edited_steps"), "{late_edit}");
+
+            // approving again, and rejecting after the fact
+            for target in [proto::PlanState::Approved, proto::PlanState::Rejected] {
+                let refusal = db
+                    .decide(&plan.id, target, "again", Vec::new())
+                    .await
+                    .expect_err("a decided plan cannot be decided again");
+                assert_eq!(
+                    refusal.code(),
+                    tonic::Code::FailedPrecondition,
+                    "{target:?}"
+                );
+            }
+
+            assert_eq!(db.status_of(&plan.id).await, "approved");
+            assert_eq!(db.steps_of(&plan.id).await, approved_steps);
+            assert_eq!(db.metadata_of(&plan.id).await, approved_metadata);
+            db.cleanup().await;
+        }
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        #[ignore = "requires DATABASE_URL to a SCRATCH Postgres (name contains \"test\")"]
+        async fn plan_gate_only_the_owner_can_propose_on_or_decide_the_plan() {
+            let db = PlanGateDb::connect().await;
+            let plan = db.propose_three().await;
+            let request = |target: proto::PlanState| proto::TransitionPlanRequest {
+                plan_id: plan.id.clone(),
+                target_state: target as i32,
+                ..Default::default()
+            };
+
+            // another person in the same organisation
+            let colleague = db
+                .svc
+                .transition_plan(as_person(
+                    &db.org,
+                    "someone-else",
+                    request(proto::PlanState::Approved),
+                ))
+                .await
+                .expect_err("a colleague cannot approve another person's plan");
+            assert_eq!(colleague.code(), tonic::Code::PermissionDenied);
+            // the same person id in another organisation
+            let outsider = db
+                .svc
+                .transition_plan(as_person(
+                    "another-org",
+                    &db.user,
+                    request(proto::PlanState::Approved),
+                ))
+                .await
+                .expect_err("another tenant cannot approve this plan");
+            assert_eq!(outsider.code(), tonic::Code::PermissionDenied);
+            // and a colleague cannot put a plan on this person's thread
+            let proposal = proto::ProposePlanRequest {
+                thread_id: db.thread.clone(),
+                org_id: db.org.clone(),
+                user_id: "someone-else".to_owned(),
+                author: "agent".to_owned(),
+                summary: "Planted".to_owned(),
+                steps: vec![proto::ProposedPlanStep {
+                    title: "Do harm".to_owned(),
+                    operation: String::new(),
+                }],
+                ..Default::default()
+            };
+            let planted = db
+                .svc
+                .propose_plan(as_person(&db.org, "someone-else", proposal))
+                .await
+                .expect_err("a colleague cannot plant a plan on another person's thread");
+            assert_eq!(planted.code(), tonic::Code::PermissionDenied);
+
+            assert_eq!(db.status_of(&plan.id).await, "proposed");
+            let plans: i64 = sqlx::query_scalar("SELECT count(*) FROM plans WHERE org_id = $1")
+                .bind(&db.org)
+                .fetch_one(&db.pool)
+                .await
+                .expect("count");
+            assert_eq!(plans, 1, "the refused proposal must not have been stored");
+            // the owner still can
+            db.decide(&plan.id, proto::PlanState::Approved, "", Vec::new())
+                .await
+                .expect("the owner approves");
+            db.cleanup().await;
+        }
     }
 }

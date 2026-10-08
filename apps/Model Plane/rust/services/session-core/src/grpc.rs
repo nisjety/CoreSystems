@@ -33,7 +33,8 @@ use tracing::{info, warn};
 
 use crate::auth::{
     authorize_operation, authorize_owner_row, authorize_scheduled_step_service,
-    authorize_space_deletion_service, authorize_system_run_owner, identity, is_system_run_owner,
+    authorize_space_deletion_service, authorize_system_run_owner, authorize_thread_owner_row,
+    identity, is_system_run_owner,
     DelegatedDataPlaneBearer, JwtVerifier, OwnerIntent, VerifiedIdentity,
     DATA_PLANE_AUTH_METADATA_KEY,
 };
@@ -294,14 +295,18 @@ async fn authorize_thread_owner(
     thread_id: &str,
     intent: OwnerIntent,
 ) -> Result<(), Status> {
-    let owner: Option<(String, String)> =
-        sqlx::query_as("SELECT org_id, user_id FROM threads WHERE id = $1")
-            .bind(thread_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|error| Status::internal(error.to_string()))?;
-    let (org_id, user_id) = owner.ok_or_else(|| Status::not_found("thread not found"))?;
-    authorize_owner_row(caller, &org_id, &user_id, intent)
+    // `space_id` rides along because a system-owned thread inside a Space is
+    // not org-readable by id (see `authorize_thread_owner_row`).
+    let owner: Option<(String, String, String)> = sqlx::query_as(
+        "SELECT org_id, user_id, COALESCE(space_id, '') FROM threads WHERE id = $1",
+    )
+    .bind(thread_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|error| Status::internal(error.to_string()))?;
+    let (org_id, user_id, space_id) =
+        owner.ok_or_else(|| Status::not_found("thread not found"))?;
+    authorize_thread_owner_row(caller, &org_id, &user_id, &space_id, intent)
 }
 
 /// Require the verified caller to be the exact owner of a thread.
@@ -2270,6 +2275,24 @@ const THREAD_ORIGINS: [&str; 6] = ["chat", "space", "agent_run", "support", "sys
 const USER_OWNED_THREAD_CALLERS: [&str; 2] =
     ["service:model-gateway", "service:model-gateway-mail-task-bridge"];
 
+/// The mail-task bridge's own principal (see [`USER_OWNED_THREAD_CALLERS`]).
+const MAIL_TASK_BRIDGE_PRINCIPAL: &str = "service:model-gateway-mail-task-bridge";
+
+/// Narrows the mail-task bridge principal to the one origin its decision gate
+/// covers. `prepare_user_owned_thread` lets an allow-listed caller create a
+/// thread for any user of its org, and only `mail_task` is gated on a signed
+/// Control decision; without this the bridge's credential (or a compromised
+/// route in front of it) could mint an ordinary `chat` thread for any user
+/// with no decision at all. `service:model-gateway` keeps today's behavior.
+fn authorize_user_owned_thread_origin(principal_id: &str, origin: &str) -> Result<(), Status> {
+    if principal_id == MAIL_TASK_BRIDGE_PRINCIPAL && origin != "mail_task" {
+        return Err(Status::permission_denied(
+            "the mail-task bridge principal may only prepare mail_task-origin threads",
+        ));
+    }
+    Ok(())
+}
+
 /// Resolve and validate `origin` for a thread about to be created.
 ///
 /// A caller that declares `origin` gets it validated against
@@ -3597,21 +3620,26 @@ async fn enqueue_inline_tool_audit(
         phase,
         Utc::now(),
     );
-    if phase == "reserved" {
-        body["event"] = serde_json::json!("tool_action_reserved");
-    }
     body["details"]["request_id"] = serde_json::json!(request_id);
     let event_id = body["event_id"]
         .as_str()
         .ok_or_else(|| Status::internal("audit event identity missing"))?
         .to_owned();
+    // The row's subject names the event the body carries (`tool_action` for a
+    // final outcome, `tool_action_reserved` for the reservation): audit-core
+    // accepts a message only when its subject's last token equals the payload's
+    // `event`, so the two must come from the same place.
+    let subject = body["event"]
+        .as_str()
+        .and_then(crate::audit_publisher::audit_subject_for_event)
+        .ok_or_else(|| Status::internal("audit event name is not a subject token"))?;
     sqlx::query(
         "INSERT INTO session_audit_outbox (event_id, subject, payload)
          VALUES ($1, $2, $3)
          ON CONFLICT (event_id) DO NOTHING",
     )
     .bind(event_id)
-    .bind(crate::audit_publisher::SUBJECT_MODEL_TOOL_ACTION)
+    .bind(subject)
     .bind(body)
     .execute(&mut **tx)
     .await
@@ -4594,6 +4622,7 @@ impl SessionCore for SessionService {
                 "origin must be one of {THREAD_ORIGINS:?} and not \"space\" (this RPC never sets space_id)"
             )));
         }
+        authorize_user_owned_thread_origin(caller.principal_id(), origin)?;
         // Delegated-identity design, Gap B: mail_task is the one origin that
         // additionally requires an independently-verified Control decision
         // binding this exact (org_id, user_id, session_key) -- every other
@@ -8496,6 +8525,76 @@ mod tests {
         );
     }
 
+    /// D12 wire vector. A personal Space's owner reads a scheduled thread only
+    /// with a decision user-core's own-scheduled-thread fallback signs, and this
+    /// verifier recomputes the payload digest and checks the claim shape on its
+    /// own. The token below was issued and signed by user-core's Go code (the
+    /// same literal is pinned in `spaces/own_scheduled_thread_read_wire_test.go`),
+    /// so this runs the real verifier over a real Control decision instead of a
+    /// Rust-built look-alike. If either side changes the encoding, one of the
+    /// two tests fails.
+    #[test]
+    #[allow(clippy::result_large_err)] // the closure returns the verifier's `Status` error
+    fn own_scheduled_thread_read_decision_issued_by_control_verifies() {
+        const TOKEN: &str = "v2.Y29udHJvbC13aXJlLXZlY3Rvci1rZXk.eyJkZWNpc2lvbl9yZWYiOiJvd24tcmVhZC13aXJlLTEiLCJvcmdfaWQiOiJvcmctMSIsInNwYWNlX3JlZiI6InNwYWNlLXBlcnNvbmFsIiwic3ViamVjdF9pZCI6InVzZXItMSIsInNlcnZpY2VfYXVkaWVuY2UiOiJtb2RlbC1wbGFuZSIsImFjdGlvbl9pZCI6Im1vZGVsLnRocmVhZC5yZWFkIiwiYWN0aW9uX3NjaGVtYV9oYXNoIjoic2hhMjU2OnRocmVhZC1yZWFkLXYxIiwicGF5bG9hZF9kaWdlc3QiOiJzaGEyNTY6Y2E5YmM3ZjJiMDI5YzQzNWY1MGRiYjY1NWNmZDFmZGU3YTU4NjNhOTUwNDAzNjNlOGFlN2NmMzBkY2M5NjRiOCIsImlkZW1wb3RlbmN5X2tleSI6InNwYWNlLXJlYWQtd2lyZS0xIiwicmVjaXBpZW50X2F1ZGllbmNlX3JlZiI6ImF1ZGllbmNlOnNwYWNlLXBlcnNvbmFsOjIiLCJyZWNpcGllbnRfYXVkaWVuY2VfaGFzaCI6InNoYTI1Njp0ZXN0LWF1ZGllbmNlIiwicHJpdmFjeV9wb2xpY3lfcmVmIjoicHJpdmFjeTpvcmctMTo1IiwicmVzb3VyY2VfYXV0aG9yaXphdGlvbl9yZWYiOiJjb250cm9sOnNwYWNlLXBlcnNvbmFsOnRocmVhZC1yZWFkOjciLCJhdXRob3JpdHlfcmV2aXNpb24iOjcsIm1lbWJlcnNoaXBfcmV2aXNpb24iOjQsInByaXZhY3lfcmV2aXNpb24iOjUsInJlY2lwaWVudF9hdWRpZW5jZV9yZXZpc2lvbiI6MiwiZW50aXRsZW1lbnRfcmV2aXNpb24iOjMsInBlcm1pc3Npb25zIjpbInRocmVhZDpyZWFkIl0sInB1cnBvc2UiOiJhc3Npc3RhbnRfY29sbGFib3JhdGlvbiIsImxhd2Z1bF9iYXNpcyI6ImNvbnRyYWN0IiwicHJpdmFjeV9jbGFzcyI6ImludGVybmFsIiwidGhpcmRfcGFydHlfcHJvY2Vzc2luZ19hbGxvd2VkIjpmYWxzZSwicmV0ZW50aW9uX2NsYXNzIjoic3RhbmRhcmQiLCJyZXNpZGVuY3kiOiJzd2VkZW5jZW50cmFsIiwiZGVsZXRpb25fc2NvcGUiOiJzcGFjZSIsInplcm9fZGF0YV9yZXRlbnRpb24iOmZhbHNlLCJpc3N1ZWRfYXQiOiIyMDI2LTEwLTAxVDEyOjAwOjAwWiIsImV4cGlyZXNfYXQiOiIyMDI2LTEwLTAxVDEyOjAyOjAwWiIsIm5vbmNlIjoibm9uY2Utd2lyZS0xIn0.ChmOC42y-MpKrWV9T-CdsX8rjVeqepJ213aODu261XDk-AkAh13OxJXnhJ7lVYUXpdUxQjRIGC6qrxkp5ZVfCQ";
+        const PUBLIC_KEY: &str = "lHXGzw7aNAV1KNhpR4HsySrWOdfivSd2HtPvdJJL6wc";
+        const KEY_ID: &str = "control-wire-vector-key";
+
+        let key_bytes: [u8; 32] = URL_SAFE_NO_PAD
+            .decode(PUBLIC_KEY)
+            .expect("public key encoding")
+            .try_into()
+            .expect("public key length");
+        let key = VerifyingKey::from_bytes(&key_bytes).expect("public key");
+        let now = chrono::DateTime::parse_from_rfc3339("2026-10-01T12:00:30Z")
+            .expect("test time")
+            .with_timezone(&Utc);
+        let verify = |org: &str, user: &str, space: &str, at: DateTime<Utc>| {
+            verify_thread_read_space_decision_with_key(
+                TOKEN,
+                "own-read-wire-1",
+                org,
+                user,
+                space,
+                KEY_ID,
+                &key,
+                at,
+            )
+        };
+
+        let verified = verify("org-1", "user-1", "space-personal", now)
+            .expect("a decision Control signed for a personal Space's owner must verify");
+        assert_eq!(
+            verified.recipient_audience_revision, 2,
+            "the audience ceiling must survive the Go to Rust round trip"
+        );
+        for (org, user, space, why) in [
+            ("org-2", "user-1", "space-personal", "another tenant"),
+            ("org-1", "user-2", "space-personal", "another person"),
+            ("org-1", "user-1", "space-other", "another Space"),
+        ] {
+            assert_eq!(
+                verify(org, user, space, now)
+                    .expect_err(why)
+                    .code(),
+                tonic::Code::PermissionDenied,
+                "the owner's decision must not open the thread for {why}"
+            );
+        }
+        assert_eq!(
+            verify(
+                "org-1",
+                "user-1",
+                "space-personal",
+                now + chrono::Duration::minutes(5)
+            )
+            .expect_err("expired")
+            .code(),
+            tonic::Code::PermissionDenied,
+            "a read decision expires"
+        );
+    }
+
     /// No decision at all is the historical, owner-bound path -- not an error.
     /// Half a decision IS an error: treating it as "no token" would hide both
     /// a client bug and an attempt.
@@ -10071,6 +10170,193 @@ mod tests {
         );
     }
 
+    /// D12. A thread a trusted workload owns INSIDE a person's Space -- a
+    /// schedule's result thread -- is that person's content, not the org's.
+    /// `authorize_owner_row` used to admit any org member to any system-owned
+    /// row by id, so a colleague could read it with nothing but the thread id.
+    /// The only way in is now a verified Space read decision, which Control
+    /// issues to the Space's own owner and nobody else. Maintenance system
+    /// threads (no Space) keep their org-wide read.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres with session-core migrations"]
+    #[allow(clippy::too_many_lines)]
+    async fn a_space_scoped_system_thread_is_readable_only_through_a_verified_space_decision() {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping: DATABASE_URL unset");
+            return;
+        };
+        let pool = sqlx::PgPool::connect(&url).await.expect("connect pg");
+        sqlx::migrate!("./migrations")
+            .run(&pool)
+            .await
+            .expect("migrate");
+        let svc = super::SessionService {
+            pool: pool.clone(),
+            retrieval_client: None,
+            graph_client: None,
+            knowledge_client: None,
+            letta_memory: None,
+            audit_publisher: None,
+            auth: None,
+        };
+
+        // The fixture decision is minted for org-1 / user-1 / space-room, the
+        // way Control's own-scheduled-thread-read fallback mints one for a
+        // personal Space's owner. Process env is shared, but this is one of a
+        // handful of manually-run #[ignore]d tests that already set it.
+        let signing_key = SigningKey::from_bytes(&[47_u8; 32]);
+        let (token, decision_ref, key_id) =
+            signed_thread_read_decision(&signing_key, Utc::now(), &["thread:read"], 4);
+        std::env::remove_var("CONTROL_SPACE_DECISION_PUBLIC_KEYS_JSON");
+        std::env::set_var("CONTROL_SPACE_DECISION_KEY_ID", &key_id);
+        std::env::set_var(
+            "CONTROL_SPACE_DECISION_PUBLIC_KEY_BASE64",
+            URL_SAFE_NO_PAD.encode(signing_key.verifying_key().to_bytes()),
+        );
+
+        let sfx = super::new_ulid();
+        let scheduled = format!("d12-sched-{sfx}");
+        let maintenance = format!("d12-maint-{sfx}");
+        let human = format!("d12-human-{sfx}");
+        sqlx::query(
+            "INSERT INTO threads (id, session_key, org_id, user_id, space_id, space_decision_ref, \
+             recipient_audience_ref, privacy_policy_ref, resource_authorization_ref, authority_revision, \
+             recipient_audience_revision, recipient_audience_hash, origin) \
+             VALUES ($1, $1, 'org-1', 'service:orchestrator-core', 'space-room', 'decision-1', \
+             'audience-1', 'policy-1', 'resource-1', 1, 1, 'audience-hash-1', 'space')",
+        )
+        .bind(&scheduled)
+        .execute(&pool)
+        .await
+        .expect("seed scheduled thread");
+        sqlx::query(
+            "INSERT INTO threads (id, session_key, org_id, user_id) \
+             VALUES ($1, $1, 'org-1', 'service:orchestrator-core')",
+        )
+        .bind(&maintenance)
+        .execute(&pool)
+        .await
+        .expect("seed maintenance system thread");
+        sqlx::query("INSERT INTO threads (id, session_key, org_id, user_id) VALUES ($1, $1, 'org-1', 'user-1')")
+            .bind(&human)
+            .execute(&pool)
+            .await
+            .expect("seed ordinary human thread");
+        for thread in [&scheduled, &maintenance, &human] {
+            sqlx::query(
+                "INSERT INTO messages (id, thread_id, role, content) VALUES ($1, $2, 'assistant', 'draft result')",
+            )
+            .bind(format!("m-{thread}"))
+            .bind(thread)
+            .execute(&pool)
+            .await
+            .expect("seed message");
+        }
+
+        let read = |org: &str, user: &str, thread: &str, with_decision: bool| {
+            let request = pb::ListConversationRequest {
+                org_id: org.to_owned(),
+                thread_id: thread.to_owned(),
+                space_id: if with_decision {
+                    "space-room".to_owned()
+                } else {
+                    String::new()
+                },
+                space_read_decision_ref: if with_decision {
+                    decision_ref.clone()
+                } else {
+                    String::new()
+                },
+                space_read_decision_token: if with_decision {
+                    token.clone()
+                } else {
+                    String::new()
+                },
+            };
+            svc.list_conversation(as_user(org, user, request))
+        };
+
+        // An org peer with no decision: not found, exactly what a thread that
+        // does not exist answers, so the id is not even confirmed.
+        assert_eq!(
+            read("org-1", "user-2", &scheduled, false)
+                .await
+                .expect_err("an org peer must not read a Space-scoped system thread by id")
+                .code(),
+            tonic::Code::NotFound,
+        );
+        // Not even the schedule's owner reads it by the ownership path: the
+        // owner is a workload, and the person comes in through the decision.
+        assert_eq!(
+            read("org-1", "user-1", &scheduled, false)
+                .await
+                .expect_err("the decision is the only way into a scheduled thread")
+                .code(),
+            tonic::Code::NotFound,
+        );
+        // The owner with a verified decision reads it.
+        let owner_read = read("org-1", "user-1", &scheduled, true)
+            .await
+            .expect("the Space's owner reads their scheduled thread with a verified decision")
+            .into_inner();
+        assert_eq!(owner_read.messages.len(), 1);
+        assert_eq!(owner_read.messages[0].content, "draft result");
+        // A decision is bound to the subject Control issued it to.
+        assert_eq!(
+            read("org-1", "user-2", &scheduled, true)
+                .await
+                .expect_err("someone else's decision must not open the thread")
+                .code(),
+            tonic::Code::PermissionDenied,
+        );
+        // The org boundary is unchanged and still checked first.
+        assert_eq!(
+            read("org-2", "user-1", &scheduled, false)
+                .await
+                .expect_err("another org stays refused")
+                .code(),
+            tonic::Code::PermissionDenied,
+        );
+        // A decision for this Space does not unlock a thread outside it.
+        assert_eq!(
+            read("org-1", "user-1", &maintenance, true)
+                .await
+                .expect_err("a Space decision must not reach an unscoped thread")
+                .code(),
+            tonic::Code::NotFound,
+        );
+        // Maintenance system threads (no Space) stay org-readable.
+        let maintenance_read = read("org-1", "user-2", &maintenance, false)
+            .await
+            .expect("an unscoped system thread keeps its org-wide read")
+            .into_inner();
+        assert_eq!(maintenance_read.messages.len(), 1);
+        // An ordinary person's thread is untouched: owner reads, peer refused.
+        read("org-1", "user-1", &human, false)
+            .await
+            .expect("an owner reads their own thread");
+        assert_eq!(
+            read("org-1", "user-2", &human, false)
+                .await
+                .expect_err("a peer must not read another person's thread")
+                .code(),
+            tonic::Code::PermissionDenied,
+        );
+
+        for thread in [&scheduled, &maintenance, &human] {
+            sqlx::query("DELETE FROM messages WHERE thread_id = $1")
+                .bind(thread)
+                .execute(&pool)
+                .await
+                .ok();
+            sqlx::query("DELETE FROM threads WHERE id = $1")
+                .bind(thread)
+                .execute(&pool)
+                .await
+                .ok();
+        }
+    }
+
     fn lazy_test_service() -> super::SessionService {
         super::SessionService {
             pool: sqlx::PgPool::connect_lazy("postgres://postgres:postgres@127.0.0.1/session_core")
@@ -10392,6 +10678,97 @@ mod tests {
              session-core credential (B-4/T-6) -- if that principal id is not \
              also allow-listed here, every real mail-task call is refused \
              regardless of every registry row being correct"
+        );
+    }
+
+    /// The bridge principal exists to create mail_task threads behind a signed
+    /// decision. Allow-listing it for the RPC must not also hand it the
+    /// decision-free path every other origin has: any non-mail_task origin is
+    /// refused for it, before any database access (the lazy pool would answer
+    /// `Internal` if this were reached).
+    #[tokio::test]
+    async fn prepare_user_owned_thread_confines_the_mail_task_bridge_principal_to_the_mail_task_origin() {
+        for origin in ["chat", "agent_run", "support", "system"] {
+            let svc = lazy_test_service();
+            let mut request = Request::new(pb::PrepareUserOwnedThreadRequest {
+                org_id: "org-1".to_owned(),
+                user_id: "user-victim".to_owned(),
+                origin: origin.to_owned(),
+                session_key: "chat/whatever".to_owned(),
+                control_decision_token: String::new(),
+            });
+            request
+                .extensions_mut()
+                .insert(VerifiedIdentity::service_for_test_as(
+                    "org-1",
+                    "service:model-gateway-mail-task-bridge",
+                    &["session:user-owned-thread-prepare"],
+                    false,
+                ));
+            assert_eq!(
+                svc.prepare_user_owned_thread(request)
+                    .await
+                    .expect_err("the bridge principal must not create a decision-free thread")
+                    .code(),
+                tonic::Code::PermissionDenied,
+                "origin {origin:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn user_owned_thread_origin_guard_only_narrows_the_bridge_principal() {
+        assert!(super::authorize_user_owned_thread_origin(
+            "service:model-gateway-mail-task-bridge",
+            "mail_task"
+        )
+        .is_ok());
+        assert!(super::authorize_user_owned_thread_origin(
+            "service:model-gateway-mail-task-bridge",
+            "chat"
+        )
+        .is_err());
+        // service:model-gateway keeps its existing, decision-free origins.
+        assert!(super::authorize_user_owned_thread_origin("service:model-gateway", "chat").is_ok());
+    }
+
+    /// The RPC-level wiring of the mail_task decision gate. The
+    /// `verify_mail_task_thread_decision_with_keys` tests above prove the
+    /// verifier; this proves the handler CALLS it: a mail_task request with no
+    /// decision must be refused before any database access. (Removing the gate
+    /// would send it on to the lazy pool, which answers `Internal`.)
+    #[tokio::test]
+    async fn prepare_user_owned_thread_refuses_a_mail_task_request_with_no_decision_before_the_database() {
+        let svc = lazy_test_service();
+        let mut request = Request::new(pb::PrepareUserOwnedThreadRequest {
+            org_id: "org-1".to_owned(),
+            user_id: "user-a".to_owned(),
+            origin: "mail_task".to_owned(),
+            session_key: "mail_task/abc".to_owned(),
+            control_decision_token: String::new(),
+        });
+        request
+            .extensions_mut()
+            .insert(VerifiedIdentity::service_for_test_as(
+                "org-1",
+                "service:model-gateway-mail-task-bridge",
+                &["session:user-owned-thread-prepare"],
+                false,
+            ));
+        let code = svc
+            .prepare_user_owned_thread(request)
+            .await
+            .expect_err("a mail_task request needs a signed decision")
+            .code();
+        // failed_precondition when the Control verifier keys are not
+        // configured in this process, permission_denied when they are: either
+        // way the request stopped at the gate, never at the database.
+        assert!(
+            matches!(
+                code,
+                tonic::Code::PermissionDenied | tonic::Code::FailedPrecondition
+            ),
+            "unexpected code {code:?}: the decision gate did not run before the database"
         );
     }
 
@@ -11119,6 +11496,33 @@ mod tests {
                     "reserved".to_owned(),
                     "reserved".to_owned(),
                     "tool_action_reserved".to_owned(),
+                ),
+            ]
+        );
+
+        // audit-core accepts a message only when its subject's last token is the
+        // payload's event, so each phase's row must be stored under the subject
+        // its own event names (the reservation used to share `...tool_action`).
+        let subjects: Vec<(String, String)> = sqlx::query_as(
+            "SELECT payload->>'event', subject
+             FROM session_audit_outbox
+             WHERE payload->>'subject' = $1
+             ORDER BY payload->>'event'",
+        )
+        .bind(&run_id)
+        .fetch_all(&pool)
+        .await
+        .expect("load audit subjects");
+        assert_eq!(
+            subjects,
+            vec![
+                (
+                    "tool_action".to_owned(),
+                    "verevon.audit.v2.model.session-core.tool_action".to_owned(),
+                ),
+                (
+                    "tool_action_reserved".to_owned(),
+                    "verevon.audit.v2.model.session-core.tool_action_reserved".to_owned(),
                 ),
             ]
         );

@@ -32,8 +32,8 @@ use mp_ids::new_ulid;
 
 use crate::auth::{
     authorize_operation, authorize_owner_row, authorize_run_action_authority_service,
-    authorize_scheduled_step_authority_service, authorize_scheduled_step_service, identity,
-    OwnerIntent, VerifiedIdentity,
+    authorize_scheduled_step_authority_service, authorize_scheduled_step_service,
+    authorize_thread_owner_row, identity, OwnerIntent, VerifiedIdentity,
 };
 use crate::orchestration_grpc::json_to_struct;
 
@@ -74,8 +74,10 @@ async fn authorize_thread_owner(
     thread_id: &str,
     intent: OwnerIntent,
 ) -> Result<(), Status> {
-    let owner: Option<(String, String, bool)> = sqlx::query_as(
-        "SELECT t.org_id, t.user_id, \
+    // `space_id` rides along because a system-owned thread inside a Space is
+    // not org-readable by id (see `authorize_thread_owner_row`).
+    let owner: Option<(String, String, String, bool)> = sqlx::query_as(
+        "SELECT t.org_id, t.user_id, COALESCE(t.space_id, ''), \
          EXISTS(SELECT 1 FROM space_membership_revocations rev \
                 WHERE rev.space_ref = t.space_id AND rev.subject_id = t.user_id) \
          FROM threads t WHERE t.id = $1",
@@ -84,14 +86,14 @@ async fn authorize_thread_owner(
     .fetch_optional(pool)
     .await
     .map_err(|error| Status::internal(error.to_string()))?;
-    let (org_id, user_id, space_membership_revoked) =
+    let (org_id, user_id, space_id, space_membership_revoked) =
         owner.ok_or_else(|| Status::not_found("thread not found"))?;
     if space_membership_revoked {
         return Err(Status::permission_denied(
             "Space membership required for this thread",
         ));
     }
-    authorize_owner_row(caller, &org_id, &user_id, intent)
+    authorize_thread_owner_row(caller, &org_id, &user_id, &space_id, intent)
 }
 
 /// Seam for `resolve_thread_owner`'s durable lookup, mirroring `memory_grpc.rs`'s
@@ -603,6 +605,13 @@ impl RunService for RunServiceImpl {
     /// authorization predicate reads (`auth::system_run_owners`), not a `LIKE
     /// 'service:%'` pattern, so a row this query returns is exactly a row
     /// [`authorize_owner_row`] would admit for reading.
+    ///
+    /// Maintenance runs only. A system run inside a Space is a schedule's run: it
+    /// carries one person's goal text and result, written into their own Space,
+    /// so it is not the org's to list (the same rule `authorize_thread_owner_row`
+    /// applies to its thread). Its owner reaches it through the Space's own
+    /// read-decision routes. Filtered in SQL so `has_more` and the cursor stay
+    /// correct.
     async fn list_system_runs(
         &self,
         request: Request<pb::ListSystemRunsRequest>,
@@ -626,6 +635,11 @@ impl RunService for RunServiceImpl {
 
             let mut query = format!("{RUN_SELECT} WHERE r.org_id = $1");
             query.push_str(" AND r.user_id = ANY($2)");
+            query.push_str(" AND COALESCE(r.space_id, '') = ''");
+            query.push_str(
+                " AND NOT EXISTS (SELECT 1 FROM threads st \
+                  WHERE st.id = r.thread_id AND COALESCE(st.space_id, '') <> '')",
+            );
             query.push_str(" AND ($3 = '' OR r.status = $3)");
             query.push_str(" AND ($4 = '' OR r.id < $4)");
             query.push_str(" ORDER BY r.id DESC LIMIT $5");
@@ -1628,5 +1642,180 @@ mod tests {
             .bind(&space_ref)
             .execute(&pool)
             .await;
+    }
+
+    // -- D12: a Space-scoped system thread is not org-readable --------------
+    //
+    // A scheduled run is owned by `service:orchestrator-core` and lives in a
+    // thread inside the person's own Space. The system-run allowance used to
+    // make both readable by anyone in the org: `ListSystemRuns` returned the
+    // goal text, and the thread was readable by id. Maintenance system runs
+    // (no Space) keep the org-wide view they exist for.
+
+    /// A system-owned run in its own thread; `space` makes it a scheduled one.
+    #[allow(clippy::single_match_else)] // two parallel seed shapes read best side by side
+    async fn seed_system_thread_and_run(
+        pool: &PgPool,
+        org_id: &str,
+        thread_id: &str,
+        run_id: &str,
+        space: Option<&str>,
+        goal: &str,
+    ) {
+        match space {
+            Some(space_ref) => {
+                sqlx::query(
+                    "INSERT INTO threads (id, session_key, org_id, user_id, space_id, space_decision_ref, \
+                     recipient_audience_ref, privacy_policy_ref, resource_authorization_ref, authority_revision, \
+                     recipient_audience_revision, recipient_audience_hash, origin) \
+                     VALUES ($1, $1, $2, 'service:orchestrator-core', $3, 'decision-1', 'audience-1', \
+                     'policy-1', 'resource-1', 1, 1, 'audience-hash-1', 'space')",
+                )
+                .bind(thread_id)
+                .bind(org_id)
+                .bind(space_ref)
+                .execute(pool)
+                .await
+                .expect("seed scheduled thread");
+                sqlx::query(
+                    "INSERT INTO runs (id, thread_id, goal, org_id, user_id, space_id, space_decision_ref, \
+                     recipient_audience_ref, privacy_policy_ref, resource_authorization_ref, authority_revision, \
+                     recipient_audience_revision, recipient_audience_hash, metadata) \
+                     VALUES ($1, $2, $3, $4, 'service:orchestrator-core', $5, 'decision-1', 'audience-1', \
+                     'policy-1', 'resource-1', 1, 1, 'audience-hash-1', '{\"source\":\"scheduled_run\"}'::jsonb)",
+                )
+                .bind(run_id)
+                .bind(thread_id)
+                .bind(goal)
+                .bind(org_id)
+                .bind(space_ref)
+                .execute(pool)
+                .await
+                .expect("seed scheduled run");
+            }
+            None => {
+                sqlx::query(
+                    "INSERT INTO threads (id, session_key, org_id, user_id) \
+                     VALUES ($1, $1, $2, 'service:orchestrator-core')",
+                )
+                .bind(thread_id)
+                .bind(org_id)
+                .execute(pool)
+                .await
+                .expect("seed maintenance thread");
+                sqlx::query(
+                    "INSERT INTO runs (id, thread_id, goal, org_id, user_id) \
+                     VALUES ($1, $2, $3, $4, 'service:orchestrator-core')",
+                )
+                .bind(run_id)
+                .bind(thread_id)
+                .bind(goal)
+                .bind(org_id)
+                .execute(pool)
+                .await
+                .expect("seed maintenance run");
+            }
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a Postgres with session-core migrations"]
+    async fn a_scheduled_run_is_not_listed_org_wide_and_its_thread_is_not_org_readable() {
+        let Some(pool) = migrated_test_pool().await else {
+            eprintln!("skipping: DATABASE_URL unset");
+            return;
+        };
+        let sfx = new_ulid();
+        let org_id = format!("d12-org-{sfx}");
+        let (sched_thread, sched_run) = (format!("d12-st-{sfx}"), format!("d12-sr-{sfx}"));
+        let (maint_thread, maint_run) = (format!("d12-mt-{sfx}"), format!("d12-mr-{sfx}"));
+        let space_ref = format!("d12-space-{sfx}");
+        seed_system_thread_and_run(
+            &pool,
+            &org_id,
+            &sched_thread,
+            &sched_run,
+            Some(&space_ref),
+            "weekly competitor research for me",
+        )
+        .await;
+        seed_system_thread_and_run(
+            &pool,
+            &org_id,
+            &maint_thread,
+            &maint_run,
+            None,
+            "nightly maintenance",
+        )
+        .await;
+
+        let service = RunServiceImpl::new(pool.clone());
+        let peer = || VerifiedIdentity::user_for_test(&org_id, "d12-peer");
+
+        // ListSystemRuns: the maintenance run is there, the schedule is not --
+        // its goal text is one person's, not the org's.
+        let listed = service
+            .list_system_runs(identity_request(
+                pb::ListSystemRunsRequest {
+                    org_id: org_id.clone(),
+                    status_filter: String::new(),
+                    after_run_id: String::new(),
+                    limit: 50,
+                },
+                peer(),
+            ))
+            .await
+            .expect("an org member lists system runs")
+            .into_inner();
+        let ids: Vec<&str> = listed.runs.iter().map(|run| run.run_id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec![maint_run.as_str()],
+            "only the maintenance run is org-visible"
+        );
+        assert!(
+            listed.runs.iter().all(|run| !run.goal.contains("competitor")),
+            "a personal schedule's goal text must not reach an org-wide listing"
+        );
+
+        // The thread-keyed read: a peer cannot list the runs of a scheduled
+        // thread by id (not found), but still can for a maintenance thread.
+        let list_runs_of = |thread_id: &str| {
+            service.list_runs(identity_request(
+                pb::ListRunsRequest {
+                    thread_id: thread_id.to_owned(),
+                    limit: 10,
+                    ..Default::default()
+                },
+                peer(),
+            ))
+        };
+        assert_eq!(
+            list_runs_of(&sched_thread)
+                .await
+                .expect_err("a peer must not read a scheduled thread's runs by thread id")
+                .code(),
+            tonic::Code::NotFound,
+        );
+        assert_eq!(
+            list_runs_of(&maint_thread)
+                .await
+                .expect("maintenance threads keep the org-wide read")
+                .into_inner()
+                .runs
+                .len(),
+            1
+        );
+
+        for (thread_id, run_id) in [(&sched_thread, &sched_run), (&maint_thread, &maint_run)] {
+            let _ = sqlx::query("DELETE FROM runs WHERE id = $1")
+                .bind(run_id)
+                .execute(&pool)
+                .await;
+            let _ = sqlx::query("DELETE FROM threads WHERE id = $1")
+                .bind(thread_id)
+                .execute(&pool)
+                .await;
+        }
     }
 }

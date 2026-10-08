@@ -209,6 +209,8 @@ mod tests {
             parent_run_id: "run_p".into(),
             child_run_id: "run_c".into(),
             role: SubagentRole::Coder,
+            goal_summary: "summarise Q3".into(),
+            batch_id: "batch_1".into(),
             at: fixed_at(),
         })
         .unwrap();
@@ -220,6 +222,8 @@ mod tests {
                 assert_eq!(p.parent_run_id, "run_p");
                 assert_eq!(p.child_run_id, "run_c");
                 assert_eq!(p.role, proto::SubagentRole::Coder as i32);
+                assert_eq!(p.goal_summary, "summarise Q3");
+                assert_eq!(p.batch_id, "batch_1");
             }
             _ => panic!("wrong variant"),
         }
@@ -239,6 +243,7 @@ mod tests {
         let body = serde_json::to_vec(&OrchestrationEvent::SubagentStopped {
             child_run_id: "run_c".into(),
             status: "completed".into(),
+            parent_run_id: "run_p".into(),
             at: fixed_at(),
         })
         .unwrap();

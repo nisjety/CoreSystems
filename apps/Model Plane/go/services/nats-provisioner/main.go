@@ -50,11 +50,19 @@ func streamConfigs() []nats.StreamConfig {
 			Replicas:  1,
 			Discard:   nats.DiscardOld,
 		},
+		// Carries session-core's audit events ("Used by AI?") to audit-core. See
+		// audit_observability.go for why this stream is provisioned here.
+		auditObservabilityStream(),
+		{
+			Name: "MODEL_PLANE_USAGE_EVENTS", Subjects: []string{"mp.v1.usage.*"},
+			Retention: nats.LimitsPolicy, Storage: nats.FileStorage,
+			MaxAge: 7 * 24 * time.Hour, MaxBytes: 256 << 20, Replicas: 1, Discard: nats.DiscardOld,
+		},
 	}
 }
 
 func consumerBindings() []consumerBinding {
-	return []consumerBinding{
+	bindings := []consumerBinding{
 		{
 			stream: "TOOLS_COMPLETIONS",
 			config: nats.ConsumerConfig{
@@ -176,7 +184,48 @@ func consumerBindings() []consumerBinding {
 				DeliverPolicy: nats.DeliverAllPolicy,
 			},
 		},
+		{
+			// Insight Core consumes run lifecycle events to report agent activity.
+			// Provision its durable alongside the Model Plane-owned run stream so
+			// the application-plane subscriber can bind and replay retained events.
+			stream: "MODEL_PLANE_RUN_EVENTS",
+			config: nats.ConsumerConfig{
+				Durable:        "insight-core-agent-run-subscriber",
+				DeliverSubject: "_VEREVON.MODEL.DELIVER.application.insight.run",
+				DeliverGroup:   "insight-core-agent-run-subscriber",
+				AckPolicy:      nats.AckExplicitPolicy,
+				AckWait:        30 * time.Second,
+				MaxDeliver:     5,
+				FilterSubject:  "mp.v1.run.*.event",
+				ReplayPolicy:   nats.ReplayInstantPolicy,
+				DeliverPolicy:  nats.DeliverAllPolicy,
+			},
+		},
+		{
+			// Approval lifecycle events feed the same user-facing agent report.
+			stream: "MP_ORCHESTRATION_EVENTS",
+			config: nats.ConsumerConfig{
+				Durable:        "insight-core-agent-approval-subscriber",
+				DeliverSubject: "_VEREVON.MODEL.DELIVER.application.insight.approval",
+				DeliverGroup:   "insight-core-agent-approval-subscriber",
+				AckPolicy:      nats.AckExplicitPolicy,
+				AckWait:        30 * time.Second,
+				MaxDeliver:     5,
+				FilterSubject:  "mp.v1.orchestration.approval",
+				ReplayPolicy:   nats.ReplayInstantPolicy,
+				DeliverPolicy:  nats.DeliverAllPolicy,
+			},
+		},
 	}
+	// audit-core's two durables on the audit observability stream. It binds them
+	// and cannot create them (its principal has no JetStream admin grant).
+	bindings = append(bindings, auditObservabilityConsumers()...)
+	return append(bindings, consumerBinding{stream: "MODEL_PLANE_USAGE_EVENTS", config: nats.ConsumerConfig{
+		Durable: "cost-core-usage", DeliverSubject: "_VEREVON.MODEL.DELIVER.cost.usage",
+		DeliverGroup: "cost-core-usage", FilterSubject: "mp.v1.usage.*",
+		AckPolicy: nats.AckExplicitPolicy, AckWait: 30 * time.Second, MaxDeliver: -1,
+		MaxAckPending: 256, ReplayPolicy: nats.ReplayInstantPolicy, DeliverPolicy: nats.DeliverAllPolicy,
+	}})
 }
 
 func main() {
@@ -214,19 +263,29 @@ func main() {
 		os.Exit(1)
 	}
 
+	if err := provisionTopology(js); err != nil {
+		slog.Error("JetStream topology contract failed", "error", err)
+		os.Exit(1)
+	}
+	slog.Info("Model Plane JetStream topology ready", "streams", len(streamConfigs()), "consumers", len(consumerBindings()))
+}
+
+// provisionTopology converges the whole manifest (streamConfigs then
+// consumerBindings) and stops at the first resource that does not match its
+// contract. It is the single entry point main and the contract tests share, so
+// the tests exercise exactly what the deployment runs.
+func provisionTopology(js nats.JetStreamContext) error {
 	for _, spec := range streamConfigs() {
 		if err := ensureStream(js, spec); err != nil {
-			slog.Error("stream contract failed", "stream", spec.Name, "error", err)
-			os.Exit(1)
+			return fmt.Errorf("stream %s: %w", spec.Name, err)
 		}
 	}
 	for _, binding := range consumerBindings() {
 		if err := ensureConsumer(js, binding); err != nil {
-			slog.Error("consumer contract failed", "stream", binding.stream, "durable", binding.config.Durable, "error", err)
-			os.Exit(1)
+			return fmt.Errorf("consumer %s on stream %s: %w", binding.config.Durable, binding.stream, err)
 		}
 	}
-	slog.Info("Model Plane JetStream topology ready")
+	return nil
 }
 
 func ensureStream(js nats.JetStreamContext, expected nats.StreamConfig) error {
