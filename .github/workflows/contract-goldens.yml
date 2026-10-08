@@ -1,0 +1,74 @@
+name: Contract goldens
+
+# The shared contract goldens (apps/Model Plane/api/contracts) are read by several planes, each
+# holding a byte-identical vendored copy inside its own tree. This job runs the repo-level drift
+# check, so a golden edited without its pin, a stale vendored copy in ANY tree, or a ZDR golden
+# that breaks the strict loader fails here, whichever plane's workflow would otherwise have run.
+#
+# model-plane-rust-ci.yml also runs the sync script, but only when Model Plane Rust paths change.
+# A vendored copy in Control Plane, Ingestion Plane, Data Plane or the Frontend never triggers
+# that, so the path filter below names every golden and every vendored copy by file name, at any
+# depth.
+#
+# REQUIRE_CONTRACT is deliberately not set yet: some consumers have not vendored their copy
+# (the sync script lists them as "pending"). Set it here once every consumer in the script's
+# CONSUMERS table has vendored, so a plane can never be tested against nothing and pass.
+
+on:
+  pull_request:
+    paths:
+      - "apps/Model Plane/api/contracts/**"
+      - "apps/**/zdr-posture-matrix.json*"
+      - "apps/**/connection-zdr-capabilities.json*"
+      - "apps/**/infer-statuses.json*"
+      - "apps/**/inference-service-tokens.golden.json*"
+      - "apps/**/zdr-refusals.json*"
+      - "apps/**/cross-plane-token-requests.json*"
+      - "scripts/tests/zdr-contract-sync.test.sh"
+      - "scripts/tests/zdr-contract-schema.mjs"
+      - "scripts/tests/zdr-contract-schema.test.mjs"
+      - ".github/workflows/contract-goldens.yml"
+  push:
+    branches: [main]
+    paths:
+      - "apps/Model Plane/api/contracts/**"
+      - "apps/**/zdr-posture-matrix.json*"
+      - "apps/**/connection-zdr-capabilities.json*"
+      - "apps/**/infer-statuses.json*"
+      - "apps/**/inference-service-tokens.golden.json*"
+      - "apps/**/zdr-refusals.json*"
+      - "apps/**/cross-plane-token-requests.json*"
+      - "scripts/tests/zdr-contract-sync.test.sh"
+      - "scripts/tests/zdr-contract-schema.mjs"
+      - "scripts/tests/zdr-contract-schema.test.mjs"
+      - ".github/workflows/contract-goldens.yml"
+
+# The job reads the checkout and runs local scripts; nothing here writes to the repository.
+permissions:
+  contents: read
+
+concurrency:
+  group: contract-goldens-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  goldens:
+    name: Goldens match their pins and every copy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "20"
+
+      - name: Drift check (goldens, pins, vendored copies, strict loader, consumers)
+        run: bash scripts/tests/zdr-contract-sync.test.sh
+
+      # A checker that cannot fail reads as coverage. Prove it fails on a tampered golden, a
+      # drifted copy, a malformed ZDR golden and a pending consumer under REQUIRE_CONTRACT.
+      - name: Prove the drift check can fail
+        run: bash scripts/tests/zdr-contract-sync.test.sh --self-test
+
+      - name: Loader tests for the ZDR goldens
+        run: node --test scripts/tests/zdr-contract-schema.test.mjs

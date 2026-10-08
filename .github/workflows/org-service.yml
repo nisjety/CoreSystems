@@ -15,11 +15,13 @@ on:
     branches: [main, develop]
     paths:
       - 'apps/Control Plane/org-core/**'
+      - 'apps/Control Plane/docker-compose.yml'
       - '.github/workflows/org-service.yml'
   pull_request:
     branches: [main, develop]
     paths:
       - 'apps/Control Plane/org-core/**'
+      - 'apps/Control Plane/docker-compose.yml'
 
 env:
   SERVICE_NAME: org-service
@@ -92,6 +94,10 @@ jobs:
 
       - name: Run tests
         env:
+          # The retention-posture contract test reads the Control Plane compose
+          # file from the checkout (its golden is vendored into this module).
+          # Without REQUIRE_CONTRACT a missing file skips; with it, it fails.
+          REQUIRE_CONTRACT: '1'
           TEST_DATABASE_URL: postgres://org_core:org_core@localhost:5432/org_test?sslmode=disable
           CONTROL_LIFECYCLE_TEST_DATABASE_URL: postgres://org_core:org_core@localhost:5432/org_lifecycle?sslmode=disable
         run: go test -v -p 1 ./...

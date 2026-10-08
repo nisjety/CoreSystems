@@ -14,11 +14,26 @@ on:
     branches: [main, develop]
     paths:
       - 'apps/Control Plane/auth-core/**'
+      # Read by auth-core's contract specs (the system under test, so they cannot be vendored).
+      - 'apps/Control Plane/config/**'
+      - 'apps/Control Plane/scripts/plane-principal-registry.jq'
+      - 'apps/Control Plane/scripts/run-control-plane.sh'
+      - 'scripts/bootstrap_runtime_environment.sh'
+      - 'scripts/tests/principal-registry-parity.test.sh'
+      - 'apps/Control Plane/docker-compose.yml'
+      - 'apps/Control Plane/docker-compose.production.yml'
       - '.github/workflows/auth-service.yml'
   pull_request:
     branches: [main, develop]
     paths:
       - 'apps/Control Plane/auth-core/**'
+      - 'apps/Control Plane/config/**'
+      - 'apps/Control Plane/scripts/plane-principal-registry.jq'
+      - 'apps/Control Plane/scripts/run-control-plane.sh'
+      - 'scripts/bootstrap_runtime_environment.sh'
+      - 'scripts/tests/principal-registry-parity.test.sh'
+      - 'apps/Control Plane/docker-compose.yml'
+      - 'apps/Control Plane/docker-compose.production.yml'
 
 env:
   SERVICE_NAME: auth-service
@@ -50,8 +65,20 @@ jobs:
       - name: Type check
         run: pnpm run build
       
+      # The contract specs read the principal policy, the compose file and the
+      # vendored goldens from the full checkout. Without REQUIRE_CONTRACT a spec
+      # whose file is missing skips; with it, the absence fails the suite.
       - name: Run tests
+        env:
+          REQUIRE_CONTRACT: '1'
         run: pnpm test
+
+      # The committed principal policy, the launcher and the central bootstrap
+      # must produce the same registry. Runs the real scripts in hermetic
+      # sandboxes (a stub docker, throwaway env files); no live secret is read.
+      - name: Principal registry parity (policy, launcher, bootstrap)
+        working-directory: '.'
+        run: bash scripts/tests/principal-registry-parity.test.sh
 
   build:
     needs: test

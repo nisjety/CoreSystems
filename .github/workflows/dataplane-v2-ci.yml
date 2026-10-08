@@ -191,6 +191,104 @@ jobs:
           TEST_DATABASE_URL: postgres://dataplane:dataplane@localhost:5432/documents_test?sslmode=disable
         run: go test -tags=integration -v ./internal/repo/...
 
+  # CR-N1. The Postgres-gated tests of the CR chain (and the crates it touches)
+  # used to be compiled and never run: Rust ones are #[ignore]d, Go ones t.Skip
+  # and `go test` reports `ok` (tests/contract/postgres exits 0 with 13 SKIP when
+  # no database is reachable). These two jobs make that impossible.
+  #
+  # postgres-contract-wiring needs no database: it self-tests the runner's
+  # parsers and fails if a Postgres-gated test exists that no suite owns, if a
+  # migration file would be silently ignored by the migrator, or if the job below
+  # is removed or made skippable (continue-on-error).
+  postgres-contract-wiring:
+    name: Postgres Contract Wiring Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Self-test the runner (parsers, assertions, lints)
+        run: bash tests/scripts/run-postgres-contract-tests.sh --self-test
+
+      - name: Lint (every Postgres gate registered or exempt, workflow wiring, migration names)
+        run: bash tests/scripts/run-postgres-contract-tests.sh --lint
+
+      # CR-T11: the keyword-index parity contract (index-parity-v1) is vendored byte for byte by its
+      # producer (quickwit-adapter-rs, CR-T9a) and consumer (data-quality-go). No database needed.
+      - name: Parity contract drift check (pins, and the adapter's vendored copy once it serves the route)
+        run: bash scripts/check-parity-contract.sh
+
+      - name: Prove the parity drift check can fail
+        run: bash scripts/check-parity-contract.sh --self-test
+
+  # postgres-contract-tests applies init.sql and EVERY migration through the real
+  # tools/migrator on a disposable Postgres 16, then runs the gated suites of
+  # tests/contract/postgres, embedding-engine-rs, graph-index-rs and
+  # data-quality-go with REQUIRE_CONTRACT=1 and asserts that the gated tests
+  # EXECUTED (names and counts), instead of trusting a green exit code. The
+  # existing rust-integration-tests and documents-api-postgres-tests jobs are
+  # unchanged. Add a suite in tests/scripts/run-postgres-contract-tests.sh.
+  postgres-contract-tests:
+    name: Postgres Contract Tests (real migrator, REQUIRE_CONTRACT=1)
+    runs-on: ubuntu-latest
+    needs: [rust-check, go-build, postgres-contract-wiring]
+    timeout-minutes: 45
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: dataplane
+          POSTGRES_PASSWORD: dataplane
+          POSTGRES_DB: dataplane_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U dataplane"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: apps/Data Plane v2/tools/migrator/go.mod
+          cache-dependency-path: |
+            apps/Data Plane v2/tools/migrator/go.sum
+            apps/Data Plane v2/tests/contract/postgres/go.sum
+            apps/Data Plane v2/services/data-quality-go/go.sum
+            apps/Data Plane v2/shared/go/go.sum
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "apps/Data Plane v2 -> target"
+
+      - name: Install protoc
+        uses: arduino/setup-protoc@v3
+        with:
+          version: "27.x"
+
+      - name: PostgreSQL client (psql creates the per-suite databases)
+        run: |
+          if ! command -v psql >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends postgresql-client
+          fi
+          psql --version
+
+      - name: Run the Postgres-gated suites (real migrator, REQUIRE_CONTRACT=1)
+        # TEST_DATABASE_URL is the ADMIN connection to the throwaway service
+        # above (superuser, local host, database name ending in _test); the
+        # runner derives a fresh bare and a fresh migrated database per suite
+        # from it. Absence of the database, a skipped gated test or a gated test
+        # that is not compiled all fail the job. The counts land in the job summary.
+        env:
+          REQUIRE_CONTRACT: "1"
+          TEST_DATABASE_URL: postgres://dataplane:dataplane@127.0.0.1:5432/dataplane_test?sslmode=disable
+        run: bash tests/scripts/run-postgres-contract-tests.sh
+
   subject-contract:
     name: NATS subject contract lint (§17.3.3)
     runs-on: ubuntu-latest
@@ -198,6 +296,65 @@ jobs:
       - uses: actions/checkout@v7
       - name: Lint NATS subjects
         run: bash scripts/check-subjects.sh
+
+  # CR-T12: graph-index reaches a model through inference-core and nowhere else. The direct-Azure
+  # backend and its key are deleted; this keeps the deployment from growing them back.
+  graph-index-no-azure-contract:
+    name: graph-index reaches a model through inference-core only
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Compose contract (no Azure key or endpoint, the inference-core hop, its own signing key)
+        run: bash tests/scripts/graph-index-no-azure-contract-test.sh
+
+  # CR-T13: contextual retrieval is on by default and the global flag is an incident-only kill
+  # switch. The compose defaults, the model default, every variable the code reads, their
+  # documentation in .env.example and the explicit off of the isolated stacks are one contract; the
+  # Rust side (the compose defaults equal the code defaults, the kill switch needs a reason) runs in
+  # the workspace test step above.
+  contextual-retrieval-config-contract:
+    name: contextual retrieval is on by default and documented
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Config contract (compose defaults, .env.example, isolated stacks, stale statements)
+        run: bash tests/scripts/contextual-retrieval-config-contract-test.sh
+      - name: Prove the contract can fail
+        run: bash tests/scripts/contextual-retrieval-config-contract-test.sh --self-test
+
+  # CR-T9b: the background LLM budget is read by two services (embedding-engine and graph-index)
+  # from the same four variables and measured as one figure. Both compose blocks, .env.example and
+  # both configurations must agree, nothing may be built in (the owner supplies the figure and the
+  # prices), and the one metric must be served, scraped and alerted on. The Rust side (the spend
+  # statement and the variable names equal graph-index's) runs in the workspace test step above.
+  background-budget-contract:
+    name: the background LLM budget is the same setting in both services and builds nothing in
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Budget contract (compose, .env.example, configurations, metric, scrape, alert)
+        run: bash tests/scripts/background-budget-contract-test.sh
+      - name: Prove the contract can fail
+        run: bash tests/scripts/background-budget-contract-test.sh --self-test
+
+  # CR-T14: the retrieval-quality harness. The gate (regression, coverage, keyword-index parity, the ctx-v2 promotion),
+  # the ingest of the frozen corpus, the golden builder and the service client are scripts a nightly job on a
+  # self-hosted runner uses against paid services; this job proves their rules without touching any of that.
+  eval-harness:
+    name: retrieval-quality harness (gate, corpus ingest, golden builder, service client)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: The frozen corpus matches its manifest (a changed byte fails)
+        run: python3 scripts/eval-ingest-corpus.py verify
+      - name: Python tests (gate both ways, promotion, ingest idempotency, goldens, service client)
+        run: python3 -m unittest discover -s scripts/tests -p "test_eval_*.py"
+      - name: Contract goldens are the same bytes on both sides (eval-evidence-v1, harness-record-v1)
+        run: bash scripts/check-eval-contract.sh
+      - name: Prove the drift check can fail
+        run: bash scripts/check-eval-contract.sh --self-test
+      - name: Shell contract (study, variant cell, evidence, records, nightly switches) against a stand-in for docker
+        run: bash tests/scripts/eval-harness-contract-test.sh
 
   docker-smoke:
     name: Docker Compose Smoke Test
