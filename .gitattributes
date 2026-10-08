@@ -36,3 +36,17 @@ GNUmakefile text eol=lf
 *.yaml text eol=lf
 *.sql text eol=lf
 Dockerfile text eol=lf
+
+# Product-recording fixtures are hashed byte for byte: manifest.json lists a
+# sourceHashes entry per file and tests/e2e/product-recording*.ts refuse to run
+# when one differs. The blobs are stored LF, but a Windows checkout with
+# core.autocrlf=true rewrites the working copies to CRLF, which changes every
+# hash and fails every take (seen 2026-09-29, after a merge). Pin the four
+# scenario folders to LF so a checkout cannot change what the model is sent.
+**/product-recordings/0[1-4]-*/* text eol=lf
+
+# Contract goldens that are hashed byte for byte: SHA256SUMS pins every file of the directory,
+# README.md included, and the producer vendors the directory unchanged. The .json goldens are
+# already LF by the *.json rule; this pins the rest, so that a Windows checkout with
+# core.autocrlf=true cannot change a hash (the CR-T11 keyword-index parity contract).
+**/testdata/index-parity-v1/* text eol=lf
