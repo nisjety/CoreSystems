@@ -14,6 +14,9 @@
 - **PDF** - Extract text from PDFs using PyPDF2
 - **DOCX** - Parse Word documents using python-docx
 - **CSV/Excel** - Parse tabular data using pandas
+- **XLSX** - Read straight from the OOXML parts (no pandas): cell values as Excel shows them (dates as ISO dates, percentages, booleans, errors), formulas nobody calculated as `=SUM(B2:B9)`, a `[Formler]` list of the formulas behind the numbers, hidden sheets labelled `(skjult)`. Row *n* is line *n* of its sheet. For chat attachments the grid is cut on a row boundary at about 55 000 characters, with a `[… avkortet: N rader utelatt i «Ark»]` marker and `truncated: true` in the response
+- **PPTX** - Slide text in shape order with the title first, tables as tab-separated rows, picture alt text as `[Bilde: …]`, charts as `[Diagram: tittel] serie: verdier; kategorier: …` from the cached values, speaker notes in a `[Notater]` block, hidden slides labelled `(skjult)`
+- **Office archive budget** - `.xlsx` and `.pptx` are refused with 413 from the zip directory alone (more than 2 000 parts, a part over 20 MB, more than 30 MB in total) before any part is inflated; worksheets and shared strings are streamed, and every other part is read whole only up to 2 MB (a bigger style table is skipped, any other part is refused with 413) because imports-api runs in a 256 MB container. A single row, string or list that holds more than 100 000 elements is refused, a row of more than 1 000 000 characters is refused (a row of cells that all point at one long shared string would otherwise be built in full), a chat deck of more than 200 000 characters is refused as soon as it passes that, sheet names are cut at 255 characters, and a chat parse that takes more than 15 s is refused (413) for decks as well as workbooks
 - **JSON** - Validate and parse JSON structures
 - **HTML** - Extract text from HTML using BeautifulSoup
 - **Plain Text** - TXT and Markdown files

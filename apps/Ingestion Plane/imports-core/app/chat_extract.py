@@ -6,7 +6,13 @@ from pathlib import Path
 from fastapi import HTTPException
 from pydantic import BaseModel, Field
 
-from app.parsers import _parse_local, UnsupportedFileTypeError
+from app.parsers import _parse_local, OfficeArchiveTooLargeError, UnsupportedFileTypeError
+
+# One chat turn takes at most this much text per document.
+_MAX_CHARS = 60_000
+# A workbook is cut on a row boundary a little below that, so the formula list
+# and the cut markers still fit inside the limit.
+_XLSX_MAX_CHARS = 55_000
 
 
 class ChatExtractRequest(BaseModel):
@@ -22,15 +28,24 @@ def extract_chat_document(request: ChatExtractRequest) -> dict:
         raise HTTPException(400, "Invalid attachment encoding") from exc
     if not content or len(content) > 1_000_000:
         raise HTTPException(413, "Choose a non-empty attachment smaller than 1 MB")
+    metadata: dict = {}
     try:
-        text = _parse_local(Path(request.filename).suffix.lower().lstrip('.'), content, {})
+        text = _parse_local(
+            Path(request.filename).suffix.lower().lstrip('.'), content, metadata, max_chars=_XLSX_MAX_CHARS,
+        )
     except UnsupportedFileTypeError as exc:
         raise HTTPException(415, "This attachment type is not supported") from exc
+    except OfficeArchiveTooLargeError as exc:
+        raise HTTPException(413, "The attachment expands to too much content to read safely. Choose a smaller file.") from exc
     except Exception as exc:
         # Parser exceptions may contain document text. Do not expose or log them.
         raise HTTPException(422, "The attachment could not be read. Check the file and retry.") from exc
     if not text.strip():
         raise HTTPException(422, "No readable text found. Scanned files require a text version.")
-    if len(text) > 60_000:
+    if len(text) > _MAX_CHARS:
         raise HTTPException(413, "The document is too long for this turn. Choose a smaller excerpt.")
-    return {"data": {"name": request.filename, "content": text, "persisted": False}}
+    data = {"name": request.filename, "content": text, "persisted": False}
+    if metadata.get("truncated"):
+        # The sheet was cut on a row boundary; the text says where.
+        data["truncated"] = True
+    return {"data": data}
