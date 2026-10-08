@@ -1,0 +1,4 @@
+# The snapshot is hashed byte for byte (scripts/eval-corpus-manifest.json pins every file by sha256).
+# With core.autocrlf=true a Windows checkout would rewrite the line endings of the working copies and
+# change every hash, so git must not touch these files at all, in either direction.
+* -text
