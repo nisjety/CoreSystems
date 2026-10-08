@@ -3120,6 +3120,16 @@ its `InteractivePlaneAudience` type and doc comment (`:110-126`) say
 caller start any run-scoped workflow"). The spec asserts only `control-policy`.
 Type/runtime divergence on an auth gate — filed separately.
 
+**Fixed 2026-09-11** (`fix(auth-core): refuse interactive orchestrator-core
+plane tokens`). The exclusion now lives in one `SERVICE_ONLY_PLANE_AUDIENCES`
+tuple in `convex-token.service.ts` (`as const satisfies readonly
+PlaneAudience[]`); both the `InteractivePlaneAudience` type and the
+`isInteractivePlaneAudience` guard derive from it, so they cannot drift again.
+`convex-token.service.spec.ts` and `plane-token.controller.spec.ts` pin
+`orchestrator-core` as service-only: `GET /api/orchestrator-core/token` is a
+404 before the session is even read, while service principals still mint it
+through `:audience/internal-token`.
+
 Full mechanism and implementation order:
 `apps/Frontend Plane/verevonv3/docs/S3_3_DURABLE_WORKSPACE_DESIGN_2026-09-11.md` §3.5 B.2.
 

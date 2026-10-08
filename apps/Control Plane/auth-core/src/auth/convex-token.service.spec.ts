@@ -1,4 +1,7 @@
-import { ConvexTokenService } from './convex-token.service';
+import {
+  ConvexTokenService,
+  SERVICE_ONLY_PLANE_AUDIENCES,
+} from './convex-token.service';
 import { generateKeyPairSync } from 'crypto';
 import { mkdtempSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
@@ -182,6 +185,57 @@ describe('ConvexTokenService production key and principal posture', () => {
       org_id: 'org-a',
       principal_type: 'user',
     });
+  });
+
+  it('reserves the orchestrator-core audience for service-principal issuance', () => {
+    process.env.NODE_ENV = 'test';
+    for (const name of keyEnvNames) delete process.env[name];
+    const service = new ConvexTokenService();
+
+    // Known to the issuer, so services can still mint it through
+    // `:audience/internal-token` ...
+    expect(service.isKnownPlaneAudience('orchestrator-core')).toBe(true);
+    // ... but never from a user session: orchestrator-core's StartWorkflow
+    // lets a non-service caller start any run-scoped workflow, so a user-bound
+    // token would drive the durable tier directly. This is the case that used
+    // to slip through: the type excluded it, the runtime guard did not.
+    expect(service.isInteractivePlaneAudience('orchestrator-core')).toBe(false);
+
+    const serviceBundle = service.issuePlaneToken('orchestrator-core', {
+      userId: 'service:workflow-starter',
+      orgId: 'org-a',
+      principalType: 'service',
+      serviceId: 'workflow-starter',
+      reason: 'start a system-initiated workflow',
+    });
+    const servicePayload = JSON.parse(
+      Buffer.from(serviceBundle.token.split('.')[1], 'base64url').toString(
+        'utf8',
+      ),
+    ) as Record<string, unknown>;
+    expect(servicePayload).toMatchObject({
+      aud: 'orchestrator-core',
+      sub: 'service:workflow-starter',
+      principal_type: 'service',
+      service_id: 'service:workflow-starter',
+    });
+    expect(servicePayload).not.toHaveProperty('user_id');
+  });
+
+  it('keeps the interactive guard in lockstep with the declared service-only audiences', () => {
+    process.env.NODE_ENV = 'test';
+    for (const name of keyEnvNames) delete process.env[name];
+    const service = new ConvexTokenService();
+
+    // Pin the set itself: growing or shrinking it must be a deliberate change.
+    expect(SERVICE_ONLY_PLANE_AUDIENCES).toEqual([
+      'control-policy',
+      'orchestrator-core',
+    ]);
+    for (const audience of SERVICE_ONLY_PLANE_AUDIENCES) {
+      expect(service.isKnownPlaneAudience(audience)).toBe(true);
+      expect(service.isInteractivePlaneAudience(audience)).toBe(false);
+    }
   });
 
   it('recognizes the closed Model service audience contract without accepting typos', () => {

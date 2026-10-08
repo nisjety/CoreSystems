@@ -27,6 +27,10 @@ jest.mock('./interactive-retention-policy', () => ({
 }));
 
 import { PlaneTokenController } from './plane-token.controller';
+import {
+  ConvexTokenService,
+  SERVICE_ONLY_PLANE_AUDIENCES,
+} from './convex-token.service';
 
 describe('PlaneTokenController service issuance audit', () => {
   const originalRegistry = process.env.PLANE_SERVICE_PRINCIPALS_JSON;
@@ -635,5 +639,82 @@ describe('PlaneTokenController delegated-identity token exchange (issueTokenExch
         validBody,
       ),
     ).rejects.toBeInstanceOf(ServiceUnavailableException);
+  });
+});
+
+describe('PlaneTokenController service-only audience gate', () => {
+  const keyEnvNames = [
+    'CONVEX_AUTH_PRIVATE_KEY_FILE',
+    'CONVEX_AUTH_PUBLIC_KEY_FILE',
+    'CONVEX_AUTH_PRIVATE_KEY_PEM',
+    'CONVEX_AUTH_PUBLIC_KEY_PEM',
+  ] as const;
+  const originalEnv = { ...process.env };
+
+  beforeEach(() => {
+    process.env.NODE_ENV = 'test';
+    for (const name of keyEnvNames) delete process.env[name];
+    mockGetSession.mockReset();
+    mockResolveCanonicalTokenContext.mockReset();
+    mockResolveInteractiveRetentionPosture.mockReset();
+    mockGetSession.mockResolvedValue({
+      user: { id: 'user-a', email: 'user@example.test' },
+      session: { activeOrganizationId: 'org-a' },
+    });
+    mockResolveCanonicalTokenContext.mockResolvedValue({
+      orgId: 'org-a',
+      role: 'member',
+    });
+    mockResolveInteractiveRetentionPosture.mockResolvedValue({
+      zdr: false,
+      authority: 'interactive-org-retention-policy',
+    });
+  });
+
+  afterEach(() => {
+    process.env = { ...originalEnv };
+  });
+
+  // Uses the REAL ConvexTokenService guard rather than a mock so the test pins
+  // the actual slugs, not just the controller's `if`. `orchestrator-core` is
+  // the case that used to slip through: the InteractivePlaneAudience type
+  // excluded it but the runtime check only excluded `control-policy`, so a
+  // plain session cookie could mint a user-bound orchestrator-core JWT and
+  // start run-scoped workflows directly.
+  it.each(SERVICE_ONLY_PLANE_AUDIENCES)(
+    'refuses GET /api/%s/token from a session cookie before reading the session',
+    async (audience) => {
+      const tokens = new ConvexTokenService();
+      const issueSpy = jest.spyOn(tokens, 'issuePlaneToken');
+      const controller = new PlaneTokenController(tokens, {} as never);
+
+      await expect(
+        controller.getToken(audience, {
+          headers: { cookie: 'session=test' },
+        } as never),
+      ).rejects.toBeInstanceOf(NotFoundException);
+
+      expect(mockGetSession).not.toHaveBeenCalled();
+      expect(issueSpy).not.toHaveBeenCalled();
+    },
+  );
+
+  it('still mints for a genuinely interactive audience through the same real guard', async () => {
+    const tokens = new ConvexTokenService();
+    const controller = new PlaneTokenController(tokens, {} as never);
+
+    const result = await controller.getToken('session-core', {
+      headers: { cookie: 'session=test' },
+    } as never);
+    const payload = JSON.parse(
+      Buffer.from(result.token.split('.')[1], 'base64url').toString('utf8'),
+    ) as Record<string, unknown>;
+
+    expect(result).toMatchObject({ orgId: 'org-a', role: 'member' });
+    expect(payload).toMatchObject({
+      aud: 'session-core',
+      user_id: 'user-a',
+      principal_type: 'user',
+    });
   });
 });
