@@ -1,0 +1,130 @@
+# Live reads, 2026-10-06: why the model plane's "Used by AI?" audit trail never reached audit-core, and what is true now
+# Engineering evidence, not legal advice. Each block names the command that produced it. Read-only: SELECT statements, docker inspect and logs, the NATS monitoring endpoint, name resolution.
+# Contents: counts, names, subjects, timestamps and sequence numbers. No credentials, no message content, no tenant identifiers. Credential copies are compared for equality only; no value and no digest is printed.
+# Follows live-reads-trust-claims-2026-10-03.txt (BLOCK 3 there is the read this one explains). Read at 2026-10-06T11:58:46Z on the developer stack.
+
+## BLOCK 1: the stream on the Model Plane broker, and who created it
+## command: docker exec model-plane-nats-1 wget -qO- 'http://127.0.0.1:8222/jsz?streams=true&consumers=true&config=true'   (reduced to one line per stream and consumer by a short node filter)
+STREAM MODEL_PLANE_RUN_EVENTS created=2026-09-03T19:18:53.837320703Z messages=2 last_seq=1754 subjects=mp.v1.run.*.event
+  CONSUMER capability-core-run-watch-notify filter=mp.v1.run.*.event delivered=151 ack_floor=0 ack_pending=0 push_bound=n/a
+  CONSUMER capability-core-skill-review filter=mp.v1.run.*.event delivered=1713 ack_floor=1713 ack_pending=0 push_bound=n/a
+  CONSUMER insight-core-agent-run-subscriber filter=mp.v1.run.*.event delivered=1752 ack_floor=1752 ack_pending=0 push_bound=n/a
+STREAM MODEL_PLANE_USAGE_EVENTS created=2026-10-04T23:46:31.32720768Z messages=2 last_seq=2 subjects=mp.v1.usage.*
+  CONSUMER cost-core-usage filter=mp.v1.usage.* delivered=2 ack_floor=2 ack_pending=0 push_bound=true
+STREAM MP_ORCHESTRATION_EVENTS created=2026-09-03T19:18:53.83548166Z messages=0 last_seq=0 subjects=mp.v1.orchestration.>
+  CONSUMER insight-core-agent-approval-subscriber filter=mp.v1.orchestration.approval delivered=0 ack_floor=0 ack_pending=0 push_bound=n/a
+  CONSUMER session-core-orchestration filter=mp.v1.orchestration.> delivered=0 ack_floor=0 ack_pending=0 push_bound=n/a
+STREAM TOOLS_COMPLETIONS created=2026-09-03T19:18:53.832909022Z messages=0 last_seq=0 subjects=tools.completions.*
+  CONSUMER session-core-tools filter=tools.completions.* delivered=0 ack_floor=0 ack_pending=0 push_bound=n/a
+STREAM VEREVON_CONTROL_OBSERVABILITY created=2026-10-04T23:46:31.309784165Z messages=3 last_seq=3 subjects=verevon.audit.v1.model.>,verevon.usage.v1.model.>,verevon.audit.v2.model.>,verevon.usage.v2.model.>,verevon.dlq.audit-core.>
+  CONSUMER audit-core-model-v3-audit filter=verevon.audit.v2.model.> delivered=3 ack_floor=3 ack_pending=0 push_bound=true
+  CONSUMER audit-core-model-v3-usage filter=verevon.usage.v2.model.> delivered=0 ack_floor=0 ack_pending=0 push_bound=true
+## command: docker inspect model-plane-nats-provisioner --format 'image created={{.Created}}'   and   docker inspect model-plane-nats-provisioner-1 --format 'started={{.State.StartedAt}} finished={{.State.FinishedAt}} exit={{.State.ExitCode}}'
+image created=2026-10-04T23:46:28.42174289Z
+started=2026-10-05T00:24:35.199841013Z finished=2026-10-05T00:24:35.473872807Z exit=0
+# READING: VEREVON_CONTROL_OBSERVABILITY exists on this broker with the two audit-core durables bound. It was created three seconds after the Model Plane's own provisioner image was built (the image holds nats-provisioner/audit_observability.go) and its subjects and limits are that file's. The streams that existed since 2026-09-03 (MP_ORCHESTRATION_EVENTS, TOOLS_COMPLETIONS, MODEL_PLANE_RUN_EVENTS) do not capture verevon.audit.v2.model.>. Until the stream existed the broker had no stream for that subject, which is why session-core's JetStream publishes failed with "no stream found for given subject" and why 4,992 rows ran out of attempts.
+
+## BLOCK 2: session-core's outbox today (SELECT only)
+## command: docker exec model-plane-postgres-1 psql -U postgres -d session_core -At -F '|' -c "select class, published, pending, terminal_unpublished, first_day, last_day, max_attempts ..."   (class = the payload's event, or run_event for mp.v1.run.<run>.event)
+run_event|391|0|0|2026-09-29|2026-10-05|1
+tool_action|1|0|2515|2026-09-04|2026-10-05|20
+tool_action_reserved|1|0|2477|2026-09-04|2026-10-05|20
+## command: select subject, payload->>'event', count(*) from session_audit_outbox where terminal_at is not null and published_at is null group by 1,2   (shows which subject each stuck row was stored under)
+verevon.audit.v2.model.session-core.tool_action|tool_action|2515
+verevon.audit.v2.model.session-core.tool_action|tool_action_reserved|2477
+## command: select last_error, count(*) from session_audit_outbox where terminal_at is not null and published_at is null group by 1
+no stream found for given subject|4992
+## command: select payload->>'plane', payload->>'producer', count(*), count(distinct event_id), count(distinct payload->>'org_id') from session_audit_outbox where terminal_at is not null and published_at is null group by 1,2   (do the stuck rows carry what audit-core requires: plane model, producer session-core, an org id)
+model|session-core|4992|4992|2
+## command: select subject, payload->>'event', attempts, published_at from session_audit_outbox where published_at is not null and subject like 'verevon.audit%' order by published_at   (the rows published since the stream exists; the event id is a hash and is left out)
+verevon.audit.v2.model.session-core.tool_action|tool_action_reserved|1|2026-10-05 01:19:20
+verevon.audit.v2.model.session-core.tool_action|tool_action|1|2026-10-05 01:19:20
+## command: select version, description from _sqlx_migrations order by version desc limit 2
+42|thread persona toggle
+41|mail task thread origin
+## command: docker inspect model-plane-session-core-1 --format 'started={{.State.StartedAt}}'   and the image's .Created
+started=2026-10-05T00:22:20.913568381Z
+image created=2026-10-01T23:13:31.114134524Z
+# READING: all 4,992 stuck rows are still stuck (terminal, unpublished, 20 attempts, "no stream found for given subject"), and every one carries what audit-core requires. 2,477 of them are reservation events (event tool_action_reserved) stored under the tool_action subject: audit-core refuses that pairing (BLOCK 3). Two rows were published after the stream existed (2026-10-05, one of each event), both by the session-core build of 2026-10-01 that predates the fix: the reservation row was published on the tool_action subject. The running session-core has not applied migration 43, so the requeue function does not exist on this database yet.
+
+## BLOCK 3: what audit-core holds (SELECT only)
+## command: docker exec controlplane-postgres psql -U coresystem -d controlplane -At -F '|' -c "select plane, event, count(*), min(occurred_at), max(occurred_at) from audit_events where plane = 'model' group by 1,2"
+model|tool_action|1|2026-10-05 01:19:20|2026-10-05 01:19:20
+## command: select indexname from pg_indexes where tablename = 'audit_events' and indexname like 'uq_%'   (the de-duplication a replay relies on)
+uq_audit_events_jetstream_inbox
+uq_audit_events_source_producer_event
+uq_audit_events_source_subject_event
+# READING: audit-core holds exactly one model-plane event, the tool_action of 2026-10-05. The reservation event published the same second on the wrong subject is not there: the stream holds three messages on two subjects and audit-core's consumer acknowledged all three and stored one, which fits the reservation having been refused as an authority mismatch and parked on the dead-letter subject that lives in the same stream (the message bodies were not read). A replay is safe by schema: an event is unique per (source bus, producer, event_id) and per (source bus, subject, event_id).
+
+## BLOCK 4: why nothing created the stream before (broker log, credential copies)
+## command: docker logs model-plane-nats-1 2>&1 | grep 'authentication error'   (counted per user name per day by a short node filter; the broker log starts 2026/09/10)
+application-insight-model: 2026/10/01=1
+audit-core-model: 2026/09/10=41579 2026/09/11=70176 2026/09/12=63782 2026/09/13=75237 2026/09/14=64131
+observability-provisioner-model: 2026/09/14=2 2026/09/17=1 2026/09/19=1 2026/09/28=1 2026/09/29=2 2026/10/01=1
+## command: comparing the copies of the provisioner and audit credentials in the Model Plane env file and the Control Plane secrets file (equal or different only; no value, no digest)
+MODEL_NATS_PROVISIONER_PASSWORD: Model Plane deploy/.env vs Control Plane .env.generated-secrets: different (lengths 64 and 64)
+AUDIT_MODEL_NATS_PASSWORD: Model Plane deploy/.env vs Control Plane .env.generated-secrets: equal (lengths 64 and 64)
+AUDIT_MODEL_NATS_PASSWORD: Model Plane deploy/.env.bak-natsfix-20260914 vs Control Plane .env.generated-secrets.bak-natsfix-20260914: different (lengths 64 and 64)
+## command: grep -n '"optional":true' "apps/Control Plane/docker-compose.yml"   (the audit-extra-nats-provisioner declares the model and application buses optional; its restart policy is on-failure; the password fields are variable references, shown hidden)
+802:                [{"name":"model","plane":"model","url":"nats://model-nats:4222","user":"observability-provisioner-mo
+## command: docker ps -a --format '{{.Names}}' | grep -E '^(audit-extra|audit-nats)'
+(none: the Control Plane's provisioners left no container to read)
+# READING: until 2026-09-14 audit-core's own login to this broker was refused (the audit credential differed); that was repaired on 2026-09-14 (the audit copies are equal now and were different in the backup of that day). The provisioner credential was not: the Control Plane's copy of MODEL_NATS_PROVISIONER_PASSWORD still differs from the broker's. The broker refused the login of observability-provisioner-model on the days the Control Plane stack was launched (8 refusals, 2026-09-14 to 2026-10-01), and the Control Plane's extra provisioner, which declares the model bus optional, skips such a bus and exits 0. That is the only party that was to create the stream; the Model Plane's own provisioner did not. Whether those 8 refusals all came from the Control Plane's provisioner is read from the user name and the dates, not from the client address.
+
+## BLOCK 5: the same class elsewhere on this stack
+## command: docker logs audit-core-service 2>&1 | grep -c 'extra nats subscriber start failed'   and the bus and error of the lines
+34202 x bus=application error=nats: stream not found
+## command: docker exec app-nats wget -qO- 'http://127.0.0.1:8222/jsz?streams=true&consumers=true&config=true'   (reduced as in BLOCK 1)
+STREAM VEREVON_APPLICATION created=2026-09-03T19:23:00.591085489Z messages=176 last_seq=7258 subjects=verevon.application.>
+  CONSUMER conversation-core-ai-action-executor filter=verevon.application.conversation.ai_action.reviewed delivered=0 ack_floor=0 ack_pending=0 push_bound=true
+  CONSUMER insight-core-metric-subscriber filter=verevon.application.> delivered=7258 ack_floor=7258 ack_pending=0 push_bound=true
+STREAM VEREVON_AUDIT created=2026-09-03T19:24:00.756346447Z messages=1 last_seq=11 subjects=verevon.audit.>
+STREAM VEREVON_INGESTION created=2026-09-03T19:23:20.65540299Z messages=0 last_seq=0 subjects=verevon.ingestion.>
+  CONSUMER conversation-core-webhook-received filter=verevon.ingestion.integration.webhook_received delivered=0 ack_floor=0 ack_pending=0 push_bound=true
+  CONSUMER insight-core-ingestion-subscriber filter=verevon.ingestion.> delivered=0 ack_floor=0 ack_pending=0 push_bound=true
+STREAM VEREVON_MODEL created=2026-09-03T19:23:40.707865909Z messages=0 last_seq=0 subjects=verevon.model.>
+  CONSUMER conversation-core-model-action-proposed filter=verevon.model.action.proposed delivered=0 ack_floor=0 ack_pending=0 push_bound=true
+## command: select subject, count(*) filter (where published_at is not null), count(*) filter (where published_at is null) from leads_audit_outbox group by 1   (database notifications on application-postgres)
+verevon.audit.v2.application.leads-core.provider_lead_sync|11|0
+## command: select plane, count(*) from audit_events group by 1 order by 1
+control|47728
+ingestion|17247
+model|1
+# READING: audit-core's second extra bus, the Application Plane's, has the same symptom: it retries every second and gets "nats: stream not found", because VEREVON_CONTROL_OBSERVABILITY does not exist on app-nats. Its publishers do publish (leads-core wrote 11 audit events, all published to VEREVON_AUDIT, which has no consumer), and audit-core holds no application-plane event. A scratch broker shows why the stream cannot be created there while VEREVON_AUDIT (verevon.audit.>) exists: "subjects overlap with an existing stream".
+
+## BLOCK 6: other outbox tables (SELECT counts, every Postgres database on this stack)
+## command: select state, count(*) from managed_run_terminalization_outbox group by 1   (session_core)
+applied|1888
+reconciliation_required|6
+superseded|31
+## command: counts of the other session_core outbox tables: approval_delivery_outbox, cost_billing_outbox (rows; undelivered)
+approval_delivery_outbox|0|0
+cost_billing_outbox|0|0
+## command: select count(*) filter (where published_at is not null), count(*) filter (where published_at is null), count(*) filter (where actor_resolution_dead_lettered_at is not null), max(attempts) from organization_membership_audit_outbox   (auth_service)
+0|3|3|41963
+## command: select left(last_error, 80), count(*) from organization_membership_audit_outbox group by 1   (the error text names a code defect, not a tenant)
+TypeError: audit.actor_resolution_dead_lettered_at?.toISOString is not a functio|3
+## command: the same published/unpublished split for the other auth_service, user_service and org_core outbox tables
+auth_identity_event_outbox|6|0
+organization_membership_outbox|3|0
+organization_projection_outbox|3|0
+organization_invitation_audit_outbox|0|0
+organization_deletion_outbox|0|0
+user_audit_outbox|0|0
+organization_gdpr_audit_outbox|0|0
+organization_interactive_retention_outbox|0|0
+organization_plan_change_outbox|0|0
+## command: select count(*) filter (where published), count(*) filter (where not published), count(*) filter (where not observability_published) from documents_outbox   (dataplane on data-plane-v2-postgres-1)
+192|0|192
+## command: docker inspect data-plane-v2-documents-api-1 ... | grep -c '^KNOWLEDGE_OBSERVABILITY_NATS_URL=.'   (set = 1)
+0
+## command: docker exec model-plane-session-core-1 getent hosts nats   (which brokers does the name the Model Plane services use resolve to, inside a container that also sits on inter-plane-bus)
+172.19.0.23 verevon-nats
+172.19.0.33 app-nats
+172.19.0.44 data-plane-v2-nats-1
+172.19.0.47 model-plane-nats-1
+## command: docker logs app-nats 2>&1 | grep 'authentication error'   (per user name per day, as in BLOCK 4)
+application-insight: 2026/10/01=1
+capability-core-runtime: 2026/09/11=1 2026/09/14=4 2026/09/17=6 2026/09/18=2 2026/09/19=3 2026/09/26=7 2026/09/27=6 2026/09/29=1 2026/09/30=4 2026/10/01=12 2026/10/05=15
+session-core-runtime: 2026/09/04=1 2026/09/06=4 2026/09/07=2 2026/09/11=1 2026/09/12=1 2026/09/14=10 2026/09/15=13 2026/09/16=8 2026/09/17=32 2026/09/18=1 2026/09/19=3 2026/09/21=2 2026/09/24=5 2026/09/25=2 2026/09/26=13 2026/09/27=5 2026/09/28=3 2026/09/29=4 2026/09/30=8 2026/10/01=6 2026/10/05=258
+# READING: (1) auth_service's organization_membership_audit_outbox holds 3 rows that were never published and retry every second with a code error ("toISOString is not a function", 25,000 to 42,000 attempts): the Control Plane's membership audit trail is stuck the same way, for a different reason. (2) The Data Plane's documents_outbox has 192 rows whose observability copy was never published: the publisher is off (KNOWLEDGE_OBSERVABILITY_NATS_URL is unset), so the rows only pile up. (3) The name nats resolves to four brokers inside the Model Plane's containers because they also sit on the shared inter-plane-bus network; the services reach their own broker only because the others refuse their login (app-nats logged 258 refused logins of session-core-runtime and 15 of capability-core-runtime on 2026-10-05). (4) managed_run_terminalization_outbox holds 6 rows in reconciliation_required from 2026-09-08 to 2026-09-17: a different queue, not a NATS publish. Every other outbox table read is empty or fully published.

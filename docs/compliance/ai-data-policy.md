@@ -118,6 +118,52 @@ without becoming a shadow copy of your content; and a default-deny posture for
 sending your data to any third party. Full processor-side security measures are in
 the [DPA](./dpa-template.md).
 
+## 7. Using your own AI subscription or key
+
+> **Planned, not built.** The part of this section that says what will happen is
+> designed and approved in direction by the owner (2026-10-03) and is not in the
+> product. Today a ZDR request on a member's own connection is refused.
+
+**What zero retention covers, honestly.** Zero Data Retention (ZDR) covers the
+content of interactive chat. It does not cover documents synced from connectors, the
+search engines a web search queries, or the platform's background processing of your
+documents (see [`evidence/honest-limits.md`](./evidence/honest-limits.md), L12, L13,
+L33). On the developer stack read on 2026-10-06 no model provider has a recorded
+zero-retention attestation, so a request that demands ZDR is refused instead of being
+sent anywhere, and an organisation administrator cannot switch the setting on in the product until a provider is
+attested. The statements in the one-sentence summary and in section 2 describe the
+arrangement we are working towards; they are not a description of what the stack was
+verified to do on that date.
+
+**Today.** A member can connect their own ChatGPT account and choose a ChatGPT model.
+Chats on that connection go to OpenAI under the member's own account and terms, and
+OpenAI may keep them: the connection cannot provide ZDR. If the member's organisation
+has ZDR on, such a chat is refused and the member has no way to continue.
+
+**Planned.** A member who uses their own subscription or key will not be stopped. When
+they add the connection, and again the first time they use it after their organisation
+turns ZDR on, we will tell them whether it can provide ZDR. If it cannot and their
+organisation has ZDR on, we will say so plainly, with a stronger warning because it
+contradicts the organisation's setting, and they may continue. If they do:
+
+- ZDR is off only for chats they run with that connection. It stays on for the rest of
+  the organisation, for other members, and for every other model and connection. We
+  never change the organisation's setting.
+- Those chats are saved in the member's workspace like ordinary chats. Organisation
+  knowledge retrieved for them, and tool results, are sent to the member's provider
+  (documents classified restricted are left out). Memory indexing, dreaming
+  extraction and learning review do not run on them.
+- The member's provider keeps what its own terms allow. Verevon cannot change that.
+- The member's confirmation is recorded with the wording they saw and the time, can be
+  withdrawn at any time (the next chat is then refused again), and is kept while the
+  connection exists and for 365 days after withdrawal. It does not apply to
+  Temporary chat, scheduled or unattended work, or background jobs.
+- An organisation administrator can see who confirmed what and cannot prevent it.
+  Whether a member may lawfully override the organisation's instruction to us as its
+  processor is an open question for counsel, and it will not ship until counsel has
+  reviewed it ([`../../apps/GDPR_SUMMARY.md`](../../apps/GDPR_SUMMARY.md), "Exception: a
+  user's own AI connection").
+
 ---
 
 *Questions about this policy should go to your Verevon account contact. This is a

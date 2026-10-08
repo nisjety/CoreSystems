@@ -1,0 +1,459 @@
+# LIVE read of the local developer stack, 2026-10-01. Read-only. Nothing here describes production.
+# Engineering evidence, not legal advice. Companion of subprocessors-from-code.md (task J11).
+# Contents: for each variable NAME that the vendor catalogue of tools/scan-egress.mjs lists as a gate, whether a running container has it SET or EMPTY.
+# No value is printed: the pipeline below reduces every line to "name, set|empty" before anything is written. Names the catalogue lists that no container has are listed at the end.
+#
+# command (once per container; the awk program keeps only the catalogue names and prints name plus length-based state):
+#   docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' <container> | awk -F= -v c=<container> 'BEGIN{while((getline l < "gate-names.txt")>0) want[l]=1} ($1 in want){ printf "%s\t%s\t%s\n", c, $1, (length($0)>length($1)+1 ? "set" : "empty") }'
+# gate-names.txt = every vendors[].gates[].name printed by:  node docs/compliance/evidence/tools/scan-egress.mjs --json  (200 names)
+# containers inspected: 108 (the output of `docker ps`), of which 19 carry at least one catalogue name
+# "set" means the variable has a non-empty value in the container environment; "empty" means it is defined with an empty value. "set" says nothing about whether the value is valid or is a test credential.
+# columns: container <TAB> variable name <TAB> set|empty
+
+auth-service	GOOGLE_CLIENT_ID	set
+auth-service	GOOGLE_CLIENT_SECRET	set
+auth-service	MICROSOFT_CLIENT_ID	set
+auth-service	MICROSOFT_CLIENT_SECRET	set
+auth-service	OKTA_CLIENT_ID	set
+auth-service	OKTA_CLIENT_SECRET	set
+auth-service	OKTA_DOMAIN	set
+auth-service	RESEND_API_KEY	set
+auth-service	TWILIO_ACCOUNT_SID	set
+auth-service	TWILIO_AUTH_TOKEN	set
+auth-service	TWILIO_VERIFY_SERVICE_SID	set
+auth-service	VIPPS_CLIENT_ID	set
+auth-service	VIPPS_CLIENT_SECRET	set
+auth-service	VIPPS_ENVIRONMENT	set
+billing-core-service	NEXI_BASE_URL	set
+billing-core-service	NEXI_CHECKOUT_JS_URL	set
+billing-core-service	NEXI_SECRET_KEY	set
+billing-core-service	NEXI_WEBHOOK_SECRET	set
+billing-core-service	STRIPE_API_KEY	set
+billing-core-service	STRIPE_API_KEY_SECRET	set
+billing-core-service	STRIPE_BASE_URL	set
+data-plane-v2-embedding-engine-1	AZURE_OPENAI_API_KEY	set
+data-plane-v2-embedding-engine-1	AZURE_OPENAI_ENDPOINT	set
+data-plane-v2-embedding-engine-1	COHERE_EMBED_V4_API_KEY	set
+data-plane-v2-embedding-engine-1	COHERE_EMBED_V4_ENDPOINT	set
+data-plane-v2-graph-index-1	AZURE_OPENAI_API_KEY	set
+data-plane-v2-graph-index-1	AZURE_OPENAI_ENDPOINT	set
+data-plane-v2-retrieval-engine-1	AZURE_OPENAI_API_KEY	set
+data-plane-v2-retrieval-engine-1	AZURE_OPENAI_ENDPOINT	set
+data-plane-v2-retrieval-engine-1	COHERE_API_KEY	set
+data-plane-v2-retrieval-engine-1	COHERE_EMBED_V4_API_KEY	set
+data-plane-v2-retrieval-engine-1	COHERE_EMBED_V4_ENDPOINT	set
+data-plane-v2-retrieval-engine-1	RERANK_ENDPOINT	set
+integration-api	AZURE_CLIENT_ID	set
+integration-api	AZURE_CLIENT_SECRET	set
+integration-api	AZURE_TENANT_ID	set
+integration-api	CODEX_APP_SERVER_HARDENED	set
+integration-api	CODEX_SUBSCRIPTION_DIRECT_PROMPT_MODE	set
+integration-api	CODEX_SUBSCRIPTION_ENABLED	set
+integration-api	CODEX_SUBSCRIPTION_TRANSPORT	set
+integration-api	DISCORD_CLIENT_SECRET	set
+integration-api	FACEBOOK_AUTHORIZATION_URL	set
+integration-api	FACEBOOK_CLIENT_SECRET	set
+integration-api	FACEBOOK_GRAPH_API_BASE_URL	set
+integration-api	FACEBOOK_TOKEN_URL	set
+integration-api	GITHUB_API_BASE_URL	set
+integration-api	GITHUB_AUTHORIZATION_URL	set
+integration-api	GITHUB_CLIENT_ID	set
+integration-api	GITHUB_CLIENT_SECRET	set
+integration-api	GITHUB_TOKEN_URL	set
+integration-api	GITHUB_WEBHOOK_SECRET	set
+integration-api	GOOGLE_ADS_DEVELOPER_TOKEN	empty
+integration-api	GOOGLE_API_BASE_URL	set
+integration-api	GOOGLE_AUTHORIZATION_URL	set
+integration-api	GOOGLE_CLIENT_ID	set
+integration-api	GOOGLE_CLIENT_SECRET	set
+integration-api	GOOGLE_TOKEN_URL	set
+integration-api	INSTAGRAM_AUTHORIZATION_URL	set
+integration-api	INSTAGRAM_CLIENT_SECRET	set
+integration-api	INSTAGRAM_GRAPH_API_BASE_URL	set
+integration-api	INSTAGRAM_TOKEN_URL	set
+integration-api	LINKEDIN_API_BASE_URL	set
+integration-api	LINKEDIN_AUTHORIZATION_URL	set
+integration-api	LINKEDIN_CLIENT_SECRET	set
+integration-api	LINKEDIN_TOKEN_URL	set
+integration-api	META_APP_CLIENT_SECRET	set
+integration-api	META_AUTHORIZATION_URL	set
+integration-api	META_CLIENT_SECRET	set
+integration-api	META_GRAPH_API_BASE_URL	set
+integration-api	META_JS_SDK_APP_ID	set
+integration-api	META_TOKEN_URL	set
+integration-api	META_WEBHOOK_VERIFY_TOKEN	set
+integration-api	MICROSOFT_GRAPH_BASE_URL	set
+integration-api	NEXI_SECRET_KEY	set
+integration-api	NEXI_WEBHOOK_SECRET	set
+integration-api	NOTION_API_BASE_URL	set
+integration-api	NOTION_AUTHORIZATION_URL	set
+integration-api	NOTION_CLIENT_ID	set
+integration-api	NOTION_CLIENT_SECRET	set
+integration-api	NOTION_TOKEN_URL	set
+integration-api	OKTA_API_TOKEN	empty
+integration-api	OKTA_CLIENT_ID	empty
+integration-api	OKTA_CLIENT_SECRET	empty
+integration-api	OKTA_DOMAIN	empty
+integration-api	SHOPIFY_CLIENT_SECRET	empty
+integration-api	SHOPIFY_WEBHOOK_SECRET	empty
+integration-api	SLACK_API_BASE_URL	set
+integration-api	SLACK_AUTHORIZATION_URL	set
+integration-api	SLACK_CLIENT_ID	set
+integration-api	SLACK_CLIENT_SECRET	set
+integration-api	SLACK_SIGNING_SECRET	set
+integration-api	SLACK_TOKEN_URL	set
+integration-api	SNAPCHAT_API_BASE_URL	set
+integration-api	SNAPCHAT_AUTHORIZATION_URL	set
+integration-api	SNAPCHAT_CLIENT_SECRET	set
+integration-api	SNAPCHAT_TOKEN_URL	set
+integration-api	TIKTOK_API_BASE_URL	set
+integration-api	TIKTOK_AUTHORIZATION_URL	set
+integration-api	TIKTOK_CLIENT_KEY	set
+integration-api	TIKTOK_CLIENT_SECRET	set
+integration-api	TIKTOK_TOKEN_URL	set
+integration-api	VIPPS_CLIENT_ID	set
+integration-api	VIPPS_CLIENT_SECRET	set
+integration-api	X_API_BASE_URL	set
+integration-api	X_AUTHORIZATION_URL	set
+integration-api	X_CLIENT_SECRET	set
+integration-api	X_TOKEN_URL	set
+integration-email-worker	AZURE_CLIENT_ID	set
+integration-email-worker	AZURE_CLIENT_SECRET	set
+integration-email-worker	AZURE_TENANT_ID	set
+integration-email-worker	CODEX_SUBSCRIPTION_ENABLED	set
+integration-email-worker	DISCORD_BOT_TOKEN	empty
+integration-email-worker	DISCORD_CLIENT_SECRET	set
+integration-email-worker	FACEBOOK_AUTHORIZATION_URL	set
+integration-email-worker	FACEBOOK_CLIENT_SECRET	set
+integration-email-worker	FACEBOOK_GRAPH_API_BASE_URL	set
+integration-email-worker	FACEBOOK_TOKEN_URL	set
+integration-email-worker	GITHUB_API_BASE_URL	set
+integration-email-worker	GITHUB_AUTHORIZATION_URL	set
+integration-email-worker	GITHUB_CLIENT_ID	set
+integration-email-worker	GITHUB_CLIENT_SECRET	set
+integration-email-worker	GITHUB_TOKEN_URL	set
+integration-email-worker	GITHUB_WEBHOOK_SECRET	set
+integration-email-worker	GOOGLE_ADS_DEVELOPER_TOKEN	empty
+integration-email-worker	GOOGLE_API_BASE_URL	set
+integration-email-worker	GOOGLE_AUTHORIZATION_URL	set
+integration-email-worker	GOOGLE_CLIENT_ID	set
+integration-email-worker	GOOGLE_CLIENT_SECRET	set
+integration-email-worker	GOOGLE_TOKEN_URL	set
+integration-email-worker	INSTAGRAM_AUTHORIZATION_URL	set
+integration-email-worker	INSTAGRAM_CLIENT_SECRET	set
+integration-email-worker	INSTAGRAM_GRAPH_API_BASE_URL	set
+integration-email-worker	INSTAGRAM_TOKEN_URL	set
+integration-email-worker	LINKEDIN_API_BASE_URL	set
+integration-email-worker	LINKEDIN_AUTHORIZATION_URL	set
+integration-email-worker	LINKEDIN_CLIENT_SECRET	set
+integration-email-worker	LINKEDIN_TOKEN_URL	set
+integration-email-worker	META_APP_CLIENT_SECRET	set
+integration-email-worker	META_AUTHORIZATION_URL	set
+integration-email-worker	META_CLIENT_SECRET	set
+integration-email-worker	META_GRAPH_API_BASE_URL	set
+integration-email-worker	META_TOKEN_URL	set
+integration-email-worker	META_WEBHOOK_VERIFY_TOKEN	set
+integration-email-worker	MICROSOFT_GRAPH_BASE_URL	set
+integration-email-worker	NEXI_SECRET_KEY	set
+integration-email-worker	NEXI_WEBHOOK_SECRET	set
+integration-email-worker	NOTION_API_BASE_URL	set
+integration-email-worker	NOTION_AUTHORIZATION_URL	set
+integration-email-worker	NOTION_CLIENT_ID	set
+integration-email-worker	NOTION_CLIENT_SECRET	set
+integration-email-worker	NOTION_TOKEN_URL	set
+integration-email-worker	OKTA_API_TOKEN	empty
+integration-email-worker	OKTA_CLIENT_ID	empty
+integration-email-worker	OKTA_CLIENT_SECRET	empty
+integration-email-worker	OKTA_DOMAIN	empty
+integration-email-worker	SHOPIFY_CLIENT_SECRET	empty
+integration-email-worker	SHOPIFY_WEBHOOK_SECRET	empty
+integration-email-worker	SLACK_API_BASE_URL	set
+integration-email-worker	SLACK_AUTHORIZATION_URL	set
+integration-email-worker	SLACK_CLIENT_ID	set
+integration-email-worker	SLACK_CLIENT_SECRET	set
+integration-email-worker	SLACK_SIGNING_SECRET	set
+integration-email-worker	SLACK_TOKEN_URL	set
+integration-email-worker	SNAPCHAT_API_BASE_URL	set
+integration-email-worker	SNAPCHAT_AUTHORIZATION_URL	set
+integration-email-worker	SNAPCHAT_CLIENT_SECRET	set
+integration-email-worker	SNAPCHAT_TOKEN_URL	set
+integration-email-worker	TIKTOK_API_BASE_URL	set
+integration-email-worker	TIKTOK_AUTHORIZATION_URL	set
+integration-email-worker	TIKTOK_CLIENT_KEY	set
+integration-email-worker	TIKTOK_CLIENT_SECRET	set
+integration-email-worker	TIKTOK_TOKEN_URL	set
+integration-email-worker	VIPPS_CLIENT_ID	set
+integration-email-worker	VIPPS_CLIENT_SECRET	set
+integration-email-worker	X_API_BASE_URL	set
+integration-email-worker	X_AUTHORIZATION_URL	set
+integration-email-worker	X_CLIENT_SECRET	set
+integration-email-worker	X_TOKEN_URL	set
+integration-finspo-worker	AZURE_CLIENT_ID	set
+integration-finspo-worker	AZURE_CLIENT_SECRET	set
+integration-finspo-worker	AZURE_TENANT_ID	set
+integration-finspo-worker	CODEX_SUBSCRIPTION_ENABLED	set
+integration-finspo-worker	DISCORD_CLIENT_SECRET	set
+integration-finspo-worker	FACEBOOK_AUTHORIZATION_URL	set
+integration-finspo-worker	FACEBOOK_CLIENT_SECRET	set
+integration-finspo-worker	FACEBOOK_GRAPH_API_BASE_URL	set
+integration-finspo-worker	FACEBOOK_TOKEN_URL	set
+integration-finspo-worker	GITHUB_API_BASE_URL	set
+integration-finspo-worker	GITHUB_AUTHORIZATION_URL	set
+integration-finspo-worker	GITHUB_CLIENT_ID	set
+integration-finspo-worker	GITHUB_CLIENT_SECRET	set
+integration-finspo-worker	GITHUB_TOKEN_URL	set
+integration-finspo-worker	GITHUB_WEBHOOK_SECRET	set
+integration-finspo-worker	GOOGLE_ADS_DEVELOPER_TOKEN	empty
+integration-finspo-worker	GOOGLE_API_BASE_URL	set
+integration-finspo-worker	GOOGLE_AUTHORIZATION_URL	set
+integration-finspo-worker	GOOGLE_CLIENT_ID	set
+integration-finspo-worker	GOOGLE_CLIENT_SECRET	set
+integration-finspo-worker	GOOGLE_TOKEN_URL	set
+integration-finspo-worker	INSTAGRAM_AUTHORIZATION_URL	set
+integration-finspo-worker	INSTAGRAM_CLIENT_SECRET	set
+integration-finspo-worker	INSTAGRAM_GRAPH_API_BASE_URL	set
+integration-finspo-worker	INSTAGRAM_TOKEN_URL	set
+integration-finspo-worker	LINKEDIN_API_BASE_URL	set
+integration-finspo-worker	LINKEDIN_AUTHORIZATION_URL	set
+integration-finspo-worker	LINKEDIN_CLIENT_SECRET	set
+integration-finspo-worker	LINKEDIN_TOKEN_URL	set
+integration-finspo-worker	META_APP_CLIENT_SECRET	set
+integration-finspo-worker	META_AUTHORIZATION_URL	set
+integration-finspo-worker	META_CLIENT_SECRET	set
+integration-finspo-worker	META_GRAPH_API_BASE_URL	set
+integration-finspo-worker	META_TOKEN_URL	set
+integration-finspo-worker	META_WEBHOOK_VERIFY_TOKEN	set
+integration-finspo-worker	MICROSOFT_GRAPH_BASE_URL	set
+integration-finspo-worker	NEXI_SECRET_KEY	set
+integration-finspo-worker	NEXI_WEBHOOK_SECRET	set
+integration-finspo-worker	NOTION_API_BASE_URL	set
+integration-finspo-worker	NOTION_AUTHORIZATION_URL	set
+integration-finspo-worker	NOTION_CLIENT_ID	set
+integration-finspo-worker	NOTION_CLIENT_SECRET	set
+integration-finspo-worker	NOTION_TOKEN_URL	set
+integration-finspo-worker	OKTA_API_TOKEN	empty
+integration-finspo-worker	OKTA_CLIENT_ID	empty
+integration-finspo-worker	OKTA_CLIENT_SECRET	empty
+integration-finspo-worker	OKTA_DOMAIN	empty
+integration-finspo-worker	SHOPIFY_CLIENT_SECRET	empty
+integration-finspo-worker	SHOPIFY_WEBHOOK_SECRET	empty
+integration-finspo-worker	SLACK_API_BASE_URL	set
+integration-finspo-worker	SLACK_AUTHORIZATION_URL	set
+integration-finspo-worker	SLACK_CLIENT_ID	set
+integration-finspo-worker	SLACK_CLIENT_SECRET	set
+integration-finspo-worker	SLACK_SIGNING_SECRET	set
+integration-finspo-worker	SLACK_TOKEN_URL	set
+integration-finspo-worker	SNAPCHAT_API_BASE_URL	set
+integration-finspo-worker	SNAPCHAT_AUTHORIZATION_URL	set
+integration-finspo-worker	SNAPCHAT_CLIENT_SECRET	set
+integration-finspo-worker	SNAPCHAT_TOKEN_URL	set
+integration-finspo-worker	TIKTOK_API_BASE_URL	set
+integration-finspo-worker	TIKTOK_AUTHORIZATION_URL	set
+integration-finspo-worker	TIKTOK_CLIENT_KEY	set
+integration-finspo-worker	TIKTOK_CLIENT_SECRET	set
+integration-finspo-worker	TIKTOK_TOKEN_URL	set
+integration-finspo-worker	VIPPS_CLIENT_ID	set
+integration-finspo-worker	VIPPS_CLIENT_SECRET	set
+integration-finspo-worker	X_API_BASE_URL	set
+integration-finspo-worker	X_AUTHORIZATION_URL	set
+integration-finspo-worker	X_CLIENT_SECRET	set
+integration-finspo-worker	X_TOKEN_URL	set
+integration-webhook-normalizer	AZURE_CLIENT_ID	set
+integration-webhook-normalizer	AZURE_CLIENT_SECRET	set
+integration-webhook-normalizer	AZURE_TENANT_ID	set
+integration-webhook-normalizer	CODEX_SUBSCRIPTION_ENABLED	set
+integration-webhook-normalizer	DISCORD_CLIENT_SECRET	set
+integration-webhook-normalizer	FACEBOOK_AUTHORIZATION_URL	set
+integration-webhook-normalizer	FACEBOOK_CLIENT_SECRET	set
+integration-webhook-normalizer	FACEBOOK_GRAPH_API_BASE_URL	set
+integration-webhook-normalizer	FACEBOOK_TOKEN_URL	set
+integration-webhook-normalizer	GITHUB_API_BASE_URL	set
+integration-webhook-normalizer	GITHUB_AUTHORIZATION_URL	set
+integration-webhook-normalizer	GITHUB_CLIENT_ID	set
+integration-webhook-normalizer	GITHUB_CLIENT_SECRET	set
+integration-webhook-normalizer	GITHUB_TOKEN_URL	set
+integration-webhook-normalizer	GITHUB_WEBHOOK_SECRET	set
+integration-webhook-normalizer	GOOGLE_ADS_DEVELOPER_TOKEN	empty
+integration-webhook-normalizer	GOOGLE_API_BASE_URL	set
+integration-webhook-normalizer	GOOGLE_AUTHORIZATION_URL	set
+integration-webhook-normalizer	GOOGLE_CLIENT_ID	set
+integration-webhook-normalizer	GOOGLE_CLIENT_SECRET	set
+integration-webhook-normalizer	GOOGLE_TOKEN_URL	set
+integration-webhook-normalizer	INSTAGRAM_AUTHORIZATION_URL	set
+integration-webhook-normalizer	INSTAGRAM_CLIENT_SECRET	set
+integration-webhook-normalizer	INSTAGRAM_GRAPH_API_BASE_URL	set
+integration-webhook-normalizer	INSTAGRAM_TOKEN_URL	set
+integration-webhook-normalizer	LINKEDIN_API_BASE_URL	set
+integration-webhook-normalizer	LINKEDIN_AUTHORIZATION_URL	set
+integration-webhook-normalizer	LINKEDIN_CLIENT_SECRET	set
+integration-webhook-normalizer	LINKEDIN_TOKEN_URL	set
+integration-webhook-normalizer	META_APP_CLIENT_SECRET	set
+integration-webhook-normalizer	META_AUTHORIZATION_URL	set
+integration-webhook-normalizer	META_CLIENT_SECRET	set
+integration-webhook-normalizer	META_GRAPH_API_BASE_URL	set
+integration-webhook-normalizer	META_TOKEN_URL	set
+integration-webhook-normalizer	META_WEBHOOK_VERIFY_TOKEN	set
+integration-webhook-normalizer	MICROSOFT_GRAPH_BASE_URL	set
+integration-webhook-normalizer	NEXI_SECRET_KEY	set
+integration-webhook-normalizer	NEXI_WEBHOOK_SECRET	set
+integration-webhook-normalizer	NOTION_API_BASE_URL	set
+integration-webhook-normalizer	NOTION_AUTHORIZATION_URL	set
+integration-webhook-normalizer	NOTION_CLIENT_ID	set
+integration-webhook-normalizer	NOTION_CLIENT_SECRET	set
+integration-webhook-normalizer	NOTION_TOKEN_URL	set
+integration-webhook-normalizer	OKTA_API_TOKEN	empty
+integration-webhook-normalizer	OKTA_CLIENT_ID	empty
+integration-webhook-normalizer	OKTA_CLIENT_SECRET	empty
+integration-webhook-normalizer	OKTA_DOMAIN	empty
+integration-webhook-normalizer	SHOPIFY_CLIENT_SECRET	empty
+integration-webhook-normalizer	SHOPIFY_WEBHOOK_SECRET	empty
+integration-webhook-normalizer	SLACK_API_BASE_URL	set
+integration-webhook-normalizer	SLACK_AUTHORIZATION_URL	set
+integration-webhook-normalizer	SLACK_CLIENT_ID	set
+integration-webhook-normalizer	SLACK_CLIENT_SECRET	set
+integration-webhook-normalizer	SLACK_SIGNING_SECRET	set
+integration-webhook-normalizer	SLACK_TOKEN_URL	set
+integration-webhook-normalizer	SNAPCHAT_API_BASE_URL	set
+integration-webhook-normalizer	SNAPCHAT_AUTHORIZATION_URL	set
+integration-webhook-normalizer	SNAPCHAT_CLIENT_SECRET	set
+integration-webhook-normalizer	SNAPCHAT_TOKEN_URL	set
+integration-webhook-normalizer	TIKTOK_API_BASE_URL	set
+integration-webhook-normalizer	TIKTOK_AUTHORIZATION_URL	set
+integration-webhook-normalizer	TIKTOK_CLIENT_KEY	set
+integration-webhook-normalizer	TIKTOK_CLIENT_SECRET	set
+integration-webhook-normalizer	TIKTOK_TOKEN_URL	set
+integration-webhook-normalizer	VIPPS_CLIENT_ID	set
+integration-webhook-normalizer	VIPPS_CLIENT_SECRET	set
+integration-webhook-normalizer	X_API_BASE_URL	set
+integration-webhook-normalizer	X_AUTHORIZATION_URL	set
+integration-webhook-normalizer	X_CLIENT_SECRET	set
+integration-webhook-normalizer	X_TOKEN_URL	set
+model-plane-agent-memory-server-1	AZURE_API_BASE	set
+model-plane-agent-memory-server-1	OPENAI_API_BASE	empty
+model-plane-agent-memory-server-1	OPENAI_API_KEY	empty
+model-plane-capability-core-1	LETTA_API_KEY	empty
+model-plane-capability-core-1	LETTA_TOOL_SEARCH_ENABLED	set
+model-plane-capability-core-1	LETTA_TOOL_SEARCH_URL	empty
+model-plane-execution-core-1	MINIO_ENDPOINT	set
+model-plane-inference-core-1	ANTHROPIC_API_KEY	set
+model-plane-inference-core-1	AZURE_AI_LANGUAGE_ENDPOINT	set
+model-plane-inference-core-1	AZURE_AI_LANGUAGE_KEY	set
+model-plane-inference-core-1	AZURE_ANTHROPIC_API_KEY	set
+model-plane-inference-core-1	AZURE_ANTHROPIC_ENDPOINT	set
+model-plane-inference-core-1	AZURE_ANTHROPIC_REGION	empty
+model-plane-inference-core-1	AZURE_COHERE_API_KEY	set
+model-plane-inference-core-1	AZURE_COHERE_ENDPOINT	set
+model-plane-inference-core-1	AZURE_COHERE_REGION	set
+model-plane-inference-core-1	AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT	set
+model-plane-inference-core-1	AZURE_DOCUMENT_INTELLIGENCE_KEY	set
+model-plane-inference-core-1	AZURE_OPENAI_API_KEY	set
+model-plane-inference-core-1	AZURE_OPENAI_DEPLOYMENT_TYPE	empty
+model-plane-inference-core-1	AZURE_OPENAI_ENDPOINT	set
+model-plane-inference-core-1	AZURE_OPENAI_REGION	set
+model-plane-inference-core-1	AZURE_OPENAI_VIDEO_API_KEY	empty
+model-plane-inference-core-1	AZURE_OPENAI_VIDEO_ENDPOINT	empty
+model-plane-inference-core-1	AZURE_SPEECH_ENDPOINT	empty
+model-plane-inference-core-1	AZURE_SPEECH_KEY	set
+model-plane-inference-core-1	AZURE_SPEECH_REGION	set
+model-plane-inference-core-1	AZURE_TRANSLATOR_API_KEY	set
+model-plane-inference-core-1	AZURE_TRANSLATOR_ENDPOINT	empty
+model-plane-inference-core-1	AZURE_TRANSLATOR_KEY	set
+model-plane-inference-core-1	AZURE_TRANSLATOR_REGION	set
+model-plane-inference-core-1	OPENAI_API_BASE	set
+model-plane-inference-core-1	OPENAI_API_KEY	empty
+model-plane-model-gateway-1	AZURE_OPENAI_API_KEY	set
+model-plane-model-gateway-1	AZURE_OPENAI_ENDPOINT	set
+model-plane-model-gateway-1	AZURE_OPENAI_STT_API_KEY	empty
+model-plane-model-gateway-1	AZURE_OPENAI_TTS_API_KEY	empty
+model-plane-model-gateway-1	OPENAI_API_KEY	empty
+model-plane-model-gateway-1	OPENAI_BASE_URL	empty
+model-plane-sandbox-manager-1	MINIO_ENDPOINT	set
+notification-core	NOTIFICATION_DELIVERY_CALLBACK_SECRET	empty
+notification-core	NOTIFICATION_DELIVERY_MODE	set
+notification-core	NOVU_BASE_URL	empty
+notification-core	NOVU_SECRET_KEY	empty
+notification-core	RESEND_API_KEY	set
+quarry-edge	QUARRY_EDGE__BRAVE_SEARCH_KEY	set
+quarry-edge	QUARRY_EDGE__SEARXNG_URL	set
+quarry-edge	QUARRY_EDGE__ZERO_SAAS_SEARCH	set
+quarry-edge	QUARRY_PROXY_POOL	empty
+shipping-core	BRING_API_KEY	set
+shipping-core	BRING_API_UID	set
+shipping-core	BRING_LIVE_BOOKING	empty
+shipping-core	DHL_API_BASE_URL	set
+shipping-core	DHL_API_KEY	set
+shipping-core	DHL_API_SECRET	set
+shipping-core	FEDEX_CLIENT_ID	set
+shipping-core	FEDEX_CLIENT_SECRET	set
+shipping-core	UPS_CLIENT_ID	set
+shipping-core	UPS_CLIENT_SECRET	set
+social-core	FACEBOOK_GRAPH_API_BASE_URL	set
+social-core	INSTAGRAM_GRAPH_API_BASE_URL	set
+social-core	LINKEDIN_API_BASE_URL	set
+social-core	LINKEDIN_API_VERSION	set
+social-core	SNAPCHAT_API_BASE_URL	set
+social-core	TIKTOK_API_BASE_URL	set
+social-core	X_API_BASE_URL	set
+
+## names in the catalogue that NO running container has (absent, which is neither set nor empty): 56
+APPLE_APP_BUNDLE_IDENTIFIER
+APPLE_CLIENT_ID
+APPLE_CLIENT_SECRET
+APPLE_KEY_ID
+APPLE_PRIVATE_KEY
+APPLE_TEAM_ID
+AZURE_OPENAI_REALTIME_API_KEY
+BRREG_API_BASE_URL
+CAPTCHA_ENABLED
+CAPTCHA_SECRET_KEY
+CODEX_SUBSCRIPTION_DIRECT_BASE_URL
+COHERE_URL
+DATEX_PASSWORD
+DATEX_URL
+DATEX_USERNAME
+DISCORD_API_BASE_URL
+DISCORD_AUTHORIZATION_URL
+DISCORD_TOKEN_URL
+FROST_CLIENT_ID
+FROST_URL
+GOOGLE_ADS_API_BASE_URL
+GOOGLE_ANALYTICS_DATA_API_BASE_URL
+GOOGLE_SEARCH_CONSOLE_API_BASE_URL
+GRAPH_BASE_URL
+HYPERSWITCH_API_KEY
+HYPERSWITCH_API_KEY_SECRET
+HYPERSWITCH_BACKEND_URL
+HYPERSWITCH_BASE_URL
+HYPERSWITCH_CLIENT_URL
+HYPERSWITCH_PUBLISHABLE_KEY
+LOVDATA_API_KEY
+MAIL_TASK_PROVIDER
+MAIL_TASK_RECEIVING_DOMAIN
+MAIL_TASK_WEBHOOK_SECRET
+META_WEBHOOK_SECRET
+MICROSOFT_CLIENT_AUTH_MODE
+MICROSOFT_TOKEN_ORIGIN
+NEXI_SECRET_API_KEY
+NOMINATIM_URL
+PHISHTANK_CSV_URL
+QUARRY_BROWSERBASE_PROCESSOR_ID
+QUARRY_EDGE__BROWSERBASE_API_KEY
+QUARRY_EDGE__SERPER_KEY
+QUARRY_PROXY_FIRST_PARTY
+QUARRY_PROXY_PROCESSOR_ID
+SNAPCHAT_BUSINESS_API_BASE_URL
+SNAPCHAT_REDIRECT_BASE_URL
+STRIPE_API_BASE_URL
+STRIPE_AUTHORIZATION_URL
+STRIPE_CLIENT_ID
+STRIPE_CLIENT_SECRET
+STRIPE_TOKEN_URL
+STRIPE_WEBHOOK_SECRET
+THREADS_API_BASE_URL
+TURNSTILE_SECRET_KEY
+URLHAUS_CSV_URL
+#
+# reviewer addition (J11 review, 2026-10-01): carrier base-URL variables. The catalogue does not list them because a base URL only redirects a host. Read the same way (docker inspect, awk) but printed as a host class, not a value: these are public vendor hostnames, not credentials. Columns: container, variable name, state, host class.
+shipping-core	DHL_API_BASE_URL	set	test path on the production host (express.api.dhl.com/mydhlapi/test)
+shipping-core	FEDEX_API_BASE_URL	set	sandbox host (apis-sandbox.fedex.com)
+shipping-core	UPS_API_BASE_URL	set	PRODUCTION host (onlinetools.ups.com); the UPS test host is wwwcie.ups.com

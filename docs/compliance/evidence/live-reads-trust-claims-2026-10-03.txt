@@ -1,0 +1,64 @@
+# LIVE reads of the local developer stack, 2026-10-03 (about 12:00 to 12:25 UTC). Read-only. Nothing here describes production.
+# Engineering evidence, not legal advice. Each block names the command that produced it.
+# Contents: provider variable names with set or empty state and allow-listed values, counts and the reason text of a queue error. No keys, tokens, URLs with credentials or message content.
+# Made for the trust-edits pass (task J13 follow-up). It refreshes the 2026-10-01 reads in live-reads-trust-claims-2026-10-01.txt and adds the audit-trail delivery read (BLOCK 3).
+
+## BLOCK 1: inference-core posture (ZDR attestations, deployment type, regions, provider order)
+## command: bash docs/compliance/evidence/tools/export-provider-posture.sh --container model-plane-inference-core-1   (docker inspect only; lines kept: the ones below)
+## container started at: 2026-10-01T23:16:23.88Z (docker inspect .State.StartedAt); posture read at 2026-10-03T12:05:36Z
+AGENTIC_SUBSCRIPTION_ENABLED	set	true
+AZURE_ANTHROPIC_REGION	empty	-
+AZURE_ANTHROPIC_ZDR_APPROVAL_REF	empty	-
+AZURE_ANTHROPIC_ZDR_DIGEST	empty	-
+AZURE_ANTHROPIC_ZDR_EFFECTIVE_DATE	empty	-
+AZURE_ANTHROPIC_ZDR_RESOURCE_ID	empty	-
+AZURE_ANTHROPIC_ZDR_REVIEWER	empty	-
+AZURE_ANTHROPIC_ZDR_REVIEW_BY	empty	-
+AZURE_COHERE_REGION	set	swedencentral
+AZURE_OPENAI_DEPLOYMENT_TYPE	empty	-
+AZURE_OPENAI_REGION	set	swedencentral
+AZURE_OPENAI_ZDR_APPROVAL_REF	empty	-
+AZURE_OPENAI_ZDR_DIGEST	empty	-
+AZURE_OPENAI_ZDR_EFFECTIVE_DATE	empty	-
+AZURE_OPENAI_ZDR_RESOURCE_ID	empty	-
+AZURE_OPENAI_ZDR_REVIEWER	empty	-
+AZURE_OPENAI_ZDR_REVIEW_BY	empty	-
+AZURE_SPEECH_REGION	set	swedencentral
+AZURE_TRANSLATOR_REGION	set	swedencentral
+INFERENCE_PROVIDER_ORDER	set	azure,anthropic,openai,cohere,openai-codex-subscription
+MODEL_PLANE_ALLOW_GLOBAL_RESIDENCY	set	false
+OPENAI_API_KEY	empty	-
+# READING: every ZDR attestation field is still empty, so no chat provider supports ZDR on this stack and a ZDR request is refused. The Azure OpenAI deployment type is still unset. The Foundry Claude region is still empty (it declares no region). The ChatGPT-subscription route is in the provider order. The direct OpenAI key is empty.
+
+## BLOCK 2: session-core run residency stamp
+## command: docker exec model-plane-postgres-1 psql -U postgres -d session_core -At -c "select residency, count(*) from runs group by 1"   (SELECT only)
+swedencentral|1921
+# READING: the stamp is one configured value on every run, including the runs the A6 proof served on the ChatGPT route, so it does not follow the serving provider.
+
+## BLOCK 3: does the "Used by AI?" audit trail reach audit-core?
+## command: docker exec model-plane-postgres-1 psql -U postgres -d session_core -At -c "select count(*), count(*) filter (where published_at is not null), count(*) filter (where terminal_at is not null), max(attempts), min(created_at)::date, max(created_at)::date from session_audit_outbox where subject like '%tool_action'"   (SELECT only; columns: total, published, terminal, max attempts, first day, last day)
+4992|0|4992|20|2026-09-04|2026-10-01
+## command: docker exec model-plane-postgres-1 psql -U postgres -d session_core -At -c "select last_error, count(*) from session_audit_outbox where subject like '%tool_action' group by 1"
+no stream found for given subject|4992
+## command: docker exec controlplane-postgres psql -U coresystem -d controlplane -At -c "select plane, count(*) from audit_events group by 1 order by 1"   (SELECT only; the database user name is not a secret)
+control|40342
+ingestion|16444
+## command: docker exec controlplane-postgres psql -U coresystem -d controlplane -At -c "select count(*) from audit_events where event='tool_action'"
+0
+# READING: session-core queued 4,992 tool_action events for audit-core between 2026-09-04 and 2026-10-01. None was published: every one ran out of attempts (20) with the error "no stream found for given subject". audit-core holds events from the control and ingestion planes only, and no tool_action event at all. On this stack the model plane's audit events never reached audit-core, so the "Used by AI?" column can show nothing from the model plane. Why the stream is missing was not investigated here (audit-core's provisioner creates streams per bus; whether one covers the model-plane audit subject on this stack's NATS server is not read).
+
+## BLOCK 4: vendors that the register lists and that are gated by a variable (names, set or empty only)
+## command: docker inspect <container> --format '{{range .Config.Env}}{{println .}}{{end}}' | grep -E "^(NAMES)="  with the value replaced by <set> when non-empty
+billing-core-service: STRIPE_API_KEY set; NEXI_SECRET_KEY set; HYPERSWITCH_API_KEY absent
+quarry-edge: QUARRY_EDGE__BRAVE_SEARCH_KEY set; QUARRY_EDGE__SERPER_KEY absent; QUARRY_EDGE__BROWSERBASE_API_KEY absent; QUARRY_PROXY_POOL empty; QUARRY_EDGE__ZERO_SAAS_SEARCH=0; QUARRY_EDGE__SEMANTIC_RERANK=1
+integration-api: MAIL_TASK_PROVIDER empty; MAIL_TASK_WEBHOOK_SECRET empty
+notification-core: NOVU_SECRET_KEY empty; RESEND_API_KEY set; NOTIFICATION_DELIVERY_MODE set
+auth-service: RESEND_API_KEY set; TWILIO_AUTH_TOKEN set; TURNSTILE_SECRET_KEY absent
+# READING: the vendors the page marks "ikke satt i miljøet vi har lest" or "av som standard" (OpenAI direct in BLOCK 1, Hyperswitch, Browserbase, Serper, the proxy pool, Postmark mail-to-task, Novu, Turnstile) are unset or empty on this stack today. The switch that turns the paid search providers off exists and is off (0).
+
+## BLOCK 5: Data Plane contextual retrieval
+## command: docker inspect data-plane-v2-embedding-engine-1 --format '{{range .Config.Env}}{{println .}}{{end}}' | grep -E "^CONTEXTUAL_[A-Z_]*="   (no secret is in this family of variables)
+CONTEXTUAL_RETRIEVAL_ENABLED=true
+CONTEXTUAL_RETRIEVAL_MODEL=gpt-4o-mini
+CONTEXTUAL_RETRIEVAL_PROVIDER_HINT=
+# READING: contextual retrieval is on and sends document chunk text to the model chain for a summary at indexing time, with an empty provider hint (so the default chain serves it). Restricted (ZDR) documents are filtered out before the call. This is being reworked (metering, ZDR handling, backfill); the page sentences that mention it are in trust-claims-pending-reverification.md.

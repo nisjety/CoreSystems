@@ -1,0 +1,138 @@
+# LIVE reads of the local developer stack, 2026-10-06 (read at 2026-10-06T12:24:55Z). Read-only. Nothing here describes production.
+# Engineering evidence, not legal advice. Each block names the command that produced it.
+# Contents: variable names with allow-listed values, row counts, a column list and a metrics body. No keys, tokens, endpoint values, document text or message content.
+# Made for the contextual retrieval documents task (CR-T16). It refreshes the contextual retrieval flags of live-reads-trust-claims-2026-10-03.txt (BLOCK 5) and adds the corpus, index, ledger and posture counts the design audit of 2026-10-03 relied on.
+
+## BLOCK 1: embedding-engine contextual retrieval and token-posture variables
+## command: docker exec data-plane-v2-embedding-engine-1 env | grep -E '^(CONTEXTUAL_RETRIEVAL_|EMBEDDING_PROVIDER=|MODEL_PLANE_INFERENCE_RETENTION_POSTURE=|MODEL_PLANE_INFERENCE_SERVICE_ID=)'   (no secret is in this family of variables)
+CONTEXTUAL_RETRIEVAL_CONCURRENCY=4
+CONTEXTUAL_RETRIEVAL_ENABLED=true
+CONTEXTUAL_RETRIEVAL_MAX_DOCUMENT_CHARS=48000
+CONTEXTUAL_RETRIEVAL_MAX_TOKENS=128
+CONTEXTUAL_RETRIEVAL_MODEL=gpt-4o-mini
+CONTEXTUAL_RETRIEVAL_PROVIDER_HINT=
+CONTEXTUAL_RETRIEVAL_RETRY_ATTEMPTS=4
+CONTEXTUAL_RETRIEVAL_RETRY_BASE_MS=2000
+CONTEXTUAL_RETRIEVAL_TIMEOUT_MS=30000
+EMBEDDING_PROVIDER=cohere
+MODEL_PLANE_INFERENCE_RETENTION_POSTURE=persistent
+MODEL_PLANE_INFERENCE_SERVICE_ID=embedding-engine
+# READING: contextual retrieval is on only because the running container was given the flag (the compose default is false in apps/Data Plane v2/docker-compose.yml and the live .env that would set it is matched by the repository .gitignore). The model is gpt-4o-mini with an empty provider hint. The token posture is the fixed value persistent.
+
+## BLOCK 2: graph-index extraction variables, and whether a direct Azure key is present
+## command: docker exec data-plane-v2-graph-index-1 env | grep -E '^(GRAPH_EXTRACTION_PROVIDER=|MODEL_PLANE_EXTRACTION_|MODEL_PLANE_INFERENCE_RETENTION_POSTURE=|MODEL_PLANE_INFERENCE_SERVICE_ID=)'; then a count of lines that start with AZURE_OPENAI_API_KEY= and AZURE_OPENAI_ENDPOINT= (the values are not printed)
+GRAPH_EXTRACTION_PROVIDER=model_plane
+MODEL_PLANE_EXTRACTION_MODEL=gpt-4o-mini
+MODEL_PLANE_EXTRACTION_PROVIDER=azure_openai
+MODEL_PLANE_EXTRACTION_TIMEOUT_MS=60000
+MODEL_PLANE_INFERENCE_RETENTION_POSTURE=persistent
+MODEL_PLANE_INFERENCE_SERVICE_ID=graph-index
+AZURE_OPENAI_API_KEY	1
+AZURE_OPENAI_ENDPOINT	1
+# READING: extraction goes through inference-core (model_plane) today, and the container also holds a direct Azure OpenAI key and endpoint (count 1 each). Setting GRAPH_EXTRACTION_PROVIDER=azure_openai would select the direct path, which sends no service token, no zero-retention claim and no usage record.
+
+## BLOCK 3: Data Plane Postgres, knowledge_units and the ledger
+## command: docker exec -i data-plane-v2-postgres-1 psql -U dataplane -d dataplane -At   (SELECT aggregates only)
+knowledge_units|207
+with_chunk_context|206
+without_chunk_context|1
+context_prompt_versions|NULL,ctx-v1
+embedding_model_null|207
+status_column_exists|0
+coverage_view_exists|0
+cost_events|embedding|17|2026-09-28
+cost_events|rerank|265|2026-10-05
+cost_events_columns|id,event_type,model,org_id,count,estimated_tokens,idempotency_key,created_at,user_id
+# READING: 207 knowledge units, 206 with a context (all of prompt version ctx-v1) and 1 without (it carries no prompt version), embedding_model NULL on all 207, no status column and no coverage view yet (the CR-T6 migration file is in the tree and not applied). The Data Plane's own ledger holds rerank and embedding events only, nothing for contextual retrieval or graph extraction.
+
+## BLOCK 4: Quickwit sparse index against Postgres
+## command: docker exec data-plane-v2-quickwit-1 curl -s -X POST http://localhost:7280/api/v1/dataplane-corpus/search -d {query,max_hits:0}   (counts only, one per query)
+*	57
+entity_type:knowledge_unit	52
+entity_type:source_object	5
+entity_type:knowledge_unit AND context_body:*	51
+# READING: the index holds 52 knowledge-unit documents (51 with a context_body) and 5 source-object documents, against 207 knowledge units in Postgres: the keyword arm reaches at most 52 of 207 chunks (about 25 percent). The count is of documents, not of distinct chunks, and delete-by-query is eventual, so the distinct chunk count can be lower.
+
+## BLOCK 5: cost-core ledger of record
+## command: docker exec -i model-plane-postgres-1 psql -U postgres -d session_core -At   (SELECT aggregates and a column list)
+cost_entries_by_producer|model-gateway|1716
+cost_entries_columns|id,org_id,user_id,run_id,request_id,model,input_tokens,output_tokens,cost_usd,idempotency_key,metadata,created_at,producer_id,cache_read_input_tokens,cache_creation_input_tokens,cost_basis,provider_used
+# READING: every cost-core row is from the producer model-gateway; no embedding-engine, graph-index or data-orchestrator row exists. The table has provider_used (the cost-core migrations 0006 and 0007 are deployed since the 2026-10-03 design read) and still has no feature or units column.
+
+## BLOCK 6: inference-core metrics endpoint
+## command: curl -s http://127.0.0.1:18082/metrics
+# HELP inference_core_requests_total
+# READING: the endpoint answers with a single help line and no sample, so there is no per-service token counter to compare a ledger against yet.
+
+## BLOCK 7: organisation zero-retention intent in org-core
+## command: docker exec controlplane-postgres psql -U coresystem -d org_core -At -c "select count(*), count(*) filter (where deleted_at is null), count(*) filter (where metadata->'interactiveRetention'->>'zdr' = 'true') from organizations"   (counts only)
+3|3|0
+# READING: three organisations, three live, none with zero-retention intent set. The path that would carry an organisation's setting to a background job cannot be exercised on this stack without changing a setting.
+
+## BLOCK 8: which knowledge units the Quickwit index is missing
+## command: the ids of the 52 knowledge-unit documents are read from Quickwit (search, max_hits 200; the ids are not printed) and one SELECT groups every Postgres knowledge unit by whether its id is in that list, with the source, visibility, classification, liveness and embedding status of its document (counts only)
+in_quickwit | source | visibility | zdr_classification | live_doc | embedding_status | count
+f | quarry | org | internal | t | done | 1
+f | sharepoint | org | internal | t | done | 3
+f | sharepoint | private | internal | t | done | 151
+t | quarry | org | internal | t | done | 1
+t | sharepoint | private | internal | t | done | 51
+## second command: the same id list, restricted to the units that are NOT in it, grouped by document source and visibility, counting documents, units and units that already hold a stored context
+source | visibility | documents | units_missing | units_missing_with_stored_context
+quarry | org | 1 | 1 | 1
+sharepoint | org | 1 | 3 | 3
+sharepoint | private | 136 | 151 | 151
+# READING: 155 knowledge units are not in the index: 151 belong to private SharePoint documents, 3 to organisation-visible SharePoint documents and 1 to an organisation-visible Quarry document. All of them are live, classified internal and embedded, so every one is eligible for the keyword index and missing from it. They sit in 138 documents (136 private SharePoint, 1 organisation SharePoint, 1 Quarry) and every one of the 155 already has a stored context in Postgres, so the repair needs the keyword index to be fed again and no model call. 52 units are present (51 private SharePoint and 1 Quarry).
+
+## BLOCK 9: has the Quickwit rebuild path ever run here
+## command: docker exec data-plane-v2-postgres-1 psql -U dataplane -d dataplane -At -c 'select count(*) from quickwit_admin_jobs'; then docker logs data-plane-v2-quickwit-adapter-1 filtered to the lines that contain 'admin job claim failed' (count, and the timestamp and message of the last one)
+quickwit_admin_jobs	0
+admin_job_claim_failed_lines	1
+last_line	2026-10-01T20:59:18.510380Z	Quickwit admin job claim failed	Storage
+# READING: the admin-job table has no row, so the rebuild path has never run on this stack, and the adapter log holds one admin-job claim failure with the error Storage (2026-10-01). The adapter's durable consumer of documents.indexed is the path that has run.
+
+## BLOCK 10: graph extraction, what exists and what it has recorded
+## command: docker exec -i data-plane-v2-postgres-1 psql -U dataplane -d dataplane -At   (SELECT counts and a table-name list); then docker logs data-plane-v2-graph-index-1 filtered to the lines that contain 'model-plane inference failed' (a count)
+graph_entities|68|68
+graph_relationships|6
+graph_claims|36
+graph_text_units|86
+documents_live_and_org_visible|185|3
+graph_tables|graph_claims,graph_communities,graph_entities,graph_exports,graph_relationships,graph_text_units
+graph_extraction_state_exists|0
+graph_index_log_model_plane_inference_failed_lines	8
+# READING: 68 entities (all with provenance 'extracted', which records neither a model nor a prompt version), 6 relationships, 36 claims and 86 text units, drawn from the organisation-visible documents (3 of the 185 live documents are organisation-visible, and only those are extracted). There is no per-chunk extraction state table. The graph-index log holds 8 'model-plane inference failed' lines (the 2026-09-29 retry loop), in which the gRPC status code is not shown.
+
+## BLOCK 11: the dense arm, and whether the quality evaluation can run
+## command: docker exec -i data-plane-v2-postgres-1 psql -U dataplane -d dataplane -At   (SELECT counts); then one GET of the Qdrant collection description from inside the retrieval-engine container, reduced to the point count
+organisations_with_documents|1
+documents_in_eval_organisations|0
+quality_eval_runs|0
+eval_golden_judgments|0
+qdrant_dataplane_knowledge_embedv4_points	207
+# READING: one organisation holds documents, none of them in an evaluation organisation, the evaluation result and judgment tables are empty, and the dense collection holds 207 points, one per knowledge unit. So the dense arm is complete and the quality gate has nothing to run on.
+
+## BLOCK 12: the Auth Core image and registry on the stack (added by the adversarial review of CR-T16, read at 2026-10-06T12:43:46Z)
+## command: docker image inspect control-plane-auth-core and docker inspect auth-service (creation and start times); docker exec auth-service, a count of lines containing the word tenant and the string retention_posture_unavailable in four compiled files under /app/dist/src/auth, a count of the two constants, and a count of the quoted values tenant, persistent and zdr inside the PLANE_SERVICE_PRINCIPALS_JSON variable (counts only, the value is not printed); docker logs auth-service reduced to counts and timestamps (no organisation ids)
+image_created=2026-10-04T22:51:45Z
+container_created=2026-10-04T22:56:50Z started=2026-10-05T00:21:13Z
+plane-token.controller tenant=1 retention_posture_unavailable=0
+model-plane-token.controller tenant=1 retention_posture_unavailable=0
+plane-service-principal tenant=1 retention_posture_unavailable=0
+interactive-retention-policy tenant=4 retention_posture_unavailable=2
+RETENTION_POSTURE_FRESH_TTL_MS = 45_000: 1
+TENANT_PRINCIPAL_TOKEN_TTL_SECONDS = 60: 1
+registry_tenant=0
+registry_persistent=21
+registry_zdr=8
+log lines with retention_posture_unavailable or org_core_credential_rejected: 12 (11 refusals, 1 line saying org-core answered 403), all on 2026-10-04 between 22:57:18 and 22:58:16, none since
+# READING: the running Auth Core image of 2026-10-04 already contains the posture code (the 45-second resolver cache, the 503 retention_posture_unavailable refusal, the tenant value in the principal and both token controllers, the 60-second tenant token cap). The running registry has no tenant principal (21 persistent, 8 zdr), so no background job's token is resolved from the organisation yet. The 11 refusals of the first minutes had the reason org_core_credential_rejected: org-core answered 403 to the new credential of Auth Core. Whether org-core answers it now is not established by this read.
+
+## BLOCK 13: the organisation service on the stack, against the first refusals of Auth Core (added on the resume of CR-T16, read at 2026-10-06T16:40Z)
+## command: docker inspect org-core-service (creation and start times); docker exec org-core-service, a count of lines containing the route name retention-posture and the scope name org:retention:read:any in the compiled binary /app/org-core (counts only); docker exec auth-service, a count of lines containing retention-posture in the compiled interactive-retention-policy.js; docker logs auth-service reduced to a count and the first and last timestamp of the lines that contain org_core_credential_rejected, retention_posture_unavailable or serving_stale_posture; and the registry variable of auth-service reduced to three counts (principals, rows with allowAnyOrg true, rows with tenancy directory)
+org_core_created=2026-10-04T22:59:07Z started=2026-10-05T00:21:16Z
+org-core binary: retention-posture=1 org:retention:read:any=1
+auth-core interactive-retention-policy.js: retention-posture=1
+auth-service log lines (all time): 12, first 2026-10-04 22:57:18, last 2026-10-04 22:58:16
+auth-service registry (PLANE_SERVICE_PRINCIPALS_JSON, counts only): principals=17 allowAnyOrg=16 tenancy_directory=0
+# READING: the running organisation service (container created 51 seconds after the last of the 12 refusal log lines of Auth Core, block 12) carries the internal retention-posture route and the read scope that Auth Core's credential needs, and the running Auth Core names that route in its compiled resolver. Auth Core logged no further refusal after 22:58:16 on 2026-10-04, which is consistent with the refusals having come from the organisation service that was replaced at 22:59:07. This is not a proof: no read of the route by Auth Core with a 200 answer is shown here, and none was made for this document (a background job's token would need it, and no such principal exists in the running registry). The documents that cite this block say "carries" and "no refusal since", never "proven".

@@ -1,0 +1,161 @@
+# LIVE read of the local developer stack, 2026-10-01. Read-only. Nothing here describes production.
+# Engineering evidence, not legal advice. Companion of retention-and-erasure-evidence.md (task J12 of the chat gap-closure plan).
+# Every command below only reads: psql SELECT, docker logs, docker inspect (variable NAMES reduced to "set|empty" before printing), wget against the NATS monitoring port, find/stat/ls in a container (counts, sizes and dates only).
+# No row content, no message text, no identifier of a person, no secret, no connection id was printed or kept. Nothing was written, deleted or restarted. No model was called.
+# Blocks are numbered so the evidence document can cite them (BLOCK n). Line numbers cited from the document into this file are checked by tools/check-citations.mjs.
+
+## BLOCK 1 session_core foreign keys that point at the tables an erasure deletes (confdeltype: a = NO ACTION, c = CASCADE)
+# command: docker exec model-plane-postgres-1 psql -d session_core -c "SELECT conrelid::regclass, confrelid::regclass, confdeltype FROM pg_constraint WHERE contype='f' AND confrelid::regclass::text IN ('threads','runs','tasks','plans','approvals','cron_schedules','space_watches') ORDER BY 2,1"
+messages|threads|a
+runs|threads|a
+memory_index|threads|a
+plans|threads|a
+todos|threads|a
+scheduled_step_receipts|threads|a
+checkpoints|runs|a
+plans|runs|a
+approvals|runs|a
+subagent_edges|runs|a
+subagent_edges|runs|a
+tasks|runs|a
+task_assignments|runs|a
+session_tool_audit_intents|runs|c
+approval_delivery_outbox|runs|a
+managed_run_terminalization_outbox|runs|c
+approval_continuation_receipts|runs|a
+approval_continuation_descriptors|runs|c
+scheduled_step_receipts|runs|a
+plan_steps|plans|a
+todos|plans|a
+approvals|plans|a
+approval_delivery_outbox|approvals|c
+approval_continuation_receipts|approvals|c
+approval_continuation_descriptors|approvals|c
+tasks|tasks|a
+task_events|tasks|a
+task_assignments|tasks|a
+task_dependencies|tasks|a
+task_dependencies|tasks|a
+task_artifacts|tasks|a
+cron_fires|tasks|a
+cron_fires|cron_schedules|a
+space_watch_events|space_watches|a
+# READING: scheduled_step_receipts has NO ACTION foreign keys to both threads and runs, and task_artifacts has one to tasks. The session-core purge in gdpr.rs deletes neither table. The thread delete in grpc.rs deletes task_artifacts (grpc.rs:407-408) but not scheduled_step_receipts. So scheduled_step_receipts is the only child of threads, runs or tasks that neither delete path removes, and task_artifacts is the one the purge misses.
+
+## BLOCK 2 session_core row counts, selected tables (count(*) only)
+# command: SELECT count(*) FROM <table> for each table named below, in the database session_core of model-plane-postgres-1
+task_artifacts|0
+scheduled_step_receipts|0
+space_watches|0
+space_watch_events|0
+space_membership_revocations|0
+space_deletion_semantic_memory_receipts|0
+threads|1122
+messages|3714
+agent_memory|52
+runs|1905
+events|14402
+cost_entries|1702
+feedback_ratings|19
+mcp_oauth_tokens|1
+mcp_servers|1
+letta_memory_blocks|0
+registry_audit_log|176509
+session_audit_outbox|6130
+# READING: the session-core tables that the session-core purge does not touch (scheduled_step_receipts, task_artifacts, space_watches, space_watch_events, space_membership_revocations, space_deletion_semantic_memory_receipts) are all empty on this stack. The same database also holds tables owned by other services, and those hold rows: cost_entries 1702 (cost-core), feedback_ratings 19 (orchestrator-core), mcp_oauth_tokens 1 and mcp_servers 1 and registry_audit_log 176509 (capability-core).
+
+## BLOCK 3 session_core shape counts (aggregates only)
+# command: aggregate SELECTs over threads, agent_memory, user_memory_controls, forgotten_memory_ids, session_audit_outbox
+threads archived|0
+distinct (org,user) owners of threads|3
+threads older than 30 days|0
+threads older than 365 days|0
+agent_memory distinct owners|4
+agent_memory with expires_at set|0
+agent_memory expired and still present|0
+user_memory_controls|2
+forgotten_memory_ids|6
+session_audit_outbox rows|6130
+session_audit_outbox published older than 7d|0
+oldest thread|2026-09-04
+oldest message|2026-09-04
+oldest event|2026-09-04
+# READING: the stack is 27 days old, so it cannot show whether a time-based sweep of threads exists; that rests on reading the code (no sweep found). Nothing is older than 30 days.
+
+## BLOCK 4 control-shared-nats JetStream: stream AQENCIA_CONTROLPLANE and every consumer filtered on verevon.gdpr.erasure.requested
+# command: docker exec control-shared-nats wget -qO- "http://127.0.0.1:8222/jsz?streams=true&consumers=true&config=true", reduced by a node one-liner to the fields below
+STREAM AQENCIA_CONTROLPLANE max_age_ns 604800000000000 max_msgs 1000000 retention limits discard old storage file
+state msgs 11 first_ts 2026-09-27T23:34:49.244202615Z last_ts 2026-10-01T14:13:03.445593309Z consumers 28
+CONSUMER conversation-core-org-erasure filter verevon.gdpr.erasure.requested max_deliver 20 ack_wait 30000000000 delivered 0 ack_floor 0 num_ack_pending 0 num_redelivered 0 num_pending 0 push_bound true pull_waiting 0
+CONSUMER cost-core-org-erasure filter verevon.gdpr.erasure.requested max_deliver 20 ack_wait 30000000000 delivered 0 ack_floor 0 num_ack_pending 0 num_redelivered 0 num_pending 0 push_bound undefined pull_waiting 0
+CONSUMER data-orchestrator-org-erasure filter verevon.gdpr.erasure.requested max_deliver 20 ack_wait 30000000000 delivered 0 ack_floor 0 num_ack_pending 0 num_redelivered 0 num_pending 0 push_bound true pull_waiting 0
+CONSUMER data-quality-org-erasure filter verevon.gdpr.erasure.requested max_deliver 20 ack_wait 30000000000 delivered 0 ack_floor 0 num_ack_pending 0 num_redelivered 0 num_pending 0 push_bound true pull_waiting 0
+CONSUMER documents-api-gdpr-erasure-v1 filter verevon.gdpr.erasure.requested max_deliver 20 ack_wait 30000000000 delivered 0 ack_floor 0 num_ack_pending 0 num_redelivered 0 num_pending 0 push_bound true pull_waiting 0
+CONSUMER documents-api-org-erasure filter verevon.gdpr.erasure.requested max_deliver 20 ack_wait 30000000000 delivered 0 ack_floor 0 num_ack_pending 0 num_redelivered 0 num_pending 0 push_bound true pull_waiting 0
+CONSUMER embedding-engine-org-erasure filter verevon.gdpr.erasure.requested max_deliver 20 ack_wait 30000000000 delivered 0 ack_floor 0 num_ack_pending 0 num_redelivered 0 num_pending 0 push_bound undefined pull_waiting 1
+CONSUMER graph-index-gdpr-erasure-v1 filter verevon.gdpr.erasure.requested max_deliver 20 ack_wait 30000000000 delivered 0 ack_floor 0 num_ack_pending 0 num_redelivered 0 num_pending 0 push_bound undefined pull_waiting 1
+CONSUMER index-engine-org-erasure filter verevon.gdpr.erasure.requested max_deliver 20 ack_wait 30000000000 delivered 0 ack_floor 0 num_ack_pending 0 num_redelivered 0 num_pending 0 push_bound undefined pull_waiting 1
+CONSUMER quarry-control-org-erasure filter verevon.gdpr.erasure.requested max_deliver 20 ack_wait 30000000000 delivered 0 ack_floor 0 num_ack_pending 0 num_redelivered 0 num_pending 0 push_bound true pull_waiting 0
+CONSUMER quickwit-adapter-gdpr-erasure-v1 filter verevon.gdpr.erasure.requested max_deliver 20 ack_wait 30000000000 delivered 0 ack_floor 0 num_ack_pending 0 num_redelivered 0 num_pending 0 push_bound undefined pull_waiting 1
+CONSUMER retrieval-engine-gdpr-erasure-v1 filter verevon.gdpr.erasure.requested max_deliver 20 ack_wait 30000000000 delivered 0 ack_floor 0 num_ack_pending 0 num_redelivered 0 num_pending 0 push_bound undefined pull_waiting 1
+CONSUMER session-core-gdpr-erasure-v1 filter verevon.gdpr.erasure.requested max_deliver 20 ack_wait 30000000000 delivered 0 ack_floor 0 num_ack_pending 0 num_redelivered 0 num_pending 0 push_bound undefined pull_waiting 1
+CONSUMER verevon-gateway-gdpr-erasure-v1 filter verevon.gdpr.erasure.requested max_deliver 20 ack_wait 30000000000 delivered 0 ack_floor 0 num_ack_pending 0 num_redelivered 0 num_pending 0 push_bound undefined pull_waiting 1
+CONSUMER wiki-store-org-erasure filter verevon.gdpr.erasure.requested max_deliver 20 ack_wait 30000000000 delivered 0 ack_floor 0 num_ack_pending 0 num_redelivered 0 num_pending 0 push_bound true pull_waiting 0
+# READING: (1) the stream keeps messages for 7 days (604800 s). (2) 15 consumers exist; none has ever been delivered an erasure event on this stack (delivered 0), so no erasure consumer has been exercised live. (3) Every push consumer reports push_bound true and every pull consumer shows one waiting puller, EXCEPT cost-core-org-erasure, which has no client attached (a push consumer, push_bound absent, no waiting puller). (4) There is no consumer for the erasure subject from notification-core, integration-core, orchestrator-core, capability-core, billing-core or the Convex backend.
+
+## BLOCK 5 cost-core: boot log lines about the erasure consumer, environment variable presence, broker authentication errors
+# commands: docker logs model-plane-cost-core-1 | grep -i -E "gdpr|erasure" ; docker inspect model-plane-cost-core-1 (names reduced to SET|EMPTY) ; docker logs control-shared-nats | grep "authentication error" (user name and count only)
+{"time":"2026-10-01T14:11:37.515443994Z","level":"ERROR","msg":"GDPR org-erasure consumer bind failed (is it pre-provisioned on control-shared-nats?)","error":"nats: connection closed"}
+container started: 2026-10-01T14:11:33.689709932Z
+COST_CORE_GDPR_NATS_PASSWORD SET
+COST_CORE_GDPR_NATS_USER SET
+COST_CORE_GDPR_NATS_URL SET
+broker authentication errors by user name (whole broker log): session-core-gdpr 1469296 ; cost-core-gdpr 112
+broker authentication errors for user cost-core-gdpr, last four: 2026-10-01 12:41:55 ; 12:41:57 ; 14:11:35 ; 14:11:37  (the 14:11 pair is this container's last boot)
+# READING: the cost-core erasure identity is refused by the broker on every boot seen today, and the consumer start returns after one failed attempt (cost-core cmd/main.go). The cause of the refusal (credential mismatch against the broker configuration) was not investigated and is UNVERIFIED.
+
+## BLOCK 6 session-core: erasure consumer log lines and the earlier authentication failures
+# commands: docker logs model-plane-session-core-1 | grep -E "GDPR erasure consumer (ready|connecting)" (the two lines below are trimmed to their message fields) ; docker logs control-shared-nats | grep 'User "session-core-gdpr"' (first and last timestamp, count in the last 5 minutes)
+{"timestamp":"2026-10-01T14:11:36.235363Z","level":"INFO","fields":{"message":"session-core GDPR erasure consumer connecting","nats_url":"nats://control-shared-nats:4222","subject":"verevon.gdpr.erasure.requested"}}
+{"timestamp":"2026-10-01T14:11:36.247745Z","level":"INFO","fields":{"message":"session-core GDPR erasure consumer ready"}}
+session-core-gdpr authentication errors: first 2026/09/03 19:18:58 ; last 2026/09/14 18:13:51 ; in the last 5 minutes: 0
+# READING: the session-core erasure consumer is connected now. Between 2026-09-03 and 2026-09-14 the same identity was refused about 1.47 million times on this stack. The stream keeps 7 days, so an erasure event published during such an outage and not consumed within 7 days would be gone for that consumer. Whether any event was published in that window is not known.
+
+## BLOCK 7 user-core: erasure ledger counts and a boot log line
+# commands: psql -d user_service in controlplane-postgres (counts only) ; docker logs user-service | grep -i -E "erasure|gdpr" | tail
+user_erasure_operations total|0
+user_erasure_operations completed|0
+user_erasure_operations by mode hard_delete|0
+user_erasure_operations by mode anonymize|0
+user_erasure_fanout total|0
+users total|4
+2026/09/30 13:06:42 GDPR: connected to auth_service DB for gdpr_hard_delete_user / gdpr_anonymize_user
+2026/09/30 13:06:42 GDPR: ORG_CORE_BASE_URL/ORG_CORE_SERVICE_TOKEN not set - sole-owner/admin self-erasure will return 503 succession_unavailable until a successor client is configured
+# READING: the per-user erasure saga has never run on this stack (0 operations, 0 fan-out children). On this stack a user who is the sole owner or admin of an organisation cannot self-erase (503) until the org-core succession client is configured.
+
+## BLOCK 8 auth database: GDPR functions, outbox trigger, migration ledger against the image
+# commands: psql -d auth_service in controlplane-postgres: pg_proc, pg_trigger, public.auth_schema_migrations (first 8 characters of each checksum) ; sha256sum of the three files inside the auth-service image and in the working tree
+gdpr_anonymize_user|security_definer=t|default_public_execute=f
+gdpr_anonymize_user_unfenced|security_definer=t|default_public_execute=f
+gdpr_hard_delete_user|security_definer=t|default_public_execute=f
+gdpr_hard_delete_user_unfenced|security_definer=t|default_public_execute=f
+trigger trg_gdpr_erase_auth_outboxes exists on "user"
+auth user rows|4
+ledger: 023_gdpr_outbox_erasure.sql 54d70e6c applied 2026-09-03 ; 025_gdpr_outbox_publish_fence.sql 6f13b9ac applied 2026-09-03 ; gdpr_hard_delete.sql b0a345cf applied 2026-09-03
+image : 023_gdpr_outbox_erasure.sql b3154cc7 ; 025_gdpr_outbox_publish_fence.sql 5c6dde9e ; gdpr_hard_delete.sql ff9fe801
+working tree (CRLF): 023 b3154cc7 ; 025 5c6dde9e ; gdpr_hard_delete.sql ff9fe801
+auth-service boot log: "Migration checksum mismatch for <file>" printed for 16 migration files (these three included); container started 2026-09-30T13:05:31Z, restarts 0, healthy
+# READING: the four functions and the trigger exist and the functions are not executable by PUBLIC. The ledger holds a different checksum from the file in the image for every one of the three, and the working-tree files are CRLF with the image's hash. The likely cause is a line-ending difference between the 2026-09-03 build and today's; that is not proven. The entrypoint is meant to stop on a mismatch and did not stop the container. Function bodies were not diffed against the files.
+
+## BLOCK 9 Codex connection homes (volume integration-codex-subscription-home, mounted in integration-api): counts, sizes and dates only
+# commands (inside integration-api, home = /var/lib/integration-core/codex-subscriptions): find ... -type f -name "logs_*" | wc -l ; find ... for state, goals, memories, queue, thread_history databases and for the sessions directory, printing the path with the connection id replaced by CONN, a size and a date ; counts of files in workspace, shell_snapshots, tmp, .tmp, cache
+connection home directories|2
+logs_* files (depth <= 3)|0
+.ephemeral entries|0
+CONN/state_5.sqlite|241664|2026-09-23   (and a second connection: 552960|2026-09-15; each with -shm and -wal files)
+CONN/thread_history_1.sqlite|188416|2026-09-08   (one connection only)
+CONN/goals_1.sqlite, memories_1.sqlite, queue_1.sqlite   (both connections; dates 2026-09-15 to 2026-09-23, each with -shm and -wal files)
+sessions directory files: connection 1 = 0 ; connection 2 = 11 (all dated 2026-09-08; 826253 bytes in total)
+workspace files 0 and 0 ; shell_snapshots files 0 and 0 ; tmp files 1 and 1 ; .tmp files 5388 and 2449 ; cache files 3 and 3
+broker boot log (integration-api started 2026-10-01T13:33:39Z): "Codex subscription broker ready" app_server_hardened=true app_server_launcher=native-npm
+# READING: no logs_* database remains at depth 3 or less. The volume does still hold per-connection state databases, a thread_history database (2026-09-08) and 11 files under a sessions directory (2026-09-08), all written before or outside the hardened per-process state directory. Their contents were not read. Whether they hold prompt text is UNVERIFIED; the owner decides on deleting them. Nothing was deleted.

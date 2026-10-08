@@ -1,0 +1,466 @@
+scan-egress summary (generated; no line numbers, no counts; diff two of these to see what changed)
+vendors 58
+vendor abuse-ch-feeds class=public-source role=no-content evidence=config-file wiring=env-example-only
+  host urlhaus.abuse.ch config
+  env URLHAUS_CSV_URL read=no wired=env default=non-empty-default
+  env PHISHTANK_CSV_URL read=no wired=env default=empty-default
+  components Ingestion Plane
+vendor anthropic-api class=subprocessor role=processor evidence=code wiring=compose
+  host api.anthropic.com code+comment
+  env ANTHROPIC_API_KEY read=literal wired=compose default=empty-default
+  components Model Plane/inference-core
+vendor apple-sign-in class=user-authorised role=customer-directed evidence=code wiring=none
+  host appleid.apple.com code
+  env APPLE_CLIENT_ID read=literal wired=no default=not-wired
+  env APPLE_CLIENT_SECRET read=literal wired=no default=not-wired
+  env APPLE_APP_BUNDLE_IDENTIFIER read=literal wired=no default=not-wired
+  env APPLE_KEY_ID read=literal wired=no default=not-wired
+  env APPLE_PRIVATE_KEY read=literal wired=no default=not-wired
+  env APPLE_TEAM_ID read=literal wired=no default=not-wired
+  components Control Plane/auth-core
+vendor brave-search class=subprocessor role=independent-recipient evidence=code wiring=compose
+  host api.search.brave.com code
+  host search.brave.com comment
+  env QUARRY_EDGE__BRAVE_SEARCH_KEY read=rust-config-field wired=compose default=non-empty-default
+  env QUARRY_EDGE__ZERO_SAAS_SEARCH read=rust-config-field wired=compose default=non-empty-default
+  components Ingestion Plane/Quarry-v2
+vendor bring-carrier class=subprocessor role=independent-recipient evidence=code wiring=compose
+  host api.bring.com code
+  host developer.bring.com comment
+  env BRING_API_KEY read=literal wired=compose default=empty-default
+  env BRING_API_UID read=literal wired=compose default=empty-default
+  env BRING_LIVE_BOOKING read=literal wired=compose default=empty-default
+  components Ingestion Plane/shipping-core
+vendor browserbase class=subprocessor role=processor evidence=code wiring=none
+  host www.browserbase.com code
+  env QUARRY_EDGE__BROWSERBASE_API_KEY read=rust-config-field wired=no default=not-wired
+  env QUARRY_BROWSERBASE_PROCESSOR_ID read=literal wired=no default=not-wired
+  components Ingestion Plane/Quarry-v2
+vendor browserless class=subprocessor role=processor evidence=comment-only wiring=n/a
+  host chrome.browserless.io comment
+  host docs.browserless.io comment
+  host live.browserless.io comment
+  components 
+vendor brreg class=public-source role=no-content evidence=code wiring=ungated
+  host data.brreg.no code+comment
+  env BRREG_API_BASE_URL read=literal wired=no default=not-wired
+  components Application Plane/leads-core; Control Plane/org-core; Model Plane/execution-core; Model Plane/model-gateway
+vendor cloudflare-turnstile class=subprocessor role=processor evidence=code wiring=env-example-only
+  host challenges.cloudflare.com code
+  env CAPTCHA_SECRET_KEY read=literal wired=no default=not-wired
+  env TURNSTILE_SECRET_KEY read=literal wired=env default=empty-default
+  env CAPTCHA_ENABLED read=literal wired=env default=non-empty-default
+  components Control Plane/auth-core; Frontend Plane/verevonv3; Frontend Plane/verevonv3/src
+vendor cohere-api class=subprocessor role=processor evidence=code wiring=compose
+  host api.cohere.ai code
+  env COHERE_API_KEY read=no wired=compose default=empty-default
+  env COHERE_URL read=no wired=compose default=empty-default
+  components Data Plane v2/retrieval-engine-rs
+vendor crm-erp-import-sources class=user-authorised role=customer-directed evidence=sdk-only wiring=per-user-connection
+  sdk pypi:hubspot-api-client
+  sdk pypi:simple-salesforce
+  sdk pypi:odoorpc
+  signal import connectors in the imports service
+  components Ingestion Plane/imports-core
+vendor dhl-express class=subprocessor role=independent-recipient evidence=code wiring=compose
+  host express.api.dhl.com code+comment
+  env DHL_API_KEY read=literal wired=compose default=empty-default
+  env DHL_API_SECRET read=literal wired=compose default=empty-default
+  env DHL_API_BASE_URL read=literal wired=compose default=empty-default
+  components Ingestion Plane/shipping-core
+vendor discord-api class=user-authorised role=customer-directed evidence=code wiring=compose
+  host discord.com code+config+comment
+  env DISCORD_CLIENT_SECRET read=literal wired=env default=non-empty-default
+  env DISCORD_BOT_TOKEN read=literal wired=compose default=empty-default
+  env DISCORD_API_BASE_URL read=literal wired=env default=non-empty-default
+  env DISCORD_AUTHORIZATION_URL read=literal wired=env default=non-empty-default
+  env DISCORD_TOKEN_URL read=literal wired=env default=non-empty-default
+  components Ingestion Plane/integration-corev2
+vendor eu-procurement class=public-source role=no-content evidence=code wiring=ungated
+  host adaapnedataprodst.blob.core.windows.net code
+  host api.ted.europa.eu code
+  components Ingestion Plane/quarry-control
+vendor fedex-carrier class=subprocessor role=independent-recipient evidence=code wiring=compose
+  host apis-sandbox.fedex.com code+config+comment
+  host apis.fedex.com code+comment
+  env FEDEX_CLIENT_ID read=literal wired=compose default=empty-default
+  env FEDEX_CLIENT_SECRET read=literal wired=compose default=empty-default
+  components Ingestion Plane; Ingestion Plane/shipping-core
+vendor geofabrik class=public-source role=no-content evidence=config-file wiring=ungated
+  host download.geofabrik.de config
+  components Data Plane v2
+vendor github-api class=user-authorised role=customer-directed evidence=code wiring=env-example-only
+  host api.github.com code+config
+  host github.com code+config+comment
+  env GITHUB_CLIENT_ID read=literal wired=env default=non-empty-default
+  env GITHUB_CLIENT_SECRET read=literal wired=env default=non-empty-default
+  env GITHUB_WEBHOOK_SECRET read=literal wired=env default=non-empty-default
+  env GITHUB_API_BASE_URL read=literal wired=env default=non-empty-default
+  env GITHUB_AUTHORIZATION_URL read=literal wired=env default=non-empty-default
+  env GITHUB_TOKEN_URL read=literal wired=env default=non-empty-default
+  components Frontend Plane/triodelab-web/src; Ingestion Plane/integration-corev2
+vendor google-accounts-apis class=user-authorised role=customer-directed evidence=code wiring=env-example-only
+  host accounts.google.com code+config
+  host analyticsdata.googleapis.com code
+  host developers.google.com code+comment
+  host gmail.googleapis.com code+comment
+  host googleads.googleapis.com code
+  host oauth2.googleapis.com code+config
+  host www.googleapis.com code+config
+  env GOOGLE_CLIENT_ID read=literal wired=env default=non-empty-default
+  env GOOGLE_CLIENT_SECRET read=literal wired=env default=non-empty-default
+  env GOOGLE_API_BASE_URL read=literal wired=env default=non-empty-default
+  env GOOGLE_ADS_DEVELOPER_TOKEN read=literal wired=no default=not-wired
+  env GOOGLE_ADS_API_BASE_URL read=literal wired=no default=not-wired
+  env GOOGLE_ANALYTICS_DATA_API_BASE_URL read=literal wired=no default=not-wired
+  env GOOGLE_AUTHORIZATION_URL read=literal wired=env default=non-empty-default
+  env GOOGLE_SEARCH_CONSOLE_API_BASE_URL read=literal wired=no default=not-wired
+  env GOOGLE_TOKEN_URL read=literal wired=env default=non-empty-default
+  components Application Plane/insight-core; Application Plane/social-core; Control Plane/auth-core; Frontend Plane/verevonv3/src; Ingestion Plane/integration-corev2
+vendor google-fonts class=infrastructure role=no-content evidence=code wiring=ungated
+  host fonts.googleapis.com code
+  host fonts.gstatic.com code
+  components Frontend Plane/verevonv3
+vendor google-search-and-favicons class=infrastructure role=independent-recipient evidence=code wiring=ungated
+  host www.google.com code
+  components Frontend Plane/verevonv3/src
+vendor hibp-pwned-passwords class=infrastructure role=no-content evidence=code wiring=ungated
+  host api.pwnedpasswords.com code
+  components Control Plane/auth-core
+vendor hugging-face-hub class=public-source role=no-content evidence=sdk-only wiring=ungated
+  sdk pypi:colpali-engine
+  sdk pypi:transformers
+  signal model weights loaded by id with from_pretrained
+  components Data Plane v2/colqwen-reranker; Data Plane v2/media-embedder
+vendor hyperswitch class=subprocessor role=processor evidence=code wiring=env-example-only
+  host beta.hyperswitch.io code+config
+  host sandbox.hyperswitch.io code+config
+  env HYPERSWITCH_API_KEY read=literal wired=env default=empty-default
+  env HYPERSWITCH_API_KEY_SECRET read=literal wired=no default=not-wired
+  env HYPERSWITCH_BASE_URL read=literal wired=env default=non-empty-default
+  env HYPERSWITCH_BACKEND_URL read=literal wired=env default=non-empty-default
+  env HYPERSWITCH_CLIENT_URL read=literal wired=env default=non-empty-default
+  env HYPERSWITCH_PUBLISHABLE_KEY read=literal wired=env default=empty-default
+  components Control Plane/billing-core
+vendor letta-tool-search class=subprocessor role=unknown evidence=env-only wiring=compose
+  env LETTA_TOOL_SEARCH_ENABLED read=literal wired=compose default=non-empty-default
+  env LETTA_TOOL_SEARCH_URL read=literal wired=compose default=empty-default
+  env LETTA_API_KEY read=literal wired=compose default=empty-default
+  components Model Plane/capability-core
+vendor linkedin-api class=user-authorised role=customer-directed evidence=code wiring=env-example-only
+  host api.linkedin.com code+config
+  host www.linkedin.com code+config
+  env LINKEDIN_CLIENT_SECRET read=literal wired=env default=non-empty-default
+  env LINKEDIN_API_BASE_URL read=literal wired=compose default=non-empty-default
+  env LINKEDIN_API_VERSION read=literal wired=compose default=non-empty-default
+  env LINKEDIN_AUTHORIZATION_URL read=literal wired=env default=non-empty-default
+  env LINKEDIN_TOKEN_URL read=literal wired=env default=non-empty-default
+  components Application Plane; Application Plane/social-core; Ingestion Plane/integration-corev2
+vendor marketing-site-assets class=infrastructure role=no-content evidence=code wiring=ungated
+  host cal.com code
+  host cdn.prod.website-files.com code
+  host framerusercontent.com code
+  host html.tailus.io code
+  components Frontend Plane/triodelab-web/src; Frontend Plane/verevonv3/verevon-web
+vendor meta-platforms class=user-authorised role=customer-directed evidence=code wiring=compose
+  host api.instagram.com code+config
+  host connect.facebook.net code
+  host graph.facebook.com code+config+comment
+  host graph.instagram.com code+config+comment
+  host graph.threads.net code+config
+  host www.facebook.com code+config
+  host www.instagram.com code+config
+  env META_APP_CLIENT_SECRET read=literal wired=env default=non-empty-default
+  env META_CLIENT_SECRET read=literal wired=no default=not-wired
+  env META_WEBHOOK_SECRET read=literal wired=env default=empty-default
+  env META_WEBHOOK_VERIFY_TOKEN read=literal wired=env default=non-empty-default
+  env META_JS_SDK_APP_ID read=literal wired=compose default=non-empty-default
+  env FACEBOOK_CLIENT_SECRET read=literal wired=env default=non-empty-default
+  env FACEBOOK_GRAPH_API_BASE_URL read=literal wired=compose default=non-empty-default
+  env INSTAGRAM_CLIENT_SECRET read=literal wired=env default=empty-default
+  env INSTAGRAM_GRAPH_API_BASE_URL read=literal wired=compose default=non-empty-default
+  env THREADS_API_BASE_URL read=literal wired=env default=non-empty-default
+  env FACEBOOK_AUTHORIZATION_URL read=literal wired=env default=non-empty-default
+  env FACEBOOK_TOKEN_URL read=literal wired=env default=non-empty-default
+  env INSTAGRAM_AUTHORIZATION_URL read=literal wired=env default=non-empty-default
+  env INSTAGRAM_TOKEN_URL read=literal wired=env default=non-empty-default
+  env META_AUTHORIZATION_URL read=literal wired=env default=non-empty-default
+  env META_GRAPH_API_BASE_URL read=literal wired=env default=non-empty-default
+  env META_TOKEN_URL read=literal wired=env default=non-empty-default
+  components Application Plane; Application Plane/social-core; Frontend Plane/verevonv3/src; Ingestion Plane/integration-corev2
+vendor microsoft-365-entra-graph class=user-authorised role=customer-directed evidence=code wiring=compose
+  host graph.microsoft.com code+config+comment
+  host login.microsoftonline.com code+comment
+  env MICROSOFT_CLIENT_ID read=literal wired=env default=non-empty-default
+  env MICROSOFT_CLIENT_SECRET read=literal wired=env default=non-empty-default
+  env MICROSOFT_GRAPH_BASE_URL read=literal wired=compose default=non-empty-default
+  env AZURE_CLIENT_ID read=literal wired=env default=non-empty-default
+  env AZURE_CLIENT_SECRET read=literal wired=env default=empty-default
+  env AZURE_TENANT_ID read=literal wired=compose default=non-empty-default
+  env MICROSOFT_TOKEN_ORIGIN read=literal wired=env default=non-empty-default
+  env MICROSOFT_CLIENT_AUTH_MODE read=literal wired=env default=non-empty-default
+  env GRAPH_BASE_URL read=literal wired=no default=not-wired
+  components Control Plane/auth-core; Control Plane/user-core; Ingestion Plane; Ingestion Plane/finspo-core; Ingestion Plane/integration-corev2; Model Plane/model-gateway
+vendor microsoft-azure-ai class=subprocessor role=processor evidence=code wiring=compose
+  host *.tts.speech.microsoft.com code
+  host ai.azure.com comment
+  host api.cognitive.microsofttranslator.com code
+  host core-ai-rg.services.ai.azure.com comment
+  host management.azure.com code+comment
+  env AZURE_OPENAI_ENDPOINT read=literal wired=compose default=empty-default
+  env AZURE_OPENAI_API_KEY read=literal wired=compose default=empty-default
+  env AZURE_OPENAI_REGION read=literal wired=compose default=empty-default
+  env AZURE_OPENAI_DEPLOYMENT_TYPE read=literal wired=compose default=empty-default
+  env AZURE_OPENAI_VIDEO_ENDPOINT read=literal wired=compose default=empty-default
+  env AZURE_ANTHROPIC_ENDPOINT read=literal wired=compose default=empty-default
+  env AZURE_ANTHROPIC_API_KEY read=literal wired=compose default=empty-default
+  env AZURE_ANTHROPIC_REGION read=literal wired=compose default=empty-default
+  env AZURE_COHERE_ENDPOINT read=literal wired=compose default=empty-default
+  env AZURE_COHERE_API_KEY read=literal wired=compose default=empty-default
+  env AZURE_COHERE_REGION read=literal wired=compose default=empty-default
+  env AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT read=literal wired=compose default=empty-default
+  env AZURE_DOCUMENT_INTELLIGENCE_KEY read=literal wired=compose default=empty-default
+  env AZURE_AI_LANGUAGE_ENDPOINT read=literal wired=compose default=empty-default
+  env AZURE_AI_LANGUAGE_KEY read=literal wired=compose default=empty-default
+  env AZURE_TRANSLATOR_ENDPOINT read=literal wired=compose default=empty-default
+  env AZURE_TRANSLATOR_KEY read=literal wired=compose default=empty-default
+  env AZURE_TRANSLATOR_API_KEY read=literal wired=compose default=empty-default
+  env AZURE_TRANSLATOR_REGION read=literal wired=compose default=empty-default
+  env AZURE_SPEECH_ENDPOINT read=literal wired=compose default=empty-default
+  env AZURE_SPEECH_KEY read=literal wired=compose default=empty-default
+  env AZURE_SPEECH_REGION read=literal wired=compose default=empty-default
+  env AZURE_OPENAI_STT_API_KEY read=literal wired=compose default=empty-default
+  env AZURE_OPENAI_TTS_API_KEY read=literal wired=compose default=empty-default
+  env AZURE_OPENAI_VIDEO_API_KEY read=literal wired=compose default=empty-default
+  env AZURE_OPENAI_REALTIME_API_KEY read=literal wired=no default=not-wired
+  env COHERE_EMBED_V4_ENDPOINT read=no wired=compose default=empty-default
+  env COHERE_EMBED_V4_API_KEY read=no wired=compose default=non-empty-default
+  env RERANK_ENDPOINT read=no wired=compose default=empty-default
+  env AZURE_API_BASE read=no wired=compose default=non-empty-default
+  components Model Plane/inference-core; Model Plane/model-gateway
+vendor nexi-checkout class=subprocessor role=processor evidence=code wiring=env-example-only
+  host api.dibspayment.eu code+comment
+  host checkout.dibspayment.eu code+comment
+  host test.api.dibspayment.eu code+config+comment
+  host test.checkout.dibspayment.eu code+config
+  env NEXI_SECRET_KEY read=literal wired=no default=not-wired
+  env NEXI_SECRET_API_KEY read=literal wired=env default=empty-default
+  env NEXI_BASE_URL read=literal wired=env default=non-empty-default
+  env NEXI_WEBHOOK_SECRET read=literal wired=no default=not-wired
+  env NEXI_CHECKOUT_JS_URL read=literal wired=env default=non-empty-default
+  components Control Plane/billing-core; Frontend Plane/verevonv3
+vendor no-news-feeds class=public-source role=no-content evidence=code wiring=ungated
+  host e24.no code
+  host www.aftenposten.no code
+  host www.dagbladet.no code
+  host www.digi.no code
+  host www.dn.no code
+  host www.nrk.no code
+  host www.tek.no code
+  host www.vg.no code
+  components Application Plane/information-core
+vendor no-public-authorities class=public-source role=no-content evidence=code wiring=mixed
+  host api-luftmalinger.miljodirektoratet.no code
+  host api.entur.io code
+  host api.kartverket.no code
+  host api.lovdata.no code
+  host api.met.no code
+  host api.ra.no code
+  host api01.nve.no code
+  host data.norges-bank.no code
+  host data.ssb.no code
+  host data.stortinget.no code
+  host datex-server-get-v3-1.atlas.vegvesen.no config
+  host frost.met.no code+config
+  host nvdbapiles.atlas.vegvesen.no code
+  host pam-stilling-feed.nav.no code
+  host sparql.fellesdatakatalog.digdir.no code
+  host trafikkdata-api.atlas.vegvesen.no code
+  host ws.geonorge.no code
+  host www.ssb.no code
+  env LOVDATA_API_KEY read=literal wired=env default=empty-default
+  env DATEX_URL read=literal wired=env default=non-empty-default
+  env DATEX_USERNAME read=literal wired=env default=empty-default
+  env DATEX_PASSWORD read=literal wired=env default=empty-default
+  env FROST_URL read=literal wired=env default=non-empty-default
+  env FROST_CLIENT_ID read=literal wired=env default=empty-default
+  components Application Plane/information-core; Ingestion Plane/quarry-control; Model Plane/model-gateway
+vendor notion-api class=user-authorised role=customer-directed evidence=code wiring=env-example-only
+  host api.notion.com code+config
+  sdk pypi:notion-client
+  env NOTION_CLIENT_ID read=literal wired=env default=non-empty-default
+  env NOTION_CLIENT_SECRET read=literal wired=env default=non-empty-default
+  env NOTION_API_BASE_URL read=literal wired=env default=non-empty-default
+  env NOTION_AUTHORIZATION_URL read=literal wired=env default=non-empty-default
+  env NOTION_TOKEN_URL read=literal wired=env default=non-empty-default
+  components Ingestion Plane/integration-corev2
+vendor novu class=subprocessor role=processor evidence=env-only wiring=compose
+  host eu.api.novu.co comment
+  sdk go:github.com/novuhq/novu-go/v3
+  env NOVU_SECRET_KEY read=literal wired=env-legacy default=non-empty-default
+  env NOVU_BASE_URL read=literal wired=no default=not-wired
+  env NOTIFICATION_DELIVERY_MODE read=literal wired=compose default=non-empty-default
+  env NOTIFICATION_DELIVERY_CALLBACK_SECRET read=literal wired=compose default=empty-default
+  components Application Plane/notification-core
+vendor okta-oidc class=user-authorised role=customer-directed evidence=env-only wiring=env-example-only
+  env OKTA_DOMAIN read=literal wired=env default=empty-default
+  env OKTA_CLIENT_ID read=literal wired=env default=empty-default
+  env OKTA_CLIENT_SECRET read=literal wired=env default=empty-default
+  env OKTA_API_TOKEN read=literal wired=env default=empty-default
+  components Control Plane/auth-core; Ingestion Plane/integration-corev2
+vendor openai-api class=subprocessor role=processor evidence=code wiring=compose
+  host api.openai.com code+config+comment
+  env OPENAI_API_KEY read=literal wired=compose default=empty-default
+  env OPENAI_API_BASE read=literal wired=compose default=non-empty-default+empty-default
+  env OPENAI_BASE_URL read=literal wired=compose default=empty-default
+  components (root); Model Plane/deploy; Model Plane/inference-core
+vendor openai-chatgpt-subscription class=user-authorised role=customer-directed evidence=code wiring=compose
+  host auth.openai.com code+comment
+  host chatgpt.com code
+  env CODEX_SUBSCRIPTION_TRANSPORT read=literal wired=compose default=non-empty-default
+  env CODEX_APP_SERVER_HARDENED read=literal wired=compose default=non-empty-default
+  env CODEX_SUBSCRIPTION_ENABLED read=literal wired=env default=non-empty-default
+  env CODEX_SUBSCRIPTION_DIRECT_BASE_URL read=literal wired=no default=not-wired
+  env CODEX_SUBSCRIPTION_DIRECT_PROMPT_MODE read=literal wired=compose default=non-empty-default
+  components Frontend Plane/verevonv3/src; Ingestion Plane/integration-corev2
+vendor osm-nominatim class=public-source role=independent-recipient evidence=code wiring=ungated
+  host nominatim.openstreetmap.org code
+  components Application Plane/information-core
+vendor postmark class=subprocessor role=processor evidence=env-only wiring=none
+  host postmarkapp.com comment
+  signal Postmark receiver in the mail-task package
+  env MAIL_TASK_PROVIDER read=literal wired=no default=not-wired
+  env MAIL_TASK_WEBHOOK_SECRET read=literal wired=no default=not-wired
+  env MAIL_TASK_RECEIVING_DOMAIN read=literal wired=no default=not-wired
+  components Control Plane/user-core; Ingestion Plane/integration-corev2
+vendor quarry-proxy-pool class=subprocessor role=unknown evidence=env-only wiring=compose
+  env QUARRY_PROXY_POOL read=literal wired=compose default=empty-default
+  env QUARRY_PROXY_FIRST_PARTY read=literal wired=no default=not-wired
+  env QUARRY_PROXY_PROCESSOR_ID read=literal wired=no default=not-wired
+  components Ingestion Plane/Quarry-v2
+vendor resend class=subprocessor role=processor evidence=env-only wiring=compose
+  sdk npm:resend
+  env RESEND_API_KEY read=literal wired=compose default=non-empty-default+required
+  components Control Plane/auth-core
+vendor s3-compatible-object-storage class=infrastructure role=unknown evidence=env-only wiring=compose
+  sdk cargo:aws-sdk-s3
+  sdk cargo:aws-sigv4
+  env MINIO_ENDPOINT read=literal wired=compose default=non-empty-default
+  components Model Plane/execution-core
+vendor searxng-upstream-engines class=subprocessor role=independent-recipient evidence=env-only wiring=compose
+  signal engine entries in the SearXNG settings
+  env QUARRY_EDGE__SEARXNG_URL read=rust-config-field wired=compose default=non-empty-default
+  components Ingestion Plane/config
+vendor serper-search class=subprocessor role=independent-recipient evidence=code wiring=legacy-compose-only
+  host google.serper.dev code
+  env QUARRY_EDGE__SERPER_KEY read=rust-config-field wired=compose-legacy default=non-empty-default
+  components Ingestion Plane/Quarry-v2
+vendor shopify class=user-authorised role=customer-directed evidence=env-only wiring=env-example-only
+  env SHOPIFY_CLIENT_SECRET read=literal wired=env default=non-empty-default
+  env SHOPIFY_WEBHOOK_SECRET read=literal wired=env default=non-empty-default
+  components Ingestion Plane/integration-corev2
+vendor slack-api class=user-authorised role=customer-directed evidence=code wiring=env-example-only
+  host slack.com code+config+comment
+  env SLACK_CLIENT_ID read=literal wired=env default=non-empty-default
+  env SLACK_CLIENT_SECRET read=literal wired=env default=non-empty-default
+  env SLACK_SIGNING_SECRET read=literal wired=env default=non-empty-default
+  env SLACK_API_BASE_URL read=literal wired=env default=non-empty-default
+  env SLACK_AUTHORIZATION_URL read=literal wired=env default=non-empty-default
+  env SLACK_TOKEN_URL read=literal wired=env default=non-empty-default
+  components Ingestion Plane/integration-corev2
+vendor snapchat-api class=user-authorised role=customer-directed evidence=code wiring=env-example-only
+  host accounts.snapchat.com code+config
+  host adsapi.snapchat.com code+config
+  host businessapi.snapchat.com code
+  env SNAPCHAT_CLIENT_SECRET read=literal wired=env default=non-empty-default
+  env SNAPCHAT_API_BASE_URL read=literal wired=compose default=non-empty-default
+  env SNAPCHAT_AUTHORIZATION_URL read=literal wired=env default=non-empty-default
+  env SNAPCHAT_BUSINESS_API_BASE_URL read=literal wired=no default=not-wired
+  env SNAPCHAT_REDIRECT_BASE_URL read=literal wired=env default=empty-default
+  env SNAPCHAT_TOKEN_URL read=literal wired=env default=non-empty-default
+  components Application Plane; Application Plane/social-core; Ingestion Plane/integration-corev2
+vendor stock-media class=infrastructure role=no-content evidence=code wiring=ungated
+  host images.pexels.com code
+  host images.unsplash.com code
+  host unsplash.com code
+  host videos.pexels.com code
+  host www.pexels.com code
+  components Frontend Plane/triodelab-web/src; Frontend Plane/verevonv3/verevon-web
+vendor stripe-billing class=subprocessor role=processor evidence=code wiring=env-example-only
+  host api.stripe.com code+config
+  env STRIPE_API_KEY read=literal wired=env default=empty-default
+  env STRIPE_API_KEY_SECRET read=literal wired=no default=not-wired
+  env STRIPE_BASE_URL read=literal wired=env default=non-empty-default
+  env STRIPE_WEBHOOK_SECRET read=literal wired=env default=non-empty-default
+  components Control Plane/billing-core; Ingestion Plane/integration-corev2
+vendor stripe-connect class=user-authorised role=customer-directed evidence=code wiring=env-example-only
+  host connect.stripe.com code+config
+  env STRIPE_CLIENT_ID read=literal wired=env default=non-empty-default
+  env STRIPE_CLIENT_SECRET read=literal wired=env default=non-empty-default
+  env STRIPE_API_BASE_URL read=literal wired=env default=non-empty-default
+  env STRIPE_AUTHORIZATION_URL read=literal wired=env default=non-empty-default
+  env STRIPE_TOKEN_URL read=literal wired=env default=non-empty-default
+  components Ingestion Plane/integration-corev2
+vendor superoffice class=user-authorised role=customer-directed evidence=code wiring=config-flag
+  host online.superoffice.com code
+  host sod.superoffice.com comment
+  components Infra Plane/core-gateway
+vendor tiktok-api class=user-authorised role=customer-directed evidence=code wiring=env-example-only
+  host open.tiktokapis.com code+config
+  host www.tiktok.com code+config
+  env TIKTOK_CLIENT_SECRET read=literal wired=env default=non-empty-default+empty-default
+  env TIKTOK_API_BASE_URL read=literal wired=compose default=non-empty-default
+  env TIKTOK_CLIENT_KEY read=literal wired=env default=non-empty-default+empty-default
+  env TIKTOK_AUTHORIZATION_URL read=literal wired=env default=non-empty-default
+  env TIKTOK_TOKEN_URL read=literal wired=env default=non-empty-default
+  components Application Plane; Application Plane/social-core; Ingestion Plane/integration-corev2
+vendor twilio-verify class=subprocessor role=processor evidence=env-only wiring=env-example-only
+  sdk npm:twilio
+  env TWILIO_ACCOUNT_SID read=literal wired=env default=non-empty-default
+  env TWILIO_AUTH_TOKEN read=literal wired=env default=non-empty-default
+  env TWILIO_VERIFY_SERVICE_SID read=literal wired=env default=non-empty-default
+  components Control Plane/auth-core
+vendor unpkg-cdn class=infrastructure role=no-content evidence=code wiring=ungated
+  host unpkg.com code
+  components Control Plane/auth-core; Ingestion Plane/Quarry-v2
+vendor ups-carrier class=subprocessor role=independent-recipient evidence=code wiring=compose
+  host onlinetools.ups.com code
+  host wwwcie.ups.com comment
+  env UPS_CLIENT_ID read=literal wired=compose default=empty-default
+  env UPS_CLIENT_SECRET read=literal wired=compose default=empty-default
+  components Ingestion Plane/shipping-core
+vendor vipps-login class=user-authorised role=customer-directed evidence=code wiring=none
+  host api.vipps.no code
+  host apitest.vipps.no code
+  env VIPPS_CLIENT_ID read=literal wired=no default=not-wired
+  env VIPPS_CLIENT_SECRET read=literal wired=no default=not-wired
+  env VIPPS_ENVIRONMENT read=literal wired=no default=not-wired
+  components Control Plane/auth-core
+vendor visma-net class=user-authorised role=customer-directed evidence=code wiring=config-flag
+  host api.visma.net code
+  host connect.visma.com comment
+  host mcp.finance.visma.net code
+  components Frontend Plane/verevonv3/src; Infra Plane/core-gateway
+vendor x-api class=user-authorised role=customer-directed evidence=code wiring=env-example-only
+  host api.x.com code+config+comment
+  host x.com code+config
+  env X_CLIENT_SECRET read=literal wired=env default=non-empty-default
+  env X_API_BASE_URL read=literal wired=compose default=non-empty-default
+  env X_AUTHORIZATION_URL read=literal wired=env default=non-empty-default
+  env X_TOKEN_URL read=literal wired=env default=non-empty-default
+  components Application Plane; Application Plane/social-core; Ingestion Plane/integration-corev2
+comment-only developer.mozilla.org
+comment-only developer.nexigroup.com
+comment-only docs.python.org
+comment-only joda-time.sourceforge.net
+comment-only learn.microsoft.com
+comment-only redis.github.io
+comment-only services.zammad.com
+comment-only www.aquatiq.com
+comment-only x.no
+reviewed-internal-credentials 115
+ignored first-party-domain hosts=11
+ignored in-cluster-name hosts=102
+ignored loopback-or-private hosts=4
+ignored reserved-placeholder hosts=15
+ignored schema-or-namespace hosts=9

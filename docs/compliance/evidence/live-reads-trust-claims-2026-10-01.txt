@@ -1,0 +1,57 @@
+# LIVE reads of the local developer stack, 2026-10-01, taken for task J13 (claims versus code). Read-only. Nothing here describes production.
+# Engineering evidence, not legal advice. Each block names the command that produced it.
+# Contents: provider and region facts only (names, set or empty, allow-listed values, hostnames). No keys, tokens, URLs with credentials or message content.
+# This file is a second reading beside live-reads-2026-10-01.txt. The inference-core container was rebuilt and restarted after that file was written (14:11Z), so the posture here is the one the evening stack had.
+
+## BLOCK 1: inference-core provider registration and residency posture at boot
+## command: docker logs model-plane-inference-core-1 | grep -E 'provider registered|provider residency declared|provider declares NO residency|DEPLOYMENT_TYPE is unset'  (fields trimmed to timestamp, level, message, provider, residency)
+## container started at: 2026-10-01T19:35:35.185443117Z
+2026-10-01T19:35:36Z | INFO | provider registered | provider=azure-openai
+2026-10-01T19:35:36Z | INFO | provider registered | provider=azure-anthropic
+2026-10-01T19:35:36Z | INFO | provider registered | provider=cohere
+2026-10-01T19:35:36Z | INFO | subscription provider registered | provider=openai-codex-subscription
+2026-10-01T19:35:36Z | WARN | AZURE_OPENAI_DEPLOYMENT_TYPE is unset - cannot prove the Azure OpenAI deployment keeps inference inside the EU
+2026-10-01T19:35:36Z | INFO | provider residency declared | provider=azure-openai | residency=eu
+2026-10-01T19:35:36Z | WARN | provider declares NO residency commitment: traffic to it may be processed outside the EU/EEA | provider=azure-anthropic
+2026-10-01T19:35:36Z | INFO | provider residency declared | provider=cohere | residency=eu
+2026-10-01T19:35:36Z | WARN | provider declares NO residency commitment: traffic to it may be processed outside the EU/EEA | provider=openai-codex-subscription
+2026-10-01T19:35:36Z | INFO | speech provider registered | provider=azure-speech
+2026-10-01T19:35:36Z | INFO | speech provider registered | provider=azure-openai
+## READING: the same picture as live-reads-2026-10-01.txt BLOCK 1. Azure OpenAI is declared eu on its region label while its deployment type is unset; Foundry Claude and the ChatGPT subscription route each declare no residency commitment.
+
+## BLOCK 2: inference-core environment, provider and region variables (names, set or empty, allow-listed values only)
+## command: bash docs/compliance/evidence/tools/export-provider-posture.sh --container model-plane-inference-core-1   (read at 2026-10-01T20:56:16Z; output filtered to the names below, nothing else removed or changed)
+## columns: NAME<TAB>state<TAB>shown
+AGENTIC_SUBSCRIPTION_ENABLED	set	true
+AZURE_ANTHROPIC_REGION	empty	-
+AZURE_ANTHROPIC_ZDR_APPROVAL_REF	empty	-
+AZURE_ANTHROPIC_ZDR_DIGEST	empty	-
+AZURE_ANTHROPIC_ZDR_EFFECTIVE_DATE	empty	-
+AZURE_ANTHROPIC_ZDR_RESOURCE_ID	empty	-
+AZURE_ANTHROPIC_ZDR_REVIEWER	empty	-
+AZURE_ANTHROPIC_ZDR_REVIEW_BY	empty	-
+AZURE_COHERE_REGION	set	swedencentral
+AZURE_OPENAI_DEPLOYMENT_TYPE	empty	-
+AZURE_OPENAI_REGION	set	swedencentral
+AZURE_OPENAI_ZDR_APPROVAL_REF	empty	-
+AZURE_OPENAI_ZDR_DIGEST	empty	-
+AZURE_OPENAI_ZDR_EFFECTIVE_DATE	empty	-
+AZURE_OPENAI_ZDR_RESOURCE_ID	empty	-
+AZURE_OPENAI_ZDR_REVIEWER	empty	-
+AZURE_OPENAI_ZDR_REVIEW_BY	empty	-
+AZURE_SPEECH_ENDPOINT	empty	-
+AZURE_SPEECH_REGION	set	swedencentral
+AZURE_TRANSLATOR_REGION	set	swedencentral
+INFERENCE_PROVIDER_ORDER	set	azure,anthropic,openai,cohere,openai-codex-subscription
+MODEL_PLANE_ALLOW_GLOBAL_DEPLOYMENT	set	false
+MODEL_PLANE_ALLOW_GLOBAL_RESIDENCY	set	false
+## READING: every AZURE_*_ZDR_* attestation field for both surfaces is empty, so neither Azure OpenAI nor Foundry Claude carries an attestation and no chat provider supports ZDR (provider/zdr.rs, fallback.rs ZDR gate). The speech region is a label (swedencentral) and the speech endpoint override is empty.
+
+## BLOCK 3: TTS override variables in the inference-core container (absence read from the exporter listing, not from a count)
+## command: the same export as BLOCK 2, searched for the names MODEL_PLANE_ALLOW_NON_EU_TTS and AZURE_OPENAI_TTS_ (any state)
+(no matches)
+## READING: the exporter lists every variable whose name starts with one of its provider prefixes (AZURE_, MODEL_PLANE_ and others, set or empty), so a TTS override name would have been listed. None is in this container, which agrees with live-reads-2026-10-01.txt BLOCK 3 (count 0). speech.rs ignores the override unless the opt-in flag is set, so through these compose files the East US 2 override cannot take effect here. Production wiring is not read.
+
+## BLOCK 4: reads attempted and not completed
+## commands: docker exec model-plane-inference-core-1 sh -c 'env | grep -c ...'  and  docker exec model-plane-postgres-1 psql ... select residency, count(*) from runs group by 1
+Docker answered "500 Internal Server Error" for the container inspect of both containers, and a later docker ps did not return within 25 seconds. Nothing was retried, no container was touched, and the stack was probably busy with another agent or the orchestrator. The run residency count in live-reads-2026-10-01.txt BLOCK 2 (swedencentral 1905 of 1905) is therefore not refreshed here.

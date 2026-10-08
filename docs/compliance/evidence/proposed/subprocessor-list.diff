@@ -1,0 +1,71 @@
+--- a/docs/compliance/subprocessor-list.md
++++ b/docs/compliance/subprocessor-list.md
+@@ -27,26 +27,55 @@
+ 
+ | Subprocessor | Purpose | Data categories | Region (processing/storage) | Transfer basis |
+ |--------------|---------|-----------------|------------------------------|----------------|
+-| **Microsoft Azure — Azure OpenAI** | AI model inference (prompts/completions) and embeddings generation | `customer_private`, `personal`, prompts, completions, embeddings | **Sweden Central (EU/EEA)** — Tier 1 default; Norway East for Tier 2 | EEA-resident + ZDR + SCCs/DPF + supplementary; **CLOUD Act residual disclosed** |
+-| **Microsoft Azure — Hosting / infrastructure** | Compute, storage, networking for Verevon services (app data, run-history, audit, vector store, object storage) | All classes processed by the platform (per classification policy) | **EU/EEA** | EEA-resident + SCCs/DPF + supplementary; **CLOUD Act residual disclosed** |
+-| **Microsoft Azure — Text-to-Speech (TTS)** | Speech synthesis | Text submitted for synthesis | **East US 2 (United States)** — *known exception, remediation in progress* | US processing — **excluded for protected classes until relocated to EEA** |
+-| **Resend** | Transactional email delivery (notifications) | Recipient email address, message content (minimised) | **TBC — verify** | **TBC — verify (likely SCCs/DPF + supplementary)** |
++| **Microsoft Azure — AI services (Azure OpenAI, Azure AI Foundry Claude and Cohere, Document Intelligence, Language, Translator, Speech, video, fine-tuning)** | AI model inference (prompts/completions), embeddings (agent memory; Data Plane document embeddings and rerank on a Foundry Cohere deployment), document, language, translation, speech and video processing, fine-tuning | `customer_private`, `personal`, prompts, completions, embeddings, documents, audio, fine-tune training files | **Sweden Central (EU/EEA)** is the region *declared* for Azure OpenAI, Cohere, Speech and Translator (a configured label, not a verified boundary); Foundry Claude, Document Intelligence, Language and video declare none — **TBC — verify per service**; Norway East for Tier 2 | EEA-resident (**TBC — verify deployment type**) + ZDR (**TBC — verify attestation**) + SCCs/DPF + supplementary; **CLOUD Act residual disclosed** |
++| **Microsoft Azure — Hosting / infrastructure** | Compute, storage, networking for Verevon services (app data, run-history, audit, vector store, object storage) | All classes processed by the platform (per classification policy) | **EU/EEA** — **TBC — verify: the code names no hosting vendor or deployment record; the compose files start every store as a container on whatever host runs the stack** | EEA-resident + SCCs/DPF + supplementary; **CLOUD Act residual disclosed** |
++| **Microsoft Azure — Text-to-Speech (TTS)** | Speech synthesis | Text submitted for synthesis | **East US 2 (United States)** — *known exception, remediation in progress*; **TBC — verify: on the developer stack the Speech path builds its host from the region variable (Sweden Central) and the non-EU override cannot take effect; confirm the production wiring, then keep, narrow or remove this row** | US processing — **excluded for protected classes until relocated to EEA** |
++| **Resend** | Transactional email delivery (sign-in: verification, password reset, one-time code) | Recipient email address, message content (minimised) | **TBC — verify** | **TBC — verify (likely SCCs/DPF + supplementary)** |
+ | **Twilio** | SMS delivery and 2FA / one-time passcodes | Phone number, OTP, delivery metadata | **TBC — verify** | **TBC — verify (likely SCCs/DPF + supplementary)** |
+-| **Browser-automation / residential-proxy / unblocker vendor(s) (behind Quarry egress broker)** | Web fetch/crawl/browse for agent retrieval, only when Verevon-owned egress is insufficient and policy permits | Crawled/retrieved content, target URLs/metadata | **TBC — verify per vendor** | Default-deny; per-processor approval; **TBC — verify** |
+-| **Additional model vendors (via Model Plane routing)** | Alternative LLM inference where routed | prompts, completions | **TBC — confirm ZDR + EEA per vendor** | **TBC — verify; only the Azure OpenAI Sweden Central path is confirmed today** |
++| **Browser and proxy vendor(s) behind the Quarry egress broker** | Hosted browser (Browserbase: unset by default and ineligible for governed runs) and an operator-supplied proxy pool (the code names no vendor) for web fetch/crawl/browse, only when Verevon-owned egress is insufficient and policy permits | Crawled/retrieved content, target URLs/metadata | **TBC — verify per vendor** | Default-deny; per-processor approval; **TBC — verify** |
++| **OpenAI (direct API)** | Alternative LLM inference where routed, and speech/translation/image/language fallbacks; registered only when an API key is set | prompts, completions | **TBC — confirm ZDR + EEA** | **TBC — verify** |
++| **Anthropic (direct API)** | Claude inference where Azure AI Foundry Claude is not configured | prompts, completions | **TBC — confirm ZDR + EEA** | **TBC — verify** |
++| **Cohere (public API)** | Rerank fallback when no Foundry rerank endpoint is set | Query text, candidate chunk texts | **TBC — verify** | **TBC — verify** |
++| **Brave Search API** | Paid web-search backup in the Quarry chain, only when the free chain returns too little and the request allows paid search | Search query text | **TBC — verify** | **TBC — verify** |
++| **Serper** | Paid web-search backup (adapter present; the plane compose files pass no key) | Search query text | **TBC — verify** | **TBC — verify** |
++| **External search engines behind the self-hosted SearXNG (Google CSE, Bing, DuckDuckGo, Yandex and others)** | Free web-search chain: the query is forwarded to external engines whatever the ZDR flags say | Search query text | **TBC — verify per engine** | **TBC — verify**; role (independent recipient or processor) for counsel |
++| **Stripe** | Billing: checkout sessions and customer metadata | Billing email, organisation name and id, checkout parameters | **TBC — verify** | **TBC — verify** |
++| **Nexi (Dibs)** | Payment checkout | Order items, amount, currency | **TBC — verify** | **TBC — verify** |
++| **Hyperswitch** | Payment orchestration adapter (not configured on the developer stack) | Amount, currency, metadata | **TBC — verify** | **TBC — verify** |
++| **Novu** | Notification delivery (delivery mode is disabled by default; the EU host is an option, not a setting) | Notification payloads, subscriber identity | **TBC — verify** | **TBC — verify** |
++| **Postmark** | Inbound mail-to-task processor (not enabled; must be listed, with region, DPA and SCCs, before it is enabled for customer organisations) | Forwarded email: sender, subject, body, attachments, authentication headers | **TBC — verify** | **TBC — verify** |
++| **Cloudflare (Turnstile)** | Sign-up human check (on when a secret key is set) | Visitor IP address, browser signals | **TBC — verify** | **TBC — verify** |
++| **Letta (tool-definition search)** | Optional remote tool search at an operator-supplied endpoint (off by default) | Tool-search query text | **TBC — verify** | **TBC — verify** |
++| **Freight carriers: Bring (Posten), DHL Express, UPS, FedEx** | Rate quotes, booking and tracking; the real adapters replace the mocks when credentials are present | Sender and consignee names, addresses and contact details, shipment data | **TBC — verify per carrier** | **TBC — verify**; role (independent recipient or processor) for counsel |
++| **Google (Fonts, favicon service)** | The web app loads its font stylesheet from Google and asks Google's favicon service for the hostname of each search result shown | Visitor IP address and user agent; result hostnames | **TBC — verify** | **TBC — verify**; the font can be self-hosted to remove the first |
+ 
+ ## Notes
+ 
+-- **Microsoft Azure is the principal subprocessor** and the only one whose region
+-  (Sweden Central / Norway East / East-US-2-for-TTS) is confirmed from
+-  configuration. All other regions are **TBC — verify** against the vendor DPA.
+-- Billing processors (e.g. Stripe / Lago, if used) are **allowed for the billing
+-  purpose only** and must carry their own processor record and retention policy —
+-  add them here once confirmed in production. *(Not confirmed in the codebase; do
+-  not list externally until verified.)*
++- **Microsoft Azure is the principal subprocessor** and the only one for which the
++  configuration *declares* a region (Sweden Central / Norway East / East-US-2-for-TTS).
++  A declared region is a configured label, not a verified boundary. All other
++  regions are **TBC — verify** against the vendor DPA.
++- Billing processors (Stripe, Nexi, Hyperswitch) are **allowed for the billing
++  purpose only** and must carry their own processor record and retention policy.
++  They are present in the code and are listed above; region and DPA are
++  **TBC — verify**. (Lago is a container the repository runs itself, not a vendor.)
+ - Sub-subprocessors of each subprocessor are governed by that subprocessor's DPA
+   and should be enumerated in the processor registry record.
+ 
++## Other recipients (for counsel: keep, move to the privacy notice, or drop)
++
++These recipients appear in the code but are **not proposed** for the sub-processor
++list above. Region and transfer basis for each are **TBC — verify**. The reasons are
++the engineer's reading, not legal advice.
++
++| Recipient class | Recipients found in the code | What leaves | Why it is not proposed as a subprocessor |
++|-----------------|------------------------------|-------------|------------------------------------------|
++| Customer-directed connectors and sign-in (the customer connects their own account) | Microsoft Entra / Graph, Google, Apple, Vipps, Okta; Slack, Notion, GitHub, Meta (Facebook, Instagram, Threads), LinkedIn, X, TikTok, Snapchat, Discord, Shopify; Visma.net, SuperOffice; Stripe Connect; HubSpot, Salesforce and Odoo imports | OAuth tokens and the content the user grants | The customer authorises the connection under their own account and terms. **TBC — counsel to confirm** |
++| The user's own ChatGPT subscription | OpenAI (chatgpt.com, auth.openai.com) | Prompts, tool schemas, connection tokens | Runs on the user's own OpenAI account and terms; but Verevon systems carry the prompts and the tokens, so it should be disclosed as its own recipient |
++| Public data sources | Brønnøysundregistrene, Lovdata, Stortinget, Riksarkivet, NAV, Digdir, SSB, Norges Bank, Kartverket, Geonorge, NVE, Miljødirektoratet, Entur, MET Norway, Statens vegvesen, EU TED and Doffin, OpenStreetMap Nominatim, Norwegian news feeds, abuse.ch blocklists, Geofabrik, Hugging Face Hub | The request only (a query term, a place name) and the platform's egress address | Public data is read; no customer file leaves. Nominatim receives place or address strings, so counsel may prefer to list it |
++| Infrastructure recipients of connection metadata | Have I Been Pwned range API, unpkg, the S3-compatible object-storage client (MinIO in the compose files) | A five-character hash prefix with padding; the IP address of whoever opens an API documentation page; object payloads to MinIO | No customer file leaves; a cloud object store behind the S3 client in production would be a subprocessor (**TBC — verify**) |
++| Recipients of the marketing sites' own visitors | Pexels, Unsplash, Webflow CDN, Framer, Tailus, Cal.com | Visitor IP address | Verevon is the controller for its own website visitors; this belongs in the privacy notice, not in this list |
++
+ ## Change management
+ 
+ - New or replacement subprocessors require: an approved processor registry record,

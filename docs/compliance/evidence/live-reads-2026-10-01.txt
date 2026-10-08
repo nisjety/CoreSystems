@@ -1,0 +1,112 @@
+# LIVE reads of the local developer stack, 2026-10-01. Read-only. Nothing here describes production.
+# Engineering evidence, not legal advice. Each block names the command that produced it.
+# Contents: provider and region facts only (names, hostnames, counts). No keys, tokens, URLs with credentials or message content.
+
+## BLOCK 1: inference-core provider registration and residency posture at boot
+## command: docker logs model-plane-inference-core-1 | grep -E 'provider registered|provider residency declared|provider declares NO residency|DEPLOYMENT_TYPE is unset'  (fields trimmed to timestamp, level, message, provider, residency)
+## container started at: 2026-10-01T14:11:33.612495984Z
+2026-10-01T14:11:36Z | INFO | provider registered | provider=azure-openai
+2026-10-01T14:11:36Z | INFO | provider registered | provider=azure-anthropic
+2026-10-01T14:11:36Z | INFO | provider registered | provider=cohere
+2026-10-01T14:11:36Z | INFO | subscription provider registered | provider=openai-codex-subscription
+2026-10-01T14:11:36Z | WARN | AZURE_OPENAI_DEPLOYMENT_TYPE is unset — cannot prove the Azure OpenAI 
+2026-10-01T14:11:36Z | INFO | provider residency declared | provider=azure-openai | residency=eu
+2026-10-01T14:11:36Z | WARN | provider declares NO residency commitment: traffic to it may be proces | provider=azure-anthropic
+2026-10-01T14:11:36Z | INFO | provider residency declared | provider=cohere | residency=eu
+2026-10-01T14:11:36Z | WARN | provider declares NO residency commitment: traffic to it may be proces | provider=openai-codex-subscription
+2026-10-01T14:11:36Z | INFO | speech provider registered | provider=azure-speech
+2026-10-01T14:11:36Z | INFO | speech provider registered | provider=azure-openai
+2026-10-01T14:11:36Z | INFO | translation provider registered | provider=azure-translator
+2026-10-01T14:11:36Z | INFO | translation provider registered | provider=azure-openai
+2026-10-01T14:11:37Z | INFO | realtime provider registered | provider=azure
+2026-10-01T14:11:37Z | INFO | video provider registered | provider=azure-openai
+
+## BLOCK 2: session-core run records, residency stamp
+## command: psql -U postgres -d session_core -At -c "select residency, count(*) from runs group by 1"  (docker exec model-plane-postgres-1, SELECT only)
+swedencentral|1905
+## command: select column_name from information_schema.columns where table_name='runs' order by ordinal_position
+id thread_id parent_run_id agent_id goal mode status org_id user_id final_output error metadata created_at updated_at ended_at residency space_id space_decision_ref recipient_audience_ref privacy_policy_ref resource_authorization_ref authority_revision recipient_audience_revision recipient_audience_hash 
+
+## BLOCK 3: are the TTS residency variables present in the inference-core container? (count only, no values)
+## command: docker exec model-plane-inference-core-1 sh -c 'env | grep -c "^MODEL_PLANE_ALLOW_NON_EU_TTS=\|^AZURE_OPENAI_TTS_"'
+0
+
+## BLOCK 4: code search, tracked files: where is min_residency written? (per-file counts, 2026-10-01 tree; this block is a search, not a live read)
+## command: git grep -c min_residency -- '*.rs' '*.go' '*.ts' '*.tsx' ':!*.pb.go'
+    apps/Data Plane v2/services/embedding-engine-rs/src/provider/contextualize.rs:2
+    apps/Data Plane v2/services/graph-index-rs/src/extractor.rs:2
+    apps/Frontend Plane/verevon/src/lib/model-plane/gen/model_plane/v1/inference_pb.ts:2
+    apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs:1
+    apps/Model Plane/rust/services/inference-core/src/grpc.rs:1
+    apps/Model Plane/rust/services/inference-core/src/provider/fallback.rs:21
+    apps/Model Plane/rust/services/inference-core/src/provider/mod.rs:1
+    apps/Model Plane/rust/services/model-gateway/src/source_validation.rs:6
+    apps/Model Plane/rust/services/model-gateway/src/sse.rs:3
+    apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs:1
+## READING (by hand, each hit opened): no non-test code assigns a non-empty value.
+##   apps/Model Plane/rust/services/inference-core/src/provider/fallback.rs : the gate itself and its tests
+##   apps/Model Plane/rust/services/inference-core/src/grpc.rs:1108         : copies the wire field into the internal request
+##   apps/Model Plane/rust/services/model-gateway/src/sse.rs:527            : copies the main route's (empty) value onto auxiliary calls; lines 564 and 570 are in mod subscription_route_tests
+##   apps/Model Plane/rust/services/model-gateway/src/source_validation.rs  : line 1004 copies it into a review binding; later hits are inside mod tests (line 3039)
+##   apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs:1278, apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs:6670, apps/Data Plane v2/services/graph-index-rs/src/extractor.rs:295, apps/Data Plane v2/services/embedding-engine-rs/src/provider/contextualize.rs:423 : String::new()
+##   apps/Frontend Plane/verevon/src/lib/model-plane/gen/...inference_pb.ts : generated protobuf type, no assignment
+##   the chat request builder (model-gateway sse.rs:2526-2544) never sets it: it builds InferRequest with ..Default::default() after setting min_privacy_tier
+
+## BLOCK 5: code search, tracked files: which service reads the TTS residency variables? (a search, not a live read)
+## command: git grep -n 'AZURE_OPENAI_TTS_ENDPOINT\|MODEL_PLANE_ALLOW_NON_EU_TTS' -- 'apps/Model Plane/rust/services'
+    apps/Model Plane/rust/services/inference-core/src/config.rs:280:        // embedding residency gate. Mirrors the speech.rs MODEL_PLANE_ALLOW_NON_EU_TTS
+    apps/Model Plane/rust/services/inference-core/src/provider/speech.rs:428:        // accepts the cross-region transfer via `MODEL_PLANE_ALLOW_NON_EU_TTS`.
+    apps/Model Plane/rust/services/inference-core/src/provider/speech.rs:429:        let allow_non_eu_tts = env_nonempty("MODEL_PLANE_ALLOW_NON_EU_TTS")
+    apps/Model Plane/rust/services/inference-core/src/provider/speech.rs:431:        if !allow_non_eu_tts && env_nonempty("AZURE_OPENAI_TTS_ENDPOINT").is_some() {
+    apps/Model Plane/rust/services/inference-core/src/provider/speech.rs:433:                "AZURE_OPENAI_TTS_ENDPOINT set but MODEL_PLANE_ALLOW_NON_EU_TTS is off; \
+    apps/Model Plane/rust/services/inference-core/src/provider/speech.rs:439:            env_nonempty("AZURE_OPENAI_TTS_ENDPOINT")
+## READING: only inference-core reads them (config.rs:280 is a comment). model-gateway source does not.
+
+## BLOCK 6: code search: where is the ChatGPT account's compute-residency claim used in Integration Core? (a search, not a live read)
+## command: git grep -n -i 'chatgpt_compute_residency\|tokens.Residency\|set.Residency' -- 'apps/Ingestion Plane/integration-corev2' ':!*_test.go'
+    apps/Ingestion Plane/integration-corev2/internal/codexsubscription/credentials.go:582:	residency := stringClaim(authClaims(accessClaims), "chatgpt_compute_residency")
+    apps/Ingestion Plane/integration-corev2/internal/codexsubscription/credentials.go:584:		residency = stringClaim(accessClaims, openAIAuthClaim+".chatgpt_compute_residency")
+    apps/Ingestion Plane/integration-corev2/internal/codexsubscription/credentials.go:587:		residency = stringClaim(accessClaims, "chatgpt_compute_residency")
+    apps/Ingestion Plane/integration-corev2/internal/codexsubscription/credentials.go:590:		set.Residency = residency
+    apps/Ingestion Plane/integration-corev2/internal/codexsubscription/direct.go:391:	if tokens.Residency != "" {
+    apps/Ingestion Plane/integration-corev2/internal/codexsubscription/direct.go:392:		headers.Set("x-openai-internal-codex-residency", tokens.Residency)
+## READING: read from the token (credentials.go) and sent back to OpenAI as a header in the direct transport (direct.go). No other use.
+
+## BLOCK 7: code search: analytics or telemetry vendor SDKs by package or host name in the web app, gateway and public site source (not exhaustive)
+## command: git grep -n -i -E '@sentry/|sentry\.io|posthog|datadog|applicationinsights|mixpanel|plausible\.io|google-analytics|googletagmanager|gtag\(|hotjar|amplitude\.com|@amplitude/|fullstory|logrocket' -- <web app src, index.html, package.json, gateway src, public site src>
+    (no matches)
+## READING: a name search can miss a vendor loaded another way; it found no SDK or host of the listed vendors.
+
+## BLOCK 8: code search: is the Space decision's third_party_processing_allowed flag applied anywhere in the Model Plane? (a search, not a live read)
+## command: git grep -n 'third_party_processing_allowed' -- 'apps/Model Plane/rust/services'
+    apps/Model Plane/rust/services/session-core/src/grpc.rs:642:    third_party_processing_allowed: bool,
+    apps/Model Plane/rust/services/session-core/src/grpc.rs:1746:        claims.third_party_processing_allowed,
+    apps/Model Plane/rust/services/session-core/src/grpc.rs:7523:                "third_party_processing_allowed": false,
+    apps/Model Plane/rust/services/session-core/src/grpc.rs:7713:            "third_party_processing_allowed": false,
+    apps/Model Plane/rust/services/session-core/src/grpc.rs:8379:            "third_party_processing_allowed": false,
+    apps/Model Plane/rust/services/session-core/src/grpc.rs:8578:            "third_party_processing_allowed": false,
+    apps/Model Plane/rust/services/session-core/src/grpc.rs:8648:            "third_party_processing_allowed": false, "retention_class": "standard", "residency": "swedencentral",
+## READING: session-core grpc.rs:642 declares the field, grpc.rs:1746 decodes it into an unused tuple; every later hit is inside the test module. Nothing applies it to provider choice.
+
+## BLOCK 9: code search (added by the J10 reviewer): which Data Plane files read a sovereign flag? (a search, not a live read)
+## command: git grep -n -i sovereign -- services/graph-index-rs services/embedding-engine-rs services/index-engine-rs   (run in apps/Data Plane v2)
+    services/embedding-engine-rs/src/provider/contextualize.rs:420:            // gates retaining providers. Revisit when the sovereignty posture is
+    services/graph-index-rs/src/extractor.rs:292:            // gates retaining providers. Revisit when the sovereignty posture is
+    services/index-engine-rs/src/bin/reembed_switch.rs:2://! `docs/sovereign-rag-phased-plan.md` - migrating text from
+## command: git grep -l -i sovereign -- services   (same directory; the other hits)
+    services/retrieval-engine-rs/src/{api/mod.rs, authz/context.rs, config.rs, grpc/document_svc.rs, grpc/interceptor.rs, grpc/retrieval_svc.rs, pipeline/orchestrator.rs, pipeline/types.rs} and its tests
+## READING (each embedding-engine, graph-index and index-engine hit opened): the three hits above are comments. Code that reads a sovereign flag is in retrieval-engine-rs, the query side. The embedding engine, which embeds documents and page images at index time, has no sovereign check.
+
+## BLOCK 10: code search (added by the J10 reviewer): where is the Space decision's zero_data_retention flag read in the Model Plane? (a search, not a live read)
+## command: git grep -c zero_data_retention -- "apps/Model Plane" ':!*.pb.go' ':!*_pb.ts' ':!*.md'
+    capability-core: model_action_view.go:1, cron/control_authorizer.go:1, sessionreview/retention.go:1, migrations/0005_seed_operating_map_capability.up.sql:1
+    orchestrator-core: activities.go:1, scheduled_run_authorizer.go:1, scheduled_step_authorizer.go:1
+    execution-core: scheduled_step_decision.rs:3
+    model-gateway: quarry.rs:1 (a test name)
+    session-core: grpc.rs:9
+## READING: session-core grpc.rs:826 and :1073 and execution-core scheduled_step_decision.rs:164 refuse a scheduled-run, scheduled-execute or scheduled-step decision when the flag is set. No hit in inference-core, and none that chooses a provider. The thread-creation decision (grpc.rs:1742-1747) decodes it into an unused tuple.
+
+## BLOCK 11: session-core routing policy store (added by the J10 reviewer; SELECT only, docker exec model-plane-postgres-1)
+## command: psql -U postgres -d session_core -At -c "select version, config::text from routing_policy"
+0|{}
+## READING: one singleton row, version 0, empty config. inference-core falls back to RoutingPolicy::default when the stored policy is empty (routing_policy.rs:12), so the default Balance and Genius table applies on this stack.
