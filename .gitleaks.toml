@@ -91,9 +91,16 @@ regexes = [
   # fixture is generated (the private halves are never written down); each token lives two minutes. The exact header
   # of each of the three producers' envelope signers.
   '''^(?:eyJ0eXAiOiJKV1QiLCJhbGciOiJSUzI1NiIsImtpZCI6ImVtYmVkZGluZy1ldmVudHMtdjEifQ|eyJ0eXAiOiJKV1QiLCJhbGciOiJSUzI1NiIsImtpZCI6ImdyYXBoLWV2ZW50cy12MSJ9|eyJ0eXAiOiJKV1QiLCJhbGciOiJSUzI1NiIsImtpZCI6InJldHJpZXZhbC1ldmVudHMtdjEifQ)\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_\\/-]+$''',
-  # Exact synthetic hex test constants: two repetitions of the ascending or the descending 16-digit sequence.
-  '''^(?:0123456789abcdef|fedcba9876543210){2}$''',
+  # Exact synthetic hex test constants: a 16-digit test sequence repeated twice (0123456789abcdef, fedcba9876543210 or
+  # abcdef0123456789).
+  '''^(?:0123456789abcdef|fedcba9876543210|abcdef0123456789){2}$''',
   # The exact test constant of the embedding-engine unit tests and the exact document id of the eval golden set.
   '''^test-key-0123456789$''',
   '''^edf42420-3863-49fb-8629-8d0e541a3b31$''',
+  # The wire vector of user-core's own-scheduled-thread-read decision (own_scheduled_thread_read_wire_test.go): a v2 token
+  # signed with a seed that the test documents as public (never a deployment key). Its first segment is the key id
+  # control-wire-vector-key, which no deployment trusts.
+  '''^v2\.Y29udHJvbC13aXJlLXZlY3Rvci1rZXk\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$''',
+  # The exact replacement-token constant of org-core's service_auth_test.go.
+  '''^replace-with-generated-secret-at-least-32-bytes$''',
 ]
