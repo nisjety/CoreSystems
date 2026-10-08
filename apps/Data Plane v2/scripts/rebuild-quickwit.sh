@@ -1,6 +1,18 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# NOT USABLE AS IT STANDS, and not to be extended (CR-T9a). It posts once to /admin/rebuild
+# with no bearer token; the admin routes of quickwit-adapter-rs answer 401 without a verified
+# admin credential, and a rebuild there is a preview followed by an approval, not one post. So
+# the script cannot rebuild anything today. It also CLEARS the index before replaying unless
+# --no-clear is given, so a run that did work would leave the keyword index empty until the
+# replay finished. The repair for a document the index lacks, or holds stale, is to announce the
+# document again (see docs/contextual-retrieval-runbook.md, "The keyword index"):
+#   GET  /admin/index-parity/documents        which documents differ (ids and counts only)
+#   backfill-reannounce --org-id ORG --document-id ID ...   announce exactly those documents
+# A rebuild that needs a clear belongs behind an authenticated operator route with a dry run,
+# not in this script.
+#
 # Rebuilds the Quickwit read model from canonical Postgres through
 # quickwit-adapter-rs. This is the deterministic recovery/backfill path for
 # knowledge_units, wiki versions, source_objects, retrieval logs, and source

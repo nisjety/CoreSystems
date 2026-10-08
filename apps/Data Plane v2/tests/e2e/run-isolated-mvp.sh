@@ -56,6 +56,11 @@ export USER_CORE_RETRIEVAL_TOKEN="$(openssl rand -hex 32)"
 export USER_CORE_DOCUMENTS_TOKEN="$(openssl rand -hex 32)"
 export AUTH_CORE_ISSUER="http://auth-core:3011/api/convex-auth"
 export JWT_REQUIRED_ISSUER="$AUTH_CORE_ISSUER"
+# Contextual retrieval is on by default and needs inference-core, which this disposable stack does
+# not have. Turn it off by name, with the reason the kill switch requires (CR-T13): left on, every
+# chunk of the run would try, and fail, to reach one, and the proof would read that noise.
+export CONTEXTUAL_RETRIEVAL_ENABLED=false
+export CONTEXT_RETRIEVAL_KILL_SWITCH_REASON="isolated test stack: it has no inference-core to generate contexts"
 
 node "$FIXTURE" prepare "$runtime_dir"
 export ISOLATED_JWKS_FILE="$runtime_dir/jwks.json"
@@ -71,6 +76,9 @@ export WIKI_EVENT_SIGNING_PRIVATE_KEY_PATH="$runtime_dir/wiki-events.pem"
 export WIKI_EVENT_VERIFYING_PUBLIC_KEY_PATH="$runtime_dir/wiki-events.pub"
 export RETRIEVAL_EVENT_SIGNING_PRIVATE_KEY_PATH="$runtime_dir/retrieval-events.pem"
 export RETRIEVAL_EVENT_VERIFYING_PUBLIC_KEY_PATH="$runtime_dir/retrieval-events.pub"
+# graph-index signs its usage events with a key of its own; data-orchestrator verifies them (CR-T10).
+export GRAPH_EVENT_SIGNING_PRIVATE_KEY_PATH="$runtime_dir/graph-events.pem"
+export GRAPH_EVENT_VERIFYING_PUBLIC_KEY_PATH="$runtime_dir/graph-events.pub"
 
 compose=(docker compose --project-name "$project" -f "$ROOT/docker-compose.yml" -f "$OVERRIDE")
 

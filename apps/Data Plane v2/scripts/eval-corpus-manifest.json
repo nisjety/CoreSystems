@@ -1,0 +1,978 @@
+{
+ "schema": "eval-corpus-manifest-v1",
+ "corpus_id": "dpv2-eval-corpus-v1",
+ "description": "The frozen corpus of the retrieval-quality evaluation: this repository's own markdown documents as they were when the judgments of the golden set were written, plus a small synthetic supplement. Every file is pinned by sha256; `eval-ingest-corpus.py verify` fails on any change.",
+ "snapshot_dir": "eval-corpus",
+ "freeze": {
+  "source_ref": "da6fa0d45d8d646a3acace01fcdedcec883b96dd",
+  "source_ref_date": "2026-08-26T20:36:49+02:00",
+  "selection": {
+   "root": "apps/",
+   "suffix": ".md",
+   "slash_counts": [
+    1,
+    2
+   ],
+   "prefixes": [
+    "apps/Data Plane v2/docs/"
+   ],
+   "exclude_basenames": [
+    "CLAUDE.md",
+    "AGENTS.md",
+    "ONBOARDING.md"
+   ]
+  },
+  "additions": [
+   {
+    "path": "apps/Data Plane v2/docs/core-research/video-temporal-retrieval-gap-2026-08-25.md",
+    "ref": "557e3a0388fc2997b24f5708ce5839ce4c9efb3c"
+   }
+  ],
+  "note": "repo documents are the git blobs of source_ref (a document with its own source_ref was taken from that commit), byte for byte; synthetic documents are authored for this corpus and live in eval-corpus/synthetic/"
+ },
+ "ingest": {
+  "source": "eval-corpus:dpv2-eval-corpus-v1",
+  "type": "markdown",
+  "visibility": "private",
+  "zdr_classification": "internal"
+ },
+ "estimate_basis": {
+  "chars_per_chunk": 1580,
+  "usd_per_contextual_call": 0.00013
+ },
+ "totals": {
+  "documents": 104,
+  "bytes": 1853135
+ },
+ "manifest_digest": "12bab766bfcc4790901fa2c8a149438779a643e994cbd4a41d5317ff7c333ac7",
+ "documents": [
+  {
+   "key": "apps/AUTHORED_INSTRUCTIONS_ADR_2026-08-19.md",
+   "title": "AUTHORED INSTRUCTIONS ADR 2026 08 19",
+   "path": "repo/apps/AUTHORED_INSTRUCTIONS_ADR_2026-08-19.md",
+   "sha256": "35eb70355c68dddf726f6ef5e7c6c5b3a89d067d554ca50b139fb5c60e5eecb7",
+   "bytes": 16859,
+   "origin": "repo",
+   "source_ref": "da6fa0d45d8d646a3acace01fcdedcec883b96dd"
+  },
+  {
+   "key": "apps/Application Plane/APPLICATION_PLANE_DEEP_DIVE.md",
+   "title": "APPLICATION PLANE DEEP DIVE",
+   "path": "repo/apps/Application Plane/APPLICATION_PLANE_DEEP_DIVE.md",
+   "sha256": "d9c4be94b95541db5e38a835e28330a542d17ae39dbb070bd0f412f9da4b3d05",
+   "bytes": 22404,
+   "origin": "repo",
+   "source_ref": "da6fa0d45d8d646a3acace01fcdedcec883b96dd"
+  },
+  {
+   "key": "apps/Application Plane/APPLICATION_PLANE_ROADMAP.md",
+   "title": "APPLICATION PLANE ROADMAP",
+   "path": "repo/apps/Application Plane/APPLICATION_PLANE_ROADMAP.md",
+   "sha256": "545183c11d372cabd82bfe7c5966fea2fd44ad17faa308d47e5645cece285508",
+   "bytes": 8292,
+   "origin": "repo",
+   "source_ref": "da6fa0d45d8d646a3acace01fcdedcec883b96dd"
+  },
+  {
+   "key": "apps/Application Plane/APPLICATION_PLANE_STATUS.md",
+   "title": "APPLICATION PLANE STATUS",
+   "path": "repo/apps/Application Plane/APPLICATION_PLANE_STATUS.md",
+   "sha256": "37962d286b508ab0796cc2a0ffc640b7757e56a9d76219473b82faf40d828944",
+   "bytes": 11841,
+   "origin": "repo",
+   "source_ref": "da6fa0d45d8d646a3acace01fcdedcec883b96dd"
+  },
+  {
+   "key": "apps/CODEBASE_INFORMATION_SYSTEM.md",
+   "title": "CODEBASE INFORMATION SYSTEM",
+   "path": "repo/apps/CODEBASE_INFORMATION_SYSTEM.md",
+   "sha256": "7c47ff2114925295a7e57d3e4b5816975b719ccb1c8124158c7656d019d1c758",
+   "bytes": 28514,
+   "origin": "repo",
+   "source_ref": "da6fa0d45d8d646a3acace01fcdedcec883b96dd"
+  },
+  {
+   "key": "apps/CORESYSTEM_AUDIT_BACKLOG.md",
+   "title": "CORESYSTEM AUDIT BACKLOG",
+   "path": "repo/apps/CORESYSTEM_AUDIT_BACKLOG.md",
+   "sha256": "4c25770a71b25d9c1530b3646d79199126a5991b5b73075cadb7c9f52e292857",
+   "bytes": 28617,
+   "origin": "repo",
+   "source_ref": "da6fa0d45d8d646a3acace01fcdedcec883b96dd"
+  },
+  {
+   "key": "apps/CROSS_SPACE_AGENT_REGISTRY_ADR_2026-08-19.md",
+   "title": "CROSS SPACE AGENT REGISTRY ADR 2026 08 19",
+   "path": "repo/apps/CROSS_SPACE_AGENT_REGISTRY_ADR_2026-08-19.md",
+   "sha256": "0090b9b6a2fd4a7f86ea828fadc526f190cc080bd3ae7485dd6615ddca1d4485",
+   "bytes": 7824,
+   "origin": "repo",
+   "source_ref": "da6fa0d45d8d646a3acace01fcdedcec883b96dd"
+  },
+  {
+   "key": "apps/Channel Plane/CHANNEL_PLANE_DEEP_DIVE.md",
+   "title": "CHANNEL PLANE DEEP DIVE",
+   "path": "repo/apps/Channel Plane/CHANNEL_PLANE_DEEP_DIVE.md",
+   "sha256": "3342f018aa7844cb2eed7288c8cf076778e86289ecbafce8c1ac0b42b28e89cc",
+   "bytes": 3734,
+   "origin": "repo",
+   "source_ref": "da6fa0d45d8d646a3acace01fcdedcec883b96dd"
+  },
+  {
+   "key": "apps/Control Plane/CONTROL_PLANE_DEEP_DIVE.md",
+   "title": "CONTROL PLANE DEEP DIVE",
+   "path": "repo/apps/Control Plane/CONTROL_PLANE_DEEP_DIVE.md",
+   "sha256": "f4c5c1c27099afe72d121451e0b8cc49d7681331fef7ff0075d185613375ecc0",
+   "bytes": 28678,
+   "origin": "repo",
+   "source_ref": "da6fa0d45d8d646a3acace01fcdedcec883b96dd"
+  },
+  {
+   "key": "apps/Control Plane/CONTROL_PLANE_OWNERSHIP.md",
+   "title": "CONTROL PLANE OWNERSHIP",
+   "path": "repo/apps/Control Plane/CONTROL_PLANE_OWNERSHIP.md",
+   "sha256": "f17cc67163e840904f1c9d222f029b84a2b0c80ad56c8339576de8476f0ef696",
+   "bytes": 19229,
+   "origin": "repo",
+   "source_ref": "da6fa0d45d8d646a3acace01fcdedcec883b96dd"
+  },
+  {
+   "key": "apps/Control Plane/CONTROL_PLANE_ROADMAP.md",
+   "title": "CONTROL PLANE ROADMAP",
+   "path": "repo/apps/Control Plane/CONTROL_PLANE_ROADMAP.md",
+   "sha256": "3f90786ba125657caf85c88a85438e3ca42d437325d5802073ae9143f3ac1dfb",
+   "bytes": 19568,
+   "origin": "repo",
+   "source_ref": "da6fa0d45d8d646a3acace01fcdedcec883b96dd"
+  },
+  {
+   "key": "apps/Control Plane/CONTROL_PLANE_STATUS.md",
+   "title": "CONTROL PLANE STATUS",
+   "path": "repo/apps/Control Plane/CONTROL_PLANE_STATUS.md",
+   "sha256": "3254e7e1dfcd72be205636e3ab1a8c04e3f231bfcd484b96c76ecf7a9a55ae2d",
+   "bytes": 41415,
+   "origin": "repo",
+   "source_ref": "da6fa0d45d8d646a3acace01fcdedcec883b96dd"
+  },
+  {
+   "key": "apps/Control Plane/CONTROL_PLANE_TEST_FLOW.md",
+   "title": "CONTROL PLANE TEST FLOW",
+   "path": "repo/apps/Control Plane/CONTROL_PLANE_TEST_FLOW.md",
+   "sha256": "a2a62654dce1183b5a0d9db26d93e51d3adf049f7bbe12c16ceb1813ab0b1e7e",
+   "bytes": 7265,
+   "origin": "repo",
+   "source_ref": "da6fa0d45d8d646a3acace01fcdedcec883b96dd"
+  },
+  {
+   "key": "apps/Control Plane/CONVEX_INTEGRATION_SUMMARY.md",
+   "title": "CONVEX INTEGRATION SUMMARY",
+   "path": "repo/apps/Control Plane/CONVEX_INTEGRATION_SUMMARY.md",
+   "sha256": "1deb5c6c7e4fe7143b8a10ce01876e8c49b10b85b04b075668e10f9a5e2fea6e",
+   "bytes": 10559,
+   "origin": "repo",
+   "source_ref": "da6fa0d45d8d646a3acace01fcdedcec883b96dd"
+  },
+  {
+   "key": "apps/Control Plane/DEPLOYMENT_CHECKLIST.md",
+   "title": "DEPLOYMENT CHECKLIST",
+   "path": "repo/apps/Control Plane/DEPLOYMENT_CHECKLIST.md",
+   "sha256": "08d846b2e0528de53a6c04b0b6eeaf7a35a905384caae1ccf65f690eaa742b13",
+   "bytes": 7514,
+   "origin": "repo",
+   "source_ref": "da6fa0d45d8d646a3acace01fcdedcec883b96dd"
+  },
+  {
+   "key": "apps/Control Plane/ENHANCEMENT_SUMMARY.md",
+   "title": "ENHANCEMENT SUMMARY",
+   "path": "repo/apps/Control Plane/ENHANCEMENT_SUMMARY.md",
+   "sha256": "62145dd56a601e487007f5513fbef6a583a0029df51c79137c28a2f2d1b386e2",
+   "bytes": 15811,
+   "origin": "repo",
+   "source_ref": "da6fa0d45d8d646a3acace01fcdedcec883b96dd"
+  },
+  {
+   "key": "apps/Control Plane/ENVIRONMENT_FILES.md",
+   "title": "ENVIRONMENT FILES",
+   "path": "repo/apps/Control Plane/ENVIRONMENT_FILES.md",
+   "sha256": "f3af9f46d666448f7e7e1a9887e64ccb7f7e6646454e256996fbf0f8660f7be3",
+   "bytes": 11375,
+   "origin": "repo",
+   "source_ref": "da6fa0d45d8d646a3acace01fcdedcec883b96dd"
+  },
+  {
+   "key": "apps/Control Plane/QUICK_REFERENCE.md",
+   "title": "QUICK REFERENCE",
+   "path": "repo/apps/Control Plane/QUICK_REFERENCE.md",
+   "sha256": "f144eeb82e7fce0974513f1a0a558c6d0d776a532cfdaeed1208088c9c843c04",
+   "bytes": 4043,
+   "origin": "repo",
+   "source_ref": "da6fa0d45d8d646a3acace01fcdedcec883b96dd"
+  },
+  {
+   "key": "apps/Control Plane/README.md",
+   "title": "README",
+   "path": "repo/apps/Control Plane/README.md",
+   "sha256": "0a103b8a1812d482ee2dfb571fecf4d52fbeecff8660ef8d83c352c7d63902b6",
+   "bytes": 11550,
+   "origin": "repo",
+   "source_ref": "da6fa0d45d8d646a3acace01fcdedcec883b96dd"
+  },
+  {
+   "key": "apps/Data Plane v2/DATA_PLANE_DEEP_DIVE.md",
+   "title": "DATA PLANE DEEP DIVE",
+   "path": "repo/apps/Data Plane v2/DATA_PLANE_DEEP_DIVE.md",
+   "sha256": "4aa6b4816c84dfbae113d4a8f15de1345476d8f7e0e3f93d2fb44315ad4656db",
+   "bytes": 21295,
+   "origin": "repo",
+   "source_ref": "da6fa0d45d8d646a3acace01fcdedcec883b96dd"
+  },
+  {
+   "key": "apps/Data Plane v2/DATA_PLANE_ROADMAP.md",
+   "title": "DATA PLANE ROADMAP",
+   "path": "repo/apps/Data Plane v2/DATA_PLANE_ROADMAP.md",
+   "sha256": "0032703cc529a645ea654ca340760665902da66994f1ba5b495f64e014fdfdcf",
+   "bytes": 19505,
+   "origin": "repo",
+   "source_ref": "da6fa0d45d8d646a3acace01fcdedcec883b96dd"
+  },
+  {
+   "key": "apps/Data Plane v2/DATA_PLANE_STATUS.md",
+   "title": "DATA PLANE STATUS",
+   "path": "repo/apps/Data Plane v2/DATA_PLANE_STATUS.md",
+   "sha256": "72cfe26acecbed8c66394cc9061e8809fb240e46deb8a2e77c7fb07a4f12aec1",
+   "bytes": 27234,
+   "origin": "repo",
+   "source_ref": "da6fa0d45d8d646a3acace01fcdedcec883b96dd"
+  },
+  {
+   "key": "apps/Data Plane v2/docs/WIRE_RECONCILIATION.md",
+   "title": "WIRE RECONCILIATION",
+   "path": "repo/apps/Data Plane v2/docs/WIRE_RECONCILIATION.md",
+   "sha256": "012066f83a5c45c5392e7ec94314046246a113094f3aa4d9bc0b1c8bd81dbc27",
+   "bytes": 10483,
+   "origin": "repo",
+   "source_ref": "da6fa0d45d8d646a3acace01fcdedcec883b96dd"
+  },
+  {
+   "key": "apps/Data Plane v2/docs/WIRE_SURFACE_PLAN.md",
+   "title": "WIRE SURFACE PLAN",
+   "path": "repo/apps/Data Plane v2/docs/WIRE_SURFACE_PLAN.md",
+   "sha256": "6c4881000be33270f853b358ec9c279675550e976413a137b343fb1b77c23bcc",
+   "bytes": 5878,
+   "origin": "repo",
+   "source_ref": "da6fa0d45d8d646a3acace01fcdedcec883b96dd"
+  },
+  {
+   "key": "apps/Data Plane v2/docs/backup-restore.md",
+   "title": "backup restore",
+   "path": "repo/apps/Data Plane v2/docs/backup-restore.md",
+   "sha256": "d6b1c1d56fc11d1a6fe725e21fcbe3c9b56b9131d2ad8e719c087338a588391b",
+   "bytes": 6345,
+   "origin": "repo",
+   "source_ref": "da6fa0d45d8d646a3acace01fcdedcec883b96dd"
+  },
+  {
+   "key": "apps/Data Plane v2/docs/core-research/README.md",
+   "title": "README",
+   "path": "repo/apps/Data Plane v2/docs/core-research/README.md",
+   "sha256": "0734e2ab4d5340517e67721bdecde6f5202612f43c176632b3691bb3e4c09587",
+   "bytes": 6316,
+   "origin": "repo",
+   "source_ref": "da6fa0d45d8d646a3acace01fcdedcec883b96dd"
+  },
+  {
+   "key": "apps/Data Plane v2/docs/core-research/colqwen-reranker.md",
+   "title": "colqwen reranker",
+   "path": "repo/apps/Data Plane v2/docs/core-research/colqwen-reranker.md",
+   "sha256": "6d41b4372b585dfd002d9a4b27f98a8d29f734de59ca8f6c350419edabf803b9",
+   "bytes": 17616,
+   "origin": "repo",
+   "source_ref": "da6fa0d45d8d646a3acace01fcdedcec883b96dd"
+  },
+  {
+   "key": "apps/Data Plane v2/docs/core-research/data-orchestrator-go.md",
+   "title": "data orchestrator go",
+   "path": "repo/apps/Data Plane v2/docs/core-research/data-orchestrator-go.md",
+   "sha256": "fbfbbf11fa9a13e55d88cc825942731c3a6bbf4b93c7404a568cbacb97ecf3bc",
+   "bytes": 20597,
+   "origin": "repo",
+   "source_ref": "da6fa0d45d8d646a3acace01fcdedcec883b96dd"
+  },
+  {
+   "key": "apps/Data Plane v2/docs/core-research/data-quality-go.md",
+   "title": "data quality go",
+   "path": "repo/apps/Data Plane v2/docs/core-research/data-quality-go.md",
+   "sha256": "db384bbeaf43dd435c728cdccb298dd6ac3112f32f63d19a599e111e9da2538b",
+   "bytes": 19337,
+   "origin": "repo",
+   "source_ref": "da6fa0d45d8d646a3acace01fcdedcec883b96dd"
+  },
+  {
+   "key": "apps/Data Plane v2/docs/core-research/documents-api-go.md",
+   "title": "documents api go",
+   "path": "repo/apps/Data Plane v2/docs/core-research/documents-api-go.md",
+   "sha256": "82dea92531d4e61a672ab8011ccc642a62a64862066fce02fa808d7263e1697a",
+   "bytes": 27146,
+   "origin": "repo",
+   "source_ref": "da6fa0d45d8d646a3acace01fcdedcec883b96dd"
+  },
+  {
+   "key": "apps/Data Plane v2/docs/core-research/embedding-engine-rs.md",
+   "title": "embedding engine rs",
+   "path": "repo/apps/Data Plane v2/docs/core-research/embedding-engine-rs.md",
+   "sha256": "5f46fdde69aab7bff37cffc50dfe715a5404082d8364d94f5fe2f2386c683a15",
+   "bytes": 21400,
+   "origin": "repo",
+   "source_ref": "da6fa0d45d8d646a3acace01fcdedcec883b96dd"
+  },
+  {
+   "key": "apps/Data Plane v2/docs/core-research/embedding-modality-and-rag-audit-2026-08-19.md",
+   "title": "embedding modality and rag audit 2026 08 19",
+   "path": "repo/apps/Data Plane v2/docs/core-research/embedding-modality-and-rag-audit-2026-08-19.md",
+   "sha256": "5540863d755eaf687e3a94810b4d42f1078aa88a1d9cbb3a332b747bbd7d3ddb",
+   "bytes": 15612,
+   "origin": "repo",
+   "source_ref": "da6fa0d45d8d646a3acace01fcdedcec883b96dd"
+  },
+  {
+   "key": "apps/Data Plane v2/docs/core-research/graph-index-rs.md",
+   "title": "graph index rs",
+   "path": "repo/apps/Data Plane v2/docs/core-research/graph-index-rs.md",
+   "sha256": "844ba60c6a31e233f5e2193118d17979ec445a648792029b6d06f9e5b1f11c94",
+   "bytes": 21893,
+   "origin": "repo",
+   "source_ref": "da6fa0d45d8d646a3acace01fcdedcec883b96dd"
+  },
+  {
+   "key": "apps/Data Plane v2/docs/core-research/index-engine-rs.md",
+   "title": "index engine rs",
+   "path": "repo/apps/Data Plane v2/docs/core-research/index-engine-rs.md",
+   "sha256": "21e8bb871cdb264ee3533d114541349872f302982259f56768afa14c89570d19",
+   "bytes": 19743,
+   "origin": "repo",
+   "source_ref": "da6fa0d45d8d646a3acace01fcdedcec883b96dd"
+  },
+  {
+   "key": "apps/Data Plane v2/docs/core-research/plane-audit-2026-07-10.md",
+   "title": "plane audit 2026 07 10",
+   "path": "repo/apps/Data Plane v2/docs/core-research/plane-audit-2026-07-10.md",
+   "sha256": "347c73f00875c2c8f997296dd6a18c8b7eb16c0c3115589a4b82577df3cd1994",
+   "bytes": 34995,
+   "origin": "repo",
+   "source_ref": "da6fa0d45d8d646a3acace01fcdedcec883b96dd"
+  },
+  {
+   "key": "apps/Data Plane v2/docs/core-research/quickwit-adapter-rs.md",
+   "title": "quickwit adapter rs",
+   "path": "repo/apps/Data Plane v2/docs/core-research/quickwit-adapter-rs.md",
+   "sha256": "0aec7e55d5d50e5e523672ff8ebdeca70614e64a488347aef4c063b8c87c7822",
+   "bytes": 18748,
+   "origin": "repo",
+   "source_ref": "da6fa0d45d8d646a3acace01fcdedcec883b96dd"
+  },
+  {
+   "key": "apps/Data Plane v2/docs/core-research/retrieval-engine-rs.md",
+   "title": "retrieval engine rs",
+   "path": "repo/apps/Data Plane v2/docs/core-research/retrieval-engine-rs.md",
+   "sha256": "9e195b77e6617abb5a9c056adb2b22d3e15b46994aa33b4b2b02a4cc9f32e180",
+   "bytes": 35398,
+   "origin": "repo",
+   "source_ref": "da6fa0d45d8d646a3acace01fcdedcec883b96dd"
+  },
+  {
+   "key": "apps/Data Plane v2/docs/core-research/retrieval-eval-py.md",
+   "title": "retrieval eval py",
+   "path": "repo/apps/Data Plane v2/docs/core-research/retrieval-eval-py.md",
+   "sha256": "42f464697ed66913f7601709f771a9b265c5caa3d7f509b8e3f396ce9d93a6af",
+   "bytes": 6820,
+   "origin": "repo",
+   "source_ref": "da6fa0d45d8d646a3acace01fcdedcec883b96dd"
+  },
+  {
+   "key": "apps/Data Plane v2/docs/core-research/video-temporal-retrieval-gap-2026-08-25.md",
+   "title": "video temporal retrieval gap 2026 08 25",
+   "path": "repo/apps/Data Plane v2/docs/core-research/video-temporal-retrieval-gap-2026-08-25.md",
+   "sha256": "c54f3e6930c6ff93dd56d5df0f8e3416f5ab17b31816cdc999d01b7d6c8ae675",
+   "bytes": 11424,
+   "origin": "repo",
+   "source_ref": "557e3a0388fc2997b24f5708ce5839ce4c9efb3c"
+  },
+  {
+   "key": "apps/Data Plane v2/docs/core-research/wiki-store-go.md",
+   "title": "wiki store go",
+   "path": "repo/apps/Data Plane v2/docs/core-research/wiki-store-go.md",
+   "sha256": "2b83f4af344de44f9aff4da4dc569fed9d9200531bef27744153135846e9b530",
+   "bytes": 23636,
+   "origin": "repo",
+   "source_ref": "da6fa0d45d8d646a3acace01fcdedcec883b96dd"
+  },
+  {
+   "key": "apps/Data Plane v2/docs/gap-data.md",
+   "title": "gap data",
+   "path": "repo/apps/Data Plane v2/docs/gap-data.md",
+   "sha256": "c5365a74b892e05dc0cda6d690cff7c0ca012e47eab40a829ace7b9a4ae8d88b",
+   "bytes": 115419,
+   "origin": "repo",
+   "source_ref": "da6fa0d45d8d646a3acace01fcdedcec883b96dd"
+  },
+  {
+   "key": "apps/Data Plane v2/docs/graphrag-neo4j-plan.md",
+   "title": "graphrag neo4j plan",
+   "path": "repo/apps/Data Plane v2/docs/graphrag-neo4j-plan.md",
+   "sha256": "eb0030b93b921a3bdf837f085ce83e13880f5c73645d3d69353b4fef9fa64b1f",
+   "bytes": 22892,
+   "origin": "repo",
+   "source_ref": "da6fa0d45d8d646a3acace01fcdedcec883b96dd"
+  },
+  {
+   "key": "apps/Data Plane v2/docs/migration-v1-to-v2.md",
+   "title": "migration v1 to v2",
+   "path": "repo/apps/Data Plane v2/docs/migration-v1-to-v2.md",
+   "sha256": "724fd56d323bc3922dd3fbbffc616fa879f1066cb48dbb80b548dfff7b7b2290",
+   "bytes": 5228,
+   "origin": "repo",
+   "source_ref": "da6fa0d45d8d646a3acace01fcdedcec883b96dd"
+  },
+  {
+   "key": "apps/Data Plane v2/docs/production-deploy.md",
+   "title": "production deploy",
+   "path": "repo/apps/Data Plane v2/docs/production-deploy.md",
+   "sha256": "77321a8ff22f7915887f8b2ed85654454e3c1769ae4aae4b12bf256fe7caa732",
+   "bytes": 6365,
+   "origin": "repo",
+   "source_ref": "da6fa0d45d8d646a3acace01fcdedcec883b96dd"
+  },
+  {
+   "key": "apps/Data Plane v2/docs/quickwit-read-model.md",
+   "title": "quickwit read model",
+   "path": "repo/apps/Data Plane v2/docs/quickwit-read-model.md",
+   "sha256": "8c5e97a4f51fda5e649e27bd7dd1b6c99c66fe142287e470fb73466a71997940",
+   "bytes": 4042,
+   "origin": "repo",
+   "source_ref": "da6fa0d45d8d646a3acace01fcdedcec883b96dd"
+  },
+  {
+   "key": "apps/Data Plane v2/docs/retrieval-quality-and-durability-plan-2026-08-05.md",
+   "title": "retrieval quality and durability plan 2026 08 05",
+   "path": "repo/apps/Data Plane v2/docs/retrieval-quality-and-durability-plan-2026-08-05.md",
+   "sha256": "60395089110f022e1007d496af28578dc6853bda7f36175264a0ce36c5cd132c",
+   "bytes": 174885,
+   "origin": "repo",
+   "source_ref": "da6fa0d45d8d646a3acace01fcdedcec883b96dd"
+  },
+  {
+   "key": "apps/Data Plane v2/docs/schemas/wiki_events.md",
+   "title": "wiki events",
+   "path": "repo/apps/Data Plane v2/docs/schemas/wiki_events.md",
+   "sha256": "83ce3e1ec2d189711fe73602a09456bf5a8665b68392d5527ff9b25f73a6214e",
+   "bytes": 3264,
+   "origin": "repo",
+   "source_ref": "da6fa0d45d8d646a3acace01fcdedcec883b96dd"
+  },
+  {
+   "key": "apps/Data Plane v2/docs/sovereign-rag-blueprint-reconciliation.md",
+   "title": "sovereign rag blueprint reconciliation",
+   "path": "repo/apps/Data Plane v2/docs/sovereign-rag-blueprint-reconciliation.md",
+   "sha256": "8f340e3f4495a25c586fb82ee31b43b539a5db65c7099a9fe3fb2b04711de50d",
+   "bytes": 12131,
+   "origin": "repo",
+   "source_ref": "da6fa0d45d8d646a3acace01fcdedcec883b96dd"
+  },
+  {
+   "key": "apps/Data Plane v2/docs/sovereign-rag-phased-plan.md",
+   "title": "sovereign rag phased plan",
+   "path": "repo/apps/Data Plane v2/docs/sovereign-rag-phased-plan.md",
+   "sha256": "6958b5a8a1b11748ba8898c7c730e19e7a778e335d2d38122470a767f5bf730c",
+   "bytes": 71339,
+   "origin": "repo",
+   "source_ref": "da6fa0d45d8d646a3acace01fcdedcec883b96dd"
+  },
+  {
+   "key": "apps/Data Plane v2/docs/visual-rag-integration-plan.md",
+   "title": "visual rag integration plan",
+   "path": "repo/apps/Data Plane v2/docs/visual-rag-integration-plan.md",
+   "sha256": "0d0af66950262a2d5c1447a4ab0592233f52e408d3fa357250ac53977bfd209b",
+   "bytes": 19210,
+   "origin": "repo",
+   "source_ref": "da6fa0d45d8d646a3acace01fcdedcec883b96dd"
+  },
+  {
+   "key": "apps/Frontend Plane/verevonv2-chat-core-shell-consistency.md",
+   "title": "verevonv2 chat core shell consistency",
+   "path": "repo/apps/Frontend Plane/verevonv2-chat-core-shell-consistency.md",
+   "sha256": "801485d9bb7d86e2dc6f94e0213c7261af9865a70903d51b768b5ccfd075b23b",
+   "bytes": 1231,
+   "origin": "repo",
+   "source_ref": "da6fa0d45d8d646a3acace01fcdedcec883b96dd"
+  },
+  {
+   "key": "apps/Frontend Plane/verevonv2-chat-shared-shell-snapshot.md",
+   "title": "verevonv2 chat shared shell snapshot",
+   "path": "repo/apps/Frontend Plane/verevonv2-chat-shared-shell-snapshot.md",
+   "sha256": "3331c9095967ffa9d345b1913b6f2b11e8c7f52b07de63465c4f37817247f93d",
+   "bytes": 3034,
+   "origin": "repo",
+   "source_ref": "da6fa0d45d8d646a3acace01fcdedcec883b96dd"
+  },
+  {
+   "key": "apps/Frontend Plane/verevonv2-performance-chat-snapshot.md",
+   "title": "verevonv2 performance chat snapshot",
+   "path": "repo/apps/Frontend Plane/verevonv2-performance-chat-snapshot.md",
+   "sha256": "87420b91bf8e95589b9e16829149c20049fd0bbef54481e34f0615a68f44b028",
+   "bytes": 346,
+   "origin": "repo",
+   "source_ref": "da6fa0d45d8d646a3acace01fcdedcec883b96dd"
+  },
+  {
+   "key": "apps/Frontend Plane/verevonv2-performance-dashboard-snapshot.md",
+   "title": "verevonv2 performance dashboard snapshot",
+   "path": "repo/apps/Frontend Plane/verevonv2-performance-dashboard-snapshot.md",
+   "sha256": "58e838401230c709770e4b23805d215c25164d1c2dba553e8ad0ace7245e6e8e",
+   "bytes": 346,
+   "origin": "repo",
+   "source_ref": "da6fa0d45d8d646a3acace01fcdedcec883b96dd"
+  },
+  {
+   "key": "apps/Frontend Plane/verevonv2-performance-inbox-snapshot.md",
+   "title": "verevonv2 performance inbox snapshot",
+   "path": "repo/apps/Frontend Plane/verevonv2-performance-inbox-snapshot.md",
+   "sha256": "c758a8fdb0f35a1c5ef8403925f426a3b2872741a8012ca62353750e59867eac",
+   "bytes": 346,
+   "origin": "repo",
+   "source_ref": "da6fa0d45d8d646a3acace01fcdedcec883b96dd"
+  },
+  {
+   "key": "apps/Frontend Plane/verevonv2-sidebar-connector-snapshot.md",
+   "title": "verevonv2 sidebar connector snapshot",
+   "path": "repo/apps/Frontend Plane/verevonv2-sidebar-connector-snapshot.md",
+   "sha256": "209186cf983e28d903eec883e21618af1bea5b116117e49a91aac24d2b408ccb",
+   "bytes": 5508,
+   "origin": "repo",
+   "source_ref": "da6fa0d45d8d646a3acace01fcdedcec883b96dd"
+  },
+  {
+   "key": "apps/GDPR_SUMMARY.md",
+   "title": "GDPR SUMMARY",
+   "path": "repo/apps/GDPR_SUMMARY.md",
+   "sha256": "6754fddb715b8047aa288ab9b4d9866b94410dc003a1e2043b2e6d21bda92546",
+   "bytes": 13399,
+   "origin": "repo",
+   "source_ref": "da6fa0d45d8d646a3acace01fcdedcec883b96dd"
+  },
+  {
+   "key": "apps/Infra Plane/CHANGELOG.md",
+   "title": "CHANGELOG",
+   "path": "repo/apps/Infra Plane/CHANGELOG.md",
+   "sha256": "3adfe681287383319eadc9304189104d7eb8261a55b27dd96e58d5f140743931",
+   "bytes": 5044,
+   "origin": "repo",
+   "source_ref": "da6fa0d45d8d646a3acace01fcdedcec883b96dd"
+  },
+  {
+   "key": "apps/Infra Plane/CLOUDFLARE_SETUP.md",
+   "title": "CLOUDFLARE SETUP",
+   "path": "repo/apps/Infra Plane/CLOUDFLARE_SETUP.md",
+   "sha256": "67acff734240910eee45ddd1d0b9cb7bfc045165488224c0a8a9dcc12a95377c",
+   "bytes": 7860,
+   "origin": "repo",
+   "source_ref": "da6fa0d45d8d646a3acace01fcdedcec883b96dd"
+  },
+  {
+   "key": "apps/Infra Plane/CONTRIBUTING.md",
+   "title": "CONTRIBUTING",
+   "path": "repo/apps/Infra Plane/CONTRIBUTING.md",
+   "sha256": "77943b4d229eb3ab1ba8e0b383bb8ce260061d072fd02fb4a385d7f500e37530",
+   "bytes": 10146,
+   "origin": "repo",
+   "source_ref": "da6fa0d45d8d646a3acace01fcdedcec883b96dd"
+  },
+  {
+   "key": "apps/Infra Plane/CREDENTIALS_SETUP.md",
+   "title": "CREDENTIALS SETUP",
+   "path": "repo/apps/Infra Plane/CREDENTIALS_SETUP.md",
+   "sha256": "0b11f007a8bdca87afd4ce56293a87988812273a6cb57c988585973362209723",
+   "bytes": 1872,
+   "origin": "repo",
+   "source_ref": "da6fa0d45d8d646a3acace01fcdedcec883b96dd"
+  },
+  {
+   "key": "apps/Infra Plane/CREDENTIALS_SIMPLIFIED.md",
+   "title": "CREDENTIALS SIMPLIFIED",
+   "path": "repo/apps/Infra Plane/CREDENTIALS_SIMPLIFIED.md",
+   "sha256": "f6459e1fb14c5dab5085b05bfd6e71d82a9fbc7fb7e77910b73269baa2543df0",
+   "bytes": 2160,
+   "origin": "repo",
+   "source_ref": "da6fa0d45d8d646a3acace01fcdedcec883b96dd"
+  },
+  {
+   "key": "apps/Infra Plane/LEGACY_MIGRATION.md",
+   "title": "LEGACY MIGRATION",
+   "path": "repo/apps/Infra Plane/LEGACY_MIGRATION.md",
+   "sha256": "5efe6e1acedc3c1f11d81867a7b43c6b75cadeb304746c881b80099d438ceb65",
+   "bytes": 1028,
+   "origin": "repo",
+   "source_ref": "da6fa0d45d8d646a3acace01fcdedcec883b96dd"
+  },
+  {
+   "key": "apps/Infra Plane/README.md",
+   "title": "README",
+   "path": "repo/apps/Infra Plane/README.md",
+   "sha256": "b74a54407fc33df5b4fe44b45e326168faed047ef9a689cb5b07e9c31165eaf4",
+   "bytes": 7138,
+   "origin": "repo",
+   "source_ref": "da6fa0d45d8d646a3acace01fcdedcec883b96dd"
+  },
+  {
+   "key": "apps/Infra Plane/SETUP_COMPLETE.md",
+   "title": "SETUP COMPLETE",
+   "path": "repo/apps/Infra Plane/SETUP_COMPLETE.md",
+   "sha256": "ffa241ce7094b2ba89245d67ea2c1412f1ee4a251ed4c96f45eae9ad1e3e6c6a",
+   "bytes": 12577,
+   "origin": "repo",
+   "source_ref": "da6fa0d45d8d646a3acace01fcdedcec883b96dd"
+  },
+  {
+   "key": "apps/Infra Plane/TEST_DEPLOYMENT.md",
+   "title": "TEST DEPLOYMENT",
+   "path": "repo/apps/Infra Plane/TEST_DEPLOYMENT.md",
+   "sha256": "c634c8b612cabbc96b0b53b53cf073deaf6bc8c950baa76e804391f70b9535e3",
+   "bytes": 291,
+   "origin": "repo",
+   "source_ref": "da6fa0d45d8d646a3acace01fcdedcec883b96dd"
+  },
+  {
+   "key": "apps/Infra Plane/TOOLS_INTEGRATION.md",
+   "title": "TOOLS INTEGRATION",
+   "path": "repo/apps/Infra Plane/TOOLS_INTEGRATION.md",
+   "sha256": "ab93a0427220d0df21708dbe58cef9f4fd992916a011df1e7059a5f83052760c",
+   "bytes": 3954,
+   "origin": "repo",
+   "source_ref": "da6fa0d45d8d646a3acace01fcdedcec883b96dd"
+  },
+  {
+   "key": "apps/Infra Plane/WEBHOOK_SETUP.md",
+   "title": "WEBHOOK SETUP",
+   "path": "repo/apps/Infra Plane/WEBHOOK_SETUP.md",
+   "sha256": "3e573a61ee4a8095cdc380bc0309e451a1fa11a6ff6812cd6e14a1548ed1edf5",
+   "bytes": 3997,
+   "origin": "repo",
+   "source_ref": "da6fa0d45d8d646a3acace01fcdedcec883b96dd"
+  },
+  {
+   "key": "apps/Ingestion Plane/COMPLETION_REPORT.md",
+   "title": "COMPLETION REPORT",
+   "path": "repo/apps/Ingestion Plane/COMPLETION_REPORT.md",
+   "sha256": "d37b386f6ecbc0f508a4344eca371efe7033688a3a58f6e89233d61f81af9580",
+   "bytes": 16466,
+   "origin": "repo",
+   "source_ref": "da6fa0d45d8d646a3acace01fcdedcec883b96dd"
+  },
+  {
+   "key": "apps/Ingestion Plane/END_TO_END_TESTS.md",
+   "title": "END TO END TESTS",
+   "path": "repo/apps/Ingestion Plane/END_TO_END_TESTS.md",
+   "sha256": "e44e3c306007afb92e096a6edb8797651f23a0f37c3163f87e2af282443a435b",
+   "bytes": 6555,
+   "origin": "repo",
+   "source_ref": "da6fa0d45d8d646a3acace01fcdedcec883b96dd"
+  },
+  {
+   "key": "apps/Ingestion Plane/FINAL_TEST_SUMMARY.md",
+   "title": "FINAL TEST SUMMARY",
+   "path": "repo/apps/Ingestion Plane/FINAL_TEST_SUMMARY.md",
+   "sha256": "f233c1ba1adab87e7cd3ffefdb99ba4c355d5fc26b450949a4e3d82c83c3cac7",
+   "bytes": 9553,
+   "origin": "repo",
+   "source_ref": "da6fa0d45d8d646a3acace01fcdedcec883b96dd"
+  },
+  {
+   "key": "apps/Ingestion Plane/IMPORTS_COMPLETION_SUMMARY.md",
+   "title": "IMPORTS COMPLETION SUMMARY",
+   "path": "repo/apps/Ingestion Plane/IMPORTS_COMPLETION_SUMMARY.md",
+   "sha256": "3234336607ec83d459d224b75261883c1356071c252acb42f8788dbd2480d895",
+   "bytes": 18516,
+   "origin": "repo",
+   "source_ref": "da6fa0d45d8d646a3acace01fcdedcec883b96dd"
+  },
+  {
+   "key": "apps/Ingestion Plane/INGESTION_PLANE_DEEP_DIVE.md",
+   "title": "INGESTION PLANE DEEP DIVE",
+   "path": "repo/apps/Ingestion Plane/INGESTION_PLANE_DEEP_DIVE.md",
+   "sha256": "68fd4276ae3ba8989dd32e546ed905cb66ac83bbfc74198f960f8e1caf122d7d",
+   "bytes": 25668,
+   "origin": "repo",
+   "source_ref": "da6fa0d45d8d646a3acace01fcdedcec883b96dd"
+  },
+  {
+   "key": "apps/Ingestion Plane/INGESTION_PLANE_ROADMAP.md",
+   "title": "INGESTION PLANE ROADMAP",
+   "path": "repo/apps/Ingestion Plane/INGESTION_PLANE_ROADMAP.md",
+   "sha256": "a844a4c0fe7f14e1e5ec7565fbf6d8591a1da664bfd4c9ac853fcef58cf6dba0",
+   "bytes": 5664,
+   "origin": "repo",
+   "source_ref": "da6fa0d45d8d646a3acace01fcdedcec883b96dd"
+  },
+  {
+   "key": "apps/Ingestion Plane/INGESTION_PLANE_STATUS.md",
+   "title": "INGESTION PLANE STATUS",
+   "path": "repo/apps/Ingestion Plane/INGESTION_PLANE_STATUS.md",
+   "sha256": "dd8c2462a7fbb3a27d7b0f6914c85f52e618668efc308b9f295cbf28d187cafb",
+   "bytes": 10000,
+   "origin": "repo",
+   "source_ref": "da6fa0d45d8d646a3acace01fcdedcec883b96dd"
+  },
+  {
+   "key": "apps/Ingestion Plane/PORT_MAPPING.md",
+   "title": "PORT MAPPING",
+   "path": "repo/apps/Ingestion Plane/PORT_MAPPING.md",
+   "sha256": "c35bacb08ea51ebf1e56d0f8bc2388c1f8878f91ea20a699a671a7a652357e66",
+   "bytes": 6536,
+   "origin": "repo",
+   "source_ref": "da6fa0d45d8d646a3acace01fcdedcec883b96dd"
+  },
+  {
+   "key": "apps/Ingestion Plane/QUARRY_V2_BROWSER_AUTOMATION_IMPROVEMENTS_2026.md",
+   "title": "QUARRY V2 BROWSER AUTOMATION IMPROVEMENTS 2026",
+   "path": "repo/apps/Ingestion Plane/QUARRY_V2_BROWSER_AUTOMATION_IMPROVEMENTS_2026.md",
+   "sha256": "a8cd1e1c173dbc28f0dd1bb80442c37a6edf24ce8ba5046dfab4ef744e36e405",
+   "bytes": 108367,
+   "origin": "repo",
+   "source_ref": "da6fa0d45d8d646a3acace01fcdedcec883b96dd"
+  },
+  {
+   "key": "apps/Ingestion Plane/QUICKSTART.md",
+   "title": "QUICKSTART",
+   "path": "repo/apps/Ingestion Plane/QUICKSTART.md",
+   "sha256": "e2ceaaa41cb22218fa88122e376df13b9c45b1e0a279e332b03c7c8b307fb241",
+   "bytes": 9404,
+   "origin": "repo",
+   "source_ref": "da6fa0d45d8d646a3acace01fcdedcec883b96dd"
+  },
+  {
+   "key": "apps/Ingestion Plane/README.md",
+   "title": "README",
+   "path": "repo/apps/Ingestion Plane/README.md",
+   "sha256": "859eebb618ee7aadfe329abdc02bf2de66a595269f6b6a09a331377b43ef3165",
+   "bytes": 17172,
+   "origin": "repo",
+   "source_ref": "da6fa0d45d8d646a3acace01fcdedcec883b96dd"
+  },
+  {
+   "key": "apps/Ingestion Plane/TESTING_CHECKLIST.md",
+   "title": "TESTING CHECKLIST",
+   "path": "repo/apps/Ingestion Plane/TESTING_CHECKLIST.md",
+   "sha256": "953d8def5416accda9532c91e226eeb99ef19a249e426c8bdfee2f333ef7eda1",
+   "bytes": 8039,
+   "origin": "repo",
+   "source_ref": "da6fa0d45d8d646a3acace01fcdedcec883b96dd"
+  },
+  {
+   "key": "apps/Ingestion Plane/TESTING_INDEX.md",
+   "title": "TESTING INDEX",
+   "path": "repo/apps/Ingestion Plane/TESTING_INDEX.md",
+   "sha256": "2253eacce41fe1002a15ece50c13c9e49091a92a8dcc10fee7d718fc91ac1fab",
+   "bytes": 9077,
+   "origin": "repo",
+   "source_ref": "da6fa0d45d8d646a3acace01fcdedcec883b96dd"
+  },
+  {
+   "key": "apps/Ingestion Plane/TESTING_SUMMARY.md",
+   "title": "TESTING SUMMARY",
+   "path": "repo/apps/Ingestion Plane/TESTING_SUMMARY.md",
+   "sha256": "cf80bbc4c232b7b67c6b4a45e6e03464558a55b460f7a9f1f1917fc6210a67de",
+   "bytes": 8195,
+   "origin": "repo",
+   "source_ref": "da6fa0d45d8d646a3acace01fcdedcec883b96dd"
+  },
+  {
+   "key": "apps/Ingestion Plane/TEST_DOCUMENTATION_INDEX.md",
+   "title": "TEST DOCUMENTATION INDEX",
+   "path": "repo/apps/Ingestion Plane/TEST_DOCUMENTATION_INDEX.md",
+   "sha256": "0bee5cc4f2af3703329a082d584556eae3d9e83441e5459dd5a9b15e82319f90",
+   "bytes": 5978,
+   "origin": "repo",
+   "source_ref": "da6fa0d45d8d646a3acace01fcdedcec883b96dd"
+  },
+  {
+   "key": "apps/Ingestion Plane/TEST_REPORT.md",
+   "title": "TEST REPORT",
+   "path": "repo/apps/Ingestion Plane/TEST_REPORT.md",
+   "sha256": "fcfabf6fc5503751075f4344de55a636c9cc57bb454ece47ca89c6340d4dbd79",
+   "bytes": 9733,
+   "origin": "repo",
+   "source_ref": "da6fa0d45d8d646a3acace01fcdedcec883b96dd"
+  },
+  {
+   "key": "apps/Model Plane/MODEL_PLANE_DEEP_DIVE.md",
+   "title": "MODEL PLANE DEEP DIVE",
+   "path": "repo/apps/Model Plane/MODEL_PLANE_DEEP_DIVE.md",
+   "sha256": "4e173a88f4253f4ca2bfc855cbe6a674ff2d2b7a4d7f09c2c6713d2fbd997862",
+   "bytes": 27242,
+   "origin": "repo",
+   "source_ref": "da6fa0d45d8d646a3acace01fcdedcec883b96dd"
+  },
+  {
+   "key": "apps/Model Plane/MODEL_PLANE_ROADMAP.md",
+   "title": "MODEL PLANE ROADMAP",
+   "path": "repo/apps/Model Plane/MODEL_PLANE_ROADMAP.md",
+   "sha256": "6de698a3738d102a7caef9f145c13cf995a044458bbe179074404dfb5450d6b8",
+   "bytes": 25072,
+   "origin": "repo",
+   "source_ref": "da6fa0d45d8d646a3acace01fcdedcec883b96dd"
+  },
+  {
+   "key": "apps/Model Plane/MODEL_PLANE_STATUS.md",
+   "title": "MODEL PLANE STATUS",
+   "path": "repo/apps/Model Plane/MODEL_PLANE_STATUS.md",
+   "sha256": "f4417b21b87c4bd7c838027643e6655b250bdbe47510c3be56e93eb3675944d9",
+   "bytes": 28073,
+   "origin": "repo",
+   "source_ref": "da6fa0d45d8d646a3acace01fcdedcec883b96dd"
+  },
+  {
+   "key": "apps/Model Plane/README.md",
+   "title": "README",
+   "path": "repo/apps/Model Plane/README.md",
+   "sha256": "1a1906bdc5ee0b85cfe6dfab447203f4c1d1fa3b79ffdaf6ec42a965d67c6923",
+   "bytes": 15638,
+   "origin": "repo",
+   "source_ref": "da6fa0d45d8d646a3acace01fcdedcec883b96dd"
+  },
+  {
+   "key": "apps/Model Plane/feature.md",
+   "title": "feature",
+   "path": "repo/apps/Model Plane/feature.md",
+   "sha256": "ad3ad90c8da90f282acc0ccde1664ae3281dcd008249c5ebbb5c9c94dc991dc3",
+   "bytes": 48595,
+   "origin": "repo",
+   "source_ref": "da6fa0d45d8d646a3acace01fcdedcec883b96dd"
+  },
+  {
+   "key": "apps/QM_INSPIRED_IMPROVEMENT_PLAN_2026-08-13.md",
+   "title": "QM INSPIRED IMPROVEMENT PLAN 2026 08 13",
+   "path": "repo/apps/QM_INSPIRED_IMPROVEMENT_PLAN_2026-08-13.md",
+   "sha256": "4b993248c75dc23854beb0a9d16cc95a07fc54dab7b5a52c55f573f8571dc356",
+   "bytes": 72689,
+   "origin": "repo",
+   "source_ref": "da6fa0d45d8d646a3acace01fcdedcec883b96dd"
+  },
+  {
+   "key": "apps/SPACE_AUTHORITY_ADR_2026-08-13.md",
+   "title": "SPACE AUTHORITY ADR 2026 08 13",
+   "path": "repo/apps/SPACE_AUTHORITY_ADR_2026-08-13.md",
+   "sha256": "647a0b3b32401da580479750c429817a8362f9c62dc649a2363f1a71f4a67580",
+   "bytes": 8494,
+   "origin": "repo",
+   "source_ref": "da6fa0d45d8d646a3acace01fcdedcec883b96dd"
+  },
+  {
+   "key": "apps/STALE_DOC_DELETION_REGISTER.md",
+   "title": "STALE DOC DELETION REGISTER",
+   "path": "repo/apps/STALE_DOC_DELETION_REGISTER.md",
+   "sha256": "a401130ab892cd6357204b97d6f831307c60e7fec97f0a1523260f72acea0fe8",
+   "bytes": 26847,
+   "origin": "repo",
+   "source_ref": "da6fa0d45d8d646a3acace01fcdedcec883b96dd"
+  },
+  {
+   "key": "apps/STATUS.md",
+   "title": "STATUS",
+   "path": "repo/apps/STATUS.md",
+   "sha256": "8e25f741ddc5006a82fbc7d1770946d56d6e4f2d11534193daee6656b69c4996",
+   "bytes": 8697,
+   "origin": "repo",
+   "source_ref": "da6fa0d45d8d646a3acace01fcdedcec883b96dd"
+  },
+  {
+   "key": "apps/Studio Plane/README.md",
+   "title": "README",
+   "path": "repo/apps/Studio Plane/README.md",
+   "sha256": "6ef941e557d36ae0776a92b8c7220c6bb9a1c9f0e73e9c97c28aa6af644457a4",
+   "bytes": 28720,
+   "origin": "repo",
+   "source_ref": "da6fa0d45d8d646a3acace01fcdedcec883b96dd"
+  },
+  {
+   "key": "apps/VEREVON_UI_COWORK_RESEARCH_2026-08-13.md",
+   "title": "VEREVON UI COWORK RESEARCH 2026 08 13",
+   "path": "repo/apps/VEREVON_UI_COWORK_RESEARCH_2026-08-13.md",
+   "sha256": "80332e4a307dc531feb9c70927973e3bbf744c90373df1603b057af89c736d9b",
+   "bytes": 46033,
+   "origin": "repo",
+   "source_ref": "da6fa0d45d8d646a3acace01fcdedcec883b96dd"
+  },
+  {
+   "key": "apps/master-ownership-matrix.md",
+   "title": "master ownership matrix",
+   "path": "repo/apps/master-ownership-matrix.md",
+   "sha256": "bee9c66aafd6c443b6d8db79b85b6e6f806d0d686eb176466b47eab24520bb84",
+   "bytes": 16053,
+   "origin": "repo",
+   "source_ref": "da6fa0d45d8d646a3acace01fcdedcec883b96dd"
+  },
+  {
+   "key": "synthetic/no-avvikshandtering.md",
+   "title": "no avvikshandtering",
+   "path": "synthetic/no-avvikshandtering.md",
+   "sha256": "2086e407a336493b6d546a5ce541600c5fb7c74c53590eccff41fdf0a8298f2f",
+   "bytes": 1745,
+   "origin": "synthetic"
+  },
+  {
+   "key": "synthetic/no-kalibrering-av-doseringsutstyr.md",
+   "title": "no kalibrering av doseringsutstyr",
+   "path": "synthetic/no-kalibrering-av-doseringsutstyr.md",
+   "sha256": "6e6aed76aa5a7417048190aeb8605e2fcb2c0a9dc7b24af39732054dbbea0657",
+   "bytes": 1732,
+   "origin": "synthetic"
+  },
+  {
+   "key": "synthetic/no-kjemikalielager.md",
+   "title": "no kjemikalielager",
+   "path": "synthetic/no-kjemikalielager.md",
+   "sha256": "11166d41d831589fd7574375eb5a1346b34bde9914d5e766fc22d917efa036bd",
+   "bytes": 1713,
+   "origin": "synthetic"
+  },
+  {
+   "key": "synthetic/no-mikrobiologisk-provetaking.md",
+   "title": "no mikrobiologisk provetaking",
+   "path": "synthetic/no-mikrobiologisk-provetaking.md",
+   "sha256": "cdfb81c0b8777ba0d7f0cae7e5c0c1dd1375fd510ed579a98b46cb39e36c5cb0",
+   "bytes": 1830,
+   "origin": "synthetic"
+  },
+  {
+   "key": "synthetic/no-opplaering-av-nyansatte.md",
+   "title": "no opplaering av nyansatte",
+   "path": "synthetic/no-opplaering-av-nyansatte.md",
+   "sha256": "04f4d449d4d7eb708fbe7304ba6d50a3cde50d5e2d77c9fb52f9f255ebce2784",
+   "bytes": 1729,
+   "origin": "synthetic"
+  },
+  {
+   "key": "synthetic/no-rengjoring-og-desinfeksjon.md",
+   "title": "no rengjoring og desinfeksjon",
+   "path": "synthetic/no-rengjoring-og-desinfeksjon.md",
+   "sha256": "9402e7d10d9179fbed48820bff0330abd3d2dee2382347260d3f43eff386d956",
+   "bytes": 2248,
+   "origin": "synthetic"
+  },
+  {
+   "key": "synthetic/no-vann-og-avlop.md",
+   "title": "no vann og avlop",
+   "path": "synthetic/no-vann-og-avlop.md",
+   "sha256": "ab828894e498ee7b902721d3c69d654d745a5cd07fcf9bfd2947ead42d1214e3",
+   "bytes": 1771,
+   "origin": "synthetic"
+  },
+  {
+   "key": "synthetic/no-vedlikehold-og-service.md",
+   "title": "no vedlikehold og service",
+   "path": "synthetic/no-vedlikehold-og-service.md",
+   "sha256": "8482a3f112307488de05843586ecf16134c34751515c8f6e3bc0b6ab67610e85",
+   "bytes": 1726,
+   "origin": "synthetic"
+  }
+ ]
+}

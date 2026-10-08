@@ -10,13 +10,23 @@
 -- evaluation cannot run. This keeps CONTROL_PLANE_ENFORCEMENT=strict intact —
 -- preferable to the ALLOW_INSECURE_DEV_DEFAULTS escape hatch.
 --
+-- WHAT THIS FILE DOES NOT DO (CR-T14, OPS-ORG): it is the Better Auth half of the provisioning, and only that.
+-- org-core builds its own `organizations` table from events that auth-core emits when an organization is created
+-- through the application; rows inserted here with SQL emit none. With the `tenant` retention posture (CR-T1,
+-- CR-T10) the Data Plane's background services ask Auth Core, which asks org-core, whether an organization is
+-- zero-retention, and an organization org-core does not know is refused (503 retention_posture_unavailable,
+-- no token, no embedding, no context). So the two evaluation organizations must ALSO be created through the real
+-- organization service by an operator (docs/contextual-retrieval-runbook.md, section 5.12); this file then adds
+-- the corpus-seeder's membership, which a service subject can never get through sign-up, and an owner, which the
+-- startup preflight of auth-core requires.
+--
 -- Run with:
 --   docker exec -i controlplane-postgres sh -c 'psql -U "$POSTGRES_USER" -d auth_service -v ON_ERROR_STOP=1' < "apps/Data Plane v2/scripts/eval-fixture-membership.sql"
 --
 -- Undo with:
---   DELETE FROM member WHERE user_id = 'service:corpus-seeder';
+--   DELETE FROM member WHERE user_id IN ('service:corpus-seeder', 'user:eval-fixture-owner');
 --   DELETE FROM organization WHERE id IN ('org-corpus-baseline','org-corpus-contextual');
---   DELETE FROM "user" WHERE id = 'service:corpus-seeder';
+--   DELETE FROM "user" WHERE id IN ('service:corpus-seeder', 'user:eval-fixture-owner');
 
 INSERT INTO "user" (id, name, email)
 VALUES ('service:corpus-seeder', 'Corpus Seeder (dev eval fixture)', 'corpus-seeder@fixture.invalid')
@@ -28,24 +38,27 @@ VALUES
   ('org-corpus-contextual', 'Corpus Contextual (dev eval fixture)', now())
 ON CONFLICT (id) DO NOTHING;
 
--- WARNING (added 2026-08-27): role 'member' below is NOT sufficient.
---
--- auth-core's owner-invariant preflight (migration 018) refuses to START while
--- any organization is ownerless, and an org whose only member is a 'member' is
--- ownerless. This fixture therefore installs a latent startup blocker: nothing
--- fails until auth-service next restarts, and then it crash-loops with
--- OWNER_INVARIANT_PREFLIGHT_FAILED. That is exactly what happened when
--- auth-service was restarted to reload PLANE_SERVICE_PRINCIPALS_JSON.
---
--- Repairing it is an operator-reviewed workflow, not an UPDATE: see
--- scripts/eval-fixture-owner-repair.sql. If you are creating these orgs fresh,
--- run that repair immediately after this file, or delete the fixture instead of
--- leaving it ownerless.
+-- The owner (fixed 2026-10-07). auth-core's owner-invariant preflight (migration 018) refuses to START while any
+-- organization has no member whose role contains 'owner'. The first version of this file made the seeder a plain
+-- 'member' and so installed a latent startup blocker: nothing failed until auth-service next restarted, and then it
+-- crash-looped with OWNER_INVARIANT_PREFLIGHT_FAILED (that is what happened on 2026-08-27, after a restart to reload
+-- PLANE_SERVICE_PRINCIPALS_JSON, and what scripts/eval-fixture-owner-repair.sql repaired by an operator-reviewed
+-- mapping). Each organization now gets a PLACEHOLDER owner that cannot sign in (no account row, no password, an
+-- address under .invalid), and the seeder stays a plain member: this file never makes a service principal an
+-- owner, and needs no reviewed mapping.
+INSERT INTO "user" (id, name, email)
+VALUES ('user:eval-fixture-owner', 'Evaluation fixture owner (cannot sign in)', 'eval-fixture-owner@fixture.invalid')
+ON CONFLICT (id) DO NOTHING;
 
 INSERT INTO member (id, organization_id, user_id, role, created_at)
 VALUES
-  ('member-corpus-seeder-baseline',   'org-corpus-baseline',   'service:corpus-seeder', 'member', now()),
-  ('member-corpus-seeder-contextual', 'org-corpus-contextual', 'service:corpus-seeder', 'member', now())
+  ('member-eval-fixture-owner-baseline',   'org-corpus-baseline',   'user:eval-fixture-owner', 'owner',  now()),
+  ('member-eval-fixture-owner-contextual', 'org-corpus-contextual', 'user:eval-fixture-owner', 'owner',  now()),
+  ('member-corpus-seeder-baseline',        'org-corpus-baseline',   'service:corpus-seeder',   'member', now()),
+  ('member-corpus-seeder-contextual',      'org-corpus-contextual', 'service:corpus-seeder',   'member', now())
 ON CONFLICT (organization_id, user_id) DO NOTHING;
 
 SELECT 'fixture memberships: ' || count(*) FROM member WHERE user_id = 'service:corpus-seeder';
+-- Must be 0: an organization listed here would stop auth-service at its next start.
+SELECT 'ownerless fixture organizations: ' || count(*) FROM owner_invariant_preflight_report
+ WHERE organization_id IN ('org-corpus-baseline', 'org-corpus-contextual');

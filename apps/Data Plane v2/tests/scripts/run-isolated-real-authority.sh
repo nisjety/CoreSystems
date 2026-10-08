@@ -51,6 +51,11 @@ export USER_CORE_RETRIEVAL_TOKEN=$(openssl rand -hex 32)
 export USER_CORE_DOCUMENTS_TOKEN=$(openssl rand -hex 32)
 export AUTH_CORE_ISSUER=http://auth-core:3011/api/convex-auth
 export JWT_REQUIRED_ISSUER="$AUTH_CORE_ISSUER"
+# Contextual retrieval is on by default and needs inference-core, which this disposable stack does
+# not have (it starts no embedding engine today; the line keeps the three isolated harnesses alike,
+# so a service added here later does not meet a boot check it cannot pass) (CR-T13).
+export CONTEXTUAL_RETRIEVAL_ENABLED=false
+export CONTEXT_RETRIEVAL_KILL_SWITCH_REASON="isolated test stack: it has no inference-core to generate contexts"
 
 node "$KEY_FIXTURE" prepare "$runtime_dir"
 "$USER_GRPC_TLS_FIXTURE" "$runtime_dir"
@@ -67,6 +72,9 @@ export WIKI_EVENT_SIGNING_PRIVATE_KEY_PATH="$runtime_dir/wiki-events.pem"
 export WIKI_EVENT_VERIFYING_PUBLIC_KEY_PATH="$runtime_dir/wiki-events.pub"
 export RETRIEVAL_EVENT_SIGNING_PRIVATE_KEY_PATH="$runtime_dir/retrieval-events.pem"
 export RETRIEVAL_EVENT_VERIFYING_PUBLIC_KEY_PATH="$runtime_dir/retrieval-events.pub"
+# graph-index signs its usage events with a key of its own; data-orchestrator verifies them (CR-T10).
+export GRAPH_EVENT_SIGNING_PRIVATE_KEY_PATH="$runtime_dir/graph-events.pem"
+export GRAPH_EVENT_VERIFYING_PUBLIC_KEY_PATH="$runtime_dir/graph-events.pub"
 
 export REAL_AUTHORITY_RUN_ID="$suffix"
 export REAL_AUTHORITY_AUTH_IMAGE="$project-auth-core:local"

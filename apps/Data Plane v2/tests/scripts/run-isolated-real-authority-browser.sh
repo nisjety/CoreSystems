@@ -58,6 +58,11 @@ export USER_CORE_DOCUMENTS_TOKEN=$(openssl rand -hex 32)
 export INTERNAL_API_KEY=$(openssl rand -hex 32)
 export AUTH_CORE_ISSUER=http://auth-core:3011/api/convex-auth
 export JWT_REQUIRED_ISSUER="$AUTH_CORE_ISSUER"
+# Contextual retrieval is on by default and writes contexts through inference-core, which here is a
+# fixture that answers the graph extraction contract and cannot write a context. Turn it off by
+# name, with the reason the kill switch requires (CR-T13); the browser proof reads raw chunks.
+export CONTEXTUAL_RETRIEVAL_ENABLED=false
+export CONTEXT_RETRIEVAL_KILL_SWITCH_REASON="isolated browser stack: inference-core is a fixture that cannot write contexts"
 
 node "$KEY_FIXTURE" prepare "$runtime_dir"
 "$USER_GRPC_TLS_FIXTURE" "$runtime_dir"
@@ -74,6 +79,9 @@ export WIKI_EVENT_SIGNING_PRIVATE_KEY_PATH="$runtime_dir/wiki-events.pem"
 export WIKI_EVENT_VERIFYING_PUBLIC_KEY_PATH="$runtime_dir/wiki-events.pub"
 export RETRIEVAL_EVENT_SIGNING_PRIVATE_KEY_PATH="$runtime_dir/retrieval-events.pem"
 export RETRIEVAL_EVENT_VERIFYING_PUBLIC_KEY_PATH="$runtime_dir/retrieval-events.pub"
+# graph-index signs its usage events with a key of its own; data-orchestrator verifies them (CR-T10).
+export GRAPH_EVENT_SIGNING_PRIVATE_KEY_PATH="$runtime_dir/graph-events.pem"
+export GRAPH_EVENT_VERIFYING_PUBLIC_KEY_PATH="$runtime_dir/graph-events.pub"
 
 export REAL_AUTHORITY_RUN_ID="$suffix"
 export REAL_AUTHORITY_AUTH_IMAGE="$project-auth-core:local"
@@ -178,7 +186,7 @@ export REAL_AUTHORITY_GATEWAY_AUDIT_TOKEN=$(openssl rand -hex 32)
 export REAL_AUTHORITY_GATEWAY_NOTIFICATION_TOKEN=$(openssl rand -hex 32)
 export REAL_AUTHORITY_GATEWAY_CONVERSATION_TOKEN=$(openssl rand -hex 32)
 export REAL_AUTHORITY_PLANE_PRINCIPALS_JSON=$(printf '%s' \
-  '{"retrieval-engine":{"credential":"'"$CONTROL_POLICY_SERVICE_API_KEY"'","audiences":["control-policy"],"orgIds":[],"allowAnyOrg":true,"scopes":["data:authorization:decide"],"scopesByAudience":{"control-policy":["data:authorization:decide"]}},"embedding-engine":{"credential":"'"$MODEL_PLANE_EMBEDDING_INFERENCE_SERVICE_API_KEY"'","audiences":["inference-core"],"orgIds":[],"allowAnyOrg":true,"scopes":["inference:invoke"],"scopesByAudience":{"inference-core":["inference:invoke"]}},"browser-fixture-seeder":{"credential":"'"$REAL_AUTHORITY_PERSISTENCE_SERVICE_API_KEY"'","audiences":["data-plane"],"orgIds":[],"allowAnyOrg":true,"allowPersistentData":true,"scopes":["documents:write","org:data:write_all"],"scopesByAudience":{"data-plane":["documents:write","org:data:write_all"]}}}')
+  '{"retrieval-engine":{"credential":"'"$CONTROL_POLICY_SERVICE_API_KEY"'","audiences":["control-policy"],"orgIds":[],"allowAnyOrg":true,"scopes":["data:authorization:decide"],"scopesByAudience":{"control-policy":["data:authorization:decide"]}},"embedding-engine":{"credential":"'"$MODEL_PLANE_EMBEDDING_INFERENCE_SERVICE_API_KEY"'","audiences":["inference-core"],"orgIds":[],"allowAnyOrg":true,"scopes":["inference:invoke"],"scopesByAudience":{"inference-core":["inference:invoke"]}},"graph-index":{"credential":"'"$MODEL_PLANE_INFERENCE_SERVICE_API_KEY"'","audiences":["inference-core"],"orgIds":[],"allowAnyOrg":true,"scopes":["inference:invoke"],"scopesByAudience":{"inference-core":["inference:invoke"]},"retentionByAudience":{"inference-core":"persistent"}},"browser-fixture-seeder":{"credential":"'"$REAL_AUTHORITY_PERSISTENCE_SERVICE_API_KEY"'","audiences":["data-plane"],"orgIds":[],"allowAnyOrg":true,"allowPersistentData":true,"scopes":["documents:write","org:data:write_all"],"scopesByAudience":{"data-plane":["documents:write","org:data:write_all"]}}}')
 export REAL_AUTHORITY_USER_CREDENTIALS_JSON=$(printf '%s' \
   '[{"principal":"verevon-gateway","audience":"user-core","token":"'"$REAL_AUTHORITY_GATEWAY_TOKEN"'","scopes":["users:read:self","users:write:self"]},{"principal":"retrieval-engine","audience":"user-core","token":"'"$REAL_AUTHORITY_RETRIEVAL_TOKEN"'","scopes":["authz:read"]}]')
 

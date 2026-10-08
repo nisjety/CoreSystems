@@ -117,4 +117,25 @@ rg -q 'GDPR_DURABLE_CONSUMER_REQUIRED: "0"' "$standalone_compose"
 rg -q 'NATS_SHARED_URL: ""' "$standalone_compose"
 rg -q 'NATS_SHARED_USER: ""' "$standalone_compose"
 
+# The inference token client's retention posture (CR-T5). embedding-engine and
+# graph-index are set by DIFFERENT host variables (compose hands each to the
+# container as MODEL_PLANE_INFERENCE_RETENTION_POSTURE), so setting one cannot move
+# the other, and each default must be a posture the client accepts. That the value
+# agrees with the principal's retentionByAudience entry in Auth Core's registry is
+# checked against the real registry rows by
+# services/inference-client-rs/tests/real_policy.rs; this keeps the two names and the
+# operator-facing check from drifting.
+rg -q 'MODEL_PLANE_INFERENCE_RETENTION_POSTURE: \$\{MODEL_PLANE_EMBEDDING_INFERENCE_RETENTION_POSTURE:-(persistent|zdr|tenant)\}' "$data_compose"
+rg -q 'MODEL_PLANE_INFERENCE_RETENTION_POSTURE: \$\{MODEL_PLANE_INFERENCE_RETENTION_POSTURE:-(persistent|zdr|tenant)\}' "$data_compose"
+rg -q 'persistent\|zdr\|tenant' "$makefile"
+rg -q 'MODEL_PLANE_EMBEDDING_INFERENCE_RETENTION_POSTURE=' "$root_dir/apps/Data Plane v2/.env.example"
+rg -q 'MODEL_PLANE_INFERENCE_RETENTION_POSTURE=' "$root_dir/apps/Data Plane v2/.env.example"
+
+# Contextual retrieval is on by default and the global flag is an incident-only kill switch
+# (CR-T13): the compose defaults, the model default, every variable the code reads, their
+# documentation in .env.example and the explicit off of the isolated stacks are one contract of
+# their own. It lives in a sibling script (this file belongs to other tasks too) that also runs
+# on its own: `bash tests/scripts/contextual-retrieval-config-contract-test.sh [--self-test]`.
+bash "$(dirname "${BASH_SOURCE[0]}")/contextual-retrieval-config-contract-test.sh"
+
 echo "PASS: Compose security contract"

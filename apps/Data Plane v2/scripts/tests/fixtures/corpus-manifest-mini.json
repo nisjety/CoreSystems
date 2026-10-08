@@ -1,0 +1,9 @@
+{
+  "schema": "eval-corpus-manifest-v1",
+  "corpus_id": "dpv2-eval-corpus-test",
+  "manifest_digest": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+  "documents": [
+    {"key": "a.md", "title": "a", "path": "a.md", "sha256": "0000000000000000000000000000000000000000000000000000000000000000", "bytes": 1, "origin": "repo"},
+    {"key": "b.md", "title": "b", "path": "b.md", "sha256": "1111111111111111111111111111111111111111111111111111111111111111", "bytes": 1, "origin": "repo"}
+  ]
+}

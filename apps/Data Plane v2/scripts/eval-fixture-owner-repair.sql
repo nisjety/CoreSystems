@@ -1,3 +1,7 @@
+-- SUPERSEDED for new installs (2026-10-07): scripts/eval-fixture-membership.sql now installs a placeholder owner
+-- (a user that cannot sign in) for each organization, so a fresh fixture is never ownerless and needs none of this.
+-- This file remains the repair for a fixture that was created by the earlier version of that file.
+--
 -- URGENT: auth-service is crash-looping until this runs.
 --
 -- ## What happened

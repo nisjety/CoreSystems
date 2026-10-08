@@ -23,7 +23,7 @@ ROOT = Path.cwd()
 TENANT_TABLES = [
     "documents", "knowledge_units", "retrieval_traces", "retrieval_candidates",
     "wiki_pages", "wiki_page_versions",
-    "graph_entities", "graph_relationships", "graph_claims", "graph_text_units",
+    "graph_entities", "graph_relationships", "graph_claims", "graph_text_units", "graph_extraction_state",
     "evals", "eval_runs", "eval_scorecards", "trust_scores",
     "source_logs", "maintenance_logs",
 ]

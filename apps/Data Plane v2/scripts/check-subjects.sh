@@ -21,6 +21,32 @@ if [[ ! -f "$CONTRACT" ]]; then
     exit 1
 fi
 
+# 0. The usage ledger stream (CR-T10) is defined in two places, with the same values: the
+#    producers' (services/usage-ledger-rs) and the consumer's (services/data-orchestrator-go).
+#    Their names must agree with each other and with the contract, and the cost subject must
+#    belong to exactly one stream (JetStream refuses a subject bound twice, at runtime; this
+#    catches it at PR time). Checked first so a failure here is reported even while other
+#    subjects are still missing from the contract.
+rust_stream=$(grep -hE 'pub const STREAM_NAME: &str = "[A-Z_]+"' \
+    "$REPO_ROOT/services/usage-ledger-rs/src/stream.rs" 2>/dev/null \
+    | grep -oE '"[A-Z_]+"' | tr -d '"' || true)
+go_stream=$(grep -hE 'StreamName[[:space:]]*=[[:space:]]*"[A-Z_]+"' \
+    "$REPO_ROOT/services/data-orchestrator-go/internal/cost/stream.go" 2>/dev/null \
+    | grep -oE '"[A-Z_]+"' | tr -d '"' || true)
+if [[ -z "$rust_stream" || -z "$go_stream" || "$rust_stream" != "$go_stream" ]]; then
+    echo "FAIL: the usage ledger stream is named '${rust_stream:-?}' by usage-ledger-rs and '${go_stream:-?}' by data-orchestrator-go" >&2
+    exit 1
+fi
+if ! grep -qE "^\| \`${rust_stream}\` \| \`dataplane\.cost\.ledger\` \|" "$CONTRACT"; then
+    echo "FAIL: $CONTRACT has no stream row binding dataplane.cost.ledger to $rust_stream" >&2
+    exit 1
+fi
+cost_streams=$(grep -cE '^\| `DATAPLANE_[A-Z_]+` \|[^|]*`dataplane\.cost\.ledger`' "$CONTRACT" || true)
+if [[ "$cost_streams" != "1" ]]; then
+    echo "FAIL: dataplane.cost.ledger is bound by $cost_streams streams in $CONTRACT; a subject belongs to exactly one" >&2
+    exit 1
+fi
+
 # 1. Collect every "dataplane.*" string used in source.
 #    Excludes the contract file itself, docs, tests, and the schema lock.
 # Strip out `include_proto!("dataplane.foo.v2")` and similar proto-package

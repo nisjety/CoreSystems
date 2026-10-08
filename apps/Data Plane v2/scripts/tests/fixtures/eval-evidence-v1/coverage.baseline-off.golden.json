@@ -1,0 +1,31 @@
+{
+  "org_id": "org-corpus-baseline",
+  "counts": {
+    "eligible": 1164,
+    "ready": 0,
+    "legacy": 0,
+    "pending": 0,
+    "skipped_zdr": 0,
+    "skipped_policy": 1164,
+    "skipped_budget": 0,
+    "failed_transient": 0,
+    "failed_permanent": 0,
+    "status_unknown": 0,
+    "vector_incoherent": 0,
+    "ready_unverified": 0,
+    "excluded_by_classification": 0
+  },
+  "policy": {
+    "contextual_retrieval": "off",
+    "source": "policy"
+  },
+  "evaluation": {
+    "status": "skipped_policy",
+    "ready_trusted": 0,
+    "denominator": 0,
+    "coverage_percent": null,
+    "threshold_percent": 99,
+    "message": "contextual retrieval is OFF for this organization by operator policy; 1164 of 1164 eligible units are skipped_policy and coverage is not expected"
+  }
+}
+

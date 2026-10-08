@@ -1,4 +1,7 @@
 services:
+  # Stands in for the Model Plane at its boundary: the embedding provider's HTTP API on 8088 and,
+  # as `inference-core`, the gRPC Infer RPC on 9092 that graph-index reaches a model through (its
+  # direct-Azure backend is deleted, so there is no HTTP path for graph extraction any more).
   model-plane-http-fixture:
     image: node:20-alpine
     restart: "no"
@@ -6,12 +9,14 @@ services:
     command: ["node", "/fixture/model-plane-http-fixture.mjs"]
     environment:
       PORT: "8088"
+      GRPC_PORT: "9092"
       EMBEDDING_DIMENSION: "32"
     volumes:
       - ./tests/e2e/isolated/model-plane-http-fixture.mjs:/fixture/model-plane-http-fixture.mjs:ro
-    expose: ["8088"]
+    expose: ["8088", "9092"]
     networks:
-      - dpv2-net
+      dpv2-net:
+        aliases: ["inference-core"]
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8088/health"]
       interval: 2s
@@ -36,13 +41,15 @@ services:
       ALLOW_INSECURE_DEV_DEFAULTS: "1"
       ISOLATED_E2E: "1"
 
+  # Graph extraction goes through inference-core, as in production: the service credential is
+  # registered with the real Auth Core (the principal registry of this harness), the bearer it
+  # mints is checked by the fixture's gRPC endpoint, and the posture is the registry's.
   graph-index:
     environment:
       APP_ENV: test
-      GRAPH_EXTRACTION_PROVIDER: azure_openai
-      AZURE_OPENAI_ENDPOINT: http://model-plane-http-fixture:8088
-      AZURE_OPENAI_API_KEY: ${REAL_AUTHORITY_MODEL_FIXTURE_KEY:?required}
-      AZURE_OPENAI_EXTRACTION_DEPLOYMENT: isolated-deterministic-graph
+      MODEL_PLANE_AI_CORE_GRPC_URL: http://inference-core:9092
+      MODEL_PLANE_INFERENCE_SERVICE_API_KEY: ${MODEL_PLANE_INFERENCE_SERVICE_API_KEY:?required}
+      MODEL_PLANE_INFERENCE_RETENTION_POSTURE: persistent
     depends_on:
       model-plane-http-fixture:
         condition: service_healthy

@@ -31,6 +31,17 @@
 # so private/shared documents are excluded by design (see
 # `graph-index-rs/src/store.rs::load_org_visible_chunks`).
 #
+# ## Since CR-T12 (2026-10-07)
+#
+# graph-index records what it did to every chunk in `graph_extraction_state` and its own
+# reconciler (`graph-index-rs/src/reconcile.rs`) selects from that table, so a document with no
+# entities is remembered as `empty` and is not retried, and a failing chunk backs off and stops
+# at the poison cap. This script still decides by the rows above and knows nothing of the state
+# table: it re-announces a document whose chunks are `empty`, `failed_permanent` or `skipped_*`
+# on every run (the announce is cheap; the graph-index pipeline then makes no call for a chunk it
+# has recorded as final). Prefer the state table (docs/contextual-retrieval-runbook.md, 5.9) and
+# use this script only to re-announce a named document while the reconciler is disabled.
+#
 # Usage:
 #   scripts/graph-reconcile.sh <org-id> [--max N] [--wait-secs S] [--dry-run]
 set -eu

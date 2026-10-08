@@ -16,7 +16,7 @@ if (command === 'prepare') {
   writeFileSync(join(directory, 'private.pem'), privatePem, { mode: 0o600 });
   writeFileSync(join(directory, 'public.pem'), publicPem, { mode: 0o600 });
   writeFileSync(join(directory, 'jwks.json'), JSON.stringify({ keys: [{ ...jwk, kid, alg: 'RS256', use: 'sig' }] }), { mode: 0o600 });
-  for (const producer of ['documents', 'index', 'embedding', 'wiki', 'retrieval']) {
+  for (const producer of ['documents', 'index', 'embedding', 'wiki', 'retrieval', 'graph']) {
     const pair = generateRsaPair();
     writeFileSync(
       join(directory, `${producer}-events.pem`),
