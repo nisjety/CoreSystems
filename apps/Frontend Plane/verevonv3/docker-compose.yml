@@ -142,6 +142,15 @@ services:
       SEARXNG_URL: ${SEARXNG_URL:-http://searxng:8080}
       AUTOCOMPLETE_CORE_URL: ${AUTOCOMPLETE_CORE_URL:-http://autocomplete-core:3219}
       AUTOCOMPLETE_INTERNAL_TOKEN: ${AUTOCOMPLETE_INTERNAL_TOKEN:-}
+      # Support Plane (apps/Support Plane) connection config for the Remote
+      # support surface. Read-only passthrough to the SPA -- the gateway never
+      # itself connects to hbbs/hbbr, the browser does, directly over WSS. Left
+      # empty by default (never a guessed default host); domains/remote_support.rs
+      # reports configured:false plus which of these is missing until all three
+      # are set. See apps/Support Plane/README.md.
+      REMOTE_SUPPORT_RENDEZVOUS_URL: ${REMOTE_SUPPORT_RENDEZVOUS_URL:-}
+      REMOTE_SUPPORT_RELAY_URL: ${REMOTE_SUPPORT_RELAY_URL:-}
+      REMOTE_SUPPORT_SERVER_PUBLIC_KEY: ${REMOTE_SUPPORT_SERVER_PUBLIC_KEY:-}
       # Cross-plane GDPR erasure consumer. Points at control-shared-nats (Control
       # Plane), NOT this stack's own `nats` service: only control-shared-nats
       # hosts the AQENCIA_CONTROLPLANE stream that org-core and user-core publish

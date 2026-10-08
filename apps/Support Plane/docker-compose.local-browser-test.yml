@@ -1,0 +1,11 @@
+# Throwaway local-only override — do NOT use in any shared environment.
+# Publishes hbbs/hbbr's plaintext WS ports to 127.0.0.1 only, so a browser on
+# this machine (ws://localhost:21118 / :21119) can reach them directly without
+# Caddy, which needs real DNS + certs and is skipped locally per README.md.
+services:
+  hbbs:
+    ports:
+      - "127.0.0.1:21118:21118"
+  hbbr:
+    ports:
+      - "127.0.0.1:21119:21119"

@@ -25,4 +25,6 @@ pnpm --filter @verevon/remote-core build
 
 ## What this can and cannot tell you
 
-It exercises the real library: the real connect sequence, the real crypto, the real canvas renderer. It has **not** yet been run against a live `rustdesk-server` plus a native host — so a failure here is as likely to be a protocol-interop gap as a bug in the harness. `docs/architecture.md` in remote-core lists, in priority order, exactly which unknowns a first live run should settle.
+It exercises the real library: the real connect sequence, the real crypto, the real canvas renderer, and (since 2026-09-11) real pointer/keyboard forwarding — the canvas mirrors `RemoteSupportPage.tsx`'s exact `canPoint`/`canType`-gated handlers, and granted permissions show in the status bar. It has been run successfully against a real `rustdesk-server` plus a stock RustDesk client (see `docs/architecture.md`'s Status section) for the video/connect path; pointer/keyboard forwarding has the wiring but has not itself been exercised against a real host yet. `docs/architecture.md` lists, in priority order, exactly which unknowns remain.
+
+A test rig without a separate Verevon Agent machine is a loopback: the "remote" host is the same machine running the browser controller. Pointer/keyboard testing this way drives the *operator's own* live desktop — be as careful with it as with any other live, unattended system before sending it clicks or keystrokes.
