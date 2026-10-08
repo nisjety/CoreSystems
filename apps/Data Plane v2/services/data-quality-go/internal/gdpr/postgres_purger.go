@@ -8,17 +8,30 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// PostgresOrgPurger hard-deletes every quality-evaluation row this service
-// owns for one org: quality_eval_runs and eval_golden_judgments. Both are
+// PostgresOrgPurger hard-deletes every row this service owns for one org:
+// quality_eval_runs, eval_golden_judgments and org_processing_policy. All are
 // org_id-scoped per infra/postgres/migrations/
 // 20260711160000_quality_orchestrator_durability.sql (quality_eval_runs.org_id
-// TEXT NOT NULL) and 20260717100000_eval_golden_judgments.sql
-// (eval_golden_judgments' PRIMARY KEY (org_id, query_norm)). It deliberately
+// TEXT NOT NULL), 20260717100000_eval_golden_judgments.sql
+// (eval_golden_judgments' PRIMARY KEY (org_id, query_norm)) and
+// 20261003130000_context_provenance.sql (org_processing_policy's PRIMARY KEY
+// org_id: an operator's policy row, with its reason and the operator's id, is
+// org data and does not survive the org's erasure). It deliberately
 // does NOT touch data_orchestrator_jobs — that table lives in this same
 // Postgres instance but is owned by the sibling data-orchestrator-go
-// service's own repository code, not this one.
+// service's own repository code, not this one — nor admin_audit_log, which the
+// documents-api org purge already erases for the org.
 type PostgresOrgPurger struct {
 	pool *pgxpool.Pool
+}
+
+// purgeStatements are the statements HardPurgeByOrg runs, in order. The purger
+// lists its tables explicitly (an unlisted table survives an erasure), each is a
+// static `DELETE ... WHERE org_id = $1`, and a test pins both facts.
+var purgeStatements = [...]struct{ table, sql string }{
+	{"quality_eval_runs", `DELETE FROM quality_eval_runs WHERE org_id = $1`},
+	{"eval_golden_judgments", `DELETE FROM eval_golden_judgments WHERE org_id = $1`},
+	{"org_processing_policy", `DELETE FROM org_processing_policy WHERE org_id = $1`},
 }
 
 func NewPostgresOrgPurger(pool *pgxpool.Pool) *PostgresOrgPurger {
@@ -28,10 +41,10 @@ func NewPostgresOrgPurger(pool *pgxpool.Pool) *PostgresOrgPurger {
 // HardPurgeByOrg runs in a single transaction so a crash mid-purge never
 // leaves the org half-purged.
 //
-// Safety: every statement below is a static `DELETE ... WHERE org_id = $1`
-// literal — there is no code path here that could ever filter on anything
-// else, so a caller cannot make this touch another org's rows even by
-// accident. Callers (org_purge.go's HandleOrgErasure) must still pass the
+// Safety: every statement in purgeStatements is a static
+// `DELETE ... WHERE org_id = $1` literal — there is no code path here that
+// could ever filter on anything else, so a caller cannot make this touch
+// another org's rows even by accident. Callers (org_purge.go's HandleOrgErasure) must still pass the
 // org_id straight from the event payload, never a derived or client-supplied
 // value.
 //
@@ -73,11 +86,10 @@ func (p *PostgresOrgPurger) HardPurgeByOrg(ctx context.Context, orgID string) er
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck -- commit owns the successful path.
 
-	if _, err := tx.Exec(ctx, `DELETE FROM quality_eval_runs WHERE org_id = $1`, orgID); err != nil {
-		return fmt.Errorf("purge quality_eval_runs: %w", err)
-	}
-	if _, err := tx.Exec(ctx, `DELETE FROM eval_golden_judgments WHERE org_id = $1`, orgID); err != nil {
-		return fmt.Errorf("purge eval_golden_judgments: %w", err)
+	for _, statement := range purgeStatements {
+		if _, err := tx.Exec(ctx, statement.sql, orgID); err != nil {
+			return fmt.Errorf("purge %s: %w", statement.table, err)
+		}
 	}
 
 	if err := tx.Commit(ctx); err != nil {

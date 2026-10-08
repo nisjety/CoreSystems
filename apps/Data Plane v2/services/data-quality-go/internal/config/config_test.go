@@ -93,6 +93,75 @@ func TestLoadRejectsRequiredGdprConsumerWithoutSharedNats(t *testing.T) {
 	}
 }
 
+func TestLoadDefaultsForTheContextualReleaseGates(t *testing.T) {
+	clearSharedNatsEnv(t)
+	t.Setenv("CONTEXT_COVERAGE_THRESHOLD_PERCENT", "")
+	t.Setenv("SPARSE_INDEX_PARITY_URL", "")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	if cfg.CoverageThresholdPercent != 99 {
+		t.Fatalf("coverage threshold = %v, want the design's 99", cfg.CoverageThresholdPercent)
+	}
+	if cfg.SparseIndexParityURL != "" {
+		t.Fatalf("parity URL = %q, want empty: the gate then reports unavailable, never a pass", cfg.SparseIndexParityURL)
+	}
+}
+
+func TestLoadAcceptsAConfiguredThresholdAndParityEndpoint(t *testing.T) {
+	clearSharedNatsEnv(t)
+	t.Setenv("CONTEXT_COVERAGE_THRESHOLD_PERCENT", "97.5")
+	t.Setenv("SPARSE_INDEX_PARITY_URL", "http://quickwit-adapter:8008/admin/index-parity")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	if cfg.CoverageThresholdPercent != 97.5 || cfg.SparseIndexParityURL != "http://quickwit-adapter:8008/admin/index-parity" {
+		t.Fatalf("unexpected gate config: %+v", cfg)
+	}
+}
+
+// A threshold that cannot mean "a percentage of units" must stop the service at
+// boot, not quietly make the coverage gate always pass (0, negative, above 100) or
+// never pass, or read as the default (a typo).
+func TestLoadRejectsAnInvalidCoverageThreshold(t *testing.T) {
+	for _, value := range []string{"0", "-1", "100.5", "101", "ninety-nine", "NaN", "Inf", "99%"} {
+		t.Run(value, func(t *testing.T) {
+			clearSharedNatsEnv(t)
+			t.Setenv("SPARSE_INDEX_PARITY_URL", "")
+			t.Setenv("CONTEXT_COVERAGE_THRESHOLD_PERCENT", value)
+			if _, err := Load(); err == nil {
+				t.Fatalf("CONTEXT_COVERAGE_THRESHOLD_PERCENT=%q was accepted", value)
+			}
+		})
+	}
+}
+
+// The parity URL receives the caller's bearer: it must be an absolute http(s) URL
+// the operator wrote, with no credentials of its own.
+func TestLoadRejectsAnInvalidParityEndpoint(t *testing.T) {
+	for _, value := range []string{
+		"quickwit-adapter:8008/admin/index-parity",
+		"/admin/index-parity",
+		"ftp://quickwit-adapter/admin/index-parity",
+		"http://user:secret@quickwit-adapter:8008/admin/index-parity",
+		"http://quickwit-adapter:8008/admin/index-parity#fragment",
+		"http:///admin/index-parity",
+	} {
+		t.Run(value, func(t *testing.T) {
+			clearSharedNatsEnv(t)
+			t.Setenv("CONTEXT_COVERAGE_THRESHOLD_PERCENT", "")
+			t.Setenv("SPARSE_INDEX_PARITY_URL", value)
+			if _, err := Load(); err == nil {
+				t.Fatalf("SPARSE_INDEX_PARITY_URL=%q was accepted", value)
+			}
+		})
+	}
+}
+
 func clearSharedNatsEnv(t *testing.T) {
 	t.Helper()
 	t.Setenv("NATS_SHARED_URL", "")

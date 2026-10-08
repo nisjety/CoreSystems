@@ -1,0 +1,161 @@
+{
+  "audience": "dataplane-events",
+  "cases": [
+    {
+      "envelope": "{\"authorization\":\"Bearer eyJ0eXAiOiJKV1QiLCJhbGciOiJSUzI1NiIsImtpZCI6ImVtYmVkZGluZy1ldmVudHMtdjEifQ.eyJpc3MiOiJzZXJ2aWNlOmVtYmVkZGluZy1lbmdpbmUtcnMiLCJzdWIiOiJzZXJ2aWNlOmVtYmVkZGluZy1lbmdpbmUtcnMiLCJhdWQiOiJkYXRhcGxhbmUtZXZlbnRzIiwicHJpbmNpcGFsX3R5cGUiOiJzZXJ2aWNlIiwib3JnX2lkIjoib3JnLWZpeHR1cmUtYSIsInNjb3BlcyI6WyJldmVudHM6ZW1iZWRkaW5nOnB1Ymxpc2giXSwiemRyIjpmYWxzZSwiZXZlbnRfdHlwZSI6ImRhdGFwbGFuZS5jb3N0LmxlZGdlciIsInBheWxvYWRfc2hhMjU2IjoiN2RhN2Y2MjIyM2M5NDQ5ODA3YjM5YzQ1MmNlMDA0NzQyYzE4ODhjYTY3NTE1MjU4ZDQ5NWE1NGM4NDViODZhNCIsImp0aSI6ImFjODBjZGU5LWRhNzgtNGUwZC1hN2E1LTQ0OTJlNmVjMmMzZiIsImlhdCI6MTc5MTM1MTc2NSwibmJmIjoxNzkxMzUxNzY1LCJleHAiOjE3OTEzNTE4ODV9.sGT82xDPDq0wSnriuR8PWkAN6Vug1ZcNrxNc-pW_Qm_JZoiJFSPNckt5IWSAsQBhqvm70XMDQ87IL3_vyeXXKh1IYtWqYjma58BR-iVARPPFLROQYE0VCYYia02un9IQfQKU_OLPDvF8JqcvrBC5WHWmju0Rl8BDkW4Ydr_2XQbMvBXadW9liEQm6IXOhZraL9T-q36oZM09JbV48LB1Dj5ymzlJ9-BIu35zKRKDyWn_s9_TooCXNhFAMgU2UqKAElUXEzyjgebcyMYJWIn2yJ-qV7j8V565pmgWk7FIl4ex5HFcg_Pgb-YqsesSmNF5YajzMiYAeEOSvU2_mQnFbQ\",\"data\":\"eyJzY2hlbWFfdmVyc2lvbiI6MiwiZXZlbnRfdHlwZSI6ImxsbSIsImZlYXR1cmUiOiJjb250ZXh0dWFsLXJldHJpZXZhbCIsIm1vZGVsX3VzZWQiOiJncHQtNG8tbWluaS0yMDI0LTA3LTE4IiwicHJvdmlkZXJfdXNlZCI6ImF6dXJlLW9wZW5haSIsImNvdW50IjozLCJpbnB1dF90b2tlbnMiOjM2NzIsIm91dHB1dF90b2tlbnMiOjE3NywiY2FjaGVfcmVhZF90b2tlbnMiOjIwNDgsImNvc3RfYmFzaXMiOiJtZXRlcmVkIiwiZXN0aW1hdGVkIjpmYWxzZSwicmVxdWVzdF9kaWdlc3QiOiJkZDZmZGI4NWE5OWRkN2ZmYjE2MDkxMGRjZDcxMWViNDFlZDA5ZjA4MTcwNTdmMjA2YWU1ZTQxYzRmYmFlZGUzIiwib3JnX2lkIjoib3JnLWZpeHR1cmUtYSIsInpkciI6ZmFsc2UsImlkZW1wb3RlbmN5X2tleSI6InVzYWdlOmNvbnRleHR1YWwtcmV0cmlldmFsOmRkNmZkYjg1YTk5ZGQ3ZmZiMTYwOTEwZGNkNzExZWI0MWVkMDlmMDgxNzA1N2YyMDZhZTVlNDFjNGZiYWVkZTMifQ\"}",
+      "expect": {
+        "cache_read_tokens": 2048,
+        "cost_basis": "metered",
+        "count": 3,
+        "estimated": false,
+        "event_type": "llm",
+        "feature": "contextual-retrieval",
+        "idempotency_key": "usage:contextual-retrieval:dd6fdb85a99dd7ffb160910dcd711eb41ed09f0817057f206ae5e41c4fbaede3",
+        "input_tokens": 3672,
+        "model_used": "gpt-4o-mini-2024-07-18",
+        "org_id": "org-fixture-a",
+        "output_tokens": 177,
+        "provider_used": "azure-openai",
+        "request_digest": "dd6fdb85a99dd7ffb160910dcd711eb41ed09f0817057f206ae5e41c4fbaede3",
+        "units": null,
+        "zdr": false
+      },
+      "name": "contextual-retrieval-exact",
+      "producer": "embedding-engine-rs"
+    },
+    {
+      "envelope": "{\"authorization\":\"Bearer eyJ0eXAiOiJKV1QiLCJhbGciOiJSUzI1NiIsImtpZCI6ImVtYmVkZGluZy1ldmVudHMtdjEifQ.eyJpc3MiOiJzZXJ2aWNlOmVtYmVkZGluZy1lbmdpbmUtcnMiLCJzdWIiOiJzZXJ2aWNlOmVtYmVkZGluZy1lbmdpbmUtcnMiLCJhdWQiOiJkYXRhcGxhbmUtZXZlbnRzIiwicHJpbmNpcGFsX3R5cGUiOiJzZXJ2aWNlIiwib3JnX2lkIjoib3JnLWZpeHR1cmUtYSIsInNjb3BlcyI6WyJldmVudHM6ZW1iZWRkaW5nOnB1Ymxpc2giXSwiemRyIjpmYWxzZSwiZXZlbnRfdHlwZSI6ImRhdGFwbGFuZS5jb3N0LmxlZGdlciIsInBheWxvYWRfc2hhMjU2IjoiZjhmZTdkYzhiMjdiY2ZmNGU2N2FhNTViYThlNmJmZDU1M2FiZGU1ZjYyOWQ5OThiMDJhMGQwOTQ5ZGQxMjJkZiIsImp0aSI6IjJjNGJjNGNlLTA4MzQtNDZkYS1hMzZlLWFlMTk5ZDE2N2ZlNCIsImlhdCI6MTc5MTM1MTc2NSwibmJmIjoxNzkxMzUxNzY1LCJleHAiOjE3OTEzNTE4ODV9.tkBBrNve_cw2JdL4fG4QSR6a9kBvJ-HTjiJy7SO6u8NfHi4Y3BQiPm9LA7wnv_W3ph9Bgs8Mxh-2PFZuS6mnZGv1LnowVEHusmOpkovx68BHbxoGUU1Xsoy4o7FzOKiLgtC_o8LMZJwS5lBWQ_XuMCBAe3Vr_vf_n3C8pg34a5DlDT2JkDgCvJPzfZ6Di5hyNRDRn8Gr2pu3v2oWEJH4Ss3Op2-lGhWeKXEb_yxCTykrPG07GxRtaNC8MT4FKf4x1fqrYyIeJz_Jje7A_AaP3WzTwQ-7jHP_kcfjzIVpDb7E-M9D2DU0-CTQdiLwYrZ_uzJSTYfGKPrevQK3zhIPZQ\",\"data\":\"eyJzY2hlbWFfdmVyc2lvbiI6MiwiZXZlbnRfdHlwZSI6ImVtYmVkZGluZyIsImZlYXR1cmUiOiJlbWJlZGRpbmciLCJtb2RlbF91c2VkIjoiZW1iZWQtdi00LTAiLCJwcm92aWRlcl91c2VkIjoiYXp1cmUtY29oZXJlIiwiY291bnQiOjI0LCJpbnB1dF90b2tlbnMiOjkxMDAsIm91dHB1dF90b2tlbnMiOjAsImNhY2hlX3JlYWRfdG9rZW5zIjowLCJjb3N0X2Jhc2lzIjoiZXN0aW1hdGVkIiwiZXN0aW1hdGVkIjp0cnVlLCJyZXF1ZXN0X2RpZ2VzdCI6Ijk2ZWM2NjZmOTU2NjU3MjNjMjZkMWE3YTRjZjA1Zjk3NjE1YTllZTE5NjUxOGY5OWEzZTRkNzM2ODAzYmM3MTEiLCJvcmdfaWQiOiJvcmctZml4dHVyZS1hIiwiemRyIjpmYWxzZSwiaWRlbXBvdGVuY3lfa2V5IjoidXNhZ2U6ZW1iZWRkaW5nOjk2ZWM2NjZmOTU2NjU3MjNjMjZkMWE3YTRjZjA1Zjk3NjE1YTllZTE5NjUxOGY5OWEzZTRkNzM2ODAzYmM3MTEifQ\"}",
+      "expect": {
+        "cache_read_tokens": 0,
+        "cost_basis": "estimated",
+        "count": 24,
+        "estimated": true,
+        "event_type": "embedding",
+        "feature": "embedding",
+        "idempotency_key": "usage:embedding:96ec666f95665723c26d1a7a4cf05f97615a9ee196518f99a3e4d736803bc711",
+        "input_tokens": 9100,
+        "model_used": "embed-v-4-0",
+        "org_id": "org-fixture-a",
+        "output_tokens": 0,
+        "provider_used": "azure-cohere",
+        "request_digest": "96ec666f95665723c26d1a7a4cf05f97615a9ee196518f99a3e4d736803bc711",
+        "units": null,
+        "zdr": false
+      },
+      "name": "embedding-estimated",
+      "producer": "embedding-engine-rs"
+    },
+    {
+      "envelope": "{\"authorization\":\"Bearer eyJ0eXAiOiJKV1QiLCJhbGciOiJSUzI1NiIsImtpZCI6ImVtYmVkZGluZy1ldmVudHMtdjEifQ.eyJpc3MiOiJzZXJ2aWNlOmVtYmVkZGluZy1lbmdpbmUtcnMiLCJzdWIiOiJzZXJ2aWNlOmVtYmVkZGluZy1lbmdpbmUtcnMiLCJhdWQiOiJkYXRhcGxhbmUtZXZlbnRzIiwicHJpbmNpcGFsX3R5cGUiOiJzZXJ2aWNlIiwib3JnX2lkIjoib3JnLWZpeHR1cmUtemRyIiwic2NvcGVzIjpbImV2ZW50czplbWJlZGRpbmc6cHVibGlzaCJdLCJ6ZHIiOnRydWUsImV2ZW50X3R5cGUiOiJkYXRhcGxhbmUuY29zdC5sZWRnZXIiLCJwYXlsb2FkX3NoYTI1NiI6IjA1ZDk3NTE0MTljMjhiOWM1OTY5NmM0YTRkZjMwMzE0ZDQ1OTA0OWExMzM0OTA2ODUxZGRmYzc3MzNhYjZkZmMiLCJqdGkiOiIxYTBlMzE2MC1kZGEzLTRlYzktYWYyMi1mMjA2NjQwMDdjZjciLCJpYXQiOjE3OTEzNTE3NjUsIm5iZiI6MTc5MTM1MTc2NSwiZXhwIjoxNzkxMzUxODg1fQ.Z1kAkJDFoY6JRPCb-2lr957WVozqRKqAB0Ez5eRWDlHQNTYEymTLnccV8EU354oEs-4zL7Hk46Hvh3t_TEbhlpRWepnJ6jFbvPra7IdQ577zZE3FDbWcGNdMI9xPmGAC5kIzO73Zv0BfyJ2cSQT1mnf_ulpUrlKg6RTijk9V5umv-6T0l1Qkn0-BmjNhQnpNcdQioTQHtvjdVGQBq9rdcXZ2fDtxXMLvq46MLC3yJgvVk6yt6t_edB8wDudVA-bFARPULDBcmutCmmelLRwgWgxWs8R0mVaDGP2PuP0XWBUU0WFiK4pI3JY6uBdCLwL7L_cf83r_SUVbseFUXwb_DA\",\"data\":\"eyJzY2hlbWFfdmVyc2lvbiI6MiwiZXZlbnRfdHlwZSI6ImxsbSIsImZlYXR1cmUiOiJjb250ZXh0dWFsLXJldHJpZXZhbCIsIm1vZGVsX3VzZWQiOiJncHQtNG8tbWluaS0yMDI0LTA3LTE4IiwicHJvdmlkZXJfdXNlZCI6ImF6dXJlLW9wZW5haSIsImNvdW50IjoxLCJpbnB1dF90b2tlbnMiOjkwMCwib3V0cHV0X3Rva2VucyI6NDAsImNhY2hlX3JlYWRfdG9rZW5zIjowLCJjb3N0X2Jhc2lzIjoibWV0ZXJlZCIsImVzdGltYXRlZCI6ZmFsc2UsInJlcXVlc3RfZGlnZXN0IjoiM2NiMDUwNzQ5MDYxMzJjZTY1Y2EwZmZmMjY5YmFkMGEyNWFmMTQ4YzkwNTQyNWUxZDM0YjI2YzM4NjMyZGNiYyIsIm9yZ19pZCI6Im9yZy1maXh0dXJlLXpkciIsInpkciI6dHJ1ZSwiaWRlbXBvdGVuY3lfa2V5IjoidXNhZ2U6Y29udGV4dHVhbC1yZXRyaWV2YWw6M2NiMDUwNzQ5MDYxMzJjZTY1Y2EwZmZmMjY5YmFkMGEyNWFmMTQ4YzkwNTQyNWUxZDM0YjI2YzM4NjMyZGNiYyJ9\"}",
+      "expect": {
+        "cache_read_tokens": 0,
+        "cost_basis": "metered",
+        "count": 1,
+        "estimated": false,
+        "event_type": "llm",
+        "feature": "contextual-retrieval",
+        "idempotency_key": "usage:contextual-retrieval:3cb05074906132ce65ca0fff269bad0a25af148c905425e1d34b26c38632dcbc",
+        "input_tokens": 900,
+        "model_used": "gpt-4o-mini-2024-07-18",
+        "org_id": "org-fixture-zdr",
+        "output_tokens": 40,
+        "provider_used": "azure-openai",
+        "request_digest": "3cb05074906132ce65ca0fff269bad0a25af148c905425e1d34b26c38632dcbc",
+        "units": null,
+        "zdr": true
+      },
+      "name": "contextual-retrieval-zero-retention",
+      "producer": "embedding-engine-rs"
+    },
+    {
+      "envelope": "{\"authorization\":\"Bearer eyJ0eXAiOiJKV1QiLCJhbGciOiJSUzI1NiIsImtpZCI6ImdyYXBoLWV2ZW50cy12MSJ9.eyJpc3MiOiJzZXJ2aWNlOmdyYXBoLWluZGV4LXJzIiwic3ViIjoic2VydmljZTpncmFwaC1pbmRleC1ycyIsImF1ZCI6ImRhdGFwbGFuZS1ldmVudHMiLCJwcmluY2lwYWxfdHlwZSI6InNlcnZpY2UiLCJvcmdfaWQiOiJvcmctZml4dHVyZS1hIiwic2NvcGVzIjpbImV2ZW50czpncmFwaDpwdWJsaXNoIl0sInpkciI6ZmFsc2UsImV2ZW50X3R5cGUiOiJkYXRhcGxhbmUuY29zdC5sZWRnZXIiLCJwYXlsb2FkX3NoYTI1NiI6ImVjZjc4ODA5YjkwZDRkODBjMzIxODVmZTJiN2M0N2Y4ZTQwZDZhNjkwNjUxMTdiYjUyY2I3ZGU5YjIxNjAwMTgiLCJqdGkiOiJkODUyYmJkOS1lNTE4LTQ3Y2QtODNmMS1mZWU1ZDZlMzA2MzQiLCJpYXQiOjE3OTEzNTE3NjUsIm5iZiI6MTc5MTM1MTc2NSwiZXhwIjoxNzkxMzUxODg1fQ.hjFTOHyYJ6iPGky6MQR3bgXRUU6Kt0w9pE7gGF3rmSBcgxvWs7AJ7yK0BuE0vsRu8ecZjhrRxPBF6vqbfyFGp30ammxDH98SDNv6EHTbQYeJHiBZcDpBChuI5XSN03jHVO0GiXtnCWbxsjnfrvCjE9C7uRlTMAuqITEHdunMxt9ncc0akHvPff7xEyAqZgK-hN6K8je6jZG2ngb7iEbDZ0kYIux2RuqRg7xOPpufTJWIY-Ch78n1Ureut_AJW7jTkBmo7A-hArTARz6vq5cPDTeNSygdFTKfaNOLms307e8ZceFa4Mg6b4mvxBvuPBPkTEkOJTEwLXM7DJUvpB0l_w\",\"data\":\"eyJzY2hlbWFfdmVyc2lvbiI6MiwiZXZlbnRfdHlwZSI6ImxsbSIsImZlYXR1cmUiOiJncmFwaC1leHRyYWN0aW9uIiwibW9kZWxfdXNlZCI6ImdwdC00byIsInByb3ZpZGVyX3VzZWQiOiJhenVyZS1vcGVuYWkiLCJjb3VudCI6MiwiaW5wdXRfdG9rZW5zIjo0MDAwLCJvdXRwdXRfdG9rZW5zIjo3ODAsImNhY2hlX3JlYWRfdG9rZW5zIjowLCJjb3N0X2Jhc2lzIjoibWV0ZXJlZCIsImVzdGltYXRlZCI6ZmFsc2UsInJlcXVlc3RfZGlnZXN0IjoiN2NkY2RhOGVhNjkyNmMyNDliNGQ1NTM0Nzk2ZDczMDEyY2M1ODdiMjgxNjU0YjhkMWQ2MWYyMTM2ZTY5YzQ5NiIsIm9yZ19pZCI6Im9yZy1maXh0dXJlLWEiLCJ6ZHIiOmZhbHNlLCJpZGVtcG90ZW5jeV9rZXkiOiJ1c2FnZTpncmFwaC1leHRyYWN0aW9uOjdjZGNkYThlYTY5MjZjMjQ5YjRkNTUzNDc5NmQ3MzAxMmNjNTg3YjI4MTY1NGI4ZDFkNjFmMjEzNmU2OWM0OTYifQ\"}",
+      "expect": {
+        "cache_read_tokens": 0,
+        "cost_basis": "metered",
+        "count": 2,
+        "estimated": false,
+        "event_type": "llm",
+        "feature": "graph-extraction",
+        "idempotency_key": "usage:graph-extraction:7cdcda8ea6926c249b4d5534796d73012cc587b281654b8d1d61f2136e69c496",
+        "input_tokens": 4000,
+        "model_used": "gpt-4o",
+        "org_id": "org-fixture-a",
+        "output_tokens": 780,
+        "provider_used": "azure-openai",
+        "request_digest": "7cdcda8ea6926c249b4d5534796d73012cc587b281654b8d1d61f2136e69c496",
+        "units": null,
+        "zdr": false
+      },
+      "name": "graph-extraction",
+      "producer": "graph-index-rs"
+    },
+    {
+      "envelope": "{\"authorization\":\"Bearer eyJ0eXAiOiJKV1QiLCJhbGciOiJSUzI1NiIsImtpZCI6ImdyYXBoLWV2ZW50cy12MSJ9.eyJpc3MiOiJzZXJ2aWNlOmdyYXBoLWluZGV4LXJzIiwic3ViIjoic2VydmljZTpncmFwaC1pbmRleC1ycyIsImF1ZCI6ImRhdGFwbGFuZS1ldmVudHMiLCJwcmluY2lwYWxfdHlwZSI6InNlcnZpY2UiLCJvcmdfaWQiOiJvcmctZml4dHVyZS16ZHIiLCJzY29wZXMiOlsiZXZlbnRzOmdyYXBoOnB1Ymxpc2giXSwiemRyIjp0cnVlLCJldmVudF90eXBlIjoiZGF0YXBsYW5lLmNvc3QubGVkZ2VyIiwicGF5bG9hZF9zaGEyNTYiOiJmMjVjZTY5YzkzNjk2YjVkMDgwYzYyMzg5M2QyMDk1NDI5YWM3YTBlYzEzZWI0ZmQ2OGEyMjAyMTI1YzZkYzZjIiwianRpIjoiZDFjZGFmNDYtODhkYS00NmY5LTk5MGMtZGY3MjdmMTQxODVmIiwiaWF0IjoxNzkxMzUxNzY1LCJuYmYiOjE3OTEzNTE3NjUsImV4cCI6MTc5MTM1MTg4NX0.SavQzjGj6kgARIo_JHIDJoe60X5cal9wrObSTNQz-R8dzLcSK5xoONhCKUlHSivFOK_HUzJrDWFd56-WhninZD8uQ9sKsbKLKGZSi6dIC6Q29U3V8M0PUbuhR3yFDb_yIs3291l4zFYfQb-_8SKPdDA2-ZXf6GaFfKGOXSgxMsbnkxwJF5db_LjuTuCdcBfirGq0N-hNHJoWMec_BNowQi3vAlSMT3sjkDbYhS5FgXkkoMaJ9jH4irZYmYKwW2w-YMFJE4yS9npKlGjaGCfeZM0kv8uPT7nKPp5UY5x3GqVWrzhPdlgHaHClJqo9jFLCtBIIO-8yCzA-VFUyOuCnGg\",\"data\":\"eyJzY2hlbWFfdmVyc2lvbiI6MiwiZXZlbnRfdHlwZSI6ImxsbSIsImZlYXR1cmUiOiJncmFwaC1jb21tdW5pdHktc3VtbWFyeSIsIm1vZGVsX3VzZWQiOiJncHQtNG8iLCJwcm92aWRlcl91c2VkIjoiYXp1cmUtb3BlbmFpIiwiY291bnQiOjEsImlucHV0X3Rva2VucyI6MzAwMCwib3V0cHV0X3Rva2VucyI6MjIwLCJjYWNoZV9yZWFkX3Rva2VucyI6MCwiY29zdF9iYXNpcyI6Im1ldGVyZWQiLCJlc3RpbWF0ZWQiOmZhbHNlLCJyZXF1ZXN0X2RpZ2VzdCI6IjYzMzAxY2M4MjZmOTUyMzI3MGUwNmQ1NGI1MTFiYWFkODNkOTUwYTdkNzE4MmY2YjA3N2Y3ZjE1Yzk3ZGQ0ZTYiLCJvcmdfaWQiOiJvcmctZml4dHVyZS16ZHIiLCJ6ZHIiOnRydWUsImlkZW1wb3RlbmN5X2tleSI6InVzYWdlOmdyYXBoLWNvbW11bml0eS1zdW1tYXJ5OjYzMzAxY2M4MjZmOTUyMzI3MGUwNmQ1NGI1MTFiYWFkODNkOTUwYTdkNzE4MmY2YjA3N2Y3ZjE1Yzk3ZGQ0ZTYifQ\"}",
+      "expect": {
+        "cache_read_tokens": 0,
+        "cost_basis": "metered",
+        "count": 1,
+        "estimated": false,
+        "event_type": "llm",
+        "feature": "graph-community-summary",
+        "idempotency_key": "usage:graph-community-summary:63301cc826f9523270e06d54b511baad83d950a7d7182f6b077f7f15c97dd4e6",
+        "input_tokens": 3000,
+        "model_used": "gpt-4o",
+        "org_id": "org-fixture-zdr",
+        "output_tokens": 220,
+        "provider_used": "azure-openai",
+        "request_digest": "63301cc826f9523270e06d54b511baad83d950a7d7182f6b077f7f15c97dd4e6",
+        "units": null,
+        "zdr": true
+      },
+      "name": "graph-community-summary-zero-retention",
+      "producer": "graph-index-rs"
+    },
+    {
+      "envelope": "{\"authorization\":\"Bearer eyJ0eXAiOiJKV1QiLCJhbGciOiJSUzI1NiIsImtpZCI6InJldHJpZXZhbC1ldmVudHMtdjEifQ.eyJpc3MiOiJzZXJ2aWNlOnJldHJpZXZhbC1lbmdpbmUtcnMiLCJzdWIiOiJzZXJ2aWNlOnJldHJpZXZhbC1lbmdpbmUtcnMiLCJhdWQiOiJkYXRhcGxhbmUtZXZlbnRzIiwicHJpbmNpcGFsX3R5cGUiOiJzZXJ2aWNlIiwib3JnX2lkIjoib3JnLWZpeHR1cmUtYSIsInNjb3BlcyI6WyJldmVudHM6cmV0cmlldmFsOnB1Ymxpc2giXSwiemRyIjpmYWxzZSwiZXZlbnRfdHlwZSI6ImRhdGFwbGFuZS5jb3N0LmxlZGdlciIsInBheWxvYWRfc2hhMjU2IjoiMDk1ZGY5NThlZWM0NmVjNjVkYjk4OWQxN2Q5NmMyMmI0MTM3N2Q3YWQ4ZGIxZTgyN2M5NGM0NGY5Nzc4MTFjNiIsImp0aSI6IjdmNGZiOTBkLTFhNmItNDBjZS04ODhhLWJiMDc3MjU4MjRlYiIsImlhdCI6MTc5MTM1MTc2NSwibmJmIjoxNzkxMzUxNzY1LCJleHAiOjE3OTEzNTE4ODV9.g0l-mRK3QE9jcJUPL1EZfz_-sqn_LzQkmD7fd-cZkDVYuuZSL3KnmdHuJ6deM0SSlUISbBQlyhyp5qPuzcSb-b88QdE-IRhdAQCm-oDkw0X6jxCGWDtz1-hKxXQndYArGLjPE5bCS7cFqOBZdKhLK6cS2WK2j_5WVSrFEBNMhBc57cUGhO1RRLhw5G32l4ofD99uHXubmkDL1jKZCiowxuqThcPhmdjMovM6x7tWComUNNHQtopTa8HwH8zuSmSogfR4BTca-qVcf9Zf-utixeUincf-MDRXwcVYKc9uC_J_Z0kaQzO2RtU94KMFE-KONZ7aceqLAVNxQcSUCS5dsQ\",\"data\":\"eyJzY2hlbWFfdmVyc2lvbiI6MiwiZXZlbnRfdHlwZSI6InJlcmFuayIsImZlYXR1cmUiOiJ3ZWItcmVyYW5rIiwibW9kZWxfdXNlZCI6InJlcmFuay12NC4wLXBybyIsInByb3ZpZGVyX3VzZWQiOiJhenVyZS1vcGVuYWkiLCJjb3VudCI6MSwiaW5wdXRfdG9rZW5zIjowLCJvdXRwdXRfdG9rZW5zIjowLCJjYWNoZV9yZWFkX3Rva2VucyI6MCwidW5pdHMiOjMsImNvc3RfYmFzaXMiOiJtZXRlcmVkIiwiZXN0aW1hdGVkIjpmYWxzZSwicmVxdWVzdF9kaWdlc3QiOiI5YTQ3YjVhOTIwZjYxOGZkNjU5MDc1NWYzNDgxYjhmMGU5MzQwYzY4ZDgyM2ZkMjZhOWY3NzNmMzU3ZmY2MTBmIiwib3JnX2lkIjoib3JnLWZpeHR1cmUtYSIsInpkciI6ZmFsc2UsImlkZW1wb3RlbmN5X2tleSI6InVzYWdlOndlYi1yZXJhbms6OWE0N2I1YTkyMGY2MThmZDY1OTA3NTVmMzQ4MWI4ZjBlOTM0MGM2OGQ4MjNmZDI2YTlmNzczZjM1N2ZmNjEwZiJ9\"}",
+      "expect": {
+        "cache_read_tokens": 0,
+        "cost_basis": "metered",
+        "count": 1,
+        "estimated": false,
+        "event_type": "rerank",
+        "feature": "web-rerank",
+        "idempotency_key": "usage:web-rerank:9a47b5a920f618fd6590755f3481b8f0e9340c68d823fd26a9f773f357ff610f",
+        "input_tokens": 0,
+        "model_used": "rerank-v4.0-pro",
+        "org_id": "org-fixture-a",
+        "output_tokens": 0,
+        "provider_used": "azure-openai",
+        "request_digest": "9a47b5a920f618fd6590755f3481b8f0e9340c68d823fd26a9f773f357ff610f",
+        "units": 3,
+        "zdr": false
+      },
+      "name": "web-rerank-units",
+      "producer": "retrieval-engine-rs"
+    }
+  ],
+  "contract": "usage-ledger-rs envelopes, schema_version 2",
+  "generator": "UPDATE_USAGE_FIXTURE=1 cargo test -p usage-ledger-rs --test envelope_fixture",
+  "producers": {
+    "embedding-engine-rs": {
+      "issuer": "service:embedding-engine-rs",
+      "key_id": "embedding-events-v1",
+      "public_key_pem": "-----BEGIN PUBLIC KEY-----\nMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAxJgnZ1Cre9EN4+4yqPKa\ntvOswykzMiTAUfO4+0pBvhU3haDSWKOohxHfRiqmOOpvo3TnkIajg4+RprtWfW5I\n12r409Od3PehqvfsOZV6C33im8tax6+aQstHRRwgtvX2QQ1opM2qGHOgKWzf89Uj\nIapXSHKgIUAkjZ8tjiZfMvQ4SIXCyQXua5JRAEwKuzT8jxp8X4eeOusysESh1pdG\nn/k/ferNNjQ6sXGMtUh+yzRyyeMJMFWJxmKrqjKxlNEbZzHUuw8YwXGdLOS/W6/R\nMnI0dG/Tr/Yn0Rc0lJKIxotw3D2phwGSzVA44S1yRWDc/EpNLRrtVwozbrYAjkir\ngwIDAQAB\n-----END PUBLIC KEY-----\n",
+      "scope": "events:embedding:publish"
+    },
+    "graph-index-rs": {
+      "issuer": "service:graph-index-rs",
+      "key_id": "graph-events-v1",
+      "public_key_pem": "-----BEGIN PUBLIC KEY-----\nMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA10FV3Sf0lnkzcwl0RKBr\nt0wV52xrsJEmfFtHf4XXqpai706aaQjKksStZOQM+BJywQ9jYhFoNrcEJGLA1Avx\nNXYIH2bUmeFEFGqX0SEbOhU2bjtud1vQ7E2O1FxSPGyNX/dGDoyAtjw9PYulrrNi\nt1LduE6u7Z3nUpNYodXLXvdpBWGbvHD4x0R705L96Ed+pnLv2QUnVDrF8NFkAQXF\n2vUzyMGOv50J4lAO92xTP/nBO/FK98fwtxFbXDanzZhlS+W0Nuw8zQziuNcSAtNT\np1fdz3b6mkIu3Ci7o1oksY0rGTncqMF2Ef6juepw2d/RypYFSQ2qova8LrFcDwQp\ngwIDAQAB\n-----END PUBLIC KEY-----\n",
+      "scope": "events:graph:publish"
+    },
+    "retrieval-engine-rs": {
+      "issuer": "service:retrieval-engine-rs",
+      "key_id": "retrieval-events-v1",
+      "public_key_pem": "-----BEGIN PUBLIC KEY-----\nMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAvhLy1uYx0WI0o3xxF4Ex\njZW5wy0abZdBdHGZ/OjTZh7vRi5lKnIQjA3P0bXYP7/c9khenBYRt0BAkwjZabuq\n+Vy/5Fl2xnuJJzAeKOwh/J7ZDXMdqb16CJ4JI4F2RDYPMRW+NVYltN1RyHbJdfnS\nFLp2gHK0Bh+K1I3DC/9/z0iJmaIGuiWCfkrMUJGNvacnX9ObLdtoQJm59/e3EMFX\nwKNPFFq+vthOZwNoUXsxJyRTeSgAZlqJjZhV0KJpsa1F1u04L5CnvpsH6iP6LBNQ\nimulIkdMmWbPv09+wrro3VDMSAgr0IqQ3YO2FCBSkoi4QRgN42Lnk0tg1Eh5Etd1\n3QIDAQAB\n-----END PUBLIC KEY-----\n",
+      "scope": "events:retrieval:publish"
+    }
+  },
+  "signed_at": 1791351743,
+  "subject": "dataplane.cost.ledger"
+}

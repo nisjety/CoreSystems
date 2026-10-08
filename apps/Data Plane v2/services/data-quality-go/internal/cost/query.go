@@ -1,6 +1,6 @@
 // Package cost queries the cost_events ledger and produces consumption
 // summaries per org. The events are written by data-orchestrator-go from
-// NATS.
+// NATS (the usage ledger, design task CR-T10: the durable DATAPLANE_COST stream).
 package cost
 
 import (
@@ -22,12 +22,29 @@ func NewQuery(pool *pgxpool.Pool) *Query {
 	return &Query{pool: pool}
 }
 
+// Bucket is one (event type, feature, model) of the ledger. The first five fields are what the
+// summary has always said and keep their meaning. The rest come from the usage ledger rows
+// (schema_version 2): exact tokens as the provider reported them, which a version 1 row never
+// had, so a bucket that holds only version 1 rows reports zero of them and Estimated true.
 type Bucket struct {
-	EventType   string `json:"event_type"`
+	EventType string `json:"event_type"`
+	// Feature is what caused the spend (contextual-retrieval, graph-extraction, embedding,
+	// rerank, ...). Empty for a row whose kind the table was not built for.
+	Feature     string `json:"feature"`
 	Model       string `json:"model"`
 	EventCount  int    `json:"event_count"`
-	UnitsTotal  int    `json:"units_total"`  // sum(count) — chunks/queries processed
-	TokensTotal int64  `json:"tokens_total"` // sum(estimated_tokens)
+	UnitsTotal  int    `json:"units_total"`  // sum(count): provider calls, texts or candidates, by event type
+	TokensTotal int64  `json:"tokens_total"` // sum(estimated_tokens): input + output for version 2 rows
+	// InputTokens, OutputTokens and CacheReadTokens are sums of what version 2 rows recorded.
+	// CacheReadTokens is detail of InputTokens, not an addition to it.
+	InputTokens     int64 `json:"input_tokens"`
+	OutputTokens    int64 `json:"output_tokens"`
+	CacheReadTokens int64 `json:"cache_read_tokens"`
+	// Estimated is true when any row of the bucket carries numbers that are not
+	// provider-reported: an embedding estimate (bytes / 4) or a version 1 row.
+	Estimated bool `json:"estimated"`
+	// ZDREvents counts the events of zero-retention organizations: recorded as counters only.
+	ZDREvents int `json:"zdr_events"`
 }
 
 type Summary struct {
@@ -58,18 +75,7 @@ func (q *Query) Summary(ctx context.Context, orgID string, from, to time.Time) (
 
 	return orgscope.InOrgScope(ctx, q.pool, orgID,
 		func(ctx context.Context, tx pgx.Tx) (*Summary, error) {
-			rows, err := tx.Query(ctx, `
-				SELECT event_type, model,
-				       COUNT(*)               AS event_count,
-				       COALESCE(SUM(count), 0)            AS units_total,
-				       COALESCE(SUM(estimated_tokens), 0) AS tokens_total
-				FROM cost_events
-				WHERE org_id = $1
-				  AND created_at >= $2
-				  AND created_at <  $3
-				GROUP BY event_type, model
-				ORDER BY tokens_total DESC
-			`, orgID, from, to)
+			rows, err := tx.Query(ctx, summarySQL, orgID, from, to)
 			if err != nil {
 				return nil, fmt.Errorf("query cost events: %w", err)
 			}
@@ -79,7 +85,8 @@ func (q *Query) Summary(ctx context.Context, orgID string, from, to time.Time) (
 			summary := &Summary{OrgID: orgID, From: from, To: to, Buckets: []Bucket{}}
 			for rows.Next() {
 				var b Bucket
-				if err := rows.Scan(&b.EventType, &b.Model, &b.EventCount, &b.UnitsTotal, &b.TokensTotal); err != nil {
+				if err := rows.Scan(&b.EventType, &b.Feature, &b.Model, &b.EventCount, &b.UnitsTotal, &b.TokensTotal,
+					&b.InputTokens, &b.OutputTokens, &b.CacheReadTokens, &b.Estimated, &b.ZDREvents); err != nil {
 					return nil, fmt.Errorf("scan bucket: %w", err)
 				}
 				summary.Buckets = append(summary.Buckets, b)
@@ -93,3 +100,24 @@ func (q *Query) Summary(ctx context.Context, orgID string, from, to time.Time) (
 			return summary, nil
 		})
 }
+
+// summarySQL is the one statement of the summary. A version 1 row has NULL exact columns, which
+// sum to zero here and mark its bucket estimated (a row is exact only when it says so:
+// estimated IS FALSE), so a report never presents a count-only event as a measurement.
+const summarySQL = `
+	SELECT event_type, COALESCE(feature, '') AS feature, model,
+	       COUNT(*)                                   AS event_count,
+	       COALESCE(SUM(count), 0)                    AS units_total,
+	       COALESCE(SUM(estimated_tokens), 0)         AS tokens_total,
+	       COALESCE(SUM(input_tokens), 0)             AS input_tokens,
+	       COALESCE(SUM(output_tokens), 0)            AS output_tokens,
+	       COALESCE(SUM(cache_read_tokens), 0)        AS cache_read_tokens,
+	       BOOL_OR(estimated IS DISTINCT FROM FALSE)  AS estimated,
+	       COUNT(*) FILTER (WHERE zdr)                AS zdr_events
+	FROM cost_events
+	WHERE org_id = $1
+	  AND created_at >= $2
+	  AND created_at <  $3
+	GROUP BY event_type, COALESCE(feature, ''), model
+	ORDER BY tokens_total DESC, event_type, feature, model
+`

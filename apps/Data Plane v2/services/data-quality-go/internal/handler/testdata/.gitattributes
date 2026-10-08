@@ -1,0 +1,4 @@
+# Contract goldens are hashed byte for byte (SHA256SUMS pins every file of a directory, README.md
+# included, and the consumer vendors the directory unchanged). Pin the checkout to LF so a Windows
+# clone with core.autocrlf=true cannot change a hash.
+* text eol=lf

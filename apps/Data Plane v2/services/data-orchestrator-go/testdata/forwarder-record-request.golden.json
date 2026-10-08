@@ -1,0 +1,140 @@
+{
+  "contract": "data-orchestrator forwarder to cost-core: POST /api/v1/cost/record",
+  "endpoint": "POST /api/v1/cost/record",
+  "audience": "cost-core",
+  "principal": "data-orchestrator",
+  "scope": "cost:write",
+  "note": "Each body is posted exactly as written (compact JSON, this field order) with a bearer minted for the organization in its org_id. cost-core must answer 202 for every body, and again for a second post of the same body without recording a second row. The idempotency key starts with the organization because cost-core's unique index on it is global.",
+  "cases": [
+    {
+      "name": "llm-metered-contextual-retrieval",
+      "row": {
+        "org_id": "org-golden-a",
+        "model": "gpt-4o-mini-2024-07-18",
+        "feature": "contextual-retrieval",
+        "provider_used": "azure-openai",
+        "input_tokens": 3672,
+        "output_tokens": 177,
+        "cache_read_tokens": 2048,
+        "cost_basis": "metered",
+        "estimated": false,
+        "request_id": "ca45143c1e5d2b759c9d0a268d2488318bd1b709c4dd9275e265e0f75c4b1153",
+        "idempotency_key": "org-golden-a:usage:contextual-retrieval:ca45143c1e5d2b759c9d0a268d2488318bd1b709c4dd9275e265e0f75c4b1153"
+      },
+      "body": {
+        "org_id": "org-golden-a",
+        "request_id": "ca45143c1e5d2b759c9d0a268d2488318bd1b709c4dd9275e265e0f75c4b1153",
+        "model": "gpt-4o-mini-2024-07-18",
+        "provider_used": "azure-openai",
+        "input_tokens": 3672,
+        "output_tokens": 177,
+        "cache_read_input_tokens": 2048,
+        "cost_basis": "metered",
+        "idempotency_key": "dataplane:org-golden-a:usage:contextual-retrieval:ca45143c1e5d2b759c9d0a268d2488318bd1b709c4dd9275e265e0f75c4b1153",
+        "feature": "contextual-retrieval"
+      }
+    },
+    {
+      "name": "embedding-estimated-has-no-cost-basis",
+      "row": {
+        "org_id": "org-golden-a",
+        "model": "embed-v-4-0",
+        "feature": "embedding",
+        "provider_used": "azure-cohere",
+        "input_tokens": 9100,
+        "output_tokens": 0,
+        "cache_read_tokens": 0,
+        "cost_basis": "estimated",
+        "estimated": true,
+        "request_id": "bd8d2b7b7b536d7bc8048aa376bdbb4850677327b37345b5e90f8d0fcb6fc189",
+        "idempotency_key": "org-golden-a:usage:embedding:bd8d2b7b7b536d7bc8048aa376bdbb4850677327b37345b5e90f8d0fcb6fc189"
+      },
+      "body": {
+        "org_id": "org-golden-a",
+        "request_id": "bd8d2b7b7b536d7bc8048aa376bdbb4850677327b37345b5e90f8d0fcb6fc189",
+        "model": "embed-v-4-0",
+        "provider_used": "azure-cohere",
+        "input_tokens": 9100,
+        "output_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "idempotency_key": "dataplane:org-golden-a:usage:embedding:bd8d2b7b7b536d7bc8048aa376bdbb4850677327b37345b5e90f8d0fcb6fc189",
+        "feature": "embedding"
+      }
+    },
+    {
+      "name": "web-rerank-units",
+      "row": {
+        "org_id": "org-golden-b",
+        "model": "rerank-v4.0-pro",
+        "feature": "web-rerank",
+        "provider_used": "azure-cohere",
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "cache_read_tokens": 0,
+        "units": 3,
+        "cost_basis": "metered",
+        "estimated": false,
+        "request_id": "e808f8e5ba1aec7259ae9428e9ea5dbba65c0c3301b3cfa6b3425231ef1f782a",
+        "idempotency_key": "org-golden-b:usage:web-rerank:e808f8e5ba1aec7259ae9428e9ea5dbba65c0c3301b3cfa6b3425231ef1f782a"
+      },
+      "body": {
+        "org_id": "org-golden-b",
+        "request_id": "e808f8e5ba1aec7259ae9428e9ea5dbba65c0c3301b3cfa6b3425231ef1f782a",
+        "model": "rerank-v4.0-pro",
+        "provider_used": "azure-cohere",
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "cost_basis": "metered",
+        "idempotency_key": "dataplane:org-golden-b:usage:web-rerank:e808f8e5ba1aec7259ae9428e9ea5dbba65c0c3301b3cfa6b3425231ef1f782a",
+        "feature": "web-rerank",
+        "units": 3
+      }
+    },
+    {
+      "name": "graph-extraction-zero-retention-organization",
+      "row": {
+        "org_id": "org-golden-zdr",
+        "model": "gpt-4o",
+        "feature": "graph-extraction",
+        "provider_used": "azure-openai",
+        "input_tokens": 4000,
+        "output_tokens": 780,
+        "cache_read_tokens": 0,
+        "cost_basis": "metered",
+        "estimated": false,
+        "request_id": "34a0f9f5fe6382f96963fd87632ea6094af33f17fc3dc9a0b489c4d43c3bb0db",
+        "idempotency_key": "org-golden-zdr:usage:graph-extraction:34a0f9f5fe6382f96963fd87632ea6094af33f17fc3dc9a0b489c4d43c3bb0db"
+      },
+      "body": {
+        "org_id": "org-golden-zdr",
+        "request_id": "34a0f9f5fe6382f96963fd87632ea6094af33f17fc3dc9a0b489c4d43c3bb0db",
+        "model": "gpt-4o",
+        "provider_used": "azure-openai",
+        "input_tokens": 4000,
+        "output_tokens": 780,
+        "cache_read_input_tokens": 0,
+        "cost_basis": "metered",
+        "idempotency_key": "dataplane:org-golden-zdr:usage:graph-extraction:34a0f9f5fe6382f96963fd87632ea6094af33f17fc3dc9a0b489c4d43c3bb0db",
+        "feature": "graph-extraction"
+      }
+    }
+  ],
+  "fields": [
+    "org_id",
+    "user_id",
+    "run_id",
+    "request_id",
+    "model",
+    "provider_used",
+    "input_tokens",
+    "output_tokens",
+    "cost_usd",
+    "idempotency_key",
+    "cache_read_input_tokens",
+    "cache_creation_input_tokens",
+    "cost_basis",
+    "feature",
+    "units"
+  ]
+}

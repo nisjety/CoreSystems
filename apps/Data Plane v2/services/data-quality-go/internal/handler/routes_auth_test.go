@@ -86,6 +86,10 @@ func TestProtectedRouteFamiliesEnforceFourShapeMatrix(t *testing.T) {
 		checkGates:  authorized,
 		lint:        authorized,
 		costSummary: authorized,
+		// CR-T11: the new read routes sit behind the same boundary. (The write route is operator-only and
+		// is exercised in policy_test.go through the real handler.)
+		contextCoverage: authorized,
+		getPolicy:       authorized,
 	})
 
 	routes := []struct {
@@ -100,6 +104,8 @@ func TestProtectedRouteFamiliesEnforceFourShapeMatrix(t *testing.T) {
 		{name: "quality gates", method: http.MethodGet, path: "/v1/quality/gates"},
 		{name: "quality lint", method: http.MethodGet, path: "/v1/quality/lint"},
 		{name: "cost summary", method: http.MethodGet, path: "/v1/cost/summary"},
+		{name: "context coverage", method: http.MethodGet, path: "/v1/quality/context-coverage"},
+		{name: "processing policy get", method: http.MethodGet, path: "/v1/admin/orgs/org_authorized/processing-policy"},
 	}
 	shapes := []struct {
 		name       string

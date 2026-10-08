@@ -26,6 +26,7 @@ import (
 	"github.com/triodelab/dataplane/services/data-quality-go/internal/lint"
 	"github.com/triodelab/dataplane/services/data-quality-go/internal/metrics"
 	apmotel "github.com/triodelab/dataplane/services/data-quality-go/internal/otel"
+	"github.com/triodelab/dataplane/services/data-quality-go/internal/policy"
 	"github.com/triodelab/dataplane/services/data-quality-go/internal/trust"
 )
 
@@ -84,11 +85,24 @@ func main() {
 		}
 	}()
 	scorer := trust.NewScorer(pool)
-	checker := gates.NewChecker(pool)
+	// Release gates (CR-T11). The coverage threshold is checked at boot (config.Load).
+	// The keyword-index parity gate reads quickwit-adapter's parity endpoint; with
+	// no SPARSE_INDEX_PARITY_URL it reports "unavailable", which fails the gate
+	// report (unread evidence is never a pass), and says so here.
+	gateOptions := []gates.Option{gates.WithCoverageThreshold(cfg.CoverageThresholdPercent)}
+	if cfg.SparseIndexParityURL != "" {
+		gateOptions = append(gateOptions, gates.WithParity(gates.NewHTTPParity(cfg.SparseIndexParityURL, nil, 5*time.Second)))
+	} else {
+		log.Warn().Msg("SPARSE_INDEX_PARITY_URL unset: the sparse_index_in_sync gate reports unavailable")
+	}
+	checker := gates.NewChecker(pool, gateOptions...)
 	linter := lint.NewLinter(pool)
 	costQuery := cost.NewQuery(pool)
 	goldenStore := eval.NewPostgresGoldenStore(pool)
-	qualityHandler := handler.NewQualityHandler(runner, goldenStore, scorer, checker, linter, costQuery)
+	qualityHandler := handler.NewQualityHandler(runner, goldenStore, scorer, checker, linter, costQuery).
+		WithPolicyStore(policy.NewStore(pool)).
+		// The retrieval-quality harness's results (CR-T14): POST /v1/evals/results, operator-only.
+		WithResultRecorder(eval.NewPostgresEvalStore(pool))
 
 	// Cross-plane GDPR erasure fan-out: org-core publishes
 	// verevon.gdpr.erasure.requested (explicit hard-delete AND its 30-day

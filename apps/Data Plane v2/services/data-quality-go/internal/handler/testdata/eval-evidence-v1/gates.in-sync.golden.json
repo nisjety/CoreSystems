@@ -1,0 +1,19 @@
+{
+  "all_passed": true,
+  "gates": [
+    {
+      "gate": "contextual_coverage_ok",
+      "passed": true,
+      "message": "1164 of 1164 expected units have a verified context (100.00%, threshold 99.00%)",
+      "value": "100.00",
+      "status": "passed"
+    },
+    {
+      "gate": "sparse_index_in_sync",
+      "passed": true,
+      "message": "the keyword index holds all 1164 eligible units, 1164 with their context",
+      "value": "1164/1164",
+      "status": "passed"
+    }
+  ]
+}

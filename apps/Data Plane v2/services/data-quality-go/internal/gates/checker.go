@@ -10,14 +10,63 @@ import (
 	"github.com/triodelab/dataplane/shared/go/orgscope"
 
 	"github.com/triodelab/dataplane/services/data-quality-go/internal/model"
+	"github.com/triodelab/dataplane/services/data-quality-go/internal/policy"
 )
 
 type Checker struct {
 	pool *pgxpool.Pool
+	// coverageThreshold is the percentage contextual_coverage_ok requires.
+	coverageThreshold float64
+	// parity reads the keyword index's parity report. Nil when the endpoint is
+	// not configured: sparse_index_in_sync then reports "unavailable".
+	parity ParitySource
 }
 
-func NewChecker(pool *pgxpool.Pool) *Checker {
-	return &Checker{pool: pool}
+// Option configures a Checker.
+type Option func(*Checker)
+
+// WithCoverageThreshold sets the percentage of eligible units that must have a
+// verified context (CONTEXT_COVERAGE_THRESHOLD_PERCENT, default 99).
+func WithCoverageThreshold(percent float64) Option {
+	return func(c *Checker) { c.coverageThreshold = percent }
+}
+
+// WithParity sets where the keyword index's parity report comes from.
+func WithParity(source ParitySource) Option {
+	return func(c *Checker) { c.parity = source }
+}
+
+func NewChecker(pool *pgxpool.Pool, options ...Option) *Checker {
+	checker := &Checker{pool: pool, coverageThreshold: DefaultCoverageThresholdPercent}
+	for _, option := range options {
+		option(checker)
+	}
+	return checker
+}
+
+// ContextCoverage reads the organization's contextual-retrieval coverage and
+// judges it by the same rule as the contextual_coverage_ok gate. The organization
+// comes from verified claims; the read runs in one scoped transaction.
+func (c *Checker) ContextCoverage(ctx context.Context, orgID string) (*CoverageReport, error) {
+	report := &CoverageReport{OrgID: orgID}
+	err := orgscope.WithOrgScope(ctx, c.pool, orgID, func(tx pgx.Tx) error {
+		counts, err := readCoverage(ctx, tx, orgID)
+		if err != nil {
+			return err
+		}
+		record, err := policy.Load(ctx, tx, orgID)
+		if err != nil {
+			return err
+		}
+		report.Counts = counts
+		report.Policy = settingOf(record)
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	report.Evaluation = EvaluateContextCoverage(report.Counts, report.Policy, c.coverageThreshold)
+	return report, nil
 }
 
 // tolerate runs a query whose failure must NOT fail the whole gate report.
@@ -52,6 +101,13 @@ func tolerate(ctx context.Context, tx pgx.Tx, run func(pgx.Tx) error) {
 // filter being dropped, not a replacement for it.
 func (c *Checker) CheckReleaseGates(ctx context.Context, orgID string) (*model.GateReport, error) {
 	var gates []model.GateResult
+	// What the sparse_index_in_sync gate needs from the database, read inside the
+	// scope below; the HTTP call to the adapter is made after the transaction has
+	// ended so that no pooled connection is held across a network round trip.
+	var (
+		parityPG    PostgresSide
+		parityPGErr error
+	)
 
 	err := orgscope.WithOrgScope(ctx, c.pool, orgID, func(tx pgx.Tx) error {
 		// Gate 1: retrieval traces exist
@@ -148,10 +204,54 @@ func (c *Checker) CheckReleaseGates(ctx context.Context, orgID string) (*model.G
 			Message: fmt.Sprintf("p95 retrieval latency: %dms (D5-10 spec gate: 800ms)", p95Ms),
 			Value:   fmt.Sprintf("%d", p95Ms),
 		})
+
+		// Gate 7 (CR-T11): contextual retrieval coverage. Read in a savepoint like
+		// the gates above: a database that does not have the migration yet is an
+		// UNAVAILABLE gate, not a failed report and never a pass.
+		var (
+			counts   CoverageCounts
+			setting  PolicySetting
+			coverErr error
+		)
+		tolerate(ctx, tx, func(sp pgx.Tx) error {
+			if counts, coverErr = readCoverage(ctx, sp, orgID); coverErr != nil {
+				return coverErr
+			}
+			record, err := policy.Load(ctx, sp, orgID)
+			if err != nil {
+				coverErr = err
+				return err
+			}
+			setting = settingOf(record)
+			return nil
+		})
+		if coverErr != nil {
+			gates = append(gates, unavailableCoverage("the coverage view or the policy table could not be read; has migration 20261003130000_context_provenance been applied?"))
+		} else {
+			gates = append(gates, EvaluateContextCoverage(counts, setting, c.coverageThreshold).GateOf())
+		}
+
+		// The database half of gate 8, counted with the adapter's own eligibility
+		// predicate and without the view, so it does not depend on the migration.
+		tolerate(ctx, tx, func(sp pgx.Tx) error {
+			parityPG, parityPGErr = readPostgresSide(ctx, sp, orgID)
+			return parityPGErr
+		})
 		return nil
 	})
 	if err != nil {
 		return nil, err
+	}
+
+	// Gate 8 (CR-T11): the keyword index is in sync with Postgres. The index is read
+	// through the adapter's parity endpoint (data-quality-go has no Quickwit access);
+	// without a configured, working endpoint the gate is "unavailable", which fails
+	// the report: unread evidence is never a pass.
+	if c.parity == nil {
+		gates = append(gates, unavailableParity("SPARSE_INDEX_PARITY_URL is not set, so there is no parity endpoint to read"))
+	} else {
+		report, fetchErr := c.parity.Fetch(ctx)
+		gates = append(gates, EvaluateSparseParity(orgID, parityPG, parityPGErr, report, fetchErr))
 	}
 
 	allPassed := true

@@ -120,6 +120,12 @@ type GateResult struct {
 	Passed  bool   `json:"passed"`
 	Message string `json:"message"`
 	Value   string `json:"value,omitempty"`
+	// Status says how the gate ended where "passed" is not enough. Set by the
+	// gates that can be unable to judge: "passed", "failed", "skipped_policy"
+	// (passed because an operator policy switched the feature off for the
+	// organization, said out loud) and "unavailable" (the evidence could not be
+	// read: never a pass). Gates that predate it leave it empty.
+	Status string `json:"status,omitempty"`
 }
 
 type GateReport struct {

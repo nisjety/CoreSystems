@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"testing"
@@ -14,10 +15,11 @@ import (
 )
 
 // TestPostgresOrgPurger_HardPurgeByOrg_IsolatesOtherOrgs seeds two
-// organizations' rows across both tables this service owns
-// (quality_eval_runs, eval_golden_judgments), purges org A, and asserts every
-// org B row survives untouched — the safety contract's required isolation
-// test (org A's purge must never be able to touch org B's rows).
+// organizations' rows across all three tables this service owns
+// (quality_eval_runs, eval_golden_judgments, org_processing_policy), purges
+// org A, and asserts every org B row survives untouched — the safety
+// contract's required isolation test (org A's purge must never be able to
+// touch org B's rows).
 func TestPostgresOrgPurger_HardPurgeByOrg_IsolatesOtherOrgs(t *testing.T) {
 	pool := gdprIntegrationPool(t)
 	purger := NewPostgresOrgPurger(pool)
@@ -29,6 +31,8 @@ func TestPostgresOrgPurger_HardPurgeByOrg_IsolatesOtherOrgs(t *testing.T) {
 	seedQualityEvalRun(t, pool, orgB, "quality-eval-purge-b-1")
 	seedGoldenJudgment(t, pool, orgA, "query one")
 	seedGoldenJudgment(t, pool, orgB, "query one")
+	seedProcessingPolicy(t, pool, orgA)
+	seedProcessingPolicy(t, pool, orgB)
 
 	if err := purger.HardPurgeByOrg(ctx, orgA); err != nil {
 		t.Fatalf("HardPurgeByOrg(org A): %v", err)
@@ -40,11 +44,17 @@ func TestPostgresOrgPurger_HardPurgeByOrg_IsolatesOtherOrgs(t *testing.T) {
 	if n := countRows(t, pool, "eval_golden_judgments", orgA); n != 0 {
 		t.Fatalf("eval_golden_judgments rows for purged org A = %d, want 0", n)
 	}
+	if n := countRows(t, pool, "org_processing_policy", orgA); n != 0 {
+		t.Fatalf("org_processing_policy rows for purged org A = %d, want 0 (an operator's policy row is org data)", n)
+	}
 	if n := countRows(t, pool, "quality_eval_runs", orgB); n != 1 {
 		t.Fatalf("quality_eval_runs rows for untouched org B = %d, want 1 (org B must survive org A's purge)", n)
 	}
 	if n := countRows(t, pool, "eval_golden_judgments", orgB); n != 1 {
 		t.Fatalf("eval_golden_judgments rows for untouched org B = %d, want 1 (org B must survive org A's purge)", n)
+	}
+	if n := countRows(t, pool, "org_processing_policy", orgB); n != 1 {
+		t.Fatalf("org_processing_policy rows for untouched org B = %d, want 1 (org B must survive org A's purge)", n)
 	}
 
 	// Idempotency: NATS is at-least-once delivery — a redelivered purge for
@@ -81,6 +91,17 @@ func seedGoldenJudgment(t *testing.T, pool *pgxpool.Pool, orgID, query string) {
 	`, orgID, query)
 	if err != nil {
 		t.Fatalf("seed eval_golden_judgments (org=%s): %v", orgID, err)
+	}
+}
+
+func seedProcessingPolicy(t *testing.T, pool *pgxpool.Pool, orgID string) {
+	t.Helper()
+	_, err := pool.Exec(context.Background(), `
+		INSERT INTO org_processing_policy (org_id, contextual_retrieval, reason, updated_by)
+		VALUES ($1, 'off', 'integration test', 'test')
+	`, orgID)
+	if err != nil {
+		t.Fatalf("seed org_processing_policy (org=%s): %v", orgID, err)
 	}
 }
 
@@ -139,6 +160,12 @@ func gdprIntegrationPool(t *testing.T) *pgxpool.Pool {
 	if _, err := pool.Exec(ctx, goldenUp); err != nil {
 		t.Fatalf("apply golden-judgments migration: %v", err)
 	}
+	// The purge also erases org_processing_policy. Its real DDL (constraints included) is taken
+	// from the context-provenance migration itself, which cannot be applied whole to this
+	// disposable schema (it alters knowledge_units and grants to roles this schema lacks).
+	if _, err := pool.Exec(ctx, processingPolicyDDL(t)); err != nil {
+		t.Fatalf("create org_processing_policy from its migration: %v", err)
+	}
 
 	t.Cleanup(func() {
 		goldenDown := readMigration(t, "20260717100000_eval_golden_judgments.down.sql")
@@ -156,6 +183,18 @@ func gdprIntegrationPool(t *testing.T) *pgxpool.Pool {
 		admin.Close()
 	})
 	return pool
+}
+
+// processingPolicyDDL returns the CREATE TABLE statement of org_processing_policy exactly as the
+// context-provenance migration defines it.
+func processingPolicyDDL(t *testing.T) string {
+	t.Helper()
+	migration := readMigration(t, "20261003130000_context_provenance.sql")
+	found := regexp.MustCompile(`(?s)CREATE TABLE IF NOT EXISTS org_processing_policy \(.*?\r?\n\);`).FindString(migration)
+	if found == "" {
+		t.Fatal("the context-provenance migration no longer defines org_processing_policy in the expected shape")
+	}
+	return found
 }
 
 func readMigration(t *testing.T, name string) string {

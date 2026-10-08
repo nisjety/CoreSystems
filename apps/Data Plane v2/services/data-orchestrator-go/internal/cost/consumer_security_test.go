@@ -19,7 +19,6 @@ import (
 
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/jackc/pgx/v5/pgconn"
-	"github.com/nats-io/nats.go"
 )
 
 const testSubjectCostLedger = "dataplane.cost.ledger"
@@ -32,16 +31,6 @@ type recordingStore struct {
 func (s *recordingStore) Exec(_ context.Context, _ string, args ...any) (pgconn.CommandTag, error) {
 	s.calls = append(s.calls, append([]any(nil), args...))
 	return pgconn.NewCommandTag("INSERT 0 1"), s.err
-}
-
-type fakeSubscriber struct {
-	handler nats.MsgHandler
-	err     error
-}
-
-func (s *fakeSubscriber) Subscribe(_ string, handler nats.MsgHandler) (*nats.Subscription, error) {
-	s.handler = handler
-	return &nats.Subscription{}, s.err
 }
 
 type testProducer struct {
@@ -198,7 +187,10 @@ func TestSignedConsumerRejectsReplay(t *testing.T) {
 	}
 }
 
-func TestSignedConsumerSuppressesPersistenceForZDR(t *testing.T) {
+// A zero-retention organization's usage is recorded, as counters only. The earlier
+// convention dropped these events, which made that organization's spend invisible
+// (design task CR-T10; the convention is recorded in the ledger by CR-T16).
+func TestSignedConsumerRecordsZDRUsageAsCountersOnly(t *testing.T) {
 	embedding := newTestProducer(t, embeddingIssuer, embeddingKeyID, embeddingScope)
 	retrieval := newTestProducer(t, retrievalIssuer, retrievalKeyID, retrievalScope)
 	store := &recordingStore{}
@@ -210,8 +202,18 @@ func TestSignedConsumerSuppressesPersistenceForZDR(t *testing.T) {
 	if err := consumer.process(context.Background(), signTestEvent(t, embedding, opts)); err != nil {
 		t.Fatalf("valid restrictive event failed: %v", err)
 	}
-	if len(store.calls) != 0 {
-		t.Fatalf("zdr event persisted %d rows", len(store.calls))
+	if len(store.calls) != 1 {
+		t.Fatalf("zdr event persisted %d rows, want 1: a zero-retention organization's spend must not be invisible", len(store.calls))
+	}
+	call := store.calls[0]
+	if call[colOrgID] != "org-a" || call[colZDR] != true {
+		t.Fatalf("zdr row org=%v zdr=%v, want org-a and zdr=true", call[colOrgID], call[colZDR])
+	}
+	if call[colUserID] != nil {
+		t.Fatalf("a zero-retention row carries user %v: it must hold counters only", call[colUserID])
+	}
+	if call[colCount] != 2 || call[colEstimatedTokens] != int64(64) || call[colModel] != "test-model" {
+		t.Fatalf("zdr row lost its counters: count=%v tokens=%v model=%v", call[colCount], call[colEstimatedTokens], call[colModel])
 	}
 }
 
@@ -247,53 +249,43 @@ func TestSignedConsumerAcceptsPinnedEmbeddingAndRetrievalProducers(t *testing.T)
 func TestRegistryFileLoadingFailsClosed(t *testing.T) {
 	embedding := newTestProducer(t, embeddingIssuer, embeddingKeyID, embeddingScope)
 	retrieval := newTestProducer(t, retrievalIssuer, retrievalKeyID, retrievalScope)
+	graph := newTestProducer(t, graphIssuer, graphKeyID, graphScope)
 	dir := t.TempDir()
 	embeddingPath := filepath.Join(dir, "embedding.pub")
 	retrievalPath := filepath.Join(dir, "retrieval.pub")
+	graphPath := filepath.Join(dir, "graph.pub")
 	if err := os.WriteFile(embeddingPath, embedding.publicPEM, 0o600); err != nil {
 		t.Fatalf("write embedding public key: %v", err)
 	}
-	if _, err := LoadVerifierRegistryFromFiles(embeddingPath, retrievalPath, 32); err == nil {
+	if _, err := LoadVerifierRegistryFromFiles(embeddingPath, retrievalPath, graphPath, 32); err == nil {
 		t.Fatal("registry loaded with missing retrieval key")
 	}
 	if err := os.WriteFile(retrievalPath, retrieval.publicPEM, 0o600); err != nil {
 		t.Fatalf("write retrieval public key: %v", err)
 	}
-	if _, err := LoadVerifierRegistryFromFiles(embeddingPath, retrievalPath, 32); err != nil {
+	if _, err := LoadVerifierRegistryFromFiles(embeddingPath, retrievalPath, graphPath, 32); err == nil {
+		t.Fatal("registry loaded with missing graph key: graph-index would be silently unmetered")
+	}
+	if err := os.WriteFile(graphPath, graph.publicPEM, 0o600); err != nil {
+		t.Fatalf("write graph public key: %v", err)
+	}
+	if _, err := LoadVerifierRegistryFromFiles(embeddingPath, retrievalPath, graphPath, 32); err != nil {
 		t.Fatalf("complete registry failed: %v", err)
 	}
 }
 
 func TestRegistryRejectsSharedProducerKey(t *testing.T) {
 	producer := newTestProducer(t, embeddingIssuer, embeddingKeyID, embeddingScope)
-	if _, err := NewVerifierRegistry(RegistryConfig{
-		EmbeddingPublicKeyPEM: producer.publicPEM,
-		RetrievalPublicKeyPEM: producer.publicPEM,
-	}, 32); err == nil {
-		t.Fatal("producer registry accepted a shared verification key")
-	}
-}
-
-func TestSignedConsumerStartDispatchesVerifiedMessage(t *testing.T) {
-	embedding := newTestProducer(t, embeddingIssuer, embeddingKeyID, embeddingScope)
-	retrieval := newTestProducer(t, retrievalIssuer, retrievalKeyID, retrievalScope)
-	store := &recordingStore{}
-	broker := &fakeSubscriber{}
-	consumer := NewSignedConsumer(store, broker, newTestRegistry(t, embedding, retrieval))
-	if _, err := consumer.Start(context.Background()); err != nil {
-		t.Fatalf("start consumer: %v", err)
-	}
-	if broker.handler == nil {
-		t.Fatal("consumer did not register a broker handler")
-	}
-	broker.handler(&nats.Msg{Data: signTestEvent(t, embedding, validEmbeddingOptions())})
-	if len(store.calls) != 1 {
-		t.Fatalf("broker delivery persisted %d rows, want 1", len(store.calls))
-	}
-
-	failingBroker := &fakeSubscriber{err: errors.New("subscribe unavailable")}
-	if _, err := NewSignedConsumer(store, failingBroker, newTestRegistry(t, embedding, retrieval)).Start(context.Background()); err == nil {
-		t.Fatal("consumer startup did not fail when subscription failed")
+	other := newTestProducer(t, retrievalIssuer, retrievalKeyID, retrievalScope)
+	// Any two of the three producers sharing a key would let one stand in for the other.
+	for name, config := range map[string]RegistryConfig{
+		"embedding and retrieval": {EmbeddingPublicKeyPEM: producer.publicPEM, RetrievalPublicKeyPEM: producer.publicPEM, GraphPublicKeyPEM: other.publicPEM},
+		"embedding and graph":     {EmbeddingPublicKeyPEM: producer.publicPEM, RetrievalPublicKeyPEM: other.publicPEM, GraphPublicKeyPEM: producer.publicPEM},
+		"retrieval and graph":     {EmbeddingPublicKeyPEM: other.publicPEM, RetrievalPublicKeyPEM: producer.publicPEM, GraphPublicKeyPEM: producer.publicPEM},
+	} {
+		if _, err := NewVerifierRegistry(config, 32); err == nil {
+			t.Fatalf("producer registry accepted a shared verification key between %s", name)
+		}
 	}
 }
 
@@ -342,16 +334,25 @@ func TestVerifierRegistryRejectsInvalidConfigurationAndCapacityExhaustion(t *tes
 	if _, err := NewVerifierRegistry(RegistryConfig{}, 0); err == nil {
 		t.Fatal("empty producer registry was accepted")
 	}
+	graph := newTestProducer(t, graphIssuer, graphKeyID, graphScope)
 	if _, err := NewVerifierRegistry(RegistryConfig{
 		EmbeddingPublicKeyPEM: []byte("not a public key"),
 		RetrievalPublicKeyPEM: retrieval.publicPEM,
+		GraphPublicKeyPEM:     graph.publicPEM,
 	}, 1); err == nil {
 		t.Fatal("invalid producer key was accepted")
+	}
+	if _, err := NewVerifierRegistry(RegistryConfig{
+		EmbeddingPublicKeyPEM: embedding.publicPEM,
+		RetrievalPublicKeyPEM: retrieval.publicPEM,
+	}, 1); err == nil {
+		t.Fatal("a registry without the graph producer key was accepted")
 	}
 
 	registry, err := NewVerifierRegistry(RegistryConfig{
 		EmbeddingPublicKeyPEM: embedding.publicPEM,
 		RetrievalPublicKeyPEM: retrieval.publicPEM,
+		GraphPublicKeyPEM:     graph.publicPEM,
 	}, 1)
 	if err != nil {
 		t.Fatalf("registry: %v", err)
@@ -367,11 +368,19 @@ func TestVerifierRegistryRejectsInvalidConfigurationAndCapacityExhaustion(t *tes
 	}
 }
 
+// newTestRegistry is the registry of the two producers that existed before the usage
+// ledger, with a third (graph-index) whose key the caller does not need.
 func newTestRegistry(t *testing.T, embedding, retrieval testProducer) *VerifierRegistry {
+	t.Helper()
+	return newTestRegistryOf(t, embedding, retrieval, newTestProducer(t, graphIssuer, graphKeyID, graphScope))
+}
+
+func newTestRegistryOf(t *testing.T, embedding, retrieval, graph testProducer) *VerifierRegistry {
 	t.Helper()
 	registry, err := NewVerifierRegistry(RegistryConfig{
 		EmbeddingPublicKeyPEM: embedding.publicPEM,
 		RetrievalPublicKeyPEM: retrieval.publicPEM,
+		GraphPublicKeyPEM:     graph.publicPEM,
 	}, 32)
 	if err != nil {
 		t.Fatalf("new verifier registry: %v", err)

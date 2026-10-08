@@ -1,0 +1,31 @@
+{
+  "org_id": "org-corpus-contextual",
+  "counts": {
+    "eligible": 1164,
+    "ready": 1164,
+    "legacy": 0,
+    "pending": 0,
+    "skipped_zdr": 0,
+    "skipped_policy": 0,
+    "skipped_budget": 0,
+    "failed_transient": 0,
+    "failed_permanent": 0,
+    "status_unknown": 0,
+    "vector_incoherent": 0,
+    "ready_unverified": 0,
+    "excluded_by_classification": 0
+  },
+  "policy": {
+    "contextual_retrieval": "inherit",
+    "source": "default"
+  },
+  "evaluation": {
+    "status": "passed",
+    "ready_trusted": 1164,
+    "denominator": 1164,
+    "coverage_percent": 100,
+    "threshold_percent": 99,
+    "message": "1164 of 1164 expected units have a verified context (100.00%, threshold 99.00%)"
+  }
+}
+

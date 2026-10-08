@@ -1,0 +1,20 @@
+{
+  "contract": "index-parity-v1",
+  "org_id": "org-parity-example",
+  "checked_at": "2026-10-07T09:30:00Z",
+  "postgres": {
+    "eligible_units": 207,
+    "eligible_with_context": 206
+  },
+  "quickwit": {
+    "documents": 52,
+    "distinct_units": 52,
+    "with_context_body": 51
+  },
+  "difference": {
+    "missing_units": 155,
+    "unexpected_units": 0,
+    "context_body_missing": 0,
+    "context_body_unexpected": 0
+  }
+}

@@ -19,6 +19,7 @@ import (
 	"github.com/triodelab/dataplane/services/data-quality-go/internal/gates"
 	"github.com/triodelab/dataplane/services/data-quality-go/internal/lint"
 	"github.com/triodelab/dataplane/services/data-quality-go/internal/model"
+	"github.com/triodelab/dataplane/services/data-quality-go/internal/policy"
 	"github.com/triodelab/dataplane/services/data-quality-go/internal/trust"
 )
 
@@ -37,6 +38,24 @@ type QualityHandler struct {
 	checker   *gates.Checker
 	linter    *lint.Linter
 	costQuery *cost.Query
+	// policies serves the processing-policy admin endpoints (WithPolicyStore).
+	policies PolicyStore
+	// coverage serves the context-coverage endpoint; the release-gate checker when unset.
+	coverage CoverageReader
+	// recorder serves POST /v1/evals/results (WithResultRecorder): the harness's recorded runs.
+	recorder eval.ResultRecorder
+}
+
+// CoverageReader reads one organization's contextual-retrieval coverage. *gates.Checker is the
+// real one; a test supplies its own to exercise the endpoint's error mapping.
+type CoverageReader interface {
+	ContextCoverage(ctx context.Context, orgID string) (*gates.CoverageReport, error)
+}
+
+// WithCoverageReader overrides where the context-coverage endpoint reads from.
+func (h *QualityHandler) WithCoverageReader(reader CoverageReader) *QualityHandler {
+	h.coverage = reader
+	return h
 }
 
 type EvalRunner interface {
@@ -67,21 +86,33 @@ type qualityRouteHandlers struct {
 	checkGates   http.HandlerFunc
 	lint         http.HandlerFunc
 	costSummary  http.HandlerFunc
+	// contextCoverage serves GET /v1/quality/context-coverage.
+	contextCoverage http.HandlerFunc
+	// getPolicy and putPolicy serve /v1/admin/orgs/{org}/processing-policy.
+	getPolicy http.HandlerFunc
+	putPolicy http.HandlerFunc
+	// recordEvalResult serves POST /v1/evals/results (operator only).
+	recordEvalResult http.HandlerFunc
 }
 
 // MountProtectedRoutes keeps the auth boundary and the complete sensitive
 // route table together so adding a route cannot accidentally bypass it.
 func MountProtectedRoutes(r chi.Router, auth func(http.Handler) http.Handler, h *QualityHandler) {
 	mountProtectedRoutes(r, auth, qualityRouteHandlers{
-		runEval:      h.RunEval,
-		getEval:      h.GetEval,
-		compareEval:  h.CompareEval,
-		upsertGolden: h.UpsertGolden,
-		listGolden:   h.ListGolden,
-		scoreTrust:   h.ScoreTrust,
-		checkGates:   h.CheckGates,
-		lint:         h.Lint,
-		costSummary:  h.CostSummary,
+		runEval:         h.RunEval,
+		getEval:         h.GetEval,
+		compareEval:     h.CompareEval,
+		upsertGolden:    h.UpsertGolden,
+		listGolden:      h.ListGolden,
+		scoreTrust:      h.ScoreTrust,
+		checkGates:      h.CheckGates,
+		lint:            h.Lint,
+		costSummary:     h.CostSummary,
+		contextCoverage: h.ContextCoverage,
+		getPolicy:       h.GetPolicy,
+		putPolicy:       h.PutPolicy,
+
+		recordEvalResult: h.RecordEvalResult,
 	})
 }
 
@@ -94,6 +125,9 @@ func mountProtectedRoutes(r chi.Router, auth func(http.Handler) http.Handler, h 
 		r.Post("/compare", h.compareEval)
 		r.Post("/golden", h.upsertGolden)
 		r.Get("/golden", h.listGolden)
+		// The retrieval-quality harness's own results (CR-T14): an operator service principal only,
+		// for the token's own organization.
+		r.With(requireOperator).Post("/results", h.recordEvalResult)
 	})
 	r.Route("/v1/quality", func(r chi.Router) {
 		r.Use(auth)
@@ -101,11 +135,23 @@ func mountProtectedRoutes(r chi.Router, auth func(http.Handler) http.Handler, h 
 		r.Post("/trust", h.scoreTrust)
 		r.Get("/gates", h.checkGates)
 		r.Get("/lint", h.lint)
+		r.Get("/context-coverage", h.contextCoverage)
 	})
 	r.Route("/v1/cost", func(r chi.Router) {
 		r.Use(auth)
 		r.Use(authctx.RequireScope("data:quality:admin"))
 		r.Get("/summary", h.costSummary)
+	})
+	// The processing policy of one organization. Reading needs the admin scope and
+	// the token's own organization; writing also needs an OPERATOR (a service
+	// principal): an organization's own admin holds data:quality:admin too and must
+	// not be able to switch background processing off for their organization.
+	r.Route("/v1/admin/orgs/{org}/processing-policy", func(r chi.Router) {
+		r.Use(auth)
+		r.Use(authctx.RequireScope("data:quality:admin"))
+		r.Use(requirePathOrg)
+		r.Get("/", h.getPolicy)
+		r.With(requireOperator).Put("/", h.putPolicy)
 	})
 }
 
@@ -353,6 +399,35 @@ func (h *QualityHandler) CheckGates(w http.ResponseWriter, r *http.Request) {
 		status = http.StatusPreconditionFailed
 	}
 	writeJSON(w, status, report)
+}
+
+// ContextCoverage returns the caller's organization's contextual-retrieval
+// coverage: the counts of v_context_coverage, the processing policy that applies,
+// and the judgement the contextual_coverage_ok release gate would make of them.
+// The organization is the verified token's; there is no org parameter.
+func (h *QualityHandler) ContextCoverage(w http.ResponseWriter, r *http.Request) {
+	orgID := orgIDFrom(r.Context())
+	reader := h.coverage
+	if reader == nil && h.checker != nil {
+		reader = h.checker
+	}
+	if reader == nil {
+		writeError(w, http.StatusServiceUnavailable, "coverage is not configured")
+		return
+	}
+	report, err := reader.ContextCoverage(r.Context(), orgID)
+	if errors.Is(err, gates.ErrCoverageUnavailable) || errors.Is(err, policy.ErrNotMigrated) {
+		log.Error().Err(err).Str("org_id", orgID).Msg("context coverage: the coverage view or policy table is missing")
+		writeCodedError(w, http.StatusServiceUnavailable, "coverage_unavailable", "the context coverage view is not migrated in this database")
+		return
+	}
+	if err != nil {
+		log.Error().Err(err).Str("org_id", orgID).Msg("context coverage: read failed")
+		writeError(w, http.StatusInternalServerError, "coverage read failed")
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	writeJSON(w, http.StatusOK, report)
 }
 
 func Health(w http.ResponseWriter, r *http.Request) {

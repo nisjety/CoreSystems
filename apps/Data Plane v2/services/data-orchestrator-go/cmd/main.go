@@ -36,6 +36,9 @@ func main() {
 	if err := cfg.ValidateSignedCostEvents(); err != nil {
 		log.Fatal().Err(err).Msg("signed cost event verification configuration invalid")
 	}
+	if err := cfg.ValidateUsageForwarder(); err != nil {
+		log.Fatal().Err(err).Msg("usage forwarder configuration invalid")
+	}
 	if err := cfg.ValidateGDPRConsumer(); err != nil {
 		log.Fatal().Err(err).Msg("GDPR org-purge consumer configuration invalid")
 	}
@@ -147,6 +150,7 @@ func main() {
 		registry, err := cost.LoadVerifierRegistryFromFiles(
 			cfg.EmbeddingEventPublicKeyPath,
 			cfg.RetrievalEventPublicKeyPath,
+			cfg.GraphEventPublicKeyPath,
 			cost.DefaultReplayCapacity,
 		)
 		if err != nil {
@@ -158,7 +162,7 @@ func main() {
 			log.Fatal().Err(err).Msg("signed cost ledger consumer failed to start")
 		}
 		defer cleanup()
-		log.Info().Msg("producer-scoped signed cost ledger consumer enabled")
+		log.Info().Msg("producer-scoped signed cost ledger consumer enabled (durable stream)")
 	} else if legacyEventsEnabled {
 		log.Warn().Msg("unsigned cost ledger consumer enabled for insecure development")
 		costConsumer := cost.NewLegacyConsumer(pool, nc)
@@ -169,6 +173,27 @@ func main() {
 		}
 	} else {
 		log.Info().Msg("cost ledger consumer disabled")
+	}
+
+	// The usage forwarder: version 2 rows to cost-core. Dark unless USAGE_FORWARDER_ENABLED=1,
+	// and checked at boot above. It reads the table, not the stream, so it does not depend on
+	// the consumer above being the one that wrote the rows.
+	if cfg.UsageForwarderEnabled {
+		tokens, err := cost.NewAuthCoreTokens(cfg.CostCoreTokenURL, cfg.CostServiceID, cfg.CostServiceAPIKey, cfg.JWTIssuer, nil)
+		if err != nil {
+			log.Fatal().Err(err).Msg("usage forwarder token client invalid")
+		}
+		forwarder, err := cost.NewForwarder(cost.NewPGForwardStore(pool), tokens, nil, cost.ForwarderConfig{
+			BaseURL:   cfg.CostCoreURL,
+			BatchSize: cfg.UsageForwarderBatch,
+			Interval:  cfg.UsageForwarderInterval,
+		})
+		if err != nil {
+			log.Fatal().Err(err).Msg("usage forwarder invalid")
+		}
+		go forwarder.Run(ctx)
+	} else {
+		log.Info().Msg("usage forwarder disabled (USAGE_FORWARDER_ENABLED is not 1)")
 	}
 
 	r := chi.NewRouter()

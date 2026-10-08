@@ -2,6 +2,8 @@ package config
 
 import (
 	"fmt"
+	"math"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -33,6 +35,17 @@ type Config struct {
 	// erasure fail-closed in production. Defaults to permissive (false) so a
 	// local/dev boot without the shared broker configured still starts.
 	GDPRConsumerRequired bool
+
+	// CoverageThresholdPercent is the share of eligible units that must have a
+	// verified context for the contextual_coverage_ok release gate and the
+	// coverage endpoint (CONTEXT_COVERAGE_THRESHOLD_PERCENT, default 99, in (0, 100]).
+	CoverageThresholdPercent float64
+	// SparseIndexParityURL is the quickwit-adapter parity endpoint the
+	// sparse_index_in_sync gate reads (SPARSE_INDEX_PARITY_URL). Empty (the
+	// default) means there is none yet: the gate then reports "unavailable",
+	// which fails the gate report and is never a pass. The caller's own bearer is
+	// forwarded to it, so it must be an absolute http(s) URL without credentials.
+	SparseIndexParityURL string
 }
 
 func Load() (*Config, error) {
@@ -61,7 +74,47 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("scoped shared NATS credentials are required for the durable GDPR org-erasure consumer")
 	}
 
+	threshold, err := coverageThreshold(os.Getenv("CONTEXT_COVERAGE_THRESHOLD_PERCENT"))
+	if err != nil {
+		return nil, err
+	}
+	cfg.CoverageThresholdPercent = threshold
+	parityURL := strings.TrimSpace(os.Getenv("SPARSE_INDEX_PARITY_URL"))
+	if err := checkParityURL(parityURL); err != nil {
+		return nil, err
+	}
+	cfg.SparseIndexParityURL = parityURL
+
 	return cfg, nil
+}
+
+// defaultCoverageThresholdPercent is the design's 99 percent.
+const defaultCoverageThresholdPercent = 99.0
+
+func coverageThreshold(raw string) (float64, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return defaultCoverageThresholdPercent, nil
+	}
+	value, err := strconv.ParseFloat(raw, 64)
+	if err != nil || math.IsNaN(value) || math.IsInf(value, 0) || value <= 0 || value > 100 {
+		return 0, fmt.Errorf("CONTEXT_COVERAGE_THRESHOLD_PERCENT must be a number above 0 and at most 100 (default %v)", defaultCoverageThresholdPercent)
+	}
+	return value, nil
+}
+
+// checkParityURL accepts the empty string (no endpoint) or an absolute http(s)
+// URL with a host and without credentials or a fragment.
+func checkParityURL(raw string) error {
+	if raw == "" {
+		return nil
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") ||
+		parsed.User != nil || parsed.Fragment != "" {
+		return fmt.Errorf("SPARSE_INDEX_PARITY_URL must be an absolute http(s) URL with a host and without credentials or a fragment")
+	}
+	return nil
 }
 
 func envOr(key, fallback string) string {
