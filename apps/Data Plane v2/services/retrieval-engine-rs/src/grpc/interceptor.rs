@@ -3,7 +3,9 @@ use std::sync::Arc;
 use jsonwebtoken::{decode, decode_header, Algorithm, DecodingKey, Validation};
 use tonic::{service::Interceptor, Request, Status};
 
-use crate::authz::{AuthContext, AuthMethod, Claims, EffectiveAcl, PolicyClient};
+use crate::authz::{
+    classify_principal, AuthContext, AuthMethod, Claims, EffectiveAcl, PolicyClient, Principal,
+};
 
 #[derive(Clone)]
 pub struct JwtVerifier {
@@ -68,6 +70,25 @@ impl JwtVerifier {
         let claims = decode::<Claims>(token, &self.key, &validation)
             .map_err(|_| Status::unauthenticated("invalid or missing credential"))?
             .claims;
+        // A SERVICE principal is admitted only on the HTTP surface, by its
+        // route allowlist. This interface authorizes by user membership, which
+        // a service can never have, so it is refused here explicitly (typed
+        // PermissionDenied, no identity echoed) instead of relying on the
+        // membership lookup failing. A contradictory identity is not guessed
+        // at: it is unauthenticated.
+        match classify_principal(&claims) {
+            Ok(Principal::User) => {}
+            Ok(Principal::Service { .. }) => {
+                crate::metrics::record_authz_denial(
+                    claims.org_id.as_deref().unwrap_or_default(),
+                    "denied:service_principal_grpc",
+                );
+                return Err(Status::permission_denied(
+                    "service principals are not accepted on this interface",
+                ));
+            }
+            Err(_) => return Err(Status::unauthenticated("invalid identity claims")),
+        }
         let org_id = claims
             .org_id
             .filter(|org| !org.trim().is_empty() && org.trim() == org)
@@ -86,6 +107,7 @@ impl JwtVerifier {
             acl: EffectiveAcl::default(),
             request_id: uuid::Uuid::new_v4().to_string(),
             verified_bearer: Some(token.to_owned()),
+            principal: Principal::User,
         })
     }
 }
@@ -159,6 +181,14 @@ where
         .get::<AuthContext>()
         .cloned()
         .ok_or_else(|| Status::unauthenticated("missing verified principal"))?;
+    // Defence in depth: the interceptor already refuses service tokens, and
+    // this holds even for a context built by some other path (or a permissive
+    // policy). Services never enter the membership-authorized gRPC surface.
+    if ctx.principal.is_service() {
+        return Err(Status::permission_denied(
+            "service principals are not accepted on this interface",
+        ));
+    }
     if requested_org_id.is_empty() || requested_org_id != ctx.org_id {
         return Err(Status::permission_denied(
             "tenant does not match authenticated principal",

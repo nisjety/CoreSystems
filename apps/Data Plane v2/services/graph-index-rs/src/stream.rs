@@ -5,17 +5,18 @@ use async_nats::jetstream::{self, consumer::PullConsumer, Context as JsContext};
 use event_envelope_rs::{EnvelopeError, EventClaims, EventVerifier};
 use futures::StreamExt;
 
-use crate::extractor::GraphExtractor;
-use crate::neo4j::Neo4jClient;
+use crate::pipeline::{self, DocumentReport, Live, Origin, Ports};
 use crate::store::GraphStore;
 
 // Each engine owns disjoint subjects in JetStream. graph-index owns only
 // `dataplane.documents.indexed` (its trigger) — the other subjects belong to
 // DATAPLANE_DOCUMENTS / DATAPLANE_KNOWLEDGE streams.
 const STREAM_NAME: &str = "DATAPLANE_GRAPH";
-const SUBJECT: &str = "dataplane.documents.indexed";
+pub(crate) const SUBJECT: &str = "dataplane.documents.indexed";
 const CONSUMER_NAME: &str = "graph-index";
-const DLQ_SUBJECT: &str = "dataplane.dlq.graph-index";
+/// Where a chunk that was given up on is dead-lettered (the pipeline publishes it, in every
+/// event-verifier mode).
+pub(crate) const DLQ_SUBJECT: &str = "dataplane.dlq.graph-index";
 const KNOWLEDGE_STREAM_NAME: &str = "DATAPLANE_KNOWLEDGE";
 const SUBJECT_KNOWLEDGE_DELETED: &str = "dataplane.knowledge.units.deleted";
 const CLEANUP_CONSUMER_NAME: &str = "graph-index-cleanup";
@@ -208,15 +209,132 @@ pub async fn create_consumer(js: &JsContext) -> anyhow::Result<PullConsumer> {
     Ok(consumer)
 }
 
+/// What became of one message from the stream. The message is acknowledged in every case: what
+/// was not done is in the database (a chunk's state), and the reconciler reads it from there.
+#[derive(Debug)]
+pub(crate) enum MessageResult {
+    /// Not processed, and settled: unauthorized, expired, another tenant's, malformed, or a
+    /// restrictive-ZDR event.
+    Dropped,
+    Processed {
+        org_id: String,
+        report: DocumentReport,
+    },
+    /// The pass failed before it could record what it did (a database error). The chunks keep
+    /// the state they had, and the reconciler picks the document up from the database.
+    Failed,
+}
+
+/// One message: verified, then the document through the pipeline. Everything that can be decided
+/// without a database (authenticity, tenant, restrictive ZDR) is decided here; everything about
+/// the document's chunks is the pipeline's.
+///
+/// Nothing here depends on whether a verifier is configured beyond how the envelope is read: a
+/// chunk that is given up on is dead-lettered by the pipeline whatever the mode (the old code
+/// published its dead letters only when no verifier was configured, so in production, where
+/// events are signed, none was ever published).
+pub(crate) async fn process_message<P: Ports>(
+    ports: &P,
+    verifier: Option<&EventVerifier>,
+    bytes: &[u8],
+    redelivery: bool,
+) -> MessageResult {
+    let verified = match decode_event(verifier, SUBJECT, bytes, redelivery) {
+        Ok(v) => v,
+        Err(e) => {
+            // An EXPIRED envelope is not a forgery and must not be reported as one.
+            // `EnvelopeError::Expired` is produced only after every authenticity check has
+            // already passed (signature, key id, issuer, scope, payload digest, boundary
+            // fields): the sole thing that failed is the clock window. Graph extraction is
+            // INHERENTLY slow (one inference call per chunk), so a backlog of more than a couple
+            // of documents always outlives the envelope TTL (120s, max 300s); observed: 12
+            // documents announced, 2 extracted, 10 discarded, logged as "unauthorized", which
+            // reads as an attack rather than latency. Dropping is still the behaviour (accepting
+            // an expired envelope would weaken a real replay control), but the document is
+            // named, and the reconciler extracts it from the database with no envelope at all.
+            match e.downcast_ref::<EnvelopeError>() {
+                Some(EnvelopeError::Expired(stale)) => {
+                    let doc = serde_json::from_slice::<serde_json::Value>(&stale.payload)
+                        .ok()
+                        .and_then(|p| p["document_id"].as_str().map(str::to_owned))
+                        .unwrap_or_else(|| "<unknown>".to_string());
+                    tracing::error!(
+                        document_id = %doc,
+                        "graph event DROPPED: envelope authentic but expired \
+                         (consumer is behind the envelope TTL). The reconciler extracts the \
+                         document from the database; nothing needs re-announcing."
+                    );
+                }
+                _ => {
+                    tracing::warn!(err = %e, "rejected unauthorized graph event");
+                }
+            }
+            return MessageResult::Dropped;
+        }
+    };
+    let org_id = match event_org_id(&verified) {
+        Ok(org_id) => org_id.to_owned(),
+        Err(e) => {
+            tracing::warn!(err = %e, "rejected graph event tenant mismatch");
+            return MessageResult::Dropped;
+        }
+    };
+    let payload = verified.payload;
+    let claims = verified.claims;
+
+    let doc_id = payload["document_id"].as_str().unwrap_or("").to_owned();
+    if doc_id.is_empty() || org_id.is_empty() {
+        return MessageResult::Dropped;
+    }
+
+    if claims.zdr {
+        tracing::info!(
+            org_id,
+            "restrictive-ZDR graph event dropped without durable writes"
+        );
+        return MessageResult::Dropped;
+    }
+
+    tracing::info!(
+        document_id = %doc_id,
+        org_id,
+        "processing document for graph extraction"
+    );
+
+    match pipeline::handle_document(ports, Origin::Stream, &org_id, &doc_id).await {
+        Ok(report) => {
+            tracing::info!(
+                document_id = %doc_id,
+                org_id,
+                chunks = report.chunks,
+                ready = report.ready,
+                empty = report.empty,
+                not_due = report.not_due,
+                other = report.other,
+                given_up = report.given_up,
+                entities = report.entities,
+                relationships = report.relationships,
+                claims = report.claims,
+                "graph extraction complete"
+            );
+            MessageResult::Processed { org_id, report }
+        }
+        Err(error) => {
+            tracing::error!(
+                %error,
+                document_id = %doc_id,
+                org_id,
+                "graph extraction pass failed; the reconciler picks the document up from the database"
+            );
+            MessageResult::Failed
+        }
+    }
+}
+
 pub async fn run_consumer(
     consumer: PullConsumer,
-    store: Arc<GraphStore>,
-    extractor: Arc<GraphExtractor>,
-    nats: async_nats::Client,
+    ports: Arc<Live>,
     event_verifier: Option<Arc<EventVerifier>>,
-    // Optional Neo4j read-model mirror. `None` disables the mirror; the
-    // canonical Postgres graph is written regardless.
-    neo4j: Option<Arc<Neo4jClient>>,
     // Minimum member count for a derived community (config `community_min_size`).
     community_min_size: usize,
 ) -> anyhow::Result<()> {
@@ -238,269 +356,61 @@ pub async fn run_consumer(
             };
 
             let redelivery = msg.info().is_ok_and(|info| info.delivered > 1);
-            let verified =
-                match decode_event(event_verifier.as_deref(), SUBJECT, &msg.payload, redelivery) {
-                    Ok(v) => v,
-                    Err(e) => {
-                        // An EXPIRED envelope is not a forgery and must not be
-                        // reported as one. `EnvelopeError::Expired` is produced
-                        // only after every authenticity check has already passed
-                        // (signature, key id, issuer, scope, payload digest,
-                        // boundary fields) — the sole thing that failed is the
-                        // clock window. Same distinction embedding-engine draws
-                        // in its `SUBJECT_CREATED` handler.
-                        //
-                        // This matters here more than anywhere else in the plane,
-                        // because graph extraction is INHERENTLY slow: one
-                        // inference call per chunk, tens of seconds per document.
-                        // A backlog of more than a couple of documents therefore
-                        // always outlives the envelope TTL (120s, max 300s), and
-                        // every document behind the head of the queue was being
-                        // dropped and acked — silently, logged as
-                        // "unauthorized", which reads as an attack rather than
-                        // latency. Observed: 12 documents announced, 2 extracted,
-                        // 10 discarded this way with the graph left empty.
-                        //
-                        // Dropping is still the behaviour (accepting an expired
-                        // envelope would weaken a real replay control, and this
-                        // service has no reconciler to hand it to), but it is now
-                        // an explicit, actionable signal naming the document to
-                        // re-announce. The durable fix is a reconciler for this
-                        // subject, or extraction fanned out behind a fresh
-                        // envelope per chunk.
-                        match e.downcast_ref::<EnvelopeError>() {
-                            Some(EnvelopeError::Expired(stale)) => {
-                                let doc =
-                                    serde_json::from_slice::<serde_json::Value>(&stale.payload)
-                                        .ok()
-                                        .and_then(|p| p["document_id"].as_str().map(str::to_owned))
-                                        .unwrap_or_else(|| "<unknown>".to_string());
-                                tracing::error!(
-                                    document_id = %doc,
-                                    "graph event DROPPED: envelope authentic but expired \
-                                     (consumer is behind the envelope TTL). Extraction did \
-                                     NOT run for this document; re-announce it to retry."
-                                );
-                            }
-                            _ => {
-                                tracing::warn!(err = %e, "rejected unauthorized graph event");
-                            }
-                        }
-                        let _ = msg.ack().await;
-                        continue;
-                    }
-                };
-            let org_id = match event_org_id(&verified) {
-                Ok(org_id) => org_id.to_owned(),
-                Err(e) => {
-                    tracing::warn!(err = %e, "rejected graph event tenant mismatch");
-                    let _ = msg.ack().await;
-                    continue;
-                }
-            };
-            let payload = verified.payload;
-            let claims = verified.claims;
+            let result = process_message(
+                ports.as_ref(),
+                event_verifier.as_deref(),
+                &msg.payload,
+                redelivery,
+            )
+            .await;
 
-            let doc_id = payload["document_id"].as_str().unwrap_or("");
-
-            if doc_id.is_empty() || org_id.is_empty() {
-                let _ = msg.ack().await;
-                continue;
-            }
-
-            if claims.zdr {
-                tracing::info!(
-                    org_id,
-                    "restrictive-ZDR graph event dropped without durable writes"
-                );
-                let _ = msg.ack().await;
-                continue;
-            }
-
-            tracing::info!(
-                document_id = doc_id,
-                org_id,
-                "processing document for graph extraction"
-            );
-
-            // Only organization-visible, live documents may enter graph
-            // extraction. Filtering after the model call is too late: it would
-            // disclose private/shared content to the extractor even when the
-            // resulting graph rows were discarded.
-            // `unwrap_or_default()` also collapses a DB error into "no chunks",
-            // so the two cases are logged apart — an empty result is a routine
-            // policy skip, a query failure is not.
-            let chunks = match store.load_org_visible_chunks(&org_id, doc_id).await {
-                Ok(chunks) => chunks,
-                Err(e) => {
-                    tracing::error!(
-                        err = %e,
-                        document_id = doc_id,
-                        org_id = %org_id,
-                        "loading org-visible chunks failed; treating as no chunks"
-                    );
-                    Vec::new()
-                }
-            };
-
-            // Say so when a document is skipped by the visibility policy rather
-            // than extracted.
-            //
-            // Without this the run logged "graph extraction complete,
-            // entities=0" and acked — indistinguishable from extraction running
-            // and finding nothing, and the `all_failed` DLQ guard below is
-            // deliberately gated on `!chunks.is_empty()` so it stays quiet too.
-            // A whole 190-document corpus produced an empty graph this way, with
-            // every document reporting success in ~3ms: the corpus was ingested
-            // `visibility='private'` and this path only reads `'org'`.
-            //
-            // The filter itself is correct and must stay — graph entities are
-            // org-shared, so extracting a private document would leak its
-            // content org-wide through the graph arm. Only the silence was
-            // wrong.
-            if chunks.is_empty() {
-                tracing::info!(
-                    document_id = doc_id,
-                    org_id = %org_id,
-                    "graph extraction skipped: no org-visible live chunks \
-                     (documents must be visibility='org'; private/shared and \
-                     deleted documents are excluded by design)"
-                );
-            }
-
-            let mut total_entities = 0usize;
-            let mut total_rels = 0usize;
-            let mut total_claims = 0usize;
-            let mut all_claim_ids: Vec<String> = Vec::new();
-
-            for (kid, text) in &chunks {
-                match extractor.extract(text, &org_id, claims.zdr).await {
-                    Ok(result) => match store.persist_extraction(&org_id, kid, &result).await {
-                        Ok(persisted) => {
-                            if let Err(e) = store
-                                .persist_text_unit_mappings(
-                                    &org_id,
-                                    kid,
-                                    &persisted.entity_ids,
-                                    &persisted.rel_ids,
-                                    &persisted.claim_ids,
-                                )
-                                .await
-                            {
-                                tracing::error!(err = %e, knowledge_id = kid, "persist text_unit mappings failed");
-                            }
-                            // Mirror to the Neo4j read-model. Best-effort and
-                            // non-fatal — Postgres is canonical, the read-model
-                            // is rebuildable. This runs ONLY on org-visible,
-                            // non-restrictive-ZDR content: restrictive events
-                            // are dropped above (claims.zdr) and non-visible
-                            // chunks yield an empty PersistedExtraction, so the
-                            // mirror inherits both gates.
-                            if let Some(neo4j) = neo4j.as_ref() {
-                                if let Err(e) = neo4j
-                                    .merge_extraction(
-                                        &org_id,
-                                        &persisted.mirror_entities,
-                                        &persisted.mirror_relationships,
-                                    )
-                                    .await
-                                {
-                                    tracing::warn!(err = %e, knowledge_id = kid, "neo4j mirror write failed (non-fatal; postgres canonical)");
-                                }
-                            }
-                            total_entities += persisted.entity_ids.len();
-                            total_rels += persisted.rel_ids.len();
-                            total_claims += persisted.claim_ids.len();
-                            // Collected for the post-ack contradiction sweep:
-                            // detection needs the whole document's claims, and
-                            // the text_unit mappings above must already exist
-                            // for the visibility join to resolve.
-                            all_claim_ids.extend(persisted.claim_ids.iter().cloned());
-                        }
-                        Err(e) => {
-                            tracing::error!(err = %e, knowledge_id = kid, "persist extraction failed")
-                        }
-                    },
-                    Err(e) => tracing::error!(err = %e, knowledge_id = kid, "extraction failed"),
-                }
-            }
-
-            let all_failed =
-                total_entities == 0 && total_rels == 0 && total_claims == 0 && !chunks.is_empty();
-            if all_failed {
-                let num_delivered = msg.info().map(|i| i.delivered).unwrap_or(0) as u32;
-                if num_delivered >= 3 {
-                    tracing::warn!(
-                        document_id = doc_id,
-                        "all extractions failed, sending to DLQ"
-                    );
-                    let dlq = serde_json::json!({
-                        "original_subject": SUBJECT,
-                        "document_id": doc_id,
-                        "org_id": org_id,
-                        "error": "all chunk extractions failed",
-                        "attempts": num_delivered,
-                    });
-                    if event_verifier.is_none() {
-                        let _ = nats
-                            .publish(
-                                DLQ_SUBJECT,
-                                serde_json::to_vec(&dlq).unwrap_or_default().into(),
-                            )
-                            .await;
-                    }
-                }
-            }
-
-            tracing::info!(
-                document_id = doc_id,
-                entities = total_entities,
-                relationships = total_rels,
-                claims = total_claims,
-                "graph extraction complete"
-            );
-
-            // Ack BEFORE the community refresh: the refresh is a whole-org
-            // recompute (two bulk queries + a replace tx), so running it inside
-            // the ack window would extend the JetStream deadline under bulk
-            // ingest and risk redelivery. Post-ack keeps the message settled;
-            // the per-org advisory lock in `replace_communities` serializes any
-            // concurrent recompute so overlapping runs can't duplicate rows.
+            // Ack BEFORE the community refresh: the refresh is a whole-org recompute (two bulk
+            // queries + a replace tx), so running it inside the ack window would extend the
+            // JetStream deadline under bulk ingest and risk redelivery. Post-ack keeps the
+            // message settled; the per-org advisory lock in `replace_communities` serializes any
+            // concurrent recompute so overlapping runs can't duplicate rows. The message is
+            // acknowledged whatever came of it: a chunk that was not extracted has a state, and
+            // the reconciler reads it.
             let _ = msg.ack().await;
 
-            // Refresh the org's derived communities when this document added
-            // relationships. Best-effort: a failure is logged, never retried
-            // here (the message is already acked), and detect_communities only
-            // replaces rows AFTER a successful listing — a transient DB error
-            // cannot wipe existing communities.
-            if total_rels > 0 {
-                if let Err(e) =
-                    crate::community::detect_communities(&store, &org_id, community_min_size).await
+            let MessageResult::Processed { org_id, report } = result else {
+                continue;
+            };
+
+            // Refresh the org's derived communities when this document added relationships.
+            // Best-effort: a failure is logged, never retried here (the message is already
+            // acked), and detect_communities only replaces rows AFTER a successful listing: a
+            // transient DB error cannot wipe existing communities.
+            if report.relationships > 0 {
+                if let Err(e) = crate::community::detect_communities(
+                    ports.store.as_ref(),
+                    &org_id,
+                    community_min_size,
+                )
+                .await
                 {
                     tracing::warn!(err = %e, org_id, "community refresh failed (non-fatal)");
                 } else if let Err(e) =
-                    crate::community::summarize_communities(&store, &extractor, &org_id).await
+                    crate::community::summarize_communities(ports.as_ref(), &org_id).await
                 {
-                    // P1-5: fill `graph_communities.summary` for communities that
-                    // still lack one. Gated on `COMMUNITY_SUMMARY_ENABLED` and
-                    // capped per run, so a backlog drains over successive
-                    // ingests instead of stalling one on many LLM calls. Only
-                    // runs when detection succeeded — summarising against a
-                    // half-updated community set would key summaries to
-                    // memberships that never existed.
+                    // P1-5: fill `graph_communities.summary` for communities that still lack
+                    // one. Gated on `COMMUNITY_SUMMARY_ENABLED`, on the organization's policy,
+                    // retention posture and budget (CR-T12), and capped per run, so a backlog
+                    // drains over successive ingests instead of stalling one on many LLM calls.
+                    // Only runs when detection succeeded: summarising against a half-updated
+                    // community set would key summaries to memberships that never existed.
                     tracing::warn!(err = %e, org_id, "community summarisation failed (non-fatal)");
                 }
             }
 
-            // P1-4: flag claims this document contradicts. Post-ack for the same
-            // reason as the community refresh — keeping it inside the ack window
-            // would extend the JetStream deadline under bulk ingest and risk
-            // redelivery. Best-effort and additive: a failure leaves existing
-            // flags untouched, and the write only ever unions ids and sets
-            // `claim_status`, so a partial run cannot erase prior findings.
-            if !all_claim_ids.is_empty() {
-                match store
-                    .detect_claim_contradictions(&org_id, &all_claim_ids)
+            // P1-4: flag claims this document contradicts. Post-ack for the same reason as the
+            // community refresh. Best-effort and additive: a failure leaves existing flags
+            // untouched, and the write only ever unions ids and sets `claim_status`, so a
+            // partial run cannot erase prior findings.
+            if !report.claim_ids.is_empty() {
+                match ports
+                    .store
+                    .detect_claim_contradictions(&org_id, &report.claim_ids)
                     .await
                 {
                     Ok(0) => {}
@@ -738,5 +648,198 @@ mod signed_event_tests {
 
         let cross_tenant = signer.sign(SUBJECT_KNOWLEDGE_DELETED, "org-b", None, false, raw);
         assert!(cross_tenant.is_err());
+    }
+}
+
+/// The consumer end to end through the real envelope verifier (design task CR-T12): a signed
+/// event goes in, the pipeline runs, and what happens to a chunk that is given up on does not
+/// depend on whether a verifier is configured.
+#[cfg(test)]
+mod consumer_tests {
+    use super::{process_message, MessageResult, SUBJECT};
+    use crate::pipeline::harness::{Control, Memory};
+    use crate::pipeline::DeadLetter;
+    use crate::state::ErrorClass;
+    use crate::testing::{answer, capture_logs, fail, RICH_EXTRACTION};
+    use event_envelope_rs::{EventSigner, EventVerifier};
+    use rsa::pkcs1::{EncodeRsaPrivateKey, EncodeRsaPublicKey};
+    use rsa::{RsaPrivateKey, RsaPublicKey};
+
+    /// The producer the consumer pins: embedding-engine's key, as in production.
+    fn keys() -> (EventSigner, EventVerifier) {
+        let private = RsaPrivateKey::new(&mut rand::thread_rng(), 2048).expect("key");
+        let public = RsaPublicKey::from(&private);
+        let signer = EventSigner::from_rsa_pem(
+            private
+                .to_pkcs1_pem(Default::default())
+                .expect("pem")
+                .as_bytes(),
+            "service:embedding-engine-rs",
+            "embedding-events-v1",
+            "dataplane-events",
+            "events:embedding:publish",
+        )
+        .expect("signer");
+        let verifier = EventVerifier::from_rsa_pem(
+            public
+                .to_pkcs1_pem(Default::default())
+                .expect("pem")
+                .as_bytes(),
+            "service:embedding-engine-rs",
+            "embedding-events-v1",
+            "dataplane-events",
+            "events:embedding:publish",
+            10_000,
+        )
+        .expect("verifier");
+        (signer, verifier)
+    }
+
+    fn indexed(signer: &EventSigner, org: &str, document: &str, zdr: bool) -> Vec<u8> {
+        let payload = serde_json::json!({ "document_id": document, "org_id": org, "zdr": zdr });
+        signer
+            .sign(SUBJECT, org, None, zdr, payload.to_string().as_bytes())
+            .expect("a signed event")
+    }
+
+    /// The defect: the dead letter was published only when NO verifier was configured, so in
+    /// production, where events are signed, a chunk that failed for good was never dead-lettered.
+    /// Here every event is signed and verified, and the sixth failure still dead-letters it,
+    /// once.
+    #[tokio::test]
+    async fn a_chunk_that_is_given_up_on_is_dead_lettered_with_a_verifier_configured() {
+        let (signer, verifier) = keys();
+        let rig = Memory::new().await;
+        let org = rig.org("dlq");
+        let chunks = rig
+            .add_document(
+                &org,
+                "poisoned",
+                "org",
+                "internal",
+                &["a chunk nobody can extract"],
+            )
+            .await;
+        rig.parts().inference.always(fail("provider_unavailable"));
+        let (logs, _guard) = capture_logs();
+
+        for attempt in 1..=7 {
+            let envelope = indexed(&signer, &org, &format!("{org}-poisoned"), false);
+            let result = process_message(&rig, Some(&verifier), &envelope, false).await;
+            let MessageResult::Processed { report, .. } = result else {
+                panic!("attempt {attempt}: a verified event is processed, got {result:?}");
+            };
+            assert_eq!(
+                report.given_up,
+                usize::from(attempt == 6),
+                "attempt {attempt}"
+            );
+            rig.make_due(&org, &chunks[0]).await;
+        }
+
+        assert_eq!(
+            rig.parts().inference.call_count(),
+            6,
+            "six attempts, then none"
+        );
+        assert_eq!(
+            rig.letters(),
+            vec![DeadLetter {
+                org_id: org.clone(),
+                document_id: format!("{org}-poisoned"),
+                knowledge_id: chunks[0].clone(),
+                error_class: ErrorClass::ProviderUnavailable,
+                attempts: 6,
+            }]
+        );
+        assert_eq!(logs.events_saying("graph extraction complete").len(), 7);
+    }
+
+    #[tokio::test]
+    async fn a_verified_event_runs_the_document_through_the_pipeline() {
+        let (signer, verifier) = keys();
+        let rig = Memory::new().await;
+        let org = rig.org("event");
+        rig.add_document(&org, "d", "org", "internal", &["one", "two"])
+            .await;
+        rig.parts().inference.always(answer(RICH_EXTRACTION));
+
+        let envelope = indexed(&signer, &org, &format!("{org}-d"), false);
+        let MessageResult::Processed { org_id, report } =
+            process_message(&rig, Some(&verifier), &envelope, false).await
+        else {
+            panic!("a verified event is processed");
+        };
+        assert_eq!(org_id, org);
+        assert_eq!(
+            (report.ready, report.relationships, report.claim_ids.len()),
+            (2, 2, 2)
+        );
+    }
+
+    /// Restrictive-ZDR events are dropped without a call and without a durable write: no
+    /// state row is made for a document the event says must not be touched.
+    #[tokio::test]
+    async fn a_restrictive_zdr_event_is_dropped_with_no_call_and_no_state() {
+        let (signer, verifier) = keys();
+        let rig = Memory::new().await;
+        let org = rig.org("zdr-event");
+        let chunks = rig
+            .add_document(&org, "d", "org", "internal", &["one"])
+            .await;
+        rig.parts().inference.always(answer(RICH_EXTRACTION));
+
+        let envelope = indexed(&signer, &org, &format!("{org}-d"), true);
+        assert!(matches!(
+            process_message(&rig, Some(&verifier), &envelope, false).await,
+            MessageResult::Dropped
+        ));
+        assert_eq!(rig.parts().inference.call_count(), 0);
+        assert!(rig.row(&org, &chunks[0]).await.is_none());
+    }
+
+    /// An unsigned event is refused when a verifier is configured, and a replayed one is too:
+    /// nothing about the state machine loosened the envelope's rules.
+    #[tokio::test]
+    async fn an_unsigned_or_replayed_event_is_dropped() {
+        let (signer, verifier) = keys();
+        let rig = Memory::new().await;
+        let org = rig.org("forged");
+        rig.add_document(&org, "d", "org", "internal", &["one"])
+            .await;
+        rig.parts().inference.always(answer(RICH_EXTRACTION));
+
+        let raw = serde_json::json!({ "document_id": format!("{org}-d"), "org_id": org });
+        assert!(matches!(
+            process_message(&rig, Some(&verifier), raw.to_string().as_bytes(), false).await,
+            MessageResult::Dropped
+        ));
+        let envelope = indexed(&signer, &org, &format!("{org}-d"), false);
+        assert!(matches!(
+            process_message(&rig, Some(&verifier), &envelope, false).await,
+            MessageResult::Processed { .. }
+        ));
+        assert!(matches!(
+            process_message(&rig, Some(&verifier), &envelope, false).await,
+            MessageResult::Dropped
+        ));
+        assert_eq!(rig.parts().inference.call_count(), 1, "the first, once");
+    }
+
+    /// The text of the consumer has no path that depends on the verifier except how the envelope
+    /// is read. A test over the text is crude, and exactly as strong as the regression it
+    /// guards: someone gating the dead letter on it again.
+    #[test]
+    fn nothing_about_a_dead_letter_depends_on_the_verifier() {
+        let source = include_str!("stream.rs");
+        let production = source
+            .split("mod signed_event_tests")
+            .next()
+            .expect("production code");
+        assert!(
+            !production.contains("event_verifier.is_none()")
+                && !production.contains("verifier.is_none()"),
+            "stream.rs gates something on the absence of a verifier"
+        );
     }
 }

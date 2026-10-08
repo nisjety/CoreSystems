@@ -1,0 +1,11 @@
+<document title="Årsrapport 2025" source="sharepoint" date="2026-03-14">
+Årsrapport 2025 for Fjordfisk AS.
+
+Driftsmarginen økte til 31 prosent. Røyking av laks i Tromsø ble utvidet.
+</document>
+
+<chunk>
+Marginen økte til 31 %.
+</chunk>
+
+Write one or two sentences, at most 60 words, that situate the chunk within the document so that a search can find it. Write in the same language as the chunk. Start directly with the content; never start with "This chunk", "The chunk" or "This section" (or the same phrase in the chunk's language). Name the subject, section, entities and dates that the chunk only implies. Do not summarise or interpret the chunk, and do not add anything that is not in the document. Reply with the sentences alone.

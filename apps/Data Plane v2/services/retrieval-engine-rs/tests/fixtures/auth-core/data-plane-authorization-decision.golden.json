@@ -1,0 +1,57 @@
+{
+  "contract": "auth-core data-plane authorization decision -> retrieval-engine HttpPolicyClient",
+  "version": 1,
+  "orgId": "org-contract-fixture",
+  "decisions": {
+    "serviceSubjectNotMember": {
+      "request": {
+        "userId": "service:quarry-edge",
+        "orgId": "org-contract-fixture",
+        "action": "data.read"
+      },
+      "response": {
+        "version": "v1",
+        "allowed": false,
+        "role": null,
+        "permissions": [],
+        "membershipRevision": null,
+        "reason": "not_member"
+      }
+    },
+    "memberRead": {
+      "request": {
+        "userId": "user-contract-member",
+        "orgId": "org-contract-fixture",
+        "action": "data.read"
+      },
+      "response": {
+        "version": "v1",
+        "allowed": true,
+        "role": "member",
+        "permissions": [
+          "data:read"
+        ],
+        "membershipRevision": "2026-01-01T00:00:00.000Z",
+        "reason": "member"
+      }
+    },
+    "adminRead": {
+      "request": {
+        "userId": "user-contract-admin",
+        "orgId": "org-contract-fixture",
+        "action": "data.read"
+      },
+      "response": {
+        "version": "v1",
+        "allowed": true,
+        "role": "admin",
+        "permissions": [
+          "data:read",
+          "org:data:read_all"
+        ],
+        "membershipRevision": "2026-01-01T00:00:00.000Z",
+        "reason": "member"
+      }
+    }
+  }
+}

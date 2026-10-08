@@ -70,6 +70,7 @@ async fn writes_one_row_per_event() {
         acl: EffectiveAcl::allow_all(),
         request_id: "req-test-1".into(),
         verified_bearer: None,
+        principal: retrieval_engine::authz::Principal::User,
     };
 
     record_access(

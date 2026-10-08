@@ -51,6 +51,14 @@ fn describe_metrics() {
         "dpv2_rate_limiter_backend_unavailable_total",
         "Rate limiter checks that failed open because Dragonfly was unreachable or the script errored"
     );
+    metrics::describe_counter!(
+        "dpv2_authz_denials_total",
+        "Authenticated requests refused at admission, by org and cause"
+    );
+    metrics::describe_counter!(
+        "dpv2_service_principal_requests_total",
+        "Service-principal requests by service id and admission outcome (admitted or the denial cause)"
+    );
 }
 
 pub struct PrometheusHandle(metrics_exporter_prometheus::PrometheusHandle);
@@ -104,6 +112,19 @@ pub fn record_authz_denial(org_id: &str, cause: &str) {
         "dpv2_authz_denials_total",
         "org_id" => org_id.to_string(),
         "cause" => cause.to_string()
+    )
+    .increment(1);
+}
+
+/// One service-principal request at the admission guard. `outcome` is
+/// `admitted` or the denial cause (`denied:service_route_not_allowed`,
+/// `denied:service_scope_missing`, ...). The label set is bounded: service ids
+/// come from Control's registry and the outcomes are a closed list.
+pub fn record_service_principal_request(service_id: &str, outcome: &str) {
+    counter!(
+        "dpv2_service_principal_requests_total",
+        "service_id" => service_id.to_string(),
+        "outcome" => outcome.to_string()
     )
     .increment(1);
 }

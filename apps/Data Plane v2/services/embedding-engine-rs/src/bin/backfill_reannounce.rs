@@ -48,10 +48,16 @@
 //!
 //! Usage:
 //!   cargo run --bin backfill-reannounce -- \
-//!       --org-id <ORG_ID> [--document-id <ID>]... [--dry-run]
+//!       --org-id <ORG_ID> (--document-id <ID>... | --all-documents) [--dry-run]
 //!
-//! With no `--document-id`, every non-deleted, non-restricted document in
-//! the org that is already `status = 'indexed'` is targeted.
+//! Name the documents (`--document-id`, as many times as needed). The whole organization is
+//! announced only with `--all-documents` (every non-deleted, non-restricted document of the org
+//! that is already `status = 'indexed'`), and not by leaving the documents out: a re-announce
+//! makes graph-index extract each document again (one provider call per chunk, until CR-T12 gives
+//! it a hash to skip an unchanged one by) and makes Meilisearch clear and re-index it, so the
+//! whole organization is announced after CR-T12 is deployed, and until then only named documents.
+//! The reconciler (`context-backfill`, the service's own loop) announces the documents it heals
+//! by itself; this tool is for the keyword index's parity repair (runbook 5.7).
 //!
 //! Env: `DATABASE_URL`, `NATS_URL`, `EMBEDDING_EVENT_PRIVATE_KEY_PATH`,
 //! `EVENT_AUTH_AUDIENCE` (default `dataplane-events`) — the same variables
@@ -68,16 +74,23 @@ const EVENT_SCOPE: &str = "events:embedding:publish";
 #[derive(Debug)]
 struct Args {
     org_id: String,
+    /// The documents named. Empty means every live, non-restricted, already-indexed document of
+    /// the organization, which `parse_from` lets through only when `--all-documents` asked for it.
     document_ids: Vec<String>,
     dry_run: bool,
 }
 
 fn parse_args() -> anyhow::Result<Args> {
+    parse_from(std::env::args().skip(1))
+}
+
+fn parse_from(args: impl IntoIterator<Item = String>) -> anyhow::Result<Args> {
     let mut org_id: Option<String> = None;
     let mut document_ids = Vec::new();
+    let mut all_documents = false;
     let mut dry_run = false;
 
-    let mut it = std::env::args().skip(1);
+    let mut it = args.into_iter();
     while let Some(a) = it.next() {
         match a.as_str() {
             "--org-id" => {
@@ -87,10 +100,11 @@ fn parse_args() -> anyhow::Result<Args> {
                 it.next()
                     .ok_or_else(|| anyhow!("--document-id needs a value"))?,
             ),
+            "--all-documents" => all_documents = true,
             "--dry-run" => dry_run = true,
             "-h" | "--help" => {
                 println!(
-                    "backfill-reannounce --org-id <ORG_ID> [--document-id <ID>]... [--dry-run]"
+                    "backfill-reannounce --org-id <ORG_ID> (--document-id <ID>... | --all-documents) [--dry-run]"
                 );
                 std::process::exit(0);
             }
@@ -98,6 +112,21 @@ fn parse_args() -> anyhow::Result<Args> {
         }
     }
 
+    if all_documents && !document_ids.is_empty() {
+        return Err(anyhow!(
+            "--all-documents and --document-id contradict each other: name the documents or ask for all of them"
+        ));
+    }
+    if !all_documents && document_ids.is_empty() {
+        return Err(anyhow!(
+            "name the documents with --document-id <ID> (one or more), or ask for the whole \
+             organization with --all-documents. A re-announce makes graph-index extract each \
+             document again (one provider call per chunk, until CR-T12 lets it skip an unchanged \
+             one) and makes Meilisearch clear and re-index it, so the whole organization is \
+             announced only on purpose, after CR-T12 is deployed. The keyword index's own repair \
+             is a re-announce of the documents its parity report names (runbook 5.7)"
+        ));
+    }
     Ok(Args {
         org_id: org_id.ok_or_else(|| anyhow!("--org-id required"))?,
         document_ids,
@@ -266,6 +295,58 @@ mod tests {
         let c = idempotency_key("doc-1", "org-2");
         assert_eq!(a, b);
         assert_ne!(a, c);
+    }
+
+    fn parse(args: &[&str]) -> anyhow::Result<Args> {
+        parse_from(args.iter().map(|arg| (*arg).to_owned()))
+    }
+
+    /// A re-announce of a document makes graph-index extract it again (one provider call per
+    /// chunk, until it can skip an unchanged one) and makes Meilisearch clear and re-index it. So
+    /// announcing the whole organization is a decision, and a missing `--document-id` is not
+    /// one: the whole organization has to be asked for by name.
+    #[test]
+    fn the_whole_organization_is_announced_only_when_it_is_asked_for_by_name() {
+        let error = parse(&["--org-id", "org-1"])
+            .expect_err("no document and no --all-documents")
+            .to_string();
+        assert!(error.contains("--document-id"), "{error}");
+        assert!(error.contains("--all-documents"), "{error}");
+        assert!(
+            error.contains("graph"),
+            "it says what an announcement costs: {error}"
+        );
+
+        let named = parse(&[
+            "--org-id",
+            "org-1",
+            "--document-id",
+            "d1",
+            "--document-id",
+            "d2",
+        ])
+        .expect("named documents");
+        assert_eq!(named.document_ids, ["d1", "d2"]);
+
+        let everything = parse(&["--org-id", "org-1", "--all-documents", "--dry-run"])
+            .expect("the whole organization, asked for");
+        assert!(everything.dry_run);
+        assert!(everything.document_ids.is_empty());
+    }
+
+    #[test]
+    fn naming_documents_and_asking_for_all_of_them_is_contradictory() {
+        let error = parse(&["--org-id", "o", "--document-id", "d", "--all-documents"])
+            .expect_err("both")
+            .to_string();
+        assert!(error.contains("--all-documents"), "{error}");
+    }
+
+    #[test]
+    fn the_organization_is_still_required_and_unknown_arguments_are_refused() {
+        assert!(parse(&["--document-id", "d"]).is_err());
+        assert!(parse(&["--org-id", "o", "--document-id", "d", "--everything"]).is_err());
+        assert!(parse(&["--org-id"]).is_err());
     }
 
     #[test]

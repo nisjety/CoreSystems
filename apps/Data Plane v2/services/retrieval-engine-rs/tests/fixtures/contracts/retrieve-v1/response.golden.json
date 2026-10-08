@@ -1,0 +1,79 @@
+{
+  "candidates": [
+    {
+      "knowledge_id": "ku-quarry-pricing-0",
+      "document_id": "doc-quarry-pricing",
+      "text": "The plan costs a fixed amount per cleaning cycle.",
+      "dense_score": 0.75,
+      "sparse_score": 0.5,
+      "rerank_score": 0.0,
+      "final_score": 0.03125,
+      "chunk_index": 0
+    },
+    {
+      "knowledge_id": "ku-handbook-3",
+      "document_id": "doc-handbook",
+      "text": "Conveyor belts are cleaned at the end of every shift.",
+      "dense_score": 0.5,
+      "sparse_score": 0.25,
+      "rerank_score": 0.0,
+      "final_score": 0.015625,
+      "chunk_index": 3
+    },
+    {
+      "knowledge_id": "wiki-block-1",
+      "document_id": "wiki-page-hygiene",
+      "text": "Hygiene zones are separated by colour.",
+      "dense_score": 0.25,
+      "sparse_score": 0.0,
+      "rerank_score": 0.0,
+      "final_score": 0.0078125,
+      "chunk_index": 1
+    }
+  ],
+  "sources": [
+    {
+      "document_id": "doc-quarry-pricing",
+      "title": "Pricing",
+      "source": "quarry",
+      "type": "web_page",
+      "url": "https://docs.example.test/pricing?plan=pro"
+    },
+    {
+      "document_id": "doc-handbook",
+      "title": "Handbook",
+      "source": "sharepoint",
+      "type": "sharepoint_page"
+    },
+    {
+      "document_id": "wiki-page-hygiene",
+      "title": "Hygiene",
+      "source": "wiki/hygiene",
+      "type": "wiki"
+    }
+  ],
+  "query": "how often is the conveyor belt cleaned",
+  "org_id": "org-golden",
+  "trace_id": "00000000-0000-4000-8000-000000000001",
+  "index_version": "v2-current",
+  "zdr_mode": "disabled",
+  "zdr_actions_applied": [],
+  "low_confidence": false,
+  "context_pack": {
+    "facts": [
+      {
+        "knowledge_id": "ku-handbook-3",
+        "document_id": "doc-handbook",
+        "text": "Conveyor belts are cleaned at the end of every shift.",
+        "score": 0.5,
+        "source_title": "Handbook",
+        "source_type": "sharepoint_page",
+        "estimated_tokens": 12
+      }
+    ],
+    "total_tokens": 12,
+    "budget_tokens": 4000,
+    "format": "json"
+  },
+  "suggested_next_tools": []
+}

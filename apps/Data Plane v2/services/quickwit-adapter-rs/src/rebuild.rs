@@ -684,6 +684,34 @@ mod contextual_bm25_tests {
         let wire = serde_json::to_value(&with).expect("serializable");
         assert_eq!(wire["context_body"], "From the Q2 report.");
     }
+
+    /// A blank context is no context (CR-T9a). Postgres says a unit has a context when
+    /// `btrim(chunk_context) <> ''`, and the parity report compares the index with that: the index
+    /// answers "does the unit have a `context_body`" by whether the field is PRESENT (a wildcard
+    /// query on a field with presence indexing, measured on the live index), so a blank string
+    /// that was indexed would read as a context the database does not have. Nothing the
+    /// contextualizer writes is blank, and nothing blank is indexed.
+    #[test]
+    fn a_blank_context_is_indexed_as_no_context() {
+        for blank in ["", " ", "\n\t "] {
+            let doc = knowledge_row_to_document(row(Some(blank)));
+            assert_eq!(doc.context_body, None, "{blank:?}");
+            let wire = serde_json::to_value(&doc).expect("serializable");
+            assert!(
+                !wire
+                    .as_object()
+                    .expect("object")
+                    .contains_key("context_body"),
+                "{blank:?} reached the wire as a field"
+            );
+        }
+        // Padding around a real context is not touched: the stored string is the string.
+        let padded = knowledge_row_to_document(row(Some(" From the Q2 report. ")));
+        assert_eq!(
+            padded.context_body.as_deref(),
+            Some(" From the Q2 report. ")
+        );
+    }
 }
 
 #[cfg(test)]
@@ -1040,8 +1068,11 @@ fn knowledge_row_to_document(row: KnowledgeRow) -> QuickwitDocument {
         source: Some(row.source),
         title: Some(row.title),
         body: row.text,
-        // Indexed and searched; deliberately NOT merged into `body` above.
-        context_body: row.chunk_context,
+        // Indexed and searched; deliberately NOT merged into `body` above. A blank context is
+        // no context (the parity report reads the field's presence as "has a context").
+        context_body: row
+            .chunk_context
+            .filter(|context| !context.trim().is_empty()),
         site_id: string_field(lookup, &["site_id"])
             .or_else(|| string_field(fallback, &["site_id"])),
         drive_id: string_field(lookup, &["drive_id"])

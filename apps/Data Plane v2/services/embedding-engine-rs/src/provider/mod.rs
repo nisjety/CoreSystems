@@ -1,6 +1,9 @@
 use std::time::Duration;
 
 use anyhow::Context;
+use inference_client_rs::{
+    InferenceError, InferenceTokenClient, Reason, RetentionPosture, TokenClientConfig,
+};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use tonic::metadata::MetadataValue;
@@ -10,11 +13,9 @@ use uuid::Uuid;
 use crate::config::Config;
 
 pub mod contextualize;
-mod inference_auth;
 pub mod media;
 pub mod video_caption;
 pub mod visual;
-use inference_auth::{InferenceTokenClient, RetentionPosture};
 
 const MAX_RETRIES: u32 = 3;
 const INITIAL_BACKOFF_MS: u64 = 500;
@@ -201,24 +202,13 @@ impl EmbeddingProvider {
         inference_retention_posture: &str,
     ) -> anyhow::Result<Self> {
         let timeout = Duration::from_millis(timeout_ms.max(1));
-        let retention_posture = RetentionPosture::parse(inference_retention_posture)?;
-        let inference_token_client = if standalone_startup() {
-            InferenceTokenClient::new_allow_unconfigured(
-                inference_token_url,
-                inference_token_issuer,
-                inference_service_id,
-                inference_service_api_key,
-                retention_posture,
-            )?
-        } else {
-            InferenceTokenClient::new(
-                inference_token_url,
-                inference_token_issuer,
-                inference_service_id,
-                inference_service_api_key,
-                retention_posture,
-            )?
-        };
+        let inference_token_client = token_client(
+            inference_token_url,
+            inference_token_issuer,
+            inference_service_id,
+            inference_service_api_key,
+            inference_retention_posture,
+        )?;
         let channel = Endpoint::from_shared(grpc_url.to_string())
             .with_context(|| format!("invalid MODEL_PLANE_AI_CORE_GRPC_URL `{grpc_url}`"))?
             .connect_timeout(timeout)
@@ -327,17 +317,57 @@ fn standalone_startup() -> bool {
         .unwrap_or(false)
 }
 
+/// The Auth Core service-token client every inference call of this service uses,
+/// from the values the service is configured with. The posture is the one the
+/// operator set in `MODEL_PLANE_INFERENCE_RETENTION_POSTURE` (see
+/// `inference_client_rs::RetentionPosture`).
+///
+/// Strict in a real deployment: a missing credential is a startup error, not a
+/// month of silently failed calls. Standalone startup (`APP_ENV=standalone`)
+/// relaxes it exactly as it always did: the client binds but stays unusable, so
+/// every call fails closed instead of reaching inference-core unauthenticated.
+fn token_client(
+    token_url: &str,
+    issuer: &str,
+    service_id: &str,
+    service_api_key: &str,
+    posture: &str,
+) -> anyhow::Result<InferenceTokenClient> {
+    Ok(InferenceTokenClient::new(TokenClientConfig {
+        token_url: token_url.to_owned(),
+        expected_issuer: issuer.to_owned(),
+        service_id: service_id.to_owned(),
+        service_api_key: service_api_key.to_owned(),
+        posture: RetentionPosture::parse(posture)?,
+        allow_unconfigured: standalone_startup(),
+    })?)
+}
+
+/// [`token_client`] from the service configuration. Used by the contextualizer
+/// and the video describer, which act as the same principal.
+fn token_client_from_config(cfg: &Config) -> anyhow::Result<InferenceTokenClient> {
+    token_client(
+        &cfg.model_plane_inference_token_url,
+        &cfg.model_plane_inference_token_issuer,
+        &cfg.model_plane_inference_service_id,
+        &cfg.model_plane_inference_service_api_key,
+        &cfg.model_plane_inference_retention_posture,
+    )
+}
+
 impl ModelPlaneEmbeddingClient {
+    /// One bearer per provider call, taken at the moment of the call. A large
+    /// document outlives a 60-second tenant token, and the cache makes the lookup
+    /// free, so nothing here holds a bearer across the batch.
     async fn embed_batch(
         &self,
         org_id: &str,
         texts: &[String],
         zdr: bool,
     ) -> anyhow::Result<Vec<Vec<f32>>> {
-        let bearer = self.inference_token_client.mint(org_id).await?;
         let mut vectors = Vec::with_capacity(texts.len());
         for text in texts {
-            vectors.push(self.embed_one(org_id, text, zdr, bearer.as_str()).await?);
+            vectors.push(self.embed_one(org_id, text, zdr).await?);
         }
         Ok(vectors)
     }
@@ -365,13 +395,7 @@ impl ModelPlaneEmbeddingClient {
         }
     }
 
-    async fn embed_one(
-        &self,
-        org_id: &str,
-        text: &str,
-        zdr: bool,
-        bearer: &str,
-    ) -> anyhow::Result<Vec<f32>> {
+    async fn embed_one(&self, org_id: &str, text: &str, zdr: bool) -> anyhow::Result<Vec<f32>> {
         let mut last_err = None;
 
         for attempt in 0..=MAX_RETRIES {
@@ -381,8 +405,23 @@ impl ModelPlaneEmbeddingClient {
                 tokio::time::sleep(backoff).await;
             }
 
+            // Fetched per attempt, not per document: a retry after a backoff may
+            // fall past the expiry of the bearer the first attempt used. A mint
+            // that Auth Core refuses (no token issued) ends the call at once and
+            // keeps its type: a posture that could not be resolved is a wait for
+            // the caller to schedule, not something to retry here.
+            let bearer = self
+                .inference_token_client
+                .bearer(org_id, Reason::DocumentEmbedding)
+                .await
+                .map_err(|error| {
+                    anyhow::Error::new(
+                        InferenceError::from(error).during("model-plane embedding bearer"),
+                    )
+                })?;
+
             let request = self.build_request(org_id, text, zdr);
-            let request = Self::authenticated_request(request, bearer)?;
+            let request = Self::authenticated_request(request, bearer.as_str())?;
 
             let mut client = self.client.clone();
             match tokio::time::timeout(self.timeout, client.create_embedding(request)).await {
@@ -394,11 +433,10 @@ impl ModelPlaneEmbeddingClient {
                     return Ok(body.vector);
                 }
                 Ok(Err(status)) if is_retryable_grpc(&status) => {
-                    last_err =
-                        Some(anyhow::anyhow!(status).context("model-plane embedding failed"));
+                    last_err = Some(typed_embedding_error(&status));
                 }
                 Ok(Err(status)) => {
-                    return Err(anyhow::anyhow!(status).context("model-plane embedding failed"));
+                    return Err(typed_embedding_error(&status));
                 }
                 Err(_) => {
                     last_err = Some(anyhow::anyhow!(
@@ -619,6 +657,14 @@ fn normalize_provider(provider: &str) -> String {
     }
 }
 
+/// The failed call as a typed error. The kind and gRPC code are in its message,
+/// and a caller that has to decide what to do with the work (skip it, wait for
+/// the organization's posture, retry) recovers the type with
+/// `error.downcast_ref::<InferenceError>()` instead of reading text.
+fn typed_embedding_error(status: &tonic::Status) -> anyhow::Error {
+    anyhow::Error::new(InferenceError::from_status(status).during("model-plane embedding"))
+}
+
 fn is_retryable_grpc(status: &tonic::Status) -> bool {
     matches!(
         status.code(),
@@ -628,6 +674,63 @@ fn is_retryable_grpc(status: &tonic::Status) -> bool {
             | tonic::Code::Unavailable
             | tonic::Code::Unknown
     )
+}
+
+/// A stand-in for Auth Core's token endpoint, for the tests of the three callers
+/// of the inference token client. It is a transport and nothing else: the rules
+/// under test (which `reason` a feature asks with, what is done with a refusal to
+/// issue) are the callers' and the client's own, and the answer it serves is the
+/// body Auth Core really sends (`inference-service-tokens.golden.json`, case
+/// `tenantPostureUnavailable`, in `services/inference-client-rs/tests/fixtures`).
+#[cfg(test)]
+pub(crate) mod test_support {
+    use std::sync::{Arc, Mutex};
+
+    /// Auth Core when it cannot resolve an organization's retention posture: 503
+    /// `retention_posture_unavailable` and no token. Returns the token URL and the
+    /// request bodies the endpoint has received.
+    pub(crate) async fn posture_unavailable_auth_core(
+    ) -> (String, Arc<Mutex<Vec<serde_json::Value>>>) {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let recorded = seen.clone();
+        let app = axum::Router::new().route(
+            "/api/inference-core/internal-token",
+            axum::routing::post(move |axum::Json(body): axum::Json<serde_json::Value>| {
+                let recorded = recorded.clone();
+                async move {
+                    recorded.lock().expect("recorded requests").push(body);
+                    (
+                        axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                        axum::Json(serde_json::json!({
+                            "statusCode": 503,
+                            "error": "retention_posture_unavailable",
+                            "message": "The organization retention posture could not be verified. Retry shortly."
+                        })),
+                    )
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind loopback");
+        let address = listener.local_addr().expect("local address");
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        (
+            format!("http://{address}/api/inference-core/internal-token"),
+            seen,
+        )
+    }
+
+    /// The `reason` of each request the stand-in has received, in order.
+    pub(crate) fn reasons(seen: &Mutex<Vec<serde_json::Value>>) -> Vec<String> {
+        seen.lock()
+            .expect("recorded requests")
+            .iter()
+            .map(|body| body["reason"].as_str().unwrap_or_default().to_owned())
+            .collect()
+    }
 }
 
 #[cfg(test)]
@@ -988,5 +1091,84 @@ mod tests {
         )
         .expect_err("missing bearer must fail closed");
         assert!(error.to_string().contains("inference bearer"));
+    }
+
+    /// Embedding asks Auth Core for the `document-embedding` reason, once per
+    /// provider call and not once per batch, and a refusal to issue keeps its
+    /// type all the way out: the caller can tell a wait (the organization's
+    /// posture could not be resolved) from a failure without reading text.
+    #[tokio::test]
+    async fn a_refused_bearer_ends_the_batch_typed_and_names_the_feature() {
+        let (token_url, seen) = test_support::posture_unavailable_auth_core().await;
+        let provider = EmbeddingProvider::model_plane(
+            "http://inference-core:9092",
+            "text-embedding-3-large",
+            "azure_openai",
+            "swedencentral",
+            30_000,
+            &token_url,
+            "http://auth-core:3011/api/convex-auth",
+            "embedding-engine",
+            "service-key-for-embedding-tests",
+            "tenant",
+        )
+        .expect("model-plane provider");
+
+        let texts: Vec<String> = ["a", "b", "c"]
+            .iter()
+            .map(|text| text.to_string())
+            .collect();
+        let error = provider
+            .embed_batch("org-1", &texts, false)
+            .await
+            .expect_err("no bearer, no embedding");
+
+        let typed = error
+            .downcast_ref::<InferenceError>()
+            .expect("the failure keeps its type");
+        assert_eq!(
+            typed.failure(),
+            &inference_client_rs::Failure::PostureUnavailable
+        );
+        assert_eq!(
+            typed.disposition(),
+            inference_client_rs::Disposition::Pending {
+                after: Duration::from_secs(300)
+            },
+            "an unresolved posture is a wait: pending, five minutes, never skipped"
+        );
+        // What a caller logs with `%e` names the kind, not a bare context.
+        assert!(error.to_string().contains("posture_unavailable"), "{error}");
+        // The first text found there was no bearer and the batch stopped there.
+        assert_eq!(
+            test_support::reasons(&seen),
+            ["document-embedding"],
+            "one request, for this feature's reason"
+        );
+    }
+
+    #[test]
+    fn an_unknown_posture_is_a_startup_error_naming_the_variable() {
+        let error = match EmbeddingProvider::model_plane(
+            "http://inference-core:9092",
+            "text-embedding-3-large",
+            "azure_openai",
+            "swedencentral",
+            30_000,
+            "http://auth-core:3011/api/inference-core/internal-token",
+            "http://auth-core:3011/api/convex-auth",
+            "embedding-engine",
+            "service-key-for-embedding-tests",
+            "sometimes",
+        ) {
+            Ok(_) => panic!("an unknown posture must fail startup"),
+            Err(error) => error,
+        };
+        let message = error.to_string();
+        assert!(
+            message.contains("MODEL_PLANE_INFERENCE_RETENTION_POSTURE")
+                && message.contains("tenant"),
+            "{message}"
+        );
     }
 }

@@ -642,6 +642,74 @@ CREATE INDEX IF NOT EXISTS idx_cost_events_user_created
     ON cost_events (user_id, created_at DESC)
     WHERE user_id IS NOT NULL;
 
+-- CR-T10 — usage ledger v2. A MIRROR of migrations/20261003140000_cost_events_v2.sql (read
+-- its header for what each column is for): a fresh database gets the same columns,
+-- constraints and indexes from init.sql that an existing one gets from the migration, and
+-- the migrator then re-applies the migration over this, which is a no-op by construction.
+-- tests/contract/postgres/cost_events_v2_static_test.go fails when the two differ.
+ALTER TABLE cost_events
+    ADD COLUMN IF NOT EXISTS schema_version     SMALLINT    NOT NULL DEFAULT 1,
+    ADD COLUMN IF NOT EXISTS feature            TEXT,
+    ADD COLUMN IF NOT EXISTS provider_used      TEXT,
+    ADD COLUMN IF NOT EXISTS input_tokens       BIGINT,
+    ADD COLUMN IF NOT EXISTS output_tokens      BIGINT,
+    ADD COLUMN IF NOT EXISTS cache_read_tokens  BIGINT,
+    ADD COLUMN IF NOT EXISTS units              BIGINT,
+    ADD COLUMN IF NOT EXISTS cost_basis         TEXT,
+    ADD COLUMN IF NOT EXISTS estimated          BOOLEAN,
+    ADD COLUMN IF NOT EXISTS zdr                BOOLEAN     NOT NULL DEFAULT FALSE,
+    ADD COLUMN IF NOT EXISTS request_id         TEXT,
+    ADD COLUMN IF NOT EXISTS forwarded_at       TIMESTAMPTZ,
+    ADD COLUMN IF NOT EXISTS forward_attempts   INTEGER     NOT NULL DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS forward_next_at    TIMESTAMPTZ,
+    ADD COLUMN IF NOT EXISTS forward_lease_until TIMESTAMPTZ,
+    ADD COLUMN IF NOT EXISTS forward_error      TEXT;
+
+ALTER TABLE cost_events DROP CONSTRAINT IF EXISTS cost_events_schema_version_chk;
+ALTER TABLE cost_events ADD CONSTRAINT cost_events_schema_version_chk
+    CHECK (schema_version IN (1, 2));
+
+ALTER TABLE cost_events DROP CONSTRAINT IF EXISTS cost_events_v2_complete_chk;
+ALTER TABLE cost_events ADD CONSTRAINT cost_events_v2_complete_chk
+    CHECK (schema_version < 2 OR (
+        feature IS NOT NULL AND provider_used IS NOT NULL
+        AND input_tokens IS NOT NULL AND output_tokens IS NOT NULL AND cache_read_tokens IS NOT NULL
+        AND cost_basis IS NOT NULL AND estimated IS NOT NULL AND request_id IS NOT NULL));
+
+ALTER TABLE cost_events DROP CONSTRAINT IF EXISTS cost_events_counts_chk;
+ALTER TABLE cost_events ADD CONSTRAINT cost_events_counts_chk
+    CHECK (count >= 0 AND estimated_tokens >= 0
+        AND (input_tokens IS NULL OR input_tokens >= 0)
+        AND (output_tokens IS NULL OR output_tokens >= 0)
+        AND (cache_read_tokens IS NULL OR cache_read_tokens >= 0)
+        AND (units IS NULL OR units >= 0));
+
+ALTER TABLE cost_events DROP CONSTRAINT IF EXISTS cost_events_cost_basis_chk;
+ALTER TABLE cost_events ADD CONSTRAINT cost_events_cost_basis_chk
+    CHECK (cost_basis IS NULL OR (cost_basis IN ('metered', 'estimated') AND estimated IS NOT NULL AND estimated = (cost_basis = 'estimated')));
+
+ALTER TABLE cost_events DROP CONSTRAINT IF EXISTS cost_events_feature_chk;
+ALTER TABLE cost_events ADD CONSTRAINT cost_events_feature_chk
+    CHECK (feature IS NULL OR feature ~ '^[a-z][a-z0-9-]{0,62}$');
+
+ALTER TABLE cost_events DROP CONSTRAINT IF EXISTS cost_events_zdr_counters_only_chk;
+ALTER TABLE cost_events ADD CONSTRAINT cost_events_zdr_counters_only_chk
+    CHECK (NOT zdr OR user_id IS NULL);
+
+ALTER TABLE cost_events DROP CONSTRAINT IF EXISTS cost_events_forward_state_chk;
+ALTER TABLE cost_events ADD CONSTRAINT cost_events_forward_state_chk
+    CHECK ((forwarded_at IS NULL OR schema_version >= 2)
+        AND forward_attempts >= 0
+        AND (forward_error IS NULL OR forward_error IN ('rejected', 'unauthorized', 'unavailable', 'token_unavailable')));
+
+CREATE INDEX IF NOT EXISTS idx_cost_events_forward_queue
+    ON cost_events (id)
+    WHERE forwarded_at IS NULL AND schema_version >= 2;
+
+CREATE INDEX IF NOT EXISTS idx_cost_events_org_feature_created
+    ON cost_events (org_id, feature, created_at DESC)
+    WHERE feature IS NOT NULL;
+
 -- Wave-3.2 §16.3.7 — GIN indexes on existing JSONB columns
 CREATE INDEX IF NOT EXISTS idx_documents_extraction_trace_gin
     ON documents USING GIN (extraction_trace);

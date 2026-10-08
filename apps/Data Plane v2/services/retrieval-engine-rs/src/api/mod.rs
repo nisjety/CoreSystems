@@ -51,316 +51,33 @@ async fn resolve_viewer_grants(
         }
     }
     let viewer = auth.and_then(|ext| ext.user_id.clone());
-    let granted = match &viewer {
-        Some(uid) => {
-            pipeline
-                .visibility
-                .visible_documents(
-                    org_id,
-                    uid,
-                    auth.and_then(|ext| ext.verified_bearer.as_deref()),
-                )
-                .await
-        }
-        None => Vec::new(),
-    };
+    // One helper for every grants lookup: a service principal has none and is
+    // never sent to the user-core facade.
+    let granted = crate::authz::resolve_explicit_grants(
+        pipeline.visibility.as_ref(),
+        org_id,
+        viewer.as_deref(),
+        auth.is_some_and(|ext| ext.principal.is_service()),
+        auth.and_then(|ext| ext.verified_bearer.as_deref()),
+    )
+    .await;
     (viewer, granted)
 }
 
-/// Wave 3 §15 — full auth + AuthContext + policy + audit-log middleware.
+/// The admission guard for every authenticated route.
 ///
-/// Flow:
-///  1. Identify the caller from a verified JWT (`sub` + `org_id` claims).
-///  2. Build `AuthContext` with `request_id` and `org_id`.
-///  3. JWT path only — verify `X-Org-ID` header matches `claims.org_id`
-///     (rejects org-claim spoofing).
-///  4. JWT path with `CONTROL_PLANE_ENFORCEMENT≠off` — call PolicyClient;
-///     deny if not a member or no ACL.
-///  5. Inject AuthContext into request extensions; downstream handlers + the
-///     pipeline read it via `Extension<AuthContext>`.
-///  6. After response, append one row to `access_audit_log`.
-async fn auth_middleware(
-    State(state): State<AppState>,
-    mut req: Request,
-    next: Next,
-) -> Result<axum::response::Response, StatusCode> {
-    use crate::authz::{AuthContext, AuthMethod};
-
-    let started = std::time::Instant::now();
-    let endpoint_label = format!("{} {}", req.method(), req.uri().path());
-
-    // Stable request id for log correlation. Re-use X-Request-Id if the
-    // caller set one; otherwise mint a fresh one.
-    let request_id = req
-        .headers()
-        .get("x-request-id")
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-
-    // ── Step 1: identify caller ────────────────────────────────────────
-    let header_org_id = req
-        .headers()
-        .get("x-org-id")
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string());
-
-    // A fleet-shared API key is not an identity and can no longer authorize a
-    // tenant. User and service callers both use audience-scoped signed tokens.
-    let auth_ctx: AuthContext = if let Some(token) = bearer_token(req.headers()) {
-        match verify_jwt(&token).await {
-            Ok(claims) => {
-                let claims_org = claims.org_id.clone().unwrap_or_default();
-                // §15-A core check: header MUST match claims for JWT path.
-                // Empty header is interpreted as "use claims".
-                let header_org = header_org_id.clone().unwrap_or_else(|| claims_org.clone());
-                if header_org != claims_org && !claims_org.is_empty() {
-                    crate::metrics::record_authz_denial(&claims_org, "header_claims_mismatch");
-                    audit_unauthorized(
-                        &state,
-                        &request_id,
-                        Some(&claims.sub),
-                        &claims_org,
-                        &endpoint_label,
-                        started.elapsed().as_millis() as u32,
-                        AuthMethod::Jwt,
-                        "denied:header_claims_mismatch",
-                    )
-                    .await;
-                    return Err(StatusCode::FORBIDDEN);
-                }
-
-                let mut ctx =
-                    auth_context_from_verified_claims(&claims, request_id.clone(), token.clone());
-
-                // §15-B + §15-C: PolicyClient lookup.
-                let decision = state.policy.resolve(&claims.sub, &claims_org).await;
-                if !decision.is_member {
-                    crate::metrics::record_authz_denial(&claims_org, &decision.cause);
-                    audit_unauthorized(
-                        &state,
-                        &request_id,
-                        Some(&claims.sub),
-                        &claims_org,
-                        &endpoint_label,
-                        started.elapsed().as_millis() as u32,
-                        AuthMethod::Jwt,
-                        &decision.cause,
-                    )
-                    .await;
-                    return Err(StatusCode::FORBIDDEN);
-                }
-                ctx.acl = decision.acl;
-                ctx
-            }
-            Err(_) => return Err(StatusCode::UNAUTHORIZED),
-        }
-    } else {
-        return Err(StatusCode::UNAUTHORIZED);
-    };
-
-    // ── Step 2: org_id must be present at this point ───────────────────
-    if auth_ctx.org_id.is_empty() {
-        return Err(StatusCode::BAD_REQUEST);
-    }
-
-    // ── Step 3: inject into request extensions for downstream consumers ─
-    let endpoint_for_audit = endpoint_label.clone();
-    let auth_for_audit = auth_ctx.clone();
-    req.extensions_mut().insert(auth_ctx);
-
-    let response = next.run(req).await;
-    let status = response.status();
-    let latency_ms = started.elapsed().as_millis() as u32;
-
-    // ── Step 4: audit-log append (best-effort) ─────────────────────────
-    let cause = if status.is_success() {
-        "ok"
-    } else if status.as_u16() == 403 {
-        "denied:downstream_forbidden"
-    } else if status.is_client_error() {
-        "error:client"
-    } else {
-        "error:server"
-    };
-    crate::audit::record_access(
-        &state.pool,
-        crate::audit::AccessEvent {
-            ctx: &auth_for_audit,
-            endpoint: &endpoint_for_audit,
-            http_status: status.as_u16(),
-            latency_ms,
-            document_ids: vec![], // populated by handlers in v2.4+
-            cause,
-        },
+/// The whole decision (bearer verification, identity shape, `X-Org-ID` check,
+/// then Control membership for users or the default-deny route allowlist for
+/// services, the audit row) lives in `authz::principal` so the crate's tests
+/// run the REAL rules rather than a copy; this only supplies the production
+/// dependencies: the pipeline's policy client, the org-scoped audit writer and
+/// the env/JWKS verifier.
+fn auth_guard(state: &AppState) -> crate::authz::AuthGuard {
+    crate::authz::AuthGuard::new(
+        state.policy.clone(),
+        Arc::new(crate::audit::PgAuditSink::new(state.pool.clone())),
+        Arc::new(crate::authz::EnvClaimsVerifier),
     )
-    .await;
-
-    Ok(response)
-}
-
-/// Helper: write a denial row to the audit log for requests we reject in
-/// the middleware itself (before `next.run`).
-#[allow(clippy::too_many_arguments)] // pre-existing arity; clippy 1.94 -D warnings
-async fn audit_unauthorized(
-    state: &AppState,
-    request_id: &str,
-    user_id: Option<&str>,
-    org_id: &str,
-    endpoint: &str,
-    latency_ms: u32,
-    method: crate::authz::AuthMethod,
-    cause: &str,
-) {
-    let ctx = crate::authz::AuthContext {
-        user_id: user_id.map(String::from),
-        org_id: org_id.to_string(),
-        auth_method: method,
-        scopes: vec![],
-        zdr: true,
-        // A rejected request has no verified claims to read a real posture
-        // from — strict placeholder, matching `zdr: true` above, not the
-        // permissive default.
-        sovereign: Some(true),
-        acl: crate::authz::EffectiveAcl::default(),
-        request_id: request_id.to_string(),
-        verified_bearer: None,
-    };
-    crate::audit::record_access(
-        &state.pool,
-        crate::audit::AccessEvent {
-            ctx: &ctx,
-            endpoint,
-            http_status: 403,
-            latency_ms,
-            document_ids: vec![],
-            cause,
-        },
-    )
-    .await;
-}
-
-fn bearer_token(headers: &axum::http::HeaderMap) -> Option<String> {
-    let value = headers.get("authorization").and_then(|v| v.to_str().ok())?;
-    value.strip_prefix("Bearer ").map(|s| s.to_string())
-}
-
-fn auth_context_from_verified_claims(
-    claims: &crate::authz::Claims,
-    request_id: String,
-    token: String,
-) -> crate::authz::AuthContext {
-    crate::authz::AuthContext {
-        user_id: Some(claims.sub.clone()),
-        org_id: claims.org_id.clone().unwrap_or_default(),
-        auth_method: crate::authz::AuthMethod::Jwt,
-        scopes: claims.scopes.clone(),
-        zdr: claims.zdr,
-        sovereign: claims.sovereign,
-        acl: crate::authz::EffectiveAcl::allow_all(),
-        request_id,
-        verified_bearer: Some(token),
-    }
-}
-
-fn strict_validation_from_env() -> Result<jsonwebtoken::Validation, StatusCode> {
-    let issuer = std::env::var("JWT_REQUIRED_ISSUER")
-        .ok()
-        .map(|value| value.trim().to_owned())
-        .filter(|value| !value.is_empty())
-        .ok_or(StatusCode::UNAUTHORIZED)?;
-    let audience = std::env::var("JWT_REQUIRED_AUDIENCE")
-        .ok()
-        .map(|value| value.trim().to_owned())
-        .filter(|value| !value.is_empty())
-        .ok_or(StatusCode::UNAUTHORIZED)?;
-    strict_validation_for(&issuer, &audience)
-}
-
-fn strict_validation_for(
-    issuer: &str,
-    audience: &str,
-) -> Result<jsonwebtoken::Validation, StatusCode> {
-    if issuer.trim().is_empty()
-        || issuer != issuer.trim()
-        || audience.trim().is_empty()
-        || audience != audience.trim()
-    {
-        return Err(StatusCode::UNAUTHORIZED);
-    }
-
-    let mut validation = jsonwebtoken::Validation::new(jsonwebtoken::Algorithm::RS256);
-    // "sovereign" deliberately NOT required here — see `Claims::sovereign`'s
-    // doc comment: auth-core does not emit it yet, and requiring it would
-    // reject every real token in production.
-    validation.set_required_spec_claims(&["exp", "nbf", "aud", "iss", "sub", "zdr"]);
-    validation.set_issuer(&[issuer]);
-    validation.set_audience(&[audience]);
-    validation.validate_exp = true;
-    validation.validate_nbf = true;
-    validation.leeway = 30;
-    Ok(validation)
-}
-
-fn decode_verified_claims(
-    token: &str,
-    key: &jsonwebtoken::DecodingKey,
-    validation: &jsonwebtoken::Validation,
-) -> Result<crate::authz::Claims, StatusCode> {
-    let header = jsonwebtoken::decode_header(token).map_err(|_| StatusCode::UNAUTHORIZED)?;
-    if header.alg != jsonwebtoken::Algorithm::RS256 {
-        return Err(StatusCode::UNAUTHORIZED);
-    }
-
-    let claims = jsonwebtoken::decode::<crate::authz::Claims>(token, key, validation)
-        .map_err(|_| StatusCode::UNAUTHORIZED)?
-        .claims;
-    let org_id = claims
-        .org_id
-        .as_ref()
-        .filter(|org| !org.trim().is_empty() && org.trim() == org.as_str())
-        .ok_or(StatusCode::UNAUTHORIZED)?;
-    if claims.sub.trim().is_empty() || claims.sub.trim() != claims.sub {
-        return Err(StatusCode::UNAUTHORIZED);
-    }
-    if org_id.is_empty() {
-        return Err(StatusCode::UNAUTHORIZED);
-    }
-    Ok(claims)
-}
-
-/// Verify a JWT against `JWT_PUBLIC_KEY_PEM` (RS256). Returns the decoded
-/// claims so the caller can build `AuthContext` from them. JWKS fetching is
-/// the wave-3.1 follow-up — most internal deployments pin a single key.
-async fn verify_jwt(token: &str) -> Result<crate::authz::Claims, StatusCode> {
-    // §16.5.5 — if a JWKS cache is initialized and the token's `kid`
-    // resolves there, use that key. Otherwise fall through to the static
-    // `JWT_PUBLIC_KEY_PEM` path (pre-3.4 behavior).
-    let validation = strict_validation_from_env()?;
-
-    if let Some(jwks) = crate::authz::JwksCache::global() {
-        if let Ok(header) = jsonwebtoken::decode_header(token) {
-            if let Some(kid) = header.kid {
-                if let Some(key) = jwks.key_for_kid(&kid).await {
-                    return decode_verified_claims(token, &key, &validation).inspect_err(|error| {
-                        tracing::debug!(?error, kid = %kid, "jwks jwt verify failed");
-                    });
-                }
-            }
-        }
-    }
-
-    let pem = std::env::var("JWT_PUBLIC_KEY_PEM").ok();
-    let pem = pem
-        .filter(|p| !p.is_empty())
-        .ok_or(StatusCode::UNAUTHORIZED)?;
-
-    let key = jsonwebtoken::DecodingKey::from_rsa_pem(pem.as_bytes())
-        .map_err(|_| StatusCode::UNAUTHORIZED)?;
-
-    decode_verified_claims(token, &key, &validation).inspect_err(|error| {
-        tracing::debug!(?error, "jwt verification failed");
-    })
 }
 
 #[cfg(test)]
@@ -372,7 +89,9 @@ mod auth_security_tests {
     };
     use serde_json::{json, Value};
 
-    use super::{auth_context_from_verified_claims, decode_verified_claims, strict_validation_for};
+    use crate::authz::{
+        auth_context_from_verified_claims, decode_verified_claims, strict_validation_for,
+    };
     use crate::pipeline::types::{RetrievalRequest, ZdrMode};
 
     const ISSUER: &str = "https://control.test/api/convex-auth";
@@ -681,17 +400,19 @@ fn router_inner(
             axum::routing::delete(delete_context_pin),
         )
         .route("/v1/context/preload", post(context_preload))
-        // §16.5.1 — per-org rate limit applied AFTER auth_middleware runs,
+        // §16.5.1 — per-org rate limit applied AFTER the auth guard runs,
         // so the limiter key resolves against the authenticated org_id.
         // `route_layer` order: bottom layer runs innermost, so we put rate
-        // limit BELOW auth_middleware in the chain.
+        // limit BELOW the guard in the chain. The guard is mounted with
+        // `route_layer` (never `layer`) so it sees the matched route PATTERN,
+        // which is what the service allowlist is keyed on.
         .route_layer(middleware::from_fn_with_state(
             crate::rate_limit::PerOrgLimiter::from_env(),
             crate::rate_limit::per_org_rate_limit,
         ))
         .route_layer(middleware::from_fn_with_state(
-            state.clone(),
-            auth_middleware,
+            auth_guard(&state),
+            crate::authz::guard_middleware,
         ))
         // A Space decision is authority, not a hint. Until every auxiliary
         // retrieval arm can enforce the exact resolved mapping, never allow a
@@ -818,7 +539,7 @@ async fn retrieve(
     Json(mut req): Json<RetrievalRequest>,
 ) -> Result<impl IntoResponse, AppError> {
     // Wave-3.1 §15-C completion: when an AuthContext was injected by the
-    // auth_middleware, apply its ACL to the request filters BEFORE the
+    // admission guard, apply its ACL to the request filters BEFORE the
     // pipeline runs. Caller-supplied workspaces / collections / acl_tags
     // are intersected with what org-core says the user can see.
     if let Some(axum::extract::Extension(ctx)) = auth.as_ref() {
@@ -1659,6 +1380,7 @@ fn pack_retrieval_request(
         mode_mix: None,
         agent_id: None,
         admin_read_all: false,
+        service_principal: false,
         space_scope: None,
     };
     auth.apply_to_request(&mut retrieval);
@@ -2840,6 +2562,7 @@ mod admin_security_tests {
             acl: EffectiveAcl::allow_all(),
             request_id: "request-1".into(),
             verified_bearer: None,
+            principal: crate::authz::Principal::User,
         }
     }
 
@@ -3004,6 +2727,7 @@ mod auxiliary_security_tests {
             acl: EffectiveAcl::allow_all(),
             request_id: "aux-security-test".into(),
             verified_bearer: None,
+            principal: crate::authz::Principal::User,
         }
     }
 

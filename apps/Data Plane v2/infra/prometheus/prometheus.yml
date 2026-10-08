@@ -15,6 +15,17 @@ scrape_configs:
           service: retrieval-engine-rs
           plane: data
 
+  # The embedding engine serves one counter so far, ctx_budget_exceeded_total (CR-T9b). Its own
+  # job, so that the retrieval-engine job's `up` alert does not also speak for it.
+  - job_name: dataplane-v2-embedding
+    metrics_path: /metrics
+    static_configs:
+      - targets:
+          - embedding-engine:9202
+        labels:
+          service: embedding-engine-rs
+          plane: data
+
   - job_name: dataplane-v2-go
     metrics_path: /metrics
     static_configs:

@@ -20,12 +20,24 @@
 //!   - `strict`     → HttpPolicyClient, fail-closed if Control Plane is down
 //!   - `permissive` → retained config alias for HttpPolicyClient; still fail-closed
 //!
+//! Two kinds of verified caller are admitted differently (QB-T03):
+//!   - [`principal`]       — identity classification, the single admission
+//!                           decision ([`principal::admit`]) and the HTTP guard.
+//!                           Users: Control membership. Services: the default-
+//!                           deny route allowlist.
+//!   - [`service_routes`]  — that allowlist: which service may call which
+//!                           `(method, route pattern)` with which scope.
+//!   - [`jwt`]             — the real bearer validation, shared with the tests.
+//!
 //! Closes §15-A `AuthContext`, §15-B `MembershipCache`, §15-C
 //! `PermissionResolver` foundation.
 
 pub mod context;
 pub mod jwks;
+pub mod jwt;
 pub mod policy;
+pub mod principal;
+pub mod service_routes;
 pub mod taxonomy;
 pub mod visibility;
 
@@ -34,10 +46,20 @@ pub use context::{
     pin_org_from_ctx, AuthContext, AuthMethod, Claims, EffectiveAcl, OrgScopeMismatch,
 };
 pub use jwks::JwksCache;
+#[allow(unused_imports)] // the verifier seam is consumed by the crate's integration tests
+pub use jwt::{
+    bearer_token, decode_verified_claims, strict_validation_for, ClaimsVerifier, EnvClaimsVerifier,
+};
 #[allow(unused_imports)]
 // PolicyDecision is part of the public surface; consumers land in later wiring
 pub use policy::{
     EnforcementMode, HttpPolicyClient, NoopPolicyClient, PolicyClient, PolicyDecision,
+};
+#[allow(unused_imports)] // the admission surface is consumed by the crate's integration tests
+pub use principal::{
+    admit, auth_context_from_verified_claims, classify_principal, guard_middleware,
+    resolve_explicit_grants, Admission, AdmissionRequest, Admitted, AuthGuard, Denial, Principal,
+    PrincipalShapeError,
 };
 #[allow(unused_imports)]
 pub use visibility::{HttpVisibilityClient, NoopVisibilityClient, VisibilityClient};

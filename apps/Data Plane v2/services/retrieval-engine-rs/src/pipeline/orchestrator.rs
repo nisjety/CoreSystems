@@ -62,6 +62,38 @@ fn text_rerank_allowed(zdr_mode: ZdrMode, requested: bool) -> bool {
     requested && !zdr_mode.restricts_egress()
 }
 
+/// Whether the cross-encoder may run for this request: the caller's
+/// `mode_mix.rerank` (absent means on; an explicit `false` is an opt-out, which
+/// is what Quarry's vector leg sends), any restrictive ZDR posture (no
+/// retaining egress of the query text), and sovereignty (Cohere rerank v4 is
+/// Azure-hosted and can never satisfy it).
+///
+/// `sovereign_required` stays a separate `&&` rather than a parameter of
+/// [`text_rerank_allowed`], so that function's zdr-only contract and tests are
+/// unchanged. When this is false no reranker call is made, `rerank_used_count`
+/// is 0 and the confidence gate is inactive (it only judges reranker scores).
+#[must_use]
+pub fn text_rerank_requested(
+    zdr_mode: ZdrMode,
+    mode_mix_rerank: Option<bool>,
+    sovereign_required: bool,
+) -> bool {
+    text_rerank_allowed(zdr_mode, mode_mix_rerank.unwrap_or(true)) && !sovereign_required
+}
+
+/// The sovereignty posture of a request. ABSENT means STRICT (`true`): the caller
+/// needs sovereign infrastructure, which the Azure-hosted query embedding cannot
+/// give, so cloud egress is restricted like a restrictive ZDR posture and a
+/// dense-routed request fails closed (an error, not a lexical-only answer). To
+/// keep the dense arm send `false`; a signed `sovereign=true` claim still wins.
+#[must_use]
+pub const fn sovereign_required_or_strict(requested: Option<bool>) -> bool {
+    match requested {
+        Some(required) => required,
+        None => true,
+    }
+}
+
 fn encode_cost_event(
     signer: &EventSigner,
     org_id: &str,
@@ -877,7 +909,7 @@ impl RetrievalPipeline {
         // that as "sovereignty not required" would be exactly the
         // absence-of-proof-as-proof-of-safety mistake this system's own
         // `Residency::classify` doctrine exists to prevent.
-        let sovereign_required = req.sovereign_required.unwrap_or(true);
+        let sovereign_required = sovereign_required_or_strict(req.sovereign_required);
         // Azure-hosted providers (Cohere Embed v4 dense/visual embedding,
         // Cohere rerank v4) can never satisfy a sovereignty requirement —
         // Microsoft operates the infrastructure, and no Azure region is
@@ -991,14 +1023,18 @@ impl RetrievalPipeline {
             );
             (None, Vec::new())
         } else {
-            let granted = match req.user_id.as_deref() {
-                Some(uid) => {
-                    self.visibility
-                        .visible_documents(&req.org_id, uid, req.verified_bearer.as_deref())
-                        .await
-                }
-                None => Vec::new(),
-            };
+            // A service principal has no per-user grants and is never sent to
+            // the user-core facade (it would refuse the service bearer and fail
+            // open to empty after paying the call's latency); it sees
+            // organization-shared documents only. Users resolve as before.
+            let granted = crate::authz::resolve_explicit_grants(
+                self.visibility.as_ref(),
+                &req.org_id,
+                req.user_id.as_deref(),
+                req.service_principal,
+                req.verified_bearer.as_deref(),
+            )
+            .await;
             (req.user_id.as_deref(), granted)
         };
 
@@ -1305,10 +1341,11 @@ impl RetrievalPipeline {
         // unchanged). Reranker *failure* is handled inside the stage and is
         // non-fatal by design — reranking refines ordering and must never
         // sink a successful retrieval.
-        let rerank_requested = text_rerank_allowed(
+        let rerank_requested = text_rerank_requested(
             zdr_mode,
-            req.mode_mix.as_ref().and_then(|m| m.rerank).unwrap_or(true),
-        ) && !sovereign_required;
+            req.mode_mix.as_ref().and_then(|m| m.rerank),
+            sovereign_required,
+        );
         // Chain input: resolve the viewer's explicit grants for the visibility
         // 5-7. The post-fusion postprocessor chain. The ORDER below is the
         // policy, not a convenience: see `pipeline::postprocess` for why the
@@ -1687,64 +1724,87 @@ impl RetrievalPipeline {
             .into_iter()
             .collect();
 
-        if doc_ids.is_empty() {
-            return Ok(vec![]);
-        }
+        fetch_source_refs(&self.pool, org_id, &doc_ids).await
+    }
+}
 
-        let mut tx = pg_org_scope::begin_org_scoped(&self.pool, org_id).await?;
-        let mut rows = sqlx::query_as::<_, SourceRow>(
-            r#"
-            SELECT document_id, title, source, type
+/// The citation lookup behind [`RetrievalPipeline::join_sources`], on a bare
+/// pool so the real SQL can be exercised against a real, RLS-enabled database
+/// without building a whole pipeline (`tests/retrieve_contract.rs`).
+///
+/// `url` is selected only for Quarry crawl documents
+/// (`CASE WHEN source = 'quarry' THEN metadata->>'url' END`), so no other
+/// source's metadata is even read out of the row, and is then shaped by
+/// [`SourceRef::citation_url`]. Wiki rows never have one.
+pub async fn fetch_source_refs(
+    pool: &PgPool,
+    org_id: &str,
+    doc_ids: &[String],
+) -> anyhow::Result<Vec<SourceRef>> {
+    if doc_ids.is_empty() {
+        return Ok(vec![]);
+    }
+
+    let mut tx = pg_org_scope::begin_org_scoped(pool, org_id).await?;
+    let mut rows = sqlx::query_as::<_, SourceRow>(
+        r#"
+            SELECT document_id, title, source, type,
+                   CASE WHEN source = $2 THEN metadata->>'url' END AS url
             FROM documents
             WHERE document_id = ANY($1)
               AND deleted_at IS NULL
             "#,
-        )
-        .bind(&doc_ids)
-        .fetch_all(&mut *tx)
-        .await?;
-        tx.commit().await?;
+    )
+    .bind(doc_ids)
+    .bind(SourceRef::QUARRY_SOURCE)
+    .fetch_all(&mut *tx)
+    .await?;
+    tx.commit().await?;
 
-        // Wiki candidates (from the wiki ANN arm) carry document_id = wiki
-        // page_id, which lives in wiki_pages, not documents. Look those up too
-        // so wiki citations get a real title + path + type="wiki" instead of a
-        // bare id. Best-effort: a failure here just omits the wiki title.
-        //
-        // Scoped on its OWN transaction, deliberately: in Postgres a failed
-        // statement aborts the entire transaction, so sharing one with the
-        // query above would turn this tolerated failure into a hard error at
-        // COMMIT — exactly what this `match` exists to avoid.
-        match async {
-            let mut tx = pg_org_scope::begin_org_scoped(&self.pool, org_id).await?;
-            let wiki_rows = sqlx::query_as::<_, SourceRow>(
-                r#"
-            SELECT page_id AS document_id, title, path AS source, 'wiki' AS type
+    // Wiki candidates (from the wiki ANN arm) carry document_id = wiki
+    // page_id, which lives in wiki_pages, not documents. Look those up too
+    // so wiki citations get a real title + path + type="wiki" instead of a
+    // bare id. Best-effort: a failure here just omits the wiki title.
+    //
+    // Scoped on its OWN transaction, deliberately: in Postgres a failed
+    // statement aborts the entire transaction, so sharing one with the
+    // query above would turn this tolerated failure into a hard error at
+    // COMMIT — exactly what this `match` exists to avoid.
+    match async {
+        let mut tx = pg_org_scope::begin_org_scoped(pool, org_id).await?;
+        let wiki_rows = sqlx::query_as::<_, SourceRow>(
+            r#"
+            SELECT page_id AS document_id, title, path AS source, 'wiki' AS type,
+                   NULL::text AS url
             FROM wiki_pages
             WHERE page_id = ANY($1)
             "#,
-            )
-            .bind(&doc_ids)
-            .fetch_all(&mut *tx)
-            .await?;
-            tx.commit().await?;
-            Ok::<_, anyhow::Error>(wiki_rows)
-        }
-        .await
-        {
-            Ok(wiki_rows) => rows.extend(wiki_rows),
-            Err(e) => tracing::warn!(error = %e, "wiki source join failed; omitting wiki titles"),
-        }
+        )
+        .bind(doc_ids)
+        .fetch_all(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok::<_, anyhow::Error>(wiki_rows)
+    }
+    .await
+    {
+        Ok(wiki_rows) => rows.extend(wiki_rows),
+        Err(e) => tracing::warn!(error = %e, "wiki source join failed; omitting wiki titles"),
+    }
 
-        Ok(rows
-            .into_iter()
-            .map(|r| SourceRef {
+    Ok(rows
+        .into_iter()
+        .map(|r| {
+            let url = SourceRef::citation_url(&r.source, r.url.as_deref());
+            SourceRef {
                 document_id: r.document_id,
                 title: r.title,
                 source: r.source,
                 r#type: r.r#type,
-            })
-            .collect())
-    }
+                url,
+            }
+        })
+        .collect())
 }
 
 #[derive(sqlx::FromRow)]
@@ -1753,6 +1813,7 @@ struct SourceRow {
     title: String,
     source: String,
     r#type: String,
+    url: Option<String>,
 }
 
 #[cfg(test)]

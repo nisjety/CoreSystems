@@ -1,0 +1,233 @@
+{
+  "contract": "inference-core.infer-statuses",
+  "version": 1,
+  "trailer_keys": {
+    "kind": "x-mp-provider-error",
+    "resets_at": "x-mp-resets-at",
+    "retry_after_ms": "x-mp-retry-after-ms"
+  },
+  "kinds": [
+    "rate_limited",
+    "residency_unavailable",
+    "subscription_bad_request",
+    "subscription_reauth_required",
+    "subscription_upstream_unavailable",
+    "subscription_usage_limit",
+    "tier_unavailable",
+    "too_long",
+    "zdr_unavailable"
+  ],
+  "cases": [
+    {
+      "id": "provider_http",
+      "source": "ProviderError::Http",
+      "grpc_code": "UNAVAILABLE",
+      "grpc_code_number": 14,
+      "trailers": {}
+    },
+    {
+      "id": "provider_unavailable",
+      "source": "ProviderError::Unavailable",
+      "grpc_code": "UNAVAILABLE",
+      "grpc_code_number": 14,
+      "trailers": {}
+    },
+    {
+      "id": "provider_subscription_failed",
+      "source": "ProviderError::SubscriptionFailed",
+      "grpc_code": "UNAVAILABLE",
+      "grpc_code_number": 14,
+      "trailers": {}
+    },
+    {
+      "id": "provider_invalid_response",
+      "source": "ProviderError::InvalidResponse",
+      "grpc_code": "INVALID_ARGUMENT",
+      "grpc_code_number": 3,
+      "trailers": {}
+    },
+    {
+      "id": "provider_unsupported_model",
+      "source": "ProviderError::UnsupportedModel",
+      "grpc_code": "UNIMPLEMENTED",
+      "grpc_code_number": 12,
+      "trailers": {}
+    },
+    {
+      "id": "provider_all_exhausted",
+      "source": "ProviderError::AllExhausted",
+      "grpc_code": "UNAVAILABLE",
+      "grpc_code_number": 14,
+      "trailers": {}
+    },
+    {
+      "id": "provider_too_long",
+      "source": "ProviderError::TooLong",
+      "grpc_code": "UNAVAILABLE",
+      "grpc_code_number": 14,
+      "trailers": {
+        "x-mp-provider-error": "too_long"
+      }
+    },
+    {
+      "id": "provider_rate_limited",
+      "source": "ProviderError::RateLimited",
+      "grpc_code": "RESOURCE_EXHAUSTED",
+      "grpc_code_number": 8,
+      "trailers": {
+        "x-mp-provider-error": "rate_limited",
+        "x-mp-retry-after-ms": "1500"
+      }
+    },
+    {
+      "id": "provider_zdr_unavailable",
+      "source": "ProviderError::ZdrUnavailable",
+      "grpc_code": "FAILED_PRECONDITION",
+      "grpc_code_number": 9,
+      "trailers": {
+        "x-mp-provider-error": "zdr_unavailable"
+      }
+    },
+    {
+      "id": "provider_residency_violation",
+      "source": "ProviderError::ResidencyViolation",
+      "grpc_code": "FAILED_PRECONDITION",
+      "grpc_code_number": 9,
+      "trailers": {
+        "x-mp-provider-error": "residency_unavailable"
+      }
+    },
+    {
+      "id": "provider_tier_unavailable",
+      "source": "ProviderError::TierUnavailable",
+      "grpc_code": "FAILED_PRECONDITION",
+      "grpc_code_number": 9,
+      "trailers": {
+        "x-mp-provider-error": "tier_unavailable"
+      }
+    },
+    {
+      "id": "subscription_usage_limit_with_timing",
+      "source": "ProviderError::SubscriptionRefused",
+      "grpc_code": "RESOURCE_EXHAUSTED",
+      "grpc_code_number": 8,
+      "trailers": {
+        "x-mp-provider-error": "subscription_usage_limit",
+        "x-mp-resets-at": "2026-09-25T23:21:00Z",
+        "x-mp-retry-after-ms": "52260000"
+      }
+    },
+    {
+      "id": "subscription_usage_limit_without_timing",
+      "source": "ProviderError::SubscriptionRefused",
+      "grpc_code": "RESOURCE_EXHAUSTED",
+      "grpc_code_number": 8,
+      "trailers": {
+        "x-mp-provider-error": "subscription_usage_limit"
+      }
+    },
+    {
+      "id": "subscription_reauth_required_with_timing",
+      "source": "ProviderError::SubscriptionRefused",
+      "grpc_code": "UNAVAILABLE",
+      "grpc_code_number": 14,
+      "trailers": {
+        "x-mp-provider-error": "subscription_reauth_required",
+        "x-mp-resets-at": "2026-09-25T23:21:00Z",
+        "x-mp-retry-after-ms": "52260000"
+      }
+    },
+    {
+      "id": "subscription_reauth_required_without_timing",
+      "source": "ProviderError::SubscriptionRefused",
+      "grpc_code": "UNAVAILABLE",
+      "grpc_code_number": 14,
+      "trailers": {
+        "x-mp-provider-error": "subscription_reauth_required"
+      }
+    },
+    {
+      "id": "subscription_upstream_unavailable_with_timing",
+      "source": "ProviderError::SubscriptionRefused",
+      "grpc_code": "UNAVAILABLE",
+      "grpc_code_number": 14,
+      "trailers": {
+        "x-mp-provider-error": "subscription_upstream_unavailable",
+        "x-mp-resets-at": "2026-09-25T23:21:00Z",
+        "x-mp-retry-after-ms": "52260000"
+      }
+    },
+    {
+      "id": "subscription_upstream_unavailable_without_timing",
+      "source": "ProviderError::SubscriptionRefused",
+      "grpc_code": "UNAVAILABLE",
+      "grpc_code_number": 14,
+      "trailers": {
+        "x-mp-provider-error": "subscription_upstream_unavailable"
+      }
+    },
+    {
+      "id": "subscription_bad_request_with_timing",
+      "source": "ProviderError::SubscriptionRefused",
+      "grpc_code": "UNAVAILABLE",
+      "grpc_code_number": 14,
+      "trailers": {
+        "x-mp-provider-error": "subscription_bad_request",
+        "x-mp-resets-at": "2026-09-25T23:21:00Z",
+        "x-mp-retry-after-ms": "52260000"
+      }
+    },
+    {
+      "id": "subscription_bad_request_without_timing",
+      "source": "ProviderError::SubscriptionRefused",
+      "grpc_code": "UNAVAILABLE",
+      "grpc_code_number": 14,
+      "trailers": {
+        "x-mp-provider-error": "subscription_bad_request"
+      }
+    },
+    {
+      "id": "modality_refused_under_zdr",
+      "source": "reject_unattested_zdr_modality",
+      "grpc_code": "FAILED_PRECONDITION",
+      "grpc_code_number": 9,
+      "trailers": {
+        "x-mp-provider-error": "zdr_unavailable"
+      }
+    },
+    {
+      "id": "embedding_zdr_unavailable",
+      "source": "embedding_error_to_status",
+      "grpc_code": "FAILED_PRECONDITION",
+      "grpc_code_number": 9,
+      "trailers": {
+        "x-mp-provider-error": "zdr_unavailable"
+      }
+    },
+    {
+      "id": "embedding_residency_unavailable",
+      "source": "embedding_error_to_status",
+      "grpc_code": "FAILED_PRECONDITION",
+      "grpc_code_number": 9,
+      "trailers": {
+        "x-mp-provider-error": "residency_unavailable"
+      }
+    },
+    {
+      "id": "embedding_tier_unavailable",
+      "source": "embedding_error_to_status",
+      "grpc_code": "FAILED_PRECONDITION",
+      "grpc_code_number": 9,
+      "trailers": {
+        "x-mp-provider-error": "tier_unavailable"
+      }
+    },
+    {
+      "id": "embedding_provider_http",
+      "source": "embedding_error_to_status",
+      "grpc_code": "INTERNAL",
+      "grpc_code_number": 13,
+      "trailers": {}
+    }
+  ]
+}

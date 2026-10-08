@@ -224,7 +224,7 @@ impl PerOrgLimiter {
     }
 }
 
-/// Axum middleware: looks up `AuthContext` (set by `auth_middleware`),
+/// Axum middleware: looks up `AuthContext` (set by `authz::guard_middleware`),
 /// keys the limiter on `org_id`, and on rejection returns 429 with a
 /// `Retry-After: 1` header (best-effort — the token bucket's true wait time
 /// depends on the org's own refill rate, and a constant 1s retry is a safe

@@ -42,150 +42,276 @@
 //! arm index the chunk's own words in one field and the context in another. That
 //! matters because BM25 sums across fields — indexing a composed string next to
 //! the chunk would score the chunk's own terms twice. `content_tsv` is generated
-//! over `text` at weight A and `chunk_context` at weight B, so BOTH halves of
-//! the technique (contextual embeddings and contextual BM25) come out of this
+//! over `text` at weight A and `chunk_context` at weight B, so BOTH halves of the
+//! technique (contextual embeddings and contextual BM25) come out of this
 //! one generation.
 //!
-//! ## Failure and ZDR posture
+//! ## What this module is, and what it is not
 //!
-//! Best-effort by construction: any failure (mint, transport, empty answer,
-//! timeout) falls back to embedding the raw chunk. A quality enhancement must
-//! never be able to fail an ingest.
+//! This is the client: it takes a bearer, builds the request, calls
+//! inference-core, retries what is worth retrying, and turns what came back into a
+//! [`ContextOutcome`]. What the prompt says, which part of the document is read,
+//! what is accepted from the answer and what each result means are decided in
+//! [`crate::context`], without a network, so they are tested with the real inputs.
 //!
-//! ZDR is absolute, not best-effort: a restricted document's text is never
-//! sent, and the guard is applied by the caller refusing to even ask (see
-//! `batch::contextualize_items`), so there is no path where a retaining model
-//! provider sees restricted content.
+//! Every chunk of a call ends in an explicit outcome. There is no path on which a
+//! failure becomes "no context" without saying which failure: an empty answer is
+//! `invalid_output`, a refused bearer is `pending` or `failed_transient` with its
+//! class, a zero-retention organization is `skipped_zdr` with no provider call
+//! made. What the caller does with an outcome (the embed falls back to the raw
+//! chunk, the unit's status is written) is the batch pipeline's.
 //!
-//! OFF by default (`CONTEXTUAL_RETRIEVAL_ENABLED`). This spends one LLM call
-//! per chunk on every first-time embed; that is a real per-tenant cost and
-//! deserves an explicit decision rather than arriving with a deploy.
+//! ZDR is absolute, not best-effort, and it is enforced in three places so that no
+//! one of them is the only line. A restricted document is refused here before its
+//! text is read ([`crate::context::DocumentInput::restricted`]). An organization
+//! whose bearer says `zdr` makes no call at all. And the request carries the
+//! bearer's own flag, so a route that is not attested for zero retention refuses
+//! it at inference-core before any provider is reached.
+//!
+//! ON by default, and kept on (owner ruling of 2026-10-03): `CONTEXTUAL_RETRIEVAL_ENABLED=false`
+//! is the incident kill switch and needs a `CONTEXT_RETRIEVAL_KILL_SWITCH_REASON` (see
+//! [`Config::contextual_retrieval_state`]). The cost is bounded, metered and reported, not avoided.
 
+use std::collections::{BTreeMap, HashSet};
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use anyhow::Context as _;
+use futures::stream::{self, StreamExt};
+use inference_client_rs::{InferenceError, InferenceTokenClient, Reason};
+use tokio::time::Instant;
 use tonic::metadata::MetadataValue;
 use tonic::transport::{Channel, Endpoint};
 use uuid::Uuid;
 
-use super::inference_auth::{InferenceBearer, InferenceTokenClient, RetentionPosture};
 use super::model_plane;
 use crate::config::Config;
+use crate::context::outcome::{inline_retry_wait, outcome_for_failure};
+use crate::context::prompt::{build_prompt, input_hash};
+use crate::context::validate::validate;
+use crate::context::{
+    ChunkInput, ChunkResult, ContextOutcome, DocumentInput, Generated, InlineBudget, MeteredCall,
+    PendingReason, PreparedDocument, PromptVersion, Usage, Window, WindowConfig, ZdrReason,
+};
+// The tests of this module (and its children) build documents with it.
+#[cfg(test)]
+use crate::context::DocumentMeta;
 
-/// Bumped whenever the prompt below changes in a way that alters the generated
-/// context. Persisted with the text so a later audit can tell which prompt
-/// produced a given stored context, and so a future refresh pass can find
-/// entries built by an older prompt.
-pub const PROMPT_VERSION: &str = "ctx-v1";
+/// The most documents of one batch that are contextualized at once. A bound on what
+/// one batch can ask of the provider (it is multiplied by the per-document
+/// concurrency), checked at startup.
+pub const MAX_DOCUMENT_CONCURRENCY: usize = 32;
 
-/// The instruction sent per chunk. Deliberately constrains the model to
-/// *situating* information only: a summary or an interpretation would add
-/// tokens that compete with the chunk's own terms in the embedding, which is
-/// the opposite of the goal.
-fn build_prompt(document_text: &str, chunk_text: &str) -> String {
-    format!(
-        "Here is a document:\n\n<document>\n{document_text}\n</document>\n\n\
-         Here is a chunk taken from that document:\n\n<chunk>\n{chunk_text}\n</chunk>\n\n\
-         Give one or two short sentences that situate this chunk within the \
-         document, so the chunk can be found by search. Name the concrete \
-         entities, dates, sections, or subjects the chunk refers to only \
-         implicitly. Do not summarise the chunk, do not interpret it, and do \
-         not add anything that is not in the document. Reply with the situating \
-         sentences alone and nothing else."
-    )
+/// The provider asked for when nothing else is configured. A hint pins the route:
+/// without one, inference-core may serve the call from any provider in its chain.
+pub const DEFAULT_PROVIDER_HINT: &str = "azure-openai";
+/// The residency floor asked for when nothing else is configured.
+pub const DEFAULT_MIN_RESIDENCY: &str = "eu";
+/// The tokens inference-core's `Residency::parse` accepts. Anything else is
+/// rejected there with INVALID_ARGUMENT before any provider is tried, which would
+/// refuse every call; it is refused at startup instead.
+const RESIDENCY_TOKENS: [&str; 6] = ["global", "eu", "eea", "norway", "no", "sovereign"];
+
+/// A window shorter than this has no prefix a provider could cache (Azure's
+/// automatic prompt cache needs 1,024 tokens, about 4,000 characters), so asking
+/// the first chunk alone to warm it would only add a round trip of latency.
+const PREFIX_CACHE_MIN_BYTES: usize = 4_096;
+
+const OUTPUT_TOKENS_MIN: i32 = 16;
+const OUTPUT_TOKENS_MAX: i32 = 1_024;
+
+/// Everything the engine reads from configuration, validated.
+#[derive(Clone, Debug)]
+pub(crate) struct Settings {
+    pub model: String,
+    pub provider_hint: String,
+    pub min_residency: String,
+    pub prompt_version: PromptVersion,
+    pub window: WindowConfig,
+    pub max_tokens: i32,
+    pub timeout: Duration,
+    pub concurrency: usize,
+    pub retry_attempts: u32,
+    pub retry_base: Duration,
+    pub inline_budget: InlineBudget,
+    /// How many documents of one batch are contextualized at the same time.
+    pub document_concurrency: usize,
 }
 
-/// Joins the generated context to the chunk to form the text that gets embedded.
-///
-/// A blank line separator, and context first: the retrieval query matches
-/// against the whole string, and leading context is what makes an
-/// otherwise-anonymous chunk match an entity-bearing query.
-pub fn compose_contextualized(context: &str, chunk_text: &str) -> String {
-    format!("{}\n\n{}", context.trim(), chunk_text)
-}
-
-#[derive(Clone)]
-pub struct Contextualizer {
-    client: model_plane::v1::inference_core_client::InferenceCoreClient<Channel>,
-    token_client: InferenceTokenClient,
-    model: String,
-    provider_hint: String,
-    /// Hard cap on how much document text goes into the prompt. A document is
-    /// arbitrary user content and can be megabytes; without a cap one oversized
-    /// upload would blow the model's context window (a hard error) or quietly
-    /// cost hundreds of times what a normal document does.
-    max_document_chars: usize,
-    max_context_tokens: i32,
-    timeout: Duration,
-    concurrency: usize,
-    retry_attempts: u32,
-    retry_base: Duration,
-}
-
-/// Why one chunk's context generation failed.
-///
-/// The split exists so the retry wrapper can distinguish "the provider is busy"
-/// from "this request is malformed". Collapsing both into one error type is what
-/// made the original code retry-blind.
-enum ContextError {
-    /// Inference answered with a gRPC status. Retryable iff `is_transient`.
-    Status(tonic::Status),
-    /// A local failure — never retryable, because nothing upstream will change.
-    Local(anyhow::Error),
-}
-
-/// Whether a failed inference call is worth retrying.
-///
-/// `ResourceExhausted` is the one that matters in practice — it is how a
-/// provider rate limit arrives, and a bulk backfill generates them in bursts.
-/// `Unavailable` and `DeadlineExceeded` cover a restarting inference pod and a
-/// slow provider respectively.
-///
-/// Everything else is deliberately terminal. Retrying `InvalidArgument`,
-/// `PermissionDenied`, or `Unauthenticated` would burn the whole backoff budget
-/// re-sending a request that cannot succeed, turning a fast clear failure into a
-/// slow one and delaying every other chunk behind it.
-fn is_transient(code: tonic::Code) -> bool {
-    matches!(
-        code,
-        tonic::Code::ResourceExhausted | tonic::Code::Unavailable | tonic::Code::DeadlineExceeded
-    )
-}
-
-/// Backoff before retry `attempt` (0-based) for the chunk at `chunk_index`.
-///
-/// Exponential in the attempt, plus a deterministic per-chunk offset. The offset
-/// is what keeps `concurrency` chunks that were rate-limited by the same upstream
-/// burst from retrying in lockstep and re-triggering the same limit; spreading
-/// them across the step is the point. It is derived from the chunk index rather
-/// than drawn randomly so the schedule is reproducible in tests — `rand` is a
-/// dev-dependency here, and decorrelating concurrent retries within one document
-/// is the only property the jitter needs.
-fn retry_backoff(base: Duration, attempt: u32, chunk_index: usize) -> Duration {
-    let step = base.saturating_mul(1u32 << attempt.min(6));
-    let spread = step / 4;
-    let offset = if spread.is_zero() {
-        Duration::ZERO
-    } else {
-        // `% 4` then scaled, so the offset stays inside one quarter-step.
-        spread * ((chunk_index % 4) as u32) / 4
-    };
-    step + offset
-}
-
-impl Contextualizer {
-    /// `Ok(None)` when the feature is off — an absent contextualizer is the
-    /// normal state, not an error, so callers treat it as "embed raw text".
-    pub fn from_config(cfg: &Config) -> anyhow::Result<Option<Self>> {
-        if !cfg.contextual_retrieval_enabled {
-            return Ok(None);
-        }
-        if cfg.contextual_retrieval_model.trim().is_empty() {
+impl Settings {
+    /// Read and check the configuration. Every refusal names the variable, so a
+    /// startup failure says what to fix.
+    pub(crate) fn from_config(cfg: &Config) -> anyhow::Result<Self> {
+        let model = cfg.contextual_retrieval_model.trim().to_string();
+        if model.is_empty() {
             anyhow::bail!(
                 "CONTEXTUAL_RETRIEVAL_MODEL is required when CONTEXTUAL_RETRIEVAL_ENABLED=true"
             );
         }
-        let timeout = Duration::from_millis(cfg.contextual_retrieval_timeout_ms.max(1));
+        // An empty value takes the default rather than meaning "no floor": compose
+        // passes every variable, empty when unset, and an empty residency floor
+        // would silently remove the guarantee. Weaker is spelled out (`global`).
+        let or_default = |value: &str, default: &str| {
+            let value = value.trim();
+            let chosen = if value.is_empty() { default } else { value };
+            chosen.to_string()
+        };
+        let provider_hint = or_default(
+            &cfg.contextual_retrieval_provider_hint,
+            DEFAULT_PROVIDER_HINT,
+        );
+        let min_residency = or_default(
+            &cfg.contextual_retrieval_min_residency,
+            DEFAULT_MIN_RESIDENCY,
+        )
+        .to_ascii_lowercase();
+        if !RESIDENCY_TOKENS.contains(&min_residency.as_str()) {
+            anyhow::bail!(
+                "CONTEXTUAL_RETRIEVAL_MIN_RESIDENCY `{min_residency}` is not a residency inference-core accepts (one of {}); every call would be refused",
+                RESIDENCY_TOKENS.join(", ")
+            );
+        }
+        let prompt_version = PromptVersion::parse(&or_default(
+            &cfg.contextual_retrieval_prompt_version,
+            crate::context::prompt::PROMPT_V1,
+        ))
+        .map_err(|error| anyhow::anyhow!("CONTEXTUAL_RETRIEVAL_PROMPT_VERSION: {error}"))?;
+        let window =
+            WindowConfig::new(cfg.contextual_retrieval_window_chars).map_err(anyhow::Error::msg)?;
+        if window.window_chars() > cfg.contextual_retrieval_max_document_chars {
+            anyhow::bail!(
+                "CONTEXTUAL_RETRIEVAL_WINDOW_CHARS ({}) must not exceed CONTEXTUAL_RETRIEVAL_MAX_DOCUMENT_CHARS ({}), the most document text a prompt may carry",
+                window.window_chars(),
+                cfg.contextual_retrieval_max_document_chars
+            );
+        }
+        let max_tokens = cfg.contextual_retrieval_max_tokens;
+        if !(OUTPUT_TOKENS_MIN..=OUTPUT_TOKENS_MAX).contains(&max_tokens) {
+            anyhow::bail!(
+                "CONTEXTUAL_RETRIEVAL_MAX_TOKENS must be between {OUTPUT_TOKENS_MIN} and {OUTPUT_TOKENS_MAX}, got {max_tokens}"
+            );
+        }
+        let inline_budget = InlineBudget::new(
+            cfg.context_inline_document_budget_ms,
+            cfg.context_inline_budget_ms,
+        )
+        .map_err(anyhow::Error::msg)?;
+        let document_concurrency = cfg.context_inline_document_concurrency;
+        if !(1..=MAX_DOCUMENT_CONCURRENCY).contains(&document_concurrency) {
+            anyhow::bail!(
+                "CONTEXT_INLINE_DOCUMENT_CONCURRENCY must be between 1 and {MAX_DOCUMENT_CONCURRENCY}, got {document_concurrency}: it is how many documents of one batch are contextualized at once, so the most provider calls one batch has in flight is this times CONTEXTUAL_RETRIEVAL_CONCURRENCY"
+            );
+        }
+        Ok(Self {
+            model,
+            provider_hint,
+            min_residency,
+            prompt_version,
+            window,
+            max_tokens,
+            timeout: Duration::from_millis(cfg.contextual_retrieval_timeout_ms.max(1)),
+            concurrency: cfg.contextual_retrieval_concurrency.max(1),
+            retry_attempts: cfg.contextual_retrieval_retry_attempts,
+            retry_base: Duration::from_millis(cfg.contextual_retrieval_retry_base_ms.max(1)),
+            inline_budget,
+            document_concurrency,
+        })
+    }
+}
+
+type InferFuture<'a> = Pin<
+    Box<dyn Future<Output = Result<model_plane::v1::InferResponse, tonic::Status>> + Send + 'a>,
+>;
+
+/// The one call this client makes. A seam so the engine can be driven by a port
+/// that records what it was sent and answers with real statuses, without a server.
+pub(crate) trait InferencePort: Send + Sync + 'static {
+    fn infer(&self, request: tonic::Request<model_plane::v1::InferRequest>) -> InferFuture<'_>;
+}
+
+struct GrpcInference {
+    client: model_plane::v1::inference_core_client::InferenceCoreClient<Channel>,
+}
+
+impl InferencePort for GrpcInference {
+    fn infer(&self, request: tonic::Request<model_plane::v1::InferRequest>) -> InferFuture<'_> {
+        let mut client = self.client.clone();
+        Box::pin(async move { client.infer(request).await.map(tonic::Response::into_inner) })
+    }
+}
+
+/// The lazily-connected channel to inference-core. Opens no connection until the
+/// first call, so building one needs a Tokio runtime and nothing else.
+fn grpc_inference(cfg: &Config, settings: &Settings) -> anyhow::Result<GrpcInference> {
+    let channel = Endpoint::from_shared(cfg.model_plane_ai_core_grpc_url.clone())
+        .with_context(|| {
+            format!(
+                "invalid MODEL_PLANE_AI_CORE_GRPC_URL `{}`",
+                cfg.model_plane_ai_core_grpc_url
+            )
+        })?
+        .connect_timeout(settings.timeout)
+        .timeout(settings.timeout)
+        .connect_lazy();
+    Ok(GrpcInference {
+        client: model_plane::v1::inference_core_client::InferenceCoreClient::new(channel),
+    })
+}
+
+#[derive(Clone)]
+pub struct Contextualizer {
+    port: Arc<dyn InferencePort>,
+    token_client: InferenceTokenClient,
+    settings: Arc<Settings>,
+}
+
+/// What every chunk of one call shares.
+struct Run<'a> {
+    prepared: &'a PreparedDocument<'a>,
+    chunks: &'a [ChunkInput<'a>],
+    windows: &'a [Window<'a>],
+    deadline: Option<Instant>,
+    /// An outcome that is the answer for every remaining chunk (see
+    /// [`ContextOutcome::is_systemic`]), once any chunk has found it out.
+    systemic: Mutex<Option<ContextOutcome>>,
+}
+
+impl Run<'_> {
+    fn systemic(&self) -> Option<ContextOutcome> {
+        self.systemic
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    fn note_systemic(&self, outcome: &ContextOutcome) {
+        let mut slot = self.systemic.lock().unwrap_or_else(PoisonError::into_inner);
+        if slot.is_none() {
+            *slot = Some(outcome.clone());
+        }
+    }
+
+    /// `None` when there is no deadline; `Some(ZERO)` when it has passed.
+    fn remaining(&self) -> Option<Duration> {
+        self.deadline
+            .map(|deadline| deadline.saturating_duration_since(Instant::now()))
+    }
+
+    fn expired(&self) -> bool {
+        self.remaining().is_some_and(|left| left.is_zero())
+    }
+}
+
+impl Contextualizer {
+    /// `Ok(None)` only while the incident kill switch is thrown, and a thrown switch has a
+    /// reason on record (`Config::contextual_retrieval_state`): callers then embed the raw text.
+    pub fn from_config(cfg: &Config) -> anyhow::Result<Option<Self>> {
+        if !cfg.contextual_retrieval_state()?.is_on() {
+            return Ok(None);
+        }
+        let settings = Settings::from_config(cfg)?;
         // Reuses this service's existing inference credential and retention
         // posture — the same principal already used for model-plane embedding,
         // so enabling this grants no authority the service did not already hold.
@@ -194,450 +320,606 @@ impl Contextualizer {
         // retrieval and supplied no credential should be told at startup, not
         // discover months later that nothing was ever contextualized. Standalone
         // startup relaxes it exactly as the embedding provider does — the client
-        // stays unusable, so mints fail, so every chunk falls back to raw text
-        // rather than making an unauthenticated inference call.
-        let posture = RetentionPosture::parse(&cfg.model_plane_inference_retention_posture)?;
-        let token_client = if super::standalone_startup() {
-            InferenceTokenClient::new_allow_unconfigured(
-                &cfg.model_plane_inference_token_url,
-                &cfg.model_plane_inference_token_issuer,
-                &cfg.model_plane_inference_service_id,
-                &cfg.model_plane_inference_service_api_key,
-                posture,
-            )?
-        } else {
-            InferenceTokenClient::new(
-                &cfg.model_plane_inference_token_url,
-                &cfg.model_plane_inference_token_issuer,
-                &cfg.model_plane_inference_service_id,
-                &cfg.model_plane_inference_service_api_key,
-                posture,
-            )?
-        };
-        let channel = Endpoint::from_shared(cfg.model_plane_ai_core_grpc_url.clone())
-            .with_context(|| {
-                format!(
-                    "invalid MODEL_PLANE_AI_CORE_GRPC_URL `{}`",
-                    cfg.model_plane_ai_core_grpc_url
-                )
-            })?
-            .connect_timeout(timeout)
-            .timeout(timeout)
-            .connect_lazy();
-        Ok(Some(Self {
-            client: model_plane::v1::inference_core_client::InferenceCoreClient::new(channel),
+        // stays unusable, so mints fail, so every chunk gets a refused-bearer
+        // outcome rather than an unauthenticated inference call.
+        let token_client = super::token_client_from_config(cfg)?;
+        let port = grpc_inference(cfg, &settings)?;
+        tracing::info!(
+            model = %settings.model,
+            prompt_version = settings.prompt_version.as_str(),
+            provider_hint = %settings.provider_hint,
+            min_residency = %settings.min_residency,
+            window_chars = settings.window.window_chars(),
+            inline_document_budget_ms = settings.inline_budget.document.as_millis() as u64,
+            inline_batch_budget_ms = settings.inline_budget.batch.as_millis() as u64,
+            concurrency = settings.concurrency,
+            "contextual retrieval configured"
+        );
+        Ok(Some(Self::new(Arc::new(port), token_client, settings)))
+    }
+
+    pub(crate) fn new(
+        port: Arc<dyn InferencePort>,
+        token_client: InferenceTokenClient,
+        settings: Settings,
+    ) -> Self {
+        Self {
+            port,
             token_client,
-            model: cfg.contextual_retrieval_model.trim().to_string(),
-            provider_hint: cfg.contextual_retrieval_provider_hint.trim().to_string(),
-            max_document_chars: cfg.contextual_retrieval_max_document_chars,
-            max_context_tokens: cfg.contextual_retrieval_max_tokens,
-            timeout,
-            concurrency: cfg.contextual_retrieval_concurrency.max(1),
-            retry_attempts: cfg.contextual_retrieval_retry_attempts,
-            retry_base: Duration::from_millis(cfg.contextual_retrieval_retry_base_ms.max(1)),
-        }))
+            settings: Arc::new(settings),
+        }
     }
 
     pub fn model_name(&self) -> &str {
-        &self.model
+        &self.settings.model
     }
 
-    /// Contextualize every chunk of ONE document.
-    ///
-    /// Returns one entry per input chunk, positionally aligned: `Some(context)`
-    /// where generation succeeded, `None` where it did not. `None` is a normal
-    /// outcome, not a failure to propagate — the caller embeds the raw chunk.
-    /// The whole method is infallible for exactly that reason: there is no error
-    /// a caller could usefully act on that is not already expressed by `None`.
-    ///
-    /// One bearer is minted for the whole document rather than one per chunk:
-    /// the token is already scoped to precisely this org and audience, so
-    /// per-chunk minting would add a round trip each without narrowing
-    /// authority. A mint failure yields all-`None` — every chunk falls back,
-    /// and the ingest proceeds.
-    ///
-    /// The bearer never leaves this module. That is deliberate: an API where
-    /// the caller holds the credential invites it being reused for a request
-    /// this service never authorized.
-    pub async fn contextualize_document(
+    /// The prompt version used when an organization has not pinned another.
+    #[allow(dead_code)] // consumed by the write-ahead pipeline (CR-T8)
+    pub fn prompt_version(&self) -> PromptVersion {
+        self.settings.prompt_version
+    }
+
+    /// How the inline phase is time-boxed.
+    pub fn inline_budget(&self) -> InlineBudget {
+        self.settings.inline_budget
+    }
+
+    /// How many documents of one batch are contextualized at the same time.
+    pub fn document_concurrency(&self) -> usize {
+        self.settings.document_concurrency
+    }
+
+    /// Whether Auth Core says the organization is zero-retention NOW: one bearer mint for the
+    /// feature, and its `zdr` claim read. This is how the reconciler (CR-T9a) rechecks the units
+    /// that were skipped for zero retention, at most once an hour per organization: it asks the
+    /// same authority the generation asks, and calls no model. `Err` is what a refused or
+    /// unresolved mint means (a wait, never a skip and never a send), by the same table as a
+    /// failed call.
+    pub async fn org_is_zero_retention(&self, org_id: &str) -> Result<bool, ContextOutcome> {
+        match self
+            .token_client
+            .bearer(org_id, Reason::ContextualRetrieval)
+            .await
+        {
+            Ok(bearer) => Ok(bearer.zdr()),
+            Err(error) => Err(outcome_for_failure(&InferenceError::from(error))),
+        }
+    }
+
+    /// Window a document. Cheap (one pass over the text) and needed first: the
+    /// input hash of each chunk, with which the caller decides reuse, depends on it.
+    pub fn prepare<'a>(&self, input: DocumentInput<'a>) -> PreparedDocument<'a> {
+        PreparedDocument::new(input, self.settings.prompt_version, self.settings.window)
+    }
+
+    /// What a chunk's context would be generated from. Equal to what a stored
+    /// context recorded when it was generated from the same inputs, which is how an
+    /// unchanged chunk is recognised and not paid for twice.
+    pub fn input_hash(&self, prepared: &PreparedDocument<'_>, chunk: &ChunkInput<'_>) -> String {
+        self.hash_for(prepared, &prepared.window_for(chunk).text, chunk.text)
+    }
+
+    fn hash_for(
         &self,
-        org_id: &str,
-        document_text: &str,
-        chunks: &[&str],
-    ) -> Vec<Option<String>> {
+        prepared: &PreparedDocument<'_>,
+        window_text: &str,
+        chunk_text: &str,
+    ) -> String {
+        input_hash(
+            prepared.version,
+            &self.settings.model,
+            window_text,
+            prepared.input.meta.title,
+            chunk_text,
+        )
+    }
+
+    /// Generate the context of each of `chunks`, one result per chunk, in order.
+    ///
+    /// Infallible: every chunk ends in an outcome (see [`ContextOutcome`]), and a
+    /// failure that applies to the whole document is every chunk's outcome.
+    ///
+    /// * **ZDR.** A restricted document is refused before anything of it is read.
+    ///   An organization whose bearer says `zdr` makes no call.
+    /// * **Deadline.** `deadline` bounds the whole call. A chunk that has not
+    ///   finished by then is [`PendingReason::DeadlineExceeded`] and no call is
+    ///   started after it; a retry never sleeps past it. `None` is unbounded (the
+    ///   per-call timeout still applies). An already-passed deadline makes no call
+    ///   and mints nothing.
+    /// * **Bearer.** One is asked for up front to fail fast: if Auth Core issues
+    ///   none, every chunk would find that out one slow round trip at a time. After
+    ///   that a bearer is taken from the client's cache at the moment of EACH
+    ///   provider call and never held across the document, so a document that
+    ///   outlives a 60-second tenant token does not carry an expired one.
+    /// * **Order.** Chunks that share a window (the same prefix of the prompt) are
+    ///   not all started at once: the first goes alone and the rest follow
+    ///   concurrently, so the provider's prefix cache is warm for them. A window too
+    ///   short to be cached (most documents) is not staged.
+    pub async fn contextualize(
+        &self,
+        prepared: &PreparedDocument<'_>,
+        chunks: &[ChunkInput<'_>],
+        deadline: Option<Instant>,
+    ) -> Vec<ChunkResult> {
         if chunks.is_empty() {
             return Vec::new();
         }
-        let bearer = match self.token_client.mint(org_id).await {
-            Ok(bearer) => bearer,
-            Err(e) => {
-                tracing::warn!(
-                    error = %e,
-                    org_id,
-                    chunks = chunks.len(),
-                    "contextual retrieval: bearer mint failed; embedding raw chunks"
-                );
-                return vec![None; chunks.len()];
-            }
+        let org_id = prepared.input.org_id;
+        let uniform = |outcome: ContextOutcome| {
+            chunks
+                .iter()
+                .map(|_| ChunkResult::without_calls(outcome.clone()))
+                .collect::<Vec<_>>()
         };
-
-        use futures::stream::StreamExt;
-        futures::stream::iter(chunks.iter().enumerate().map(|(index, chunk)| {
-            let bearer = bearer.clone();
-            async move {
-                self.context_for_chunk_with_retry(&bearer, org_id, document_text, chunk, index)
-                    .await
+        if prepared.input.restricted {
+            return self.report(
+                prepared,
+                uniform(ContextOutcome::skipped_zdr(ZdrReason::Document)),
+            );
+        }
+        if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            return self.report(prepared, uniform(deadline_outcome()));
+        }
+        match self
+            .token_client
+            .bearer(org_id, Reason::ContextualRetrieval)
+            .await
+        {
+            Err(error) => {
+                let error = InferenceError::from(error);
+                return self.report(prepared, uniform(outcome_for_failure(&error)));
             }
-        }))
-        // `buffered`, not `buffer_unordered`: the results are consumed
-        // positionally against the chunk list, so order is load-bearing —
-        // an unordered stream would attach one chunk's context to another.
-        .buffered(self.concurrency)
-        .collect()
-        .await
+            Ok(bearer) if bearer.zdr() => {
+                return self.report(
+                    prepared,
+                    uniform(ContextOutcome::skipped_zdr(ZdrReason::Org)),
+                );
+            }
+            Ok(_) => {}
+        }
+
+        let windows: Vec<Window<'_>> = chunks
+            .iter()
+            .map(|chunk| prepared.window_for(chunk))
+            .collect();
+        let (leaders, followers) = stages(&windows);
+        let run = Run {
+            prepared,
+            chunks,
+            windows: &windows,
+            deadline,
+            systemic: Mutex::new(None),
+        };
+        let run = &run;
+        let mut results: Vec<Option<ChunkResult>> = vec![None; chunks.len()];
+        for stage in [leaders, followers] {
+            let done: Vec<(usize, ChunkResult)> = stream::iter(stage)
+                .map(|position| async move { (position, self.generate_one(run, position).await) })
+                // Unordered, indexed: an ordered buffer would hold a slot behind a
+                // slow head and quietly lower the concurrency below what was set.
+                .buffer_unordered(self.settings.concurrency)
+                .collect()
+                .await;
+            for (position, result) in done {
+                results[position] = Some(result);
+            }
+        }
+        let results = results
+            .into_iter()
+            .map(|result| {
+                result.unwrap_or_else(|| {
+                    ChunkResult::without_calls(ContextOutcome::permanent(
+                        crate::context::ErrorClass::Internal,
+                    ))
+                })
+            })
+            .collect();
+        self.report(prepared, results)
     }
 
-    /// `context_for_chunk`, retrying transient inference failures.
-    ///
-    /// Always resolves to `Option<String>`: a chunk that cannot be
-    /// contextualized falls back to raw embedding, which is correct behaviour
-    /// rather than an error to propagate. What the retries buy is that a
-    /// *recoverable* upstream condition — nearly always a rate limit during a
-    /// bulk backfill — stops silently costing coverage.
-    async fn context_for_chunk_with_retry(
+    /// One chunk, to an outcome, with every provider call it cost.
+    async fn generate_one(&self, run: &Run<'_>, position: usize) -> ChunkResult {
+        let mut calls = Vec::new();
+        let outcome = self.generate(run, position, &mut calls).await;
+        if outcome.is_systemic() {
+            run.note_systemic(&outcome);
+        }
+        ChunkResult { outcome, calls }
+    }
+
+    async fn generate(
         &self,
-        bearer: &InferenceBearer,
-        org_id: &str,
-        document_text: &str,
-        chunk_text: &str,
-        chunk_index: usize,
-    ) -> Option<String> {
+        run: &Run<'_>,
+        position: usize,
+        calls: &mut Vec<MeteredCall>,
+    ) -> ContextOutcome {
+        let chunk = &run.chunks[position];
+        let org_id = run.prepared.input.org_id;
+        // From the PLANNED window, whatever window the call ends up using: the hash
+        // names the inputs, and a shrink is a deterministic fallback for the same
+        // inputs. Otherwise a document that always needs the shrink would never
+        // match its own stored hash and would be paid for again every pass.
+        let planned_hash = self.hash_for(run.prepared, &run.windows[position].text, chunk.text);
+        let mut window = Some(&run.windows[position]);
+        let mut shrunk: Option<Window<'_>> = None;
         let mut attempt = 0u32;
         loop {
-            match self
-                .context_for_chunk(bearer, org_id, document_text, chunk_text)
+            // Another chunk already found the answer for the whole document.
+            if let Some(outcome) = run.systemic() {
+                return outcome;
+            }
+            let Some(remaining) = remaining_or_expired(run) else {
+                return deadline_outcome();
+            };
+            // From the client's cache, at the moment of this call.
+            let bearer = match self
+                .token_client
+                .bearer(org_id, Reason::ContextualRetrieval)
                 .await
             {
-                Ok(context) => return context,
-                Err(ContextError::Local(e)) => {
-                    tracing::warn!(
-                        error = %e,
-                        org_id,
-                        chunk_index,
-                        "contextual retrieval: generation failed; embedding raw chunk"
-                    );
-                    return None;
+                Ok(bearer) => bearer,
+                Err(error) => return outcome_for_failure(&InferenceError::from(error)),
+            };
+            if bearer.zdr() {
+                // The organization turned zero-retention part way through.
+                return ContextOutcome::skipped_zdr(ZdrReason::Org);
+            }
+            let in_use: &Window<'_> = match (&shrunk, window) {
+                (Some(shrunk), _) => shrunk,
+                (None, Some(planned)) => planned,
+                (None, None) => {
+                    return ContextOutcome::permanent(crate::context::ErrorClass::Internal)
                 }
-                Err(ContextError::Status(status)) => {
-                    let retryable = is_transient(status.code()) && attempt < self.retry_attempts;
-                    if !retryable {
-                        tracing::warn!(
-                            code = %status.code(),
-                            message = %status.message(),
-                            org_id,
-                            chunk_index,
-                            attempts = attempt + 1,
-                            transient = is_transient(status.code()),
-                            "contextual retrieval: generation failed; embedding raw chunk"
-                        );
-                        return None;
-                    }
-                    let delay = retry_backoff(self.retry_base, attempt, chunk_index);
+            };
+            let prompt = build_prompt(
+                run.prepared.version,
+                &run.prepared.input.meta,
+                &in_use.text,
+                chunk.text,
+            );
+            let per_call = remaining.map_or(self.settings.timeout, |left| {
+                left.min(self.settings.timeout)
+            });
+            let request =
+                match self.build_request(org_id, bearer.zdr(), prompt, bearer.as_str(), per_call) {
+                    Ok(request) => request,
+                    Err(outcome) => return outcome,
+                };
+
+            let call = self.port.infer(request);
+            let answered = match tokio::time::timeout(per_call, call).await {
+                Ok(answered) => answered,
+                Err(_elapsed) if run.expired() => return deadline_outcome(),
+                // The per-call timeout ran out while there was still time overall:
+                // a slow provider, the same as one that answered DEADLINE_EXCEEDED.
+                Err(_elapsed) => Err(tonic::Status::deadline_exceeded("inference call timed out")),
+            };
+
+            let error = match answered {
+                Ok(response) => {
+                    return self.finish(run, response, &planned_hash, calls);
+                }
+                Err(status) => InferenceError::from_status(&status),
+            };
+
+            // The deadline we set ran out inside the call.
+            if run.expired()
+                && matches!(
+                    error.code(),
+                    Some(tonic::Code::DeadlineExceeded | tonic::Code::Cancelled)
+                )
+            {
+                return deadline_outcome();
+            }
+            // Too long: one smaller window around the chunk, then give up.
+            if matches!(error.failure(), inference_client_rs::Failure::TooLong) && shrunk.is_none()
+            {
+                if let Some(smaller) = run.prepared.windows.shrunk_for(
+                    chunk.text,
+                    chunk.index,
+                    run.prepared.input.total_chunks,
+                ) {
+                    shrunk = Some(smaller);
+                    window = None;
+                    continue;
+                }
+            }
+            let outcome = outcome_for_failure(&error);
+            match inline_retry_wait(
+                &error,
+                self.settings.retry_base,
+                attempt,
+                usize::try_from(chunk.index.max(0)).unwrap_or(0),
+            ) {
+                Some(wait)
+                    if attempt < self.settings.retry_attempts
+                        && run.remaining().is_none_or(|left| wait < left) =>
+                {
                     tracing::debug!(
-                        code = %status.code(),
                         org_id,
-                        chunk_index,
+                        chunk_index = chunk.index,
                         attempt = attempt + 1,
-                        delay_ms = delay.as_millis(),
+                        failure = error.failure().kind(),
+                        code = ?error.code(),
+                        provider_error = error.wire_kind(),
+                        wait_ms = wait.as_millis() as u64,
                         "contextual retrieval: transient inference failure; retrying"
                     );
-                    tokio::time::sleep(delay).await;
+                    tokio::time::sleep(wait).await;
                     attempt += 1;
                 }
+                // Out of retries, or the wait would not fit: what the chunk is now.
+                _ => return outcome,
             }
         }
     }
 
-    /// Generate the situating context for one chunk.
+    /// The request for one chunk. Residency and provider floors are set here, not
+    /// left to the router.
     ///
-    /// Returns `Ok(None)` when the model replied with nothing usable — treated
-    /// as "no context available" rather than an error, because the fallback
-    /// (embed the raw chunk) is exactly what the caller does on `Err` anyway,
-    /// and distinguishing them only matters for logging.
-    async fn context_for_chunk(
+    /// * The provider hint pins the route to the deployment this feature's data
+    ///   processing is documented for. A hint of `azure-openai` matches the
+    ///   provider whether it is spelled with an underscore or a hyphen.
+    /// * The residency floor makes inference-core refuse, before any provider is
+    ///   tried, a route that cannot prove it stays inside it. That proof is its
+    ///   own configuration (`AZURE_OPENAI_REGION`), and an unset region reads as
+    ///   unproven: the refusal comes back as `residency_unavailable` and is an
+    ///   outcome of its own, never a silent fallback.
+    /// * Restricted content never reaches this request: a restricted document is
+    ///   refused before it is read, and an organization whose bearer says `zdr`
+    ///   makes no call. The flag is still taken from the bearer, not assumed
+    ///   false, so that if either of those ever changed, a route that is not
+    ///   attested for zero retention would still refuse it.
+    fn build_request(
         &self,
-        bearer: &InferenceBearer,
         org_id: &str,
-        document_text: &str,
-        chunk_text: &str,
-    ) -> Result<Option<String>, ContextError> {
-        // Truncate on a char boundary, never a byte offset: document content is
-        // Norwegian-first in this corpus, so a byte slice would panic on the
-        // first `ø` that straddles the cap.
-        let bounded: String = document_text
-            .chars()
-            .take(self.max_document_chars)
-            .collect();
+        zdr: bool,
+        prompt: String,
+        bearer: &str,
+        timeout: Duration,
+    ) -> Result<tonic::Request<model_plane::v1::InferRequest>, ContextOutcome> {
         let request = model_plane::v1::InferRequest {
             request_id: Uuid::new_v4().to_string(),
             org_id: org_id.to_string(),
-            model: self.model.clone(),
-            provider_hint: self.provider_hint.clone(),
+            model: self.settings.model.clone(),
+            provider_hint: self.settings.provider_hint.clone(),
             messages: vec![model_plane::v1::ChatMessage {
                 role: "user".to_string(),
-                content: build_prompt(&bounded, chunk_text),
+                content: prompt,
                 name: String::new(),
                 // Provider-native compaction checkpoint; a one-shot user
                 // prompt never carries one.
                 compaction_summary: String::new(),
             }],
-            // Zero temperature: the same chunk in the same document must
+            // Zero temperature: the same chunk in the same document should
             // produce the same context, or a reindex silently changes what got
-            // embedded for reasons unrelated to the content.
+            // embedded for reasons unrelated to the content. Providers are not
+            // bit-exact, so what makes it reproducible is that the output is
+            // persisted and reused by its input hash, not that it is regenerated.
             temperature: 0.0,
-            max_tokens: self.max_context_tokens,
+            max_tokens: self.settings.max_tokens,
             structured_output_schema: String::new(),
-            // This path never carries restricted content — the caller filters
-            // ZDR items out before asking — so the flag is false rather than
-            // plumbed. A restricted document reaching here would be a caller
-            // bug, and `batch` asserts against it.
-            zdr: false,
+            zdr,
             tools: Vec::new(),
             tool_choice: String::new(),
-            // The three fields the merged inference contract added. All set to
-            // their zero values, which the proto documents as byte-identical to
-            // the pre-existing behaviour: UNSPECIFIED imposes no privacy-tier
-            // constraint, an empty `min_residency` imposes no residency floor,
-            // and a 0 thinking budget requests no extended thinking (right for a
-            // cheap, deterministic, temperature-0 task like this one).
-            //
-            // Deliberately NOT tightened here. Both are real provider-selection
-            // controls — a tier or residency floor SKIPS providers that cannot
-            // meet it and fails the call rather than downgrading silently — so
-            // raising them is a deployment posture decision, not a build fix.
-            // This path's retention posture is already asserted at mint time via
-            // MODEL_PLANE_INFERENCE_RETENTION_POSTURE, and `zdr` above still
-            // gates retaining providers. Revisit when the sovereignty posture is
-            // set per-tenant rather than per-service.
+            // No privacy-tier constraint: the tier is a statement about a
+            // provider's ZDR attestation, which `zdr` above already enforces.
             min_privacy_tier: model_plane::v1::PrivacyTier::Unspecified as i32,
-            min_residency: String::new(),
+            min_residency: self.settings.min_residency.clone(),
+            // No extended thinking: right for a cheap, deterministic,
+            // temperature-0 task like this one.
             thinking_budget_tokens: 0,
             // Subscription routing belongs to a user's own chat, never to
             // background contextualization: no subscription connection, normal tier.
             subscription_connection_id: String::new(),
             prefer_priority_service_tier: false,
         };
-
-        let mut req = tonic::Request::new(request);
-        req.set_timeout(self.timeout);
-        let bearer_value: MetadataValue<_> = format!("Bearer {}", bearer.as_str())
-            .parse()
-            .context("inference bearer is not a valid header value")
-            .map_err(ContextError::Local)?;
-        req.metadata_mut().insert("authorization", bearer_value);
-
-        // The `Status` is carried intact rather than flattened to a message, so
-        // the retry wrapper can read its code. Only the code and message are
-        // ever logged, never the payload: a provider error body can echo the
-        // prompt, and the prompt contains document text.
-        let response = self
-            .client
-            .clone()
-            .infer(req)
-            .await
-            .map_err(ContextError::Status)?
-            .into_inner();
-
-        let context = response.content.trim();
-        if context.is_empty() {
-            return Ok(None);
-        }
-        Ok(Some(context.to_string()))
+        let mut request = tonic::Request::new(request);
+        request.set_timeout(timeout);
+        let value: MetadataValue<_> = format!("Bearer {bearer}").parse().map_err(|_| {
+            // A JWT is base64url and dots; reaching this is a defect in the mint,
+            // and retrying cannot fix it.
+            ContextOutcome::permanent(crate::context::ErrorClass::Internal)
+        })?;
+        request.metadata_mut().insert("authorization", value);
+        Ok(request)
     }
+
+    /// An answered call: validate it, and record what it cost either way.
+    fn finish(
+        &self,
+        run: &Run<'_>,
+        response: model_plane::v1::InferResponse,
+        planned_hash: &str,
+        calls: &mut Vec<MeteredCall>,
+    ) -> ContextOutcome {
+        let usage = usage_of(&response);
+        let request_id = response.request_id.clone();
+        calls.push(MeteredCall {
+            request_id: request_id.clone(),
+            model_used: response.model_used.clone(),
+            provider_used: response.provider_used.clone(),
+            usage,
+        });
+        match validate(&response.content, &response.stop_reason) {
+            Ok(accepted) => ContextOutcome::Ready(Box::new(Generated {
+                text: accepted.text,
+                usage,
+                model_used: response.model_used,
+                provider_used: response.provider_used,
+                residency: response.residency,
+                request_id,
+                prompt_version: run.prepared.version,
+                input_hash: planned_hash.to_string(),
+                cut_at_sentence: accepted.cut_at_sentence,
+                meta_opening: accepted.meta_opening,
+            })),
+            Err(rejection) => rejection.outcome(),
+        }
+    }
+
+    /// One line per call, content-free: ids, counts, classes and token totals.
+    /// Never a prompt, a context, a window or a provider body.
+    fn report(
+        &self,
+        prepared: &PreparedDocument<'_>,
+        results: Vec<ChunkResult>,
+    ) -> Vec<ChunkResult> {
+        let mut by_status: BTreeMap<&'static str, usize> = BTreeMap::new();
+        let mut by_class: BTreeMap<&'static str, usize> = BTreeMap::new();
+        let (mut input_tokens, mut output_tokens, mut cache_read, mut provider_calls) =
+            (0u64, 0u64, 0u64, 0u64);
+        let (mut meta_openings, mut cut) = (0usize, 0usize);
+        for result in &results {
+            *by_status
+                .entry(result.outcome.status().as_str())
+                .or_default() += 1;
+            if let Some(class) = result.outcome.error_class() {
+                *by_class.entry(class.as_str()).or_default() += 1;
+            }
+            if let Some(generated) = result.outcome.generated() {
+                meta_openings += usize::from(generated.meta_opening);
+                cut += usize::from(generated.cut_at_sentence);
+            }
+            for call in &result.calls {
+                provider_calls += 1;
+                if call.usage.is_billable() {
+                    input_tokens += u64::from(call.usage.input_tokens);
+                    output_tokens += u64::from(call.usage.output_tokens);
+                    cache_read += u64::from(call.usage.cache_read_input_tokens);
+                }
+            }
+        }
+        let ready = by_status.get("ready").copied().unwrap_or(0);
+        let statuses = render(&by_status);
+        let classes = render(&by_class);
+        if ready == results.len() {
+            tracing::debug!(
+                org_id = prepared.input.org_id,
+                document_id = prepared.input.document_id,
+                chunks = results.len(),
+                prompt_version = prepared.version.as_str(),
+                provider_calls,
+                input_tokens,
+                output_tokens,
+                cache_read_input_tokens = cache_read,
+                meta_openings,
+                cut_at_sentence = cut,
+                "contextual retrieval: chunks contextualized"
+            );
+        } else {
+            let failed = by_status.get("failed_transient").copied().unwrap_or(0)
+                + by_status.get("failed_permanent").copied().unwrap_or(0);
+            // A refusal, a failure: said once per document with its classes, never
+            // once per chunk. A throttled bulk ingest would otherwise write one
+            // line per chunk of the corpus.
+            if failed > 0 {
+                tracing::warn!(
+                    org_id = prepared.input.org_id,
+                    document_id = prepared.input.document_id,
+                    chunks = results.len(),
+                    statuses = %statuses,
+                    classes = %classes,
+                    provider_calls,
+                    "contextual retrieval: chunks not contextualized; they are embedded raw"
+                );
+            } else {
+                tracing::info!(
+                    org_id = prepared.input.org_id,
+                    document_id = prepared.input.document_id,
+                    chunks = results.len(),
+                    statuses = %statuses,
+                    classes = %classes,
+                    provider_calls,
+                    "contextual retrieval: chunks not contextualized; they are embedded raw"
+                );
+            }
+        }
+        results
+    }
+}
+
+/// `Some(remaining)` while there is time (`None` inside when unbounded), `None`
+/// when the deadline has passed.
+fn remaining_or_expired(run: &Run<'_>) -> Option<Option<Duration>> {
+    match run.remaining() {
+        Some(left) if left.is_zero() => None,
+        other => Some(other),
+    }
+}
+
+fn deadline_outcome() -> ContextOutcome {
+    // Due again at once: the reconciler picks it up, and the unit is embedded raw
+    // in the meantime.
+    ContextOutcome::pending(PendingReason::DeadlineExceeded, Duration::ZERO)
+}
+
+/// Split chunk positions into the first of each cacheable window (asked alone,
+/// first) and the rest. Chunks of a window too short to cache are all in the first
+/// stage, so nothing waits for nothing.
+fn stages(windows: &[Window<'_>]) -> (Vec<usize>, Vec<usize>) {
+    let mut seen = HashSet::new();
+    let (mut leaders, mut followers) = (Vec::new(), Vec::new());
+    for (position, window) in windows.iter().enumerate() {
+        if window.text.len() >= PREFIX_CACHE_MIN_BYTES && !seen.insert(window.id) {
+            followers.push(position);
+        } else {
+            leaders.push(position);
+        }
+    }
+    (leaders, followers)
+}
+
+fn usage_of(response: &model_plane::v1::InferResponse) -> Usage {
+    let tokens = |value: i32| u32::try_from(value.max(0)).unwrap_or(0);
+    let timing = response.provider_timing.as_ref();
+    let (input_tokens, output_tokens) = (
+        tokens(response.input_tokens),
+        tokens(response.output_tokens),
+    );
+    Usage {
+        input_tokens,
+        output_tokens,
+        cache_read_input_tokens: tokens(response.cache_read_input_tokens),
+        cache_creation_input_tokens: tokens(response.cache_creation_input_tokens),
+        // A server that predates the timing field says nothing: both counts zero
+        // then means unknown, as it does on the wire.
+        usage_reported: timing.map_or(input_tokens > 0 || output_tokens > 0, |timing| {
+            timing.usage_reported
+        }),
+        response_cache_hit: timing.is_some_and(|timing| timing.response_cache_hit),
+    }
+}
+
+fn render(counts: &BTreeMap<&'static str, usize>) -> String {
+    counts
+        .iter()
+        .map(|(name, count)| format!("{name}={count}"))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+/// The boot-time contract of contextual retrieval (CR-T13), for the process that is about to run
+/// it. With the feature on, the settings are valid (a variable out of range names itself) and the
+/// service holds the credential its Auth Core token client needs; while the incident kill switch is
+/// thrown there is nothing to check, because no model is asked. `main` calls it before anything
+/// starts, so a deployment that cannot generate contexts stops there, with a message and a
+/// non-zero exit, and does not run for weeks with the feature doing nothing (the consumer builds
+/// its own contextualizer later, and a failure there only ended the consumer, quietly).
+pub fn check_boot(cfg: &Config) -> anyhow::Result<()> {
+    if !cfg.contextual_retrieval_state()?.is_on() {
+        return Ok(());
+    }
+    Settings::from_config(cfg)?;
+    super::token_client_from_config(cfg)?;
+    Ok(())
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn only_recoverable_inference_statuses_are_retried() {
-        // A rate limit is the whole reason this exists: bulk contextualization
-        // of a 1,164-chunk corpus lost 300 chunks of coverage to
-        // ResourceExhausted, silently, because every failure fell back to raw.
-        assert!(is_transient(tonic::Code::ResourceExhausted));
-        assert!(is_transient(tonic::Code::Unavailable));
-        assert!(is_transient(tonic::Code::DeadlineExceeded));
-
-        // Retrying these would spend the entire backoff budget re-sending a
-        // request that cannot succeed, delaying every chunk queued behind it.
-        assert!(!is_transient(tonic::Code::InvalidArgument));
-        assert!(!is_transient(tonic::Code::PermissionDenied));
-        assert!(!is_transient(tonic::Code::Unauthenticated));
-        assert!(!is_transient(tonic::Code::NotFound));
-        assert!(!is_transient(tonic::Code::Internal));
-    }
-
-    #[test]
-    fn backoff_doubles_and_spans_the_providers_retry_window() {
-        let base = Duration::from_millis(2_000);
-        // Attempt n waits 2^n * base, so 4 attempts span 2+4+8+16 = 30s —
-        // covering the 30-second Retry-After this Azure deployment returns.
-        let total: Duration = (0..4).map(|a| retry_backoff(base, a, 0)).sum();
-        assert_eq!(total, Duration::from_millis(30_000));
-        assert_eq!(retry_backoff(base, 0, 0), Duration::from_millis(2_000));
-        assert_eq!(retry_backoff(base, 3, 0), Duration::from_millis(16_000));
-    }
-
-    #[test]
-    fn concurrent_chunks_do_not_retry_in_lockstep() {
-        let base = Duration::from_millis(2_000);
-        // Chunks rate-limited by one upstream burst must not all come back at
-        // the same instant and re-trigger the same limit.
-        let delays: Vec<Duration> = (0..4).map(|i| retry_backoff(base, 0, i)).collect();
-        let distinct: std::collections::HashSet<u128> =
-            delays.iter().map(|d| d.as_millis()).collect();
-        assert_eq!(distinct.len(), 4, "offsets collided: {delays:?}");
-
-        // The spread stays inside one quarter-step, so jitter never reorders
-        // attempts across backoff generations.
-        for d in &delays {
-            assert!(*d >= base && *d < base + base / 4, "{d:?} escaped its step");
-        }
-    }
-
-    #[test]
-    fn backoff_saturates_rather_than_overflowing() {
-        // A misconfigured attempt count must not panic on the shift.
-        let base = Duration::from_secs(1);
-        for attempt in [6u32, 7, 32, u32::MAX] {
-            let d = retry_backoff(base, attempt, 1);
-            assert!(d >= base, "attempt {attempt} produced {d:?}");
-        }
-    }
-
-    #[test]
-    fn the_prompt_carries_both_the_document_and_the_chunk() {
-        let prompt = build_prompt("full document body", "the chunk");
-        assert!(prompt.contains("<document>\nfull document body\n</document>"));
-        assert!(prompt.contains("<chunk>\nthe chunk\n</chunk>"));
-        // The instruction must forbid summarising: a summary competes with the
-        // chunk's own terms in the embedding instead of adding findable ones.
-        assert!(prompt.contains("Do not summarise"));
-    }
-
-    #[test]
-    fn context_is_prepended_and_the_chunk_survives_verbatim() {
-        let composed = compose_contextualized("  This is from ACME's Q2 report.  ", "Margin: 31%.");
-        assert_eq!(composed, "This is from ACME's Q2 report.\n\nMargin: 31%.");
-        assert!(
-            composed.ends_with("Margin: 31%."),
-            "the chunk must be preserved exactly, not rewritten"
-        );
-    }
-
-    /// A byte-offset truncation would panic partway through a multi-byte char.
-    /// The corpus is Norwegian-first, so this is the common case, not an edge.
-    #[test]
-    fn document_truncation_never_splits_a_multibyte_character() {
-        let norwegian = "ø".repeat(1000);
-        for cap in [0_usize, 1, 7, 999, 1000, 5000] {
-            let bounded: String = norwegian.chars().take(cap).collect();
-            assert_eq!(bounded.chars().count(), cap.min(1000));
-            // Round-trips as valid UTF-8 by construction; the assertion is that
-            // building it did not panic and no char was cut in half.
-            assert!(bounded.chars().all(|c| c == 'ø'));
-        }
-    }
-
-    /// Only three env vars are required by `Config`; everything this module
-    /// reads is `#[serde(default)]`, which is exactly what the off-by-default
-    /// assertions below are checking.
-    fn minimal_config() -> Config {
-        envy::from_iter::<_, Config>(vec![
-            (
-                "DATABASE_URL".to_string(),
-                "postgres://test.invalid/test".to_string(),
-            ),
-            (
-                "NATS_URL".to_string(),
-                "nats://test.invalid:4222".to_string(),
-            ),
-            (
-                "QDRANT_URL".to_string(),
-                "http://test.invalid:6334".to_string(),
-            ),
-        ])
-        .expect("minimal config")
-    }
-
-    #[test]
-    fn a_disabled_config_yields_no_contextualizer_rather_than_an_error() {
-        let cfg = minimal_config();
-        assert!(
-            !cfg.contextual_retrieval_enabled,
-            "contextual retrieval must default to OFF: it spends one inference \
-             call per chunk and must never switch on by deploying"
-        );
-        let built = Contextualizer::from_config(&cfg).expect("disabled is not an error");
-        assert!(built.is_none());
-    }
-
-    #[test]
-    fn enabling_without_a_model_fails_closed() {
-        let cfg = Config {
-            contextual_retrieval_enabled: true,
-            contextual_retrieval_model: "   ".to_string(),
-            ..minimal_config()
-        };
-        let err = match Contextualizer::from_config(&cfg) {
-            Ok(_) => panic!("an enabled contextualizer with no model must fail"),
-            Err(err) => err,
-        };
-        assert!(
-            err.to_string().contains("CONTEXTUAL_RETRIEVAL_MODEL"),
-            "unexpected error: {err}"
-        );
-    }
-
-    /// Concurrency is clamped to at least 1: `buffered(0)` yields nothing
-    /// forever, so a misconfigured `0` would hang every ingest rather than
-    /// degrade it.
-    // `tokio::test` because building the contextualizer calls
-    // `Endpoint::connect_lazy`, which registers with the Tokio reactor even
-    // though it opens no connection.
-    #[tokio::test]
-    async fn zero_concurrency_is_clamped_rather_than_stalling_the_stream() {
-        let cfg = Config {
-            contextual_retrieval_enabled: true,
-            contextual_retrieval_model: "claude-haiku-4-5-20251001".to_string(),
-            contextual_retrieval_concurrency: 0,
-            // A real credential is required outside standalone startup; the
-            // value is never used because nothing here reaches the network.
-            model_plane_inference_service_api_key: "test-key-0123456789".to_string(),
-            ..minimal_config()
-        };
-        let built = Contextualizer::from_config(&cfg)
-            .expect("valid config")
-            .expect("enabled");
-        assert_eq!(built.concurrency, 1);
-    }
-
-    #[tokio::test]
-    async fn an_empty_chunk_list_makes_no_calls_and_mints_nothing() {
-        let cfg = Config {
-            contextual_retrieval_enabled: true,
-            contextual_retrieval_model: "claude-haiku-4-5-20251001".to_string(),
-            // Unreachable on purpose: reaching the network at all would surface
-            // as a hang/error instead of the empty vec asserted below.
-            model_plane_ai_core_grpc_url: "http://127.0.0.1:1".to_string(),
-            model_plane_inference_service_api_key: "test-key-0123456789".to_string(),
-            ..minimal_config()
-        };
-        let built = Contextualizer::from_config(&cfg)
-            .expect("valid config")
-            .expect("enabled");
-        let out = built.contextualize_document("org-1", "doc body", &[]).await;
-        assert!(out.is_empty());
-    }
-}
+mod live_proof;
+/// A model for the batch pipeline's tests (a port that records and answers per tenant).
+#[cfg(test)]
+pub(crate) mod testing;
+#[cfg(test)]
+mod tests;

@@ -1,0 +1,22 @@
+[package]
+name = "inference-client-rs"
+version.workspace = true
+edition.workspace = true
+description = "Data Plane client for inference-core: the Auth Core service-token mint with a tenant-aware bearer cache, and the typed decoder for inference-core's refusal statuses"
+
+[dependencies]
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+chrono.workspace = true
+reqwest.workspace = true
+jsonwebtoken.workspace = true
+tonic.workspace = true
+futures.workspace = true
+
+[dev-dependencies]
+axum.workspace = true
+sha2.workspace = true
+base64 = "0.22"

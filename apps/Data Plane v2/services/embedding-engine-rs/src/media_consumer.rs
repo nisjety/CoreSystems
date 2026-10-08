@@ -453,6 +453,27 @@ async fn handle_created(
     Ok(())
 }
 
+/// The `source` a caption's point is stamped with: the `documents.source` of the video it
+/// describes, the way a text chunk's point is stamped (`batch::build_points`). A lookup that
+/// fails, or a document that is not there, gives `None`: the point is written unstamped,
+/// which a corpus-scoped search treats as outside every corpus, and
+/// `qdrant-backfill-source` stamps it later. That is better than losing the caption's dense
+/// leg over a stamp, in a path that is infallible by design.
+async fn caption_source(pool: &sqlx::PgPool, org_id: &str, document_id: &str) -> Option<String> {
+    let found = async {
+        let mut conn = pool.acquire().await?;
+        crate::source_stamp::load(&mut conn, &[(document_id, org_id)]).await
+    }
+    .await;
+    match found {
+        Ok(mut sources) => sources.remove(&(document_id.to_owned(), org_id.to_owned())),
+        Err(e) => {
+            tracing::warn!(error = %e, document_id = %document_id, "caption source lookup failed; point written without a source");
+            None
+        }
+    }
+}
+
 /// Describe one video segment and index the description as TEXT.
 ///
 /// This is the temporal fix. The caption lands as a `knowledge_units` row, so it
@@ -590,6 +611,7 @@ async fn caption_video_segment(
         chunk_index: -(evt.segment_no + 1) as i32,
         text: caption.clone(),
         vector,
+        source: caption_source(&captioning.pool, &evt.org_id, &evt.document_id).await,
         metadata: HashMap::new(),
     };
     if let Err(e) =

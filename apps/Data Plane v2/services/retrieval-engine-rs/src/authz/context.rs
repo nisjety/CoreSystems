@@ -86,6 +86,25 @@ pub struct Claims {
     pub iss: Option<String>,
     #[serde(default)]
     pub aud: Option<String>,
+    /// `"user"` or `"service"` (Auth Core `issuePlaneToken`). Absent on legacy
+    /// tokens, which are user tokens. Read only by
+    /// [`crate::authz::principal::classify_principal`].
+    #[serde(default)]
+    pub principal_type: Option<String>,
+    /// `service:<name>`, equal to `sub`, on service tokens only.
+    #[serde(default)]
+    pub service_id: Option<String>,
+    /// The user id, on user tokens only (equal to `sub`). A service token never
+    /// carries one.
+    #[serde(default)]
+    pub user_id: Option<String>,
+    /// A delegated acting user, minted only by the token-exchange endpoint on a
+    /// service token. This engine treats it as an ambiguous identity.
+    #[serde(default)]
+    pub acting_user_id: Option<String>,
+    /// Why the token was minted (service tokens).
+    #[serde(default)]
+    pub reason: Option<String>,
 }
 
 /// What this user is effectively allowed to see in this org, as
@@ -147,6 +166,10 @@ pub struct AuthContext {
     /// serialize this value.
     #[serde(skip_serializing)]
     pub verified_bearer: Option<String>,
+    /// Who the verified caller is: an interactive user (admitted by Control
+    /// membership) or a first-party service (admitted by the default-deny route
+    /// table). Set only by the admission guard from verified claims.
+    pub principal: super::principal::Principal,
 }
 
 impl AuthContext {
@@ -212,6 +235,7 @@ impl AuthContext {
             acl: EffectiveAcl::allow_all(),
             request_id,
             verified_bearer: None,
+            principal: super::principal::Principal::User,
         }
     }
 
@@ -293,10 +317,18 @@ impl AuthContext {
         req.zdr_mode = self.effective_zdr_mode(req.zdr_mode);
         req.sovereign_required = self.effective_sovereign_required(req.sovereign_required);
 
+        // A SERVICE principal is flagged so the pipeline never sends it to the
+        // per-user grants facade. The flag is boundary-injected only; a request
+        // body can never set it (`skip_deserializing`).
+        req.service_principal = self.principal.is_service();
+
         // Org-admin super-visibility derives ONLY from a verified scope. This is
         // reached only on the JWT HTTP path; the api-key/agent path carries no
-        // scopes, so admin bypass can never leak into agent grounding.
-        req.admin_read_all = self.scopes.iter().any(|s| s == "org:data:read_all");
+        // scopes, so admin bypass can never leak into agent grounding. A service
+        // principal NEVER gets it, even when its registry ceiling lists the
+        // scope: org-wide visibility is a human administrator's authority.
+        req.admin_read_all =
+            !self.principal.is_service() && self.scopes.iter().any(|s| s == "org:data:read_all");
     }
 }
 
@@ -347,6 +379,7 @@ mod tests {
             },
             request_id: "req".into(),
             verified_bearer: None,
+            principal: crate::authz::Principal::User,
         }
     }
 
@@ -493,6 +526,57 @@ mod tests {
         let mut request = retrieval_request_sovereign(Some(false));
         ctx.apply_to_request(&mut request);
         assert_eq!(request.sovereign_required, Some(true));
+    }
+
+    fn service_ctx(scopes: &[&str]) -> AuthContext {
+        AuthContext {
+            user_id: Some("service:quarry-edge".into()),
+            scopes: scopes.iter().map(|scope| (*scope).to_owned()).collect(),
+            principal: crate::authz::Principal::Service {
+                service_id: "service:quarry-edge".into(),
+            },
+            ..ctx_with_acl(vec![])
+        }
+    }
+
+    #[test]
+    fn a_service_context_flags_the_request_and_never_grants_org_wide_visibility() {
+        // Even a (mis-issued) service context that still carries the scope.
+        let ctx = service_ctx(&["data:read", "org:data:read_all"]);
+        let mut request = retrieval_request(None);
+        ctx.apply_to_request(&mut request);
+        assert!(request.service_principal);
+        assert!(!request.admin_read_all);
+        assert_eq!(request.user_id.as_deref(), Some("service:quarry-edge"));
+
+        // A user with the scope keeps the admin bypass, and is not a service.
+        let admin = AuthContext {
+            scopes: vec!["org:data:read_all".into()],
+            ..ctx_with_acl(vec![])
+        };
+        let mut request = retrieval_request(None);
+        admin.apply_to_request(&mut request);
+        assert!(!request.service_principal);
+        assert!(request.admin_read_all);
+    }
+
+    #[test]
+    fn a_request_body_can_never_claim_to_be_a_service_principal() {
+        let request: RetrievalRequest = serde_json::from_value(serde_json::json!({
+            "org_id": "body-org",
+            "query": "synthetic boundary test",
+            "service_principal": true,
+            "admin_read_all": true,
+        }))
+        .expect("valid retrieval request");
+        assert!(!request.service_principal, "skip_deserializing must hold");
+        assert!(!request.admin_read_all);
+
+        // And a user context overwrites whatever a pipeline struct held.
+        let mut forged = request;
+        forged.service_principal = true;
+        ctx_with_acl(vec![]).apply_to_request(&mut forged);
+        assert!(!forged.service_principal);
     }
 
     #[test]

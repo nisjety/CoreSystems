@@ -1,14 +1,19 @@
 mod api;
 mod batch;
+mod budget;
 mod cas_store;
 mod config;
+mod context;
+mod context_reconciler;
 mod document_erasure_consumer;
 mod gdpr;
 mod gdpr_nats;
 mod image_consumer;
 mod media_consumer;
+mod policy;
 mod provider;
 mod qdrant_writer;
+mod source_stamp;
 mod stream;
 mod wiki_consumer;
 
@@ -34,10 +39,52 @@ async fn main() -> anyhow::Result<()> {
         "embedding-engine-rs starting"
     );
 
+    // The boot-time contract of contextual retrieval (CR-T13). It is on, and the flag is the
+    // incident kill switch: `Config::from_env` has already refused a switch that is off without a
+    // reason, and the state is said here, once, so that the log says which it is and why.
+    let contextual = cfg.contextual_retrieval_state()?;
+    match &contextual {
+        config::ContextualRetrievalState::On { model } => {
+            tracing::info!(
+                model = %model,
+                provider_hint = %cfg.contextual_retrieval_provider_hint,
+                min_residency = %cfg.contextual_retrieval_min_residency,
+                prompt_version = %cfg.contextual_retrieval_prompt_version,
+                "contextual retrieval is ON: contexts are generated within the inline time box and by the reconciler; CONTEXTUAL_RETRIEVAL_ENABLED=false is the incident kill switch"
+            );
+            if !cfg.context_retrieval_kill_switch_reason.trim().is_empty() {
+                tracing::warn!(
+                    "CONTEXT_RETRIEVAL_KILL_SWITCH_REASON is set but contextual retrieval is on; the reason is ignored"
+                );
+            }
+        }
+        config::ContextualRetrievalState::KillSwitch { reason } => {
+            tracing::warn!(
+                reason = %reason,
+                "contextual retrieval is OFF: the incident kill switch is thrown (CONTEXTUAL_RETRIEVAL_ENABLED=false); no model is asked and chunks are embedded raw; nothing stored is removed"
+            );
+        }
+    }
+
     let pool = sqlx::postgres::PgPoolOptions::new()
         .max_connections(10)
         .connect(&cfg.database_url)
         .await?;
+
+    // The background LLM budget gate (CR-T9b), one for the process: the stream consumer's
+    // pipeline and the reconciler both ask it, so that what either spends is in the figure the
+    // other reads. `Config::from_env` has already refused a setting that cannot work; the state is
+    // said here, once. The default (alert only, no figure, no prices) holds nothing back and reads
+    // nothing.
+    let budget_settings = cfg.background_budget()?;
+    tracing::info!(
+        mode = budget_settings.mode.as_str(),
+        monthly_usd = ?budget_settings.monthly_usd,
+        prices = budget_settings.price.is_some(),
+        usage_ledger = cfg.usage_emit_enabled,
+        "background LLM budget: alert-only unless an operator set a mode (BACKGROUND_BUDGET_MODE, or an organization's own budget_mode); no figure is built in"
+    );
+    let budget = Arc::new(budget::BudgetGate::from_config(&cfg, pool.clone())?);
 
     let qdrant = qdrant_client::Qdrant::from_url(&cfg.qdrant_url)
         .build()
@@ -87,6 +134,12 @@ async fn main() -> anyhow::Result<()> {
             .as_deref()
             .unwrap_or(""),
     );
+    // With contextual retrieval on and a consumer that will run it, the settings and the service
+    // credential are checked HERE, before any consumer starts: the consumer builds its own
+    // contextualizer later, and a failure there ended only the consumer, with exit status 0.
+    if signed_events_enabled || legacy_events_enabled {
+        provider::contextualize::check_boot(&cfg)?;
+    }
     // Built once, shared by the per-document erasure consumer below AND the
     // whole-org GDPR purge further down — one CasStore, two erasure triggers.
     // `None` when `cas_bucket` is unset: erasure of the OTHER stores this
@@ -385,7 +438,47 @@ async fn main() -> anyhow::Result<()> {
         ));
     }
 
-    let admin_app = api::router();
+    // The context reconciler (CR-T9a): the loop that fills, verifies and repairs contexts and
+    // vectors from what the database says. OFF unless CONTEXT_RECONCILER_ENABLED=1, and then the
+    // service refuses to start unless it can run it properly: every setting is checked (a value
+    // out of range names its variable), the schema must carry the provenance columns, and the
+    // signed event runtime must be on, because a document the reconciler heals is announced with
+    // `dataplane.documents.indexed`, which the keyword index only reads signed.
+    let reconciler = if cfg.context_reconciler_enabled {
+        let Some((_, nats_client, _, signer)) = &event_runtime else {
+            anyhow::bail!(
+                "CONTEXT_RECONCILER_ENABLED=1 needs the signed event consumers \
+                 (ENABLE_SIGNED_EVENT_CONSUMERS=1 and EMBEDDING_EVENT_PRIVATE_KEY_PATH): a healed \
+                 document is announced signed, and an unsigned announcement is refused"
+            );
+        };
+        let reconciler = context_reconciler::Reconciler::from_config(
+            &cfg,
+            pool.clone(),
+            qdrant.clone(),
+            provider.clone(),
+            nats_client.clone(),
+            signer.clone(),
+            budget.clone(),
+        )
+        .await?;
+        Some(Arc::new(reconciler))
+    } else {
+        tracing::info!("context reconciler disabled (CONTEXT_RECONCILER_ENABLED)");
+        None
+    };
+    // Not `tokio::spawn`ed, like the consumer: the pipeline's future is not provably `Send`
+    // (the contextualizer's stream of documents trips a known limit of the compiler), so the loop
+    // is a branch of the select below, polled on this task, and a panic in it ends the process as
+    // one in the consumer does.
+    let reconciler_task = async move {
+        match reconciler {
+            Some(reconciler) => reconciler.run().await,
+            None => std::future::pending::<()>().await,
+        }
+    };
+
+    let admin_app = api::router(contextual, budget.clone());
     let admin_addr = format!("0.0.0.0:{}", cfg.admin_port);
     let admin_listener = tokio::net::TcpListener::bind(&admin_addr).await?;
     tracing::info!("admin on {admin_addr}");
@@ -401,6 +494,7 @@ async fn main() -> anyhow::Result<()> {
                     cfg,
                     nats_client,
                     stream::EventSecurity { verifier, signer },
+                    budget,
                 )
                 .await
             }
@@ -414,6 +508,9 @@ async fn main() -> anyhow::Result<()> {
         }
         res = consumer_task => {
             if let Err(e) = res { tracing::error!(err = %e, "consumer error"); }
+        }
+        () = reconciler_task => {
+            tracing::error!("the context reconciler ended; it runs for ever");
         }
     }
 

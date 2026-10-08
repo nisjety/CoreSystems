@@ -158,6 +158,7 @@ fn test_principal(mut request: Request<()>) -> Result<Request<()>, Status> {
         acl: EffectiveAcl::allow_all(),
         request_id: "cross-org-isolation-test".into(),
         verified_bearer: None,
+        principal: retrieval_engine::authz::Principal::User,
     });
     Ok(request)
 }

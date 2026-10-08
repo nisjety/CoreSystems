@@ -240,7 +240,8 @@ pub fn community_identity(org_id: &str, entity_ids: &[String]) -> String {
 }
 
 pub struct GraphStore {
-    pool: PgPool,
+    // Shared with `state_store`, which holds the SQL of graph extraction state.
+    pub(crate) pool: PgPool,
 }
 
 impl GraphStore {
@@ -262,13 +263,17 @@ impl GraphStore {
         // policy is a backstop against that filter being dropped or mis-edited
         // later, not a replacement for it.
         let mut tx = pg_org_scope::begin_org_scoped(&self.pool, org_id).await?;
+        // In document order: the order the chunks are worked in is the order they are read in,
+        // and without it that is whatever the plan returns (a throttled pass works "the first"
+        // due chunk, and two database tests asserted which one that was and failed under load).
         let rows = sqlx::query_as(
             "SELECT ku.knowledge_id, ku.text
              FROM knowledge_units AS ku
              JOIN documents AS d
                ON d.document_id = ku.document_id AND d.org_id = ku.org_id
              WHERE d.document_id = $1 AND d.org_id = $2
-               AND d.visibility = 'org' AND d.deleted_at IS NULL",
+               AND d.visibility = 'org' AND d.deleted_at IS NULL
+             ORDER BY ku.chunk_index, ku.knowledge_id",
         )
         .bind(document_id)
         .bind(org_id)
@@ -315,7 +320,9 @@ impl GraphStore {
         {
             // Not org-visible → persist nothing. The empty result means the
             // Neo4j mirror is a no-op too, so the read-model inherits this gate
-            // (and the upstream restrictive-ZDR drop) with no extra code.
+            // (and the upstream restrictive-ZDR drop) with no extra code. `visible`
+            // stays false so the caller can tell this from an extraction that
+            // found nothing: the first is `skipped_visibility`, the second `empty`.
             return Ok(PersistedExtraction::default());
         }
         let source_ref = serde_json::json!([knowledge_id]);
@@ -498,6 +505,7 @@ impl GraphStore {
         mirror_relationships.dedup_by(|a, b| a.rel_id == b.rel_id);
 
         Ok(PersistedExtraction {
+            visible: true,
             entity_ids,
             rel_ids,
             claim_ids,
@@ -641,6 +649,17 @@ impl GraphStore {
             .await?
             .rows_affected();
 
+        // What was done to each chunk (CR-T12). Ids and counters only, no content, but it is the
+        // organization's and an erasure that left it behind would leave the list of the
+        // organization's chunks. It references knowledge_units, not the graph tables, so its
+        // place in the order is free.
+        let graph_extraction_state =
+            sqlx::query("DELETE FROM graph_extraction_state WHERE org_id = $1")
+                .bind(org_id)
+                .execute(&mut *tx)
+                .await?
+                .rows_affected();
+
         let graph_relationships = sqlx::query("DELETE FROM graph_relationships WHERE org_id = $1")
             .bind(org_id)
             .execute(&mut *tx)
@@ -675,6 +694,7 @@ impl GraphStore {
             graph_claims,
             graph_communities,
             graph_entities,
+            graph_extraction_state,
         })
     }
 
@@ -1820,7 +1840,7 @@ mod visibility_tests {
         );
         CREATE TABLE knowledge_units (
             knowledge_id TEXT PRIMARY KEY, document_id TEXT NOT NULL, org_id TEXT NOT NULL,
-            text TEXT NOT NULL
+            text TEXT NOT NULL, chunk_index INTEGER NOT NULL DEFAULT 0
         );
         CREATE TABLE graph_entities (
             entity_id TEXT PRIMARY KEY, org_id TEXT NOT NULL, entity_type TEXT NOT NULL,
@@ -2401,6 +2421,13 @@ mod gdpr_purge_tests {
             entity_ids JSONB NOT NULL, summary TEXT, level INTEGER NOT NULL DEFAULT 0,
             created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         );
+        -- What was done to each chunk (CR-T12), without the foreign key to knowledge_units
+        -- this fixture does not have.
+        CREATE TABLE graph_extraction_state (
+            org_id TEXT NOT NULL, knowledge_id TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending', attempts INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (org_id, knowledge_id)
+        );
 
         INSERT INTO graph_entities VALUES
             ('e-a1', 'org-a', 'Person', 'A One', 1, 'test', '[]', NOW()),
@@ -2422,6 +2449,9 @@ mod gdpr_purge_tests {
         INSERT INTO graph_communities VALUES
             ('comm-a', 'org-a', '["e-a1","e-a2"]', 'org a community', 0, NOW()),
             ('comm-b', 'org-b', '["e-b1","e-b2"]', 'org b community', 0, NOW());
+        INSERT INTO graph_extraction_state (org_id, knowledge_id, status) VALUES
+            ('org-a', 'k-a', 'ready'), ('org-a', 'k-a2', 'pending'),
+            ('org-b', 'k-b', 'ready'), ('org-b', 'k-b2', 'pending');
     "#;
 
     async fn fixture() -> (GraphStore, PgPool, String) {
@@ -2460,14 +2490,15 @@ mod gdpr_purge_tests {
         (GraphStore::new(pool.clone()), pool, schema)
     }
 
-    async fn org_row_counts(pool: &PgPool, org_id: &str) -> [i64; 5] {
-        let mut counts = [0i64; 5];
+    async fn org_row_counts(pool: &PgPool, org_id: &str) -> [i64; 6] {
+        let mut counts = [0i64; 6];
         for (idx, table) in [
             "graph_text_units",
             "graph_relationships",
             "graph_claims",
             "graph_communities",
             "graph_entities",
+            "graph_extraction_state",
         ]
         .into_iter()
         .enumerate()
@@ -2495,8 +2526,8 @@ mod gdpr_purge_tests {
         // graph_text_units carries THREE rows per org: one mapping row each
         // for the entity_id-only, rel_id-only, and claim_id-only inserts
         // above — not one row per source table.
-        assert_eq!(org_row_counts(&pool, "org-a").await, [3, 1, 1, 1, 2]);
-        assert_eq!(org_row_counts(&pool, "org-b").await, [3, 1, 1, 1, 2]);
+        assert_eq!(org_row_counts(&pool, "org-a").await, [3, 1, 1, 1, 2, 2]);
+        assert_eq!(org_row_counts(&pool, "org-b").await, [3, 1, 1, 1, 2, 2]);
 
         let summary = store
             .purge_organization_data("org-a")
@@ -2507,12 +2538,16 @@ mod gdpr_purge_tests {
         assert_eq!(summary.graph_claims, 1);
         assert_eq!(summary.graph_communities, 1);
         assert_eq!(summary.graph_entities, 2);
-        assert_eq!(summary.total(), 8);
+        assert_eq!(
+            summary.graph_extraction_state, 2,
+            "what was done to the erased organization's chunks goes with it"
+        );
+        assert_eq!(summary.total(), 10);
 
         // org-a is now fully purged across every owned table...
-        assert_eq!(org_row_counts(&pool, "org-a").await, [0, 0, 0, 0, 0]);
+        assert_eq!(org_row_counts(&pool, "org-a").await, [0, 0, 0, 0, 0, 0]);
         // ...and org-b's rows are byte-for-byte untouched.
-        assert_eq!(org_row_counts(&pool, "org-b").await, [3, 1, 1, 1, 2]);
+        assert_eq!(org_row_counts(&pool, "org-b").await, [3, 1, 1, 1, 2, 2]);
 
         // Idempotency: NATS is at-least-once delivery, so a redelivered
         // erasure event must be safe to run twice — the second purge must
@@ -2522,7 +2557,7 @@ mod gdpr_purge_tests {
             .await
             .expect("replayed purge of already-purged org-a must not error");
         assert_eq!(replay.total(), 0);
-        assert_eq!(org_row_counts(&pool, "org-b").await, [3, 1, 1, 1, 2]);
+        assert_eq!(org_row_counts(&pool, "org-b").await, [3, 1, 1, 1, 2, 2]);
 
         sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
             .execute(&pool)

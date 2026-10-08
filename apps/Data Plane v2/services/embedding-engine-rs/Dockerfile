@@ -44,9 +44,11 @@ COPY --from=model-plane-proto [".", "/Model Plane/proto/"]
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,target=/build/target,sharing=locked \
-    cargo build --release --bin embedding-engine --bin backfill-reannounce \
+    cargo build --release --bin embedding-engine --bin backfill-reannounce --bin qdrant-backfill-source --bin context-backfill \
     && cp target/release/embedding-engine /usr/local/bin/embedding-engine \
-    && cp target/release/backfill-reannounce /usr/local/bin/backfill-reannounce
+    && cp target/release/backfill-reannounce /usr/local/bin/backfill-reannounce \
+    && cp target/release/qdrant-backfill-source /usr/local/bin/qdrant-backfill-source \
+    && cp target/release/context-backfill /usr/local/bin/context-backfill
 
 FROM debian:bookworm-slim AS runtime
 ARG SOURCE_REVISION=unverified
@@ -73,6 +75,8 @@ USER dpv2
 
 COPY --from=builder /usr/local/bin/embedding-engine /usr/local/bin/embedding-engine
 COPY --from=builder /usr/local/bin/backfill-reannounce /usr/local/bin/backfill-reannounce
+COPY --from=builder /usr/local/bin/qdrant-backfill-source /usr/local/bin/qdrant-backfill-source
+COPY --from=builder /usr/local/bin/context-backfill /usr/local/bin/context-backfill
 
 EXPOSE 9202
 

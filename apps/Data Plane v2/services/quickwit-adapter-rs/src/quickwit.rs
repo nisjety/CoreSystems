@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+
 use anyhow::Context;
 use reqwest::{Client, StatusCode};
 
@@ -54,6 +56,39 @@ fn warn_on_missing_schema_additions(live: &serde_json::Value, index_id: &str) {
             );
         }
     }
+}
+
+/// How many distinct units one parity request asks the index to list. Far under the aggregation
+/// bucket limit of Quickwit (65,000), and enough that an organization of a few thousand units
+/// is read in two requests.
+pub const TERMS_PER_REQUEST: u64 = 10_000;
+
+/// The deepest id prefix the parity check will split by: sixteen to the power of this many parts
+/// is more than any index holds, so reaching it means the ids are not what this check reads.
+const MAX_PREFIX_DEPTH: usize = 8;
+
+const HEX: [char; 16] = [
+    '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'a', 'b', 'c', 'd', 'e', 'f',
+];
+
+/// One organization's knowledge units as the index holds them (see
+/// [`QuickwitClient::indexed_units`]). Ids are lower-cased.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct IndexedUnits {
+    /// Documents the index counts, duplicates included.
+    pub documents: u64,
+    /// Distinct units.
+    pub distinct: BTreeSet<String>,
+    /// Distinct units with a `context_body` (the field is present: the indexer writes none for a
+    /// blank context).
+    pub with_context: BTreeSet<String>,
+}
+
+struct TermsPage {
+    hits: u64,
+    keys: BTreeSet<String>,
+    /// Documents the aggregation left out because it returned `size` terms.
+    other: u64,
 }
 
 #[derive(Clone)]
@@ -234,6 +269,156 @@ impl QuickwitClient {
         body.get("num_hits")
             .and_then(serde_json::Value::as_u64)
             .ok_or_else(|| anyhow::anyhow!("Quickwit rebuild preflight omitted num_hits"))
+    }
+
+    /// The knowledge units one organization has in the index, as the keyword-index parity check
+    /// needs them: how many documents the index counts, which distinct units there are (de-duplicated
+    /// by `knowledge_id`, because a delete is a task that takes effect at the next merge and until
+    /// then the index holds both generations of a re-indexed chunk), and which of those have a
+    /// `context_body`. (The index answers `context_body:*` by whether the field is present, and the
+    /// indexer writes none for a blank context, so present means not blank.)
+    ///
+    /// Read-only: a count, and terms aggregations that carry ids and no document. Two things are
+    /// true of this Quickwit (0.8.1, measured on the live index) and shape the code:
+    ///
+    /// * it refuses the `cardinality` aggregation, so the distinct units are enumerated with a
+    ///   `terms` aggregation on `knowledge_id`;
+    /// * a `terms` aggregation returns at most `size` buckets and says how many documents it left
+    ///   out (`sum_other_doc_count`), and the field cannot be range-queried or sorted (it is a text
+    ///   field), so an organization with more units than one request holds is split by id prefix,
+    ///   `knowledge_id:a*`, `knowledge_id:a0*`, and so on, until every part fits. The parts must add
+    ///   up to the whole: a part that does not (an id that is not lower-case hexadecimal, which a
+    ///   prefix query on a raw-tokenized field cannot reach) is an error, never a silently smaller
+    ///   count.
+    ///
+    /// The aggregation reads the lower-cased fast field, so the ids come back lower-cased; the
+    /// caller compares them lower-cased.
+    pub async fn indexed_units(&self, org_id: &str) -> anyhow::Result<IndexedUnits> {
+        self.indexed_units_by(org_id, TERMS_PER_REQUEST).await
+    }
+
+    /// [`Self::indexed_units`] with the number of terms one request may return, so that a test can
+    /// make a small index need partitioning.
+    pub async fn indexed_units_by(
+        &self,
+        org_id: &str,
+        terms_per_request: u64,
+    ) -> anyhow::Result<IndexedUnits> {
+        let base = format!(
+            "org_id:{} AND entity_type:\"knowledge_unit\"",
+            quote_query_value(org_id)
+        );
+        let (documents, distinct) = self.distinct_ids(&base, terms_per_request).await?;
+        let (_, with_context) = self
+            .distinct_ids(&format!("{base} AND context_body:*"), terms_per_request)
+            .await?;
+        Ok(IndexedUnits {
+            documents,
+            distinct,
+            with_context,
+        })
+    }
+
+    /// `(documents the query matches, the distinct lower-cased ids among them)`.
+    async fn distinct_ids(
+        &self,
+        base: &str,
+        terms_per_request: u64,
+    ) -> anyhow::Result<(u64, BTreeSet<String>)> {
+        let mut ids = BTreeSet::new();
+        let mut total = None;
+        // Prefixes still to read; the empty one is the whole query.
+        let mut pending = vec![String::new()];
+        while let Some(prefix) = pending.pop() {
+            let query = if prefix.is_empty() {
+                base.to_owned()
+            } else {
+                format!("{base} AND knowledge_id:{prefix}*")
+            };
+            let part = self.terms_page(&query, terms_per_request).await?;
+            if prefix.is_empty() {
+                total = Some(part.hits);
+            }
+            if part.other == 0 {
+                ids.extend(part.keys);
+                continue;
+            }
+            // More units than one request holds: split by the next character of the id.
+            anyhow::ensure!(
+                prefix.len() < MAX_PREFIX_DEPTH,
+                "the index holds more units than can be listed by id prefix"
+            );
+            let mut parts = Vec::with_capacity(HEX.len());
+            let mut covered = 0u64;
+            for digit in HEX {
+                let child = format!("{prefix}{digit}");
+                let hits = self
+                    .count_query(&format!("{base} AND knowledge_id:{child}*"))
+                    .await?;
+                covered += hits;
+                if hits > 0 {
+                    parts.push(child);
+                }
+            }
+            anyhow::ensure!(
+                covered == part.hits,
+                "the index holds units whose id does not start with a lower-case hexadecimal \
+                 digit after `{prefix}`: {} of {} cannot be listed by prefix",
+                part.hits.saturating_sub(covered),
+                part.hits
+            );
+            pending.extend(parts);
+        }
+        Ok((total.unwrap_or(0), ids))
+    }
+
+    /// One `terms` aggregation over `knowledge_id`.
+    async fn terms_page(&self, query: &str, size: u64) -> anyhow::Result<TermsPage> {
+        let url = format!("{}/api/v1/{}/search", self.base_url, self.index_id);
+        let response = self
+            .http
+            .post(&url)
+            .json(&serde_json::json!({
+                "query": query,
+                "max_hits": 0,
+                "aggs": { "ids": { "terms": { "field": "knowledge_id", "size": size } } },
+            }))
+            .send()
+            .await?;
+        if !response.status().is_success() {
+            anyhow::bail!(
+                "Quickwit parity search failed with status {}",
+                response.status()
+            );
+        }
+        let body: serde_json::Value = response.json().await?;
+        let hits = body
+            .get("num_hits")
+            .and_then(serde_json::Value::as_u64)
+            .ok_or_else(|| anyhow::anyhow!("Quickwit parity search omitted num_hits"))?;
+        let aggregation = body.pointer("/aggregations/ids");
+        let keys = aggregation
+            .and_then(|ids| ids.get("buckets"))
+            .and_then(serde_json::Value::as_array)
+            .map(|buckets| {
+                buckets
+                    .iter()
+                    .filter_map(|bucket| bucket.get("key").and_then(serde_json::Value::as_str))
+                    .map(str::to_lowercase)
+                    .collect::<BTreeSet<_>>()
+            });
+        // No aggregation in the answer is only right when nothing matched: a Quickwit that
+        // ignored the aggregation would otherwise read as an empty index.
+        let keys = match (keys, hits) {
+            (Some(keys), _) => keys,
+            (None, 0) => BTreeSet::new(),
+            (None, _) => anyhow::bail!("Quickwit parity search returned no aggregation"),
+        };
+        let other = aggregation
+            .and_then(|ids| ids.get("sum_other_doc_count"))
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
+        Ok(TermsPage { hits, keys, other })
     }
 
     pub async fn delete_by_query(&self, query: &str) -> anyhow::Result<()> {

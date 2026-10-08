@@ -1,0 +1,15 @@
+Here is a document:
+
+<document>
+Annual report 2025 for Fjordfisk AS.
+
+Operating margin rose to 31 percent.
+</document>
+
+Here is a chunk taken from that document:
+
+<chunk>
+The margin improved to 31%.
+</chunk>
+
+Give one or two short sentences that situate this chunk within the document, so the chunk can be found by search. Name the concrete entities, dates, sections, or subjects the chunk refers to only implicitly. Do not summarise the chunk, do not interpret it, and do not add anything that is not in the document. Reply with the situating sentences alone and nothing else.

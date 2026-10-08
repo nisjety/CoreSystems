@@ -8,6 +8,8 @@ members = [
     "services/index-engine-rs",
     "services/embedding-engine-rs",
     "services/graph-index-rs",
+    "services/inference-client-rs",
+    "services/usage-ledger-rs",
     "services/quickwit-adapter-rs",
     "services/meilisearch-adapter-rs",
 ]

@@ -81,6 +81,33 @@ pub async fn record_access(pool: &PgPool, event: AccessEvent<'_>) {
     }
 }
 
+/// Where the HTTP admission guard writes its access rows. The seam exists so the
+/// guard can be exercised hermetically (no Postgres); production uses
+/// [`PgAuditSink`], which is a thin adapter over [`record_access`] and keeps its
+/// org-scoped, best-effort semantics exactly.
+#[async_trait::async_trait]
+pub trait AuditSink: Send + Sync {
+    async fn record(&self, event: AccessEvent<'_>);
+}
+
+/// The production sink: `access_audit_log` through the org-scoped transaction.
+pub struct PgAuditSink {
+    pool: PgPool,
+}
+
+impl PgAuditSink {
+    pub fn new(pool: PgPool) -> Self {
+        Self { pool }
+    }
+}
+
+#[async_trait::async_trait]
+impl AuditSink for PgAuditSink {
+    async fn record(&self, event: AccessEvent<'_>) {
+        record_access(&self.pool, event).await;
+    }
+}
+
 /// Wave-3.2 §16.5.3 — admin-action audit log writer.
 /// Use from every admin endpoint: orphan cleanup, sweeps, hard deletes,
 /// reindex jobs. `actor` is the resolved subject from the AuthContext

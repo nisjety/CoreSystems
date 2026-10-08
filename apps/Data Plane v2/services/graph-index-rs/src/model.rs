@@ -46,10 +46,16 @@ pub struct Community {
     pub level: i32,
 }
 
+/// What the model answered. Each list defaults to empty: a model that has no relationships to
+/// report and leaves the key out has answered, and an answer is not a failure to parse (a
+/// failure here counts toward the chunk's poison cap).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExtractionResult {
+    #[serde(default)]
     pub entities: Vec<ExtractedEntity>,
+    #[serde(default)]
     pub relationships: Vec<ExtractedRelationship>,
+    #[serde(default)]
     pub claims: Vec<ExtractedClaim>,
 }
 
@@ -81,6 +87,9 @@ pub struct MirrorRelationship {
 /// org-visible — so the mirror inherits the org-visibility + ZDR gate for free.
 #[derive(Debug, Clone, Default)]
 pub struct PersistedExtraction {
+    /// False only when the chunk's document was not visible to the whole organization, so
+    /// nothing was written. An extraction that found nothing is `visible` with no ids.
+    pub visible: bool,
     pub entity_ids: Vec<String>,
     pub rel_ids: Vec<String>,
     pub claim_ids: Vec<String>,
@@ -100,6 +109,9 @@ pub struct GdprPurgeSummary {
     pub graph_claims: u64,
     pub graph_communities: u64,
     pub graph_entities: u64,
+    /// What was done to each chunk (CR-T12): ids and counters only, but it is the
+    /// organization's, so it goes with the rest.
+    pub graph_extraction_state: u64,
 }
 
 impl GdprPurgeSummary {
@@ -111,6 +123,7 @@ impl GdprPurgeSummary {
             + self.graph_claims
             + self.graph_communities
             + self.graph_entities
+            + self.graph_extraction_state
     }
 }
 

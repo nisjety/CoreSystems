@@ -19,6 +19,7 @@ another one without a contract update.
 | `DATAPLANE_DOCUMENTS` | `dataplane.documents.created`, `dataplane.documents.deleted`, `dataplane.documents.updated` | WorkQueue, 7d (**live: `interest`, verified 2026-08-07** — see the retrieval-quality-and-durability-plan execution record; this row's retention column predates that migration and was not corrected here, out of this change's scope) | documents-api-go (producer) → index-engine-rs, retrieval-engine-rs cache invalidator, quickwit-adapter-rs, meilisearch-adapter-rs, embedding-engine-rs `document_erasure_consumer` (consumers, on `.deleted` only for the last three — quickwit/meilisearch purge their lexical/keyword copy, embedding-engine purges the page-image Qdrant vectors + MinIO CAS objects) | Document lifecycle |
 | `DATAPLANE_KNOWLEDGE` | `dataplane.knowledge.units.created` | WorkQueue, 7d (**live: `interest`**, same note as above) | index-engine-rs (producer) → embedding-engine-rs, quickwit-adapter-rs, graph-index-rs, meilisearch-adapter-rs (consumers) | Chunk-level events |
 | `DATAPLANE_GRAPH` | `dataplane.graph.extraction.requested` | WorkQueue, 7d | (planned) → graph-index-rs (consumer) | Entity extraction trigger |
+| `DATAPLANE_COST` | `dataplane.cost.ledger` | **Limits** (never Interest or WorkQueue), file storage, 7d, 512 MiB, `discard: old`, 2 min duplicate window | embedding-engine-rs, graph-index-rs, retrieval-engine-rs (producers, signed) → data-orchestrator-go `cost` durable consumer `data-orchestrator-cost` | The usage ledger (CR-T10): see "The `DATAPLANE_COST` stream" below |
 
 ## Core (non-JetStream) subjects
 
@@ -32,7 +33,7 @@ Best-effort delivery is acceptable for the use case.
 | `dataplane.source_objects.changed` | connector ingesters / documents-api-go outbox | quickwit-adapter-rs | `{source_object_id, org_id}` or full source-object payload | Best-effort live update; adapter can rebuild from Postgres |
 | `dataplane.source_objects.deleted` | connector ingesters / documents-api-go outbox | quickwit-adapter-rs | `{source_object_id, org_id}` | Best-effort live delete; adapter can rebuild from Postgres |
 | `dataplane.search.rebuild.requested` | operator/admin | quickwit-adapter-rs | `{org_id?, clear?: boolean}` | Triggers derived Quickwit rebuild from Postgres |
-| `dataplane.cost.ledger` | retrieval-engine-rs, embedding-engine-rs | data-orchestrator-go (`cost.consumer`) | `{event_type, model, count, estimated_tokens, org_ids, user_id, idempotency_key}` | Per-call cost events |
+| `dataplane.cost.ledger` | retrieval-engine-rs, embedding-engine-rs, graph-index-rs | data-orchestrator-go (`cost.consumer`) | version 1: `{event_type, model, count, estimated_tokens, org_id, user_id, zdr, idempotency_key}`; version 2: the usage ledger event (`usage-ledger-rs`, `schema_version: 2`) | **No longer a plain core subject: it is the subject of the `DATAPLANE_COST` stream** (below), listed here because a core publish on it is still accepted. Signed envelope, one issuer per producer |
 | `dataplane.documents.indexed` | embedding-engine-rs, data-orchestrator-go | graph-index-rs (`stream.rs`), meilisearch-adapter-rs (`stream.rs`) | `{document_id, org_id, indexed_at}` | Signal that a document's vectors are now queryable; meilisearch-adapter treats it as the clear-then-reindex trigger for the keyword arm |
 | `dataplane.knowledge.units.deleted` | index-engine-rs (deletion outbox) | embedding-engine-rs (purges Qdrant points), graph-index-rs (`graph-index-cleanup`) | `{document_id, org_id, knowledge_ids[], user_id, zdr, idempotency_key}` | Orphaned chunks from a re-chunk; keeps superseded content out of retrieval |
 | `dataplane.page_images.created` | quarry-edge (Ingestion Plane) | embedding-engine-rs (`image_consumer`) | `{org_id, document_id, image_url, page_no}` | Visual RAG arm; carries no document text |
@@ -63,6 +64,40 @@ published while it happened to be running.
 | `max_age` | 30 days | A dead letter must outlive the weekend plus the investigation. |
 | `max_bytes` | 1 GiB, `discard: old` | `Limits` never discards on ack, so a bounded ceiling is what stops a poison loop filling the JetStream store. |
 | storage | file | Must survive the broker restart that often accompanies the incident. |
+
+### The `DATAPLANE_COST` stream (CR-T10)
+
+Spend that is not recorded cannot be billed or budgeted, and the cost event used to be a plain
+core-NATS publish read by a plain core subscription: a consumer that was restarting, or one that
+crashed between receiving an event and writing its row, lost it, and no producer could know. The
+stream binds the subject the cost events always used, `dataplane.cost.ledger`:
+
+- A stream captures a core publish on its subject, so a producer that has not been upgraded keeps
+  working and its events are retained too. A JetStream publish is also delivered to core
+  subscribers, so a consumer that has not been upgraded still sees the events. That is the
+  "dual publish for one release" with no second publish call (which would have booked every event
+  twice).
+- Producers (`usage-ledger-rs`) publish to it with a `PubAck` and `Nats-Msg-Id`
+  `<org>:<idempotency key>`; the broker drops a retry inside the 2 minute window. A producer with
+  usage emission on refuses to start when it cannot create or verify the stream.
+- The consumer (`data-orchestrator-go` `internal/cost`) is the durable `data-orchestrator-cost`,
+  explicit ack, never gives up (`MaxDeliver -1`), acknowledges only after the row is written.
+  What cannot become a row (not authentic, or refused by the table for what is in it) is
+  terminated, and stays in the stream for 7 days so it can be looked at (`nats stream get
+  DATAPLANE_COST <sequence>`; the log names the sequence and nothing else about the event).
+
+| Setting | Value | Why |
+|---|---|---|
+| retention | **`Limits`** | **Never `Interest` or `WorkQueue`.** Both discard an event that arrives while no consumer is bound, and the producer-before-consumer order of a deploy would lose it while the stream looked healthy. Retention cannot be changed in place, so both sides refuse a stream that exists with another retention. |
+| storage | file | The ledger must survive the broker restart that often accompanies the incident that made it matter. |
+| `max_age` | 7 days | A consumer down over a weekend loses nothing. It is also the horizon an expired envelope is still accepted within (an envelope's own lifetime is two minutes, so everything that waited in the stream is expired when it is read: authentic-but-stale is accepted through the durable door only, see `VerifyDurable`). |
+| `max_bytes` | 512 MiB, `discard: old` | `Limits` never discards on ack, so a ceiling stops a consumer that is down for a long time filling the broker. About 350,000 events. |
+| duplicate window | 2 minutes | Makes a producer's publish retry harmless. |
+
+The stream is defined twice, with the same values: `usage-ledger-rs/src/stream.rs` (producers) and
+`data-orchestrator-go/internal/cost/stream.go` (consumer). Each creates it on boot when it is
+missing and converges it (raising a limit, never lowering one) when it exists.
+`scripts/check-subjects.sh` fails when the two names differ.
 
 ## Constants
 

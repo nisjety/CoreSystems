@@ -386,6 +386,121 @@ fn retrieval_cost_scope_is_producer_specific_and_claim_bound() {
         .is_err());
 }
 
+/// CR-T10: graph-index signs its usage events with a key of its own, so its issuer, its
+/// key id and its scope are separate from the embedding engine's. The scope may publish
+/// the cost subject and nothing else: a graph-index key that could sign
+/// `documents.indexed` would let a compromised graph service tell the keyword and graph
+/// arms that a document is indexed.
+#[test]
+fn graph_scope_is_producer_specific_and_may_publish_only_usage_events() {
+    let (private, public) = keys();
+    let signer = EventSigner::from_rsa_pem(
+        private.as_bytes(),
+        "service:graph-index-rs",
+        "graph-events-v1",
+        "dataplane-events",
+        "events:graph:publish",
+    )
+    .expect("graph signer");
+    let verifier = EventVerifier::from_rsa_pem(
+        public.as_bytes(),
+        "service:graph-index-rs",
+        "graph-events-v1",
+        "dataplane-events",
+        "events:graph:publish",
+        10,
+    )
+    .expect("graph verifier");
+    let payload = br#"{"schema_version":2,"event_type":"llm","feature":"graph-extraction","org_id":"org-test","zdr":true,"idempotency_key":"usage:graph-extraction:abc"}"#;
+    let envelope = signer
+        .sign("dataplane.cost.ledger", "org-test", None, true, payload)
+        .expect("signed graph usage event");
+    let verified = verifier
+        .verify("dataplane.cost.ledger", &envelope)
+        .expect("verified graph usage event");
+    assert_eq!(verified.claims.org_id, "org-test");
+    assert_eq!(verified.claims.user_id, None, "a usage event names no user");
+    assert!(
+        verified.claims.zdr,
+        "a zero-retention organization's usage is signed as zero-retention, not dropped"
+    );
+
+    for subject in [
+        "dataplane.documents.indexed",
+        "dataplane.documents.created",
+        "dataplane.knowledge.units.created",
+        "dataplane.wiki.version.published",
+    ] {
+        assert!(
+            signer
+                .sign(subject, "org-test", None, false, payload)
+                .is_err(),
+            "the graph scope signed {subject}"
+        );
+        assert!(
+            verifier.verify(subject, &envelope).is_err(),
+            "the graph scope verified {subject}"
+        );
+    }
+}
+
+/// The three cost producers cannot sign for one another: each key, issuer and scope is its
+/// own, and a verifier pinned to one rejects the other two's envelopes.
+#[test]
+fn the_three_usage_producers_cannot_stand_in_for_each_other() {
+    let payload = br#"{"schema_version":2,"event_type":"llm","org_id":"org-test","zdr":false}"#;
+    let producers = [
+        (
+            "service:embedding-engine-rs",
+            "embedding-events-v1",
+            "events:embedding:publish",
+        ),
+        (
+            "service:retrieval-engine-rs",
+            "retrieval-events-v1",
+            "events:retrieval:publish",
+        ),
+        (
+            "service:graph-index-rs",
+            "graph-events-v1",
+            "events:graph:publish",
+        ),
+    ];
+    let keys: Vec<(String, String)> = producers.iter().map(|_| keys()).collect();
+    for (signer_index, (issuer, key_id, scope)) in producers.iter().enumerate() {
+        let signer = EventSigner::from_rsa_pem(
+            keys[signer_index].0.as_bytes(),
+            issuer,
+            key_id,
+            "dataplane-events",
+            scope,
+        )
+        .expect("signer");
+        let envelope = signer
+            .sign("dataplane.cost.ledger", "org-test", None, false, payload)
+            .expect("each producer may sign the cost subject");
+        for (verifier_index, (expected_issuer, expected_key_id, expected_scope)) in
+            producers.iter().enumerate()
+        {
+            let verifier = EventVerifier::from_rsa_pem(
+                keys[verifier_index].1.as_bytes(),
+                expected_issuer,
+                expected_key_id,
+                "dataplane-events",
+                expected_scope,
+                10,
+            )
+            .expect("verifier");
+            let accepted = verifier.verify("dataplane.cost.ledger", &envelope).is_ok();
+            assert_eq!(
+                accepted,
+                signer_index == verifier_index,
+                "producer {issuer} verified by the verifier of {expected_issuer}"
+            );
+        }
+    }
+}
+
 // ── Expired-vs-forged: the distinction that stops silent data loss ──────────
 //
 // A durable queue (max_age 7 days) carries envelopes that live 120s, so a

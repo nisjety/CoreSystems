@@ -19,6 +19,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::model::Community;
+use crate::pipeline::{self, Ports};
 use crate::store::GraphStore;
 
 /// Undirected connected components over `entity_ids` using `edges`, returning
@@ -112,11 +113,48 @@ pub async fn detect_communities(
 /// successive ingests, biggest (most useful) first, instead of stalling one
 /// ingest on a hundred calls. Override with `COMMUNITY_SUMMARY_MAX_PER_RUN`.
 fn max_summaries_per_run() -> i64 {
+    // Boot has already refused a value that does not parse (`Config::validate`), so the fallback
+    // is for a test that never booted: the default.
     std::env::var("COMMUNITY_SUMMARY_MAX_PER_RUN")
         .ok()
-        .and_then(|v| v.trim().parse::<i64>().ok())
-        .filter(|v| *v > 0)
-        .unwrap_or(5)
+        .and_then(|v| parse_max_summaries_per_run(&v).ok())
+        .unwrap_or(DEFAULT_MAX_SUMMARIES_PER_RUN)
+}
+
+/// `COMMUNITY_SUMMARY_MAX_PER_RUN` when it is not set.
+pub(crate) const DEFAULT_MAX_SUMMARIES_PER_RUN: i64 = 5;
+/// The most a deployment may ask for: each summary is a paid call after an ingest.
+pub(crate) const MAX_SUMMARIES_PER_RUN_CEILING: i64 = 1000;
+
+/// Read `COMMUNITY_SUMMARY_MAX_PER_RUN`: blank is the default, otherwise a whole number from 1 to
+/// [`MAX_SUMMARIES_PER_RUN_CEILING`]. Anything else is an error that names the variable: a cap
+/// that quietly became 5 (or 0) is a budget control that does not do what its owner set.
+pub(crate) fn parse_max_summaries_per_run(value: &str) -> anyhow::Result<i64> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Ok(DEFAULT_MAX_SUMMARIES_PER_RUN);
+    }
+    match value.parse::<i64>() {
+        Ok(parsed) if (1..=MAX_SUMMARIES_PER_RUN_CEILING).contains(&parsed) => Ok(parsed),
+        _ => anyhow::bail!(
+            "COMMUNITY_SUMMARY_MAX_PER_RUN must be a whole number from 1 to \
+             {MAX_SUMMARIES_PER_RUN_CEILING}, got `{value}`"
+        ),
+    }
+}
+
+/// Read `COMMUNITY_SUMMARY_ENABLED`: `1`, `true` or `yes` is on; blank, `0`, `false` or `no` is
+/// off (case does not matter). Anything else is an error that names the variable: a switch that
+/// spends a paid call per community must not be left off, or on, by a typo.
+pub(crate) fn parse_summaries_enabled(value: &str) -> anyhow::Result<bool> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" => Ok(true),
+        "" | "0" | "false" | "no" => Ok(false),
+        other => anyhow::bail!(
+            "COMMUNITY_SUMMARY_ENABLED must be 1, true or yes to turn community summaries on, \
+             or blank, 0, false or no to leave them off, got `{other}`"
+        ),
+    }
 }
 
 /// Whether to generate community summaries at all (plan P1-5).
@@ -125,8 +163,10 @@ fn max_summaries_per_run() -> i64 {
 /// an explicit operational opt-in rather than something that switches on with a
 /// deploy. Set `COMMUNITY_SUMMARY_ENABLED=true`.
 fn summaries_enabled() -> bool {
+    // A value `Config::validate` would have refused reads as off: the safe side of a paid switch.
     std::env::var("COMMUNITY_SUMMARY_ENABLED")
-        .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
+        .ok()
+        .and_then(|v| parse_summaries_enabled(&v).ok())
         .unwrap_or(false)
 }
 
@@ -140,52 +180,20 @@ fn summaries_enabled() -> bool {
 /// Best-effort per community: one failure is logged and the others continue, so
 /// a single provider hiccup cannot abort the batch. Returns how many were
 /// written.
-pub async fn summarize_communities(
-    store: &GraphStore,
-    extractor: &crate::extractor::GraphExtractor,
-    org_id: &str,
-) -> anyhow::Result<usize> {
+///
+/// A summary is a paid call like an extraction (design task CR-T12), so it passes the same
+/// gate: the organization's processing policy (`graph_extraction = off` withholds it), its
+/// retention posture under its own bearer reason (`graph-community-summary`: a zero-retention
+/// organization gets no call, and a posture Auth Core could not resolve is a wait), and the
+/// background budget (alert-only by default; `stop` withholds it, `throttle` writes one at a
+/// time). Its calls are metered under their own feature, and its failures are typed: a
+/// refused credential, a throttle or a provider that is down ends the run instead of asking
+/// once per community.
+pub async fn summarize_communities<P: Ports>(ports: &P, org_id: &str) -> anyhow::Result<usize> {
     if !summaries_enabled() {
         return Ok(0);
     }
-    let pending = store
-        .list_communities_needing_summary(org_id, max_summaries_per_run())
-        .await?;
-    if pending.is_empty() {
-        return Ok(0);
-    }
-
-    let mut written = 0usize;
-    for (community_id, labels) in pending {
-        // `zdr: false` — graph entities only exist for non-restrictive content
-        // (the ingest consumer drops restrictive-ZDR events before extraction),
-        // and `summarize_community` still refuses the direct-Azure path if that
-        // ever stops being true.
-        match extractor.summarize_community(&labels, org_id, false).await {
-            Ok(summary) => match store
-                .set_community_summary(org_id, &community_id, &summary)
-                .await
-            {
-                // `false` means another run summarised it first — not an error.
-                Ok(true) => written += 1,
-                Ok(false) => tracing::debug!(
-                    org_id,
-                    community_id,
-                    "community summary already present; skipped"
-                ),
-                Err(e) => {
-                    tracing::warn!(err = %e, org_id, community_id, "store community summary failed")
-                }
-            },
-            Err(e) => {
-                tracing::warn!(err = %e, org_id, community_id, "community summarisation failed")
-            }
-        }
-    }
-    if written > 0 {
-        tracing::info!(org_id, written, "community summaries generated");
-    }
-    Ok(written)
+    pipeline::summarize_communities(ports, org_id, max_summaries_per_run()).await
 }
 
 #[cfg(test)]
@@ -232,5 +240,40 @@ mod tests {
         let entities = s(&["a", "b"]);
         assert!(connected_components(&entities, &[], 2).is_empty());
         assert!(connected_components(&[], &[], 2).is_empty());
+    }
+
+    /// The switch that spends a paid call per community: off by default (blank is what compose
+    /// passes when nothing is set), on only for the three spellings the runtime has always read, and
+    /// a typo is an error rather than a switch left in the wrong position.
+    #[test]
+    fn the_summary_switch_is_off_by_default_and_a_typo_is_refused() {
+        for off in ["", "  ", "0", "false", "FALSE", "no", "No"] {
+            assert!(!parse_summaries_enabled(off).expect(off), "{off:?}");
+        }
+        for on in ["1", "true", "True", "yes", " YES "] {
+            assert!(parse_summaries_enabled(on).expect(on), "{on:?}");
+        }
+        for typo in ["on", "enabled", "ture", "2", "off"] {
+            let error = parse_summaries_enabled(typo).expect_err(typo).to_string();
+            assert!(
+                error.contains("COMMUNITY_SUMMARY_ENABLED"),
+                "{typo}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_summary_cap_is_a_whole_number_in_range_and_never_quietly_five() {
+        assert_eq!(parse_max_summaries_per_run("").expect("blank"), 5);
+        assert_eq!(parse_max_summaries_per_run(" 12 ").expect("12"), 12);
+        assert_eq!(parse_max_summaries_per_run("1").expect("1"), 1);
+        assert_eq!(parse_max_summaries_per_run("1000").expect("ceiling"), 1000);
+        for bad in ["0", "-3", "1001", "five", "2.5"] {
+            let error = parse_max_summaries_per_run(bad).expect_err(bad).to_string();
+            assert!(
+                error.contains("COMMUNITY_SUMMARY_MAX_PER_RUN"),
+                "{bad}: {error}"
+            );
+        }
     }
 }

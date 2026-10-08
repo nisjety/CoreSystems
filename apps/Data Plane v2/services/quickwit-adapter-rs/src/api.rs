@@ -16,6 +16,7 @@ use crate::{
         RebuildIntent,
     },
     jobs::{AdminJobStore, JobError, JobSpec, Submission},
+    parity,
     rebuild::RebuildContext,
 };
 
@@ -53,6 +54,10 @@ pub fn router_with_store(
         .route("/admin/rebuild", post(rebuild_index))
         .route("/admin/rebuild/{job_id}", get(rebuild_status))
         .route("/admin/rebuild/{job_id}/approve", post(approve_rebuild))
+        // Read-only: how far the keyword index is from Postgres (CR-T9a). The contract is
+        // `index-parity-v1`, owned by data-quality-go, and the organization is the bearer's.
+        .route("/admin/index-parity", get(index_parity))
+        .route("/admin/index-parity/documents", get(index_parity_documents))
         .route_layer(middleware::from_fn_with_state(verifier, require_admin_jwt))
         .layer(DefaultBodyLimit::max(16 * 1024));
 
@@ -103,6 +108,59 @@ async fn readyz(State(state): State<ApiState>) -> impl axum::response::IntoRespo
             "checks": { "gdpr_erasure_consumer": erasure.as_str() }
         })),
     )
+}
+
+/// `GET /admin/index-parity`: the keyword-index parity report of the caller's organization
+/// (`parity::CONTRACT`). Read-only, no parameters (an organization in the query string is not
+/// read: the organization is the verified bearer's), scope `data:quality:admin`.
+async fn index_parity(
+    State(state): State<ApiState>,
+    Extension(claims): Extension<crate::auth::AdminClaims>,
+) -> Response {
+    if !claims.has_scope(parity::SCOPE) {
+        return auth_error(AuthError::Forbidden);
+    }
+    match parity::measure(&state.rebuild, &claims.org_id).await {
+        Ok(comparison) => no_store(Json(comparison.report).into_response()),
+        Err(error) => parity_unavailable(&error),
+    }
+}
+
+/// `GET /admin/index-parity/documents`: the documents of the caller's organization whose units
+/// are missing from the index or whose context differs, by id and count, for the operator to
+/// re-announce (`backfill-reannounce --document-id`). The same scope, the same organization, no
+/// content.
+async fn index_parity_documents(
+    State(state): State<ApiState>,
+    Extension(claims): Extension<crate::auth::AdminClaims>,
+) -> Response {
+    if !claims.has_scope(parity::SCOPE) {
+        return auth_error(AuthError::Forbidden);
+    }
+    match parity::measure(&state.rebuild, &claims.org_id).await {
+        Ok(comparison) => no_store(Json(parity::documents_report(&comparison)).into_response()),
+        Err(error) => parity_unavailable(&error),
+    }
+}
+
+/// The measurement could not be taken. The reason is logged and not returned (it can name a
+/// host); the quality service reads any non-200 as `unavailable`, which is never a pass.
+fn parity_unavailable(error: &anyhow::Error) -> Response {
+    tracing::error!(error = %error, "the keyword-index parity could not be measured");
+    error_response(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "index_parity_unavailable",
+        "The keyword index parity could not be measured",
+    )
+}
+
+/// A report is a measurement of a moving thing: never cached.
+fn no_store(mut response: Response) -> Response {
+    response.headers_mut().insert(
+        axum::http::header::CACHE_CONTROL,
+        axum::http::HeaderValue::from_static("no-store"),
+    );
+    response
 }
 
 async fn rebuild_index(

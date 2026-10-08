@@ -149,6 +149,45 @@ legacy ports. Static credentials cannot perform delegated-user/grant mutation.
 Signed v2 Control read delegation is implemented/tested, but this remains source
 evidence rather than functional runtime acceptance.
 
+## 2026-10-06 Contextual retrieval: decided, partly in the tree, nothing deployed
+
+Contextual retrieval (a model-written situating context stored beside each chunk
+and embedded with it) runs on the developer stack, and only because the running
+`embedding-engine` container was given the flag by the git-ignored `.env`: the code
+and compose default is false. The owner ruled on 2026-10-03 that it stays on and is
+made to work. The rework is decided and recorded in the Model Plane decision ledger
+(four entries of 2026-10-03, state `proposed`); the operator procedures are in
+[`docs/contextual-retrieval-runbook.md`](docs/contextual-retrieval-runbook.md); the
+data-protection statements are `docs/compliance/evidence/honest-limits.md` L33 to
+L35. This section states what is true, not what is planned. The numbers were read on
+2026-10-06 (`docs/compliance/evidence/live-reads-contextual-retrieval-2026-10-06.txt`).
+
+| Item | State on 2026-10-06 | Delivered by |
+|---|---|---|
+| On by default, with a boot-time check and a kill-switch reason | Not done. Default false in code and compose, no model default, no variable in `.env.example`. | CR-T13 |
+| Status machine, provenance, coherence hash, `org_processing_policy`, `v_context_coverage` | Migration `20261003130000_context_provenance` is in the tree and not applied; the live table has no `context_status`. Nothing reads the columns yet. | CR-T6, CR-T7, CR-T8 |
+| Generation inside ingest | Inline in the single embedding consumer, best effort, outcome recorded nowhere; a re-embed regenerates and pays again. | CR-T7, CR-T8 |
+| Reconciler, backfill, legacy verification, keyword index parity | Built and tested in the tree, not deployed (after the CR-T6 migration: the embedding-engine image, which carries the reconciler, shipped dark with `CONTEXT_RECONCILER_ENABLED=0`, and the `context-backfill` tool; the quickwit-adapter image, which carries `GET /admin/index-parity` and `/admin/index-parity/documents`; then `SPARSE_INDEX_PARITY_URL` in the data-quality block, which this change did not set). On the stack today only `backfill-reannounce` and `reembed-switch` exist. Parity repair is by named re-announce, not automatic. The budget gate has its own row below (CR-T9b). Runbook sections 5.2 and 5.7. | CR-T9a, CR-T9b |
+| Background LLM budget gate (owner default D-E) | Built and tested in the tree, not deployed: embedding-engine (contextual retrieval, in the stream consumer's pipeline and in the reconciler) and graph-index (CR-T12) read the same `BACKGROUND_BUDGET_*` and the organisation's own `budget_mode` and figure. Alert-only by default, with no figure and no prices built in; `throttle` and `stop` only when an operator sets them (`stop` marks units `skipped_budget` with no provider call, and they are generated again when the budget allows it). The spend is the month's `llm` tokens in `cost_events`, so the gate can enforce only once the usage ledger records (`USAGE_EMIT_ENABLED=1`, CR-T10) and prices are set; before that it alerts that it cannot measure and never stops on a guess. `ctx_budget_exceeded_total` is served on the embedding engine's `/metrics`. The policy API still refuses budget values until its flag is turned on after both images are deployed. Runbook 5.5. | CR-T9b |
+| Organisation zero-retention posture for these jobs | Not read. Tokens carry the fixed posture `persistent`; the summary call sends `zdr: false`. | Control Plane wave, CR-T5, CR-T7 |
+| Metering | None. cost-core holds `model-gateway` rows only; the Data Plane's own table holds rerank and embedding events. DATA-15 in `gap-data.md` was corrected from closed to partial. | CR-T10, CR-T4 |
+| Graph extraction state, direct-Azure backend removed | Built and tested in the tree, not applied and not deployed: migration `20261003150000_graph_extraction_state`, then the graph-index image, then data-quality-go (per-chunk state with backoff and a poison cap, typed errors with the gRPC code in the log, metering, tenant posture, budget gate alert-only, no Azure key or endpoint in the container). Its 22 Rust and 7 Go Postgres-gated tests are run by the CI job `postgres-contract-tests`, not by the author. The live stack of 2026-10-06 still has in-memory suppression, a retry loop was observed on 2026-09-29, and a direct Azure key is present. | CR-T12 |
+| Quality gate | Built and tested in the tree, not run live: a frozen, committed corpus (`scripts/eval-corpus-manifest.json`, 104 documents) and its idempotent ingest (`scripts/eval-ingest-corpus.py`), golden sets built per organisation, coverage and keyword-index parity evidence, a ctx-v2 promotion gate and recorded results (`POST /v1/evals/results`, data-quality-go). Still true on the stack: the two evaluation organisations do not exist (they must be created through the organisation service, OPS-ORG), `quality_eval_runs` is empty, and the paid re-seed waits for the owner's decision OD8. Runbook section 5.12. | CR-T14 |
+| Rerank input with the summary | Not built; the reranker reads the raw chunk. | CR-T15 |
+
+The corpus on the stack: 207 knowledge units, 206 with a summary (all prompt
+version `ctx-v1`) and 1 raw; the dense collection holds 207 points; the keyword
+index holds 52 of the 207 units (51 with the summary field), so 155 units in 138
+live documents are missing from it and every one of them already has its stored
+summary. The repair is a re-announce of named documents, not the rebuild script
+(runbook section 5.7).
+
+Not claimed: that an organisation's zero-retention setting is honoured by these jobs
+(it is not), that their spend is metered, that existing summaries can be purged
+without removing documents (no tool exists), or that the Data Plane has alerts for
+any of this (the optional Prometheus is not running and scrapes none of these
+services).
+
 ## Verification ledger
 
 ### 2026-07-15 final isolated acceptance delta

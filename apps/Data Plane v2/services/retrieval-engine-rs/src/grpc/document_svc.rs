@@ -396,6 +396,7 @@ mod tests {
             acl: EffectiveAcl::allow_all(),
             request_id: "grpc-document-write-regression".into(),
             verified_bearer: None,
+            principal: crate::authz::Principal::User,
         });
         request
     }

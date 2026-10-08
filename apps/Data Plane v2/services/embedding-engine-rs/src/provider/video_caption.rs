@@ -41,11 +41,11 @@
 use std::time::Duration;
 
 use anyhow::Context as _;
+use inference_client_rs::{InferenceError, InferenceTokenClient, Reason};
 use tonic::metadata::MetadataValue;
 use tonic::transport::{Channel, Endpoint};
 use uuid::Uuid;
 
-use super::inference_auth::{InferenceTokenClient, RetentionPosture};
 use super::model_plane;
 use crate::config::Config;
 
@@ -118,24 +118,7 @@ impl VideoDescriber {
         // Strict outside standalone startup for the same reason as
         // `contextualize`: an operator who asked for captions and supplied no
         // credential should learn that at boot.
-        let posture = RetentionPosture::parse(&cfg.model_plane_inference_retention_posture)?;
-        let token_client = if super::standalone_startup() {
-            InferenceTokenClient::new_allow_unconfigured(
-                &cfg.model_plane_inference_token_url,
-                &cfg.model_plane_inference_token_issuer,
-                &cfg.model_plane_inference_service_id,
-                &cfg.model_plane_inference_service_api_key,
-                posture,
-            )?
-        } else {
-            InferenceTokenClient::new(
-                &cfg.model_plane_inference_token_url,
-                &cfg.model_plane_inference_token_issuer,
-                &cfg.model_plane_inference_service_id,
-                &cfg.model_plane_inference_service_api_key,
-                posture,
-            )?
-        };
+        let token_client = super::token_client_from_config(cfg)?;
         let channel = Endpoint::from_shared(cfg.model_plane_ai_core_grpc_url.clone())
             .with_context(|| {
                 format!(
@@ -173,11 +156,16 @@ impl VideoDescriber {
         mime_type: &str,
         frames: usize,
     ) -> anyhow::Result<Option<String>> {
+        // At the moment of the call, from the client's cache. A refusal to issue
+        // keeps its type, so the caller can tell "wait" (posture unresolved) from
+        // "stop" (principal refused) without reading text.
         let bearer = self
             .token_client
-            .mint(org_id)
+            .bearer(org_id, Reason::VideoCaption)
             .await
-            .context("mint inference bearer for video caption")?;
+            .map_err(|error| {
+                anyhow::Error::new(InferenceError::from(error).during("video caption bearer"))
+            })?;
 
         let request = model_plane::v1::AnalyzeImageRequest {
             request_id: Uuid::new_v4().to_string(),
@@ -206,12 +194,12 @@ impl VideoDescriber {
             .analyze_image(req)
             .await
             .map_err(|status| {
-                // Status only, never the body: a provider error can echo the
-                // prompt, and for other calls that would mean echoing content.
-                anyhow::anyhow!(
-                    "model-plane analyze_image failed: {} ({})",
-                    status.code(),
-                    status.message()
+                // Decoded from the code and the provider kind; the message is
+                // carried for the log line only (bounded, one line), never
+                // inspected. A zero-retention or residency refusal comes back
+                // typed: the caller must not retry it into another route.
+                anyhow::Error::new(
+                    InferenceError::from_status(&status).during("model-plane analyze_image"),
                 )
             })?
             .into_inner();
@@ -309,6 +297,39 @@ mod tests {
         assert!(
             err.to_string().contains("VIDEO_CAPTION_MODEL"),
             "unexpected error: {err}"
+        );
+    }
+
+    /// A caption is asked for under its own reason, and a refusal to issue a
+    /// bearer keeps its type so the caller can tell a wait from a failure.
+    #[tokio::test]
+    async fn a_refused_bearer_is_typed_and_names_the_feature() {
+        let (token_url, seen) =
+            crate::provider::test_support::posture_unavailable_auth_core().await;
+        let cfg = Config {
+            video_caption_enabled: true,
+            video_caption_model: "gpt-4o".to_string(),
+            model_plane_inference_token_url: token_url,
+            model_plane_inference_service_api_key: "test-key-0123456789".to_string(),
+            ..minimal_config()
+        };
+        let describer = VideoDescriber::from_config(&cfg)
+            .expect("valid config")
+            .expect("enabled");
+        let error = describer
+            .describe("org-1", vec![0xff, 0xd8], "image/jpeg", 8)
+            .await
+            .expect_err("no bearer, no caption");
+        let typed = error
+            .downcast_ref::<inference_client_rs::InferenceError>()
+            .expect("the failure keeps its type");
+        assert_eq!(
+            typed.failure(),
+            &inference_client_rs::Failure::PostureUnavailable
+        );
+        assert_eq!(
+            crate::provider::test_support::reasons(&seen),
+            ["video-caption"]
         );
     }
 }

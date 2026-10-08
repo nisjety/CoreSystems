@@ -1,0 +1,3 @@
+8a750e8286cc8b6915d03fcf327721c22dbe08eae433457c67e3e5ef2506deea *README.md
+63ccd4865776b72b83cfe5a69ea2d3c12e587257668dead81a26eb16d74b36d7 *response.in-sync.golden.json
+6d6cd86acb3cffd6e78958a860de449525934ebfb3d018cb23da92ee645b742f *response.drift.golden.json

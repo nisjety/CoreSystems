@@ -447,6 +447,9 @@ fn subject_allowed_for_scope(scope: &str, subject: &str) -> bool {
         ),
         "events:wiki:publish" => subject == "dataplane.wiki.version.published",
         "events:retrieval:publish" => subject == "dataplane.cost.ledger",
+        // CR-T10: graph-index's own key. It publishes usage events and nothing else; its
+        // dead letters stay unsigned until they are given a subject here on purpose.
+        "events:graph:publish" => subject == "dataplane.cost.ledger",
         _ => false,
     }
 }

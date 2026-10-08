@@ -1299,3 +1299,75 @@ failure, not a silent false pass.
 itself needs a short-lived, host-specific token from an authenticated GitHub
 session (Settings → Actions → Runners → "New self-hosted runner"). Nothing
 can script or pre-generate that safely.
+
+---
+
+# Addendum — round 12: contextual retrieval as a durable pipeline (audit of 2026-10-03, numbers re-read 2026-10-06)
+
+Written for the contextual retrieval build (design task CR-T16). It changes none of
+the measurements above. It records what the measurements do not cover: whether the
+feature that produced them still works, and is still measurable, on the stack that
+exists today. Decisions: the four entries of 2026-10-03 in
+`apps/Model Plane/docs/decisions/ledger.md`. Operation:
+`docs/contextual-retrieval-runbook.md`. The reads behind every number are in
+`docs/compliance/evidence/live-reads-contextual-retrieval-2026-10-06.txt`.
+
+## What stands
+
+- The measured benefit of the findings section stands for the 1,164-chunk corpus
+  and the 87 judged queries of 2026-08-26: +0.033 to +0.048 nDCG@10 and +0.040 to
+  +0.061 MRR over raw chunks at every fusion weight tested (the contextual
+  organisation's pinned-mix scorecard, the committed baseline, is nDCG@10 0.7732 and
+  MRR 0.7394), exact-identifier queries unchanged.
+- Finding 1 said the feature is on for the deployment through `.env`. That is still
+  the whole reason it is on: the code and compose defaults are false and the file is
+  git-ignored. The owner ruled on 2026-10-03 that it stays on and is made to work, so
+  the default moves into code and a boot-time check; the flag becomes an
+  incident-only kill switch.
+
+## What the measurements did not cover
+
+1. **Whether the live index is contextual at all.** The eval organisations held a
+   fully contextualised corpus. The one live organisation (re-read 2026-10-06) holds
+   207 units, 206 with a stored summary and 1 raw, and the keyword index reaches
+   at most 52 of them (51 with the summary field): 155 units in 138 live documents
+   were never indexed. Contextual BM25 therefore covers about a quarter of the live
+   corpus, and the cause was never recorded. The dense arm is complete (re-read
+   2026-10-06: the dense collection holds 207 points).
+2. **Whether a stored vector matches its stored summary.** The pipeline persists
+   the summary after the vector, best effort, and only a success is written. A
+   failed regeneration leaves the old summary in the keyword indexes beside a raw
+   vector, and nothing records which model, prompt or input produced a summary
+   (`embedding_model` is NULL on all 207 units). The design adds a status machine,
+   provenance and a coherence hash; legacy rows are not declared coherent, they are
+   verified.
+3. **What it costs.** Summaries and entity extraction are paid calls recorded in no
+   ledger (round 11's "cost ledger" covers rerank and embedding events only, and
+   nothing reaches cost-core). The design estimate is about $0.00013 per chunk at
+   gpt-4o-mini prices, about three cents for the live index and about fifteen cents
+   for the eval corpus; it is an estimate until the usage ledger exists.
+4. **Whether it is measurable again.** Round 11 named the blocker: no committed
+   script ingests the corpus. On 2026-10-06 the eval organisations are gone,
+   `quality_eval_runs` is empty, and the throwaway organisations a proof needs have
+   to be provisioned through the real organisation service (the tenant posture
+   refuses unknown organisations). The build adds a committed ingest from a frozen
+   manifest, a baseline made with the per-organisation policy (off against
+   inherit), coverage and parity gates and a persisted result history.
+
+## A correction to the framing of finding 3
+
+Finding 3 measured the reranker's contribution (rr-on against rr-off): +0.0245
+nDCG on the raw corpus and +0.005 on the contextual one. That is the reranker's gain
+shrinking where contextual embeddings already did the ordering; it is not the gain of
+contextual retrieval with the reranker on, which finding 1 reports separately and
+which held (+0.028 MRR in the pair). Later summaries that quote "+0.005 with rerank
+on" as contextual retrieval's gain misread this section. The reranker still reads the
+raw chunk text and never the summary. Whether it should is the single measured change
+the build ships behind a flag that stays off until the evaluation shows a gain beyond
+the rerank noise (about ±0.04 nDCG per run, three runs per cell).
+
+## Not re-measured
+
+Nothing above was re-run. The 2026-08-26 numbers were not reproduced, and no model
+was called to write this addendum. The first re-measurement is the live proof named
+in the decision ledger entry, after the pipeline is deployed.

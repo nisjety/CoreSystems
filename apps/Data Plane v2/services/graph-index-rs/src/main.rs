@@ -1,5 +1,6 @@
 mod api;
 mod auth;
+mod budget;
 mod community;
 mod config;
 mod contradiction;
@@ -7,12 +8,17 @@ mod extractor;
 mod gdpr;
 mod gdpr_nats;
 mod grpc;
-mod inference_auth;
 mod model;
 mod neo4j;
+mod pipeline;
 mod reconcile;
+mod state;
+mod state_store;
 mod store;
 mod stream;
+#[cfg(test)]
+mod testing;
+mod usage;
 
 use std::sync::Arc;
 
@@ -39,7 +45,14 @@ async fn main() -> anyhow::Result<()> {
         .await?;
 
     let store = Arc::new(store::GraphStore::new(pool.clone()));
-    let extractor = Arc::new(extractor::GraphExtractor::new(&cfg)?);
+    // Boot-time check (CR-T12): the state machine reads and writes graph_extraction_state, and
+    // the gates read org_processing_policy and the usage ledger's columns. Against a database
+    // without them the first chunk would fail on a missing relation and be counted against its
+    // poison cap, so refuse to start, naming the migration to apply.
+    store.verify_state_schema().await?;
+    // Validates the extraction backend (the direct-Azure one is gone: asking for it is an error)
+    // and the credential; the usage ledger is attached below, once the event runtime is up.
+    let extractor = extractor::GraphExtractor::new(&cfg)?;
 
     // Neo4j graph read-model (Phase 2). Fail closed on a missing secret when
     // enabled; degrade (not crash) on a connectivity/schema error so the
@@ -164,6 +177,46 @@ async fn main() -> anyhow::Result<()> {
         None
     };
 
+    // The usage ledger (CR-T10): graph-index's signer and the durable DATAPLANE_COST stream.
+    // Off unless USAGE_EMIT_ENABLED=1, and then the service refuses to start unless it can sign
+    // and the stream is there. What graph-index records with it (CR-T12): one event per paid
+    // call, feature graph-extraction for a chunk and graph-community-summary for a community.
+    let usage_ledger = usage::start(
+        &cfg,
+        signed_events_enabled,
+        event_runtime.as_ref().map(|runtime| &runtime.2),
+    )
+    .await?;
+    tracing::info!(
+        usage_ledger = usage_ledger.is_some(),
+        "graph usage ledger state"
+    );
+
+    // The graph extraction state machine (CR-T12): the poison cap, the background budget and
+    // the ledger the extractor meters into, with the NATS connection the dead letters go out on
+    // (the same one the signed event runtime holds, whatever its verifier mode).
+    let extractor = Arc::new(
+        extractor
+            .with_ledger(usage_ledger.map(|ledger| ledger as Arc<dyn usage_ledger_rs::LedgerSink>)),
+    );
+    let settings = pipeline::Settings::from_config(&cfg)?;
+    tracing::info!(
+        prompt_version = state::PROMPT_VERSION,
+        max_attempts = settings.max_attempts,
+        lease_secs = settings.lease.as_secs(),
+        budget_mode = settings.budget.mode.as_str(),
+        budget_monthly_usd = settings.budget.monthly_usd,
+        budget_prices_configured = settings.budget.price.is_some(),
+        "graph extraction state machine"
+    );
+    let live = Arc::new(pipeline::Live {
+        store: store.clone(),
+        extractor,
+        neo4j: neo4j.clone(),
+        nats: event_runtime.as_ref().map(|runtime| runtime.2.clone()),
+        settings,
+    });
+
     let graph_limits = api::GraphLimits {
         max_hops: cfg.graph_max_hops,
         max_entities: cfg.graph_traverse_max_entities as i64,
@@ -224,26 +277,15 @@ async fn main() -> anyhow::Result<()> {
     // that can expire. See `reconcile` for why the alternatives were rejected.
     let reconcile_task = reconcile::run(
         pool.clone(),
-        store.clone(),
-        extractor.clone(),
-        neo4j.clone(),
+        live.clone(),
         reconcile::ReconcileConfig::from_env(),
     );
 
-    let consumer_neo4j = neo4j.clone();
     let community_min_size = cfg.community_min_size;
     let consumer_task = async move {
         match event_runtime {
-            Some((consumer, cleanup_consumer, nats, verifier, cleanup_verifier, _)) => {
-                let extraction = stream::run_consumer(
-                    consumer,
-                    store.clone(),
-                    extractor,
-                    nats,
-                    verifier,
-                    consumer_neo4j,
-                    community_min_size,
-                );
+            Some((consumer, cleanup_consumer, _nats, verifier, cleanup_verifier, _)) => {
+                let extraction = stream::run_consumer(consumer, live, verifier, community_min_size);
                 let cleanup =
                     stream::run_cleanup_consumer(cleanup_consumer, store, cleanup_verifier);
                 tokio::try_join!(extraction, cleanup).map(|_| ())

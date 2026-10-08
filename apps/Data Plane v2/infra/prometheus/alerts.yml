@@ -124,3 +124,18 @@ groups:
         annotations:
           summary: "Data Plane v2 service down"
           description: "{{ $labels.instance }} is not responding to scrapes"
+
+      # ── Background LLM budget (CR-T9b) ────────────────────────────
+      # Owner default D-E: alert only. The budget gate counts every organization it finds over its
+      # budget (at most once per organization per 30-second spend reading), in the mode that
+      # applied: alert_only keeps working, throttle works one chunk at a time, stop withholds
+      # contexts (units are skipped_budget). The log line alert=ctx_budget_exceeded names the
+      # organization and the two figures. No figure is built in: with none set nothing is counted.
+      - alert: BackgroundLlmBudgetExceeded
+        expr: increase(ctx_budget_exceeded_total[15m]) > 0
+        labels:
+          severity: warning
+          service: embedding-engine-rs
+        annotations:
+          summary: "An organization is over its background LLM budget"
+          description: "The budget gate found an organization over its budget in {{ $labels.mode }} mode. See the embedding-engine log line alert=ctx_budget_exceeded for the organization and the figures, and runbook 5.5."

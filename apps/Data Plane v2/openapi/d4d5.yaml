@@ -104,21 +104,83 @@ components:
         w_bm25:  { type: number, format: float, minimum: 0, maximum: 1 }
         w_graph: { type: number, format: float, minimum: 0, maximum: 1 }
         w_wiki:  { type: number, format: float, minimum: 0, maximum: 1 }
-        rerank:  { type: boolean }
+        rerank:
+          type: boolean
+          default: true
+          description: |
+            `false` skips the cross-encoder rerank for this request: no
+            provider call is made, the fused order is served and the
+            reranker-score confidence gate does not run. Absent means `true`.
+            A restrictive `zdr_mode` or a strict `sovereign_required` skips the
+            rerank whatever this says.
 
     RetrievalRequest:
       type: object
       required: [org_id, query]
+      description: |
+        Wire contract `retrieve-v1`. The request body, the response body and the
+        accepted `zdr_mode` values are pinned by sha256-pinned goldens in
+        `services/retrieval-engine-rs/tests/fixtures/contracts/retrieve-v1/`
+        (checked by `tests/retrieve_contract.rs`). Non-user callers (Quarry's
+        vector leg, `principal_type=service`) vendor that directory byte for
+        byte. Unknown JSON keys are ignored, not rejected: a field that is not
+        listed here does nothing.
       properties:
         org_id:                 { type: string, maxLength: 128 }
         query:                  { type: string, maxLength: 8192 }
         top_k:                  { type: integer, minimum: 1, maximum: 1000 }
         top_n:                  { type: integer, minimum: 1, maximum: 100 }
         filters:                { $ref: '#/components/schemas/RetrievalFilters' }
-        user_id:                { type: string, nullable: true }
+        user_id:
+          type: string
+          nullable: true
+          readOnly: true
+          description: |
+            Never read from the body. The viewer is set by the auth layer from
+            the verified principal; a service principal has none.
         query_expansion:        { type: string, nullable: true }
         reranker_model:         { type: string, nullable: true }
-        zdr_mode:               { type: string, enum: [disabled, reject, ephemeral] }
+        zdr_mode:
+          type: string
+          enum: [disabled, reject, ephemeral]
+          default: disabled
+          description: |
+            Zero-data-retention posture of this retrieval. The match is EXACT
+            and lowercase: any other spelling (`off`, `on`, `Disabled`, an empty
+            string, ...) fails body deserialization with HTTP 422 before the
+            pipeline runs, and there is no alias. Absent means `disabled`.
+            `disabled` - no restriction.
+            `reject` - no retaining egress (no query embedding or rerank
+            through a retaining provider), documents classified `restricted`
+            are filtered out, the retrieval result cache is not used, the
+            trace is persisted.
+            `ephemeral` - no retaining egress, the retrieval result cache is
+            not used, no trace is persisted; documents classified `restricted`
+            are NOT filtered out (only `reject` does that).
+            A signed `zdr` claim only ever tightens this (to `ephemeral`; an
+            explicit `reject` stays `reject`); it can never be relaxed by the body.
+            The signed claim is the caller's REGISTERED retention posture, not the
+            organisation's: a service principal registered as `persistent` is
+            signed `zdr:false`, so for that caller the engine enforces exactly what
+            the body says and knows nothing of the org's own ZDR setting (only a
+            `tenant` registration carries the org setting into the claim). A
+            caller that serves a zero-retention organisation must itself send
+            `reject` or `ephemeral`, never `disabled`.
+            Caution: the configured direct embedding backends (Cohere Embed v4,
+            Azure OpenAI) refuse any restrictive posture and fail closed, so a
+            request that is both restrictive and dense-routed is answered with an
+            HTTP 5xx, not with a lexical-only result. Send `mode_mix.w_dense: 0`
+            to ask for the lexical arm alone, or do not call.
+        sovereign_required:
+          type: boolean
+          description: |
+            Sovereign-infrastructure requirement. ABSENT MEANS STRICT (`true`)
+            inside the engine. Azure-hosted providers (the Cohere Embed v4 query
+            embedding, Cohere rerank) can never satisfy it, so with the Cohere
+            Embed v4 backend deployed today a strict, dense-routed request
+            fails closed like a restrictive `zdr_mode` (HTTP 5xx). A caller
+            that wants the dense arm must send `false` explicitly. A signed
+            `sovereign=true` claim wins over a body `false`.
         context_budget_tokens:  { type: integer, minimum: 1 }
         context_format:         { type: string, enum: [json, markdown, text] }
         mode_mix:               { $ref: '#/components/schemas/ModeMixWeights' }
@@ -126,6 +188,10 @@ components:
     ScoredCandidate:
       type: object
       required: [knowledge_id, document_id, text, final_score]
+      description: |
+        Exactly these keys are serialized. There is NO `score` and NO `url`:
+        the order of `candidates` is the rank, and a hit's page address comes
+        from the matching entry of `sources` (join on `document_id`).
       properties:
         knowledge_id: { type: string }
         document_id:  { type: string }
@@ -139,11 +205,27 @@ components:
     SourceRef:
       type: object
       required: [document_id, title]
+      description: |
+        One citation. HTTP only: the gRPC `Source` message (retrieval_v2.proto)
+        is an older shape and deliberately has no `url`, so HTTP and gRPC
+        responses differ by this additive field.
       properties:
         document_id: { type: string }
         title:       { type: string }
         source:      { type: string }
         type:        { type: string }
+        url:
+          type: string
+          format: uri
+          maxLength: 2048
+          description: |
+            Additive. Where the document can be opened. Present ONLY for
+            documents whose `source` is `quarry` (a crawled page, from its
+            `metadata.url`) and only when that value is a plain `http(s)` URL
+            with a host, without credentials, whitespace or control characters.
+            Omitted (never `null`) for every other source, for wiki pages and
+            for a Quarry document without a usable URL; connector metadata (for
+            example SharePoint web URLs) is never exposed through it.
 
     ContextFact:
       type: object
@@ -167,6 +249,9 @@ components:
     RetrievalResponse:
       type: object
       required: [candidates, sources, query, org_id, trace_id, zdr_mode]
+      description: |
+        Wire contract `retrieve-v1` (see `RetrievalRequest`). Additive changes
+        only: a consumer reads the keys it needs and tolerates new ones.
       properties:
         candidates:           { type: array, items: { $ref: '#/components/schemas/ScoredCandidate' } }
         sources:              { type: array, items: { $ref: '#/components/schemas/SourceRef' } }
@@ -321,6 +406,125 @@ components:
         node_count: { type: integer }
         edge_count: { type: integer }
 
+    # ─── Contextual retrieval: processing policy, coverage, gates (data-quality-go, CR-T11) ───
+    ProcessingPolicyRequest:
+      type: object
+      description: |
+        Replaces the WHOLE policy of the caller's organization. The three switches are required:
+        an omitted field must never lift a hold by accident. All switches at their defaults
+        (`inherit`, `inherit`, `inherit`, no pin, no budget figure) is a reset: the row is removed,
+        because a row exists only because an operator set something. Unknown fields are refused.
+      required: [contextual_retrieval, graph_extraction, budget_mode]
+      properties:
+        contextual_retrieval:
+          type: string
+          enum: [inherit, on, off]
+          description: |
+            `off` stops context generation for the organization: zero provider calls, its units get
+            the status `skipped_policy`, contexts they already have stay. `on` and `inherit` generate;
+            `on` does NOT override the global kill switch (`CONTEXTUAL_RETRIEVAL_ENABLED=false`).
+            Requires `reason` when `off`.
+        graph_extraction:
+          type: string
+          enum: [inherit, on, off]
+          description: |
+            NOT ENFORCED YET: graph-index reads it from CR-T12. Until then only `inherit` is accepted
+            (400 otherwise), because a stored `off` that nothing honours would be a silent no-op.
+            Requires `reason` when `off`.
+        context_prompt_version:
+          type: string
+          nullable: true
+          enum: [ctx-v1, ctx-v2]
+          description: The organization's prompt version (the canary of a prompt rollout). `null` keeps the service default.
+        budget_mode:
+          type: string
+          enum: [inherit, alert_only, throttle, stop]
+          description: |
+            NOT ENFORCED YET: the budget gate is CR-T9b. Until then only `inherit` is accepted (400
+            otherwise), because a stored value that nothing reads would be a silent no-op.
+            `alert_only` will be the system default (exceeding a budget alerts and does not stop
+            work); `stop` withholds work and will require `reason`.
+        monthly_budget_usd:
+          type: number
+          nullable: true
+          minimum: 0
+          maximum: 1000000000
+          description: NOT ENFORCED YET (CR-T9b). Until then only `null` is accepted.
+        reason:
+          type: string
+          nullable: true
+          maxLength: 500
+          description: Plain text on one line. Required when a feature is `off` or `budget_mode` is `stop`. Stored and audited.
+
+    ProcessingPolicyView:
+      type: object
+      properties:
+        contextual_retrieval:    { type: string, enum: [inherit, on, off] }
+        graph_extraction:        { type: string, enum: [inherit, on, off] }
+        context_prompt_version:  { type: string, nullable: true }
+        budget_mode:             { type: string, enum: [inherit, alert_only, throttle, stop] }
+        monthly_budget_usd:      { type: number, nullable: true }
+        reason:                  { type: string, nullable: true }
+        source:                  { type: string, enum: [policy, default], description: '`default` means the organization has no row (the system default, which is on).' }
+        updated_by:              { type: string, nullable: true, description: The operator service principal that last changed it; null for the default. }
+        updated_at:              { type: string, format: date-time, nullable: true }
+
+    ProcessingPolicyResponse:
+      type: object
+      properties:
+        org_id:    { type: string }
+        policy:    { $ref: '#/components/schemas/ProcessingPolicyView' }
+        effective:
+          type: object
+          properties:
+            contextual_retrieval: { type: string, enum: ['on', 'off'] }
+            graph_extraction:     { type: string, enum: ['on', 'off', deployment_default] }
+        note:      { type: string }
+        action:    { type: string, enum: [set, reset], description: PUT only. }
+        previous:  { $ref: '#/components/schemas/ProcessingPolicyView', description: PUT only; what the change replaced. }
+
+    ContextCoverageCounts:
+      type: object
+      description: |
+        One row of `v_context_coverage`. Every count is over ELIGIBLE units (embedding done, document
+        not deleted, classification internal, public or sensitive: the population the keyword index
+        also uses). The statuses partition `eligible`.
+      properties:
+        eligible:         { type: integer }
+        ready:            { type: integer }
+        legacy:           { type: integer, description: A context of unknown provenance; eligible but not ready until the verification pass runs. }
+        pending:          { type: integer }
+        skipped_zdr:      { type: integer }
+        skipped_policy:   { type: integer }
+        skipped_budget:   { type: integer }
+        failed_transient: { type: integer }
+        failed_permanent: { type: integer }
+        status_unknown:   { type: integer }
+        vector_incoherent: { type: integer, description: '`ready` units whose vector was not built from the stored context.' }
+        ready_unverified: { type: integer, description: '`ready` units with no recorded vector hash.' }
+        excluded_by_classification: { type: integer, description: "Units of restricted documents: never sent to a provider, so out of scope." }
+
+    ContextCoverageResponse:
+      type: object
+      properties:
+        org_id: { type: string }
+        counts: { $ref: '#/components/schemas/ContextCoverageCounts' }
+        policy:
+          type: object
+          properties:
+            contextual_retrieval: { type: string, enum: [inherit, on, off] }
+            source:               { type: string, enum: [policy, default] }
+        evaluation:
+          type: object
+          description: The judgement the `contextual_coverage_ok` release gate makes of the counts.
+          properties:
+            status:            { type: string, enum: [passed, failed, skipped_policy] }
+            ready_trusted:     { type: integer, description: 'ready minus ready_unverified minus vector_incoherent.' }
+            denominator:       { type: integer, description: eligible minus skipped_zdr. }
+            coverage_percent:  { type: number, nullable: true }
+            threshold_percent: { type: number, description: CONTEXT_COVERAGE_THRESHOLD_PERCENT (default 99). }
+            message:           { type: string }
+
 # ─── Paths ─────────────────────────────────────────────────────────────────
 paths:
   # ── Retrieval ─────────────────────────────────────────────────────────
@@ -342,6 +546,7 @@ paths:
               schema: { $ref: '#/components/schemas/RetrievalResponse' }
         '400': { description: bad request, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
         '401': { description: unauthorized }
+        '422': { description: 'body is not a valid RetrievalRequest, for example an unknown zdr_mode such as "off" (rejected by the JSON extractor, the pipeline never runs)' }
 
   /v1/retrieve/hybrid:
     post:
@@ -611,10 +816,110 @@ paths:
   /v1/evals/retrieval: { post: { summary: Run retrieval eval, tags: [quality], responses: { '200': { description: OK } } } }
   /v1/evals/retrieval/{evalID}: { get: { summary: Get eval result, tags: [quality], responses: { '200': { description: OK } } } }
   /v1/evals/compare: { post: { summary: A/B compare two strategies, tags: [quality], responses: { '200': { description: OK } } } }
+  /v1/evals/results:
+    post:
+      summary: Record the summary of a retrieval-quality run measured outside the service (operator-only)
+      tags: [quality]
+      description: |
+        CR-T14. The retrieval-quality harness (`scripts/eval-gate.py --records-out`, sent by
+        `python3 scripts/eval-service.py record`) stores one summary per gated cell, and one per promotion
+        verdict, in `quality_eval_runs`, under the strategy `harness:<cell>`, so that a regression is
+        a query: `SELECT ... FROM quality_eval_runs WHERE strategy LIKE 'harness:%'`. Read one back
+        with `GET /v1/evals/retrieval/{evalID}`.
+
+        Requires scope `data:quality:admin` AND a verified service principal (an organization's own
+        admin is refused with 403 `operator_only`: history that a promotion decision reads is not a
+        customer setting). The organization is the verified token's; a body that names one is refused.
+        The `Idempotency-Key` header is required (8 to 120 characters). A replay with the same key and
+        content answers 200 with the stored run; the same key with other content answers 409
+        `idempotency_conflict`: history is immutable. The body is the wire contract
+        `harness-record-v1` (a summary of at most 64 KiB, never the per-query rows), pinned by
+        `testdata/harness-record-v1/` here and `scripts/tests/fixtures/harness-record-v1/` on the
+        producer side.
+      requestBody:
+        required: true
+        content: { application/json: { schema: { type: object, required: [strategy, corpus, scorecard], additionalProperties: false } } }
+      responses:
+        '201': { description: Recorded }
+        '200': { description: A replay of a record that is already stored }
+        '400': { description: "Not a valid record (`invalid_record`, with the problems) or a missing or malformed `Idempotency-Key` (`invalid_idempotency_key`)" }
+        '403': { description: "Missing scope, or not an operator service principal (`operator_only`)" }
+        '409': { description: "The key is bound to a different record (`idempotency_conflict`)" }
+        '413': { description: "More than 64 KiB (`record_too_large`)" }
+        '503': { description: "The results store is not configured (`results_store_unavailable`)" }
   /v1/quality/trust: { post: { summary: Score trust, tags: [quality], responses: { '200': { description: OK } } } }
-  /v1/quality/gates: { get: { summary: Release gates check, tags: [quality], responses: { '200': { description: OK } } } }
+  /v1/quality/gates:
+    get:
+      summary: Release gates check
+      tags: [quality]
+      description: |
+        Scope `data:quality:admin`; the organization is the verified token's. 200 when every gate
+        passes, 412 when any does not. A gate that can be unable to judge carries `status`:
+        `passed`, `failed`, `skipped_policy` (passed because an operator policy switched the feature
+        off for the organization, said out loud) or `unavailable` (the evidence could not be read:
+        never a pass, so the report fails).
+
+        `contextual_coverage_ok`: the share of eligible units that have a verified context is at
+        least `CONTEXT_COVERAGE_THRESHOLD_PERCENT` (default 99). `legacy` units count as eligible but
+        not ready until the verification pass runs; `skipped_zdr` units leave the denominator; an
+        organization whose policy is `off` passes with status `skipped_policy`.
+
+        `sparse_index_in_sync`: the keyword index holds exactly the eligible units, each with its
+        context where Postgres has one. It reads the parity endpoint of quickwit-adapter-rs
+        (`SPARSE_INDEX_PARITY_URL`, contract `index-parity-v1`, CR-T9a); until that endpoint exists
+        and is configured the gate is `unavailable`.
+      responses:
+        '200': { description: Every gate passed }
+        '412': { description: At least one gate failed or was unavailable }
+  /v1/quality/context-coverage:
+    get:
+      summary: Contextual-retrieval coverage of the caller's organization
+      tags: [quality]
+      description: |
+        Scope `data:quality:admin`; the organization is the verified token's (there is no org
+        parameter). Backed by `v_context_coverage`. `503 coverage_unavailable` when the
+        context-provenance migration is not applied to the database.
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/ContextCoverageResponse' } } } }
+        '503': { description: The coverage view does not exist in this database }
   /v1/quality/lint:  { get: { summary: Knowledge lint (orphan/stale/weak-citation), tags: [quality], responses: { '200': { description: OK } } } }
   /v1/cost/summary:  { get: { summary: Cost ledger summary, tags: [quality], responses: { '200': { description: OK } } } }
+  /v1/admin/orgs/{org}/processing-policy:
+    parameters:
+      - { name: org, in: path, required: true, schema: { type: string, maxLength: 128, pattern: '^[A-Za-z0-9][A-Za-z0-9_.:\-]*$' } }
+    get:
+      summary: Read the organization's processing policy
+      tags: [admin, quality]
+      description: |
+        Scope `data:quality:admin`. `{org}` must equal the verified token's organization (403
+        `tenant_mismatch` otherwise); a token of one organization cannot read another's policy. An
+        organization with no row reads as the system default (`source: default`, which is on).
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/ProcessingPolicyResponse' } } } }
+        '400': { description: "The organization id is not valid (`invalid_org`)" }
+        '403': { description: "Missing scope, or `{org}` is not the token's organization (`tenant_mismatch`)" }
+        '503': { description: "The policy table is not migrated (`policy_store_unavailable`)" }
+    put:
+      summary: Replace the organization's processing policy (operator-only, audited)
+      tags: [admin, quality]
+      description: |
+        An OPERATOR control, not a customer setting. Requires scope `data:quality:admin` AND a verified
+        service principal: an organization's own owner or admin also carries the scope in an
+        interactive token and is refused (403 `operator_only`). `{org}` must equal the token's
+        organization (403 `tenant_mismatch` otherwise: a cross-organization write is refused). The
+        change and its audit row (`admin_audit_log`, action `org_processing_policy.set` or `.reset`)
+        are one transaction. `off` and `budget_mode: stop` require a `reason`. The embedding engine
+        applies the change within 30 seconds (its policy cache); contexts a unit already has stay.
+        Whether `off` may be used on customer organizations is an open owner decision
+        (OD-PER-ORG-OFF): until it is ruled it is for evaluation baseline organizations and incidents.
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: '#/components/schemas/ProcessingPolicyRequest' } } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/ProcessingPolicyResponse' } } } }
+        '400': { description: "Invalid organization id or body (`invalid_org`, `invalid_request`)" }
+        '403': { description: "Missing scope, not an operator service principal (`operator_only`), or another organization (`tenant_mismatch`)" }
+        '503': { description: "The policy table is not migrated (`policy_store_unavailable`)" }
 
 tags:
   - { name: retrieval, description: Retrieval endpoints (Rust, port 8004) }

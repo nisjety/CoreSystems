@@ -754,30 +754,59 @@ services:
       MODEL_PLANE_INFERENCE_TOKEN_ISSUER: ${AUTH_CORE_ISSUER:-http://auth-core:3011/api/convex-auth}
       MODEL_PLANE_INFERENCE_SERVICE_ID: ${MODEL_PLANE_EMBEDDING_INFERENCE_SERVICE_ID:-embedding-engine}
       MODEL_PLANE_INFERENCE_SERVICE_API_KEY: ${MODEL_PLANE_EMBEDDING_INFERENCE_SERVICE_API_KEY:-}
-      # Must equal this principal's retentionByAudience entry for
-      # inference-core in PLANE_SERVICE_PRINCIPALS_JSON.
+      # persistent | zdr | tenant: the posture this client asserts on its token.
+      # persistent and zdr must equal this principal's retentionByAudience entry
+      # for inference-core in the principal registry. tenant accepts either: the
+      # token's zdr is the ORGANIZATION's own setting, resolved by Auth Core at the
+      # mint (60 s lifetime, no token when the posture cannot be resolved). Ship
+      # the client, set this to tenant, then change the registry; never the other
+      # way round. An unknown value stops the service at startup, and
+      # `make cross-plane-env` checks it. (graph-index has its own variable.)
       MODEL_PLANE_INFERENCE_RETENTION_POSTURE: ${MODEL_PLANE_EMBEDDING_INFERENCE_RETENTION_POSTURE:-persistent}
       # Contextual Retrieval (Anthropic, 2024) — prepend LLM-generated
       # situating context to each chunk BEFORE embedding, so a chunk whose
       # subject only appears elsewhere in the document is still findable.
       # Reported to cut retrieval failures ~35% for contextual embeddings alone.
       #
-      # OFF by default, and that default is the cost gate, not caution: enabling
-      # this spends ONE inference call per chunk on every first-time embed, which
-      # for a large first ingest is a real and unbounded per-tenant bill. Turn it
-      # on deliberately, per environment.
+      # ON by default, and kept on (owner ruling of 2026-10-03). The cost is bounded and
+      # metered, not avoided: contexts are generated inline within a time box (CONTEXT_INLINE_*)
+      # and otherwise by the reconciler, within its caps and behind its circuit breaker
+      # (CONTEXT_RECONCILER_*), and every provider call is a usage event once the ledger is on
+      # (USAGE_EMIT_ENABLED). Every variable below has a default, so a deployment whose
+      # environment says nothing about them generates contexts: the git-ignored .env is no
+      # longer what keeps the feature on. Each one is documented in .env.example.
+      #
+      # CONTEXTUAL_RETRIEVAL_ENABLED=false is the INCIDENT KILL SWITCH, for the case in which
+      # content must stop going to the provider (a confirmed posture failure, a provider
+      # incident, a legal instruction), never for load or cost. The service refuses to start
+      # with it off unless CONTEXT_RETRIEVAL_KILL_SWITCH_REASON says why (8 to 240 characters,
+      # one line); the reason is logged at startup and reported by /readyz. It takes the model
+      # away and removes nothing: stored contexts stay, and the reconciler's repairs go on.
+      # An empty value of the switch is the default (on), never off.
       #
       # Restricted (ZDR) documents are never contextualized — their text must
       # not reach a model provider — and any failure falls back to embedding the
       # raw chunk, so an inference outage degrades quality without failing an
-      # ingest. The embedded text changes; the stored/displayed chunk does not.
-      # Requires the migration adding knowledge_units.contextualized_text.
-      CONTEXTUAL_RETRIEVAL_ENABLED: ${CONTEXTUAL_RETRIEVAL_ENABLED:-false}
-      # Required when enabled — no default, so the model (and therefore the
-      # cost) is always an explicit choice. A small fast model is the right fit:
-      # the task is one or two situating sentences, not reasoning.
-      CONTEXTUAL_RETRIEVAL_MODEL: ${CONTEXTUAL_RETRIEVAL_MODEL:-}
-      CONTEXTUAL_RETRIEVAL_PROVIDER_HINT: ${CONTEXTUAL_RETRIEVAL_PROVIDER_HINT:-}
+      # ingest. The embedded text changes; the stored/displayed chunk does not
+      # (the context is stored alone, in knowledge_units.chunk_context).
+      CONTEXTUAL_RETRIEVAL_ENABLED: ${CONTEXTUAL_RETRIEVAL_ENABLED:-true}
+      CONTEXT_RETRIEVAL_KILL_SWITCH_REASON: ${CONTEXT_RETRIEVAL_KILL_SWITCH_REASON:-}
+      # The model is the Azure deployment inference-core serves, always named: the shared
+      # gpt-4o-mini deployment by default. A dedicated background deployment alias (an operator
+      # action on inference-core's catalog) is another value of this one variable; until it
+      # exists the caps, the retry-after and the circuit breaker below are what protect chat's
+      # share of the shared deployment. A small fast model is the right fit: the task is one or
+      # two situating sentences, not reasoning.
+      CONTEXTUAL_RETRIEVAL_MODEL: ${CONTEXTUAL_RETRIEVAL_MODEL:-gpt-4o-mini}
+      # The route is pinned and so is the residency floor: an empty value takes these, never
+      # "any provider" or "no floor" (the floor is only as good as inference-core's
+      # AZURE_OPENAI_REGION). The prompt is ctx-v1, the one every stored context came from;
+      # ctx-v2 ships only through the evaluation gate. A document up to WINDOW_CHARS is read
+      # whole, a longer one in overlapping sections.
+      CONTEXTUAL_RETRIEVAL_PROVIDER_HINT: ${CONTEXTUAL_RETRIEVAL_PROVIDER_HINT:-azure-openai}
+      CONTEXTUAL_RETRIEVAL_MIN_RESIDENCY: ${CONTEXTUAL_RETRIEVAL_MIN_RESIDENCY:-eu}
+      CONTEXTUAL_RETRIEVAL_PROMPT_VERSION: ${CONTEXTUAL_RETRIEVAL_PROMPT_VERSION:-ctx-v1}
+      CONTEXTUAL_RETRIEVAL_WINDOW_CHARS: ${CONTEXTUAL_RETRIEVAL_WINDOW_CHARS:-32000}
       # Prompt-side cap on document text (~48k chars ≈ 12k tokens). Stops one
       # oversized upload from exceeding the context window or costing hundreds
       # of times a normal document.
@@ -796,6 +825,17 @@ services:
       # Retry-After this deployment returns.
       CONTEXTUAL_RETRIEVAL_RETRY_ATTEMPTS: ${CONTEXTUAL_RETRIEVAL_RETRY_ATTEMPTS:-4}
       CONTEXTUAL_RETRIEVAL_RETRY_BASE_MS: ${CONTEXTUAL_RETRIEVAL_RETRY_BASE_MS:-2000}
+      # How much of one batch's time may go to generating contexts inline, in milliseconds: a
+      # chunk not finished by then is embedded raw, left pending, and filled by the reconciler
+      # (0 makes all generation asynchronous). At most 30000, half of the 60 s ack wait of the
+      # consumer, because a batch that runs past it is redelivered and its contexts are paid for
+      # twice. A document's share never exceeds the batch's, and DOCUMENT_CONCURRENCY documents
+      # of one batch run at once, so the most provider calls one batch has in flight is that
+      # times CONTEXTUAL_RETRIEVAL_CONCURRENCY. Raise them with the dedicated deployment alias,
+      # not before.
+      CONTEXT_INLINE_BUDGET_MS: ${CONTEXT_INLINE_BUDGET_MS:-20000}
+      CONTEXT_INLINE_DOCUMENT_BUDGET_MS: ${CONTEXT_INLINE_DOCUMENT_BUDGET_MS:-8000}
+      CONTEXT_INLINE_DOCUMENT_CONCURRENCY: ${CONTEXT_INLINE_DOCUMENT_CONCURRENCY:-2}
       # Caption-to-text for video — the ONLY way motion and ordering become
       # retrievable. No video embedding tower distinguishes a video from its own
       # reverse: measured cos 1.000000 locally for SigLIP 2 and X-CLIP, and on
@@ -863,11 +903,74 @@ services:
       # `embedding-engine-rs`). The old `embedding_engine_rs=info` matched nothing →
       # silent empty logs. (Code default in main.rs has the same wrong name — fix on
       # next rebuild; this compose value overrides it at runtime.)
-      RUST_LOG: ${RUST_LOG:-warn,embedding_engine=info}
+      RUST_LOG: ${RUST_LOG:-warn,embedding_engine=info,inference_client_rs=info}
       ENABLE_SIGNED_EVENT_CONSUMERS: ${ENABLE_SIGNED_EVENT_CONSUMERS:-1}
       INDEX_EVENT_PUBLIC_KEY_PATH: /run/event-keys/index-events.pub
       WIKI_EVENT_PUBLIC_KEY_PATH: /run/event-keys/wiki-events.pub
       EMBEDDING_EVENT_PRIVATE_KEY_PATH: /run/event-keys/embedding-events.pem
+      # The usage ledger (CR-T10): record every paid provider call (contextual retrieval,
+      # embedding) as a signed version 2 event on the durable DATAPLANE_COST stream. OFF until
+      # data-orchestrator runs the consumer that reads the stream (consumers and verifiers ship
+      # before producers: the old consumer logs an event it cannot read as invalid and drops it).
+      # Turned on, the service refuses to start unless signed events are enabled and the stream
+      # can be created or verified. 1 or true turns it on. Off, the version 1 cost event is
+      # published as before.
+      USAGE_EMIT_ENABLED: ${USAGE_EMIT_ENABLED:-0}
+      # The context reconciler (CR-T9a): the DB-truth loop that fills the units that have no
+      # context, verifies the legacy ones (re-embeds the stored context, no model is asked),
+      # re-embeds a vector that is not the one its stored context makes, rechecks the units skipped
+      # for zero retention once an hour, and announces a document only when a context was written
+      # for it. OFF until the live proof (runbook 5.2): `0` first, `1` with the caps below after.
+      # Turned on, the service refuses to start unless signed events are enabled, and every value
+      # below is checked at startup (one out of range names its variable). The pause file is the
+      # kill switch that needs no restart: `docker exec <container> touch <file>`.
+      CONTEXT_RECONCILER_ENABLED: ${CONTEXT_RECONCILER_ENABLED:-0}
+      CONTEXT_RECONCILER_INTERVAL_SECS: ${CONTEXT_RECONCILER_INTERVAL_SECS:-30}
+      # The most units one pass leases in all, and for one organization (the rest wait their turn).
+      CONTEXT_RECONCILER_UNITS_PER_PASS: ${CONTEXT_RECONCILER_UNITS_PER_PASS:-32}
+      CONTEXT_RECONCILER_ORG_UNITS_PER_PASS: ${CONTEXT_RECONCILER_ORG_UNITS_PER_PASS:-16}
+      # Documents worked at once, in all and for one organization, and chunks of one document
+      # contextualized at once. The most provider calls in flight is the first times the third (4).
+      CONTEXT_RECONCILER_CONCURRENCY: ${CONTEXT_RECONCILER_CONCURRENCY:-2}
+      CONTEXT_RECONCILER_ORG_CONCURRENCY: ${CONTEXT_RECONCILER_ORG_CONCURRENCY:-1}
+      CONTEXT_RECONCILER_CHUNK_CONCURRENCY: ${CONTEXT_RECONCILER_CHUNK_CONCURRENCY:-2}
+      CONTEXT_RECONCILER_LEASE_SECS: ${CONTEXT_RECONCILER_LEASE_SECS:-300}
+      CONTEXT_RECONCILER_BUDGET_MS: ${CONTEXT_RECONCILER_BUDGET_MS:-30000}
+      CONTEXT_RECONCILER_DOCUMENT_BUDGET_MS: ${CONTEXT_RECONCILER_DOCUMENT_BUDGET_MS:-25000}
+      # A retryable failure that fails this often becomes failed_permanent, with an alert.
+      CONTEXT_RECONCILER_MAX_ATTEMPTS: ${CONTEXT_RECONCILER_MAX_ATTEMPTS:-8}
+      # The circuit breaker: this many passes in a row in which the provider failed everything
+      # pause the reconciler for the pause, and a refused credential does at once.
+      CONTEXT_RECONCILER_BREAKER_FAILURES: ${CONTEXT_RECONCILER_BREAKER_FAILURES:-3}
+      CONTEXT_RECONCILER_BREAKER_PAUSE_SECS: ${CONTEXT_RECONCILER_BREAKER_PAUSE_SECS:-300}
+      CONTEXT_RECONCILER_PAUSE_FILE: ${CONTEXT_RECONCILER_PAUSE_FILE:-/tmp/context-reconciler.pause}
+      CONTEXT_RECONCILER_ZDR_RECHECK_SECS: ${CONTEXT_RECONCILER_ZDR_RECHECK_SECS:-3600}
+      CONTEXT_RECONCILER_SWEEP_SECS: ${CONTEXT_RECONCILER_SWEEP_SECS:-300}
+      # Regenerate the contexts of a document that changed after they were made (a chunk whose
+      # inputs did not change costs nothing). OFF: an edited document costs a call per chunk.
+      CONTEXT_RECONCILER_STALE_ENABLED: ${CONTEXT_RECONCILER_STALE_ENABLED:-0}
+      CONTEXT_RECONCILER_STALE_DOCUMENTS: ${CONTEXT_RECONCILER_STALE_DOCUMENTS:-8}
+      # A prompt refresh: regenerate the contexts made with another prompt version than the one in
+      # force. OFF, and always capped: with the flag on the service refuses to start unless the cap
+      # is above zero. The cap is per process (a restart grants it again).
+      CONTEXT_REFRESH_ON_PROMPT_CHANGE: ${CONTEXT_REFRESH_ON_PROMPT_CHANGE:-0}
+      CONTEXT_REFRESH_MAX_UNITS: ${CONTEXT_REFRESH_MAX_UNITS:-0}
+      # The background LLM budget gate (CR-T9b, owner default D-E): the same four variables, with
+      # the same defaults, that graph-index reads, so one setting in the git-ignored .env holds
+      # for both. Configurable per organization (org_processing_policy) and here for every
+      # organization that sets none; ALERT-ONLY by default (over a figure it logs, counts
+      # ctx_budget_exceeded_total on /metrics and keeps working), `throttle` works one chunk at a
+      # time, `stop` marks the units skipped_budget and asks no model until the budget allows it.
+      # NO figure and NO prices are built in (the owner supplies them): blank means none, and with
+      # no figure the gate reads nothing. The spend is the month's `llm` tokens in cost_events
+      # priced with the two prices below, which go together or not at all. Boot checks: an
+      # unknown mode, a bad number, one price without the other, and a throttle or stop with a
+      # figure and no prices or with USAGE_EMIT_ENABLED off (a limit that could never fire) all
+      # stop the service naming the variable.
+      BACKGROUND_BUDGET_MODE: ${BACKGROUND_BUDGET_MODE:-alert_only}
+      BACKGROUND_BUDGET_MONTHLY_USD: ${BACKGROUND_BUDGET_MONTHLY_USD:-}
+      BACKGROUND_PRICE_INPUT_USD_PER_MTOK: ${BACKGROUND_PRICE_INPUT_USD_PER_MTOK:-}
+      BACKGROUND_PRICE_OUTPUT_USD_PER_MTOK: ${BACKGROUND_PRICE_OUTPUT_USD_PER_MTOK:-}
       # Verifies dataplane.documents.deleted for the per-document erasure
       # consumer (document_erasure_consumer.rs). Same key file already
       # mounted into quickwit-adapter/retrieval-engine/graph-index for the
@@ -948,10 +1051,13 @@ services:
       DATAPLANE_NATS_TOKEN: ${DATAPLANE_NATS_TOKEN:?DATAPLANE_NATS_TOKEN is required}
       ADMIN_PORT: "9203"
       # Graph entity/relationship extraction routes through the Model Plane
-      # (gRPC → inference-core Infer), NOT direct Azure — no independent LLM
-      # calls outside the Model Plane. Override GRAPH_EXTRACTION_PROVIDER=
-      # azure_openai (and set the AZURE_* vars) to fall back to the direct path.
-      GRAPH_EXTRACTION_PROVIDER: ${GRAPH_EXTRACTION_PROVIDER:-model_plane}
+      # (gRPC → inference-core Infer) and NOWHERE ELSE. The direct-Azure backend
+      # (GRAPH_EXTRACTION_PROVIDER=azure_openai, the Azure key and endpoint) is
+      # deleted: flipping that one variable bypassed the Auth Core service token,
+      # the organization's retention posture, metering and the typed errors, and
+      # selecting it is now a startup error. This block therefore holds no Azure
+      # key and no Azure endpoint, and tests/scripts/graph-index-no-azure-contract-test.sh
+      # fails when one comes back.
       MODEL_PLANE_AI_CORE_GRPC_URL: ${MODEL_PLANE_AI_CORE_GRPC_URL:-http://inference-core:9092}
       MODEL_PLANE_EXTRACTION_MODEL: ${MODEL_PLANE_EXTRACTION_MODEL:-gpt-4o-mini}
       MODEL_PLANE_EXTRACTION_PROVIDER: ${MODEL_PLANE_EXTRACTION_PROVIDER:-azure_openai}
@@ -967,33 +1073,68 @@ services:
       #
       # Interval is deliberately slower than index-engine's 60s and the batch much
       # smaller: one tick can run for minutes, so polling faster only stacks ticks.
-      # Documents that extract cleanly to zero entities are suppressed for the
-      # process lifetime — without that the loop re-pays for them every tick
-      # (measured 63 inference calls/tick on the eval corpus, ~18k/day).
+      # What was done to each chunk is a row (graph_extraction_state, migration
+      # 20261003150000): a chunk that extracts cleanly to zero entities is `empty`
+      # and stays so across restarts (it cost 63 inference calls/tick on the eval
+      # corpus, ~18k/day, while only the process remembered it), a chunk that keeps
+      # failing waits 5 minutes to 6 hours between attempts and is given up on at the
+      # cap below, and the migration must be applied before this image starts (the
+      # service checks and refuses to boot otherwise).
       GRAPH_RECONCILE_ENABLED: ${GRAPH_RECONCILE_ENABLED:-1}
       GRAPH_RECONCILE_INTERVAL_SECS: ${GRAPH_RECONCILE_INTERVAL_SECS:-300}
       GRAPH_RECONCILE_BATCH: ${GRAPH_RECONCILE_BATCH:-5}
+      # The poison cap: attempts after which a chunk is failed_permanent and
+      # dead-lettered (dataplane.dlq.graph-index) until an operator requeues it.
+      # 1 to 50; anything else stops the service at startup.
+      GRAPH_EXTRACTION_MAX_ATTEMPTS: ${GRAPH_EXTRACTION_MAX_ATTEMPTS:-6}
+      # The background LLM budget (owner default D-E): configurable per
+      # organization (org_processing_policy) and here for every organization that
+      # sets none; ALERT-ONLY by default, `stop` only when an operator says so, and
+      # no figure built in. Spend is read from cost_events and priced with the two
+      # figures below, which have no default (blank: the spend in dollars cannot be
+      # measured, and a budget that applies is alerted, not enforced). The prices go
+      # together or not at all, and `stop` with a figure needs them: boot checks.
+      BACKGROUND_BUDGET_MODE: ${BACKGROUND_BUDGET_MODE:-alert_only}
+      BACKGROUND_BUDGET_MONTHLY_USD: ${BACKGROUND_BUDGET_MONTHLY_USD:-}
+      BACKGROUND_PRICE_INPUT_USD_PER_MTOK: ${BACKGROUND_PRICE_INPUT_USD_PER_MTOK:-}
+      BACKGROUND_PRICE_OUTPUT_USD_PER_MTOK: ${BACKGROUND_PRICE_OUTPUT_USD_PER_MTOK:-}
+      # GraphRAG community summaries (one paid call each): OFF unless turned on, and
+      # then under the same gate as extraction (policy, retention posture, budget).
+      COMMUNITY_SUMMARY_ENABLED: ${COMMUNITY_SUMMARY_ENABLED:-0}
+      COMMUNITY_SUMMARY_MAX_PER_RUN: ${COMMUNITY_SUMMARY_MAX_PER_RUN:-5}
       # Auth Core audited service-principal hop to inference-core. The
       # credential is deployment-owned; never fall back to a shared x-api-key.
       MODEL_PLANE_INFERENCE_TOKEN_URL: ${MODEL_PLANE_INFERENCE_TOKEN_URL:-http://auth-core:3011/api/inference-core/internal-token}
       MODEL_PLANE_INFERENCE_TOKEN_ISSUER: ${AUTH_CORE_ISSUER:-http://auth-core:3011/api/convex-auth}
       MODEL_PLANE_INFERENCE_SERVICE_ID: ${MODEL_PLANE_INFERENCE_SERVICE_ID:-graph-index}
       MODEL_PLANE_INFERENCE_SERVICE_API_KEY: ${MODEL_PLANE_INFERENCE_SERVICE_API_KEY:-}
-      # Must equal this principal's retentionByAudience entry for
-      # inference-core in PLANE_SERVICE_PRINCIPALS_JSON.
+      # persistent | zdr | tenant: the posture this client asserts on its token.
+      # persistent and zdr must equal this principal's retentionByAudience entry
+      # for inference-core in the principal registry. tenant accepts either: the
+      # token's zdr is the ORGANIZATION's own setting, resolved by Auth Core at the
+      # mint (60 s lifetime, no token when the posture cannot be resolved). Ship
+      # the client, set this to tenant, then change the registry; never the other
+      # way round. An unknown value stops the service at startup, and
+      # `make cross-plane-env` checks it. (embedding-engine has its own variable.)
       MODEL_PLANE_INFERENCE_RETENTION_POSTURE: ${MODEL_PLANE_INFERENCE_RETENTION_POSTURE:-persistent}
       JWT_PUBLIC_KEY_FILE: /app/keys/convex-auth.pub
       JWT_REQUIRED_AUDIENCE: ${DATA_PLANE_AUTH_AUDIENCE:-data-plane}
       JWT_REQUIRED_ISSUER: ${AUTH_CORE_ISSUER:-http://auth-core:3011/api/convex-auth}
-      AZURE_OPENAI_API_KEY: ${AZURE_OPENAI_API_KEY:-}
-      AZURE_OPENAI_ENDPOINT: ${AZURE_OPENAI_ENDPOINT:-}
-      AZURE_OPENAI_EXTRACTION_DEPLOYMENT: ${AZURE_OPENAI_EXTRACTION_DEPLOYMENT:-gpt-4o}
       OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
-      RUST_LOG: ${RUST_LOG:-warn,graph_index=info}
+      RUST_LOG: ${RUST_LOG:-warn,graph_index=info,inference_client_rs=info}
       ENABLE_SIGNED_EVENT_CONSUMERS: ${ENABLE_SIGNED_EVENT_CONSUMERS:-1}
       EMBEDDING_EVENT_PUBLIC_KEY_PATH: /run/event-keys/embedding-events.pub
       INDEX_EVENT_PUBLIC_KEY_PATH: /run/event-keys/index-events.pub
       EVENT_AUTH_AUDIENCE: dataplane-events
+      # graph-index's own usage-event signing key (CR-T10): issuer service:graph-index-rs, key id
+      # graph-events-v1, scope events:graph:publish (the cost subject and nothing else). The
+      # public half is mounted into data-orchestrator. Provisioned by hand through the Makefile
+      # list; production keys live at an absolute path from the secret manager, never under
+      # .secrets/event-keys. Read only when USAGE_EMIT_ENABLED is on; with it on graph-index
+      # records one event per paid call (feature graph-extraction for a chunk,
+      # graph-community-summary for a community), exact tokens, no document or user.
+      GRAPH_EVENT_PRIVATE_KEY_PATH: /run/event-keys/graph-events.pem
+      USAGE_EMIT_ENABLED: ${USAGE_EMIT_ENABLED:-0}
       # Neo4j graph read-model. ON by default in the composed stack; the
       # dual-write + multi-hop traverse path mirrors the canonical Postgres
       # graph. Startup fails closed if enabled without a password. graph-index
@@ -1029,6 +1170,7 @@ services:
       - "${AUTH_CORE_PUBLIC_KEY_PATH:-../Control Plane/auth-core/keys/convex-auth.pub}:/app/keys/convex-auth.pub:ro"
       - ${EMBEDDING_EVENT_VERIFYING_PUBLIC_KEY_PATH:-.secrets/event-keys/embedding-events.pub}:/run/event-keys/embedding-events.pub:ro
       - ${INDEX_EVENT_VERIFYING_PUBLIC_KEY_PATH:-.secrets/event-keys/index-events.pub}:/run/event-keys/index-events.pub:ro
+      - ${GRAPH_EVENT_SIGNING_PRIVATE_KEY_PATH:-.secrets/event-keys/graph-events.pem}:/run/event-keys/graph-events.pem:ro
     networks:
       dpv2-net:
       inter-plane-bus:
@@ -1332,6 +1474,24 @@ services:
       SIGNED_COST_EVENTS_ENABLED: ${SIGNED_COST_EVENTS_ENABLED:-1}
       EMBEDDING_EVENT_PUBLIC_KEY_PATH: /run/event-keys/embedding-events.pub
       RETRIEVAL_EVENT_PUBLIC_KEY_PATH: /run/event-keys/retrieval-events.pub
+      # graph-index's usage events (CR-T10). Required with the other two: a registry
+      # without it would refuse graph-index's spend as invalid, silently, for ever.
+      GRAPH_EVENT_PUBLIC_KEY_PATH: /run/event-keys/graph-events.pub
+      # The usage forwarder (CR-T10): posts every version 2 usage row to cost-core. DARK:
+      # off unless USAGE_FORWARDER_ENABLED=1, and it must stay off until cost-core accepts the
+      # `feature` and `units` fields (CR-T4), has priced the models the Data Plane meters
+      # and the data-orchestrator principal exists in the registry. Turned on, the service
+      # refuses to start without a service credential (checked at boot). It posts one
+      # bearer per organization, minted by Auth Core for the audience cost-core with the one
+      # scope cost:write; the credential below goes to Auth Core and to nobody else. The
+      # contextual retrieval runbook has the order of enablement.
+      USAGE_FORWARDER_ENABLED: ${USAGE_FORWARDER_ENABLED:-0}
+      COST_CORE_URL: ${USAGE_FORWARDER_COST_CORE_URL:-http://cost-core:8089}
+      COST_CORE_TOKEN_URL: ${USAGE_FORWARDER_TOKEN_URL:-http://auth-core:3011/api/cost-core/internal-token}
+      DATA_ORCHESTRATOR_COST_SERVICE_ID: ${DATA_ORCHESTRATOR_COST_SERVICE_ID:-data-orchestrator}
+      DATA_ORCHESTRATOR_COST_SERVICE_API_KEY: ${DATA_ORCHESTRATOR_COST_SERVICE_API_KEY:-}
+      USAGE_FORWARDER_BATCH: ${USAGE_FORWARDER_BATCH:-50}
+      USAGE_FORWARDER_INTERVAL_SECS: ${USAGE_FORWARDER_INTERVAL_SECS:-15}
       # GDPR org-erasure durable delivery crosses into Control Plane's shared
       # broker. Empty values are allowed only so an explicit standalone
       # overlay can boot; production keeps GDPR_ORG_PURGE_CONSUMER_REQUIRED=1
@@ -1345,6 +1505,7 @@ services:
     volumes:
       - ${EMBEDDING_EVENT_VERIFYING_PUBLIC_KEY_PATH:-.secrets/event-keys/embedding-events.pub}:/run/event-keys/embedding-events.pub:ro
       - ${RETRIEVAL_EVENT_VERIFYING_PUBLIC_KEY_PATH:-.secrets/event-keys/retrieval-events.pub}:/run/event-keys/retrieval-events.pub:ro
+      - ${GRAPH_EVENT_VERIFYING_PUBLIC_KEY_PATH:-.secrets/event-keys/graph-events.pub}:/run/event-keys/graph-events.pub:ro
     networks:
       - dpv2-net
       - inter-plane-bus

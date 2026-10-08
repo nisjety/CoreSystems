@@ -1,0 +1,610 @@
+{
+  "contract": "auth-core POST /api/inference-core/internal-token -> Data Plane inference client",
+  "version": 1,
+  "audience": "inference-core",
+  "issuer": "https://control.contract.test/api/convex-auth",
+  "frozenNowSeconds": 1791288000,
+  "tenantTtlSeconds": 60,
+  "defaultTtlSeconds": 300,
+  "reasons": [
+    "document-embedding",
+    "contextual-retrieval",
+    "video-caption",
+    "graph-extraction",
+    "graph-community-summary"
+  ],
+  "registry": {
+    "embedding-engine": {
+      "tenancy": "directory",
+      "audiences": [
+        "inference-core"
+      ],
+      "consumerEnv": "MODEL_PLANE_EMBEDDING_INFERENCE_SERVICE_API_KEY",
+      "orgIds": [],
+      "retentionByAudience": {
+        "inference-core": "tenant"
+      },
+      "scopes": [
+        "inference:invoke"
+      ],
+      "scopesByAudience": {
+        "inference-core": [
+          "inference:invoke"
+        ]
+      }
+    },
+    "graph-index": {
+      "tenancy": "directory",
+      "audiences": [
+        "inference-core"
+      ],
+      "consumerEnv": "MODEL_PLANE_INFERENCE_SERVICE_API_KEY",
+      "orgIds": [],
+      "retentionByAudience": {
+        "inference-core": "tenant"
+      },
+      "scopes": [
+        "inference:invoke"
+      ],
+      "scopesByAudience": {
+        "inference-core": [
+          "inference:invoke"
+        ]
+      }
+    }
+  },
+  "cases": {
+    "embeddingEnginePersistent": {
+      "note": "the row as it was before the enablement step; what an unflipped registry mints",
+      "request": {
+        "route": "POST /api/inference-core/internal-token",
+        "serviceId": "embedding-engine",
+        "orgId": "org-contract-plain",
+        "scopes": [
+          "inference:invoke"
+        ],
+        "reason": "document-embedding",
+        "registryRetention": "persistent",
+        "tenancy": "directory",
+        "orgCore": "plain"
+      },
+      "response": {
+        "status": 201,
+        "body": {
+          "token": "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCIsImtpZCI6ImNvbnZleC1hdXRoLXJzMjU2In0.eyJpc3MiOiJodHRwczovL2NvbnRyb2wuY29udHJhY3QudGVzdC9hcGkvY29udmV4LWF1dGgiLCJhdWQiOiJpbmZlcmVuY2UtY29yZSIsInN1YiI6InNlcnZpY2U6ZW1iZWRkaW5nLWVuZ2luZSIsImlhdCI6MTc5MTI4ODAwMCwibmJmIjoxNzkxMjg3OTk1LCJleHAiOjE3OTEyODgzMDAsIm9yZ19pZCI6Im9yZy1jb250cmFjdC1wbGFpbiIsInByaW5jaXBhbF90eXBlIjoic2VydmljZSIsInNlcnZpY2VfaWQiOiJzZXJ2aWNlOmVtYmVkZGluZy1lbmdpbmUiLCJyZWFzb24iOiJkb2N1bWVudC1lbWJlZGRpbmciLCJzY29wZXMiOlsiaW5mZXJlbmNlOmludm9rZSJdLCJ6ZHIiOmZhbHNlfQ.signature-omitted-from-golden",
+          "expiresAt": "2026-10-06T12:05:00.000Z",
+          "expiresInSeconds": 300,
+          "issuer": "https://control.contract.test/api/convex-auth",
+          "audience": "inference-core"
+        }
+      },
+      "header": {
+        "alg": "RS256",
+        "typ": "JWT",
+        "kid": "convex-auth-rs256"
+      },
+      "claims": {
+        "iss": "https://control.contract.test/api/convex-auth",
+        "aud": "inference-core",
+        "sub": "service:embedding-engine",
+        "iat": 1791288000,
+        "nbf": 1791287995,
+        "exp": 1791288300,
+        "org_id": "org-contract-plain",
+        "principal_type": "service",
+        "service_id": "service:embedding-engine",
+        "reason": "document-embedding",
+        "scopes": [
+          "inference:invoke"
+        ],
+        "zdr": false
+      }
+    },
+    "embeddingEngineContextualRetrievalPersistent": {
+      "note": "the row as it was before the enablement step; what an unflipped registry mints",
+      "request": {
+        "route": "POST /api/inference-core/internal-token",
+        "serviceId": "embedding-engine",
+        "orgId": "org-contract-plain",
+        "scopes": [
+          "inference:invoke"
+        ],
+        "reason": "contextual-retrieval",
+        "registryRetention": "persistent",
+        "tenancy": "directory",
+        "orgCore": "plain"
+      },
+      "response": {
+        "status": 201,
+        "body": {
+          "token": "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCIsImtpZCI6ImNvbnZleC1hdXRoLXJzMjU2In0.eyJpc3MiOiJodHRwczovL2NvbnRyb2wuY29udHJhY3QudGVzdC9hcGkvY29udmV4LWF1dGgiLCJhdWQiOiJpbmZlcmVuY2UtY29yZSIsInN1YiI6InNlcnZpY2U6ZW1iZWRkaW5nLWVuZ2luZSIsImlhdCI6MTc5MTI4ODAwMCwibmJmIjoxNzkxMjg3OTk1LCJleHAiOjE3OTEyODgzMDAsIm9yZ19pZCI6Im9yZy1jb250cmFjdC1wbGFpbiIsInByaW5jaXBhbF90eXBlIjoic2VydmljZSIsInNlcnZpY2VfaWQiOiJzZXJ2aWNlOmVtYmVkZGluZy1lbmdpbmUiLCJyZWFzb24iOiJjb250ZXh0dWFsLXJldHJpZXZhbCIsInNjb3BlcyI6WyJpbmZlcmVuY2U6aW52b2tlIl0sInpkciI6ZmFsc2V9.signature-omitted-from-golden",
+          "expiresAt": "2026-10-06T12:05:00.000Z",
+          "expiresInSeconds": 300,
+          "issuer": "https://control.contract.test/api/convex-auth",
+          "audience": "inference-core"
+        }
+      },
+      "header": {
+        "alg": "RS256",
+        "typ": "JWT",
+        "kid": "convex-auth-rs256"
+      },
+      "claims": {
+        "iss": "https://control.contract.test/api/convex-auth",
+        "aud": "inference-core",
+        "sub": "service:embedding-engine",
+        "iat": 1791288000,
+        "nbf": 1791287995,
+        "exp": 1791288300,
+        "org_id": "org-contract-plain",
+        "principal_type": "service",
+        "service_id": "service:embedding-engine",
+        "reason": "contextual-retrieval",
+        "scopes": [
+          "inference:invoke"
+        ],
+        "zdr": false
+      }
+    },
+    "embeddingEngineVideoCaptionPersistent": {
+      "note": "the row as it was before the enablement step; what an unflipped registry mints",
+      "request": {
+        "route": "POST /api/inference-core/internal-token",
+        "serviceId": "embedding-engine",
+        "orgId": "org-contract-plain",
+        "scopes": [
+          "inference:invoke"
+        ],
+        "reason": "video-caption",
+        "registryRetention": "persistent",
+        "tenancy": "directory",
+        "orgCore": "plain"
+      },
+      "response": {
+        "status": 201,
+        "body": {
+          "token": "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCIsImtpZCI6ImNvbnZleC1hdXRoLXJzMjU2In0.eyJpc3MiOiJodHRwczovL2NvbnRyb2wuY29udHJhY3QudGVzdC9hcGkvY29udmV4LWF1dGgiLCJhdWQiOiJpbmZlcmVuY2UtY29yZSIsInN1YiI6InNlcnZpY2U6ZW1iZWRkaW5nLWVuZ2luZSIsImlhdCI6MTc5MTI4ODAwMCwibmJmIjoxNzkxMjg3OTk1LCJleHAiOjE3OTEyODgzMDAsIm9yZ19pZCI6Im9yZy1jb250cmFjdC1wbGFpbiIsInByaW5jaXBhbF90eXBlIjoic2VydmljZSIsInNlcnZpY2VfaWQiOiJzZXJ2aWNlOmVtYmVkZGluZy1lbmdpbmUiLCJyZWFzb24iOiJ2aWRlby1jYXB0aW9uIiwic2NvcGVzIjpbImluZmVyZW5jZTppbnZva2UiXSwiemRyIjpmYWxzZX0.signature-omitted-from-golden",
+          "expiresAt": "2026-10-06T12:05:00.000Z",
+          "expiresInSeconds": 300,
+          "issuer": "https://control.contract.test/api/convex-auth",
+          "audience": "inference-core"
+        }
+      },
+      "header": {
+        "alg": "RS256",
+        "typ": "JWT",
+        "kid": "convex-auth-rs256"
+      },
+      "claims": {
+        "iss": "https://control.contract.test/api/convex-auth",
+        "aud": "inference-core",
+        "sub": "service:embedding-engine",
+        "iat": 1791288000,
+        "nbf": 1791287995,
+        "exp": 1791288300,
+        "org_id": "org-contract-plain",
+        "principal_type": "service",
+        "service_id": "service:embedding-engine",
+        "reason": "video-caption",
+        "scopes": [
+          "inference:invoke"
+        ],
+        "zdr": false
+      }
+    },
+    "embeddingEngineZdrRegistry": {
+      "note": "the row flipped to zdr: the posture is the registry, not the org",
+      "request": {
+        "route": "POST /api/inference-core/internal-token",
+        "serviceId": "embedding-engine",
+        "orgId": "org-contract-plain",
+        "scopes": [
+          "inference:invoke"
+        ],
+        "reason": "document-embedding",
+        "registryRetention": "zdr",
+        "tenancy": "directory",
+        "orgCore": "plain"
+      },
+      "response": {
+        "status": 201,
+        "body": {
+          "token": "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCIsImtpZCI6ImNvbnZleC1hdXRoLXJzMjU2In0.eyJpc3MiOiJodHRwczovL2NvbnRyb2wuY29udHJhY3QudGVzdC9hcGkvY29udmV4LWF1dGgiLCJhdWQiOiJpbmZlcmVuY2UtY29yZSIsInN1YiI6InNlcnZpY2U6ZW1iZWRkaW5nLWVuZ2luZSIsImlhdCI6MTc5MTI4ODAwMCwibmJmIjoxNzkxMjg3OTk1LCJleHAiOjE3OTEyODgzMDAsIm9yZ19pZCI6Im9yZy1jb250cmFjdC1wbGFpbiIsInByaW5jaXBhbF90eXBlIjoic2VydmljZSIsInNlcnZpY2VfaWQiOiJzZXJ2aWNlOmVtYmVkZGluZy1lbmdpbmUiLCJyZWFzb24iOiJkb2N1bWVudC1lbWJlZGRpbmciLCJzY29wZXMiOlsiaW5mZXJlbmNlOmludm9rZSJdLCJ6ZHIiOnRydWV9.signature-omitted-from-golden",
+          "expiresAt": "2026-10-06T12:05:00.000Z",
+          "expiresInSeconds": 300,
+          "issuer": "https://control.contract.test/api/convex-auth",
+          "audience": "inference-core"
+        }
+      },
+      "header": {
+        "alg": "RS256",
+        "typ": "JWT",
+        "kid": "convex-auth-rs256"
+      },
+      "claims": {
+        "iss": "https://control.contract.test/api/convex-auth",
+        "aud": "inference-core",
+        "sub": "service:embedding-engine",
+        "iat": 1791288000,
+        "nbf": 1791287995,
+        "exp": 1791288300,
+        "org_id": "org-contract-plain",
+        "principal_type": "service",
+        "service_id": "service:embedding-engine",
+        "reason": "document-embedding",
+        "scopes": [
+          "inference:invoke"
+        ],
+        "zdr": true
+      }
+    },
+    "embeddingEngineTenantOrgPlain": {
+      "note": "the row of the enablement step; the org has no ZDR",
+      "request": {
+        "route": "POST /api/inference-core/internal-token",
+        "serviceId": "embedding-engine",
+        "orgId": "org-contract-plain",
+        "scopes": [
+          "inference:invoke"
+        ],
+        "reason": "contextual-retrieval",
+        "registryRetention": "tenant",
+        "tenancy": "directory",
+        "orgCore": "plain"
+      },
+      "response": {
+        "status": 201,
+        "body": {
+          "token": "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCIsImtpZCI6ImNvbnZleC1hdXRoLXJzMjU2In0.eyJpc3MiOiJodHRwczovL2NvbnRyb2wuY29udHJhY3QudGVzdC9hcGkvY29udmV4LWF1dGgiLCJhdWQiOiJpbmZlcmVuY2UtY29yZSIsInN1YiI6InNlcnZpY2U6ZW1iZWRkaW5nLWVuZ2luZSIsImlhdCI6MTc5MTI4ODAwMCwibmJmIjoxNzkxMjg3OTk1LCJleHAiOjE3OTEyODgwNjAsIm9yZ19pZCI6Im9yZy1jb250cmFjdC1wbGFpbiIsInByaW5jaXBhbF90eXBlIjoic2VydmljZSIsInNlcnZpY2VfaWQiOiJzZXJ2aWNlOmVtYmVkZGluZy1lbmdpbmUiLCJyZWFzb24iOiJjb250ZXh0dWFsLXJldHJpZXZhbCIsInNjb3BlcyI6WyJpbmZlcmVuY2U6aW52b2tlIl0sInpkciI6ZmFsc2V9.signature-omitted-from-golden",
+          "expiresAt": "2026-10-06T12:01:00.000Z",
+          "expiresInSeconds": 60,
+          "issuer": "https://control.contract.test/api/convex-auth",
+          "audience": "inference-core"
+        }
+      },
+      "header": {
+        "alg": "RS256",
+        "typ": "JWT",
+        "kid": "convex-auth-rs256"
+      },
+      "claims": {
+        "iss": "https://control.contract.test/api/convex-auth",
+        "aud": "inference-core",
+        "sub": "service:embedding-engine",
+        "iat": 1791288000,
+        "nbf": 1791287995,
+        "exp": 1791288060,
+        "org_id": "org-contract-plain",
+        "principal_type": "service",
+        "service_id": "service:embedding-engine",
+        "reason": "contextual-retrieval",
+        "scopes": [
+          "inference:invoke"
+        ],
+        "zdr": false
+      }
+    },
+    "embeddingEngineTenantOrgZdr": {
+      "note": "the row of the enablement step; the org has ZDR on",
+      "request": {
+        "route": "POST /api/inference-core/internal-token",
+        "serviceId": "embedding-engine",
+        "orgId": "org-contract-zdr",
+        "scopes": [
+          "inference:invoke"
+        ],
+        "reason": "contextual-retrieval",
+        "registryRetention": "tenant",
+        "tenancy": "directory",
+        "orgCore": "zdr"
+      },
+      "response": {
+        "status": 201,
+        "body": {
+          "token": "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCIsImtpZCI6ImNvbnZleC1hdXRoLXJzMjU2In0.eyJpc3MiOiJodHRwczovL2NvbnRyb2wuY29udHJhY3QudGVzdC9hcGkvY29udmV4LWF1dGgiLCJhdWQiOiJpbmZlcmVuY2UtY29yZSIsInN1YiI6InNlcnZpY2U6ZW1iZWRkaW5nLWVuZ2luZSIsImlhdCI6MTc5MTI4ODAwMCwibmJmIjoxNzkxMjg3OTk1LCJleHAiOjE3OTEyODgwNjAsIm9yZ19pZCI6Im9yZy1jb250cmFjdC16ZHIiLCJwcmluY2lwYWxfdHlwZSI6InNlcnZpY2UiLCJzZXJ2aWNlX2lkIjoic2VydmljZTplbWJlZGRpbmctZW5naW5lIiwicmVhc29uIjoiY29udGV4dHVhbC1yZXRyaWV2YWwiLCJzY29wZXMiOlsiaW5mZXJlbmNlOmludm9rZSJdLCJ6ZHIiOnRydWV9.signature-omitted-from-golden",
+          "expiresAt": "2026-10-06T12:01:00.000Z",
+          "expiresInSeconds": 60,
+          "issuer": "https://control.contract.test/api/convex-auth",
+          "audience": "inference-core"
+        }
+      },
+      "header": {
+        "alg": "RS256",
+        "typ": "JWT",
+        "kid": "convex-auth-rs256"
+      },
+      "claims": {
+        "iss": "https://control.contract.test/api/convex-auth",
+        "aud": "inference-core",
+        "sub": "service:embedding-engine",
+        "iat": 1791288000,
+        "nbf": 1791287995,
+        "exp": 1791288060,
+        "org_id": "org-contract-zdr",
+        "principal_type": "service",
+        "service_id": "service:embedding-engine",
+        "reason": "contextual-retrieval",
+        "scopes": [
+          "inference:invoke"
+        ],
+        "zdr": true
+      }
+    },
+    "graphIndexPersistent": {
+      "note": "the row as it was before the enablement step; what an unflipped registry mints",
+      "request": {
+        "route": "POST /api/inference-core/internal-token",
+        "serviceId": "graph-index",
+        "orgId": "org-contract-plain",
+        "scopes": [
+          "inference:invoke"
+        ],
+        "reason": "graph-extraction",
+        "registryRetention": "persistent",
+        "tenancy": "directory",
+        "orgCore": "plain"
+      },
+      "response": {
+        "status": 201,
+        "body": {
+          "token": "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCIsImtpZCI6ImNvbnZleC1hdXRoLXJzMjU2In0.eyJpc3MiOiJodHRwczovL2NvbnRyb2wuY29udHJhY3QudGVzdC9hcGkvY29udmV4LWF1dGgiLCJhdWQiOiJpbmZlcmVuY2UtY29yZSIsInN1YiI6InNlcnZpY2U6Z3JhcGgtaW5kZXgiLCJpYXQiOjE3OTEyODgwMDAsIm5iZiI6MTc5MTI4Nzk5NSwiZXhwIjoxNzkxMjg4MzAwLCJvcmdfaWQiOiJvcmctY29udHJhY3QtcGxhaW4iLCJwcmluY2lwYWxfdHlwZSI6InNlcnZpY2UiLCJzZXJ2aWNlX2lkIjoic2VydmljZTpncmFwaC1pbmRleCIsInJlYXNvbiI6ImdyYXBoLWV4dHJhY3Rpb24iLCJzY29wZXMiOlsiaW5mZXJlbmNlOmludm9rZSJdLCJ6ZHIiOmZhbHNlfQ.signature-omitted-from-golden",
+          "expiresAt": "2026-10-06T12:05:00.000Z",
+          "expiresInSeconds": 300,
+          "issuer": "https://control.contract.test/api/convex-auth",
+          "audience": "inference-core"
+        }
+      },
+      "header": {
+        "alg": "RS256",
+        "typ": "JWT",
+        "kid": "convex-auth-rs256"
+      },
+      "claims": {
+        "iss": "https://control.contract.test/api/convex-auth",
+        "aud": "inference-core",
+        "sub": "service:graph-index",
+        "iat": 1791288000,
+        "nbf": 1791287995,
+        "exp": 1791288300,
+        "org_id": "org-contract-plain",
+        "principal_type": "service",
+        "service_id": "service:graph-index",
+        "reason": "graph-extraction",
+        "scopes": [
+          "inference:invoke"
+        ],
+        "zdr": false
+      }
+    },
+    "graphIndexCommunitySummaryPersistent": {
+      "note": "the row as it was before the enablement step; what an unflipped registry mints",
+      "request": {
+        "route": "POST /api/inference-core/internal-token",
+        "serviceId": "graph-index",
+        "orgId": "org-contract-plain",
+        "scopes": [
+          "inference:invoke"
+        ],
+        "reason": "graph-community-summary",
+        "registryRetention": "persistent",
+        "tenancy": "directory",
+        "orgCore": "plain"
+      },
+      "response": {
+        "status": 201,
+        "body": {
+          "token": "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCIsImtpZCI6ImNvbnZleC1hdXRoLXJzMjU2In0.eyJpc3MiOiJodHRwczovL2NvbnRyb2wuY29udHJhY3QudGVzdC9hcGkvY29udmV4LWF1dGgiLCJhdWQiOiJpbmZlcmVuY2UtY29yZSIsInN1YiI6InNlcnZpY2U6Z3JhcGgtaW5kZXgiLCJpYXQiOjE3OTEyODgwMDAsIm5iZiI6MTc5MTI4Nzk5NSwiZXhwIjoxNzkxMjg4MzAwLCJvcmdfaWQiOiJvcmctY29udHJhY3QtcGxhaW4iLCJwcmluY2lwYWxfdHlwZSI6InNlcnZpY2UiLCJzZXJ2aWNlX2lkIjoic2VydmljZTpncmFwaC1pbmRleCIsInJlYXNvbiI6ImdyYXBoLWNvbW11bml0eS1zdW1tYXJ5Iiwic2NvcGVzIjpbImluZmVyZW5jZTppbnZva2UiXSwiemRyIjpmYWxzZX0.signature-omitted-from-golden",
+          "expiresAt": "2026-10-06T12:05:00.000Z",
+          "expiresInSeconds": 300,
+          "issuer": "https://control.contract.test/api/convex-auth",
+          "audience": "inference-core"
+        }
+      },
+      "header": {
+        "alg": "RS256",
+        "typ": "JWT",
+        "kid": "convex-auth-rs256"
+      },
+      "claims": {
+        "iss": "https://control.contract.test/api/convex-auth",
+        "aud": "inference-core",
+        "sub": "service:graph-index",
+        "iat": 1791288000,
+        "nbf": 1791287995,
+        "exp": 1791288300,
+        "org_id": "org-contract-plain",
+        "principal_type": "service",
+        "service_id": "service:graph-index",
+        "reason": "graph-community-summary",
+        "scopes": [
+          "inference:invoke"
+        ],
+        "zdr": false
+      }
+    },
+    "graphIndexTenantOrgPlain": {
+      "note": "the row of the enablement step; the org has no ZDR",
+      "request": {
+        "route": "POST /api/inference-core/internal-token",
+        "serviceId": "graph-index",
+        "orgId": "org-contract-plain",
+        "scopes": [
+          "inference:invoke"
+        ],
+        "reason": "graph-extraction",
+        "registryRetention": "tenant",
+        "tenancy": "directory",
+        "orgCore": "plain"
+      },
+      "response": {
+        "status": 201,
+        "body": {
+          "token": "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCIsImtpZCI6ImNvbnZleC1hdXRoLXJzMjU2In0.eyJpc3MiOiJodHRwczovL2NvbnRyb2wuY29udHJhY3QudGVzdC9hcGkvY29udmV4LWF1dGgiLCJhdWQiOiJpbmZlcmVuY2UtY29yZSIsInN1YiI6InNlcnZpY2U6Z3JhcGgtaW5kZXgiLCJpYXQiOjE3OTEyODgwMDAsIm5iZiI6MTc5MTI4Nzk5NSwiZXhwIjoxNzkxMjg4MDYwLCJvcmdfaWQiOiJvcmctY29udHJhY3QtcGxhaW4iLCJwcmluY2lwYWxfdHlwZSI6InNlcnZpY2UiLCJzZXJ2aWNlX2lkIjoic2VydmljZTpncmFwaC1pbmRleCIsInJlYXNvbiI6ImdyYXBoLWV4dHJhY3Rpb24iLCJzY29wZXMiOlsiaW5mZXJlbmNlOmludm9rZSJdLCJ6ZHIiOmZhbHNlfQ.signature-omitted-from-golden",
+          "expiresAt": "2026-10-06T12:01:00.000Z",
+          "expiresInSeconds": 60,
+          "issuer": "https://control.contract.test/api/convex-auth",
+          "audience": "inference-core"
+        }
+      },
+      "header": {
+        "alg": "RS256",
+        "typ": "JWT",
+        "kid": "convex-auth-rs256"
+      },
+      "claims": {
+        "iss": "https://control.contract.test/api/convex-auth",
+        "aud": "inference-core",
+        "sub": "service:graph-index",
+        "iat": 1791288000,
+        "nbf": 1791287995,
+        "exp": 1791288060,
+        "org_id": "org-contract-plain",
+        "principal_type": "service",
+        "service_id": "service:graph-index",
+        "reason": "graph-extraction",
+        "scopes": [
+          "inference:invoke"
+        ],
+        "zdr": false
+      }
+    },
+    "graphIndexTenantOrgZdr": {
+      "note": "the row of the enablement step; the org has ZDR on",
+      "request": {
+        "route": "POST /api/inference-core/internal-token",
+        "serviceId": "graph-index",
+        "orgId": "org-contract-zdr",
+        "scopes": [
+          "inference:invoke"
+        ],
+        "reason": "graph-extraction",
+        "registryRetention": "tenant",
+        "tenancy": "directory",
+        "orgCore": "zdr"
+      },
+      "response": {
+        "status": 201,
+        "body": {
+          "token": "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCIsImtpZCI6ImNvbnZleC1hdXRoLXJzMjU2In0.eyJpc3MiOiJodHRwczovL2NvbnRyb2wuY29udHJhY3QudGVzdC9hcGkvY29udmV4LWF1dGgiLCJhdWQiOiJpbmZlcmVuY2UtY29yZSIsInN1YiI6InNlcnZpY2U6Z3JhcGgtaW5kZXgiLCJpYXQiOjE3OTEyODgwMDAsIm5iZiI6MTc5MTI4Nzk5NSwiZXhwIjoxNzkxMjg4MDYwLCJvcmdfaWQiOiJvcmctY29udHJhY3QtemRyIiwicHJpbmNpcGFsX3R5cGUiOiJzZXJ2aWNlIiwic2VydmljZV9pZCI6InNlcnZpY2U6Z3JhcGgtaW5kZXgiLCJyZWFzb24iOiJncmFwaC1leHRyYWN0aW9uIiwic2NvcGVzIjpbImluZmVyZW5jZTppbnZva2UiXSwiemRyIjp0cnVlfQ.signature-omitted-from-golden",
+          "expiresAt": "2026-10-06T12:01:00.000Z",
+          "expiresInSeconds": 60,
+          "issuer": "https://control.contract.test/api/convex-auth",
+          "audience": "inference-core"
+        }
+      },
+      "header": {
+        "alg": "RS256",
+        "typ": "JWT",
+        "kid": "convex-auth-rs256"
+      },
+      "claims": {
+        "iss": "https://control.contract.test/api/convex-auth",
+        "aud": "inference-core",
+        "sub": "service:graph-index",
+        "iat": 1791288000,
+        "nbf": 1791287995,
+        "exp": 1791288060,
+        "org_id": "org-contract-zdr",
+        "principal_type": "service",
+        "service_id": "service:graph-index",
+        "reason": "graph-extraction",
+        "scopes": [
+          "inference:invoke"
+        ],
+        "zdr": true
+      }
+    },
+    "tenantDirectoryUnavailable": {
+      "note": "org-core unreachable for a directory-bound tenant principal: the directory check answers first",
+      "request": {
+        "route": "POST /api/inference-core/internal-token",
+        "serviceId": "embedding-engine",
+        "orgId": "org-contract-plain",
+        "scopes": [
+          "inference:invoke"
+        ],
+        "reason": "contextual-retrieval",
+        "registryRetention": "tenant",
+        "tenancy": "directory",
+        "orgCore": "down"
+      },
+      "response": {
+        "status": 503,
+        "body": {
+          "statusCode": 503,
+          "error": "organization_directory_unavailable",
+          "message": "The organization could not be verified. Retry shortly."
+        }
+      }
+    },
+    "tenantPostureUnavailable": {
+      "note": "org-core unreachable for a principal bound to a fixed org: only the posture read fails",
+      "request": {
+        "route": "POST /api/inference-core/internal-token",
+        "serviceId": "embedding-engine",
+        "orgId": "org-contract-plain",
+        "scopes": [
+          "inference:invoke"
+        ],
+        "reason": "contextual-retrieval",
+        "registryRetention": "tenant",
+        "tenancy": "fixed",
+        "orgCore": "down"
+      },
+      "response": {
+        "status": 503,
+        "body": {
+          "statusCode": 503,
+          "error": "retention_posture_unavailable",
+          "message": "The organization retention posture could not be verified. Retry shortly."
+        }
+      }
+    },
+    "organizationNotInDirectory": {
+      "note": "org-core has no record of the organization: refused with the same 403 as any unauthorised caller",
+      "request": {
+        "route": "POST /api/inference-core/internal-token",
+        "serviceId": "embedding-engine",
+        "orgId": "org-contract-unknown",
+        "scopes": [
+          "inference:invoke"
+        ],
+        "reason": "contextual-retrieval",
+        "registryRetention": "tenant",
+        "tenancy": "directory",
+        "orgCore": "unknown"
+      },
+      "response": {
+        "status": 403,
+        "body": {
+          "message": "Service principal is not authorized",
+          "error": "Forbidden",
+          "statusCode": 403
+        }
+      }
+    },
+    "wrongCredential": {
+      "note": "the credential does not match the registry",
+      "request": {
+        "route": "POST /api/inference-core/internal-token",
+        "serviceId": "graph-index",
+        "orgId": "org-contract-plain",
+        "scopes": [
+          "inference:invoke"
+        ],
+        "reason": "graph-extraction",
+        "registryRetention": "persistent",
+        "tenancy": "directory",
+        "orgCore": "plain"
+      },
+      "response": {
+        "status": 403,
+        "body": {
+          "message": "Service principal is not authorized",
+          "error": "Forbidden",
+          "statusCode": 403
+        }
+      }
+    }
+  }
+}

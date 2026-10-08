@@ -712,6 +712,7 @@ fn grpc_to_pipeline(req: RetrieveRequest) -> Result<PipelineReq, &'static str> {
         context_format: req.context_format,
         agent_id: req.agent_id,
         admin_read_all: false,
+        service_principal: false,
         space_scope: None,
     })
 }
@@ -820,6 +821,7 @@ mod zdr_boundary_tests {
             acl: EffectiveAcl::allow_all(),
             request_id: "grpc-zdr-boundary".into(),
             verified_bearer: None,
+            principal: crate::authz::Principal::User,
         }
     }
 

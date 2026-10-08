@@ -98,6 +98,13 @@ pub struct RetrievalRequest {
     /// agent grounding by construction.
     #[serde(default, skip_deserializing)]
     pub admin_read_all: bool,
+    /// The verified caller is a SERVICE principal (`principal_type=service`,
+    /// admitted by the route allowlist, not by membership). Set ONLY by the auth
+    /// boundary from verified claims; a request body can never set it. A service
+    /// has no per-user document grants, so the pipeline never asks the user-core
+    /// grants facade for one (`authz::resolve_explicit_grants`).
+    #[serde(default, skip_deserializing)]
+    pub service_principal: bool,
     /// Control-verified Space authority and its Data-owned target mapping. This
     /// is intentionally boundary-injected, never accepted from request JSON.
     #[serde(skip)]
@@ -247,12 +254,73 @@ pub struct ScoredCandidate {
     pub metadata: HashMap<String, QdrantValue>,
 }
 
+/// One citation in `RetrievalResponse.sources` (HTTP wire contract `retrieve-v1`,
+/// pinned by `tests/retrieve_contract.rs`). The gRPC `Source` message is a
+/// separate, older shape and deliberately has no `url`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SourceRef {
     pub document_id: String,
     pub title: String,
     pub source: String,
     pub r#type: String,
+    /// Where the document can be opened, for callers that cite pages (Quarry's
+    /// vector leg maps a hit to its page through this). Present ONLY for Quarry
+    /// crawl documents (see [`SourceRef::citation_url`]); connector and wiki
+    /// rows never carry one.
+    ///
+    /// Additive wire: `default` + `skip_serializing_if` keep entries written
+    /// into the retrieval cache (and traces) by the previous build readable, and
+    /// keep the field out of every response that has no URL to give.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+}
+
+impl SourceRef {
+    /// `documents.source` written by Quarry crawls; the only source whose
+    /// `metadata.url` is a public page address.
+    pub const QUARRY_SOURCE: &'static str = "quarry";
+
+    /// Longest URL surfaced. Longer values are not truncated (a cut URL points
+    /// somewhere else); they are not surfaced at all.
+    pub const MAX_URL_LEN: usize = 2048;
+
+    /// The citation URL a document may expose through `/v1/retrieve`.
+    ///
+    /// Two gates, both deliberate:
+    ///
+    /// * the SOURCE gate: only `documents.source = 'quarry'`. Other connectors
+    ///   keep their own metadata (SharePoint, for one, stores site and web URLs
+    ///   there); that is tenant metadata nobody reviewed for this response, and
+    ///   it would also be copied into the Dragonfly retrieval cache;
+    /// * the SHAPE gate: a plain `http(s)` URL with a host, no whitespace or
+    ///   control characters, no credentials (`user:secret@host`), at most
+    ///   [`Self::MAX_URL_LEN`] bytes. Anything else (`javascript:`, `data:`,
+    ///   `file:`, a relative path, a URL a crawler stored with embedded
+    ///   credentials) is dropped rather than repaired.
+    ///
+    /// The SQL already restricts the column to Quarry rows; this re-checks both
+    /// gates so the policy lives in one pure, tested place.
+    #[must_use]
+    pub fn citation_url(source: &str, metadata_url: Option<&str>) -> Option<String> {
+        if source != Self::QUARRY_SOURCE {
+            return None;
+        }
+        let url = metadata_url?;
+        if url.len() > Self::MAX_URL_LEN || url.chars().any(|c| c.is_control() || c.is_whitespace())
+        {
+            return None;
+        }
+        let rest = ["http://", "https://"].iter().find_map(|scheme| {
+            url.get(..scheme.len())
+                .filter(|head| head.eq_ignore_ascii_case(scheme))
+                .map(|_| &url[scheme.len()..])
+        })?;
+        let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+        if authority.is_empty() || authority.contains('@') {
+            return None;
+        }
+        Some(url.to_owned())
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]

@@ -80,6 +80,9 @@ pub async fn create_consumer(js: &JsContext) -> anyhow::Result<PullConsumer> {
     Ok(consumer)
 }
 
+// The eighth is the process's budget gate (CR-T9b), which the reconciler shares: a struct would
+// only move the same count into a type that exists for this one call.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_consumer(
     consumer: PullConsumer,
     pool: sqlx::PgPool,
@@ -88,23 +91,59 @@ pub async fn run_consumer(
     config: Config,
     nats: async_nats::Client,
     event_security: EventSecurity,
+    budget: Arc<crate::budget::BudgetGate>,
 ) -> anyhow::Result<()> {
     let mut buffer: Vec<(async_nats::jetstream::message::Message, BatchItem)> = Vec::new();
 
     // Contextual Retrieval, built once for the consumer's lifetime rather than
     // per batch: it owns a lazily-connected model-plane channel and a token
     // cache, both of which are wasted if rebuilt per batch. `None` when the
-    // feature is off, which is the default — see `provider::contextualize`.
+    // incident kill switch is thrown (it is on by default) — see `provider::contextualize`.
     // A *misconfigured* enablement fails here, at startup, rather than silently
     // degrading every batch to non-contextual embedding.
     let contextualizer = crate::provider::contextualize::Contextualizer::from_config(&config)?;
     match contextualizer.as_ref() {
         Some(c) => tracing::info!(
             model = c.model_name(),
-            "contextual retrieval ENABLED: one inference call per chunk on first embed"
+            "contextual retrieval ENABLED: contexts are generated inline within a time box and reused by input hash"
         ),
         None => tracing::info!("contextual retrieval disabled (CONTEXTUAL_RETRIEVAL_ENABLED)"),
     }
+    // The pipeline writes the provenance columns on every batch: say which migration to
+    // run now, rather than let every batch fail on a missing column.
+    batch::ensure_schema(&pool).await?;
+
+    // The per-organization operator policy (`org_processing_policy`, CR-T11): read through a
+    // 30-second cache, consulted only while generation is on. An organization whose policy is
+    // off gets no provider call and a `skipped_policy` status on its units; see `policy`.
+    let policy = crate::policy::PolicyReader::new(Arc::new(crate::policy::PgPolicySource::new(
+        pool.clone(),
+    )));
+
+    // The usage ledger (CR-T10), built once for the consumer's lifetime. `None` unless
+    // USAGE_EMIT_ENABLED=1, and then the consumer refuses to start unless it can sign the events
+    // and can create or verify the durable stream they ride: a producer that cannot reach a
+    // durable ledger must not run with metering on, because every event it published would be
+    // lost without a sound.
+    let usage_signer =
+        batch::usage_signer(config.usage_emit_enabled, event_security.signer.clone())?;
+    let usage_ledger = match usage_signer {
+        Some(signer) => {
+            let ledger = usage_ledger_rs::JetStreamLedger::new(nats.clone(), signer);
+            usage_ledger_rs::ensure_stream(ledger.context()).await?;
+            tracing::info!(
+                stream = usage_ledger_rs::STREAM_NAME,
+                "usage ledger ENABLED: every paid provider call is recorded on the durable stream"
+            );
+            Some(ledger)
+        }
+        None => {
+            tracing::info!(
+                "usage ledger disabled (USAGE_EMIT_ENABLED): the version 1 cost event is published"
+            );
+            None
+        }
+    };
 
     // §16.2.3 — drain on shutdown. A separate task watches SIGTERM/Ctrl-C
     // and flips this flag; the consumer loop checks it after every fetch
@@ -359,9 +398,7 @@ pub async fn run_consumer(
 
         // Process accumulated batch
         if !buffer.is_empty() {
-            // `mut`: the batch pipeline's Contextual Retrieval pass writes
-            // each item's embedded text in place before embedding.
-            let mut items: Vec<BatchItem> = buffer
+            let items: Vec<BatchItem> = buffer
                 .iter()
                 .map(|(_, item)| BatchItem {
                     knowledge_id: item.knowledge_id.clone(),
@@ -376,18 +413,22 @@ pub async fn run_consumer(
                 })
                 .collect();
 
-            match batch::process_batch(
-                &mut items,
-                &provider,
-                &qdrant,
-                &pool,
-                &config.qdrant_collection,
-                &nats,
-                event_security.signer.as_deref(),
-                contextualizer.as_ref(),
-            )
-            .await
-            {
+            let pipeline = batch::Pipeline {
+                provider: &provider,
+                vectors: &qdrant,
+                pool: &pool,
+                collection: &config.qdrant_collection,
+                events: &nats,
+                event_signer: event_security.signer.as_deref(),
+                contextualizer: contextualizer.as_ref(),
+                policy: &policy,
+                budget: budget.as_ref(),
+                usage: usage_ledger
+                    .as_ref()
+                    .map(|ledger| ledger as &dyn usage_ledger_rs::LedgerSink),
+                pass: batch::PassKind::Inline,
+            };
+            match batch::process_batch(items, &pipeline).await {
                 Ok(()) => {
                     for (msg, _) in &buffer {
                         let _ = msg.ack().await;

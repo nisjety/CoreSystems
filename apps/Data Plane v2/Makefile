@@ -1,4 +1,4 @@
-.PHONY: eval-retrieval eval-retrieval-lexical eval-gate eval-check up standalone-up cross-plane-env cross-plane-up down build logs clean status dev-retrieve proto ci smoke smoke-health auth-matrix test-security-scripts test-rs test-integration build-rs build-go check-rs fmt-rs clippy-rs vet-go load-grpc load-http migrate-build migrate-status migrate-up backup restore tenant-static-check tenant-check docker-build docker-up docker-up-obs docker-down docker-restart docker-test docker-logs docker-shell verevon-net go-tidy
+.PHONY: eval-retrieval eval-retrieval-lexical eval-gate eval-check eval-golden eval-evidence eval-variant eval-corpus-verify eval-harness-test up standalone-up cross-plane-env cross-plane-up down build logs clean status dev-retrieve proto ci smoke smoke-health auth-matrix test-security-scripts test-rs test-integration build-rs build-go check-rs fmt-rs clippy-rs vet-go load-grpc load-http migrate-build migrate-status migrate-up backup restore tenant-static-check tenant-check docker-build docker-up docker-up-obs docker-down docker-restart docker-test docker-logs docker-shell verevon-net go-tidy
 
 SOURCE_REVISION ?= $(shell git rev-parse --verify HEAD 2>/dev/null || echo unverified)
 BUILD_DATE ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
@@ -43,16 +43,20 @@ cross-plane-env: cp-env
 	env_dump="$$(mktemp)"; \
 	trap 'rm -f "$$env_dump"' EXIT; \
 	$(COMPOSE_BUILD_ENV) docker compose config --environment >"$$env_dump"; \
-	for name in NATS_SHARED_URL DOCUMENTS_GDPR_NATS_PASSWORD MODEL_PLANE_INFERENCE_SERVICE_API_KEY MODEL_PLANE_EMBEDDING_INFERENCE_SERVICE_API_KEY USER_CORE_DOCUMENTS_TOKEN USER_CORE_RETRIEVAL_TOKEN CONTROL_POLICY_SERVICE_API_KEY AUTH_CORE_PUBLIC_KEY_PATH DOCUMENTS_EVENT_SIGNING_PRIVATE_KEY_PATH DOCUMENTS_EVENT_VERIFYING_PUBLIC_KEY_PATH INDEX_EVENT_SIGNING_PRIVATE_KEY_PATH INDEX_EVENT_VERIFYING_PUBLIC_KEY_PATH EMBEDDING_EVENT_SIGNING_PRIVATE_KEY_PATH EMBEDDING_EVENT_VERIFYING_PUBLIC_KEY_PATH WIKI_EVENT_SIGNING_PRIVATE_KEY_PATH WIKI_EVENT_VERIFYING_PUBLIC_KEY_PATH RETRIEVAL_EVENT_SIGNING_PRIVATE_KEY_PATH RETRIEVAL_EVENT_VERIFYING_PUBLIC_KEY_PATH; do \
+	for name in NATS_SHARED_URL DOCUMENTS_GDPR_NATS_PASSWORD MODEL_PLANE_INFERENCE_SERVICE_API_KEY MODEL_PLANE_EMBEDDING_INFERENCE_SERVICE_API_KEY USER_CORE_DOCUMENTS_TOKEN USER_CORE_RETRIEVAL_TOKEN CONTROL_POLICY_SERVICE_API_KEY DATA_ORCHESTRATOR_COST_SERVICE_API_KEY AUTH_CORE_PUBLIC_KEY_PATH DOCUMENTS_EVENT_SIGNING_PRIVATE_KEY_PATH DOCUMENTS_EVENT_VERIFYING_PUBLIC_KEY_PATH INDEX_EVENT_SIGNING_PRIVATE_KEY_PATH INDEX_EVENT_VERIFYING_PUBLIC_KEY_PATH EMBEDDING_EVENT_SIGNING_PRIVATE_KEY_PATH EMBEDDING_EVENT_VERIFYING_PUBLIC_KEY_PATH WIKI_EVENT_SIGNING_PRIVATE_KEY_PATH WIKI_EVENT_VERIFYING_PUBLIC_KEY_PATH RETRIEVAL_EVENT_SIGNING_PRIVATE_KEY_PATH RETRIEVAL_EVENT_VERIFYING_PUBLIC_KEY_PATH GRAPH_EVENT_SIGNING_PRIVATE_KEY_PATH GRAPH_EVENT_VERIFYING_PUBLIC_KEY_PATH; do \
 		if ! awk -F= -v name="$$name" '$$1 == name && length(substr($$0, index($$0, "=") + 1)) > 0 { found=1 } END { exit !found }' "$$env_dump"; then \
 			echo "$$name must be provisioned before cross-plane-up" >&2; exit 1; \
 		fi; \
 	done; \
-	for name in AUTH_CORE_PUBLIC_KEY_PATH DOCUMENTS_EVENT_SIGNING_PRIVATE_KEY_PATH DOCUMENTS_EVENT_VERIFYING_PUBLIC_KEY_PATH INDEX_EVENT_SIGNING_PRIVATE_KEY_PATH INDEX_EVENT_VERIFYING_PUBLIC_KEY_PATH EMBEDDING_EVENT_SIGNING_PRIVATE_KEY_PATH EMBEDDING_EVENT_VERIFYING_PUBLIC_KEY_PATH WIKI_EVENT_SIGNING_PRIVATE_KEY_PATH WIKI_EVENT_VERIFYING_PUBLIC_KEY_PATH RETRIEVAL_EVENT_SIGNING_PRIVATE_KEY_PATH RETRIEVAL_EVENT_VERIFYING_PUBLIC_KEY_PATH; do \
+	for name in AUTH_CORE_PUBLIC_KEY_PATH DOCUMENTS_EVENT_SIGNING_PRIVATE_KEY_PATH DOCUMENTS_EVENT_VERIFYING_PUBLIC_KEY_PATH INDEX_EVENT_SIGNING_PRIVATE_KEY_PATH INDEX_EVENT_VERIFYING_PUBLIC_KEY_PATH EMBEDDING_EVENT_SIGNING_PRIVATE_KEY_PATH EMBEDDING_EVENT_VERIFYING_PUBLIC_KEY_PATH WIKI_EVENT_SIGNING_PRIVATE_KEY_PATH WIKI_EVENT_VERIFYING_PUBLIC_KEY_PATH RETRIEVAL_EVENT_SIGNING_PRIVATE_KEY_PATH RETRIEVAL_EVENT_VERIFYING_PUBLIC_KEY_PATH GRAPH_EVENT_SIGNING_PRIVATE_KEY_PATH GRAPH_EVENT_VERIFYING_PUBLIC_KEY_PATH; do \
 		path="$$(awk -F= -v name="$$name" '$$1 == name { print substr($$0, index($$0, "=") + 1); exit }' "$$env_dump")"; \
 		case "$$path" in .secrets/event-keys/*|*/.secrets/event-keys/*) echo "$$name still points at local sandbox key material" >&2; exit 1 ;; esac; \
 		case "$$path" in /*) ;; *) path="$(CURDIR)/$$path" ;; esac; \
 		test -r "$$path" || { echo "$$name points to an unreadable file" >&2; exit 1; }; \
+	done; \
+	for name in MODEL_PLANE_EMBEDDING_INFERENCE_RETENTION_POSTURE MODEL_PLANE_INFERENCE_RETENTION_POSTURE; do \
+		value="$$(awk -F= -v name="$$name" '$$1 == name { print substr($$0, index($$0, "=") + 1); exit }' "$$env_dump")"; \
+		case "$$value" in ""|persistent|zdr|tenant) ;; *) echo "$$name must be persistent|zdr|tenant (it must match the principal's retentionByAudience for inference-core, or be tenant), got '$$value'" >&2; exit 1 ;; esac; \
 	done
 
 cross-plane-up: cp-env cross-plane-env
@@ -187,16 +191,24 @@ smoke:
 # corrected goldenMetrics. Run BEFORE and AFTER any change to fusion weights,
 # rerank config, chunking, or embedding models — the 2026-08-26 sweeps are the
 # baseline evidence (see docker-compose.yml comments at W_BM25 / RERANK_TOP_K).
-# Requires: the stack up with the cross-plane overlay, the eval fixture applied
-# (scripts/eval-fixture-membership.sql), and the corpus ingested in
-# org-corpus-baseline / org-corpus-contextual.
-# EVAL_SCRATCH must contain: golden-v2.json + golden-v2-ctx.json (produced by
-# scripts/eval-build-golden-set.py) and seed-cred.txt (the corpus-seeder service
-# credential — a secret, deliberately never in the repo). Defaults to scripts/
-# so a colocated setup needs no arguments.
-eval-retrieval:
+# Requires: the stack up with the cross-plane overlay, the two organizations
+# provisioned (docs/contextual-retrieval-runbook.md, section 5.12), and the FROZEN
+# corpus ingested in org-corpus-baseline / org-corpus-contextual
+# (scripts/eval-ingest-corpus.py: a paid act that needs the owner's approval, OD8).
+# EVAL_SCRATCH receives the golden sets (built for the organizations as they are,
+# by the eval-golden target below: the id-keyed files are no longer committed
+# state) and must contain seed-cred.txt or have DATA_PLANE_CORPUS_SEEDER_API_KEY
+# exported (the corpus-seeder service credential — a secret, deliberately never in
+# the repo). Defaults to scripts/ so a colocated setup needs no arguments.
+eval-retrieval: eval-golden
 	./scripts/eval-attribution-study.sh "$${EVAL_SCRATCH:-./scripts}"
 	python3 ./scripts/eval-score-attribution.py "$${EVAL_SCRATCH:-./scripts}"
+
+# The golden sets (natural language, Norwegian morphology, mixed language), keyed by
+# document title and resolved to the ids the two organizations hold today through the
+# corpus key the ingest stored (CR-T14). Run it again after every re-seed.
+eval-golden:
+	python3 ./scripts/eval-build-golden-set.py --out "$${EVAL_SCRATCH:-./scripts}"
 
 # The MINED LEXICAL class — exact identifiers, config keys, file paths — as its
 # own gated cell. Separate from the target above on purpose: the 87-query set is
@@ -231,7 +243,38 @@ eval-gate:
 # models. Both classes are included because they disagree — a change that helps
 # prose retrieval can gut identifier lookup, and only running one class would
 # call that a win.
-eval-check: eval-retrieval eval-retrieval-lexical eval-gate
+eval-check: eval-retrieval eval-retrieval-lexical eval-evidence eval-gate
+
+# The evidence the gate judges the numbers by: the coverage of the contextual
+# organization (99 percent verified, and a baseline that is really raw) and the
+# keyword-index parity of both. Fetched from data-quality; a report that cannot be
+# read is removed, never left stale. Make the gate demand it:
+#   EVAL_REQUIRE_COVERAGE=1 EVAL_REQUIRE_PARITY=1 make eval-gate
+eval-evidence:
+	python3 ./scripts/eval-service.py coverage "$${EVAL_SCRATCH:-./scripts}"
+	python3 ./scripts/eval-service.py gates "$${EVAL_SCRATCH:-./scripts}"
+
+# One variant of the contextual organization (a prompt version, a model, the rerank
+# input) for the promotion gate. Putting the organization in that state is an
+# operator's act (the runbook, section 5.4); this measures it and DECLARES it:
+#   make eval-variant VARIANT=ctx-v2 DECLARE="--prompt ctx-v2"
+#   python3 scripts/eval-gate.py "$${EVAL_SCRATCH:-./scripts}" --promote ctx-v2 --against ctx-v1
+# 371 retrieval requests, 261 of them reranked (paid): not a loop.
+eval-variant:
+	./scripts/eval-variant-cell.sh "$${EVAL_SCRATCH:-./scripts}" "$(VARIANT)" $(DECLARE)
+
+# The harness's own tests (no stack, no cost): the frozen corpus matches its manifest,
+# the Python tests of the gate (both ways), the promotion gate, the ingest, the golden
+# builder and the service client, the contract goldens on both sides, and the shell
+# scripts against a stand-in for docker. CI runs the same (the eval-harness job).
+eval-corpus-verify:
+	python3 ./scripts/eval-ingest-corpus.py verify
+
+eval-harness-test: eval-corpus-verify
+	python3 -m unittest discover -s scripts/tests -p "test_eval_*.py"
+	bash ./scripts/check-eval-contract.sh
+	bash ./scripts/check-eval-contract.sh --self-test
+	bash ./tests/scripts/eval-harness-contract-test.sh
 
 test-security-scripts:
 	./tests/scripts/auth-regression-matrix-test.sh
@@ -239,6 +282,8 @@ test-security-scripts:
 	./tests/scripts/load-auth-contract-test.sh
 	bash ./tests/scripts/image-provenance-contract-test.sh
 	bash ./tests/scripts/compose-security-contract-test.sh
+	bash ./tests/scripts/graph-index-no-azure-contract-test.sh
+	bash ./tests/scripts/background-budget-contract-test.sh
 
 load-grpc:
 	./tests/load/grpc-retrieve.sh

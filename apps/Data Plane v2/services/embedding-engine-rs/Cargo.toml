@@ -11,6 +11,23 @@ path = "src/main.rs"
 name = "backfill-reannounce"
 path = "src/bin/backfill_reannounce.rs"
 
+# QB-M1b: stamps `documents.source` into the Qdrant payload of points written before the
+# embedding engine did. Operator tool, run once after the engine that stamps new points is
+# deployed (docs/qdrant-source-stamp-runbook.md).
+[[bin]]
+name = "qdrant-backfill-source"
+path = "src/bin/qdrant_backfill_source.rs"
+
+# CR-T9a: the operator's wrapper over the context reconciler (dry run, capped backfill, legacy
+# verification, prompt refresh). It compiles the service's own modules (`#[path]`, as
+# `qdrant-backfill-source` compiles `source_stamp`), so it is the reconciler's code and not a copy
+# of it. `test = false`: those modules' tests run once, in the service's own test binary, and not
+# a second time here. The Dockerfile builds and copies it, or it never reaches the image.
+[[bin]]
+name = "context-backfill"
+path = "src/bin/context_backfill.rs"
+test = false
+
 [dependencies]
 tokio.workspace = true
 serde.workspace = true
@@ -35,6 +52,15 @@ nats-connection-rs = { path = "../nats-connection-rs" }
 futures = "0.3"
 event-envelope-rs = { path = "../event-envelope-rs" }
 pg-org-scope-rs = { path = "../pg-org-scope-rs" }
+# The usage ledger (CR-T10): the v2 event every paid provider call is recorded as, signed with
+# this service's event key and published to the durable DATAPLANE_COST stream.
+usage-ledger-rs = { path = "../usage-ledger-rs" }
+# The one copy of the Auth Core service-token client and of the typed reading of
+# inference-core's refusal statuses (replaces provider/inference_auth.rs).
+inference-client-rs = { path = "../inference-client-rs" }
+# sha256 of what a context was generated from (context::prompt::input_hash) and of
+# a stored context (stored_context_hash): reuse, staleness and vector coherence.
+sha2.workspace = true
 base64 = "0.22"
 # Visual RAG: downscale + recompress rendered page images to fit Embed v4's
 # per-request token budget. PNG decode + JPEG encode only (lean feature set).
