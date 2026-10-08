@@ -162,9 +162,10 @@ if jq -e '
   and (to_entries | all(
         (.value.retentionByAudience | keys | sort) == (.value.audiences | sort)))
   # Retention is a closed vocabulary; anything else invalidates the entry.
+  # (tenant is the org-following posture: the ZDR setting of the org, read at mint.)
   and (to_entries | all(
         .value.retentionByAudience | to_entries | all(
-          .value == "zdr" or .value == "persistent")))
+          .value == "zdr" or .value == "persistent" or .value == "tenant")))
 ' <<<"$principal_json" >/dev/null; then
   pass "service-principal registry satisfies Auth Core's per-audience invariants"
 else
@@ -208,7 +209,7 @@ else
   fail "known placeholder secrets are replaced"
 fi
 
-for domain in documents index embedding wiki; do
+for domain in documents index embedding wiki graph; do
   private="$FIXTURE/apps/Data Plane v2/.secrets/event-keys/$domain-events.pem"
   public="$FIXTURE/apps/Data Plane v2/.secrets/event-keys/$domain-events.pub"
   if [[ -s "$private" && -s "$public" && "$(stat -f '%Lp' "$private")" == "600" && "$(stat -f '%Lp' "$public")" == "644" ]]; then

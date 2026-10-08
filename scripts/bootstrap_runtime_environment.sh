@@ -308,6 +308,18 @@ ensure_event_keypair() {
       upsert_env "$DATA_ENV" RETRIEVAL_EVENT_SIGNING_PRIVATE_KEY_PATH "$private_key_env"
       upsert_env "$DATA_ENV" RETRIEVAL_EVENT_VERIFYING_PUBLIC_KEY_PATH "$public_key_env"
       ;;
+    graph)
+      # graph-index SIGNS the usage events it emits for its model calls (graph
+      # extraction and community summaries) and data-orchestrator VERIFIES them,
+      # exactly as for the other four signed-event domains. Provisioned HERE, before
+      # any compose file mounts it: the retrieval domain above is the cautionary
+      # tale of a key the compose file referenced and nothing generated. The Data
+      # Plane compose reads these two names with the same relative defaults the
+      # other domains use (.secrets/event-keys/graph-events.{pem,pub}); production
+      # keys come from the secret manager at an absolute path, not from here.
+      upsert_env "$DATA_ENV" GRAPH_EVENT_SIGNING_PRIVATE_KEY_PATH "$private_key_env"
+      upsert_env "$DATA_ENV" GRAPH_EVENT_VERIFYING_PUBLIC_KEY_PATH "$public_key_env"
+      ;;
   esac
 }
 
@@ -693,7 +705,7 @@ ensure_secret "$DATA_ENV" DATAPLANE_NATS_TOKEN >/dev/null
 ensure_secret "$DATA_ENV" QDRANT_API_KEY >/dev/null
 ensure_value "$DATA_ENV" MINIO_ROOT_USER "verevon-data" >/dev/null
 ensure_secret "$DATA_ENV" MINIO_ROOT_PASSWORD >/dev/null
-for event_domain in documents index embedding wiki retrieval; do
+for event_domain in documents index embedding wiki retrieval graph; do
   ensure_event_keypair "$event_domain"
 done
 
@@ -866,193 +878,112 @@ ensure_model_execution_attestation_key
 # actually reads. Must run after both ensure_*_attestation_key calls above.
 assemble_provider_write_attestation_keys_json
 
-# Deployment-owned registry. Each identity has its own credential and bounded
-# audience/scopes; allowAnyOrg permits internal workers to serve newly-created
-# tenants without trusting a caller-supplied identity or widening scopes.
-# Deployment-owned registry. Each identity has its own credential and bounded
-# audience/scopes; allowAnyOrg permits internal workers to serve newly-created
-# tenants without trusting a caller-supplied identity or widening scopes.
+# ── Service principal registry ────────────────────────────────────────────────
 #
-# Reconciled 2026-08-01 against the LIVE 14-principal registry. Auth Core's
-# parseRegistry throws on the FIRST bad entry and runs PER REQUEST, so one
-# malformed entry 503s every service-token mint fleet-wide while /health stays
-# green. Two invariants it enforces, both easy to break by hand:
-#   * the union of scopesByAudience MUST exactly equal the flat `scopes` array;
-#   * retentionByAudience MUST have a key for every audience, valued only
-#     'zdr' or 'persistent'.
-# retention is issuer-determined and inference-core treats it as a FLOOR:
-# 'persistent' permits provider-side retention, 'zdr' forbids it.
+# ONE policy, ONE assembler. This script used to carry its own inline copy of the
+# registry (14 principals, older scopes, no tokenExchange) beside the committed
+# policy and the launcher's assembly, and the three drifted: a re-bootstrap
+# silently reverted scopes, and the launcher then adopted the stale copy's
+# credentials back into the live registry file. The registry is now assembled from
+# the COMMITTED policy (apps/Control Plane/config/plane-service-principals.json:
+# audiences, scopes per audience, retention, organization binding, tokenExchange)
+# by the shared assembler (apps/Control Plane/scripts/plane-principal-registry.jq),
+# the same one run-control-plane.sh calls. scripts/tests/
+# principal-registry-parity.test.sh fails when the policy, the launcher or this
+# script disagree.
 #
-# All 14 live principals are seeded. graph-index and embedding-engine reach the
-# Model Plane embedding hop with their own credentials from $DATA_ENV; the three
-# Data Plane services share the container variable NAME
-# (MODEL_PLANE_INFERENCE_SERVICE_API_KEY) but compose sources it from three
-# different plane-level variables, so the values are independent.
-principal_registry="$(jq -cn \
-  --arg retrieval "$control_policy_key" \
-  --arg imports "$imports_service_key" \
-  --arg model "$model_ingestion_key" \
-  --arg quarry "$quarry_service_key" \
-  --arg model_gateway "$model_gateway_service_key" \
-  --arg execution_core "$execution_core_service_key" \
-  --arg inference_routing "$inference_routing_key" \
-  --arg session_core "$session_core_service_key" \
-  --arg capability_core "$capability_core_key" \
-  --arg orchestrator_core "$orchestrator_core_key" \
-  --arg conversation_core "$conversation_core_key" \
-  --arg graph_index "$graph_index_key" \
-  --arg embedding_engine "$embedding_engine_key" \
-  --arg finspo "$finspo_service_key" \
-  '{
-    "retrieval-engine": {
-      credential: $retrieval,
-      audiences: ["control-policy", "inference-core"],
-      orgIds: [],
-      allowAnyOrg: true,
-      scopes: ["data:authorization:decide", "inference:invoke"],
-      scopesByAudience: {
-        "control-policy": ["data:authorization:decide"],
-        "inference-core": ["inference:invoke"]
-      },
-      retentionByAudience: { "control-policy": "zdr", "inference-core": "persistent" }
-    },
-    "imports-core": {
-      credential: $imports,
-      audiences: ["data-plane"],
-      orgIds: [],
-      allowAnyOrg: true,
-      scopes: ["documents:write"],
-      scopesByAudience: { "data-plane": ["documents:write"] },
-      retentionByAudience: { "data-plane": "persistent" }
-    },
-    "model-execution": {
-      credential: $model,
-      audiences: ["ingestion"],
-      orgIds: [],
-      allowAnyOrg: true,
-      scopes: ["integration:read", "shipping:read"],
-      scopesByAudience: { "ingestion": ["integration:read", "shipping:read"] },
-      retentionByAudience: { "ingestion": "zdr" }
-    },
-    "conversation-core": {
-      credential: $conversation_core,
-      audiences: ["ingestion"],
-      orgIds: [],
-      allowAnyOrg: true,
-      scopes: ["integration:read", "integration:write"],
-      scopesByAudience: { "ingestion": ["integration:read", "integration:write"] },
-      retentionByAudience: { "ingestion": "zdr" }
-    },
-    "quarry-edge": {
-      credential: $quarry,
-      audiences: ["data-plane"],
-      orgIds: [],
-      allowAnyOrg: true,
-      scopes: ["data:read", "documents:write", "org:data:read_all"],
-      scopesByAudience: { "data-plane": ["data:read", "documents:write", "org:data:read_all"] },
-      retentionByAudience: { "data-plane": "persistent" }
-    },
-    "model-gateway": {
-      credential: $model_gateway,
-      audiences: ["session-core", "quarry"],
-      orgIds: [],
-      allowAnyOrg: true,
-      scopes: ["scrape:read", "search:read", "session:heartbeat", "session:terminalize"],
-      scopesByAudience: {
-        "session-core": ["session:heartbeat", "session:terminalize"],
-        "quarry": ["scrape:read", "search:read"]
-      },
-      retentionByAudience: { "session-core": "zdr", "quarry": "zdr" }
-    },
-    "execution-core": {
-      credential: $execution_core,
-      audiences: ["capability-core", "session-core", "quarry"],
-      orgIds: [],
-      allowAnyOrg: true,
-      scopes: ["browser:execute", "capability:health:global:write", "capability:read", "scrape:write", "session:heartbeat", "session:terminalize"],
-      scopesByAudience: {
-        "capability-core": ["capability:read", "capability:health:global:write"],
-        "session-core": ["session:heartbeat", "session:terminalize"],
-        "quarry": ["browser:execute", "scrape:write"]
-      },
-      retentionByAudience: { "capability-core": "persistent", "session-core": "zdr", "quarry": "zdr" }
-    },
-    "finspo-core": {
-      credential: $finspo,
-      audiences: ["data-plane"],
-      orgIds: [],
-      allowAnyOrg: true,
-      scopes: ["documents:write"],
-      scopesByAudience: { "data-plane": ["documents:write"] },
-      retentionByAudience: { "data-plane": "persistent" }
-    },
-    "inference-core": {
-      credential: $inference_routing,
-      audiences: ["session-core"],
-      orgIds: [],
-      allowAnyOrg: true,
-      scopes: ["routing:read"],
-      scopesByAudience: { "session-core": ["routing:read"] },
-      retentionByAudience: { "session-core": "zdr" }
-    },
-    "session-core": {
-      credential: $session_core,
-      audiences: ["letta-bridge", "inference-core"],
-      orgIds: [],
-      allowAnyOrg: true,
-      scopes: ["inference:invoke", "memory:read", "memory:write"],
-      scopesByAudience: {
-        "letta-bridge": ["memory:read", "memory:write"],
-        "inference-core": ["inference:invoke"]
-      },
-      retentionByAudience: { "letta-bridge": "persistent", "inference-core": "persistent" }
-    },
-    "capability-core": {
-      credential: $capability_core,
-      audiences: ["session-core", "inference-core", "orchestrator-core"],
-      orgIds: [],
-      allowAnyOrg: true,
-      scopes: ["inference:invoke", "orchestration:workflow:start", "orchestration:workflow:start:global", "session:read", "session:skills:write"],
-      scopesByAudience: {
-        "session-core": ["session:read", "session:skills:write"],
-        "inference-core": ["inference:invoke"],
-        "orchestrator-core": ["orchestration:workflow:start", "orchestration:workflow:start:global"]
-      },
-      retentionByAudience: { "session-core": "persistent", "inference-core": "zdr", "orchestrator-core": "persistent" }
-    },
-    "orchestrator-core": {
-      credential: $orchestrator_core,
-      audiences: ["session-core", "inference-core", "capability-core", "letta-bridge"],
-      orgIds: [],
-      allowAnyOrg: true,
-      scopes: ["capability:read", "capability:write", "inference:invoke", "memory:read", "memory:write", "session:runs:system-owner", "session:write"],
-      scopesByAudience: {
-        "session-core": ["session:write", "session:runs:system-owner"],
-        "inference-core": ["inference:invoke"],
-        "capability-core": ["capability:read", "capability:write"],
-        "letta-bridge": ["memory:read", "memory:write"]
-      },
-      retentionByAudience: { "session-core": "persistent", "inference-core": "persistent", "capability-core": "persistent", "letta-bridge": "persistent" }
-    },
-    "graph-index": {
-      credential: $graph_index,
-      audiences: ["inference-core"],
-      orgIds: [],
-      allowAnyOrg: true,
-      scopes: ["inference:invoke"],
-      scopesByAudience: { "inference-core": ["inference:invoke"] },
-      retentionByAudience: { "inference-core": "persistent" }
-    },
-    "embedding-engine": {
-      credential: $embedding_engine,
-      audiences: ["inference-core"],
-      orgIds: [],
-      allowAnyOrg: true,
-      scopes: ["inference:invoke"],
-      scopesByAudience: { "inference-core": ["inference:invoke"] },
-      retentionByAudience: { "inference-core": "persistent" }
-    }
-  }')"
+# Adding or changing a principal is an edit to the policy file and nothing else
+# here. The policy holds no credential; each principal's credential is resolved,
+# never rotated:
+#   1. the variable its presenting end reads (`consumerEnv`), from the first
+#      ledger file that holds it. The explicit ensure_secret calls above mint the
+#      fleet-owned ones in their home plane; the registry then accepts exactly
+#      what the services present;
+#   2. else the launcher's store (apps/Control Plane/.env.generated-secrets), read
+#      only: that is where a principal with no home plane (corpus-seeder, the
+#      mail-task pair) already lives on a machine the launcher has run on;
+#   3. else the credential the previous registry in the Control ledger held;
+#   4. else a freshly minted one.
+# Whatever was chosen is published to `consumerEnv` in the Control ledger when no
+# ledger holds it, so a re-run finds it and the presenting end can read it.
+#
+# PLANE_SERVICE_PRINCIPALS_PROFILE selects the shape, as for the launcher:
+# `development` (default) keeps `tenancy: "directory"` rows on the legacy
+# allowAnyOrg the development stack runs on; `production` emits the policy as
+# stated (see config/README.md, "Organization binding").
+PRINCIPAL_POLICY_FILE="${PLANE_SERVICE_PRINCIPALS_POLICY_FILE:-$SCRIPT_DIR/../apps/Control Plane/config/plane-service-principals.json}"
+PRINCIPAL_ASSEMBLER="$SCRIPT_DIR/../apps/Control Plane/scripts/plane-principal-registry.jq"
+PRINCIPAL_PROFILE="${PLANE_SERVICE_PRINCIPALS_PROFILE:-development}"
+CONTROL_SECRETS_FILE="$CORE_ROOT/apps/Control Plane/.env.generated-secrets"
+
+for principal_input in "$PRINCIPAL_POLICY_FILE" "$PRINCIPAL_ASSEMBLER"; do
+  if [[ ! -f "$principal_input" ]]; then
+    log "ERROR: $principal_input is missing; the principal registry cannot be assembled"
+    exit 1
+  fi
+done
+
+# Path a NATIVE tool can open: jq on Windows is a win32 binary that cannot open
+# the /c/Users/... form bash hands it.
+native_path() {
+  if command -v cygpath >/dev/null 2>&1; then cygpath -m "$1"; else printf '%s' "$1"; fi
+}
+# jq on Windows writes CRLF, and command substitution keeps the CR.
+jqr() { jq "$@" | tr -d '\015'; }
+
+principal_policy_native="$(native_path "$PRINCIPAL_POLICY_FILE")"
+principal_assembler_native="$(native_path "$PRINCIPAL_ASSEMBLER")"
+principal_ledger_files=("$CONTROL_ENV" "$INGESTION_ENV" "$MODEL_ENV" "$DATA_ENV" "$APPLICATION_ENV" "$FRONTEND_ENV" "$ROOT_ENV")
+
+# The value of a variable in the first ledger file that holds a real one.
+ledger_credential() {
+  local file value
+  for file in "${principal_ledger_files[@]}"; do
+    value="$(dotenv_get "$file" "$1" 2>/dev/null || true)"
+    if [[ -n "$value" ]] && ! is_placeholder "$value"; then
+      printf '%s' "$value"
+      return 0
+    fi
+  done
+  return 1
+}
+
+existing_registry="$(dotenv_get "$CONTROL_ENV" PLANE_SERVICE_PRINCIPALS_JSON 2>/dev/null || true)"
+if [[ -z "$existing_registry" ]] || ! printf '%s' "$existing_registry" | jq empty >/dev/null 2>&1; then
+  existing_registry='{}'
+fi
+
+principal_credentials='{}'
+while IFS= read -r principal_name; do
+  [[ -n "$principal_name" ]] || continue
+  principal_consumer="$(jqr -r --arg n "$principal_name" '.[$n].consumerEnv // empty' "$principal_policy_native")"
+  if [[ -z "$principal_consumer" ]]; then
+    log "ERROR: principal $principal_name declares no consumerEnv in $PRINCIPAL_POLICY_FILE; there is nowhere to read or publish its credential"
+    exit 1
+  fi
+  principal_credential="$(ledger_credential "$principal_consumer" || true)"
+  if [[ -z "$principal_credential" ]]; then
+    principal_credential="$(dotenv_get "$CONTROL_SECRETS_FILE" "$principal_consumer" 2>/dev/null || true)"
+    if is_placeholder "$principal_credential"; then principal_credential=""; fi
+  fi
+  if [[ -z "$principal_credential" ]]; then
+    principal_credential="$(printf '%s' "$existing_registry" | jqr -r --arg n "$principal_name" '.[$n].credential // empty')"
+    if is_placeholder "$principal_credential"; then principal_credential=""; fi
+  fi
+  if [[ -z "$principal_credential" ]]; then
+    principal_credential="$(random_secret)"
+  fi
+  if ! ledger_credential "$principal_consumer" >/dev/null; then
+    upsert_env "$CONTROL_ENV" "$principal_consumer" "$principal_credential"
+  fi
+  principal_credentials="$(printf '%s' "$principal_credentials" | jqr -c --arg n "$principal_name" --arg c "$principal_credential" '.[$n] = $c')"
+done < <(jqr -r 'keys[]' "$principal_policy_native")
+
+if ! principal_registry="$(jqr -c -n --slurpfile pol "$principal_policy_native" --argjson creds "$principal_credentials" \
+  --arg profile "$PRINCIPAL_PROFILE" -f "$principal_assembler_native")"; then
+  log "ERROR: the principal registry could not be assembled from $PRINCIPAL_POLICY_FILE (profile $PRINCIPAL_PROFILE)"
+  exit 1
+fi
 upsert_env "$CONTROL_ENV" PLANE_SERVICE_PRINCIPALS_JSON "$principal_registry"
 
 for env_file in "${ENV_FILES[@]}"; do

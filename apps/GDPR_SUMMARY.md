@@ -112,6 +112,41 @@ Required controls:
 - Block production GDPR claims until ZDR rejection and cache invalidation tests
   cover durable stores and provider paths.
 
+> **Note: rerank of caller-supplied candidates (2026-10-03).** The deny rule
+> and the Model Plane preference above meet in one capability. The Data Plane
+> owns reranking of candidates a caller supplies with the request, including
+> public web search results (master ownership matrix, rule 15), and it calls
+> its reranking provider (Azure-hosted Cohere) directly over HTTPS. That is by
+> design and is not a bypass of the Model Plane preference above: the gates
+> below apply to it instead.
+>
+> - **Both processor conditions are required.** The processor is approved
+>   **and** `allow_third_party_processing=true`. Neither alone is enough.
+> - **Recorded gap, per request.** Quarry's
+>   `PrivacyPolicy.allow_third_party_processing` (default `false`) is not
+>   carried on Quarry's search path, and the Data Plane retrieval and embedding
+>   engines read no such field. The deployment-level processor approval
+>   specified for the web rerank route (decision ledger entry of 2026-10-03;
+>   default off, fail closed; not yet built) is an operator affirmation, not
+>   the per-request allowance this section requires. Until
+>   the signal is carried end to end, the per-request half of this control is
+>   an open gap for the Data Plane's external provider calls, not a satisfied
+>   control. Do not describe it as satisfied.
+> - **ZDR and sovereign requests never reach the provider.** A restrictive ZDR
+>   mode or a sovereign requirement skips the provider call. The existing
+>   retrieval rerank already does this. The caller-supplied rerank is specified
+>   to skip the same way, with an explicit marker, and to return the
+>   candidates in the order the caller supplied.
+> - **No retention evidence for the provider.** The repository holds no
+>   evidence that Cohere on Azure offers zero retention, the two Data Plane
+>   planning documents disagree on whether it is already in place (see the
+>   decision ledger entry of 2026-10-03), and the region of the rerank
+>   deployment is not recorded in the repository. None of that is relied on:
+>   restrictive-ZDR traffic is not sent to the provider.
+> - **The query is sent too.** The provider receives the query text as well as
+>   the candidates. The query can reveal tenant intent, so the same gates cover
+>   it.
+
 ### Ingestion Plane
 
 Ingestion Plane captures evidence, imports content, syncs connectors, and feeds
@@ -140,7 +175,9 @@ Required controls:
 - Gate every provider call with org policy, privacy classification, residency,
   ZDR, and processor approval.
 - Do not send prompts, context, embeddings, tool outputs, browser captures, or
-  files to third-party model providers when policy denies it.
+  files to third-party model providers when policy denies it. The one recorded
+  exception is a user's own AI connection (see "Exception: a user's own AI
+  connection" below).
 - Ensure inference caches, prompt logs, session records, memory, runs, and
   sandbox snapshots obey retention and deletion policy.
 - Audit browser and sandbox grants with expiry and minimal payloads.
@@ -168,6 +205,69 @@ secret, and ZDR data. It is allowed only when all of these are true:
 | Model, embedding, reranking providers | Denied for GDPR/ZDR content unless policy and processor allow it. |
 | Billing processors such as Stripe or Lago | Allowed for billing purpose only with processor records and retention policy. |
 | Support and notification systems | Allowed for support/notification purpose only with minimized payloads. |
+
+### Exception: a user's own AI connection
+
+> **Status (2026-10-06): designed, not built.** The owner decided the direction
+> on 2026-10-03. Nothing below runs today: a ZDR request on a user's own
+> connection is refused (`docs/compliance/evidence/honest-limits.md`, L17). Do
+> not describe this exception as in place, and do not describe it to a customer
+> until counsel has reviewed it.
+
+The policy above denies model-provider processing of ZDR data unless the
+organisation allows it, the processor is registered, and the provider can
+satisfy ZDR. A member who connects their own AI subscription or key (today the
+ChatGPT account route; no own-key connection exists) meets none of the three by
+design. The processor is the member's own provider account under the member's
+own terms, no processor agreement with that provider for it is recorded in the
+repository, and the provider cannot give ZDR. The owner's ruling is that such a member is not
+stopped: they are told, and they may continue. The exception is therefore
+narrow, and it replaces the conditions above with these, all required:
+
+1. The organisation has ZDR on and the connection cannot provide ZDR (its
+   capability is recorded as not supported, or as cannot verify). With ZDR off
+   nothing changes and nothing is asked.
+2. The member made an informed acknowledgement for this connection, this
+   capability and this wording version, shown when the connection was added or
+   at first use after the organisation turned ZDR on. It is stored with the text
+   shown, can be withdrawn at any time, and stops being valid when the
+   connection's capability or the wording changes.
+3. The waiver is per run. A signed, short-lived Control Plane decision binds it
+   to one connection. The Model Plane honours it for that connection only and
+   refuses every other route.
+4. The run is attended and interactive. A waiver never applies to an explicit
+   Temporary chat, a Space policy, scheduled or unattended work, inbox or
+   support AI, browser runs, speech, or background jobs.
+5. Retrieval for the run filters documents classified restricted. The
+   acknowledgement says that organisation knowledge retrieved for the run, and
+   tool results, are sent to the member's provider.
+6. Content-derived jobs that would send the run's content to other processors
+   (memory indexing, dreaming extraction, learning review) are skipped for it.
+7. The decision and the acknowledgement are audited with identifiers only. The
+   acknowledgement is personal data: it is kept while the connection exists and
+   365 days after withdrawal, and it is erased with the organisation purge.
+
+What the exception does not do:
+
+- **It does not make the member's provider a Verevon processor.** The provider
+  keeps what its own terms allow. The acknowledgement says so, and says that
+  Verevon cannot change it.
+- **It does not lower ZDR for anyone else.** The organisation's setting is never
+  written. Other members, other connections and other models stay under ZDR.
+- **It does not settle the processor-instruction question.** As processor,
+  Verevon takes the organisation's instructions. A member overriding the
+  organisation's ZDR for their own runs is, in effect, an instruction from
+  someone else. No admin lock is built (the owner ruled that members are not
+  stopped). The mitigations are the acknowledgement, the audit record and a
+  list an organisation admin can read. An organisation setting "members may use
+  own connections without ZDR" (default on) is proposed in the design for before the
+  first regulated customer organisation; the owner has not ruled on it. Counsel must
+  review this exception and the
+  acknowledgement wording, and the wording must be checked against the
+  providers' current documents, before it ships.
+
+The decision record is the Model Plane decision ledger entry of 2026-10-03
+(own-connection ZDR); the plane rule is rule 17 of the master ownership matrix.
 
 ## Quarry Proxy And Unblocker Position
 
@@ -242,6 +342,8 @@ are implemented and tested:
   across all derived stores.
 - ZDR tests cover provider rejection, cache invalidation, logs, audit events,
   Data Plane indexes, Model Plane sessions, and Quarry captures.
+- Counsel has reviewed the own-connection ZDR exception and its acknowledgement
+  wording (see "Exception: a user's own AI connection").
 - Direct provider paths are either removed or guarded by the same provider
   policy engine as Model Plane.
 - Development bypasses and in-memory operational state are production-denied.

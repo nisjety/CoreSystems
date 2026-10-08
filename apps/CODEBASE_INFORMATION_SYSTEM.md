@@ -2,6 +2,12 @@
 
 Updated: 2026-07-13
 
+> **Billing / Cost / Insights handoff — 2026-10-05:** see the
+> [current status and future plan](../docs/BILLING_COST_INSIGHTS_STATUS_AND_ROADMAP.md).
+> Further implementation is on hold at the user's request. Local allowance and
+> usage work is implemented; complete source coverage and commercial settlement
+> remain unfinished. The dated runtime notes below retain their original scope.
+
 > **Learning foundation added 2026-09-24:** [Learning Plane](learning-plane/README.md)
 > owns human-learning courses, revisions, assignments and attempts. Its first
 > consumer is [Teachme / Learn Core](Frontend%20Plane/learn-core/README.md):
@@ -116,7 +122,7 @@ flowchart LR
 ## Non-Negotiable Cross-Plane Rules
 
 1. No direct database crossing. Model, Frontend, Application, and Ingestion consume Data Plane APIs only.
-2. No independent embeddings or reranking outside isolated labs. Data Plane owns embedding and retrieval parity.
+2. No independent embeddings or reranking outside isolated labs. Data Plane owns embedding and retrieval parity, and owns reranking of tenant knowledge and of caller-supplied candidates (matrix rule 15): Quarry and Model Plane call it, subject to the ZDR, sovereign and processor gates.
 3. No browser-agent bypass around Quarry policy. Model Plane proposes browser actions; Quarry-v2 executes or rejects them.
 4. Zero Data Retention must propagate across every boundary that could persist content.
 5. GDPR policy metadata must travel with data and processing jobs: purpose, lawful basis, retention, residency, privacy class, third-party processing allowance, and deletion scope.
@@ -124,6 +130,8 @@ flowchart LR
 7. Reasoning lives in Model Plane: planning, synthesis, agent loops, tool selection, memory/wiki maintenance proposals.
 8. Human-facing UX lives in Frontend/Application/Channel surfaces, not in core storage or reasoning services.
 9. Browser-facing and frontend calls must pass through the Verevon gateway/BFF surface; upstream secrets, OAuth tokens, and forged org/user headers must not reach the browser.
+10. Background content processing in the Data Plane (contextual retrieval, graph extraction, index-time embedding and rerank) follows the organisation's retention posture and is metered under an org-attributed feature (matrix rule 16): ZDR is never lowered organisation-wide, and every paid provider call is recorded in cost-core, the ledger of record. The decision and its implementation state are in the Model Plane decision ledger, entries of 2026-10-03.
+11. The one exception to rule 4 is a per-run waiver of ZDR for a user's own connection (matrix rule 17): a signed, acknowledged decision issued only by Auth Core, bound to that one connection, never organisation-wide, with the capability record and the acknowledgement ledger owned by `integration-corev2`. As of 2026-10-06 it is designed and not built; what is built is the organisation switch gate and Auth Core's posture read path. The decision and its state are in the Model Plane decision ledger, entry of 2026-10-03 (own-connection ZDR).
 
 ## Plane Details
 
@@ -132,7 +140,7 @@ flowchart LR
 Purpose: authority root for authentication, authorization, users, organizations, billing, sessions, and audit.
 
 Primary services:
-- `auth-core` - NestJS/TypeScript auth authority, Better Auth-adjacent runtime, JWT/session/token flows.
+- `auth-core` - NestJS/TypeScript auth authority, Better Auth-adjacent runtime, JWT/session/token flows. The only authority for an organisation's retention (ZDR) posture at token mint, and, designed and not built, the only issuer of the per-run ZDR waiver (matrix rules 16 and 17).
 - `user-core` - Go user profile and preference service.
 - `org-core` - Go organization, entitlement, quota, feature flag, compliance authority.
 - `billing-core` - Go billing, usage, invoice, account, and quota events.
@@ -155,9 +163,9 @@ Purpose: canonical knowledge infrastructure for source documents, chunks, embedd
 Primary services:
 - `documents-api-go` - document CRUD, org scoping, bulk ingest, status, internal ingest.
 - `index-engine-rs` - chunking, BLAKE3 fingerprints, knowledge units, indexing events.
-- `embedding-engine-rs` - provider-backed embeddings, Qdrant upserts/deletes, NATS consumers.
-- `retrieval-engine-rs` - hybrid retrieval, query embedding, ANN, BM25, rerank, source join, context packing.
-- `graph-index-rs` - GraphRAG entities, relationships, claims, communities, provenance.
+- `embedding-engine-rs` - provider-backed embeddings, Qdrant upserts/deletes, NATS consumers, and contextual retrieval (a model-written situating context per chunk, generated through `inference-core`; the Data Plane owns the feature, matrix rule 16; the status machine and reconciler are planned, see `apps/Data Plane v2/docs/contextual-retrieval-runbook.md`).
+- `retrieval-engine-rs` - hybrid retrieval, query embedding, ANN, BM25, rerank (tenant knowledge and, per matrix rule 15, caller-supplied candidates), source join, context packing.
+- `graph-index-rs` - GraphRAG entities, relationships, claims, communities, provenance; extraction and community summaries are model calls through `inference-core` (matrix rule 16).
 - `wiki-store-go` - LLM wiki pages, versions, backlinks, source/maintenance logs.
 - `data-orchestrator-go` - reindex/rebuild/refresh/compaction jobs.
 - `data-quality-go` - eval, trust score, and release gates.
@@ -188,7 +196,7 @@ Primary services:
 - `Quarry-v2/services/quarry-control` - Go jobs, resources, schedules, histories, webhooks.
 - `Quarry-v2/services/quarry-orchestrator` - Go Temporal workflows.
 - `imports-core` - Python/FastAPI file import path.
-- `integration-corev2` - Go OAuth/connectors and workers.
+- `integration-corev2` - Go OAuth/connectors and workers. Also owns the user-owned model connections (today the ChatGPT account route) and, designed and not built, each connection's ZDR capability record and acknowledgement ledger (matrix rule 17).
 - `finspo-core` - Go SharePoint/M365 sync.
 - `autocomplete-core` - Rust quick lookup/autocomplete service.
 - `services/support-worker` - TypeScript worker package.
@@ -221,7 +229,7 @@ Primary services:
 - `sandbox-manager` - Go sandbox leases.
 - `browser-broker` - Go browser grants.
 - `letta-bridge` - Go optional memory bridge.
-- `cost-core` and `bridge-core` - Go cost ledger and MCP/LSP/bridge boundaries.
+- `cost-core` and `bridge-core` - Go cost ledger and MCP/LSP/bridge boundaries. `cost-core` is the ledger of record; as of 2026-10-06 it holds model-gateway rows only, and the Data Plane's own spend (embed, rerank, contextual retrieval, graph extraction) is planned to reach it through a forwarder that is not built or deployed (matrix rule 16).
 
 Common entry points:
 - `apps/Model Plane/rust/services/*/src/main.rs`
