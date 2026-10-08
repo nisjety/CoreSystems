@@ -16,3 +16,16 @@ tracing = { workspace = true }
 # dxgi.rs was written and verified against -- see that module's doc comment
 # for citations.
 windows-capture = "1.5"
+# windows-capture's own `Monitor` type has no safe way to read a monitor's
+# POSITION (x/y in the virtual desktop) -- only width/height/name/index
+# (verified against its actual source). `display-info`'s public API is
+# fully safe (confirmed via its own source: every `unsafe` block --
+# `GetMonitorInfoW`, `EnumDisplayMonitors` -- is internal to its own crate,
+# the same precedent `windows-capture`/`enigo`/`rfd` already established
+# for this workspace's `unsafe_code = "forbid"` lint) and gives real
+# position, size, and primary-ness. `DisplayInfo::raw_handle` is a plain
+# `HMONITOR(pub *mut c_void)` (confirmed in the `windows` crate's own
+# source), so its `.0` bridges directly into `windows_capture::monitor::
+# Monitor::from_raw_hmonitor` with no unsafe code and no cross-crate type
+# concerns (the boundary is a raw `c_void` pointer, not a typed handle).
+display-info = "0.5"

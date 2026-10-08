@@ -39,9 +39,10 @@ use va_crypto::{unseal, CryptoError, EphemeralKeyPair, IdentityKeyPair, SessionC
 
 use crate::messages::{
     decode_key_event, decode_login_request, decode_mouse_event, decode_public_key,
-    decode_test_delay, encode_hash, encode_login_response, encode_permission_info,
-    encode_signed_id, encode_test_delay, message_field, read_envelope_field, wrap_message,
-    DisplayInfo, Hash, KeyEvent, LoginResponse, MouseEvent, PeerInfo, Permission, TestDelay,
+    decode_switch_display_request, decode_test_delay, encode_hash, encode_login_response,
+    encode_permission_info, encode_signed_id, encode_switch_display, encode_test_delay,
+    message_field, read_envelope_field, wrap_message, DisplayInfo, Hash, KeyEvent, LoginResponse,
+    MouseEvent, PeerInfo, Permission, SwitchDisplay, TestDelay,
 };
 
 #[derive(Debug, Error)]
@@ -148,6 +149,13 @@ pub enum Event {
     /// "nothing happened" from "the controller tried to do something it
     /// isn't allowed to do" for logging/telemetry.
     InputDenied,
+    /// The controller asked to switch the streamed display (`Misc.
+    /// switch_display` carrying only the target index). This state
+    /// machine has no capture/monitor knowledge of its own -- the caller
+    /// decides whether the index is valid, does whatever real work
+    /// switching implies, and calls `confirm_display_switch` with the new
+    /// display's real geometry once it's actually active.
+    DisplaySwitchRequested { display: i32 },
     /// Nothing to send back for this message (e.g. the echo of our own
     /// outbound `TestDelay` probe, which needs no further reply).
     None,
@@ -324,6 +332,14 @@ impl HostSession {
             }
             return Ok(Event::KeyInput(decode_key_event(payload)?));
         }
+        if field_number == message_field::MISC {
+            if let Some(display) = decode_switch_display_request(payload)? {
+                return Ok(Event::DisplaySwitchRequested { display });
+            }
+            // Some other Misc variant this phase doesn't act on -- ignored,
+            // matching proto3 forward-compatibility.
+            return Ok(Event::None);
+        }
         // Unknown/unhandled field for this phase — ignored rather than
         // erroring, matching proto3's forward-compatibility contract.
         Ok(Event::None)
@@ -363,6 +379,22 @@ impl HostSession {
 
     fn encode_permission_info(&mut self, enabled: bool) -> Result<Vec<u8>, ProtocolError> {
         let envelope = wrap_message(message_field::MISC, &encode_permission_info(Permission::Keyboard, enabled));
+        self.encrypt(&envelope)
+    }
+
+    /// Confirms a display switch with the new display's REAL geometry --
+    /// this state machine has no capture/monitor knowledge of its own, so
+    /// the caller (which does) builds `display` from whatever it actually
+    /// switched to, not necessarily the index the controller requested
+    /// (e.g. an out-of-range request could be clamped, or ignored in favor
+    /// of whatever was already active -- that policy is entirely the
+    /// caller's call).
+    ///
+    /// # Errors
+    ///
+    /// Same as `grant_input_permission`.
+    pub fn confirm_display_switch(&mut self, display: &SwitchDisplay) -> Result<Vec<u8>, ProtocolError> {
+        let envelope = wrap_message(message_field::MISC, &encode_switch_display(display));
         self.encrypt(&envelope)
     }
 

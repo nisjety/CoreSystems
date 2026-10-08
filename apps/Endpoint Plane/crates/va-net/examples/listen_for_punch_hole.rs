@@ -137,6 +137,10 @@ async fn handle_punch_hole(
     run_host_session(&mut relay_sock, id, identity, password).await;
 }
 
+// A diagnostic tool's dispatch loop, not core logic -- a couple of lines
+// over the pedantic threshold from an exhaustive Event match isn't worth
+// fragmenting further.
+#[allow(clippy::too_many_lines)]
 async fn run_host_session(
     relay_sock: &mut tokio::net::TcpStream,
     id: &str,
@@ -221,7 +225,13 @@ async fn run_host_session(
                         // registration/relay/handshake/login sequence;
                         // input injection and its permission model are
                         // `verevon-agent`'s job, not this example's.
-                        Ok(Event::MouseInput(_) | Event::KeyInput(_) | Event::InputDenied | Event::None) => {}
+                        Ok(
+                            Event::MouseInput(_)
+                            | Event::KeyInput(_)
+                            | Event::InputDenied
+                            | Event::DisplaySwitchRequested { .. }
+                            | Event::None,
+                        ) => {}
                         Err(err) => {
                             println!("on_encrypted_message failed: {err}");
                             return;

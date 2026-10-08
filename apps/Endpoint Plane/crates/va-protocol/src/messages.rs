@@ -772,6 +772,38 @@ pub fn encode_switch_display(value: &SwitchDisplay) -> Vec<u8> {
     w.finish()
 }
 
+/// Decodes a `Misc` envelope (the payload of a `Message.misc` field, NOT
+/// yet unwrapped further), returning the requested display index if it's
+/// a `switch_display` REQUEST (only `display`, field 1, is ever set by the
+/// client -- see `encodeSwitchDisplayRequest` in `remote-core`'s own
+/// `controlCodec.ts`) -- `None` for any other `Misc` variant
+/// (`permission_info`, an unrecognized field, etc.), matching proto3
+/// forward-compatibility. This crate has no reason to decode the HOST's
+/// own confirmation shape (`SwitchDisplay`'s other fields) since it never
+/// receives its own message back.
+pub fn decode_switch_display_request(misc_payload: &[u8]) -> Result<Option<i32>, WireError> {
+    let mut r = ProtoReader::new(misc_payload);
+    while !r.eof() {
+        let tag = r.read_tag()?;
+        if tag.field_number == 5 {
+            let inner_payload = r.read_length_delimited()?;
+            let mut ir = ProtoReader::new(inner_payload);
+            let mut display = 0;
+            while !ir.eof() {
+                let inner_tag = ir.read_tag()?;
+                if inner_tag.field_number == 1 {
+                    display = ir.read_int32()?;
+                } else {
+                    ir.skip(inner_tag.wire_type)?;
+                }
+            }
+            return Ok(Some(display));
+        }
+        r.skip(tag.wire_type)?;
+    }
+    Ok(None)
+}
+
 // =====================================================================
 // RegisterPeer / RegisterPeerResponse — the actual online-keepalive hbbs
 // checks a peer's `last_reg_time` against (see the module doc above for how
@@ -1334,6 +1366,29 @@ mod tests {
         assert_eq!(mr.read_int32().unwrap(), 1);
         assert_eq!(mr.read_tag().unwrap().field_number, 2);
         assert_eq!(mr.read_sint32().unwrap(), -100);
+    }
+
+    #[test]
+    fn decode_switch_display_request_reads_the_display_index() {
+        // Matches remote-core's own encodeSwitchDisplayRequest -- only
+        // `display` (field 1) is ever set, nested under Misc field 5.
+        let mut inner = ProtoWriter::new();
+        inner.int32(1, 2);
+        let mut misc = ProtoWriter::new();
+        misc.message(5, &inner.finish());
+        let display = decode_switch_display_request(&misc.finish()).unwrap();
+        assert_eq!(display, Some(2));
+    }
+
+    #[test]
+    fn decode_switch_display_request_returns_none_for_a_different_misc_variant() {
+        // permission_info (field 6), not switch_display (field 5).
+        let mut inner = ProtoWriter::new();
+        inner.int32(1, 0).bool(2, true);
+        let mut misc = ProtoWriter::new();
+        misc.message(6, &inner.finish());
+        let display = decode_switch_display_request(&misc.finish()).unwrap();
+        assert_eq!(display, None);
     }
 
     #[test]

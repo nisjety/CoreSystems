@@ -10,7 +10,7 @@ use thiserror::Error;
 #[cfg(windows)]
 pub mod dxgi;
 #[cfg(windows)]
-pub use dxgi::DxgiDuplicationSource;
+pub use dxgi::{enumerate_monitors, DxgiDuplicationSource, MonitorInfo};
 
 #[derive(Debug, Error)]
 pub enum CaptureError {
