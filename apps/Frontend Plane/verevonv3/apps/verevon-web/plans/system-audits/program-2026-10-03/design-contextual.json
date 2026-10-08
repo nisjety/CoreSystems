@@ -1,0 +1,726 @@
+{
+ "summary": "Contextual retrieval (CR) stays ON and becomes a durable, DB-truth pipeline instead of a best-effort inline step. The live audit found nine problems: (1) CR is on only through the git-ignored Data Plane `.env`; code and compose default to OFF. (2) Every paid CR and graph-extraction call is unmetered. (3) The org-level ZDR flag never reaches background processing. (4) Failures are silent and unrecorded. (5) A re-embed can leave the lexical context out of step with the vector. (6) Contextualisation stalls the single embedding consumer for every tenant. (7) The sparse index holds only 57 of 207 chunks, so contextual BM25 reaches 51 chunks. (8) The graph reconciler re-pays for the same chunk. (9) The eval corpus and gate cannot run. The design adds a per-unit `context_status` state machine with provenance and a vector-coherence hash. Generation is time-boxed inline, with a reconciler as the DB-truth backstop and backfill. It adds a `tenant` retention posture for service tokens (org ZDR respected, fail-closed, explicit markers, never silent). Metering goes through Data Plane usage events → durable stream → forwarder → cost-core, with a `feature` dimension and exact tokens. Graph extraction gets the same treatment. A re-seeded eval corpus gates every prompt, model or policy change. Real-policy contract tests and a live smoke matrix cover each cross-plane dependency. Nothing was changed. Two credential-like values appeared in my own tool output (see risks).",
+ "current_state": [
+  {
+   "fact": "Live corpus: 1 org, 185 live documents, 207 knowledge_units, all embedding_status=done. 206 carry chunk_context with context_prompt_version=ctx-v1; 1 has none. Average chunk 888 chars, average context 242 chars, max 485. The Data Plane Postgres superuser role is `dataplane`, not `postgres`.",
+   "source": "live SQL on data-plane-v2-postgres-1/dataplane (aggregates only), 2026-10-03",
+   "verified_live": true
+  },
+  {
+   "fact": "The one raw chunk is a single-chunk document whose chunk equals the whole document (529 chars). It was created 2026-09-28 21:09:31 and embedded 21:12:21, 2m50s later. Why it skipped CR is unknowable: logs rolled over at the 2026-09-30 container restart and nothing in the DB records why.",
+   "source": "live SQL join documents/knowledge_units; docker logs embedding-engine (only 40 lines since 2026-09-30 13:06)",
+   "verified_live": true
+  },
+  {
+   "fact": "knowledge_units has chunk_context, context_prompt_version and a generated content_tsv (text weight A, chunk_context weight B, 'simple' config). It has NO status/provenance/model/input-hash/attempt columns. embedding_model exists but is NULL on all 207 rows because embedding-engine never writes it.",
+   "source": "live \\d knowledge_units; grep embedding_model across services (only the NATS event carries it: embedding-engine-rs/src/batch/mod.rs:158)",
+   "verified_live": true
+  },
+  {
+   "fact": "Contextual BM25 reaches few chunks. SPARSE_SEARCH_BACKEND=quickwit but the Quickwit index dataplane-corpus holds 57 distinct chunks (52 documents, 10 splits, 1 org) against 207 in Postgres. 51 of those 57 have context_body; 6 do not. Qdrant dataplane_knowledge_embedv4 has 207 points (dense arm complete). The Quickwit adapter logged 'Quickwit admin job claim failed: Storage'.",
+   "source": "live Quickwit search + terms aggs via docker exec data-plane-v2-quickwit-1 curl; Qdrant /points/count via retrieval-engine container; retrieval-engine env",
+   "verified_live": true
+  },
+  {
+   "fact": "CR is ON in the live container (CONTEXTUAL_RETRIEVAL_ENABLED=true, MODEL=gpt-4o-mini, concurrency 4, 4 retries, 30s timeout, 48,000 doc chars, 128 max tokens, empty provider hint). But the default is false in code (config.rs:135-136) and compose (docker-compose.yml:775), the model has no default (compose:779), and `.env` is git-ignored (.gitignore:243) so a fresh checkout turns CR off. `.env.example` has no CR variables and no compose contract test mentions CR.",
+   "source": "docker exec data-plane-v2-embedding-engine-1 env; git check-ignore; apps/Data Plane v2/.env.example; tests/scripts/compose-security-contract-test.sh",
+   "verified_live": true
+  },
+  {
+   "fact": "How each CR call is made: embedding-engine mints ONE aud=inference-core service JWT per document via auth-core /api/inference-core/internal-token (org_id = the document's org, scope inference:invoke, reason 'embed document content', TTL up to 300s). It calls inference-core gRPC Infer with model gpt-4o-mini, empty provider_hint, zdr=false, no privacy tier, no residency floor, temperature 0, max_tokens 128. inference-core pins request.org_id to the token org, so every call is org-attributed. Routing resolves gpt-4o-mini to azure-openai (INFERENCE_PROVIDER_ORDER=azure,anthropic,openai,cohere,openai-codex-subscription; AZURE_OPENAI_CHAT_DEPLOYMENTS includes gpt-4o-mini).",
+   "source": "embedding-engine-rs/src/provider/contextualize.rs:271,381-429; provider/inference_auth.rs:238-274; inference-core grpc.rs:155-168,1104-1110; live inference-core env",
+   "verified_live": true
+  },
+  {
+   "fact": "The response carries exact usage and provenance that the caller discards. InferResponse has input_tokens, output_tokens, cache_read_input_tokens, cache_creation_input_tokens, model_used, provider_used, residency, stop_reason, and provider_timing.response_cache_hit. contextualize.rs reads only `content`.",
+   "source": "apps/Model Plane/proto/model_plane/v1/inference.proto:256-310,423; contextualize.rs:443-455",
+   "verified_live": false
+  },
+  {
+   "fact": "Cost visibility gap, confirmed. cost-core cost_entries holds only producer_id=model-gateway rows (gpt-5.6-terra subscription 1,197; claude-sonnet-4-6 332; gpt-4o-mini 16 from chat, etc.). There are no embedding-engine, graph-index or CR rows. cost-core accepts NATS usage envelopes only from producer 'model-gateway', and requires a non-empty user_id. inference-core has no usage emission and its /metrics returns 200 with an empty body (no counters defined). The Data Plane's own cost_events holds 259 rerank events (latest 2026-09-23) and 17 embedding events (latest 2026-09-28) and nothing for CR or graph. The product cost page reads cost-core only. Gap-data DATA-15 says 'usage events to cost-core ... CLOSED' but no path to cost-core exists.",
+   "source": "live SQL cost_entries (model-plane-postgres-1/session_core) and cost_events; cost-core cmd/main.go:53,430-441; curl 127.0.0.1:18082/metrics; gateway domains/cost.rs; docs/gap-data.md:351",
+   "verified_live": true
+  },
+  {
+   "fact": "cost-core already has an authenticated HTTP ingest. POST /api/v1/cost/record accepts a service principal with scope cost:write (CostAuthorizer, server.go:220-240). The ledger accepts producer-attributed rows with no user (ledger.go:134, `user_id or producer_id`), the org is pinned from the token, and COST_CORE_AUTH_AUDIENCE=cost-core,inference-core live. data-orchestrator reaches cost-core:8089 over inter-plane-bus (HTTP 200 on /healthz). No principal anywhere holds audience cost-core or scope cost:write.",
+   "source": "cost-core server.go:131-147,220-324; docker exec data-plane-v2-data-orchestrator-1 curl; plane-service-principals.json + live registry (names/audiences/scopes only)",
+   "verified_live": true
+  },
+  {
+   "fact": "cost-core pricing has gpt-4o-mini (0.15/0.60 per M) but no rows for embed-v-4-0, text-embedding-3-large or Cohere-rerank-v4.0-pro. An unknown model is priced at the mid-tier `default` row (3.00/15.00), which would overstate embedding cost about 25x. The live cost_entries table lacks the provider_used column: migrations 0006/0007 and the store.go change are uncommitted work by another session.",
+   "source": "cost-core internal/pricing/pricing.go:86-120; git status of cost-core; live \\d cost_entries",
+   "verified_live": true
+  },
+  {
+   "fact": "The Data Plane cost ledger is lossy and thin. Producers publish `dataplane.cost.ledger` as plain core-NATS (`let _ = nats.publish`). The consumer is a non-durable core subscription. It drops every event whose envelope zdr flag is true. It accepts only two signed issuers (embedding-engine-rs, retrieval-engine-rs), so graph-index cannot emit without a new key. The cost_events table has event_type/model/count/estimated_tokens/user_id only. Embedding tokens are an estimate (bytes/4).",
+   "source": "embedding-engine batch/mod.rs:185-216; data-orchestrator-go internal/cost/consumer.go:52-60,88-90; verifier.go:28-33,111-135; live \\d cost_events",
+   "verified_live": true
+  },
+  {
+   "fact": "Auth Core principals. embedding-engine and graph-index each hold audience inference-core, scope inference:invoke, retentionByAudience persistent, allowAnyOrg true. Their clients assert claims.zdr == configured posture and fail every mint on mismatch (inference_auth.rs:331-338). Service-token retention is STATIC per (service,audience) with default 'zdr' for an unlisted audience (plane-service-principal.ts:379-380,406). Org-level ZDR (org-core metadata.interactiveRetention.zdr AND the feature.zero_data_retention entitlement) is resolved only for INTERACTIVE user tokens (interactive-retention-policy.ts:147-174). The registry loader refuses allowAnyOrg principals in production file mode (plane-service-principal.ts:176-186).",
+   "source": "live auth-service PLANE_SERVICE_PRINCIPALS_JSON (structure only); auth-core plane-service-principal.ts, plane-token.controller.ts:272-333, interactive-retention-policy.ts",
+   "verified_live": true
+  },
+  {
+   "fact": "ZDR posture. Live inference-core has NO ZDR attestation (all AZURE_OPENAI_ZDR_* and AZURE_ANTHROPIC_ZDR_* empty, *_CONFIRMED=false), AZURE_OPENAI_DEPLOYMENT_TYPE unset (boot warning), azure-anthropic declares no residency, MODEL_PLANE_ALLOW_GLOBAL_RESIDENCY=false. A ZDR-flagged chat request therefore fails with FAILED_PRECONDITION (ZdrUnavailable, checked before any network call, fallback.rs:1224-1226,1283-1290; grpc.rs:1465-1467). inference-core ORs the token's zdr claim with the request flag (auth.rs:193-195). org-core: 3 organisations, 0 with ZDR intent, so the org-ZDR path is not exercisable live without toggling a setting.",
+   "source": "docker exec model-plane-inference-core-1 env + docker logs; docs/compliance/evidence/data-flow-map.md G14,R15.1; org_core SQL aggregate",
+   "verified_live": true
+  },
+  {
+   "fact": "ZDR at the Data Plane is per document, not per org. The embedding consumer drops events whose envelope zdr=true (stream/mod.rs:230-234) and treats a document as ZDR only when documents.zdr_classification='restricted' (stream/mod.rs:289-309). index-engine refuses restricted/zdr documents entirely (builder/mod.rs: canonical_document_is_indexable; process_document bails on event.zdr). documents-api rejects durable persistence only when the verified TOKEN carries zdr=true (handler/documents.go:68-80,304), which service writers (imports-core, finspo-core, quarry-edge, persistent posture) never do. The CR request hard-codes zdr=false (contextualize.rs:404). Text embedding bypasses inference-core (EMBEDDING_PROVIDER=cohere, Cohere Embed v4 direct on Foundry) with the same per-document guard only.",
+   "source": "embedding-engine stream/mod.rs, contextualize.rs; index-engine builder/mod.rs:58-66,128-131; documents-api handler/documents.go; live embedding-engine env",
+   "verified_live": true
+  },
+  {
+   "fact": "Pipeline mechanics. CR runs inside the single embedding consumer loop, document by document (batch/mod.rs:353-390), before embedding. JetStream ack_wait is 60s, max_deliver 5 (stream/mod.rs:74-75), batch size 32 and envelope TTL 120s (documented incident: 1,044 of 1,164 chunks lost to expiry). Retry backoff 2/4/8/16s ignores the typed retry-after trailer (x-mp-retry-after-ms) the server sets. Failure paths: bearer mint failure, any non-transient status, retries exhausted, empty answer (Ok(None), NOT logged), missing or empty document content, lookup failure, and count mismatch all fall back to a raw embed with no DB record.",
+   "source": "embedding-engine contextualize.rs:148-174,262-359,452-455; batch/mod.rs:291-391; stream/mod.rs; inference-core grpc.rs:1343-1358,1449-1455",
+   "verified_live": false
+  },
+  {
+   "fact": "Re-embed behaviour. persist_chunk_context writes only Some(context) (batch/mod.rs:445-490). A re-embed whose generation fails therefore embeds raw but leaves the OLD context in content_tsv and Quickwit. A re-embed always regenerates, even when a valid context is persisted (re-pays). context_prompt_version is written and never read, so there is no refresh path. index-engine's exact-reuse chunking never re-emits knowledge.units.created for unchanged content. The existing operator tools are backfill-reannounce (embedding-engine) and reembed-switch (index-engine, replays units.created).",
+   "source": "batch/mod.rs; index-engine-rs/src/builder/mod.rs:91-135; src/bin/reembed_switch.rs:1-60; backfill_reannounce.rs:1-60",
+   "verified_live": false
+  },
+  {
+   "fact": "Prompt/quality facts. The document is placed first (prompt-cache friendly) but truncated to the FIRST 48,000 chars, so chunks beyond have no document context. The prompt has no title/source/date and no language instruction. stop_reason is ignored. 195 of 206 live contexts begin with 'This chunk / The chunk / This section / ...'. 205 of 206 contexts contain English stopwords, 175 of 206 chunks contain Norwegian stopwords (corpus is mixed; contexts are mostly English). Measured benefit (evidence 2026-08-26, 87 judged queries, 1,164-chunk corpus): nDCG@10 contextual 0.7732 vs raw 0.7452, MRR 0.7394 vs 0.6999, recall 0.8736 vs 0.8851 (inside noise); exact-identifier class unchanged (0.9622 nDCG on 23 mined queries); +0.005 nDCG with the reranker on.",
+   "source": "contextualize.rs:85-96,377-380; live SQL regex aggregates; docs/retrieval-fusion-evidence-2026-08-26.md:30-65,398-400; scripts/eval-baseline.json",
+   "verified_live": true
+  },
+  {
+   "fact": "The reranker never sees context. retrieval-engine reranks `c.text` (raw chunk) and never reads chunk_context. Neither Meilisearch (keyword arm) nor retrieval-engine consumes chunk_context; only Postgres content_tsv and Quickwit context_body do.",
+   "source": "retrieval-engine-rs/src/search/rerank.rs:207,373; grep chunk_context across services",
+   "verified_live": false
+  },
+  {
+   "fact": "Graph extraction. graph-index uses gpt-4o-mini via inference-core (MODEL_PLANE_EXTRACTION_MODEL, provider hint azure_openai, 60s timeout, max_tokens 4096), one call per org-visible chunk, then per-community summarisation calls. It emits no cost event, stores no model/prompt version (provenance='extracted' on all 68 entities), and its token client is a near-copy of embedding-engine's (52 diff lines). Live graph is 68 entities, 6 relationships, 36 claims, 86 text units. Only 3 of 185 documents are visibility=org, and 2 have graph rows. The reconciler retried one single-chunk document at ~6-minute intervals at least 10 times on 2026-09-29 14:16-15:09 ('model-plane inference failed' x8, 'timed out after 60s' x2). The real gRPC status is hidden by `anyhow!(status).context(..)` printed with %e. It then succeeded with 0 entities, was suppressed in memory only, and was re-paid after the 09-30 restart. The DLQ publish happens only when the event verifier is None.",
+   "source": "graph-index-rs extractor.rs:330-345, reconcile.rs:132-174,283-324, stream.rs:376-453; docker logs data-plane-v2-graph-index-1; live SQL",
+   "verified_live": true
+  },
+  {
+   "fact": "Observability. embedding-engine exposes only /healthz, /readyz and a short-text embed endpoint, with no /metrics. Data Plane compose has no Prometheus. data-quality-go has release gates (retrieval_traces_exist, no_failed_embeddings, ...) and a cost summary reading cost_events. quality_eval_runs and eval_golden_judgments are empty.",
+   "source": "embedding-engine api/mod.rs; data-quality-go internal/gates/checker.go:53-166, internal/cost/query.go; live SQL",
+   "verified_live": true
+  },
+  {
+   "fact": "The eval harness exists but cannot run on this stack. 87 hand-authored judged queries (scripts/golden-v2*.json), eval-attribution-study.sh, eval-lexical-cell.sh, eval-gate.py with committed baseline, and eval-nightly.sh for a self-hosted runner. It needs org-corpus-baseline and org-corpus-contextual. The live DB has one org (a real user org) and no eval orgs, and no committed script ingests the corpus. The corpus-seeder principal exists, restricted to those two org ids.",
+   "source": "apps/Data Plane v2/Makefile:184-234, scripts/eval-nightly.sh:1-45, docs/retrieval-fusion-evidence-2026-08-26.md:11-18,1125-1135; live SQL",
+   "verified_live": true
+  },
+  {
+   "fact": "Declared posture: G14 'Data Plane background LLM calls: no floor ... on purpose'; R15.1 says chunk text goes to inference-core for graph extraction and contextual summaries and the caller filters restricted documents. Processors: Azure OpenAI deployment at core-ai-rg.cognitiveservices.azure.com labelled swedencentral (deployment type unset, so the EU claim is label-only). GDPR_SUMMARY denies model/embedding/rerank providers for GDPR/ZDR content unless policy and processor allow, and lists Data Plane direct-Azure paths as a gap.",
+   "source": "docs/compliance/evidence/data-flow-map.md G13,G14,G17,R15.1; honest-limits.md L7,L8,L12; apps/GDPR_SUMMARY.md:151-170,265-266",
+   "verified_live": false
+  },
+  {
+   "fact": "Network and runtime facts used by the design. data-plane-v2-data-orchestrator-1 and embedding-engine are on inter-plane-bus/dpv2-net; cost-core, inference-core and auth-service are reachable from the Data Plane. Quarry's quarry-edge principal holds only audience data-plane (relevant to the cross-plane contract-test pattern, not changed here).",
+   "source": "docker inspect networks; curl from orchestrator container; principals file",
+   "verified_live": true
+  }
+ ],
+ "defects_found": [
+  {
+   "defect": "CR (the owner's must-stay-on feature) is ON only through a git-ignored `.env`; code and compose default to OFF. The compose comment cites a non-existent column ('contextualized_text'). A clean checkout, a new machine, or a launcher run from a fresh shell silently turns CR off, with no startup signal.",
+   "evidence": "config.rs:135-136 (`#[serde(default)] bool` = false); docker-compose.yml:775-779 (default false, model default empty); .gitignore:243 matches apps/Data Plane v2/.env; .env.example has no CR keys; contextualize.rs tests assert 'must default to OFF'.",
+   "severity": "high"
+  },
+  {
+   "defect": "Every paid CR call and every graph-extraction call is unmetered. cost-core has no embedding-engine/graph-index rows, inference-core has no usage emission or metrics, and the Data Plane cost ledger does not see these calls.",
+   "evidence": "live cost_entries by producer (only model-gateway); inference-core /metrics empty; cost_events has only rerank/embedding event types; contextualize.rs discards InferResponse usage; graph extractor emits nothing.",
+   "severity": "high"
+  },
+  {
+   "defect": "The org-level ZDR setting is not honoured by background content processing. Service tokens carry a static registry posture ('persistent'), CR sends zdr=false, and only per-document classification='restricted' is consulted. An org with ZDR on would have its documents sent to a retaining Azure deployment for contextualisation and graph extraction, and (separately) embedded on the Foundry Cohere path. Not yet exploitable live: 0 of 3 orgs have ZDR on, and no provider is ZDR-attested, so an org-aware token would fail closed (ZdrUnavailable).",
+   "evidence": "plane-service-principal.ts:379-406; plane-token.controller.ts:322-333; interactive-retention-policy.ts:147-174 (user tokens only); contextualize.rs:404; stream/mod.rs:289-309.",
+   "severity": "high"
+  },
+  {
+   "defect": "Silent, unrecorded degradation. Eight paths embed raw with no durable record (mint failure, non-transient error, retries exhausted, EMPTY answer with no log at all, missing/empty doc content, doc lookup failure, count mismatch, expired bearer mid-document). NULL chunk_context conflates 'feature off', 'ZDR skipped', 'not yet', 'failed' and 'trivial'. There is no metric, no coverage endpoint and no release gate. The live raw chunk (since 2026-09-28) cannot be explained.",
+   "evidence": "contextualize.rs:271-283,322-345,452-455; batch/mod.rs:309,346-358,366-376; knowledge_units live schema; embedding-engine has no /metrics.",
+   "severity": "high"
+  },
+  {
+   "defect": "Contextual BM25 reaches only a fraction of the index. The live sparse backend (Quickwit) holds 57 of 207 chunks and 51 with context_body. The only repair paths are the manual backfill-reannounce tool and an admin rebuild job whose claim logged a Storage error. Nothing detects drift between Postgres and Quickwit.",
+   "evidence": "live Quickwit counts vs Postgres; SPARSE_SEARCH_BACKEND=quickwit; backfill_reannounce.rs:33-45; quickwit-adapter ERROR 'admin job claim failed'.",
+   "severity": "high"
+  },
+  {
+   "defect": "Stale-context divergence on re-embed. persist_chunk_context writes only successes; a failed regeneration leaves the old context in content_tsv/Quickwit while the new vector is raw. Re-embeds always regenerate (re-pay) even when a valid persisted context exists. The vector is not provably built from the stored context (Qdrant first, context persisted afterwards, best-effort), and a crash between them loses the context for good.",
+   "evidence": "batch/mod.rs:126-148,445-490; reembed_switch.rs replays units.created; embedding_model never written.",
+   "severity": "medium"
+  },
+  {
+   "defect": "Head-of-line blocking and TTL hazards. CR runs inside the single sequential consumer loop, document by document. Under provider throttling (30s retry window per chunk, 4-wide) one tenant's batch can run for minutes, blocking every other tenant's embeds. It can exceed ack_wait (60s) and the 120s envelope TTL of the queued messages (the documented loss pattern). One bearer per document with a 300s max TTL can expire mid-document on large documents, after which every remaining chunk silently embeds raw. Retry ignores the server's retry-after trailer.",
+   "evidence": "stream/mod.rs:74-75,360-455; batch/mod.rs:353-390; inference_auth.rs:21; grpc.rs:1343-1358.",
+   "severity": "medium"
+  },
+  {
+   "defect": "Large documents lose their document context. The prompt carries the first 48,000 chars only, so a chunk beyond that point is 'situated' against text that does not contain it (guess or generic output), silently.",
+   "evidence": "contextualize.rs:377-380.",
+   "severity": "medium"
+  },
+  {
+   "defect": "Prompt/output quality gaps. 195/206 contexts open with a meta phrase ('This chunk...') that dilutes the embedding and BM25. No language instruction, so contexts are English over mixed Norwegian/English chunks. Title/source/date are not supplied. stop_reason (length/content_filter) is ignored, so truncated output is stored as valid. There is no output validation, and the prompt_version is never read, so a prompt change has no refresh path.",
+   "evidence": "live regex aggregates; contextualize.rs:85-96,443-455; batch/mod.rs:457.",
+   "severity": "medium"
+  },
+  {
+   "defect": "Graph extraction is a paid loop with no cap or memory. A failing chunk retried at least 10 times at 6-minute intervals. 'Suppressed' (empty result) lives in process memory, so every restart re-pays for every empty document. Failed attempts log only the outer anyhow context, hiding the gRPC code. The DLQ is published only when no verifier is configured. The stream path and the reconciler can double-extract. No model/prompt version is stored.",
+   "evidence": "docker logs graph-index 2026-09-29 14:16-15:09 and 2026-09-30 13:11; reconcile.rs:174,283-324; extractor.rs:339; stream.rs:444; graph_entities.provenance='extracted'.",
+   "severity": "medium"
+  },
+  {
+   "defect": "The Data Plane cost ledger cannot carry billing-grade data: non-durable core-NATS publish and subscription, ZDR events dropped entirely (a ZDR org's spend would be invisible), exact token usage unavailable, only two permitted producers, and rows never reach cost-core (so the product cost page and budgets cannot see them). The cost-core catalogue would price unknown Data Plane models at the 3.00/15.00 default.",
+   "evidence": "consumer.go:52-60,88-90; verifier.go:111-135; batch/mod.rs:215; cost-core pricing.go; gap-data.md DATA-15 overclaim.",
+   "severity": "medium"
+  },
+  {
+   "defect": "Background calls carry no routing floor and no provider pin: provider_hint empty, min_privacy_tier unspecified, min_residency empty, with Azure deployment type unset. The model family gate currently keeps gpt-4o-mini on azure-openai, but any future registered provider that serves the model id would receive org documents without a residency check.",
+   "evidence": "contextualize.rs:381-429 (deliberate non-tightening comment); data-flow-map G14, G17; inference-core boot warning.",
+   "severity": "medium"
+  },
+  {
+   "defect": "The retrieval quality gate cannot run and nothing proves CR on the current stack. Eval orgs are gone, there is no committed corpus-ingest script, quality_eval_runs is empty, and no coverage gate exists. The reranker is fed raw chunk text, so CR's measured benefit disappears with rerank on (+0.005 nDCG), a likely cause.",
+   "evidence": "live SQL; eval-nightly.sh:1-45; rerank.rs:207,373; evidence doc finding 3.",
+   "severity": "medium"
+  },
+  {
+   "defect": "Production principal model blocks the whole design: the registry loader throws if any principal has allowAnyOrg=true in file mode outside development/test, and every Data Plane background principal (embedding-engine, graph-index, retrieval-engine, quarry-edge, imports/finspo) uses allowAnyOrg. The multi-tenant background pattern has no production-valid registry form yet.",
+   "evidence": "plane-service-principal.ts:176-186; plane-service-principals.json (allowAnyOrg true on all of them).",
+   "severity": "medium"
+  },
+  {
+   "defect": "Stale or contradicting documentation and comments: compose comment 'Requires the migration adding knowledge_units.contextualized_text' (real column chunk_context); contextualize.rs, config.rs and the 20260824 migration say CR is 'OFF by default'; DATA-15 'closed'; Model Plane ZDR.md says no Anthropic attestation knob exists while AZURE_ANTHROPIC_ZDR_* now exists.",
+   "evidence": "docker-compose.yml:774; contextualize.rs:60-62; migration 20260824120000 header; gap-data.md:351; ZDR.md section 4 step 2 vs live env.",
+   "severity": "low"
+  },
+  {
+   "defect": "embedding-engine, graph-index (and video_caption) each carry their own copy of the inference token client. Any change to retention posture, bearer caching or typed-status decoding must be made in several places, and the two copies have already drifted.",
+   "evidence": "embedding-engine provider/inference_auth.rs vs graph-index inference_auth.rs (52-line diff); video_caption.rs uses the embedding one; commit 3666503f posture drift precedent in inference_auth.rs:33-36.",
+   "severity": "low"
+  }
+ ],
+ "design": "LEGEND: [FACT]=verified in code or live and cited in current_state/defects; [INFERENCE]=derived by reading, not exercised; [DECISION]=owner call (see owner_decisions).\n\n0. DECISION SUMMARY\n- CR stays ON, permanently. The global env flag becomes an incident-only kill switch. The default flips to ON in code, compose and .env.example, with a default model, and a boot-time contract check fails the process if CR is enabled without a model or a credential. Day-to-day control is per org (org_processing_policy), not per deployment.\n- CR becomes a durable, observable, idempotent pipeline: a per-unit status machine, provenance, write-ahead persisted context, a vector-coherence hash, a time-boxed inline phase and a DB-truth reconciler that also serves as backfill/repair and prompt-version refresh.\n- ZDR: a new `tenant` retention posture for service tokens makes the org's ZDR intent (org-core stored intent AND plan entitlement) part of every background mint, fail-closed. A ZDR org's content is never sent to a non-attested route, and the unit gets an explicit marker. Nothing in this design turns ZDR off org-wide. Background jobs never use a user's own subscription or API connection.\n- Metering: Data Plane usage events v2 (exact tokens from InferResponse) over a durable JetStream stream, forwarded by data-orchestrator to cost-core POST /api/v1/cost/record with a new `feature` dimension. One new principal (data-orchestrator to cost-core, cost:write) and one new signing key (graph-events). Drift is checked against new inference-core counters.\n- Graph extraction gets the same posture, state machine, metering and retry discipline.\n- Quality: re-seed the eval corpus from a committed manifest, add per-prompt-version and per-policy cells, a coverage gate and a persisted result history. Prompt ctx-v2 and any model change ship only through that gate.\n- Every cross-plane dependency is verified with contract tests that run the REAL policy files and REAL decision code, plus a live mint/probe smoke matrix. No permissive doubles.\n\n1. INVARIANTS\nI1 The vector of a unit is a pure function of (text, persisted chunk_context). embedded_context_hash = sha256(chunk_context) or NULL for a raw vector. Embedding always reads the persisted context, never an in-memory one.\nI2 A context is written only together with its provenance (model, provider, residency, prompt_version, input_hash, generated_at) in the same statement.\nI3 Nothing is silent. Every eligible unit has a non-NULL context_status; every non-ready status carries a content-free error_class or reason.\nI4 Ingest never fails or stalls because of context generation. The inline phase is time-boxed; anything unfinished is left `pending` for the reconciler and embedded raw. One tenant cannot hold up another.\nI5 No document text leaves for a provider unless the org posture is resolved and either not ZDR or the route is attested. Unresolved posture means defer, not send, and not permanently skip.\nI6 Every provider call is metered with org, feature and exact usage, at-least-once and idempotent.\nI7 Re-runs with unchanged inputs make zero provider calls.\nI8 The lexical arms are fed from the same persisted context, and a per-unit sync event plus a parity gate make convergence measurable.\n\n2. DATA MODEL (additive, nullable, zero-downtime)\nMigration apps/Data Plane v2/infra/postgres/migrations/<ts>_context_provenance.sql (+ .down.sql), mirrored in infra/postgres/init.sql and in the index-engine test schemas (builder/mod.rs:602,784):\n- knowledge_units add: context_status text CHECK IN ('pending','ready','skipped_zdr','skipped_policy','skipped_budget','failed_transient','failed_permanent') (NULL = legacy/unknown, treated as pending when eligible); context_model, context_provider, context_residency, context_input_hash, embedded_context_hash, context_generated_at, context_attempts int default 0, context_next_attempt_at, context_error_class (closed enum: rate_limited, provider_unavailable, timeout, auth, zdr_unavailable, residency_unavailable, content_filter, invalid_output, doc_missing, too_long, internal), context_lease_until. Also finally write embedding_model.\n- partial index idx_ku_context_work (org_id, context_next_attempt_at) WHERE embedding_status='done' AND (context_status IS NULL OR context_status IN ('pending','failed_transient','skipped_budget')).\n- org_processing_policy(org_id pk, contextual_retrieval text 'inherit|on|off' default inherit, context_prompt_version text null, graph_extraction text default inherit, monthly_budget_usd numeric null, updated_by, updated_at) with the same RLS policy as the other org tables. Absent row = system default (ON). The unused org_quotas table (0 rows, no consumers) is untouched.\n- view v_context_coverage(org_id, eligible, ready, ready_current_version, pending, skipped_zdr, skipped_policy, skipped_budget, failed_transient, failed_permanent, vector_incoherent) where vector_incoherent = ready units whose embedded_context_hash IS DISTINCT FROM sha256(chunk_context).\n- Legacy backfill in the same migration: rows with chunk_context get context_status='ready' and embedded_context_hash=sha256(chunk_context) with context_model NULL (marks 'legacy, assumed'); eligible rows without a context get 'pending'. [INFERENCE] legacy vectors were built in the same pass; the first prompt-version refresh re-verifies them.\ninput_hash = sha256(prompt_version | model alias | window_text | title | chunk_text). It decides reuse and staleness.\n\n3. PIPELINE\n3.1 Inline phase (batch pipeline). For each eligible unit in a batch: read persisted (status, input_hash, chunk_context). If the hash matches the current inputs, reuse it (no call). Otherwise generate within a deadline (default 8s per document, 20s per batch, env-tunable). Documents are processed with bounded cross-document concurrency (not sequential). Then, in this order: (1) UPDATE the context and provenance, status ready (write-ahead); (2) embed compose(context,text); (3) upsert Qdrant; (4) mark done with embedding_model and embedded_context_hash; (5) publish a content-free `dataplane.knowledge.units.contextualized` event for lexical sync; (6) existing documents.indexed announce. Units that miss the deadline are embedded raw (embedded_context_hash NULL) with context_status='pending' and context_next_attempt_at=now. A bearer cache keyed by org refreshes when under 60s TTL remain (kills mid-document expiry and cuts audit-event volume).\n3.2 Reconciler (new, embedding-engine). A loop leases rows with FOR UPDATE SKIP LOCKED plus context_lease_until, orders by org fair-share then document, and applies the same steps as the inline phase: ensure context (reuse or generate), re-embed when embedded_context_hash differs from the hash of the persisted context, upsert, CAS update, publish the sync event. It enforces budgets (per run, per org month-to-date from cost_events feature totals, global daily), per-org and global concurrency, jittered backoff honouring x-mp-retry-after-ms, a circuit breaker (pause 5 minutes after N consecutive provider failures), and kill-switch/policy checks on every pass. It also (a) re-checks skipped_zdr rows per org at most hourly by minting a bearer and reading its zdr claim, (b) refreshes ready rows whose prompt_version differs from the target only when CONTEXT_REFRESH_ON_PROMPT_CHANGE=1 and within budget, (c) retries failed_transient with 1m/5m/30m/2h/12h backoff and moves to failed_permanent after 8 attempts with an alert, (d) never touches restricted documents. The existing operator tools become thin wrappers: `context-backfill --org-id --dry-run --max-usd --target-version` calls the same code, and the dry run prints counts and estimated spend per org, no content.\n3.3 Why bounded-inline plus reconciler. Inline keeps small ingests contextual from the first embed (evidence: measurable nDCG/MRR gain). The reconciler satisfies the repo's own guardrail ('any inference-bound consumer must ship a DB-truth reconciler', evidence doc) and removes the stall/TTL/double-pay failure modes. The alternative (all generation async, raw first) doubles embed work and leaves every new document at baseline quality; rejected as the default but available via CONTEXT_INLINE_BUDGET_MS=0.\n\n4. PROMPT, WINDOW, VALIDATION (c)\n- Prompt ctx-v2. The stable prefix is the document block with title/source/date attributes, then the chunk, then the instruction: one or two sentences, at most about 60 words, same language as the chunk, start directly with the content and never with 'This chunk / The chunk / This section', name the subject/section/entities/dates the chunk only implies, do not summarise or interpret, output sentences only. The document block is identical across a document's chunks, so Azure automatic prefix caching (prefixes of 1,024 tokens or more) applies; the first chunk of a document runs alone and the rest follow concurrently so the cache is warm [INFERENCE: provider behaviour, verified in the live proof via cache_read_input_tokens]. Small documents (the live average is about 245 tokens) never reach the 1,024 floor and cost fractions of a cent anyway.\n- Window. If the document is 32,000 chars or less, the whole document (about 8-10k tokens, token estimate adjusted for Norwegian) is the window. Larger documents are cut into fixed 32,000-char sections with 4,000-char overlap; each chunk goes to the section where it sits farthest from an edge, preceded by a constant header (title and first 2,000 chars). All chunks in a section share a prefix (cache-friendly). The chunk offset is found by exact search with a proportional chunk_index fallback.\n- Validation (never silent). Treat the output as untrusted data (it can carry prompt injection from the document, but it is never returned to callers, so impact is limited to ranking of that tenant's own chunk). Normalise whitespace, strip tags/markup, require 12-600 chars, require stop_reason=end_turn (on 'length': cut at the last full sentence if 20 chars or more, else invalid_output; on content_filter: failed_permanent/content_filter, never retried). Count meta-opening and language-mismatch rates as metrics.\n- Determinism. Temperature 0, but providers are not bit-exact; reproducibility comes from persisting the output and reusing it by input_hash.\n- Floors. Default provider_hint=azure-openai and min_residency=eu (env overridable). [DECISION OD5] The residency check is label-based while AZURE_OPENAI_DEPLOYMENT_TYPE is unset; set it to make the claim provable. Request cache-control: no-store on background calls, and skip metering on response_cache_hit.\n\n5. FAILURE TAXONOMY (d). Each row yields an explicit status, never a silent raw embed.\n- FAILED_PRECONDITION zdr/residency/tier (typed trailer) -> skipped_zdr or residency_unavailable, no retry, zero spend.\n- RESOURCE_EXHAUSTED/UNAVAILABLE/DEADLINE -> failed_transient with backoff honouring the retry-after trailer (cap 5 minutes), counted as provider health.\n- INVALID_ARGUMENT/too long -> failed_permanent(too_long) after one window shrink attempt.\n- UNAUTHENTICATED/PERMISSION_DENIED -> auth: stop the run, alert, deferral (a posture or credential problem must not burn attempts).\n- empty or invalid output, stop_reason length/content_filter -> invalid_output or content_filter per section 4.\n- document missing/deleted -> doc_missing (terminal, no cost).\n- org policy off -> skipped_policy; budget exhausted -> skipped_budget with next attempt at the next period.\n- unresolved org posture (org-core outage, fail-closed) -> pending with next attempt in 5 minutes (deferral, not a skip).\nMixed-index repair: the live raw chunk becomes pending and is healed by the first reconciler pass. A re-embed no longer re-pays or diverges because of I1/I7: a failed regeneration leaves the previous ready context and its coherent vector untouched.\n\n6. BACKFILL / REPAIR (e)\nThe reconciler is the backfill. Safety: leases (no double work), CAS on input_hash (a stale worker cannot overwrite newer state), idempotent upserts, budget gates before each call using token estimates times the catalogue price, per-run --max-usd and --max-units, pause/resume by flag. Lexical repair: the units.contextualized event drives quickwit-adapter's existing index_knowledge_unit_by_id; a one-off parity rebuild (existing rebuild job/scripts/rebuild-quickwit.sh) restores the 150 chunks missing from Quickwit, and a parity gate compares Postgres to Quickwit counts and context_body presence. Prompt-version rollout is staged by org_processing_policy.context_prompt_version (canary on the eval org first), then CONTEXT_REFRESH_ON_PROMPT_CHANGE with a budget.\n\n7. IDENTITY, TENANCY, ZDR (f)\n7.1 The `tenant` posture. Registry retentionByAudience gains a third value 'tenant' (floor persistent). For such a principal/audience, issueInternalToken resolves the org's retention intent through a new resolveServiceTenantRetentionPosture(orgId) that reuses org-core stored intent AND the feature.zero_data_retention entitlement, but FAILS CLOSED to zdr:true when org-core is unreachable or malformed (unlike the interactive resolver, which fails open to false so login never blocks). Negative results are cached 5-10s, positive 45s. The token's zdr claim is true when the org is ZDR. Audit details record zdr_source=tenant-policy. It is applied only to the inference-core audience for embedding-engine and graph-index; NOT to the data-plane audience of document writers, so a ZDR org's knowledge base still ingests (see OD1).\n7.2 Enforcement needs no inference-core change: effective_zdr = token OR request (auth.rs:193), so a ZDR org's token makes inference-core skip every non-attested provider and return FAILED_PRECONDITION before any network call (fallback.rs:1224-1226,1283-1290). The Data Plane client reads bearer.zdr(), sets request.zdr accordingly, and maps the typed status to skipped_zdr.\n7.3 When an attested ZDR deployment exists (OD2), the same code routes to it and the cost event is recorded numeric-only. The Data Plane cost consumer stops dropping ZDR events (counters only, no document ids in any usage payload).\n7.4 Kill switches, finest to coarsest: per-document classification restricted (existing); per-org policy off; global env flag (incident-only). Existing contexts are derived data in our own store and stay on 'off' unless an admin purge is run; the purge reuses the reconciler (sets chunk_context NULL, re-embeds raw).\n7.5 Processor/residency statements to publish (data-flow-map G14/R15.1, honest-limits L12): contexts are generated by the Azure OpenAI gpt-4o-mini deployment (region label swedencentral, deployment type unset, ZDR unattested). The contextual text is derived personal data, erased with its knowledge_units row (the DSAR path cascades) and with Quickwit/Meili purges (known gap L22: keyword indexes are not purged by the org path). Background calls never use subscription or BYO connections (subscription_connection_id stays empty).\n7.6 BYO boundary (owner rule). When a user adds their own subscription/API connection, the check-and-prompt flow and the per-run ZDR override belong to the connection/chat design. This design is compatible: it never lowers org ZDR, and background jobs are independent of user connections. The per-run override must not be implemented by weakening the issuer floor in effective_zdr.\n7.7 Adjacent finding for OD1. Text embedding (Cohere Embed v4, direct) has the same blind spot as CR (it sees only per-document restricted). The tenant bearer's zdr claim could serve as the org-posture oracle for it as well.\n\n8. METERING AND COST (b)\n8.1 Options and decision. A) inference-core emits usage for every service-principal call: single choke point and exact tokens, but covers LLM only (embed/rerank bypass it), risks double-counting with model-gateway/orchestrator paths, and does not know the feature. B) Data Plane emitter, forwarder, cost-core (CHOSEN): exact from InferResponse, covers embed and rerank too, no model-gateway overlap, feature known at the caller, one new principal plus one key. C) extend cost-core's NATS producer allowlist: needs cross-plane NATS credentials and a fake user_id (cost-core requires one, main.go:439), and its own code comment says producer is attribution, not workload identity. Safeguard for B's weakness (a caller can forget): inference-core gains per-service token counters and a daily drift check compares them with ledger totals for embedding-engine and graph-index.\n8.2 Event v2 (extends dataplane.cost.ledger, schema_version=2): org_id (from the minted bearer, equal to knowledge_units.org_id and pinned by inference-core), feature in {contextual-retrieval, graph-extraction, graph-community-summary, embedding, rerank}, model_used, provider_used, input_tokens, output_tokens, cache_read_input_tokens, calls, cost_basis=metered, estimated bool, idempotency_key=sha256(sorted request_ids) (aggregated per document per batch to limit volume). No document ids or content. Org-level rows: user_id empty, producer-attributed. This is deliberate: attributing background spend to the uploader would eat that user's chat budget.\n8.3 Durability. Producers publish to a JetStream stream DATAPLANE_COST (new, in SUBJECTS.md, lint-checked) with PubAck; data-orchestrator consumes with a durable consumer and ack-after-insert. cost_events gains feature, input_tokens, output_tokens, cache_read_tokens, provider_used, request_id, forwarded_at (partial index on forwarded_at IS NULL). A forwarder loop (DB-truth) drains unforwarded rows to cost-core POST /api/v1/cost/record with a per-org auth-core token (principal data-orchestrator, audience cost-core, scope cost:write, retention persistent), idempotency_key 'dataplane:'+event key, and retries until 202. A second signed issuer service:graph-index-rs / graph-events-v1 / scope events:graph:publish (new key) lets graph-index emit.\n8.4 cost-core. recordRequest gains feature and units (migration 0008 columns, DisallowUnknownFields means cost-core must ship first); aggregate gains a feature filter/group; catalogue rows are added for models the Data Plane meters (embed-v-4-0, text-embedding-3-large; rerank per search-unit via explicit cost_usd) with sourced prices, because the default row would otherwise overprice. The product cost page and budgets then see Data Plane spend.\n8.5 Org attribution comes from the token (auth-core mint, inference-core pin, signed envelope org claim, cost-core pin) at every hop; nothing is taken from a caller-supplied field.\n8.6 Cost envelope [INFERENCE from pricing.go gpt-4o-mini 0.15/0.60 per M tokens; confirm in the live proof]: per call about tokens(window)+tokens(chunk)+130 in and about 60 out. Live corpus about 600 in/60 out, about $0.00013 per chunk, so the whole live index (207 chunks) is about $0.03 and the 1,164-chunk eval corpus about $0.15. A 12k-token document with 100 chunks is about $0.18 uncached, about half with prefix caching. Caps: per-org monthly budget in org_processing_policy, global daily cap, per-document cap (above it: window sampling or skipped_budget). Defaults in OD6.\n\n9. GRAPH EXTRACTION (h) — same treatment, justified by being the second unmetered paid gpt-4o-mini path\n- Shared inference-client crate: tenant bearer, typed errors (log code and kind), bearer cache, reason 'graph extraction'/'graph community summary'.\n- New per-chunk state table graph_extraction_state(org_id, knowledge_id, status, attempts, next_attempt_at, prompt_version, model, extracted_at, entity_count, error_class) with RLS. Empty results are durable ('empty' per prompt_version), so restarts stop re-paying. Retries use backoff 5m to 6h and become failed_permanent after 6 attempts. Statuses skipped_zdr, skipped_policy, skipped_visibility, skipped_budget mirror CR. This removes the in-memory Suppressed set and the CANDIDATES_SQL rescans. The live loop (at least 10 retries of one chunk, re-paid on restart) is the regression fixture.\n- Metering feature graph-extraction/graph-community-summary through the same usage pipeline; per-org graph_extraction policy and budget; DLQ publish regardless of verifier mode; stamp model and prompt version in provenance; bounded per-document concurrency and deadline; set structured_output_schema where the provider honours it. Visibility rule (only org-visible documents) is unchanged.\n- Quality: the graph arm has little data (68 entities) and weight 0.2; first make it measurable (extraction yield per chunk, empty-rate, entity-type conformity, spot precision) and gate on non-regression; deeper GraphRAG evaluation stays with the GraphRAG plan.\n\n10. QUALITY MEASUREMENT (g)\n- Re-seed org-corpus-baseline and org-corpus-contextual from a pinned manifest (path + sha256) with a committed ingest script (the gap noted in evidence round 11). Baseline is made by org_processing_policy contextual_retrieval='off' on the same stack, so A/B no longer needs a deployment toggle.\n- Cells: baseline, contextual-ctx-v1, contextual-ctx-v2, model alternative (gpt-5-nano/gpt-5-mini need reasoning_effort minimal and a higher token cap), rerank-input-with-context, tier-1 breadcrumb (optional). Run attribution with the reranker OFF (noise about 0.008) and confirm with rerank ON three times (noise +/-0.04).\n- Gates: non-inferiority (delta nDCG >= -0.01, delta MRR >= -0.01 vs the current default) AND a coverage gate (v_context_coverage ready/eligible >= 99% on the contextual org) AND the exact-identifier class unchanged (23 mined queries, recall 1.0). Add Norwegian-morphology and mixed-language queries to the golden set (open item 2). Results are persisted in quality_eval_runs (empty today) so regressions are a query, and eval-nightly.sh runs the cells on the self-hosted runner.\n- Release gate in data-quality-go: contextual_coverage_ok and sparse_index_in_sync per org.\n\n11. OBSERVABILITY AND RUNBOOK (i)\nMetrics (embedding-engine gains /metrics on the admin port; graph-index too; inference-core gains counters): ctx_units_total{status}, ctx_generation_total{outcome,error_class}, ctx_tokens_total{dir}, ctx_prompt_cache_read_ratio, ctx_latency_seconds, ctx_inline_deadline_exceeded_total, ctx_reuse_total, ctx_backlog{status}, ctx_quality_meta_start_ratio, usage_forward_lag_seconds, usage_unforwarded_total, inference_tokens_total{service_id,model,provider,dir}. Logs: structured, content-free, with org/document/knowledge ids, status/error_class/attempt, and the gRPC code and kind (fixing the %e hiding in graph-index). No prompts, contexts or provider bodies are ever logged. Alerts (SQL gates when there is no Prometheus; Prometheus rules when scraped): coverage under 99% for 30m; failed_permanent growth; skipped_budget non-zero; forward lag over 10m; drift over 2%; any provider call for an org whose posture is ZDR (must be zero); circuit breaker open over 15m. Runbook sections: provider 429 storm, stuck backlog, ZDR org report, prompt rollout/rollback, budget exhausted, kill switch and purge, Quickwit parity repair, cost spike triage.\n\n12. CONTRACT TESTS THAT APPLY THE REAL RULES (A6 lesson)\na) Auth: extend plane-service-principals-policy.contract.spec.ts so the real JSON feeds the real authorizePlaneServicePrincipal, including tenant resolution against an org-core HTTP double that returns real response shapes, and a fail-closed outage case. Holder-of-scope tests: cost:write held by exactly [data-orchestrator]; audience cost-core present only there.\nb) A committed plane-calls manifest (apps/Control Plane/config/plane-calls.manifest.json) listing every cross-plane call (caller, audience, scopes, retention posture, feature). A spec asserts each entry is authorized by the real registry, no registry grant is unreferenced, and the compose *_RETENTION_POSTURE envs match the registry value.\nc) Wire-contract fixtures shared by inference-core and the Data Plane client (typed statuses with trailers; InferResponse usage fields), so the client is tested against what the server really emits.\nd) cost-core ingest: the Data Plane forwarder fixture posted through the real Handler with the real CostAuthorizer and a generated JWKS; unknown-field rejection is tested before deploy ordering is trusted.\ne) Postgres-backed tests for the status machine, leasing, coherence invariants (failure injection between write-ahead context, embed, upsert, mark-done), reuse-with-zero-calls, and org RLS.\nf) Compose contract (tests/scripts/compose-security-contract-test.sh): CR default ON with a model default, graph key mount, posture envs, no secrets in defaults.\ng) Live smoke matrix scripts/plane-call-smoke.sh: for every manifest row, mint against the live auth-service (mint-only, status only) and perform a no-spend probe (inference-core ListModels, cost-core pricing/record round trip with a test org idempotency key, orchestrator health). Run in the live proof; it would have caught all six A6 defect classes.\n\n13. DOCUMENTS TO UPDATE (ownership changes)\napps/master-ownership-matrix.md: new row 'Contextual retrieval (situating context)' (Data Plane owner; Model Plane provides routing only); new row 'Background provider metering' (Data Plane emits, cost-core ledger of record); amend row 'Cost ledger / budgets' (line 87: Data Plane spend flows into cost-core via the forwarder); amend 'Embedding generation' (line 69); add rule 10 'every paid provider call is metered under an org-attributed feature' and rule 11 'background content processing honours the org retention posture via the token claim; ZDR is never lowered org-wide'. CODEBASE_INFORMATION_SYSTEM.md lines 158-160,224. Model Plane docs/decisions/ledger.md: entries for (1) CR permanently on and bounded-inline+reconciler, (2) tenant retention posture, (3) metering architecture and rejected alternatives, (4) graph state machine. docs/compliance/evidence: data-flow-map G14/R15.1/G13, honest-limits L12/L19 (L19 changes once metering lands), subprocessors rows, claims-vs-code. Data Plane: new docs/contextual-retrieval-runbook.md, evidence doc addendum, gap-data DATA-15 correction, DATA_PLANE_STATUS.md; fix the stale comments listed in defects.\n\n14. OPEN INTERACTIONS WITH OTHER DESIGNS\nQuarry's rerank-through-Data-Plane (option B) uses the same usage pipeline (feature=rerank, per search unit). The ZDR BYO-connection prompt and per-run override live in the connection design and must not touch effective_zdr's monotonic floor. The trust-page edits depend on the corrected G14/L12 statements above.",
+ "tasks": [
+  {
+   "id": "T1",
+   "title": "Auth Core: tenant-aware retention posture for service tokens (fail-closed)",
+   "plane": "control",
+   "files": [
+    "apps/Control Plane/auth-core/src/auth/plane-service-principal.ts",
+    "apps/Control Plane/auth-core/src/auth/interactive-retention-policy.ts",
+    "apps/Control Plane/auth-core/src/auth/plane-token.controller.ts",
+    "apps/Control Plane/auth-core/src/auth/plane-service-principal.spec.ts",
+    "apps/Control Plane/auth-core/src/auth/interactive-retention-policy.spec.ts",
+    "apps/Control Plane/auth-core/src/auth/plane-token.controller.spec.ts",
+    "apps/Control Plane/auth-core/src/auth/plane-service-principals-policy.contract.spec.ts",
+    "apps/Control Plane/config/plane-service-principals.json",
+    "apps/Control Plane/config/README.md"
+   ],
+   "approach": "Extend retentionByAudience with a third value 'tenant' (floor persistent) in the registry types and validAudienceRetentionMap, and have authorizePlaneServicePrincipal return retention='tenant'. In issueInternalToken, when retention is 'tenant', call a new resolveServiceTenantRetentionPosture(orgId) in interactive-retention-policy.ts that reuses the stored-intent plus feature.zero_data_retention entitlement lookups but fails CLOSED to zdr:true on any org-core error, timeout or malformed body (short negative-cache 5-10s, positive 45s), and stamp authority 'service-principal-policy' with an audit detail zdr_source=tenant-policy. Leave interactive resolution unchanged (fail open to false). Flip embedding-engine and graph-index inference-core rows to 'tenant' in plane-service-principals.json only together with the client change in T5. Keep rejection of x-zdr/body zdr fields. Merge carefully with the other session's uncommitted edits to plane-token.controller.ts and convex-token.service.ts.",
+   "tests_first": "Write failing specs first: (1) tenant principal + org with stored intent AND entitlement mints zdr:true; (2) intent without entitlement mints zdr:false; (3) org-core 500/timeout/malformed JSON mints zdr:true for tenant principals while the interactive path still mints false (regression); (4) non-tenant principals unchanged; (5) caller-supplied zdr still rejected; (6) REAL-RULE contract: load the real plane-service-principals.json, add test credentials, run the real authorizePlaneServicePrincipal for embedding-engine and graph-index on inference-core and assert retention 'tenant' and scope inference:invoke; (7) compose contract: the Data Plane compose *_INFERENCE_RETENTION_POSTURE values equal the registry value for those principals. Use an org-core HTTP double that replays real response bodies captured from GET /api/v1/organizations/:id and /entitlements.",
+   "live_proof": "No paid call. After an auth-core rebuild via the launcher, mint through the embedding-engine container's own env (print status and the decoded zdr claim only) for the live non-ZDR org: expect zdr:false. With owner approval, toggle ZDR intent (and plan entitlement) on a throwaway org and expect zdr:true; then stop org-core briefly and expect zdr:true for an unknown org (fail-closed), restoring afterwards. Confirm the durable audit event carries zdr_source.",
+   "depends_on": [],
+   "size": "M"
+  },
+  {
+   "id": "T2",
+   "title": "Principals and keys: data-orchestrator to cost-core (cost:write), graph-index event signer, launcher mint, credential validation",
+   "plane": "control",
+   "files": [
+    "apps/Control Plane/config/plane-service-principals.json",
+    "apps/Control Plane/scripts/run-control-plane.sh",
+    "apps/Control Plane/scripts/validate-release-credentials.sh",
+    "apps/Control Plane/scripts/validate-release-credentials-test.sh",
+    "apps/Data Plane v2/docker-compose.yml",
+    "apps/Data Plane v2/docker-compose.cross-plane.yml",
+    "apps/Data Plane v2/services/data-orchestrator-go/internal/config/config.go",
+    "apps/Data Plane v2/.secrets/event-keys/graph-events.pem (new, git-ignored)",
+    "apps/Data Plane v2/.secrets/event-keys/graph-events.pub (new, git-ignored)"
+   ],
+   "approach": "Add principal data-orchestrator: allowAnyOrg (development form), audiences [cost-core], scopesByAudience cost-core -> [cost:write], retentionByAudience cost-core persistent, consumerEnv DATA_ORCHESTRATOR_COST_SERVICE_API_KEY (the launcher mints the credential from consumerEnv). Wire the key into data-orchestrator in the Data Plane compose and config. Generate the graph-events RSA key pair with the same mechanism as the other event keys, mount the private key into graph-index (signer) and the public key into data-orchestrator (verifier). Add both to the release-credential validator and its test. Record the production allowAnyOrg limitation (OD9) in config/README.md.",
+   "tests_first": "Extend plane-service-principals-policy.contract.spec.ts first: cost:write is held by exactly [data-orchestrator] and only for audience cost-core; the principal can mint cost-core for a scope-narrowed request and is refused for inference-core; the validator test fails when the new credential env is missing or short; a compose contract asserts the env is wired and no default secret exists.",
+   "live_proof": "After the launcher run, mint cost-core tokens from the data-orchestrator container (status only) and call cost-core GET /api/v1/pricing and an authenticated POST /api/v1/cost/record for a test org with a unique idempotency key and zero tokens; read it back via GET /api/v1/cost/entries and expect exactly one row with producer_id data-orchestrator. No inference spend.",
+   "depends_on": [
+    "T1"
+   ],
+   "size": "S"
+  },
+  {
+   "id": "T3",
+   "title": "inference-core: typed ZDR/residency/tier statuses, per-service counters, shared wire fixtures",
+   "plane": "model",
+   "files": [
+    "apps/Model Plane/rust/services/inference-core/src/grpc.rs",
+    "apps/Model Plane/rust/services/inference-core/src/main.rs",
+    "apps/Model Plane/rust/services/inference-core/src/http_health.rs",
+    "apps/Model Plane/rust/services/inference-core/src/provider/fallback.rs",
+    "apps/Model Plane/proto/contract-fixtures/infer-statuses.json (new)",
+    "apps/Model Plane/rust/services/inference-core/tests/status_contract_test.rs (new)"
+   ],
+   "approach": "Route ZdrUnavailable, ResidencyViolation and TierUnavailable through typed_status with distinct x-mp-provider-error kind trailers (zdr_unavailable, residency_unavailable, tier_unavailable) instead of message-only FAILED_PRECONDITION, so clients never parse prose. Register metrics counters (requests and tokens by principal service_id, model, provider, direction, outcome; no org label) and expose them on the existing /metrics handler, which is currently empty. Emit a canonical JSON fixture of status codes and trailers that both inference-core tests and the Data Plane client tests consume. No behaviour change to routing or caching.",
+   "tests_first": "Failing tests first: a status contract test builds each ProviderError and asserts code, kind trailer and retry-after trailer match the committed fixture; a counters test calls a fake provider through the real FallbackChain and asserts counter deltas; a regression test asserts a ZDR token with an unattested provider returns FAILED_PRECONDITION with kind zdr_unavailable before any provider call is attempted (call counter stays 0).",
+   "live_proof": "No paid call. After the launcher rebuild, GET /metrics on 127.0.0.1:18082 returns non-empty counters. A ListModels call (catalog, no provider spend) increments the request counter for the calling service id. With a ZDR-claim token (from T1 proof) an Infer is refused with the typed kind and the provider-call counter does not move.",
+   "depends_on": [],
+   "size": "M"
+  },
+  {
+   "id": "T4",
+   "title": "cost-core: feature and units on the ledger, org-level service rows, catalogue rows, feature aggregation",
+   "plane": "model",
+   "files": [
+    "apps/Model Plane/go/services/cost-core/internal/ledger/ledger.go",
+    "apps/Model Plane/go/services/cost-core/internal/postgres/store.go",
+    "apps/Model Plane/go/services/cost-core/internal/server/server.go",
+    "apps/Model Plane/go/services/cost-core/internal/server/server_test.go",
+    "apps/Model Plane/go/services/cost-core/internal/pricing/pricing.go",
+    "apps/Model Plane/go/services/cost-core/migrations/0008_usage_feature.up.sql (new)",
+    "apps/Model Plane/go/services/cost-core/migrations/0008_usage_feature.down.sql (new)",
+    "apps/Model Plane/go/services/cost-core/cmd/main.go",
+    "apps/Model Plane/go/services/cost-core/cmd/main_test.go"
+   ],
+   "approach": "Add optional feature (bounded string, validated) and units (non-negative) to recordRequest, ledger.Entry, the cost_entries table (migration 0008, nullable/defaulted) and the entry/aggregate responses. Add a feature filter and group-by to the aggregate endpoint so the product cost page can show Data Plane spend by feature. Keep org pinning and the producer-attributed (no user) rule. Add catalogue rows with sourced prices for the Data Plane models that will be metered (embed-v-4-0, text-embedding-3-large) in 0002 seed and defaultSeed together; rerank is recorded with an explicit cost_usd per search unit. Land AFTER the other session's cost-core work (0006/0007) is merged, as one rebuild.",
+   "tests_first": "Write first: the exact JSON the Data Plane forwarder will send (shared fixture) is accepted with 202 through the real Handler, the real CostAuthorizer and a generated JWKS service token with cost:write; the same body with an unknown field still 400s (documents why cost-core must ship first); a user token is refused; idempotency replay returns 202 without a second row; producer-only rows (no user_id) validate; unknown models with explicit cost_usd are not repriced; aggregate by feature sums correctly. Keep existing model-gateway tests unchanged.",
+   "live_proof": "No paid call. After the rebuild, apply migration, then POST a zero-token test record for a test org (feature contextual-retrieval) with a data-orchestrator token and read it back through /api/v1/cost/aggregate?feature=...; confirm existing model-gateway rows are untouched (counts per producer unchanged).",
+   "depends_on": [
+    "T2"
+   ],
+   "size": "M"
+  },
+  {
+   "id": "T5",
+   "title": "Data Plane shared crate inference-client-rs (token client, tenant posture, bearer cache, typed statuses)",
+   "plane": "data",
+   "files": [
+    "apps/Data Plane v2/services/inference-client-rs/Cargo.toml (new)",
+    "apps/Data Plane v2/services/inference-client-rs/src/lib.rs (new)",
+    "apps/Data Plane v2/services/inference-client-rs/src/token.rs (new)",
+    "apps/Data Plane v2/services/inference-client-rs/src/status.rs (new)",
+    "apps/Data Plane v2/services/inference-client-rs/tests/real_policy.rs (new)",
+    "apps/Data Plane v2/Cargo.toml",
+    "apps/Data Plane v2/services/embedding-engine-rs/src/provider/inference_auth.rs (delete)",
+    "apps/Data Plane v2/services/embedding-engine-rs/src/provider/mod.rs",
+    "apps/Data Plane v2/services/embedding-engine-rs/src/provider/video_caption.rs",
+    "apps/Data Plane v2/services/embedding-engine-rs/src/config.rs",
+    "apps/Data Plane v2/services/graph-index-rs/src/inference_auth.rs (delete)",
+    "apps/Data Plane v2/services/graph-index-rs/src/extractor.rs",
+    "apps/Data Plane v2/services/graph-index-rs/src/config.rs",
+    "apps/Data Plane v2/services/embedding-engine-rs/Dockerfile",
+    "apps/Data Plane v2/services/graph-index-rs/Dockerfile",
+    "apps/Data Plane v2/docker-compose.yml"
+   ],
+   "approach": "Extract the duplicated token client into one crate: RetentionPosture gains Tenant (accepts claims.zdr either way and exposes bearer.zdr()), per-feature token reason (contextual-retrieval, graph-extraction, graph-community-summary) validated against the claim, an org-keyed bearer cache that refreshes when under 60s TTL remain, and a typed-status decoder (code plus x-mp-provider-error kind and x-mp-retry-after-ms) that returns a closed enum (ZdrUnavailable, ResidencyUnavailable, RateLimited{retry_after}, Transient, Auth, InvalidArgument, TooLong, Other). Convert embedding-engine and graph-index (and video_caption) to it; fix graph-index's error logging to include the gRPC code and kind. Flip the compose retention posture env to tenant at the same release as T1's registry flip.",
+   "tests_first": "Failing tests first: the validate_bundle matrix (persistent, zdr, tenant with each claim value, wrong reason, wrong org, TTL margins, expiry mid-use refreshes); decoder tests that consume the shared fixture from apps/Model Plane/proto/contract-fixtures/infer-statuses.json (T3) so the client is tested against what the server really emits; a REAL-POLICY test (tests/real_policy.rs) that reads apps/Control Plane/config/plane-service-principals.json (skipped when absent, like the TS spec) and asserts the principal for each service id has audience inference-core, scope inference:invoke and a retention value compatible with the compose posture env.",
+   "live_proof": "No paid call. Rebuild embedding-engine and graph-index through the launcher; startup logs show the posture; a mint for the live org succeeds (embedding-engine /readyz stays healthy) and a second mint within the cache window is served from cache (auth-core audit event count increases by 1, not 2).",
+   "depends_on": [
+    "T1",
+    "T3"
+   ],
+   "size": "M"
+  },
+  {
+   "id": "T6",
+   "title": "Postgres migration: CR provenance and status, org_processing_policy, coverage view, legacy backfill",
+   "plane": "data",
+   "files": [
+    "apps/Data Plane v2/infra/postgres/migrations/<timestamp>_context_provenance.sql (new)",
+    "apps/Data Plane v2/infra/postgres/migrations/<timestamp>_context_provenance.down.sql (new)",
+    "apps/Data Plane v2/infra/postgres/init.sql",
+    "apps/Data Plane v2/services/index-engine-rs/src/builder/mod.rs",
+    "apps/Data Plane v2/tools/migrator",
+    "apps/Data Plane v2/tests/scripts/compose-security-contract-test.sh"
+   ],
+   "approach": "Add the context_* columns, embedded_context_hash, the partial work index, org_processing_policy with RLS identical to the other org tables, and v_context_coverage. Backfill legacy rows in the same migration (206 ready/legacy-assumed with embedded_context_hash=sha256(chunk_context); eligible rows without context become pending). Mirror the schema in init.sql and in the index-engine test schemas. Nothing reads the new columns until T7/T8 ship, so the migration is deployable alone and reversible.",
+   "tests_first": "Write against a disposable Postgres (existing TEST_DATABASE_URL pattern) first: up then down then up is clean; the CHECK constraint rejects an unknown status; RLS isolates org_processing_policy rows between two orgs; v_context_coverage returns expected counts for a fixture covering every status and a vector_incoherent row; the legacy backfill statement is idempotent; index-engine builder tests still pass with the extended schema.",
+   "live_proof": "No paid call. Apply to the live dataplane DB (additive) and verify with SQL: 206 rows ready, 1 pending, 0 incoherent, embedding_model still NULL until T8, row counts unchanged before and after.",
+   "depends_on": [],
+   "size": "M"
+  },
+  {
+   "id": "T7",
+   "title": "Contextualizer v2: outcomes, ctx-v2 prompt, windowing, validation, usage capture, floors",
+   "plane": "data",
+   "files": [
+    "apps/Data Plane v2/services/embedding-engine-rs/src/provider/contextualize.rs",
+    "apps/Data Plane v2/services/embedding-engine-rs/src/context/mod.rs (new)",
+    "apps/Data Plane v2/services/embedding-engine-rs/src/context/prompt.rs (new)",
+    "apps/Data Plane v2/services/embedding-engine-rs/src/context/window.rs (new)",
+    "apps/Data Plane v2/services/embedding-engine-rs/src/context/validate.rs (new)",
+    "apps/Data Plane v2/services/embedding-engine-rs/src/context/outcome.rs (new)",
+    "apps/Data Plane v2/services/embedding-engine-rs/src/config.rs",
+    "apps/Data Plane v2/services/embedding-engine-rs/src/main.rs"
+   ],
+   "approach": "Replace Option<String> results with a ContextOutcome enum (Ready{text, usage, model_used, provider_used, residency, request_id}, SkippedZdr, ResidencyUnavailable, SkippedPolicy, SkippedBudget, Transient{retry_after}, Permanent{class}) mapped from the typed statuses; honour the retry-after trailer; set request.zdr from the bearer, provider_hint azure-openai and min_residency eu from config, cache-control no-store; ship the ctx-v1 prompt unchanged as the default and ctx-v2 behind org policy/env pin; implement window selection (whole doc up to 32k chars, else fixed sections with 4k overlap and a constant header), first-chunk-first for prefix caching, per-document and per-batch deadlines, output validation (length, tags, stop_reason handling), and capture of InferResponse usage including cache_read_input_tokens and response_cache_hit. Remove the byte-length/size assumptions that break on Norwegian text.",
+   "tests_first": "Write first: table-driven outcome mapping from the shared status fixtures; prompt golden-file tests for ctx-v1 (byte-identical to today) and ctx-v2 including a Norwegian chunk, title/source/date attributes and the 'same language' and 'no This chunk' instructions; window property tests (every chunk's text appears in its window or falls back deterministically; sections cover the document; multibyte safe); validation tests (empty, too short, too long, tags, newline, stop_reason length truncation to a sentence, content_filter -> permanent); a retry test proving the delay uses retry-after_ms; a counting double proving a ZDR bearer makes zero provider calls.",
+   "live_proof": "Paid calls (3 gpt-4o-mini calls, about $0.002): ingest one synthetic ~1,200-token document with 3 chunks into the throwaway eval org; verify the three requests' usage (cache_read_input_tokens greater than 0 on calls 2 and 3 proves prefix caching), model_used/provider_used=azure-openai, residency eu, contexts persisted with provenance, no meta preamble and the same language as the chunk. Share these calls with the T8 and T10 proofs.",
+   "depends_on": [
+    "T5",
+    "T6"
+   ],
+   "size": "L"
+  },
+  {
+   "id": "T8",
+   "title": "Batch pipeline: write-ahead context, vector coherence, reuse, inline deadline, cross-document concurrency",
+   "plane": "data",
+   "files": [
+    "apps/Data Plane v2/services/embedding-engine-rs/src/batch/mod.rs",
+    "apps/Data Plane v2/services/embedding-engine-rs/src/stream/mod.rs",
+    "apps/Data Plane v2/services/embedding-engine-rs/src/qdrant_writer/mod.rs"
+   ],
+   "approach": "Rewrite contextualize_items and process_batch around the invariants: read persisted rows and reuse a context whose input_hash matches; generate within the inline deadline with bounded cross-document concurrency; UPDATE context+provenance and status (write-ahead) before embedding; embed from the persisted context; upsert Qdrant; mark done writing embedding_model and embedded_context_hash; set pending with next attempt for anything unfinished and embed it raw; publish the units.contextualized sync event and keep documents.indexed. A failed regeneration never overwrites a previous ready context. Tenant isolation: one tenant's slow provider can no longer hold the consumer past the deadline (head-of-line fix).",
+   "tests_first": "Postgres-backed tests first (disposable DB, fake provider and fake Qdrant that record calls): (I1) vector input equals compose(persisted context, text); (I2) provenance written with the context; (I3) every eligible unit ends non-NULL; (I4) a provider that sleeps past the deadline leaves units pending while OTHER tenants' items still embed within the batch; (I7) a second run with unchanged inputs makes zero provider calls; failure injection between write-ahead, embed, upsert and mark-done each converge to a coherent state after a retry; a regeneration failure keeps the previous ready context and its vector; ZDR bearer produces skipped_zdr with zero provider calls.",
+   "live_proof": "Same 3 calls as T7 (no extra spend): ingest the synthetic document, verify via SQL: status ready, embedded_context_hash equals sha256(chunk_context), embedding_model set, Qdrant point payload text unchanged, content_tsv matches the context terms, Quickwit context_body present after the sync event; re-embed the document via the existing reembed-switch and assert zero new provider calls and unchanged context.",
+   "depends_on": [
+    "T7"
+   ],
+   "size": "L"
+  },
+  {
+   "id": "T9",
+   "title": "Context reconciler, backfill/repair CLI, prompt-version refresh, Quickwit unit-sync event and parity repair",
+   "plane": "data",
+   "files": [
+    "apps/Data Plane v2/services/embedding-engine-rs/src/context_reconciler.rs (new)",
+    "apps/Data Plane v2/services/embedding-engine-rs/src/bin/context_backfill.rs (new)",
+    "apps/Data Plane v2/services/embedding-engine-rs/src/bin/backfill_reannounce.rs",
+    "apps/Data Plane v2/services/embedding-engine-rs/src/main.rs",
+    "apps/Data Plane v2/services/quickwit-adapter-rs/src/stream.rs",
+    "apps/Data Plane v2/services/quickwit-adapter-rs/src/rebuild.rs",
+    "apps/Data Plane v2/services/event-envelope-rs/src/lib.rs",
+    "apps/Data Plane v2/infra/nats/SUBJECTS.md",
+    "apps/Data Plane v2/scripts/check-subjects.sh",
+    "apps/Data Plane v2/scripts/rebuild-quickwit.sh"
+   ],
+   "approach": "Implement the DB-truth reconciler (leasing with SKIP LOCKED, org fair-share, budgets from cost_events and the policy table, per-org and global concurrency, jittered backoff honouring retry-after, circuit breaker, skipped_zdr re-check by minting, prompt-version refresh only when CONTEXT_REFRESH_ON_PROMPT_CHANGE=1) and the thin context-backfill CLI with --dry-run/--max-usd/--max-units/--target-version. Add the signed content-free subject dataplane.knowledge.units.contextualized (declared in SUBJECTS.md, lint-checked) that quickwit-adapter consumes with its existing index_knowledge_unit_by_id; add a Postgres-vs-Quickwit parity check and run the existing rebuild for the 150 chunks that are missing from Quickwit.",
+   "tests_first": "Failing tests first against a disposable Postgres: the selector returns exactly the right rows for every status/policy/ZDR/budget combination; two concurrent reconcilers never process the same unit (lease); budget exhaustion stops before the next call and marks skipped_budget; an interrupted run resumes without repeating generation; a second full run makes zero provider calls; prompt refresh is off unless the flag is set and cost-capped when on; dry-run output contains counts and estimated spend but no content; the sync-event handler is idempotent and the parity check detects a missing and a context-less document.",
+   "live_proof": "One paid call (about $0.0002): run the reconciler once on the live stack; the single raw chunk (single-chunk document, 529 chars) becomes ready and its vector coherent. Then run the Quickwit parity rebuild and verify counts: Quickwit chunks equal 207 and context_body present on all ready units. No other spend.",
+   "depends_on": [
+    "T8",
+    "T10",
+    "T11"
+   ],
+   "size": "L"
+  },
+  {
+   "id": "T10",
+   "title": "Usage ledger v2: shared event crate, durable stream, cost_events columns, forwarder to cost-core, ZDR numeric-only, graph signer",
+   "plane": "data",
+   "files": [
+    "apps/Data Plane v2/services/usage-ledger-rs/Cargo.toml (new)",
+    "apps/Data Plane v2/services/usage-ledger-rs/src/lib.rs (new)",
+    "apps/Data Plane v2/Cargo.toml",
+    "apps/Data Plane v2/services/embedding-engine-rs/src/batch/mod.rs",
+    "apps/Data Plane v2/services/graph-index-rs/src/extractor.rs",
+    "apps/Data Plane v2/services/graph-index-rs/src/main.rs",
+    "apps/Data Plane v2/services/data-orchestrator-go/internal/cost/consumer.go",
+    "apps/Data Plane v2/services/data-orchestrator-go/internal/cost/verifier.go",
+    "apps/Data Plane v2/services/data-orchestrator-go/internal/cost/forwarder.go (new)",
+    "apps/Data Plane v2/services/data-orchestrator-go/internal/cost/consumer_security_test.go",
+    "apps/Data Plane v2/services/data-orchestrator-go/cmd/main.go",
+    "apps/Data Plane v2/services/data-orchestrator-go/internal/config/config.go",
+    "apps/Data Plane v2/services/data-quality-go/internal/cost/query.go",
+    "apps/Data Plane v2/infra/postgres/migrations/<timestamp>_cost_events_v2.sql (new)",
+    "apps/Data Plane v2/infra/nats/SUBJECTS.md",
+    "apps/Data Plane v2/docker-compose.yml"
+   ],
+   "approach": "Create the shared event schema/builder (schema_version 2: org, feature, model_used, provider_used, input/output/cache_read tokens, calls, cost_basis, estimated, idempotency key = hash of sorted request ids; no document ids) built directly from InferResponse. Producers (embedding CR calls, graph extraction and community summaries, later rerank) publish to a new JetStream stream DATAPLANE_COST with PubAck (dual-publish to core NATS for one release). data-orchestrator consumes with a durable consumer, verifies the signer (add graph-index as a third issuer with its new key), persists to cost_events v2 columns, records ZDR events numeric-only instead of dropping them, and a forwarder loop posts unforwarded rows to cost-core with per-org tokens (principal data-orchestrator) until 202. Skip metering on response_cache_hit. Keep schema_version 1 accepted.",
+   "tests_first": "Failing tests first: signature/replay/scope tests for the new issuer (extend consumer_security_test.go); a ZDR-flagged event is persisted with counters only; JetStream durability (publish while the consumer is down, restart, exactly one row); forwarder against the REAL cost-core Handler (httptest with the real CostAuthorizer and JWKS, via the shared fixture from T4): 202, retry on 5xx, idempotency on replay, never forwards a row twice after success; token-cache per org; event builder tests proving exact token fields are copied from a captured real InferResponse and that cached responses emit zero.",
+   "live_proof": "Uses the T7/T8/T12 paid calls (no extra spend): after the synthetic ingest, the cost_events rows (feature contextual-retrieval) exist with exact input/output/cache_read tokens, forwarded_at is set within seconds, and cost-core GET /api/v1/cost/aggregate?feature=contextual-retrieval for the test org matches the sums. Kill data-orchestrator mid-run and confirm no event is lost after restart.",
+   "depends_on": [
+    "T2",
+    "T4",
+    "T6"
+   ],
+   "size": "L"
+  },
+  {
+   "id": "T11",
+   "title": "Org processing policy admin API, coverage endpoint and release gates",
+   "plane": "data",
+   "files": [
+    "apps/Data Plane v2/services/data-quality-go/internal/handler/quality.go",
+    "apps/Data Plane v2/services/data-quality-go/internal/handler/policy.go (new)",
+    "apps/Data Plane v2/services/data-quality-go/internal/policy/store.go (new)",
+    "apps/Data Plane v2/services/data-quality-go/internal/gates/checker.go",
+    "apps/Data Plane v2/services/embedding-engine-rs/src/policy.rs (new)",
+    "apps/Data Plane v2/openapi"
+   ],
+   "approach": "Add PUT/GET /v1/admin/orgs/{org}/processing-policy (scope data:quality:admin, audited, org id validated), GET /v1/quality/context-coverage backed by v_context_coverage, and two release gates: contextual_coverage_ok (ready/eligible >= 99% unless the org policy is off or the unit is explicitly skipped) and sparse_index_in_sync (Quickwit count and context_body presence equal Postgres). embedding-engine reads the policy through a 30s cache with a hard fallback to 'inherit/ON' only when the table is unreachable AND the global flag is on (never when the org policy says off).",
+   "tests_first": "Write first: authorization (admin scope required, cross-org write refused), RLS isolation, the default row semantics (absent row means ON), the kill switch is honoured by the embedding-engine policy reader (off means zero provider calls), cache expiry, and gate unit tests in both directions (a fixture with 98% coverage fails; a skipped_policy org passes; a Quickwit count mismatch fails).",
+   "live_proof": "No paid call. Set the throwaway eval org to off and confirm a synthetic ingest makes zero provider calls (inference-core counter from T3 unchanged) and units are skipped_policy; set back to inherit and confirm they become pending then ready via T9. Query the coverage endpoint for the live org and see 206/207 then 207/207.",
+   "depends_on": [
+    "T6"
+   ],
+   "size": "M"
+  },
+  {
+   "id": "T12",
+   "title": "graph-index hardening: durable per-chunk state, backoff and poison cap, typed errors, metering, tenant posture, version stamps",
+   "plane": "data",
+   "files": [
+    "apps/Data Plane v2/services/graph-index-rs/src/extractor.rs",
+    "apps/Data Plane v2/services/graph-index-rs/src/reconcile.rs",
+    "apps/Data Plane v2/services/graph-index-rs/src/stream.rs",
+    "apps/Data Plane v2/services/graph-index-rs/src/store.rs",
+    "apps/Data Plane v2/services/graph-index-rs/src/community.rs",
+    "apps/Data Plane v2/services/graph-index-rs/src/config.rs",
+    "apps/Data Plane v2/infra/postgres/migrations/<timestamp>_graph_extraction_state.sql (new)",
+    "apps/Data Plane v2/infra/postgres/init.sql"
+   ],
+   "approach": "Add graph_extraction_state (per org+chunk: status pending/ready/empty/skipped_zdr/skipped_policy/skipped_visibility/skipped_budget/failed_transient/failed_permanent, attempts, next_attempt_at, prompt_version, model, extracted_at, entity_count, error_class) with RLS. Replace the in-memory Suppressed set and the NOT EXISTS candidate scan with state-driven selection, exponential backoff (5m to 6h) and a poison cap of 6 attempts. Use the shared client (tenant bearer, typed statuses, per-feature reason), skip with markers for ZDR orgs, emit usage events for extraction and community summaries, honour org policy and budget, publish the DLQ regardless of verifier mode, stamp model and prompt version into provenance, bound per-document concurrency and deadline, and request structured JSON where the provider supports it. Visibility rule unchanged.",
+   "tests_first": "Failing tests first, built on the live repro: a chunk that fails 10 times in a row stops being retried after the cap and is reported failed_permanent; backoff table; an empty result is durable across a simulated restart (zero provider calls on the next pass); a ZDR bearer or skipped policy makes zero calls and records the marker; community summarisation obeys budget; the typed gRPC code appears in the log fields (assert on the structured event); DLQ publish happens with a verifier configured.",
+   "live_proof": "One paid call (about $0.0005): extract one org-visible chunk in the throwaway org and verify the usage event (feature graph-extraction), state row ready with model and prompt version, and that restarting graph-index makes no new call for an empty document. Confirm the live org's cefaf22d document is now durably empty (no repeats).",
+   "depends_on": [
+    "T5",
+    "T6",
+    "T10"
+   ],
+   "size": "L"
+  },
+  {
+   "id": "T13",
+   "title": "Defaults and config: CR ON by default, boot-time contract, .env.example, compose contract, dedicated deployment alias, stale-comment fixes",
+   "plane": "data",
+   "files": [
+    "apps/Data Plane v2/docker-compose.yml",
+    "apps/Data Plane v2/.env.example",
+    "apps/Data Plane v2/services/embedding-engine-rs/src/config.rs",
+    "apps/Data Plane v2/services/embedding-engine-rs/src/provider/contextualize.rs",
+    "apps/Data Plane v2/tests/scripts/compose-security-contract-test.sh",
+    "apps/Data Plane v2/infra/postgres/migrations/20260824120000_knowledge_unit_contextual_retrieval.sql (comment fix only via a new migration note)",
+    "apps/Data Plane v2/docs/gap-data.md"
+   ],
+   "approach": "Flip CONTEXTUAL_RETRIEVAL_ENABLED to true by default in config.rs and compose, give the model a default (gpt-4o-mini, or the dedicated background alias from OD4), add every CR/reconciler/budget knob to .env.example with its meaning, make startup fail loudly when CR is enabled without a model or credential (already true) AND when the global flag is off without an explicit CONTEXT_RETRIEVAL_KILL_SWITCH_REASON (an incident-only switch must be deliberate and logged), rewrite the stale comments (OFF by default, contextualized_text), and correct DATA-15 in gap-data.md. Never edit the live git-ignored .env in place.",
+   "tests_first": "Failing tests first: config tests assert default ON and an explicit-reason requirement for turning it off; the compose contract test asserts the compose default, the model default, the new env keys and that .env.example documents each; a docs lint ensures no file still says 'OFF by default' for CR.",
+   "live_proof": "No paid call. Recreate embedding-engine through the launcher with the live .env deliberately lacking CR keys and confirm CR is still ON from the new defaults (startup log line). Flip the kill switch with a reason in a scratch environment and confirm the process logs it and /readyz reports it.",
+   "depends_on": [
+    "T7"
+   ],
+   "size": "S"
+  },
+  {
+   "id": "T14",
+   "title": "Quality harness: committed corpus ingest, A/B cells, coverage gate, persisted results, ctx-v2 promotion gate",
+   "plane": "quality",
+   "files": [
+    "apps/Data Plane v2/scripts/eval-ingest-corpus.py (new)",
+    "apps/Data Plane v2/scripts/eval-corpus-manifest.json (new)",
+    "apps/Data Plane v2/scripts/eval-attribution-study.sh",
+    "apps/Data Plane v2/scripts/eval-gate.py",
+    "apps/Data Plane v2/scripts/eval-baseline.json",
+    "apps/Data Plane v2/scripts/eval-nightly.sh",
+    "apps/Data Plane v2/scripts/eval-fixture-membership.sql",
+    "apps/Data Plane v2/scripts/golden-v2.json",
+    "apps/Data Plane v2/services/data-quality-go/internal/eval/store.go",
+    "apps/Data Plane v2/Makefile"
+   ],
+   "approach": "Add a deterministic corpus ingest (pinned manifest of path+sha256 of the repo docs) that creates org-corpus-baseline and org-corpus-contextual through documents-api with the corpus-seeder principal; use org_processing_policy off vs inherit for the baseline/contextual split; add cells for ctx-v1, ctx-v2, a model candidate, rerank-input-with-context and (if built) breadcrumb; run attribution with the reranker off and confirm with rerank on three times; add the coverage and parity gates to eval-gate.py; persist each run's summary in quality_eval_runs; extend the golden set with Norwegian-morphology and mixed-language queries; wire the nightly job.",
+   "tests_first": "Gate unit tests first, verified in BOTH directions as round 8 did: the gate exits 1 when a cell regresses past tolerance, when coverage is below 99%, when fewer than the required queries were scored, and exits 0 on the committed baseline; the ingest script is idempotent (second run creates nothing); the manifest check fails on a changed file hash.",
+   "live_proof": "With owner approval (OD8): re-seed the eval orgs (about 1,164 chunk calls, about $0.15, outside the handful of tiny proof calls), run baseline vs contextual-ctx-v1 and record the new committed baseline; then run ctx-v1 vs ctx-v2 on the canary policy and decide promotion by the gate. Results visible in quality_eval_runs.",
+   "depends_on": [
+    "T8",
+    "T9",
+    "T11"
+   ],
+   "size": "L"
+  },
+  {
+   "id": "T15",
+   "title": "Retrieval: rerank input with chunk context (measured, flag-gated)",
+   "plane": "data",
+   "files": [
+    "apps/Data Plane v2/services/retrieval-engine-rs/src/search/rerank.rs",
+    "apps/Data Plane v2/services/retrieval-engine-rs/src/search/sparse.rs",
+    "apps/Data Plane v2/services/retrieval-engine-rs/src/pipeline/types.rs",
+    "apps/Data Plane v2/services/retrieval-engine-rs/src/pipeline/orchestrator.rs",
+    "apps/Data Plane v2/services/retrieval-engine-rs/src/config.rs"
+   ],
+   "approach": "Carry chunk_context on retrieval candidates through the source join and, behind RERANK_INPUT_INCLUDE_CONTEXT (default off), build rerank documents as compose_contextualized(context, text) instead of the raw text. Never return the context to callers or graders. Ship it enabled only if the T14 cells show a gain beyond the rerank noise floor with the reranker on; reranking stays on the paid Cohere route, never a subscription route.",
+   "tests_first": "Write first: with the flag off the rerank request body is byte-identical to today; with it on the document string equals compose(context,text) and a candidate without context is unchanged; context never appears in the response payload; a Norwegian multibyte fixture does not break truncation.",
+   "live_proof": "No extra paid generation; rerank calls are part of the T14 eval run. Compare rerank-on cells with and without the flag three times each and record the decision in the evidence doc.",
+   "depends_on": [
+    "T14"
+   ],
+   "size": "M"
+  },
+  {
+   "id": "T16",
+   "title": "Ownership documents, decision ledger, compliance evidence and runbook",
+   "plane": "docs",
+   "files": [
+    "apps/master-ownership-matrix.md",
+    "apps/CODEBASE_INFORMATION_SYSTEM.md",
+    "apps/Model Plane/docs/decisions/ledger.md",
+    "apps/Model Plane/docs/ZDR.md",
+    "apps/Data Plane v2/docs/contextual-retrieval-runbook.md (new)",
+    "apps/Data Plane v2/docs/retrieval-fusion-evidence-2026-08-26.md",
+    "apps/Data Plane v2/docs/gap-data.md",
+    "apps/Data Plane v2/DATA_PLANE_STATUS.md",
+    "docs/compliance/evidence/data-flow-map.md",
+    "docs/compliance/evidence/honest-limits.md",
+    "docs/compliance/evidence/subprocessors-from-code.md",
+    "docs/compliance/evidence/claims-vs-code.md"
+   ],
+   "approach": "Apply the document changes listed in design section 13: new matrix rows and rules 10 and 11, corrected cost row and embedding row, four ledger entries (append, newest first, with state), runbook with the incident procedures, evidence-doc addendum and corrections (G13/G14/R15.1, L12/L19), the stale ZDR.md statement about the Anthropic attestation knob, and DATA-15. Draft early (target state), then finalise with measured numbers when T7-T14 land. Coordinate with the trust-edits track that edits the compliance evidence files.",
+   "tests_first": "Run the repo's citation checker first (node docs/compliance/evidence/tools/check-citations.mjs on each edited evidence file, then --show) so every new line number anchor is verified; a docs lint asserts no remaining 'OFF by default' or 'contextualized_text' strings; scripts/check-subjects.sh passes for the new subjects.",
+   "live_proof": "No paid call. Re-run the live read-only queries cited in the evidence files and confirm each statement against the stack after the rollout.",
+   "depends_on": [],
+   "size": "M"
+  },
+  {
+   "id": "T17",
+   "title": "Cross-plane dependency manifest, real-policy contract spec and live smoke matrix",
+   "plane": "control",
+   "files": [
+    "apps/Control Plane/config/plane-calls.manifest.json (new)",
+    "apps/Control Plane/auth-core/src/auth/plane-calls-manifest.contract.spec.ts (new)",
+    "apps/Control Plane/auth-core/src/auth/plane-service-principals-policy.contract.spec.ts",
+    "apps/Data Plane v2/scripts/plane-call-smoke.sh (new)",
+    "apps/Data Plane v2/tests/scripts/compose-security-contract-test.sh"
+   ],
+   "approach": "Commit a machine-readable manifest of every cross-plane call this design relies on (caller, audience, scopes, retention posture, feature, the file that makes the call). A spec loads the REAL registry and manifest and asserts each call is authorized by the real authorizePlaneServicePrincipal, no registry grant lacks a manifest owner, retention values match, and compose posture envs match. The smoke script performs, for every manifest row, a real mint against the live auth-service (status only) plus a no-spend probe, and prints a pass/fail matrix with no tokens or org ids. This is the answer to the A6 finding that stubs hid six defects.",
+   "tests_first": "Write the spec first so it fails on today's tree for the missing data-orchestrator row, the unmanifested quarry-edge grants, and the missing tenant posture; the smoke script gets a dry test mode that asserts it never prints secrets (grep the output).",
+   "live_proof": "No paid call. Run the matrix on the live stack after T1-T5 and T10 and record the result in the runbook; every row green before the paid proofs of T7/T8/T12 run.",
+   "depends_on": [
+    "T1",
+    "T2",
+    "T3",
+    "T4"
+   ],
+   "size": "M"
+  },
+  {
+   "id": "T18",
+   "title": "Optional: deterministic tier-1 breadcrumb context (title/heading path) for ZDR orgs and cost-free baseline, eval-gated",
+   "plane": "data",
+   "files": [
+    "apps/Data Plane v2/services/index-engine-rs/src/chunker/mod.rs",
+    "apps/Data Plane v2/services/index-engine-rs/src/builder/mod.rs",
+    "apps/Data Plane v2/infra/postgres/migrations/<timestamp>_chunk_breadcrumb.sql (new)",
+    "apps/Data Plane v2/services/embedding-engine-rs/src/batch/mod.rs"
+   ],
+   "approach": "Have the chunker track the heading path and persist a short deterministic breadcrumb (document title, heading path, source, date) per chunk; compose it ahead of any LLM context at embed time and index it with the same weight B. No provider call, so ZDR orgs get structural contextualisation without egress. Ships only if the T14 cells show it is non-inferior alone and additive with the LLM context.",
+   "tests_first": "Write first: chunker emits the right heading path for nested markdown including tables and fenced code; the breadcrumb is stable (same input gives same bytes) and bounded in length; embedding input equals compose(breadcrumb, context, text) with each part optional; no provider call is made for a ZDR org.",
+   "live_proof": "No paid generation; embedding-only cost for the eval corpus re-embed (Cohere), measured as a separate cell in T14.",
+   "depends_on": [
+    "T14"
+   ],
+   "size": "M"
+  }
+ ],
+ "rollout_and_migration": "ORDER (each step additive and independently reversible; rebuild through the launcher so the Control Plane env chain is applied):\n0) Docs first (T16 draft, T17 manifest) so reviewers see the target contract. No runtime change.\n1) cost-core (T4). Must land first: the ledger endpoint uses DisallowUnknownFields, so `feature`/`units` must be accepted before any forwarder sends them. Coordinate with the other session's uncommitted cost-core changes (migrations 0006/0007, Azure actual-cost sync): land after their merge; the live cost_entries table is still at schema 0005 (no provider_used) and will pick up 0006-0008 in one rebuild. Add sourced catalogue rows BEFORE any Data Plane model is forwarded (default row would overprice about 25x).\n2) auth-core + registry (T1, T2): deploy the tenant posture with the embedding-engine/graph-index inference-core rows still 'persistent', then flip those two rows to 'tenant' together with the clients (step 5). Add the data-orchestrator principal (new consumerEnv minted by the launcher) and the graph-events signing key. Live-verify mints before any client depends on them.\n3) inference-core (T3): typed statuses are additive trailers; counters are new. Rebuild via the launcher.\n4) Data Plane migrations (T6, T10 cost_events_v2, T12 graph_extraction_state): additive nullable columns/tables, applied before code. Legacy backfill sets the 206 rows to ready/legacy-assumed and the 1 raw row to pending. Rollback = down migrations (columns are unused by old code).\n5) Data Plane services in this order: inference-client crate + embedding-engine v2 (T5/T7/T8) with CONTEXT_RECONCILER_ENABLED=0 and CONTEXT_REFRESH_ON_PROMPT_CHANGE=0 first (new code drives the existing ctx-v1 prompt; ctx-v2 behind org policy pin), together with the posture env flip to tenant; then orchestrator forwarder + JetStream stream (T10) with dual-publish for one release (core-NATS plus JetStream) to avoid a ledger gap; then graph-index (T12); then enable the reconciler (T9) with a $ cap.\n6) Repair: reconciler heals the raw chunk (1 call); one-off Quickwit parity rebuild restores the 150 missing chunks; verify parity gate green. Run a backfill-reannounce only if the sync event does not cover a gap.\n7) Defaults (T13): flip CR default ON in code/compose/.env.example once step 5 is green, so the owner's requirement no longer depends on a git-ignored file.\n8) Quality (T14): re-seed eval orgs (owner-approved paid ingest about 1,164 calls, about $0.15), record the new baseline, run ctx-v1 vs ctx-v2 cells; promote ctx-v2 via org policy canary, then global default, then budgeted refresh (re-embeds all affected units: Cohere embed cost plus about $0.03 per 200 chunks of generation). Rollback of a prompt = set the policy pin back and run a refresh to the prior version.\nLegacy/in-flight safety: old events and consumers keep working because every new column is nullable and every new event field is optional; the consumer continues to accept schema_version 1 events. The live JetStream stream DATAPLANE_KNOWLEDGE (interest retention, 7-day max_age) is untouched. Throughout, CR stays ON: no step sets CONTEXTUAL_RETRIEVAL_ENABLED=false; the incident kill switch is the only path and is documented as such.\nLive-proof budget: T7/T8/T10 share 3 gpt-4o-mini calls on one synthetic document (about $0.002), T9 uses 1 call to heal the raw chunk (about $0.0002), T12 uses 1 extraction call (about $0.0005). Total 5 tiny paid calls, under a cent. Everything else (T1-T6, T11, T13, T15-T17) is zero paid spend. The T14 corpus re-seed (about $0.15) is a separate, owner-approved step.",
+ "risks": [
+  "PROCESS DISCLOSURE: during this read-only audit two credential-like values appeared in my own tool output. (a) A redaction filter keyed on names missed the field `credential`, so the local-dev service-principal credentials of the auth-service registry were printed in full. (b) A truncated prefix of the org-core service credential for principal 'verevon-gateway' was printed from an env listing. Nothing was written to disk or sent anywhere, but if this transcript is retained, rotate the PLANE_SERVICE_PRINCIPALS_JSON credentials (the launcher mints them) and ORG_CORE_SERVICE_CREDENTIALS. No env value, key or token was otherwise used.",
+  "Concurrent edits: several files this plan touches have uncommitted changes from other sessions (auth-core plane-token.controller.ts and convex-token.service.ts, plane-service-principals.json, run-control-plane.sh, Control Plane docker-compose.yml, and all of cost-core including migrations 0006/0007). Rebase carefully; never stash or checkout over them (repo memory rule). The cost-core live image predates its working tree.",
+  "Pricing trap: any Data Plane model forwarded to cost-core without a catalogue row is priced at the 3.00/15.00 default (about 25x overstated for embeddings). Prices for embed-v-4-0, text-embedding-3-large and Cohere rerank must be sourced by the owner; rerank is per search unit and must carry an explicit cost_usd.",
+  "Fail-closed tenant posture ties CR and graph availability to org-core health. Mitigation: unresolved posture is a deferral with a 5-minute retry, positive results are cached 45s, and negative results only a few seconds. If org-core flaps, contextualisation pauses rather than leaks.",
+  "No ZDR-attested deployment exists live (and deployment type is unset). A ZDR org will get no LLM-derived enrichment (explicit skipped_zdr marker) until the owner provisions an attested deployment. This is intended but is a product limitation to communicate. The tier-1 breadcrumb (T18) is the no-egress partial substitute.",
+  "Unresolved ZDR semantics for the Data Plane beyond CR: text embedding (Cohere Embed v4 direct) and document persistence consult only per-document 'restricted', not the org retention intent. A ZDR org's documents can be embedded at the Foundry host today. Not fixed by this design (OD1).",
+  "Production principal model: allowAnyOrg is rejected by the registry loader in production file mode, and every multi-tenant Data Plane background principal uses it. The tenant-posture and metering design inherit that blocker; a production-valid form (per-tenant orgIds provisioning, or a delegated-token path) needs an owner/architecture call before any real deployment.",
+  "Azure quota coupling: background CR/graph traffic shares the gpt-4o-mini deployment's tokens-per-minute quota with chat (Budget/cheap-fallback routing uses the same model). A large backfill can 429 chat. Mitigation: per-org and global rate caps and a circuit breaker now; a dedicated deployment alias is the clean fix (OD4).",
+  "Model swaps are not drop-in: gpt-5-* family models are reasoning models and the OpenAI provider sends max_completion_tokens, so a 128-token cap can be consumed by hidden reasoning and return empty content (silently, today). Only change the model through the eval cells with reasoning effort minimal and a larger cap.",
+  "Re-embedding on a prompt-version refresh is real spend (Cohere embed per unit plus generation) and changes retrieval behaviour; it must be canaried per org, gated by the eval cells, and budget-capped. The +/-0.04 rerank-lottery noise means CR attribution must be measured with the reranker off and confirmed on.",
+  "Legacy rows are assumed coherent (context persisted after the vector in the same pass); no proof exists for the 206 existing vectors. The first refresh re-verifies them. Low risk, but the status 'ready' with context_model NULL must be treated as unverified in reports.",
+  "Two live proofs need owner approval: toggling a throwaway org's ZDR intent/entitlement in org-core (otherwise ZDR behaviour is proven only by contract tests plus a mint with a stubbed org-core), and the paid eval-corpus re-ingest (about $0.15, outside the handful of tiny proof calls).",
+  "The Data Plane has no Prometheus. Metrics and alerts are only useful once a scrape target (Control Plane's Prometheus can add a job) or the SQL gates are wired; until then v_context_coverage plus the data-quality release gates are the monitoring.",
+  "Quickwit parity repair and re-announce create transient duplicate generations (delete is asynchronous); retrieval already de-duplicates by knowledge_id, but parity counts should be read after merges.",
+  "Prompt injection in documents can steer a generated context (stored and indexed for that tenant's own chunk). Contexts are never returned to callers (no retrieval-engine consumer) and are validated and length-capped, so impact is ranking-only within the tenant; keep it that way (do not expose chunk_context in answers).",
+  "Observed instability signals that may mask failures in the proof: Postgres slow-acquire warnings (28s), NATS 'missed idle heartbeat' on several consumers, and the quickwit admin job Storage error. Re-run the proof if the stack is mid-recovery."
+ ],
+ "owner_decisions": [
+  {
+   "question": "OD1: What does an org with ZDR ON mean for the Data Plane's durable knowledge base and text embedding?",
+   "options": "(a) Strict: a ZDR org may not persist durable documents at all (extend the existing documents-api token-zdr refusal to service writers). (b) Workable: ZDR org's KB ingests and lexical/graph-local retrieval works, while every provider-facing step (embedding, CR, graph, rerank) uses only ZDR-attested routes and is otherwise skipped with a visible marker. (c) Treat only per-document 'restricted' as ZDR (status quo, which contradicts the org setting).",
+   "recommended": "(b). This design implements it for CR and graph through the tenant token claim; embedding and rerank should reuse the same claim as the org-posture oracle in a follow-up. It is the reading of 'zero retention must be workable, only for orgs that have it on, and we respect it'."
+  },
+  {
+   "question": "OD2: Provision a ZDR-attested provider deployment (Azure OpenAI and, if Claude is used, Foundry Claude), including a contractual no-retention approval, so ZDR orgs get CR and graph instead of a skip marker?",
+   "options": "(a) Yes, attest one gpt-4o-mini-class deployment via the existing AZURE_*_ZDR_* evidence fields (resource id, approval ref, dates, reviewer, digest) and set AZURE_OPENAI_DEPLOYMENT_TYPE. (b) Not now: ZDR orgs get explicit skipped_zdr markers and the optional tier-1 breadcrumb only.",
+   "recommended": "(a) when the contract exists; (b) until then. The code path is ready either way; the attestation is a human/contract action (Model Plane ZDR.md step 0), never a code flip."
+  },
+  {
+   "question": "OD3: Metering architecture: approve Data Plane usage events v2 -> durable stream -> data-orchestrator forwarder -> cost-core (new principal data-orchestrator with cost:write, new graph-events signing key, `feature` and `units` columns, org-level producer-attributed rows) instead of inference-core emitting usage.",
+   "options": "(a) Chosen design. (b) inference-core emits for all service-principal callers (double-count risk with model-gateway/orchestrator paths, no coverage of embed/rerank, no feature). (c) Extend cost-core's NATS producer allowlist (needs cross-plane NATS credentials and a fake user_id).",
+   "recommended": "(a), with inference-core counters used only for a drift check. Background spend is attributed to the org, not the uploading user, so it cannot exhaust a person's chat budget."
+  },
+  {
+   "question": "OD4: Create a dedicated Azure deployment alias for background LLM work (CR, graph, community summaries) to isolate quota from chat?",
+   "options": "(a) Yes: add e.g. gpt-4o-mini-bg to AZURE_OPENAI_CHAT_DEPLOYMENTS and use it for background calls (pricing prefix-match still resolves to gpt-4o-mini). (b) No: share the deployment and rely on rate caps and the circuit breaker.",
+   "recommended": "(a). It is an Azure portal action plus one env value; without it a backfill can starve chat."
+  },
+  {
+   "question": "OD5: Residency and provider pinning for background document calls.",
+   "options": "(a) Pin provider_hint=azure-openai and min_residency=eu (label-based until AZURE_OPENAI_DEPLOYMENT_TYPE is set). (b) Keep no floor (status quo, G14). (c) Add a Norway/sovereign floor (no provider is classed Norway today, so everything would fail).",
+   "recommended": "(a), and set AZURE_OPENAI_DEPLOYMENT_TYPE so the EU claim becomes provable; document that it is a label gate (honest-limits L7)."
+  },
+  {
+   "question": "OD6: Spend caps and defaults for CR and graph.",
+   "options": "Proposed defaults: per-org monthly budget $5 (adjustable per org in org_processing_policy), global daily cap $25, per-document cap $0.25 (above it: windowed sampling or skipped_budget), per-run backfill --max-usd required. Alternative: uncapped with alerts only, or per-plan tiers from org entitlements.",
+   "recommended": "The proposed defaults, with alerts at 80% and a documented raise path; revisit once the real per-org distribution is visible in the ledger."
+  },
+  {
+   "question": "OD7: Who may set org_processing_policy and where does it surface?",
+   "options": "(a) Operator-only via the data-quality admin API (data:quality:admin) now; a settings UI later. (b) Org admins can toggle CR/graph for their own org immediately via the product.",
+   "recommended": "(a) first, because it is the kill-switch and A/B mechanism for the eval orgs; expose to org admins once the coverage view and cost visibility are live in the product."
+  },
+  {
+   "question": "OD8: Approve the paid re-seed of the eval corpus (about 1,164 chunks, about $0.15 of gpt-4o-mini plus Cohere embed cost) and the standing nightly eval, to re-establish the CR baseline on this stack.",
+   "options": "(a) Yes, once T14 lands. (b) Rely on the 2026-08-26 evidence only (the gate stays dead and CR regressions go undetected).",
+   "recommended": "(a). It is the only way to prove ctx-v2 and to keep proving CR."
+  },
+  {
+   "question": "OD9: Production principal model for multi-tenant background services (allowAnyOrg is refused in production file mode).",
+   "options": "(a) Provision fixed orgIds per deployment through the launcher/org lifecycle. (b) Introduce a delegated/tenant-bound token path for background services (e.g. a per-org token exchange from an event-authority claim). (c) Defer; production is not on the roadmap yet.",
+   "recommended": "(b) as the architecture direction, but it is a Control Plane design of its own; do not block this work on it, and record it in the ledger so the dependency is visible."
+  },
+  {
+   "question": "OD10: Model and prompt choice for CR.",
+   "options": "(a) Keep gpt-4o-mini and ship ctx-v2 (language rule, no meta preamble, title/source/date, windowing) only if the eval gate passes. (b) Evaluate gpt-5-nano/gpt-5-mini as a measured cell (cheaper cached input, but reasoning-token and cap issues). (c) Evaluate a per-document batched variant (K chunks per call) for cost at scale.",
+   "recommended": "(a) now, with (b) and (c) as eval cells; no model change without the gate."
+  },
+  {
+   "question": "OD11: Include the optional deterministic tier-1 breadcrumb (title/heading path) as context for every org, including ZDR orgs?",
+   "options": "(a) Yes, behind the eval gate: zero-egress, deterministic, free, and the only contextualisation a ZDR org can have without an attested provider. (b) No: LLM context only.",
+   "recommended": "(a) as T18 after the core pipeline lands; it needs a chunker change to track headings."
+  }
+ ],
+ "shared_files_touched": [
+  "apps/Control Plane/config/plane-service-principals.json (uncommitted edits by other sessions: new principals and quarry scopes)",
+  "apps/Control Plane/auth-core/src/auth/plane-token.controller.ts (uncommitted edit by another session)",
+  "apps/Control Plane/auth-core/src/auth/convex-token.service.ts (uncommitted edit by another session; read-only dependency for T1)",
+  "apps/Control Plane/auth-core/src/auth/plane-service-principal.ts",
+  "apps/Control Plane/auth-core/src/auth/interactive-retention-policy.ts",
+  "apps/Control Plane/auth-core/src/auth/plane-service-principals-policy.contract.spec.ts",
+  "apps/Control Plane/scripts/run-control-plane.sh (uncommitted edit by another session)",
+  "apps/Control Plane/scripts/validate-release-credentials.sh (uncommitted edit by another session)",
+  "apps/Control Plane/docker-compose.yml (uncommitted edit by another session)",
+  "apps/Control Plane/config/README.md (uncommitted edit by another session)",
+  "apps/Model Plane/go/services/cost-core/** (cmd/main.go, internal/ledger, internal/postgres, internal/server, migrations 0006/0007 and docs/ are uncommitted work by another session)",
+  "apps/Model Plane/rust/services/inference-core/src/grpc.rs",
+  "apps/Model Plane/rust/services/inference-core/src/provider/fallback.rs",
+  "apps/Model Plane/docs/decisions/ledger.md",
+  "apps/Model Plane/docs/ZDR.md",
+  "apps/Data Plane v2/docker-compose.yml",
+  "apps/Data Plane v2/docker-compose.cross-plane.yml",
+  "apps/Data Plane v2/.env (git-ignored, live; do not edit in place, document in .env.example instead)",
+  "apps/Data Plane v2/.env.example",
+  "apps/Data Plane v2/Cargo.toml (workspace members)",
+  "apps/Data Plane v2/infra/postgres/init.sql",
+  "apps/Data Plane v2/infra/postgres/migrations/ (new files only)",
+  "apps/Data Plane v2/infra/nats/SUBJECTS.md",
+  "apps/Data Plane v2/scripts/check-subjects.sh",
+  "apps/Data Plane v2/services/event-envelope-rs/src/lib.rs",
+  "apps/Data Plane v2/services/embedding-engine-rs/** (provider, batch, stream, config, bins)",
+  "apps/Data Plane v2/services/graph-index-rs/**",
+  "apps/Data Plane v2/services/data-orchestrator-go/internal/cost/** and cmd/main.go",
+  "apps/Data Plane v2/services/data-quality-go/internal/handler|gates|cost|eval",
+  "apps/Data Plane v2/services/quickwit-adapter-rs/src/stream.rs and rebuild.rs",
+  "apps/Data Plane v2/services/index-engine-rs/src/builder/mod.rs and chunker/mod.rs",
+  "apps/Data Plane v2/services/retrieval-engine-rs/src/search/rerank.rs, sparse.rs and pipeline/*",
+  "apps/Data Plane v2/scripts/eval-*.sh|py|json and Makefile",
+  "apps/Data Plane v2/tests/scripts/compose-security-contract-test.sh",
+  "apps/master-ownership-matrix.md",
+  "apps/CODEBASE_INFORMATION_SYSTEM.md",
+  "docs/compliance/evidence/data-flow-map.md, honest-limits.md, subprocessors-from-code.md, claims-vs-code.md (the trust-edits track edits these)"
+ ]
+}

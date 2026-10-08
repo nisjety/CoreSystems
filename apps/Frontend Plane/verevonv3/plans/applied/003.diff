@@ -1,0 +1,146 @@
+--- a/src/styles/global.css
++++ b/src/styles/global.css
+@@ -29707,18 +29707,21 @@
+   margin-top: 17px;
+ }
+ 
+-.knowledge-folder-card__stat-primary,
+-.knowledge-folder-card__stat-secondary {
++/* Scoped under the docs surface so these outrank the unscoped legacy
++   .knowledge-folder-card__stats span rules (0,1,1) that also match both stat spans. */
++.knowledge-page-surface--docs .knowledge-folder-card__stat-primary,
++.knowledge-page-surface--docs .knowledge-folder-card__stat-secondary {
+   display: inline-flex;
+   align-items: center;
+   gap: 5px;
++  padding-bottom: 0;
+ }
+ 
+-.knowledge-folder-card__stat-primary {
++.knowledge-page-surface--docs .knowledge-folder-card__stat-primary {
+   color: #62625b;
+ }
+ 
+-.knowledge-folder-card__stat-primary strong {
++.knowledge-page-surface--docs .knowledge-folder-card__stat-primary strong {
+   color: #22221f;
+   font-size: 16px;
+   font-weight: 740;
+@@ -29726,13 +29729,13 @@
+   line-height: 1;
+ }
+ 
+-.knowledge-folder-card__stat-primary small,
+-.knowledge-folder-card__stat-secondary {
++.knowledge-page-surface--docs .knowledge-folder-card__stat-primary small,
++.knowledge-page-surface--docs .knowledge-folder-card__stat-secondary {
+   color: #8e8e87;
+   font-size: 9px;
+ }
+ 
+-.knowledge-folder-card__stat-secondary {
++.knowledge-page-surface--docs .knowledge-folder-card__stat-secondary {
+   max-width: 50%;
+   overflow: hidden;
+   text-overflow: ellipsis;
+@@ -41905,97 +41908,12 @@
+   gap: 8px;
+ }
+ 
++/* The folder card is a static article. The unscoped legacy .knowledge-folder-card
++   rule (button-style card) still sets cursor: pointer and a 1px outline, so keep
++   these two resets here; all layout and colour comes from the card block above. */
+ .knowledge-page-surface--docs .knowledge-folder-card {
+-  display: grid;
+-  min-height: 96px;
+-  grid-template-columns: 32px minmax(0, 1fr) auto;
+-  grid-template-rows: 1fr auto;
+-  gap: 7px 9px;
+-  overflow: hidden;
+-  border: 1px solid #e2e2dd;
+-  border-radius: 10px;
+-  background: #ffffff;
+-  padding: 12px;
+-  color: #22221f;
+   cursor: default;
+   outline: none;
+-  box-shadow: 0 2px 8px rgb(25 25 22 / 3%);
+-}
+-
+-.knowledge-page-surface--docs .knowledge-folder-card:hover {
+-  border-color: #c9c9c2;
+-  box-shadow: 0 8px 18px rgb(25 25 22 / 7%);
+-  transform: translateY(-1px);
+-}
+-
+-.knowledge-folder-card__icon {
+-  display: grid;
+-  width: 32px;
+-  height: 26px;
+-  grid-row: 1 / span 2;
+-  place-items: center;
+-  align-self: start;
+-  border-radius: 6px;
+-  background: #eee9dd;
+-  color: #8c7048;
+-}
+-
+-.knowledge-folder-card__icon--blue { background: #e7edf5; color: #547297; }
+-.knowledge-folder-card__icon--gray { background: #ececea; color: #777871; }
+-.knowledge-folder-card__icon--green { background: #e8f0ea; color: #5d856a; }
+-.knowledge-folder-card__icon--warm { background: #f3e8dc; color: #9a6946; }
+-
+-.knowledge-page-surface--docs .knowledge-folder-card__copy {
+-  display: block;
+-  min-width: 0;
+-}
+-
+-.knowledge-page-surface--docs .knowledge-folder-card__copy h3 {
+-  overflow: hidden;
+-  margin: 0;
+-  color: #272721;
+-  font-size: 11px;
+-  font-weight: 700;
+-  text-overflow: ellipsis;
+-  white-space: nowrap;
+-}
+-
+-.knowledge-page-surface--docs .knowledge-folder-card__copy small {
+-  display: block;
+-  overflow: hidden;
+-  margin-top: 4px;
+-  color: #87877f;
+-  font-size: 9px;
+-  text-overflow: ellipsis;
+-  white-space: nowrap;
+-}
+-
+-.knowledge-page-surface--docs .knowledge-folder-card__stats {
+-  position: static;
+-  display: flex;
+-  align-items: baseline;
+-  gap: 4px;
+-  grid-column: 2;
+-  grid-row: 2;
+-}
+-
+-.knowledge-page-surface--docs .knowledge-folder-card__stats strong {
+-  color: #282822;
+-  font-size: 13px;
+-  font-weight: 700;
+-  line-height: 1;
+-}
+-
+-.knowledge-page-surface--docs .knowledge-folder-card__stats small {
+-  color: #96968f;
+-  font-size: 9px;
+-}
+-
+-.knowledge-page-surface--docs .knowledge-folder-card__arrow {
+-  align-self: end;
+-  color: #aaa9a2;
+-  font-size: 14px;
+-  line-height: 1;
+ }
+ 
+ .knowledge-pulse-grid {

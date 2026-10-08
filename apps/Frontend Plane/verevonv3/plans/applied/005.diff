@@ -1,0 +1,129 @@
+--- src/features/inbox/components/InboxPage.tsx
++++ src/features/inbox/components/InboxPage.tsx
+@@ -252,10 +252,10 @@
+     }
+     return byConversation
+   })
+-  const tickets = () => baseTickets().map((ticket) => ({
++  const tickets = createMemo(() => baseTickets().map((ticket) => ({
+     ...ticket,
+     supportTicket: supportTicketByConversation().get(ticket.conversationId) ?? null,
+-  }))
++  })))
+ 
+   const [groupsRes, { mutate: mutateGroups }] = createResource(
+     orgId,
+--- src/features/inbox/components/TicketQueue.tsx
++++ src/features/inbox/components/TicketQueue.tsx
+@@ -445,20 +445,21 @@
+         </Show>
+         <Show when={!props.loading && !props.error && sortedTickets().length > 0}>
+           <ul aria-label={i18n.tr('Saker', 'Tickets')} aria-keyshortcuts="j k" class="verevon-inbox-ticket-list">
+-            <For each={sortedTickets()}>
++            {/* Keyed by conversation: a poll rebuilds every row object, and an unkeyed list would remount each row and drop focus. */}
++            <For each={sortedTickets()} keyed={(t) => t.conversationId ?? t.id}>
+               {(ticket) => (
+                 <li>
+                   <TicketRow
+-                    active={props.selectedTicketId === ticket.id}
+-                    pinned={pinnedConversationIds().has(ticketPreferenceId(ticket))}
+-                    unread={!readConversationIds().has(ticketPreferenceId(ticket))}
+-                    ticket={ticket}
++                    active={props.selectedTicketId === ticket().id}
++                    pinned={pinnedConversationIds().has(ticketPreferenceId(ticket()))}
++                    unread={!readConversationIds().has(ticketPreferenceId(ticket()))}
++                    ticket={ticket()}
+                     onClick={() => {
+-                      props.onMarkRead(ticket)
+-                      props.onSelectTicket(ticket)
++                      props.onMarkRead(ticket())
++                      props.onSelectTicket(ticket())
+                     }}
+-                    onSnooze={() => props.onSnoozeTicket(ticket)}
+-                    onTogglePinned={() => props.onTogglePinned(ticket)}
++                    onSnooze={() => props.onSnoozeTicket(ticket())}
++                    onTogglePinned={() => props.onTogglePinned(ticket())}
+                   />
+                 </li>
+               )}
+--- src/features/inbox/components/ConversationPanel.tsx
++++ src/features/inbox/components/ConversationPanel.tsx
+@@ -553,8 +553,8 @@
+       </Show>
+       <Show when={!props.articlesLoading && props.articles.length > 0}>
+         <div class="verevon-inbox-transcript__articles">
+-          <For each={props.articles}>
+-            {(article) => <ArticleBubble article={article} ticket={props.selectedTicket} />}
++          <For each={props.articles} keyed={(article) => article.id}>
++            {(article) => <ArticleBubble article={article()} ticket={props.selectedTicket} />}
+           </For>
+         </div>
+       </Show>
+--- src/features/chat/components/ChatPage.tsx
++++ src/features/chat/components/ChatPage.tsx
+@@ -806,34 +806,35 @@
+                 </Show>
+               </div>
+               <div class="verevon-chat-thread">
+-                <For each={messageRows()}>
++                {/* Keyed by turn id: messageRows rebuilds its row objects on every copy, feedback or approval change; unkeyed, each change remounted the whole transcript. */}
++                <For each={messageRows()} keyed={(row) => row.turn.id}>
+                   {(row) => (
+                     <>
+-                      <Show when={row.showDateDivider}>
+-                        <DateDivider value={row.createdAt} />
++                      <Show when={row().showDateDivider}>
++                        <DateDivider value={row().createdAt} />
+                       </Show>
+                       <MessageBlock
+-                        copied={row.copied}
+-                        message={row.turn}
+-                        onBranch={() => branchAt(row.turn.id)}
+-                        onCopy={() => void copyTurn(row.turn)}
+-                        onEdit={(text) => void editAndResubmit(row.turn.id, text)}
++                        copied={row().copied}
++                        message={row().turn}
++                        onBranch={() => branchAt(row().turn.id)}
++                        onCopy={() => void copyTurn(row().turn)}
++                        onEdit={(text) => void editAndResubmit(row().turn.id, text)}
+                         onRegenerate={regenerateLatest}
+-                        onContinue={() => continueGeneration(row.turn.id)}
+-                        onRerunAsNewTurn={() => void rerunAsNewTurn(row.turn.id)}
+-                        onScheduleThis={() => openScheduleDialogForTurn(row.turn.id)}
+-                        onFeedback={(rating, note) => submitTurnFeedback(row.turn.id, rating, note)}
++                        onContinue={() => continueGeneration(row().turn.id)}
++                        onRerunAsNewTurn={() => void rerunAsNewTurn(row().turn.id)}
++                        onScheduleThis={() => openScheduleDialogForTurn(row().turn.id)}
++                        onFeedback={(rating, note) => submitTurnFeedback(row().turn.id, rating, note)}
+                         onApprovalDecision={(approvalId, decision) =>
+-                          void handleApprovalDecision(row.turn.id, approvalId, decision)
++                          void handleApprovalDecision(row().turn.id, approvalId, decision)
+                         }
+                         onApprovePlan={(rung, justification, steps) =>
+-                          void approveTurnPlan(row.turn.id, rung, justification, steps)
++                          void approveTurnPlan(row().turn.id, rung, justification, steps)
+                         }
+-                        onRejectPlan={(_planId, reason) => void rejectTurnPlan(row.turn.id, reason)}
+-                        pinned={pinnedMessages().includes(row.turn.id)}
++                        onRejectPlan={(_planId, reason) => void rejectTurnPlan(row().turn.id, reason)}
++                        pinned={pinnedMessages().includes(row().turn.id)}
+                         pinDisabled={pinnedMessagesFull(pinnedMessages())}
+-                        onTogglePin={() => togglePin(row.turn.id)}
+-                        planApproval={row.planApproval}
++                        onTogglePin={() => togglePin(row().turn.id)}
++                        planApproval={row().planApproval}
+                         onSelectFollowUp={setInput}
+                         onViewSteps={() => setActiveTab('steps')}
+                         onViewAttachments={(attachmentId) => {
+@@ -843,9 +844,9 @@
+                         // The version switcher only ever applies to the trailing
+                         // assistant turn — chat-versions.ts guards versioning to
+                         // the final exchange, so no other turn can have one.
+-                        version={row.version}
++                        version={row().version}
+                         onSelectVersion={selectExchangeVersion}
+-                        editLocked={row.editLocked}
++                        editLocked={row().editLocked}
+                         threadId={state.threadId}
+                         temporaryChat={readAloudBlocked()}
+                       />

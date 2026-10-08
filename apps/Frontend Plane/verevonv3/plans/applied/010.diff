@@ -1,0 +1,779 @@
+--- a/index.html
++++ b/index.html
+@@ -3,6 +3,9 @@
+ 	<head>
+ 		<meta charset="UTF-8" />
+ 		<link rel="icon" type="image/svg+xml" href="/favicon.svg" />
++		<link rel="preconnect" href="https://fonts.googleapis.com" />
++		<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
++		<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Geist:wght@100..900&family=Geist+Mono:wght@100..900&display=swap" />
+ 		<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+ 		<title>verevonv3</title>
+ 	</head>
+--- a/src/styles/global.css
++++ b/src/styles/global.css
+@@ -1,10 +1,7 @@
+-@import url('https://fonts.googleapis.com/css2?family=Geist:wght@100..900&family=Geist+Mono:wght@100..900&display=swap');
+-
+ :root {
+   color: var(--foreground);
+   background: var(--background);
+-  font-family:
+-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
++  font-family: var(--font-sans);
+   font-synthesis: none;
+   line-height: 1.5;
+   text-rendering: optimizeLegibility;
+@@ -376,10 +373,7 @@
+   --auth-field: #f7f4ed;
+ 
+   /* Fonts. */
+-  --font-sans:
+-    var(--font-inter), var(--font-geist-sans), "Inter", "Geist",
+-    ui-sans-serif, system-ui, sans-serif;
+-  --font-geist-sans: "Geist";
++  --font-sans: "Geist", "Geist Fallback", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+ }
+ 
+ :root {
+@@ -423,9 +417,6 @@
+   --color-linear-panel-bg: var(--linear-panel-bg);
+   --color-linear-border: var(--linear-border);
+   --color-linear-accent: var(--linear-accent);
+-  --font-sans:
+-    var(--font-inter), var(--font-geist-sans), "Inter", "Geist",
+-    "Geist Fallback", ui-sans-serif, system-ui, sans-serif;
+   --font-mono: "Geist Mono", "Geist Mono Fallback", ui-monospace, monospace;
+ }
+ 
+@@ -1905,9 +1896,7 @@
+ }
+ 
+ .verevon-sidebar-type {
+-  font-family:
+-    var(--font-inter), var(--font-geist-sans),
+-    var(--font-sans, "Inter", "Geist", "Geist Fallback", ui-sans-serif, system-ui, sans-serif);
++  font-family: var(--font-sans);
+ }
+ 
+ .core-sidebar {
+@@ -7327,8 +7316,8 @@
+ }
+ 
+ .dashboard-home {
+-  --dashboard-home-font-display: var(--font-geist-sans), "Geist", Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+-  --dashboard-home-font-body: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
++  --dashboard-home-font-display: var(--font-sans);
++  --dashboard-home-font-body: var(--font-sans);
+   --dashboard-home-h1-size: clamp(42px, 4.2vw, 64px);
+   --dashboard-home-h2-size: 28px;
+   --dashboard-home-h3-size: 18px;
+@@ -16556,9 +16545,7 @@
+   background: var(--panel);
+   box-shadow: 0 20px 80px rgb(17 17 17 / 15%);
+   color: var(--ink);
+-  font-family:
+-    var(--font-inter), var(--font-geist-sans),
+-    var(--font-sans, "Inter", "Geist", "Geist Fallback", ui-sans-serif, system-ui, sans-serif);
++  font-family: var(--font-sans);
+   animation: verevonPopoverIn 180ms cubic-bezier(0.19, 1, 0.22, 1) both;
+ }
+ 
+@@ -19180,8 +19167,7 @@
+   min-height: 40px;
+   padding: 0 16px;
+   color: var(--verevon-text);
+-  font-family:
+-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
++  font-family: var(--font-sans);
+   font-size: 14px;
+   font-weight: 500;
+   line-height: 1;
+@@ -24937,8 +24923,8 @@
+ }
+ 
+ .verevon-chat-page {
+-  --chat-font-display: var(--font-geist-sans), "Geist", Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+-  --chat-font-body: var(--font-geist-sans), "Geist", Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; /* Geist is the only family actually loaded — lead with it */
++  --chat-font-display: var(--font-sans);
++  --chat-font-body: var(--font-sans); /* Geist is the only family actually loaded — lead with it */
+   --chat-h1-size: clamp(42px, 4.2vw, 64px);
+   --chat-h2-size: 28px;
+   --chat-h3-size: 18px;
+@@ -29971,8 +29957,7 @@
+   min-height: 32px;
+   padding: 0 12px;
+   color: var(--ink);
+-  font-family:
+-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
++  font-family: var(--font-sans);
+   font-size: 11px;
+   font-weight: 700;
+   letter-spacing: 0;
+@@ -30056,8 +30041,7 @@
+   padding: 6px 12px;
+   margin: 0;
+   color: var(--foreground);
+-  font-family:
+-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
++  font-family: var(--font-sans);
+   font-size: 11px;
+   font-weight: 800;
+   text-transform: uppercase;
+@@ -30205,7 +30189,7 @@
+ .onboarding-summary-card h2 {
+   margin: 0;
+   color: var(--verevon-dark-surface);
+-  font-family: var(--font-geist-sans), "Geist", Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
++  font-family: var(--font-sans);
+   font-size: clamp(42px, 4.2vw, 64px);
+   font-weight: 400;
+   line-height: 1.02;
+@@ -30235,8 +30219,7 @@
+ .onboarding-right-surface h2 {
+   margin: 0;
+   color: var(--foreground);
+-  font-family:
+-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
++  font-family: var(--font-sans);
+   font-size: 28px;
+   font-weight: 600;
+   line-height: 1.1;
+@@ -30246,8 +30229,7 @@
+ .onboarding-eyebrow,
+ .onboarding-right-surface__eyebrow {
+   color: var(--subtle);
+-  font-family:
+-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
++  font-family: var(--font-sans);
+   font-size: 10px;
+   font-weight: 500;
+   letter-spacing: 0.12em;
+@@ -30258,8 +30240,7 @@
+ .onboarding-right-surface p,
+ .onboarding-summary-card p {
+   color: var(--verevon-text-muted);
+-  font-family:
+-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
++  font-family: var(--font-sans);
+   font-size: 15px;
+   line-height: 1.6;
+ }
+@@ -30271,8 +30252,7 @@
+ 
+ .onboarding-field span {
+   color: var(--subtle);
+-  font-family:
+-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
++  font-family: var(--font-sans);
+   font-size: 11px;
+   font-weight: 500;
+   letter-spacing: 0.1em;
+@@ -30290,8 +30270,7 @@
+ .onboarding-field textarea {
+   width: 100%;
+   color: var(--foreground);
+-  font-family:
+-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
++  font-family: var(--font-sans);
+   font-size: 14px;
+   background: var(--panel);
+   border: 1px solid var(--linear-border);
+@@ -30344,8 +30323,7 @@
+   padding: 0 12px;
+   background: var(--auth-field);
+   color: var(--verevon-text-muted);
+-  font-family:
+-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
++  font-family: var(--font-sans);
+   font-size: 12px;
+   letter-spacing: 0;
+   text-transform: none;
+@@ -30394,8 +30372,7 @@
+   padding: 0;
+   background: transparent;
+   color: var(--subtle);
+-  font-family:
+-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
++  font-family: var(--font-sans);
+   font-size: 11px;
+   font-weight: 700;
+   letter-spacing: 0.18em;
+@@ -30415,8 +30392,7 @@
+ .onboarding-size-fieldset legend {
+   margin-bottom: 8px;
+   color: var(--verevon-text-muted);
+-  font-family:
+-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
++  font-family: var(--font-sans);
+   font-size: 11px;
+   letter-spacing: 0.16em;
+   text-transform: uppercase;
+@@ -30501,8 +30477,7 @@
+ .onboarding-error {
+   margin-top: 12px;
+   color: var(--danger);
+-  font-family:
+-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
++  font-family: var(--font-sans);
+   font-size: 12px;
+   line-height: 1.5;
+ }
+@@ -30510,8 +30485,7 @@
+ .auth-status-notice {
+   margin: 0;
+   color: var(--verevon-text-muted);
+-  font-family:
+-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
++  font-family: var(--font-sans);
+   font-size: 12px;
+   line-height: 1.5;
+ }
+@@ -30530,8 +30504,7 @@
+   margin-inline: auto;
+   margin-top: 8px;
+   color: var(--verevon-text-muted);
+-  font-family:
+-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
++  font-family: var(--font-sans);
+   font-size: 12px;
+   letter-spacing: 0.02em;
+ }
+@@ -30579,8 +30552,7 @@
+   display: block;
+   margin-bottom: 2px;
+   color: var(--foreground);
+-  font-family:
+-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
++  font-family: var(--font-sans);
+   font-size: 12.5px;
+   font-weight: 400;
+ }
+@@ -30588,8 +30560,7 @@
+ .verevon-selectable-row small,
+ .onboarding-plan-card small {
+   color: var(--verevon-text-muted);
+-  font-family:
+-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
++  font-family: var(--font-sans);
+   font-size: 11px;
+   line-height: 1.45;
+ }
+@@ -30605,8 +30576,7 @@
+ .onboarding-summary-card .badge {
+   min-height: 22px;
+   padding: 0 9px;
+-  font-family:
+-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
++  font-family: var(--font-sans);
+   font-size: 10px;
+   font-weight: 700;
+   letter-spacing: 0.16em;
+@@ -30631,8 +30601,7 @@
+   min-width: unset;
+   padding: 6px 14px;
+   color: var(--foreground);
+-  font-family:
+-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
++  font-family: var(--font-sans);
+   font-size: 12px;
+   background: var(--onboarding-surface);
+   border: 1px solid transparent;
+@@ -30687,8 +30656,7 @@
+ .onboarding-connector-tab small {
+   min-width: 0;
+   overflow-wrap: anywhere;
+-  font-family:
+-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
++  font-family: var(--font-sans);
+ }
+ 
+ .onboarding-connector-tab span {
+@@ -30706,8 +30674,7 @@
+ .onboarding-connector-group h3 {
+   margin: 0;
+   color: var(--subtle);
+-  font-family:
+-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
++  font-family: var(--font-sans);
+   font-size: 10px;
+   font-weight: 400;
+   letter-spacing: 0.16em;
+@@ -30760,8 +30727,7 @@
+ .onboarding-connected__eyebrow {
+   margin: 0;
+   color: var(--onboarding-accent, var(--ink));
+-  font-family:
+-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
++  font-family: var(--font-sans);
+   font-size: 10px;
+   font-weight: 600;
+   letter-spacing: 0.14em;
+@@ -30771,8 +30737,7 @@
+ .onboarding-connected__refresh {
+   padding: 2px 0;
+   color: var(--verevon-text-muted);
+-  font-family:
+-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
++  font-family: var(--font-sans);
+   font-size: 11px;
+   text-decoration: underline;
+   text-underline-offset: 2px;
+@@ -30806,8 +30771,7 @@
+ 
+ .onboarding-connected-account__title strong {
+   color: var(--foreground);
+-  font-family:
+-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
++  font-family: var(--font-sans);
+   font-size: 13px;
+   font-weight: 600;
+ }
+@@ -30816,8 +30780,7 @@
+   min-width: 0;
+   overflow-wrap: anywhere;
+   color: var(--verevon-text-muted);
+-  font-family:
+-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
++  font-family: var(--font-sans);
+   font-size: 11.5px;
+ }
+ 
+@@ -30838,8 +30801,7 @@
+ .onboarding-grant-chip {
+   padding: 2px 8px;
+   color: var(--foreground);
+-  font-family:
+-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
++  font-family: var(--font-sans);
+   font-size: 10.5px;
+   font-weight: 500;
+   background: var(--onboarding-surface-subtle);
+@@ -30857,15 +30819,13 @@
+   justify-content: space-between;
+   gap: 8px;
+   color: var(--foreground);
+-  font-family:
+-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
++  font-family: var(--font-sans);
+   font-size: 11.5px;
+ }
+ 
+ .onboarding-lane-status {
+   color: var(--subtle);
+-  font-family:
+-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
++  font-family: var(--font-sans);
+   font-size: 10px;
+   font-weight: 600;
+   letter-spacing: 0.12em;
+@@ -30901,8 +30861,7 @@
+   flex: 1 1 12rem;
+   margin: 0;
+   color: var(--foreground);
+-  font-family:
+-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
++  font-family: var(--font-sans);
+   font-size: 12px;
+   line-height: 1.45;
+ }
+@@ -30936,8 +30895,7 @@
+ 
+ .onboarding-library-picker__field span {
+   color: var(--subtle);
+-  font-family:
+-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
++  font-family: var(--font-sans);
+   font-size: 10px;
+   letter-spacing: 0.12em;
+   text-transform: uppercase;
+@@ -30947,8 +30905,7 @@
+   min-height: 32px;
+   padding: 4px 8px;
+   color: var(--foreground);
+-  font-family:
+-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
++  font-family: var(--font-sans);
+   font-size: 12px;
+   background: var(--panel);
+   border: 1px solid var(--verevon-border);
+@@ -30958,8 +30915,7 @@
+ .onboarding-library-picker__error {
+   margin: 0;
+   color: #b42318;
+-  font-family:
+-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
++  font-family: var(--font-sans);
+   font-size: 11.5px;
+ }
+ 
+@@ -30989,8 +30945,7 @@
+ .onboarding-stat-list li {
+   padding: 12px 0;
+   color: var(--onboarding-text);
+-  font-family:
+-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
++  font-family: var(--font-sans);
+   font-size: 13px;
+   border-bottom: 1px solid var(--verevon-border-warm);
+ }
+@@ -31000,8 +30955,7 @@
+   gap: 12px;
+   align-items: center;
+   color: var(--verevon-text-muted);
+-  font-family:
+-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
++  font-family: var(--font-sans);
+   font-size: 12px;
+ }
+ 
+@@ -31028,8 +30982,7 @@
+   align-items: center;
+   justify-content: center;
+   color: var(--verevon-text-muted);
+-  font-family:
+-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
++  font-family: var(--font-sans);
+   font-size: 13px;
+   letter-spacing: 0.02em;
+ }
+@@ -31247,8 +31200,7 @@
+   margin: 0;
+   padding-left: 18px;
+   color: var(--onboarding-copy);
+-  font-family:
+-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
++  font-family: var(--font-sans);
+   font-size: 11px;
+   line-height: 1.5;
+ }
+@@ -31275,8 +31227,7 @@
+   margin: 0;
+   padding-left: 18px;
+   color: var(--onboarding-copy);
+-  font-family:
+-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
++  font-family: var(--font-sans);
+   font-size: 11px;
+   line-height: 1.55;
+ }
+@@ -31331,8 +31282,7 @@
+ 
+ .onboarding-product-reveal__overlay p {
+   color: var(--foreground);
+-  font-family:
+-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
++  font-family: var(--font-sans);
+   font-size: 12px;
+   font-weight: 700;
+   letter-spacing: 0;
+@@ -31342,8 +31292,7 @@
+   display: block;
+   margin-top: 4px;
+   color: var(--verevon-text-muted);
+-  font-family:
+-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
++  font-family: var(--font-sans);
+   font-size: 11px;
+ }
+ 
+@@ -31384,8 +31333,7 @@
+ 
+ .onboarding-folder-card p {
+   color: var(--subtle);
+-  font-family:
+-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
++  font-family: var(--font-sans);
+   font-size: 10px;
+   letter-spacing: 0.16em;
+   text-transform: uppercase;
+@@ -31394,8 +31342,7 @@
+ .onboarding-folder-card h2 {
+   margin: 8px 0 0;
+   color: var(--foreground);
+-  font-family:
+-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
++  font-family: var(--font-sans);
+   font-size: 18px;
+   font-weight: 500;
+   line-height: 1.25;
+@@ -31405,8 +31352,7 @@
+   display: block;
+   margin-top: 6px;
+   color: var(--verevon-text-muted);
+-  font-family:
+-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
++  font-family: var(--font-sans);
+   font-size: 11px;
+   line-height: 1.45;
+ }
+@@ -31421,8 +31367,7 @@
+   display: flex;
+   justify-content: space-between;
+   color: var(--verevon-text-muted);
+-  font-family:
+-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
++  font-family: var(--font-sans);
+   font-size: 10px;
+   letter-spacing: 0.16em;
+   text-transform: uppercase;
+@@ -31475,8 +31420,7 @@
+ }
+ 
+ .onboarding-organization-card strong {
+-  font-family:
+-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
++  font-family: var(--font-sans);
+   font-size: 14px;
+   font-weight: 700;
+ }
+@@ -31951,7 +31895,7 @@
+   display: block;
+   margin-bottom: 6px;
+   color: var(--verevon-text-muted);
+-  font-family: Inter, ui-sans-serif, system-ui, -apple-system, sans-serif;
++  font-family: var(--font-sans);
+   font-size: 11px;
+   font-weight: 600;
+   letter-spacing: 0.08em;
+@@ -31967,7 +31911,7 @@
+ }
+ 
+ .onboarding-summary-card__plan-block li {
+-  font-family: Inter, ui-sans-serif, system-ui, -apple-system, sans-serif;
++  font-family: var(--font-sans);
+   font-size: 13px;
+   line-height: 1.45;
+ }
+@@ -31983,7 +31927,7 @@
+   border-radius: 999px;
+   background: rgba(255, 255, 255, 0.08);
+   border: 1px solid var(--verevon-border, rgba(255, 255, 255, 0.14));
+-  font-family: Inter, ui-sans-serif, system-ui, -apple-system, sans-serif;
++  font-family: var(--font-sans);
+   font-size: 12px;
+   line-height: 1.5;
+ }
+@@ -32001,8 +31945,7 @@
+   place-items: center;
+   background: var(--panel-muted);
+   color: var(--verevon-text-muted);
+-  font-family:
+-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
++  font-family: var(--font-sans);
+   font-size: 13px;
+   font-weight: 800;
+   letter-spacing: 0.18em;
+@@ -32143,8 +32086,7 @@
+   gap: 12px;
+   align-items: center;
+   color: var(--onboarding-muted);
+-  font-family:
+-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
++  font-family: var(--font-sans);
+   font-size: 13px;
+ }
+ 
+@@ -32190,7 +32132,7 @@
+   overflow: hidden;
+   background: var(--verevon-dark-surface, #111);
+   color: #fff;
+-  font-family: var(--font-geist-sans), "Geist", Inter, ui-sans-serif, system-ui, sans-serif;
++  font-family: var(--font-sans);
+   font-size: 20px;
+   font-weight: 500;
+ }
+@@ -32210,7 +32152,7 @@
+ 
+ .onboarding-paywall__identity-kicker {
+   color: var(--verevon-text-muted);
+-  font-family: Inter, ui-sans-serif, system-ui, -apple-system, sans-serif;
++  font-family: var(--font-sans);
+   font-size: 11px;
+   font-weight: 600;
+   letter-spacing: 0.08em;
+@@ -32219,7 +32161,7 @@
+ 
+ .onboarding-paywall__identity-body strong {
+   color: var(--verevon-dark-surface);
+-  font-family: var(--font-geist-sans), "Geist", Inter, ui-sans-serif, system-ui, sans-serif;
++  font-family: var(--font-sans);
+   font-size: 20px;
+   font-weight: 500;
+   line-height: 1.1;
+@@ -32241,7 +32183,7 @@
+   background: var(--verevon-surface, rgba(17, 17, 17, 0.05));
+   border: 1px solid var(--verevon-border, rgba(17, 17, 17, 0.08));
+   color: var(--verevon-text-muted);
+-  font-family: Inter, ui-sans-serif, system-ui, -apple-system, sans-serif;
++  font-family: var(--font-sans);
+   font-size: 12px;
+   font-weight: 500;
+   line-height: 1.5;
+@@ -32258,7 +32200,7 @@
+ .onboarding-paywall__header h1 {
+   margin: 0;
+   color: var(--verevon-dark-surface);
+-  font-family: var(--font-geist-sans), "Geist", Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
++  font-family: var(--font-sans);
+   font-size: clamp(46px, 4.4vw, 64px);
+   font-weight: 400;
+   line-height: 0.98;
+@@ -32268,8 +32210,7 @@
+ .onboarding-paywall__header p {
+   margin-top: 12px;
+   color: var(--verevon-text-muted);
+-  font-family:
+-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
++  font-family: var(--font-sans);
+   font-size: 15px;
+   font-weight: 500;
+   line-height: 1.6;
+@@ -32282,8 +32223,7 @@
+   align-items: center;
+   margin-top: 12px;
+   color: var(--verevon-dark-surface);
+-  font-family:
+-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
++  font-family: var(--font-sans);
+   font-size: 14px;
+   font-weight: 500;
+ }
+@@ -32383,8 +32323,7 @@
+ 
+ .onboarding-paywall-card__head strong {
+   color: var(--verevon-dark-surface);
+-  font-family:
+-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
++  font-family: var(--font-sans);
+   font-size: 17px;
+   font-weight: 650;
+ }
+@@ -32392,8 +32331,7 @@
+ .onboarding-paywall-card__badge {
+   padding: 5px 10px;
+   color: var(--verevon-dark-surface);
+-  font-family:
+-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
++  font-family: var(--font-sans);
+   font-size: 10px;
+   font-weight: 700;
+   text-transform: uppercase;
+@@ -32422,8 +32360,7 @@
+ 
+ .onboarding-paywall-card__price span {
+   color: var(--verevon-dark-surface);
+-  font-family:
+-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
++  font-family: var(--font-sans);
+   font-size: 27px;
+   font-weight: 700;
+   line-height: 1;
+@@ -32433,8 +32370,7 @@
+ .onboarding-paywall-card p,
+ .onboarding-paywall-card li {
+   color: var(--verevon-text-muted);
+-  font-family:
+-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
++  font-family: var(--font-sans);
+   font-size: 13px;
+   line-height: 1.45;
+ }
+@@ -32512,8 +32448,7 @@
+ .onboarding-paywall__suggestion-main strong,
+ .onboarding-paywall__suggestion-side strong {
+   color: var(--verevon-dark-surface);
+-  font-family:
+-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
++  font-family: var(--font-sans);
+   font-size: 16px;
+   font-weight: 750;
+ }
+@@ -32524,8 +32459,7 @@
+ .onboarding-paywall__suggestion-evidence li,
+ .onboarding-paywall__suggestion-opportunities p {
+   color: var(--verevon-text-muted);
+-  font-family:
+-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
++  font-family: var(--font-sans);
+   font-size: 13px;
+   line-height: 1.5;
+ }
+@@ -32645,16 +32579,14 @@
+ 
+ .onboarding-paywall__reason strong {
+   color: var(--verevon-dark-surface);
+-  font-family:
+-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
++  font-family: var(--font-sans);
+   font-size: 16px;
+ }
+ 
+ .onboarding-paywall__reason p {
+   margin-top: 10px;
+   color: var(--verevon-text-muted);
+-  font-family:
+-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
++  font-family: var(--font-sans);
+   font-size: 14px;
+   line-height: 1.6;
+ }
+@@ -32685,8 +32617,7 @@
+   justify-content: space-between;
+   gap: 16px;
+   color: var(--verevon-dark-surface);
+-  font-family:
+-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
++  font-family: var(--font-sans);
+ }
+ 
+ .verevon-billing-checkout__header strong {
+@@ -32734,8 +32665,7 @@
+   padding: 0;
+   background: transparent;
+   color: var(--verevon-text-muted);
+-  font-family:
+-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
++  font-family: var(--font-sans);
+   font-size: 12px;
+   letter-spacing: 0.02em;
+   transition: color 140ms ease;
+@@ -32952,8 +32882,7 @@
+   gap: 10px;
+   align-items: center;
+   color: var(--onboarding-muted);
+-  font-family:
+-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
++  font-family: var(--font-sans);
+   font-size: 13px;
+ }
+ 
+@@ -39394,8 +39323,7 @@
+ .verevon-studio-profile strong,
+ .verevon-studio-profile span {
+   display: block;
+-  font-family:
+-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
++  font-family: var(--font-sans);
+ }
+ 
+ .verevon-studio-profile strong {
+@@ -39640,8 +39568,7 @@
+ .verevon-studio-block strong,
+ .verevon-studio-block p,
+ .verevon-studio-block span {
+-  font-family:
+-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
++  font-family: var(--font-sans);
+ }
+ 
+ .verevon-studio-block strong {
+@@ -42464,7 +42391,7 @@
+   gap: 6px;
+   padding: 9px 14px;
+   color: var(--verevon-text);
+-  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
++  font-family: var(--font-sans);
+   font-size: 12.5px;
+   font-weight: 600;
+   background: var(--verevon-surface);

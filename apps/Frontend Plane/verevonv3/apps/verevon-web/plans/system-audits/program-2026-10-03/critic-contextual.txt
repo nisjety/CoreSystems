@@ -1,0 +1,193 @@
+VERDICT: sound after the corrections below. The architecture fits the plane rules and no owner rule is broken outright, but T1 as written would ship broken, and sections 5, 7, 8 and 10 have errors an implementer would hit.
+
+The design text I received stops in the middle of T3's live_proof. T4 onward is unreviewed. Everything below covers sections 0–14 and T1–T3.
+
+Paths are relative to C:/dev/CoresSystem. CP = apps/Control Plane, DP = "apps/Data Plane v2", MP = "apps/Model Plane". I made no edits, restarts or model calls. Two things you should know about my own activity:
+- One of my env listings of the graph-index container printed the value of GRAPH_INDEX_GDPR_NATS_PASSWORD, because my redaction only covered KEY, SECRET and TOKEN. It is in this session's transcript, not repeated here. Rotate it if transcripts are retained.
+- Two read-only repo-wide greps timed out and were moved to the background.
+
+CORRECTIONS
+
+1. BLOCKER: the org-ZDR resolver T1 reuses cannot read org-core.
+   - Auth Core's resolver (CP/auth-core/src/auth/interactive-retention-policy.ts:94-129) calls org-core's `/api/v1/organizations/:id` and `/entitlements` with no credential.
+   - org-core now enforces service auth (CP/org-core/internal/http/service_auth.go:545-600).
+   - Live check: I ran the same two fetches from inside the auth-service container for the real org id. Both returned 401.
+   - Even with a credential, Auth Core's own org-core principal holds only org:projection:write:any and org:projection:delete:any (live registry, and CP/docker-compose.yml:531-532). It lacks org:read:any.
+   - The existing spec mocks global.fetch (interactive-retention-policy.spec.ts:36), so it never saw the 401.
+   - Today the org-level ZDR flag therefore resolves to zdr:false for every org, including the user-token path used by documents-api.
+   - Under the design's fail-closed tenant resolver, every org would mint zdr:true the moment T1 and the client ship. Contexts and graph extraction would stop for all orgs, and T1's own live proof ("zdr:false for the live non-ZDR org") would fail.
+   - Fix, as a new T0:
+     - Grant auth-core org:read:any in the org-core registry (CP docker-compose.yml and the launcher).
+     - Send X-Service-Id and X-Service-Token from the resolver.
+     - Better, add one org-core internal route returning {zdrIntent, entitled}. org-core has `/internal/orgs/:orgId` but no internal entitlements route (service_auth.go:~335-365).
+   - Test with the real org-core middleware, for example a Go test that loads the compose registry and runs it against these routes. Also give Auth Core's fetch double a check that refuses calls without service headers.
+
+2. BLOCKER: introducing 'tenant' fails open in one place and breaks the whole fleet in another.
+   - `authorizePlaneServicePrincipal` returns `zdr: retentionPosture === 'zdr'` (plane-service-principal.ts:380,406). A 'tenant' value therefore yields zdr:false unless the caller overrides it.
+   - A second caller exists that T1 does not list: CP/auth-core/src/auth/model-plane-token.controller.ts:224-254.
+   - The registry is parsed as a whole, and `validAudienceRetentionMap` accepts only 'zdr' or 'persistent' (plane-service-principal.ts:266).
+   - Flip the registry to 'tenant' with an auth-core image that lacks the change, and every principal on every plane gets a configuration error and a 503.
+   - Fix:
+     - Map 'tenant' to zdr:true by default in `authorizePlaneServicePrincipal`.
+     - Resolve it explicitly in both controllers.
+     - Require the auth-core image to be deployed before the registry file changes.
+     - Add a spec that the old validator rejects 'tenant' and the new code never returns zdr:false without resolving.
+
+3. "Fail closed to zdr:true" cannot carry the design's own deferral semantics.
+   - A boolean claim cannot tell an org-core outage from a real ZDR org. Section 5 says unresolved posture becomes pending with a 5-minute retry. Section 3.2 says skipped_zdr is rechecked at most hourly. These conflict.
+   - Fix: on resolution failure, auth-core returns 503 with reason `retention_posture_unavailable` and issues no token. The Data Plane maps that to pending.
+   - "Negative results cached 5-10s, positive 45s" is ambiguous. State which outcome each TTL applies to.
+   - Staleness window after an org turns ZDR on:
+     - Bearer TTL up to 300s (inference_auth.rs:21).
+     - Plus the design's 60s refresh margin.
+     - Plus the 45s resolver cache.
+     - Content can reach the persistent route for several minutes.
+   - Fix: cap tenant-principal token TTL at 60s or key the bearer cache on a posture version, and disclose the window.
+
+4. `stop_reason=end_turn` would reject every real answer.
+   - The Azure/OpenAI adapter returns the raw finish_reason, which is "stop", "length" or "content_filter" (MP/rust/services/inference-core/src/provider/openai.rs:708-733, and the streaming path at :896).
+   - The proto comment's "end_turn / max_tokens / stop_sequence" is the Anthropic vocabulary (inference.proto:259).
+   - Under the design, all contexts become invalid_output.
+   - Accept {stop, end_turn}. Treat {length, max_tokens} as truncated. Note that content_filter may also arrive as an HTTP error rather than a finish reason.
+   - Test with a real captured Azure response, not a hand-written one.
+
+5. Metering Event v2 needs verifier, envelope and consumer changes the design omits.
+   - The Data Plane cost verifier pins one event_type per producer key: "embedding" for embedding-engine, "rerank" for retrieval-engine (DP/services/data-orchestrator-go/internal/cost/verifier.go:21-33,111-135,232-262).
+   - It decodes strictly (DisallowUnknownFields). The payload has only count and estimated_tokens, and the consumer drops ZDR events (consumer.go:88-90).
+   - The shared envelope crate has a closed subject-per-scope table (DP/services/event-envelope-rs/src/lib.rs:432-455). It does not allow `dataplane.knowledge.units.contextualized` and has no graph scope.
+   - Required first: verifier, consumer, migration and envelope changes, deployed before any producer. Otherwise events are logged as invalid and lost, because the subscription is non-durable.
+   - The design only states the cost-core ordering.
+   - Separate existing bug, an inference from the code and not exercised: one embed.cost idempotency key is shared by all (org, user, zdr) groups in a batch (embedding-engine batch/mod.rs:185-216). The persist step prefixes only the org (consumer.go:149-164), so a second user in the same org is silently dropped.
+
+6. Data Plane spend would count against the org's chat budget.
+   - cost-core's org-wide budget check sums every row for the org, including producer-attributed ones (MP/go/services/cost-core/internal/postgres/store.go:241, and the "Budget scope" comment in internal/server/server.go).
+   - inference-core's intent layer downgrades over-budget orgs to the cheap fallback model (MP/rust/services/inference-core/src/provider/intent.rs:176-234).
+   - The design's stated reason for org-level rows (avoid eating one user's budget) only moves the problem to the org.
+   - It also creates two budget systems, org_processing_policy.monthly_budget_usd and cost-core's.
+   - Needs an owner decision, or a feature filter on the aggregate.
+
+7. ZDR usage events: a convention reversal, and a wrong doc reference.
+   - Existing convention suppresses usage and billing events for ZDR requests (MP/docs/decisions/ledger.md:33, consumer.go:88-90, and the embedding-engine drop).
+   - Design 7.3 reverses that for the Data Plane only. Either apply it uniformly (model-gateway too) or keep suppression. This is an owner ruling.
+   - The design says L19 "changes once metering lands". That is wrong. L19 in docs/compliance/evidence/honest-limits.md:44 is about usage on the ChatGPT-account route, not Data Plane background calls.
+
+8. Graph extraction has a direct-Azure bypass the design does not mention.
+   - GRAPH_EXTRACTION_PROVIDER=azure_openai selects `AzureExtractor` (DP/services/graph-index-rs/src/config.rs:19-25, extractor.rs:34,45,348).
+   - graph-index's live env holds AZURE_OPENAI_API_KEY and the endpoint (DP/docker-compose.yml:988).
+   - Flipping that one variable bypasses the token, the ZDR claim, metering and typed errors.
+   - Fix: delete the backend, drop the key from graph-index's env, and add a compose contract test.
+   - embedding-engine also carries AZURE_OPENAI_API_KEY (DP/docker-compose.yml:827).
+
+9. The sparse-index facts are wrong, and the repair path is unproven.
+   - Live Quickwit holds 52 knowledge_unit documents plus 5 source_object documents, not "57 chunks". 51 of the 52 have context_body, so chunk coverage is 52/207, about 25%.
+   - The 155 missing chunks are 151 private SharePoint chunks from 2026-09-28, 3 org SharePoint chunks from 09-06, and 1 Quarry chunk. The design said 150. The cause is unknown.
+   - quickwit_admin_jobs has 0 rows ever, so the rebuild path has never run here.
+   - scripts/rebuild-quickwit.sh defaults to CLEAR=true, which is destructive. Use --no-clear and the approval gate.
+   - This Quickwit rejects the `cardinality` aggregation, so "compare counts" needs dedup by knowledge_id. Delete-by-query is eventual, and one measured case was 5,215 docs for 1,164 chunks (quickwit-adapter stream.rs:454-480).
+   - `documents.indexed` already re-indexes a document's units with their context over JetStream.
+   - The design's new `units.contextualized` event is core-NATS, which is non-durable per SUBJECTS.md. So I8 (lexical sync) needs a DB-truth marker or a JetStream subject.
+
+10. Matrix rule numbers are taken. apps/master-ownership-matrix.md already has rules 1-14 (lines 152-168). The new rules are 15 and 16, not 10 and 11. Lines 69, 87 and 155 are correct.
+
+11. The legacy backfill asserts coherence it has not checked.
+    - Marking all 206 legacy rows ready with embedded_context_hash=sha256(chunk_context) makes vector_incoherent read 0 for rows that may be raw-embedded with a stale context. That is the defect the design itself describes.
+    - Backfill the hash as NULL with a legacy status, or sample re-embeds. Specify the canonical bytes hashed (the stored, trimmed string).
+    - embedding_model is NULL on all 207 rows; backfill it too.
+
+12. Staleness and eligibility are ambiguous.
+    - input_hash includes window_text, so any edit to a small document changes every chunk's hash.
+    - Exact-reuse chunks keep their ids and vectors and get no units.created event (index-engine builder/mod.rs:91-135). The reconciler would have to read documents.content for every ready row to detect staleness. Add a document-level content hash.
+    - 134 of 207 live units are single-chunk documents where the chunk is the whole document, and they all have contexts. The one raw unit has that same shape. Decide whether this case generates a context or gets an explicit status.
+
+13. Production principal model (OD9) is a prerequisite, not an open choice.
+    - The registry loader refuses allowAnyOrg in file mode outside development and test (plane-service-principal.ts:176-186).
+    - Every Data Plane background principal is allowAnyOrg, and the new data-orchestrator forwarder would be too.
+    - The owner rule is "best option, no shortcuts". Build the real model: for tenant principals, Auth Core confirms the org exists in org-core at mint. It is already calling org-core there.
+
+14. File and deploy collisions with other sessions (all uncommitted in the shared tree).
+    - CP: plane-service-principals.json, config/README.md, run-control-plane.sh, validate-release-credentials.sh, docker-compose.yml (the org-core registry that T0 touches), plane-token.controller.ts, convex-token.service.ts.
+    - plane-service-principals-policy.contract.spec.ts is untracked, and T1 and T2 "extend" it.
+    - MP/rust/services/inference-core/src/provider/fallback.rs has 107 added lines from another session.
+    - cost-core:
+      - cmd/main.go, internal/ledger/ledger.go, internal/postgres/store.go and internal/server/server.go are modified.
+      - Migrations 0006 and 0007 are untracked, so the design's "0008" will collide.
+      - The live cost_entries table lacks provider_used. The forwarder must not send it until that cost-core build is deployed, because the struct rejects unknown fields.
+    - docs/compliance/evidence/ is untracked (trust edits). trust-claims.ts, trust-data.test.ts, TrustCenter.test.tsx and trust-recipients.ts are untracked, and TrustCenter.tsx and trust-data.ts are modified.
+    - Model Plane ledger.md is 3,453 lines of append-only entries, so expect merge conflicts.
+    - DP/Makefile:46-51 hard-codes the required env names for cross-plane-env.
+    - DP/tests/scripts/run-isolated-real-authority*.sh carry hand-written principal registries (line 164). They must change or they become permissive copies.
+
+15. Trust drift. The trust copy anchors on code comments the design deletes: contextualize.rs "Deliberately NOT tightened here" (:414-423) and "This path never carries restricted content" (:400-404), and extractor.rs:286-297. check-citations.mjs and trust-data.test.ts fail for pending claims whose anchors vanish. Update trust-claims.ts and the evidence docs in the same commit, and re-verify the pending rows per docs/compliance/evidence/trust-claims-pending-reverification.md section 0 after the live proof.
+
+16. The eval re-seed is under-specified.
+    - Golden judgments key on document ids (relevant_ids), and the corpus is the repo's own 95 markdown files ingested by an unrecorded process (retrieval-fusion-evidence-2026-08-26.md:1123-1129).
+    - The two orgs use different id sets (golden-v2.json and golden-v2-ctx.json).
+    - A "pinned manifest" must be a frozen snapshot, not live repo paths, which change every commit.
+    - It must also regenerate the judgments (eval-build-golden-set.py) or use deterministic document ids.
+
+17. Flipping CR to ON by default would break the isolated stacks. They have no inference-core, and the boot check would crash them (tests/e2e/run-isolated-mvp.sh and the real-authority runners). They must set CR off explicitly.
+
+18. ZDR coverage is narrower than the claim "background content processing honours org ZDR".
+    - Index-time text embedding goes to Foundry Cohere, which the repo itself treats as retaining (data-flow-map G13). It has only the per-document 'restricted' guard.
+    - Rerank is similar. Retrieval-engine has a third copy of the token client (DP/services/retrieval-engine-rs/src/embed/service_auth.rs, 650 lines).
+    - So there are three copies of the inference token client, not two.
+    - Under the owner rule "we respect ZDR for orgs that have it", OD1 is not open for content. The same oracle must gate embed, page-image and rerank in the same release, or the trust copy must state the gap.
+
+19. Residency floor dependency. min_residency="eu" passes today only because AZURE_OPENAI_REGION=swedencentral (live). With the deployment type unset it classifies as EU (fallback.rs:540-575). A missing region variable in any other environment hard-fails every CR call. Add a contract test over the real env. The azure-openai provider hint also removes failover during Azure 429s, so retries must honour the retry-after trailer.
+
+20. Production event keys cannot live under .secrets/event-keys. DP/DATA_PLANE_STATUS.md:90 says the production preflight rejects that path. Also, event keys are provisioned by hand through .env and the Makefile list, not by the launcher.
+
+21. Minor stale facts. The average chunk is 886 chars, not 888. The inference-core /metrics handler is a hard-coded stub string (http_health.rs:76-78), not "no counters defined".
+
+CLAIMS I VERIFIED (method)
+- Live SQL aggregates on the Data Plane Postgres: 207 units, 206 with context, all ctx-v1. embedding_model is NULL on all 207. The one raw unit is a single-chunk document (529 chars). Average context 242 chars, max 485. Cost events: 259 rerank and 17 embedding.
+- cost-core's cost_entries holds only model-gateway rows. The cost-core pricing default row is 3.00/15.00, and gpt-4o-mini is 0.15/0.60.
+- org-core: 3 organisations, 0 with ZDR intent.
+- docker exec env of embedding-engine, graph-index, inference-core, cost-core, quickwit-adapter and retrieval-engine. This confirms CR on, gpt-4o-mini, the persistent posture, no ZDR attestations, region swedencentral, SPARSE_SEARCH_BACKEND=quickwit, and COST_CORE_AUTH_AUDIENCE=cost-core,inference-core.
+- Quickwit queries with aggregations (finding 9). The Qdrant 207-point count I did not re-check.
+- The embedding-engine log window is gone (container recreated 2026-09-29). The graph-index log shows 8 "model-plane inference failed" lines.
+- From the data-orchestrator container: cost-core, org-core and auth-core are reachable.
+- Source reads:
+  - contextualize.rs (prompt, zdr:false at :404, empty answer returns Ok(None) without logging).
+  - batch/mod.rs (write only on Some, context persisted after vectors).
+  - stream/mod.rs (ack_wait 60s, max_deliver 5, ZDR drop).
+  - inference_auth.rs (the zdr equality assertion at :331-338, reason constant).
+  - inference-core auth.rs:193 (effective_zdr is an OR), grpc.rs (message-only FAILED_PRECONDITION, typed trailers).
+  - cost-core server.go (cost:write scope, org pinning, 202 and idempotent duplicate), ledger.go (user or producer id).
+  - plane-service-principals.json, the principal registry loader, the retention vocabulary.
+  - docker-compose.yml:775-779, .gitignore:243, DP/.env.example.
+  - master-ownership-matrix.md, honest-limits.md, data-flow-map.md G14 and R15.1, the A6 proof document.
+- Not verified: T4 onward, Azure prefix-caching behaviour, the cost envelope figures, and Foundry's ZDR status.
+
+MISSING TASKS
+- T0: org-core grant plus the Auth Core resolver fix (finding 1).
+- model-plane-token.controller.ts handling (finding 2).
+- data-orchestrator verifier, consumer and migration; event-envelope-rs scopes and subjects; SUBJECTS.md and check-subjects.sh.
+- Makefile cross-plane-env, .env.example, the isolated-script registries, and a compose contract for CR default, graph key mount and posture envs.
+- Remove the graph direct-Azure backend and its key (finding 8).
+- A Quickwit parity gate that dedups by knowledge_id and uses --no-clear (finding 9).
+- Trust anchors and honest-limits corrections (findings 7 and 15).
+- A decision on how Data Plane spend interacts with cost-core's org budget (finding 6).
+- A real production principal model (finding 13).
+- An org-ZDR oracle for embed, page-image and rerank (finding 18).
+- An eval corpus snapshot with regenerated judgments (finding 16).
+- A document-level content hash (finding 12).
+- Fold the retrieval-engine client into the shared crate.
+- Tests: Postgres tests for the status machine must run as `SET LOCAL ROLE dataplane_app`, because the services connect as a superuser and RLS is inert otherwise (DP migration 20260809120000).
+- Tests: use real fixtures (captured Azure response, real org-core responses with auth enforced).
+
+OWNER DECISIONS ALREADY ANSWERED BY THE OWNER RULES
+- CR stays on.
+- ZDR is respected per org that has it on and is never lowered org-wide. The design complies, subject to finding 18.
+- BYO subscription or API ZDR prompts and per-run override belong to the connection design, per run and not org-wide. The only compliant mechanism is an issuer-selected per-run token, so the design's "must not weaken the issuer floor" note is consistent.
+- Rerank may be paid and never uses a subscription.
+- Quarry rerank is option B: a Data Plane endpoint accepting caller-supplied documents. Section 14's "open interaction" is therefore decided.
+  - It needs a new data-plane scope for quarry-edge, which currently holds only data:read, documents:write and org:data:read_all.
+  - It needs ZDR-org skipping, since the rerank provider is a retaining Foundry endpoint.
+  - It meters as feature=rerank.
+- The trust edits are in scope now. Do the non-pending ones immediately and re-verify the pending ones after the CR live proof.
+
+Still open for the owner:
+- Whether Data Plane spend counts against org chat budgets (finding 6).
+- Whether ZDR orgs keep emitting usage events (finding 7).
+- Whether per-org CR "off" or skipped_budget may exist at all. Both sit awkwardly with "do not switch it off". My lean is throttle or defer, never silently skip.

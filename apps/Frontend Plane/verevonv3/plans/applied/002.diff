@@ -1,0 +1,70 @@
+--- a/src/styles/global.css
++++ b/src/styles/global.css
+@@ -359,6 +359,9 @@
+   --verevon-accent-ink: #b8501f;
+   --warning-ink: #9a5410;
+ 
++  /* Visible keyboard-focus ring (≈4.5:1 on white); .dark re-tints it. */
++  --focus-ring: var(--verevon-accent-ink);
++
+   /* Auth surfaces (atmospheric brand zone). */
+   --auth-card: #edebe7;
+   --auth-field: #f7f4ed;
+@@ -465,11 +468,10 @@
+   margin: 0;
+ }
+ 
+-button:focus-visible,
+-a:focus-visible,
+-textarea:focus-visible {
+-  outline: 3px solid rgb(0 0 0 / 18%);
++:where(button, a, summary, input, select, textarea, [tabindex]):focus-visible {
++  outline: 2px solid var(--focus-ring);
+   outline-offset: 2px;
++  box-shadow: none;
+ }
+ 
+ .sr-only {
+@@ -584,6 +586,10 @@
+   background: var(--verevon-dashboard-sidebar);
+ }
+ 
++.dark {
++  --focus-ring: #f0936a;
++}
++
+ .dark .dashboard-navbar-bg {
+   background: var(--verevon-dark-sidebar);
+ }
+@@ -38531,10 +38537,9 @@
+ ================================================================== */
+ 
+ .button:focus-visible {
+-  outline: none;
+-  box-shadow:
+-    0 0 0 2px var(--background),
+-    0 0 0 4px rgba(238, 122, 80, 0.34);
++  outline: 2px solid var(--focus-ring);
++  outline-offset: 2px;
++  box-shadow: none;
+ }
+ 
+ .button-primary {
+@@ -47925,10 +47930,16 @@
+   display: block;
+   width: 100%;
+   height: 100%;
+-  outline: none;
+   cursor: crosshair;
+ }
+ 
++/* The canvas fills its frame, so the ring is drawn inset. An inset box-shadow
++   would paint beneath the (opaque) canvas bitmap, so use an inset outline. */
++.verevon-remote-support__screen canvas:focus-visible {
++  outline: 2px solid var(--focus-ring);
++  outline-offset: -2px;
++}
++
+ .verevon-remote-support__screen canvas[data-view-only='true'] {
+   cursor: default;
+ }

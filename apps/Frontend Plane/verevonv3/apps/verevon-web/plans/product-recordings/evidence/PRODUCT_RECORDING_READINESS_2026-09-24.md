@@ -834,6 +834,189 @@ Every switch is unchanged; fixtures 13/13; tracked diff `1f22140d6970d086`.
 
 Status is still **blocked** on follow-up p95 (03, 04). Chat Wave 2 is being built next, so the full Q16 procedure (series, top-ups, durability, recovery, viewport, Q08, trust) will run on the freeze that follows it rather than on freeze 5.
 
+### Q16f: short series with the Wave-2 build and three review-latency switches (2026-09-28, 18:14–19:10 UTC)
+
+This is a partial series (10 takes each of 03 and 04), run to check the latency switches before more work went on top. It is not a qualification.
+
+**Build:**
+- model-gateway `981d0dca282e`;
+- session-core `607562c1491e`;
+- execution-core `3258f3e55555`;
+- integration-api `057a6e8dab9b`;
+- imports-api `c224ac4f5883`;
+- verevon-gateway-rs `1c349a72f093`;
+- frontend `8e71a4a03094`.
+
+**Switches (all on):**
+- `sole_note_prefetch`;
+- `revision_review_reuse`;
+- `revision_framing_guard`;
+- `in_turn_scoped_recheck`;
+- `tiny_candidate_skips_propose_edits` (a candidate of fewer than 3 segments goes straight to repair);
+- `targeted_source_repair` (the repair request carries only the failed segments);
+- `list_item_segments` (bullet lists are reviewed item by item, like table rows).
+
+`recheck_proposes_edits` and `balanced_review_batches` stay off.
+
+| Journey | Passes | First turn p50 / p95 | Follow-up p50 / p95 | Follow-ups over 70 s |
+|---|---|---|---|---|
+| 03 kampanje | 10/10 | 75.4 / 92.2 s | 47.5 / **75.6 s** | 2 of 10 (72.0 s, 75.6 s) |
+| 04 prosjektplan | 9/10 | 46.6 / 74.9 s | 30.4 / 47.0 s (n=9) | 0 |
+
+At n=10, p95 is the maximum. No timeouts. The one failure in 04 was the known plan-wording class (no stand-in or buffer named).
+
+**Repairs:**
+- 03: none of the ten follow-ups needed a repair, against all three slow ones in the freeze-5 series.
+- The samples are small and this is not a controlled A/B, so read it as consistent with the switches helping, not as proof.
+
+**What the two slow 03 follow-ups were.** Neither was a repair.
+- **Take 7 (75.6 s), a wasted retry.**
+  - The first draft attempt ran 32 s and failed in inference-core with `invalid subscription tool arguments`.
+  - The fallback retried the same provider and needed another 32 s.
+  - Cause: on the subscription route tools are emulated. The model returns an envelope whose `arguments` field is itself a JSON string, and one bad character in a large Norwegian document body fails the whole attempt.
+  - Rate: one failed attempt in about 40 tool-emitting calls in this window. Freeze-5 container logs were replaced by the rebuild, so that rate is unknown.
+- **Take 2 (72.0 s), a heavy review batch.**
+  - The draft was ready at 32 s. One of two parallel review batches, four segments and 966 bytes, spent about 3,000 reasoning tokens (39.5 s), against 283 tokens (8.3 s) in the other batch.
+  - The review's thinking budget is deliberately 4,096 tokens; it is not being lowered without an A/B on the saved 104-case matrix.
+
+With 20 samples, p95 by nearest rank is the second-largest value, so one slow turn in twenty is tolerable and two is not. The wasted retry is therefore the first thing to fix (tolerant parsing of unambiguous JSON damage, in progress). Splitting review batches finer is the second candidate, to be A/B-tested for correctness first.
+
+## Q16h and Q16i: the model sends only the revised post (2026-09-29)
+
+**What changed.** On a recognised revision of one dated post ("Gjør innlegget for 23. september ..."), the model is told to send `update_artifact` with only that post's section, and the gateway splices it into the accepted document. Stage 1 of the [patch-revision plan](../../system-audits/patch-revision-2026-09-29/00-critic-verdict-and-staged-plan.md). Before this, the follow-up rewrote about 3.8 KB to change about 0.4 KB.
+
+**Q16h: 20 takes of journey 03, switch on, all other levers as in freeze 5.** Same Terra subscription route, no automatic retry, corrected oracle (see below).
+
+| Measure | Q16h | Baseline (whole document) | Owner target |
+|---|---|---|---|
+| Passes | 20/20 | 20/20 (q16e) | |
+| Follow-ups that came back as a section | **20/20** | not applicable | kill criterion: under 90% |
+| Follow-up p50 / p95 / max | **26.7 / 41.6 / 43.8 s** | 47.5 / 75.6 s (q16f, n=10); 76.3 s p95 (q16e, n=20) | p95 ≤ 70 s |
+| Follow-ups over 70 s | **0** | 2 of 10; 2 of 20 | |
+| First turn p50 / p95 / max | 73.5 / 92.4 / 93.1 s | 105.4 s p95 (q16e) | p95 ≤ 120 s |
+| Timeouts, repairs, `invalid subscription tool arguments` | none | | none |
+
+The model wrote 474 to 623 characters (median 530) against a stored document of about 3.6 KB; the draft was ready at a median of 14.3 s, against about 32 s. Most follow-ups needed one review pass and a few two; none needed a repair. These are the numbers the [patch-revision analysis](../../system-audits/patch-revision-2026-09-29/00-critic-verdict-and-staged-plan.md) projected (follow-up p50 about 24 s, p95 57 to 60 s); the measured p95 is lower.
+
+**Oracle correction, made before this series.** The first attempt (folder `q16g-20260929T1458Z`, kept as evidence) failed take 1 with "piece 1: 7 words" although the stored document was complete. The model had put a metadata block, including the "Produktinformasjon teksten bygger på" note, above each post, and the oracle cut the piece at the first source note. `tests/e2e/product-campaign-oracle.ts` now removes a leading metadata block first (8 tests). Replayed over all 62 recorded journey-03 documents: none that passed now fails, the failing one now measures 63, 63, 61 and 80 words. The oracle no longer counts the "Kanal" and "Foreslått dato" lines as copy, so most posts count 2 to 7 words fewer than in q16e and q16f: **q16h is judged slightly stricter than those series**, and several posts sit at 60 to 62 words against the 60-word minimum.
+
+**Defect found by reading the documents, not by any check.** When the accepted post has a `### Kilder` sub-section (the per-post source note the brief asks for), the splice replaced the post's whole section with the model's, and the model had sent only the heading and text. In q16h that happened in **3 of 3 takes that had the layout** (takes 1, 7 and 9 of 20); with whole-document output the note survived in 6 of 6 earlier takes. The copy checks passed all three, because they measure the customer copy. The source note is exactly what the brief asks the drafts to show. Fixed in three parts:
+- **Told:** the section-only notice is followed by one message naming the post's sub-heading lines.
+- **Refused:** with the switch on, a section that comes back with none of the accepted post's sub-sections is rejected and repaired, and the repair is shown the note it lost. `apply` itself is unchanged.
+- **Judged:** the journey-03 oracle fails a take in which a post that showed a note no longer shows one (`lostPostNotes`; 13 tests in all). Replayed over the recorded documents it flags exactly the three q16h takes and none of the 47 others.
+
+**Offline evidence for the fix** (gateway lib 1591 passed, integration 93 passed):
+- unit tests for the two helpers and the check, with the lost note quoted in the repair;
+- two mocked end-to-end tests: the author call names the sub-heading and a section with the note is spliced; a section without it is never emitted or saved, and with the switch off it is spliced as before;
+- a corpus test over the 50 recorded revisions: 9 had a note, and the refusal fires on exactly the 3 that lost it;
+- mutation checks: disabling the check, and separately the notice, fails the tests.
+
+**Q16i: not finished. The live proof of the fix is outstanding.** The compose default is now `MODEL_GATEWAY_DATED_POST_SECTION_ONLY=1`, the images were rebuilt through the launcher, and 20 takes were started on that configuration (`q16i-20260929T1706Z`). Takes 1 and 2 passed (follow-ups 25.9 s and 23.7 s), but neither had the per-post note layout, so the fix was not exercised. **Take 3 stopped with `subscription_usage_limit`: the connected ChatGPT plan has reached its Codex usage limit and resets 2026-10-03 17:45 UTC.** The series stopped by its own guard and nothing was run on another provider. What Q16h proves (adoption, timing) was measured before the fix; the fix only affects turns whose target post has a sub-section.
+
+**Q16j: the live proof of the fix (2026-09-30, after the owner reset the Codex limit).** The host had rebooted in between (containers restarted, the test sign-in was emptied and restored with the authorised local setup), and the owner had committed two marketing-site font changes. Neither touches the chat app, the gateway or the fixtures (13 of 13 hashes match). The images are the same as in q16i. Frozen 13:09 UTC, run 13:10 to 14:09 UTC, 20 takes of journey 03, switch on by the compose default.
+
+| Measure | Q16j | Owner target |
+|---|---|---|
+| Passes | 20/20 | |
+| Follow-ups that came back as a section | 20/20 | kill criterion: under 90% |
+| Follow-up p50 / p95 / max | **25.3 / 57.2 / 58.5 s** | p95 ≤ 70 s |
+| Follow-ups over 70 s | **0** | |
+| First turn p50 / p95 / max | 68.9 / 102.8 / 105.8 s | p95 ≤ 120 s |
+| Timeouts, repairs, guard refusals, tool-argument errors, usage-limit events | none | none |
+
+- **Notes:** 4 of the 20 documents had the per-post `### Kilder` layout, and **all 4 kept their note** after the revision (Q16h: 0 of 3). The notice alone was enough; the refusal never fired, so its live path is still exercised only by the offline tests. In those four takes (2, 4, 18 and 19) the model wrote 623 to 818 characters instead of about 500, which is the note travelling with the post. Two of them (2 and 18) also changed the note's text to match the revised post; the other two sent it unchanged.
+- **Oracle:** the new note check flags none of the 20 documents; the structural diff shows the headings unchanged in every take.
+- **Reuse:** all 20 revisions reused earlier approvals on the accepted pass. They reviewed 3 to 12 segments (median 4) and reused 17 to 32.
+- **Tail:** the two slowest follow-ups (58.5 s and 57.2 s) were review time after a normal 14 to 16 s draft, one with four review batches and two passes. That is the review's reasoning budget again, not the draft; it is within target and not touched.
+- **Against the baseline:** follow-up p95 57.2 s against 76.3 s (q16e) and 75.6 s (q16f); the first-turn p95 of 102.8 s is about the same as q16e (105.4 s).
+
+Journey 03 of this pass is this series. Journeys 01, 02 and 04 ran next on the same build (`q16k`).
+
+## Q16k: journeys 01, 02 and 04 on the same build, and two timeouts (2026-09-30)
+
+Frozen 13:09 UTC (the Q16j freeze), run 14:09 to 16:17 UTC, 20 takes each.
+
+| Journey | Passes | First turn p50 / p95 / max | Follow-up p50 / p95 / max | Timeouts |
+|---|---|---|---|---|
+| 01 kundesvar | 19/20 | 30.7 / 39.3 / 39.9 s | 30.4 / 43.5 / 43.5 s (n=19) | 0 |
+| 02 salgsrapport | 19/20 | 58.5 / 68.2 / 68.2 s | 29.6 / 50.2 / 50.2 s (n=19) | 0 |
+| 04 prosjektplan | 17/20 | 43.3 / 109.5 / 111.6 s | 31.1 / 42.9 / 42.9 s (n=17) | **2** |
+
+All timing targets hold. Two targets do not: **journey 04 had two timeouts** (the series must have none), and three journeys are short of 20 follow-up samples because a failed first turn has no follow-up.
+
+**The five failures:**
+- **01, take 16: `customer_body_sections_missing`.** The draft was refused twice by the local check that wants one customer body and one internal note section, and the second repair came back unchanged. A model-output failure at 31 s; the draft is not in any log, so the cause is unknown. A content-free diagnostic now records how many internal-note headings the draft had (none, or two or more, both make the check say "missing").
+- **02, take 19: the chat page never rendered.** The route sat on "Loading…" for the 10 s wait for the composer, before anything reached the model. The wait is now 30 s. It is test code only.
+- **04, take 17: plan wording** (no stand-in or buffer named), the known content failure.
+- **04, takes 7 and 9: `response_validation_timeout`, both at about 110 s.** The two had the same shape. The draft was ready at 19 to 22 s. The first source review of 15 segments ran in 3 batches of 4, 4 and 7 segments. The 7-segment batch (1,404 to 1,474 bytes, table rows) spent 4,051 to 4,580 reasoning tokens and took 52.5 and 60.7 s, while the other two finished in 10 to 18 s. Three table rows were unsupported, so a repair (14 to 15 s) and a second review (17 s) followed, and the 90 s the source check gets from the moment the draft is ready ran out in the next repair. The same tail was there in freeze 5 (a 109.7 s first turn that just finished).
+
+**What drives the tail.** Across 258 review batches of the q16k window: median 12.1 s, p95 28.9 s, 3 over 40 s, and the two slowest (53 and 61 s) were the two 4,000-plus-token calls. Batches of 7 or more segments had a 33.0 s p95 and 8 of 137 over 30 s; smaller ones 21 s and 3 of 121. Journeys 02 and 04 also review more than in freeze 5 (second review pass in 40 to 47% of first turns against 25 to 30%), which fits `list_item_segments` splitting bullet lists into items.
+
+**Finer review batches, A/B on real plans (2026-09-30).** 10 real journey-04 plans (whose batching the new rule changes) and a copy of each with one unsupported statement inserted, 3 runs per arm, the production configuration, Terra subscription only:
+
+| | Old rule (3 batches) | Finer rule (4 batches) |
+|---|---|---|
+| Real plans accepted | 20/30 | 20/30 |
+| Seeded defects rejected | 30/30 | 30/30 |
+| Protocol errors | 0 | 0 |
+| Review time p50 / p90 / max | 26.0 / 33.1 / 48.5 s | 25.6 / 32.7 / 48.2 s |
+| Batch calls with 2,000 or more output tokens | 10 of 180 (5.6%), max 3,716 | 1 of 240 (0.4%), max 2,745 |
+| Median output tokens per call | 995 | 688 |
+
+The two arms judge alike. Wall-clock review time did not differ in this sample, because provider latency varies independently of tokens (the same plan took 18, 19 and 27 s in one arm and 48 s once in the other), and one-pass reviews rarely meet the tail. The reasoning-token tail did shrink 14-fold. That is the mechanism behind the two timeouts, so the rule is now on; the next series is its real test. The low acceptance of real plans by a single complete pass (20 of 30 in both arms) is the same review variance that causes the repair loops.
+
+**Changes made from this, all in the gateway and compose (tests: lib 1600, integration 93):**
+- `MODEL_GATEWAY_FINER_REVIEW_BATCHES` on by default (one batch per four segments or 1,400 bytes of weight, at most four at once).
+- `MODEL_GATEWAY_ARTIFACT_CHECK_TIMEOUT_SECS` 120 instead of 90, because take 7 needed about 110 s of checking even with its heavy batch halved. The 150 s limit on the whole tool phase still applies, and an independent timeout audit found no upstream limit that a 120 s check would trip.
+- Hardening from an independent three-lens review: the sub-section guard now counts only `#` headings (a bold hook line in a post was counted as a sub-section), a request that also removes the note or the sources stays on the whole-document path, and the section-only notice no longer says not to send "the sources or the notes" while another message says to keep the post's note.
+
+## Q16L: the final pass on the new configuration (2026-09-30)
+
+Frozen 18:06 UTC on the model-gateway image `1ff7c6a268d6` (finer review batches on, section-only on, 120 s source check, the two review levers off, guidance v1, 13 of 13 fixture hashes). Journeys 04, 03, 02 and 01, 20 takes each, run 18:07 to 21:16 UTC, plus a four-take top-up of journey 02 (`q16Lb`, 21:16 to 21:26). The frontend container was deliberately not restarted: another session had uncommitted frontend edits, which a launcher rebuild would have baked in.
+
+| Journey | Passes | First turn p50 / p95 / max | Follow-up p50 / p95 / max | Samples (first / follow-up) | Timeouts |
+|---|---|---|---|---|---|
+| 04 prosjektplan | 20/20 | 46.3 / 67.1 / 121.1 s | 28.0 / 47.0 / 106.5 s | 20 / 20 | **0** |
+| 03 kampanje | 19/20 | 79.2 / 105.7 / 108.9 s | 28.6 / 57.7 / 61.8 s | 20 / 20 | 0 |
+| 02 salgsrapport | 17/20, plus 4/4 top-up | 53.4 / 65.0 / 73.0 s | 23.5 / 46.0 / 46.0 s | 20 / 21 | 0 |
+| 01 kundesvar | 20/20 | 32.7 / 43.0 / 55.5 s | 28.8 / 45.3 / 73.2 s | 20 / 20 | 0 |
+
+Against the owner's targets: first-turn p95 ≤ 120 s holds on all four, follow-up p95 ≤ 70 s holds on all four, **no timeouts in 84 takes**, and at least 20 samples per journey turn. Nearest-rank p95 at n=20 is the second-largest value, so one slow turn in twenty is tolerated: journey 04 has one first turn at 121.1 s (three review passes and two repairs, the loop that timed out at 110 s in q16k) and one follow-up at 106.5 s (three passes, one repair), and journey 01 has one follow-up at 73.2 s.
+
+**Journey 04, the point of the changes:** 20/20 with no timeout, against two timeouts and a 109.5 s p95 in q16k. Across 80 review batches the largest took 32.5 s (none over 40 s), the largest batch held 4 segments, and the most reasoning in one call was 2,401 output tokens, against 4,580 and 60.7 s before. The 121 s turn completes because the source check now has 120 s; it would have been a timeout at 90 s.
+
+**The four failed takes, all model behaviour, none a timeout, none a gateway fault** (when I checked mid-series, the Codex route had returned 200 for all 410 inference calls in the integration-api log, and inference-core had logged no warnings):
+- **03, take 3 (revision turn):** after one repair the recheck still found unsupported paragraphs and the check gave up within its attempt limit, at 62 s.
+- **02, take 6 (first turn):** a local document check failed on one segment and two short repairs did not clear it; no review pass ran.
+- **02, take 8 (first turn):** the model's first `create_artifact` call carried only an `id`; the gateway returned a schema error, the model recovered and the turn completed at 73 s, but the recording oracle counts any tool error as a failure.
+- **02, take 12 (first turn):** the model wrote the report as chat text and made no artifact call.
+
+Journey 02 had one model failure in the previous 40 takes and three here, clustered within 15 minutes. The earlier series also show occasional 02 failures (q16b kept several), and 01 and 04 ran clean on the same build. Nothing in these classes is touched by this window's changes (they occur before any review or splice), so I read this as route variance and will say so to the owner, not as a regression.
+
+**The sub-section fix held again:** 11 of the 20 journey-03 documents had a per-post `### Kilder` note, all 10 that completed the revision kept it, and the refusal never fired (the notice was enough); the oracle flagged none.
+
+**The gates** (`run_gates.sh`, on the Q16L capture root, 21:26 to 21:32 UTC, Terra subscription only, `--no-deps`):
+
+| Gate | Result |
+|---|---|
+| Durability before the restart | 21 passed |
+| Controlled restart of Model Plane Postgres, session-core, model-gateway and verevon-gateway-rs | healthy after 10 s |
+| Durability after the restart | 21 passed; evidence identical in 20 of 20 files (timestamps ignored) |
+| Recovery (`product-recovery.spec.ts`) | 9 passed |
+| Viewport (`product-journeys-viewport.spec.ts`) | 9 passed |
+| Live Q08 reload-resume and mobile markdown | 2 passed |
+| Trust (`product-memory.spec.ts`, `product-connected.spec.ts`) | 3 passed |
+
+**Where this leaves the four gates that were open.** Performance now meets every owner target on one build; the manifest says so (`performance: passed`). Correctness stays partial: 4 of 80 final-pass takes failed on model behaviour, and the 04 plan-wording class under author guidance v1 is not addressed. Trust stays partial because the cross-tenant spec (`real-authority-knowledge.spec.ts`) needs password fixtures only the owner can run. Experience stays partial until the captions and the editorial and media review are done. The overall status stays `blocked` on those owner-side items, and no public media is approved.
+
+**Still to do (owner):** captions, the editorial and media review, the cross-tenant spec, and whether to widen section-only beyond the "Gjør innlegget for D. måned" phrasing (decision D2 in the plan).
+
+## Build drift after the final pass (2026-10-01)
+
+The final-pass build (model-gateway image `1ff7c6a268d6`) is no longer the running build. The model plane was redeployed twice on 2026-10-01 from the working tree for the chat gap-closure plan (batch 1 at about 09:00 UTC, batch 2 at 12:05 UTC): typed subscription failures, the run-level refusal latch, agentic stream follow, server-side run budgets, Do mode on the Terra route (all behind `AGENTIC_SUBSCRIPTION_ENABLED`, off), and two switches that turn off background features which called paid models (capability-core learning review, session-core Dreaming extraction). None of this touches the document journeys' path by design, and every new behaviour is off by default, but the Q16 numbers above were measured on the earlier build. **Before any release or public recording, re-run the journeys on the build that will ship** (a short series is enough to catch a regression; the full five-pass rule still applies for a release freeze).
+
+**Smoke check on the final build of 2026-10-01 (23:20 to 23:30 UTC, label q17smoke):** one rehearsal take per journey on Terra after all four planes had been redeployed (Control, Model, Ingestion, Frontend), no retry. All four journeys passed (4 of 4). First turns took 29.1 s (01), 53.8 s (02), 81.3 s (03) and 48.5 s (04); follow-ups took 47.8 s (01, one repair), 27.2 s (02), 38.6 s (03) and 22.7 s (04). No timeout and no turn over the owner targets (first turn at most 120 s, follow-up at most 70 s). This is one take per journey, so it is a regression check and not a qualification: the five-pass rule and the 20-sample p95 still have to be re-run on the build that ships.
+
 ## Owner action after the rebuild: delete the legacy prompt logs
 
 After the rebuild, and once the smoke turn shows no new `logs_2.sqlite` is written, the **product owner** deletes the legacy `logs_2.sqlite` files (and the legacy Codex session transcripts) in the connection homes on the `integration-codex-subscription-home` volume. They hold full prompts and attachment content back to 21 September. The new startup sweep removes only `.ephemeral` directories, not these files. This is permanent deletion. **It is never done by an agent.**

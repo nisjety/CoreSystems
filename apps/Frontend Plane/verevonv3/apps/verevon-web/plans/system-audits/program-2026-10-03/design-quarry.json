@@ -1,0 +1,689 @@
+{
+ "summary": "Design 2 (Quarry option B). Reranking of caller-supplied candidates becomes a Data Plane capability: POST /v1/rerank, served as a separate service-only sub-router inside retrieval-engine-rs and reusing the existing paid Cohere-rerank-v4.0-pro-on-Azure client. It never touches the Model Plane or any subscription route. Quarry becomes a caller: its LLM-prompt reranker, the Model Plane rerank dependency and QUARRY_EDGE__SEMANTIC_RERANK_MODEL are deleted. For ZDR orgs, sovereign requests, an unapproved processor or provider failure, the Data Plane returns the input order plus an explicit status marker, never silently. Highlights become verbatim extractive passages scored by the same cross-encoder in the same provider call. Live evidence (docker logs, auth-service registry with credentials redacted, psql aggregates, metrics) shows the two 403s have different causes, and that fixing the principal alone would expose at least four more defects behind the vector call: invalid zdr_mode \"off\", omitted sovereign_required, a response with no page URL, and an unscoped corpus. The design therefore also fixes Quarry's vector leg, adds principal-aware auth to the retrieval engine (default-deny route allowlist), adds metering with producer and units, adds a judged-set quality gate with score calibration for model-gateway relevance.rs, and ships contract tests that use the real registry, golden Auth Core claims and a realistic membership double instead of permissive stubs. All principal/scope changes are grouped in one Control Plane step (T01+T02). Nothing was edited, built, restarted or called (no model or paid call); only read-only live checks were made.",
+ "current_state": [
+  {
+   "fact": "LIVE Auth Core registry: principal quarry-edge has audiences [data-plane] only; scopes [data:read, documents:write, org:data:read_all]; retention data-plane=persistent (token zdr=false); allowAnyOrg=true. No principal holds audience model-gateway except verevon-gateway (scope mail-task:prepare-thread), so no service principal can mint models:invoke.",
+   "source": "docker exec auth-service reading PLANE_SERVICE_PRINCIPALS_JSON (credentials not printed); apps/Control Plane/config/plane-service-principals.json:359-381; plane-service-principal.ts:382-398 (audience check)",
+   "verified_live": true
+  },
+  {
+   "fact": "Quarry rerank 403 cause: quarry-edge asks Auth Core for /api/model-plane/internal-token (audience model-gateway) which its principal does not hold, so Auth Core answers 403 before any model call. Logged on every search since the stack started: 'rerank: model plane failed ... Auth Core service-token request returned 403'.",
+   "source": "docker logs quarry-edge (4 occurrences, 2026-10-01); quarry-runtime/src/service_tokens.rs:40-52,218-246; rerank.rs:117-126; quarry-edge main.rs:946-962,1097-1127",
+   "verified_live": true
+  },
+  {
+   "fact": "Quarry vector-retrieval 403 cause (different from the rerank one): the token IS minted and verified, but retrieval-engine's HTTP auth_middleware sends every JWT subject through the user-membership policy; sub=service:quarry-edge is not an org member, so Auth Core decides not_member and the engine answers 403.",
+   "source": "auth-service log lines data_plane_authorization_decision userId=service:quarry-edge allowed=false decisionReason=not_member; retrieval-engine log 'Control authorization denied membership'; metric dpv2_authz_denials_total{cause=denied:no_membership}=15; api/mod.rs:110-152; data-plane-authorization.controller.ts:127-135,170-180",
+   "verified_live": true
+  },
+  {
+   "fact": "documents-api-go is principal-type aware (service_id==sub, no user_id, scopes required), and Quarry ingest works live (2 source=quarry documents with metadata.url), while retrieval-engine's Claims has no principal_type/service_id at all.",
+   "source": "documents-api-go/pkg/authctx/verify.go:143-153, authctx.go:87-103; retrieval-engine authz/context.rs:29-89; psql documents aggregate (source=quarry, visibility=org, 2 rows, has_url=true)",
+   "verified_live": true
+  },
+  {
+   "fact": "/v1/retrieve (HTTP) never checks the data:read scope for any caller; the only gate is membership. gRPC authorize_request is membership-gated the same way.",
+   "source": "api/mod.rs:82-200,814-833; grpc/interceptor.rs:148-189",
+   "verified_live": false
+  },
+  {
+   "fact": "Quarry's vector request body sends zdr_mode:\"off\" but the engine's ZdrMode accepts only disabled|reject|ephemeral (serde lowercase, no alias), so the body would be rejected as invalid even after the 403 is fixed. Quarry also omits sovereign_required, which the engine resolves as TRUE (strict), which disables Cohere embedding and text rerank for that request.",
+   "source": "vector_index.rs:86-98,142; retrieval-engine pipeline/types.rs:6-47; orchestrator.rs:880-892,1308-1311; Model Plane mp-contracts dataplane_posture.rs (gateway sends Some(false)); live DP logs show model-gateway calls with sovereign_required:false",
+   "verified_live": false
+  },
+  {
+   "fact": "The engine's retrieve response has no page URL and no 'score': candidates carry knowledge_id/document_id/text/dense_score/sparse_score/rerank_score/final_score; sources carry document_id/title/source/type. Quarry's 'tolerant mirror' expects url/source_url/uri and score, so vector hits would be keyed by document_id (a UUID) and never fuse with lexical URLs. The URL exists in documents.metadata.url (unique index for source=quarry).",
+   "source": "pipeline/types.rs:236-258; orchestrator.rs:1678-1705; vector_index.rs:100-120,194-227; psql: 2/2 quarry documents have metadata url; idx_documents_crawl_url_dedup",
+   "verified_live": true
+  },
+  {
+   "fact": "Live Data Plane corpus: 183 sharepoint docs (182 visibility=private owned by a service principal, 1 org-visible) and 2 quarry docs (org-visible). With filters:{} Quarry's vector leg would also surface the org-visible sharepoint doc in web-search results; with the viewer being service:quarry-edge and no org:data:read_all in the retrieval token, private docs stay hidden.",
+   "source": "psql documents group by source,visibility; vector_index.rs:92-97,143-148; ingest_client.rs:101-113 (org:data:read_all only requested for ingest); retrieval context.rs:299",
+   "verified_live": true
+  },
+  {
+   "fact": "The Data Plane reranker is Cohere-rerank-v4.0-pro on Azure Foundry: RERANK_ENDPOINT host is azure.com, path /providers/cohere/v2/rerank, bearer auth, RERANK_TOP_K=50, COHERE_API_KEY set. CAUTION: the code default endpoint is PUBLIC Cohere (https://api.cohere.ai/v1/rerank) if RERANK_ENDPOINT is unset.",
+   "source": "docker exec retrieval-engine env classification (host class only, key length only); config.rs:61-67,338-346; main.rs:153-164",
+   "verified_live": true
+  },
+  {
+   "fact": "The cross-encoder last ran 2026-09-23: cost_events has 259 rerank rows (1365 units, model Cohere-rerank-v4.0-pro), none after that day; dpv2_rerank_requests_total is absent since the 2026-09-30 restart; no 'reranker failed' or 'rerank retry' log lines in 72h. All 38 retrieval runs since 2026-09-26 returned zero candidates in every arm, so an empty list (not a provider fault or sovereignty gating) is the likely reason nothing was reranked (inference; consistent with off-topic queries and the dense score threshold). Net: there is no live evidence of provider health since 2026-09-23.",
+   "source": "psql cost_events and retrieval_runs aggregates; curl /metrics inside retrieval-engine; docker logs retrieval-engine; search/dense.rs:24,91",
+   "verified_live": true
+  },
+  {
+   "fact": "reranker_model on the retrieval request is plumbed but never read anywhere (only copied into the request struct).",
+   "source": "grep reranker_model in retrieval-engine/src (types.rs:70, grpc/retrieval_svc.rs:702, config.rs:49 only)",
+   "verified_live": false
+  },
+  {
+   "fact": "Provider rate-limit history: S0 Foundry answers 429 per-second windows; retries are 3 attempts with 1s/2s backoff (Retry-After capped at 5s), shards >50 docs (32/shard, 300ms stagger), and the pipeline degrades silently to fused order. Measured losses: 93/94 queries (before the fix) and about 19% of queries per run (eval-gate header).",
+   "source": "search/rerank.rs:9-48,178-179,266-359; postprocess.rs:288-297; scripts/eval-gate.py header",
+   "verified_live": false
+  },
+  {
+   "fact": "Data Plane ZDR doctrine: any restrictive zdr_mode (ephemeral or reject) forbids Cohere/Azure text rerank and embedding egress; sovereign_required=true also blocks it; cost events are suppressed for restrictive modes and the cost consumer drops ZDR-flagged events.",
+   "source": "orchestrator.rs:25-63,65-75,881-892,1298-1311; data-orchestrator-go/internal/cost/consumer.go process(); apps/GDPR_SUMMARY.md:106-108,168",
+   "verified_live": false
+  },
+  {
+   "fact": "No contractual ZDR evidence exists for Cohere-on-Azure rerank in the repo: docs list 'ZDR contractual for Cohere Rerank/Embed v4' only as a Phase-7 TODO; PROVIDER_AND_PRIVACY_STRATEGY.md binds ZDR to evidence-checked attestations and only Azure OpenAI has one.",
+   "source": "Data Plane v2/docs/sovereign-rag-phased-plan.md:645; sovereign-rag-blueprint-reconciliation.md:75-82; PROVIDER_AND_PRIVACY_STRATEGY.md lines 44,174-175",
+   "verified_live": false
+  },
+  {
+   "fact": "ZDR posture sources: interactive tokens carry the org's real posture (paid opt-in, default false, resolved from org-core; an org-core outage resolves to false). Service tokens carry the principal's static per-audience posture (model-gateway and execution-core are zdr:true on the quarry audience; quarry-edge is zdr:false on data-plane). Quarry-edge ignores token zdr entirely and reads zdr only from the request body (Claims has no zdr field). So the claim zdr of a service caller must NOT be used to decide ZDR in Quarry.",
+   "source": "interactive-retention-policy.ts:1-40,160-170; convex-token.service.ts:155-168,642; plane-service-principals.json (retentionByAudience); search_routes.rs:44-49,144-146,628; quarry-edge auth.rs:56-77; contract spec comment 'Quarry reads the zdr posture from the request body, not the token'",
+   "verified_live": false
+  },
+  {
+   "fact": "Quarry's rerank path ignores opts.zdr (RerankingSearchProvider::search passes only org_id) and the hybrid vector leg ignores it too, with zdr_mode hard-coded 'off' on the wire. model-gateway does pass the run's real zdr to /v1/search.",
+   "source": "rerank.rs:262-271; hybrid.rs:41-44; vector_index.rs:92-97; model-gateway tool_loop.rs:2840-2845",
+   "verified_live": false
+  },
+  {
+   "fact": "Quarry's DataPlaneVectorIndex builds reqwest::Client::new() with no timeout, and tokio::join! waits for both legs, so a slow Data Plane stalls search. The quarry-edge 'metrics' crate is inert (no recorder); observability is tracing events.",
+   "source": "vector_index.rs:56-64; hybrid.rs:41-44; quarry-edge telemetry.rs header",
+   "verified_live": false
+  },
+  {
+   "fact": "Quarry compose turned semantic rerank and autoprompt ON by default on 2026-09-23 (commit 932b30d2); live env: SEMANTIC_RERANK=1, TOP_N=10, AUTOPROMPT=1, MODEL_PLANE_URL set, LLM_CLASSIFY empty, DATA_PLANE_URL=http://dpv2-retrieval-engine:8004. Autoprompt, answer synthesis, ai-formats and page-title all use the same Model-Plane-token client, so they hit the same audience 403 (inference: not observed because the 4 logged searches were not research/comparative).",
+   "source": "apps/Ingestion Plane/docker-compose.yml:121-147; git log -S; docker exec quarry-edge env; quarry-edge main.rs:946-1170",
+   "verified_live": true
+  },
+  {
+   "fact": "model-gateway consumes Quarry's score as Option<f32> in [0,1] (absent means not reranked, never zero), weight 0.6 against lexical overlap, keep threshold 0.30, highlight-only credit 0.85; it forwards score/highlights/rank/engines to the gate; deep_research keeps the max score across sub-queries. No Cohere score calibration exists anywhere (DP confidence_threshold 0.35 was 'never empirically calibrated').",
+   "source": "relevance.rs:99,109,210,751-757; tool_loop.rs:2893-2915,5547-5553; deep_research.rs:1016; retrieval-quality-and-durability-plan-2026-08-05.md:1722-1735",
+   "verified_live": false
+  },
+  {
+   "fact": "Data Plane metering today: cost_events(event_type, model, org_id, count, estimated_tokens, idempotency_key, user_id); the signed-event verifier binds the retrieval producer to event_type 'rerank', decodes strictly (unknown fields rejected), and the Rust encoder uses a random uuid idempotency key so a retried request double-counts. cost-core accepts only producer model-gateway and the product cost view reads only cost-core, so Data Plane costs are invisible in the UI.",
+   "source": "psql \\d cost_events; data-orchestrator-go/internal/cost/{verifier.go,consumer.go}; orchestrator.rs:65-94,1403-1424; cost-core cmd/main.go:53,430-431; Frontend gateway domains/cost.rs:7",
+   "verified_live": true
+  },
+  {
+   "fact": "Ownership docs: matrix rows 69-71 give 'Vector retrieval / rerank / source join' and 'Hybrid retrieval' to retrieval-engine-rs with Quarry 'no'; rule 2 at :155 and CODEBASE_INFORMATION_SYSTEM.md:119 forbid independent reranking outside labs. Quarry docs still say the reranker calls Model Plane (Features.md:39,179) and CROSS_PLANE_AUTH.md:9-10 claims a quarry-to-model-plane service token is 'implemented', which the live registry contradicts.",
+   "source": "apps/master-ownership-matrix.md:69-71,155; apps/CODEBASE_INFORMATION_SYSTEM.md:119,159; Quarry-v2/docs/Features.md:39,179; docs/CROSS_PLANE_AUTH.md:9-10",
+   "verified_live": false
+  },
+  {
+   "fact": "Auth Core refuses to load a file registry with allowAnyOrg principals outside development/test; every committed principal (including quarry-edge) is allowAnyOrg:true, so production needs fixed org allowlists regardless of this design.",
+   "source": "plane-service-principal.ts:173-188; plane-service-principals.json",
+   "verified_live": false
+  },
+  {
+   "fact": "Retrieval-engine per-org limiter (Dragonfly token bucket) defaults 20 rps / burst 40 and fails open; Data Plane integration tests that need Postgres are #[ignore]-gated behind TEST_DATABASE_URL, so DB-gated tests are invisible to a plain cargo test.",
+   "source": "rate_limit/mod.rs:15-30; tests/common/mod.rs:26-38",
+   "verified_live": false
+  },
+  {
+   "fact": "The engine logs the raw retrieval query text at INFO in retrieval.start (observed in live container logs); this new endpoint must not copy that pattern.",
+   "source": "docker logs data-plane-v2-retrieval-engine-1 (retrieval.start events)",
+   "verified_live": true
+  },
+  {
+   "fact": "Other sessions have uncommitted edits in files this design must touch: plane-service-principals.json, config/README.md, run-control-plane.sh, auth-core plane-token.controller.ts and convex-token.service.ts, Ingestion Plane docker-compose.yml (integration-api section only), and cost-core cmd/main.go, ledger.go, postgres/store.go, server/server.go. Data Plane v2, Quarry-v2 crates and model-gateway relevance.rs/quarry.rs/tool_loop.rs are clean in the working tree.",
+   "source": "git status --short (350 modified files); git diff of the files named",
+   "verified_live": true
+  },
+  {
+   "fact": "The live registry already contains the uncommitted principals verevon-gateway and model-gateway-mail-task-bridge and execution-core search:read/extract:read, i.e. the launcher has applied the working-tree policy file; a new scope therefore reaches Auth Core only after the launcher re-assembles PLANE_SERVICE_PRINCIPALS_JSON and auth-service is recreated.",
+   "source": "docker exec auth-service registry key list; run-control-plane.sh:274-359",
+   "verified_live": true
+  },
+  {
+   "fact": "quarry-control and quarry-orchestrator have no Auth Core principal and make no Data Plane or Model Plane calls (quarry-control uses HMAC with the edge); quarry-edge is the only Quarry caller of the new capability.",
+   "source": "registry key list (live); grep services/ in Quarry-v2; docs/CROSS_PLANE_AUTH.md",
+   "verified_live": true
+  }
+ ],
+ "defects_found": [
+  {
+   "defect": "D1. Retrieval-engine sends service principals through the user-membership check: every Quarry /v1/retrieve returns 403 (also every other service-designed route behind auth_middleware, for example the Space-binding routes that pin service:control-space-deletion, a principal absent from the registry).",
+   "evidence": "api/mod.rs:110-152 vs data-plane-authorization.controller.ts:170-180; live not_member decisions for service:quarry-edge; dpv2_authz_denials_total=15; the comment at api/mod.rs:108-109 says service callers use tokens, so intent and implementation disagree",
+   "severity": "high"
+  },
+  {
+   "defect": "D2. Quarry rerank cannot get a Model Plane token: quarry-edge lacks the model-gateway audience and no service principal anywhere holds models:invoke. The feature has never worked since it was enabled by default on 2026-09-23.",
+   "evidence": "live registry; quarry-edge warnings; service_tokens.rs; compose :135",
+   "severity": "high"
+  },
+  {
+   "defect": "D3. After D1 is fixed the vector call is still invalid: zdr_mode 'off' is not a ZdrMode value (422 on deserialize).",
+   "evidence": "vector_index.rs:142 vs types.rs:6-47",
+   "severity": "high"
+  },
+  {
+   "defect": "D4. The vector leg ignores ZDR and hard-codes zdr off: once the 403 is fixed, a ZDR org's query text would be embedded by Cohere Embed v4 on Azure and persisted as a retrieval trace row, violating the repo's own ZDR doctrine and the 2026-09-03 ledger precedent (ZDR must gate third-party egress for web search).",
+   "evidence": "hybrid.rs:41-44; vector_index.rs:92-97; orchestrator.rs:25-28,881-892; ledger.md 2026-09-03 entry",
+   "severity": "high"
+  },
+  {
+   "defect": "D5. Quarry omits sovereign_required, which the engine resolves to TRUE: no cloud embedding or text rerank for that call.",
+   "evidence": "orchestrator.rs:880-892,1308-1311; ledger.md 2026-08-28 entry",
+   "severity": "medium"
+  },
+  {
+   "defect": "D6. Response contract mismatch: the engine returns no URL or score on candidates/sources; Quarry maps document_id as url, so fused results contain UUID pseudo-URLs that cannot dedupe with lexical hits and are unusable by model-gateway. Quarry's wiremock tests encode invented aliases (source_url, uri, score) that the real service never emits (the 'permissive double' pattern).",
+   "evidence": "types.rs:236-258; orchestrator.rs:1695-1702; vector_index.rs:100-120,282-301",
+   "severity": "high"
+  },
+  {
+   "defect": "D7. Unscoped corpus: filters:{} makes the vector leg search every org-visible document, mixing non-Quarry org knowledge into web search results; correct scope is source=quarry. The retrieval token must stay data:read only (admin_read_all is derived from org:data:read_all).",
+   "evidence": "vector_index.rs:92-97; filters.rs:34; context.rs:299; psql corpus mix",
+   "severity": "medium"
+  },
+  {
+   "defect": "D8. Quarry's rerank path ignores opts.zdr, so a ZDR-flagged search would send query plus snippets to a general model (it currently only fails because of D2).",
+   "evidence": "rerank.rs:262-271",
+   "severity": "high"
+  },
+  {
+   "defect": "D9. Quarry derives ZDR only from the request body, never from the verified token; an org with ZDR on whose caller omits zdr:true gets cached, event-emitting, non-ZDR handling. A naive fix that reads claim zdr would mark every model-gateway/execution-core call ZDR (their quarry-audience tokens are always zdr:true) and disable rerank for all chat traffic.",
+   "evidence": "search_routes.rs:628; auth.rs:56-77; plane-service-principals.json retentionByAudience.quarry",
+   "severity": "medium"
+  },
+  {
+   "defect": "D10. DataPlaneVectorIndex has no HTTP timeout and the hybrid join waits for it.",
+   "evidence": "vector_index.rs:56-64; hybrid.rs:41-44",
+   "severity": "medium"
+  },
+  {
+   "defect": "D11. The LLM reranker design is wrong for the job: general-model prompt per search, 'verbatim highlight' not enforced, unmetered per-query cost, parse-or-degrade JSON contract, and it is independent reranking forbidden by rule 2.",
+   "evidence": "rerank.rs:139-221; master-ownership-matrix.md:155",
+   "severity": "medium"
+  },
+  {
+   "defect": "D12. Data Plane rerank gaps for a caller-docs use: no endpoint taking caller documents, reranker_model dead field, retries not deadline-aware, no provider-level limiter shared across callers (429 loss), shard-merge of per-shard scores, and a default endpoint of public Cohere when RERANK_ENDPOINT is unset (contradicts 'Azure only').",
+   "evidence": "search/rerank.rs; config.rs:61-67,344-346; main.rs:153-164",
+   "severity": "medium"
+  },
+  {
+   "defect": "D13. Rerank cost events carry no producer/unit attribution, use a random idempotency key (retries double count) and never reach cost-core or the product cost view.",
+   "evidence": "orchestrator.rs:65-94; cost-core cmd/main.go:53,430; gateway cost.rs:7",
+   "severity": "medium"
+  },
+  {
+   "defect": "D14. Quarry caches whatever the provider returned, including an unreranked result set produced by a rerank failure, for the cache TTL, and the cache signature does not include rerank state.",
+   "evidence": "search_routes.rs:517-531,727-745",
+   "severity": "low"
+  },
+  {
+   "defect": "D15. Stale or contradictory documentation: CROSS_PLANE_AUTH.md:9-10 (claims implemented model-plane token), Features.md:39,179, openapi.yaml lacks the existing highlights field, GDPR_SUMMARY.md:106-108 'prefer Model Plane gates' versus the matrix giving rerank to the Data Plane.",
+   "evidence": "docs cited",
+   "severity": "low"
+  },
+  {
+   "defect": "D16. Other Quarry features that call the Model Plane are dead for the same audience reason while ON by default: autoprompt (QUARRY_EDGE__AUTOPROMPT=1), answer synthesis, ai-formats, page-title. Out of Design 2 scope but surfaced because removing the rerank dependency does not fix them.",
+   "evidence": "main.rs:946-1170; compose :130",
+   "severity": "medium"
+  },
+  {
+   "defect": "D17. retrieval.start logs raw query text at INFO in the retrieval engine (tenant intent in operator-readable logs).",
+   "evidence": "live container logs",
+   "severity": "low"
+  },
+  {
+   "defect": "D18. Interactive ZDR resolution fails to non-ZDR on an org-core outage, so a ZDR org can be treated as non-ZDR for the outage window; the new endpoint cannot detect this from the token (platform risk, Auth Core owner).",
+   "evidence": "interactive-retention-policy.ts:31-35,160-170",
+   "severity": "medium"
+  }
+ ],
+ "design": "LEGEND: [F] verified fact (see current_state), [I] inference, [D] design decision, [O] owner decision (see owner_decisions). Nothing in this task was edited or called; live reads only.\n\n0. WHAT THE LIVE STACK CHANGED IN THE PROBLEM\n[F] The two 403s are different defects (audience for rerank; membership for retrieve). [F] Behind the retrieve 403 sit at least four more (D3 zdr_mode enum, D5 sovereign default, D6 no URL, D7 unscoped corpus) plus D4 (ZDR egress). [D] The design fixes the whole path, because a green unit test with a permissive stub is exactly how the six A6 defects survived. [F] ZDR trap: service-token zdr is a static principal posture, so Quarry must take ZDR from the request body for service callers (model-gateway, execution-core) and from the token claim only for interactive user callers.\n\n1. THE CAPABILITY: WHERE IT LIVES AND ITS API\n[D] Placement: a second sub-router on retrieval-engine-rs's existing HTTP listener (:8004), module rerank_api, sharing the existing RerankClient, JWT verifier and metrics, but NOT sharing auth_middleware (that is user-membership shaped). Not a new service. Reasons: (a) ownership matrix rows 69-71 already give rerank to retrieval-engine-rs, so a new service would duplicate provider secrets and Azure quota; (b) the engine already holds Cohere-on-Azure config, retry logic and signed cost-event plumbing; (c) auth boundary is solved by a separate service-only layer plus default-deny route allowlist; (d) blast radius is bounded by a dedicated in-flight semaphore, per-org rate class, a provider permit pool that reserves capacity for tenant-knowledge retrieval, and a kill switch (WEB_RERANK_ENABLED); (e) the contract is transport-stable so it can be extracted to its own service later without touching callers. Wire: HTTP/JSON now (Quarry's existing client style); gRPC RerankService deferred until the first Model Plane caller exists [O6]. The core is transport-agnostic (rerank_api::score) so adding gRPC later is small.\n\nEndpoint: POST /v1/rerank (service principals only).\nRequest: {\"request_id\":\"<8..64 chars, unique per org, also the metering idempotency key>\", \"query\":\"<1..1024 chars>\", \"documents\":[{\"id\":\"<opaque 1..128 chars, caller chooses, no URL required>\",\"text\":\"<1..4000 chars>\"}], \"top_n\":<1..documents, default all>, \"profile\":\"web-v1\", \"purpose\":\"web_search\", \"highlights\":{\"mode\":\"passage|none\",\"max_per_document\":1..3}, \"zdr_mode\":\"disabled|reject|ephemeral (optional; merged monotonically with the signed token zdr)\", \"sovereign_required\":<bool, optional, merged>, \"deadline_ms\":<100..8000, default 2000>}\nLimits [D]: documents<=100 (more is 400, never silent sharding of caller documents), text<=4000 chars (longer is truncated at a char boundary and listed in truncated_ids), query<=1024, body<=1 MiB (route-level limit under the global 10 MiB), unique ids, UTF-8 only. profile is an allowlist resolved server-side to a model and thresholds (web-v1 = RERANKER_MODEL); a raw model id from the caller is never accepted (the dead reranker_model field is not copied).\nResponse: {\"request_id\", \"status\":\"ok|skipped|degraded\", \"reason\":null|\"zdr\"|\"sovereign\"|\"disabled\"|\"processor_not_approved\"|\"circuit_open\"|\"provider_rate_limited\"|\"provider_error\"|\"timeout\"|\"input_too_small\", \"degraded\":<status!=ok>, \"reranker\":{\"provider\":\"cohere\",\"route\":\"azure-foundry\",\"model\":\"Cohere-rerank-v4.0-pro\",\"profile\":\"web-v1@1\",\"score_kind\":\"cross_encoder.v1\"}, \"results\":[{\"id\",\"index\",\"rank\",\"score\"|null,\"scored\":bool,\"highlights\":[{\"text\",\"start_char\",\"end_char\",\"score\"}]}], \"truncated_ids\":[...], \"usage\":{\"documents_scored\",\"passages_scored\",\"provider_calls\",\"search_units_estimate\"}, \"zdr_actions_applied\":[\"rerank_skipped_zdr\"|...], \"latency_ms\"}.\nWhen status != ok, results are the INPUT order with scored:false and no scores: this is the explicit marker the owner required (never silent). Provider failure, 429 after budget, timeout, ZDR, sovereign, unapproved processor, disabled and circuit-open are all HTTP 200 with a marker so callers never retry blindly; only 400 (invalid), 401, 403, 413, and 429 from OUR per-org limiter (with Retry-After) are error statuses.\nDeadline and retries [D]: the whole handler runs under tokio::time::timeout(deadline_ms); RerankClient::rerank_texts passes the remaining budget into send_with_retry, which only sleeps for a backoff or Retry-After that still fits the budget, otherwise returns degraded timeout/provider_rate_limited immediately. One provider call per request (all candidates plus passage windows, <=100 docs), no sharding, so every score in a response comes from one comparable pass.\nIdempotency [D]: (org_id, request_id) is cached for 120 s in an in-process moka cache (key = blake3(org|profile|query|doc texts); value = scores and offsets only, never text) so a retry returns the identical response without a second provider call; metering idempotency key is rerank:{org}:{request_id} (deterministic, replaces the random uuid for this path).\nProvider [D]: the SAME configuration as the existing reranker (RERANK_ENDPOINT, COHERE_API_KEY, RERANKER_MODEL, bearer or api-key header), called directly on Azure. Never the Model Plane, never inference-core, never a subscription route. Startup guard: web rerank refuses to enable unless RERANK_ENDPOINT is set and its host is on an Azure allowlist (*.azure.com, *.ai.azure.com), closing the public-Cohere default; a unit test pins that rerank_api imports no Model Plane client or subscription provider module.\nCapacity [D]: WEB_RERANK_MAX_INFLIGHT=8; per-org class limiter WEB_RERANK_PER_ORG_RPS=5 burst 10 (Dragonfly, same fail-open convention); a shared provider permit pool and token bucket (RERANK_PROVIDER_MAX_INFLIGHT, RERANK_PROVIDER_RPS tuned to the real Foundry quota) that reserves 2 permits for tenant-knowledge retrieval; circuit breaker after 5 consecutive provider failures in 30 s (open 30 s) returning degraded circuit_open. [O1] decides shared deployment versus a dedicated Azure deployment for web traffic; recommended: shared now with the limiter, dedicated before general availability.\n\n2. AUTHENTICATION AND TENANCY\nCallers [D]: exactly one principal, quarry-edge (service:quarry-edge), audience data-plane (the engine's JWT_REQUIRED_AUDIENCE; no new audience), new scope data:rerank. quarry-control and quarry-orchestrator have no principal and are not callers [F]. Tokens are minted per org by Auth Core from the verified org of the caller's quarry token (token_for_org), scope list narrowed to [data:rerank] only; the engine independently requires: valid RS256 JWT (aud, iss, exp, nbf, boolean zdr), principal_type=service, service_id==sub, sub starts with service:, no user_id claim, non-empty scopes (mirrors documents-api-go verify.go:144-149), scope data:rerank, sub in WEB_RERANK_ALLOWED_SERVICES (default service:quarry-edge, a second belt), org_id non-empty and pinned from the signed claim (a body org is not accepted at all). No membership lookup for service principals (they are not members); tenant binding is the signed claim minted by Auth Core against the registry. Interactive user tokens can never reach it (member scopes never include data:rerank; the handler also requires principal_type=service) so it cannot become a free Cohere proxy for end users.\nPrincipal-aware auth for the existing routes (fixes D1) [D]: new authz::principal (decision logic, in lib so integration tests can reach it; api is not in lib.rs) plus authz::service_routes, a compiled DEFAULT-DENY table of (method, path, required scope, allowed service ids): POST /v1/retrieve, /v1/retrieve/hybrid, /v1/knowledge/search require data:read for service:quarry-edge; POST /v1/rerank requires data:rerank. Every other route (admin cleanup, context pins, semantic cache, space-binding, graph/wiki/trace) rejects service principals with 403 service_principal_route_not_allowed, so skipping membership widens nothing that was not explicitly listed. User behaviour is byte-identical (membership still enforced). gRPC stays user-delegation-only (model-gateway forwards the user's bearer); an explicit test pins that.\nAttribution [D]: every call writes one access_audit_log row (endpoint, status, cause such as rerank:ok|skipped_zdr|degraded_timeout; no document ids, no text), a Prometheus outcome counter per org, and, for status ok, a signed cost event keyed by org with producer=service:quarry-edge. The query can reveal tenant intent even though candidates are public web text, so the endpoint persists nothing: no retrieval_runs/trace row, no text in the cache (offsets only), no query or document text in logs or errors (contract test captures logs), error bodies sanitized like sanitized_rerank_status_error.\nSpecial orgs [D]: Quarry skips reranking for the pre-org sentinel org 'onboarding' (shared pseudo-tenant, cost not attributable, abuse surface) and for health-probe org 'global'; marker reason input_not_tenant.\n\n3. ZDR, SOVEREIGNTY AND PROCESSOR BEHAVIOUR\nDecision order in rerank_api::policy (pure function, table-tested): enabled? -> processor approved? -> effective zdr (signed token zdr OR body zdr_mode restrictive) -> sovereign (signed claim or body or deployment) -> circuit -> input size -> call provider. [F] What Cohere on Azure commits to is NOT established anywhere in the repo, and the code treats it as retaining egress. [D] Therefore: any restrictive ZDR posture (ephemeral or reject) returns status skipped, reason zdr, zdr_actions_applied rerank_skipped_zdr, original order, zero provider calls, zero cost event. Sovereign required returns skipped sovereign (Azure cannot satisfy it, same doctrine as orchestrator.rs:881-892). WEB_RERANK_PROCESSOR_APPROVED (default false) must be true or the capability returns skipped processor_not_approved: the operator affirms the Art. 28 processor basis for sending the QUERY to Azure/Cohere (candidates are public text; [O2] legal confirmation needed). This resolves the GDPR_SUMMARY tension: the Data Plane owns reranking and calls the provider directly by design, with the processor gate in place of Model Plane gating; GDPR_SUMMARY.md:106-108 gets a clarifying note.\nZDR made workable [D]: (a) now: skip plus marker, never silent, and Quarry surfaces rerank.status=skipped reason=zdr in its response so model-gateway can state 'results not reranked (zero-retention organisation)'; (b) dark path: RERANK_ZDR_ATTESTATION_* (resource id, approval reference, effective date, reviewer, review-by, digest) validated at startup exactly like the Azure OpenAI ZdrAttestation; only a valid, unexpired attestation lets ZDR orgs use the Azure route; no attestation exists today so it stays off; (c) option: self-hosted text cross-encoder sidecar (like colqwen-reranker/media-embedder) as profile web-v1-sovereign for ZDR/sovereign orgs, no egress [O2]. Reranking never uses a subscription or BYO route, so the user-chosen-connection ZDR prompt flow does not apply to it: the platform route is always the paid Azure Cohere deployment.\nQuarry side [D]: Quarry computes effective_zdr = body.zdr OR (principal is a user AND verified claim zdr). Service callers (model-gateway, execution-core) are governed by body.zdr only (their token zdr is static). Quarry also passes sovereign_required = zero_saas_search (a posture that already promises queries never leave the cluster). Quarry does not call the DP at all when effective zdr is true, and the DP independently enforces the same (belt and braces), so each side's test proves the other cannot be bypassed by a caller bug. Cache: ZDR requests are never cached (existing), and degraded results are never cached.\n\n4. METERING\n[D] One signed cost event per status-ok call, event_type stays 'rerank' (the Go verifier binds the retrieval producer to that type). Schema change (additive, nullable): cost_events.producer TEXT (verified caller, e.g. service:quarry-edge; existing rows null = retrieval-engine), units NUMERIC(12,3), unit_kind TEXT ('rerank_search_unit'), purpose TEXT ('web_search'). count = documents_scored, estimated_tokens = sum(chars)/4 (honest estimate), units = search_units_estimate = ceil(documents_scored/100) adjusted for >500-token docs. Azure pricing for Cohere-rerank-v4.0-pro is NOT in the repo [O5]; we store raw quantities so cost can be recomputed when the price sheet is confirmed. Emission sits behind a CostSink trait (NATS signer impl, in-memory test impl). Deployment order matters because the Go consumer decodes strictly: migration plus data-orchestrator-go first, then retrieval-engine. data-quality /v1/cost/summary gains a producer dimension. Visibility to cost-core consumers (product cost view reads only cost-core) is a separate bridge T16: data-orchestrator forwards verified non-ZDR cost events to cost-core as a data-plane producer entry (needs a producer allowlist set in cost-core cmd/main.go:53,430 and units columns in ledger.Entry). It is shared with Design 1 (contextual retrieval metering), blocked on the other session's uncommitted cost-core work, and until it lands the cost is queryable per org and producer from the Data Plane ledger and Prometheus. Failed/degraded/skipped calls emit no cost event but increment dpv2_web_rerank_total{outcome,reason}.\n\n5. REPLACING QUARRY'S rerank.rs\nKeep: SearchReranker trait and RerankingSearchProvider wrapper (sits above HybridSearchProvider, so vector hits participate; reranked output is what the edge cache and AnswerPipeline see). Replace: ModelPlaneSearchReranker with DataPlaneSearchReranker (HTTP client, shared timeouts, token provider with one refresh-on-401, request_id = search run id, deadline default 2000 ms via QUARRY_EDGE__RERANK_DEADLINE_MS). Delete: build_rerank_prompt, strip_code_fences, RerankEntry/JSON-parse contract, with_model, the main.rs:1091-1127 model-client block, config.rs semantic_rerank_model, compose QUARRY_EDGE__SEMANTIC_RERANK_MODEL and the 'one call over N titles' comment, lib.rs export, Features.md/CROSS_PLANE_AUTH.md claims. Keep env QUARRY_EDGE__SEMANTIC_RERANK (compose default stays ON, now meaning 'call the Data Plane rerank') and _TOP_N; add QUARRY_EDGE__RERANK_SHADOW (call but keep order, for first exposure) and QUARRY_EDGE__RERANK_WINDOW (retrieve wide, rerank narrow: widen inner limit to window, rerank, truncate back; value chosen from T14 sweeps).\nRequest composition [D]: documents = title + newline + snippet (SERP, <=1200 chars) or chunk text (DP vector hits, <=4000), ids r0..rN (no URLs sent), query = the string the provider received. Head N reordered by DP order, tail untouched, ranks renumbered (the existing apply_rerank semantics, fed by DP indexes; invalid/duplicate indexes ignored).\nFailure behaviour [D]: any non-ok status keeps search order; the response carries rerank:{status:applied|skipped|degraded|disabled, reason, model, latency_ms, score_kind}; a tracing event search.rerank with low-cardinality fields (outcome, reason, docs, passages, latency_ms) because the quarry-edge metrics crate is inert; auth/contract failures (401/403/404/422) log at ERROR (misconfiguration, rate-limited to 1/min per reason) while 429/timeout log at WARN; Quarry-side circuit breaker mirrors the DP one. The edge never caches degraded results and the cache signature gains the rerank profile version.\nHighlights [D] (replaces the LLM prompt's single sentence): extractive passages, scored by the SAME cross-encoder in the SAME provider call. The DP segments each document into sentence windows (Norwegian and English abbreviation list such as bl.a., f.eks., osv., kl., dr.; window <=320 chars; windows under 40 chars merge with the next; <=4 windows per document, chosen by position, or by a lexical pre-score for documents over 2000 chars; total docs sent <=100, else only the first K documents get windows and truncated_ids says so). The provider scores N full documents plus M windows in one call with top_n = all. The candidate score is the full-text score (comparable across candidates); windows are used only to choose highlights: per document the best window is emitted only when its score >= the profile floor (calibrated in T14) AND it is not essentially the whole text (window under 70% of the document or the document had >=2 windows), so a highlight still means 'the passage the reranker picked out', which is how relevance.rs treats it (HIGHLIGHT_ONLY_CREDIT 0.85). Highlights are verbatim substrings by construction (offsets into the supplied text), which the LLM prompt never guaranteed. Cost-neutral for N<=25 (one search unit); lexical-only or none are the fallbacks [O4].\nrelevance.rs contract [D]: keep the wire contract (score absent means not reranked, never zero; highlights omitted when empty; rank) and make the change deliberately: Quarry adds a top-level score_kind 'cross_encoder.v1' (and rerank status); model-gateway quarry.rs parses it (absent defaults to the legacy LLM kind so older Quarry builds behave as before); relevance.rs gains a per-kind calibration map applied before the 0.6 blend, derived from the judged set (T14): a monotone piecewise-linear table of at most 8 knots mapping raw Cohere score to estimated P(relevant), plus a re-fit of DEFAULT_PROVIDER_WEIGHT (0.6) and, if needed, DEFAULT_KEEP_THRESHOLD (0.30). Cohere scores are 0-1 but not probability-calibrated and not comparable across queries, so deep_research's max-over-sub-queries (deep_research.rs:1016) must use the calibrated value (property test: monotone, calibrated(0)=0, calibrated(1)=1, absent stays absent). tool_loop surfaces rerank.status in the coverage line so a skipped or degraded rerank is visible to the model and the user.\n\n6. QUARRY VECTOR LEG (Path A, fixed)\n[D] Principal quarry-edge, audience data-plane, scope [data:read] ONLY (never org:data:read_all; ingest keeps its own separate token request), reason retrieve verified organization evidence. Request: {\"org_id\",\"query\",\"top_k\":max(limit,20),\"top_n\":limit,\"zdr_mode\":\"disabled\",\"sovereign_required\":zero_saas_search,\"filters\":{\"sources\":[\"quarry\"]},\"mode_mix\":{\"rerank\":false}}. Corpus [O3]: Quarry-origin documents only (source=quarry, crawled evidence stamped visibility=org), so org knowledge (SharePoint etc.) does not leak into web-search results; viewer is service:quarry-edge so only org-visible or service-owned documents can match. mode_mix.rerank=false stops the engine from paying for a second rerank and avoids its confidence gate emptying the list (Quarry reranks the fused list itself). ZDR or sovereign requests skip the vector leg entirely (no Cohere embedding of the query) with hybrid marker skipped_zdr. A 4-byte-exact strict response mirror replaces the tolerant one: candidates map to sources[].url via document_id (new SourceRef.url from documents.metadata url, additive JSON field; gRPC Source message unchanged for now), score from final_score. Timeouts: 1500 ms client timeout, join with a timeout so a slow DP never stalls lexical results. 401/403/404/422 from the DP log at ERROR with a distinct degraded reason (misconfiguration must be loud, not a WARN that looks like an outage). Same fix applies to /v1/search/similar (search_routes.rs:1260-1270). Each non-ZDR Quarry search leaves one retrieval trace row (query text) in the DP, acceptable under non-ZDR retention and purged by the GDPR consumer; flagged for volume.\n\n7. OWNERSHIP DOCUMENT CHANGES (same PR as the code)\nmaster-ownership-matrix.md:69-71 -> Quarry column becomes 'caller only: sends caller-supplied candidates to Data Plane POST /v1/rerank'; add row 'Rerank of caller-supplied candidates (public web results)': Quarry sends, Data Plane OWNER, Model Plane consumes score/highlights, UI shows rerank status; rule 2 (:155) and CODEBASE_INFORMATION_SYSTEM.md:119,159 amended: 'Data Plane owns embedding and reranking of tenant knowledge AND of caller-supplied candidates; Quarry and Model Plane are callers, subject to ZDR, sovereign and processor gates; direct provider HTTP from the Data Plane is by design'. New entry in apps/Model Plane/docs/decisions/ledger.md (proposed first, then implemented) recording the option-B decision, the doctrine, the deliberately-not-done items (gRPC, self-hosted ZDR sidecar, cost-core bridge ownership) and the three Quarry-vector defects. GDPR_SUMMARY.md note near :106-108. Quarry docs: Features.md:39,179, CROSS_PLANE_AUTH.md:9-10 (rewrite to the real grants), CROSS_PLANE_INTEGRATION.md, openapi.yaml (SearchResponse.rerank, SearchResult.score/highlights/score_kind) plus SDK regeneration, PARITY_IMPLEMENTATION_PLAN.md 1C note, WEB_SOURCE_QUALITY_AUDIT A3 status. Data Plane: openapi/d4d5.yaml, docs/web-rerank-v1.md, DATA_PLANE_STATUS.md.\n\n8. QUALITY PROOF AND REGRESSION GATE\n[D] Judged set: 80 queries (50 Norwegian, 30 English) across navigational 10, factual 20, fresh/news 15, research/comparative 15, local 10, technical 10; for each, the top 20 raw results from the live SearXNG federation are FROZEN into a fixture (title, snippet, url, engine ranks; public data) so the comparison is offline and reproducible; graded 0-3 relevance by two judges (LLM pre-judge on the Terra subscription is allowed for labels because it is not reranking [O11], plus human adjudication of all disagreements and a 20% sample; require Cohen kappa >= 0.6). Arms: A engine order (current production, since the LLM reranker never worked), B lexical-overlap baseline, C Cohere web-v1 title+snippet, D C plus host in the document text, E window sweep {limit, 20, 30}, F passage highlights on/off (measures highlight precision: share of emitted highlights judged to contain the answer). Metrics: nDCG@10, MRR, P@3, noise@5, per-category deltas, paired-bootstrap 95% CI. Acceptance gate (committed, config-driven): C beats A by >= +0.04 nDCG@10 with CI lower bound > 0; no category drops > 0.03; degraded rate <= 2% over a 200-call sequential soak; added p95 latency <= 900 ms; highlight precision >= 0.7. Regression gate: lab/evals/web-rerank-baseline.json compared by a runner modelled on Data Plane scripts/eval-gate.py (tolerances set from the measured noise, which for a cross-encoder is dominated by provider 429s, so the gate also asserts degraded rate); it runs in the Quarry lab, and a cheap 10-query smoke variant runs in the live proof. Calibration artefacts (score-to-relevance table, highlight floor, provider weight re-fit) are emitted by the same runner and committed with T12.\n\n9. TESTS THAT APPLY THE REAL RULES (no permissive doubles)\nC1 Auth Core contract spec (existing style, reads the committed registry): quarry-edge holds data:rerank only on data-plane; authorizePlaneServicePrincipal accepts exactly the manifest requests and refuses the old model-gateway/models:invoke rerank request; no other principal or interactive role gets data:rerank; no wildcard scopes.\nC2 Quarry manifest (contracts/cross-plane-token-requests.json) is the single source for every token request Quarry makes; a Rust test asserts production constructors equal the manifest and the TS spec asserts the registry authorizes each entry, so a missing grant fails in CI, not live (the A6 failure mode).\nC3 Golden Auth Core claims: a jest test mints a real service token through ConvexTokenService.issuePlaneToken with test keys and compares the decoded claims to a committed fixture; the Data Plane tests build tokens from that same fixture, so the claim shape cannot drift between issuer and verifier.\nC4 Realistic membership double: the Data Plane tests use a Control stand-in that returns not_member for any service: subject, exactly like lookupMembership; today's permissive Policy(true) doubles are what hid D1.\nC5 Wire goldens: the Data Plane tests emit the real serialized retrieve and rerank responses to contracts/retrieve-v1 and contracts/rerank-v1; Quarry's wiremock tests load only those files, so an invented field alias fails immediately.\nC6 Hermetic by construction: new tests live in default cargo test (authz and rerank_api are in lib, with trait-based sinks), never behind TEST_DATABASE_URL; DB-gated variants are additional, not the only coverage.\nC7 Policy matrix: zdr x sovereign x processor x enabled x circuit table asserting provider call count is exactly 0 for every restrictive cell (mock provider counts calls) and cost-event count is 0; log-capture test proves no query or document text reaches logs or errors.\nC8 Live matrix: scripts/auth-regression-matrix.sh gains route families (no token 401; user token on /v1/rerank 403; service token without scope 403; service token on admin routes 403; quarry-edge token on /v1/retrieve 200).\n\n10. SEQUENCE (Control Plane principal changes grouped)\nWave 0 (parallel, no code): T14 judged-set labelling starts; T13 ledger entry as 'proposed'.\nWave 1 (ONE Control Plane group, one reviewable change set): T01 registry plus specs, T02 manifest plus spec. No other task edits the registry; T16, if chosen, joins here as T01b.\nWave 2 (Data Plane): T03 and T04 in parallel; then T05; then T06 and T07 in parallel; then T08.\nWave 3 (Quarry): T09 and T10 after T03/T04/T05; T11 docs.\nWave 4 (Model Plane): T12 after T14 produces calibration.\nWave 5: T13 flips to implemented; T15 rollout plus live proof. Kill switches at every layer (QUARRY_EDGE__SEMANTIC_RERANK=0, WEB_RERANK_ENABLED=0, scope removal) require no rebuild.\n\n11. LIVE PROOF PLAN (tiny paid usage) is in T15 and each task's live_proof; total expected paid provider calls < 400 (one-time checks, 80-call judged run, 200-call soak), plus one Cohere Embed call for the vector check; at any plausible Cohere price this is under a dollar (price itself unverified [O5]).",
+ "tasks": [
+  {
+   "id": "T01",
+   "title": "Control Plane principal change set: grant data:rerank to quarry-edge and pin who may hold it",
+   "plane": "control",
+   "files": [
+    "apps/Control Plane/config/plane-service-principals.json",
+    "apps/Control Plane/config/README.md",
+    "apps/Control Plane/auth-core/src/auth/plane-service-principals-policy.contract.spec.ts",
+    "apps/Control Plane/auth-core/src/auth/plane-token-scopes.spec.ts"
+   ],
+   "approach": "Edit (never overwrite; other sessions have uncommitted hunks in this JSON and README, check git status first and merge, do not revert) quarry-edge.scopes and quarry-edge.scopesByAudience.data-plane to insert data:rerank after data:read (alphabetical). Keep retentionByAudience.data-plane persistent and keep audiences [data-plane]: explicitly do NOT add a model-gateway audience (web rerank no longer uses the Model Plane). No new principal and no new secret (consumerEnv QUARRY_SERVICE_API_KEY unchanged). Document the scope and the 'no model audience' decision in config/README.md. Launcher re-run assembles PLANE_SERVICE_PRINCIPALS_JSON; auth-service must be recreated afterwards.",
+   "tests_first": "New describe 'principal policy web-rerank grant' in the contract spec, written against the real committed policy and authorizePlaneServicePrincipal: (1) holdersOfScope('data:rerank') equals ['quarry-edge'] and only under audience data-plane [fails today]; (2) quarry-edge/data-plane/[data:rerank] authorizes with zdr:false [fails today]; (3) every other principal x audience pair is refused for data:rerank (enumerate like the existing web-tool test and assert the refused count); (4) quarry-edge is refused for audience model-gateway/models:invoke (pins the removal of the Model Plane rerank); (5) quarry-edge still lacks any scope containing a wildcard. In plane-token-scopes.spec.ts: planeScopesForRole never returns data:rerank for any role/audience combination.",
+   "live_proof": "After launcher re-run and auth-service recreate: docker exec auth-service node prints (credentials redacted) quarry-edge scopes including data:rerank; a token mint for scopes [data:rerank] on data-plane returns 200 with claims principal_type=service, service_id=service:quarry-edge, scopes=[data:rerank], zdr=false (decode payload only, never print signature); a mint of [models:invoke] on model-gateway returns 403; auth-service audit event plane_service_token_issued appears.",
+   "depends_on": [],
+   "size": "S"
+  },
+  {
+   "id": "T02",
+   "title": "Quarry cross-plane token-request manifest and its Auth Core contract",
+   "plane": "ingestion",
+   "files": [
+    "apps/Ingestion Plane/Quarry-v2/contracts/cross-plane-token-requests.json",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/service_tokens.rs",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/vector_index.rs",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/ingest_client.rs",
+    "apps/Control Plane/auth-core/src/auth/plane-service-principals-callers.contract.spec.ts"
+   ],
+   "approach": "Create a JSON manifest listing every Auth Core token request quarry-edge makes: vector-retrieve (data-plane, [data:read], reason 'retrieve verified organization evidence'), ingest (data-plane, [documents:write, org:data:read_all], 'persist verified Quarry evidence'), web-rerank (data-plane, [data:rerank], 'rank web search candidates'). service_tokens.rs gains a TokenRequestSpec loaded with include_str! and ServiceTokenRequest::from_spec; vector_index.rs, ingest_client.rs and the new rerank client build their requests from the manifest instead of inline literals. The Auth Core spec reads the manifest (skip when absent, like the existing policy spec) and runs the real authorizePlaneServicePrincipal for each entry.",
+   "tests_first": "Rust: a unit test enumerates every production ServiceTokenRequest constructor and asserts equality with the manifest entry (fails today: none are manifest-driven); manifest scopes sorted/deduped and reasons 3..500 chars; the retrieval entry never contains org:data:read_all. TS: each manifest entry authorizes under the registry with test credentials; an entry with audience model-gateway or scope models:invoke fails the spec (guards against reintroducing the rerank-via-Model-Plane path); data:read and data:rerank are separate requests.",
+   "live_proof": "Run the TS spec against the registry produced by the launcher (the same file the live auth-service loaded) and diff manifest audiences/scopes against the live registry read via docker exec (credentials redacted): zero mismatches.",
+   "depends_on": [
+    "T01"
+   ],
+   "size": "M"
+  },
+  {
+   "id": "T03",
+   "title": "Retrieval engine: principal-aware auth with a default-deny service route allowlist (fixes the 403)",
+   "plane": "data",
+   "files": [
+    "apps/Data Plane v2/services/retrieval-engine-rs/src/authz/context.rs",
+    "apps/Data Plane v2/services/retrieval-engine-rs/src/authz/principal.rs",
+    "apps/Data Plane v2/services/retrieval-engine-rs/src/authz/service_routes.rs",
+    "apps/Data Plane v2/services/retrieval-engine-rs/src/authz/mod.rs",
+    "apps/Data Plane v2/services/retrieval-engine-rs/src/api/mod.rs",
+    "apps/Data Plane v2/services/retrieval-engine-rs/src/grpc/interceptor.rs",
+    "apps/Data Plane v2/services/retrieval-engine-rs/src/audit/mod.rs",
+    "apps/Data Plane v2/services/retrieval-engine-rs/src/metrics/mod.rs",
+    "apps/Data Plane v2/services/retrieval-engine-rs/tests/service_principal_auth.rs",
+    "apps/Data Plane v2/services/retrieval-engine-rs/tests/fixtures/auth-core/data-plane-service-token-claims.golden.json"
+   ],
+   "approach": "Add principal_type, service_id, user_id (optional) and reason to Claims. authz::principal validates the service identity shape exactly like documents-api-go verify.go:144-149 and exposes a pure decide(claims, method, path) used by api::auth_middleware: user principals keep the current membership path unchanged; valid service principals skip policy.resolve and are admitted only if (method,path) is in authz::service_routes and the token carries the route's scope and the service id is allowed; everything else is 403 service_principal_route_not_allowed (new denial cause, audited and counted). Table: POST /v1/retrieve, /v1/retrieve/hybrid, /v1/knowledge/search need data:read for service:quarry-edge; POST /v1/rerank (T05) needs data:rerank. Ambiguous service shapes (service_id!=sub, user_id present, sub without service: prefix, empty scopes) are 401. gRPC stays membership-gated; add a comment and test. apply_to_request is unchanged, so admin_read_all stays false for a token without org:data:read_all.",
+   "tests_first": "Hermetic tests in tests/service_principal_auth.rs (no Postgres, uses lib exports) with a RealisticControl double that answers not_member for any subject starting service: (mirrors data-plane-authorization.controller.ts lookupMembership) and member otherwise: (1) golden-claims service token + data:read on POST /v1/retrieve is admitted [fails today: 403]; (2) same token on /v1/admin/cleanup/orphans, /v1/context/pins, /v1/cache/semantic/store, /v1/internal/space-retrieval-bindings, /v1/retrieve/graph is denied; (3) service token without data:read denied; with data:read on /v1/rerank denied (needs data:rerank); (4) a user token on /v1/rerank denied; (5) user token membership path unchanged (deny double still 403); (6) five ambiguous-identity cases 401; (7) x-org-id header mismatch still 403; (8) a token without org:data:read_all yields admin_read_all=false; (9) golden fixture key set equals the claims keys Auth Core emits (C3).",
+   "live_proof": "After deploy with rerank still off: drive one real Quarry /v1/search for the test org through the stack; quarry-edge log no longer shows 'retrieve returned status 403'; dpv2_authz_denials_total{cause=denied:no_membership} stops increasing; auth-service logs no new decisionReason=not_member for userId service:quarry-edge; the engine audit table has a service-principal row for POST /v1/retrieve (cause ok or the next defect in the chain, T04/T10); scripts/auth-regression-matrix.sh (T08) service rows all PASS.",
+   "depends_on": [],
+   "size": "M"
+  },
+  {
+   "id": "T04",
+   "title": "Retrieve contract for non-user callers: SourceRef.url, wire golden, strict zdr_mode",
+   "plane": "data",
+   "files": [
+    "apps/Data Plane v2/services/retrieval-engine-rs/src/pipeline/types.rs",
+    "apps/Data Plane v2/services/retrieval-engine-rs/src/pipeline/orchestrator.rs",
+    "apps/Data Plane v2/services/retrieval-engine-rs/tests/retrieve_contract.rs",
+    "apps/Data Plane v2/contracts/retrieve-v1/response.golden.json",
+    "apps/Data Plane v2/openapi/d4d5.yaml"
+   ],
+   "approach": "Add url: Option<String> (skip when none) to SourceRef, populated in join_sources from documents.metadata->>'url' (wiki rows stay None); additive JSON only (gRPC Source message left alone to avoid regenerating Model Plane protobufs; note the HTTP/gRPC drift in docs). Do not add a zdr_mode 'off' alias: the contract stays strict and Quarry is fixed (T10). Document accepted zdr_mode values and the sovereign_required default in OpenAPI.",
+   "tests_first": "Hermetic serialization golden of RetrievalResponse written first: asserts sources[].url present when set, ScoredCandidate serializes NO 'score' or 'url' field (pins the contract Quarry must mirror), and that deserializing {\"zdr_mode\":\"off\"} fails (documents the strict enum). A unit test on rerank_requested: mode_mix.rerank=false means rerank_used_count 0 and the confidence gate inactive (so Quarry's mode_mix.rerank=false behaves as designed). DB-gated companion asserts the SQL returns url for a quarry document.",
+   "live_proof": "psql: the 2 quarry documents expose metadata url; after deploy a /v1/retrieve for the test org with filters.sources=[quarry] (any on-topic query, costs one Cohere Embed call) returns sources[].url equal to the stored url.",
+   "depends_on": [],
+   "size": "S"
+  },
+  {
+   "id": "T05",
+   "title": "Data Plane rerank capability: POST /v1/rerank (core, policy, limits, idempotency, metrics)",
+   "plane": "data",
+   "files": [
+    "apps/Data Plane v2/services/retrieval-engine-rs/src/rerank_api/mod.rs",
+    "apps/Data Plane v2/services/retrieval-engine-rs/src/rerank_api/schema.rs",
+    "apps/Data Plane v2/services/retrieval-engine-rs/src/rerank_api/policy.rs",
+    "apps/Data Plane v2/services/retrieval-engine-rs/src/rerank_api/limits.rs",
+    "apps/Data Plane v2/services/retrieval-engine-rs/src/rerank_api/cache.rs",
+    "apps/Data Plane v2/services/retrieval-engine-rs/src/search/rerank.rs",
+    "apps/Data Plane v2/services/retrieval-engine-rs/src/config.rs",
+    "apps/Data Plane v2/services/retrieval-engine-rs/src/main.rs",
+    "apps/Data Plane v2/services/retrieval-engine-rs/src/lib.rs",
+    "apps/Data Plane v2/services/retrieval-engine-rs/src/api/mod.rs",
+    "apps/Data Plane v2/services/retrieval-engine-rs/src/metrics/mod.rs",
+    "apps/Data Plane v2/services/retrieval-engine-rs/tests/rerank_contract.rs",
+    "apps/Data Plane v2/contracts/rerank-v1/"
+   ],
+   "approach": "New rerank_api module exported from lib.rs; router merged in api::router_inner as its own sub-router with a service-only auth layer (T03 decide), a per-org rerank-class limiter, a RequestBodyLimitLayer of 1 MiB and its own state (RerankState: config, RerankClient, CostSink, AuditSink, limiter, cache) so it is constructible in tests without Postgres or Qdrant. search/rerank.rs gains RerankClient::rerank_texts(query, texts, top_n, deadline) returning typed errors (RateLimited, Provider, Timeout), no sharding, deadline-aware send_with_retry, a shared provider permit pool plus token bucket and a circuit breaker; the existing pipeline path keeps its behaviour. policy.rs is the pure decision function (enabled, processor approved, effective zdr = token zdr OR body zdr_mode, sovereign, circuit, size). Config adds WEB_RERANK_ENABLED (default 0 until proof), WEB_RERANK_ALLOWED_SERVICES, WEB_RERANK_PROCESSOR_APPROVED (default false), limits, RERANK_PROVIDER_* and a startup validator that requires an Azure endpoint host and refuses the public-Cohere default for this route. Prometheus: dpv2_web_rerank_total{outcome,reason}, dpv2_web_rerank_duration_seconds, dpv2_web_rerank_documents. No retrieval_runs/trace rows, no text in logs or cache values.",
+   "tests_first": "Hermetic tests with an in-process axum mock of the Cohere v2 route (axum is already a dependency): provider-call-count is 0 for every restrictive cell of the policy matrix (zdr ephemeral/reject, token zdr true, sovereign, processor unapproved, disabled, circuit open) and the response is status skipped with identity order and zdr_actions_applied; ok path returns scores in descending order with ties by index; 429 with Retry-After inside the deadline retries once, outside it returns degraded provider_rate_limited without sleeping; deadline expiry returns degraded timeout; provider 5xx sanitized; NaN/Inf coerced to 0.0; out-of-range/duplicate provider indexes ignored; limits (101 docs 400, duplicate ids 400, 4001-char text truncated and listed, 1025-char query 400, body over 1 MiB 413); idempotent replay returns the identical response with provider calls 1; startup validator rejects empty and non-Azure endpoints; log-capture test proves no query or document text appears in any log line or error body; module-import test proves rerank_api uses no Model Plane/inference client; auth tests reuse T03 decide (user token 403, no scope 403, wrong service 403). Wire goldens for ok/skipped/degraded written to contracts/rerank-v1 for Quarry (C5).",
+   "live_proof": "With WEB_RERANK_ENABLED=1 and PROCESSOR_APPROVED=true on the live stack: (a) /v1/rerank with a quarry-edge token and zdr_mode ephemeral returns status skipped reason zdr and dpv2_web_rerank_total{outcome=skipped,reason=zdr} increments with provider calls unchanged; (b) one 10-document ok call (paid, one search unit) returns scores and increments dpv2_web_rerank_total{outcome=ok}; (c) replay of the same request_id returns the identical body and provider call count stays 1; (d) WEB_RERANK_ENABLED=0 returns skipped disabled.",
+   "depends_on": [
+    "T01",
+    "T03"
+   ],
+   "size": "L"
+  },
+  {
+   "id": "T06",
+   "title": "Extractive passage highlights scored in the same provider call",
+   "plane": "data",
+   "files": [
+    "apps/Data Plane v2/services/retrieval-engine-rs/src/rerank_api/highlights.rs",
+    "apps/Data Plane v2/services/retrieval-engine-rs/src/rerank_api/mod.rs",
+    "apps/Data Plane v2/services/retrieval-engine-rs/src/rerank_api/schema.rs",
+    "apps/Data Plane v2/services/retrieval-engine-rs/tests/rerank_highlights.rs"
+   ],
+   "approach": "Sentence segmentation with a Norwegian and English abbreviation list, windows <=320 chars, merge windows <40 chars, <=4 windows per document (position order, or lexical pre-score for documents over 2000 chars), total docs sent to the provider <=100 with truncated_ids when windows are trimmed. Provider scores N full documents plus M windows in one call with top_n=all; candidate score = full-text score; highlight = best window per document emitted only when score >= profile floor and the window is not essentially the whole text; offsets are Unicode scalar indexes into the supplied text and the emitted text is always the exact substring.",
+   "tests_first": "Property tests: every highlight text equals the substring at its offsets (multi-byte å/ø/æ, emoji, CRLF); never emitted when it covers >=95% of a one-window document; windows deterministic; total docs never exceed 100; abbreviations (bl.a., f.eks., kl. 14.30, osv.) do not split sentences; floor respected; max_per_document honoured; mode none sends no windows and still scores candidates; a mock provider asserts exactly one provider call for N+M docs.",
+   "live_proof": "In the 10-document paid call from T05 request highlights.mode=passage and verify each returned highlight is a verbatim substring of the supplied text and that provider_calls is 1; the judged-set run (T14) measures highlight precision.",
+   "depends_on": [
+    "T05"
+   ],
+   "size": "M"
+  },
+  {
+   "id": "T07",
+   "title": "Metering: cost event v2 (producer, units), deterministic idempotency, Go consumer and query",
+   "plane": "data",
+   "files": [
+    "apps/Data Plane v2/infra/postgres/migrations/20261003120000_cost_events_producer_units.sql",
+    "apps/Data Plane v2/infra/postgres/migrations/20261003120000_cost_events_producer_units.down.sql",
+    "apps/Data Plane v2/infra/postgres/init.sql",
+    "apps/Data Plane v2/services/data-orchestrator-go/internal/cost/consumer.go",
+    "apps/Data Plane v2/services/data-orchestrator-go/internal/cost/verifier.go",
+    "apps/Data Plane v2/services/data-orchestrator-go/internal/cost/consumer_security_test.go",
+    "apps/Data Plane v2/services/data-quality-go/internal/cost/query.go",
+    "apps/Data Plane v2/services/retrieval-engine-rs/src/pipeline/orchestrator.rs",
+    "apps/Data Plane v2/services/retrieval-engine-rs/src/rerank_api/metering.rs"
+   ],
+   "approach": "Migration adds nullable producer TEXT, units NUMERIC(12,3), unit_kind TEXT, purpose TEXT to cost_events (pick a unique timestamp: Design 1 may also add migrations). Go: eventPayload and Event accept the new optional fields (decodeStrict stays strict, so deploy this first), persist writes them, data-quality Summary gains a producer dimension. Rust: encode_cost_event gains a v2 builder used by rerank_api (producer = verified service id, units, unit_kind, purpose, idempotency key rerank:{org}:{request_id}); the existing retrieval-pipeline event keeps its type and gains producer retrieval-engine. Coordinate with Design 1: producerVerifier.eventType is single-valued per producer, so any new event type from either design needs it turned into a set in one shared change.",
+   "tests_first": "Go: strict decoder accepts the new optional fields and still rejects unknown ones; an event with producer/units persists them; ZDR-flagged events are still dropped; replay rejected. Rust: restrictive zdr yields no event; a retried request_id yields the same idempotency key. Cross-language golden: Rust signs an event and the Go verifier verifies the same bytes (reuse the event-envelope-rs security test pattern) for both the old and the v2 payload.",
+   "live_proof": "After migration plus data-orchestrator then retrieval-engine rollout and one paid rerank call: psql cost_events shows a row event_type=rerank, producer service:quarry-edge, count and units set, org matching the test org, idempotency_key prefixed with the org; replaying the same request_id leaves exactly one row; data-quality /v1/cost/summary groups by producer.",
+   "depends_on": [
+    "T05"
+   ],
+   "size": "M"
+  },
+  {
+   "id": "T08",
+   "title": "Config, compose, OpenAPI, runbook, auth matrix rows and dark ZDR attestation",
+   "plane": "data",
+   "files": [
+    "apps/Data Plane v2/docker-compose.yml",
+    "apps/Data Plane v2/openapi/d4d5.yaml",
+    "apps/Data Plane v2/docs/web-rerank-v1.md",
+    "apps/Data Plane v2/DATA_PLANE_STATUS.md",
+    "apps/Data Plane v2/scripts/auth-regression-matrix.sh",
+    "apps/Data Plane v2/services/retrieval-engine-rs/src/rerank_api/attestation.rs"
+   ],
+   "approach": "Add env to the retrieval-engine service block (near RERANK_ENDPOINT at compose :486-493): WEB_RERANK_ENABLED default 0, WEB_RERANK_ALLOWED_SERVICES, WEB_RERANK_PROCESSOR_APPROVED default false, limits, RERANK_PROVIDER_*; document runbook, kill switches, quota ownership and the price-sheet gap. Add attestation.rs: RERANK_ZDR_ATTESTATION_* validated at startup like the Azure OpenAI ZdrAttestation (resource id, approval ref, effective date, reviewer, review-by, digest); absent or expired means ZDR orgs always get skipped zdr. Add route families to the regression matrix script (it prints only labels and statuses, never tokens or tenant ids).",
+   "tests_first": "attestation.rs unit tests (valid, expired, placeholder digest rejected, absent means off); matrix script self-test in dry-run mode asserts the new rows exist and expected statuses (401, 403, 403, 403, 200) are encoded.",
+   "live_proof": "scripts/auth-regression-matrix.sh against the live isolated project: all new rows PASS.",
+   "depends_on": [
+    "T03",
+    "T05"
+   ],
+   "size": "S"
+  },
+  {
+   "id": "T09",
+   "title": "Quarry: Data Plane rerank client replaces the LLM reranker, with explicit status, ZDR and cache rules",
+   "plane": "ingestion",
+   "files": [
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/rerank.rs",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/data_plane_http.rs",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/serp.rs",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/lib.rs",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/main.rs",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/config.rs",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/search_routes.rs",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/auth.rs",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/tests/rerank_behavior.rs",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/tests/dp_rerank_contract.rs"
+   ],
+   "approach": "Add data_plane_http.rs (shared client with timeouts, manifest-driven token requests, one refresh on 401). Rewrite rerank.rs: keep SearchReranker and RerankingSearchProvider, add DataPlaneSearchReranker, RerankContext {org_id, zdr, sovereign, request_id, deadline}, RerankReport/outcome, and a SearchProvider::search_with_report default method overridden by the wrapper. Delete ModelPlaneSearchReranker, prompt builder, fence stripping, JSON entry parsing and tests, main.rs:1091-1127 model-client block, config.rs semantic_rerank_model. auth.rs Claims gains zdr (optional) used only for principal_type user; search_routes computes effective_zdr = body.zdr OR (user principal AND claim zdr), passes sovereign = zero_saas_search, skips input_not_tenant orgs (onboarding, global), adds SearchResponse.rerank and top-level score_kind, never caches degraded results, adds the rerank profile to params_signature, emits the search.rerank tracing event. Optional QUARRY_EDGE__RERANK_SHADOW and QUARRY_EDGE__RERANK_WINDOW. Coordinate with Ingestion docker-compose.yml edits (T11).",
+   "tests_first": "Wiremock tests load ONLY the contracts/rerank-v1 goldens produced by T05: ok reorders head by DP order and keeps the tail; skipped/degraded keep order and mark the response; ZDR (body or user-claim) makes zero DP calls; a service principal whose token zdr is true but body zdr false DOES call the DP (guards the trap) using claims built from the registry policy; invalid/duplicate indexes ignored; deadline respected; circuit breaker opens after 5 failures; degraded not cached and cache signature changes with profile; 401/403/404/422 log at ERROR once per minute; onboarding/global orgs skip with reason. Regression test that no code path constructs a Model Plane token for rerank (grep-style test over the manifest).",
+   "live_proof": "Through the live stack: a real /v1/search for the test org returns rerank.status=applied with scores and highlights, quarry-edge logs search.rerank outcome=applied and no Model Plane 403; the same request with zdr:true returns rerank.status=skipped reason=zdr with unchanged order and no DP call (dpv2_web_rerank_total unchanged); WEB_RERANK_ENABLED=0 yields degraded or skipped with the original order and results still returned.",
+   "depends_on": [
+    "T02",
+    "T03",
+    "T05"
+   ],
+   "size": "L"
+  },
+  {
+   "id": "T10",
+   "title": "Quarry vector leg: correct request, ZDR/sovereign skip, scoped corpus, strict mirror, timeouts",
+   "plane": "ingestion",
+   "files": [
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/vector_index.rs",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/hybrid.rs",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/search_routes.rs",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/tests/dp_retrieve_contract.rs"
+   ],
+   "approach": "Change VectorIndex::retrieve to take a context (org, zdr, sovereign, limit). Request body: zdr_mode disabled, sovereign_required = zero_saas_search, filters.sources [quarry], mode_mix.rerank false, top_n = limit; token request data:read only from the manifest. ZDR or sovereign skips the leg (marker skipped_zdr). Replace the tolerant response mirror with a strict one that reads candidates (document_id, text, final_score) and sources[].url from the real wire, mapping document_id to url; drop hits without a resolvable url. 1500 ms client timeout and a joined timeout in HybridSearchProvider so lexical results are never delayed by the Data Plane. Distinguish auth/contract failures (ERROR, loud) from outages (WARN). Apply the same context to /v1/search/similar (search_routes.rs:1260-1270).",
+   "tests_first": "Wiremock loads only contracts/retrieve-v1 goldens from T04 (no invented aliases); asserts the exact request body (valid zdr_mode, filters.sources, mode_mix.rerank=false, no org:data:read_all in the token request); ZDR and sovereign make zero requests; a hit with no url is dropped; vector 422/403 produce the loud degraded reason; timeout leaves lexical results intact and bounded latency; fused results contain real URLs deduplicated against lexical hits.",
+   "live_proof": "Live /v1/search for a test org that has an ingested quarry page: results contain a vector-origin hit with its real URL fused with lexical results; quarry-edge shows no hybrid warning; the DP audit table shows the service-principal retrieve with cause ok; a ZDR search shows zero DP retrieve calls (retrieval_runs count unchanged).",
+   "depends_on": [
+    "T02",
+    "T03",
+    "T04"
+   ],
+   "size": "M"
+  },
+  {
+   "id": "T11",
+   "title": "Quarry docs, OpenAPI, SDKs and compose cleanup",
+   "plane": "ingestion",
+   "files": [
+    "apps/Ingestion Plane/docker-compose.yml",
+    "apps/Ingestion Plane/Quarry-v2/docs/Features.md",
+    "apps/Ingestion Plane/Quarry-v2/docs/CROSS_PLANE_AUTH.md",
+    "apps/Ingestion Plane/Quarry-v2/docs/CROSS_PLANE_INTEGRATION.md",
+    "apps/Ingestion Plane/Quarry-v2/docs/openapi.yaml",
+    "apps/Ingestion Plane/Quarry-v2/docs/PARITY_IMPLEMENTATION_PLAN.md",
+    "apps/Ingestion Plane/Quarry-v2/sdks/generate.sh"
+   ],
+   "approach": "Compose :121-137: rewrite the comments (no LLM, no per-query LLM cost), delete QUARRY_EDGE__SEMANTIC_RERANK_MODEL, keep QUARRY_EDGE__SEMANTIC_RERANK default 1 and TOP_N, add RERANK_DEADLINE_MS, RERANK_WINDOW and RERANK_SHADOW. The file also has another session's uncommitted integration-api hunk (line ~458+): edit only the quarry-edge block. Docs: Features.md:39,179; CROSS_PLANE_AUTH.md rows 9-10 rewritten to the real grants (data-plane scopes data:read, data:rerank, documents:write; no model-plane token); openapi SearchResponse.rerank and SearchResult score/highlights/score_kind; regenerate SDKs.",
+   "tests_first": "A docs-contract test in the Quarry repo greps compose, config.rs and docs for removed identifiers (SEMANTIC_RERANK_MODEL, ModelPlaneSearchReranker, 'reranker can call Model Plane') and fails if any remain; an OpenAPI lint check that SearchResult documents highlights and score_kind.",
+   "live_proof": "docker compose config for the Ingestion stack shows the new env and no removed variable; quarry-edge starts and logs 'semantic rerank: enabled' with the DP client, not a model client.",
+   "depends_on": [
+    "T09"
+   ],
+   "size": "S"
+  },
+  {
+   "id": "T12",
+   "title": "Model Plane consumers: score_kind, rerank status, calibration in relevance.rs",
+   "plane": "model",
+   "files": [
+    "apps/Model Plane/rust/services/model-gateway/src/quarry.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/relevance.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/tool_loop.rs",
+    "apps/Model Plane/rust/services/model-gateway/src/deep_research.rs"
+   ],
+   "approach": "quarry.rs parses top-level score_kind and rerank {status, reason}; absent score_kind keeps the legacy LLM semantics. relevance.rs adds a per-kind calibration table (monotone piecewise-linear, <=8 knots, from T14) applied before the 0.6 blend and re-fits DEFAULT_PROVIDER_WEIGHT/threshold only if the judged data requires; tool_loop.rs surfaces rerank status (skipped zdr, degraded) in the coverage line and keeps the absent-not-zero rule; deep_research.rs uses the calibrated value for its cross-sub-query max.",
+   "tests_first": "Property tests on the calibration (monotone, f(0)=0, f(1)=1, NaN ignored, absent stays absent); a golden test deserializing the Quarry response goldens (ok, skipped zdr, degraded) and asserting provider_score/highlights/engines projection and the coverage line; a regression test that legacy responses without score_kind score byte-identically to today; judged-set derived test that the calibrated gate keeps >=95% of relevant (grade>=2) and drops >=70% of irrelevant results.",
+   "live_proof": "Run a Terra-subscription chat turn with web_search for a factual Norwegian question through the live stack: tool output carries score, highlights and the rerank status, the gate keeps on-topic sources and the coverage line mentions rerank when skipped; repeat on a ZDR test org and see the skipped marker surfaced.",
+   "depends_on": [
+    "T09",
+    "T14"
+   ],
+   "size": "M"
+  },
+  {
+   "id": "T13",
+   "title": "Ownership documents and decision ledger",
+   "plane": "docs",
+   "files": [
+    "apps/master-ownership-matrix.md",
+    "apps/CODEBASE_INFORMATION_SYSTEM.md",
+    "apps/GDPR_SUMMARY.md",
+    "apps/Model Plane/docs/decisions/ledger.md",
+    "apps/Frontend Plane/verevonv3/docs/WEB_SOURCE_QUALITY_AUDIT_2026-09-15.md"
+   ],
+   "approach": "Matrix rows 69-71 and rule 2 (:155), CODEBASE_INFORMATION_SYSTEM.md:119,159, GDPR_SUMMARY.md note near :106-108, new ledger entry (state proposed at Wave 0, implemented at Wave 5; append, never rewrite), WEB_SOURCE_QUALITY_AUDIT A3 status. Ownership docs must land in the same change set as T05 so the matrix is never contradicted by the code.",
+   "tests_first": "The repo's existing doc/consistency lint (scripts/lint-resource-taxonomy.sh and any matrix checks) must pass; add a grep check in the T11 docs-contract test that the matrix names 'POST /v1/rerank'.",
+   "live_proof": "n/a (documentation); confirm in the final PR that every file changed by T05/T09 is referenced by the ledger entry.",
+   "depends_on": [],
+   "size": "S"
+  },
+  {
+   "id": "T14",
+   "title": "Judged web-result set, runner, calibration and regression gate",
+   "plane": "ingestion",
+   "files": [
+    "apps/Ingestion Plane/Quarry-v2/lab/evals/fixtures/web-rerank/queries.v1.json",
+    "apps/Ingestion Plane/Quarry-v2/lab/evals/fixtures/web-rerank/results.v1.jsonl",
+    "apps/Ingestion Plane/Quarry-v2/lab/evals/fixtures/web-rerank/judgments.v1.jsonl",
+    "apps/Ingestion Plane/Quarry-v2/lab/evals/src/web_rerank_gate.rs",
+    "apps/Ingestion Plane/Quarry-v2/lab/evals/web-rerank-baseline.json",
+    "apps/Ingestion Plane/Quarry-v2/lab/evals/Cargo.toml"
+   ],
+   "approach": "Build the 80-query set (50 no, 30 en; categories per design section 8), freeze the top-20 SearXNG results per query (public data, about 400 KB), obtain graded 0-3 labels (LLM pre-judge on Terra plus human adjudication, kappa>=0.6), implement the runner (arms A-F, nDCG@10/MRR/P@3/noise@5, per-category deltas, paired bootstrap, degraded-rate soak, highlight precision), emit calibration artefacts (score-to-relevance knots, highlight floor, provider weight), commit a baseline with tolerances derived from measured noise and a 10-query smoke mode for CI. Labelling can start in Wave 0 before any DP code exists.",
+   "tests_first": "Unit tests for the metrics (known small judged examples with hand-computed nDCG/MRR), the bootstrap (seeded determinism), the gate (fails on a synthetic regression and on a degraded-rate breach, passes on baseline) and the calibration fit (monotone knots); a fixture-integrity test (every judged url exists in results, every query has >=2 judges).",
+   "live_proof": "Run arm C against the live DP /v1/rerank (about 80 paid calls plus the 200-call soak): acceptance gate from design section 8 met (nDCG@10 >= +0.04 over engine order with CI lower bound > 0, no category drop > 0.03, degraded <= 2%, added p95 <= 900 ms, highlight precision >= 0.7); commit the results and the calibration table consumed by T12.",
+   "depends_on": [
+    "T05",
+    "T06"
+   ],
+   "size": "L"
+  },
+  {
+   "id": "T15",
+   "title": "Rollout, staged enablement and live proof",
+   "plane": "data",
+   "files": [
+    "apps/Control Plane/scripts/run-control-plane.sh",
+    "apps/Data Plane v2/docker-compose.yml",
+    "apps/Ingestion Plane/docker-compose.yml"
+   ],
+   "approach": "Follow the owner's build rule: build and recreate images through the launcher (hand-built docker compose build misses the Control Plane env chain), long builds with nohup and Monitor; Quarry only compiles in Docker (docker build -f deploy/compose/Dockerfile.edge --target build .). Order: (1) T01/T02 registry via launcher then recreate auth-service; (2) Data Plane migration then data-orchestrator-go; (3) retrieval-engine with WEB_RERANK_ENABLED=0; run the auth matrix; flip WEB_RERANK_ENABLED=1 and PROCESSOR_APPROVED=true only after [O2]; (4) quarry-edge new image, first with QUARRY_EDGE__RERANK_SHADOW=1 for the 10-query smoke, then shadow off; (5) T14 judged run; (6) T12 model-gateway. Before starting each step check git status for other sessions' half-done edits, never stash or checkout, scan for NUL bytes after any abrupt shutdown, and if the token endpoint 401s after a boot check boot time and refresh the test sign-in with owner approval.",
+   "tests_first": "Pre-flight script (read-only) asserts: registry has data:rerank, DP migration applied, DP image has /v1/rerank (401 without a token), WEB_RERANK_ENABLED state, quarry-edge env, baseline metrics captured (dpv2_authz_denials_total, cost_events counts).",
+   "live_proof": "Ordered checks, each with an observable: P0 pre-flight above; P1 auth matrix all PASS (no provider cost); P2 ZDR path: skipped zdr, zero provider calls; P3 one paid 10-doc rerank through Quarry /v1/search: rerank.status=applied, dpv2_web_rerank_total ok +1, one cost_events row with producer and units, no Model Plane 403 in quarry-edge logs; P4 vector leg: real URLs, no 403, no 422; P5 kill-switch drills (SEMANTIC_RERANK=0, WEB_RERANK_ENABLED=0, scope removal) each return results in original order with the right marker; P6 judged run (T14) plus 200-call soak; P7 Terra chat turn (T12). Estimated paid usage: under 400 rerank calls plus one Embed call.",
+   "depends_on": [
+    "T01",
+    "T02",
+    "T03",
+    "T04",
+    "T05",
+    "T07",
+    "T08",
+    "T09",
+    "T10"
+   ],
+   "size": "M"
+  },
+  {
+   "id": "T16",
+   "title": "OPTIONAL shared with Design 1: bridge Data Plane cost events into cost-core",
+   "plane": "model",
+   "files": [
+    "apps/Model Plane/go/services/cost-core/cmd/main.go",
+    "apps/Model Plane/go/services/cost-core/internal/ledger/ledger.go",
+    "apps/Model Plane/go/services/cost-core/internal/postgres/store.go",
+    "apps/Model Plane/go/services/cost-core/internal/server/server.go",
+    "apps/Data Plane v2/services/data-orchestrator-go/internal/cost/consumer.go",
+    "apps/Control Plane/config/plane-service-principals.json"
+   ],
+   "approach": "Make cost-core's producer allowlist a set (cmd/main.go:53,430-431), add a units/unit_kind entry shape in ledger.Entry, and have data-orchestrator forward verified non-ZDR events with producer data-plane over a registered service principal (this is the only possible T01b principal change and must join the Wave 1 Control group). BLOCKED on the other session's uncommitted cost-core edits (Azure cost sync, provider_used): do not start until they land; coordinate the single bridge with Design 1 so contextual-retrieval costs ride it too.",
+   "tests_first": "cost-core decodeUsageMessage accepts a data-plane producer envelope with units, still rejects unknown producers and subject/org mismatches; contract spec for the new principal; end-to-end test from a signed Data Plane event to a cost-core ledger row.",
+   "live_proof": "A paid rerank call appears in the Frontend cost view (gateway /api/v1/cost/summary) attributed to the org with producer data-plane and the Cohere model.",
+   "depends_on": [
+    "T07"
+   ],
+   "size": "L"
+  },
+  {
+   "id": "T17",
+   "title": "Decide and fix Quarry's other Model Plane dependents (autoprompt, answer, ai-formats, page-title)",
+   "plane": "ingestion",
+   "files": [
+    "apps/Ingestion Plane/docker-compose.yml",
+    "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/main.rs",
+    "apps/Control Plane/config/plane-service-principals.json"
+   ],
+   "approach": "Out of Design 2 scope but required for a fully working Quarry: either give quarry-edge a model path (a principal with audience model-gateway, scope models:invoke, per-request ZDR from the body, and a Model Plane cost trail; joins the Wave 1 Control group) or move those features to Model Plane tools; until decided, default QUARRY_EDGE__AUTOPROMPT to 0 so it stops 403ing silently.",
+   "tests_first": "Same manifest-driven contract pattern as T02 for any new request; behaviour test that a flagged-on feature with no model path logs a loud startup error instead of silently degrading.",
+   "live_proof": "Research/comparative search no longer logs an Auth Core 403 for autoprompt; answer synthesis returns an answer for a test org.",
+   "depends_on": [
+    "T02"
+   ],
+   "size": "M"
+  }
+ ],
+ "rollout_and_migration": "Order is fixed by two hard dependencies: the Go cost consumer decodes strictly (so it must understand new optional fields before any producer emits them) and Quarry must not run its new client before the Data Plane route and the Auth Core scope exist. Steps: (1) Wave 1 principal change set (T01+T02): edit the policy JSON by hunk (other sessions have uncommitted edits in it), run the launcher so PLANE_SERVICE_PRINCIPALS_JSON is re-assembled (it adopts existing credentials, no new secret), recreate auth-service; the new scope is inert until used. (2) Data Plane: apply the additive cost_events migration with the Data Plane migrator, rebuild and recreate data-orchestrator-go and data-quality-go, then rebuild retrieval-engine (T03,T04,T05,T06,T07,T08) with WEB_RERANK_ENABLED=0 (default) and WEB_RERANK_PROCESSOR_APPROVED=false, so /v1/retrieve for service principals and SourceRef.url are live while /v1/rerank answers skipped/disabled. Run scripts/auth-regression-matrix.sh. (3) Obtain [O2] processor confirmation, then set WEB_RERANK_PROCESSOR_APPROVED=true and WEB_RERANK_ENABLED=1 (the compose default flips to 1 in the final PR after proof). (4) Quarry: build via the launcher, deploy quarry-edge with QUARRY_EDGE__RERANK_SHADOW=1 for the smoke run (rerank called, order unchanged), then shadow off; the compose default QUARRY_EDGE__SEMANTIC_RERANK stays 1. (5) Model Plane relevance/calibration (T12) after T14. (6) Flip the ledger entry to implemented, update the matrix. DATA MIGRATION: only cost_events gains four nullable columns (existing rows keep null producer, read as retrieval-engine); no backfill, no document or index change. Config removals (QUARRY_EDGE__SEMANTIC_RERANK_MODEL, semantic_rerank_model) are harmless if the env var lingers. The gRPC proto is untouched in this design (HTTP-only SourceRef.url), avoiding a coordinated Model Plane protobuf regeneration; the drift is documented. ROLLBACK, no rebuild needed at any layer: QUARRY_EDGE__SEMANTIC_RERANK=0 restores plain merge order; WEB_RERANK_ENABLED=0 makes the Data Plane answer skipped disabled with input order; removing data:rerank from the registry makes Quarry degrade with a loud 403 marker while search keeps working; the strict service-route allowlist in the retrieval engine can be reverted independently of rerank (user behaviour is unchanged by it). Production readiness remains blocked platform-wide by the Auth Core rule that refuses allowAnyOrg principals outside development (see risks).",
+ "risks": [
+  "Azure Foundry S0 per-second quota is shared by tenant-knowledge retrieval and web rerank; the engine already loses the cross-encoder on roughly 19% of queries per eval run to 429s, so web traffic can starve retrieval or lose its own rerank. Mitigation: shared provider permit pool reserving capacity for retrieval, per-org class limiter, deadline-aware retries, circuit breaker; real fix is a dedicated deployment [O1]. The actual Foundry quota is not in the repo.",
+  "Added search latency: DP rerank_ms averaged about 380-565 ms for 50 documents; budget default 2000 ms deadline with a 900 ms p95 acceptance gate; wide windows (30 candidates plus passages) raise it, which T14 sweeps measure.",
+  "Score calibration is unknown: no Cohere score calibration exists in the repo and the DP threshold 0.35 was never calibrated; until T12 lands, model-gateway's 0.6 blend and 0.30 keep threshold could over-filter sources. Interim: ship Quarry's score_kind and keep legacy semantics behind it, and do not enable on-by-default in model-gateway weighting before T14 data.",
+  "ZDR trap: service-token zdr is a static principal posture (model-gateway and execution-core are always zdr:true toward Quarry). Any future change that reads claim zdr for service callers would silently disable rerank for all chat traffic; conversely trusting only body zdr means a buggy caller can under-declare. Pinned by tests in T09 and recorded in the ledger; an Auth Core change that stamps org posture on service tokens is the robust fix [O-ZDR in O2].",
+  "Interactive ZDR resolves to non-ZDR whenever org-core is unreachable (fail to normal retention), so a ZDR org could be reranked via Azure during an outage and the endpoint cannot detect it from the token; platform risk for Auth Core owners (consider never downgrading a recently seen ZDR=true).",
+  "Processor and residency basis for sending the QUERY to Azure/Cohere is unverified in the repo (no DPA/ZDR evidence for Cohere-on-Azure; GDPR_SUMMARY prefers Model Plane gating). The fail-closed WEB_RERANK_PROCESSOR_APPROVED flag defaults false; enabling it is a legal decision [O2].",
+  "Service-principal pass-through widens the retrieval engine's auth surface; mitigated by a compiled default-deny allowlist, a dedicated scope, a per-route allowed-service list and the auth matrix, but needs a security review before production and must be re-reviewed whenever a route is added to the table.",
+  "Production Auth Core refuses allowAnyOrg principals, and every committed principal (including quarry-edge) is allowAnyOrg:true, so none of the cross-plane Quarry paths (ingest, retrieve, rerank) can be authorized in production until fixed org allowlists or an equivalent mechanism exist; this design does not solve it.",
+  "Concurrent uncommitted work by other sessions in shared files (plane-service-principals.json, config/README.md, run-control-plane.sh, auth-core token controller/service, Ingestion docker-compose.yml, cost-core cmd/ledger/store/server). Edits must be hunk-level (Edit, not Write), re-read before saving, no stash/checkout; T16 is blocked until the cost-core work lands.",
+  "Design 1 (contextual retrieval) will also touch Data Plane migrations, the cost-event verifier (single event type per producer), cost-core visibility and possibly retrieval-engine config; migration timestamps and the verifier change must be coordinated to avoid conflicting edits.",
+  "Cost accuracy: the Azure price for Cohere-rerank-v4.0-pro and the billing unit definition are not in the repo; units are estimated and raw quantities are stored so cost can be recomputed; passage windows could change units if documents are long.",
+  "Retrieval traces: every non-ZDR Quarry search now also writes a DP retrieval_runs row containing the query text (volume and privacy; purged by the GDPR consumer). The engine also logs raw query text at INFO (existing defect D17); the new endpoint deliberately does not.",
+  "Quarry's other Model Plane features (autoprompt default ON, answer, ai-formats, page-title) remain broken after this design unless T17 is done; removing the rerank dependency does not fix them and the compose default keeps autoprompt on.",
+  "Quarry cache semantics: degraded results were previously cached for the TTL; the fix depends on carrying rerank status through the provider trait (search_with_report) and every provider implementation keeping its default; a missed call site would reintroduce caching of unreranked results.",
+  "HTTP versus gRPC contract drift: SourceRef.url is HTTP-only in this design; if model-gateway later needs it over gRPC the Model Plane protobuf copies must be regenerated together.",
+  "Preview/onboarding sentinel org and the global health org: skipping them avoids unattributable cost, but if the owner wants rerank in onboarding previews the shared sentinel needs its own hard rate cap.",
+  "Highlight quality depends on SERP snippets being 1-3 sentences; for such documents the passage step often adds nothing (omitted by the not-the-whole-text rule), and the judged set may show it is only valuable for DP chunk text and local-index hits; fallback is mode none with no loss of scores."
+ ],
+ "owner_decisions": [
+  {
+   "question": "O1. Provider capacity: share the existing Azure Foundry Cohere-rerank-v4.0-pro deployment between tenant retrieval and web search, or provision a dedicated deployment (own quota and key) for web rerank?",
+   "options": "(a) share with the limiter and reserved retrieval permits; (b) dedicated Azure deployment for web traffic; (c) share now, dedicated before general availability",
+   "recommended": "(c): ship on the shared deployment with the provider limiter, and provision a dedicated deployment before GA (also gives an independent kill switch and cost line)."
+  },
+  {
+   "question": "O2. ZDR and legal basis for rerank. Cohere-on-Azure has no ZDR evidence in the repo. What should ZDR/sovereign orgs get, and who confirms the processor basis for sending the query text to Azure/Cohere?",
+   "options": "(a) skip with explicit marker (never silent) and keep it that way; (b) pursue a written Microsoft/Cohere no-retention commitment and enable the dark attestation path (RERANK_ZDR_ATTESTATION_*) so ZDR orgs can use it; (c) build a self-hosted text cross-encoder sidecar as profile web-v1-sovereign for ZDR/sovereign orgs (no egress); also decide whether Auth Core should stamp the org's real ZDR on service tokens",
+   "recommended": "(a) now, with (b) started in parallel and (c) as the durable answer for ZDR/sovereign orgs; legal must confirm the Art. 28 basis before WEB_RERANK_PROCESSOR_APPROVED is set true. Consistent with the rule that ZDR is respected and only per-connection BYO routes may turn it off for their own runs; rerank never uses a BYO or subscription route."
+  },
+  {
+   "question": "O3. Which corpus does Quarry's vector leg search?",
+   "options": "(a) Quarry-origin documents only (filters.sources=[quarry]); (b) the whole org-visible corpus (unified search, mixes org knowledge into web results); (c) a dedicated Quarry collection",
+   "recommended": "(a). Live corpus shows (b) would surface the org-visible SharePoint document in web results; (c) is more isolation than needed today."
+  },
+  {
+   "question": "O4. Highlight strategy replacing the LLM sentence.",
+   "options": "(a) extractive passage windows scored by the same cross-encoder in the same call; (b) lexical term-coverage sentence only (free, weaker); (c) a separate optional second provider step; (d) none",
+   "recommended": "(a), with (b) as the automatic fallback when the 100-document cap trims windows; confirm with the T14 highlight-precision metric."
+  },
+  {
+   "question": "O5. Pricing and billing treatment of web rerank cost.",
+   "options": "(a) internal COGS only; (b) metered per org and shown in the cost view; (c) passed through to customers",
+   "recommended": "(b) via the producer/units ledger now and the cost-core bridge T16; supply the Azure price sheet for Cohere-rerank-v4.0-pro (not in the repo) so units convert to money."
+  },
+  {
+   "question": "O6. Wire format for the capability.",
+   "options": "(a) HTTP/JSON only now; (b) HTTP plus gRPC RerankService now",
+   "recommended": "(a) now; add gRPC when the first Model Plane caller exists (the core is transport-agnostic, so it is a small addition)."
+  },
+  {
+   "question": "O7. Should rerank be gated by the per-request allow_paid_providers permission used for Brave/Serper?",
+   "options": "(a) no: platform-paid, governed by ZDR, sovereign, processor and quota gates; (b) yes",
+   "recommended": "(a): that permission exists to stop caller-driven spend on external SERP SaaS; rerank is bounded by per-org limits and deadlines instead."
+  },
+  {
+   "question": "O8. Quarry's other Model Plane dependents that return 403 today (autoprompt default ON, answer, ai-formats, page-title): fix or retire?",
+   "options": "(a) give quarry-edge a model path (model-gateway audience, models:invoke, per-request ZDR, cost trail); (b) move those features into Model Plane tools; (c) default AUTOPROMPT off until decided",
+   "recommended": "(c) immediately (stops silent 403s), then (b) as the architecture-consistent answer (reasoning stays Model Plane-owned); (a) only if Quarry must own the calls."
+  },
+  {
+   "question": "O9. Production readiness of cross-plane principals: Auth Core refuses allowAnyOrg outside development. Which mechanism provides fixed org allowlists for quarry-edge (and all other principals)?",
+   "options": "(a) generate per-environment orgIds from org-core; (b) permit allowAnyOrg for named internal principals in production with extra controls; (c) per-org principals",
+   "recommended": "Needs a Control Plane decision; (a) fits the registry model. Required before any of these Quarry paths work in production."
+  },
+  {
+   "question": "O10. cost-core visibility for Data Plane costs (T16): who owns the bridge and when, given the other session's uncommitted cost-core work and Design 1's need?",
+   "options": "(a) one shared bridge built after the cost-core work lands; (b) Data Plane ledger plus data-quality summary only for now",
+   "recommended": "(b) now, (a) as soon as cost-core is stable; a single bridge for both designs."
+  },
+  {
+   "question": "O11. How to label the judged set.",
+   "options": "(a) human-only; (b) LLM pre-judge on the Terra subscription plus human adjudication; (c) a paid judge model",
+   "recommended": "(b): consistent with the rule that live model tests use only the Terra subscription (judging is not reranking), with human adjudication of disagreements and a 20% sample."
+  },
+  {
+   "question": "O12. Default for rerank rollout exposure.",
+   "options": "(a) straight on (compose default already 1); (b) one shadow period (call and log, keep order) before enabling order changes",
+   "recommended": "(b) for the 10-query smoke and the live proof only, then on; both are cheap and the kill switches need no rebuild."
+  }
+ ],
+ "shared_files_touched": [
+  "apps/Control Plane/config/plane-service-principals.json (other session has uncommitted edits; also T16/T17 may add principals)",
+  "apps/Control Plane/config/README.md (uncommitted by another session)",
+  "apps/Control Plane/scripts/run-control-plane.sh (uncommitted by another session; launcher re-run only, no edit planned)",
+  "apps/Control Plane/auth-core/src/auth/plane-service-principals-policy.contract.spec.ts",
+  "apps/Control Plane/auth-core/src/auth/plane-token-scopes.spec.ts",
+  "apps/Control Plane/auth-core/src/auth/convex-token.service.ts and plane-token.controller.ts (read-only reference; other session has uncommitted edits)",
+  "apps/Ingestion Plane/docker-compose.yml (uncommitted integration-api hunk by another session; edit only the quarry-edge block at lines ~121-147)",
+  "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/{rerank.rs,vector_index.rs,hybrid.rs,service_tokens.rs,serp.rs,lib.rs}",
+  "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/{main.rs,config.rs,search_routes.rs,auth.rs}",
+  "apps/Ingestion Plane/Quarry-v2/docs/{Features.md,CROSS_PLANE_AUTH.md,CROSS_PLANE_INTEGRATION.md,openapi.yaml,PARITY_IMPLEMENTATION_PLAN.md}",
+  "apps/Data Plane v2/services/retrieval-engine-rs/src/{api/mod.rs,authz/context.rs,authz/mod.rs,config.rs,main.rs,lib.rs,metrics/mod.rs,pipeline/orchestrator.rs,pipeline/types.rs,search/rerank.rs,grpc/interceptor.rs,audit/mod.rs} (Design 1 may touch config.rs/orchestrator.rs)",
+  "apps/Data Plane v2/docker-compose.yml (retrieval-engine block near RERANK_ENDPOINT; Design 1 may edit embedding/graph blocks)",
+  "apps/Data Plane v2/infra/postgres/migrations and init.sql (cost_events columns; coordinate timestamps with Design 1)",
+  "apps/Data Plane v2/services/data-orchestrator-go/internal/cost/{consumer.go,verifier.go} and data-quality-go/internal/cost/query.go (single-event-type-per-producer verifier is shared with Design 1)",
+  "apps/Data Plane v2/openapi/d4d5.yaml, scripts/auth-regression-matrix.sh, DATA_PLANE_STATUS.md",
+  "apps/Model Plane/rust/services/model-gateway/src/{quarry.rs,relevance.rs,tool_loop.rs,deep_research.rs}",
+  "apps/Model Plane/go/services/cost-core/{cmd/main.go,internal/ledger/ledger.go,internal/postgres/store.go,internal/server/server.go} (T16 only; uncommitted by another session)",
+  "apps/Model Plane/docs/decisions/ledger.md",
+  "apps/master-ownership-matrix.md and apps/CODEBASE_INFORMATION_SYSTEM.md and apps/GDPR_SUMMARY.md",
+  "apps/Frontend Plane/verevonv3/docs/WEB_SOURCE_QUALITY_AUDIT_2026-09-15.md"
+ ]
+}

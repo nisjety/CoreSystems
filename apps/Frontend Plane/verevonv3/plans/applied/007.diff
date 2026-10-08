@@ -1,0 +1,109 @@
+--- a/src/styles/global.css
++++ b/src/styles/global.css
+@@ -28244,18 +28244,28 @@
+    ------------------------------------------------------------------------------ */
+ .verevon-chat-message--assistant .verevon-chat-action-button,
+ .verevon-chat-message--assistant .verevon-chat-menu > button {
+-  opacity: 0;
+   transition:
+     opacity 160ms ease,
+     background-color 140ms ease,
+     color 140ms ease;
+ }
+ 
+-.verevon-chat-message--assistant:hover .verevon-chat-action-button,
+-.verevon-chat-message--assistant:hover .verevon-chat-menu > button,
+-.verevon-chat-message-actions:focus-within .verevon-chat-action-button,
+-.verevon-chat-message-actions:focus-within .verevon-chat-menu > button {
+-  opacity: 1;
++/* Only hide on devices that can hover. On touch there is no hover to reveal
++   the row, so hiding it left invisible-but-tappable buttons (a stray tap could
++   fire an unseen Regenerate). The latest assistant turn (data-latest) stays
++   visible on desktop too — it is the turn people act on most. */
++@media (hover: hover) and (pointer: fine) {
++  .verevon-chat-message--assistant:not([data-latest]) .verevon-chat-action-button,
++  .verevon-chat-message--assistant:not([data-latest]) .verevon-chat-menu > button {
++    opacity: 0;
++  }
++
++  .verevon-chat-message--assistant:hover .verevon-chat-action-button,
++  .verevon-chat-message--assistant:hover .verevon-chat-menu > button,
++  .verevon-chat-message-actions:focus-within .verevon-chat-action-button,
++  .verevon-chat-message-actions:focus-within .verevon-chat-menu > button {
++    opacity: 1;
++  }
+ }
+ 
+ /* 5 · General — subtle scrollbar for the message list (was the crude default). */
+--- a/src/features/chat/components/ChatPage.tsx
++++ b/src/features/chat/components/ChatPage.tsx
+@@ -262,12 +262,24 @@
+   // node keeps its owner, its effects and the dialog it opened.
+   const composerView = composer()
+ 
++  // The newest assistant turn keeps its action row visible at rest (`data-latest`
++  // in ChatMessages); older turns reveal theirs on hover or focus.
++  const latestAssistantTurnId = createMemo(() => {
++    const turns = state.turns
++    for (let index = turns.length - 1; index >= 0; index -= 1) {
++      const turn = turns[index]
++      if (turn?.role === 'assistant') return turn.id
++    }
++    return null
++  })
++
+   // `<For>` mappers are untracked in Solid 2. Derive the neighboring turns and
+   // all per-row reactive values up front so each mapper receives plain row data
+   // instead of reading the live store while it renders.
+   const messageRows = createMemo(() => state.turns.map((turn, index, turns) => ({
+     turn,
+     createdAt: turn.createdAt,
++    isLatest: turn.role === 'assistant' && turn.id === latestAssistantTurnId(),
+     showDateDivider: shouldShowDateDivider(turns[index - 1], turn),
+     copied: copiedTurnId() === turn.id,
+     planApproval: {
+@@ -841,6 +853,7 @@
+                         // assistant turn — chat-versions.ts guards versioning to
+                         // the final exchange, so no other turn can have one.
+                         version={row().version}
++                        isLatest={row().isLatest}
+                         onSelectVersion={selectExchangeVersion}
+                         editLocked={row().editLocked}
+                         threadId={state.threadId}
+--- a/src/features/chat/components/ChatMessages.tsx
++++ b/src/features/chat/components/ChatMessages.tsx
+@@ -170,6 +170,12 @@
+   /** n/N badge for this turn's exchange versions — only ever set on the trailing assistant turn. */
+   version?: VersionBadge | null
+   onSelectVersion?: (target: number) => void
++  /**
++   * This is the latest assistant turn. Rendered as `data-latest` so its action
++   * row stays visible at rest on hover-capable devices (older turns reveal
++   * theirs on hover or focus).
++   */
++  isLatest?: boolean
+   /** Effectful turns cannot be edited or regenerated in place. */
+   editLocked?: boolean
+   /** Forwarded into `ConversationNodeContext` — see its own doc for why. */
+@@ -395,6 +401,8 @@
+   onViewAttachments?: (attachmentId: string) => void
+   version?: VersionBadge | null
+   onSelectVersion?: (target: number) => void
++  /** See `MessageBlock`'s doc — marks the article `data-latest`. */
++  isLatest?: boolean
+   /** Forwarded into `ConversationNodeContext` — see its own doc for why. */
+   threadId?: string | null
+   /** See `MessageBlock`'s doc: disables "Les høyt". */
+@@ -603,7 +611,11 @@
+     // `tabindex=-1`: focusable for the arrow-key walk in ChatPage, but never
+     // in the Tab sequence, which still runs answer -> actions -> next message
+     // through DOM order (audit item 26).
+-    <article class="verevon-chat-message verevon-chat-message--assistant" tabindex={-1}>
++    <article
++      class="verevon-chat-message verevon-chat-message--assistant"
++      data-latest={props.isLatest ? '' : undefined}
++      tabindex={-1}
++    >
+       <div class="verevon-chat-message__avatar">
+         <span class="verevon-chat-message__logo" aria-hidden="true" />
+       </div>

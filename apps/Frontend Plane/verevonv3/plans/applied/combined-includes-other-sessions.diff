@@ -1,0 +1,2063 @@
+--- a/index.html
++++ b/index.html
+@@ -3,6 +3,9 @@
+ 	<head>
+ 		<meta charset="UTF-8" />
+ 		<link rel="icon" type="image/svg+xml" href="/favicon.svg" />
++		<link rel="preconnect" href="https://fonts.googleapis.com" />
++		<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
++		<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Geist:wght@100..900&family=Geist+Mono:wght@100..900&display=swap" />
+ 		<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+ 		<title>verevonv3</title>
+ 	</head>
+--- a/src/features/chat/components/ChatMessages.tsx
++++ b/src/features/chat/components/ChatMessages.tsx
+@@ -72,6 +72,7 @@
+   createSignal,
+   createUniqueId,
+   onCleanup,
++  untrack,
+ } from 'solid-js'
+ import { render, type JSX } from '@solidjs/web'
+ import {
+@@ -169,6 +170,12 @@
+   /** n/N badge for this turn's exchange versions — only ever set on the trailing assistant turn. */
+   version?: VersionBadge | null
+   onSelectVersion?: (target: number) => void
++  /**
++   * This is the latest assistant turn. Rendered as `data-latest` so its action
++   * row stays visible at rest on hover-capable devices (older turns reveal
++   * theirs on hover or focus).
++   */
++  isLatest?: boolean
+   /** Effectful turns cannot be edited or regenerated in place. */
+   editLocked?: boolean
+   /** Forwarded into `ConversationNodeContext` — see its own doc for why. */
+@@ -275,6 +282,7 @@
+         summary={node.summary}
+         steps={node.steps}
+         grantedRung={node.grantedRung}
++        rejected={node.rejected}
+         pending={node.pending}
+         error={node.error}
+         onApprove={ctx.onApprovePlan}
+@@ -393,6 +401,8 @@
+   onViewAttachments?: (attachmentId: string) => void
+   version?: VersionBadge | null
+   onSelectVersion?: (target: number) => void
++  /** See `MessageBlock`'s doc — marks the article `data-latest`. */
++  isLatest?: boolean
+   /** Forwarded into `ConversationNodeContext` — see its own doc for why. */
+   threadId?: string | null
+   /** See `MessageBlock`'s doc: disables "Les høyt". */
+@@ -601,7 +611,11 @@
+     // `tabindex=-1`: focusable for the arrow-key walk in ChatPage, but never
+     // in the Tab sequence, which still runs answer -> actions -> next message
+     // through DOM order (audit item 26).
+-    <article class="verevon-chat-message verevon-chat-message--assistant" tabindex={-1}>
++    <article
++      class="verevon-chat-message verevon-chat-message--assistant"
++      data-latest={props.isLatest ? '' : undefined}
++      tabindex={-1}
++    >
+       <div class="verevon-chat-message__avatar">
+         <span class="verevon-chat-message__logo" aria-hidden="true" />
+       </div>
+@@ -2086,6 +2100,39 @@
+ }
+ 
+ /**
++ * Unsent edits to a proposed plan, kept across a REMOUNT of the control.
++ *
++ * The control does not own its lifetime. Its parent (`AssistantMessage`)
++ * derives the turn's nodes as a fresh list whenever anything they read
++ * changes, and `<For>` keys that list by object reference — so every node,
++ * this one included, is torn down and rebuilt. Clicking Approve flips
++ * `pending`, and a refused approval sets `error`: both rebuild the control,
++ * which used to throw away the person's reordering, rewritten steps and
++ * typed justification exactly when they most needed them (fix the problem
++ * the server named, press Approve again). Keyed by plan id, so a different
++ * (revised) plan never inherits them; bounded, so a long session cannot
++ * accumulate them.
++ */
++type PlanDraft = { rung: AutonomyRung; reason: string; rows: EditablePlanStepRow[] }
++const MAX_PLAN_DRAFTS = 20
++const planDrafts = new Map<string, PlanDraft>()
++
++function rememberPlanDraft(planId: string, draft: PlanDraft): void {
++  planDrafts.delete(planId)
++  planDrafts.set(planId, draft)
++  while (planDrafts.size > MAX_PLAN_DRAFTS) {
++    const oldest = planDrafts.keys().next().value
++    if (oldest === undefined) break
++    planDrafts.delete(oldest)
++  }
++}
++
++/** Test seam: drafts are module state that outlives a single mount by design. */
++export function __resetPlanDraftsForTests(): void {
++  planDrafts.clear()
++}
++
++/**
+  * The plan-approval control: the only thing that grants a planning run the
+  * authority to execute — and, when the model proposed a structured plan
+  * (plan-gate §2.1), the only place a person can reorder, rewrite, add,
+@@ -2108,31 +2155,42 @@
+   summary?: string
+   steps?: ChatPlanStep[]
+   grantedRung?: AutonomyRung
++  /** The proposed plan was rejected — nothing was granted or executed. */
++  rejected?: boolean
+   pending: boolean
+   error?: string
+   onApprove: (rung: AutonomyRung, justification: string, steps?: PlanStepEdit[]) => void
+   onReject?: (planId: string, reason: string) => void
+ }) {
+   const i18n = useI18n()
+-  const [rung, setRung] = createSignal<AutonomyRung>('workspace_write')
+-  const [reason, setReason] = createSignal('')
++  // Read once, on purpose: this is the identity the control's draft is kept
++  // under, and a control never changes which plan it is showing.
++  const draftKey = untrack(() => props.planId)
++  const draft = draftKey ? planDrafts.get(draftKey) : undefined
++  // A decided plan has nothing left to edit; do not let its draft outlive it.
++  if (draftKey && untrack(() => Boolean(props.grantedRung || props.rejected))) {
++    planDrafts.delete(draftKey)
++  }
++  const [rung, setRung] = createSignal<AutonomyRung>(draft?.rung ?? 'workspace_write')
++  const [reason, setReason] = createSignal(draft?.reason ?? '')
+   const tooShort = () => reason().trim().length < MIN_PLAN_JUSTIFICATION_CHARS
+   const hasStructuredPlan = () => Boolean(props.planId)
+ 
+-  // Seeded ONCE from props.steps, never resynced on every render — same
+-  // defensive pattern as `reason` above: a mid-edit re-stream (a second
+-  // plan.propose call superseding this one before the user submits) must not
+-  // silently clobber edits already in progress.
++  // Seeded ONCE (from the remembered draft if this control is a remount, else
++  // from props.steps), never resynced on every render — same defensive
++  // pattern as `reason` above: a mid-edit re-stream (a second plan.propose
++  // call superseding this one before the user submits) must not silently
++  // clobber edits already in progress.
+   const [rows, setRows] = createSignal<EditablePlanStepRow[]>(
+-    (props.steps ?? []).map((step) => ({
+-      localKey: nextPlanStepRowKey(),
+-      stepId: step.id,
+-      title: step.title,
+-      operation: step.operation ?? '',
+-      removed: false,
+-    })),
++    draft?.rows ??
++      untrack(() => props.steps ?? []).map((step) => ({
++        localKey: nextPlanStepRowKey(),
++        stepId: step.id,
++        title: step.title,
++        operation: step.operation ?? '',
++        removed: false,
++      })),
+   )
+-  const remainingCount = () => rows().filter((row) => !row.removed).length
+ 
+   // Uncontrolled: `<input value={row.title}>` sets the DOM value once at
+   // creation; the live, currently-typed value is read back from here at
+@@ -2140,6 +2198,38 @@
+   const inputRefs = new Map<string, HTMLInputElement>()
+   const currentTitle = (row: EditablePlanStepRow) => inputRefs.get(row.localKey)?.value ?? row.title
+ 
++  // The one thing typing DOES drive: whether the plan still has a real step
++  // and whether every kept step has a title. A tick, not the text — the
++  // inputs stay uncontrolled (see `EditablePlanStepRow`), this only tells the
++  // two derived reads below to look at them again.
++  const [titleTick, setTitleTick] = createSignal(0)
++  // A row the person added and never filled in is not a step.
++  const isBlankNewRow = (row: EditablePlanStepRow) =>
++    row.stepId === '' && currentTitle(row).trim() === ''
++  const remainingCount = () => {
++    titleTick()
++    return rows().filter((row) => !row.removed && !isBlankNewRow(row)).length
++  }
++  // A step the person is keeping but has emptied: the server refuses a step
++  // with no title, so say so here instead of after a round trip.
++  const hasBlankKeptStep = () => {
++    titleTick()
++    return rows().some(
++      (row) => !row.removed && row.stepId !== '' && currentTitle(row).trim() === '',
++    )
++  }
++
++  // Remember the edits if this control is torn down for a reason other than
++  // the decision itself (see `PlanDraft`).
++  onCleanup(() => {
++    if (!draftKey) return
++    rememberPlanDraft(draftKey, {
++      rung: rung(),
++      reason: reason(),
++      rows: rows().map((row) => ({ ...row, title: currentTitle(row) })),
++    })
++  })
++
+   const removeRow = (localKey: string) => {
+     setRows((current) =>
+       current.map((row) => (row.localKey === localKey ? { ...row, removed: true } : row)),
+@@ -2180,22 +2270,36 @@
+     ])
+   }
+   const wireEdits = (): PlanStepEdit[] =>
+-    rows().map((row) => ({
+-      stepId: row.stepId || undefined,
+-      title: currentTitle(row),
+-      operation: row.operation || undefined,
+-      removed: row.removed,
+-    }))
++    rows()
++      // A never-filled new row is dropped rather than sent: the server refuses
++      // a step with no title, and it never belonged to the proposal.
++      .filter((row) => !isBlankNewRow(row))
++      .map((row) => ({
++        stepId: row.stepId || undefined,
++        title: currentTitle(row).trim(),
++        operation: row.operation || undefined,
++        removed: row.removed,
++      }))
+ 
+   const approveDisabled = () =>
+-    tooShort() || props.pending || (hasStructuredPlan() && remainingCount() === 0)
++    tooShort() ||
++    props.pending ||
++    (hasStructuredPlan() && (remainingCount() === 0 || hasBlankKeptStep()))
+ 
+   return (
+     <Show
+-      when={!props.grantedRung}
++      when={!props.grantedRung && !props.rejected}
+       fallback={
+         <p class="verevon-chat-plan-granted">
+-          Godkjent: agenten kan nå {RUNG_LABEL[props.grantedRung ?? 'read_only']}.
++          <Show
++            when={props.rejected}
++            fallback={<>Godkjent: agenten kan nå {RUNG_LABEL[props.grantedRung ?? 'read_only']}.</>}
++          >
++            {i18n.tr(
++              'Planen ble avvist – ingenting ble utført.',
++              'The plan was rejected – nothing was executed.',
++            )}
++          </Show>
+         </p>
+       }
+     >
+@@ -2227,6 +2331,7 @@
+                       ref={(el) => inputRefs.set(row.localKey, el)}
+                       value={row.title}
+                       aria-label={i18n.tr(`Steg`, `Step`)}
++                      onInput={() => setTitleTick((tick) => tick + 1)}
+                     />
+                     <div class="verevon-chat-plan__step-actions">
+                       <button
+@@ -2308,6 +2413,11 @@
+               {i18n.tr('Planen må ha minst ett steg.', 'The plan needs at least one step.')}
+             </span>
+           </Show>
++          <Show when={hasStructuredPlan() && remainingCount() > 0 && hasBlankKeptStep()}>
++            <span class="verevon-chat-plan__hint">
++              {i18n.tr('Hvert steg trenger en tittel.', 'Every step needs a title.')}
++            </span>
++          </Show>
+           <Show when={props.error}>
+             {(message) => (
+               <span class="verevon-chat-plan__error" role="alert">
+--- a/src/features/chat/components/ChatPage.tsx
++++ b/src/features/chat/components/ChatPage.tsx
+@@ -262,12 +262,24 @@
+   // node keeps its owner, its effects and the dialog it opened.
+   const composerView = composer()
+ 
++  // The newest assistant turn keeps its action row visible at rest (`data-latest`
++  // in ChatMessages); older turns reveal theirs on hover or focus.
++  const latestAssistantTurnId = createMemo(() => {
++    const turns = state.turns
++    for (let index = turns.length - 1; index >= 0; index -= 1) {
++      const turn = turns[index]
++      if (turn?.role === 'assistant') return turn.id
++    }
++    return null
++  })
++
+   // `<For>` mappers are untracked in Solid 2. Derive the neighboring turns and
+   // all per-row reactive values up front so each mapper receives plain row data
+   // instead of reading the live store while it renders.
+   const messageRows = createMemo(() => state.turns.map((turn, index, turns) => ({
+     turn,
+     createdAt: turn.createdAt,
++    isLatest: turn.role === 'assistant' && turn.id === latestAssistantTurnId(),
+     showDateDivider: shouldShowDateDivider(turns[index - 1], turn),
+     copied: copiedTurnId() === turn.id,
+     planApproval: {
+@@ -726,10 +738,6 @@
+         },
+       ]}
+     >
+-      <Show when={launchMotion()}>
+-        <div class="verevon-chat-launch-wash" aria-hidden="true" />
+-      </Show>
+-
+       {/* Streaming is silent to a screen reader: tokens append into the
+           transcript, which is not a live region, so nothing is announced and a
+           long deep-research turn is indistinguishable from a hung page. This
+@@ -806,34 +814,35 @@
+                 </Show>
+               </div>
+               <div class="verevon-chat-thread">
+-                <For each={messageRows()}>
++                {/* Keyed by turn id: messageRows rebuilds its row objects on every copy, feedback or approval change; unkeyed, each change remounted the whole transcript. */}
++                <For each={messageRows()} keyed={(row) => row.turn.id}>
+                   {(row) => (
+                     <>
+-                      <Show when={row.showDateDivider}>
+-                        <DateDivider value={row.createdAt} />
++                      <Show when={row().showDateDivider}>
++                        <DateDivider value={row().createdAt} />
+                       </Show>
+                       <MessageBlock
+-                        copied={row.copied}
+-                        message={row.turn}
+-                        onBranch={() => branchAt(row.turn.id)}
+-                        onCopy={() => void copyTurn(row.turn)}
+-                        onEdit={(text) => void editAndResubmit(row.turn.id, text)}
++                        copied={row().copied}
++                        message={row().turn}
++                        onBranch={() => branchAt(row().turn.id)}
++                        onCopy={() => void copyTurn(row().turn)}
++                        onEdit={(text) => void editAndResubmit(row().turn.id, text)}
+                         onRegenerate={regenerateLatest}
+-                        onContinue={() => continueGeneration(row.turn.id)}
+-                        onRerunAsNewTurn={() => void rerunAsNewTurn(row.turn.id)}
+-                        onScheduleThis={() => openScheduleDialogForTurn(row.turn.id)}
+-                        onFeedback={(rating, note) => submitTurnFeedback(row.turn.id, rating, note)}
++                        onContinue={() => continueGeneration(row().turn.id)}
++                        onRerunAsNewTurn={() => void rerunAsNewTurn(row().turn.id)}
++                        onScheduleThis={() => openScheduleDialogForTurn(row().turn.id)}
++                        onFeedback={(rating, note) => submitTurnFeedback(row().turn.id, rating, note)}
+                         onApprovalDecision={(approvalId, decision) =>
+-                          void handleApprovalDecision(row.turn.id, approvalId, decision)
++                          void handleApprovalDecision(row().turn.id, approvalId, decision)
+                         }
+                         onApprovePlan={(rung, justification, steps) =>
+-                          void approveTurnPlan(row.turn.id, rung, justification, steps)
++                          void approveTurnPlan(row().turn.id, rung, justification, steps)
+                         }
+-                        onRejectPlan={(_planId, reason) => void rejectTurnPlan(row.turn.id, reason)}
+-                        pinned={pinnedMessages().includes(row.turn.id)}
++                        onRejectPlan={(_planId, reason) => void rejectTurnPlan(row().turn.id, reason)}
++                        pinned={pinnedMessages().includes(row().turn.id)}
+                         pinDisabled={pinnedMessagesFull(pinnedMessages())}
+-                        onTogglePin={() => togglePin(row.turn.id)}
+-                        planApproval={row.planApproval}
++                        onTogglePin={() => togglePin(row().turn.id)}
++                        planApproval={row().planApproval}
+                         onSelectFollowUp={setInput}
+                         onViewSteps={() => setActiveTab('steps')}
+                         onViewAttachments={(attachmentId) => {
+@@ -843,9 +852,10 @@
+                         // The version switcher only ever applies to the trailing
+                         // assistant turn — chat-versions.ts guards versioning to
+                         // the final exchange, so no other turn can have one.
+-                        version={row.version}
++                        version={row().version}
++                        isLatest={row().isLatest}
+                         onSelectVersion={selectExchangeVersion}
+-                        editLocked={row.editLocked}
++                        editLocked={row().editLocked}
+                         threadId={state.threadId}
+                         temporaryChat={readAloudBlocked()}
+                       />
+--- a/src/features/chat/components/use-chat-controller.ts
++++ b/src/features/chat/components/use-chat-controller.ts
+@@ -1906,7 +1906,7 @@
+   const triggerLaunchMotion = () => {
+     requestAnimationFrame(() => {
+       setLaunchMotion(true)
+-      setTimeout(() => setLaunchMotion(false), 1200)
++      setTimeout(() => setLaunchMotion(false), 200)
+     })
+   }
+ 
+@@ -2086,6 +2086,10 @@
+     })
+     try {
+       await rejectPlan(runId, planId, reason)
++      setState((s) => {
++        const turn = s.turns.find((turn) => turn.id === turnId)
++        if (turn) turn.planRejected = true
++      })
+       setPlanMode(false)
+     } catch (error) {
+       setPlanApprovalError((prev) => ({
+--- a/src/features/core/components/CoreNavbar.tsx
++++ b/src/features/core/components/CoreNavbar.tsx
+@@ -462,7 +462,7 @@
+   return (
+     <div class="core-search-overlay" role="dialog" aria-modal="true" aria-label={i18n.tr('Kunnskapssøk', 'Knowledge search')}>
+       <button type="button" class="core-search-overlay__scrim" aria-label={i18n.tr('Lukk globalt søk', 'Close global search')} onClick={() => props.onClose()} />
+-      <div class="core-search-overlay__panel verevon-panel-in">
++      <div class="core-search-overlay__panel">
+         <div class="core-search-overlay__header">
+           <Search class="size-4 core-search-overlay__icon" strokeWidth={1.8} />
+           <input
+--- a/src/features/core/components/sidebar/CoreSidebarKnowledgePanel.tsx
++++ b/src/features/core/components/sidebar/CoreSidebarKnowledgePanel.tsx
+@@ -81,6 +81,21 @@
+   const [loading, setLoading] = createSignal(true)
+   const [searchQuery, setSearchQuery] = createSignal('')
+   const normalizedSearch = () => searchQuery().trim().toLowerCase()
++  // Expanded folder ids for the collections tree. `null` means the user has
++  // not toggled anything yet: depth-0 collections show open and everything
++  // deeper starts closed. The first toggle snapshots those defaults into an
++  // explicit Set; every later update replaces the Set (never mutates it).
++  const [expandedFolderIds, setExpandedFolderIds] = createSignal<ReadonlySet<string> | null>(null)
++  // While the filter box is in use every branch is forced open, otherwise a
++  // match inside a collapsed folder would be invisible.
++  const forceFoldersOpen = () => normalizedSearch().length > 0
++  const isFolderExpanded = (folder: KnowledgeSidebarFolderNode, depth: number) =>
++    forceFoldersOpen() || (expandedFolderIds()?.has(folder.id) ?? depth === 0)
++  const toggleFolder = (folder: KnowledgeSidebarFolderNode) => {
++    const next = new Set(expandedFolderIds() ?? (sidebarData()?.folders ?? []).map((root) => root.id))
++    if (!next.delete(folder.id)) next.add(folder.id)
++    setExpandedFolderIds(next)
++  }
+   const sidebarData = createMemo(() => liveKnowledge() ? buildKnowledgeSidebarLiveData(liveKnowledge()!) : null)
+   const activeFolderSourceIds = () => {
+     const data = sidebarData()
+@@ -176,10 +191,14 @@
+                           activeFolderId={activeFolderId()}
+                           depth={0}
+                           folder={folder}
++                          isExpanded={isFolderExpanded}
+                           onSelect={(selected) => {
+                             setActiveFolderId(selected.id)
+                             applyKnowledgeFilter(selected.label)
+                           }}
++                          onToggle={toggleFolder}
++                          reserveToggle={visibleFolders().some(hasFolderChildren)}
++                          toggleLocked={forceFoldersOpen()}
+                         />
+                       )}
+                     </For>
+@@ -476,24 +495,52 @@
+   activeFolderId: string
+   depth: number
+   folder: KnowledgeSidebarFolderNode
++  isExpanded: (folder: KnowledgeSidebarFolderNode, depth: number) => boolean
+   onSelect: (folder: KnowledgeSidebarFolderNode) => void
++  onToggle: (folder: KnowledgeSidebarFolderNode) => void
++  /** Keep a chevron-wide gap on leaf rows whose siblings have a chevron, so labels line up. */
++  reserveToggle: boolean
++  /** True while the filter box forces every branch open; the chevron is then inert. */
++  toggleLocked: boolean
+ }) {
++  const i18n = useI18n()
+   const active = () => props.activeFolderId === props.folder.id
+   const Icon = () => knowledgeFolderIcon(props.folder, props.depth)
++  const hasChildren = () => hasFolderChildren(props.folder)
++  const expanded = () => hasChildren() && props.isExpanded(props.folder, props.depth)
++  const childrenReserveToggle = () => (props.folder.children ?? []).some(hasFolderChildren)
+ 
+   return (
+     <div>
+-      <button
+-        type="button"
+-        aria-pressed={active() ? 'true' : 'false'}
+-        onClick={() => props.onSelect(props.folder)}
+-        class={cn('core-sidebar-section-link', active() && 'core-sidebar-source-link--active')}
+-      >
+-        <Dynamic component={Icon()} class="core-sidebar-dedicated-icon" strokeWidth={1.75} />
+-        <span class={props.depth === 0 ? 'verevon-sidebar-row-strong' : 'verevon-sidebar-row-normal'}>{props.folder.label}</span>
+-        <span class="core-sidebar-count-pill">{props.folder.count}</span>
+-      </button>
+-      <Show when={props.folder.children?.length}>
++      <div class="core-sidebar-tree-row">
++        <Show
++          when={hasChildren()}
++          fallback={<Show when={props.reserveToggle}><span class="core-sidebar-tree-toggle-spacer" aria-hidden="true" /></Show>}
++        >
++          <button
++            type="button"
++            class="core-sidebar-tree-toggle"
++            aria-expanded={expanded() ? 'true' : 'false'}
++            aria-label={`${i18n.tr('Vis undermapper', 'Show subfolders')}: ${props.folder.label}`}
++            disabled={props.toggleLocked}
++            onClick={() => props.onToggle(props.folder)}
++          >
++            <ChevronDown class="core-sidebar-tree-toggle__icon" strokeWidth={2} />
++          </button>
++        </Show>
++        <button
++          type="button"
++          title={props.folder.label}
++          aria-pressed={active() ? 'true' : 'false'}
++          onClick={() => props.onSelect(props.folder)}
++          class={cn('core-sidebar-section-link', active() && 'core-sidebar-source-link--active')}
++        >
++          <Dynamic component={Icon()} class="core-sidebar-dedicated-icon" strokeWidth={1.75} />
++          <span class={props.depth === 0 ? 'verevon-sidebar-row-strong' : 'verevon-sidebar-row-normal'}>{props.folder.label}</span>
++          <span class="core-sidebar-count-pill" data-count={props.folder.count}>{props.folder.count}</span>
++        </button>
++      </div>
++      <Show when={expanded()}>
+         <div class={cn('core-sidebar-subtree', props.depth > 0 && 'core-sidebar-subtree--nested')}>
+           <div class="core-sidebar-subnav__line" />
+           <For each={props.folder.children}>
+@@ -503,7 +550,11 @@
+                   activeFolderId={props.activeFolderId}
+                   depth={props.depth + 1}
+                   folder={child}
++                  isExpanded={props.isExpanded}
+                   onSelect={props.onSelect}
++                  onToggle={props.onToggle}
++                  reserveToggle={childrenReserveToggle()}
++                  toggleLocked={props.toggleLocked}
+                 />
+               </div>
+             )}
+@@ -514,6 +565,10 @@
+   )
+ }
+ 
++function hasFolderChildren(folder: KnowledgeSidebarFolderNode): boolean {
++  return (folder.children?.length ?? 0) > 0
++}
++
+ function knowledgeFolderIcon(folder: KnowledgeSidebarFolderNode, depth: number) {
+   if (depth > 0) return BookOpen
+   if (folder.providerKey === 'rag') return ShieldCheck
+--- a/src/features/inbox/components/ConversationPanel.tsx
++++ b/src/features/inbox/components/ConversationPanel.tsx
+@@ -553,8 +553,8 @@
+       </Show>
+       <Show when={!props.articlesLoading && props.articles.length > 0}>
+         <div class="verevon-inbox-transcript__articles">
+-          <For each={props.articles}>
+-            {(article) => <ArticleBubble article={article} ticket={props.selectedTicket} />}
++          <For each={props.articles} keyed={(article) => article.id}>
++            {(article) => <ArticleBubble article={article()} ticket={props.selectedTicket} />}
+           </For>
+         </div>
+       </Show>
+--- a/src/features/inbox/components/InboxPage.tsx
++++ b/src/features/inbox/components/InboxPage.tsx
+@@ -252,10 +252,10 @@
+     }
+     return byConversation
+   })
+-  const tickets = () => baseTickets().map((ticket) => ({
++  const tickets = createMemo(() => baseTickets().map((ticket) => ({
+     ...ticket,
+     supportTicket: supportTicketByConversation().get(ticket.conversationId) ?? null,
+-  }))
++  })))
+ 
+   const [groupsRes, { mutate: mutateGroups }] = createResource(
+     orgId,
+--- a/src/features/inbox/components/TicketQueue.tsx
++++ b/src/features/inbox/components/TicketQueue.tsx
+@@ -445,20 +445,21 @@
+         </Show>
+         <Show when={!props.loading && !props.error && sortedTickets().length > 0}>
+           <ul aria-label={i18n.tr('Saker', 'Tickets')} aria-keyshortcuts="j k" class="verevon-inbox-ticket-list">
+-            <For each={sortedTickets()}>
++            {/* Keyed by conversation: a poll rebuilds every row object, and an unkeyed list would remount each row and drop focus. */}
++            <For each={sortedTickets()} keyed={(t) => t.conversationId ?? t.id}>
+               {(ticket) => (
+                 <li>
+                   <TicketRow
+-                    active={props.selectedTicketId === ticket.id}
+-                    pinned={pinnedConversationIds().has(ticketPreferenceId(ticket))}
+-                    unread={!readConversationIds().has(ticketPreferenceId(ticket))}
+-                    ticket={ticket}
++                    active={props.selectedTicketId === ticket().id}
++                    pinned={pinnedConversationIds().has(ticketPreferenceId(ticket()))}
++                    unread={!readConversationIds().has(ticketPreferenceId(ticket()))}
++                    ticket={ticket()}
+                     onClick={() => {
+-                      props.onMarkRead(ticket)
+-                      props.onSelectTicket(ticket)
++                      props.onMarkRead(ticket())
++                      props.onSelectTicket(ticket())
+                     }}
+-                    onSnooze={() => props.onSnoozeTicket(ticket)}
+-                    onTogglePinned={() => props.onTogglePinned(ticket)}
++                    onSnooze={() => props.onSnoozeTicket(ticket())}
++                    onTogglePinned={() => props.onTogglePinned(ticket())}
+                   />
+                 </li>
+               )}
+--- a/src/styles/global.css
++++ b/src/styles/global.css
+@@ -1,10 +1,7 @@
+-@import url('https://fonts.googleapis.com/css2?family=Geist:wght@100..900&family=Geist+Mono:wght@100..900&display=swap');
+-
+ :root {
+   color: var(--foreground);
+   background: var(--background);
+-  font-family:
+-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
++  font-family: var(--font-sans);
+   font-synthesis: none;
+   line-height: 1.5;
+   text-rendering: optimizeLegibility;
+@@ -52,6 +49,7 @@
+   --verevon-border-soft: #eeeeec;
+   --verevon-border-strong: #d8d8d4;
+   --verevon-primary: #171717;
++  --verevon-primary-foreground: #ffffff;
+   --verevon-primary-hover: #34363d;
+   --verevon-primary-soft: #efefee;
+   --verevon-primary-dark: #111111;
+@@ -305,6 +303,15 @@
+   --verevon-z-tooltip: 60;
+ 
+   /* ==================================================
++     MOTION — shared easing and duration vocabulary
++  ================================================== */
++  --ease-out: cubic-bezier(0.19, 1, 0.22, 1);
++  --ease-in-out: cubic-bezier(0.65, 0, 0.35, 1);
++  --dur-fast: 120ms;
++  --dur-base: 160ms;
++  --dur-slow: 240ms;
++
++  /* ==================================================
+      LEGACY COMPAT — bridges the pre-existing stylesheet onto the new
+      system. Old token names kept so no var() breaks; each maps to the
+      nearest new token (values match where the role aligns). New code
+@@ -358,15 +365,15 @@
+   --verevon-accent-ink: #b8501f;
+   --warning-ink: #9a5410;
+ 
++  /* Visible keyboard-focus ring (≈4.5:1 on white); .dark re-tints it. */
++  --focus-ring: var(--verevon-accent-ink);
++
+   /* Auth surfaces (atmospheric brand zone). */
+   --auth-card: #edebe7;
+   --auth-field: #f7f4ed;
+ 
+   /* Fonts. */
+-  --font-sans:
+-    var(--font-inter), var(--font-geist-sans), "Inter", "Geist",
+-    ui-sans-serif, system-ui, sans-serif;
+-  --font-geist-sans: "Geist";
++  --font-sans: "Geist", "Geist Fallback", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+ }
+ 
+ :root {
+@@ -410,9 +417,6 @@
+   --color-linear-panel-bg: var(--linear-panel-bg);
+   --color-linear-border: var(--linear-border);
+   --color-linear-accent: var(--linear-accent);
+-  --font-sans:
+-    var(--font-inter), var(--font-geist-sans), "Inter", "Geist",
+-    "Geist Fallback", ui-sans-serif, system-ui, sans-serif;
+   --font-mono: "Geist Mono", "Geist Mono Fallback", ui-monospace, monospace;
+ }
+ 
+@@ -464,11 +468,10 @@
+   margin: 0;
+ }
+ 
+-button:focus-visible,
+-a:focus-visible,
+-textarea:focus-visible {
+-  outline: 3px solid rgb(0 0 0 / 18%);
++:where(button, a, summary, input, select, textarea, [tabindex]):focus-visible {
++  outline: 2px solid var(--focus-ring);
+   outline-offset: 2px;
++  box-shadow: none;
+ }
+ 
+ .sr-only {
+@@ -583,6 +586,10 @@
+   background: var(--verevon-dashboard-sidebar);
+ }
+ 
++.dark {
++  --focus-ring: #f0936a;
++}
++
+ .dark .dashboard-navbar-bg {
+   background: var(--verevon-dark-sidebar);
+ }
+@@ -1889,9 +1896,7 @@
+ }
+ 
+ .verevon-sidebar-type {
+-  font-family:
+-    var(--font-inter), var(--font-geist-sans),
+-    var(--font-sans, "Inter", "Geist", "Geist Fallback", ui-sans-serif, system-ui, sans-serif);
++  font-family: var(--font-sans);
+ }
+ 
+ .core-sidebar {
+@@ -1902,9 +1907,7 @@
+   z-index: var(--verevon-z-sidebar);
+   display: block;
+   overflow: hidden;
+-  transition:
+-    width 300ms ease-out,
+-    background-color 300ms ease-out;
++  transition: background-color var(--dur-base) var(--ease-out);
+ }
+ 
+ .verevon-sidebar-themed {
+@@ -3176,18 +3179,20 @@
+   color: var(--sidebar-muted);
+ }
+ 
+-.core-sidebar-subnav,
+-.core-sidebar-subtree {
++.core-sidebar-subnav {
+   position: relative;
+   margin: 6px 0 8px 34px;
+ }
+ 
++/* Knowledge collections tree. The guide line sits under the parent's chevron
++   centre so every level only spends 10px + 4px on indentation. */
+ .core-sidebar-subtree {
+-  margin-left: 30px;
++  position: relative;
++  margin: 2px 0 2px 10px;
+ }
+ 
+ .core-sidebar-subtree--nested {
+-  margin-left: 24px;
++  margin-left: 10px;
+ }
+ 
+ .core-sidebar-subnav__line {
+@@ -3200,7 +3205,63 @@
+ }
+ 
+ .core-sidebar-subtree__child {
+-  padding-left: 12px;
++  padding-left: 4px;
++}
++
++/* Depth 2 and below: drop the leaf icon and the "1" count pill so the label
++   keeps the room. The full name stays reachable through the row title. */
++.core-sidebar-subtree--nested .core-sidebar-subtree__child .core-sidebar-dedicated-icon,
++.core-sidebar-subtree--nested .core-sidebar-subtree__child .core-sidebar-count-pill[data-count="1"] {
++  display: none;
++}
++
++/* Tree row = expand chevron (or an equally wide spacer) + the row button. */
++.core-sidebar-tree-row {
++  display: flex;
++  min-width: 0;
++  align-items: center;
++}
++
++.core-sidebar-tree-row > .core-sidebar-section-link {
++  width: auto;
++  min-width: 0;
++  flex: 1;
++}
++
++.core-sidebar-tree-toggle,
++.core-sidebar-tree-toggle-spacer {
++  width: 20px;
++  height: 36px;
++  flex-shrink: 0;
++}
++
++.core-sidebar-tree-toggle {
++  display: grid;
++  place-items: center;
++  border: 0;
++  border-radius: 6px;
++  background: transparent;
++  padding: 0;
++  color: var(--subtle);
++  cursor: pointer;
++}
++
++.core-sidebar-tree-toggle:hover:not(:disabled) {
++  color: var(--verevon-dark-surface);
++}
++
++.core-sidebar-tree-toggle:disabled {
++  cursor: default;
++}
++
++.core-sidebar-tree-toggle__icon {
++  width: 14px;
++  height: 14px;
++  transform: rotate(-90deg);
++}
++
++.core-sidebar-tree-toggle[aria-expanded="true"] .core-sidebar-tree-toggle__icon {
++  transform: none;
+ }
+ 
+ .core-sidebar-subnav-link {
+@@ -6679,7 +6740,11 @@
+   outline-offset: 2px;
+ }
+ .resize { resize: both; }
+-.transition { transition: all 150ms ease; }
++.transition {
++  transition-property: color, background-color, border-color, opacity, transform;
++  transition-duration: var(--dur-fast);
++  transition-timing-function: var(--ease-out);
++}
+ .transition-colors {
+   transition:
+     color 150ms ease,
+@@ -7113,7 +7178,7 @@
+   padding-right: var(--dashboard-frame-gap);
+   padding-bottom: var(--dashboard-frame-gap);
+   padding-left: var(--dashboard-rail-width);
+-  transition: padding-left 300ms ease-out, padding-top 160ms ease-out;
++  transition: padding-top var(--dur-base) var(--ease-out);
+ }
+ 
+ .core-main__panel {
+@@ -7171,7 +7236,6 @@
+   background: color-mix(in srgb, var(--destructive) 12%, var(--verevon-surface));
+   color: var(--foreground);
+   font-size: 13px;
+-  transition: left 300ms ease-out;
+ }
+ 
+ .org-deletion-banner__message {
+@@ -7252,8 +7316,8 @@
+ }
+ 
+ .dashboard-home {
+-  --dashboard-home-font-display: var(--font-geist-sans), "Geist", Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+-  --dashboard-home-font-body: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
++  --dashboard-home-font-display: var(--font-sans);
++  --dashboard-home-font-body: var(--font-sans);
+   --dashboard-home-h1-size: clamp(42px, 4.2vw, 64px);
+   --dashboard-home-h2-size: 28px;
+   --dashboard-home-h3-size: 18px;
+@@ -9688,7 +9752,7 @@
+   flex-direction: column;
+   overflow: hidden;
+   background: transparent;
+-  transition: all 500ms ease-out;
++  transition: opacity var(--dur-slow) var(--ease-out);
+ }
+ 
+ .dashboard-expanded-search-input {
+@@ -16471,7 +16535,7 @@
+ }
+ 
+ .verevon-panel-in {
+-  animation: verevonPanelIn 440ms cubic-bezier(0.19, 1, 0.22, 1) both;
++  animation: verevonPanelIn var(--dur-slow) var(--ease-out) both;
+ }
+ 
+ .verevon-popover {
+@@ -16481,9 +16545,7 @@
+   background: var(--panel);
+   box-shadow: 0 20px 80px rgb(17 17 17 / 15%);
+   color: var(--ink);
+-  font-family:
+-    var(--font-inter), var(--font-geist-sans),
+-    var(--font-sans, "Inter", "Geist", "Geist Fallback", ui-sans-serif, system-ui, sans-serif);
++  font-family: var(--font-sans);
+   animation: verevonPopoverIn 180ms cubic-bezier(0.19, 1, 0.22, 1) both;
+ }
+ 
+@@ -19105,8 +19167,7 @@
+   min-height: 40px;
+   padding: 0 16px;
+   color: var(--verevon-text);
+-  font-family:
+-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
++  font-family: var(--font-sans);
+   font-size: 14px;
+   font-weight: 500;
+   line-height: 1;
+@@ -22837,7 +22898,6 @@
+   box-shadow: 0 -18px 48px rgb(252 252 253 / 94%);
+   -webkit-backdrop-filter: blur(18px);
+   backdrop-filter: blur(18px);
+-  animation: verevonChatComposerDockIn 360ms cubic-bezier(0.19, 1, 0.22, 1) both;
+ }
+ 
+ .verevon-chat-composer-dock__inner {
+@@ -22851,18 +22911,6 @@
+   box-shadow: 0 -18px 48px rgb(16 17 20 / 94%);
+ }
+ 
+-@keyframes verevonChatComposerDockIn {
+-  0% {
+-    opacity: 0;
+-    transform: translateY(22px) scale(0.985);
+-  }
+-
+-  100% {
+-    opacity: 1;
+-    transform: translateY(0) scale(1);
+-  }
+-}
+-
+ /* ── Chat page layout ──────────────────────────────────────────────────────── */
+ 
+ .verevon-chat-page {
+@@ -24828,33 +24876,14 @@
+ 
+ /* ── Launch motion ─────────────────────────────────────────────────────────── */
+ 
+-.verevon-chat-launch-wash {
+-  position: absolute;
+-  inset: 0;
+-  z-index: 100;
+-  background: var(--panel);
+-  pointer-events: none;
+-  animation: verevonChatLaunchWash 1200ms cubic-bezier(0.19, 1, 0.22, 1) both;
+-}
+-
+-.dark .verevon-chat-launch-wash {
+-  background: var(--ink);
+-}
+-
+-@keyframes verevonChatLaunchWash {
+-  0% { opacity: 0; }
+-  15% { opacity: 0.5; }
+-  100% { opacity: 0; }
+-}
+-
+ .verevon-chat-page-launch .verevon-chat-thread {
+-  animation: verevonChatThreadLaunch 600ms cubic-bezier(0.19, 1, 0.22, 1) both;
++  animation: verevonChatThreadLaunch 200ms cubic-bezier(0.19, 1, 0.22, 1) both;
+ }
+ 
+ @keyframes verevonChatThreadLaunch {
+   0% {
+     opacity: 0;
+-    transform: translateY(12px);
++    transform: translateY(6px);
+   }
+ 
+   100% {
+@@ -24863,15 +24892,23 @@
+   }
+ }
+ 
++@media (prefers-reduced-motion: reduce) {
++  .verevon-chat-page-launch .verevon-chat-thread {
++    animation-name: verevonChatThreadLaunchFade;
++  }
++}
++
++@keyframes verevonChatThreadLaunchFade {
++  0% { opacity: 0; }
++  100% { opacity: 1; }
++}
++
+ /* ── Chat v2 parity surface ───────────────────────────────────────────────── */
+ 
+ /* Step 2 — reduced-motion guard. Every new chat keyframe MUST be listed here. */
+ @media (prefers-reduced-motion: reduce) {
+-  .verevon-chat-composer-dock,
+   .verevon-thinking-dots span,
+-  .verevon-chat-streaming::after,
+-  .verevon-chat-launch-wash,
+-  .verevon-chat-page-launch .verevon-chat-thread {
++  .verevon-chat-streaming::after {
+     animation: none !important;
+   }
+ 
+@@ -24886,8 +24923,8 @@
+ }
+ 
+ .verevon-chat-page {
+-  --chat-font-display: var(--font-geist-sans), "Geist", Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+-  --chat-font-body: var(--font-geist-sans), "Geist", Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; /* Geist is the only family actually loaded — lead with it */
++  --chat-font-display: var(--font-sans);
++  --chat-font-body: var(--font-sans); /* Geist is the only family actually loaded — lead with it */
+   --chat-h1-size: clamp(42px, 4.2vw, 64px);
+   --chat-h2-size: 28px;
+   --chat-h3-size: 18px;
+@@ -28203,18 +28240,28 @@
+    ------------------------------------------------------------------------------ */
+ .verevon-chat-message--assistant .verevon-chat-action-button,
+ .verevon-chat-message--assistant .verevon-chat-menu > button {
+-  opacity: 0;
+   transition:
+     opacity 160ms ease,
+     background-color 140ms ease,
+     color 140ms ease;
+ }
+ 
+-.verevon-chat-message--assistant:hover .verevon-chat-action-button,
+-.verevon-chat-message--assistant:hover .verevon-chat-menu > button,
+-.verevon-chat-message-actions:focus-within .verevon-chat-action-button,
+-.verevon-chat-message-actions:focus-within .verevon-chat-menu > button {
+-  opacity: 1;
++/* Only hide on devices that can hover. On touch there is no hover to reveal
++   the row, so hiding it left invisible-but-tappable buttons (a stray tap could
++   fire an unseen Regenerate). The latest assistant turn (data-latest) stays
++   visible on desktop too — it is the turn people act on most. */
++@media (hover: hover) and (pointer: fine) {
++  .verevon-chat-message--assistant:not([data-latest]) .verevon-chat-action-button,
++  .verevon-chat-message--assistant:not([data-latest]) .verevon-chat-menu > button {
++    opacity: 0;
++  }
++
++  .verevon-chat-message--assistant:hover .verevon-chat-action-button,
++  .verevon-chat-message--assistant:hover .verevon-chat-menu > button,
++  .verevon-chat-message-actions:focus-within .verevon-chat-action-button,
++  .verevon-chat-message-actions:focus-within .verevon-chat-menu > button {
++    opacity: 1;
++  }
+ }
+ 
+ /* 5 · General — subtle scrollbar for the message list (was the crude default). */
+@@ -29700,18 +29747,21 @@
+   margin-top: 17px;
+ }
+ 
+-.knowledge-folder-card__stat-primary,
+-.knowledge-folder-card__stat-secondary {
++/* Scoped under the docs surface so these outrank the unscoped legacy
++   .knowledge-folder-card__stats span rules (0,1,1) that also match both stat spans. */
++.knowledge-page-surface--docs .knowledge-folder-card__stat-primary,
++.knowledge-page-surface--docs .knowledge-folder-card__stat-secondary {
+   display: inline-flex;
+   align-items: center;
+   gap: 5px;
++  padding-bottom: 0;
+ }
+ 
+-.knowledge-folder-card__stat-primary {
++.knowledge-page-surface--docs .knowledge-folder-card__stat-primary {
+   color: #62625b;
+ }
+ 
+-.knowledge-folder-card__stat-primary strong {
++.knowledge-page-surface--docs .knowledge-folder-card__stat-primary strong {
+   color: #22221f;
+   font-size: 16px;
+   font-weight: 740;
+@@ -29719,13 +29769,13 @@
+   line-height: 1;
+ }
+ 
+-.knowledge-folder-card__stat-primary small,
+-.knowledge-folder-card__stat-secondary {
++.knowledge-page-surface--docs .knowledge-folder-card__stat-primary small,
++.knowledge-page-surface--docs .knowledge-folder-card__stat-secondary {
+   color: #8e8e87;
+   font-size: 9px;
+ }
+ 
+-.knowledge-folder-card__stat-secondary {
++.knowledge-page-surface--docs .knowledge-folder-card__stat-secondary {
+   max-width: 50%;
+   overflow: hidden;
+   text-overflow: ellipsis;
+@@ -29907,8 +29957,7 @@
+   min-height: 32px;
+   padding: 0 12px;
+   color: var(--ink);
+-  font-family:
+-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
++  font-family: var(--font-sans);
+   font-size: 11px;
+   font-weight: 700;
+   letter-spacing: 0;
+@@ -29992,8 +30041,7 @@
+   padding: 6px 12px;
+   margin: 0;
+   color: var(--foreground);
+-  font-family:
+-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
++  font-family: var(--font-sans);
+   font-size: 11px;
+   font-weight: 800;
+   text-transform: uppercase;
+@@ -30141,7 +30189,7 @@
+ .onboarding-summary-card h2 {
+   margin: 0;
+   color: var(--verevon-dark-surface);
+-  font-family: var(--font-geist-sans), "Geist", Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
++  font-family: var(--font-sans);
+   font-size: clamp(42px, 4.2vw, 64px);
+   font-weight: 400;
+   line-height: 1.02;
+@@ -30171,8 +30219,7 @@
+ .onboarding-right-surface h2 {
+   margin: 0;
+   color: var(--foreground);
+-  font-family:
+-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
++  font-family: var(--font-sans);
+   font-size: 28px;
+   font-weight: 600;
+   line-height: 1.1;
+@@ -30182,8 +30229,7 @@
+ .onboarding-eyebrow,
+ .onboarding-right-surface__eyebrow {
+   color: var(--subtle);
+-  font-family:
+-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
++  font-family: var(--font-sans);
+   font-size: 10px;
+   font-weight: 500;
+   letter-spacing: 0.12em;
+@@ -30194,8 +30240,7 @@
+ .onboarding-right-surface p,
+ .onboarding-summary-card p {
+   color: var(--verevon-text-muted);
+-  font-family:
+-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
++  font-family: var(--font-sans);
+   font-size: 15px;
+   line-height: 1.6;
+ }
+@@ -30207,8 +30252,7 @@
+ 
+ .onboarding-field span {
+   color: var(--subtle);
+-  font-family:
+-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
++  font-family: var(--font-sans);
+   font-size: 11px;
+   font-weight: 500;
+   letter-spacing: 0.1em;
+@@ -30226,8 +30270,7 @@
+ .onboarding-field textarea {
+   width: 100%;
+   color: var(--foreground);
+-  font-family:
+-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
++  font-family: var(--font-sans);
+   font-size: 14px;
+   background: var(--panel);
+   border: 1px solid var(--linear-border);
+@@ -30280,8 +30323,7 @@
+   padding: 0 12px;
+   background: var(--auth-field);
+   color: var(--verevon-text-muted);
+-  font-family:
+-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
++  font-family: var(--font-sans);
+   font-size: 12px;
+   letter-spacing: 0;
+   text-transform: none;
+@@ -30330,8 +30372,7 @@
+   padding: 0;
+   background: transparent;
+   color: var(--subtle);
+-  font-family:
+-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
++  font-family: var(--font-sans);
+   font-size: 11px;
+   font-weight: 700;
+   letter-spacing: 0.18em;
+@@ -30351,8 +30392,7 @@
+ .onboarding-size-fieldset legend {
+   margin-bottom: 8px;
+   color: var(--verevon-text-muted);
+-  font-family:
+-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
++  font-family: var(--font-sans);
+   font-size: 11px;
+   letter-spacing: 0.16em;
+   text-transform: uppercase;
+@@ -30437,8 +30477,7 @@
+ .onboarding-error {
+   margin-top: 12px;
+   color: var(--danger);
+-  font-family:
+-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
++  font-family: var(--font-sans);
+   font-size: 12px;
+   line-height: 1.5;
+ }
+@@ -30446,8 +30485,7 @@
+ .auth-status-notice {
+   margin: 0;
+   color: var(--verevon-text-muted);
+-  font-family:
+-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
++  font-family: var(--font-sans);
+   font-size: 12px;
+   line-height: 1.5;
+ }
+@@ -30466,8 +30504,7 @@
+   margin-inline: auto;
+   margin-top: 8px;
+   color: var(--verevon-text-muted);
+-  font-family:
+-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
++  font-family: var(--font-sans);
+   font-size: 12px;
+   letter-spacing: 0.02em;
+ }
+@@ -30515,8 +30552,7 @@
+   display: block;
+   margin-bottom: 2px;
+   color: var(--foreground);
+-  font-family:
+-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
++  font-family: var(--font-sans);
+   font-size: 12.5px;
+   font-weight: 400;
+ }
+@@ -30524,8 +30560,7 @@
+ .verevon-selectable-row small,
+ .onboarding-plan-card small {
+   color: var(--verevon-text-muted);
+-  font-family:
+-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
++  font-family: var(--font-sans);
+   font-size: 11px;
+   line-height: 1.45;
+ }
+@@ -30541,8 +30576,7 @@
+ .onboarding-summary-card .badge {
+   min-height: 22px;
+   padding: 0 9px;
+-  font-family:
+-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
++  font-family: var(--font-sans);
+   font-size: 10px;
+   font-weight: 700;
+   letter-spacing: 0.16em;
+@@ -30567,8 +30601,7 @@
+   min-width: unset;
+   padding: 6px 14px;
+   color: var(--foreground);
+-  font-family:
+-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
++  font-family: var(--font-sans);
+   font-size: 12px;
+   background: var(--onboarding-surface);
+   border: 1px solid transparent;
+@@ -30623,8 +30656,7 @@
+ .onboarding-connector-tab small {
+   min-width: 0;
+   overflow-wrap: anywhere;
+-  font-family:
+-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
++  font-family: var(--font-sans);
+ }
+ 
+ .onboarding-connector-tab span {
+@@ -30642,8 +30674,7 @@
+ .onboarding-connector-group h3 {
+   margin: 0;
+   color: var(--subtle);
+-  font-family:
+-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
++  font-family: var(--font-sans);
+   font-size: 10px;
+   font-weight: 400;
+   letter-spacing: 0.16em;
+@@ -30696,8 +30727,7 @@
+ .onboarding-connected__eyebrow {
+   margin: 0;
+   color: var(--onboarding-accent, var(--ink));
+-  font-family:
+-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
++  font-family: var(--font-sans);
+   font-size: 10px;
+   font-weight: 600;
+   letter-spacing: 0.14em;
+@@ -30707,8 +30737,7 @@
+ .onboarding-connected__refresh {
+   padding: 2px 0;
+   color: var(--verevon-text-muted);
+-  font-family:
+-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
++  font-family: var(--font-sans);
+   font-size: 11px;
+   text-decoration: underline;
+   text-underline-offset: 2px;
+@@ -30742,8 +30771,7 @@
+ 
+ .onboarding-connected-account__title strong {
+   color: var(--foreground);
+-  font-family:
+-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
++  font-family: var(--font-sans);
+   font-size: 13px;
+   font-weight: 600;
+ }
+@@ -30752,8 +30780,7 @@
+   min-width: 0;
+   overflow-wrap: anywhere;
+   color: var(--verevon-text-muted);
+-  font-family:
+-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
++  font-family: var(--font-sans);
+   font-size: 11.5px;
+ }
+ 
+@@ -30774,8 +30801,7 @@
+ .onboarding-grant-chip {
+   padding: 2px 8px;
+   color: var(--foreground);
+-  font-family:
+-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
++  font-family: var(--font-sans);
+   font-size: 10.5px;
+   font-weight: 500;
+   background: var(--onboarding-surface-subtle);
+@@ -30793,15 +30819,13 @@
+   justify-content: space-between;
+   gap: 8px;
+   color: var(--foreground);
+-  font-family:
+-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
++  font-family: var(--font-sans);
+   font-size: 11.5px;
+ }
+ 
+ .onboarding-lane-status {
+   color: var(--subtle);
+-  font-family:
+-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
++  font-family: var(--font-sans);
+   font-size: 10px;
+   font-weight: 600;
+   letter-spacing: 0.12em;
+@@ -30837,8 +30861,7 @@
+   flex: 1 1 12rem;
+   margin: 0;
+   color: var(--foreground);
+-  font-family:
+-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
++  font-family: var(--font-sans);
+   font-size: 12px;
+   line-height: 1.45;
+ }
+@@ -30872,8 +30895,7 @@
+ 
+ .onboarding-library-picker__field span {
+   color: var(--subtle);
+-  font-family:
+-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
++  font-family: var(--font-sans);
+   font-size: 10px;
+   letter-spacing: 0.12em;
+   text-transform: uppercase;
+@@ -30883,8 +30905,7 @@
+   min-height: 32px;
+   padding: 4px 8px;
+   color: var(--foreground);
+-  font-family:
+-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
++  font-family: var(--font-sans);
+   font-size: 12px;
+   background: var(--panel);
+   border: 1px solid var(--verevon-border);
+@@ -30894,8 +30915,7 @@
+ .onboarding-library-picker__error {
+   margin: 0;
+   color: #b42318;
+-  font-family:
+-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
++  font-family: var(--font-sans);
+   font-size: 11.5px;
+ }
+ 
+@@ -30925,8 +30945,7 @@
+ .onboarding-stat-list li {
+   padding: 12px 0;
+   color: var(--onboarding-text);
+-  font-family:
+-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
++  font-family: var(--font-sans);
+   font-size: 13px;
+   border-bottom: 1px solid var(--verevon-border-warm);
+ }
+@@ -30936,8 +30955,7 @@
+   gap: 12px;
+   align-items: center;
+   color: var(--verevon-text-muted);
+-  font-family:
+-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
++  font-family: var(--font-sans);
+   font-size: 12px;
+ }
+ 
+@@ -30964,8 +30982,7 @@
+   align-items: center;
+   justify-content: center;
+   color: var(--verevon-text-muted);
+-  font-family:
+-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
++  font-family: var(--font-sans);
+   font-size: 13px;
+   letter-spacing: 0.02em;
+ }
+@@ -31183,8 +31200,7 @@
+   margin: 0;
+   padding-left: 18px;
+   color: var(--onboarding-copy);
+-  font-family:
+-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
++  font-family: var(--font-sans);
+   font-size: 11px;
+   line-height: 1.5;
+ }
+@@ -31211,8 +31227,7 @@
+   margin: 0;
+   padding-left: 18px;
+   color: var(--onboarding-copy);
+-  font-family:
+-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
++  font-family: var(--font-sans);
+   font-size: 11px;
+   line-height: 1.55;
+ }
+@@ -31267,8 +31282,7 @@
+ 
+ .onboarding-product-reveal__overlay p {
+   color: var(--foreground);
+-  font-family:
+-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
++  font-family: var(--font-sans);
+   font-size: 12px;
+   font-weight: 700;
+   letter-spacing: 0;
+@@ -31278,8 +31292,7 @@
+   display: block;
+   margin-top: 4px;
+   color: var(--verevon-text-muted);
+-  font-family:
+-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
++  font-family: var(--font-sans);
+   font-size: 11px;
+ }
+ 
+@@ -31320,8 +31333,7 @@
+ 
+ .onboarding-folder-card p {
+   color: var(--subtle);
+-  font-family:
+-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
++  font-family: var(--font-sans);
+   font-size: 10px;
+   letter-spacing: 0.16em;
+   text-transform: uppercase;
+@@ -31330,8 +31342,7 @@
+ .onboarding-folder-card h2 {
+   margin: 8px 0 0;
+   color: var(--foreground);
+-  font-family:
+-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
++  font-family: var(--font-sans);
+   font-size: 18px;
+   font-weight: 500;
+   line-height: 1.25;
+@@ -31341,8 +31352,7 @@
+   display: block;
+   margin-top: 6px;
+   color: var(--verevon-text-muted);
+-  font-family:
+-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
++  font-family: var(--font-sans);
+   font-size: 11px;
+   line-height: 1.45;
+ }
+@@ -31357,8 +31367,7 @@
+   display: flex;
+   justify-content: space-between;
+   color: var(--verevon-text-muted);
+-  font-family:
+-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
++  font-family: var(--font-sans);
+   font-size: 10px;
+   letter-spacing: 0.16em;
+   text-transform: uppercase;
+@@ -31411,8 +31420,7 @@
+ }
+ 
+ .onboarding-organization-card strong {
+-  font-family:
+-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
++  font-family: var(--font-sans);
+   font-size: 14px;
+   font-weight: 700;
+ }
+@@ -31887,7 +31895,7 @@
+   display: block;
+   margin-bottom: 6px;
+   color: var(--verevon-text-muted);
+-  font-family: Inter, ui-sans-serif, system-ui, -apple-system, sans-serif;
++  font-family: var(--font-sans);
+   font-size: 11px;
+   font-weight: 600;
+   letter-spacing: 0.08em;
+@@ -31903,7 +31911,7 @@
+ }
+ 
+ .onboarding-summary-card__plan-block li {
+-  font-family: Inter, ui-sans-serif, system-ui, -apple-system, sans-serif;
++  font-family: var(--font-sans);
+   font-size: 13px;
+   line-height: 1.45;
+ }
+@@ -31919,7 +31927,7 @@
+   border-radius: 999px;
+   background: rgba(255, 255, 255, 0.08);
+   border: 1px solid var(--verevon-border, rgba(255, 255, 255, 0.14));
+-  font-family: Inter, ui-sans-serif, system-ui, -apple-system, sans-serif;
++  font-family: var(--font-sans);
+   font-size: 12px;
+   line-height: 1.5;
+ }
+@@ -31937,8 +31945,7 @@
+   place-items: center;
+   background: var(--panel-muted);
+   color: var(--verevon-text-muted);
+-  font-family:
+-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
++  font-family: var(--font-sans);
+   font-size: 13px;
+   font-weight: 800;
+   letter-spacing: 0.18em;
+@@ -32079,8 +32086,7 @@
+   gap: 12px;
+   align-items: center;
+   color: var(--onboarding-muted);
+-  font-family:
+-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
++  font-family: var(--font-sans);
+   font-size: 13px;
+ }
+ 
+@@ -32126,7 +32132,7 @@
+   overflow: hidden;
+   background: var(--verevon-dark-surface, #111);
+   color: #fff;
+-  font-family: var(--font-geist-sans), "Geist", Inter, ui-sans-serif, system-ui, sans-serif;
++  font-family: var(--font-sans);
+   font-size: 20px;
+   font-weight: 500;
+ }
+@@ -32146,7 +32152,7 @@
+ 
+ .onboarding-paywall__identity-kicker {
+   color: var(--verevon-text-muted);
+-  font-family: Inter, ui-sans-serif, system-ui, -apple-system, sans-serif;
++  font-family: var(--font-sans);
+   font-size: 11px;
+   font-weight: 600;
+   letter-spacing: 0.08em;
+@@ -32155,7 +32161,7 @@
+ 
+ .onboarding-paywall__identity-body strong {
+   color: var(--verevon-dark-surface);
+-  font-family: var(--font-geist-sans), "Geist", Inter, ui-sans-serif, system-ui, sans-serif;
++  font-family: var(--font-sans);
+   font-size: 20px;
+   font-weight: 500;
+   line-height: 1.1;
+@@ -32177,7 +32183,7 @@
+   background: var(--verevon-surface, rgba(17, 17, 17, 0.05));
+   border: 1px solid var(--verevon-border, rgba(17, 17, 17, 0.08));
+   color: var(--verevon-text-muted);
+-  font-family: Inter, ui-sans-serif, system-ui, -apple-system, sans-serif;
++  font-family: var(--font-sans);
+   font-size: 12px;
+   font-weight: 500;
+   line-height: 1.5;
+@@ -32194,7 +32200,7 @@
+ .onboarding-paywall__header h1 {
+   margin: 0;
+   color: var(--verevon-dark-surface);
+-  font-family: var(--font-geist-sans), "Geist", Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
++  font-family: var(--font-sans);
+   font-size: clamp(46px, 4.4vw, 64px);
+   font-weight: 400;
+   line-height: 0.98;
+@@ -32204,8 +32210,7 @@
+ .onboarding-paywall__header p {
+   margin-top: 12px;
+   color: var(--verevon-text-muted);
+-  font-family:
+-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
++  font-family: var(--font-sans);
+   font-size: 15px;
+   font-weight: 500;
+   line-height: 1.6;
+@@ -32218,8 +32223,7 @@
+   align-items: center;
+   margin-top: 12px;
+   color: var(--verevon-dark-surface);
+-  font-family:
+-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
++  font-family: var(--font-sans);
+   font-size: 14px;
+   font-weight: 500;
+ }
+@@ -32319,8 +32323,7 @@
+ 
+ .onboarding-paywall-card__head strong {
+   color: var(--verevon-dark-surface);
+-  font-family:
+-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
++  font-family: var(--font-sans);
+   font-size: 17px;
+   font-weight: 650;
+ }
+@@ -32328,8 +32331,7 @@
+ .onboarding-paywall-card__badge {
+   padding: 5px 10px;
+   color: var(--verevon-dark-surface);
+-  font-family:
+-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
++  font-family: var(--font-sans);
+   font-size: 10px;
+   font-weight: 700;
+   text-transform: uppercase;
+@@ -32358,8 +32360,7 @@
+ 
+ .onboarding-paywall-card__price span {
+   color: var(--verevon-dark-surface);
+-  font-family:
+-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
++  font-family: var(--font-sans);
+   font-size: 27px;
+   font-weight: 700;
+   line-height: 1;
+@@ -32369,8 +32370,7 @@
+ .onboarding-paywall-card p,
+ .onboarding-paywall-card li {
+   color: var(--verevon-text-muted);
+-  font-family:
+-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
++  font-family: var(--font-sans);
+   font-size: 13px;
+   line-height: 1.45;
+ }
+@@ -32448,8 +32448,7 @@
+ .onboarding-paywall__suggestion-main strong,
+ .onboarding-paywall__suggestion-side strong {
+   color: var(--verevon-dark-surface);
+-  font-family:
+-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
++  font-family: var(--font-sans);
+   font-size: 16px;
+   font-weight: 750;
+ }
+@@ -32460,8 +32459,7 @@
+ .onboarding-paywall__suggestion-evidence li,
+ .onboarding-paywall__suggestion-opportunities p {
+   color: var(--verevon-text-muted);
+-  font-family:
+-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
++  font-family: var(--font-sans);
+   font-size: 13px;
+   line-height: 1.5;
+ }
+@@ -32581,16 +32579,14 @@
+ 
+ .onboarding-paywall__reason strong {
+   color: var(--verevon-dark-surface);
+-  font-family:
+-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
++  font-family: var(--font-sans);
+   font-size: 16px;
+ }
+ 
+ .onboarding-paywall__reason p {
+   margin-top: 10px;
+   color: var(--verevon-text-muted);
+-  font-family:
+-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
++  font-family: var(--font-sans);
+   font-size: 14px;
+   line-height: 1.6;
+ }
+@@ -32621,8 +32617,7 @@
+   justify-content: space-between;
+   gap: 16px;
+   color: var(--verevon-dark-surface);
+-  font-family:
+-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
++  font-family: var(--font-sans);
+ }
+ 
+ .verevon-billing-checkout__header strong {
+@@ -32670,8 +32665,7 @@
+   padding: 0;
+   background: transparent;
+   color: var(--verevon-text-muted);
+-  font-family:
+-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
++  font-family: var(--font-sans);
+   font-size: 12px;
+   letter-spacing: 0.02em;
+   transition: color 140ms ease;
+@@ -32888,8 +32882,7 @@
+   gap: 10px;
+   align-items: center;
+   color: var(--onboarding-muted);
+-  font-family:
+-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
++  font-family: var(--font-sans);
+   font-size: 13px;
+ }
+ 
+@@ -38530,10 +38523,9 @@
+ ================================================================== */
+ 
+ .button:focus-visible {
+-  outline: none;
+-  box-shadow:
+-    0 0 0 2px var(--background),
+-    0 0 0 4px rgba(238, 122, 80, 0.34);
++  outline: 2px solid var(--focus-ring);
++  outline-offset: 2px;
++  box-shadow: none;
+ }
+ 
+ .button-primary {
+@@ -39331,8 +39323,7 @@
+ .verevon-studio-profile strong,
+ .verevon-studio-profile span {
+   display: block;
+-  font-family:
+-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
++  font-family: var(--font-sans);
+ }
+ 
+ .verevon-studio-profile strong {
+@@ -39577,8 +39568,7 @@
+ .verevon-studio-block strong,
+ .verevon-studio-block p,
+ .verevon-studio-block span {
+-  font-family:
+-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
++  font-family: var(--font-sans);
+ }
+ 
+ .verevon-studio-block strong {
+@@ -40424,11 +40414,19 @@
+   cursor: pointer;
+ }
+ 
+-.verevon-insights-scope button:hover,
+-.verevon-insights-scope button:focus-visible {
+-  border-color: var(--verevon-border);
+-  background: var(--verevon-surface-soft);
+-  outline: none;
++@media (hover: hover) and (pointer: fine) {
++  .verevon-insights-scope button:not(.is-active):hover,
++  .verevon-insights-range button:not(.is-active):hover {
++    border-color: var(--verevon-border);
++    background: var(--verevon-surface-soft);
++  }
++}
++
++.verevon-insights-scope button:focus-visible,
++.verevon-insights-range button:focus-visible,
++.verevon-insights-tab:focus-visible {
++  outline: 2px solid var(--focus-ring, var(--verevon-accent-ink));
++  outline-offset: 2px;
+ }
+ 
+ .verevon-insights-scope button.is-active {
+@@ -40471,13 +40469,6 @@
+   cursor: pointer;
+ }
+ 
+-.verevon-insights-range button:hover,
+-.verevon-insights-range button:focus-visible {
+-  border-color: var(--verevon-border);
+-  background: var(--verevon-surface-soft);
+-  outline: none;
+-}
+-
+ .verevon-insights-range button.is-active {
+   border-color: var(--verevon-primary);
+   background: var(--verevon-primary);
+@@ -41898,97 +41889,12 @@
+   gap: 8px;
+ }
+ 
++/* The folder card is a static article. The unscoped legacy .knowledge-folder-card
++   rule (button-style card) still sets cursor: pointer and a 1px outline, so keep
++   these two resets here; all layout and colour comes from the card block above. */
+ .knowledge-page-surface--docs .knowledge-folder-card {
+-  display: grid;
+-  min-height: 96px;
+-  grid-template-columns: 32px minmax(0, 1fr) auto;
+-  grid-template-rows: 1fr auto;
+-  gap: 7px 9px;
+-  overflow: hidden;
+-  border: 1px solid #e2e2dd;
+-  border-radius: 10px;
+-  background: #ffffff;
+-  padding: 12px;
+-  color: #22221f;
+   cursor: default;
+   outline: none;
+-  box-shadow: 0 2px 8px rgb(25 25 22 / 3%);
+-}
+-
+-.knowledge-page-surface--docs .knowledge-folder-card:hover {
+-  border-color: #c9c9c2;
+-  box-shadow: 0 8px 18px rgb(25 25 22 / 7%);
+-  transform: translateY(-1px);
+-}
+-
+-.knowledge-folder-card__icon {
+-  display: grid;
+-  width: 32px;
+-  height: 26px;
+-  grid-row: 1 / span 2;
+-  place-items: center;
+-  align-self: start;
+-  border-radius: 6px;
+-  background: #eee9dd;
+-  color: #8c7048;
+-}
+-
+-.knowledge-folder-card__icon--blue { background: #e7edf5; color: #547297; }
+-.knowledge-folder-card__icon--gray { background: #ececea; color: #777871; }
+-.knowledge-folder-card__icon--green { background: #e8f0ea; color: #5d856a; }
+-.knowledge-folder-card__icon--warm { background: #f3e8dc; color: #9a6946; }
+-
+-.knowledge-page-surface--docs .knowledge-folder-card__copy {
+-  display: block;
+-  min-width: 0;
+-}
+-
+-.knowledge-page-surface--docs .knowledge-folder-card__copy h3 {
+-  overflow: hidden;
+-  margin: 0;
+-  color: #272721;
+-  font-size: 11px;
+-  font-weight: 700;
+-  text-overflow: ellipsis;
+-  white-space: nowrap;
+-}
+-
+-.knowledge-page-surface--docs .knowledge-folder-card__copy small {
+-  display: block;
+-  overflow: hidden;
+-  margin-top: 4px;
+-  color: #87877f;
+-  font-size: 9px;
+-  text-overflow: ellipsis;
+-  white-space: nowrap;
+-}
+-
+-.knowledge-page-surface--docs .knowledge-folder-card__stats {
+-  position: static;
+-  display: flex;
+-  align-items: baseline;
+-  gap: 4px;
+-  grid-column: 2;
+-  grid-row: 2;
+-}
+-
+-.knowledge-page-surface--docs .knowledge-folder-card__stats strong {
+-  color: #282822;
+-  font-size: 13px;
+-  font-weight: 700;
+-  line-height: 1;
+-}
+-
+-.knowledge-page-surface--docs .knowledge-folder-card__stats small {
+-  color: #96968f;
+-  font-size: 9px;
+-}
+-
+-.knowledge-page-surface--docs .knowledge-folder-card__arrow {
+-  align-self: end;
+-  color: #aaa9a2;
+-  font-size: 14px;
+-  line-height: 1;
+ }
+ 
+ .knowledge-pulse-grid {
+@@ -42485,7 +42391,7 @@
+   gap: 6px;
+   padding: 9px 14px;
+   color: var(--verevon-text);
+-  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
++  font-family: var(--font-sans);
+   font-size: 12.5px;
+   font-weight: 600;
+   background: var(--verevon-surface);
+@@ -42617,7 +42523,8 @@
+ 
+ .verevon-support-workspace > .verevon-inbox-page,
+ .verevon-support-workspace > .verevon-ticketing-page,
+-.verevon-support-workspace > .verevon-support-outbound {
++.verevon-support-workspace > .verevon-support-outbound,
++.verevon-support-workspace > .verevon-drafts {
+   min-height: 0;
+   flex: 1 1 auto;
+ }
+@@ -43205,7 +43112,7 @@
+    with the draft's own text rather than a metadata line, because the text is
+    what a reviewer is deciding about. */
+ .verevon-drafts {
+-  min-height: calc(100dvh - 132px);
++  overflow-y: auto;
+   padding: 28px clamp(16px, 4vw, 56px);
+   background: var(--panel);
+ }
+@@ -43376,7 +43283,7 @@
+ 
+ @media (max-width: 640px) {
+   .verevon-ai-review-queue { min-height: calc(100dvh - 112px); padding: 20px 16px; }
+-  .verevon-drafts { min-height: calc(100dvh - 112px); padding: 20px 16px; }
++  .verevon-drafts { padding: 20px 16px; }
+   .verevon-ai-review-outcomes__metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+   .verevon-ai-review-queue__item { align-items: flex-start; flex-direction: column; gap: 12px; }
+ }
+@@ -46467,6 +46374,127 @@
+   color: var(--verevon-text);
+ }
+ 
++/* The editable step list (plan-gate): the model's plan as data, in the order it
++   will run. Numbering is a counter rather than the list's own marker because
++   each row is a flex line (input + actions), and a flex `li` has no marker. */
++.verevon-chat-plan__summary {
++  margin: 0;
++  font-size: 13px;
++  font-weight: 600;
++  line-height: 1.4;
++  color: var(--verevon-text);
++}
++
++.verevon-chat-plan__steps {
++  display: flex;
++  flex-direction: column;
++  gap: 6px;
++  margin: 0;
++  padding: 0;
++  list-style: none;
++  counter-reset: plan-step;
++}
++
++.verevon-chat-plan__step {
++  display: flex;
++  align-items: center;
++  gap: 8px;
++  counter-increment: plan-step;
++}
++
++.verevon-chat-plan__step::before {
++  content: counter(plan-step) '.';
++  min-width: 18px;
++  font-size: 12px;
++  text-align: right;
++  color: var(--verevon-text-muted);
++}
++
++.verevon-chat-plan__step-input {
++  flex: 1;
++  min-width: 0;
++  padding: 8px 10px;
++  font: inherit;
++  font-size: 12px;
++  color: var(--verevon-text);
++  background: var(--verevon-i-surface);
++  border: 0;
++  border-radius: var(--chat-r-sm, 8px);
++  box-shadow: var(--verevon-chat-shadow);
++}
++
++.verevon-chat-plan__step-actions {
++  display: flex;
++  gap: 2px;
++}
++
++.verevon-chat-plan__step-actions button {
++  display: inline-flex;
++  align-items: center;
++  justify-content: center;
++  width: 28px;
++  height: 28px;
++  padding: 0;
++  border: 0;
++  border-radius: 999px;
++  background: transparent;
++  color: var(--verevon-text-muted);
++  cursor: pointer;
++  transition: background-color 140ms ease, color 140ms ease;
++}
++
++.verevon-chat-plan__step-actions button:hover:not(:disabled) {
++  background: var(--verevon-i-surface);
++  color: var(--verevon-text);
++}
++
++.verevon-chat-plan__step-actions button:focus-visible,
++.verevon-chat-plan__add-step:focus-visible,
++.verevon-chat-plan__reject:focus-visible {
++  outline: 2px solid var(--verevon-a-earth);
++  outline-offset: 1px;
++}
++
++.verevon-chat-plan__step-actions button:disabled {
++  opacity: 0.35;
++  cursor: not-allowed;
++}
++
++@media (pointer: coarse) {
++  .verevon-chat-plan__step-actions button {
++    width: 36px;
++    height: 36px;
++  }
++}
++
++.verevon-chat-plan__add-step,
++.verevon-chat-plan__reject {
++  padding: 6px 12px;
++  font: inherit;
++  font-size: 12px;
++  border: 0;
++  border-radius: 999px;
++  background: transparent;
++  color: var(--verevon-text-muted);
++  cursor: pointer;
++  transition: background-color 140ms ease, color 140ms ease;
++}
++
++.verevon-chat-plan__add-step {
++  align-self: flex-start;
++}
++
++.verevon-chat-plan__add-step:hover,
++.verevon-chat-plan__reject:hover:not(:disabled) {
++  background: var(--verevon-i-surface);
++  color: var(--verevon-text);
++}
++
++.verevon-chat-plan__reject:disabled {
++  opacity: 0.55;
++  cursor: not-allowed;
++}
++
+ .verevon-chat-plan__rungs {
+   display: flex;
+   flex-wrap: wrap;
+@@ -47923,10 +47951,16 @@
+   display: block;
+   width: 100%;
+   height: 100%;
+-  outline: none;
+   cursor: crosshair;
+ }
+ 
++/* The canvas fills its frame, so the ring is drawn inset. An inset box-shadow
++   would paint beneath the (opaque) canvas bitmap, so use an inset outline. */
++.verevon-remote-support__screen canvas:focus-visible {
++  outline: 2px solid var(--focus-ring);
++  outline-offset: -2px;
++}
++
+ .verevon-remote-support__screen canvas[data-view-only='true'] {
+   cursor: default;
+ }

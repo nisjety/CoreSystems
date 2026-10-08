@@ -1,0 +1,30 @@
+--- a/src/styles/global.css
++++ b/src/styles/global.css
+@@ -42586,7 +42586,8 @@
+ 
+ .verevon-support-workspace > .verevon-inbox-page,
+ .verevon-support-workspace > .verevon-ticketing-page,
+-.verevon-support-workspace > .verevon-support-outbound {
++.verevon-support-workspace > .verevon-support-outbound,
++.verevon-support-workspace > .verevon-drafts {
+   min-height: 0;
+   flex: 1 1 auto;
+ }
+@@ -43174,7 +43175,7 @@
+    with the draft's own text rather than a metadata line, because the text is
+    what a reviewer is deciding about. */
+ .verevon-drafts {
+-  min-height: calc(100dvh - 132px);
++  overflow-y: auto;
+   padding: 28px clamp(16px, 4vw, 56px);
+   background: var(--panel);
+ }
+@@ -43345,7 +43346,7 @@
+ 
+ @media (max-width: 640px) {
+   .verevon-ai-review-queue { min-height: calc(100dvh - 112px); padding: 20px 16px; }
+-  .verevon-drafts { min-height: calc(100dvh - 112px); padding: 20px 16px; }
++  .verevon-drafts { padding: 20px 16px; }
+   .verevon-ai-review-outcomes__metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+   .verevon-ai-review-queue__item { align-items: flex-start; flex-direction: column; gap: 12px; }
+ }

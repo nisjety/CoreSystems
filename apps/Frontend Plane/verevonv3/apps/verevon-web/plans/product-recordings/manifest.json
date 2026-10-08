@@ -36,13 +36,13 @@
         }
       ],
       "currentEvidence": {
-        "reviewedOn": "2026-09-27",
+        "reviewedOn": "2026-09-30",
         "consecutivePassesOnReleaseBuild": 5,
         "record": "evidence/PRODUCT_RECORDING_READINESS_2026-09-24.md",
         "latestRehearsal": {
           "result": "passed",
           "kind": "editorial-rehearsal",
-          "build": "sha256:e90d485701eb0b3494ea16b61aeaa5727c59e0455ec002b1e2679dff4cbe45b8",
+          "build": "sha256:1ff7c6a268d606add3e7bd5883e929c36be300e9e930581e095803ecd4a4d09d",
           "publicationApproved": false
         }
       },
@@ -84,13 +84,13 @@
         }
       ],
       "currentEvidence": {
-        "reviewedOn": "2026-09-27",
+        "reviewedOn": "2026-09-30",
         "consecutivePassesOnReleaseBuild": 5,
         "record": "evidence/PRODUCT_RECORDING_READINESS_2026-09-24.md",
         "latestRehearsal": {
           "result": "passed",
           "kind": "editorial-rehearsal",
-          "build": "sha256:e90d485701eb0b3494ea16b61aeaa5727c59e0455ec002b1e2679dff4cbe45b8",
+          "build": "sha256:1ff7c6a268d606add3e7bd5883e929c36be300e9e930581e095803ecd4a4d09d",
           "publicationApproved": false
         }
       },
@@ -132,13 +132,13 @@
         }
       ],
       "currentEvidence": {
-        "reviewedOn": "2026-09-27",
+        "reviewedOn": "2026-09-30",
         "consecutivePassesOnReleaseBuild": 5,
         "record": "evidence/PRODUCT_RECORDING_READINESS_2026-09-24.md",
         "latestRehearsal": {
           "result": "passed",
           "kind": "editorial-rehearsal",
-          "build": "sha256:e90d485701eb0b3494ea16b61aeaa5727c59e0455ec002b1e2679dff4cbe45b8",
+          "build": "sha256:1ff7c6a268d606add3e7bd5883e929c36be300e9e930581e095803ecd4a4d09d",
           "publicationApproved": false
         }
       },
@@ -179,13 +179,13 @@
         }
       ],
       "currentEvidence": {
-        "reviewedOn": "2026-09-27",
+        "reviewedOn": "2026-09-30",
         "consecutivePassesOnReleaseBuild": 5,
         "record": "evidence/PRODUCT_RECORDING_READINESS_2026-09-24.md",
         "latestRehearsal": {
           "result": "passed",
           "kind": "editorial-rehearsal",
-          "build": "sha256:e90d485701eb0b3494ea16b61aeaa5727c59e0455ec002b1e2679dff4cbe45b8",
+          "build": "sha256:1ff7c6a268d606add3e7bd5883e929c36be300e9e930581e095803ecd4a4d09d",
           "publicationApproved": false
         }
       },
@@ -199,19 +199,19 @@
   "recordingReadiness": {
     "requiredConsecutivePasses": 5,
     "reasons": [
-      "Third freeze (2026-09-27T04:30Z; the owner rulings of 2026-09-27 on scoped revisions; image IDs and switches in the readiness record): all four scenarios reached five consecutive private rehearsal passes with the capture tool, no automatic retry and all attempts kept: 01 at attempt 8 (18/20 plus 2/2), 02 at attempt 5 (20/20), 03 at attempt 5 (18/20 plus 3/3), 04 at attempt 6 (16/20 plus 3/3).",
-      "Durability passed: the 20 qualifying threads reopened identically in fresh browser contexts before and after a controlled restart of Model Plane Postgres, session-core, model-gateway and verevon-gateway-rs.",
-      "Recovery passed: product-recovery.spec.ts 9/9 on this build and the live Q08 reload-resume check on the restarted system.",
-      "Performance remains partial against the owner targets (first turn p95 <= 120 s, follow-up p95 <= 70 s, no timeouts, >= 20 samples per journey turn): every first turn and the 01/02/04 follow-ups pass; the 03 follow-up p95 is 74.7 s (117.4 s on the second freeze) and 03 had one first-turn response_validation_timeout.",
-      "Correctness remains partial: 8 of 80 series attempts failed. Rejection cascades on turns that keep the complete recheck (03 first turns x2, 04 new notes x2), exhausted document-stage repairs in 01 (x2), and two 04 plans without the required 'earliest possible date' wording (author guidance v1).",
-      "Experience remains partial: mobile/desktop, keyboard and reduced-motion checks pass on the four journeys (viewport spec 9/9, live Q08 mobile); caption tracks and the editorial/media review of the films are not done. Trust is not re-evidenced on this build. No public media pack is approved."
+      "Final pass (2026-09-30, model-gateway image 1ff7c6a268d6; image IDs, switches and the failure analysis in the readiness record, sections Q16k and Q16L): all four scenarios reached five consecutive private rehearsal passes with the capture tool, no automatic retry and all attempts kept: 04 at attempt 5 (20/20), 03 at attempt 8 (19/20), 02 at attempt 5 (17/20 plus 4/4), 01 at attempt 5 (20/20). The fixtures match the hashes below.",
+      "Durability passed: the twenty qualifying threads of each journey reopened identically (20/20 evidence files, 21/21 checks before and after) in fresh browser contexts around a controlled restart of Model Plane Postgres, session-core, model-gateway and verevon-gateway-rs.",
+      "Recovery passed: product-recovery.spec.ts 9/9 on this build and the live Q08 reload-resume and mobile markdown checks 2/2 on the restarted system.",
+      "Performance passed against the owner targets (first turn p95 <= 120 s, follow-up p95 <= 70 s, no timeouts, >= 20 samples per journey turn): first-turn p95 43.0 to 105.7 s and follow-up p95 45.3 to 57.7 s across the four journeys, no timeout in 84 takes, 20 to 21 samples per turn. The previous blockers are gone: 03 follow-up p95 (74.7 s at the third freeze) is 57.7 s after section-only revision, and the two journey-04 timeouts of the previous series are gone after finer review batches and a 120 s source check. Single turns at 121.1 s (04 first), 106.5 s (04 follow-up) and 73.2 s (01 follow-up) are repair loops and are tolerated by the nearest-rank p95 at n=20.",
+      "Correctness remains partial: 4 of 80 final-pass attempts failed, all model behaviour and none a timeout (a revision whose recheck still found unsupported text after one repair in 03; in 02 a local check the repairs did not clear, a first create_artifact call with only an id, and a report written as chat text with no artifact), plus the content failures of the earlier series (04 plans without the required stand-in or buffer wording under author guidance v1). Source notes under posts now survive a section-only revision (14 of 14 documents with the layout that completed a revision: 4 in q16j and 10 in the final pass).",
+      "Experience remains partial: mobile/desktop, keyboard and reduced-motion checks pass on the four journeys (viewport spec 9/9, live Q08 mobile); caption tracks and the editorial/media review of the films are not done. Trust is evidenced by the memory and connected-account specs (3/3 on this build); the cross-tenant authority spec is not re-run on this build (its last recorded pass is 2026-07-16). It does not need owner-made passwords: its harness builds a disposable stack with random per-run credentials, but it builds about nine images, calls a macOS-only stat, and needs the owner's approval of a quiet run window (plan task J7). No public media pack is approved."
     ],
-    "reviewedOn": "2026-09-27",
+    "reviewedOn": "2026-09-30",
     "evidence": "evidence/PRODUCT_RECORDING_READINESS_2026-09-24.md",
     "status": "blocked",
     "gates": {
       "trust": "partial",
-      "performance": "partial",
+      "performance": "passed",
       "repeatability": "passed",
       "experience": "partial",
       "recovery": "passed",

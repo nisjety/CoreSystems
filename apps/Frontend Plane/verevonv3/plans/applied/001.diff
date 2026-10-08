@@ -1,0 +1,49 @@
+--- a/src/styles/global.css
++++ b/src/styles/global.css
+@@ -52,6 +52,7 @@
+   --verevon-border-soft: #eeeeec;
+   --verevon-border-strong: #d8d8d4;
+   --verevon-primary: #171717;
++  --verevon-primary-foreground: #ffffff;
+   --verevon-primary-hover: #34363d;
+   --verevon-primary-soft: #efefee;
+   --verevon-primary-dark: #111111;
+@@ -40424,11 +40425,19 @@
+   cursor: pointer;
+ }
+ 
+-.verevon-insights-scope button:hover,
+-.verevon-insights-scope button:focus-visible {
+-  border-color: var(--verevon-border);
+-  background: var(--verevon-surface-soft);
+-  outline: none;
++@media (hover: hover) and (pointer: fine) {
++  .verevon-insights-scope button:not(.is-active):hover,
++  .verevon-insights-range button:not(.is-active):hover {
++    border-color: var(--verevon-border);
++    background: var(--verevon-surface-soft);
++  }
++}
++
++.verevon-insights-scope button:focus-visible,
++.verevon-insights-range button:focus-visible,
++.verevon-insights-tab:focus-visible {
++  outline: 2px solid var(--focus-ring, var(--verevon-accent-ink));
++  outline-offset: 2px;
+ }
+ 
+ .verevon-insights-scope button.is-active {
+@@ -40471,13 +40480,6 @@
+   cursor: pointer;
+ }
+ 
+-.verevon-insights-range button:hover,
+-.verevon-insights-range button:focus-visible {
+-  border-color: var(--verevon-border);
+-  background: var(--verevon-surface-soft);
+-  outline: none;
+-}
+-
+ .verevon-insights-range button.is-active {
+   border-color: var(--verevon-primary);
+   background: var(--verevon-primary);
