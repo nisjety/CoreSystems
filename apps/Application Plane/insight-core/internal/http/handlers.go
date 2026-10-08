@@ -56,6 +56,31 @@ func (h *Handler) ListConnectors(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"data": connectors})
 }
 
+// Internal BFF orchestration only. The browser route is GET and does not
+// accept a source snapshot supplied by the browser.
+func (h *Handler) OverviewWithOutcomes(c *gin.Context) {
+	orgID := requireOrgID(c)
+	if orgID == "" {
+		return
+	}
+	query, err := overviewQueryFromRequest(c, orgID)
+	if err != nil {
+		writeServiceError(c, insights.ErrInvalidInput)
+		return
+	}
+	var snapshot insights.OutcomeSnapshot
+	if err := decodeJSONBody(c, &snapshot); err != nil {
+		c.JSON(http.StatusBadRequest, errorPayload("invalid_json", "Invalid source snapshot."))
+		return
+	}
+	report, err := h.service.OverviewWithOutcomes(c.Request.Context(), query, snapshot)
+	if err != nil {
+		writeServiceError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"data": report})
+}
+
 func (h *Handler) IngestEvent(c *gin.Context) {
 	orgID := requireOrgID(c)
 	if orgID == "" {

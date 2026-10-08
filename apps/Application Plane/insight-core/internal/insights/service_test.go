@@ -36,6 +36,9 @@ func TestOverviewIncludesAllVerevonSurfaces(t *testing.T) {
 	if overview.Surfaces[0].Surface != SurfaceSocial || overview.Surfaces[0].Metrics[0].Value != 3 {
 		t.Fatalf("social rollup = %#v, want published_posts=3", overview.Surfaces[0])
 	}
+	if overview.ContractVersion != "2.0" || overview.Coverage != "unknown" || overview.CoverageDetail == "" {
+		t.Fatalf("report contract = %#v", overview)
+	}
 }
 
 func TestOverviewCitesRealEventSourcesNeverFabricates(t *testing.T) {
@@ -86,13 +89,16 @@ func TestOverviewCitesRealEventSourcesNeverFabricates(t *testing.T) {
 	if executed.Value != 2 {
 		t.Errorf("scorecard value = %v, want 2", executed.Value)
 	}
+	if executed.Definition == "" {
+		t.Errorf("scorecard definition must be present in the versioned report")
+	}
 	if ticketsCreated.Source != "" {
 		t.Errorf("unattributed metric must have an empty source, never fabricated; got %q", ticketsCreated.Source)
 	}
 }
 
-// TestOverviewRelabelsPilotHeadlineScorecards locks the "Conversations
-// handled" / "AI drafts approved" / "AI drafts rejected" presentation labels
+// TestOverviewRelabelsPilotHeadlineScorecards locks the "Tickets resolved" /
+// "AI drafts approved" / "AI drafts rejected" presentation labels
 // to their exact real metric ids — relabeling never changes the recorded
 // value or fabricates a new one.
 func TestOverviewRelabelsPilotHeadlineScorecards(t *testing.T) {
@@ -123,7 +129,7 @@ func TestOverviewRelabelsPilotHeadlineScorecards(t *testing.T) {
 	}
 
 	wantLabels := map[string]string{
-		"inbox.tickets_resolved":    "Conversations handled",
+		"inbox.tickets_resolved":    "Tickets resolved",
 		"inbox.ai_actions_approved": "AI drafts approved",
 		"inbox.ai_actions_rejected": "AI drafts rejected",
 		"inbox.tickets_created":     "inbox tickets created",

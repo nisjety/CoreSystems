@@ -34,6 +34,25 @@ func (r *MemoryRepository) RecordMetricEvent(_ context.Context, event MetricEven
 	return &result, nil
 }
 
+func (r *MemoryRepository) RecordMetricSnapshot(_ context.Context, event MetricEvent) (*MetricEvent, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for i := range r.events {
+		if r.events[i].ID == event.ID {
+			if r.events[i].OrgID != event.OrgID || r.events[i].Source != "social-core" || r.events[i].Surface != SurfaceExternalAnalytics {
+				break
+			}
+			r.events[i] = copyMetricEvent(event)
+			stored := copyMetricEvent(event)
+			return &stored, nil
+		}
+	}
+	stored := copyMetricEvent(event)
+	r.events = append(r.events, stored)
+	result := copyMetricEvent(stored)
+	return &result, nil
+}
+
 func (r *MemoryRepository) ListMetricEvents(_ context.Context, query OverviewQuery) ([]MetricEvent, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()

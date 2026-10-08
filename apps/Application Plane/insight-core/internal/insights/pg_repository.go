@@ -44,6 +44,32 @@ ON CONFLICT (id) DO NOTHING`,
 	return &stored, nil
 }
 
+// RecordMetricSnapshot upserts only deterministic, replaceable snapshots.
+// The service restricts this path to social-core external analytics rows.
+func (r *PGRepository) RecordMetricSnapshot(ctx context.Context, event MetricEvent) (*MetricEvent, error) {
+	dims, err := json.Marshal(copyMap(event.Dimensions))
+	if err != nil {
+		return nil, err
+	}
+	_, err = r.pool.Exec(ctx, `
+INSERT INTO insight_core.insight_metric_events
+	(id, org_id, actor_user_id, surface, metric, value, unit, source, connector_type, dimensions, occurred_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11)
+ON CONFLICT (id) DO UPDATE SET
+	value = EXCLUDED.value, unit = EXCLUDED.unit, dimensions = EXCLUDED.dimensions,
+	connector_type = EXCLUDED.connector_type, occurred_at = EXCLUDED.occurred_at
+WHERE insight_core.insight_metric_events.org_id = EXCLUDED.org_id
+	AND insight_core.insight_metric_events.source = 'social-core'
+	AND insight_core.insight_metric_events.surface = 'external_analytics'`,
+		event.ID, event.OrgID, event.ActorUserID, event.Surface, event.Metric, event.Value, event.Unit,
+		event.Source, event.ConnectorType, dims, event.OccurredAt)
+	if err != nil {
+		return nil, err
+	}
+	stored := copyMetricEvent(event)
+	return &stored, nil
+}
+
 // ListMetricEvents returns org-scoped events for the requested surfaces within an
 // optional time window. The service normalizes query.Surfaces (defaulting to all
 // supported surfaces), matching the in-memory repo's surface filter.

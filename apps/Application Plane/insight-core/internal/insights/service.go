@@ -3,6 +3,7 @@ package insights
 import (
 	"context"
 	"fmt"
+	"math"
 	"sort"
 	"strings"
 	"time"
@@ -42,6 +43,19 @@ func (s *Service) RecordMetricEvent(ctx context.Context, input IngestMetricEvent
 	return s.repository.RecordMetricEvent(ctx, event)
 }
 
+// RecordMetricSnapshot replaces deterministic provider snapshot rows when a
+// source corrects its data. Lifecycle events remain append-only.
+func (s *Service) RecordMetricSnapshot(ctx context.Context, input IngestMetricEventInput) (*MetricEvent, error) {
+	event, err := normalizeMetricEvent(input, s.now)
+	if err != nil {
+		return nil, err
+	}
+	if event.Surface != SurfaceExternalAnalytics || event.Source != "social-core" {
+		return nil, fmt.Errorf("%w: replaceable snapshots must come from social-core external analytics", ErrInvalidInput)
+	}
+	return s.repository.RecordMetricSnapshot(ctx, event)
+}
+
 func (s *Service) Overview(ctx context.Context, query OverviewQuery) (*Overview, error) {
 	normalized, err := normalizeOverviewQuery(query)
 	if err != nil {
@@ -57,14 +71,17 @@ func (s *Service) Overview(ctx context.Context, query OverviewQuery) (*Overview,
 	}
 	surfaces := buildSurfaceOverviews(normalized.Surfaces, events)
 	return &Overview{
-		OrgID:        normalized.OrgID,
-		Plane:        OwnershipDecision(),
-		Surfaces:     surfaces,
-		Scorecards:   buildScorecards(surfaces),
-		Connectors:   connectors,
-		GeneratedAt:  s.now().UTC(),
-		Window:       TimeWindow{From: normalized.From, To: normalized.To},
-		ConnectorLag: connectorGaps(connectors),
+		ContractVersion: "2.0",
+		OrgID:           normalized.OrgID,
+		Plane:           OwnershipDecision(),
+		Surfaces:        surfaces,
+		Scorecards:      buildScorecards(surfaces),
+		Connectors:      connectors,
+		GeneratedAt:     s.now().UTC(),
+		Window:          TimeWindow{From: normalized.From, To: normalized.To},
+		ConnectorLag:    connectorGaps(connectors),
+		Coverage:        "unknown",
+		CoverageDetail:  "Source delivery checkpoints are not yet available. Recorded rows show observed activity, but do not certify that every source event was delivered.",
 	}, nil
 }
 
@@ -94,6 +111,9 @@ func normalizeMetricEvent(input IngestMetricEventInput, now func() time.Time) (M
 	metric := normalizeToken(input.Metric)
 	if orgID == "" || surface == "" || metric == "" {
 		return MetricEvent{}, fmt.Errorf("%w: org_id, surface, and metric are required", ErrInvalidInput)
+	}
+	if math.IsNaN(input.Value) || math.IsInf(input.Value, 0) {
+		return MetricEvent{}, fmt.Errorf("%w: metric value must be finite", ErrInvalidInput)
 	}
 	if !isSupportedSurface(surface) {
 		return MetricEvent{}, fmt.Errorf("%w: unsupported surface %q", ErrInvalidInput, surface)
@@ -174,33 +194,52 @@ func rollupMetrics(events []MetricEvent) []MetricRollup {
 		value   float64
 		unit    string
 		sources map[string]struct{}
+		count   int
 	}
 	aggregates := map[string]aggregate{}
 	for _, event := range events {
-		current, ok := aggregates[event.Metric]
+		unit := event.Unit
+		if event.Surface == SurfaceExternalAnalytics && event.Source == "social-core" && unit == "count" {
+			// Older ingestion mislabeled every provider metric as count. Keep
+			// those historical rows available but prevent false numeric claims.
+			unit = "unverified"
+		}
+		key := event.Metric + "\x00" + unit
+		current, ok := aggregates[key]
 		if !ok {
 			current.sources = map[string]struct{}{}
 		}
 		current.value += event.Value
+		current.count++
 		if current.unit == "" {
-			current.unit = event.Unit
+			current.unit = unit
 		}
 		// Cite the real producer(s) behind the events — never invent attribution.
 		if source := strings.TrimSpace(event.Source); source != "" {
 			current.sources[source] = struct{}{}
 		}
-		aggregates[event.Metric] = current
+		aggregates[key] = current
 	}
 	metrics := make([]MetricRollup, 0, len(aggregates))
-	for metric, aggregate := range aggregates {
+	for key, aggregate := range aggregates {
+		metric := strings.SplitN(key, "\x00", 2)[0]
+		aggregation := "sum_of_recorded_events"
+		if aggregate.unit == "unverified" {
+			aggregation = "unverified"
+		}
 		metrics = append(metrics, MetricRollup{
-			Metric: metric,
-			Value:  aggregate.value,
-			Unit:   aggregate.unit,
-			Source: joinSources(aggregate.sources),
+			Metric:      metric,
+			Value:       aggregate.value,
+			Unit:        aggregate.unit,
+			Source:      joinSources(aggregate.sources),
+			EventCount:  aggregate.count,
+			Aggregation: aggregation,
 		})
 	}
 	sort.Slice(metrics, func(i, j int) bool {
+		if metrics[i].Metric == metrics[j].Metric {
+			return metrics[i].Unit < metrics[j].Unit
+		}
 		return metrics[i].Metric < metrics[j].Metric
 	})
 	return metrics
@@ -235,15 +274,26 @@ func lastEventAt(events []MetricEvent) *time.Time {
 func buildScorecards(surfaces []SurfaceOverview) []Scorecard {
 	scorecards := []Scorecard{}
 	for _, surface := range surfaces {
+		metricCounts := map[string]int{}
 		for _, metric := range surface.Metrics {
+			metricCounts[metric.Metric]++
+		}
+		for _, metric := range surface.Metrics {
+			id := surface.Surface + "." + metric.Metric
+			if metricCounts[metric.Metric] > 1 {
+				id += "." + strings.ReplaceAll(metric.Unit, " ", "_")
+			}
 			scorecards = append(scorecards, Scorecard{
-				ID:      surface.Surface + "." + metric.Metric,
-				Label:   scorecardLabel(surface.Surface, metric.Metric),
-				Surface: surface.Surface,
-				Metric:  metric.Metric,
-				Value:   metric.Value,
-				Unit:    metric.Unit,
-				Source:  metric.Source,
+				ID:          id,
+				Label:       scorecardLabel(surface.Surface, metric.Metric),
+				Definition:  scorecardDefinition(surface.Surface, metric.Metric),
+				Surface:     surface.Surface,
+				Metric:      metric.Metric,
+				Value:       metric.Value,
+				Unit:        metric.Unit,
+				Source:      metric.Source,
+				EventCount:  metric.EventCount,
+				Aggregation: metric.Aggregation,
 			})
 		}
 	}
@@ -251,6 +301,22 @@ func buildScorecards(surfaces []SurfaceOverview) []Scorecard {
 		return scorecards[i].ID < scorecards[j].ID
 	})
 	return scorecards
+}
+
+// scorecardDefinition gives reports and model consumers the exact meaning of
+// the small set of business-facing metrics. Unlisted event series remain
+// described conservatively as recorded values rather than inferred outcomes.
+func scorecardDefinition(surface, metric string) string {
+	switch surface + "." + metric {
+	case "inbox.tickets_resolved":
+		return "Ticket-resolution events recorded by Conversation Core during the selected event-time window. This is not a distinct-ticket count and may include later resolutions after reopening."
+	case "inbox.ai_actions_approved":
+		return "AI action approval events recorded by Conversation Core during the selected event-time window; includes action types beyond reply drafts."
+	case "inbox.ai_actions_rejected":
+		return "AI action rejection events recorded by Conversation Core during the selected event-time window; includes action types beyond reply drafts."
+	default:
+		return "Sum of recorded source events for this metric and unit during the selected event-time window."
+	}
 }
 
 func connectorGaps(connectors []ConnectorSlot) []ConnectorGap {
@@ -281,10 +347,7 @@ func connectorGaps(connectors []ConnectorSlot) []ConnectorGap {
 // not listed here fall back to the generic transform; nothing here changes
 // the underlying value, source, or unit — it is presentation only.
 var scorecardLabelOverrides = map[string]string{
-	// "Conversations handled" is the pilot's first headline number (see
-	// verevon-feature-map.md's Insights "done-enough gate"): the real count of
-	// conversation-core tickets marked resolved.
-	"inbox.tickets_resolved": "Conversations handled",
+	"inbox.tickets_resolved": "Tickets resolved",
 	// Feeds the "AI draft acceptance %" headline number as
 	// approved / (approved + rejected); see metric_subscriber.go's
 	// processAIActionReviewed for how these two metrics are recorded.

@@ -40,6 +40,10 @@ type MetricRecorder interface {
 	RecordMetricEvent(ctx context.Context, input insights.IngestMetricEventInput) (*insights.MetricEvent, error)
 }
 
+type metricSnapshotRecorder interface {
+	RecordMetricSnapshot(ctx context.Context, input insights.IngestMetricEventInput) (*insights.MetricEvent, error)
+}
+
 // SocialMetricsFetcher fetches the real provider-metric rows behind a
 // metrics.snapshotted event (which carries only a summary count).
 // *socialmetrics.Client satisfies it.
@@ -303,19 +307,28 @@ func (s *MetricSubscriber) processProviderMetricsSnapshotted(ctx context.Context
 	anyFailure := false
 	for _, row := range rows {
 		campaignID, _ := row.Dimensions["campaign_id"].(string)
-		dedupKey := fmt.Sprintf("%s|%s|%s|%s|%s", accountID, row.ProviderKey, row.MetricName, campaignID, row.SnapshotDate.Format("2006-01-02"))
-		if _, err := s.recorder.RecordMetricEvent(ctx, insights.IngestMetricEventInput{
+		// Include tenant identity in the deterministic key. Account IDs are not
+		// guaranteed globally unique across organizations.
+		dedupKey := fmt.Sprintf("%s|%s|%s|%s|%s|%s", orgID, accountID, row.ProviderKey, row.MetricName, campaignID, row.SnapshotDate.Format("2006-01-02"))
+		input := insights.IngestMetricEventInput{
 			ID:            "ins_evt_socialmetric_" + stableHex(dedupKey),
 			OrgID:         orgID,
 			Surface:       insights.SurfaceExternalAnalytics,
 			Metric:        row.MetricName,
 			Value:         row.MetricValue,
-			Unit:          "count",
+			Unit:          metricUnit(row.Dimensions),
 			Source:        metricSourceSocial,
 			ConnectorType: row.ProviderKey,
 			Dimensions:    row.Dimensions,
 			OccurredAt:    row.SnapshotDate,
-		}); err != nil {
+		}
+		var err error
+		if recorder, ok := s.recorder.(metricSnapshotRecorder); ok {
+			_, err = recorder.RecordMetricSnapshot(ctx, input)
+		} else {
+			_, err = s.recorder.RecordMetricEvent(ctx, input)
+		}
+		if err != nil {
 			log.Printf("[insight-core/metric-subscriber] record provider metric %s for org %s: %v", row.MetricName, orgID, err)
 			anyFailure = true
 		}
@@ -324,6 +337,20 @@ func (s *MetricSubscriber) processProviderMetricsSnapshotted(ctx context.Context
 		return outcomeRetry
 	}
 	return outcomeAck
+}
+
+// Provider rows do not currently carry a typed unit in social-core's wire
+// contract. Preserve an explicit unit if present; otherwise leave it unknown
+// instead of falsely describing spend/ratios as counts.
+func metricUnit(dimensions map[string]any) string {
+	if dimensions == nil {
+		return "unverified"
+	}
+	unit, _ := dimensions["unit"].(string)
+	if unit = strings.TrimSpace(unit); unit != "" {
+		return unit
+	}
+	return "unverified"
 }
 
 func stringFromEventData(data map[string]any, key string) string {

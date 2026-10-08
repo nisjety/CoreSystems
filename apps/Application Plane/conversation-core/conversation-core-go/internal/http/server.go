@@ -84,6 +84,7 @@ func newRouter(handler *Handler, verifier *delegation.Verifier) *gin.Engine {
 	readers.GET("/tickets/:id", handler.GetTicket)
 	readers.GET("/tickets/:id/support-recurrence-candidates", handler.GetSupportRecurrenceCandidates)
 	readers.GET("/csat-scorecard", handler.GetCSATScorecard)
+	readers.GET("/insights/outcomes", handler.GetOutcomeReport)
 	readers.GET("/incidents", handler.ListIncidents)
 	readers.GET("/incidents/:id", handler.GetIncident)
 	readers.GET("/problems", handler.ListProblems)

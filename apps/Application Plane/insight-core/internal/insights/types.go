@@ -26,6 +26,9 @@ var ErrInvalidInput = errors.New("invalid input")
 
 type Repository interface {
 	RecordMetricEvent(ctx context.Context, event MetricEvent) (*MetricEvent, error)
+	// RecordMetricSnapshot replaces a deterministic snapshot row when the
+	// provider corrects it; append-only lifecycle events still use the method above.
+	RecordMetricSnapshot(ctx context.Context, event MetricEvent) (*MetricEvent, error)
 	ListMetricEvents(ctx context.Context, query OverviewQuery) ([]MetricEvent, error)
 	ListConnectorSlots(ctx context.Context, orgID string) ([]ConnectorSlot, error)
 	// ListOrgIDsWithMetricsSince returns the distinct org_ids that have at least
@@ -78,14 +81,20 @@ type MetricEvent struct {
 }
 
 type Overview struct {
-	OrgID        string            `json:"org_id"`
-	Plane        PlanePlacement    `json:"plane"`
-	Surfaces     []SurfaceOverview `json:"surfaces"`
-	Scorecards   []Scorecard       `json:"scorecards"`
-	Connectors   []ConnectorSlot   `json:"connectors"`
-	GeneratedAt  time.Time         `json:"generated_at"`
-	Window       TimeWindow        `json:"window"`
-	ConnectorLag []ConnectorGap    `json:"connector_lag"`
+	// ContractVersion changes when report semantics or field meanings change.
+	ContractVersion string            `json:"contract_version"`
+	OrgID           string            `json:"org_id"`
+	Plane           PlanePlacement    `json:"plane"`
+	Surfaces        []SurfaceOverview `json:"surfaces"`
+	Scorecards      []Scorecard       `json:"scorecards"`
+	Connectors      []ConnectorSlot   `json:"connectors"`
+	GeneratedAt     time.Time         `json:"generated_at"`
+	Window          TimeWindow        `json:"window"`
+	ConnectorLag    []ConnectorGap    `json:"connector_lag"`
+	// Coverage is unknown until producers publish delivery checkpoints. A
+	// successful query only proves that recorded rows were read.
+	Coverage       string `json:"coverage"`
+	CoverageDetail string `json:"coverage_detail"`
 }
 
 type TimeWindow struct {
@@ -108,19 +117,26 @@ type MetricRollup struct {
 	// metric (e.g. "conversation-core"), for honest citation. Multiple distinct
 	// producers are joined with ", " (sorted). Empty when no event carried a
 	// source — never fabricated.
-	Source string `json:"source,omitempty"`
+	Source      string `json:"source,omitempty"`
+	EventCount  int    `json:"event_count"`
+	Aggregation string `json:"aggregation"`
 }
 
 type Scorecard struct {
-	ID      string  `json:"id"`
-	Label   string  `json:"label"`
-	Surface string  `json:"surface"`
-	Metric  string  `json:"metric"`
-	Value   float64 `json:"value"`
-	Unit    string  `json:"unit,omitempty"`
+	Coverage   string     `json:"coverage,omitempty"`
+	CheckedAt  *time.Time `json:"checked_at,omitempty"`
+	ID         string     `json:"id"`
+	Label      string     `json:"label"`
+	Definition string     `json:"definition"`
+	Surface    string     `json:"surface"`
+	Metric     string     `json:"metric"`
+	Value      float64    `json:"value"`
+	Unit       string     `json:"unit,omitempty"`
 	// Source cites the real producer(s) behind this scorecard's value, threaded
 	// from the rolled-up metric. Empty when unattributed — never fabricated.
-	Source string `json:"source,omitempty"`
+	Source      string `json:"source,omitempty"`
+	EventCount  int    `json:"event_count"`
+	Aggregation string `json:"aggregation"`
 }
 
 type ConnectorSlot struct {

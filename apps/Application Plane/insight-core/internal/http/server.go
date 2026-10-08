@@ -54,6 +54,7 @@ func newRouter(handler *Handler, internalKey string) *gin.Engine {
 	{
 		api := gated.Group("/api/v1/insights")
 		api.GET("/overview", handler.Overview)
+		api.POST("/overview", handler.OverviewWithOutcomes)
 		api.GET("/connectors", handler.ListConnectors)
 
 		gated.POST("/internal/insight-events", handler.IngestEvent)
