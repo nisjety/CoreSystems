@@ -28,13 +28,17 @@ WORKDIR /app/rust
 RUN cargo chef prepare --recipe-path recipe.json
 
 FROM chef AS builder
+ARG CARGO_BUILD_JOBS=2
+# Bound compilation memory on shared local/CI builders. Only this service's
+# dependencies are needed; cooking the whole workspace also builds other cores.
+ENV CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS}
 WORKDIR /app/rust
 COPY --from=planner /app/rust/recipe.json recipe.json
 COPY proto/ /app/proto/
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
-    --mount=type=cache,target=/app/rust/target,sharing=locked \
-    cargo chef cook --release --recipe-path recipe.json
+    --mount=type=cache,id=model-gateway-rust-1.97,target=/app/rust/target,sharing=locked \
+    cargo chef cook --release --package model-gateway --recipe-path recipe.json
 WORKDIR /app
 COPY rust/ rust/
 WORKDIR /app/rust
@@ -43,7 +47,7 @@ WORKDIR /app/rust
 # runtime stage can COPY it from a real path.
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
-    --mount=type=cache,target=/app/rust/target,sharing=locked \
+    --mount=type=cache,id=model-gateway-rust-1.97,target=/app/rust/target,sharing=locked \
     cargo build --release --bin model-gateway \
     && cp target/release/model-gateway /usr/local/bin/model-gateway
 

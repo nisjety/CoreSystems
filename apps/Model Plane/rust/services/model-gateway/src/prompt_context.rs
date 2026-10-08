@@ -183,8 +183,9 @@ pub enum PromptOrder {
     /// The order the chat path has always sent: conversation scope, artifact
     /// inventory, authored instructions, identity, calendar, date notice,
     /// grounding, the context block, then pins and summary, memory, skills,
-    /// verbosity, response discipline, generated-image state and the
-    /// supplied-arguments notice, and last the conversation.
+    /// verbosity, response discipline, generated-image state, the
+    /// supplied-arguments notice and any formatting guidance, and last the
+    /// conversation.
     Legacy,
     /// The standing blocks first, then pins, summary and the prior
     /// conversation, then the per-turn blocks, then the current user turn.
@@ -226,6 +227,11 @@ pub struct PromptContext {
     pub generated_image_state: Option<ChatMessage>,
     /// Guidance for tools whose arguments the user must supply.
     pub user_supplied_args: Option<ChatMessage>,
+    /// Per-turn formatting guidance (the chart fence, later staged files and
+    /// the deck path), present only on a turn whose latest user message asks
+    /// for what it explains. Empty on every other turn, and an empty slot
+    /// sends nothing: the prompt is then exactly what it was without the slot.
+    pub format_guidance: Option<ChatMessage>,
 }
 
 impl PromptContext {
@@ -260,6 +266,7 @@ impl PromptContext {
             response_discipline,
             generated_image_state,
             user_supplied_args,
+            format_guidance,
         } = self;
         let leading = history
             .iter()
@@ -282,6 +289,7 @@ impl PromptContext {
         out.extend(response_discipline);
         out.extend(generated_image_state);
         out.extend(user_supplied_args);
+        out.extend(format_guidance);
         out.extend(history);
         out
     }
@@ -311,6 +319,7 @@ impl PromptContext {
             response_discipline,
             generated_image_state,
             user_supplied_args,
+            format_guidance,
         } = self;
         let current_at = history
             .iter()
@@ -333,6 +342,7 @@ impl PromptContext {
         out.extend(memory);
         out.extend(skills);
         out.extend(generated_image_state);
+        out.extend(format_guidance);
         out.extend(current);
         out
     }
@@ -453,6 +463,7 @@ mod tests {
             response_discipline: Some(system("discipline")),
             generated_image_state: Some(system("image state")),
             user_supplied_args: Some(system("supplied args")),
+            format_guidance: None,
         }
     }
 
@@ -628,6 +639,53 @@ mod tests {
         let legacy_first =
             full_context(history_with_pins_and_summary()).render(PromptOrder::Legacy);
         assert_eq!(legacy_first[1].content, "inventory v3");
+    }
+
+    /// The formatting-guidance slot is a per-turn block like the others: it
+    /// sits just ahead of the conversation in the legacy order and last among
+    /// the per-turn blocks, before the current user turn, in the stable order.
+    #[test]
+    fn the_format_guidance_slot_sits_with_the_per_turn_blocks() {
+        let with = PromptContext {
+            format_guidance: Some(system("chart notice")),
+            ..full_context(history_with_pins_and_summary())
+        };
+
+        let legacy = with.clone().render(PromptOrder::Legacy);
+        let contents: Vec<&str> = legacy.iter().map(|m| m.content.as_str()).collect();
+        let notice = contents.iter().position(|c| *c == "chart notice");
+        let supplied = contents.iter().position(|c| *c == "supplied args");
+        let first_turn = contents.iter().position(|c| *c == "first question");
+        assert_eq!(notice, supplied.map(|at| at + 1));
+        assert_eq!(notice.map(|at| at + 1), first_turn);
+
+        let stable = with.render(PromptOrder::StablePrefix);
+        let contents: Vec<&str> = stable.iter().map(|m| m.content.as_str()).collect();
+        assert_eq!(
+            &contents[contents.len() - 3..],
+            ["image state", "chart notice", "current question"]
+        );
+    }
+
+    #[test]
+    fn an_empty_format_guidance_slot_changes_nothing_in_either_order() {
+        for order in [PromptOrder::Legacy, PromptOrder::StablePrefix] {
+            let context = full_context(history_with_pins_and_summary());
+            assert!(context.format_guidance.is_none());
+            let rendered = context.render(order);
+            assert!(rendered.iter().all(|m| m.content != "chart notice"));
+        }
+        // Sent with the slot filled, both orders still send the same messages.
+        let filled = PromptContext {
+            format_guidance: Some(system("chart notice")),
+            ..full_context(history_with_pins_and_summary())
+        };
+        let mut legacy = filled.clone().render(PromptOrder::Legacy);
+        let mut stable = filled.render(PromptOrder::StablePrefix);
+        let key = |m: &ChatMessage| (m.role.clone(), m.content.clone());
+        legacy.sort_by_key(key);
+        stable.sort_by_key(key);
+        assert_eq!(legacy, stable);
     }
 
     #[test]

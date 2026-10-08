@@ -1815,10 +1815,15 @@ const REQUIREMENTS_INSTRUCTION: &str = "The activeRequest field is the current e
 ///
 /// `balanced` is `LatencyLevers::balanced_review_batches`. Off, the groups are
 /// the heaviest-range bisection this used before, exactly.
-fn review_groups(parts: &[&str], balanced: bool) -> Vec<Vec<usize>> {
+fn review_groups(parts: &[&str], balanced: bool, finer: bool) -> Vec<Vec<usize>> {
     assert!(parts.len() >= 2);
     let total: usize = parts.iter().map(|part| part.len() + 128).sum();
-    let batches = parts.len().div_ceil(6).max(total.div_ceil(2200)).clamp(2, 4).min(parts.len());
+    // `finer` is `LatencyLevers::finer_review_batches`: one batch per four
+    // segments or per 1,400 bytes of weight rather than per six or per 2,200,
+    // still at least two and at most four concurrent. Off, the count is the one
+    // this always used.
+    let (per_batch_segments, per_batch_weight) = if finer { (4, 1_400) } else { (6, 2_200) };
+    let batches = parts.len().div_ceil(per_batch_segments).max(total.div_ceil(per_batch_weight)).clamp(2, 4).min(parts.len());
     let ranges = if balanced {
         let weights: Vec<_> = parts.iter().map(|part| part.len()).collect();
         balanced_ranges(&weights, batches)
@@ -1937,7 +1942,7 @@ where
     let parts = segments(candidate, levers);
     let count = assigned.len();
     let assigned_parts: Vec<&str> = assigned.iter().map(|&index| parts[index]).collect();
-    let groups: Vec<Vec<usize>> = review_groups(&assigned_parts, levers.balanced_review_batches)
+    let groups: Vec<Vec<usize>> = review_groups(&assigned_parts, levers.balanced_review_batches, levers.finer_review_batches)
         .into_iter()
         .map(|group| group.into_iter().map(|position| assigned[position]).collect())
         .collect();
@@ -2506,11 +2511,38 @@ where
         // keep them, and it fires at most once per rejected pass.
         let mut framing_guard_terms: Option<Vec<String>> = None;
         if let Some(preservation) = &preservation {
-            match preservation.apply(&candidate) {
-                Ok(preserved) => candidate = preserved,
-                Err(reason) => {
-                    tracing::info!(request_id = %request.request_id, attempt, category = "preservation", "local document check rejected");
-                    failure = reason;
+            // Section-only output (`LatencyLevers::dated_post_section_only`):
+            // a dated-post revision that comes back as its section alone, with
+            // its heading line left off, gets the original heading in front of
+            // it so the splice below can find it. Anything else — a whole
+            // document, a section with its heading, a wrong heading — passes
+            // through untouched, so `apply` sees what it always saw.
+            let section = if levers.dated_post_section_only {
+                preservation.with_section_heading(&candidate)
+            } else {
+                std::borrow::Cow::Borrowed(candidate.as_str())
+            };
+            // A section that comes back without the sub-section the accepted
+            // post had (its `### Kilder` note) would delete it, because the
+            // splice replaces the post's whole section. Only on the
+            // section-only path, where the model sends so little that
+            // leaving the note off is easy (Q16h take 1); the repair is
+            // shown the note it lost.
+            let dropped_notes = if levers.dated_post_section_only {
+                preservation.dropped_subsections(&section)
+            } else {
+                None
+            };
+            if let Some(reason) = dropped_notes {
+                tracing::info!(request_id = %request.request_id, attempt, category = "preservation_subsections", "local document check rejected");
+                failure = reason;
+            } else {
+                match preservation.apply(&section) {
+                    Ok(preserved) => candidate = preserved,
+                    Err(reason) => {
+                        tracing::info!(request_id = %request.request_id, attempt, category = "preservation", "local document check rejected");
+                        failure = reason;
+                    }
                 }
             }
         }
@@ -2519,7 +2551,11 @@ where
                 && crate::result_validation::document_body_word_limit(prompt, &candidate)
                     .is_none_or(|(words, _)| words == 0)
             {
-                tracing::info!(request_id = %request.request_id, attempt, category = "customer_body_sections_missing", "local document check rejected");
+                // Counts only, never text: zero internal-note headings, or two or more,
+                // are the two ways a draft is reported as missing its sections.
+                let (internal_headings, headings) = crate::revision_preservation::internal_heading_counts(&candidate);
+                tracing::info!(request_id = %request.request_id, attempt, category = "customer_body_sections_missing",
+                    internal_headings, headings, candidate_bytes = candidate.len(), "local document check rejected");
                 failure = "The requested customer draft must have a nonempty customer body followed by a separate internal source-note section. Restore those sections before checking the word limit.".into();
             }
         }
@@ -4212,14 +4248,14 @@ mod tests {
         let long = "A factual paragraph with many separate assertions. ".repeat(20);
         let mut parts = vec!["# Heading"; 6];
         parts.extend(std::iter::repeat_n(long.as_str(), 6));
-        let groups = review_groups(&parts, true);
+        let groups = review_groups(&parts, true, false);
         assert_eq!(groups.concat(), (0..parts.len()).collect::<Vec<_>>());
         assert!(groups.iter().all(|group| !group.is_empty()));
         let weight = |indexes: &[usize]| indexes.iter().map(|&index| parts[index].len() + 128).sum::<usize>();
         let old = weight(&(0..6).collect::<Vec<_>>()).abs_diff(weight(&(6..12).collect::<Vec<_>>()));
         assert!(weight(&groups[0]).abs_diff(weight(&groups[1])) < old);
-        assert_eq!(review_groups(&["A", "B"], true), [vec![0], vec![1]]);
-        let dominant = review_groups(&[long.as_str(), "# Heading", "A", "B"], true);
+        assert_eq!(review_groups(&["A", "B"], true, false), [vec![0], vec![1]]);
+        let dominant = review_groups(&[long.as_str(), "# Heading", "A", "B"], true, false);
         assert_eq!(dominant, [vec![0], vec![1, 2, 3]]);
     }
 
@@ -4309,12 +4345,12 @@ mod tests {
             let owned = sized_segments(sizes);
             let parts: Vec<&str> = owned.iter().map(String::as_str).collect();
             assert_eq!(batch_sizes(&parts, &bisected_review_groups(&parts)), logged, "the recorded split");
-            assert_eq!(batch_sizes(&parts, &review_groups(&parts, true)), balanced);
+            assert_eq!(batch_sizes(&parts, &review_groups(&parts, true, false)), balanced);
         }
         for sizes in &review_batch_documents() {
             let owned = sized_segments(sizes);
             let parts: Vec<&str> = owned.iter().map(String::as_str).collect();
-            let groups = review_groups(&parts, true);
+            let groups = review_groups(&parts, true, false);
             let before = bisected_review_groups(&parts);
             assert_eq!(groups.len(), before.len(), "the batch count is unchanged: {sizes:?}");
             assert_eq!(groups.concat(), (0..parts.len()).collect::<Vec<_>>(), "every segment exactly once, in order: {sizes:?}");
@@ -4327,7 +4363,7 @@ mod tests {
         let owned = sized_segments(&LONG_THEN_ROWS);
         let parts: Vec<&str> = owned.iter().map(String::as_str).collect();
         assert_eq!(bisected_review_groups(&parts), [vec![0, 1, 2], (3..9).collect()]);
-        assert_eq!(review_groups(&parts, true), [vec![0], (1..9).collect()]);
+        assert_eq!(review_groups(&parts, true, false), [vec![0], (1..9).collect()]);
     }
 
     /// `MODEL_GATEWAY_BALANCED_REVIEW_BATCHES` off: exactly the previous
@@ -4339,17 +4375,141 @@ mod tests {
         for (sizes, logged, balanced) in RECORDED_REVIEW_BATCHES {
             let owned = sized_segments(sizes);
             let parts: Vec<&str> = owned.iter().map(String::as_str).collect();
-            assert_eq!(batch_sizes(&parts, &review_groups(&parts, false)), logged, "the recorded split");
+            assert_eq!(batch_sizes(&parts, &review_groups(&parts, false, false)), logged, "the recorded split");
             assert_ne!(logged, balanced, "on and off differ on every recorded plan");
         }
         for sizes in &review_batch_documents() {
             let owned = sized_segments(sizes);
             let parts: Vec<&str> = owned.iter().map(String::as_str).collect();
-            assert_eq!(review_groups(&parts, false), bisected_review_groups(&parts), "{sizes:?}");
+            assert_eq!(review_groups(&parts, false, false), bisected_review_groups(&parts), "{sizes:?}");
         }
         let owned = sized_segments(&LONG_THEN_ROWS);
         let parts: Vec<&str> = owned.iter().map(String::as_str).collect();
-        assert_eq!(review_groups(&parts, false), [vec![0, 1, 2], (3..9).collect()]);
+        assert_eq!(review_groups(&parts, false, false), [vec![0, 1, 2], (3..9).collect()]);
+    }
+
+    /// The Q16k journey-04 plan: 15 segments. In two takes the batch of seven
+    /// table rows and 1,404 bytes spent 4,000 to 4,600 reasoning tokens (53 to
+    /// 61 s) while its two neighbours, 737 and 779 bytes, finished in 11 to 13 s,
+    /// and the check's 90 s ran out in the repair that followed.
+    const Q16K_PLAN: [usize; 15] = [184, 184, 184, 185, 195, 195, 194, 195, 200, 200, 200, 201, 201, 201, 201];
+
+    #[test]
+    fn the_finer_rule_splits_the_seven_segment_batch_that_timed_out_q16k() {
+        let candidate = sized_segments(&Q16K_PLAN).join("\n\n");
+        let parts = segments(&candidate, LatencyLevers::ALL_ON);
+        assert_eq!(parts.len(), 15);
+        let before = batch_sizes(&parts, &review_groups(&parts, false, false));
+        assert_eq!(before, [(4, 737), (4, 779), (7, 1404)], "the recorded split");
+        let after = batch_sizes(&parts, &review_groups(&parts, false, true));
+        assert_eq!(after.len(), 4, "{after:?}");
+        assert!(after.iter().all(|&(count, _)| count <= 4), "no batch above four segments: {after:?}");
+        assert!(after.iter().all(|&(_, bytes)| bytes <= 850), "no batch near the 1,404 that took 53 to 61 s: {after:?}");
+        assert_eq!(after.iter().map(|&(count, _)| count).sum::<usize>(), 15);
+    }
+
+    /// The constants themselves: one batch per four segments or per 1,400
+    /// bytes of weight (each segment's bytes plus 128), against six and 2,200,
+    /// never fewer than two nor more than four. Pinned in the regime where the
+    /// segment count decides, the one where the bytes decide, and the caps.
+    #[test]
+    fn the_finer_rule_is_one_batch_per_four_segments_or_1400_bytes_of_weight() {
+        let count = |sizes: &[usize], finer: bool| {
+            let owned = sized_segments(sizes);
+            let parts: Vec<&str> = owned.iter().map(String::as_str).collect();
+            review_groups(&parts, false, finer).len()
+        };
+        let both = |sizes: &[usize]| (count(sizes, false), count(sizes, true));
+        assert_eq!(both(&[10; 13]), (3, 4), "the segment count decides: 13 / 6 against 13 / 4");
+        assert_eq!(both(&[100; 9]), (2, 3), "9 / 6 against 9 / 4");
+        assert_eq!(both(&[300; 8]), (2, 3), "the bytes decide: 3,424 of weight over 2,200 against over 1,400");
+        assert_eq!(both(&[400; 6]), (2, 3), "3,168 of weight");
+        assert_eq!(both(&[50; 4]), (2, 2), "small reviews keep the minimum of two");
+        assert_eq!(both(&[100; 20]), (4, 4), "both are capped at four");
+        assert_eq!(both(&[1_500; 2]), (2, 2), "never more batches than segments");
+    }
+
+    /// Not a check: prints, for each saved review case in `VEREVON_AB_CASES`
+    /// (the `VEREVON_REVIEW_EVAL_CASES` format), how many segments it has and
+    /// how many batches the old and the finer rule give it, so a live A/B can
+    /// spend its calls on the cases where the two differ. A review of fewer
+    /// than twelve segments is not split at all.
+    #[test]
+    #[ignore = "helper for the finer-batches A/B; set VEREVON_AB_CASES"]
+    fn list_how_the_finer_rule_changes_saved_cases() {
+        #[derive(serde::Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Saved {
+            id: String,
+            candidate: String,
+        }
+        let path = std::env::var("VEREVON_AB_CASES").expect("VEREVON_AB_CASES");
+        let saved: Vec<Saved> = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        for case in saved {
+            let parts = segments(&case.candidate, LatencyLevers::ALL_ON);
+            let batches = |finer: bool| if parts.len() >= 12 { review_groups(&parts, false, finer).len() } else { 1 };
+            let heaviest = |finer: bool| {
+                if parts.len() < 12 {
+                    return case.candidate.len();
+                }
+                review_groups(&parts, false, finer).iter().map(|group| group.iter().map(|&index| parts[index].len()).sum::<usize>()).max().unwrap_or(0)
+            };
+            println!("CASE\t{}\t{}\t{}\t{}\t{}\t{}\t{}", case.id, parts.len(), case.candidate.len(), batches(false), batches(true), heaviest(false), heaviest(true));
+        }
+    }
+
+    #[test]
+    fn the_finer_rule_keeps_every_segment_once_in_order_and_never_exceeds_four_batches() {
+        for count in 2..=40usize {
+            for bytes in [40usize, 200, 500, 1_500] {
+                let owned = sized_segments(&vec![bytes; count]);
+                let parts: Vec<&str> = owned.iter().map(String::as_str).collect();
+                let old = review_groups(&parts, false, false);
+                let finer = review_groups(&parts, false, true);
+                assert!(finer.len() >= old.len() && finer.len() <= 4, "{count} x {bytes}: {} against {}", finer.len(), old.len());
+                assert!(finer.iter().all(|group| !group.is_empty()), "{count} x {bytes}");
+                assert_eq!(finer.iter().flatten().copied().collect::<Vec<_>>(), (0..count).collect::<Vec<_>>(), "{count} x {bytes}");
+            }
+        }
+        // Where the old rule already used four batches, or two tiny ones, the finer rule is the same split.
+        let owned = sized_segments(&[300; 30]);
+        let parts: Vec<&str> = owned.iter().map(String::as_str).collect();
+        assert_eq!(review_groups(&parts, false, true), review_groups(&parts, false, false), "four batches either way");
+        assert_eq!(review_groups(&["A", "B"], false, true), review_groups(&["A", "B"], false, false));
+    }
+
+    /// The lever reaches the split review's requests: the same fifteen segments
+    /// go out as four batches instead of three, every segment assessed once,
+    /// and only the assignment differs.
+    #[tokio::test]
+    async fn finer_review_batches_reach_the_split_reviews_requests() {
+        let candidate = sized_segments(&Q16K_PLAN).join("\n\n");
+        let parts = segments(&candidate, LatencyLevers::ALL_ON);
+        let mut assigned = Vec::new();
+        for finer in [false, true] {
+            let levers = LatencyLevers { balanced_review_batches: false, finer_review_batches: finer, ..LatencyLevers::ALL_ON };
+            let requests = std::cell::RefCell::new(Vec::<InferRequest>::new());
+            let mut infer = |request: InferRequest| {
+                let response = batch_response(&request, None);
+                requests.borrow_mut().push(request);
+                std::future::ready(Ok(response))
+            };
+            let receipt = review_candidate(&context(), &batch_request(), &candidate, None, None, false, None, 0, levers, &mut infer).await.unwrap().unwrap();
+            assert_eq!(receipt.reviewed_segments, 15, "finer={finer}");
+            let groups: Vec<Vec<usize>> = requests.into_inner().iter().map(|request| {
+                let data: serde_json::Value = serde_json::from_str(&request.messages[1].content).unwrap();
+                data["reviewIndexes"].as_array().unwrap().iter().map(|index| usize::try_from(index.as_u64().unwrap()).unwrap()).collect()
+            }).collect();
+            assigned.push(groups);
+        }
+        assert_eq!(assigned[0], review_groups(&parts, false, false), "off: the previous three batches");
+        assert_eq!(assigned[1], review_groups(&parts, false, true), "on: four finer batches");
+        assert_eq!((assigned[0].len(), assigned[1].len()), (3, 4));
+        for groups in &assigned {
+            let mut all: Vec<usize> = groups.iter().flatten().copied().collect();
+            all.sort_unstable();
+            assert_eq!(all, (0..15).collect::<Vec<_>>(), "every segment assessed exactly once");
+        }
     }
 
     /// The lever reaches the split review's requests: each batch is assigned
@@ -4381,7 +4541,7 @@ mod tests {
             }).collect()
         };
         assert_eq!(assigned(off), bisected_review_groups(&parts), "off: the previous batches");
-        assert_eq!(assigned(on), review_groups(&parts, true));
+        assert_eq!(assigned(on), review_groups(&parts, true, false));
         assert_ne!(assigned(on), assigned(off));
         // The same calls, differing only in which segments each one assesses:
         // its reviewIndexes, its assignment notice and the schema's bounds on
@@ -4468,7 +4628,7 @@ mod tests {
     async fn large_reviews_use_at_most_four_complete_context_assignments() {
         let candidate = (0..24).map(|index| format!("Paragraph {index}: {}", "Pickup is not confirmed. ".repeat(10))).collect::<Vec<_>>().join("\n\n");
         let parts = segments(&candidate, LatencyLevers::ALL_ON);
-        let groups = review_groups(&parts, true);
+        let groups = review_groups(&parts, true, false);
         assert_eq!(groups.len(), 4);
         assert_eq!(groups.concat(), (0..24).collect::<Vec<_>>());
         let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(4));
@@ -7052,5 +7212,119 @@ Se prisen 3000 kr i tabellen ovenfor."],
         assert_eq!(field("words"), crate::result_validation::count_words("For kort.").to_string(), "\"For kort.\" is two words");
         assert_eq!(field("minimum"), "5", "the LinkedIn post's adopted minimum, 5-9 ord");
         assert_eq!(field("maximum"), "9", "the LinkedIn post's adopted maximum, 5-9 ord");
+    }
+
+    /// Section-only output (`LatencyLevers::dated_post_section_only`), at the
+    /// check: the revision of one dated post may arrive as that post's section
+    /// alone. A section whose heading line was left off is completed only with
+    /// the lever on; a section with its heading, a whole document and a wrong
+    /// heading are handled identically with it on and off; and the accepted
+    /// text is the accepted document with only that post replaced.
+    #[tokio::test]
+    async fn a_dated_post_section_is_spliced_by_the_check_and_only_a_headingless_one_needs_the_lever() {
+        let before = "# Kampanje\n\n## LinkedIn 21. oktober\nA.\n\n## LinkedIn 23. oktober\nB.\n\n## E-post\nC.\n";
+        let expected = before.replace("B.", "Konkret.");
+        let prompt = "Gjør innlegget for 23. oktober mer konkret.";
+        let on = LatencyLevers { dated_post_section_only: true, ..LatencyLevers::ALL_ON };
+        let off = LatencyLevers::ALL_ON;
+        let check = |levers: LatencyLevers, candidate: &'static str| async move {
+            let request = InferRequest::default();
+            check_artifact(levers, None, &request, prompt, Some(before), None, candidate, |_| {
+                // No source context: nothing is reviewed, and a repair is not available.
+                std::future::ready(Err::<InferResponse, _>(tonic::Status::unavailable("no repair in this test")))
+            })
+            .await
+            .map(|(accepted, receipt)| {
+                assert!(receipt.is_none(), "no source context, no receipt");
+                accepted
+            })
+        };
+        // Handled the same on and off: the section with its heading, a whole document.
+        for candidate in [
+            "## LinkedIn 23. oktober\nKonkret.\n",
+            "## LinkedIn 23. oktober\nKonkret.\n\n## E-post\nTapt.\n",
+            "# Kampanje\n\n## LinkedIn 21. oktober\nEndret ved uhell.\n\n## LinkedIn 23. oktober\nKonkret.\n\n## E-post\nTapt.\n",
+        ] {
+            assert_eq!(check(on, candidate).await.unwrap(), expected, "{candidate:?}");
+            assert_eq!(check(off, candidate).await.unwrap(), expected, "{candidate:?}");
+        }
+        // Without the heading line: refused as ever, unless the lever is on.
+        for (candidate, spliced) in [
+            ("Konkret.\n", expected.clone()),
+            ("Konkret.", expected.clone()),
+            ("\nKonkret.\n\n", before.replace("## LinkedIn 23. oktober\nB.", "## LinkedIn 23. oktober\n\nKonkret.")),
+        ] {
+            assert!(check(off, candidate).await.is_err(), "off: {candidate:?}");
+            assert_eq!(check(on, candidate).await.unwrap(), spliced, "on: {candidate:?}");
+        }
+        // A wrong heading, or one that is not a heading of the post at all: refused either way.
+        for candidate in [
+            "## LinkedIn 25. oktober\nKonkret.\n",
+            "## LinkedIn 21. oktober\nKonkret.\n",
+            "# Kampanje\n\n## E-post\nKonkret.\n",
+            "## E-post\nKonkret.\n",
+        ] {
+            assert!(check(off, candidate).await.is_err(), "off: {candidate:?}");
+            assert!(check(on, candidate).await.is_err(), "on: {candidate:?}");
+        }
+        // No lever, or no recognised dated post, and a body without a heading is just a body.
+        let untargeted = check_artifact(on, None, &InferRequest::default(), "Gjør hele dokumentet kortere.", Some(before), None, "Konkret.\n", |_| {
+            std::future::ready(Err::<InferResponse, _>(tonic::Status::unavailable("no repair in this test")))
+        })
+        .await
+        .unwrap();
+        assert_eq!(untargeted.0, "Konkret.\n", "no preservation, nothing completed or spliced");
+    }
+
+    /// Q16h take 1: a post's section that comes back without the `### Kilder`
+    /// note the accepted post had would delete the note, because the splice
+    /// replaces the whole section. With the lever on it is refused and the
+    /// repair is shown the note it lost; with the lever off nothing changes.
+    #[tokio::test]
+    async fn a_section_that_lost_its_note_is_repaired_with_the_note_quoted_only_when_the_lever_is_on() {
+        let before = "# Kampanje\n\n## LinkedIn 21. oktober\nA.\n\n## LinkedIn 23. oktober\nB.\n\n### Kilder\n- Produktinformasjon brukt: arm.\n\n## E-post\nC.\n";
+        let prompt = "Gjør innlegget for 23. oktober mer konkret.";
+        let on = LatencyLevers { dated_post_section_only: true, ..LatencyLevers::ALL_ON };
+        let off = LatencyLevers::ALL_ON;
+        let lost = "## LinkedIn 23. oktober\nKonkret.\n";
+        let request = InferRequest::default();
+        let unavailable = |_: InferRequest| std::future::ready(Err::<InferResponse, _>(tonic::Status::unavailable("no repair in this test")));
+
+        // Off: as ever, the section replaces the post whole and the note goes with it.
+        let (accepted, _) = check_artifact(off, None, &request, prompt, Some(before), None, lost, unavailable).await.unwrap();
+        assert_eq!(accepted, "# Kampanje\n\n## LinkedIn 21. oktober\nA.\n\n## LinkedIn 23. oktober\nKonkret.\n\n## E-post\nC.\n");
+
+        // On: refused, and no repair is available here, so the check fails rather than deleting the note.
+        assert!(check_artifact(on, None, &request, prompt, Some(before), None, lost, unavailable).await.is_err());
+
+        // On, with a repair that puts the note back: the repair saw the lost note, the document keeps a note.
+        let repaired = "## LinkedIn 23. oktober\nKonkret.\n\n### Kilder\n- Produktinformasjon brukt: arm; knapp.\n";
+        let seen = std::cell::RefCell::new(Vec::<String>::new());
+        let (accepted, _) = check_artifact(on, None, &request, prompt, Some(before), None, lost, |request: InferRequest| {
+            seen.borrow_mut().push(request.messages.last().map(|message| message.content.clone()).unwrap_or_default());
+            std::future::ready(Ok(InferResponse { content: repaired.to_owned(), stop_reason: "end_turn".into(), ..Default::default() }))
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            accepted,
+            "# Kampanje\n\n## LinkedIn 21. oktober\nA.\n\n## LinkedIn 23. oktober\nKonkret.\n\n### Kilder\n- Produktinformasjon brukt: arm; knapp.\n\n## E-post\nC.\n"
+        );
+        let seen = seen.borrow();
+        assert_eq!(seen.len(), 1, "one repair");
+        assert!(seen[0].contains("- Produktinformasjon brukt: arm."), "the repair is shown the note it lost: {}", seen[0]);
+
+        // A repair that still leaves the note off ends the check: it never publishes a post without it.
+        let unchanged = |_: InferRequest| std::future::ready(Ok(InferResponse { content: lost.to_owned(), stop_reason: "end_turn".into(), ..Default::default() }));
+        assert!(check_artifact(on, None, &request, prompt, Some(before), None, lost, unchanged).await.is_err());
+
+        // On, and the note kept: accepted at once, no repair asked for.
+        for kept in [
+            "## LinkedIn 23. oktober\nKonkret.\n\n### Kilder\n- Produktinformasjon brukt: arm.\n",
+            "# Kampanje\n\n## LinkedIn 21. oktober\nA.\n\n## LinkedIn 23. oktober\nKonkret.\n\n### Kilder\n- Produktinformasjon brukt: arm.\n\n## E-post\nC.\n",
+        ] {
+            let (accepted, _) = check_artifact(on, None, &request, prompt, Some(before), None, kept, unavailable).await.unwrap();
+            assert!(accepted.contains("Konkret.\n\n### Kilder\n- Produktinformasjon brukt: arm.\n\n## E-post\nC.\n"), "{accepted:?}");
+        }
     }
 }

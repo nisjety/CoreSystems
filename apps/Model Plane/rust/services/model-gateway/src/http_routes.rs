@@ -58,6 +58,11 @@ use crate::{
 
 /// Start the HTTP server on :8080.
 ///
+/// `shutdown` is the graceful-stop trigger. In production it is the signal plus
+/// the drain (see [`crate::drain`]), so it only resolves once in-flight streams
+/// have finished or the drain window ran out: the listener stays open, and
+/// resume, stop and queued input keep working, until then.
+///
 /// # Errors
 ///
 /// Returns an error if the server fails to bind or serve.
@@ -65,11 +70,31 @@ pub async fn serve(
     state: AppState,
     prom_handle: Option<PrometheusHandle>,
     grpc_readiness: GrpcReadiness,
+    shutdown: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> anyhow::Result<()> {
     let app = build_router_with_readiness(state, prom_handle, grpc_readiness);
     let listener = tokio::net::TcpListener::bind("0.0.0.0:8080").await?;
     info!("HTTP listening on :8080");
-    axum::serve(listener, app).await?;
+    serve_on(listener, app, shutdown).await
+}
+
+/// Serve `app` on an already-bound `listener` until `shutdown` resolves, then
+/// stop accepting, close idle connections, and return once the connections that
+/// are still open have finished (a streamed answer flushes its last frames
+/// before its connection closes). Split out of [`serve`] so the shutdown
+/// behaviour is testable on an ephemeral port.
+///
+/// # Errors
+///
+/// Returns an error if the server fails while serving.
+pub async fn serve_on(
+    listener: tokio::net::TcpListener,
+    app: Router,
+    shutdown: impl std::future::Future<Output = ()> + Send + 'static,
+) -> anyhow::Result<()> {
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown)
+        .await?;
     Ok(())
 }
 
@@ -528,7 +553,11 @@ async fn healthz() -> &'static str {
 }
 
 async fn readyz(Extension(grpc_readiness): Extension<GrpcReadiness>) -> Response {
-    if grpc_readiness.is_bound() {
+    // A draining process is finishing the streams it has and must get no new
+    // ones, so it reports not ready whatever its listeners are doing.
+    if grpc_readiness.is_draining() {
+        (StatusCode::SERVICE_UNAVAILABLE, "draining").into_response()
+    } else if grpc_readiness.is_bound() {
         (StatusCode::OK, "ok").into_response()
     } else {
         (StatusCode::SERVICE_UNAVAILABLE, "grpc listener not bound").into_response()
@@ -7035,6 +7064,78 @@ async fn plan_approval(
     .await
     .map_err(|error| grpc_status_to_http(&error))?;
 
+    if body.decision != "approve" && body.decision != "reject" {
+        return Err(bad_request(format!(
+            "unknown decision '{}': expected approve or reject",
+            body.decision
+        )));
+    }
+
+    // Edits are edits OF a plan. A body that carries them without naming the
+    // plan would be approved with the edits silently dropped: the person
+    // believes their rewrite was applied, and the run is granted authority
+    // against the plan exactly as the model wrote it.
+    if body.plan_id.is_empty() && !body.edited_steps.is_empty() {
+        return Err(bad_request(
+            "edited_steps requires plan_id: there is no plan to edit".to_owned(),
+        ));
+    }
+
+    // Resolve the run's THREAD before anything is decided. Two reasons, both
+    // about not leaving a half-made decision behind:
+    //
+    // * the grant has to outlive this run — the work it authorizes happens on
+    //   the NEXT run of the same conversation — so `PlanModeStore` keys grants
+    //   by thread, and the thread is filled here rather than trusted from the
+    //   client so a caller cannot attach a grant to a thread it does not own
+    //   (the ownership check above is on the RUN, and session-core resolves
+    //   the thread from that same run);
+    // * a failure here must leave the plan PROPOSED. This lookup used to run
+    //   AFTER the plan had already been moved to APPROVED, so a transient
+    //   error at that point left an approved plan with no grant, and — an
+    //   approval being single-use — no way to retry it.
+    let thread_id = state
+        .run_client
+        .clone()
+        .get_run(authenticated_session_request(
+            mp_contracts::model_plane::v1::GetRunRequest {
+                run_id: run_id.clone(),
+            },
+            &bearer,
+        )?)
+        .await
+        .map_err(|error| grpc_status_to_http(&error))?
+        .into_inner()
+        .thread_id;
+
+    // The plan being decided must be a plan OF THIS run's conversation. The
+    // route is keyed by run and the body names the plan, and session-core
+    // only checks that the caller owns the plan — so without this, a run's
+    // approval could decide any other plan the same person owns, and the
+    // rung it grants would be recorded against a conversation whose plan was
+    // never reviewed.
+    if !body.plan_id.is_empty() {
+        let plan = state
+            .orchestration_client
+            .clone()
+            .get_plan(authenticated_session_request(
+                GetPlanRequest {
+                    plan_id: body.plan_id.clone(),
+                },
+                &bearer,
+            )?)
+            .await
+            .map_err(|e| grpc_status_to_http(&e))?
+            .into_inner()
+            .plan
+            .ok_or_else(|| not_found("plan not found"))?;
+        if plan.thread_id != thread_id {
+            return Err(bad_request(
+                "plan_id is not a plan of this run's conversation".to_owned(),
+            ));
+        }
+    }
+
     let edited_steps: Vec<PlanStepEdit> = body
         .edited_steps
         .into_iter()
@@ -7073,13 +7174,6 @@ async fn plan_approval(
             "plan": plan_value(&plan),
         })));
     }
-    if body.decision != "approve" {
-        return Err(bad_request(format!(
-            "unknown decision '{}': expected approve or reject",
-            body.decision
-        )));
-    }
-
     // --- Approve: unchanged rung/justification validation. ---
     // A keyword on the HTTP edge rather than a number: a browser sending `2` and
     // meaning something else is a silent mis-grant, and an unknown keyword is
@@ -7125,29 +7219,9 @@ async fn plan_approval(
 
     // In-process: this IS the gateway, so calling the coordinator directly
     // rather than dialling our own gRPC surface keeps one code path and one
-    // validation.
-    // Resolve the run's THREAD before granting. The grant has to outlive this
-    // run — the work it authorizes happens on the NEXT run of the same
-    // conversation — so `PlanModeStore` keys grants by thread. This used to send
-    // an empty `session_id`, which the store correctly refused, making the whole
-    // grant path a no-op; the field is filled here rather than trusted from the
-    // client so a caller cannot attach a grant to a thread it does not own (the
-    // ownership check above is on the RUN, and session-core resolves the thread
-    // from that same run).
-    let thread_id = state
-        .run_client
-        .clone()
-        .get_run(authenticated_session_request(
-            mp_contracts::model_plane::v1::GetRunRequest {
-                run_id: run_id.clone(),
-            },
-            &bearer,
-        )?)
-        .await
-        .map_err(|error| grpc_status_to_http(&error))?
-        .into_inner()
-        .thread_id;
-
+    // validation. `thread_id` was resolved above, before the plan moved. (An
+    // earlier revision of this call sent an empty `session_id`, which the
+    // store correctly refused, making the whole grant path a no-op.)
     let exited = crate::coordinator::handle_exit_plan_mode(
         &state.plan_mode,
         &*state.publisher,
@@ -8203,6 +8277,18 @@ async fn prepare_mail_task_thread_for_gateway_bff(
             Json(json!({"error": "org_id, user_id, origin and session_key are required"})),
         ));
     }
+    // This route exists for exactly one origin. The bridge's session-core
+    // principal is allow-listed to prepare a thread for ANY user of the org
+    // and only the `mail_task` origin is gated on a signed Control decision,
+    // so a caller-chosen origin here would let a compromised BFF credential
+    // mint an ordinary `chat` thread for any user with no decision at all.
+    // Pinned here and again in session-core for that principal.
+    if body.origin.trim() != "mail_task" {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "origin must be \"mail_task\" for the mail-task thread bridge"})),
+        ));
+    }
     // Same tenant-fencing shape as delete_space_threads_for_deletion_coordinator
     // above: the verified service credential's own org_id must match the
     // request it is presenting, so a bridge credential minted for one org
@@ -8720,6 +8806,16 @@ async fn invoke(
         }}))).into());
     }
     let start = std::time::Instant::now();
+
+    // A token that says ZDR cannot be served on the user's own subscription
+    // connection: refuse, typed, before anything else is decided. This route
+    // already forwarded the connection to inference-core (which refused), so
+    // what it gains is the typed answer instead of a generic 502, and no
+    // inference call at all. The token's own claim decides; `normalize` has no
+    // claims. See `zdr_precheck`.
+    if let Some(refusal) = crate::zdr_precheck::refuse_subscription_under_token_zdr(&claims, &req) {
+        return Err(refusal.http().into());
+    }
 
     // Normalize and validate the request
     let normalized = normalize::normalize(&req)?;
@@ -9838,6 +9934,78 @@ mod capability_contract_tests {
         );
     }
 
+    fn mail_task_bridge_claims(org_id: &str) -> Claims {
+        Claims {
+            sub: "service:verevon-gateway".to_owned(),
+            iss: "test-issuer".to_owned(),
+            exp: i64::MAX,
+            org_id: org_id.to_owned(),
+            user_id: String::new(),
+            nbf: None,
+            aud: Some("model-gateway".to_owned()),
+            scopes: vec!["mail-task:prepare-thread".to_owned()],
+            zdr: false,
+            sovereign: None,
+            principal_type: Some("service".to_owned()),
+            service_id: Some("service:verevon-gateway".to_owned()),
+            reason: Some("prepare a mail-task-origin thread".to_owned()),
+        }
+    }
+
+    fn mail_task_bridge_body(org_id: &str, origin: &str) -> PrepareMailTaskThreadRequestBody {
+        PrepareMailTaskThreadRequestBody {
+            org_id: org_id.to_owned(),
+            user_id: "user-a".to_owned(),
+            origin: origin.to_owned(),
+            session_key: "mail_task/abc".to_owned(),
+            control_decision_token: "mail-task-v1.k.p.s".to_owned(),
+        }
+    }
+
+    /// The bridge exists for the mail_task origin only. A caller-chosen origin
+    /// would reach session-core under the bridge principal's allow-list entry,
+    /// which is what lets that principal prepare a thread for any user in the
+    /// org -- and only mail_task is gated on a signed Control decision. With
+    /// no bridge credential configured a request that got PAST the origin guard
+    /// would answer 503, so a 400 here proves the guard fired first.
+    #[tokio::test]
+    async fn mail_task_bridge_refuses_any_origin_but_mail_task() {
+        for origin in ["chat", "agent_run", "support", "system", "space", "", "MAIL_TASK"] {
+            let error = prepare_mail_task_thread_for_gateway_bff(
+                State(AppState::new()),
+                Extension(mail_task_bridge_claims("org-a")),
+                Json(mail_task_bridge_body("org-a", origin)),
+            )
+            .await
+            .expect_err("a non-mail_task origin must never reach session-core");
+            assert_eq!(error.0, StatusCode::BAD_REQUEST, "origin {origin:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn mail_task_bridge_refuses_a_request_for_another_orgs_tenant() {
+        let error = prepare_mail_task_thread_for_gateway_bff(
+            State(AppState::new()),
+            Extension(mail_task_bridge_claims("org-attacker")),
+            Json(mail_task_bridge_body("org-a", "mail_task")),
+        )
+        .await
+        .expect_err("a credential minted for one org must not prepare a thread in another");
+        assert_eq!(error.0, StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn mail_task_bridge_answers_503_until_its_session_core_credential_is_configured() {
+        let error = prepare_mail_task_thread_for_gateway_bff(
+            State(AppState::new()),
+            Extension(mail_task_bridge_claims("org-a")),
+            Json(mail_task_bridge_body("org-a", "mail_task")),
+        )
+        .await
+        .expect_err("an unconfigured bridge fails closed");
+        assert_eq!(error.0, StatusCode::SERVICE_UNAVAILABLE);
+    }
+
     #[tokio::test]
     async fn space_deletion_requires_capability_bearer_before_session_core_call() {
         let error = delete_space_threads_for_deletion_coordinator(
@@ -9878,6 +10046,26 @@ mod grpc_readiness_tests {
         readiness.mark_bound();
         let after_bind = readyz(Extension(readiness)).await.into_response();
         assert_eq!(after_bind.status(), StatusCode::OK);
+    }
+
+    /// I3: a draining gateway is finishing its streams and must get no new
+    /// traffic, so `/readyz` flips to 503 the moment the drain starts, while the
+    /// listeners are still bound and `/healthz` (liveness) still answers.
+    #[tokio::test]
+    async fn readyz_fails_while_draining_even_though_the_listeners_are_bound() {
+        let readiness = GrpcReadiness::new();
+        readiness.mark_bound();
+        let before = readyz(Extension(readiness.clone())).await.into_response();
+        assert_eq!(before.status(), StatusCode::OK);
+
+        readiness.begin_drain();
+        let draining = readyz(Extension(readiness.clone())).await.into_response();
+        assert_eq!(draining.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = axum::body::to_bytes(draining.into_body(), 1024).await.unwrap();
+        assert_eq!(&body[..], b"draining", "the reason is told, not guessed");
+
+        assert_eq!(healthz().await, "ok", "liveness is not readiness");
+        assert!(readiness.is_bound(), "draining does not unbind the listener");
     }
 }
 

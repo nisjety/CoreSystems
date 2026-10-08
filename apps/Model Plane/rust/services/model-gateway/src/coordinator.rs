@@ -90,6 +90,12 @@ struct GrantEntry {
     org_id: String,
     rung: mp_contracts::model_plane::v1::AutonomyRung,
     expires_at_unix: i64,
+    /// The plan-gate plan this grant was approved TOGETHER with, until the
+    /// next run takes it (`take_approved_plan`). `None` for a grant made
+    /// without a structured plan, and once the plan has been handed to a run:
+    /// the rung outlives the plan's consumption (it covers the thread until
+    /// it expires), the plan does not.
+    approved_plan_id: Option<String>,
 }
 
 impl PlanModeStore {
@@ -149,11 +155,20 @@ impl PlanModeStore {
     /// Same TTL ceiling as plan entries: a grant is an approval artifact, not a
     /// standing policy, and an unbounded one would quietly outlive the plan it
     /// authorized.
+    ///
+    /// `approved_plan_id` is the plan-gate plan approved in the same decision
+    /// (empty when there is none). Remembering it here — rather than having
+    /// the next run go looking for "the thread's latest approved plan" — is
+    /// what binds the plan a run is told to follow to the approval that
+    /// granted it, and it keeps that lookup off the hot path: the alternative
+    /// listed every plan of the thread, with all their steps, at the start of
+    /// every run for the 24 hours a grant lasts.
     pub fn record_grant(
         &self,
         org_id: &str,
         thread_id: &str,
         rung: mp_contracts::model_plane::v1::AutonomyRung,
+        approved_plan_id: &str,
     ) {
         if thread_id.trim().is_empty()
             || rung == mp_contracts::model_plane::v1::AutonomyRung::Unspecified
@@ -166,8 +181,25 @@ impl PlanModeStore {
                 org_id: org_id.to_owned(),
                 rung,
                 expires_at_unix: now_unix() + MAX_PLAN_TTL_SECS,
+                approved_plan_id: (!approved_plan_id.is_empty()).then(|| approved_plan_id.to_owned()),
             },
         );
+    }
+
+    /// Hand the plan approved with this thread's grant to the run that is
+    /// starting — ONCE. The id is removed as it is returned, so of two runs
+    /// starting together only one is told to follow the plan (session-core's
+    /// compare-and-swap on the plan itself makes the same true across
+    /// gateway replicas). Org-checked and expiry-checked like
+    /// [`granted_rung`](Self::granted_rung); `None` when there is nothing
+    /// pending.
+    #[must_use]
+    pub fn take_approved_plan(&self, org_id: &str, thread_id: &str) -> Option<String> {
+        let mut entry = self.grants.get_mut(thread_id)?;
+        if entry.org_id != org_id || entry.expires_at_unix <= now_unix() {
+            return None;
+        }
+        entry.approved_plan_id.take()
     }
 
     /// The rung a prior approved plan granted this thread, if any and unexpired.
@@ -292,7 +324,7 @@ pub async fn handle_exit_plan_mode<P: EventPublisher>(
 
     // The grant must reach the NEXT run, which is a different run on the same
     // thread — record it thread-keyed before anything else can fail.
-    store.record_grant(&req.org_id, &req.session_id, escalation.to());
+    store.record_grant(&req.org_id, &req.session_id, escalation.to(), plan_id);
     let was_active = store.exit(&req.org_id, &req.run_id);
     if was_active {
         let envelope = mp_events::envelope::Envelope {
@@ -667,6 +699,13 @@ mod tests {
         assert_eq!(exited[0].0, "mp.v1.run.run-1.event");
         assert_eq!(exited[0].1.event_type, "RUN_PLAN_MODE_EXITED");
         assert_eq!(exited[0].1.payload["plan_id"], "plan_abc123");
+        // The same decision that emitted the receipt queued the plan for the
+        // next run on the thread, so the plan a run is told to follow is the
+        // one approved together with its grant.
+        assert_eq!(
+            store.take_approved_plan("org-1", "session-1"),
+            Some("plan_abc123".to_owned())
+        );
     }
 
     #[test]
@@ -764,6 +803,7 @@ mod tests {
             "org-1",
             "thread-1",
             mp_contracts::model_plane::v1::AutonomyRung::WorkspaceWrite,
+            "",
         );
         assert_eq!(
             store.granted_rung("org-1", "thread-1"),
@@ -775,6 +815,62 @@ mod tests {
         assert_eq!(store.granted_rung("org-1", "thread-2"), None);
     }
 
+    /// plan-gate §2.4: the plan approved WITH a grant is handed to the next run
+    /// once, and only to a caller in the grant's own org and thread.
+    #[test]
+    fn the_plan_approved_with_a_grant_is_handed_over_exactly_once() {
+        let store = PlanModeStore::new();
+        store.record_grant(
+            "org-1",
+            "thread-1",
+            mp_contracts::model_plane::v1::AutonomyRung::WorkspaceWrite,
+            "plan_7",
+        );
+        // A foreign org or an unrelated thread neither sees it nor spends it.
+        assert_eq!(store.take_approved_plan("org-2", "thread-1"), None);
+        assert_eq!(store.take_approved_plan("org-1", "thread-2"), None);
+        // The first run to start takes it …
+        assert_eq!(
+            store.take_approved_plan("org-1", "thread-1"),
+            Some("plan_7".to_owned())
+        );
+        // … the second gets nothing: an approval is spent once.
+        assert_eq!(store.take_approved_plan("org-1", "thread-1"), None);
+        // The RUNG is not spent with the plan — it covers the thread until it
+        // expires.
+        assert_eq!(
+            store.granted_rung("org-1", "thread-1"),
+            Some(mp_contracts::model_plane::v1::AutonomyRung::WorkspaceWrite),
+        );
+    }
+
+    #[test]
+    fn a_grant_made_without_a_plan_hands_over_no_plan() {
+        let store = PlanModeStore::new();
+        store.record_grant(
+            "org-1",
+            "thread-1",
+            mp_contracts::model_plane::v1::AutonomyRung::WorkspaceWrite,
+            "",
+        );
+        assert_eq!(store.take_approved_plan("org-1", "thread-1"), None);
+    }
+
+    #[test]
+    fn a_newer_grant_replaces_the_pending_plan_of_an_older_one() {
+        // Two approvals on one thread before any run starts: only the latest
+        // decision stands, so the earlier plan is never handed over.
+        let store = PlanModeStore::new();
+        let rung = mp_contracts::model_plane::v1::AutonomyRung::WorkspaceWrite;
+        store.record_grant("org-1", "thread-1", rung, "plan_old");
+        store.record_grant("org-1", "thread-1", rung, "plan_new");
+        assert_eq!(
+            store.take_approved_plan("org-1", "thread-1"),
+            Some("plan_new".to_owned())
+        );
+        assert_eq!(store.take_approved_plan("org-1", "thread-1"), None);
+    }
+
     /// An empty thread is refused rather than stored under "" — where every
     /// caller would collide and read each other's grants.
     #[test]
@@ -784,12 +880,15 @@ mod tests {
             "org-1",
             "",
             mp_contracts::model_plane::v1::AutonomyRung::WorkspaceWrite,
+            "plan_7",
         );
         assert_eq!(store.granted_rung("org-1", ""), None);
+        assert_eq!(store.take_approved_plan("org-1", ""), None);
         store.record_grant(
             "org-1",
             "thread-1",
             mp_contracts::model_plane::v1::AutonomyRung::Unspecified,
+            "plan_7",
         );
         assert_eq!(store.granted_rung("org-1", "thread-1"), None);
     }

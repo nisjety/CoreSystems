@@ -2302,6 +2302,88 @@ mod resolution_tests {
         }
     }
 
+    /// Z-00, at the chain. A token that says ZDR used to reach this chain from
+    /// the gateway with the user's subscription pin dropped (empty provider hint,
+    /// empty connection id, `zdr` on), so the first ZDR-attested deployment
+    /// behind it served the turn and the user's connection was replaced without
+    /// a word. Both halves with the real subscription provider (which cannot
+    /// give ZDR) beside an attested Azure double: the dropped-pin request lands
+    /// on Azure, which is why the gateway refuses first; the pinned request the
+    /// gateway's backstop forwards is refused here, never reaching Azure, the
+    /// subscription's own endpoint or the intent ladder.
+    #[tokio::test]
+    async fn a_zdr_turn_pinned_to_the_subscription_never_lands_on_an_attested_azure() {
+        let server = wiremock::MockServer::start().await;
+        let subscription: BoxedProvider = Arc::new(
+            crate::provider::codex_subscription::CodexSubscriptionProvider::new(
+                server.uri(),
+                "test-key",
+                vec!["gpt-5.6-terra".into()],
+            )
+            .unwrap(),
+        );
+        let azure_seen = Arc::new(Mutex::new(None));
+        let attested_azure: BoxedProvider = Arc::new(RecordingProvider {
+            seen_model: azure_seen.clone(),
+            zdr_supported: true,
+            ..Default::default()
+        });
+        let chain = FallbackChain::new_with_providers(
+            vec![
+                ("openai-codex-subscription".into(), subscription),
+                ("azure-openai".into(), attested_azure),
+            ],
+            1,
+        )
+        .with_intent_enabled(true);
+
+        // What the gateway used to send for a ZDR token on a Terra turn: the pin
+        // is gone, so nothing says the subscription was ever asked for.
+        let dropped_pin = InferRequest {
+            request_id: "zdr-dropped-pin".into(),
+            model: "gpt-5.6-terra".into(),
+            org_id: "org".into(),
+            user_id: "user".into(),
+            zdr: true,
+            ..Default::default()
+        };
+        chain
+            .infer(&dropped_pin)
+            .await
+            .expect("an attested Azure serves a request that carries no pin");
+        assert!(
+            azure_seen.lock().unwrap().is_some(),
+            "this is the silent re-route: the user's connection replaced by Azure"
+        );
+
+        // What the persistence-free path forwards now: the pin is kept.
+        *azure_seen.lock().unwrap() = None;
+        let pinned = InferRequest {
+            request_id: "zdr-pinned".into(),
+            provider_hint: "openai-codex-subscription".into(),
+            subscription_connection_id: "connection".into(),
+            ..dropped_pin
+        };
+        let refused = chain
+            .infer(&pinned)
+            .await
+            .expect_err("a subscription cannot serve ZDR");
+        assert!(matches!(refused, ProviderError::ZdrUnavailable(_)), "{refused:?}");
+        let refused_stream = chain
+            .infer_stream(&pinned)
+            .await
+            .expect_err("nor can it stream ZDR");
+        assert!(matches!(refused_stream, ProviderError::ZdrUnavailable(_)), "{refused_stream:?}");
+        assert!(
+            azure_seen.lock().unwrap().is_none(),
+            "a turn pinned to the subscription never lands on Azure, attested or not"
+        );
+        assert!(
+            server.received_requests().await.unwrap().is_empty(),
+            "and the subscription is not asked to serve what it cannot keep zero-retention"
+        );
+    }
+
     /// Refuses every call with one subscription refusal, counting the calls.
     struct RefusingProvider {
         calls: Arc<std::sync::atomic::AtomicUsize>,
@@ -2785,6 +2867,113 @@ mod resolution_tests {
             Some(&Duration::from_millis(41))
         );
         assert!(timing.upstream.contains_key("broker_ready"));
+    }
+
+    #[tokio::test]
+    async fn the_subscription_route_is_stamped_global_and_cannot_meet_an_eu_or_zdr_floor() {
+        // The provenance the browser's answer meta shows ("Behandlet: global,
+        // ingen EU- eller ZDR-garanti") is stamped here, not by the provider:
+        // the provider returns both fields empty, and the chain writes them
+        // from the provider's declared capabilities on the unary response and
+        // on the final stream chunk alike.
+        use wiremock::matchers::path;
+        let usage = serde_json::json!({"inputTokens": 10, "outputTokens": 2});
+        let server = wiremock::MockServer::start().await;
+        let reply = serde_json::json!({"success": true, "data": {"response": {
+            "requestId": "stamp", "content": "Hei", "modelUsed": "gpt-5.6-terra", "usage": usage
+        }}});
+        wiremock::Mock::given(path("/internal/model-subscriptions/openai-codex/infer"))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(reply))
+            .mount(&server)
+            .await;
+        let stream = [
+            serde_json::json!({"type": "ready", "requestId": "stamp"}),
+            serde_json::json!({"type": "delta", "delta": "Hei"}),
+            serde_json::json!({
+                "type": "done", "requestId": "stamp", "modelUsed": "gpt-5.6-terra", "usage": usage
+            }),
+        ]
+        .iter()
+        .map(|event| format!("data: {event}\n\n"))
+        .collect::<Vec<_>>()
+        .concat();
+        wiremock::Mock::given(path(
+            "/internal/model-subscriptions/openai-codex/infer/stream",
+        ))
+        .respond_with(
+            wiremock::ResponseTemplate::new(200).set_body_raw(stream, "text/event-stream"),
+        )
+        .mount(&server)
+        .await;
+        let provider =
+            CodexSubscriptionProvider::new(server.uri(), "test-key", vec!["gpt-5.6-terra".into()])
+                .unwrap();
+
+        // What the provider declares: no region commitment, no verified ZDR.
+        let caps = ProviderRouter::capabilities(&provider);
+        assert_eq!(caps.residency, Residency::Global);
+        assert!(!caps.supports_zdr);
+        assert_eq!(PrivacyTier::classify(&caps), PrivacyTier::Global);
+
+        let request = InferRequest {
+            request_id: "stamp".into(),
+            model: "gpt-5.6-terra".into(),
+            provider_hint: "openai-codex-subscription".into(),
+            subscription_connection_id: "connection".into(),
+            org_id: "org".into(),
+            user_id: "user".into(),
+            ..Default::default()
+        };
+        let raw = ProviderRouter::infer(&provider, &request).await.unwrap();
+        assert_eq!(
+            (raw.provider_used.as_str(), raw.residency.as_str()),
+            ("", ""),
+            "the provider stamps nothing itself; the chain does"
+        );
+
+        let subscription: BoxedProvider = Arc::new(provider);
+        let chain = FallbackChain::new_with_providers(
+            vec![("openai-codex-subscription".into(), subscription)],
+            1,
+        );
+        let response = chain.infer_without_response_cache(&request).await.unwrap();
+        assert_eq!(response.provider_used, "openai-codex-subscription");
+        assert_eq!(response.residency, "global");
+
+        let mut chunks = chain.infer_stream(&request).await.unwrap();
+        let mut done = None;
+        while let Some(chunk) = chunks.recv().await {
+            if chunk.done {
+                done = Some(chunk);
+                break;
+            }
+        }
+        let done = done.expect("a final chunk");
+        assert_eq!(done.provider_used, "openai-codex-subscription");
+        assert_eq!(done.residency, "global");
+
+        // The same declaration refuses what the stamp does not promise: an
+        // EU or ZDR requirement is never answered through this route.
+        for floor in [PrivacyTier::EuResident, PrivacyTier::ZdrContractual] {
+            let strict = InferRequest {
+                min_privacy_tier: floor,
+                ..request.clone()
+            };
+            assert!(
+                matches!(
+                    chain.infer_without_response_cache(&strict).await,
+                    Err(ProviderError::TierUnavailable(_))
+                ),
+                "unary: {floor:?} must be refused"
+            );
+            assert!(
+                matches!(
+                    chain.infer_stream(&strict).await,
+                    Err(ProviderError::TierUnavailable(_))
+                ),
+                "stream: {floor:?} must be refused"
+            );
+        }
     }
 
     #[tokio::test]

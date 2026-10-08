@@ -17,6 +17,89 @@ use axum::response::sse::Event;
 use serde_json::{json, Value};
 use tokio::sync::mpsc::Sender;
 
+/// Who processed one answer, as the server stamped it. It rides on the `usage`
+/// frame so the answer meta can say where an answer was processed, from
+/// server-stamped values only: the client never infers residency from a model
+/// name, and an older gateway simply sends nothing.
+///
+/// `provider_used` and `residency` are read off the final chunk (or unary
+/// response) of the call that served the answer. inference-core's fallback chain
+/// writes both from the serving provider's own declared capabilities, so the
+/// ChatGPT-subscription route reads `global` even though that provider itself
+/// returns both empty.
+///
+/// `privacy_tier` is the strongest tier the gateway can substantiate for this
+/// answer, never an overstatement: the tier its stamped residency implies on
+/// its own (`global` is `global`; `eu` and `norway` are `eu_resident`), raised
+/// to the floor the request enforced (inference-core skips every provider below
+/// it, so an answer that was served met it). Retention is not carried on the
+/// chunk, so `zdr_contractual` and `sovereign` appear only when the request
+/// demanded them.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ServedBy {
+    /// Registry id of the provider deployment that served the answer.
+    pub provider_used: String,
+    /// Residency that deployment declares: `global`, `eu` or `norway`.
+    pub residency: String,
+    /// `global`, `eu_resident`, `zdr_contractual` or `sovereign`; `None` when
+    /// nothing is asserted.
+    pub privacy_tier: Option<&'static str>,
+}
+
+impl ServedBy {
+    /// The provenance of an answer from what the call that served it reported.
+    ///
+    /// `None` when no provider served it (a synthetic answer that made no
+    /// provider call, or an older inference-core that stamped nothing), so the
+    /// frame then carries no provenance at all rather than an empty claim.
+    /// `enforced_floor_wire` is the `PrivacyTier` ordinal the request sent
+    /// with the call; anything outside 1..=4 expresses no floor.
+    #[must_use]
+    pub fn stamped(provider_used: &str, residency: &str, enforced_floor_wire: i32) -> Option<Self> {
+        let provider_used = provider_used.trim();
+        if provider_used.is_empty() {
+            return None;
+        }
+        let residency = residency.trim();
+        let implied = match residency.to_ascii_lowercase().as_str() {
+            "global" => 1,
+            "eu" | "norway" => 2,
+            _ => 0,
+        };
+        let floor = if (1..=4).contains(&enforced_floor_wire) {
+            enforced_floor_wire
+        } else {
+            0
+        };
+        let privacy_tier = match implied.max(floor) {
+            1 => Some("global"),
+            2 => Some("eu_resident"),
+            3 => Some("zdr_contractual"),
+            4 => Some("sovereign"),
+            _ => None,
+        };
+        Some(Self {
+            provider_used: provider_used.to_owned(),
+            residency: residency.to_owned(),
+            privacy_tier,
+        })
+    }
+
+    /// Writes each non-empty field onto a `usage` payload, leaving the keys of
+    /// every payload that predates them untouched.
+    fn write_to(&self, usage: &mut Value) {
+        if !self.provider_used.is_empty() {
+            usage["provider_used"] = json!(self.provider_used);
+        }
+        if !self.residency.is_empty() {
+            usage["residency"] = json!(self.residency);
+        }
+        if let Some(tier) = self.privacy_tier {
+            usage["privacy_tier"] = json!(tier);
+        }
+    }
+}
+
 /// A rich chat-stream event beyond the plain text delta.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ChatEvent {
@@ -153,6 +236,11 @@ pub enum ChatEvent {
         cost_basis: Option<crate::pricing::CostBasis>,
         latency_ms: u64,
         confidence: Option<f64>,
+        /// Which provider served the answer, under what declared residency and
+        /// privacy tier, as stamped by the server (see [`ServedBy`]). `None`
+        /// where this layer saw no serving provider; the three keys are then
+        /// omitted, so older clients and every earlier payload stay valid.
+        served_by: Option<ServedBy>,
     },
     /// Per-turn phase timing (Q14): ids, milliseconds and counts, never
     /// content. Emitted once, just before the terminal `done`, `error` or
@@ -431,6 +519,7 @@ impl ChatEvent {
                 cost_basis,
                 latency_ms,
                 confidence,
+                served_by,
             } => {
                 let mut usage = json!({
                     "input_tokens": input_tokens,
@@ -442,6 +531,10 @@ impl ChatEvent {
                 // Optional: a client that predates it sees the same payload.
                 if let Some(basis) = cost_basis {
                     usage["cost_basis"] = json!(basis.as_str());
+                }
+                // Optional, and per field: an empty value is left out.
+                if let Some(served_by) = served_by {
+                    served_by.write_to(&mut usage);
                 }
                 usage
             }
@@ -1285,6 +1378,7 @@ mod tests {
             cost_basis: None,
             latency_ms: 10,
             confidence: None,
+            served_by: None,
         }
         .should_emit(&no_features));
         assert!(ChatEvent::Stopped {
@@ -1364,6 +1458,7 @@ mod tests {
             cost_basis: Some(crate::pricing::CostBasis::Metered),
             latency_ms: 5,
             confidence: Some(0.9),
+            served_by: None,
         }
         .should_emit(&feats));
         // Not opted in:
@@ -1417,6 +1512,7 @@ mod tests {
             cost_basis: Some(crate::pricing::CostBasis::Metered),
             latency_ms: 880,
             confidence: Some(0.77),
+            served_by: None,
         };
         assert_eq!(usage.name(), "usage");
         let p = usage.payload("req-1");
@@ -1542,6 +1638,7 @@ mod tests {
             cost_basis: Some(crate::pricing::CostBasis::Subscription),
             latency_ms: 880,
             confidence: None,
+            served_by: None,
         }
         .payload("req-2");
         assert_eq!(subscription["cost_usd"], 0.0);
@@ -1554,6 +1651,7 @@ mod tests {
             cost_basis: None,
             latency_ms: 880,
             confidence: None,
+            served_by: None,
         }
         .payload("req-3");
         let mut keys: Vec<&str> = unestablished
@@ -1575,6 +1673,123 @@ mod tests {
         );
     }
 
+    fn usage_with(served_by: Option<ServedBy>) -> serde_json::Value {
+        ChatEvent::Usage {
+            input_tokens: 10,
+            output_tokens: 5,
+            cost_usd: Some(0.0),
+            cost_basis: Some(crate::pricing::CostBasis::Metered),
+            latency_ms: 700,
+            confidence: None,
+            served_by,
+        }
+        .payload("req-served")
+    }
+
+    /// The usage payload carries the three provenance fields when the server
+    /// stamped them, and exactly the keys it always had when it did not.
+    #[test]
+    fn usage_carries_server_stamped_provenance_and_omits_it_when_empty() {
+        let baseline = usage_with(None);
+        let mut baseline_keys: Vec<&str> = baseline
+            .as_object()
+            .expect("usage payload is an object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        baseline_keys.sort_unstable();
+        assert_eq!(
+            baseline_keys,
+            [
+                "confidence",
+                "cost_basis",
+                "cost_usd",
+                "input_tokens",
+                "latency_ms",
+                "output_tokens"
+            ],
+            "no provenance, no new keys"
+        );
+
+        let azure = usage_with(ServedBy::stamped("azure-openai", "eu", 3));
+        assert_eq!(azure["provider_used"], "azure-openai");
+        assert_eq!(azure["residency"], "eu");
+        assert_eq!(azure["privacy_tier"], "zdr_contractual");
+        // The fields sit beside the old ones; none of those moved.
+        assert_eq!(azure["input_tokens"], 10);
+        assert_eq!(azure["cost_basis"], "metered");
+
+        // Per field: an empty value is left out, not sent as "" or null.
+        let bare = usage_with(Some(ServedBy {
+            provider_used: "azure-openai".into(),
+            residency: String::new(),
+            privacy_tier: None,
+        }));
+        assert_eq!(bare["provider_used"], "azure-openai");
+        assert!(bare.get("residency").is_none());
+        assert!(bare.get("privacy_tier").is_none());
+        let empty = usage_with(Some(ServedBy::default()));
+        for key in ["provider_used", "residency", "privacy_tier"] {
+            assert!(empty.get(key).is_none(), "{key} must be omitted when empty");
+        }
+        assert_eq!(empty, baseline, "an all-empty stamp is the old payload");
+    }
+
+    /// A subscription answer reads `global` with no tier above it. The
+    /// provider itself returns both fields empty; inference-core's chain
+    /// stamps them (pinned by its own test), and this is what the gateway
+    /// makes of that stamp.
+    #[test]
+    fn a_subscription_answer_reads_global_with_no_eu_or_zdr_tier() {
+        let served = ServedBy::stamped("openai-codex-subscription", "global", 0)
+            .expect("a provider served the answer");
+        assert_eq!(served.provider_used, "openai-codex-subscription");
+        assert_eq!(served.residency, "global");
+        assert_eq!(served.privacy_tier, Some("global"));
+        let payload = usage_with(Some(served));
+        assert_eq!(payload["residency"], "global");
+        assert_eq!(payload["privacy_tier"], "global");
+        let text = payload.to_string();
+        assert!(
+            !text.contains("eu_resident") && !text.contains("zdr") && !text.contains("sovereign"),
+            "the subscription route must never carry a stronger tier: {text}"
+        );
+    }
+
+    /// The tier is a lower bound: what the stamped residency implies, raised
+    /// to the floor the request enforced, never more.
+    #[test]
+    fn served_by_asserts_only_what_residency_and_the_enforced_floor_support() {
+        let tier = |provider: &str, residency: &str, floor: i32| {
+            ServedBy::stamped(provider, residency, floor).and_then(|served| served.privacy_tier)
+        };
+        // Residency alone.
+        assert_eq!(tier("azure-openai", "eu", 0), Some("eu_resident"));
+        assert_eq!(tier("azure-openai", " EU ", 0), Some("eu_resident"));
+        assert_eq!(tier("some-sovereign", "norway", 0), Some("eu_resident"));
+        assert_eq!(tier("openai", "global", 0), Some("global"));
+        // The enforced floor raises it: inference-core skipped every provider
+        // below it, so the answer met it.
+        assert_eq!(tier("azure-openai", "eu", 3), Some("zdr_contractual"));
+        assert_eq!(tier("some-sovereign", "norway", 4), Some("sovereign"));
+        // A floor can never lower what the residency already implies.
+        assert_eq!(tier("azure-openai", "eu", 1), Some("eu_resident"));
+        // Out-of-range ordinals express no floor at all.
+        assert_eq!(tier("azure-openai", "eu", 99), Some("eu_resident"));
+        assert_eq!(tier("azure-openai", "eu", -1), Some("eu_resident"));
+        // An undeclared residency asserts nothing by itself.
+        assert_eq!(tier("mystery", "", 0), None);
+        assert_eq!(tier("mystery", "atlantis", 0), None);
+        assert_eq!(
+            ServedBy::stamped("mystery", "", 0).map(|served| served.residency),
+            Some(String::new())
+        );
+        // No serving provider, no provenance: a synthetic answer that made
+        // no provider call, or an inference-core that stamped nothing.
+        assert_eq!(ServedBy::stamped("", "eu", 3), None);
+        assert_eq!(ServedBy::stamped("   ", "global", 2), None);
+    }
+
     /// `turn_timing` rides with `usage`: a client that did not ask for usage
     /// never sees it, live or on resume.
     #[test]
@@ -1591,6 +1806,7 @@ mod tests {
             cost_basis: None,
             latency_ms: 0,
             confidence: None,
+            served_by: None,
         };
         assert_eq!(event.name(), "turn_timing");
         assert_eq!(event.family(), usage.family());

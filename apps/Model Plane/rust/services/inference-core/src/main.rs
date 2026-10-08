@@ -4,7 +4,7 @@
 
 use anyhow::Result;
 use inference_core::{
-    auth::JwtVerifier, config, grpc, http_health, provider, readiness::GrpcReadiness,
+    auth::JwtVerifier, config, grpc, http_health, metrics, provider, readiness::GrpcReadiness,
 };
 use tracing::info;
 
@@ -12,6 +12,11 @@ use tracing::info;
 async fn main() -> Result<()> {
     let _otel_guard = mp_telemetry::init("inference-core")?;
     info!("inference-core starting");
+
+    // Installed before anything can count a request, and fatal when it cannot
+    // be: a failed install would leave `/metrics` empty while every counter went
+    // nowhere.
+    let metrics_handle = metrics::install_recorder()?;
 
     let cfg = config::InferenceConfig::from_env()?;
     info!(
@@ -79,7 +84,11 @@ async fn main() -> Result<()> {
         auth,
         grpc_readiness.clone(),
     ));
-    let http_handle = tokio::spawn(http_health::serve(policy_state, grpc_readiness));
+    let http_handle = tokio::spawn(http_health::serve(
+        policy_state,
+        grpc_readiness,
+        metrics_handle,
+    ));
 
     let shutdown = async {
         wait_for_terminate().await;

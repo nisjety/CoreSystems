@@ -185,6 +185,23 @@ const TOOL_PHASE_OVERFLOW_NOTICE: &str =
 /// can genuinely approach.
 const MAX_TOOL_OUTPUT_CHARS: usize = 8_000;
 
+/// What a `read_artifact` result carries around the document body: its
+/// "Current content of artifact '<id>' (v<n>):" header and, past
+/// [`MAX_READ_ARTIFACT_CHARS`], the note that says the read was cut. Generous
+/// on purpose: an artifact id has no length limit of its own.
+const READ_ARTIFACT_FRAME_CHARS: usize = 1_024;
+
+/// The inline bound of a `read_artifact` result, in place of
+/// [`MAX_TOOL_OUTPUT_CHARS`]. The read returns a document up to
+/// [`MAX_READ_ARTIFACT_CHARS`] whole, the artifact store and the sole-artifact
+/// prefetch treat one that fits as fully read, and a revision that rewrites it
+/// whole drops whatever the model was not shown. So the text the model sees of
+/// a read is never shorter than the document the gateway treats as read: this
+/// is the read's own limit plus its frame, not the general bound that clipped
+/// a 20 000-character document at 8 000 while the gateway counted it whole.
+/// No other tool's bound changes.
+const MAX_READ_ARTIFACT_OUTPUT_CHARS: usize = MAX_READ_ARTIFACT_CHARS + READ_ARTIFACT_FRAME_CHARS;
+
 /// The result of executing one model-requested tool call.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolOutcome {
@@ -2438,6 +2455,37 @@ pub async fn dispatch_tool(
     // one arm, `code_interpreter`, and only when `space_id` is set.
     sandbox_bearer: Option<&VerifiedSandboxBearer>,
 ) -> ToolOutcome {
+    dispatch_tool_with_cost(
+        state, run_id, org_id, user_id, thread_id, space_id, prompt_contents,
+        conversation, data_plane_bearer, execution_bearer, inference_bearer,
+        session_bearer, capability_bearer, zdr, sovereign_required,
+        allow_paid_providers, call, ingestion_bearer, sandbox_bearer, None,
+    ).await
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+async fn dispatch_tool_with_cost(
+    state: &AppState,
+    run_id: &str,
+    org_id: &str,
+    user_id: &str,
+    thread_id: &str,
+    space_id: &str,
+    prompt_contents: &[String],
+    conversation: &str,
+    data_plane_bearer: Option<&VerifiedBearer>,
+    execution_bearer: Option<&VerifiedExecutionBearer>,
+    inference_bearer: &str,
+    session_bearer: &str,
+    capability_bearer: Option<&str>,
+    zdr: bool,
+    sovereign_required: bool,
+    allow_paid_providers: bool,
+    call: &ToolCall,
+    ingestion_bearer: Option<&VerifiedIngestionBearer>,
+    sandbox_bearer: Option<&VerifiedSandboxBearer>,
+    cost_bearer: Option<&str>,
+) -> ToolOutcome {
     if !inline_tool_allowed(&call.name) {
         return err_outcome(
             call,
@@ -3512,14 +3560,26 @@ pub async fn dispatch_tool(
         // a cross-tenant read. Underscore names are what we advertise (Anthropic
         // rejects '.' in tool names); the dotted forms are accepted so the Agent
         // Console's explicit action ids resolve to the same handler.
-        "insights_overview" | "insights.overview" => verevon_read_outcome(
-            state,
-            org_id,
-            user_id,
-            zdr,
-            call,
-            crate::verevon_actions::insights_overview(state, org_id).await,
-        ),
+        "insights_overview" | "insights.overview" => {
+            let surface = arg_str(&call.arguments_json, "surface");
+            let period = arg_str(&call.arguments_json, "period");
+            verevon_read_outcome(
+                state,
+                org_id,
+                user_id,
+                zdr,
+                call,
+                crate::verevon_actions::insights_overview_filtered(
+                    state,
+                    org_id,
+                    user_id,
+                    cost_bearer,
+                    Some(surface.as_str()),
+                    Some(period.as_str()),
+                )
+                .await,
+            )
+        }
         // The shared inbox. Read-only and org-scoped by the VERIFIED request
         // org; no arm reads an org from `call.arguments_json`, so a turn cannot
         // reach another tenant's mail.
@@ -3909,6 +3969,7 @@ async fn dispatch_audited_tool(
     call: &ToolCall,
     ingestion_bearer: Option<&VerifiedIngestionBearer>,
     sandbox_bearer: Option<&VerifiedSandboxBearer>,
+    cost_bearer: Option<&str>,
     // When set, the call (all of its attempts) stops here and fails. Only a
     // read in a source-bound phase gets one; see `stops_at_validation_deadline`.
     read_deadline: Option<tokio::time::Instant>,
@@ -3954,7 +4015,7 @@ async fn dispatch_audited_tool(
             if attempt > 1 {
                 tokio::time::sleep(crate::tool_retry::backoff_before_attempt(attempt)).await;
             }
-            let result = dispatch_tool(
+            let result = dispatch_tool_with_cost(
                 state,
                 run_id,
                 org_id,
@@ -3974,6 +4035,7 @@ async fn dispatch_audited_tool(
                 call,
                 ingestion_bearer,
                 sandbox_bearer,
+                cost_bearer,
             )
             .await;
             let should_retry = attempt < crate::tool_retry::MAX_TOOL_ATTEMPTS
@@ -4106,6 +4168,7 @@ pub(crate) async fn dispatch_web_tool_audited(
         None,
         // Web tools only: code_interpreter, the sole reader of the sandbox
         // bearer, is unreachable from this path.
+        None,
         None,
         // Research bounds its own pipeline; there is no draft deadline here.
         None,
@@ -4241,7 +4304,7 @@ pub fn builtin_tool_defs() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "code_interpreter".to_owned(),
-            description: "Run Python 3 (or POSIX sh) in an isolated sandbox and return stdout/stderr plus any FILES the code wrote. This is the tool for exact computation and for producing real documents: use it for arithmetic and large-number math, date arithmetic, statistics, parsing and data transformation, and for GENERATING files the user can download — .xlsx via openpyxl, .docx via python-docx, .pdf via reportlab, charts via matplotlib (headless), plus csv/json/html/md. Write files to the current working directory and they are returned to the user automatically as downloadable artifacts, appearing as download cards BELOW your message the moment this call returns; do not base64 them yourself, and NEVER write a markdown link, a bare URL, or a \"sandbox:/\" path to reference one — none of those resolve to anything and the user cannot open them. Just confirm in plain text what you produced. Available libraries: openpyxl, python-docx, reportlab, matplotlib, pandas, numpy. The sandbox has NO network access and a hard ~30s timeout, so never attempt downloads or long jobs here (use web_search/fetch_url for the web). Prefer this over doing arithmetic in your head whenever the exact value matters.".to_owned(),
+            description: "Run Python 3 (or POSIX sh) in an isolated sandbox and return stdout/stderr plus any FILES the code wrote. This is the tool for exact computation and for producing real documents: use it for arithmetic and large-number math, date arithmetic, statistics, parsing and data transformation, and for GENERATING files the user can download — .xlsx via openpyxl or xlsxwriter (write formulas as strings such as \"=SUM(B2:B9)\" so the sheet keeps live formulas, and make a native Excel chart with openpyxl.chart or xlsxwriter's add_chart; neither library calculates a formula, so compute any figure you quote in Python as well), .docx via python-docx, .pptx via python-pptx (to put a chart on a slide, draw it with matplotlib and add the PNG with add_picture), .pdf via reportlab (pypdf reads and merges existing PDFs), charts and images as PNG via matplotlib (headless: plt.savefig, never plt.show) and Pillow, plus csv/json/html/md. Write files to the current working directory and they are returned to the user automatically as downloadable artifacts, appearing as download cards BELOW your message the moment this call returns (a PNG also shows inline in the message); do not base64 them yourself, and NEVER write a markdown link, a bare URL, or a \"sandbox:/\" path to reference one — none of those resolve to anything and the user cannot open them. Just confirm in plain text what you produced. Available libraries: numpy, pandas, matplotlib, openpyxl, xlsxwriter, python-docx, reportlab, pypdf, Pillow, python-pptx, lxml. The sandbox has NO network access and a hard ~30s timeout, so never attempt downloads or long jobs here (use web_search/fetch_url for the web). Prefer this over doing arithmetic in your head whenever the exact value matters.".to_owned(),
             parameters_json: r#"{"type":"object","properties":{"language":{"type":"string","enum":["python","sh"],"description":"Runtime; defaults to python"},"code":{"type":"string","description":"Source to execute. print() what you want to read back; write files to the working directory to hand them to the user."},"files_in":{"type":"array","description":"Optional input files to place in the working directory before running.","items":{"type":"object","properties":{"name":{"type":"string","description":"Flat filename, no directories"},"content_b64":{"type":"string","description":"Base64 file contents"}},"required":["name","content_b64"]}}},"required":["code"]}"#.to_owned(),
         },
         ToolDefinition {
@@ -4338,8 +4401,8 @@ pub fn builtin_tool_defs() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "insights_overview".to_owned(),
-            description: "Get the organization's own Insights dashboard numbers: headline scorecards (label, metric, value, unit), per-surface event rollups with the last-event timestamp, connector lag, and the catalogue of supported connectors with their wiring status. Use this for 'how are we doing', 'what do our metrics say', 'which numbers changed', or when the user refers to the Insights page. Note that the connector list is the SUPPORTED-connector catalogue with status (native / planned / requires_token_lease / disabled) — it is NOT a list of live connections, so never report a 'planned' connector as something the org has connected. Do NOT use this for social-account or post data (use social_list_accounts / social_list_posts), and do NOT use it for public benchmarks or market figures (use web_search).".to_owned(),
-            parameters_json: r#"{"type":"object","properties":{}}"#.to_owned(),
+            description: "Read recorded Insights scorecards and per-surface event totals from Insight Core, plus the signed-in user's personal Cost Core usage split into metered spend, Codex subscription entries/tokens, and unknown-basis usage when an authorized credential is present. Insights events may be incomplete; explain counts with their source/unit/aggregation and coverage. Subscription token totals are reported usage, not remaining allowance, and metered USD is an estimated ledger amount rather than an invoice. Use for 'how are we doing', 'what do our metrics say', or 'how have I used AI'. Do NOT use for social-account or post data (use social_list_accounts / social_list_posts), and do NOT use for public benchmarks or market figures (use web_search).".to_owned(),
+            parameters_json: r#"{"type":"object","properties":{"surface":{"type":"string","enum":["social","inbox","agents","chat","knowledge","ingestion","campaigns","external_analytics"],"description":"Optional Insights area filter."},"period":{"type":"string","enum":["7d","30d","90d","all"],"description":"Reporting window. Defaults to the full available history."}}}"#.to_owned(),
         },
         ToolDefinition {
             name: "social_list_accounts".to_owned(),
@@ -4411,12 +4474,12 @@ fn append_tool_outcomes(s: &mut String, outcomes: &[ToolOutcome]) {
                 let _ = writeln!(s, "- {} [source: {source}] → ERROR: {e}", o.name);
             }
             None => {
-                let _ = writeln!(
-                    s,
-                    "- {} [source: {source}] → {}",
-                    o.name,
+                let shown = if o.name == "read_artifact" {
+                    bounded_read_output(&o.output)
+                } else {
                     bounded_tool_output(&o.output)
-                );
+                };
+                let _ = writeln!(s, "- {} [source: {source}] → {shown}", o.name);
                 append_provenance_note(s, &o.provenance);
             }
         }
@@ -4463,16 +4526,39 @@ fn append_provenance_note(s: &mut String, provenance: &crate::moderation::ToolPr
 /// — a bare ellipsis reads as "that is all there was", which would have it
 /// summarize a partial result set as if it were complete.
 fn bounded_tool_output(output: &str) -> String {
+    bounded_output(output, MAX_TOOL_OUTPUT_CHARS)
+}
+
+/// [`bounded_tool_output`] for a `read_artifact` result, at the read's own
+/// limit ([`MAX_READ_ARTIFACT_OUTPUT_CHARS`]).
+fn bounded_read_output(output: &str) -> String {
+    bounded_output(output, MAX_READ_ARTIFACT_OUTPUT_CHARS)
+}
+
+fn bounded_output(output: &str, limit: usize) -> String {
     let trimmed = output.trim();
-    if trimmed.chars().count() <= MAX_TOOL_OUTPUT_CHARS {
+    if trimmed.chars().count() <= limit {
         return trimmed.to_owned();
     }
-    let kept: String = trimmed.chars().take(MAX_TOOL_OUTPUT_CHARS).collect();
+    let kept: String = trimmed.chars().take(limit).collect();
     format!(
-        "{kept}\n[truncated: result exceeded {MAX_TOOL_OUTPUT_CHARS} characters and is INCOMPLETE. \
+        "{kept}\n[truncated: result exceeded {limit} characters and is INCOMPLETE. \
          Do not treat this as the full result set. To see the rest, narrow the request — filter \
          harder, request fewer fields, or page through it.]"
     )
+}
+
+/// Whether `outcome` is a `read_artifact` that put a document's COMPLETE text
+/// in front of the model: the read returned it whole (no read-limit note) and
+/// the text the model is shown of it ([`bounded_read_output`]) is not clipped
+/// either. The gateway's "whole document was read" state keys on this, so it
+/// can never be set for text the model did not see.
+fn read_whole_artifact(outcome: &ToolOutcome) -> bool {
+    outcome.name == "read_artifact"
+        && outcome.error.is_none()
+        && outcome.output.starts_with("Current content of artifact")
+        && !outcome.output.contains("[Only the first part of this artifact is shown")
+        && outcome.output.trim().chars().count() <= MAX_READ_ARTIFACT_OUTPUT_CHARS
 }
 
 /// Result of resolving a request's tool calls before the final answer streams.
@@ -4902,6 +4988,117 @@ fn sole_artifact_prefetch(
     })
 }
 
+/// Told to the author, as the last decision message, on a turn that asks for
+/// a dated post's section alone (`LatencyLevers::dated_post_section_only`).
+/// It must win over the standing "full content" wording of the decision
+/// prompt, so it says that it does.
+const DATED_POST_SECTION_ONLY_NOTICE: &str = "For this revision only, send just the post you were asked to revise. Call update_artifact with the same id and put in content ONLY that post's section: its Markdown heading line, copied unchanged from the document, followed by the revised text under it, with the status or metadata lines, hashtags and any sub-heading that belong to that post. Send nothing else: not the document title, not the other posts, not the overview, the e-mail, or any sources or notes that stand apart from this post (a sub-heading under this post is part of it and goes with it). The gateway keeps everything outside that post exactly as it is and puts your section in its place, so a complete document is not needed and only makes this turn slower. This replaces, for this revision, every earlier instruction to send the complete content, including the one in the tool description.";
+
+/// The `update_artifact` description offered on such a turn, in place of the
+/// standing one ("Always send the COMPLETE new content"), so the tool text and
+/// the notice above do not contradict each other.
+const SECTION_ONLY_UPDATE_DESCRIPTION: &str = "Replace one dated post of an artifact you created earlier with create_artifact, producing a new version the user can step back through. For this revision the user asked to change exactly one dated post, and the gateway keeps every other part of the document exactly as it is: send in content ONLY that post's section, meaning its Markdown heading line (the same heading line as in the document, unchanged) followed by the revised text under it, and nothing else. Do not send the complete document, its title or any other section. Read the current text with read_artifact first when you no longer have it in front of you.";
+
+/// The parameter schema that goes with [`SECTION_ONLY_UPDATE_DESCRIPTION`]:
+/// the same three properties, with `content` described as the section.
+const SECTION_ONLY_UPDATE_PARAMETERS: &str = r#"{"type":"object","properties":{"id":{"type":"string","description":"The id you used with create_artifact"},"content":{"type":"string","description":"Only the revised post: its heading line, unchanged, and its revised text"},"title":{"type":"string","description":"Optional new title; omit to keep the current one"}},"required":["id","content"]}"#;
+
+/// Whether this round's author call is asked for one dated post's section
+/// alone. Only with the opt-in `dated_post_section_only` lever on, when
+/// `update_artifact` is offered, and when `turn_question` is a recognised
+/// revision of one dated post
+/// ([`crate::revision_preservation::Preservation::from_prompt`] gives a
+/// `DatedPost`) of exactly one of the thread's artifacts: the gateway has then
+/// resolved the unique target section, and `check_artifact` splices whatever
+/// the model sends into that artifact's accepted text. A new note never is,
+/// and neither is an artifact that is not a document (`document_artifact_write`):
+/// only a document write is checked, so only there is a section spliced
+/// rather than stored as it arrives.
+fn section_only_revision(
+    levers: crate::latency_levers::LatencyLevers,
+    artifacts: &crate::artifacts::ArtifactVersionStore,
+    thread_id: &str,
+    turn_question: &str,
+    new_note_pending: bool,
+    offered: &[ToolDefinition],
+) -> bool {
+    if !levers.dated_post_section_only
+        || new_note_pending
+        || !offered.iter().any(|tool| tool.name == "update_artifact")
+    {
+        return false;
+    }
+    let mut targets = artifacts
+        .known_in_thread(thread_id)
+        .into_iter()
+        .filter(|artifact| document_artifact_write(artifacts, thread_id, &artifact.id, "update_artifact", ""))
+        .filter_map(|artifact| artifacts.content_of(thread_id, &artifact.id))
+        .filter(|content| {
+            matches!(
+                crate::revision_preservation::Preservation::from_prompt(turn_question, content),
+                Ok(Some(crate::revision_preservation::Preservation::DatedPost { .. }))
+            )
+        });
+    targets.next().is_some() && targets.next().is_none()
+}
+
+/// The sub-heading lines (`### Kilder`) of the target post's section in the
+/// document a section-only turn revises, in order; empty when the post has
+/// none. Named to the author because the splice replaces the post's whole
+/// section: a post sent without its note deletes the note (Q16h take 1). The
+/// first document that resolves the target is the one `section_only_revision`
+/// found, since it is offered only when exactly one does.
+fn section_only_subheadings(
+    artifacts: &crate::artifacts::ArtifactVersionStore,
+    thread_id: &str,
+    turn_question: &str,
+) -> Vec<String> {
+    artifacts
+        .known_in_thread(thread_id)
+        .into_iter()
+        .filter(|artifact| document_artifact_write(artifacts, thread_id, &artifact.id, "update_artifact", ""))
+        .filter_map(|artifact| artifacts.content_of(thread_id, &artifact.id))
+        .find_map(|content| match crate::revision_preservation::Preservation::from_prompt(turn_question, &content) {
+            Ok(Some(preservation @ crate::revision_preservation::Preservation::DatedPost { .. })) => Some(preservation.subheadings()),
+            _ => None,
+        })
+        .unwrap_or_default()
+}
+
+/// Told to the author after [`DATED_POST_SECTION_ONLY_NOTICE`] when the post
+/// has sub-sections, so that the short section it sends carries them along.
+fn section_only_subheadings_notice(headings: &[String]) -> String {
+    let listed = headings.iter().map(|heading| format!("`{heading}`")).collect::<Vec<_>>().join(", ");
+    format!("That post's section in the document has these sub-heading lines: {listed}. Keep each of them in the section you send, under the revised text, and change what is under it so that it matches the revised text (a source note lists the product information the revised text builds on). Leaving a sub-heading out deletes it, and its note, from the document.")
+}
+
+/// Swap the offered `update_artifact` for its section-only wording. The name
+/// stays, so the dispatch guard and every list of tool names see the same tool.
+fn offer_section_only_update(tools: &mut [ToolDefinition]) {
+    for tool in tools.iter_mut().filter(|tool| tool.name == "update_artifact") {
+        SECTION_ONLY_UPDATE_DESCRIPTION.clone_into(&mut tool.description);
+        SECTION_ONLY_UPDATE_PARAMETERS.clone_into(&mut tool.parameters_json);
+    }
+}
+
+/// The document writes in a round's proposed calls, and the characters of
+/// their raw `content` arguments: the size of what the model emitted, for the
+/// turn's timing record. A write cut off mid-argument has no parseable
+/// arguments, and the length of its raw arguments text stands in.
+fn model_document_writes(calls: &[ToolCall]) -> (u32, u64) {
+    let mut writes = 0u32;
+    let mut chars = 0u64;
+    for call in calls.iter().filter(|call| writes_document(&call.name)) {
+        writes = writes.saturating_add(1);
+        let counted = match serde_json::from_str::<Value>(&call.arguments_json) {
+            Ok(arguments) => arguments.get("content").and_then(Value::as_str).map_or(0, |content| content.chars().count()),
+            Err(_) => call.arguments_json.chars().count(),
+        };
+        chars = chars.saturating_add(u64::try_from(counted).unwrap_or(u64::MAX));
+    }
+    (writes, chars)
+}
+
 fn pending_checked_document(prompt: &str, has_sources: bool, written: bool) -> bool {
     // A requested memo/status deliverable needs the same checked, durable
     // result as the initial plan. A direct chat summary or question does not.
@@ -5080,6 +5277,7 @@ pub async fn run_forced_web_search_for_model(
         None,
         // web_search only: code_interpreter, the sole reader of the sandbox
         // bearer, is unreachable from a forced search.
+        None,
         None,
         // Runs before any source-bound phase has started its deadline.
         None,
@@ -6098,6 +6296,7 @@ pub async fn run_tool_rounds(
         inference_bearer,
         session_bearer,
         capability_bearer,
+        None,
         zdr,
         sovereign_required,
         min_privacy_tier,
@@ -6145,6 +6344,7 @@ pub async fn run_tool_rounds_for_model(
     inference_bearer: &str,
     session_bearer: &str,
     capability_bearer: Option<&str>,
+    cost_bearer: Option<&str>,
     zdr: bool,
     sovereign_required: bool,
     min_privacy_tier: i32,
@@ -6379,6 +6579,11 @@ pub async fn run_tool_rounds_for_model(
             });
             break;
         }
+        // A recognised dated-post revision may be answered with that post's
+        // section alone (opt-in `dated_post_section_only`): this round then
+        // offers the section-only `update_artifact` and adds its notice below.
+        let section_only = section_only_revision(state.latency_levers, &state.artifact_versions, thread_id, &turn_question, new_note_pending, &round_tools);
+        if section_only { offer_section_only_update(&mut round_tools); }
         let document_pending = pending_checked_document(&turn_question, source_context.is_some(), document_written_for_instruction);
         if document_pending && !round_tools.iter().any(|tool| matches!(tool.name.as_str(), "create_artifact" | "update_artifact")) {
             return Err(crate::result_validation::VALIDATION_FAILED);
@@ -6398,6 +6603,13 @@ pub async fn run_tool_rounds_for_model(
                 "Create the requested short status/memo as a NEW artifact with its own distinct id and title. Preserve every existing artifact and its current version. Read the relevant prior artifact if needed before drafting; do not replace the project plan or report with the new note."
             }.into(), ..Default::default() });
             decision_messages.push(ChatMessage { role: "system".into(), content: "For a short internal project status, state only the requested two most important source-supported risks and the first decision or clarification, within the user's word limit. Make each risk conditional where the source is conditional: technical repair and checking are required only IF user testing finds errors that need technical repair; do not say all technical errors or all testing requires repair. A proposed invitation date is not a sent invitation, and a possible approval date is not an approval. If decision status is not documented, do not call it pending, unapproved or unconfirmed. Keep the note to three concise points without introducing new owners, deadlines, actions or expected effects.".into(), ..Default::default() });
+        }
+        if section_only {
+            decision_messages.push(ChatMessage { role: "system".into(), content: DATED_POST_SECTION_ONLY_NOTICE.into(), ..Default::default() });
+            let kept = section_only_subheadings(&state.artifact_versions, thread_id, &turn_question);
+            if !kept.is_empty() {
+                decision_messages.push(ChatMessage { role: "system".into(), content: section_only_subheadings_notice(&kept), ..Default::default() });
+            }
         }
         // A new note's only possible prior source, or a scoped revision's
         // sole document, is read before the first model round, through the
@@ -6571,6 +6783,12 @@ pub async fn run_tool_rounds_for_model(
         let finish_proposed = resp.tool_calls.iter().any(|call| call.name == FINISH_TOOL_PHASE);
         let phase_finished = take_tool_phase_signal(&mut resp.tool_calls);
         let mut last_call_truncated = output_hit_token_ceiling(&resp.stop_reason) && !truncated_call_was_finish;
+        // What the model emitted for the document, counted before any check,
+        // splice or drop below (content-free: counts only).
+        if let Some(timing) = timing {
+            let (writes, chars) = model_document_writes(&resp.tool_calls);
+            if writes > 0 { timing.model_document_writes(writes, chars); }
+        }
         // A write of a new document this turn already accepted for the current
         // instruction has no reason: no newer user message asked for it (a
         // delivered one clears the set) and the accepted version is staged.
@@ -6699,10 +6917,22 @@ pub async fn run_tool_rounds_for_model(
             let kind = arg_str(&call.arguments_json, "kind");
             let document = document_artifact_write(&state.artifact_versions, thread_id, &resolved_id, &call.name, &kind);
             if !document || content.trim().is_empty() { continue; }
-            let has_preservation = before.as_deref().map(|text| crate::revision_preservation::Preservation::from_prompt(&turn_question, text))
-                .transpose().map_err(|_| crate::result_validation::VALIDATION_FAILED)?.flatten().is_some();
+            let preservation = before.as_deref().map(|text| crate::revision_preservation::Preservation::from_prompt(&turn_question, text))
+                .transpose().map_err(|_| crate::result_validation::VALIDATION_FAILED)?.flatten();
+            let has_preservation = preservation.is_some();
             if source_context.is_none() && !has_preservation { continue; }
             if !checked_ids.insert(resolved_id.clone()) { return Err(crate::result_validation::VALIDATION_FAILED); }
+            // A dated-post revision that came back as its section alone is
+            // spliced into the accepted document by `check_artifact`; the
+            // timing record says so, with the lever off as well (a model may
+            // send one unasked, and an off arm is the baseline of the
+            // adoption count). Lengths only, never the text.
+            if preservation.as_ref().is_some_and(|preservation| preservation.is_section_fragment(&content, state.latency_levers.dated_post_section_only)) {
+                if let Some(timing) = timing { timing.fragment_spliced(); }
+                tracing::info!(%request_id, model_chars = content.chars().count(),
+                    accepted_chars = before.as_deref().map_or(0, |text| text.chars().count()),
+                    "dated-post revision answered with its section alone; splicing it into the accepted document");
+            }
             events.push(ChatEvent::StepUpdate { id: format!("{}:source-check", call.id), title: if source_context.is_some() { "Kontrollerer utkastet mot kildene" } else { "Bevarer valgte avsnitt" }.to_owned(),
                 detail: if source_context.is_some() { "Kontrollerer påstander og bevarer avsnitt som skal stå uendret" } else { "Bevarer innholdet fra forrige versjon" }.to_owned(), status: "running".to_owned() }).await;
             let request = InferRequest { request_id: format!("{request_id}-{}", call.id), org_id: org_id.to_owned(),
@@ -6910,6 +7140,7 @@ pub async fn run_tool_rounds_for_model(
                     call,
                     ingestion_bearer,
                     sandbox_bearer,
+                    cost_bearer,
                     validation_deadline.filter(|_| stops_at_validation_deadline(&call.name)),
                 )
                 .await
@@ -7051,6 +7282,15 @@ pub async fn run_tool_rounds_for_model(
                     }
                 }
             }
+            // The document this write stored, as the artifact event carries
+            // it: after every check and splice. The last one of the turn.
+            if let (Some(timing), true) = (timing, writes_document(&outcome.name)) {
+                for event in &artifact_events {
+                    if let ChatEvent::Artifact { content, .. } = event {
+                        timing.stored_document(u64::try_from(content.chars().count()).unwrap_or(u64::MAX));
+                    }
+                }
+            }
             events
                 .push(ChatEvent::ToolResult {
                     id: outcome.call_id.clone(),
@@ -7093,10 +7333,8 @@ pub async fn run_tool_rounds_for_model(
                     document_tool_failures = document_tool_failures.saturating_add(1);
                 }
             }
-            if new_note_pending && outcome.name == "read_artifact" && outcome.error.is_none()
+            if new_note_pending && read_whole_artifact(&outcome)
                 && state.artifact_versions.known_in_thread(thread_id).len() == 1
-                && outcome.output.starts_with("Current content of artifact")
-                && !outcome.output.contains("[Only the first part of this artifact is shown")
             {
                 sole_note_source_read = true;
             }
@@ -7108,10 +7346,8 @@ pub async fn run_tool_rounds_for_model(
             // the lever off never sets it, since that path never reaches a
             // successful whole read of the sole artifact under these terms
             // either — nothing here is specific to the gateway's own call id).
-            if !new_note_pending && outcome.name == "read_artifact" && outcome.error.is_none()
+            if !new_note_pending && read_whole_artifact(&outcome)
                 && state.artifact_versions.known_in_thread(thread_id).len() == 1
-                && outcome.output.starts_with("Current content of artifact")
-                && !outcome.output.contains("[Only the first part of this artifact is shown")
             {
                 sole_revision_source_read = true;
             }
@@ -8331,6 +8567,240 @@ mod tests {
         store.seed_persisted("revision-thread", "kampanje", "Kampanje", "## LinkedIn 23. oktober\nGammel tekst.\n", 1);
         assert!(sole_artifact_prefetch(LatencyLevers::ALL_ON, store, "revision-thread", &readable, false, revision_prompt).is_some());
         assert!(sole_artifact_prefetch(off, store, "revision-thread", &readable, false, revision_prompt).is_none());
+    }
+
+    /// A document of exactly `chars` ASCII characters that ends in a marker
+    /// only its tail carries.
+    fn document_of(chars: usize) -> String {
+        const TAIL: &str = "\n\nSLUTTMERKE";
+        let body = chars - TAIL.len();
+        let mut text = String::from("# Rapport\n\n");
+        while text.len() < body {
+            text.push_str("Tekst. ");
+        }
+        text.truncate(body);
+        text.push_str(TAIL);
+        assert_eq!(text.len(), chars);
+        text
+    }
+
+    /// Stage 0 of the patch-revision plan: a document of 8 001-24 000
+    /// characters used to reach the model clipped at 8 000 (with the
+    /// "INCOMPLETE" marker) while the artifact store, the sole-artifact
+    /// prefetch and the "whole document was read" state all counted it read
+    /// whole, so a whole-document rewrite dropped the tail without anyone
+    /// noticing. What the model is shown of a read, through the gateway's
+    /// prefetch and through its own explicit `read_artifact`, is now never
+    /// shorter than the document the gateway treats as fully read; and no
+    /// other tool's bound moves.
+    #[tokio::test]
+    async fn the_model_is_shown_the_whole_document_the_gateway_counts_as_read() {
+        use crate::latency_levers::LatencyLevers;
+        let on = LatencyLevers::ALL_ON;
+        let state = crate::state::AppState::new();
+        let store = &state.artifact_versions;
+        let readable = tools_for_artifact_state(&builtin_tool_defs(), true);
+        for chars in [MAX_TOOL_OUTPUT_CHARS + 1, 12_000, 20_000, MAX_READ_ARTIFACT_CHARS] {
+            let thread = format!("thread-{chars}");
+            let document = document_of(chars);
+            store.seed_persisted(&thread, "rapport", "Rapport", &document, 1);
+            let call = sole_artifact_prefetch(on, store, &thread, &readable, true, "new note")
+                .unwrap_or_else(|| panic!("{chars}: a document that fits whole is prefetched"));
+            let prefetched = dispatch_tool(&state, "run", "org", "user", &thread, "", &[], "",
+                None, None, "", "", None, false, false, false, &call, None, None).await;
+            let explicit = dispatch_tool(&state, "run", "org", "user", &thread, "", &[], "",
+                None, None, "", "", None, false, false, false, &tool_call("read_artifact", r#"{"id":"rapport"}"#), None, None).await;
+            assert_eq!(prefetched.output, explicit.output, "{chars}: the prefetch is the ordinary read");
+            for (via, outcome, shown) in [
+                ("the prefetch", &prefetched, format_gateway_read_context(std::slice::from_ref(&prefetched))),
+                ("an explicit read", &explicit, format_tool_context(std::slice::from_ref(&explicit))),
+            ] {
+                assert!(read_whole_artifact(outcome), "{chars} through {via}: the gateway counts it as read whole");
+                assert!(shown.contains(&document), "{chars} through {via}: the model sees every character of it");
+                assert!(shown.contains("SLUTTMERKE"), "{chars} through {via}: including the tail");
+                assert!(!shown.contains("[truncated"), "{chars} through {via}: and is not told it is incomplete");
+            }
+            if chars > MAX_TOOL_OUTPUT_CHARS {
+                assert!(
+                    bounded_tool_output(&prefetched.output).contains("[truncated: result exceeded 8000 characters"),
+                    "{chars}: the general bound would have clipped it, which is the mismatch this closes"
+                );
+            }
+        }
+
+        // One character past the read limit: the read says it was cut, the
+        // prefetch does not fire and the gateway does not count it as read.
+        store.seed_persisted("thread-long", "rapport", "Rapport", &document_of(MAX_READ_ARTIFACT_CHARS + 1), 1);
+        assert!(sole_artifact_prefetch(on, store, "thread-long", &readable, true, "new note").is_none());
+        let cut = dispatch_tool(&state, "run", "org", "user", "thread-long", "", &[], "",
+            None, None, "", "", None, false, false, false, &tool_call("read_artifact", "{}"), None, None).await;
+        assert!(cut.output.contains("[Only the first part of this artifact is shown"));
+        assert!(!read_whole_artifact(&cut));
+
+        // An id so long that the read's frame would push a whole document
+        // past what the model is shown: shown clipped, and not counted as read.
+        let long_id = "a".repeat(2_000);
+        store.seed_persisted("thread-id", &long_id, "Rapport", &document_of(MAX_READ_ARTIFACT_CHARS), 1);
+        let framed = dispatch_tool(&state, "run", "org", "user", "thread-id", "", &[], "",
+            None, None, "", "", None, false, false, false, &tool_call("read_artifact", "{}"), None, None).await;
+        assert!(!framed.output.contains("[Only the first part of this artifact is shown"));
+        assert!(!read_whole_artifact(&framed), "text the model did not see is never counted as read");
+        assert!(format_tool_context(std::slice::from_ref(&framed)).contains("[truncated"));
+
+        // A failed read is not a read, and no other tool's result is widened.
+        let mut failed = explicit_read_outcome_for_test();
+        failed.error = Some("no".to_owned());
+        assert!(!read_whole_artifact(&failed));
+        let search = ToolOutcome {
+            call_id: "c".to_owned(),
+            name: "web_search".to_owned(),
+            output: "y".repeat(20_000),
+            error: None,
+            provenance: crate::moderation::ToolProvenance::unscreened("web_search", "y"),
+        };
+        let shown = format_tool_context(std::slice::from_ref(&search));
+        assert!(shown.contains("[truncated: result exceeded 8000 characters"));
+        assert!(shown.chars().count() < 10_000, "other tools stay at the general bound");
+        let other_read_like = ToolOutcome { name: "knowledge_search".to_owned(), ..search.clone() };
+        assert!(format_tool_context(&[other_read_like]).contains("[truncated: result exceeded 8000 characters"));
+        assert!(!read_whole_artifact(&search));
+    }
+
+    fn explicit_read_outcome_for_test() -> ToolOutcome {
+        ToolOutcome {
+            call_id: "c".to_owned(),
+            name: "read_artifact".to_owned(),
+            output: "Current content of artifact 'a' (v1):\n\nText".to_owned(),
+            error: None,
+            provenance: crate::moderation::ToolProvenance::unscreened("read_artifact", "Text"),
+        }
+    }
+
+    /// The section-only wording (opt-in lever) is offered only when the lever
+    /// is on, `update_artifact` is offered, the turn is not a new note, and
+    /// the instruction is a recognised dated-post revision of exactly one of
+    /// the thread's artifacts.
+    #[tokio::test]
+    async fn the_section_only_wording_is_offered_only_for_a_recognised_dated_post_of_one_artifact() {
+        use crate::latency_levers::LatencyLevers;
+        let on = LatencyLevers { dated_post_section_only: true, ..LatencyLevers::ALL_ON };
+        let state = crate::state::AppState::new();
+        let store = &state.artifact_versions;
+        let offered = tools_for_artifact_state(&builtin_tool_defs(), true);
+        let campaign = "# Kampanje\n\n## LinkedIn 21. oktober\nA.\n\n## LinkedIn 23. oktober\nB.\n\n## E-post\nC.\n";
+        let prompt = "Gjør innlegget for 23. oktober mer konkret.";
+        assert!(!section_only_revision(on, store, "t", prompt, false, &offered), "no artifact yet");
+        store.seed_persisted("t", "kampanje", "Kampanje", campaign, 1);
+        assert!(section_only_revision(on, store, "t", prompt, false, &offered));
+        assert!(!section_only_revision(LatencyLevers::ALL_ON, store, "t", prompt, false, &offered), "the lever is opt-in");
+        assert!(!section_only_revision(LatencyLevers::ALL_OFF, store, "t", prompt, false, &offered));
+        assert!(!section_only_revision(on, store, "other", prompt, false, &offered), "another thread's artifacts");
+        for other in [
+            "Gjør hele dokumentet kortere.",
+            "Gjør innlegget for 9. desember mer konkret.",
+            "Gjør innlegget for 23. oktober mer konkret og oppdater e-posten.",
+            "Behold den interne kildeoversikten.",
+            "Hvordan går det?",
+        ] {
+            assert!(!section_only_revision(on, store, "t", other, false, &offered), "{other}");
+        }
+        assert!(!section_only_revision(on, store, "t", prompt, true, &offered), "a new note is another work product");
+        let read_only: Vec<_> = offered.iter().filter(|tool| tool.name != "update_artifact").cloned().collect();
+        assert!(!section_only_revision(on, store, "t", prompt, false, &read_only), "no update_artifact to reword");
+        store.seed_persisted("t", "plan", "Plan", "# Plan\n\nIngen innlegg her.", 1);
+        assert!(section_only_revision(on, store, "t", prompt, false, &offered), "another artifact without the post is no rival");
+        store.seed_persisted("t", "kampanje-2", "Kampanje 2", campaign, 1);
+        assert!(!section_only_revision(on, store, "t", prompt, false, &offered), "two artifacts with the post leave the choice to the model");
+        // Only a document is checked, so only a document can have a section spliced
+        // into it: an artifact of another kind whose text happens to hold the
+        // heading would store the model's section as the whole artifact.
+        for kind in [crate::artifacts::ArtifactKind::Code, crate::artifacts::ArtifactKind::Html] {
+            let thread = format!("t-{kind:?}");
+            store.seed_persisted(&thread, "kampanje", "Kampanje", campaign, 1);
+            assert!(section_only_revision(on, store, &thread, prompt, false, &offered), "{kind:?}: a legacy artifact without a kind is a document");
+            store.remember_kind(&thread, "kampanje", kind);
+            assert!(!section_only_revision(on, store, &thread, prompt, false, &offered), "{kind:?}: not a document, not spliced");
+        }
+        store.seed_persisted("t-doc", "kampanje", "Kampanje", campaign, 1);
+        store.remember_kind("t-doc", "kampanje", crate::artifacts::ArtifactKind::Document);
+        assert!(section_only_revision(on, store, "t-doc", prompt, false, &offered), "a document created this session");
+    }
+
+    /// The author is told the sub-headings of the post it is revising, so the
+    /// short section it sends carries them: the splice replaces the post's
+    /// whole section, and a post sent without its `### Kilder` note deletes it.
+    #[tokio::test]
+    async fn the_section_only_turn_names_the_subheadings_of_the_target_post() {
+        let state = crate::state::AppState::new();
+        let store = &state.artifact_versions;
+        let prompt = "Gjør innlegget for 23. oktober mer konkret.";
+        let with_notes = "# Kampanje\n\n## LinkedIn 21. oktober\nA.\n\n### Kilder\nNote A.\n\n## LinkedIn 23. oktober\nB.\n\n### Kilder\n- Produktinformasjon brukt: arm.\n\n## E-post\nC.\n";
+        assert!(section_only_subheadings(store, "t", prompt).is_empty(), "no artifact yet");
+        store.seed_persisted("t", "kampanje", "Kampanje", with_notes, 1);
+        assert_eq!(section_only_subheadings(store, "t", prompt), ["### Kilder"]);
+        assert!(section_only_subheadings(store, "t", "Gjør hele dokumentet kortere.").is_empty(), "not a dated-post revision");
+        assert!(section_only_subheadings(store, "other", prompt).is_empty(), "another thread's artifacts");
+        store.seed_persisted("bare", "kampanje", "Kampanje", "# Kampanje\n\n## LinkedIn 23. oktober\nB.\n\n## E-post\nC.\n", 1);
+        assert!(section_only_subheadings(store, "bare", prompt).is_empty(), "a post without a note lists none");
+        let notice = section_only_subheadings_notice(&["### Kilder".to_owned(), "### Vinkel".to_owned()]);
+        assert!(notice.contains("`### Kilder`, `### Vinkel`"), "{notice}");
+        assert!(notice.contains("Keep each of them"), "{notice}");
+    }
+
+    /// The offered `update_artifact` is reworded for the turn and only for it:
+    /// same name, same required arguments, another description; the standing
+    /// definition, and every other tool, stay as they were.
+    #[test]
+    fn the_section_only_update_replaces_only_the_offered_description() {
+        let standing = builtin_tool_defs();
+        let standing_update = standing.iter().find(|tool| tool.name == "update_artifact").unwrap().clone();
+        assert!(standing_update.description.contains("Always send the COMPLETE new content"));
+        assert!(standing_update.parameters_json.contains("The complete replacement content"));
+        let mut offered = tools_for_artifact_state(&standing, true);
+        let untouched = offered.clone();
+        offer_section_only_update(&mut offered);
+        assert_eq!(offered.len(), untouched.len());
+        for (was, now) in untouched.iter().zip(&offered) {
+            assert_eq!(was.name, now.name, "the same tools in the same order");
+            if was.name == "update_artifact" {
+                assert!(now.description.contains("ONLY that post's section"), "{}", now.description);
+                assert!(!now.description.contains("COMPLETE"), "{}", now.description);
+                assert!(!now.parameters_json.contains("complete replacement"), "{}", now.parameters_json);
+                let parameters: Value = serde_json::from_str(&now.parameters_json).unwrap();
+                assert_eq!(parameters["required"], serde_json::json!(["id", "content"]));
+                let standing_parameters: Value = serde_json::from_str(&standing_update.parameters_json).unwrap();
+                assert_eq!(
+                    parameters["properties"].as_object().unwrap().keys().collect::<Vec<_>>(),
+                    standing_parameters["properties"].as_object().unwrap().keys().collect::<Vec<_>>(),
+                    "the same arguments"
+                );
+            } else {
+                assert_eq!((&was.description, &was.parameters_json), (&now.description, &now.parameters_json), "{}", was.name);
+            }
+        }
+        let after = builtin_tool_defs().into_iter().find(|tool| tool.name == "update_artifact").unwrap();
+        assert_eq!((after.description, after.parameters_json), (standing_update.description, standing_update.parameters_json),
+            "the standing definition is not touched");
+        assert!(DATED_POST_SECTION_ONLY_NOTICE.contains("replaces, for this revision, every earlier instruction"));
+    }
+
+    /// The timing record counts what the model emitted, before any splice:
+    /// document writes and the characters of their raw `content` argument.
+    #[test]
+    fn the_models_document_writes_are_counted_as_it_emitted_them() {
+        let write = |name: &str, content: &str| tool_call(name, &serde_json::json!({ "id": "a", "content": content }).to_string());
+        let calls = vec![
+            write("update_artifact", &"å".repeat(700)),
+            tool_call("read_artifact", "{}"),
+            write("create_artifact", "0123456789"),
+            tool_call("count_words", r#"{"texts":["one two"]}"#),
+        ];
+        assert_eq!(model_document_writes(&calls), (2, 710), "characters, not bytes; reads and counts are not writes");
+        assert_eq!(model_document_writes(&[]), (0, 0));
+        assert_eq!(model_document_writes(&[tool_call("update_artifact", r#"{"id":"a"}"#)]), (1, 0), "a write with no content");
+        let cut = r#"{"id":"a","content":"the argument was cut off mid-sent"#;
+        assert_eq!(model_document_writes(&[tool_call("update_artifact", cut)]), (1, cut.chars().count() as u64),
+            "a cut-off write counts its raw arguments text");
     }
 
     #[tokio::test]
@@ -10178,6 +10648,136 @@ mod tests {
         // The old name must be gone, so a stale client-declared spec cannot
         // shadow the real tool with a dead one.
         assert!(!defs.iter().any(|d| d.name == "run_code"));
+    }
+
+    /// The Python libraries the sandbox image installs, spelled the way the model
+    /// knows them.
+    ///
+    /// Read from the image definition itself (`execution-core/Dockerfile`, runtime
+    /// stage), not from a second list kept in Rust: the image alone decides what
+    /// `import` can find in the sandbox, and a description that drifts from it
+    /// fails the model in one of two ways. A library the image has but the
+    /// description omits is never used (python-pptx, xlsxwriter, pypdf and Pillow
+    /// were all shipped and unmentioned, so a deck request had no tool to reach
+    /// for), and one the description names but the image lacks sends the model
+    /// into an ImportError it cannot repair, because there is no network.
+    fn sandbox_image_libraries() -> std::collections::BTreeSet<String> {
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../execution-core/Dockerfile");
+        let dockerfile = std::fs::read_to_string(&path).unwrap_or_else(|error| {
+            panic!(
+                "the sandbox image definition {} is the authority on what code_interpreter can \
+                 import; if it moved, re-point this test, do not delete it: {error}",
+                path.display()
+            )
+        });
+        // Only the runtime stage installs the interpreter's libraries; the builder
+        // stages install the protobuf toolchain.
+        let runtime = dockerfile
+            .split("AS runtime")
+            .nth(1)
+            .expect("the Dockerfile's runtime stage was renamed; re-point this test");
+        let mut libraries = std::collections::BTreeSet::new();
+        for line in runtime
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.starts_with('#'))
+        {
+            for token in line.split_whitespace() {
+                let token = token.trim_end_matches('\\');
+                if let Some(package) = token.strip_prefix("python3-") {
+                    // `python3-pip` is the installer, not something the model imports.
+                    if package != "pip" {
+                        libraries.insert(
+                            match package {
+                                "docx" => "python-docx",
+                                "pil" => "Pillow",
+                                other => other,
+                            }
+                            .to_owned(),
+                        );
+                    }
+                } else if let Some((package, _pinned_version)) = token.split_once("==") {
+                    // A pinned pip wheel (python-pptx has no bookworm package).
+                    if package.starts_with("python-") {
+                        libraries.insert(package.to_owned());
+                    }
+                }
+            }
+        }
+        libraries
+    }
+
+    #[test]
+    fn code_interpreter_description_names_every_library_the_sandbox_image_ships() {
+        let description = builtin_tool_defs()
+            .into_iter()
+            .find(|d| d.name == "code_interpreter")
+            .expect("code_interpreter must be advertised to the model")
+            .description;
+        let listed: std::collections::BTreeSet<String> = description
+            .split("Available libraries: ")
+            .nth(1)
+            .expect("the description must carry an 'Available libraries:' list")
+            .split(". ")
+            .next()
+            .unwrap_or_default()
+            .split(',')
+            .map(|name| name.trim().to_owned())
+            .filter(|name| !name.is_empty())
+            .collect();
+        let shipped = sandbox_image_libraries();
+        // Not vacuous: a Dockerfile layout this parser no longer understands must
+        // fail here, not pass by comparing two empty sets.
+        for required in [
+            "python-pptx",
+            "openpyxl",
+            "matplotlib",
+            "python-docx",
+            "Pillow",
+        ] {
+            assert!(
+                shipped.contains(required),
+                "the Dockerfile parse lost {required}: {shipped:?}"
+            );
+        }
+        let omitted: Vec<&String> = shipped.difference(&listed).collect();
+        let phantom: Vec<&String> = listed.difference(&shipped).collect();
+        assert!(
+            omitted.is_empty() && phantom.is_empty(),
+            "the code_interpreter description and the sandbox image disagree: shipped but not \
+             advertised {omitted:?}, advertised but not shipped {phantom:?}"
+        );
+    }
+
+    /// Libraries are not enough: the model also has to be told what each Office
+    /// output is made with, and that a chart is a native object in a workbook but a
+    /// picture on a slide, or it will describe a deck instead of building one.
+    #[test]
+    fn code_interpreter_description_says_how_to_make_each_office_output() {
+        let description = builtin_tool_defs()
+            .into_iter()
+            .find(|d| d.name == "code_interpreter")
+            .expect("code_interpreter must be advertised to the model")
+            .description;
+        for needle in [
+            ".xlsx",
+            ".docx",
+            ".pptx",
+            ".pdf",
+            "openpyxl.chart",
+            "xlsxwriter",
+            "python-pptx",
+            "reportlab",
+            "PNG",
+            "savefig",
+            "current working directory",
+        ] {
+            assert!(
+                description.contains(needle),
+                "the code_interpreter description does not mention {needle}"
+            );
+        }
     }
 
     /// The canvas tools are what make long-form work product a first-class

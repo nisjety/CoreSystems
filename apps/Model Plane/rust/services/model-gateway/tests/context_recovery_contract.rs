@@ -61,7 +61,10 @@ fn function_body(text: &str, signature: &str) -> String {
 #[test]
 fn the_recovery_tool_is_handed_the_real_prompt() {
     let text = source("src/tool_loop.rs");
-    let arm = function_body(&text, "pub async fn dispatch_tool(");
+    // dispatch_tool is now a credential/context wrapper. The actual match arm
+    // lives in dispatch_tool_with_cost, where prompt_contents is forwarded to
+    // the recovery selector.
+    let arm = function_body(&text, "async fn dispatch_tool_with_cost(");
     let recovery = arm
         .split(r#""reattach_context" => {"#)
         .nth(1)

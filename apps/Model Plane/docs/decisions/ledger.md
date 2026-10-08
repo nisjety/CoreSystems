@@ -22,6 +22,1156 @@ with a pointer forward. Newest first.
 
 ---
 
+## 2026-10-06 — Service principals reach the retrieval engine by a route allowlist, not by membership: a bounded exception to matrix rule 9
+
+**State:** `proposed`
+(built and tested in the working tree on 2026-10-06; the retrieval-engine image
+running that day was built on 2026-09-29 and does not contain it; flips to
+`implemented` at **Trigger to flip to `implemented`** below)
+
+**The decision.** Matrix rule 9 says identity and membership are Control
+Plane-owned, and `retrieval-engine-rs` honoured it by asking Control for a
+membership decision on every HTTP request. A first-party service is not a
+member: Auth Core's real answer for a `service:` subject is `not_member`, which
+is why every Quarry retrieval was refused (the counts are in the rerank entry
+below). The engine now admits a verified service principal without a membership
+lookup, through a default-deny table of exact service, method, route and scope
+rows, and matrix rule 18 records that as a bounded exception to rule 9. Not
+chosen: a membership row per service. Membership answers whether a person
+belongs to an organisation and returns that person's ACL; a service call is
+judged by what it may call, so the table says that directly, and a route added
+to the router stays closed to every service until a reviewer lists it. The table
+is policy in code (`retrieval-engine-rs/src/authz/service_routes.rs`), reviewed
+with the handler it admits; the scopes it demands are issued by Auth Core's
+registry.
+
+**The rows, as of 2026-10-06** (`SERVICE_ROUTE_GRANTS`; the docs test
+`scripts/tests/ownership-docs-contract.test.mjs` compares this list with the
+code, so the two cannot drift):
+
+- `service:quarry-edge` `POST` `/v1/retrieve` needs `data:read`
+- `service:quarry-edge` `POST` `/v1/retrieve/hybrid` needs `data:read`
+- `service:quarry-edge` `POST` `/v1/knowledge/search` needs `data:read`
+- `service:quarry-edge` `POST` `/v1/rerank` needs `data:rerank`
+
+**What bounds the exception.** `tests/service_principal_auth.rs` applies the
+real rules, not a permissive double: tokens re-signed from goldens that Auth
+Core's own mint wrote (sha256-pinned, regenerated and compared by an Auth Core
+jest spec), the real JWT validation, the real policy client against a loopback
+Control that answers `not_member` for a `service:` subject exactly as Auth Core
+does, and the real guard mounted on routes scanned from the real router.
+
+- Tenancy stays Control's. Auth Core mints a service token only for a registered
+  principal and an organisation its registry row names (a fixed list, or the
+  org-core directory checked at every mint; the production loader refuses
+  `allowAnyOrg`). The engine pins every request to the token's organisation and
+  refuses an `x-org-id` header that differs (403).
+- A contradictory identity is 401, never a guess: a service id that differs from
+  the subject, a `user_id` or `acting_user_id` on a service token, no scopes, an
+  unknown principal type, or a user token that carries a service identity. None
+  of these reaches Control.
+- A service context keeps only `data:read` and `data:rerank`. The
+  organisation-wide `org:data:read_all` that quarry-edge's registry ceiling holds
+  is dropped at admission, so a service sees what the organisation shares with
+  everyone and the documents it owns itself, never what another person holds
+  privately; it has no per-user grants and the user-core visibility facade is not
+  called for it.
+- Refusals are typed, audited and counted by organisation and cause
+  (`dpv2_authz_denials_total`): 403 `service_principal_route_not_allowed`, and
+  403 `service_principal_scope_missing` when the route is named and the scope is
+  not. The key is axum's matched route pattern, so trailing-slash,
+  percent-encoded and case spellings cannot reach a different decision, and a
+  sweep over every route the real router registers proves each unlisted one is
+  refused.
+- A route that exists for services only (`POST /v1/rerank`, rule 15) refuses an
+  interactive user before any membership lookup. The user's membership path is
+  what it always was. That route is not registered in the engine's router yet
+  (the rerank capability of rule 15 is its own task): the table row and the
+  service-only refusal are in place and tested against a stand-in handler, and
+  they take effect when the handler is registered.
+- gRPC stays membership-gated and refuses a service principal with
+  `PermissionDenied` in the interceptor and again in the handler, instead of
+  relying on the membership lookup failing.
+
+**Precedent, and where it differs.** `documents-api-go` already admits a
+verified service principal with no membership lookup: `authctx.RequireServiceScope`
+lets a verified user through and a service only on the route's scope, and its
+verifier accepts a service token only with a service id equal to the subject, no
+`user_id` and at least one scope (`pkg/authctx/verify.go`). It differs from the
+engine in two ways, both its own choice and not changed here: it does not name
+which service may call a route (any principal holding the scope passes; the one
+place it names a service, `imports-core`, is the optional Space-import decision
+envelope, not route admission), and it honours `org:data:read_all` for a service
+that holds it.
+
+**Deliberately not done, flagged instead of decided:**
+
+- *The `data:rerank` grant.* Read on 2026-10-06: the registry the running Auth
+  Core holds gives `service:quarry-edge` the scopes `data:read`,
+  `documents:write` and `org:data:read_all` and no `data:rerank`, while the registry
+  file in the working tree (`apps/Control Plane/config/plane-service-principals.json`)
+  now lists `data:rerank` for it too, uncommitted and not yet running. Until the Auth
+  Core that carries that file ships, the table's rerank row cannot be used by a
+  minted token. The grant is the Control Plane principal work's, and this chain does
+  not edit the registry. **Trigger:** that Auth Core ships and a minted
+  `service:quarry-edge` data-plane token carries `data:rerank`.
+- *Other Data Plane services were not audited.* Only the retrieval engine and
+  `documents-api-go` were read for this entry. Whether the others that take a
+  service principal meet the terms of rule 18 is not claimed here. **Trigger:**
+  the next change that adds a service-principal route to one of them.
+
+**Trigger to flip to `implemented`.** The retrieval-engine image carrying
+principal-aware admission ships, and the live proof passes for the test
+organisation. The proof's engine calls cost nothing when they carry `zdr_mode`
+`ephemeral`: the engine then buys no query embedding and persists no trace
+(`sovereign_required` true alone also stops the paid embedding and rerank calls
+but still persists a trace, so the proof does not rely on it). (1) A service
+token for `service:quarry-edge` with `data:read`, minted by Auth Core, is
+admitted on `POST /v1/retrieve` (200), and the engine's access audit log holds a
+row for the service principal. (2) The same token on a route the table does not
+name, for example `POST /v1/retrieve/graph`, is refused with 403
+`service_principal_route_not_allowed`. (3)
+`dpv2_authz_denials_total{cause="denied:no_membership"}` does not move during
+(1), and the auth-service log holds no new `not_member` decision for
+`service:quarry-edge`. (4) A real Quarry `/v1/search` for the test organisation
+no longer logs `retrieve returned status 403`; what it logs next is the next
+defect in the chain, which the Quarry client work of the rerank entry above is
+to fix, and that work's own proof counts its cost. (5) Once the rerank handler is
+registered, an interactive token on `POST /v1/rerank` is refused with 403
+`service_only_route` before any membership lookup. The docs finalisation then
+reconciles this entry with what was measured.
+
+---
+
+## 2026-10-06 — inference-core: typed posture refusals, one metering decorator, a generated status golden
+
+**State:** `proposed`
+(built and tested on 2026-10-06; flips to `implemented` when the inference-core
+image carrying it is deployed and the free live proof in
+`docs/inference-core-wire-contract-and-metrics.md` passes)
+
+**Decision.** The three posture refusals (`zdr_unavailable`,
+`residency_unavailable`, `tier_unavailable`) ride the same `FAILED_PRECONDITION`
+and message they always had, plus an `x-mp-provider-error` trailer, through one
+helper at every site, so no client matches prose. The kind strings are a frozen
+vocabulary. The one code that moved is `CreateEmbedding`, where a ZDR or tier
+refusal used to be `INTERNAL` (retried by the embedding clients) and is now the
+same typed `FAILED_PRECONDITION` as every other path.
+
+**Counters live in a decorator, not in the handlers.** `MeteredCore` wraps the
+generated `InferenceCore` trait, so all 20 RPCs are counted, a new RPC cannot
+compile unmetered, and the handlers (and the evidence line citations into
+`grpc.rs`) are untouched. The one coupling is a write-only caller slot that
+`authorize` fills once the credential verifies, so a service refused on scope or
+tenant is still counted under its own id. Rejected: counting inside the four
+interesting handlers only (leaves the other 16 and every future RPC blind), and
+a tower layer (cannot see the model, provider, tokens or the verified caller).
+Labels never carry an org or user; `model` and `provider` come from the response,
+never the request; every caller-influenced label is bounded.
+
+**Deviation from the build brief.** The brief named four labels; `rpc` is a fifth,
+so a catalogue read and a provider call are not mixed in one series.
+
+**The status golden is generated, not written.** `api/contracts/infer-statuses.json`
+is produced by the code under test, checked by an inline test that fails (never
+skips), and pinned by sha256 in `scripts/tests/zdr-contract-sync.test.sh`, which
+CI runs; consumers vendor byte-identical copies and add a row there.
+
+**Trigger to flip.** Deployed, `/metrics` is more than the old 37-byte stub, a
+`ListModels` moves its series, and an `Infer` with `zdr=true` returns the typed
+refusal with the `zdr_unavailable` series moving and the `ok` series not.
+
+---
+
+## 2026-10-03 — Own-connection ZDR: a signed, acknowledged, per-run waiver bound to one connection, never organisation-wide
+
+**State:** `proposed`
+(the owner ruled on the direction on 2026-10-03; written on 2026-10-06 against the
+tree and the stack of that day; the waiver is designed and not built, see **Build
+state**; flips to `implemented` at **Trigger to flip**)
+
+**The decision.** Zero retention (ZDR) is respected for an organisation that turned it
+on. A member who uses their own subscription or key, which cannot provide ZDR, is not
+stopped: they are told when they add the connection (a stronger warning when their
+organisation has ZDR on, because it contradicts the organisation's setting), they may
+continue, and ZDR is turned off only for the runs that use that connection. Never
+organisation-wide, never for another member, never for another connection or model.
+Today the only such connection is the ChatGPT account route; own API keys do not exist
+and the record is generic so they plug in later.
+
+- *The rule.* `effective_zdr = O AND NOT (the run uses connection C AND C cannot provide
+  ZDR AND a valid acknowledgement stands AND the turn is not an explicit ZDR request AND
+  no Space ZDR policy applies)`. With ZDR off nothing changes and nothing is asked. With
+  ZDR on and no valid acknowledgement the turn is refused with
+  `zdr_connection_not_acknowledged`; an explicit Temporary chat on such a connection is
+  refused with `zdr_explicit_request_not_supported_by_connection`; with the kill switch
+  off, or for a provider that has no waiver route, the turn is refused with
+  `zdr_connection_not_supported` (acknowledging cannot help). Never silently served,
+  never silently re-routed. The rule and these codes are pinned as data in
+  `api/contracts/zdr-posture-matrix.json` (task Z-10, authored in the working tree on
+  2026-10-06), which each plane has to evaluate with its own function.
+- *Auth Core decides and mints, and nothing else can.* The BFF, under a dedicated
+  service principal (audience `control-policy`, scope `retention:zdr-decide`, not the
+  gateway's existing model credential), asks for a 60-second signed decision. Auth Core
+  re-checks the organisation's posture, the connection's owner and status, the
+  capability digest and the stored acknowledgement itself, audits the decision with a
+  durable publish acknowledgement, and mints the turn's tokens with `zdr: false` plus a
+  connection-bound `zdr_waiver` claim (header `x-retention-decision`, tokens capped at
+  300 seconds). A client's `zdr: false` is ignored. The organisation's flag is never
+  written.
+- *The record belongs to integration-corev2.* The connection's capability
+  (supported, not supported, cannot verify, with basis and a digest) and an append-only
+  acknowledgement ledger live there, in a side table written in the connection's own
+  audit transaction. Auth Core reads it as the session user: a Control Plane to
+  Ingestion Plane read edge, recorded as E2 in `docs/CROSS_PLANE_CONTRACT_MATRIX.md`
+  (E1, an existing write edge for the Microsoft sign-in hand-off, was in code and not in
+  that matrix; it is recorded now). Rejected homes: an organisation-service ledger with
+  NATS-driven invalidation (capability change, disconnect and audit would stop sharing a
+  transaction, and invalidation becomes eventual), and session-core (a run store, not the
+  connection's authority).
+- *Enforcement is route-bound at three planes.* model-gateway, inference-core and
+  execution-core honour a waiver only for the exact connection and refuse every other
+  route with `zdr_waiver_route_mismatch`; they never re-route. session-core stamps an
+  immutable receipt (retention class `zdr_waived`) on the run. One shared resolver in
+  `mp-contracts` and one golden posture matrix, evaluated by each plane's own code
+  (TypeScript, Rust, Go), replace the copies of the rule.
+- *A waived run is a normal persisted run*, with two protections. Retrieval filters
+  documents classified restricted, because the waived run retrieves in the non-ZDR mode
+  and that mode does not (the acknowledgement says that retrieved organisation knowledge
+  and tool results go to the provider; the wording drafted in the design did not say
+  it). Content-derived jobs that would send the run's content to other processors
+  (memory indexing, dreaming extraction, learning review) are skipped for it (owner
+  default D-B).
+- *It fails closed.* If Auth Core, the organisation service or integration-corev2
+  cannot answer, the turn is refused with `zdr_decision_unavailable` and ZDR stays on.
+  The design's earlier alternative (mint persistent with an alert while the
+  organisation service is down) was not taken: the Control Plane wave fails closed at
+  the mint with `retention_posture_unavailable`, and the decision follows the same rule.
+- *The acknowledgement is server-composed and server-enforced.* The text is built from a
+  versioned template, the capability and the organisation's state; the client sends only
+  the digest and the version it displayed, and a stale one gets 409 and a fresh
+  assessment. It is stored with the text shown, can be withdrawn, stops being valid when
+  the capability digest or the wording version changes, and is kept while the connection
+  exists and 365 days after withdrawal (erased with the organisation purge). It is
+  asked at connect, at first use after the organisation turns ZDR on, and any time from
+  Integrations. The drafted wording is a placeholder: counsel and a check against the
+  providers' current documents come first (OD-Z12).
+- *Never.* An explicit Temporary chat, a Space policy (not applied in chat at all, see
+  honest-limits L14), scheduled or unattended runs, inbox or support AI, browser runs,
+  speech, background jobs, another member, another connection or model, an operator or
+  admin switch.
+
+**Why it is not a small change (the audit).**
+
+- *Auth Core could not read the organisation service*, so no organisation's ZDR reached
+  any token. That is the Control Plane wave's repair of 2026-10-03 and 2026-10-04
+  (entry below); nothing here works without it.
+- *A waiver token reaching a plane that does not know the claim is a silent downgrade.*
+  The planes ignore unknown claims, so a `zdr: false` token for a ZDR organisation
+  would be treated as ordinary. Hence the order (enforcers, then record, then issuer,
+  then BFF, then SPA, rolled back in reverse), a kill switch `ZDR_WAIVER_ENABLED`
+  (default off, with a boot-time check), a waiver contract version the planes report and
+  the launcher checks, and one decision carried by every mint site of a turn, because
+  session-core and execution-core refuse a token set whose bearers disagree on `zdr`.
+- *The generic connection routes do not bind a ChatGPT connection to its owner.*
+  `personalProviderKeys` lists only Microsoft and Google, so those routes check the
+  organisation only for `openai-codex-subscription`, and the internal-key calls skip the
+  owner check. The acknowledgement and posture routes are therefore bearer-only with an
+  owner-equals-connection check and no internal-key path, tested with that header; the
+  capability fields cannot be written through the generic upsert or patch.
+- *A digest has one writer.* Computing it in Go and in TypeScript would drift on the
+  canonical form. integration-corev2 computes it; Auth Core compares it as an opaque
+  string.
+- *The principal registry had two writers* (the bootstrap script and the committed
+  file), so a re-bootstrap could silently remove the BFF's decision right. The Control
+  Plane wave unifies them (P0c): the bootstrap script now reads the committed file
+  (working tree, read 2026-10-06).
+- *Quarry must not read a service principal's claim.* Quarry reads the run's flag from
+  the request body. Reading the token claim for a service principal would force ZDR onto
+  every organisation's web search, because the registry rows toward Quarry say `zdr`.
+  The claim counts as a floor for an interactive user only (`Claims::zdr_floor`,
+  built).
+- *`effective_zdr` has 72 references in four services* (read 2026-10-03), so the
+  migration to one resolver needs a named inventory and a source-scan test, not a count.
+- *The 2026-10-02 Do finding is not closed by this.* A waived Do run on the ChatGPT route
+  still needs `AGENTIC_SUBSCRIPTION_ENABLED` (default off), read-only plan mode and the
+  gateway setting `zdr` false for that run.
+
+**Alternatives rejected.** Switching ZDR off for the organisation when a member connects
+(against the ruling, and it removes every other member's protection). An organisation
+admin lock (OD-Z4; the owner ruled that members are not stopped; the processor-instruction
+risk goes to counsel, and an organisation setting "members may use own connections
+without ZDR", default on, is proposed in this design for before the first regulated
+customer organisation, not decided by the owner). A client-controlled or BFF-asserted flag (a client can never lower the
+posture). A time expiry on the acknowledgement (OD-Z3: it ends on a digest change, a
+wording bump, connection removal or withdrawal). Registering ZDR children as metadata-only
+runs (invalid in session-core: a ZDR start forces an empty parent run id and a fresh
+thread, and a ZDR credential cannot write orchestration events); Do and agentic stay
+refused under ZDR with a typed reason, and a waived run gets normal children.
+
+**Deliberately not done.** Own API-key connections (Z-50) and a customer-asserted ZDR
+basis for them (Z-51). Ephemeral orchestration for Do under real ZDR (OD-Z8). Attesting
+a provider (D-A): an operator and commercial step, task Z-40. ZDR over connector
+ingestion (OD-Z9): the organisation's ZDR covers interactive content only, and the
+tooltip, the trust page and the pack must say so. Metering ZDR turns (OD-Z7, deferred).
+
+**Build state (read 2026-10-06).** Built: the Control Plane wave's posture read path and
+`tenant` posture, the organisation switch gate (next entry) and the Quarry floor (in the
+working tree). Not built: Z-00 (refuse the subscription route by name when only the token
+carries ZDR), Z-01 (strict `zdr` claim, `zdr_posture_mismatch`), Z-05a, Z-05b and Z-06 (typed
+refusal catalogue, provenance), Z-11 (shared resolver; the golden matrix of Z-10 is
+authored, with its loader and drift check, and no plane evaluates its posture rows yet), Z-12 and Z-13 (record and acknowledgement API),
+Z-14 (decision endpoint, claim, kill switch), Z-15 to Z-18 (plane enforcement), Z-19 to
+Z-21b (BFF and SPA; Z-21a is the session-core aggregate behind the counts), Z-31 and Z-32 (end-to-end specs, launcher wiring). Not done: Z-40 (attestation) and Z-60 (live
+proof). The final documents task re-reads this list.
+
+**Trigger to flip to `implemented`.** On a dedicated ZDR test organisation (plan pro,
+operator-seeded, real organisation service) and on `gpt-5.6-terra` through
+`openai-codex-subscription` only, never Verevon Balance, about 7 to 10 model rounds: a
+member without an acknowledgement is refused `zdr_connection_not_acknowledged` with no
+run row, no broker audit line and no other provider in the inference-core log; a stale
+digest gets 409, another member 403, a client `zdr: false` is ignored and a direct token
+mint carries no waiver; after the acknowledgement one Ask runs, the run row carries
+`zdr_waived` with the acknowledgement id, the thread persists, the usage frame and the
+answer line say so, and only the subscription provider appears in the log; a second member
+and the same member on another model are refused (it is not organisation-wide) and the
+organisation's flag is unchanged; a withdrawal and a capability version bump each refuse
+until acknowledged again; Temporary chat on the connection is refused. A non-ZDR
+organisation sees no change. The contract tests apply the real policy file, the real
+middleware and tokens captured from the real mint.
+
+---
+
+## 2026-10-03 — The organisation's ZDR switch is gated on an attested provider
+
+**State:** `proposed`
+(built; the running gateway binary carries it, string check of 2026-10-06; flips to
+`implemented` at **Trigger to flip**)
+
+**The decision.** An admin could switch organisation ZDR on with only the plan checked,
+while no provider was attested. inference-core fails a ZDR request closed, so every chat
+of that organisation would then fail. On the stack read, all three organisations were
+entitled and nothing was attested (owner default D-A, 2026-10-03: attestation is an
+operator and commercial step, built as data and not as code). The switch is therefore
+refused until the model catalogue shows an attested chat model.
+
+- *Where.* In the gateway, not in the organisation service. The gateway is the only
+  holder of the organisation service's `org:settings:write:self` and the only service
+  that can read the Model Plane catalogue; the organisation service would need a Control
+  Plane to Model Plane dependency to do it.
+- *What.* Enabling is refused with 409 `zdr_no_attested_provider` when no chat model
+  carries the `zdr` feature or the `zdr_contractual` or sovereign tier (the tier is a
+  second signal for the same bit, because the Anthropic model list never lists the
+  feature even when attested), and with 503 `zdr_gate_unavailable` when the catalogue
+  cannot be read: it fails closed on enable only. Disabling is never gated. The gate
+  stands in front of the settings page, the `org.update_zdr` agent action and organization
+  creation (a first-time creator always gets the 503, because no catalogue credential can
+  be minted before an organisation exists).
+- *The live proof still needs one organisation with the switch on.* An operator-only
+  seed script writes it straight to the organisation service for one dedicated
+  `ZDR-TEST` organisation, on loopback only, refusing any other name
+  (`apps/Frontend Plane/verevonv3/docs/ZDR_OPERATOR_SEED_RUNBOOK.md`).
+- *When a provider is attested the gate opens by itself*: it reads the catalogue, not a
+  flag.
+- *Known limit.* The organisation service stores `interactiveRetention` exactly as sent
+  on organisation creation and on a re-mirror, so another writer of that key is not
+  gated; making the key server-owned is the lasting fix (runbook, section 8).
+
+**Alternatives rejected.** Allowing the switch and letting chat fail, or allowing it with
+a warning only: each is a one-click, organisation-wide outage.
+
+**Trigger to flip to `implemented`.** Read-only on the live stack: the catalogue entries
+the gateway reads carry the fields the gate needs (the first two tests of
+`tests/e2e/zdr-org-switch-gate.spec.ts`), and on the dedicated test organisation the one
+refused PATCH returns 409 `zdr_no_attested_provider` and writes nothing.
+
+---
+
+## 2026-10-03 — Contextual retrieval stays on: bounded inline generation plus a database-truth reconciler
+
+**State:** `proposed`
+(the owner ruled on the direction on 2026-10-03; written on 2026-10-06 against the
+tree and the stack of that day; nothing below is deployed until this entry flips,
+see **Trigger to flip** at the end)
+
+**The decision.** Contextual retrieval (CR: a model-written sentence or two that
+places each chunk in its document, stored beside the chunk and prepended to it
+before it is embedded) is not switched off. It is made to work. The owner's ruling
+is that it stays on and is made perfect; where it needs cross-plane tuning
+(principals, audiences, scopes, metering) it gets the same tuning the Data Plane
+and Quarry got. Concretely:
+
+- *On by default, in code.* The deployment flag `CONTEXTUAL_RETRIEVAL_ENABLED`
+  becomes an incident-only kill switch. Its default is on in code, in compose and
+  in `.env.example`, the model has a default, and start-up fails when CR is
+  enabled without a model or a credential and when it is switched off without a
+  written reason (`CONTEXT_RETRIEVAL_KILL_SWITCH_REASON`, logged and reported by
+  `/readyz`). Day-to-day control is per organisation (`org_processing_policy`):
+  operator-only, audited, with a reason, and always a visible `skipped_policy`
+  status, never a silent skip. There is no organisation-admin screen for it.
+- *A per-unit status machine.* Each knowledge unit carries a `context_status`
+  (`pending`, `ready`, `legacy`, `skipped_zdr`, `skipped_policy`,
+  `skipped_budget`, `failed_transient`, `failed_permanent`; NULL means unknown),
+  the provenance of its context (model, provider, residency, prompt version, input
+  hash, time), a content-free error class and a vector-coherence hash. A context
+  is written only together with its provenance, and the vector is built from the
+  persisted context, never from one that only exists in memory.
+- *Bounded inline generation, plus a reconciler.* Generation inside the embedding
+  consumer is time-boxed (about 8 seconds per document and 20 per batch, with
+  bounded cross-document concurrency) so ingest never fails or stalls because of
+  it and one tenant cannot hold up another. Whatever is not finished is embedded
+  raw and left `pending`. A reconciler that reads the database, not events, does
+  the backfill, the repair, the legacy verification and the prompt-version
+  refresh. Unchanged inputs make zero provider calls. Its budget gate is
+  alert-only by default (owner default D-E: per organisation and global, no stop,
+  the figure to come from the owner); `skipped_budget` exists only when an
+  operator sets `stop`.
+- *Lexical sync through the event that already exists.* The keyword arms read the
+  same stored context. When the reconciler heals a document it re-publishes
+  `documents.indexed`, which rides the JetStream stream `DATAPLANE_GRAPH` and which
+  `quickwit-adapter` consumes with a durable pull consumer that re-indexes the
+  document's chunks with their context. The design's new `units.contextualized`
+  event is dropped.
+- *Validation that is never silent.* The model's answer is untrusted text:
+  whitespace normalised, markup stripped, 12 to 600 characters, an accepted stop
+  reason of `stop` or `end_turn` (`length` and `max_tokens` count as truncated;
+  `content_filter` may arrive as an HTTP error). The Azure adapter returns the raw
+  finish reason `stop`, so the design's "require `end_turn`" would have rejected
+  every real answer; the proof uses a captured real response, not a hand-written
+  one. An empty or invalid answer becomes an explicit `invalid_output` outcome.
+
+**What the audit found (read 2026-10-03; the numbers re-read on 2026-10-06 are
+marked).** CR was "on" for a reason that a fresh checkout would not reproduce, and
+nothing could say whether it worked.
+
+- *On only through a git-ignored file.* The container has the flag because the
+  Data Plane `.env` sets it. The default is false in code (`embedding-engine-rs`
+  `config.rs`) and in compose, the model has no default, `.gitignore` matches
+  `.env*`, `.env.example` has no CR variable, and no compose contract test names
+  CR. A clean checkout turns the owner's requirement off with no signal. The
+  compose comment also names a column that does not exist (the column is
+  `chunk_context`). Re-read 2026-10-06: the flag, `gpt-4o-mini`, an empty provider
+  hint and the fixed token posture `persistent` are what the container holds.
+- *Silent, unrecorded degradation.* Eight paths embed the raw chunk with no durable
+  record: a failed mint, a non-transient error, exhausted retries, an empty answer
+  (which returns no context and logs nothing), a missing or empty document, a
+  failed lookup, a count mismatch and a bearer that expired mid-document. NULL
+  `chunk_context` meant "off", "ZDR", "not yet", "failed" and "trivial" at once.
+  One live unit has been raw since 2026-09-28 and nothing records why. Re-read
+  2026-10-06: 207 units, 206 with a context (all prompt version `ctx-v1`), 1 without.
+- *One consumer for every tenant.* CR runs inside the single embedding consumer,
+  document by document, before embedding, against an ack wait of 60 seconds, five
+  deliveries and an envelope time to live of 120 seconds (the documented incident:
+  1,044 of 1,164 chunks lost to expiry). One bearer per document with a 300-second
+  maximum can expire mid-document, after which every remaining chunk is embedded
+  raw. Retry is a doubling ladder that does not read the server's retry-after.
+- *The vector and the context can diverge.* The context is persisted after the
+  vector, best effort, and only a success is written, so a failed regeneration
+  leaves the old context in the keyword indexes beside a raw vector. A re-embed
+  always regenerates and pays again. `context_prompt_version` is written and never
+  read, so a prompt change has no refresh path. `embedding_model` is NULL on all
+  207 units (re-read 2026-10-06) because nothing writes it.
+- *The keyword arm reaches a quarter of the corpus.* Re-read 2026-10-06: the
+  Quickwit index holds 52 knowledge-unit documents (51 with a `context_body`)
+  against 207 units in Postgres. The 155 missing units sit in 138 live documents
+  (136 private SharePoint, 1 organisation SharePoint, 1 Quarry), all classified
+  internal and embedded, and all of them already have a stored context. Why they
+  never arrived is not known. The admin-job table has no row, so the rebuild path
+  has never run here.
+- *Large documents lose their document context.* The prompt carries the first
+  48,000 characters only, so a chunk beyond that point is situated against text
+  that does not contain it.
+- *Prompt quality.* 195 of 206 contexts open with a meta phrase ("This chunk ..."),
+  which dilutes the embedding and the keyword match, and they are mostly English
+  over mixed Norwegian and English chunks. The prompt has no title, source, date or
+  language instruction (design audit, not re-read).
+- *The reranker never sees the context.* It reranks the raw chunk text. On the
+  contextual corpus the reranker added only +0.005 nDCG, against +0.0245 on the raw
+  corpus, so the two overlap; CR's own gain over raw chunks was +0.033 to +0.048
+  nDCG at every fusion weight tested and held with the reranker on
+  (`retrieval-fusion-evidence-2026-08-26.md`). Whether giving the reranker the
+  context recovers more is a measurement, not an assumption (CR-T15).
+- *The quality gate cannot run.* There is no committed script that ingests the
+  95-document corpus, the eval organisations are gone, and `quality_eval_runs` is
+  empty.
+
+**Alternatives rejected.**
+
+- *All generation asynchronous, raw first.* It doubles the embedding work and
+  leaves every new document at baseline quality until the reconciler reaches it.
+  It stays available as `CONTEXT_INLINE_BUDGET_MS=0`.
+- *Inline only, with fixes.* It cannot remove the stall, the expiry and the
+  double-pay failure modes. The Data Plane's own guardrail is that any
+  inference-bound consumer ships a database-truth reconciler.
+- *A new `units.contextualized` event for lexical sync.* It would be core NATS,
+  which `SUBJECTS.md` says is not durable, and it needs a new verifier scope. The
+  durable path already exists.
+- *Repairing the keyword index with the admin rebuild.* It is unreachable (the
+  route needs a scope and a second approval scope that no principal holds), the
+  script sends no bearer and clears the index by default, and it has never run
+  here. The repair is a re-announce of named documents. Until the graph work lands
+  a re-announce also re-triggers graph extraction for organisation-visible
+  documents, so only named documents are announced and never a whole organisation.
+- *Marking every legacy row `ready` with a computed hash.* It would assert a
+  coherence nobody checked and make `vector_incoherent` read 0 for vectors that may
+  be raw or built from a stale context. Legacy rows are `legacy` with a NULL hash,
+  and a verification pass re-embeds the stored context (zero model calls, one
+  Cohere embed per unit) to make them `ready`.
+- *A $5 monthly stop as the default budget.* Superseded by the owner's default
+  (alert-only). A stop is explicit and audited.
+- *Switching CR off per organisation as a normal control.* It sits badly beside
+  the ruling. It exists for the evaluation baseline organisations and for
+  incidents. Whether it may be used on customer organisations is an open owner
+  question (`OD-PER-ORG-OFF`).
+
+**Deliberately not done, flagged instead of decided.**
+
+- *A context-only purge.* The design says a purge reuses the reconciler (clear the
+  context, re-embed raw). No build task delivers it, so after an organisation is
+  switched off its existing contexts stay in Postgres, in both keyword indexes and
+  in the vectors. Deleting a document removes its context; the keyword indexes are
+  not purged by the organisation erasure path (honest-limits L22). **Trigger:** the
+  first request to remove contexts without removing documents.
+- *Metrics and alert rules* for `embedding-engine` and `graph-index` (the design's
+  `ctx_*` and `usage_*` families). Only the `inference-core` counters and the budget
+  counter are assigned. The Data Plane compose has an optional Prometheus behind
+  the `obs` profile; it is not running here and none of its rules concerns CR.
+  **Trigger:** the first operator who needs an alert rather than a query.
+- *The title-and-heading breadcrumb* as the only context a ZDR organisation could
+  have without an attested provider (CR-T18, owner decision `OD-BREADCRUMB`).
+- *A model or prompt change.* `ctx-v2` and any other model ship only through the
+  evaluation gate (non-inferiority, 99 percent coverage, exact-identifier class
+  unchanged). `gpt-4o-mini` stays (`OD10`).
+- *A dedicated Azure deployment for background work* (operator action `OPS-ALIAS`)
+  and reading the real `AZURE_OPENAI_DEPLOYMENT_TYPE`. The residency floor
+  (`azure-openai`, EU) passes today only because the region label is set, so the
+  claim is label-based; the type is not set blindly.
+- *Rerank input with context* (CR-T15): behind `RERANK_INPUT_INCLUDE_CONTEXT`, off
+  until the evaluation shows a gain beyond the rerank noise (about ±0.04 nDCG).
+
+**Where the build stands on 2026-10-06 (time-bound; reconciled when the state
+flips).** The Postgres migration `20261003130000_context_provenance.sql` and its
+down file are in the tree and not applied: the live table has no `context_status`
+column and no coverage view. The `inference-core` typed statuses and counters are
+in the tree and not deployed: `/metrics` still answers with one help line. The
+Control Plane `tenant` posture code is in the working tree, uncommitted, and the
+running Auth Core image (built 2026-10-04 22:51 UTC) already contains it: the
+45-second resolver cache, the 503 `retention_posture_unavailable` refusal, the
+`tenant` value and the 60-second token cap. The running registry has no `tenant`
+principal, so nothing uses it yet (block 12 of the live-reads file, read in the
+review of this task). The `cost-core` migrations 0006 to 0010 are in the tree and
+applied on the stack (`cost_entries` has `provider_used`, and the tables of 0008 to
+0010 exist: the erasure replay guard, the usage reporting periods and the billing
+outbox). The feature and units migration is not built; the design called it 0008,
+which now belongs to the erasure replay guard, so it takes the next free number. The
+Data Plane embedding, graph and reconciler code is unchanged.
+
+**Where it lands (planned; reconciled when the state flips).**
+
+- Data Plane, under `apps/Data Plane v2/`: `infra/postgres/migrations/` (the
+  provenance migration above, then `20261003140000_cost_events_v2` and
+  `20261003150000_graph_extraction_state`), `services/inference-client-rs/` (new,
+  the shared token client), `services/embedding-engine-rs/src/` (`context/` new,
+  `provider/contextualize.rs`, `batch/mod.rs`, `stream/mod.rs`,
+  `context_reconciler.rs` new, `policy.rs` new, `bin/context_backfill.rs` new,
+  `bin/backfill_reannounce.rs`, `config.rs`), `services/quickwit-adapter-rs/src/api.rs`
+  (the read-only parity endpoint), `services/data-quality-go/` (the policy admin API,
+  the coverage endpoint and the gates `contextual_coverage_ok` and
+  `sparse_index_in_sync`), `services/retrieval-engine-rs/src/search/rerank.rs` and
+  `pipeline/` (rerank input), `docker-compose.yml`, `.env.example`, `scripts/eval-*`,
+  `docs/contextual-retrieval-runbook.md` and `DATA_PLANE_STATUS.md`.
+- Model Plane: `inference-core` (typed statuses, counters, the wire golden
+  `api/contracts/infer-statuses.json`).
+- Control Plane: the tenant posture and the principal bundle (the Control Plane
+  wave, not this chain).
+
+**Trigger to flip to `implemented`.** The live proof, in a throwaway organisation,
+with the number of paid calls stated (about three `gpt-4o-mini` calls, one to heal
+the raw unit, one extraction call, and about 206 Cohere embed calls for the legacy
+verification): 207 of 207 units have a non-NULL status; keyword index parity is 0
+after named re-announces; a forced re-embed with unchanged inputs makes 0 provider
+calls (counter check); a captured real Azure response with finish reason `stop`
+passes validation; a ZDR test organisation makes 0 provider calls and records
+`skipped_zdr`. The quality gate also has to hold: the contextual cells do not drop
+below the committed baseline (nDCG@10 0.7732) and coverage is at least 99 percent.
+The docs finalisation then replaces every target in this entry and in the runbook
+with what was built and measured.
+
+---
+
+## 2026-10-03 — The tenant retention posture: background work follows the organisation's zero-retention setting
+
+**State:** `proposed`
+(written on 2026-10-06; the Auth Core half and the organisation-service half (the
+internal route and its read grant) are both in the images running since 2026-10-04,
+and no principal uses them yet. Auth Core's first minute on its image logged 12
+refusal lines when org-core answered 403 to its credential, and none since: the
+organisation service was recreated 51 seconds after the last of them (block 13 of
+the live-reads file). No successful read of the route is shown. The Data Plane part
+waits for the principals)
+
+**The decision.** The Data Plane's background jobs on a tenant's content (CR, graph
+extraction and community summaries) must not send a zero-retention (ZDR)
+organisation's text to a route that is not attested for ZDR. The organisation's
+setting reaches them through the service token, resolved by Auth Core at mint, which
+stays the only posture authority.
+
+- *A third posture value.* The service-principal registry's `retentionByAudience`
+  gains `tenant` (floor `persistent`). For such a principal and audience, Auth Core
+  resolves the organisation's ZDR intent at mint and the token's `zdr` claim is the
+  organisation's. It applies to `embedding-engine` and `graph-index` on the
+  `inference-core` audience only, not to the data-plane audience of the document
+  writers, so a ZDR organisation's knowledge base still ingests.
+- *It fails closed, and says so.* A boolean claim cannot tell an organisation-service
+  outage from a real ZDR organisation, so when the posture cannot be resolved Auth
+  Core answers 503 with the reason `retention_posture_unavailable` and issues no
+  token. The Data Plane maps that to `pending` with the next attempt in 5 minutes:
+  a deferral, never a send and never a permanent skip. Failures are not cached.
+- *Enforcement needs no `inference-core` change.* The effective ZDR is the token's
+  claim or the request's (`auth.rs`), so a ZDR organisation's token makes
+  `inference-core` skip every non-attested provider and fail with a typed
+  `FAILED_PRECONDITION` before any network call. The Data Plane client reads the
+  bearer's claim, sets the request flag from it and maps the typed status to
+  `skipped_zdr`.
+- *The window is bounded and disclosed.* Tenant-principal tokens live at most 60
+  seconds, which replaces the critic's posture-version bearer cache with something
+  simpler and the same bound. The Control Plane code (working tree, uncommitted, and
+  in the running Auth Core image) states the staleness: after an organisation turns ZDR on, a worker can hold a
+  `zdr: false` token for up to the 45-second resolver cache plus the 60-second token
+  lifetime, about 105 seconds, and while the organisation service is unreachable a
+  stale non-ZDR answer is served for at most 15 minutes plus 60 seconds. The Data
+  Plane client reuses a token for at most 45 seconds (refresh margin `min(60 s,
+  ttl/4)`), which sits inside that bound. The trust copy must quote the final
+  Control Plane figures.
+- *ZDR is never lowered.* Nothing here turns ZDR off for an organisation, and
+  background jobs never use a user's own subscription or API connection. A per-run
+  downgrade for a user's own connection belongs to the connection design: an
+  issuer-selected per-run token on the consent path. It must not be built by
+  weakening the issuer floor in `effective_zdr`, which stays a monotonic OR.
+- *What a ZDR organisation gets today.* No provider is attested (owner default D-A),
+  so its units are marked `skipped_zdr` and not contextualised, and the same code
+  routes to an attested deployment when one exists (`Z-40`, an operator action).
+
+**Why it is not a one-line change (the audit).**
+
+- *The existing resolver could not read the organisation service.* Auth Core's
+  fetch sent no service credential, the organisation service enforces service auth
+  on every route, and Auth Core's own principal there holds projection scopes only.
+  Its spec mocked `fetch` and never saw the 401, so on the stack the
+  organisation-level flag resolves to `zdr: false` for every organisation (the code
+  facts were read; the live 401 is the audit's check of 2026-10-03 and was not
+  re-run; the running Auth Core, which now sends a credential, logged org-core
+  answering 403 to it 11 times in one minute on 2026-10-04 and not since). Under a
+  fail-closed resolver
+  every organisation would have minted `zdr: true` the day the client shipped. The
+  Control Plane wave added an internal organisation-service route that returns
+  `{zdrIntent, entitled}` (`GET /internal/orgs/:orgId/retention-posture`, behind the
+  scope `org:retention:read:any`, which the compose registry grants to Auth Core's
+  principal) and a test of the real middleware. Both are in the Control Plane working
+  tree (uncommitted) and in the running organisation-service image (string check).
+- *A new value fails open in one place and breaks the fleet in another.* The
+  registry helper returns `zdr: retentionPosture === 'zdr'`, so an unknown value
+  would be read as persistent unless it maps to `zdr: true` by default and both
+  token controllers resolve it explicitly. The registry is parsed as a whole and an
+  older validator accepts only `zdr` or `persistent`, so a registry that says
+  `tenant` makes every principal on every plane fail with a 503 unless the Auth Core
+  image with the new code is deployed first. Order: image, then registry, then
+  clients.
+- *No production principal model.* The registry loader refuses `allowAnyOrg` in
+  production file mode, and every Data Plane background principal uses it. For a
+  `tenant` principal Auth Core confirms the organisation exists at mint (the
+  production principal model, Control Plane principal bundle P1; design question
+  OD9). Read 2026-10-06: the running registry still says `allowAnyOrg` on 16 of its
+  17 principals (the corpus seeder has a fixed list; block 13 of the live-reads
+  file). The Control Plane working tree
+  (uncommitted) now carries the production-valid form, `tenancy: 'directory'`, on
+  every principal except the corpus seeder: Auth Core verifies the organisation
+  against the organisation service's directory at each mint. No row says `tenant`
+  yet, and neither change is in the running registry.
+- *Plan lapse.* Today Auth Core reads intent AND entitlement, the BFF fails to
+  true and conversation-core reads the raw intent. The applied default is the
+  stricter reading (intent stays ZDR until an admin turns it off); it changes Auth
+  Core's behaviour and the Control Plane wave owner must be told (`OD-LAPSE`).
+- *The residency floor depends on a label.* The provider hint `azure-openai` and
+  `min_residency=eu` pass only because `AZURE_OPENAI_REGION` is set; a missing
+  variable in another environment would fail every CR call, so a contract test over
+  the real compose environment guards it (OD5).
+
+**Alternatives rejected.** Treating only a per-document `restricted` flag as ZDR
+(the status quo) contradicts the organisation's setting. Refusing durable
+documents for a ZDR organisation altogether would make ZDR unworkable, against the
+owner's ruling that it must be workable. A posture-version bearer cache is replaced
+by the 60-second cap.
+
+**Deliberately not done, flagged instead of decided.**
+
+- *The same oracle for index-time text embedding, page-image embedding and rerank.*
+  They go to a Foundry Cohere endpoint that the repository treats as retaining and
+  are guarded only per document (index time) and by the request's own ZDR mode
+  (query time). None reads the organisation's setting. Owner decision
+  `OD-ZDR-INGEST` is open; the applied default builds the interactive and CR parts,
+  schedules the rest (`DEF-CR-EMBED-ZDR-ORACLE`) and requires the evidence and the
+  trust copy to state the gap (honest-limits L33). The tenant bearer's claim could
+  serve as the oracle.
+- *Org-admin control and user-facing prompts.* Those belong to the connection
+  design.
+
+**Trigger to flip to `implemented`.** On a dedicated ZDR test organisation (real
+organisation service, pro plan; `OPS-ORG`): a mint returns `zdr: true`, a non-ZDR
+organisation returns `false`, an organisation-service outage returns 503
+`retention_posture_unavailable` and no token; the test organisation's units are
+`skipped_zdr` with zero provider calls and zero usage rows after the flip; a
+non-ZDR organisation sees no change. The contract tests apply the real policy file,
+the real middleware and tokens captured from the real mint.
+
+---
+
+## 2026-10-03 — Background provider metering: usage events from the Data Plane to cost-core
+
+**State:** `proposed`
+(written on 2026-10-06; cost-core's ingest change is not built and the Data Plane
+side is not started; the forwarder ships dark)
+
+**The decision.** The Data Plane meters its own paid provider calls (embed, rerank,
+contextual retrieval, graph extraction and community summaries) and forwards them
+to cost-core, the ledger of record. Option B of three:
+
+- *The event.* A usage event, schema version 2, built from the provider response:
+  organisation (from the minted bearer, equal to the unit's organisation), `feature`
+  (`contextual-retrieval`, `graph-extraction`, `graph-community-summary`,
+  `embedding`, `rerank`), model, provider, input, output and cache-read tokens,
+  calls, cost basis `metered`, an `estimated` flag, and an idempotency key (a hash
+  of the sorted request ids, aggregated per document per batch). No document ids and
+  no content. A cached response emits nothing. Rows are organisation-level (no user)
+  and producer-attributed.
+- *Durable.* Producers publish to a new JetStream stream `DATAPLANE_COST` with an
+  acknowledgement, and `data-orchestrator` consumes it with a durable consumer that
+  acknowledges after the insert. For one release the producers also publish to
+  core NATS and the consumer still accepts schema version 1.
+- *Forwarded.* A loop in `data-orchestrator`, driven by the database, posts
+  unforwarded rows to cost-core `POST /api/v1/cost/record` with a per-organisation
+  token (principal `data-orchestrator`, audience `cost-core`, scope `cost:write`,
+  retention `persistent`) and retries until 202. The idempotency key carries the
+  organisation, because cost-core's unique index on that key is global. It ships
+  dark (`USAGE_EMIT_ENABLED=0`, `USAGE_FORWARDER_ENABLED=0`).
+- *cost-core.* The request accepts an optional `feature` and `units`
+  (a new migration; the design's number 0008 is taken, see the order below), the
+  aggregate gains a feature filter and group-by, and the
+  catalogue gets sourced price rows. Its decoder rejects unknown fields, so
+  cost-core must ship before any sender.
+- *The chat budget stays chat.* The org-wide budget check sums every row for the
+  organisation, and `inference-core`'s intent layer downgrades an over-budget
+  organisation to the cheap fallback model, so background spend would degrade chat.
+  The org-wide branch of the budget check gets an exclusion predicate so it counts
+  chat rows only; the aggregate keeps counting everything.
+- *ZDR is counted, content-free.* Today usage and billing events for ZDR requests
+  are suppressed, and the Data Plane consumer drops every ZDR event, so a ZDR
+  organisation's spend would be invisible. For the Data Plane the events are
+  recorded as counters with `zdr = true` and no document ids. This reverses the
+  suppression for the Data Plane only. The basis the integrator gave was the phrase
+  "ZDR/cost metadata only" of matrix row 87; that phrase sits in the Quarry column of
+  that row, so it does not license the Data Plane by itself. The reading that
+  carries it is that a counter holds no content, so what ZDR protects is untouched.
+  Whether that is the owner's reading is not established: it was settled without the
+  owner and is recorded here so the owner can object. Metering of ZDR chat turns in
+  model-gateway stays deferred (`DEF-Z-06b`), so the convention is not uniform yet.
+- *A drift check.* `inference-core` gains per-service token counters
+  (`inference_requests_total`, `inference_tokens_total`), and a daily comparison
+  with the ledger totals for `embedding-engine` and `graph-index` catches a caller
+  that forgets to emit.
+
+**Alternatives rejected.**
+
+- *`inference-core` emits usage for every service-principal call.* One choke point
+  and exact tokens, but it covers model calls only (embed and rerank bypass it), it
+  risks double counting with the model-gateway and orchestrator paths, and it does
+  not know the feature. Kept only as the drift check.
+- *Extend cost-core's NATS producer allowlist.* It needs cross-plane NATS
+  credentials and a made-up user id (cost-core requires one on that path), and its
+  own comment says the producer is attribution, not workload identity.
+- *Attribute the spend to the uploading user.* It would eat that person's chat
+  budget.
+- *Count the organisation rows in the organisation's chat budget.* It only moves the
+  problem from the person to the organisation and creates two budget systems.
+
+**What the audit found, and what the build fixes first.** Re-read on 2026-10-06 where
+marked.
+
+- The Data Plane ledger cannot carry billing-grade data. Producers publish
+  `dataplane.cost.ledger` as plain core NATS, the consumer is a non-durable
+  subscription, the verifier pins one event type per producer (`embedding` for
+  `embedding-engine`, `rerank` for `retrieval-engine`) and decodes strictly, only two
+  issuers are accepted so `graph-index` cannot emit, and the shared envelope crate
+  has a closed subject table. Without verifier, consumer and envelope changes first,
+  events are logged as invalid and lost.
+- One `embed.cost` idempotency key is shared by every (organisation, user, ZDR)
+  group in a batch while the persist step prefixes only the organisation, so a
+  second user in the same organisation is silently dropped (read in code, not
+  exercised).
+- Nothing reaches cost-core from the Data Plane: no Data Plane service names it.
+  Re-read 2026-10-06: cost-core holds 1,716 rows, all from the producer
+  `model-gateway`; the Data Plane's own `cost_events` holds 265 rerank events (latest
+  2026-10-05) and 17 embedding events (latest 2026-09-28) and nothing for CR or
+  graph. `cost_entries` now has `provider_used` and still no `feature` or `units`.
+  The gap row DATA-15 in `gap-data.md` said "closed" for a path that does not exist;
+  it was corrected on 2026-10-06.
+- Embedding tokens are an estimate (bytes divided by 4). Exact usage is in the
+  provider response (`input_tokens`, `output_tokens`, `cache_read_input_tokens`) and
+  was discarded by the caller.
+
+**Deliberately not done, flagged instead of decided.**
+
+- *Prices.* `model_pricing` is per token only. No price for `embed-v-4-0`,
+  `text-embedding-3-large` or the Cohere rerank model exists in the repository and
+  none is invented: an unknown model would be priced at the default 3.00/15.00 per
+  million, about 25 times too high for embeddings. The forwarder stays dark and
+  `cost_usd` stays unset until the owner or operator supplies sourced rows
+  (`OD-PRICES`, `OPS-PRICE`).
+- *Quarry's query embeds and the web rerank producer* move to this ledger after it
+  is deployed (`QB-M`, `DEF-QB-VECTOR-METERING`).
+- *Chat-turn metering for ZDR* (`DEF-Z-06b`).
+- *Alert rules on usage lag.* No build task delivers them (see the first entry of
+  this date).
+
+**Order.** The other session's cost-core work (migrations 0006 to 0010: provider
+attribution, the Azure cost sync, the erasure replay guard, the usage reporting
+periods and the billing outbox) is applied on the stack; the files carry that
+session's uncommitted edits, so cost-core ingest v2 starts after it is committed. Its
+migration takes the next free number (not 0008, which exists). cost-core ingest v2 and its sourced prices
+deploy first; then the verifier, consumer and migration; then the producers with
+emission dark; emission is enabled after the consumer is verified; the forwarder
+last. Consumers and verifiers before producers; cost-core before the forwarder.
+
+**Trigger to flip to `implemented`.** One CR call gives exactly one cost-core row
+with the feature, the organisation and the exact tokens; replaying it still leaves
+one row; the chat budget aggregate for that organisation is unchanged; killing
+`data-orchestrator` mid-run loses no event after the restart; a ZDR test
+organisation's calls appear as counters with no content.
+
+---
+
+## 2026-10-03 — Graph extraction gets a per-chunk state machine and loses its direct-Azure path
+
+**State:** `proposed`
+(written on 2026-10-06; nothing below is built)
+
+**The decision.** `graph-index` is the second unmetered paid `gpt-4o-mini` path, so
+it gets the same treatment as CR.
+
+- *State per chunk.* A table `graph_extraction_state(org_id, knowledge_id, status,
+  attempts, next_attempt_at, prompt_version, model, extracted_at, entity_count,
+  error_class)` with row-level security. Statuses: `pending`, `ready`, `empty`,
+  `skipped_zdr`, `skipped_policy`, `skipped_visibility`, `skipped_budget`,
+  `failed_transient`, `failed_permanent`. An empty result is durable per prompt
+  version, so a restart stops paying again. Retries back off from 5 minutes to 6
+  hours and the chunk becomes `failed_permanent` after 6 attempts. This replaces the
+  in-memory suppression set and the candidate rescans.
+- *The same posture, metering and errors as CR.* The shared token client (tenant
+  bearer, typed statuses, a reason per feature), usage events with the features
+  `graph-extraction` and `graph-community-summary`, a per-organisation
+  `graph_extraction` policy and an alert-only budget, the typed gRPC code in the
+  log, the dead-letter publish regardless of the verifier mode, the model and the
+  prompt version stamped into provenance, a bounded per-document concurrency and
+  deadline. The visibility rule is unchanged: only organisation-visible documents
+  are extracted.
+- *Delete the direct-Azure backend.* `GRAPH_EXTRACTION_PROVIDER=azure_openai`
+  selects an extractor that calls Azure with a key from the container, and
+  `graph-index`'s environment holds that key and the endpoint (re-read 2026-10-06:
+  both present; the active value is `model_plane`). Flipping one variable would
+  bypass the token, the ZDR claim, the metering and the typed errors. The backend
+  and its key are removed and a compose contract test keeps them out. The same audit
+  applies to the Azure key that `embedding-engine`'s compose block carries.
+
+**What the audit found.** One single-chunk document was retried at about
+six-minute intervals at least ten times on 2026-09-29 (eight "model-plane
+inference failed" lines and two 60-second timeouts), then succeeded with no
+entities, was remembered only in process memory and was paid for again after the
+restart of 2026-09-30. The real gRPC status was hidden because the error is wrapped
+and printed with `%e`. The dead-letter publish happens only when no event verifier
+is configured. The stream path and the reconciler can extract the same chunk twice.
+Re-read 2026-10-06: the log still holds the eight failure lines, and the graph is 68
+entities (all provenance `extracted`, no model or prompt version), 6 relationships,
+36 claims and 86 text units from the organisation-visible documents (3 of 185 live
+documents); there is no state table.
+
+**Alternatives rejected.** Keeping the in-memory suppression (it is the bug).
+Keeping the direct backend as an "escape hatch" (it is a bypass of every control in
+this entry and in the tenant posture entry). Per-organisation switching off as a
+normal control (see the first entry of this date).
+
+**Deliberately not done.** Measuring and improving the graph arm's quality: it has
+little data and a weight of 0.2, so the build makes it measurable (yield per chunk,
+empty rate, entity-type conformity) and gates on non-regression; deeper GraphRAG
+evaluation stays with the GraphRAG plan. The credential `graph-index` uses for its
+erasure subscription was printed in an audit transcript and needs rotating
+(`OPS-SECRETS`, an operator action, not code).
+
+**Order.** After the shared client and the usage events exist, and before a
+whole-organisation re-announce is ever run, because a re-announce re-triggers
+extraction.
+
+**Trigger to flip to `implemented`.** A chunk that fails ten times in a row stops
+being retried after the cap and is reported `failed_permanent`; a `graph-index`
+restart makes no new call for a document whose result was empty; a ZDR test
+organisation makes zero calls and records the marker; the typed gRPC code appears in
+the structured log; `graph-index` holds no Azure key.
+
+---
+
+## 2026-10-03 — Web-search rerank: the Data Plane owns reranking of caller-supplied candidates (Quarry option B)
+
+**State:** `proposed`
+(the owner ruled on the direction on 2026-10-03; nothing below is built or
+deployed until this entry flips, see **Trigger to flip** at the end)
+
+**The decision.** Reranking of candidate documents a caller supplies, in
+particular Quarry's public web search results, becomes a Data Plane capability:
+`POST /v1/rerank`, a service-only route in `retrieval-engine-rs` that reuses the
+engine's existing paid Azure-hosted Cohere client (`RERANKER_MODEL`, today
+`Cohere-rerank-v4.0-pro`). Quarry calls it instead of prompting a general model.
+Its own LLM-prompt reranker, its Model Plane dependency for reranking and
+`QUARRY_EDGE__SEMANTIC_RERANK_MODEL` are to be deleted, not repaired. Ownership is
+recorded in the master ownership matrix (rows 70-71, rule 2 amended, new rule
+15), in `CODEBASE_INFORMATION_SYSTEM.md` and in a note in `GDPR_SUMMARY.md`.
+Three owner rulings bind it: reranking is paid and never a subscription route;
+the Data Plane owns the capability and Quarry calls it (option B); zero
+retention is per organisation and is respected. It extends the doctrine of the
+2026-09-03 entry below (ZDR gates third-party egress for web search) to the
+rerank and vector-retrieval boundaries that entry did not reach.
+
+**Why not repair what exists.** The Quarry reranker does not work as committed.
+`quarry_runtime::rerank::ModelPlaneSearchReranker` builds a Model Plane client,
+which asks Auth Core for a service token with scope `models:invoke` on the Model
+Plane audience. quarry-edge's committed principal holds the `data-plane`
+audience only (`data:read`, `documents:write`, `org:data:read_all`). The committed
+registry (`apps/Control Plane/config/plane-service-principals.json`, since
+2026-08-27) has never granted `models:invoke` to any principal. Its predecessor,
+the bootstrap seed in `scripts/bootstrap_runtime_environment.sh`, did list
+`models:invoke` and a `model-gateway` audience for quarry-edge (commit `57e4b47d`,
+2026-07-13) until commit `fcb8aeaf` (2026-08-01) reconciled the seed to the live
+fleet and removed both, before the compose default turned the reranker on (below).
+Whether the running Auth Core ever held that grant is not recorded. Today Auth
+Core answers 403. Read on 2026-10-03 from the running
+quarry-edge (up since 2026-10-01 22:38 UTC): 4 of 4 reranked searches logged
+`rerank: model plane failed; keeping original order` with `Auth Core
+service-token request returned 403 Forbidden`. The failure degrades safely,
+which is why nothing visibly broke: results come back in search order, unjudged.
+Re-read on 2026-10-06, the same container log holds 8 such lines (4 from
+2026-10-01, 4 from 2026-10-03) and no successful rerank. The log spans two
+starts (2026-10-01 22:38 UTC and 2026-10-05 00:21 UTC); no search has run
+since the second.
+The compose default went from 0 to 1 on 2026-09-23 (commit `932b30d2`, together
+with autoprompt). The reranker's design is also wrong for the job, not only
+unauthorised: it prompts a general model once per search and parses the answer
+back as JSON
+(`build_rerank_prompt`, `strip_code_fences`), and `rerank.rs` never reads the
+request's ZDR flag, so a ZDR search would have sent its query and snippets to a
+general model had the token ever been granted. Matrix rule 2 already forbade an
+independent reranker in Quarry.
+
+**What the capability must do (the doctrine).**
+
+- *Who may call it.* Only a named service principal holding a dedicated
+  `data:rerank` scope, through a default-deny route table. Interactive user
+  tokens can never reach it. Quarry's `service:quarry-edge` is the only caller
+  at first.
+- *Run-level ZDR, required.* `zdr_mode` is a required field (400 when absent;
+  `off` is not a value). It is the run-level flag the caller sends, after any
+  per-run downgrade that the authoritative consent path granted for that run.
+  The Data Plane never infers organisation state and never relaxes the flag. The
+  token cannot carry it: quarry-edge's `data-plane` token has retention
+  `persistent`, while the tokens model-gateway and execution-core hold toward
+  Quarry are always `zdr`. Reading the token claim would either miss a ZDR run
+  or switch rerank off for all chat traffic. A consequence worth stating: on a
+  run whose ZDR was waived for the user's own connection the flag is off, so
+  that run's search query and results may be reranked by the platform provider.
+  Whether the waiver's consent wording names this is for the ZDR work to settle.
+- *ZDR and sovereign skip, loudly.* A restrictive ZDR mode, a sovereign
+  requirement, a disabled route or an unapproved processor return HTTP 200 with
+  `status: skipped`, a reason and the candidates in input order, with zero
+  provider calls and no cost event. Never silent, never a quiet reorder. This is
+  what the engine already does for tenant retrieval (`text_rerank_allowed` and
+  the `sovereign_required` check in `pipeline/orchestrator.rs`: Cohere rerank on
+  Azure is treated as retaining, non-sovereign egress), extended to
+  caller-supplied candidates.
+- *Processor gate, both halves.* `GDPR_SUMMARY.md` requires an approved
+  processor and `allow_third_party_processing=true`. The deployment-level half
+  (`WEB_RERANK_PROCESSOR_APPROVED`, default false, fail closed) is part of
+  this decision (its specification file, `docs/web-rerank-v1.md`, is listed
+  below and does not exist yet). The per-request half is a recorded gap: Quarry's
+  `PrivacyPolicy.allow_third_party_processing` is not carried on its search
+  path, and the retrieval and embedding engines read no such field. The Quarry
+  client work either carries the signal or leaves the gap documented, and the
+  note in `GDPR_SUMMARY.md` states which is true. Legal confirmation of the
+  Article 28 basis for sending the query to the provider is still open and is a
+  condition for switching the approval on in production.
+- *Paid platform provider only.* Never the Model Plane, inference-core, a
+  subscription or a bring-your-own route. A per-connection ZDR downgrade
+  concerns the user's own model route; it gives rerank no other provider.
+- *"Public text" is enforced, not assumed.* The vector hits Quarry would send
+  are tenant-stored chunks, not public web text. The route is therefore
+  reachable only by `service:quarry-edge`, and Quarry's vector leg is scoped on
+  the server to Quarry-origin documents (`documents.source = 'quarry'`), because
+  the client-side filter never worked (below).
+- *Idempotent, bounded, metered.* Key `rerank:{org}:{request_id}:{content
+  hash}`, so a caller-chosen id reused with different content cannot
+  under-record. One provider call per request and no sharding of caller
+  documents. Limits, a deadline and an alert-only per-org budget. Cost is first
+  recorded as the existing v1 `rerank` cost event and moves to the usage ledger
+  v2 later.
+- *Scores only once calibrated.* Quarry attaches `score` and `score_kind` only
+  after model-gateway understands them, because uncalibrated Cohere scores
+  would meet the 0.6 provider weight and the 0.30 keep threshold in
+  `relevance.rs` that they were never calibrated against.
+
+**Defects behind the 403 that a green stub would have hidden.** Fixing
+quarry-edge's principal alone would have exposed these. All were read in code on
+2026-10-03, and the same chain fixes them with tests that apply the real rules,
+not permissive doubles (the live proof of 2026-10-01 found six defects that
+stubs had hidden).
+
+- *A membership check, not a token problem.* The engine's auth middleware treats
+  `service:quarry-edge` as a user and refuses it. It was read on 2026-10-03 as
+  15 `not_member` decisions naming that principal in the auth-service log. That
+  log is no longer available (the container was recreated on 2026-10-04 22:56
+  UTC); the retrieval-engine log, which does not name the principal, holds 20
+  `Control authorization denied membership` lines between
+  2026-10-01 22:07 and 2026-10-03 22:02 UTC, and quarry-edge's own log shows
+  `retrieve returned status 403 Forbidden` on all 9 vector calls that logged an
+  outcome (a success is not logged, but no search's engine mix shows a vector
+  hit). So Quarry's vector retrieval returned 403 on every logged call before
+  anything below could happen.
+- *An invalid ZDR value, and ZDR ignored.* Quarry's vector request hard-codes
+  `zdr_mode: "off"` (`vector_index.rs`) while the engine's `ZdrMode` accepts only
+  `disabled`, `reject` and `ephemeral`. A typed map from Quarry's mode to the
+  engine's values replaces the literal.
+- *Sovereignty by silence.* Quarry sends no `sovereign_required`, which the
+  engine resolves to `true` and which takes the dense arm down (the 2026-08-28
+  entry below).
+- *No URL in the answer.* The engine's `SourceRef` carries `document_id`,
+  `title`, `source` and `type`, and no `url`. Quarry's client reads `url` with
+  aliases `source_url` and `uri` that the real service never emits, and its
+  mock-server tests encode the same invented fields.
+- *Unscoped corpus, and nothing to filter on.* Quarry sends `filters: {}`, which
+  searches the whole organisation corpus, and the `sources` filter maps to a
+  Qdrant payload key `source` that the embedding writer never sets (it writes
+  `knowledge_id`, `document_id`, `org_id`, `chunk_index` and `text`). The scope
+  is enforced on the server as a predicate on `documents.source`, and the
+  payload is stamped and backfilled so the vector arm can filter too.
+- *Fusion drops the engine signal.* `rrf_fuse` rebuilds each result with
+  `..Default::default()` and loses `engines` and `fusion_score`, which
+  model-gateway's agreement bonus reads. Fixed together with canonical URL
+  dedup.
+- *No timeout on the vector call.* The client is `reqwest::Client::new()` and
+  the hybrid join waits for it. A bounded timeout and a kill switch are added.
+- *The query is logged.* `retrieval.start` logs the first 60 characters of the
+  query at INFO, scrubbed only of emails, phone numbers and card-like numbers,
+  next to the ZDR mode and for ZDR requests too. The planned fix redacts it in
+  full when the mode is restrictive. The new route logs no query or document
+  text at all.
+
+**Deliberately not done, flagged instead of decided:**
+
+- *gRPC.* The route is HTTP/JSON, which is Quarry's existing client style. The
+  core is transport-agnostic. **Trigger:** the first Model Plane caller of
+  rerank, which adds a gRPC `RerankService`.
+- *A ZDR-compliant rerank path.* ZDR and sovereign organisations get the
+  explicit skip, not a reranked list: the repository holds no evidence of what
+  Cohere on Azure commits to, and the code treats it as retaining egress. The
+  two planning documents conflict: `sovereign-rag-blueprint-reconciliation.md`
+  (Decision 1) calls Embed v4 on Azure-EU DataZone "ZDR", while
+  `sovereign-rag-phased-plan.md` (Phase 7) lists contractual ZDR for Cohere
+  Command R+, Rerank and Embed v4 as work still to do. Neither is relied on. The
+  region of the rerank deployment is not recorded either (the host is
+  `core-ai-rg.services.ai.azure.com`). The compliant path is a self-hosted text
+  cross-encoder profile with no egress, or a provider route attested as data
+  (modelled on the Azure OpenAI ZDR attestation; no provider is attested today).
+  Exit criteria: attestation data with evidence fields, or a zero-egress
+  profile proven by the same policy matrix. **Trigger:** a provider attestation
+  exists, or the owner decides on the sidecar.
+- *Passage highlights.* Deferred. Live `search.result_shape` shows snippets of
+  70 to 274 characters in the four searches logged on 2026-10-01 (medians 138
+  to 172), and 36 to 504 in the one later search that returned hits (30 hits, one
+  of them from the local index; a second later search returned none). A
+  320-character window is the
+  whole snippet for almost every hit and adds nothing. **Trigger:** Data Plane
+  vector chunks or fetched page text become reranker inputs. The v1 route has
+  no highlights field.
+- *Dedicated rerank capacity.* The first exposure shares the Azure Foundry
+  deployment with tenant retrieval, behind a limiter that reserves permits for
+  retrieval (owner default). A dedicated deployment is due before general
+  availability. Known risk, not a decision: the eval gate measured about 19% of
+  queries losing the cross-encoder to provider 429s on the shared deployment
+  (`apps/Data Plane v2/scripts/eval-gate.py`, measured 2026-08-26), so a tight
+  degraded-rate target is not realistic until capacity is separate.
+- *Query-embed metering.* Quarry-triggered query embeds (Cohere Embed) are
+  unmetered. **Trigger:** usage ledger v2 deployed.
+- *Quarry's other Model Plane dependents.* Autoprompt, answer synthesis,
+  ai-formats and page-title enrichment build their clients through the same
+  Model Plane path (`build_model_client` in quarry-edge's `main.rs`) and share
+  the audience gap; autoprompt (compose default 1 since 2026-09-23) and
+  page-title enrichment are on by default. Owner default D-C (2026-10-03): their
+  defaults are to be switched off in config (build task QB-T17) so they stop
+  failing, and nothing is granted to quarry-edge's principal (no
+  `models:invoke`). The proper org-bound,
+  metered model path (a principal on the model-gateway audience, a narrow scope,
+  per-request ZDR from the body, a Model Plane cost trail) is a scheduled design
+  task, `DEF-QB-T17-PART2`, state `deferred`, so it cannot become a forgotten
+  stopgap. **Trigger:** before any of the four is switched back on. Owner and
+  date for that design: not yet assigned, the owner supplies them and this entry
+  is updated then (neither is invented here).
+
+**Where it lands (planned; reconciled when the state flips).**
+
+- Data Plane, under `apps/Data Plane v2/services/`:
+  `retrieval-engine-rs/src/rerank_api/` (new: `mod.rs`, `schema.rs`, `policy.rs`,
+  `limits.rs`, `cache.rs`), `retrieval-engine-rs/src/search/rerank.rs`,
+  `retrieval-engine-rs/src/rate_limit/mod.rs`,
+  `retrieval-engine-rs/src/audit/mod.rs`, `retrieval-engine-rs/src/config.rs`,
+  `retrieval-engine-rs/src/main.rs`, `retrieval-engine-rs/src/lib.rs`,
+  `retrieval-engine-rs/src/api/mod.rs`, `retrieval-engine-rs/src/metrics/mod.rs`,
+  `retrieval-engine-rs/tests/rerank_contract.rs` and the goldens in
+  `retrieval-engine-rs/tests/fixtures/contracts/rerank-v1/` (inside the build
+  context, vendored by hash into Quarry). The same chain adds principal-aware
+  auth and the service route table (`retrieval-engine-rs/src/authz/`), the
+  forced Quarry scope and the log redaction
+  (`retrieval-engine-rs/src/pipeline/orchestrator.rs`,
+  `retrieval-engine-rs/src/search/filters.rs`), the payload stamp
+  (`embedding-engine-rs/src/qdrant_writer/mod.rs`), and the retrieval-engine
+  block of `docker-compose.yml`, `openapi/d4d5.yaml`, `docs/web-rerank-v1.md`
+  and `DATA_PLANE_STATUS.md`.
+- Quarry, under `apps/Ingestion Plane/Quarry-v2/crates/`:
+  `quarry-runtime/src/rerank.rs` (the Data Plane client replaces the LLM
+  reranker), `quarry-runtime/src/data_plane_http.rs` (new),
+  `quarry-runtime/src/lib.rs`, `quarry-edge/src/main.rs`,
+  `quarry-edge/src/config.rs`, `quarry-edge/src/search_routes.rs`,
+  `quarry-edge/tests/rerank_behavior.rs`,
+  `quarry-runtime/tests/dp_rerank_contract.rs` and the vendored goldens in
+  `quarry-runtime/tests/fixtures/dp-contracts/rerank-v1/`. Vector leg:
+  `quarry-runtime/src/vector_index.rs`, `quarry-runtime/src/hybrid.rs`,
+  `quarry-runtime/src/fusion.rs`. Compose and docs: the quarry-edge block of
+  `apps/Ingestion Plane/docker-compose.yml` and `Quarry-v2/docs/`.
+- Control Plane: the `data:rerank` grant on quarry-edge in
+  `config/plane-service-principals.json`, owned by the Control Plane principal
+  work and not edited by this chain.
+- Model Plane: `model-gateway/src/quarry.rs` and `model-gateway/src/relevance.rs`
+  (`score_kind`, calibration).
+
+**Trigger to flip to `implemented`.** The live proof, with the number of paid
+calls stated: one paid `POST /v1/rerank` returns `status: ok` with Cohere
+scores; the same `request_id` retried makes no second provider call; a ZDR
+request returns `skipped` in input order with zero provider calls and no cost
+event; an interactive token is refused; a Quarry search end to end shows no 403s
+in the logs, vector hits with real URLs from `source = 'quarry'` only, and
+`engines` surviving fusion. The quality gate also has to hold: on the judged
+web-result set, rerank beats search order by at least +0.04 nDCG@10 with a
+confidence interval above zero and no category dropping more than 0.03 (the
+power of an 80-query set at that effect size is unchecked). The docs
+finalisation then reconciles the planned files above with the files actually
+changed and replaces every target in this entry with the measured number.
+
+---
+
 ## 2026-09-03 — Quarry-v2 web search: ZDR did not gate Brave/Serper
 
 **State:** `implemented`

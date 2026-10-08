@@ -76,6 +76,11 @@ const GATEWAY_COMPACTION: &str = "model-gateway/src/compaction.rs";
 const INFERENCE_GRPC: &str = "inference-core/src/grpc.rs";
 const INFERENCE_PROVIDER: &str = "inference-core/src/provider/mod.rs";
 const INFERENCE_BROKER: &str = "inference-core/src/provider/codex_subscription.rs";
+/// execution-core's copy of this reader, for a governed agent run pinned to the
+/// subscription: it types a failed round and puts the code on
+/// `RunAgentResponse.failure_code`, which the gateway then words.
+const EXECUTION: &str = "execution-core/src/subscription_refusal.rs";
+const GATEWAY_SESSION_FLOW: &str = "model-gateway/src/session_flow.rs";
 
 #[test]
 fn both_sides_spell_the_timing_trailers_identically() {
@@ -154,6 +159,76 @@ fn inference_core_reads_the_broker_by_the_same_codes() {
             str_const(&broker, broker_name),
             str_const(&gateway, gateway_name),
             "{broker_name}"
+        );
+    }
+}
+
+/// An agent run's failure travels as a code on `RunAgentResponse`. The gateway
+/// words only codes it knows, so every code execution-core can send must be
+/// spelled exactly as the gateway spells it; a code that drifted would fall
+/// back to the generic `agent_run_failed`, hiding a usage limit's reset time.
+#[test]
+fn execution_core_sends_only_codes_the_gateway_words() {
+    let gateway = read_source(GATEWAY);
+    let execution = read_source(EXECUTION);
+    for name in [
+        "SUBSCRIPTION_USAGE_LIMIT",
+        "SUBSCRIPTION_REAUTH_REQUIRED",
+        "SUBSCRIPTION_UPSTREAM_UNAVAILABLE",
+        "SUBSCRIPTION_BAD_REQUEST",
+        "RATE_LIMITED",
+        "SUBSCRIPTION_ROUTE_UNAVAILABLE",
+        "PROMPT_TOO_LONG",
+    ] {
+        assert_eq!(
+            str_const(&execution, name),
+            str_const(&gateway, name),
+            "{EXECUTION} {name}"
+        );
+    }
+}
+
+/// execution-core reads the same trailers the gateway does, off the same
+/// inference-core status, so the two readers type one refusal the same way.
+#[test]
+fn execution_core_reads_the_same_trailers_as_the_gateway() {
+    let gateway = read_source(GATEWAY);
+    let execution = read_source(EXECUTION);
+    for name in ["RETRY_AFTER_MS_TRAILER", "RESETS_AT_TRAILER"] {
+        assert_eq!(
+            str_const(&execution, name),
+            str_const(&gateway, name),
+            "{name}"
+        );
+    }
+    let compaction = read_source(GATEWAY_COMPACTION);
+    assert_eq!(
+        str_const(&execution, "PROVIDER_ERROR_KIND_TRAILER"),
+        str_const(&compaction, "PROVIDER_ERROR_KIND_TRAILER"),
+    );
+    assert_eq!(
+        str_const(&execution, "PROVIDER_ERROR_TOO_LONG"),
+        str_const(&compaction, "PROVIDER_ERROR_TOO_LONG"),
+    );
+}
+
+/// A run pinned to the subscription records the same terminal failure codes
+/// the gateway records for a direct subscription turn: `provider_unavailable`
+/// for a provider that refused or could not answer, `inference_failed` for a
+/// request ChatGPT rejected.
+#[test]
+fn execution_core_records_the_terminal_codes_the_gateway_records() {
+    let terminal = literals_in_fn(
+        &read_source(GATEWAY_SESSION_FLOW),
+        "fn direct_terminal_outcome(",
+    );
+    let execution = read_source(EXECUTION);
+    for name in ["TERMINAL_PROVIDER_UNAVAILABLE", "TERMINAL_INFERENCE_FAILED"] {
+        let code = str_const(&execution, name);
+        assert!(
+            terminal.contains(&code),
+            "execution-core records `{code}` ({name}) for a subscription failure; \
+             the gateway's `direct_terminal_outcome` does not: {terminal:?}"
         );
     }
 }

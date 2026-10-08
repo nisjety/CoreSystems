@@ -4,12 +4,19 @@
 //! :9090.
 //! Emits ingress.accepted / ingress.rejected envelopes.
 
+use std::time::Duration;
+
 use anyhow::Result;
 use model_gateway::{
-    auth, capability_consumer, doc_indexed_consumer, finetune_poller, gateway_metrics, grpc,
+    auth, capability_consumer, doc_indexed_consumer, drain, finetune_poller, gateway_metrics, grpc,
     http_routes, readiness::GrpcReadiness, state,
 };
-use tracing::info;
+use tracing::{info, warn};
+
+/// After the drain, how long the HTTP server gets to close the connections that
+/// are still open (a streamed answer flushes its last frames) before the process
+/// exits anyway. A connection that never closes must not hold the exit.
+const CONNECTION_CLOSE_BOUND: Duration = Duration::from_secs(5);
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -22,10 +29,26 @@ async fn main() -> Result<()> {
     let prom_handle = gateway_metrics::install_recorder().ok();
 
     let grpc_readiness = GrpcReadiness::new();
+
+    // Graceful shutdown. The signal is only the start: the trigger the HTTP
+    // server stops on is "signal, then drain" (see `model_gateway::drain`), so
+    // a redeploy waits for the chat turns in flight instead of killing them.
+    // Shared, because both the HTTP server and `main` wait on it and it must run
+    // once. Windows does not expose Unix signal modules through Tokio, so the
+    // local development path listens for Ctrl-C while Linux containers retain
+    // the SIGTERM contract used by orchestrators.
+    let shutdown = drain::shutdown_trigger(
+        shutdown_signal(),
+        grpc_readiness.clone(),
+        app_state.cancels.clone(),
+        drain::drain_window_from_env(),
+    );
+
     let http_handle = tokio::spawn(http_routes::serve(
         app_state.clone(),
         prom_handle,
         grpc_readiness.clone(),
+        shutdown.clone(),
     ));
     let grpc_handle = tokio::spawn(grpc::serve_with_readiness(
         app_state.clone(),
@@ -56,23 +79,31 @@ async fn main() -> Result<()> {
     // operator can flip the kill switch without restarting.
     let poller_handle = finetune_poller::spawn(&app_state);
 
-    // Graceful shutdown. Windows does not expose Unix signal modules through
-    // Tokio, so the local development path listens for Ctrl-C while Linux
-    // containers retain the SIGTERM contract used by orchestrators.
-    let shutdown = shutdown_signal();
+    // Once the drain is over the HTTP server stops accepting and waits for the
+    // connections still open (a streamed answer flushes its last frames, so the
+    // client sees its `done`). Normally `http_handle` below wins that race
+    // within milliseconds; this branch is the bound for the connection that
+    // never closes.
+    let stopped = drain::stop_after(shutdown, CONNECTION_CLOSE_BOUND);
 
     if let Some(handle) = poller_handle {
         tokio::select! {
             result = http_handle => result??,
             result = grpc_handle => result??,
             result = handle => result??,
-            () = shutdown => {},
+            () = stopped => warn!(
+                bound_secs = CONNECTION_CLOSE_BOUND.as_secs(),
+                "connections were still open after the drain; stopping anyway"
+            ),
         }
     } else {
         tokio::select! {
             result = http_handle => result??,
             result = grpc_handle => result??,
-            () = shutdown => {},
+            () = stopped => warn!(
+                bound_secs = CONNECTION_CLOSE_BOUND.as_secs(),
+                "connections were still open after the drain; stopping anyway"
+            ),
         }
     }
 

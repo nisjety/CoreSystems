@@ -854,7 +854,28 @@ impl ProviderRouter for CodexSubscriptionProvider {
     }
 
     fn list_models(&self) -> Vec<ModelInfo> {
+        self.model_infos(mp_contracts::agentic_subscription::enabled())
+    }
+}
+
+impl CodexSubscriptionProvider {
+    /// The catalog this provider advertises. `agentic` adds the `agentic`
+    /// feature to every model: the server's statement that an agentic run
+    /// (execution-core's governed loop, pinned to this subscription) is
+    /// available, so the composer enables Do mode from the model list instead
+    /// of hard-coding the provider. It is the same
+    /// `AGENTIC_SUBSCRIPTION_ENABLED` switch model-gateway and execution-core
+    /// read, parsed by the same code, so the three cannot disagree.
+    ///
+    /// Takes the switch as an argument so a test never touches the process
+    /// environment; [`list_models`](ProviderRouter::list_models) passes the
+    /// real one.
+    fn model_infos(&self, agentic: bool) -> Vec<ModelInfo> {
         let caps = self.capabilities();
+        let mut features = caps.feature_flags();
+        if agentic {
+            features.push("agentic".to_owned());
+        }
         self.models
             .iter()
             .map(|model| ModelInfo {
@@ -862,7 +883,7 @@ impl ProviderRouter for CodexSubscriptionProvider {
                 provider: PROVIDER_ID.to_owned(),
                 modality: "chat".to_owned(),
                 streaming: true,
-                features: caps.feature_flags(),
+                features: features.clone(),
                 cheap: false,
                 privacy_tier: PrivacyTier::classify(&caps),
                 residency_label: caps.residency.as_str().to_owned(),
@@ -917,6 +938,66 @@ mod tests {
             .request_body(&request)
             .expect_err("the subscription catalog must be an allow-list");
         assert!(matches!(error, ProviderError::UnsupportedModel(_)));
+    }
+
+    #[test]
+    fn the_agentic_feature_is_advertised_only_when_the_switch_is_on() {
+        let provider = CodexSubscriptionProvider::new(
+            "http://integration",
+            "service-key",
+            vec!["gpt-5.6-terra".to_owned(), "gpt-6-astra".to_owned()],
+        )
+        .expect("provider");
+
+        let off = provider.model_infos(false);
+        let on = provider.model_infos(true);
+        assert_eq!(off.len(), 2);
+        assert_eq!(on.len(), 2);
+        for model in &off {
+            assert!(
+                !model.features.iter().any(|feature| feature == "agentic"),
+                "{}: agentic must not be advertised with the switch off",
+                model.id
+            );
+            assert!(model.features.iter().any(|feature| feature == "tools"));
+        }
+        for (with, without) in on.iter().zip(&off) {
+            assert!(
+                with.features.iter().any(|feature| feature == "agentic"),
+                "{}: agentic must be advertised with the switch on",
+                with.id
+            );
+            // Nothing else about the catalog changes.
+            let mut stripped = with.clone();
+            stripped.features.retain(|feature| feature != "agentic");
+            assert_eq!(&stripped, without);
+        }
+    }
+
+    #[test]
+    fn the_trait_catalog_follows_the_process_switch() {
+        let provider = CodexSubscriptionProvider::new(
+            "http://integration",
+            "service-key",
+            vec!["gpt-5.6-terra".to_owned()],
+        )
+        .expect("provider");
+        // Off in a test run unless a developer exported it; either way the
+        // trait entry point must agree with the switch it reads.
+        let enabled = mp_contracts::agentic_subscription::enabled();
+        let advertised = provider
+            .list_models()
+            .iter()
+            .all(|model| model.features.iter().any(|feature| feature == "agentic"));
+        assert_eq!(advertised, enabled);
+    }
+
+    #[test]
+    fn the_provider_id_is_the_one_the_other_services_pin_runs_to() {
+        // model-gateway forwards this id and execution-core accepts only this
+        // id; a rename here without the shared constant would make every pinned
+        // run fail its response guard.
+        assert_eq!(PROVIDER_ID, mp_contracts::agentic_subscription::PROVIDER_ID);
     }
 
     #[test]

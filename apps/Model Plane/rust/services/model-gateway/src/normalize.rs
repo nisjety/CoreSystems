@@ -106,6 +106,87 @@ pub(crate) fn load_default_model() -> String {
         .unwrap_or_default()
 }
 
+/// The refusal a subscription turn has always got for anything beyond
+/// text-only, non-ZDR chat. Unchanged byte for byte, so a client (or a test)
+/// that matches on it keeps working when the agentic exception is off.
+const SUBSCRIPTION_STRICT_REFUSAL: &str = "openai-codex-subscription supports text-only, non-ZDR chat without image generation, browsing, deep research, plan mode, or agentic tool specs";
+
+/// The same refusal where plan mode and the agentic feature ARE admitted, so
+/// it must not list them as unsupported.
+const SUBSCRIPTION_AGENTIC_REFUSAL: &str = "openai-codex-subscription supports text-only, non-ZDR chat without image generation, browsing, deep research, or client-declared tool specs";
+
+/// A 400 with the usual `{"error": message}` body, plus a stable `code` when
+/// the caller has one worth matching on.
+fn refusal(message: &str, code: Option<&str>) -> (StatusCode, Json<serde_json::Value>) {
+    let mut body = json!({ "error": message });
+    if let (Some(code), Some(map)) = (code, body.as_object_mut()) {
+        map.insert("code".to_owned(), json!(code));
+    }
+    (StatusCode::BAD_REQUEST, Json(body))
+}
+
+/// Whether `provider` names the ChatGPT subscription route, by its canonical
+/// registry id or either alias inference-core also accepts.
+#[must_use]
+pub fn is_codex_subscription_hint(provider: &str) -> bool {
+    let provider = provider.trim();
+    provider.eq_ignore_ascii_case(mp_contracts::agentic_subscription::PROVIDER_ID)
+        || provider.eq_ignore_ascii_case("codex-subscription")
+        || provider.eq_ignore_ascii_case("chatgpt-codex")
+}
+
+/// Whether the streaming endpoint may admit an agentic run on a subscription
+/// turn: the gateway's reader of the `AGENTIC_SUBSCRIPTION_ENABLED` kill switch
+/// (and `AGENTIC_SUBSCRIPTION_ALLOW_EFFECTS`), whose parsing lives in
+/// [`mp_contracts::agentic_subscription`] so execution-core and inference-core
+/// read it the same way.
+///
+/// Off by default, and a pure value: the function that decides takes it as an
+/// argument, so a test never has to touch the process environment.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct AgenticSubscriptionPolicy {
+    switches: mp_contracts::agentic_subscription::Switches,
+}
+
+impl AgenticSubscriptionPolicy {
+    /// Both switches off: the strict rule.
+    pub const OFF: Self = Self {
+        switches: mp_contracts::agentic_subscription::Switches::OFF,
+    };
+
+    /// The process environment right now.
+    #[must_use]
+    pub fn from_env() -> Self {
+        Self {
+            switches: mp_contracts::agentic_subscription::Switches::from_env(),
+        }
+    }
+
+    /// A policy with the given switches.
+    #[must_use]
+    pub const fn new(enabled: bool, allow_effects: bool) -> Self {
+        Self {
+            switches: mp_contracts::agentic_subscription::Switches {
+                enabled,
+                allow_effects,
+            },
+        }
+    }
+
+    /// Whether a subscription turn may carry the agentic feature at all.
+    #[must_use]
+    pub fn enabled(self) -> bool {
+        self.switches.enabled
+    }
+
+    /// Whether such a run may act (run without plan mode). False whenever
+    /// [`Self::enabled`] is false.
+    #[must_use]
+    pub fn effects_permitted(self) -> bool {
+        self.switches.effects_permitted()
+    }
+}
+
 /// Normalize and validate an incoming invoke request.
 ///
 /// Returns a `NormalizedRequest` on success, or an error response tuple on failure.
@@ -115,6 +196,33 @@ pub(crate) fn load_default_model() -> String {
 /// (empty content, unknown modality, invalid parameters, etc.).
 pub fn normalize(
     req: &InvokeRequest,
+) -> Result<NormalizedRequest, (StatusCode, Json<serde_json::Value>)> {
+    normalize_with(req, None)
+}
+
+/// [`normalize`] for the streaming endpoint (`/v1/invoke/stream`), which is the
+/// only transport with a path to `execution-core`'s governed agent loop.
+///
+/// Identical except for one thing: with `policy` on, a subscription turn
+/// (`provider: openai-codex-subscription`) may carry the `agentic` feature,
+/// read-only and on an explicit model (see [`AgenticSubscriptionPolicy`]).
+/// Every other rejection of a subscription turn is unchanged. With the policy
+/// off the answer is the same as [`normalize`]'s, plus the stable error code
+/// [`mp_contracts::agentic_subscription::DISABLED_CODE`] on the request that
+/// asked for the agentic run.
+///
+/// # Errors
+/// As [`normalize`].
+pub fn normalize_stream(
+    req: &InvokeRequest,
+    policy: AgenticSubscriptionPolicy,
+) -> Result<NormalizedRequest, (StatusCode, Json<serde_json::Value>)> {
+    normalize_with(req, Some(policy))
+}
+
+fn normalize_with(
+    req: &InvokeRequest,
+    stream_policy: Option<AgenticSubscriptionPolicy>,
 ) -> Result<NormalizedRequest, (StatusCode, Json<serde_json::Value>)> {
     let content = req.content.trim().to_owned();
 
@@ -161,9 +269,7 @@ pub fn normalize(
         .map(str::trim)
         .unwrap_or_default()
         .to_owned();
-    let is_codex_subscription = provider_hint.eq_ignore_ascii_case("openai-codex-subscription")
-        || provider_hint.eq_ignore_ascii_case("codex-subscription")
-        || provider_hint.eq_ignore_ascii_case("chatgpt-codex");
+    let is_codex_subscription = is_codex_subscription_hint(&provider_hint);
     if is_codex_subscription && subscription_connection_id.is_empty() {
         return Err((
             StatusCode::BAD_REQUEST,
@@ -183,8 +289,12 @@ pub fn normalize(
     // Subscription tool decisions are constrained proposals executed only by
     // the gateway. The separate orchestration, vision and browsing paths still
     // lack this connection-aware contract and remain unavailable.
-    if is_codex_subscription
-        && (req.zdr
+    //
+    // The one exception is the agentic run on `execution-core`'s governed loop,
+    // which the streaming endpoint may admit (see `AgenticSubscriptionPolicy`).
+    if is_codex_subscription {
+        let agentic = req.features.iter().any(|feature| feature == "agentic");
+        let other_unsupported = req.zdr
             || req
                 .structured_output_schema
                 .as_deref()
@@ -193,16 +303,61 @@ pub fn normalize(
             || req.generate_image
             || req.browse_web
             || req.deep_research
-            || req.plan_mode
-            || !req.tools.is_empty()
-            || req.features.iter().any(|feature| feature == "agentic"))
-    {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(json!({
-                "error": "openai-codex-subscription supports text-only, non-ZDR chat without image generation, browsing, deep research, plan mode, or agentic tool specs",
-            })),
-        ));
+            || !req.tools.is_empty();
+        match stream_policy {
+            // The unary endpoint never reaches the agent loop, so today's rule
+            // holds there whatever the switch says.
+            None => {
+                if other_unsupported || req.plan_mode || agentic {
+                    return Err(refusal(SUBSCRIPTION_STRICT_REFUSAL, None));
+                }
+            }
+            Some(policy) if !policy.enabled() => {
+                // The root cause is named first: a client that sends the
+                // agentic feature to a server without the switch gets a code it
+                // can match on, not the generic text.
+                if agentic {
+                    return Err(refusal(
+                        SUBSCRIPTION_STRICT_REFUSAL,
+                        Some(mp_contracts::agentic_subscription::DISABLED_CODE),
+                    ));
+                }
+                if other_unsupported || req.plan_mode {
+                    return Err(refusal(SUBSCRIPTION_STRICT_REFUSAL, None));
+                }
+            }
+            Some(policy) => {
+                if other_unsupported {
+                    return Err(refusal(SUBSCRIPTION_AGENTIC_REFUSAL, None));
+                }
+                if req.plan_mode && !agentic {
+                    return Err(refusal(
+                        "plan mode on openai-codex-subscription is available only with an agentic run",
+                        None,
+                    ));
+                }
+                if agentic {
+                    // Read-only first, matching what the composer sends. The
+                    // second switch relaxes this once plan approval is wired
+                    // to a subscription run; until then a run that is not in
+                    // plan mode could act, and nothing here has approved that.
+                    if !req.plan_mode && !policy.effects_permitted() {
+                        return Err(refusal(
+                            "agentic runs on openai-codex-subscription are read-only for now; send them with plan_mode",
+                            None,
+                        ));
+                    }
+                    // execution-core refuses a pseudo model for this route, so
+                    // refuse it here, before a durable run is prepared.
+                    if mp_contracts::agentic_subscription::is_pseudo_model(&model) {
+                        return Err(refusal(
+                            "an agentic run on openai-codex-subscription needs an explicit model",
+                            None,
+                        ));
+                    }
+                }
+            }
+        }
     }
 
     // Validate model against allowlist — but skip when the model is unspecified
@@ -387,11 +542,11 @@ mod tests {
     fn subscription_provider_allows_the_tools_feature_but_not_agentic() {
         // `tools` (the FEATURE, distinct from the `req.tools` client-declared
         // specs covered above) enables sse.rs's server-side builtins
-        // (get_weather, code_interpreter, ...) via a tool-decision round that
-        // now runs through Verevon Balance for a subscription turn, never the
-        // broker — see `subscription_tool_round` in sse.rs. `agentic` has no
-        // such substitute (the orchestration-backed plan-mode run path) and
-        // must stay rejected.
+        // (get_weather, code_interpreter, ...) through the inline tool loop,
+        // whose decision rounds are constrained proposals on the subscription
+        // route itself. `agentic` is the governed execution-core loop, which
+        // the strict (unary) `normalize` never admits; the streaming endpoint
+        // admits it only under `AgenticSubscriptionPolicy` (tests below).
         let mut req = make_request("hello", None);
         req.provider = Some("openai-codex-subscription".to_owned());
         req.subscription_connection_id = Some("conn_example".to_owned());
@@ -452,6 +607,245 @@ mod tests {
     fn retrieval_scope_normalizes_known_values() {
         assert_eq!(retrieval_scope(Some("knowledge_only")), RetrievalScope::KnowledgeOnly);
         assert_eq!(retrieval_scope(Some("web_only")), RetrievalScope::WebOnly);
+    }
+
+    /// A subscription request for an agentic run exactly as the composer sends
+    /// it: the agentic feature, plan mode, an explicit model, one connection.
+    fn agentic_subscription_request() -> InvokeRequest {
+        let mut req = make_request("research the Q3 numbers", Some("gpt-5.6-terra"));
+        req.provider = Some("openai-codex-subscription".to_owned());
+        req.subscription_connection_id = Some("conn_example".to_owned());
+        req.features = vec!["agentic".to_owned()];
+        req.plan_mode = true;
+        req
+    }
+
+    fn error_body(
+        result: Result<NormalizedRequest, (StatusCode, Json<serde_json::Value>)>,
+    ) -> serde_json::Value {
+        let (status, Json(body)) = result.expect_err("the request must be refused");
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        body
+    }
+
+    const ON: AgenticSubscriptionPolicy = AgenticSubscriptionPolicy::new(true, false);
+
+    #[test]
+    fn an_agentic_subscription_run_is_admitted_only_with_the_switch_on() {
+        let req = agentic_subscription_request();
+
+        let admitted = normalize_stream(&req, ON).expect("switch on admits the read-only run");
+        assert_eq!(admitted.provider_hint, "openai-codex-subscription");
+        assert_eq!(admitted.subscription_connection_id, "conn_example");
+        assert_eq!(admitted.model, "gpt-5.6-terra");
+
+        // Off, whether spelled out or defaulted: refused with the stable code
+        // and the text a subscription turn has always got.
+        for off in [
+            AgenticSubscriptionPolicy::OFF,
+            AgenticSubscriptionPolicy::default(),
+            AgenticSubscriptionPolicy::new(false, true),
+        ] {
+            let body = error_body(normalize_stream(&req, off));
+            assert_eq!(body["code"], "agentic_subscription_disabled");
+            assert_eq!(body["code"], mp_contracts::agentic_subscription::DISABLED_CODE);
+            assert_eq!(body["error"], SUBSCRIPTION_STRICT_REFUSAL);
+            assert!(
+                body["error"]
+                    .as_str()
+                    .is_some_and(|text| text.starts_with("openai-codex-subscription supports text-only")),
+                "the existing 400 text is kept"
+            );
+        }
+    }
+
+    #[test]
+    fn the_unary_endpoint_stays_strict_whatever_the_switch_says() {
+        // `normalize` takes no policy: the unary invoke has no path to the
+        // agent loop. Same answer as before this exception existed, with no
+        // `code` field.
+        let req = agentic_subscription_request();
+        let body = error_body(normalize(&req));
+        assert_eq!(body, json!({ "error": SUBSCRIPTION_STRICT_REFUSAL }));
+
+        let mut plan_only = agentic_subscription_request();
+        plan_only.features.clear();
+        assert_eq!(
+            error_body(normalize(&plan_only)),
+            json!({ "error": SUBSCRIPTION_STRICT_REFUSAL }),
+            "plan_mode without agentic is refused on the unary path too"
+        );
+        // And a plain subscription turn is unaffected by all of this.
+        let mut plain = agentic_subscription_request();
+        plain.features.clear();
+        plain.plan_mode = false;
+        assert!(normalize(&plain).is_ok());
+        assert!(normalize_stream(&plain, ON).is_ok());
+        assert!(normalize_stream(&plain, AgenticSubscriptionPolicy::OFF).is_ok());
+    }
+
+    #[test]
+    fn an_agentic_subscription_run_must_be_read_only_until_effects_are_allowed() {
+        let mut req = agentic_subscription_request();
+        req.plan_mode = false;
+
+        let body = error_body(normalize_stream(&req, ON));
+        assert!(
+            body["error"]
+                .as_str()
+                .is_some_and(|text| text.contains("read-only") && text.contains("plan_mode")),
+            "{body}"
+        );
+        assert!(body.get("code").is_none(), "no stable code beyond the disabled one");
+
+        // The second switch relaxes exactly this, and only with the first on.
+        assert!(normalize_stream(&req, AgenticSubscriptionPolicy::new(true, true)).is_ok());
+        let body = error_body(normalize_stream(&req, AgenticSubscriptionPolicy::new(false, true)));
+        assert_eq!(body["code"], "agentic_subscription_disabled");
+    }
+
+    #[test]
+    fn plan_mode_alone_is_still_refused_on_a_subscription_turn() {
+        let mut req = agentic_subscription_request();
+        req.features.clear();
+        // Off: the original refusal. On: refused for its own reason.
+        let off = error_body(normalize_stream(&req, AgenticSubscriptionPolicy::OFF));
+        assert_eq!(off["error"], SUBSCRIPTION_STRICT_REFUSAL);
+        assert!(off.get("code").is_none());
+        let on = error_body(normalize_stream(&req, ON));
+        assert!(
+            on["error"].as_str().is_some_and(|text| text.contains("only with an agentic run")),
+            "{on}"
+        );
+        // A "tools"-only feature set does not make plan mode admissible.
+        req.features = vec!["tools".to_owned()];
+        assert!(normalize_stream(&req, ON).is_err());
+    }
+
+    #[test]
+    fn every_other_subscription_restriction_still_holds_for_an_agentic_run() {
+        type Mutation = fn(&mut InvokeRequest);
+        let mutations: [(&str, Mutation); 8] = [
+            ("zdr", |req| req.zdr = true),
+            ("attachments", |req| {
+                req.attachments = vec![crate::vision::InvokeAttachment::default()];
+            }),
+            ("browse_web", |req| req.browse_web = true),
+            ("deep_research", |req| req.deep_research = true),
+            ("generate_image", |req| req.generate_image = true),
+            ("structured schema", |req| {
+                req.structured_output_schema = Some(r#"{"type":"object"}"#.to_owned());
+            }),
+            ("client tools", |req| {
+                req.tools = vec![crate::http_routes::ToolSpec {
+                    name: "web_search".to_owned(),
+                    description: String::new(),
+                    parameters_json: "{}".to_owned(),
+                }];
+            }),
+            ("effects without plan mode", |req| req.plan_mode = false),
+        ];
+        for (label, mutate) in mutations {
+            let mut req = agentic_subscription_request();
+            mutate(&mut req);
+            assert!(
+                normalize_stream(&req, ON).is_err(),
+                "{label} must stay refused with the switch on"
+            );
+            // And with the switch off it is refused too, never turned into a
+            // turn on another route.
+            assert!(
+                normalize_stream(&req, AgenticSubscriptionPolicy::OFF).is_err(),
+                "{label} must stay refused with the switch off"
+            );
+        }
+        // The connection id is still required for the route to mean anything.
+        let mut no_connection = agentic_subscription_request();
+        no_connection.subscription_connection_id = None;
+        assert!(normalize_stream(&no_connection, ON).is_err());
+    }
+
+    #[test]
+    fn an_agentic_subscription_run_needs_an_explicit_model() {
+        for pseudo in ["verevon-balance", "Verevon-Genius", "auto", "default", "verevon"] {
+            let mut req = agentic_subscription_request();
+            req.model = Some(pseudo.to_owned());
+            let body = error_body(normalize_stream(&req, ON));
+            assert!(
+                body["error"].as_str().is_some_and(|text| text.contains("explicit model")),
+                "{pseudo}: {body}"
+            );
+        }
+        // No model at all resolves to DEFAULT_MODEL, which is empty unless an
+        // operator pinned one; empty is refused, a pinned concrete id is not.
+        let mut req = agentic_subscription_request();
+        req.model = None;
+        let outcome = normalize_stream(&req, ON);
+        if load_default_model().is_empty() {
+            assert!(outcome.is_err(), "an empty model is not explicit");
+        }
+        // The plain subscription chat turn does not need one.
+        let mut chat = agentic_subscription_request();
+        chat.features.clear();
+        chat.plan_mode = false;
+        chat.model = Some("verevon-balance".to_owned());
+        assert!(normalize_stream(&chat, ON).is_ok());
+    }
+
+    #[test]
+    fn the_policy_does_not_touch_a_turn_that_is_not_on_the_subscription() {
+        // The same request, with and without the switch, on every other
+        // provider: identical outcome, so enabling the route for one org's
+        // seat changes nothing for anyone else.
+        for provider in [None, Some("azure-openai"), Some("anthropic")] {
+            for features in [vec![], vec!["agentic".to_owned()], vec!["tools".to_owned()]] {
+                for plan_mode in [false, true] {
+                    let mut req = make_request("hello", Some("gpt-4o"));
+                    req.provider = provider.map(str::to_owned);
+                    req.features = features.clone();
+                    req.plan_mode = plan_mode;
+                    let strict = normalize(&req).map(|normalized| normalized.provider_hint);
+                    for policy in [AgenticSubscriptionPolicy::OFF, ON] {
+                        let streamed =
+                            normalize_stream(&req, policy).map(|normalized| normalized.provider_hint);
+                        assert_eq!(
+                            strict.as_ref().ok(),
+                            streamed.as_ref().ok(),
+                            "{provider:?} {features:?} plan_mode={plan_mode}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn subscription_aliases_are_recognised_and_the_canonical_id_wins() {
+        for alias in [
+            "openai-codex-subscription",
+            "OpenAI-Codex-Subscription",
+            " codex-subscription ",
+            "chatgpt-codex",
+        ] {
+            assert!(is_codex_subscription_hint(alias), "{alias:?}");
+        }
+        for other in ["", "azure-openai", "openai", "codex"] {
+            assert!(!is_codex_subscription_hint(other), "{other:?}");
+        }
+        // An alias is admitted like the canonical id; the route the gateway
+        // forwards to execution-core is canonicalised separately (sse.rs).
+        let mut req = agentic_subscription_request();
+        req.provider = Some("chatgpt-codex".to_owned());
+        assert!(normalize_stream(&req, ON).is_ok());
+    }
+
+    #[test]
+    fn the_policy_defaults_to_off_and_effects_need_the_master_switch() {
+        assert!(!AgenticSubscriptionPolicy::default().enabled());
+        assert!(!AgenticSubscriptionPolicy::OFF.effects_permitted());
+        assert!(!AgenticSubscriptionPolicy::new(false, true).effects_permitted());
+        assert!(!ON.effects_permitted());
+        assert!(AgenticSubscriptionPolicy::new(true, true).effects_permitted());
     }
 
     #[test]

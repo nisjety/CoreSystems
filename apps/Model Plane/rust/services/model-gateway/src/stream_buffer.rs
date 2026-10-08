@@ -16,6 +16,8 @@
 //! Methods are async so both backends share one signature.
 
 use std::collections::HashMap;
+use std::future::Future;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -260,9 +262,115 @@ impl InMemoryStreamBuffer {
 // Redis backend
 // ---------------------------------------------------------------------------
 
+/// Longest one Redis command may take before it is given up on.
+///
+/// The producer awaits every frame's append inline, so this is also the longest
+/// a frame can be held up by the buffer. The connection manager's own defaults
+/// have no response or connect timeout at all: with the store hung (paused
+/// container, stalled host) an append never returned, which froze the answer it
+/// belonged to for as long as the store stayed down (37.9 s measured against a
+/// paused Dragonfly 1.37), and with the store gone every append waited out a
+/// full reconnect cycle. A healthy append measured 2 to 20 ms through a
+/// published port, so this is generous.
+const REDIS_OP_TIMEOUT: Duration = Duration::from_millis(250);
+
+/// After a Redis command fails or times out, Redis is left alone for this long.
+/// Without it an outage costs [`REDIS_OP_TIMEOUT`] on every frame of every
+/// stream. With it, an outage costs one bounded attempt per cooldown.
+const REDIS_COOLDOWN: Duration = Duration::from_secs(5);
+
+/// How long the connection manager waits to connect before it gives up, and how
+/// often it retries one reconnect cycle. Short, because [`REDIS_COOLDOWN`] owns
+/// the pacing of retries.
+const REDIS_CONNECT_TIMEOUT: Duration = Duration::from_secs(1);
+
+/// Bounded connection settings (see [`REDIS_OP_TIMEOUT`]).
+fn redis_manager_config() -> redis::aio::ConnectionManagerConfig {
+    redis::aio::ConnectionManagerConfig::new()
+        .set_connection_timeout(REDIS_CONNECT_TIMEOUT)
+        .set_response_timeout(REDIS_OP_TIMEOUT)
+        .set_number_of_retries(1)
+}
+
+/// Keeps a slow or dead Redis from stalling the streams that write to it.
+///
+/// Every command runs under [`REDIS_OP_TIMEOUT`]. The first failure or timeout
+/// opens the breaker for [`REDIS_COOLDOWN`]; while it is open commands are not
+/// sent at all and report "no result". It closes by itself: the first command
+/// after the cooldown is the probe, and a success needs no bookkeeping.
+///
+/// What an open breaker costs: frames written during it are not buffered, so a
+/// resume that needs them (after a crash, or on another replica) falls back to
+/// the run-status path instead of replaying. That is the right trade against an
+/// answer that stops moving.
+#[derive(Clone)]
+struct Breaker {
+    origin: tokio::time::Instant,
+    open_until_ms: Arc<AtomicU64>,
+}
+
+impl Breaker {
+    fn new() -> Self {
+        Self {
+            origin: tokio::time::Instant::now(),
+            open_until_ms: Arc::new(AtomicU64::new(0)),
+        }
+    }
+
+    fn now_ms(&self) -> u64 {
+        u64::try_from(self.origin.elapsed().as_millis()).unwrap_or(u64::MAX)
+    }
+
+    fn is_open(&self) -> bool {
+        self.now_ms() < self.open_until_ms.load(Ordering::Relaxed)
+    }
+
+    fn trip(&self) {
+        let cooldown = u64::try_from(REDIS_COOLDOWN.as_millis()).unwrap_or(u64::MAX);
+        self.open_until_ms
+            .store(self.now_ms().saturating_add(cooldown), Ordering::Relaxed);
+    }
+
+    /// Run one Redis command under the breaker. `op` is only called when the
+    /// breaker is closed, so a skipped command does no work. The log lines
+    /// carry the operation, not the stream key: that holds org and user ids.
+    async fn run<T, Fut>(&self, what: &'static str, op: impl FnOnce() -> Fut) -> Option<T>
+    where
+        Fut: Future<Output = redis::RedisResult<T>>,
+    {
+        if self.is_open() {
+            return None;
+        }
+        match tokio::time::timeout(REDIS_OP_TIMEOUT, op()).await {
+            Ok(Ok(value)) => Some(value),
+            Ok(Err(e)) => {
+                warn!(
+                    error = %e,
+                    op = what,
+                    cooldown_secs = REDIS_COOLDOWN.as_secs(),
+                    "redis stream op failed; not using redis for the cooldown"
+                );
+                self.trip();
+                None
+            }
+            Err(_) => {
+                warn!(
+                    op = what,
+                    timeout_ms = u64::try_from(REDIS_OP_TIMEOUT.as_millis()).unwrap_or(u64::MAX),
+                    cooldown_secs = REDIS_COOLDOWN.as_secs(),
+                    "redis stream op timed out; not using redis for the cooldown"
+                );
+                self.trip();
+                None
+            }
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct RedisStreamBuffer {
     conn: redis::aio::ConnectionManager,
+    breaker: Breaker,
 }
 
 impl RedisStreamBuffer {
@@ -286,21 +394,25 @@ impl RedisStreamBuffer {
         }) else {
             return;
         };
-        let mut conn = self.conn.clone();
         let cap = isize::try_from(MAX_DELTAS_PER_STREAM).unwrap_or(isize::MAX);
-        // RPUSH + LTRIM to cap + EXPIRE in a pipeline; ignore transient errors.
-        let result: redis::RedisResult<()> = redis::pipe()
-            .rpush(&key, entry)
-            .ignore()
-            .ltrim(&key, -cap, -1)
-            .ignore()
-            .expire(&key, STREAM_TTL_SECS)
-            .ignore()
-            .query_async(&mut conn)
+        // RPUSH + LTRIM to cap + EXPIRE in a pipeline. A failure is logged by
+        // the breaker and does not fail the stream.
+        self.breaker
+            .run("append", || {
+                let mut conn = self.conn.clone();
+                async move {
+                    redis::pipe()
+                        .rpush(&key, entry)
+                        .ignore()
+                        .ltrim(&key, -cap, -1)
+                        .ignore()
+                        .expire(&key, STREAM_TTL_SECS)
+                        .ignore()
+                        .query_async::<()>(&mut conn)
+                        .await
+                }
+            })
             .await;
-        if let Err(e) = result {
-            warn!(error = %e, request_id, "redis stream append failed");
-        }
     }
 
     async fn finish(&self, request_id: &str, done: StreamDone) {
@@ -308,11 +420,15 @@ impl RedisStreamBuffer {
         let Ok(value) = serde_json::to_string(&done) else {
             return;
         };
-        let mut conn = self.conn.clone();
-        let result: redis::RedisResult<()> = conn.set_ex(&key, value, STREAM_TTL_SECS as u64).await;
-        if let Err(e) = result {
-            warn!(error = %e, request_id, "redis stream finish failed");
-        }
+        self.breaker
+            .run("finish", || {
+                let mut conn = self.conn.clone();
+                async move {
+                    conn.set_ex::<_, _, ()>(&key, value, STREAM_TTL_SECS as u64)
+                        .await
+                }
+            })
+            .await;
     }
 
     async fn end(&self, request_id: &str, end: StreamEnd) {
@@ -320,15 +436,18 @@ impl RedisStreamBuffer {
         let Ok(value) = serde_json::to_string(&end) else {
             return;
         };
-        let mut conn = self.conn.clone();
-        let result: redis::RedisResult<()> = conn.set_ex(&key, value, STREAM_TTL_SECS as u64).await;
-        if let Err(e) = result {
-            warn!(error = %e, request_id, "redis stream end failed");
-        }
+        self.breaker
+            .run("end", || {
+                let mut conn = self.conn.clone();
+                async move {
+                    conn.set_ex::<_, _, ()>(&key, value, STREAM_TTL_SECS as u64)
+                        .await
+                }
+            })
+            .await;
     }
 
     async fn replay_after(&self, request_id: &str, after_seq: Option<u64>) -> Replay {
-        let mut conn = self.conn.clone();
         let list_key = Self::list_key(request_id);
         let done_key = Self::done_key(request_id);
         let ended_key = Self::ended_key(request_id);
@@ -338,23 +457,40 @@ impl RedisStreamBuffer {
         // the list read below holds the frames before it. Read the other way
         // round, a terminal landing between the two reads ended a resume
         // without its last frames.
-        let raw_terminal: redis::RedisResult<Vec<Option<String>>> =
-            conn.mget(&[&done_key, &ended_key]).await;
-        let raw: redis::RedisResult<Vec<String>> = conn.lrange(&list_key, 0, -1).await;
-
-        let entries = match raw {
-            Ok(v) => v,
-            Err(e) => {
-                warn!(error = %e, request_id, "redis stream replay failed");
-                return Replay {
-                    deltas: Vec::new(),
-                    done: None,
-                    ended: None,
-                    found: false,
-                };
+        //
+        // Both reads run under the breaker. If either fails or Redis is being
+        // left alone, the stream is reported unknown, the same answer an
+        // evicted stream gets, and the caller falls back to the run-status path.
+        let raw_terminal: Option<Vec<Option<String>>> = self
+            .breaker
+            .run("replay_terminal", || {
+                let mut conn = self.conn.clone();
+                let keys = [done_key.clone(), ended_key.clone()];
+                async move { conn.mget(&keys).await }
+            })
+            .await;
+        let raw: Option<Vec<String>> = match raw_terminal {
+            Some(_) => {
+                self.breaker
+                    .run("replay_frames", || {
+                        let mut conn = self.conn.clone();
+                        let key = list_key.clone();
+                        async move { conn.lrange(&key, 0, -1).await }
+                    })
+                    .await
             }
+            None => None,
         };
-        let mut raw_terminal = raw_terminal.unwrap_or_default().into_iter();
+
+        let (Some(raw_terminal), Some(entries)) = (raw_terminal, raw) else {
+            return Replay {
+                deltas: Vec::new(),
+                done: None,
+                ended: None,
+                found: false,
+            };
+        };
+        let mut raw_terminal = raw_terminal.into_iter();
         let raw_done = raw_terminal.next().flatten();
         let raw_ended = raw_terminal.next().flatten();
         // A terminal stream remains a known stream even when the caller's
@@ -409,16 +545,23 @@ impl StreamBufferStore {
             return Self::new();
         };
         match redis::Client::open(url) {
-            Ok(client) => match redis::aio::ConnectionManager::new(client).await {
-                Ok(conn) => {
-                    tracing::info!("stream buffer: Redis backend active");
-                    Self::Redis(Box::new(RedisStreamBuffer { conn }))
+            Ok(client) => {
+                match redis::aio::ConnectionManager::new_with_config(client, redis_manager_config())
+                    .await
+                {
+                    Ok(conn) => {
+                        tracing::info!("stream buffer: Redis backend active");
+                        Self::Redis(Box::new(RedisStreamBuffer {
+                            conn,
+                            breaker: Breaker::new(),
+                        }))
+                    }
+                    Err(e) => {
+                        warn!(error = %e, "REDIS_URL set but connect failed; using in-memory stream buffer");
+                        Self::new()
+                    }
                 }
-                Err(e) => {
-                    warn!(error = %e, "REDIS_URL set but connect failed; using in-memory stream buffer");
-                    Self::new()
-                }
-            },
+            }
             Err(e) => {
                 warn!(error = %e, "invalid REDIS_URL; using in-memory stream buffer");
                 Self::new()
@@ -744,6 +887,223 @@ mod tests {
         assert_ne!(
             scoped_stream_key("orga", "user", "req"),
             scoped_stream_key("org", "auser", "req")
+        );
+    }
+
+    // -- The breaker: a hung or dead Redis must not stall the stream ----------
+
+    /// A command that never answers (a paused or stalled store, which the
+    /// connection manager's default settings wait on forever) is cut off at
+    /// `REDIS_OP_TIMEOUT`; after that Redis is not asked again until the
+    /// cooldown has passed, however many frames follow; the first command after
+    /// the cooldown is the probe, and its success closes the breaker.
+    #[tokio::test(start_paused = true)]
+    async fn a_hung_command_is_cut_off_and_the_breaker_then_stops_asking() {
+        use std::sync::atomic::AtomicUsize;
+        let breaker = Breaker::new();
+        let asked = Arc::new(AtomicUsize::new(0));
+        let before = tokio::time::Instant::now();
+
+        let hung: Option<()> = breaker
+            .run("append", || {
+                asked.fetch_add(1, Ordering::SeqCst);
+                std::future::pending::<redis::RedisResult<()>>()
+            })
+            .await;
+        assert!(hung.is_none());
+        assert_eq!(
+            before.elapsed(),
+            REDIS_OP_TIMEOUT,
+            "a hung command holds one frame up for the timeout and no longer"
+        );
+        assert!(breaker.is_open());
+
+        // The rest of the answer's frames: not sent, not waited for.
+        for _ in 0..1_000 {
+            let skipped: Option<()> = breaker
+                .run("append", || {
+                    asked.fetch_add(1, Ordering::SeqCst);
+                    async { Ok::<(), redis::RedisError>(()) }
+                })
+                .await;
+            assert!(skipped.is_none());
+        }
+        assert_eq!(
+            asked.load(Ordering::SeqCst),
+            1,
+            "an open breaker sends nothing"
+        );
+        assert_eq!(
+            before.elapsed(),
+            REDIS_OP_TIMEOUT,
+            "a thousand skipped frames cost no time at all"
+        );
+
+        // After the cooldown the next command is the probe.
+        tokio::time::sleep(REDIS_COOLDOWN).await;
+        let recovered = breaker
+            .run("append", || {
+                asked.fetch_add(1, Ordering::SeqCst);
+                async { Ok::<u8, redis::RedisError>(7) }
+            })
+            .await;
+        assert_eq!(recovered, Some(7));
+        assert!(
+            !breaker.is_open(),
+            "a successful probe leaves the breaker closed"
+        );
+        assert_eq!(asked.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_error_opens_the_breaker_and_a_failed_probe_opens_it_again() {
+        let breaker = Breaker::new();
+        let refused = || async {
+            Err::<(), _>(redis::RedisError::from((
+                redis::ErrorKind::IoError,
+                "connection refused",
+            )))
+        };
+
+        assert!(breaker.run("append", refused).await.is_none());
+        assert!(breaker.is_open(), "a refused command opens the breaker");
+
+        tokio::time::sleep(REDIS_COOLDOWN / 2).await;
+        assert!(breaker.is_open(), "still cooling down halfway through");
+        tokio::time::sleep(REDIS_COOLDOWN / 2 + Duration::from_millis(1)).await;
+        assert!(!breaker.is_open(), "the cooldown ends by itself");
+
+        assert!(breaker.run("append", refused).await.is_none());
+        assert!(
+            breaker.is_open(),
+            "the probe failed, so it waits out another cooldown"
+        );
+    }
+
+    // -- Measurements against a real store (ignored, need REDIS_URL) ----------
+
+    fn unique_probe_id(tag: &str) -> String {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |elapsed| elapsed.as_nanos());
+        scoped_stream_key("org_probe", "user_probe", &format!("{tag}_{nanos}"))
+    }
+
+    async fn time_appends(store: &StreamBufferStore, key: &str, frames: usize) -> Vec<Duration> {
+        // A `chunk` frame as the gateway buffers it is a couple of hundred bytes.
+        let data = format!("{{\"delta\":\"{}\"}}", "x".repeat(200));
+        let mut took = Vec::with_capacity(frames);
+        for seq in 0..frames {
+            let started = Instant::now();
+            store.append(key, seq as u64, "chunk", &data).await;
+            took.push(started.elapsed());
+        }
+        took.sort();
+        took
+    }
+
+    fn at_percentile(sorted: &[Duration], percent: usize) -> Duration {
+        sorted[(sorted.len() * percent / 100).min(sorted.len() - 1)]
+    }
+
+    /// What the Redis buffer adds to every frame of every answer, next to the
+    /// in-memory buffer it replaces. Run it against the stack's Dragonfly from
+    /// inside the compose network to get the number that matters; through a
+    /// published port the host's port forwarding dominates it. The bound is the
+    /// point at which per-frame appends would need batching (50 ms batches with
+    /// memory as the hot path) instead of staying inline.
+    #[tokio::test]
+    #[ignore = "requires REDIS_URL"]
+    async fn redis_append_latency_probe() {
+        let redis = StreamBufferStore::from_env().await;
+        assert!(
+            matches!(redis, StreamBufferStore::Redis(_)),
+            "REDIS_URL must resolve"
+        );
+        let frames: usize = std::env::var("REDIS_PROBE_FRAMES")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(1_000);
+
+        let in_memory = time_appends(&StreamBufferStore::new(), "probe", frames).await;
+        let over_redis = time_appends(&redis, &unique_probe_id("latency"), frames).await;
+        for (name, took) in [("memory", &in_memory), ("redis", &over_redis)] {
+            println!(
+                "append latency over {frames} frames, {name}: p50={:?} p95={:?} p99={:?} max={:?}",
+                at_percentile(took, 50),
+                at_percentile(took, 95),
+                at_percentile(took, 99),
+                took[took.len() - 1],
+            );
+        }
+        assert!(
+            at_percentile(&over_redis, 95) < Duration::from_millis(25),
+            "per-frame appends are no longer cheap enough to leave inline"
+        );
+    }
+
+    /// The stall proof, against a real store. Pause the Redis container, then
+    /// create the file named by `STALL_PROBE_PAUSED_FLAG`: twenty appends must
+    /// then finish in about one timeout, not hang. Unpause it and create
+    /// `STALL_PROBE_RESUMED_FLAG`: after the cooldown the next frame is buffered
+    /// and replays again.
+    #[tokio::test]
+    #[ignore = "requires REDIS_URL, STALL_PROBE_PAUSED_FLAG and STALL_PROBE_RESUMED_FLAG (paths)"]
+    async fn redis_stalled_server_does_not_stall_appends() {
+        let paused_flag =
+            std::env::var("STALL_PROBE_PAUSED_FLAG").expect("STALL_PROBE_PAUSED_FLAG");
+        let resumed_flag =
+            std::env::var("STALL_PROBE_RESUMED_FLAG").expect("STALL_PROBE_RESUMED_FLAG");
+        let store = StreamBufferStore::from_env().await;
+        assert!(
+            matches!(store, StreamBufferStore::Redis(_)),
+            "REDIS_URL must resolve"
+        );
+        let key = unique_probe_id("stall");
+        time_appends(&store, &key, 5).await;
+        println!("STALL_PROBE_READY: pause the Redis container, then create {paused_flag}");
+
+        let wait_for = |path: String| async move {
+            let deadline = Instant::now() + Duration::from_secs(180);
+            while !std::path::Path::new(&path).exists() {
+                assert!(Instant::now() < deadline, "timed out waiting for {path}");
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        };
+        wait_for(paused_flag).await;
+
+        let started = Instant::now();
+        for seq in 5..25_u64 {
+            store
+                .append(&key, seq, "chunk", "{\"delta\":\"during the stall\"}")
+                .await;
+        }
+        let stalled_for = started.elapsed();
+        println!("twenty appends against a paused store took {stalled_for:?}");
+        assert!(
+            stalled_for < Duration::from_millis(1_500),
+            "appends must not wait on a hung store: took {stalled_for:?}"
+        );
+
+        println!("STALL_PROBE_PAUSED_OK: unpause the Redis container, then create {resumed_flag}");
+        wait_for(resumed_flag).await;
+        tokio::time::sleep(REDIS_COOLDOWN + Duration::from_millis(500)).await;
+        store
+            .append(&key, 25, "chunk", "{\"delta\":\"after\"}")
+            .await;
+        let replay = store.replay_after(&key, Some(24)).await;
+        assert!(
+            replay.found,
+            "the store is back and the buffer is using it again"
+        );
+        assert_eq!(
+            replay
+                .deltas
+                .iter()
+                .map(|frame| frame.seq)
+                .collect::<Vec<_>>(),
+            [25],
+            "the frame sent after recovery replays"
         );
     }
 }

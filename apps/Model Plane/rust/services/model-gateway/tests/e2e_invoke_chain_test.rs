@@ -82,6 +82,12 @@ type CapturedZdrRequests = Arc<Mutex<Vec<(&'static str, bool)>>>;
 /// messages as (role, content).
 type CapturedOffer = (String, Vec<String>, Vec<(String, String)>);
 type CapturedOffers = Arc<Mutex<Vec<CapturedOffer>>>;
+/// Every unary `infer` request as the gateway sent it, tool definitions
+/// (descriptions and parameter schemas) and message bodies included.
+type CapturedRequests = Arc<Mutex<Vec<InferRequest>>>;
+/// The assistant turns Session Core was asked to save (with the turn's
+/// metadata, its artifacts included), in order.
+type CapturedCompletions = Arc<Mutex<Vec<mpv1::CompleteDirectRunWithMessageRequest>>>;
 
 const TEST_AUTH_KID: &str = "model-gateway-zdr-route-test";
 const TEST_AUTH_ISSUER: &str = "https://auth.test/model";
@@ -104,6 +110,8 @@ struct MockOk {
     /// Every unary `infer`: its request id, the tool names it offered and its
     /// messages.
     captured_offers: Option<CapturedOffers>,
+    /// Every unary `infer` request, whole.
+    captured_requests: Option<CapturedRequests>,
     /// Called with the request id of each source review answered through
     /// `approve_source_reviews`, before its approval is returned.
     on_source_review: Option<SourceReviewHook>,
@@ -114,6 +122,10 @@ struct MockOk {
     /// unary answer on the subscription route also names the subscription's
     /// model and provider, as the broker's does.
     refusal: Option<MockRefusal>,
+    /// `infer_stream` holds every chunk after the first back until a permit is
+    /// added, so a test can act while an answer is provably in flight. Add
+    /// plenty to release every stream, current and later, at once.
+    stream_gate: Option<Arc<tokio::sync::Semaphore>>,
 }
 
 /// Where [`MockOk::refusal`] refuses, and with what.
@@ -152,9 +164,11 @@ impl MockOk {
             stream_without_final: false,
             approve_source_reviews: false,
             captured_offers: None,
+            captured_requests: None,
             on_source_review: None,
             captured_cache_control: None,
             refusal: None,
+            stream_gate: None,
         }
     }
 
@@ -168,9 +182,11 @@ impl MockOk {
             stream_without_final: false,
             approve_source_reviews: false,
             captured_offers: None,
+            captured_requests: None,
             on_source_review: None,
             captured_cache_control: None,
             refusal: None,
+            stream_gate: None,
         }
     }
 
@@ -184,9 +200,11 @@ impl MockOk {
             stream_without_final: false,
             approve_source_reviews: false,
             captured_offers: None,
+            captured_requests: None,
             on_source_review: None,
             captured_cache_control: None,
             refusal: None,
+            stream_gate: None,
         }
     }
 
@@ -200,9 +218,11 @@ impl MockOk {
             stream_without_final: false,
             approve_source_reviews: false,
             captured_offers: None,
+            captured_requests: None,
             on_source_review: None,
             captured_cache_control: None,
             refusal: None,
+            stream_gate: None,
         }
     }
 
@@ -254,6 +274,9 @@ impl InferenceCore for MockOk {
             seen.lock().unwrap().push((request.request_id.clone(), cache_control));
         }
         self.capture("infer", &request);
+        if let Some(requests) = &self.captured_requests {
+            requests.lock().unwrap().push(request.clone());
+        }
         if let Some(offers) = &self.captured_offers {
             offers.lock().unwrap().push((
                 request.request_id.clone(),
@@ -410,6 +433,19 @@ impl InferenceCore for MockOk {
         ];
         if self.stream_without_final {
             chunks.truncate(1);
+        }
+        if let Some(gate) = self.stream_gate.clone() {
+            use futures::StreamExt as _;
+            let gated = futures::stream::iter(chunks).enumerate().then(move |(index, chunk)| {
+                let gate = gate.clone();
+                async move {
+                    if index > 0 {
+                        gate.acquire().await.expect("the gate is never closed").forget();
+                    }
+                    chunk
+                }
+            });
+            return Ok(Response::new(Box::pin(gated)));
         }
         Ok(Response::new(Box::pin(futures::stream::iter(chunks))))
     }
@@ -1884,6 +1920,440 @@ async fn spawn_rejecting_execution_mock() -> ExecutionCoreClient<tonic::transpor
         .await
         .unwrap();
     ExecutionCoreClient::new(ch)
+}
+
+/// Every `RunAgentRequest` a mock Execution Core received, in order.
+type CapturedRunAgentRequests = Arc<Mutex<Vec<mpv1::RunAgentRequest>>>;
+
+/// A mock Execution Core that records each `RunAgent` request and then refuses
+/// it (`PermissionDenied`, a CONFIRMED pre-dispatch rejection, so the prepared
+/// run is terminalized and the stream ends). What the test asserts on is what
+/// ARRIVED, which is independent of how the run then ends. Every other method
+/// is unreachable on the agentic chat path.
+struct CapturingExecutionCore {
+    captured: CapturedRunAgentRequests,
+}
+
+#[tonic::async_trait]
+impl ExecutionCore for CapturingExecutionCore {
+    async fn run_agent(
+        &self,
+        request: TReq<mpv1::RunAgentRequest>,
+    ) -> Result<Response<mpv1::RunAgentResponse>, Status> {
+        self.captured.lock().unwrap().push(request.into_inner());
+        Err(Status::permission_denied(
+            "run agent captured, then refused before it began",
+        ))
+    }
+
+    async fn execute_step(
+        &self,
+        _: TReq<mpv1::ExecuteStepRequest>,
+    ) -> Result<Response<mpv1::ExecuteStepResponse>, Status> {
+        Err(Status::unimplemented("execute_step not needed in test"))
+    }
+
+    async fn resume_run(
+        &self,
+        _: TReq<mpv1::ResumeRunRequest>,
+    ) -> Result<Response<mpv1::ResumeRunResponse>, Status> {
+        Err(Status::unimplemented("resume_run not needed in test"))
+    }
+
+    async fn cancel_run(
+        &self,
+        _: TReq<mpv1::CancelRunRequest>,
+    ) -> Result<Response<mpv1::CancelRunResponse>, Status> {
+        Err(Status::unimplemented("cancel_run not needed in test"))
+    }
+
+    async fn pause_run(
+        &self,
+        _: TReq<mpv1::PauseRunRequest>,
+    ) -> Result<Response<mpv1::PauseRunResponse>, Status> {
+        Err(Status::unimplemented("pause_run not needed in test"))
+    }
+
+    async fn execute_scheduled_step(
+        &self,
+        _: TReq<mpv1::ExecuteScheduledStepRequest>,
+    ) -> Result<Response<mpv1::ExecuteScheduledStepResponse>, Status> {
+        Err(Status::unimplemented(
+            "execute_scheduled_step not needed in test",
+        ))
+    }
+}
+
+async fn spawn_capturing_execution_mock(
+    captured: CapturedRunAgentRequests,
+) -> ExecutionCoreClient<tonic::transport::Channel> {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        Server::builder()
+            .add_service(ExecutionCoreServer::new(CapturingExecutionCore { captured }))
+            .serve_with_incoming(TcpListenerStream::new(listener))
+            .await
+            .ok();
+    });
+    let ch = Endpoint::from_shared(format!("http://{addr}"))
+        .unwrap()
+        .connect()
+        .await
+        .unwrap();
+    ExecutionCoreClient::new(ch)
+}
+
+/// A mock Execution Core whose `RunAgent` completes with the given terminal
+/// response, as a real one does once it has finalized the run itself (its own
+/// receipt written, nothing appended to the thread for a typed failure).
+struct RespondingExecutionCore {
+    response: mpv1::RunAgentResponse,
+    /// How long the run takes before it answers. Zero answers at once.
+    delay: Duration,
+}
+
+#[tonic::async_trait]
+impl ExecutionCore for RespondingExecutionCore {
+    async fn run_agent(
+        &self,
+        _: TReq<mpv1::RunAgentRequest>,
+    ) -> Result<Response<mpv1::RunAgentResponse>, Status> {
+        if !self.delay.is_zero() {
+            tokio::time::sleep(self.delay).await;
+        }
+        Ok(Response::new(self.response.clone()))
+    }
+
+    async fn execute_step(
+        &self,
+        _: TReq<mpv1::ExecuteStepRequest>,
+    ) -> Result<Response<mpv1::ExecuteStepResponse>, Status> {
+        Err(Status::unimplemented("execute_step not needed in test"))
+    }
+
+    async fn resume_run(
+        &self,
+        _: TReq<mpv1::ResumeRunRequest>,
+    ) -> Result<Response<mpv1::ResumeRunResponse>, Status> {
+        Err(Status::unimplemented("resume_run not needed in test"))
+    }
+
+    async fn cancel_run(
+        &self,
+        _: TReq<mpv1::CancelRunRequest>,
+    ) -> Result<Response<mpv1::CancelRunResponse>, Status> {
+        Err(Status::unimplemented("cancel_run not needed in test"))
+    }
+
+    async fn pause_run(
+        &self,
+        _: TReq<mpv1::PauseRunRequest>,
+    ) -> Result<Response<mpv1::PauseRunResponse>, Status> {
+        Err(Status::unimplemented("pause_run not needed in test"))
+    }
+
+    async fn execute_scheduled_step(
+        &self,
+        _: TReq<mpv1::ExecuteScheduledStepRequest>,
+    ) -> Result<Response<mpv1::ExecuteScheduledStepResponse>, Status> {
+        Err(Status::unimplemented(
+            "execute_scheduled_step not needed in test",
+        ))
+    }
+}
+
+async fn spawn_responding_execution_mock(
+    response: mpv1::RunAgentResponse,
+) -> ExecutionCoreClient<tonic::transport::Channel> {
+    spawn_delayed_execution_mock(response, Duration::ZERO).await
+}
+
+/// [`spawn_responding_execution_mock`] for a run that takes `delay` to finish.
+async fn spawn_delayed_execution_mock(
+    response: mpv1::RunAgentResponse,
+    delay: Duration,
+) -> ExecutionCoreClient<tonic::transport::Channel> {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        Server::builder()
+            .add_service(ExecutionCoreServer::new(RespondingExecutionCore {
+                response,
+                delay,
+            }))
+            .serve_with_incoming(TcpListenerStream::new(listener))
+            .await
+            .ok();
+    });
+    let ch = Endpoint::from_shared(format!("http://{addr}"))
+        .unwrap()
+        .connect()
+        .await
+        .unwrap();
+    ExecutionCoreClient::new(ch)
+}
+
+type MockRunEventStream =
+    Pin<Box<dyn futures::Stream<Item = Result<mpv1::OrchestrationEvent, Status>> + Send>>;
+
+/// A mock Orchestration Core whose `StreamRunEvents` is the live tail a real
+/// run's observer holds: it sends each scripted event after its delay and then
+/// says nothing more, WITHOUT ending the stream, until the client hangs up.
+/// Every other method is unreachable on the agentic chat path.
+struct ScriptedRunEvents {
+    script: Vec<(Duration, mpv1::OrchestrationEvent)>,
+}
+
+#[tonic::async_trait]
+impl mpv1::orchestration_core_service_server::OrchestrationCoreService for ScriptedRunEvents {
+    async fn list_plans(
+        &self,
+        _: TReq<mpv1::ListPlansRequest>,
+    ) -> Result<Response<mpv1::ListPlansResponse>, Status> {
+        Err(Status::unimplemented("list_plans not needed in test"))
+    }
+    async fn get_plan(
+        &self,
+        _: TReq<mpv1::GetPlanRequest>,
+    ) -> Result<Response<mpv1::GetPlanResponse>, Status> {
+        Err(Status::unimplemented("get_plan not needed in test"))
+    }
+    async fn transition_plan(
+        &self,
+        _: TReq<mpv1::TransitionPlanRequest>,
+    ) -> Result<Response<mpv1::TransitionPlanResponse>, Status> {
+        Err(Status::unimplemented("transition_plan not needed in test"))
+    }
+    async fn propose_plan(
+        &self,
+        _: TReq<mpv1::ProposePlanRequest>,
+    ) -> Result<Response<mpv1::ProposePlanResponse>, Status> {
+        Err(Status::unimplemented("propose_plan not needed in test"))
+    }
+    async fn list_todos(
+        &self,
+        _: TReq<mpv1::ListTodosRequest>,
+    ) -> Result<Response<mpv1::ListTodosResponse>, Status> {
+        Err(Status::unimplemented("list_todos not needed in test"))
+    }
+    async fn get_todo(
+        &self,
+        _: TReq<mpv1::GetTodoRequest>,
+    ) -> Result<Response<mpv1::GetTodoResponse>, Status> {
+        Err(Status::unimplemented("get_todo not needed in test"))
+    }
+    async fn transition_todo(
+        &self,
+        _: TReq<mpv1::TransitionTodoRequest>,
+    ) -> Result<Response<mpv1::TransitionTodoResponse>, Status> {
+        Err(Status::unimplemented("transition_todo not needed in test"))
+    }
+    async fn create_approval(
+        &self,
+        _: TReq<mpv1::CreateApprovalRequest>,
+    ) -> Result<Response<mpv1::CreateApprovalResponse>, Status> {
+        Err(Status::unimplemented("create_approval not needed in test"))
+    }
+    async fn list_approvals(
+        &self,
+        _: TReq<mpv1::ListApprovalsRequest>,
+    ) -> Result<Response<mpv1::ListApprovalsResponse>, Status> {
+        Err(Status::unimplemented("list_approvals not needed in test"))
+    }
+    async fn list_pending_approvals(
+        &self,
+        _: TReq<mpv1::OrgPendingApprovalsRequest>,
+    ) -> Result<Response<mpv1::OrgPendingApprovalsResponse>, Status> {
+        Err(Status::unimplemented(
+            "list_pending_approvals not needed in test",
+        ))
+    }
+    async fn get_approval(
+        &self,
+        _: TReq<mpv1::GetApprovalRequest>,
+    ) -> Result<Response<mpv1::GetApprovalResponse>, Status> {
+        Err(Status::unimplemented("get_approval not needed in test"))
+    }
+    async fn decide_approval(
+        &self,
+        _: TReq<mpv1::DecideApprovalRequest>,
+    ) -> Result<Response<mpv1::DecideApprovalResponse>, Status> {
+        Err(Status::unimplemented("decide_approval not needed in test"))
+    }
+    async fn claim_approval_deliveries(
+        &self,
+        _: TReq<mpv1::ClaimApprovalDeliveriesRequest>,
+    ) -> Result<Response<mpv1::ClaimApprovalDeliveriesResponse>, Status> {
+        Err(Status::unimplemented(
+            "claim_approval_deliveries not needed in test",
+        ))
+    }
+    async fn get_approval_continuation(
+        &self,
+        _: TReq<mpv1::GetApprovalContinuationRequest>,
+    ) -> Result<Response<mpv1::GetApprovalContinuationResponse>, Status> {
+        Err(Status::unimplemented(
+            "get_approval_continuation not needed in test",
+        ))
+    }
+    async fn record_approval_continuation_started(
+        &self,
+        _: TReq<mpv1::RecordApprovalContinuationStartedRequest>,
+    ) -> Result<Response<mpv1::RecordApprovalContinuationStartedResponse>, Status> {
+        Err(Status::unimplemented(
+            "record_approval_continuation_started not needed in test",
+        ))
+    }
+    async fn record_approval_continuation_outcome(
+        &self,
+        _: TReq<mpv1::RecordApprovalContinuationOutcomeRequest>,
+    ) -> Result<Response<mpv1::RecordApprovalContinuationOutcomeResponse>, Status> {
+        Err(Status::unimplemented(
+            "record_approval_continuation_outcome not needed in test",
+        ))
+    }
+    async fn acknowledge_approval_delivery(
+        &self,
+        _: TReq<mpv1::AcknowledgeApprovalDeliveryRequest>,
+    ) -> Result<Response<mpv1::AcknowledgeApprovalDeliveryResponse>, Status> {
+        Err(Status::unimplemented(
+            "acknowledge_approval_delivery not needed in test",
+        ))
+    }
+    async fn get_run_proof_bundle(
+        &self,
+        _: TReq<mpv1::GetRunProofBundleRequest>,
+    ) -> Result<Response<mpv1::GetRunProofBundleResponse>, Status> {
+        Err(Status::unimplemented(
+            "get_run_proof_bundle not needed in test",
+        ))
+    }
+    async fn get_verification_metrics(
+        &self,
+        _: TReq<mpv1::GetVerificationMetricsRequest>,
+    ) -> Result<Response<mpv1::GetVerificationMetricsResponse>, Status> {
+        Err(Status::unimplemented(
+            "get_verification_metrics not needed in test",
+        ))
+    }
+    async fn get_subagent_lineage(
+        &self,
+        _: TReq<mpv1::GetSubagentLineageRequest>,
+    ) -> Result<Response<mpv1::GetSubagentLineageResponse>, Status> {
+        Err(Status::unimplemented(
+            "get_subagent_lineage not needed in test",
+        ))
+    }
+    async fn attach_subagent(
+        &self,
+        _: TReq<mpv1::AttachSubagentRequest>,
+    ) -> Result<Response<mpv1::AttachSubagentResponse>, Status> {
+        Err(Status::unimplemented("attach_subagent not needed in test"))
+    }
+    async fn record_orchestration_event(
+        &self,
+        _: TReq<mpv1::RecordOrchestrationEventRequest>,
+    ) -> Result<Response<mpv1::RecordOrchestrationEventResponse>, Status> {
+        Err(Status::unimplemented(
+            "record_orchestration_event not needed in test",
+        ))
+    }
+
+    type StreamRunEventsStream = MockRunEventStream;
+    async fn stream_run_events(
+        &self,
+        _: TReq<mpv1::StreamRunEventsRequest>,
+    ) -> Result<Response<Self::StreamRunEventsStream>, Status> {
+        let (tx, rx) = tokio::sync::mpsc::channel(8);
+        let script = self.script.clone();
+        tokio::spawn(async move {
+            for (delay, event) in script {
+                tokio::time::sleep(delay).await;
+                if tx.send(Ok(event)).await.is_err() {
+                    return;
+                }
+            }
+            // The tail stays open: the sender outlives the script until the
+            // reader hangs up, as an observer of a live run is not told "no
+            // more" when the run goes quiet.
+            tx.closed().await;
+        });
+        Ok(Response::new(Box::pin(
+            tokio_stream::wrappers::ReceiverStream::new(rx),
+        )))
+    }
+}
+
+async fn spawn_scripted_orchestration_mock(
+    script: Vec<(Duration, mpv1::OrchestrationEvent)>,
+) -> mpv1::orchestration_core_service_client::OrchestrationCoreServiceClient<
+    tonic::transport::Channel,
+> {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        Server::builder()
+            .add_service(
+                mpv1::orchestration_core_service_server::OrchestrationCoreServiceServer::new(
+                    ScriptedRunEvents { script },
+                ),
+            )
+            .serve_with_incoming(TcpListenerStream::new(listener))
+            .await
+            .ok();
+    });
+    let ch = Endpoint::from_shared(format!("http://{addr}"))
+        .unwrap()
+        .connect()
+        .await
+        .unwrap();
+    mpv1::orchestration_core_service_client::OrchestrationCoreServiceClient::new(ch)
+}
+
+/// The orchestration event Execution Core records when a plan moves, which the
+/// gateway shows as a `step_update` whose id is `plan_id`.
+fn plan_step_event(plan_id: &str) -> mpv1::OrchestrationEvent {
+    mpv1::OrchestrationEvent {
+        event_id: format!("evt-{plan_id}"),
+        at: None,
+        event: Some(mpv1::orchestration_event::Event::PlanTransitioned(
+            mpv1::orchestration_event::PlanTransitioned {
+                plan_id: plan_id.to_owned(),
+                run_id: "run-1".to_owned(),
+                from: mpv1::PlanState::Draft as i32,
+                to: mpv1::PlanState::Approved as i32,
+            },
+        )),
+    }
+}
+
+/// Sets (or removes) an environment variable for the length of one test and
+/// puts the previous value back on drop, including when the test panics. Every
+/// test using it is `#[serial]`, so no other test observes the change.
+struct EnvGuard {
+    name: &'static str,
+    previous: Option<String>,
+}
+
+impl EnvGuard {
+    fn set(name: &'static str, value: Option<&str>) -> Self {
+        let previous = std::env::var(name).ok();
+        match value {
+            Some(value) => std::env::set_var(name, value),
+            None => std::env::remove_var(name),
+        }
+        Self { name, previous }
+    }
+}
+
+impl Drop for EnvGuard {
+    fn drop(&mut self) {
+        match &self.previous {
+            Some(value) => std::env::set_var(self.name, value),
+            None => std::env::remove_var(self.name),
+        }
+    }
 }
 
 async fn spawn_mock<S: InferenceCore>(svc: S) -> InferenceCoreClient<tonic::transport::Channel> {
@@ -3718,6 +4188,677 @@ async fn invoke_stream_agentic_reuses_the_prepared_session_run() {
     );
 }
 
+/// The agentic subscription route, switch ON: a Do-mode turn on the user's
+/// ChatGPT subscription reaches Execution Core's `RunAgent` with the route
+/// pinned on the request: the CANONICAL provider id (the composer's alias is
+/// canonicalised), the connection, the explicit model, read-only, no ZDR.
+#[tokio::test]
+#[serial_test::serial]
+async fn invoke_stream_agentic_on_the_subscription_pins_the_route_on_run_agent() {
+    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "1");
+    std::env::remove_var("ALLOWED_MODELS");
+    let _switch = EnvGuard::set("AGENTIC_SUBSCRIPTION_ENABLED", Some("1"));
+    let _effects = EnvGuard::set("AGENTIC_SUBSCRIPTION_ALLOW_EFFECTS", None);
+    let client = spawn_mock(MockOk::default()).await;
+    let (mock_session, session_handles) = MockSessionCore::new();
+    let session_client = spawn_session_mock(mock_session).await;
+    let (mut state, _publisher) = make_state(client, session_client).await;
+    let captured: CapturedRunAgentRequests = Arc::new(Mutex::new(Vec::new()));
+    state.execution_client = spawn_capturing_execution_mock(captured.clone()).await;
+    let (app, _delegated_jwks) = authenticated_user_router(
+        build_router(state, None),
+        "org_placeholder",
+        "user_placeholder",
+    )
+    .await;
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/invoke/stream")
+        .header(AUTHORIZATION, "Bearer dev")
+        .header(CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            r#"{"content":"research the Q3 numbers","model":"gpt-5.6-terra","provider":"chatgpt-codex","subscription_connection_id":"conn_1","features":["agentic"],"plan_mode":true}"#,
+        ))
+        .unwrap();
+
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let body = String::from_utf8(body.to_vec()).unwrap();
+    assert!(body.contains("event: connected"), "{body}");
+    assert!(
+        !body.contains("agentic_subscription_disabled"),
+        "the switch is on: {body}"
+    );
+
+    let captured = captured.lock().unwrap();
+    assert_eq!(captured.len(), 1, "exactly one RunAgent dispatch");
+    let run_agent = &captured[0];
+    assert_eq!(
+        run_agent.provider_hint, "openai-codex-subscription",
+        "the alias the client sent must arrive as the canonical registry id"
+    );
+    assert_eq!(run_agent.subscription_connection_id, "conn_1");
+    assert_eq!(run_agent.model, "gpt-5.6-terra", "the explicit model rides along");
+    assert!(run_agent.plan_mode, "read-only: plan mode is forwarded");
+    assert_eq!(
+        run_agent.autonomy_rung,
+        mpv1::AutonomyRung::ReadOnly as i32,
+        "and the rung agrees with it"
+    );
+    assert!(!run_agent.zdr);
+    assert_eq!(run_agent.goal, "research the Q3 numbers");
+    assert_eq!(
+        managed_start_count(&session_handles),
+        1,
+        "one prepared run was dispatched"
+    );
+}
+
+/// The same request with the switch OFF (the default) never reaches Execution
+/// Core and prepares no run: refused at the edge with the stable code, so a
+/// client can tell "this server has the route off" from a malformed request.
+#[tokio::test]
+#[serial_test::serial]
+async fn invoke_stream_agentic_on_the_subscription_is_refused_when_the_switch_is_off() {
+    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "1");
+    std::env::remove_var("ALLOWED_MODELS");
+    // Unset, and also each spelling that must read as off.
+    for off in [None, Some(""), Some("0"), Some("false"), Some("off"), Some("disabled")] {
+        let _switch = EnvGuard::set("AGENTIC_SUBSCRIPTION_ENABLED", off);
+        let client = spawn_mock(MockOk::default()).await;
+        let (mock_session, session_handles) = MockSessionCore::new();
+        let session_client = spawn_session_mock(mock_session).await;
+        let (mut state, _publisher) = make_state(client, session_client).await;
+        let captured: CapturedRunAgentRequests = Arc::new(Mutex::new(Vec::new()));
+        state.execution_client = spawn_capturing_execution_mock(captured.clone()).await;
+        let (app, _delegated_jwks) = authenticated_user_router(
+            build_router(state, None),
+            "org_placeholder",
+            "user_placeholder",
+        )
+        .await;
+        let req = Request::builder()
+            .method("POST")
+            .uri("/v1/invoke/stream")
+            .header(AUTHORIZATION, "Bearer dev")
+            .header(CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                r#"{"content":"research the Q3 numbers","model":"gpt-5.6-terra","provider":"openai-codex-subscription","subscription_connection_id":"conn_1","features":["agentic"],"plan_mode":true}"#,
+            ))
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK, "{off:?}");
+        let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let body = String::from_utf8(body.to_vec()).unwrap();
+        assert!(body.contains("event: error"), "{off:?}: {body}");
+        assert!(body.contains("agentic_subscription_disabled"), "{off:?}: {body}");
+        assert!(
+            body.contains("openai-codex-subscription supports text-only"),
+            "the existing 400 text is kept: {body}"
+        );
+        assert!(!body.contains("event: connected"), "{off:?}: no run was prepared: {body}");
+        assert!(
+            captured.lock().unwrap().is_empty(),
+            "{off:?}: nothing may reach Execution Core"
+        );
+        assert_eq!(
+            managed_start_count(&session_handles),
+            0,
+            "{off:?}: no durable run may be prepared for a refused request"
+        );
+    }
+}
+
+/// Switching the route on changes nothing for a turn that is not on the
+/// subscription: its `RunAgent` request names no route, exactly as before the
+/// fields existed.
+#[tokio::test]
+#[serial_test::serial]
+async fn invoke_stream_agentic_off_the_subscription_pins_no_route_even_with_the_switch_on() {
+    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "1");
+    std::env::remove_var("ALLOWED_MODELS");
+    let _switch = EnvGuard::set("AGENTIC_SUBSCRIPTION_ENABLED", Some("1"));
+    let client = spawn_mock(MockOk::default()).await;
+    let (mock_session, _session_handles) = MockSessionCore::new();
+    let session_client = spawn_session_mock(mock_session).await;
+    let (mut state, _publisher) = make_state(client, session_client).await;
+    let captured: CapturedRunAgentRequests = Arc::new(Mutex::new(Vec::new()));
+    state.execution_client = spawn_capturing_execution_mock(captured.clone()).await;
+    let (app, _delegated_jwks) = authenticated_user_router(
+        build_router(state, None),
+        "org_placeholder",
+        "user_placeholder",
+    )
+    .await;
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/invoke/stream")
+        .header(AUTHORIZATION, "Bearer dev")
+        .header(CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            r#"{"content":"plan this safely","model":"m","features":["agentic"]}"#,
+        ))
+        .unwrap();
+
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let _ = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+
+    let captured = captured.lock().unwrap();
+    assert_eq!(captured.len(), 1);
+    assert_eq!(captured[0].provider_hint, "");
+    assert_eq!(captured[0].subscription_connection_id, "");
+    assert_eq!(captured[0].model, "m", "the request's model is unchanged");
+}
+
+/// The `RunAgent` request one agentic turn sends, for the budget test below.
+/// `subscription` picks the ChatGPT-subscription body or a plain one.
+async fn run_agent_request_for_turn(subscription: bool) -> mpv1::RunAgentRequest {
+    let client = spawn_mock(MockOk::default()).await;
+    let (mock_session, _session_handles) = MockSessionCore::new();
+    let session_client = spawn_session_mock(mock_session).await;
+    let (mut state, _publisher) = make_state(client, session_client).await;
+    let captured: CapturedRunAgentRequests = Arc::new(Mutex::new(Vec::new()));
+    state.execution_client = spawn_capturing_execution_mock(captured.clone()).await;
+    let (app, _delegated_jwks) = authenticated_user_router(
+        build_router(state, None),
+        "org_placeholder",
+        "user_placeholder",
+    )
+    .await;
+    let body = if subscription {
+        r#"{"content":"research the Q3 numbers","model":"gpt-5.6-terra","provider":"chatgpt-codex","subscription_connection_id":"conn_1","features":["agentic"],"plan_mode":true}"#
+    } else {
+        r#"{"content":"plan this safely","model":"m","features":["agentic"]}"#
+    };
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/invoke/stream")
+        .header(AUTHORIZATION, "Bearer dev")
+        .header(CONTENT_TYPE, "application/json")
+        .body(Body::from(body))
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let _ = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let captured = captured.lock().unwrap();
+    assert_eq!(captured.len(), 1, "exactly one RunAgent dispatch");
+    captured[0].clone()
+}
+
+/// The run budget on `RunAgent` is resolved by the gateway from its own
+/// environment and the route it pinned (`run_budget`), not from the request.
+/// This drives the real dispatch, so it fails if `spawn_run_dispatch` goes back
+/// to a literal: with nothing set the request carries the 4 rounds and
+/// unspecified subagents it always did, the general variables reach every
+/// route, and the subscription pair reaches only a turn on the subscription.
+#[tokio::test]
+#[serial_test::serial]
+async fn invoke_stream_agentic_resolves_the_run_budget_on_the_server_per_route() {
+    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "1");
+    std::env::remove_var("ALLOWED_MODELS");
+    let _switch = EnvGuard::set("AGENTIC_SUBSCRIPTION_ENABLED", Some("1"));
+    let _effects = EnvGuard::set("AGENTIC_SUBSCRIPTION_ALLOW_EFFECTS", None);
+
+    // Nothing set: today's literals, on both routes.
+    {
+        let _rounds = EnvGuard::set("AGENTIC_MAX_ROUNDS", None);
+        let _subagents = EnvGuard::set("AGENTIC_MAX_SUBAGENTS", None);
+        let _sub_rounds = EnvGuard::set("AGENTIC_SUBSCRIPTION_MAX_ROUNDS", None);
+        let _sub_subagents = EnvGuard::set("AGENTIC_SUBSCRIPTION_MAX_SUBAGENTS", None);
+        for subscription in [true, false] {
+            let run_agent = run_agent_request_for_turn(subscription).await;
+            assert_eq!(
+                (run_agent.max_rounds, run_agent.max_subagents),
+                (4, 0),
+                "nothing set must send what the gateway always sent (subscription={subscription})"
+            );
+        }
+    }
+
+    // A general value and a wider one for the subscription only.
+    {
+        let _rounds = EnvGuard::set("AGENTIC_MAX_ROUNDS", Some("6"));
+        let _subagents = EnvGuard::set("AGENTIC_MAX_SUBAGENTS", Some("3"));
+        let _sub_rounds = EnvGuard::set("AGENTIC_SUBSCRIPTION_MAX_ROUNDS", Some("10"));
+        let _sub_subagents = EnvGuard::set("AGENTIC_SUBSCRIPTION_MAX_SUBAGENTS", Some("2"));
+        let on_route = run_agent_request_for_turn(true).await;
+        assert_eq!(
+            (on_route.max_rounds, on_route.max_subagents),
+            (10, 2),
+            "a turn pinned to the subscription takes the subscription pair"
+        );
+        let off_route = run_agent_request_for_turn(false).await;
+        assert_eq!(
+            (off_route.max_rounds, off_route.max_subagents),
+            (6, 3),
+            "a turn that is not on the subscription takes the general pair only"
+        );
+    }
+
+    // A value that is not usable never widens or breaks a run.
+    {
+        let _rounds = EnvGuard::set("AGENTIC_MAX_ROUNDS", Some("0"));
+        let _subagents = EnvGuard::set("AGENTIC_MAX_SUBAGENTS", Some("many"));
+        let _sub_rounds = EnvGuard::set("AGENTIC_SUBSCRIPTION_MAX_ROUNDS", Some(""));
+        let _sub_subagents = EnvGuard::set("AGENTIC_SUBSCRIPTION_MAX_SUBAGENTS", Some("-1"));
+        for subscription in [true, false] {
+            let run_agent = run_agent_request_for_turn(subscription).await;
+            assert_eq!(
+                (run_agent.max_rounds, run_agent.max_subagents),
+                (4, 0),
+                "zero rounds would be read as execution-core's 12: refused (subscription={subscription})"
+            );
+        }
+    }
+}
+
+/// One agentic turn whose Execution Core finishes with `response`. Returns the
+/// SSE body and the session mock's handles. The caller holds any env guard.
+async fn run_agentic_turn_answered_with(
+    request_body: &'static str,
+    response: mpv1::RunAgentResponse,
+) -> (String, MockSessionHandles) {
+    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "1");
+    std::env::remove_var("ALLOWED_MODELS");
+    let client = spawn_mock(MockOk::default()).await;
+    let (mock_session, session_handles) = MockSessionCore::new();
+    let session_client = spawn_session_mock(mock_session).await;
+    let (mut state, _publisher) = make_state(client, session_client).await;
+    state.execution_client = spawn_responding_execution_mock(response).await;
+    let (app, _delegated_jwks) = authenticated_user_router(
+        build_router(state, None),
+        "org_placeholder",
+        "user_placeholder",
+    )
+    .await;
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/invoke/stream")
+        .header(AUTHORIZATION, "Bearer dev")
+        .header(CONTENT_TYPE, "application/json")
+        .body(Body::from(request_body))
+        .unwrap();
+
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    (String::from_utf8(body.to_vec()).unwrap(), session_handles)
+}
+
+const SUBSCRIPTION_AGENTIC_TURN: &str = r#"{"content":"research the Q3 numbers","model":"gpt-5.6-terra","provider":"openai-codex-subscription","subscription_connection_id":"conn_1","features":["agentic"],"plan_mode":true}"#;
+
+/// What Execution Core's `RunAgent` returns for a run pinned to the
+/// subscription whose plan ran out of Codex usage: it has written its own
+/// terminal receipt and appended nothing to the thread.
+fn usage_limit_run_response() -> mpv1::RunAgentResponse {
+    mpv1::RunAgentResponse {
+        status: "failed".to_owned(),
+        final_output: "This run was stopped because your ChatGPT subscription could not complete it."
+            .to_owned(),
+        rounds_executed: 1,
+        failure_code: "subscription_usage_limit".to_owned(),
+        retry_after_ms: Some(52_260_000),
+        resets_at: "2026-09-26T01:21:00Z".to_owned(),
+        ..Default::default()
+    }
+}
+
+/// A Do run on the subscription that hits the plan's usage limit says so: one
+/// `error` frame with the code, `retryable: false` and the reset, worded as the
+/// inline chat loop words the same refusal, and the thread holds the same
+/// explanation on reload. The gateway does not terminalize a second time: the
+/// run is Execution Core's, and it already did.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_subscription_agent_run_that_hits_the_usage_limit_says_so_and_the_thread_agrees() {
+    let _switch = EnvGuard::set("AGENTIC_SUBSCRIPTION_ENABLED", Some("1"));
+    let (body, handles) =
+        run_agentic_turn_answered_with(SUBSCRIPTION_AGENTIC_TURN, usage_limit_run_response()).await;
+
+    let errors = error_frames(&body);
+    assert_eq!(errors.len(), 1, "{body}");
+    let error = &errors[0];
+    assert_eq!(error["code"], "subscription_usage_limit", "{body}");
+    assert_eq!(error["retryable"], false);
+    assert_eq!(error["resets_at"], "2026-09-26T01:21:00Z");
+    assert_eq!(error["retry_after_ms"], 52_260_000);
+    assert_eq!(error["retry_at"], "2026-09-26T01:21:00Z");
+    assert_eq!(
+        error["message"], USAGE_LIMIT_MESSAGE,
+        "the same words the inline loop uses for the same refusal"
+    );
+    assert!(
+        !body.contains("agent_run_failed") && !body.contains("could not complete it."),
+        "neither the generic failure nor Execution Core's English sentence: {body}"
+    );
+
+    // The thread is honest on reload: the user's turn and exactly one
+    // assistant message, the fixed explanation.
+    let conversation = handles.conversation.lock().unwrap();
+    let assistant: Vec<_> = conversation
+        .iter()
+        .filter(|(role, _, _)| role == "assistant")
+        .collect();
+    assert_eq!(assistant.len(), 1, "{conversation:?}");
+    assert_eq!(assistant[0].2, USAGE_LIMIT_MESSAGE);
+    assert_eq!(assistant[0].1, prepared_thread_id(&handles));
+
+    assert!(
+        handles.terminal_outcome_captures.lock().unwrap().is_empty(),
+        "Execution Core settled the run; the gateway must not terminalize it again"
+    );
+    clear_model_auth_env();
+}
+
+/// Each typed code reaches the client as its own frame, with the retryability
+/// the inline loop gives it: a throttle and a transient failure may be retried
+/// as they stand; a spent plan, an expired sign-in, a rejected request and an
+/// overlong prompt may not.
+#[tokio::test]
+#[serial_test::serial]
+async fn every_typed_agent_run_failure_is_a_subscription_frame_with_its_retryability() {
+    let _switch = EnvGuard::set("AGENTIC_SUBSCRIPTION_ENABLED", Some("1"));
+    for (code, retryable) in [
+        ("subscription_usage_limit", false),
+        ("subscription_reauth_required", false),
+        ("subscription_upstream_unavailable", true),
+        ("subscription_bad_request", false),
+        ("rate_limited", true),
+        ("prompt_too_long", false),
+        ("subscription_route_unavailable", true),
+    ] {
+        let (body, handles) = run_agentic_turn_answered_with(
+            SUBSCRIPTION_AGENTIC_TURN,
+            mpv1::RunAgentResponse {
+                status: "failed".to_owned(),
+                failure_code: code.to_owned(),
+                ..Default::default()
+            },
+        )
+        .await;
+
+        let errors = error_frames(&body);
+        assert_eq!(errors.len(), 1, "{code}: {body}");
+        assert_eq!(errors[0]["code"], code, "{body}");
+        assert_eq!(errors[0]["retryable"], retryable, "{code}");
+        assert!(
+            errors[0]["message"]
+                .as_str()
+                .is_some_and(|message| message.ends_with("Ingen annen modell ble brukt.")
+                    || message.contains("Start en ny tråd")),
+            "{code}: {body}"
+        );
+        let conversation = handles.conversation.lock().unwrap();
+        assert_eq!(
+            conversation
+                .iter()
+                .filter(|(role, _, _)| role == "assistant")
+                .count(),
+            1,
+            "{code}: one persisted explanation"
+        );
+    }
+    clear_model_auth_env();
+}
+
+/// A failed run with no typed reason, or one this build does not word, is the
+/// generic `agent_run_failed` it always was, and the gateway persists nothing
+/// of its own for it.
+#[tokio::test]
+#[serial_test::serial]
+async fn an_untyped_or_unknown_agent_run_failure_stays_the_generic_failure() {
+    let _switch = EnvGuard::set("AGENTIC_SUBSCRIPTION_ENABLED", Some("1"));
+    for code in ["", "execution_failed", "a_code_from_a_newer_execution_core"] {
+        let (body, handles) = run_agentic_turn_answered_with(
+            SUBSCRIPTION_AGENTIC_TURN,
+            mpv1::RunAgentResponse {
+                status: "failed".to_owned(),
+                failure_code: code.to_owned(),
+                ..Default::default()
+            },
+        )
+        .await;
+        let errors = error_frames(&body);
+        assert_eq!(errors.len(), 1, "{code:?}: {body}");
+        assert_eq!(errors[0]["code"], "agent_run_failed", "{code:?}");
+        assert!(errors[0].get("resets_at").is_none(), "{code:?}");
+        assert!(
+            !handles
+                .conversation
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|(role, _, _)| role == "assistant"),
+            "{code:?}: the gateway appends no assistant message for an untyped failure"
+        );
+    }
+    clear_model_auth_env();
+}
+
+/// A subscription code on a turn that was not on the subscription is not shown
+/// as a subscription failure, whatever the peer says.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_subscription_code_on_a_turn_off_the_subscription_stays_the_generic_failure() {
+    let _switch = EnvGuard::set("AGENTIC_SUBSCRIPTION_ENABLED", Some("1"));
+    let (body, handles) = run_agentic_turn_answered_with(
+        r#"{"content":"plan this safely","model":"m","features":["agentic"]}"#,
+        usage_limit_run_response(),
+    )
+    .await;
+    let errors = error_frames(&body);
+    assert_eq!(errors.len(), 1, "{body}");
+    assert_eq!(errors[0]["code"], "agent_run_failed", "{body}");
+    assert!(
+        !handles
+            .conversation
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(role, _, _)| role == "assistant"),
+        "no explanation is persisted for a failure the gateway does not type"
+    );
+    clear_model_auth_env();
+}
+
+/// A turn that was followed to the end of its stream, as the client saw it.
+struct FollowedTurn {
+    body: String,
+    /// Wall time from the request to the last byte of the stream.
+    elapsed: Duration,
+    handles: MockSessionHandles,
+    /// The `event_type` of every envelope the gateway published, in order.
+    published: Vec<String>,
+}
+
+fn completed_run_response(answer: &str) -> mpv1::RunAgentResponse {
+    mpv1::RunAgentResponse {
+        status: "completed".to_owned(),
+        final_output: answer.to_owned(),
+        rounds_executed: 2,
+        ..Default::default()
+    }
+}
+
+/// One agentic turn on a mock Execution Core that takes `run_delay` to answer
+/// with `response`, watched through a mock Orchestration Core that sends
+/// `script` and then keeps its connection open, as a real run's observer does.
+///
+/// Real time, on purpose: the delays are second-scale because tokio's paused
+/// clock does not hold across real sockets (an idle poll that finds socket I/O
+/// ready still jumps the clock to the next timer, which would fire the
+/// deadline before the answer is read). The paused-clock timing tests drive
+/// `follow_agentic_run` directly, in `sse.rs`.
+async fn run_followed_agentic_turn(
+    request_body: &'static str,
+    response: mpv1::RunAgentResponse,
+    run_delay: Duration,
+    script: Vec<(Duration, mpv1::OrchestrationEvent)>,
+) -> FollowedTurn {
+    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "1");
+    std::env::remove_var("ALLOWED_MODELS");
+    let client = spawn_mock(MockOk::default()).await;
+    let (mock_session, handles) = MockSessionCore::new();
+    let session_client = spawn_session_mock(mock_session).await;
+    let (mut state, publisher) = make_state(client, session_client).await;
+    state.execution_client = spawn_delayed_execution_mock(response, run_delay).await;
+    state.orchestration_client = spawn_scripted_orchestration_mock(script).await;
+    let (app, _delegated_jwks) = authenticated_user_router(
+        build_router(state, None),
+        "org_placeholder",
+        "user_placeholder",
+    )
+    .await;
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/invoke/stream")
+        .header(AUTHORIZATION, "Bearer dev")
+        .header(CONTENT_TYPE, "application/json")
+        .body(Body::from(request_body))
+        .unwrap();
+
+    let started = std::time::Instant::now();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = tokio::time::timeout(
+        Duration::from_secs(20),
+        to_bytes(resp.into_body(), usize::MAX),
+    )
+    .await
+    .expect("the stream did not end within 20 s")
+    .unwrap();
+    let elapsed = started.elapsed();
+    let event_types = publisher
+        .drain()
+        .into_iter()
+        .map(|(_, envelope)| envelope.event_type)
+        .collect();
+    FollowedTurn {
+        body: String::from_utf8(body.to_vec()).unwrap(),
+        elapsed,
+        handles,
+        published: event_types,
+    }
+}
+
+/// The defect this task closes: the orchestration tail is a live stream that
+/// does not end when the run does, and the gateway read it until 25 s of
+/// silence AFTER the run had finished, so every Do answer arrived about 25 s
+/// late. A run that finishes ends the stream then (give or take the short
+/// drain), with the step updates the run produced shown in order and ahead of
+/// the answer's first chunk.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_finished_agent_run_ends_its_stream_at_once_with_its_step_updates_first() {
+    let _deadline = EnvGuard::set("AGENTIC_RUN_DEADLINE_SECS", None);
+    let turn = run_followed_agentic_turn(
+        r#"{"content":"research the Q3 numbers","model":"m","features":["agentic","steps"]}"#,
+        completed_run_response("Svaret er klart."),
+        Duration::from_millis(1500),
+        vec![
+            (Duration::from_millis(300), plan_step_event("plan-1")),
+            (Duration::from_millis(300), plan_step_event("plan-2")),
+        ],
+    )
+    .await;
+
+    assert!(
+        turn.elapsed >= Duration::from_millis(1500),
+        "the answer cannot arrive before the run finished: {:?}",
+        turn.elapsed
+    );
+    assert!(
+        turn.elapsed < Duration::from_secs(8),
+        "a finished run waited out the event tail: {:?}",
+        turn.elapsed
+    );
+
+    let frames = sse_frames(&turn.body);
+    let names: Vec<&str> = frames.iter().map(|(_, name, _)| name.as_str()).collect();
+    let steps: Vec<&str> = frames
+        .iter()
+        .filter(|(_, name, _)| name == "step_update")
+        .filter_map(|(_, _, data)| data["id"].as_str())
+        .collect();
+    assert_eq!(steps, ["plan-1", "plan-2"], "in the order they happened: {names:?}");
+    let last_step = names.iter().rposition(|name| *name == "step_update");
+    let first_chunk = names.iter().position(|name| *name == "chunk");
+    assert!(
+        last_step.zip(first_chunk).is_some_and(|(step, chunk)| step < chunk),
+        "every step update comes before the answer: {names:?}"
+    );
+    assert_eq!(chat_text(&frames), "Svaret er klart.");
+    assert_eq!(names.last(), Some(&"done"), "{names:?}");
+    assert!(
+        error_frames(&turn.body).is_empty(),
+        "a finished run is not an error: {}",
+        turn.body
+    );
+    clear_model_auth_env();
+}
+
+/// A run that outlives the gateway's deadline is left alone, exactly as before:
+/// the stream ends with the retryable `agent_dispatch_unavailable`, the run is
+/// NOT terminalized (it is still running in Execution Core and will land its
+/// answer in the thread), and the frame now names the run so the client can
+/// find it again.
+#[tokio::test]
+#[serial_test::serial]
+async fn an_agent_run_past_the_deadline_is_left_alone_and_named_in_the_error() {
+    let _deadline = EnvGuard::set("AGENTIC_RUN_DEADLINE_SECS", Some("1"));
+    let turn = run_followed_agentic_turn(
+        r#"{"content":"research the Q3 numbers","model":"m","features":["agentic","steps"]}"#,
+        completed_run_response("Kommer aldri frem i tide."),
+        Duration::from_secs(90),
+        Vec::new(),
+    )
+    .await;
+
+    assert!(
+        turn.elapsed >= Duration::from_secs(1),
+        "the deadline is one second: {:?}",
+        turn.elapsed
+    );
+    assert!(
+        turn.elapsed < Duration::from_secs(8),
+        "the stream outlived its deadline: {:?}",
+        turn.elapsed
+    );
+    let errors = error_frames(&turn.body);
+    assert_eq!(errors.len(), 1, "{}", turn.body);
+    assert_eq!(errors[0]["code"], "agent_dispatch_unavailable", "{}", turn.body);
+    assert_eq!(errors[0]["retryable"], true);
+    assert_eq!(
+        errors[0]["run_id"],
+        format!("managed-run-for-{}", prepared_thread_id(&turn.handles)),
+        "the frame names the run that is still going: {}",
+        turn.body
+    );
+    assert!(!turn.body.contains("event: done"), "{}", turn.body);
+    assert!(
+        !turn.body.contains("Kommer aldri"),
+        "no answer was produced inside the deadline: {}",
+        turn.body
+    );
+    assert!(
+        turn.handles
+            .terminal_outcome_captures
+            .lock()
+            .unwrap()
+            .is_empty(),
+        "an unfinished run must be left running, not terminalized"
+    );
+    assert!(
+        turn.published.iter().any(|kind| kind == "RUN_DISPATCH_DEGRADED"),
+        "the metrics stream still hears the dispatch is uncertain: {:?}",
+        turn.published
+    );
+    clear_model_auth_env();
+}
+
 /// chat-wave2 scope spec: the per-turn retrieval-source filter has no
 /// equivalent in execution-core's own agentic tool set — `agentic_run_stream`
 /// is a separate pipeline that is never given `retrieval_scope` and offers
@@ -5539,6 +6680,19 @@ struct NoteThreadTurn<'a> {
 
 /// [`run_conversation_only_turn`] for any [`NoteThreadTurn`].
 async fn run_note_thread_turn(turn: NoteThreadTurn<'_>) -> ConversationTurn {
+    run_note_thread_turn_capturing(turn, None, None, false).await
+}
+
+/// [`run_note_thread_turn`], additionally keeping every unary `infer` request
+/// whole in `requests` and every assistant turn Session Core was asked to
+/// save in `completions`. A turn must end in `done`, unless `may_end_in_error`
+/// (a revision the gateway refuses ends in an `error` event instead).
+async fn run_note_thread_turn_capturing(
+    turn: NoteThreadTurn<'_>,
+    requests: Option<CapturedRequests>,
+    completions: Option<CapturedCompletions>,
+    may_end_in_error: bool,
+) -> ConversationTurn {
     let NoteThreadTurn { levers, author_guidance, review_proposal_rule, content, artifacts, rounds, queued_during_first_review, follow_ups } = turn;
     std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "1");
     std::env::remove_var("ALLOWED_MODELS");
@@ -5569,6 +6723,7 @@ async fn run_note_thread_turn(turn: NoteThreadTurn<'_>) -> ConversationTurn {
         planned_rounds: Some(Arc::new(Mutex::new(rounds.into()))),
         approve_source_reviews: true,
         captured_offers: Some(offers.clone()),
+        captured_requests: requests,
         on_source_review,
         ..MockOk::default()
     })
@@ -5651,7 +6806,7 @@ async fn run_note_thread_turn(turn: NoteThreadTurn<'_>) -> ConversationTurn {
         assert_eq!(response.status(), StatusCode::OK);
         let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         body = String::from_utf8(bytes.to_vec()).unwrap();
-        assert!(body.contains("event: done"), "{body}");
+        assert!(body.contains("event: done") || (may_end_in_error && body.contains("event: error")), "{body}");
     }
     let reserved = session_handles
         .reserve_tool_action_captures
@@ -5664,6 +6819,15 @@ async fn run_note_thread_turn(turn: NoteThreadTurn<'_>) -> ConversationTurn {
         .unwrap()
         .clone();
     let offers = offers.lock().unwrap().clone();
+    if let Some(completions) = completions {
+        *completions.lock().unwrap() = session_handles
+            .direct_completion_captures
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(_, request)| request.clone())
+            .collect();
+    }
     if queued_during_first_review.is_some() {
         let enqueued = enqueued.lock().unwrap().clone();
         assert!(
@@ -6679,6 +7843,449 @@ async fn revise_one_dated_post(levers: LatencyLevers) -> (Vec<(Option<u64>, Stri
         .map(|(_, _, messages)| serde_json::from_str(&messages[1].1).expect("a review payload"))
         .collect();
     (frames, payloads)
+}
+
+/// One recorded pair of turns for the section-only tests: the campaign
+/// accepted in the first turn, then a follow-up instruction in the second
+/// whose model output is `revision_content`.
+struct RevisionRun {
+    /// The second turn's SSE frames.
+    frames: Vec<(Option<u64>, String, serde_json::Value)>,
+    /// Every unary request of both turns, whole.
+    requests: Vec<InferRequest>,
+    /// Every unary request of both turns: id, offered tool names, messages.
+    offers: Vec<CapturedOffer>,
+    /// The assistant turns Session Core was asked to save, first turn first.
+    completions: Vec<mpv1::CompleteDirectRunWithMessageRequest>,
+}
+
+/// The instruction the section-only tests revise one post with.
+const REVISE_23: &str = "Gjør innlegget for 23. oktober mer konkret.";
+
+async fn revise_with(levers: LatencyLevers, follow_up: &str, revision_content: &str) -> RevisionRun {
+    revise_document(levers, &dated_campaign(), follow_up, revision_content, false).await
+}
+
+/// [`revise_with`] for a campaign of the caller's choosing.
+async fn revise_document(levers: LatencyLevers, campaign: &str, follow_up: &str, revision_content: &str, may_end_in_error: bool) -> RevisionRun {
+    let requests: CapturedRequests = Arc::new(Mutex::new(Vec::new()));
+    let completions: CapturedCompletions = Arc::new(Mutex::new(Vec::new()));
+    let (frames, _, _, offers) = run_note_thread_turn_capturing(
+        NoteThreadTurn {
+            levers,
+            author_guidance: AuthorGuidance::default(),
+            review_proposal_rule: ReviewProposalRule::default(),
+            content: CAMPAIGN_PROMPT,
+            artifacts: &[],
+            rounds: vec![
+                write_round("call-campaign", "create_artifact", "kampanje", &campaign),
+                write_round("call-revision", "update_artifact", "kampanje", revision_content),
+            ],
+            queued_during_first_review: None,
+            follow_ups: &[follow_up],
+        },
+        Some(requests.clone()),
+        Some(completions.clone()),
+        may_end_in_error,
+    )
+    .await;
+    let requests = requests.lock().unwrap().clone();
+    let completions = completions.lock().unwrap().clone();
+    RevisionRun { frames, requests, offers, completions }
+}
+
+/// Everything a unary request tells the model, without the ids minted per
+/// run: for comparing what the gateway sends byte for byte.
+fn request_body(request: &InferRequest) -> serde_json::Value {
+    serde_json::json!({
+        "model": request.model,
+        "temperature": request.temperature,
+        "max_tokens": request.max_tokens,
+        "thinking_budget_tokens": request.thinking_budget_tokens,
+        "tool_choice": request.tool_choice,
+        "structured_output_schema": request.structured_output_schema,
+        "messages": request.messages.iter()
+            .map(|message| serde_json::json!({ "role": message.role, "content": message.content, "name": message.name }))
+            .collect::<Vec<_>>(),
+        "tools": request.tools.iter()
+            .map(|tool| serde_json::json!({ "name": tool.name, "description": tool.description, "parameters": tool.parameters_json }))
+            .collect::<Vec<_>>(),
+    })
+}
+
+/// A prost struct as JSON, to read the metadata Session Core was handed.
+fn struct_json(value: &prost_types::Struct) -> serde_json::Value {
+    fn convert(value: &prost_types::Value) -> serde_json::Value {
+        use prost_types::value::Kind;
+        match value.kind.as_ref() {
+            Some(Kind::StringValue(text)) => serde_json::Value::String(text.clone()),
+            Some(Kind::NumberValue(number)) => serde_json::json!(number),
+            Some(Kind::BoolValue(flag)) => serde_json::Value::Bool(*flag),
+            Some(Kind::ListValue(list)) => serde_json::Value::Array(list.values.iter().map(convert).collect()),
+            Some(Kind::StructValue(inner)) => struct_json(inner),
+            Some(Kind::NullValue(_)) | None => serde_json::Value::Null,
+        }
+    }
+    serde_json::Value::Object(value.fields.iter().map(|(key, value)| (key.clone(), convert(value))).collect())
+}
+
+/// The 23. oktober post of `campaign`: its heading line through the blank
+/// line before the next heading.
+fn post_23(campaign: &str) -> String {
+    let start = campaign.find("## LinkedIn 23. oktober").expect("the dated post");
+    let end = campaign[start..].find("\n## E-post").map(|at| start + at + 1).expect("the e-mail after it");
+    campaign[start..end].to_owned()
+}
+
+/// [`dated_campaign`] after the model made the 23. oktober post more concrete.
+fn revised_dated_campaign() -> String {
+    dated_campaign().replace("Snakk med oss om arbeidsplassen deres.", "Snakk med oss om arbeidsplassen og bordene deres.")
+}
+
+fn last_frame<'a>(frames: &'a [(Option<u64>, String, serde_json::Value)], event: &str) -> &'a serde_json::Value {
+    &frames.iter().rev().find(|(_, name, _)| name == event).unwrap_or_else(|| panic!("no {event} frame")).2
+}
+
+/// Stage 1 of the patch-revision plan, end to end with the scripted mock: a
+/// recognised dated-post revision may be answered with that post's section
+/// alone. Whatever shape the model's answer takes, the SPLICED document — never
+/// the fragment — is what is reviewed, stored, emitted, persisted and
+/// receipted, and it is the same document a whole-document answer gives.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_section_alone_is_spliced_into_the_accepted_document_and_that_is_what_is_stored() {
+    let campaign = dated_campaign();
+    let expected = revised_dated_campaign();
+    let section = post_23(&expected);
+    assert!(section.len() < expected.len() / 3, "the fragment is a fraction of the document: {} of {}", section.len(), expected.len());
+    let on = LatencyLevers { dated_post_section_only: true, ..LatencyLevers::ALL_ON };
+
+    // The whole-document answer, for the reviews to be compared with.
+    let whole = revise_with(on, REVISE_23, &expected).await;
+    let whole_reviews: Vec<serde_json::Value> = reviews_of(&whole.offers, "bordene deres")
+        .into_iter()
+        .map(|(_, _, messages)| serde_json::from_str(&messages[1].1).expect("a review payload"))
+        .collect();
+    assert_eq!(whole_reviews.len(), 1);
+    assert_eq!(last_frame(&whole.frames, "turn_timing")["draft"]["fragment_spliced"], false);
+    let whole_checks = last_frame(&whole.frames, "result_receipt")["receipt"]["artifactChecks"][0]["sourceReview"]["documentChecks"].clone();
+    assert!(whole_checks.as_array().is_some_and(|checks| !checks.is_empty()), "{whole_checks}");
+
+    let shapes: [(&str, String); 5] = [
+        ("the section, blank line after it", section.clone()),
+        ("the section, no trailing whitespace", section.trim_end().to_owned()),
+        ("the section without its heading line", section[section.find('\n').unwrap() + 1..].to_owned()),
+        ("the section after a line of talk", format!("Her er innlegget:\n\n{section}")),
+        (
+            "the section beside its neighbour",
+            format!("{}{}", &expected[expected.find("## LinkedIn 21. oktober").unwrap()..expected.find("## LinkedIn 23. oktober").unwrap()], section),
+        ),
+    ];
+    for (shape, fragment) in shapes {
+        let run = revise_with(on, REVISE_23, &fragment).await;
+        // Emitted: one artifact event, version 2, the spliced document.
+        let artifact = last_frame(&run.frames, "artifact");
+        assert_eq!(artifact["version"], 2, "{shape}");
+        assert_eq!(artifact["content"].as_str(), Some(expected.as_str()), "{shape}: the spliced document is emitted");
+        assert_ne!(artifact["content"].as_str(), Some(fragment.as_str()), "{shape}");
+        assert_eq!(run.frames.iter().filter(|(_, event, _)| event == "artifact").count(), 1, "{shape}");
+        // Receipted: for the spliced document's hash, preservation applied, a source review.
+        let receipt = &last_frame(&run.frames, "result_receipt")["receipt"];
+        let check = &receipt["artifactChecks"][0];
+        assert_eq!(check["contentHash"], model_gateway::result_validation::content_hash(&expected), "{shape}: {receipt}");
+        assert_eq!(check["preservationApplied"], true, "{shape}");
+        assert_eq!(check["sourceReview"]["documentChecks"], whole_checks, "{shape}: the local checks ran on the spliced document, as on a whole one");
+        // Reviewed: the same document, the same segments, the same assignment as the whole-document answer.
+        let reviews: Vec<serde_json::Value> = reviews_of(&run.offers, "bordene deres")
+            .into_iter()
+            .map(|(_, _, messages)| serde_json::from_str(&messages[1].1).expect("a review payload"))
+            .collect();
+        assert_eq!(reviews, whole_reviews, "{shape}: the reviewer is sent what a whole-document answer sends");
+        // Persisted: the saved turn carries the spliced document.
+        let saved = run.completions.last().expect("the revision turn is saved");
+        let metadata = struct_json(saved.metadata.as_ref().expect("turn evidence"));
+        let artifacts = metadata["artifacts"].as_array().expect("the turn's artifacts");
+        assert_eq!(artifacts.len(), 1, "{shape}");
+        assert_eq!(artifacts[0]["content"].as_str(), Some(expected.as_str()), "{shape}: the spliced document is persisted");
+        assert_eq!(artifacts[0]["version"].as_f64(), Some(2.0), "{shape}");
+        // Timed: what the model emitted, what was stored, and that a section was spliced.
+        let draft = &last_frame(&run.frames, "turn_timing")["draft"];
+        assert_eq!(draft["model_writes"], 1, "{shape}");
+        assert_eq!(draft["model_write_chars"].as_u64(), Some(fragment.chars().count() as u64), "{shape}: measured before the splice");
+        assert_eq!(draft["stored_chars"].as_u64(), Some(expected.chars().count() as u64), "{shape}: the stored document, not the fragment");
+        assert_eq!(draft["fragment_spliced"], true, "{shape}");
+    }
+    assert_ne!(campaign, expected);
+}
+
+/// A whole document under the lever is exactly today's path: the same
+/// document, the same reviews, and the timing record says no section was
+/// spliced and how many characters the model sent.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_whole_document_answer_under_the_section_only_lever_works_as_before() {
+    let expected = revised_dated_campaign();
+    let on = LatencyLevers { dated_post_section_only: true, ..LatencyLevers::ALL_ON };
+    let run = revise_with(on, REVISE_23, &expected).await;
+    assert_eq!(last_frame(&run.frames, "artifact")["content"].as_str(), Some(expected.as_str()));
+    let draft = &last_frame(&run.frames, "turn_timing")["draft"];
+    assert_eq!(draft["fragment_spliced"], false);
+    assert_eq!(draft["model_write_chars"].as_u64(), Some(expected.chars().count() as u64));
+    assert_eq!(draft["stored_chars"], draft["model_write_chars"], "nothing was cut or added");
+    // A whole document that also changed a post it was not asked to touch is
+    // still reduced to the asked-for post, as always.
+    let careless = expected.replace("Dere som driver et lite verksted", "Dere som driver et stort verksted");
+    let run = revise_with(on, REVISE_23, &careless).await;
+    assert_eq!(last_frame(&run.frames, "artifact")["content"].as_str(), Some(expected.as_str()));
+}
+
+/// With the lever off nothing asks for a section, but one that arrives with
+/// its heading line is spliced as it always was (`Preservation::apply` takes
+/// the section out of whatever it is given), and the timing record counts it:
+/// the off arm of an adoption comparison has a baseline to read.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_section_sent_unasked_is_spliced_and_counted_with_the_lever_off() {
+    let expected = revised_dated_campaign();
+    let section = post_23(&expected);
+    let run = revise_with(LatencyLevers::ALL_ON, REVISE_23, &section).await;
+    assert_eq!(last_frame(&run.frames, "artifact")["content"].as_str(), Some(expected.as_str()));
+    let draft = &last_frame(&run.frames, "turn_timing")["draft"];
+    assert_eq!(draft["fragment_spliced"], true);
+    assert_eq!(draft["model_write_chars"].as_u64(), Some(section.chars().count() as u64));
+    assert_eq!(draft["stored_chars"].as_u64(), Some(expected.chars().count() as u64));
+    assert!(
+        run.requests.iter().flat_map(|request| &request.messages).all(|message| !message.content.contains("For this revision only, send just the post")),
+        "and nothing asked for it"
+    );
+}
+
+/// The lever is opt-in and changes nothing while off. Off, the offered
+/// `update_artifact` is the standing one, no message carries the section-only
+/// notice, and the turn's requests are the ones the same lever-off turn always
+/// sent. On, the ONLY differences are that tool's description and schema and
+/// one trailing system message on the calls that offer it — and only on a
+/// turn that revises one dated post.
+#[tokio::test]
+#[serial_test::serial]
+async fn the_section_only_lever_changes_only_the_update_tool_and_one_message_and_only_when_on() {
+    const NOTICE: &str = "For this revision only, send just the post you were asked to revise.";
+    let expected = revised_dated_campaign();
+    let standing = model_gateway::tool_loop::builtin_tool_defs()
+        .into_iter()
+        .find(|tool| tool.name == "update_artifact")
+        .expect("the standing tool");
+    assert!(standing.description.contains("Always send the COMPLETE new content"));
+    let on = LatencyLevers { dated_post_section_only: true, ..LatencyLevers::ALL_ON };
+
+    // Off: the standing tool, no notice, anywhere.
+    let off = revise_with(LatencyLevers::ALL_ON, REVISE_23, &expected).await;
+    let updates: Vec<_> = off.requests.iter().flat_map(|request| &request.tools).filter(|tool| tool.name == "update_artifact").collect();
+    assert!(!updates.is_empty());
+    for tool in updates {
+        assert_eq!((&tool.description, &tool.parameters_json), (&standing.description, &standing.parameters_json));
+    }
+    assert!(off.requests.iter().flat_map(|request| &request.messages).all(|message| !message.content.contains(NOTICE)));
+
+    // On, on a dated-post revision: only the update tool and one message differ.
+    let with = revise_with(on, REVISE_23, &expected).await;
+    assert_eq!(off.requests.len(), with.requests.len(), "the same calls");
+    let mut reworded = 0;
+    for (before, after) in off.requests.iter().zip(&with.requests) {
+        let (before, mut after) = (request_body(before), request_body(after));
+        if before == after {
+            continue;
+        }
+        reworded += 1;
+        let tools = after["tools"].as_array_mut().unwrap();
+        let update = tools.iter_mut().find(|tool| tool["name"] == "update_artifact").expect("only a call that offers update_artifact differs");
+        assert!(update["description"].as_str().unwrap().contains("ONLY that post's section"), "{update}");
+        assert!(!update["description"].as_str().unwrap().contains("COMPLETE"), "{update}");
+        assert_ne!(update["parameters"], serde_json::json!(standing.parameters_json));
+        let restored = before["tools"].as_array().unwrap().iter().find(|tool| tool["name"] == "update_artifact").unwrap().clone();
+        *update = restored;
+        let messages = after["messages"].as_array_mut().unwrap();
+        let notice = messages.pop().expect("the notice is the last message");
+        assert_eq!(notice["role"], "system");
+        assert!(notice["content"].as_str().unwrap().starts_with(NOTICE), "{notice}");
+        assert!(notice["content"].as_str().unwrap().contains("ONLY that post's section"), "{notice}");
+        assert_eq!(before, after, "nothing else differs");
+    }
+    assert!(reworded >= 1, "the revision turn's author call is reworded");
+
+    // On, on turns that are not a dated-post revision: not one byte differs.
+    for other in ["Gjør hele dokumentet kortere.", "Gjør innlegget for 23. oktober mer konkret og oppdater e-posten."] {
+        let off = revise_with(LatencyLevers::ALL_ON, other, &expected).await;
+        let with = revise_with(on, other, &expected).await;
+        assert_eq!(
+            off.requests.iter().map(request_body).collect::<Vec<_>>(),
+            with.requests.iter().map(request_body).collect::<Vec<_>>(),
+            "{other}: the lever does not touch a turn it does not apply to"
+        );
+        assert_eq!(last_frame(&off.frames, "artifact")["content"], last_frame(&with.frames, "artifact")["content"], "{other}");
+    }
+}
+
+/// [`dated_campaign`] with a source note under the 23. oktober post, the layout
+/// Q16h saw in 3 of 20 takes: a `### Kilder` sub-section that shows which
+/// product information the post builds on.
+fn dated_campaign_with_post_note() -> String {
+    let with_note = dated_campaign().replace(
+        "passer rommet deres.\n\n## E-post",
+        "passer rommet deres.\n\n### Kilder\n\n- Produktinformasjon brukt: arm, lysnivåer og farger.\n\n## E-post",
+    );
+    assert!(with_note.contains("- Produktinformasjon brukt: arm, lysnivåer og farger."), "the fixture holds the note");
+    with_note
+}
+
+/// Q16h take 1: the splice replaces the post's WHOLE section, so a post sent
+/// back without its `### Kilder` note deleted the note, in 3 of 3 takes that
+/// had one. The author is now told which sub-headings the post has, and a
+/// section that comes back with them is spliced as before.
+#[tokio::test]
+#[serial_test::serial]
+async fn the_section_only_turn_names_the_posts_note_and_a_section_that_keeps_it_is_spliced() {
+    const NOTICE: &str = "For this revision only, send just the post you were asked to revise.";
+    let campaign = dated_campaign_with_post_note();
+    let expected = campaign.replace("Snakk med oss om arbeidsplassen deres.", "Snakk med oss om arbeidsplassen og bordene deres.");
+    let section = post_23(&expected);
+    assert!(section.contains("### Kilder"), "the section carries its note");
+    let on = LatencyLevers { dated_post_section_only: true, ..LatencyLevers::ALL_ON };
+    let run = revise_document(on, &campaign, REVISE_23, &section, false).await;
+
+    // Told: the section-only notice, then one message naming the sub-heading, last on the author call.
+    let told: Vec<_> = run
+        .requests
+        .iter()
+        .filter(|request| request.messages.last().is_some_and(|message| message.content.contains("sub-heading lines")))
+        .collect();
+    assert!(!told.is_empty(), "the author call names the post's sub-heading");
+    for request in told {
+        let messages = &request.messages;
+        let (notice, naming) = (&messages[messages.len() - 2], &messages[messages.len() - 1]);
+        assert!(notice.content.starts_with(NOTICE), "{}", notice.content);
+        assert_eq!(naming.role, "system");
+        assert!(naming.content.contains("`### Kilder`"), "{}", naming.content);
+        assert!(naming.content.contains("Keep each of them"), "{}", naming.content);
+    }
+
+    // Spliced: the whole document, note included, is what is emitted and timed as a fragment.
+    let artifact = last_frame(&run.frames, "artifact");
+    assert_eq!(artifact["content"].as_str(), Some(expected.as_str()));
+    assert!(artifact["content"].as_str().unwrap().contains("- Produktinformasjon brukt: arm, lysnivåer og farger."));
+    let draft = &last_frame(&run.frames, "turn_timing")["draft"];
+    assert_eq!(draft["fragment_spliced"], true);
+    assert!(run.frames.iter().all(|(_, event, _)| event != "error"), "no error frame");
+
+    // A post with no note is told nothing about sub-headings: the turn is what it was.
+    let bare = revise_with(on, REVISE_23, &revised_dated_campaign()).await;
+    assert!(
+        bare.requests.iter().flat_map(|request| &request.messages).all(|message| !message.content.contains("sub-heading lines")),
+        "no note, nothing to name"
+    );
+
+    // A document whose post HAS a note, with the lever off or on a turn that is not a
+    // dated-post revision: nothing is said about sub-headings, and no section is asked for.
+    let off = revise_document(LatencyLevers::ALL_ON, &campaign, REVISE_23, &expected, false).await;
+    assert!(
+        off.requests.iter().flat_map(|request| &request.messages).all(|message| !message.content.contains("sub-heading lines")),
+        "lever off"
+    );
+    for other in ["Gjør hele dokumentet kortere.", "Gjør innlegget for 23. oktober mer konkret og oppdater e-posten.", "Gjør innlegget for 23. oktober mer konkret og fjern kildene."] {
+        let run = revise_document(on, &campaign, other, &expected, false).await;
+        assert!(
+            run.requests.iter().flat_map(|request| &request.messages).all(|message| !message.content.contains("sub-heading lines")),
+            "{other}: not a dated-post revision"
+        );
+    }
+}
+
+/// The same revision, the section sent WITHOUT the note. With the lever off the
+/// splice deletes the note as it always did; with it on the gateway refuses the
+/// section, and the repair (which here answers "hello") cannot restore it, so
+/// the turn ends in an error and no post without its note is emitted.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_section_that_lost_its_note_is_never_published_with_the_lever_on() {
+    let campaign = dated_campaign_with_post_note();
+    let expected = campaign.replace("Snakk med oss om arbeidsplassen deres.", "Snakk med oss om arbeidsplassen og bordene deres.");
+    let full = post_23(&expected);
+    let without_note = format!("{}\n", full.split("### Kilder").next().unwrap().trim_end());
+    assert!(!without_note.contains("Produktinformasjon brukt"));
+
+    // Off: as before, the note goes with the section.
+    let off = revise_document(LatencyLevers::ALL_ON, &campaign, REVISE_23, &without_note, false).await;
+    let published = last_frame(&off.frames, "artifact")["content"].as_str().expect("an artifact").to_owned();
+    assert!(!published.contains("- Produktinformasjon brukt: arm, lysnivåer og farger."), "off: the splice deleted the note, as it always did");
+    assert!(published.contains("bordene deres"), "off: the revision itself is there");
+
+    // On: refused, never published without the note.
+    let on = LatencyLevers { dated_post_section_only: true, ..LatencyLevers::ALL_ON };
+    let run = revise_document(on, &campaign, REVISE_23, &without_note, true).await;
+    for (_, event, data) in run.frames.iter().filter(|(_, event, _)| event == "artifact") {
+        assert!(
+            data["content"].as_str().is_some_and(|content| content.contains("- Produktinformasjon brukt: arm, lysnivåer og farger.")),
+            "{event}: an emitted document still has the note: {data}"
+        );
+    }
+    assert!(run.frames.iter().any(|(_, event, _)| event == "error"), "the turn ends in an error rather than publishing a post without its note");
+    let saved = run.completions.last().expect("the revision turn is saved");
+    let metadata = struct_json(saved.metadata.as_ref().expect("turn evidence"));
+    assert!(
+        metadata["artifacts"].as_array().is_none_or(|artifacts| artifacts.iter().all(|artifact| artifact["content"].as_str().is_none_or(|content| content.contains("- Produktinformasjon brukt: arm, lysnivåer og farger.")))),
+        "and nothing saved lacks it either"
+    );
+}
+
+/// Stage 0: the model is shown the whole document the gateway treats as read,
+/// however it was read. A 20 000-character artifact is read by the gateway's
+/// prefetch on a recognised revision, and by the model's own explicit
+/// `read_artifact` on any other instruction; in both cases every character of
+/// it, its tail included, is in the request the next decision round sends,
+/// with no "INCOMPLETE" marker — and that read is what takes `read_artifact`
+/// out of the later rounds.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_twenty_thousand_character_artifact_reaches_the_model_whole_by_prefetch_and_by_explicit_read() {
+    let mut big = dated_campaign();
+    big.push_str("\n\n## Vedlegg\n\n");
+    while big.chars().count() < 20_000 {
+        big.push_str("Bakgrunnsnotat som ikke er del av noe innlegg. ");
+    }
+    big.push_str("\n\nSLUTTMERKE");
+    assert!((20_000..=20_100).contains(&big.chars().count()), "{}", big.chars().count());
+    let complete = |messages: &[(String, String)], via: &str| {
+        let read = messages
+            .iter()
+            .find(|(role, content)| role == "user" && content.contains("Current content of artifact 'kampanje'"))
+            .unwrap_or_else(|| panic!("{via}: the read reached the model"));
+        assert!(read.1.contains(&big), "{via}: every character of the document is in front of the model");
+        assert!(read.1.contains("SLUTTMERKE"), "{via}");
+        assert!(!read.1.contains("[truncated"), "{via}: and it is not told the read is incomplete");
+        assert!(!read.1.contains("[Only the first part"), "{via}");
+        read.1.clone()
+    };
+
+    // The gateway's prefetch, on a recognised dated-post revision.
+    let (_, reserved, _, offers) = run_conversation_only_turn(REVISE_23, &[("kampanje", &big)], vec![]).await;
+    assert_eq!(reserved.iter().map(|action| action.tool.as_str()).collect::<Vec<_>>(), ["read_artifact"]);
+    let rounds = decision_rounds(&offers);
+    assert_eq!(rounds.len(), 1);
+    assert!(complete(&rounds[0].2, "the prefetch").starts_with(GATEWAY_READ_HEADER));
+
+    // The model's own explicit read, on an instruction the gateway does not recognise.
+    let read = vec![mpv1::ToolCall {
+        id: "call-read".into(),
+        name: "read_artifact".into(),
+        arguments_json: serde_json::json!({ "id": "kampanje" }).to_string(),
+    }];
+    let (_, reserved, _, offers) = run_conversation_only_turn("Gjør hele dokumentet kortere.", &[("kampanje", &big)], vec![read]).await;
+    assert_eq!(reserved.iter().map(|action| action.tool.as_str()).collect::<Vec<_>>(), ["read_artifact"]);
+    let rounds = decision_rounds(&offers);
+    assert_eq!(rounds.len(), 2, "the read's result reaches a second round");
+    assert!(complete(&rounds[1].2, "the explicit read").starts_with("Tool results for your previous request"));
+    assert!(rounds[0].1.iter().any(|tool| tool == "read_artifact"));
+    assert!(!rounds[1].1.iter().any(|tool| tool == "read_artifact"), "a whole read takes the read out of later rounds: {:?}", rounds[1].1);
 }
 
 /// Owner ruling 2026-09-26, end to end: the accepted review of the first
@@ -8710,4 +10317,479 @@ async fn a_scripted_rejection_narrows_the_in_turn_recheck_end_to_end() {
             + receipt["carriedInTurnSegments"].as_u64().unwrap(),
         3
     );
+}
+
+/// What the process holds at the moment the trigger the HTTP server stops on
+/// resolves, which is the moment `main` lets the process exit.
+#[derive(Debug)]
+struct ExitSnapshot {
+    streams_running: usize,
+    assistant_messages_saved: usize,
+    terminal_outcomes_recorded: usize,
+}
+
+struct DrainObservation {
+    at_exit: ExitSnapshot,
+    /// `/readyz` over the wire while the drain was waiting; none when the drain
+    /// window was zero and so no waiting happened.
+    readyz_while_draining: Option<u16>,
+    frames: Vec<(Option<u64>, String, serde_json::Value)>,
+}
+
+async fn read_sse_until(response: &mut reqwest::Response, seen: &mut String, needle: &str) {
+    while !seen.contains(needle) {
+        let chunk = tokio::time::timeout(Duration::from_secs(20), response.chunk())
+            .await
+            .expect("an SSE frame within 20 s")
+            .expect("a readable response body")
+            .unwrap_or_else(|| panic!("the stream ended before {needle:?}; saw {seen}"));
+        seen.push_str(&String::from_utf8_lossy(&chunk));
+    }
+}
+
+/// Serve the gateway on a real socket, start a chat turn whose model stream is
+/// held open mid-answer, fire the shutdown signal while it is in flight, and
+/// record what the process holds when its shutdown trigger resolves. The
+/// trigger is the one `main` builds (`drain::shutdown_trigger`) and the server
+/// stops on it through `serve_on`, as `serve` does.
+async fn catch_a_turn_in_flight_with_a_shutdown_signal(window: Duration) -> DrainObservation {
+    std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "1");
+    std::env::remove_var("ALLOWED_MODELS");
+    let gate = Arc::new(tokio::sync::Semaphore::new(0));
+    let client = spawn_mock(MockOk {
+        stream_gate: Some(gate.clone()),
+        ..Default::default()
+    })
+    .await;
+    let (mock_session, session_handles) = MockSessionCore::new();
+    let session_client = spawn_session_mock(mock_session).await;
+    let (state, _publisher) = make_state(client, session_client).await;
+    let cancels = state.cancels.clone();
+    let readiness = model_gateway::readiness::GrpcReadiness::new();
+    readiness.mark_bound();
+    let (app, _delegated_jwks) = authenticated_user_router(
+        model_gateway::http_routes::build_router_with_readiness(state, None, readiness.clone()),
+        "org_placeholder",
+        "user_placeholder",
+    )
+    .await;
+
+    // The same trigger `main` builds, with a oneshot standing in for SIGTERM.
+    let (signal, signalled) = tokio::sync::oneshot::channel::<()>();
+    let trigger = model_gateway::drain::shutdown_trigger(
+        async move {
+            let _ = signalled.await;
+        },
+        readiness.clone(),
+        cancels.clone(),
+        window,
+    );
+    // What the process holds the instant that trigger resolves: `main` exits then.
+    let observed: Arc<Mutex<Option<ExitSnapshot>>> = Arc::default();
+    tokio::spawn({
+        let trigger = trigger.clone();
+        let cancels = cancels.clone();
+        let handles = session_handles.clone();
+        let observed = observed.clone();
+        async move {
+            trigger.await;
+            *observed.lock().unwrap() = Some(ExitSnapshot {
+                streams_running: cancels.active(),
+                assistant_messages_saved: handles
+                    .append_captures
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|(role, _)| role == "assistant")
+                    .count(),
+                terminal_outcomes_recorded: handles.terminal_outcome_captures.lock().unwrap().len(),
+            });
+        }
+    });
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(model_gateway::http_routes::serve_on(
+        listener,
+        app,
+        trigger.clone(),
+    ));
+
+    let http = reqwest::Client::new();
+    let mut response = http
+        .post(format!("http://{addr}/v1/invoke/stream"))
+        .header("authorization", "Bearer dev")
+        .header("content-type", "application/json")
+        .body(r#"{"content":"hi","model":"m"}"#)
+        .send()
+        .await
+        .expect("the chat stream opens");
+    assert_eq!(response.status().as_u16(), 200);
+    // The first delta reached the client and the second is held back: the turn
+    // is provably in flight, with its producer registered.
+    let mut seen = String::new();
+    read_sse_until(&mut response, &mut seen, "\"delta\":\"hel\"").await;
+    assert_eq!(cancels.active(), 1, "the in-flight turn is registered");
+
+    signal.send(()).expect("the shutdown trigger is waiting");
+    let begun = std::time::Instant::now();
+    while !readiness.is_draining() {
+        assert!(begun.elapsed() < Duration::from_secs(10), "the drain must begin");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    let readyz_while_draining = if window.is_zero() {
+        // No waiting: the trigger resolves at once and the listener closes.
+        while observed.lock().unwrap().is_none() {
+            assert!(begun.elapsed() < Duration::from_secs(10), "a zero window resolves at once");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        None
+    } else {
+        let status = http
+            .get(format!("http://{addr}/readyz"))
+            .send()
+            .await
+            .expect("the listener stays open while the drain waits")
+            .status()
+            .as_u16();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(
+            observed.lock().unwrap().is_none() && !server.is_finished(),
+            "neither the drain nor the server may end while a turn is in flight"
+        );
+        Some(status)
+    };
+
+    // The model finishes. The client must still get the rest of its answer.
+    gate.add_permits(1_000);
+    loop {
+        match tokio::time::timeout(Duration::from_secs(20), response.chunk())
+            .await
+            .expect("the rest of the stream within 20 s")
+            .expect("a readable response body")
+        {
+            Some(chunk) => seen.push_str(&String::from_utf8_lossy(&chunk)),
+            None => break,
+        }
+    }
+    // `main` waits on the server and, as a bound, on `stop_after`. The server must
+    // win that race: the connection closes once its last frame is flushed.
+    let stopped = model_gateway::drain::stop_after(trigger, Duration::from_secs(5));
+    tokio::time::timeout(Duration::from_secs(20), async {
+        tokio::select! {
+            joined = server => joined
+                .expect("the server task did not panic")
+                .expect("the server stopped cleanly"),
+            () = stopped => panic!(
+                "the process would have exited with the server's connections still open"
+            ),
+        }
+    })
+    .await
+    .expect("the server returns once the drain and its open connections are done");
+
+    let at_exit = observed.lock().unwrap().take().expect("the trigger resolved");
+    DrainObservation {
+        at_exit,
+        readyz_while_draining,
+        frames: sse_frames(&seen),
+    }
+}
+
+/// I3: a redeploy used to cut every chat turn in flight, because SIGTERM ended
+/// the process under the producer task. The drain makes the process wait: by the
+/// time its shutdown trigger resolves (the moment it may exit) the turn is
+/// finished, its answer saved and its run terminal, and the client that held the
+/// connection open got its `done`. `/readyz` said 503 the whole time, and the
+/// listener stayed open until then.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_shutdown_signal_waits_for_the_turn_in_flight_and_the_client_still_gets_done() {
+    let seen = catch_a_turn_in_flight_with_a_shutdown_signal(Duration::from_secs(60)).await;
+
+    assert_eq!(seen.readyz_while_draining, Some(503), "out of rotation while draining");
+    assert_eq!(
+        seen.at_exit.streams_running, 0,
+        "nothing is running when the process may exit: the drain ended because the turn \
+         finished, not because the window ran out"
+    );
+    assert_eq!(
+        seen.at_exit.assistant_messages_saved, 1,
+        "the answer was saved before the process was allowed to exit"
+    );
+    assert_eq!(
+        seen.at_exit.terminal_outcomes_recorded, 1,
+        "the run was made terminal before the process was allowed to exit"
+    );
+
+    let named: Vec<&str> = seen.frames.iter().map(|(_, event, _)| event.as_str()).collect();
+    assert_eq!(named.last(), Some(&"done"), "the client got its terminal frame: {named:?}");
+    let answer: String = seen
+        .frames
+        .iter()
+        .filter(|(_, event, _)| event == "chunk")
+        .filter_map(|(_, _, data)| data["delta"].as_str())
+        .collect();
+    assert_eq!(answer, "hello", "the client got the whole answer");
+}
+
+/// The other side of the same test, and the defect it exists to catch:
+/// `MODEL_GATEWAY_DRAIN_SECS=0` restores the old immediate exit. The trigger
+/// then resolves with the turn still running and its answer unsaved, which is
+/// exactly the state a redeploy used to kill. This is what the test above would
+/// see if the drain did not wait.
+#[tokio::test]
+#[serial_test::serial]
+async fn with_a_zero_drain_window_the_process_may_exit_with_the_turn_still_unsaved() {
+    let seen = catch_a_turn_in_flight_with_a_shutdown_signal(Duration::ZERO).await;
+
+    assert_eq!(seen.at_exit.streams_running, 1, "the turn is still running when the process may exit");
+    assert_eq!(seen.at_exit.assistant_messages_saved, 0, "the answer is lost if the process exits now");
+    assert_eq!(seen.at_exit.terminal_outcomes_recorded, 0, "the run is left non-terminal");
+}
+
+// ---------------------------------------------------------------------------
+// Z-00: a token that says ZDR never silently loses the user's own connection.
+//
+// Every test below sends a REAL signed RS256 token through the real
+// authentication middleware (JWKS fetched over HTTP, issuer, audience and
+// expiry enforced) and the real router, and puts a counting inference-core in
+// front of the gateway. Nothing here builds `Claims` by hand: the `zdr` the
+// handlers see is the one that came out of the token. The request body never
+// says `zdr`, which is exactly the shape the defect needed.
+// ---------------------------------------------------------------------------
+
+/// What one turn on a real signed token came back with.
+struct SignedTurn {
+    status: StatusCode,
+    body: String,
+    session: MockSessionHandles,
+}
+
+/// POST `request` to `uri` on a token whose own `zdr` claim is `token_zdr`.
+async fn signed_turn(
+    uri: &str,
+    token_zdr: bool,
+    request: serde_json::Value,
+    inference: MockOk,
+) -> SignedTurn {
+    std::env::remove_var("ALLOWED_MODELS");
+    let (_jwks, token) = signed_model_token(token_zdr).await;
+    let client = spawn_mock(inference).await;
+    let (mock_session, session) = MockSessionCore::new();
+    let session_client = spawn_session_mock(mock_session).await;
+    let (state, _publisher) = make_state(client, session_client).await;
+    let (app, _delegated_jwks) =
+        authenticated_user_router(build_router(state, None), "org-zdr", "user-zdr").await;
+    let request = Request::builder()
+        .method("POST")
+        .uri(uri)
+        .header(AUTHORIZATION, format!("Bearer {token}"))
+        .header(CONTENT_TYPE, "application/json")
+        .body(Body::from(request.to_string()))
+        .unwrap();
+    let response = app.oneshot(request).await.unwrap();
+    let status = response.status();
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    clear_model_auth_env();
+    SignedTurn {
+        status,
+        body: String::from_utf8(body.to_vec()).unwrap(),
+        session,
+    }
+}
+
+/// A turn pinned to the user's own ChatGPT subscription, with no `zdr` in the
+/// body: the token alone decides the retention posture.
+fn terra_turn() -> serde_json::Value {
+    serde_json::json!({
+        "content": "summarise the board minutes",
+        "model": "gpt-5.6-terra",
+        "provider": "openai-codex-subscription",
+        "subscription_connection_id": "conn-1",
+    })
+}
+
+/// A counting inference-core that also keeps every unary request whole.
+fn counting_inference() -> (MockOk, Arc<AtomicUsize>, CapturedRequests) {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let requests: CapturedRequests = Arc::new(Mutex::new(Vec::new()));
+    (
+        MockOk {
+            infer_call_count: Some(Arc::clone(&calls)),
+            captured_requests: Some(Arc::clone(&requests)),
+            ..MockOk::default()
+        },
+        calls,
+        requests,
+    )
+}
+
+/// The defect: a ZDR token plus a subscription turn used to reach the ZDR
+/// branch, which sent the model call with the provider and the connection
+/// dropped, so the turn was served (or refused) on the default ZDR chain and the
+/// user's choice vanished without a word. Now the turn is refused with one typed
+/// frame before any model is touched and before any run exists.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_zdr_token_on_the_subscription_is_refused_on_the_stream_before_any_model_is_called() {
+    let (inference, calls, requests) = counting_inference();
+    let turn = signed_turn("/v1/invoke/stream", true, terra_turn(), inference).await;
+
+    assert_eq!(turn.status, StatusCode::OK, "{}", turn.body);
+    let errors = error_frames(&turn.body);
+    assert_eq!(errors.len(), 1, "{}", turn.body);
+    assert_eq!(errors[0]["code"], "zdr_connection_not_supported", "{}", turn.body);
+    assert_eq!(errors[0]["retryable"], false, "nothing about waiting changes this");
+    let message = errors[0]["message"].as_str().unwrap_or_default();
+    assert!(
+        message.contains("not sent") && message.contains("No other model was used"),
+        "the user is told what did not happen: {message}"
+    );
+    assert!(
+        !message.contains("acknowledge"),
+        "no acknowledgement path exists yet, so none may be promised: {message}"
+    );
+    assert!(
+        !turn.body.contains("event: chunk") && !turn.body.contains("event: done"),
+        "no answer of any kind: {}",
+        turn.body
+    );
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        0,
+        "no model call: the old code made one with the route dropped: {:?}",
+        requests
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|request| (request.provider_hint.clone(), request.subscription_connection_id.clone(), request.zdr))
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        managed_start_count(&turn.session),
+        0,
+        "a refused turn prepares no run"
+    );
+}
+
+/// The unary route had the route intact but only a generic 502 mapped from the
+/// provider's refusal. It now refuses first, with the typed body, and does not
+/// reach inference-core at all.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_zdr_token_on_the_subscription_is_refused_on_the_unary_route_with_a_typed_body() {
+    let (inference, calls, _) = counting_inference();
+    let turn = signed_turn("/v1/invoke", true, terra_turn(), inference).await;
+
+    assert_eq!(turn.status, StatusCode::PRECONDITION_FAILED, "{}", turn.body);
+    let body: serde_json::Value = serde_json::from_str(&turn.body).expect("a JSON body");
+    assert_eq!(body["code"], "zdr_connection_not_supported", "{body}");
+    assert_eq!(body["retryable"], false, "{body}");
+    assert!(
+        body["error"].as_str().is_some_and(|message| message.contains("No other model was used")),
+        "{body}"
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 0, "no model call");
+    assert_eq!(managed_start_count(&turn.session), 0, "a refused turn prepares no run");
+}
+
+/// The route can be named other ways than the canonical id: inference-core
+/// matches a provider hint case-insensitively with `_` read as `-`, and takes
+/// two aliases. A turn that names the subscription any of those ways, with no
+/// connection id to trip the gateway's own validation, must not slip past as a
+/// plain turn on the default chain.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_zdr_token_is_refused_however_the_subscription_is_named() {
+    for provider in [
+        "OpenAI-Codex-Subscription",
+        "openai_codex_subscription",
+        "chatgpt-codex",
+        "Codex_Subscription",
+        "  openai-codex-subscription  ",
+    ] {
+        let (inference, calls, _) = counting_inference();
+        let turn = signed_turn(
+            "/v1/invoke/stream",
+            true,
+            serde_json::json!({ "content": "hi", "model": "gpt-5.6-terra", "provider": provider }),
+            inference,
+        )
+        .await;
+        let errors = error_frames(&turn.body);
+        assert_eq!(errors.len(), 1, "{provider:?}: {}", turn.body);
+        assert_eq!(errors[0]["code"], "zdr_connection_not_supported", "{provider:?}");
+        assert_eq!(calls.load(Ordering::SeqCst), 0, "{provider:?}: no model call");
+    }
+}
+
+/// A ZDR token with a connection id and no provider is a malformed request that
+/// also names a user connection: it is refused for ZDR, not served on the
+/// default chain with the connection dropped.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_zdr_token_naming_only_a_connection_is_refused_too() {
+    let (inference, calls, _) = counting_inference();
+    let turn = signed_turn(
+        "/v1/invoke/stream",
+        true,
+        serde_json::json!({ "content": "hi", "model": "gpt-5.6-terra", "subscription_connection_id": "conn-1" }),
+        inference,
+    )
+    .await;
+    let errors = error_frames(&turn.body);
+    assert_eq!(errors.len(), 1, "{}", turn.body);
+    assert_eq!(errors[0]["code"], "zdr_connection_not_supported", "{}", turn.body);
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+}
+
+/// The other side: a token that does not say ZDR is not touched. The same turn
+/// reaches inference-core with its provider and connection intact, unary and
+/// streamed, and carries no ZDR refusal. Non-ZDR callers are byte-identical.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_token_that_is_not_zdr_keeps_its_subscription_route_unchanged() {
+    let (inference, calls, requests) = counting_inference();
+    let unary = signed_turn("/v1/invoke", false, terra_turn(), inference).await;
+    assert_eq!(unary.status, StatusCode::OK, "{}", unary.body);
+    let sent = requests.lock().unwrap().clone();
+    assert_eq!(sent.len(), 1, "one model call");
+    assert_eq!(sent[0].provider_hint, "openai-codex-subscription");
+    assert_eq!(sent[0].subscription_connection_id, "conn-1");
+    assert_eq!(sent[0].model, "gpt-5.6-terra");
+    assert!(!sent[0].zdr, "a non-ZDR turn stays non-ZDR");
+    assert_eq!(managed_start_count(&unary.session), 1, "a normal turn prepares its run");
+
+    let (inference, calls_stream, _) = counting_inference();
+    let streamed = signed_turn("/v1/invoke/stream", false, terra_turn(), inference).await;
+    assert_eq!(streamed.status, StatusCode::OK, "{}", streamed.body);
+    assert!(error_frames(&streamed.body).is_empty(), "{}", streamed.body);
+    assert!(streamed.body.contains("event: done"), "{}", streamed.body);
+    assert!(calls_stream.load(Ordering::SeqCst) >= 1, "the model was called");
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+}
+
+/// A ZDR token that does NOT name a user connection is unchanged too: it still
+/// takes the persistence-free path on the default ZDR chain, with `zdr` on and
+/// no provider pinned. The refusal is about the connection route and nothing
+/// else.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_zdr_token_without_a_connection_route_still_takes_the_zdr_path() {
+    let (inference, _, requests) = counting_inference();
+    let turn = signed_turn(
+        "/v1/invoke",
+        true,
+        serde_json::json!({ "content": "hi", "model": "mock" }),
+        inference,
+    )
+    .await;
+    assert_eq!(turn.status, StatusCode::OK, "{}", turn.body);
+    let sent = requests.lock().unwrap().clone();
+    assert_eq!(sent.len(), 1);
+    assert!(sent[0].zdr, "the ZDR path asks for ZDR");
+    assert_eq!(sent[0].provider_hint, "");
+    assert_eq!(sent[0].subscription_connection_id, "");
+    assert_eq!(managed_start_count(&turn.session), 0, "the ZDR path prepares no run");
 }

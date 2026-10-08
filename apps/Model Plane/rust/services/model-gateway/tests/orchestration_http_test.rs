@@ -37,7 +37,7 @@ use mp_events::publisher::InMemoryPublisher;
 use std::{
     pin::Pin,
     sync::{
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc, Mutex,
     },
 };
@@ -183,6 +183,17 @@ struct CaptureState {
     /// `(thread_id, summary, step_count)` from the last `ProposePlan` call
     /// (plan-gate §2.1).
     propose_plan: Arc<Mutex<Option<(String, String, usize)>>>,
+    /// plan-gate §2.3: the thread `GetPlan` reports the plan as belonging to.
+    /// `None` answers `thread-1`, the thread the run-owner mock reports.
+    plan_thread_id: Arc<Mutex<Option<String>>>,
+    /// plan-gate §2.3: make `TransitionPlan` refuse, as session-core does for
+    /// a plan that was already decided.
+    fail_transition: Arc<AtomicBool>,
+    /// Every `GetPlan` / `TransitionPlan` call, in arrival order, so a test
+    /// can prove the plan was CHECKED before it was decided.
+    plan_calls: Arc<Mutex<Vec<String>>>,
+    /// `(step_id, title, removed)` of the last `TransitionPlan`'s edits.
+    transition_edits: Arc<Mutex<Vec<(String, String, bool)>>>,
     list_todos: Arc<Mutex<Option<(String, String)>>>,
     get_todo_id: Arc<Mutex<Option<String>>>,
     transition_todo: CapturedTransition,
@@ -242,11 +253,19 @@ impl OrchestrationCoreService for MockOrchestration {
     ) -> Result<Response<GetPlanResponse>, Status> {
         let request = request.into_inner();
         *self.state.get_plan_id.lock().unwrap() = Some(request.plan_id.clone());
+        self.state.plan_calls.lock().unwrap().push("get_plan".into());
+        let thread_id = self
+            .state
+            .plan_thread_id
+            .lock()
+            .unwrap()
+            .clone()
+            .unwrap_or_else(|| "thread-1".into());
         Ok(Response::new(GetPlanResponse {
             plan: Some(Plan {
                 id: request.plan_id,
                 run_id: "run-1".into(),
-                thread_id: "thread-1".into(),
+                thread_id,
                 author: "user-1".into(),
                 state: PlanState::Approved as i32,
                 summary: "loaded".into(),
@@ -264,6 +283,21 @@ impl OrchestrationCoreService for MockOrchestration {
         request: TonicRequest<TransitionPlanRequest>,
     ) -> Result<Response<TransitionPlanResponse>, Status> {
         let request = request.into_inner();
+        self.state
+            .plan_calls
+            .lock()
+            .unwrap()
+            .push("transition_plan".into());
+        if self.state.fail_transition.load(Ordering::SeqCst) {
+            return Err(Status::failed_precondition(
+                "a plan can only be approved from PLAN_STATE_PROPOSED",
+            ));
+        }
+        *self.state.transition_edits.lock().unwrap() = request
+            .edited_steps
+            .iter()
+            .map(|e| (e.step_id.clone(), e.title.clone(), e.removed))
+            .collect();
         *self.state.transition_plan.lock().unwrap() = Some((
             request.plan_id.clone(),
             request.target_state,
@@ -712,8 +746,22 @@ struct MockRunOwner {
 
 #[tonic::async_trait]
 impl RunService for MockRunOwner {
-    async fn get_run(&self, _: TonicRequest<GetRunRequest>) -> Result<Response<RunDetail>, Status> {
-        Err(Status::unimplemented("get_run not needed in test"))
+    async fn get_run(
+        &self,
+        request: TonicRequest<GetRunRequest>,
+    ) -> Result<Response<RunDetail>, Status> {
+        // Only `plan_approval` resolves a run's thread through this route
+        // today: the plan-gate tests need it to say which conversation the
+        // run belongs to. Any other run is not this mock's to describe.
+        let request = request.into_inner();
+        if request.run_id != "run-owned" {
+            return Err(Status::not_found("run not found"));
+        }
+        Ok(Response::new(RunDetail {
+            run_id: request.run_id,
+            thread_id: "thread-1".into(),
+            ..Default::default()
+        }))
     }
 
     async fn list_runs(
@@ -1579,4 +1627,345 @@ async fn http_run_event_routes_require_a_durable_owner_before_publish() {
     assert_eq!(events[0].1.event_type, "RUN_CANCEL_REQUESTED");
     assert_eq!(events[0].1.causation_id, "receipt-cancel-1");
     assert_eq!(events[1].1.event_type, "FEEDBACK_RATED");
+}
+
+// ---------------------------------------------------------------------------
+// plan-gate §2.3: `POST /v1/runs/{run_id}/plan-approval`
+//
+// The route is the confirm gate itself: it decides a PLAN and, only if that
+// worked, grants the run authority. What matters is the ORDER (check the plan,
+// decide it, then grant) and that a refusal at any step leaves no grant behind.
+// ---------------------------------------------------------------------------
+
+struct PlanGateHarness {
+    app: axum::Router,
+    capture: CaptureState,
+    plan_mode: model_gateway::coordinator::PlanModeStore,
+    owner: UserTokens,
+    _auth: AuthFixture,
+}
+
+async fn plan_gate_harness() -> PlanGateHarness {
+    let auth = AuthFixture::start().await;
+    let owner = AuthFixture::user_tokens("org-owner", "owner-user");
+    let (mock, capture) = MockOrchestration::new();
+    let (mut state, _publisher, _cancel_calls) = run_owner_state(&owner.session).await;
+    state.orchestration_client = spawn_orchestration_mock(mock).await;
+    // The grant's durable half (`set_run_mode`) goes to session-core. Point it
+    // at a port nothing listens on, so the test never reaches a real service
+    // that happens to be running on the default local port; the route reports
+    // `persisted: false` and still answers.
+    state.session_client = mp_contracts::model_plane::v1::session_core_client::SessionCoreClient::new(
+        tonic::transport::Endpoint::from_static("http://127.0.0.1:1").connect_lazy(),
+    );
+    let plan_mode = state.plan_mode.clone();
+    PlanGateHarness {
+        app: build_router(state, None),
+        capture,
+        plan_mode,
+        owner,
+        _auth: auth,
+    }
+}
+
+async fn post_plan_approval(
+    harness: &PlanGateHarness,
+    run_id: &str,
+    tokens: &UserTokens,
+    body: serde_json::Value,
+) -> (StatusCode, serde_json::Value) {
+    let request = Request::builder()
+        .method("POST")
+        .uri(format!("/v1/runs/{run_id}/plan-approval"))
+        .header(AUTHORIZATION, format!("Bearer {}", tokens.model))
+        .header(
+            "x-session-authorization",
+            format!("Bearer {}", tokens.session),
+        )
+        .header("content-type", "application/json")
+        .body(Body::from(body.to_string()))
+        .unwrap();
+    let response = harness.app.clone().oneshot(request).await.unwrap();
+    let status = response.status();
+    let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let json = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+    (status, json)
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn approving_a_plan_checks_it_decides_it_with_the_edits_and_only_then_grants() {
+    let harness = plan_gate_harness().await;
+    let (status, body) = post_plan_approval(
+        &harness,
+        "run-owned",
+        &harness.owner,
+        serde_json::json!({
+            "decision": "approve",
+            "granted_rung": "workspace_write",
+            "justification": "writes the report into the workspace",
+            "plan_id": "plan-7",
+            "edited_steps": [
+                {"step_id": "step-b", "title": "Send it", "removed": false},
+                {"step_id": "step-a", "title": "Draft the email", "removed": true},
+            ],
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["granted_rung"], "workspace_write");
+    assert_eq!(body["plan"]["id"], "plan-7");
+
+    // The plan was looked at BEFORE it was decided.
+    assert_eq!(
+        *harness.capture.plan_calls.lock().unwrap(),
+        vec!["get_plan".to_owned(), "transition_plan".to_owned()]
+    );
+    // Decided as APPROVED, by the caller, for the stated reason, with the
+    // person's edits in the person's order.
+    let (plan_id, target, actor, reason) = harness
+        .capture
+        .transition_plan
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("the plan must be transitioned");
+    assert_eq!(plan_id, "plan-7");
+    assert_eq!(target, PlanState::Approved as i32);
+    assert_eq!(actor, "owner-user");
+    assert_eq!(reason, "writes the report into the workspace");
+    assert_eq!(
+        *harness.capture.transition_edits.lock().unwrap(),
+        vec![
+            ("step-b".to_owned(), "Send it".to_owned(), false),
+            ("step-a".to_owned(), "Draft the email".to_owned(), true),
+        ]
+    );
+    // And the grant landed on the RUN's conversation, carrying the plan it
+    // was approved with for the next run to follow.
+    assert_eq!(
+        harness.plan_mode.granted_rung("org-owner", "thread-1"),
+        Some(mp_contracts::model_plane::v1::AutonomyRung::WorkspaceWrite)
+    );
+    assert_eq!(
+        harness.plan_mode.take_approved_plan("org-owner", "thread-1"),
+        Some("plan-7".to_owned())
+    );
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn a_plan_that_is_not_this_runs_conversation_is_refused_before_anything_is_decided() {
+    let harness = plan_gate_harness().await;
+    *harness.capture.plan_thread_id.lock().unwrap() = Some("thread-of-another-conversation".into());
+
+    let (status, body) = post_plan_approval(
+        &harness,
+        "run-owned",
+        &harness.owner,
+        serde_json::json!({
+            "decision": "approve",
+            "granted_rung": "danger_full_access",
+            "justification": "the plan sends the invoice",
+            "plan_id": "plan-elsewhere",
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(
+        harness.capture.transition_plan.lock().unwrap().is_none(),
+        "a plan of another conversation must not be approved through this run"
+    );
+    assert_eq!(
+        harness.plan_mode.granted_rung("org-owner", "thread-1"),
+        None,
+        "and no authority may be granted on the strength of it"
+    );
+    assert_eq!(
+        harness.plan_mode.granted_rung("org-owner", "thread-of-another-conversation"),
+        None
+    );
+
+    // The same guard covers a rejection.
+    let (status, _) = post_plan_approval(
+        &harness,
+        "run-owned",
+        &harness.owner,
+        serde_json::json!({
+            "decision": "reject",
+            "justification": "no",
+            "plan_id": "plan-elsewhere",
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(harness.capture.transition_plan.lock().unwrap().is_none());
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn a_plan_the_server_refuses_to_approve_grants_no_authority() {
+    // session-core refuses an approval of a plan that is no longer PROPOSED
+    // (already decided, or beaten by a concurrent request). An autonomy grant
+    // with no approved plan behind it is exactly the rubber stamp this gate
+    // exists to prevent.
+    let harness = plan_gate_harness().await;
+    harness.capture.fail_transition.store(true, Ordering::SeqCst);
+
+    let (status, body) = post_plan_approval(
+        &harness,
+        "run-owned",
+        &harness.owner,
+        serde_json::json!({
+            "decision": "approve",
+            "granted_rung": "workspace_write",
+            "justification": "writes the report into the workspace",
+            "plan_id": "plan-7",
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::PRECONDITION_FAILED, "{body}");
+    assert_eq!(
+        harness.plan_mode.granted_rung("org-owner", "thread-1"),
+        None,
+        "a refused plan transition must leave no grant behind"
+    );
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn rejecting_a_plan_decides_it_and_grants_nothing() {
+    let harness = plan_gate_harness().await;
+    let (status, body) = post_plan_approval(
+        &harness,
+        "run-owned",
+        &harness.owner,
+        // No rung and a one-word reason: an approve would be refused for both,
+        // a reject needs neither because it hands nothing back.
+        serde_json::json!({
+            "decision": "reject",
+            "justification": "nei",
+            "plan_id": "plan-7",
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["decision"], "reject");
+    let (plan_id, target, _actor, reason) = harness
+        .capture
+        .transition_plan
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("the plan must be transitioned");
+    assert_eq!(plan_id, "plan-7");
+    assert_eq!(target, PlanState::Rejected as i32);
+    assert_eq!(reason, "nei");
+    assert_eq!(harness.plan_mode.granted_rung("org-owner", "thread-1"), None);
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn rejecting_without_a_plan_is_refused_and_an_unknown_decision_is_too() {
+    let harness = plan_gate_harness().await;
+    let (status, _) = post_plan_approval(
+        &harness,
+        "run-owned",
+        &harness.owner,
+        serde_json::json!({"decision": "reject", "justification": "nei"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "there is no plan to reject");
+
+    let (status, _) = post_plan_approval(
+        &harness,
+        "run-owned",
+        &harness.owner,
+        serde_json::json!({
+            "decision": "maybe",
+            "granted_rung": "workspace_write",
+            "justification": "writes the report into the workspace",
+            "plan_id": "plan-7",
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(harness.capture.plan_calls.lock().unwrap().is_empty());
+    assert_eq!(harness.plan_mode.granted_rung("org-owner", "thread-1"), None);
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn only_the_runs_owner_can_decide_its_plan() {
+    let harness = plan_gate_harness().await;
+    let stranger = AuthFixture::user_tokens("org-owner", "someone-else");
+    let (status, _) = post_plan_approval(
+        &harness,
+        "run-owned",
+        &stranger,
+        serde_json::json!({
+            "decision": "approve",
+            "granted_rung": "workspace_write",
+            "justification": "writes the report into the workspace",
+            "plan_id": "plan-7",
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert!(
+        harness.capture.plan_calls.lock().unwrap().is_empty(),
+        "a stranger must be refused before the plan is even read"
+    );
+    assert_eq!(harness.plan_mode.granted_rung("org-owner", "thread-1"), None);
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn edits_without_a_plan_are_refused_rather_than_silently_dropped() {
+    // The person rewrote steps; a body that does not say WHICH plan they belong
+    // to cannot apply them, and approving anyway would grant authority against
+    // the plan as the model wrote it while telling them nothing.
+    let harness = plan_gate_harness().await;
+    for decision in ["approve", "reject"] {
+        let (status, body) = post_plan_approval(
+            &harness,
+            "run-owned",
+            &harness.owner,
+            serde_json::json!({
+                "decision": decision,
+                "granted_rung": "workspace_write",
+                "justification": "writes the report into the workspace",
+                "edited_steps": [{"step_id": "step-a", "title": "Send it", "removed": false}],
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{decision}: {body}");
+    }
+    assert!(harness.capture.plan_calls.lock().unwrap().is_empty());
+    assert_eq!(harness.plan_mode.granted_rung("org-owner", "thread-1"), None);
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn approving_without_a_structured_plan_is_still_the_plain_rung_grant() {
+    // A turn whose model never called plan.propose (or a browser that reloaded
+    // and lost the plan): no plan_id, no plan RPCs, the rung grant as before.
+    let harness = plan_gate_harness().await;
+    let (status, body) = post_plan_approval(
+        &harness,
+        "run-owned",
+        &harness.owner,
+        serde_json::json!({
+            "granted_rung": "workspace_write",
+            "justification": "writes the report into the workspace",
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body["plan"].is_null());
+    assert!(harness.capture.plan_calls.lock().unwrap().is_empty());
+    assert_eq!(
+        harness.plan_mode.granted_rung("org-owner", "thread-1"),
+        Some(mp_contracts::model_plane::v1::AutonomyRung::WorkspaceWrite)
+    );
 }

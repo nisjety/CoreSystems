@@ -18,7 +18,8 @@
 //!
 //! Only identifiers, milliseconds, counts and offered tool names are recorded:
 //! never prompt text, message content, tool arguments or tool results. The
-//! same record is therefore safe for ZDR and temporary chats.
+//! same record is therefore safe for ZDR and temporary chats. The draft-size
+//! record ([`Draft`]) is character counts and one boolean, nothing else.
 //!
 //! `provider_ms` is the union of the gateway-observed provider-call intervals,
 //! so parallel review batches are counted once, and `orchestration_ms` is the
@@ -203,6 +204,40 @@ pub struct Counts {
     pub protocol_retries: u32,
 }
 
+/// How large the turn's document writes were: numbers and one boolean, never
+/// the text. It lets a series of turns be analysed for how much of a revised
+/// document the model rewrites, and whether it adopted a shorter draft when
+/// it was asked for one (`LatencyLevers::dated_post_section_only`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct Draft {
+    /// `create_artifact` and `update_artifact` calls the model emitted, in
+    /// every round of the turn, counted before any gateway check, splice or
+    /// drop.
+    pub model_writes: u32,
+    /// Characters in the raw `content` argument of those calls, as the model
+    /// emitted them and measured before any preserved section was spliced in.
+    /// A call cut off mid-argument (the output ceiling) has no parseable
+    /// argument: the length of its raw arguments text stands in for it.
+    pub model_write_chars: u64,
+    /// Characters of the document the turn stored, after every check and
+    /// splice: the last document write the turn dispatched. 0 when none was.
+    pub stored_chars: u64,
+    /// The model answered a dated-post revision with that post's section
+    /// alone, and the gateway spliced it into the accepted document
+    /// (`Preservation::is_section_fragment`).
+    pub fragment_spliced: bool,
+}
+
+impl Draft {
+    /// Nothing was recorded: the turn wrote no document. An empty draft is
+    /// left out of the report, so a turn without a document writes the record
+    /// it always did.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
 /// Inference-core's report about one call, as the event carries it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ProviderSummary {
@@ -329,6 +364,10 @@ pub struct TurnTimingReport {
     pub tokens_reported: bool,
     pub phases: Vec<PhaseSpan>,
     pub phases_dropped: u32,
+    /// The size of the turn's document writes; absent on a turn that wrote
+    /// none.
+    #[serde(skip_serializing_if = "Draft::is_empty")]
+    pub draft: Draft,
 }
 
 /// Total length of the union of `[start, end)` intervals: overlapping time,
@@ -399,6 +438,7 @@ struct Ledger {
     phases_dropped: u32,
     marks: Marks,
     counts: Counts,
+    draft: Draft,
     provider_intervals: Vec<(u64, u64)>,
     open_calls: BTreeMap<u64, OpenCall>,
     next_call: u64,
@@ -569,6 +609,7 @@ impl Ledger {
             tokens_reported: self.tokens_reported,
             phases: self.phases.clone(),
             phases_dropped: self.phases_dropped,
+            draft: self.draft.clone(),
         }
     }
 }
@@ -634,6 +675,28 @@ impl TurnTiming {
     /// carries, were reported by the provider.
     pub fn answer_tokens(&self, timing: Option<&ProviderTiming>) {
         self.ledger().tokens_reported = timing.is_some_and(|timing| timing.usage_reported);
+    }
+
+    /// Count `writes` document writes a tool round's model output proposed,
+    /// and the `chars` characters of their raw `content` arguments. Called as
+    /// the round's answer arrives, before the gateway checks, splices or drops
+    /// anything.
+    pub fn model_document_writes(&self, writes: u32, chars: u64) {
+        let mut ledger = self.ledger();
+        ledger.draft.model_writes = ledger.draft.model_writes.saturating_add(writes);
+        ledger.draft.model_write_chars = ledger.draft.model_write_chars.saturating_add(chars);
+    }
+
+    /// The document a write stored, `chars` characters long after every check
+    /// and splice. The last one of the turn is kept.
+    pub fn stored_document(&self, chars: u64) {
+        self.ledger().draft.stored_chars = chars;
+    }
+
+    /// The model's document write was a section alone, spliced into the
+    /// accepted document.
+    pub fn fragment_spliced(&self) {
+        self.ledger().draft.fragment_spliced = true;
     }
 
     fn open(&self, mut span: PhaseSpan, classify: Option<&str>) -> u64 {
@@ -725,14 +788,18 @@ impl TurnTiming {
         let now = self.now_ms();
         let ledger = self.ledger();
         let provider_ms = union_ms(&ledger.provider_intervals);
-        serde_json::json!({
+        let mut summary = serde_json::json!({
             "server_ms": now,
             "provider_ms": provider_ms,
             "orchestration_ms": now.saturating_sub(provider_ms),
             "marks": ledger.marks,
             "counts": ledger.counts(),
             "tokens_reported": ledger.tokens_reported,
-        })
+        });
+        if !ledger.draft.is_empty() {
+            summary["draft"] = serde_json::json!(ledger.draft);
+        }
+        summary
     }
 }
 
@@ -795,6 +862,10 @@ impl TimingLine {
             repairs = counts.repairs,
             reviewer_edits = counts.reviewer_edits,
             tokens_reported = report.tokens_reported,
+            draft_model_writes = report.draft.model_writes,
+            draft_model_write_chars = report.draft.model_write_chars,
+            draft_stored_chars = report.draft.stored_chars,
+            draft_fragment_spliced = report.draft.fragment_spliced,
             phases = report.phases.len(),
             phases_dropped = report.phases_dropped,
             tools = %self.tools,
@@ -1391,6 +1462,9 @@ mod tests {
         let round = timing.round(1);
         round.set_tools(vec!["web_search".into()]);
         round.finish("ok", None);
+        timing.model_document_writes(1, 12);
+        timing.stored_document(34);
+        timing.fragment_spliced();
         let report = timing.report(Outcome::Completed).unwrap();
         let json = serde_json::to_value(&report).unwrap();
         let mut found = BTreeSet::new();
@@ -1418,6 +1492,11 @@ mod tests {
             "counts.repairs",
             "counts.reviewer_edits",
             "counts.protocol_retries",
+            "draft",
+            "draft.model_writes",
+            "draft.model_write_chars",
+            "draft.stored_chars",
+            "draft.fragment_spliced",
             "phases",
             "phases[].phase",
             "phases[].start_ms",
@@ -1456,6 +1535,51 @@ mod tests {
             !json.to_string().contains("run-7c1f"),
             "the run id is for the log line only"
         );
+    }
+
+    /// The draft-size record is character counts and one flag, taken as the
+    /// model's writes arrive (before any splice), kept out of the record of a
+    /// turn that wrote no document, and carried by the report, the envelope
+    /// summary and the log line alike.
+    #[test]
+    fn draft_size_is_counts_and_a_flag_and_absent_without_a_document() {
+        let _ = written();
+        let timing = TurnTiming::start("req-no-document");
+        assert!(timing.summary().get("draft").is_none(), "an empty draft is left out of the summary");
+        let report = timing.report(Outcome::Completed).unwrap();
+        assert!(report.draft.is_empty());
+        assert!(
+            serde_json::to_value(&report).unwrap().get("draft").is_none(),
+            "and out of the report, whose existing fields are all it carries"
+        );
+        drop(timing);
+        assert_eq!(written()[0].report.draft, Draft::default());
+
+        let timing = TurnTiming::start("req-document");
+        // Two author rounds: a whole document, then a shorter correction.
+        timing.model_document_writes(1, 3_800);
+        timing.model_document_writes(1, 700);
+        timing.model_document_writes(0, 0);
+        timing.stored_document(3_900);
+        timing.stored_document(3_950);
+        timing.fragment_spliced();
+        let expected = serde_json::json!({
+            "model_writes": 2,
+            "model_write_chars": 4_500,
+            "stored_chars": 3_950,
+            "fragment_spliced": true,
+        });
+        assert_eq!(timing.summary()["draft"], expected);
+        let report = timing.report(Outcome::Completed).unwrap();
+        assert_eq!(serde_json::to_value(&report).unwrap()["draft"], expected);
+        drop(timing);
+        let lines = written();
+        assert_eq!(lines[0].report.draft.model_write_chars, 4_500);
+        assert!(lines[0].report.draft.fragment_spliced);
+
+        let timing = TurnTiming::start("req-whole");
+        timing.model_document_writes(1, 10);
+        assert!(!timing.report(Outcome::Completed).unwrap().draft.fragment_spliced, "a flag nobody raised stays down");
     }
 
     #[test]

@@ -157,6 +157,9 @@ impl InferenceService {
         request: &Request<T>,
     ) -> Result<AuthenticatedPrincipal, Status> {
         let principal = self.auth.authenticate(request).await?;
+        // From here the call has a verified caller, whatever the checks below
+        // decide: the metering decorator counts it under that service.
+        crate::metered::note_caller(request.extensions(), &principal);
         if request.get_ref().is_catalog() {
             principal.authorize_catalog()?;
         } else {
@@ -179,7 +182,7 @@ fn reject_unattested_zdr_modality(
     operation: &'static str,
 ) -> Result<(), Status> {
     if principal.effective_zdr(request_zdr) {
-        return Err(Status::failed_precondition(format!(
+        return Err(zdr_unavailable_status(format!(
             "ZDR {operation} is unavailable because no provider deployment is independently attested"
         )));
     }
@@ -369,15 +372,9 @@ impl InferenceCore for InferenceService {
                     error = %e,
                     "create_embedding failed"
                 );
-                // A residency rejection is a precondition the caller can act on
-                // (request an EU region / opt in), not an internal fault — map
-                // it to FAILED_PRECONDITION rather than INTERNAL.
-                match e {
-                    provider::ProviderError::ResidencyViolation(msg) => {
-                        Status::failed_precondition(msg)
-                    }
-                    other => Status::internal(other.to_string()),
-                }
+                // A residency, ZDR or tier refusal is a precondition the caller
+                // can act on, not an internal fault: typed FAILED_PRECONDITION.
+                embedding_error_to_status(e)
             })?;
 
         Ok(Response::new(pb::CreateEmbeddingResponse {
@@ -1180,10 +1177,11 @@ pub async fn serve_with_providers_and_readiness(
         realtime,
         video,
     };
-    let grpc_service = InferenceCoreServer::new(service);
+    // Every RPC is counted by the decorator, so none can ship unmetered.
+    let grpc_service = InferenceCoreServer::new(crate::metered::MeteredCore::new(service));
     let (mut health_reporter, health_service) = tonic_health::server::health_reporter();
     health_reporter
-        .set_serving::<InferenceCoreServer<InferenceService>>()
+        .set_serving::<InferenceCoreServer<crate::metered::MeteredCore<InferenceService>>>()
         .await;
 
     readiness.mark_bound();
@@ -1357,6 +1355,27 @@ pub const RETRY_AFTER_MS_TRAILER: &str = "x-mp-retry-after-ms";
 /// whole seconds. Sent only for a usage limit whose reset is known.
 pub const RESETS_AT_TRAILER: &str = "x-mp-resets-at";
 
+/// Value of [`PROVIDER_ERROR_KIND_TRAILER`] when a request required zero data
+/// retention and no matching deployment has an independently verified ZDR
+/// contract. Refused before any provider is called.
+///
+/// The three posture kinds below are a frozen vocabulary: callers (the Data
+/// Plane client, the gateway's refusal catalogue) key on the exact strings and
+/// a rename is a breaking change. They ride a `FAILED_PRECONDITION` whose
+/// message is unchanged, so a caller that has not adopted the trailer behaves
+/// exactly as it did when these were message-only.
+pub const PROVIDER_ERROR_ZDR_UNAVAILABLE: &str = "zdr_unavailable";
+
+/// Value of [`PROVIDER_ERROR_KIND_TRAILER`] when no matching deployment meets
+/// the requested residency floor, or an embedding region is outside the EU
+/// boundary. Refused before any provider is called.
+pub const PROVIDER_ERROR_RESIDENCY_UNAVAILABLE: &str = "residency_unavailable";
+
+/// Value of [`PROVIDER_ERROR_KIND_TRAILER`] when no configured provider
+/// satisfies the requested minimum privacy tier. Refused before any provider
+/// is called.
+pub const PROVIDER_ERROR_TIER_UNAVAILABLE: &str = "tier_unavailable";
+
 /// Add one typed trailer. Every value here is a static code, a number or a
 /// formatted timestamp, all valid ASCII; if one ever were not, that signal is
 /// simply absent and the status code still applies.
@@ -1397,6 +1416,25 @@ fn typed_status(
         );
     }
     Status::with_metadata(code, message, metadata)
+}
+
+/// A posture refusal on the wire: the caller asked for a guarantee (verified
+/// ZDR, an EU residency floor, a minimum privacy tier) that no configured
+/// provider can honor, so no provider was called.
+///
+/// All three share `FAILED_PRECONDITION` on purpose, because the caller can act
+/// on it (adjust the request, or opt in) rather than retry blindly, and a
+/// consumer that predates the kind trailer keeps reading the code it always
+/// read. The `kind` is what tells the three apart, so no caller has to match
+/// the message text. The message is the refusal's own, content-free sentence.
+fn posture_refusal_status(kind: &'static str, message: String) -> Status {
+    typed_status(tonic::Code::FailedPrecondition, message, kind, None, None)
+}
+
+/// The zero-retention refusal: the chain's own, and the one every non-chat
+/// modality returns when ZDR applies and no deployment of it is attested.
+fn zdr_unavailable_status(message: String) -> Status {
+    posture_refusal_status(PROVIDER_ERROR_ZDR_UNAVAILABLE, message)
 }
 
 /// A ChatGPT-subscription refusal on the wire.
@@ -1458,13 +1496,29 @@ fn provider_error_to_status(error: provider::ProviderError) -> Status {
             retry_after_ms,
             resets_at,
         } => subscription_refused_status(reason, retry_after_ms, resets_at),
-        // All three posture rejections share FAILED_PRECONDITION on purpose: the
-        // caller asked for a guarantee (EU residency, verified ZDR, or a minimum
-        // privacy tier) that no configured provider can honor, so the caller can
-        // act on it (adjust the request / opt in) rather than retry blindly.
-        provider::ProviderError::ResidencyViolation(message)
-        | provider::ProviderError::ZdrUnavailable(message)
-        | provider::ProviderError::TierUnavailable(message) => Status::failed_precondition(message),
+        // The three posture rejections: one code, three kinds. See
+        // `posture_refusal_status`.
+        provider::ProviderError::ResidencyViolation(message) => {
+            posture_refusal_status(PROVIDER_ERROR_RESIDENCY_UNAVAILABLE, message)
+        }
+        provider::ProviderError::ZdrUnavailable(message) => zdr_unavailable_status(message),
+        provider::ProviderError::TierUnavailable(message) => {
+            posture_refusal_status(PROVIDER_ERROR_TIER_UNAVAILABLE, message)
+        }
+    }
+}
+
+/// A `CreateEmbedding` failure on the wire.
+///
+/// A posture refusal is typed exactly as it is on every other path. Anything
+/// else stays `INTERNAL`, as it always has: the embedding clients retry on that
+/// code, and re-coding it here would change what they do.
+fn embedding_error_to_status(error: provider::ProviderError) -> Status {
+    match error {
+        posture @ (provider::ProviderError::ResidencyViolation(_)
+        | provider::ProviderError::ZdrUnavailable(_)
+        | provider::ProviderError::TierUnavailable(_)) => provider_error_to_status(posture),
+        other => Status::internal(other.to_string()),
     }
 }
 
@@ -1794,4 +1848,344 @@ mod tests {
         );
         assert!(status.metadata().is_empty(), "no typed trailer");
     }
+
+    /// The three posture refusals keep the code they always had and gain the
+    /// kind a caller reads instead of the prose. The kind strings are a frozen
+    /// vocabulary (the Data Plane client and the refusal catalogue key on
+    /// them), so they are spelled as literals here and not through the
+    /// constants: renaming one must fail this test, not silently follow.
+    #[test]
+    fn a_posture_refusal_is_failed_precondition_with_its_frozen_kind() {
+        for (error, message, kind) in [
+            (
+                provider::ProviderError::ZdrUnavailable("zdr gate".to_owned()),
+                "zdr gate",
+                "zdr_unavailable",
+            ),
+            (
+                provider::ProviderError::ResidencyViolation("residency gate".to_owned()),
+                "residency gate",
+                "residency_unavailable",
+            ),
+            (
+                provider::ProviderError::TierUnavailable("tier gate".to_owned()),
+                "tier gate",
+                "tier_unavailable",
+            ),
+        ] {
+            let status = provider_error_to_status(error);
+            assert_eq!(status.code(), tonic::Code::FailedPrecondition, "{kind}");
+            assert_eq!(
+                status.message(),
+                message,
+                "{kind}: the message is unchanged"
+            );
+            assert_eq!(trailer(&status, "x-mp-provider-error"), Some(kind));
+            assert_eq!(trailer(&status, "x-mp-retry-after-ms"), None, "{kind}");
+            assert_eq!(trailer(&status, "x-mp-resets-at"), None, "{kind}");
+        }
+    }
+
+    /// A non-chat modality refused under ZDR names the same kind as the chat
+    /// chain does, whether ZDR came from the token or from the request's flag.
+    #[test]
+    fn a_zdr_modality_refusal_names_its_kind() {
+        for (issuer_zdr, request_zdr) in [(true, false), (false, true), (true, true)] {
+            let principal =
+                AuthenticatedPrincipal::for_test("org-zdr", Some("user-zdr"), issuer_zdr);
+            let status = reject_unattested_zdr_modality(&principal, request_zdr, "translation")
+                .expect_err("an unattested modality is refused under ZDR");
+            let case = format!("issuer_zdr={issuer_zdr} request_zdr={request_zdr}");
+            assert_eq!(status.code(), tonic::Code::FailedPrecondition, "{case}");
+            assert!(status.message().contains("translation"), "{case}");
+            assert_eq!(
+                trailer(&status, "x-mp-provider-error"),
+                Some("zdr_unavailable"),
+                "{case}"
+            );
+        }
+    }
+
+    /// The committed status contract: what the Data Plane client (and any other
+    /// caller) may rely on, generated from the code under test rather than
+    /// written by hand. Regenerate with `MP_UPDATE_GOLDEN=1`; the repo-level
+    /// `scripts/tests/zdr-contract-sync.test.sh` then needs its pinned digest
+    /// updated, which is the deliberate second step of changing the contract.
+    const STATUS_CONTRACT_PATH: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../../api/contracts/infer-statuses.json"
+    );
+
+    /// One row per way a call can fail, built from the real mappers.
+    fn status_contract_cases() -> Vec<(String, &'static str, Status)> {
+        use provider::{ProviderError as E, SubscriptionRefusal as S};
+        let resets_at = chrono::DateTime::parse_from_rfc3339("2026-09-26T01:21:00.750+02:00")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let principal = AuthenticatedPrincipal::for_test("org-zdr", Some("user-zdr"), true);
+        let mut cases: Vec<(String, &'static str, Status)> = Vec::new();
+        let mut add = |id: &str, source: &'static str, status: Status| {
+            cases.push((id.to_owned(), source, status));
+        };
+        for error in [
+            E::Http("upstream reset".to_owned()),
+            E::Unavailable("provider unavailable".to_owned()),
+            E::SubscriptionFailed("subscription_broker_failed".to_owned()),
+            E::InvalidResponse("bad response".to_owned()),
+            E::UnsupportedModel("model".to_owned()),
+            E::AllExhausted { attempts: 3 },
+            E::TooLong {
+                detail: "413: too long".to_owned(),
+            },
+            E::RateLimited {
+                retry_after_ms: 1_500,
+            },
+            E::ZdrUnavailable(
+                "no matching provider deployment has verified ZDR support".to_owned(),
+            ),
+            E::ResidencyViolation(
+                "no matching provider deployment meets the residency floor".to_owned(),
+            ),
+            E::TierUnavailable("no configured provider satisfies privacy tier".to_owned()),
+        ] {
+            let source = status_contract_source(&error);
+            let id = status_contract_id(source);
+            add(&id, source, provider_error_to_status(error));
+        }
+        for (reason, id) in [
+            (S::UsageLimit, "subscription_usage_limit"),
+            (S::ReauthRequired, "subscription_reauth_required"),
+            (S::UpstreamUnavailable, "subscription_upstream_unavailable"),
+            (S::BadRequest, "subscription_bad_request"),
+        ] {
+            for (suffix, retry_after_ms, resets_at) in [
+                ("with_timing", Some(52_260_000), Some(resets_at)),
+                ("without_timing", None, None),
+            ] {
+                add(
+                    &format!("{id}_{suffix}"),
+                    "ProviderError::SubscriptionRefused",
+                    provider_error_to_status(E::SubscriptionRefused {
+                        reason,
+                        retry_after_ms,
+                        resets_at,
+                    }),
+                );
+            }
+        }
+        add(
+            "modality_refused_under_zdr",
+            "reject_unattested_zdr_modality",
+            reject_unattested_zdr_modality(&principal, false, "translation")
+                .expect_err("an unattested modality is refused under ZDR"),
+        );
+        // CreateEmbedding types the three posture refusals like every other
+        // path and keeps INTERNAL for the rest (its clients retry on it).
+        for (id, error) in [
+            (
+                "embedding_zdr_unavailable",
+                E::ZdrUnavailable("no matching provider deployment has verified ZDR".to_owned()),
+            ),
+            (
+                "embedding_residency_unavailable",
+                E::ResidencyViolation("embedding region is outside the EU boundary".to_owned()),
+            ),
+            (
+                "embedding_tier_unavailable",
+                E::TierUnavailable("no configured provider satisfies the tier".to_owned()),
+            ),
+            (
+                "embedding_provider_http",
+                E::Http("upstream reset".to_owned()),
+            ),
+        ] {
+            add(
+                id,
+                "embedding_error_to_status",
+                embedding_error_to_status(error),
+            );
+        }
+        cases
+    }
+
+    #[test]
+    fn an_embedding_posture_refusal_is_typed_and_any_other_failure_stays_internal() {
+        use provider::ProviderError as E;
+        for (error, kind) in [
+            (E::ZdrUnavailable("zdr".to_owned()), "zdr_unavailable"),
+            (
+                E::ResidencyViolation("residency".to_owned()),
+                "residency_unavailable",
+            ),
+            (E::TierUnavailable("tier".to_owned()), "tier_unavailable"),
+        ] {
+            let message = match &error {
+                E::ZdrUnavailable(m) | E::ResidencyViolation(m) | E::TierUnavailable(m) => {
+                    m.clone()
+                }
+                _ => unreachable!(),
+            };
+            let status = embedding_error_to_status(error);
+            assert_eq!(status.code(), tonic::Code::FailedPrecondition, "{kind}");
+            assert_eq!(status.message(), message, "{kind}");
+            assert_eq!(trailer(&status, "x-mp-provider-error"), Some(kind));
+        }
+        for error in [
+            E::Http("upstream reset".to_owned()),
+            E::RateLimited {
+                retry_after_ms: 1_000,
+            },
+            E::AllExhausted { attempts: 2 },
+        ] {
+            let status = embedding_error_to_status(error);
+            assert_eq!(status.code(), tonic::Code::Internal);
+            assert!(
+                status.metadata().is_empty(),
+                "an INTERNAL embedding failure is untyped"
+            );
+        }
+    }
+
+    /// Exhaustive on purpose: a new `ProviderError` variant does not compile
+    /// until it is given a name here, so it cannot reach the wire without
+    /// reaching the committed contract.
+    fn status_contract_source(error: &provider::ProviderError) -> &'static str {
+        use provider::ProviderError as E;
+        match error {
+            E::Http(_) => "ProviderError::Http",
+            E::RateLimited { .. } => "ProviderError::RateLimited",
+            E::SubscriptionRefused { .. } => "ProviderError::SubscriptionRefused",
+            E::InvalidResponse(_) => "ProviderError::InvalidResponse",
+            E::Unavailable(_) => "ProviderError::Unavailable",
+            E::SubscriptionFailed(_) => "ProviderError::SubscriptionFailed",
+            E::TooLong { .. } => "ProviderError::TooLong",
+            E::AllExhausted { .. } => "ProviderError::AllExhausted",
+            E::UnsupportedModel(_) => "ProviderError::UnsupportedModel",
+            E::ResidencyViolation(_) => "ProviderError::ResidencyViolation",
+            E::ZdrUnavailable(_) => "ProviderError::ZdrUnavailable",
+            E::TierUnavailable(_) => "ProviderError::TierUnavailable",
+        }
+    }
+
+    fn status_contract_id(source: &str) -> String {
+        let name = source.trim_start_matches("ProviderError::");
+        let mut id = String::new();
+        for (index, ch) in name.chars().enumerate() {
+            if ch.is_ascii_uppercase() && index > 0 {
+                id.push('_');
+            }
+            id.push(ch.to_ascii_lowercase());
+        }
+        format!("provider_{id}")
+    }
+
+    fn grpc_code_name(code: tonic::Code) -> &'static str {
+        match code {
+            tonic::Code::InvalidArgument => "INVALID_ARGUMENT",
+            tonic::Code::ResourceExhausted => "RESOURCE_EXHAUSTED",
+            tonic::Code::FailedPrecondition => "FAILED_PRECONDITION",
+            tonic::Code::Unimplemented => "UNIMPLEMENTED",
+            tonic::Code::Internal => "INTERNAL",
+            tonic::Code::Unavailable => "UNAVAILABLE",
+            other => panic!("the status contract has no name for {other:?}; add it"),
+        }
+    }
+
+    #[derive(serde::Serialize)]
+    struct StatusContract {
+        contract: &'static str,
+        version: u32,
+        trailer_keys: std::collections::BTreeMap<&'static str, &'static str>,
+        kinds: Vec<String>,
+        cases: Vec<StatusContractCase>,
+    }
+
+    #[derive(serde::Serialize)]
+    struct StatusContractCase {
+        id: String,
+        source: &'static str,
+        grpc_code: &'static str,
+        grpc_code_number: i32,
+        trailers: std::collections::BTreeMap<String, String>,
+    }
+
+    /// The contract as bytes: pretty JSON, LF endings, one trailing newline.
+    /// Built from structs and `BTreeMap`s so the byte order never depends on
+    /// which `serde_json` features another crate in the build turned on.
+    fn render_status_contract() -> String {
+        let mut kinds = std::collections::BTreeSet::new();
+        let mut cases = Vec::new();
+        for (id, source, status) in status_contract_cases() {
+            let trailers: std::collections::BTreeMap<String, String> = status
+                .metadata()
+                .iter()
+                .filter_map(|entry| match entry {
+                    tonic::metadata::KeyAndValueRef::Ascii(key, value) => {
+                        Some((key.as_str().to_owned(), value.to_str().ok()?.to_owned()))
+                    }
+                    tonic::metadata::KeyAndValueRef::Binary(..) => None,
+                })
+                .collect();
+            if let Some(kind) = trailers.get("x-mp-provider-error") {
+                kinds.insert(kind.clone());
+            }
+            cases.push(StatusContractCase {
+                id,
+                source,
+                grpc_code: grpc_code_name(status.code()),
+                grpc_code_number: status.code() as i32,
+                trailers,
+            });
+        }
+        let contract = StatusContract {
+            contract: "inference-core.infer-statuses",
+            version: 1,
+            trailer_keys: [
+                ("kind", "x-mp-provider-error"),
+                ("resets_at", "x-mp-resets-at"),
+                ("retry_after_ms", "x-mp-retry-after-ms"),
+            ]
+            .into_iter()
+            .collect(),
+            kinds: kinds.into_iter().collect(),
+            cases,
+        };
+        let mut text = serde_json::to_string_pretty(&contract).expect("the contract serializes");
+        text.push('\n');
+        text
+    }
+
+    #[test]
+    fn the_committed_status_contract_is_what_the_code_produces() {
+        let generated = render_status_contract();
+        if std::env::var("MP_UPDATE_GOLDEN").is_ok_and(|value| value == "1") {
+            std::fs::create_dir_all(std::path::Path::new(STATUS_CONTRACT_PATH).parent().unwrap())
+                .expect("the contracts directory");
+            std::fs::write(STATUS_CONTRACT_PATH, &generated).expect("write the status contract");
+            return;
+        }
+        let committed = std::fs::read_to_string(STATUS_CONTRACT_PATH).unwrap_or_else(|error| {
+            panic!(
+                "cannot read {STATUS_CONTRACT_PATH} ({error}). Generate it with \
+                 MP_UPDATE_GOLDEN=1 cargo test -p inference-core --lib status_contract, \
+                 then pin its digest in scripts/tests/zdr-contract-sync.test.sh."
+            )
+        });
+        assert!(
+            !committed.contains('\r'),
+            "the status contract must keep LF line endings (see its .gitattributes)"
+        );
+        assert_eq!(
+            committed, generated,
+            "the committed status contract differs from what the code produces. If the change \
+             is intended, regenerate it with MP_UPDATE_GOLDEN=1 and update the pinned digest \
+             in scripts/tests/zdr-contract-sync.test.sh."
+        );
+    }
 }
+
+/// The metered call path under the real rules (real tokens, real provider
+/// configuration, rendered Prometheus text). A file of its own, so the tests that
+/// build a whole service stay out of this one.
+#[cfg(test)]
+mod real_rules_tests;

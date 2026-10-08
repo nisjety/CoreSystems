@@ -10,11 +10,15 @@ use std::sync::Arc;
 use arc_swap::ArcSwap;
 use axum::{
     extract::State,
-    http::{header::AUTHORIZATION, HeaderMap, StatusCode},
+    http::{
+        header::{AUTHORIZATION, CONTENT_TYPE},
+        HeaderMap, StatusCode,
+    },
     response::{IntoResponse, Response},
     routing::get,
     Extension, Json, Router,
 };
+use metrics_exporter_prometheus::PrometheusHandle;
 use tracing::info;
 
 use crate::auth::JwtVerifier;
@@ -34,12 +38,33 @@ pub struct PolicyState {
     pub client: Option<Arc<PolicyClient>>,
 }
 
-/// Start the HTTP health server on :8082.
+/// Start the HTTP health server on :8082. `metrics` is the handle of the
+/// process-global recorder ([`crate::metrics::install_recorder`]) that
+/// `/metrics` renders.
 ///
 /// # Errors
 ///
 /// Returns an error if the server fails to bind or serve.
-pub async fn serve(state: PolicyState, grpc_readiness: GrpcReadiness) -> anyhow::Result<()> {
+pub async fn serve(
+    state: PolicyState,
+    grpc_readiness: GrpcReadiness,
+    metrics: PrometheusHandle,
+) -> anyhow::Result<()> {
+    let app = router(state, grpc_readiness, metrics);
+
+    let listener = tokio::net::TcpListener::bind("0.0.0.0:8082").await?;
+    info!("HTTP health listening on :8082");
+    axum::serve(listener, app).await?;
+    Ok(())
+}
+
+/// Every route of the :8082 server. Split from [`serve`] so a test can mount it
+/// on an ephemeral port.
+pub fn router(
+    state: PolicyState,
+    grpc_readiness: GrpcReadiness,
+    metrics: PrometheusHandle,
+) -> Router {
     let policy_routes = Router::new()
         .route(
             "/internal/v1/router-policy",
@@ -47,18 +72,18 @@ pub async fn serve(state: PolicyState, grpc_readiness: GrpcReadiness) -> anyhow:
         )
         .with_state(state);
 
-    let app = Router::new()
+    Router::new()
         .route("/healthz", get(healthz))
         .route("/readyz", get(readyz))
         .route("/version", get(version))
-        .route("/metrics", get(metrics_handler))
+        .merge(metrics_route(metrics))
         .merge(policy_routes)
-        .layer(Extension(grpc_readiness));
+        .layer(Extension(grpc_readiness))
+}
 
-    let listener = tokio::net::TcpListener::bind("0.0.0.0:8082").await?;
-    info!("HTTP health listening on :8082");
-    axum::serve(listener, app).await?;
-    Ok(())
+/// `GET /metrics`: the Prometheus text exposition of the recorder behind `handle`.
+pub fn metrics_route(handle: PrometheusHandle) -> Router {
+    Router::new().route("/metrics", get(metrics_handler).with_state(handle))
 }
 
 async fn healthz() -> &'static str {
@@ -73,8 +98,15 @@ async fn readyz(Extension(grpc_readiness): Extension<GrpcReadiness>) -> Response
     }
 }
 
-async fn metrics_handler() -> impl IntoResponse {
-    (StatusCode::OK, "# HELP inference_core_requests_total\n")
+/// Prometheus text exposition format, version 0.0.4.
+const PROMETHEUS_TEXT: &str = "text/plain; version=0.0.4; charset=utf-8";
+
+async fn metrics_handler(State(handle): State<PrometheusHandle>) -> impl IntoResponse {
+    (
+        StatusCode::OK,
+        [(CONTENT_TYPE, PROMETHEUS_TEXT)],
+        handle.render(),
+    )
 }
 
 /// Reports what is actually running in this container: the git revision and
@@ -194,5 +226,48 @@ mod tests {
         readiness.mark_bound();
         let after_bind = readyz(Extension(readiness)).await.into_response();
         assert_eq!(after_bind.status(), StatusCode::OK);
+    }
+
+    /// `/metrics` is what the recorder rendered, over a real HTTP round trip,
+    /// not the fixed 37-byte line it used to answer with whatever had happened.
+    #[tokio::test]
+    async fn metrics_serves_the_recorders_exposition_over_http() {
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        ::metrics::with_local_recorder(&recorder, || {
+            crate::metrics::record_request(
+                "infer",
+                "service:data-orchestrator",
+                "gpt-4o-mini",
+                "azure-openai",
+                "zdr_unavailable",
+            );
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("an ephemeral port");
+        let address = listener.local_addr().expect("the bound address");
+        tokio::spawn(async move { axum::serve(listener, metrics_route(handle)).await });
+
+        let response = reqwest::get(format!("http://{address}/metrics"))
+            .await
+            .expect("the scrape");
+
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get(CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok()),
+            Some(PROMETHEUS_TEXT)
+        );
+        let body = response.text().await.expect("the body");
+        assert!(body.len() > 37, "more than the old stub: {body}");
+        assert!(
+            body.contains("inference_requests_total{")
+                && body.contains("service=\"service:data-orchestrator\"")
+                && body.contains("outcome=\"zdr_unavailable\""),
+            "{body}"
+        );
     }
 }

@@ -51,6 +51,40 @@ impl NatsPublisher {
 
 impl EventPublisher for NatsPublisher {
     async fn publish(&self, subject: &str, envelope: &Envelope) -> Result<(), PublishError> {
+        // Accounting must wait for durable storage, not merely enqueue a
+        // transient socket publish. Other event contracts keep their existing
+        // compatibility routing. Usage is canonical and content-free.
+        if subject.starts_with("mp.v1.usage.") {
+            if envelope.zdr {
+                return Ok(());
+            }
+            if envelope.idempotency_key.is_empty() {
+                return Err(PublishError::Transport(
+                    "usage idempotency key is required".into(),
+                ));
+            }
+            let mut headers = async_nats::HeaderMap::new();
+            headers.insert(
+                "Nats-Msg-Id",
+                format!("{}:{}", envelope.org_id, envelope.idempotency_key),
+            );
+            let ack = async_nats::jetstream::new(self.client.clone())
+                .publish_with_headers(
+                    subject.to_owned(),
+                    headers,
+                    envelope.to_json_bytes()?.into(),
+                )
+                .await
+                .map_err(|e| PublishError::Transport(e.to_string()))?
+                .await
+                .map_err(|e| PublishError::Transport(e.to_string()))?;
+            if ack.stream != "MODEL_PLANE_USAGE_EVENTS" {
+                return Err(PublishError::Transport(
+                    "usage acknowledged by unexpected stream".into(),
+                ));
+            }
+            return Ok(());
+        }
         let bytes = envelope.to_json_bytes()?;
 
         for publish_subject in Self::dispatch_subjects(self.mode, subject)? {

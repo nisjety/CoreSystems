@@ -318,12 +318,58 @@ fn social_list_payload(
 /// Returns an error when insight-core is unreachable, rejects the read, or
 /// returns a payload that is not the documented `{ data: Overview }` envelope.
 pub async fn insights_overview(state: &AppState, org_id: &str) -> Result<String, String> {
+    insights_overview_filtered(state, org_id, "", None, None, None).await
+}
+
+pub async fn insights_overview_filtered(
+    state: &AppState,
+    org_id: &str,
+    user_id: &str,
+    cost_bearer: Option<&str>,
+    surface: Option<&str>,
+    period: Option<&str>,
+) -> Result<String, String> {
+    const SURFACES: &[&str] = &[
+        "social",
+        "inbox",
+        "agents",
+        "chat",
+        "knowledge",
+        "ingestion",
+        "campaigns",
+        "external_analytics",
+    ];
+    let mut query: Vec<(&str, String)> = Vec::new();
+    let mut cost_query: Vec<(String, String)> = vec![
+        ("org_id".to_owned(), org_id.to_owned()),
+        ("user_id".to_owned(), user_id.to_owned()),
+    ];
+    if let Some(surface) = surface.map(str::trim).filter(|v| !v.is_empty()) {
+        if !SURFACES.contains(&surface) {
+            return Err("unsupported Insights surface".to_owned());
+        }
+        query.push(("surface", surface.to_owned()));
+    }
+    if let Some(period) = period.map(str::trim).filter(|v| !v.is_empty() && *v != "all") {
+        let days = match period {
+            "7d" => 7,
+            "30d" => 30,
+            "90d" => 90,
+            _ => return Err("period must be 7d, 30d, 90d, or all".to_owned()),
+        };
+        let to = chrono::Utc::now();
+        let from = to - chrono::Duration::days(days);
+        query.push(("from", from.to_rfc3339()));
+        query.push(("to", to.to_rfc3339()));
+        cost_query.push(("since".to_owned(), from.to_rfc3339()));
+        cost_query.push(("until".to_owned(), to.to_rfc3339()));
+    }
     let body = application_core_get(
         state,
         &state.insight_core_base_url,
         "/api/v1/insights/overview",
         org_id,
-        &[],
+        &query,
         "insight-core",
     )
     .await?;
@@ -339,10 +385,34 @@ pub async fn insights_overview(state: &AppState, org_id: &str) -> Result<String,
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
-    let (scorecards, scorecards_withheld) = capped_rows(
+    let (mut scorecards, scorecards_withheld) = capped_rows(
         &scorecards,
-        &["label", "surface", "metric", "value", "unit", "source"],
+        &[
+            "id",
+            "label",
+            "definition",
+            "surface",
+            "metric",
+            "value",
+            "unit",
+            "source",
+            "event_count",
+            "aggregation",
+        ],
     );
+    for scorecard in &mut scorecards {
+        if scorecard.get("aggregation").and_then(Value::as_str) == Some("unverified") {
+            if let Some(object) = scorecard.as_object_mut() {
+                object.insert("value".to_owned(), Value::Null);
+            }
+        }
+    }
+
+    let usage = if let Some(bearer) = cost_bearer.filter(|value| !value.trim().is_empty()) {
+        personal_cost_report(state, bearer, &cost_query).await
+    } else {
+        json!({ "state": "unavailable", "reason": "An authorized personal Cost Core credential is not available for this turn." })
+    };
 
     let surfaces = overview
         .get("surfaces")
@@ -352,32 +422,83 @@ pub async fn insights_overview(state: &AppState, org_id: &str) -> Result<String,
     let (surfaces, surfaces_withheld) =
         capped_rows(&surfaces, &["surface", "total_events", "last_event_at"]);
 
-    // Connector *slots* are a capability catalogue (native / planned /
-    // requires_token_lease / disabled), NOT a list of live connections — only
-    // the status is reported so the model cannot present a planned connector as
-    // an active integration.
-    let connectors = overview
-        .get("connectors")
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default();
-    let (connectors, connectors_withheld) =
-        capped_rows(&connectors, &["type", "display_name", "surface", "status"]);
-
     Ok(json!({
         "upstream": "insight-core /api/v1/insights/overview",
+        "contract_version": overview.get("contract_version").cloned().unwrap_or(json!("1.x")),
         "generated_at": overview.get("generated_at").cloned().unwrap_or(Value::Null),
         "window": overview.get("window").cloned().unwrap_or(Value::Null),
+        "coverage": overview.get("coverage").cloned().unwrap_or(json!("unknown")),
+        "coverage_detail": overview.get("coverage_detail").cloned().unwrap_or(json!("Source delivery checkpoints are not available.")),
+        "personal_ai_usage": usage,
         "scorecards": scorecards,
         "scorecards_withheld": scorecards_withheld,
         "surfaces": surfaces,
         "surfaces_withheld": surfaces_withheld,
-        "connector_slots": connectors,
-        "connector_slots_withheld": connectors_withheld,
-        "connector_lag": overview.get("connector_lag").cloned().unwrap_or(Value::Null),
-        "note": "connector_slots is the supported-connector catalogue with wiring status, not a list of live connections.",
+        "note": "These are recorded source events for the returned window. Coverage is unknown until source delivery checkpoints are available; totals are not guaranteed complete. Each row includes its definition, source, unit, aggregation, and supporting event count.",
     })
     .to_string())
+}
+
+/// Read the signed-in user's ledger through Cost Core's user-bound bearer.
+/// Never replaces that authority with the internal service key: the bearer
+/// pins both organization and actor at the owning service.
+async fn personal_cost_report(
+    state: &AppState,
+    bearer: &str,
+    query: &[(String, String)],
+) -> Value {
+    let base_url = std::env::var("COST_CORE_URL")
+        .unwrap_or_else(|_| "http://localhost:8089".to_owned());
+    let url = format!("{}/api/v1/cost/aggregate", base_url.trim_end_matches('/'));
+    let response = state
+        .http_client
+        .get(url)
+        .query(query)
+        .bearer_auth(bearer)
+        .timeout(std::time::Duration::from_secs(4))
+        .send()
+        .await;
+    let Ok(response) = response else {
+        return json!({ "state": "unavailable", "reason": "Cost Core did not respond; usage is not inferred." });
+    };
+    if !response.status().is_success() {
+        return json!({ "state": "unavailable", "reason": format!("Cost Core returned HTTP {}.", response.status().as_u16()) });
+    }
+    let Ok(body) = response.json::<Value>().await else {
+        return json!({ "state": "unavailable", "reason": "Cost Core returned an invalid usage report." });
+    };
+    let required_counts = [
+        "entry_count", "metered_entry_count", "subscription_entry_count",
+        "unknown_basis_entry_count", "zero_token_entry_count",
+        "subscription_input_tokens", "subscription_output_tokens",
+        "unknown_basis_input_tokens", "unknown_basis_output_tokens",
+    ];
+    if required_counts.iter().any(|key| body.get(key).and_then(Value::as_i64).is_none())
+        || body.get("metered_cost_usd").and_then(Value::as_f64).is_none()
+    {
+        return json!({ "state": "unavailable", "reason": "Cost Core did not provide the billing-basis fields needed to explain usage." });
+    }
+    let since = query.iter().find(|(key, _)| key == "since").map(|(_, value)| value.as_str());
+    let until = query.iter().find(|(key, _)| key == "until").map(|(_, value)| value.as_str());
+    let coverage_incomplete = body["unknown_basis_entry_count"].as_i64().unwrap_or(0) > 0
+        || body["zero_token_entry_count"].as_i64().unwrap_or(0) > 0;
+    json!({
+        "state": if body["entry_count"].as_i64().unwrap_or(0) == 0 { "no_data" } else if coverage_incomplete { "partial" } else { "measured" },
+        "scope": "signed_in_user",
+        "window": { "since": since, "until": until },
+        "entry_count": body["entry_count"],
+        "metered_entry_count": body["metered_entry_count"],
+        "metered_cost_usd": body["metered_cost_usd"],
+        "subscription_entry_count": body["subscription_entry_count"],
+        "subscription_input_tokens": body["subscription_input_tokens"],
+        "subscription_output_tokens": body["subscription_output_tokens"],
+        "unknown_basis_entry_count": body["unknown_basis_entry_count"],
+        "unknown_basis_input_tokens": body["unknown_basis_input_tokens"],
+        "unknown_basis_output_tokens": body["unknown_basis_output_tokens"],
+        "zero_token_entry_count": body["zero_token_entry_count"],
+        "latest_entry_at": body.get("latest_entry_at").cloned().unwrap_or(Value::Null),
+        "note": "Metered spend is an estimated ledger amount. Subscription entries show recorded usage and reported tokens, not subscription allowance consumed; zero-token entries do not prove zero usage.",
+    })
 }
 
 // ============================================================================
