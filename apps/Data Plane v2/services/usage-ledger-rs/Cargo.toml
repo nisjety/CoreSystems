@@ -1,0 +1,23 @@
+[package]
+name = "usage-ledger-rs"
+version.workspace = true
+edition.workspace = true
+description = "The Data Plane usage ledger: the schema_version 2 event every producer emits for a paid provider call, built from what the provider reported, signed with the producer's event key and published to the durable DATAPLANE_COST stream"
+
+[dependencies]
+async-nats.workspace = true
+event-envelope-rs = { path = "../event-envelope-rs" }
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+base64 = "0.22"
+chrono.workspace = true
+rand = "0.8"
+rsa = { version = "0.9", features = ["pem"] }
+tokio = { workspace = true, features = ["test-util"] }
