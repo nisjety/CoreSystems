@@ -6,6 +6,7 @@ import { formatDerivedTrafficMetadata, formatTrafficObservation, loadDashboardIn
 import { getSession } from '@/shared/session/session-store'
 import { useI18n } from '@/shared/i18n'
 import { dashboardCards, type DashboardCard } from './dashboard-cards'
+import { useHomeLayout } from './home-layout-state'
 import './dashboard-updates.css'
 
 type FeedData = { kind: 'news'; payload: InformationNewsPayload } | { kind: 'traffic'; payload: InformationTrafficPayload; nearby: boolean } | { kind: 'aquatiq'; payload: AquatiqUpdates }
@@ -13,8 +14,11 @@ type FeedData = { kind: 'news'; payload: InformationNewsPayload } | { kind: 'tra
 export function DashboardUpdatesCard(props: { onPrompt: (card: DashboardCard) => void }) {
   const i18n = useI18n()
   const session = getSession()
-  const [feed, setFeed] = createSignal<HomeUpdatesFeed>('news')
-  const [category, setCategory] = createSignal('all')
+  // The card remounts with the Home tab, so the feed and topic are remembered
+  // per browser and account instead of resetting to News / All each time.
+  const [layout, updateLayout] = useHomeLayout()
+  const feed = () => layout().feed
+  const category = () => layout().category
   const [site, setSite] = createSignal('all')
   const [revision, setRevision] = createSignal(0)
   const [data, setData] = createSignal<FeedData | null>(null)
@@ -29,7 +33,7 @@ export function DashboardUpdatesCard(props: { onPrompt: (card: DashboardCard) =>
   const subtitle = () => feed() === 'news' ? i18n.tr('Siste fra norske redaksjoner', 'Latest from Norwegian publishers') : feed() === 'traffic' ? 'Statens vegvesen' : i18n.tr('Synkroniserte SharePoint-sider', 'Synced SharePoint pages')
   const selectFeed = (value: HomeUpdatesFeed) => {
     const action = homeUpdatesActionSchema.parse({ type: 'home.updates.select', feed: value })
-    setFeed(action.feed)
+    updateLayout({ feed: action.feed })
   }
   createEffect(
     () => ({ feed: feed(), category: category(), revision: revision(), org: session.activeOrg?.id, user: session.user?.id }),
@@ -74,7 +78,7 @@ export function DashboardUpdatesCard(props: { onPrompt: (card: DashboardCard) =>
   const Switcher = () => <div class="home-updates__switcher" role="group" aria-label={i18n.tr('Velg oppdateringer', 'Choose updates')}><For each={feeds}>{(value) => <button type="button" aria-pressed={feed() === value ? 'true' : 'false'} onClick={() => selectFeed(value)}>{label(value)}</button>}</For></div>
   const Refresh = () => <button type="button" class="home-updates__icon" disabled={loading()} aria-label={i18n.tr('Oppdater', 'Refresh updates')} onClick={() => setRevision((value) => value + 1)}><RefreshCw size={15} /></button>
   const Filters = () => <>
-    <Show when={feed() === 'news'}><select aria-label={i18n.tr('Filtrer nyheter', 'Filter news')} value={category()} onChange={(event) => setCategory(event.currentTarget.value)}><For each={newsCategoryOptions}>{(option) => <option value={option.value}>{option.value === 'all' ? i18n.tr('Alle emner', 'All topics') : option.value === 'General' ? i18n.tr('Generelt', 'General') : option.value === 'Business' ? i18n.tr('Næring', 'Business') : i18n.tr('Teknologi', 'Technology')}</option>}</For></select></Show>
+    <Show when={feed() === 'news'}><select aria-label={i18n.tr('Filtrer nyheter', 'Filter news')} value={category()} onChange={(event) => updateLayout({ category: event.currentTarget.value })}><For each={newsCategoryOptions}>{(option) => <option value={option.value}>{option.value === 'all' ? i18n.tr('Alle emner', 'All topics') : option.value === 'General' ? i18n.tr('Generelt', 'General') : option.value === 'Business' ? i18n.tr('Næring', 'Business') : i18n.tr('Teknologi', 'Technology')}</option>}</For></select></Show>
     <Show when={feed() === 'aquatiq' && sites().length > 1}><select aria-label={i18n.tr('SharePoint-nettsted', 'SharePoint site')} value={site()} onChange={(event) => setSite(event.currentTarget.value)}><option value="all">{i18n.tr('Alle nettsteder', 'All sites')}</option><For each={sites()}>{(value) => <option value={value}>{new URL(value).pathname.replace('/sites/', '') || new URL(value).hostname}</option>}</For></select></Show>
   </>
   const Feed = (view: { full?: boolean }) => <div class="home-updates__feed" aria-busy={loading() ? 'true' : 'false'}>

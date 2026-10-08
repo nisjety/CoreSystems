@@ -252,10 +252,10 @@ export default function InboxPage() {
     }
     return byConversation
   })
-  const tickets = () => baseTickets().map((ticket) => ({
+  const tickets = createMemo(() => baseTickets().map((ticket) => ({
     ...ticket,
     supportTicket: supportTicketByConversation().get(ticket.conversationId) ?? null,
-  }))
+  })))
 
   const [groupsRes, { mutate: mutateGroups }] = createResource(
     orgId,

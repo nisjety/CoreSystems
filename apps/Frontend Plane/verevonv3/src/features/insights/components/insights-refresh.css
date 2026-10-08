@@ -1,0 +1,32 @@
+.verevon-insights-refresh {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 14px;
+  color: var(--verevon-text-muted);
+  font-size: 12px;
+}
+
+.verevon-insights-refresh button {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  border: 1px solid var(--verevon-border);
+  border-radius: 10px;
+  padding: 7px 11px;
+  background: var(--panel);
+  color: var(--verevon-text);
+  cursor: pointer;
+}
+
+.verevon-insights-refresh button:disabled {
+  opacity: .6;
+  cursor: default;
+}
+
+.verevon-insights-refresh button:focus-visible {
+  outline: 2px solid var(--verevon-text);
+  outline-offset: 2px;
+}

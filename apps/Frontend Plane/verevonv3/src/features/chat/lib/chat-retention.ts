@@ -21,6 +21,8 @@
  *     everything local, immediately.
  *   * [`isLocalRetentionAllowed`] — the write gate, read by the single funnel
  *     all local content writes go through.
+ *   * [`subscribeLocalRetention`] — for the code that holds an in-memory copy
+ *     of that gate (the Home draft), so it follows the posture without polling.
  *   * [`forgetThreadLocally`] — a save answered `retained: false` means the
  *     server kept nothing, so neither may we.
  *   * [`reconcileLocalThreads`] — a thread the server no longer lists has been
@@ -31,6 +33,7 @@
  * the server cannot reach on its own.
  */
 
+import { clearHomeLocalContent } from '@/shared/session/home-local-content'
 import {
   clearChatThreadHistory,
   readChatThreadHistory,
@@ -65,6 +68,21 @@ export function isLocalRetentionAllowed(): boolean {
   return retentionAllowed
 }
 
+const listeners = new Set<(allowed: boolean) => void>()
+
+/**
+ * Calls `listener` with the new verdict each time the posture changes (not with
+ * the current one on subscribing: read {@link isLocalRetentionAllowed} for that).
+ * By then the local copies a denial purges are already gone. Returns the
+ * function that withdraws the listener.
+ */
+export function subscribeLocalRetention(listener: (allowed: boolean) => void): () => void {
+  listeners.add(listener)
+  return () => {
+    listeners.delete(listener)
+  }
+}
+
 /**
  * Record the server's retention verdict, purging local storage when it denies.
  *
@@ -78,7 +96,19 @@ export function applyServerRetention(zdr: boolean | undefined): void {
   const allowed = !zdr
   if (allowed === retentionAllowed) return
   retentionAllowed = allowed
-  if (!allowed) clearChatThreadHistory()
+  if (!allowed) {
+    clearChatThreadHistory()
+    // Home keeps its own local copies of what a person typed or searched for
+    // (unsent draft, saved search, Nett history). The same verdict applies.
+    clearHomeLocalContent()
+  }
+  for (const listener of [...listeners]) {
+    try {
+      listener(allowed)
+    } catch {
+      // One listener failing must not keep the others from learning the verdict.
+    }
+  }
 }
 
 /** Drop one thread's local copy — used when a save comes back unretained. */

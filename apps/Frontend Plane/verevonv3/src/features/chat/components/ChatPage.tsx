@@ -46,6 +46,7 @@ import {
 import {
   ChatLiveRunPanel,
 } from './ChatLiveRunPanel'
+import { ChatWideResearchPanel } from './ChatWideResearchPanel'
 import { ChatWorkspaceCanvas } from './ChatWorkspaceCanvas'
 import { ChatAttachmentCanvas } from './ChatAttachmentCanvas'
 import { ScheduleDialog } from './ScheduleDialog'
@@ -261,12 +262,24 @@ export default function ChatPage() {
   // node keeps its owner, its effects and the dialog it opened.
   const composerView = composer()
 
+  // The newest assistant turn keeps its action row visible at rest (`data-latest`
+  // in ChatMessages); older turns reveal theirs on hover or focus.
+  const latestAssistantTurnId = createMemo(() => {
+    const turns = state.turns
+    for (let index = turns.length - 1; index >= 0; index -= 1) {
+      const turn = turns[index]
+      if (turn?.role === 'assistant') return turn.id
+    }
+    return null
+  })
+
   // `<For>` mappers are untracked in Solid 2. Derive the neighboring turns and
   // all per-row reactive values up front so each mapper receives plain row data
   // instead of reading the live store while it renders.
   const messageRows = createMemo(() => state.turns.map((turn, index, turns) => ({
     turn,
     createdAt: turn.createdAt,
+    isLatest: turn.role === 'assistant' && turn.id === latestAssistantTurnId(),
     showDateDivider: shouldShowDateDivider(turns[index - 1], turn),
     copied: copiedTurnId() === turn.id,
     planApproval: {
@@ -665,6 +678,15 @@ export default function ChatPage() {
   // requests per refresh, measured live. A memo hands every read the same tree.
   const liveRailWorkContent = createMemo(() => (workCanvasActive() ? contextualPanel() : undefined))
   const liveRailNavigation = createMemo(() => (workCanvasActive() ? workspaceNavigation() : undefined))
+  // Wide-research fan-out (chat-wave2-specs, 2026-09-28): the parallel item
+  // cards, hosted inside the run rail above rather than beside it. Renders
+  // nothing of its own until the watched run actually contains a
+  // subagent.research_fan_out call (≥2 delegated items sharing one batchId),
+  // so an ordinary single subagent.task delegation never shows it. A memo for
+  // the same reason as `liveRailWorkContent`: the rail reads its prop slot, and
+  // each read of an inline JSX prop would build a fresh tree with its own
+  // event-stream subscription.
+  const liveRailWideResearch = createMemo(() => <ChatWideResearchPanel runId={liveRunId()} />)
 
   /**
    * Arrow keys move between messages (audit item 26 / plan item 14).
@@ -725,10 +747,6 @@ export default function ChatPage() {
         },
       ]}
     >
-      <Show when={launchMotion()}>
-        <div class="verevon-chat-launch-wash" aria-hidden="true" />
-      </Show>
-
       {/* Streaming is silent to a screen reader: tokens append into the
           transcript, which is not a live region, so nothing is announced and a
           long deep-research turn is indistinguishable from a hung page. This
@@ -805,34 +823,35 @@ export default function ChatPage() {
                 </Show>
               </div>
               <div class="verevon-chat-thread">
-                <For each={messageRows()}>
+                {/* Keyed by turn id: messageRows rebuilds its row objects on every copy, feedback or approval change; unkeyed, each change remounted the whole transcript. */}
+                <For each={messageRows()} keyed={(row) => row.turn.id}>
                   {(row) => (
                     <>
-                      <Show when={row.showDateDivider}>
-                        <DateDivider value={row.createdAt} />
+                      <Show when={row().showDateDivider}>
+                        <DateDivider value={row().createdAt} />
                       </Show>
                       <MessageBlock
-                        copied={row.copied}
-                        message={row.turn}
-                        onBranch={() => branchAt(row.turn.id)}
-                        onCopy={() => void copyTurn(row.turn)}
-                        onEdit={(text) => void editAndResubmit(row.turn.id, text)}
+                        copied={row().copied}
+                        message={row().turn}
+                        onBranch={() => branchAt(row().turn.id)}
+                        onCopy={() => void copyTurn(row().turn)}
+                        onEdit={(text) => void editAndResubmit(row().turn.id, text)}
                         onRegenerate={regenerateLatest}
-                        onContinue={() => continueGeneration(row.turn.id)}
-                        onRerunAsNewTurn={() => void rerunAsNewTurn(row.turn.id)}
-                        onScheduleThis={() => openScheduleDialogForTurn(row.turn.id)}
-                        onFeedback={(rating, note) => submitTurnFeedback(row.turn.id, rating, note)}
+                        onContinue={() => continueGeneration(row().turn.id)}
+                        onRerunAsNewTurn={() => void rerunAsNewTurn(row().turn.id)}
+                        onScheduleThis={() => openScheduleDialogForTurn(row().turn.id)}
+                        onFeedback={(rating, note) => submitTurnFeedback(row().turn.id, rating, note)}
                         onApprovalDecision={(approvalId, decision) =>
-                          void handleApprovalDecision(row.turn.id, approvalId, decision)
+                          void handleApprovalDecision(row().turn.id, approvalId, decision)
                         }
                         onApprovePlan={(rung, justification, steps) =>
-                          void approveTurnPlan(row.turn.id, rung, justification, steps)
+                          void approveTurnPlan(row().turn.id, rung, justification, steps)
                         }
-                        onRejectPlan={(_planId, reason) => void rejectTurnPlan(row.turn.id, reason)}
-                        pinned={pinnedMessages().includes(row.turn.id)}
+                        onRejectPlan={(_planId, reason) => void rejectTurnPlan(row().turn.id, reason)}
+                        pinned={pinnedMessages().includes(row().turn.id)}
                         pinDisabled={pinnedMessagesFull(pinnedMessages())}
-                        onTogglePin={() => togglePin(row.turn.id)}
-                        planApproval={row.planApproval}
+                        onTogglePin={() => togglePin(row().turn.id)}
+                        planApproval={row().planApproval}
                         onSelectFollowUp={setInput}
                         onViewSteps={() => setActiveTab('steps')}
                         onViewAttachments={(attachmentId) => {
@@ -842,9 +861,10 @@ export default function ChatPage() {
                         // The version switcher only ever applies to the trailing
                         // assistant turn — chat-versions.ts guards versioning to
                         // the final exchange, so no other turn can have one.
-                        version={row.version}
+                        version={row().version}
+                        isLatest={row().isLatest}
                         onSelectVersion={selectExchangeVersion}
-                        editLocked={row.editLocked}
+                        editLocked={row().editLocked}
                         threadId={state.threadId}
                         temporaryChat={readAloudBlocked()}
                       />
@@ -950,6 +970,7 @@ export default function ChatPage() {
         navigation={liveRailNavigation()}
         onCloseWork={() => setActiveTab('chat')}
         workContent={liveRailWorkContent()}
+        wideResearch={liveRailWideResearch()}
       />
       <Show when={scheduleDialogOpen()}>
         <Portal>

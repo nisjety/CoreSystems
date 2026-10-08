@@ -46,15 +46,16 @@ import {
   webResultsToPreviews,
   type SearchSourceItem,
 } from '@/features/dashboard/home/dashboard-search-utils'
+import { currentSearchSnapshotKey, query, registerSearchRunner, setQuery } from '@/features/dashboard/home/dashboard-search-session'
+import { recordWebPage, recordWebQuery } from '@/features/dashboard/home/web-history'
 import { useI18n } from '@/shared/i18n'
-import { readClientJson, writeClientJson } from '@/shared/session/client-storage'
+import { isLocalRetentionAllowed } from '@/features/chat/lib/chat-retention'
+import { readClientJson, removeClientValue, writeClientJson } from '@/shared/session/client-storage'
 
-// Search session state lives at module scope so the active query survives the
-// panel unmounting on a tab switch — combined with the 4h web-search cache, the
-// last query is restored (and its preview re-renders instantly from cache) when
-// you return to the Søk tab.
-const [query, setQuery] = createSignal('')
-const searchSessionKey = 'verevon.dashboard.search.session'
+// The shared query and the saved snapshot's key live in dashboard-search-session
+// (Home resets them from there when the active Nett tab is double-clicked). The
+// snapshot belongs to the workspace and user it was saved under, and a
+// zero-data-retention workspace keeps none.
 // Client-side pagination: over-fetch one page-worth more than we show, reveal in
 // SEARCH_PAGE_SIZE increments via "Vis flere". Avoids backend offset paging
 // through the router's cross-provider merge/dedup (which has no stable offset).
@@ -79,10 +80,16 @@ export function SearchPanel(props: {
   onExpandedChange: (expanded: boolean) => void
   onPreviewActiveChange: (active: boolean) => void
   previewCollapsed?: boolean
+  /**
+   * Whether the searches run here and the pages opened from them may be kept in
+   * Home's browser-local history. Home says yes only while the composer reports
+   * that the next turn is not zero-retention; left off, nothing is remembered.
+   */
+  rememberSearches?: boolean
 }) {
   const i18n = useI18n()
   const navigate = useNavigate()
-  const restored = readSearchSnapshot()
+  const restored = isLocalRetentionAllowed() ? readSearchSnapshot(currentSearchSnapshotKey()) : null
   let suggestionsTimer: number | undefined
   let previewTimer: number | undefined
   let suggestionsController: AbortController | undefined
@@ -168,18 +175,20 @@ export function SearchPanel(props: {
       webResults: webResults(),
     }),
     (state) => {
+      // The identity now, not the one the panel was created under.
+      const key = currentSearchSnapshotKey()
+      if (!key) return
+      // An emptied query leaves nothing to resume, and the earlier search must not
+      // come back from storage after the box was cleared (backspace, select all).
+      if (!state.query.trim() || !isLocalRetentionAllowed()) {
+        removeClientValue(key)
+        return
+      }
       const snapshot: SearchSnapshot = {
         ...state,
         savedAt: Date.now(),
       }
-      if (
-        snapshot.query.trim()
-        || snapshot.previewResults.length > 0
-        || snapshot.webResults.length > 0
-        || snapshot.webAnswer
-      ) {
-        writeClientJson(searchSessionKey, snapshot)
-      }
+      writeClientJson(key, snapshot)
     },
   )
   const sourceItems = createMemo(() => {
@@ -201,13 +210,53 @@ export function SearchPanel(props: {
     setQuery(value)
   }
 
+  // Expanding swaps the compact input for the results page's input and collapsing
+  // swaps it back, so the focused input goes with the swap. Where focus was lost,
+  // hand it to the new one; focus that moved elsewhere is left alone. Only used
+  // for keyboard-started changes: a touch or mouse press has no focus to keep, and
+  // an input taking focus would raise the on-screen keyboard over the results.
+  let expandedInput: HTMLInputElement | undefined
+  const refocusWhenLost = (target: () => HTMLElement | null | undefined) => {
+    queueMicrotask(() => {
+      const active = document.activeElement
+      if (!active || active === document.body) target()?.focus()
+    })
+  }
+
   const submit = async (event: SubmitEvent) => {
     event.preventDefault()
     const trimmed = activeQuery()
     if (trimmed.length < 3) return
+    await startSearch(trimmed)
+  }
+
+  const startSearch = async (trimmed: string, options?: { focus?: boolean }) => {
     props.onExpandedChange(true)
     props.onPreviewActiveChange(false)
+    if (options?.focus) refocusWhenLost(() => expandedInput)
     await runExpandedSearch(trimmed)
+  }
+
+  // Home's Nett history card re-runs an earlier search through the same steps as
+  // submitting it here (see registerSearchRunner).
+  const runFromOutside = (text: string, options?: { focus?: boolean }) => {
+    setQuery(text)
+    // Like submitting, a search needs three characters; less is only put in the box.
+    if (text.length < 3) return
+    setActiveResultTab('Info')
+    void startSearch(text, options)
+  }
+  createEffect(() => undefined, () => registerSearchRunner(runFromOutside))
+
+  // Whether this search or page may go in the browser-local history. Read when
+  // it happens, so it reflects the composer's latest report; fails closed.
+  const rememberSearches = () => props.rememberSearches === true
+  const openPage = (page: { title?: string | null; url: string }) => {
+    if (rememberSearches()) recordWebPage(page)
+  }
+  const openResult = (result: PreviewResult) => {
+    openPage(result)
+    window.open(result.url, '_blank', 'noopener,noreferrer')
   }
 
   const runExpandedSearch = async (nextQuery: string, options?: { refreshSidecars?: boolean }) => {
@@ -215,6 +264,10 @@ export function SearchPanel(props: {
     // not depend on the web filters, so a filter-only re-run skips them and just
     // re-fetches the filtered web result list.
     const refreshSidecars = options?.refreshSidecars ?? true
+    // The one place a search is run (submit, a suggestion, a related search, Refresh,
+    // the history card); typing and the typeahead preview never get here. A filter-only
+    // re-run is the same search again, so it is not recorded a second time.
+    if (refreshSidecars && nextQuery.trim().length >= 3 && rememberSearches()) recordWebQuery(nextQuery)
     const currentFilters = filters()
     searchController?.abort()
     const controller = new AbortController()
@@ -593,6 +646,7 @@ export function SearchPanel(props: {
               <div class="dashboard-xsearch-input-row">
                 <Search class="size-4 shrink-0 text-[#9A9188]" aria-hidden="true" />
                 <input
+                  ref={(element) => { expandedInput = element }}
                   value={query()}
                   onInput={(event) => updateQuery(event.currentTarget.value)}
                   class="dashboard-xsearch-input"
@@ -659,22 +713,24 @@ export function SearchPanel(props: {
                     images={images()}
                     imagesError={imagesError()}
                     imagesStatus={imagesStatus()}
+                    onOpenPage={openPage}
                     query={activeQuery()}
                   />
                 </Match>
                 <Match when={activeResultTab() === 'Videos'}>
                   <VideoResultsPanel
                     error={videosError()}
+                    onOpenPage={openPage}
                     query={activeQuery()}
                     status={videosStatus()}
                     videos={videos()}
                   />
                 </Match>
                 <Match when={activeResultTab() === 'Map'}>
-                  <MapGuidePanel query={activeQuery()} results={webResults()} />
+                  <MapGuidePanel onOpenPage={openPage} query={activeQuery()} results={webResults()} />
                 </Match>
                 <Match when={activeResultTab() === 'Shopping'}>
-                  <ShoppingResultsPanel query={activeQuery()} results={webResults()} />
+                  <ShoppingResultsPanel onOpenPage={openPage} query={activeQuery()} results={webResults()} />
                 </Match>
                 <Match when={true}>
                   <div class="dashboard-xsearch-info">
@@ -777,7 +833,7 @@ export function SearchPanel(props: {
                           error={similarError()}
                           label={label()}
                           onClose={closeSimilar}
-                          onOpen={(next) => window.open(next.url, '_blank', 'noopener,noreferrer')}
+                          onOpen={openResult}
                           query={activeQuery()}
                           results={similarResults()}
                           status={similarStatus()}
@@ -796,8 +852,9 @@ export function SearchPanel(props: {
                             result={result}
                             index={index()}
                             image={images()[index() % Math.max(images().length, 1)]}
-                            onOpen={(next) => window.open(next.url, '_blank', 'noopener,noreferrer')}
+                            onOpen={openResult}
                             onFindSimilar={(next) => runFindSimilar({ label: next.title, url: next.url })}
+                            onOpenPage={openPage}
                           />
                         )}
                       </For>
@@ -821,6 +878,7 @@ export function SearchPanel(props: {
                 activeTab={activeResultTab()}
                 answer={webAnswer() ?? ''}
                 images={images()}
+                onOpenPage={openPage}
                 query={activeQuery()}
                 sourceItems={sourceItems().slice(0, 5)}
               />
@@ -959,8 +1017,9 @@ export function SearchPanel(props: {
   )
 }
 
-function readSearchSnapshot(): SearchSnapshot | null {
-  const snapshot = readClientJson(searchSessionKey, isSearchSnapshot)
+function readSearchSnapshot(key: string | null): SearchSnapshot | null {
+  if (!key) return null
+  const snapshot = readClientJson(key, isSearchSnapshot)
   if (!snapshot) return null
   const maxAgeMs = FOUR_HOURS_MS
   return Date.now() - snapshot.savedAt <= maxAgeMs ? snapshot : null

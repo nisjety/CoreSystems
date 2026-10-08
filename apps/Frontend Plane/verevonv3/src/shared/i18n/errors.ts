@@ -153,6 +153,21 @@ const ERROR_COPY: Record<string, ErrorCopy> = {
   INVITATION_NOT_FOUND: { no: 'Fant ikke invitasjonen. Be om en ny.', en: 'Invitation not found. Ask for a new one.' },
   plan_upgrade_required: { no: 'Oppgrader planen din for å fortsette.', en: 'Upgrade your plan to continue.' },
   entitlement_required: { no: 'Denne funksjonen er ikke inkludert i planen din.', en: 'This feature is not included in your plan.' },
+
+  // The org Zero Data Retention switch (gateway `orgs/settings.rs`), refused
+  // when no AI provider has a recorded zero-retention attestation, or when that
+  // cannot be checked. The same two codes come back from the settings page and
+  // from organization creation (the onboarding step has the same switch), so the
+  // copy names the way forward for both: carry on without it and switch it on in
+  // the settings once a provider is attested.
+  zdr_no_attested_provider: {
+    no: 'Zero Data Retention kan ikke slås på ennå: ingen AI-leverandør har en registrert nullbevaringsgodkjenning. Fortsett uten, og slå det på i innstillingene når en leverandør er godkjent.',
+    en: 'Zero Data Retention cannot be turned on yet: no AI provider has a recorded zero-retention attestation. Carry on without it, and turn it on in the settings once a provider is attested.',
+  },
+  zdr_gate_unavailable: {
+    no: 'Kunne ikke kontrollere hvilke leverandører som har registrert ZDR-godkjenning, så Zero Data Retention kan ikke slås på akkurat nå. Prøv igjen om litt, eller fortsett uten og slå det på senere.',
+    en: 'We could not check which providers have a recorded ZDR attestation, so Zero Data Retention cannot be turned on right now. Try again shortly, or carry on without it and turn it on later.',
+  },
 }
 
 /**

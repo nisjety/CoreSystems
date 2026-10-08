@@ -274,3 +274,47 @@ describe('OnboardingPage paywall commit guard', () => {
     })
   })
 })
+
+describe('OnboardingPage organization step and the Zero Data Retention switch', () => {
+  // The onboarding step carries the same switch as the security settings, and the
+  // gateway refuses it while no AI provider is attested (409 zdr_no_attested_provider,
+  // before anything is created). The user must get the reason in their own language
+  // and be able to carry on without it, not "something went wrong".
+  it('says why when the gateway refuses the switch, and creates nothing', async () => {
+    seedOnboardingState({
+      step: 'organization',
+      organization: { name: 'Acme AS', id: '', zeroDataRetention: true },
+    })
+    const createBodies: unknown[] = []
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.includes('/onboarding/actions/create-organization')) {
+        createBodies.push(JSON.parse(String(init?.body)))
+        return new Response(JSON.stringify({
+          error: { code: 'zdr_no_attested_provider', message: 'Zero Data Retention cannot be turned on: no AI provider ...' },
+        }), { headers: { 'Content-Type': 'application/json' }, status: 409 })
+      }
+      return new Response(JSON.stringify({}), { headers: { 'Content-Type': 'application/json' }, status: 200 })
+    }))
+
+    renderWithProviders(() => <OnboardingPage />)
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Fortsett' }))
+
+    await waitFor(() => expect(createBodies).toHaveLength(1))
+    // The request the gateway refused really asked for ZDR on.
+    expect((createBodies[0] as { metadata?: { interactiveRetention?: { zdr?: boolean } } }).metadata?.interactiveRetention?.zdr).toBe(true)
+    const message = await waitFor(() => {
+      const element = document.querySelector('.onboarding-error')
+      expect(element).toBeTruthy()
+      return element?.textContent ?? ''
+    })
+    expect(message).toMatch(/Zero Data Retention kan ikke slås på ennå/)
+    expect(message).toMatch(/Fortsett uten/)
+    expect(message).not.toMatch(/cannot be turned on: no AI provider/)
+    // Still on the organization step with no organization: nothing was created.
+    const stored = JSON.parse(window.localStorage.getItem(storageKey) ?? '{}') as OnboardingState
+    expect(stored.step).toBe('organization')
+    expect(stored.organization.id).toBe('')
+  })
+})

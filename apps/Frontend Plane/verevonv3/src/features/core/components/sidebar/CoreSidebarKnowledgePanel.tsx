@@ -81,6 +81,21 @@ export function KnowledgeExpandedSidebarPanel(props: { onCollapse: () => void })
   const [loading, setLoading] = createSignal(true)
   const [searchQuery, setSearchQuery] = createSignal('')
   const normalizedSearch = () => searchQuery().trim().toLowerCase()
+  // Expanded folder ids for the collections tree. `null` means the user has
+  // not toggled anything yet: depth-0 collections show open and everything
+  // deeper starts closed. The first toggle snapshots those defaults into an
+  // explicit Set; every later update replaces the Set (never mutates it).
+  const [expandedFolderIds, setExpandedFolderIds] = createSignal<ReadonlySet<string> | null>(null)
+  // While the filter box is in use every branch is forced open, otherwise a
+  // match inside a collapsed folder would be invisible.
+  const forceFoldersOpen = () => normalizedSearch().length > 0
+  const isFolderExpanded = (folder: KnowledgeSidebarFolderNode, depth: number) =>
+    forceFoldersOpen() || (expandedFolderIds()?.has(folder.id) ?? depth === 0)
+  const toggleFolder = (folder: KnowledgeSidebarFolderNode) => {
+    const next = new Set(expandedFolderIds() ?? (sidebarData()?.folders ?? []).map((root) => root.id))
+    if (!next.delete(folder.id)) next.add(folder.id)
+    setExpandedFolderIds(next)
+  }
   const sidebarData = createMemo(() => liveKnowledge() ? buildKnowledgeSidebarLiveData(liveKnowledge()!) : null)
   const activeFolderSourceIds = () => {
     const data = sidebarData()
@@ -176,10 +191,14 @@ export function KnowledgeExpandedSidebarPanel(props: { onCollapse: () => void })
                           activeFolderId={activeFolderId()}
                           depth={0}
                           folder={folder}
+                          isExpanded={isFolderExpanded}
                           onSelect={(selected) => {
                             setActiveFolderId(selected.id)
                             applyKnowledgeFilter(selected.label)
                           }}
+                          onToggle={toggleFolder}
+                          reserveToggle={visibleFolders().some(hasFolderChildren)}
+                          toggleLocked={forceFoldersOpen()}
                         />
                       )}
                     </For>
@@ -476,24 +495,51 @@ function KnowledgeSidebarTreeItem(props: {
   activeFolderId: string
   depth: number
   folder: KnowledgeSidebarFolderNode
+  isExpanded: (folder: KnowledgeSidebarFolderNode, depth: number) => boolean
   onSelect: (folder: KnowledgeSidebarFolderNode) => void
+  onToggle: (folder: KnowledgeSidebarFolderNode) => void
+  /** Keep a chevron-wide gap on leaf rows so labels line up with folder rows and every level sits one chevron column right of its parent. */
+  reserveToggle: boolean
+  /** True while the filter box forces every branch open; the chevron is then inert. */
+  toggleLocked: boolean
 }) {
+  const i18n = useI18n()
   const active = () => props.activeFolderId === props.folder.id
   const Icon = () => knowledgeFolderIcon(props.folder, props.depth)
+  const hasChildren = () => hasFolderChildren(props.folder)
+  const expanded = () => hasChildren() && props.isExpanded(props.folder, props.depth)
 
   return (
     <div>
-      <button
-        type="button"
-        aria-pressed={active() ? 'true' : 'false'}
-        onClick={() => props.onSelect(props.folder)}
-        class={cn('core-sidebar-section-link', active() && 'core-sidebar-source-link--active')}
-      >
-        <Dynamic component={Icon()} class="core-sidebar-dedicated-icon" strokeWidth={1.75} />
-        <span class={props.depth === 0 ? 'verevon-sidebar-row-strong' : 'verevon-sidebar-row-normal'}>{props.folder.label}</span>
-        <span class="core-sidebar-count-pill">{props.folder.count}</span>
-      </button>
-      <Show when={props.folder.children?.length}>
+      <div class="core-sidebar-tree-row">
+        <Show
+          when={hasChildren()}
+          fallback={<Show when={props.reserveToggle}><span class="core-sidebar-tree-toggle-spacer" aria-hidden="true" /></Show>}
+        >
+          <button
+            type="button"
+            class="core-sidebar-tree-toggle"
+            aria-expanded={expanded() ? 'true' : 'false'}
+            aria-label={`${i18n.tr('Vis undermapper', 'Show subfolders')}: ${props.folder.label}`}
+            disabled={props.toggleLocked}
+            onClick={() => props.onToggle(props.folder)}
+          >
+            <ChevronDown class="core-sidebar-tree-toggle__icon" strokeWidth={2} />
+          </button>
+        </Show>
+        <button
+          type="button"
+          title={props.folder.label}
+          aria-pressed={active() ? 'true' : 'false'}
+          onClick={() => props.onSelect(props.folder)}
+          class={cn('core-sidebar-section-link', active() && 'core-sidebar-source-link--active')}
+        >
+          <Dynamic component={Icon()} class="core-sidebar-dedicated-icon" strokeWidth={1.75} />
+          <span class={props.depth === 0 ? 'verevon-sidebar-row-strong' : 'verevon-sidebar-row-normal'}>{props.folder.label}</span>
+          <span class="core-sidebar-count-pill" data-count={props.folder.count}>{props.folder.count}</span>
+        </button>
+      </div>
+      <Show when={expanded()}>
         <div class={cn('core-sidebar-subtree', props.depth > 0 && 'core-sidebar-subtree--nested')}>
           <div class="core-sidebar-subnav__line" />
           <For each={props.folder.children}>
@@ -503,7 +549,11 @@ function KnowledgeSidebarTreeItem(props: {
                   activeFolderId={props.activeFolderId}
                   depth={props.depth + 1}
                   folder={child}
+                  isExpanded={props.isExpanded}
                   onSelect={props.onSelect}
+                  onToggle={props.onToggle}
+                  reserveToggle
+                  toggleLocked={props.toggleLocked}
                 />
               </div>
             )}
@@ -512,6 +562,10 @@ function KnowledgeSidebarTreeItem(props: {
       </Show>
     </div>
   )
+}
+
+function hasFolderChildren(folder: KnowledgeSidebarFolderNode): boolean {
+  return (folder.children?.length ?? 0) > 0
 }
 
 function knowledgeFolderIcon(folder: KnowledgeSidebarFolderNode, depth: number) {

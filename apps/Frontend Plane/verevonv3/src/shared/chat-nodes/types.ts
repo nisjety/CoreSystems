@@ -70,8 +70,13 @@ export type AnswerState =
    * nothing has been reported yet — the state the plain subscription route sits
    * in for its whole 90-second wait — and the indicator then shows elapsed time
    * alone rather than an invented phase.
+   *
+   * `runId` is the turn's durable run, once the stream's `connected` event has
+   * named it. Absent means there is none to watch yet. It is what lets the
+   * indicator offer "Varsle meg når ferdig" on a plain turn, which never reaches
+   * the live run panel.
    */
-  | { state: 'pending'; since: string; activity?: StreamActivity }
+  | { state: 'pending'; since: string; activity?: StreamActivity; runId?: string }
   /**
    * The stream failed; the content field holds the error text. `unsaved` is
    * answer text that streamed before a failure the server saved nothing for:
@@ -142,6 +147,8 @@ export type ConversationNode =
       summary?: string
       steps?: ChatPlanStep[]
       grantedRung?: AutonomyRung
+      /** The proposed plan was rejected: nothing was granted or executed. */
+      rejected?: boolean
       pending: boolean
       error?: string
     }
@@ -183,6 +190,12 @@ export type ConversationNodeContext = {
    * the edit action there rather than sending an empty id.
    */
   threadId: string | null
+  /**
+   * The thread is temporary (Zero Data Retention): its run events are
+   * suppressed, so the waiting state must not offer to be told when the run
+   * finishes. Absent means an ordinary thread.
+   */
+  temporaryChat?: boolean
 }
 
 /** One node kind's renderer. */

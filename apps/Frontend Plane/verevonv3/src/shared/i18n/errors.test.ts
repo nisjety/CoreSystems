@@ -19,4 +19,19 @@ describe('translateApiError', () => {
     expect(translateApiError({ code: 'personal_connection_forbidden' }, tr)).toMatch(/tilhører en annen bruker/i)
     expect(translateApiError({ code: 'personal_connection_no_delegated_user' }, tr)).toMatch(/logget inn som eieren/i)
   })
+
+  // The org Zero Data Retention switch is refused with these two codes, from the
+  // settings page and from organization creation alike. Each needs its own
+  // sentence: the generic fallback would tell an admin "something went wrong"
+  // about a refusal that is deliberate and has a way forward.
+  it('gives the org ZDR switch refusals their own copy, in both languages', () => {
+    const no = (norwegian: string) => norwegian
+    const en = (_norwegian: string, english: string) => english
+
+    expect(translateApiError({ code: 'zdr_no_attested_provider' }, no)).toMatch(/ingen AI-leverandør har en registrert nullbevaringsgodkjenning/i)
+    expect(translateApiError({ code: 'zdr_no_attested_provider' }, en)).toMatch(/no AI provider has a recorded zero-retention attestation/i)
+    expect(translateApiError({ code: 'zdr_gate_unavailable' }, no)).toMatch(/Kunne ikke kontrollere/i)
+    expect(translateApiError({ code: 'zdr_gate_unavailable' }, en)).toMatch(/could not check which providers/i)
+    expect(translateApiError({ code: 'zdr_no_attested_provider' }, no)).not.toMatch(/Noe gikk galt/)
+  })
 })

@@ -40,7 +40,7 @@ rest come from the traces and are cited by file:line so they can be checked.
 | W-02 effectively one engine | ✅ | 12 engines declared, 8 contributing; each in its own suspension bucket |
 | W-03 unofficial Google scrape as sole source | ✅ mitigated | No longer sole; `braveapi` (official) available, env-gated and inert without a key |
 | W-04 no locale reaches search | ✅ | `language`/`country`/`topic`/`time_range` derived per turn and sent; adapter bug (country in the language slot) fixed |
-| W-05 ranking = engine order | ✅ | Cross-engine RRF fusion using SearXNG's own `positions[]`; semantic rerank + autoprompt enabled in the deployed config |
+| W-05 ranking = engine order | ◐ | Cross-engine RRF fusion using SearXNG's own `positions[]` is live. Semantic rerank is switched on in the deployed config but has never been effective: it needs a Model Plane token that Auth Core refuses to issue to quarry-edge (403), and autoprompt needs the same token. See "A3 status" below |
 | W-06 no web citation floor | ✅ | Thin sources reach context with a warning, withheld from citations |
 | W-07 exact-URL dedup only | ✅ | Canonical dedup key (scheme, `www.`, trailing slash, tracking params); duplicates now *merge* into agreement evidence |
 | W-08 raw conversational query | ◐ | Autoprompt rewriting enabled server-side; no model-written query on the forced path yet |
@@ -106,6 +106,27 @@ code.
    sized so bonuses alone can never carry a hit past the keep threshold.
 4. **Deep research** — "read more": 16 successful reads, ceiling 24, with coverage
    reported proportionally so a bigger budget cannot silently inflate confidence.
+
+### A3 status — updated 2026-10-03
+
+A3 asked for three things. Where each stands, read on 2026-10-03 from the code,
+the committed principal registry and the running quarry-edge:
+
+| Part of A3 | Status | Note |
+|---|---|---|
+| `QUARRY_EDGE__SEMANTIC_RERANK=1`, top_n 10 | ◐ on, never effective | The compose default became 1 on 2026-09-23 (commit `932b30d2`). The reranker asks Auth Core for a Model Plane service token (`models:invoke`). quarry-edge's committed principal holds only the `data-plane` audience. The committed registry has never granted `models:invoke` to any principal (an earlier bootstrap seed did, for quarry-edge only, until commit `fcb8aeaf` on 2026-08-01 removed it), so Auth Core answers 403. In the running container (up since 2026-10-01 22:38 UTC) 4 of 4 searches logged `rerank: model plane failed; keeping original order`; read again on 2026-10-06, the same log holds 8 such lines (4 from 2026-10-01, 4 from 2026-10-03) and no successful rerank; it spans two starts (2026-10-01 22:38 and 2026-10-05 00:21 UTC) and no search has run since the second. Search degrades safely to the unreranked order, so nothing visibly broke, and rerank has not once changed an order in the logs that can be read (from 2026-10-01) |
+| `QUARRY_EDGE__AUTOPROMPT=1` | ◐ on, same dependency | Autoprompt builds its client through the same Model Plane path, so it has the same gap. No autoprompt failure line appears in that container's log, but autoprompt rewrites only Research and Comparative queries and none of the six searches in the log (read 2026-10-06) was classed as one (intent rules `fresh` and `default`), so the sample says nothing either way. It is decided with Quarry's other Model Plane dependents (owner default D-C: switched off until an org-bound, metered path exists), not here |
+| Forward `score` / `highlights` into the gate | ◐ forwarded, nothing to forward | model-gateway already keeps `rank`, the reranker `score` and `highlights` (W-09, unit-tested) and treats an absent score as "not judged". Because the reranker never succeeded, every hit arrives not judged and without highlights: no genuine relevance score has reached the gate yet |
+
+What replaces the rerank half: Quarry does not repair its LLM-prompt reranker.
+Reranking moves to the Data Plane (`POST /v1/rerank`: paid Azure Cohere, no
+general-model prompt, an explicit `skipped` marker for ZDR and sovereign
+requests). The decision, its reasons and its open items are in the decision
+ledger entry of 2026-10-03 (`apps/Model Plane/docs/decisions/ledger.md`), and
+the ownership is matrix rule 15 in `apps/master-ownership-matrix.md`. That
+entry stays `proposed` until the live proof, so until then web ranking is the
+cross-engine fusion alone. The A3 latency estimate (LLM judge, +0.5 to 1.5 s)
+never applied, because the judge never ran.
 
 ## 0. One-screen verdict
 
@@ -231,7 +252,7 @@ change itself, not the verification pass.
 |---|---|---|---|---|
 | A1 | Send `language`, `country`, `topic`, `time_range` from model-gateway; derive `language` from the user’s UI locale / message language, `country: "NO"` for the Norwegian tenant, `topic: "news"` + `time_range` when `should_force_web_search` fired on a recency token, and stop sending the dead `intent` field. | `quarry.rs:670-693`, `tool_loop.rs:2128-2202`, `run_forced_web_search` | Fixes W-04/W-09 at the source; SearXNG `google cse` and Brave both honour language + time range. | Low |
 | A2 | Fix the SearXNG adapter to send `language` as SearXNG `language` and `safesearch`; map `country` to a locale suffix (`nb-NO`). | `serp.rs:455-457` | Currently a country code lands in the language slot. | Low |
-| A3 | Turn on `QUARRY_EDGE__SEMANTIC_RERANK=1` (top_n 10–15) and `QUARRY_EDGE__AUTOPROMPT=1`, and forward quarry’s `score`/`highlights` into the gate instead of dropping them. | compose `:90-96`, `tool_loop.rs:2151-2176`, `relevance.rs` | Gives the pipeline its first genuine relevance score; the code is already written and degrade-safe. Measure latency (LLM judge ≈ +0.5–1.5 s). | Medium (latency) |
+| A3 | Turn on `QUARRY_EDGE__SEMANTIC_RERANK=1` (top_n 10–15) and `QUARRY_EDGE__AUTOPROMPT=1`, and forward quarry’s `score`/`highlights` into the gate instead of dropping them. **Status 2026-10-03: see "A3 status" in section 0.0.** | compose `:90-96`, `tool_loop.rs:2151-2176`, `relevance.rs` | Gives the pipeline its first genuine relevance score; the code is already written and degrade-safe. Measure latency (LLM judge ≈ +0.5–1.5 s). | Medium (latency) |
 | A4 | Add a web citation floor mirroring the KB one (≥150 chars of *evidence text*, see B1) and URL canonicalisation (scheme, `www.`, trailing slash, tracking params) before dedup — on the router and on the chat path. | `tool_loop.rs:3904`, `smart_router.rs:768`, reuse `deep_research::normalize_url_key` | Closes W-06/W-07 directly. | Low |
 | A5 | Tune SearXNG instead of shipping defaults: pin the `general` engine set to those that actually answer from this IP; add `language: nb-NO` engine variants (SearXNG supports per-engine language entries), set `default_lang: "nb-NO"` for the Norwegian deployment, `safe_search: 1`, and enable `enable_metrics: true`. | `apps/Ingestion Plane/config/searxng/settings.yml` | Stops paying 10 s timeouts for three dead engines on every query; gets Norwegian-language results. | Low |
 | A6 | Persist the local index (`QUARRY_EDGE__LOCAL_INDEX_DIR`) so pages already read become a first tier. | compose | Cheap corroboration and stability across restarts. | Low |

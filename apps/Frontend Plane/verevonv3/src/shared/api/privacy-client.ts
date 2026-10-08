@@ -23,13 +23,14 @@ export interface DsarExport {
  * The Control-Plane-only scope disclosure, copied VERBATIM from user-core's
  * `gdpr.go` `BuildDSARExport` notes. Rendered so a user understands, before
  * exporting or erasing, that this surface covers Control-Plane data only and
- * that Model/Data-plane data is handled by a separate erasure fan-out. The
- * accompanying test pins this to the backend text so the two cannot drift.
+ * that a per-user erasure does not delete Model/Data-plane data. The
+ * accompanying test reads gdpr.go and pins this to the backend text, so the
+ * two cannot drift.
  */
 export const CONTROL_PLANE_DSAR_DISCLOSURE: readonly string[] = [
   'Control Plane export: profile + org memberships + API key metadata.',
-  'Audit events for this subject are retained by audit-core (verevon.audit.v1.control.*).',
-  'Model Plane run history / conversations and Data Plane documents are purged/exported via the verevon.gdpr.erasure.requested fan-out (follow-up subscribers).',
+  'Audit events for this subject are retained by audit-core (verevon.audit.v2.control.user-core.*).',
+  "Model Plane conversations and memory and Data Plane documents are not part of this export, and a per-user erasure does not delete them: their owner can delete conversations and memories while signed in, and an organisation erasure is built to remove the organisation's copies (not verified end to end).",
 ]
 
 /** Fetch the authenticated user's Control-Plane data export (Art. 15). */

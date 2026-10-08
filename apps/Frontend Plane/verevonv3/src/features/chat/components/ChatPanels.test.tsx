@@ -1,12 +1,13 @@
 // @vitest-environment jsdom
 
-import { fireEvent, render, waitFor } from '@solidjs/testing-library'
+import { cleanup, fireEvent, render, waitFor } from '@solidjs/testing-library'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { flush, createSignal } from 'solid-js'
 import { ChatTabs, ContextWindowPanel, RunPlanPanel, SourcesPanel, StepsPanel } from './ChatPanels'
 import * as orchestration from '@/shared/api/orchestration-client'
 import * as memoryClient from '@/shared/api/memory-client'
 import {
+  __resetPlanDraftsForTests,
   AnswerRegion,
   DiffView,
   MemoryRecallNotice,
@@ -726,6 +727,15 @@ describe('QueuedInputStrip', () => {
 })
 
 describe('PlanApprovalControl', () => {
+  // A control remembers its unsent edits per plan id across a remount (see
+  // `PlanDraft`), and every test below shows `plan_1`: without this the edits
+  // one test leaves behind would be restored into the next.
+  afterEach(() => {
+    // Unmount first: tearing a control down is what stores its draft.
+    cleanup()
+    __resetPlanDraftsForTests()
+  })
+
   /**
    * The whole reason the control exists: a plan approval must name what is
    * granted AND why. An Approve button that works with an empty reason is a
@@ -986,6 +996,90 @@ describe('PlanApprovalControl', () => {
     flush()
     expect(onApprove).not.toHaveBeenCalled()
     expect(container.textContent).toContain('minst ett steg')
+    unmount()
+  })
+
+  it('does not send a step that was added and never filled in', () => {
+    const onApprove = vi.fn()
+    const { container, unmount } = render(() => (
+      <PlanApprovalControl {...planProps} pending={false} onApprove={onApprove} />
+    ))
+    fireEvent.click(container.querySelector<HTMLButtonElement>('.verevon-chat-plan__add-step')!)
+    flush()
+    expect(container.querySelectorAll('.verevon-chat-plan__step-input')).toHaveLength(3)
+
+    fillReason(container)
+    fireEvent.click(container.querySelector<HTMLButtonElement>('.verevon-chat-plan__approve')!)
+    flush()
+
+    // The server refuses a step with no title; a blank new row never belonged
+    // to the proposal, so it is dropped, not sent.
+    const editedSteps = onApprove.mock.calls[0]![2]
+    expect(editedSteps.map((s: { stepId?: string }) => s.stepId)).toEqual(['step_1', 'step_2'])
+    unmount()
+  })
+
+  it('does not count a blank new row as the plan\'s remaining step', () => {
+    const onApprove = vi.fn()
+    const { container, unmount } = render(() => (
+      <PlanApprovalControl {...planProps} pending={false} onApprove={onApprove} />
+    ))
+    fillReason(container)
+    fireEvent.click(container.querySelector<HTMLButtonElement>('.verevon-chat-plan__add-step')!)
+    flush()
+    let remove = container.querySelector<HTMLButtonElement>('.verevon-chat-plan__step-remove')
+    // Remove both real steps (the blank new row's remove button is last).
+    for (let i = 0; i < 2 && remove; i += 1) {
+      fireEvent.click(remove)
+      flush()
+      remove = container.querySelector<HTMLButtonElement>('.verevon-chat-plan__step-remove')
+    }
+    // Only the blank row is left: that is not a plan.
+    expect(container.querySelectorAll('.verevon-chat-plan__step-input')).toHaveLength(1)
+    expect(container.querySelector<HTMLButtonElement>('.verevon-chat-plan__approve')!.disabled).toBe(true)
+    expect(container.textContent).toContain('minst ett steg')
+
+    // Typing a title makes it a step, and approving becomes possible.
+    fireEvent.input(container.querySelector<HTMLInputElement>('.verevon-chat-plan__step-input')!, {
+      target: { value: 'Call the customer instead' },
+    })
+    flush()
+    expect(container.querySelector<HTMLButtonElement>('.verevon-chat-plan__approve')!.disabled).toBe(false)
+    unmount()
+  })
+
+  it('will not approve while a kept step has been emptied', () => {
+    const onApprove = vi.fn()
+    const { container, unmount } = render(() => (
+      <PlanApprovalControl {...planProps} pending={false} onApprove={onApprove} />
+    ))
+    fillReason(container)
+    const approve = () =>
+      container.querySelector<HTMLButtonElement>('.verevon-chat-plan__approve')!
+    expect(approve().disabled).toBe(false)
+
+    const first = container.querySelector<HTMLInputElement>('.verevon-chat-plan__step-input')!
+    fireEvent.input(first, { target: { value: '   ' } })
+    flush()
+    expect(approve().disabled).toBe(true)
+    expect(container.textContent).toMatch(/Hvert steg trenger en tittel|Every step needs a title/)
+    fireEvent.click(approve())
+    flush()
+    expect(onApprove).not.toHaveBeenCalled()
+
+    fireEvent.input(first, { target: { value: 'Draft the email again' } })
+    flush()
+    expect(approve().disabled).toBe(false)
+    unmount()
+  })
+
+  it('shows a rejected plan as rejected, with nothing left to decide', () => {
+    const { container, unmount } = render(() => (
+      <PlanApprovalControl {...planProps} rejected pending={false} onApprove={() => {}} />
+    ))
+    expect(container.querySelector('.verevon-chat-plan')).toBeNull()
+    expect(container.querySelector('.verevon-chat-plan__approve')).toBeNull()
+    expect(container.textContent).toMatch(/Planen ble avvist|The plan was rejected/)
     unmount()
   })
 })

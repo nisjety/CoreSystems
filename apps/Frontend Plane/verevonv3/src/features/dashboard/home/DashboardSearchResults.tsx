@@ -11,11 +11,21 @@ function relevancePercent(score: number): number {
   return Math.max(0, Math.min(100, Math.round(score * 100)))
 }
 
+/** A page the person opened from the results (Home keeps it in its browser-local history). */
+export type OpenedPage = { title?: string | null; url: string }
+
+// For a link that opens its page in a new tab: a click or a middle-click (which
+// opens the tab without a click event) reports the page. Nothing else does.
+function reportOpened(event: MouseEvent, report: ((page: OpenedPage) => void) | undefined, page: OpenedPage) {
+  if (event.type === 'click' || event.button === 1) report?.(page)
+}
+
 export function SearchResultCard(props: {
   image?: ImageHit
   index: number
   onFindSimilar?: (result: PreviewResult) => void
   onOpen?: (result: PreviewResult) => void
+  onOpenPage?: (page: OpenedPage) => void
   result: PreviewResult
   selected?: boolean
 }) {
@@ -123,6 +133,8 @@ export function SearchResultCard(props: {
         target="_blank"
         rel="noopener noreferrer"
         class="dashboard-xresult__external"
+        onClick={(event) => reportOpened(event, props.onOpenPage, props.result)}
+        onAuxClick={(event) => reportOpened(event, props.onOpenPage, props.result)}
         aria-label={i18n.tr(`Åpne ${props.result.title} i ny fane`, `Open ${props.result.title} in a new tab`)}
       >
         <ExternalLink class="size-3.5" aria-hidden="true" />
@@ -188,6 +200,7 @@ export function ImageResultsPanel(props: {
   images: ImageHit[]
   imagesError: string | null
   imagesStatus: ImagesStatus
+  onOpenPage?: (page: OpenedPage) => void
   query: string
 }) {
   const i18n = useI18n()
@@ -214,7 +227,14 @@ export function ImageResultsPanel(props: {
         <div class="dashboard-ximages">
           <For each={props.images}>
             {(image) => (
-              <a href={image.url} target="_blank" rel="noopener noreferrer" class="dashboard-ximages__item">
+              <a
+                href={image.url}
+                target="_blank"
+                rel="noopener noreferrer"
+                class="dashboard-ximages__item"
+                onClick={(event) => reportOpened(event, props.onOpenPage, image)}
+                onAuxClick={(event) => reportOpened(event, props.onOpenPage, image)}
+              >
                 <img src={image.thumbnailUrl} alt={image.title ?? ''} loading="lazy" referrerpolicy="no-referrer" />
                 <div class="dashboard-ximages__cap">
                   <p>{image.title ?? i18n.tr('Bildetreff', 'Image result')}</p>
@@ -234,7 +254,13 @@ export function ImageResultsPanel(props: {
   )
 }
 
-export function VideoResultsPanel(props: { error: string | null; query: string; status: ImagesStatus; videos: VideoHit[] }) {
+export function VideoResultsPanel(props: {
+  error: string | null
+  onOpenPage?: (page: OpenedPage) => void
+  query: string
+  status: ImagesStatus
+  videos: VideoHit[]
+}) {
   const i18n = useI18n()
   const [playing, setPlaying] = createSignal<string | null>(null)
 
@@ -266,7 +292,9 @@ export function VideoResultsPanel(props: { error: string | null; query: string; 
                     target="_blank"
                     rel="noopener noreferrer"
                     class="dashboard-xvideo"
+                    onAuxClick={(event) => reportOpened(event, props.onOpenPage, video)}
                     onClick={(event) => {
+                      reportOpened(event, props.onOpenPage, video)
                       if (video.embedUrl) {
                         event.preventDefault()
                         setPlaying(video.url)
@@ -358,7 +386,7 @@ export function VerevonResultsSection(props: { loading: boolean; results: Navbar
   )
 }
 
-export function MapGuidePanel(props: { query: string; results: PreviewResult[] }) {
+export function MapGuidePanel(props: { onOpenPage?: (page: OpenedPage) => void; query: string; results: PreviewResult[] }) {
   const i18n = useI18n()
   const places = () => props.results.slice(0, 4)
 
@@ -383,7 +411,14 @@ export function MapGuidePanel(props: { query: string; results: PreviewResult[] }
       <div class="dashboard-xmap__list">
         <For each={places()}>
           {(place, index) => (
-            <a href={place.url} target="_blank" rel="noopener noreferrer" class="dashboard-xmap__item">
+            <a
+              href={place.url}
+              target="_blank"
+              rel="noopener noreferrer"
+              class="dashboard-xmap__item"
+              onClick={(event) => reportOpened(event, props.onOpenPage, place)}
+              onAuxClick={(event) => reportOpened(event, props.onOpenPage, place)}
+            >
               <span class="dashboard-xmap__num">{index() + 1}</span>
               <span class="dashboard-xmap__meta">
                 <span class="dashboard-xmap__name">{place.title}</span>
@@ -398,7 +433,7 @@ export function MapGuidePanel(props: { query: string; results: PreviewResult[] }
   )
 }
 
-export function ShoppingResultsPanel(props: { query: string; results: PreviewResult[] }) {
+export function ShoppingResultsPanel(props: { onOpenPage?: (page: OpenedPage) => void; query: string; results: PreviewResult[] }) {
   const i18n = useI18n()
   const items = () => props.results.slice(0, 5)
 
@@ -416,7 +451,14 @@ export function ShoppingResultsPanel(props: { query: string; results: PreviewRes
         </section>
         <For each={items()}>
           {(item, index) => (
-            <a href={item.url} target="_blank" rel="noopener noreferrer" class="dashboard-xshop__item">
+            <a
+              href={item.url}
+              target="_blank"
+              rel="noopener noreferrer"
+              class="dashboard-xshop__item"
+              onClick={(event) => reportOpened(event, props.onOpenPage, item)}
+              onAuxClick={(event) => reportOpened(event, props.onOpenPage, item)}
+            >
               <span class="dashboard-xshop__num">{index() + 1}</span>
               <span class="dashboard-xshop__body">
                 <span class="dashboard-xshop__host">{item.hostname}</span>
@@ -449,6 +491,7 @@ export function SearchInsightRail(props: {
   activeTab: SearchResultTab
   answer: string
   images: ImageHit[]
+  onOpenPage?: (page: OpenedPage) => void
   query: string
   sourceItems: Array<{ hostname: string; title: string; url: string }>
 }) {
@@ -457,7 +500,7 @@ export function SearchInsightRail(props: {
     <div class="dashboard-xrail">
       <section class="dashboard-xrail__card">
         <p class="dashboard-xsearch-eyebrow">{i18n.tr('Kilder', 'Sources')}</p>
-        <ExpandedSourcesList sourceItems={props.sourceItems} />
+        <ExpandedSourcesList onOpenPage={props.onOpenPage} sourceItems={props.sourceItems} />
       </section>
 
       <section class="dashboard-xrail__card">
@@ -614,7 +657,10 @@ function searchTabEvidenceLabel(tab: SearchResultTab, locale: 'en' | 'no'): stri
   return labels[tab][locale]
 }
 
-function ExpandedSourcesList(props: { sourceItems: Array<{ hostname: string; title: string; url: string }> }) {
+function ExpandedSourcesList(props: {
+  onOpenPage?: (page: OpenedPage) => void
+  sourceItems: Array<{ hostname: string; title: string; url: string }>
+}) {
   const i18n = useI18n()
   return (
     <Show
@@ -624,7 +670,14 @@ function ExpandedSourcesList(props: { sourceItems: Array<{ hostname: string; tit
       <div class="dashboard-xrail__sources">
         <For each={props.sourceItems}>
           {(source) => (
-            <a href={source.url} target="_blank" rel="noopener noreferrer" class="dashboard-xrail__source">
+            <a
+              href={source.url}
+              target="_blank"
+              rel="noopener noreferrer"
+              class="dashboard-xrail__source"
+              onClick={(event) => reportOpened(event, props.onOpenPage, source)}
+              onAuxClick={(event) => reportOpened(event, props.onOpenPage, source)}
+            >
               <span class="dashboard-xrail__source-badge">{source.hostname.slice(0, 1).toUpperCase()}</span>
               <span class="dashboard-xrail__source-body">
                 <span class="dashboard-xrail__source-title">{source.title}</span>

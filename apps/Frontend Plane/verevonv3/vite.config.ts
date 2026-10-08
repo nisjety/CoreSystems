@@ -97,6 +97,10 @@ export default defineConfig({
       // Uint8Array checks that never occur in its real (node) environment.
       'packages/**',
       'apps/remote-dev/**',
+      // verevon-web is React (Next). This config compiles every .tsx with the
+      // Solid JSX transform, so a React component test cannot render here; those
+      // run from apps/verevon-web/vitest.config.mts (`pnpm --filter verevon-web test`).
+      'apps/verevon-web/**/*.test.tsx',
     ],
     // Default per-test budget. The A8 fabrication-guard test spins up the real
     // ESLint flat config (cold-start ~8s), which exceeds vitest's 5s default when

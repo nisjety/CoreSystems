@@ -144,10 +144,26 @@ export async function getOrganizationZdrEntitled(organizationId: string): Promis
 }
 
 /**
+ * Codes the gateway answers when turning org ZDR ON is refused before anything
+ * is written (`apps/gateway/src/domains/orgs/settings.rs`). Turning it OFF is
+ * never refused this way.
+ *
+ * - `zdr_no_attested_provider` (409): no AI provider in the catalogue carries a
+ *   recorded zero-retention attestation, so every request of that org would be
+ *   refused.
+ * - `zdr_gate_unavailable` (503): the catalogue could not be checked, so nothing
+ *   is known either way. The gate fails closed on enable.
+ */
+export const ZDR_NO_ATTESTED_PROVIDER = 'zdr_no_attested_provider'
+export const ZDR_GATE_UNAVAILABLE = 'zdr_gate_unavailable'
+
+/**
  * Persist the organization's interactive Zero-Data-Retention posture. Org-admin
  * gated at the gateway; enabling ZDR is plan-gated (a 402 plan_upgrade_required
- * is returned for ineligible plans). The value is durable org intent, not a
- * per-request override. Returns the resolved posture after the write.
+ * is returned for ineligible plans) and attestation-gated (a 409
+ * {@link ZDR_NO_ATTESTED_PROVIDER} or 503 {@link ZDR_GATE_UNAVAILABLE} while no
+ * provider is attested). The value is durable org intent, not a per-request
+ * override. Returns the resolved posture after the write.
  */
 export async function updateOrganizationZdr(
   organizationId: string,

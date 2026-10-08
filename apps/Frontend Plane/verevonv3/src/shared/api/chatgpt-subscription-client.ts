@@ -6,6 +6,10 @@ import { requestJson } from './http'
  * it does not ingest a knowledge source. */
 export const OPENAI_CODEX_SUBSCRIPTION_PROVIDER = 'openai-codex-subscription'
 
+export function isChatGptSubscriptionConnected(status: string): boolean {
+  return ['active', 'connected'].includes(status.trim().toLowerCase())
+}
+
 export type ChatGptSubscriptionConnection = {
   id: string
   providerKey: typeof OPENAI_CODEX_SUBSCRIPTION_PROVIDER
@@ -34,6 +38,12 @@ export type ChatGptSubscriptionStatus = {
   login: Pick<ChatGptDeviceLogin, 'loginId' | 'connectionId'> & {
     status: NonNullable<ChatGptDeviceLogin['status']>
   }
+}
+
+export type ChatGptRateLimitReport = {
+  observedAt: string
+  primary?: { usedPercent: number; windowMinutes?: number; resetsAt?: string }
+  secondary?: { usedPercent: number; windowMinutes?: number; resetsAt?: string }
 }
 
 function headers(orgId: string): HeadersInit | undefined {
@@ -65,6 +75,17 @@ export function disconnectChatGptSubscription(orgId: string, connectionId: strin
     `/api/v1/model-subscriptions/openai-codex/connections/${encodeURIComponent(connectionId)}`,
     { method: 'DELETE', headers: headers(orgId) },
   )
+}
+
+export function getChatGptSubscriptionUsage(orgId: string, connectionId: string): Promise<{
+  connectionId: string
+  scope: 'connected_user'
+  source: 'provider_rate_limits'
+  usage: ChatGptRateLimitReport
+}> {
+  return requestJson(`/api/v1/model-subscriptions/openai-codex/connections/${encodeURIComponent(connectionId)}/usage`, {
+    headers: headers(orgId),
+  })
 }
 
 export async function listChatGptSubscriptions(orgId: string): Promise<ChatGptSubscriptionConnection[]> {

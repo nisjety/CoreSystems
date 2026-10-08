@@ -40,7 +40,14 @@ function answerState(turn: ChatTurn, displayContent: string): AnswerState {
     // no activity derives a node with no such key at all, so "nothing known
     // yet" and "some activity" stay distinguishable by shape.
     const activity = deriveStreamActivity(turn.toolCalls)
-    return { state: 'pending', since: turn.createdAt, ...(activity ? { activity } : {}) }
+    // `runId` is spread for the same reason: a turn the stream has not yet named
+    // a run for derives the shape it always did.
+    return {
+      state: 'pending',
+      since: turn.createdAt,
+      ...(activity ? { activity } : {}),
+      ...(turn.runId ? { runId: turn.runId } : {}),
+    }
   }
   if (turn.status === 'error') {
     // Keys only when set, as for `unsaved`: an ordinary failure derives the
@@ -191,6 +198,9 @@ export function deriveConversationNodes(
       summary: turn.proposedPlan?.summary,
       steps: turn.proposedPlan?.steps,
       grantedRung: turn.grantedRung,
+      // Keys only when set, so every plan that was never rejected derives the
+      // shape it always did.
+      ...(turn.planRejected === true ? { rejected: true } : {}),
       pending: planApproval?.pending === true,
       error: planApproval?.error,
     })

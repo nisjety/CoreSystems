@@ -12,7 +12,7 @@ import { VerevonSelectableRow } from '@/shared/ui/verevon/VerevonSelectableRow'
 import { VerevonSwitch } from '@/shared/ui/verevon/VerevonSwitch'
 
 const ZDR_TOOLTIP =
-  'Zero Data Retention (ZDR): et valgfritt tillegg for Pro/Enterprise-planer — av som standard. Slå på for at samtaleinnhold ikke lagres og ikke forlater tjenesten (maksimalt personvern). Når organisasjonen slår det på, gjelder valget for hvordan forespørslene behandles, og kan endres senere i organisasjonsinnstillingene.'
+  'Zero Data Retention (ZDR): et valgfritt tillegg for Pro/Enterprise-planer — av som standard. Når det er på, sendes forespørsler bare til en leverandør med registrert ZDR-godkjenning, og avvises ellers; innholdet går fortsatt til den leverandøren. Når organisasjonen slår det på, gjelder valget for hvordan forespørslene behandles, og kan endres senere i organisasjonsinnstillingene.'
 
 type OrganizationStepContentProps = {
   organization: OnboardingState['organization']

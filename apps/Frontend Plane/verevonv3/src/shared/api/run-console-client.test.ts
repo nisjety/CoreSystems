@@ -98,6 +98,86 @@ describe('streamRunEvents dispatch', () => {
     expect(onDone).toHaveBeenCalledTimes(1)
   })
 
+  it('parses goal_summary/batch_id (wide-research fan-out) into goalSummary/batchId', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      sseResponse([
+        sseFrame('subagent_attached', {
+          parent_run_id: 'run_1',
+          child_run_id: 'run_1.tool_1_fan-1.0',
+          role: 'researcher',
+          goal_summary: 'look up carrier docs',
+          batch_id: 'run_1:tool_1_fan-1',
+          at: '2026-09-28T10:00:00Z',
+        }),
+        // A standalone subagent.task delegation carries neither field —
+        // the defensive parse must not invent one.
+        sseFrame('subagent_attached', {
+          parent_run_id: 'run_1',
+          child_run_id: 'run_1.tool_2_sub-1',
+          role: 'generic',
+          at: '2026-09-28T10:00:01Z',
+        }),
+      ]),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    const onSubagentAttached = vi.fn()
+    await streamRunEvents('run_1', { onSubagentAttached })
+
+    expect(onSubagentAttached).toHaveBeenNthCalledWith(1, {
+      parentRunId: 'run_1',
+      childRunId: 'run_1.tool_1_fan-1.0',
+      role: 'researcher',
+      goalSummary: 'look up carrier docs',
+      batchId: 'run_1:tool_1_fan-1',
+      at: '2026-09-28T10:00:00Z',
+    })
+    expect(onSubagentAttached).toHaveBeenNthCalledWith(2, {
+      parentRunId: 'run_1',
+      childRunId: 'run_1.tool_2_sub-1',
+      role: 'generic',
+      goalSummary: undefined,
+      batchId: undefined,
+      at: '2026-09-28T10:00:01Z',
+    })
+  })
+
+  it('parses subagent_stopped with the parent run it belongs to (wide-research card completion)', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      sseResponse([
+        sseFrame('subagent_stopped', {
+          parent_run_id: 'run_1',
+          child_run_id: 'run_1.tool_1_fan-1.0',
+          status: 'completed',
+          at: '2026-09-28T10:00:05Z',
+        }),
+        // A stop recorded before the parent was named on the wire.
+        sseFrame('subagent_stopped', {
+          child_run_id: 'run_1.tool_1_fan-1.1',
+          status: 'failed',
+          at: '2026-09-28T10:00:06Z',
+        }),
+      ]),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    const onSubagentStopped = vi.fn()
+    await streamRunEvents('run_1', { onSubagentStopped })
+
+    expect(onSubagentStopped).toHaveBeenNthCalledWith(1, {
+      parentRunId: 'run_1',
+      childRunId: 'run_1.tool_1_fan-1.0',
+      status: 'completed',
+      at: '2026-09-28T10:00:05Z',
+    })
+    expect(onSubagentStopped).toHaveBeenNthCalledWith(2, {
+      parentRunId: undefined,
+      childRunId: 'run_1.tool_1_fan-1.1',
+      status: 'failed',
+      at: '2026-09-28T10:00:06Z',
+    })
+  })
+
   it('dispatches browser_action_dispatched with reason and browser_run_paused/resumed (Phase 2)', async () => {
     const fetchMock = vi.fn().mockResolvedValue(
       sseResponse([

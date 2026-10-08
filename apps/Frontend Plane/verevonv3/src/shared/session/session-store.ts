@@ -2,6 +2,8 @@ import { createStore, untrack } from 'solid-js'
 import { getCurrentSession, probeAuthSession, type AuthUser, type OnboardingStatus } from '../api/auth-client'
 import { ApiError } from '../api/http'
 import { clearSupportChatThreads } from '../chat/support-chat-thread'
+import { clearHomeDrafts } from './home-draft-storage'
+import { clearSearchSnapshots } from './home-local-content'
 
 export type SessionStatus = 'idle' | 'loading' | 'authenticated' | 'unauthenticated'
 
@@ -69,7 +71,11 @@ export async function loadSession(options?: { disableAuthCookieCache?: boolean }
     }
 
     const data = await getCurrentSession()
-    if (session.user?.id && session.user.id !== data.user.id) clearSupportChatThreads()
+    if (session.user?.id && session.user.id !== data.user.id) {
+      clearSupportChatThreads()
+      clearHomeDrafts()
+      clearSearchSnapshots()
+    }
     const onboardingStatus =
       session.user?.id === data.user.id &&
       session.activeOrg?.id === data.org?.id &&
@@ -101,7 +107,11 @@ export async function loadSession(options?: { disableAuthCookieCache?: boolean }
 }
 
 export function setSessionUser(user: AuthUser): void {
-  if (session.user?.id && session.user.id !== user.id) clearSupportChatThreads()
+  if (session.user?.id && session.user.id !== user.id) {
+    clearSupportChatThreads()
+    clearHomeDrafts()
+    clearSearchSnapshots()
+  }
   setSession((s) => {
     s.status = 'authenticated'
     s.user = user
@@ -122,6 +132,8 @@ export function markSessionOnboardingComplete(activeOrg?: SessionOrg | null): vo
 
 export function clearSession(): void {
   clearSupportChatThreads()
+  clearHomeDrafts()
+  clearSearchSnapshots()
   setSession((s) => {
     s.status = 'unauthenticated'
     s.user = null

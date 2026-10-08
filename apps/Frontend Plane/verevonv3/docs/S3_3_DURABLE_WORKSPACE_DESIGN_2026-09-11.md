@@ -63,7 +63,7 @@ citation above as settled, per this repo's own adoption-gating rule.
 
 **Two more things this research surfaced that shape scope below:**
 
-- `docs/decisions/ledger.md:208-236` (2026-08-22) **rejected** a generic
+- `docs/decisions/ledger.md`, the entry "2026-08-22 — Sandbox-backend interface: defer a `SandboxBackend` trait" (found by its heading, because the ledger is newest first and every new entry shifts line numbers) **rejected** a generic
   `SandboxBackend` trait "for now... a registry/interface for one
   implementation," with an explicit revisit condition: *"a second real
   sandbox backend (remote/SDK-only) is actually being built."* The same

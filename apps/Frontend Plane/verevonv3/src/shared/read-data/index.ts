@@ -14,12 +14,13 @@
 /**
  * The measurement state of a read.
  * - `live` — a real backend contract responded WITH rows.
+ * - `partial` — source returned some data, but lacks evidence required to verify the full measure.
  * - `empty` — a real backend contract responded with ZERO rows (honest empty).
  * - `not_connected` — the source exists but the org has not connected it.
  * - `unavailable` — the contract failed/timed out (transient).
  * - `planned` — the producer is not built yet (honest "blueprint" state).
  */
-export type MeasurementState = 'live' | 'empty' | 'not_connected' | 'unavailable' | 'planned'
+export type MeasurementState = 'live' | 'partial' | 'empty' | 'not_connected' | 'unavailable' | 'planned'
 
 /** A read result: the data, the honest state, and a human-readable message. */
 export type ResourceResult<T> = {

@@ -553,8 +553,8 @@ function ConversationTranscript(props: {
       </Show>
       <Show when={!props.articlesLoading && props.articles.length > 0}>
         <div class="verevon-inbox-transcript__articles">
-          <For each={props.articles}>
-            {(article) => <ArticleBubble article={article} ticket={props.selectedTicket} />}
+          <For each={props.articles} keyed={(article) => article.id}>
+            {(article) => <ArticleBubble article={article()} ticket={props.selectedTicket} />}
           </For>
         </div>
       </Show>

@@ -241,6 +241,26 @@ describe('plan-approval node', () => {
     expect(node && 'grantedRung' in node ? node.grantedRung : undefined).toBe('workspace_write')
   })
 
+  it('carries a rejection so the card can say the plan was rejected', () => {
+    const turn = assistantTurn({
+      planMode: true,
+      streaming: false,
+      planRejected: true,
+      proposedPlan: {
+        planId: 'plan_1',
+        summary: 'Send the overdue invoice',
+        steps: [{ id: 'step_1', title: 'Draft the email' }],
+      },
+    })
+    const node = deriveConversationNodes(turn).find((n) => n.kind === 'plan-approval')
+    expect(node && 'rejected' in node ? node.rejected : undefined).toBe(true)
+    // And a plan nobody rejected derives no `rejected` key at all.
+    const open = deriveConversationNodes(
+      assistantTurn({ planMode: true, streaming: false }),
+    ).find((n) => n.kind === 'plan-approval')
+    expect(open && 'rejected' in open).toBe(false)
+  })
+
   it('is absent entirely for an ordinary (non-plan-mode) turn', () => {
     const turn = assistantTurn({
       proposedPlan: {

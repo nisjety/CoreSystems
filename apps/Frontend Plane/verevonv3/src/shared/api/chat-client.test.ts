@@ -10,6 +10,7 @@ import {
   getChatThreadTranscript,
   getThreadContext,
   listChatThreads,
+  modelSupportsAgentic,
   parseTurnTiming,
   queueInvocationInput,
   resumeStream,
@@ -508,7 +509,7 @@ describe('chat-client tool wiring', () => {
       subscriptionConnectionId: 'conn-subscription-1',
       browseWeb: true,
       generateImage: true,
-      planMode: true,
+      deepResearch: true,
       attachments: [{ kind: 'image', data_base64: 'abc' }],
     })
 
@@ -518,18 +519,111 @@ describe('chat-client tool wiring', () => {
       subscription_connection_id: 'conn-subscription-1',
       browse_web: false,
       generate_image: false,
+      deep_research: false,
       plan_mode: false,
       attachments: [],
       tools: [],
     })
-    // `tools` DOES stay on for a subscription turn: model-gateway routes the
-    // tool-decision round through Balance and only hands the answer off when
-    // a tool actually ran (sse.rs `subscription_tool_round`), so this is what
-    // lets a subscription turn reach get_weather/code_interpreter at all.
-    // `agentic` (the orchestration-backed plan-mode run path) is a separate,
-    // still-incompatible concern and stays off.
+    // `tools` DOES stay on for a subscription turn: the subscription route
+    // proposes tool calls through the scoped broker and model-gateway executes
+    // them, so this is what lets a subscription turn reach
+    // get_weather/code_interpreter at all. Without plan mode there is no
+    // `agentic` run either.
     expect(body.features).toContain('tools')
     expect(body.features).not.toContain('agentic')
+  })
+
+  // A5: Do on the ChatGPT subscription. The composer offers it only when the
+  // server advertises the `agentic` capability; what reaches the wire is the
+  // agentic feature and plan_mode, and nothing else the route cannot do.
+  it('carries Do on a subscription turn as the agentic feature plus plan_mode, and nothing else the route refuses', () => {
+    const body = buildChatWireBody({
+      content: 'Research this',
+      model: 'gpt-5.6-terra',
+      provider: 'openai-codex-subscription',
+      subscriptionConnectionId: 'conn-subscription-1',
+      planMode: true,
+      // None of these may ride along: the server refuses an agentic
+      // subscription run that also asks for them.
+      browseWeb: true,
+      generateImage: true,
+      deepResearch: true,
+      attachments: [{ kind: 'image', data_base64: 'abc' }],
+      actions: [{ id: 'skill-1', name: 'Quality report', kind: 'skill' }],
+    })
+
+    expect(body).toMatchObject({
+      model: 'gpt-5.6-terra',
+      provider: 'openai-codex-subscription',
+      subscription_connection_id: 'conn-subscription-1',
+      plan_mode: true,
+      browse_web: false,
+      generate_image: false,
+      deep_research: false,
+      attachments: [],
+      tools: [],
+      zdr: false,
+    })
+    expect(body.features).toEqual(expect.arrayContaining(['agentic', 'tools']))
+    expect(body).not.toHaveProperty('skill_ids')
+  })
+
+  it('sends neither agentic nor plan_mode for a conversation-only subscription turn, since the server admits plan_mode only with agentic', () => {
+    const body = buildChatWireBody({
+      content: 'Only this chat',
+      model: 'gpt-5.6-terra',
+      provider: 'openai-codex-subscription',
+      subscriptionConnectionId: 'conn-subscription-1',
+      planMode: true,
+      sourceScope: 'conversation',
+    })
+
+    expect(body.plan_mode).toBe(false)
+    expect(body.features).not.toContain('agentic')
+  })
+
+  it('keeps plan_mode and the agentic feature together on a subscription turn, in both states', () => {
+    for (const planMode of [true, false]) {
+      const body = buildChatWireBody({
+        content: 'hello',
+        model: 'gpt-5.6-terra',
+        provider: 'openai-codex-subscription',
+        subscriptionConnectionId: 'conn-subscription-1',
+        planMode,
+      })
+      expect(body.plan_mode).toBe(planMode)
+      expect((body.features as string[]).includes('agentic')).toBe(planMode)
+    }
+  })
+
+  it('leaves Do on a non-subscription turn exactly as it was', () => {
+    const body = buildChatWireBody({ content: 'Plan it', planMode: true })
+
+    expect(body.plan_mode).toBe(true)
+    expect(body.features).toEqual(expect.arrayContaining(['agentic', 'tools']))
+    expect(buildChatWireBody({ content: 'Plan it' }).plan_mode).toBe(false)
+    expect(buildChatWireBody({ content: 'Plan it' }).features).not.toContain('agentic')
+  })
+
+  it('reads the agentic capability from the catalogue entry alone, and treats an unlisted model as not agentic', () => {
+    expect(modelSupportsAgentic({ capabilities: ['tools', 'agentic'] })).toBe(true)
+    expect(modelSupportsAgentic({ capabilities: ['tools'] })).toBe(false)
+    expect(modelSupportsAgentic({ capabilities: undefined })).toBe(false)
+    expect(modelSupportsAgentic(undefined)).toBe(false)
+  })
+
+  it('maps a catalogue feature list carrying agentic onto the model capabilities', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      models: [
+        { id: 'gpt-5.6-terra', provider: 'openai-codex-subscription', features: ['tools', 'agentic'] },
+        { id: 'gpt-5.6-luna', provider: 'openai-codex-subscription', features: ['tools'] },
+      ],
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } })))
+
+    const [terra, luna] = await listModels()
+    expect(modelSupportsAgentic(terra)).toBe(true)
+    expect(modelSupportsAgentic(luna)).toBe(false)
+    vi.unstubAllGlobals()
   })
 
   it('names and groups ChatGPT-plan models as subscriptions, not Codex products', () => {

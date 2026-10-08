@@ -30,6 +30,8 @@ export function DashboardHomeHeader(props: {
 
 export function DashboardTabs(props: {
   activeTab: DashboardTab
+  /** Fires only when the double-clicked tab was already the active one. */
+  onActiveTabDoubleClick?: (tab: DashboardTab) => void
   onTabChange: (tab: DashboardTab) => void
 }) {
   const i18n = useI18n()
@@ -44,17 +46,31 @@ export function DashboardTabs(props: {
       <div class="dashboard-home-tabs__inner">
         <div class="dashboard-home-tabs__pill">
           <For each={dashboardTabs}>
-            {(tab) => (
-              <button
-                type="button"
-                onClick={() => props.onTabChange(tab)}
-                title={i18n.tr(`Vis ${tabLabel(tab).toLowerCase()}`, `Show ${tabLabel(tab).toLowerCase()}`)}
-                class={{ 'dashboard-home-tabs__tab--active': props.activeTab === tab }}
-                aria-pressed={props.activeTab === tab ? 'true' : 'false'}
-              >
-                {tabLabel(tab)}
-              </button>
-            )}
+            {(tab) => {
+              // A double-click on an inactive tab switches on its first click, so
+              // by the time dblclick fires the tab is already active. Remember
+              // whether it was active when the sequence began: that one only switches.
+              let activeAtFirstClick: boolean | undefined
+              return (
+                <button
+                  type="button"
+                  onClick={(event) => {
+                    if (event.detail <= 1) activeAtFirstClick = props.activeTab === tab
+                    props.onTabChange(tab)
+                  }}
+                  onDblClick={() => {
+                    const wasActive = activeAtFirstClick ?? props.activeTab === tab
+                    activeAtFirstClick = undefined
+                    if (wasActive && props.activeTab === tab) props.onActiveTabDoubleClick?.(tab)
+                  }}
+                  title={i18n.tr(`Vis ${tabLabel(tab).toLowerCase()}`, `Show ${tabLabel(tab).toLowerCase()}`)}
+                  class={{ 'dashboard-home-tabs__tab--active': props.activeTab === tab }}
+                  aria-pressed={props.activeTab === tab ? 'true' : 'false'}
+                >
+                  {tabLabel(tab)}
+                </button>
+              )
+            }}
           </For>
         </div>
       </div>
@@ -71,10 +87,15 @@ export function DashboardComposerPanel(props: {
   message: string
   onKnowledgePreviewActiveChange: (active: boolean) => void
   onLaunchStart: () => void
+  onZeroRetentionChange?: (zeroRetention: boolean | undefined) => void
   onSearchExpandedChange: (expanded: boolean) => void
   onSearchPreviewActiveChange: (active: boolean) => void
   onMessageChange: (value: string) => void
   previewCollapsed: boolean
+  /** Whether searches and opened pages may go in the Nett history: on only while the composer says the next turn is not zero-retention. */
+  rememberSearches?: boolean
+  /** Changing it remounts the search panel, which drops all of its state. */
+  searchResetKey?: number
   searchExpanded: boolean
 }) {
   return (
@@ -82,12 +103,16 @@ export function DashboardComposerPanel(props: {
       <Show when={props.activeTab !== 'Chat'}>
         {props.activeTab === 'Søk'
           ? (
-            <SearchPanel
-              expanded={props.searchExpanded}
-              onExpandedChange={props.onSearchExpandedChange}
-              onPreviewActiveChange={props.onSearchPreviewActiveChange}
-              previewCollapsed={props.previewCollapsed}
-            />
+            // A keyed Show rebuilds its child whenever the key changes.
+            <Show when={`search-${props.searchResetKey ?? 0}`} keyed>
+              <SearchPanel
+                expanded={props.searchExpanded}
+                onExpandedChange={props.onSearchExpandedChange}
+                onPreviewActiveChange={props.onSearchPreviewActiveChange}
+                previewCollapsed={props.previewCollapsed}
+                rememberSearches={props.rememberSearches}
+              />
+            </Show>
           )
           : (
             <KnowledgeComposer
@@ -105,6 +130,7 @@ export function DashboardComposerPanel(props: {
             message={props.message}
             onLaunchStart={props.onLaunchStart}
             onMessageChange={props.onMessageChange}
+            onZeroRetentionChange={props.onZeroRetentionChange}
           />
         </div>
       </Show>

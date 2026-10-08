@@ -1,7 +1,9 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   disconnectChatGptSubscription,
+  getChatGptSubscriptionUsage,
   getChatGptSubscriptionStatus,
+  isChatGptSubscriptionConnected,
   listChatGptSubscriptions,
   startChatGptSubscription,
 } from './chatgpt-subscription-client'
@@ -48,6 +50,21 @@ describe('ChatGPT subscription client', () => {
     expect(disconnect?.[1]?.method).toBe('DELETE')
   })
 
+  it('reads provider allowance windows without creating an inference request', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ data: {
+      connectionId: 'conn-codex', scope: 'connected_user', source: 'provider_rate_limits',
+      usage: { observedAt: '2026-10-01T10:00:00Z', primary: { usedPercent: 42, windowMinutes: 300 } },
+    } }), { headers: { 'Content-Type': 'application/json' } })))
+
+    await expect(getChatGptSubscriptionUsage('org-coresystem', 'conn/codex')).resolves.toMatchObject({
+      scope: 'connected_user', source: 'provider_rate_limits', usage: { primary: { usedPercent: 42 } },
+    })
+    const request = vi.mocked(fetch).mock.calls[0]
+    expect(String(request?.[0])).toBe('/api/v1/model-subscriptions/openai-codex/connections/conn%2Fcodex/usage')
+    expect(request?.[1]?.method).toBeUndefined()
+    expect(new Headers(request?.[1]?.headers).get('x-verevon-org-id')).toBe('org-coresystem')
+  })
+
   it('keeps subscription connections out of generic source rows', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ data: {
       connections: [
@@ -59,5 +76,11 @@ describe('ChatGPT subscription client', () => {
     await expect(listChatGptSubscriptions('org-coresystem')).resolves.toEqual([
       expect.objectContaining({ id: 'conn-codex', providerKey: 'openai-codex-subscription' }),
     ])
+  })
+
+  it('recognizes both connected status values exposed by Integration Core', () => {
+    expect(isChatGptSubscriptionConnected('active')).toBe(true)
+    expect(isChatGptSubscriptionConnected('connected')).toBe(true)
+    expect(isChatGptSubscriptionConnected('needs_refresh')).toBe(false)
   })
 })

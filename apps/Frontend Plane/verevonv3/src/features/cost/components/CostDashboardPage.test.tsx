@@ -5,7 +5,13 @@ import { describe, expect, it, vi } from 'vitest'
 import CostDashboardPage from './CostDashboardPage'
 
 vi.mock('@/shared/api/cost-client', () => ({
-  getCostSummary: vi.fn(async () => ({ totalInputTokens: 1500, totalOutputTokens: 400, totalCostUsd: 0.0123, entryCount: 2 })),
+  getCostSummary: vi.fn(async () => ({
+    totalInputTokens: 1500, totalOutputTokens: 400, totalCostUsd: 0.0123, entryCount: 2,
+    meteredEntryCount: 1, subscriptionEntryCount: 1, unknownBasisEntryCount: 0,
+    meteredCostUsd: 0.0123, subscriptionInputTokens: 1200, subscriptionOutputTokens: 300,
+    unknownBasisInputTokens: 0, unknownBasisOutputTokens: 0, zeroTokenEntryCount: 0,
+    latestEntryAt: '2026-09-24T08:01:00Z', basisBreakdownAvailable: true,
+  })),
   listCostEntries: vi.fn(async () => [
     {
       model: 'gpt-5.6-terra',
@@ -42,7 +48,7 @@ describe('CostDashboardPage recent inferences', () => {
     const costs = Array.from(container.querySelectorAll('.verevon-cost__table tbody .verevon-cost__cost')).map(
       (cell) => cell.textContent?.trim(),
     )
-    expect(costs[0]).toMatch(/^(Inkludert i abonnementet|Included in the subscription)$/)
+    expect(costs[0]).toMatch(/^(Inkludert i abonnementet|Included in the subscription|Bruk av abonnement)$/)
     expect(costs[1]).toBe('$0.0123')
     unmount()
   })

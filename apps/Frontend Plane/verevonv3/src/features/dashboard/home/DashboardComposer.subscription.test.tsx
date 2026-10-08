@@ -32,6 +32,8 @@ vi.mock('@/shared/session/session-store', () => ({
 import { DashboardComposer } from './DashboardComposer'
 
 const submitted: Array<Record<string, unknown>> = []
+// Every value the composer reported through `onPlanModeChange`, in order.
+const planModeChanges: boolean[] = []
 
 function ComposerPage() {
   const [message, setMessage] = createSignal('')
@@ -57,6 +59,7 @@ function renderComposer() {
 
 afterEach(() => {
   submitted.length = 0
+  planModeChanges.length = 0
   vi.clearAllMocks()
   window.localStorage.removeItem('verevon.ai-model-selection.v1:org-1')
 })
@@ -82,7 +85,10 @@ function ComposerPageWithModeControls(props: { initiallyEnabled?: boolean }) {
       onBrowseWebChange={setBrowseWeb}
       onImageModeChange={setImageMode}
       onMessageChange={setMessage}
-      onPlanModeChange={setPlanMode}
+      onPlanModeChange={(value) => {
+        planModeChanges.push(value)
+        setPlanMode(value)
+      }}
       onSubmit={(payload) => {
         submitted.push(payload as unknown as Record<string, unknown>)
       }}
@@ -144,6 +150,131 @@ describe('subscription-backed model disables capabilities it silently drops', ()
     expect(screen.getByRole('button', { name: /søk på nett/i }).title).toMatch(
       /ikke tilgjengelig med denne modellen/i,
     )
+    // Utfør says its own, more precise reason: the server has not switched Do
+    // on for the ChatGPT subscription (the model carries no `agentic` capability).
+    expect(screen.getByRole('button', { name: /^utfør$/i }).title).toMatch(
+      /utfør er ikke slått på for chatgpt-abonnementet/i,
+    )
+  })
+})
+
+// A5: Do on the ChatGPT subscription follows what the SERVER says. inference-core
+// adds the `agentic` capability to the subscription models only while
+// AGENTIC_SUBSCRIPTION_ENABLED is on, and the composer reads it from the
+// catalogue instead of naming the provider. Everything else the route cannot do
+// (Søk/Bilde/Dyp research) stays disabled either way.
+describe('Do on a subscription model follows the server-advertised agentic capability', () => {
+  const persistTerra = () =>
+    window.localStorage.setItem(
+      'verevon.ai-model-selection.v1:org-1',
+      JSON.stringify({
+        model: 'gpt-5.6-terra',
+        label: 'Terra',
+        provider: 'openai-codex-subscription',
+        subscriptionConnectionId: 'conn',
+      }),
+    )
+  const activeConnection = [{ id: 'conn', providerKey: 'openai-codex-subscription', status: 'active' }]
+  const utfor = () => screen.getByRole('button', { name: /^utfør$/i }) as HTMLButtonElement
+
+  it('enables Utfør once the selected model carries the agentic capability, and leaves the other modes off', async () => {
+    persistTerra()
+    mockListModels.mockResolvedValue([
+      { id: 'gpt-5.6-terra', name: 'Terra', provider: 'openai-codex-subscription', capabilities: ['tools', 'agentic'] },
+    ])
+    mockListSubscriptions.mockResolvedValue(activeConnection)
+    renderComposerWithModeControls()
+
+    await waitFor(() => expect(utfor().disabled).toBe(false))
+    expect(utfor().title).toBe('')
+    expect((screen.getByRole('button', { name: /søk på nett/i }) as HTMLButtonElement).disabled).toBe(true)
+    expect((screen.getByRole('button', { name: /dyp research/i }) as HTMLButtonElement).disabled).toBe(true)
+    expect((screen.getByRole('button', { name: /generer bilde/i }) as HTMLButtonElement).disabled).toBe(true)
+
+    fireEvent.click(utfor())
+    flush()
+    expect(planModeChanges).toEqual([true])
+    expect(utfor().getAttribute('aria-pressed')).toBe('true')
+  })
+
+  it('keeps Utfør disabled, with the reason, when the model carries no agentic capability', async () => {
+    persistTerra()
+    mockListModels.mockResolvedValue([
+      { id: 'gpt-5.6-terra', name: 'Terra', provider: 'openai-codex-subscription', capabilities: ['tools'] },
+    ])
+    mockListSubscriptions.mockResolvedValue(activeConnection)
+    renderComposerWithModeControls()
+
+    await waitFor(() => expect(mockListSubscriptions).toHaveBeenCalled())
+    await screen.findByRole('textbox')
+    flush()
+    expect(utfor().disabled).toBe(true)
+    expect(utfor().title).toMatch(/utfør er ikke slått på for chatgpt-abonnementet/i)
+    fireEvent.click(utfor())
+    expect(planModeChanges).toEqual([])
+  })
+
+  it('needs no capability on a model that is not a subscription: Do is as available as before', async () => {
+    window.localStorage.setItem(
+      'verevon.ai-model-selection.v1:org-1',
+      JSON.stringify({ model: 'gpt-4o', label: 'GPT-4o', provider: 'openai' }),
+    )
+    mockListModels.mockResolvedValue([{ id: 'gpt-4o', name: 'GPT-4o', provider: 'openai', capabilities: ['tools'] }])
+    mockListSubscriptions.mockResolvedValue([])
+    renderComposerWithModeControls(true)
+
+    await waitFor(() => expect(mockListModels).toHaveBeenCalled())
+    await screen.findByRole('textbox')
+    flush()
+    expect(utfor().disabled).toBe(false)
+    expect(utfor().title).toBe('')
+    expect(utfor().getAttribute('aria-pressed')).toBe('true')
+    expect(planModeChanges).toEqual([])
+  })
+
+  it('shows Do as active when it is on and the model advertises agentic', async () => {
+    persistTerra()
+    mockListModels.mockResolvedValue([
+      { id: 'gpt-5.6-terra', name: 'Terra', provider: 'openai-codex-subscription', capabilities: ['agentic'] },
+    ])
+    mockListSubscriptions.mockResolvedValue(activeConnection)
+    renderComposerWithModeControls(true)
+
+    await waitFor(() => expect(utfor().getAttribute('aria-pressed')).toBe('true'))
+    // A valid Do is never turned off by the composer.
+    expect(planModeChanges).toEqual([])
+    // Search, image and deep research are inactive on this route whatever the page holds.
+    expect(screen.getByRole('button', { name: /søk på nett/i }).getAttribute('aria-pressed')).toBe('false')
+  })
+
+  it('turns a Do left on under another model off once the subscription model proves not to be agentic', async () => {
+    persistTerra()
+    mockListModels.mockResolvedValue([
+      { id: 'gpt-5.6-terra', name: 'Terra', provider: 'openai-codex-subscription' },
+    ])
+    mockListSubscriptions.mockResolvedValue(activeConnection)
+    // The page already holds Do = true (it was switched on under Verevon Balance).
+    renderComposerWithModeControls(true)
+
+    // The controller sends its own plan-mode signal, so the composer must hand
+    // it back instead of letting a Do it cannot offer ride onto the route.
+    await waitFor(() => expect(planModeChanges).toEqual([false]))
+    expect(utfor().getAttribute('aria-pressed')).toBe('false')
+    expect(utfor().disabled).toBe(true)
+  })
+
+  it('does not touch Do while the catalogue or the connection lookup is still pending', async () => {
+    persistTerra()
+    mockListModels.mockReturnValue(new Promise(() => undefined))
+    mockListSubscriptions.mockResolvedValue(activeConnection)
+    renderComposerWithModeControls(true)
+
+    await screen.findByRole('textbox')
+    await waitFor(() => expect(mockListSubscriptions).toHaveBeenCalled())
+    flush()
+    // Unknown is not "absent": a remounted composer must not drop a Do that is still valid.
+    expect(planModeChanges).toEqual([])
+    expect(utfor().disabled).toBe(true)
   })
 })
 

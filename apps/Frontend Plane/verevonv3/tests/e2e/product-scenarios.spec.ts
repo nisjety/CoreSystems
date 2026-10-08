@@ -5,6 +5,7 @@ import { openFresh, restrictSources, send, transcript, latestArtifacts, type Tra
 import { acceptableProfitChange, containsRoundedNumber, grossProfitChangeClaims } from './product-sales-oracle'
 import { scenarioRecording } from './product-recording-camera'
 import { unsupportedDatedApprovalRows } from './product-project-oracle'
+import { campaignCopy, copyBody, lostPostNotes } from './product-campaign-oracle'
 
 const root = resolve('apps/verevon-web/plans/product-recordings')
 const scenarios = ['02-salgsrapport', '03-kampanje', '04-prosjektplan'] as const
@@ -80,19 +81,6 @@ function section(text: string, heading: RegExp, dateMetadata?: RegExp) {
   const start = headings[index]
   const next = headings.slice(index + 1).find(match => match[1].length <= start[1].length)
   return text.slice(start.index! + start[0].length, next?.index ?? text.length).trim()
-}
-
-function copyBody(text: string) {
-  return text.split(/\r?\n/).filter(line => !/^\s*(?:#{1,6}\s|---+$|\*?\*?(?:Rapportdato|Dato|Vinkel|Status|(?:Antall )?ord(?:antall|telling|tall)?(?:\s+brødtekst)?(?:\s*\([^)]*\))?|Maks emneknagger|Rekkevidde(?:\s*\([^)]*\))?|Kilde(?:r|grunnlag)?|Produktinformasjon|Bygger på)\s*\*?\*?\s*:)/i.test(line))
-    .join('\n').replace(/[*`]/g, '').trim()
-}
-
-function campaignCopy(text: string) {
-  // A source note may sit below each piece instead of in one final appendix.
-  // Its explicit label separates internal evidence from customer-facing copy.
-  const sourceNote = /^\s*(?:(?:#{1,6}\s*)?(?:\*\*)?(?:Produktinformasjon(?:\s+[^\n]*)?|Kildenoter|Kildegrunnlag|Faktagrunnlag|Bygger på)[^\n]*|#{1,6}\s+(?:Kilder|Sources)(?:[\s/][^\n]*)?)$/im.exec(text)
-  return copyBody(sourceNote ? text.slice(0, sourceNote.index) : text)
-    .split(/\r?\n/).filter(line => !/^\s*Produktgrunnlag(?:\s*\([^)]*\))?\s*:|^\s*\(?\d+\s+ord\)?\s*$/i.test(line)).join('\n').trim()
 }
 
 function checkCampaign(text: string) {
@@ -257,6 +245,7 @@ for (const scenario of scenarios) test(`Q05 ${scenario}: fixed brief, follow-up 
     expect(after.email, 'email remains unchanged').toBe(before.email)
     const initialDocument = initialArtifacts.map(a => a.content).join('\n\n')
     const revisedDocument = artifacts.map(a => a.content).join('\n\n')
+    expect(lostPostNotes(initialDocument, revisedDocument), 'a post that showed its source note must still show it after the revision').toEqual([])
     if (/^#+ .*publiseringsoversikt/im.test(initialDocument) && /^#+ .*publiseringsoversikt/im.test(revisedDocument)) {
       const overviewBefore = section(initialDocument, /publiseringsoversikt/i)
       const overviewAfter = section(revisedDocument, /publiseringsoversikt/i)

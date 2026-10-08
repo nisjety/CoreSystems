@@ -111,11 +111,11 @@ describe('model picker privacy badges', () => {
       catalogModel({ id: 'm-zdr', name: 'ZDR Model', privacyTier: 'zdr_contractual' }),
     ])
 
-    const euBadge = screen.getByTitle(/EU\/EØS-jurisdiksjon/i)
+    const euBadge = screen.getByTitle(/region er satt til EU\/EØS/i)
     expect(euBadge.textContent).toBe('EU')
     expect(euBadge.getAttribute('data-tone')).toBe('claimed')
 
-    const zdrBadge = screen.getByTitle(/null datalagring/i)
+    const zdrBadge = screen.getByTitle(/registrert ZDR-godkjenning/i)
     expect(zdrBadge.textContent).toBe('ZDR')
     expect(zdrBadge.getAttribute('data-tone')).toBe('claimed')
   })
@@ -137,13 +137,13 @@ describe('model picker privacy badges', () => {
       catalogModel({ id: 'm-uns', name: 'Unspecified Model', privacyTier: 'unspecified' as PrivacyTier }),
     ])
 
-    expect(screen.queryByTitle(/jurisdiksjon|datalagring|regionsbegrensning/i)).toBeNull()
+    expect(screen.queryByTitle(/region er satt til EU|registrert ZDR-godkjenning|norskdrevet|regionsbegrensning/i)).toBeNull()
     expect(screen.getByText('Unspecified Model')).toBeTruthy()
   })
 
   it('adds no tier badge to the pinned Verevon intent modes', async () => {
     await openModelMenu([])
-    expect(screen.queryByTitle(/jurisdiksjon|datalagring|regionsbegrensning/i)).toBeNull()
+    expect(screen.queryByTitle(/region er satt til EU|registrert ZDR-godkjenning|norskdrevet|regionsbegrensning/i)).toBeNull()
     // The intent modes themselves still render above the (empty) catalog.
     expect(screen.getAllByText(/Verevon Balance|Verevon Genius/).length).toBeGreaterThan(0)
   })

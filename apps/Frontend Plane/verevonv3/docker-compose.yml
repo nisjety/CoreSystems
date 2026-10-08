@@ -153,6 +153,22 @@ services:
       VEREVON_GATEWAY_GDPR_NATS_URL: ${VEREVON_GATEWAY_GDPR_NATS_URL:-nats://control-shared-nats:4222}
       VEREVON_GATEWAY_GDPR_NATS_USER: ${VEREVON_GATEWAY_GDPR_NATS_USER:-verevon-gateway-gdpr}
       VEREVON_GATEWAY_GDPR_NATS_PASSWORD: ${VEREVON_GATEWAY_GDPR_NATS_PASSWORD:?VEREVON_GATEWAY_GDPR_NATS_PASSWORD must match Control Plane control-shared-nats configuration}
+      # Inbound "forward an email to create a task" (plan task J3, dark). Nothing
+      # below turns the feature on: the ingest route refuses every caller while the
+      # token is empty, and the thread bridge below is not wired into the pipeline
+      # in any build yet (domains/mail_task_thread_bridge.rs).
+      # HMAC key for /internal/mail-task/ingest. The SAME host variable feeds
+      # integration-api's MAIL_TASK_GATEWAY_SERVICE_TOKEN, so the two ends are equal
+      # by construction. Not minted by the launcher; set by the owner at switch-on.
+      MAIL_TASK_INGEST_SERVICE_TOKEN: ${MAIL_TASK_GATEWAY_SERVICE_TOKEN:-}
+      # Runs per hour per org; empty falls back to the code default (20).
+      MAIL_TASK_RATE_LIMIT_PER_HOUR: ${MAIL_TASK_RATE_LIMIT_PER_HOUR:-}
+      # Auth Core principal `verevon-gateway` (audience model-gateway, scope
+      # mail-task:prepare-thread alone) minted via /api/model-plane/internal-token.
+      # Control's launcher mints the key from the principal's consumerEnv. NOT the
+      # user-core registry entry of the same name (that one is audience user-core).
+      MAIL_TASK_GATEWAY_BRIDGE_SERVICE_API_KEY: ${MAIL_TASK_GATEWAY_BRIDGE_SERVICE_API_KEY:-}
+      MAIL_TASK_GATEWAY_BRIDGE_SERVICE_ID: ${MAIL_TASK_GATEWAY_BRIDGE_SERVICE_ID:-verevon-gateway}
       # NOTE: there is deliberately no SCRAPE_ENHANCED_* stealth-proxy tier here.
       # The BFF used to fetch bot-walled sites itself through Scrapfly / Bright
       # Data, which sent the org's target URL and the page's full content to a

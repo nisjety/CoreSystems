@@ -376,7 +376,10 @@ function rateLimitedPresentation(
  * carry a fixed, content-free reason, so each gets its own words in both
  * languages and an `action`: wait for a known reset, reconnect, retry, or
  * nothing. None of them ever retries by itself, and each says no other model
- * was used, because the subscription route never swaps. `prompt_too_long`,
+ * was used, because the subscription route never swaps.
+ * `agentic_subscription_disabled` is the server saying Do is off for the
+ * subscription route: the reader is told to choose Ask or another model, and
+ * no retry is offered. `prompt_too_long`,
  * `inference_stream_error` and `model_plane_unavailable` are translated too;
  * the last one's server text is raw transport detail and is never shown.
  */
@@ -433,6 +436,20 @@ export function streamFailurePresentation(
         message: tr(
           'ChatGPT avviste forespørselen. Endre eller kort ned meldingen, og prøv igjen. Ingen annen modell ble brukt.',
           'ChatGPT rejected the request. Change or shorten the message, then try again. No other model was used.',
+        ),
+        unsaved: true,
+        unavailable: false,
+        action: 'none',
+      }
+    case 'agentic_subscription_disabled':
+      // The server refused Do on the ChatGPT subscription because its switch is
+      // off, before any model ran. Sending the same turn again would be refused
+      // the same way, so there is no retry; the words say what to do instead.
+      // The server's own text is English operator wording and is never shown.
+      return {
+        message: tr(
+          'Utfør er ikke slått på for ChatGPT-abonnementet. Velg Spør, eller velg en annen modell for å bruke Utfør. Ingen modell ble brukt.',
+          'Do is not switched on for the ChatGPT subscription. Choose Ask, or pick another model to use Do. No model was used.',
         ),
         unsaved: true,
         unavailable: false,

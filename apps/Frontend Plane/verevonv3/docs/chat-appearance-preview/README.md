@@ -3,6 +3,14 @@
 Updated 2026-09-28 after the twelve annotated browser comments. This is an
 opt-in development preview. Production continues to use the existing UI.
 
+**2026-09-29:** All eight switches are now the standard appearance: always on
+in production and on by default in development. The Appearance panel only
+turns single refinements off for comparison. **Original** shows the legacy UI
+and **Reset all** returns to the standard; **Try all** was removed. Choices use
+`verevon.chat-appearance-preview.v3` and store only the switches turned off.
+v1 and v2 choices are ignored, because they were saved against the old all-off
+default.
+
 ## Try it
 
 Open `/chat`. With the refined navigation enabled, choose **… → Appearance**.

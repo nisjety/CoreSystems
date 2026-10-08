@@ -445,20 +445,21 @@ export function TicketQueue(props: {
         </Show>
         <Show when={!props.loading && !props.error && sortedTickets().length > 0}>
           <ul aria-label={i18n.tr('Saker', 'Tickets')} aria-keyshortcuts="j k" class="verevon-inbox-ticket-list">
-            <For each={sortedTickets()}>
+            {/* Keyed by conversation: a poll rebuilds every row object, and an unkeyed list would remount each row and drop focus. */}
+            <For each={sortedTickets()} keyed={(t) => t.conversationId ?? t.id}>
               {(ticket) => (
                 <li>
                   <TicketRow
-                    active={props.selectedTicketId === ticket.id}
-                    pinned={pinnedConversationIds().has(ticketPreferenceId(ticket))}
-                    unread={!readConversationIds().has(ticketPreferenceId(ticket))}
-                    ticket={ticket}
+                    active={props.selectedTicketId === ticket().id}
+                    pinned={pinnedConversationIds().has(ticketPreferenceId(ticket()))}
+                    unread={!readConversationIds().has(ticketPreferenceId(ticket()))}
+                    ticket={ticket()}
                     onClick={() => {
-                      props.onMarkRead(ticket)
-                      props.onSelectTicket(ticket)
+                      props.onMarkRead(ticket())
+                      props.onSelectTicket(ticket())
                     }}
-                    onSnooze={() => props.onSnoozeTicket(ticket)}
-                    onTogglePinned={() => props.onTogglePinned(ticket)}
+                    onSnooze={() => props.onSnoozeTicket(ticket())}
+                    onTogglePinned={() => props.onTogglePinned(ticket())}
                   />
                 </li>
               )}

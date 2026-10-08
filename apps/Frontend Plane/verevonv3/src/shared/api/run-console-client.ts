@@ -44,10 +44,29 @@ export type SubagentAttachedEvent = {
   parentRunId?: string
   childRunId?: string
   role?: string
+  /**
+   * Truncated delegated goal (wide-research fan-out, chat-wave2-specs
+   * 2026-09-28). Empty/absent for an event from before this field existed.
+   */
+  goalSummary?: string
+  /**
+   * Groups every sibling spawned by ONE `subagent.research_fan_out` call.
+   * Absent/empty for a standalone `subagent.task` delegation, which has no
+   * siblings to group — the live run panel switches in only when ≥2
+   * attached edges share one non-empty `batchId`.
+   */
+  batchId?: string
   at?: string
 }
 
 export type SubagentStoppedEvent = {
+  /**
+   * The run that delegated the child. It is what routes the event onto the
+   * run's stream at all (the server delivers an event only to the stream of the
+   * run it names), so a live panel can rely on receiving it; absent only on an
+   * event recorded before the field existed.
+   */
+  parentRunId?: string
   childRunId?: string
   status?: string
   at?: string
@@ -239,11 +258,14 @@ function dispatch(event: SseEvent, handlers: RunEventHandlers): void {
         parentRunId: str(payload.parent_run_id) ?? str(payload.parentRunId),
         childRunId: str(payload.child_run_id) ?? str(payload.childRunId),
         role: str(payload.role),
+        goalSummary: str(payload.goal_summary) ?? str(payload.goalSummary),
+        batchId: str(payload.batch_id) ?? str(payload.batchId),
         at: str(payload.at),
       })
       break
     case 'subagent_stopped':
       handlers.onSubagentStopped?.({
+        parentRunId: str(payload.parent_run_id) ?? str(payload.parentRunId),
         childRunId: str(payload.child_run_id) ?? str(payload.childRunId),
         status: str(payload.status),
         at: str(payload.at),

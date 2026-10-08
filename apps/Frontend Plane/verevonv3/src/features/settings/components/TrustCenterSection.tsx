@@ -30,8 +30,11 @@ import { useI18n } from '@/shared/i18n'
  * (aggregated from `tool_action` audit events), whether the AI has used it at
  * all, the retention class, last sync, and a disconnect control.
  *
- * Disconnect reuses the existing integrations client; the UI copy notes that
- * it also purges cached data (the backend erasure is wired separately).
+ * Disconnect reuses the existing integrations client. The UI copy claims no more
+ * than the broker does: it blanks the stored tokens and marks the connection
+ * deleted, revokes at the provider only where the provider supports it
+ * (Microsoft does not), and nothing here is known to purge content already
+ * fetched (docs/compliance/evidence/claims-vs-code.md, P6).
  */
 
 interface TrustCenterData {
@@ -404,8 +407,8 @@ export function TrustCenterSection() {
 
             <p class="verevon-settings-subnote">
               <ShieldCheck size={14} aria-hidden="true" /> {i18n.tr(
-                'Å koble fra en app tilbakekaller tilgangen og sletter mellomlagrede data. "Ja" under "Brukt av AI?" betyr at en verktøyshendelse ble knyttet til denne tilkoblingen; "Attribusjon utilgjengelig" betyr at ingen kunne knyttes — ikke at AI-en aldri har brukt den.',
-                'Disconnecting an app revokes its access and purges its cached data. "Yes" under "Used by AI?" means a tool-action event was attributed to this connection; "Attribution unavailable" means none could be — not that the AI has never used it.',
+                'Å koble fra en app stopper Verevons bruk av tilkoblingen og sletter våre lagrede tilgangsnøkler til den. Hos noen leverandører, blant annet Microsoft, trekkes ikke tilgangen tilbake hos leverandøren: fjern appen i leverandørens egne innstillinger for å gjøre det. Vi har ikke verifisert at innhold som allerede er hentet inn, slettes ved frakobling. "Ja" under "Brukt av AI?" betyr at en verktøyshendelse ble knyttet til denne tilkoblingen; "Attribusjon utilgjengelig" betyr at ingen kunne knyttes — ikke at AI-en aldri har brukt den.',
+                'Disconnecting an app stops Verevon from using the connection and deletes our stored access tokens for it. At some providers, Microsoft among them, the access is not revoked at the provider: remove the app in the settings of the provider itself to do that. We have not verified that content already fetched is deleted when you disconnect. "Yes" under "Used by AI?" means a tool-action event was attributed to this connection; "Attribution unavailable" means none could be — not that the AI has never used it.',
               )}
             </p>
           </Show>

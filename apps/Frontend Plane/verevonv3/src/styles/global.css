@@ -1,10 +1,7 @@
-@import url('https://fonts.googleapis.com/css2?family=Geist:wght@100..900&family=Geist+Mono:wght@100..900&display=swap');
-
 :root {
   color: var(--foreground);
   background: var(--background);
-  font-family:
-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-family: var(--font-sans);
   font-synthesis: none;
   line-height: 1.5;
   text-rendering: optimizeLegibility;
@@ -52,6 +49,7 @@
   --verevon-border-soft: #eeeeec;
   --verevon-border-strong: #d8d8d4;
   --verevon-primary: #171717;
+  --verevon-primary-foreground: #ffffff;
   --verevon-primary-hover: #34363d;
   --verevon-primary-soft: #efefee;
   --verevon-primary-dark: #111111;
@@ -305,6 +303,15 @@
   --verevon-z-tooltip: 60;
 
   /* ==================================================
+     MOTION — shared easing and duration vocabulary
+  ================================================== */
+  --ease-out: cubic-bezier(0.19, 1, 0.22, 1);
+  --ease-in-out: cubic-bezier(0.65, 0, 0.35, 1);
+  --dur-fast: 120ms;
+  --dur-base: 160ms;
+  --dur-slow: 240ms;
+
+  /* ==================================================
      LEGACY COMPAT — bridges the pre-existing stylesheet onto the new
      system. Old token names kept so no var() breaks; each maps to the
      nearest new token (values match where the role aligns). New code
@@ -358,15 +365,16 @@
   --verevon-accent-ink: #b8501f;
   --warning-ink: #9a5410;
 
+  /* Visible keyboard-focus ring (≈4.5:1 on white); .dark re-tints it. */
+  --focus-ring: var(--verevon-accent-ink);
+  --focus-ring-width: 2px;
+
   /* Auth surfaces (atmospheric brand zone). */
   --auth-card: #edebe7;
   --auth-field: #f7f4ed;
 
   /* Fonts. */
-  --font-sans:
-    var(--font-inter), var(--font-geist-sans), "Inter", "Geist",
-    ui-sans-serif, system-ui, sans-serif;
-  --font-geist-sans: "Geist";
+  --font-sans: "Geist", "Geist Fallback", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
 }
 
 :root {
@@ -410,9 +418,6 @@
   --color-linear-panel-bg: var(--linear-panel-bg);
   --color-linear-border: var(--linear-border);
   --color-linear-accent: var(--linear-accent);
-  --font-sans:
-    var(--font-inter), var(--font-geist-sans), "Inter", "Geist",
-    "Geist Fallback", ui-sans-serif, system-ui, sans-serif;
   --font-mono: "Geist Mono", "Geist Mono Fallback", ui-monospace, monospace;
 }
 
@@ -464,11 +469,10 @@ h3 {
   margin: 0;
 }
 
-button:focus-visible,
-a:focus-visible,
-textarea:focus-visible {
-  outline: 3px solid rgb(0 0 0 / 18%);
+:where(button, a, summary, input, select, textarea, [tabindex]):focus-visible {
+  outline: var(--focus-ring-width, 2px) solid var(--focus-ring);
   outline-offset: 2px;
+  box-shadow: none;
 }
 
 .sr-only {
@@ -559,6 +563,11 @@ textarea:focus-visible {
        zoom and the base 44px is already correct -- which is the case that
        matters most, since that is where touch happens. */
     --verevon-touch-target: calc(44px / 0.9);
+    /* Same zoom problem for the focus ring: a 2px outline lands at 1.8 device
+       pixels and Chrome floors outline widths to whole device pixels, so it
+       rendered as a 1px ring. 2.25px / 0.9 = 2.5px in zoomed units = 2.25
+       device pixels, which floors to 2. */
+    --focus-ring-width: calc(2.25px / 0.9);
   }
 }
 
@@ -581,6 +590,10 @@ textarea:focus-visible {
      it from the recessed content well below (Linear-style top chrome). */
   border-bottom: 1px solid var(--verevon-border-soft);
   background: var(--verevon-dashboard-sidebar);
+}
+
+.dark {
+  --focus-ring: #f0936a;
 }
 
 .dark .dashboard-navbar-bg {
@@ -1889,9 +1902,7 @@ textarea:focus-visible {
 }
 
 .verevon-sidebar-type {
-  font-family:
-    var(--font-inter), var(--font-geist-sans),
-    var(--font-sans, "Inter", "Geist", "Geist Fallback", ui-sans-serif, system-ui, sans-serif);
+  font-family: var(--font-sans);
 }
 
 .core-sidebar {
@@ -1902,9 +1913,7 @@ textarea:focus-visible {
   z-index: var(--verevon-z-sidebar);
   display: block;
   overflow: hidden;
-  transition:
-    width 300ms ease-out,
-    background-color 300ms ease-out;
+  transition: background-color var(--dur-base) var(--ease-out);
 }
 
 .verevon-sidebar-themed {
@@ -3176,18 +3185,20 @@ textarea:focus-visible {
   color: var(--sidebar-muted);
 }
 
-.core-sidebar-subnav,
-.core-sidebar-subtree {
+.core-sidebar-subnav {
   position: relative;
   margin: 6px 0 8px 34px;
 }
 
+/* Knowledge collections tree. The guide line sits under the parent's chevron
+   centre so every level only spends 10px + 4px on indentation. */
 .core-sidebar-subtree {
-  margin-left: 30px;
+  position: relative;
+  margin: 2px 0 2px 10px;
 }
 
 .core-sidebar-subtree--nested {
-  margin-left: 24px;
+  margin-left: 10px;
 }
 
 .core-sidebar-subnav__line {
@@ -3200,7 +3211,64 @@ textarea:focus-visible {
 }
 
 .core-sidebar-subtree__child {
-  padding-left: 12px;
+  padding-left: 4px;
+}
+
+/* Depth 2 and below: drop the "1" count pill on leaves so the label keeps the
+   room. The icon stays at every depth: hiding it made a child's text start to
+   the left of its parent's text (measured live: 133 -> 123 -> 118), which
+   inverted the hierarchy. The full name stays reachable through the row title. */
+.core-sidebar-subtree--nested .core-sidebar-subtree__child .core-sidebar-count-pill[data-count="1"] {
+  display: none;
+}
+
+/* Tree row = expand chevron (or an equally wide spacer) + the row button. */
+.core-sidebar-tree-row {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+}
+
+.core-sidebar-tree-row > .core-sidebar-section-link {
+  width: auto;
+  min-width: 0;
+  flex: 1;
+}
+
+.core-sidebar-tree-toggle,
+.core-sidebar-tree-toggle-spacer {
+  width: 20px;
+  height: 36px;
+  flex-shrink: 0;
+}
+
+.core-sidebar-tree-toggle {
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  padding: 0;
+  color: var(--subtle);
+  cursor: pointer;
+}
+
+.core-sidebar-tree-toggle:hover:not(:disabled) {
+  color: var(--verevon-dark-surface);
+}
+
+.core-sidebar-tree-toggle:disabled {
+  cursor: default;
+}
+
+.core-sidebar-tree-toggle__icon {
+  width: 14px;
+  height: 14px;
+  transform: rotate(-90deg);
+}
+
+.core-sidebar-tree-toggle[aria-expanded="true"] .core-sidebar-tree-toggle__icon {
+  transform: none;
 }
 
 .core-sidebar-subnav-link {
@@ -6679,7 +6747,11 @@ textarea:focus-visible {
   outline-offset: 2px;
 }
 .resize { resize: both; }
-.transition { transition: all 150ms ease; }
+.transition {
+  transition-property: color, background-color, border-color, opacity, transform;
+  transition-duration: var(--dur-fast);
+  transition-timing-function: var(--ease-out);
+}
 .transition-colors {
   transition:
     color 150ms ease,
@@ -7100,6 +7172,9 @@ textarea:focus-visible {
 }
 
 .core-main {
+  /* The shell colour continues as a strip along the right and bottom edges,
+     so the navbar and rail frame the content panel all the way round. */
+  --dashboard-frame-gap: 5px;
   position: relative;
   height: 100%;
   overflow: hidden;
@@ -7107,8 +7182,10 @@ textarea:focus-visible {
      while the org-deletion banner (Flow C) is visible so content reflows
      below it instead of being covered by the fixed banner bar. */
   padding-top: var(--dashboard-navbar-height, 56px);
+  padding-right: var(--dashboard-frame-gap);
+  padding-bottom: var(--dashboard-frame-gap);
   padding-left: var(--dashboard-rail-width);
-  transition: padding-left 300ms ease-out, padding-top 160ms ease-out;
+  transition: padding-top var(--dur-base) var(--ease-out);
 }
 
 .core-main__panel {
@@ -7123,9 +7200,8 @@ textarea:focus-visible {
 }
 
 .dashboard-main-panel {
-  border-top: 1px solid rgb(17 17 17 / 7%);
-  border-left: 1px solid rgb(17 17 17 / 7%);
-  border-top-left-radius: 18px;
+  border: 1px solid rgb(17 17 17 / 7%);
+  border-radius: 18px;
   background: var(--verevon-app-background);
   background-clip: padding-box;
   box-shadow:
@@ -7134,16 +7210,14 @@ textarea:focus-visible {
 }
 
 .dark .dashboard-main-panel {
-  border-top-color: rgb(255 255 255 / 8%);
-  border-left-color: rgb(255 255 255 / 8%);
+  border-color: rgb(255 255 255 / 8%);
   box-shadow:
     inset 8px 8px 18px -10px rgb(0 0 0 / 35%),
     inset 1px 1px 0 rgb(255 255 255 / 5%);
 }
 
 .dark .dashboard-main-panel {
-  border-top-color: rgb(42 44 49 / 95%);
-  border-left-color: rgb(42 44 49 / 95%);
+  border-color: rgb(42 44 49 / 95%);
   box-shadow: inset 10px 10px 18px rgb(255 255 255 / 2%);
 }
 
@@ -7169,7 +7243,6 @@ textarea:focus-visible {
   background: color-mix(in srgb, var(--destructive) 12%, var(--verevon-surface));
   color: var(--foreground);
   font-size: 13px;
-  transition: left 300ms ease-out;
 }
 
 .org-deletion-banner__message {
@@ -7250,8 +7323,8 @@ textarea:focus-visible {
 }
 
 .dashboard-home {
-  --dashboard-home-font-display: var(--font-geist-sans), "Geist", Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  --dashboard-home-font-body: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --dashboard-home-font-display: var(--font-sans);
+  --dashboard-home-font-body: var(--font-sans);
   --dashboard-home-h1-size: clamp(42px, 4.2vw, 64px);
   --dashboard-home-h2-size: 28px;
   --dashboard-home-h3-size: 18px;
@@ -9686,7 +9759,7 @@ textarea:focus-visible {
   flex-direction: column;
   overflow: hidden;
   background: transparent;
-  transition: all 500ms ease-out;
+  transition: opacity var(--dur-slow) var(--ease-out);
 }
 
 .dashboard-expanded-search-input {
@@ -16390,7 +16463,7 @@ textarea:focus-visible {
   }
 
   .core-main {
-    padding-left: 0;
+    padding-left: var(--dashboard-frame-gap);
   }
 
   .core-navbar__inner {
@@ -16469,7 +16542,7 @@ textarea:focus-visible {
 }
 
 .verevon-panel-in {
-  animation: verevonPanelIn 440ms cubic-bezier(0.19, 1, 0.22, 1) both;
+  animation: verevonPanelIn var(--dur-slow) var(--ease-out) both;
 }
 
 .verevon-popover {
@@ -16479,9 +16552,7 @@ textarea:focus-visible {
   background: var(--panel);
   box-shadow: 0 20px 80px rgb(17 17 17 / 15%);
   color: var(--ink);
-  font-family:
-    var(--font-inter), var(--font-geist-sans),
-    var(--font-sans, "Inter", "Geist", "Geist Fallback", ui-sans-serif, system-ui, sans-serif);
+  font-family: var(--font-sans);
   animation: verevonPopoverIn 180ms cubic-bezier(0.19, 1, 0.22, 1) both;
 }
 
@@ -19103,8 +19174,7 @@ textarea:focus-visible {
   min-height: 40px;
   padding: 0 16px;
   color: var(--verevon-text);
-  font-family:
-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-family: var(--font-sans);
   font-size: 14px;
   font-weight: 500;
   line-height: 1;
@@ -22835,7 +22905,6 @@ textarea:focus-visible {
   box-shadow: 0 -18px 48px rgb(252 252 253 / 94%);
   -webkit-backdrop-filter: blur(18px);
   backdrop-filter: blur(18px);
-  animation: verevonChatComposerDockIn 360ms cubic-bezier(0.19, 1, 0.22, 1) both;
 }
 
 .verevon-chat-composer-dock__inner {
@@ -22847,18 +22916,6 @@ textarea:focus-visible {
 .dark .verevon-chat-composer-dock {
   background: rgb(16 17 20 / 90%);
   box-shadow: 0 -18px 48px rgb(16 17 20 / 94%);
-}
-
-@keyframes verevonChatComposerDockIn {
-  0% {
-    opacity: 0;
-    transform: translateY(22px) scale(0.985);
-  }
-
-  100% {
-    opacity: 1;
-    transform: translateY(0) scale(1);
-  }
 }
 
 /* ── Chat page layout ──────────────────────────────────────────────────────── */
@@ -24256,6 +24313,105 @@ body.verevon-chat-canvas-resizing * {
   white-space: nowrap;
 }
 
+/* ── Wide-research fan-out live panel (chat-wave2-specs, 2026-09-28) ───────── */
+
+.verevon-wide-research {
+  display: grid;
+  flex: 0 0 auto;
+  gap: 10px;
+  padding: 10px 16px;
+  border-top: 1px solid var(--verevon-border);
+}
+
+.verevon-wide-research__batch {
+  display: grid;
+  gap: 6px;
+}
+
+.verevon-wide-research__batch-head {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  font-size: 12px;
+}
+
+.verevon-wide-research__batch-head strong {
+  color: var(--verevon-j-text);
+}
+
+.verevon-wide-research__batch-head span {
+  color: var(--verevon-e-muted);
+}
+
+.verevon-wide-research__grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 8px;
+}
+
+.verevon-wide-research__card {
+  display: grid;
+  gap: 6px;
+  padding: 8px 10px;
+  border: 1px solid var(--verevon-border);
+  border-radius: 10px;
+  background: var(--verevon-surface-soft);
+}
+
+.verevon-wide-research__goal {
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--verevon-j-text);
+}
+
+.verevon-wide-research__pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  width: fit-content;
+  padding: 2px 7px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+}
+
+.verevon-wide-research__pill--neutral {
+  background: var(--linear-main-bg);
+  color: var(--verevon-text-muted);
+}
+
+.verevon-wide-research__pill--ok {
+  background: color-mix(in srgb, var(--success) 14%, transparent);
+  color: var(--success);
+}
+
+.verevon-wide-research__pill--warn {
+  background: color-mix(in srgb, var(--warning) 16%, transparent);
+  color: var(--warning-ink);
+}
+
+.verevon-wide-research__pill--error {
+  background: color-mix(in srgb, var(--danger) 14%, transparent);
+  color: var(--danger);
+}
+
+/* The slot the run rail hosts the cards in (ChatLiveRunPanel `wideResearch`):
+   between the rail's header and its scrolling body. A fan-out can be dozens of
+   cards, so the slot scrolls on its own and never crowds the run body out. */
+.verevon-chat-run-panel__wide-research {
+  flex: 0 1 auto;
+  min-height: 0;
+  max-height: 45%;
+  overflow-y: auto;
+}
+
 /* ── Compact BrowserChrome (narrow chat column) ────────────────────────────── */
 
 .knowledge-browser-chrome--compact {
@@ -24737,33 +24893,14 @@ body.verevon-chat-canvas-resizing * {
 
 /* ── Launch motion ─────────────────────────────────────────────────────────── */
 
-.verevon-chat-launch-wash {
-  position: absolute;
-  inset: 0;
-  z-index: 100;
-  background: var(--panel);
-  pointer-events: none;
-  animation: verevonChatLaunchWash 1200ms cubic-bezier(0.19, 1, 0.22, 1) both;
-}
-
-.dark .verevon-chat-launch-wash {
-  background: var(--ink);
-}
-
-@keyframes verevonChatLaunchWash {
-  0% { opacity: 0; }
-  15% { opacity: 0.5; }
-  100% { opacity: 0; }
-}
-
 .verevon-chat-page-launch .verevon-chat-thread {
-  animation: verevonChatThreadLaunch 600ms cubic-bezier(0.19, 1, 0.22, 1) both;
+  animation: verevonChatThreadLaunch 200ms cubic-bezier(0.19, 1, 0.22, 1) both;
 }
 
 @keyframes verevonChatThreadLaunch {
   0% {
     opacity: 0;
-    transform: translateY(12px);
+    transform: translateY(6px);
   }
 
   100% {
@@ -24772,15 +24909,23 @@ body.verevon-chat-canvas-resizing * {
   }
 }
 
+@media (prefers-reduced-motion: reduce) {
+  .verevon-chat-page-launch .verevon-chat-thread {
+    animation-name: verevonChatThreadLaunchFade;
+  }
+}
+
+@keyframes verevonChatThreadLaunchFade {
+  0% { opacity: 0; }
+  100% { opacity: 1; }
+}
+
 /* ── Chat v2 parity surface ───────────────────────────────────────────────── */
 
 /* Step 2 — reduced-motion guard. Every new chat keyframe MUST be listed here. */
 @media (prefers-reduced-motion: reduce) {
-  .verevon-chat-composer-dock,
   .verevon-thinking-dots span,
-  .verevon-chat-streaming::after,
-  .verevon-chat-launch-wash,
-  .verevon-chat-page-launch .verevon-chat-thread {
+  .verevon-chat-streaming::after {
     animation: none !important;
   }
 
@@ -24795,8 +24940,8 @@ body.verevon-chat-canvas-resizing * {
 }
 
 .verevon-chat-page {
-  --chat-font-display: var(--font-geist-sans), "Geist", Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  --chat-font-body: var(--font-geist-sans), "Geist", Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; /* Geist is the only family actually loaded — lead with it */
+  --chat-font-display: var(--font-sans);
+  --chat-font-body: var(--font-sans); /* Geist is the only family actually loaded — lead with it */
   --chat-h1-size: clamp(42px, 4.2vw, 64px);
   --chat-h2-size: 28px;
   --chat-h3-size: 18px;
@@ -25479,6 +25624,432 @@ body.verevon-chat-canvas-resizing * {
   padding: 8px 16px 16px;
   color: var(--verevon-e-muted);
   font-size: 13px;
+}
+
+/* ── Markdown charts (```chart fences, "Vis som diagram") ───────────────────── */
+
+/* One SVG per chart (ChatChart.tsx). The eight series colours are the data-viz
+   palette's categorical slots in their fixed order: validated for colour-vision
+   separation on this card surface (white; #34363d in dark), with the dark steps
+   being the same hues re-stepped for the dark surface, not a flip. Some light
+   steps sit below 3:1 on the card (aqua, yellow, pink), so identity never rests
+   on colour: every chart has a legend with markers, a tooltip and a data table. */
+.verevon-chat-chart {
+  --chart-s1: #2a78d6;
+  --chart-s2: #eb6834;
+  --chart-s3: #1baf7a;
+  --chart-s4: #eda100;
+  --chart-s5: #e87ba4;
+  --chart-s6: #008300;
+  --chart-s7: #4a3aa7;
+  --chart-s8: #e34948;
+  --chart-surface: var(--verevon-i-surface);
+  --chart-grid: var(--verevon-border-soft);
+  --chart-baseline: #c3c2b7;
+  --chart-text: var(--verevon-e-muted);
+  --chart-value: var(--verevon-j-text-soft);
+  position: relative;
+  min-width: 0;
+  max-width: 100%;
+  margin: 4px 0 14px;
+  padding: 12px 14px 10px;
+  border-radius: var(--chat-r-md, 12px);
+  background: var(--chart-surface);
+  box-shadow: var(--verevon-chat-shadow);
+  color: var(--verevon-j-text);
+}
+
+.dark .verevon-chat-chart {
+  --chart-s1: #3987e5;
+  --chart-s2: #d95926;
+  --chart-s3: #199e70;
+  --chart-s4: #c98500;
+  --chart-s5: #d55181;
+  --chart-s6: #008300;
+  --chart-s7: #9085e9;
+  --chart-s8: #e66767;
+  --chart-baseline: rgb(255 255 255 / 20%);
+}
+
+.verevon-chat-chart:last-child {
+  margin-bottom: 0;
+}
+
+.verevon-chat-chart__header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 12px;
+  margin-bottom: 8px;
+}
+
+.verevon-chat-chart__title {
+  flex: 1 1 12rem;
+  min-width: 0;
+  margin: 0;
+  color: var(--verevon-j-text);
+  font-size: 13px;
+  font-weight: 650;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.verevon-chat-chart__tools {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+}
+
+.verevon-chat-chart__switch {
+  display: inline-flex;
+  padding: 2px;
+  border-radius: 999px;
+  background: var(--verevon-surface-soft);
+}
+
+.verevon-chat-chart__button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  padding: 4px 10px;
+  color: var(--verevon-e-muted);
+  font-family: var(--font-sans);
+  font-size: 11px;
+  font-weight: 650;
+  cursor: pointer;
+  transition: background-color 140ms ease, color 140ms ease;
+}
+
+.verevon-chat-chart__button:hover {
+  background: color-mix(in srgb, var(--verevon-e-subtle) 14%, var(--verevon-surface-soft));
+  color: var(--verevon-j-text);
+}
+
+.verevon-chat-chart__button:focus-visible {
+  outline: var(--focus-ring-width, 2px) solid var(--focus-ring);
+  outline-offset: 1px;
+}
+
+.verevon-chat-chart__switch .verevon-chat-chart__button[aria-pressed='true'] {
+  background: var(--verevon-i-surface);
+  box-shadow: 0 0 0 1px var(--verevon-border);
+  color: var(--verevon-j-text);
+}
+
+.verevon-chat-chart__button--icon[aria-pressed='true'] {
+  background: color-mix(in srgb, var(--verevon-e-subtle) 14%, var(--verevon-surface-soft));
+  color: var(--verevon-j-text);
+}
+
+.verevon-chat-chart__plot {
+  position: relative;
+}
+
+.verevon-chat-chart__svg {
+  display: block;
+  width: 100%;
+  height: auto;
+  overflow: visible;
+  font-family: var(--font-sans);
+}
+
+.verevon-chat-chart__grid {
+  stroke: var(--chart-grid);
+  stroke-width: 1;
+  shape-rendering: crispEdges;
+}
+
+.verevon-chat-chart__baseline,
+.verevon-chat-chart__crosshair {
+  stroke: var(--chart-baseline);
+  stroke-width: 1;
+  shape-rendering: crispEdges;
+}
+
+.verevon-chat-chart__crosshair {
+  pointer-events: none;
+}
+
+.verevon-chat-chart__tick,
+.verevon-chat-chart__unit {
+  fill: var(--chart-text);
+  font-size: 11px;
+}
+
+.verevon-chat-chart__value {
+  fill: var(--chart-value);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+/* Percent inside a pie slice: ink with a surface halo, readable on any slice colour. */
+.verevon-chat-chart__slice-label {
+  fill: var(--verevon-j-text);
+  stroke: var(--chart-surface);
+  stroke-width: 3px;
+  paint-order: stroke;
+  font-size: 11px;
+  font-weight: 650;
+  pointer-events: none;
+}
+
+/* The hover and focus target of a category: the whole band, not the bar. */
+.verevon-chat-chart__hit {
+  fill: transparent;
+  outline: none;
+}
+
+.verevon-chat-chart__hit:hover {
+  fill: color-mix(in srgb, var(--verevon-j-text) 4%, transparent);
+}
+
+.verevon-chat-chart__hit:focus-visible {
+  fill: color-mix(in srgb, var(--verevon-j-text) 6%, transparent);
+  stroke: var(--focus-ring);
+  stroke-width: 2px;
+}
+
+.verevon-chat-chart__slice {
+  stroke: var(--chart-surface);
+  stroke-width: 2px;
+  outline: none;
+}
+
+.verevon-chat-chart__slice:hover,
+.verevon-chat-chart__slice[data-active='true'] {
+  opacity: 0.88;
+}
+
+.verevon-chat-chart__slice:focus-visible {
+  stroke: var(--focus-ring);
+  stroke-width: 3px;
+}
+
+.verevon-chat-chart__tooltip {
+  position: absolute;
+  z-index: 2;
+  min-width: 120px;
+  max-width: min(280px, 90%);
+  padding: 8px 10px;
+  border-radius: 10px;
+  background: var(--verevon-i-surface);
+  box-shadow: 0 0 0 1px var(--verevon-border), 0 6px 18px rgb(0 0 0 / 14%);
+  color: var(--verevon-j-text);
+  font-size: 12px;
+  line-height: 1.4;
+  pointer-events: none;
+  transform: translate(-50%, -100%);
+}
+
+.verevon-chat-chart__tooltip[data-align='start'] {
+  transform: translate(-12px, -100%);
+}
+
+.verevon-chat-chart__tooltip[data-align='end'] {
+  transform: translate(calc(-100% + 12px), -100%);
+}
+
+.verevon-chat-chart__tooltip-title {
+  margin-bottom: 4px;
+  color: var(--verevon-e-muted);
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.verevon-chat-chart__tooltip-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  white-space: nowrap;
+}
+
+.verevon-chat-chart__tooltip-row strong {
+  font-variant-numeric: tabular-nums;
+  font-weight: 650;
+}
+
+.verevon-chat-chart__tooltip-row span {
+  color: var(--verevon-e-muted);
+}
+
+.verevon-chat-chart__legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 16px;
+  margin: 8px 0 0;
+  padding: 0;
+  color: var(--verevon-j-text-soft);
+  font-size: 12px;
+  list-style: none;
+}
+
+.verevon-chat-chart__legend li {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.verevon-chat-chart__legend-mark {
+  flex: 0 0 auto;
+}
+
+.verevon-chat-chart__legend-detail {
+  color: var(--verevon-e-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+/* The data table is always in the page for screen readers; "Vis tabell" shows it. */
+.verevon-chat-chart__table:not(.verevon-chat-chart__table--visible) {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  border: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.verevon-chat-chart__table--visible {
+  width: 100%;
+  margin-top: 10px;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.verevon-chat-chart__table--visible caption {
+  padding-bottom: 6px;
+  color: var(--verevon-e-muted);
+  font-size: 11px;
+  text-align: left;
+}
+
+.verevon-chat-chart__table--visible :is(th, td) {
+  padding: 6px 10px;
+  border-top: 1px solid var(--verevon-border-soft);
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.verevon-chat-chart__table--visible :is(th:first-child, td:first-child) {
+  text-align: left;
+}
+
+.verevon-chat-chart__table--visible thead th {
+  border-top: 0;
+  color: var(--verevon-e-muted);
+  font-weight: 600;
+}
+
+.verevon-chat-chart__note {
+  margin: -8px 0 14px;
+  color: var(--verevon-e-muted);
+  font-size: 12px;
+}
+
+/* Table toolbar: copy, CSV, "Vis som diagram". Floats over the table's top
+   right corner and only appears on hover or keyboard focus, so a table keeps
+   the density it has. The zero-height sticky row keeps it in the visible part
+   of a table that scrolls sideways. */
+.verevon-chat-table-tools {
+  position: sticky;
+  left: 0;
+  z-index: 2;
+  width: 100%;
+  height: 0;
+  overflow: visible;
+  pointer-events: none;
+}
+
+.verevon-chat-table-tools__bar {
+  position: absolute;
+  top: 6px;
+  right: 8px;
+  display: inline-flex;
+  gap: 2px;
+  padding: 2px;
+  border-radius: 999px;
+  background: var(--verevon-i-surface);
+  box-shadow: 0 0 0 1px var(--verevon-border), 0 2px 8px rgb(0 0 0 / 8%);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 120ms ease;
+}
+
+.verevon-chat-table-wrap:hover .verevon-chat-table-tools__bar,
+.verevon-chat-table-wrap:focus-within .verevon-chat-table-tools__bar {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+/* No hover on a touch screen: show it, icons only. */
+@media (hover: none) {
+  .verevon-chat-table-tools__bar {
+    opacity: 1;
+    pointer-events: auto;
+  }
+
+  .verevon-chat-table-tools__button span {
+    display: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .verevon-chat-table-tools__bar {
+    transition: none;
+  }
+}
+
+.verevon-chat-table-tools__button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  padding: 4px 9px;
+  color: var(--verevon-e-muted);
+  font-family: var(--font-sans);
+  font-size: 11px;
+  font-weight: 650;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.verevon-chat-table-tools__button:hover,
+.verevon-chat-table-tools__button[aria-pressed='true'] {
+  background: color-mix(in srgb, var(--verevon-e-subtle) 14%, var(--verevon-surface-soft));
+  color: var(--verevon-j-text);
+}
+
+.verevon-chat-table-tools__button:focus-visible {
+  outline: var(--focus-ring-width, 2px) solid var(--focus-ring);
+  outline-offset: 1px;
+}
+
+.verevon-chat-table-tools__button--failed,
+.verevon-chat-table-tools__button--failed:hover {
+  background: color-mix(in srgb, var(--danger) 12%, transparent);
+  color: var(--danger);
+}
+
+@media print {
+  .verevon-chat-table-tools,
+  .verevon-chat-chart__tools {
+    display: none;
+  }
+
+  .verevon-chat-chart {
+    box-shadow: none;
+    break-inside: avoid;
+  }
 }
 
 /* ── Markdown tables (GFM pipe tables) ─────────────────────────────────────── */
@@ -26232,6 +26803,18 @@ body.verevon-chat-canvas-resizing * {
   color: var(--verevon-text-subtle);
   font-size: 11px;
   line-height: 1.25;
+}
+
+/* One small line under the action row saying where this answer was processed,
+   from the gateway's own stamp. Quiet by design: the hover text carries the
+   caveat that the residency is the deployment's declaration. It states a
+   privacy fact, so it uses the muted ink (6.1:1 light, 5.0:1 on the dark card)
+   rather than the subtle one (2.5:1 light, 2.3:1 on the dark card). */
+.verevon-chat-processing-line {
+  margin: 2px 0 0;
+  color: var(--verevon-text-muted);
+  font-size: 11px;
+  line-height: 1.35;
 }
 
 .verevon-chat-feedback-reasons {
@@ -28112,18 +28695,28 @@ body.verevon-chat-canvas-resizing * {
    ------------------------------------------------------------------------------ */
 .verevon-chat-message--assistant .verevon-chat-action-button,
 .verevon-chat-message--assistant .verevon-chat-menu > button {
-  opacity: 0;
   transition:
     opacity 160ms ease,
     background-color 140ms ease,
     color 140ms ease;
 }
 
-.verevon-chat-message--assistant:hover .verevon-chat-action-button,
-.verevon-chat-message--assistant:hover .verevon-chat-menu > button,
-.verevon-chat-message-actions:focus-within .verevon-chat-action-button,
-.verevon-chat-message-actions:focus-within .verevon-chat-menu > button {
-  opacity: 1;
+/* Only hide on devices that can hover. On touch there is no hover to reveal
+   the row, so hiding it left invisible-but-tappable buttons (a stray tap could
+   fire an unseen Regenerate). The latest assistant turn (data-latest) stays
+   visible on desktop too — it is the turn people act on most. */
+@media (hover: hover) and (pointer: fine) {
+  .verevon-chat-message--assistant:not([data-latest]) .verevon-chat-action-button,
+  .verevon-chat-message--assistant:not([data-latest]) .verevon-chat-menu > button {
+    opacity: 0;
+  }
+
+  .verevon-chat-message--assistant:hover .verevon-chat-action-button,
+  .verevon-chat-message--assistant:hover .verevon-chat-menu > button,
+  .verevon-chat-message-actions:focus-within .verevon-chat-action-button,
+  .verevon-chat-message-actions:focus-within .verevon-chat-menu > button {
+    opacity: 1;
+  }
 }
 
 /* 5 · General — subtle scrollbar for the message list (was the crude default). */
@@ -29609,18 +30202,21 @@ body.verevon-chat-canvas-resizing * {
   margin-top: 17px;
 }
 
-.knowledge-folder-card__stat-primary,
-.knowledge-folder-card__stat-secondary {
+/* Scoped under the docs surface so these outrank the unscoped legacy
+   .knowledge-folder-card__stats span rules (0,1,1) that also match both stat spans. */
+.knowledge-page-surface--docs .knowledge-folder-card__stat-primary,
+.knowledge-page-surface--docs .knowledge-folder-card__stat-secondary {
   display: inline-flex;
   align-items: center;
   gap: 5px;
+  padding-bottom: 0;
 }
 
-.knowledge-folder-card__stat-primary {
+.knowledge-page-surface--docs .knowledge-folder-card__stat-primary {
   color: #62625b;
 }
 
-.knowledge-folder-card__stat-primary strong {
+.knowledge-page-surface--docs .knowledge-folder-card__stat-primary strong {
   color: #22221f;
   font-size: 16px;
   font-weight: 740;
@@ -29628,13 +30224,13 @@ body.verevon-chat-canvas-resizing * {
   line-height: 1;
 }
 
-.knowledge-folder-card__stat-primary small,
-.knowledge-folder-card__stat-secondary {
+.knowledge-page-surface--docs .knowledge-folder-card__stat-primary small,
+.knowledge-page-surface--docs .knowledge-folder-card__stat-secondary {
   color: #8e8e87;
   font-size: 9px;
 }
 
-.knowledge-folder-card__stat-secondary {
+.knowledge-page-surface--docs .knowledge-folder-card__stat-secondary {
   max-width: 50%;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -29816,8 +30412,7 @@ body.verevon-chat-canvas-resizing * {
   min-height: 32px;
   padding: 0 12px;
   color: var(--ink);
-  font-family:
-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-family: var(--font-sans);
   font-size: 11px;
   font-weight: 700;
   letter-spacing: 0;
@@ -29901,8 +30496,7 @@ body.verevon-chat-canvas-resizing * {
   padding: 6px 12px;
   margin: 0;
   color: var(--foreground);
-  font-family:
-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-family: var(--font-sans);
   font-size: 11px;
   font-weight: 800;
   text-transform: uppercase;
@@ -30050,7 +30644,7 @@ body.verevon-chat-canvas-resizing * {
 .onboarding-summary-card h2 {
   margin: 0;
   color: var(--verevon-dark-surface);
-  font-family: var(--font-geist-sans), "Geist", Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-family: var(--font-sans);
   font-size: clamp(42px, 4.2vw, 64px);
   font-weight: 400;
   line-height: 1.02;
@@ -30080,8 +30674,7 @@ body.verevon-chat-canvas-resizing * {
 .onboarding-right-surface h2 {
   margin: 0;
   color: var(--foreground);
-  font-family:
-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-family: var(--font-sans);
   font-size: 28px;
   font-weight: 600;
   line-height: 1.1;
@@ -30091,8 +30684,7 @@ body.verevon-chat-canvas-resizing * {
 .onboarding-eyebrow,
 .onboarding-right-surface__eyebrow {
   color: var(--subtle);
-  font-family:
-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-family: var(--font-sans);
   font-size: 10px;
   font-weight: 500;
   letter-spacing: 0.12em;
@@ -30103,8 +30695,7 @@ body.verevon-chat-canvas-resizing * {
 .onboarding-right-surface p,
 .onboarding-summary-card p {
   color: var(--verevon-text-muted);
-  font-family:
-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-family: var(--font-sans);
   font-size: 15px;
   line-height: 1.6;
 }
@@ -30116,8 +30707,7 @@ body.verevon-chat-canvas-resizing * {
 
 .onboarding-field span {
   color: var(--subtle);
-  font-family:
-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-family: var(--font-sans);
   font-size: 11px;
   font-weight: 500;
   letter-spacing: 0.1em;
@@ -30135,8 +30725,7 @@ body.verevon-chat-canvas-resizing * {
 .onboarding-field textarea {
   width: 100%;
   color: var(--foreground);
-  font-family:
-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-family: var(--font-sans);
   font-size: 14px;
   background: var(--panel);
   border: 1px solid var(--linear-border);
@@ -30189,8 +30778,7 @@ body.verevon-chat-canvas-resizing * {
   padding: 0 12px;
   background: var(--auth-field);
   color: var(--verevon-text-muted);
-  font-family:
-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-family: var(--font-sans);
   font-size: 12px;
   letter-spacing: 0;
   text-transform: none;
@@ -30239,8 +30827,7 @@ body.verevon-chat-canvas-resizing * {
   padding: 0;
   background: transparent;
   color: var(--subtle);
-  font-family:
-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-family: var(--font-sans);
   font-size: 11px;
   font-weight: 700;
   letter-spacing: 0.18em;
@@ -30260,8 +30847,7 @@ body.verevon-chat-canvas-resizing * {
 .onboarding-size-fieldset legend {
   margin-bottom: 8px;
   color: var(--verevon-text-muted);
-  font-family:
-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-family: var(--font-sans);
   font-size: 11px;
   letter-spacing: 0.16em;
   text-transform: uppercase;
@@ -30346,8 +30932,7 @@ body.verevon-chat-canvas-resizing * {
 .onboarding-error {
   margin-top: 12px;
   color: var(--danger);
-  font-family:
-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-family: var(--font-sans);
   font-size: 12px;
   line-height: 1.5;
 }
@@ -30355,8 +30940,7 @@ body.verevon-chat-canvas-resizing * {
 .auth-status-notice {
   margin: 0;
   color: var(--verevon-text-muted);
-  font-family:
-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-family: var(--font-sans);
   font-size: 12px;
   line-height: 1.5;
 }
@@ -30375,8 +30959,7 @@ body.verevon-chat-canvas-resizing * {
   margin-inline: auto;
   margin-top: 8px;
   color: var(--verevon-text-muted);
-  font-family:
-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-family: var(--font-sans);
   font-size: 12px;
   letter-spacing: 0.02em;
 }
@@ -30424,8 +31007,7 @@ body.verevon-chat-canvas-resizing * {
   display: block;
   margin-bottom: 2px;
   color: var(--foreground);
-  font-family:
-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-family: var(--font-sans);
   font-size: 12.5px;
   font-weight: 400;
 }
@@ -30433,8 +31015,7 @@ body.verevon-chat-canvas-resizing * {
 .verevon-selectable-row small,
 .onboarding-plan-card small {
   color: var(--verevon-text-muted);
-  font-family:
-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-family: var(--font-sans);
   font-size: 11px;
   line-height: 1.45;
 }
@@ -30450,8 +31031,7 @@ body.verevon-chat-canvas-resizing * {
 .onboarding-summary-card .badge {
   min-height: 22px;
   padding: 0 9px;
-  font-family:
-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-family: var(--font-sans);
   font-size: 10px;
   font-weight: 700;
   letter-spacing: 0.16em;
@@ -30476,8 +31056,7 @@ body.verevon-chat-canvas-resizing * {
   min-width: unset;
   padding: 6px 14px;
   color: var(--foreground);
-  font-family:
-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-family: var(--font-sans);
   font-size: 12px;
   background: var(--onboarding-surface);
   border: 1px solid transparent;
@@ -30532,8 +31111,7 @@ body.verevon-chat-canvas-resizing * {
 .onboarding-connector-tab small {
   min-width: 0;
   overflow-wrap: anywhere;
-  font-family:
-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-family: var(--font-sans);
 }
 
 .onboarding-connector-tab span {
@@ -30551,8 +31129,7 @@ body.verevon-chat-canvas-resizing * {
 .onboarding-connector-group h3 {
   margin: 0;
   color: var(--subtle);
-  font-family:
-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-family: var(--font-sans);
   font-size: 10px;
   font-weight: 400;
   letter-spacing: 0.16em;
@@ -30605,8 +31182,7 @@ body.verevon-chat-canvas-resizing * {
 .onboarding-connected__eyebrow {
   margin: 0;
   color: var(--onboarding-accent, var(--ink));
-  font-family:
-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-family: var(--font-sans);
   font-size: 10px;
   font-weight: 600;
   letter-spacing: 0.14em;
@@ -30616,8 +31192,7 @@ body.verevon-chat-canvas-resizing * {
 .onboarding-connected__refresh {
   padding: 2px 0;
   color: var(--verevon-text-muted);
-  font-family:
-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-family: var(--font-sans);
   font-size: 11px;
   text-decoration: underline;
   text-underline-offset: 2px;
@@ -30651,8 +31226,7 @@ body.verevon-chat-canvas-resizing * {
 
 .onboarding-connected-account__title strong {
   color: var(--foreground);
-  font-family:
-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-family: var(--font-sans);
   font-size: 13px;
   font-weight: 600;
 }
@@ -30661,8 +31235,7 @@ body.verevon-chat-canvas-resizing * {
   min-width: 0;
   overflow-wrap: anywhere;
   color: var(--verevon-text-muted);
-  font-family:
-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-family: var(--font-sans);
   font-size: 11.5px;
 }
 
@@ -30683,8 +31256,7 @@ body.verevon-chat-canvas-resizing * {
 .onboarding-grant-chip {
   padding: 2px 8px;
   color: var(--foreground);
-  font-family:
-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-family: var(--font-sans);
   font-size: 10.5px;
   font-weight: 500;
   background: var(--onboarding-surface-subtle);
@@ -30702,15 +31274,13 @@ body.verevon-chat-canvas-resizing * {
   justify-content: space-between;
   gap: 8px;
   color: var(--foreground);
-  font-family:
-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-family: var(--font-sans);
   font-size: 11.5px;
 }
 
 .onboarding-lane-status {
   color: var(--subtle);
-  font-family:
-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-family: var(--font-sans);
   font-size: 10px;
   font-weight: 600;
   letter-spacing: 0.12em;
@@ -30746,8 +31316,7 @@ body.verevon-chat-canvas-resizing * {
   flex: 1 1 12rem;
   margin: 0;
   color: var(--foreground);
-  font-family:
-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-family: var(--font-sans);
   font-size: 12px;
   line-height: 1.45;
 }
@@ -30781,8 +31350,7 @@ body.verevon-chat-canvas-resizing * {
 
 .onboarding-library-picker__field span {
   color: var(--subtle);
-  font-family:
-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-family: var(--font-sans);
   font-size: 10px;
   letter-spacing: 0.12em;
   text-transform: uppercase;
@@ -30792,8 +31360,7 @@ body.verevon-chat-canvas-resizing * {
   min-height: 32px;
   padding: 4px 8px;
   color: var(--foreground);
-  font-family:
-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-family: var(--font-sans);
   font-size: 12px;
   background: var(--panel);
   border: 1px solid var(--verevon-border);
@@ -30803,8 +31370,7 @@ body.verevon-chat-canvas-resizing * {
 .onboarding-library-picker__error {
   margin: 0;
   color: #b42318;
-  font-family:
-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-family: var(--font-sans);
   font-size: 11.5px;
 }
 
@@ -30834,8 +31400,7 @@ body.verevon-chat-canvas-resizing * {
 .onboarding-stat-list li {
   padding: 12px 0;
   color: var(--onboarding-text);
-  font-family:
-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-family: var(--font-sans);
   font-size: 13px;
   border-bottom: 1px solid var(--verevon-border-warm);
 }
@@ -30845,8 +31410,7 @@ body.verevon-chat-canvas-resizing * {
   gap: 12px;
   align-items: center;
   color: var(--verevon-text-muted);
-  font-family:
-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-family: var(--font-sans);
   font-size: 12px;
 }
 
@@ -30873,8 +31437,7 @@ body.verevon-chat-canvas-resizing * {
   align-items: center;
   justify-content: center;
   color: var(--verevon-text-muted);
-  font-family:
-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-family: var(--font-sans);
   font-size: 13px;
   letter-spacing: 0.02em;
 }
@@ -31092,8 +31655,7 @@ body.verevon-chat-canvas-resizing * {
   margin: 0;
   padding-left: 18px;
   color: var(--onboarding-copy);
-  font-family:
-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-family: var(--font-sans);
   font-size: 11px;
   line-height: 1.5;
 }
@@ -31120,8 +31682,7 @@ body.verevon-chat-canvas-resizing * {
   margin: 0;
   padding-left: 18px;
   color: var(--onboarding-copy);
-  font-family:
-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-family: var(--font-sans);
   font-size: 11px;
   line-height: 1.55;
 }
@@ -31176,8 +31737,7 @@ body.verevon-chat-canvas-resizing * {
 
 .onboarding-product-reveal__overlay p {
   color: var(--foreground);
-  font-family:
-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-family: var(--font-sans);
   font-size: 12px;
   font-weight: 700;
   letter-spacing: 0;
@@ -31187,8 +31747,7 @@ body.verevon-chat-canvas-resizing * {
   display: block;
   margin-top: 4px;
   color: var(--verevon-text-muted);
-  font-family:
-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-family: var(--font-sans);
   font-size: 11px;
 }
 
@@ -31229,8 +31788,7 @@ body.verevon-chat-canvas-resizing * {
 
 .onboarding-folder-card p {
   color: var(--subtle);
-  font-family:
-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-family: var(--font-sans);
   font-size: 10px;
   letter-spacing: 0.16em;
   text-transform: uppercase;
@@ -31239,8 +31797,7 @@ body.verevon-chat-canvas-resizing * {
 .onboarding-folder-card h2 {
   margin: 8px 0 0;
   color: var(--foreground);
-  font-family:
-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-family: var(--font-sans);
   font-size: 18px;
   font-weight: 500;
   line-height: 1.25;
@@ -31250,8 +31807,7 @@ body.verevon-chat-canvas-resizing * {
   display: block;
   margin-top: 6px;
   color: var(--verevon-text-muted);
-  font-family:
-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-family: var(--font-sans);
   font-size: 11px;
   line-height: 1.45;
 }
@@ -31266,8 +31822,7 @@ body.verevon-chat-canvas-resizing * {
   display: flex;
   justify-content: space-between;
   color: var(--verevon-text-muted);
-  font-family:
-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-family: var(--font-sans);
   font-size: 10px;
   letter-spacing: 0.16em;
   text-transform: uppercase;
@@ -31320,8 +31875,7 @@ body.verevon-chat-canvas-resizing * {
 }
 
 .onboarding-organization-card strong {
-  font-family:
-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-family: var(--font-sans);
   font-size: 14px;
   font-weight: 700;
 }
@@ -31796,7 +32350,7 @@ body.verevon-chat-canvas-resizing * {
   display: block;
   margin-bottom: 6px;
   color: var(--verevon-text-muted);
-  font-family: Inter, ui-sans-serif, system-ui, -apple-system, sans-serif;
+  font-family: var(--font-sans);
   font-size: 11px;
   font-weight: 600;
   letter-spacing: 0.08em;
@@ -31812,7 +32366,7 @@ body.verevon-chat-canvas-resizing * {
 }
 
 .onboarding-summary-card__plan-block li {
-  font-family: Inter, ui-sans-serif, system-ui, -apple-system, sans-serif;
+  font-family: var(--font-sans);
   font-size: 13px;
   line-height: 1.45;
 }
@@ -31828,7 +32382,7 @@ body.verevon-chat-canvas-resizing * {
   border-radius: 999px;
   background: rgba(255, 255, 255, 0.08);
   border: 1px solid var(--verevon-border, rgba(255, 255, 255, 0.14));
-  font-family: Inter, ui-sans-serif, system-ui, -apple-system, sans-serif;
+  font-family: var(--font-sans);
   font-size: 12px;
   line-height: 1.5;
 }
@@ -31846,8 +32400,7 @@ body.verevon-chat-canvas-resizing * {
   place-items: center;
   background: var(--panel-muted);
   color: var(--verevon-text-muted);
-  font-family:
-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-family: var(--font-sans);
   font-size: 13px;
   font-weight: 800;
   letter-spacing: 0.18em;
@@ -31988,8 +32541,7 @@ body.verevon-chat-canvas-resizing * {
   gap: 12px;
   align-items: center;
   color: var(--onboarding-muted);
-  font-family:
-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-family: var(--font-sans);
   font-size: 13px;
 }
 
@@ -32035,7 +32587,7 @@ body.verevon-chat-canvas-resizing * {
   overflow: hidden;
   background: var(--verevon-dark-surface, #111);
   color: #fff;
-  font-family: var(--font-geist-sans), "Geist", Inter, ui-sans-serif, system-ui, sans-serif;
+  font-family: var(--font-sans);
   font-size: 20px;
   font-weight: 500;
 }
@@ -32055,7 +32607,7 @@ body.verevon-chat-canvas-resizing * {
 
 .onboarding-paywall__identity-kicker {
   color: var(--verevon-text-muted);
-  font-family: Inter, ui-sans-serif, system-ui, -apple-system, sans-serif;
+  font-family: var(--font-sans);
   font-size: 11px;
   font-weight: 600;
   letter-spacing: 0.08em;
@@ -32064,7 +32616,7 @@ body.verevon-chat-canvas-resizing * {
 
 .onboarding-paywall__identity-body strong {
   color: var(--verevon-dark-surface);
-  font-family: var(--font-geist-sans), "Geist", Inter, ui-sans-serif, system-ui, sans-serif;
+  font-family: var(--font-sans);
   font-size: 20px;
   font-weight: 500;
   line-height: 1.1;
@@ -32086,7 +32638,7 @@ body.verevon-chat-canvas-resizing * {
   background: var(--verevon-surface, rgba(17, 17, 17, 0.05));
   border: 1px solid var(--verevon-border, rgba(17, 17, 17, 0.08));
   color: var(--verevon-text-muted);
-  font-family: Inter, ui-sans-serif, system-ui, -apple-system, sans-serif;
+  font-family: var(--font-sans);
   font-size: 12px;
   font-weight: 500;
   line-height: 1.5;
@@ -32103,7 +32655,7 @@ body.verevon-chat-canvas-resizing * {
 .onboarding-paywall__header h1 {
   margin: 0;
   color: var(--verevon-dark-surface);
-  font-family: var(--font-geist-sans), "Geist", Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-family: var(--font-sans);
   font-size: clamp(46px, 4.4vw, 64px);
   font-weight: 400;
   line-height: 0.98;
@@ -32113,8 +32665,7 @@ body.verevon-chat-canvas-resizing * {
 .onboarding-paywall__header p {
   margin-top: 12px;
   color: var(--verevon-text-muted);
-  font-family:
-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-family: var(--font-sans);
   font-size: 15px;
   font-weight: 500;
   line-height: 1.6;
@@ -32127,8 +32678,7 @@ body.verevon-chat-canvas-resizing * {
   align-items: center;
   margin-top: 12px;
   color: var(--verevon-dark-surface);
-  font-family:
-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-family: var(--font-sans);
   font-size: 14px;
   font-weight: 500;
 }
@@ -32228,8 +32778,7 @@ body.verevon-chat-canvas-resizing * {
 
 .onboarding-paywall-card__head strong {
   color: var(--verevon-dark-surface);
-  font-family:
-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-family: var(--font-sans);
   font-size: 17px;
   font-weight: 650;
 }
@@ -32237,8 +32786,7 @@ body.verevon-chat-canvas-resizing * {
 .onboarding-paywall-card__badge {
   padding: 5px 10px;
   color: var(--verevon-dark-surface);
-  font-family:
-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-family: var(--font-sans);
   font-size: 10px;
   font-weight: 700;
   text-transform: uppercase;
@@ -32267,8 +32815,7 @@ body.verevon-chat-canvas-resizing * {
 
 .onboarding-paywall-card__price span {
   color: var(--verevon-dark-surface);
-  font-family:
-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-family: var(--font-sans);
   font-size: 27px;
   font-weight: 700;
   line-height: 1;
@@ -32278,8 +32825,7 @@ body.verevon-chat-canvas-resizing * {
 .onboarding-paywall-card p,
 .onboarding-paywall-card li {
   color: var(--verevon-text-muted);
-  font-family:
-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-family: var(--font-sans);
   font-size: 13px;
   line-height: 1.45;
 }
@@ -32357,8 +32903,7 @@ body.verevon-chat-canvas-resizing * {
 .onboarding-paywall__suggestion-main strong,
 .onboarding-paywall__suggestion-side strong {
   color: var(--verevon-dark-surface);
-  font-family:
-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-family: var(--font-sans);
   font-size: 16px;
   font-weight: 750;
 }
@@ -32369,8 +32914,7 @@ body.verevon-chat-canvas-resizing * {
 .onboarding-paywall__suggestion-evidence li,
 .onboarding-paywall__suggestion-opportunities p {
   color: var(--verevon-text-muted);
-  font-family:
-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-family: var(--font-sans);
   font-size: 13px;
   line-height: 1.5;
 }
@@ -32490,16 +33034,14 @@ body.verevon-chat-canvas-resizing * {
 
 .onboarding-paywall__reason strong {
   color: var(--verevon-dark-surface);
-  font-family:
-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-family: var(--font-sans);
   font-size: 16px;
 }
 
 .onboarding-paywall__reason p {
   margin-top: 10px;
   color: var(--verevon-text-muted);
-  font-family:
-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-family: var(--font-sans);
   font-size: 14px;
   line-height: 1.6;
 }
@@ -32530,8 +33072,7 @@ body.verevon-chat-canvas-resizing * {
   justify-content: space-between;
   gap: 16px;
   color: var(--verevon-dark-surface);
-  font-family:
-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-family: var(--font-sans);
 }
 
 .verevon-billing-checkout__header strong {
@@ -32579,8 +33120,7 @@ body.verevon-chat-canvas-resizing * {
   padding: 0;
   background: transparent;
   color: var(--verevon-text-muted);
-  font-family:
-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-family: var(--font-sans);
   font-size: 12px;
   letter-spacing: 0.02em;
   transition: color 140ms ease;
@@ -32797,8 +33337,7 @@ body.verevon-chat-canvas-resizing * {
   gap: 10px;
   align-items: center;
   color: var(--onboarding-muted);
-  font-family:
-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-family: var(--font-sans);
   font-size: 13px;
 }
 
@@ -38439,10 +38978,9 @@ body.verevon-chat-canvas-resizing * {
 ================================================================== */
 
 .button:focus-visible {
-  outline: none;
-  box-shadow:
-    0 0 0 2px var(--background),
-    0 0 0 4px rgba(238, 122, 80, 0.34);
+  outline: var(--focus-ring-width, 2px) solid var(--focus-ring);
+  outline-offset: 2px;
+  box-shadow: none;
 }
 
 .button-primary {
@@ -39240,8 +39778,7 @@ body.verevon-chat-canvas-resizing * {
 .verevon-studio-profile strong,
 .verevon-studio-profile span {
   display: block;
-  font-family:
-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-family: var(--font-sans);
 }
 
 .verevon-studio-profile strong {
@@ -39486,8 +40023,7 @@ body.verevon-chat-canvas-resizing * {
 .verevon-studio-block strong,
 .verevon-studio-block p,
 .verevon-studio-block span {
-  font-family:
-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-family: var(--font-sans);
 }
 
 .verevon-studio-block strong {
@@ -39977,6 +40513,12 @@ body.verevon-chat-canvas-resizing * {
   color: var(--foreground);
 }
 
+.verevon-insights-page {
+  max-width: 1480px;
+  margin: 0 auto;
+  padding: clamp(20px, 3vw, 36px);
+}
+
 .verevon-studio-library-hero,
 .verevon-insights-hero,
 .verevon-social-ops-hero {
@@ -40077,11 +40619,18 @@ body.verevon-chat-canvas-resizing * {
   line-height: 1.55;
 }
 
-.verevon-social-ops-metrics,
-.verevon-insights-metrics {
+.verevon-social-ops-metrics {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 12px;
+  margin-top: 18px;
+}
+
+/* This section contains its own metric grid; its heading and coverage note
+   must span the page instead of becoming stretched columns in a second grid. */
+.verevon-insights-metrics {
+  display: block;
+  min-width: 0;
   margin-top: 18px;
 }
 
@@ -40333,11 +40882,19 @@ body.verevon-chat-canvas-resizing * {
   cursor: pointer;
 }
 
-.verevon-insights-scope button:hover,
-.verevon-insights-scope button:focus-visible {
-  border-color: var(--verevon-border);
-  background: var(--verevon-surface-soft);
-  outline: none;
+@media (hover: hover) and (pointer: fine) {
+  .verevon-insights-scope button:not(.is-active):hover,
+  .verevon-insights-range button:not(.is-active):hover {
+    border-color: var(--verevon-border);
+    background: var(--verevon-surface-soft);
+  }
+}
+
+.verevon-insights-scope button:focus-visible,
+.verevon-insights-range button:focus-visible,
+.verevon-insights-tab:focus-visible {
+  outline: var(--focus-ring-width, 2px) solid var(--focus-ring, var(--verevon-accent-ink));
+  outline-offset: 2px;
 }
 
 .verevon-insights-scope button.is-active {
@@ -40378,13 +40935,6 @@ body.verevon-chat-canvas-resizing * {
   font-size: 11px;
   font-weight: 800;
   cursor: pointer;
-}
-
-.verevon-insights-range button:hover,
-.verevon-insights-range button:focus-visible {
-  border-color: var(--verevon-border);
-  background: var(--verevon-surface-soft);
-  outline: none;
 }
 
 .verevon-insights-range button.is-active {
@@ -40875,6 +41425,11 @@ body.verevon-chat-canvas-resizing * {
   background: #eef4ff;
 }
 
+.verevon-insights-headline-card--partial {
+  border-color: rgba(199, 137, 42, 0.28);
+  background: #fff8e9;
+}
+
 .verevon-insights-headline-card--planned {
   border-color: rgba(238, 122, 80, 0.24);
   background: var(--verevon-coral-soft);
@@ -40885,6 +41440,98 @@ body.verevon-chat-canvas-resizing * {
 .verevon-insights-headline-card--unavailable {
   border-color: #e5e1da;
   background: #fdfcf9;
+}
+
+.verevon-insights-codex-usage {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  margin: 16px 0 24px;
+  padding: 18px 20px;
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  background: var(--card);
+}
+.verevon-insights-codex-usage > div:first-child > span,
+.verevon-insights-codex-usage__windows span,
+.verevon-insights-codex-usage__windows small {
+  color: var(--muted-foreground);
+  font-size: 12px;
+}
+.verevon-insights-codex-usage h3 { margin: 4px 0; font-size: 16px; }
+.verevon-insights-codex-usage p { margin: 0; color: var(--muted-foreground); font-size: 12px; }
+.verevon-insights-codex-usage__windows { display: flex; gap: 18px; }
+.verevon-insights-codex-usage__windows > div { display: grid; gap: 2px; min-width: 90px; }
+.verevon-insights-codex-usage__windows strong { font-size: 22px; font-weight: 600; }
+@media (max-width: 720px) {
+  .verevon-insights-codex-usage { align-items: flex-start; flex-direction: column; }
+  .verevon-insights-codex-usage__windows { flex-wrap: wrap; }
+}
+
+.verevon-insights-coverage-note {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  margin: 14px 0 0;
+  border: 1px solid rgba(199, 137, 42, 0.24);
+  border-radius: 10px;
+  background: #fff8e9;
+  padding: 11px 13px;
+  color: var(--verevon-text-muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.verevon-insights-coverage-note svg {
+  flex: 0 0 auto;
+  margin-top: 1px;
+  color: #a66d13;
+}
+
+.verevon-insights-metric-card__details {
+  margin-top: 4px;
+  border-top: 1px solid var(--verevon-border-soft);
+  padding-top: 9px;
+  color: var(--verevon-text-muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.verevon-insights-metric-card__details summary {
+  width: fit-content;
+  color: var(--verevon-text-soft);
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.verevon-insights-metric-card__details p {
+  margin: 8px 0 0;
+  overflow-wrap: anywhere;
+}
+
+.verevon-insights-hero h1 {
+  letter-spacing: -0.035em;
+}
+
+.verevon-insights-headline-card,
+.verevon-insights-metric-card {
+  box-shadow: 0 5px 18px rgb(31 27 23 / 3%);
+}
+
+@media (max-width: 680px) {
+  .verevon-insights-page {
+    padding: 18px 14px;
+  }
+
+  .verevon-insights-controls {
+    grid-template-columns: 1fr;
+  }
+
+  .verevon-insights-range,
+  .verevon-insights-scope {
+    flex-wrap: wrap;
+  }
 }
 
 @media (max-width: 860px) {
@@ -41807,97 +42454,12 @@ body.verevon-chat-canvas-resizing * {
   gap: 8px;
 }
 
+/* The folder card is a static article. The unscoped legacy .knowledge-folder-card
+   rule (button-style card) still sets cursor: pointer and a 1px outline, so keep
+   these two resets here; all layout and colour comes from the card block above. */
 .knowledge-page-surface--docs .knowledge-folder-card {
-  display: grid;
-  min-height: 96px;
-  grid-template-columns: 32px minmax(0, 1fr) auto;
-  grid-template-rows: 1fr auto;
-  gap: 7px 9px;
-  overflow: hidden;
-  border: 1px solid #e2e2dd;
-  border-radius: 10px;
-  background: #ffffff;
-  padding: 12px;
-  color: #22221f;
   cursor: default;
   outline: none;
-  box-shadow: 0 2px 8px rgb(25 25 22 / 3%);
-}
-
-.knowledge-page-surface--docs .knowledge-folder-card:hover {
-  border-color: #c9c9c2;
-  box-shadow: 0 8px 18px rgb(25 25 22 / 7%);
-  transform: translateY(-1px);
-}
-
-.knowledge-folder-card__icon {
-  display: grid;
-  width: 32px;
-  height: 26px;
-  grid-row: 1 / span 2;
-  place-items: center;
-  align-self: start;
-  border-radius: 6px;
-  background: #eee9dd;
-  color: #8c7048;
-}
-
-.knowledge-folder-card__icon--blue { background: #e7edf5; color: #547297; }
-.knowledge-folder-card__icon--gray { background: #ececea; color: #777871; }
-.knowledge-folder-card__icon--green { background: #e8f0ea; color: #5d856a; }
-.knowledge-folder-card__icon--warm { background: #f3e8dc; color: #9a6946; }
-
-.knowledge-page-surface--docs .knowledge-folder-card__copy {
-  display: block;
-  min-width: 0;
-}
-
-.knowledge-page-surface--docs .knowledge-folder-card__copy h3 {
-  overflow: hidden;
-  margin: 0;
-  color: #272721;
-  font-size: 11px;
-  font-weight: 700;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.knowledge-page-surface--docs .knowledge-folder-card__copy small {
-  display: block;
-  overflow: hidden;
-  margin-top: 4px;
-  color: #87877f;
-  font-size: 9px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.knowledge-page-surface--docs .knowledge-folder-card__stats {
-  position: static;
-  display: flex;
-  align-items: baseline;
-  gap: 4px;
-  grid-column: 2;
-  grid-row: 2;
-}
-
-.knowledge-page-surface--docs .knowledge-folder-card__stats strong {
-  color: #282822;
-  font-size: 13px;
-  font-weight: 700;
-  line-height: 1;
-}
-
-.knowledge-page-surface--docs .knowledge-folder-card__stats small {
-  color: #96968f;
-  font-size: 9px;
-}
-
-.knowledge-page-surface--docs .knowledge-folder-card__arrow {
-  align-self: end;
-  color: #aaa9a2;
-  font-size: 14px;
-  line-height: 1;
 }
 
 .knowledge-pulse-grid {
@@ -42364,10 +42926,15 @@ body.verevon-chat-canvas-resizing * {
    existing --verevon-* tokens; no bespoke color literals.
 ================================================================== */
 
+:root {
+  /* The Home chat dock lines its bottom edge up with this button. */
+  --feedback-widget-bottom: 24.5px;
+}
+
 .feedback-widget {
   position: fixed;
   right: 20px;
-  bottom: 20px;
+  bottom: var(--feedback-widget-bottom);
   z-index: 70;
   transition: bottom 200ms ease;
 }
@@ -42389,7 +42956,7 @@ body.verevon-chat-canvas-resizing * {
   gap: 6px;
   padding: 9px 14px;
   color: var(--verevon-text);
-  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-family: var(--font-sans);
   font-size: 12.5px;
   font-weight: 600;
   background: var(--verevon-surface);
@@ -42521,7 +43088,8 @@ body.verevon-chat-canvas-resizing * {
 
 .verevon-support-workspace > .verevon-inbox-page,
 .verevon-support-workspace > .verevon-ticketing-page,
-.verevon-support-workspace > .verevon-support-outbound {
+.verevon-support-workspace > .verevon-support-outbound,
+.verevon-support-workspace > .verevon-drafts {
   min-height: 0;
   flex: 1 1 auto;
 }
@@ -43109,7 +43677,7 @@ body.verevon-chat-canvas-resizing * {
    with the draft's own text rather than a metadata line, because the text is
    what a reviewer is deciding about. */
 .verevon-drafts {
-  min-height: calc(100dvh - 132px);
+  overflow-y: auto;
   padding: 28px clamp(16px, 4vw, 56px);
   background: var(--panel);
 }
@@ -43280,7 +43848,7 @@ body.verevon-chat-canvas-resizing * {
 
 @media (max-width: 640px) {
   .verevon-ai-review-queue { min-height: calc(100dvh - 112px); padding: 20px 16px; }
-  .verevon-drafts { min-height: calc(100dvh - 112px); padding: 20px 16px; }
+  .verevon-drafts { padding: 20px 16px; }
   .verevon-ai-review-outcomes__metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .verevon-ai-review-queue__item { align-items: flex-start; flex-direction: column; gap: 12px; }
 }
@@ -46371,6 +46939,127 @@ so it
   color: var(--verevon-text);
 }
 
+/* The editable step list (plan-gate): the model's plan as data, in the order it
+   will run. Numbering is a counter rather than the list's own marker because
+   each row is a flex line (input + actions), and a flex `li` has no marker. */
+.verevon-chat-plan__summary {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.4;
+  color: var(--verevon-text);
+}
+
+.verevon-chat-plan__steps {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  counter-reset: plan-step;
+}
+
+.verevon-chat-plan__step {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  counter-increment: plan-step;
+}
+
+.verevon-chat-plan__step::before {
+  content: counter(plan-step) '.';
+  min-width: 18px;
+  font-size: 12px;
+  text-align: right;
+  color: var(--verevon-text-muted);
+}
+
+.verevon-chat-plan__step-input {
+  flex: 1;
+  min-width: 0;
+  padding: 8px 10px;
+  font: inherit;
+  font-size: 12px;
+  color: var(--verevon-text);
+  background: var(--verevon-i-surface);
+  border: 0;
+  border-radius: var(--chat-r-sm, 8px);
+  box-shadow: var(--verevon-chat-shadow);
+}
+
+.verevon-chat-plan__step-actions {
+  display: flex;
+  gap: 2px;
+}
+
+.verevon-chat-plan__step-actions button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--verevon-text-muted);
+  cursor: pointer;
+  transition: background-color 140ms ease, color 140ms ease;
+}
+
+.verevon-chat-plan__step-actions button:hover:not(:disabled) {
+  background: var(--verevon-i-surface);
+  color: var(--verevon-text);
+}
+
+.verevon-chat-plan__step-actions button:focus-visible,
+.verevon-chat-plan__add-step:focus-visible,
+.verevon-chat-plan__reject:focus-visible {
+  outline: 2px solid var(--verevon-a-earth);
+  outline-offset: 1px;
+}
+
+.verevon-chat-plan__step-actions button:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+@media (pointer: coarse) {
+  .verevon-chat-plan__step-actions button {
+    width: 36px;
+    height: 36px;
+  }
+}
+
+.verevon-chat-plan__add-step,
+.verevon-chat-plan__reject {
+  padding: 6px 12px;
+  font: inherit;
+  font-size: 12px;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--verevon-text-muted);
+  cursor: pointer;
+  transition: background-color 140ms ease, color 140ms ease;
+}
+
+.verevon-chat-plan__add-step {
+  align-self: flex-start;
+}
+
+.verevon-chat-plan__add-step:hover,
+.verevon-chat-plan__reject:hover:not(:disabled) {
+  background: var(--verevon-i-surface);
+  color: var(--verevon-text);
+}
+
+.verevon-chat-plan__reject:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
 .verevon-chat-plan__rungs {
   display: flex;
   flex-wrap: wrap;
@@ -47827,8 +48516,14 @@ so it
   display: block;
   width: 100%;
   height: 100%;
-  outline: none;
   cursor: crosshair;
+}
+
+/* The canvas fills its frame, so the ring is drawn inset. An inset box-shadow
+   would paint beneath the (opaque) canvas bitmap, so use an inset outline. */
+.verevon-remote-support__screen canvas:focus-visible {
+  outline: var(--focus-ring-width, 2px) solid var(--focus-ring);
+  outline-offset: -2px;
 }
 
 .verevon-remote-support__screen canvas[data-view-only='true'] {

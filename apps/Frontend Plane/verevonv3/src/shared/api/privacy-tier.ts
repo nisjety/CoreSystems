@@ -118,18 +118,18 @@ export function privacyTierBadgeTitle(
   switch (tier) {
     case 'sovereign':
       return i18n.tr(
-        'Behandles kun i Norge – aldri utenfor norsk jurisdiksjon',
-        'Processed only in Norway – never outside Norwegian jurisdiction',
+        'Erklært: behandles kun i Norge, på norskdrevet infrastruktur, med registrert null datalagring (ikke uavhengig verifisert)',
+        'Declared: processed only in Norway on Norwegian-operated infrastructure, with a recorded zero-data-retention attestation (not independently verified)',
       )
     case 'eu_resident':
       return i18n.tr(
-        'Beholdes innenfor EU/EØS-jurisdiksjon',
-        'Kept within EU/EEA jurisdiction',
+        'Leverandørens region er satt til EU/EØS (erklært, ikke uavhengig verifisert)',
+        'Provider region is set to EU/EEA (declared, not independently verified)',
       )
     case 'zdr_contractual':
       return i18n.tr(
-        'Null datalagring – ingenting lagres etter svaret',
-        'Zero data retention – nothing is stored after the answer',
+        'Leverandøren har en registrert ZDR-godkjenning (vår egen registrering, ikke uavhengig verifisert)',
+        'The provider has a recorded zero-data-retention attestation (our own record, not independently verified)',
       )
     case 'global':
       return i18n.tr('Ingen regionsbegrensning', 'No region restriction')
@@ -149,7 +149,140 @@ export function sovereignCatalogNotice(
   i18n: { tr(no: string, en: string): string },
 ): string {
   return i18n.tr(
-    'Sikreste nivå: færre modeller er tilgjengelige – behandling kun i Norge.',
-    'Strongest tier: fewer models are available – processing stays in Norway.',
+    'Sikreste nivå: færre modeller er tilgjengelige – erklært behandling kun i Norge.',
+    'Strongest tier: fewer models are available – declared processing stays in Norway.',
   )
+}
+
+// ── Where an answer was processed ───────────────────────────────────────────
+// The gateway stamps the serving provider, the residency that provider declares
+// and the strongest privacy tier it can substantiate onto each answer's `usage`
+// event (`provider_used`, `residency`, `privacy_tier`). The honesty rule above
+// applies in full: a claim is rendered ONLY from a value the server asserted,
+// never from a model name, and a gateway that sends none (an older one, or a
+// turn no provider served) renders nothing at all.
+
+/** Residency labels exactly as the server stamps them (`global`, `eu`, `norway`). */
+export const ANSWER_RESIDENCIES = ['global', 'eu', 'norway'] as const
+
+export type AnswerResidency = (typeof ANSWER_RESIDENCIES)[number]
+
+/** What the server stamped on one answer. Absent fields are unknown, never defaulted. */
+export type AnswerServedBy = {
+  /** Registry id of the serving provider, as stamped. */
+  providerUsed?: string
+  residency?: AnswerResidency
+  /** Never `'unspecified'`: that is "no constraint", and a stamp says something. */
+  privacyTier?: Exclude<PrivacyTier, 'unspecified'>
+}
+
+/** Coerce an untrusted wire value into a stamped residency, or `undefined`. */
+export function normalizeAnswerResidency(value: unknown): AnswerResidency | undefined {
+  if (typeof value !== 'string') return undefined
+  const key = value.trim().toLowerCase()
+  return (ANSWER_RESIDENCIES as readonly string[]).includes(key)
+    ? (key as AnswerResidency)
+    : undefined
+}
+
+/**
+ * Coerce the three untrusted `usage` fields into what the server stamped, or
+ * `undefined` when none of them is usable (the common case on an older
+ * gateway). A provider id is kept only when it has the shape of a registry id,
+ * so nothing free-form can reach the page through it.
+ */
+export function normalizeAnswerServedBy(wire: {
+  provider_used?: unknown
+  residency?: unknown
+  privacy_tier?: unknown
+}): AnswerServedBy | undefined {
+  const providerRaw = typeof wire.provider_used === 'string' ? wire.provider_used.trim() : ''
+  const providerUsed = /^[a-z0-9][a-z0-9._-]{0,63}$/i.test(providerRaw) ? providerRaw : undefined
+  const residency = normalizeAnswerResidency(wire.residency)
+  const tier = normalizePrivacyTier(wire.privacy_tier)
+  const privacyTier = tier === undefined || tier === 'unspecified' ? undefined : tier
+  if (providerUsed === undefined && residency === undefined && privacyTier === undefined) {
+    return undefined
+  }
+  return {
+    ...(providerUsed === undefined ? {} : { providerUsed }),
+    ...(residency === undefined ? {} : { residency }),
+    ...(privacyTier === undefined ? {} : { privacyTier }),
+  }
+}
+
+/**
+ * A name for the serving provider where the id is one we know how to name.
+ * The ChatGPT-subscription route and anything unrecognised get none: the line
+ * then says where the answer was processed without naming a vendor.
+ */
+function answerProviderLabel(providerUsed: string | undefined): string | undefined {
+  const id = providerUsed?.trim().toLowerCase()
+  if (!id) return undefined
+  if (id === 'azure' || id.startsWith('azure-')) return 'Azure'
+  if (id === 'openai') return 'OpenAI'
+  if (id === 'anthropic') return 'Anthropic'
+  return undefined
+}
+
+export type AnswerProcessingNote = {
+  /** The one small line, for example `Behandlet: EU (Azure), ZDR`. */
+  text: string
+  /** The hover explanation, saying what the line does and does not promise. */
+  title: string
+}
+
+/**
+ * The one small line under an answer saying where it was processed, from the
+ * server's stamp alone: `Behandlet: EU (Azure), ZDR` for an EU deployment under
+ * a retention contract, and `Behandlet: global, ingen EU- eller ZDR-garanti`
+ * where nothing stronger is promised, as on the ChatGPT-subscription route.
+ *
+ * Returns `undefined`, so nothing is rendered, when the stamp carries no
+ * residency and no retention claim. A tier fills in the region only where it
+ * says the same thing (`eu_resident`, `sovereign`, `global`); where the stamped
+ * residency and the tier disagree, the weaker reading wins. `ZDR` is the
+ * server's attestation, not "nothing is stored", and the hover text says so.
+ */
+export function answerProcessingNote(
+  i18n: { tr(no: string, en: string): string },
+  servedBy: AnswerServedBy | undefined | null,
+): AnswerProcessingNote | undefined {
+  if (!servedBy) return undefined
+  const tier = servedBy.privacyTier
+  const zdr = tier === 'zdr_contractual' || tier === 'sovereign'
+  const residency: AnswerResidency | undefined = servedBy.residency
+    ?? (tier === 'eu_resident' ? 'eu' : tier === 'sovereign' ? 'norway' : tier === 'global' ? 'global' : undefined)
+  if (residency === undefined && !zdr) return undefined
+
+  const region = residency === 'eu'
+    ? 'EU'
+    : residency === 'norway'
+      ? i18n.tr('Norge', 'Norway')
+      : residency === 'global'
+        ? i18n.tr('global', 'global')
+        : undefined
+  const provider = region === undefined ? undefined : answerProviderLabel(servedBy.providerUsed)
+  const parts: string[] = []
+  if (region !== undefined) parts.push(provider ? `${region} (${provider})` : region)
+  if (residency === 'global') {
+    parts.push(zdr
+      ? i18n.tr('ingen EU-garanti', 'no EU guarantee')
+      : i18n.tr('ingen EU- eller ZDR-garanti', 'no EU or ZDR guarantee'))
+  }
+  if (zdr) parts.push('ZDR')
+
+  const unguaranteed = residency === 'global' && !zdr
+  return {
+    text: `${i18n.tr('Behandlet', 'Processed')}: ${parts.join(', ')}`,
+    title: unguaranteed
+      ? i18n.tr(
+          'Dette svaret kan være behandlet utenfor EU/EØS, og null datalagring er ikke lovet.',
+          'This answer may have been processed outside the EU/EEA, and zero data retention is not promised.',
+        )
+      : i18n.tr(
+          'Behandlingssted og datalagring slik oppsettet erklærer dem. Ikke uavhengig verifisert.',
+          'Processing location and data retention as the deployment declares them. Not independently verified.',
+        ),
+  }
 }

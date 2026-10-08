@@ -51,8 +51,8 @@ afterEach(() => {
 })
 
 describe('v2 dashboard shell port', () => {
-  it('renders the v2-style navbar, sidebar, and dashboard home surfaces', () => {
-    renderWithRouter(() => (
+  it('renders the v2-style navbar, sidebar, and dashboard overview surfaces', () => {
+    const { container } = renderWithRouter(() => (
       <>
         <CoreNavbar activeRoute="/dashboard" workspace={demoWorkspaceIdentity} />
         <AgentsProvider>
@@ -67,20 +67,27 @@ describe('v2 dashboard shell port', () => {
       </>
     ))
 
-    expect(screen.getByRole('banner')).toBeTruthy()
-    expect(screen.getByRole('navigation', { name: /arbeidsområ|arbeidsomr/i })).toBeTruthy()
+    expect(container.querySelector('header.core-navbar')).toBeTruthy()
+    expect(screen.getByRole('navigation', { name: 'Arbeidsområdeseksjoner' })).toBeTruthy()
+    expect(screen.getByRole('navigation', { name: 'Snarveier i arbeidsområdet' })).toBeTruthy()
     expect(screen.getByRole('button', { name: 'Chat' })).toBeTruthy()
     expect(screen.getByRole('heading', { name: /God (morgen|ettermiddag|kveld), Verevon/ })).toBeTruthy()
-    expect(screen.getByRole('button', { name: 'Velg AI-modell' })).toBeTruthy()
-    expect(screen.getByText('Opprett agent')).toBeTruthy()
-    expect(screen.getByRole('button', { name: 'Legg til filer' })).toBeTruthy()
-    expect(screen.getAllByRole('button', { name: 'Dyp research' }).length).toBeGreaterThanOrEqual(1)
+    expect(screen.getByRole('heading', { name: 'Fortsett der du slapp' })).toBeTruthy()
     expect(screen.getByText('Lokalt værbilde')).toBeTruthy()
-    expect(screen.getByText('Trafikk rundt Oslo')).toBeTruthy()
-    expect(screen.getByText('Norske nyheter')).toBeTruthy()
+    expect(screen.getByRole('heading', { name: 'Norske nyheter' })).toBeTruthy()
+    expect(screen.getByRole('heading', { name: 'Klar for neste steg' })).toBeTruthy()
+
+    const dock = screen.getByRole('region', { name: 'Spør Verevon' })
+    expect(within(dock).getByRole('textbox', { name: 'Meld Verevon' })).toBeTruthy()
+    expect(within(dock).getByRole('button', { name: 'Legg til filer' })).toBeTruthy()
+    fireEvent.click(within(dock).getByRole('button', { name: 'Flere chattevalg' }))
+    flush()
+    expect(within(dock).getByRole('button', { name: 'Velg AI-modell' })).toBeTruthy()
+    expect(within(dock).getByText('Opprett agent')).toBeTruthy()
+    expect(within(dock).getAllByRole('button', { name: 'Dyp research' }).length).toBeGreaterThanOrEqual(1)
   })
 
-  it('uses the requested original Chat icon and freeform Studio icon in the mini rail', () => {
+  it('uses the round Chat bubble and freeform Studio icon in the mini rail', () => {
     renderWithRouter(() => (
       <AgentsProvider>
         <CoreSidebar
@@ -96,12 +103,12 @@ describe('v2 dashboard shell port', () => {
     const chatIcon = within(workspaceNavigation).getByRole('link', { name: 'Chat' }).querySelector('svg')
     const studioIcon = within(workspaceNavigation).getByRole('link', { name: 'Studio' }).querySelector('svg')
 
-    expect(chatIcon?.getAttribute('class')).toContain('lucide-message-square')
+    expect(chatIcon?.getAttribute('class')).toContain('lucide-message-circle-more')
     expect(chatIcon?.getAttribute('class')).not.toContain('lucide-bot-message-square')
     expect(studioIcon?.getAttribute('class')).toContain('lucide-layout-freeform')
   })
 
-  it('renders v2-shaped dashboard search and knowledge tab panels', () => {
+  it('renders v2-shaped dashboard search and knowledge tab panels', async () => {
     vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input)
       if (url.endsWith('/api/v1/auth/session')) {
@@ -138,23 +145,25 @@ describe('v2 dashboard shell port', () => {
 
     renderWithRouter(() => <DashboardHome workspace={demoWorkspaceIdentity} />)
 
-    fireEvent.click(screen.getByRole('button', { name: 'Søk' }))
+    // The tabs are named Chat / Nett / Hent ut and live in the URL (?tab=), so
+    // a click resolves one router tick later.
+    fireEvent.click(screen.getByRole('button', { name: 'Nett' }))
     flush()
-    expect(screen.getByRole('heading', { name: 'Søk på nett og i Verevon' })).toBeTruthy()
-    expect(screen.getByRole('combobox', { name: 'Søk i selskapets kunnskap' })).toBeTruthy()
+    expect(await screen.findByRole('heading', { name: 'Søk på nett og i Verevon' })).toBeTruthy()
+    expect(screen.getByRole('combobox', { name: 'Søk på nettet eller spør' })).toBeTruthy()
     expect(screen.getByRole('button', { name: 'Send søkekontekst til chat' })).toBeTruthy()
-    fireEvent.input(screen.getByRole('combobox', { name: 'Søk i selskapets kunnskap' }), {
+    fireEvent.input(screen.getByRole('combobox', { name: 'Søk på nettet eller spør' }), {
       target: { value: 'agent status' },
     })
     flush()
     expect(screen.queryByText('AI operations status')).toBeNull()
 
-    fireEvent.click(screen.getByRole('button', { name: 'Innhent' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Hent ut' }))
     flush()
     // The unified browser chrome dropped the composer's decorative caption
     // block ("… Verevon indekserer alt."), so the panel heading now appears
     // exactly once and the caption text is gone by design.
-    expect(screen.getByRole('heading', { name: 'Hent inn kunnskap' })).toBeTruthy()
+    expect(await screen.findByRole('heading', { name: 'Hent inn kunnskap' })).toBeTruthy()
     expect(screen.getByRole('button', { name: 'Last opp filer' })).toBeTruthy()
     expect(screen.getByRole('link', { name: /Åpne kunnskapsbase/ })).toBeTruthy()
   })

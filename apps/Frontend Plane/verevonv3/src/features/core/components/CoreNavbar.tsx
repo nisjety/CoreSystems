@@ -218,7 +218,7 @@ export function CoreNavbar(props: {
           </div>
 
           <div class="core-navbar__actions">
-            <Show when={import.meta.env.DEV && props.activeRoute === '/chat' && !refinedNavigation()}>
+            <Show when={import.meta.env.DEV && !refinedNavigation()}>
               <ChatAppearancePreview />
             </Show>
             <NavbarActionButton
@@ -462,7 +462,7 @@ function GlobalSearchDialog(props: {
   return (
     <div class="core-search-overlay" role="dialog" aria-modal="true" aria-label={i18n.tr('Kunnskapssøk', 'Knowledge search')}>
       <button type="button" class="core-search-overlay__scrim" aria-label={i18n.tr('Lukk globalt søk', 'Close global search')} onClick={() => props.onClose()} />
-      <div class="core-search-overlay__panel verevon-panel-in">
+      <div class="core-search-overlay__panel">
         <div class="core-search-overlay__header">
           <Search class="size-4 core-search-overlay__icon" strokeWidth={1.8} />
           <input

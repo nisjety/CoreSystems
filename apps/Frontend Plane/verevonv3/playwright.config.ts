@@ -56,7 +56,7 @@ const BROWSER_WORKSPACE_SPECS = /browser-workspace-.*\.spec\.ts/
  * with every speech and model call mocked (`page.route` plus voice-fakes.ts).
  */
 const CHAT_WORKSPACE_SPECS = /chat-(?:workspace|voice-mode)\.spec\.ts/
-const PRODUCT_READINESS_SPECS = /product-(?:readiness|scenarios|memory|connected|experience|latency|durability|recovery|journeys-viewport)\.spec\.ts/
+const PRODUCT_READINESS_SPECS = /(?:product-(?:readiness|scenarios|memory|connected|experience|latency|durability|recovery|journeys-viewport|office-outputs|code-interpreter|chat-charts)|agentic-subscription)\.spec\.ts/
 const PRODUCT_RECORDING_SPEC = /product-recording\.spec\.ts/
 if (process.env.PRODUCT_RECORDING_CAPTURE === '1' && process.env.PRODUCT_RECORDING_MODE === 'rehearsal') throw new Error('Do not combine release capture and rehearsal flags')
 const capture = productCaptureSettings(process.env.PRODUCT_RECORDING_MODE || (process.env.PRODUCT_RECORDING_CAPTURE === '1' ? 'release' : undefined),

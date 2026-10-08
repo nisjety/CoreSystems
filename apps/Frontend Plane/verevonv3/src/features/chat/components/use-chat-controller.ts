@@ -34,6 +34,7 @@ import {
   type ChatThreadTranscriptStep,
   type ChatThreadTranscriptTurn,
 } from '@/features/chat/lib/chat-thread-history'
+import { hydratablePlan } from '@/features/chat/lib/chat-plan-hydration'
 import { isLocalRetentionAllowed } from '@/features/chat/lib/chat-retention'
 import { openProjectionChannel } from '@/shared/projection/keyed-channel'
 import {
@@ -57,6 +58,7 @@ import {
   cancelRun,
   decideApproval,
   listApprovals,
+  listPlans,
   resumeRun,
   type ApprovalDecision,
   type PlanStepEdit,
@@ -724,6 +726,43 @@ export function useChatController() {
   }
 
   /**
+   * Give the newest plan run's card its plan back after a reload (plan-gate).
+   *
+   * `turn.proposedPlan` came in on the `plan_proposed` SSE frame and is
+   * session-only, so a reload left the rung-only control on a message that —
+   * because `plan.propose` IS the plan — does not repeat it: approving that
+   * granted authority against steps the person never saw and left the plan
+   * itself undecided. The plan is durable server-side, so read it back. Only a
+   * PROPOSED plan restores the editable card and only a REJECTED one restores
+   * the "rejected" note (see `hydratablePlan`); anything else, and any failure
+   * here, leaves the turn exactly as it was — the rung-only control still works.
+   */
+  const hydrateProposedPlan = (threadId: string, turns: ChatTurn[], sequence: number) => {
+    if (isTemporaryThread(threadId) || isForeignOriginThread(threadId)) return
+    const runTurn = [...turns].reverse().find((turn) => (
+      turn.role === 'assistant' && turn.runId && turn.planMode === true
+    ))
+    const runId = runTurn?.runId
+    if (!runTurn || !runId || runTurn.proposedPlan) return
+    void (async () => {
+      try {
+        const hydrated = hydratablePlan(await listPlans(runId))
+        if (!hydrated) return
+        if (sequence !== threadLoadSequence || state.threadId !== threadId) return
+        setState((current) => {
+          const turn = current.turns.find((candidate) => candidate.id === runTurn.id)
+          // A plan_proposed frame that raced this read is the fresher word.
+          if (!turn || turn.proposedPlan) return
+          if (hydrated.kind === 'proposed') turn.proposedPlan = hydrated.plan
+          else turn.planRejected = true
+        })
+      } catch {
+        // Best-effort: an unreadable plan degrades to the rung-only control.
+      }
+    })()
+  }
+
+  /**
    * The canonical chat transcript deliberately stores messages, not run
    * metadata. A local snapshot can therefore lose the link between a plan
    * answer and its durable orchestration run after a reload or on another
@@ -1087,6 +1126,7 @@ export function useChatController() {
       if (seq !== threadLoadSequence || state.threadId !== threadId) return
       restoreSurfaceTab(threadId)
       hydrateRunApprovals(threadId, turns, seq)
+      hydrateProposedPlan(threadId, turns, seq)
       maybeResumeStream(threadId, turns)
       if (activeRunTail) void followUnresumableRun(threadId, activeRunTail.id, activeRunTail.runId)
     } catch (error) {
@@ -1137,6 +1177,7 @@ export function useChatController() {
       if (seq !== threadLoadSequence || state.threadId !== threadId) return
       restoreSurfaceTab(threadId)
       hydrateRunApprovals(threadId, fallbackTurns, seq)
+      hydrateProposedPlan(threadId, fallbackTurns, seq)
       maybeResumeStream(threadId, fallbackTurns)
     }
   }
@@ -1906,7 +1947,7 @@ export function useChatController() {
   const triggerLaunchMotion = () => {
     requestAnimationFrame(() => {
       setLaunchMotion(true)
-      setTimeout(() => setLaunchMotion(false), 1200)
+      setTimeout(() => setLaunchMotion(false), 200)
     })
   }
 
@@ -2086,6 +2127,10 @@ export function useChatController() {
     })
     try {
       await rejectPlan(runId, planId, reason)
+      setState((s) => {
+        const turn = s.turns.find((turn) => turn.id === turnId)
+        if (turn) turn.planRejected = true
+      })
       setPlanMode(false)
     } catch (error) {
       setPlanApprovalError((prev) => ({
@@ -3151,6 +3196,9 @@ export function useChatController() {
             // so no surface (live, snapshot or reload) can show it as "$0".
             turn.costUsd = usage.costBasis === 'subscription' ? undefined : usage.costUsd
             turn.costBasis = usage.costBasis
+            // Server-stamped or nothing: a usage frame without the stamp
+            // leaves the turn without a processing line, never a guessed one.
+            turn.servedBy = usage.servedBy
             turn.confidence = usage.confidence
           }
         })

@@ -219,6 +219,61 @@ describe('plan-gate: proposed-plan wiring', () => {
       // fresh message rather than silently retrying (owner ruling, no
       // revise-after-reject in this wave).
       expect(controller.planMode()).toBe(false)
+      // And the turn records the decision, so the card can say the plan was
+      // rejected instead of sitting there with an Approve button the server
+      // would now refuse.
+      expect(controller.state.turns.at(-1)?.planRejected).toBe(true)
+    })
+  })
+
+  it('a refused rejection leaves the plan undecided and says why', async () => {
+    mockRejectPlan.mockRejectedValue(new Error('the plan was decided by another request first'))
+    await withController(async (controller) => {
+      await tick()
+      controller.setPlanMode(true)
+      flush()
+      await send(controller, 'Send fakturaen')
+      await tick()
+      streams[0]!.handlers.onConnected?.({ requestId: 'req-1', threadId: 't-1', runId: 'run-1' })
+      flush()
+      streams[0]!.handlers.onPlanProposed?.({
+        planId: 'plan_1',
+        summary: 'Send the overdue invoice',
+        steps: [{ id: 'step_1', title: 'Draft the email' }],
+      })
+      flush()
+
+      const turnId = controller.state.turns.at(-1)!.id
+      await controller.rejectTurnPlan(turnId, 'Ikke nødvendig lenger')
+
+      expect(controller.state.turns.at(-1)?.planRejected).toBeUndefined()
+      // Plan mode stays on: nothing was decided, so nothing was left behind.
+      expect(controller.planMode()).toBe(true)
+    })
+  })
+
+  it('a refused approval grants nothing and leaves plan mode on for a retry', async () => {
+    mockApprovePlan.mockRejectedValue(new Error('a plan cannot be approved with every step removed'))
+    await withController(async (controller) => {
+      await tick()
+      controller.setPlanMode(true)
+      flush()
+      await send(controller, 'Send fakturaen')
+      await tick()
+      streams[0]!.handlers.onConnected?.({ requestId: 'req-1', threadId: 't-1', runId: 'run-1' })
+      flush()
+      streams[0]!.handlers.onPlanProposed?.({
+        planId: 'plan_1',
+        summary: 'Send the overdue invoice',
+        steps: [{ id: 'step_1', title: 'Draft the email' }],
+      })
+      flush()
+
+      const turnId = controller.state.turns.at(-1)!.id
+      await controller.approveTurnPlan(turnId, 'workspace_write', 'writes its report', [])
+
+      expect(controller.state.turns.at(-1)?.grantedRung).toBeUndefined()
+      expect(controller.planMode()).toBe(true)
     })
   })
 })

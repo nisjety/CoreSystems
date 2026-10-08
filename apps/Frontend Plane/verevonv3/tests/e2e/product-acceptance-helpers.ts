@@ -20,7 +20,10 @@ export async function openFresh(page: Page, path = '/chat', options: { mockedInf
   await page.goto(path)
   expect(new URL(page.url()).pathname).toBe(new URL(path, 'http://localhost:5173').pathname)
   await expect(page).toHaveTitle(/verevon/i)
-  await expect(composer(page)).toBeVisible()
+  // The chat route is a lazy chunk on the dev server. One Q16k take (02, take 19) stayed on
+  // "Loading…" for the 10 s default, before anything reached the model, so this readiness
+  // wait is not part of any measured turn and gets room.
+  await expect(composer(page)).toBeVisible({ timeout: 30_000 })
   await expect(page.locator('vite-error-overlay')).toHaveCount(0)
   // The maintained fixture is attachment-grounded. Select the existing UI
   // control explicitly instead of inheriting an account's browsing preference.

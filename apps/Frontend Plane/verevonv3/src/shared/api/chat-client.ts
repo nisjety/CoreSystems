@@ -9,8 +9,10 @@ import {
 import { readSseStream, type SseEvent } from './sse'
 import {
   isSelectablePrivacyTier,
+  normalizeAnswerServedBy,
   normalizePrivacyTier,
   privacyTierWireValue,
+  type AnswerServedBy,
   type PrivacyTier,
 } from './privacy-tier'
 import { createSelectedAgentToolSpecs } from '@/shared/actions/agent-tools'
@@ -23,7 +25,9 @@ import {
 } from '@/features/chat/lib/chat-retention'
 
 // ── Wire contract ───────────────────────────────────────────────────────────
-export async function extractChatDocument(filename: string, content_base64: string, content_type: string): Promise<{ content: string }> {
+// `truncated` is set when a workbook was cut on a row boundary to fit one turn;
+// the cut is also marked inside `content`, where the model reads it.
+export async function extractChatDocument(filename: string, content_base64: string, content_type: string): Promise<{ content: string; truncated?: boolean }> {
   return requestJson('/api/v1/chat/documents/extract', {
     method: 'POST', body: JSON.stringify({ filename, content_base64, content_type }),
   })
@@ -325,10 +329,23 @@ export type ChatUsageEvent = {
   confidence?: number
   cacheReadTokens?: number
   cacheWriteTokens?: number
+  /**
+   * Where the answer was processed, exactly as the gateway stamped it
+   * (`provider_used`, `residency`, `privacy_tier`). Absent on an older gateway
+   * and on a turn no provider served: the UI then renders nothing, and never
+   * fills the gap from a model name.
+   */
+  servedBy?: AnswerServedBy
 }
 
 function costBasisValue(value: unknown): ChatCostBasis | undefined {
   return value === 'metered' || value === 'subscription' ? value : undefined
+}
+
+/** The `servedBy` key of a usage event, present only when the server stamped something usable. */
+function servedByField(payload: Record<string, unknown>): { servedBy?: AnswerServedBy } {
+  const servedBy = normalizeAnswerServedBy(payload)
+  return servedBy ? { servedBy } : {}
 }
 
 export type TurnTimingOutcome = 'completed' | 'failed' | 'cancelled' | 'timeout'
@@ -1026,7 +1043,16 @@ export function buildChatWireBody(request: ChatInvokeRequest): Record<string, un
   // Plan mode → agentic run path (orchestration-backed, supports approval gates
   // + run pause/resume). Without it the gateway uses the direct tool loop, which
   // never pauses for human approval.
-  if (request.planMode && !conversationOnly && !supportReadOnly && !subscriptionBacked) features.add('agentic')
+  //
+  // This now holds on the ChatGPT-subscription route too. Whether that route may
+  // run agentic is the server's call (the AGENTIC_SUBSCRIPTION_ENABLED switch,
+  // advertised as the `agentic` model capability): the composer only offers Do
+  // when the catalogue says so, and a request that still arrives while the
+  // switch is off is refused with the typed `agentic_subscription_disabled`
+  // code, which the chat presents in words (`streamFailurePresentation`). The
+  // body stays as narrow as before on every other axis: no client tools,
+  // browsing, image generation, deep research, skills or attachments.
+  if (request.planMode && !conversationOnly && !supportReadOnly) features.add('agentic')
   else features.delete('agentic')
 
   const supportContextQuery = !conversationOnly && !supportReadOnly && shouldRequestSupportContext(request.content)
@@ -1054,7 +1080,15 @@ export function buildChatWireBody(request: ChatInvokeRequest): Record<string, un
     // session-core's durable `run.mode`). Without this the toggle only widened
     // the feature set and nothing server-side could tell a planning run from an
     // executing one.
-    plan_mode: supportReadOnly || subscriptionBacked ? false : request.planMode ?? false,
+    //
+    // On the subscription route the server admits plan mode only together with
+    // the `agentic` feature (a bare plan_mode is refused), so there it follows
+    // the feature exactly: a conversation-only turn sends neither.
+    plan_mode: supportReadOnly
+      ? false
+      : subscriptionBacked
+        ? (request.planMode ?? false) && !conversationOnly
+        : request.planMode ?? false,
     // Deep research is its OWN field, not just `browse_web`. "Dyp research"
     // used to set only browseWeb, so it was indistinguishable from a plain
     // Search turn — the same failure planMode had. The gateway keys the
@@ -1328,6 +1362,7 @@ function dispatchAgUiEvent(
             confidence: num(value.confidence),
             cacheReadTokens: num(value.cache_read_tokens) ?? num(value.cacheReadTokens),
             cacheWriteTokens: num(value.cache_write_tokens) ?? num(value.cacheWriteTokens),
+            ...servedByField(value),
           })
           break
         case 'awaiting_approval':
@@ -1572,6 +1607,7 @@ function dispatchEvent(event: SseEvent, handlers: ChatStreamHandlers): void {
         confidence: num(payload.confidence),
         cacheReadTokens: num(payload.cache_read_tokens) ?? num(payload.cacheReadTokens),
         cacheWriteTokens: num(payload.cache_write_tokens) ?? num(payload.cacheWriteTokens),
+        ...servedByField(payload),
       })
       break
     case 'turn_timing': {
@@ -2466,10 +2502,40 @@ export function subscriptionModelDisplayName(id: string): string {
  *
  * It is NOT derived from the region or the provider brand. `feature_flags()` in
  * inference-core only adds it when `supports_zdr` is true, which for Azure
- * OpenAI means the operator set `AZURE_OPENAI_ZDR_CONFIRMED`, and which the
- * Anthropic provider currently never sets.
+ * OpenAI means the operator supplied a valid evidence-bound attestation
+ * (`AZURE_OPENAI_ZDR_*`, validated in `provider/zdr.rs`). The Anthropic
+ * provider's own model list hardcodes its features and never lists it, so for
+ * that provider the privacy tier below is the only place the same bit shows.
  */
 export const ZERO_RETENTION_CAPABILITY = 'zdr'
+
+/**
+ * Privacy tiers inference-core only assigns to a provider whose zero-retention
+ * attestation holds (`PrivacyTier::classify`: without `supports_zdr` the best a
+ * provider gets is `eu_resident`). A second signal for the same bit as
+ * {@link ZERO_RETENTION_CAPABILITY}.
+ */
+const ZERO_RETENTION_PRIVACY_TIERS: ReadonlySet<PrivacyTier> = new Set<PrivacyTier>([
+  'zdr_contractual',
+  'sovereign',
+])
+
+/**
+ * Whether one catalogue entry is a CHAT model whose provider carries a recorded
+ * zero-retention attestation. A model of another modality (an image or
+ * embedding deployment) can carry the flag but cannot serve a ZDR chat turn, so
+ * it never counts. Mirrors `model_attests_zdr_for_chat` in the gateway's
+ * `orgs/settings.rs`, which decides whether the org ZDR switch may be turned on;
+ * both read `apps/gateway/tests/fixtures/zdr-model-catalogue-cases.json`, so the
+ * composer, the settings toggle and that gate cannot disagree.
+ */
+export function modelAttestsZeroRetention(
+  model: Pick<ModelInfo, 'capabilities' | 'modality' | 'privacyTier'>,
+): boolean {
+  if (model.modality !== 'chat') return false
+  if (model.capabilities?.includes(ZERO_RETENTION_CAPABILITY)) return true
+  return model.privacyTier !== undefined && ZERO_RETENTION_PRIVACY_TIERS.has(model.privacyTier)
+}
 
 /**
  * Whether ANY catalogue model can serve a no-retention turn.
@@ -2478,14 +2544,32 @@ export const ZERO_RETENTION_CAPABILITY = 'zdr'
  * fails a ZDR request CLOSED, skipping every provider that is not attested, so
  * offering the temporary-chat toggle against an unattested fleet produces a
  * turn that always dies. Asking the catalogue lets the UI say so before the
- * user spends a message finding out.
+ * user spends a message finding out. The org-level ZDR switch in the workspace
+ * settings asks the same question.
  *
  * An EMPTY catalogue returns false. That is deliberate: `listModels()` swallows
  * a gateway outage into `[]`, and in that state we know nothing about provider
  * attestation — offering a mode that fails closed downstream is the wrong guess.
  */
 export function hasZeroRetentionModel(models: readonly ModelInfo[]): boolean {
-  return models.some((model) => model.capabilities?.includes(ZERO_RETENTION_CAPABILITY) ?? false)
+  return models.some(modelAttestsZeroRetention)
+}
+
+/**
+ * The per-model capability flag inference-core emits on the ChatGPT-subscription
+ * models only while the server's `AGENTIC_SUBSCRIPTION_ENABLED` switch is on:
+ * the server's own statement that Do (an agentic run) can run on that route.
+ * Nothing in the client derives it from the provider name.
+ */
+export const AGENTIC_CAPABILITY = 'agentic'
+
+/**
+ * Whether the catalogue says an agentic run can use this model. `false` for a
+ * model that is not listed (yet), so a catalogue that has not answered never
+ * switches Do on by guess.
+ */
+export function modelSupportsAgentic(model: Pick<ModelInfo, 'capabilities'> | undefined): boolean {
+  return model?.capabilities?.includes(AGENTIC_CAPABILITY) ?? false
 }
 
 /** Patterns that mark a model as expensive enough to warrant a deliberate pick. */

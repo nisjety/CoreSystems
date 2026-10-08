@@ -1,4 +1,5 @@
 import { formatResetTime, refreshResetTimeWording, workStepLabel } from './chat-normalizers'
+import { RunNotifyButton } from './RunNotifyButton'
 import {
   type Approval,
   type ApprovalDecision,
@@ -60,6 +61,7 @@ import type { AutonomyRung, ChatPlanStep, MemoryOrigin, RecalledMemory } from '@
 import { readChatThreadHistory } from '../lib/chat-thread-history'
 import { chatAppearanceActive } from '../lib/chat-appearance-preview'
 import { MIN_PLAN_JUSTIFICATION_CHARS } from '@/shared/api/chat-client'
+import { answerProcessingNote } from '@/shared/api/privacy-tier'
 import { correctMemory, deleteMemory, listMemories } from '@/shared/api/memory-client'
 import { ApiError } from '@/shared/api/http'
 import {
@@ -72,6 +74,7 @@ import {
   createSignal,
   createUniqueId,
   onCleanup,
+  untrack,
 } from 'solid-js'
 import { render, type JSX } from '@solidjs/web'
 import {
@@ -83,6 +86,8 @@ import {
   MAX_HIGHLIGHT_CHARS,
   highlightCode,
 } from './chat-code-highlight'
+import { ChartFenceBlock } from './ChatChart'
+import { ChatTableTools, TableChart, createTableChartState } from './ChatTableTools'
 import {
   domId,
   formatBytes,
@@ -169,6 +174,12 @@ export function MessageBlock(props: {
   /** n/N badge for this turn's exchange versions — only ever set on the trailing assistant turn. */
   version?: VersionBadge | null
   onSelectVersion?: (target: number) => void
+  /**
+   * This is the latest assistant turn. Rendered as `data-latest` so its action
+   * row stays visible at rest on hover-capable devices (older turns reveal
+   * theirs on hover or focus).
+   */
+  isLatest?: boolean
   /** Effectful turns cannot be edited or regenerated in place. */
   editLocked?: boolean
   /** Forwarded into `ConversationNodeContext` — see its own doc for why. */
@@ -208,7 +219,12 @@ const CHAT_NODE_REGISTRY = createConversationNodeRegistry({
   answer: {
     kind: 'answer',
     render: (node, ctx) => (
-      <AnswerRegion answer={node.answer} onRegenerate={ctx.onRegenerate} citations={ctx.citations} />
+      <AnswerRegion
+        answer={node.answer}
+        onRegenerate={ctx.onRegenerate}
+        citations={ctx.citations}
+        temporaryChat={ctx.temporaryChat}
+      />
     ),
   },
   grounding: {
@@ -275,6 +291,7 @@ const CHAT_NODE_REGISTRY = createConversationNodeRegistry({
         summary={node.summary}
         steps={node.steps}
         grantedRung={node.grantedRung}
+        rejected={node.rejected}
         pending={node.pending}
         error={node.error}
         onApprove={ctx.onApprovePlan}
@@ -328,11 +345,22 @@ export function AnswerRegion(props: {
   answer: AnswerState
   onRegenerate: () => void
   citations?: readonly Citation[]
+  /**
+   * The thread is temporary (ZDR): its run events are suppressed, so the
+   * waiting state offers no "Varsle meg når ferdig" for it. Absent = ordinary.
+   */
+  temporaryChat?: boolean
 }) {
   return (
     <Switch>
       <Match when={props.answer.state === 'pending' ? props.answer : null}>
-        {(pending) => <ThinkingDots since={pending().since} activity={pending().activity} />}
+        {(pending) => (
+          <ThinkingDots
+            since={pending().since}
+            activity={pending().activity}
+            runId={props.temporaryChat ? undefined : pending().runId}
+          />
+        )}
       </Match>
       <Match when={props.answer.state === 'failed' ? props.answer : null}>
         {(failed) => (
@@ -393,6 +421,8 @@ export function AssistantMessage(props: {
   onViewAttachments?: (attachmentId: string) => void
   version?: VersionBadge | null
   onSelectVersion?: (target: number) => void
+  /** See `MessageBlock`'s doc — marks the article `data-latest`. */
+  isLatest?: boolean
   /** Forwarded into `ConversationNodeContext` — see its own doc for why. */
   threadId?: string | null
   /** See `MessageBlock`'s doc: disables "Les høyt". */
@@ -400,6 +430,10 @@ export function AssistantMessage(props: {
 }) {
   const i18n = useI18n()
   const [reaction, setReaction] = createSignal<'up' | 'down' | null>(null)
+  // Where the answer was processed, from the gateway's own stamp on `usage`.
+  // Undefined (nothing rendered) unless the server asserted a residency or a
+  // retention claim; never worked out from the model name.
+  const processingNote = createMemo(() => answerProcessingNote(i18n, props.message.servedBy))
 
   // "Les høyt" reads the reply through governed text-to-speech (Azure Speech
   // via Verevon's speech route) in the UI language's voice. The browser's own
@@ -506,6 +540,7 @@ export function AssistantMessage(props: {
       onRegenerate: props.onRegenerate,
       citations: props.message.citations,
       threadId: props.threadId ?? null,
+      temporaryChat: props.temporaryChat,
     }
     return nodes().map((node) => ({ node, context }))
   })
@@ -601,7 +636,11 @@ export function AssistantMessage(props: {
     // `tabindex=-1`: focusable for the arrow-key walk in ChatPage, but never
     // in the Tab sequence, which still runs answer -> actions -> next message
     // through DOM order (audit item 26).
-    <article class="verevon-chat-message verevon-chat-message--assistant" tabindex={-1}>
+    <article
+      class="verevon-chat-message verevon-chat-message--assistant"
+      data-latest={props.isLatest ? '' : undefined}
+      tabindex={-1}
+    >
       <div class="verevon-chat-message__avatar">
         <span class="verevon-chat-message__logo" aria-hidden="true" />
       </div>
@@ -791,6 +830,13 @@ export function AssistantMessage(props: {
             <MessageMetricsBadge message={props.message} />
             <ReasoningPopover message={props.message} />
           </div>
+          <Show when={processingNote()}>
+            {(note) => (
+              <p class="verevon-chat-processing-line" role="note" title={note().title}>
+                {note().text}
+              </p>
+            )}
+          </Show>
           <Show when={readAloudFailed()}>
             <p class="verevon-chat-feedback-reasons__note" role="alert">
               {readAloudUnavailableMessage(i18n.tr)}
@@ -1116,14 +1162,25 @@ export function DynamicHeading(props: { block: Extract<MarkdownBlock, { kind: 'h
  * the expected shape of every token before the last one. Until the fence
  * closes this renders exactly like any other language's code block, same as
  * the rest of this file's streaming-resilience approach.
+ *
+ * A closed ```chart``` fence is the same story: the native chart when its JSON
+ * reads, the plain code block plus a one-line note when it does not (see
+ * `ChartFenceBlock`), and a plain code block while it is still streaming.
  */
 export function MarkdownCodeBlock(props: { block: Extract<MarkdownBlock, { kind: 'code' }> }) {
   return (
     <Show
-      when={props.block.closed && props.block.lang.trim().toLowerCase() === 'mermaid'}
-      fallback={<TranscriptCodeBlock block={props.block} />}
+      when={props.block.closed && props.block.lang.trim().toLowerCase() === 'chart'}
+      fallback={
+        <Show
+          when={props.block.closed && props.block.lang.trim().toLowerCase() === 'mermaid'}
+          fallback={<TranscriptCodeBlock block={props.block} />}
+        >
+          <MermaidDiagram code={props.block.text} />
+        </Show>
+      }
     >
-      <MermaidDiagram code={props.block.text} />
+      <ChartFenceBlock text={props.block.text} fallback={<TranscriptCodeBlock block={props.block} />} />
     </Show>
   )
 }
@@ -1388,13 +1445,32 @@ function MarkdownMathBlock(props: { block: Extract<MarkdownBlock, { kind: 'math'
   )
 }
 
+/**
+ * A table, with its hover toolbar (copy, CSV, "Vis som diagram") and, when the
+ * reader switched it on, the chart under it.
+ */
 export function MarkdownTable(props: { block: Extract<MarkdownBlock, { kind: 'table' }>; citations?: readonly Citation[] }) {
+  const chartState = createTableChartState(() => props.block.header, () => props.block.rows)
+  return (
+    <>
+      <MarkdownTableGrid block={props.block} citations={props.citations} chartState={chartState} />
+      <TableChart state={chartState} />
+    </>
+  )
+}
+
+function MarkdownTableGrid(props: {
+  block: Extract<MarkdownBlock, { kind: 'table' }>
+  citations?: readonly Citation[]
+  chartState: ReturnType<typeof createTableChartState>
+}) {
   const alignStyle = (column: number): JSX.CSSProperties | undefined => {
     const align = props.block.align[column]
     return align ? { 'text-align': align } : undefined
   }
   return (
     <div class="verevon-chat-table-wrap">
+      <ChatTableTools header={props.block.header} rows={props.block.rows} state={props.chartState} />
       <table class="verevon-chat-table">
         <thead>
           <tr>
@@ -2086,6 +2162,39 @@ function nextPlanStepRowKey(): string {
 }
 
 /**
+ * Unsent edits to a proposed plan, kept across a REMOUNT of the control.
+ *
+ * The control does not own its lifetime. Its parent (`AssistantMessage`)
+ * derives the turn's nodes as a fresh list whenever anything they read
+ * changes, and `<For>` keys that list by object reference — so every node,
+ * this one included, is torn down and rebuilt. Clicking Approve flips
+ * `pending`, and a refused approval sets `error`: both rebuild the control,
+ * which used to throw away the person's reordering, rewritten steps and
+ * typed justification exactly when they most needed them (fix the problem
+ * the server named, press Approve again). Keyed by plan id, so a different
+ * (revised) plan never inherits them; bounded, so a long session cannot
+ * accumulate them.
+ */
+type PlanDraft = { rung: AutonomyRung; reason: string; rows: EditablePlanStepRow[] }
+const MAX_PLAN_DRAFTS = 20
+const planDrafts = new Map<string, PlanDraft>()
+
+function rememberPlanDraft(planId: string, draft: PlanDraft): void {
+  planDrafts.delete(planId)
+  planDrafts.set(planId, draft)
+  while (planDrafts.size > MAX_PLAN_DRAFTS) {
+    const oldest = planDrafts.keys().next().value
+    if (oldest === undefined) break
+    planDrafts.delete(oldest)
+  }
+}
+
+/** Test seam: drafts are module state that outlives a single mount by design. */
+export function __resetPlanDraftsForTests(): void {
+  planDrafts.clear()
+}
+
+/**
  * The plan-approval control: the only thing that grants a planning run the
  * authority to execute — and, when the model proposed a structured plan
  * (plan-gate §2.1), the only place a person can reorder, rewrite, add,
@@ -2108,37 +2217,80 @@ export function PlanApprovalControl(props: {
   summary?: string
   steps?: ChatPlanStep[]
   grantedRung?: AutonomyRung
+  /** The proposed plan was rejected — nothing was granted or executed. */
+  rejected?: boolean
   pending: boolean
   error?: string
   onApprove: (rung: AutonomyRung, justification: string, steps?: PlanStepEdit[]) => void
   onReject?: (planId: string, reason: string) => void
 }) {
   const i18n = useI18n()
-  const [rung, setRung] = createSignal<AutonomyRung>('workspace_write')
-  const [reason, setReason] = createSignal('')
+  // Read once, on purpose: this is the identity the control's draft is kept
+  // under, and a control never changes which plan it is showing.
+  const draftKey = untrack(() => props.planId)
+  const draft = draftKey ? planDrafts.get(draftKey) : undefined
+  // A decided plan has nothing left to edit; do not let its draft outlive it.
+  if (draftKey && untrack(() => Boolean(props.grantedRung || props.rejected))) {
+    planDrafts.delete(draftKey)
+  }
+  const [rung, setRung] = createSignal<AutonomyRung>(draft?.rung ?? 'workspace_write')
+  const [reason, setReason] = createSignal(draft?.reason ?? '')
   const tooShort = () => reason().trim().length < MIN_PLAN_JUSTIFICATION_CHARS
   const hasStructuredPlan = () => Boolean(props.planId)
 
-  // Seeded ONCE from props.steps, never resynced on every render — same
-  // defensive pattern as `reason` above: a mid-edit re-stream (a second
-  // plan.propose call superseding this one before the user submits) must not
-  // silently clobber edits already in progress.
+  // Seeded ONCE (from the remembered draft if this control is a remount, else
+  // from props.steps), never resynced on every render — same defensive
+  // pattern as `reason` above: a mid-edit re-stream (a second plan.propose
+  // call superseding this one before the user submits) must not silently
+  // clobber edits already in progress.
   const [rows, setRows] = createSignal<EditablePlanStepRow[]>(
-    (props.steps ?? []).map((step) => ({
-      localKey: nextPlanStepRowKey(),
-      stepId: step.id,
-      title: step.title,
-      operation: step.operation ?? '',
-      removed: false,
-    })),
+    draft?.rows ??
+      untrack(() => props.steps ?? []).map((step) => ({
+        localKey: nextPlanStepRowKey(),
+        stepId: step.id,
+        title: step.title,
+        operation: step.operation ?? '',
+        removed: false,
+      })),
   )
-  const remainingCount = () => rows().filter((row) => !row.removed).length
 
   // Uncontrolled: `<input value={row.title}>` sets the DOM value once at
   // creation; the live, currently-typed value is read back from here at
   // submit time (`wireEdits`). Never used to drive a render.
   const inputRefs = new Map<string, HTMLInputElement>()
   const currentTitle = (row: EditablePlanStepRow) => inputRefs.get(row.localKey)?.value ?? row.title
+
+  // The one thing typing DOES drive: whether the plan still has a real step
+  // and whether every kept step has a title. A tick, not the text — the
+  // inputs stay uncontrolled (see `EditablePlanStepRow`), this only tells the
+  // two derived reads below to look at them again.
+  const [titleTick, setTitleTick] = createSignal(0)
+  // A row the person added and never filled in is not a step.
+  const isBlankNewRow = (row: EditablePlanStepRow) =>
+    row.stepId === '' && currentTitle(row).trim() === ''
+  const remainingCount = () => {
+    titleTick()
+    return rows().filter((row) => !row.removed && !isBlankNewRow(row)).length
+  }
+  // A step the person is keeping but has emptied: the server refuses a step
+  // with no title, so say so here instead of after a round trip.
+  const hasBlankKeptStep = () => {
+    titleTick()
+    return rows().some(
+      (row) => !row.removed && row.stepId !== '' && currentTitle(row).trim() === '',
+    )
+  }
+
+  // Remember the edits if this control is torn down for a reason other than
+  // the decision itself (see `PlanDraft`).
+  onCleanup(() => {
+    if (!draftKey) return
+    rememberPlanDraft(draftKey, {
+      rung: rung(),
+      reason: reason(),
+      rows: rows().map((row) => ({ ...row, title: currentTitle(row) })),
+    })
+  })
 
   const removeRow = (localKey: string) => {
     setRows((current) =>
@@ -2180,22 +2332,36 @@ export function PlanApprovalControl(props: {
     ])
   }
   const wireEdits = (): PlanStepEdit[] =>
-    rows().map((row) => ({
-      stepId: row.stepId || undefined,
-      title: currentTitle(row),
-      operation: row.operation || undefined,
-      removed: row.removed,
-    }))
+    rows()
+      // A never-filled new row is dropped rather than sent: the server refuses
+      // a step with no title, and it never belonged to the proposal.
+      .filter((row) => !isBlankNewRow(row))
+      .map((row) => ({
+        stepId: row.stepId || undefined,
+        title: currentTitle(row).trim(),
+        operation: row.operation || undefined,
+        removed: row.removed,
+      }))
 
   const approveDisabled = () =>
-    tooShort() || props.pending || (hasStructuredPlan() && remainingCount() === 0)
+    tooShort() ||
+    props.pending ||
+    (hasStructuredPlan() && (remainingCount() === 0 || hasBlankKeptStep()))
 
   return (
     <Show
-      when={!props.grantedRung}
+      when={!props.grantedRung && !props.rejected}
       fallback={
         <p class="verevon-chat-plan-granted">
-          Godkjent: agenten kan nå {RUNG_LABEL[props.grantedRung ?? 'read_only']}.
+          <Show
+            when={props.rejected}
+            fallback={<>Godkjent: agenten kan nå {RUNG_LABEL[props.grantedRung ?? 'read_only']}.</>}
+          >
+            {i18n.tr(
+              'Planen ble avvist – ingenting ble utført.',
+              'The plan was rejected – nothing was executed.',
+            )}
+          </Show>
         </p>
       }
     >
@@ -2227,6 +2393,7 @@ export function PlanApprovalControl(props: {
                       ref={(el) => inputRefs.set(row.localKey, el)}
                       value={row.title}
                       aria-label={i18n.tr(`Steg`, `Step`)}
+                      onInput={() => setTitleTick((tick) => tick + 1)}
                     />
                     <div class="verevon-chat-plan__step-actions">
                       <button
@@ -2306,6 +2473,11 @@ export function PlanApprovalControl(props: {
           <Show when={hasStructuredPlan() && remainingCount() === 0 && !tooShort()}>
             <span class="verevon-chat-plan__hint">
               {i18n.tr('Planen må ha minst ett steg.', 'The plan needs at least one step.')}
+            </span>
+          </Show>
+          <Show when={hasStructuredPlan() && remainingCount() > 0 && hasBlankKeptStep()}>
+            <span class="verevon-chat-plan__hint">
+              {i18n.tr('Hvert steg trenger en tittel.', 'Every step needs a title.')}
             </span>
           </Show>
           <Show when={props.error}>
@@ -3446,6 +3618,11 @@ export function ThinkingDots(props: {
   since?: string
   /** The last thing the stream reported. Absent = nothing reported yet. */
   activity?: StreamActivity
+  /**
+   * The turn's durable run. With one, a wait past the threshold also offers
+   * "Varsle meg når ferdig". Absent = no control, exactly as before.
+   */
+  runId?: string
 }) {
   const mountedAt = Date.now()
   /**
@@ -3492,6 +3669,10 @@ export function ThinkingDots(props: {
       </Show>
       <Show when={elapsedMs() >= THINKING_ELAPSED_THRESHOLD_MS}>
         <small class="verevon-chat-thinking__elapsed">{formatElapsedWait(elapsedMs())}</small>
+      </Show>
+      {/* Same threshold as the counter: an ordinary answer never shows it. */}
+      <Show when={elapsedMs() >= THINKING_ELAPSED_THRESHOLD_MS ? props.runId : undefined}>
+        {(runId) => <RunNotifyButton runId={runId()} />}
       </Show>
     </span>
   )

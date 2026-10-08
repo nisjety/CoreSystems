@@ -688,3 +688,80 @@ describe('BrowserObservationShot', () => {
     unmount()
   })
 })
+
+describe('AgentRunConsole sub-agent timeline', () => {
+  beforeEach(() => {
+    mockStreamChat.mockReset()
+    mockStreamRunEvents.mockReset()
+    mockGetRunProofBundle.mockReset().mockResolvedValue(null)
+    mockListApprovals.mockReset().mockResolvedValue([])
+    mockDecideApproval.mockReset()
+    mockResumeRun.mockReset().mockResolvedValue(undefined)
+    mockCancelRun.mockReset().mockResolvedValue(undefined)
+    mockGetRun.mockReset().mockResolvedValue(runDetail())
+    mockListRuns.mockReset().mockResolvedValue({ runs: [], hasMore: false })
+    mockListSystemRuns.mockReset().mockResolvedValue({ runs: [], hasMore: false })
+    mockWatchRun.mockReset().mockResolvedValue({ watching: true })
+    mockUnwatchRun.mockReset().mockResolvedValue(undefined)
+    mockGetRunWatchStatus.mockReset().mockResolvedValue({ watching: false })
+  })
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  /** Starts a run and hands back the handlers the console gave the event stream. */
+  async function startRun(): Promise<RunEventHandlers> {
+    let runEventHandlers: RunEventHandlers | undefined
+    mockStreamChat.mockImplementation((_request: unknown, handlers: ChatStreamHandlers) => {
+      handlers.onConnected?.({ runId: 'run_1', threadId: 'thread_1', model: 'balanced' })
+      return new Promise<void>(() => {})
+    })
+    mockStreamRunEvents.mockImplementation((_runId: string, handlers: RunEventHandlers) => {
+      runEventHandlers = handlers
+      return new Promise<void>(() => {})
+    })
+    fireEvent.input(screen.getByLabelText(/hva skal agenten gjøre/i), { target: { value: 'Compare carriers' } })
+    flush()
+    fireEvent.click(screen.getByRole('button', { name: /kjør oppgave/i }))
+    await waitFor(() => expect(runEventHandlers).toBeDefined())
+    return runEventHandlers!
+  }
+
+  it('names the delegated goal and its fan-out batch instead of a bare run id', async () => {
+    renderConsole()
+    const handlers = await startRun()
+
+    handlers.onSubagentAttached?.({
+      parentRunId: 'run_1',
+      childRunId: 'run_1.tool_1_fan-1.0',
+      role: 'researcher',
+      goalSummary: 'look up carrier docs',
+      batchId: 'run_1:tool_1_fan-1',
+      at: '2026-09-28T12:00:00Z',
+    })
+    flush()
+
+    const row = await screen.findByText(/look up carrier docs/)
+    // The goal leads, and the batch tells the reader which siblings belong together.
+    expect(row.textContent).toContain('batch')
+  })
+
+  it('keeps the run id as the detail line when the edge carries no goal (a lone subagent.task, or an older run)', async () => {
+    renderConsole()
+    const handlers = await startRun()
+
+    handlers.onSubagentAttached?.({
+      parentRunId: 'run_1',
+      childRunId: 'run_1.tool_2_sub-1',
+      role: 'generic',
+      at: '2026-09-28T12:00:00Z',
+    })
+    flush()
+
+    const title = await screen.findByText(/Underagent koblet til/)
+    const item = title.closest('li') ?? title.parentElement
+    expect(item?.textContent).toContain('kjøring')
+    expect(item?.textContent).not.toContain('batch')
+  })
+})

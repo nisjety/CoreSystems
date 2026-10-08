@@ -9,10 +9,8 @@ import {
 } from '@/shared/api/cost-client'
 import { useI18n } from '@/shared/i18n'
 
-// Org-wide cost & usage dashboard (Phase 7 B5). Renders real ledger spend from
-// cost-core via the gateway `/api/v1/cost/*` proxy: a rolled-up summary, the
-// most recent priced inferences, and the model rate card. Honest-empty: a fresh
-// org shows zeros and an empty table — never a fabricated figure.
+// Personal cost & usage dashboard. The authenticated Cost Core user token
+// scopes these reads to the signed-in user's ledger.
 
 function fmtUsd(value: number): string {
   if (value === 0) return '$0.00'
@@ -34,7 +32,7 @@ function fmtClock(at: string): string {
 
 export default function CostDashboardPage() {
   const i18n = useI18n()
-  const [summary] = createResource(getCostSummary)
+  const [summary] = createResource(() => getCostSummary())
   const [entries] = createResource(() => listCostEntries(50))
   const [pricing] = createResource(getCostPricing)
 
@@ -51,8 +49,8 @@ export default function CostDashboardPage() {
           </p>
           <h1 class="verevon-cost__title">Cost dashboard</h1>
           <p class="verevon-cost__sub">
-            Real per-run spend from the model ledger. Every figure is priced from the
-            catalogue cost-core records each inference against.
+            Your recorded model usage. Metered API spend is separated from subscription tokens;
+            historical entries without a billing basis remain unverified.
           </p>
         </div>
       </header>
@@ -60,29 +58,40 @@ export default function CostDashboardPage() {
       <section class="verevon-cost__stats" aria-label="Spend summary">
         <Stat
           icon={<Coins size={15} strokeWidth={2.1} />}
-          label="Total spend"
-          value={fmtUsd(summary()?.totalCostUsd ?? 0)}
+          label="Metered API spend"
+          value={summary()?.basisBreakdownAvailable ? fmtUsd(summary()?.meteredCostUsd ?? 0) : '—'}
           loading={summary.loading}
         />
         <Stat
           icon={<Receipt size={15} strokeWidth={2.1} />}
-          label="Billed inferences"
-          value={fmtInt(summary()?.entryCount ?? 0)}
+          label="Metered requests"
+          value={fmtInt(summary()?.meteredEntryCount ?? 0)}
           loading={summary.loading}
         />
         <Stat
           icon={<Activity size={15} strokeWidth={2.1} />}
-          label="Input tokens"
-          value={fmtInt(summary()?.totalInputTokens ?? 0)}
+          label="Subscription tokens"
+          value={fmtInt((summary()?.subscriptionInputTokens ?? 0) + (summary()?.subscriptionOutputTokens ?? 0))}
           loading={summary.loading}
         />
         <Stat
           icon={<Activity size={15} strokeWidth={2.1} />}
-          label="Output tokens"
-          value={fmtInt(summary()?.totalOutputTokens ?? 0)}
+          label="Unknown billing basis"
+          value={fmtInt(summary()?.unknownBasisEntryCount ?? 0)}
           loading={summary.loading}
         />
       </section>
+
+      <Show when={summary()?.basisBreakdownAvailable && (summary()?.unknownBasisEntryCount ?? 0) > 0}>
+        <p class="verevon-cost__empty">
+          {fmtInt(summary()?.unknownBasisEntryCount ?? 0)} entries have no recorded billing basis. They are excluded from metered spend and cannot be identified as subscription usage from the available data.
+        </p>
+      </Show>
+      <Show when={summary()?.basisBreakdownAvailable && (summary()?.subscriptionEntryCount ?? 0) > 0}>
+        <p class="verevon-cost__empty">
+          {fmtInt(summary()?.subscriptionEntryCount ?? 0)} subscription-backed requests · {fmtInt(summary()?.subscriptionInputTokens ?? 0)} input / {fmtInt(summary()?.subscriptionOutputTokens ?? 0)} output tokens. These are usage included in your subscription, not incremental API spend.
+        </p>
+      </Show>
 
       <section class="verevon-cost__panel" aria-label="Recent inferences">
         <div class="verevon-cost__panel-head">
@@ -93,7 +102,7 @@ export default function CostDashboardPage() {
           fallback={
             <p class="verevon-cost__empty">
               <Show when={!entries.loading} fallback="Loading…">
-                No billed inferences yet — run a task in chat or the Agent Run Console and spend appears here.
+              No model-usage entries have been recorded for your account yet.
               </Show>
             </p>
           }
@@ -119,8 +128,10 @@ export default function CostDashboardPage() {
                       <td class="verevon-cost__num">{fmtInt(row.outputTokens)}</td>
                       <td class="verevon-cost__num verevon-cost__cost">
                         {row.costBasis === 'subscription'
-                          ? i18n.tr('Inkludert i abonnementet', 'Included in the subscription')
-                          : fmtUsd(row.costUsd)}
+                          ? i18n.tr('Bruk av abonnement', 'Subscription usage')
+                          : row.costBasis === 'metered'
+                            ? fmtUsd(row.costUsd)
+                            : i18n.tr('Ukjent grunnlag', 'Unknown basis')}
                       </td>
                     </tr>
                   )}

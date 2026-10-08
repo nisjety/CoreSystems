@@ -223,6 +223,21 @@ describe('streamFailurePresentation for ChatGPT-subscription refusals', () => {
       .toBe('The selected ChatGPT subscription connection could not complete the answer. Try again shortly. No other model was used.')
   })
 
+  it('says Do is not switched on for the subscription, in words, and offers no retry of the refused turn', () => {
+    // What model-gateway sends when its AGENTIC_SUBSCRIPTION_ENABLED switch is off.
+    const operatorEnglish = 'openai-codex-subscription supports text-only, non-ZDR chat without image generation, browsing, deep research, plan mode, or agentic tool specs'
+    const shown = streamFailurePresentation('agentic_subscription_disabled', operatorEnglish, norwegian, utc)
+    expect(shown).toEqual({
+      message: 'Utfør er ikke slått på for ChatGPT-abonnementet. Velg Spør, eller velg en annen modell for å bruke Utfør. Ingen modell ble brukt.',
+      unsaved: true,
+      unavailable: false,
+      action: 'none',
+    })
+    expect(shown.message).not.toContain('text-only')
+    expect(streamFailurePresentation('agentic_subscription_disabled', operatorEnglish, english, utc).message)
+      .toBe('Do is not switched on for the ChatGPT subscription. Choose Ask, or pick another model to use Do. No model was used.')
+  })
+
   it('translates a conversation that is too long, and offers no retry of the same turn', () => {
     const operatorEnglish = 'This conversation is too long for the selected model, even after compacting it. Start a new thread, or choose a model with a larger context window.'
     expect(streamFailurePresentation('prompt_too_long', operatorEnglish, norwegian, utc)).toEqual({

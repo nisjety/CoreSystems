@@ -186,9 +186,11 @@ function ExpandedSidebarPanel(props: {
   const [searchQuery, setSearchQuery] = createSignal('')
   const [activeTabId, setActiveTabId] = createSignal<string | null>(null)
   const panelTabs = () => props.activeSection.panelTabs ?? []
-  const firstPanelTabId = () => props.activeSection.id === 'overview' && chatAppearanceActive('dashboard')
+  // A memo, so the effect below runs when the group changes and not for every other query parameter
+  // (the Home tab lives in ?tab=): an effect re-runs whenever its source is invalidated, equal value or not.
+  const firstPanelTabId = createMemo(() => props.activeSection.id === 'overview' && chatAppearanceActive('dashboard')
     ? homeOverviewGroup(parseHomeOverview(new URLSearchParams(props.pathname.split('?')[1] ?? '').get('overview')))
-    : panelTabs()[0]?.id ?? null
+    : panelTabs()[0]?.id ?? null)
   const panelKind = createMemo(() => {
     if (props.activeSection.id === 'messages') return 'messages'
     if (props.activeSection.id === 'spaces') return 'spaces'
@@ -941,10 +943,13 @@ function SidebarPanelNavigation(props: {
   const topGroups = () => visibleGroups().filter((group) => !group.alignBottom)
   const bottomGroups = () => visibleGroups().filter((group) => group.alignBottom)
 
+  // The items the address lands on, as one string, for the same reason: a query parameter that
+  // lands on the same items must not collapse the groups the person has opened.
+  const activeItemKey = createMemo(() => Array.from(getActiveItemIds(props.section, props.pathname)).join('\n'))
   createEffect(
     () => ({
       expandedGroups: new Set(getDefaultExpandedGroups(props.section)),
-      expandedItems: new Set(getActiveItemIds(props.section, props.pathname)),
+      expandedItems: new Set(activeItemKey() ? activeItemKey().split('\n') : []),
     }),
     (next) => {
       setExpandedGroups(next.expandedGroups)

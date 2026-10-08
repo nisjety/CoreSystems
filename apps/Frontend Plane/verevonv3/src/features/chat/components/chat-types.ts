@@ -10,6 +10,7 @@ import {
   type RecalledMemory,
 } from '@/shared/api/chat-client'
 import {
+  type AnswerServedBy,
   type PrivacyTier,
 } from '@/shared/api/privacy-tier'
 import {
@@ -284,6 +285,14 @@ export type ChatTurn = {
    */
   costBasis?: ChatCostBasis
   /**
+   * Where the answer was processed, as the gateway stamped it on `usage`
+   * (serving provider, declared residency, privacy tier). Absent when the
+   * gateway did not stamp one, and then nothing is rendered. Session-only:
+   * not written to the thread snapshot, so a reload shows no line rather than
+   * a stale or reconstructed one.
+   */
+  servedBy?: AnswerServedBy
+  /**
    * Where the turn's server time went (`turn_timing`). Absent when the gateway
    * did not report it; the metrics rows that read it are then not shown at all.
    * A restored transcript keeps only the three totals.
@@ -398,6 +407,14 @@ export type ChatTurn = {
     summary: string
     steps: import('@/shared/api/chat-client').ChatPlanStep[]
   }
+  /**
+   * The person rejected this turn's proposed plan (plan-gate §2.3), and the
+   * server recorded it. Session-only, like `proposedPlan`: the server is the
+   * durable record and refuses any further decision on a rejected plan, so
+   * this only exists so the card can say what happened instead of sitting
+   * there unchanged with an Approve button that would now be refused.
+   */
+  planRejected?: boolean
   /**
    * AI-generated follow-up question suggestions (composer chips), from the
    * `follow_ups` SSE event. Session-only by design — not persisted into the

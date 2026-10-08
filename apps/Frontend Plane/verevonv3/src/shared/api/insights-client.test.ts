@@ -93,8 +93,8 @@ describe('insights-client', () => {
           generated_at: '2026-06-20T10:00:00Z',
           source_count: 2,
           scorecards: [
-            { id: 'inbox.a', label: 'inbox a', surface: 'inbox', metric: 'a', value: 4, unit: 'count', source: 'conversation-core' },
-            { id: 'social.b', label: 'social b', surface: 'social', metric: 'b', value: 2.5, unit: '', source: '' },
+            { id: 'inbox.a', label: 'inbox a', surface: 'inbox', metric: 'a', value: 4, unit: 'count', source: 'conversation-core', event_count: 2, aggregation: 'sum_of_recorded_events', definition: 'Two recorded events.' },
+            { id: 'social.b', label: 'social b', surface: 'social', metric: 'b', value: 2.5, unit: '', source: '', event_count: 1, aggregation: 'unverified' },
           ],
         }),
       ),
@@ -108,11 +108,16 @@ describe('insights-client', () => {
     expect(overview.scorecards[0]).toEqual({
       id: 'inbox.a',
       label: 'inbox a',
+      definition: 'Two recorded events.',
+      coverage: 'unknown',
+      checkedAt: undefined,
       surface: 'inbox',
       metric: 'a',
       value: 4,
       unit: 'count',
       source: 'conversation-core',
+      eventCount: 2,
+      aggregation: 'sum_of_recorded_events',
     })
     // Unattributed scorecard keeps an empty source — never fabricated.
     expect(overview.scorecards[1]!.source).toBe('')
@@ -137,26 +142,29 @@ describe('normalizeInsightConnector', () => {
 })
 
 describe('normalizeInsightOverview', () => {
-  it('collapses a non-object / empty payload to a zero-scorecard overview', () => {
-    expect(normalizeInsightOverview(null)).toEqual({ generatedAt: '', scorecards: [], sourceCount: 0 })
-    expect(normalizeInsightOverview({})).toEqual({ generatedAt: '', scorecards: [], sourceCount: 0 })
+  it('rejects malformed reports instead of turning them into empty measurements', () => {
+    expect(() => normalizeInsightOverview(null)).toThrow('Invalid Insight Core report')
+    expect(() => normalizeInsightOverview({})).toThrow('Incomplete Insight Core report')
   })
 
-  it('never fabricates a value or source for malformed scorecard fields', () => {
+  it('preserves report metadata and rejects malformed numeric scorecards', () => {
     const overview = normalizeInsightOverview({
-      scorecards: [{ id: 'x.y', metric: 'y', surface: 'x', value: 'NaN', source: 42 }],
+      contract_version: '2.0',
+      coverage: 'unknown',
+      coverage_detail: 'No delivery watermark.',
+      generated_at: '2026-09-30T12:00:00Z',
+      window: { from: '2026-09-01T00:00:00Z', to: '2026-09-30T12:00:00Z' },
+      scorecards: [{ id: 'x.y', label: 'Metric Y', metric: 'y', surface: 'x', value: 2, unit: 'count', source: 'core', event_count: 2, aggregation: 'sum_of_recorded_events' }],
     })
-    expect(overview.scorecards[0]).toEqual({
-      id: 'x.y',
-      label: '',
-      surface: 'x',
-      metric: 'y',
-      value: 0,
-      unit: '',
-      source: '',
-    })
-    // source_count falls back to the real produced row count when absent.
     expect(overview.sourceCount).toBe(1)
+    expect(overview.coverage).toBe('unknown')
+    expect(overview.contractVersion).toBe('2.0')
+    expect(overview.coverageDetail).toBe('No delivery watermark.')
+    expect(overview.window.from).toBe('2026-09-01T00:00:00Z')
+    expect(() => normalizeInsightOverview({
+      generated_at: '2026-09-30T12:00:00Z',
+      scorecards: [{ id: 'x.y', label: 'Metric Y', metric: 'y', surface: 'x', value: 'NaN', unit: 'count', event_count: 2, aggregation: 'sum_of_recorded_events' }],
+    })).toThrow('Invalid numeric value in Insight Core report')
   })
 })
 

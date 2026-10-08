@@ -1,0 +1,84 @@
+import { createMemo, createSignal, For, Show } from 'solid-js'
+import { createResource } from '@/shared/lib/create-resource-compat'
+import { getUsageAnalytics, type CostSummaryQuery } from '@/shared/api/cost-client'
+import { insightsUsageActionSchema } from '@/shared/actions/insights-usage'
+import { useI18n } from '@/shared/i18n'
+import { usageCsv, usageMoney, usageRows, usageTotals, type UsageFilter, type UsageGroup } from '../lib/usage-analytics'
+import './usage-analytics.css'
+
+export function UsageAnalyticsSection(props: { identity: string; scope: 'organization' | 'me'; from?: string; to?: string; refreshKey: number; canManage: boolean }) {
+  const i18n = useI18n()
+  const [group, setGroup] = createSignal<UsageGroup>('model')
+  const [filter, setFilter] = createSignal<UsageFilter>('all')
+  const key = () => JSON.stringify([props.identity, props.scope, props.from, props.to])
+  const [report] = createResource(() => ({ key: key(), revision: props.refreshKey, scope: props.scope, from: props.from, to: props.to }), async query => {
+    insightsUsageActionSchema.parse({ type: 'insights.usage.read', ...query })
+    try { return { key: query.key, data: await getUsageAnalytics(query as CostSummaryQuery), available: true } }
+    catch { return { key: query.key, data: null, available: false } }
+  })
+  const current = () => report()?.key === key() ? report() : undefined
+  const buckets = () => current()?.data?.buckets ?? []
+  const totals = createMemo(() => usageTotals(buckets(), filter()))
+  const rows = createMemo(() => usageRows(buckets(), group(), filter()))
+  const days = createMemo(() => usageRows(buckets(), 'day', filter()))
+  const maxRequests = () => Math.max(1, ...days().map(row => row.requests))
+  const number = (value: number) => value.toLocaleString()
+  const basisLabel = (value: string) => value === 'metered' ? i18n.tr('API', 'API') : value === 'subscription' ? i18n.tr('Abonnement', 'Subscription') : i18n.tr('Uavklart', 'Unclassified')
+  const label = (value: string) => group() === 'basis' ? basisLabel(value) : value || i18n.tr('Ukjent modell', 'Unknown model')
+  function exportReport() {
+    const data = current()?.data
+    if (!data) return
+    insightsUsageActionSchema.parse({ type: 'insights.usage.export', scope: props.scope, from: props.from, to: props.to })
+    const url = URL.createObjectURL(new Blob([usageCsv(data, filter())], { type: 'text/csv;charset=utf-8' }))
+    const a = document.createElement('a')
+    a.href = url; a.download = `verevon-usage-${data.scope}-${data.to.slice(0, 10)}.csv`
+    a.click()
+    setTimeout(() => URL.revokeObjectURL(url), 1000)
+  }
+  return <section class="usage-analytics" aria-label={i18n.tr('AI-bruksdetaljer', 'AI usage details')}>
+    <header class="usage-analytics__header">
+      <div><span>{i18n.tr('Bruksoversikt', 'Usage breakdown')}</span><h2>{i18n.tr('Forstå AI-bruken din', 'Understand your AI usage')}</h2></div>
+      <button type="button" onClick={exportReport} disabled={!current()?.available || !buckets().length}>{i18n.tr('Eksporter CSV', 'Export CSV')}</button>
+    </header>
+    <Show when={current()} fallback={<p>{i18n.tr('Henter bruk…', 'Loading usage…')}</p>}>
+      <Show when={current()?.available} fallback={<p role="status">{i18n.tr('Bruksdetaljer er utilgjengelige. Prøv å oppdatere eller velg en kortere periode.', 'Usage details are unavailable. Try refreshing or selecting a shorter period.')}</p>}>
+        <div class="usage-analytics__toolbar">
+          <label>{i18n.tr('Vis', 'Show')} <select value={filter()} onChange={e => setFilter(e.currentTarget.value as UsageFilter)}>
+            <option value="all">{i18n.tr('All bruk', 'All usage')}</option><option value="metered">API</option>
+            <option value="subscription">{i18n.tr('Abonnement', 'Subscription')}</option>
+            <Show when={buckets().some(b => b.basis === 'unknown')}><option value="unknown">{i18n.tr('Uavklart', 'Unclassified')}</option></Show>
+          </select></label>
+          <span>{i18n.tr('Valgt periode', 'Selected period')}{current()?.data?.from ? ` · ${new Date(current()!.data!.from!).toLocaleDateString()}` : ''}</span>
+        </div>
+        <dl class="usage-analytics__meters">
+          <div><dt>{i18n.tr('Modellforespørsler', 'Model requests')}</dt><dd>{number(totals().requests)}</dd></div>
+          <div><dt>{i18n.tr('Input-tokens', 'Input tokens')}</dt><dd>{number(totals().input)}</dd></div>
+          <div><dt>{i18n.tr('Output-tokens', 'Output tokens')}</dt><dd>{number(totals().output)}</dd></div>
+          <div><dt>{i18n.tr('API-estimat', 'API estimate')}</dt><dd>{totals().metered ? usageMoney(totals().apiCost) : '—'}</dd></div>
+        </dl>
+        <p class="usage-analytics__note">{i18n.tr('Input inkluderer instruksjoner, samtalehistorikk og verktøykontekst. Output er modellens genererte tokens. Én melding kan bruke flere modellforespørsler.', 'Input includes instructions, conversation history, and tool context. Output is tokens generated by the model. One message can use several model requests.')}</p>
+        <Show when={totals().unknown || totals().unmeasured}><p class="usage-analytics__note" role="status">{i18n.tr('Noen kostnads- eller tokendetaljer mangler for denne perioden.', 'Some cost or token details are unavailable for this period.')}</p></Show>
+        <Show when={rows().length} fallback={<p class="usage-analytics__empty">{i18n.tr('Ingen bruk i denne perioden. Nye forespørsler vises automatisk her.', 'No usage in this period. New requests will appear here automatically.')}</p>}>
+          <details class="usage-analytics__trend"><summary>{i18n.tr('Daglig aktivitet', 'Daily activity')} · UTC</summary>
+            <div class="usage-analytics__days"><For each={days()}>{day => <div class="usage-analytics__day">
+              <time>{day.label}</time><span class="usage-analytics__track" aria-hidden="true"><i style={{ width: `${day.requests / maxRequests() * 100}%` }} /></span>
+              <span>{number(day.requests)} {i18n.tr('forespørsler', 'requests')}</span>
+            </div>}</For></div>
+          </details>
+          <div class="usage-analytics__groups" role="group" aria-label={i18n.tr('Grupper bruk', 'Group usage')}>
+            <For each={(['model', 'day', 'basis'] as const)}>{value => <button type="button" aria-pressed={group() === value ? 'true' : 'false'} onClick={() => setGroup(value)}>
+              {value === 'model' ? i18n.tr('Modell', 'Model') : value === 'day' ? i18n.tr('Dag', 'Day') : i18n.tr('Betalingstype', 'Billing type')}
+            </button>}</For>
+          </div>
+          <div class="usage-analytics__table" tabindex={0} role="region" aria-label={i18n.tr('Bruksdetaljer', 'Usage breakdown')}><table>
+            <thead><tr><th>{group() === 'day' ? i18n.tr('Dag (UTC)', 'Day (UTC)') : group() === 'model' ? i18n.tr('Modell', 'Model') : i18n.tr('Betalingstype', 'Billing type')}</th><th>{i18n.tr('Forespørsler', 'Requests')}</th><th>Input</th><th>Output</th><th>{i18n.tr('API-estimat', 'API estimate')}</th></tr></thead>
+            <tbody><For each={rows()}>{row => <tr><th scope="row">{label(row.label)}</th><td>{number(row.requests)}</td><td>{number(row.input)}</td><td>{number(row.output)}</td><td>{row.metered ? usageMoney(row.apiCost) : '—'}</td></tr>}</For></tbody>
+          </table></div>
+        </Show>
+        <footer class="usage-analytics__footer"><span>{i18n.tr('API-beløp er estimater. Abonnement betales separat.', 'API amounts are estimates. Subscriptions are paid separately.')}</span>
+          <Show when={props.canManage}><div><a href="/settings/billing" link>{i18n.tr('Plan og fakturering', 'Plan & billing')}</a><a href="/settings/quotas" link>{i18n.tr('Bruksgrenser', 'Usage limits')}</a></div></Show>
+        </footer>
+      </Show>
+    </Show>
+  </section>
+}

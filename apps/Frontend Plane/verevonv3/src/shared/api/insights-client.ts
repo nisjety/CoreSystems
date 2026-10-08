@@ -63,13 +63,18 @@ export async function listInsightConnectors(): Promise<InsightConnector[]> {
 // `source` cites the producer(s) behind it. The SPA must never render a
 // scorecard the backend did not produce.
 export type InsightScorecard = {
+	coverage?: 'measured' | 'unknown'
+	checkedAt?: string
   id: string
   label: string
+  definition: string
   metric: string
   source: string
   surface: string
   unit: string
   value: number
+  eventCount: number
+  aggregation: string
 }
 
 // The browser may narrow an Insights read to a reporting surface and time
@@ -87,51 +92,78 @@ export type InsightOverviewQuery = {
 // The per-org metric overview Insight Core produced. `sourceCount` is derived
 // only from actual scorecards when the upstream has not included its count.
 export type InsightOverview = {
+  contractVersion: string
+  coverageDetail: string
+  coverage: 'unknown' | 'measured'
   generatedAt: string
+  window: { from?: string; to?: string }
   scorecards: InsightScorecard[]
   sourceCount: number
 }
 
 type InsightOverviewWire = {
+	coverage?: unknown
+	coverage_detail?: unknown
+	contract_version?: unknown
   generated_at?: unknown
   scorecards?: unknown
   source_count?: unknown
+	window?: unknown
 }
 
 function asString(value: unknown): string {
   return typeof value === 'string' ? value : ''
 }
 
-function asNumber(value: unknown): number {
-  return typeof value === 'number' && Number.isFinite(value) ? value : 0
-}
-
-// Normalize the gateway's snake_case overview wire shape into the SPA's camelCase
-// type. Unknown / missing fields collapse to empty/zero — never a fabricated
-// value. A non-object payload yields a zero-scorecard overview (honest empty).
+// Reject malformed measurement data. Treating bad values or a broken response
+// as zero would turn a contract failure into a convincing but false metric.
 export function normalizeInsightOverview(value: unknown): InsightOverview {
-  const wire = (value && typeof value === 'object' ? value : {}) as InsightOverviewWire
-  const scorecards = Array.isArray(wire.scorecards)
-    ? wire.scorecards.map(normalizeScorecard)
-    : []
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Invalid Insight Core report')
+  const wire = value as InsightOverviewWire
+  if (!Array.isArray(wire.scorecards) || typeof wire.generated_at !== 'string') throw new Error('Incomplete Insight Core report')
+  const scorecards = wire.scorecards.map(normalizeScorecard)
+  const window = wire.window && typeof wire.window === 'object' ? wire.window as Record<string, unknown> : {}
+  const sourceCount = wire.source_count === undefined ? scorecards.length : finiteNumber(wire.source_count)
   return {
-    generatedAt: asString(wire.generated_at),
+    contractVersion: typeof wire.contract_version === 'string' ? wire.contract_version : '1.x',
+    coverageDetail: typeof wire.coverage_detail === 'string' ? wire.coverage_detail : '',
+    coverage: wire.coverage === 'measured' ? 'measured' : 'unknown',
+    generatedAt: wire.generated_at,
+    window: {
+      ...(typeof window.from === 'string' ? { from: window.from } : {}),
+      ...(typeof window.to === 'string' ? { to: window.to } : {}),
+    },
     scorecards,
-    sourceCount: typeof wire.source_count === 'number' ? wire.source_count : scorecards.length,
+    sourceCount,
   }
 }
 
 function normalizeScorecard(value: unknown): InsightScorecard {
-  const wire = (value && typeof value === 'object' ? value : {}) as Record<string, unknown>
-  return {
-    id: asString(wire.id),
-    label: asString(wire.label),
-    metric: asString(wire.metric),
-    source: asString(wire.source),
-    surface: asString(wire.surface),
-    unit: asString(wire.unit),
-    value: asNumber(wire.value),
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Invalid Insight Core scorecard')
+  const wire = value as Record<string, unknown>
+  for (const key of ['id', 'label', 'metric', 'surface', 'unit', 'aggregation']) {
+    if (typeof wire[key] !== 'string') throw new Error(`Invalid Insight Core scorecard field: ${key}`)
   }
+  if (typeof wire.source !== 'string' && wire.source !== undefined) throw new Error('Invalid Insight Core scorecard source')
+  return {
+    id: wire.id as string,
+		coverage: wire.coverage === 'measured' ? 'measured' : 'unknown',
+		checkedAt: typeof wire.checked_at === 'string' ? wire.checked_at : undefined,
+    label: wire.label as string,
+    definition: typeof wire.definition === 'string' ? wire.definition : 'Definition not supplied by the reporting source.',
+    metric: wire.metric as string,
+    source: (wire.source as string | undefined) ?? '',
+    surface: wire.surface as string,
+    unit: wire.unit as string,
+    aggregation: wire.aggregation as string,
+    eventCount: finiteNumber(wire.event_count),
+    value: finiteNumber(wire.value),
+  }
+}
+
+function finiteNumber(value: unknown): number {
+  if (typeof value !== 'number' || !Number.isFinite(value)) throw new Error('Invalid numeric value in Insight Core report')
+  return value
 }
 
 // Gateway-facing only (same IDOR-clean contract as the connectors route): the

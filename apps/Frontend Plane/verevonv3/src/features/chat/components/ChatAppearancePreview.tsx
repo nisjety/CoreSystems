@@ -7,7 +7,6 @@ import {
   compareChatOriginal,
   comparingOriginal,
   resetChatAppearance,
-  tryAllChatAppearance,
   type ChatAppearanceKey,
 } from '../lib/chat-appearance-preview'
 import './chat-appearance-preview.css'
@@ -55,7 +54,7 @@ export function ChatAppearancePreview(props: { embedded?: boolean } = {}) {
       </summary>
       <section class="chat-appearance-preview__panel" aria-label={i18n.tr('Forhåndsvis chat-utseende', 'Chat appearance preview')}>
         <h2>{i18n.tr('Finn din balanse', 'Find your balance')}</h2>
-        <p>{i18n.tr('Prøv én endring om gangen. Valgene lagres bare i denne nettleseren.', 'Try one change at a time. Choices stay in this browser.')}</p>
+        <p>{i18n.tr('Alt er på som standard. Slå av én endring for å sammenligne. Valgene lagres bare i denne nettleseren.', 'Everything is on by default. Turn one change off to compare. Choices stay in this browser.')}</p>
         <div class="chat-appearance-preview__compare" role="group" aria-label={i18n.tr('Sammenlign utseende', 'Compare appearance')}>
           <button type="button" aria-pressed={comparingOriginal() ? 'true' : 'false'} onClick={() => compareChatOriginal(true)}>{i18n.tr('Original', 'Original')}</button>
           <button type="button" aria-pressed={comparingOriginal() ? 'false' : 'true'} onClick={() => compareChatOriginal(false)}>{i18n.tr('Ditt valg', 'Your mix')}</button>
@@ -71,7 +70,6 @@ export function ChatAppearancePreview(props: { embedded?: boolean } = {}) {
         </fieldset>
         <div class="chat-appearance-preview__footer">
           <button type="button" onClick={resetChatAppearance}>{i18n.tr('Tilbakestill', 'Reset all')}</button>
-          <button type="button" onClick={tryAllChatAppearance}>{i18n.tr('Prøv alle', 'Try all')}</button>
         </div>
       </section>
     </details>

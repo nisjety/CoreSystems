@@ -569,11 +569,24 @@ export default function AgentRunConsole() {
         })
       },
       onSubagentAttached: (event) => {
+        // Wide-research fan-out (chat-wave2-specs, 2026-09-28): prefer the
+        // delegated goal as the detail line when the run carries one, so the
+        // flat timeline names what a delegation is actually doing instead of
+        // a bare run id — a batch_id (multiple siblings from one
+        // subagent.research_fan_out call) is appended when present, so the
+        // console reader can tell which items belong together without the
+        // card grid the live panel shows.
+        const runLabel = event.childRunId ? `${i18n.tr('kjøring', 'run')} ${shortId(event.childRunId)}` : ''
+        const detail = event.goalSummary
+          ? event.batchId
+            ? `${event.goalSummary} (${i18n.tr('batch', 'batch')} ${shortId(event.batchId)})`
+            : event.goalSummary
+          : runLabel
         append({
           id: `subagent-on-${event.childRunId ?? state.timeline.length}`,
           kind: 'subagent',
           title: `${i18n.tr('Underagent koblet til', 'Sub-agent attached')}${event.role ? ` · ${event.role}` : ''}`,
-          detail: event.childRunId ? `${i18n.tr('kjøring', 'run')} ${shortId(event.childRunId)}` : '',
+          detail,
           status: 'attached',
           at: event.at ?? new Date().toISOString(),
         })

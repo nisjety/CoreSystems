@@ -18,6 +18,11 @@ import { chatAppearanceActive } from '@/features/chat/lib/chat-appearance-previe
 import { DashboardOverview } from './DashboardOverview'
 import { DashboardSectionOverview } from './DashboardSectionOverview'
 import { homeOverviewLabel, parseHomeOverview } from '@/shared/actions/home-overview'
+import { homeTabActionSchema, homeTabParam, parseHomeTab } from '@/shared/actions/home-tab'
+import { resetSearchSession } from './dashboard-search-session'
+import { useHomeDraft } from './home-draft'
+import { useHomeLayout } from './home-layout-state'
+import { useRetentionVerdictProbe } from './local-retention'
 import { homeSectionDescription, type HomeWorkSection } from './home-section-data'
 import './dashboard-overview.css'
 
@@ -26,21 +31,42 @@ const cardsPerPage = 3
 export default function DashboardHome(props: { workspace?: WorkspaceIdentity } = {}) {
   const i18n = useI18n()
   const shellWorkspace = useCoreWorkspace()
-  const [searchParams] = useSearchParams()
-  const [homeTool, setActiveTab] = createSignal<DashboardTab>('Chat')
+  const [searchParams, setSearchParams] = useSearchParams()
   const [isLaunching, setIsLaunching] = createSignal(false)
-  const [message, setMessage] = createSignal('')
+  // The unsent draft is kept for this tab and account, and only while the
+  // composer says the next turn is not zero-retention (see home-draft). The Nett
+  // history (web-history) is kept behind the same gate.
+  const [zeroRetention, setZeroRetention] = createSignal<boolean | undefined>(undefined)
+  const [message, setMessage, discardDraft] = useHomeDraft({ zeroRetention })
   const [cardPage, setCardPage] = createSignal(0)
   const [searchExpanded, setSearchExpanded] = createSignal(false)
   const [searchPreviewActive, setSearchPreviewActive] = createSignal(false)
   const [knowledgePreviewActive, setKnowledgePreviewActive] = createSignal(false)
   const [cardsRevealed, setCardsRevealed] = createSignal(false)
-  const [dockExpanded, setDockExpanded] = createSignal(false)
-  const [dockMinimized, setDockMinimized] = createSignal(false)
+  // Bumped to remount the search panel, which drops its ~30 local signals at once.
+  const [searchResetKey, setSearchResetKey] = createSignal(0)
+  // The dock is remembered per browser and account (see home-layout-state).
+  const [layout, updateLayout] = useHomeLayout()
+  // A prompt card opens the dock for this visit only: it is not a layout choice,
+  // so the remembered state stays as the person left it.
+  const [dockRevealed, setDockRevealed] = createSignal(false)
+  const dockExpanded = () => layout().dockExpanded || dockRevealed()
+  const dockMinimized = () => layout().dockMinimized && !dockRevealed()
+  const setDock = (patch: { dockMinimized: boolean; dockExpanded?: boolean }) => {
+    setDockRevealed(false)
+    updateLayout(patch)
+  }
   const overview = () => chatAppearanceActive('dashboard')
   const section = () => overview() ? parseHomeOverview(searchParams.overview) : 'home'
   const workSection = () => section() !== 'home' ? section() as HomeWorkSection : null
+  // The URL owns the tab (?tab=web|extract, none is Chat), so Back/Forward and
+  // shared links land on the same tool. ?overview= sections still win.
+  const homeTool = () => parseHomeTab(searchParams.tab)
   const activeTab = () => workSection() ? 'Chat' : homeTool()
+  // The draft, the saved search and the Nett history obey the workspace's retention
+  // verdict, which only a threads listing states. The recent-work card lists them on
+  // the Chat overview; on every other tab, and without the overview, Home asks itself.
+  useRetentionVerdictProbe(() => overview() && !workSection() && activeTab() === 'Chat')
   // Warm the chat route chunk so the first composer→chat View Transition morph
   // finds its target already mounted (no lazy/Suspense gap on the first launch).
   createEffect(
@@ -88,6 +114,21 @@ export default function DashboardHome(props: { workspace?: WorkspaceIdentity } =
       if (!present) setCardsRevealed(false)
     },
   )
+  // A tab's leftovers must not outlive it. This follows the visible tab rather
+  // than the click, because Back/Forward and direct links change ?tab= without
+  // passing through changeActiveTab.
+  createEffect(
+    () => activeTab(),
+    (tab) => {
+      setCardsRevealed(false)
+      if (tab !== 'Søk') {
+        setSearchExpanded(false)
+        setSearchPreviewActive(false)
+      }
+      if (tab !== 'Crawl') setKnowledgePreviewActive(false)
+    },
+    { defer: true },
+  )
 
   const bandsClass = () => {
     if (!workSection() && searchExpanded()) return 'verevon-home-bands verevon-home-bands--expanded min-h-0 flex-1'
@@ -101,22 +142,41 @@ export default function DashboardHome(props: { workspace?: WorkspaceIdentity } =
     return 'verevon-home-composer-section verevon-home-band verevon-home-band-middle px-4 transition-[padding] duration-500'
   }
 
+  // A new tab is a new history entry; unrelated params (e.g. ?overview=) stay.
+  // Chat has no param, so choosing it removes ?tab=.
+  const selectTab = (tab: DashboardTab) => {
+    if (tab === homeTool()) return
+    const action = homeTabActionSchema.parse({ type: 'home.tab.select', tab })
+    setSearchParams({ tab: homeTabParam(action.tab) })
+  }
+
   const applyCardPrompt = (card: DashboardCard) => {
-    setActiveTab('Chat')
+    selectTab('Chat')
     setMessage(i18n.tr(card.prompt, card.promptEn))
-    setDockMinimized(false)
-    setDockExpanded(true)
-    queueMicrotask(() => document.getElementById('verevon-dashboard-input')?.focus())
+    setDockRevealed(true)
+    // The URL settles a navigation after this click, so a timeout (not a
+    // microtask) lets the composer show again before it takes focus.
+    setTimeout(() => document.getElementById('verevon-dashboard-input')?.focus(), 0)
   }
 
   const changeActiveTab = (tab: DashboardTab) => {
-    setActiveTab(tab)
+    // Re-clicking the active tab changes no URL but still returns to the result.
     setCardsRevealed(false)
-    if (tab !== 'Søk') {
-      setSearchExpanded(false)
-      setSearchPreviewActive(false)
-    }
-    if (tab !== 'Crawl') setKnowledgePreviewActive(false)
+    selectTab(tab)
+  }
+
+  // Double-clicking the active Nett tab starts the web search over: the query,
+  // the saved snapshot and anything in flight go, and the panel remounts empty.
+  // The chat draft and the shared 4h web-search cache are not touched.
+  const resetSearch = () => {
+    resetSearchSession()
+    setSearchExpanded(false)
+    setSearchPreviewActive(false)
+    setSearchResetKey((key) => key + 1)
+  }
+
+  const handleActiveTabDoubleClick = (tab: DashboardTab) => {
+    if (tab === 'Søk') resetSearch()
   }
 
   const showNextCards = () => {
@@ -134,22 +194,22 @@ export default function DashboardHome(props: { workspace?: WorkspaceIdentity } =
             <time datetime={new Date().toISOString()}>{new Date().toLocaleDateString(i18n.locale() === 'no' ? 'nb-NO' : 'en-GB', { weekday: 'long', day: 'numeric', month: 'long' })}</time>
           </header>
         </Show>
-        <Show when={!workSection()}><DashboardTabs activeTab={activeTab()} onTabChange={changeActiveTab} /></Show>
+        <Show when={!workSection()}><DashboardTabs activeTab={activeTab()} onActiveTabDoubleClick={handleActiveTabDoubleClick} onTabChange={changeActiveTab} /></Show>
 
         <div class={bandsClass()}>
           <Show when={!overview() && !searchExpanded() && !knowledgeBrowserHeaderInline()}>
             <DashboardHomeHeader compact={resultsView()} planLabel={planLabel()} planTrial={workspace().planTrial} title={homeTitle()} />
           </Show>
 
-          <Show when={overview() && !workSection() && (activeTab() === 'Chat' || (!searchExpanded() && !resultPresent()))}><DashboardOverview onPrompt={applyCardPrompt} /></Show>
+          <Show when={overview() && !workSection() && (activeTab() === 'Chat' || (!searchExpanded() && !resultPresent()))}><DashboardOverview tab={activeTab()} onPrompt={applyCardPrompt} /></Show>
           <Show when={workSection()}>{(selected) => <DashboardSectionOverview section={selected()} />}</Show>
 
           <section class={cn(composerSectionClass(), overview() && activeTab() === 'Chat' && 'home-chat-dock')} data-dock-expanded={dockExpanded() ? 'true' : 'false'} data-dock-minimized={dockMinimized() ? 'true' : 'false'} aria-label={overview() && activeTab() === 'Chat' ? i18n.tr('Spør Verevon', 'Ask Verevon') : undefined}>
             <Show when={overview() && activeTab() === 'Chat'}>
               <div class="home-chat-dock__header">
-                <button type="button" aria-label={dockMinimized() ? i18n.tr('Åpne skrivefelt', 'Expand chat bar') : i18n.tr('Minimer skrivefelt', 'Minimize chat bar')} aria-expanded={dockMinimized() ? 'false' : 'true'} onClick={() => setDockMinimized((value) => !value)}><Show when={dockMinimized()} fallback={<Minus size={16} />}><Plus size={16} /></Show></button>
+                <button type="button" aria-label={dockMinimized() ? i18n.tr('Åpne skrivefelt', 'Expand chat bar') : i18n.tr('Minimer skrivefelt', 'Minimize chat bar')} aria-expanded={dockMinimized() ? 'false' : 'true'} onClick={() => setDock({ dockMinimized: !dockMinimized() })}><Show when={dockMinimized()} fallback={<Minus size={16} />}><Plus size={16} /></Show></button>
                 <MessageCircleMore size={16} /><strong>{i18n.tr('Spør Verevon', 'Ask Verevon')}</strong><span>{i18n.tr('Ny samtale', 'New conversation')}</span>
-                <button type="button" aria-label={i18n.tr('Flere chattevalg', 'More chat options')} title={i18n.tr('Modell, kontekst og verktøy', 'Model, context and tools')} aria-expanded={dockExpanded() ? 'true' : 'false'} onClick={() => { setDockMinimized(false); setDockExpanded((value) => !value) }}><MoreHorizontal size={18} /></button>
+                <button type="button" aria-label={i18n.tr('Flere chattevalg', 'More chat options')} title={i18n.tr('Modell, kontekst og verktøy', 'Model, context and tools')} aria-expanded={dockExpanded() ? 'true' : 'false'} onClick={() => setDock({ dockMinimized: false, dockExpanded: !dockExpanded() })}><MoreHorizontal size={18} /></button>
               </div>
             </Show>
             <DashboardComposerPanel
@@ -160,11 +220,17 @@ export default function DashboardHome(props: { workspace?: WorkspaceIdentity } =
               knowledgeInlineTitle={knowledgeBrowserHeaderInline() ? homeTitle() : undefined}
               message={message()}
               onKnowledgePreviewActiveChange={setKnowledgePreviewActive}
-              onLaunchStart={() => setIsLaunching(true)}
+              onLaunchStart={() => {
+                discardDraft()
+                setIsLaunching(true)
+              }}
               onMessageChange={setMessage}
+              onZeroRetentionChange={setZeroRetention}
               onSearchExpandedChange={setSearchExpanded}
               onSearchPreviewActiveChange={setSearchPreviewActive}
               previewCollapsed={cardsRevealed()}
+              rememberSearches={zeroRetention() === false}
+              searchResetKey={searchResetKey()}
               searchExpanded={!workSection() && searchExpanded()}
             />
           </section>

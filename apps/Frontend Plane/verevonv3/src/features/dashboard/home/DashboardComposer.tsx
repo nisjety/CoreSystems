@@ -102,6 +102,7 @@ import {
 	isExpensiveModel,
 	listChatThreads,
 	listModels,
+	modelSupportsAgentic,
 	saveChatThreadSnapshot,
 	verevonModeById,
 	VEREVON_BALANCE_MODE_ID,
@@ -885,6 +886,12 @@ export function DashboardComposer(props: {
 	onTemporaryChatChange?: (value: boolean) => void;
 	/** Once a message has been sent in a temporary thread, the toggle can no longer be turned off mid-conversation. */
 	temporaryChatLocked?: boolean;
+	/**
+	 * Reports whether the next turn is zero-retention (Temporary chat): once when
+	 * the composer appears and on every change, and `undefined` when it goes away.
+	 * The Home draft is kept in storage only while this says `false`.
+	 */
+	onZeroRetentionChange?: (zeroRetention: boolean | undefined) => void;
 	/** Foreign-origin transcript currently displayed read-only in Chat. */
 	disabled?: boolean;
 	/** Explicitly persist selected files as durable organisation knowledge. */
@@ -987,8 +994,10 @@ export function DashboardComposer(props: {
 	const [selectedModelProvider, setSelectedModelProvider] = createSignal<string | undefined>(initialModelSelection.provider);
 	// Mirrors chat-client.ts's own `subscriptionBacked` check
 	// (buildChatWireBody, ~L651): for this provider the wire silently sends
-	// browse_web/generate_image/plan_mode/deep_research as `false` and drops
-	// every explicit skill pick, regardless of what these controls show here.
+	// browse_web/generate_image/deep_research as `false` and drops every
+	// explicit skill pick, regardless of what these controls show here. Do
+	// (plan_mode) is the one exception, and only when the server advertises the
+	// `agentic` capability on the selected model (`subscriptionAgentic` below).
 	// Before this memo the composer had no way to know that, so Søk/Bilde/
 	// Utfør/Dyp research stayed fully enabled and unlabeled while doing
 	// nothing server-side — CHAT_PARITY_AUDIT_2026-09-15.md F-10.
@@ -999,6 +1008,14 @@ export function DashboardComposer(props: {
 		i18n.tr(
 			"Ikke tilgjengelig med denne modellen",
 			"Not available with this model",
+		);
+	// Why Do is off on the ChatGPT subscription: the server does not advertise
+	// the `agentic` capability, i.e. its AGENTIC_SUBSCRIPTION_ENABLED switch is
+	// off (or the catalogue has not said otherwise).
+	const subscriptionDoDisabledTitle = () =>
+		i18n.tr(
+			"Utfør er ikke slått på for ChatGPT-abonnementet",
+			"Do is not switched on for the ChatGPT subscription",
 		);
 	const subscriptionDisabledStyle = (): JSX.CSSProperties | undefined =>
 		subscriptionBacked()
@@ -1108,6 +1125,22 @@ export function DashboardComposer(props: {
 				model.provider === selectedModelProvider(),
 		);
 	});
+	// Do (plan mode on execution-core's agentic loop) on the ChatGPT subscription
+	// depends on the SERVER, not on the provider name: inference-core adds the
+	// `agentic` capability to the subscription models only while
+	// AGENTIC_SUBSCRIPTION_ENABLED is on, and `/v1/models` carries it here. So
+	// the control follows the catalogue, and a catalogue that has not answered
+	// (or a model it does not list) leaves Do off, exactly as before this switch
+	// existed.
+	const subscriptionAgentic = createMemo(
+		() => subscriptionBacked() && modelSupportsAgentic(selectedCatalogModel()),
+	);
+	// Every other route can always take Do; the subscription route only when the
+	// server says it can. Search, image, deep research, skills and attachments
+	// stay `subscriptionBacked()`-gated: nothing advertises those for it.
+	const planModeAvailable = createMemo(
+		() => !subscriptionBacked() || subscriptionAgentic(),
+	);
 	const selectedModelLabel = () => {
 		const id = selectedModel();
 		// Empty id → backend treats it as Verevon Balance (resilient fallback).
@@ -1259,7 +1292,29 @@ export function DashboardComposer(props: {
 		() => commandBody().trim().length > 0 || files().length > 0,
 	);
 	const imageMode = createMemo(() => !subscriptionBacked() && (props.imageMode ?? false));
-	const planMode = createMemo(() => !subscriptionBacked() && (props.planMode ?? false));
+	const planMode = createMemo(() => planModeAvailable() && (props.planMode ?? false));
+	// The chat controller sends ITS plan-mode signal, not this memo, so Do left on
+	// under another model must not ride onto a subscription route that cannot run
+	// it: the wire carries plan_mode for that route now, and the server would
+	// refuse it while this control reads "Ask". Once the catalogue and the
+	// connection lookup have both answered (a pending lookup is not evidence of
+	// absence, and a remounted composer must not drop a Do that is still valid;
+	// the Subscription group only lists with an active connection) and the
+	// selected subscription model does not advertise `agentic`, turn the
+	// parent's Do off, the way `setRetrievalScope` does for a conflicting source
+	// filter.
+	createEffect(
+		() =>
+			subscriptionBacked() &&
+			!subscriptionConnectionPending() &&
+			!models.loading &&
+			models() !== undefined &&
+			!subscriptionAgentic() &&
+			(props.planMode ?? false),
+		(stale) => {
+			if (stale) props.onPlanModeChange?.(false);
+		},
+	);
 	// Mirrors the `conversationOnly` reset above: Plan mode may also be turned
 	// on directly (e.g. the segmented Ask/Do control), not only through
 	// `setRetrievalScope`, so a stale `knowledge_only`/`web_only` pick must not
@@ -1315,6 +1370,13 @@ export function DashboardComposer(props: {
 			// Temporary chat started mid-take: drop the take, nothing is sent.
 			// A dictation already on its way was an ordinary one and may finish.
 			cancelVoiceInputTake();
+		},
+	);
+	createEffect(
+		() => temporaryChat(),
+		(temporary) => {
+			// A statement, not the callback's value: an effect may only return a cleanup.
+			props.onZeroRetentionChange?.(temporary);
 		},
 	);
 	const voiceLanguageLabel = () => {
@@ -2506,6 +2568,7 @@ export function DashboardComposer(props: {
 
 	onCleanup(() => {
 		composerDisposed = true;
+		props.onZeroRetentionChange?.(undefined);
 		// Mid-take or still on the permission prompt: either way the microphone
 		// is released, including a stream granted after this point.
 		const take = voiceInputTake;
@@ -2936,10 +2999,10 @@ export function DashboardComposer(props: {
 								<span class={cn("dashboard-composer-intent-toggle", planMode() ? "dashboard-composer-intent-toggle--active" : "")}>
 									<ComposerIconButton
 										active={planMode()}
-										disabled={subscriptionBacked() || conversationOnly()}
+										disabled={!planModeAvailable() || conversationOnly()}
 										label={
-											subscriptionBacked()
-												? `${i18n.tr("Utfør", "Do")} — ${subscriptionDisabledTitle()}`
+											!planModeAvailable()
+												? `${i18n.tr("Utfør", "Do")} — ${subscriptionDoDisabledTitle()}`
 												: i18n.tr(
 													planMode()
 														? "Do-modus - agenten planlegger og ber om godkjenning før risikable verktøy"
@@ -2973,10 +3036,10 @@ export function DashboardComposer(props: {
 									type="button"
 									aria-pressed={planMode() ? "true" : "false"}
 									class={{ "is-active": planMode() }}
-									disabled={subscriptionBacked() || conversationOnly()}
-									title={subscriptionBacked() ? subscriptionDisabledTitle() : undefined}
+									disabled={!planModeAvailable() || conversationOnly()}
+									title={!planModeAvailable() ? subscriptionDoDisabledTitle() : undefined}
 									onClick={() => props.onPlanModeChange?.(true)}
-									style={subscriptionDisabledStyle()}
+									style={planModeAvailable() ? undefined : subscriptionDisabledStyle()}
 								>
 									{i18n.tr("Utfør", "Do")}
 								</button>

@@ -1,0 +1,7 @@
+.verevon-insights-users { margin-top: 24px; padding-top: 24px; border-top: 1px solid var(--border-color, #e5e5e5); min-width: 0; }
+.verevon-insights-users__scroll { overflow-x: auto; }
+.verevon-insights-users table { width: 100%; min-width: 840px; border-collapse: collapse; font-size: 12px; text-align: left; }
+.verevon-insights-users th, .verevon-insights-users td { padding: 14px 12px; border-bottom: 1px solid var(--border-color, #e5e5e5); vertical-align: top; }
+.verevon-insights-users tbody th { font-weight: 500; overflow-wrap: anywhere; min-width: 180px; max-width: 230px; }
+.verevon-insights-users thead { color: var(--text-secondary, #666); }
+.verevon-insights-users__note { font-size: 12px; color: var(--text-secondary, #666); margin-top: 14px; line-height: 1.6; }

@@ -48,8 +48,12 @@ import {
   getOrganizationZdrEntitled,
   updateOrganizationSupportAIMode,
   updateOrganizationZdr,
+  ZDR_GATE_UNAVAILABLE,
+  ZDR_NO_ATTESTED_PROVIDER,
   type SupportAIMode,
 } from '@/shared/api/organization-client'
+import { hasZeroRetentionModel, listModels } from '@/shared/api/chat-client'
+import { translateApiError } from '@/shared/i18n/errors'
 import { triggerSync } from '@/shared/api/integrations-client'
 import { ApiError } from '@/shared/api/http'
 import {
@@ -1311,10 +1315,19 @@ function RecentSecurityEvents() {
 
 function zdrTooltip(i18n: ReturnType<typeof useI18n>): string {
   return i18n.tr(
-    'Zero Data Retention (ZDR): når dette er på, blir ikke interaktivt AI-innhold lagret, og det forlater ikke tjenesten. Slå det på for maksimalt personvern (null lagring). ZDR er et frivillig, betalt tillegg tilgjengelig på kvalifiserende (Pro/Enterprise) planer — av som standard til organisasjonen din aktiverer det.',
-    'Zero Data Retention (ZDR): when on, interactive AI content is not retained and does not leave the service. Turn it on for maximum privacy (zero retention). ZDR is an opt-in, paid add-on available on qualifying (Pro/Enterprise) plans — off by default until your organization enables it.',
+    'Zero Data Retention (ZDR): når dette er på, sendes interaktive forespørsler bare til en leverandør vi har en registrert ZDR-godkjenning for, og avvises ellers. Innholdet forlater likevel Verevon og går til den leverandøren. ZDR er et frivillig tillegg på Pro- og Enterprise-planer — av som standard til organisasjonen din aktiverer det.',
+    'Zero Data Retention (ZDR): when on, interactive requests are sent only to a provider we have a recorded ZDR attestation for, and are refused otherwise. The content still leaves Verevon and goes to that provider. ZDR is an opt-in add-on on Pro and Enterprise plans — off by default until your organization enables it.',
   )
 }
+
+/**
+ * What the provider catalogue says about zero-retention attestation:
+ * `checking` (not answered yet), `attested` (at least one chat model's provider
+ * has a recorded attestation), `none` (the catalogue answered and no provider
+ * has one) and `unavailable` (the catalogue could not be read, so nothing is
+ * known either way).
+ */
+type ZdrAttestation = 'checking' | 'attested' | 'none' | 'unavailable'
 
 function OrgSecuritySection() {
   const i18n = useI18n()
@@ -1326,6 +1339,11 @@ function OrgSecuritySection() {
   const [zdrLoaded, setZdrLoaded] = createSignal(false)
   const [zdrBusy, setZdrBusy] = createSignal(false)
   const [zdrError, setZdrError] = createSignal<string | null>(null)
+  // Whether any chat model in the provider catalogue has a recorded zero-retention
+  // attestation: the same question the composer asks before it offers Temporary
+  // chat, and the one the gateway decides before it accepts "ZDR on". Until the
+  // catalogue has answered, and when it cannot be read, nothing is known.
+  const [zdrAttestation, setZdrAttestation] = createSignal<ZdrAttestation>('checking')
   const [supportAiMode, setSupportAiMode] = createSignal<SupportAIMode>('review')
   const [supportAiLoaded, setSupportAiLoaded] = createSignal(false)
   const [supportAiBusy, setSupportAiBusy] = createSignal(false)
@@ -1341,6 +1359,12 @@ function OrgSecuritySection() {
           setSupportAiLoaded(true)
           return
         }
+        // Read beside the posture, never in front of it: a slow or failed catalogue
+        // must not hold back the posture and the plan lock.
+        void listModels().then(
+          (models) => setZdrAttestation(hasZeroRetentionModel(models) ? 'attested' : 'none'),
+          () => setZdrAttestation('unavailable'),
+        )
         try {
           const [posture, entitled, mode] = await Promise.all([
             getOrganizationZdr(id),
@@ -1374,6 +1398,14 @@ function OrgSecuritySection() {
       setZdr(previous) // revert on failure
       if (reason instanceof ApiError && reason.code === 'plan_upgrade_required') {
         setZdrError(i18n.tr('Zero Data Retention er tilgjengelig på en høyere plan. Oppgrader for å aktivere det.', 'Zero Data Retention is available on a higher plan. Upgrade to enable it.'))
+      } else if (reason instanceof ApiError && reason.code === ZDR_NO_ATTESTED_PROVIDER) {
+        // The catalogue changed between loading this page and the click (an
+        // attestation lapsed). Take the gateway's word and stop offering the switch.
+        setZdrAttestation('none')
+        setZdrError(translateApiError(reason, i18n.tr))
+      } else if (reason instanceof ApiError && reason.code === ZDR_GATE_UNAVAILABLE) {
+        setZdrAttestation('unavailable')
+        setZdrError(translateApiError(reason, i18n.tr))
       } else {
         setZdrError(
           reason instanceof Error ? reason.message : i18n.tr('Kunne ikke oppdatere Zero Data Retention.', 'Could not update Zero Data Retention.'),
@@ -1406,6 +1438,11 @@ function OrgSecuritySection() {
   // Enabling ZDR is plan-gated; disabling is always allowed. Block the control
   // only when the org can't enable it and it is currently off.
   const zdrLocked = createMemo(() => !zdrEntitled() && !zdr())
+  // Enabling ZDR also needs an attested provider; disabling never does. A separate
+  // reason from the plan lock above, and it says its own thing: with a provider
+  // missing, every interactive request of the org would be refused. While the
+  // catalogue is unanswered or unreadable the control stays off: fail closed.
+  const zdrAttestationBlocks = createMemo(() => !zdr() && zdrAttestation() !== 'attested')
 
   return (
     <>
@@ -1422,7 +1459,7 @@ function OrgSecuritySection() {
           )}
           info={zdrTooltip(i18n)}
           enabled={zdr()}
-          disabled={!isAdmin() || zdrBusy() || !zdrLoaded() || !orgId() || zdrLocked()}
+          disabled={!isAdmin() || zdrBusy() || !zdrLoaded() || !orgId() || zdrLocked() || zdrAttestationBlocks()}
           onChange={(value) => void toggleZdr(value)}
         />
         <div class="verevon-settings-toggle-row">
@@ -1463,6 +1500,30 @@ function OrgSecuritySection() {
           {i18n.tr(
             'Zero Data Retention er en personvernfunksjon for premiumplaner. Oppgrader planen din for å aktivere nullbevaringsbehandling.',
             'Zero Data Retention is a premium privacy feature. Upgrade your plan to enable zero-retention processing.',
+          )}
+        </p>
+      </Show>
+      <Show when={zdrLoaded() && !zdr() && zdrAttestation() === 'none'}>
+        <p class="verevon-settings-panel-note">
+          {i18n.tr(
+            'Zero Data Retention kan ikke slås på ennå: ingen AI-leverandør i dette miljøet har en registrert nullbevaringsgodkjenning. Hvis det ble slått på nå, ville alle interaktive forespørsler fra organisasjonen blitt avvist.',
+            'Zero Data Retention cannot be turned on yet: no AI provider in this environment has a recorded zero-retention attestation. If it were turned on now, every interactive request from your organization would be refused.',
+          )}
+        </p>
+      </Show>
+      <Show when={zdrLoaded() && !zdr() && zdrAttestation() === 'unavailable'}>
+        <p class="verevon-settings-panel-note">
+          {i18n.tr(
+            'Kunne ikke kontrollere hvilke leverandører som har registrert ZDR-godkjenning, så Zero Data Retention kan ikke slås på akkurat nå. Last inn siden på nytt og prøv igjen. Å slå det av er alltid mulig.',
+            'We could not check which providers have a recorded ZDR attestation, so Zero Data Retention cannot be turned on right now. Reload the page and try again. Turning it off is always possible.',
+          )}
+        </p>
+      </Show>
+      <Show when={zdrLoaded() && zdr() && zdrAttestation() === 'none'}>
+        <p class="verevon-settings-panel-note" role="alert">
+          {i18n.tr(
+            'Zero Data Retention er på, men ingen AI-leverandør har en registrert nullbevaringsgodkjenning akkurat nå, så godkjenningen kan ha utløpt. Med ZDR på avvises interaktive forespørsler som ingen godkjent leverandør kan besvare. Du kan slå Zero Data Retention av for å gjenopprette vanlig bruk.',
+            'Zero Data Retention is on, but no AI provider has a recorded zero-retention attestation right now, so the attestation may have lapsed. With ZDR on, interactive requests that no attested provider can answer are refused. You can turn Zero Data Retention off to restore normal use.',
           )}
         </p>
       </Show>

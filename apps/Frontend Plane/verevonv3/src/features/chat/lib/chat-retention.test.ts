@@ -5,6 +5,7 @@ import {
   forgetThreadLocally,
   isLocalRetentionAllowed,
   reconcileLocalThreads,
+  subscribeLocalRetention,
 } from '@/features/chat/lib/chat-retention'
 import {
   clearActiveChatThreadId,
@@ -15,6 +16,9 @@ import {
   upsertChatThreadHistory,
   upsertChatThreadTranscript,
 } from '@/features/chat/lib/chat-thread-history'
+import { readClientValue, writeClientJson } from '@/shared/session/client-storage'
+import { homeDraftStorageKey, readHomeDraft, writeHomeDraft } from '@/shared/session/home-draft-storage'
+import { searchSnapshotStorageKey, webHistoryStorageKey } from '@/shared/session/home-local-content'
 
 function createStorageMock(): Storage {
   const entries = new Map<string, string>()
@@ -177,5 +181,85 @@ describe('chat retention', () => {
     reconcileLocalThreads([])
 
     expect(readChatThreadHistory().map((item) => item.threadId)).toEqual(['no-timestamp'])
+  })
+
+  describe('Home local copies', () => {
+    const draftKey = homeDraftStorageKey('user-a', 'org-a')
+    const snapshotKey = searchSnapshotStorageKey('user-a', 'org-a')!
+    const historyKey = webHistoryStorageKey('user-a', 'org-a')!
+    // Subscribers outlive a test unless they are withdrawn.
+    const withdrawals: Array<() => void> = []
+    const subscribe = (listener: (allowed: boolean) => void) => {
+      const withdraw = subscribeLocalRetention(listener)
+      withdrawals.push(withdraw)
+      return withdraw
+    }
+    afterEach(() => {
+      for (const withdraw of withdrawals.splice(0)) withdraw()
+    })
+    const storeHomeContent = () => {
+      writeHomeDraft(draftKey, 'Kundens kontrakt')
+      writeClientJson(snapshotKey, { query: 'kontraktsvilkår', savedAt: Date.now() })
+      writeClientJson(historyKey, [{ kind: 'query', text: 'kontraktsvilkår', at: '2026-09-29T10:00:00.000Z' }])
+    }
+
+    /**
+     * Home keeps its own copies of what a person typed or searched for. They are
+     * on the same device, beyond the same erasure path, so the same verdict
+     * purges them.
+     */
+    it('purges the Home draft, the saved Nett search and the Nett history on a ZDR posture', () => {
+      storeHomeContent()
+
+      applyServerRetention(true)
+
+      expect(readHomeDraft(draftKey)).toBe('')
+      expect(readClientValue(snapshotKey)).toBeNull()
+      expect(readClientValue(historyKey)).toBeNull()
+      expect(window.localStorage.length + window.sessionStorage.length).toBe(0)
+    })
+
+    it('leaves them alone while the posture is allowed, unchanged or unstated', () => {
+      storeHomeContent()
+
+      applyServerRetention(false)
+      applyServerRetention(undefined)
+
+      expect(readHomeDraft(draftKey)).toBe('Kundens kontrakt')
+      expect(readClientValue(snapshotKey)).not.toBeNull()
+      expect(readClientValue(historyKey)).not.toBeNull()
+    })
+
+    it('tells subscribers each change of posture once, after the purge, and not a repeat', () => {
+      const heard: Array<{ allowed: boolean; draft: string }> = []
+      subscribe((allowed) => heard.push({ allowed, draft: readHomeDraft(draftKey) }))
+      storeHomeContent()
+
+      applyServerRetention(true)
+      applyServerRetention(true)
+      applyServerRetention(undefined)
+      applyServerRetention(false)
+
+      expect(heard).toEqual([
+        { allowed: false, draft: '' },
+        { allowed: true, draft: '' },
+      ])
+    })
+
+    it('stops telling a subscriber that withdrew, and one that throws does not silence the rest', () => {
+      const withdrawn = vi.fn()
+      const heard = vi.fn()
+      subscribe(withdrawn)()
+      subscribe(() => {
+        throw new Error('listener failed')
+      })
+      subscribe(heard)
+
+      applyServerRetention(true)
+
+      expect(withdrawn).not.toHaveBeenCalled()
+      expect(heard).toHaveBeenCalledWith(false)
+      expect(isLocalRetentionAllowed()).toBe(false)
+    })
   })
 })

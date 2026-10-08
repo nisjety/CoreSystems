@@ -64,6 +64,7 @@ import {
   type ChatRunWatchState,
 } from '@/features/chat/lib/chat-run-watch'
 import { useI18n } from '@/shared/i18n'
+import { RunNotifyButton } from './RunNotifyButton'
 
 const RUN_STREAM_ERROR = 'Kunne ikke lese hendelsesstrømmen for denne kjøringen.'
 
@@ -205,6 +206,15 @@ export function ChatLiveRunPanel(props: {
   zdr: boolean
   /** Optional Work-tab projection rendered in this same run-owned canvas. */
   workContent?: JSX.Element
+  /**
+   * Wide-research fan-out cards (chat-wave2-specs). Hosted INSIDE this rail so
+   * they take the rail's width instead of becoming a third flex column beside
+   * the transcript, and kept mounted — merely hidden — while the rail is
+   * collapsed: the cards are built from live events, which a remount would not
+   * replay. Read exactly once below, so the caller should hand over a memoised
+   * element (as `workContent` is) or every read would build a fresh tree.
+   */
+  wideResearch?: JSX.Element
   /** Local workspace tabs shown when Work owns the contextual canvas. */
   navigation?: JSX.Element
   /** Close Work without collapsing the background run watcher. */
@@ -519,6 +529,11 @@ export function ChatLiveRunPanel(props: {
                 <div class="verevon-chat-run-panel__workspace-navigation">{props.navigation}</div>
                 <span class="verevon-chat-run-panel__workspace-status">{statusLabel()}</span>
               </Show>
+              {/* "Varsle meg når ferdig" while the run is live. Gone once it has
+                  finished, and for a ZDR run, whose events are suppressed. */}
+              <Show when={live() && !zdr() ? runId() : undefined}>
+                {(watchedRunId) => <RunNotifyButton runId={watchedRunId()} compact />}
+              </Show>
               <Show when={props.orgId && framed() && live()}>
                 <div class="verevon-chat-run-panel__controls" role="group" aria-label={i18n.tr('Nettleserkjøring', 'Browser run')}>
                   <Show
@@ -555,6 +570,13 @@ export function ChatLiveRunPanel(props: {
               </Show>
             </Show>
           </header>
+
+          <div
+            class="verevon-chat-run-panel__wide-research"
+            style={{ display: props.collapsed ? 'none' : undefined }}
+          >
+            {props.wideResearch}
+          </div>
 
           <Show when={!props.collapsed}>
             <div class="verevon-chat-run-panel__body">

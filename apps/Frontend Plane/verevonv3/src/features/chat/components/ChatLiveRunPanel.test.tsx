@@ -8,6 +8,9 @@ import type { RunEventHandlers } from '@/shared/api/run-console-client'
 
 const hoisted = vi.hoisted(() => ({
   subscriptions: [] as Array<{ handlers: Record<string, unknown>; runId: string }>,
+  watchRun: vi.fn(),
+  unwatchRun: vi.fn(),
+  getRunWatchStatus: vi.fn(),
 }))
 
 // The panel now rehydrates the durable replay page and checks the run's read
@@ -29,9 +32,15 @@ vi.mock('@/shared/api/runs-client', () => ({
   // The durable status probe runs in parallel with the tail; an in-flight run
   // simply never answers here, so the tail stays open like it does live.
   getRun: () => new Promise(() => {}),
+  // The header's "Varsle meg når ferdig" rides the run-watcher endpoints.
+  watchRun: hoisted.watchRun,
+  unwatchRun: hoisted.unwatchRun,
+  getRunWatchStatus: hoisted.getRunWatchStatus,
 }))
 
 import { ChatLiveRunPanel } from './ChatLiveRunPanel'
+import { ChatWideResearchPanel } from './ChatWideResearchPanel'
+import { __resetRunNotifyForTests } from './RunNotifyButton'
 
 const SHOT_URL = '/api/v1/browser/sessions/run_abc123/artifacts/art_shot_1'
 
@@ -61,6 +70,10 @@ async function subscribed(count = 1): Promise<void> {
 
 beforeEach(() => {
   hoisted.subscriptions.length = 0
+  __resetRunNotifyForTests()
+  hoisted.watchRun.mockReset().mockResolvedValue({ watching: true })
+  hoisted.unwatchRun.mockReset().mockResolvedValue(undefined)
+  hoisted.getRunWatchStatus.mockReset().mockResolvedValue({ watching: false })
 })
 
 describe('ChatLiveRunPanel', () => {
@@ -127,6 +140,83 @@ describe('ChatLiveRunPanel', () => {
     // Collapsing must not drop the subscription and restart the run stream.
     await tick(2)
     expect(hoisted.subscriptions).toHaveLength(1)
+  })
+
+  it('hosts the wide-research cards inside its own rail and keeps them across a collapse', async () => {
+    const [collapsed, setCollapsed] = createSignal(false)
+    const { container } = render(() => (
+      <ChatLiveRunPanel
+        collapsed={collapsed()}
+        onToggleCollapsed={() => undefined}
+        runId="run_abc123"
+        wideResearch={<ChatWideResearchPanel runId="run_abc123" />}
+        zdr={false}
+      />
+    ))
+    // The live tail and the wide-research watcher each hold their own stream.
+    await subscribed(2)
+
+    const attach = (childRunId: string, goalSummary: string) => {
+      for (const subscription of hoisted.subscriptions) {
+        (subscription.handlers as RunEventHandlers).onSubagentAttached?.({
+          childRunId,
+          batchId: 'run_abc123:tool_1_fan-1',
+          goalSummary,
+          role: 'researcher',
+        })
+      }
+    }
+    attach('run_abc123.tool_1_fan-1.0', 'look up carrier docs')
+    attach('run_abc123.tool_1_fan-1.1', 'look up pricing docs')
+    flush()
+    await tick()
+
+    // In the rail (a descendant of the aside), not a sibling of the page row.
+    const cardsInRail = () => container.querySelectorAll(
+      '.verevon-chat-run-panel .verevon-chat-run-panel__wide-research .verevon-wide-research__card',
+    )
+    expect(cardsInRail()).toHaveLength(2)
+    const slot = container.querySelector<HTMLElement>('.verevon-chat-run-panel__wide-research')
+    expect(slot?.style.display).not.toBe('none')
+
+    // Collapsing hides the cards but must not unmount them: they are built from
+    // live events, which a remount would not get replayed.
+    setCollapsed(true)
+    flush()
+    expect(slot?.style.display).toBe('none')
+    expect(cardsInRail()).toHaveLength(2)
+    expect(hoisted.subscriptions).toHaveLength(2)
+
+    setCollapsed(false)
+    flush()
+    expect(slot?.style.display).not.toBe('none')
+    expect(cardsInRail()).toHaveLength(2)
+    expect(container.textContent).toContain('look up carrier docs')
+  })
+
+  it('renders an empty wide-research slot as nothing when no fan-out was ever seen', async () => {
+    const { container } = render(() => (
+      <ChatLiveRunPanel
+        collapsed={false}
+        onToggleCollapsed={() => undefined}
+        runId="run_abc123"
+        wideResearch={<ChatWideResearchPanel runId="run_abc123" />}
+        zdr={false}
+      />
+    ))
+    await subscribed(2)
+
+    // A lone `subagent.task` delegation carries no batchId, so no card grid.
+    for (const subscription of hoisted.subscriptions) {
+      (subscription.handlers as RunEventHandlers).onSubagentAttached?.({
+        childRunId: 'run_abc123.tool_1_sub-1',
+        role: 'generic',
+      })
+    }
+    flush()
+    await tick()
+
+    expect(container.querySelector('.verevon-wide-research')).toBeNull()
   })
 
   it('renders a step screenshot from its artifact reference and expands it on click', async () => {
@@ -240,6 +330,90 @@ describe('ChatLiveRunPanel', () => {
 
     expect(screen.queryByText('Venter på agenten')).toBeNull()
     expect(screen.getByText('Ingen nettleseraktivitet')).toBeTruthy()
+  })
+
+  describe('"Varsle meg når ferdig" in the header', () => {
+    const notify = (container: HTMLElement) =>
+      container.querySelector<HTMLButtonElement>('.verevon-chat-run-panel__head button.verevon-run-notify')
+
+    it('is offered while the run is live, and toggles the watch through the watcher endpoints', async () => {
+      const { container } = render(() => (
+        <ChatLiveRunPanel collapsed={false} onToggleCollapsed={() => undefined} runId="run_abc123" zdr={false} />
+      ))
+      await subscribed()
+      await tick(2)
+
+      expect(notify(container)?.getAttribute('aria-pressed')).toBe('false')
+      expect(notify(container)?.textContent).toContain('Varsle meg')
+
+      fireEvent.click(notify(container) as HTMLElement)
+      await tick(2)
+      expect(hoisted.watchRun).toHaveBeenCalledTimes(1)
+      expect(hoisted.watchRun.mock.calls[0]?.[0]).toBe('run_abc123')
+      expect(notify(container)?.getAttribute('aria-pressed')).toBe('true')
+
+      fireEvent.click(notify(container) as HTMLElement)
+      await tick(2)
+      expect(hoisted.unwatchRun).toHaveBeenCalledTimes(1)
+      expect(hoisted.unwatchRun.mock.calls[0]?.[0]).toBe('run_abc123')
+      expect(notify(container)?.getAttribute('aria-pressed')).toBe('false')
+    })
+
+    it('shows a watch the server already holds for this run', async () => {
+      hoisted.getRunWatchStatus.mockResolvedValue({ watching: true })
+      const { container } = render(() => (
+        <ChatLiveRunPanel collapsed={false} onToggleCollapsed={() => undefined} runId="run_abc123" zdr={false} />
+      ))
+      await subscribed()
+      await tick(2)
+
+      expect(hoisted.getRunWatchStatus).toHaveBeenCalledWith('run_abc123')
+      expect(notify(container)?.getAttribute('aria-pressed')).toBe('true')
+    })
+
+    it('is withheld for a ZDR run, whose events are suppressed', async () => {
+      const { container } = render(() => (
+        <ChatLiveRunPanel collapsed={false} onToggleCollapsed={() => undefined} runId="run_abc123" zdr />
+      ))
+      await subscribed()
+      await tick(2)
+
+      expect(container.querySelector('.verevon-chat-run-panel__title')).not.toBeNull()
+      expect(notify(container)).toBeNull()
+      expect(hoisted.getRunWatchStatus).not.toHaveBeenCalled()
+    })
+
+    it('is gone once the run has finished, and while the rail is collapsed', async () => {
+      const [collapsed, setCollapsed] = createSignal(false)
+      const { container } = render(() => (
+        <ChatLiveRunPanel collapsed={collapsed()} onToggleCollapsed={() => undefined} runId="run_abc123" zdr={false} />
+      ))
+      await subscribed()
+      await tick(2)
+      expect(notify(container)).not.toBeNull()
+
+      setCollapsed(true)
+      flush()
+      expect(notify(container)).toBeNull()
+
+      setCollapsed(false)
+      flush()
+      expect(notify(container)).not.toBeNull()
+
+      handlers().onDone?.()
+      flush()
+      expect(notify(container)).toBeNull()
+    })
+
+    it('is absent when the turn has no run to watch', async () => {
+      const { container } = render(() => (
+        <ChatLiveRunPanel collapsed={false} onToggleCollapsed={() => undefined} runId={null} zdr={false} />
+      ))
+      await tick(3)
+
+      expect(container.querySelector('button.verevon-run-notify')).toBeNull()
+      expect(hoisted.getRunWatchStatus).not.toHaveBeenCalled()
+    })
   })
 
   it('surfaces a run-stream failure instead of waiting forever', async () => {

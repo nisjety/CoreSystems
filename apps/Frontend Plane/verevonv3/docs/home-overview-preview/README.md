@@ -4,6 +4,22 @@
 
 Later refinements: [Home sidebar overviews and plain Web/Extract containers](sidebar-overviews.md).
 
+**Standard since 2026-09-29.** The Dashboard overview, and every other
+appearance refinement, is the default in production and in development.
+Turning **Dashboard overview** off, or choosing **Original**, still shows the
+legacy Home for comparison. See `src/features/chat/lib/chat-appearance-preview.ts`.
+
+The same day the heading gained the Verevon mark: 48 px, centred on the page
+in the gap between the greeting and the Chat / Nett / Hent ut tabs, behind the
+text and never taking pointer events. It fades to a watermark at 640 px and
+below, where the description reaches the centre. Above 640 px the chat dock's
+bottom edge lines up with the fixed Tilbakemelding button: both sit
+`--feedback-widget-bottom` (24.5 px) above the window's bottom edge. Where the two would
+meet, the dock narrows to stay 12 px clear of it, so the button never covers
+the send controls. The shell also closes around the content: `.core-main`
+leaves a 5 px strip of the shell colour on the right and bottom (and on the
+left on phones), and `.dashboard-main-panel` is rounded on all four corners.
+
 ## Design decisions
 
 - Image 1 supplies the main direction: warm neutral surfaces, quiet type,

@@ -240,8 +240,8 @@ export function PrivacyDataSection() {
         </div>
         <p class="verevon-privacy-danger__note">
           {i18n.tr(
-            'Dette sletter permanent Control-Plane-kontodataene dine og kan ikke angres. Data i Model- og Data-plane fjernes gjennom den separate slettingsprosessen nevnt ovenfor.',
-            'This permanently erases your Control-Plane account data and cannot be undone. Model- and Data-plane data is removed via the separate erasure fan-out noted above.',
+            'Dette sletter permanent Control-Plane-kontodataene dine og kan ikke angres. Det sletter ikke samtaler, minne eller dokumenter i andre deler av Verevon: slett samtalene og minnene du vil fjerne før du sletter kontoen, for etterpå kan du ikke logge inn for å gjøre det. Sletting av en hel organisasjon er et eget løp som ikke er verifisert ende til ende.',
+            'This permanently erases your Control-Plane account data and cannot be undone. It does not delete conversations, memory or documents held in other parts of Verevon: delete the conversations and memories you want removed before you erase the account, because you cannot sign in to do it afterwards. Erasing a whole organization is a separate path that is not verified end to end.',
           )}
         </p>
         <Show when={showErase()}>
