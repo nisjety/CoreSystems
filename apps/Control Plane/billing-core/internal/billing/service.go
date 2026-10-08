@@ -847,6 +847,31 @@ func (s *Service) GetQuotaStatus(ctx context.Context, orgID, metric string) (Quo
 	if err != nil {
 		return QuotaStatus{}, err
 	}
+	allowances, err := s.Allowances(ctx, orgID)
+	if err != nil {
+		return QuotaStatus{}, err
+	}
+	for _, report := range allowances {
+		if report.Policy.Metric != metric {
+			continue
+		}
+		// A scheduled policy must not take away the currently active plan's
+		// quota before its start. Ended or paused policies cannot authorize use
+		// of a historical remaining balance.
+		if report.AsOf.Before(report.Policy.StartsAt) {
+			continue
+		}
+		if !report.Active {
+			return QuotaStatus{OrgID: orgID, Metric: metric, Used: float64(report.Current.Used), IsExceeded: true, Utilization: 1}, nil
+		}
+		period := report.Current
+		limit := float64(period.Used - period.Overage + period.Remaining)
+		utilization := 0.0
+		if limit > 0 {
+			utilization = math.Min(float64(period.Used)/limit, 1)
+		}
+		return QuotaStatus{OrgID: orgID, Metric: metric, Limit: limit, Used: float64(period.Used), Remaining: float64(period.Remaining), IsExceeded: period.Overage > 0, Utilization: utilization}, nil
+	}
 
 	limit := account.QuotaLimits[metric]
 

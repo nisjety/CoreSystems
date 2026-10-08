@@ -59,6 +59,10 @@ func (s *Server) setupRoutes() {
 
 	v1 := s.router.Group("/api/v1/billing")
 	v1.GET("/orgs/:orgId/account", s.getAccount)
+	v1.GET("/orgs/:orgId/allowances", s.getAllowances)
+	v1.PUT("/orgs/:orgId/allowances", s.configureAllowance)
+	v1.POST("/orgs/:orgId/allowances/:metric/grants", s.grantAllowance)
+	v1.POST("/orgs/:orgId/allowances/:metric/revisions", s.scheduleAllowanceRevision)
 	v1.PUT("/orgs/:orgId/account", s.upsertAccount)
 	v1.POST("/orgs/:orgId/usage", s.recordUsage)
 	v1.GET("/orgs/:orgId/entitlements/:feature", s.checkEntitlement)

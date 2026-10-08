@@ -147,6 +147,20 @@ func main() {
 	}()
 
 	var publisher billing.EventPublisher
+	go func() {
+		ticker := time.NewTicker(time.Minute)
+		defer ticker.Stop()
+		for {
+			if err := billingService.RefreshAllowances(ctx); err != nil {
+				log.Printf("billing-core allowance refresh failed: %v", err)
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+			}
+		}
+	}()
 	natsClient, err := nats.NewClient(nats.Config{
 		URL:   cfg.NATSURL,
 		Token: cfg.NATSToken,

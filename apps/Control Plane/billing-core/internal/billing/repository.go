@@ -364,7 +364,8 @@ func (r *Repository) ListExpiredTrials(ctx context.Context, now time.Time, limit
 }
 
 // RecordUsage atomically reserves the caller-stable identity, appends the
-// usage aggregate row, and creates the durable Lago delivery job. Repeated
+// usage aggregate row, and queues priced usage for Lago. Raw AI counters remain
+// internal until an explicit commercial meter mapping exists. Repeated
 // identical requests repair partial rows left by the pre-0007 implementation;
 // conflicting reuse of an event id fails closed.
 func (r *Repository) RecordUsage(ctx context.Context, event UsageEvent) (bool, error) {
@@ -390,6 +391,9 @@ func (r *Repository) RecordUsage(ctx context.Context, event UsageEvent) (bool, e
 	defer func() { _ = tx.Rollback(ctx) }()
 	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, "billing-usage:"+event.EventID); err != nil {
 		return false, fmt.Errorf("lock usage event: %w", err)
+	}
+	if err := lockAllowanceOrg(ctx, tx, event.OrgID); err != nil {
+		return false, err
 	}
 
 	reserved, err := tx.Exec(ctx, `
@@ -488,17 +492,34 @@ ON CONFLICT DO NOTHING`,
 	}
 
 	dedupeKey := string(RetryJobKindLagoUsage) + ":" + event.EventID
-	if _, err := tx.Exec(ctx, `
+	if err := recordAllowanceUsage(ctx, tx, event); err != nil {
+		return false, err
+	}
+	if !isRawAIUsageMetric(event.Metric) {
+		if _, err := tx.Exec(ctx, `
 INSERT INTO billing_retry_jobs (kind, dedupe_key, payload, status, attempt_count, next_attempt_at)
 VALUES ($1, $2, $3::jsonb, 'pending', 0, NOW())
 ON CONFLICT (dedupe_key) DO NOTHING`, RetryJobKindLagoUsage, dedupeKey, string(payloadJSON)); err != nil {
-		return false, fmt.Errorf("enqueue Lago usage delivery: %w", err)
+			return false, fmt.Errorf("enqueue Lago usage delivery: %w", err)
+		}
 	}
 
 	if err := tx.Commit(ctx); err != nil {
 		return false, fmt.Errorf("commit usage record: %w", err)
 	}
 	return usageResult.RowsAffected() == 1, nil
+}
+
+// These counters measure consumption, not money owed. Subscription tokens in
+// particular must never become per-token charges just because they were recorded.
+func isRawAIUsageMetric(metric string) bool {
+	switch metric {
+	case "ai.metered.requests", "ai.metered.input_tokens", "ai.metered.output_tokens",
+		"ai.subscription.requests", "ai.subscription.input_tokens", "ai.subscription.output_tokens":
+		return true
+	default:
+		return false
+	}
 }
 
 func (r *Repository) GetMetricUsage(ctx context.Context, orgID, metric string) (float64, error) {

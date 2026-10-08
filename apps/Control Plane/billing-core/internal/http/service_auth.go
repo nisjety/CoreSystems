@@ -28,6 +28,7 @@ const (
 )
 
 var billingServiceScopeAllowlist = map[string]struct{}{
+	"billing:allowance:write:any":         {},
 	"billing:account:read:self":           {},
 	"billing:account:read:any":            {},
 	"billing:account:write:any":           {},
@@ -235,6 +236,12 @@ func serviceScopesForRequest(request *http.Request) []string {
 	}
 	rest := segments[5:]
 	switch {
+	case len(rest) == 1 && rest[0] == "allowances" && request.Method == http.MethodGet:
+		return []string{"billing:account:read:self", "billing:account:read:any"}
+	case len(rest) == 1 && rest[0] == "allowances" && request.Method == http.MethodPut:
+		return []string{"billing:allowance:write:any"}
+	case len(rest) == 3 && rest[0] == "allowances" && (rest[2] == "grants" || rest[2] == "revisions") && request.Method == http.MethodPost:
+		return []string{"billing:allowance:write:any"}
 	case len(rest) == 1 && rest[0] == "account" && request.Method == http.MethodGet:
 		return []string{"billing:account:read:self", "billing:account:read:any"}
 	case len(rest) == 1 && rest[0] == "account" && request.Method == http.MethodPut:
