@@ -151,13 +151,16 @@ unchanged. Mobile and reduced-motion visitors keep the existing static fallback.
 ## Trust surfaces
 
 - Homepage **Trust section** (teaser) → links to `/trust`.
-- **`/trust`** — dedicated public Trust Center: defensible *live* differentiators
-  first (ZDR-by-default, EU-resident Sweden Central, per-action approval +
-  "Used by AI?" audit, data classification, erasure, 0-SaaS search,
-  Norwegian-native), an honest certifications **roadmap** table (SOC 2 Type II,
-  ISO 27001, **ISO 42001**, EU AI Act, pentest — all *Planlagt/Under arbeid*),
-  subprocessors + data-flow with the **CLOUD Act disclosure**, and a
-  request-security-access affordance.
+- **`/trust`** — dedicated public Trust Center: each control with its real
+  level and where it stops (optional ZDR as a gate, not a guarantee; EU region
+  label on the default models; per-action approval for deployed agents;
+  "Used by AI?" audit, built but not verified end to end; data classification;
+  erasure; own search chain first; Norwegian lookup), an honest certifications
+  **roadmap** table (SOC 2 Type II, ISO 27001, **ISO 42001**, EU AI Act,
+  pentest — all *Planlagt/Under arbeid*), the sub-processor list with the
+  **CLOUD Act disclosure**, and a contact address (no security package is
+  offered). The wording is pinned to the evidence in
+  `docs/compliance/evidence/` by the drift tests in `src/components/trust/`.
 
 Never render an unearned certification as held. Never claim "we avoid US clouds"
 — Verevon runs on Azure; lead on **EU-resident-by-default + ISO 42001 / EU AI Act

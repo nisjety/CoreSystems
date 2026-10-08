@@ -29,8 +29,10 @@ export function ProductRecordingPlayer({ recordings }: { recordings: ProductReco
 	const [selected, setSelected] = useState(0);
 	const [full, setFull] = useState(false);
 	const description = useId();
+	const transcriptIntro = useId();
 	const recording = recordings[selected];
 	if (!recording) return null;
+	const transcript = full ? recording.rawTranscript : recording.transcript;
 	return <div className="mx-auto grid w-full max-w-6xl gap-5" data-product-recordings>
 		<div role="group" aria-label="Velg oppgave" className="flex flex-wrap gap-2">
 			{recordings.map((item, index) => <button key={item.id} type="button" aria-pressed={selected === index}
@@ -45,5 +47,11 @@ export function ProductRecordingPlayer({ recordings }: { recordings: ProductReco
 			<button type="button" aria-pressed={full} aria-describedby={description} className="min-h-11 rounded-full border border-black/20 px-5 py-2 text-black focus-visible:outline-2 focus-visible:outline-offset-4"
 				onClick={() => setFull(value => !value)}>{full ? 'Vis kortfilmen' : 'Se hele oppgaven'}</button>
 		</div>
+		{/* The films have no speech, so a captions track alone gives a screen-reader user no equivalent. The cue texts are the text alternative of whichever film is shown. A native <details> is collapsed until asked for, is keyboard operable without script and keeps its open state when the film changes. */}
+		<details data-recording-transcript className="rounded-2xl border border-black/10 px-5 font-geist text-sm leading-relaxed text-black/65">
+			<summary className="cursor-pointer py-3 text-[#1d1d1b] focus-visible:outline-2 focus-visible:outline-offset-4">Tekstalternativ</summary>
+			<p id={transcriptIntro} className="max-w-2xl">{recording.label}, {full ? 'hele oppgaven' : 'kortfilmen'}. Filmen har ingen tale. Her er handlingen beskrevet steg for steg.</p>
+			<ol aria-labelledby={transcriptIntro} className="my-3 max-w-2xl list-decimal space-y-2 pb-1 pl-6">{transcript.map((cue, index) => <li key={index}>{cue}</li>)}</ol>
+		</details>
 	</div>;
 }

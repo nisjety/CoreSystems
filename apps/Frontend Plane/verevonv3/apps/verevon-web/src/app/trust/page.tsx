@@ -6,14 +6,14 @@ import { TrustHeader } from "@/components/trust/TrustHeader";
 export const metadata: Metadata = {
 	title: "Trust Center — sikkerhet, personvern og AI-styring",
 	description:
-		"Verevons Trust Center: forsvarbare, live kontroller (EU-residens i Sweden Central, valgfri Zero Data Retention på Pro/Enterprise, godkjenning per handling, «Brukt av AI?»-revisjon), en ærlig sertifiserings­løype (ISO 42001, EU AI Act, SOC 2), underleverandører og dataflyt — med CLOUD Act åpent oppgitt.",
+		"Verevons Trust Center: hva plattformen håndhever i kode og hva som bare er erklært (EU-region på standardmodellene, valgfri Zero Data Retention, godkjenning for utplasserte agenter), en ærlig sertifiseringsløype (ISO 42001, EU AI Act, SOC 2), underleverandører og dataflyt — med CLOUD Act åpent oppgitt.",
 	alternates: {
 		canonical: "/trust",
 	},
 	openGraph: {
 		title: "Verevon Trust Center",
 		description:
-			"Forsvarbare, live kontroller og en ærlig sertifiserings­løype. EU-residens som standard, valgfri Zero Data Retention (Pro/Enterprise), og CLOUD Act åpent oppgitt.",
+			"Hva som håndheves og hva som er erklært, og en ærlig sertifiseringsløype. EU-region på standardmodellene, valgfri Zero Data Retention, og CLOUD Act åpent oppgitt.",
 		locale: "nb_NO",
 		type: "website",
 		url: "/trust",

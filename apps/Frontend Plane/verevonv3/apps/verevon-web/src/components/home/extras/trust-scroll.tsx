@@ -30,7 +30,7 @@ const mediaLayers: MediaLayer[] = [
 		kind: "video",
 		src: "/verevon-product-shots/verevon-dashboard-typing.mp4",
 		poster: "/verevon-product-shots/dashboard-expanded-prompt.png",
-		alt: "EU-residens som standard",
+		alt: "EU-region på standardmodellene",
 	},
 	{
 		kind: "image",
@@ -46,17 +46,17 @@ const mediaLayers: MediaLayer[] = [
 
 const copyPanels = [
 	{
-		body: "Verevon kjører chat, søk og agentoppgaver i EU som standard, uten at promptene dine lagres hos modell-leverandøren.",
+		body: "Standardmodellene i Verevon kjører med EU-region (Sweden Central), og du kan slå på Zero Data Retention, som sender forespørselen bare til en leverandør med registrert ZDR-godkjenning.",
 		cta: undefined,
 		align: "left",
 	},
 	{
-		body: "Når Verevon vil sende et svar, publisere noe eller bruke et risikofylt verktøy, stopper det for Godkjenn eller Avvis.",
+		body: "Når en utplassert agent skal sende et svar, publisere noe eller bruke et risikofylt verktøy, stopper den for Godkjenn eller Avvis.",
 		cta: "Tillitssenter",
 		align: "left",
 	},
 	{
-		body: "I Verevon tillitssenter ser du hvilke kilder AI-en brukte, hvilke data som ble berørt, og at norske selskaper kobles mot Enhetsregisteret.",
+		body: "Tillitssenteret i Verevon er bygget for å vise hvilke verktøy og datakategorier AI-en har brukt per tilkobling. Norske virksomheter kan slås opp i Enhetsregisteret.",
 		cta: undefined,
 		align: "center",
 	},
