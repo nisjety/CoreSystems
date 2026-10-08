@@ -29,8 +29,18 @@ const GOLDEN_APPROVAL_STATE_CHANGED: &str =
     "0a060880e2cfaa0662250a06617070722d31120572756e2d31180220022a1075736572406578616d706c652e636f6d";
 const GOLDEN_SUBAGENT_ATTACHED: &str =
     "0a060880e2cfaa066a190a0a72756e2d706172656e74120972756e2d6368696c641802";
+// Captured on first run (see CONTRIBUTING's golden-refresh flow) — has
+// goal_summary/batch_id set, unlike GOLDEN_SUBAGENT_ATTACHED above.
+const GOLDEN_SUBAGENT_ATTACHED_WITH_GOAL_AND_BATCH: &str =
+    "0a060880e2cfaa066a300a0a72756e2d706172656e74120972756e2d6368696c641802220c73756d6d61726973652051332a0762617463682d31";
 const GOLDEN_SUBAGENT_STOPPED: &str =
     "0a060880e2cfaa0672160a0972756e2d6368696c641209636f6d706c65746564";
+// Wide-research fan-out live panel: the stop event NAMES the run that
+// delegated the child (field 3), which is what routes it onto that run's
+// stream. GOLDEN_SUBAGENT_STOPPED above stays byte-identical with the field
+// empty (proto3 omits a default), the backward-compat proof.
+const GOLDEN_SUBAGENT_STOPPED_WITH_PARENT: &str =
+    "0a060880e2cfaa0672220a0972756e2d6368696c641209636f6d706c657465641a0a72756e2d706172656e74";
 const GOLDEN_RUN_PAUSED_FOR_APPROVAL: &str = "0a060880e2cfaa067a0f0a0572756e2d311206617070722d31";
 const GOLDEN_RUN_RESUMED_AFTER_APPROVAL: &str =
     "0a060880e2cfaa0682010f0a0572756e2d311206617070722d31";
@@ -99,9 +109,29 @@ fn subagent_attached_wire_parity() {
         parent_run_id: "run-parent".into(),
         child_run_id: "run-child".into(),
         role: SubagentRole::Reviewer,
+        // Empty on purpose: proto3 omits a default-valued scalar from the
+        // wire entirely, so an event that never sets these two additive
+        // fields (wide-research fan-out §2.4) must encode to the SAME golden
+        // bytes as before they existed — this is what proves the field
+        // addition was truly additive, not a silent wire break.
+        goal_summary: String::new(),
+        batch_id: String::new(),
         at: at(),
     };
     assert_roundtrip(&ev, GOLDEN_SUBAGENT_ATTACHED);
+}
+
+#[test]
+fn subagent_attached_with_goal_and_batch_wire_parity() {
+    let ev = OrchestrationEvent::SubagentAttached {
+        parent_run_id: "run-parent".into(),
+        child_run_id: "run-child".into(),
+        role: SubagentRole::Reviewer,
+        goal_summary: "summarise Q3".into(),
+        batch_id: "batch-1".into(),
+        at: at(),
+    };
+    assert_roundtrip(&ev, GOLDEN_SUBAGENT_ATTACHED_WITH_GOAL_AND_BATCH);
 }
 
 #[test]
@@ -109,9 +139,21 @@ fn subagent_stopped_wire_parity() {
     let ev = OrchestrationEvent::SubagentStopped {
         child_run_id: "run-child".into(),
         status: "completed".into(),
+        parent_run_id: String::new(),
         at: at(),
     };
     assert_roundtrip(&ev, GOLDEN_SUBAGENT_STOPPED);
+}
+
+#[test]
+fn subagent_stopped_with_parent_wire_parity() {
+    let ev = OrchestrationEvent::SubagentStopped {
+        child_run_id: "run-child".into(),
+        status: "completed".into(),
+        parent_run_id: "run-parent".into(),
+        at: at(),
+    };
+    assert_roundtrip(&ev, GOLDEN_SUBAGENT_STOPPED_WITH_PARENT);
 }
 
 #[test]

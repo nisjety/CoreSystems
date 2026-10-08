@@ -177,7 +177,7 @@ impl ShippingToolsClient {
     }
 
     #[cfg(test)]
-    fn new_for_test(
+    pub(crate) fn new_for_test(
         base_url: String,
         auth_core_url: String,
         service_id: &str,

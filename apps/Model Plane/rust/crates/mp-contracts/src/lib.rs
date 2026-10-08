@@ -1,3 +1,4 @@
+pub mod agentic_subscription;
 pub mod autonomy;
 pub mod dataplane_posture;
 pub mod skill_recovery;

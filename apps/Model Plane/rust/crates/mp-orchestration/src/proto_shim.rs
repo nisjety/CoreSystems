@@ -297,6 +297,8 @@ impl From<OrchestrationEvent> for ProtoOrchestrationEvent {
                 parent_run_id,
                 child_run_id,
                 role,
+                goal_summary,
+                batch_id,
                 at,
             } => envelope(
                 at,
@@ -304,17 +306,21 @@ impl From<OrchestrationEvent> for ProtoOrchestrationEvent {
                     parent_run_id,
                     child_run_id,
                     role: subagent_role_to_proto(role),
+                    goal_summary,
+                    batch_id,
                 }),
             ),
             OrchestrationEvent::SubagentStopped {
                 child_run_id,
                 status,
+                parent_run_id,
                 at,
             } => envelope(
                 at,
                 ProtoEvent::SubagentStopped(PbSubagentStopped {
                     child_run_id,
                     status,
+                    parent_run_id,
                 }),
             ),
             OrchestrationEvent::RunPausedForApproval {
@@ -511,11 +517,14 @@ impl TryFrom<ProtoOrchestrationEvent> for OrchestrationEvent {
                 parent_run_id: p.parent_run_id,
                 child_run_id: p.child_run_id,
                 role: subagent_role_from_proto(p.role)?,
+                goal_summary: p.goal_summary,
+                batch_id: p.batch_id,
                 at,
             },
             ProtoEvent::SubagentStopped(p) => OrchestrationEvent::SubagentStopped {
                 child_run_id: p.child_run_id,
                 status: p.status,
+                parent_run_id: p.parent_run_id,
                 at,
             },
             ProtoEvent::RunPausedForApproval(p) => OrchestrationEvent::RunPausedForApproval {
@@ -791,6 +800,8 @@ mod tests {
             parent_run_id: "run-parent".into(),
             child_run_id: "run-child".into(),
             role: SubagentRole::Reviewer,
+            goal_summary: "summarise the Q3 numbers".into(),
+            batch_id: "batch-1".into(),
             at: fixture_at(),
         });
     }
@@ -800,6 +811,7 @@ mod tests {
         round_trip(&OrchestrationEvent::SubagentStopped {
             child_run_id: "run-child".into(),
             status: "completed".into(),
+            parent_run_id: "run-parent".into(),
             at: fixture_at(),
         });
     }

@@ -38,6 +38,9 @@ const MAX_SNIPPET_CHARS: usize = 900;
 const MAX_FETCH_CHARS: usize = 8000;
 const SEARCH_SCOPES: &[&str] = &["search:read"];
 const EXTRACT_SCOPES: &[&str] = &["extract:read"];
+/// Ceiling on the public `GET /ready` probe — short on purpose so a hung edge
+/// cannot stall the 60 s health heartbeat for the other attestations.
+const READY_PROBE_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// HTTP client for Quarry edge search/extract. Cheap to clone.
 #[derive(Clone)]
@@ -150,6 +153,89 @@ impl WebToolsClient {
             .await?;
         extract_markdown(url, &value)
     }
+
+    /// Health probe behind the `cap.tool.http` attestation: `Ok(())` only when
+    /// `web_search` and `web_fetch` could actually authenticate AND the edge is
+    /// serving.
+    ///
+    /// Two things are checked, and both are required:
+    ///
+    /// 1. quarry-edge's public `GET /ready` answers `200` with `status` `ready`.
+    /// 2. The exact credentials dispatch uses can be minted for BOTH scope sets it
+    ///    asks for (`SEARCH_SCOPES` for `web_search`, `EXTRACT_SCOPES` for
+    ///    `web_fetch`), through the same base URL and token source.
+    ///
+    /// `/ready` alone would be dishonest: it reports only the edge's durable flag,
+    /// and the edge always carries a local search index, so `/v1/search` never
+    /// even fails while Auth Core can still be refusing the credential. Today
+    /// Auth Core refuses both scopes for this principal, so this returns `Err` and
+    /// the capability stays unavailable until the Control Plane grants them.
+    ///
+    /// It NEVER calls `/v1/search` or `/v1/extract`: the search route meters a
+    /// billable usage unit per query, so probing through it every heartbeat would
+    /// bill an org once a minute. The mint is cached by the token provider, so the
+    /// steady-state cost is two mints per token lifetime, not per probe.
+    ///
+    /// Nothing here logs or returns a token, a mint response or the service
+    /// credential; the error strings carry statuses only.
+    pub(crate) async fn probe_ready(&self, org_id: &str) -> Result<(), String> {
+        self.probe_ready_with_timeout(org_id, READY_PROBE_TIMEOUT)
+            .await
+    }
+
+    async fn probe_ready_with_timeout(
+        &self,
+        org_id: &str,
+        timeout: Duration,
+    ) -> Result<(), String> {
+        // A dedicated client rather than `self.http`: that one follows redirects
+        // and carries a 60 s ceiling, and a readiness answer from a redirect
+        // target is not the edge's own answer.
+        let probe_http = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .connect_timeout(timeout)
+            .timeout(timeout)
+            .build()
+            .map_err(|error| format!("failed to build Quarry readiness client: {error}"))?;
+        let response = probe_http
+            .get(format!("{}/ready", self.base_url))
+            .send()
+            .await
+            .map_err(|error| format!("quarry /ready request failed: {error}"))?;
+        let status = response.status();
+        if status != reqwest::StatusCode::OK {
+            return Err(format!("quarry /ready returned {status}"));
+        }
+        let body: Value = response
+            .json()
+            .await
+            .map_err(|error| format!("quarry /ready decode failed: {error}"))?;
+        if body.get("status").and_then(Value::as_str) != Some("ready") {
+            return Err("quarry /ready did not report status ready".to_owned());
+        }
+        // The credentials, in dispatch's own order and through its own source.
+        // The minted values are dropped on the spot: the point is that Auth Core
+        // grants them, not to use them.
+        for scopes in [SEARCH_SCOPES, EXTRACT_SCOPES] {
+            self.auth
+                .token(org_id, scopes)
+                .await
+                .map_err(|error| format!("quarry authentication failed: {error}"))?;
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn new_for_test(base_url: &str, auth: TokenSource) -> Self {
+        Self {
+            base_url: base_url.trim_end_matches('/').to_owned(),
+            auth,
+            http: reqwest::Client::builder()
+                .timeout(Duration::from_secs(5))
+                .build()
+                .expect("test HTTP client"),
+        }
+    }
 }
 
 /// Body for `POST /v1/search` (pure; keeps the wire shape assertable in tests).
@@ -237,8 +323,9 @@ fn truncate_chars(s: &str, max: usize) -> String {
     format!("{head}…[truncated {dropped} chars]")
 }
 
+// `pub(crate)` so `health_attest`'s tests can reuse the Quarry stubs below.
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     #[test]
@@ -352,5 +439,279 @@ mod tests {
         assert!(out.starts_with("éééé"));
         assert!(out.contains("truncated 6 chars"));
         assert_eq!(truncate_chars("short", 100), "short");
+    }
+
+    // ---- `probe_ready`: the cap.tool.http health probe -------------------------
+    //
+    // A `/ready`-only probe would be dishonest: quarry-edge's `/ready` reports
+    // only its durable flag, and local Tantivy search means `/v1/search` never
+    // even fails, so the edge looks healthy while Auth Core refuses the very
+    // credentials dispatch needs. These pin that the probe asks for those
+    // credentials too, and that it can never touch a metered route.
+
+    use crate::quarry_auth::TokenProvider;
+    use wiremock::matchers::{body_json, header, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    pub(crate) const TEST_SERVICE_KEY: &str = "execution-core-test-credential";
+
+    pub(crate) fn quarry_client(edge_url: &str, auth_url: &str) -> WebToolsClient {
+        WebToolsClient::new_for_test(
+            edge_url,
+            TokenSource::ServicePrincipal(TokenProvider::new_for_test(
+                auth_url,
+                "execution-core",
+                TEST_SERVICE_KEY,
+            )),
+        )
+    }
+
+    /// The mint request dispatch sends for ONE scope set — exact body, exact
+    /// service headers — so a probe that asked for anything else would not match.
+    pub(crate) fn mint_mock(org_id: &str, scope: &str, response: ResponseTemplate) -> Mock {
+        Mock::given(method("POST"))
+            .and(path("/api/quarry/internal-token"))
+            .and(header("x-service-id", "execution-core"))
+            .and(header("x-service-api-key", TEST_SERVICE_KEY))
+            .and(body_json(json!({
+                "orgId": org_id,
+                "scopes": [scope],
+                "reason": "execution-core Quarry access",
+            })))
+            .respond_with(response)
+    }
+
+    pub(crate) fn minted(token: &str) -> ResponseTemplate {
+        ResponseTemplate::new(200).set_body_json(json!({
+            "token": token,
+            "expiresInSeconds": 300,
+            "audience": "quarry"
+        }))
+    }
+
+    pub(crate) fn refused() -> ResponseTemplate {
+        ResponseTemplate::new(403)
+            .set_body_json(json!({"message": "Service principal is not authorized"}))
+    }
+
+    /// A quarry-edge stub whose METERED routes fail the test if they are ever
+    /// called: `/v1/search` bills a usage unit per query, so a heartbeat probe
+    /// that reached it would bill an org every minute.
+    pub(crate) async fn edge_with_ready(ready: ResponseTemplate) -> MockServer {
+        let edge = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/ready"))
+            .respond_with(ready)
+            .mount(&edge)
+            .await;
+        for metered in ["/v1/search", "/v1/extract"] {
+            Mock::given(method("POST"))
+                .and(path(metered))
+                .respond_with(ResponseTemplate::new(500))
+                .expect(0)
+                .mount(&edge)
+                .await;
+        }
+        edge
+    }
+
+    pub(crate) fn ready_ok() -> ResponseTemplate {
+        ResponseTemplate::new(200).set_body_json(json!({"status": "ready", "durable": true}))
+    }
+
+    pub(crate) async fn mounted_auth(
+        search: ResponseTemplate,
+        extract: ResponseTemplate,
+        org_id: &str,
+    ) -> MockServer {
+        let auth = MockServer::start().await;
+        mint_mock(org_id, "search:read", search).mount(&auth).await;
+        mint_mock(org_id, "extract:read", extract)
+            .mount(&auth)
+            .await;
+        auth
+    }
+
+    #[tokio::test]
+    async fn probe_is_healthy_when_the_edge_is_ready_and_both_scopes_mint() {
+        let edge = edge_with_ready(ready_ok()).await;
+        let auth = MockServer::start().await;
+        // Each scope set is minted exactly once, with exactly that scope: the
+        // credentials dispatch uses, not a broader or different one.
+        mint_mock("global", "search:read", minted("search-token"))
+            .expect(1)
+            .mount(&auth)
+            .await;
+        mint_mock("global", "extract:read", minted("extract-token"))
+            .expect(1)
+            .mount(&auth)
+            .await;
+
+        quarry_client(&edge.uri(), &auth.uri())
+            .probe_ready("global")
+            .await
+            .expect("a ready edge whose credentials mint is healthy");
+
+        let requests = edge.received_requests().await.expect("recorded requests");
+        assert_eq!(
+            requests.len(),
+            1,
+            "the probe must make exactly one edge call"
+        );
+        assert_eq!(requests[0].method.as_str(), "GET");
+        assert_eq!(requests[0].url.path(), "/ready");
+        // `/ready` is public: a minted token must never be sent to it.
+        assert!(
+            requests[0].headers.get("authorization").is_none(),
+            "the public readiness route must not receive a bearer"
+        );
+    }
+
+    #[tokio::test]
+    async fn probe_mints_for_the_org_it_is_given_not_a_hardcoded_one() {
+        let edge = edge_with_ready(ready_ok()).await;
+        let auth = mounted_auth(minted("a"), minted("b"), "probe-org").await;
+        quarry_client(&edge.uri(), &auth.uri())
+            .probe_ready("probe-org")
+            .await
+            .expect("both mints carry the probe org");
+        // Had the probe minted for any other org the strict body matchers would
+        // have answered 404 and the probe would have failed above.
+        assert_eq!(
+            auth.received_requests().await.expect("recorded").len(),
+            2,
+            "one mint per scope set"
+        );
+    }
+
+    /// Today's live state: Auth Core's registry grants execution-core only
+    /// `browser:execute` and `scrape:write` on the quarry audience, so it
+    /// refuses BOTH scopes dispatch asks for. The capability must stay
+    /// unavailable — attesting it would claim a working web tool that cannot run.
+    #[tokio::test]
+    async fn refused_mints_for_both_scopes_keep_the_capability_unavailable() {
+        let edge = edge_with_ready(ready_ok()).await;
+        let auth = mounted_auth(refused(), refused(), "global").await;
+        let error = quarry_client(&edge.uri(), &auth.uri())
+            .probe_ready("global")
+            .await
+            .expect_err("a refused credential is unhealthy");
+        assert!(
+            error.contains("403"),
+            "the refusal status is reported: {error}"
+        );
+        assert!(
+            !error.contains(TEST_SERVICE_KEY),
+            "no credential in the error: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_refused_search_mint_alone_is_unhealthy() {
+        let edge = edge_with_ready(ready_ok()).await;
+        let auth = mounted_auth(refused(), minted("extract-token"), "global").await;
+        let error = quarry_client(&edge.uri(), &auth.uri())
+            .probe_ready("global")
+            .await
+            .expect_err("web_search could not authenticate, so cap.tool.http is not healthy");
+        assert!(error.contains("403"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn a_refused_extract_mint_alone_is_unhealthy() {
+        // cap.tool.http covers web_fetch too: granting only search:read must not
+        // make the capability look healthy for the tool that still cannot run.
+        let edge = edge_with_ready(ready_ok()).await;
+        let auth = mounted_auth(minted("search-token"), refused(), "global").await;
+        let error = quarry_client(&edge.uri(), &auth.uri())
+            .probe_ready("global")
+            .await
+            .expect_err("web_fetch could not authenticate, so cap.tool.http is not healthy");
+        assert!(error.contains("403"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn an_edge_that_is_not_ready_is_unhealthy_and_no_credential_is_minted() {
+        let edge = edge_with_ready(
+            ResponseTemplate::new(503)
+                .set_body_json(json!({"status": "not_ready", "durable": false, "reason": "no db"})),
+        )
+        .await;
+        let auth = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(minted("never"))
+            .expect(0)
+            .mount(&auth)
+            .await;
+        let error = quarry_client(&edge.uri(), &auth.uri())
+            .probe_ready("global")
+            .await
+            .expect_err("503 not_ready is unhealthy");
+        assert!(error.contains("503"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn a_ready_answer_that_does_not_say_ready_is_unhealthy() {
+        for body in [
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"status": "degraded", "durable": true})),
+            ResponseTemplate::new(200).set_body_json(json!({"durable": true})),
+            ResponseTemplate::new(200).set_body_string("<html>captive portal</html>"),
+        ] {
+            let edge = edge_with_ready(body).await;
+            let auth = mounted_auth(minted("a"), minted("b"), "global").await;
+            quarry_client(&edge.uri(), &auth.uri())
+                .probe_ready("global")
+                .await
+                .expect_err("only a 200 that reports status ready is healthy");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_redirecting_ready_route_is_not_followed() {
+        let sink = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ready_ok())
+            .expect(0)
+            .mount(&sink)
+            .await;
+        let edge = edge_with_ready(
+            ResponseTemplate::new(307).insert_header("location", format!("{}/ready", sink.uri())),
+        )
+        .await;
+        let auth = mounted_auth(minted("a"), minted("b"), "global").await;
+        quarry_client(&edge.uri(), &auth.uri())
+            .probe_ready("global")
+            .await
+            .expect_err("a redirect is not a readiness answer");
+    }
+
+    #[tokio::test]
+    async fn an_unreachable_edge_is_unhealthy() {
+        let auth = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(minted("never"))
+            .expect(0)
+            .mount(&auth)
+            .await;
+        quarry_client("http://127.0.0.1:1", &auth.uri())
+            .probe_ready("global")
+            .await
+            .expect_err("nothing is listening");
+    }
+
+    #[tokio::test]
+    async fn a_hung_edge_is_cut_off_at_the_probe_timeout() {
+        let edge = edge_with_ready(ready_ok().set_delay(Duration::from_secs(5))).await;
+        let auth = mounted_auth(minted("a"), minted("b"), "global").await;
+        let started = std::time::Instant::now();
+        quarry_client(&edge.uri(), &auth.uri())
+            .probe_ready_with_timeout("global", Duration::from_millis(250))
+            .await
+            .expect_err("a hung /ready is unhealthy");
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "the probe must give up at its own timeout, not the stub's delay"
+        );
     }
 }

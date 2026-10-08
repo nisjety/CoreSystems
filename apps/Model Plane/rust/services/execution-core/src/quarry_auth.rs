@@ -109,7 +109,7 @@ impl TokenProvider {
     }
 
     #[cfg(test)]
-    fn new_for_test(auth_core_url: &str, service_id: &str, credential: &str) -> Self {
+    pub(crate) fn new_for_test(auth_core_url: &str, service_id: &str, credential: &str) -> Self {
         Self::new_for_test_with_cache_limit(
             auth_core_url,
             service_id,

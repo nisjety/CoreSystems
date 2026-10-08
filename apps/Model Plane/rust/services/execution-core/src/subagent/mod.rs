@@ -14,6 +14,8 @@
 
 use crate::runtime_loop::agent::{DEFAULT_MAX_ROUNDS, MAX_ROUNDS_CEILING};
 
+pub mod research_fan_out;
+
 /// Namespace all delegated-agent tools live under (`subagent.<task>`).
 pub const TOOL_PREFIX: &str = "subagent.";
 
@@ -45,16 +47,51 @@ pub const MAX_DEPTH: u32 = 1;
 /// a misleading one about what just happened: the fan-out already happened at
 /// the point of refusal, and the reason the model reads should be the real one.
 ///
-/// # Why eight
+/// # Why eight (as a DEFAULT, not a ceiling any more)
 ///
 /// `MAX_DEPTH == 1`, so this is the total breadth of one run's delegation tree.
-/// Eight is more than any real task has needed (the largest observed use is
+/// Eight was more than any real task had needed (the largest observed use was
 /// two or three parallel lookups) and few enough that a human reading the Agent
-/// Run Console can still follow the causal chain — the same reason the depth
-/// limit is one.
-pub const MAX_TOTAL_CHILDREN: u32 = 8;
+/// Run Console could still follow the causal chain — the same reason the depth
+/// limit is one. Wide-research fan-out (chat-wave2-specs, 2026-09-28) widened
+/// this from a hard compile-time constant to a per-run, per-org configurable
+/// value — see [`resolve_child_ceiling`] — because a genuine wide-research call
+/// (dozens of parallel sub-questions) legitimately wants more than eight, and a
+/// single hardcoded number cannot serve both that and the "few enough to
+/// audit" default at once. Eight is kept as the unchanged DEFAULT so a run that
+/// never opts in sees no behavior change.
+pub const DEFAULT_MAX_CHILDREN: u32 = 8;
 
-/// Refuse a delegation that would exceed [`MAX_TOTAL_CHILDREN`].
+/// Hard server-side ceiling on [`resolve_child_ceiling`]'s output, regardless
+/// of what the request or an org policy asks for. No request or org
+/// configuration can ever widen a run past this — it exists so a
+/// misconfigured org policy (or a future bug in it) cannot turn "configurable"
+/// into "unbounded". Matches the scale a wide-research fan-out call
+/// (`subagent::research_fan_out`) is actually meant to reach.
+pub const MAX_CHILDREN_CEILING: u32 = 100;
+
+/// Resolve the per-run child ceiling from what the request asked for and what
+/// the run's org allows.
+///
+/// Mirrors [`resolve_round_budget`]'s shape: `requested` follows the same
+/// "`None` or `Some(0)` means unspecified, use the default" wire convention as
+/// `RunAgentRequest.max_subagents`. The org ceiling, when configured, can only
+/// ever TIGHTEN the result — a request cannot widen past what the org allows,
+/// the same non-negotiable-widening rule `org_quota.rs` already establishes
+/// for cost ceilings in model-gateway. Both are additionally clamped by the
+/// hard [`MAX_CHILDREN_CEILING`], which neither side can widen past either.
+#[must_use]
+pub fn resolve_child_ceiling(requested: Option<u32>, org_ceiling: Option<u32>) -> u32 {
+    let org = org_ceiling.unwrap_or(MAX_CHILDREN_CEILING).min(MAX_CHILDREN_CEILING);
+    let wanted = match requested {
+        None | Some(0) => DEFAULT_MAX_CHILDREN,
+        Some(n) => n,
+    };
+    wanted.min(org).min(MAX_CHILDREN_CEILING)
+}
+
+/// Refuse a delegation that would exceed `ceiling` (the run's own resolved
+/// value from [`resolve_child_ceiling`] — no longer a single global constant).
 ///
 /// `started` is how many this run has already opened. The message names the real
 /// cause and what to do instead, because the model's alternative to delegating
@@ -64,11 +101,11 @@ pub const MAX_TOTAL_CHILDREN: u32 = 8;
 /// # Errors
 ///
 /// Returns the refusal text when the ceiling is already reached.
-pub fn guard_child_ceiling(started: u32) -> Result<(), String> {
-    if started >= MAX_TOTAL_CHILDREN {
+pub fn guard_child_ceiling(started: u32, ceiling: u32) -> Result<(), String> {
+    if started >= ceiling {
         return Err(format!(
             "delegation refused: this run has already started {started} subagents, which is the \
-             per-run limit of {MAX_TOTAL_CHILDREN}. Do the remaining work yourself, or narrow it \
+             per-run limit of {ceiling}. Do the remaining work yourself, or narrow it \
              into one delegated task instead of several."
         ));
     }
@@ -223,9 +260,10 @@ mod tests {
     /// its cause.
     #[test]
     fn the_child_ceiling_is_independent_of_the_round_budget() {
-        guard_child_ceiling(0).expect("a run with no children may delegate");
-        guard_child_ceiling(MAX_TOTAL_CHILDREN - 1).expect("the last slot is usable");
-        let refusal = guard_child_ceiling(MAX_TOTAL_CHILDREN)
+        guard_child_ceiling(0, DEFAULT_MAX_CHILDREN).expect("a run with no children may delegate");
+        guard_child_ceiling(DEFAULT_MAX_CHILDREN - 1, DEFAULT_MAX_CHILDREN)
+            .expect("the last slot is usable");
+        let refusal = guard_child_ceiling(DEFAULT_MAX_CHILDREN, DEFAULT_MAX_CHILDREN)
             .expect_err("the ceiling must actually stop the next one");
         assert!(
             refusal.contains("per-run limit"),
@@ -239,14 +277,54 @@ mod tests {
         // And a run at the ceiling with plenty of budget is still refused —
         // which is exactly the case the round budget cannot express.
         assert!(resolve_round_budget(100, None).is_ok());
-        assert!(guard_child_ceiling(MAX_TOTAL_CHILDREN).is_err());
+        assert!(guard_child_ceiling(DEFAULT_MAX_CHILDREN, DEFAULT_MAX_CHILDREN).is_err());
     }
 
     /// Past the ceiling as well as at it. An `==` check would let a counter that
     /// overshot (a concurrent batch incrementing past the limit) pass forever.
     #[test]
     fn the_ceiling_holds_past_its_own_value() {
-        assert!(guard_child_ceiling(MAX_TOTAL_CHILDREN + 5).is_err());
+        assert!(guard_child_ceiling(DEFAULT_MAX_CHILDREN + 5, DEFAULT_MAX_CHILDREN).is_err());
+    }
+
+    /// A run whose org policy or request raised the ceiling is bound by the
+    /// CONFIGURED value, not by the old hardcoded eight — the whole point of
+    /// making this configurable.
+    #[test]
+    fn guard_child_ceiling_reports_the_configured_ceiling_not_a_constant() {
+        guard_child_ceiling(39, 40).expect("the 40th configured slot is usable");
+        let refusal = guard_child_ceiling(40, 40).expect_err("the configured ceiling must stop it");
+        assert!(
+            refusal.contains("limit of 40"),
+            "the refusal must interpolate the passed ceiling, not a hardcoded 8: {refusal}"
+        );
+    }
+
+    #[test]
+    fn resolve_child_ceiling_prefers_the_tighter_of_request_and_org_ceiling() {
+        // Neither set → the unchanged default.
+        assert_eq!(resolve_child_ceiling(None, None), DEFAULT_MAX_CHILDREN);
+        assert_eq!(resolve_child_ceiling(Some(0), None), DEFAULT_MAX_CHILDREN);
+
+        // Request tighter than the org ceiling → request wins.
+        assert_eq!(resolve_child_ceiling(Some(5), Some(20)), 5);
+
+        // Request wider than the org ceiling → the org wins; a request can
+        // only tighten, never widen past what the org allows.
+        assert_eq!(resolve_child_ceiling(Some(50), Some(20)), 20);
+
+        // No request, but the org tightens below the default.
+        assert_eq!(resolve_child_ceiling(None, Some(3)), 3);
+    }
+
+    #[test]
+    fn resolve_child_ceiling_never_exceeds_the_hard_ceiling() {
+        assert_eq!(
+            resolve_child_ceiling(Some(u32::MAX), Some(u32::MAX)),
+            MAX_CHILDREN_CEILING
+        );
+        assert_eq!(resolve_child_ceiling(Some(u32::MAX), None), MAX_CHILDREN_CEILING);
+        assert_eq!(resolve_child_ceiling(None, Some(u32::MAX)), DEFAULT_MAX_CHILDREN);
     }
 
     #[test]

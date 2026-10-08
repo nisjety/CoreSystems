@@ -724,6 +724,37 @@ fn validate_direct_permission_mode(permission_mode: &str) -> Result<(), Status> 
     }
 }
 
+/// Judge the inference route a `RunAgent` request names before any of the run's
+/// work starts.
+///
+/// A request that names none (the empty `provider_hint` and
+/// `subscription_connection_id` of every run that predates the fields) passes
+/// untouched. One that names the ChatGPT subscription route passes only when
+/// `crate::agent_route::validate_run_route` says so (kill switch on, canonical
+/// provider, a connection, a concrete model, read-only, not ZDR).
+///
+/// The refusals are `PermissionDenied` or `InvalidArgument`, which model-gateway
+/// terminalizes as a confirmed dispatch rejection: nothing ran, so the prepared
+/// run is closed rather than left to be retried into the same refusal. They are
+/// refusals, never a downgrade to the default route: ignoring the route would
+/// run the loop on a paid provider the user did not choose.
+///
+/// `switches` is a parameter so the decision is testable without touching the
+/// process environment; `run_agent` passes the real ones.
+#[allow(clippy::result_large_err)]
+fn enforce_agent_route(
+    req: &pb::RunAgentRequest,
+    switches: mp_contracts::agentic_subscription::Switches,
+) -> Result<(), Status> {
+    crate::agent_route::validate_run_route(req, switches).inspect_err(|status| {
+        warn!(
+            run_id = %req.run_id,
+            code = ?status.code(),
+            "run_agent: refused the inference route the request names"
+        );
+    })
+}
+
 /// Validate the public shape of the scheduled-step lane before it is wired to
 /// any authority or execution adapter. This keeps malformed Temporal activity
 /// input from becoming an implicit wildcard when the lane is enabled later.
@@ -1204,6 +1235,11 @@ impl ExecutionCore for ExecutionService {
         self.authorize_run(&caller, &req.run_id, &session_bearer)
             .await?;
         enforce_persistence_free_execution(&caller, req.zdr, "agent run")?;
+        // The inference route the request names (`provider_hint` and
+        // `subscription_connection_id`) is judged here, at the boundary and
+        // before any of the run's work: a route this process may not honour is
+        // refused, never replaced by the default one.
+        enforce_agent_route(&req, mp_contracts::agentic_subscription::Switches::from_env())?;
         info!(
             run_id = %req.run_id,
             thread_id = %req.thread_id,
@@ -1831,6 +1867,103 @@ mod auth_tests {
             state.snapshot("run-undurable").is_none(),
             "the failed persistence path must not claim AwaitingApproval"
         );
+    }
+
+    fn subscription_run() -> pb::RunAgentRequest {
+        pb::RunAgentRequest {
+            run_id: "run-1".to_owned(),
+            org_id: "org-1".to_owned(),
+            user_id: "user-1".to_owned(),
+            model: "gpt-5.6-terra".to_owned(),
+            provider_hint: "openai-codex-subscription".to_owned(),
+            subscription_connection_id: "conn_1".to_owned(),
+            plan_mode: true,
+            ..Default::default()
+        }
+    }
+
+    const ROUTE_ON: mp_contracts::agentic_subscription::Switches =
+        mp_contracts::agentic_subscription::Switches {
+            enabled: true,
+            allow_effects: false,
+        };
+
+    #[test]
+    fn a_subscription_run_is_refused_when_the_switch_is_off() {
+        let error = enforce_agent_route(
+            &subscription_run(),
+            mp_contracts::agentic_subscription::Switches::OFF,
+        )
+        .expect_err("a disabled route must not start");
+        assert_eq!(error.code(), tonic::Code::PermissionDenied);
+        assert!(
+            error
+                .message()
+                .contains(mp_contracts::agentic_subscription::DISABLED_CODE),
+            "{}",
+            error.message()
+        );
+        // The only difference from a run that is accepted is the switch.
+        enforce_agent_route(&subscription_run(), ROUTE_ON).expect("switch on admits the run");
+    }
+
+    #[test]
+    fn a_subscription_run_is_refused_with_zdr_or_a_pseudo_model() {
+        let mut zdr = subscription_run();
+        zdr.zdr = true;
+        let error = enforce_agent_route(&zdr, ROUTE_ON).expect_err("the seat has no ZDR commitment");
+        assert_eq!(error.code(), tonic::Code::PermissionDenied);
+
+        for pseudo in ["verevon-balance", "verevon-auto", "Verevon-Genius", ""] {
+            let mut request = subscription_run();
+            request.model = pseudo.to_owned();
+            let error =
+                enforce_agent_route(&request, ROUTE_ON).expect_err("a pseudo model names no model");
+            assert_eq!(error.code(), tonic::Code::InvalidArgument, "{pseudo:?}");
+        }
+    }
+
+    #[test]
+    fn every_route_refusal_is_one_the_gateway_terminalizes_as_a_rejection() {
+        // model-gateway closes the prepared run only for these three codes
+        // (`is_confirmed_agent_dispatch_rejection`); any other would leave the
+        // run open to be retried into the same refusal.
+        let mut half_set = subscription_run();
+        half_set.subscription_connection_id.clear();
+        let mut alias = subscription_run();
+        alias.provider_hint = "chatgpt-codex".to_owned();
+        let mut acting = subscription_run();
+        acting.plan_mode = false;
+        for (label, request, switches) in [
+            ("switch off", subscription_run(), mp_contracts::agentic_subscription::Switches::OFF),
+            ("half-set route", half_set, ROUTE_ON),
+            ("alias provider", alias, ROUTE_ON),
+            ("not read-only", acting, ROUTE_ON),
+        ] {
+            let error = enforce_agent_route(&request, switches).expect_err(label);
+            assert!(
+                matches!(
+                    error.code(),
+                    tonic::Code::InvalidArgument
+                        | tonic::Code::PermissionDenied
+                        | tonic::Code::Unauthenticated
+                ),
+                "{label}: {:?}",
+                error.code()
+            );
+        }
+    }
+
+    #[test]
+    fn a_run_without_route_fields_is_never_affected_by_the_switch() {
+        let plain = pb::RunAgentRequest {
+            run_id: "run-1".to_owned(),
+            model: "gpt-4o-mini".to_owned(),
+            ..Default::default()
+        };
+        for switches in [mp_contracts::agentic_subscription::Switches::OFF, ROUTE_ON] {
+            enforce_agent_route(&plain, switches).expect("a route-less run is unchanged");
+        }
     }
 
     #[tokio::test]

@@ -13,13 +13,18 @@ import (
 // All variants share Timestamp at = 1_700_000_000s (prefix 0a060880e2cfaa06).
 
 const (
-	goldenOrchPlanTransitionedHex        = "0a060880e2cfaa0652130a06706c616e2d31120572756e2d3118012002"
-	goldenOrchTodoTransitionedHex        = "0a060880e2cfaa065a160a06746f646f2d3112087468726561642d3118012002"
-	goldenOrchApprovalStateChangedHex    = "0a060880e2cfaa0662250a06617070722d31120572756e2d31180220022a1075736572406578616d706c652e636f6d"
-	goldenOrchSubagentAttachedHex        = "0a060880e2cfaa066a190a0a72756e2d706172656e74120972756e2d6368696c641802"
-	goldenOrchSubagentStoppedHex         = "0a060880e2cfaa0672160a0972756e2d6368696c641209636f6d706c65746564"
-	goldenOrchRunPausedForApprovalHex    = "0a060880e2cfaa067a0f0a0572756e2d311206617070722d31"
-	goldenOrchRunResumedAfterApprovalHex = "0a060880e2cfaa0682010f0a0572756e2d311206617070722d31"
+	goldenOrchPlanTransitionedHex     = "0a060880e2cfaa0652130a06706c616e2d31120572756e2d3118012002"
+	goldenOrchTodoTransitionedHex     = "0a060880e2cfaa065a160a06746f646f2d3112087468726561642d3118012002"
+	goldenOrchApprovalStateChangedHex = "0a060880e2cfaa0662250a06617070722d31120572756e2d31180220022a1075736572406578616d706c652e636f6d"
+	goldenOrchSubagentAttachedHex     = "0a060880e2cfaa066a190a0a72756e2d706172656e74120972756e2d6368696c641802"
+	goldenOrchSubagentStoppedHex      = "0a060880e2cfaa0672160a0972756e2d6368696c641209636f6d706c65746564"
+	// Wide-research fan-out: the same two variants with the fields the live run
+	// panel keys off. The un-suffixed goldens above stay byte-identical (proto3
+	// omits a default field), which is the backward-compat proof.
+	goldenOrchSubagentAttachedWithGoalAndBatchHex = "0a060880e2cfaa066a300a0a72756e2d706172656e74120972756e2d6368696c641802220c73756d6d61726973652051332a0762617463682d31"
+	goldenOrchSubagentStoppedWithParentHex        = "0a060880e2cfaa0672220a0972756e2d6368696c641209636f6d706c657465641a0a72756e2d706172656e74"
+	goldenOrchRunPausedForApprovalHex             = "0a060880e2cfaa067a0f0a0572756e2d311206617070722d31"
+	goldenOrchRunResumedAfterApprovalHex          = "0a060880e2cfaa0682010f0a0572756e2d311206617070722d31"
 )
 
 const expectedAtSeconds int64 = 1_700_000_000
@@ -115,6 +120,30 @@ func TestOrchestrationEventDecodeSubagentStopped(t *testing.T) {
 	}
 }
 
+func TestOrchestrationEventDecodeSubagentAttachedWithGoalAndBatch(t *testing.T) {
+	ev := decodeOrchHex(t, goldenOrchSubagentAttachedWithGoalAndBatchHex)
+	v, ok := ev.GetEvent().(*OrchestrationEvent_SubagentAttached_)
+	if !ok {
+		t.Fatalf("variant = %T", ev.GetEvent())
+	}
+	p := v.SubagentAttached
+	if p.GetGoalSummary() != "summarise Q3" || p.GetBatchId() != "batch-1" {
+		t.Fatalf("goal/batch = %q/%q", p.GetGoalSummary(), p.GetBatchId())
+	}
+}
+
+func TestOrchestrationEventDecodeSubagentStoppedWithParent(t *testing.T) {
+	ev := decodeOrchHex(t, goldenOrchSubagentStoppedWithParentHex)
+	v, ok := ev.GetEvent().(*OrchestrationEvent_SubagentStopped_)
+	if !ok {
+		t.Fatalf("variant = %T", ev.GetEvent())
+	}
+	p := v.SubagentStopped
+	if p.GetChildRunId() != "run-child" || p.GetStatus() != "completed" || p.GetParentRunId() != "run-parent" {
+		t.Fatalf("fields = %q/%q/%q", p.GetChildRunId(), p.GetStatus(), p.GetParentRunId())
+	}
+}
+
 func TestOrchestrationEventDecodeRunPausedForApproval(t *testing.T) {
 	ev := decodeOrchHex(t, goldenOrchRunPausedForApprovalHex)
 	v, ok := ev.GetEvent().(*OrchestrationEvent_RunPausedForApproval_)
@@ -146,6 +175,8 @@ func TestOrchestrationEventRoundTripReencodesIdentically(t *testing.T) {
 		goldenOrchApprovalStateChangedHex,
 		goldenOrchSubagentAttachedHex,
 		goldenOrchSubagentStoppedHex,
+		goldenOrchSubagentAttachedWithGoalAndBatchHex,
+		goldenOrchSubagentStoppedWithParentHex,
 		goldenOrchRunPausedForApprovalHex,
 		goldenOrchRunResumedAfterApprovalHex,
 	}

@@ -1,9 +1,13 @@
 //! Runtime loop orchestration for one execution step.
 
 pub mod agent;
+pub(crate) mod post_mutation;
 pub mod retry;
 pub(crate) mod skill_budget;
 pub mod subagent_results;
+
+#[cfg(test)]
+pub(crate) mod session_core_rules_double;
 
 use std::path::Path;
 
@@ -1486,21 +1490,23 @@ async fn execute_book_shipment(
         Err(error) => return tool_error(error),
     };
     let idempotency_key = format!("{run_id}:{step_id}");
-    let Some(client) = crate::shipping_tools::ShippingToolsClient::from_env() else {
+    let Some(client) = post_mutation::shipping_client() else {
         return tool_error(
             "book_shipment unavailable: shipping tools client could not be built".to_owned(),
         );
     };
-    match client
-        .book_shipment(&input, org_id, &approval_id, &idempotency_key)
-        .await
-    {
-        Ok(outcome) => tool_bridge::ToolExecution {
-            output: outcome.rendered,
-            error: None,
-        },
-        Err(e) => tool_error(e),
-    }
+    // Books, then (when `EXECUTION_POST_MUTATION_VERIFY_ENABLED` is on) reads the
+    // booking back from shipping-core and appends the verdict to the output.
+    post_mutation::run_shipment_booking(
+        &client,
+        &input,
+        org_id,
+        &approval_id,
+        &idempotency_key,
+        run_id,
+        step_id,
+    )
+    .await
 }
 
 /// `list_social_accounts` tool — no input. Read-only discovery of the org's
@@ -1674,30 +1680,31 @@ async fn execute_provider_action(
         None
     };
 
-    let Some(client) = crate::integration_tools::IntegrationActionsClient::from_env() else {
+    let Some(client) = post_mutation::integration_client() else {
         return tool_error(
             "execute_provider_action unavailable: integration client could not be built".to_owned(),
         );
     };
-    match client
-        .execute_action(
+    // Runs the action, then (for a write, when
+    // `EXECUTION_POST_MUTATION_VERIFY_ENABLED` is on) reads the effect back from
+    // the provider and appends the verdict to the output. A read is untouched.
+    post_mutation::run_provider_call(
+        &client,
+        post_mutation::ProviderCall {
             org_id,
-            &input.connection_id,
-            &input.operation,
-            input.params,
-            input.body,
             user_id,
-            approval_ref.as_deref(),
+            run_id,
+            step_id,
+            connection_id: &input.connection_id,
+            operation: &input.operation,
+            params: input.params,
+            body: input.body,
+            approval_ref: approval_ref.as_deref(),
             session_bearer,
-        )
-        .await
-    {
-        Ok(outcome) => tool_bridge::ToolExecution {
-            output: outcome.rendered,
-            error: None,
+            is_write,
         },
-        Err(e) => tool_error(e),
-    }
+    )
+    .await
 }
 
 /// Resolve the REAL durable approval id to forward as `approvalId` for a
@@ -1952,6 +1959,20 @@ mod memory_tool_tests {
             .error
             .expect("must refuse")
             .contains("at least one step is required"));
+
+        // An untrusted author cannot hand the person a thousand-step "plan".
+        let steps: Vec<String> = (0..=crate::plan::MAX_STEPS)
+            .map(|i| format!(r#"{{"title":"step {i}"}}"#))
+            .collect();
+        let too_many = format!(r#"{{"summary":"Big","steps":[{}]}}"#, steps.join(","));
+        let out = execute_propose_plan(
+            &too_many, "org-1", "user-1", "thread-1", "run-1", false, None, None,
+        )
+        .await;
+        assert!(out
+            .error
+            .expect("must refuse")
+            .contains("at most"));
     }
 
     #[tokio::test]
@@ -2249,11 +2270,17 @@ async fn execute_propose_plan(
         Ok(i) => i,
         Err(e) => return tool_error(format!("invalid plan.propose input: {e}")),
     };
-    if input.summary.trim().is_empty() {
-        return tool_error("plan.propose: summary must not be empty".to_owned());
-    }
-    if input.steps.is_empty() {
-        return tool_error("plan.propose: at least one step is required".to_owned());
+    // The model is an untrusted author of this text (it reads web pages and
+    // documents), and the person is about to be shown it as "the plan":
+    // bounded here for a useful tool error, and again in session-core, which
+    // is the authority.
+    let step_texts: Vec<(&str, &str)> = input
+        .steps
+        .iter()
+        .map(|s| (s.title.as_str(), s.operation.as_str()))
+        .collect();
+    if let Some(problem) = crate::plan::proposal_problem(&input.summary, &step_texts) {
+        return tool_error(format!("plan.propose: {problem}"));
     }
 
     let (channel, bearer) = match memory_tool_preflight(

@@ -121,6 +121,14 @@ pub enum OrchestrationEvent {
         child_run_id: String,
         /// Child's role.
         role: SubagentRole,
+        /// Truncated delegated goal (wide-research fan-out §2.4). Empty for
+        /// an event predating this field.
+        #[serde(default)]
+        goal_summary: String,
+        /// Groups every sibling spawned by one `research_fan_out` call; empty
+        /// for a standalone delegation.
+        #[serde(default)]
+        batch_id: String,
         /// Timestamp.
         at: DateTime<Utc>,
     },
@@ -130,6 +138,11 @@ pub enum OrchestrationEvent {
         child_run_id: String,
         /// Terminal status ("completed", "failed", "cancelled").
         status: String,
+        /// The run that delegated this child — what routes the event onto that
+        /// run's stream (wide-research fan-out live panel). Empty for an event
+        /// predating this field, which has no run to be delivered to.
+        #[serde(default)]
+        parent_run_id: String,
         /// Timestamp.
         at: DateTime<Utc>,
     },

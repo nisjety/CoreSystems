@@ -1,5 +1,6 @@
 //! execution-core — runtime loop ownership for agent execution.
 
+pub(crate) mod agent_route;
 pub mod approval_delivery_worker;
 pub mod artifact;
 pub mod attestation;
@@ -32,6 +33,7 @@ pub mod promote_on_use;
 pub mod provenance;
 pub mod quarry_agent;
 mod quarry_auth;
+pub(crate) mod run_budget;
 pub mod runtime_loop;
 pub mod sandbox;
 pub mod sandbox_lease;
@@ -44,6 +46,7 @@ pub mod shipping_tools;
 pub mod social_tools;
 pub mod state;
 pub mod subagent;
+pub(crate) mod subscription_refusal;
 pub mod ticket_tools;
 pub mod tool_bridge;
 pub mod user_core_client;

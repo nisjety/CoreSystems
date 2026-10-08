@@ -283,6 +283,27 @@ const MAX_TOOL_CONTEXT_CHARS: usize = 8000;
 const GRACEFUL_FAILURE_REPLY: &str =
     "I wasn't able to complete that request right now. Please try again.";
 
+/// The reply persisted when a run pinned to the ChatGPT subscription is
+/// stopped because a round was served by another provider or model
+/// (`subscription_route_unavailable`). It says what happened and nothing about
+/// what the other route was; the route and the failure code are in the log.
+const SUBSCRIPTION_ROUTE_UNAVAILABLE_REPLY: &str =
+    "This run was stopped because it could not stay on your ChatGPT subscription. Please try again.";
+
+/// `RunAgentResponse.final_output` of a run pinned to the ChatGPT subscription
+/// that ended on a typed refusal. Content-free and never persisted: the reason
+/// is `RunAgentResponse.failure_code`, and the gateway words and persists the
+/// user-facing explanation from it.
+const SUBSCRIPTION_REFUSED_REPLY: &str =
+    "This run was stopped because your ChatGPT subscription could not complete it.";
+
+/// The reply persisted when a run reached its time budget
+/// (`run_budget::RunDeadline`) before it had an answer. It says what happened
+/// and claims nothing the run did not produce: no new round was started once
+/// the limit passed, so there is no answer to offer, only the way forward.
+const RUN_TIME_LIMIT_REPLY: &str =
+    "This run stopped at its time limit before it could reach an answer, and nothing further was started. Try a narrower request.";
+
 /// Cap on the `CompleteStep.output` payload (the durable step record); the full
 /// answer still lives in the appended assistant message.
 const OUTPUT_TRUNCATE: usize = 2000;
@@ -367,7 +388,20 @@ struct LoopContext<'a> {
     /// `process_*` dispatch arm and by the run-end lease release, which must
     /// stop a lease's children BEFORE the workspace is diffed and uploaded.
     process_host: Option<&'a crate::process_host::ProcessHost>,
-    agent_model: String,
+    /// The inference route of every round of this run: its model, and (for a
+    /// run pinned to the ChatGPT subscription) the provider and connection each
+    /// `InferRequest` carries and the guard each response passes. Resolved once
+    /// by `run_agent_with_tools` and cloned verbatim into every delegated
+    /// child's context, so a child cannot take a different route than its
+    /// parent, and the clones share one stop flag.
+    route: crate::agent_route::ModelRoute,
+    /// The first run-wide refusal (a spent usage limit or an expired sign-in)
+    /// any loop of a run pinned to the ChatGPT subscription met. Created once
+    /// by `run_agent_with_route` and cloned into every delegated child's
+    /// context, so the clones share one slot: the first loop to be refused
+    /// stops every other loop before its next round, and the root finalizes
+    /// with that refusal's code. Never set for an unpinned run.
+    refusal: crate::subscription_refusal::RefusalLatch,
     permission_wire: &'static str,
     /// Nesting depth: 0 is the user-facing run, 1 a delegated subagent. Bounds
     /// recursion via `subagent::guard_depth` and selects the run-level
@@ -377,17 +411,50 @@ struct LoopContext<'a> {
     /// attributable to the tool call that spawned them instead of colliding
     /// with the parent's `tool_<n>_<id>` sequence.
     step_prefix: String,
+    /// This run's resolved per-run child ceiling
+    /// (`subagent::resolve_child_ceiling`'s output), read by
+    /// `LoopSubagentDispatch` in place of the old hardcoded
+    /// `subagent::MAX_TOTAL_CHILDREN` constant. Copied verbatim onto every
+    /// delegated child's own `LoopContext` — a subagent cannot delegate at
+    /// all (`MAX_DEPTH == 1`), so it never reads its own copy, but keeping it
+    /// on the struct rather than root-only avoids a second, parallel context
+    /// shape for depth-1 loops.
+    child_ceiling: u32,
+    /// The instant after which no loop of this run starts another round
+    /// (`run_budget::RunDeadline`): the operator's wall clock and, for a run
+    /// pinned to the ChatGPT subscription, the run's own credentials' expiry.
+    /// Resolved once by `run_agent_with_tools` and copied (it is `Copy`) into
+    /// every delegated child's context, so parent and children share ONE limit,
+    /// measured from the start of the run, never a clock of their own.
+    deadline: crate::run_budget::RunDeadline,
 }
 
 /// Why a round loop stopped — without deciding what to do about it. The root run
 /// finalizes; a subagent turns the same outcome into its tool result.
 enum RoundsOutcome {
     Answered(String),
+    /// A DELEGATED loop's answer from its concluding round: the last round of its
+    /// budget, run with no tools (`reserves_conclusion_round`). It rests only on
+    /// what the loop had gathered by then, which the delegating call says
+    /// (`label_concluded_answer`). Never produced by the root run.
+    Concluded(String),
     Exhausted,
-    InferFailed,
+    /// An inference round failed. `Some` for a run pinned to the ChatGPT
+    /// subscription: the typed refusal (its own, or the latched one another loop
+    /// of the run met first). `None` for every other run, which keeps the generic
+    /// graceful reply.
+    InferFailed(Option<crate::subscription_refusal::Refusal>),
     /// A gated tool minted a durable approval and the run is paused. Root only:
     /// a delegated loop cannot own the run's HITL pause.
     Paused(pb::RunAgentResponse),
+    /// A run pinned to the ChatGPT subscription had a round served by another
+    /// provider or model, here or in a delegated loop. No further round starts.
+    RouteUnavailable,
+    /// The run's time budget (`run_budget::RunDeadline`) was spent before this
+    /// loop could start another round. The round in flight when it passed was
+    /// allowed to finish; the run ends honestly with what it has, as a failed
+    /// run that says it stopped at its time limit.
+    OutOfTime,
 }
 
 struct RoundsResult {
@@ -409,6 +476,72 @@ impl RoundsResult {
     fn total_rounds(&self) -> u32 {
         self.rounds_executed.saturating_add(self.delegated_rounds)
     }
+}
+
+/// The smallest round budget at which a delegated loop reserves its last round
+/// for concluding. With one round there is nothing to conclude from: that round
+/// is the loop's only chance to gather anything, and it keeps its tools.
+const MIN_BUDGET_TO_RESERVE_CONCLUSION: u32 = 2;
+
+/// Whether a loop at `depth` with `max_rounds` spends its LAST round concluding,
+/// with its tools withheld, instead of researching.
+///
+/// # Why
+///
+/// A delegated research loop that kept asking for tools until its budget ran out
+/// used to end `RoundsOutcome::Exhausted`, and everything it had gathered was
+/// lost: the findings lived in the loop's own message history, which dies with
+/// it, and the parent was handed only "spent its whole N-round budget without
+/// reaching an answer". Two of the three research children of the 2026-10-01 live
+/// run ended that way (budget 3, three rounds, no answer), each having spent its
+/// whole budget gathering material that was then thrown away.
+///
+/// The last round is therefore spent answering. It is the SAME budget, not an
+/// extra round: a child never costs the run more rounds than it was lent, the
+/// parent's own synthesis round (`PARENT_SYNTHESIS_RESERVE`) is untouched, and
+/// no limit anywhere is raised. What it costs is one tool round of a budget that
+/// would otherwise have ended with its last tool round unread.
+///
+/// Delegated loops only. The root run keeps its tools to its last round: it is
+/// the loop whose failure is reported to the user as a failed run, and changing
+/// that is a different decision.
+fn reserves_conclusion_round(depth: u32, max_rounds: u32) -> bool {
+    depth > 0 && max_rounds >= MIN_BUDGET_TO_RESERVE_CONCLUSION
+}
+
+/// What a concluding round is told, after everything the loop has already read.
+const CONCLUSION_NOTICE: &str = "Your round budget is spent: this is your last turn and no \
+tools are available. Do not request any tool. Answer now from what you have already gathered \
+above. Lead with what you established, cite only sources you actually read, and say plainly \
+which parts of the question you could not finish.";
+
+/// The loop's history plus the notice that ends it, for the concluding round's
+/// request only. The loop's own history is left as it was: nothing follows.
+fn with_conclusion_notice(messages: &[pb::ChatMessage]) -> Vec<pb::ChatMessage> {
+    let mut with_notice = messages.to_vec();
+    with_notice.push(pb::ChatMessage {
+        compaction_summary: String::new(),
+        role: "user".to_owned(),
+        content: CONCLUSION_NOTICE.to_owned(),
+        name: String::new(),
+    });
+    with_notice
+}
+
+/// A concluded delegation's answer, labelled for the parent that reads it.
+///
+/// Said first, in the text itself, because that is the one place that survives
+/// everything the answer goes through: the fan-out digest's per-answer clip cuts
+/// the tail, the durable copy on the child run and a replayed delegation both
+/// return this exact text, and the parent model reads it as part of the tool
+/// result. A label kept only in a log line would be invisible to all of them.
+fn label_concluded_answer(answer: &str, budget: u32) -> String {
+    format!(
+        "[Partial result: this subagent used its whole {budget}-round budget on research and \
+         was then made to answer without tools, so it reflects only what it had gathered by \
+         then. Treat anything it says it could not finish as unfinished.]\n\n{}",
+        answer.trim()
+    )
 }
 
 /// Drive an agent run to a terminal answer through a governed multi-tool loop.
@@ -495,6 +628,14 @@ async fn merged_tool_defs(
     space_scoped: bool,
 ) -> Vec<pb::ToolDefinition> {
     let mut tools = offered_tool_defs();
+    // Wide-research kill switch (`WIDE_RESEARCH_FAN_OUT_ENABLED`): when the
+    // deployment switches the fan-out off, the model is simply not shown it.
+    // `offered_tool_defs` itself stays unconditional so the tool-catalogue
+    // invariants its tests pin (unique names, a capability binding for every
+    // entry) hold for the full set; the dispatch arm refuses independently.
+    if !crate::subagent::research_fan_out::enabled() {
+        tools.retain(|tool| tool.name != crate::subagent::research_fan_out::RESEARCH_TOOL_NAME);
+    }
     // The S4.2 process family is conditional where everything else above is
     // unconditional, and on BOTH halves of the condition for different
     // reasons. Without a Space there is no lease, no hydrated workspace and no
@@ -592,6 +733,12 @@ fn is_server_resolved_tool_name(name: &str) -> bool {
 /// subagent re-enters it, and must NOT re-enter any of the run-level work here:
 /// there is exactly one plan transition and one managed terminal receipt per
 /// run, no matter how many nested loops it drove.
+///
+/// The run's inference route is resolved here, once, from the request and the
+/// process environment (`AGENTIC_SUBSCRIPTION_*`, `EXECUTION_AGENT_MODEL`) and
+/// handed to [`run_agent_with_route`]. A request that names a route this
+/// process may not honour is refused before anything starts: no plan
+/// transition, no heartbeat, no round.
 #[allow(clippy::too_many_arguments)]
 async fn run_agent_with_tools(
     state: &crate::state::StateStore,
@@ -612,6 +759,78 @@ async fn run_agent_with_tools(
     sandbox_tokens: &crate::sandbox_lease::SandboxManagerTokenProvider,
     process_host: Option<&crate::process_host::ProcessHost>,
 ) -> Result<pb::RunAgentResponse, tonic::Status> {
+    let route = crate::agent_route::ModelRoute::resolve(
+        &req,
+        mp_contracts::agentic_subscription::Switches::from_env(),
+        std::env::var("EXECUTION_AGENT_MODEL").ok().as_deref(),
+    )?;
+    // The run's time budget, resolved once and shared with every delegated
+    // child: the operator's wall clock (`EXECUTION_RUN_WALL_CLOCK_SECS`, off by
+    // default) and, for a run pinned to the subscription, the expiry of the
+    // earliest credential the run carries. See `crate::run_budget`.
+    let deadline = crate::run_budget::RunDeadline::for_run(
+        std::time::Instant::now(),
+        std::env::var(crate::run_budget::WALL_CLOCK_ENV)
+            .ok()
+            .as_deref(),
+        route.is_pinned(),
+        &[
+            Some(inference_bearer.as_str()),
+            session_bearer.as_deref(),
+            data_plane_bearer.as_deref(),
+            sandbox_bearer.as_deref(),
+        ],
+        crate::run_budget::now_epoch_secs(),
+    );
+    run_agent_with_route(
+        state,
+        session_channel,
+        inference_channel,
+        req,
+        tools,
+        data_plane_bearer,
+        session_bearer,
+        inference_bearer,
+        capability_policy,
+        terminal_tokens,
+        sandbox_bearer,
+        capability_client,
+        sandbox_manager_client,
+        backend_id,
+        cas_client,
+        sandbox_tokens,
+        process_host,
+        route,
+        deadline,
+    )
+    .await
+}
+
+/// [`run_agent_with_tools`] with the run's inference route already resolved.
+/// Tests drive a pinned run through this directly, with the switches and the
+/// environment model they mean, instead of through the process environment.
+#[allow(clippy::too_many_arguments)]
+async fn run_agent_with_route(
+    state: &crate::state::StateStore,
+    session_channel: Channel,
+    inference_channel: Channel,
+    req: pb::RunAgentRequest,
+    tools: Vec<pb::ToolDefinition>,
+    data_plane_bearer: Option<String>,
+    session_bearer: Option<String>,
+    inference_bearer: String,
+    capability_policy: &dyn crate::capability_policy::CapabilityPolicy,
+    terminal_tokens: &dyn ManagedRunTokenProvider,
+    sandbox_bearer: Option<String>,
+    capability_client: Option<&crate::capability_client::CapabilityClient>,
+    sandbox_manager_client: &crate::sandbox_manager_client::SandboxManagerClient,
+    backend_id: &str,
+    cas_client: Option<&crate::workspace_cas::CasClient>,
+    sandbox_tokens: &crate::sandbox_lease::SandboxManagerTokenProvider,
+    process_host: Option<&crate::process_host::ProcessHost>,
+    route: crate::agent_route::ModelRoute,
+    deadline: crate::run_budget::RunDeadline,
+) -> Result<pb::RunAgentResponse, tonic::Status> {
     let plan_id = format!("plan_{}", req.run_id);
 
     // Posture: deployed agents default to `ask` (risky tools gated behind a
@@ -628,21 +847,32 @@ async fn run_agent_with_tools(
     } else {
         req.max_rounds.min(MAX_ROUNDS_CEILING)
     };
+    // Wide-research fan-out (chat-wave2-specs, 2026-09-28): the per-run
+    // delegation breadth ceiling, configurable per request and clamped by an
+    // org policy. `org_ceiling` is `None` here — execution-core does not yet
+    // read org-core's `max_subagents_per_run` quota key at all (org-core is
+    // Control Plane, outside this pass's touched services; flagged as a
+    // cross-plane follow-up, same as model-gateway's existing `org_quota.rs`
+    // pattern this would mirror). Until that lookup lands, a request is
+    // resolved against the hard ceiling only — never silently unbounded, just
+    // not yet org-tightenable.
+    let child_ceiling =
+        crate::subagent::resolve_child_ceiling(Some(req.max_subagents).filter(|&n| n != 0), None);
 
-    // Autonomous, tool-using runs need a tool-following model. A weak chat-tier
-    // model (e.g. gpt-4o-mini) under-elects tools unless the prompt is forceful,
-    // so `EXECUTION_AGENT_MODEL` (e.g. "verevon-balance") lets the deployment
-    // route the agentic loop through inference-core's intent layer, which
-    // upgrades the model when tools are offered. Empty env → honor the
-    // requested model unchanged (no behaviour change).
-    let agent_model = resolve_agent_model(&req.model);
-
+    // The run's model and provider are `route`'s (see `crate::agent_route`).
+    // Autonomous, tool-using runs need a tool-following model, so an UNPINNED
+    // run's model may come from `EXECUTION_AGENT_MODEL` (e.g. "model-router");
+    // a run pinned to the ChatGPT subscription never does.
     info!(
         run_id = %req.run_id,
         mode = %permission_wire,
         max_rounds,
         tools = ?allowlist,
-        model = %agent_model,
+        model = %route.model(),
+        pinned_to_subscription = route.is_pinned(),
+        time_budget_secs = ?deadline
+            .remaining_at(std::time::Instant::now())
+            .map(|left| left.as_secs()),
         goal = %req.goal,
         "run_agent: purpose-locked governed multi-tool run starting"
     );
@@ -679,10 +909,13 @@ async fn run_agent_with_tools(
         cas_client,
         sandbox_tokens,
         process_host,
-        agent_model,
+        route,
+        refusal: crate::subscription_refusal::RefusalLatch::default(),
         permission_wire,
         depth: 0,
         step_prefix: String::new(),
+        child_ceiling,
+        deadline,
     };
 
     // 2. The governed ReAct loop.
@@ -690,14 +923,34 @@ async fn run_agent_with_tools(
     let total_rounds = rounds.total_rounds();
     // Captured before `rounds.outcome` is moved out below.
     let compaction_triggered = rounds.compaction_triggered;
-    let (final_answer, success) = match rounds.outcome {
+    // A typed subscription failure ends the run with its code on the response
+    // and the terminal receipt, and with NO assistant message from here: the
+    // gateway words the reason for the user and persists that one.
+    let (final_answer, success, refusal) = match rounds.outcome {
         // Paused, not finished: the approval is already durable and the run
         // stays non-terminal. Resume re-invokes `run_agent`.
         RoundsOutcome::Paused(response) => return Ok(response),
-        RoundsOutcome::Answered(text) => (text, true),
-        RoundsOutcome::Exhausted | RoundsOutcome::InferFailed => {
-            (GRACEFUL_FAILURE_REPLY.to_owned(), false)
+        // `Concluded` is a delegated loop's outcome only (the root run keeps its
+        // tools to its last round); the arm exists so the match stays total.
+        RoundsOutcome::Answered(text) | RoundsOutcome::Concluded(text) => (text, true, None),
+        RoundsOutcome::Exhausted | RoundsOutcome::InferFailed(None) => {
+            (GRACEFUL_FAILURE_REPLY.to_owned(), false, None)
         }
+        // The time budget is spent: a failed run with no typed code (it is not
+        // a subscription refusal) whose reply says what happened. It goes
+        // through `finalize` like any other failed run, so the reply and the
+        // managed receipt are written while the credentials still work.
+        RoundsOutcome::OutOfTime => (RUN_TIME_LIMIT_REPLY.to_owned(), false, None),
+        RoundsOutcome::InferFailed(Some(refusal)) => {
+            (SUBSCRIPTION_REFUSED_REPLY.to_owned(), false, Some(refusal))
+        }
+        RoundsOutcome::RouteUnavailable => (
+            SUBSCRIPTION_ROUTE_UNAVAILABLE_REPLY.to_owned(),
+            false,
+            Some(crate::subscription_refusal::Refusal::bare(
+                crate::subscription_refusal::SUBSCRIPTION_ROUTE_UNAVAILABLE,
+            )),
+        ),
     };
 
     let response = finalize(
@@ -710,6 +963,7 @@ async fn run_agent_with_tools(
         total_rounds,
         rounds.grounded,
         compaction_triggered,
+        refusal.as_ref(),
         session_bearer.as_deref(),
         terminal_tokens,
     )
@@ -968,6 +1222,10 @@ async fn run_rounds(
 
     let mut inference = InferenceCoreClient::new(ctx.inference_channel.clone());
     let mut answer: Option<String> = None;
+    // Whether `answer` came from the concluding round of a delegated loop (see
+    // `reserves_conclusion_round`) rather than from a round that still had its
+    // tools.
+    let mut concluded = false;
     let mut rounds_executed: u32 = 0;
     let mut delegated_rounds: u32 = 0;
     let mut step_seq: u32 = 0;
@@ -975,7 +1233,7 @@ async fn run_rounds(
     // Run-scoped, NOT round-scoped: the ceiling bounds how many delegations this
     // run opens in TOTAL, so three per round for four rounds is bounded exactly
     // like twelve at once. Deliberately independent of the round budget — see
-    // `subagent::MAX_TOTAL_CHILDREN` on why one cannot express the other.
+    // `subagent::DEFAULT_MAX_CHILDREN` on why one cannot express the other.
     let children_started = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
     // Reported on the step outcome. Was a hardcoded `false` at every
     // construction site while being surfaced over gRPC — a dead-but-visible
@@ -989,8 +1247,65 @@ async fn run_rounds(
     // A delegated loop's rounds are charged against the SAME budget, so a parent
     // that delegates on every round cannot drive max_rounds² inference calls.
     while rounds_executed + delegated_rounds < max_rounds {
+        // A run pinned to the ChatGPT subscription stops the moment ANY of its
+        // loops had a round served by another route. This loop may be the
+        // parent of a child that just tripped it, or a sibling of one: neither
+        // starts another round, so a fallback that happened once is never
+        // followed by a second inference call on that route.
+        if ctx.route.is_stopped() {
+            return Ok(RoundsResult {
+                compaction_triggered,
+                outcome: RoundsOutcome::RouteUnavailable,
+                rounds_executed,
+                delegated_rounds,
+                grounded,
+            });
+        }
+        // The same for a run-wide refusal (a spent usage limit, an expired
+        // sign-in) that ANY loop of the run met: another round of this loop,
+        // or a sibling's first round, would be a Codex process spawn to be
+        // refused again. The run ends with the refusal that stopped it.
+        if let Some(refusal) = ctx.refusal.latched() {
+            return Ok(RoundsResult {
+                compaction_triggered,
+                outcome: RoundsOutcome::InferFailed(Some(refusal)),
+                rounds_executed,
+                delegated_rounds,
+                grounded,
+            });
+        }
+        // The run's time budget (`run_budget::RunDeadline`): once the wall clock
+        // or the credentials' margin has passed, no loop of the run starts a
+        // new round. The round that was in flight when it passed has already
+        // finished (this check is the only place a round begins), and the run
+        // ends with what it has instead of starting work its credentials may
+        // not outlive. The parent sees a child's stop at its own next loop
+        // top, and a fan-out item still waiting for a permit lands here too.
+        if let Some(cause) = ctx.deadline.expired() {
+            warn!(
+                run_id = %req.run_id,
+                depth = ctx.depth,
+                cause = cause.as_str(),
+                rounds_executed,
+                delegated_rounds,
+                "run_agent: the run's time budget is spent; no further round starts"
+            );
+            return Ok(RoundsResult {
+                compaction_triggered,
+                outcome: RoundsOutcome::OutOfTime,
+                rounds_executed,
+                delegated_rounds,
+                grounded,
+            });
+        }
         heartbeat_managed_agent_run(ctx.session_channel, req, ctx.terminal_tokens).await?;
         rounds_executed += 1;
+        // The last round of a delegated loop's budget is spent concluding: no
+        // tools, and a notice that it must answer from what it has. A loop that
+        // used its whole budget on tool rounds used to end `Exhausted`, and the
+        // findings it had gathered died with its local message history.
+        let concluding = reserves_conclusion_round(ctx.depth, max_rounds)
+            && rounds_executed.saturating_add(delegated_rounds) >= max_rounds;
         // Tier-1 compaction, in the loop that needed it most and did not have
         // it. A 12-round agentic run accumulates far more tool-result payload
         // than a chat turn, and this loop had NO compaction of any kind — an
@@ -1020,9 +1335,19 @@ async fn run_rounds(
             thinking_budget_tokens: 0,
             request_id: req.run_id.clone(),
             org_id: req.org_id.clone(),
-            model: ctx.agent_model.clone(),
-            provider_hint: String::new(),
-            messages: messages.clone(),
+            // The run's route, the same on every round of the parent and of
+            // every delegated child. For a run pinned to the ChatGPT
+            // subscription the model is the request's own (never the
+            // environment's) and the provider names the subscription, so
+            // inference-core serves the round from it or refuses; it never
+            // falls through to another provider.
+            model: ctx.route.model().to_owned(),
+            provider_hint: ctx.route.provider_hint().to_owned(),
+            messages: if concluding {
+                with_conclusion_notice(&messages)
+            } else {
+                messages.clone()
+            },
             temperature: TEMPERATURE,
             max_tokens: MAX_TOKENS,
             structured_output_schema: String::new(),
@@ -1033,14 +1358,23 @@ async fn run_rounds(
             // the same tier as the inline invoke path — inference-core skips
             // ineligible providers before any network call and fails closed.
             min_privacy_tier: req.min_privacy_tier,
-            tools: ctx.tools.clone(),
-            tool_choice: "auto".to_owned(),
+            // Withheld on a concluding round, so the model cannot spend it on
+            // another tool call it would never see the result of.
+            tools: if concluding {
+                Vec::new()
+            } else {
+                ctx.tools.clone()
+            },
+            tool_choice: if concluding { "none" } else { "auto" }.to_owned(),
             // No caller here has a residency floor to express yet; left for
             // a future org-policy wiring (see inference.proto's field doc).
             min_residency: String::new(),
-            // Governed agent loops cannot select a user-owned ChatGPT
-            // subscription; only an explicit user chat request may do so.
-            subscription_connection_id: String::new(),
+            // Empty unless the run was started on the user's ChatGPT
+            // subscription: only an explicit user request may select a
+            // user-owned subscription, and `agent_route::validate_run_route`
+            // admitted this one (kill switch on, canonical provider, a
+            // connection, a concrete model, read-only, not ZDR).
+            subscription_connection_id: ctx.route.subscription_connection_id().to_owned(),
             // The priority tier is a subscription speed control, so it has no
             // meaning without a subscription connection. `false` is also what
             // this loop sent before the field existed.
@@ -1057,15 +1391,50 @@ async fn run_rounds(
         let response = match infer_result {
             Ok(r) => r.into_inner(),
             Err(error) => {
-                warn!(
-                    run_id = %req.run_id,
-                    depth = ctx.depth,
-                    error = %error,
-                    "run_agent: inference failed; finalizing run as failed (graceful reply)"
-                );
+                // A run pinned to the ChatGPT subscription is never answered by
+                // another model, so a failed round is a typed refusal: the
+                // reason inference-core declared on the status trailers, or the
+                // generic `subscription_route_unavailable`. Any other run keeps
+                // the graceful reply.
+                let refusal = ctx.route.is_pinned().then(|| {
+                    crate::subscription_refusal::refusal_for_failed_round(&error)
+                });
+                if let Some(refusal) = &refusal {
+                    // Content-free on purpose: the gRPC code and the typed
+                    // reason, never the status message, which for an untyped
+                    // failure can carry the provider's own text.
+                    warn!(
+                        run_id = %req.run_id,
+                        depth = ctx.depth,
+                        grpc_code = ?error.code(),
+                        failure_code = refusal.code,
+                        retry_after_ms = ?refusal.retry_after_ms,
+                        resets_at = ?refusal.resets_at_label(),
+                        run_wide = refusal.latches(),
+                        "run_agent: the ChatGPT subscription route refused an inference round; \
+                         finalizing run as failed with a typed reason"
+                    );
+                } else {
+                    warn!(
+                        run_id = %req.run_id,
+                        depth = ctx.depth,
+                        error = %error,
+                        "run_agent: inference failed; finalizing run as failed (graceful reply)"
+                    );
+                }
+                // A refusal that is true of the whole run is latched for every
+                // other loop of it, and the run reports the FIRST one any loop
+                // met: that is the one that actually stopped it.
+                let refusal = refusal.map(|refusal| {
+                    if refusal.latches() {
+                        ctx.refusal.latch(refusal)
+                    } else {
+                        refusal
+                    }
+                });
                 return Ok(RoundsResult {
                     compaction_triggered,
-                    outcome: RoundsOutcome::InferFailed,
+                    outcome: RoundsOutcome::InferFailed(refusal),
                     rounds_executed,
                     delegated_rounds,
                     grounded,
@@ -1073,9 +1442,84 @@ async fn run_rounds(
             }
         };
 
+        // Quota burn, visible: one line per round with what the round cost,
+        // from the provider's own counts. Content-free by construction: ids,
+        // counts and stop reason; never a message, a tool name or an argument.
+        // The route fields are the same fact the guard below checks, so a round
+        // served by the wrong provider is also visible after the fact.
+        info!(
+            run_id = %req.run_id,
+            depth = ctx.depth,
+            round = rounds_executed,
+            provider_used = %response.provider_used,
+            model_used = %response.model_used,
+            input_tokens = response.input_tokens,
+            output_tokens = response.output_tokens,
+            cache_read_input_tokens = response.cache_read_input_tokens,
+            cache_creation_input_tokens = response.cache_creation_input_tokens,
+            stop_reason = %response.stop_reason,
+            tool_calls = response.tool_calls.len(),
+            "run_agent: inference round usage"
+        );
+
+        // Route guard, BEFORE anything in the response is acted on. A run
+        // pinned to the ChatGPT subscription accepts a round only from that
+        // provider serving exactly the model it asked for; the same condition
+        // the inline chat loop applies to its own subscription rounds. If the
+        // answer came from anywhere else (a stale or misconfigured
+        // inference-core, an intent layer substituting a model), its tool calls
+        // are not dispatched and its text is not used: the run stops here, and
+        // so does every other loop of it (`stop` is shared with the parent's
+        // and the children's contexts). An unpinned run accepts any provider,
+        // as before.
+        if let Err(violation) = ctx
+            .route
+            .verify_response(&response.provider_used, &response.model_used)
+        {
+            warn!(
+                run_id = %req.run_id,
+                depth = ctx.depth,
+                code = mp_contracts::agentic_subscription::ROUTE_UNAVAILABLE_CODE,
+                served_provider = %violation.served_provider,
+                served_model = %violation.served_model,
+                requested_model = %ctx.route.model(),
+                "run_agent: a round was not served by the subscription route the run is pinned to; stopping the run"
+            );
+            ctx.route.stop();
+            return Ok(RoundsResult {
+                compaction_triggered,
+                outcome: RoundsOutcome::RouteUnavailable,
+                rounds_executed,
+                delegated_rounds,
+                grounded,
+            });
+        }
+
         // No tool calls → the model is ready to answer.
         if response.tool_calls.is_empty() {
+            concluded = concluding;
             answer = Some(response.content);
+            break;
+        }
+
+        // A concluding round was offered no tools, so a tool call here is a model
+        // that would not stop researching. It is not dispatched: there is no
+        // round left to read its result in, and running it would be work the
+        // budget does not cover. Whatever text came with it is the best
+        // conclusion the loop has; with none, the loop ends exhausted as before.
+        if concluding {
+            warn!(
+                run_id = %req.run_id,
+                depth = ctx.depth,
+                tool_calls = response.tool_calls.len(),
+                has_text = !response.content.trim().is_empty(),
+                "run_agent: a concluding round proposed tool calls although none were offered; \
+                 they are not dispatched"
+            );
+            if !response.content.trim().is_empty() {
+                concluded = true;
+                answer = Some(response.content);
+            }
             break;
         }
 
@@ -1308,6 +1752,30 @@ async fn run_rounds(
                     error: Some(
                         crate::runtime_loop::subagent_results::main_agent_only_refusal(&call.name),
                     ),
+                }));
+                continue;
+            }
+
+            // `plan.propose` puts a plan on the PERSON's approval surface, and a
+            // delegated subagent shares the parent's run id, identity and session
+            // credential — so without this its call would land as the run's newest
+            // proposal and displace the plan the main agent proposed (plan-gate's
+            // last-proposed-wins). The subagent is the context that reads the
+            // untrusted pages a delegation exists for; it investigates and reports,
+            // the main agent proposes. Not exempted like `subagent.*`: a plan is
+            // not a delegation, and this is the only depth rule that must hold
+            // regardless of the run's mode or rung.
+            if ctx.depth > 0 && crate::plan::is_plan_tool(&call.name) {
+                warn!(
+                    run_id = %req.run_id,
+                    depth = ctx.depth,
+                    tool = %call.name,
+                    "run_agent: rejecting a plan tool call from a delegated subagent"
+                );
+                slots.push(CallSlot::Rejected(ToolStepResult {
+                    name: call.name.clone(),
+                    output: String::new(),
+                    error: Some(crate::plan::main_agent_only_refusal(&call.name)),
                 }));
                 continue;
             }
@@ -1606,7 +2074,18 @@ async fn run_rounds(
             });
         }
 
-        if let Some(pending) = pending_pause {
+        // A run stopped on a route violation (a delegated child in this very
+        // batch may have just tripped it) never mints an approval: the pause
+        // would leave a durable request for a run that is over, and approving
+        // it would resume work on a route that was already shown to be wrong.
+        // The loop top reads the stop flag and ends the run instead. The gated
+        // call itself never ran (a gated call does not execute before approval).
+        // Only a pinned run can be stopped, so an unpinned run is unaffected.
+        // The same holds for a run-wide refusal a delegated child just met: the
+        // run is over, so it leaves no approval behind either.
+        if let Some(pending) = pending_pause
+            .filter(|_| !ctx.route.is_stopped() && ctx.refusal.latched().is_none())
+        {
             let paused = pause_for_approval(
                 ctx.state,
                 ctx.session_channel,
@@ -1646,8 +2125,21 @@ async fn run_rounds(
         });
     }
 
-    let outcome = if let Some(text) = answer {
-        RoundsOutcome::Answered(text)
+    // A stopped run never reports an answer, whichever loop stopped it.
+    let outcome = if ctx.route.is_stopped() {
+        RoundsOutcome::RouteUnavailable
+    } else if let Some(text) = answer {
+        // An answer this loop got from the pinned route stands even if a
+        // sibling met a run-wide refusal meanwhile: it is a real answer, and
+        // the run ends at the root's next loop top either way.
+        if concluded {
+            RoundsOutcome::Concluded(text)
+        } else {
+            RoundsOutcome::Answered(text)
+        }
+    } else if let Some(refusal) = ctx.refusal.latched() {
+        // Out of budget because a delegated child spent it on a refusal.
+        RoundsOutcome::InferFailed(Some(refusal))
     } else {
         warn!(
             run_id = %req.run_id,
@@ -1684,7 +2176,7 @@ struct LoopSubagentDispatch<'a, 'b> {
     shared_rounds_remaining: std::sync::Arc<std::sync::atomic::AtomicU32>,
     /// Delegations this RUN has started, across every round. Separate from
     /// `shared_rounds_remaining` on purpose — see
-    /// `subagent::MAX_TOTAL_CHILDREN`: one bounds work, the other bounds
+    /// `subagent::DEFAULT_MAX_CHILDREN`: one bounds work, the other bounds
     /// fan-out, and a run can hit either without the other.
     children_started: std::sync::Arc<std::sync::atomic::AtomicU32>,
     consumed: std::sync::atomic::AtomicU32,
@@ -1714,6 +2206,9 @@ impl<'a, 'b> LoopSubagentDispatch<'a, 'b> {
 #[tonic::async_trait]
 impl crate::subagent::SubagentDispatch for LoopSubagentDispatch<'_, '_> {
     async fn spawn(&self, tool_name: &str, tool_input: &str) -> Result<String, String> {
+        if tool_name == crate::subagent::research_fan_out::RESEARCH_TOOL_NAME {
+            return self.spawn_research_fan_out(tool_input).await;
+        }
         // Exclusive claim, not a load: `swap` atomically takes the ENTIRE
         // remaining pool and leaves 0 behind, in one RMW with no gap a
         // concurrent sibling could land in. A plain load-then-settle-later
@@ -1733,48 +2228,313 @@ impl crate::subagent::SubagentDispatch for LoopSubagentDispatch<'_, '_> {
         //
         // `fetch_add` returns the value BEFORE the increment, so concurrent
         // siblings each get a distinct index and exactly
-        // `MAX_TOTAL_CHILDREN` of them win. A refused claim is not given back:
-        // handing the slot back would let an unbounded number of refused
-        // attempts keep retrying into the same slot within one round.
+        // `self.parent.child_ceiling` of them win. A refused claim is not
+        // given back: handing the slot back would let an unbounded number of
+        // refused attempts keep retrying into the same slot within one round.
         let claimed = self
             .children_started
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        if let Err(refusal) = crate::subagent::guard_child_ceiling(claimed) {
+        if let Err(refusal) =
+            crate::subagent::guard_child_ceiling(claimed, self.parent.child_ceiling)
+        {
             warn!(
                 run_id = %self.parent.req.run_id,
                 started = claimed,
-                limit = crate::subagent::MAX_TOTAL_CHILDREN,
+                limit = self.parent.child_ceiling,
                 "run_agent: delegation refused by the per-run child ceiling"
             );
             return Err(refusal);
         }
-        let ceiling = self
+        let pool = self
             .shared_rounds_remaining
             .swap(0, std::sync::atomic::Ordering::Relaxed);
-        let (result, rounds) = run_subagent(
-            self.parent,
-            self.parent_step_id,
-            ceiling,
-            tool_name,
-            tool_input,
-        )
-        .await;
+        let (result, rounds) =
+            run_subagent(self.parent, self.parent_step_id, pool, tool_name, tool_input).await;
         self.consumed
             .fetch_add(rounds, std::sync::atomic::Ordering::Relaxed);
         result
     }
 }
 
-/// Delegation role recorded on the lineage edge. Every in-loop subagent is
-/// `GENERIC` today: the narrower `SubagentRole` values (coder, reviewer,
-/// researcher, explorer) belong to the orchestration surface, where a caller
-/// declares the role. Deriving one from a free-text tool label — `subagent.foo`
-/// → "researcher"? — would be guessing at semantics the model never stated, and
-/// a wrong role on a lineage graph is worse than an honest unspecified one.
+impl LoopSubagentDispatch<'_, '_> {
+    /// Dispatch a `subagent.research_fan_out` call.
+    ///
+    /// Depth and the round pool are claimed ONCE for the whole call, exactly
+    /// like any other sibling tool call in this round (a fan-out call is one
+    /// entry in `run_rounds`'s concurrent dispatch phase, not several). The
+    /// claimed pool is then PRE-DIVIDED across the declared items
+    /// (`research_fan_out::item_round_share`; owner ruling, 2026-09-28: unlike
+    /// an ad hoc `subagent.task` call, a fan-out call knows every item's goal
+    /// up front, so it can divide fairly instead of first-claim-wins — unfair
+    /// division was tolerable for eight possible children; it starves most of
+    /// a 40-item fan-out). One round of the pool is held back for THIS run's
+    /// own next round, so the parent can still read the digest and answer.
+    /// Each item then claims its OWN slot against the shared per-run child
+    /// ceiling, so a ceiling hit partway through degrades to "N ran, the rest
+    /// honestly refused" rather than an all-or-nothing failure.
+    ///
+    /// At most `research_fan_out::concurrency()` items are in flight at once
+    /// (owner default 4) — a second, independent knob from the total breadth
+    /// ceiling. Items beyond that wait for a permit and only then register
+    /// their child run, so the live panel shows the running items, not the
+    /// queue.
+    async fn spawn_research_fan_out(&self, tool_input: &str) -> Result<String, String> {
+        use crate::subagent::research_fan_out::{self, FanOutItemResult};
+
+        // The kill switch is checked here as well as at offer time
+        // (`merged_tool_defs`): a caller-declared tool of the same name is
+        // admitted to the allowlist by `append_untrusted_tool_defs` when the
+        // built-in is not offered, and would otherwise dispatch anyway.
+        if !research_fan_out::enabled() {
+            warn!(
+                run_id = %self.parent.req.run_id,
+                "run_agent: research_fan_out refused: switched off by {}",
+                research_fan_out::ENABLED_ENV
+            );
+            return Err(research_fan_out::disabled_refusal());
+        }
+        if let Err(refusal) = crate::subagent::guard_depth(self.parent.depth) {
+            warn!(
+                run_id = %self.parent.req.run_id,
+                depth = self.parent.depth,
+                "run_agent: research_fan_out refused by the recursion guard"
+            );
+            return Err(refusal);
+        }
+
+        let ceiling = self.parent.child_ceiling;
+        let request = research_fan_out::parse_fan_out(tool_input, ceiling)?;
+        let item_count = u32::try_from(request.items.len()).unwrap_or(u32::MAX);
+
+        let pool = self
+            .shared_rounds_remaining
+            .swap(0, std::sync::atomic::Ordering::Relaxed);
+
+        // Durable fields (agent id, log lines) carry the tool's own label, never
+        // the model-supplied item id: that is free text, and a lineage row is
+        // not the place to store it.
+        let label = crate::subagent::label(research_fan_out::RESEARCH_TOOL_NAME);
+        let batch_id = self.parent_step_id.to_owned();
+        let semaphore =
+            std::sync::Arc::new(tokio::sync::Semaphore::new(research_fan_out::concurrency()));
+        let consumed = std::sync::atomic::AtomicU32::new(0);
+        let max_rounds_per_item = request.max_rounds_per_item;
+        let result_schema_hint = request.result_schema_hint.as_deref();
+
+        let results: Vec<FanOutItemResult> = futures::future::join_all(
+            request.items.iter().enumerate().map(|(index, item)| {
+                let semaphore = std::sync::Arc::clone(&semaphore);
+                let batch_id = batch_id.as_str();
+                let consumed = &consumed;
+                async move {
+                    let _permit = semaphore
+                        .acquire()
+                        .await
+                        .expect("fan-out semaphore is never closed");
+                    // Resolve this item's share of the pool BEFORE claiming a
+                    // child-ceiling slot. It depends only on the item's index, so
+                    // no item's outcome depends on another's — but it matters
+                    // when the pool has fewer distributable rounds than items:
+                    // the items past the pool would fail regardless, and
+                    // claiming a ceiling slot first would burn the run's WHOLE
+                    // per-run child ceiling on items that never got a chance to
+                    // start a single nested loop. A ceiling slot is only ever
+                    // spent on an item that could actually run.
+                    let share = research_fan_out::item_round_share(
+                        pool,
+                        item_count,
+                        u32::try_from(index).unwrap_or(u32::MAX),
+                    );
+                    let budget = match crate::subagent::resolve_round_budget(
+                        share,
+                        max_rounds_per_item,
+                    ) {
+                        Ok(budget) => budget,
+                        Err(refusal) => return FanOutItemResult::refused(item, refusal),
+                    };
+                    let claimed = self
+                        .children_started
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    if let Err(refusal) = crate::subagent::guard_child_ceiling(claimed, ceiling) {
+                        warn!(
+                            run_id = %self.parent.req.run_id,
+                            started = claimed,
+                            limit = ceiling,
+                            // The position, never the id: the id is model-written
+                            // text, and a ZDR run's logs are not the place for it
+                            // (the same reason the durable agent id is a constant).
+                            item_index = index,
+                            "run_agent: research_fan_out item refused by the per-run child ceiling"
+                        );
+                        return FanOutItemResult::refused(item, refusal);
+                    }
+                    let item_step_id = format!("{}.{index}", self.parent_step_id);
+                    let prompt = research_fan_out::compose_item_prompt(item, result_schema_hint);
+                    let (result, rounds) = run_delegated_child(
+                        self.parent,
+                        &item_step_id,
+                        label,
+                        &item.goal,
+                        &prompt,
+                        budget,
+                        pb::SubagentRole::Researcher,
+                        Some(batch_id),
+                    )
+                    .await;
+                    consumed.fetch_add(rounds, std::sync::atomic::Ordering::Relaxed);
+                    match result {
+                        Ok(answer) => FanOutItemResult::ok(item, answer),
+                        Err(error) => FanOutItemResult::failed(item, error),
+                    }
+                }
+            }),
+        )
+        .await;
+
+        self.consumed.fetch_add(
+            consumed.load(std::sync::atomic::Ordering::Relaxed),
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        Ok(research_fan_out::merge(&results))
+    }
+}
+
+/// Delegation role recorded on the lineage edge for an ad hoc `subagent.task`
+/// call. The narrower `SubagentRole` values (coder, reviewer, explorer) still
+/// have no in-loop caller that declares them — deriving one from a free-text
+/// tool label would be guessing at semantics the model never stated, and a
+/// wrong role on a lineage graph is worse than an honest unspecified one.
+/// `subagent.research_fan_out` (wide-research fan-out, chat-wave2-specs
+/// 2026-09-28) is the first in-loop caller that DOES know its role — every
+/// item it spawns records `SubagentRole::Researcher` instead, see
+/// `LoopSubagentDispatch::spawn_research_fan_out`.
 const SUBAGENT_LINEAGE_ROLE: pb::SubagentRole = pb::SubagentRole::Generic;
 
 /// Mode recorded on a delegated child run.
 const SUBAGENT_RUN_MODE: &str = "execute";
+
+/// `AttachSubagentRequest.goal_summary` truncation bound (wide-research
+/// fan-out §2.4) — same order of magnitude as `integration_tools.rs`'s
+/// `MAX_RESULT_CHARS`-style bounds on other model/UI-facing text.
+const MAX_GOAL_SUMMARY_CHARS: usize = 200;
+
+/// Truncate a delegated goal for the lineage edge's `goal_summary`, on a char
+/// boundary so a multi-byte UTF-8 sequence is never split.
+fn truncate_goal_summary(goal: &str) -> String {
+    match goal.char_indices().nth(MAX_GOAL_SUMMARY_CHARS) {
+        Some((boundary, _)) => format!("{}…", &goal[..boundary]),
+        None => goal.to_owned(),
+    }
+}
+
+/// Longest `start_key` session-core's `StartManagedRun` accepts
+/// (`terminalization::MAX_START_KEY_BYTES`).
+const MANAGED_START_KEY_MAX_BYTES: usize = 128;
+
+/// The idempotency key a delegated child's managed run is started under.
+///
+/// # Why this is not just `<run_id>:<step_id>`
+///
+/// session-core validates the key against `[A-Za-z0-9_-]` and 128 bytes
+/// (`terminalization::validate_start_key`) and refuses anything else with
+/// `InvalidArgument`. The raw `<run_id>:<step_id>` this used to send carries a
+/// `:` — and a fan-out item's step id a `.` as well — so registration was
+/// REFUSED, and `register_delegated_child_run` treats a refusal as "proceed
+/// without a lineage record": no durable child run, no lineage edge, no attach
+/// event and no stop event, for every delegation. The panel that draws one card
+/// per fan-out item is fed by exactly those events, so it would have stayed
+/// empty against the real session-core while every test against a fake that
+/// accepts any string passed.
+///
+/// Every character outside the accepted set becomes `_`. That keeps the key
+/// stable across retries and derived from identifiers only. Two distinct
+/// (run, step) pairs cannot collapse onto one key in practice: the step id
+/// leads with a per-run sequence number (`tool_<n>_...`) that is unique to one
+/// tool call, and a fan-out item adds its index after it. A key too long for the
+/// limit keeps a readable prefix and ends in a digest of the full
+/// identifiers, so two long keys sharing a prefix stay apart and the result is
+/// still deterministic.
+fn managed_start_key(run_id: &str, step_id: &str) -> String {
+    let raw = format!("{run_id}:{step_id}");
+    let mapped: String = raw
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if mapped.len() <= MANAGED_START_KEY_MAX_BYTES {
+        return mapped;
+    }
+    // `mapped` is ASCII by construction, so slicing by byte index is safe.
+    let digest = blake3::hash(raw.as_bytes()).to_hex();
+    let digest = &digest.as_str()[..32];
+    let keep = MANAGED_START_KEY_MAX_BYTES - digest.len() - 1;
+    format!("{}-{digest}", &mapped[..keep])
+}
+
+/// Longest goal recorded on a delegated child's durable run. session-core
+/// accepts up to 64 KiB; a delegated goal is a label for the lineage, not a
+/// transcript.
+const DURABLE_GOAL_MAX_CHARS: usize = 4_000;
+
+/// A delegated goal as the durable run and its lineage edge record it.
+///
+/// session-core refuses a goal containing ANY control character
+/// (`terminalization::validate_managed_start_request`) — and a newline or a tab
+/// is one. A model writes a research question as multi-line prose all the time,
+/// so passing it verbatim made that delegation's registration fail and the child
+/// run vanish from the lineage (and, for a fan-out, its card from the panel)
+/// while it ran anyway. Control characters become spaces and the text is
+/// bounded; the nested loop is still seeded with the goal exactly as written.
+fn durable_goal(goal: &str) -> String {
+    let flattened: String = goal
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect();
+    truncate(flattened.trim(), DURABLE_GOAL_MAX_CHARS)
+}
+
+/// Longest part of a refusing service's message a warning carries.
+const STATUS_REASON_MAX_CHARS: usize = 200;
+
+/// Why a session-core call said no, as a log field: the status message.
+///
+/// The code alone cannot tell "the credential has no user" from "not your
+/// thread" (both `PermissionDenied`), and a warning that only said
+/// `PermissionDenied` is why the 2026-10-01 live proof logged three refusals
+/// nobody could explain without reading session-core. The message is
+/// session-core's own fixed sentence ("user-bound managed-run credential
+/// required", "invalid goal"), chosen there and never built from a
+/// request's content, so it is safe to log; it is also flattened to one line and
+/// bounded, so a long or odd one cannot become a content channel.
+fn status_reason(status: &tonic::Status) -> String {
+    let flattened: String = status
+        .message()
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect();
+    let flattened = flattened.trim();
+    if flattened.is_empty() {
+        return "(no message)".to_owned();
+    }
+    match flattened.char_indices().nth(STATUS_REASON_MAX_CHARS) {
+        Some((boundary, _)) => format!("{}…", &flattened[..boundary]),
+        None => flattened.to_owned(),
+    }
+}
+
+/// A delegation's durable child run, and whether this call created it.
+struct DelegatedChildRun {
+    run_id: String,
+    /// True when `StartManagedRun` replayed an existing run for this
+    /// `start_key`. The delegation has already happened once, so its recorded
+    /// outcome is the truth — see `resume_delegated_child_run`.
+    already_started: bool,
+}
 
 /// Register a delegation as a durable child run and record the lineage edge.
 ///
@@ -1788,12 +2548,46 @@ const SUBAGENT_RUN_MODE: &str = "execute";
 ///
 /// # Idempotency
 ///
-/// `start_key` is `<parent_run_id>:<parent_step_id>` — stable across retries of
-/// the same delegating tool call, and derived from identifiers only. The
-/// contract requires it not be derived from prompt or tool content, which also
-/// means it is safe to log. A replayed start returns `already_started`, so a
-/// re-attempted parent step reuses its child run instead of minting a second
-/// one and forking the lineage.
+/// `start_key` is [`managed_start_key`] of `<parent_run_id>` and
+/// `<parent_step_id>` — stable across retries of the same delegating tool call,
+/// and derived from identifiers only. The contract requires it not be derived
+/// from prompt or tool content, which also means it is safe to log. A replayed
+/// start returns `already_started`, so a re-attempted parent step reuses its
+/// child run instead of minting a second one and forking the lineage.
+///
+/// # Whose credential starts the child
+///
+/// The user's own: the run's delegated `aud=session-core` bearer
+/// (`LoopContext::session_bearer`), the very credential the gateway started the
+/// parent run under. A child run is a durable record under the parent's own user
+/// and thread, and `StartManagedRun` is user-bound by design: session-core
+/// refuses a caller with no user id ("user-bound managed-run credential
+/// required"), takes the run's owner from the credential rather than from the
+/// request, and for a non-ZDR caller also requires the `session:write`
+/// operation and ownership of the thread.
+///
+/// This used to present Execution Core's fixed-scope service token
+/// (`ManagedRunTokenProvider::terminalize_token`), which is a SERVICE credential
+/// and carries no user id. session-core refused every delegation of the live
+/// 2026-10-01 wide-research run with `PermissionDenied`, three of three, and
+/// the child run, its lineage edge and its stop event all vanished with it.
+/// The service token's job starts later, where it belongs: it SETTLES the child
+/// (`settle_delegated_child_run`), which session-core allows only to the
+/// source's owning workload. Start under the user, settle under the service:
+/// the split the parent run already has (the gateway starts it under the user's
+/// bearer, Execution Core terminalizes it with its terminalizer). No scope is
+/// widened and no service principal speaks for a user.
+///
+/// # Zero-retention runs
+///
+/// A ZDR run was promised no durable trace, so its delegation registers
+/// nothing: no child run, no lineage edge, no stop event and no stored answer.
+/// That is what happened to every ZDR delegation before this credential was
+/// corrected (the service token was refused for want of a user), and it is
+/// stated here rather than left to session-core's refusal. A ZDR start would
+/// also be refused there for another reason: a ZDR run takes a fresh
+/// metadata-only thread, never an existing one. The delegated work itself
+/// still runs and its answer still reaches the parent.
 ///
 /// # Failure posture
 ///
@@ -1801,59 +2595,54 @@ const SUBAGENT_RUN_MODE: &str = "execute";
 /// proceeds unrecorded. The
 /// subagent's work is what the user asked for; losing its lineage row is a
 /// bookkeeping regression, not a reason to refuse the task. Every failure is a
-/// warning with the parent run and step, so an unrecorded delegation is
-/// diagnosable rather than invisible.
-/// A delegation's durable child run, and whether this call created it.
-struct DelegatedChildRun {
-    run_id: String,
-    /// True when `StartManagedRun` replayed an existing run for this
-    /// `start_key`. The delegation has already happened once, so its recorded
-    /// outcome is the truth — see `resume_delegated_child_run`.
-    already_started: bool,
-}
-
+/// warning with the parent run and step and with session-core's own reason
+/// ([`status_reason`]), so an unrecorded delegation is diagnosable rather than
+/// invisible.
+#[allow(clippy::too_many_lines)] // one delegation's whole registration: start, edge, log
 async fn register_delegated_child_run(
     parent: &LoopContext<'_>,
     parent_step_id: &str,
     label: &str,
     goal: &str,
+    role: pb::SubagentRole,
+    batch_id: Option<&str>,
 ) -> Option<DelegatedChildRun> {
-    let token = match parent
-        .terminal_tokens
-        .terminalize_token(&parent.req.org_id)
-        .await
-    {
-        Ok(token) => token,
-        Err(error) => {
-            warn!(
-                run_id = %parent.req.run_id,
-                step_id = parent_step_id,
-                %error,
-                "run_agent: no managed credential to register the delegated child run; \
-                 delegation proceeds without a lineage record"
-            );
-            return None;
-        }
-    };
+    if parent.req.zdr {
+        info!(
+            run_id = %parent.req.run_id,
+            step_id = parent_step_id,
+            "run_agent: zero-retention run; the delegated child is not registered as a durable \
+             run (no child run, lineage edge, stop event or stored answer)"
+        );
+        return None;
+    }
 
-    let start_key = format!("{}:{}", parent.req.run_id, parent_step_id);
+    let start_key = managed_start_key(&parent.req.run_id, parent_step_id);
+    let goal = durable_goal(goal);
     let request = match authenticated_session_request(
         pb::StartManagedRunRequest {
             thread_id: parent.req.thread_id.clone(),
             parent_run_id: parent.req.run_id.clone(),
             agent_id: label.to_owned(),
-            goal: goal.to_owned(),
+            goal: goal.clone(),
             mode: SUBAGENT_RUN_MODE.to_owned(),
             org_id: parent.req.org_id.clone(),
             user_id: parent.req.user_id.clone(),
             start_key: start_key.clone(),
             terminal_source: pb::ManagedRunSource::ExecutionAgent as i32,
         },
-        Some(&token),
+        parent.session_bearer,
     ) {
         Ok(request) => request,
         Err(error) => {
-            warn!(run_id = %parent.req.run_id, %error, "run_agent: child-run request not forwardable");
+            warn!(
+                run_id = %parent.req.run_id,
+                step_id = parent_step_id,
+                code = ?error.code(),
+                reason = %status_reason(&error),
+                "run_agent: no delegated user credential to register the delegated child run; \
+                 delegation proceeds without a lineage record"
+            );
             return None;
         }
     };
@@ -1868,6 +2657,7 @@ async fn register_delegated_child_run(
                 run_id = %parent.req.run_id,
                 step_id = parent_step_id,
                 code = ?error.code(),
+                reason = %status_reason(&error),
                 "run_agent: could not register the delegated child run; delegation \
                  proceeds without a lineage record"
             );
@@ -1879,12 +2669,31 @@ async fn register_delegated_child_run(
     // `subagent_edges` are two representations of the same relation, and the
     // lineage endpoint reads only the latter. A child run without its edge is
     // still durable and still terminalized; it is just missing from the graph.
+    //
+    // ZDR runs get no durable copy of the goal text here either — same posture
+    // as `record_delegated_child_answer`/`record_delegation_memory` below: the
+    // run was promised no durable trace, and a truncated goal is still the
+    // user's own content, now ALSO broadcast live over the orchestration SSE
+    // stream (`orchestration_grpc::attach_subagent`). Empty is already a
+    // supported value (see `AttachSubagentRequest.goal_summary`'s own doc
+    // comment), so a ZDR run simply looks like an older caller that never set
+    // the field — the live panel already falls back to the bare "attached"
+    // label for that case. (A ZDR run registers no child at all, above, so this
+    // branch is not reached today; it stays so that a future ZDR registration
+    // cannot broadcast goal text by default.)
+    let goal_summary = if parent.req.zdr {
+        String::new()
+    } else {
+        truncate_goal_summary(&goal)
+    };
     match authenticated_session_request(
         pb::AttachSubagentRequest {
             thread_id: parent.req.thread_id.clone(),
             parent_run_id: parent.req.run_id.clone(),
             child_run_id: started.run_id.clone(),
-            role: SUBAGENT_LINEAGE_ROLE as i32,
+            role: role as i32,
+            goal_summary,
+            batch_id: batch_id.unwrap_or_default().to_owned(),
         },
         parent.session_bearer,
     ) {
@@ -1902,6 +2711,7 @@ async fn register_delegated_child_run(
                         run_id = %parent.req.run_id,
                         child_run_id = %started.run_id,
                         code = ?error.code(),
+                        reason = %status_reason(&error),
                         "run_agent: delegated child run registered but its lineage edge was not"
                     );
                 }
@@ -1940,7 +2750,7 @@ enum ReplayedDelegation {
 ///
 /// # Why a replay must not re-run
 ///
-/// `start_key` is `<parent_run_id>:<parent_step_id>` — identifiers only — so a
+/// `start_key` is [`managed_start_key`] of the run and step ids — identifiers only — so a
 /// re-driven parent step (an approval resume, a redelivered request) reuses its
 /// child run rather than forking the lineage. That is the right identity
 /// behaviour, and it makes re-running the loop actively wrong: the child run
@@ -2017,12 +2827,31 @@ async fn resume_delegated_child_run(
     ))
 }
 
+/// The failure code a delegated child run is settled under when it failed.
+///
+/// Session-core records a receipt only for a code in its fixed vocabulary
+/// (`terminalization::ALLOWED_FAILURE_CODES`, mirrored by the outbox table's
+/// CHECK) and answers any other with `InvalidArgument`. This used to be
+/// `subagent_failed`, a word of this loop's own, so every FAILED child's receipt
+/// was refused and the child sat open until the deadline watchdog force-failed
+/// it as `outcome_unknown`. The generic execution failure is what the parent
+/// run itself records for the same kind of end, and a child's receipt carries
+/// no more detail than that by design (the reason travels to the parent as the
+/// delegating tool's error, not on the receipt).
+const CHILD_FAILURE_CODE: &str = "execution_failed";
+
 /// Settle a delegated child run's managed obligation.
 ///
 /// A managed run is born with a terminalization obligation carrying a deadline;
 /// leaving one unsettled means a watchdog eventually force-fails it. So this
 /// runs on EVERY delegation outcome, including refusals and failures — the
 /// child run must reach a terminal state by the same path that created it.
+///
+/// The receipt is the one call of the delegation that IS the terminalizer's:
+/// session-core accepts it only from the workload that owns the run's source
+/// (`ManagedRunSource::ExecutionAgent`, principal `service:execution-core`,
+/// scope `session:terminalize`), which is why it is signed with the service
+/// token while the child was started under the user's bearer.
 async fn settle_delegated_child_run(parent: &LoopContext<'_>, child_run_id: &str, success: bool) {
     let token = match parent
         .terminal_tokens
@@ -2047,7 +2876,7 @@ async fn settle_delegated_child_run(parent: &LoopContext<'_>, child_run_id: &str
             failure_code: if success {
                 String::new()
             } else {
-                "subagent_failed".to_owned()
+                CHILD_FAILURE_CODE.to_owned()
             },
         },
         Some(&token),
@@ -2065,8 +2894,78 @@ async fn settle_delegated_child_run(parent: &LoopContext<'_>, child_run_id: &str
         warn!(
             child_run_id,
             code = ?error.code(),
+            reason = %status_reason(&error),
             "run_agent: delegated child run left unsettled; the managed deadline \
              watchdog will terminalize it"
+        );
+    }
+}
+
+/// Tell the delegating run's live event stream that a child has stopped.
+///
+/// # Why this exists
+///
+/// A live panel shows one card per delegated item and moves it from "running"
+/// to "done"/"failed" on the child's stop. But `SubagentStopped` had no
+/// producer outside tests, and no way to be delivered even if it had: the
+/// stream a browser watches carries an event only when the event NAMES the run
+/// it belongs to, and a stop named only the child. Settling the child run (the
+/// managed terminal receipt above) is durable but does not touch the stream, so
+/// every card would have sat on "running" until the whole run ended and then
+/// read "did not finish" — including the items that succeeded.
+///
+/// # Posture
+///
+/// Best-effort, like the lineage edge announcing the same child: the receipt is
+/// what is audited, this only drives a display. A failed announcement is a
+/// warning, and the card then falls back to the honest "did not finish" when
+/// the run ends rather than a spinner. It carries identifiers and a status word
+/// only — no goal, no answer. (A ZDR run registers no child, so it announces no
+/// stop; session-core also refuses orchestration writes for a ZDR credential.)
+async fn announce_delegated_child_stopped(
+    parent: &LoopContext<'_>,
+    child_run_id: &str,
+    success: bool,
+) {
+    let request = match authenticated_session_request(
+        pb::RecordOrchestrationEventRequest {
+            event: Some(pb::OrchestrationEvent {
+                // session-core assigns the event id and the timestamp.
+                event_id: String::new(),
+                at: None,
+                event: Some(pb::orchestration_event::Event::SubagentStopped(
+                    pb::orchestration_event::SubagentStopped {
+                        child_run_id: child_run_id.to_owned(),
+                        status: if success { "completed" } else { "failed" }.to_owned(),
+                        parent_run_id: parent.req.run_id.clone(),
+                    },
+                )),
+            }),
+        },
+        parent.session_bearer,
+    ) {
+        Ok(request) => request,
+        Err(error) => {
+            warn!(
+                run_id = %parent.req.run_id,
+                child_run_id,
+                %error,
+                "run_agent: child stop announcement not forwardable"
+            );
+            return;
+        }
+    };
+    if let Err(error) = OrchestrationCoreServiceClient::new(parent.session_channel.clone())
+        .record_orchestration_event(request)
+        .await
+    {
+        warn!(
+            run_id = %parent.req.run_id,
+            child_run_id,
+            code = ?error.code(),
+            reason = %status_reason(&error),
+            "run_agent: delegated child stop not announced on the run stream; its live card \
+             will read 'did not finish' once the run ends"
         );
     }
 }
@@ -2105,6 +3004,80 @@ async fn run_subagent(
         Ok(budget) => budget,
         Err(error) => return (Err(error), 0),
     };
+    run_delegated_child(
+        parent,
+        parent_step_id,
+        label,
+        &task.goal,
+        &task.goal,
+        budget,
+        SUBAGENT_LINEAGE_ROLE,
+        None,
+    )
+    .await
+}
+
+/// Run ONE delegated child to a final answer by re-entering [`run_rounds`],
+/// shared by an ad hoc `subagent.task` call ([`run_subagent`], depth guard and
+/// budget already resolved by its own caller) and by every item a
+/// `subagent.research_fan_out` call spawns
+/// (`LoopSubagentDispatch::spawn_research_fan_out`, one call per item with its
+/// own pre-divided budget). `role` and `batch_id` are what tells the two
+/// callers apart on the lineage graph.
+///
+/// `goal` is what was ASKED — it is what the durable child run, the lineage
+/// edge and the delegation memory record. `prompt` is what the nested loop is
+/// SEEDED with: identical to `goal` for an ad hoc `subagent.task`, and the goal
+/// plus the fan-out's shared research/citation instructions for a fan-out item,
+/// so that boilerplate never gets recorded as though the user or the model had
+/// asked it.
+///
+/// Returns the rounds consumed alongside the result — including on failure —
+/// because the caller must charge them either way.
+#[allow(clippy::too_many_arguments)] // a cohesive description of one delegation
+async fn run_delegated_child(
+    parent: &LoopContext<'_>,
+    step_id: &str,
+    label: &str,
+    goal: &str,
+    prompt: &str,
+    budget: u32,
+    role: pb::SubagentRole,
+    batch_id: Option<&str>,
+) -> (Result<String, String>, u32) {
+    // A run-wide refusal (a spent usage limit, an expired sign-in) that another
+    // loop of the run already met ends the run: this delegation is not started,
+    // so it neither registers a durable child run nor spends a round to be
+    // refused again. A fan-out item still waiting for its permit lands here.
+    if let Some(refusal) = parent.refusal.latched() {
+        return (
+            Err(format!(
+                "subagent '{label}' was not started: the run was stopped by the ChatGPT \
+                 subscription route ({})",
+                refusal.code
+            )),
+            0,
+        );
+    }
+    // The same for the run's time budget: a delegation that would begin after
+    // the limit has passed is not started, so it registers no durable child run
+    // for work that never happened and spends no round. A fan-out item still
+    // waiting for its permit lands here.
+    if let Some(cause) = parent.deadline.expired() {
+        warn!(
+            run_id = %parent.req.run_id,
+            depth = parent.depth,
+            subagent = %label,
+            cause = cause.as_str(),
+            "run_agent: delegation not started; the run's time budget is spent"
+        );
+        return (
+            Err(format!(
+                "subagent '{label}' was not started: the run reached its time limit"
+            )),
+            0,
+        );
+    }
 
     // Register the delegation as a durable child run BEFORE any work happens,
     // so a lineage row exists even for a delegation that then fails. The child
@@ -2113,7 +3086,8 @@ async fn run_subagent(
     // under the prefix the Agent Run Console follows, which is a console-visible
     // change and a separate decision. What the child run carries is the
     // delegation's own identity, goal, parent edge and terminal outcome.
-    let delegation = register_delegated_child_run(parent, parent_step_id, label, &task.goal).await;
+    let delegation =
+        register_delegated_child_run(parent, step_id, label, goal, role, batch_id).await;
 
     // A replay is a delegation that already happened. Its recorded outcome is
     // the truth, and re-running it would fork the answer from the immutable
@@ -2149,13 +3123,22 @@ async fn run_subagent(
         cas_client: parent.cas_client,
         sandbox_tokens: parent.sandbox_tokens,
         process_host: parent.process_host,
-        agent_model: parent.agent_model.clone(),
+        // The parent's route, not one derived again: a delegated child runs on
+        // exactly the provider, connection and model its parent does, and
+        // shares its stop flag.
+        route: parent.route.clone(),
+        // The parent's latch, shared: a refusal met in this child stops its
+        // siblings and the parent, and one met elsewhere stops this child.
+        refusal: parent.refusal.clone(),
         permission_wire: parent.permission_wire,
         depth: parent.depth + 1,
         // Hang the child's step ids off the delegating call's step id so the
         // Agent Run Console attributes delegated work to the call that caused
         // it, and so two sibling subagents cannot collide.
-        step_prefix: format!("{parent_step_id}."),
+        step_prefix: format!("{step_id}."),
+        child_ceiling: parent.child_ceiling,
+        // The parent's deadline, copied: one limit for the whole run.
+        deadline: parent.deadline,
     };
 
     info!(
@@ -2166,7 +3149,7 @@ async fn run_subagent(
         "run_agent: delegating to subagent (isolated context)"
     );
 
-    let rounds_result = run_rounds(&child, &task.goal, budget).await;
+    let rounds_result = run_rounds(&child, prompt, budget).await;
     let (outcome, rounds) = match rounds_result {
         Ok(result) => {
             let rounds = result.total_rounds();
@@ -2178,10 +3161,23 @@ async fn run_subagent(
                     // conversation can recall "we already investigated X".
                     // Fire-and-forget and non-ZDR only — the parent's answer
                     // must never wait on, or fail because of, a memory write.
-                    record_delegation_memory(parent, &task.goal, &text);
+                    record_delegation_memory(parent, goal, &text);
                     (Ok(text), rounds)
                 }
-                RoundsOutcome::Answered(_) => (
+                // The subagent used its whole budget on research and was then
+                // made to answer without tools. What it gathered is kept and
+                // handed to the parent, labelled as partial — before this it
+                // ended `Exhausted` and the findings were lost with the loop.
+                //
+                // No delegation memory is written for it: that memory exists so a
+                // later conversation can recall what an investigation CONCLUDED,
+                // and a partial result recalled as "we already investigated X"
+                // would read as settled. The parent still gets the findings, and
+                // the child run keeps them.
+                RoundsOutcome::Concluded(text) if !text.trim().is_empty() => {
+                    (Ok(label_concluded_answer(&text, budget)), rounds)
+                }
+                RoundsOutcome::Answered(_) | RoundsOutcome::Concluded(_) => (
                     Err(format!("subagent '{label}' returned an empty answer")),
                     rounds,
                 ),
@@ -2192,9 +3188,39 @@ async fn run_subagent(
                     )),
                     rounds,
                 ),
-                RoundsOutcome::InferFailed => (
+                RoundsOutcome::InferFailed(None) => (
                     Err(format!(
                         "subagent '{label}' failed: inference was unavailable"
+                    )),
+                    rounds,
+                ),
+                // A refusal from the pinned subscription route. A run-wide one
+                // is already latched (the siblings and the parent stop on it);
+                // a per-round one (a throttle, a transient upstream failure)
+                // fails only this delegation and leaves the parent to decide.
+                RoundsOutcome::InferFailed(Some(refusal)) => (
+                    Err(format!(
+                        "subagent '{label}' failed: inference was unavailable ({})",
+                        refusal.code
+                    )),
+                    rounds,
+                ),
+                // The whole run is stopped (the flag is shared), so this is
+                // the last thing the parent's loop reads before it stops too.
+                RoundsOutcome::RouteUnavailable => (
+                    Err(format!(
+                        "subagent '{label}' failed: the run's inference route was unavailable"
+                    )),
+                    rounds,
+                ),
+                // The run's time budget passed before this child could start
+                // another round. Every loop shares the deadline, so the parent
+                // stops at its own next loop top; this is the tool result it
+                // would read if it somehow got one more.
+                RoundsOutcome::OutOfTime => (
+                    Err(format!(
+                        "subagent '{label}' stopped at the run's time limit without reaching \
+                         an answer"
                     )),
                     rounds,
                 ),
@@ -2231,6 +3257,9 @@ async fn run_subagent(
     // deadline watchdog, so every path that created a child run must close it.
     if let Some(child) = delegation.as_ref() {
         settle_delegated_child_run(parent, &child.run_id, outcome.is_ok()).await;
+        // After the durable receipt, never before: the display must not claim a
+        // stop the ledger has not recorded.
+        announce_delegated_child_stopped(parent, &child.run_id, outcome.is_ok()).await;
     }
     (outcome, rounds)
 }
@@ -2246,6 +3275,20 @@ async fn run_subagent(
 /// checks exist on purpose: the caller knows the run's posture without a round
 /// trip, and session-core fails closed for a zero-retention credential anyway —
 /// so neither side depends on the other being right.
+///
+/// # Whose credential writes the answer
+///
+/// The run owner's own bearer, not the terminalizer's. `RecordRunOutput` is the
+/// one content-carrying call of the managed lifecycle, so session-core asks for
+/// the `session:write` operation and for the caller to own the run; Execution
+/// Core's service principal is granted only `session:heartbeat`,
+/// `session:terminalize` and `approval:deliver` on this audience, so under its
+/// token this call would be refused (`PermissionDenied`, "service scope
+/// required") even once the child run exists. The child run belongs to the
+/// parent's user (it was started under the user's bearer), so that bearer is
+/// entitled to write its answer, and it is the credential every other durable
+/// write of this delegation (`AttachSubagent`, the delegation memory) already
+/// uses.
 async fn record_delegated_child_answer(parent: &LoopContext<'_>, child_run_id: &str, answer: &str) {
     if parent.req.zdr {
         return;
@@ -2253,23 +3296,12 @@ async fn record_delegated_child_answer(parent: &LoopContext<'_>, child_run_id: &
     if answer.trim().is_empty() {
         return;
     }
-    let token = match parent
-        .terminal_tokens
-        .terminalize_token(&parent.req.org_id)
-        .await
-    {
-        Ok(token) => token,
-        Err(error) => {
-            warn!(child_run_id, %error, "run_agent: no credential to record the delegated answer");
-            return;
-        }
-    };
     let request = match authenticated_session_request(
         pb::RecordRunOutputRequest {
             run_id: child_run_id.to_owned(),
             output: answer.to_owned(),
         },
-        Some(&token),
+        parent.session_bearer,
     ) {
         Ok(request) => request,
         Err(error) => {
@@ -2293,6 +3325,7 @@ async fn record_delegated_child_answer(parent: &LoopContext<'_>, child_run_id: &
         Err(error) => warn!(
             child_run_id,
             code = ?error.code(),
+            reason = %status_reason(&error),
             "run_agent: delegated answer not durably recorded; a resumed parent will \
              see that this child finished but not what it concluded"
         ),
@@ -2355,19 +3388,6 @@ fn record_delegation_memory(parent: &LoopContext<'_>, goal: &str, outcome: &str)
             warn!(%run_id, error = %status.message(), "delegation memory write failed (best-effort)");
         }
     });
-}
-
-/// Resolve the model the agentic loop drives. Autonomous, tool-using runs need
-/// a tool-following model; a weak chat-tier model under-elects tools. When
-/// `EXECUTION_AGENT_MODEL` is set (e.g. "verevon-balance"), it becomes the
-/// agentic run's model so inference-core's intent layer picks a tool-capable
-/// model (the classifier upgrades complexity when tools are offered). Empty /
-/// unset → the requested model is honored unchanged.
-fn resolve_agent_model(requested: &str) -> String {
-    match std::env::var("EXECUTION_AGENT_MODEL") {
-        Ok(value) if !value.trim().is_empty() => value.trim().to_owned(),
-        _ => requested.to_owned(),
-    }
 }
 
 /// Resolve the request's wire mode into a posture. Deployed agents default to
@@ -2511,6 +3531,31 @@ mod system_prompt_composition {
 
     fn offered(names: &[&str]) -> BTreeSet<String> {
         names.iter().map(|name| (*name).to_owned()).collect()
+    }
+
+    /// Every offered tool's parameter schema is valid JSON describing an object.
+    ///
+    /// The ChatGPT subscription route renders each schema into the proposal
+    /// protocol and refuses the whole round ("invalid subscription tool
+    /// parameters") when one does not parse, so a single malformed built-in
+    /// takes every agentic Terra run down on its first round. A raw string
+    /// makes that easy to do: `description` text with bare quotes in it ends
+    /// the JSON string early, and nothing else checks it.
+    #[test]
+    fn every_offered_tool_has_a_parameter_schema_that_is_a_json_object() {
+        let mut all = offered_tool_defs();
+        all.extend(super::process_tool_defs());
+        for def in &all {
+            let parsed: serde_json::Value = serde_json::from_str(&def.parameters_json)
+                .unwrap_or_else(|error| {
+                    panic!("{}: parameters_json is not valid JSON: {error}", def.name)
+                });
+            assert_eq!(
+                parsed["type"], "object",
+                "{}: the schema must describe an object",
+                def.name
+            );
+        }
     }
 
     /// The core is unconditional; nothing tool-specific is.
@@ -2818,22 +3863,32 @@ mod capability_binding_contract {
             })
             .collect();
 
-        let attesting_bodies: String = ["pub fn attestable(", "pub fn memory_attestations("]
-            .iter()
-            .map(|signature| {
-                let start = attestor
-                    .find(signature)
-                    .unwrap_or_else(|| panic!("`{signature}` is gone; re-point this test"));
-                let rest = &attestor[start..];
-                // Up to the next top-level item — enough to cover the body.
-                let end = rest[1..]
-                    .find("\npub fn ")
-                    .or_else(|| rest[1..].find("\nfn "))
-                    .map_or(rest.len(), |at| at + 1);
-                rest[..end].to_owned()
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
+        let attesting_bodies: String = [
+            "pub fn attestable(",
+            "pub fn memory_attestations(",
+            "pub fn retrieval_attestations(",
+            "pub fn web_attestations(",
+        ]
+        .iter()
+        .map(|signature| {
+            let start = attestor
+                .find(signature)
+                .unwrap_or_else(|| panic!("`{signature}` is gone; re-point this test"));
+            let rest = &attestor[start..];
+            // Up to the NEAREST top-level terminator — a following item or the
+            // closing brace at column 0. Taking `\npub fn` in preference to a
+            // nearer `\nfn` let a body spill across unrelated functions, so a
+            // deleted attestation could still "resolve" through a constant named
+            // further down.
+            let end = ["\npub fn ", "\nfn ", "\nasync fn ", "\npub async fn ", "\n}"]
+                .iter()
+                .filter_map(|terminator| rest[1..].find(terminator))
+                .min()
+                .map_or(rest.len(), |at| at + 1);
+            rest[..end].to_owned()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
 
         let attested: Vec<&str> = const_ids
             .iter()
@@ -2864,6 +3919,13 @@ mod capability_binding_contract {
         // stop the list from GROWING, which is what caught cap.memory.* and
         // cap.agent.spawn. Removing an entry requires naming the reporter that
         // attests it.
+        //
+        // Removed 2026-10-01, reporter named: `cap.retrieval.query`
+        // (execution-core's `retrieval_attestations`, probed against the Data
+        // Plane retrieval engine) and `cap.tool.http` (execution-core's
+        // `web_attestations`, probed against quarry-edge and the Quarry
+        // credentials dispatch mints). Both are now resolved from
+        // `health_attest.rs` like every other attested id, not exempted here.
         // VERIFIED elsewhere — a named reporter was confirmed to attest these
         // (2026-08-26 verification: shipping-core and conversation-core each run
         // a Go `capabilityhealth` reporter on their own route/scope).
@@ -2887,11 +3949,9 @@ mod capability_binding_contract {
             "cap.tool.shipping.track",
             "cap.tool.social.read",
             "cap.tool.social.publish",
-            "cap.retrieval.query",
             "cap.tool.provider.read",
             "cap.tool.provider.execute",
             "cap.browser.open",
-            "cap.tool.http",
             "cap.skill.summarize",
             "cap.agent.lineage.read",
         ];
@@ -3096,7 +4156,7 @@ fn offered_tool_defs() -> Vec<pb::ToolDefinition> {
         pb::ToolDefinition {
             name: "publish_social_post".to_owned(),
             description: "Create a social media post in Verevon's Social workspace and request its publish to the chosen platforms. This is a REAL outbound action and always requires human approval — first in this run, and the post then waits for workspace approval under Social → Approvals before anything goes live (report that honestly; never claim content is already published). Use platform keys from list_social_accounts. Optional scheduled_at (RFC 3339) schedules instead of publishing immediately.".to_owned(),
-            parameters_json: r#"{"type":"object","properties":{"title":{"type":"string","description":"Optional internal title for the workspace"},"body":{"type":"string","description":"The post text"},"platforms":{"type":"array","items":{"type":"string"},"description":"Platform keys from list_social_accounts, e.g. ["linkedin","meta"]"},"scheduled_at":{"type":"string","description":"Optional RFC 3339 publish time"},"media":{"type":"array","items":{"type":"object"},"description":"Optional media refs, e.g. [{"type":"image","url":"https://…"}]"}},"required":["body","platforms"]}"#.to_owned(),
+            parameters_json: r#"{"type":"object","properties":{"title":{"type":"string","description":"Optional internal title for the workspace"},"body":{"type":"string","description":"The post text"},"platforms":{"type":"array","items":{"type":"string"},"description":"Platform keys from list_social_accounts, e.g. [\"linkedin\",\"meta\"]"},"scheduled_at":{"type":"string","description":"Optional RFC 3339 publish time"},"media":{"type":"array","items":{"type":"object"},"description":"Optional media refs, e.g. [{\"type\":\"image\",\"url\":\"https://…\"}]"}},"required":["body","platforms"]}"#.to_owned(),
         },
         pb::ToolDefinition {
             name: "knowledge_search".to_owned(),
@@ -3169,21 +4229,6 @@ fn offered_tool_defs() -> Vec<pb::ToolDefinition> {
             description: "Save ONE durable fact to long-term memory so future conversations can recall it: a standing preference, constraint, decision, or identifier the user will expect you to remember (e.g. 'invoices must be in NOK', 'the project reference code is ZX-88214'). Do NOT save transient task state, tool output, or anything the user asked to keep private. Unavailable on Zero-Data-Retention runs.".to_owned(),
             parameters_json: r#"{"type":"object","properties":{"content":{"type":"string","description":"The single fact to remember, self-contained and concise"},"topic":{"type":"string","description":"Optional short topic label, e.g. PREFERENCE, CONSTRAINT, IDENTIFIER"}},"required":["content"]}"#.to_owned(),
         },
-        // Delegation. This definition is what makes `run_subagent` reachable
-        // first-party: dispatch is prefix-matched on `subagent.`
-        // (`crate::subagent::is_subagent_tool`), the capability binding
-        // (`subagent.*` → cap.agent.spawn) has been seeded since migration
-        // 0008, `SNIPPET_SUBAGENT` gates on this name being offered — and yet
-        // no catalogue advertised any `subagent.*` name, so the entire
-        // delegation arc (nested loop, lineage, cold resume, replay semantics)
-        // was reachable only by an API caller declaring the tool themselves.
-        // Verified 2026-08-26: every prior `subagent.` literal was a policy
-        // mapping or inside #[cfg(test)].
-        pb::ToolDefinition {
-            name: "subagent.task".to_owned(),
-            description: "Delegate ONE self-contained sub-task to a fresh subagent that runs its own bounded tool loop and returns only its conclusion. The subagent starts with NO view of this conversation, so state the goal completely and include every fact it needs. Delegate only work that is genuinely separable (a research question, a bounded computation over tools); do the rest yourself. Costs rounds from this run's own budget and requires approval like other real-effect capabilities.".to_owned(),
-            parameters_json: r#"{"type":"object","properties":{"goal":{"type":"string","description":"The complete, self-contained task for the subagent"},"max_rounds":{"type":"integer","description":"Optional cap on the subagent's tool rounds"}},"required":["goal"]}"#.to_owned(),
-        },
         pb::ToolDefinition {
             name: "recall_memory".to_owned(),
             description: "Search long-term memory for facts saved in earlier conversations: preferences, constraints, decisions, identifiers. Use when the task references something the user established before ('the usual carrier', 'my reference code'). Returns matching memories or an honest no_memories status — treat an empty result as 'not recorded', never as proof it was never said.".to_owned(),
@@ -3225,7 +4270,21 @@ fn offered_tool_defs() -> Vec<pb::ToolDefinition> {
         pb::ToolDefinition {
             name: "subagent.task".to_owned(),
             description: "Delegate a self-contained sub-task to a subagent that runs its own tool loop with the SAME tools you have, then returns only its final answer. Its work happens in an isolated context, so use it when a sub-task needs many tool calls whose intermediate output you do not need (e.g. 'find every carrier that ships dangerous goods to Svalbard and summarise the cheapest'). Give it one clear, self-contained goal — it cannot see this conversation, cannot ask you questions, and cannot delegate further (nesting is capped at one level). It may ONLY use read/analysis tools: any side-effecting or destructive action (delete, write, send, deploy, book, publish, execute a provider action, drive a browser, run a shell command, ...) is refused outright, even if this run's own permission mode is 'auto' — delegating that kind of step does not skip its gate, it just fails, so do it yourself instead. Its rounds come out of THIS run's budget, so do not delegate work you can do in a call or two yourself.".to_owned(),
-            parameters_json: r#"{"type":"object","properties":{"goal":{"type":"string","description":"The complete, self-contained task for the subagent, including any context it needs"},"max_rounds":{"type":"integer","minimum":1,"description":"Optional cap on the subagent's tool rounds; capped by this run's remaining budget"}},"required":["goal"]}"#.to_owned(),
+            parameters_json: r#"{"type":"object","properties":{"goal":{"type":"string","description":"The complete, self-contained task for the subagent, including any context it needs"},"max_rounds":{"type":"integer","minimum":1,"description":"Optional cap on the subagent's rounds, counting the final round in which it must answer without tools (so 3 allows two rounds of tool use; a cap of 1 is a single round that keeps its tools); capped by this run's remaining budget"}},"required":["goal"]}"#.to_owned(),
+        },
+        // Wide-research fan-out (chat-wave2-specs, 2026-09-28). Same
+        // delegation contract as `subagent.task` (isolated context, read/
+        // analysis tools only, capped at one nesting level, rounds come out
+        // of this run's own budget) but for N self-contained items in ONE
+        // call, each run as its own `SubagentRole::Researcher`-tagged child
+        // and merged into one structured digest instead of N separate tool
+        // outputs the model would otherwise have to stitch together itself.
+        // Every item still counts against the SAME per-run child ceiling as
+        // `subagent.task` — this tool cannot be used to bypass it.
+        pb::ToolDefinition {
+            name: crate::subagent::research_fan_out::RESEARCH_TOOL_NAME.to_owned(),
+            description: "Delegate MULTIPLE self-contained research questions in ONE call, each run as its own isolated subagent in parallel, with the results merged into a single structured digest (one section per item, with its status and cited sources). Use this instead of several separate subagent.task calls when you already know the full list of questions up front (e.g. 'check these six sources' or 'look up these four companies') — the merge step keeps each item's answer and sources attributed separately, rather than you having to stitch N free-text answers together yourself. Every item is read/analysis-only, exactly like subagent.task: no item may take a side-effecting action. Every item still counts against this run's per-run delegation limit, so a fan-out call cannot request more items than that limit allows; a limit hit partway through is reported honestly per item (ok/failed/refused), never silently dropped.".to_owned(),
+            parameters_json: r#"{"type":"object","properties":{"items":{"type":"array","minItems":1,"description":"The research items to fan out, one subagent per item","items":{"type":"object","properties":{"id":{"type":"string","description":"Optional stable id for this item, echoed back in the merged digest"},"goal":{"type":"string","description":"Self-contained research question for this item — the subagent sees ONLY this text, not the rest of the conversation"}},"required":["goal"]}},"max_rounds_per_item":{"type":"integer","minimum":1,"description":"Optional cap on each item's own rounds, counting the final round in which it must answer without tools (so 3 allows two rounds of tool use; a cap of 1 is a single round that keeps its tools); still capped by this run's remaining round budget divided across the items"},"result_schema_hint":{"type":"string","description":"Optional free-text hint on what shape each item's answer should take (e.g. 'one sentence with the price and source')"}},"required":["items"]}"#.to_owned(),
         },
         // Plan-mode's control tool (chat-wave2-specs plan-gate §2.1). Offered
         // UNCONDITIONALLY, the same way plan mode itself gates risky tools by
@@ -3252,6 +4311,21 @@ fn offered_tool_defs() -> Vec<pb::ToolDefinition> {
     tools
 }
 
+/// How many characters of one tool's result the model gets to keep.
+///
+/// [`MAX_TOOL_CONTEXT_CHARS`] for every tool except the wide-research fan-out,
+/// whose digest already budgets itself to
+/// [`crate::subagent::research_fan_out::MERGE_BUDGET_CHARS`] and would otherwise
+/// be cut at the tail — losing its last items and the `verification:` summary —
+/// by a cap sized for a single lookup.
+fn tool_context_cap(tool_name: &str) -> usize {
+    if tool_name == crate::subagent::research_fan_out::RESEARCH_TOOL_NAME {
+        crate::subagent::research_fan_out::CONTEXT_CHARS
+    } else {
+        MAX_TOOL_CONTEXT_CHARS
+    }
+}
+
 /// Frame a round of tool outcomes as a context message appended to the
 /// conversation, so the model can answer from them on the next inference
 /// (mirrors `model-gateway::tool_loop::format_tool_context`).
@@ -3272,7 +4346,7 @@ does not exist:\n",
                     s,
                     "- {} → {}",
                     o.name,
-                    bounded_tool_context(&o.output, MAX_TOOL_CONTEXT_CHARS)
+                    bounded_tool_context(&o.output, tool_context_cap(&o.name))
                 );
             }
         }
@@ -3463,6 +4537,10 @@ async fn pause_for_approval(
         // run reports its own. Reporting `true` here from nowhere would be worse
         // than reporting nothing.
         compaction_triggered: false,
+        // Not a failure, so no failure reason.
+        failure_code: String::new(),
+        retry_after_ms: None,
+        resets_at: String::new(),
     })
 }
 
@@ -3648,10 +4726,15 @@ async fn heartbeat_managed_agent_run(
 /// Record a terminal receipt before any local state or successful response is
 /// exposed. Session Core derives run owner/ZDR from `run_id`; this request has
 /// no output, prompt, tool payload, or arbitrary error fields.
+///
+/// `failure_code` is read only for a failed run, and must be one of Session
+/// Core's fixed failure vocabulary (`execution_failed` for the generic case;
+/// `Refusal::terminal_failure_code` for a typed subscription failure).
 async fn record_managed_agent_terminal_outcome(
     session_channel: &Channel,
     req: &pb::RunAgentRequest,
     success: bool,
+    failure_code: &str,
     terminal_tokens: &dyn ManagedRunTokenProvider,
 ) -> Result<(), tonic::Status> {
     let token = terminal_tokens
@@ -3674,7 +4757,7 @@ async fn record_managed_agent_terminal_outcome(
                 failure_code: if success {
                     String::new()
                 } else {
-                    "execution_failed".to_owned()
+                    failure_code.to_owned()
                 },
             },
             Some(&token),
@@ -3707,6 +4790,13 @@ async fn finalize(
     // otherwise invisible: an answer built on a compacted prompt can be worse
     // for a reason nothing else in the response explains.
     compaction_triggered: bool,
+    // The typed reason a run pinned to the ChatGPT subscription failed, when it
+    // did. Such a run records `provider_unavailable` (or `inference_failed` for
+    // a rejected request) instead of `execution_failed`, reports the reason on
+    // the response, and appends NO assistant message here: the generic English
+    // apology would be wrong for a usage limit, and the gateway persists the
+    // explanation it words from the code, so the thread carries exactly one.
+    refusal: Option<&crate::subscription_refusal::Refusal>,
     bearer: Option<&str>,
     terminal_tokens: &dyn ManagedRunTokenProvider,
 ) -> Result<pb::RunAgentResponse, tonic::Status> {
@@ -3716,7 +4806,7 @@ async fn finalize(
 
     // 3. Persist the assistant answer only when retention permits it. An
     // append failure becomes a durable failed receipt, never a success.
-    if !req.zdr {
+    if !req.zdr && refusal.is_none() {
         let append_request = authenticated_session_request(
             pb::AppendMessageRequest {
                 thread_id: req.thread_id.clone(),
@@ -3744,8 +4834,14 @@ async fn finalize(
 
     // 4. Session Core owns the terminal run + plan transaction. On failure do
     // not mutate StateStore or return a terminal RunAgent response.
-    record_managed_agent_terminal_outcome(session_channel, req, terminal_success, terminal_tokens)
-        .await?;
+    record_managed_agent_terminal_outcome(
+        session_channel,
+        req,
+        terminal_success,
+        refusal.map_or("execution_failed", |refusal| refusal.terminal_failure_code()),
+        terminal_tokens,
+    )
+    .await?;
 
     let status = if terminal_success {
         "completed"
@@ -3782,13 +4878,14 @@ async fn finalize(
     snapshot.last_error = if terminal_success {
         None
     } else {
-        Some("execution_failed".to_owned())
+        Some(refusal.map_or("execution_failed", |refusal| refusal.code).to_owned())
     };
     state.update(snapshot);
 
     info!(
         run_id = %req.run_id,
         status = %status,
+        failure_code = refusal.map_or("", |refusal| refusal.code),
         "run_agent: run finalized"
     );
 
@@ -3798,6 +4895,11 @@ async fn finalize(
         rounds_executed,
         grounded,
         compaction_triggered,
+        failure_code: refusal.map_or_else(String::new, |refusal| refusal.code.to_owned()),
+        retry_after_ms: refusal.and_then(|refusal| refusal.retry_after_ms),
+        resets_at: refusal
+            .and_then(crate::subscription_refusal::Refusal::resets_at_label)
+            .unwrap_or_default(),
     })
 }
 
@@ -3893,6 +4995,7 @@ fn bounded_tool_context(output: &str, max: usize) -> String {
 mod tests {
     use super::*;
     use crate::session_terminal_auth::SessionTerminalTokenError;
+    use mp_contracts::agentic_subscription::Switches;
     use mp_contracts::model_plane::v1::{
         inference_core_server::{InferenceCore, InferenceCoreServer},
         managed_run_lifecycle_server::{ManagedRunLifecycle, ManagedRunLifecycleServer},
@@ -4255,14 +5358,47 @@ mod tests {
         /// (parent_run_id, goal, start_key, agent_id).
         started_child_runs: Vec<(String, String, String, String)>,
         /// Lineage edges recorded via `AttachSubagent`:
-        /// (parent_run_id, child_run_id, role).
-        lineage_edges: Vec<(String, String, i32)>,
+        /// (parent_run_id, child_run_id, role, goal_summary, batch_id).
+        lineage_edges: Vec<(String, String, i32, String, String)>,
+        /// Child stops announced on the parent run's stream via
+        /// `RecordOrchestrationEvent`: (parent_run_id, child_run_id, status).
+        stopped_children: Vec<(String, String, String)>,
         /// When set, `start_managed_run` fails — used to prove a delegation
         /// still completes when its bookkeeping does not.
         fail_child_run_start: bool,
+        /// When set, the lifecycle and orchestration mocks hand every managed
+        /// start, receipt, answer, heartbeat, lineage edge and stop to
+        /// session-core's REAL credential rules
+        /// (`session_core_rules_double`) and answer exactly as it would. The
+        /// requests then need genuine signed bearers (`run_agent`'s session
+        /// bearer and a `SignedServiceTokens` provider), which is the point.
+        rules: Option<Arc<crate::runtime_loop::session_core_rules_double::SessionCoreRules>>,
     }
 
     type SharedRecorder = Arc<Mutex<Recorder>>;
+
+    /// The session-core rules double a test installed on the recorder, if any.
+    fn rules_of(
+        rec: &SharedRecorder,
+    ) -> Option<Arc<crate::runtime_loop::session_core_rules_double::SessionCoreRules>> {
+        rec.lock().unwrap().rules.clone()
+    }
+
+    /// Whether the request carries one of [`StaticTerminalTokens`]' service
+    /// credentials (no user id, fixed scope) instead of a user's own bearer.
+    fn presented_service_credential<T>(request: &Request<T>) -> bool {
+        matches!(
+            request
+                .metadata()
+                .get("authorization")
+                .and_then(|value| value.to_str().ok()),
+            Some(
+                "Bearer test-terminalize-service-token"
+                    | "Bearer test-heartbeat-service-token"
+                    | "Bearer test-scheduled-step-service-token"
+            )
+        )
+    }
 
     /// Test-only fixed-scope service credential source. It deliberately does
     /// not accept a caller's delegated session bearer, mirroring production's
@@ -4338,6 +5474,19 @@ mod tests {
         },
         /// An infer transport error.
         Error,
+        /// An infer failure with exactly this status: what inference-core
+        /// returns for a refused ChatGPT-subscription round, trailers included.
+        Refused(Status),
+        /// A model that keeps researching for as long as it is offered tools, and
+        /// answers with `answer` the moment none are: the request decides, not the
+        /// script's position. It is what makes a test fail on a loop that hands a
+        /// last-round model its tools again (it would ask for them, run out, and
+        /// lose everything), instead of passing on whichever script happens to line
+        /// up.
+        KeepsResearchingUnlessToolsAreWithheld {
+            calls: Vec<pb::ToolCall>,
+            answer: String,
+        },
     }
 
     // --- Inference mock: replays a scripted queue, one entry per round. ---
@@ -4346,7 +5495,50 @@ mod tests {
 
     type ObservedTiers = Arc<Mutex<Vec<i32>>>;
 
+    /// `(tools offered, tool_choice)` of each `InferRequest`, in call order.
+    type ObservedTooling = Arc<Mutex<Vec<(usize, String)>>>;
+
+    /// The route fields one `InferRequest` carried, in call order.
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    struct ObservedRoute {
+        model: String,
+        provider_hint: String,
+        subscription_connection_id: String,
+    }
+
+    type ObservedRoutes = Arc<Mutex<Vec<ObservedRoute>>>;
+
+    /// How the mock reports which provider and model served a round.
+    #[derive(Clone, Debug, Default)]
+    enum Serving {
+        /// What every test before the route existed saw: `model_used: "mock"`
+        /// and no provider.
+        #[default]
+        Legacy,
+        /// A faithful inference-core: the provider the request named and the
+        /// model it asked for, so a pinned run's guard passes.
+        Echo,
+        /// Faithful for the first `healthy_rounds` calls, then served by
+        /// `provider`/`model` whatever the request named: the silent fallback.
+        EchoThenFallback {
+            healthy_rounds: usize,
+            provider: String,
+            model: String,
+        },
+    }
+
+    /// The route recorder and the serving behaviour, kept together so the mock's
+    /// constructors that do not care about routes add one defaulted field.
+    #[derive(Default)]
+    struct RouteProbe {
+        observed: ObservedRoutes,
+        serving: Serving,
+    }
+
     struct MockInference {
+        /// The route fields each `InferRequest` carried, and how the mock
+        /// reports being served. Defaults to "record, report Legacy".
+        route_probe: RouteProbe,
         script: Mutex<std::collections::VecDeque<Scripted>>,
         /// ZDR flag observed on each `InferRequest`, so a test can assert the
         /// run's `zdr` was threaded through.
@@ -4358,24 +5550,59 @@ mod tests {
         /// nested subagent shares this channel, so the recording is also the
         /// evidence that its context was ISOLATED from its parent's.
         observed_messages: ObservedMessages,
+        /// How many tools each `InferRequest` offered and what `tool_choice` it
+        /// carried, in call order: the evidence of which round was made to answer
+        /// without tools.
+        observed_tooling: ObservedTooling,
+        /// When set, every `infer` call holds for `delay` while counting itself
+        /// in-flight, so a test can read back how many ran AT ONCE. Absent for
+        /// every ordinary test: no sleep, no counting.
+        probe: Option<Arc<ConcurrencyProbe>>,
+    }
+
+    /// Peak number of `infer` calls that overlapped in time.
+    struct ConcurrencyProbe {
+        in_flight: std::sync::atomic::AtomicUsize,
+        peak: std::sync::atomic::AtomicUsize,
+        delay: std::time::Duration,
+    }
+
+    impl ConcurrencyProbe {
+        fn new(delay: std::time::Duration) -> Arc<Self> {
+            Arc::new(Self {
+                in_flight: std::sync::atomic::AtomicUsize::new(0),
+                peak: std::sync::atomic::AtomicUsize::new(0),
+                delay,
+            })
+        }
+
+        fn peak(&self) -> usize {
+            self.peak.load(std::sync::atomic::Ordering::SeqCst)
+        }
     }
 
     impl MockInference {
         fn new(steps: Vec<Scripted>) -> Self {
             Self {
+                route_probe: RouteProbe::default(),
                 script: Mutex::new(steps.into_iter().collect()),
                 observed_zdr: Arc::new(Mutex::new(Vec::new())),
                 observed_tiers: Arc::new(Mutex::new(Vec::new())),
                 observed_messages: Arc::new(Mutex::new(Vec::new())),
+                observed_tooling: Arc::default(),
+                probe: None,
             }
         }
 
         fn with_zdr_recorder(steps: Vec<Scripted>, observed_zdr: Arc<Mutex<Vec<bool>>>) -> Self {
             Self {
+                route_probe: RouteProbe::default(),
                 script: Mutex::new(steps.into_iter().collect()),
                 observed_zdr,
                 observed_tiers: Arc::new(Mutex::new(Vec::new())),
                 observed_messages: Arc::new(Mutex::new(Vec::new())),
+                observed_tooling: Arc::default(),
+                probe: None,
             }
         }
 
@@ -4384,19 +5611,58 @@ mod tests {
             observed_messages: ObservedMessages,
         ) -> Self {
             Self {
+                route_probe: RouteProbe::default(),
                 script: Mutex::new(steps.into_iter().collect()),
                 observed_zdr: Arc::new(Mutex::new(Vec::new())),
                 observed_tiers: Arc::new(Mutex::new(Vec::new())),
                 observed_messages,
+                observed_tooling: Arc::default(),
+                probe: None,
             }
         }
 
         fn with_tier_recorder(steps: Vec<Scripted>, observed_tiers: ObservedTiers) -> Self {
             Self {
+                route_probe: RouteProbe::default(),
                 script: Mutex::new(steps.into_iter().collect()),
                 observed_zdr: Arc::new(Mutex::new(Vec::new())),
                 observed_tiers,
                 observed_messages: Arc::new(Mutex::new(Vec::new())),
+                observed_tooling: Arc::default(),
+                probe: None,
+            }
+        }
+
+        fn with_concurrency_probe(steps: Vec<Scripted>, probe: Arc<ConcurrencyProbe>) -> Self {
+            Self {
+                route_probe: RouteProbe::default(),
+                script: Mutex::new(steps.into_iter().collect()),
+                observed_zdr: Arc::new(Mutex::new(Vec::new())),
+                observed_tiers: Arc::new(Mutex::new(Vec::new())),
+                observed_messages: Arc::new(Mutex::new(Vec::new())),
+                observed_tooling: Arc::default(),
+                probe: Some(probe),
+            }
+        }
+
+        /// A mock that records the route fields of every `InferRequest` into
+        /// `observed_routes` and reports being served as `serving` says.
+        fn with_route_probe(
+            steps: Vec<Scripted>,
+            observed_routes: ObservedRoutes,
+            serving: Serving,
+        ) -> Self {
+            Self {
+                route_probe: RouteProbe {
+                    observed: observed_routes,
+                    serving,
+                },
+                script: Mutex::new(steps.into_iter().collect()),
+                observed_zdr: Arc::new(Mutex::new(Vec::new())),
+                observed_tiers: Arc::new(Mutex::new(Vec::new())),
+                observed_messages: Arc::new(Mutex::new(Vec::new())),
+                observed_tooling: Arc::default(),
+                probe: None,
             }
         }
     }
@@ -4411,24 +5677,68 @@ mod tests {
             request: Request<pb::InferRequest>,
         ) -> Result<Response<pb::InferResponse>, Status> {
             let observed = request.into_inner();
+            // The route this round carried. Its position is the call's, which
+            // is how `Serving::EchoThenFallback` knows how many rounds came
+            // before it.
+            let (call_index, requested_model, requested_provider) = {
+                let mut routes = self.route_probe.observed.lock().unwrap();
+                routes.push(ObservedRoute {
+                    model: observed.model.clone(),
+                    provider_hint: observed.provider_hint.clone(),
+                    subscription_connection_id: observed.subscription_connection_id.clone(),
+                });
+                (
+                    routes.len() - 1,
+                    observed.model.clone(),
+                    observed.provider_hint.clone(),
+                )
+            };
             self.observed_zdr.lock().unwrap().push(observed.zdr);
             self.observed_tiers
                 .lock()
                 .unwrap()
                 .push(observed.min_privacy_tier);
+            let tools_offered = observed.tools.len();
+            self.observed_tooling
+                .lock()
+                .unwrap()
+                .push((tools_offered, observed.tool_choice.clone()));
             self.observed_messages
                 .lock()
                 .unwrap()
                 .push(observed.messages);
+            if let Some(probe) = &self.probe {
+                use std::sync::atomic::Ordering::SeqCst;
+                let now = probe.in_flight.fetch_add(1, SeqCst) + 1;
+                probe.peak.fetch_max(now, SeqCst);
+                tokio::time::sleep(probe.delay).await;
+                probe.in_flight.fetch_sub(1, SeqCst);
+            }
             // Default to a plain answer once the script is exhausted, so a loop
             // bug can't hang the test waiting for more rounds.
-            let step = self
-                .script
-                .lock()
-                .unwrap()
-                .pop_front()
-                .unwrap_or_else(|| Scripted::Answer("done".to_owned()));
-            match step {
+            let step = {
+                let mut script = self.script.lock().unwrap();
+                match script.front() {
+                    // Stays at the front, asking for its tools every round, until a
+                    // round withholds them: only then does it answer and leave.
+                    Some(Scripted::KeepsResearchingUnlessToolsAreWithheld { calls, answer }) => {
+                        if tools_offered == 0 {
+                            let answer = answer.clone();
+                            script.pop_front();
+                            Scripted::Answer(answer)
+                        } else {
+                            Scripted::ToolCalls {
+                                content: String::new(),
+                                calls: calls.clone(),
+                            }
+                        }
+                    }
+                    _ => script
+                        .pop_front()
+                        .unwrap_or_else(|| Scripted::Answer("done".to_owned())),
+                }
+            };
+            let result = match step {
                 Scripted::Answer(content) => Ok(Response::new(pb::InferResponse {
                     compaction_summary: String::new(),
                     request_id: "req".to_owned(),
@@ -4470,7 +5780,37 @@ mod tests {
                     ..Default::default()
                 })),
                 Scripted::Error => Err(Status::unavailable("inference down")),
-            }
+                Scripted::Refused(status) => Err(status),
+                Scripted::KeepsResearchingUnlessToolsAreWithheld { .. } => {
+                    unreachable!("resolved into a tool round or an answer above")
+                }
+            };
+            // Report which provider and model "served" the round, the fields a
+            // pinned run's guard reads. `Legacy` leaves the arms' own values.
+            result.map(|response| {
+                let mut response = response.into_inner();
+                match &self.route_probe.serving {
+                    Serving::Legacy => {}
+                    Serving::Echo => {
+                        response.provider_used.clone_from(&requested_provider);
+                        response.model_used.clone_from(&requested_model);
+                    }
+                    Serving::EchoThenFallback {
+                        healthy_rounds,
+                        provider,
+                        model,
+                    } => {
+                        if call_index < *healthy_rounds {
+                            response.provider_used.clone_from(&requested_provider);
+                            response.model_used.clone_from(&requested_model);
+                        } else {
+                            response.provider_used.clone_from(provider);
+                            response.model_used.clone_from(model);
+                        }
+                    }
+                }
+                Response::new(response)
+            })
         }
 
         async fn infer_stream(
@@ -4962,20 +6302,46 @@ mod tests {
             &self,
             request: Request<pb::StartManagedRunRequest>,
         ) -> Result<Response<pb::StartManagedRunResponse>, Status> {
-            if request
-                .metadata()
-                .get("authorization")
-                .and_then(|value| value.to_str().ok())
-                != Some("Bearer test-terminalize-service-token")
-            {
-                return Err(Status::unauthenticated(
-                    "managed run start requires its service credential",
+            if let Some(rules) = rules_of(&self.rec) {
+                let caller = crate::runtime_loop::session_core_rules_double::caller_of(&request)?;
+                return rules
+                    .start_managed_run(&caller, request.into_inner())
+                    .map(Response::new);
+            }
+            // session-core's first rule for this RPC: a managed run belongs to a
+            // USER, so the credential must carry one. Execution Core's
+            // fixed-scope service tokens have no user id and are refused here
+            // exactly as `ManagedRunLifecycleService::start_managed_run` refuses
+            // them. This check used to demand the service token instead, which
+            // is the reverse: every delegation registered in every test and none
+            // registered live (`PermissionDenied`, 2026-10-01). A test that must
+            // see the real bearer verified sets `Recorder::rules`.
+            if presented_service_credential(&request) {
+                return Err(Status::permission_denied(
+                    "user-bound managed-run credential required",
                 ));
             }
             if self.rec.lock().unwrap().fail_child_run_start {
                 return Err(Status::unavailable("managed run start unavailable"));
             }
             let req = request.into_inner();
+            // Mirror session-core's `validate_managed_start_request`: the
+            // idempotency key is `[A-Za-z0-9_-]`, at most 128 bytes, and a goal
+            // may hold no control character (a newline is one). A fake that
+            // accepted any string is how a `run:step` key session-core refuses
+            // passed every delegation test while registering nothing for real.
+            if req.start_key.is_empty()
+                || req.start_key.len() > 128
+                || !req
+                    .start_key
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+            {
+                return Err(Status::invalid_argument("invalid start_key"));
+            }
+            if req.goal.len() > 64 * 1024 || req.goal.chars().any(char::is_control) {
+                return Err(Status::invalid_argument("invalid goal"));
+            }
             // Mirror the real idempotency contract: the same start_key replays
             // the same run id and reports already_started.
             let mut rec = self.rec.lock().unwrap();
@@ -5007,6 +6373,12 @@ mod tests {
             &self,
             request: Request<pb::RecordTerminalOutcomeRequest>,
         ) -> Result<Response<pb::RecordTerminalOutcomeResponse>, Status> {
+            if let Some(rules) = rules_of(&self.rec) {
+                let caller = crate::runtime_loop::session_core_rules_double::caller_of(&request)?;
+                return rules
+                    .record_terminal_outcome(&caller, request.into_inner())
+                    .map(Response::new);
+            }
             if request
                 .metadata()
                 .get("authorization")
@@ -5021,6 +6393,15 @@ mod tests {
                 return Err(Status::unavailable("managed terminal receipt unavailable"));
             }
             let req = request.into_inner();
+            // The receipt's whole grammar, as session-core validates it before
+            // any database access. A failure code outside the vocabulary was
+            // accepted here and refused there, so a child settled as failed
+            // under a word of the loop's own invention was "recorded" in every
+            // test and in no live run.
+            crate::runtime_loop::session_core_rules_double::validate_terminal_outcome(
+                req.outcome,
+                &req.failure_code,
+            )?;
             self.rec.lock().unwrap().managed_terminal_outcomes.push((
                 req.run_id.clone(),
                 req.source,
@@ -5043,15 +6424,19 @@ mod tests {
             &self,
             request: Request<pb::RecordRunOutputRequest>,
         ) -> Result<Response<pb::RecordRunOutputResponse>, Status> {
-            if request
-                .metadata()
-                .get("authorization")
-                .and_then(|value| value.to_str().ok())
-                != Some("Bearer test-terminalize-service-token")
-            {
-                return Err(Status::unauthenticated(
-                    "recording a run answer requires its service credential",
-                ));
+            if let Some(rules) = rules_of(&self.rec) {
+                let caller = crate::runtime_loop::session_core_rules_double::caller_of(&request)?;
+                return rules
+                    .record_run_output(&caller, request.into_inner())
+                    .map(Response::new);
+            }
+            // `authorize_operation(.., "session:write")`: a service credential
+            // must hold that scope, and Execution Core's principal is granted
+            // only `session:heartbeat`, `session:terminalize` and
+            // `approval:deliver` on this audience. The answer is written under
+            // the run owner's own bearer, never the terminalizer's.
+            if presented_service_credential(&request) {
+                return Err(Status::permission_denied("service scope required"));
             }
             if self.rec.lock().unwrap().fail_run_output {
                 return Err(Status::unavailable("run output store unavailable"));
@@ -5073,6 +6458,12 @@ mod tests {
             &self,
             request: Request<pb::HeartbeatManagedRunRequest>,
         ) -> Result<Response<pb::HeartbeatManagedRunResponse>, Status> {
+            if let Some(rules) = rules_of(&self.rec) {
+                let caller = crate::runtime_loop::session_core_rules_double::caller_of(&request)?;
+                return rules
+                    .heartbeat_managed_run(&caller, request.into_inner())
+                    .map(Response::new);
+            }
             if request
                 .metadata()
                 .get("authorization")
@@ -5137,16 +6528,34 @@ mod tests {
             &self,
             request: Request<pb::RecordOrchestrationEventRequest>,
         ) -> Result<Response<pb::RecordOrchestrationEventResponse>, Status> {
-            if let Some(pb::OrchestrationEvent {
-                event: Some(pb::orchestration_event::Event::PlanTransitioned(pt)),
-                ..
-            }) = request.into_inner().event
-            {
-                self.rec
-                    .lock()
-                    .unwrap()
-                    .plan_transitions
-                    .push((pt.from, pt.to));
+            if let Some(rules) = rules_of(&self.rec) {
+                let caller = crate::runtime_loop::session_core_rules_double::caller_of(&request)?;
+                return rules
+                    .record_orchestration_event(&caller, request.into_inner())
+                    .map(Response::new);
+            }
+            match request.into_inner().event {
+                Some(pb::OrchestrationEvent {
+                    event: Some(pb::orchestration_event::Event::PlanTransitioned(pt)),
+                    ..
+                }) => {
+                    self.rec
+                        .lock()
+                        .unwrap()
+                        .plan_transitions
+                        .push((pt.from, pt.to));
+                }
+                Some(pb::OrchestrationEvent {
+                    event: Some(pb::orchestration_event::Event::SubagentStopped(stopped)),
+                    ..
+                }) => {
+                    self.rec.lock().unwrap().stopped_children.push((
+                        stopped.parent_run_id,
+                        stopped.child_run_id,
+                        stopped.status,
+                    ));
+                }
+                _ => {}
             }
             Ok(Response::new(pb::RecordOrchestrationEventResponse {
                 event_id: "evt".to_owned(),
@@ -5354,11 +6763,17 @@ mod tests {
             &self,
             request: Request<pb::AttachSubagentRequest>,
         ) -> Result<Response<pb::AttachSubagentResponse>, Status> {
+            if let Some(rules) = rules_of(&self.rec) {
+                let caller = crate::runtime_loop::session_core_rules_double::caller_of(&request)?;
+                return rules
+                    .attach_subagent(&caller, request.into_inner())
+                    .map(Response::new);
+            }
             let req = request.into_inner();
             let mut rec = self.rec.lock().unwrap();
             // The real table's composite PK rejects a duplicate edge; mirror it
             // so the already_started replay path is exercised, not smoothed over.
-            if rec.lineage_edges.iter().any(|(parent, child, _)| {
+            if rec.lineage_edges.iter().any(|(parent, child, _, _, _)| {
                 parent == &req.parent_run_id && child == &req.child_run_id
             }) {
                 return Err(Status::already_exists("subagent edge already recorded"));
@@ -5367,6 +6782,8 @@ mod tests {
                 req.parent_run_id.clone(),
                 req.child_run_id.clone(),
                 req.role,
+                req.goal_summary.clone(),
+                req.batch_id.clone(),
             ));
             Ok(Response::new(pb::AttachSubagentResponse::default()))
         }
@@ -5469,6 +6886,48 @@ mod tests {
         .await
     }
 
+    /// Like [`spawn_inference_channel`] but records, for every `InferRequest`, how
+    /// many tools it offered and its `tool_choice`, and the message history it
+    /// carried, in call order.
+    async fn spawn_inference_channel_with_tooling(
+        script: Vec<Scripted>,
+        observed_tooling: ObservedTooling,
+        observed_messages: ObservedMessages,
+    ) -> Channel {
+        spawn_inference_channel_inner(MockInference {
+            observed_tooling,
+            observed_messages,
+            ..MockInference::new(script)
+        })
+        .await
+    }
+
+    /// Like [`spawn_inference_channel`] but records the route fields of every
+    /// `InferRequest` into `observed_routes` and reports being served as
+    /// `serving` says, so a test can assert what each round carried and what a
+    /// pinned run does with a round served by another route.
+    async fn spawn_inference_channel_with_routes(
+        script: Vec<Scripted>,
+        observed_routes: ObservedRoutes,
+        serving: Serving,
+    ) -> Channel {
+        spawn_inference_channel_inner(MockInference::with_route_probe(
+            script,
+            observed_routes,
+            serving,
+        ))
+        .await
+    }
+
+    /// Like [`spawn_inference_channel`] but every `infer` call holds for `delay`
+    /// and is counted, so `probe.peak()` reports how many overlapped.
+    async fn spawn_inference_channel_with_probe(
+        script: Vec<Scripted>,
+        probe: Arc<ConcurrencyProbe>,
+    ) -> Channel {
+        spawn_inference_channel_inner(MockInference::with_concurrency_probe(script, probe)).await
+    }
+
     async fn spawn_inference_channel_inner(mock: MockInference) -> Channel {
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
@@ -5511,6 +6970,13 @@ mod tests {
             // Non-Space by default, matching every other unconstrained field
             // above — the tests that DO care set it explicitly.
             space_id: String::new(),
+            // Unspecified, which resolves to `DEFAULT_MAX_CHILDREN` — the
+            // tests that DO care (the child-ceiling tests) set it explicitly.
+            max_subagents: 0,
+            // No route named, which is what every run that predates the fields
+            // sends — the tests that DO care use `subscription_request()`.
+            provider_hint: String::new(),
+            subscription_connection_id: String::new(),
         }
     }
 
@@ -5893,6 +7359,1449 @@ mod tests {
             observed[0],
             pb::PrivacyTier::Sovereign as i32,
             "the run's min_privacy_tier must be threaded into the InferRequest"
+        );
+    }
+
+    // --- The inference route: a run pinned to the ChatGPT subscription -------
+
+    /// A run pinned to the ChatGPT subscription, as the gateway sends it:
+    /// read-only, an explicit model, the canonical provider and a connection.
+    fn subscription_request() -> pb::RunAgentRequest {
+        pb::RunAgentRequest {
+            model: "gpt-5.6-terra".to_owned(),
+            provider_hint: "openai-codex-subscription".to_owned(),
+            subscription_connection_id: "conn_1".to_owned(),
+            plan_mode: true,
+            ..sample_request()
+        }
+    }
+
+    /// [`subscription_request`] with a round budget big enough for a fan-out
+    /// (the parent's two rounds plus every child's).
+    fn pinned_with_rounds(max_rounds: u32) -> pb::RunAgentRequest {
+        pb::RunAgentRequest {
+            max_rounds,
+            ..subscription_request()
+        }
+    }
+
+    /// The route fields a faithful pinned round carries.
+    fn pinned_round() -> ObservedRoute {
+        ObservedRoute {
+            model: "gpt-5.6-terra".to_owned(),
+            provider_hint: "openai-codex-subscription".to_owned(),
+            subscription_connection_id: "conn_1".to_owned(),
+        }
+    }
+
+    const SWITCH_ON: mp_contracts::agentic_subscription::Switches =
+        mp_contracts::agentic_subscription::Switches {
+            enabled: true,
+            allow_effects: false,
+        };
+
+    /// The compose default for the loop's model: the paid Azure router a
+    /// subscription run must never reach.
+    const COMPOSE_AGENT_MODEL: Option<&str> = Some("model-router");
+
+    /// Drive `req` through the real loop with its route resolved exactly as
+    /// `run_agent_with_tools` resolves it, but from the switches and the
+    /// environment model the test names rather than from the process
+    /// environment. Returns the result, every round's observed route, and the
+    /// session recorder.
+    async fn drive_with_route(
+        req: pb::RunAgentRequest,
+        switches: mp_contracts::agentic_subscription::Switches,
+        env_agent_model: Option<&str>,
+        script: Vec<Scripted>,
+        serving: Serving,
+    ) -> (
+        Result<pb::RunAgentResponse, Status>,
+        ObservedRoutes,
+        SharedRecorder,
+    ) {
+        drive_with_deadline(
+            req,
+            switches,
+            env_agent_model,
+            script,
+            serving,
+            |_| crate::run_budget::RunDeadline::NONE,
+            None,
+        )
+        .await
+    }
+
+    /// [`drive_with_route`] under a time budget. `deadline` is given the
+    /// instant the run starts (taken after the mock services are up, so their
+    /// setup is not charged to the run) and returns the budget. With
+    /// `round_delay` set, the mock inference holds every round for that long, so
+    /// a run is genuinely slow against a wall clock of under a second.
+    async fn drive_with_deadline(
+        req: pb::RunAgentRequest,
+        switches: mp_contracts::agentic_subscription::Switches,
+        env_agent_model: Option<&str>,
+        script: Vec<Scripted>,
+        serving: Serving,
+        deadline: impl FnOnce(std::time::Instant) -> crate::run_budget::RunDeadline,
+        round_delay: Option<std::time::Duration>,
+    ) -> (
+        Result<pb::RunAgentResponse, Status>,
+        ObservedRoutes,
+        SharedRecorder,
+    ) {
+        let route = crate::agent_route::ModelRoute::resolve(&req, switches, env_agent_model)
+            .expect("the request's route is valid for these switches");
+        let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
+        let session_channel = spawn_session_channel(rec.clone()).await;
+        let observed_routes: ObservedRoutes = Arc::new(Mutex::new(Vec::new()));
+        let inference_channel = match round_delay {
+            None => {
+                spawn_inference_channel_with_routes(script, observed_routes.clone(), serving).await
+            }
+            Some(delay) => {
+                spawn_inference_channel_inner(MockInference {
+                    probe: Some(ConcurrencyProbe::new(delay)),
+                    ..MockInference::with_route_probe(script, observed_routes.clone(), serving)
+                })
+                .await
+            }
+        };
+        let state = crate::state::StateStore::new();
+        let deadline = deadline(std::time::Instant::now());
+        let result = run_agent_with_route(
+            &state,
+            session_channel,
+            inference_channel,
+            req,
+            offered_tool_defs(),
+            None,
+            Some("session-token".to_owned()),
+            "inference-token".to_owned(),
+            &ALLOW_CAPABILITY_POLICY,
+            &STATIC_TERMINAL_TOKENS,
+            None,
+            None,
+            &test_sandbox_manager_client(),
+            "test-backend",
+            None,
+            &test_sandbox_tokens(),
+            None,
+            route,
+            deadline,
+        )
+        .await;
+        (result, observed_routes, rec)
+    }
+
+    #[tokio::test]
+    async fn every_round_of_a_pinned_run_and_of_its_delegated_child_carries_the_route() {
+        // Parent delegates, the child runs a tool round and answers, the parent
+        // answers: four rounds, two loops. With EXECUTION_AGENT_MODEL set to
+        // the compose default, which a pinned run must ignore.
+        let (result, observed, _rec) = drive_with_route(
+            subscription_request(),
+            SWITCH_ON,
+            COMPOSE_AGENT_MODEL,
+            vec![
+                Scripted::ToolCalls {
+                    content: "Delegating.".to_owned(),
+                    calls: vec![subagent_call("sub-1", r#"{"goal":"Find the Bergen weather"}"#)],
+                },
+                Scripted::ToolCalls {
+                    content: String::new(),
+                    calls: vec![failing_tool_call("wx-1")],
+                },
+                Scripted::Answer("Bergen: 8 degrees.".to_owned()),
+                Scripted::Answer("Delegated result: Bergen: 8 degrees.".to_owned()),
+            ],
+            Serving::Echo,
+        )
+        .await;
+
+        let response = result.expect("a faithfully served pinned run completes");
+        assert_eq!(response.status, "completed");
+        assert_eq!(response.rounds_executed, 4, "2 parent rounds + 2 child rounds");
+
+        let observed = observed.lock().unwrap();
+        assert_eq!(observed.len(), 4, "parent, child, child, parent");
+        for (round, route) in observed.iter().enumerate() {
+            assert_eq!(
+                route,
+                &pinned_round(),
+                "round {round} (parent or child) must carry the provider, the connection and \
+                 the request's model, not the environment's"
+            );
+        }
+    }
+
+    // --- The run's time budget (`crate::run_budget`) ---
+
+    /// A script that would keep a slow run going for many rounds: tool calls
+    /// round after round, and an answer only at the end.
+    fn endless_tool_rounds() -> Vec<Scripted> {
+        let mut script: Vec<Scripted> = (0..6)
+            .map(|index| Scripted::ToolCalls {
+                content: String::new(),
+                calls: vec![failing_tool_call(&format!("wx-{index}"))],
+            })
+            .collect();
+        script.push(Scripted::Answer("a late answer".to_owned()));
+        script
+    }
+
+    #[tokio::test]
+    async fn a_spent_wall_clock_stops_a_slow_run_after_the_round_in_flight_and_finalizes() {
+        // Every round takes 900 ms against a 500 ms wall clock: the first round
+        // starts inside the budget and is allowed to finish, and no second one
+        // starts. Pinned and unpinned alike: the wall clock is the operator's
+        // setting for every run of the process.
+        for (req, switches, serving) in [
+            (subscription_request(), SWITCH_ON, Serving::Echo),
+            (sample_request(), Switches::OFF, Serving::Legacy),
+        ] {
+            let pinned = !req.provider_hint.is_empty();
+            let (result, observed, rec) = drive_with_deadline(
+                req,
+                switches,
+                COMPOSE_AGENT_MODEL,
+                endless_tool_rounds(),
+                serving,
+                |started| {
+                    crate::run_budget::RunDeadline::wall_clock_after(
+                        started,
+                        std::time::Duration::from_millis(500),
+                    )
+                },
+                Some(std::time::Duration::from_millis(900)),
+            )
+            .await;
+
+            let response = result.expect("a run that hit its time limit ends gracefully");
+            assert_eq!(response.status, "failed", "pinned={pinned}");
+            assert_eq!(response.final_output, RUN_TIME_LIMIT_REPLY, "pinned={pinned}");
+            assert_eq!(
+                response.rounds_executed, 1,
+                "the round in flight finished and nothing was started after it (pinned={pinned})"
+            );
+            assert_eq!(
+                response.failure_code, "",
+                "a time limit is not a subscription refusal (pinned={pinned})"
+            );
+            assert_eq!(
+                observed.lock().unwrap().len(),
+                1,
+                "exactly one inference call reached the provider (pinned={pinned})"
+            );
+
+            // Finalized through the ordinary path: the honest reply is on the
+            // thread and the managed receipt says failed, both written while the
+            // credentials still work.
+            let rec = rec.lock().unwrap();
+            assert_eq!(
+                rec.appended_assistant,
+                vec![RUN_TIME_LIMIT_REPLY.to_owned()],
+                "pinned={pinned}"
+            );
+            assert_eq!(rec.managed_terminal_outcomes.len(), 1, "pinned={pinned}");
+            assert_eq!(
+                rec.managed_terminal_outcomes[0].2,
+                pb::TerminalOutcome::Failed as i32,
+                "pinned={pinned}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn with_no_deadline_a_slow_run_is_not_cut_short() {
+        // The other half: nothing about a run changes while the wall clock is off.
+        let (result, observed, _rec) = drive_with_deadline(
+            subscription_request(),
+            SWITCH_ON,
+            COMPOSE_AGENT_MODEL,
+            vec![
+                Scripted::ToolCalls {
+                    content: String::new(),
+                    calls: vec![failing_tool_call("wx-1")],
+                },
+                Scripted::Answer("took a while, but done".to_owned()),
+            ],
+            Serving::Echo,
+            |_| crate::run_budget::RunDeadline::NONE,
+            Some(std::time::Duration::from_millis(400)),
+        )
+        .await;
+
+        let response = result.expect("completes");
+        assert_eq!(response.status, "completed", "{}", response.final_output);
+        assert_eq!(response.final_output, "took a while, but done");
+        assert_eq!(response.rounds_executed, 2);
+        assert_eq!(observed.lock().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_delegated_child_and_its_parent_both_stop_at_the_one_shared_deadline() {
+        // The parent's round ends at about 700 ms, inside the 1000 ms budget, so
+        // the delegation starts. The child's first round ends at about 1400 ms:
+        // past the shared deadline, so the child starts no second round, and the
+        // parent, which charges the child's round to the same run, starts none
+        // either. Neither answer in the script is ever asked for.
+        let (result, observed, _rec) = drive_with_deadline(
+            pinned_with_rounds(8),
+            SWITCH_ON,
+            COMPOSE_AGENT_MODEL,
+            vec![
+                Scripted::ToolCalls {
+                    content: "Delegating.".to_owned(),
+                    calls: vec![subagent_call("sub-1", r#"{"goal":"Find the Bergen weather"}"#)],
+                },
+                Scripted::ToolCalls {
+                    content: String::new(),
+                    calls: vec![failing_tool_call("wx-1")],
+                },
+                Scripted::Answer("child answer, must not be asked for".to_owned()),
+                Scripted::Answer("parent answer, must not be asked for".to_owned()),
+            ],
+            Serving::Echo,
+            |started| {
+                crate::run_budget::RunDeadline::wall_clock_after(
+                    started,
+                    std::time::Duration::from_millis(1000),
+                )
+            },
+            Some(std::time::Duration::from_millis(700)),
+        )
+        .await;
+
+        let response = result.expect("ends gracefully");
+        assert_eq!(response.status, "failed", "{}", response.final_output);
+        assert_eq!(response.final_output, RUN_TIME_LIMIT_REPLY);
+        assert_eq!(
+            response.rounds_executed, 2,
+            "one parent round and one child round, charged to the same run"
+        );
+        assert_eq!(
+            observed.lock().unwrap().len(),
+            2,
+            "no round started after the deadline, in the child or in the parent"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_fan_out_item_still_waiting_for_a_permit_is_not_started_after_the_deadline() {
+        // Six items against the default concurrency of four: the first four
+        // start at about 500 ms, inside the 750 ms budget, and finish at about
+        // 1000 ms. The other two get their permits after the deadline and are
+        // refused before they register a child run or spend a round.
+        let ceiling = crate::subagent::research_fan_out::concurrency();
+        let items: Vec<String> = (0..6)
+            .map(|i| format!(r#"{{"id":"q{i}","goal":"look up {i}"}}"#))
+            .collect();
+        let input = format!(r#"{{"items":[{}]}}"#, items.join(","));
+        let mut script = vec![Scripted::ToolCalls {
+            content: String::new(),
+            calls: vec![research_fan_out_call("fan-1", &input)],
+        }];
+        for i in 0..6 {
+            script.push(Scripted::Answer(format!("finding {i}")));
+        }
+        script.push(Scripted::Answer("parent answer, must not be asked for".to_owned()));
+
+        let (result, observed, rec) = drive_with_deadline(
+            pinned_with_rounds(10),
+            SWITCH_ON,
+            COMPOSE_AGENT_MODEL,
+            script,
+            Serving::Echo,
+            |started| {
+                crate::run_budget::RunDeadline::wall_clock_after(
+                    started,
+                    std::time::Duration::from_millis(750),
+                )
+            },
+            Some(std::time::Duration::from_millis(500)),
+        )
+        .await;
+
+        let response = result.expect("ends gracefully");
+        assert_eq!(response.status, "failed", "{}", response.final_output);
+        assert_eq!(response.final_output, RUN_TIME_LIMIT_REPLY);
+        let started = ceiling.min(6);
+        assert_eq!(
+            observed.lock().unwrap().len(),
+            1 + started,
+            "the parent round plus one round for each item that got a permit in time: \
+             no item and no parent round after the deadline"
+        );
+        assert_eq!(
+            rec.lock().unwrap().started_child_runs.len(),
+            started,
+            "an item refused at the deadline registered no child run for work that never began"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_pinned_run_whose_credentials_are_inside_the_margin_never_starts_a_round() {
+        // A bearer with 30 s left is inside the 60 s margin: the credential
+        // guard stops the run before its first round, with no wall clock set.
+        let token = crate::run_budget::unsigned_test_token_expiring_at(
+            crate::run_budget::now_epoch_secs() + 30,
+        );
+        let (result, observed, rec) = drive_with_deadline(
+            subscription_request(),
+            SWITCH_ON,
+            COMPOSE_AGENT_MODEL,
+            vec![Scripted::Answer("must not be asked for".to_owned())],
+            Serving::Echo,
+            |started| {
+                crate::run_budget::RunDeadline::for_run(
+                    started,
+                    None,
+                    true,
+                    &[Some(token.as_str())],
+                    crate::run_budget::now_epoch_secs(),
+                )
+            },
+            None,
+        )
+        .await;
+
+        let response = result.expect("ends gracefully");
+        assert_eq!(response.status, "failed", "{}", response.final_output);
+        assert_eq!(response.final_output, RUN_TIME_LIMIT_REPLY);
+        assert_eq!(response.rounds_executed, 0);
+        assert!(
+            observed.lock().unwrap().is_empty(),
+            "no inference call may start on credentials about to expire"
+        );
+        assert_eq!(
+            rec.lock().unwrap().appended_assistant,
+            vec![RUN_TIME_LIMIT_REPLY.to_owned()]
+        );
+    }
+
+    #[tokio::test]
+    async fn the_environment_model_still_drives_a_run_with_no_route_fields() {
+        // The other half of the same rule: nothing about an ordinary run
+        // changes. Same script, same environment model, no route in the request.
+        let (result, observed, _rec) = drive_with_route(
+            sample_request(),
+            SWITCH_ON,
+            COMPOSE_AGENT_MODEL,
+            vec![
+                Scripted::ToolCalls {
+                    content: "Delegating.".to_owned(),
+                    calls: vec![subagent_call("sub-1", r#"{"goal":"Find the Bergen weather"}"#)],
+                },
+                Scripted::Answer("Bergen: 8 degrees.".to_owned()),
+                Scripted::Answer("Delegated result: Bergen: 8 degrees.".to_owned()),
+            ],
+            Serving::Legacy,
+        )
+        .await;
+
+        assert_eq!(result.expect("completes").status, "completed");
+        let observed = observed.lock().unwrap();
+        assert_eq!(observed.len(), 3);
+        for route in observed.iter() {
+            assert_eq!(
+                route,
+                &ObservedRoute {
+                    model: "model-router".to_owned(),
+                    provider_hint: String::new(),
+                    subscription_connection_id: String::new(),
+                },
+                "an unpinned run keeps today's model resolution and names no provider"
+            );
+        }
+
+        // And without the environment model it is the request's own.
+        let (_, observed, _rec) = drive_with_route(
+            sample_request(),
+            Switches::OFF,
+            None,
+            vec![Scripted::Answer("4".to_owned())],
+            Serving::Legacy,
+        )
+        .await;
+        assert_eq!(observed.lock().unwrap()[0].model, sample_request().model);
+    }
+
+    #[tokio::test]
+    async fn every_round_of_a_pinned_wide_research_fan_out_carries_the_route() {
+        // The fan-out children run concurrently, each its own loop, all on the
+        // parent's route: parent, two research children, parent.
+        let (result, observed, _rec) = drive_with_route(
+            pinned_with_rounds(6),
+            SWITCH_ON,
+            COMPOSE_AGENT_MODEL,
+            vec![
+                Scripted::ToolCalls {
+                    content: String::new(),
+                    calls: vec![research_fan_out_call(
+                        "fan-1",
+                        r#"{"items":[{"id":"a","goal":"look up A"},{"id":"b","goal":"look up B"}]}"#,
+                    )],
+                },
+                Scripted::Answer("finding A".to_owned()),
+                Scripted::Answer("finding B".to_owned()),
+                Scripted::Answer("Collected both findings.".to_owned()),
+            ],
+            Serving::Echo,
+        )
+        .await;
+
+        let response = result.expect("a faithfully served pinned fan-out completes");
+        assert_eq!(response.status, "completed", "{}", response.final_output);
+        let observed = observed.lock().unwrap();
+        assert_eq!(observed.len(), 4, "parent, two children, parent");
+        assert!(
+            observed.iter().all(|route| route == &pinned_round()),
+            "every round, children included, must carry the provider, connection and model: {observed:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_fan_out_child_served_by_another_provider_stops_the_run_before_the_parents_next_round() {
+        // Call 0 is the parent (healthy); every call after it is served by the
+        // paid route. Both children trip the guard (or the second sees the stop
+        // flag the first set and never starts), and the parent's final round
+        // is never asked for.
+        let (result, observed, rec) = drive_with_route(
+            pinned_with_rounds(6),
+            SWITCH_ON,
+            COMPOSE_AGENT_MODEL,
+            vec![
+                Scripted::ToolCalls {
+                    content: String::new(),
+                    calls: vec![research_fan_out_call(
+                        "fan-1",
+                        r#"{"items":[{"id":"a","goal":"look up A"},{"id":"b","goal":"look up B"}]}"#,
+                    )],
+                },
+                Scripted::Answer("finding A".to_owned()),
+                Scripted::Answer("finding B".to_owned()),
+                Scripted::Answer("parent answer, must not be asked for".to_owned()),
+            ],
+            Serving::EchoThenFallback {
+                healthy_rounds: 1,
+                provider: "azure-openai".to_owned(),
+                model: "model-router".to_owned(),
+            },
+        )
+        .await;
+
+        let response = result.expect("graceful");
+        assert_eq!(response.status, "failed");
+        assert_eq!(response.final_output, SUBSCRIPTION_ROUTE_UNAVAILABLE_REPLY);
+        let rounds = observed.lock().unwrap().len();
+        assert!(
+            (2..=3).contains(&rounds),
+            "the parent round and one or both children, never the parent's next round: {rounds}"
+        );
+        assert!(
+            !rec.lock()
+                .unwrap()
+                .appended_assistant
+                .iter()
+                .any(|text| text.contains("parent answer")),
+            "the parent did not get to answer"
+        );
+    }
+
+    /// The failure that must be impossible: a pinned run's round comes back
+    /// from somewhere else. It is stopped before anything in that answer is
+    /// used, and no second round is made.
+    #[tokio::test]
+    async fn a_round_served_by_another_provider_ends_a_pinned_run_with_no_second_round() {
+        let (result, observed, rec) = drive_with_route(
+            subscription_request(),
+            SWITCH_ON,
+            COMPOSE_AGENT_MODEL,
+            vec![
+                // The answer would dispatch a tool if it were acted on.
+                Scripted::ToolCalls {
+                    content: "From the paid route.".to_owned(),
+                    calls: vec![failing_tool_call("wx-1")],
+                },
+                Scripted::Answer("A second round must never be asked for.".to_owned()),
+            ],
+            Serving::EchoThenFallback {
+                healthy_rounds: 0,
+                provider: "azure-openai".to_owned(),
+                model: "model-router".to_owned(),
+            },
+        )
+        .await;
+
+        let response = result.expect("the run ends gracefully, it does not error");
+        assert_eq!(response.status, "failed");
+        assert_eq!(response.final_output, SUBSCRIPTION_ROUTE_UNAVAILABLE_REPLY);
+        assert_eq!(response.rounds_executed, 1);
+        assert_eq!(
+            observed.lock().unwrap().len(),
+            1,
+            "exactly one inference call: the one that was served wrongly"
+        );
+
+        let r = rec.lock().unwrap();
+        assert!(
+            r.completed.is_empty() && r.persisted_step_payloads.is_empty(),
+            "the wrongly served round's tool call must not be dispatched"
+        );
+        // A round served by the wrong route is the typed failure
+        // `subscription_route_unavailable` like any other subscription failure
+        // (A2): the code rides on the response, the receipt is in Session
+        // Core's provider vocabulary, and the gateway words and persists the
+        // one explanation, so execution-core appends none of its own.
+        assert_eq!(response.failure_code, "subscription_route_unavailable");
+        assert!(
+            r.appended_assistant.is_empty(),
+            "the gateway persists the explanation: {:?}",
+            r.appended_assistant
+        );
+        assert_eq!(
+            r.managed_terminal_outcomes,
+            failed_receipt("provider_unavailable"),
+            "the run is terminalized as failed, once"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_fallback_on_a_later_round_discards_that_rounds_answer_and_stops() {
+        let (result, observed, rec) = drive_with_route(
+            subscription_request(),
+            SWITCH_ON,
+            None,
+            vec![
+                Scripted::ToolCalls {
+                    content: String::new(),
+                    calls: vec![failing_tool_call("wx-1")],
+                },
+                Scripted::Answer("LEAKED ANSWER FROM THE OTHER ROUTE".to_owned()),
+                Scripted::Answer("never asked for".to_owned()),
+            ],
+            Serving::EchoThenFallback {
+                healthy_rounds: 1,
+                provider: "azure-openai".to_owned(),
+                model: "gpt-5-mini".to_owned(),
+            },
+        )
+        .await;
+
+        let response = result.expect("graceful");
+        assert_eq!(response.status, "failed");
+        assert_eq!(response.final_output, SUBSCRIPTION_ROUTE_UNAVAILABLE_REPLY);
+        assert_eq!(observed.lock().unwrap().len(), 2, "round 1 healthy, round 2 the violation");
+        let r = rec.lock().unwrap();
+        assert!(
+            !r.appended_assistant.iter().any(|text| text.contains("LEAKED")),
+            "an answer from another route is never shown to the user"
+        );
+        assert_eq!(r.completed.len(), 1, "the healthy round's tool call did run");
+    }
+
+    #[tokio::test]
+    async fn the_right_provider_serving_a_different_model_is_also_a_violation() {
+        // The provider matches but the model is not the one asked for: a tier
+        // substitution on the seat. The same guard as the inline chat loop.
+        let (result, observed, _rec) = drive_with_route(
+            subscription_request(),
+            SWITCH_ON,
+            None,
+            vec![Scripted::Answer("from another model".to_owned())],
+            Serving::EchoThenFallback {
+                healthy_rounds: 0,
+                provider: "openai-codex-subscription".to_owned(),
+                model: "gpt-5.6-luna".to_owned(),
+            },
+        )
+        .await;
+        let response = result.expect("graceful");
+        assert_eq!(response.status, "failed");
+        assert_eq!(response.final_output, SUBSCRIPTION_ROUTE_UNAVAILABLE_REPLY);
+        assert_eq!(observed.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_delegated_childs_fallback_stops_the_parent_run_too() {
+        // Call 0 is the parent (healthy), call 1 the child (served wrongly).
+        // The parent would otherwise start a round of its own after reading the
+        // child's failure; it must not.
+        let (result, observed, rec) = drive_with_route(
+            subscription_request(),
+            SWITCH_ON,
+            COMPOSE_AGENT_MODEL,
+            vec![
+                Scripted::ToolCalls {
+                    content: "Delegating.".to_owned(),
+                    calls: vec![subagent_call("sub-1", r#"{"goal":"Find the Bergen weather"}"#)],
+                },
+                Scripted::Answer("child answer from the other route".to_owned()),
+                Scripted::Answer("parent answer, must not be asked for".to_owned()),
+            ],
+            Serving::EchoThenFallback {
+                healthy_rounds: 1,
+                provider: "azure-openai".to_owned(),
+                model: "model-router".to_owned(),
+            },
+        )
+        .await;
+
+        let response = result.expect("graceful");
+        assert_eq!(response.status, "failed");
+        assert_eq!(response.final_output, SUBSCRIPTION_ROUTE_UNAVAILABLE_REPLY);
+        assert_eq!(
+            observed.lock().unwrap().len(),
+            2,
+            "parent round, child round, and nothing after the child's violation"
+        );
+        let r = rec.lock().unwrap();
+        assert!(
+            !r.appended_assistant.iter().any(|text| text.contains("parent answer")),
+            "the parent did not get to answer"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_run_stopped_by_a_childs_violation_does_not_mint_an_approval_for_a_gated_sibling() {
+        // With the effects switch on a pinned run may act, so a round can hold a
+        // call that needs approval next to a delegation. The child's round is
+        // served by the paid route and stops the run; the parent must then end
+        // the run, not pause it on a durable approval request for work that is
+        // over (approving it would resume a run already shown to be off-route).
+        let switches = mp_contracts::agentic_subscription::Switches {
+            enabled: true,
+            allow_effects: true,
+        };
+        let req = pb::RunAgentRequest {
+            plan_mode: false,
+            ..subscription_request()
+        };
+        let route = crate::agent_route::ModelRoute::resolve(&req, switches, COMPOSE_AGENT_MODEL)
+            .expect("a pinned run that may act is valid with both switches on");
+        let mut tools = offered_tool_defs();
+        tools.push(pb::ToolDefinition {
+            name: "delete_records".to_owned(),
+            description: "Delete records (destructive).".to_owned(),
+            parameters_json: r#"{"type":"object","properties":{}}"#.to_owned(),
+        });
+        let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
+        let session_channel = spawn_session_channel(rec.clone()).await;
+        let observed_routes: ObservedRoutes = Arc::new(Mutex::new(Vec::new()));
+        let inference_channel = spawn_inference_channel_with_routes(
+            vec![
+                Scripted::ToolCalls {
+                    content: String::new(),
+                    calls: vec![
+                        subagent_call("sub-1", r#"{"goal":"Find the Bergen weather"}"#),
+                        pb::ToolCall {
+                            id: "del-1".to_owned(),
+                            name: "delete_records".to_owned(),
+                            arguments_json: "{}".to_owned(),
+                        },
+                    ],
+                },
+                Scripted::Answer("child answer from the other route".to_owned()),
+                Scripted::Answer("parent answer, must not be asked for".to_owned()),
+            ],
+            observed_routes.clone(),
+            Serving::EchoThenFallback {
+                healthy_rounds: 1,
+                provider: "azure-openai".to_owned(),
+                model: "model-router".to_owned(),
+            },
+        )
+        .await;
+        let state = crate::state::StateStore::new();
+
+        let response = run_agent_with_route(
+            &state,
+            session_channel,
+            inference_channel,
+            req,
+            tools,
+            None,
+            Some("session-token".to_owned()),
+            "inference-token".to_owned(),
+            &ALLOW_CAPABILITY_POLICY,
+            &STATIC_TERMINAL_TOKENS,
+            None,
+            None,
+            &test_sandbox_manager_client(),
+            "test-backend",
+            None,
+            &test_sandbox_tokens(),
+            None,
+            route,
+            crate::run_budget::RunDeadline::NONE,
+        )
+        .await
+        .expect("the run ends gracefully, it does not error");
+
+        assert_eq!(response.status, "failed", "{}", response.final_output);
+        assert_eq!(response.final_output, SUBSCRIPTION_ROUTE_UNAVAILABLE_REPLY);
+        assert_eq!(
+            observed_routes.lock().unwrap().len(),
+            2,
+            "parent round, child round, and nothing after the child's violation"
+        );
+        let r = rec.lock().unwrap();
+        assert!(
+            r.approvals.is_empty(),
+            "a stopped run must not leave a durable approval behind: {:?}",
+            r.approvals
+        );
+        assert_ne!(
+            state.get_or_create("run_test").status,
+            crate::state::RunStatus::AwaitingApproval,
+            "a stopped run is over, not paused"
+        );
+        assert!(
+            !r.managed_terminal_outcomes.is_empty(),
+            "the run is terminalized as failed"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unpinned_run_does_not_apply_the_guard() {
+        // Today's behaviour for every ordinary run: whichever provider served
+        // it, the answer is used. The guard is for pinned runs only.
+        let (result, observed, _rec) = drive_with_route(
+            sample_request(),
+            Switches::OFF,
+            COMPOSE_AGENT_MODEL,
+            vec![Scripted::Answer("served by the router".to_owned())],
+            Serving::EchoThenFallback {
+                healthy_rounds: 0,
+                provider: "azure-openai".to_owned(),
+                model: "gpt-5-mini".to_owned(),
+            },
+        )
+        .await;
+        let response = result.expect("completes");
+        assert_eq!(response.status, "completed");
+        assert_eq!(response.final_output, "served by the router");
+        assert_eq!(observed.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_subscription_run_is_refused_before_any_work_when_the_switch_is_off() {
+        // `run_agent_with_tools` reads the real environment, where the switch
+        // is unset in a test run: the run must not start. If a developer
+        // exported it, there is nothing to prove here.
+        if mp_contracts::agentic_subscription::Switches::from_env().enabled {
+            return;
+        }
+        let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
+        let session_channel = spawn_session_channel(rec.clone()).await;
+        let observed_routes: ObservedRoutes = Arc::new(Mutex::new(Vec::new()));
+        let inference_channel = spawn_inference_channel_with_routes(
+            vec![Scripted::Answer("must not run".to_owned())],
+            observed_routes.clone(),
+            Serving::Echo,
+        )
+        .await;
+        let state = crate::state::StateStore::new();
+
+        let error = run_agent_with_tools(
+            &state,
+            session_channel,
+            inference_channel,
+            subscription_request(),
+            offered_tool_defs(),
+            None,
+            Some("session-token".to_owned()),
+            "inference-token".to_owned(),
+            &ALLOW_CAPABILITY_POLICY,
+            &STATIC_TERMINAL_TOKENS,
+            None,
+            None,
+            &test_sandbox_manager_client(),
+            "test-backend",
+            None,
+            &test_sandbox_tokens(),
+            None,
+        )
+        .await
+        .expect_err("a disabled route must be refused, not run on the default route");
+
+        assert_eq!(error.code(), tonic::Code::PermissionDenied);
+        assert!(observed_routes.lock().unwrap().is_empty(), "no inference call of any kind");
+        let r = rec.lock().unwrap();
+        assert!(
+            r.plan_transitions.is_empty()
+                && r.managed_terminal_outcomes.is_empty()
+                && r.managed_heartbeats.is_empty()
+                && r.appended_assistant.is_empty(),
+            "refused before the plan transition, the heartbeat and any receipt"
+        );
+    }
+
+    // --- Typed subscription failures, the run-level latch, the usage log -----
+
+    /// A refused ChatGPT-subscription round as inference-core returns it: the
+    /// reason, and any timing, on the status trailers; the message is the code
+    /// alone. Spelled with literals rather than this crate's constants so the
+    /// test is also a check of them. Only a usage limit is `ResourceExhausted`.
+    fn refused_round(code: &str, trailers: &[(&'static str, &str)]) -> Status {
+        let mut metadata = tonic::metadata::MetadataMap::new();
+        metadata.insert("x-mp-provider-error", code.parse().unwrap());
+        for (key, value) in trailers {
+            metadata.insert(*key, value.parse().unwrap());
+        }
+        let grpc = if code == "subscription_usage_limit" {
+            tonic::Code::ResourceExhausted
+        } else {
+            tonic::Code::Unavailable
+        };
+        Status::with_metadata(grpc, code.to_owned(), metadata)
+    }
+
+    /// The receipts recorded for the run itself, not for its delegated children.
+    fn root_receipts(recorder: &Recorder) -> Vec<(String, i32, i32, String)> {
+        recorder
+            .managed_terminal_outcomes
+            .iter()
+            .filter(|(run_id, ..)| run_id == "run_test")
+            .cloned()
+            .collect()
+    }
+
+    /// The terminal receipt a failed run of the sample request records.
+    fn failed_receipt(failure_code: &str) -> Vec<(String, i32, i32, String)> {
+        vec![(
+            "run_test".to_owned(),
+            pb::ManagedRunSource::ExecutionAgent as i32,
+            pb::TerminalOutcome::Failed as i32,
+            failure_code.to_owned(),
+        )]
+    }
+
+    #[tokio::test]
+    async fn every_typed_refusal_ends_a_pinned_run_with_its_code_and_no_apology() {
+        // (what inference-core returned, the code on the response, the code on
+        // the terminal receipt, retry_after_ms, resets_at)
+        let cases: Vec<(Status, &str, &str, Option<u64>, &str)> = vec![
+            (
+                refused_round(
+                    "subscription_usage_limit",
+                    &[
+                        ("x-mp-retry-after-ms", "52260000"),
+                        ("x-mp-resets-at", "2026-10-03T17:45:00Z"),
+                    ],
+                ),
+                "subscription_usage_limit",
+                "provider_unavailable",
+                Some(52_260_000),
+                "2026-10-03T17:45:00Z",
+            ),
+            (
+                refused_round("subscription_reauth_required", &[]),
+                "subscription_reauth_required",
+                "provider_unavailable",
+                None,
+                "",
+            ),
+            (
+                refused_round("subscription_upstream_unavailable", &[]),
+                "subscription_upstream_unavailable",
+                "provider_unavailable",
+                None,
+                "",
+            ),
+            (
+                refused_round("subscription_bad_request", &[]),
+                "subscription_bad_request",
+                "inference_failed",
+                None,
+                "",
+            ),
+            (
+                refused_round("rate_limited", &[("x-mp-retry-after-ms", "1500")]),
+                "rate_limited",
+                "provider_unavailable",
+                Some(1_500),
+                "",
+            ),
+            (
+                refused_round("too_long", &[]),
+                "prompt_too_long",
+                "inference_failed",
+                None,
+                "",
+            ),
+        ];
+        for (status, code, terminal, retry_after_ms, resets_at) in cases {
+            let (result, observed, rec) = drive_with_route(
+                subscription_request(),
+                SWITCH_ON,
+                COMPOSE_AGENT_MODEL,
+                vec![
+                    Scripted::Refused(status),
+                    Scripted::Answer("a second round must not be asked for".to_owned()),
+                ],
+                Serving::Echo,
+            )
+            .await;
+
+            let response = result.expect("a refused run is finalized, it does not error");
+            assert_eq!(response.status, "failed", "{code}");
+            assert_eq!(response.failure_code, code);
+            assert_eq!(response.retry_after_ms, retry_after_ms, "{code}");
+            assert_eq!(response.resets_at, resets_at, "{code}");
+            assert_eq!(response.final_output, SUBSCRIPTION_REFUSED_REPLY, "{code}");
+            assert_eq!(response.rounds_executed, 1, "{code}");
+            assert_eq!(
+                observed.lock().unwrap().len(),
+                1,
+                "{code}: the run stops at the refusal, with no second round"
+            );
+
+            let r = rec.lock().unwrap();
+            assert!(
+                r.appended_assistant.is_empty(),
+                "{code}: no generic apology; the gateway words and persists the reason: {:?}",
+                r.appended_assistant
+            );
+            assert_eq!(
+                r.managed_terminal_outcomes,
+                failed_receipt(terminal),
+                "{code}: one failed receipt, in Session Core's vocabulary"
+            );
+            assert_eq!(
+                r.plan_transitions,
+                vec![
+                    (pb::PlanState::Draft as i32, pb::PlanState::Executing as i32),
+                    (pb::PlanState::Executing as i32, pb::PlanState::Failed as i32),
+                ],
+                "{code}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn an_untyped_failure_on_a_pinned_run_is_subscription_route_unavailable() {
+        // No typed reason: a broker that did not answer, an untyped 403 scope
+        // mismatch from Integration Core, an older inference-core, and a reason
+        // this build does not know yet.
+        let failures = [
+            Status::unavailable("inference down"),
+            Status::permission_denied("connection scope mismatch"),
+            Status::unauthenticated("token expired"),
+            refused_round("a_reason_nobody_has_heard_of", &[]),
+        ];
+        for failed in failures {
+            let label = format!("{:?}", failed.code());
+            let (result, observed, rec) = drive_with_route(
+                subscription_request(),
+                SWITCH_ON,
+                COMPOSE_AGENT_MODEL,
+                vec![Scripted::Refused(failed)],
+                Serving::Echo,
+            )
+            .await;
+
+            let response = result.expect("finalized, not an error");
+            assert_eq!(response.status, "failed", "{label}");
+            assert_eq!(response.failure_code, "subscription_route_unavailable", "{label}");
+            assert_eq!(response.retry_after_ms, None, "{label}");
+            assert_eq!(response.resets_at, "", "{label}");
+            assert_eq!(observed.lock().unwrap().len(), 1, "{label}");
+            let r = rec.lock().unwrap();
+            assert!(r.appended_assistant.is_empty(), "{label}");
+            assert_eq!(
+                r.managed_terminal_outcomes,
+                failed_receipt("provider_unavailable"),
+                "{label}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn an_unpinned_run_keeps_the_graceful_reply_even_if_inference_declares_a_typed_refusal() {
+        // Nothing changes for a run that is not on the subscription: the same
+        // trailers, no route, and the generic apology and receipt as before.
+        let (result, _observed, rec) = drive_with_route(
+            sample_request(),
+            Switches::OFF,
+            COMPOSE_AGENT_MODEL,
+            vec![Scripted::Refused(refused_round(
+                "subscription_usage_limit",
+                &[("x-mp-resets-at", "2026-10-03T17:45:00Z")],
+            ))],
+            Serving::Legacy,
+        )
+        .await;
+
+        let response = result.expect("finalized");
+        assert_eq!(response.status, "failed");
+        assert_eq!(response.failure_code, "");
+        assert_eq!(response.retry_after_ms, None);
+        assert_eq!(response.resets_at, "");
+        assert_eq!(response.final_output, GRACEFUL_FAILURE_REPLY);
+        let r = rec.lock().unwrap();
+        assert_eq!(r.appended_assistant, vec![GRACEFUL_FAILURE_REPLY.to_owned()]);
+        assert_eq!(r.managed_terminal_outcomes, failed_receipt("execution_failed"));
+    }
+
+    #[tokio::test]
+    async fn a_usage_limit_in_a_delegated_child_stops_the_parent_run() {
+        // The child is refused; the parent would otherwise read "inference was
+        // unavailable" as a tool result and spend another round on the same
+        // spent plan. It must not, and the run reports the child's refusal.
+        let (result, observed, rec) = drive_with_route(
+            subscription_request(),
+            SWITCH_ON,
+            COMPOSE_AGENT_MODEL,
+            vec![
+                Scripted::ToolCalls {
+                    content: "Delegating.".to_owned(),
+                    calls: vec![subagent_call("sub-1", r#"{"goal":"Find the Bergen weather"}"#)],
+                },
+                Scripted::Refused(refused_round(
+                    "subscription_usage_limit",
+                    &[("x-mp-resets-at", "2026-10-03T17:45:00Z")],
+                )),
+                Scripted::Answer("parent answer, must not be asked for".to_owned()),
+            ],
+            Serving::Echo,
+        )
+        .await;
+
+        let response = result.expect("finalized");
+        assert_eq!(response.status, "failed", "{}", response.final_output);
+        assert_eq!(response.failure_code, "subscription_usage_limit");
+        assert_eq!(response.resets_at, "2026-10-03T17:45:00Z");
+        assert_eq!(
+            response.rounds_executed, 2,
+            "the parent's round and the child's, nothing after"
+        );
+        assert_eq!(
+            observed.lock().unwrap().len(),
+            2,
+            "parent round, child round, and no second parent round"
+        );
+        let r = rec.lock().unwrap();
+        assert!(r.appended_assistant.is_empty(), "{:?}", r.appended_assistant);
+        assert_eq!(
+            root_receipts(&r),
+            failed_receipt("provider_unavailable"),
+            "the run's own receipt carries the refusal (the child's is its own, `execution_failed`)"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_usage_limit_in_one_fan_out_item_stops_its_siblings_and_the_parent() {
+        // Six items, four in flight at once. The first one to call the route is
+        // refused. Its three siblings in flight each got a tool round and must
+        // not start a second; the two items still waiting for a permit must not
+        // start at all (no durable child run, no round); and the parent never
+        // gets to read the digest and answer.
+        let (result, observed, rec) = drive_with_route(
+            pinned_with_rounds(32),
+            SWITCH_ON,
+            COMPOSE_AGENT_MODEL,
+            vec![
+                Scripted::ToolCalls {
+                    content: String::new(),
+                    calls: vec![research_fan_out_call(
+                        "fan-1",
+                        r#"{"items":[{"id":"a","goal":"look up A"},{"id":"b","goal":"look up B"},{"id":"c","goal":"look up C"},{"id":"d","goal":"look up D"},{"id":"e","goal":"look up E"},{"id":"f","goal":"look up F"}]}"#,
+                    )],
+                },
+                Scripted::Refused(refused_round(
+                    "subscription_usage_limit",
+                    &[("x-mp-resets-at", "2026-10-03T17:45:00Z")],
+                )),
+                Scripted::ToolCalls {
+                    content: String::new(),
+                    calls: vec![failing_tool_call("wx-b")],
+                },
+                Scripted::ToolCalls {
+                    content: String::new(),
+                    calls: vec![failing_tool_call("wx-c")],
+                },
+                Scripted::ToolCalls {
+                    content: String::new(),
+                    calls: vec![failing_tool_call("wx-d")],
+                },
+                // Anything after the first five calls is a round that the
+                // latch should have prevented.
+                Scripted::Answer("a sibling's second round, must not be asked for".to_owned()),
+                Scripted::Answer("an unstarted item, must not be asked for".to_owned()),
+                Scripted::Answer("an unstarted item, must not be asked for".to_owned()),
+                Scripted::Answer("parent answer, must not be asked for".to_owned()),
+            ],
+            Serving::Echo,
+        )
+        .await;
+
+        let response = result.expect("finalized");
+        assert_eq!(response.status, "failed", "{}", response.final_output);
+        assert_eq!(response.failure_code, "subscription_usage_limit");
+        assert_eq!(response.resets_at, "2026-10-03T17:45:00Z");
+        assert_eq!(
+            observed.lock().unwrap().len(),
+            5,
+            "the parent's round and one first round per item in flight, nothing more"
+        );
+        let r = rec.lock().unwrap();
+        assert_eq!(
+            r.started_child_runs.len(),
+            4,
+            "the two items that never got a permit before the refusal were not registered"
+        );
+        assert!(r.appended_assistant.is_empty(), "{:?}", r.appended_assistant);
+        assert!(r.approvals.is_empty());
+        assert_eq!(root_receipts(&r), failed_receipt("provider_unavailable"));
+        // Every item that was registered was settled, and as failed.
+        let items: Vec<_> = r
+            .managed_terminal_outcomes
+            .iter()
+            .filter(|(run_id, ..)| run_id != "run_test")
+            .collect();
+        assert_eq!(items.len(), 4, "{items:?}");
+        assert!(items
+            .iter()
+            .all(|(_, _, outcome, _)| *outcome == pb::TerminalOutcome::Failed as i32));
+    }
+
+    #[tokio::test]
+    async fn a_refusal_that_is_not_run_wide_fails_only_the_delegation() {
+        // A throttle is about one round. The child fails, the parent reads that
+        // as a tool result and goes on to answer: nothing is latched.
+        let (result, observed, rec) = drive_with_route(
+            subscription_request(),
+            SWITCH_ON,
+            COMPOSE_AGENT_MODEL,
+            vec![
+                Scripted::ToolCalls {
+                    content: "Delegating.".to_owned(),
+                    calls: vec![subagent_call("sub-1", r#"{"goal":"Find the Bergen weather"}"#)],
+                },
+                Scripted::Refused(refused_round("rate_limited", &[("x-mp-retry-after-ms", "1500")])),
+                Scripted::Answer("I could not delegate; here is what I know.".to_owned()),
+            ],
+            Serving::Echo,
+        )
+        .await;
+
+        let response = result.expect("finalized");
+        assert_eq!(response.status, "completed", "{}", response.final_output);
+        assert_eq!(response.failure_code, "");
+        assert_eq!(observed.lock().unwrap().len(), 3, "parent, child, parent");
+        let r = rec.lock().unwrap();
+        assert_eq!(
+            r.appended_assistant,
+            vec!["I could not delegate; here is what I know.".to_owned()]
+        );
+    }
+
+    /// Every tracing event emitted on this thread while installed, as
+    /// `(message, [(field, value)])`. `tracing-subscriber` is not a dependency
+    /// of this crate, and a `Subscriber` is small enough to write here.
+    #[derive(Clone, Default)]
+    struct CapturedEvents(Arc<Mutex<Vec<(String, Vec<(String, String)>)>>>);
+
+    impl CapturedEvents {
+        /// The events whose message contains `needle`.
+        fn with_message(&self, needle: &str) -> Vec<(String, Vec<(String, String)>)> {
+            self.0
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(message, _)| message.contains(needle))
+                .cloned()
+                .collect()
+        }
+    }
+
+    /// One process-wide subscriber that hands each event to the sink of the
+    /// thread that emitted it. A per-test `set_default` is not enough: tracing
+    /// caches whether a call site is enabled, and a test thread that reaches a
+    /// call site while another test thread has no scoped subscriber caches
+    /// "never", so the capturing test then misses its events (it failed about
+    /// half of the parallel runs). A global subscriber keeps every call site
+    /// enabled, and the tests run on a current-thread runtime, so each run's
+    /// events stay on its own thread.
+    struct CaptureSubscriber;
+
+    thread_local! {
+        static CAPTURE_SINK: std::cell::RefCell<Option<CapturedEvents>> =
+            const { std::cell::RefCell::new(None) };
+    }
+
+    /// Clears this thread's sink when the test ends.
+    struct CaptureGuard;
+
+    impl Drop for CaptureGuard {
+        fn drop(&mut self) {
+            CAPTURE_SINK.with(|sink| *sink.borrow_mut() = None);
+        }
+    }
+
+    fn capture_events() -> (CapturedEvents, CaptureGuard) {
+        static INSTALL: std::sync::Once = std::sync::Once::new();
+        INSTALL.call_once(|| {
+            tracing::subscriber::set_global_default(CaptureSubscriber)
+                .expect("no other global tracing subscriber in the execution-core tests");
+        });
+        let captured = CapturedEvents::default();
+        CAPTURE_SINK.with(|sink| *sink.borrow_mut() = Some(captured.clone()));
+        (captured, CaptureGuard)
+    }
+
+    #[derive(Default)]
+    struct FieldCollector {
+        message: String,
+        fields: Vec<(String, String)>,
+    }
+
+    impl tracing::field::Visit for FieldCollector {
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            if field.name() == "message" {
+                self.message = format!("{value:?}");
+            } else {
+                self.fields.push((field.name().to_owned(), format!("{value:?}")));
+            }
+        }
+    }
+
+    impl tracing::Subscriber for CaptureSubscriber {
+        fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+            true
+        }
+        fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+        fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+        fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+        fn event(&self, event: &tracing::Event<'_>) {
+            let mut collector = FieldCollector::default();
+            event.record(&mut collector);
+            CAPTURE_SINK.with(|sink| {
+                if let Some(captured) = sink.borrow().as_ref() {
+                    captured
+                        .0
+                        .lock()
+                        .unwrap()
+                        .push((collector.message, collector.fields));
+                }
+            });
+        }
+        fn enter(&self, _: &tracing::span::Id) {}
+        fn exit(&self, _: &tracing::span::Id) {}
+    }
+
+    #[tokio::test]
+    async fn each_round_logs_its_token_usage_and_never_its_content() {
+        let (captured, _installed) = capture_events();
+
+        let req = pb::RunAgentRequest {
+            goal: "SECRET-GOAL quarterly figures for Kunde AS".to_owned(),
+            ..subscription_request()
+        };
+        let (result, _observed, _rec) = drive_with_route(
+            req,
+            SWITCH_ON,
+            COMPOSE_AGENT_MODEL,
+            vec![
+                Scripted::ToolCalls {
+                    content: "SECRET-INTERIM reasoning".to_owned(),
+                    calls: vec![failing_tool_call("wx-1")],
+                },
+                Scripted::Answer("SECRET-ANSWER text".to_owned()),
+            ],
+            Serving::Echo,
+        )
+        .await;
+        assert_eq!(result.expect("completes").status, "completed");
+
+        let usage = captured.with_message("inference round usage");
+        assert_eq!(usage.len(), 2, "one line per inference round: {usage:?}");
+        let field = |event: &(String, Vec<(String, String)>), name: &str| -> String {
+            event
+                .1
+                .iter()
+                .find(|(key, _)| key == name)
+                .map(|(_, value)| value.trim_matches('"').to_owned())
+                .unwrap_or_else(|| panic!("no `{name}` field in {event:?}"))
+        };
+        let mut names: Vec<&str> = usage[0].1.iter().map(|(key, _)| key.as_str()).collect();
+        names.sort_unstable();
+        assert_eq!(
+            names,
+            vec![
+                "cache_creation_input_tokens",
+                "cache_read_input_tokens",
+                "depth",
+                "input_tokens",
+                "model_used",
+                "output_tokens",
+                "provider_used",
+                "round",
+                "run_id",
+                "stop_reason",
+                "tool_calls",
+            ],
+            "exactly the content-free fields, no more"
+        );
+        assert_eq!(field(&usage[0], "run_id"), "run_test");
+        assert_eq!(field(&usage[0], "depth"), "0");
+        assert_eq!(field(&usage[0], "round"), "1");
+        assert_eq!(field(&usage[0], "input_tokens"), "1");
+        assert_eq!(field(&usage[0], "output_tokens"), "1");
+        assert_eq!(field(&usage[0], "cache_read_input_tokens"), "0");
+        assert_eq!(field(&usage[0], "cache_creation_input_tokens"), "0");
+        assert_eq!(field(&usage[0], "stop_reason"), "tool_use");
+        assert_eq!(field(&usage[0], "tool_calls"), "1");
+        assert_eq!(field(&usage[0], "provider_used"), "openai-codex-subscription");
+        assert_eq!(field(&usage[0], "model_used"), "gpt-5.6-terra");
+        assert_eq!(field(&usage[1], "round"), "2");
+        assert_eq!(field(&usage[1], "stop_reason"), "end_turn");
+        assert_eq!(field(&usage[1], "tool_calls"), "0");
+        assert!(
+            !format!("{usage:?}").contains("SECRET"),
+            "a usage line carries no goal, reasoning, answer or argument text: {usage:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_refused_round_logs_its_code_and_never_the_status_message() {
+        let (captured, _installed) = capture_events();
+
+        // An untyped failure whose message carries provider text.
+        let (result, _observed, _rec) = drive_with_route(
+            subscription_request(),
+            SWITCH_ON,
+            COMPOSE_AGENT_MODEL,
+            vec![Scripted::Refused(Status::unavailable(
+                "SECRET-PROVIDER-BODY: your prompt about Kunde AS was refused",
+            ))],
+            Serving::Echo,
+        )
+        .await;
+        assert_eq!(
+            result.expect("finalized").failure_code,
+            "subscription_route_unavailable"
+        );
+
+        let refused = captured.with_message("refused an inference round");
+        assert_eq!(refused.len(), 1, "{refused:?}");
+        let rendered = format!("{refused:?}");
+        assert!(rendered.contains("subscription_route_unavailable"), "{rendered}");
+        assert!(rendered.contains("Unavailable"), "the gRPC code is logged: {rendered}");
+        assert!(
+            !rendered.contains("SECRET") && !rendered.contains("Kunde"),
+            "the status message is provider text and is not logged for a pinned run: {rendered}"
+        );
+        // And the run's own finalize line names the code, not a message.
+        let finalized = captured.with_message("run finalized");
+        assert_eq!(finalized.len(), 1, "{finalized:?}");
+        assert!(
+            format!("{finalized:?}").contains("subscription_route_unavailable"),
+            "{finalized:?}"
         );
     }
 
@@ -6404,6 +9313,398 @@ mod tests {
         );
     }
 
+    // --- Post-mutation verification inside the loop (chat gap closure B8) -----
+
+    /// What one scripted provider-write run left behind.
+    struct VerifiedWriteRun {
+        /// The tool context the model was given in round 2.
+        next_round_context: String,
+        /// The durable output Session Core recorded for the write's step.
+        step_record: String,
+        /// The operations integration-corev2 was asked to run, in order.
+        operations_called: Vec<String>,
+    }
+
+    /// Run `gmail.send` through the whole loop (model asks, gate approves,
+    /// write runs, round 2 sees the result) against fake Auth Core and
+    /// integration-corev2. `listed_ids` are the message ids the fake mailbox
+    /// lists when the write is read back.
+    async fn run_a_provider_write(verify: bool, listed_ids: &[&str]) -> VerifiedWriteRun {
+        use crate::integration_tools::IntegrationActionsClient;
+        use crate::runtime_loop::post_mutation::test_overrides::Overrides;
+        use wiremock::matchers::{body_partial_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let auth = MockServer::start().await;
+        for token_path in [
+            "/api/ingestion/internal-token",
+            "/api/ingestion/token-exchange",
+        ] {
+            Mock::given(method("POST"))
+                .and(path(token_path))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .set_body_json(serde_json::json!({"token": "test-token"})),
+                )
+                .mount(&auth)
+                .await;
+        }
+        let integration = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/connections/c1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(
+                serde_json::json!({"data": {"connection": {"providerKey": "google"}}}),
+            ))
+            .mount(&integration)
+            .await;
+        let messages: Vec<serde_json::Value> = listed_ids
+            .iter()
+            .map(|id| serde_json::json!({ "id": id }))
+            .collect();
+        for (operation, result) in [
+            ("gmail.send", serde_json::json!({"id": "msg-1"})),
+            (
+                "gmail.messages",
+                serde_json::json!({ "messages": messages }),
+            ),
+        ] {
+            Mock::given(method("POST"))
+                .and(path("/api/v1/connections/c1/actions"))
+                .and(body_partial_json(
+                    serde_json::json!({ "operation": operation }),
+                ))
+                .respond_with(ResponseTemplate::new(200).set_body_json(
+                    serde_json::json!({"success": true, "data": {"action": {"result": result}}}),
+                ))
+                .mount(&integration)
+                .await;
+        }
+        let signer = Arc::new(
+            crate::attestation::Signer::new([7u8; 32], "test-key-1").expect("test signer"),
+        );
+        let _overrides =
+            Overrides::new()
+                .enabled(verify)
+                .integration(IntegrationActionsClient::new_for_test(
+                    &auth.uri(),
+                    &integration.uri(),
+                    Some(signer),
+                ));
+
+        let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
+        let session_channel = spawn_session_channel(rec.clone()).await;
+        let call = pb::ToolCall {
+            id: "pa-1".to_owned(),
+            name: "execute_provider_action".to_owned(),
+            arguments_json: r#"{"connection_id":"c1","operation":"gmail.send","body":{"to":"a@example.org","subject":"Hi","bodyText":"Hello"}}"#
+                .to_owned(),
+        };
+        let observed_messages: ObservedMessages = Arc::new(Mutex::new(Vec::new()));
+        let inference_channel = spawn_inference_channel_with_messages(
+            vec![
+                Scripted::ToolCalls {
+                    content: String::new(),
+                    calls: vec![call],
+                },
+                Scripted::Answer("done".to_owned()),
+            ],
+            observed_messages.clone(),
+        )
+        .await;
+        let state = crate::state::StateStore::new();
+        let tools = vec![pb::ToolDefinition {
+            name: "execute_provider_action".to_owned(),
+            description: "Run one provider operation.".to_owned(),
+            parameters_json: r#"{"type":"object","properties":{}}"#.to_owned(),
+        }];
+        let mut req = sample_request();
+        req.mode = "auto".to_owned();
+
+        let resp = run_agent_with_tools(
+            &state,
+            session_channel,
+            inference_channel,
+            req,
+            tools,
+            None,
+            Some("session-token".to_owned()),
+            "inference-token".to_owned(),
+            &ALLOW_CAPABILITY_POLICY,
+            &STATIC_TERMINAL_TOKENS,
+            None,
+            None,
+            &test_sandbox_manager_client(),
+            "test-backend",
+            None,
+            &test_sandbox_tokens(),
+            None,
+        )
+        .await
+        .expect("the provider write run should succeed");
+        assert_eq!(resp.status, "completed");
+
+        let next_round_context = observed_messages.lock().unwrap()[1]
+            .iter()
+            .rfind(|message| message.role == "user")
+            .map_or_else(String::new, |message| message.content.clone());
+        let (step_record, _) = persisted_step(&rec.lock().unwrap(), "tool_1_pa-1");
+        let operations_called = integration
+            .received_requests()
+            .await
+            .expect("request recording is on")
+            .iter()
+            .filter(|request| request.url.path() == "/api/v1/connections/c1/actions")
+            .filter_map(|request| {
+                let body: serde_json::Value = serde_json::from_slice(&request.body).ok()?;
+                body["operation"].as_str().map(str::to_owned)
+            })
+            .collect();
+        VerifiedWriteRun {
+            next_round_context,
+            step_record,
+            operations_called,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_confirmed_provider_write_shows_the_model_and_the_trace_the_verdict() {
+        let run = run_a_provider_write(true, &["msg-0", "msg-1"]).await;
+
+        assert_eq!(run.operations_called, ["gmail.send", "gmail.messages"]);
+        for (where_, text) in [
+            ("the next round's tool context", &run.next_round_context),
+            ("the durable step record", &run.step_record),
+        ] {
+            assert!(
+                text.contains("Executed gmail.send."),
+                "{where_} keeps the write's own result: {text}"
+            );
+            assert!(
+                text.contains("Verified against the system of record:"),
+                "{where_} must carry the verdict: {text}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn an_unconfirmed_provider_write_does_not_read_as_confirmed_to_the_model() {
+        // The mailbox lists other messages but not the one just sent: a bounded
+        // window, so this is "could not verify", never "it failed".
+        let run = run_a_provider_write(true, &["msg-0"]).await;
+
+        assert_eq!(run.operations_called, ["gmail.send", "gmail.messages"]);
+        assert!(
+            run.next_round_context.contains("Could not verify (")
+                && run
+                    .next_round_context
+                    .contains("say so, do not claim it is confirmed"),
+            "the model is told to say it is unverified: {}",
+            run.next_round_context
+        );
+        assert!(
+            !run.next_round_context
+                .contains("Verified against the system of record"),
+            "{}",
+            run.next_round_context
+        );
+        assert!(!run.next_round_context.contains("NOT confirmed"));
+    }
+
+    #[tokio::test]
+    async fn with_verification_off_the_loop_shows_the_model_the_write_unchanged() {
+        let run = run_a_provider_write(false, &["msg-1"]).await;
+
+        assert_eq!(
+            run.operations_called,
+            ["gmail.send"],
+            "no read-back request while the switch is off"
+        );
+        assert!(run.next_round_context.contains("Executed gmail.send."));
+        assert!(
+            !run.next_round_context.contains("system of record")
+                && !run.next_round_context.contains("Could not verify"),
+            "{}",
+            run.next_round_context
+        );
+        assert!(!run.step_record.contains("system of record"));
+    }
+
+    /// Run `book_shipment` through the whole loop against fake Auth Core and
+    /// shipping-core, and return the model's round-2 tool context. `status` is
+    /// what shipping-core reports when the booking is read back.
+    async fn run_a_shipment_booking(
+        verify: bool,
+        booking_arguments: &str,
+        read_back: wiremock::ResponseTemplate,
+    ) -> (String, usize) {
+        use crate::runtime_loop::post_mutation::test_overrides::Overrides;
+        use crate::shipping_tools::ShippingToolsClient;
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let auth = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/ingestion/internal-token"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"token": "t"})),
+            )
+            .mount(&auth)
+            .await;
+        let shipping = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/bookings"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "booking_id": "booking-1", "confirmation_token": "confirm-1"
+            })))
+            .mount(&shipping)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/bookings/booking-1/confirm"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "carrier_name": "Bring", "booking_ref": "ref-1",
+                "tracking_no": "TRK-1", "has_label": false
+            })))
+            .mount(&shipping)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/bookings/booking-1"))
+            .respond_with(read_back)
+            .mount(&shipping)
+            .await;
+        let _overrides =
+            Overrides::new()
+                .enabled(verify)
+                .shipping(ShippingToolsClient::new_for_test(
+                    shipping.uri(),
+                    auth.uri(),
+                    "model-execution",
+                    "test-only-service-key",
+                ));
+
+        let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
+        let session_channel = spawn_session_channel(rec.clone()).await;
+        let observed_messages: ObservedMessages = Arc::new(Mutex::new(Vec::new()));
+        let inference_channel = spawn_inference_channel_with_messages(
+            vec![
+                Scripted::ToolCalls {
+                    content: String::new(),
+                    calls: vec![pb::ToolCall {
+                        id: "bk-1".to_owned(),
+                        name: "book_shipment".to_owned(),
+                        arguments_json: booking_arguments.to_owned(),
+                    }],
+                },
+                Scripted::Answer("done".to_owned()),
+            ],
+            observed_messages.clone(),
+        )
+        .await;
+        let state = crate::state::StateStore::new();
+        let tools = vec![pb::ToolDefinition {
+            name: "book_shipment".to_owned(),
+            description: "Book a shipment.".to_owned(),
+            parameters_json: r#"{"type":"object","properties":{}}"#.to_owned(),
+        }];
+        let mut req = sample_request();
+        req.mode = "auto".to_owned();
+        // The loop refuses a booking whose address, dimensions or price appear
+        // nowhere in the conversation, so the user's request has to say them.
+        req.goal = BOOKING_GOAL.to_owned();
+
+        let resp = run_agent_with_tools(
+            &state,
+            session_channel,
+            inference_channel,
+            req,
+            tools,
+            None,
+            Some("session-token".to_owned()),
+            "inference-token".to_owned(),
+            &ALLOW_CAPABILITY_POLICY,
+            &STATIC_TERMINAL_TOKENS,
+            None,
+            None,
+            &test_sandbox_manager_client(),
+            "test-backend",
+            None,
+            &test_sandbox_tokens(),
+            None,
+        )
+        .await
+        .expect("the booking run should succeed");
+        assert_eq!(resp.status, "completed");
+
+        let next_round_context = observed_messages.lock().unwrap()[1]
+            .iter()
+            .rfind(|message| message.role == "user")
+            .map_or_else(String::new, |message| message.content.clone());
+        let reads = shipping
+            .received_requests()
+            .await
+            .expect("request recording is on")
+            .iter()
+            .filter(|request| request.method.as_str() == "GET")
+            .count();
+        (next_round_context, reads)
+    }
+
+    const BOOKING_GOAL: &str = "Book the NOK 1000 mock-bring Parcel quote (quote-1) from Sender, Gata 1, 0001 Oslo, NO to Recipient, Gata 2, 7010 Trondheim, NO. One parcel: weight 1, length 10, width 10, height 10.";
+
+    const BOOKING_ARGUMENTS: &str = r#"{"quote_ref":"quote-1","carrier_code":"mock-bring","service_name":"Parcel","price_amount_cents":1000,"price_currency":"NOK","from":{"name":"Sender","street":"Gata 1","postal_code":"0001","city":"Oslo","country":"NO","is_business":true,"phone":"+4712345678"},"to":{"name":"Recipient","street":"Gata 2","postal_code":"7010","city":"Trondheim","country":"NO","is_business":true,"phone":"+4787654321"},"weight_kg":1,"length_cm":10,"width_cm":10,"height_cm":10,"booked_by":""}"#;
+
+    #[tokio::test]
+    async fn a_booking_shipping_core_holds_shows_the_model_the_verdict() {
+        let (context, reads) = run_a_shipment_booking(
+            true,
+            BOOKING_ARGUMENTS,
+            wiremock::ResponseTemplate::new(200)
+                .set_body_json(serde_json::json!({"status": "booked", "tracking_no": "TRK-1"})),
+        )
+        .await;
+
+        assert!(context.contains("Shipment BOOKED with Bring."), "{context}");
+        assert!(
+            context.contains(
+                "Verified against the system of record: shipping-core independently reports booking booking-1 as booked"
+            ),
+            "{context}"
+        );
+        assert_eq!(reads, 1, "the booking is read back exactly once");
+    }
+
+    #[tokio::test]
+    async fn a_booking_shipping_core_does_not_hold_tells_the_model_not_to_report_success() {
+        let (context, _) = run_a_shipment_booking(
+            true,
+            BOOKING_ARGUMENTS,
+            wiremock::ResponseTemplate::new(404)
+                .set_body_json(serde_json::json!({"error": "not found"})),
+        )
+        .await;
+
+        assert!(context.contains("Shipment BOOKED with Bring."), "{context}");
+        assert!(
+            context.contains("NOT confirmed: the system of record contradicts this write:")
+                && context.contains("do not tell the user it succeeded, report the discrepancy"),
+            "{context}"
+        );
+    }
+
+    #[tokio::test]
+    async fn with_verification_off_a_booking_reads_nothing_back() {
+        let (context, reads) = run_a_shipment_booking(
+            false,
+            BOOKING_ARGUMENTS,
+            wiremock::ResponseTemplate::new(200)
+                .set_body_json(serde_json::json!({"status": "booked", "tracking_no": "TRK-1"})),
+        )
+        .await;
+
+        assert!(context.contains("Shipment BOOKED with Bring."), "{context}");
+        assert!(!context.contains("system of record"), "{context}");
+        assert_eq!(reads, 0);
+    }
+
     // --- Delegated subagents -------------------------------------------------
 
     /// The (output, error) Session Core persisted for `step_id`.
@@ -6438,6 +9739,21 @@ mod tests {
             name: "subagent.task".to_owned(),
             arguments_json: input.to_owned(),
         }
+    }
+
+    fn research_fan_out_call(id: &str, input: &str) -> pb::ToolCall {
+        pb::ToolCall {
+            id: id.to_owned(),
+            name: crate::subagent::research_fan_out::RESEARCH_TOOL_NAME.to_owned(),
+            arguments_json: input.to_owned(),
+        }
+    }
+
+    /// The idempotency key the production code starts the sample run's child
+    /// for `step_id` under. Derived through the production function, while the
+    /// fake session-core independently enforces the real key CHARSET.
+    fn sample_child_start_key(step_id: &str) -> String {
+        managed_start_key(&sample_request().run_id, step_id)
     }
 
     /// A tool call that dispatches for real and fails fast without a network:
@@ -6548,8 +9864,11 @@ mod tests {
     /// because both sides exist on purpose: the caller knows the posture with no
     /// round trip, the server fails closed for a ZDR credential anyway, and
     /// neither is allowed to depend on the other being right. Note what still
-    /// happens on a ZDR run — the terminal receipt, which is metadata-only and
-    /// safe. That difference IS the design.
+    /// happens on a ZDR run — the PARENT run's terminal receipt, which is
+    /// metadata-only and safe. That difference IS the design. (The delegated
+    /// child gets no run of its own under ZDR, so it has no receipt: see
+    /// `a_zero_retention_delegation_registers_nothing_durable_and_still_answers`,
+    /// which holds the same posture to session-core's real rules.)
     #[tokio::test]
     async fn a_zero_retention_delegation_records_a_receipt_but_never_its_answer() {
         const DELEGATED_GOAL: &str = "Find the current Bergen weather";
@@ -6606,10 +9925,17 @@ mod tests {
             r.recorded_run_outputs
         );
         assert!(
-            !r.managed_terminal_outcomes.is_empty(),
-            "the metadata-only receipt is still written — that is what makes it \
-             safe on a ZDR run, and losing it would leave an obligation the \
-             watchdog force-fails"
+            r.managed_terminal_outcomes
+                .iter()
+                .any(|(run_id, ..)| run_id == &sample_request().run_id),
+            "the parent's metadata-only receipt is still written — that is what \
+             makes it safe on a ZDR run, and losing it would leave an obligation \
+             the watchdog force-fails"
+        );
+        assert!(
+            r.started_child_runs.is_empty(),
+            "a zero-retention delegation registers no durable child run: {:?}",
+            r.started_child_runs
         );
     }
 
@@ -6675,7 +10001,7 @@ mod tests {
             r.managed_terminal_outcomes
                 .iter()
                 .any(|(run_id, _, outcome, _)| {
-                    run_id == &format!("child-{}:tool_1_sub-1", sample_request().run_id)
+                    run_id == &format!("child-{}", sample_child_start_key("tool_1_sub-1"))
                         && *outcome == pb::TerminalOutcome::Completed as i32
                 }),
             "a failed answer write must not leave the child obligation open"
@@ -6842,7 +10168,7 @@ mod tests {
         );
         assert_eq!(
             start_key,
-            &format!("{}:tool_1_sub-1", sample_request().run_id),
+            &sample_child_start_key("tool_1_sub-1"),
             "start_key must be identifiers only — stable across retries and \
              carrying no prompt or tool content"
         );
@@ -6850,8 +10176,10 @@ mod tests {
             r.lineage_edges,
             vec![(
                 sample_request().run_id.clone(),
-                format!("child-{}:tool_1_sub-1", sample_request().run_id),
+                format!("child-{}", sample_child_start_key("tool_1_sub-1")),
                 pb::SubagentRole::Generic as i32,
+                DELEGATED_GOAL.to_owned(),
+                String::new(),
             )],
             "the parent -> child edge must be recorded, since the lineage \
              endpoint reads subagent_edges and not runs.parent_run_id"
@@ -6862,7 +10190,7 @@ mod tests {
             r.managed_terminal_outcomes
                 .iter()
                 .any(|(run_id, _, outcome, _)| {
-                    run_id == &format!("child-{}:tool_1_sub-1", sample_request().run_id)
+                    run_id == &format!("child-{}", sample_child_start_key("tool_1_sub-1"))
                         && *outcome == pb::TerminalOutcome::Completed as i32
                 }),
             "the delegated child run must be settled Completed"
@@ -6911,7 +10239,7 @@ mod tests {
         let (answer_run_id, answer) = &r.recorded_run_outputs[0];
         assert_eq!(
             answer_run_id,
-            &format!("child-{}:tool_1_sub-1", sample_request().run_id),
+            &format!("child-{}", sample_child_start_key("tool_1_sub-1")),
             "the answer belongs to the CHILD run's record, never the parent's"
         );
         assert_ne!(
@@ -6997,6 +10325,58 @@ mod tests {
         assert!(
             outer_output.contains("I completed it myself."),
             "{outer_output}"
+        );
+    }
+
+    /// The fan-out is a SECOND way to spawn, and the depth limit must hold for it
+    /// too: a delegated subagent that fans out would multiply the tree by its item
+    /// count (8 x 8 children under the default ceiling) and put nested loops
+    /// outside every audit view this depth limit exists to keep legible.
+    #[tokio::test]
+    async fn a_delegated_subagent_cannot_fan_out() {
+        let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
+        let session_channel = spawn_session_channel(rec.clone()).await;
+        let observed_messages: ObservedMessages = Arc::new(Mutex::new(Vec::new()));
+        let inference_channel = spawn_inference_channel_with_messages(
+            vec![
+                Scripted::ToolCalls {
+                    content: String::new(),
+                    calls: vec![subagent_call("sub-outer", r#"{"goal":"outer task"}"#)],
+                },
+                Scripted::ToolCalls {
+                    content: String::new(),
+                    calls: vec![research_fan_out_call(
+                        "fan-inner",
+                        r#"{"items":[{"goal":"inner A"},{"goal":"inner B"}]}"#,
+                    )],
+                },
+                Scripted::Answer("I did it myself.".to_owned()),
+                Scripted::Answer("Done.".to_owned()),
+            ],
+            observed_messages.clone(),
+        )
+        .await;
+
+        let mut req = sample_request();
+        req.max_rounds = 8;
+        let resp = run_fan_out_agent(session_channel, inference_channel, req).await;
+        assert_eq!(resp.status, "completed");
+        assert_eq!(
+            observed_messages.lock().unwrap().len(),
+            4,
+            "exactly four inference rounds: the refused fan-out never started a loop"
+        );
+
+        let r = rec.lock().unwrap();
+        assert_eq!(
+            r.started_child_runs.len(),
+            1,
+            "only the outer delegation registered a child run; the refused fan-out registered none"
+        );
+        let (_, error) = persisted_step(&r, "tool_1_sub-outer.tool_1_fan-inner");
+        assert!(
+            error.contains("may not spawn another subagent"),
+            "the refusal must reach the subagent as an explicit error: {error}"
         );
     }
 
@@ -7132,6 +10512,94 @@ mod tests {
         assert!(
             subagent_next_round.contains("only available to the main agent")
                 && subagent_next_round.contains("no subagent results"),
+            "the refusal must reach the subagent's next round with its reason stated: \
+             {subagent_next_round}"
+        );
+    }
+
+    /// A plan is what the person confirms before the run acts, and the newest
+    /// proposal of a run is the one they are shown. A delegated subagent shares
+    /// the parent's run id and credentials, so it must not be able to propose one:
+    /// it would displace the main agent's plan on the approval surface. The
+    /// refusal must reach the subagent with its reason, and nothing may be
+    /// written to session-core.
+    #[tokio::test]
+    async fn a_delegated_subagent_cannot_propose_a_plan() {
+        let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
+        let session_channel = spawn_session_channel(rec.clone()).await;
+        let observed_messages: ObservedMessages = Arc::new(Mutex::new(Vec::new()));
+        let inference_channel = spawn_inference_channel_with_messages(
+            vec![
+                Scripted::ToolCalls {
+                    content: String::new(),
+                    calls: vec![subagent_call(
+                        "sub-1",
+                        r#"{"goal":"investigate the overdue invoices"}"#,
+                    )],
+                },
+                Scripted::ToolCalls {
+                    content: String::new(),
+                    calls: vec![pb::ToolCall {
+                        id: "propose-1".to_owned(),
+                        name: crate::plan::PROPOSE_TOOL.to_owned(),
+                        arguments_json: serde_json::json!({
+                            "summary": "Email every customer",
+                            "steps": [{"title": "Send the email to all customers"}],
+                        })
+                        .to_string(),
+                    }],
+                },
+                Scripted::Answer("I could not propose a plan; here are my findings.".to_owned()),
+                Scripted::Answer("Reported back.".to_owned()),
+            ],
+            observed_messages.clone(),
+        )
+        .await;
+        let state = crate::state::StateStore::new();
+
+        // A plan-mode run, the only place a plan is ever proposed.
+        let mut req = sample_request();
+        req.mode = "auto".to_owned();
+        req.plan_mode = true;
+        req.autonomy_rung = pb::AutonomyRung::ReadOnly as i32;
+        let resp = run_agent(
+            &state,
+            session_channel,
+            inference_channel,
+            req,
+            None,
+            Some("session-token".to_owned()),
+            "inference-token".to_owned(),
+            &ALLOW_CAPABILITY_POLICY,
+            &STATIC_TERMINAL_TOKENS,
+            None,
+            None,
+            &test_sandbox_manager_client(),
+            "test-backend",
+            None,
+            &test_sandbox_tokens(),
+            None,
+        )
+        .await
+        .expect("a refused plan.propose inside a subagent must not fail the run");
+
+        assert_eq!(resp.status, "completed");
+        let r = rec.lock().unwrap();
+        assert!(
+            r.propose_plan_calls.is_empty(),
+            "a subagent's plan.propose must never reach session-core: {:?}",
+            r.propose_plan_calls
+        );
+        drop(r);
+        let observed = observed_messages.lock().unwrap();
+        assert_eq!(observed.len(), 4, "parent, child, child, parent");
+        let subagent_next_round = observed[2]
+            .iter()
+            .rfind(|message| message.role == "user")
+            .map_or("", |message| message.content.as_str());
+        assert!(
+            subagent_next_round.contains("only available to the main agent")
+                && subagent_next_round.contains("plan.propose"),
             "the refusal must reach the subagent's next round with its reason stated: \
              {subagent_next_round}"
         );
@@ -7498,6 +10966,12 @@ mod tests {
         let mut req = sample_request();
         req.mode = "auto".to_owned();
         req.plan_mode = true;
+        // Exactly what the gateway sends for a plan-mode run (`sse.rs`:
+        // "a plan-mode run is held to READ_ONLY"). Without this the graded
+        // rung check (`check_autonomy_rung`) is skipped as "no rung stated",
+        // and the test would pass even if `plan.propose` were classified as
+        // needing a wider rung than the one plan mode holds.
+        req.autonomy_rung = pb::AutonomyRung::ReadOnly as i32;
         // `run_agent_with_tools` (unlike the public `run_agent`) takes an
         // EXPLICIT injected tool set as the purpose-lock allowlist — it does
         // not call `offered_tool_defs()` itself (see its own doc comment) —
@@ -7709,7 +11183,7 @@ mod tests {
     #[tokio::test]
     async fn a_replayed_delegation_resumes_from_its_recorded_answer_without_re_running() {
         const RECORDED: &str = "Bring, 412 NOK (from the first attempt)";
-        let start_key = format!("{}:tool_1_sub-1", sample_request().run_id);
+        let start_key = sample_child_start_key("tool_1_sub-1");
         let child_run_id = format!("child-{start_key}");
 
         let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
@@ -7801,7 +11275,7 @@ mod tests {
     /// it is exactly the case where re-running looks most tempting.
     #[tokio::test]
     async fn a_replayed_delegation_with_nothing_recorded_is_refused_not_re_run() {
-        let start_key = format!("{}:tool_1_sub-1", sample_request().run_id);
+        let start_key = sample_child_start_key("tool_1_sub-1");
         let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
         rec.lock().unwrap().started_child_runs.push((
             sample_request().run_id.clone(),
@@ -7867,7 +11341,7 @@ mod tests {
     /// refusal: starting it again would fork one delegation into two.
     #[tokio::test]
     async fn a_replayed_delegation_still_running_is_refused_as_in_flight() {
-        let start_key = format!("{}:tool_1_sub-1", sample_request().run_id);
+        let start_key = sample_child_start_key("tool_1_sub-1");
         let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
         {
             let mut r = rec.lock().unwrap();
@@ -7919,8 +11393,10 @@ mod tests {
         );
     }
 
-    /// The per-run child ceiling (`subagent::MAX_TOTAL_CHILDREN`), which the
-    /// round budget genuinely cannot express.
+    /// The per-run child ceiling (`subagent::resolve_child_ceiling`'s
+    /// resolved default, `subagent::DEFAULT_MAX_CHILDREN` — this test's
+    /// request never sets `max_subagents`), which the round budget genuinely
+    /// cannot express.
     ///
     /// # Why the round budget is not already this
     ///
@@ -7936,7 +11412,7 @@ mod tests {
     /// ceiling and proves the ceiling, not the budget, is what stops it.
     #[tokio::test]
     async fn the_per_run_child_ceiling_bounds_delegations_across_rounds() {
-        let over = crate::subagent::MAX_TOTAL_CHILDREN + 1;
+        let over = crate::subagent::DEFAULT_MAX_CHILDREN + 1;
         let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
         let session_channel = spawn_session_channel(rec.clone()).await;
 
@@ -7987,7 +11463,7 @@ mod tests {
         let r = rec.lock().unwrap();
         assert_eq!(
             u32::try_from(r.started_child_runs.len()).unwrap(),
-            crate::subagent::MAX_TOTAL_CHILDREN,
+            crate::subagent::DEFAULT_MAX_CHILDREN,
             "the ceiling must cap the DURABLE child runs, not merely the answers"
         );
 
@@ -8088,6 +11564,794 @@ mod tests {
             "exactly one sibling must be refused outright for lack of shared \
              budget -- 0 would mean the pool did not cap them at all, and 2 \
              would mean neither could claim it: sub-a={error_a:?} sub-b={error_b:?}"
+        );
+    }
+
+    /// Regression test for a pre-existing bug found while adding
+    /// `subagent.research_fan_out`: `offered_tool_defs()` used to define
+    /// `subagent.task` TWICE, with two different description strings. Every
+    /// name it hands the model must be unique, or a future refactor that
+    /// turns this `Vec` into a name-keyed lookup silently picks whichever
+    /// entry wins (or panics on construction).
+    #[test]
+    fn offered_tool_defs_has_no_duplicate_tool_names() {
+        let defs = offered_tool_defs();
+        let mut names: Vec<&str> = defs.iter().map(|def| def.name.as_str()).collect();
+        let before_dedup = names.len();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(
+            names.len(),
+            before_dedup,
+            "offered_tool_defs() advertises a duplicate tool name — the model is handed \
+             the same name twice, possibly with conflicting docs"
+        );
+    }
+
+    /// The kill switch (`WIDE_RESEARCH_FAN_OUT_ENABLED`, spec §4) has two
+    /// enforcement points, and each needs its own test or removing one leaves the
+    /// suite green. This one: a switched-off deployment does not OFFER the tool.
+    #[tokio::test]
+    async fn a_switched_off_fan_out_is_not_offered_to_the_model() {
+        use crate::subagent::research_fan_out::{EnabledOverride, RESEARCH_TOOL_NAME};
+        let offered = |tools: &[pb::ToolDefinition], name: &str| {
+            tools.iter().any(|tool| tool.name == name)
+        };
+
+        let off = EnabledOverride::set(false);
+        let tools = merged_tool_defs("run_x", "org_x", "user_x", &[], &ALLOW_CAPABILITY_POLICY, false)
+            .await;
+        assert!(!offered(&tools, RESEARCH_TOOL_NAME), "switched off, yet offered");
+        assert!(
+            offered(&tools, "subagent.task"),
+            "the switch removes the fan-out only, never plain delegation"
+        );
+        drop(off);
+
+        let _on = EnabledOverride::set(true);
+        let tools = merged_tool_defs("run_x", "org_x", "user_x", &[], &ALLOW_CAPABILITY_POLICY, false)
+            .await;
+        assert!(offered(&tools, RESEARCH_TOOL_NAME), "switched on, yet not offered");
+    }
+
+    /// The other enforcement point: hiding the tool is not enough, because a
+    /// caller can DECLARE a tool of the same name (`RunAgentRequest.tools`), and
+    /// the loop admits a declared name the built-ins do not already hold. A model
+    /// that calls it anyway must be refused at dispatch — no child run, and a
+    /// reason it can act on.
+    #[tokio::test]
+    async fn a_switched_off_fan_out_is_refused_at_dispatch_even_when_the_caller_declared_it() {
+        use crate::subagent::research_fan_out::{EnabledOverride, RESEARCH_TOOL_NAME};
+        let _off = EnabledOverride::set(false);
+
+        let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
+        let session_channel = spawn_session_channel(rec.clone()).await;
+        let observed: ObservedMessages = Arc::new(Mutex::new(Vec::new()));
+        let inference_channel = spawn_inference_channel_with_messages(
+            vec![
+                Scripted::ToolCalls {
+                    content: String::new(),
+                    calls: vec![research_fan_out_call(
+                        "fan-1",
+                        r#"{"items":[{"goal":"look up A"},{"goal":"look up B"}]}"#,
+                    )],
+                },
+                Scripted::Answer("One at a time, then.".to_owned()),
+            ],
+            observed.clone(),
+        )
+        .await;
+
+        let mut req = sample_request();
+        req.max_rounds = 6;
+        req.tools = vec![pb::ToolDefinition {
+            name: RESEARCH_TOOL_NAME.to_owned(),
+            description: "caller-declared".to_owned(),
+            parameters_json: r#"{"type":"object"}"#.to_owned(),
+        }];
+        let resp = run_fan_out_agent(session_channel, inference_channel, req).await;
+        assert_eq!(resp.status, "completed");
+
+        assert!(
+            observed_text_contains(&observed, "switched off on this deployment"),
+            "the model must be told why the call was refused"
+        );
+        let r = rec.lock().unwrap();
+        assert!(
+            r.started_child_runs.is_empty() && r.lineage_edges.is_empty(),
+            "a refused fan-out must not start a single child: {:?}",
+            r.started_child_runs
+        );
+    }
+
+    /// session-core refuses a `start_key` outside `[A-Za-z0-9_-]` / 128 bytes, and
+    /// a refusal makes the delegation register NOTHING (no child run, no
+    /// lineage edge, no live card). The raw `<run>:<step>` this replaced carried
+    /// a `:` and, for a fan-out item, a `.` — so the derivation itself is pinned
+    /// here, for the awkward ids a model can put in a call id.
+    #[test]
+    fn managed_start_keys_fit_session_cores_validator_and_stay_distinct() {
+        let accepted = |key: &str| {
+            !key.is_empty()
+                && key.len() <= 128
+                && key
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+        };
+        let long_call_id = "x".repeat(300);
+        let long_step_0 = format!("tool_5_{long_call_id}.0");
+        let long_step_1 = format!("tool_5_{long_call_id}.1");
+        let steps: [&str; 8] = [
+            "tool_1_sub-1",
+            "tool_2_fan-1.0",
+            "tool_2_fan-1.11",
+            "tool_3_id with spaces/and:colons.0",
+            "tool_4_ünïcödé.7",
+            "",
+            &long_step_0,
+            &long_step_1,
+        ];
+        let keys: Vec<String> = steps
+            .iter()
+            .map(|step_id| managed_start_key("run_01HZ", step_id))
+            .collect();
+        for (key, step_id) in keys.iter().zip(steps.iter()) {
+            assert!(accepted(key), "session-core would refuse {key:?} (from {step_id:?})");
+        }
+        // Stable across retries (a replay must find its child run again)...
+        assert_eq!(keys[1], managed_start_key("run_01HZ", "tool_2_fan-1.0"));
+        // ...and distinct where the identifiers are: sibling items of one
+        // fan-out, and two long ids that differ only past the length limit.
+        let unique: std::collections::BTreeSet<&String> = keys.iter().collect();
+        assert_eq!(unique.len(), keys.len(), "keys collided: {keys:?}");
+        assert_eq!(keys[6].len(), MANAGED_START_KEY_MAX_BYTES);
+        // A readable key stays readable.
+        assert_eq!(keys[0], "run_01HZ_tool_1_sub-1");
+    }
+
+    /// A model writes a research question as prose, and prose has newlines.
+    /// session-core refuses a goal with a control character, and the refusal used
+    /// to silently drop that item's child run from the lineage (and its card).
+    #[tokio::test]
+    async fn a_multi_line_goal_still_registers_its_child_run_and_lineage_edge() {
+        let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
+        let session_channel = spawn_session_channel(rec.clone()).await;
+        let inference_channel = spawn_inference_channel(vec![
+            Scripted::ToolCalls {
+                content: String::new(),
+                calls: vec![research_fan_out_call(
+                    "fan-1",
+                    r#"{"items":[{"goal":"Compare A and B.\nCover:\n\t- price\n\t- lead time"},{"goal":"look up C"}]}"#,
+                )],
+            },
+            Scripted::Answer("finding A".to_owned()),
+            Scripted::Answer("finding B".to_owned()),
+            Scripted::Answer("Done.".to_owned()),
+        ])
+        .await;
+
+        let mut req = sample_request();
+        req.max_rounds = 6;
+        let resp = run_fan_out_agent(session_channel, inference_channel, req).await;
+        assert_eq!(resp.status, "completed");
+
+        let r = rec.lock().unwrap();
+        assert_eq!(
+            r.started_child_runs.len(),
+            2,
+            "the multi-line item must register as a durable child run like any other"
+        );
+        assert_eq!(r.lineage_edges.len(), 2, "and get its lineage edge");
+        assert_eq!(r.stopped_children.len(), 2, "and announce its stop");
+        let recorded: Vec<&String> = r.started_child_runs.iter().map(|run| &run.1).collect();
+        assert!(
+            recorded
+                .iter()
+                .any(|goal| goal.as_str() == "Compare A and B. Cover:  - price  - lead time"),
+            "control characters become spaces, the wording is kept: {recorded:?}"
+        );
+    }
+
+    /// `subagent.research_fan_out` records every item with `SubagentRole::Researcher`
+    /// (not the ad hoc `subagent.task` path's `Generic`), and every sibling spawned
+    /// by the SAME fan-out call shares one `batch_id` — the join key the live run
+    /// panel groups cards on.
+    #[tokio::test]
+    async fn research_fan_out_items_are_recorded_with_researcher_role_and_a_shared_batch_id() {
+        let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
+        let session_channel = spawn_session_channel(rec.clone()).await;
+        let inference_channel = spawn_inference_channel(vec![
+            Scripted::ToolCalls {
+                content: String::new(),
+                calls: vec![research_fan_out_call(
+                    "fan-1",
+                    r#"{"items":[{"id":"a","goal":"look up A"},{"id":"b","goal":"look up B"}]}"#,
+                )],
+            },
+            Scripted::Answer("finding A".to_owned()),
+            Scripted::Answer("finding B".to_owned()),
+            Scripted::Answer("Collected both findings.".to_owned()),
+        ])
+        .await;
+        let state = crate::state::StateStore::new();
+
+        let mut req = sample_request();
+        req.max_rounds = 4;
+        let resp = run_agent(
+            &state,
+            session_channel,
+            inference_channel,
+            req,
+            None,
+            Some("session-token".to_owned()),
+            "inference-token".to_owned(),
+            &ALLOW_CAPABILITY_POLICY,
+            &STATIC_TERMINAL_TOKENS,
+            None,
+            None,
+            &test_sandbox_manager_client(),
+            "test-backend",
+            None,
+            &test_sandbox_tokens(),
+            None,
+        )
+        .await
+        .expect("a fan-out run completes");
+        assert_eq!(resp.status, "completed");
+
+        let r = rec.lock().unwrap();
+        assert_eq!(
+            r.lineage_edges.len(),
+            2,
+            "both fan-out items must register their own lineage edge"
+        );
+        let batch_ids: std::collections::BTreeSet<&String> =
+            r.lineage_edges.iter().map(|(_, _, _, _, batch)| batch).collect();
+        assert_eq!(
+            batch_ids.len(),
+            1,
+            "every sibling spawned by ONE fan-out call must share one batch_id: {:?}",
+            r.lineage_edges
+        );
+        assert!(
+            !batch_ids.iter().next().unwrap().is_empty(),
+            "the shared batch_id must not be empty"
+        );
+        for (_, _, role, goal_summary, _) in r.lineage_edges.iter() {
+            assert_eq!(
+                *role,
+                pb::SubagentRole::Researcher as i32,
+                "a research_fan_out item must be tagged Researcher, not the ad hoc \
+                 subagent.task path's Generic"
+            );
+            assert!(!goal_summary.is_empty(), "each item's goal must be recorded too");
+        }
+    }
+
+    /// Owner ruling (chat-wave2-specs wide-research fan-out, 2026-09-28): a
+    /// `research_fan_out` call knows every item's goal up front, so it
+    /// PRE-DIVIDES the round pool evenly across the declared items instead of
+    /// the first-claim-wins semantics an ad hoc `subagent.task` call still
+    /// uses (`two_concurrent_delegations_in_one_round_share_the_same_budget_pool`,
+    /// above). Three items each need 2 rounds; a winner-take-all split would
+    /// starve at least two of them down to 1 round and fail them with
+    /// "spent its whole 1-round budget". Even division proves all three
+    /// succeed instead.
+    #[tokio::test]
+    async fn research_fan_out_pre_divides_the_round_budget_evenly_across_items() {
+        let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
+        let session_channel = spawn_session_channel(rec.clone()).await;
+        let inference_channel = spawn_inference_channel(vec![
+            Scripted::ToolCalls {
+                content: String::new(),
+                calls: vec![research_fan_out_call(
+                    "fan-1",
+                    r#"{"items":[{"id":"a","goal":"look up A"},{"id":"b","goal":"look up B"},{"id":"c","goal":"look up C"}]}"#,
+                )],
+            },
+            // Each item's FIRST round makes a (dispatch-failing, but
+            // round-consuming) tool call; only a run with 2 rounds to spend
+            // reaches a second round to answer from.
+            Scripted::ToolCalls {
+                content: String::new(),
+                calls: vec![failing_tool_call("wx-a")],
+            },
+            Scripted::ToolCalls {
+                content: String::new(),
+                calls: vec![failing_tool_call("wx-b")],
+            },
+            Scripted::ToolCalls {
+                content: String::new(),
+                calls: vec![failing_tool_call("wx-c")],
+            },
+            Scripted::Answer("finding A".to_owned()),
+            Scripted::Answer("finding B".to_owned()),
+            Scripted::Answer("finding C".to_owned()),
+            Scripted::Answer("Collected all three findings.".to_owned()),
+        ])
+        .await;
+        let state = crate::state::StateStore::new();
+
+        let mut req = sample_request();
+        // 1 parent round + 6 to divide across 3 items (2 each) + 1 final
+        // parent answer.
+        req.max_rounds = 8;
+        let resp = run_agent(
+            &state,
+            session_channel,
+            inference_channel,
+            req,
+            None,
+            Some("session-token".to_owned()),
+            "inference-token".to_owned(),
+            &ALLOW_CAPABILITY_POLICY,
+            &STATIC_TERMINAL_TOKENS,
+            None,
+            None,
+            &test_sandbox_manager_client(),
+            "test-backend",
+            None,
+            &test_sandbox_tokens(),
+            None,
+        )
+        .await
+        .expect("a fan-out run completes");
+        assert_eq!(resp.status, "completed");
+        assert_eq!(
+            resp.final_output, "Collected all three findings.",
+            "the parent must have reached its final answer, which only \
+             happens if the merged tool output reported no failures for it \
+             to notice"
+        );
+
+        let r = rec.lock().unwrap();
+        assert_eq!(
+            r.lineage_edges.len(),
+            3,
+            "all three items must have been registered as durable child runs, \
+             not just the ones an unfair first-claim-wins split would have \
+             let finish"
+        );
+    }
+
+    /// The whole `run_agent` argument list for the fan-out tests below, which
+    /// differ only in their request and their scripted channels.
+    async fn run_fan_out_agent(
+        session_channel: Channel,
+        inference_channel: Channel,
+        req: pb::RunAgentRequest,
+    ) -> pb::RunAgentResponse {
+        let state = crate::state::StateStore::new();
+        run_agent(
+            &state,
+            session_channel,
+            inference_channel,
+            req,
+            None,
+            Some("session-token".to_owned()),
+            "inference-token".to_owned(),
+            &ALLOW_CAPABILITY_POLICY,
+            &STATIC_TERMINAL_TOKENS,
+            None,
+            None,
+            &test_sandbox_manager_client(),
+            "test-backend",
+            None,
+            &test_sandbox_tokens(),
+            None,
+        )
+        .await
+        .expect("a fan-out run completes")
+    }
+
+    /// Whether any inference request the mock saw carried `needle` in a message —
+    /// the parent's tool-result context, or a child's seed prompt.
+    fn observed_text_contains(observed: &ObservedMessages, needle: &str) -> bool {
+        observed
+            .lock()
+            .unwrap()
+            .iter()
+            .flatten()
+            .any(|message| message.content.contains(needle))
+    }
+
+    /// Owner ruling (2026-09-28): start the concurrency ceiling at 4. Six items
+    /// against a ceiling of four must never have more than four in flight — and
+    /// must genuinely overlap, or "parallel" would be a claim nothing checked
+    /// (every other fan-out test would pass just as well run serially).
+    #[tokio::test]
+    async fn research_fan_out_never_runs_more_items_at_once_than_the_concurrency_ceiling() {
+        let items: Vec<String> = (0..6)
+            .map(|i| format!(r#"{{"id":"q{i}","goal":"look up {i}"}}"#))
+            .collect();
+        let input = format!(r#"{{"items":[{}]}}"#, items.join(","));
+        let mut script = vec![Scripted::ToolCalls {
+            content: String::new(),
+            calls: vec![research_fan_out_call("fan-1", &input)],
+        }];
+        for i in 0..6 {
+            script.push(Scripted::Answer(format!("finding {i}")));
+        }
+        script.push(Scripted::Answer("Collected all six.".to_owned()));
+
+        let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
+        let session_channel = spawn_session_channel(rec.clone()).await;
+        let probe = ConcurrencyProbe::new(std::time::Duration::from_millis(150));
+        let inference_channel = spawn_inference_channel_with_probe(script, probe.clone()).await;
+
+        let mut req = sample_request();
+        // 1 parent round + 8 to divide (one round each is plenty) + the parent's
+        // final round.
+        req.max_rounds = 10;
+        let resp = run_fan_out_agent(session_channel, inference_channel, req).await;
+        assert_eq!(resp.status, "completed");
+        assert_eq!(resp.final_output, "Collected all six.");
+
+        let ceiling = crate::subagent::research_fan_out::concurrency();
+        let peak = probe.peak();
+        assert!(
+            peak >= 2,
+            "six items with room for {ceiling} in flight must actually overlap, saw a peak of {peak}"
+        );
+        assert!(
+            peak <= ceiling,
+            "no more than {ceiling} items may be in flight at once, saw a peak of {peak}"
+        );
+        assert_eq!(
+            rec.lock().unwrap().lineage_edges.len(),
+            6,
+            "the items that waited for a permit still ran, in the same batch"
+        );
+    }
+
+    /// A per-run ceiling hit PARTWAY through a fan-out degrades to "some ran,
+    /// the rest were refused" — and the parent is told, per item, with the real
+    /// reason. The ceiling is shared with `subagent.task`: one delegation
+    /// already spent one of the two slots, so of the two fan-out items only one
+    /// can start.
+    #[tokio::test]
+    async fn research_fan_out_reports_a_ceiling_hit_partway_as_ok_and_refused_items() {
+        let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
+        let session_channel = spawn_session_channel(rec.clone()).await;
+        let observed: ObservedMessages = Arc::new(Mutex::new(Vec::new()));
+        let inference_channel = spawn_inference_channel_with_messages(
+            vec![
+                Scripted::ToolCalls {
+                    content: String::new(),
+                    calls: vec![subagent_call("sub-1", r#"{"goal":"one","max_rounds":1}"#)],
+                },
+                Scripted::Answer("finding one".to_owned()),
+                Scripted::ToolCalls {
+                    content: String::new(),
+                    calls: vec![research_fan_out_call(
+                        "fan-1",
+                        r#"{"items":[{"id":"a","goal":"look up A"},{"id":"b","goal":"look up B"}]}"#,
+                    )],
+                },
+                Scripted::Answer("finding A".to_owned()),
+                Scripted::Answer("Collected what ran.".to_owned()),
+            ],
+            observed.clone(),
+        )
+        .await;
+
+        let mut req = sample_request();
+        req.max_rounds = 12;
+        req.max_subagents = 2;
+        let resp = run_fan_out_agent(session_channel, inference_channel, req).await;
+        assert_eq!(resp.status, "completed");
+        assert_eq!(resp.final_output, "Collected what ran.");
+
+        for needle in [
+            "Status: ok",
+            "Status: refused",
+            "per-run limit of 2",
+            r#"verification: {"checked": 2, "confirmed": 1}"#,
+        ] {
+            assert!(
+                observed_text_contains(&observed, needle),
+                "the parent must be told {needle:?} about the partial fan-out"
+            );
+        }
+        assert_eq!(
+            rec.lock().unwrap().started_child_runs.len(),
+            2,
+            "the task child plus the ONE fan-out item the ceiling let through"
+        );
+    }
+
+    /// The item's nested loop is seeded with its question PLUS the shared
+    /// research/citation instructions and the caller's answer-format hint — but
+    /// the durable child run, the lineage edge and the agent id record only what
+    /// was asked, never the boilerplate, and never the model-supplied item id.
+    #[tokio::test]
+    async fn research_fan_out_seeds_each_item_with_its_prompt_but_records_only_the_bare_goal() {
+        let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
+        let session_channel = spawn_session_channel(rec.clone()).await;
+        let observed: ObservedMessages = Arc::new(Mutex::new(Vec::new()));
+        let inference_channel = spawn_inference_channel_with_messages(
+            vec![
+                Scripted::ToolCalls {
+                    content: String::new(),
+                    calls: vec![research_fan_out_call(
+                        "fan-1",
+                        r#"{"items":[{"id":"secret-model-supplied-id","goal":"look up A"}],"result_schema_hint":"one sentence"}"#,
+                    )],
+                },
+                Scripted::Answer("A is 42, see https://a.example/x".to_owned()),
+                Scripted::Answer("Done.".to_owned()),
+            ],
+            observed.clone(),
+        )
+        .await;
+
+        let mut req = sample_request();
+        req.max_rounds = 6;
+        let resp = run_fan_out_agent(session_channel, inference_channel, req).await;
+        assert_eq!(resp.status, "completed");
+
+        assert!(
+            observed_text_contains(&observed, "Requested answer format: one sentence"),
+            "the schema hint must reach the item's own prompt"
+        );
+        assert!(
+            observed_text_contains(&observed, "\"Sources:\" list"),
+            "the citation instruction must reach the item's own prompt"
+        );
+        assert!(
+            observed_text_contains(&observed, "1. https://a.example/x"),
+            "the item's cited URL must come back as ITS source in the digest"
+        );
+
+        let r = rec.lock().unwrap();
+        assert_eq!(r.started_child_runs.len(), 1);
+        let (_, goal, _, agent_id) = &r.started_child_runs[0];
+        assert_eq!(goal, "look up A", "the durable goal is the bare question");
+        assert_eq!(
+            agent_id, "research_fan_out",
+            "model-supplied item ids stay out of the durable agent id"
+        );
+        let (_, _, _, goal_summary, _) = &r.lineage_edges[0];
+        assert_eq!(goal_summary, "look up A");
+    }
+
+    /// The pool a fan-out claims already counts the parent's own final round. If
+    /// every item spends its whole share the parent must STILL have a round to
+    /// read the digest — otherwise the run ends "exhausted" holding a complete
+    /// answer it never got to give. Five rounds: one parent round, two items
+    /// sharing the remaining four minus the parent's reserve (2 + 1), and the
+    /// parent's final round.
+    #[tokio::test]
+    async fn research_fan_out_keeps_a_round_for_the_parent_to_read_the_digest() {
+        let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
+        let session_channel = spawn_session_channel(rec.clone()).await;
+        let observed: ObservedMessages = Arc::new(Mutex::new(Vec::new()));
+        let inference_channel = spawn_inference_channel_with_messages(
+            vec![
+                Scripted::ToolCalls {
+                    content: String::new(),
+                    calls: vec![research_fan_out_call(
+                        "fan-1",
+                        r#"{"items":[{"id":"a","goal":"look up A"},{"id":"b","goal":"look up B"}]}"#,
+                    )],
+                },
+                // Each item's first round is a (dispatch-failing) tool call.
+                Scripted::ToolCalls {
+                    content: String::new(),
+                    calls: vec![failing_tool_call("wx-a")],
+                },
+                Scripted::ToolCalls {
+                    content: String::new(),
+                    calls: vec![failing_tool_call("wx-b")],
+                },
+                // Only the item with a SECOND round reaches this.
+                Scripted::Answer("finding".to_owned()),
+                Scripted::Answer("Reported what finished.".to_owned()),
+            ],
+            observed.clone(),
+        )
+        .await;
+
+        let mut req = sample_request();
+        req.max_rounds = 5;
+        let resp = run_fan_out_agent(session_channel, inference_channel, req).await;
+        assert_eq!(
+            resp.status, "completed",
+            "a parent left with no round ends exhausted with a graceful-failure reply"
+        );
+        assert_eq!(resp.final_output, "Reported what finished.");
+
+        // The digest the parent read: one item finished, the one with the
+        // smaller share ran out of rounds — reported, not hidden.
+        assert!(observed_text_contains(&observed, "Status: ok"));
+        assert!(observed_text_contains(&observed, "Status: failed"));
+        assert!(observed_text_contains(
+            &observed,
+            r#"verification: {"checked": 2, "confirmed": 1}"#
+        ));
+    }
+
+    /// The other half of a live card's life. A card leaves "running" on the
+    /// child's stop, so every child that registered an attach edge must also
+    /// announce its stop on the PARENT run's stream — naming that run, which is
+    /// what routes it — and under the same child run id, which is the join key.
+    /// Same script as the parent-round test above: of two items sharing a pool,
+    /// one has the rounds to finish and one runs out, so both statuses appear.
+    #[tokio::test]
+    async fn every_delegated_child_announces_its_stop_on_the_parent_runs_stream() {
+        let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
+        let session_channel = spawn_session_channel(rec.clone()).await;
+        let inference_channel = spawn_inference_channel(vec![
+            Scripted::ToolCalls {
+                content: String::new(),
+                calls: vec![research_fan_out_call(
+                    "fan-1",
+                    r#"{"items":[{"id":"a","goal":"look up A"},{"id":"b","goal":"look up B"}]}"#,
+                )],
+            },
+            Scripted::ToolCalls {
+                content: String::new(),
+                calls: vec![failing_tool_call("wx-a")],
+            },
+            Scripted::ToolCalls {
+                content: String::new(),
+                calls: vec![failing_tool_call("wx-b")],
+            },
+            Scripted::Answer("finding".to_owned()),
+            Scripted::Answer("Reported what finished.".to_owned()),
+        ])
+        .await;
+
+        let mut req = sample_request();
+        req.max_rounds = 5;
+        let resp = run_fan_out_agent(session_channel, inference_channel, req).await;
+        assert_eq!(resp.status, "completed");
+
+        let r = rec.lock().unwrap();
+        assert_eq!(r.stopped_children.len(), 2, "one stop per attached child");
+        let attached: std::collections::BTreeSet<&String> =
+            r.lineage_edges.iter().map(|edge| &edge.1).collect();
+        let stopped: std::collections::BTreeSet<&String> =
+            r.stopped_children.iter().map(|stop| &stop.1).collect();
+        assert_eq!(
+            attached, stopped,
+            "a stop must carry the child run id its attach edge carried, or no card can pair them"
+        );
+        for (parent_run_id, _, _) in &r.stopped_children {
+            assert_eq!(
+                parent_run_id, "run_test",
+                "the stop must name the delegating run — that is what routes it onto its stream"
+            );
+        }
+        let mut statuses: Vec<&str> = r
+            .stopped_children
+            .iter()
+            .map(|(_, _, status)| status.as_str())
+            .collect();
+        statuses.sort_unstable();
+        assert_eq!(
+            statuses,
+            vec!["completed", "failed"],
+            "the child that finished and the one that ran out of rounds must not read alike"
+        );
+    }
+
+    /// A lone `subagent.task` is not a fan-out, but its console row ("Sub-agent
+    /// stopped") is fed by the same event, so it announces its stop too.
+    #[tokio::test]
+    async fn a_standalone_subagent_task_announces_its_stop_too() {
+        let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
+        let session_channel = spawn_session_channel(rec.clone()).await;
+        let inference_channel = spawn_inference_channel(vec![
+            Scripted::ToolCalls {
+                content: String::new(),
+                calls: vec![subagent_call("sub-1", r#"{"goal":"one","max_rounds":2}"#)],
+            },
+            Scripted::Answer("finding one".to_owned()),
+            Scripted::Answer("Done.".to_owned()),
+        ])
+        .await;
+
+        let mut req = sample_request();
+        req.max_rounds = 6;
+        let resp = run_fan_out_agent(session_channel, inference_channel, req).await;
+        assert_eq!(resp.status, "completed");
+
+        let r = rec.lock().unwrap();
+        assert_eq!(r.lineage_edges.len(), 1);
+        assert_eq!(
+            r.stopped_children,
+            vec![(
+                "run_test".to_owned(),
+                r.lineage_edges[0].1.clone(),
+                "completed".to_owned()
+            )]
+        );
+    }
+
+    /// A ZDR run was promised no durable trace of its content. The goal text is
+    /// the user's own content, and a lineage edge is also broadcast on the live
+    /// run stream, so a ZDR fan-out must put NO goal text on one.
+    ///
+    /// This test used to assert that a ZDR fan-out still recorded its edges, with
+    /// grouping and roles but an empty goal summary. That held only against a
+    /// double that accepted the terminalizer's service token for `StartManagedRun`:
+    /// session-core refuses that credential (no user id), so a ZDR fan-out never
+    /// had any edge to put a summary on. A ZDR delegation now registers no child
+    /// at all, which is the same promise stated outright (and held to session-core's
+    /// real rules by
+    /// `a_zero_retention_delegation_registers_nothing_durable_and_still_answers`).
+    #[tokio::test]
+    async fn a_zdr_fan_out_registers_no_children_and_so_puts_no_goal_text_on_the_stream() {
+        let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
+        let session_channel = spawn_session_channel(rec.clone()).await;
+        let inference_channel = spawn_inference_channel(vec![
+            Scripted::ToolCalls {
+                content: String::new(),
+                calls: vec![research_fan_out_call(
+                    "fan-1",
+                    r#"{"items":[{"id":"a","goal":"a private question"},{"id":"b","goal":"another private question"}]}"#,
+                )],
+            },
+            Scripted::Answer("finding A".to_owned()),
+            Scripted::Answer("finding B".to_owned()),
+            Scripted::Answer("Done.".to_owned()),
+        ])
+        .await;
+
+        let mut req = sample_request();
+        req.zdr = true;
+        req.max_rounds = 6;
+        let resp = run_fan_out_agent(session_channel, inference_channel, req).await;
+        assert_eq!(resp.status, "completed");
+
+        let r = rec.lock().unwrap();
+        assert!(
+            r.started_child_runs.is_empty(),
+            "a ZDR fan-out registers no durable child run: {:?}",
+            r.started_child_runs
+        );
+        assert!(
+            r.lineage_edges.is_empty(),
+            "so there is no lineage edge to carry goal text: {:?}",
+            r.lineage_edges
+        );
+        assert!(
+            r.stopped_children.is_empty(),
+            "and no stop to announce for a child that was never attached"
+        );
+    }
+
+    /// The fan-out digest budgets itself to a larger allowance than the loop's
+    /// flat cap; every other tool still gets the flat cap. Without this the
+    /// loop's tail-truncation would cut a fan-out's last items and its summary
+    /// line — the very thing `merge` orders the digest to protect.
+    #[test]
+    fn the_fan_out_digest_gets_a_larger_context_allowance_than_an_ordinary_tool() {
+        use crate::subagent::research_fan_out::{CONTEXT_CHARS, MERGE_BUDGET_CHARS, RESEARCH_TOOL_NAME};
+        assert_eq!(tool_context_cap("web_search"), MAX_TOOL_CONTEXT_CHARS);
+        assert_eq!(tool_context_cap(RESEARCH_TOOL_NAME), CONTEXT_CHARS);
+        assert!(MERGE_BUDGET_CHARS < CONTEXT_CHARS);
+        assert!(CONTEXT_CHARS > MAX_TOOL_CONTEXT_CHARS);
+
+        let output = "x".repeat(MERGE_BUDGET_CHARS);
+        let framed_digest = format_tool_context(&[ToolStepResult {
+            name: RESEARCH_TOOL_NAME.to_owned(),
+            output: output.clone(),
+            error: None,
+        }]);
+        assert!(
+            !framed_digest.contains("[truncated:"),
+            "a digest at its own budget must survive the loop's framing"
+        );
+        let framed_other = format_tool_context(&[ToolStepResult {
+            name: "web_search".to_owned(),
+            output,
+            error: None,
+        }]);
+        assert!(
+            framed_other.contains("[truncated:"),
+            "the same size from an ordinary tool is still cut"
         );
     }
 
@@ -8239,5 +12503,826 @@ mod tests {
              the durable write; del-2 can be requested again once the run resumes"
         );
         assert_eq!(r.approvals[0].0, "tool_1_del-1");
+    }
+
+    // --- Delegation under session-core's REAL credential rules ----------------
+    //
+    // Every delegation test above runs against `MockManagedRunLifecycle`, a
+    // permissive double, and for a long time that double demanded the wrong
+    // credential: the fixed-scope SERVICE token, for `StartManagedRun`. session-core
+    // refuses a caller with no user id there, so no delegated child run was ever
+    // registered in a live run (`PermissionDenied`, three of three children of
+    // the 2026-10-01 wide-research proof) while every test registered one. The
+    // tests below instead hand the loop genuine signed bearers and let
+    // `session_core_rules_double` decide every start, receipt, answer, heartbeat,
+    // lineage edge and stop the way session-core does.
+
+    /// A recorder wired to a fresh rules double that already holds what the
+    /// gateway creates before a run reaches execution-core: the user's thread and
+    /// the parent run, both owned by the sample request's user.
+    fn real_rules_for(
+        rec: &SharedRecorder,
+    ) -> Arc<crate::runtime_loop::session_core_rules_double::SessionCoreRules> {
+        let rules =
+            Arc::new(crate::runtime_loop::session_core_rules_double::SessionCoreRules::default());
+        let req = sample_request();
+        rules.seed_thread(&req.thread_id, &req.org_id, &req.user_id);
+        rules.seed_run(&req.run_id, &req.thread_id, &req.org_id, &req.user_id);
+        rec.lock().unwrap().rules = Some(rules.clone());
+        rules
+    }
+
+    /// `run_agent` with what production presents: the user's own signed
+    /// `aud=session-core` bearer as the run's session credential, and Execution
+    /// Core's fixed-scope service credentials (signed, one scope each) as its
+    /// terminalizer.
+    async fn run_with_real_credentials(
+        session_channel: Channel,
+        inference_channel: Channel,
+        req: pb::RunAgentRequest,
+    ) -> pb::RunAgentResponse {
+        let bearer = crate::runtime_loop::session_core_rules_double::user_bearer(
+            &req.org_id,
+            &req.user_id,
+            req.zdr,
+        );
+        let state = crate::state::StateStore::new();
+        run_agent(
+            &state,
+            session_channel,
+            inference_channel,
+            req,
+            None,
+            Some(bearer),
+            "inference-token".to_owned(),
+            &ALLOW_CAPABILITY_POLICY,
+            &crate::runtime_loop::session_core_rules_double::SignedServiceTokens,
+            None,
+            None,
+            &test_sandbox_manager_client(),
+            "test-backend",
+            None,
+            &test_sandbox_tokens(),
+            None,
+        )
+        .await
+        .expect("a delegating run is finalized")
+    }
+
+    /// The root cause, end to end. A delegated child run must be registered,
+    /// attached, answered, settled and announced when every one of those calls is
+    /// judged by session-core's own rules.
+    ///
+    /// Before the fix this failed at its first assertion on the refusal list:
+    /// `StartManagedRun` was presented with the terminalizer's service token, which
+    /// carries no user id (`PermissionDenied`, "user-bound managed-run credential
+    /// required"), so nothing downstream ever happened. Fixing only that exposes
+    /// the next two: the child's answer was written under the same service token
+    /// (it holds no `session:write`), and a failed child was settled under a code
+    /// outside the receipt vocabulary (`failed` test below).
+    #[tokio::test]
+    async fn a_delegated_child_is_registered_and_settled_under_session_cores_real_rules() {
+        const DELEGATED_GOAL: &str = "Find the current Bergen weather";
+        const SUBAGENT_ANSWER: &str = "Bergen: 8 degrees and raining.";
+
+        let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
+        let rules = real_rules_for(&rec);
+        let session_channel = spawn_session_channel(rec.clone()).await;
+        let inference_channel = spawn_inference_channel(vec![
+            Scripted::ToolCalls {
+                content: "Delegating the lookup.".to_owned(),
+                calls: vec![subagent_call(
+                    "sub-1",
+                    &format!(r#"{{"goal":"{DELEGATED_GOAL}"}}"#),
+                )],
+            },
+            Scripted::Answer(SUBAGENT_ANSWER.to_owned()),
+            Scripted::Answer(format!("Delegated result: {SUBAGENT_ANSWER}")),
+        ])
+        .await;
+
+        let resp =
+            run_with_real_credentials(session_channel, inference_channel, sample_request()).await;
+        assert_eq!(resp.status, "completed", "{}", resp.final_output);
+
+        let snapshot = rules.snapshot();
+        assert!(
+            snapshot.refusals.is_empty(),
+            "session-core's rules refused part of the delegation: {:?}",
+            snapshot.refusals
+        );
+        let children = snapshot.child_runs();
+        assert_eq!(
+            children.len(),
+            1,
+            "the delegation must register a child run"
+        );
+        let (child_id, child) = children[0];
+        assert_eq!(
+            child.user_id, "user_test",
+            "the child belongs to the run's own user"
+        );
+        assert_eq!(child.parent_run_id, "run_test");
+        assert_eq!(child.thread_id, "thread_test");
+        assert_eq!(child.goal, DELEGATED_GOAL);
+        assert_eq!(
+            child.start_key,
+            managed_start_key("run_test", "tool_1_sub-1"),
+            "started under the idempotency key derived from the delegating step"
+        );
+
+        assert_eq!(
+            snapshot.edges.len(),
+            1,
+            "and AttachSubagent must have been accepted"
+        );
+        assert_eq!(snapshot.edges[0].parent_run_id, "run_test");
+        assert_eq!(&snapshot.edges[0].child_run_id, child_id);
+        assert_eq!(snapshot.edges[0].role, pb::SubagentRole::Generic as i32);
+        assert_eq!(snapshot.edges[0].goal_summary, DELEGATED_GOAL);
+
+        assert_eq!(
+            child.final_output.as_deref(),
+            Some(SUBAGENT_ANSWER),
+            "the child's answer is stored on the child's own run, under the owner's credential"
+        );
+        assert_eq!(
+            child.terminal,
+            Some((pb::TerminalOutcome::Completed as i32, String::new())),
+            "the child is settled by the terminalizer's service credential"
+        );
+        assert!(
+            snapshot.events.contains(
+                &crate::runtime_loop::session_core_rules_double::RecordedEvent {
+                    run_id: "run_test".to_owned(),
+                    kind: "subagent_stopped",
+                    subject: child_id.clone(),
+                    status: "completed".to_owned(),
+                }
+            ),
+            "the stop is announced on the delegating run's stream: {:?}",
+            snapshot.events
+        );
+        assert!(
+            snapshot.heartbeats.len() >= 2 && snapshot.heartbeats.iter().all(|id| id == "run_test"),
+            "every round of the parent and of its child renews the delegating run's lease: {:?}",
+            snapshot.heartbeats
+        );
+        assert_eq!(
+            snapshot.runs["run_test"].terminal,
+            Some((pb::TerminalOutcome::Completed as i32, String::new())),
+            "and the parent's own receipt is accepted as before"
+        );
+    }
+
+    /// A child that fails is a durable run too, and must close under a failure code
+    /// from session-core's vocabulary. The loop used its own word,
+    /// `subagent_failed`, which neither the service nor the migration's CHECK
+    /// knows: the receipt was refused (`InvalidArgument`), so a failed child sat
+    /// open until the deadline watchdog force-failed it as `outcome_unknown`. Two of
+    /// the three research children of the live proof failed.
+    #[tokio::test]
+    async fn a_failed_delegated_child_is_settled_with_a_failure_code_session_core_accepts() {
+        let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
+        let rules = real_rules_for(&rec);
+        let session_channel = spawn_session_channel(rec.clone()).await;
+        // A one-round subagent that spends its only round on a tool call cannot
+        // answer: it fails, and its failure must still be recorded.
+        let inference_channel = spawn_inference_channel(vec![
+            Scripted::ToolCalls {
+                content: String::new(),
+                calls: vec![subagent_call(
+                    "sub-f",
+                    r#"{"goal":"deep research","max_rounds":1}"#,
+                )],
+            },
+            Scripted::ToolCalls {
+                content: String::new(),
+                calls: vec![failing_tool_call("wx-1")],
+            },
+            Scripted::Answer("The delegated lookup did not finish.".to_owned()),
+        ])
+        .await;
+
+        let resp =
+            run_with_real_credentials(session_channel, inference_channel, sample_request()).await;
+        assert_eq!(resp.status, "completed", "{}", resp.final_output);
+
+        let snapshot = rules.snapshot();
+        assert!(
+            snapshot.refusals.is_empty(),
+            "session-core's rules refused part of the delegation: {:?}",
+            snapshot.refusals
+        );
+        let children = snapshot.child_runs();
+        assert_eq!(children.len(), 1);
+        let (child_id, child) = children[0];
+        assert_eq!(
+            child.terminal,
+            Some((
+                pb::TerminalOutcome::Failed as i32,
+                "execution_failed".to_owned()
+            )),
+            "a failed child closes under the generic execution failure, a word the receipt knows"
+        );
+        assert_eq!(
+            child.final_output, None,
+            "a failed child has no answer to store"
+        );
+        assert_eq!(snapshot.edges.len(), 1);
+        assert!(
+            snapshot
+                .events
+                .iter()
+                .any(|event| event.kind == "subagent_stopped"
+                    && &event.subject == child_id
+                    && event.status == "failed"),
+            "{:?}",
+            snapshot.events
+        );
+    }
+
+    /// The shape of the live proof: one wide-research call, three researchers, all
+    /// judged by session-core's rules. Each is a durable child run with a lineage
+    /// edge in the same batch, an answer, a receipt and a stop: exactly the rows
+    /// and events the chat stream and the run panel are built from.
+    #[tokio::test]
+    async fn a_wide_research_fan_out_registers_every_item_under_session_cores_real_rules() {
+        let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
+        let rules = real_rules_for(&rec);
+        let session_channel = spawn_session_channel(rec.clone()).await;
+        let inference_channel = spawn_inference_channel(vec![
+            Scripted::ToolCalls {
+                content: String::new(),
+                calls: vec![research_fan_out_call(
+                    "fan-1",
+                    r#"{"items":[{"id":"a","goal":"look up A"},{"id":"b","goal":"look up B"},{"id":"c","goal":"look up C"}]}"#,
+                )],
+            },
+            Scripted::Answer("finding one".to_owned()),
+            Scripted::Answer("finding two".to_owned()),
+            Scripted::Answer("finding three".to_owned()),
+            Scripted::Answer("Collected the three findings.".to_owned()),
+        ])
+        .await;
+        let mut req = sample_request();
+        req.max_rounds = 8;
+
+        let resp = run_with_real_credentials(session_channel, inference_channel, req).await;
+        assert_eq!(resp.status, "completed", "{}", resp.final_output);
+
+        let snapshot = rules.snapshot();
+        assert!(
+            snapshot.refusals.is_empty(),
+            "session-core's rules refused part of the fan-out: {:?}",
+            snapshot.refusals
+        );
+        let children = snapshot.child_runs();
+        assert_eq!(children.len(), 3, "one durable child run per researcher");
+        assert_eq!(snapshot.edges.len(), 3, "and one lineage edge each");
+        let batches: std::collections::BTreeSet<&String> =
+            snapshot.edges.iter().map(|edge| &edge.batch_id).collect();
+        assert_eq!(batches.len(), 1, "grouped as one batch");
+        for edge in &snapshot.edges {
+            assert_eq!(edge.role, pb::SubagentRole::Researcher as i32);
+            assert!(
+                edge.goal_summary.starts_with("look up "),
+                "the live panel's card label: {:?}",
+                edge.goal_summary
+            );
+        }
+        for (child_id, child) in &children {
+            assert!(child.final_output.is_some(), "{child_id} keeps its answer");
+            assert_eq!(
+                child.terminal,
+                Some((pb::TerminalOutcome::Completed as i32, String::new())),
+                "{child_id} is settled"
+            );
+        }
+        let stops = snapshot
+            .events
+            .iter()
+            .filter(|event| event.kind == "subagent_stopped" && event.status == "completed")
+            .count();
+        assert_eq!(
+            stops, 3,
+            "the panel's three cards leave 'running': {:?}",
+            snapshot.events
+        );
+    }
+
+    /// A zero-retention run is promised no durable copy, so its delegations are
+    /// not registered at all: no child run, no lineage edge, no stop event, no
+    /// stored answer. It is not left to session-core's refusal (a ZDR credential
+    /// cannot start a run inside an existing thread anyway): the caller knows the
+    /// posture without a round trip, and neither side depends on the other being
+    /// right. The delegated work itself still runs and its answer still reaches
+    /// the parent.
+    #[tokio::test]
+    async fn a_zero_retention_delegation_registers_nothing_durable_and_still_answers() {
+        const SUBAGENT_ANSWER: &str = "Bergen: 8 degrees and raining.";
+
+        let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
+        let rules = real_rules_for(&rec);
+        let session_channel = spawn_session_channel(rec.clone()).await;
+        let inference_channel = spawn_inference_channel(vec![
+            Scripted::ToolCalls {
+                content: String::new(),
+                calls: vec![subagent_call("sub-z", r#"{"goal":"a private question"}"#)],
+            },
+            Scripted::Answer(SUBAGENT_ANSWER.to_owned()),
+            Scripted::Answer(format!("Delegated result: {SUBAGENT_ANSWER}")),
+        ])
+        .await;
+        let mut req = sample_request();
+        req.zdr = true;
+
+        let resp = run_with_real_credentials(session_channel, inference_channel, req).await;
+        assert_eq!(resp.status, "completed", "{}", resp.final_output);
+        assert_eq!(
+            resp.final_output,
+            format!("Delegated result: {SUBAGENT_ANSWER}"),
+            "the child's answer still reached the parent"
+        );
+
+        let snapshot = rules.snapshot();
+        // The delegation itself attempts no child-run call that session-core could
+        // refuse. (The PARENT run's own plan-transition events are a separate,
+        // older, best-effort write that session-core has always refused for a ZDR
+        // credential; they are not part of the delegation.)
+        let delegation_rpcs = ["start_managed_run", "attach_subagent", "record_run_output"];
+        assert!(
+            !snapshot
+                .refusals
+                .iter()
+                .any(|refusal| delegation_rpcs.contains(&refusal.rpc)),
+            "a ZDR delegation must not even attempt a child-run call: {:?}",
+            snapshot.refusals
+        );
+        assert!(snapshot.child_runs().is_empty(), "no durable child run");
+        assert!(snapshot.edges.is_empty(), "no lineage edge");
+        assert!(
+            !snapshot
+                .events
+                .iter()
+                .any(|event| event.kind == "subagent_stopped"),
+            "no stop announcement for a child that was never attached: {:?}",
+            snapshot.events
+        );
+        assert_eq!(
+            snapshot.runs.len(),
+            1,
+            "only the seeded parent run exists: {:?}",
+            snapshot.runs.keys().collect::<Vec<_>>()
+        );
+        assert_eq!(
+            snapshot.runs["run_test"].terminal,
+            Some((pb::TerminalOutcome::Completed as i32, String::new())),
+            "the parent's own metadata-only receipt is still recorded"
+        );
+    }
+
+    /// What the next failure says. The warning for a refused registration used to
+    /// carry only the gRPC code, which cannot tell "no user on the credential"
+    /// from "not your thread" from "bad key" (all `PermissionDenied` or
+    /// `InvalidArgument`), and that is exactly why the root cause had to be found
+    /// by reading session-core. It now carries session-core's own words, bounded
+    /// and on one line.
+    #[test]
+    fn a_refusal_reason_is_session_cores_own_words_bounded_and_on_one_line() {
+        assert_eq!(
+            status_reason(&Status::permission_denied(
+                "user-bound managed-run credential required"
+            )),
+            "user-bound managed-run credential required"
+        );
+        assert_eq!(
+            status_reason(&Status::invalid_argument("invalid\nstart_key\t")),
+            "invalid start_key",
+            "control characters are flattened and the ends trimmed"
+        );
+        let long = status_reason(&Status::internal("x".repeat(5_000)));
+        assert!(
+            long.chars().count() <= STATUS_REASON_MAX_CHARS + 1,
+            "a hostile or verbose message is clipped: {} chars",
+            long.chars().count()
+        );
+        assert!(long.ends_with('…'));
+        assert_eq!(status_reason(&Status::unavailable("")), "(no message)");
+    }
+
+    // --- A delegated loop's last round concludes instead of researching ---------
+    //
+    // Two of the three research children of the 2026-10-01 live run logged "round
+    // budget exhausted without a final answer" (budget 3, three rounds executed):
+    // each kept asking for tools until its rounds ran out, the findings died with
+    // its local message history, and the parent was handed only "spent its whole
+    // 3-round budget". The last round of a delegated loop's budget now withholds
+    // the tools and says so, which turns that ending into an answer.
+
+    fn flattened(messages: &[pb::ChatMessage]) -> String {
+        messages
+            .iter()
+            .map(|message| message.content.as_str())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// The defect, as a model would meet it: a researcher that asks for tools
+    /// whenever it has them. Round 3 of a 3-round budget used to hand it its tools
+    /// again, it asked, and the loop ended exhausted with nothing. Now round 3 has
+    /// none, the model answers from what rounds 1 and 2 gathered, and the parent
+    /// receives that answer, labelled as partial.
+    #[tokio::test]
+    async fn a_delegated_child_that_keeps_researching_is_made_to_conclude_on_its_last_round() {
+        const FINDINGS: &str = "Gathered: the harbour ferry stops at 22:00.";
+
+        let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
+        let rules = real_rules_for(&rec);
+        let session_channel = spawn_session_channel(rec.clone()).await;
+        let observed_tooling: ObservedTooling = Arc::default();
+        let observed_messages: ObservedMessages = Arc::default();
+        let inference_channel = spawn_inference_channel_with_tooling(
+            vec![
+                Scripted::ToolCalls {
+                    content: String::new(),
+                    calls: vec![subagent_call(
+                        "sub-r",
+                        r#"{"goal":"when does the ferry stop","max_rounds":3}"#,
+                    )],
+                },
+                Scripted::KeepsResearchingUnlessToolsAreWithheld {
+                    calls: vec![failing_tool_call("wx")],
+                    answer: FINDINGS.to_owned(),
+                },
+                Scripted::Answer("Final: the ferry stops at 22:00 (partial).".to_owned()),
+            ],
+            observed_tooling.clone(),
+            observed_messages.clone(),
+        )
+        .await;
+        let mut req = sample_request();
+        req.max_rounds = 8;
+
+        let resp = run_with_real_credentials(session_channel, inference_channel, req).await;
+        assert_eq!(resp.status, "completed", "{}", resp.final_output);
+        assert_eq!(
+            resp.final_output,
+            "Final: the ferry stops at 22:00 (partial)."
+        );
+        assert_eq!(
+            resp.rounds_executed, 5,
+            "parent round, the child's whole 3-round budget, parent round: the concluding \
+             round is the LAST of the same budget, not an extra one"
+        );
+
+        let tooling = observed_tooling.lock().unwrap().clone();
+        assert_eq!(tooling.len(), 5, "{tooling:?}");
+        for (round, (tools, choice)) in tooling.iter().enumerate() {
+            if round == 3 {
+                assert_eq!(
+                    (*tools, choice.as_str()),
+                    (0, "none"),
+                    "the child's third and last round is offered no tools"
+                );
+            } else {
+                assert!(*tools > 0 && choice == "auto", "round {round}: {tooling:?}");
+            }
+        }
+        let messages = observed_messages.lock().unwrap();
+        assert!(
+            flattened(&messages[3]).contains("Your round budget is spent"),
+            "the concluding round is told to answer from what it has"
+        );
+        for earlier in [1, 2] {
+            assert!(
+                !flattened(&messages[earlier]).contains("Your round budget is spent"),
+                "round {earlier} still has its tools and is not told otherwise"
+            );
+        }
+        let parent_second_round = flattened(&messages[4]);
+        assert!(
+            parent_second_round.contains(FINDINGS),
+            "the parent receives what the child gathered: {parent_second_round}"
+        );
+        assert!(
+            parent_second_round.contains("[Partial result: this subagent used its whole 3-round"),
+            "and is told it is partial: {parent_second_round}"
+        );
+
+        let snapshot = rules.snapshot();
+        assert!(snapshot.refusals.is_empty(), "{:?}", snapshot.refusals);
+        let children = snapshot.child_runs();
+        assert_eq!(children.len(), 1);
+        let (_, child) = children[0];
+        let stored = child
+            .final_output
+            .as_deref()
+            .expect("the conclusion is stored");
+        assert!(
+            stored.starts_with("[Partial result:") && stored.contains(FINDINGS),
+            "{stored}"
+        );
+        assert_eq!(
+            child.terminal,
+            Some((pb::TerminalOutcome::Completed as i32, String::new())),
+            "a concluded child is a completed child run: it produced an answer"
+        );
+    }
+
+    /// If a model proposes tools although none were offered, the proposal is not
+    /// run: there is no round left to read its result in. With nothing else to
+    /// say, the child ends exhausted exactly as before, and the parent is told so.
+    #[tokio::test]
+    async fn a_concluding_round_that_asks_for_tools_anyway_runs_none_and_fails_honestly() {
+        let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
+        let session_channel = spawn_session_channel(rec.clone()).await;
+        let observed_tooling: ObservedTooling = Arc::default();
+        let inference_channel = spawn_inference_channel_with_tooling(
+            vec![
+                Scripted::ToolCalls {
+                    content: String::new(),
+                    calls: vec![subagent_call("sub-s", r#"{"goal":"dig","max_rounds":2}"#)],
+                },
+                Scripted::ToolCalls {
+                    content: String::new(),
+                    calls: vec![failing_tool_call("wx-1")],
+                },
+                Scripted::ToolCalls {
+                    content: String::new(),
+                    calls: vec![failing_tool_call("wx-2")],
+                },
+                Scripted::Answer("The delegated lookup did not finish.".to_owned()),
+            ],
+            observed_tooling.clone(),
+            Arc::default(),
+        )
+        .await;
+        let state = crate::state::StateStore::new();
+
+        let resp = run_agent(
+            &state,
+            session_channel,
+            inference_channel,
+            sample_request(),
+            None,
+            Some("session-token".to_owned()),
+            "inference-token".to_owned(),
+            &ALLOW_CAPABILITY_POLICY,
+            &STATIC_TERMINAL_TOKENS,
+            None,
+            None,
+            &test_sandbox_manager_client(),
+            "test-backend",
+            None,
+            &test_sandbox_tokens(),
+            None,
+        )
+        .await
+        .expect("a failed delegation must not fail the parent run");
+
+        assert_eq!(resp.status, "completed", "{}", resp.final_output);
+        assert_eq!(observed_tooling.lock().unwrap()[2], (0, "none".to_owned()));
+
+        let r = rec.lock().unwrap();
+        let step_ids: Vec<&String> = r
+            .persisted_step_payloads
+            .iter()
+            .map(|(id, _, _)| id)
+            .collect();
+        assert!(
+            step_ids.iter().any(|id| id.contains("wx-1")),
+            "round 1's tool ran: {step_ids:?}"
+        );
+        assert!(
+            !step_ids.iter().any(|id| id.contains("wx-2")),
+            "the concluding round's tool proposal must not be dispatched: {step_ids:?}"
+        );
+        let (_, error) = persisted_step(&r, "tool_1_sub-s");
+        assert!(
+            error.contains("2-round budget"),
+            "the parent is told the real budget that ran out: {error}"
+        );
+    }
+
+    /// The same, when the model wrote its conclusion alongside the tool proposal:
+    /// the text is the best conclusion there is, so it is kept and labelled.
+    #[tokio::test]
+    async fn a_concluding_round_that_asks_for_tools_but_wrote_a_conclusion_keeps_the_text() {
+        let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
+        let session_channel = spawn_session_channel(rec.clone()).await;
+        let inference_channel = spawn_inference_channel(vec![
+            Scripted::ToolCalls {
+                content: String::new(),
+                calls: vec![subagent_call("sub-t", r#"{"goal":"dig","max_rounds":2}"#)],
+            },
+            Scripted::ToolCalls {
+                content: String::new(),
+                calls: vec![failing_tool_call("wx-1")],
+            },
+            Scripted::ToolCalls {
+                content: "What I have: the ferry stops at 22:00.".to_owned(),
+                calls: vec![failing_tool_call("wx-2")],
+            },
+            Scripted::Answer("Parent done.".to_owned()),
+        ])
+        .await;
+        let state = crate::state::StateStore::new();
+
+        let resp = run_agent(
+            &state,
+            session_channel,
+            inference_channel,
+            sample_request(),
+            None,
+            Some("session-token".to_owned()),
+            "inference-token".to_owned(),
+            &ALLOW_CAPABILITY_POLICY,
+            &STATIC_TERMINAL_TOKENS,
+            None,
+            None,
+            &test_sandbox_manager_client(),
+            "test-backend",
+            None,
+            &test_sandbox_tokens(),
+            None,
+        )
+        .await
+        .expect("a delegating run is finalized");
+        assert_eq!(resp.status, "completed", "{}", resp.final_output);
+
+        let r = rec.lock().unwrap();
+        let stored: Vec<&String> = r
+            .recorded_run_outputs
+            .iter()
+            .map(|(_, answer)| answer)
+            .collect();
+        assert_eq!(stored.len(), 1, "{stored:?}");
+        assert!(
+            stored[0].starts_with("[Partial result:")
+                && stored[0].contains("What I have: the ferry stops at 22:00."),
+            "{}",
+            stored[0]
+        );
+        assert!(
+            !r.persisted_step_payloads
+                .iter()
+                .any(|(id, _, _)| id.contains("wx-2")),
+            "and the proposed tool still did not run"
+        );
+    }
+
+    /// One round is the loop's only chance to gather anything, so a one-round
+    /// delegated loop keeps its tools and fails honestly when it spends the round
+    /// on them (`subagent_honors_a_requested_budget_and_reports_exhaustion_honestly`).
+    /// And the root run keeps its tools to its last round: the loop whose failure
+    /// is reported to the user as a failed run is not changed by this.
+    #[tokio::test]
+    async fn only_a_delegated_loop_with_room_to_spare_reserves_a_concluding_round() {
+        // The rule itself, at its edges.
+        assert!(!reserves_conclusion_round(0, 12), "the root run never does");
+        assert!(
+            !reserves_conclusion_round(1, 1),
+            "a one-round child has none to spare"
+        );
+        assert!(!reserves_conclusion_round(1, 0));
+        assert!(reserves_conclusion_round(1, 2));
+        assert!(reserves_conclusion_round(1, 12));
+
+        // The root run through its whole budget: every round has its tools.
+        let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
+        let session_channel = spawn_session_channel(rec.clone()).await;
+        let observed_tooling: ObservedTooling = Arc::default();
+        let inference_channel = spawn_inference_channel_with_tooling(
+            vec![
+                Scripted::ToolCalls {
+                    content: String::new(),
+                    calls: vec![failing_tool_call("wx-1")],
+                },
+                Scripted::ToolCalls {
+                    content: String::new(),
+                    calls: vec![failing_tool_call("wx-2")],
+                },
+            ],
+            observed_tooling.clone(),
+            Arc::default(),
+        )
+        .await;
+        let state = crate::state::StateStore::new();
+        let mut req = sample_request();
+        req.max_rounds = 2;
+        let resp = run_agent(
+            &state,
+            session_channel,
+            inference_channel,
+            req,
+            None,
+            Some("session-token".to_owned()),
+            "inference-token".to_owned(),
+            &ALLOW_CAPABILITY_POLICY,
+            &STATIC_TERMINAL_TOKENS,
+            None,
+            None,
+            &test_sandbox_manager_client(),
+            "test-backend",
+            None,
+            &test_sandbox_tokens(),
+            None,
+        )
+        .await
+        .expect("an exhausted run is still finalized");
+        assert_eq!(resp.status, "failed", "the root run still ends exhausted");
+        let tooling = observed_tooling.lock().unwrap().clone();
+        assert_eq!(tooling.len(), 2);
+        assert!(
+            tooling
+                .iter()
+                .all(|(tools, choice)| *tools > 0 && choice == "auto"),
+            "{tooling:?}"
+        );
+    }
+
+    /// The shape of the live run: one wide-research call, three researchers, each
+    /// with a 3-round budget and each a model that keeps researching. All three
+    /// used to end exhausted. Each now concludes, so the parent reads three
+    /// labelled partial findings instead of three failures, and the three durable
+    /// child runs are settled as completed.
+    #[tokio::test]
+    async fn a_wide_research_fan_out_of_researchers_that_keep_going_returns_their_findings() {
+        let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
+        let rules = real_rules_for(&rec);
+        let session_channel = spawn_session_channel(rec.clone()).await;
+        let observed_messages: ObservedMessages = Arc::default();
+        let inference_channel = spawn_inference_channel_with_tooling(
+            vec![
+                Scripted::ToolCalls {
+                    content: String::new(),
+                    calls: vec![research_fan_out_call(
+                        "fan-1",
+                        r#"{"items":[{"id":"a","goal":"look up A"},{"id":"b","goal":"look up B"},{"id":"c","goal":"look up C"}],"max_rounds_per_item":3}"#,
+                    )],
+                },
+                Scripted::KeepsResearchingUnlessToolsAreWithheld {
+                    calls: vec![failing_tool_call("wx")],
+                    answer: "gathered finding".to_owned(),
+                },
+                Scripted::KeepsResearchingUnlessToolsAreWithheld {
+                    calls: vec![failing_tool_call("wx")],
+                    answer: "gathered finding".to_owned(),
+                },
+                Scripted::KeepsResearchingUnlessToolsAreWithheld {
+                    calls: vec![failing_tool_call("wx")],
+                    answer: "gathered finding".to_owned(),
+                },
+                Scripted::Answer("Synthesis of the three partial findings.".to_owned()),
+            ],
+            Arc::default(),
+            observed_messages.clone(),
+        )
+        .await;
+        let mut req = sample_request();
+        req.max_rounds = 14;
+
+        let resp = run_with_real_credentials(session_channel, inference_channel, req).await;
+        assert_eq!(resp.status, "completed", "{}", resp.final_output);
+        assert_eq!(
+            resp.final_output,
+            "Synthesis of the three partial findings."
+        );
+
+        let digest_round = {
+            let messages = observed_messages.lock().unwrap();
+            flattened(messages.last().expect("the parent's synthesis round"))
+        };
+        assert_eq!(
+            digest_round.matches("[Partial result:").count(),
+            3,
+            "the parent reads three labelled findings, not three failures: {digest_round}"
+        );
+        assert_eq!(
+            digest_round.matches("Status: ok").count(),
+            3,
+            "{digest_round}"
+        );
+        assert!(!digest_round.contains("Status: failed"), "{digest_round}");
+
+        let snapshot = rules.snapshot();
+        assert!(snapshot.refusals.is_empty(), "{:?}", snapshot.refusals);
+        let children = snapshot.child_runs();
+        assert_eq!(children.len(), 3);
+        for (child_id, child) in &children {
+            assert_eq!(
+                child.terminal,
+                Some((pb::TerminalOutcome::Completed as i32, String::new())),
+                "{child_id}"
+            );
+            assert!(
+                child
+                    .final_output
+                    .as_deref()
+                    .is_some_and(|answer| answer.starts_with("[Partial result:")),
+                "{child_id}"
+            );
+        }
     }
 }

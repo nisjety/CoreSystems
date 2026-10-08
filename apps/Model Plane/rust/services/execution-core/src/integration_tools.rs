@@ -228,6 +228,29 @@ impl IntegrationActionsClient {
         })
     }
 
+    /// A client pointed at fake Auth Core and integration-corev2 servers, for
+    /// tests of code that takes a client (the in-loop write verification).
+    /// `write_attestor` is `Some` when the test runs a write: without one the
+    /// client refuses the write exactly as a production client does.
+    #[cfg(test)]
+    pub(crate) fn new_for_test(
+        auth_core_url: &str,
+        integration_url: &str,
+        write_attestor: Option<Arc<attestation::Signer>>,
+    ) -> Self {
+        Self {
+            base_url: integration_url.trim_end_matches('/').to_owned(),
+            auth_core_url: auth_core_url.trim_end_matches('/').to_owned(),
+            service_id: "model-execution".to_owned(),
+            service_credential: "test-only-execution-service-key".to_owned(),
+            http: reqwest::Client::builder()
+                .timeout(Duration::from_secs(5))
+                .build()
+                .expect("build test http client"),
+            write_attestor,
+        }
+    }
+
     /// GET /api/v1/connections?organizationId=<org> — the org's live provider
     /// connections. Rendered together with the static catalog so the model can
     /// see what is connected and what it can call on each.

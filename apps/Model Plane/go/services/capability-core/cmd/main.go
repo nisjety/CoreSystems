@@ -739,15 +739,57 @@ func taskExecutorEnabled(workflowBacked bool) bool {
 	}
 }
 
+// learningReviewEnabledEnv is the kill switch for the G7 learning review. The
+// review sends the session transcript to LEARNING_REVIEW_MODEL, which is a
+// different (and on some stacks paid) provider than the one the conversation
+// ran on, so a stack that must keep every model call on one route has to be
+// able to turn it off without removing the service credentials.
+const learningReviewEnabledEnv = "LEARNING_REVIEW_ENABLED"
+
+// parseLearningReviewSwitch interprets a LEARNING_REVIEW_ENABLED value. Unset
+// or blank means enabled (the code default, so existing deployments are
+// unchanged). recognized is false for a value that is neither a clear yes nor a
+// clear no; the caller falls back to the default and says so.
+func parseLearningReviewSwitch(raw string) (enabled bool, recognized bool) {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "":
+		return true, true
+	case "false", "0", "no", "off", "disabled":
+		return false, true
+	case "true", "1", "yes", "on", "enabled":
+		return true, true
+	default:
+		return true, false
+	}
+}
+
+// learningReviewEnabled reports whether the learning-review consumer may start.
+func learningReviewEnabled() bool {
+	raw := os.Getenv(learningReviewEnabledEnv)
+	enabled, recognized := parseLearningReviewSwitch(raw)
+	if !recognized {
+		slog.Warn("unrecognized "+learningReviewEnabledEnv+" value; using the default (enabled)",
+			"accepted", "true|false|1|0|yes|no|on|off|enabled|disabled")
+	}
+	return enabled
+}
+
 // startLearningConsumer wires the G7 learning-review trigger on the shared
 // session-core + inference-core clients: bind the durable JetStream
 // RUN_COMPLETED consumer (sessionreview.RunConsumer, on
 // sessionreview.RunEventsStream/SkillReviewDurable -- must be pre-provisioned
-// by nats-provisioner). No-op when the clients are nil (backends unset) or
-// JetStream is unavailable, so the service runs without the learning loop
-// rather than failing to start. The decode→review→persist core is unit-tested;
-// this subscribe wiring is e2e-verified only against the stack.
+// by nats-provisioner). No-op when LEARNING_REVIEW_ENABLED is off, when the
+// clients are nil (backends unset) or JetStream is unavailable, so the service
+// runs without the learning loop rather than failing to start. The
+// decode→review→persist core is unit-tested; this subscribe wiring is
+// e2e-verified only against the stack.
 func startLearningConsumer(ctx context.Context, nc *nats.Conn, sc mpv1.SessionCoreClient, ic mpv1.InferenceCoreClient) {
+	if !learningReviewEnabled() {
+		// Checked before anything touches nc: a disabled review must neither bind
+		// the durable consumer nor read a single transcript.
+		slog.Info("learning-review consumer disabled (" + learningReviewEnabledEnv + "=false)")
+		return
+	}
 	if sc == nil || ic == nil {
 		slog.Info("learning-review consumer disabled (session-core/inference-core not dialed)")
 		return

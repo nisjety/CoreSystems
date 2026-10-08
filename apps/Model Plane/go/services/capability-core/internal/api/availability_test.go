@@ -79,13 +79,228 @@ func TestGenericGlobalHealthAttestorCannotAttestOwnerActionTicket(t *testing.T) 
 	if mayUseGenericGlobalHealthAttestation(unprefixed, "cap.command.sandbox") {
 		t.Fatal("unprefixed deployment name was accepted as the signed health identity")
 	}
-	if mayUseGenericGlobalHealthAttestation(principal, "cap.retrieval.query") {
+	// cap.retrieval.query used to be the "unmeasured" negative control here. It
+	// is now measured (execution-core probes the retrieval engine), so the
+	// control moves to an id execution-core still has no probe for.
+	if mayUseGenericGlobalHealthAttestation(principal, "cap.tool.provider.execute") {
 		t.Fatal("generic global health attestor may attest an unmeasured capability")
 	}
 	otherService := principal
 	otherService.ActorID = "capability-health-attestor"
 	if mayUseGenericGlobalHealthAttestation(otherService, "cap.command.sandbox") {
 		t.Fatal("an unrelated global-health service may attest execution-core capability health")
+	}
+}
+
+// The two ids added for knowledge_search and web_search/web_fetch. Each one is
+// executed inside execution-core's own tool loop (migration 0008 records
+// config_json.owner_service = execution-core) and execution-core probes the
+// real dependency before it attests — the bar cap.memory.* and cap.agent.spawn
+// already passed.
+var executionOwnedDependencyBackedCapabilityIDs = []string{"cap.retrieval.query", "cap.tool.http"}
+
+func executionCoreGlobalHealthPrincipal() authctx.Principal {
+	return authctx.Principal{
+		OrganizationID: "global",
+		ActorID:        authz.ExecutionCoreServiceID,
+		PrincipalType:  "service",
+		Scopes:         []string{authz.GlobalHealthWriteScope},
+	}
+}
+
+func TestGenericGlobalHealthAttestorMayAttestRetrievalAndWebOnlyAsExecutionCore(t *testing.T) {
+	t.Parallel()
+
+	exact := executionCoreGlobalHealthPrincipal()
+	for _, capabilityID := range executionOwnedDependencyBackedCapabilityIDs {
+		capabilityID := capabilityID
+		t.Run(capabilityID, func(t *testing.T) {
+			t.Parallel()
+			if !mayUseGenericGlobalHealthAttestation(exact, capabilityID) {
+				t.Fatalf("service:execution-core in org global with the global-health scope may not attest %s", capabilityID)
+			}
+
+			wrongActors := map[string]authctx.Principal{
+				"unprefixed deployment name": func() authctx.Principal {
+					p := exact
+					p.ActorID = "execution-core"
+					return p
+				}(),
+				"unrelated global service": func() authctx.Principal {
+					p := exact
+					p.ActorID = "service:unrelated"
+					return p
+				}(),
+				"conversation-core owner-action workload": func() authctx.Principal {
+					p := exact
+					p.ActorID = authz.ConversationCoreServiceID
+					return p
+				}(),
+				"execution-core in a tenant org": func() authctx.Principal {
+					p := exact
+					p.OrganizationID = "org-a"
+					return p
+				}(),
+				"execution-core without the global-health scope": func() authctx.Principal {
+					p := exact
+					p.Scopes = []string{authz.HealthWriteScope}
+					return p
+				}(),
+				"a user holding the global-health scope": func() authctx.Principal {
+					p := exact
+					p.PrincipalType = "user"
+					return p
+				}(),
+			}
+			for name, principal := range wrongActors {
+				if mayUseGenericGlobalHealthAttestation(principal, capabilityID) {
+					t.Fatalf("%s was allowed to attest %s", name, capabilityID)
+				}
+			}
+		})
+	}
+}
+
+// Widening this list is a decision, so the exact set is pinned: a future id
+// has to be added here on purpose and justified, not slip in beside another
+// edit. Effectful or externally owned capabilities must never appear.
+func TestGenericGlobalHealthAllowlistIsExactlyTheExecutionOwnedRuntimes(t *testing.T) {
+	t.Parallel()
+
+	want := map[string]struct{}{
+		"cap.command.sandbox":    {},
+		"cap.command.shell":      {},
+		"cap.memory.search":      {},
+		"cap.memory.index":       {},
+		"cap.agent.spawn":        {},
+		"cap.process.background": {},
+		"cap.retrieval.query":    {},
+		"cap.tool.http":          {},
+	}
+	for capabilityID := range want {
+		if _, present := genericGlobalHealthCapabilityIDs[capabilityID]; !present {
+			t.Errorf("allowlist is missing %s", capabilityID)
+		}
+	}
+	for capabilityID := range genericGlobalHealthCapabilityIDs {
+		if _, expected := want[capabilityID]; !expected {
+			t.Errorf("allowlist grew by %s; justify it that execution-core owns and probes that runtime, then pin it here", capabilityID)
+		}
+	}
+}
+
+func TestGenericGlobalHealthAttestorStillCannotAttestEveryOtherCapability(t *testing.T) {
+	t.Parallel()
+
+	principal := executionCoreGlobalHealthPrincipal()
+	for _, capabilityID := range []string{
+		ownerActionTicketCapabilityID,
+		"cap.tool.provider.execute",
+		"cap.tool.provider.read",
+		"cap.tool.social.publish",
+		"cap.tool.social.read",
+		"cap.tool.shipping.book",
+		"cap.tool.shipping.read",
+		"cap.tool.shipping.track",
+		"cap.tool.information.read",
+		"cap.browser.open",
+		"cap.skill.summarize",
+		"cap.agent.lineage.read",
+		"cap.retrieval.query.extra",
+		"",
+	} {
+		if mayUseGenericGlobalHealthAttestation(principal, capabilityID) {
+			t.Errorf("generic global health attestor may attest %q", capabilityID)
+		}
+	}
+}
+
+func TestExecutionCoreAttestationForRetrievalAndWebIsAcceptedAndAudited(t *testing.T) {
+	for _, test := range []struct {
+		capabilityID string
+		risk         string
+	}{
+		{capabilityID: "cap.retrieval.query", risk: models.RiskLow},
+		{capabilityID: "cap.tool.http", risk: models.RiskMedium},
+	} {
+		test := test
+		t.Run(test.capabilityID, func(t *testing.T) {
+			store := &fakeAvailabilityStore{
+				row: &registry.CapabilityRow{
+					ID: test.capabilityID, OrgID: "global", Version: "1",
+					Enabled: true, RiskLevel: test.risk,
+				},
+				updated: true,
+			}
+			recorder := availabilityAttestationRecorder(t, store, test.capabilityID, "global", authz.ExecutionCoreServiceID, authz.GlobalHealthWriteScope)
+			if recorder.Code != http.StatusOK {
+				t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+			}
+			if store.auditAction != "global_availability_attested" {
+				t.Fatalf("audit action = %q", store.auditAction)
+			}
+			// Attesting health is not granting permission: neither row is
+			// high-risk, so the stored state stays plain `available`.
+			if store.gotUpdate.State != string(models.AvailabilityAvailable) {
+				t.Fatalf("stored state = %q", store.gotUpdate.State)
+			}
+		})
+	}
+}
+
+func TestOtherActorsStillCannotPersistRetrievalOrWebAttestation(t *testing.T) {
+	for _, capabilityID := range executionOwnedDependencyBackedCapabilityIDs {
+		for _, actor := range []struct {
+			name, org, service, scope string
+			want                      int
+		}{
+			// The tenant lane cannot even see a global row: not found, and
+			// nothing is written.
+			{name: "tenant health reporter", org: "org-a", service: "tenant-health", scope: authz.HealthWriteScope, want: http.StatusNotFound},
+			{name: "tenant health reporter on the global org", org: "global", service: "tenant-health", scope: authz.HealthWriteScope, want: http.StatusForbidden},
+			{name: "unrelated global service", org: "global", service: "service:unrelated", scope: authz.GlobalHealthWriteScope, want: http.StatusForbidden},
+			{name: "execution-core in a tenant org", org: "org-a", service: authz.ExecutionCoreServiceID, scope: authz.GlobalHealthWriteScope, want: http.StatusForbidden},
+		} {
+			capabilityID, actor := capabilityID, actor
+			t.Run(capabilityID+"/"+actor.name, func(t *testing.T) {
+				store := &fakeAvailabilityStore{
+					row: &registry.CapabilityRow{
+						ID: capabilityID, OrgID: "global", Version: "1",
+						Enabled: true, RiskLevel: models.RiskMedium,
+					},
+					updated: true,
+				}
+				recorder := availabilityAttestationRecorder(t, store, capabilityID, actor.org, actor.service, actor.scope)
+				if recorder.Code != actor.want {
+					t.Fatalf("status = %d, want %d, body = %s", recorder.Code, actor.want, recorder.Body.String())
+				}
+				if store.auditAction != "" {
+					t.Fatalf("%s reached persistence: %q", actor.name, store.auditAction)
+				}
+			})
+		}
+	}
+}
+
+func TestExecutionCoreStillCannotPersistAttestationForUnmeasuredCapabilities(t *testing.T) {
+	for _, capabilityID := range []string{"cap.tool.provider.execute", "cap.browser.open", "cap.tool.social.publish", "cap.tool.shipping.book"} {
+		capabilityID := capabilityID
+		t.Run(capabilityID, func(t *testing.T) {
+			store := &fakeAvailabilityStore{
+				row: &registry.CapabilityRow{
+					ID: capabilityID, OrgID: "global", Version: "1",
+					Enabled: true, RiskLevel: models.RiskHigh,
+				},
+				updated: true,
+			}
+			recorder := availabilityAttestationRecorder(t, store, capabilityID, "global", authz.ExecutionCoreServiceID, authz.GlobalHealthWriteScope)
+			if recorder.Code != http.StatusForbidden {
+				t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+			}
+			if store.auditAction != "" {
+				t.Fatalf("unmeasured capability reached persistence: %q", store.auditAction)
+			}
+		})
 	}
 }
 

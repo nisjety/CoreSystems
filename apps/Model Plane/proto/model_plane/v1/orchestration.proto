@@ -456,11 +456,14 @@ message ListPlansRequest {
   // the request is refused when both are empty.
   string run_id = 1;
 
-  // Thread whose plans are being listed, newest first (plan-gate §2.4). Used
-  // by the executing run's context-injection path to find the thread's
-  // latest APPROVED plan across run boundaries — a model-proposed plan is
-  // approved on the plan-mode run that proposed it but consumed by the NEXT
-  // run on the same thread, which does not share that run_id.
+  // Thread whose plans are being listed, newest first (plan-gate §2.4) —
+  // across run boundaries, for a reader that has a conversation but no run
+  // (a model-proposed plan is approved on the plan-mode run that proposed it
+  // but consumed by the NEXT run on the same thread, which does not share
+  // that run_id). The gateway's own hand-over of an approved plan does NOT use
+  // this: it fetches the one plan approved with the grant by id (`GetPlan`),
+  // because listing a whole thread's plans and steps at the start of every
+  // run does not scale with the thread.
   string thread_id = 2;
 }
 
@@ -959,6 +962,23 @@ message AttachSubagentRequest {
 
   // Role of the child subagent.
   SubagentRole role = 4;
+
+  // Truncated delegated goal (chat-wave2-specs wide-research fan-out §2.4),
+  // so a live lineage edge is legible without a second fetch back to the
+  // parent's own transcript (which a subagent never shares in the first
+  // place — see `subagent/mod.rs`'s doc comment). Truncated the same way
+  // `integration_tools.rs`'s `MAX_RESULT_CHARS` bound truncates other
+  // model-facing text; empty is valid (an older caller that does not set
+  // this loses nothing it had before).
+  string goal_summary = 5;
+
+  // Groups every sibling spawned by ONE `subagent.research_fan_out` call
+  // (chat-wave2-specs wide-research fan-out §2.3). Set to that call's own
+  // step_id for every item it spawns; empty for a standalone
+  // `subagent.task` delegation, which has no siblings to group. The live
+  // run panel keys its per-item card grid off this field, switching in only
+  // when ≥2 attached edges share one non-empty batch_id.
+  string batch_id = 6;
 }
 
 message AttachSubagentResponse {
@@ -1057,11 +1077,26 @@ message OrchestrationEvent {
     string parent_run_id = 1;
     string child_run_id = 2;
     SubagentRole role = 3;
+    // Mirrors `AttachSubagentRequest.goal_summary` (wide-research fan-out
+    // §2.4) so the live run panel shows what a card is actually doing
+    // without a second round-trip.
+    string goal_summary = 4;
+    // Mirrors `AttachSubagentRequest.batch_id`.
+    string batch_id = 5;
   }
 
   message SubagentStopped {
     string child_run_id = 1;
     string status = 2;
+    // The run that delegated this child (wide-research fan-out live panel).
+    // `StreamRunEvents` delivers an event only to the stream of the run it
+    // NAMES, and this event named none: it could be recorded but never reach
+    // any run's stream, so a live panel's per-item card had no way to leave
+    // "running" for "done"/"failed". Naming the parent run makes it routable
+    // the same way `SubagentAttached` (keyed by its `parent_run_id`) already
+    // is. Empty on an event recorded before this field existed, which stays
+    // undeliverable per run — unchanged.
+    string parent_run_id = 3;
   }
 
   message RunPausedForApproval {

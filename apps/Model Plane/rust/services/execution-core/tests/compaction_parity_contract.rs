@@ -291,16 +291,21 @@ fn both_loops_validate_tool_arguments_before_dispatch() {
         );
     }
 
-    // Chat validates at the top of `dispatch_tool`, before the match; the agent
+    // Chat validates at the top of the dispatcher, before the match; the agent
     // loop validates in the sequential pre-pass alongside the purpose-lock. Both
     // must precede any dispatch, so a rejected call reaches no executor.
-    let dispatch = function_body(&chat, "pub async fn dispatch_tool(");
+    //
+    // `dispatch_tool` is now a thin wrapper over `dispatch_tool_with_cost` (the
+    // cost-accounting variant), so the body that holds the validator and the arm
+    // match is the latter. Pointing at the wrapper made this test fail for a
+    // refactor that kept the property.
+    let dispatch = function_body(&chat, "async fn dispatch_tool_with_cost(");
     let validate_at = dispatch
         .find("builtin_argument_problem")
-        .expect("dispatch_tool no longer validates arguments");
+        .expect("dispatch_tool_with_cost no longer validates arguments");
     let match_at = dispatch
         .find("match call.name.as_str()")
-        .expect("dispatch_tool's arm match is gone; re-point this test");
+        .expect("dispatch_tool_with_cost's arm match is gone; re-point this test");
     assert!(
         validate_at < match_at,
         "validation must run BEFORE the dispatch arms, or a bad call reaches an executor \

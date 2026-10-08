@@ -166,6 +166,46 @@ message RunAgentRequest {
   // apps/Frontend Plane/verevonv3/docs/S3_3_DURABLE_WORKSPACE_DESIGN_2026-09-11.md
   // §3.5 phase B.2.
   string space_id = 14;
+
+  // Per-run ceiling on delegated subagents this run may start across all of
+  // its rounds (chat-wave2-specs wide-research fan-out §2.1). Same "0 =
+  // unspecified, use default" convention as `max_rounds` (field 8) — an older
+  // caller that never sets this keeps today's behavior
+  // (`subagent::DEFAULT_MAX_CHILDREN`), never a surprise widening. Resolved
+  // server-side by `subagent::resolve_child_ceiling`, which also clamps
+  // against an org-level ceiling (when configured) and the hard
+  // `subagent::MAX_CHILDREN_CEILING` — a request can only tighten the
+  // ceiling, never loosen it past what the org allows.
+  uint32 max_subagents = 15;
+
+  // Inference route this run is PINNED to. Empty (together with
+  // `subscription_connection_id`) is every run that predates the field: the
+  // loop resolves its model as before (`EXECUTION_AGENT_MODEL`, e.g.
+  // "model-router") and names no provider. The only value execution-core
+  // accepts is "openai-codex-subscription" (the canonical registry id, not an
+  // alias), and only together with `subscription_connection_id` (17), an
+  // explicit non-"verevon-*" `model` (6), `zdr = false`, `plan_mode = true`
+  // (unless AGENTIC_SUBSCRIPTION_ALLOW_EFFECTS is also on: a subscription run is
+  // read-only until plan approval is connected) and
+  // AGENTIC_SUBSCRIPTION_ENABLED. When set, execution-core copies this onto
+  // EVERY inference round of the run, parent and delegated subagents alike,
+  // ignores `EXECUTION_AGENT_MODEL`, and stops the run (no further rounds) if
+  // a round is served by any other provider or model. A half-set pair or any
+  // other value is refused, never ignored: ignoring it would silently run the
+  // loop on the paid default route.
+  //
+  // Rollout order matters. An execution-core built before this field existed
+  // skips unknown fields and would run the loop on its default route, so the
+  // gateway only sends it once AGENTIC_SUBSCRIPTION_ENABLED is on, and that
+  // switch is turned on only after the new execution-core is running.
+  string provider_hint = 16;
+
+  // Opaque Integration Core reference to the user's ChatGPT subscription
+  // connection, meaningful only with `provider_hint` (16). Identical
+  // semantics to `InferRequest.subscription_connection_id`: inference-core
+  // hands it to Integration Core, which validates it against the caller's
+  // verified org and user scope. It carries no credential.
+  string subscription_connection_id = 17;
 }
 
 // RunAgentResponse — terminal outcome of a driven agent run.
@@ -195,6 +235,33 @@ message RunAgentResponse {
   // for the single-step surface, where it is correctly always false — one step
   // accumulates no history to compact.
   bool compaction_triggered = 5;
+
+  // Why a run pinned to the ChatGPT subscription (`RunAgentRequest.provider_hint`
+  // = "openai-codex-subscription") ended in `status` "failed", as a stable
+  // code. Empty for every other outcome and for every run that is not pinned.
+  // One of: "subscription_usage_limit", "subscription_reauth_required",
+  // "subscription_upstream_unavailable", "subscription_bad_request",
+  // "rate_limited", "prompt_too_long", or "subscription_route_unavailable"
+  // (any other subscription failure, and a round that was served by another
+  // provider or model than the run is pinned to). The spellings are
+  // model-gateway's `subscription_failure` vocabulary and are pinned to it by a
+  // contract test; the gateway words the reason for the user from this code and
+  // never from `final_output`.
+  //
+  // When set, execution-core has NOT appended an assistant message to the
+  // thread: the gateway persists the explanation it words from this code, so
+  // the thread carries exactly one. A caller that does not read this field
+  // sees `status` "failed" and `final_output`, as for any failed run.
+  string failure_code = 6;
+
+  // How long to wait before a retry could succeed, in whole milliseconds, when
+  // the provider said. Unset when it did not (an unset value is not zero).
+  // Meaningful only with `failure_code`.
+  optional uint64 retry_after_ms = 7;
+
+  // When a "subscription_usage_limit" resets: RFC 3339 UTC to whole seconds.
+  // Empty when unknown. Meaningful only with `failure_code`.
+  string resets_at = 8;
 }
 
 // ExecuteStepRequest — request to execute one step in the agent loop.

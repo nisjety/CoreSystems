@@ -25,11 +25,35 @@ use mp_contracts::dataplane::retrieval_v2::{
     retrieval_service_client::RetrievalServiceClient, RetrieveRequest, RetrieveResponse,
 };
 use serde::Serialize;
+use std::time::Duration;
 use tonic::metadata::MetadataValue;
-use tonic::transport::Channel;
+use tonic::transport::{Channel, Endpoint};
 
 const MAX_TOP_K: i32 = 20;
 const MAX_CHUNK_CHARS: usize = 600;
+
+/// The Data Plane retrieval gRPC endpoint, as configured for this process.
+///
+/// The ONE resolver for everything that talks to retrieval: dispatch
+/// ([`KnowledgeClient::from_env`]) and the health probe
+/// ([`retrieval_auth_boundary_alive`]) both call it, so the endpoint a
+/// `cap.retrieval.query` attestation vouches for cannot drift from the endpoint
+/// `knowledge_search` really dials. `DATAPLANE_RETRIEVAL_URL` wins over
+/// `DATAPLANE_RETRIEVAL_ADDR`; a blank value is "not configured", not a reason to
+/// fall through to the other name.
+#[must_use]
+pub(crate) fn retrieval_endpoint_from_env() -> Option<String> {
+    retrieval_endpoint_from_values(
+        std::env::var("DATAPLANE_RETRIEVAL_URL").ok(),
+        std::env::var("DATAPLANE_RETRIEVAL_ADDR").ok(),
+    )
+}
+
+/// Pure core of [`retrieval_endpoint_from_env`] (env access stays out of the
+/// precedence rule so the rule is testable without touching the process env).
+fn retrieval_endpoint_from_values(url: Option<String>, addr: Option<String>) -> Option<String> {
+    url.or(addr).filter(|value| !value.trim().is_empty())
+}
 
 /// gRPC client for Data Plane v2 retrieval. Cheap to clone.
 #[derive(Clone)]
@@ -43,10 +67,7 @@ impl KnowledgeClient {
     /// unparseable, so the caller surfaces a clear "not configured" error.
     #[must_use]
     pub fn from_env() -> Option<Self> {
-        let url = std::env::var("DATAPLANE_RETRIEVAL_URL")
-            .or_else(|_| std::env::var("DATAPLANE_RETRIEVAL_ADDR"))
-            .ok()
-            .filter(|s| !s.trim().is_empty())?;
+        let url = retrieval_endpoint_from_env()?;
         let channel = Channel::from_shared(url).ok()?.connect_lazy();
         Some(Self {
             client: RetrievalServiceClient::new(channel),
@@ -132,6 +153,59 @@ fn build_request(
         .metadata_mut()
         .insert("authorization", authorization);
     Ok(request)
+}
+
+/// Is the retrieval engine's authentication boundary alive on `endpoint`?
+///
+/// Half of the `cap.retrieval.query` health probe (the other half is the
+/// engine's own `/readyz`). It sends ONE `Retrieve` with NO credential to the
+/// exact endpoint [`KnowledgeClient`] dispatches to, and counts the engine as
+/// alive only when that call is answered `Unauthenticated`. That single answer
+/// proves DNS, TCP, HTTP/2, the `RetrievalService` route and the JWT interceptor
+/// in front of it are all up, which a TCP connect alone does not. `Unavailable`,
+/// `Unimplemented`, a timeout, a transport failure, an unparseable endpoint or
+/// anything else (including an unexpected success, which would mean there is no
+/// auth boundary at all) is NOT alive.
+///
+/// No bearer is ever sent: the probe has no user to speak for, and attaching a
+/// real credential to a health check would be a privilege leak with no upside.
+/// The request names no org, user or query, so it carries no data either, and
+/// the engine rejects it at the interceptor before any handler (and so any
+/// embedding or index work) runs. `sovereign_required` is set explicitly, to the
+/// fail-closed value, only because `retrieval_sovereignty_contract` requires
+/// every `RetrieveRequest` literal in the workspace to declare it.
+///
+/// `timeout` bounds the whole probe (connect plus call), so a hung dependency
+/// cannot stall the health heartbeat.
+pub(crate) async fn retrieval_auth_boundary_alive(endpoint: &str, timeout: Duration) -> bool {
+    let Ok(endpoint) = Endpoint::from_shared(endpoint.to_owned()) else {
+        return false;
+    };
+    let outcome = tokio::time::timeout(timeout, async {
+        // An eager connect, unlike dispatch's lazy channel: the probe exists to
+        // find out whether the connection can be made at all.
+        let channel = endpoint
+            .connect_timeout(timeout)
+            .connect()
+            .await
+            .map_err(|_| tonic::Code::Unavailable)?;
+        RetrievalServiceClient::new(channel)
+            .retrieve(tonic::Request::new(RetrieveRequest {
+                sovereign_required: Some(true),
+                ..Default::default()
+            }))
+            .await
+            .map(|_| ())
+            .map_err(|status| status.code())
+    })
+    .await;
+    outcome.is_ok_and(is_auth_boundary_answer)
+}
+
+/// The probe's verdict, pure so it can be tabulated: ONLY `Unauthenticated`
+/// counts. See [`retrieval_auth_boundary_alive`].
+fn is_auth_boundary_answer(outcome: Result<(), tonic::Code>) -> bool {
+    matches!(outcome, Err(tonic::Code::Unauthenticated))
 }
 
 #[derive(Serialize)]
@@ -283,8 +357,10 @@ fn truncate_chars(s: &str, max: usize) -> String {
     format!("{head}…")
 }
 
+// `pub(crate)` so `health_attest`'s tests can reuse the stub retrieval server
+// below instead of growing a second copy of it.
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use mp_contracts::dataplane::retrieval_v2::Candidate;
 
@@ -455,5 +531,305 @@ mod tests {
                 "tier {tier} must not decide the sovereignty axis"
             );
         }
+    }
+
+    // ---- the unauthenticated retrieval probe (cap.retrieval.query health) ------
+
+    use mp_contracts::dataplane::retrieval_v2::retrieval_service_server::{
+        RetrievalService, RetrievalServiceServer,
+    };
+    use mp_contracts::dataplane::retrieval_v2::{
+        GetChunksRequest, GetChunksResponse, GetSourcesRequest, GetSourcesResponse,
+        GetTraceRequest, GetTraceResponse, PackContextRequest, PackContextResponse, RetrievalChunk,
+    };
+    use std::pin::Pin;
+    use std::sync::{Arc, Mutex};
+    use tokio::net::TcpListener;
+    use tokio_stream::wrappers::TcpListenerStream;
+    use tonic::{transport::Server, Request, Response, Status};
+
+    /// What the stub `Retrieve` answers an unauthenticated caller with.
+    #[derive(Clone, Copy, Debug)]
+    pub(crate) enum Answer {
+        /// The real engine's behaviour: its JWT interceptor rejects a request with
+        /// no credential before any handler runs.
+        Unauthenticated,
+        Unavailable,
+        Unimplemented,
+        PermissionDenied,
+        /// A server that answers an unauthenticated call successfully has NO
+        /// working auth boundary; that is not "healthy".
+        Success,
+        /// Answers `Unauthenticated`, but only after far longer than any probe waits.
+        TooSlow,
+    }
+
+    /// What the stub saw of the probe's one request.
+    #[derive(Clone, Debug, Default)]
+    pub(crate) struct Seen {
+        metadata_keys: Vec<String>,
+        org_id: String,
+        query: String,
+        user_id: Option<String>,
+    }
+
+    struct StubRetrieval {
+        answer: Answer,
+        seen: Arc<Mutex<Vec<Seen>>>,
+    }
+
+    type NoStream =
+        Pin<Box<dyn futures::Stream<Item = Result<RetrievalChunk, Status>> + Send + 'static>>;
+
+    #[tonic::async_trait]
+    impl RetrievalService for StubRetrieval {
+        async fn retrieve(
+            &self,
+            request: Request<RetrieveRequest>,
+        ) -> Result<Response<RetrieveResponse>, Status> {
+            self.seen.lock().expect("seen lock").push(Seen {
+                metadata_keys: request
+                    .metadata()
+                    .clone()
+                    .into_headers()
+                    .keys()
+                    .map(|key| key.as_str().to_owned())
+                    .collect(),
+                org_id: request.get_ref().org_id.clone(),
+                query: request.get_ref().query.clone(),
+                user_id: request.get_ref().user_id.clone(),
+            });
+            match self.answer {
+                Answer::Unauthenticated => {
+                    Err(Status::unauthenticated("invalid or missing credential"))
+                }
+                Answer::Unavailable => Err(Status::unavailable("stub is down")),
+                Answer::Unimplemented => Err(Status::unimplemented("stub has no retrieval")),
+                Answer::PermissionDenied => Err(Status::permission_denied("stub denies")),
+                Answer::Success => Ok(Response::new(RetrieveResponse::default())),
+                Answer::TooSlow => {
+                    tokio::time::sleep(Duration::from_secs(30)).await;
+                    Err(Status::unauthenticated("too late"))
+                }
+            }
+        }
+
+        type RetrieveStreamStream = NoStream;
+        async fn retrieve_stream(
+            &self,
+            _: Request<RetrieveRequest>,
+        ) -> Result<Response<Self::RetrieveStreamStream>, Status> {
+            Err(Status::unimplemented("not needed in this test"))
+        }
+        async fn get_trace(
+            &self,
+            _: Request<GetTraceRequest>,
+        ) -> Result<Response<GetTraceResponse>, Status> {
+            Err(Status::unimplemented("not needed in this test"))
+        }
+        async fn get_sources(
+            &self,
+            _: Request<GetSourcesRequest>,
+        ) -> Result<Response<GetSourcesResponse>, Status> {
+            Err(Status::unimplemented("not needed in this test"))
+        }
+        async fn get_chunks(
+            &self,
+            _: Request<GetChunksRequest>,
+        ) -> Result<Response<GetChunksResponse>, Status> {
+            Err(Status::unimplemented("not needed in this test"))
+        }
+        async fn pack_context(
+            &self,
+            _: Request<PackContextRequest>,
+        ) -> Result<Response<PackContextResponse>, Status> {
+            Err(Status::unimplemented("not needed in this test"))
+        }
+    }
+
+    pub(crate) async fn spawn_stub(answer: Answer) -> (String, Arc<Mutex<Vec<Seen>>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind stub");
+        let address = listener.local_addr().expect("stub address");
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let stub = StubRetrieval {
+            answer,
+            seen: seen.clone(),
+        };
+        tokio::spawn(async move {
+            Server::builder()
+                .add_service(RetrievalServiceServer::new(stub))
+                .serve_with_incoming(TcpListenerStream::new(listener))
+                .await
+                .ok();
+        });
+        (format!("http://{address}"), seen)
+    }
+
+    const TEST_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
+
+    #[tokio::test]
+    async fn an_unauthenticated_answer_proves_the_route_and_its_jwt_boundary_are_alive() {
+        let (endpoint, seen) = spawn_stub(Answer::Unauthenticated).await;
+        assert!(retrieval_auth_boundary_alive(&endpoint, TEST_PROBE_TIMEOUT).await);
+
+        // The probe is credential-free and data-free: no bearer (or any other
+        // credential header), and a request that names no org, user or query.
+        let seen = seen.lock().expect("seen lock").clone();
+        assert_eq!(seen.len(), 1, "exactly one Retrieve per probe");
+        for key in &seen[0].metadata_keys {
+            assert!(
+                !matches!(key.as_str(), "authorization" | "x-api-key" | "x-user-id"),
+                "the probe must not send credential header {key}"
+            );
+        }
+        assert!(seen[0].org_id.is_empty());
+        assert!(seen[0].query.is_empty());
+        assert_eq!(seen[0].user_id, None);
+    }
+
+    #[tokio::test]
+    async fn every_answer_other_than_unauthenticated_is_unhealthy() {
+        for answer in [
+            Answer::Unavailable,
+            Answer::Unimplemented,
+            Answer::PermissionDenied,
+            Answer::Success,
+        ] {
+            let (endpoint, _) = spawn_stub(answer).await;
+            assert!(
+                !retrieval_auth_boundary_alive(&endpoint, TEST_PROBE_TIMEOUT).await,
+                "{answer:?} must not read as a live auth boundary"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_server_slower_than_the_timeout_is_unhealthy_and_the_probe_returns_in_time() {
+        let (endpoint, _) = spawn_stub(Answer::TooSlow).await;
+        let started = std::time::Instant::now();
+        assert!(!retrieval_auth_boundary_alive(&endpoint, Duration::from_millis(300)).await);
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "the probe must give up at its own timeout"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_server_that_accepts_the_connection_and_never_speaks_is_unhealthy_in_time() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind mute");
+        let address = listener.local_addr().expect("mute address");
+        tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((socket, _)) = listener.accept().await {
+                held.push(socket);
+            }
+        });
+        let started = std::time::Instant::now();
+        assert!(
+            !retrieval_auth_boundary_alive(
+                &format!("http://{address}"),
+                Duration::from_millis(300)
+            )
+            .await
+        );
+        assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    #[tokio::test]
+    async fn a_closed_port_and_an_unparseable_endpoint_are_unhealthy() {
+        let port = {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("reserve a port");
+            listener.local_addr().expect("address").port()
+        };
+        assert!(
+            !retrieval_auth_boundary_alive(&format!("http://127.0.0.1:{port}"), TEST_PROBE_TIMEOUT)
+                .await
+        );
+        assert!(!retrieval_auth_boundary_alive("not a url", TEST_PROBE_TIMEOUT).await);
+    }
+
+    /// The verdict is the whole safety argument, so it is pinned as a table:
+    /// ONLY `Unauthenticated` is healthy.
+    #[test]
+    fn only_unauthenticated_is_a_healthy_verdict() {
+        use tonic::Code;
+        assert!(is_auth_boundary_answer(Err(Code::Unauthenticated)));
+        assert!(!is_auth_boundary_answer(Ok(())));
+        for code in [
+            Code::Cancelled,
+            Code::Unknown,
+            Code::InvalidArgument,
+            Code::DeadlineExceeded,
+            Code::NotFound,
+            Code::AlreadyExists,
+            Code::PermissionDenied,
+            Code::ResourceExhausted,
+            Code::FailedPrecondition,
+            Code::Aborted,
+            Code::OutOfRange,
+            Code::Unimplemented,
+            Code::Internal,
+            Code::Unavailable,
+            Code::DataLoss,
+        ] {
+            assert!(
+                !is_auth_boundary_answer(Err(code)),
+                "{code:?} must not be a healthy verdict"
+            );
+        }
+    }
+
+    // ---- one endpoint resolver for dispatch and probe -------------------------
+
+    #[test]
+    fn the_endpoint_resolver_keeps_dispatchs_precedence_and_blank_handling() {
+        let some = |value: &str| Some(value.to_owned());
+        // URL wins over ADDR.
+        assert_eq!(
+            retrieval_endpoint_from_values(some("http://url:50052"), some("http://addr:50052")),
+            some("http://url:50052")
+        );
+        // ADDR is used only when URL is absent.
+        assert_eq!(
+            retrieval_endpoint_from_values(None, some("http://addr:50052")),
+            some("http://addr:50052")
+        );
+        // A blank URL is "not configured" — it does NOT fall through to ADDR,
+        // exactly as dispatch always behaved.
+        assert_eq!(
+            retrieval_endpoint_from_values(some("  "), some("http://addr:50052")),
+            None
+        );
+        assert_eq!(retrieval_endpoint_from_values(None, None), None);
+        assert_eq!(retrieval_endpoint_from_values(None, some("")), None);
+    }
+
+    /// Dispatch must resolve its endpoint ONLY through the shared helper. If
+    /// `from_env` grew its own `env::var` reads again, the probe could vouch for
+    /// one endpoint while `knowledge_search` dials another.
+    #[test]
+    fn dispatch_reads_the_endpoint_only_through_the_shared_resolver() {
+        let source = include_str!("knowledge_tools.rs");
+        let production = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("source has a production part");
+        assert_eq!(
+            production
+                .matches("std::env::var(\"DATAPLANE_RETRIEVAL_URL\")")
+                .count(),
+            1,
+            "the retrieval endpoint env must be read in exactly one place"
+        );
+        assert_eq!(
+            production
+                .matches("std::env::var(\"DATAPLANE_RETRIEVAL_ADDR\")")
+                .count(),
+            1
+        );
+        assert!(
+            production.contains("let url = retrieval_endpoint_from_env()?;"),
+            "KnowledgeClient::from_env must use the shared resolver"
+        );
     }
 }

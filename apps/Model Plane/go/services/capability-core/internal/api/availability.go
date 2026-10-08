@@ -30,7 +30,7 @@ const (
 
 	// genericGlobalHealthAttesterID is the only workload currently permitted to
 	// use the generic global-health route. Its Rust reporter probes precisely
-	// the two capabilities listed below; a scope alone is intentionally not a
+	// the capabilities listed below; a scope alone is intentionally not a
 	// universal availability authority.
 	// Auth Core's service-token contract prefixes service identities in both
 	// `sub` and `service_id`; keep the exact signed namespace in this comparison.
@@ -42,7 +42,7 @@ var reasonCodePattern = regexp.MustCompile(`^[a-z][a-z0-9_]{0,127}$`)
 // The capabilities execution-core's generic health credential may attest.
 //
 // The bar is the one this list's purpose states: execution-core must OWN the
-// runtime it is claiming health for. It does for all five —
+// runtime it is claiming health for. It does for every entry —
 //
 //   cap.command.sandbox / cap.command.shell  its bubblewrap sandbox and the
 //       interpreter, probed in-process.
@@ -59,6 +59,26 @@ var reasonCodePattern = regexp.MustCompile(`^[a-z][a-z0-9_]{0,127}$`)
 //       that instance has the host ENABLED, so an execution-core that cannot
 //       host a background process cannot make the capability available — the
 //       ownership bar is not just "owns the runtime" but "is running it".
+//   cap.retrieval.query                      `knowledge_search` executes inside
+//       execution-core's tool loop (migration 0008 records owner_service =
+//       execution-core). Added 2026-10-01. The reporter attests it only when
+//       BOTH the Data Plane retrieval engine's own readiness endpoint reports
+//       Postgres and Qdrant ready AND an unauthenticated Retrieve to the very
+//       endpoint dispatch uses is answered Unauthenticated (the route and its
+//       JWT interceptor are alive). It sends no user credential and no data. It
+//       does not prove the embedding provider, which still fails per call.
+//   cap.tool.http                            `web_search`/`web_fetch` execute
+//       inside execution-core's tool loop and talk to quarry-edge. Added
+//       2026-10-01. The reporter attests it only when quarry-edge answers
+//       /ready AND the exact Quarry credentials dispatch uses can be minted for
+//       BOTH scopes it requests; it never calls the metered search or extract
+//       routes. So while Auth Core refuses either scope for execution-core the
+//       row stays unavailable, and it flips on its own once that grant lands.
+//
+// Everything with effects or an owner elsewhere stays OFF this list on purpose:
+// cap.tool.provider.execute, cap.tool.social.publish, cap.tool.shipping.book,
+// cap.browser.open and cap.tool.ticket.create (see
+// ownerActionTicketCapabilityID) must be attested by their own owners.
 //
 // This list stays a list precisely because widening it is a decision. Added
 // 2026-08-26 after live proof: execution-core's reporter was attesting the
@@ -75,6 +95,9 @@ var genericGlobalHealthCapabilityIDs = map[string]struct{}{
 	"cap.agent.spawn":     {},
 
 	"cap.process.background": {},
+
+	"cap.retrieval.query": {},
+	"cap.tool.http":       {},
 }
 
 type availabilityRequest struct {

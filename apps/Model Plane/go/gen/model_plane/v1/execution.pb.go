@@ -334,9 +334,46 @@ type RunAgentRequest struct {
 	// lease at all. See
 	// apps/Frontend Plane/verevonv3/docs/S3_3_DURABLE_WORKSPACE_DESIGN_2026-09-11.md
 	// §3.5 phase B.2.
-	SpaceId       string `protobuf:"bytes,14,opt,name=space_id,json=spaceId,proto3" json:"space_id,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	SpaceId string `protobuf:"bytes,14,opt,name=space_id,json=spaceId,proto3" json:"space_id,omitempty"`
+	// Per-run ceiling on delegated subagents this run may start across all of
+	// its rounds (chat-wave2-specs wide-research fan-out §2.1). Same "0 =
+	// unspecified, use default" convention as `max_rounds` (field 8) — an older
+	// caller that never sets this keeps today's behavior
+	// (`subagent::DEFAULT_MAX_CHILDREN`), never a surprise widening. Resolved
+	// server-side by `subagent::resolve_child_ceiling`, which also clamps
+	// against an org-level ceiling (when configured) and the hard
+	// `subagent::MAX_CHILDREN_CEILING` — a request can only tighten the
+	// ceiling, never loosen it past what the org allows.
+	MaxSubagents uint32 `protobuf:"varint,15,opt,name=max_subagents,json=maxSubagents,proto3" json:"max_subagents,omitempty"`
+	// Inference route this run is PINNED to. Empty (together with
+	// `subscription_connection_id`) is every run that predates the field: the
+	// loop resolves its model as before (`EXECUTION_AGENT_MODEL`, e.g.
+	// "model-router") and names no provider. The only value execution-core
+	// accepts is "openai-codex-subscription" (the canonical registry id, not an
+	// alias), and only together with `subscription_connection_id` (17), an
+	// explicit non-"verevon-*" `model` (6), `zdr = false`, `plan_mode = true`
+	// (unless AGENTIC_SUBSCRIPTION_ALLOW_EFFECTS is also on: a subscription run is
+	// read-only until plan approval is connected) and
+	// AGENTIC_SUBSCRIPTION_ENABLED. When set, execution-core copies this onto
+	// EVERY inference round of the run, parent and delegated subagents alike,
+	// ignores `EXECUTION_AGENT_MODEL`, and stops the run (no further rounds) if
+	// a round is served by any other provider or model. A half-set pair or any
+	// other value is refused, never ignored: ignoring it would silently run the
+	// loop on the paid default route.
+	//
+	// Rollout order matters. An execution-core built before this field existed
+	// skips unknown fields and would run the loop on its default route, so the
+	// gateway only sends it once AGENTIC_SUBSCRIPTION_ENABLED is on, and that
+	// switch is turned on only after the new execution-core is running.
+	ProviderHint string `protobuf:"bytes,16,opt,name=provider_hint,json=providerHint,proto3" json:"provider_hint,omitempty"`
+	// Opaque Integration Core reference to the user's ChatGPT subscription
+	// connection, meaningful only with `provider_hint` (16). Identical
+	// semantics to `InferRequest.subscription_connection_id`: inference-core
+	// hands it to Integration Core, which validates it against the caller's
+	// verified org and user scope. It carries no credential.
+	SubscriptionConnectionId string `protobuf:"bytes,17,opt,name=subscription_connection_id,json=subscriptionConnectionId,proto3" json:"subscription_connection_id,omitempty"`
+	unknownFields            protoimpl.UnknownFields
+	sizeCache                protoimpl.SizeCache
 }
 
 func (x *RunAgentRequest) Reset() {
@@ -467,6 +504,27 @@ func (x *RunAgentRequest) GetSpaceId() string {
 	return ""
 }
 
+func (x *RunAgentRequest) GetMaxSubagents() uint32 {
+	if x != nil {
+		return x.MaxSubagents
+	}
+	return 0
+}
+
+func (x *RunAgentRequest) GetProviderHint() string {
+	if x != nil {
+		return x.ProviderHint
+	}
+	return ""
+}
+
+func (x *RunAgentRequest) GetSubscriptionConnectionId() string {
+	if x != nil {
+		return x.SubscriptionConnectionId
+	}
+	return ""
+}
+
 // RunAgentResponse — terminal outcome of a driven agent run.
 type RunAgentResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
@@ -491,8 +549,32 @@ type RunAgentResponse struct {
 	// for the single-step surface, where it is correctly always false — one step
 	// accumulates no history to compact.
 	CompactionTriggered bool `protobuf:"varint,5,opt,name=compaction_triggered,json=compactionTriggered,proto3" json:"compaction_triggered,omitempty"`
-	unknownFields       protoimpl.UnknownFields
-	sizeCache           protoimpl.SizeCache
+	// Why a run pinned to the ChatGPT subscription (`RunAgentRequest.provider_hint`
+	// = "openai-codex-subscription") ended in `status` "failed", as a stable
+	// code. Empty for every other outcome and for every run that is not pinned.
+	// One of: "subscription_usage_limit", "subscription_reauth_required",
+	// "subscription_upstream_unavailable", "subscription_bad_request",
+	// "rate_limited", "prompt_too_long", or "subscription_route_unavailable"
+	// (any other subscription failure, and a round that was served by another
+	// provider or model than the run is pinned to). The spellings are
+	// model-gateway's `subscription_failure` vocabulary and are pinned to it by a
+	// contract test; the gateway words the reason for the user from this code and
+	// never from `final_output`.
+	//
+	// When set, execution-core has NOT appended an assistant message to the
+	// thread: the gateway persists the explanation it words from this code, so
+	// the thread carries exactly one. A caller that does not read this field
+	// sees `status` "failed" and `final_output`, as for any failed run.
+	FailureCode string `protobuf:"bytes,6,opt,name=failure_code,json=failureCode,proto3" json:"failure_code,omitempty"`
+	// How long to wait before a retry could succeed, in whole milliseconds, when
+	// the provider said. Unset when it did not (an unset value is not zero).
+	// Meaningful only with `failure_code`.
+	RetryAfterMs *uint64 `protobuf:"varint,7,opt,name=retry_after_ms,json=retryAfterMs,proto3,oneof" json:"retry_after_ms,omitempty"`
+	// When a "subscription_usage_limit" resets: RFC 3339 UTC to whole seconds.
+	// Empty when unknown. Meaningful only with `failure_code`.
+	ResetsAt      string `protobuf:"bytes,8,opt,name=resets_at,json=resetsAt,proto3" json:"resets_at,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *RunAgentResponse) Reset() {
@@ -558,6 +640,27 @@ func (x *RunAgentResponse) GetCompactionTriggered() bool {
 		return x.CompactionTriggered
 	}
 	return false
+}
+
+func (x *RunAgentResponse) GetFailureCode() string {
+	if x != nil {
+		return x.FailureCode
+	}
+	return ""
+}
+
+func (x *RunAgentResponse) GetRetryAfterMs() uint64 {
+	if x != nil && x.RetryAfterMs != nil {
+		return *x.RetryAfterMs
+	}
+	return 0
+}
+
+func (x *RunAgentResponse) GetResetsAt() string {
+	if x != nil {
+		return x.ResetsAt
+	}
+	return ""
 }
 
 // ExecuteStepRequest — request to execute one step in the agent loop.
@@ -1056,7 +1159,7 @@ const file_model_plane_v1_execution_proto_rawDesc = "" +
 	"receipt_id\x18\x03 \x01(\tR\treceiptId\x12\x16\n" +
 	"\x06output\x18\x04 \x01(\tR\x06output\x12\x14\n" +
 	"\x05error\x18\x05 \x01(\tR\x05error\x12'\n" +
-	"\x0funknown_outcome\x18\x06 \x01(\bR\x0eunknownOutcome\"\xdc\x03\n" +
+	"\x0funknown_outcome\x18\x06 \x01(\bR\x0eunknownOutcome\"\xe4\x04\n" +
 	"\x0fRunAgentRequest\x12\x15\n" +
 	"\x06run_id\x18\x01 \x01(\tR\x05runId\x12\x1b\n" +
 	"\tthread_id\x18\x02 \x01(\tR\bthreadId\x12\x12\n" +
@@ -1073,13 +1176,20 @@ const file_model_plane_v1_execution_proto_rawDesc = "" +
 	"\x10min_privacy_tier\x18\v \x01(\x0e2\x1b.model_plane.v1.PrivacyTierR\x0eminPrivacyTier\x12\x1b\n" +
 	"\tplan_mode\x18\r \x01(\bR\bplanMode\x12A\n" +
 	"\rautonomy_rung\x18\f \x01(\x0e2\x1c.model_plane.v1.AutonomyRungR\fautonomyRung\x12\x19\n" +
-	"\bspace_id\x18\x0e \x01(\tR\aspaceId\"\xc5\x01\n" +
+	"\bspace_id\x18\x0e \x01(\tR\aspaceId\x12#\n" +
+	"\rmax_subagents\x18\x0f \x01(\rR\fmaxSubagents\x12#\n" +
+	"\rprovider_hint\x18\x10 \x01(\tR\fproviderHint\x12<\n" +
+	"\x1asubscription_connection_id\x18\x11 \x01(\tR\x18subscriptionConnectionId\"\xc3\x02\n" +
 	"\x10RunAgentResponse\x12\x16\n" +
 	"\x06status\x18\x01 \x01(\tR\x06status\x12!\n" +
 	"\ffinal_output\x18\x02 \x01(\tR\vfinalOutput\x12'\n" +
 	"\x0frounds_executed\x18\x03 \x01(\rR\x0eroundsExecuted\x12\x1a\n" +
 	"\bgrounded\x18\x04 \x01(\bR\bgrounded\x121\n" +
-	"\x14compaction_triggered\x18\x05 \x01(\bR\x13compactionTriggered\"\xf0\x02\n" +
+	"\x14compaction_triggered\x18\x05 \x01(\bR\x13compactionTriggered\x12!\n" +
+	"\ffailure_code\x18\x06 \x01(\tR\vfailureCode\x12)\n" +
+	"\x0eretry_after_ms\x18\a \x01(\x04H\x00R\fretryAfterMs\x88\x01\x01\x12\x1b\n" +
+	"\tresets_at\x18\b \x01(\tR\bresetsAtB\x11\n" +
+	"\x0f_retry_after_ms\"\xf0\x02\n" +
 	"\x12ExecuteStepRequest\x12\x15\n" +
 	"\x06run_id\x18\x01 \x01(\tR\x05runId\x12\x17\n" +
 	"\astep_id\x18\x02 \x01(\tR\x06stepId\x12\x1b\n" +
@@ -1185,6 +1295,7 @@ func file_model_plane_v1_execution_proto_init() {
 	}
 	file_model_plane_v1_runs_proto_init()
 	file_model_plane_v1_inference_proto_init()
+	file_model_plane_v1_execution_proto_msgTypes[3].OneofWrappers = []any{}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
