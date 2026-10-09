@@ -16,6 +16,7 @@ import {
 } from './membership-authority.controller';
 
 const TOKEN = '0123456789abcdef0123456789abcdef';
+const LEARNING_TOKEN = 'learning-core-membership-token-0123456789abcdef';
 
 describe('MembershipAuthorityController', () => {
   const originalEnv = { ...process.env };
@@ -146,10 +147,11 @@ describe('MembershipAuthorityController', () => {
       from: () => ({ where: () => ({ limit }) }),
     } as never);
 
-    const decision = await new MembershipAuthorityController().decide(TOKEN, {
-      userId: ' user-1 ',
-      orgId: ' org-1 ',
-    });
+    const decision = await new MembershipAuthorityController().decide(
+      TOKEN,
+      undefined,
+      { userId: ' user-1 ', orgId: ' org-1 ' },
+    );
 
     expect(decision).toEqual({
       version: 'v1',
@@ -157,6 +159,90 @@ describe('MembershipAuthorityController', () => {
       role: 'member',
     });
     expect(limit).toHaveBeenCalledWith(2);
+  });
+
+  it('authenticates the Learning caller with its own credential when one is configured', async () => {
+    process.env.LEARNING_CORE_MEMBERSHIP_SERVICE_TOKEN = LEARNING_TOKEN;
+    const limit = jest.fn().mockResolvedValue([{ role: 'member' }]);
+    jest.spyOn(db, 'select').mockReturnValue({
+      from: () => ({ where: () => ({ limit }) }),
+    } as never);
+
+    const decision = await new MembershipAuthorityController().decide(
+      undefined,
+      LEARNING_TOKEN,
+      { userId: ' user-1 ', orgId: ' org-1 ' },
+    );
+
+    expect(decision).toEqual({
+      version: 'v1',
+      member: true,
+      role: 'member',
+    });
+    expect(limit).toHaveBeenCalledWith(2);
+  });
+
+  it('rejects a Learning credential when none is configured', async () => {
+    delete process.env.LEARNING_CORE_MEMBERSHIP_SERVICE_TOKEN;
+    const select = jest.spyOn(db, 'select');
+    const controller = new MembershipAuthorityController();
+    const body = { userId: 'user-1', orgId: 'org-1' };
+
+    await expect(
+      controller.decide(undefined, LEARNING_TOKEN, body),
+    ).rejects.toBeInstanceOf(UnauthorizedException);
+    // The Learning header must never fall back to the user-core secret.
+    await expect(
+      controller.decide(undefined, TOKEN, body),
+    ).rejects.toBeInstanceOf(UnauthorizedException);
+    expect(select).not.toHaveBeenCalled();
+  });
+
+  it('rejects a Learning credential that is not the configured one', async () => {
+    process.env.LEARNING_CORE_MEMBERSHIP_SERVICE_TOKEN = LEARNING_TOKEN;
+    const select = jest.spyOn(db, 'select');
+    const controller = new MembershipAuthorityController();
+    const body = { userId: 'user-1', orgId: 'org-1' };
+
+    await expect(
+      controller.decide(undefined, 'wrong-token', body),
+    ).rejects.toBeInstanceOf(UnauthorizedException);
+    await expect(
+      controller.decide(undefined, TOKEN, body),
+    ).rejects.toBeInstanceOf(UnauthorizedException);
+    await expect(
+      controller.decide(LEARNING_TOKEN, undefined, body),
+    ).rejects.toBeInstanceOf(UnauthorizedException);
+    expect(select).not.toHaveBeenCalled();
+  });
+
+  it('rejects presenting both credentials even when each is valid', async () => {
+    process.env.LEARNING_CORE_MEMBERSHIP_SERVICE_TOKEN = LEARNING_TOKEN;
+    const select = jest.spyOn(db, 'select');
+    const controller = new MembershipAuthorityController();
+
+    await expect(
+      controller.decide(TOKEN, LEARNING_TOKEN, {
+        userId: 'user-1',
+        orgId: 'org-1',
+      }),
+    ).rejects.toBeInstanceOf(UnauthorizedException);
+    expect(select).not.toHaveBeenCalled();
+  });
+
+  it('rejects presenting neither credential', async () => {
+    process.env.LEARNING_CORE_MEMBERSHIP_SERVICE_TOKEN = LEARNING_TOKEN;
+    const select = jest.spyOn(db, 'select');
+    const controller = new MembershipAuthorityController();
+    const body = { userId: 'user-1', orgId: 'org-1' };
+
+    await expect(
+      controller.decide(undefined, undefined, body),
+    ).rejects.toBeInstanceOf(UnauthorizedException);
+    await expect(controller.decide('  ', '', body)).rejects.toBeInstanceOf(
+      UnauthorizedException,
+    );
+    expect(select).not.toHaveBeenCalled();
   });
 
   it('fails closed when duplicate canonical membership rows exist', async () => {
@@ -168,7 +254,7 @@ describe('MembershipAuthorityController', () => {
     } as never);
 
     await expect(
-      new MembershipAuthorityController().decide(TOKEN, {
+      new MembershipAuthorityController().decide(TOKEN, undefined, {
         userId: 'user-1',
         orgId: 'org-1',
       }),
@@ -180,16 +266,19 @@ describe('MembershipAuthorityController', () => {
     const controller = new MembershipAuthorityController();
 
     await expect(
-      controller.decide('wrong-token', { userId: 'user-1', orgId: 'org-1' }),
+      controller.decide('wrong-token', undefined, {
+        userId: 'user-1',
+        orgId: 'org-1',
+      }),
     ).rejects.toBeInstanceOf(UnauthorizedException);
     await expect(
-      controller.decide(TOKEN, { userId: '', orgId: 'org-1' }),
+      controller.decide(TOKEN, undefined, { userId: '', orgId: 'org-1' }),
     ).rejects.toBeInstanceOf(BadRequestException);
     await expect(
-      controller.decide(TOKEN, null as never),
+      controller.decide(TOKEN, undefined, null as never),
     ).rejects.toBeInstanceOf(BadRequestException);
     await expect(
-      controller.decide(TOKEN, {
+      controller.decide(TOKEN, undefined, {
         userId: 'user-1',
         orgId: 'org-1',
         role: 'owner',
@@ -207,7 +296,7 @@ describe('MembershipAuthorityController', () => {
     } as never);
 
     await expect(
-      new MembershipAuthorityController().decide(TOKEN, {
+      new MembershipAuthorityController().decide(TOKEN, undefined, {
         userId: 'user-1',
         orgId: 'org-1',
       }),
