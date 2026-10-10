@@ -7,7 +7,7 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "test": "pnpm --dir ../.. exec vitest run apps/verevon-web",
+    "test": "pnpm --dir ../.. exec vitest run apps/verevon-web && pnpm --dir ../.. exec vitest run --config apps/verevon-web/vitest.config.mts",
     "remotion:studio": "remotion studio remotion/index.ts",
     "remotion:render:cards": "node scripts/render-feature-films.mjs"
   },

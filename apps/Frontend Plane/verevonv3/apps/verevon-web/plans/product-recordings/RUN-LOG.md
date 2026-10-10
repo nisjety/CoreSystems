@@ -407,3 +407,97 @@ Frosset 02:01 UTC. Serien gikk 02:02–05:17 UTC med gpt-5.6-terra via abonnemen
 **Status:** fortsatt blokkert på oppfølgingstiden. Hele Q16-prosedyren kjøres på neste frys, etter chat bølge 2.
 
 Fjerde frys ble avbrutt. Først startet maskinen på nytt, deretter stoppet jeg serien feilaktig, etter 01 20/20. Frontenden laster ikke inn kodeendringer uten omstart, så appen var aldri påvirket.
+
+## 2026-09-28 — kort serie q16f (Wave 2 + tre nye brytere)
+
+Kort serie med 10 forsøk hver på 03 og 04, kun for å sjekke at de nye latensbryterne virker. Det er ikke en kvalifisering.
+
+**Resultat:**
+- **03:** 10/10. Første tur p95 92,2 s. Oppfølging p50 47,5 s og p95 75,6 s. To av ti oppfølginger ble over 70 s (72,0 og 75,6 s).
+- **04:** 9/10 (feilen var planformulering, ikke tid). Første tur p95 74,9 s. Oppfølging p95 47,0 s.
+- Ingen tidsavbrudd, og ingen av de ti oppfølgingene i 03 trengte reparasjon.
+
+**De to trege oppfølgingene:**
+- **75,6 s:** første forsøk feilet etter 32 s med «ugyldige verktøyargumenter» (dobbelt-kodet JSON fra abonnementsruten), og hele forsøket ble kjørt om igjen. Feilen rettes nå med tolerant parsing av utvetydige JSON-skader.
+- **72,0 s:** én av to parallelle kontroll-grupper brukte 39,5 s på ca. 3000 resonneringstokens. Tenkebudsjettet på 4096 røres ikke uten testing mot de 104 lagrede kontrolltilfellene.
+
+**Status:** fortsatt blokkert på oppfølgingstiden i 03. Full Q16 kjøres på siste frys.
+
+## 2026-09-29 — q16h og q16i: modellen sender bare det reviderte innlegget
+
+Journey 03 med bryteren for «bare det aktuelle innlegget» slått på. Samme Terra-rute via abonnementet, ingen automatisk omforsøk.
+
+**Rettet før serien.** Første forsøk (`q16g`, mappen beholdt som bevis) feilet i tur 1 med «piece 1: 7 words» selv om dokumentet var komplett. Modellen hadde lagt en metadatablokk med kildenoten over hvert innlegg, og oracle kuttet teksten ved første kildenote. Oracle fjerner nå en ledende metadatablokk først. Alle 62 innspilte 03-dokumenter er kjørt gjennom gammel og ny versjon: ingen som besto feiler nå. Oracle teller ikke lenger «Kanal» og «Foreslått dato» som tekst, så q16h dømmes litt strengere enn q16e og q16f (2 til 7 ord færre per innlegg).
+
+**q16h, 20 forsøk (frosset 15:09 UTC, kjørt 15:10–16:08 UTC):**
+- **Bestått:** 20/20.
+- **Innlegget sendt som utsnitt:** 20/20 (grensen var 90 %). Modellen skrev 474–623 tegn mot et lagret dokument på ca. 3,6 KB.
+- **Oppfølging:** p50 26,7 s, p95 41,6 s, lengste 43,8 s, ingen over 70 s. Til sammenligning 47,5 og 75,6 s (q16f) og p95 76,3 s (q16e).
+- **Første tur:** p50 73,5 s, p95 92,4 s.
+- Ingen tidsavbrudd, ingen reparasjoner, ingen «ugyldige verktøyargumenter».
+
+**Feil funnet ved å lese dokumentene, ikke av noen kontroll.** Når innlegget hadde en egen kildenote (`### Kilder`) under seg, forsvant noten etter revisjonen i **3 av 3** forsøk med det oppsettet (forsøk 1, 7 og 9). Uten bryteren beholdt 6 av 6 noten. Tekstkontrollene så det ikke, fordi de måler kundeteksten, og kildenoten er nettopp det oppdraget ber om å få vist.
+
+**Rettelse (bygget, testet, ikke bevist i live):**
+- Forfatteren får beskjed om hvilke underoverskrifter innlegget har.
+- Et utsnitt uten noen av dem avvises og repareres, og reparasjonen får se noten som gikk tapt.
+- Oracle feiler et forsøk der et innlegg med note mister den. På de innspilte dokumentene slår den ut på nøyaktig de tre og ingen av de 47 andre.
+- Tester: gateway lib 1591 og integrasjon 93 bestått, to nye ende-til-ende-tester mot den simulerte kjeden, og en test mot alle 50 innspilte revisjoner (9 hadde note, 3 mistet den, alle tre avvises). Å slå av kontrollen, og separat beskjeden, feiler testene.
+- Standardverdien i compose er nå `MODEL_GATEWAY_DATED_POST_SECTION_ONLY=1`. Bildene er bygget om via oppstarteren (model-gateway `d1e5d038aca4`).
+
+**q16i (ny bygg, 17:06 UTC): stoppet etter to forsøk.** Forsøk 1 og 2 bestod (oppfølging 25,9 og 23,7 s), men ingen av dem hadde note-oppsettet, så rettelsen ble ikke prøvd. Forsøk 3 stoppet med `subscription_usage_limit`: ChatGPT-planen har nådd bruksgrensen for Codex og tilbakestilles **03.10.2026 kl. 17:45 UTC**. Serien stoppet av seg selv. Ingenting ble kjørt på annen leverandør.
+
+**Status:** oppfølgingstiden i 03 er innenfor målet (p95 41,6 s mot 70 s) på q16h. Gjenstår: bevise note-rettelsen i live (minst tre forsøk med note-oppsett), så siste frys med alle fire oppgaver og minst 20 forsøk hver, og portene.
+
+## 2026-09-30 — q16j: note-rettelsen bevist i live, og siste frys for 03
+
+Eieren tilbakestilte Codex-grensen. Maskinen hadde startet på nytt i mellomtiden (containerne kom opp igjen, innloggingen for testkontoen var tømt og ble gjenopprettet med det godkjente lokale oppsettet). Eieren hadde også lagt inn to skrift-endringer på markedsføringssiden. Ingen av dem rører chat-appen, gatewayen eller fixturene (13 av 13 hasher stemmer). Bildene er de samme som i q16i.
+
+**q16j, 20 forsøk på 03 (frosset 13:09 UTC, kjørt 13:10–14:09 UTC, bryteren på via compose):**
+- **Bestått:** 20/20. **Innlegget sendt som utsnitt:** 20/20.
+- **Oppfølging:** p50 25,3 s, p95 57,2 s, lengste 58,5 s, ingen over 70 s. Før: p95 76 s.
+- **Første tur:** p50 68,9 s, p95 102,8 s, lengste 105,8 s.
+- Ingen tidsavbrudd, reparasjoner, avvisninger fra kontrollen, verktøyargumentfeil eller bruksgrense.
+- **Kildenoter:** 4 av 20 dokumenter hadde note under innlegget (forsøk 2, 4, 18 og 19), og **alle fire beholdt den** (q16h: 0 av 3). Beskjeden til forfatteren var nok, så avvisningen slo aldri inn. To av dem (2 og 18) oppdaterte også notens tekst. Den nye oracle-sjekken slår ikke ut på noen av de 20.
+- **Gjenbruk:** alle 20 revisjoner gjenbrukte tidligere godkjenninger (3–12 segmenter kontrollert, 17–32 gjenbrukt).
+- **Halen:** de to tregeste oppfølgingene (58,5 og 57,2 s) var kontrolltid etter et vanlig utkast på 14–16 s. Innenfor målet, ikke rørt.
+
+Dette er 03 i den første runden på dette bygget. 01, 02 og 04 ble kjørt videre på samme bygg (`q16k`).
+
+## 2026-09-30 — q16k: to tidsavbrudd i 04, og endelig runde q16L
+
+**q16k (01, 02, 04, 20 forsøk hver, 14:09–16:17 UTC):**
+- **01:** 19/20. **02:** 19/20. **04:** 17/20.
+- Tidsmålene holdt overalt, men **04 hadde to tidsavbrudd** (forsøk 7 og 9, begge ca. 110 s), og serien skal ikke ha noen. 01, 02 og 04 hadde under 20 oppfølgingsprøver fordi en feilet første tur ikke har oppfølging.
+- De andre tre feilene: 01 «kundetekst og intern merknad mangler» (to reparasjoner hjalp ikke), 02 at chat-siden aldri ble vist (10 s ventetid, nå 30 s), 04 plantekst uten stedfortreder eller buffer.
+
+**Årsak til tidsavbruddene.** Begge hadde samme forløp. Utkastet var ferdig etter 19–22 s. Første kildekontroll delte 15 segmenter i tre grupper på 4, 4 og 7. Gruppen på 7 tabellrader brukte 4 000–4 600 resonneringstokens (53 og 61 s), mens de to andre var ferdige på 10–18 s. Tre tabellrader var ikke støttet, så reparasjon og ny kontroll kom, og de 90 s kontrollen får fra utkastet er ferdig tok slutt i neste reparasjon. Samme hale fantes i frys 5 (109,7 s som akkurat holdt).
+
+**A/B av finere kontrollgrupper** (10 ekte 04-planer og en kopi av hver med én uberettiget setning, 3 runder per gren, bare Terra via abonnementet):
+- Samme kvalitet: 20/30 ekte planer godkjent og 30/30 innsatte feil avvist i begge grener, ingen protokollfeil.
+- Tid per kontroll var ikke forskjellig i utvalget (median 26,0 mot 25,6 s).
+- Kall med 2 000 eller flere utdatatokens falt fra 10 av 180 til 1 av 240.
+
+**Endringer:**
+- Finere kontrollgrupper på (en gruppe per fire segmenter eller 1 400 byte, maks fire samtidig).
+- Kildekontrollen får 120 s i stedet for 90 s. Hele verktøyfasen er fortsatt begrenset til 150 s, og en uavhengig gjennomgang fant ingen grense oppstrøms som 120 s kan utløse.
+- Herdet etter uavhengig gjennomgang: undernotevakten teller bare `#`-overskrifter, en forespørsel som også fjerner noten går til hele dokumentet, og meldingen til forfatteren motsier ikke lenger seg selv om noter.
+- Venteren på chat-ruten er 30 s i stedet for 10 s (bare testkode).
+- Uten innhold logges nå antall interne notatoverskrifter når en tekst sies å mangle seksjoner.
+
+**Endelig runde q16L (frosset 18:06 UTC, bilde `1ff7c6a268d6`, kjørt 18:07–21:16 UTC, pluss fire forsøk på 02 til 21:26):**
+
+| Oppgave | Bestått | Første tur p95 | Oppfølging p95 | Tidsavbrudd |
+|---|---|---|---|---|
+| 04 | 20/20 | 67,1 s | 47,0 s | 0 |
+| 03 | 19/20 | 105,7 s | 57,7 s | 0 |
+| 02 | 17/20 og 4/4 | 65,0 s | 46,0 s | 0 |
+| 01 | 20/20 | 43,0 s | 45,3 s | 0 |
+
+- Alle tidsmål holder på ett bygg, ingen tidsavbrudd på 84 forsøk, minst 20 prøver per tur. 04 fikk ingen tidsavbrudd; største kontrollgruppe var 32,5 s mot 60,7 s før.
+- De fire feilene var modelloppførsel: 03 en revisjon der ny kontroll fortsatt fant uberettiget tekst, og 02 tre ganger på første tur (en lokal kontroll som reparasjonene ikke løste, et første `create_artifact`-kall med bare en id, og en rapport skrevet som chattekst uten dokument).
+- Kildenoter under innlegg overlevde 10 av 10 revisjoner der oppsettet fantes.
+
+**Portene (21:26–21:32 UTC):** holdbarhet 21 bestått før og 21 etter en kontrollert omstart (bevis identisk i 20 av 20 filer), gjenoppretting 9, visning 9, levende Q08 2, tillit (minne og tilkobling) 3.
+
+**Status:** ytelse er nå bestått mot eierens mål. Riktighet er fortsatt delvis (modellatferd). Tillit er delvis fordi tverr-leietaker-testen bare eieren kan kjøre. Opplevelse er delvis til teksting og redaksjonell og medie-gjennomgang er gjort. Ingen offentlig medie er godkjent.

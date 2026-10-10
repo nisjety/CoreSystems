@@ -3,8 +3,8 @@ import { CpuArchitecture } from "@/components/ui/cpu-architecture";
 
 const stats = [
 	{ label: "Overvåk · brief · godkjenn · handle", unit: "steg", value: "4" },
-	{ label: "Data behandles i EU som standard", unit: "EØS", value: "EU" },
-	{ label: "Risikofylte handlinger stoppes", unit: "først", value: "Ja" },
+	{ label: "EU-region på standardmodellene", unit: "EØS", value: "EU" },
+	{ label: "Utplasserte agenter stopper risikofylte handlinger", unit: "først", value: "Ja" },
 ];
 
 export function TechnologySection() {

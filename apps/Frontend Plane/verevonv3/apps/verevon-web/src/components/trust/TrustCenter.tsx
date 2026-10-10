@@ -29,20 +29,21 @@ function TrustHero() {
 				</h1>
 
 				<p className="mt-8 max-w-[64ch] font-geist text-[var(--text-body-lg)] font-light leading-[1.5] text-verevon-text-muted text-pretty">
-					Verevon er bygget for virksomheter som ikke kan gå på akkord med hvor
-					dataene ligger. Her er den ærlige tilstanden: kontrollene er reelle og
-					stort sett live i dag — men vi holder ennå ingen tredjeparts­sertifiseringer.
-					Vi viser begge deler, uten pynt.
+					Verevon er bygget for virksomheter som må vite hvor dataene deres går.
+					Her er den ærlige tilstanden: mange kontroller er
+					håndhevet i kode, noen er bare erklært eller valgfrie per forespørsel,
+					og vi holder ennå ingen tredjeparts­sertifiseringer. Vi viser alt dette,
+					uten pynt.
 				</p>
 
 				<div className="mt-10 flex flex-wrap items-center gap-x-9 gap-y-4">
 					<div className="flex flex-wrap items-center gap-3">
-						<StatusBadge level="live" label="Kontrollene er live" />
+						<StatusBadge level="live" label="Kontroller i kode" />
 						<StatusBadge level="planned" label="Sertifiseringer på vei" />
 					</div>
 
 					<ArrowButton href={`mailto:${SECURITY_EMAIL}`} variant="coral">
-						Be om sikkerhets­pakken
+						Kontakt sikkerhets­teamet
 					</ArrowButton>
 				</div>
 			</div>
@@ -60,12 +61,12 @@ function ControlsSection() {
 				<div className="max-w-[760px]">
 					<Eyebrow>Det vi kan stå for</Eyebrow>
 					<h2 className="verevon-h2 mt-6 text-balance">
-						De forsvarbare forskjellene — håndhevet, ikke lovet.
+						De forsvarbare forskjellene — og hvor hver av dem stopper.
 					</h2>
 					<p className="verevon-body-lg mt-7 max-w-[600px] text-pretty">
 						Den late påstanden «amerikanske leverandører lekker dataene dine»
-						holder ikke mot en moden konkurrent — og Verevon kjører selv på Azure.
-						Derfor er forspranget vårt skarpere og mer konkret.
+						holder ikke mot en moden konkurrent — og Verevon bruker selv Azures
+						AI-tjenester. Derfor sier vi i stedet hva hver kontroll gjør, og hvor den stopper.
 					</p>
 				</div>
 
@@ -100,17 +101,17 @@ function CertificationsSection() {
 				<div className="max-w-[820px]">
 					<Eyebrow>Sertifiseringer & løype</Eyebrow>
 					<h2 className="verevon-h2 mt-6 text-balance">
-						Vi har kontrollene — men ennå ikke sertifiseringene.
+						Vi har mange av kontrollene — men ennå ikke sertifiseringene.
 					</h2>
 					<p className="verevon-body-lg mt-7 max-w-[640px] text-pretty">
 						Det er den ubehagelige sannheten en tillitsledet posisjon må eie. På
 						innkjøps­modent papir kan en Vanta-støttet konkurrent med SOC&nbsp;2 og
 						ISO&nbsp;42001 i dag dokumentere mer enn oss. Å lukke gapet er en
-						prioritet — og vi leder an på{" "}
+						prioritet — og vi har valgt{" "}
 						<strong className="font-medium text-verevon-j-text">
 							ISO&nbsp;42001 og EU&nbsp;AI&nbsp;Act
 						</strong>{" "}
-						som den suverene AI-spydspissen.
+						som vår AI-spydspiss.
 					</p>
 				</div>
 
@@ -147,14 +148,20 @@ function ResidencySection() {
 				<div>
 					<Eyebrow marker>Datalagring & dataflyt</Eyebrow>
 					<h2 className="verevon-h2 mt-6 text-balance">
-						Hvor dataene dine ligger — og hvor de ikke gjør det.
+						Hvor dataene dine går — og hva vi ikke kan love.
 					</h2>
 					<p className="verevon-body-lg mt-7 max-w-[52ch] text-pretty">
-						App-data, samtaler, kjørehistorikk, revisjon og vektorlageret er
-						EU/EØS-lagre under Verevons kontroll. Primær inferens og embeddings
-						kjører på Azure OpenAI Sweden Central. Tale (TTS) står på EU-endepunktet
-						og nekter et konfigurert ikke-EU-endepunkt med mindre det eksplisitt
-						åpnes.
+						Standardmodellene kjører hovedsakelig på Azure OpenAI med regionen satt til Sweden
+						Central. Regionen er en etikett vi selv setter, og ikke alle ruter har
+						den: Claude-modellene går via Azure AI Foundry uten oppgitt region,
+						dokument-embeddings via Cohere på Azure AI Foundry, og en ChatGPT-modell
+						brukeren selv velger går via brukerens egen OpenAI-konto med global
+						behandling og uten EU- eller ZDR-garanti. Nett-søk går via eksterne
+						søkemotorer. Tale (TTS) bruker Azure Speech og Azure OpenAI med en
+						konfigurert region; bare en overstyring av Azure OpenAI-tale til et
+						ikke-EU-endepunkt nektes med mindre den eksplisitt åpnes. Hvor Verevons
+						egne lagre (app-data, samtaler, kjørehistorikk, revisjon og vektorlager)
+						kjører, oppgir vi ikke her før vi kan dokumentere det.
 					</p>
 
 					<div className="mt-9">
@@ -170,9 +177,11 @@ function ResidencySection() {
 							))}
 						</ul>
 						<p className="verevon-body mt-5 max-w-[52ch] text-pretty">
-							Default-deny tredjeparts­behandling for beskyttede klasser.
+							Data Plane nekter å sende ZDR-merket innhold til eksterne embeddings.
+							I chat brukes klassen ennå ikke til å velge modell-leverandør.
 							GDPR-policy­metadata (formål, lovlig grunnlag, lagringstid, residens,
-							personvern­klasse, sletteomfang) følger varige poster.
+							personvern­klasse, sletteomfang) kreves på varige poster i Spaces, men
+							styrer ennå ikke valg av leverandør i chat.
 						</p>
 					</div>
 				</div>
@@ -187,14 +196,15 @@ function ResidencySection() {
 						</h3>
 						<p className="verevon-body mt-5 text-pretty">
 							EU-residens er ikke det samme som datasuverenitet. En
-							leverandør med hovedkontor i USA — også Microsoft Azure — kan nås
-							under den amerikanske CLOUD Act uavhengig av fysisk plassering. Vi
-							hevder aldri at residens gir immunitet.
+							leverandør med hovedkontor i USA — også Microsoft Azure, og OpenAI på
+							ChatGPT-ruten — kan nås under den amerikanske CLOUD Act uavhengig av
+							fysisk plassering. Vi hevder aldri at residens gir immunitet.
 						</p>
 						<p className="verevon-body mt-4 text-pretty">
-							Dette logges som en åpent oppgitt restrisiko i vår
-							Schrems&nbsp;II-overførings­vurdering, med supplerende tiltak. Vi sier
-							det rett ut framfor å pakke det bort.
+							Dette er ført som en åpent oppgitt restrisiko i vårt utkast til
+							Schrems&nbsp;II-overførings­vurdering. Utkastet er ikke gjennomgått av
+							norsk personvernjurist ennå og nevner foreløpig bare Microsoft, ikke
+							OpenAI. Vi sier det rett ut framfor å pakke det bort.
 						</p>
 					</div>
 
@@ -203,12 +213,19 @@ function ResidencySection() {
 							ZDR — ærlig omfang
 						</h3>
 						<p className="verevon-body mt-5 text-pretty">
-							Zero Data Retention er et valgfritt, betalt Pro/Enterprise-tillegg
-							organisasjonen selv slår på. Når det er aktivert binder det
-							modell-leverandøren (ingen trening eller lagring på prompts); er det
-							av, beholder Verevon fortsatt egen kjørehistorikk, samtaler og revisjon
-							etter sin lagringsplan. Kun Azure OpenAI Sweden Central-stien støtter
-							ZDR&nbsp;+&nbsp;EØS i dag — andre leverandører er under avklaring.
+							Zero Data Retention er valgfritt og av som standard. En organisasjon kan
+							slå det på for alle forespørsler, men bare på Pro- eller Enterprise-plan;
+							en bruker kan også velge «Midlertidig samtale» for én samtale. Når ZDR
+							er på, sender plattformen en ZDR-forespørsel bare til
+							en leverandør vi har en registrert og datert ZDR-godkjenning for, og
+							avviser den ellers. Godkjenningen er vår egen registrering, ikke en
+							uavhengig verifisering, og om leverandøren faktisk holder avtalen er et
+							kontraktsspørsmål. I miljøet vi har gjennomgått er ingen slik
+							godkjenning registrert, så en ZDR-forespørsel avvises der.
+							ChatGPT-ruten støtter ikke ZDR. ZDR gjelder modell-leverandøren, ikke
+							Verevons egne lagre: Verevon beholder metadata og revisjonshendelser, og
+							for arbeid uten ZDR beholdes samtaler og kjørehistorikk til noen sletter
+							dem; de slettes ikke automatisk etter alder.
 						</p>
 					</div>
 				</aside>
@@ -227,24 +244,47 @@ function SubprocessorsSection() {
 				<div className="max-w-[760px]">
 					<Eyebrow>Underleverandører</Eyebrow>
 					<h2 className="verevon-h2 mt-6 text-balance">
-						En kort, EU-først liste — og statusen på hver enkelt.
+						Hvem som kan få dataene dine — og statusen på hver enkelt.
 					</h2>
 					<p className="verevon-body-lg mt-7 max-w-[600px] text-pretty">
-						Vi holder lista stram. Der residens eller ZDR ikke er bekreftet ennå,
-						står det «under avklaring» — ikke et grønt flagg.
+						Listen tar med leverandørene og mottakerne koden kan sende data til.
+						Hvilke som er aktive, avhenger av oppsettet og funksjonene en
+						organisasjon bruker, og produksjonsoppsettet er ikke dokumentert her.
+						Der residens eller ZDR ikke er bekreftet ennå, står det «under
+						avklaring» — ikke et grønt flagg. For mottakere uten oppgitt region har
+						vi ikke bekreftet region eller databehandleravtale. Ikke tatt med er
+						tilkoblinger og innlogging som kunden eller brukeren selv godkjenner på
+						egen konto (blant annet Google, Microsoft, Apple, Vipps, Slack og
+						Notion), offentlige kilder vi bare leser fra, tjenester som bare ser en
+						besøkendes IP-adresse, og to små oppslag: stedsnavn til OpenStreetMap og
+						en kort hash-prefiks til en passordsjekk.
 					</p>
 				</div>
 
-				<div className="mt-[clamp(40px,5vw,72px)] overflow-x-auto">
+				<div
+					aria-label="Tabell over underleverandører og mottakere"
+					className="mt-[clamp(40px,5vw,72px)] overflow-x-auto focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-verevon-j-text/40"
+					role="region"
+					tabIndex={0}
+				>
 					<table className="w-full min-w-[680px] border-collapse text-left">
+						<caption className="sr-only">
+							Underleverandører og mottakere, med formål, region og status
+						</caption>
 						<thead>
 							<tr className="border-b border-verevon-j-text/16">
-								<th className="verevon-eyebrow pb-4 pr-6 font-medium">
+								<th className="verevon-eyebrow pb-4 pr-6 font-medium" scope="col">
 									Leverandør
 								</th>
-								<th className="verevon-eyebrow pb-4 pr-6 font-medium">Formål</th>
-								<th className="verevon-eyebrow pb-4 pr-6 font-medium">Region</th>
-								<th className="verevon-eyebrow pb-4 font-medium">Status</th>
+								<th className="verevon-eyebrow pb-4 pr-6 font-medium" scope="col">
+									Formål
+								</th>
+								<th className="verevon-eyebrow pb-4 pr-6 font-medium" scope="col">
+									Region
+								</th>
+								<th className="verevon-eyebrow pb-4 font-medium" scope="col">
+									Status
+								</th>
 							</tr>
 						</thead>
 						<tbody>
@@ -288,14 +328,15 @@ function ContactSection() {
 		>
 			<div className="mx-auto grid max-w-[1680px] items-end gap-x-[clamp(40px,5vw,96px)] gap-y-10 xl:grid-cols-[minmax(0,1fr)_auto]">
 				<div>
-					<Eyebrow marker>Be om tilgang</Eyebrow>
+					<Eyebrow marker>Kontakt sikkerhet</Eyebrow>
 					<h2 className="verevon-h2 mt-6 max-w-[20ch] text-balance">
-						Trenger sikkerhets­teamet ditt mer? Be om pakken.
+						Trenger sikkerhets­teamet ditt mer? Ta kontakt.
 					</h2>
 					<p className="verevon-body-lg mt-7 max-w-[58ch] text-pretty">
-						Vi deler databehandler­avtale (DPA), Schrems&nbsp;II-vurdering,
-						dataflyt-diagram og sikkerhets­arkitektur på forespørsel — og holder
-						deg oppdatert etter hvert som sertifiseringene lander.
+						Databehandleravtale (DPA), Schrems&nbsp;II-vurdering og dataflyt-diagram
+						er under utarbeidelse og ennå ikke gjennomgått av norsk
+						personvernjurist. Ta kontakt, så sier vi hva som er klart — og vi
+						holder deg oppdatert etter hvert som sertifiseringene lander.
 					</p>
 				</div>
 

@@ -20,7 +20,7 @@ const promptLines = [
 	"Lag et kort svarforslag for teamet.",
 	"Marker hva som krever godkjenning.",
 	"Stopp før noe sendes til kunden.",
-	"Lagre kilder, region og godkjenning i sporet.",
+	"Lagre kilder og godkjenning i sporet.",
 ];
 
 type LoopSourceId =
@@ -109,7 +109,7 @@ const loopSources: LoopSource[] = [
 	{
 		id: "audit",
 		label: "Spor",
-		detail: "EU/ZDR",
+		detail: "Revisjon",
 		icon: FileText,
 		x: "22%",
 		y: "80%",
@@ -213,11 +213,11 @@ const loopSteps: LoopStep[] = [
 		title: "Lagre sporet",
 		prompt: promptLines[7],
 		action: "audit.tool_action",
-		actionDetail: "Kilder, region, ZDR-status og godkjenning skrives til saken.",
+		actionDetail: "Kilder og godkjenning knyttes til saken som et spor.",
 		status: "logger",
-		metric: "Sweden Central",
-		result: "Revisjonsspor skrevet",
-		resultDetail: "Kilde, region og menneskelig godkjenning er etterprøvbart senere.",
+		metric: "Kilder og godkjenning",
+		result: "Spor lagret i saken",
+		resultDetail: "Kilde og menneskelig godkjenning kan sees i saken senere.",
 		accent: "#4b6f8f",
 		sourceIds: ["audit"],
 	},

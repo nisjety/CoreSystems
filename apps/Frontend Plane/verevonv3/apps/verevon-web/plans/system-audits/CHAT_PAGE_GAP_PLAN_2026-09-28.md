@@ -108,6 +108,8 @@ Tiers:
 
 ## 4. Waves
 
+> **Status correction, 2026-10-01.** A row-by-row audit of the code ([`CHAT_PARITY_AUDIT_2026-10-01.md`](CHAT_PARITY_AUDIT_2026-10-01.md), 142 rows) answers the owner's question "do we have parity with the reference systems?" with **no**. In this plan, "built" below means the code exists and is unit-tested, not that it works end to end. The audit found that wide research gets at most two researchers through chat, the editable plan gate's approval is not consumed by any web-app turn, a scheduled run is a single no-tool call whose output is not delivered, agent-driven browser runs cannot start (no grant issuer), the agent's mail and file tools are header listings that run only in Do mode (off on the Terra route), and only the Office exports of Wave 1 were live-verified. Read the Wave 2 and Wave 3 status with that in mind.
+
 **Wave 1: done and live on freeze 5 (2026-09-28T02:01Z).** It was built by workflow `chat-wave1-implement` (5 implementers, 5 adversarial reviewers, 1 final verify).
 
 The reviewers fixed seven real defects before verification:
@@ -172,14 +174,55 @@ Known limits:
 - **Test status:** model-gateway 1542 lib and 86/86 e2e, session-core 381, gateway BFF 583, and every Go package pass, with typecheck clean.
   - The one frontend failure is `CoreShell.test.tsx`. It comes from another session's "Søk" to "Nett" relabel in `DashboardHomeChrome.tsx`, not from this work.
 
-**Open after Wave 2:**
-1. **Delegated identity for services acting for a user.** It unblocks two things:
-   - the chat agent's use of *personal* connections, which execution-core now correctly refuses because it conveys no end user;
-   - the mail-task thread creation, since `PrepareUserOwnedThread` exists but model-gateway has no service credential.
-   
-   This is the next item.
-2. The "Se resultater" link in the schedules panel needs a `cron_fires.thread_id` link and a runs endpoint.
-3. Wave 2 batch 3: the editable plan gate and wide research.
+**Wave 2 batch 3 and delegated identity: built 2026-09-29 (in review and verification).** Details are in `delegated-identity-2026-09-28/04-implementation-and-deployment-status.md`.
+- **Delegated identity, so a service can act for a user.** It uses a token exchange at auth-core plus a lean Control-signed `mail-task-v1` decision.
+  - The chat agent can read the run owner's own personal mail, files and calendar, and never another user's.
+  - The activation is in the policy (`plane-service-principals.json` and the assembler in `run-control-plane.sh`) and takes effect at the next launcher run from the Control plane.
+  - A review caught that a single-use check on the run's session bearer would have refused every second read in a run; the single-use check now sits on the exchanged token instead.
+- **Editable plan gate.**
+  - The model proposes a plan through `plan.propose`.
+  - The user can reorder, edit and remove steps before approving.
+  - The edited plan is bound to the run and its receipt; the last proposal wins.
+  - Review fixed five serious defects: a missing capability entry, a superseded plan that could still be approved, the oldest plan shown instead of the newest, a dead end when the model proposes nothing, and a reorder bug after removing a step.
+- **Wide research.**
+  - The subagent ceiling is configurable up to 100, with 8 as the default.
+  - `subagent.research_fan_out` runs up to 4 items at once and pre-divides the round budget evenly.
+  - A live card panel groups the items by batch.
+  - The duplicate `subagent.task` tool definition is removed.
+- **Limits.**
+  - Plan mode and wide research live in execution-core's agentic ("Utfør") runs. The composer disables that mode for subscription-backed models (`DashboardComposer.tsx`, the `subscriptionBacked()` check), so neither can be exercised live on the ChatGPT-subscription route. They are covered by unit and end-to-end tests. A live check would have to run on the paid balance, which the owner has ruled out for testing.
+  - Mail-to-task stays off until a Postmark account and domain exist and `MailTaskPipeline` is built.
+- **Verification (2026-09-29).**
+  - **Frontend:** the full run passes, 292 files and 2,912 tests, with typecheck clean and lint at 0 errors.
+  - **Rust:**
+    - model-gateway: 1,569 library tests and 86 of 86 end-to-end;
+    - session-core: 418;
+    - execution-core: 640;
+    - gateway BFF: 589;
+    - Data Plane v2 compiles.
+  - **Go and auth-core:** user-core, the Model Plane Go services and integration-corev2's auth, controlplane and mailtask packages all pass. auth-core passes 110 tests and its deployment contract 30 of 30.
+- **Not proven, needs an agentic run to settle:**
+  1. **Wide-research child runs.**
+     - After a real fan-out, check the execution-core log for `could not register the delegated child run`.
+     - If it appears, session-core refuses execution-core's org-scoped service token for child runs, and the cards will not show until that identity question is decided.
+  2. **Plan-gate SQL.** The compare-and-swap, supersede and reorder queries have never run against a real Postgres. The plan grants and pointer live in memory per gateway process. The `ApprovalProof.plan_id` binding is deferred.
+  3. **Neither can be run on your Terra route.** If you want them proven live, the only route is a Do-mode run on the paid balance.
+- **Pre-existing failures, not caused by this work, left alone:**
+  - `integration-corev2/internal/api/codex_subscription_direct_test.go` doesn't compile (unused `access`, undefined `auth`), and `TestDirectBodyGoldenRoles` fails. Both belong to the codex-subscription work. The test file is not part of the image build.
+  - `auth-core` `membership-authority.controller.spec.ts` has 7 argument-count errors, from a controller parameter added earlier.
+  - Two execution-core warnings, and one test that hangs on Windows.
+
+**Follow-up latency, findings 2026-09-29.** Details are in `patch-revision-2026-09-29/`.
+- **Wasted retry.** A follow-up in journey 03 took 75.6 s because the subscription route's emulated tool call failed to parse. The double-encoded `arguments` string was invalid, and a second full attempt cost another 32 s. A tolerant parser for unambiguous JSON damage, with content-free diagnostics, is built and in the running image. No `invalid subscription tool arguments` event occurred in the 20-take Q16h series.
+- **Full-document draft.** Every follow-up regenerated the whole document (about 32 s of about 44 s). For a dated-post revision the gateway already discards everything except the target section, so the model is now asked for only that section (`dated_post_section_only`). **Measured live (Q16h, 20 takes of journey 03):** 20/20 follow-ups came back as a section (about 530 characters against a 3.6 KB document), follow-up p50 26.7 s, p95 41.6 s, none over 70 s, against p95 76 s before. It is on by default in compose since 2026-09-29. The critic advised against a full `patch_artifact` tool for now, and nothing here changes that.
+- **Sub-section loss, found and fixed.** The splice replaces the target post's whole section, so a section sent without its `### Kilder` note deleted the note: 3 of 3 takes in Q16h that had one. The author is now told the post's sub-headings, a section without them is refused and repaired, and the journey-03 oracle fails such a take. **Proven live in Q16j (2026-09-30):** 4 of 4 takes with a note kept it, follow-up p95 57.2 s, 20/20 adopted. The notice alone was enough, so the refusal's live path is covered only by the offline tests (unit, mocked chain, 50 recorded revisions). See the [readiness note](../product-recordings/evidence/PRODUCT_RECORDING_READINESS_2026-09-24.md).
+- **Review tail and the two timeouts (2026-09-30).** With section-only on, journey 04 still timed out twice (about 110 s) on one 7-segment table batch that spent 4,000 to 4,600 reasoning tokens. Finer review batches (one per four segments or 1,400 bytes, at most four at once) and a 120 s source check are now on by default. A live A/B on real plans found identical verdict quality, and the final four-journey pass met every owner target on one build: first-turn p95 43.0 to 105.7 s, follow-up p95 45.3 to 57.7 s, no timeout in 84 takes, at least 20 samples per turn, and the durability, recovery, viewport, Q08 and trust gates passed. Four takes failed on model behaviour. See the [readiness note](../product-recordings/evidence/PRODUCT_RECORDING_READINESS_2026-09-24.md), sections Q16k and Q16L.
+- **Long-document visibility bug.** For documents of 8,001–24,000 characters the model saw a truncated view that the gateway counted as a complete read, so a whole-document rewrite could silently drop the tail. It doesn't affect the four journeys. It is fixed in the same stage.
+
+**Still open:**
+1. The "Se resultater" link in the schedules panel needs a `cron_fires.thread_id` link and a runs endpoint.
+2. The `MailTaskPipeline` implementation, after the Postmark account exists.
+3. Whether to widen section-only revisions beyond the recognised dated-post phrasing (decision D2 in the patch design; recommended: not before the measurements).
 
 **Wave 2 (close Copilot, Manus and Perplexity gaps; moderate):**
 - "Schedule this" from chat, reusing the cron API;

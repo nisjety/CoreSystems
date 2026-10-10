@@ -13,7 +13,7 @@ const footerColumns = [
 	],
 	[
 		{ href: "/trust", label: "Tillitssenter ↗" },
-		{ href: "/trust", label: "Datasuverenitet ↗" },
+		{ href: "/trust", label: "Dataflyt og underleverandører ↗" },
 		{ href: "/trust", label: "Sikkerhet ↗" },
 	],
 	[
@@ -85,7 +85,7 @@ export function Footer() {
 								<br />
 								Distribuert team
 								<br />
-								Data i EU/EØS (Sweden Central)
+								Standardmodeller satt til Sweden Central (EU/EØS)
 							</p>
 						</div>
 
