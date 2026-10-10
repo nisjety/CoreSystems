@@ -329,6 +329,117 @@ mod auth_security_tests {
         let validation = strict_validation_for(ISSUER, AUDIENCE).expect("strict validation");
         assert!(decode_verified_claims(&token, &decoding, &validation).is_err());
     }
+
+    /// A real verified context: a signed RS256 token that carries `zdr`, decoded
+    /// by the strict verifier and turned into an `AuthContext` by the same
+    /// function the admission guard uses — no hand-built context, no stubbed claim.
+    fn verified_extension(
+        keys: &(EncodingKey, DecodingKey),
+        zdr: bool,
+    ) -> axum::extract::Extension<crate::authz::AuthContext> {
+        let mut claims = valid_claims();
+        claims["zdr"] = json!(zdr);
+        let token = signed_token(&claims, &keys.0);
+        let validation = strict_validation_for(ISSUER, AUDIENCE).expect("strict validation");
+        let verified = decode_verified_claims(&token, &keys.1, &validation)
+            .expect("signed boolean posture is valid");
+        assert_eq!(
+            verified.zdr, zdr,
+            "verified posture must reach the HTTP boundary"
+        );
+        let ctx = auth_context_from_verified_claims(&verified, "request-1".into(), token);
+        axum::extract::Extension(ctx)
+    }
+
+    fn cache_search_body(zdr_mode: Option<&str>) -> super::SemanticCacheSearchRequest {
+        let mut body = json!({
+            "org_id": "org-a",
+            "model": "synthetic-model",
+            "prompt": "synthetic boundary prompt",
+        });
+        if let Some(mode) = zdr_mode {
+            body["zdr_mode"] = json!(mode);
+        }
+        serde_json::from_value(body).expect("valid semantic-cache search request")
+    }
+
+    fn cache_store_body(zdr_mode: Option<&str>) -> super::SemanticCacheStoreRequest {
+        let mut body = json!({
+            "org_id": "org-a",
+            "model": "synthetic-model",
+            "prompt": "synthetic boundary prompt",
+            "response": "synthetic cached response",
+        });
+        if let Some(mode) = zdr_mode {
+            body["zdr_mode"] = json!(mode);
+        }
+        serde_json::from_value(body).expect("valid semantic-cache store request")
+    }
+
+    /// The semantic-cache handlers once derived the embedding egress flag from the
+    /// request body alone, so a caller whose signed token carried `zdr=true` but
+    /// whose body omitted `zdr_mode` (or sent `disabled`) still had its prompt
+    /// embedded by the cloud embedder. The flag handed to the cache must be
+    /// restrictive for every body shape under a signed `zdr=true`.
+    #[test]
+    fn semantic_cache_embedding_egress_is_floored_by_the_signed_zdr_claim() {
+        let zdr_ctx = verified_extension(&keys(), true);
+
+        for mode in [None, Some("disabled"), Some("ephemeral"), Some("reject")] {
+            let search = cache_search_body(mode);
+            let store = cache_store_body(mode);
+            assert!(
+                super::effective_restrictive_zdr(Some(&zdr_ctx), search.zdr_mode),
+                "search must not embed a signed-zdr caller's prompt (body zdr_mode {mode:?})"
+            );
+            assert!(
+                super::effective_restrictive_zdr(Some(&zdr_ctx), store.zdr_mode),
+                "store must not embed a signed-zdr caller's prompt (body zdr_mode {mode:?})"
+            );
+        }
+
+        // The body alone is permissive for these shapes, so it is the signed
+        // claim — not the request — that makes the flag restrictive.
+        for mode in [None, Some("disabled")] {
+            assert!(
+                !super::is_restrictive_zdr(cache_search_body(mode).zdr_mode),
+                "precondition: body zdr_mode {mode:?} alone does not restrict egress"
+            );
+        }
+    }
+
+    /// The floor only tightens: a signed `zdr=false` leaves the caller's own
+    /// posture in force (the cache stays usable for non-ZDR callers) while the
+    /// body can still opt in to a stricter posture, and with no verified context
+    /// only the body speaks — the same `Option` pattern as `/v1/retrieve`.
+    #[test]
+    fn semantic_cache_zdr_floor_only_tightens_the_requested_posture() {
+        let open_ctx = verified_extension(&keys(), false);
+
+        for auth in [Some(&open_ctx), None] {
+            let who = if auth.is_some() {
+                "signed zdr=false"
+            } else {
+                "no verified context"
+            };
+            assert!(
+                !super::effective_restrictive_zdr(auth, None),
+                "{who}: an omitted zdr_mode must leave the cache usable"
+            );
+            assert!(
+                !super::effective_restrictive_zdr(auth, Some(ZdrMode::Disabled)),
+                "{who}: a disabled zdr_mode must leave the cache usable"
+            );
+            assert!(
+                super::effective_restrictive_zdr(auth, Some(ZdrMode::Ephemeral)),
+                "{who}: the body may still opt in to ephemeral"
+            );
+            assert!(
+                super::effective_restrictive_zdr(auth, Some(ZdrMode::Reject)),
+                "{who}: the body may still opt in to reject"
+            );
+        }
+    }
 }
 
 pub fn router_with_metrics(
@@ -584,7 +695,9 @@ struct SemanticCacheSearchRequest {
     prompt: String,
     /// Optional ZDR session mode (e.g. "ephemeral"). When ephemeral, the prompt
     /// is ZDR content and its embedding must not egress to a retaining provider;
-    /// the embed layer's egress guard enforces it. Defaults to non-ZDR.
+    /// the embed layer's egress guard enforces it. Defaults to non-ZDR, but this
+    /// is only the requested posture: a signed `zdr=true` claim floors it (see
+    /// `effective_restrictive_zdr`).
     #[serde(default)]
     zdr_mode: Option<ZdrMode>,
     /// Authorization scope that partitions the cache (PR-A). The Model Plane
@@ -615,6 +728,26 @@ fn is_restrictive_zdr(zdr_mode: Option<ZdrMode>) -> bool {
     zdr_mode.unwrap_or_default().restricts_egress()
 }
 
+/// Embedding-egress flag for the semantic cache: `true` means the prompt is ZDR
+/// content whose embedding must not reach a retaining provider, so the cache
+/// stays out of the request entirely (no search, no store, no embed call).
+///
+/// The body's `zdr_mode` is only the caller's *requested* posture. The verified,
+/// signed `zdr` claim is the floor: it is merged through
+/// `AuthContext::effective_zdr_mode` exactly as `/v1/retrieve` does in
+/// `apply_to_request`, so a body that omits `zdr_mode` (or sends `disabled`) can
+/// never relax a signed `zdr=true`, while a signed `zdr=false` still lets the
+/// body opt in to a stricter posture. With no verified context there is no claim
+/// to floor from and only the body speaks — the same `Option` pattern as
+/// `/v1/retrieve`; the admission guard injects a context on every route these
+/// handlers are mounted under.
+fn effective_restrictive_zdr(
+    auth: Option<&axum::extract::Extension<crate::authz::AuthContext>>,
+    requested: Option<ZdrMode>,
+) -> bool {
+    is_restrictive_zdr(auth.map_or(requested, |ctx| ctx.effective_zdr_mode(requested)))
+}
+
 async fn semantic_cache_search(
     State(pipeline): State<AppState>,
     auth: Option<axum::extract::Extension<crate::authz::AuthContext>>,
@@ -622,6 +755,9 @@ async fn semantic_cache_search(
 ) -> Result<impl IntoResponse, AppError> {
     // GAP-1: pin org from the verified principal — never trust the body org_id.
     pin_request_org(auth.as_ref(), &mut req.org_id)?;
+    // ZDR floor: the signed `zdr` claim tightens the body's `zdr_mode`, so an
+    // omitted/`disabled` body cannot send a ZDR caller's prompt to the embedder.
+    let zdr = effective_restrictive_zdr(auth.as_ref(), req.zdr_mode);
     let hit = crate::cache::semantic::search(
         &pipeline.qdrant,
         &pipeline.embedder,
@@ -629,7 +765,7 @@ async fn semantic_cache_search(
         &req.org_id,
         &req.model,
         &req.prompt,
-        is_restrictive_zdr(req.zdr_mode),
+        zdr,
         req.scope_key.as_deref(),
     )
     .await?;
@@ -650,6 +786,9 @@ async fn semantic_cache_store(
 ) -> Result<impl IntoResponse, AppError> {
     // GAP-1: pin org from the verified principal — never trust the body org_id.
     pin_request_org(auth.as_ref(), &mut req.org_id)?;
+    // ZDR floor: the signed `zdr` claim tightens the body's `zdr_mode`, so an
+    // omitted/`disabled` body cannot send a ZDR caller's prompt to the embedder.
+    let zdr = effective_restrictive_zdr(auth.as_ref(), req.zdr_mode);
     crate::cache::semantic::store(
         &pipeline.qdrant,
         &pipeline.embedder,
@@ -658,7 +797,7 @@ async fn semantic_cache_store(
         &req.model,
         &req.prompt,
         &req.response,
-        is_restrictive_zdr(req.zdr_mode),
+        zdr,
         req.scope_key.as_deref(),
     )
     .await?;
@@ -2737,20 +2876,35 @@ mod auxiliary_security_tests {
 
     #[test]
     fn space_decision_is_never_silently_ignored_by_an_auxiliary_endpoint() {
+        // Every path whose handler resolves the verified Space decision and
+        // constrains its own read to it. Listing a path in
+        // `space_decision_is_enforced_for_path` is a claim about its handler, so
+        // the two lists here move together with it.
         for path in [
             "/v1/retrieve",
             "/v1/retrieve/hybrid",
+            "/v1/retrieve/sources",
+            "/v1/retrieve/freshness",
+            "/v1/retrieve/wiki",
             "/v1/knowledge/search",
+            "/v1/knowledge/sources",
+            "/v1/knowledge/freshness",
+            "/v1/knowledge/wiki",
+            "/v1/knowledge/space-sources",
         ] {
             assert!(
                 space_decision_is_enforced_for_path(path),
                 "{path} has the verified Space-scope handler"
             );
         }
+        // No Space predicate yet: the boundary refuses a decision for these.
         for path in [
             "/v1/retrieve/graph",
-            "/v1/retrieve/wiki",
+            "/v1/retrieve/timeline",
+            "/v1/retrieve/contradictions",
             "/v1/retrieve/pack",
+            "/v1/retrieve/chunks",
+            "/v1/retrieve/compare",
             "/v1/knowledge/graph",
             "/v1/context/preload",
         ] {
