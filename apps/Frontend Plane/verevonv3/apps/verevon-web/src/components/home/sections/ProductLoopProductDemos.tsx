@@ -26,12 +26,11 @@ function ProductLoopVideo({ media }: { media: ProductLoopMedia }) {
 	useEffect(() => {
 		const video = videoRef.current;
 		if (!video) return;
-		const preference = window.matchMedia("(prefers-reduced-motion: reduce)");
 		const layer = video.closest<HTMLElement>("[data-product-loop-layer]");
 		let isVisible = false;
 		const update = () => {
 			const layerVisible = !layer || (getComputedStyle(layer).visibility !== "hidden" && Number(getComputedStyle(layer).opacity) > 0.1);
-			if (isVisible && layerVisible && !preference.matches && !document.hidden) {
+			if (isVisible && layerVisible && !document.hidden) {
 				void video.play().catch(() => {});
 			} else video.pause();
 		};
@@ -39,9 +38,8 @@ function ProductLoopVideo({ media }: { media: ProductLoopMedia }) {
 		const layerObserver = new MutationObserver(update);
 		observer.observe(video);
 		if (layer) layerObserver.observe(layer, { attributes: true, attributeFilter: ["style"] });
-		preference.addEventListener("change", update);
 		document.addEventListener("visibilitychange", update);
-		return () => { observer.disconnect(); layerObserver.disconnect(); preference.removeEventListener("change", update); document.removeEventListener("visibilitychange", update); video.pause(); };
+		return () => { observer.disconnect(); layerObserver.disconnect(); document.removeEventListener("visibilitychange", update); video.pause(); };
 	}, []);
 	return <video ref={videoRef} aria-label={media.alt} className="h-full w-full object-contain" muted playsInline poster={media.poster} preload="none" style={{ objectPosition: media.objectPosition ?? "center" }}><source src={media.src} type="video/mp4" /></video>;
 }
