@@ -29,17 +29,30 @@ function ResponsiveDemo({ step, desktop = false }: { step: 1 | 2 | 3; desktop?: 
 	const root = useRef<HTMLDivElement>(null);
 	const [enabled, setEnabled] = useState(false);
 	useEffect(() => {
-		const media = window.matchMedia("(min-width: 900px) and (prefers-reduced-motion: no-preference)");
-		let near = false;
-		const update = () => setEnabled(media.matches === desktop && (near || !desktop));
-		const observer = new IntersectionObserver(([entry]) => {
-			if (entry.isIntersecting) { near = true; update(); observer.disconnect(); }
+		const host = root.current?.closest<HTMLElement>(
+			desktop ? "[data-product-loop-frame]" : "[data-product-loop-mobile-fallback]",
+		);
+		// Mount only the layout visible at this viewport width.
+		let near = typeof IntersectionObserver === "undefined";
+		const update = () => setEnabled(
+			Boolean(host && getComputedStyle(host).display !== "none" && (near || !desktop)),
+		);
+		const observer = typeof IntersectionObserver === "undefined" ? null : new IntersectionObserver(([entry]) => {
+			if (entry.isIntersecting) { near = true; update(); observer?.disconnect(); }
 		}, { rootMargin: "1000px" });
 		const section = root.current?.closest("[data-product-loop]");
-		if (section) observer.observe(section);
+		if (section) observer?.observe(section);
+		const resizeObserver = host && typeof ResizeObserver !== "undefined"
+			? new ResizeObserver(update)
+			: null;
+		if (host) resizeObserver?.observe(host);
 		update();
-		media.addEventListener("change", update);
-		return () => { observer.disconnect(); media.removeEventListener("change", update); };
+		window.addEventListener("resize", update);
+		return () => {
+			observer?.disconnect();
+			resizeObserver?.disconnect();
+			window.removeEventListener("resize", update);
+		};
 	}, [desktop]);
 	return <div ref={root} className="h-full w-full">{enabled && <ProductDemo embeddedStep={step} />}</div>;
 }
@@ -233,7 +246,7 @@ function ProductLoopMobileFallback() {
 
 	return (
 		<div
-			className="hidden max-[899px]:grid max-[899px]:gap-12 motion-reduce:grid motion-reduce:gap-12"
+			className="hidden max-[899px]:grid max-[899px]:gap-12"
 			data-product-loop-mobile-fallback=""
 		>
 			<div className="grid gap-6 border-t border-verevon-j-text/10 pt-6">
@@ -298,7 +311,7 @@ export function ProductLoopSection({ recordings = [] }: { recordings?: ProductRe
 		const matchMedia = gsap.matchMedia();
 		const context = gsap.context(() => {
 			matchMedia.add(
-				"(min-width: 900px) and (prefers-reduced-motion: no-preference)",
+				"(min-width: 900px)",
 				() => {
 					const viewport = section.querySelector<HTMLElement>(
 						"[data-product-loop-viewport]",
@@ -813,7 +826,7 @@ export function ProductLoopSection({ recordings = [] }: { recordings?: ProductRe
 	return (
 		<section
 			aria-labelledby="product-loop-title"
-			className="relative isolate z-[5] -mt-[clamp(48px,6vh,88px)] h-[396svh] overflow-visible bg-background text-verevon-j-text motion-reduce:mt-0 motion-reduce:h-auto max-[899px]:mt-0 max-[899px]:h-auto max-[899px]:overflow-hidden"
+			className="relative isolate z-[5] -mt-[clamp(48px,6vh,88px)] h-[396svh] overflow-visible bg-background text-verevon-j-text max-[899px]:mt-0 max-[899px]:h-auto max-[899px]:overflow-hidden"
 			data-product-loop
 			id="flyt"
 			ref={sectionRef}
@@ -827,13 +840,13 @@ export function ProductLoopSection({ recordings = [] }: { recordings?: ProductRe
 
 			<div className="sticky top-0 min-h-svh overflow-hidden max-[899px]:relative max-[899px]:min-h-0" data-product-loop-pin="">
 				<div
-					className="relative min-h-svh overflow-hidden motion-reduce:min-h-0 motion-reduce:px-[var(--verevon-page-pad)] motion-reduce:py-24 max-[899px]:grid max-[899px]:min-h-0 max-[899px]:gap-12 max-[899px]:px-[var(--verevon-page-pad)] max-[899px]:py-24"
+					className="relative min-h-svh overflow-hidden max-[899px]:grid max-[899px]:min-h-0 max-[899px]:gap-12 max-[899px]:px-[var(--verevon-page-pad)] max-[899px]:py-24"
 					data-product-loop-viewport=""
 				>
 					<div aria-hidden="true" className="absolute inset-0 bg-[radial-gradient(circle_at_78%_28%,rgba(238,122,80,0.08),transparent_27%),radial-gradient(circle_at_14%_74%,rgba(41,64,74,0.07),transparent_28%),linear-gradient(180deg,rgba(248,248,247,0),rgba(248,248,247,0.78))]" />
 
 					<div
-						className="absolute left-[var(--verevon-edge)] top-[clamp(112px,15vh,176px)] z-40 max-w-[min(46.8vw,630px)] text-left max-[899px]:hidden motion-reduce:hidden"
+						className="absolute left-[var(--verevon-edge)] top-[clamp(112px,15vh,176px)] z-40 max-w-[min(46.8vw,630px)] text-left max-[899px]:hidden"
 						data-product-loop-header=""
 					>
 						<h2 className="verevon-home-heading max-w-[10ch] text-verevon-j-text text-balance">
@@ -845,11 +858,11 @@ export function ProductLoopSection({ recordings = [] }: { recordings?: ProductRe
 					    as the entrance plays, right as the loop circle takes over. */}
 						<div
 							aria-hidden="true"
-							className="pointer-events-none absolute left-1/2 top-0 z-10 h-[clamp(48px,9vh,140px)] w-px -translate-x-1/2 bg-[linear-gradient(180deg,transparent,color-mix(in_srgb,var(--verevon-j-text)_28%,transparent)_60%,transparent)] max-[899px]:hidden motion-reduce:hidden"
+							className="pointer-events-none absolute left-1/2 top-0 z-10 h-[clamp(48px,9vh,140px)] w-px -translate-x-1/2 bg-[linear-gradient(180deg,transparent,color-mix(in_srgb,var(--verevon-j-text)_28%,transparent)_60%,transparent)] max-[899px]:hidden"
 							data-product-loop-connector=""
 						/>
 
-					<div aria-hidden="true" className="absolute inset-0 max-[899px]:hidden motion-reduce:hidden">
+					<div aria-hidden="true" className="absolute inset-0 max-[899px]:hidden">
 						<div className="absolute left-[22%] top-[24%] h-[clamp(260px,34vh,390px)] w-[calc((100%-2*var(--verevon-edge))*0.48)]" data-product-loop-frame-marker="" />
 						<div className="absolute right-[var(--verevon-edge)] top-[clamp(142px,17vh,206px)] h-[clamp(344px,47vh,560px)] w-[calc((100%-2*var(--verevon-edge))*0.53)]" data-product-loop-frame-marker="" />
 						<div className="absolute left-[var(--verevon-edge)] top-[clamp(222px,34vh,350px)] h-[clamp(260px,34vh,390px)] w-[clamp(520px,43vw,760px)]" data-product-loop-frame-marker="" />
@@ -866,12 +879,12 @@ export function ProductLoopSection({ recordings = [] }: { recordings?: ProductRe
 					    each stage (see the circle tweens in the timeline above). */}
 					<div
 						aria-hidden="true"
-						className="pointer-events-none absolute left-1/2 top-1/2 z-10 aspect-square rounded-full border-2 border-verevon-j-text/25 max-[899px]:hidden motion-reduce:hidden"
+						className="pointer-events-none absolute left-1/2 top-1/2 z-10 aspect-square rounded-full border-2 border-verevon-j-text/25 max-[899px]:hidden"
 						data-product-loop-circle=""
 					/>
 
 					<div
-						className="absolute left-0 top-0 z-20 h-full w-full overflow-hidden rounded-[24px] border border-verevon-j-text/8 bg-[#f8f8f7] shadow-[0_28px_96px_rgba(23,23,23,0.1)] max-[899px]:hidden motion-reduce:hidden"
+						className="absolute left-0 top-0 z-20 h-full w-full overflow-hidden rounded-[24px] border border-verevon-j-text/8 bg-[#f8f8f7] shadow-[0_28px_96px_rgba(23,23,23,0.1)] max-[899px]:hidden"
 						data-product-loop-frame=""
 					>
 						<div className="relative h-full w-full">
@@ -886,7 +899,7 @@ export function ProductLoopSection({ recordings = [] }: { recordings?: ProductRe
 						<LoopFrameChrome />
 					</div>
 
-					<div className="absolute z-30 max-[899px]:hidden motion-reduce:hidden" data-product-loop-copy="">
+					<div className="absolute z-30 max-[899px]:hidden" data-product-loop-copy="">
 						{copyStages.map((stage, index) => (
 							<LoopCopyPanel index={index} key={stage.step} stage={stage} />
 						))}

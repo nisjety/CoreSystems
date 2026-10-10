@@ -28,9 +28,6 @@
   .embedded .output { width: 100%; min-width: 0; border-top: 1px solid #e6e5dc; }
   .embedded .outputContent { max-height: 560px; }
 }
-@media (min-width: 900px) and (prefers-reduced-motion: reduce) {
-  .embedded.page { height: 700px; }
-}
 .page {
   min-height: 100vh;
   padding: 64px 24px 30px;
@@ -1778,13 +1775,5 @@
   .reviewFooter button {
     white-space: nowrap;
     padding: 0;
-  }
-}
-@media (prefers-reduced-motion: reduce) {
-  .page *,
-  .page *::before,
-  .page *::after {
-    transition: none !important;
-    scroll-behavior: auto !important;
   }
 }
