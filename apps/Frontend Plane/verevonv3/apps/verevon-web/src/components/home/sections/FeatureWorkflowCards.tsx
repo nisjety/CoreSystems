@@ -54,7 +54,7 @@ export function ModuleWorkflowCard({
 			data-feature-index={index}
 			{...(animated ? { "data-feature-card": "" } : {})}
 		>
-			<div className="flex h-[15px] select-none items-center justify-between font-protokoll text-[10px] leading-none text-verevon-j-text/42">
+			<div className="flex h-[15px] select-none items-center justify-between font-geist text-[10px] leading-none text-verevon-j-text/42">
 				<span className="tracking-[0.18em]">{card.area}</span>
 				<span>{`0${index + 1} / ${String(total).padStart(2, "0")}`}</span>
 			</div>
@@ -63,15 +63,15 @@ export function ModuleWorkflowCard({
 				<ModuleVisual card={card} />
 			</div>
 
-			<h3 className="m-0 max-w-full break-words font-arbeit text-[clamp(1.18rem,1.42vw,1.6rem)] font-light leading-[1.06] tracking-[-0.05em] text-verevon-j-text" id={titleId}>
+			<h3 className="m-0 max-w-full break-words font-manrope text-[clamp(1.18rem,1.42vw,1.6rem)] font-light leading-[1.06] tracking-[-0.05em] text-verevon-j-text" id={titleId}>
 				{card.title}
 			</h3>
 
-			<p className="m-0 font-protokoll text-[clamp(0.82rem,0.82vw,0.94rem)] font-light leading-[1.45] text-verevon-text-muted/90">
+			<p className="m-0 font-geist text-[clamp(0.82rem,0.82vw,0.94rem)] font-light leading-[1.45] text-verevon-text-muted/90">
 				{card.text}
 			</p>
 
-			<a className="mt-auto inline-flex w-fit items-center gap-2 font-protokoll text-[0.78rem] font-light text-verevon-j-text/68 underline decoration-verevon-j-text/22 underline-offset-4 transition-colors hover:text-verevon-coral focus-visible:text-verevon-coral focus-visible:outline-none" href={card.href}>
+			<a className="mt-auto inline-flex w-fit items-center gap-2 font-geist text-[0.78rem] font-light text-verevon-j-text/68 underline decoration-verevon-j-text/22 underline-offset-4 transition-colors hover:text-verevon-coral focus-visible:text-verevon-coral focus-visible:outline-none" href={card.href}>
 				{card.linkLabel}
 				<span aria-hidden="true">→</span>
 			</a>
@@ -103,7 +103,7 @@ export function FeatureWorkflowCard({
 			href={card.href}
 			{...(animated ? { "data-feature-card": "" } : {})}
 		>
-			<div className="flex h-[15px] select-none items-center justify-between font-protokoll text-[10px] leading-none text-verevon-j-text/42">
+			<div className="flex h-[15px] select-none items-center justify-between font-geist text-[10px] leading-none text-verevon-j-text/42">
 				<span className="size-[5px] rounded-full bg-verevon-coral/70" />
 				<span>{`0${index + 1} / ${String(total).padStart(2, "0")}`}</span>
 			</div>
@@ -112,11 +112,11 @@ export function FeatureWorkflowCard({
 				<FeatureCardFilm kind={card.film} />
 			</div>
 
-			<h3 className="m-0 max-w-full break-words font-arbeit text-[clamp(1.25rem,1.55vw,1.75rem)] font-light leading-[1.04] tracking-[-0.055em] text-verevon-j-text">
+			<h3 className="m-0 max-w-full break-words font-manrope text-[clamp(1.25rem,1.55vw,1.75rem)] font-light leading-[1.04] tracking-[-0.055em] text-verevon-j-text">
 				{card.title}
 			</h3>
 
-			<p className="m-0 font-protokoll text-[9px] font-medium uppercase tracking-[0.17em] text-verevon-coral/80">
+			<p className="m-0 font-geist text-[9px] font-medium uppercase tracking-[0.17em] text-verevon-coral/80">
 				{card.kicker}
 			</p>
 
@@ -126,7 +126,7 @@ export function FeatureWorkflowCard({
 			>
 				{card.features.map((feature) => (
 					<span
-						className="rounded-full border border-verevon-j-text/10 px-2 py-1 font-protokoll text-[9px] uppercase tracking-[0.12em] text-verevon-j-text/58"
+						className="rounded-full border border-verevon-j-text/10 px-2 py-1 font-geist text-[9px] uppercase tracking-[0.12em] text-verevon-j-text/58"
 						key={feature}
 					>
 						{feature}
@@ -134,7 +134,7 @@ export function FeatureWorkflowCard({
 				))}
 			</div>
 
-			<p className="m-0 font-protokoll text-[clamp(0.82rem,0.82vw,0.94rem)] font-light leading-[1.4] text-verevon-text-muted/90">
+			<p className="m-0 font-geist text-[clamp(0.82rem,0.82vw,0.94rem)] font-light leading-[1.4] text-verevon-text-muted/90">
 				{card.text}
 			</p>
 		</a>

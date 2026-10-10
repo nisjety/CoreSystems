@@ -124,11 +124,11 @@ export function MenuModal({ onClose, open }: MenuModalProps) {
 				{menuItems.map((item, index) => {
 					const itemContent = (
 						<>
-							<span className="font-arbeit text-[0.98rem] text-[color-mix(in_srgb,var(--verevon-j-text)_72%,transparent)]">
+							<span className="font-manrope text-[0.98rem] text-[color-mix(in_srgb,var(--verevon-j-text)_72%,transparent)]">
 								{item.number}
 							</span>
 
-							<strong className="font-arbeit text-[2.2rem] font-normal leading-none text-[color-mix(in_srgb,var(--verevon-j-text)_78%,transparent)] max-[760px]:text-[1.72rem]">
+							<strong className="font-manrope text-[2.2rem] font-normal leading-none text-[color-mix(in_srgb,var(--verevon-j-text)_78%,transparent)] max-[760px]:text-[1.72rem]">
 								{item.label}
 							</strong>
 						</>
@@ -155,7 +155,7 @@ export function MenuModal({ onClose, open }: MenuModalProps) {
 
 			<div
 				aria-label="Kontaktlenker"
-				className="grid shrink-0 justify-items-start gap-2 font-arbeit text-base text-[color-mix(in_srgb,var(--verevon-j-text)_74%,transparent)]"
+				className="grid shrink-0 justify-items-start gap-2 font-manrope text-base text-[color-mix(in_srgb,var(--verevon-j-text)_74%,transparent)]"
 			>
 				<span>Kontakt:</span>
 

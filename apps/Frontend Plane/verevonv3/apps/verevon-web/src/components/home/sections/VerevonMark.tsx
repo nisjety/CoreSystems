@@ -1,11 +1,15 @@
+import type { CSSProperties } from "react";
+
 type VerevonMarkProps = {
 	className?: string;
+	style?: CSSProperties;
 	strokeWidth?: number;
 	variant?: "filled" | "outline";
 };
 
 export function VerevonMark({
 	className = "",
+	style,
 	strokeWidth = 1.8,
 	variant = "filled",
 }: VerevonMarkProps) {
@@ -15,6 +19,7 @@ export function VerevonMark({
 		<svg
 			aria-hidden="true"
 			className={className}
+			style={style}
 			viewBox="0 0 120 120"
 			xmlns="http://www.w3.org/2000/svg"
 			fill={isOutline ? "none" : "currentColor"}

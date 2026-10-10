@@ -5,7 +5,6 @@ import { useLayoutEffect, useRef } from "react";
 import { gsap } from "gsap";
 import { ScrollTrigger } from "gsap/ScrollTrigger";
 import { ArrowButton } from "@/components/ui/ArrowButton";
-import { Eyebrow } from "@/components/ui/SectionHeading";
 import { SignalPathLayer } from "@/components/home/sections/SignalPathLayer";
 import { cn } from "@/lib/utils";
 
@@ -455,13 +454,6 @@ export function ProblemSection() {
         aria-hidden="true"
         className="pointer-events-none absolute left-[-10%] top-0 z-[2] h-40 w-[120%] bg-gradient-to-b from-background to-transparent"
       />
-
-      <Eyebrow
-        className="absolute left-[var(--verevon-edge)] top-[clamp(28px,4vh,48px)] z-20 max-[760px]:left-[var(--verevon-page-pad)] max-[760px]:top-5"
-        marker
-      >
-        01 / Problemet
-      </Eyebrow>
 
       <div className="relative z-10 flex w-full flex-col items-center justify-center gap-[clamp(1.6rem,2vw,2rem)] px-[var(--verevon-edge)] max-[760px]:px-[var(--verevon-page-pad)]">
         <h2

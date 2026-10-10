@@ -7,7 +7,7 @@ export function TrustHeader() {
 			<div className="mx-auto flex h-[72px] max-w-[1680px] items-center justify-between px-[var(--verevon-page-pad)]">
 				<Link
 					aria-label="Verevon forside"
-					className="font-arbeit text-base font-normal uppercase leading-none tracking-[0.44em] text-verevon-j-text"
+					className="font-manrope text-base font-normal uppercase leading-none tracking-[0.44em] text-verevon-j-text"
 					href="/"
 				>
 					Verevon
@@ -15,7 +15,7 @@ export function TrustHeader() {
 
 				<nav
 					aria-label="Trust Center-navigasjon"
-					className="flex items-center gap-[clamp(20px,3vw,42px)] font-protokoll text-[0.78rem] font-medium uppercase tracking-[0.06em] text-verevon-j-text/60"
+					className="flex items-center gap-[clamp(20px,3vw,42px)] font-geist text-[0.78rem] font-medium uppercase tracking-[0.06em] text-verevon-j-text/60"
 				>
 					<a className="transition-colors hover:text-verevon-j-text" href="#kontroller">
 						Kontroller

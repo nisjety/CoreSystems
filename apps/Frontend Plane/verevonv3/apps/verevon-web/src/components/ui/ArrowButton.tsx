@@ -58,7 +58,7 @@ export function ArrowButtonLabel({
 	return (
 		<span
 			className={[
-				"relative inline-flex w-fit items-center overflow-hidden px-px py-1 font-protokoll text-[clamp(0.94rem,0.95vw,1.08rem)] font-light leading-none opacity-80 transition-all duration-500 group-hover:opacity-100",
+				"relative inline-flex w-fit items-center overflow-hidden px-px py-1 font-geist text-[clamp(0.94rem,0.95vw,1.08rem)] font-light leading-none opacity-80 transition-all duration-500 group-hover:opacity-100",
 				className,
 			]
 				.filter(Boolean)

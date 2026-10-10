@@ -1,8 +1,11 @@
 "use client";
 
-import { useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import dynamic from "next/dynamic";
 import { gsap } from "gsap";
 import { ScrollTrigger } from "gsap/ScrollTrigger";
+import type { ProductRecording } from "@/lib/product-recording-contract";
+import { ProductRecordingPlayer } from "./ProductRecordingPlayer";
 import type { VerevonComposerMode } from "@/components/ui/VerevonComposerPreview";
 import { FeatureComposerCycle } from "./FeatureComposerCycle";
 import { getProductLoopComposerCopy } from "./product-loop-composer-copy";
@@ -19,9 +22,45 @@ import {
 
 gsap.registerPlugin(ScrollTrigger);
 
+const ProductDemo = dynamic(() => import("../product-demo/product-demo").then((module) => module.ProductDemo), { ssr: false });
+
+// Only mount the demo layout that can actually be seen. Keep its state while scrolling.
+function ResponsiveDemo({ step, desktop = false }: { step: 1 | 2 | 3; desktop?: boolean }) {
+	const root = useRef<HTMLDivElement>(null);
+	const [enabled, setEnabled] = useState(false);
+	useEffect(() => {
+		const host = root.current?.closest<HTMLElement>(
+			desktop ? "[data-product-loop-frame]" : "[data-product-loop-mobile-fallback]",
+		);
+		// Mount only the layout visible at this viewport width.
+		let near = typeof IntersectionObserver === "undefined";
+		const update = () => setEnabled(
+			Boolean(host && getComputedStyle(host).display !== "none" && (near || !desktop)),
+		);
+		const observer = typeof IntersectionObserver === "undefined" ? null : new IntersectionObserver(([entry]) => {
+			if (entry.isIntersecting) { near = true; update(); observer?.disconnect(); }
+		}, { rootMargin: "1000px" });
+		const section = root.current?.closest("[data-product-loop]");
+		if (section) observer?.observe(section);
+		const resizeObserver = host && typeof ResizeObserver !== "undefined"
+			? new ResizeObserver(update)
+			: null;
+		if (host) resizeObserver?.observe(host);
+		update();
+		window.addEventListener("resize", update);
+		return () => {
+			observer?.disconnect();
+			resizeObserver?.disconnect();
+			window.removeEventListener("resize", update);
+		};
+	}, [desktop]);
+	return <div ref={root} className="h-full w-full">{enabled && <ProductDemo embeddedStep={step} />}</div>;
+}
+
 type LoopStage = {
 	body?: string;
-	kind: "composer" | "media";
+	kind: "composer" | "media" | "demo";
+	demoStep?: 1 | 2 | 3;
 	media?: ProductLoopMedia;
 	state: string;
 	step: string;
@@ -40,49 +79,16 @@ const loopStages: LoopStage[] = [
 			objectPosition: "center 50%",
 		},
 	},
-	{
-		step: "02",
-		state: "Arbeid",
-		title: "Verevon gjør spørsmålet om til arbeidet.",
-		body: "En oppgave blir til en arbeidsflyt med riktig kontekst, foreslåtte steg og et grunnlag teamet kan følge.",
-		kind: "media",
-		media: {
-			kind: "image",
-			src: "/verevon-mood/operator-calm-warm.jpg",
-			alt: "En person arbeider rolig gjennom en oppgave i et lyst, dempet rom.",
-			objectPosition: "center 42%",
-		},
-	},
-	{
-		step: "03",
-		state: "Kontroll",
-		title: "Risikable handlinger stopper hos dere.",
-		body: "Se kilde, policy, konsekvens og neste steg i samme flyt. Dere godkjenner før noe sendes, endres eller publiseres.",
-		kind: "media",
-		media: {
-			kind: "image",
-			src: "/hand-with-strings-of-text.jpg",
-			alt: "Hender som arbeider med tekst og informasjon i et lyst rom.",
-			objectPosition: "center 48%",
-		},
-	},
-	{
-		step: "04",
-		state: "Composer",
-		kind: "composer",
-	},
-	{
-		step: "05",
-		state: "Plattform",
-		kind: "media",
-		media: {
-			kind: "video",
-			src: "/verevon-product-shots/product-showcase.mp4",
-			poster: "/verevon-product-shots/product-showcase-poster.jpg",
-			alt: "Verevons faktiske norske composer med et eksempelspørsmål om beslutninger, kilder og neste steg.",
-			objectPosition: "center 42%",
-		},
-	},
+	{ step: "02", state: "Plan", kind: "demo", demoStep: 1,
+        title: "Fra spørsmål til en gjennomførbar plan.",
+        body: "Se ansvar, avhengigheter og frister samlet i et planutkast." },
+    { step: "03", state: "Undersøk", kind: "demo", demoStep: 2,
+        title: "Finn blokkeringen. Se løsningen.",
+        body: "Følg undersøkelsen fra kilder og logg til en endring som kan testes." },
+    { step: "04", state: "Følg opp", kind: "demo", demoStep: 3,
+        title: "Hold arbeidet i gang.",
+        body: "Se status, gjennomgå kundeutkastet og velg hvordan arbeidet skal følges opp." },
+    { step: "05", state: "Composer", kind: "composer" },
 ];
 
 const copyStages = loopStages.slice(1, 3);
@@ -100,7 +106,7 @@ function LoopComposerContent() {
 						className="verevon-eyebrow text-verevon-coral"
 						data-product-loop-composer-label=""
 					>
-						{activeComposerCopy.label}
+						{activeComposerCopy.label.replace("04 /", "05 /")}
 					</p>
 					<h2 className="verevon-home-heading mt-4 min-h-[1.8em] max-w-[14ch] text-verevon-j-text text-balance">
 						<span
@@ -119,7 +125,7 @@ function LoopComposerContent() {
 					/>
 				</div>
 				<p
-					className="mt-[clamp(22px,4vh,44px)] min-h-[3em] max-w-[42rem] shrink-0 font-protokoll text-[clamp(0.96rem,1.04vw,1.16rem)] font-light leading-[1.48] text-verevon-text-muted"
+					className="mt-[clamp(22px,4vh,44px)] min-h-[3em] max-w-[42rem] shrink-0 font-geist text-[clamp(0.96rem,1.04vw,1.16rem)] font-light leading-[1.48] text-verevon-text-muted"
 					data-product-loop-composer-copy=""
 				>
 					<span
@@ -144,17 +150,19 @@ function LoopMediaLayer({
 }) {
 	return (
 		<div
-			aria-hidden="true"
 			className="absolute inset-0 overflow-hidden"
 			data-product-loop-layer={index}
 			style={{
 				clipPath: index === 0 ? "inset(0% 0% 0%)" : "inset(0% 0% 100%)",
 				opacity: index === 0 ? 1 : 0,
+                visibility: index === 0 ? "visible" : "hidden",
 			}}
 		>
 			{stage.kind === "composer" ? (
 				<LoopComposerContent />
-			) : stage.media ? (
+			) : stage.kind === "demo" ? (
+				<LoopDemoPreview step={stage.demoStep!} />
+            ) : stage.media ? (
 				<ProductLoopMediaContent media={stage.media} priority={index === 0} />
 			) : null}
 			{stage.kind === "media" ? (
@@ -162,6 +170,34 @@ function LoopMediaLayer({
 			) : null}
 		</div>
 	);
+}
+
+function LoopDemoPreview({ step }: { step: 1 | 2 | 3 }) {
+	const previewRef = useRef<HTMLDivElement>(null);
+	const contentRef = useRef<HTMLDivElement>(null);
+	useLayoutEffect(() => {
+		const preview = previewRef.current;
+		const content = contentRef.current;
+		if (!preview || !content) return;
+		const resize = (width: number, height: number) => {
+			const scale = Math.min(1, width / 1100);
+			if (!scale) return;
+			const nextWidth = `${width / scale}px`;
+			const nextHeight = `${height / scale}px`;
+			if (content.style.width !== nextWidth) content.style.width = nextWidth;
+			if (content.style.height !== nextHeight) content.style.height = nextHeight;
+			content.style.transform = `scale(${scale})`;
+		};
+		const observer = new ResizeObserver(([entry]) => resize(entry.contentRect.width, entry.contentRect.height));
+		observer.observe(preview);
+		resize(preview.clientWidth, preview.clientHeight);
+		return () => observer.disconnect();
+	}, []);
+	return <div ref={previewRef} className="h-full w-full overflow-hidden">
+		<div ref={contentRef} className="h-full w-full origin-top-left">
+			<ResponsiveDemo step={step} desktop />
+		</div>
+	</div>;
 }
 
 function LoopCopyPanel({ index, stage }: { index: number; stage: LoopStage }) {
@@ -181,7 +217,7 @@ function LoopCopyPanel({ index, stage }: { index: number; stage: LoopStage }) {
 			<h2 className="verevon-home-heading m-0 max-w-[10.5ch] text-verevon-j-text text-balance">
 				{stage.title}
 			</h2>
-			<p className="mt-[clamp(22px,2.4vw,36px)] max-w-[416px] font-protokoll text-[clamp(1rem,1.02vw,1.18rem)] font-light leading-[1.5] text-verevon-text-muted text-pretty">
+			<p className="mt-[clamp(22px,2.4vw,36px)] max-w-[416px] font-geist text-[clamp(1rem,1.02vw,1.18rem)] font-light leading-[1.5] text-verevon-text-muted text-pretty">
 				{stage.body}
 			</p>
 		</div>
@@ -214,7 +250,6 @@ function ProductLoopMobileFallback() {
 			data-product-loop-mobile-fallback=""
 		>
 			<div className="grid gap-6 border-t border-verevon-j-text/10 pt-6">
-				<p className="verevon-eyebrow text-verevon-coral">03 / Produkt</p>
 				<h2 className="verevon-home-heading max-w-[11ch] text-verevon-j-text">
 					Fra kunnskap til handling
 				</h2>
@@ -226,67 +261,57 @@ function ProductLoopMobileFallback() {
 				</div>
 			</div>
 
-			{copyStages.map((stage) => (
+			{loopStages.slice(1, 4).map((stage) => (
 				<article className="grid gap-5 border-t border-verevon-j-text/10 pt-6" key={stage.step}>
 					<p className="verevon-eyebrow text-verevon-coral">
 						{stage.step} / {stage.state}
 					</p>
-					<h3 className="m-0 max-w-[11ch] font-arbeit text-[clamp(2.5rem,12vw,4.6rem)] font-light leading-[0.94] tracking-[-0.065em] text-verevon-j-text text-balance">
+					<h3 className="m-0 max-w-[11ch] font-manrope text-[clamp(2.5rem,12vw,4.6rem)] font-light leading-[0.94] tracking-[-0.065em] text-verevon-j-text text-balance">
 						{stage.title}
 					</h3>
-					<p className="max-w-[34rem] font-protokoll text-[1rem] font-light leading-[1.48] text-verevon-text-muted">
+					<p className="max-w-[34rem] font-geist text-[1rem] font-light leading-[1.48] text-verevon-text-muted">
 						{stage.body}
 					</p>
-					<div className="relative aspect-[1.18] overflow-hidden rounded-[20px] bg-[#f4f3f0]">
-						<ProductLoopMediaContent media={stage.media as ProductLoopMedia} />
-					</div>
-					{stage.step === "02" ? <FeatureComposerCycle id="product-mobile-composer" /> : null}
+                    <div className="relative overflow-hidden rounded-[20px]">
+                        <ResponsiveDemo step={stage.demoStep!} />
+                    </div>
 				</article>
 			))}
 
 			<div className="grid gap-6 border-t border-verevon-j-text/10 pt-6">
 				<p className="verevon-eyebrow text-verevon-coral">
-					{activeComposerCopy.label}
+					{activeComposerCopy.label.replace("04 /", "05 /")}
 				</p>
-				<h3 className="max-w-[14ch] font-arbeit text-[clamp(2.5rem,11vw,4.4rem)] font-light leading-[0.92] tracking-[-0.065em] text-verevon-j-text">
+				<h3 className="max-w-[14ch] font-manrope text-[clamp(2.5rem,11vw,4.4rem)] font-light leading-[0.92] tracking-[-0.065em] text-verevon-j-text">
 					{activeComposerCopy.title}
 				</h3>
 				<FeatureComposerCycle
 					id="product-mobile-composer-control"
 					onModeChange={setActiveComposerMode}
 				/>
-				<p className="max-w-[34rem] font-protokoll text-[1rem] font-light leading-[1.48] text-verevon-text-muted">
+				<p className="max-w-[34rem] font-geist text-[1rem] font-light leading-[1.48] text-verevon-text-muted">
 					{activeComposerCopy.body}
 				</p>
 			</div>
 
-			<div className="grid gap-6 border-t border-verevon-j-text/10 pt-6">
-				<p className="verevon-eyebrow text-verevon-coral">05 / Plattform</p>
-				<p className="max-w-[20ch] font-arbeit text-[clamp(2.4rem,11vw,4.4rem)] font-light leading-[0.92] tracking-[-0.065em] text-verevon-j-text">
-					Én oversikt over arbeidet som skjer.
-				</p>
-				<div className="relative aspect-[1.18] overflow-hidden rounded-[20px] bg-[#f8f8f7]">
-					<ProductLoopMediaContent media={loopStages[4].media as ProductLoopMedia} />
-				</div>
-			</div>
 		</div>
 	);
 }
 
-export function ProductLoopSection() {
+export function ProductLoopSection({ recordings = [] }: { recordings?: ProductRecording[] }) {
 	const sectionRef = useRef<HTMLElement>(null);
 
 	useLayoutEffect(() => {
 		const section = sectionRef.current;
 
-		if (!section) {
+		if (!section || recordings.length > 0) {
 			return;
 		}
 
 		const matchMedia = gsap.matchMedia();
 		const context = gsap.context(() => {
 			matchMedia.add(
-				"(min-width: 900px) and (prefers-reduced-motion: no-preference)",
+				"(min-width: 900px)",
 				() => {
 					const viewport = section.querySelector<HTMLElement>(
 						"[data-product-loop-viewport]",
@@ -351,8 +376,9 @@ export function ProductLoopSection() {
 						return;
 					}
 
-					const boxFromMarker = (marker: HTMLElement) => {
-						const viewportRect = viewport.getBoundingClientRect();
+					let viewportRect = viewport.getBoundingClientRect();
+                    const markerBoxes = new Map<HTMLElement, {height: number; left: number; top: number; width: number}>();
+                    const measureMarker = (marker: HTMLElement) => {
 						const markerRect = marker.getBoundingClientRect();
 
 						return {
@@ -362,6 +388,13 @@ export function ProductLoopSection() {
 							width: markerRect.width,
 						};
 					};
+
+                    const measureGeometry = () => {
+                        viewportRect = viewport.getBoundingClientRect();
+                        [...frameMarkers, ...copyMarkers].forEach(marker => markerBoxes.set(marker, measureMarker(marker)));
+                    };
+                    measureGeometry();
+                    const boxFromMarker = (marker: HTMLElement) => markerBoxes.get(marker)!;
 
 					const sectionTop = () =>
 						section.getBoundingClientRect().top + window.scrollY;
@@ -380,7 +413,6 @@ export function ProductLoopSection() {
 						width: () => placeFrame(index).width,
 					});
 					const entranceStartFrame = () => {
-						const viewportRect = viewport.getBoundingClientRect();
 						const markerRect = placeFrame(0);
 
 						return {
@@ -395,7 +427,7 @@ export function ProductLoopSection() {
 						width: () => entranceStartFrame().width,
 					});
 					const contentFrame = () => {
-						const rect = viewport.getBoundingClientRect();
+						const rect = viewportRect;
 						const inset = Math.max(Math.min(rect.width * 0.077, 100), (rect.width - 1512) / 2);
 						const width = rect.width - inset * 2;
 						const height = Math.min(rect.height - 160, width * 0.625);
@@ -431,10 +463,10 @@ export function ProductLoopSection() {
 						xRatio: number,
 						yRatio: number,
 					) => ({
-						height: () => viewport.getBoundingClientRect().height * sizeRatio,
-						width: () => viewport.getBoundingClientRect().height * sizeRatio,
-						x: () => viewport.getBoundingClientRect().width * xRatio,
-						y: () => viewport.getBoundingClientRect().height * yRatio,
+						height: () => viewportRect.height * sizeRatio,
+						width: () => viewportRect.height * sizeRatio,
+						x: () => viewportRect.width * xRatio,
+						y: () => viewportRect.height * yRatio,
 					});
 
 					let timeline: gsap.core.Timeline | null = null;
@@ -481,9 +513,20 @@ export function ProductLoopSection() {
 						});
 						gsap.set(composerCopy, { autoAlpha: 1, y: 0 });
 
+						let previousActive = -1;
 						const loopTimeline = gsap.timeline({
 							defaults: { ease: "none" },
 							paused: true,
+                            onUpdate() {
+                                const time = this.time();
+                                const active = time < 1.16 ? 0 : time < 2.06 ? 1 : time < 2.96 ? 2 : time < 3.96 ? 3 : 4;
+                                if (active === previousActive) return;
+                                previousActive = active;
+                                layers.forEach((layer, index) => {
+                                    layer.inert = index !== active;
+                                    layer.setAttribute("aria-hidden", String(index !== active));
+                                });
+                            },
 						});
 						timeline = loopTimeline;
 
@@ -497,7 +540,7 @@ export function ProductLoopSection() {
 							loopTimeline
 								.to(
 									frame,
-									{ ...dynamicFramePosition(frameIndex), duration: 0.52 },
+									{ ...(frameIndex === 4 ? dynamicFullFrame() : dynamicFramePosition(frameIndex)), duration: 0.52 },
 									at,
 								)
 								.to(
@@ -638,98 +681,19 @@ export function ProductLoopSection() {
 							2.72,
 						);
 
-						loopTimeline
-							.to(
-								frame,
-								{ ...dynamicFramePosition(3), duration: 0.58 },
-								2.72,
-							)
-							.to(
-								layers[2],
-								{
-									autoAlpha: 0,
-									clipPath: "inset(100% 0% 0%)",
-									duration: 0.3,
-								},
-								2.84,
-							)
-							.to(
-								layers[3],
-								{
-									autoAlpha: 1,
-									clipPath: "inset(0% 0% 0%)",
-									duration: 0.42,
-								},
-								2.9,
-							)
-							.to(
-								copyFloat,
-								{
-									autoAlpha: 0,
-									pointerEvents: "none",
-									y: -24,
-									duration: 0.24,
-								},
-								2.78,
-							)
-							.to(chrome, { autoAlpha: 0, duration: 0.18 }, 2.88)
-							.to(
-								frame,
-								{
-									backgroundColor: "transparent",
-									borderColor: "transparent",
-									borderRadius: "0px",
-									boxShadow: "none",
-									duration: 0.34,
-								},
-								2.78,
-							)
-							// Let the composer stand on the page itself, with its copy
-							// and controls above the loop ring until the platform crossfade.
-							.to(
-								circle,
-								{
-									...dynamicCircleGeometry(1.3, 0, 0),
-									autoAlpha: 0,
-									duration: 0.6,
-									rotation: 180,
-								},
-								3.72,
-							)
-							.to(
-								frame,
-								{
-									...dynamicFullFrame(),
-									backgroundColor: "#f8f8f7",
-									borderColor: "rgba(31,31,29,0.08)",
-									borderRadius: "24px",
-									boxShadow: "0 28px 96px rgba(23,23,23,0.1)",
-									duration: 0.82,
-									ease: "power3.out",
-								},
-								3.72,
-							)
-							.to(
-								layers[3],
-								{
-									autoAlpha: 0,
-									clipPath: "inset(100% 0% 0%)",
-									duration: 0.32,
-								},
-								3.86,
-							)
-							.to(
-								layers[4],
-								{
-									autoAlpha: 1,
-									clipPath: "inset(0% 0% 0%)",
-									duration: 0.46,
-								},
-								3.9,
-							);
+                        transition(2, 3, 4, null, 2.72);
+                        transition(3, 4, 3, null, 3.72);
+                        loopTimeline
+                            .to(chrome, { autoAlpha: 0, duration: 0.18 }, 3.88)
+                            .to(circle, { ...dynamicCircleGeometry(1.05, 0, 0.05), rotation: 180, duration: 0.6 }, 3.72)
+                            .to(frame, { backgroundColor: "transparent", borderColor: "transparent", borderRadius: "0px", boxShadow: "none", duration: 0.6 }, 3.72)
+                            .to({}, { duration: 0.22 }, 4.32);
+
 					}, section);
 
-					let progressFrame: number | null = null;
+					let disposed = false;
+					let cachedTop = sectionTop();
+					let cachedRange = sectionScrollRange();
 					let progressTween: gsap.core.Tween | null = null;
 					let refreshFrame: number | null = null;
 					let refreshTimeout: number | null = null;
@@ -744,9 +708,9 @@ export function ProductLoopSection() {
 								window.innerHeight * PRODUCT_LOOP_ENTRANCE_VIEWPORT_RATIO,
 							entranceTimelineDuration:
 								PRODUCT_LOOP_ENTRANCE_TIMELINE_DURATION,
-							pinnedScrollRange: sectionScrollRange(),
+							pinnedScrollRange: cachedRange,
 							scrollY: window.scrollY,
-							sectionTop: sectionTop(),
+							sectionTop: cachedTop,
 							timelineDuration: timeline.duration(),
 						});
 
@@ -765,18 +729,8 @@ export function ProductLoopSection() {
 						});
 					};
 
-					const queueProgress = () => {
-						if (progressFrame !== null) {
-							return;
-						}
-
-						progressFrame = window.requestAnimationFrame(() => {
-							progressFrame = null;
-							updateProgress();
-						});
-					};
-
-						const queueRefresh = () => {
+					const queueRefresh = () => {
+                            if (disposed) return;
 							if (refreshFrame !== null) {
 								return;
 							}
@@ -788,7 +742,6 @@ export function ProductLoopSection() {
 								}
 								refreshTimeout = window.setTimeout(() => {
 									refreshTimeout = null;
-									timeline?.invalidate();
 									ScrollTrigger.refresh();
 									updateProgress(true);
 								}, 80);
@@ -797,8 +750,17 @@ export function ProductLoopSection() {
 
 						const scrollDriver = ScrollTrigger.create({
 							trigger: section,
-							start: "top top",
-							end: () => `+=${sectionScrollRange()}`,
+							start: () => `top ${window.innerHeight * PRODUCT_LOOP_ENTRANCE_VIEWPORT_RATIO}px`,
+                            end: "bottom bottom",
+                            onRefreshInit: () => {
+                                progressTween?.kill();
+                                // Rewind before invalidating so new tween starts never capture a later card.
+                                timeline?.progress(0);
+                                measureGeometry();
+                                cachedTop = sectionTop();
+                                cachedRange = sectionScrollRange();
+                                timeline?.invalidate();
+                            },
 							onRefresh: () => updateProgress(true),
 							onUpdate: () => updateProgress(),
 						});
@@ -817,29 +779,25 @@ export function ProductLoopSection() {
 						);
 						refreshTargets.forEach((target) => refreshObserver?.observe(target));
 
-						const settleRefreshTimers = [0, 250, 750, 1500].map((delay) =>
-							window.setTimeout(queueRefresh, delay),
-						);
+						queueRefresh();
 						document.fonts?.ready.then(queueRefresh);
 						window.addEventListener("load", queueRefresh, { once: true });
-					window.addEventListener("scroll", queueProgress, { passive: true });
+
 					window.addEventListener("resize", queueRefresh);
 					updateProgress(true);
 
 					return () => {
-						if (progressFrame !== null) {
-							window.cancelAnimationFrame(progressFrame);
-						}
+						disposed = true;
 						if (refreshFrame !== null) {
 							window.cancelAnimationFrame(refreshFrame);
 						}
 						if (refreshTimeout !== null) {
 							window.clearTimeout(refreshTimeout);
 						}
-						settleRefreshTimers.forEach((timer) => window.clearTimeout(timer));
+
 						progressTween?.kill();
 						scrollDriver.kill();
-						window.removeEventListener("scroll", queueProgress);
+
 						window.removeEventListener("resize", queueRefresh);
 						window.removeEventListener("load", queueRefresh);
 						refreshObserver?.disconnect();
@@ -853,7 +811,14 @@ export function ProductLoopSection() {
 			matchMedia.revert();
 			context.revert();
 		};
-	}, []);
+	}, [recordings.length]);
+
+	if (recordings.length > 0) {
+		return <section id="produkt" ref={sectionRef} aria-labelledby="product-recordings-title" className="bg-background px-[var(--verevon-page-pad)] py-24 text-verevon-j-text">
+			<div className="mx-auto mb-10 max-w-6xl"><h2 id="product-recordings-title" className="verevon-home-heading max-w-[14ch]">Fra kunnskap til handling.</h2></div>
+			<ProductRecordingPlayer recordings={recordings} />
+		</section>;
+	}
 
 	// The first 0.78 timeline units now play before the sticky boundary. Reducing
 	// the pinned height by the same proportion preserves the approved pacing of
@@ -884,8 +849,7 @@ export function ProductLoopSection() {
 						className="absolute left-[var(--verevon-edge)] top-[clamp(112px,15vh,176px)] z-40 max-w-[min(46.8vw,630px)] text-left max-[899px]:hidden"
 						data-product-loop-header=""
 					>
-						<p className="verevon-eyebrow text-verevon-coral">03 / Produkt</p>
-						<h2 className="verevon-home-heading mt-4 max-w-[10ch] text-verevon-j-text text-balance">
+						<h2 className="verevon-home-heading max-w-[10ch] text-verevon-j-text text-balance">
 							Fra kunnskap til handling
 						</h2>
 					</div>

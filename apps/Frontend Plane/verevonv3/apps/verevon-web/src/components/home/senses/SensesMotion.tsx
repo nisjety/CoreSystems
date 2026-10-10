@@ -4,6 +4,7 @@ import dynamic from "next/dynamic";
 import { useEffect, useRef, useState } from "react";
 import type { CSSProperties } from "react";
 import type { SenseKind } from "./SenseScene";
+import { VerevonMark } from "../sections/VerevonMark";
 import styles from "./SensesMotion.module.css";
 
 const descriptions: Record<SenseKind, string> = {
@@ -23,7 +24,7 @@ function backgroundStyle(backgroundSrc: string): CSSProperties {
 }
 
 function Placeholder({ backgroundSrc }: { backgroundSrc: string }) {
-	return <div aria-hidden="true"><div className={styles.placeholder} style={backgroundStyle(backgroundSrc)}><span>V</span></div><div className={styles.transport} /></div>;
+	return <div aria-hidden="true"><div className={styles.placeholder} style={backgroundStyle(backgroundSrc)}><span><VerevonMark style={{ display: "block", width: "100%", height: "100%", transform: "scale(1.3)" }} /></span></div><div className={styles.transport} /></div>;
 }
 
 const defaultBackground = "/verevon-senses/glass-study.webp";

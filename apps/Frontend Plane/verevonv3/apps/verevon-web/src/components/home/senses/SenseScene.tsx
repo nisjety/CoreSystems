@@ -1,6 +1,7 @@
 import type { CSSProperties, ReactNode } from "react";
 import { AbsoluteFill, Easing, interpolate, Sequence, staticFile, useCurrentFrame } from "remotion";
 import { ArrowUpRight, Check, FileText, Mail, MousePointer2, Search, ShieldCheck, Sparkles } from "lucide-react";
+import { VerevonMark } from "../sections/VerevonMark";
 
 export type SenseKind = "delegate" | "learn" | "oversee";
 export const SENSE_DURATION = 540;
@@ -19,7 +20,7 @@ const panel: CSSProperties = { background: paper, border: "1px solid rgba(255,25
 const row: CSSProperties = { display: "flex", alignItems: "center", gap: 14 };
 
 function Brand({ small = false }: { small?: boolean }) {
-	return <span style={{ display: "inline-grid", placeItems: "center", flexShrink: 0, width: small ? 30 : 44, height: small ? 30 : 44, background: ink, color: "#fffefa", borderRadius: small ? 8 : 12, fontSize: small ? 19 : 26, fontWeight: 400 }}>V</span>;
+	return <span style={{ display: "inline-grid", placeItems: "center", flexShrink: 0, width: small ? 30 : 44, height: small ? 30 : 44, background: ink, color: paper, borderRadius: small ? 8 : 12 }}><VerevonMark style={{ display: "block", width: "100%", height: "100%", transform: "scale(1.3)" }} /></span>;
 }
 
 function Chip({ children, done = false }: { children: ReactNode; done?: boolean }) {
@@ -51,8 +52,8 @@ function Stage({ kind, children }: { kind: SenseKind; children: ReactNode }) {
 	const frame = useCurrentFrame();
 	const dark = kind === "oversee";
 	const loopVeil = interpolate(frame, [0, 12, 516, 539], [0, 1, 1, 0], clamp);
-	return <AbsoluteFill style={{ fontFamily: "Arbeit, Arial, sans-serif", fontSize: 23, color: ink, fontWeight: 400, lineHeight: 1.3, fontVariantNumeric: "tabular-nums", background: "transparent", overflow: "hidden" }}>
-		<style>{`@font-face{font-family:Arbeit;src:url('${staticFile("fonts/arbeit-pro-book/arbeit-pro-book.woff")}') format('woff');font-weight:400}@font-face{font-family:Protokoll;src:url('${staticFile("fonts/protokoll-medium/ProtokollMedium-Web.woff2")}') format('woff2');font-weight:500}`}</style>
+	return <AbsoluteFill style={{ fontFamily: "Manrope, Arial, sans-serif", fontSize: 23, color: ink, fontWeight: 400, lineHeight: 1.3, fontVariantNumeric: "tabular-nums", background: "transparent", overflow: "hidden" }}>
+		<style>{`@font-face{font-family:Manrope;src:url('${staticFile("fonts/manrope/manrope-latin-variable.woff2")}') format('woff2');font-weight:200 800}@font-face{font-family:Geist;src:url('${staticFile("fonts/geist/geist-variable.woff2")}') format('woff2');font-weight:100 900}`}</style>
 		<AbsoluteFill style={{ background: dark ? "linear-gradient(145deg,#19252299,transparent 60%,#1c1b1a99)" : "linear-gradient(150deg,#ffffff26,transparent 70%,#c3916726)" }} />
 		{/* A single signal travels around the working area, then resolves into the result. */}
 		<svg viewBox="0 0 720 640" style={{ position: "absolute", inset: 0, width: "100%", height: "100%", opacity: dark ? .4 : .27 }} fill="none">

@@ -1,0 +1,100 @@
+{
+  "schemaVersion": 1,
+  "preparedOn": "2026-09-14",
+  "locale": "nb-NO",
+  "demoCompany": "Fjordform (fiktiv demobedrift)",
+  "sectionTitle": "Fra kunnskap til handling.",
+  "tasks": [
+    {
+      "id": "01-kundesvar",
+      "label": "Kundesvar",
+      "title": "Fra henvendelse til svarutkast.",
+      "inputs": [
+        "01-kundesvar/kildepakke.md"
+      ],
+      "result": "Svarutkast og intern kildeoversikt",
+      "primary": true,
+      "prompt": "01-kundesvar/prompt.txt",
+      "direction": "01-kundesvar/REGI.md",
+      "status": "prepared",
+      "runVerified": false,
+      "media": {
+        "raw": null,
+        "video": null,
+        "poster": null,
+        "captions": null
+      },
+      "plannedVideoFilename": "01-kundesvar.mp4",
+      "pasteBundle": "01-kundesvar/samtalestart.txt"
+    },
+    {
+      "id": "02-salgsrapport",
+      "label": "Salgsanalyse",
+      "title": "Fra tall til prioriteringer.",
+      "inputs": [
+        "02-salgsrapport/kildepakke.md",
+        "02-salgsrapport/salg.csv"
+      ],
+      "result": "Ukesrapport med tall, hypoteser og oppfølginger",
+      "primary": false,
+      "prompt": "02-salgsrapport/prompt.txt",
+      "direction": "02-salgsrapport/REGI.md",
+      "status": "prepared",
+      "runVerified": false,
+      "media": {
+        "raw": null,
+        "video": null,
+        "poster": null,
+        "captions": null
+      },
+      "plannedVideoFilename": "02-salgsrapport.mp4",
+      "pasteBundle": "02-salgsrapport/samtalestart.txt"
+    },
+    {
+      "id": "03-kampanje",
+      "label": "Kampanje",
+      "title": "Fra brief til innhold.",
+      "inputs": [
+        "03-kampanje/kildepakke.md"
+      ],
+      "result": "Tre LinkedIn-utkast og én e-post",
+      "primary": false,
+      "prompt": "03-kampanje/prompt.txt",
+      "direction": "03-kampanje/REGI.md",
+      "status": "prepared",
+      "runVerified": false,
+      "media": {
+        "raw": null,
+        "video": null,
+        "poster": null,
+        "captions": null
+      },
+      "plannedVideoFilename": "03-kampanje.mp4",
+      "pasteBundle": "03-kampanje/samtalestart.txt"
+    },
+    {
+      "id": "04-prosjektplan",
+      "label": "Prosjektplan",
+      "title": "Fra møte til fremdrift.",
+      "inputs": [
+        "04-prosjektplan/kildepakke.md"
+      ],
+      "result": "Prosjektplan og risikooversikt",
+      "primary": false,
+      "prompt": "04-prosjektplan/prompt.txt",
+      "direction": "04-prosjektplan/REGI.md",
+      "status": "prepared",
+      "runVerified": false,
+      "media": {
+        "raw": null,
+        "video": null,
+        "poster": null,
+        "captions": null
+      },
+      "plannedVideoFilename": "04-prosjektplan.mp4",
+      "pasteBundle": "04-prosjektplan/samtalestart.txt"
+    }
+  ],
+  "snapshotStatus": "historical-not-current-approval",
+  "supersededBy": "../../product-recordings/manifest.json"
+}

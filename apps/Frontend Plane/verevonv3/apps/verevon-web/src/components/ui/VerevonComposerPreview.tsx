@@ -161,7 +161,7 @@ function SearchBarPreview({
 			</button>
 			<div className="flex h-12 min-w-0 flex-1 items-center gap-2 rounded-full border border-black/[0.07] bg-white/90 px-4 shadow-[0_10px_28px_rgba(0,0,0,0.07)] backdrop-blur-sm">
 				<Search className="size-4 shrink-0 text-[#9A9188]" />
-				<span className="min-w-0 flex-1 truncate text-left font-protokoll text-[14px] font-medium text-[#777]">
+				<span className="min-w-0 flex-1 truncate text-left font-geist text-[14px] font-medium text-[#777]">
 					{prompt}
 				</span>
 				<button
@@ -187,19 +187,19 @@ function CrawlBarPreview({
 	return (
 		<div aria-hidden="true" className={cn("grid w-full gap-3", className)} data-composer-mode="crawl">
 			<div className="flex w-fit items-center gap-1 rounded-full bg-black/[0.04] p-[3px]">
-				<span className="inline-flex items-center gap-1.5 rounded-full px-3 py-[5px] font-protokoll text-[12.5px] font-semibold leading-none text-[#999]">
+				<span className="inline-flex items-center gap-1.5 rounded-full px-3 py-[5px] font-geist text-[12.5px] font-semibold leading-none text-[#999]">
 					<Link2 className="size-3.5" /> Lenke
 				</span>
-				<span className="inline-flex items-center gap-1.5 rounded-full bg-white px-3 py-[5px] font-protokoll text-[12.5px] font-semibold leading-none text-[#222] shadow-sm">
+				<span className="inline-flex items-center gap-1.5 rounded-full bg-white px-3 py-[5px] font-geist text-[12.5px] font-semibold leading-none text-[#222] shadow-sm">
 					<Globe2 className="size-3.5" /> Crawl
 				</span>
-				<span className="inline-flex items-center gap-1.5 rounded-full px-3 py-[5px] font-protokoll text-[12.5px] font-semibold leading-none text-[#999]">
+				<span className="inline-flex items-center gap-1.5 rounded-full px-3 py-[5px] font-geist text-[12.5px] font-semibold leading-none text-[#999]">
 					<ShoppingBag className="size-3.5" /> Produkter
 				</span>
 			</div>
 			<div className="flex min-w-0 items-center gap-2 rounded-[18px] border border-black/[0.07] bg-white/90 px-3 py-[10px] shadow-[0_10px_28px_rgba(0,0,0,0.07)] backdrop-blur-sm">
 				<Link2 className="size-4 shrink-0 text-[#9A9188]" />
-				<span className="min-w-0 flex-1 truncate text-left font-protokoll text-[14px] font-medium text-[#777]">
+				<span className="min-w-0 flex-1 truncate text-left font-geist text-[14px] font-medium text-[#777]">
 					{prompt}
 				</span>
 				<button
@@ -234,7 +234,7 @@ function ChatComposerPreview({
 				<div className="flex min-w-0 items-center gap-2">
 					<button
 						aria-label="Valgt modell"
-						className="flex h-[38px] max-w-[150px] items-center gap-2 rounded-[12px] border border-black/[0.07] bg-white/90 px-3 font-protokoll text-[13px] font-medium text-[#333] shadow-[0_8px_20px_rgba(0,0,0,0.05)] backdrop-blur-sm"
+						className="flex h-[38px] max-w-[150px] items-center gap-2 rounded-[12px] border border-black/[0.07] bg-white/90 px-3 font-geist text-[13px] font-medium text-[#333] shadow-[0_8px_20px_rgba(0,0,0,0.05)] backdrop-blur-sm"
 						tabIndex={-1}
 						type="button"
 					>
@@ -244,7 +244,7 @@ function ChatComposerPreview({
 					</button>
 
 					<button
-						className="flex h-[38px] items-center gap-2 rounded-[12px] bg-[#2a2a2a] px-3 font-protokoll text-[13px] font-medium text-white shadow-md"
+						className="flex h-[38px] items-center gap-2 rounded-[12px] bg-[#2a2a2a] px-3 font-geist text-[13px] font-medium text-white shadow-md"
 						tabIndex={-1}
 						type="button"
 					>
@@ -274,7 +274,7 @@ function ChatComposerPreview({
 					</label>
 					<div
 						aria-label={prompt}
-						className="min-h-[80px] w-full resize-none bg-transparent px-1 font-protokoll text-[15px] font-medium leading-[21px] text-[#1a1a1a] outline-none"
+						className="min-h-[80px] w-full resize-none bg-transparent px-1 font-geist text-[15px] font-medium leading-[21px] text-[#1a1a1a] outline-none"
 						id={id}
 						role="textbox"
 					>
@@ -294,7 +294,7 @@ function ChatComposerPreview({
 					<div className="flex min-w-0 flex-wrap items-center gap-1.5">
 						<button
 							aria-label="Legg til filer"
-							className="group flex items-center gap-1.5 font-protokoll text-[13px] text-[#888]"
+							className="group flex items-center gap-1.5 font-geist text-[13px] text-[#888]"
 							tabIndex={-1}
 							type="button"
 						>
@@ -314,7 +314,7 @@ function ChatComposerPreview({
 							aria-label="Søk på nettet"
 							aria-pressed={webSearchActive}
 							className={cn(
-								"flex items-center gap-1.5 rounded-lg px-3 py-[7px] font-protokoll text-[13px] font-medium transition-colors",
+								"flex items-center gap-1.5 rounded-lg px-3 py-[7px] font-geist text-[13px] font-medium transition-colors",
 								webSearchActive ? "bg-blue-50 text-blue-600" : "text-[#777]",
 							)}
 							tabIndex={-1}
@@ -325,7 +325,7 @@ function ChatComposerPreview({
 						</button>
 						<button
 							aria-label="Generer bilde"
-							className="hidden items-center gap-1.5 rounded-lg px-3 py-[7px] font-protokoll text-[13px] font-medium text-[#777] md:flex"
+							className="hidden items-center gap-1.5 rounded-lg px-3 py-[7px] font-geist text-[13px] font-medium text-[#777] md:flex"
 							tabIndex={-1}
 							type="button"
 						>
