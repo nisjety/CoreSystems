@@ -254,6 +254,10 @@ const routes: Route[] = [
   { match: /^\/api\/v1\/orgs\/[^/]+\/gdpr\/deletion\/status$/, respond: () => fjordformGdprStatus },
   { match: /^\/api\/v1\/ownership\/status$/, respond: () => ({ configured: true, ok: true }) },
   { match: /^\/api\/v1\/notifications/, respond: () => ({ notifications: [], unreadCount: 0 }) },
+  // The start screen asks for open inbox conversations next to the alerts
+  // (EmptyChatState's context-aware suggestions). The films carry their own
+  // suggestion card (suggestions.ts), so the real feature gets none here.
+  { match: /^\/api\/v1\/inbox\/conversations(\?.*)?$/, respond: () => ({ tickets: [], total: 0 }) },
   { match: /^\/api\/v1\/home-updates/, respond: () => ({ updates: [], items: [] }) },
   // ── Composer ─────────────────────────────────────────────────────────────
   { match: /^\/api\/v1\/models$/, respond: () => fjordformModels },

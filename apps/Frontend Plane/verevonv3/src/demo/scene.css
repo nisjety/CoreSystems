@@ -86,3 +86,104 @@ html.verevon-scene *:focus-visible {
 .verevon-scene-cursor[data-pressed='true'] svg {
   transform: scale(0.9);
 }
+
+/* ── Context-aware start screen (CONTRACT.md amendment F) ─────────────────── */
+
+/* The general welcome paragraph is for a fresh start with nothing to report.
+   When Verevon has a relevant event, the suggestion below replaces it
+   (suggestions.ts). */
+html.verevon-scene .verevon-chat-empty__heading > p {
+  display: none;
+}
+
+html.verevon-scene .v-suggestions {
+  display: grid;
+  max-width: none;
+  gap: 0;
+  margin-top: 18px;
+}
+
+html.verevon-scene .v-suggestions__label {
+  margin-bottom: 7px;
+  padding-left: 2px;
+  color: var(--verevon-e-subtle);
+  font-size: 11px;
+  font-weight: 650;
+  letter-spacing: 0.01em;
+}
+
+/* The product's starter row (global.css `.verevon-chat-empty__prompts
+   .verevon-chat-starter`), repeated here because that rule is scoped to the
+   prompts block the welcome appearance hides. Resting on the soft surface so a
+   relevant event reads as something that arrived, not as a generic example. */
+html.verevon-scene .v-suggestions .verevon-chat-starter {
+  display: grid;
+  width: 100%;
+  min-height: 56px;
+  grid-template-columns: 28px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  border: 0;
+  border-radius: var(--chat-r-md, 12px);
+  background: var(--verevon-surface-soft);
+  padding: 13px 14px;
+  color: var(--verevon-e-muted);
+  font: inherit;
+  text-align: left;
+  box-shadow: none;
+  white-space: normal;
+  cursor: pointer;
+  transition: background-color 160ms ease, box-shadow 160ms ease;
+}
+
+html.verevon-scene .v-suggestions .verevon-chat-starter:hover {
+  background: #efeeec;
+  box-shadow: 0 1px 0 rgb(17 17 17 / 4%), 0 6px 18px -8px rgb(17 17 17 / 18%);
+  color: var(--verevon-j-text);
+}
+
+/* After the click the composer holds the question; the card stays as the
+   record of what it came from. */
+html.verevon-scene .v-suggestions .verevon-chat-starter.is-chosen {
+  background: #efeeec;
+}
+
+html.verevon-scene .v-suggestion .verevon-chat-starter__icon {
+  align-self: start;
+  margin-top: 1px;
+}
+
+html.verevon-scene .v-suggestion__text {
+  color: var(--verevon-j-text);
+  font-size: 14px;
+  font-weight: 560;
+  line-height: 1.38;
+}
+
+html.verevon-scene .v-suggestion__meta {
+  display: flex;
+  gap: 6px;
+  margin-top: 4px;
+  color: var(--verevon-e-subtle);
+  font-size: 12px;
+}
+
+html.verevon-scene .v-suggestion__source {
+  color: var(--verevon-e-muted);
+  font-weight: 560;
+}
+
+html.verevon-scene .v-suggestion__chevron {
+  align-self: center;
+  color: var(--verevon-e-subtle);
+}
+
+/* ── The work surface opens by growing (choreography.ts) ──────────────────── */
+
+/* While the surface grows from 0 to its width, its head and body keep their
+   full width and are clipped by the surface (overflow hidden), so nothing
+   inside reflows; the content is revealed from the right edge. */
+html.verevon-scene .verevon-chat-workspace-canvas > .verevon-chat-workspace-canvas__head,
+html.verevon-scene .verevon-chat-workspace-canvas > .verevon-chat-workspace-canvas__body {
+  min-width: 440px;
+}

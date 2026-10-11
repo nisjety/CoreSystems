@@ -1,10 +1,17 @@
 /**
  * Scene 03 · Undersøk · «Agent som undersøker»
  *
- * Capability sold: autonomous investigation under control. Verevon splits the
- * question into parallel sub-tasks, works in the test environment through the
- * browser agent, shows its evidence, proposes a safe fix and stops at the
- * approval gate. The proposal is never executed; the last beat is the hover.
+ * Capability sold: autonomous investigation under control, started by context.
+ * Verevon notices a fictional invoice notice (invoice 20471 to Nordlys Handel
+ * AS deviates from the agreed price), offers one concrete suggestion on the
+ * start screen, and on a click fills the composer (it never sends). The
+ * person sends the question; Verevon splits the check into three parallel
+ * sub-tasks, reads the invoice in the accounting system through the browser
+ * agent, sets agreement, order and invoice side by side, explains the
+ * deviation with traceable sources and prepares a credit note. The last beat
+ * is human approval: nothing goes to the customer before a person says yes.
+ * The story is a customer problem (an invoice written at list price), not a
+ * fault in Verevon.
  *
  * FALLBACK LADDER (CONTRACT §3): RUNG 1, the highest. Real panels, all fed
  * through the transports they already use, no component edited:
@@ -15,50 +22,49 @@
  *   - BrowserChrome (compact): one `browser_action_dispatched` +
  *     `browser_observation_received` with a `screenshot_ref`; the `<img>` the
  *     app points at the BFF artifact route is mapped by the runtime to
- *     `fixtures/assets/eksportlogg-kjoring-184.png`.
- *   - ArtifactsPanel (Resultat) with the proposal document, re-emitted with
- *     one more diff line each time, through `artifact` chat frames.
- *   - ApprovalRequests card «Godkjenning · Kjør simulert test» under the
+ *     `fixtures/assets/faktura-20471.png`.
+ *   - ArtifactsPanel (Resultat) with the comparison document, re-emitted with
+ *     one more block each time, through `artifact` chat frames.
+ *   - ApprovalRequests card «Godkjenning · Opprett kreditnota» under the
  *     answer: `run_paused_for_approval` on the run stream makes the live
  *     panel ask the turn to re-read `GET .../approvals` (the real HITL path).
- *   - The reserved right column shows the Arbeid surface's real empty state
- *     (`EmptyPanel`, «Ingen steg ennå») until the send.
  *
  * Viewport: 1024x640 CSS px (CONTRACT amendment A, `scene-config.json`
- * `scenes["03-undersok"]`), the same as scene 02, captured at device scale
- * factor 2.5. The right work surface is the canvas's own 440 px column.
+ * `scenes["03-undersok"]`), captured at device scale factor 2.5, as scene 02.
  *
- * Round 3 timeline (scene ms; PLAN §2 beat sheet, scene 03):
- *   0–700      Static resting state, «Utfør» selected in the composer (the
- *              real «Arbeidsmodus» segment, clicked in `prepare`). The
- *              conversation column already has its split width; the right
- *              column holds the Arbeid surface's empty state; the greeting
- *              «God dag, Ida» sits above the composer, which rests exactly
- *              where the thread dock will hold it.
- *   700–1190   Cursor fades in beside the composer, glides 390 ms to «Send».
- *   1200/1250  Press / release. Nothing changes before the press. On the
- *              press the empty state in the right column fades out; on the
- *              send the greeting leaves as a 320 ms cross-fade (a frozen
- *              copy, `installWelcomeCrossfade`) while the thread header fades
- *              in 60 ms late (after the `title` event, so the first visible
- *              header already carries the final title) and the question
- *              rises 12 px. The composer does not move.
- *   1262       `connected` + `title` + `tool_call` «3_deloppgaver»: the
- *              thinking line reads «Tenker · Kjører 3 deloppgaver»; the live
- *              split's content slides in 16 px.
- *   1450–1820  The three sub-task rows rise 90 ms apart, all «Kjører».
- *   2600       Assistant line «Loggen og skjemaet peker på samme årsak.»
- *              (one chunk, 300 ms fade-rise).
- *   2700–3100  Browser step: the export log frame with the highlighted
- *              `required field customer_id is missing` line rises in 400 ms.
- *   3000–3700  Sub-tasks flip to «Ferdig», 350 ms apart.
- *   4420–4670  The live split fades out. 4.60 finding block (one chunk,
- *              300 ms fade-rise). 4.70 the proposal claims Resultat and slides
- *              in 16 px; diff lines 4.70/5.00/5.30 and the «Simulert test ·
- *              ingen produksjonsdata endres» note 5.60 each rise 8 px over
- *              300 ms; the document card has its final height from 4.70.
- *   5650       `done`. 5800 the run pauses for approval → the «Kjør simulert
- *              test» card rises 8 px over 300 ms at the end of the answer.
+ * Round 5 (CONTRACT.md amendment F): the film starts on the product's own
+ * centred start screen. Greeting and composer are centred, there is no work
+ * surface and no empty column; the live split opens, growing from the right
+ * edge, only when the run has sub-tasks to show. The general welcome text is
+ * for a fresh start with nothing to report, so here a suggestion card
+ * (suggestions.ts) stands in its place.
+ *
+ * Timeline (scene ms; PLAN §2 beat sheet, re-timed for the extra click):
+ *   0–700      Static start screen: brand mark, «God dag, Ida», the
+ *              suggestion card (what happened, source, time), the empty
+ *              composer with «Utfør» selected (the real «Arbeidsmodus»
+ *              segment, clicked in `prepare`). Cursor hidden, parked.
+ *   700–1300   Cursor fades in and glides to the suggestion.
+ *   1300–1380  Press and release: the composer is FILLED. Nothing is sent.
+ *   1800–2190  Cursor glides to «Send melding»; 2200 press, 2280 release.
+ *   2290       The send: the greeting and card leave as a 320 ms cross-fade,
+ *              the composer glides to its dock, the thread header and the
+ *              question rise in. 2300 `connected` + `title` + `tool_call`
+ *              «3_deloppgaver»: the thinking line reads «Tenker · Kjører 3
+ *              deloppgaver» and the live split grows in from the right.
+ *   2550–2790  The three sub-task rows rise 90 ms apart, all «Kjører».
+ *   3300       Assistant line «Jeg sammenholder avtalen, ordren og
+ *              fakturaen.» (one chunk, 300 ms fade-rise).
+ *   3500       Browser step: the invoice frame with the price highlighted.
+ *   3800–4400  Sub-tasks flip to «Ferdig», 300 ms apart.
+ *   4750–4800  The finding block. 4800 the comparison claims Resultat: the
+ *              live split stays fully visible until this swap and then
+ *              cross-dissolves out over 200 ms (installRunPanelCrossfade)
+ *              while the comparison slides in 16 px; rows and sections rise
+ *              as they arrive (4800, 5050, 5300, 5550, 5800).
+ *   5900       `done`. 6050 the run pauses for approval → the «Opprett
+ *              kreditnota» card rises 8 px over 340 ms at the end of the
+ *              answer.
  *   6450–7000  Cursor fades in ~45 px from «Godkjenn», glides 400 ms onto it.
  *   7000–8000  Real `:hover` on «Godkjenn», held. Never clicked.
  *
@@ -83,21 +89,17 @@
  *   - The Work canvas the run summons is closed with its own «Lukk
  *     arbeidsflaten» button the moment it mounts (a MutationObserver in
  *     `prepare`, before any paint), so the run is watched in the live split
- *     and the first artifact can claim Resultat, as the beat sheet wants
- *     («replaces the research panel»). Work renders hard-coded English
- *     lifecycle rows while a turn streams.
- *   - The diff is a fenced ```diff block in the document: the coloured
- *     DiffView only appears after a user toggles «Vis endringer». The added
- *     line is tinted green by 03-undersok.css.
- *   - «Kjør simulert test» is the approval card's title, its button reads
+ *     and the first artifact can claim Resultat. Work renders hard-coded
+ *     English lifecycle rows while a turn streams.
+ *   - The comparison is a list, not a table: the real table renderer is 620 px
+ *     wide minimum and would scroll sideways inside the 440 px Resultat
+ *     surface.
+ *   - «Opprett kreditnota» is the approval card's title, its button reads
  *     «Godkjenn», and it sits under the answer: the Resultat viewer has no
  *     button surface (the same mapping as scene 02, CONTRACT amendment D(3)).
  *   - The thread header shows the title only (the «N meldinger» count is
  *     hidden): the product counts the assistant placeholder from the send.
  */
-import { render } from '@solidjs/web'
-import { EmptyPanel } from '@/features/chat/components/ChatPanels'
-import { ListChecks } from '@/shared/icons'
 import { FJORDFORM_NOW_ISO } from '../fixtures/fjordform'
 import {
   undersokAnswerChunks,
@@ -109,16 +111,18 @@ import {
   undersokBrowserStep,
   undersokFindingChunks,
   undersokImages,
-  undersokQuestion,
   undersokRequestId,
   undersokRunDetail,
   undersokRunId,
   undersokSubtasks,
+  undersokSuggestion,
   undersokThreadId,
   undersokTitle,
   undersokToolName,
 } from '../fixtures/fjordform-undersok'
+import { installCanvasOpen, installComposerTravel, isSendPress } from '../choreography'
 import type { SceneDefinition, SceneStreamFrame, SceneTarget } from '../scene-types'
+import { installPromptSuggestions } from '../suggestions'
 import './03-undersok.css'
 
 const IS_SCENE_03 = typeof window !== 'undefined' && window.location.pathname.startsWith('/scene/03-undersok')
@@ -154,29 +158,6 @@ function installScene03Clock(): void {
   window.Date = new Proxy(SceneDate, {
     apply: () => new SceneDate().toString(),
   }) as unknown as DateConstructor
-}
-
-/** True for a press or click on «Send melding» (not the «Utfør» click in `prepare`). */
-function isSendPress(event: Event): boolean {
-  return event.target instanceof Element && event.target.closest('button[aria-label="Send melding"]') !== null
-}
-
-/** Calls `run` once `.verevon-chat-page` exists (or right away). */
-function whenChatPage(run: (page: HTMLElement) => void): void {
-  const found = document.querySelector<HTMLElement>('.verevon-chat-page')
-  if (found) {
-    run(found)
-    return
-  }
-  const observer = new MutationObserver(() => {
-    const page = document.querySelector<HTMLElement>('.verevon-chat-page')
-    if (!page) return
-    observer.disconnect()
-    run(page)
-  })
-  const start = () => observer.observe(document.body, { childList: true, subtree: true })
-  if (document.body) start()
-  else document.addEventListener('DOMContentLoaded', start, { once: true })
 }
 
 /**
@@ -226,56 +207,6 @@ function installWelcomeCrossfade(): void {
 }
 
 /**
- * The reserved right column shows the Arbeid surface's REAL empty state from
- * frame 0 (`EmptyPanel` from ChatPanels with the product's own Norwegian copy
- * and icon), so the column reads as a work surface waiting for a task rather
- * than a page still loading. It fades out from the press on «Send melding»
- * and is removed once faded, before the live split's content arrives.
- */
-function installEmptyWorkPlaceholder(): void {
-  const host = document.createElement('div')
-  host.className = 'v03-work-placeholder'
-  host.setAttribute('aria-hidden', 'true')
-  host.inert = true
-  const body = document.createElement('div')
-  body.className = 'verevon-chat-workspace-canvas__body'
-  host.appendChild(body)
-  render(
-    () =>
-      EmptyPanel({
-        icon: ListChecks({ size: 20 }),
-        title: 'Ingen steg ennå',
-        subtitle: 'Agentens arbeidssteg vises her mens en oppgave kjører.',
-      }),
-    body,
-  )
-  let left = false
-  // The chat page can be re-created while the session settles; the
-  // placeholder follows whichever `.verevon-chat-page` is current until the
-  // press.
-  const adopt = () => {
-    if (left) return
-    const page = document.querySelector<HTMLElement>('.verevon-chat-page')
-    if (page && host.parentElement !== page) page.appendChild(host)
-  }
-  whenChatPage(adopt)
-  const observer = new MutationObserver(adopt)
-  const start = () => observer.observe(document.body, { childList: true, subtree: true })
-  if (document.body) start()
-  else document.addEventListener('DOMContentLoaded', start, { once: true })
-  const leave = (event: Event) => {
-    if (!isSendPress(event)) return
-    if (left || !host.isConnected) return
-    left = true
-    observer.disconnect()
-    host.classList.add('is-leaving')
-    host.addEventListener('animationend', () => host.remove(), { once: true })
-  }
-  document.addEventListener('pointerdown', leave, true)
-  document.addEventListener('click', leave, true)
-}
-
-/**
  * Entrances that survive the product's re-renders.
  *
  * The real markdown renderer rebuilds its blocks on every streamed update
@@ -316,7 +247,7 @@ const ENTRANCES: Entrance[] = [
     key: (e) => `task:${textKey(e.querySelector('.verevon-wide-research__goal') ?? e)}`,
     keyframes: rise(10),
     duration: 320,
-    delay: (e) => 190 + 90 * siblingIndex(e),
+    delay: (e) => 90 + 90 * siblingIndex(e),
   },
   // A status flip («Kjører» → «Ferdig») rebuilds the row; the new pill fades
   // in over 240 ms instead of swapping in one frame.
@@ -335,18 +266,26 @@ const ENTRANCES: Entrance[] = [
     keyframes: rise(6),
     duration: 300,
   },
-  // Proposal document: each diff line and the note rise 8 px as they arrive.
+  // Comparison document (Resultat): each row and section rises as it arrives;
+  // a row's source reference fades in just after its line.
   {
-    selector: '.verevon-chat-workspace-canvas .verevon-chat-codeblock code > span',
-    key: (e) => `diff:${textKey(e)}`,
-    keyframes: rise(8),
-    duration: 300,
+    selector: '.verevon-chat-workspace-canvas .verevon-chat-artifact-document li',
+    key: (e) => `li:${textKey(e)}`,
+    keyframes: rise(10),
+    duration: 340,
   },
   {
-    selector: '.verevon-chat-workspace-canvas .verevon-chat-artifact-document .verevon-chat-markdown > p',
-    key: (e) => `doc:${textKey(e)}`,
-    keyframes: rise(8),
-    duration: 300,
+    selector: '.verevon-chat-workspace-canvas .verevon-chat-artifact-document li > em',
+    key: (e) => `ref:${textKey(e.parentElement ?? e)}`,
+    keyframes: fade,
+    duration: 320,
+    delay: () => 200,
+  },
+  {
+    selector: '.verevon-chat-workspace-canvas .verevon-chat-artifact-document h2',
+    key: (e) => `h2:${textKey(e)}`,
+    keyframes: rise(10),
+    duration: 340,
   },
   // The approval card: the climax, 8 px rise over 340 ms, transform/opacity only.
   { selector: '.verevon-chat-approval', key: () => 'approval', keyframes: rise(8), duration: 340 },
@@ -459,6 +398,51 @@ function installStopControlGhost(): void {
 }
 
 /**
+ * Live split to Resultat, hand-over. When the first artifact arrives the
+ * product mounts the Resultat canvas beside the live split and hides the split
+ * with an inline `display: none`, in one frame. Fading the split out BEFORE
+ * that left the right column almost empty for three frames (its content fell to
+ * about 1 %). Instead the split stays at full opacity until the swap, and at
+ * the swap a copy of it (its DOM, taken in the same task before the next paint)
+ * is laid over the same 440 px slot as a ghost that fades out
+ * (03-undersok.css `.v03-run-ghost`) while the comparison slides in: a true
+ * cross-dissolve of the two real surfaces. The ghost is inert, aria-hidden and
+ * removed when its fade ends. No component is touched.
+ */
+function installRunPanelCrossfade(): void {
+  let done = false
+  const ghostOf = (panel: HTMLElement) => {
+    if (done) return
+    const page = panel.closest<HTMLElement>('.verevon-chat-page')
+    // Only when the document takes the slot (not when the panel is closed).
+    if (!page || !page.querySelector(':scope > .verevon-chat-workspace-canvas')) return
+    done = true
+    const ghost = panel.cloneNode(true) as HTMLElement
+    ghost.style.removeProperty('display')
+    ghost.classList.add('v03-run-ghost')
+    ghost.setAttribute('aria-hidden', 'true')
+    ghost.removeAttribute('aria-label')
+    ghost.inert = true
+    ghost.addEventListener('animationend', () => ghost.remove(), { once: true })
+    page.appendChild(ghost)
+  }
+  const observer = new MutationObserver((records) => {
+    for (const record of records) {
+      const target = record.target
+      if (
+        record.type === 'attributes' &&
+        target instanceof HTMLElement &&
+        target.classList.contains('verevon-chat-run-panel') &&
+        target.style.display === 'none'
+      ) ghostOf(target)
+    }
+  })
+  const start = () => observer.observe(document.body, { attributes: true, attributeFilter: ['style'], subtree: true })
+  if (document.body) start()
+  else document.addEventListener('DOMContentLoaded', start, { once: true })
+}
+
+/**
  * Set-up that must exist before the chat page renders (this module is
  * evaluated when ScenePage loads the scene registry, before ChatPage mounts).
  * Acts only on /scene/03-undersok.
@@ -468,8 +452,17 @@ function installScene03Setup(): void {
   // Film-only presentation rules in 03-undersok.css are scoped to this class.
   document.documentElement.classList.add('verevon-scene--03-undersok')
   installScene03Clock()
+  // The suggestion card that stands in for the welcome text, the welcome
+  // cross-fade, the composer's glide to its dock and the live split's growth
+  // from the right edge (choreography.ts).
+  installPromptSuggestions({
+    label: undersokSuggestion.label,
+    items: [{ text: undersokSuggestion.text, source: undersokSuggestion.source, time: undersokSuggestion.time, icon: 'receipt' }],
+  })
   installWelcomeCrossfade()
-  installEmptyWorkPlaceholder()
+  installComposerTravel()
+  installCanvasOpen('.verevon-chat-run-panel')
+  installRunPanelCrossfade()
   installEntranceDirector()
   installStopControlGhost()
   // Pressing «Send melding» would focus it, and the composer's :focus-within
@@ -488,11 +481,15 @@ function installScene03Setup(): void {
 
 installScene03Setup()
 
+/** The suggestion card on the start screen (suggestions.ts). */
+const SUGGESTION: SceneTarget = { selector: '.v-suggestion', pin: true }
 const SEND_BUTTON: SceneTarget = { name: 'Send melding', role: 'button', pin: true }
 const APPROVE_BUTTON: SceneTarget = { selector: '.verevon-chat-approval__approve', pin: true }
 const DO_MODE: SceneTarget = { name: 'Utfør', role: 'button' }
 
-const SEND_AT = 1_250
+/** Mouse release on the suggestion: its click fills the composer (nothing is sent). */
+const CHOOSE_AT = 1_380
+const SEND_AT = 2_280
 
 /**
  * Entrance animations in 03-undersok.css that are CSS (they mount once in the
@@ -516,6 +513,10 @@ function settleRemounts() {
     for (const element of document.querySelectorAll<HTMLElement>(selector)) {
       if (seenEntranceElements.has(element)) continue
       seenEntranceElements.add(element)
+      // The hand-over ghost (installRunPanelCrossfade) is a copy that must run
+      // its own fade-out; «settled» would switch every animation off and leave
+      // it over the canvas for good.
+      if (element.classList.contains('v03-run-ghost')) continue
       const id = `${selector}::${key(element)}`
       if (seenEntranceKeys.has(id)) element.dataset.v03Settled = ''
       else seenEntranceKeys.add(id)
@@ -524,7 +525,7 @@ function settleRemounts() {
 }
 
 /** Scene time at which the chat POST arrives (the release + the submit path). */
-const POST_AT = 1_262
+const POST_AT = 2_290
 
 /** A frame at scene time `t` (ms), on the chat POST's clock. */
 function at(t: number, event: string, data: Record<string, unknown>): SceneStreamFrame {
@@ -535,90 +536,89 @@ function chunk(t: number, delta: string): SceneStreamFrame {
   return at(t, 'chunk', { delta, request_id: undersokRequestId })
 }
 
-function artifact(t: number, lines: number, withNote: boolean): SceneStreamFrame {
+function artifact(t: number, stage: 1 | 2 | 3 | 4 | 5): SceneStreamFrame {
   return at(t, 'artifact', {
     id: undersokArtifactId,
     kind: 'markdown',
     title: undersokArtifactTitle,
-    content: undersokArtifactMarkdown(lines, withNote),
+    content: undersokArtifactMarkdown(stage),
     version: 1,
   })
 }
 
 /** The turn's one tool call: the fan-out into three sub-tasks. Names the thinking line's step. */
-const SPLIT_TOOL_ID = 'call_del_opp_4821'
+const SPLIT_TOOL_ID = 'call_del_opp_20471'
 
 const chatFrames: SceneStreamFrame[] = [
-  at(POST_AT, 'connected', { ok: true, request_id: undersokRequestId, thread_id: undersokThreadId, model_used: 'verevon-balance', run_id: undersokRunId }),
+  at(POST_AT + 10, 'connected', { ok: true, request_id: undersokRequestId, thread_id: undersokThreadId, model_used: 'verevon-balance', run_id: undersokRunId }),
   // With `connected`; the header's entrance starts 60 ms after the send, so
   // its first visible frame already carries this title.
-  at(POST_AT, 'title', { title: undersokTitle, request_id: undersokRequestId }),
-  at(POST_AT, 'tool_call', { id: SPLIT_TOOL_ID, name: undersokToolName, args: { deloppgaver: 3 } }),
-  at(2_600, 'tool_result', { id: SPLIT_TOOL_ID, status: 'completed', output: '3 deloppgaver startet' }),
+  at(POST_AT + 10, 'title', { title: undersokTitle, request_id: undersokRequestId }),
+  at(POST_AT + 10, 'tool_call', { id: SPLIT_TOOL_ID, name: undersokToolName, args: { deloppgaver: 3 } }),
+  at(3_300, 'tool_result', { id: SPLIT_TOOL_ID, status: 'completed', output: '3 deloppgaver startet' }),
   // Each paragraph arrives whole and rises in (no mid-sentence chunk stutter).
-  chunk(2_600, undersokAnswerChunks.join('')),
-  chunk(4_600, undersokFindingChunks.join('')),
-  artifact(4_700, 1, false),
-  artifact(5_000, 2, false),
-  artifact(5_300, 3, false),
-  artifact(5_600, 3, true),
+  chunk(3_300, undersokAnswerChunks.join('')),
+  chunk(4_750, undersokFindingChunks.join('')),
+  // Agreement, order, invoice (three rows), then the deviation, then the proposal.
+  artifact(4_800, 1),
+  artifact(5_050, 2),
+  artifact(5_300, 3),
+  artifact(5_550, 4),
+  artifact(5_800, 5),
   // `done` before the gate: the turn settles first, so the approval card is
   // the last thing to enter.
-  at(5_650, 'done', { request_id: undersokRequestId, model_used: 'verevon-balance', stop_reason: 'end_turn' }),
+  at(5_900, 'done', { request_id: undersokRequestId, model_used: 'verevon-balance', stop_reason: 'end_turn' }),
 ].sort((a, b) => a.at - b.at)
 
 const runFrames: SceneStreamFrame[] = [
   // All three attach with the run; the rows' 90 ms stagger is the keyed
   // entrance above, so the panel's layout settles in one invisible frame.
-  ...undersokSubtasks.map((task) => at(POST_AT, 'subagent_attached', {
+  ...undersokSubtasks.map((task) => at(POST_AT + 10, 'subagent_attached', {
     parent_run_id: undersokRunId,
     child_run_id: task.childRunId,
     role: task.role,
     goal_summary: task.goal,
     batch_id: undersokBatchId,
   })),
-  at(2_700, 'browser_action_dispatched', {
+  at(3_500, 'browser_action_dispatched', {
     run_id: undersokRunId,
     action_id: undersokBrowserStep.actionId,
     action_type: undersokBrowserStep.actionType,
     reason: undersokBrowserStep.reason,
   }),
-  at(2_700, 'browser_observation_received', {
+  at(3_500, 'browser_observation_received', {
     run_id: undersokRunId,
     action_id: undersokBrowserStep.actionId,
     status: 'success',
     page_title: undersokBrowserStep.pageTitle,
     screenshot_ref: undersokBrowserStep.screenshotRef,
   }),
-  ...undersokSubtasks.map((task, index) => at(3_000 + index * 350, 'subagent_stopped', {
+  ...undersokSubtasks.map((task, index) => at(3_800 + index * 300, 'subagent_stopped', {
     parent_run_id: undersokRunId,
     child_run_id: task.childRunId,
     status: 'completed',
   })),
   // The gate: the run pauses for a person. The live panel hears it and asks
   // the chat turn to re-read the run's approvals (the real HITL path).
-  at(5_800, 'run_paused_for_approval', { run_id: undersokRunId, approval_id: undersokApproval.id }),
+  at(6_050, 'run_paused_for_approval', { run_id: undersokRunId, approval_id: undersokApproval.id }),
 ]
 
 export const scene03Undersok: SceneDefinition = {
   id: '03-undersok',
   durationMs: 8_000,
-  composerPrefill: undersokQuestion,
+  // Empty: the start screen is the product's own. The click on the suggestion
+  // card fills the composer (suggestions.ts).
+  composerPrefill: '',
+  readySelectors: ['.v-suggestion'],
   async prepare({ click, waitFor }) {
     document.documentElement.classList.add('verevon-scene--03-undersok')
     // The evidence frame is decoded before frame 0, so its first paint at
-    // 2.7 s never waits on the network (or on paused virtual time).
+    // 3.5 s never waits on the network (or on paused virtual time).
     await Promise.all(Object.values(undersokImages).map(async (src) => {
       const image = new Image()
       image.src = src
       await image.decode()
     }))
-    // Geist Mono (inline `customer_id`, the diff) is first used at 4.6 s; a
-    // font fetch inside the timeline would swap glyphs mid-film. Load it now.
-    await Promise.all([
-      document.fonts.load('400 15px "Geist Mono"', 'customer_id: "id",'),
-      document.fonts.load('500 15px "Geist Mono"', 'customer_id: "id",'),
-    ])
     // «Utfør»: the composer's own «Arbeidsmodus» segment.
     await click(DO_MODE)
     await waitFor(() => document.querySelector('.dashboard-composer-intent-segment button.is-active')?.textContent?.trim() === 'Utfør' ? true : null)
@@ -647,22 +647,29 @@ export const scene03Undersok: SceneDefinition = {
   ],
   hoverTarget: APPROVE_BUTTON,
   pointer: [
-    // First 0.7 s static, cursor hidden and parked off the app card: a hidden
-    // pointer resting over the composer gave the resting frames two raster
-    // variants between capture runs (7 px around the send button's glow).
+    // First 0.5 s static, cursor hidden and parked off the app card (a hidden
+    // pointer over the card would put a real :hover state into the resting
+    // frames, and into the frames the loop dissolves into).
     { at: 0, x: 4, y: 634, visible: false, pressed: false },
-    // It fades in beside the composer.
-    { at: 700, target: SEND_BUTTON, nudge: { x: -150, y: -30 }, visible: true, pressed: false },
-    { at: 800, target: SEND_BUTTON, nudge: { x: -150, y: -30 }, visible: true, pressed: false, ease: 'hold' },
-    // One move to «Send melding» (390 ms ease-out), press, release.
-    { at: 1_190, target: SEND_BUTTON, visible: true, pressed: false },
-    { at: 1_200, target: SEND_BUTTON, visible: true, pressed: true },
+    // It fades in a little below-left of the suggestion, rests, then glides
+    // onto it (500 ms ease-out).
+    { at: 700, target: SUGGESTION, nudge: { x: -80, y: 80 }, visible: true, pressed: false },
+    { at: 800, target: SUGGESTION, nudge: { x: -80, y: 80 }, visible: true, pressed: false, ease: 'hold' },
+    { at: 1_300, target: SUGGESTION, offset: { x: 0.62, y: 0.55 }, visible: true, pressed: false },
+    // Press and release: the real click fills the composer.
+    { at: 1_310, target: SUGGESTION, offset: { x: 0.62, y: 0.55 }, visible: true, pressed: true },
+    { at: CHOOSE_AT, target: SUGGESTION, offset: { x: 0.62, y: 0.55 }, visible: true, pressed: false },
+    // A beat to read the filled composer, then one glide to «Send melding»
+    // (390 ms ease-out), press, release.
+    { at: 1_800, target: SUGGESTION, offset: { x: 0.62, y: 0.55 }, visible: true, pressed: false, ease: 'hold' },
+    { at: 2_190, target: SEND_BUTTON, visible: true, pressed: false },
+    { at: 2_200, target: SEND_BUTTON, visible: true, pressed: true },
     { at: SEND_AT, target: SEND_BUTTON, visible: true, pressed: false },
-    // Fades out where it clicked (the composer does not move).
-    { at: 1_300, target: SEND_BUTTON, visible: false, pressed: false },
+    // Fades out where it clicked.
+    { at: 2_400, target: SEND_BUTTON, visible: false, pressed: false, ease: 'hold' },
     // Parked off the app card once invisible, so no hover state is held
     // anywhere while the answer builds.
-    { at: 1_520, x: 4, y: 634, visible: false, pressed: false },
+    { at: 2_520, x: 4, y: 634, visible: false, pressed: false },
     // Fades in ~45 px from «Godkjenn», then one 400 ms glide onto it.
     { at: 6_450, target: APPROVE_BUTTON, nudge: { x: -34, y: 30 }, visible: true, pressed: false },
     { at: 6_600, target: APPROVE_BUTTON, nudge: { x: -34, y: 30 }, visible: true, pressed: false, ease: 'hold' },
@@ -670,14 +677,17 @@ export const scene03Undersok: SceneDefinition = {
     { at: 8_000, target: APPROVE_BUTTON, offset: { x: 0.6, y: 0.7 }, visible: true, pressed: false, ease: 'hold' },
   ],
   events: [
-    { at: 0, kind: 'note', note: 'frame 0: resting composer in the split geometry, Utfør selected, Arbeid empty state, cursor hidden' },
-    { at: 800, kind: 'cursor', note: 'cursor glides to Send melding' },
+    { at: 0, kind: 'note', note: 'frame 0: centred start screen, suggestion card, empty composer with Utfør, no work surface, cursor hidden' },
+    { at: 800, kind: 'cursor', note: 'cursor glides to the suggestion' },
+    { at: CHOOSE_AT, kind: 'ui', note: 'click the suggestion: fills the composer (autopilot only)', action: 'click', target: SUGGESTION },
+    { at: 1_800, kind: 'cursor', note: 'cursor glides to Send melding' },
     { at: SEND_AT, kind: 'ui', note: 'click Send melding (autopilot only)', action: 'click', target: { name: 'Send melding', role: 'button' } },
-    { at: 1_450, kind: 'sse', note: 'three sub-tasks attach; Bred forskning rows in the live split', event: 'subagent_attached' },
-    { at: 2_600, kind: 'sse', note: 'answer line; browser step with the export log frame', event: 'browser_observation_received' },
-    { at: 3_000, kind: 'sse', note: 'sub-tasks flip to Ferdig, 350 ms apart', event: 'subagent_stopped' },
-    { at: 4_600, kind: 'sse', note: 'finding block; proposal opens Resultat, diff lines 300 ms apart', event: 'artifact' },
-    { at: 5_800, kind: 'sse', note: 'run pauses for approval; Kjør simulert test card', event: 'run_paused_for_approval' },
+    { at: 2_550, kind: 'sse', note: 'three sub-tasks attach; Bred forskning rows grow in', event: 'subagent_attached' },
+    { at: 3_300, kind: 'sse', note: 'answer line', event: 'chunk' },
+    { at: 3_500, kind: 'sse', note: 'browser step with the invoice frame', event: 'browser_observation_received' },
+    { at: 3_800, kind: 'sse', note: 'sub-tasks flip to Ferdig, 300 ms apart', event: 'subagent_stopped' },
+    { at: 4_800, kind: 'sse', note: 'finding block; comparison opens Resultat, rows 250 ms apart', event: 'artifact' },
+    { at: 6_050, kind: 'sse', note: 'run pauses for approval; Opprett kreditnota card', event: 'run_paused_for_approval' },
     { at: 6_600, kind: 'cursor', note: 'cursor glides to Godkjenn' },
     { at: 7_000, kind: 'hover', note: 'Godkjenn hovered, held to the end', target: APPROVE_BUTTON },
     { at: 7_000, kind: 'ui', note: 'hover Godkjenn (autopilot only)', action: 'hover', target: APPROVE_BUTTON },

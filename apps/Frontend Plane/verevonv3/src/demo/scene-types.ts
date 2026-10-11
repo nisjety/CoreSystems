@@ -109,8 +109,14 @@ export type SceneEvent =
 export type SceneDefinition = {
   id: string
   durationMs: number
-  /** What the composer holds at frame 0 (set through the real textarea + `input` event). */
+  /**
+   * What the composer holds at frame 0 (set through the real textarea + `input` event).
+   * Empty means the composer starts empty: the scene fills it itself later (a
+   * click on a prompt suggestion), so the start screen is the product's own.
+   */
   composerPrefill: string
+  /** CSS selectors that must exist before frame 0 (for example the suggestion card the scene injects). */
+  readySelectors?: string[]
   /** Time-ordered. The scheduler fires each with `setTimeout(at)` relative to `start()`. */
   events: SceneEvent[]
   /** Time-ordered pointer keyframes; targets resolve lazily by selector or accessible name. */

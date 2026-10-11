@@ -1,64 +1,56 @@
 /**
  * Scene 02 · Plan · «Svar med kilder»
  *
- * Capability sold: grounded answers. Verevon reads the company's own sources,
- * shows where every finding comes from, turns them into a plan, and waits for
- * a person before anything is created.
+ * Capability sold: a context-aware assistant. Verevon notices a relevant event
+ * (a fictional delay notice from Bring about the Nordlys delivery), offers one
+ * concrete suggestion on the start screen, and on a click fills the composer
+ * (it never sends). The person sends the question; Verevon shows the status
+ * with its sources, proposes the next steps and waits for approval before
+ * anything is sent on. Tracking status comes from Bring, not from the order
+ * system.
  *
  * Captured at 1024x640 CSS px (scene-capture `--viewport 1024x640`, see
- * src/demo/README.md "Viewport"): the smallest 16:10 width at which the real
- * workspace keeps the 440 px canvas docked beside the conversation with
- * nothing clipped.
+ * src/demo/README.md "Viewport").
  *
- * How the beat sheet (PLAN section 2) maps onto the REAL chat workspace
- * (recorded as CONTRACT.md amendment D):
+ * Round 5 (CONTRACT.md amendment F): the film starts on the product's own
+ * centred start screen. Greeting and composer are centred, there is no work
+ * surface and no empty column; the surface opens only when there is evidence
+ * to show. The general welcome text is for a fresh start with nothing to
+ * report, so here a suggestion card (suggestions.ts) stands in its place.
  *
- *   0.00–1.20  Resting chat: the welcome state with the composer prefilled
- *              (one line) and the context chip «Kunnskap + nett». The right
- *              work surface already holds the Kilder surface's real empty
- *              state («Ingen kilder ennå», installEmptyCanvasPlaceholder) in
- *              the reserved column, and the composer sits exactly where the
- *              dock will hold it, so nothing reflows and the composer never
- *              moves.
- *   0.70–1.25  Cursor fades in (150 ms) beside the composer, glides to «Send
- *              melding», presses. The real submit path runs: user bubble,
- *              assistant placeholder («Tenker»). The welcome text leaves
- *              (a frozen copy, see installWelcomeCrossfade, 320 ms) while the
- *              thread header and the bubble fade/rise in (380–400 ms); the
- *              empty state fades out (200 ms). The cursor rests on the button
- *              for 150 ms and fades out in place.
- *   1.50–2.56  Three `citation` frames, 120 ms apart. The real controller
- *              summons the Kilder surface on the first citation; its tab strip
- *              fades in and the three source cards rise 12 px (380 ms each,
- *              kept running across the list's re-mounts by
- *              installEntranceDirector), then hold as a complete beat.
- *              Real-component mapping: the sources are cards in the Kilder
- *              canvas (not chips under the bubble) and the status line is the
- *              product's «Tenker»; the product has no «Sjekker kilder» label.
- *   2.50–2.80  The assistant line streams. The sources hold at full opacity
- *              until the swap. The tab strip fades out 2.64–2.74 s and the
- *              first step joins Arbeid at 2.74 s. Resultat opens at 2.80 s:
- *              the removed Kilder body is kept as a ghost that cross-dissolves
- *              out over 260 ms (installKilderCrossfade) while the status
- *              document rises 16 px in, and the tab strip fades back in with
- *              it (2.80–3.10 s). No frame holds an empty work surface.
- *   2.80–4.10  Three re-emits add one finding each, 400 ms apart, every
- *              reference fading in 200 ms after its line. The document keeps
- *              its final height from the start (02-plan.css), so it never
- *              grows in a jump. `step_update` frames make the Arbeid badge
- *              count 1 → 2 → 3; the tab strip returns (3.06–3.42 s) only after
- *              the Arbeid tab exists, so no tab is seen jumping sideways.
- *   4.60–5.40  The draft block rises in under the answer and streams. The
- *              document gains «Klar for neste steg»; its three plan rows
- *              stagger in 110 ms apart. The third step re-sent as
- *              `awaiting_approval` makes the real controller fetch the run's
- *              approvals: the approval card «Godkjenning · Forbered
- *              oppfølging» with «Godkjenn» / «Avvis» rises in under the
- *              answer (400 ms; the real approval target, CONTRACT.md
- *              amendment D). The thread fits the frame (02-plan.css §3), so
- *              the transcript never scrolls and the card is born inside it.
- *   6.30–6.95  Cursor fades in just below the card and glides to «Godkjenn».
- *   6.95–8.00  Real `:hover` on «Godkjenn» (CDP mouse), held. Never clicked.
+ * Timeline (scene ms; PLAN §2 beat sheet, re-timed for the extra click):
+ *
+ *   0–700      Static start screen: brand mark, «God dag, Ida», the
+ *              suggestion card (what happened, source, time), the empty
+ *              composer. Cursor hidden and parked off the app card.
+ *   700–1300   Cursor fades in and glides to the suggestion.
+ *   1300–1380  Press and release: the composer is FILLED with the question
+ *              (the product's starter behaviour). Nothing is sent.
+ *   1800–2190  Cursor glides to «Send melding»; 2200 press, 2280 release.
+ *   2290       The send. The greeting and card leave as a 320 ms cross-fade
+ *              (a frozen copy, installWelcomeCrossfade), the composer glides
+ *              to its dock (installComposerTravel), the thread header and the
+ *              question rise in.
+ *   2560–2800  Three `citation` frames, 120 ms apart. The real controller
+ *              opens the Kilder surface on the first one; it grows from the
+ *              right edge (installCanvasOpen) while the conversation narrows.
+ *   3300–3500  The assistant line streams. The sources hold until the swap.
+ *   3800–3860  The first step joins Arbeid; the artifact opens Resultat. The
+ *              removed Kilder body cross-dissolves out (installKilderCrossfade)
+ *              while the status document rises in.
+ *   3860–4760  Four findings, 300 ms apart, each with its source reference.
+ *   5000–5450  Draft block under the answer; «Klar for neste steg» with three
+ *              plan rows (110 ms apart).
+ *   5700–5860  The third step pauses for approval; the real controller fetches
+ *              the run's approvals; the approval card rises in.
+ *   6300–6950  Cursor fades in just below the card and glides to «Godkjenn».
+ *   6950–8000  Real `:hover` on «Godkjenn», held. Never clicked.
+ *
+ * How the beat sheet maps onto the REAL chat workspace (CONTRACT.md amendment
+ * D, still in force): the sources are cards in the Kilder surface (not chips
+ * under the bubble), the status line is the product's «Tenker», the approval
+ * target is the product's approval card «Godkjenning · Forbered oppfølging»
+ * with «Godkjenn» / «Avvis».
  */
 import {
   FJORDFORM_NOW_ISO,
@@ -68,18 +60,17 @@ import {
   nordlysArtifactMarkdown,
   nordlysArtifactTitle,
   nordlysDraftChunks,
-  nordlysQuestion,
   nordlysRequestId,
   nordlysRunId,
   nordlysSources,
   nordlysSteps,
+  nordlysSuggestion,
   nordlysThreadId,
   nordlysTitle,
 } from '../fixtures/fjordform'
+import { installCanvasOpen, installComposerTravel, isSendPress } from '../choreography'
 import type { SceneDefinition, SceneStreamFrame, SceneTarget } from '../scene-types'
-import { render } from '@solidjs/web'
-import { EmptyPanel } from '@/features/chat/components/ChatPanels'
-import { Link2 } from '@/shared/icons'
+import { installPromptSuggestions } from '../suggestions'
 import './02-plan.css'
 
 /**
@@ -96,14 +87,21 @@ import './02-plan.css'
  *    clock advances with `performance.now()`, which follows virtual time under
  *    the harness, so relative labels («Nå nettopp», elapsed waits) behave.
  * 2. The scope attribute for `02-plan.css` (film-only layout and motion).
- * 3. The welcome cross-fade.
+ * 3. The suggestion card that stands in for the welcome text, the welcome
+ *    cross-fade, the composer's glide to its dock and the work surface's
+ *    growth (choreography.ts).
  */
 function installScene02Setup(): void {
   if (typeof window === 'undefined') return
   if (!window.location.pathname.startsWith('/scene/02-plan')) return
   document.documentElement.setAttribute('data-verevon-scene', '02-plan')
+  installPromptSuggestions({
+    label: nordlysSuggestion.label,
+    items: [{ text: nordlysSuggestion.text, source: nordlysSuggestion.source, time: nordlysSuggestion.time, icon: 'package' }],
+  })
   installWelcomeCrossfade()
-  installEmptyCanvasPlaceholder()
+  installComposerTravel()
+  installCanvasOpen('aside.verevon-chat-workspace-canvas')
   installEntranceDirector()
   installKilderCrossfade()
   // Pressing «Send melding» would focus it, and the composer's :focus-within
@@ -140,19 +138,20 @@ function installScene02Setup(): void {
 }
 
 /**
- * The product swaps the welcome state for the thread in one frame when the
- * first message is sent. For the film the welcome text leaves softly instead:
- * at the press (a real `pointerdown` from the harness's CDP mouse) the heading
- * block is copied with its real classes and measured; when the real empty
- * state unmounts, the copy is placed at the same spot inside the chat section
- * and fades out (02-plan.css `.verevon-s02-welcome-ghost`). It is inert,
- * aria-hidden and removed when its fade ends. No component is touched.
+ * The product swaps the start screen for the thread in one frame when the
+ * first message is sent. For the film the greeting and the suggestion card
+ * leave softly instead: at the press on «Send melding» (a real `pointerdown`
+ * from the harness's CDP mouse) the heading block is copied with its real
+ * classes and measured; when the real start screen unmounts, the copy is
+ * placed at the same spot inside the chat section and fades out
+ * (02-plan.css `.verevon-s02-welcome-ghost`). It is inert, aria-hidden and
+ * removed when its fade ends. No component is touched.
  */
 function installWelcomeCrossfade(): void {
   let pending: { node: HTMLElement; rect: DOMRect } | null = null
   let placed = false
-  const capture = () => {
-    if (placed) return
+  const capture = (event: Event) => {
+    if (placed || pending || !isSendPress(event)) return
     const heading = document.querySelector<HTMLElement>('.verevon-chat-empty__heading')
     if (!heading) return
     pending = { node: heading.cloneNode(true) as HTMLElement, rect: heading.getBoundingClientRect() }
@@ -184,63 +183,6 @@ function installWelcomeCrossfade(): void {
   const start = () => observer.observe(document.body, { childList: true, subtree: true })
   if (document.body) start()
   else document.addEventListener('DOMContentLoaded', start, { once: true })
-}
-
-/** Calls `run` once `.verevon-chat-page` exists (or right away). */
-function whenChatPage(run: (page: HTMLElement) => void): void {
-  const found = document.querySelector<HTMLElement>('.verevon-chat-page')
-  if (found) {
-    run(found)
-    return
-  }
-  const observer = new MutationObserver(() => {
-    const page = document.querySelector<HTMLElement>('.verevon-chat-page')
-    if (!page) return
-    observer.disconnect()
-    run(page)
-  })
-  const start = () => observer.observe(document.body, { childList: true, subtree: true })
-  if (document.body) start()
-  else document.addEventListener('DOMContentLoaded', start, { once: true })
-}
-
-/**
- * The reserved work-surface column shows the Kilder surface's REAL empty state
- * from frame 0 (`EmptyPanel` from ChatPanels with the product's own Norwegian
- * copy, the same icon and CSS), instead of a blank white column that read as a
- * half-loaded page. It sits over the reserved column (02-plan.css
- * `.verevon-s02-canvas-placeholder`), fades out from the press on «Send melding»
- * (a real `pointerdown` from the harness's CDP mouse) and is removed once
- * faded, 100 ms before the real canvas mounts on the first citation. Inert and
- * aria-hidden; no component is touched.
- */
-function installEmptyCanvasPlaceholder(): void {
-  whenChatPage((page) => {
-    const host = document.createElement('div')
-    host.className = 'verevon-s02-canvas-placeholder'
-    host.setAttribute('aria-hidden', 'true')
-    host.inert = true
-    const body = document.createElement('div')
-    body.className = 'verevon-chat-workspace-canvas__body'
-    host.appendChild(body)
-    page.appendChild(host)
-    render(
-      () =>
-        EmptyPanel({
-          icon: Link2({ size: 20 }),
-          title: 'Ingen kilder ennå',
-          subtitle: 'Interne kunnskapskilder og websøk dukker opp her når Verevon bruker dem i svaret.',
-        }),
-      body,
-    )
-    const leave = () => {
-      if (host.classList.contains('is-leaving')) return
-      host.classList.add('is-leaving')
-      host.addEventListener('animationend', () => host.remove(), { once: true })
-    }
-    document.addEventListener('pointerdown', leave, true)
-    document.addEventListener('click', leave, true)
-  })
 }
 
 /**
@@ -429,18 +371,27 @@ function installEntranceDirector(): void {
 
 installScene02Setup()
 
+/** The suggestion card on the start screen (suggestions.ts). */
+const SUGGESTION: SceneTarget = { selector: '.v-suggestion', pin: true }
 const SEND_BUTTON: SceneTarget = { name: 'Send melding', role: 'button', pin: true }
 const APPROVE_BUTTON: SceneTarget = { selector: '.verevon-chat-approval__approve', pin: true }
 
+/** Mouse release on the suggestion: its click fills the composer (nothing is sent). */
+const CHOOSE_AT = 1_380
 /**
  * Mouse release that sends the message; the POST arrives a few ms later.
  * The composer's rotating placeholder suggestion (DashboardComposer, every
  * 6.0 s after it empties) is hidden in 02-plan.css, so it no longer constrains
  * the send time.
  */
-const SEND_AT = 1_250
+const SEND_AT = 2_280
 /** Scene time at which the stream clock starts (the intercepted POST). */
-const POST_AT = 1_250
+const POST_AT = 2_290
+/**
+ * First citation: the Kilder surface opens. The entrance constants above
+ * (KILDER_MOUNT_TO_EXIT, KILDER_TABS_BACK) are relative to this moment.
+ */
+const KILDER_AT = 2_560
 
 /** A stream frame placed at scene time `sceneMs`. */
 function frame(sceneMs: number, event: string, data: Record<string, unknown>): SceneStreamFrame {
@@ -469,63 +420,77 @@ function artifact(sceneMs: number, lines: number, withPlan: boolean): SceneStrea
 }
 
 const frames: SceneStreamFrame[] = [
-  frame(1_280, 'connected', { ok: true, request_id: nordlysRequestId, thread_id: nordlysThreadId, model_used: 'verevon-balance', run_id: nordlysRunId }),
+  frame(POST_AT + 10, 'connected', { ok: true, request_id: nordlysRequestId, thread_id: nordlysThreadId, model_used: 'verevon-balance', run_id: nordlysRunId }),
   // The thread title right away: until it arrives the header shows the
   // question itself, cut with an ellipsis.
-  frame(1_290, 'title', { title: nordlysTitle, request_id: nordlysRequestId }),
-  // Sources, 120 ms apart (scene 1.50 / 1.62 / 1.74 s). One source group, so
-  // the real list shows no per-provider headings (a heading inserted above
-  // the first card when the second provider arrived pushed it down 37 px in
-  // one frame). The list re-mounts every card on each citation; the entrance
-  // director above keeps each card's rise running across those re-mounts.
-  ...nordlysSources.map((source, index) => frame(1_500 + index * 120, 'citation', { ...source, source_group_id: 'kb:fjordform', source_group_label: 'Fjordform AS' })),
-  // Assistant line (2.50 s). The three sources hold as a complete beat until
-  // 2.56 s, fade out with the tab strip (KILDER_EXIT), and Resultat opens with
-  // the first finding at 2.80 s.
-  chunk(2_500, nordlysAnswerChunks[0]!),
-  chunk(2_700, nordlysAnswerChunks[1]!),
-  artifact(2_800, 1, false),
-  // Arbeid badge 1 → 2 → 3. The first step now lands at 2.74 s, while the tab
-  // strip is faded out and 60 ms before the artifact opens Resultat, so the
-  // strip is rebuilt once, in its final layout (Arbeid, Resultat, Kilder), and
-  // fades back in with the document (KILDER_EXIT). Later steps only change the
-  // badge digit.
-  step(2_740, 0, 'done'),
-  artifact(3_200, 2, false),
-  step(3_400, 1, 'done'),
-  artifact(3_600, 3, false),
-  artifact(4_000, 4, false),
-  step(4_100, 2, 'done'),
-  // Draft block + plan rows (4.60–5.10 s).
-  chunk(4_600, nordlysDraftChunks[0]!),
-  artifact(4_700, 4, true),
-  chunk(4_850, nordlysDraftChunks[1]!),
-  chunk(5_100, nordlysDraftChunks[2]!),
-  // The approval gate (5.40 s): the third step (id = run id) pauses for a
-  // person, so the real controller fetches the run's pending approvals.
-  step(5_400, 2, 'awaiting_approval'),
+  frame(POST_AT + 20, 'title', { title: nordlysTitle, request_id: nordlysRequestId }),
+  // Sources, 120 ms apart. One source group, so the real list shows no
+  // per-provider headings (a heading inserted above the first card when the
+  // second provider arrived pushed it down 37 px in one frame). The list
+  // re-mounts every card on each citation; the entrance director above keeps
+  // each card's rise running across those re-mounts.
+  ...nordlysSources.map((source, index) => frame(KILDER_AT + index * 120, 'citation', { ...source, source_group_id: 'kb:fjordform', source_group_label: 'Fjordform AS' })),
+  // Assistant line. The three sources hold at full opacity until the swap.
+  chunk(3_300, nordlysAnswerChunks[0]!),
+  chunk(3_500, nordlysAnswerChunks[1]!),
+  // Arbeid badge 1 → 2 → 3. The first step lands 60 ms before the artifact,
+  // while the tab strip is faded out, so the strip is rebuilt once in its
+  // final layout (Arbeid, Resultat, Kilder) and fades back in with the
+  // document (KILDER_EXIT). Later steps only change the badge digit.
+  step(KILDER_AT + 1_240, 0, 'done'),
+  artifact(KILDER_AT + 1_300, 1, false),
+  artifact(4_160, 2, false),
+  step(4_300, 1, 'done'),
+  artifact(4_460, 3, false),
+  artifact(4_760, 4, false),
+  step(4_900, 2, 'done'),
+  // Draft block + plan rows.
+  chunk(5_000, nordlysDraftChunks[0]!),
+  artifact(5_100, 4, true),
+  chunk(5_250, nordlysDraftChunks[1]!),
+  chunk(5_450, nordlysDraftChunks[2]!),
+  // The approval gate: the third step (id = run id) pauses for a person, so
+  // the real controller fetches the run's pending approvals.
+  step(5_700, 2, 'awaiting_approval'),
   // `done` follows the pausing step by 160 ms. Sent in the same tick, the
   // approval card mounted after the turn had settled and the transcript no
   // longer followed it.
-  frame(5_560, 'done', { request_id: nordlysRequestId, model_used: 'verevon-balance', stop_reason: 'end_turn' }),
+  frame(5_860, 'done', { request_id: nordlysRequestId, model_used: 'verevon-balance', stop_reason: 'end_turn' }),
 ]
 
 export const scene02Plan: SceneDefinition = {
   id: '02-plan',
   durationMs: 8_000,
-  composerPrefill: nordlysQuestion,
+  // Empty: the start screen is the product's own. The click on the suggestion
+  // card fills the composer (suggestions.ts).
+  composerPrefill: '',
+  readySelectors: ['.v-suggestion'],
   stream: { path: '/api/v1/chat/stream', frames, closeAfterMs: 40 },
   hoverTarget: APPROVE_BUTTON,
   pointer: [
-    // First 0.5 s static, cursor hidden. It fades in beside the send button at 0.70 s.
-    { at: 700, target: SEND_BUTTON, nudge: { x: -150, y: -30 }, visible: true, pressed: false },
-    { at: 840, target: SEND_BUTTON, nudge: { x: -150, y: -30 }, visible: true, pressed: false, ease: 'hold' },
-    // Glide to «Send melding» (350 ms ease-out), press, release.
-    { at: 1_190, target: SEND_BUTTON, visible: true, pressed: false },
-    { at: 1_200, target: SEND_BUTTON, visible: true, pressed: true },
+    // First 0.5 s static, cursor hidden and parked off the app card (a hidden
+    // pointer over the card would put a real :hover state into the resting
+    // frames, and into the frames the loop dissolves into).
+    { at: 0, x: 4, y: 634, visible: false, pressed: false },
+    // It fades in a little below-left of the suggestion, rests, then glides
+    // onto it (500 ms ease-out).
+    { at: 700, target: SUGGESTION, nudge: { x: -80, y: 80 }, visible: true, pressed: false },
+    { at: 800, target: SUGGESTION, nudge: { x: -80, y: 80 }, visible: true, pressed: false, ease: 'hold' },
+    { at: 1_300, target: SUGGESTION, offset: { x: 0.62, y: 0.55 }, visible: true, pressed: false },
+    // Press and release: the real click fills the composer.
+    { at: 1_310, target: SUGGESTION, offset: { x: 0.62, y: 0.55 }, visible: true, pressed: true },
+    { at: CHOOSE_AT, target: SUGGESTION, offset: { x: 0.62, y: 0.55 }, visible: true, pressed: false },
+    // A beat to read the filled composer, then one glide to «Send melding»
+    // (390 ms ease-out), press, release.
+    { at: 1_800, target: SUGGESTION, offset: { x: 0.62, y: 0.55 }, visible: true, pressed: false, ease: 'hold' },
+    { at: 2_190, target: SEND_BUTTON, visible: true, pressed: false },
+    { at: 2_200, target: SEND_BUTTON, visible: true, pressed: true },
     { at: SEND_AT, target: SEND_BUTTON, visible: true, pressed: false },
-    // Rest on the button for 150 ms, then fade out in place.
-    { at: 1_400, target: SEND_BUTTON, visible: false, pressed: false, ease: 'hold' },
+    // Rest on the button for 120 ms and fade out in place.
+    { at: 2_400, target: SEND_BUTTON, visible: false, pressed: false, ease: 'hold' },
+    // Parked off the app card once invisible, so no hover state is held
+    // anywhere while the answer builds.
+    { at: 2_520, x: 4, y: 634, visible: false, pressed: false },
     // Fade in just below the approval card and glide to «Godkjenn» (550 ms).
     { at: 6_300, target: APPROVE_BUTTON, nudge: { x: 44, y: 46 }, visible: true, pressed: false },
     { at: 6_400, target: APPROVE_BUTTON, nudge: { x: 44, y: 46 }, visible: true, pressed: false, ease: 'hold' },
@@ -533,12 +498,15 @@ export const scene02Plan: SceneDefinition = {
     { at: 8_000, target: APPROVE_BUTTON, offset: { x: 0.7, y: 0.62 }, visible: true, pressed: false, ease: 'hold' },
   ],
   events: [
-    { at: 0, kind: 'note', note: 'frame 0: resting composer, empty work surface, cursor hidden' },
-    { at: 840, kind: 'cursor', note: 'cursor glides to Send melding' },
+    { at: 0, kind: 'note', note: 'frame 0: centred start screen, suggestion card, empty composer, no work surface, cursor hidden' },
+    { at: 800, kind: 'cursor', note: 'cursor glides to the suggestion' },
+    { at: CHOOSE_AT, kind: 'ui', note: 'click the suggestion: fills the composer (autopilot only)', action: 'click', target: SUGGESTION },
+    { at: 1_800, kind: 'cursor', note: 'cursor glides to Send melding' },
     { at: SEND_AT, kind: 'ui', note: 'click Send melding (autopilot only)', action: 'click', target: { name: 'Send melding', role: 'button' } },
-    { at: 1_500, kind: 'sse', note: 'citations start; Kilder surface opens', event: 'citation' },
-    { at: 2_500, kind: 'sse', note: 'answer streams; Resultat opens with the status document', event: 'chunk' },
-    { at: 4_600, kind: 'sse', note: 'draft block; plan rows; approval gate', event: 'step_update' },
+    { at: KILDER_AT, kind: 'sse', note: 'citations start; the Kilder surface grows in', event: 'citation' },
+    { at: 3_300, kind: 'sse', note: 'answer streams; sources hold', event: 'chunk' },
+    { at: KILDER_AT + 1_300, kind: 'sse', note: 'Resultat opens with the status document', event: 'artifact' },
+    { at: 5_000, kind: 'sse', note: 'draft block; plan rows; approval gate', event: 'step_update' },
     { at: 6_400, kind: 'cursor', note: 'cursor glides to Godkjenn' },
     { at: 6_950, kind: 'hover', note: 'Godkjenn hovered, held to the end', target: APPROVE_BUTTON },
     { at: 6_950, kind: 'ui', note: 'hover Godkjenn (autopilot only)', action: 'hover', target: APPROVE_BUTTON },

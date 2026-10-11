@@ -1,20 +1,23 @@
 /*
- * Scene 02 · Plan — film-only layout and motion polish.
+ * Scene 02 · Plan: film-only layout and motion polish.
  *
  * Scoped to `html[data-verevon-scene='02-plan']` (set by scenes/02-plan.ts
  * when the route is /scene/02-plan), so scene 03 and the product are never
- * affected. Nothing here changes a component or a token. It does three kinds
- * of things only:
+ * affected. Nothing here changes a component or a token. Shared start-screen
+ * and work-surface rules live in ../scene.css. This file does two kinds of
+ * things only:
  *
- *  1. Keep the layout still. The work surface's column is reserved from frame
- *     0 and the welcome composer sits where the dock will hold it, so the
- *     conversation column never reflows and the composer never moves.
- *  2. Quiet the frame. Chrome that competes with the one call to action
+ *  1. Quiet the frame. Chrome that competes with the one call to action
  *     (artifact metadata and file actions, the message action row, the
  *     scheduled-runs entry, the rotating composer suggestion) is hidden.
- *  3. Give real elements the entrance the beat sheet asks for (CONTRACT.md
+ *  2. Give real elements the entrance the beat sheet asks for (CONTRACT.md
  *     §1: 250–450 ms ease-out, 8–16 px slides with a fade, no bounce), where
  *     the product mounts them in a single frame.
+ *
+ * Round 5: the film starts on the product's own centred start screen with no
+ * work surface, so the reserved right column and the pinned composer position
+ * of the earlier rounds are gone. The composer glides to its dock and the work
+ * surface grows in (choreography.ts).
  *
  * The real markdown renderer and the source list rebuild their blocks on each
  * streamed update, so entrance rules target only the element that is new in
@@ -49,51 +52,7 @@
   }
 }
 
-/* ── 1. A still layout ────────────────────────────────────────────────────── */
-
-/* The empty work surface from frame 0: the canvas's own surface and shadow in
-   the column the canvas takes when it opens (its default 440 px, the inline
-   flex-basis ChatWorkspaceCanvas sets). It is the last flex item of the chat
-   page, exactly where the canvas mounts, and it gives way to the canvas in the
-   same frame (`--canvas` is set by the same state that mounts it). */
-html[data-verevon-scene='02-plan'] .verevon-chat-page::after {
-  position: relative;
-  z-index: 11;
-  flex: 0 0 440px;
-  background: var(--verevon-i-surface);
-  box-shadow: -12px 0 32px rgb(17 17 17 / 4%);
-  content: '';
-}
-
-html[data-verevon-scene='02-plan'] .verevon-chat-page.verevon-chat-page--canvas::after {
-  display: none;
-}
-
-/* The welcome composer sits where the dock holds the composer after the first
-   message (same inline padding and bottom inset as `.verevon-chat-composer-dock`),
-   and the greeting is centred in the space above it. «Vis eksempler» would
-   sit below the composer, so it is left out of the film. */
-html[data-verevon-scene='02-plan'] .verevon-chat-empty {
-  align-items: stretch;
-  padding: 8px clamp(12px, 2vw, 22px) 16px;
-}
-
-html[data-verevon-scene='02-plan'] .verevon-chat-empty__inner {
-  display: flex;
-  flex-direction: column;
-  max-width: 720px;
-  margin: 0 auto;
-  transform: none;
-}
-
-html[data-verevon-scene='02-plan'] .verevon-chat-empty__heading {
-  margin-block: auto;
-  padding-inline: 4px;
-}
-
-html[data-verevon-scene='02-plan'] .chat-appearance-ideas-toggle {
-  display: none;
-}
+/* ── 1. The frame ─────────────────────────────────────────────────────────── */
 
 /* The composer's compact toolbar. The product switches to it while a canvas
    is open below 1180 px (global.css, `.verevon-chat-page--canvas
@@ -125,7 +84,7 @@ html[data-verevon-scene='02-plan'] .verevon-s02-welcome-ghost {
   position: fixed;
   z-index: 1;
   pointer-events: none;
-  animation: verevon-s02-leave 320ms cubic-bezier(0.33, 1, 0.68, 1) forwards;
+  animation: verevon-s02-leave 220ms cubic-bezier(0.33, 1, 0.68, 1) forwards;
 }
 
 html[data-verevon-scene='02-plan'] .verevon-s02-welcome-ghost > .verevon-chat-empty__heading {
@@ -135,8 +94,10 @@ html[data-verevon-scene='02-plan'] .verevon-s02-welcome-ghost > .verevon-chat-em
 
 /* ── 2. A quiet frame ─────────────────────────────────────────────────────── */
 
-/* The rotating suggestion in the empty composer («… — Tab for å bruke»)
-   changes every 6 s and has nothing to do with the story. */
+/* The composer's rotating hint («Oppsummer et dokument … — Tab for å bruke»)
+   is a generic example. On a context-aware start screen the one suggestion
+   above the composer is the example, so the hint stays out of the film; it
+   also changes every 6 s, which has nothing to do with the story. */
 html[data-verevon-scene='02-plan'] .verevon-composer-shell textarea::placeholder {
   color: transparent;
 }
@@ -217,14 +178,17 @@ html[data-verevon-scene='02-plan'] .verevon-chat-artifact-document li > em {
    - tighter thread rhythm and no bottom fade mask (nothing scrolls, so
      nothing needs to dissolve into the composer).
    Any scroll that still happened would be instant, never a smooth glide. */
-html[data-verevon-scene='02-plan'] .dashboard-composer-root--chat .verevon-dashboard-textarea {
+html[data-verevon-scene='02-plan'] .verevon-chat-composer-dock .dashboard-composer-root--chat .verevon-dashboard-textarea {
   min-height: 0;
   height: 33px !important;
 }
 
+/* Round 5: the question is two lines (a suggestion, not a one-line prompt), which
+   costs 24 px; the list's idle padding gives it back so the thread still fits
+   without scrolling (measured: 390 px of content in a 375 px list before). */
 html[data-verevon-scene='02-plan'] .verevon-chat-message-list {
-  padding-top: 20px;
-  padding-bottom: 20px;
+  padding-top: 12px;
+  padding-bottom: 8px;
   scroll-behavior: auto;
   -webkit-mask-image: none;
   mask-image: none;
@@ -261,31 +225,6 @@ html[data-verevon-scene='02-plan'] .verevon-chat-workspace-canvas__body:has(> .v
   padding-right: 20px;
 }
 
-/* The work surface's real empty state from frame 0 (02-plan.ts
-   installEmptyCanvasPlaceholder): the Kilder surface's own EmptyPanel, in the
-   reserved column below where the tab strip will be. */
-html[data-verevon-scene='02-plan'] .verevon-s02-canvas-placeholder {
-  position: absolute;
-  top: 0;
-  right: 0;
-  bottom: 0;
-  z-index: 12;
-  display: flex;
-  width: 440px;
-  padding-top: 56px;
-  pointer-events: none;
-}
-
-html[data-verevon-scene='02-plan'] .verevon-s02-canvas-placeholder > .verevon-chat-workspace-canvas__body {
-  display: flex;
-  flex: 1 1 auto;
-  padding-bottom: 56px;
-}
-
-html[data-verevon-scene='02-plan'] .verevon-s02-canvas-placeholder.is-leaving {
-  animation: verevon-s02-fade-out 200ms cubic-bezier(0.33, 1, 0.68, 1) 60ms forwards;
-}
-
 @keyframes verevon-s02-fade-out {
   to {
     opacity: 0;
@@ -310,11 +249,11 @@ html[data-verevon-scene='02-plan'] .verevon-chat-header {
 }
 
 html[data-verevon-scene='02-plan'] .verevon-chat-message {
-  animation: verevon-s02-rise-12 400ms cubic-bezier(0.33, 1, 0.68, 1) 120ms both;
+  animation: verevon-s02-rise-12 400ms cubic-bezier(0.33, 1, 0.68, 1) 200ms both;
 }
 
 html[data-verevon-scene='02-plan'] .verevon-chat-message + .verevon-chat-message {
-  animation-delay: 220ms;
+  animation-delay: 300ms;
 }
 
 /* The work surface fills in where the empty state was: tab strip and body. */
@@ -331,17 +270,17 @@ html[data-verevon-scene='02-plan'] .verevon-chat-workspace-canvas__head {
 }
 
 html[data-verevon-scene='02-plan'] .verevon-chat-workspace-canvas__body > .verevon-chat-artifact-workspace {
-  animation: verevon-s02-rise-16 420ms cubic-bezier(0.33, 1, 0.68, 1) both;
+  animation: verevon-s02-rise-16 420ms cubic-bezier(0.33, 1, 0.68, 1) 40ms both;
 }
 
 /* Kilder → Resultat cross-dissolve (02-plan.ts installKilderCrossfade): the
    removed Kilder body is laid over the real body, same box, and fades out in
-   260 ms while the document rises in. */
+   200 ms while the document rises in. */
 html[data-verevon-scene='02-plan'] .verevon-s02-kilder-ghost {
   position: absolute;
   z-index: 2;
   pointer-events: none;
-  animation: verevon-s02-fade-out 260ms cubic-bezier(0.33, 1, 0.68, 1) forwards;
+  animation: verevon-s02-fade-out 200ms cubic-bezier(0.33, 1, 0.68, 1) forwards;
 }
 
 /* The pointer overlay fades over 150 ms (scene.css has 180 ms ease-out, which

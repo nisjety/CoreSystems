@@ -1,5 +1,7 @@
 /**
- * Fictional world for the product scenes (PLAN_2026-10-11.md section 1 and 4).
+ * Fictional world for the product scenes (PLAN_2026-10-11.md section 1 and 4,
+ * amended by CONTRACT.md amendment F: context-aware start, Bring as the
+ * tracking source, an invoice story for scene 03).
  *
  * Everything a frame can show comes from here: the organisation Fjordform AS,
  * the user Ida Berg, the customer Nordlys Handel AS and order 4821. No real
@@ -80,19 +82,34 @@ export const nordlysThreadId = 'thr_nordlys_4821'
 export const nordlysRequestId = 'req_nordlys_4821'
 export const nordlysRunId = 'run_nordlys_4821'
 
-export const nordlysQuestion = 'Hva er status på Nordlys-leveransen, og hva må vi gjøre nå?'
+/**
+ * The context-aware start (round 5). The film opens on a fictional carrier
+ * notification instead of a typed question. Verevon turns it into one concrete
+ * prompt suggestion that says what happened, where it came from and when, and
+ * proposes the next action. Clicking the suggestion only FILLS the composer
+ * with this text (the product's own starter behaviour, `onSelectPrompt =
+ * setInput`); the person then sends it.
+ */
+export const nordlysQuestion = 'Bring melder at Nordlys-leveransen er forsinket. Skal jeg sjekke konsekvensene og lage en plan for oppfølging?'
 
-export const nordlysTitle = 'Nordlys-leveransen · status og neste steg'
+export const nordlysSuggestion = {
+  label: 'Dette har skjedd',
+  text: nordlysQuestion,
+  source: 'Bring · sporingsvarsel',
+  time: 'i dag 08:12',
+}
+
+export const nordlysTitle = 'Nordlys-leveransen · forsinkelse'
 
 /** The three grounding sources, in the order they are shown. */
 export const nordlysSources = [
   {
-    id: 'src_visma_4821',
-    title: 'Ordre 4821 · Visma.net',
-    url: 'https://visma.fjordform.example/salgsordre/4821',
-    snippet: 'Status: Bekreftet. Opprinnelig levering: 12. okt. Avvik: pakke forsinket hos transportør, ny leveringsdato onsdag 14. okt.',
-    source_group_id: 'kb:visma',
-    source_group_label: 'Visma.net',
+    id: 'src_bring_nordlys',
+    title: 'Sporing · Bring',
+    url: 'https://sporing.fjordform.example/bring/nordlys',
+    snippet: 'Status: Forsinket. Opprinnelig levering: 12. okt. Ny forventet levering: onsdag 14. okt. Årsak: forsinket i terminal.',
+    source_group_id: 'kb:bring',
+    source_group_label: 'Bring',
     origin: 'knowledge',
   },
   {
@@ -124,7 +141,7 @@ export const nordlysAnswerChunks = [
 /**
  * The draft block added after the status is in place: two lines, so the final
  * frame keeps the whole answer in view. Every claim in it is stated by the
- * Visma order (forsinket hos transportør, ny leveringsdato onsdag 14. okt).
+ * Bring tracking status (forsinket hos transportør, ny leveringsdato onsdag 14. okt).
  * Wednesday 14 October 2026 is two days after the agreed Monday 12 October (the day the
  * e-mail says the fitters are ready), so it reads as a delay.
  */
@@ -143,16 +160,16 @@ export const nordlysArtifactTitle = 'Status · Nordlys-leveransen'
  * sources are cited.
  */
 export const nordlysStatusLines = [
-  { text: 'Forsinket hos transportør.', ref: 'Visma.net' },
-  { text: 'Ny levering: onsdag 14. okt.', ref: 'Visma.net' },
-  { text: 'Montører står klare 12. okt.', ref: 'E-post 9. okt' },
+  { text: 'Forsinket hos transportør.', ref: 'Bring' },
+  { text: 'Ny levering: onsdag 14. okt.', ref: 'Bring' },
+  { text: 'Montering 12. okt må flyttes.', ref: 'E-post 9. okt' },
   { text: 'Varsle kunden i dag.', ref: 'Kundeavtale pkt. 4.2' },
 ]
 
 export const nordlysPlanRows = [
   'Bekreft ny leveringsdato',
   'Send kundemelding',
-  'Oppdater prosjektplan',
+  'Flytt monteringen',
 ]
 
 /**
@@ -190,7 +207,7 @@ export const nordlysApproval = {
  * makes the controller fetch the run's approvals.
  */
 export const nordlysSteps = [
-  { id: 'steg-kilder', title: 'Leser kilder', detail: 'Ordre 4821, kundeavtale og e-post fra Nordlys Handel.', status: 'done' },
+  { id: 'steg-kilder', title: 'Leser kilder', detail: 'Sporing fra Bring, kundeavtale og e-post fra Nordlys Handel.', status: 'done' },
   { id: 'steg-status', title: 'Setter sammen status', detail: 'Fire funn med kildehenvisning.', status: 'done' },
   { id: nordlysRunId, title: 'Lager planutkast', detail: 'Tre neste steg, klare for godkjenning.', status: 'done' },
 ]

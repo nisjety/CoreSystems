@@ -210,20 +210,26 @@ export default function ScenePage() {
             })
             appendSceneLog('runtime', 'prepare: done')
           }
-          prefillComposer(textarea, scene.composerPrefill)
-          await waitFor(() => (textarea.value === scene.composerPrefill ? textarea : null))
-          // The send button is enabled once the composer has accepted the text.
-          await waitFor(() => {
-            const button = elementFor({ name: 'Send melding', role: 'button' })
-            return button instanceof HTMLButtonElement && !button.disabled ? button : null
-          })
+          if (scene.composerPrefill) {
+            prefillComposer(textarea, scene.composerPrefill)
+            await waitFor(() => (textarea.value === scene.composerPrefill ? textarea : null))
+            // The send button is enabled once the composer has accepted the text.
+            await waitFor(() => {
+              const button = elementFor({ name: 'Send melding', role: 'button' })
+              return button instanceof HTMLButtonElement && !button.disabled ? button : null
+            })
+          }
+          // Whatever the scene injects into the start screen (the suggestion card).
+          for (const selector of scene.readySelectors ?? []) {
+            await waitFor(() => document.querySelector(selector))
+          }
           textarea.blur()
           // The composer eases out of its focused look (160 ms transitions)
           // after the blur; frame 0 must be the settled resting state.
           await new Promise<void>((resolve) => window.setTimeout(resolve, 320))
           await nextFrame()
           await nextFrame()
-          appendSceneLog('runtime', 'ready: fonts loaded, composer prefilled, frame 0')
+          appendSceneLog('runtime', 'ready: fonts loaded, start screen settled, frame 0')
           resolveReady()
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error)

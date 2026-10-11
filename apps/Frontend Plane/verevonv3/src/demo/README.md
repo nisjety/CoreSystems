@@ -46,9 +46,11 @@ e-mail) appears in any checkpoint. Exit code 0 means clean.
 |---|---|
 | `scene-types.ts` | `VerevonScene` (the `window.__verevonScene` contract, verbatim from CONTRACT.md §2) and `SceneDefinition`. |
 | `install.ts` | `fetch` interceptor installed before render. Answers every `/api/*` request from fixtures; plays the scene's SSE script for `POST /api/v1/chat/stream` through a `setTimeout`-driven `ReadableStream`; logs unknown `/api/*` paths as `unmatched-api`. |
-| `fixtures/fjordform.ts` | The fictional world: Fjordform AS, Ida Berg, Nordlys Handel AS, order 4821, the three sources, the status document, the plan rows, the approval. Norwegian only. |
-| `fixtures/fjordform-undersok.ts` | Scene 03: export run 184 of order 4821, the three sub-tasks, the browser step, the proposal document, the «Kjør simulert test» approval. |
-| `fixtures/assets/eksportlogg-kjoring-184.png` | The browser step's screenshot (fictional test-environment export log), drawn from `eksportlogg-kjoring-184.source.html`. |
+| `fixtures/fjordform.ts` | The fictional world: Fjordform AS, Ida Berg, Nordlys Handel AS, order 4821. Scene 02: the Bring delay notice (the start-screen suggestion), the three sources (Bring tracking, customer agreement, e-mail), the status document, the plan rows, the approval. Norwegian only. |
+| `fixtures/fjordform-undersok.ts` | Scene 03: the invoice notice (the start-screen suggestion), invoice 20471 against the framework agreement and order 4821 (120 stk at 1 380,00 against 1 240,00, a 16 800,00 kr difference), the three sub-tasks, the browser step, the comparison document, the «Opprett kreditnota» approval. |
+| `fixtures/assets/faktura-20471.png` | The browser step's screenshot (fictional invoice in the accounting system, the unit price highlighted), drawn from `faktura-20471.source.html`. |
+| `suggestions.ts` | The context-aware start screen (CONTRACT amendment F): builds the prompt suggestion card from the product's own starter markup and inserts it into the real start screen in place of the welcome text. A click only fills the composer; it never sends. |
+| `choreography.ts` | Softens the two layout changes the product makes in a single frame: the composer gliding from the middle of the start screen to its dock, and the work surface growing in from the right edge. Web Animations on the real elements, driven by `document.timeline`. |
 | `scene-timeline.ts` | `createSceneScheduler` (setTimeout only), `pointerAt` (pure: keyframes + time + lazy target resolver), `resolveSceneTarget`. Unit-tested in `scene-timeline.test.ts`. |
 | `ScenePage.tsx` | Route `/scene/:id`. Mounts the real `ChatPage`, applies the `/chat` appearance tokens to the shell, prefills the composer through the real textarea + `input` event, resolves `ready` at frame 0, installs `window.__verevonScene`. |
 | `SceneCursor.tsx` | 20 px arrow overlay with a soft shadow, driven by `setCursor`. |
