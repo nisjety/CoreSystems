@@ -19,7 +19,40 @@ export type ProductLoopMedia = {
 	objectPosition?: string;
 	poster?: string;
 	src?: string;
+	webm?: string;
 };
+
+// A loop film plays only while it is in view, its stage layer is showing and the page is
+// visible. Under prefers-reduced-motion: reduce it never plays, so the poster stays.
+export function shouldPlayProductLoopVideo({
+	documentHidden,
+	inView,
+	layerVisible,
+	reducedMotion,
+}: {
+	documentHidden: boolean;
+	inView: boolean;
+	layerVisible: boolean;
+	reducedMotion: boolean;
+}) {
+	return inView && layerVisible && !documentHidden && !reducedMotion;
+}
+
+// The site's layout shim rewrites every prefers-reduced-motion matchMedia query to full motion.
+// The film's motion-reduce variant sets a custom property through the CSS cascade instead, which
+// the shim does not change, so the native preference still stops playback.
+export function productLoopPrefersReducedMotion(element: Element) {
+	return getComputedStyle(element).getPropertyValue("--product-loop-motion").trim() === "reduce";
+}
+
+// A stage layer counts as showing from its first visible frame. Starting the film there, rather than
+// part-way into the fade, keeps the browser from painting the poster (the film's end state) over the
+// opening frames of the fade-in.
+export function productLoopLayerShowing(layer: Element | null) {
+	if (!layer) return true;
+	const style = getComputedStyle(layer);
+	return style.visibility !== "hidden" && Number(style.opacity) > 0;
+}
 
 function ProductLoopVideo({ media }: { media: ProductLoopMedia }) {
 	const videoRef = useRef<HTMLVideoElement>(null);
@@ -27,10 +60,11 @@ function ProductLoopVideo({ media }: { media: ProductLoopMedia }) {
 		const video = videoRef.current;
 		if (!video) return;
 		const layer = video.closest<HTMLElement>("[data-product-loop-layer]");
+		const motion = typeof window.matchMedia === "function" ? window.matchMedia("(prefers-reduced-motion: reduce)") : null;
 		let isVisible = false;
 		const update = () => {
-			const layerVisible = !layer || (getComputedStyle(layer).visibility !== "hidden" && Number(getComputedStyle(layer).opacity) > 0.1);
-			if (isVisible && layerVisible && !document.hidden) {
+			const layerVisible = productLoopLayerShowing(layer);
+			if (shouldPlayProductLoopVideo({ documentHidden: document.hidden, inView: isVisible, layerVisible, reducedMotion: (motion?.matches ?? false) || productLoopPrefersReducedMotion(video) })) {
 				void video.play().catch(() => {});
 			} else video.pause();
 		};
@@ -39,9 +73,33 @@ function ProductLoopVideo({ media }: { media: ProductLoopMedia }) {
 		observer.observe(video);
 		if (layer) layerObserver.observe(layer, { attributes: true, attributeFilter: ["style"] });
 		document.addEventListener("visibilitychange", update);
-		return () => { observer.disconnect(); layerObserver.disconnect(); document.removeEventListener("visibilitychange", update); video.pause(); };
+		motion?.addEventListener("change", update);
+		return () => {
+			observer.disconnect();
+			layerObserver.disconnect();
+			document.removeEventListener("visibilitychange", update);
+			motion?.removeEventListener("change", update);
+			video.pause();
+		};
 	}, []);
-	return <video ref={videoRef} aria-label={media.alt} className="h-full w-full object-contain" muted playsInline poster={media.poster} preload="none" style={{ objectPosition: media.objectPosition ?? "center" }}><source src={media.src} type="video/mp4" /></video>;
+	return (
+		<video
+			aria-label={media.alt}
+			className="h-full w-full object-contain motion-reduce:[--product-loop-motion:reduce]"
+			disablePictureInPicture
+			disableRemotePlayback
+			loop
+			muted
+			playsInline
+			poster={media.poster}
+			preload="metadata"
+			ref={videoRef}
+			style={{ objectPosition: media.objectPosition ?? "center" }}
+		>
+			{media.webm ? <source src={media.webm} type="video/webm" /> : null}
+			<source src={media.src} type="video/mp4" />
+		</video>
+	);
 }
 
 export function ProductLoopMediaContent({

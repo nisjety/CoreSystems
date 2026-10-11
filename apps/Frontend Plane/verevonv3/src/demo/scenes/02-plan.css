@@ -1,0 +1,373 @@
+/*
+ * Scene 02 · Plan — film-only layout and motion polish.
+ *
+ * Scoped to `html[data-verevon-scene='02-plan']` (set by scenes/02-plan.ts
+ * when the route is /scene/02-plan), so scene 03 and the product are never
+ * affected. Nothing here changes a component or a token. It does three kinds
+ * of things only:
+ *
+ *  1. Keep the layout still. The work surface's column is reserved from frame
+ *     0 and the welcome composer sits where the dock will hold it, so the
+ *     conversation column never reflows and the composer never moves.
+ *  2. Quiet the frame. Chrome that competes with the one call to action
+ *     (artifact metadata and file actions, the message action row, the
+ *     scheduled-runs entry, the rotating composer suggestion) is hidden.
+ *  3. Give real elements the entrance the beat sheet asks for (CONTRACT.md
+ *     §1: 250–450 ms ease-out, 8–16 px slides with a fade, no bounce), where
+ *     the product mounts them in a single frame.
+ *
+ * The real markdown renderer and the source list rebuild their blocks on each
+ * streamed update, so entrance rules target only the element that is new in
+ * that update (`:last-child`) and let everything already on screen re-mount
+ * at rest.
+ */
+
+@keyframes verevon-s02-rise {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+}
+
+@keyframes verevon-s02-rise-12 {
+  from {
+    opacity: 0;
+    transform: translateY(12px);
+  }
+}
+
+@keyframes verevon-s02-fade {
+  from {
+    opacity: 0;
+  }
+}
+
+@keyframes verevon-s02-leave {
+  to {
+    opacity: 0;
+    transform: translateY(-8px);
+  }
+}
+
+/* ── 1. A still layout ────────────────────────────────────────────────────── */
+
+/* The empty work surface from frame 0: the canvas's own surface and shadow in
+   the column the canvas takes when it opens (its default 440 px, the inline
+   flex-basis ChatWorkspaceCanvas sets). It is the last flex item of the chat
+   page, exactly where the canvas mounts, and it gives way to the canvas in the
+   same frame (`--canvas` is set by the same state that mounts it). */
+html[data-verevon-scene='02-plan'] .verevon-chat-page::after {
+  position: relative;
+  z-index: 11;
+  flex: 0 0 440px;
+  background: var(--verevon-i-surface);
+  box-shadow: -12px 0 32px rgb(17 17 17 / 4%);
+  content: '';
+}
+
+html[data-verevon-scene='02-plan'] .verevon-chat-page.verevon-chat-page--canvas::after {
+  display: none;
+}
+
+/* The welcome composer sits where the dock holds the composer after the first
+   message (same inline padding and bottom inset as `.verevon-chat-composer-dock`),
+   and the greeting is centred in the space above it. «Vis eksempler» would
+   sit below the composer, so it is left out of the film. */
+html[data-verevon-scene='02-plan'] .verevon-chat-empty {
+  align-items: stretch;
+  padding: 8px clamp(12px, 2vw, 22px) 16px;
+}
+
+html[data-verevon-scene='02-plan'] .verevon-chat-empty__inner {
+  display: flex;
+  flex-direction: column;
+  max-width: 720px;
+  margin: 0 auto;
+  transform: none;
+}
+
+html[data-verevon-scene='02-plan'] .verevon-chat-empty__heading {
+  margin-block: auto;
+  padding-inline: 4px;
+}
+
+html[data-verevon-scene='02-plan'] .chat-appearance-ideas-toggle {
+  display: none;
+}
+
+/* The composer's compact toolbar. The product switches to it while a canvas
+   is open below 1180 px (global.css, `.verevon-chat-page--canvas
+   .dashboard-composer-root--chat …`); the placeholder makes the column that
+   narrow from frame 0, so the same three rules apply from frame 0 and the
+   toolbar does not change when the real canvas mounts. */
+@media (max-width: 1180px) {
+  html[data-verevon-scene='02-plan'] .verevon-chat-page .dashboard-composer-root--chat .dashboard-composer-toolbar__left > :is(.dashboard-composer-toolbar__divider, .dashboard-composer-toolbar-icon:nth-of-type(1)) {
+    display: none;
+  }
+
+  html[data-verevon-scene='02-plan'] .verevon-chat-page .dashboard-composer-root--chat :is(.dashboard-composer-attach, .dashboard-composer-web-button, .dashboard-composer-image-button) {
+    width: 44px;
+    height: 44px;
+    justify-content: center;
+    overflow: hidden;
+    padding-inline: 0;
+    font-size: 0;
+  }
+
+  html[data-verevon-scene='02-plan'] .verevon-chat-page .dashboard-composer-root--chat .dashboard-composer-attach > span:last-child {
+    display: none;
+  }
+}
+
+/* The frozen copy of the welcome text, placed by installWelcomeCrossfade at
+   the spot the real one occupied, leaves over 320 ms (8 px up, fading). */
+html[data-verevon-scene='02-plan'] .verevon-s02-welcome-ghost {
+  position: fixed;
+  z-index: 1;
+  pointer-events: none;
+  animation: verevon-s02-leave 320ms cubic-bezier(0.33, 1, 0.68, 1) forwards;
+}
+
+html[data-verevon-scene='02-plan'] .verevon-s02-welcome-ghost > .verevon-chat-empty__heading {
+  height: 100%;
+  margin: 0;
+}
+
+/* ── 2. A quiet frame ─────────────────────────────────────────────────────── */
+
+/* The rotating suggestion in the empty composer («… — Tab for å bruke»)
+   changes every 6 s and has nothing to do with the story. */
+html[data-verevon-scene='02-plan'] .verevon-composer-shell textarea::placeholder {
+  color: transparent;
+}
+
+/* Transcript chrome that is not part of this story and costs the vertical
+   room the final frame needs (at 640 px tall the transcript is ~340 px): the
+   scheduled-runs entry, the per-message action rows, the «Søk» tool chip
+   repeated under both messages, the artifact chip (the open Resultat surface
+   beside it already names the document) and the «Stopp svar» pill (the send
+   button itself turns into the stop control while the answer streams). The
+   blinking «▋» streaming caret sat alone on a line under the text and
+   blinked in bright blue for three seconds; the stop control says the same. */
+html[data-verevon-scene='02-plan'] .verevon-scheduled-runs-entry,
+html[data-verevon-scene='02-plan'] .verevon-chat-message-actions,
+html[data-verevon-scene='02-plan'] .verevon-chat-tool-chips,
+html[data-verevon-scene='02-plan'] .verevon-chat-artifact-chips,
+html[data-verevon-scene='02-plan'] .verevon-chat-stop-wrap {
+  display: none;
+}
+
+html[data-verevon-scene='02-plan'] .verevon-chat-streaming::after {
+  content: none;
+}
+
+/* Resultat: one title, the findings, the plan. The artifact list card (a
+   second copy of the title), the format/size/time chips and the
+   Kopier/Eksporter/Last ned row are left out, so «Godkjenn» is the only filled
+   orange button in the frame. */
+html[data-verevon-scene='02-plan'] .verevon-chat-artifact-list,
+html[data-verevon-scene='02-plan'] .verevon-chat-artifact-view__title p,
+html[data-verevon-scene='02-plan'] .verevon-chat-artifact-view__actions {
+  display: none;
+}
+
+/* The canvas heading is screen-reader-only and its label is the untranslated
+   surface id («Output», lib/chat-surfaces.ts). A film has no screen reader;
+   leaving it out keeps the text dumps Norwegian. */
+html[data-verevon-scene='02-plan'] .verevon-chat-workspace-canvas__head h2.sr-only {
+  display: none;
+}
+
+/* Source cards: the placeholder hosts (*.fjordform.example) read as developer
+   strings; the card title already names the system. */
+html[data-verevon-scene='02-plan'] .verevon-chat-source-card__meta em {
+  display: none;
+}
+
+/* With the metadata strip gone the document sat 40 px under its title. */
+html[data-verevon-scene='02-plan'] .verevon-chat-artifact-view__body {
+  padding-top: 4px;
+}
+
+/* Plan-row checkboxes on the text's optical centre line. */
+html[data-verevon-scene='02-plan'] .verevon-chat-artifact-document li > input[type='checkbox'] {
+  margin: 0 8px 0 0;
+  vertical-align: -0.1em;
+}
+
+/* The finding's source reference, quiet beside the finding. */
+html[data-verevon-scene='02-plan'] .verevon-chat-artifact-document li > em {
+  color: var(--verevon-e-muted, #6b6b6b);
+  font-style: normal;
+}
+
+/* ── 3. A thread that fits ────────────────────────────────────────────────── */
+
+/* Round 3. The final state (question, answer, draft, approval card) must fit
+   the 1024x640 frame without the transcript ever scrolling: the product's
+   follow-the-bottom scroll moved the whole column 44, 30 and 170 px and
+   pushed the question out of the final frame. Space comes from where it was
+   idle, not from the content:
+   - the composer field holds one line (the prefill is one line; the product's
+     64 px minimum left an empty grey box under it after the send);
+   - the «I dag» divider and the «Meg · Nå nettopp» line are left out (a
+     single fresh thread; the right-aligned bubble already says who asked);
+   - the question bubble may use the column's width, so it reads on one line
+     as it does at a desktop width (at 1024 px its 78 % cap wrapped it);
+   - tighter thread rhythm and no bottom fade mask (nothing scrolls, so
+     nothing needs to dissolve into the composer).
+   Any scroll that still happened would be instant, never a smooth glide. */
+html[data-verevon-scene='02-plan'] .dashboard-composer-root--chat .verevon-dashboard-textarea {
+  min-height: 0;
+  height: 33px !important;
+}
+
+html[data-verevon-scene='02-plan'] .verevon-chat-message-list {
+  padding-top: 20px;
+  padding-bottom: 20px;
+  scroll-behavior: auto;
+  -webkit-mask-image: none;
+  mask-image: none;
+}
+
+html[data-verevon-scene='02-plan'] .verevon-chat-thread {
+  gap: 26px;
+  padding-bottom: 0;
+}
+
+html[data-verevon-scene='02-plan'] .verevon-chat-divider,
+html[data-verevon-scene='02-plan'] .verevon-chat-user-meta {
+  display: none;
+}
+
+html[data-verevon-scene='02-plan'] .verevon-chat-bubble {
+  max-width: 100%;
+}
+
+html[data-verevon-scene='02-plan'] .verevon-chat-approval {
+  padding: 16px 20px;
+}
+
+/* The Resultat document keeps its final height from the moment it opens, so
+   the card never grows in a jump (the plan section added 174 px in one
+   frame). It reads as a sheet that fills in. */
+html[data-verevon-scene='02-plan'] .verevon-chat-artifact-view {
+  min-height: 325px;
+}
+
+/* Kilder: the source cards keep clear of the 3 % safe-area inset on the
+   right (they ended 33 px from the frame edge). */
+html[data-verevon-scene='02-plan'] .verevon-chat-workspace-canvas__body:has(> .verevon-chat-panel) {
+  padding-right: 20px;
+}
+
+/* The work surface's real empty state from frame 0 (02-plan.ts
+   installEmptyCanvasPlaceholder): the Kilder surface's own EmptyPanel, in the
+   reserved column below where the tab strip will be. */
+html[data-verevon-scene='02-plan'] .verevon-s02-canvas-placeholder {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 12;
+  display: flex;
+  width: 440px;
+  padding-top: 56px;
+  pointer-events: none;
+}
+
+html[data-verevon-scene='02-plan'] .verevon-s02-canvas-placeholder > .verevon-chat-workspace-canvas__body {
+  display: flex;
+  flex: 1 1 auto;
+  padding-bottom: 56px;
+}
+
+html[data-verevon-scene='02-plan'] .verevon-s02-canvas-placeholder.is-leaving {
+  animation: verevon-s02-fade-out 200ms cubic-bezier(0.33, 1, 0.68, 1) 60ms forwards;
+}
+
+@keyframes verevon-s02-fade-out {
+  to {
+    opacity: 0;
+  }
+}
+
+/* ── 4. Entrances ─────────────────────────────────────────────────────────── */
+
+/* Elements the product re-mounts on every streamed update (source cards,
+   document lines, the draft block, the approval card, the Kilder exit) get
+   their entrance from the keyed Web Animations in 02-plan.ts
+   (installEntranceDirector). The rules here cover elements that mount once.
+   Curve: the contract's 1 - (1 - p)^3; durations 340-420 ms, so each entrance
+   reads for at least 250 ms. */
+
+/* The thread replaces the welcome state: header and messages fade in while
+   the welcome copy leaves. The user's bubble rises 12 px. The header starts
+   60 ms late: until the thread title arrives (40 ms after the POST) it holds
+   the question cut with an ellipsis. */
+html[data-verevon-scene='02-plan'] .verevon-chat-header {
+  animation: verevon-s02-fade 380ms cubic-bezier(0.33, 1, 0.68, 1) 60ms both;
+}
+
+html[data-verevon-scene='02-plan'] .verevon-chat-message {
+  animation: verevon-s02-rise-12 400ms cubic-bezier(0.33, 1, 0.68, 1) 120ms both;
+}
+
+html[data-verevon-scene='02-plan'] .verevon-chat-message + .verevon-chat-message {
+  animation-delay: 220ms;
+}
+
+/* The work surface fills in where the empty state was: tab strip and body. */
+html[data-verevon-scene='02-plan'] .verevon-chat-workspace-canvas__head {
+  animation: verevon-s02-fade 340ms cubic-bezier(0.33, 1, 0.68, 1) both;
+}
+
+/* Resultat: the document rises 16 px into the space Kilder left. */
+@keyframes verevon-s02-rise-16 {
+  from {
+    opacity: 0;
+    transform: translateY(16px);
+  }
+}
+
+html[data-verevon-scene='02-plan'] .verevon-chat-workspace-canvas__body > .verevon-chat-artifact-workspace {
+  animation: verevon-s02-rise-16 420ms cubic-bezier(0.33, 1, 0.68, 1) both;
+}
+
+/* Kilder → Resultat cross-dissolve (02-plan.ts installKilderCrossfade): the
+   removed Kilder body is laid over the real body, same box, and fades out in
+   260 ms while the document rises in. */
+html[data-verevon-scene='02-plan'] .verevon-s02-kilder-ghost {
+  position: absolute;
+  z-index: 2;
+  pointer-events: none;
+  animation: verevon-s02-fade-out 260ms cubic-bezier(0.33, 1, 0.68, 1) forwards;
+}
+
+/* The pointer overlay fades over 150 ms (scene.css has 180 ms ease-out, which
+   reads as a 2-3 frame pop at 60 fps). Scoped here so scene 03 is unchanged. */
+html[data-verevon-scene='02-plan'] .verevon-scene-cursor {
+  transition: opacity 150ms linear;
+}
+
+/* «Godkjenn» hover. The product's own hover (opacity 0.9) is kept; at a
+   700 px tile it was nearly invisible, so the film adds a soft warm lift
+   shadow that makes the hovered state read without looking pressed. */
+html[data-verevon-scene='02-plan'] .verevon-chat-approval__approve {
+  transition-property: opacity, box-shadow, background-color, border-color;
+  transition-duration: 180ms;
+  transition-timing-function: cubic-bezier(0.33, 1, 0.68, 1);
+}
+
+html[data-verevon-scene='02-plan'] .verevon-chat-approval__approve:hover {
+  box-shadow: 0 6px 16px -2px rgb(122 52 20 / 38%);
+}
+
+/* When the turn settles the product swaps the orange stop control for a new,
+   idle send button in one frame. The idle button eases in over 250 ms, so the
+   change reads as the control settling rather than a cut. (Only the send
+   button: the stop control replaces an orange button with an orange button
+   and must not blink.) */
+html[data-verevon-scene='02-plan'] button.dashboard-composer-submit-button[aria-label='Send melding'] {
+  animation: verevon-s02-fade 250ms cubic-bezier(0.33, 1, 0.68, 1) both;
+}

@@ -1,0 +1,113 @@
+<!doctype html>
+<!--
+  Source of eksportlogg-kjoring-184.png (scene 03 browser evidence). Fictional
+  content only. Rendered with Playwright Chromium: viewport 1245x660,
+  deviceScaleFactor 1, page.screenshot after document.fonts.ready. 1245x660
+  matches the 415x220 CSS px frame the compact BrowserChrome shows in the
+  1280x800 live rail, so nothing is cropped.
+
+  Round 2 (2026-10-11): type enlarged by about 25 % and the first log row
+  («Kjøring 184 startet · 1 ordre») dropped, so the highlighted line
+  `required field customer_id is missing` still reads on a ~700 px wide tile.
+-->
+<html lang="nb">
+<head>
+<meta charset="utf-8" />
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500&display=block" />
+<style>
+  :root {
+    --ink: #1d1f22;
+    --muted: #6b6f76;
+    --faint: #9a9ea5;
+    --line: #e6e6e3;
+    --paper: #fbfbfa;
+    --card: #ffffff;
+    --error-bg: #fbeceb;
+    --error-ink: #a1322b;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { width: 1245px; height: 660px; overflow: hidden; }
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: "Geist", system-ui, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  .bar {
+    height: 92px;
+    display: flex;
+    align-items: center;
+    gap: 22px;
+    padding: 0 52px;
+    border-bottom: 2px solid var(--line);
+    background: var(--card);
+    font-size: 34px;
+    color: var(--muted);
+  }
+  .bar strong { color: var(--ink); font-weight: 600; }
+  .bar .env {
+    margin-left: auto;
+    font-size: 30px;
+    padding: 6px 20px;
+    border-radius: 999px;
+    border: 2px solid var(--line);
+    color: var(--muted);
+  }
+  main { padding: 34px 52px 0; }
+  h1 {
+    font-size: 58px;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+    display: flex;
+    align-items: center;
+    gap: 22px;
+  }
+  .pill {
+    font-size: 30px;
+    font-weight: 500;
+    padding: 6px 20px;
+    border-radius: 999px;
+    background: var(--error-bg);
+    color: var(--error-ink);
+  }
+  .log {
+    margin-top: 30px;
+    background: var(--card);
+    border: 2px solid var(--line);
+    border-radius: 18px;
+    overflow: hidden;
+    font-family: "Geist Mono", ui-monospace, monospace;
+    font-size: 40px;
+    line-height: 1.3;
+  }
+  .row {
+    display: grid;
+    grid-template-columns: 200px 1fr;
+    gap: 24px;
+    padding: 18px 28px;
+    border-top: 2px solid var(--line);
+  }
+  .row:first-child { border-top: 0; }
+  .row time { color: var(--faint); }
+  .row.hit {
+    background: var(--error-bg);
+    box-shadow: inset 8px 0 0 var(--error-ink);
+    color: var(--error-ink);
+    font-weight: 500;
+  }
+  .row.hit time { color: var(--error-ink); opacity: 0.8; }
+  .row.dim { color: var(--muted); }
+</style>
+</head>
+<body>
+  <div class="bar"><strong>Fjordform Integrasjon</strong><span>Eksport</span><span>›</span><span>Visma.net</span><span class="env">Testmiljø</span></div>
+  <main>
+    <h1>Kjøring 184 <span class="pill">Feilet</span></h1>
+    <div class="log">
+      <div class="row dim"><time>09:41:01</time><span>Mapping lastet · kunderegister</span></div>
+      <div class="row hit"><time>09:41:03</time><span>Validering feilet: required field customer_id is missing.</span></div>
+      <div class="row dim"><time>09:41:03</time><span>Eksport stoppet · 0 av 1 sendt</span></div>
+    </div>
+  </main>
+</body>
+</html>

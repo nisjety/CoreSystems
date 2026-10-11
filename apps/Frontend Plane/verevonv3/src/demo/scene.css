@@ -1,0 +1,88 @@
+/*
+ * Scene mode: hide the surrounding page chrome and keep a faint rounded
+ * app-card edge, so the film shows a focused slice of the real workspace
+ * (CONTRACT.md amendment A). Everything is scoped under `html.verevon-scene`,
+ * which ScenePage adds on mount and removes on cleanup. src/styles/global.css
+ * is never edited.
+ */
+
+html.verevon-scene,
+html.verevon-scene body {
+  overflow: hidden;
+  background: #f8f8f7;
+}
+
+/* Chrome that would not be in a product recording. */
+html.verevon-scene .core-navbar,
+html.verevon-scene .core-sidebar,
+html.verevon-scene .core-sidebar-mobile-scrim,
+html.verevon-scene .feedback-widget,
+html.verevon-scene .chat-appearance-preview {
+  display: none !important;
+}
+
+/* The shell compensates for 90% browser zoom on desktop. A film is captured
+   at a fixed CSS viewport, so the slice renders 1:1. The navbar and rail
+   widths collapse to zero because those elements are hidden above. */
+html.verevon-scene .core-product-shell {
+  height: 100dvh;
+  zoom: 1;
+  --dashboard-navbar-height: 0px;
+  --dashboard-rail-width: 0px;
+  background: #f8f8f7;
+}
+
+/* The app card keeps its real border, radius and inset shadow; the gap
+   around it is what reads as a window slice. */
+html.verevon-scene .core-main {
+  padding: 14px;
+}
+
+html.verevon-scene .dashboard-main-panel {
+  border-color: rgb(17 17 17 / 8%);
+}
+
+/* No scrollbars in a frame. The real layout decides what fits. */
+html.verevon-scene * {
+  scrollbar-width: none;
+}
+
+html.verevon-scene *::-webkit-scrollbar {
+  display: none;
+}
+
+/* The composer dock's live-region text and the focus ring belong to a user
+   session, not to a film. Focus outlines stay off so the hovered approval
+   button at the end carries only its own hover state. */
+html.verevon-scene *:focus-visible {
+  outline: none;
+}
+
+/* The pointer overlay. */
+.verevon-scene-cursor {
+  position: fixed;
+  top: 0;
+  left: 0;
+  z-index: 2147483000;
+  width: 20px;
+  height: 20px;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 180ms ease-out;
+  will-change: transform;
+}
+
+.verevon-scene-cursor svg {
+  display: block;
+  filter: drop-shadow(0 1px 1.5px rgb(0 0 0 / 28%)) drop-shadow(0 4px 10px rgb(0 0 0 / 12%));
+  transform-origin: 4px 3px;
+  transition: transform 90ms ease-out;
+}
+
+.verevon-scene-cursor[data-visible='true'] {
+  opacity: 1;
+}
+
+.verevon-scene-cursor[data-pressed='true'] svg {
+  transform: scale(0.9);
+}

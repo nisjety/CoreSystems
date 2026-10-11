@@ -1,0 +1,456 @@
+/*
+ * Scene 03 · Undersøk: film-only presentation, scoped under
+ * `html.verevon-scene--03-undersok` (added by scenes/03-undersok.ts on
+ * /scene/03-undersok only), so scene 02 and the product are untouched. No
+ * component is edited and no product stylesheet changes. These rules
+ *   1. keep the workspace geometry constant for the whole film (the
+ *      conversation column never changes width, the composer never moves,
+ *      the right surface is the canvas's own 440 px column from frame 0),
+ *   2. soften how real panels enter and leave the frame (PLAN §2 motion
+ *      column; elements the product re-mounts get keyed Web Animations from
+ *      the scene file instead), and
+ *   3. hide developer chrome and capture noise that would read as clutter on
+ *      a ~700 px wide tile, and let the final exchange fit without scrolling.
+ *
+ * Viewport 1024x640 CSS px (scene-config.json), as scene 02.
+ * Motion: cubic-bezier(0.16, 1, 0.3, 1) ease-out, 250-450 ms, 8-16 px, fade.
+ * No bounce. Delays are measured from the element's mount, which is
+ * deterministic under the capture's virtual time.
+ */
+
+/* ── 1. Constant geometry ──────────────────────────────────────────────────── */
+
+/* The right work surface is the canvas's default 440 px column (the inline
+   flex-basis ChatWorkspaceCanvas sets, and scene 02's column). The live split
+   takes the same column, and the conversation column has the rest from frame
+   0, so nothing reflows when either panel mounts. */
+html.verevon-scene--03-undersok .verevon-chat-section {
+  flex: 0 0 calc(100% - 440px);
+}
+
+html.verevon-scene--03-undersok .verevon-chat-workspace-canvas,
+html.verevon-scene--03-undersok .verevon-chat-run-panel {
+  flex: 0 0 440px;
+}
+
+/* The right-hand work surface is present from frame 0: the same white
+   surface and soft left shadow the live split and the Resultat canvas draw,
+   laid exactly under them. Their arrival then changes content, not the
+   frame's structure. Same layer as the conversation column but painted after
+   it (last child), so its shadow falls over the header and the dock exactly
+   like the real panels' (z-index 11), which then paint over it. */
+html.verevon-scene--03-undersok .verevon-chat-page::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 10;
+  width: 440px;
+  background: var(--verevon-i-surface);
+  box-shadow: -12px 0 32px rgb(17 17 17 / 4%);
+  pointer-events: none;
+}
+
+/* Once a real panel holds the surface its own shadow takes over (two would
+   double the shade over the transcript). */
+html.verevon-scene--03-undersok .verevon-chat-page:has(> .verevon-chat-run-panel, > .verevon-chat-workspace-canvas)::after {
+  box-shadow: none;
+}
+
+/* The Arbeid surface's real empty state in the reserved column until the
+   press on «Send melding» (03-undersok.ts installEmptyWorkPlaceholder). */
+html.verevon-scene--03-undersok .v03-work-placeholder {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 12;
+  display: flex;
+  width: 440px;
+  padding-bottom: 40px;
+  pointer-events: none;
+}
+
+html.verevon-scene--03-undersok .v03-work-placeholder > .verevon-chat-workspace-canvas__body {
+  display: flex;
+  flex: 1 1 auto;
+}
+
+html.verevon-scene--03-undersok .v03-work-placeholder.is-leaving {
+  animation: v03-fade-out 220ms cubic-bezier(0.33, 1, 0.68, 1) forwards;
+}
+
+/* The empty state rests the composer exactly where the thread dock holds it
+   (bottom of the column, 16 px above the card edge), with the greeting above
+   it. Sending then changes content only, never the composer's position. */
+html.verevon-scene--03-undersok .verevon-chat-empty {
+  align-items: flex-end;
+  padding: 0 clamp(12px, 2vw, 22px) 16px;
+}
+
+html.verevon-scene--03-undersok .verevon-chat-empty__inner {
+  transform: none;
+}
+
+html.verevon-scene--03-undersok .verevon-chat-empty__heading {
+  margin-bottom: 72px;
+}
+
+/* «Vis eksempler» and the starter prompts sit under the composer in the
+   empty state; the dock has nothing there. */
+html.verevon-scene--03-undersok .chat-appearance-ideas-toggle,
+html.verevon-scene--03-undersok .verevon-chat-empty__prompts {
+  display: none;
+}
+
+/* The composer's compact toolbar. The product switches to it while a canvas
+   is open below 1180 px (global.css, `.verevon-chat-page--canvas
+   .dashboard-composer-root--chat …`), so it changed at 4.7 s when Resultat
+   replaced the live split. The column has that width from frame 0, so the
+   same three rules apply from frame 0 and the toolbar never changes. */
+@media (max-width: 1180px) {
+  html.verevon-scene--03-undersok .verevon-chat-page .dashboard-composer-root--chat .dashboard-composer-toolbar__left > :is(.dashboard-composer-toolbar__divider, .dashboard-composer-toolbar-icon:nth-of-type(1)) {
+    display: none;
+  }
+
+  html.verevon-scene--03-undersok .verevon-chat-page .dashboard-composer-root--chat :is(.dashboard-composer-attach, .dashboard-composer-web-button, .dashboard-composer-image-button) {
+    width: 44px;
+    height: 44px;
+    justify-content: center;
+    overflow: hidden;
+    padding-inline: 0;
+    font-size: 0;
+  }
+
+  html.verevon-scene--03-undersok .verevon-chat-page .dashboard-composer-root--chat .dashboard-composer-attach > span:last-child {
+    display: none;
+  }
+}
+
+/* ── 2. Motion ─────────────────────────────────────────────────────────────── */
+
+/* The frozen copy of the greeting (03-undersok.ts installWelcomeCrossfade),
+   placed where the real one was when the thread replaced it, leaves over
+   320 ms (8 px up, fading). Nothing moves before the press. */
+html.verevon-scene--03-undersok .v03-welcome-ghost {
+  position: fixed;
+  z-index: 1;
+  pointer-events: none;
+  animation: v03-leave 320ms cubic-bezier(0.33, 1, 0.68, 1) forwards;
+}
+
+html.verevon-scene--03-undersok .v03-welcome-ghost > .verevon-chat-empty__heading {
+  height: 100%;
+  margin: 0;
+}
+
+/* The product's own 200 ms thread launch is replaced by per-element
+   entrances below. */
+html.verevon-scene--03-undersok .verevon-chat-page-launch .verevon-chat-thread {
+  animation: none;
+}
+
+/* Thread view entrance (1.25 s): the header fades in 60 ms late, so its first
+   visible frame already carries the thread title (the `title` event lands
+   12 ms after the send; until then the header holds the raw question). The
+   question rises 12 px, the assistant row follows 120 ms later. */
+html.verevon-scene--03-undersok .verevon-chat-header {
+  animation: v03-fade 320ms cubic-bezier(0.16, 1, 0.3, 1) 60ms both;
+}
+
+html.verevon-scene--03-undersok .verevon-chat-message--user {
+  animation: v03-rise-12 340ms cubic-bezier(0.16, 1, 0.3, 1) 40ms both;
+}
+
+html.verevon-scene--03-undersok .verevon-chat-message--assistant {
+  animation: v03-rise-12 340ms cubic-bezier(0.16, 1, 0.3, 1) 160ms both;
+}
+
+/* Live split: the panel's surface lands exactly on the resting surface drawn
+   since frame 0, so only its content moves: it slides in 16 px as the run
+   starts and fades out at 4.42-4.67 s, just before the proposal claims the
+   right surface at 4.70 s. */
+html.verevon-scene--03-undersok .verevon-chat-run-panel > * {
+  animation:
+    v03-slide-in 420ms cubic-bezier(0.16, 1, 0.3, 1) 90ms both,
+    v03-fade-out 250ms cubic-bezier(0.4, 0, 1, 1) 3160ms forwards;
+}
+
+/* The proposal (Resultat) replaces the live split: 16 px slide, 420 ms. */
+html.verevon-scene--03-undersok .verevon-chat-workspace-canvas > * {
+  animation: v03-slide-in 420ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+/* A CSS-animated element the app rebuilt (marked by the scene's
+   MutationObserver) is already on screen: no second entrance. */
+html.verevon-scene--03-undersok [data-v03-settled] {
+  animation: none !important;
+}
+
+/* The pointer overlay fades over 150 ms (scene.css has 180 ms ease-out, which
+   reads as a 2-3 frame pop at 60 fps). Same as scene 02. */
+html.verevon-scene--03-undersok .verevon-scene-cursor {
+  transition: opacity 150ms linear;
+}
+
+/* «Godkjenn» hover. The product's own hover (opacity 0.9) is kept; at a
+   700 px tile it was nearly invisible, so the film adds the same soft warm
+   lift shadow as scene 02, which makes the hovered state read without
+   looking pressed. */
+html.verevon-scene--03-undersok .verevon-chat-approval__approve {
+  transition-property: opacity, box-shadow, background-color, border-color;
+  transition-duration: 180ms;
+  transition-timing-function: cubic-bezier(0.33, 1, 0.68, 1);
+}
+
+html.verevon-scene--03-undersok .verevon-chat-approval__approve:hover {
+  box-shadow: 0 3px 10px rgb(122 52 20 / 26%);
+}
+
+/* When the turn settles the product swaps the orange stop control for a new,
+   idle send button in one frame; the idle button eases in over 250 ms. */
+html.verevon-scene--03-undersok button.dashboard-composer-submit-button[aria-label='Send melding'] {
+  animation: v03-fade 250ms cubic-bezier(0.33, 1, 0.68, 1) both;
+}
+
+/* ── 3. Quiet frame ────────────────────────────────────────────────────────── */
+
+/* Conversation column: the date divider, the «Meg · Nå nettopp» line, the
+   per-message tool chips and the hover/rest action rows are secondary;
+   without them the whole exchange fits above the composer, so the thread
+   never scrolls and the question stays in view. The «Stopp svar» pill would
+   leave the frame in one cut at `done` (the send button itself turns into
+   the stop control while the answer streams). */
+html.verevon-scene--03-undersok .verevon-chat-divider,
+html.verevon-scene--03-undersok .verevon-chat-user-meta,
+html.verevon-scene--03-undersok .verevon-chat-tool-chips,
+html.verevon-scene--03-undersok .verevon-chat-message-actions,
+html.verevon-scene--03-undersok .verevon-chat-artifact-chips,
+html.verevon-scene--03-undersok .verevon-chat-steps-pill,
+html.verevon-scene--03-undersok .verevon-chat-stop-wrap,
+html.verevon-scene--03-undersok .verevon-scheduled-runs-entry {
+  display: none;
+}
+
+/* The header carries the thread title only. Its «N meldinger» count counts
+   the assistant placeholder from the send («2 meldinger» while only the
+   question is visible). */
+html.verevon-scene--03-undersok .verevon-chat-header__copy p {
+  display: none;
+}
+
+/* The canvas heading is screen-reader-only and its label is the untranslated
+   surface id («Output»). A film has no screen reader; leaving it out keeps
+   the text dumps Norwegian. */
+html.verevon-scene--03-undersok .verevon-chat-workspace-canvas__head h2.sr-only {
+  display: none;
+}
+
+/* The final exchange must fit the 1024x640 frame without the transcript ever
+   scrolling (a follow-the-bottom scroll would move the whole column). Space
+   comes from where it was idle: a two-line composer field (the question is
+   two lines at this width; the product's 64 px minimum left an empty band
+   under it), tighter thread
+   rhythm, no bottom fade mask (nothing scrolls). Same rules as scene 02. */
+html.verevon-scene--03-undersok .dashboard-composer-root--chat .verevon-dashboard-textarea,
+html.verevon-scene--03-undersok textarea#verevon-dashboard-input {
+  min-height: 0;
+  height: 46px !important;
+}
+
+html.verevon-scene--03-undersok .verevon-chat-message-list {
+  padding-top: 12px;
+  padding-bottom: 8px;
+  scroll-behavior: auto;
+  -webkit-mask-image: none;
+  mask-image: none;
+}
+
+html.verevon-scene--03-undersok .verevon-chat-thread {
+  gap: 16px;
+  padding-bottom: 0;
+}
+
+html.verevon-scene--03-undersok .verevon-chat-approval {
+  padding: 16px 20px;
+}
+
+/* The blinking ▋ streaming cursor sits on a line of its own under each
+   paragraph and blinks on an 0.8 s step; at tile size it reads as a flicker. */
+html.verevon-scene--03-undersok .verevon-chat-streaming::after {
+  content: none;
+}
+
+/* «Utfør» turns are plan-mode turns: a finished one also derives the
+   rung-only plan gate, a second (disabled) «Godkjenn» under the run's own
+   approval card. The film shows the run's gate only. */
+html.verevon-scene--03-undersok .verevon-chat-plan,
+html.verevon-scene--03-undersok .verevon-chat-plan-granted {
+  display: none;
+}
+
+/* The composer's rotating example placeholder changes text every 6 s; in an
+   8 s loop that change lands inside the final hover hold as a text pop. */
+html.verevon-scene--03-undersok .verevon-chat-page textarea::placeholder {
+  color: transparent;
+}
+
+/* Live split: no header row (run id, notify, pause, collapse and the English
+   «Live agent» title); the research batch heads the surface instead, level
+   with the chat header. No waiting placeholder before the first browser step,
+   no browser tab for the step snapshot, no nav/address row, no thumbnail
+   strip, no «Teknisk aktivitet». */
+html.verevon-scene--03-undersok .verevon-chat-run-panel__head,
+html.verevon-scene--03-undersok .verevon-chat-run-panel .verevon-chat-run-fallback,
+html.verevon-scene--03-undersok .verevon-chat-run-panel .knowledge-browser-tab:not(.knowledge-browser-tab--active),
+html.verevon-scene--03-undersok .verevon-chat-run-panel .knowledge-browser-tab__mode,
+html.verevon-scene--03-undersok .verevon-chat-run-panel .knowledge-browser-chrome__toolbar,
+html.verevon-scene--03-undersok .verevon-chat-run-panel .verevon-chat-run-shots,
+html.verevon-scene--03-undersok .verevon-chat-run-panel .verevon-chat-run-activity-disclosure {
+  display: none;
+}
+
+html.verevon-scene--03-undersok .verevon-chat-run-panel__wide-research {
+  padding-top: 8px;
+}
+
+html.verevon-scene--03-undersok .verevon-chat-run-panel .verevon-wide-research {
+  border-top: 0;
+  padding-right: 24px;
+}
+
+/* Bred forskning as one column of rows (title left, status right): three
+   sub-tasks in the product's auto-fill grid left an empty cell and wrapped
+   «kjøring 184» onto a line of its own. Status pills keep their own height. */
+html.verevon-scene--03-undersok .verevon-wide-research__grid {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+html.verevon-scene--03-undersok .verevon-wide-research__card {
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  column-gap: 12px;
+  padding: 10px 12px;
+}
+
+html.verevon-scene--03-undersok .verevon-wide-research__pill {
+  align-self: center;
+  justify-self: end;
+}
+
+/* Safe area (CONTRACT amendment B): the right surface keeps 24 px to the card
+   edge, and the composer sits 4 px higher so its edge clears the 4 % bottom
+   line. */
+html.verevon-scene--03-undersok .verevon-chat-run-panel__body {
+  padding: 12px 24px 10px 16px;
+}
+
+html.verevon-scene--03-undersok .verevon-chat-workspace-canvas__close {
+  margin-right: 8px;
+}
+
+html.verevon-scene--03-undersok .dashboard-composer-root--chat {
+  margin-bottom: 4px;
+}
+
+/* Without the toolbar row the compact chrome would stretch to the bottom of
+   the rail and show the screenshot well's checkerboard under the page. The
+   frame hugs the page instead. */
+html.verevon-scene--03-undersok .verevon-chat-run-panel .knowledge-browser-chrome--compact {
+  flex: 0 0 auto;
+}
+
+html.verevon-scene--03-undersok .verevon-chat-run-panel .knowledge-browser-chrome--compact .knowledge-browser-chrome__body,
+html.verevon-scene--03-undersok .verevon-chat-run-panel .knowledge-browser-chrome--compact .knowledge-browser-screenshot {
+  flex: 0 0 auto;
+  min-height: 0;
+}
+
+html.verevon-scene--03-undersok .verevon-chat-run-panel .knowledge-browser-chrome--compact .knowledge-browser-screenshot img {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+/* Resultat in document mode: no resize grip, no second title card, no format
+   chips (format, byte size, time), no Kopier/Eksporter/Last ned toolbar, no
+   code-block header. «Godkjenn» stays the only primary action in the frame. */
+html.verevon-scene--03-undersok .verevon-chat-workspace-canvas__resize-handle,
+html.verevon-scene--03-undersok .verevon-chat-workspace-canvas .verevon-chat-artifact-list,
+html.verevon-scene--03-undersok .verevon-chat-workspace-canvas .verevon-chat-artifact-view__title p,
+html.verevon-scene--03-undersok .verevon-chat-workspace-canvas .verevon-chat-artifact-view__actions,
+html.verevon-scene--03-undersok .verevon-chat-workspace-canvas .verevon-chat-codeblock__header {
+  display: none;
+}
+
+/* The document card has its final height from the first diff line on, so it
+   never grows in a jump as lines and the note arrive. Its bottom edge lines up
+   with the approval card's across the gutter (y 422 at 1024x640). */
+html.verevon-scene--03-undersok .verevon-chat-workspace-canvas .verevon-chat-artifact-view {
+  min-height: 319px;
+}
+
+/* Each diff line is its own box so it can rise in (keyed entrance in the
+   scene file); the code block keeps three lines of height from the start. */
+html.verevon-scene--03-undersok .verevon-chat-workspace-canvas .verevon-chat-codeblock code > span {
+  display: inline-block;
+}
+
+html.verevon-scene--03-undersok .verevon-chat-workspace-canvas .verevon-chat-codeblock pre {
+  min-height: 88px;
+}
+
+/* The added mapping line in the product's diff colours
+   (`.verevon-chat-diff__added` / `__line--added` tokens). */
+html.verevon-scene--03-undersok .verevon-chat-workspace-canvas .verevon-chat-codeblock code > span:nth-child(3) {
+  width: calc(100% + 32px);
+  margin: 0 -16px;
+  padding: 0 16px;
+  background: var(--verevon-diff-added-surface, rgb(26 127 55 / 10%));
+  color: var(--verevon-diff-added-text, #1a7f37);
+}
+
+@keyframes v03-fade {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes v03-leave {
+  to {
+    opacity: 0;
+    transform: translateY(-8px);
+  }
+}
+
+@keyframes v03-slide-in {
+  from {
+    opacity: 0;
+    transform: translateX(16px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes v03-fade-out {
+  to {
+    opacity: 0;
+  }
+}
+
+@keyframes v03-rise-12 {
+  from {
+    opacity: 0;
+    transform: translateY(12px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}

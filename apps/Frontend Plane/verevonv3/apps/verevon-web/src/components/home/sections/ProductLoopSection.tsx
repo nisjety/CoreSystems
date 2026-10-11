@@ -67,7 +67,7 @@ type LoopStage = {
 	title?: string;
 };
 
-const loopStages: LoopStage[] = [
+export const loopStages: LoopStage[] = [
 	{
 		step: "01",
 		state: "Inngang",
@@ -79,12 +79,26 @@ const loopStages: LoopStage[] = [
 			objectPosition: "center 50%",
 		},
 	},
-	{ step: "02", state: "Plan", kind: "demo", demoStep: 1,
-        title: "Fra spørsmål til en gjennomførbar plan.",
-        body: "Se ansvar, avhengigheter og frister samlet i et planutkast." },
-    { step: "03", state: "Undersøk", kind: "demo", demoStep: 2,
-        title: "Finn blokkeringen. Se løsningen.",
-        body: "Følg undersøkelsen fra kilder og logg til en endring som kan testes." },
+	{ step: "02", state: "Plan", kind: "media",
+		title: "Fra spørsmål til plan. Med kildene synlige.",
+		body: "Verevon leser avtaler, ordre og e-post, viser hvor hvert funn kommer fra og lager et planutkast du godkjenner.",
+		media: {
+			kind: "video",
+			src: "/product-scenes/02-plan.mp4",
+			webm: "/product-scenes/02-plan.webm",
+			poster: "/product-scenes/02-plan-poster.webp",
+			alt: "Verevon svarer på status for Nordlys-leveransen. Hvert funn har sin kilde, og et planutkast venter på godkjenning.",
+		} },
+	{ step: "03", state: "Undersøk", kind: "media",
+		title: "Finn årsaken. Se beviset. Godkjenn fiksen.",
+		body: "Verevon undersøker parallelt, viser hva den fant i loggen og skjemaet, og foreslår en endring du kan teste før du sier ja.",
+		media: {
+			kind: "video",
+			src: "/product-scenes/03-undersok.mp4",
+			webm: "/product-scenes/03-undersok.webm",
+			poster: "/product-scenes/03-undersok-poster.webp",
+			alt: "Verevon undersøker eksporten av ordre 4821 med tre parallelle oppgaver. Loggen viser at customer_id mangler, og endringen kjøres som simulert test.",
+		} },
     { step: "04", state: "Følg opp", kind: "demo", demoStep: 3,
         title: "Hold arbeidet i gang.",
         body: "Se status, gjennomgå kundeutkastet og velg hvordan arbeidet skal følges opp." },
@@ -165,7 +179,7 @@ function LoopMediaLayer({
             ) : stage.media ? (
 				<ProductLoopMediaContent media={stage.media} priority={index === 0} />
 			) : null}
-			{stage.kind === "media" ? (
+			{stage.kind === "media" && stage.media?.kind !== "video" ? (
 				<div className="absolute inset-0 bg-[linear-gradient(180deg,rgba(248,248,247,0.02),rgba(248,248,247,0.16)),radial-gradient(circle_at_74%_22%,rgba(238,122,80,0.08),transparent_26%)]" />
 			) : null}
 		</div>
@@ -224,6 +238,11 @@ function LoopCopyPanel({ index, stage }: { index: number; stage: LoopStage }) {
 	);
 }
 
+// The corner ticks step aside while a film stage is the active layer: the films show real UI edge to
+// edge, and a tick would sit on top of it (at 16px inset it lands on the thread title in 02).
+const FRAME_TICKS_HIDDEN_OVER_FILM =
+	"[[data-product-loop-frame]:has([data-product-loop-layer][aria-hidden=false]_video)_&]:opacity-0";
+
 function LoopFrameChrome() {
 	return (
 		<div
@@ -231,10 +250,12 @@ function LoopFrameChrome() {
 			className="pointer-events-none absolute inset-0 z-20 text-verevon-j-text/14"
 			data-product-loop-frame-chrome=""
 		>
-			<span className="absolute left-4 top-4 size-[6px] border border-current bg-background/60" />
-			<span className="absolute right-4 top-4 size-[6px] border border-current bg-background/60" />
-			<span className="absolute bottom-4 left-4 size-[6px] border border-current bg-background/60" />
-			<span className="absolute bottom-4 right-4 size-[6px] border border-current bg-background/60" />
+			<div className={`absolute inset-0 transition-opacity duration-300 ease-out ${FRAME_TICKS_HIDDEN_OVER_FILM}`} data-product-loop-frame-ticks="">
+				<span className="absolute left-4 top-4 size-[6px] border border-current bg-background/60" />
+				<span className="absolute right-4 top-4 size-[6px] border border-current bg-background/60" />
+				<span className="absolute bottom-4 left-4 size-[6px] border border-current bg-background/60" />
+				<span className="absolute bottom-4 right-4 size-[6px] border border-current bg-background/60" />
+			</div>
 		</div>
 	);
 }
@@ -272,9 +293,15 @@ function ProductLoopMobileFallback() {
 					<p className="max-w-[34rem] font-geist text-[1rem] font-light leading-[1.48] text-verevon-text-muted">
 						{stage.body}
 					</p>
-                    <div className="relative overflow-hidden rounded-[20px]">
-                        <ResponsiveDemo step={stage.demoStep!} />
-                    </div>
+                    {stage.media ? (
+                        <div className="relative aspect-[16/10] overflow-hidden rounded-[20px] bg-[#f8f8f7]">
+                            <ProductLoopMediaContent media={stage.media} />
+                        </div>
+                    ) : (
+                        <div className="relative overflow-hidden rounded-[20px]">
+                            <ResponsiveDemo step={stage.demoStep!} />
+                        </div>
+                    )}
 				</article>
 			))}
 
@@ -864,8 +891,8 @@ export function ProductLoopSection({ recordings = [] }: { recordings?: ProductRe
 
 					<div aria-hidden="true" className="absolute inset-0 max-[899px]:hidden">
 						<div className="absolute left-[22%] top-[24%] h-[clamp(260px,34vh,390px)] w-[calc((100%-2*var(--verevon-edge))*0.48)]" data-product-loop-frame-marker="" />
-						<div className="absolute right-[var(--verevon-edge)] top-[clamp(142px,17vh,206px)] h-[clamp(344px,47vh,560px)] w-[calc((100%-2*var(--verevon-edge))*0.53)]" data-product-loop-frame-marker="" />
-						<div className="absolute left-[var(--verevon-edge)] top-[clamp(222px,34vh,350px)] h-[clamp(260px,34vh,390px)] w-[clamp(520px,43vw,760px)]" data-product-loop-frame-marker="" />
+						<div className="absolute right-[var(--verevon-edge)] top-[clamp(142px,17vh,206px)] aspect-[16/10] w-[calc((100%-2*var(--verevon-edge))*0.53)]" data-product-loop-frame-marker="" />
+						<div className="absolute left-[var(--verevon-edge)] top-[clamp(222px,34vh,350px)] aspect-[16/10] w-[clamp(520px,43vw,760px)]" data-product-loop-frame-marker="" />
 						<div
 							className="absolute left-1/2 top-1/2 h-[clamp(560px,64vh,680px)] w-[min(calc(100%-2*var(--verevon-edge)),1040px)] -translate-x-1/2 -translate-y-1/2"
 							data-product-loop-frame-marker=""
