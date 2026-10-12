@@ -9,5 +9,7 @@ export function browserOmniboxTarget(input: string, fallbackUrl?: string | null)
     const scheme = value.startsWith('localhost') || /^\d{1,3}(?:\.\d{1,3}){3}/.test(value) ? 'http' : 'https'
     return `${scheme}://${value}`
   }
+  // The interactive demo must not point visitors at a third-party search engine.
+  if (import.meta.env.VITE_DEMO === '1') return null
   return `https://www.google.com/search?q=${encodeURIComponent(value)}`
 }

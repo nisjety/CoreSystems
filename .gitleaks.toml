@@ -44,6 +44,9 @@ paths = [
   '''(^|/)\.git/''',
   '''(^|/)vendor/''',
   '''(^|/)testdata/''',
+  # The generated interactive-demo bundle (stage 04). scripts/build-product-demo.mjs scans it
+  # (forbidden names, hosts, e-mail addresses, secret shapes) and checks it against its manifest.
+  '''(^|/)verevon-web/public/product-demo/''',
   '''Cargo\.lock$''',
   '''go\.sum$''',
   '''go\.work\.sum$''',

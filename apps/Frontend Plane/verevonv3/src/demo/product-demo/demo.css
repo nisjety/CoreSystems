@@ -1,0 +1,83 @@
+/*
+ * Demo-only chrome: the persistent label, the notice line, the two calm pages and
+ * the pause states the host can request. Product styles stay in global.css.
+ */
+
+.demo-ribbon {
+  position: fixed;
+  right: 12px;
+  bottom: 10px;
+  z-index: 60;
+  padding: 2px 10px;
+  border-radius: 999px;
+  background: rgba(20, 22, 26, 0.74);
+  color: #f4f5f7;
+  font: 500 11px/1.5 var(--font-sans, system-ui, sans-serif);
+  letter-spacing: 0.01em;
+  pointer-events: none;
+  user-select: none;
+}
+
+.demo-notice {
+  position: fixed;
+  left: 50%;
+  bottom: 56px;
+  z-index: 61;
+  transform: translateX(-50%);
+  max-width: min(90%, 34ch);
+  padding: 8px 14px;
+  border-radius: 10px;
+  background: rgba(20, 22, 26, 0.9);
+  color: #f4f5f7;
+  font: 500 13px/1.45 var(--font-sans, system-ui, sans-serif);
+  text-align: center;
+  transition: opacity 180ms ease;
+  pointer-events: none;
+}
+
+.demo-notice[data-visible='false'] {
+  opacity: 0;
+}
+
+.demo-page {
+  display: grid;
+  justify-items: start;
+  gap: 12px;
+  max-width: 44ch;
+  margin: 12vh auto 0;
+  padding: 0 16px;
+  font-family: var(--font-sans, system-ui, sans-serif);
+}
+
+.demo-page h1 {
+  margin: 0;
+  font-size: 22px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.demo-page p {
+  margin: 0;
+  line-height: 1.55;
+}
+
+.demo-button {
+  padding: 8px 14px;
+  border: 0;
+  border-radius: 8px;
+  background: #1d2330;
+  color: #ffffff;
+  font: 500 14px/1.2 var(--font-sans, system-ui, sans-serif);
+  cursor: pointer;
+}
+
+.demo-button:focus-visible {
+  outline: 2px solid #4b7bec;
+  outline-offset: 2px;
+}
+
+/* The host can pause the demo while its stage is off screen or covered. */
+html[data-demo-state='paused'] *,
+html[data-demo-state='inactive'] * {
+  animation-play-state: paused !important;
+}

@@ -179,7 +179,7 @@ export function CoreNavbar(props: {
               class="core-navbar__home-mark"
             >
               <img
-                src="/verevon-mark.svg"
+                src={`${import.meta.env.BASE_URL}verevon-mark.svg`}
                 alt=""
                 aria-hidden="true"
                 class="core-navbar__home-logo"

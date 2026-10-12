@@ -2,8 +2,9 @@
  * Scene runtime extras (scene 03): scene routes, run-event streams on the chat
  * POST's clock, and the fixture image mapping for `<img src>` evidence.
  */
-import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
-import { getSceneLog, installSceneRuntime, setActiveSceneExtras, setActiveSceneStream } from './install'
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
+import { getSceneLog, installSceneRuntime, setActiveSceneExtras, setActiveSceneStream, setLiveHook } from './install'
+import type { DemoRouteContext } from './live/shared-types'
 
 async function readAll(response: Response): Promise<string> {
   const reader = response.body!.getReader()
@@ -79,5 +80,117 @@ describe('scene runtime extras', () => {
     const other = document.createElement('img')
     other.src = '/api/v1/browser/sessions/run_x/artifacts/art_other'
     expect(new URL(other.src).pathname).toBe('/api/v1/browser/sessions/run_x/artifacts/art_other')
+  })
+})
+
+describe('live hook', () => {
+  let sceneFetch: typeof window.fetch
+  beforeAll(() => {
+    installSceneRuntime()
+    sceneFetch = window.fetch
+  })
+  beforeEach(() => {
+    window.fetch = sceneFetch
+    setActiveSceneStream(null)
+  })
+  afterEach(() => {
+    setLiveHook(null)
+  })
+
+  it('answers from the live routes before the shared fixtures', async () => {
+    setLiveHook({ routes: [{ method: 'GET', match: /^\/api\/v1\/chat\/threads$/, respond: () => ({ sessions: [] }) }] })
+    const response = await window.fetch('/api/v1/chat/threads')
+    expect(await response.json()).toEqual({ sessions: [] })
+  })
+
+  it('falls through to the shared fixtures when no live route claims the request', async () => {
+    setLiveHook({ routes: [{ method: 'GET', match: /^\/api\/v1\/elsewhere$/, respond: () => ({}) }] })
+    const response = await window.fetch('/api/v1/chat/threads')
+    expect(await response.json()).toEqual({ threads: [] })
+  })
+
+  it('passes the parsed JSON body, the method and the headers to the live route', async () => {
+    let seen: DemoRouteContext | undefined
+    setLiveHook({
+      routes: [{
+        method: 'POST',
+        match: /^\/api\/v1\/chat\/threads\/thr_x\/messages$/,
+        respond: (context) => {
+          seen = context
+          return { ok: true }
+        },
+      }],
+    })
+    await window.fetch('/api/v1/chat/threads/thr_x/messages', {
+      method: 'POST',
+      headers: { 'X-Demo': 'yes' },
+      body: JSON.stringify({ content: 'Hei' }),
+    })
+    expect(seen?.method).toBe('POST')
+    expect(seen?.path).toBe('/api/v1/chat/threads/thr_x/messages')
+    expect(seen?.body).toEqual({ content: 'Hei' })
+    expect(seen?.headers.get('x-demo')).toBe('yes')
+  })
+
+  it('hands a body that is not a JSON object to the route as the raw text', async () => {
+    let seen: unknown
+    setLiveHook({
+      routes: [{
+        method: 'PUT',
+        match: /^\/api\/v1\/demo\/raw$/,
+        respond: (context) => {
+          seen = context.body
+          return {}
+        },
+      }],
+    })
+    await window.fetch('/api/v1/demo/raw', { method: 'PUT', body: 'plain text' })
+    expect(seen).toBe('plain text')
+  })
+
+  it('returns a Response a live route builds exactly as it is', async () => {
+    setLiveHook({
+      routes: [{ method: 'GET', match: /^\/api\/v1\/demo\/teapot$/, respond: () => new Response('nei', { status: 418 }) }],
+    })
+    const response = await window.fetch('/api/v1/demo/teapot')
+    expect(response.status).toBe(418)
+  })
+
+  it('turns a throwing live route into a Norwegian 500 and records it, so the page keeps running', async () => {
+    setLiveHook({
+      routes: [{
+        method: 'GET',
+        match: /^\/api\/v1\/demo\/broken$/,
+        respond: () => {
+          throw new Error('boom')
+        },
+      }],
+    })
+    const response = await window.fetch('/api/v1/demo/broken')
+    expect(response.status).toBe(500)
+    expect(await response.json()).toMatchObject({ error: { code: 'demo_error' } })
+    expect(getSceneLog().some((entry) => entry.kind === 'live-error' && entry.note.includes('boom'))).toBe(true)
+  })
+
+  it('maps a live screenshot request to its fixture image, and no other path', () => {
+    setLiveHook({
+      routes: [],
+      resolveImage: (pathname) => (pathname.endsWith('/art_live') ? '/src/demo/fixtures/assets/live.png' : undefined),
+    })
+    const image = document.createElement('img')
+    image.setAttribute('src', '/api/v1/browser/sessions/run_live/artifacts/art_live')
+    expect(image.getAttribute('src')).toBe('/src/demo/fixtures/assets/live.png')
+    const other = document.createElement('img')
+    other.setAttribute('src', '/api/v1/browser/sessions/run_live/artifacts/art_other')
+    expect(other.getAttribute('src')).toBe('/api/v1/browser/sessions/run_live/artifacts/art_other')
+  })
+
+  it('is a no-op once cleared, and scene mode without a live hook answers as before', async () => {
+    setLiveHook({ routes: [{ method: 'GET', match: /^\/api\/v1\/chat\/threads$/, respond: () => ({ sessions: [] }) }] })
+    setLiveHook(null)
+    const response = await window.fetch('/api/v1/chat/threads')
+    expect(await response.json()).toEqual({ threads: [] })
+    const stream = await window.fetch('/api/v1/chat/stream', { method: 'POST', body: '{}' })
+    expect(stream.status).toBe(503)
   })
 })

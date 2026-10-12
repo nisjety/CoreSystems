@@ -18,17 +18,17 @@
  * inside `.verevon-chat-empty__heading`, so the welcome cross-fade that copies
  * that heading on send carries the suggestion out with it.
  *
- * Scene mode only (this module is imported by the scene definitions).
+ * Shared by the films (the scene definitions) and the interactive demo (live/suggestions-live.ts).
  */
 import { render } from '@solidjs/web'
-import { ChevronRight, Package, Receipt } from '@/shared/icons'
+import { ChevronRight, Mail, Package, Receipt } from '@/shared/icons'
 
-export type SuggestionIcon = 'package' | 'receipt'
+export type SuggestionIcon = 'package' | 'receipt' | 'mail'
 
 export type SceneSuggestion = {
   /** The headline: what happened and the proposed next action, as the question the composer receives. */
   text: string
-  /** Where it came from, e.g. «Bring · sporingsvarsel». */
+  /** Where it came from, e.g. «Innboks · Solhaug Hotell AS». */
   source: string
   /** When, in the film's fictional clock, e.g. «i dag 08:12». */
   time: string
@@ -54,7 +54,7 @@ export function fillComposer(text: string): boolean {
   return true
 }
 
-const ICONS: Record<SuggestionIcon, typeof Package> = { package: Package, receipt: Receipt }
+const ICONS: Record<SuggestionIcon, typeof Package> = { package: Package, receipt: Receipt, mail: Mail }
 
 function element<K extends keyof HTMLElementTagNameMap>(tag: K, className: string, text?: string): HTMLElementTagNameMap[K] {
   const node = document.createElement(tag)
@@ -94,6 +94,17 @@ function buildSuggestion(item: SceneSuggestion, index: number): HTMLButtonElemen
   return button
 }
 
+/** One suggestion block: its label, then one starter row per item. The live demo places it on the dashboard too. */
+export function buildSuggestionBlock(set: SceneSuggestionSet): HTMLDivElement {
+  const block = element('div', 'v-suggestions')
+  block.dataset.vSuggestions = ''
+  block.setAttribute('role', 'group')
+  block.setAttribute('aria-label', set.label)
+  block.appendChild(element('span', 'v-suggestions__label', set.label))
+  set.items.forEach((item, index) => block.appendChild(buildSuggestion(item, index)))
+  return block
+}
+
 /**
  * Keeps one suggestion block inside the start screen's heading for as long as
  * the start screen is mounted. Safe to call once, before the chat page renders.
@@ -102,13 +113,7 @@ export function installPromptSuggestions(set: SceneSuggestionSet): void {
   const place = () => {
     const heading = document.querySelector<HTMLElement>('.verevon-chat-empty__heading')
     if (!heading || heading.querySelector('.v-suggestions')) return
-    const block = element('div', 'v-suggestions')
-    block.dataset.vSuggestions = ''
-    block.setAttribute('role', 'group')
-    block.setAttribute('aria-label', set.label)
-    block.appendChild(element('span', 'v-suggestions__label', set.label))
-    set.items.forEach((item, index) => block.appendChild(buildSuggestion(item, index)))
-    heading.appendChild(block)
+    heading.appendChild(buildSuggestionBlock(set))
   }
   const observer = new MutationObserver(place)
   const start = () => {

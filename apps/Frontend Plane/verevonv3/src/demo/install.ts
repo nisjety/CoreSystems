@@ -29,6 +29,7 @@ import {
   nordlysApproval,
 } from './fixtures/fjordform'
 import type { SceneExtras, SceneLogEntry, SceneRunStream, SceneStreamScript } from './scene-types'
+import type { DemoRoute, DemoRouteContext, DemoRouteMethod } from './live/shared-types'
 
 type Route = {
   method?: 'GET' | 'POST' | 'PUT' | 'DELETE' | 'PATCH'
@@ -84,6 +85,24 @@ export function setActiveSceneExtras(extras: SceneExtras | null): void {
 }
 
 /**
+ * The live demo's hook (src/demo/live, installed by `installDemoLive`). Its
+ * routes are consulted after the scene extras and before the shared fixtures.
+ * `resolveImage` maps fixture images the way a scene's `images` do. It is null
+ * in scene mode, so the films never see it.
+ */
+export type LiveHook = {
+  routes: DemoRoute[]
+  resolveImage?: (pathname: string) => string | undefined
+}
+
+let liveHook: LiveHook | null = null
+
+export function setLiveHook(hook: LiveHook | null): void {
+  liveHook = hook
+  if (hook?.resolveImage) installImageShim()
+}
+
+/**
  * Browser step screenshots are loaded by a plain `<img src>` pointing at the
  * BFF artifact route, which `fetch` never sees. In scene mode the src is
  * mapped, at the moment it is set, to a fixture asset served by Vite, so no
@@ -92,11 +111,12 @@ export function setActiveSceneExtras(extras: SceneExtras | null): void {
 let imageShimInstalled = false
 function rewriteImageSource(value: string): string {
   const images = activeExtras?.images
-  if (!images || !value) return value
+  const resolveImage = liveHook?.resolveImage
+  if ((!images && !resolveImage) || !value) return value
   try {
-    const url = new URL(value, window.location.origin)
-    if (url.origin !== window.location.origin) return value
-    const asset = images[url.pathname]
+    const url = new URL(value, window.location.href)
+    if (url.origin !== documentOrigin()) return value
+    const asset = images?.[url.pathname] ?? resolveImage?.(url.pathname)
     if (!asset) return value
     appendSceneLog('image', `${url.pathname} → fixture asset`)
     return asset
@@ -308,9 +328,65 @@ function requestMethod(input: RequestInfo | URL, init?: RequestInit): string {
   return 'GET'
 }
 
+/**
+ * Requests resolve against the document's address, not `window.location.origin`:
+ * inside the demo's sandboxed iframe that origin is the opaque "null", which
+ * does not parse as a base URL. The origin of the address is the site's own.
+ */
+function documentOrigin(): string {
+  return new URL(window.location.href).origin
+}
+
 function requestUrl(input: RequestInfo | URL): URL {
   const raw = input instanceof Request ? input.url : String(input)
-  return new URL(raw, window.location.origin)
+  return new URL(raw, window.location.href)
+}
+
+/** The body as a route reads it: a JSON object or array, the raw text, or undefined. */
+function parsedBody(body: BodyInit | null | undefined): unknown {
+  if (typeof body !== 'string' || body.length === 0) return undefined
+  try {
+    const parsed: unknown = JSON.parse(body)
+    return parsed !== null && typeof parsed === 'object' ? parsed : body
+  } catch {
+    return body
+  }
+}
+
+function headersOf(input: RequestInfo | URL, init?: RequestInit): Headers {
+  const headers = new Headers(input instanceof Request ? input.headers : undefined)
+  if (init?.headers) new Headers(init.headers).forEach((value, key) => headers.set(key, value))
+  return headers
+}
+
+/** The live hook's answer, or undefined when none of its routes claims the request. */
+async function answerLive(
+  liveRoutes: readonly DemoRoute[],
+  method: string,
+  url: URL,
+  input: RequestInfo | URL,
+  init?: RequestInit,
+): Promise<Response | undefined> {
+  const context: DemoRouteContext = {
+    method: method as DemoRouteMethod,
+    path: url.pathname,
+    search: url.search,
+    url,
+    body: parsedBody(init?.body),
+    headers: headersOf(input, init),
+  }
+  for (const route of liveRoutes) {
+    if (route.method !== context.method || !route.match.test(context.path)) continue
+    try {
+      const result = await route.respond(context)
+      if (result === undefined) continue
+      return result instanceof Response ? result : json(result)
+    } catch (error) {
+      appendSceneLog('live-error', `${context.method} ${context.path}: ${String(error)}`)
+      return json({ error: { code: 'demo_error', message: 'Demoen kunne ikke svare på denne forespørselen.' } }, 500)
+    }
+  }
+  return undefined
 }
 
 async function routeApi(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
@@ -320,6 +396,10 @@ async function routeApi(input: RequestInfo | URL, init?: RequestInit): Promise<R
   requestCounts.set(url.pathname, (requestCounts.get(url.pathname) ?? 0) + 1)
   const sceneAnswer = sceneExtraRoute(method, url, path)
   if (sceneAnswer) return sceneAnswer
+  if (liveHook) {
+    const live = await answerLive(liveHook.routes, method, url, input, init)
+    if (live) return live
+  }
   for (const route of routes) {
     if (route.method && route.method !== method) continue
     const match = path.match(route.match) ?? url.pathname.match(route.match)
@@ -328,6 +408,9 @@ async function routeApi(input: RequestInfo | URL, init?: RequestInit): Promise<R
     return result instanceof Response ? result : json(result)
   }
   appendSceneLog('unmatched-api', `${method} ${path}`)
+  // The interactive demo hands unanswered product calls to the privacy guard, which answers a
+  // 404 `demo_unavailable` and records the miss. The films keep the lenient empty object.
+  if (liveHook && originalFetch) return originalFetch(input, init)
   return json({})
 }
 
@@ -343,7 +426,7 @@ export function installSceneRuntime(): void {
   const real = originalFetch
   window.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
     const url = requestUrl(input)
-    const sameOrigin = url.origin === window.location.origin
+    const sameOrigin = url.origin === documentOrigin()
     if (sameOrigin && (url.pathname.startsWith('/api/') || url.pathname === '/health')) {
       return routeApi(input, init)
     }

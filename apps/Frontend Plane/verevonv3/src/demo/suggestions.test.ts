@@ -1,12 +1,23 @@
 /**
  * Context-aware start screen (CONTRACT.md amendment F): the suggestion card
  * says what happened, where it came from and when, a click only FILLS the
- * composer, and nothing is ever sent or acted on by the click.
+ * composer, and nothing is ever sent or acted on by the click. Each of the
+ * demo's three cases gets the same card, so each is tested the same way.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { COMPOSER_TEXTAREA, fillComposer, installPromptSuggestions } from './suggestions'
-import { nordlysSuggestion } from './fixtures/fjordform'
-import { undersokSuggestion } from './fixtures/fjordform-undersok'
+import { anbudSuggestion } from './fixtures/fjordform-anbud'
+import { reklamasjonSuggestion } from './fixtures/fjordform-reklamasjon'
+import { tilbudSuggestion } from './fixtures/fjordform-tilbud'
+import { COMPOSER_TEXTAREA, fillComposer, installPromptSuggestions, type SuggestionIcon } from './suggestions'
+
+type Card = { label: string; text: string; source: string; time: string }
+
+/** The three cases' start-screen cards, each with the icon its case shows on the start screen. */
+const CASE_CARDS: ReadonlyArray<{ name: string; card: Card; icon: SuggestionIcon }> = [
+  { name: 'Tilbud til Solhaug Hotell', card: tilbudSuggestion, icon: 'mail' },
+  { name: 'Reklamasjon fra Havnebrygga Kafé', card: reklamasjonSuggestion, icon: 'package' },
+  { name: 'Dokumentasjon til Nordhavn kommune', card: anbudSuggestion, icon: 'receipt' },
+]
 
 function mountStartScreen(): { textarea: HTMLTextAreaElement; send: HTMLButtonElement } {
   document.body.innerHTML = `
@@ -47,24 +58,6 @@ describe('fillComposer', () => {
 describe('installPromptSuggestions', () => {
   afterEach(() => { document.body.innerHTML = '' })
 
-  it('puts one suggestion with source and time into the start screen heading', async () => {
-    mountStartScreen()
-    installPromptSuggestions({
-      label: nordlysSuggestion.label,
-      items: [{ text: nordlysSuggestion.text, source: nordlysSuggestion.source, time: nordlysSuggestion.time, icon: 'package' }],
-    })
-    await flush()
-    const block = document.querySelector('.verevon-chat-empty__heading .v-suggestions')
-    expect(block).not.toBeNull()
-    expect(block!.querySelectorAll('.v-suggestion')).toHaveLength(1)
-    expect(block!.querySelector('.v-suggestions__label')?.textContent).toBe('Dette har skjedd')
-    expect(block!.querySelector('.v-suggestion__text')?.textContent).toBe(
-      'Bring melder at Nordlys-leveransen er forsinket. Skal jeg sjekke konsekvensene og lage en plan for oppfølging?',
-    )
-    expect(block!.querySelector('.v-suggestion__source')?.textContent).toBe('Bring · sporingsvarsel')
-    expect(block!.querySelector('.v-suggestion__time')?.textContent).toBe('i dag 08:12')
-  })
-
   it('does not insert the block twice when the screen re-renders', async () => {
     const { textarea } = mountStartScreen()
     installPromptSuggestions({
@@ -77,37 +70,46 @@ describe('installPromptSuggestions', () => {
     expect(document.querySelectorAll('.v-suggestions')).toHaveLength(1)
   })
 
-  it('a click fills the composer with the question and neither sends nor acts', async () => {
-    const { textarea, send } = mountStartScreen()
-    const sent = vi.fn()
-    send.addEventListener('click', sent)
-    const submitted = vi.fn()
-    document.addEventListener('submit', submitted)
-    installPromptSuggestions({
-      label: undersokSuggestion.label,
-      items: [{ text: undersokSuggestion.text, source: undersokSuggestion.source, time: undersokSuggestion.time, icon: 'receipt' }],
+  describe.each(CASE_CARDS)('the card of $name', ({ card, icon }) => {
+    it('puts the card with its source and time into the start screen heading', async () => {
+      mountStartScreen()
+      installPromptSuggestions({
+        label: card.label,
+        items: [{ text: card.text, source: card.source, time: card.time, icon }],
+      })
+      await flush()
+      const block = document.querySelector('.verevon-chat-empty__heading .v-suggestions')
+      expect(block).not.toBeNull()
+      expect(block!.querySelectorAll('.v-suggestion')).toHaveLength(1)
+      expect(block!.querySelector('.v-suggestions__label')?.textContent).toBe(card.label)
+      expect(block!.querySelector('.v-suggestion__text')?.textContent).toBe(card.text)
+      expect(block!.querySelector('.v-suggestion__source')?.textContent).toBe(card.source)
+      expect(block!.querySelector('.v-suggestion__time')?.textContent).toBe(card.time)
     })
-    await flush()
-    document.querySelector<HTMLButtonElement>('.v-suggestion')!.click()
-    expect(textarea.value).toBe('Denne fakturaen ser ut til å avvike fra avtalen. Skal jeg undersøke hvorfor?')
-    expect(document.querySelector('.v-suggestion')?.classList.contains('is-chosen')).toBe(true)
-    expect(sent).not.toHaveBeenCalled()
-    expect(submitted).not.toHaveBeenCalled()
-    document.removeEventListener('submit', submitted)
-  })
-})
 
-describe('the films\' suggestion fixtures', () => {
-  it('state what happened, the source and a time, and propose a next action', () => {
-    for (const suggestion of [nordlysSuggestion, undersokSuggestion]) {
-      expect(suggestion.text).toMatch(/\?$/)
-      expect(suggestion.source.length).toBeGreaterThan(3)
-      expect(suggestion.time).toMatch(/i dag \d{2}:\d{2}/)
-    }
-  })
+    it('a click fills the composer with the question and neither sends nor acts', async () => {
+      const { textarea, send } = mountStartScreen()
+      const sent = vi.fn()
+      send.addEventListener('click', sent)
+      const submitted = vi.fn()
+      document.addEventListener('submit', submitted)
+      installPromptSuggestions({
+        label: card.label,
+        items: [{ text: card.text, source: card.source, time: card.time, icon }],
+      })
+      await flush()
+      document.querySelector<HTMLButtonElement>('.v-suggestion')!.click()
+      expect(textarea.value).toBe(card.text)
+      expect(document.querySelector('.v-suggestion')?.classList.contains('is-chosen')).toBe(true)
+      expect(sent).not.toHaveBeenCalled()
+      expect(submitted).not.toHaveBeenCalled()
+      document.removeEventListener('submit', submitted)
+    })
 
-  it('use Bring, not the order system, as the tracking source in scene 02', () => {
-    expect(nordlysSuggestion.source).toContain('Bring')
-    expect(nordlysSuggestion.source).not.toMatch(/Visma/i)
+    it('states what happened, names its source and a time, and proposes a next action', () => {
+      expect(card.text).toMatch(/\?$/)
+      expect(card.source.length).toBeGreaterThan(3)
+      expect(card.time).toMatch(/i dag \d{2}:\d{2}/)
+    })
   })
 })

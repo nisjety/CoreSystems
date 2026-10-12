@@ -46,8 +46,8 @@ e-mail) appears in any checkpoint. Exit code 0 means clean.
 |---|---|
 | `scene-types.ts` | `VerevonScene` (the `window.__verevonScene` contract, verbatim from CONTRACT.md §2) and `SceneDefinition`. |
 | `install.ts` | `fetch` interceptor installed before render. Answers every `/api/*` request from fixtures; plays the scene's SSE script for `POST /api/v1/chat/stream` through a `setTimeout`-driven `ReadableStream`; logs unknown `/api/*` paths as `unmatched-api`. |
-| `fixtures/fjordform.ts` | The fictional world: Fjordform AS, Ida Berg, Nordlys Handel AS, order 4821. Scene 02: the Bring delay notice (the start-screen suggestion), the three sources (Bring tracking, customer agreement, e-mail), the status document, the plan rows, the approval. Norwegian only. |
-| `fixtures/fjordform-undersok.ts` | Scene 03: the invoice notice (the start-screen suggestion), invoice 20471 against the framework agreement and order 4821 (120 stk at 1 380,00 against 1 240,00, a 16 800,00 kr difference), the three sub-tasks, the browser step, the comparison document, the «Opprett kreditnota» approval. |
+| `fixtures/fjordform.ts` | The fictional world of the films (stage 02): Fjordform AS, Ida Berg, a customer and its order. Scene 02: the start-screen notice (the start-screen suggestion), the three sources (shipment tracking, customer agreement, e-mail), the status document, the plan rows, the approval. Norwegian only. |
+| `fixtures/fjordform-undersok.ts` | Scene 03 (stage 03): the invoice notice (the start-screen suggestion), the invoice against the framework agreement and the order (120 stk at 1 380,00 against 1 240,00, a 16 800,00 kr difference), the three sub-tasks, the browser step, the comparison document, the «Opprett kreditnota» approval. |
 | `fixtures/assets/faktura-20471.png` | The browser step's screenshot (fictional invoice in the accounting system, the unit price highlighted), drawn from `faktura-20471.source.html`. |
 | `suggestions.ts` | The context-aware start screen (CONTRACT amendment F): builds the prompt suggestion card from the product's own starter markup and inserts it into the real start screen in place of the welcome text. A click only fills the composer; it never sends. |
 | `choreography.ts` | Softens the two layout changes the product makes in a single frame: the composer gliding from the middle of the start screen to its dock, and the work surface growing in from the right edge. Web Animations on the real elements, driven by `document.timeline`. |
@@ -127,3 +127,52 @@ All optional; a scene without them behaves exactly as before.
 
 `install.test.ts` covers the route order, the run-stream catch-up and the image mapping.
 Scene 03 (`scenes/03-undersok.ts`) documents in its header which real panels it drives, the fallback rung, and every deviation from the beat sheet.
+
+## Live demo (stage 04, `src/demo/live`)
+
+The interactive demo on verevon.com runs the real `/dashboard` and `/chat` against an in-memory engine, instead of a film. The plan is `apps/verevon-web/plans/product-demo/PLAN_2026-10-11.md`. The code sits under the same `VITE_SCENE_MODE=1` guard, so the normal build contains none of it.
+
+| File | Role |
+|---|---|
+| `live/index.ts` | `installDemoLive(options)`: wires the thread store, the responder, the routes, the live hook and the suggestions. Returns `dispose`, `reset` and `startScenario`. |
+| `live/shared-types.ts` | The contract: `DemoRoute`, `ThreadRow`, `DemoLiveOptions`, `DemoLiveHandle`, the iframe messages, `DEMO_NOW_ISO`. |
+| `live/responder.ts` | `POST /api/v1/chat/stream` becomes a scenario turn. It also keeps runs, approvals, decisions, queued input and stop. It has no timers of its own: the clock and the channel factory are injected. |
+| `live/channel.ts` | One `text/event-stream` per request. Frames go out now or after a delay. The stream closes on request, after an idle timeout (pending approvals), or when the visitor aborts. |
+| `live/frames.ts` | Pure frame builders with the product's real event names and payload keys, `paced()` (two-word deltas every 45 ms) and `encodeFrame()`. |
+| `live/match.ts` | Deterministic matching: the exact suggestion text scores 100, otherwise all-of trigger groups matched by whole word. A trailing `*` marks a stem (`tilbud*` takes `tilbudet`). Free text answers a case only when it names it: a group is the customer's name or an order or series number alone, or at least two words, and a group of generic words needs three. Also `normalizeText`, `termMatches` and `titleFromQuestion`. No model, no network. |
+| `live/routes.ts` | The route table for threads, the stream, invocations, runs, approvals and orchestration. Speech and audio answer 503, scheduling writes 403, both in Norwegian. |
+| `live/thread-store.ts` | In-memory conversations, seeded from `threadSeed`. A seeded case thread opens with its question and answer. |
+| `live/suggestions-live.ts` | The three cases as cards on the start screen and the dashboard. A `#demo:<id>` link fills the composer and presses send. A Do case chooses «Utfør» first. It also closes the Work canvas, as the films did. |
+| `live/scenarios/` | Tilbud til Solhaug Hotell (Do, or Ask without «Utfør»), Reklamasjon fra Havnebrygga Kafé (Ask), Dokumentasjon til Nordhavn kommune (Ask), and the fallback. `index.ts` is the registry and the transcripts of seeded case threads. |
+| `live/demo.css` | Every rule scoped to `html.verevon-demo-live`. |
+| `fixtures/fjordform-tilbud.ts`, `fjordform-reklamasjon.ts`, `fjordform-anbud.ts` | The data of the three cases: question and suggestion card, sources, answer and follow-up text, the document by stage, the approval text and the step texts. |
+
+### Behaviour
+
+- Free text, attachments and images get the honest fallback: «Dette er en demo med forhåndsdefinerte svar», with the three cases as links. Free text answers a case only when it names it: the customer («Solhaug», «Havnebrygga», «Nordhavn»), the series 2609, or FSC, EPD and anbud together. A quote, warranty or tender question that does not name its case falls back, and nothing else is answered freely.
+- Each case stops at a gate: the approval card («Godkjenn» or «Avvis»). A decision sends its outcome on the same open chat stream, adds it to the stored conversation and, for Do, updates the run.
+- The dashboard's recent work is other, older work. A case's conversation joins the recent list only once a visitor has run it.
+- A Do case without «Utfør» is an ask run: the same work as steps on the chat stream, and its gate is a step.
+- Nothing leaves the page, and no draft is sent. The engine answers every `/api` request in memory.
+- Timing: chat frames are scheduled from the POST, a decision's frames from the click. A run panel that connects late gets the frames it missed at once, in order.
+
+### The install hook (`install.ts`)
+
+- `setLiveHook({ routes, resolveImage })` is the only change to scene mode. The hook is consulted after the scene extras and before the shared fixtures. Its default is `null`, which makes it a no-op, so the films stay frame-identical.
+- Requests resolve against the document's address (`window.location.href`), not `window.location.origin`. Inside the sandboxed iframe that origin is the opaque `"null"`, and it does not parse.
+- A live route that throws becomes a Norwegian 500, and a `live-error` entry in the scene log.
+
+### Tests
+
+```sh
+pnpm exec vitest run src/demo/live src/demo/install.test.ts src/demo/suggestions.test.ts
+```
+
+These run without a browser: pure functions, a manual clock, and the real SSE bodies read back as text. The browser check, `node scripts/demo-live-check.mjs --url <demo url>`, drives headless Chromium and fails on any leak. Its flows still belong to the retired cases: rewrite them for the three cases before it is run.
+
+### Known limits
+
+- A reload clears everything: the store is in memory, and the sandbox has no storage. A pending approval does not come back after a reload.
+- The rung-only plan gate that a Do turn derives is hidden by CSS. Its endpoint answers as written, so nothing is granted by it.
+- The product's English Work rows are not hidden: «Connect stream», «Compose response» and «Model selected», with details such as «Connected to the live agent stream.», «Streaming answer text.» and «Completed.». The client writes them on every turn (`chat-normalizers.ts`, `use-chat-controller.ts`). They share the generic step markup, so `demo.css` cannot select them, and the engine cannot stop them. This needs an owner decision: a written exception to the Norwegian rule for these labels, or a Norwegian change in those two files.
+- The seeded conversations that are not cases open empty: the engine holds no transcript for them.

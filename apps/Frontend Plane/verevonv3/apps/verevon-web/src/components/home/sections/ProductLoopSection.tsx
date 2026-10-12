@@ -1,66 +1,41 @@
 "use client";
 
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import dynamic from "next/dynamic";
+import { useLayoutEffect, useRef, useState } from "react";
 import { gsap } from "gsap";
 import { ScrollTrigger } from "gsap/ScrollTrigger";
 import type { ProductRecording } from "@/lib/product-recording-contract";
 import { ProductRecordingPlayer } from "./ProductRecordingPlayer";
 import type { VerevonComposerMode } from "@/components/ui/VerevonComposerPreview";
 import { FeatureComposerCycle } from "./FeatureComposerCycle";
+import { LiveDemoMobileCard, LoopLiveDemo } from "./ProductLoopLiveDemo";
+import {
+	PRODUCT_LOOP_LIVE_DEMO,
+	type ProductLoopLiveDemo,
+} from "./product-loop-live-demo";
 import { getProductLoopComposerCopy } from "./product-loop-composer-copy";
 import {
 	ProductLoopMediaContent,
 	type ProductLoopMedia,
 } from "./ProductLoopProductDemos";
 import {
+	getProductLoopContentFrame,
+	getProductLoopScrollYForTime,
 	getProductLoopTimelineProgress,
 	PRODUCT_LOOP_ENTRANCE_SCROLL_MARGIN,
 	PRODUCT_LOOP_ENTRANCE_TIMELINE_DURATION,
 	PRODUCT_LOOP_ENTRANCE_VIEWPORT_RATIO,
+	PRODUCT_LOOP_SETTLE_EVENT,
+	PRODUCT_LOOP_STAGE04_ACTIVE_END,
+	PRODUCT_LOOP_STAGE04_EXIT,
+	PRODUCT_LOOP_STAGE04_SETTLE_START,
 } from "./product-loop-progress";
 
 gsap.registerPlugin(ScrollTrigger);
 
-const ProductDemo = dynamic(() => import("../product-demo/product-demo").then((module) => module.ProductDemo), { ssr: false });
-
-// Only mount the demo layout that can actually be seen. Keep its state while scrolling.
-function ResponsiveDemo({ step, desktop = false }: { step: 1 | 2 | 3; desktop?: boolean }) {
-	const root = useRef<HTMLDivElement>(null);
-	const [enabled, setEnabled] = useState(false);
-	useEffect(() => {
-		const host = root.current?.closest<HTMLElement>(
-			desktop ? "[data-product-loop-frame]" : "[data-product-loop-mobile-fallback]",
-		);
-		// Mount only the layout visible at this viewport width.
-		let near = typeof IntersectionObserver === "undefined";
-		const update = () => setEnabled(
-			Boolean(host && getComputedStyle(host).display !== "none" && (near || !desktop)),
-		);
-		const observer = typeof IntersectionObserver === "undefined" ? null : new IntersectionObserver(([entry]) => {
-			if (entry.isIntersecting) { near = true; update(); observer?.disconnect(); }
-		}, { rootMargin: "1000px" });
-		const section = root.current?.closest("[data-product-loop]");
-		if (section) observer?.observe(section);
-		const resizeObserver = host && typeof ResizeObserver !== "undefined"
-			? new ResizeObserver(update)
-			: null;
-		if (host) resizeObserver?.observe(host);
-		update();
-		window.addEventListener("resize", update);
-		return () => {
-			observer?.disconnect();
-			resizeObserver?.disconnect();
-			window.removeEventListener("resize", update);
-		};
-	}, [desktop]);
-	return <div ref={root} className="h-full w-full">{enabled && <ProductDemo embeddedStep={step} />}</div>;
-}
-
 type LoopStage = {
 	body?: string;
-	kind: "composer" | "media" | "demo";
-	demoStep?: 1 | 2 | 3;
+	kind: "composer" | "media" | "live";
+	live?: ProductLoopLiveDemo;
 	media?: ProductLoopMedia;
 	state: string;
 	step: string;
@@ -99,11 +74,14 @@ export const loopStages: LoopStage[] = [
 			poster: "/product-scenes/03-undersok-poster.webp",
 			alt: "Verevon undersøker eksporten av ordre 4821 med tre parallelle oppgaver. Loggen viser at customer_id mangler, og endringen kjøres som simulert test.",
 		} },
-    { step: "04", state: "Følg opp", kind: "demo", demoStep: 3,
-        title: "Hold arbeidet i gang.",
-        body: "Se status, gjennomgå kundeutkastet og velg hvordan arbeidet skal følges opp." },
+    { step: "04", state: "Prøv selv", kind: "live",
+        title: "Bruk Verevon selv. Rett her.",
+        body: "Dette er det ekte dashbordet med fiktive data fra Fjordform AS. Spør, hent ut og følg opp, uten konto. Ingenting sendes, og ingenting forlater nettleseren din.",
+        live: PRODUCT_LOOP_LIVE_DEMO },
     { step: "05", state: "Composer", kind: "composer" },
 ];
+
+const LIVE_LAYER_INDEX = loopStages.findIndex((stage) => stage.kind === "live");
 
 const copyStages = loopStages.slice(1, 3);
 
@@ -174,8 +152,8 @@ function LoopMediaLayer({
 		>
 			{stage.kind === "composer" ? (
 				<LoopComposerContent />
-			) : stage.kind === "demo" ? (
-				<LoopDemoPreview step={stage.demoStep!} />
+			) : stage.kind === "live" && stage.live ? (
+				<LoopLiveDemo live={stage.live} />
             ) : stage.media ? (
 				<ProductLoopMediaContent media={stage.media} priority={index === 0} />
 			) : null}
@@ -184,34 +162,6 @@ function LoopMediaLayer({
 			) : null}
 		</div>
 	);
-}
-
-function LoopDemoPreview({ step }: { step: 1 | 2 | 3 }) {
-	const previewRef = useRef<HTMLDivElement>(null);
-	const contentRef = useRef<HTMLDivElement>(null);
-	useLayoutEffect(() => {
-		const preview = previewRef.current;
-		const content = contentRef.current;
-		if (!preview || !content) return;
-		const resize = (width: number, height: number) => {
-			const scale = Math.min(1, width / 1100);
-			if (!scale) return;
-			const nextWidth = `${width / scale}px`;
-			const nextHeight = `${height / scale}px`;
-			if (content.style.width !== nextWidth) content.style.width = nextWidth;
-			if (content.style.height !== nextHeight) content.style.height = nextHeight;
-			content.style.transform = `scale(${scale})`;
-		};
-		const observer = new ResizeObserver(([entry]) => resize(entry.contentRect.width, entry.contentRect.height));
-		observer.observe(preview);
-		resize(preview.clientWidth, preview.clientHeight);
-		return () => observer.disconnect();
-	}, []);
-	return <div ref={previewRef} className="h-full w-full overflow-hidden">
-		<div ref={contentRef} className="h-full w-full origin-top-left">
-			<ResponsiveDemo step={step} desktop />
-		</div>
-	</div>;
 }
 
 function LoopCopyPanel({ index, stage }: { index: number; stage: LoopStage }) {
@@ -241,7 +191,7 @@ function LoopCopyPanel({ index, stage }: { index: number; stage: LoopStage }) {
 // The corner ticks step aside while a film stage is the active layer: the films show real UI edge to
 // edge, and a tick would sit on top of it (at 16px inset it lands on the thread title in 02).
 const FRAME_TICKS_HIDDEN_OVER_FILM =
-	"[[data-product-loop-frame]:has([data-product-loop-layer][aria-hidden=false]_video)_&]:opacity-0";
+	"[[data-product-loop-frame]:has([data-product-loop-layer][aria-hidden=false]_video)_&]:opacity-0 [[data-product-loop-frame]:has([data-product-loop-layer][aria-hidden=false]_[data-product-loop-live])_&]:opacity-0";
 
 function LoopFrameChrome() {
 	return (
@@ -293,15 +243,13 @@ function ProductLoopMobileFallback() {
 					<p className="max-w-[34rem] font-geist text-[1rem] font-light leading-[1.48] text-verevon-text-muted">
 						{stage.body}
 					</p>
-                    {stage.media ? (
+                    {stage.kind === "live" && stage.live ? (
+                        <LiveDemoMobileCard live={stage.live} />
+                    ) : stage.media ? (
                         <div className="relative aspect-[16/10] overflow-hidden rounded-[20px] bg-[#f8f8f7]">
                             <ProductLoopMediaContent media={stage.media} />
                         </div>
-                    ) : (
-                        <div className="relative overflow-hidden rounded-[20px]">
-                            <ResponsiveDemo step={stage.demoStep!} />
-                        </div>
-                    )}
+                    ) : null}
 				</article>
 			))}
 
@@ -453,13 +401,8 @@ export function ProductLoopSection({ recordings = [] }: { recordings?: ProductRe
 						top: () => entranceStartFrame().top,
 						width: () => entranceStartFrame().width,
 					});
-					const contentFrame = () => {
-						const rect = viewportRect;
-						const inset = Math.max(Math.min(rect.width * 0.077, 100), (rect.width - 1512) / 2);
-						const width = rect.width - inset * 2;
-						const height = Math.min(rect.height - 160, width * 0.625);
-						return { width, height, left: inset, top: Math.max(96, (rect.height - height) / 2) };
-					};
+					// Shared with the live demo, which sizes its app from this settled frame.
+					const contentFrame = () => getProductLoopContentFrame(viewportRect);
 					const dynamicFullFrame = () => ({
 						height: () => contentFrame().height,
 						left: () => contentFrame().left,
@@ -541,12 +484,20 @@ export function ProductLoopSection({ recordings = [] }: { recordings?: ProductRe
 						gsap.set(composerCopy, { autoAlpha: 1, y: 0 });
 
 						let previousActive = -1;
+						// The live demo's layer records whether the visitor is in its settled window.
+						const liveLayer = layers[LIVE_LAYER_INDEX] ?? null;
+						let previousSettled: boolean | null = null;
 						const loopTimeline = gsap.timeline({
 							defaults: { ease: "none" },
 							paused: true,
                             onUpdate() {
                                 const time = this.time();
-                                const active = time < 1.16 ? 0 : time < 2.06 ? 1 : time < 2.96 ? 2 : time < 3.96 ? 3 : 4;
+                                const settled = time >= PRODUCT_LOOP_STAGE04_SETTLE_START && time < PRODUCT_LOOP_STAGE04_EXIT;
+                                if (settled !== previousSettled) {
+                                    previousSettled = settled;
+                                    if (liveLayer) liveLayer.dataset.productLoopSettled = String(settled);
+                                }
+                                const active = time < 1.16 ? 0 : time < 2.06 ? 1 : time < 2.96 ? 2 : time < PRODUCT_LOOP_STAGE04_ACTIVE_END ? 3 : 4;
                                 if (active === previousActive) return;
                                 previousActive = active;
                                 layers.forEach((layer, index) => {
@@ -709,12 +660,12 @@ export function ProductLoopSection({ recordings = [] }: { recordings?: ProductRe
 						);
 
                         transition(2, 3, 4, null, 2.72);
-                        transition(3, 4, 3, null, 3.72);
+                        transition(3, 4, 3, null, PRODUCT_LOOP_STAGE04_EXIT);
                         loopTimeline
-                            .to(chrome, { autoAlpha: 0, duration: 0.18 }, 3.88)
-                            .to(circle, { ...dynamicCircleGeometry(1.05, 0, 0.05), rotation: 180, duration: 0.6 }, 3.72)
-                            .to(frame, { backgroundColor: "transparent", borderColor: "transparent", borderRadius: "0px", boxShadow: "none", duration: 0.6 }, 3.72)
-                            .to({}, { duration: 0.22 }, 4.32);
+                            .to(chrome, { autoAlpha: 0, duration: 0.18 }, PRODUCT_LOOP_STAGE04_EXIT + 0.16)
+                            .to(circle, { ...dynamicCircleGeometry(1.05, 0, 0.05), rotation: 180, duration: 0.6 }, PRODUCT_LOOP_STAGE04_EXIT)
+                            .to(frame, { backgroundColor: "transparent", borderColor: "transparent", borderRadius: "0px", boxShadow: "none", duration: 0.6 }, PRODUCT_LOOP_STAGE04_EXIT)
+                            .to({}, { duration: 0.22 }, PRODUCT_LOOP_STAGE04_EXIT + 0.6);
 
 					}, section);
 
@@ -756,7 +707,25 @@ export function ProductLoopSection({ recordings = [] }: { recordings?: ProductRe
 						});
 					};
 
-					const queueRefresh = () => {
+					// A visitor who activates the live demo gets the middle of its still window, so the whole stage is in view.
+						const settleStage = (event: Event) => {
+							if (!timeline) return;
+							const reducedMotion = Boolean((event as CustomEvent<{ reducedMotion?: boolean }>).detail?.reducedMotion);
+							window.scrollTo({
+								behavior: reducedMotion ? "auto" : "smooth",
+								top: getProductLoopScrollYForTime({
+									entranceScrollDistance: window.innerHeight * PRODUCT_LOOP_ENTRANCE_VIEWPORT_RATIO,
+									entranceTimelineDuration: PRODUCT_LOOP_ENTRANCE_TIMELINE_DURATION,
+									pinnedScrollRange: cachedRange,
+									sectionTop: cachedTop,
+									time: (PRODUCT_LOOP_STAGE04_SETTLE_START + PRODUCT_LOOP_STAGE04_EXIT) / 2,
+									timelineDuration: timeline.duration(),
+								}),
+							});
+						};
+						window.addEventListener(PRODUCT_LOOP_SETTLE_EVENT, settleStage);
+
+						const queueRefresh = () => {
                             if (disposed) return;
 							if (refreshFrame !== null) {
 								return;
@@ -826,6 +795,7 @@ export function ProductLoopSection({ recordings = [] }: { recordings?: ProductRe
 						scrollDriver.kill();
 
 						window.removeEventListener("resize", queueRefresh);
+						window.removeEventListener(PRODUCT_LOOP_SETTLE_EVENT, settleStage);
 						window.removeEventListener("load", queueRefresh);
 						refreshObserver?.disconnect();
 						animationContext.revert();
@@ -853,7 +823,7 @@ export function ProductLoopSection({ recordings = [] }: { recordings?: ProductRe
 	return (
 		<section
 			aria-labelledby="product-loop-title"
-			className="relative isolate z-[5] -mt-[clamp(48px,6vh,88px)] h-[396svh] overflow-visible bg-background text-verevon-j-text max-[899px]:mt-0 max-[899px]:h-auto max-[899px]:overflow-hidden"
+			className="relative isolate z-[5] -mt-[clamp(48px,6vh,88px)] h-[436svh] overflow-visible bg-background text-verevon-j-text max-[899px]:mt-0 max-[899px]:h-auto max-[899px]:overflow-hidden"
 			data-product-loop
 			id="flyt"
 			ref={sectionRef}
