@@ -258,18 +258,12 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Manifest is current with its sources (no build)
-        run: node scripts/build-product-demo.mjs --verify
-
-      - name: Rebuild the demo; the committed bundle must not change
-        run: |
-          node scripts/build-product-demo.mjs
-          changed=$(git status --porcelain --untracked-files=all -- apps/verevon-web/public/product-demo)
-          if [ -n "$changed" ]; then
-            echo "::error::The committed demo bundle differs from a fresh build. Rebuild from a clean tree with node scripts/build-product-demo.mjs and commit the result."
-            echo "$changed"
-            exit 1
-          fi
+      # The bundle carries the product's own code, so any product change makes it older than the sources. That
+      # is only a warning here (--allow-stale): a showcase bundle must not block an unrelated product change. What
+      # must hold is that the committed files are exactly the ones in the manifest, that the manifest was written
+      # from a clean tree, and that next.config.ts still carries the headers the manifest records.
+      - name: Committed bundle matches its manifest and headers (staleness is a warning)
+        run: node scripts/build-product-demo.mjs --verify --allow-stale
 
       - name: Install Playwright Chromium
         run: pnpm exec playwright install --with-deps chromium

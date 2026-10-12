@@ -3,7 +3,9 @@
  * Captures the two stills the site shows while the interactive demo loads, fails to load, or sits
  * on a phone card: poster-desktop.webp (1240 x 696 CSS px at 2x) and poster-phone.webp (390 x 844
  * at 2x). They are screenshots of the built demo's dashboard at rest, so regenerate them whenever the
- * demo's first screen changes, then run `pnpm demo:build` again (the posters are build inputs).
+ * demo's first screen changes, then run `pnpm demo:build` again (the posters are build inputs). The capture also
+ * records the hash of the demo sources it used in src/demo/product-demo/poster-source.json, and the build refuses
+ * posters that were captured from other sources (scripts/build-product-demo.mjs, posterProblems).
  *
  *   node scripts/capture-demo-poster.mjs [--url http://127.0.0.1:5311/product-demo/]
  *        [--out src/demo/product-demo/public]
@@ -13,10 +15,11 @@
  */
 import { chromium } from '@playwright/test'
 import { spawnSync } from 'node:child_process'
-import { mkdir, rm } from 'node:fs/promises'
+import { mkdir, rm, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { POSTER_SOURCE_FILE, posterSourceHash } from './build-product-demo.mjs'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
 const spaRoot = path.resolve(here, '..')
@@ -56,6 +59,9 @@ try {
     if (result.status !== 0) throw new Error(`ffmpeg failed for ${poster.file}`)
     console.log(`demo:poster: ${target}`)
   }
+  const record = { sourceHash: await posterSourceHash() }
+  await writeFile(path.join(spaRoot, POSTER_SOURCE_FILE), `${JSON.stringify(record, null, 2)}\n`)
+  console.log(`demo:poster: recorded the sources in ${POSTER_SOURCE_FILE}`)
 } finally {
   await browser.close()
   await rm(scratch, { recursive: true, force: true })

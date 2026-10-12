@@ -186,11 +186,12 @@ function publishPaths(webRoot) {
 }
 
 function parseArgs(argv) {
-  const options = { verify: false, allowDirty: false, help: false, webRoot: undefined }
+  const options = { verify: false, allowDirty: false, allowStale: false, help: false, webRoot: undefined }
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]
     if (arg === '--verify') options.verify = true
     else if (arg === '--allow-dirty') options.allowDirty = true
+    else if (arg === '--allow-stale') options.allowStale = true
     else if (arg === '--help' || arg === '-h') options.help = true
     else if (arg === '--web-root') {
       const value = argv[++i]
@@ -404,30 +405,40 @@ function budgetProblems(records, totalBytes, entryBrotliBytes) {
 
 /**
  * The two stills the site shows while the demo loads or sits on a phone card (capture-demo-poster.mjs). Each must
- * exist and must be at least as new as the newest demo source: an older still may show cases the demo no longer has.
- * Only the stills are left out of the sources, because they are outputs of a capture from this build.
+ * exist, and they must have been captured from the sources that are being built: an older still may show cases the demo
+ * no longer has. The capture writes the hash of the sources it used into POSTER_SOURCE_FILE. The hash is content, not
+ * file times, so it holds in a fresh checkout and in CI. Only the stills and that record are left out of the sources,
+ * because they are outputs of a capture from this build.
  */
 const POSTER_DIR = 'src/demo/product-demo/public'
 const POSTER_FILES = ['poster-desktop.webp', 'poster-phone.webp']
+export const POSTER_SOURCE_FILE = 'src/demo/product-demo/poster-source.json'
+
+/** The hash of the demo sources without the stills and their record: what a capture records and a build compares. */
+export async function posterSourceHash() {
+  const left = new Set([...POSTER_FILES.map((name) => `${POSTER_DIR}/${name}`), POSTER_SOURCE_FILE])
+  const hash = createHash('sha256')
+  for (const rel of (await inputFiles()).filter((item) => !left.has(item))) {
+    const digest = sha256(canonicalBytes(rel, await readFile(join(SPA_ROOT, rel))))
+    hash.update(`${rel}\n${digest}\n`)
+  }
+  return hash.digest('hex')
+}
 
 async function posterProblems() {
-  const posterPaths = POSTER_FILES.map((name) => `${POSTER_DIR}/${name}`)
-  let newest = { rel: '(no sources)', mtimeMs: 0 }
-  for (const rel of (await inputFiles()).filter((item) => !posterPaths.includes(item))) {
-    const { mtimeMs } = await stat(join(SPA_ROOT, rel))
-    if (mtimeMs > newest.mtimeMs) newest = { rel, mtimeMs }
-  }
   const problems = []
-  for (const rel of posterPaths) {
-    const full = join(SPA_ROOT, rel)
-    if (!existsSync(full)) {
-      problems.push(`${rel} is missing. Capture the posters: node scripts/capture-demo-poster.mjs`)
-      continue
-    }
-    const { mtimeMs } = await stat(full)
-    if (mtimeMs < newest.mtimeMs) {
-      problems.push(`${rel} is older than ${newest.rel}. Capture it again from this build: node scripts/capture-demo-poster.mjs`)
-    }
+  for (const name of POSTER_FILES) {
+    if (!existsSync(join(SPA_ROOT, POSTER_DIR, name))) problems.push(`${POSTER_DIR}/${name} is missing. Capture the posters: node scripts/capture-demo-poster.mjs`)
+  }
+  if (problems.length > 0) return problems
+  let recorded
+  try {
+    recorded = JSON.parse(await readFile(join(SPA_ROOT, POSTER_SOURCE_FILE), 'utf8')).sourceHash
+  } catch {
+    return [`${POSTER_SOURCE_FILE} is missing. Capture the posters: node scripts/capture-demo-poster.mjs`]
+  }
+  if (recorded !== (await posterSourceHash())) {
+    problems.push('the posters were captured from other sources than these. Capture them again from this build: node scripts/capture-demo-poster.mjs')
   }
   return problems
 }
@@ -525,8 +536,9 @@ async function publish(paths, options) {
   return 0
 }
 
-async function verify(paths) {
+async function verify(paths, options = {}) {
   const problems = []
+  const warnings = []
   let manifest
   try {
     manifest = JSON.parse(await readFile(paths.manifestPath, 'utf8'))
@@ -538,7 +550,11 @@ async function verify(paths) {
   if (manifest.dirty) problems.push('the manifest was written from uncommitted demo inputs. Rebuild from a clean tree.')
   const current = await computeSourceHash()
   if (current.sourceHash !== manifest.sourceHash) {
-    problems.push('the demo sources changed since the manifest was written. Run pnpm demo:build.')
+    // The bundle carries the product's code, so any product change makes it older than the sources. CI passes --allow-stale
+    // so that an unrelated product change is not blocked by a showcase bundle: the files and headers must still be intact.
+    const message = 'the demo sources changed since the manifest was written. Run pnpm demo:build before the site next ships the demo.'
+    if (options.allowStale) warnings.push(message)
+    else problems.push(message)
   }
   if (manifest.totals.bytes > manifest.budgets.maxTotalBytes) problems.push('the manifest records a size over budget')
 
@@ -567,6 +583,7 @@ async function verify(paths) {
     if (!nextText.includes(line)) problems.push(`next.config.ts differs from the manifest for the rewrite ${rewrite.source}`)
   }
 
+  for (const warning of warnings) console.warn(`demo:verify: warning, ${warning}`)
   if (problems.length > 0) {
     console.error(`demo:verify: stale, ${problems.length} problem(s):`)
     for (const problem of problems) console.error(`  - ${problem}`)
@@ -577,7 +594,7 @@ async function verify(paths) {
 }
 
 function usage() {
-  console.log('usage: node scripts/build-product-demo.mjs [--verify] [--allow-dirty] [--web-root <dir> (with --verify only)]')
+  console.log('usage: node scripts/build-product-demo.mjs [--verify [--allow-stale]] [--allow-dirty] [--web-root <dir> (with --verify only)]')
 }
 
 async function main() {
@@ -591,7 +608,7 @@ async function main() {
     return 1
   }
   const paths = publishPaths(resolve(options.webRoot ?? DEFAULT_WEB_ROOT))
-  if (options.verify) return verify(paths)
+  if (options.verify) return verify(paths, options)
   return publish(paths, options)
 }
 
