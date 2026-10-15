@@ -84,6 +84,9 @@ impl PromptCache {
         }
         hasher.update(&req.temperature.to_le_bytes());
         hasher.update(&req.max_tokens.to_le_bytes());
+        // The thinking budget shapes the answer (a "quick" and a "deep" turn of the
+        // same prompt are different products), so a different budget must miss.
+        hasher.update(&req.thinking_budget_tokens.to_le_bytes());
         // Response-shaping fields — a tool/schema change must miss the cache.
         for tool in &req.tools {
             hasher.update(tool.name.as_bytes());
@@ -220,6 +223,25 @@ mod tests {
             output_tokens: 5,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn a_different_thinking_budget_is_a_different_cache_entry() {
+        let cache = PromptCache::new(300);
+        let quick = InferRequest {
+            thinking_budget_tokens: 0,
+            ..sample_request()
+        };
+        let deep = InferRequest {
+            thinking_budget_tokens: 4096,
+            ..sample_request()
+        };
+        cache.put(&quick, &sample_response());
+        assert!(
+            cache.get(&deep).is_none(),
+            "a deep turn must not be served the quick turn's cached answer"
+        );
+        assert!(cache.get(&quick).is_some(), "the same budget still hits");
     }
 
     #[test]
