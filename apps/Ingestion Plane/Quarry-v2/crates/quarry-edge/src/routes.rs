@@ -431,7 +431,7 @@ async fn scrape(
 
     if !zdr.is_active() && should_read(&req.cache) {
         if let (Some(prev), Some(cache)) = (req.prev_fingerprint.as_ref(), state.cache.as_ref()) {
-            if let Some(cached) = cache.get(prev).await {
+            if let Some(cached) = cache.get(&org_id, prev).await {
                 return Ok(Json(Envelope::ok(request_id, cached)));
             }
         }
@@ -480,7 +480,7 @@ async fn scrape(
             if !zdr.is_active() && should_write(&req.cache) {
                 if let Some(cache) = state.cache.as_ref() {
                     let ttl = effective_ttl(&req.cache, DEFAULT_TTL_SECS);
-                    if let Err(e) = cache.put_with_ttl(&out.fingerprint, &out, ttl).await {
+                    if let Err(e) = cache.put_with_ttl(&org_id, &out.fingerprint, &out, ttl).await {
                         tracing::warn!(error = %e, "cache put failed");
                     }
                 }
@@ -993,7 +993,7 @@ async fn internal_run_page(
         event_sink: state.event_sink.clone(),
         zdr,
         ingest: ingest_client,
-        org_id: Some(org_id),
+        org_id: Some(org_id.clone()),
         user_id: req.user_id.clone(),
         privacy,
         cancel_token: None,
@@ -1028,7 +1028,7 @@ async fn internal_run_page(
 
     if !zdr.is_active() && should_read(&req.cache) {
         if let (Some(prev), Some(cache)) = (req.prev_fingerprint.as_ref(), state.cache.as_ref()) {
-            if let Some(cached) = cache.get(prev).await {
+            if let Some(cached) = cache.get(&org_id, prev).await {
                 return Ok(Json(InternalRunPageResult::from_output(
                     run_id.to_string(),
                     &cached,
@@ -1043,7 +1043,7 @@ async fn internal_run_page(
             if !zdr.is_active() && should_write(&req.cache) {
                 if let Some(cache) = state.cache.as_ref() {
                     let ttl = effective_ttl(&req.cache, DEFAULT_TTL_SECS);
-                    if let Err(e) = cache.put_with_ttl(&out.fingerprint, &out, ttl).await {
+                    if let Err(e) = cache.put_with_ttl(&org_id, &out.fingerprint, &out, ttl).await {
                         tracing::warn!(error = %e, "cache put failed");
                     }
                 }
@@ -1084,7 +1084,7 @@ async fn scrape_stream(
         };
         if !zdr.is_active() && should_read(&req.cache) {
             if let (Some(prev), Some(cache)) = (req.prev_fingerprint.as_ref(), state.cache.as_ref()) {
-                if let Some(cached) = cache.get(prev).await {
+                if let Some(cached) = cache.get(&org_id, prev).await {
                     let data = serde_json::to_string(&cached).unwrap_or_default();
                     yield Ok(Event::default().event("result").data(data));
                     yield Ok(Event::default().data("done"));
@@ -1131,6 +1131,7 @@ async fn scrape_stream(
         let runner_url = url.clone();
         let prev_fp = req.prev_fingerprint.clone();
         let cache = state.cache.clone();
+        let cache_org_id = org_id.clone();
         let policy = req.cache.clone();
         let runner_handle = tokio::spawn(async move {
             let res = runner.run(&runner_run_id, &runner_url, prev_fp).await;
@@ -1138,7 +1139,7 @@ async fn scrape_stream(
                 if !zdr.is_active() && should_write(&policy) {
                     if let Some(c) = cache.as_ref() {
                         let ttl = effective_ttl(&policy, DEFAULT_TTL_SECS);
-                        if let Err(e) = c.put_with_ttl(&out.fingerprint, out, ttl).await {
+                        if let Err(e) = c.put_with_ttl(&cache_org_id, &out.fingerprint, out, ttl).await {
                             tracing::warn!(error = %e, "cache put failed");
                         }
                     }

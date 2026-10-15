@@ -69,8 +69,16 @@ fn extract_fingerprint(body: &serde_json::Value) -> String {
         .to_string()
 }
 
+/// With `QUARRY_EDGE_AUTH_DEV_BYPASS` every caller is the stub org below, so
+/// page-cache entries written by these tests live under that org's key.
+const DEV_ORG: &str = "org_placeholder";
+
 async fn purge_key(conn: &mut redis::aio::ConnectionManager, fp: &str) {
-    let key = format!("quarry:page:{fp}");
+    purge_key_for(conn, DEV_ORG, fp).await;
+}
+
+async fn purge_key_for(conn: &mut redis::aio::ConnectionManager, org: &str, fp: &str) {
+    let key = format!("quarry:page:{org}:{fp}");
     let _: redis::RedisResult<i64> = conn.del(&key).await;
 }
 
@@ -302,4 +310,95 @@ async fn cache_max_age_zero_uses_default_ttl() {
     );
 
     purge_key(&mut conn, &fp).await;
+}
+
+/// A cached output with a recognisable title, as an org would have stored it.
+fn planted_output(url: &str, fingerprint: &str, title: &str) -> quarry_core::output::NormalizedOutput {
+    serde_json::from_value(serde_json::json!({
+        "run_id": quarry_core::ids::kinds::RunKind::new(),
+        "url": { "requested": url, "final_url": url },
+        "status": 200,
+        "fetched_at": "2026-01-01T00:00:00Z",
+        "fingerprint": fingerprint,
+        "formats": {},
+        "change": { "status": "new" },
+        "metadata": { "title": title },
+        "driver": { "kind": "static", "duration_ms": 1 }
+    }))
+    .expect("a minimal NormalizedOutput")
+}
+
+/// Tenant isolation: a fingerprint is a hash of the raw page body, so anyone
+/// can compute it for a public page. It must never address another org's
+/// cached output (final URL, title, artifact refs) through `prev_fingerprint`.
+///
+/// Entries are planted straight into the cache so the test needs no origin
+/// (the SSRF guard refuses a loopback mock origin): a hit returns without
+/// fetching, and the miss case targets a refused loopback URL so it never
+/// leaves the process.
+#[tokio::test]
+async fn page_cache_is_not_readable_across_orgs() {
+    let Some((state, mut conn)) = build_state().await else {
+        eprintln!("skip: REDIS_URL unreachable");
+        return;
+    };
+    let addr = spawn_app(state).await;
+    let client = reqwest::Client::new();
+    let cache = PageCache::new(conn.clone(), Duration::from_secs(3600));
+
+    let url = "http://127.0.0.1:1/page";
+    let own_fp = "fp-own-org-isolation-test";
+    let other_fp = "fp-other-org-isolation-test";
+    cache
+        .put(DEV_ORG, own_fp, &planted_output(url, own_fp, "OWN ORG TITLE"))
+        .await
+        .expect("plant the dev org entry");
+    cache
+        .put("org_other", other_fp, &planted_output(url, other_fp, "OTHER ORG TITLE"))
+        .await
+        .expect("plant the other org entry");
+
+    // The dev org reading its own fingerprint is served from the cache.
+    let own = authed(
+        client
+            .post(format!("http://{addr}/v1/scrape"))
+            .json(&serde_json::json!({
+                "url": url,
+                "prev_fingerprint": own_fp,
+                "cache": { "mode": "read_write" }
+            })),
+    )
+    .send()
+    .await
+    .unwrap();
+    assert!(own.status().is_success(), "own-org fingerprint is a hit");
+    assert!(own.text().await.unwrap().contains("OWN ORG TITLE"));
+
+    // The dev org presenting the OTHER org's fingerprint must not be served
+    // that org's output: the key includes the org, so it is a miss.
+    let other = authed(
+        client
+            .post(format!("http://{addr}/v1/scrape"))
+            .json(&serde_json::json!({
+                "url": url,
+                "prev_fingerprint": other_fp,
+                "cache": { "mode": "read_write" }
+            })),
+    )
+    .send()
+    .await
+    .unwrap();
+    let body = other.text().await.unwrap();
+    assert!(
+        !body.contains("OTHER ORG TITLE"),
+        "another org's cached output leaked through prev_fingerprint: {body}"
+    );
+
+    // ...and the cache itself agrees at the key level.
+    assert!(cache.get("org_other", other_fp).await.is_some());
+    assert!(cache.get(DEV_ORG, other_fp).await.is_none());
+    assert!(cache.get("org_other", own_fp).await.is_none());
+
+    purge_key(&mut conn, own_fp).await;
+    purge_key_for(&mut conn, "org_other", other_fp).await;
 }
