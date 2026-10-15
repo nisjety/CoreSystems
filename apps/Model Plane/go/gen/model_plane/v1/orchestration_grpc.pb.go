@@ -31,6 +31,7 @@ const (
 	OrchestrationCoreService_ListPendingApprovals_FullMethodName              = "/model_plane.v1.OrchestrationCoreService/ListPendingApprovals"
 	OrchestrationCoreService_GetApproval_FullMethodName                       = "/model_plane.v1.OrchestrationCoreService/GetApproval"
 	OrchestrationCoreService_DecideApproval_FullMethodName                    = "/model_plane.v1.OrchestrationCoreService/DecideApproval"
+	OrchestrationCoreService_ConsumeApproval_FullMethodName                   = "/model_plane.v1.OrchestrationCoreService/ConsumeApproval"
 	OrchestrationCoreService_ClaimApprovalDeliveries_FullMethodName           = "/model_plane.v1.OrchestrationCoreService/ClaimApprovalDeliveries"
 	OrchestrationCoreService_GetApprovalContinuation_FullMethodName           = "/model_plane.v1.OrchestrationCoreService/GetApprovalContinuation"
 	OrchestrationCoreService_RecordApprovalContinuationStarted_FullMethodName = "/model_plane.v1.OrchestrationCoreService/RecordApprovalContinuationStarted"
@@ -91,6 +92,11 @@ type OrchestrationCoreServiceClient interface {
 	GetApproval(ctx context.Context, in *GetApprovalRequest, opts ...grpc.CallOption) (*GetApprovalResponse, error)
 	// Record a decision (granted, denied, or timed_out) on an approval.
 	DecideApproval(ctx context.Context, in *DecideApprovalRequest, opts ...grpc.CallOption) (*DecideApprovalResponse, error)
+	// Consume a granted loop-mode approval exactly once (build plan WS03 S2). The
+	// durable Do loop that paused for the approval calls this when it re-enters, so
+	// a granted approval is executed by the loop once and never also by the cold
+	// delivery worker. Caller-scoped (user bearer), not service-only.
+	ConsumeApproval(ctx context.Context, in *ConsumeApprovalRequest, opts ...grpc.CallOption) (*ConsumeApprovalResponse, error)
 	// Claim due durable approval deliveries for an authenticated internal
 	// worker. Claims are tenant-scoped, leased, and opaque; the caller identity
 	// is derived from its verified service credential, never from this request.
@@ -256,6 +262,16 @@ func (c *orchestrationCoreServiceClient) DecideApproval(ctx context.Context, in 
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(DecideApprovalResponse)
 	err := c.cc.Invoke(ctx, OrchestrationCoreService_DecideApproval_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *orchestrationCoreServiceClient) ConsumeApproval(ctx context.Context, in *ConsumeApprovalRequest, opts ...grpc.CallOption) (*ConsumeApprovalResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ConsumeApprovalResponse)
+	err := c.cc.Invoke(ctx, OrchestrationCoreService_ConsumeApproval_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -428,6 +444,11 @@ type OrchestrationCoreServiceServer interface {
 	GetApproval(context.Context, *GetApprovalRequest) (*GetApprovalResponse, error)
 	// Record a decision (granted, denied, or timed_out) on an approval.
 	DecideApproval(context.Context, *DecideApprovalRequest) (*DecideApprovalResponse, error)
+	// Consume a granted loop-mode approval exactly once (build plan WS03 S2). The
+	// durable Do loop that paused for the approval calls this when it re-enters, so
+	// a granted approval is executed by the loop once and never also by the cold
+	// delivery worker. Caller-scoped (user bearer), not service-only.
+	ConsumeApproval(context.Context, *ConsumeApprovalRequest) (*ConsumeApprovalResponse, error)
 	// Claim due durable approval deliveries for an authenticated internal
 	// worker. Claims are tenant-scoped, leased, and opaque; the caller identity
 	// is derived from its verified service credential, never from this request.
@@ -514,6 +535,9 @@ func (UnimplementedOrchestrationCoreServiceServer) GetApproval(context.Context, 
 }
 func (UnimplementedOrchestrationCoreServiceServer) DecideApproval(context.Context, *DecideApprovalRequest) (*DecideApprovalResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method DecideApproval not implemented")
+}
+func (UnimplementedOrchestrationCoreServiceServer) ConsumeApproval(context.Context, *ConsumeApprovalRequest) (*ConsumeApprovalResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ConsumeApproval not implemented")
 }
 func (UnimplementedOrchestrationCoreServiceServer) ClaimApprovalDeliveries(context.Context, *ClaimApprovalDeliveriesRequest) (*ClaimApprovalDeliveriesResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ClaimApprovalDeliveries not implemented")
@@ -786,6 +810,24 @@ func _OrchestrationCoreService_DecideApproval_Handler(srv interface{}, ctx conte
 	return interceptor(ctx, in, info, handler)
 }
 
+func _OrchestrationCoreService_ConsumeApproval_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ConsumeApprovalRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(OrchestrationCoreServiceServer).ConsumeApproval(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: OrchestrationCoreService_ConsumeApproval_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(OrchestrationCoreServiceServer).ConsumeApproval(ctx, req.(*ConsumeApprovalRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _OrchestrationCoreService_ClaimApprovalDeliveries_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(ClaimApprovalDeliveriesRequest)
 	if err := dec(in); err != nil {
@@ -1031,6 +1073,10 @@ var OrchestrationCoreService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "DecideApproval",
 			Handler:    _OrchestrationCoreService_DecideApproval_Handler,
+		},
+		{
+			MethodName: "ConsumeApproval",
+			Handler:    _OrchestrationCoreService_ConsumeApproval_Handler,
 		},
 		{
 			MethodName: "ClaimApprovalDeliveries",

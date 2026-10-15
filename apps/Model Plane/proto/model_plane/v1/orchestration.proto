@@ -64,6 +64,12 @@ service OrchestrationCoreService {
   // Record a decision (granted, denied, or timed_out) on an approval.
   rpc DecideApproval(DecideApprovalRequest) returns (DecideApprovalResponse);
 
+  // Consume a granted loop-mode approval exactly once (build plan WS03 S2). The
+  // durable Do loop that paused for the approval calls this when it re-enters, so
+  // a granted approval is executed by the loop once and never also by the cold
+  // delivery worker. Caller-scoped (user bearer), not service-only.
+  rpc ConsumeApproval(ConsumeApprovalRequest) returns (ConsumeApprovalResponse);
+
   // Claim due durable approval deliveries for an authenticated internal
   // worker. Claims are tenant-scoped, leased, and opaque; the caller identity
   // is derived from its verified service credential, never from this request.
@@ -378,6 +384,15 @@ message Approval {
   // (ListPendingApprovals with empty org_id) can re-scope each entry to its
   // tenant in the consumer's cache (D-1, IDOR-safe).
   string org_id = 13;
+
+  // When the loop consumed the granted approval (build plan WS03 S2). Unset
+  // until consumed; a consumed approval is not pending activity.
+  google.protobuf.Timestamp consumed_at = 14;
+
+  // Who resumes this approval once granted: empty = the cold delivery worker
+  // (the default, unchanged), "segment" or "loop" = the durable Do loop, which
+  // consumes it once via ConsumeApproval. Loop modes create no delivery row.
+  string continuation_mode = 15;
 }
 
 // A durable todo record.
@@ -673,6 +688,41 @@ message CreateApprovalRequest {
   // retained continuation descriptors are intentionally incompatible with
   // zero-data-retention execution.
   string continuation_descriptor_json = 11;
+
+  // Who resumes the approval once granted (see Approval.continuation_mode).
+  // Empty = the cold delivery worker, exactly as before. Refused for a
+  // zero-retention caller: a loop continuation retains a fold.
+  string continuation_mode = 12;
+}
+
+// ConsumeApproval claims one granted loop-mode approval for the loop that is
+// re-entering. Scope comes from the verified caller; the ids only select.
+message ConsumeApprovalRequest {
+  // The approval to consume.
+  string approval_id = 1;
+  // Server-authoritative org scope.
+  string org_id = 2;
+  // The run the approval gates; must match the approval.
+  string run_id = 3;
+  // The step the approval gates; must match when the approval names one.
+  string step_id = 4;
+  // The digest of the exact call, compared with the retained descriptor when one
+  // exists. A mismatch is refused: the loop may not run a different call.
+  string action_fingerprint = 5;
+  // An opaque token the resuming segment generates. The same token consuming
+  // twice is a safe replay; another token is refused as already consumed.
+  string claim_token = 6;
+}
+
+// The outcome of a ConsumeApproval.
+message ConsumeApprovalResponse {
+  // True when this call consumed the approval.
+  bool consumed = 1;
+  // True when the approval had already been consumed.
+  bool already_consumed = 2;
+  // With already_consumed: whether the earlier claim used the same token (a
+  // replay by the same segment) rather than another.
+  bool same_claim = 3;
 }
 
 message CreateApprovalResponse {
