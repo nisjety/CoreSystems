@@ -104,3 +104,52 @@ fn a_response_without_the_fields_has_no_typed_failure() {
     assert_eq!(decoded.retry_after_ms, None);
     assert_eq!(decoded.resets_at, "");
 }
+
+// ---- RunAgentRequest.run_context (field 18, build plan WS02 S4) ----
+
+/// A run that carries instructions, a memory block and a status. Pinned so the
+/// field number and the nested numbers cannot drift unseen between the Rust
+/// writer and the Go readers.
+const RUN_CONTEXT_WIRE_HEX: &str = "0a0272319201160a0942652062726965662e1a016d22060a0408011001";
+
+fn run_with_context() -> mp_contracts::model_plane::v1::RunAgentRequest {
+    use mp_contracts::model_plane::v1::{
+        RunAgentRequest, RunContext, RunContextPart, RunContextState, RunContextStatus,
+    };
+    RunAgentRequest {
+        run_id: "r1".to_owned(),
+        run_context: Some(RunContext {
+            authored_instructions: "Be brief.".to_owned(),
+            memory_block: "m".to_owned(),
+            status: Some(RunContextStatus {
+                instructions: Some(RunContextPart {
+                    state: RunContextState::Included as i32,
+                    included: 1,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }),
+        ..Default::default()
+    }
+}
+
+#[test]
+fn a_run_context_encodes_to_the_golden_bytes() {
+    assert_eq!(hex(&run_with_context().encode_to_vec()), RUN_CONTEXT_WIRE_HEX);
+}
+
+#[test]
+fn the_run_context_golden_bytes_decode_and_an_absent_context_stays_absent() {
+    use mp_contracts::model_plane::v1::RunAgentRequest;
+    let decoded = RunAgentRequest::decode(unhex(RUN_CONTEXT_WIRE_HEX).as_slice()).expect("decode");
+    let context = decoded.run_context.expect("field 18 present");
+    assert_eq!(context.authored_instructions, "Be brief.");
+    assert_eq!(context.memory_block, "m");
+    assert_eq!(context.status.expect("status").instructions.expect("part").included, 1);
+    // A request written before the field existed has no context (today's behaviour).
+    let before = RunAgentRequest { run_id: "r1".to_owned(), ..Default::default() };
+    let decoded = RunAgentRequest::decode(before.encode_to_vec().as_slice()).expect("decode");
+    assert!(decoded.run_context.is_none());
+}

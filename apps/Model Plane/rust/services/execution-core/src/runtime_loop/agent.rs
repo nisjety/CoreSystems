@@ -6181,6 +6181,13 @@ mod tests {
         ) -> Result<Response<pb::SetRunModeResponse>, Status> {
             Err(Status::unimplemented("set_run_mode not used"))
         }
+
+        async fn record_run_context(
+            &self,
+            _: Request<pb::RecordRunContextRequest>,
+        ) -> Result<Response<pb::RecordRunContextResponse>, Status> {
+            Err(Status::unimplemented("record_run_context not used"))
+        }
     }
 
     // --- RunService mock: serves the run rows a REPLAYED delegation reads back.
@@ -6985,6 +6992,7 @@ mod tests {
             // sends — the tests that DO care use `subscription_request()`.
             provider_hint: String::new(),
             subscription_connection_id: String::new(),
+            run_context: None,
         }
     }
 

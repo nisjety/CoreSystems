@@ -5246,6 +5246,61 @@ impl SessionCore for SessionService {
         result
     }
 
+    // Build plan WS02: stamp how a run's context (instructions, history,
+    // memory) was assembled onto the run record. Closed tokens and counts only.
+    // Merged into `runs.metadata` like `set_run_mode` does, so no migration and
+    // no other key is dropped; `GetRun` already returns it.
+    async fn record_run_context(
+        &self,
+        request: Request<pb::RecordRunContextRequest>,
+    ) -> Result<Response<pb::RecordRunContextResponse>, Status> {
+        let started = Instant::now();
+        let result: Result<Response<pb::RecordRunContextResponse>, Status> = async {
+            let caller = identity(&request)?;
+            authorize_operation(&caller, "session:write")?;
+            // A durable run mutation: a zero-retention or waived credential
+            // never persists one (the run it describes keeps no content).
+            if caller.zdr() || caller.zdr_waiver().is_some() {
+                return Err(Refusal::DURABLE_MUTATION_FORBIDDEN
+                    .grpc_status(tonic::Code::FailedPrecondition));
+            }
+            let req = request.into_inner();
+            if req.run_id.is_empty() || req.org_id.is_empty() {
+                return Err(Status::invalid_argument("run_id and org_id are required"));
+            }
+            let Some(status) = req.status.as_ref() else {
+                return Err(Status::invalid_argument("status is required"));
+            };
+            caller.authorize_org(&req.org_id)?;
+            authorize_run_owner(&self.pool, &caller, &req.run_id, OwnerIntent::Mutate).await?;
+            let patch = serde_json::json!({
+                "run_context": mp_contracts::run_context::status_json(status),
+            });
+            let updated = sqlx::query(
+                "UPDATE runs
+                    SET metadata = COALESCE(metadata, '{}'::jsonb) || $3::jsonb,
+                        updated_at = now()
+                  WHERE id = $1 AND org_id = $2",
+            )
+            .bind(&req.run_id)
+            .bind(&req.org_id)
+            .bind(&patch)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| {
+                warn!(error = %e, "record_run_context failed");
+                Status::internal(e.to_string())
+            })?;
+            if updated.rows_affected() == 0 {
+                return Err(Status::not_found(format!("run {} not found", req.run_id)));
+            }
+            Ok(Response::new(pb::RecordRunContextResponse {}))
+        }
+        .await;
+        record_metrics("record_run_context", started, result.is_ok());
+        result
+    }
+
     async fn claim_scheduled_step(
         &self,
         request: Request<pb::ClaimScheduledStepRequest>,
@@ -9448,6 +9503,77 @@ mod tests {
 
     /// A request as the mandatory interceptor hands it on: carrying the
     /// verified user the handler authorizes. Handlers fail closed without one.
+    // Build plan WS02 S4: RecordRunContext stamps the assembly status onto
+    // `runs.metadata.run_context` WITHOUT dropping other metadata keys, is
+    // refused for a zero-retention credential before any write, and is scoped
+    // to the owning org.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a Postgres with session-core migrations"]
+    async fn record_run_context_merges_without_dropping_other_keys() {
+        use super::SessionService;
+
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping: DATABASE_URL unset");
+            return;
+        };
+        let pool = sqlx::PgPool::connect(&url).await.expect("connect pg");
+        sqlx::migrate!("./migrations").run(&pool).await.expect("migrate");
+        let sfx = std::process::id();
+        let (thread_id, run_id, org) = (format!("rc-t-{sfx}"), format!("rc-r-{sfx}"), format!("rc-org-{sfx}"));
+        sqlx::query("INSERT INTO threads (id,session_key,org_id,user_id) VALUES ($1,$1,$2,'u1')")
+            .bind(&thread_id).bind(&org).execute(&pool).await.expect("seed thread");
+        sqlx::query(
+            "INSERT INTO runs (id,thread_id,goal,org_id,user_id,metadata) VALUES ($1,$2,'g',$3,'u1','{\"autonomy_rung\":\"workspace_write\"}'::jsonb)",
+        )
+        .bind(&run_id).bind(&thread_id).bind(&org).execute(&pool).await.expect("seed run");
+        let svc = SessionService {
+            pool: pool.clone(),
+            retrieval_client: None,
+            graph_client: None,
+            knowledge_client: None,
+            letta_memory: None,
+            audit_publisher: None,
+            auth: None,
+        };
+        let status = pb::RunContextStatus {
+            instructions: Some(pb::RunContextPart { state: pb::RunContextState::Included as i32, included: 1, omitted: 0, reason: String::new() }),
+            history: Some(pb::RunContextPart { state: pb::RunContextState::Truncated as i32, included: 24, omitted: 6, reason: "cap".into() }),
+            memory: Some(pb::RunContextPart { state: pb::RunContextState::SkippedByPolicy as i32, included: 0, omitted: 0, reason: "memory_off".into() }),
+        };
+        let request = |org: &str| pb::RecordRunContextRequest { run_id: run_id.clone(), org_id: org.to_owned(), status: Some(status.clone()) };
+
+        svc.record_run_context(as_user(&org, "u1", request(&org))).await.expect("record_run_context");
+        let (metadata,): (serde_json::Value,) = sqlx::query_as("SELECT metadata FROM runs WHERE id = $1")
+            .bind(&run_id).fetch_one(&pool).await.expect("read metadata");
+        assert_eq!(metadata["autonomy_rung"], "workspace_write", "an unrelated key must survive the merge");
+        assert_eq!(metadata["run_context"]["history"]["state"], "truncated");
+        assert_eq!(metadata["run_context"]["history"]["omitted"], 6);
+        assert_eq!(metadata["run_context"]["memory"]["reason"], "memory_off");
+
+        // A zero-retention credential never persists a run mutation.
+        let mut zdr = Request::new(request(&org));
+        zdr.extensions_mut().insert(VerifiedIdentity::user_for_test_with_zdr(&org, "u1", true));
+        let refused = svc.record_run_context(zdr).await.expect_err("ZDR must be refused");
+        // The operation scope already refuses a ZDR credential for `session:write`
+        // (permission_denied); the explicit durable-mutation check behind it is
+        // defence in depth for a credential that reaches it.
+        assert!(
+            matches!(
+                refused.code(),
+                tonic::Code::PermissionDenied | tonic::Code::FailedPrecondition
+            ),
+            "unexpected refusal: {refused:?}"
+        );
+        let (after,): (serde_json::Value,) = sqlx::query_as("SELECT metadata FROM runs WHERE id = $1")
+            .bind(&run_id).fetch_one(&pool).await.expect("re-read metadata");
+        assert_eq!(after, metadata, "a refused call must not write");
+
+        // Another org's caller is refused by the tenant check.
+        let other = format!("rc-other-{sfx}");
+        let foreign = svc.record_run_context(as_user(&other, "u1", request(&org))).await;
+        assert!(foreign.is_err(), "a foreign org must not stamp this run");
+    }
+
     fn as_user<T>(org_id: &str, user_id: &str, message: T) -> Request<T> {
         let mut request = Request::new(message);
         request

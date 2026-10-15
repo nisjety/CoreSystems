@@ -9191,6 +9191,9 @@ fn build_run_agent_request(
         // byte-identical to what was sent before these fields existed.
         provider_hint: route.provider_hint.clone(),
         subscription_connection_id: route.subscription_connection_id.clone(),
+        // The run context is composed and sent by a later slice (build plan
+        // WS02 S6); absent = today's behaviour.
+        run_context: None,
     }
 }
 

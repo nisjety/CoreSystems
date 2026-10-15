@@ -3651,6 +3651,13 @@ mod tests {
             Err(Status::unimplemented("set_run_mode not needed in test"))
         }
 
+        async fn record_run_context(
+            &self,
+            _: Request<mp_contracts::model_plane::v1::RecordRunContextRequest>,
+        ) -> Result<Response<mp_contracts::model_plane::v1::RecordRunContextResponse>, Status> {
+            Err(Status::unimplemented("record_run_context not needed in test"))
+        }
+
         async fn list_agent_skills(
             &self,
             _: Request<mp_contracts::model_plane::v1::ListAgentSkillsRequest>,

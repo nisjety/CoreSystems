@@ -661,6 +661,14 @@ async fn create_durable_approval(
 /// caller whose token says ZDR, or whose request does. `feature` is the catalogue
 /// key of what is refused, so the status names it.
 #[allow(clippy::result_large_err)]
+/// The run context is judged at the run_agent boundary: a context that breaks
+/// its bounds, or that carries conversation content on a zero-retention run, is
+/// refused with the closed token only (build plan WS02 S4).
+fn enforce_run_context(req: &pb::RunAgentRequest) -> Result<(), Status> {
+    mp_contracts::run_context::validate(req.run_context.as_ref(), req.zdr)
+        .map_err(|refusal| Status::invalid_argument(refusal.token()))
+}
+
 fn enforce_persistence_free_execution(
     caller: &AuthenticatedUser,
     request_zdr: bool,
@@ -1257,6 +1265,10 @@ impl ExecutionCore for ExecutionService {
         self.authorize_run(&caller, &req.run_id, &session_bearer)
             .await?;
         enforce_persistence_free_execution(&caller, req.zdr, "agent_run")?;
+        // The run context is judged at the boundary like the route below: a
+        // context that breaks its bounds, or that carries conversation content
+        // on a zero-retention run, is refused with the closed token only.
+        enforce_run_context(&req)?;
         // The inference route the request names (`provider_hint` and
         // `subscription_connection_id`) is judged here, at the boundary and
         // before any of the run's work: a route this process may not honour is
@@ -2117,5 +2129,46 @@ mod auth_tests {
         })
         .await
         .expect("test verifier")
+    }
+}
+
+#[cfg(test)]
+mod run_context_boundary_tests {
+    use super::*;
+
+    fn request_with(context: Option<pb::RunContext>, zdr: bool) -> pb::RunAgentRequest {
+        pb::RunAgentRequest {
+            run_id: "run".to_owned(),
+            zdr,
+            run_context: context,
+            ..Default::default()
+        }
+    }
+
+    fn history() -> pb::RunContext {
+        pb::RunContext {
+            history: vec![pb::ChatMessage {
+                role: "user".to_owned(),
+                content: "an earlier question".to_owned(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_zdr_run_with_history_is_refused_at_the_boundary() {
+        let refused = enforce_run_context(&request_with(Some(history()), true))
+            .expect_err("history on a ZDR run must be refused");
+        assert_eq!(refused.code(), tonic::Code::InvalidArgument);
+        // Only the closed token leaves the service, never the content.
+        assert_eq!(refused.message(), "run_context_zdr_history");
+    }
+
+    #[test]
+    fn the_same_context_on_a_persistent_run_and_an_absent_context_pass() {
+        assert!(enforce_run_context(&request_with(Some(history()), false)).is_ok());
+        assert!(enforce_run_context(&request_with(None, true)).is_ok());
+        assert!(enforce_run_context(&request_with(None, false)).is_ok());
     }
 }
