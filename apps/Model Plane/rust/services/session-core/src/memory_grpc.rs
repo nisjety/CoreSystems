@@ -2,7 +2,10 @@
 
 use crate::{
     auth::{identity, VerifiedIdentity},
-    grpc::{MemoryRetention, ZDR_MEMORY_READ_SUPPRESSED, ZDR_MEMORY_WRITE_SUPPRESSED},
+    grpc::{
+        MemoryRetention, WAIVED_MEMORY_INDEX_SUPPRESSED, ZDR_MEMORY_READ_SUPPRESSED,
+        ZDR_MEMORY_WRITE_SUPPRESSED,
+    },
     letta_adapter::LettaMemoryAdapter,
 };
 use chrono::{DateTime, Utc};
@@ -490,7 +493,13 @@ impl MemoryService for MemoryGrpc {
         // topic.
         let is_user_scoped = req.topic.trim().eq_ignore_ascii_case("USER");
         let letta_owner = is_user_scoped.then_some(owner_user_id.as_str());
-        let degradation_reason = if let Some(letta) = self.letta.as_ref() {
+        // The local row above is the user's own explicit save, and it stays. The
+        // external semantic copy is a derived write to another processor, which a
+        // waived run never gets (Z-17, decision D-B).
+        let external_indexing = MemoryRetention::of(&caller).permits_external_memory_indexing();
+        let degradation_reason = if !external_indexing {
+            Some(WAIVED_MEMORY_INDEX_SUPPRESSED)
+        } else if let Some(letta) = self.letta.as_ref() {
             letta
                 .index_detailed(
                     req.org_id.trim(),
@@ -616,7 +625,10 @@ impl MemoryService for MemoryGrpc {
         let permits_durable_memory =
             authorize_user_memory_preflight(&caller, org_id, user_id, MEMORY_WRITE_SCOPE)?;
 
-        if !permits_durable_memory {
+        // Owner decision 17: a user's delete of their own memory is housekeeping, open under every posture,
+        // so a ZDR user can remove a row written before ZDR applied. Only a service caller is held to the
+        // write retention here. The delete sends the memory id and never any content.
+        if !permits_durable_memory && caller.is_service() {
             return Ok(Response::new(delete_response(
                 false,
                 Some(ZDR_MEMORY_WRITE_SUPPRESSED),
@@ -978,7 +990,7 @@ mod tests {
     /// per `MemoryRetention::permits_durable_memory`'s documented policy for
     /// this boundary. Neither the database nor Letta is touched.
     #[tokio::test]
-    async fn list_and_delete_memory_are_noop_not_error_for_a_zdr_caller() {
+    async fn list_is_a_noop_not_an_error_for_a_zdr_caller() {
         let auth = MockServer::start().await;
         Mock::given(wiremock::matchers::method("POST"))
             .respond_with(ResponseTemplate::new(500))
@@ -989,7 +1001,7 @@ mod tests {
         let zdr_caller = VerifiedIdentity::user_for_test_with_zdr("org-a", "user-a", true);
 
         let list = service
-            .list_memory(request(list_request("org-a", "user-a"), zdr_caller.clone()))
+            .list_memory(request(list_request("org-a", "user-a"), zdr_caller))
             .await
             .expect("ZDR list is a well-formed empty response, not an error")
             .into_inner();
@@ -1000,23 +1012,102 @@ mod tests {
             "DEGRADED_LETTA_ZDR_READ_SUPPRESSED"
         );
 
-        let delete = service
-            .delete_memory(request(
-                delete_request("org-a", "user-a", "memory-1"),
-                zdr_caller,
-            ))
-            .await
-            .expect("ZDR delete is a well-formed no-op, not an error")
-            .into_inner();
-        assert!(!delete.deleted);
-        assert!(delete.degraded);
-        assert_eq!(
-            delete.degradation_reason,
-            "DEGRADED_LETTA_ZDR_WRITE_SUPPRESSED"
-        );
-
         assert_eq!(ownership.calls.load(Ordering::SeqCst), 0);
         assert!(auth.received_requests().await.unwrap().is_empty());
+    }
+
+    /// Owner decision 17: a ZDR user deletes their own memory, including a row written before ZDR applied.
+    /// The delete stays scoped to the owner: another user's thread memory of the same org is refused and
+    /// left alone. Needs a scratch Postgres whose name contains "test".
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a scratch Postgres whose name contains \"test\" (session-core receipts CI job)"]
+    async fn zdr_receipt_memory_delete_is_open_to_the_zdr_owner_and_stays_scoped() {
+        let url =
+            std::env::var("DATABASE_URL").expect("a scratch database whose name contains test");
+        let database = url
+            .rsplit('/')
+            .next()
+            .and_then(|tail| tail.split('?').next())
+            .unwrap_or_default();
+        assert!(
+            database.contains("test"),
+            "DATABASE_URL must name a scratch database whose name contains \"test\""
+        );
+        let pool = PgPool::connect(&url).await.unwrap();
+        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+        let org = format!("zdr-memory-delete-{}", mp_ids::new_ulid());
+        let (own_thread, foreign_thread) = (mp_ids::new_ulid(), mp_ids::new_ulid());
+        for (thread, user) in [(&own_thread, "user-a"), (&foreign_thread, "user-b")] {
+            sqlx::query(
+                "INSERT INTO threads (id, session_key, org_id, user_id) VALUES ($1, $1, $2, $3)",
+            )
+            .bind(thread)
+            .bind(&org)
+            .bind(user)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        let insert = |id: String, session: String| {
+            let pool = pool.clone();
+            let org = org.clone();
+            async move {
+                sqlx::query(
+                    "INSERT INTO agent_memory (id, org_id, session_id, scope, key, content, owner) \
+                     VALUES ($1, $2, $3, 'thread', $1, 'content', '')",
+                )
+                .bind(&id)
+                .bind(&org)
+                .bind(session)
+                .execute(&pool)
+                .await
+                .unwrap();
+                id
+            }
+        };
+        let own_memory = insert(mp_ids::new_ulid(), own_thread.clone()).await;
+        let foreign_memory = insert(mp_ids::new_ulid(), foreign_thread.clone()).await;
+        let exists = |id: String| {
+            let pool = pool.clone();
+            async move {
+                sqlx::query_scalar::<_, bool>(
+                    "SELECT EXISTS (SELECT 1 FROM agent_memory WHERE id = $1)",
+                )
+                .bind(id)
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+            }
+        };
+
+        let service = MemoryGrpc::new(pool.clone(), None);
+        let zdr_owner = || VerifiedIdentity::user_for_test_with_zdr(&org, "user-a", true);
+        let response = service
+            .delete_memory(request(
+                delete_request(&org, "user-a", &own_memory),
+                zdr_owner(),
+            ))
+            .await
+            .expect("a ZDR owner may delete their own memory")
+            .into_inner();
+        assert!(response.deleted, "the ZDR owner's own row is deleted");
+        assert!(
+            !exists(own_memory.clone()).await,
+            "the durable row must be gone"
+        );
+
+        let error = service
+            .delete_memory(request(
+                delete_request(&org, "user-a", &foreign_memory),
+                zdr_owner(),
+            ))
+            .await
+            .expect_err("another user's memory is not the ZDR owner's to delete");
+        assert_eq!(error.code(), tonic::Code::NotFound);
+        assert!(
+            exists(foreign_memory.clone()).await,
+            "a refused delete leaves the row alone"
+        );
     }
 
     #[test]

@@ -32,6 +32,7 @@ mod nats_connection;
 mod orchestration_grpc;
 mod orchestration_nats;
 mod orchestration_store;
+mod retention_receipt;
 mod routing_policy_grpc;
 mod run_service_grpc;
 mod service_token;

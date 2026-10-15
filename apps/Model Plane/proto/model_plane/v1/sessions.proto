@@ -193,6 +193,17 @@ service ManagedRunLifecycle {
   rpc CompleteDirectRunWithMessage(CompleteDirectRunWithMessageRequest) returns (CompleteDirectRunWithMessageResponse);
 }
 
+// SessionRetentionService: read-only retention receipt counts for the org
+// admin view. It is a separate service, as ManagedRunLifecycle is, so that
+// SessionCore and every mock of it stay source-compatible. The answer carries
+// counts and dates only, never run, message or goal content.
+service SessionRetentionService {
+  // Count an org's waived runs per (connection, user), with the start time of
+  // the most recent one. Refused to user credentials and to any service that
+  // lacks session:retention:read, and never answers for another org.
+  rpc CountWaivedRuns(CountWaivedRunsRequest) returns (CountWaivedRunsResponse);
+}
+
 // --- CreateThread ---
 
 message CreateThreadRequest {
@@ -1204,4 +1215,35 @@ message RecordScheduledStepReceiptResponse {
   string receipt_id = 1;
   string status = 2;
   bool recorded = 3;
+}
+
+// --- SessionRetentionService.CountWaivedRuns (Z-21a) ---
+
+// The org whose waived-run counts are wanted.
+message CountWaivedRunsRequest {
+  // Required. The org whose waived runs are counted. It must be the caller's
+  // own org: the count never crosses an org boundary.
+  string org_id = 1;
+}
+
+// Waived-run counts of one org, one row per (connection, user).
+message CountWaivedRunsResponse {
+  // One row per (connection, user) with at least one waived run in the org.
+  // Empty when the org has none.
+  repeated WaivedRunCount counts = 1;
+}
+
+// One (connection, user) group of waived runs and when it was last used.
+message WaivedRunCount {
+  // The connection the waived runs were bound to, from each run's receipt.
+  string connection_id = 1;
+
+  // The verified session user who ran them.
+  string user_id = 2;
+
+  // How many of this user's runs on this connection carry the waived receipt.
+  int64 run_count = 3;
+
+  // When the most recent of those runs started.
+  google.protobuf.Timestamp last_used_at = 4;
 }

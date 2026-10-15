@@ -21,7 +21,9 @@ use mp_contracts::model_plane::v1::{
     routing_policy_server::RoutingPolicyServer,
     run_service_server::RunServiceServer,
     session_core_server::{SessionCore, SessionCoreServer},
+    session_retention_service_server::{SessionRetentionService, SessionRetentionServiceServer},
 };
+use mp_contracts::zdr_refusal::Refusal;
 use mp_events::idempotency::derive_idempotency_hash;
 use mp_ids::new_ulid;
 use sha2::{Digest as _, Sha256};
@@ -32,11 +34,10 @@ use tonic::{Request, Response, Status};
 use tracing::{info, warn};
 
 use crate::auth::{
-    authorize_operation, authorize_owner_row, authorize_scheduled_step_service,
-    authorize_space_deletion_service, authorize_system_run_owner, authorize_thread_owner_row,
-    identity, is_system_run_owner,
-    DelegatedDataPlaneBearer, JwtVerifier, OwnerIntent, VerifiedIdentity,
-    DATA_PLANE_AUTH_METADATA_KEY,
+    authorize_operation, authorize_owner_housekeeping, authorize_owner_row,
+    authorize_scheduled_step_service, authorize_space_deletion_service, authorize_system_run_owner,
+    authorize_thread_owner_row, identity, is_system_run_owner, DelegatedDataPlaneBearer,
+    JwtVerifier, OwnerIntent, VerifiedIdentity, DATA_PLANE_AUTH_METADATA_KEY,
 };
 use crate::letta_adapter::{LettaMemoryAdapter, LettaSearchOutcome};
 use crate::orchestration_grpc::{json_to_struct, struct_to_json};
@@ -44,7 +45,7 @@ use crate::terminalization;
 
 /// Standard gRPC health names registered on the unauthenticated health-only
 /// surface. Business RPCs remain independently intercepted.
-pub const HEALTH_SERVICE_NAMES: [&str; 7] = [
+pub const HEALTH_SERVICE_NAMES: [&str; 8] = [
     "model_plane.v1.SessionCore",
     "model_plane.v1.ManagedRunLifecycle",
     "model_plane.v1.OrchestrationCoreService",
@@ -52,6 +53,7 @@ pub const HEALTH_SERVICE_NAMES: [&str; 7] = [
     "model_plane.v1.MemoryService",
     "model_plane.v1.RoutingPolicy",
     "model_plane.v1.RunService",
+    "model_plane.v1.SessionRetentionService",
 ];
 
 const RUN_STARTED_TYPE_URL: &str = "type.googleapis.com/model_plane.v1.RunStarted";
@@ -2679,7 +2681,7 @@ pub(crate) async fn append_message_in_tx(
 }
 
 /// Mirror an append's extracted memories into Letta after its transaction
-/// committed, unless the retention posture forbids durable memory.
+/// committed, unless the retention posture forbids external memory indexing.
 pub(crate) async fn sync_appended_memory(
     pool: &PgPool,
     letta: Option<&LettaMemoryAdapter>,
@@ -2688,7 +2690,7 @@ pub(crate) async fn sync_appended_memory(
     memory: Option<AppendedMemory>,
 ) {
     if let Some(memory) = memory {
-        if retention.permits_durable_memory() {
+        if retention.permits_external_memory_indexing() {
             crate::dreaming::sync_persisted_candidates_to_letta(
                 pool,
                 letta,
@@ -2931,7 +2933,7 @@ mod persona_db_tests {
 
     #[tokio::test]
     #[ignore = "requires DATABASE_URL to a disposable Postgres"]
-    async fn update_thread_presentation_rejects_persona_toggle_for_a_zdr_caller() {
+    async fn update_thread_presentation_lets_a_zdr_owner_set_the_controls_but_not_persist_text() {
         let pool = PgPool::connect(&std::env::var("DATABASE_URL").expect("disposable database required")).await.unwrap();
         sqlx::migrate!("./migrations").run(&pool).await.unwrap();
         let suffix = new_ulid();
@@ -2947,33 +2949,141 @@ mod persona_db_tests {
             persona_enabled: Some(false),
             ..Default::default()
         });
-        request.extensions_mut().insert(VerifiedIdentity::user_for_test_with_zdr(&org, "test-user", true));
-        let error = svc
-            .update_thread_presentation(request)
+        request
+            .extensions_mut()
+            .insert(VerifiedIdentity::user_for_test_with_zdr(
+                &org,
+                "test-user",
+                true,
+            ));
+        // The persona control is the owner's under every posture (owner decision 17).
+        svc.update_thread_presentation(request)
             .await
-            .expect_err("a ZDR caller cannot durably set the per-thread persona toggle");
-        assert_eq!(error.code(), tonic::Code::FailedPrecondition);
-
-        // Same rejection reuses the existing ZDR-presentation guard, so the
-        // column must be left at its migration default, untouched.
+            .expect("a ZDR owner may set the persona control");
         let (persona_enabled,): (bool,) =
             sqlx::query_as("SELECT persona_enabled FROM threads WHERE id = $1")
                 .bind(&thread)
                 .fetch_one(&pool)
                 .await
                 .unwrap();
-        assert!(persona_enabled);
+        assert!(!persona_enabled);
+
+        // Conversation text is never persisted under ZDR: a title is refused as a durable mutation, typed,
+        // and the title column stays as it was.
+        let mut text = Request::new(pb::UpdateThreadPresentationRequest {
+            org_id: org.clone(),
+            thread_id: thread.clone(),
+            title: Some("a title".into()),
+            ..Default::default()
+        });
+        text.extensions_mut()
+            .insert(VerifiedIdentity::user_for_test_with_zdr(
+                &org,
+                "test-user",
+                true,
+            ));
+        let error = svc
+            .update_thread_presentation(text)
+            .await
+            .expect_err("a ZDR owner may not persist a title");
+        assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+        assert_eq!(
+            mp_contracts::zdr_refusal::Refusal::from_status(&error).map(|refusal| refusal.code()),
+            Some(mp_contracts::zdr_refusal::code::DURABLE_MUTATION_FORBIDDEN)
+        );
+        let (title,): (Option<String>,) =
+            sqlx::query_as("SELECT presentation_title FROM threads WHERE id = $1")
+                .bind(&thread)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(title, None);
+    }
+
+    /// Owner decision 17: a zero-retention owner may archive and delete the threads they own. The owner
+    /// checks still apply, and the rest of their threads are left alone. Needs a disposable Postgres.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres"]
+    async fn zdr_receipt_a_zdr_owner_may_archive_and_delete_their_threads() {
+        let pool =
+            PgPool::connect(&std::env::var("DATABASE_URL").expect("disposable database required"))
+                .await
+                .unwrap();
+        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+        let suffix = new_ulid();
+        let org = format!("zdr-housekeeping-test-{suffix}");
+        let mut threads = Vec::new();
+        for n in 0..2 {
+            let thread = create_thread_inner(
+                &pool,
+                pb::CreateThreadRequest {
+                    session_key: format!("zdr-housekeeping-{suffix}-{n}"),
+                    org_id: org.clone(),
+                    user_id: "test-user".into(),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap()
+            .into_inner()
+            .thread_id;
+            threads.push(thread);
+        }
+        let svc = test_service(pool.clone());
+        let zdr_owner = VerifiedIdentity::user_for_test_with_zdr(&org, "test-user", true);
+
+        let mut archive = Request::new(pb::ArchiveThreadRequest {
+            org_id: org.clone(),
+            thread_id: threads[0].clone(),
+        });
+        archive.extensions_mut().insert(zdr_owner.clone());
+        svc.archive_thread(archive)
+            .await
+            .expect("a ZDR owner may archive their thread");
+        let archived: bool =
+            sqlx::query_scalar("SELECT archived_at IS NOT NULL FROM threads WHERE id = $1")
+                .bind(&threads[0])
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(archived);
+
+        let mut delete = Request::new(pb::DeleteThreadRequest {
+            org_id: org.clone(),
+            thread_id: threads[1].clone(),
+        });
+        delete.extensions_mut().insert(zdr_owner);
+        svc.delete_thread(delete)
+            .await
+            .expect("a ZDR owner may delete their thread");
+        let remains: bool =
+            sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM threads WHERE id = $1)")
+                .bind(&threads[1])
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(!remains);
     }
 }
 
 /// Core of `SessionCore::start_run`, factored out to keep the trait method
 /// small. Inserts the run row and its `RUN_STARTED` event in one tx.
-async fn start_run_inner(
+pub(crate) async fn start_run_inner(
     pool: &PgPool,
     req: pb::StartRunRequest,
     requested_run_id: Option<String>,
+    retention: crate::retention_receipt::RunRetention,
 ) -> Result<Response<pb::StartRunResponse>, Status> {
+    use crate::retention_receipt::{self, RunRetention};
     let requested_run_id = requested_run_id.filter(|value| !value.trim().is_empty());
+    // A requested run id is the prepared scheduled run's idempotent identity.
+    // Only the persistent scheduled lane uses it, so a receipt of any other
+    // class has no business naming one.
+    if requested_run_id.is_some() && retention != RunRetention::persistent() {
+        return Err(Status::permission_denied(
+            "a requested run id is only for persistent scheduled runs",
+        ));
+    }
     let run_id = requested_run_id.clone().unwrap_or_else(new_ulid);
     let now = Utc::now();
 
@@ -2982,14 +3092,31 @@ async fn start_run_inner(
         .await
         .map_err(|e| Status::internal(e.to_string()))?;
 
+    // A child run takes its parent's receipt, and the parent must be this
+    // owner's own run in this org. See `RunRetention::inherit_from`.
+    let retention = if req.parent_run_id.trim().is_empty() {
+        retention
+    } else {
+        let parent = retention_receipt::load_parent_retention(
+            &mut tx,
+            &req.org_id,
+            &req.user_id,
+            &req.parent_run_id,
+        )
+        .await?;
+        retention.inherit_from(Some(&parent))?
+    };
+
     // P0.4 residency: stamp the configured Model-Plane region (EU default,
     // Sweden Central) onto the run so its processing region is auditable.
     let residency = configured_residency();
     let inherited_space_context: Option<(Option<String>, Option<String>, Option<String>, Option<i64>, Option<String>, Option<String>, Option<String>, Option<i64>)> = sqlx::query_as(
         "INSERT INTO runs (id, thread_id, parent_run_id, agent_id, goal, mode, org_id, user_id, status, residency, created_at, updated_at,
-                          space_id, space_decision_ref, recipient_audience_ref, recipient_audience_revision, recipient_audience_hash, privacy_policy_ref, resource_authorization_ref, authority_revision)
+                          space_id, space_decision_ref, recipient_audience_ref, recipient_audience_revision, recipient_audience_hash, privacy_policy_ref, resource_authorization_ref, authority_revision,
+                          retention_class, waiver_ack_id, waiver_connection_id)
          SELECT $1, t.id, NULLIF($3, ''), $4, $5, $6, $7, $8, 'queued', $9, $10, $10,
-                t.space_id, t.space_decision_ref, t.recipient_audience_ref, t.recipient_audience_revision, t.recipient_audience_hash, t.privacy_policy_ref, t.resource_authorization_ref, t.authority_revision
+                t.space_id, t.space_decision_ref, t.recipient_audience_ref, t.recipient_audience_revision, t.recipient_audience_hash, t.privacy_policy_ref, t.resource_authorization_ref, t.authority_revision,
+                $11, $12, $13
          FROM threads t
          WHERE t.id = $2 AND t.org_id = $7
          ON CONFLICT (id) DO NOTHING
@@ -3005,6 +3132,9 @@ async fn start_run_inner(
     .bind(&req.user_id)
     .bind(&residency)
     .bind(now)
+    .bind(retention.class.as_str())
+    .bind(retention.ack_id())
+    .bind(retention.connection_id())
     .fetch_optional(&mut *tx)
     .await
     .map_err(|e| Status::internal(e.to_string()))?;
@@ -3084,6 +3214,18 @@ async fn start_run_inner(
     .execute(&mut *tx)
     .await
     .map_err(|e| Status::internal(e.to_string()))?;
+
+    // Same durable audit as the managed start: the row commits with the run.
+    if let Some(body) = retention_receipt::run_started_zdr_waived_body(
+        &retention,
+        &run_id,
+        &req.org_id,
+        &req.user_id,
+        &req.thread_id,
+        now,
+    ) {
+        retention_receipt::enqueue_run_started_zdr_waived(&mut tx, &run_id, &body).await?;
+    }
 
     tx.commit()
         .await
@@ -3956,12 +4098,20 @@ pub(crate) enum MemoryRetention {
     Durable,
     /// The trusted issuer marked the credential Zero Data Retention.
     ZeroDataRetention,
+    /// A persistent credential under a connection-bound waiver (Z-17). The run
+    /// is kept, so its reads and its own local rows are as for `Durable`, but
+    /// nothing it produces is sent to another processor: the external semantic
+    /// memory service (Letta) is never written for it, and background dreaming
+    /// skips it (see `dreaming::load_pending_messages`).
+    WaivedRun,
 }
 
 impl MemoryRetention {
     pub(crate) fn of(caller: &VerifiedIdentity) -> Self {
         if caller.zdr() {
             Self::ZeroDataRetention
+        } else if caller.zdr_waiver().is_some() {
+            Self::WaivedRun
         } else {
             Self::Durable
         }
@@ -3986,6 +4136,15 @@ impl MemoryRetention {
     /// boundary fails closed: a ZDR turn gets no memory in and leaves none
     /// behind.
     pub(crate) const fn permits_durable_memory(self) -> bool {
+        matches!(self, Self::Durable | Self::WaivedRun)
+    }
+
+    /// Whether this run's content may be written to the external semantic memory
+    /// service (Letta, served on another processor). Only an ordinary persistent
+    /// run may: a ZDR run may not be written at all, and a waived run is
+    /// persistent for the user but its content is not sent to a processor the
+    /// user did not accept for it (Z-17, decision D-B).
+    pub(crate) const fn permits_external_memory_indexing(self) -> bool {
         matches!(self, Self::Durable)
     }
 }
@@ -3998,6 +4157,10 @@ impl MemoryRetention {
 /// skip is exactly as visible as a bridge outage.
 pub(crate) const ZDR_MEMORY_READ_SUPPRESSED: &str = "DEGRADED_LETTA_ZDR_READ_SUPPRESSED";
 pub(crate) const ZDR_MEMORY_WRITE_SUPPRESSED: &str = "DEGRADED_LETTA_ZDR_WRITE_SUPPRESSED";
+/// A waived run's memory is kept locally but is not indexed into the external
+/// semantic memory service (Z-17). Reported like any other retention skip, so
+/// the missing semantic copy is never silent.
+pub(crate) const WAIVED_MEMORY_INDEX_SUPPRESSED: &str = "DEGRADED_LETTA_WAIVED_INDEX_SUPPRESSED";
 
 /// Bounded operational outcome of semantic augmentation in the default chat
 /// context path. The reason originates from `LettaReadiness`, whose values are
@@ -4404,7 +4567,12 @@ impl SessionCore for SessionService {
                 }
             };
             req.user_id = owner;
-            start_run_inner(&self.pool, req, None).await
+            // Not a ZDR path: `authorize_operation` refused a ZDR credential above.
+            // The receipt is the caller's own. A waived user's run is recorded as
+            // waived; a system owner is a service credential, which carries no
+            // waiver, so its run is persistent.
+            let retention = crate::retention_receipt::RunRetention::from_caller(&caller);
+            start_run_inner(&self.pool, req, None, retention).await
         }
         .await;
         record_metrics("start_run", started, result.is_ok());
@@ -4486,6 +4654,9 @@ impl SessionCore for SessionService {
                     user_id: owner.to_owned(),
                 },
                 Some(req.run_id.clone()),
+                // A prepared scheduled run is the persistent lane. Orchestrator
+                // Core holds a service credential, which never carries a waiver.
+                crate::retention_receipt::RunRetention::persistent(),
             )
             .await?;
             persist_scheduled_run_bindings(&self.pool, &req).await?;
@@ -5479,13 +5650,14 @@ impl SessionCore for SessionService {
         let started = Instant::now();
         let result = async {
             let caller = identity(&request)?;
-            authorize_operation(&caller, "session:write")?;
-            if caller.zdr() {
-                return Err(Status::failed_precondition(
-                    "ZDR callers cannot persist thread presentation",
-                ));
-            }
+            authorize_owner_housekeeping(&caller, "session:write")?;
             let req = request.into_inner();
+            // Owner decision 17: the presentation controls (pinned, persona) are the owner's under every
+            // posture. Title and preview are conversation text, which a ZDR credential never persists.
+            if caller.zdr() && (req.title.is_some() || req.preview.is_some()) {
+                return Err(Refusal::DURABLE_MUTATION_FORBIDDEN
+                    .grpc_status(tonic::Code::FailedPrecondition));
+            }
             if req.org_id.trim().is_empty() || req.thread_id.trim().is_empty() {
                 return Err(Status::invalid_argument(
                     "org_id and thread_id are required",
@@ -5606,12 +5778,7 @@ impl SessionCore for SessionService {
         let started = Instant::now();
         let result = async {
             let caller = identity(&request)?;
-            authorize_operation(&caller, "session:write")?;
-            if caller.zdr() {
-                return Err(Status::failed_precondition(
-                    "ZDR callers cannot archive durable threads",
-                ));
-            }
+            authorize_owner_housekeeping(&caller, "session:write")?;
             let req = request.into_inner();
             if req.org_id.trim().is_empty() || req.thread_id.trim().is_empty() {
                 return Err(Status::invalid_argument(
@@ -5695,12 +5862,7 @@ impl SessionCore for SessionService {
         let started = Instant::now();
         let result = async {
             let caller = identity(&request)?;
-            authorize_operation(&caller, "session:write")?;
-            if caller.zdr() {
-                return Err(Status::failed_precondition(
-                    "ZDR callers cannot archive durable threads",
-                ));
-            }
+            authorize_owner_housekeeping(&caller, "session:write")?;
             let req = request.into_inner();
             if req.org_id.trim().is_empty() || req.user_id.trim().is_empty() {
                 return Err(Status::invalid_argument("org_id and user_id are required"));
@@ -5771,7 +5933,7 @@ impl SessionCore for SessionService {
         let started = Instant::now();
         let result = async {
             let caller = identity(&request)?;
-            authorize_operation(&caller, "session:write")?;
+            authorize_owner_housekeeping(&caller, "session:write")?;
             let req = request.into_inner();
             if req.org_id.trim().is_empty() || req.thread_id.trim().is_empty() {
                 return Err(Status::invalid_argument(
@@ -5842,7 +6004,7 @@ impl SessionCore for SessionService {
         let started = Instant::now();
         let result = async {
             let caller = identity(&request)?;
-            authorize_operation(&caller, "session:write")?;
+            authorize_owner_housekeeping(&caller, "session:write")?;
             let req = request.into_inner();
             if req.org_id.trim().is_empty() || req.user_id.trim().is_empty() {
                 return Err(Status::invalid_argument("org_id and user_id are required"));
@@ -6145,7 +6307,11 @@ impl ManagedRunLifecycle for ManagedRunLifecycleService {
                 authorize_thread_owner(&self.pool, &caller, &req.thread_id, OwnerIntent::Mutate)
                     .await?;
             }
-            terminalization::start_managed_run_inner(&self.pool, req, caller.zdr())
+            // The run's immutable retention receipt is the one the caller's own
+            // verified claims give: zero retention, a waived persistent run on
+            // its one connection, or an ordinary persistent run.
+            let retention = crate::retention_receipt::RunRetention::from_caller(&caller);
+            terminalization::start_managed_run_with_retention_inner(&self.pool, req, retention)
                 .await
                 .map(|started| Response::new(started.into_proto()))
         }
@@ -6279,10 +6445,12 @@ impl ManagedRunLifecycle for ManagedRunLifecycleService {
             let thread_id = req.thread_id.clone();
             let completed =
                 terminalization::complete_direct_run_with_message_inner(&self.pool, req).await?;
+            // The mirror follows the RUN's receipt. This caller is the gateway's
+            // service credential, which never carries a waiver.
             sync_appended_memory(
                 &self.pool,
                 self.letta_memory.as_ref(),
-                MemoryRetention::Durable,
+                completed.memory_retention,
                 &thread_id,
                 completed.memory,
             )
@@ -7153,6 +7321,7 @@ pub async fn serve(
         pool: pool.clone(),
         letta_memory: letta_memory.clone(),
     };
+    let retention = SessionRetentionGrpc { pool: pool.clone() };
 
     let session = SessionService {
         pool,
@@ -7185,11 +7354,88 @@ pub async fn serve(
         .add_service(FinetuneJobsServer::with_interceptor(finetune, auth.clone()))
         .add_service(MemoryServiceServer::with_interceptor(memory, auth.clone()))
         .add_service(RoutingPolicyServer::with_interceptor(routing, auth.clone()))
+        .add_service(SessionRetentionServiceServer::with_interceptor(
+            retention,
+            auth.clone(),
+        ))
         .add_service(RunServiceServer::with_interceptor(runs, auth))
         .serve(addr)
         .await?;
 
     Ok(())
+}
+
+/// The service scope the org-admin read of waived-run counts needs. A user
+/// credential never satisfies it, even one that carries the claim: the check
+/// requires a service principal. Granting it is a registry change, made apart
+/// from this crate.
+pub const WAIVED_RUN_COUNT_SCOPE: &str = "session:retention:read";
+
+/// The one query behind `CountWaivedRuns`. Its predicate spells the class as a
+/// literal rather than a bound parameter, so the partial index
+/// `runs_zdr_waived_org_connection_idx` (migration 0045) is the index for it at
+/// plan time. Every waived row names its connection
+/// (`runs_retention_waiver_consistent`), so the grouping never sees a NULL.
+const COUNT_WAIVED_RUNS_SQL: &str =
+    "SELECT waiver_connection_id, user_id, COUNT(*), MAX(created_at)
+     FROM runs
+     WHERE org_id = $1 AND retention_class = 'zdr_waived'
+     GROUP BY waiver_connection_id, user_id
+     ORDER BY waiver_connection_id, user_id";
+
+/// `SessionRetentionService`: read-only waived-run counts for the org admin
+/// view. It is served behind the verifying interceptor like every service here,
+/// and it stays beside `SessionCore`, so that trait and its mocks are unchanged.
+pub struct SessionRetentionGrpc {
+    pool: PgPool,
+}
+
+#[tonic::async_trait]
+impl SessionRetentionService for SessionRetentionGrpc {
+    async fn count_waived_runs(
+        &self,
+        request: Request<pb::CountWaivedRunsRequest>,
+    ) -> Result<Response<pb::CountWaivedRunsResponse>, Status> {
+        let started = Instant::now();
+        let result: Result<Response<pb::CountWaivedRunsResponse>, Status> = async {
+            let caller = identity(&request)?;
+            // A service credential holding the read scope, and nothing else. This
+            // is not `authorize_operation`, which lets every user credential
+            // through: the gateway's admin path checks the org-admin role itself.
+            caller.require_service_scope(WAIVED_RUN_COUNT_SCOPE)?;
+            let req = request.into_inner();
+            caller.authorize_org(&req.org_id)?;
+            let counts = count_waived_runs(&self.pool, &req.org_id).await?;
+            Ok(Response::new(pb::CountWaivedRunsResponse { counts }))
+        }
+        .await;
+        record_metrics("count_waived_runs", started, result.is_ok());
+        result
+    }
+}
+
+/// One org's waived runs, one row per (connection, user), each dated by its
+/// latest run. The query reads receipt columns and start times only.
+async fn count_waived_runs(pool: &PgPool, org_id: &str) -> Result<Vec<pb::WaivedRunCount>, Status> {
+    let rows: Vec<(String, String, i64, DateTime<Utc>)> = sqlx::query_as(COUNT_WAIVED_RUNS_SQL)
+        .bind(org_id)
+        .fetch_all(pool)
+        .await
+        .map_err(|error| {
+            warn!(error = %error, "count_waived_runs failed");
+            Status::internal("waived-run counts are unavailable")
+        })?;
+    Ok(rows
+        .into_iter()
+        .map(
+            |(connection_id, user_id, run_count, last_used_at)| pb::WaivedRunCount {
+                connection_id,
+                user_id,
+                run_count,
+                last_used_at: Some(to_proto_timestamp(last_used_at)),
+            },
+        )
+        .collect())
 }
 
 #[cfg(test)]
@@ -8754,6 +9000,7 @@ mod tests {
                 "model_plane.v1.MemoryService",
                 "model_plane.v1.RoutingPolicy",
                 "model_plane.v1.RunService",
+                "model_plane.v1.SessionRetentionService",
             ]
         );
     }
@@ -11984,6 +12231,532 @@ mod direct_completion_wire_auth_tests {
             let status = complete(&mut client, claims).await;
             assert_eq!(status.code(), expected, "{claims:?}: {status:?}");
         }
+    }
+}
+
+/// `SessionRetentionService.CountWaivedRuns` behind the production interceptor,
+/// over a real socket, with the credentials Auth Core really issues. No database
+/// is needed: a refusal happens before the first query, and the one call that
+/// clears every check reaches a pool that never answers, so it fails with the
+/// generic internal status and nothing more.
+#[cfg(test)]
+mod waived_run_count_wire_tests {
+    use super::*;
+    use crate::auth::test_support::{service_principal_claims, sign, user_claims, verifier, KID};
+    use crate::retention_receipt::RetentionClass;
+    use mp_contracts::model_plane::v1::session_retention_service_client::SessionRetentionServiceClient;
+    use std::time::Duration;
+    use tonic::Code;
+
+    const ORG: &str = "org-count-a";
+    const GATEWAY: &str = "verevon-gateway";
+
+    async fn retention_client() -> (
+        std::net::TcpListener,
+        SessionRetentionServiceClient<Channel>,
+    ) {
+        let silent_database = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .acquire_timeout(Duration::from_millis(250))
+            .connect_lazy(&format!(
+                "postgresql://session-core@{}/session_core",
+                silent_database.local_addr().expect("address")
+            ))
+            .expect("lazy pool");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let address = listener.local_addr().expect("address");
+        tokio::spawn(async move {
+            tonic::transport::Server::builder()
+                .add_service(SessionRetentionServiceServer::with_interceptor(
+                    SessionRetentionGrpc { pool },
+                    verifier("session-core"),
+                ))
+                .serve_with_incoming(
+                    tonic::transport::server::TcpIncoming::from_listener(listener, true, None)
+                        .expect("incoming"),
+                )
+                .await
+                .expect("serve");
+        });
+        let channel = tonic::transport::Endpoint::from_shared(format!("http://{address}"))
+            .expect("endpoint")
+            .connect()
+            .await
+            .expect("connect");
+        (silent_database, SessionRetentionServiceClient::new(channel))
+    }
+
+    /// One `CountWaivedRuns` call as the gateway makes it: the bearer in
+    /// `authorization`, signed the way Auth Core signs.
+    async fn count(
+        client: &mut SessionRetentionServiceClient<Channel>,
+        claims: &serde_json::Value,
+        org_id: &str,
+    ) -> Result<pb::CountWaivedRunsResponse, Status> {
+        let mut request = tonic::Request::new(pb::CountWaivedRunsRequest {
+            org_id: org_id.to_owned(),
+        });
+        request.metadata_mut().insert(
+            "authorization",
+            format!("Bearer {}", sign(claims, KID))
+                .parse()
+                .expect("bearer metadata"),
+        );
+        client
+            .count_waived_runs(request)
+            .await
+            .map(tonic::Response::into_inner)
+    }
+
+    /// The admin credential the gateway holds for `org`: the read scope only.
+    fn admin_claims(org: &str) -> serde_json::Value {
+        service_principal_claims(
+            "session-core",
+            org,
+            GATEWAY,
+            &[WAIVED_RUN_COUNT_SCOPE],
+            "org admin waived-run counts",
+            false,
+        )
+    }
+
+    #[tokio::test]
+    async fn a_user_credential_is_refused_even_when_it_claims_the_scope() {
+        let (_silent_database, mut client) = retention_client().await;
+        let mut claims = user_claims("session-core", ORG, "user-admin", false);
+        claims["scopes"] = serde_json::json!([WAIVED_RUN_COUNT_SCOPE]);
+        let status = count(&mut client, &claims, ORG)
+            .await
+            .expect_err("a user credential never reads waived-run counts");
+        assert_eq!(status.code(), Code::PermissionDenied, "{status:?}");
+        assert!(
+            status.message().contains("service scope required"),
+            "{status:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_service_without_the_read_scope_is_refused() {
+        let (_silent_database, mut client) = retention_client().await;
+        let claims = service_principal_claims(
+            "session-core",
+            ORG,
+            GATEWAY,
+            &["session:read"],
+            "reads sessions only",
+            false,
+        );
+        let status = count(&mut client, &claims, ORG)
+            .await
+            .expect_err("the sessions read scope is not the waived-run scope");
+        assert_eq!(status.code(), Code::PermissionDenied, "{status:?}");
+    }
+
+    #[tokio::test]
+    async fn a_scoped_service_cannot_count_another_orgs_waived_runs() {
+        let (_silent_database, mut client) = retention_client().await;
+        let status = count(&mut client, &admin_claims(ORG), "org-count-b")
+            .await
+            .expect_err("the credential names one org only");
+        assert_eq!(status.code(), Code::PermissionDenied, "{status:?}");
+        assert!(
+            status.message().contains("tenant access denied"),
+            "{status:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_empty_org_is_an_invalid_request() {
+        let (_silent_database, mut client) = retention_client().await;
+        let status = count(&mut client, &admin_claims(ORG), "")
+            .await
+            .expect_err("an org is required");
+        assert_eq!(status.code(), Code::InvalidArgument, "{status:?}");
+    }
+
+    #[tokio::test]
+    async fn a_scoped_service_reaches_the_query_and_gets_only_a_generic_failure() {
+        let (_silent_database, mut client) = retention_client().await;
+        let status = count(&mut client, &admin_claims(ORG), ORG)
+            .await
+            .expect_err("the silent database cannot answer");
+        // Every credential check passed. The failure is the database, and the
+        // caller learns nothing of it beyond that.
+        assert_eq!(status.code(), Code::Internal, "{status:?}");
+        assert_eq!(
+            status.message(),
+            "waived-run counts are unavailable",
+            "database errors are not echoed to the caller"
+        );
+    }
+
+    #[test]
+    fn the_count_query_spells_the_receipt_class_the_index_is_built_for() {
+        assert_eq!(RetentionClass::ZdrWaived.as_str(), "zdr_waived");
+        assert!(COUNT_WAIVED_RUNS_SQL.contains("retention_class = 'zdr_waived'"));
+    }
+}
+
+/// Postgres-backed tests for `CountWaivedRuns`. They write rows to a scratch
+/// database, so they are `#[ignore]`d. The session-core receipts CI job runs every
+/// `zdr_receipt_*` test with `DATABASE_URL` set and `REQUIRE_CONTRACT=1`.
+#[cfg(test)]
+mod waived_run_count_db_tests {
+    use super::*;
+    use crate::auth::test_support::{authenticate, service_principal_claims, sign, verifier, KID};
+    use crate::retention_receipt::RunRetention;
+    use crate::terminalization::start_managed_run_with_retention_inner;
+    use chrono::{TimeZone, Utc};
+    use mp_ids::new_ulid;
+
+    const INDEX_COUNT_SQL: &str =
+        "SELECT count(*) FROM pg_indexes WHERE indexname = 'runs_zdr_waived_org_connection_idx'";
+
+    /// The scratch database. Without `DATABASE_URL` the test skips locally and
+    /// fails under CI. The name must say it is a test database, because these
+    /// tests write rows.
+    async fn scratch_pool() -> Option<PgPool> {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            assert!(
+                std::env::var_os("REQUIRE_CONTRACT").is_none() && std::env::var_os("CI").is_none(),
+                "DATABASE_URL must name a scratch Postgres when REQUIRE_CONTRACT or CI is set"
+            );
+            eprintln!("skipping: DATABASE_URL unset");
+            return None;
+        };
+        let database = url
+            .rsplit('/')
+            .next()
+            .and_then(|tail| tail.split('?').next())
+            .unwrap_or_default();
+        assert!(
+            database.contains("test"),
+            "these tests write rows: DATABASE_URL must name a scratch database whose name contains \"test\""
+        );
+        let pool = PgPool::connect(&url)
+            .await
+            .expect("scratch Postgres is reachable");
+        sqlx::migrate!("./migrations")
+            .run(&pool)
+            .await
+            .expect("session-core migrations apply in order");
+        Some(pool)
+    }
+
+    /// A thread the user owns in `org`, for that user's runs to start on.
+    async fn thread_for(pool: &PgPool, org: &str, user: &str) -> String {
+        let id = new_ulid();
+        sqlx::query(
+            "INSERT INTO threads (id, session_key, org_id, user_id, created_at)
+             VALUES ($1, $2, $3, $4, now())",
+        )
+        .bind(&id)
+        .bind(format!("count-{id}"))
+        .bind(org)
+        .bind(user)
+        .execute(pool)
+        .await
+        .expect("thread seeded");
+        id
+    }
+
+    /// One run started through the real start path, with the receipt
+    /// `retention` names. A ZDR start names no thread: Session Core makes one.
+    async fn start(
+        pool: &PgPool,
+        org: &str,
+        user: &str,
+        thread: &str,
+        key: &str,
+        retention: RunRetention,
+    ) -> String {
+        start_managed_run_with_retention_inner(
+            pool,
+            pb::StartManagedRunRequest {
+                thread_id: thread.to_owned(),
+                parent_run_id: String::new(),
+                agent_id: "general-v1".to_owned(),
+                goal: "count goal".to_owned(),
+                mode: "execute".to_owned(),
+                org_id: org.to_owned(),
+                user_id: user.to_owned(),
+                start_key: key.to_owned(),
+                terminal_source: pb::ManagedRunSource::GatewayDirect as i32,
+            },
+            retention,
+        )
+        .await
+        .expect("the run starts")
+        .run_id
+    }
+
+    /// Pins a run's start time, so that its last-used date is a known instant.
+    async fn dated(pool: &PgPool, run: &str, at: DateTime<Utc>) {
+        sqlx::query("UPDATE runs SET created_at = $2 WHERE id = $1")
+            .bind(run)
+            .bind(at)
+            .execute(pool)
+            .await
+            .expect("the start time is pinned");
+    }
+
+    /// `org`'s counts from the real handler, behind a real signed admin
+    /// credential that the real interceptor accepted.
+    async fn counts_for(pool: &PgPool, org: &str) -> Vec<pb::WaivedRunCount> {
+        let claims = service_principal_claims(
+            "session-core",
+            org,
+            "verevon-gateway",
+            &[WAIVED_RUN_COUNT_SCOPE],
+            "org admin waived-run counts",
+            false,
+        );
+        let request = authenticate(
+            &verifier("session-core"),
+            &sign(&claims, KID),
+            pb::CountWaivedRunsRequest {
+                org_id: org.to_owned(),
+            },
+        )
+        .expect("the admin credential is accepted");
+        SessionRetentionGrpc { pool: pool.clone() }
+            .count_waived_runs(request)
+            .await
+            .expect("the count reads")
+            .into_inner()
+            .counts
+    }
+
+    /// The down script opens and closes its own transaction. Inside ours that
+    /// would commit early, so its control lines are dropped here.
+    fn strip_transaction_control(script: &str) -> String {
+        script
+            .lines()
+            .filter(|line| {
+                !matches!(
+                    line.trim().to_ascii_uppercase().as_str(),
+                    "BEGIN;" | "COMMIT;"
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a scratch Postgres whose name contains \"test\" (session-core receipts CI job)"]
+    async fn zdr_receipt_counts_each_connection_and_user_of_one_org_and_nothing_else() {
+        let Some(pool) = scratch_pool().await else {
+            return;
+        };
+        let suffix = new_ulid();
+        let org = format!("count-a-{suffix}");
+        let other_org = format!("count-b-{suffix}");
+        let first = format!("u1-{suffix}");
+        let second = format!("u2-{suffix}");
+        let outsider = format!("u3-{suffix}");
+        let conn_1 = format!("conn-{suffix}-1");
+        let conn_2 = format!("conn-{suffix}-2");
+        let thread_1 = thread_for(&pool, &org, &first).await;
+        let thread_2 = thread_for(&pool, &org, &second).await;
+        let outsider_thread = thread_for(&pool, &other_org, &outsider).await;
+        let at = |day: u32, hour: u32| {
+            Utc.with_ymd_and_hms(2026, 10, day, hour, 0, 0)
+                .single()
+                .expect("a valid instant")
+        };
+
+        // Counted: two runs on (conn_1, first), one on (conn_2, first), and one
+        // on (conn_1, second).
+        let w1 = start(
+            &pool,
+            &org,
+            &first,
+            &thread_1,
+            &format!("{suffix}-w1"),
+            RunRetention::waived("ack-1", &conn_1),
+        )
+        .await;
+        dated(&pool, &w1, at(1, 9)).await;
+        let w2 = start(
+            &pool,
+            &org,
+            &first,
+            &thread_1,
+            &format!("{suffix}-w2"),
+            RunRetention::waived("ack-1", &conn_1),
+        )
+        .await;
+        dated(&pool, &w2, at(3, 12)).await;
+        let w3 = start(
+            &pool,
+            &org,
+            &first,
+            &thread_1,
+            &format!("{suffix}-w3"),
+            RunRetention::waived("ack-2", &conn_2),
+        )
+        .await;
+        dated(&pool, &w3, at(2, 8)).await;
+        let w4 = start(
+            &pool,
+            &org,
+            &second,
+            &thread_2,
+            &format!("{suffix}-w4"),
+            RunRetention::waived("ack-3", &conn_1),
+        )
+        .await;
+        dated(&pool, &w4, at(2, 10)).await;
+
+        // Not counted: an ordinary run dated after every counted one, a
+        // zero-retention run, and another org's waived run on the same
+        // connection id.
+        let persistent = start(
+            &pool,
+            &org,
+            &first,
+            &thread_1,
+            &format!("{suffix}-p1"),
+            RunRetention::persistent(),
+        )
+        .await;
+        dated(&pool, &persistent, at(5, 7)).await;
+        start(
+            &pool,
+            &org,
+            &first,
+            "",
+            &format!("{suffix}-z1"),
+            RunRetention::zdr(),
+        )
+        .await;
+        start(
+            &pool,
+            &other_org,
+            &outsider,
+            &outsider_thread,
+            &format!("{suffix}-o1"),
+            RunRetention::waived("ack-4", &conn_1),
+        )
+        .await;
+
+        let mut got: Vec<(String, String, i64, i64)> = counts_for(&pool, &org)
+            .await
+            .into_iter()
+            .map(|row| {
+                let pb::WaivedRunCount {
+                    connection_id,
+                    user_id,
+                    run_count,
+                    last_used_at,
+                } = row;
+                let seconds = last_used_at.expect("every row is dated").seconds;
+                (connection_id, user_id, run_count, seconds)
+            })
+            .collect();
+        got.sort();
+        let mut want = vec![
+            (conn_1.clone(), first.clone(), 2, at(3, 12).timestamp()),
+            (conn_1.clone(), second.clone(), 1, at(2, 10).timestamp()),
+            (conn_2.clone(), first.clone(), 1, at(2, 8).timestamp()),
+        ];
+        want.sort();
+        assert_eq!(
+            got, want,
+            "one row per (connection, user), dated by its latest waived run, this org only"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a scratch Postgres whose name contains \"test\" (session-core receipts CI job)"]
+    async fn zdr_receipt_count_is_empty_for_an_org_with_no_waived_run() {
+        let Some(pool) = scratch_pool().await else {
+            return;
+        };
+        let suffix = new_ulid();
+        let org = format!("count-empty-{suffix}");
+        let user = format!("u-{suffix}");
+        let thread = thread_for(&pool, &org, &user).await;
+        start(
+            &pool,
+            &org,
+            &user,
+            &thread,
+            &format!("{suffix}-p"),
+            RunRetention::persistent(),
+        )
+        .await;
+        assert!(
+            counts_for(&pool, &org).await.is_empty(),
+            "an ordinary run is never counted as waived"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a scratch Postgres whose name contains \"test\" (session-core receipts CI job)"]
+    async fn zdr_receipt_waived_index_is_partial_on_org_connection_and_user() {
+        let Some(pool) = scratch_pool().await else {
+            return;
+        };
+        let (definition,): (String,) = sqlx::query_as(
+            "SELECT indexdef FROM pg_indexes
+             WHERE tablename = 'runs' AND indexname = 'runs_zdr_waived_org_connection_idx'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("migration 0045 created the index");
+        assert!(
+            definition.contains("(org_id, waiver_connection_id, user_id)"),
+            "{definition}"
+        );
+        assert!(
+            definition.contains("WHERE (retention_class = 'zdr_waived'::text)"),
+            "{definition}"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a scratch Postgres whose name contains \"test\" (session-core receipts CI job)"]
+    async fn zdr_receipt_migration_0045_reverts_and_reapplies_inside_a_rolled_back_transaction() {
+        let Some(pool) = scratch_pool().await else {
+            return;
+        };
+        let revert = strip_transaction_control(include_str!(
+            "../migrations/revert/0045_zdr_waived_runs_org_index.down.sql"
+        ));
+        let mut tx = pool.begin().await.expect("transaction");
+        sqlx::raw_sql(&revert)
+            .execute(&mut *tx)
+            .await
+            .expect("the revert applies");
+        let (dropped,): (i64,) = sqlx::query_as(INDEX_COUNT_SQL)
+            .fetch_one(&mut *tx)
+            .await
+            .expect("counted");
+        assert_eq!(dropped, 0, "the revert drops the index");
+        sqlx::raw_sql(include_str!(
+            "../migrations/0045_zdr_waived_runs_org_index.sql"
+        ))
+        .execute(&mut *tx)
+        .await
+        .expect("the migration re-applies after its revert");
+        let (recreated,): (i64,) = sqlx::query_as(INDEX_COUNT_SQL)
+            .fetch_one(&mut *tx)
+            .await
+            .expect("counted");
+        assert_eq!(recreated, 1, "the migration builds the index again");
+        tx.rollback().await.expect("rolled back");
+
+        let (kept,): (i64,) = sqlx::query_as(INDEX_COUNT_SQL)
+            .fetch_one(&pool)
+            .await
+            .expect("counted");
+        assert_eq!(
+            kept, 1,
+            "the rolled-back transaction leaves the index in place"
+        );
     }
 }
 

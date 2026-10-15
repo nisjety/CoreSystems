@@ -9,6 +9,9 @@ use std::{collections::HashMap, fmt, sync::Arc, time::Duration};
 
 use base64::Engine as _;
 use jsonwebtoken::{decode, jwk::JwkSet, Algorithm, DecodingKey, Validation};
+use mp_contracts::retention::{
+    resolve_turn, ClaimsView, Resolution, RouteView, WaiverView, WAIVER_CONTRACT_VERSION,
+};
 use serde::Deserialize;
 use tonic::{Request, Status};
 
@@ -50,6 +53,51 @@ enum PrincipalKind {
     Service,
 }
 
+/// The `zdr_waiver` claim of a persistent token, after verification.
+///
+/// An Auth Core decision stamps it onto a token only when the org is ZDR and
+/// one user-owned connection that cannot give ZDR was acknowledged by the
+/// session user. It binds exactly one provider and one connection, and names
+/// the acknowledgement it rests on, which is what a run's immutable receipt
+/// records. It is constructed only by [`JwtVerifier`] from a verified token.
+#[derive(Clone, Eq, PartialEq)]
+pub struct ZdrWaiver {
+    provider: String,
+    connection_id: String,
+    ack_id: String,
+}
+
+impl ZdrWaiver {
+    /// The canonical provider the waiver binds.
+    #[must_use]
+    pub fn provider(&self) -> &str {
+        &self.provider
+    }
+
+    /// The one user-owned connection the waiver binds.
+    #[must_use]
+    pub fn connection_id(&self) -> &str {
+        &self.connection_id
+    }
+
+    /// The acknowledgement of that connection the waiver rests on.
+    #[must_use]
+    pub fn ack_id(&self) -> &str {
+        &self.ack_id
+    }
+}
+
+impl fmt::Debug for ZdrWaiver {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ZdrWaiver")
+            .field("provider", &self.provider)
+            .field("connection_id", &self.connection_id)
+            .field("ack_id", &self.ack_id)
+            .finish()
+    }
+}
+
 /// Canonical identity derived only from a verified Auth Core credential.
 #[derive(Clone, Eq, PartialEq)]
 pub struct VerifiedIdentity {
@@ -59,6 +107,7 @@ pub struct VerifiedIdentity {
     scopes: Arc<[String]>,
     kind: PrincipalKind,
     zdr: bool,
+    zdr_waiver: Option<ZdrWaiver>,
 }
 
 impl fmt::Debug for VerifiedIdentity {
@@ -70,6 +119,7 @@ impl fmt::Debug for VerifiedIdentity {
             .field("kind", &self.kind)
             .field("scopes", &self.scopes)
             .field("zdr", &self.zdr)
+            .field("zdr_waiver", &self.zdr_waiver.is_some())
             .finish_non_exhaustive()
     }
 }
@@ -104,6 +154,13 @@ impl VerifiedIdentity {
     #[must_use]
     pub fn zdr(&self) -> bool {
         self.zdr
+    }
+
+    /// The connection-bound waiver this credential carries, if any. A waiver
+    /// only ever rides a persistent credential of a ZDR org.
+    #[must_use]
+    pub fn zdr_waiver(&self) -> Option<&ZdrWaiver> {
+        self.zdr_waiver.as_ref()
     }
 
     #[allow(clippy::result_large_err)]
@@ -153,6 +210,26 @@ impl VerifiedIdentity {
             scopes: Arc::from([]),
             kind: PrincipalKind::User,
             zdr,
+            zdr_waiver: None,
+        }
+    }
+
+    /// A persistent user identity carrying `waiver`, shaped as the verifier
+    /// shapes one: the claim only ever rides a token whose `zdr` is false.
+    #[cfg(test)]
+    pub(crate) fn user_for_test_with_waiver(
+        org_id: &str,
+        user_id: &str,
+        connection_id: &str,
+        ack_id: &str,
+    ) -> Self {
+        Self {
+            zdr_waiver: Some(ZdrWaiver {
+                provider: mp_contracts::agentic_subscription::PROVIDER_ID.to_owned(),
+                connection_id: connection_id.to_owned(),
+                ack_id: ack_id.to_owned(),
+            }),
+            ..Self::user_for_test_with_zdr(org_id, user_id, false)
         }
     }
 
@@ -179,6 +256,7 @@ impl VerifiedIdentity {
                 .into(),
             kind: PrincipalKind::Service,
             zdr,
+            zdr_waiver: None,
         }
     }
 }
@@ -206,6 +284,22 @@ pub fn authorize_operation(caller: &VerifiedIdentity, service_scope: &str) -> Re
     } else {
         Ok(())
     }
+}
+
+/// The gate of the owner's own housekeeping: deleting or archiving a thread, changing its presentation
+/// controls, deleting a memory of their own. Owner decision 17 makes these open to a zero-retention user
+/// under every posture, so a human caller is not refused for holding a ZDR credential here. The handler
+/// keeps its org and owner checks, and refuses any conversation text it would persist. A service caller
+/// is held to [`authorize_operation`] as before.
+#[allow(clippy::result_large_err)]
+pub fn authorize_owner_housekeeping(
+    caller: &VerifiedIdentity,
+    service_scope: &str,
+) -> Result<(), Status> {
+    if caller.is_service() {
+        return authorize_operation(caller, service_scope);
+    }
+    Ok(())
 }
 
 /// Scope a service principal must additionally hold to create a run it owns
@@ -521,6 +615,24 @@ struct Claims {
     #[serde(default)]
     scopes: Vec<String>,
     zdr: bool,
+    /// `org_zdr`: `true` when the org is Zero Data Retention. Absent on service
+    /// tokens. Only a waiver reads it, and only as `Some(true)`.
+    #[serde(default)]
+    org_zdr: Option<bool>,
+    /// `zdr_waiver`: present only on a persistent token of a ZDR org, bound to
+    /// one connection. Parsed and checked by [`parse_zdr_waiver`].
+    #[serde(default)]
+    zdr_waiver: Option<serde_json::Value>,
+}
+
+/// The wire shape of the `zdr_waiver` claim. Extra fields Auth Core may add
+/// (a digest, a decision id) are ignored; these four are required.
+#[derive(Debug, Deserialize)]
+struct WaiverClaim {
+    version: u32,
+    provider: String,
+    connection: String,
+    ack_id: String,
 }
 
 pub(crate) struct AuthConfig {
@@ -663,9 +775,13 @@ impl JwtVerifier {
             return Ok(None);
         };
         let delegated = self.verify_token(token, self.data_plane_audience.as_ref())?;
+        // Every bearer of one request agrees on zero retention AND on the
+        // waiver: a waiver for one connection must never ride a grounding call
+        // that the caller's own posture does not carry.
         if delegated.org_id() != caller.org_id()
             || delegated.user_id() != caller.user_id()
             || delegated.zdr() != caller.zdr()
+            || delegated.zdr_waiver() != caller.zdr_waiver()
         {
             return Err(Status::permission_denied(
                 "delegated Data Plane identity or retention posture does not match caller",
@@ -742,6 +858,19 @@ fn validate_identity(claims: Claims) -> Result<VerifiedIdentity, Status> {
     if claims.org_id.trim().is_empty() || claims.org_id.trim() != claims.org_id {
         return Err(Status::unauthenticated("invalid caller credential"));
     }
+    let zdr_waiver = parse_zdr_waiver(claims.zdr, claims.org_zdr, claims.zdr_waiver.as_ref())?;
+    let user_bound = matches!(claims.principal_type.as_str(), "" | "user");
+    // A waiver is a decision about one human's connection. A service credential
+    // can never carry one, whatever else it claims.
+    if zdr_waiver.is_some() && !user_bound {
+        return Err(Status::unauthenticated("invalid caller credential"));
+    }
+    // The matrix's rule 3: a persistent user token of a ZDR org is served only
+    // under a waiver. Refused here rather than recorded as an ordinary run, so a
+    // token minted without its waiver cannot downgrade a ZDR org's turn.
+    if user_bound && !claims.zdr && claims.org_zdr == Some(true) && zdr_waiver.is_none() {
+        return Err(Status::unauthenticated("invalid caller credential"));
+    }
     let scopes: Arc<[String]> = claims.scopes.into();
     match claims.principal_type.as_str() {
         "" | "user"
@@ -757,6 +886,7 @@ fn validate_identity(claims: Claims) -> Result<VerifiedIdentity, Status> {
                 scopes,
                 kind: PrincipalKind::User,
                 zdr: claims.zdr,
+                zdr_waiver,
             })
         }
         "service"
@@ -772,10 +902,71 @@ fn validate_identity(claims: Claims) -> Result<VerifiedIdentity, Status> {
                 scopes,
                 kind: PrincipalKind::Service,
                 zdr: claims.zdr,
+                zdr_waiver: None,
             })
         }
         _ => Err(Status::unauthenticated("invalid caller credential")),
     }
+}
+
+/// Parse and check the `zdr_waiver` claim of one verified token.
+///
+/// Absent or `null` is no waiver. Anything else must be a v1 waiver that the
+/// shared matrix resolves as a waiver: a persistent token (`zdr` false) of a
+/// ZDR org (`org_zdr` true), bound to one provider and one connection, with a
+/// non-empty acknowledgement id. An unknown version, a malformed claim, or a
+/// waiver on a ZDR token is refused, never read as "no waiver": a token that
+/// silently dropped its waiver would be recorded as persistent for a ZDR org.
+#[allow(clippy::result_large_err)]
+fn parse_zdr_waiver(
+    zdr: bool,
+    org_zdr: Option<bool>,
+    claim: Option<&serde_json::Value>,
+) -> Result<Option<ZdrWaiver>, Status> {
+    let refused = || Status::unauthenticated("invalid caller credential");
+    let Some(claim) = claim.filter(|value| !value.is_null()) else {
+        return Ok(None);
+    };
+    let waiver: WaiverClaim = serde_json::from_value(claim.clone()).map_err(|_| refused())?;
+    if zdr || org_zdr != Some(true) {
+        return Err(refused());
+    }
+    // The shared resolver is the one definition of a valid waiver. Resolving
+    // the waiver's own route must yield a waiver for exactly that connection.
+    let resolution = resolve_turn(
+        &[ClaimsView {
+            zdr: false,
+            org_zdr: Some(true),
+            waiver: Some(WaiverView {
+                version: waiver.version,
+                provider: &waiver.provider,
+                connection: &waiver.connection,
+            }),
+        }],
+        &RouteView {
+            provider: &waiver.provider,
+            connection: Some(&waiver.connection),
+            explicit_zdr: false,
+        },
+    );
+    if !matches!(resolution, Resolution::Waived { .. }) || waiver.version != WAIVER_CONTRACT_VERSION
+    {
+        return Err(refused());
+    }
+    for id in [&waiver.connection, &waiver.ack_id] {
+        if id.is_empty()
+            || id.len() > 128
+            || id.trim() != id.as_str()
+            || id.chars().any(char::is_control)
+        {
+            return Err(refused());
+        }
+    }
+    Ok(Some(ZdrWaiver {
+        provider: waiver.provider,
+        connection_id: waiver.connection,
+        ack_id: waiver.ack_id,
+    }))
 }
 
 fn validated_keys(jwks: &JwkSet) -> anyhow::Result<HashMap<String, DecodingKey>> {
@@ -1695,5 +1886,210 @@ mod tests {
         )
         .expect_err("a look-alike owner gets no system treatment, so the user check applies");
         assert_eq!(error.code(), Code::PermissionDenied);
+    }
+
+    /// The claims Auth Core stamps on a persistent token of a ZDR org whose
+    /// session user acknowledged one connection that cannot give ZDR.
+    fn waived_user_claims(audience: &str, connection: &str, ack_id: &str) -> Value {
+        let mut claims = user_claims(audience);
+        claims["org_zdr"] = json!(true);
+        claims["zdr_waiver"] = json!({
+            "version": 1,
+            "provider": "openai-codex-subscription",
+            "connection": connection,
+            "ack_id": ack_id,
+        });
+        claims
+    }
+
+    /// The waiver the verifier reads is the one Auth Core stamped, and it rides
+    /// only the persistent token it was stamped on. A token without the claim
+    /// carries no waiver at all.
+    #[tokio::test]
+    async fn zdr_waiver_is_read_from_a_persistent_token_of_a_zdr_org() {
+        let verifier = test_verifier("session-core").await;
+        let token = sign(
+            &waived_user_claims("session-core", "conn-1", "ack-1"),
+            "key-1",
+        );
+        let request = test_support::authenticate(&verifier, &token, ()).expect("valid waiver");
+        let caller = identity(&request).expect("identity");
+        assert!(!caller.zdr(), "a waiver rides a persistent token");
+        let waiver = caller.zdr_waiver().expect("the waiver is carried");
+        assert_eq!(waiver.provider(), "openai-codex-subscription");
+        assert_eq!(waiver.connection_id(), "conn-1");
+        assert_eq!(waiver.ack_id(), "ack-1");
+
+        let plain = sign(&user_claims("session-core"), "key-1");
+        let request = test_support::authenticate(&verifier, &plain, ()).expect("plain token");
+        assert!(identity(&request).expect("identity").zdr_waiver().is_none());
+    }
+
+    /// An unknown version, a wrong provider, an empty or padded id, a missing
+    /// acknowledgement, a waiver on a ZDR token, a waiver without a ZDR org, and
+    /// a waiver on a service credential are all refused. None is silently
+    /// dropped: a dropped waiver would be recorded as a persistent run in a ZDR
+    /// org.
+    #[tokio::test]
+    async fn malformed_or_misplaced_zdr_waivers_are_refused_not_dropped() {
+        let verifier = test_verifier("session-core").await;
+        let good = || waived_user_claims("session-core", "conn-1", "ack-1");
+        let mut cases: Vec<(&str, Value)> = Vec::new();
+        cases.push(("unknown waiver version", {
+            let mut claims = good();
+            claims["zdr_waiver"]["version"] = json!(2);
+            claims
+        }));
+        cases.push(("provider the waiver does not bind", {
+            let mut claims = good();
+            claims["zdr_waiver"]["provider"] = json!("azure-openai");
+            claims
+        }));
+        cases.push(("empty connection", {
+            let mut claims = good();
+            claims["zdr_waiver"]["connection"] = json!("");
+            claims
+        }));
+        cases.push(("padded connection", {
+            let mut claims = good();
+            claims["zdr_waiver"]["connection"] = json!(" conn-1 ");
+            claims
+        }));
+        cases.push(("blank acknowledgement", {
+            let mut claims = good();
+            claims["zdr_waiver"]["ack_id"] = json!("  ");
+            claims
+        }));
+        cases.push(("acknowledgement missing", {
+            let mut claims = good();
+            claims["zdr_waiver"]
+                .as_object_mut()
+                .expect("object")
+                .remove("ack_id");
+            claims
+        }));
+        cases.push(("waiver that is not an object", {
+            let mut claims = good();
+            claims["zdr_waiver"] = json!("conn-1");
+            claims
+        }));
+        cases.push(("waiver on a ZDR token", {
+            let mut claims = good();
+            claims["zdr"] = json!(true);
+            claims
+        }));
+        cases.push(("waiver in an org that is not ZDR", {
+            let mut claims = good();
+            claims["org_zdr"] = json!(false);
+            claims
+        }));
+        cases.push(("waiver with no org_zdr claim", {
+            let mut claims = good();
+            claims.as_object_mut().expect("object").remove("org_zdr");
+            claims
+        }));
+        cases.push(("persistent token of a ZDR org with no waiver", {
+            let mut claims = good();
+            claims.as_object_mut().expect("object").remove("zdr_waiver");
+            claims
+        }));
+        cases.push(("waiver on a service credential", {
+            let mut claims = good();
+            claims.as_object_mut().expect("object").remove("user_id");
+            claims["principal_type"] = json!("service");
+            claims["service_id"] = json!("service:verevon-gateway");
+            claims["sub"] = json!("service:verevon-gateway");
+            claims
+        }));
+        for (case, claims) in cases {
+            let token = sign(&claims, "key-1");
+            let mut request = Request::new(());
+            request.metadata_mut().insert(
+                "authorization",
+                format!("Bearer {token}").parse().expect("metadata"),
+            );
+            assert_eq!(
+                verifier.intercept(request).unwrap_err().code(),
+                Code::Unauthenticated,
+                "{case} must be refused"
+            );
+        }
+    }
+
+    /// Every bearer of one request must carry the same waiver. A delegated
+    /// Data Plane bearer that is persistent without the waiver, or that is
+    /// waived for another connection, is refused as a posture mismatch.
+    #[tokio::test]
+    async fn delegated_data_plane_bearer_must_carry_the_same_waiver() {
+        let verifier = test_verifier("session-core").await;
+        let waived_caller =
+            VerifiedIdentity::user_for_test_with_waiver("org-1", "user-1", "conn-1", "ack-1");
+
+        let same = sign(
+            &waived_user_claims("data-plane", "conn-1", "ack-1"),
+            "key-1",
+        );
+        verifier
+            .delegated_data_plane_bearer(&delegating_request(&same), &waived_caller)
+            .expect("the same waiver verifies")
+            .expect("the bearer is forwarded");
+
+        let bare = sign(&user_claims("data-plane"), "key-1");
+        assert_eq!(
+            verifier
+                .delegated_data_plane_bearer(&delegating_request(&bare), &waived_caller)
+                .expect_err("a waived caller never forwards a bare persistent bearer")
+                .code(),
+            Code::PermissionDenied
+        );
+
+        let other_connection = sign(
+            &waived_user_claims("data-plane", "conn-2", "ack-2"),
+            "key-1",
+        );
+        assert_eq!(
+            verifier
+                .delegated_data_plane_bearer(&delegating_request(&other_connection), &waived_caller)
+                .expect_err("another connection's waiver is refused")
+                .code(),
+            Code::PermissionDenied
+        );
+
+        let plain_caller = VerifiedIdentity::user_for_test("org-1", "user-1");
+        assert_eq!(
+            verifier
+                .delegated_data_plane_bearer(&delegating_request(&same), &plain_caller)
+                .expect_err("a caller with no waiver never forwards a waived bearer")
+                .code(),
+            Code::PermissionDenied
+        );
+    }
+
+    /// Owner decision 17: a zero-retention user must always be able to delete or archive the threads
+    /// and memories they own. The ordinary write gate still refuses that user, so the housekeeping
+    /// gate is the only door open to them, and a service caller is held to the write gate.
+    #[test]
+    fn owner_housekeeping_is_open_to_a_zdr_user_and_still_scoped_for_services() {
+        let zdr_user = VerifiedIdentity::user_for_test_with_zdr("org-1", "user-1", true);
+        assert!(authorize_owner_housekeeping(&zdr_user, "session:write").is_ok());
+        assert_eq!(
+            authorize_operation(&zdr_user, "session:write")
+                .expect_err("the ordinary write gate still refuses a ZDR credential")
+                .code(),
+            Code::FailedPrecondition
+        );
+
+        let persistent_user = VerifiedIdentity::user_for_test("org-1", "user-1");
+        assert!(authorize_owner_housekeeping(&persistent_user, "session:write").is_ok());
+
+        let unscoped = VerifiedIdentity::service_for_test("org-1", &[], false);
+        assert_eq!(
+            authorize_owner_housekeeping(&unscoped, "session:write")
+                .expect_err("a service without the scope is refused")
+                .code(),
+            Code::PermissionDenied
+        );
+        let scoped = VerifiedIdentity::service_for_test("org-1", &["session:write"], false);
+        assert!(authorize_owner_housekeeping(&scoped, "session:write").is_ok());
     }
 }
