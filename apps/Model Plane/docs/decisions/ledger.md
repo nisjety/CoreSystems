@@ -22,6 +22,33 @@ with a pointer forward. Newest first.
 
 ---
 
+## 2026-10-15 - Proto field numbers and migration numbers are reserved in the build plan before use
+
+**State:** `proposed`
+(planned 2026-10-14; first claimed number: `RunAgentRequest.run_context = 18`, landed with the run-context contract)
+
+**The decision.** The Model Plane and chat build plan
+(`docs/plans/model-plane-chat-build-plan-2026-10-14.md`) runs many workstreams in
+parallel worktrees. Each adds proto fields, RPCs and SQL migrations, and a number
+taken twice is a silent wire or migration collision. Section 4.3 of that plan is
+the reservation table for proto tags (per message: proposed, conflict, final) and
+section 4.4 the migration number plan per service. A workstream claims a number
+there before using it, writes the owner in a doc comment at the field, and the
+integrator named in the plan freezes the final number when the pull request
+enters its merge train. Wire fields are never renumbered. Not chosen: letting
+each pull request pick the next free number (two parallel branches then pick the
+same one); `buf breaking` does not catch that because the baseline is a snapshot
+of one branch.
+
+**Why now.** `buf breaking` was a no-op until `apps/Model Plane/proto/baseline.binpb`
+was rebuilt from the committed protos (it was 0 bytes), so until the gate is
+verified on the integration branch this table is the only collision control.
+
+**Trigger to flip to `implemented`.** The integrator is named, and the first
+three workstreams have merged with their numbers taken from the table.
+
+---
+
 ## 2026-10-06 — Service principals reach the retrieval engine by a route allowlist, not by membership: a bounded exception to matrix rule 9
 
 **State:** `proposed`
