@@ -24,6 +24,7 @@ use tracing::info;
 mod audience_tokens;
 mod auth;
 mod cache;
+mod cache_admission;
 mod config;
 mod contracts;
 mod domains;
