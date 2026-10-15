@@ -125,3 +125,43 @@ func TestRunAgentResponseWithoutTheFailureFieldsHasNoTypedFailure(t *testing.T) 
 		t.Fatalf("an old response must decode with the failure unset: %+v", &decoded)
 	}
 }
+
+// RunAgentRequest.run_context (field 18, build plan WS02 S4). The same bytes are
+// pinned in rust/crates/mp-contracts/tests/proto_wire_parity_execution.rs.
+const runContextWireHex = "0a0272319201160a0942652062726965662e1a016d22060a0408011001"
+
+func TestRunAgentRequestRunContextDecodesFromGoldenHex(t *testing.T) {
+	raw, err := hex.DecodeString(runContextWireHex)
+	if err != nil {
+		t.Fatalf("bad golden hex: %v", err)
+	}
+	var decoded RunAgentRequest
+	if err := proto.Unmarshal(raw, &decoded); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	rc := decoded.GetRunContext()
+	if rc == nil {
+		t.Fatal("run_context (field 18) missing")
+	}
+	if rc.GetAuthoredInstructions() != "Be brief." || rc.GetMemoryBlock() != "m" {
+		t.Fatalf("unexpected context: %q %q", rc.GetAuthoredInstructions(), rc.GetMemoryBlock())
+	}
+	part := rc.GetStatus().GetInstructions()
+	if part.GetState() != RunContextState_RUN_CONTEXT_STATE_INCLUDED || part.GetIncluded() != 1 {
+		t.Fatalf("unexpected status part: %v", part)
+	}
+}
+
+func TestRunAgentRequestWithoutRunContextHasNone(t *testing.T) {
+	raw, err := proto.Marshal(&RunAgentRequest{RunId: "r1"})
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	var decoded RunAgentRequest
+	if err := proto.Unmarshal(raw, &decoded); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if decoded.GetRunContext() != nil {
+		t.Fatal("an absent run_context must stay absent")
+	}
+}

@@ -51,6 +51,10 @@ const (
 // Does NOT own: tool loop, session authority.
 type InferenceCoreClient interface {
 	// Unary inference — returns the complete response.
+	// Optional gRPC metadata `cache-control: no-store` bypasses both reads and
+	// writes of the completed-response cache. The server acknowledges it with
+	// the same response metadata. It does not alter provider prefix caching,
+	// authentication, routing, budget or ZDR/privacy restrictions.
 	Infer(ctx context.Context, in *InferRequest, opts ...grpc.CallOption) (*InferResponse, error)
 	// Streaming inference — returns token-by-token chunks.
 	InferStream(ctx context.Context, in *InferRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[InferChunk], error)
@@ -329,6 +333,10 @@ type InferenceCore_StreamVideoGenerationContentClient = grpc.ServerStreamingClie
 // Does NOT own: tool loop, session authority.
 type InferenceCoreServer interface {
 	// Unary inference — returns the complete response.
+	// Optional gRPC metadata `cache-control: no-store` bypasses both reads and
+	// writes of the completed-response cache. The server acknowledges it with
+	// the same response metadata. It does not alter provider prefix caching,
+	// authentication, routing, budget or ZDR/privacy restrictions.
 	Infer(context.Context, *InferRequest) (*InferResponse, error)
 	// Streaming inference — returns token-by-token chunks.
 	InferStream(*InferRequest, grpc.ServerStreamingServer[InferChunk]) error

@@ -150,6 +150,11 @@ service SessionCore {
   // `unknown_outcome` is explicit: a lost transport response is not converted
   // into success or an immediate blind retry.
   rpc RecordScheduledStepReceipt(RecordScheduledStepReceiptRequest) returns (RecordScheduledStepReceiptResponse);
+
+  // Stamp how a run's context was assembled onto the run record
+  // (`runs.metadata.run_context`). Counts and closed tokens only; refused for
+  // zero-retention and waived credentials like every durable run mutation.
+  rpc RecordRunContext(RecordRunContextRequest) returns (RecordRunContextResponse);
 }
 
 // ManagedRunLifecycle owns the additive, durable terminalization protocol for
@@ -1247,3 +1252,16 @@ message WaivedRunCount {
   // When the most recent of those runs started.
   google.protobuf.Timestamp last_used_at = 4;
 }
+
+// --- RecordRunContext (build plan WS02 S4) ---
+
+// Stamps the assembly status of a run's context onto the run record.
+message RecordRunContextRequest {
+  string run_id = 1;
+  // Server-authoritative org scope, forwarded from the gateway's authenticated claims.
+  string org_id = 2;
+  RunContextStatus status = 3;
+}
+
+// Empty acknowledgement of RecordRunContext.
+message RecordRunContextResponse {}

@@ -206,6 +206,28 @@ message RunAgentRequest {
   // hands it to Integration Core, which validates it against the caller's
   // verified org and user scope. It carries no credential.
   string subscription_connection_id = 17;
+
+  // The composed run context (build plan WS02). Absent = today's behaviour:
+  // the loop starts from its preamble plus the goal. The gateway composes this
+  // (the BFF resolves instruction text; execution-core never re-resolves it) and
+  // execution-core only inserts it; under ZDR only authored instructions are
+  // allowed (`mp_contracts::run_context::validate`). Old executors skip an
+  // unknown field, which is today's behaviour. Field 18 is reserved for this
+  // message in the build plan's proto reservation table (section 4.3).
+  RunContext run_context = 18;
+}
+
+// RunContext - what the gateway hands an agent run beyond its goal.
+// Fields 5 and above are reserved in the build plan for attachments and run notes.
+message RunContext {
+  // Composed platform, org, Space and persona instructions (finished text).
+  string authored_instructions = 1;
+  // Bounded prior turns of the thread (roles user and assistant only).
+  repeated ChatMessage history = 2;
+  // A prefetched memory block, already bounded.
+  string memory_block = 3;
+  // How each part was assembled, for the run record.
+  RunContextStatus status = 4;
 }
 
 // RunAgentResponse — terminal outcome of a driven agent run.

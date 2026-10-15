@@ -94,6 +94,71 @@ func (AutonomyRung) EnumDescriptor() ([]byte, []int) {
 	return file_model_plane_v1_runs_proto_rawDescGZIP(), []int{0}
 }
 
+// How one part of a run's context was assembled.
+type RunContextState int32
+
+const (
+	// Not stated (an older gateway).
+	RunContextState_RUN_CONTEXT_STATE_UNSPECIFIED RunContextState = 0
+	// Included in full.
+	RunContextState_RUN_CONTEXT_STATE_INCLUDED RunContextState = 1
+	// Included, but cut to a cap; see `omitted`.
+	RunContextState_RUN_CONTEXT_STATE_TRUNCATED RunContextState = 2
+	// Nothing to include (no instructions authored, no prior turns, no memory).
+	RunContextState_RUN_CONTEXT_STATE_EMPTY RunContextState = 3
+	// Withheld by policy (zero data retention, memory paused or off, Space scope).
+	RunContextState_RUN_CONTEXT_STATE_SKIPPED_BY_POLICY RunContextState = 4
+	// Could not be assembled (the loader failed or timed out); the run proceeds without it.
+	RunContextState_RUN_CONTEXT_STATE_UNAVAILABLE RunContextState = 5
+)
+
+// Enum value maps for RunContextState.
+var (
+	RunContextState_name = map[int32]string{
+		0: "RUN_CONTEXT_STATE_UNSPECIFIED",
+		1: "RUN_CONTEXT_STATE_INCLUDED",
+		2: "RUN_CONTEXT_STATE_TRUNCATED",
+		3: "RUN_CONTEXT_STATE_EMPTY",
+		4: "RUN_CONTEXT_STATE_SKIPPED_BY_POLICY",
+		5: "RUN_CONTEXT_STATE_UNAVAILABLE",
+	}
+	RunContextState_value = map[string]int32{
+		"RUN_CONTEXT_STATE_UNSPECIFIED":       0,
+		"RUN_CONTEXT_STATE_INCLUDED":          1,
+		"RUN_CONTEXT_STATE_TRUNCATED":         2,
+		"RUN_CONTEXT_STATE_EMPTY":             3,
+		"RUN_CONTEXT_STATE_SKIPPED_BY_POLICY": 4,
+		"RUN_CONTEXT_STATE_UNAVAILABLE":       5,
+	}
+)
+
+func (x RunContextState) Enum() *RunContextState {
+	p := new(RunContextState)
+	*p = x
+	return p
+}
+
+func (x RunContextState) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (RunContextState) Descriptor() protoreflect.EnumDescriptor {
+	return file_model_plane_v1_runs_proto_enumTypes[1].Descriptor()
+}
+
+func (RunContextState) Type() protoreflect.EnumType {
+	return &file_model_plane_v1_runs_proto_enumTypes[1]
+}
+
+func (x RunContextState) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use RunContextState.Descriptor instead.
+func (RunContextState) EnumDescriptor() ([]byte, []int) {
+	return file_model_plane_v1_runs_proto_rawDescGZIP(), []int{1}
+}
+
 type GetRunRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Run identifier (ULID).
@@ -1474,6 +1539,143 @@ func (x *RunDetail) GetMetadata() *structpb.Struct {
 	return nil
 }
 
+// The assembly outcome of one part of the run context.
+type RunContextPart struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// How the part was assembled.
+	State RunContextState `protobuf:"varint,1,opt,name=state,proto3,enum=model_plane.v1.RunContextState" json:"state,omitempty"`
+	// Items included (the unit is part specific: messages for history).
+	Included uint32 `protobuf:"varint,2,opt,name=included,proto3" json:"included,omitempty"`
+	// Items left out by a cap.
+	Omitted uint32 `protobuf:"varint,3,opt,name=omitted,proto3" json:"omitted,omitempty"`
+	// A closed token (for example "zdr", "memory_off", "cap"); never content.
+	Reason        string `protobuf:"bytes,4,opt,name=reason,proto3" json:"reason,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RunContextPart) Reset() {
+	*x = RunContextPart{}
+	mi := &file_model_plane_v1_runs_proto_msgTypes[17]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RunContextPart) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RunContextPart) ProtoMessage() {}
+
+func (x *RunContextPart) ProtoReflect() protoreflect.Message {
+	mi := &file_model_plane_v1_runs_proto_msgTypes[17]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RunContextPart.ProtoReflect.Descriptor instead.
+func (*RunContextPart) Descriptor() ([]byte, []int) {
+	return file_model_plane_v1_runs_proto_rawDescGZIP(), []int{17}
+}
+
+func (x *RunContextPart) GetState() RunContextState {
+	if x != nil {
+		return x.State
+	}
+	return RunContextState_RUN_CONTEXT_STATE_UNSPECIFIED
+}
+
+func (x *RunContextPart) GetIncluded() uint32 {
+	if x != nil {
+		return x.Included
+	}
+	return 0
+}
+
+func (x *RunContextPart) GetOmitted() uint32 {
+	if x != nil {
+		return x.Omitted
+	}
+	return 0
+}
+
+func (x *RunContextPart) GetReason() string {
+	if x != nil {
+		return x.Reason
+	}
+	return ""
+}
+
+// How a run's context was assembled, per part. Counts and closed tokens only.
+type RunContextStatus struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The composed authored instructions (platform, org, Space, persona).
+	Instructions *RunContextPart `protobuf:"bytes,1,opt,name=instructions,proto3" json:"instructions,omitempty"`
+	// The bounded prior turns of the thread.
+	History *RunContextPart `protobuf:"bytes,2,opt,name=history,proto3" json:"history,omitempty"`
+	// The prefetched memory block.
+	Memory        *RunContextPart `protobuf:"bytes,3,opt,name=memory,proto3" json:"memory,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RunContextStatus) Reset() {
+	*x = RunContextStatus{}
+	mi := &file_model_plane_v1_runs_proto_msgTypes[18]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RunContextStatus) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RunContextStatus) ProtoMessage() {}
+
+func (x *RunContextStatus) ProtoReflect() protoreflect.Message {
+	mi := &file_model_plane_v1_runs_proto_msgTypes[18]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RunContextStatus.ProtoReflect.Descriptor instead.
+func (*RunContextStatus) Descriptor() ([]byte, []int) {
+	return file_model_plane_v1_runs_proto_rawDescGZIP(), []int{18}
+}
+
+func (x *RunContextStatus) GetInstructions() *RunContextPart {
+	if x != nil {
+		return x.Instructions
+	}
+	return nil
+}
+
+func (x *RunContextStatus) GetHistory() *RunContextPart {
+	if x != nil {
+		return x.History
+	}
+	return nil
+}
+
+func (x *RunContextStatus) GetMemory() *RunContextPart {
+	if x != nil {
+		return x.Memory
+	}
+	return nil
+}
+
 var File_model_plane_v1_runs_proto protoreflect.FileDescriptor
 
 const file_model_plane_v1_runs_proto_rawDesc = "" +
@@ -1605,12 +1807,28 @@ const file_model_plane_v1_runs_proto_rawDesc = "" +
 	"created_at\x18\x0e \x01(\v2\x1a.google.protobuf.TimestampR\tcreatedAt\x129\n" +
 	"\n" +
 	"updated_at\x18\x0f \x01(\v2\x1a.google.protobuf.TimestampR\tupdatedAt\x123\n" +
-	"\bmetadata\x18\x10 \x01(\v2\x17.google.protobuf.StructR\bmetadata*\x93\x01\n" +
+	"\bmetadata\x18\x10 \x01(\v2\x17.google.protobuf.StructR\bmetadata\"\x95\x01\n" +
+	"\x0eRunContextPart\x125\n" +
+	"\x05state\x18\x01 \x01(\x0e2\x1f.model_plane.v1.RunContextStateR\x05state\x12\x1a\n" +
+	"\bincluded\x18\x02 \x01(\rR\bincluded\x12\x18\n" +
+	"\aomitted\x18\x03 \x01(\rR\aomitted\x12\x16\n" +
+	"\x06reason\x18\x04 \x01(\tR\x06reason\"\xc8\x01\n" +
+	"\x10RunContextStatus\x12B\n" +
+	"\finstructions\x18\x01 \x01(\v2\x1e.model_plane.v1.RunContextPartR\finstructions\x128\n" +
+	"\ahistory\x18\x02 \x01(\v2\x1e.model_plane.v1.RunContextPartR\ahistory\x126\n" +
+	"\x06memory\x18\x03 \x01(\v2\x1e.model_plane.v1.RunContextPartR\x06memory*\x93\x01\n" +
 	"\fAutonomyRung\x12\x1d\n" +
 	"\x19AUTONOMY_RUNG_UNSPECIFIED\x10\x00\x12\x1b\n" +
 	"\x17AUTONOMY_RUNG_READ_ONLY\x10\x01\x12!\n" +
 	"\x1dAUTONOMY_RUNG_WORKSPACE_WRITE\x10\x02\x12$\n" +
-	" AUTONOMY_RUNG_DANGER_FULL_ACCESS\x10\x032\xa0\a\n" +
+	" AUTONOMY_RUNG_DANGER_FULL_ACCESS\x10\x03*\xde\x01\n" +
+	"\x0fRunContextState\x12!\n" +
+	"\x1dRUN_CONTEXT_STATE_UNSPECIFIED\x10\x00\x12\x1e\n" +
+	"\x1aRUN_CONTEXT_STATE_INCLUDED\x10\x01\x12\x1f\n" +
+	"\x1bRUN_CONTEXT_STATE_TRUNCATED\x10\x02\x12\x1b\n" +
+	"\x17RUN_CONTEXT_STATE_EMPTY\x10\x03\x12'\n" +
+	"#RUN_CONTEXT_STATE_SKIPPED_BY_POLICY\x10\x04\x12!\n" +
+	"\x1dRUN_CONTEXT_STATE_UNAVAILABLE\x10\x052\xa0\a\n" +
 	"\n" +
 	"RunService\x12B\n" +
 	"\x06GetRun\x12\x1d.model_plane.v1.GetRunRequest\x1a\x19.model_plane.v1.RunDetail\x12o\n" +
@@ -1636,58 +1854,65 @@ func file_model_plane_v1_runs_proto_rawDescGZIP() []byte {
 	return file_model_plane_v1_runs_proto_rawDescData
 }
 
-var file_model_plane_v1_runs_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_model_plane_v1_runs_proto_msgTypes = make([]protoimpl.MessageInfo, 17)
+var file_model_plane_v1_runs_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
+var file_model_plane_v1_runs_proto_msgTypes = make([]protoimpl.MessageInfo, 19)
 var file_model_plane_v1_runs_proto_goTypes = []any{
 	(AutonomyRung)(0),                             // 0: model_plane.v1.AutonomyRung
-	(*GetRunRequest)(nil),                         // 1: model_plane.v1.GetRunRequest
-	(*GetScheduledStepContextRequest)(nil),        // 2: model_plane.v1.GetScheduledStepContextRequest
-	(*ScheduledStepContext)(nil),                  // 3: model_plane.v1.ScheduledStepContext
-	(*ListRunsRequest)(nil),                       // 4: model_plane.v1.ListRunsRequest
-	(*ListRunsResponse)(nil),                      // 5: model_plane.v1.ListRunsResponse
-	(*ListSystemRunsRequest)(nil),                 // 6: model_plane.v1.ListSystemRunsRequest
-	(*CancelRunRequest)(nil),                      // 7: model_plane.v1.CancelRunRequest
-	(*CancelRunResponse)(nil),                     // 8: model_plane.v1.CancelRunResponse
-	(*ResolveRunOwnerRequest)(nil),                // 9: model_plane.v1.ResolveRunOwnerRequest
-	(*ResolveRunOwnerResponse)(nil),               // 10: model_plane.v1.ResolveRunOwnerResponse
-	(*ResolveThreadOwnerRequest)(nil),             // 11: model_plane.v1.ResolveThreadOwnerRequest
-	(*ResolveThreadOwnerResponse)(nil),            // 12: model_plane.v1.ResolveThreadOwnerResponse
-	(*ResolveRunActionAuthorityRequest)(nil),      // 13: model_plane.v1.ResolveRunActionAuthorityRequest
-	(*ResolveRunActionAuthorityResponse)(nil),     // 14: model_plane.v1.ResolveRunActionAuthorityResponse
-	(*ResolveScheduledStepAuthorityRequest)(nil),  // 15: model_plane.v1.ResolveScheduledStepAuthorityRequest
-	(*ResolveScheduledStepAuthorityResponse)(nil), // 16: model_plane.v1.ResolveScheduledStepAuthorityResponse
-	(*RunDetail)(nil),                             // 17: model_plane.v1.RunDetail
-	(*timestamppb.Timestamp)(nil),                 // 18: google.protobuf.Timestamp
-	(*structpb.Struct)(nil),                       // 19: google.protobuf.Struct
+	(RunContextState)(0),                          // 1: model_plane.v1.RunContextState
+	(*GetRunRequest)(nil),                         // 2: model_plane.v1.GetRunRequest
+	(*GetScheduledStepContextRequest)(nil),        // 3: model_plane.v1.GetScheduledStepContextRequest
+	(*ScheduledStepContext)(nil),                  // 4: model_plane.v1.ScheduledStepContext
+	(*ListRunsRequest)(nil),                       // 5: model_plane.v1.ListRunsRequest
+	(*ListRunsResponse)(nil),                      // 6: model_plane.v1.ListRunsResponse
+	(*ListSystemRunsRequest)(nil),                 // 7: model_plane.v1.ListSystemRunsRequest
+	(*CancelRunRequest)(nil),                      // 8: model_plane.v1.CancelRunRequest
+	(*CancelRunResponse)(nil),                     // 9: model_plane.v1.CancelRunResponse
+	(*ResolveRunOwnerRequest)(nil),                // 10: model_plane.v1.ResolveRunOwnerRequest
+	(*ResolveRunOwnerResponse)(nil),               // 11: model_plane.v1.ResolveRunOwnerResponse
+	(*ResolveThreadOwnerRequest)(nil),             // 12: model_plane.v1.ResolveThreadOwnerRequest
+	(*ResolveThreadOwnerResponse)(nil),            // 13: model_plane.v1.ResolveThreadOwnerResponse
+	(*ResolveRunActionAuthorityRequest)(nil),      // 14: model_plane.v1.ResolveRunActionAuthorityRequest
+	(*ResolveRunActionAuthorityResponse)(nil),     // 15: model_plane.v1.ResolveRunActionAuthorityResponse
+	(*ResolveScheduledStepAuthorityRequest)(nil),  // 16: model_plane.v1.ResolveScheduledStepAuthorityRequest
+	(*ResolveScheduledStepAuthorityResponse)(nil), // 17: model_plane.v1.ResolveScheduledStepAuthorityResponse
+	(*RunDetail)(nil),                             // 18: model_plane.v1.RunDetail
+	(*RunContextPart)(nil),                        // 19: model_plane.v1.RunContextPart
+	(*RunContextStatus)(nil),                      // 20: model_plane.v1.RunContextStatus
+	(*timestamppb.Timestamp)(nil),                 // 21: google.protobuf.Timestamp
+	(*structpb.Struct)(nil),                       // 22: google.protobuf.Struct
 }
 var file_model_plane_v1_runs_proto_depIdxs = []int32{
-	17, // 0: model_plane.v1.ListRunsResponse.runs:type_name -> model_plane.v1.RunDetail
-	18, // 1: model_plane.v1.RunDetail.created_at:type_name -> google.protobuf.Timestamp
-	18, // 2: model_plane.v1.RunDetail.updated_at:type_name -> google.protobuf.Timestamp
-	19, // 3: model_plane.v1.RunDetail.metadata:type_name -> google.protobuf.Struct
-	1,  // 4: model_plane.v1.RunService.GetRun:input_type -> model_plane.v1.GetRunRequest
-	2,  // 5: model_plane.v1.RunService.GetScheduledStepContext:input_type -> model_plane.v1.GetScheduledStepContextRequest
-	4,  // 6: model_plane.v1.RunService.ListRuns:input_type -> model_plane.v1.ListRunsRequest
-	7,  // 7: model_plane.v1.RunService.CancelRun:input_type -> model_plane.v1.CancelRunRequest
-	6,  // 8: model_plane.v1.RunService.ListSystemRuns:input_type -> model_plane.v1.ListSystemRunsRequest
-	9,  // 9: model_plane.v1.RunService.ResolveRunOwner:input_type -> model_plane.v1.ResolveRunOwnerRequest
-	11, // 10: model_plane.v1.RunService.ResolveThreadOwner:input_type -> model_plane.v1.ResolveThreadOwnerRequest
-	13, // 11: model_plane.v1.RunService.ResolveRunActionAuthority:input_type -> model_plane.v1.ResolveRunActionAuthorityRequest
-	15, // 12: model_plane.v1.RunService.ResolveScheduledStepAuthority:input_type -> model_plane.v1.ResolveScheduledStepAuthorityRequest
-	17, // 13: model_plane.v1.RunService.GetRun:output_type -> model_plane.v1.RunDetail
-	3,  // 14: model_plane.v1.RunService.GetScheduledStepContext:output_type -> model_plane.v1.ScheduledStepContext
-	5,  // 15: model_plane.v1.RunService.ListRuns:output_type -> model_plane.v1.ListRunsResponse
-	8,  // 16: model_plane.v1.RunService.CancelRun:output_type -> model_plane.v1.CancelRunResponse
-	5,  // 17: model_plane.v1.RunService.ListSystemRuns:output_type -> model_plane.v1.ListRunsResponse
-	10, // 18: model_plane.v1.RunService.ResolveRunOwner:output_type -> model_plane.v1.ResolveRunOwnerResponse
-	12, // 19: model_plane.v1.RunService.ResolveThreadOwner:output_type -> model_plane.v1.ResolveThreadOwnerResponse
-	14, // 20: model_plane.v1.RunService.ResolveRunActionAuthority:output_type -> model_plane.v1.ResolveRunActionAuthorityResponse
-	16, // 21: model_plane.v1.RunService.ResolveScheduledStepAuthority:output_type -> model_plane.v1.ResolveScheduledStepAuthorityResponse
-	13, // [13:22] is the sub-list for method output_type
-	4,  // [4:13] is the sub-list for method input_type
-	4,  // [4:4] is the sub-list for extension type_name
-	4,  // [4:4] is the sub-list for extension extendee
-	0,  // [0:4] is the sub-list for field type_name
+	18, // 0: model_plane.v1.ListRunsResponse.runs:type_name -> model_plane.v1.RunDetail
+	21, // 1: model_plane.v1.RunDetail.created_at:type_name -> google.protobuf.Timestamp
+	21, // 2: model_plane.v1.RunDetail.updated_at:type_name -> google.protobuf.Timestamp
+	22, // 3: model_plane.v1.RunDetail.metadata:type_name -> google.protobuf.Struct
+	1,  // 4: model_plane.v1.RunContextPart.state:type_name -> model_plane.v1.RunContextState
+	19, // 5: model_plane.v1.RunContextStatus.instructions:type_name -> model_plane.v1.RunContextPart
+	19, // 6: model_plane.v1.RunContextStatus.history:type_name -> model_plane.v1.RunContextPart
+	19, // 7: model_plane.v1.RunContextStatus.memory:type_name -> model_plane.v1.RunContextPart
+	2,  // 8: model_plane.v1.RunService.GetRun:input_type -> model_plane.v1.GetRunRequest
+	3,  // 9: model_plane.v1.RunService.GetScheduledStepContext:input_type -> model_plane.v1.GetScheduledStepContextRequest
+	5,  // 10: model_plane.v1.RunService.ListRuns:input_type -> model_plane.v1.ListRunsRequest
+	8,  // 11: model_plane.v1.RunService.CancelRun:input_type -> model_plane.v1.CancelRunRequest
+	7,  // 12: model_plane.v1.RunService.ListSystemRuns:input_type -> model_plane.v1.ListSystemRunsRequest
+	10, // 13: model_plane.v1.RunService.ResolveRunOwner:input_type -> model_plane.v1.ResolveRunOwnerRequest
+	12, // 14: model_plane.v1.RunService.ResolveThreadOwner:input_type -> model_plane.v1.ResolveThreadOwnerRequest
+	14, // 15: model_plane.v1.RunService.ResolveRunActionAuthority:input_type -> model_plane.v1.ResolveRunActionAuthorityRequest
+	16, // 16: model_plane.v1.RunService.ResolveScheduledStepAuthority:input_type -> model_plane.v1.ResolveScheduledStepAuthorityRequest
+	18, // 17: model_plane.v1.RunService.GetRun:output_type -> model_plane.v1.RunDetail
+	4,  // 18: model_plane.v1.RunService.GetScheduledStepContext:output_type -> model_plane.v1.ScheduledStepContext
+	6,  // 19: model_plane.v1.RunService.ListRuns:output_type -> model_plane.v1.ListRunsResponse
+	9,  // 20: model_plane.v1.RunService.CancelRun:output_type -> model_plane.v1.CancelRunResponse
+	6,  // 21: model_plane.v1.RunService.ListSystemRuns:output_type -> model_plane.v1.ListRunsResponse
+	11, // 22: model_plane.v1.RunService.ResolveRunOwner:output_type -> model_plane.v1.ResolveRunOwnerResponse
+	13, // 23: model_plane.v1.RunService.ResolveThreadOwner:output_type -> model_plane.v1.ResolveThreadOwnerResponse
+	15, // 24: model_plane.v1.RunService.ResolveRunActionAuthority:output_type -> model_plane.v1.ResolveRunActionAuthorityResponse
+	17, // 25: model_plane.v1.RunService.ResolveScheduledStepAuthority:output_type -> model_plane.v1.ResolveScheduledStepAuthorityResponse
+	17, // [17:26] is the sub-list for method output_type
+	8,  // [8:17] is the sub-list for method input_type
+	8,  // [8:8] is the sub-list for extension type_name
+	8,  // [8:8] is the sub-list for extension extendee
+	0,  // [0:8] is the sub-list for field type_name
 }
 
 func init() { file_model_plane_v1_runs_proto_init() }
@@ -1700,8 +1925,8 @@ func file_model_plane_v1_runs_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_model_plane_v1_runs_proto_rawDesc), len(file_model_plane_v1_runs_proto_rawDesc)),
-			NumEnums:      1,
-			NumMessages:   17,
+			NumEnums:      2,
+			NumMessages:   19,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

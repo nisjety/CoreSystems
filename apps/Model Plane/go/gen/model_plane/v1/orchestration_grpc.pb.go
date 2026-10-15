@@ -22,6 +22,7 @@ const (
 	OrchestrationCoreService_ListPlans_FullMethodName                         = "/model_plane.v1.OrchestrationCoreService/ListPlans"
 	OrchestrationCoreService_GetPlan_FullMethodName                           = "/model_plane.v1.OrchestrationCoreService/GetPlan"
 	OrchestrationCoreService_TransitionPlan_FullMethodName                    = "/model_plane.v1.OrchestrationCoreService/TransitionPlan"
+	OrchestrationCoreService_ProposePlan_FullMethodName                       = "/model_plane.v1.OrchestrationCoreService/ProposePlan"
 	OrchestrationCoreService_ListTodos_FullMethodName                         = "/model_plane.v1.OrchestrationCoreService/ListTodos"
 	OrchestrationCoreService_GetTodo_FullMethodName                           = "/model_plane.v1.OrchestrationCoreService/GetTodo"
 	OrchestrationCoreService_TransitionTodo_FullMethodName                    = "/model_plane.v1.OrchestrationCoreService/TransitionTodo"
@@ -58,6 +59,13 @@ type OrchestrationCoreServiceClient interface {
 	GetPlan(ctx context.Context, in *GetPlanRequest, opts ...grpc.CallOption) (*GetPlanResponse, error)
 	// Transition a plan to a new state. Rejects illegal transitions.
 	TransitionPlan(ctx context.Context, in *TransitionPlanRequest, opts ...grpc.CallOption) (*TransitionPlanResponse, error)
+	// Create a plan directly in PROPOSED state with real steps, supplied by the
+	// model via the `plan.propose` control tool during a plan-mode run
+	// (chat-wave2-specs plan-gate §2.1-2.2). Unlike the zero-step `draft` plan
+	// session-core auto-creates at run start for the retrospective execution
+	// log (`create_plan`), this is the plan a user actually reviews and edits
+	// before granting an autonomy rung.
+	ProposePlan(ctx context.Context, in *ProposePlanRequest, opts ...grpc.CallOption) (*ProposePlanResponse, error)
 	// List todos for a thread (and optionally scoped to a run).
 	ListTodos(ctx context.Context, in *ListTodosRequest, opts ...grpc.CallOption) (*ListTodosResponse, error)
 	// Fetch a single todo by id.
@@ -158,6 +166,16 @@ func (c *orchestrationCoreServiceClient) TransitionPlan(ctx context.Context, in 
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(TransitionPlanResponse)
 	err := c.cc.Invoke(ctx, OrchestrationCoreService_TransitionPlan_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *orchestrationCoreServiceClient) ProposePlan(ctx context.Context, in *ProposePlanRequest, opts ...grpc.CallOption) (*ProposePlanResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ProposePlanResponse)
+	err := c.cc.Invoke(ctx, OrchestrationCoreService_ProposePlan_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -378,6 +396,13 @@ type OrchestrationCoreServiceServer interface {
 	GetPlan(context.Context, *GetPlanRequest) (*GetPlanResponse, error)
 	// Transition a plan to a new state. Rejects illegal transitions.
 	TransitionPlan(context.Context, *TransitionPlanRequest) (*TransitionPlanResponse, error)
+	// Create a plan directly in PROPOSED state with real steps, supplied by the
+	// model via the `plan.propose` control tool during a plan-mode run
+	// (chat-wave2-specs plan-gate §2.1-2.2). Unlike the zero-step `draft` plan
+	// session-core auto-creates at run start for the retrospective execution
+	// log (`create_plan`), this is the plan a user actually reviews and edits
+	// before granting an autonomy rung.
+	ProposePlan(context.Context, *ProposePlanRequest) (*ProposePlanResponse, error)
 	// List todos for a thread (and optionally scoped to a run).
 	ListTodos(context.Context, *ListTodosRequest) (*ListTodosResponse, error)
 	// Fetch a single todo by id.
@@ -462,6 +487,9 @@ func (UnimplementedOrchestrationCoreServiceServer) GetPlan(context.Context, *Get
 }
 func (UnimplementedOrchestrationCoreServiceServer) TransitionPlan(context.Context, *TransitionPlanRequest) (*TransitionPlanResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method TransitionPlan not implemented")
+}
+func (UnimplementedOrchestrationCoreServiceServer) ProposePlan(context.Context, *ProposePlanRequest) (*ProposePlanResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ProposePlan not implemented")
 }
 func (UnimplementedOrchestrationCoreServiceServer) ListTodos(context.Context, *ListTodosRequest) (*ListTodosResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ListTodos not implemented")
@@ -592,6 +620,24 @@ func _OrchestrationCoreService_TransitionPlan_Handler(srv interface{}, ctx conte
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(OrchestrationCoreServiceServer).TransitionPlan(ctx, req.(*TransitionPlanRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _OrchestrationCoreService_ProposePlan_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ProposePlanRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(OrchestrationCoreServiceServer).ProposePlan(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: OrchestrationCoreService_ProposePlan_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(OrchestrationCoreServiceServer).ProposePlan(ctx, req.(*ProposePlanRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -949,6 +995,10 @@ var OrchestrationCoreService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "TransitionPlan",
 			Handler:    _OrchestrationCoreService_TransitionPlan_Handler,
+		},
+		{
+			MethodName: "ProposePlan",
+			Handler:    _OrchestrationCoreService_ProposePlan_Handler,
 		},
 		{
 			MethodName: "ListTodos",

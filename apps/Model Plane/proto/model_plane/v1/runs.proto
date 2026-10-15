@@ -311,3 +311,48 @@ message RunDetail {
   // Arbitrary metadata.
   google.protobuf.Struct metadata = 16;
 }
+
+// --- Run context (build plan WS02 S4) ---
+//
+// What a Do/Plan/scheduled run was actually started with. The gateway composes
+// the run context (authored instructions, bounded prior turns, memory block)
+// and stamps this status on the run record so a reviewer can see, per part,
+// whether it was included. Counts and closed tokens only: never content.
+
+// How one part of a run's context was assembled.
+enum RunContextState {
+  // Not stated (an older gateway).
+  RUN_CONTEXT_STATE_UNSPECIFIED = 0;
+  // Included in full.
+  RUN_CONTEXT_STATE_INCLUDED = 1;
+  // Included, but cut to a cap; see `omitted`.
+  RUN_CONTEXT_STATE_TRUNCATED = 2;
+  // Nothing to include (no instructions authored, no prior turns, no memory).
+  RUN_CONTEXT_STATE_EMPTY = 3;
+  // Withheld by policy (zero data retention, memory paused or off, Space scope).
+  RUN_CONTEXT_STATE_SKIPPED_BY_POLICY = 4;
+  // Could not be assembled (the loader failed or timed out); the run proceeds without it.
+  RUN_CONTEXT_STATE_UNAVAILABLE = 5;
+}
+
+// The assembly outcome of one part of the run context.
+message RunContextPart {
+  // How the part was assembled.
+  RunContextState state = 1;
+  // Items included (the unit is part specific: messages for history).
+  uint32 included = 2;
+  // Items left out by a cap.
+  uint32 omitted = 3;
+  // A closed token (for example "zdr", "memory_off", "cap"); never content.
+  string reason = 4;
+}
+
+// How a run's context was assembled, per part. Counts and closed tokens only.
+message RunContextStatus {
+  // The composed authored instructions (platform, org, Space, persona).
+  RunContextPart instructions = 1;
+  // The bounded prior turns of the thread.
+  RunContextPart history = 2;
+  // The prefetched memory block.
+  RunContextPart memory = 3;
+}
