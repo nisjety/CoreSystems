@@ -59,6 +59,9 @@ type Config struct {
 	// but short enough that the map doesn't grow unbounded across
 	// long-running orchestrator processes.
 	EntryTTL time.Duration
+	// CrawlLimits bounds every crawl's pages and depth (see limits.go). The
+	// zero value means "use the built-in defaults", never "unbounded".
+	CrawlLimits CrawlLimits
 }
 
 // dispatchEntry tracks state for one job ID inside the dispatcher's
@@ -102,6 +105,9 @@ func New(c client.Client, cfg Config) *Manager {
 	}
 	if cfg.EntryTTL <= 0 {
 		cfg.EntryTTL = time.Hour
+	}
+	if cfg.CrawlLimits == (CrawlLimits{}) {
+		cfg.CrawlLimits = DefaultCrawlLimits()
 	}
 	return &Manager{
 		temporal: c,
@@ -275,7 +281,7 @@ func (m *Manager) dispatch(ctx context.Context, j job) error {
 		}
 		we, err = m.temporal.ExecuteWorkflow(ctx, startOpts, "ScrapeJobWF", in)
 	case "crawl":
-		in, ierr := crawlInputFromJob(j, runID)
+		in, ierr := crawlInputFromJob(j, runID, m.cfg.CrawlLimits)
 		if ierr != nil {
 			return ierr
 		}
@@ -429,7 +435,7 @@ func scrapeInputFromJob(j job, runID string) (workflows.ScrapeJobInput, error) {
 	}, nil
 }
 
-func crawlInputFromJob(j job, runID string) (workflows.CrawlJobInput, error) {
+func crawlInputFromJob(j job, runID string, limits CrawlLimits) (workflows.CrawlJobInput, error) {
 	// Accept either a single `url` (verevon onboarding) or an array of
 	// `seeds` (richer callers).
 	seeds := stringsFrom(j.Params["seeds"])
@@ -441,6 +447,10 @@ func crawlInputFromJob(j job, runID string) (workflows.CrawlJobInput, error) {
 	if len(seeds) == 0 {
 		return workflows.CrawlJobInput{}, errors.New("crawl job missing params.url or params.seeds")
 	}
+	// Bound the crawl here as well as at the edge: a job row written before the
+	// edge resolved limits (or one created straight in control) can carry a zero
+	// or a huge value, and zero used to mean "unlimited".
+	resolved := limits.Resolve(uintFrom(j.Params["max_pages"]), uintFrom(j.Params["max_depth"]))
 	return workflows.CrawlJobInput{
 		UserID:   userFromParams(j.Params),
 		Ingest:   ingestFromParams(j.Params),
@@ -448,8 +458,8 @@ func crawlInputFromJob(j job, runID string) (workflows.CrawlJobInput, error) {
 		JobID:    string(j.ID),
 		OrgID:    orgFromParams(j.Params),
 		Seeds:    seeds,
-		MaxDepth: uintFrom(j.Params["max_depth"]),
-		MaxPages: uintFrom(j.Params["max_pages"]),
+		MaxDepth: resolved.Depth,
+		MaxPages: resolved.Pages,
 	}, nil
 }
 

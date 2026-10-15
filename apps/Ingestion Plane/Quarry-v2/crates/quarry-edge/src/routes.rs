@@ -596,6 +596,12 @@ async fn crawl_handoff(
     refuse_durable_job_under_zdr(&claims, req.zdr, &request_id, "crawl")?;
     let org_id = claims.org_id.clone();
 
+    // Every crawl is bounded: an absent or zero page limit takes the default
+    // (zero used to mean unlimited) and a request above the ceiling is clamped.
+    // The resolved values are what the orchestrator receives and what the
+    // response reports, so a clamp is never silent.
+    let limits = crate::limits::crawl_limits().resolve(req.max_pages, req.max_depth);
+
     // Cycle 19 / cluster #19: emit HostDiscovered for autocomplete-core
     // consumption when this seed URL introduces a brand-new host. The
     // event carries the verified org_id so downstream consumers can
@@ -612,7 +618,7 @@ async fn crawl_handoff(
                     serde_json::json!({
                         "host": host,
                         "seed_url": req.url,
-                        "max_pages": req.max_pages,
+                        "max_pages": limits.max_pages.effective,
                         "org_id": org_id,
                         "user_id": claims.user_id,
                     }),
@@ -630,8 +636,10 @@ async fn crawl_handoff(
         serde_json::json!({
             "kind": "crawl",
             "url": req.url,
-            "max_pages": req.max_pages,
-            "max_depth": req.max_depth,
+            "max_pages": limits.max_pages.effective,
+            "max_depth": limits.max_depth.effective,
+            "max_pages_requested": req.max_pages,
+            "max_depth_requested": req.max_depth,
             "org_id": org_id,
             "user_id": claims.user_id,
             "ingest": req.ingest,
@@ -653,12 +661,15 @@ async fn crawl_handoff(
             serde_json::json!({
                 "user_id": claims.user_id,
                 "url": req.url,
-                "max_pages": req.max_pages,
+                "max_pages": limits.max_pages.effective,
             }),
         ))
         .await;
     match ack {
-        Ok(v) => Ok(Json(Envelope::ok(request_id, v))),
+        Ok(mut v) => {
+            v.limits = Some(limits);
+            Ok(Json(Envelope::ok(request_id, v)))
+        }
         Err(err) => Err((
             StatusCode::from_u16(err.code.http_status()).unwrap_or(StatusCode::BAD_GATEWAY),
             Json(Envelope::<()>::err(&request_id, err)),
@@ -735,6 +746,10 @@ pub struct HandoffAck {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub run_id: Option<String>,
     pub accepted_at: chrono::DateTime<chrono::Utc>,
+    /// The page and depth bounds this crawl will actually run with, and why they
+    /// differ from the request. Set by `/v1/crawl`; absent for other kinds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limits: Option<crate::limits::CrawlLimitsAck>,
 }
 
 /// Internal endpoint called by orchestrator activities.

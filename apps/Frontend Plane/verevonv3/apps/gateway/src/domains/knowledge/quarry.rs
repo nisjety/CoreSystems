@@ -297,6 +297,10 @@ pub(super) async fn start_crawl(
             "/data/acceptedAt",
         ]),
         "eventStream": format!("/api/v1/knowledge/jobs/{}/events", job_id),
+        // The bounds the crawl will actually run with and why they differ from
+        // the request (an absent or zero page limit takes the default; a value
+        // above the ceiling is clamped). Surfaced so a clamp is never silent.
+        "limits": resp.pointer("/data/limits").cloned().unwrap_or(Value::Null),
         "upstream": resp,
     });
 
@@ -697,6 +701,57 @@ fn crawl_job_status(value: &Value) -> Option<&str> {
 #[allow(clippy::items_after_test_module)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn start_crawl_exposes_upstream_limits() {
+        use wiremock::matchers::{method as wm_method, path as wm_path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let quarry = MockServer::start().await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/v1/crawl"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {
+                    "job_id": "job_1",
+                    "accepted_at": "2026-01-01T00:00:00Z",
+                    "limits": {
+                        "max_pages": { "requested": 0, "effective": 1000, "clamped_by": ["default"] },
+                        "max_depth": { "requested": null, "effective": 5, "clamped_by": ["default"] }
+                    }
+                }
+            })))
+            .mount(&quarry)
+            .await;
+        let mut state = crate::tests::test_state(false);
+        state.quarry_edge_url = quarry.uri();
+        let user = AuthenticatedUser {
+            user_id: "user-1".to_owned(),
+            user_email: "user@example.invalid".to_owned(),
+            user_name: "User".to_owned(),
+            user_image: None,
+            email_verified: true,
+            auth_role: Some("member".to_owned()),
+            active_org_id: Some("org-1".to_owned()),
+            authorized_membership: None,
+        };
+
+        let response = start_crawl(
+            State(state),
+            Extension(user),
+            HeaderMap::new(),
+            Json(json!({ "url": "https://example.com/" })),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let value: Value = serde_json::from_slice(&bytes).unwrap();
+        let limits = &value["data"]["limits"];
+        assert_eq!(limits["max_pages"]["effective"], json!(1000));
+        assert_eq!(limits["max_pages"]["clamped_by"], json!(["default"]));
+        assert_eq!(limits["max_depth"]["effective"], json!(5));
+    }
 
     #[test]
     fn build_scrape_preview_uses_extract_markdown_for_artifact_output() {

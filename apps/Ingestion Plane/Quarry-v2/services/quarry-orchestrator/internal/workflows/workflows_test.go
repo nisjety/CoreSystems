@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 	"go.temporal.io/sdk/testsuite"
+	"go.temporal.io/sdk/workflow"
 
 	"github.com/triodelab/quarry-v2/pkg/quarrycontracts"
 	"github.com/triodelab/quarry-v2/services/quarry-orchestrator/internal/activities"
@@ -440,4 +441,141 @@ func intStr(n int) string {
 		buf[i] = '-'
 	}
 	return string(buf[i:])
+}
+
+// A zero MaxPages used to mean "unlimited". Executions started now are bounded
+// by the fallback cap whatever the input says, and the run reports why it ended.
+func TestCrawlJobWF_ZeroMaxPagesFallsBackToCap(t *testing.T) {
+	env, a := newEnv(t)
+
+	var counter int
+	env.OnActivity(a.RunPage, mock.Anything, mock.Anything).Return(
+		func(_ context.Context, _ activities.RunPageInput) (activities.RunPageResult, error) {
+			counter++
+			// Endless fresh links: only the bound can stop this crawl.
+			return activities.RunPageResult{
+				Status:      200,
+				Fingerprint: "blake3:fp",
+				Links:       []string{"https://crawl.example/p" + intStr(counter)},
+			}, nil
+		},
+	)
+	env.OnActivity(a.EmitEvent, mock.Anything, mock.Anything, mock.Anything).Return(nil)
+	env.OnActivity(a.Checkpoint, mock.Anything, mock.Anything).Return(nil)
+
+	env.ExecuteWorkflow(CrawlJobWF, CrawlJobInput{
+		RunID:    "run_zero_pages",
+		Seeds:    []string{"https://crawl.example/seed"},
+		MaxDepth: 100000, // depth is not the limiter here
+		MaxPages: 0,
+	}, a)
+
+	require.True(t, env.IsWorkflowCompleted())
+	require.NoError(t, env.GetWorkflowError())
+	require.Equal(t, int(workflowFallbackMaxPages), counter,
+		"a zero MaxPages must stop at the fallback cap, visited %d", counter)
+}
+
+// Failed pages count toward the same bound, so a site that fails every page
+// cannot be walked indefinitely, and the terminal reason says so.
+func TestCrawlJobWF_FailuresCountTowardCap(t *testing.T) {
+	env, a := newEnv(t)
+
+	// The activity is retried by its retry policy, so count distinct pages.
+	seen := map[string]struct{}{}
+	env.OnActivity(a.RunPage, mock.Anything, mock.Anything).Return(
+		func(_ context.Context, in activities.RunPageInput) (activities.RunPageResult, error) {
+			seen[in.URL] = struct{}{}
+			return activities.RunPageResult{}, errors.New("blocked")
+		},
+	)
+	var completed map[string]any
+	env.OnActivity(a.EmitEvent, mock.Anything, mock.Anything, mock.Anything).Return(
+		func(_ context.Context, _ string, evt quarrycontracts.Event) error {
+			if evt.Type == quarrycontracts.EvtRunCompleted {
+				completed = evt.Payload
+			}
+			return nil
+		},
+	)
+	env.OnActivity(a.Checkpoint, mock.Anything, mock.Anything).Return(nil)
+
+	seeds := make([]string, 0, 20)
+	for i := 0; i < 20; i++ {
+		seeds = append(seeds, "https://crawl.example/seed"+intStr(i))
+	}
+	env.ExecuteWorkflow(CrawlJobWF, CrawlJobInput{
+		RunID:    "run_failures",
+		Seeds:    seeds,
+		MaxDepth: 2,
+		MaxPages: 3,
+	}, a)
+
+	require.True(t, env.IsWorkflowCompleted())
+	require.NoError(t, env.GetWorkflowError())
+	require.Len(t, seen, 3, "three failed pages reach the bound of 3")
+	require.NotNil(t, completed)
+	require.Equal(t, crawlStopMaxFailures, completed["reason"])
+}
+
+func TestCrawlJobWF_ZeroMaxDepthFallsBackToDepthCap(t *testing.T) {
+	env, a := newEnv(t)
+
+	var visits int
+	env.OnActivity(a.RunPage, mock.Anything, mock.Anything).Return(
+		func(_ context.Context, _ activities.RunPageInput) (activities.RunPageResult, error) {
+			visits++
+			// A single endless chain: each page links to one deeper page.
+			return activities.RunPageResult{
+				Status:      200,
+				Fingerprint: "blake3:fp",
+				Links:       []string{"https://crawl.example/deeper" + intStr(visits)},
+			}, nil
+		},
+	)
+	env.OnActivity(a.EmitEvent, mock.Anything, mock.Anything, mock.Anything).Return(nil)
+	env.OnActivity(a.Checkpoint, mock.Anything, mock.Anything).Return(nil)
+
+	env.ExecuteWorkflow(CrawlJobWF, CrawlJobInput{
+		RunID:    "run_zero_depth",
+		Seeds:    []string{"https://crawl.example/seed"},
+		MaxDepth: 0,
+		MaxPages: 500,
+	}, a)
+
+	require.True(t, env.IsWorkflowCompleted())
+	require.NoError(t, env.GetWorkflowError())
+	// Depth 0 (the seed) plus one page per level up to the fallback depth.
+	require.Equal(t, int(workflowFallbackMaxDepth)+1, visits)
+}
+
+// An execution that started before the version marker replays with the legacy
+// behaviour: a zero MaxPages is unbounded and failures are not counted.
+func TestCrawlJobWF_OldVersionHistoryKeepsLegacyBehaviour(t *testing.T) {
+	env, a := newEnv(t)
+	env.OnGetVersion("crawl-bounded-v1", workflow.DefaultVersion, 1).Return(workflow.DefaultVersion)
+
+	seen := map[string]struct{}{}
+	env.OnActivity(a.RunPage, mock.Anything, mock.Anything).Return(
+		func(_ context.Context, in activities.RunPageInput) (activities.RunPageResult, error) {
+			seen[in.URL] = struct{}{}
+			return activities.RunPageResult{}, errors.New("blocked")
+		},
+	)
+	env.OnActivity(a.EmitEvent, mock.Anything, mock.Anything, mock.Anything).Return(nil)
+	env.OnActivity(a.Checkpoint, mock.Anything, mock.Anything).Return(nil)
+
+	seeds := make([]string, 0, 8)
+	for i := 0; i < 8; i++ {
+		seeds = append(seeds, "https://crawl.example/seed"+intStr(i))
+	}
+	env.ExecuteWorkflow(CrawlJobWF, CrawlJobInput{
+		RunID:    "run_legacy",
+		Seeds:    seeds,
+		MaxPages: 2,
+	}, a)
+
+	require.True(t, env.IsWorkflowCompleted())
+	require.NoError(t, env.GetWorkflowError())
+	require.Len(t, seen, 8, "the legacy path never counted failures toward the bound")
 }

@@ -142,12 +142,19 @@ func main() {
 	// REST entrypoint verevon's onboarding crawl-preview uses) and
 	// starts the matching Temporal workflow. Without this, ad-hoc jobs
 	// never execute — only scheduled cron jobs would.
+	// An unparsable or disabled bound is a start-up error naming the variable:
+	// a crawl bound that cannot be read must not silently become "no bound".
+	crawlLimits, err := jobs.LoadCrawlLimits()
+	if err != nil {
+		log.Fatal().Err(err).Msg("crawl limits")
+	}
 	jobsMgr := jobs.New(c, jobs.Config{
 		ControlBaseURL:    controlURL,
 		ControlAuthToken:  controlToken,
 		ControlHMACSecret: edgeRunSecret,
 		TaskQueue:         TaskQueue,
 		Interval:          2 * time.Second,
+		CrawlLimits:       crawlLimits,
 	})
 	go jobsMgr.Run(rootCtx)
 

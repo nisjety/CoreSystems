@@ -43,6 +43,7 @@ mod extract_routes;
 mod graphql;
 mod handoff;
 mod internal_auth;
+mod limits;
 mod map_routes;
 mod profile_routes;
 mod queue_routes;
@@ -156,6 +157,9 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let cfg = config::EdgeConfig::from_env()?;
+    // A crawl bound that cannot be read must stop the process here, naming the
+    // variable, rather than silently become "no bound" later.
+    limits::CrawlLimits::from_env().map_err(|e| anyhow::anyhow!("crawl limits: {e}"))?;
     let environment = std::env::var("ENVIRONMENT")
         .or_else(|_| std::env::var("APP_ENV"))
         .unwrap_or_default()

@@ -4299,8 +4299,19 @@ components:
         max_pages:
           type: integer
           nullable: true
-          minimum: 1
-          description: Maximum pages to crawl
+          minimum: 0
+          description: >-
+            Maximum pages to crawl. Absent or 0 takes the default (1000; operator
+            override QUARRY_CRAWL_DEFAULT_MAX_PAGES), never unlimited. A value above
+            the hard ceiling (5000; QUARRY_CRAWL_HARD_MAX_PAGES) is clamped to it. The
+            response reports the effective value in `limits`.
+        max_depth:
+          type: integer
+          nullable: true
+          minimum: 0
+          description: >-
+            Maximum link depth from the seed. Absent or 0 takes the default (5);
+            clamped to the hard ceiling (10). Reported in `limits`.
     BatchRequest:
       type: object
       required:
@@ -4552,6 +4563,37 @@ components:
         accepted_at:
           type: string
           format: date-time
+        limits:
+          type: object
+          description: >-
+            Set by /v1/crawl. The page and depth bounds the crawl will run with and
+            why they differ from the request (`clamped_by` is `default` when the
+            request was absent or zero, `hard` when it was above the ceiling, and
+            empty when it was used as asked).
+          properties:
+            max_pages:
+              $ref: '#/components/schemas/CrawlBound'
+            max_depth:
+              $ref: '#/components/schemas/CrawlBound'
+    CrawlBound:
+      type: object
+      required:
+      - effective
+      - clamped_by
+      properties:
+        requested:
+          type: integer
+          nullable: true
+        effective:
+          type: integer
+          minimum: 1
+        clamped_by:
+          type: array
+          items:
+            type: string
+            enum:
+            - default
+            - hard
     InternalRunPageResult:
       type: object
       required:

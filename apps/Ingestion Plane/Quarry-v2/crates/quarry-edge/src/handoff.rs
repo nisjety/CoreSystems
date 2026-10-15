@@ -99,6 +99,7 @@ pub async fn forward_to_orchestrator(
         job_id: job.id,
         run_id: job.run_id,
         accepted_at: chrono::Utc::now(),
+        limits: None,
     })
 }
 

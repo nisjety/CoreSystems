@@ -397,6 +397,23 @@ func CrawlJobWF(ctx workflow.Context, in CrawlJobInput, a *activities.Activities
 	ctx = workflow.WithActivityOptions(ctx, defaultActivityOpts())
 	ids := runIDs{RunID: in.RunID, JobID: in.JobID}
 
+	// Bounded crawls. Before this version a MaxPages or MaxDepth of zero meant
+	// "unlimited" and failed pages were never counted, so one request could
+	// walk until the workflow timeout. Executions started from now on carry a
+	// finite bound whatever the input says; histories recorded before the
+	// version marker replay with the legacy behaviour. A workflow must not read
+	// the environment, so the fallbacks are constants: the dispatcher normally
+	// resolves the configured values into the input first.
+	bounded := workflow.GetVersion(ctx, "crawl-bounded-v1", workflow.DefaultVersion, 1) >= 1
+	if bounded {
+		if in.MaxPages == 0 {
+			in.MaxPages = workflowFallbackMaxPages
+		}
+		if in.MaxDepth == 0 {
+			in.MaxDepth = workflowFallbackMaxDepth
+		}
+	}
+
 	ctrl, err := installControlHandlers(ctx)
 	if err != nil {
 		return err
@@ -411,7 +428,7 @@ func CrawlJobWF(ctx workflow.Context, in CrawlJobInput, a *activities.Activities
 		return err
 	}
 	if a.DurableFrontier {
-		return crawlJobDurableFrontier(ctx, in, a, ids, ctrl)
+		return crawlJobDurableFrontier(ctx, in, a, ids, ctrl, bounded)
 	}
 
 	visited := map[string]struct{}{}
@@ -428,6 +445,7 @@ func CrawlJobWF(ctx workflow.Context, in CrawlJobInput, a *activities.Activities
 	}
 
 	var pagesVisited, pagesFailed uint32
+	stopReason := ""
 
 	emitPaused := false
 	for len(frontier) > 0 {
@@ -465,6 +483,12 @@ func CrawlJobWF(ctx workflow.Context, in CrawlJobInput, a *activities.Activities
 			pagesFailed++
 			ctrl.progress.Failed = pagesFailed
 			ctrl.progress.Pending = uint32(len(frontier))
+			// Failed pages count toward the same bound as visited ones, so a
+			// site that fails every page cannot be walked indefinitely.
+			if bounded && pagesFailed >= in.MaxPages {
+				stopReason = crawlStopMaxFailures
+				break
+			}
 			continue
 		}
 		pagesVisited++
@@ -505,11 +529,28 @@ func CrawlJobWF(ctx workflow.Context, in CrawlJobInput, a *activities.Activities
 		}, in.RunID, string(quarrycontracts.EvtRunCancelled))
 	}
 
-	return emitEvent(ctx, a, ids, quarrycontracts.EvtRunCompleted, map[string]any{
+	completed := map[string]any{
 		"pages_visited": pagesVisited,
 		"pages_failed":  pagesFailed,
-	}, in.RunID, string(quarrycontracts.EvtRunCompleted))
+	}
+	if stopReason != "" {
+		completed["reason"] = stopReason
+	}
+	return emitEvent(ctx, a, ids, quarrycontracts.EvtRunCompleted, completed,
+		in.RunID, string(quarrycontracts.EvtRunCompleted))
 }
+
+// Fallback bounds used inside the workflow when the input carries none. The
+// dispatcher resolves the operator-configured values (QUARRY_CRAWL_*) into the
+// input before the workflow starts; these constants only cover an input that
+// arrives with a zero, and match the built-in defaults of the jobs package.
+const (
+	workflowFallbackMaxPages uint32 = 1000
+	workflowFallbackMaxDepth uint32 = 5
+	// crawlStopMaxFailures is the terminal reason when failed pages alone
+	// reached the page bound.
+	crawlStopMaxFailures = "max_failures"
+)
 
 // crawlJobDurableFrontier keeps only counters in Temporal workflow state. All
 // URLs/depths/deduplication/in-flight visibility live in the Rust-owned
@@ -521,6 +562,7 @@ func crawlJobDurableFrontier(
 	a *activities.Activities,
 	ids runIDs,
 	ctrl *crawlControl,
+	bounded bool,
 ) error {
 	queueName := durableFrontierQueueName(in.RunID)
 	for _, seed := range in.Seeds {
@@ -535,6 +577,7 @@ func crawlJobDurableFrontier(
 	}
 
 	var pagesVisited, pagesFailed uint32
+	stopReason := ""
 	emitPaused := false
 	for {
 		if ctrl.state == statePaused {
@@ -569,6 +612,9 @@ func crawlJobDurableFrontier(
 		res, pageErr := runPage(ctx, a, ids, in.OrgID, in.UserID, in.Ingest, item.URL)
 		if pageErr != nil {
 			pagesFailed++
+			if bounded && pagesFailed >= in.MaxPages {
+				stopReason = crawlStopMaxFailures
+			}
 		} else {
 			pagesVisited++
 			if in.MaxDepth == 0 || depth+1 <= in.MaxDepth {
@@ -597,6 +643,9 @@ func crawlJobDurableFrontier(
 				RunID: in.RunID, Visited: pagesVisited, Frontier: 0,
 			}).Get(ctx, nil)
 		}
+		if stopReason != "" {
+			break
+		}
 	}
 
 	if ctrl.state == stateCancelled {
@@ -604,9 +653,12 @@ func crawlJobDurableFrontier(
 			"pages_visited": pagesVisited, "pages_failed": pagesFailed,
 		}, in.RunID, string(quarrycontracts.EvtRunCancelled))
 	}
-	return emitEvent(ctx, a, ids, quarrycontracts.EvtRunCompleted, map[string]any{
-		"pages_visited": pagesVisited, "pages_failed": pagesFailed,
-	}, in.RunID, string(quarrycontracts.EvtRunCompleted))
+	completed := map[string]any{"pages_visited": pagesVisited, "pages_failed": pagesFailed}
+	if stopReason != "" {
+		completed["reason"] = stopReason
+	}
+	return emitEvent(ctx, a, ids, quarrycontracts.EvtRunCompleted, completed,
+		in.RunID, string(quarrycontracts.EvtRunCompleted))
 }
 
 func durableFrontierQueueName(runID string) string {
