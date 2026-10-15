@@ -1802,6 +1802,108 @@ async fn a_plan_that_is_not_this_runs_conversation_is_refused_before_anything_is
     assert!(harness.capture.transition_plan.lock().unwrap().is_none());
 }
 
+/// The three bearers of a user, minted the way `AuthFixture::user_tokens` mints them, with the given
+/// retention claims. The middleware verifies them like any other token.
+fn user_tokens_with_retention(
+    org_id: &str,
+    user_id: &str,
+    zdr: bool,
+    org_zdr: bool,
+    waiver: Option<serde_json::Value>,
+) -> UserTokens {
+    let now = token_now();
+    let claims = |audience: &str| {
+        let mut payload = serde_json::json!({
+            "sub": user_id,
+            "iss": TEST_AUTH_ISSUER,
+            "aud": audience,
+            "exp": now + 300,
+            "nbf": now - 5,
+            "org_id": org_id,
+            "user_id": user_id,
+            "principal_type": "user",
+            "zdr": zdr,
+            "org_zdr": org_zdr,
+        });
+        if let Some(waiver) = &waiver {
+            payload["zdr_waiver"] = waiver.clone();
+        }
+        payload
+    };
+    UserTokens {
+        model: encode_test_token(&claims("model-gateway")),
+        session: encode_test_token(&claims("session-core")),
+        execution: encode_test_token(&claims("execution-core")),
+    }
+}
+
+/// Owner decision 17: a ZDR credential is refused at the gateway before any plan is read or decided,
+/// and the refusal is typed. The counting double sees no call.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_zdr_credential_is_refused_before_any_plan_is_read_or_decided() {
+    let harness = plan_gate_harness().await;
+    let tokens = user_tokens_with_retention("org-owner", "owner-user", true, true, None);
+    let (status, body) = post_plan_approval(
+        &harness,
+        "run-owned",
+        &tokens,
+        serde_json::json!({
+            "decision": "approve",
+            "granted_rung": "workspace_write",
+            "justification": "writes the report into the workspace",
+            "plan_id": "plan-7",
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::PRECONDITION_FAILED, "{body}");
+    assert_eq!(
+        body["error"]["code"], "zdr_durable_mutation_forbidden",
+        "{body}"
+    );
+    assert!(
+        harness.capture.plan_calls.lock().unwrap().is_empty(),
+        "no plan was read or decided for a ZDR credential"
+    );
+    assert!(harness.capture.transition_plan.lock().unwrap().is_none());
+    assert_eq!(
+        harness.plan_mode.granted_rung("org-owner", "thread-1"),
+        None
+    );
+}
+
+/// Owner decision 17: a valid waiver is not refused at the gateway. Session Core checks it against the
+/// receipt of the run it would advance, so the decision reaches the owner check and the plan is decided
+/// here only because the stub accepts it. The receipt check itself is pinned in Session Core's tests.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_waiver_is_not_refused_at_the_gateway_so_session_core_checks_its_receipt() {
+    let harness = plan_gate_harness().await;
+    let waiver = serde_json::json!({
+        "version": 1,
+        "provider": mp_contracts::agentic_subscription::PROVIDER_ID,
+        "connection": "conn-1",
+    });
+    let tokens = user_tokens_with_retention("org-owner", "owner-user", false, true, Some(waiver));
+    let (status, body) = post_plan_approval(
+        &harness,
+        "run-owned",
+        &tokens,
+        serde_json::json!({
+            "decision": "approve",
+            "granted_rung": "workspace_write",
+            "justification": "writes the report into the workspace",
+            "plan_id": "plan-7",
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        *harness.capture.plan_calls.lock().unwrap(),
+        vec!["get_plan".to_owned(), "transition_plan".to_owned()]
+    );
+}
+
 #[tokio::test]
 #[serial_test::serial]
 async fn a_plan_the_server_refuses_to_approve_grants_no_authority() {

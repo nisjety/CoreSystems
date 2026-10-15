@@ -26,12 +26,26 @@ use axum::{
     extract::{FromRequestParts, Request},
     http::{request::Parts, HeaderMap, StatusCode},
     middleware::Next,
-    response::Response,
+    response::{IntoResponse, Response},
+    Json,
 };
 use jsonwebtoken::{decode, decode_header, jwk::JwkSet, Algorithm, DecodingKey, Validation};
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 use tracing::{error, warn};
+
+/// The `zdr_waiver` claim: one user connection runs with zero retention off for one turn, because
+/// the user acknowledged that it cannot give it (Z-14). It binds exactly one provider and one
+/// connection, and a version the gateway knows. The resolver refuses it anywhere else.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ZdrWaiverClaim {
+    /// The waiver contract version the issuer minted it under.
+    pub version: u32,
+    /// The provider the waiver binds, spelled exactly as minted.
+    pub provider: String,
+    /// The one user connection the waiver binds.
+    pub connection: String,
+}
 
 /// Claims extracted from a verified JWT. Users carry `user_id`; services carry
 /// a matching `sub`/`service_id`, bounded reason, and no user identity.
@@ -54,8 +68,20 @@ pub struct Claims {
     pub scopes: Vec<String>,
     /// Restrictive zero-retention posture asserted by the verified issuer.
     /// Request bodies may make this stricter, but can never turn it off.
-    #[serde(default)]
+    /// Required, not defaulted: Auth Core stamps it on every plane token, so an
+    /// absent claim means a broken mint and is refused rather than read as
+    /// persistent.
     pub zdr: bool,
+    /// The org's standing zero-retention posture, as the issuer read it when it minted the token:
+    /// `Some(true)` for an org that is ZDR. Absent (`None`) on a service token and on a token minted
+    /// before the claim existed. It is an input to the resolver only, never a decision on its own
+    /// (see `zdr_posture`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub org_zdr: Option<bool>,
+    /// The connection-bound waiver of zero retention, when the issuer minted one for this turn (see
+    /// [`ZdrWaiverClaim`]). Absent on every token that does not waive ZDR for a connection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub zdr_waiver: Option<ZdrWaiverClaim>,
     /// Sovereign-infrastructure posture asserted by the verified issuer: this
     /// principal's content may only be processed on sovereign (currently
     /// Norwegian) infrastructure. A distinct axis from [`Self::zdr`] — ZDR is
@@ -538,16 +564,10 @@ impl Claims {
         self.scopes.iter().any(|s| s == scope)
     }
 
-    /// Combine issuer-asserted and request-selected ZDR monotonically.
-    #[must_use]
-    pub const fn effective_zdr(&self, request_zdr: bool) -> bool {
-        self.zdr || request_zdr
-    }
-
     /// The sovereignty posture to put on a Data Plane v2 `RetrieveRequest`,
     /// combining this token's signed claim with whatever the caller declared
-    /// for one request. Sibling of [`Self::effective_zdr`] for the other
-    /// privacy axis; the merge rules live in
+    /// for one request. The retention axis is `zdr_posture::decide_for`; this is
+    /// its sibling for the other privacy axis. The merge rules live in
     /// [`mp_contracts::dataplane_posture::effective_sovereign_required`].
     #[must_use]
     pub const fn effective_sovereign_required(&self, requested: Option<bool>) -> bool {
@@ -748,6 +768,9 @@ pub async fn warm_jwks() -> anyhow::Result<()> {
         .map_err(|status| anyhow::anyhow!("initial Auth Core JWKS fetch failed: {status}"))
 }
 
+/// The bypass asserts no retention posture of its own. It stands for the
+/// persistent (non-ZDR) posture, so a ZDR delegate for the same identity is
+/// refused under it instead of being served as persistent.
 fn dev_bypass_claims(headers: &HeaderMap) -> Claims {
     let user_id = header_string(headers, "x-user-id", "user_placeholder");
     let org_id = header_string(headers, "x-org-id", "org_placeholder");
@@ -762,6 +785,8 @@ fn dev_bypass_claims(headers: &HeaderMap) -> Claims {
         scopes: Vec::new(),
         zdr: false,
         sovereign: None,
+        org_zdr: None,
+        zdr_waiver: None,
         principal_type: Some("user".to_owned()),
         service_id: None,
         reason: None,
@@ -781,7 +806,7 @@ fn header_string(headers: &HeaderMap, name: &'static str, fallback: &'static str
 async fn verify_delegated_data_plane_bearer(
     headers: &HeaderMap,
     model_claims: &Claims,
-) -> Result<Option<VerifiedDataPlaneBearer>, StatusCode> {
+) -> Result<Option<VerifiedDataPlaneBearer>, AuthRejection> {
     verify_delegated_user_bearer(
         headers,
         "x-data-plane-authorization",
@@ -796,7 +821,7 @@ async fn verify_delegated_data_plane_bearer(
 async fn verify_delegated_ingestion_bearer(
     headers: &HeaderMap,
     model_claims: &Claims,
-) -> Result<Option<VerifiedIngestionBearer>, StatusCode> {
+) -> Result<Option<VerifiedIngestionBearer>, AuthRejection> {
     verify_delegated_user_bearer(
         headers,
         "x-ingestion-authorization",
@@ -811,7 +836,7 @@ async fn verify_delegated_ingestion_bearer(
 async fn verify_delegated_capability_bearer(
     headers: &HeaderMap,
     model_claims: &Claims,
-) -> Result<Option<VerifiedCapabilityBearer>, StatusCode> {
+) -> Result<Option<VerifiedCapabilityBearer>, AuthRejection> {
     verify_delegated_user_bearer(
         headers,
         "x-capability-authorization",
@@ -826,7 +851,7 @@ async fn verify_delegated_capability_bearer(
 async fn verify_delegated_cost_bearer(
     headers: &HeaderMap,
     model_claims: &Claims,
-) -> Result<Option<VerifiedCostBearer>, StatusCode> {
+) -> Result<Option<VerifiedCostBearer>, AuthRejection> {
     verify_delegated_user_bearer(
         headers,
         "x-cost-authorization",
@@ -841,7 +866,7 @@ async fn verify_delegated_cost_bearer(
 async fn verify_delegated_session_bearer(
     headers: &HeaderMap,
     model_claims: &Claims,
-) -> Result<Option<VerifiedSessionBearer>, StatusCode> {
+) -> Result<Option<VerifiedSessionBearer>, AuthRejection> {
     verify_delegated_user_bearer(
         headers,
         "x-session-authorization",
@@ -887,7 +912,7 @@ async fn verify_delegated_service_session_bearer(
 async fn verify_delegated_inference_bearer(
     headers: &HeaderMap,
     model_claims: &Claims,
-) -> Result<Option<VerifiedInferenceBearer>, StatusCode> {
+) -> Result<Option<VerifiedInferenceBearer>, AuthRejection> {
     verify_delegated_user_bearer(
         headers,
         "x-inference-authorization",
@@ -902,7 +927,7 @@ async fn verify_delegated_inference_bearer(
 async fn verify_delegated_execution_bearer(
     headers: &HeaderMap,
     model_claims: &Claims,
-) -> Result<Option<VerifiedExecutionBearer>, StatusCode> {
+) -> Result<Option<VerifiedExecutionBearer>, AuthRejection> {
     verify_delegated_user_bearer(
         headers,
         "x-execution-authorization",
@@ -917,7 +942,7 @@ async fn verify_delegated_execution_bearer(
 async fn verify_delegated_browser_bearer(
     headers: &HeaderMap,
     model_claims: &Claims,
-) -> Result<Option<VerifiedBrowserBearer>, StatusCode> {
+) -> Result<Option<VerifiedBrowserBearer>, AuthRejection> {
     verify_delegated_user_bearer(
         headers,
         "x-browser-authorization",
@@ -932,7 +957,7 @@ async fn verify_delegated_browser_bearer(
 async fn verify_delegated_sandbox_bearer(
     headers: &HeaderMap,
     model_claims: &Claims,
-) -> Result<Option<VerifiedSandboxBearer>, StatusCode> {
+) -> Result<Option<VerifiedSandboxBearer>, AuthRejection> {
     verify_delegated_user_bearer(
         headers,
         "x-sandbox-authorization",
@@ -950,7 +975,7 @@ async fn verify_delegated_user_bearer(
     audience_env: &'static str,
     default_audience: &'static str,
     model_claims: &Claims,
-) -> Result<Option<String>, StatusCode> {
+) -> Result<Option<String>, AuthRejection> {
     let Some((token, claims)) =
         decode_delegated_bearer(headers, header_name, audience_env, default_audience).await?
     else {
@@ -961,7 +986,19 @@ async fn verify_delegated_user_bearer(
         || claims.user_id != model_claims.user_id
         || claims.org_id != model_claims.org_id
     {
-        return Err(StatusCode::FORBIDDEN);
+        return Err(StatusCode::FORBIDDEN.into());
+    }
+    // Every user bearer of one turn carries the ingress token's retention
+    // posture, waiver included. Auth Core mints them from one org decision, so a
+    // bearer that says otherwise is a mixed set: a plane that reads only its own
+    // claim would treat ZDR content as persistent. Refused fail closed, with the
+    // typed body. The resolver (`zdr_posture`) makes the same check again.
+    if claims.zdr != model_claims.zdr || claims.zdr_waiver != model_claims.zdr_waiver {
+        warn!(
+            audience = default_audience,
+            "delegated user bearer retention posture differs from the ingress token"
+        );
+        return Err(AuthRejection::ZdrPostureMismatch);
     }
     Ok(Some(token))
 }
@@ -1042,6 +1079,36 @@ async fn decode_delegated_bearer(
     Ok(Some((token.to_owned(), claims)))
 }
 
+/// Why a request's bearer set was refused. Every refusal is a bare status except
+/// one: a delegated user bearer whose retention posture differs from the ingress
+/// token. That refusal carries a typed body (`zdr_posture_mismatch`), so a caller
+/// can tell it from an ordinary 403: a fresh mint can clear it, because Auth
+/// Core's org posture can change between two mints a second apart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuthRejection {
+    Status(StatusCode),
+    ZdrPostureMismatch,
+}
+
+impl From<StatusCode> for AuthRejection {
+    fn from(status: StatusCode) -> Self {
+        Self::Status(status)
+    }
+}
+
+impl IntoResponse for AuthRejection {
+    fn into_response(self) -> Response {
+        match self {
+            Self::Status(status) => status.into_response(),
+            Self::ZdrPostureMismatch => (
+                StatusCode::FORBIDDEN,
+                Json(mp_contracts::zdr_refusal::Refusal::POSTURE_MISMATCH.json_body()),
+            )
+                .into_response(),
+        }
+    }
+}
+
 /// Axum middleware that verifies a Bearer JWT and injects [`Claims`].
 ///
 /// # Errors
@@ -1051,7 +1118,7 @@ async fn decode_delegated_bearer(
 /// - [`StatusCode::INTERNAL_SERVER_ERROR`] when JWKS cannot be fetched or the
 ///   JWK cannot be materialised into a decoding key.
 #[allow(clippy::too_many_lines)]
-pub async fn require_auth(mut req: Request, next: Next) -> Result<Response, StatusCode> {
+pub async fn require_auth(mut req: Request, next: Next) -> Result<Response, AuthRejection> {
     let header = req
         .headers()
         .get("authorization")
@@ -1063,7 +1130,7 @@ pub async fn require_auth(mut req: Request, next: Next) -> Result<Response, Stat
 
     let Some(token) = header else {
         warn!("missing or invalid Authorization header");
-        return Err(StatusCode::UNAUTHORIZED);
+        return Err(StatusCode::UNAUTHORIZED.into());
     };
 
     if dev_bypass_enabled() {
@@ -1129,7 +1196,7 @@ pub async fn require_auth(mut req: Request, next: Next) -> Result<Response, Stat
     // Pin algorithm — blocks alg-confusion (e.g. `none`, HS256 against public key).
     if jwt_header.alg != Algorithm::RS256 {
         warn!(alg = ?jwt_header.alg, "unsupported JWT algorithm");
-        return Err(StatusCode::UNAUTHORIZED);
+        return Err(StatusCode::UNAUTHORIZED.into());
     }
 
     let kid = jwt_header.kid.ok_or_else(|| {
@@ -1185,7 +1252,7 @@ pub async fn require_auth(mut req: Request, next: Next) -> Result<Response, Stat
 
     if token_data.claims.org_id.is_empty() {
         warn!("JWT claims missing org_id");
-        return Err(StatusCode::UNAUTHORIZED);
+        return Err(StatusCode::UNAUTHORIZED.into());
     }
 
     let principal_kind = token_data.claims.principal_kind().inspect_err(|_| {
@@ -1227,7 +1294,7 @@ pub async fn require_auth(mut req: Request, next: Next) -> Result<Response, Stat
                 warn!(
                     "service principal supplied an unauthorized or ambiguous downstream delegation"
                 );
-                return Err(StatusCode::FORBIDDEN);
+                return Err(StatusCode::FORBIDDEN.into());
             }
             let inference_bearer =
                 verify_delegated_service_inference_bearer(req.headers(), &token_data.claims)
@@ -1473,6 +1540,8 @@ mod tests {
             scopes: Vec::new(),
             zdr: false,
             sovereign: None,
+            org_zdr: None,
+            zdr_waiver: None,
             principal_type: Some("user".to_owned()),
             service_id: None,
             reason: None,
@@ -1503,6 +1572,8 @@ mod tests {
             scopes: vec!["models:read".into(), "models:invoke".into()],
             zdr: false,
             sovereign: None,
+            org_zdr: None,
+            zdr_waiver: None,
             principal_type: Some("user".to_owned()),
             service_id: None,
             reason: None,
@@ -1543,6 +1614,8 @@ mod tests {
             scopes: Vec::new(),
             zdr: false,
             sovereign: None,
+            org_zdr: None,
+            zdr_waiver: None,
             principal_type: Some("user".to_owned()),
             service_id: None,
             reason: None,
@@ -2532,6 +2605,8 @@ mod tests {
             scopes: Vec::new(),
             zdr: false,
             sovereign: None,
+            org_zdr: None,
+            zdr_waiver: None,
             principal_type: Some("user".to_owned()),
             service_id: None,
             reason: None,
@@ -2809,6 +2884,8 @@ mod tests {
                 scopes: scopes.iter().map(|scope| (*scope).to_owned()).collect(),
                 zdr: false,
                 sovereign: None,
+                org_zdr: None,
+                zdr_waiver: None,
                 principal_type: Some("service".to_owned()),
                 service_id: Some(service_id.to_owned()),
                 reason: Some("execute Control-authorized Space deletion".to_owned()),
@@ -2883,6 +2960,8 @@ mod tests {
                 scopes: scopes.iter().map(|scope| (*scope).to_owned()).collect(),
                 zdr: false,
                 sovereign: None,
+                org_zdr: None,
+                zdr_waiver: None,
                 principal_type: Some("service".to_owned()),
                 service_id: Some(service_id.to_owned()),
                 reason: Some("prepare a mail-task-origin thread".to_owned()),
@@ -2937,5 +3016,289 @@ mod tests {
                 .unwrap();
             assert_eq!(response.status(), StatusCode::FORBIDDEN);
         }
+    }
+
+    // ---------------------------------------------------------------------
+    // Z-01: the zdr claim is required, and every user bearer of one turn
+    // carries the ingress token's retention posture. The user body is the one
+    // Auth Core really mints (tests/fixtures/auth-core, pinned by its .sha256
+    // and by scripts/tests/zdr-contract-sync.test.sh).
+    // ---------------------------------------------------------------------
+
+    const AUTH_CORE_GOLDEN: &str =
+        include_str!("../tests/fixtures/auth-core/quarry-token-claims.golden.json");
+    const AUTH_CORE_GOLDEN_PIN: &str =
+        include_str!("../tests/fixtures/auth-core/quarry-token-claims.golden.sha256");
+
+    /// The nine delegated user bearers, each with the audience it is minted for.
+    const DELEGATED_USER_BEARERS: [(&str, &str); 9] = [
+        ("x-data-plane-authorization", "data-plane"),
+        ("x-ingestion-authorization", "ingestion"),
+        ("x-capability-authorization", "capability-core"),
+        ("x-cost-authorization", "cost-core"),
+        ("x-session-authorization", "session-core"),
+        ("x-inference-authorization", "inference-core"),
+        ("x-execution-authorization", "execution-core"),
+        ("x-browser-authorization", "browser-broker"),
+        ("x-sandbox-authorization", "sandbox-manager"),
+    ];
+
+    /// The user claims Auth Core really minted for one golden case, with the
+    /// time claims stamped the way the consumer stamps them and the audience
+    /// set by the test.
+    fn minted_user_claims(case: &str, audience: &str) -> serde_json::Value {
+        let golden: serde_json::Value =
+            serde_json::from_str(AUTH_CORE_GOLDEN).expect("golden JSON parses");
+        let mut claims = golden["cases"][case]["claims"].clone();
+        let now = now_secs();
+        claims["aud"] = serde_json::json!(audience);
+        claims["iat"] = serde_json::json!(now);
+        claims["nbf"] = serde_json::json!(now - 5);
+        claims["exp"] = serde_json::json!(now + 300);
+        claims
+    }
+
+    fn with_zdr(mut claims: serde_json::Value, zdr: bool) -> serde_json::Value {
+        claims["zdr"] = serde_json::json!(zdr);
+        claims
+    }
+
+    /// Clear the environment and serve the test key under `kid` from a JWKS.
+    /// The issuer is the one the golden was minted under.
+    async fn configure_real_verification(kid: &str) -> wiremock::MockServer {
+        clear_env();
+        reset_jwks_cache_for_test().await;
+        let server = start_jwks_mock(kid).await;
+        let issuer = minted_user_claims("user_in_standard_org", "model-gateway")["iss"]
+            .as_str()
+            .expect("golden issuer")
+            .to_owned();
+        std::env::set_var(
+            "AUTH_CORE_JWKS_URL",
+            format!("{}/.well-known/jwks.json", server.uri()),
+        );
+        std::env::set_var("AUTH_CORE_AUDIENCE", "model-gateway");
+        std::env::set_var("AUTH_CORE_ISSUER", issuer);
+        server
+    }
+
+    /// One request through the real `require_auth` with the given headers.
+    async fn send_with_headers(headers: &[(&str, String)]) -> (StatusCode, serde_json::Value) {
+        let mut request = HttpRequest::builder().uri("/");
+        for (name, value) in headers {
+            request = request.header(*name, value.as_str());
+        }
+        let response = Router::new()
+            .route("/", get(|| async { "ok" }))
+            .layer(middleware::from_fn(require_auth))
+            .oneshot(request.body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        (
+            status,
+            serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null),
+        )
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn zdr_claim_is_required_for_a_user_token() {
+        let kid = "test-kid-zdr-required";
+        let _server = configure_real_verification(kid).await;
+
+        let mut without_claim = minted_user_claims("user_in_standard_org", "model-gateway");
+        without_claim
+            .as_object_mut()
+            .expect("claims object")
+            .remove("zdr");
+        assert_eq!(
+            send_with_token(&sign_test_jwt(&without_claim, kid)).await,
+            StatusCode::UNAUTHORIZED,
+            "a user token without the zdr claim must not be read as persistent"
+        );
+
+        let with_claim = minted_user_claims("user_in_standard_org", "model-gateway");
+        assert_eq!(
+            send_with_token(&sign_test_jwt(&with_claim, kid)).await,
+            StatusCode::OK,
+            "the same real body with the claim present is accepted"
+        );
+        clear_env();
+    }
+
+    #[test]
+    fn claims_struct_requires_the_zdr_field() {
+        let mut without_claim = minted_user_claims("user_in_standard_org", "model-gateway");
+        without_claim
+            .as_object_mut()
+            .expect("claims object")
+            .remove("zdr");
+        assert!(serde_json::from_value::<Claims>(without_claim).is_err());
+
+        let minted: Claims =
+            serde_json::from_value(minted_user_claims("user_in_zdr_org", "model-gateway"))
+                .expect("the real mint parses");
+        assert!(minted.zdr);
+    }
+
+    #[test]
+    fn vendored_auth_core_golden_matches_its_pin_and_both_postures() {
+        use sha2::{Digest, Sha256};
+        let digest: String = Sha256::digest(AUTH_CORE_GOLDEN.as_bytes())
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        assert_eq!(
+            AUTH_CORE_GOLDEN_PIN.split_whitespace().next(),
+            Some(digest.as_str())
+        );
+        assert_eq!(
+            minted_user_claims("user_in_standard_org", "model-gateway")["zdr"],
+            serde_json::json!(false)
+        );
+        assert_eq!(
+            minted_user_claims("user_in_zdr_org", "model-gateway")["zdr"],
+            serde_json::json!(true)
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn delegated_user_bearers_refuse_a_different_retention_posture() {
+        let kid = "test-kid-zdr-posture-mismatch";
+        let _server = configure_real_verification(kid).await;
+        // Same user and tenant on both sides, so only the posture differs.
+        for ingress_zdr in [false, true] {
+            let ingress = sign_test_jwt(
+                &with_zdr(
+                    minted_user_claims("user_in_standard_org", "model-gateway"),
+                    ingress_zdr,
+                ),
+                kid,
+            );
+            for (header, audience) in DELEGATED_USER_BEARERS {
+                let delegate = sign_test_jwt(
+                    &with_zdr(
+                        minted_user_claims("user_in_standard_org", audience),
+                        !ingress_zdr,
+                    ),
+                    kid,
+                );
+                let (status, body) = send_with_headers(&[
+                    ("authorization", format!("Bearer {ingress}")),
+                    (header, format!("Bearer {delegate}")),
+                ])
+                .await;
+                assert_eq!(
+                    status,
+                    StatusCode::FORBIDDEN,
+                    "{header} must be refused when the ingress zdr is {ingress_zdr}"
+                );
+                assert_eq!(
+                    body,
+                    mp_contracts::zdr_refusal::Refusal::POSTURE_MISMATCH.json_body(),
+                    "{header}"
+                );
+            }
+        }
+        clear_env();
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn delegated_user_bearers_with_the_ingress_posture_are_accepted() {
+        let kid = "test-kid-zdr-posture-equal";
+        let _server = configure_real_verification(kid).await;
+        for zdr in [false, true] {
+            let ingress = sign_test_jwt(
+                &with_zdr(
+                    minted_user_claims("user_in_standard_org", "model-gateway"),
+                    zdr,
+                ),
+                kid,
+            );
+            let mut headers = vec![("authorization", format!("Bearer {ingress}"))];
+            for (header, audience) in DELEGATED_USER_BEARERS {
+                let delegate = sign_test_jwt(
+                    &with_zdr(minted_user_claims("user_in_standard_org", audience), zdr),
+                    kid,
+                );
+                headers.push((header, format!("Bearer {delegate}")));
+            }
+            let (status, body) = send_with_headers(&headers).await;
+            assert_eq!(
+                status,
+                StatusCode::OK,
+                "all nine user bearers at zdr={zdr}: {body}"
+            );
+        }
+        clear_env();
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn service_inference_bearer_may_hold_a_different_posture_by_audience() {
+        let kid = "test-kid-service-posture-by-audience";
+        let _server = configure_real_verification(kid).await;
+        // service_claims() is issued with the "auth-core" issuer, not the golden's.
+        std::env::set_var("AUTH_CORE_ISSUER", "auth-core");
+        // A service principal's retention is per audience in the registry: one
+        // real row holds zdr for control-policy and persistent for inference-core
+        // (apps/Control Plane/config/plane-service-principals.json). The service
+        // variant must not compare posture, so zdr on the gateway's audience and
+        // persistent on inference-core is a legitimate pair.
+        let ingress = sign_test_jwt(&service_claims(), kid);
+        let mut inference = service_claims();
+        inference["aud"] = serde_json::json!("inference-core");
+        inference["zdr"] = serde_json::json!(false);
+        let (status, body) = send_with_headers(&[
+            ("authorization", format!("Bearer {ingress}")),
+            (
+                "x-inference-authorization",
+                format!("Bearer {}", sign_test_jwt(&inference, kid)),
+            ),
+        ])
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        clear_env();
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn dev_bypass_refuses_a_zdr_delegate_it_cannot_match() {
+        let kid = "test-kid-bypass-posture";
+        let _server = configure_real_verification(kid).await;
+        std::env::set_var("MODEL_GATEWAY_AUTH_DEV_BYPASS", "1");
+        std::env::set_var("ALLOW_INSECURE_DEV_DEFAULTS", "1");
+        // The bypass asserts no retention posture of its own; it is the
+        // persistent posture, so a ZDR delegate for the same identity is refused.
+        let headers = |zdr: bool| {
+            let session = sign_test_jwt(
+                &with_zdr(
+                    minted_user_claims("user_in_standard_org", "session-core"),
+                    zdr,
+                ),
+                kid,
+            );
+            vec![
+                ("authorization", "Bearer dev".to_owned()),
+                ("x-org-id", "org-standard-golden".to_owned()),
+                ("x-user-id", "user-golden".to_owned()),
+                ("x-session-authorization", format!("Bearer {session}")),
+            ]
+        };
+        let (status, body) = send_with_headers(&headers(true)).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+        assert_eq!(
+            body,
+            mp_contracts::zdr_refusal::Refusal::POSTURE_MISMATCH.json_body()
+        );
+        let (status, body) = send_with_headers(&headers(false)).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        clear_env();
     }
 }

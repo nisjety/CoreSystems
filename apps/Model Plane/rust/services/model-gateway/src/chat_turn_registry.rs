@@ -229,12 +229,17 @@ pub struct PreviousTurn {
     pub skill_ids: Vec<String>,
     /// How long ago it was.
     pub elapsed: Duration,
+    /// Whether that answer ran under zero retention, or under a waiver for one connection. The
+    /// signal about that answer is not recorded: it attaches to that run, and a learning review of
+    /// the run would read content the owner's rules keep off every processor but the user's own.
+    pub private_run: bool,
 }
 
 struct PreviousEntry {
     message: String,
     run_id: String,
     skill_ids: Vec<String>,
+    private_run: bool,
     at: Instant,
 }
 
@@ -277,6 +282,7 @@ impl PreviousTurnRegistry {
         message: &str,
         run_id: &str,
         skill_ids: Vec<String>,
+        private_run: bool,
     ) -> Option<PreviousTurn> {
         let key = Self::key(org_id, user_id, thread_id)?;
         let now = Instant::now();
@@ -289,6 +295,7 @@ impl PreviousTurnRegistry {
                 run_id: entry.run_id.clone(),
                 skill_ids: entry.skill_ids.clone(),
                 elapsed,
+                private_run: entry.private_run,
             })
         });
 
@@ -303,6 +310,7 @@ impl PreviousTurnRegistry {
                 message: truncate_bytes(message, MAX_PREVIOUS_MESSAGE_BYTES),
                 run_id: run_id.to_owned(),
                 skill_ids,
+                private_run,
                 at: now,
             },
         );
@@ -477,5 +485,33 @@ mod tests {
         let huge = "x".repeat(MAX_REQUEST_ID_BYTES + 1);
         reg.record(&huge, "org", "user", "run", Vec::new());
         assert_eq!(reg.tracked(), 0);
+    }
+
+    /// The previous turn carries whether its own answer was private, so the turn after a ZDR or
+    /// waived answer can refuse the signal that answer attaches to. A persistent answer says so too.
+    #[test]
+    fn a_private_answer_is_flagged_for_the_turn_that_follows_it() {
+        let turns = PreviousTurnRegistry::new();
+        assert!(turns
+            .swap("org", "user", "thread", "first", "run-1", Vec::new(), true)
+            .is_none());
+        let second = turns
+            .swap(
+                "org",
+                "user",
+                "thread",
+                "second",
+                "run-2",
+                Vec::new(),
+                false,
+            )
+            .expect("the first turn is the previous one");
+        assert_eq!(second.run_id, "run-1");
+        assert!(second.private_run, "the first answer was private");
+        let third = turns
+            .swap("org", "user", "thread", "third", "run-3", Vec::new(), false)
+            .expect("the second turn is the previous one");
+        assert_eq!(third.run_id, "run-2");
+        assert!(!third.private_run, "the second answer was persistent");
     }
 }
