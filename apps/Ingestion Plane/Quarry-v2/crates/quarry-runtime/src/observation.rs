@@ -539,8 +539,11 @@ impl ObservationRunner {
                         )
                         .await?;
                 }
-                AgentAction::Evaluate { script } => {
-                    self.browser.evaluate(session, script).await?;
+                AgentAction::Evaluate { .. } => {
+                    // Raw script is refused before any driver call. The edge
+                    // gates it first; this keeps library callers (agent loop,
+                    // compiled procedures) from reaching the driver either.
+                    return Err(QuarryError::raw_script_denied());
                 }
                 AgentAction::Back => {
                     self.browser.back(session).await?;
@@ -2868,6 +2871,72 @@ mod tests {
         async fn pdf(&self, _session: &quarry_browser::BrowserSession) -> QuarryResult<Bytes> {
             Ok(Bytes::new())
         }
+    }
+
+    #[tokio::test]
+    async fn evaluate_action_is_refused_without_calling_the_driver() {
+        // ContentDriver does not implement `evaluate`, so a driver call would
+        // surface as `Unsupported`. `Forbidden` proves the refusal came first.
+        let driver = Arc::new(ContentDriver {
+            html: b"<html><body><p>hello</p></body></html>",
+        });
+        let runner = ObservationRunner {
+            browser: driver.clone(),
+            artifacts: None,
+            events: None,
+            visual_processor: None,
+            org_id: "org".into(),
+        };
+        let lease = BrowserLease {
+            lease_id: Id::new(),
+            profile_id: Id::new(),
+            session_affinity_key: "test".into(),
+            proxy_affinity: ProxyAffinity {
+                pool: String::new(),
+                sticky_key: None,
+            },
+            ttl_s: 60,
+            capabilities: vec![],
+            artifact_bucket: String::new(),
+            persist_profile: false,
+            viewport: None,
+            org_id: "org".into(),
+        };
+        let session = driver.acquire(&lease).await.unwrap();
+        let mut ctx = ObservationContext {
+            step: 1,
+            current_url: "https://example.test".into(),
+            page_hash: "blake3:page".into(),
+            previous_screenshot: None,
+            previous_observation: None,
+            previous_network_keys: vec![],
+            last_egress_sequence: 0,
+            active_snapshot: None,
+            observed_action_count: 0,
+            challenge_observation_count: 0,
+        };
+        let request = AgentActionRequest {
+            run_id: Id::new(),
+            lease_id: lease.lease_id.clone(),
+            action: AgentAction::Evaluate {
+                script: "document.title = 'x'".into(),
+            },
+            instruction: None,
+            constraints: AgentConstraints {
+                max_steps: 3,
+                allowed_domains: vec![],
+                max_runtime_s: None,
+                max_cost_usd: None,
+            },
+            zdr: ZdrMode::Off,
+            extraction_profile: None,
+        };
+        let error = runner
+            .execute(&request, &session, &mut ctx)
+            .await
+            .expect_err("evaluate must be refused");
+        assert_eq!(error.code, ErrorCode::Forbidden);
+        assert_eq!(error.details.unwrap()["reason"], "raw_script_denied");
     }
 
     #[tokio::test]

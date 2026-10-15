@@ -85,6 +85,22 @@ impl QuarryError {
         self
     }
 
+    /// Raw page script execution (`AgentAction::Evaluate`) is refused on every
+    /// agent entry point: it runs in the page's main world and can express any
+    /// action (submit, delete, read a sensitive field) without passing the typed
+    /// action policy, the risk gates or a one-shot approval. The message and
+    /// details never carry the script.
+    pub fn raw_script_denied() -> Self {
+        Self::new(
+            ErrorCode::Forbidden,
+            "raw page script execution (evaluate) is not permitted; use typed browser actions",
+        )
+        .with_details(serde_json::json!({
+            "reason": "raw_script_denied",
+            "denied_action": "evaluate",
+        }))
+    }
+
     pub fn unsupported_action(action: &str) -> Self {
         Self::new(
             ErrorCode::Unsupported,

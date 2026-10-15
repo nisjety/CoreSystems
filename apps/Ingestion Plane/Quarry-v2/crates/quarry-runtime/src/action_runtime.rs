@@ -13,7 +13,7 @@ use quarry_browser::{
     BrowserDriver, BrowserEgressPolicy, BrowserSession,
 };
 use quarry_core::{
-    error::QuarryResult,
+    error::{QuarryError, QuarryResult},
     event::EventType,
     ids::kinds::{ArtifactKind, RunKind},
     lease::BrowserLease,
@@ -377,20 +377,12 @@ impl ActionRuntime {
                 }
                 None
             }
-            Action::Evaluate { script } => {
-                if let (Some(driver), Some(session)) =
-                    (self.browser.as_ref(), self.session.as_ref())
-                {
-                    let value = driver.evaluate(session, script).await?;
-                    Some(serde_json::to_vec(&value).unwrap_or_default())
-                } else {
-                    trace!(
-                        action_index = index,
-                        script_len = script.len(),
-                        "evaluate (dry-run)"
-                    );
-                    None
-                }
+            Action::Evaluate { .. } => {
+                // Refused outright, dry-run included: nothing consumes a script's
+                // return value here, and the read-only isolated-world evaluator is
+                // a separate action that arrives with scrape-time actions, never a
+                // relaxed `Evaluate`.
+                return Err(QuarryError::raw_script_denied());
             }
             Action::Select { selector, value } => {
                 if let (Some(driver), Some(session)) =
@@ -482,17 +474,28 @@ mod tests {
                 Action::Press {
                     key: "Enter".into(),
                 },
-                Action::Evaluate {
-                    script: "window.x = 1".into(),
-                },
                 Action::Back,
                 Action::Forward,
             ],
             OnError::Abort,
         );
         let results = runtime.run(&s).await.unwrap();
-        assert_eq!(results.len(), 12);
+        assert_eq!(results.len(), 11);
         assert!(results.iter().all(|r| r.success));
+    }
+
+    #[tokio::test]
+    async fn evaluate_action_is_refused() {
+        let runtime = ActionRuntime::new();
+        let s = script(
+            vec![Action::Evaluate {
+                script: "window.x = 1".into(),
+            }],
+            OnError::Abort,
+        );
+        let error = runtime.run(&s).await.expect_err("evaluate must be refused");
+        assert_eq!(error.code, quarry_core::error::ErrorCode::Forbidden);
+        assert_eq!(error.details.unwrap()["reason"], "raw_script_denied");
     }
 
     #[tokio::test]

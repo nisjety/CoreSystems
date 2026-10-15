@@ -379,8 +379,6 @@ impl ModelPlanePlanner {
              {{\"type\": \"wait\", \"ms\": 1000}}\n\
              {{\"type\": \"wait_for\", \"selector\": \"...\", \"timeout_ms\": 5000}}\n\
              {{\"type\": \"screenshot\", \"full_page\": false}}\n\
-             {{\"type\": \"pdf\"}}\n\
-             {{\"type\": \"evaluate\", \"script\": \"...\"}}\n\
              {{\"type\": \"back\"}}\n\
              {{\"type\": \"get_content\"}}\n\n\
              When `snapshot` is present, prefer its `@e…` refs for any effectful\n\
