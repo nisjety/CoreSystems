@@ -128,10 +128,13 @@ async fn main() -> anyhow::Result<()> {
             .or_else(|_| std::env::var("APP_ENV"))
             .unwrap_or_default()
             .to_ascii_lowercase();
-        let bypass = std::env::var("QUARRY_EDGE_AUTH_DEV_BYPASS")
-            .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "yes"))
-            .unwrap_or(false);
-        if bypass && (env_name == "prod" || env_name == "production") {
+        // One parse for the refusal and for the runtime reader
+        // (`auth::dev_bypass_flag_value`): they must never disagree.
+        let raw_bypass = std::env::var("QUARRY_EDGE_AUTH_DEV_BYPASS").ok();
+        let bypass = raw_bypass
+            .as_deref()
+            .is_some_and(auth::dev_bypass_flag_value);
+        if auth::production_with_dev_bypass(&env_name, raw_bypass.as_deref()) {
             tracing::error!(
                 env = %env_name,
                 "REFUSING TO START: QUARRY_EDGE_AUTH_DEV_BYPASS=1 is enabled but \
@@ -355,11 +358,13 @@ async fn main() -> anyhow::Result<()> {
     } else {
         DefaultEngine::new()
     };
-    let artifacts_durable = matches!(
-        cfg.artifact_backend.trim().to_ascii_lowercase().as_str(),
-        "fs" | "filesystem" | "s3"
-    );
-    let artifacts: Arc<dyn ArtifactStore> = match cfg.artifact_backend.as_str() {
+    // Normalise ONCE and use the result for both the durability flag and the
+    // selection below. The flag used to lowercase while the `match` did not, so
+    // `ARTIFACT_BACKEND=S3` counted as durable (production gate passes) yet fell
+    // through to the in-memory store.
+    let artifact_backend = config::normalize_artifact_backend(&cfg.artifact_backend);
+    let artifacts_durable = matches!(artifact_backend.as_str(), "fs" | "filesystem" | "s3");
+    let artifacts: Arc<dyn ArtifactStore> = match artifact_backend.as_str() {
         "fs" | "filesystem" => {
             tracing::info!(root = %cfg.artifact_root, "artifact backend: filesystem");
             Arc::new(FilesystemStore::new(&cfg.artifact_root)?)

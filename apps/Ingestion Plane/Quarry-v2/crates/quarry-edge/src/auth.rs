@@ -257,8 +257,33 @@ fn dev_bypass_enabled() -> bool {
 
 fn read_dev_bypass_from_env() -> bool {
     std::env::var("QUARRY_EDGE_AUTH_DEV_BYPASS")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .map(|v| dev_bypass_flag_value(&v))
         .unwrap_or(false)
+}
+
+/// Whether a `QUARRY_EDGE_AUTH_DEV_BYPASS` value turns the bypass on.
+///
+/// The ONE parse behind both the runtime reader and the production start-up
+/// refusal ([`production_with_dev_bypass`]). They used to disagree: the refusal
+/// matched `"1" | "true" | "TRUE" | "yes"` exactly while the reader accepted
+/// any case of `true`, so `QUARRY_EDGE_AUTH_DEV_BYPASS=True` passed the
+/// refusal and still enabled a bypass that accepts any bearer.
+pub fn dev_bypass_flag_value(raw: &str) -> bool {
+    let value = raw.trim();
+    value == "1"
+        || ["true", "yes", "on"]
+            .iter()
+            .any(|word| value.eq_ignore_ascii_case(word))
+}
+
+/// True when the process is in a production environment (`prod` or
+/// `production`, any case) AND the dev bypass is on: the combination the edge
+/// must refuse to start with.
+pub fn production_with_dev_bypass(env_name: &str, raw_bypass: Option<&str>) -> bool {
+    let env_name = env_name.trim();
+    let production =
+        env_name.eq_ignore_ascii_case("prod") || env_name.eq_ignore_ascii_case("production");
+    production && raw_bypass.is_some_and(dev_bypass_flag_value)
 }
 
 async fn fetch_jwks() -> Result<JwkSet, StatusCode> {
@@ -569,6 +594,50 @@ mod tests {
         Router::new()
             .route("/", get(ok_handler))
             .layer(middleware::from_fn(require_auth))
+    }
+
+    #[test]
+    fn dev_bypass_flag_is_case_insensitive_and_trimmed() {
+        for on in [
+            "1", "true", "True", "TRUE", "tRuE", "yes", "YES", "on", "On", " 1 ", "true ",
+        ] {
+            assert!(dev_bypass_flag_value(on), "{on:?} must read as on");
+        }
+        for off in [
+            "", "0", "false", "False", "no", "off", "2", "enabled", "truee",
+        ] {
+            assert!(!dev_bypass_flag_value(off), "{off:?} must read as off");
+        }
+    }
+
+    #[test]
+    fn prod_refuses_dev_bypass_in_any_case() {
+        for env_name in ["prod", "PROD", "production", "Production", " production "] {
+            for raw in ["1", "true", "True", "TRUE", "yes", "Yes", "on"] {
+                assert!(
+                    production_with_dev_bypass(env_name, Some(raw)),
+                    "ENVIRONMENT={env_name:?} with bypass={raw:?} must be refused"
+                );
+            }
+            // Off or unset is not a refusal.
+            assert!(!production_with_dev_bypass(env_name, None));
+            assert!(!production_with_dev_bypass(env_name, Some("0")));
+            assert!(!production_with_dev_bypass(env_name, Some("false")));
+        }
+    }
+
+    #[test]
+    fn non_prod_dev_bypass_still_boots() {
+        for env_name in ["dev", "development", "test", "staging", ""] {
+            assert!(
+                !production_with_dev_bypass(env_name, Some("1")),
+                "{env_name:?}"
+            );
+            assert!(
+                !production_with_dev_bypass(env_name, Some("True")),
+                "{env_name:?}"
+            );
+        }
     }
 
     #[test]

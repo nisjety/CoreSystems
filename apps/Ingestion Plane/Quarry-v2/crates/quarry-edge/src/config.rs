@@ -261,6 +261,13 @@ fn default_auth_core_url() -> String {
 fn default_artifact_backend() -> String {
     "memory".into()
 }
+
+/// The artifact backend name, normalised once for BOTH the production
+/// durability gate and the store selection, so the two can never disagree about
+/// what `S3` or ` Fs ` means.
+pub fn normalize_artifact_backend(raw: &str) -> String {
+    raw.trim().to_ascii_lowercase()
+}
 fn default_artifact_root() -> String {
     "./data/artifacts".into()
 }
@@ -349,6 +356,25 @@ impl EdgeConfig {
             ocr_preconditioning_enabled: false,
             rendered_branding_visual_enabled: false,
             visual_max_regions: None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod artifact_backend_tests {
+    use super::normalize_artifact_backend;
+
+    #[test]
+    fn prod_artifact_backend_match_is_case_insensitive() {
+        for (raw, want) in [
+            ("s3", "s3"),
+            ("S3", "s3"),
+            (" s3 ", "s3"),
+            ("Fs", "fs"),
+            ("FILESYSTEM", "filesystem"),
+            ("Memory", "memory"),
+        ] {
+            assert_eq!(normalize_artifact_backend(raw), want, "{raw:?}");
         }
     }
 }
