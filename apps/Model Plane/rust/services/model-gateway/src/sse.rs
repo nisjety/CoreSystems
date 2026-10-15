@@ -4240,6 +4240,8 @@ pub async fn invoke_stream_sse(
                         .await;
                     }
                     let usage_event = crate::sse_events::ChatEvent::Usage {
+                        cache_read_tokens: cache_read_tokens,
+                        cache_write_tokens: cache_creation_tokens,
                         input_tokens,
                         output_tokens,
                         cost_usd,
@@ -6981,6 +6983,8 @@ async fn run_infer_fallback(
                 .await;
             // Scored above, before the persist.
             let usage_event = crate::sse_events::ChatEvent::Usage {
+                cache_read_tokens: cache_read_tokens,
+                cache_write_tokens: cache_creation_tokens,
                 input_tokens,
                 output_tokens,
                 cost_usd,
@@ -8523,6 +8527,8 @@ fn zdr_answer_stream(
     // content. Metering of ZDR turns is the deferred Z-06b task, so no cost is
     // stated on this path rather than estimated.
     let usage = crate::sse_events::ChatEvent::Usage {
+        cache_read_tokens: 0,
+        cache_write_tokens: 0,
         input_tokens: answer.input_tokens,
         output_tokens: answer.output_tokens,
         cost_usd: None,
@@ -10078,6 +10084,8 @@ fn agentic_run_stream(
         // `run_agent` sets it from a real "status": "ok" tool outcome, not a
         // guess) — see agent.rs::knowledge_search_found_grounding.
         let usage_event = crate::sse_events::ChatEvent::Usage {
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
             input_tokens: 0,
             output_tokens: 0,
             cost_usd: None,

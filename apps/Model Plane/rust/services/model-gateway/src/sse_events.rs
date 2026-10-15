@@ -283,6 +283,12 @@ pub enum ChatEvent {
         /// How the answer's content was retained, when the turn's posture is
         /// known (see [`RetentionClass`]). `None` omits the key.
         retention_class: Option<RetentionClass>,
+        /// Prompt tokens served from the provider's cache, and written to it, on
+        /// this turn (zero where the provider reports none or the turn is
+        /// zero-retention). Counts only. Omitted from the payload when both are
+        /// zero so every earlier payload stays valid.
+        cache_read_tokens: u32,
+        cache_write_tokens: u32,
     },
     /// Per-turn phase timing (Q14): ids, milliseconds and counts, never
     /// content. Emitted once, just before the terminal `done`, `error` or
@@ -586,6 +592,8 @@ impl ChatEvent {
                 confidence,
                 served_by,
                 retention_class,
+                cache_read_tokens,
+                cache_write_tokens,
             } => {
                 let mut usage = json!({
                     "input_tokens": input_tokens,
@@ -594,6 +602,11 @@ impl ChatEvent {
                     "latency_ms": latency_ms,
                     "confidence": confidence,
                 });
+                // Optional, and only when the provider reported cache activity.
+                if *cache_read_tokens > 0 || *cache_write_tokens > 0 {
+                    usage["cache_read_tokens"] = json!(cache_read_tokens);
+                    usage["cache_write_tokens"] = json!(cache_write_tokens);
+                }
                 // Optional: a client that predates it sees the same payload.
                 if let Some(basis) = cost_basis {
                     usage["cost_basis"] = json!(basis.as_str());
@@ -1465,6 +1478,8 @@ mod tests {
         }
         .should_emit(&no_features));
         assert!(!ChatEvent::Usage {
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
             input_tokens: 1,
             output_tokens: 2,
             cost_usd: None,
@@ -1546,6 +1561,8 @@ mod tests {
         }
         .should_emit(&feats));
         assert!(ChatEvent::Usage {
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
             input_tokens: 1,
             output_tokens: 2,
             cost_usd: Some(0.01),
@@ -1601,6 +1618,8 @@ mod tests {
     #[test]
     fn names_and_payload_shapes_are_stable() {
         let usage = ChatEvent::Usage {
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
             input_tokens: 12,
             output_tokens: 34,
             cost_usd: Some(0.002),
@@ -1729,6 +1748,8 @@ mod tests {
         // A subscription turn keeps `cost_usd` at 0.0 for older clients and
         // says why; a turn with no established basis keeps the old keys.
         let subscription = ChatEvent::Usage {
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
             input_tokens: 1_800,
             output_tokens: 120,
             cost_usd: Some(0.0),
@@ -1743,6 +1764,8 @@ mod tests {
         assert_eq!(subscription["cost_basis"], "subscription");
         assert_eq!(subscription["input_tokens"], 1_800);
         let unestablished = ChatEvent::Usage {
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
             input_tokens: 0,
             output_tokens: 0,
             cost_usd: None,
@@ -1774,6 +1797,8 @@ mod tests {
 
     fn usage_with(served_by: Option<ServedBy>) -> serde_json::Value {
         ChatEvent::Usage {
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
             input_tokens: 10,
             output_tokens: 5,
             cost_usd: Some(0.0),
@@ -1789,6 +1814,34 @@ mod tests {
     /// The usage payload carries the three provenance fields when the server
     /// stamped them, and exactly the keys it always had when it did not.
     #[test]
+fn usage_carries_cache_tokens_and_omits_them_when_zero() {
+    let frame = |read: u32, write: u32| {
+        ChatEvent::Usage {
+            cache_read_tokens: read,
+            cache_write_tokens: write,
+            input_tokens: 1200,
+            output_tokens: 80,
+            cost_usd: None,
+            cost_basis: None,
+            latency_ms: 10,
+            confidence: None,
+            served_by: None,
+            retention_class: None,
+        }
+        .payload("req-1")
+    };
+    let hit = frame(900, 0);
+    assert_eq!(hit["cache_read_tokens"], 900);
+    assert_eq!(hit["cache_write_tokens"], 0);
+    let written = frame(0, 300);
+    assert_eq!(written["cache_write_tokens"], 300);
+    // The zero-retention shape (and every provider that reports no cache) is byte-identical to before.
+    let none = frame(0, 0);
+    assert!(none.get("cache_read_tokens").is_none());
+    assert!(none.get("cache_write_tokens").is_none());
+}
+
+#[test]
     fn usage_carries_server_stamped_provenance_and_omits_it_when_empty() {
         let baseline = usage_with(None);
         let mut baseline_keys: Vec<&str> = baseline
@@ -1895,6 +1948,8 @@ mod tests {
     #[test]
     fn usage_names_its_retention_class_only_when_one_is_stamped() {
         let zdr = ChatEvent::Usage {
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
             input_tokens: 3,
             output_tokens: 4,
             cost_usd: None,
@@ -1918,6 +1973,8 @@ mod tests {
     #[test]
     fn a_waived_usage_frame_states_its_class_and_reason() {
         let waived = ChatEvent::Usage {
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
             input_tokens: 3,
             output_tokens: 4,
             cost_usd: None,
@@ -1941,6 +1998,8 @@ mod tests {
         );
 
         let zdr = ChatEvent::Usage {
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
             input_tokens: 3,
             output_tokens: 4,
             cost_usd: None,
@@ -1966,6 +2025,8 @@ mod tests {
             .unwrap();
         let event = ChatEvent::TurnTiming { report };
         let usage = ChatEvent::Usage {
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
             input_tokens: 0,
             output_tokens: 0,
             cost_usd: None,
