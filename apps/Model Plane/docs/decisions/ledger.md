@@ -22,6 +22,45 @@ with a pointer forward. Newest first.
 
 ---
 
+## 2026-10-16 - Durable agent loop: execution-core hosts it, session-core stores the fold, resume is user-present and stays in the same run
+
+**State:** `proposed`
+(planned 2026-10-14, build plan WS03; owner ruling needed on D1; code lands behind `AGENT_CONTINUE_AFTER_APPROVAL_ENABLED`, default off)
+
+**The decision.** A Do run pauses for an approval and today loses its reasoning
+state: the loop's history is a local `Vec`, and the only continuation is the cold
+approval-delivery worker, which can re-run exactly three tool kinds. Decided:
+
+1. **Host (D1).** execution-core owns the Do loop, its pause and its resume;
+   session-core stores the loop's *fold* (`mp_contracts::loop_fold::LoopFoldV1`).
+   orchestrator-core's Temporal workflows stay the host of `ExecuteStep`-driven
+   runs; they have no `RunAgent` client and cannot hold a per-activity user
+   bearer. Not chosen: Temporal as the chat-loop host.
+2. **Credentials (D2).** Resume is user-present: the approve click, "Continue" or
+   an answer mints fresh bearers for that request; no bearer is stored in a fold
+   (`assert_no_credentials` refuses one). Unattended auto-resume stays out of
+   scope until OD8 (renewable delegated credentials) is decided. Not chosen: the
+   approval-worker service principal for user runs, which would break delegated
+   identity.
+3. **Storage (D3).** A new encrypted `run_loop_checkpoints` table (one row per
+   run, latest wins, purged at terminalization), not the plaintext `checkpoints`
+   table. A zero-retention run never persists a fold; neither does a waived
+   own-connection run (rule 17).
+4. **Cold worker (D4).** Loop-originated approvals carry a `continuation_mode`
+   (`""` cold, `segment`, `loop`) and are consumed once by the loop
+   (`ConsumeApproval`); the delivery outbox row is skipped for them. This amends
+   the earlier "the worker resumes three kinds" design for loop approvals only;
+   owner actions (`requires_durable_owner_approval`) stay cold.
+5. **Identity of a continuation (D5, D6).** Same `run_id`, an incrementing
+   `segment_no`; re-entry is `RunAgentRequest.resume`, not an extended
+   `ResumeRun`. A resume may only narrow the authority the run paused with
+   (`Authority::narrows`).
+
+**Trigger to flip to `implemented`.** Stage 1 (`/continue` as a fresh segment) is
+proved on a rebuilt running stack, and the D1 owner ruling is recorded here.
+
+---
+
 ## 2026-10-15 - Proto field numbers and migration numbers are reserved in the build plan before use
 
 **State:** `proposed`

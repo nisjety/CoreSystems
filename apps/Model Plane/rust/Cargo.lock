@@ -2401,8 +2401,10 @@ dependencies = [
 name = "mp-contracts"
 version = "0.1.0"
 dependencies = [
+ "blake3",
  "prost",
  "prost-types",
+ "serde",
  "serde_json",
  "tonic",
  "tonic-build",

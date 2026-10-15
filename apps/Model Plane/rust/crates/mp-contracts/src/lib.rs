@@ -1,6 +1,7 @@
 pub mod agentic_subscription;
 pub mod autonomy;
 pub mod dataplane_posture;
+pub mod loop_fold;
 pub mod retention;
 pub mod run_context;
 pub mod skill_recovery;
