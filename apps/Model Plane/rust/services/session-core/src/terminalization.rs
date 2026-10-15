@@ -1713,6 +1713,7 @@ async fn claim_due_recovery(pool: &PgPool) -> Result<Option<ClaimedRecovery>, sq
                       AND a.org_id = o.org_id
                       AND a.user_id = o.user_id
                       AND a.status IN ('requested', 'granted')
+                      AND a.consumed_at IS NULL
                )
              ORDER BY o.deadline_at ASC, o.created_at ASC
              FOR UPDATE SKIP LOCKED
@@ -1743,6 +1744,7 @@ async fn has_pending_approval(
         "SELECT EXISTS(
              SELECT 1 FROM approvals
              WHERE run_id = $1 AND status IN ('requested', 'granted')
+               AND consumed_at IS NULL
          )",
     )
     .bind(run_id)

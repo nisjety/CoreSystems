@@ -654,12 +654,13 @@ pub async fn request_approval(
     metadata: &JsonValue,
     continuation_descriptor: Option<&JsonValue>,
     expires_at: Option<DateTime<Utc>>,
+    continuation_mode: &str,
 ) -> Result<Option<String>> {
     let mut transaction = pool.begin().await?;
     let row: Option<(String,)> = sqlx::query_as(
         "INSERT INTO approvals (id, run_id, plan_id, kind, status, requested_by, \
-         org_id, user_id, idempotency_key, metadata, expires_at) \
-         VALUES ($1, $2, $3, $4, 'requested', $5, $6, $7, $8, $9, $10) \
+         org_id, user_id, idempotency_key, metadata, expires_at, continuation_mode) \
+         VALUES ($1, $2, $3, $4, 'requested', $5, $6, $7, $8, $9, $10, $11) \
          ON CONFLICT (org_id, user_id, idempotency_key) WHERE idempotency_key <> '' DO NOTHING \
          RETURNING id",
     )
@@ -673,6 +674,7 @@ pub async fn request_approval(
     .bind(idempotency_key)
     .bind(metadata)
     .bind(expires_at)
+    .bind(continuation_mode)
     .fetch_optional(&mut *transaction)
     .await?;
 
@@ -794,7 +796,25 @@ pub async fn decide_approval(
         .await?;
     }
 
-    let delivery_id = if status == "granted" && updated {
+    // A loop-mode approval is resumed by the durable Do loop through
+    // ConsumeApproval, never by the cold delivery worker: a delivery row for it
+    // would let the worker run the call a second time.
+    let loop_owned = if status == "granted" && updated {
+        sqlx::query_scalar::<_, String>(
+            "SELECT continuation_mode FROM approvals WHERE id = $1 AND org_id = $2",
+        )
+        .bind(id)
+        .bind(org_id)
+        .fetch_optional(&mut *transaction)
+        .await?
+        .is_some_and(|mode| !mode.is_empty())
+    } else {
+        false
+    };
+
+    let delivery_id = if loop_owned {
+        None
+    } else if status == "granted" && updated {
         let delivery_id = format!("approval_delivery_{}", mp_ids::new_ulid());
         let inserted = sqlx::query_as::<_, (String,)>(INSERT_APPROVAL_DELIVERY_OUTBOX_SQL)
             .bind(&delivery_id)
@@ -822,6 +842,122 @@ pub async fn decide_approval(
         delivery_id,
     })
 }
+
+/// The outcome of [`consume_approval`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ConsumeOutcome {
+    /// This call consumed the approval.
+    pub consumed: bool,
+    /// The approval had already been consumed.
+    pub already_consumed: bool,
+    /// With `already_consumed`: the earlier claim used the same token.
+    pub same_claim: bool,
+}
+
+/// Why an approval could not be consumed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConsumeRefusal {
+    /// No such approval for this org, run and user, or it is not loop-owned.
+    NotFound,
+    /// The approval is not in the granted state.
+    NotGranted,
+    /// The approval expired before it was consumed.
+    Expired,
+    /// The call fingerprint does not match the retained descriptor.
+    FingerprintMismatch,
+}
+
+/// Consume a granted, loop-owned approval exactly once (build plan WS03 S2).
+///
+/// The compare-and-set is part of the write itself: org, run and user are
+/// predicates, the approval must be `granted`, loop-owned and unconsumed, and,
+/// when a continuation descriptor is retained, the caller's fingerprint must
+/// match it (a loop may not run a different call than the one approved). A second
+/// consumer finds `consumed_at` set and is told so; the same claim token replays
+/// safely.
+///
+/// # Errors
+///
+/// Returns a database error as `Err`, and a closed [`ConsumeRefusal`] as
+/// `Ok(Err(..))`.
+#[allow(clippy::too_many_arguments)]
+pub async fn consume_approval(
+    pool: &Pool,
+    id: &str,
+    org_id: &str,
+    run_id: &str,
+    user_id: &str,
+    action_fingerprint: &str,
+    claim_hash: &str,
+) -> Result<std::result::Result<ConsumeOutcome, ConsumeRefusal>> {
+    let mut transaction = pool.begin().await?;
+    let consumed = sqlx::query_as::<_, (String,)>(CONSUME_APPROVAL_SQL)
+        .bind(id)
+        .bind(org_id)
+        .bind(run_id)
+        .bind(user_id)
+        .bind(action_fingerprint)
+        .bind(claim_hash)
+        .fetch_optional(&mut *transaction)
+        .await?;
+    if consumed.is_some() {
+        transaction.commit().await?;
+        return Ok(Ok(ConsumeOutcome {
+            consumed: true,
+            already_consumed: false,
+            same_claim: false,
+        }));
+    }
+    // Not consumed by this call: say why, from the row as it is now.
+    let row: Option<(String, String, Option<DateTime<Utc>>, Option<String>, bool, bool)> =
+        sqlx::query_as(
+            "SELECT a.status, a.continuation_mode, a.consumed_at, a.consumed_claim_hash, \
+                    (a.expires_at IS NOT NULL AND a.expires_at <= now()), \
+                    EXISTS (SELECT 1 FROM approval_continuation_descriptors d WHERE d.approval_id = a.id) \
+             FROM approvals a \
+             WHERE a.id = $1 AND a.org_id = $2 AND a.run_id = $3 AND a.user_id = $4",
+        )
+        .bind(id)
+        .bind(org_id)
+        .bind(run_id)
+        .bind(user_id)
+        .fetch_optional(&mut *transaction)
+        .await?;
+    transaction.commit().await?;
+    let Some((status, mode, consumed_at, stored_hash, expired, has_descriptor)) = row else {
+        return Ok(Err(ConsumeRefusal::NotFound));
+    };
+    if mode.is_empty() {
+        return Ok(Err(ConsumeRefusal::NotFound));
+    }
+    if consumed_at.is_some() {
+        return Ok(Ok(ConsumeOutcome {
+            consumed: false,
+            already_consumed: true,
+            same_claim: stored_hash.as_deref() == Some(claim_hash),
+        }));
+    }
+    if status != "granted" {
+        return Ok(Err(ConsumeRefusal::NotGranted));
+    }
+    if expired {
+        return Ok(Err(ConsumeRefusal::Expired));
+    }
+    if has_descriptor {
+        return Ok(Err(ConsumeRefusal::FingerprintMismatch));
+    }
+    Ok(Err(ConsumeRefusal::NotFound))
+}
+
+const CONSUME_APPROVAL_SQL: &str = "UPDATE approvals AS a \
+     SET consumed_at = now(), consumed_claim_hash = $6 \
+     WHERE a.id = $1 AND a.org_id = $2 AND a.run_id = $3 AND a.user_id = $4 \
+       AND a.status = 'granted' AND a.continuation_mode <> '' AND a.consumed_at IS NULL \
+       AND (a.expires_at IS NULL OR a.expires_at > now()) \
+       AND (NOT EXISTS (SELECT 1 FROM approval_continuation_descriptors d WHERE d.approval_id = a.id) \
+            OR EXISTS (SELECT 1 FROM approval_continuation_descriptors d \
+                       WHERE d.approval_id = a.id AND d.action_fingerprint = $5)) \
+     RETURNING a.id";
 
 const DECIDE_APPROVAL_SQL: &str =
     "UPDATE approvals SET status = $3, decided_by = $4, decision_reason = $5, \
@@ -993,6 +1129,11 @@ pub struct ApprovalRow {
     pub requested_at: DateTime<Utc>,
     pub decided_at: Option<DateTime<Utc>>,
     pub expires_at: Option<DateTime<Utc>>,
+    /// Who resumes the approval once granted: empty = the cold delivery worker,
+    /// `segment` or `loop` = the durable Do loop (build plan WS03 S2).
+    pub continuation_mode: String,
+    /// When the loop consumed the granted approval; `None` until then.
+    pub consumed_at: Option<DateTime<Utc>>,
 }
 
 #[derive(sqlx::FromRow, Debug, Clone)]
@@ -1067,7 +1208,7 @@ pub async fn get_approval(pool: &Pool, id: &str) -> Result<Option<ApprovalRow>> 
     let row = sqlx::query_as::<_, ApprovalRow>(
         "SELECT id, run_id, plan_id, kind, status, requested_by, decided_by, \
                 decision_reason, org_id, user_id, idempotency_key, metadata, \
-                requested_at, decided_at, expires_at \
+                requested_at, decided_at, expires_at, continuation_mode, consumed_at \
          FROM approvals WHERE id = $1",
     )
     .bind(id)
@@ -1094,7 +1235,7 @@ pub async fn get_approval_for_org(
     let row = sqlx::query_as::<_, ApprovalRow>(
         "SELECT id, run_id, plan_id, kind, status, requested_by, decided_by, \
                 decision_reason, org_id, user_id, idempotency_key, metadata, \
-                requested_at, decided_at, expires_at \
+                requested_at, decided_at, expires_at, continuation_mode, consumed_at \
          FROM approvals WHERE id = $1 AND org_id = $2 \
          AND ($3::text IS NULL OR user_id = $3)",
     )
@@ -1122,7 +1263,7 @@ pub async fn get_approval_by_idempotency_key(
     let row = sqlx::query_as::<_, ApprovalRow>(
         "SELECT id, run_id, plan_id, kind, status, requested_by, decided_by, \
                 decision_reason, org_id, user_id, idempotency_key, metadata, \
-                requested_at, decided_at, expires_at \
+                requested_at, decided_at, expires_at, continuation_mode, consumed_at \
          FROM approvals WHERE org_id = $1 AND user_id = $2 AND idempotency_key = $3",
     )
     .bind(org_id)
@@ -1212,7 +1353,7 @@ pub async fn list_approvals_by_run_full(pool: &Pool, run_id: &str) -> Result<Vec
     let rows = sqlx::query_as::<_, ApprovalRow>(
         "SELECT id, run_id, plan_id, kind, status, requested_by, decided_by, \
                 decision_reason, org_id, user_id, idempotency_key, metadata, \
-                requested_at, decided_at, expires_at \
+                requested_at, decided_at, expires_at, continuation_mode, consumed_at \
          FROM approvals WHERE run_id = $1 ORDER BY requested_at DESC",
     )
     .bind(run_id)
@@ -1240,7 +1381,7 @@ pub async fn list_approvals_by_run_full_for_org(
     let rows = sqlx::query_as::<_, ApprovalRow>(
         "SELECT id, run_id, plan_id, kind, status, requested_by, decided_by, \
                 decision_reason, org_id, user_id, idempotency_key, metadata, \
-                requested_at, decided_at, expires_at \
+                requested_at, decided_at, expires_at, continuation_mode, consumed_at \
          FROM approvals WHERE run_id = $1 AND org_id = $2 \
          AND ($3::text IS NULL OR user_id = $3) \
          ORDER BY requested_at DESC",
@@ -1279,7 +1420,7 @@ pub async fn list_pending_approvals(
 const LIST_PENDING_APPROVALS_SQL: &str =
     "SELECT id, run_id, plan_id, kind, status, requested_by, decided_by, \
             decision_reason, org_id, user_id, idempotency_key, metadata, \
-            requested_at, decided_at, expires_at \
+            requested_at, decided_at, expires_at, continuation_mode, consumed_at \
      FROM approvals \
      WHERE status = 'requested' AND org_id = $1 \
      AND ($2::text IS NULL OR user_id = $2) \
@@ -1669,5 +1810,194 @@ mod tests {
     fn removed_steps_are_marked_skipped_and_kept_steps_pending() {
         assert_eq!(edited_step_status(true), "skipped");
         assert_eq!(edited_step_status(false), "pending");
+    }
+}
+
+/// Build plan WS03 S2: DB-backed checks of the approval consume. Run with
+/// `DATABASE_URL=... cargo test -p session-core --bin session-core approval_consume -- --ignored --test-threads=1`
+/// against a scratch Postgres (the database name must say it is a test database).
+#[cfg(test)]
+mod approval_consume_db_tests {
+    use super::*;
+    use sqlx::postgres::PgPoolOptions;
+
+    async fn scratch_pool() -> Option<Pool> {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping: DATABASE_URL unset");
+            return None;
+        };
+        assert!(url.contains("test"), "the scratch database name must say test");
+        let pool = PgPoolOptions::new()
+            .max_connections(8)
+            .connect(&url)
+            .await
+            .expect("connect pg");
+        sqlx::migrate!("./migrations").run(&pool).await.expect("migrate");
+        Some(pool)
+    }
+
+    struct Seed {
+        run_id: String,
+        org: String,
+        user: String,
+    }
+
+    async fn seed_run(pool: &Pool, tag: &str) -> Seed {
+        let sfx = mp_ids::new_ulid();
+        let (thread_id, run_id, org, user) = (
+            format!("ac-t-{tag}-{sfx}"),
+            format!("ac-r-{tag}-{sfx}"),
+            format!("ac-org-{sfx}"),
+            "u1".to_owned(),
+        );
+        sqlx::query("INSERT INTO threads (id,session_key,org_id,user_id) VALUES ($1,$1,$2,$3)")
+            .bind(&thread_id).bind(&org).bind(&user).execute(pool).await.expect("seed thread");
+        sqlx::query("INSERT INTO runs (id,thread_id,goal,org_id,user_id) VALUES ($1,$2,'g',$3,$4)")
+            .bind(&run_id).bind(&thread_id).bind(&org).bind(&user).execute(pool).await.expect("seed run");
+        Seed { run_id, org, user }
+    }
+
+    async fn approval(pool: &Pool, seed: &Seed, mode: &str) -> String {
+        let id = format!("appr_{}", mp_ids::new_ulid());
+        request_approval(
+            pool,
+            &id,
+            &seed.run_id,
+            None,
+            "tool_call",
+            &seed.user,
+            &seed.org,
+            &seed.user,
+            "",
+            &serde_json::json!({}),
+            None,
+            Some(Utc::now() + chrono::Duration::minutes(5)),
+            mode,
+        )
+        .await
+        .expect("request approval")
+        .expect("inserted");
+        id
+    }
+
+    async fn grant(pool: &Pool, seed: &Seed, id: &str) -> ApprovalDecisionWrite {
+        decide_approval(pool, id, &seed.org, Some(&seed.user), "granted", &seed.user, "ok")
+            .await
+            .expect("decide")
+    }
+
+    async fn outbox_rows(pool: &Pool, id: &str) -> i64 {
+        sqlx::query_scalar("SELECT count(*) FROM approval_delivery_outbox WHERE approval_id = $1")
+            .bind(id)
+            .fetch_one(pool)
+            .await
+            .expect("count outbox")
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a scratch Postgres"]
+    async fn approval_consume_a_loop_approval_makes_no_delivery_row_and_a_cold_one_still_does() {
+        let Some(pool) = scratch_pool().await else { return };
+        let seed = seed_run(&pool, "outbox").await;
+        let cold = approval(&pool, &seed, "").await;
+        let looped = approval(&pool, &seed, "loop").await;
+        assert!(grant(&pool, &seed, &cold).await.delivery_id.is_some());
+        assert!(grant(&pool, &seed, &looped).await.delivery_id.is_none());
+        assert_eq!(outbox_rows(&pool, &cold).await, 1, "cold approvals are unchanged");
+        assert_eq!(outbox_rows(&pool, &looped).await, 0, "a loop approval never reaches the worker");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a scratch Postgres"]
+    async fn approval_consume_two_parallel_consumes_yield_exactly_one_win() {
+        let Some(pool) = scratch_pool().await else { return };
+        let seed = seed_run(&pool, "race").await;
+        let id = approval(&pool, &seed, "loop").await;
+        grant(&pool, &seed, &id).await;
+        let mut tasks = Vec::new();
+        for n in 0..6 {
+            let (pool, id, run, org, user) = (
+                pool.clone(),
+                id.clone(),
+                seed.run_id.clone(),
+                seed.org.clone(),
+                seed.user.clone(),
+            );
+            tasks.push(tokio::spawn(async move {
+                consume_approval(&pool, &id, &org, &run, &user, "", &format!("claim-{n}"))
+                    .await
+                    .expect("consume")
+                    .expect("outcome")
+            }));
+        }
+        let mut consumed = 0;
+        for task in tasks {
+            let outcome = task.await.expect("join");
+            if outcome.consumed {
+                consumed += 1;
+            } else {
+                assert!(outcome.already_consumed && !outcome.same_claim);
+            }
+        }
+        assert_eq!(consumed, 1, "exactly one consumer wins");
+        let (consumed_at,): (Option<DateTime<Utc>>,) =
+            sqlx::query_as("SELECT consumed_at FROM approvals WHERE id = $1")
+                .bind(&id)
+                .fetch_one(&pool)
+                .await
+                .expect("read");
+        assert!(consumed_at.is_some());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a scratch Postgres"]
+    async fn approval_consume_replay_by_the_same_claim_is_told_apart_from_another() {
+        let Some(pool) = scratch_pool().await else { return };
+        let seed = seed_run(&pool, "replay").await;
+        let id = approval(&pool, &seed, "loop").await;
+        grant(&pool, &seed, &id).await;
+        let first = consume_approval(&pool, &id, &seed.org, &seed.run_id, &seed.user, "", "a")
+            .await.unwrap().unwrap();
+        assert!(first.consumed);
+        let replay = consume_approval(&pool, &id, &seed.org, &seed.run_id, &seed.user, "", "a")
+            .await.unwrap().unwrap();
+        assert!(!replay.consumed && replay.already_consumed && replay.same_claim);
+        let other = consume_approval(&pool, &id, &seed.org, &seed.run_id, &seed.user, "", "b")
+            .await.unwrap().unwrap();
+        assert!(!other.consumed && other.already_consumed && !other.same_claim);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a scratch Postgres"]
+    async fn approval_consume_refuses_wrong_run_wrong_user_not_granted_and_cold_approvals() {
+        let Some(pool) = scratch_pool().await else { return };
+        let seed = seed_run(&pool, "refuse").await;
+        let other_run = seed_run(&pool, "refuse-other").await;
+        let id = approval(&pool, &seed, "loop").await;
+        assert_eq!(
+            consume_approval(&pool, &id, &seed.org, &seed.run_id, &seed.user, "", "c").await.unwrap(),
+            Err(ConsumeRefusal::NotGranted)
+        );
+        grant(&pool, &seed, &id).await;
+        assert_eq!(
+            consume_approval(&pool, &id, &seed.org, &other_run.run_id, &seed.user, "", "c").await.unwrap(),
+            Err(ConsumeRefusal::NotFound)
+        );
+        assert_eq!(
+            consume_approval(&pool, &id, &seed.org, &seed.run_id, "someone-else", "", "c").await.unwrap(),
+            Err(ConsumeRefusal::NotFound)
+        );
+        assert_eq!(
+            consume_approval(&pool, &id, "another-org", &seed.run_id, &seed.user, "", "c").await.unwrap(),
+            Err(ConsumeRefusal::NotFound)
+        );
+        let cold = approval(&pool, &seed, "").await;
+        grant(&pool, &seed, &cold).await;
+        assert_eq!(
+            consume_approval(&pool, &cold, &seed.org, &seed.run_id, &seed.user, "", "c").await.unwrap(),
+            Err(ConsumeRefusal::NotFound)
+        );
+        assert!(consume_approval(&pool, &id, &seed.org, &seed.run_id, &seed.user, "", "c")
+            .await.unwrap().unwrap().consumed);
     }
 }

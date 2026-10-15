@@ -1153,6 +1153,8 @@ fn approval_from_row(row: &store::ApprovalRow) -> proto::Approval {
         decided_at: row.decided_at.map(ts),
         expires_at: row.expires_at.map(ts),
         org_id: row.org_id.clone(),
+        consumed_at: row.consumed_at.map(ts),
+        continuation_mode: row.continuation_mode.clone(),
     }
 }
 
@@ -2524,6 +2526,14 @@ impl OrchestrationCoreService for OrchestrationGrpc {
                 .ok_or_else(|| Status::invalid_argument("invalid approval kind"))?;
             let continuation_descriptor =
                 validate_continuation_descriptor(&req.continuation_descriptor_json, &req)?;
+            // A loop continuation retains a fold: a zero-retention caller never
+            // raises one, and only the two named modes exist.
+            if !matches!(req.continuation_mode.as_str(), "" | "segment" | "loop") {
+                return Err(Status::invalid_argument("invalid continuation_mode"));
+            }
+            if !req.continuation_mode.is_empty() {
+                retention_receipt::refuse_zdr_continuation(&caller)?;
+            }
 
             // Honor a caller-supplied id (matrix §4.1) so an upstream cache
             // (the gateway ApprovalStore) stays aligned with the durable
@@ -2572,6 +2582,7 @@ impl OrchestrationCoreService for OrchestrationGrpc {
                 &metadata,
                 continuation_descriptor.as_ref(),
                 expires_at,
+                &req.continuation_mode,
             )
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
@@ -2638,6 +2649,92 @@ impl OrchestrationCoreService for OrchestrationGrpc {
         }
         .await;
         record_metrics("create_approval", started, result.is_ok());
+        result
+    }
+
+    // Build plan WS03 S2: the durable Do loop claims a granted loop-mode approval
+    // exactly once when it re-enters. The cold delivery worker never sees a
+    // loop-mode approval (decide_approval makes no delivery row for it), so the
+    // call is run by the loop once and never also by the worker.
+    async fn consume_approval(
+        &self,
+        request: Request<proto::ConsumeApprovalRequest>,
+    ) -> Result<Response<proto::ConsumeApprovalResponse>, Status> {
+        let started = Instant::now();
+        let result: Result<Response<proto::ConsumeApprovalResponse>, Status> = async {
+            let caller = identity(&request)?;
+            retention_receipt::refuse_zdr_continuation(&caller)?;
+            authorize_operation(&caller, "orchestration:write")?;
+            let req = request.into_inner();
+            if req.approval_id.is_empty()
+                || req.run_id.is_empty()
+                || req.org_id.is_empty()
+                || req.claim_token.is_empty()
+            {
+                return Err(Status::invalid_argument(
+                    "approval_id, run_id, org_id and claim_token are required",
+                ));
+            }
+            caller.authorize_org(&req.org_id)?;
+            let user_id = caller
+                .user_id()
+                .ok_or_else(|| Status::permission_denied("user-bound approval credential required"))?
+                .to_owned();
+            authorize_run_owner(&self.pool, &caller, &req.run_id, OwnerIntent::Mutate).await?;
+            // Only a hash of the claim token is stored.
+            let claim_hash = blake3::hash(req.claim_token.as_bytes()).to_hex().to_string();
+            let outcome = store::consume_approval(
+                &self.pool,
+                &req.approval_id,
+                &req.org_id,
+                &req.run_id,
+                &user_id,
+                &req.action_fingerprint,
+                &claim_hash,
+            )
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+            match outcome {
+                Ok(done) => {
+                    if done.consumed {
+                        broadcast_event(
+                            &self.events_tx,
+                            &self.replay,
+                            proto::OrchestrationEvent {
+                                event_id: String::new(),
+                                at: Some(now_ts()),
+                                event: Some(orchestration_event::Event::RunResumedAfterApproval(
+                                    orchestration_event::RunResumedAfterApproval {
+                                        run_id: req.run_id.clone(),
+                                        approval_id: req.approval_id.clone(),
+                                    },
+                                )),
+                            },
+                        );
+                    }
+                    Ok(Response::new(proto::ConsumeApprovalResponse {
+                        consumed: done.consumed,
+                        already_consumed: done.already_consumed,
+                        same_claim: done.same_claim,
+                    }))
+                }
+                // Closed wording only: nothing about the call or its content.
+                Err(store::ConsumeRefusal::NotFound) => {
+                    Err(Status::not_found("approval not found for this run"))
+                }
+                Err(store::ConsumeRefusal::NotGranted) => {
+                    Err(Status::failed_precondition("approval_not_granted"))
+                }
+                Err(store::ConsumeRefusal::Expired) => {
+                    Err(Status::failed_precondition("approval_expired"))
+                }
+                Err(store::ConsumeRefusal::FingerprintMismatch) => {
+                    Err(Status::failed_precondition("approval_action_mismatch"))
+                }
+            }
+        }
+        .await;
+        record_metrics("consume_approval", started, result.is_ok());
         result
     }
 
@@ -3824,6 +3921,8 @@ mod tests {
             requested_at: Utc::now(),
             decided_at: Some(Utc::now()),
             expires_at: None,
+            continuation_mode: String::new(),
+            consumed_at: None,
         };
         assert!(is_idempotent_approval_retry(
             &row, "granted", "user-1", "approved"
@@ -3854,6 +3953,8 @@ mod tests {
             requested_at: Utc::now(),
             decided_at: Some(Utc::now()),
             expires_at: None,
+            continuation_mode: String::new(),
+            consumed_at: None,
         };
         let (events_tx, mut events_rx) = broadcast::channel(8);
         let replay = ReplayBuffer::default();
@@ -4396,6 +4497,8 @@ mod tests {
 
     fn test_approval(id: &str) -> store::ApprovalRow {
         store::ApprovalRow {
+            consumed_at: None,
+            continuation_mode: String::new(),
             id: id.to_owned(),
             run_id: "run_1".to_owned(),
             plan_id: None,
