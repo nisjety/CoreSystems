@@ -1,0 +1,800 @@
+{
+  "contract": "zdr.posture-matrix",
+  "version": 1,
+  "waiver_contract_version": 1,
+  "description": "The retention-posture matrix: for every combination that matters, what a turn is (zdr, persistent, waived) or why it is refused (a code from the Z-05a refusal catalogue). Authored data, not generated: it is the specification each plane's own real function is tested against, so it must never be evaluated by a local reimplementation. org_posture_rows are evaluated by the org-posture readers (Auth Core, the BFF, conversation-core); decision_rows by Auth Core's decision function (the BFF checks decision_call and maps the answer, integration-corev2 checks the acknowledgement states); enforcement_rows by the mp-contracts resolver and, through it, model-gateway, inference-core, execution-core and session-core. Loaders reject unknown fields and rows without a code. Change a row deliberately, re-pin and re-vendor (see README.md).",
+  "policy": {
+    "plan_lapse": "intent_stays_zdr",
+    "plan_lapse_status": "applied_default_pending_owner_confirmation",
+    "space_zdr": "not_applied_in_v1",
+    "waiver_providers": ["openai-codex-subscription"],
+    "zdr_capable_connection_providers": []
+  },
+  "vocabulary": {
+    "decisions": ["zdr", "persistent", "waived", "refuse"],
+    "retention_classes": {
+      "zdr": "zdr",
+      "persistent": "persistent",
+      "waived": "zdr_waived"
+    },
+    "refusal_codes": [
+      "zdr_connection_not_acknowledged",
+      "zdr_connection_not_supported",
+      "zdr_explicit_request_not_supported_by_connection",
+      "zdr_decision_unavailable",
+      "zdr_waiver_route_mismatch",
+      "zdr_posture_mismatch"
+    ],
+    "reason_codes": {
+      "org_zdr_off": "persistent",
+      "org_zdr": "zdr",
+      "explicit_zdr": "zdr",
+      "connection_supports_zdr": "zdr",
+      "connection_not_zdr_capable": "waived"
+    },
+    "org_states": ["zdr", "not_zdr", "unknown"],
+    "connections": {
+      "none": "The turn names no user-owned connection; it runs on Verevon providers.",
+      "own": "The turn names a connection owned by the session user, in the session org.",
+      "other_member": "The turn names a connection owned by another member of the session org. The session user cannot read it, so the decision cannot depend on anything stored for it.",
+      "other_org": "The turn names a connection that belongs to another org. Same: unreadable by the session user."
+    },
+    "capabilities": ["supported", "not_supported", "cannot_verify"],
+    "acks": {
+      "none": "The ledger holds nothing for the session user and this connection.",
+      "valid": "An unrevoked acknowledgement by the session user for this connection, against the current capability digest and a text version at or above the minimum.",
+      "revoked": "The session user acknowledged this connection and later revoked it.",
+      "stale_digest": "The session user acknowledged this connection against a capability digest that is no longer the current one.",
+      "text_version_below_minimum": "The session user acknowledged this connection against a text version below the current minimum.",
+      "other_connection": "The session user holds a valid acknowledgement, but for a different connection of theirs.",
+      "other_member": "Another member holds a valid acknowledgement for this provider and digest (for their own connection, or for this very connection when the session user is not its owner). It never counts for the session user."
+    },
+    "outages": {
+      "org_core": "org-core cannot be read and the caller remembers nothing usable for the org (Auth Core stale-if-error has expired or never had it). The org posture is unknown.",
+      "auth_core": "Auth Core cannot answer the retention decision (down, or refusing because its audit trail cannot be published). Ordinary token minting still works, so a turn that needs no decision is unaffected.",
+      "integration_core": "integration-corev2 cannot be read as the session user. Only a turn that has to read a connection is affected."
+    },
+    "fields": {
+      "org": {
+        "intent": "org-core stored intent: the org admin turned ZDR on. null when the lookup is unavailable.",
+        "entitled": "org-core plan entitlement: the current plan may use ZDR. null when the lookup is unavailable.",
+        "lookup": "ok, or unavailable (org-core unreachable and nothing usable remembered)."
+      },
+      "decision": {
+        "org_zdr_intent": "org-core stored intent (see org.intent). null only with outage org_core.",
+        "org_entitled": "org-core plan entitlement (see org.entitled). null only with outage org_core.",
+        "explicit_zdr": "The turn asked for ZDR itself: Temporary chat, x-zdr, body zdr:true. A waiver never covers it.",
+        "space_zdr": "The turn is scoped to a Space whose ZDR policy is on. Not applied in v1 (honest-limits L14): rows pin that it changes nothing.",
+        "waiver_enabled": "Auth Core kill switch ZDR_WAIVER_ENABLED. Off by default; off means no waiver is ever minted.",
+        "connection": "Whose connection the turn names (see vocabulary.connections).",
+        "capability": "The named connection capability as assessed by integration-corev2. null when no connection is named.",
+        "waiver_route": "The connection provider has a waiver route in v1 (capability contract providers[].waiver_route; fallback false). null when no connection is named.",
+        "ack": "What the acknowledgement ledger holds (see vocabulary.acks). none when no connection is named.",
+        "outage": "Which dependency is unavailable, or null (see vocabulary.outages)."
+      },
+      "enforcement": {
+        "bearers": "The claims of every delegated user bearer presented with one request. One entry for a plain request; the planes that compare bearers pass all of them.",
+        "bearers[].zdr": "The zdr claim: required, no default.",
+        "bearers[].org_zdr": "The org_zdr claim: true when the org is ZDR. null when the claim is absent (service tokens).",
+        "bearers[].waiver": "The zdr_waiver claim, or null. Fields: version (WAIVER_CONTRACT_VERSION), provider, connection.",
+        "route": "What the request itself names: provider (\"\" is the default chain), connection (null when none) and explicit_zdr (body zdr or x-zdr)."
+      }
+    }
+  },
+  "rule": [
+    "1. Resolve the org posture O from the org rows. Unknown (org-core unavailable, nothing remembered): refuse zdr_decision_unavailable. Nothing else is read and no decision call is made.",
+    "2. A connection is named and (O or explicit_zdr): read it as the session user. integration-corev2 unavailable: refuse zdr_decision_unavailable. Not the session user's connection (another member, another org): refuse zdr_connection_not_acknowledged; only the owner can acknowledge, so no acknowledgement can exist for anyone else.",
+    "3. explicit_zdr and the connection capability is not supported: refuse zdr_explicit_request_not_supported_by_connection. A waiver covers the org default only, never an explicit request, and this comes before the kill switch.",
+    "4. Not O: persistent. explicit_zdr alone makes the turn zdr (the minted claims stay persistent; the request flag raises the posture and never lowers it).",
+    "5. O and no connection: zdr.",
+    "6. O and a supported connection: zdr stays on.",
+    "7. O and a connection that is not supported (or cannot_verify): a waiver is the only way to run it. Kill switch off, or the provider has no waiver route: refuse zdr_connection_not_supported (acknowledging cannot help). The BFF cannot ask Auth Core for the decision: refuse zdr_decision_unavailable (the BFF cannot tell a supported connection from an unsupported one, so any failed decision call refuses). No valid acknowledgement: refuse zdr_connection_not_acknowledged. A valid acknowledgement: waived, bound to that one connection.",
+    "The reason of a zdr decision is connection_supports_zdr when a supported connection is named, else explicit_zdr when the turn asked for ZDR itself, else org_zdr.",
+    "The decision call exists only when a connection is named and the org is known to be ZDR. Non-ZDR orgs make none.",
+    "Enforcement (every plane that receives tokens, through the shared resolver): all bearers must agree on zdr and waiver or the request is refused zdr_posture_mismatch. A waiver is honoured only for provider and connection exactly as bound, with no explicit zdr, at the current WAIVER_CONTRACT_VERSION, on a token that says org_zdr true and zdr false. A ZDR token never reaches a subscription route; a persistent token for a ZDR org with no waiver is refused, never served."
+  ],
+  "required_tags": [
+    "plan_lapsed",
+    "temporary_chat",
+    "space_scoped",
+    "other_connection",
+    "other_member",
+    "revoked_ack",
+    "stale_digest",
+    "text_version_below_minimum",
+    "unknown_provider",
+    "outage_auth_core",
+    "outage_org_core",
+    "outage_integration_core",
+    "non_owner",
+    "mixed_zdr_token_set",
+    "silent_reroute",
+    "kill_switch",
+    "non_zdr_unchanged",
+    "no_unauthorized_persistent"
+  ],
+  "org_posture_rows": [
+    {
+      "id": "o_intent_off_plan_entitled",
+      "title": "Stored intent off, plan entitles ZDR: not ZDR (the admin has not turned it on).",
+      "tags": [],
+      "inputs": {"intent": false, "entitled": true, "lookup": "ok"},
+      "expect": {"state": "not_zdr", "code": "org_zdr_off", "persist_content": true, "lapsed": false}
+    },
+    {
+      "id": "o_intent_off_not_entitled",
+      "title": "Stored intent off, no entitlement: not ZDR.",
+      "tags": [],
+      "inputs": {"intent": false, "entitled": false, "lookup": "ok"},
+      "expect": {"state": "not_zdr", "code": "org_zdr_off", "persist_content": true, "lapsed": false}
+    },
+    {
+      "id": "o_intent_on_entitled",
+      "title": "Stored intent on, plan entitles ZDR: ZDR.",
+      "tags": [],
+      "inputs": {"intent": true, "entitled": true, "lookup": "ok"},
+      "expect": {"state": "zdr", "code": "org_zdr", "persist_content": false, "lapsed": false}
+    },
+    {
+      "id": "o_plan_lapsed_keeps_zdr",
+      "title": "Stored intent on, entitlement gone: ZDR, flagged lapsed so a warning can say so.",
+      "tags": ["plan_lapsed"],
+      "inputs": {"intent": true, "entitled": false, "lookup": "ok"},
+      "expect": {"state": "zdr", "code": "org_zdr", "persist_content": false, "lapsed": true},
+      "note": "OD-LAPSE applied default (gate G-OD-LAPSE). Every reader (org-core, Auth Core, the BFF, conversation-core) must give this answer."
+    },
+    {
+      "id": "o_org_core_unreachable_nothing_remembered",
+      "title": "org-core unreachable and nothing usable remembered: unknown. A turn is refused; a write gate does not persist.",
+      "tags": ["outage_org_core"],
+      "inputs": {"intent": null, "entitled": null, "lookup": "unavailable"},
+      "expect": {"state": "unknown", "code": "zdr_decision_unavailable", "persist_content": false, "lapsed": false},
+      "note": "One unknown-posture rule for every reader: unknown is never read as not ZDR. Auth Core answers it with 503 retention_posture_unavailable and issues no token; the BFF maps that to zdr_decision_unavailable."
+    }
+  ],
+  "decision_rows": [
+    {
+      "id": "d_org_off_no_connection",
+      "title": "Org has ZDR off: nothing changes and no decision call is made.",
+      "tags": [],
+      "inputs": {"org_zdr_intent": false, "org_entitled": true, "explicit_zdr": false, "space_zdr": false, "waiver_enabled": true, "connection": "none", "capability": null, "waiver_route": null, "ack": "none", "outage": null},
+      "expect": {"decision": "persistent", "code": "org_zdr_off", "decision_call": false, "claims": {"zdr": false, "org_zdr": false, "waiver": false}}
+    },
+    {
+      "id": "d_org_off_without_plan_no_connection",
+      "title": "No stored intent and no plan entitlement: still persistent.",
+      "tags": [],
+      "inputs": {"org_zdr_intent": false, "org_entitled": false, "explicit_zdr": false, "space_zdr": false, "waiver_enabled": true, "connection": "none", "capability": null, "waiver_route": null, "ack": "none", "outage": null},
+      "expect": {"decision": "persistent", "code": "org_zdr_off", "decision_call": false, "claims": {"zdr": false, "org_zdr": false, "waiver": false}}
+    },
+    {
+      "id": "d_org_on_no_connection",
+      "title": "Org has ZDR on and the turn names no connection: ZDR, the org default.",
+      "tags": [],
+      "inputs": {"org_zdr_intent": true, "org_entitled": true, "explicit_zdr": false, "space_zdr": false, "waiver_enabled": true, "connection": "none", "capability": null, "waiver_route": null, "ack": "none", "outage": null},
+      "expect": {"decision": "zdr", "code": "org_zdr", "decision_call": false, "claims": {"zdr": true, "org_zdr": true, "waiver": false}}
+    },
+    {
+      "id": "d_plan_lapsed_keeps_zdr",
+      "title": "Plan lapsed (intent on, entitlement gone): the org stays ZDR until an admin turns it off.",
+      "tags": ["plan_lapsed"],
+      "inputs": {"org_zdr_intent": true, "org_entitled": false, "explicit_zdr": false, "space_zdr": false, "waiver_enabled": true, "connection": "none", "capability": null, "waiver_route": null, "ack": "none", "outage": null},
+      "expect": {"decision": "zdr", "code": "org_zdr", "decision_call": false, "claims": {"zdr": true, "org_zdr": true, "waiver": false}},
+      "note": "OD-LAPSE applied default (gate G-OD-LAPSE): effective ZDR is the stored intent; entitlement only gates turning it ON. Auth Core today computes intent AND entitled and must change; flip this row, the org row and policy.plan_lapse together if the owner chooses the other reading."
+    },
+    {
+      "id": "d_temporary_chat_org_off",
+      "title": "Temporary chat in a non-ZDR org: this turn is ZDR; the minted claims stay persistent and the request flag raises the posture.",
+      "tags": ["temporary_chat"],
+      "inputs": {"org_zdr_intent": false, "org_entitled": true, "explicit_zdr": true, "space_zdr": false, "waiver_enabled": true, "connection": "none", "capability": null, "waiver_route": null, "ack": "none", "outage": null},
+      "expect": {"decision": "zdr", "code": "explicit_zdr", "decision_call": false, "claims": {"zdr": false, "org_zdr": false, "waiver": false}}
+    },
+    {
+      "id": "d_temporary_chat_org_on",
+      "title": "Temporary chat in a ZDR org with no connection: ZDR.",
+      "tags": ["temporary_chat"],
+      "inputs": {"org_zdr_intent": true, "org_entitled": true, "explicit_zdr": true, "space_zdr": false, "waiver_enabled": true, "connection": "none", "capability": null, "waiver_route": null, "ack": "none", "outage": null},
+      "expect": {"decision": "zdr", "code": "explicit_zdr", "decision_call": false, "claims": {"zdr": true, "org_zdr": true, "waiver": false}}
+    },
+    {
+      "id": "d_space_zdr_not_applied_org_off",
+      "title": "A Space with ZDR policy in a non-ZDR org: the turn is persistent, because Space ZDR is not applied in v1.",
+      "tags": ["space_scoped"],
+      "inputs": {"org_zdr_intent": false, "org_entitled": true, "explicit_zdr": false, "space_zdr": true, "waiver_enabled": true, "connection": "none", "capability": null, "waiver_route": null, "ack": "none", "outage": null},
+      "expect": {"decision": "persistent", "code": "org_zdr_off", "decision_call": false, "claims": {"zdr": false, "org_zdr": false, "waiver": false}},
+      "known_limit": "honest-limits L14: Space ZDR flags are not enforced in chat in v1, and the decision request carries no space id. Pinned here so applying it later is a deliberate change of this row."
+    },
+    {
+      "id": "d_org_off_subscription_needs_nothing",
+      "title": "ZDR off, subscription connection, no acknowledgement: nothing is asked and no decision call is made.",
+      "tags": [],
+      "inputs": {"org_zdr_intent": false, "org_entitled": true, "explicit_zdr": false, "space_zdr": false, "waiver_enabled": true, "connection": "own", "capability": "not_supported", "waiver_route": true, "ack": "none", "outage": null},
+      "expect": {"decision": "persistent", "code": "org_zdr_off", "decision_call": false, "claims": {"zdr": false, "org_zdr": false, "waiver": false}}
+    },
+    {
+      "id": "d_org_off_unknown_provider_connection",
+      "title": "ZDR off, connection of a provider we cannot assess: works as before.",
+      "tags": ["unknown_provider"],
+      "inputs": {"org_zdr_intent": false, "org_entitled": true, "explicit_zdr": false, "space_zdr": false, "waiver_enabled": true, "connection": "own", "capability": "cannot_verify", "waiver_route": false, "ack": "none", "outage": null},
+      "expect": {"decision": "persistent", "code": "org_zdr_off", "decision_call": false, "claims": {"zdr": false, "org_zdr": false, "waiver": false}}
+    },
+    {
+      "id": "d_org_off_kill_switch_irrelevant",
+      "title": "ZDR off, waiver kill switch off: irrelevant, the org is not ZDR.",
+      "tags": ["kill_switch"],
+      "inputs": {"org_zdr_intent": false, "org_entitled": true, "explicit_zdr": false, "space_zdr": false, "waiver_enabled": false, "connection": "own", "capability": "not_supported", "waiver_route": true, "ack": "none", "outage": null},
+      "expect": {"decision": "persistent", "code": "org_zdr_off", "decision_call": false, "claims": {"zdr": false, "org_zdr": false, "waiver": false}}
+    },
+    {
+      "id": "d_supported_connection_stays_zdr",
+      "title": "Connection supports ZDR: the turn stays ZDR on it, no acknowledgement needed.",
+      "tags": [],
+      "inputs": {"org_zdr_intent": true, "org_entitled": true, "explicit_zdr": false, "space_zdr": false, "waiver_enabled": true, "connection": "own", "capability": "supported", "waiver_route": false, "ack": "none", "outage": null},
+      "expect": {"decision": "zdr", "code": "connection_supports_zdr", "decision_call": true, "claims": {"zdr": true, "org_zdr": true, "waiver": false}}
+    },
+    {
+      "id": "d_supported_connection_ignores_ack",
+      "title": "Connection supports ZDR: an acknowledgement changes nothing.",
+      "tags": [],
+      "inputs": {"org_zdr_intent": true, "org_entitled": true, "explicit_zdr": false, "space_zdr": false, "waiver_enabled": true, "connection": "own", "capability": "supported", "waiver_route": false, "ack": "valid", "outage": null},
+      "expect": {"decision": "zdr", "code": "connection_supports_zdr", "decision_call": true, "claims": {"zdr": true, "org_zdr": true, "waiver": false}}
+    },
+    {
+      "id": "d_supported_connection_kill_switch_irrelevant",
+      "title": "Connection supports ZDR: the waiver kill switch is not involved.",
+      "tags": ["kill_switch"],
+      "inputs": {"org_zdr_intent": true, "org_entitled": true, "explicit_zdr": false, "space_zdr": false, "waiver_enabled": false, "connection": "own", "capability": "supported", "waiver_route": false, "ack": "none", "outage": null},
+      "expect": {"decision": "zdr", "code": "connection_supports_zdr", "decision_call": true, "claims": {"zdr": true, "org_zdr": true, "waiver": false}}
+    },
+    {
+      "id": "d_valid_ack_waives",
+      "title": "Org ZDR on, connection cannot do ZDR, valid acknowledgement: a waiver bound to that connection.",
+      "tags": [],
+      "inputs": {"org_zdr_intent": true, "org_entitled": true, "explicit_zdr": false, "space_zdr": false, "waiver_enabled": true, "connection": "own", "capability": "not_supported", "waiver_route": true, "ack": "valid", "outage": null},
+      "expect": {"decision": "waived", "code": "connection_not_zdr_capable", "decision_call": true, "claims": {"zdr": false, "org_zdr": true, "waiver": true}}
+    },
+    {
+      "id": "d_plan_lapsed_org_still_waives",
+      "title": "A lapsed-plan org is still a ZDR org: the same waiver rule applies.",
+      "tags": ["plan_lapsed"],
+      "inputs": {"org_zdr_intent": true, "org_entitled": false, "explicit_zdr": false, "space_zdr": false, "waiver_enabled": true, "connection": "own", "capability": "not_supported", "waiver_route": true, "ack": "valid", "outage": null},
+      "expect": {"decision": "waived", "code": "connection_not_zdr_capable", "decision_call": true, "claims": {"zdr": false, "org_zdr": true, "waiver": true}}
+    },
+    {
+      "id": "d_cannot_verify_valid_ack_waives",
+      "title": "cannot_verify is treated like not_supported: a valid acknowledgement waives.",
+      "tags": [],
+      "inputs": {"org_zdr_intent": true, "org_entitled": true, "explicit_zdr": false, "space_zdr": false, "waiver_enabled": true, "connection": "own", "capability": "cannot_verify", "waiver_route": true, "ack": "valid", "outage": null},
+      "expect": {"decision": "waived", "code": "connection_not_zdr_capable", "decision_call": true, "claims": {"zdr": false, "org_zdr": true, "waiver": true}}
+    },
+    {
+      "id": "d_no_ack_refused",
+      "title": "No acknowledgement: refused, never served and never re-routed.",
+      "tags": [],
+      "inputs": {"org_zdr_intent": true, "org_entitled": true, "explicit_zdr": false, "space_zdr": false, "waiver_enabled": true, "connection": "own", "capability": "not_supported", "waiver_route": true, "ack": "none", "outage": null},
+      "expect": {"decision": "refuse", "code": "zdr_connection_not_acknowledged", "decision_call": true, "claims": null}
+    },
+    {
+      "id": "d_cannot_verify_no_ack_refused",
+      "title": "cannot_verify without an acknowledgement: refused.",
+      "tags": [],
+      "inputs": {"org_zdr_intent": true, "org_entitled": true, "explicit_zdr": false, "space_zdr": false, "waiver_enabled": true, "connection": "own", "capability": "cannot_verify", "waiver_route": true, "ack": "none", "outage": null},
+      "expect": {"decision": "refuse", "code": "zdr_connection_not_acknowledged", "decision_call": true, "claims": null}
+    },
+    {
+      "id": "d_revoked_ack_refused",
+      "title": "The acknowledgement was revoked: refused from the next decision.",
+      "tags": ["revoked_ack"],
+      "inputs": {"org_zdr_intent": true, "org_entitled": true, "explicit_zdr": false, "space_zdr": false, "waiver_enabled": true, "connection": "own", "capability": "not_supported", "waiver_route": true, "ack": "revoked", "outage": null},
+      "expect": {"decision": "refuse", "code": "zdr_connection_not_acknowledged", "decision_call": true, "claims": null}
+    },
+    {
+      "id": "d_stale_digest_refused",
+      "title": "The capability digest changed since the acknowledgement: refused until the user confirms again.",
+      "tags": ["stale_digest"],
+      "inputs": {"org_zdr_intent": true, "org_entitled": true, "explicit_zdr": false, "space_zdr": false, "waiver_enabled": true, "connection": "own", "capability": "not_supported", "waiver_route": true, "ack": "stale_digest", "outage": null},
+      "expect": {"decision": "refuse", "code": "zdr_connection_not_acknowledged", "decision_call": true, "claims": null}
+    },
+    {
+      "id": "d_text_version_below_minimum_refused",
+      "title": "The acknowledgement was given against an older text: refused until confirmed against the current one.",
+      "tags": ["text_version_below_minimum"],
+      "inputs": {"org_zdr_intent": true, "org_entitled": true, "explicit_zdr": false, "space_zdr": false, "waiver_enabled": true, "connection": "own", "capability": "not_supported", "waiver_route": true, "ack": "text_version_below_minimum", "outage": null},
+      "expect": {"decision": "refuse", "code": "zdr_connection_not_acknowledged", "decision_call": true, "claims": null}
+    },
+    {
+      "id": "d_ack_for_other_connection_refused",
+      "title": "A valid acknowledgement for a different connection never covers this one.",
+      "tags": ["other_connection"],
+      "inputs": {"org_zdr_intent": true, "org_entitled": true, "explicit_zdr": false, "space_zdr": false, "waiver_enabled": true, "connection": "own", "capability": "not_supported", "waiver_route": true, "ack": "other_connection", "outage": null},
+      "expect": {"decision": "refuse", "code": "zdr_connection_not_acknowledged", "decision_call": true, "claims": null}
+    },
+    {
+      "id": "d_second_member_without_ack_refused",
+      "title": "Another member acknowledged theirs; this member has not: refused (never for other members).",
+      "tags": ["other_member"],
+      "inputs": {"org_zdr_intent": true, "org_entitled": true, "explicit_zdr": false, "space_zdr": false, "waiver_enabled": true, "connection": "own", "capability": "not_supported", "waiver_route": true, "ack": "other_member", "outage": null},
+      "expect": {"decision": "refuse", "code": "zdr_connection_not_acknowledged", "decision_call": true, "claims": null}
+    },
+    {
+      "id": "d_non_owner_refused",
+      "title": "The turn names another member's connection: refused, the owner's acknowledgement is not the session user's.",
+      "tags": ["non_owner", "other_member"],
+      "inputs": {"org_zdr_intent": true, "org_entitled": true, "explicit_zdr": false, "space_zdr": false, "waiver_enabled": true, "connection": "other_member", "capability": "not_supported", "waiver_route": true, "ack": "other_member", "outage": null},
+      "expect": {"decision": "refuse", "code": "zdr_connection_not_acknowledged", "decision_call": true, "claims": null}
+    },
+    {
+      "id": "d_other_org_connection_refused",
+      "title": "The turn names a connection of another org: refused.",
+      "tags": ["non_owner"],
+      "inputs": {"org_zdr_intent": true, "org_entitled": true, "explicit_zdr": false, "space_zdr": false, "waiver_enabled": true, "connection": "other_org", "capability": "not_supported", "waiver_route": true, "ack": "none", "outage": null},
+      "expect": {"decision": "refuse", "code": "zdr_connection_not_acknowledged", "decision_call": true, "claims": null}
+    },
+    {
+      "id": "d_non_owner_beats_supported_capability",
+      "title": "Ownership comes before capability: another member's supported connection is still refused.",
+      "tags": ["non_owner"],
+      "inputs": {"org_zdr_intent": true, "org_entitled": true, "explicit_zdr": false, "space_zdr": false, "waiver_enabled": true, "connection": "other_member", "capability": "supported", "waiver_route": false, "ack": "none", "outage": null},
+      "expect": {"decision": "refuse", "code": "zdr_connection_not_acknowledged", "decision_call": true, "claims": null}
+    },
+    {
+      "id": "d_kill_switch_off_refuses_even_with_ack",
+      "title": "Waiver kill switch off: no waiver is minted, whatever the acknowledgement.",
+      "tags": ["kill_switch"],
+      "inputs": {"org_zdr_intent": true, "org_entitled": true, "explicit_zdr": false, "space_zdr": false, "waiver_enabled": false, "connection": "own", "capability": "not_supported", "waiver_route": true, "ack": "valid", "outage": null},
+      "expect": {"decision": "refuse", "code": "zdr_connection_not_supported", "decision_call": true, "claims": null}
+    },
+    {
+      "id": "d_kill_switch_off_without_ack",
+      "title": "Kill switch off and no acknowledgement: not_supported, because acknowledging cannot help.",
+      "tags": ["kill_switch"],
+      "inputs": {"org_zdr_intent": true, "org_entitled": true, "explicit_zdr": false, "space_zdr": false, "waiver_enabled": false, "connection": "own", "capability": "not_supported", "waiver_route": true, "ack": "none", "outage": null},
+      "expect": {"decision": "refuse", "code": "zdr_connection_not_supported", "decision_call": true, "claims": null}
+    },
+    {
+      "id": "d_unknown_provider_has_no_waiver_route",
+      "title": "A provider we cannot assess has no waiver route in v1: refused even with an acknowledgement.",
+      "tags": ["unknown_provider"],
+      "inputs": {"org_zdr_intent": true, "org_entitled": true, "explicit_zdr": false, "space_zdr": false, "waiver_enabled": true, "connection": "own", "capability": "cannot_verify", "waiver_route": false, "ack": "valid", "outage": null},
+      "expect": {"decision": "refuse", "code": "zdr_connection_not_supported", "decision_call": true, "claims": null}
+    },
+    {
+      "id": "d_unknown_provider_without_ack",
+      "title": "Same, without an acknowledgement: not_supported, not not_acknowledged.",
+      "tags": ["unknown_provider"],
+      "inputs": {"org_zdr_intent": true, "org_entitled": true, "explicit_zdr": false, "space_zdr": false, "waiver_enabled": true, "connection": "own", "capability": "cannot_verify", "waiver_route": false, "ack": "none", "outage": null},
+      "expect": {"decision": "refuse", "code": "zdr_connection_not_supported", "decision_call": true, "claims": null}
+    },
+    {
+      "id": "d_temporary_chat_refuses_subscription",
+      "title": "Temporary chat on a connection that cannot do ZDR: refused even with a valid acknowledgement.",
+      "tags": ["temporary_chat"],
+      "inputs": {"org_zdr_intent": true, "org_entitled": true, "explicit_zdr": true, "space_zdr": false, "waiver_enabled": true, "connection": "own", "capability": "not_supported", "waiver_route": true, "ack": "valid", "outage": null},
+      "expect": {"decision": "refuse", "code": "zdr_explicit_request_not_supported_by_connection", "decision_call": true, "claims": null}
+    },
+    {
+      "id": "d_temporary_chat_refuses_subscription_org_off",
+      "title": "Temporary chat on such a connection in a non-ZDR org: refused too (no decision call; the gateway resolver refuses).",
+      "tags": ["temporary_chat"],
+      "inputs": {"org_zdr_intent": false, "org_entitled": true, "explicit_zdr": true, "space_zdr": false, "waiver_enabled": true, "connection": "own", "capability": "not_supported", "waiver_route": true, "ack": "none", "outage": null},
+      "expect": {"decision": "refuse", "code": "zdr_explicit_request_not_supported_by_connection", "decision_call": false, "claims": null}
+    },
+    {
+      "id": "d_temporary_chat_refuses_cannot_verify",
+      "title": "Temporary chat on a cannot_verify connection: refused.",
+      "tags": ["temporary_chat"],
+      "inputs": {"org_zdr_intent": true, "org_entitled": true, "explicit_zdr": true, "space_zdr": false, "waiver_enabled": true, "connection": "own", "capability": "cannot_verify", "waiver_route": true, "ack": "valid", "outage": null},
+      "expect": {"decision": "refuse", "code": "zdr_explicit_request_not_supported_by_connection", "decision_call": true, "claims": null}
+    },
+    {
+      "id": "d_temporary_chat_on_supported_connection",
+      "title": "Temporary chat on a connection that supports ZDR: ZDR.",
+      "tags": ["temporary_chat"],
+      "inputs": {"org_zdr_intent": true, "org_entitled": true, "explicit_zdr": true, "space_zdr": false, "waiver_enabled": true, "connection": "own", "capability": "supported", "waiver_route": false, "ack": "none", "outage": null},
+      "expect": {"decision": "zdr", "code": "connection_supports_zdr", "decision_call": true, "claims": {"zdr": true, "org_zdr": true, "waiver": false}}
+    },
+    {
+      "id": "d_temporary_chat_beats_kill_switch",
+      "title": "The explicit-request refusal comes before the kill switch.",
+      "tags": ["temporary_chat", "kill_switch"],
+      "inputs": {"org_zdr_intent": true, "org_entitled": true, "explicit_zdr": true, "space_zdr": false, "waiver_enabled": false, "connection": "own", "capability": "not_supported", "waiver_route": true, "ack": "valid", "outage": null},
+      "expect": {"decision": "refuse", "code": "zdr_explicit_request_not_supported_by_connection", "decision_call": true, "claims": null}
+    },
+    {
+      "id": "d_org_core_outage_no_connection",
+      "title": "org-core unavailable, nothing remembered: refused, retryable, nothing sent.",
+      "tags": ["outage_org_core"],
+      "inputs": {"org_zdr_intent": null, "org_entitled": null, "explicit_zdr": false, "space_zdr": false, "waiver_enabled": true, "connection": "none", "capability": null, "waiver_route": null, "ack": "none", "outage": "org_core"},
+      "expect": {"decision": "refuse", "code": "zdr_decision_unavailable", "decision_call": false, "claims": null}
+    },
+    {
+      "id": "d_org_core_outage_with_connection",
+      "title": "Same with a connection named: still refused, and the BFF makes no decision call.",
+      "tags": ["outage_org_core"],
+      "inputs": {"org_zdr_intent": null, "org_entitled": null, "explicit_zdr": false, "space_zdr": false, "waiver_enabled": true, "connection": "own", "capability": "not_supported", "waiver_route": true, "ack": "valid", "outage": "org_core"},
+      "expect": {"decision": "refuse", "code": "zdr_decision_unavailable", "decision_call": false, "claims": null}
+    },
+    {
+      "id": "d_auth_core_outage_refuses_waiver_turn",
+      "title": "The decision endpoint is unavailable and a connection is named in a ZDR org: refused.",
+      "tags": ["outage_auth_core"],
+      "inputs": {"org_zdr_intent": true, "org_entitled": true, "explicit_zdr": false, "space_zdr": false, "waiver_enabled": true, "connection": "own", "capability": "not_supported", "waiver_route": true, "ack": "valid", "outage": "auth_core"},
+      "expect": {"decision": "refuse", "code": "zdr_decision_unavailable", "decision_call": true, "claims": null}
+    },
+    {
+      "id": "d_auth_core_outage_supported_connection",
+      "title": "The BFF cannot tell a supported connection from an unsupported one: a failed decision call refuses either way.",
+      "tags": ["outage_auth_core"],
+      "inputs": {"org_zdr_intent": true, "org_entitled": true, "explicit_zdr": false, "space_zdr": false, "waiver_enabled": true, "connection": "own", "capability": "supported", "waiver_route": false, "ack": "none", "outage": "auth_core"},
+      "expect": {"decision": "refuse", "code": "zdr_decision_unavailable", "decision_call": true, "claims": null}
+    },
+    {
+      "id": "d_auth_core_outage_leaves_ordinary_turns_alone",
+      "title": "No connection named: no decision is needed, so a decision outage changes nothing.",
+      "tags": ["outage_auth_core"],
+      "inputs": {"org_zdr_intent": true, "org_entitled": true, "explicit_zdr": false, "space_zdr": false, "waiver_enabled": true, "connection": "none", "capability": null, "waiver_route": null, "ack": "none", "outage": "auth_core"},
+      "expect": {"decision": "zdr", "code": "org_zdr", "decision_call": false, "claims": {"zdr": true, "org_zdr": true, "waiver": false}}
+    },
+    {
+      "id": "d_auth_core_outage_org_off",
+      "title": "Org not ZDR: no decision call, so the outage changes nothing.",
+      "tags": ["outage_auth_core"],
+      "inputs": {"org_zdr_intent": false, "org_entitled": true, "explicit_zdr": false, "space_zdr": false, "waiver_enabled": true, "connection": "own", "capability": "not_supported", "waiver_route": true, "ack": "none", "outage": "auth_core"},
+      "expect": {"decision": "persistent", "code": "org_zdr_off", "decision_call": false, "claims": {"zdr": false, "org_zdr": false, "waiver": false}}
+    },
+    {
+      "id": "d_integration_core_outage_refuses_waiver_turn",
+      "title": "The connection cannot be read: refused, retryable.",
+      "tags": ["outage_integration_core"],
+      "inputs": {"org_zdr_intent": true, "org_entitled": true, "explicit_zdr": false, "space_zdr": false, "waiver_enabled": true, "connection": "own", "capability": "not_supported", "waiver_route": true, "ack": "valid", "outage": "integration_core"},
+      "expect": {"decision": "refuse", "code": "zdr_decision_unavailable", "decision_call": true, "claims": null}
+    },
+    {
+      "id": "d_integration_core_outage_no_connection",
+      "title": "No connection named: integration-corev2 is not consulted.",
+      "tags": ["outage_integration_core"],
+      "inputs": {"org_zdr_intent": true, "org_entitled": true, "explicit_zdr": false, "space_zdr": false, "waiver_enabled": true, "connection": "none", "capability": null, "waiver_route": null, "ack": "none", "outage": "integration_core"},
+      "expect": {"decision": "zdr", "code": "org_zdr", "decision_call": false, "claims": {"zdr": true, "org_zdr": true, "waiver": false}}
+    },
+    {
+      "id": "d_integration_core_outage_org_off",
+      "title": "Org not ZDR: integration-corev2 is not consulted.",
+      "tags": ["outage_integration_core"],
+      "inputs": {"org_zdr_intent": false, "org_entitled": true, "explicit_zdr": false, "space_zdr": false, "waiver_enabled": true, "connection": "own", "capability": "not_supported", "waiver_route": true, "ack": "none", "outage": "integration_core"},
+      "expect": {"decision": "persistent", "code": "org_zdr_off", "decision_call": false, "claims": {"zdr": false, "org_zdr": false, "waiver": false}}
+    }
+  ],
+  "enforcement_rows": [
+    {
+      "id": "e_persistent_default_route",
+      "title": "A persistent token on the default chain: persistent.",
+      "tags": [],
+      "inputs": {
+        "bearers": [
+          {"zdr": false, "org_zdr": false, "waiver": null}
+        ],
+        "route": {"provider": "", "connection": null, "explicit_zdr": false}
+      },
+      "expect": {"decision": "persistent", "code": "org_zdr_off"}
+    },
+    {
+      "id": "e_persistent_subscription_route_unchanged",
+      "title": "A non-ZDR org on its own subscription connection: unchanged, nothing refused.",
+      "tags": ["non_zdr_unchanged"],
+      "inputs": {
+        "bearers": [
+          {"zdr": false, "org_zdr": false, "waiver": null}
+        ],
+        "route": {"provider": "openai-codex-subscription", "connection": "conn-1", "explicit_zdr": false}
+      },
+      "expect": {"decision": "persistent", "code": "org_zdr_off"}
+    },
+    {
+      "id": "e_zdr_default_route",
+      "title": "A ZDR token on the default chain: ZDR.",
+      "tags": [],
+      "inputs": {
+        "bearers": [
+          {"zdr": true, "org_zdr": true, "waiver": null}
+        ],
+        "route": {"provider": "", "connection": null, "explicit_zdr": false}
+      },
+      "expect": {"decision": "zdr", "code": "org_zdr"}
+    },
+    {
+      "id": "e_service_zdr_without_org_claim",
+      "title": "A service token that says zdr true and carries no org_zdr claim: ZDR.",
+      "tags": [],
+      "inputs": {
+        "bearers": [
+          {"zdr": true, "org_zdr": null, "waiver": null}
+        ],
+        "route": {"provider": "", "connection": null, "explicit_zdr": false}
+      },
+      "expect": {"decision": "zdr", "code": "org_zdr"}
+    },
+    {
+      "id": "e_service_persistent_without_org_claim",
+      "title": "A service token that says zdr false and carries no org_zdr claim: persistent.",
+      "tags": [],
+      "inputs": {
+        "bearers": [
+          {"zdr": false, "org_zdr": null, "waiver": null}
+        ],
+        "route": {"provider": "", "connection": null, "explicit_zdr": false}
+      },
+      "expect": {"decision": "persistent", "code": "org_zdr_off"}
+    },
+    {
+      "id": "e_explicit_zdr_raises_persistent_token",
+      "title": "The request asks for ZDR on a persistent token: ZDR. The flag raises the posture, it can never lower it.",
+      "tags": ["temporary_chat"],
+      "inputs": {
+        "bearers": [
+          {"zdr": false, "org_zdr": false, "waiver": null}
+        ],
+        "route": {"provider": "", "connection": null, "explicit_zdr": true}
+      },
+      "expect": {"decision": "zdr", "code": "explicit_zdr"}
+    },
+    {
+      "id": "e_zdr_token_never_reaches_subscription",
+      "title": "A ZDR token with a subscription route and no waiver: refused. It was silently re-routed before.",
+      "tags": ["silent_reroute"],
+      "inputs": {
+        "bearers": [
+          {"zdr": true, "org_zdr": true, "waiver": null}
+        ],
+        "route": {"provider": "openai-codex-subscription", "connection": "conn-1", "explicit_zdr": false}
+      },
+      "expect": {"decision": "refuse", "code": "zdr_connection_not_acknowledged"},
+      "note": "Resolver output for a ZDR token on a connection route with no waiver. Z-00 answers zdr_connection_not_supported at the gateway until Z-15 swaps in the resolver."
+    },
+    {
+      "id": "e_zdr_token_subscription_explicit",
+      "title": "A ZDR token, subscription route, explicit ZDR: the explicit-request refusal.",
+      "tags": ["temporary_chat", "silent_reroute"],
+      "inputs": {
+        "bearers": [
+          {"zdr": true, "org_zdr": true, "waiver": null}
+        ],
+        "route": {"provider": "openai-codex-subscription", "connection": "conn-1", "explicit_zdr": true}
+      },
+      "expect": {"decision": "refuse", "code": "zdr_explicit_request_not_supported_by_connection"}
+    },
+    {
+      "id": "e_temporary_chat_refuses_subscription_org_off",
+      "title": "Temporary chat on the subscription in a non-ZDR org: refused.",
+      "tags": ["temporary_chat"],
+      "inputs": {
+        "bearers": [
+          {"zdr": false, "org_zdr": false, "waiver": null}
+        ],
+        "route": {"provider": "openai-codex-subscription", "connection": "conn-1", "explicit_zdr": true}
+      },
+      "expect": {"decision": "refuse", "code": "zdr_explicit_request_not_supported_by_connection"}
+    },
+    {
+      "id": "e_waiver_on_bound_route",
+      "title": "A waiver on exactly the connection and provider it names: waived.",
+      "tags": [],
+      "inputs": {
+        "bearers": [
+          {"zdr": false, "org_zdr": true, "waiver": {"version": 1, "provider": "openai-codex-subscription", "connection": "conn-1"}}
+        ],
+        "route": {"provider": "openai-codex-subscription", "connection": "conn-1", "explicit_zdr": false}
+      },
+      "expect": {"decision": "waived", "code": "connection_not_zdr_capable"}
+    },
+    {
+      "id": "e_waiver_other_connection",
+      "title": "The same waiver on another connection: refused, never served.",
+      "tags": ["other_connection"],
+      "inputs": {
+        "bearers": [
+          {"zdr": false, "org_zdr": true, "waiver": {"version": 1, "provider": "openai-codex-subscription", "connection": "conn-1"}}
+        ],
+        "route": {"provider": "openai-codex-subscription", "connection": "conn-2", "explicit_zdr": false}
+      },
+      "expect": {"decision": "refuse", "code": "zdr_waiver_route_mismatch"}
+    },
+    {
+      "id": "e_waiver_default_route",
+      "title": "A waiver on the default chain (embeddings, memory, any Verevon provider): refused.",
+      "tags": [],
+      "inputs": {
+        "bearers": [
+          {"zdr": false, "org_zdr": true, "waiver": {"version": 1, "provider": "openai-codex-subscription", "connection": "conn-1"}}
+        ],
+        "route": {"provider": "", "connection": null, "explicit_zdr": false}
+      },
+      "expect": {"decision": "refuse", "code": "zdr_waiver_route_mismatch"}
+    },
+    {
+      "id": "e_waiver_platform_provider",
+      "title": "A waiver on a named Verevon provider: refused.",
+      "tags": [],
+      "inputs": {
+        "bearers": [
+          {"zdr": false, "org_zdr": true, "waiver": {"version": 1, "provider": "openai-codex-subscription", "connection": "conn-1"}}
+        ],
+        "route": {"provider": "azure-openai", "connection": null, "explicit_zdr": false}
+      },
+      "expect": {"decision": "refuse", "code": "zdr_waiver_route_mismatch"}
+    },
+    {
+      "id": "e_waiver_subscription_without_connection",
+      "title": "A waiver on the subscription provider with no connection id: refused.",
+      "tags": [],
+      "inputs": {
+        "bearers": [
+          {"zdr": false, "org_zdr": true, "waiver": {"version": 1, "provider": "openai-codex-subscription", "connection": "conn-1"}}
+        ],
+        "route": {"provider": "openai-codex-subscription", "connection": null, "explicit_zdr": false}
+      },
+      "expect": {"decision": "refuse", "code": "zdr_waiver_route_mismatch"}
+    },
+    {
+      "id": "e_waiver_with_explicit_zdr",
+      "title": "A crafted request: a valid waiver plus an explicit ZDR flag: refused.",
+      "tags": ["temporary_chat"],
+      "inputs": {
+        "bearers": [
+          {"zdr": false, "org_zdr": true, "waiver": {"version": 1, "provider": "openai-codex-subscription", "connection": "conn-1"}}
+        ],
+        "route": {"provider": "openai-codex-subscription", "connection": "conn-1", "explicit_zdr": true}
+      },
+      "expect": {"decision": "refuse", "code": "zdr_waiver_route_mismatch"}
+    },
+    {
+      "id": "e_waiver_unknown_version",
+      "title": "A waiver at a version this plane does not know: refused, fail closed.",
+      "tags": [],
+      "inputs": {
+        "bearers": [
+          {"zdr": false, "org_zdr": true, "waiver": {"version": 2, "provider": "openai-codex-subscription", "connection": "conn-1"}}
+        ],
+        "route": {"provider": "openai-codex-subscription", "connection": "conn-1", "explicit_zdr": false}
+      },
+      "expect": {"decision": "refuse", "code": "zdr_posture_mismatch"}
+    },
+    {
+      "id": "e_waiver_provider_not_waivable",
+      "title": "A waiver for a provider outside the v1 allowlist: refused even when the route matches it.",
+      "tags": [],
+      "inputs": {
+        "bearers": [
+          {"zdr": false, "org_zdr": true, "waiver": {"version": 1, "provider": "azure-openai", "connection": "conn-1"}}
+        ],
+        "route": {"provider": "azure-openai", "connection": "conn-1", "explicit_zdr": false}
+      },
+      "expect": {"decision": "refuse", "code": "zdr_waiver_route_mismatch"}
+    },
+    {
+      "id": "e_waiver_without_org_zdr_claim",
+      "title": "A waiver on a token with no org_zdr claim: refused, a waiver only lowers an org that is ZDR.",
+      "tags": [],
+      "inputs": {
+        "bearers": [
+          {"zdr": false, "org_zdr": null, "waiver": {"version": 1, "provider": "openai-codex-subscription", "connection": "conn-1"}}
+        ],
+        "route": {"provider": "openai-codex-subscription", "connection": "conn-1", "explicit_zdr": false}
+      },
+      "expect": {"decision": "refuse", "code": "zdr_posture_mismatch"}
+    },
+    {
+      "id": "e_waiver_with_org_zdr_false",
+      "title": "A waiver on a token whose org is not ZDR: refused.",
+      "tags": [],
+      "inputs": {
+        "bearers": [
+          {"zdr": false, "org_zdr": false, "waiver": {"version": 1, "provider": "openai-codex-subscription", "connection": "conn-1"}}
+        ],
+        "route": {"provider": "openai-codex-subscription", "connection": "conn-1", "explicit_zdr": false}
+      },
+      "expect": {"decision": "refuse", "code": "zdr_posture_mismatch"}
+    },
+    {
+      "id": "e_waiver_with_zdr_true",
+      "title": "A token that says zdr true and also carries a waiver contradicts itself: refused.",
+      "tags": [],
+      "inputs": {
+        "bearers": [
+          {"zdr": true, "org_zdr": true, "waiver": {"version": 1, "provider": "openai-codex-subscription", "connection": "conn-1"}}
+        ],
+        "route": {"provider": "openai-codex-subscription", "connection": "conn-1", "explicit_zdr": false}
+      },
+      "expect": {"decision": "refuse", "code": "zdr_posture_mismatch"}
+    },
+    {
+      "id": "e_org_zdr_without_waiver_is_not_persistent",
+      "title": "zdr false with org_zdr true and no waiver: refused, never served as persistent.",
+      "tags": ["no_unauthorized_persistent"],
+      "inputs": {
+        "bearers": [
+          {"zdr": false, "org_zdr": true, "waiver": null}
+        ],
+        "route": {"provider": "", "connection": null, "explicit_zdr": false}
+      },
+      "expect": {"decision": "refuse", "code": "zdr_posture_mismatch"}
+    },
+    {
+      "id": "e_mixed_zdr_bearers",
+      "title": "One bearer ZDR, the other not: refused.",
+      "tags": ["mixed_zdr_token_set"],
+      "inputs": {
+        "bearers": [
+          {"zdr": true, "org_zdr": true, "waiver": null},
+          {"zdr": false, "org_zdr": false, "waiver": null}
+        ],
+        "route": {"provider": "", "connection": null, "explicit_zdr": false}
+      },
+      "expect": {"decision": "refuse", "code": "zdr_posture_mismatch"}
+    },
+    {
+      "id": "e_mixed_zdr_bearers_reversed",
+      "title": "The same, in the other order: refused.",
+      "tags": ["mixed_zdr_token_set"],
+      "inputs": {
+        "bearers": [
+          {"zdr": false, "org_zdr": false, "waiver": null},
+          {"zdr": true, "org_zdr": true, "waiver": null}
+        ],
+        "route": {"provider": "", "connection": null, "explicit_zdr": false}
+      },
+      "expect": {"decision": "refuse", "code": "zdr_posture_mismatch"}
+    },
+    {
+      "id": "e_mixed_waiver_and_zdr_bearers",
+      "title": "One bearer waived, the other ZDR: refused.",
+      "tags": ["mixed_zdr_token_set"],
+      "inputs": {
+        "bearers": [
+          {"zdr": false, "org_zdr": true, "waiver": {"version": 1, "provider": "openai-codex-subscription", "connection": "conn-1"}},
+          {"zdr": true, "org_zdr": true, "waiver": null}
+        ],
+        "route": {"provider": "openai-codex-subscription", "connection": "conn-1", "explicit_zdr": false}
+      },
+      "expect": {"decision": "refuse", "code": "zdr_posture_mismatch"}
+    },
+    {
+      "id": "e_bearers_waived_for_different_connections",
+      "title": "Two waivers for different connections in one request: refused.",
+      "tags": ["mixed_zdr_token_set", "other_connection"],
+      "inputs": {
+        "bearers": [
+          {"zdr": false, "org_zdr": true, "waiver": {"version": 1, "provider": "openai-codex-subscription", "connection": "conn-1"}},
+          {"zdr": false, "org_zdr": true, "waiver": {"version": 1, "provider": "openai-codex-subscription", "connection": "conn-2"}}
+        ],
+        "route": {"provider": "openai-codex-subscription", "connection": "conn-1", "explicit_zdr": false}
+      },
+      "expect": {"decision": "refuse", "code": "zdr_posture_mismatch"}
+    },
+    {
+      "id": "e_equal_waived_bearers",
+      "title": "Every bearer carries the same waiver: waived.",
+      "tags": [],
+      "inputs": {
+        "bearers": [
+          {"zdr": false, "org_zdr": true, "waiver": {"version": 1, "provider": "openai-codex-subscription", "connection": "conn-1"}},
+          {"zdr": false, "org_zdr": true, "waiver": {"version": 1, "provider": "openai-codex-subscription", "connection": "conn-1"}}
+        ],
+        "route": {"provider": "openai-codex-subscription", "connection": "conn-1", "explicit_zdr": false}
+      },
+      "expect": {"decision": "waived", "code": "connection_not_zdr_capable"}
+    },
+    {
+      "id": "e_equal_zdr_bearers",
+      "title": "Every bearer is ZDR: ZDR.",
+      "tags": [],
+      "inputs": {
+        "bearers": [
+          {"zdr": true, "org_zdr": true, "waiver": null},
+          {"zdr": true, "org_zdr": true, "waiver": null}
+        ],
+        "route": {"provider": "", "connection": null, "explicit_zdr": false}
+      },
+      "expect": {"decision": "zdr", "code": "org_zdr"}
+    }
+  ]
+}
