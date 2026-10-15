@@ -568,6 +568,7 @@ pub(crate) async fn run_agent(
     state: &crate::state::StateStore,
     session_channel: Channel,
     inference_channel: Channel,
+    caller: &crate::auth::AuthenticatedUser,
     req: pb::RunAgentRequest,
     data_plane_bearer: Option<String>,
     session_bearer: Option<String>,
@@ -595,6 +596,7 @@ pub(crate) async fn run_agent(
         state,
         session_channel,
         inference_channel,
+        caller,
         req,
         tools,
         data_plane_bearer,
@@ -744,6 +746,7 @@ async fn run_agent_with_tools(
     state: &crate::state::StateStore,
     session_channel: Channel,
     inference_channel: Channel,
+    caller: &crate::auth::AuthenticatedUser,
     req: pb::RunAgentRequest,
     tools: Vec<pb::ToolDefinition>,
     data_plane_bearer: Option<String>,
@@ -763,6 +766,7 @@ async fn run_agent_with_tools(
         &req,
         mp_contracts::agentic_subscription::Switches::from_env(),
         std::env::var("EXECUTION_AGENT_MODEL").ok().as_deref(),
+        caller,
     )?;
     // The run's time budget, resolved once and shared with every delegated
     // child: the operator's wall clock (`EXECUTION_RUN_WALL_CLOCK_SECS`, off by
@@ -1930,6 +1934,9 @@ async fn run_rounds(
                             None,
                             None,
                             zdr,
+                            // Every step of a waived run runs the waived route's
+                            // retrieval mode; children share the same route (Z-18).
+                            ctx.route.is_waived(),
                             req.min_privacy_tier,
                             ctx.data_plane_bearer,
                             ctx.session_bearer,
@@ -4556,9 +4563,10 @@ async fn continuation_descriptor(
     permission_mode: &str,
 ) -> Result<String, tonic::Status> {
     if req.zdr {
-        return Err(tonic::Status::failed_precondition(
-            "ZDR runs cannot persist an approval continuation descriptor",
-        ));
+        return Err(mp_contracts::zdr_refusal::Refusal::feature_not_supported(
+            "approval_continuation",
+        )
+        .grpc_status(tonic::Code::FailedPrecondition));
     }
     // A server-resolved owner action is approval-only even when the outer run
     // was requested with `auto`. Preserve that stricter semantic in the
@@ -7174,6 +7182,7 @@ mod tests {
             &state,
             session_channel,
             inference_channel,
+            &plain_caller(),
             sample_request(),
             None,
             Some("session-token".to_owned()),
@@ -7262,6 +7271,7 @@ mod tests {
             &state,
             session_channel,
             inference_channel,
+            &plain_caller(),
             req,
             None,
             Some("session-token".to_owned()),
@@ -7335,6 +7345,7 @@ mod tests {
             &state,
             session_channel,
             inference_channel,
+            &plain_caller(),
             req,
             None,
             Some("session-token".to_owned()),
@@ -7360,6 +7371,12 @@ mod tests {
             pb::PrivacyTier::Sovereign as i32,
             "the run's min_privacy_tier must be threaded into the InferRequest"
         );
+    }
+
+    /// The verified caller of an ordinary run: a persistent user of an org that
+    /// is not ZDR, holding no waiver (Z-18).
+    fn plain_caller() -> crate::auth::AuthenticatedUser {
+        crate::auth::AuthenticatedUser::for_test("org-1", "user-1")
     }
 
     // --- The inference route: a run pinned to the ChatGPT subscription -------
@@ -7450,8 +7467,13 @@ mod tests {
         ObservedRoutes,
         SharedRecorder,
     ) {
-        let route = crate::agent_route::ModelRoute::resolve(&req, switches, env_agent_model)
-            .expect("the request's route is valid for these switches");
+        let route = crate::agent_route::ModelRoute::resolve(
+            &req,
+            switches,
+            env_agent_model,
+            &plain_caller(),
+        )
+        .expect("the request's route is valid for these switches");
         let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
         let session_channel = spawn_session_channel(rec.clone()).await;
         let observed_routes: ObservedRoutes = Arc::new(Mutex::new(Vec::new()));
@@ -8078,8 +8100,13 @@ mod tests {
             plan_mode: false,
             ..subscription_request()
         };
-        let route = crate::agent_route::ModelRoute::resolve(&req, switches, COMPOSE_AGENT_MODEL)
-            .expect("a pinned run that may act is valid with both switches on");
+        let route = crate::agent_route::ModelRoute::resolve(
+            &req,
+            switches,
+            COMPOSE_AGENT_MODEL,
+            &plain_caller(),
+        )
+        .expect("a pinned run that may act is valid with both switches on");
         let mut tools = offered_tool_defs();
         tools.push(pb::ToolDefinition {
             name: "delete_records".to_owned(),
@@ -8208,6 +8235,7 @@ mod tests {
             &state,
             session_channel,
             inference_channel,
+            &plain_caller(),
             subscription_request(),
             offered_tool_defs(),
             None,
@@ -8816,6 +8844,7 @@ mod tests {
             &state,
             session_channel,
             inference_channel,
+            &plain_caller(),
             sample_request(),
             None,
             Some("session-token".to_owned()),
@@ -8887,6 +8916,7 @@ mod tests {
             &state,
             session_channel,
             inference_channel,
+            &plain_caller(),
             sample_request(),
             None,
             Some("session-token".to_owned()),
@@ -8957,6 +8987,7 @@ mod tests {
             &state,
             session_channel,
             inference_channel,
+            &plain_caller(),
             sample_request(),
             None,
             Some("session-token".to_owned()),
@@ -9047,6 +9078,7 @@ mod tests {
             &state,
             session_channel,
             inference_channel,
+            &plain_caller(),
             sample_request(),
             vec![pb::ToolDefinition {
                 name: "knowledge_search".to_owned(),
@@ -9118,6 +9150,7 @@ mod tests {
             &state,
             session_channel,
             inference_channel,
+            &plain_caller(),
             req,
             gated_tools,
             None,
@@ -9185,6 +9218,7 @@ mod tests {
             &state,
             session_channel,
             inference_channel,
+            &plain_caller(),
             req,
             vec![pb::ToolDefinition {
                 name: "delete_records".to_owned(),
@@ -9271,6 +9305,7 @@ mod tests {
             &state,
             session_channel,
             inference_channel,
+            &plain_caller(),
             req,
             tools,
             None,
@@ -9424,6 +9459,7 @@ mod tests {
             &state,
             session_channel,
             inference_channel,
+            &plain_caller(),
             req,
             tools,
             None,
@@ -9615,6 +9651,7 @@ mod tests {
             &state,
             session_channel,
             inference_channel,
+            &plain_caller(),
             req,
             tools,
             None,
@@ -9810,6 +9847,7 @@ mod tests {
             &state,
             session_channel,
             inference_channel,
+            &plain_caller(),
             sample_request(),
             None,
             Some("session-token".to_owned()),
@@ -9896,6 +9934,7 @@ mod tests {
             &state,
             session_channel,
             inference_channel,
+            &plain_caller(),
             request,
             None,
             Some("session-token".to_owned()),
@@ -9968,6 +10007,7 @@ mod tests {
             &state,
             session_channel,
             inference_channel,
+            &plain_caller(),
             sample_request(),
             None,
             Some("session-token".to_owned()),
@@ -10047,6 +10087,7 @@ mod tests {
             &state,
             session_channel,
             inference_channel,
+            &plain_caller(),
             sample_request(),
             None,
             Some("session-token".to_owned()),
@@ -10284,6 +10325,7 @@ mod tests {
             &state,
             session_channel,
             inference_channel,
+            &plain_caller(),
             sample_request(),
             None,
             Some("session-token".to_owned()),
@@ -10484,6 +10526,7 @@ mod tests {
             &state,
             session_channel,
             inference_channel,
+            &plain_caller(),
             req,
             None,
             Some("session-token".to_owned()),
@@ -10566,6 +10609,7 @@ mod tests {
             &state,
             session_channel,
             inference_channel,
+            &plain_caller(),
             req,
             None,
             Some("session-token".to_owned()),
@@ -10655,6 +10699,7 @@ mod tests {
             &state,
             session_channel,
             inference_channel,
+            &plain_caller(),
             req,
             None,
             Some("session-token".to_owned()),
@@ -10738,6 +10783,7 @@ mod tests {
             &state,
             session_channel,
             inference_channel,
+            &plain_caller(),
             req,
             None,
             Some("session-token".to_owned()),
@@ -10818,6 +10864,7 @@ mod tests {
             &state,
             session_channel,
             inference_channel,
+            &plain_caller(),
             sample_request(),
             None,
             Some("session-token".to_owned()),
@@ -10897,6 +10944,7 @@ mod tests {
             &state,
             session_channel,
             inference_channel,
+            &plain_caller(),
             req,
             gated_tools,
             None,
@@ -10986,6 +11034,7 @@ mod tests {
             &state,
             session_channel,
             inference_channel,
+            &plain_caller(),
             req,
             plan_tools,
             None,
@@ -11054,6 +11103,7 @@ mod tests {
             &state,
             session_channel,
             inference_channel,
+            &plain_caller(),
             sample_request(),
             None,
             Some("session-token".to_owned()),
@@ -11127,6 +11177,7 @@ mod tests {
             &state,
             session_channel,
             inference_channel,
+            &plain_caller(),
             req,
             None,
             Some("session-token".to_owned()),
@@ -11221,6 +11272,7 @@ mod tests {
             &state,
             session_channel,
             inference_channel,
+            &plain_caller(),
             sample_request(),
             None,
             Some("session-token".to_owned()),
@@ -11302,6 +11354,7 @@ mod tests {
             &state,
             session_channel,
             inference_channel,
+            &plain_caller(),
             sample_request(),
             None,
             Some("session-token".to_owned()),
@@ -11368,6 +11421,7 @@ mod tests {
             &state,
             session_channel,
             inference_channel,
+            &plain_caller(),
             sample_request(),
             None,
             Some("session-token".to_owned()),
@@ -11442,6 +11496,7 @@ mod tests {
             &state,
             session_channel,
             inference_channel,
+            &plain_caller(),
             req,
             None,
             Some("session-token".to_owned()),
@@ -11523,6 +11578,7 @@ mod tests {
             &state,
             session_channel,
             inference_channel,
+            &plain_caller(),
             req,
             None,
             Some("session-token".to_owned()),
@@ -11781,6 +11837,7 @@ mod tests {
             &state,
             session_channel,
             inference_channel,
+            &plain_caller(),
             req,
             None,
             Some("session-token".to_owned()),
@@ -11880,6 +11937,7 @@ mod tests {
             &state,
             session_channel,
             inference_channel,
+            &plain_caller(),
             req,
             None,
             Some("session-token".to_owned()),
@@ -11926,6 +11984,7 @@ mod tests {
             &state,
             session_channel,
             inference_channel,
+            &plain_caller(),
             req,
             None,
             Some("session-token".to_owned()),
@@ -12399,6 +12458,7 @@ mod tests {
             &state,
             session_channel,
             inference_channel,
+            &plain_caller(),
             req,
             gated_tools,
             None,
@@ -12475,6 +12535,7 @@ mod tests {
             &state,
             session_channel,
             inference_channel,
+            &plain_caller(),
             req,
             gated_tools,
             None,
@@ -12551,6 +12612,7 @@ mod tests {
             &state,
             session_channel,
             inference_channel,
+            &crate::auth::AuthenticatedUser::for_test_with_zdr(&req.org_id, &req.user_id, req.zdr),
             req,
             None,
             Some(bearer),
@@ -12567,6 +12629,134 @@ mod tests {
         )
         .await
         .expect("a delegating run is finalized")
+    }
+
+    /// The rules double for a waived turn: the parent is the gateway's own run,
+    /// started under the user's waived credential on `connection`, so a delegated
+    /// child must inherit exactly that receipt (Z-17, Z-18).
+    fn real_waived_rules_for(
+        rec: &SharedRecorder,
+        connection: &str,
+        ack: &str,
+    ) -> Arc<crate::runtime_loop::session_core_rules_double::SessionCoreRules> {
+        let rules =
+            Arc::new(crate::runtime_loop::session_core_rules_double::SessionCoreRules::default());
+        let req = subscription_request();
+        rules.seed_thread(&req.thread_id, &req.org_id, &req.user_id);
+        rules.seed_waived_run(
+            &req.run_id,
+            &req.thread_id,
+            &req.org_id,
+            &req.user_id,
+            connection,
+            ack,
+        );
+        rec.lock().unwrap().rules = Some(rules.clone());
+        rules
+    }
+
+    /// A waived Do run on its own pinned route, delegating once. Its child is
+    /// registered with lineage under the same waiver, and every round of the run,
+    /// the parent's and the child's, is served on that one connection with ZDR off
+    /// for this run only (Z-18). The offline counterpart of the live probe Z4: the
+    /// live proof remains the orchestrator's to run.
+    #[tokio::test]
+    async fn a_waived_run_registers_its_delegated_child_with_lineage_on_its_own_route() {
+        const DELEGATED_GOAL: &str = "Find the current Bergen weather";
+        const SUBAGENT_ANSWER: &str = "Bergen: 8 degrees and raining.";
+
+        let req = subscription_request();
+        let caller = crate::auth::AuthenticatedUser::for_test_with_waiver(
+            &req.org_id,
+            &req.user_id,
+            "conn_1",
+            "ack-1",
+        );
+        let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
+        let rules = real_waived_rules_for(&rec, "conn_1", "ack-1");
+        let session_channel = spawn_session_channel(rec.clone()).await;
+        let observed_routes: ObservedRoutes = Arc::new(Mutex::new(Vec::new()));
+        let inference_channel = spawn_inference_channel_with_routes(
+            vec![
+                Scripted::ToolCalls {
+                    content: "Delegating the lookup.".to_owned(),
+                    calls: vec![subagent_call(
+                        "sub-1",
+                        &format!(r#"{{"goal":"{DELEGATED_GOAL}"}}"#),
+                    )],
+                },
+                Scripted::Answer(SUBAGENT_ANSWER.to_owned()),
+                Scripted::Answer(format!("Delegated result: {SUBAGENT_ANSWER}")),
+            ],
+            observed_routes.clone(),
+            Serving::Echo,
+        )
+        .await;
+        let route =
+            crate::agent_route::ModelRoute::resolve(&req, SWITCH_ON, COMPOSE_AGENT_MODEL, &caller)
+                .expect("the waived route is admitted on its own connection");
+        assert!(route.is_waived(), "the route carries the waiver");
+
+        let session_bearer =
+            crate::runtime_loop::session_core_rules_double::user_bearer_with_waiver(
+                &req.org_id,
+                &req.user_id,
+                "conn_1",
+                "ack-1",
+            );
+        let state = crate::state::StateStore::new();
+        let resp = run_agent_with_route(
+            &state,
+            session_channel,
+            inference_channel,
+            req.clone(),
+            offered_tool_defs(),
+            None,
+            Some(session_bearer),
+            "inference-token".to_owned(),
+            &ALLOW_CAPABILITY_POLICY,
+            &crate::runtime_loop::session_core_rules_double::SignedServiceTokens,
+            None,
+            None,
+            &test_sandbox_manager_client(),
+            "test-backend",
+            None,
+            &test_sandbox_tokens(),
+            None,
+            route,
+            crate::run_budget::RunDeadline::NONE,
+        )
+        .await
+        .expect("the waived run is finalized");
+        assert_eq!(resp.status, "completed", "{}", resp.final_output);
+
+        let snapshot = rules.snapshot();
+        assert!(
+            snapshot.refusals.is_empty(),
+            "session-core's rules refused part of the waived run: {:?}",
+            snapshot.refusals
+        );
+        let children = snapshot.child_runs();
+        assert_eq!(children.len(), 1, "the waived run registers its child");
+        let (child_id, child) = children[0];
+        assert_eq!(child.parent_run_id, req.run_id);
+        assert_eq!(
+            child.retention_class, "zdr_waived",
+            "the child takes the parent's receipt, not an ordinary one"
+        );
+        assert_eq!(child.waiver_connection_id.as_deref(), Some("conn_1"));
+        assert_eq!(child.waiver_ack_id.as_deref(), Some("ack-1"));
+        assert_eq!(snapshot.edges.len(), 1, "and its lineage edge is recorded");
+        assert_eq!(snapshot.edges[0].parent_run_id, req.run_id);
+        assert_eq!(&snapshot.edges[0].child_run_id, child_id);
+
+        let routes = observed_routes.lock().unwrap();
+        assert_eq!(routes.len(), 3, "parent, child and the parent's last round");
+        for round in routes.iter() {
+            assert_eq!(round.provider_hint, "openai-codex-subscription");
+            assert_eq!(round.subscription_connection_id, "conn_1");
+            assert_eq!(round.model, "gpt-5.6-terra");
+        }
     }
 
     /// The root cause, end to end. A delegated child run must be registered,
@@ -13064,6 +13254,7 @@ mod tests {
             &state,
             session_channel,
             inference_channel,
+            &plain_caller(),
             sample_request(),
             None,
             Some("session-token".to_owned()),
@@ -13133,6 +13324,7 @@ mod tests {
             &state,
             session_channel,
             inference_channel,
+            &plain_caller(),
             sample_request(),
             None,
             Some("session-token".to_owned()),
@@ -13215,6 +13407,7 @@ mod tests {
             &state,
             session_channel,
             inference_channel,
+            &plain_caller(),
             req,
             None,
             Some("session-token".to_owned()),

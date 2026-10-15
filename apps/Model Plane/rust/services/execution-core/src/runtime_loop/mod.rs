@@ -316,6 +316,9 @@ pub async fn execute_step(
         browser_event_sink,
         state,
         zdr,
+        // The compatibility entry point has no caller credential, so it never
+        // runs a waived step (Z-18).
+        false,
         min_privacy_tier,
         data_plane_bearer,
         session_bearer,
@@ -350,6 +353,10 @@ pub(crate) async fn execute_step_with_browser_grant(
     browser_event_sink: Option<&dyn crate::browser_agent::BrowserEventSink>,
     state: Option<&crate::state::StateStore>,
     zdr: bool,
+    // The caller holds the connection waiver for this step (Z-18). Retrieval
+    // then runs in the filtering mode, so restricted documents never reach the
+    // personal account.
+    waived: bool,
     // `ExecuteStepRequest.min_privacy_tier` (field 10) / `RunAgentRequest`'s
     // field of the same name, depending on caller. Only reaches
     // `knowledge_search` today — see `execute_knowledge_search`.
@@ -375,6 +382,7 @@ pub(crate) async fn execute_step_with_browser_grant(
         browser_event_sink,
         state,
         zdr,
+        waived,
         min_privacy_tier,
         data_plane_bearer,
         session_bearer,
@@ -414,6 +422,9 @@ pub(crate) async fn execute_step_with_subagent(
     browser_event_sink: Option<&dyn crate::browser_agent::BrowserEventSink>,
     state: Option<&crate::state::StateStore>,
     zdr: bool,
+    // The run's route is the caller's waived route (Z-18); see
+    // `execute_step_with_browser_grant`.
+    waived: bool,
     // `ExecuteStepRequest.min_privacy_tier` (field 10) / `RunAgentRequest`'s
     // field of the same name, depending on caller. Only reaches
     // `knowledge_search` today — see `execute_knowledge_search`.
@@ -439,6 +450,7 @@ pub(crate) async fn execute_step_with_subagent(
         browser_event_sink,
         state,
         zdr,
+        waived,
         min_privacy_tier,
         data_plane_bearer,
         session_bearer,
@@ -469,6 +481,7 @@ async fn execute_step_inner(
     browser_event_sink: Option<&dyn crate::browser_agent::BrowserEventSink>,
     state: Option<&crate::state::StateStore>,
     zdr: bool,
+    waived: bool,
     // `ExecuteStepRequest.min_privacy_tier` (field 10) / `RunAgentRequest`'s
     // field of the same name, depending on caller. Only reaches
     // `knowledge_search` today — see `execute_knowledge_search`.
@@ -636,6 +649,7 @@ async fn execute_step_inner(
             org_id,
             user_id,
             zdr,
+            waived,
             min_privacy_tier,
             data_plane_bearer,
         )
@@ -1191,6 +1205,9 @@ async fn execute_knowledge_search(
     org_id: &str,
     user_id: &str,
     zdr: bool,
+    // The caller holds the connection waiver (Z-18): the retrieval is filtered,
+    // `zdr_mode = reject`, instead of sent unfiltered to the personal account.
+    waived: bool,
     // `ExecuteStepRequest.min_privacy_tier` (field 10), threaded down so
     // `KnowledgeClient::search` can derive a sovereignty posture from the run's
     // own privacy floor when no signed claim exists. See
@@ -1224,6 +1241,7 @@ async fn execute_knowledge_search(
             &input.query,
             input.top_k,
             zdr,
+            waived,
             min_privacy_tier,
             data_plane_bearer,
         )
