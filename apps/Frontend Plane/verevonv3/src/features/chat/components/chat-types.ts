@@ -234,9 +234,12 @@ export const LOW_CONFIDENCE_ANSWER_THRESHOLD = 0.75
  *  - `reconnect`: renew the ChatGPT sign-in first, then try again.
  *  - `wait`: the refusing service accepts calls again at a known instant; the
  *    retry control stays disabled until then and never fires by itself.
- *  - `none`: sending the same turn again cannot help, so no retry is offered.
+ *  - `open_integrations`: review the connection the turn used (a zero-retention
+ *    refusal: the reader's own ChatGPT connection), then try again.
+ *  - `none`: sending the same turn again cannot help, so no retry is offered
+ *    (a model or a setting has to change first).
  */
-export type StreamFailureAction = 'retry' | 'reconnect' | 'wait' | 'none'
+export type StreamFailureAction = 'retry' | 'reconnect' | 'wait' | 'open_integrations' | 'none'
 
 /**
  * One conversation turn as the chat renders it.

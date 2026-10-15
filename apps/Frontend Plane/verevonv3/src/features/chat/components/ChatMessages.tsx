@@ -3339,12 +3339,13 @@ function msUntilNextLocalMidnight(now: number): number {
 }
 
 /**
- * Where a ChatGPT subscription is reconnected: its panel on the reader's own
- * Profile page. Not Settings → Integrations, which is admin-only and sends a
+ * Where a ChatGPT subscription is reconnected, and where a zero-retention
+ * refusal sends the reader to review that connection: its panel on the reader's
+ * own Profile page. Not Settings → Integrations, which is admin-only and sends a
  * member to the dashboard. The connection is the reader's own, and only they
- * can renew it, so the link must work for every member.
+ * can renew or confirm it, so the link must work for every member.
  */
-const CHATGPT_RECONNECT_HREF = '/account#chatgpt-subscription'
+const CHATGPT_CONNECTION_HREF = '/account#chatgpt-subscription'
 
 export function ErrorNotice(props: {
   message: string
@@ -3411,9 +3412,16 @@ export function ErrorNotice(props: {
       <Show when={action() !== 'none'}>
         <div class="verevon-chat-error-notice__actions">
           <Show when={action() === 'reconnect'}>
-            <a class="verevon-chat-error-notice__reconnect" href={CHATGPT_RECONNECT_HREF} link>
+            <a class="verevon-chat-error-notice__reconnect" href={CHATGPT_CONNECTION_HREF} link>
               <Plug size={14} />
               {i18n.tr('Koble til ChatGPT på nytt', 'Reconnect ChatGPT')}
+            </a>
+          </Show>
+          {/* A zero-retention refusal: the reader reviews the connection, then sends again. */}
+          <Show when={action() === 'open_integrations'}>
+            <a class="verevon-chat-error-notice__connection" href={CHATGPT_CONNECTION_HREF} link>
+              <Plug size={14} />
+              {i18n.tr('Åpne ChatGPT-tilkoblingen', 'Open the ChatGPT connection')}
             </a>
           </Show>
           <button

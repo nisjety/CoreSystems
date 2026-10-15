@@ -11,6 +11,12 @@ import {
   type RecalledMemory,
 } from '@/shared/api/chat-client'
 import {
+  isZdrCode,
+  type Translate,
+  type ZdrRefusalAction,
+  zdrRefusalPresentation,
+} from '@/shared/api/zdr-refusals'
+import {
   blobToDataUrl,
   parseDataUrl,
 } from '@/shared/lib/blob-data'
@@ -172,6 +178,8 @@ export type StreamFailureDetails = {
   now?: number
   /** The zone to read the reset time in. Defaults to the viewer's own. */
   timeZone?: string
+  /** For a zero-retention refusal that names a feature: the feature's key. */
+  feature?: string
 }
 
 /**
@@ -349,6 +357,34 @@ function rateLimitedPresentation(
 }
 
 /**
+ * The control a zero-retention refusal's action gives the reader. Retry is the
+ * button; open the connection gives a link and then the button. Choosing another
+ * model or turning a feature off changes the turn, so sending it again as it
+ * was cannot help: no button, and the words say what to change.
+ */
+function zdrStreamAction(action: ZdrRefusalAction): StreamFailureAction {
+  if (action === 'retry') return 'retry'
+  if (action === 'open_integrations') return 'open_integrations'
+  return 'none'
+}
+
+/**
+ * A zero-retention refusal in a turn. Nothing was saved (the refusal is made
+ * before a model runs, or the request stored nothing), so what streamed is not
+ * the answer, and it is a refusal rather than an outage. The words are the
+ * catalogue's, in the reader's language; the server's own text is never shown.
+ */
+function zdrStreamPresentation(code: string, tr: Translate, feature: string | undefined): StreamFailurePresentation {
+  const shown = zdrRefusalPresentation(code, feature, tr)
+  return {
+    message: shown.next === null ? shown.message : `${shown.message} ${shown.next}`,
+    unsaved: true,
+    unavailable: false,
+    action: zdrStreamAction(shown.action),
+  }
+}
+
+/**
  * Presentation for a server-reported stream failure, by its code.
  *
  * Only the codes that change what the reader must be told are named; every
@@ -389,6 +425,9 @@ export function streamFailurePresentation(
   tr: (noText: string, enText: string) => string,
   details: StreamFailureDetails = {},
 ): StreamFailurePresentation {
+  // Every zero-retention code, the ones this SPA does not know included: the
+  // server's text for them is English operator wording, never shown.
+  if (code !== undefined && isZdrCode(code)) return zdrStreamPresentation(code, tr, details.feature)
   const server = serverMessage.trim()
   const now = details.now ?? Date.now()
   switch (code) {

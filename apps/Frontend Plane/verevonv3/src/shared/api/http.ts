@@ -19,12 +19,18 @@ export const SESSION_EXPIRED_EVENT = 'verevon:session-expired'
 export class ApiError extends Error {
   readonly status: number
   readonly code: string | null
+  /**
+   * The feature a zero-retention refusal names (`zdr_feature_not_supported`),
+   * by its key, when the body carries one. Null otherwise.
+   */
+  readonly feature: string | null
 
-  constructor(message: string, status: number, code: string | null) {
+  constructor(message: string, status: number, code: string | null, feature: string | null = null) {
     super(message)
     this.name = 'ApiError'
     this.status = status
     this.code = code
+    this.feature = feature
   }
 }
 
@@ -49,8 +55,13 @@ function applyDevAuth(headers: Headers): void {
  *    `{ error, code: "no_speech_detected" }`, keep their top-level code
  *  - Better Auth passthrough:   `{ code, message }` (auth routes are proxied
  *    verbatim by the gateway, so the SPA sees Better Auth's native shape)
+ * A zero-retention refusal also names its feature (`error.feature`, a key); it
+ * is returned only when present, so every other error keeps its exact shape.
  */
-export function extractError(body: unknown, status: number): { code: string | null; message: string } {
+export function extractError(
+  body: unknown,
+  status: number,
+): { code: string | null; message: string; feature?: string } {
   if (body && typeof body === 'object') {
     const record = body as Record<string, unknown>
 

@@ -7,6 +7,7 @@ import {
 } from './orchestration-client'
 
 import { readSseStream, type SseEvent } from './sse'
+import { isZdrCode } from './zdr-refusals'
 import {
   isSelectablePrivacyTier,
   normalizeAnswerServedBy,
@@ -242,6 +243,11 @@ export type ChatVerificationEvent = {
 
 /** Mid-run user messages the agent has just been handed. */
 export type ChatQueuedInputEvent = { messages: string[] }
+/**
+ * An answer produced in a reduced form (`retrieval_notice`). `code` is the stable reason and `wordingKey` the
+ * key the client's wording is filed under: the gateway sends no sentence, so the text is the client's to write.
+ */
+export type ChatRetrievalNoticeEvent = { code: string; wordingKey: string; requestId?: string }
 export type ChatErrorEvent = {
   code: string
   message: string
@@ -261,6 +267,12 @@ export type ChatErrorEvent = {
    * re-validate it.
    */
   resetsAt?: string
+  /**
+   * For a zero-retention refusal that names a feature (`zdr_feature_not_supported`):
+   * the feature's stable key, such as `web_search`. The SPA words it in the
+   * reader's language (`zdr-refusals.ts`). Absent for every other error.
+   */
+  feature?: string
 }
 export type ChatArtifactEvent = {
   id?: string
@@ -657,6 +669,11 @@ export type ChatStreamHandlers = {
    */
   onQueuedInput?: (event: ChatQueuedInputEvent) => void
   /**
+   * The answer was produced in a reduced form, so the user must be told: a ZDR answer that used text search
+   * only. Ungated: sent whatever features the client opted into. See `ChatRetrievalNoticeEvent`.
+   */
+  onRetrievalNotice?: (event: ChatRetrievalNoticeEvent) => void
+  /**
    * Any SSE event this client has no case for. The gateway relays upstream
    * events verbatim with no allowlist, so a new backend event reaches the
    * browser and — before this hook — died here silently. Log, never drop.
@@ -918,6 +935,19 @@ function failureTiming(payload: Record<string, unknown>): Pick<ChatErrorEvent, '
     ...(delay !== undefined && Number.isFinite(delay) && delay >= 0 ? { retryAfterMs: delay } : {}),
     ...(resetsAt !== undefined && Number.isFinite(Date.parse(resetsAt)) ? { resetsAt } : {}),
   }
+}
+
+/**
+ * The feature a zero-retention refusal names, as the server sent its key: on
+ * the frame, or in its error envelope. Absent when neither names one, so an
+ * error without it keeps its exact shape.
+ */
+function failureFeature(
+  payload: Record<string, unknown>,
+  envelope: Record<string, unknown> | undefined,
+): Pick<ChatErrorEvent, 'feature'> {
+  const feature = str(payload.feature) ?? str(envelope?.feature)
+  return feature ? { feature } : {}
 }
 
 function emitCitation(value: unknown, handlers: ChatStreamHandlers): void {
@@ -1705,6 +1735,16 @@ function dispatchEvent(event: SseEvent, handlers: ChatStreamHandlers): void {
       }
       break
     }
+    case 'retrieval_notice': {
+      // Control: a reduced answer is told to the user whatever features were opted into. A notice without its
+      // reason and wording key is a malformed frame, so it is not reported as a reduction.
+      const code = str(payload.code)
+      const wordingKey = str(payload.wording_key)
+      if (code && wordingKey) {
+        handlers.onRetrievalNotice?.({ code, wordingKey, requestId: str(payload.request_id) })
+      }
+      break
+    }
     default: {
       // STREAM_* envelopes are emitted by some upstreams and are noise here.
       // Everything else is a backend event this client has not learned yet:
@@ -1731,8 +1771,19 @@ function dispatchEvent(event: SseEvent, handlers: ChatStreamHandlers): void {
  * the browser session is no longer accepted: the run itself is unaffected, but
  * no reconnect can succeed until the user signs in again, so reporting it as a
  * lost connection told them the wrong thing and retried into the same refusal.
+ *
+ * A zero-retention refusal is the server's answer, not a broken connection, so
+ * it keeps its code and feature (and a 403 for it is not a sign-in problem). It
+ * is checked first, for that reason.
  */
 function streamConnectionFailure(err: unknown, fallback: string): ChatErrorEvent {
+  if (err instanceof ApiError && err.code !== null && isZdrCode(err.code)) {
+    return {
+      code: err.code,
+      message: err.message,
+      ...(err.feature ? { feature: err.feature } : {}),
+    }
+  }
   if (err instanceof ApiError && err.status === 401) {
     return {
       code: 'unauthorized',
