@@ -29,7 +29,7 @@ on:
       - "scripts/tests/zdr-contract-schema.test.mjs"
       - ".github/workflows/contract-goldens.yml"
   push:
-    branches: [main]
+    branches: [main, fix/ui-premium-restore]
     paths:
       - "apps/Model Plane/api/contracts/**"
       - "apps/**/zdr-posture-matrix.json*"

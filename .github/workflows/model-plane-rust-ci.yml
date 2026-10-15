@@ -39,7 +39,7 @@ on:
       - "scripts/tests/zdr-contract-sync.test.sh"
       - ".github/workflows/model-plane-rust-ci.yml"
   push:
-    branches: [main]
+    branches: [main, fix/ui-premium-restore]
     paths:
       - "apps/Model Plane/rust/**"
       - "apps/Model Plane/proto/**"

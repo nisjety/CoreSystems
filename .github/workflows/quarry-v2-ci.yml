@@ -119,12 +119,12 @@ name: Quarry-v2 CI
 # undetected.
 on:
   pull_request:
-    branches: [main]
+    branches: [main, fix/ui-premium-restore]
     paths:
       - 'apps/Ingestion Plane/Quarry-v2/**'
       - '.github/workflows/quarry-v2-ci.yml'
   push:
-    branches: [main]
+    branches: [main, fix/ui-premium-restore]
     paths:
       - 'apps/Ingestion Plane/Quarry-v2/**'
       - '.github/workflows/quarry-v2-ci.yml'
