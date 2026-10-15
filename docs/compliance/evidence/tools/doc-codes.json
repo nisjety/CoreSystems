@@ -18,6 +18,7 @@
   ],
   "built": {
     "zdr_unavailable": ["apps/Model Plane/rust/services/inference-core/src/grpc.rs"],
+    "zdr_dense_unavailable": ["apps/Model Plane/rust/services/model-gateway/src/retrieval_metadata.rs", "apps/Data Plane v2/services/retrieval-engine-rs/src/pipeline/orchestrator.rs"],
     "zdr_no_attested_provider": ["apps/Frontend Plane/verevonv3/apps/gateway/src/domains/orgs/settings.rs"],
     "zdr_gate_unavailable": ["apps/Frontend Plane/verevonv3/apps/gateway/src/domains/orgs/settings.rs"],
     "zdr_contractual": ["apps/Frontend Plane/verevonv3/apps/gateway/src/domains/orgs/settings.rs"],
