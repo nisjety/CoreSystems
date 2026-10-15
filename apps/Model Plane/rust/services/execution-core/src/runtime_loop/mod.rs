@@ -1768,6 +1768,7 @@ async fn resolve_write_approval(
     let created = client
         .create_approval(authenticated_session_request(
             pb::CreateApprovalRequest {
+                continuation_mode: String::new(),
                 run_id: run_id.to_owned(),
                 step_id: step_id.to_owned(),
                 kind: pb::ApprovalKind::ToolCall as i32,

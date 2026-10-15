@@ -4488,6 +4488,13 @@ async fn pause_for_approval(
         continuation_descriptor(req, step_id, tool_name, tool_input, permission_mode).await?;
     let request = authenticated_session_request(
         pb::CreateApprovalRequest {
+            // Cold (the delivery worker) unless the durable-loop switch is on and
+            // the run retains state (build plan WS03 S2); default off.
+            continuation_mode: mp_contracts::loop_fold::continuation_mode_for(
+                req.zdr,
+                mp_contracts::loop_fold::continue_after_approval_enabled(),
+            )
+            .to_owned(),
             run_id: req.run_id.clone(),
             step_id: step_id.to_owned(),
             // Every pause used to report itself as DESTRUCTIVE. That is true of
@@ -6702,6 +6709,13 @@ mod tests {
             _: Request<pb::GetApprovalRequest>,
         ) -> Result<Response<pb::GetApprovalResponse>, Status> {
             Err(Status::unimplemented("get_approval not used"))
+        }
+
+        async fn consume_approval(
+            &self,
+            _: Request<pb::ConsumeApprovalRequest>,
+        ) -> Result<Response<pb::ConsumeApprovalResponse>, Status> {
+            Err(Status::unimplemented("consume_approval not needed in test"))
         }
 
         async fn decide_approval(

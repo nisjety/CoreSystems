@@ -269,6 +269,7 @@ impl BrowserEventSink for OrchestrationEventSink {
         let mut orchestration = self.client();
         let expires_in = approval_timeout_seconds();
         let created = match self.request(pb::CreateApprovalRequest {
+            continuation_mode: String::new(),
             run_id: config.run_id.clone(),
             step_id: detail.action_id.clone(),
             kind: pb::ApprovalKind::Destructive as i32,
@@ -466,6 +467,7 @@ mod tests {
         AcknowledgeApprovalDeliveryRequest, AcknowledgeApprovalDeliveryResponse,
         AttachSubagentRequest, AttachSubagentResponse, ClaimApprovalDeliveriesRequest,
         ClaimApprovalDeliveriesResponse, CreateApprovalRequest, CreateApprovalResponse,
+        ConsumeApprovalRequest, ConsumeApprovalResponse,
         DecideApprovalRequest, DecideApprovalResponse, GetApprovalContinuationRequest,
         GetApprovalContinuationResponse, GetApprovalRequest, GetApprovalResponse, GetPlanRequest,
         GetPlanResponse, GetSubagentLineageRequest, GetSubagentLineageResponse, GetTodoRequest,
@@ -565,6 +567,8 @@ mod tests {
             let request = request.into_inner();
             Ok(Response::new(CreateApprovalResponse {
                 approval: Some(pb::Approval {
+                    consumed_at: None,
+                    continuation_mode: String::new(),
                     id: "appr-test-1".into(),
                     run_id: request.run_id,
                     step_id: request.step_id,
@@ -603,6 +607,8 @@ mod tests {
             // cancel check or the (short, cfg!(test)) timeout.
             Ok(Response::new(GetApprovalResponse {
                 approval: Some(pb::Approval {
+                    consumed_at: None,
+                    continuation_mode: String::new(),
                     id: approval_id,
                     run_id: "run_001".into(),
                     step_id: "act_1".into(),
@@ -619,6 +625,13 @@ mod tests {
                 }),
             }))
         }
+        async fn consume_approval(
+            &self,
+            _: TonicRequest<ConsumeApprovalRequest>,
+        ) -> Result<Response<ConsumeApprovalResponse>, Status> {
+            Err(Status::unimplemented("consume_approval not needed in test"))
+        }
+
         async fn decide_approval(
             &self,
             request: TonicRequest<DecideApprovalRequest>,
@@ -631,6 +644,8 @@ mod tests {
             ));
             Ok(Response::new(DecideApprovalResponse {
                 approval: Some(pb::Approval {
+                    consumed_at: None,
+                    continuation_mode: String::new(),
                     id: request.approval_id,
                     run_id: "run_001".into(),
                     step_id: "act_1".into(),

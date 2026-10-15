@@ -987,6 +987,7 @@ impl ExecutionCore for ExecutionService {
             create_durable_approval(
                 &self.session_channel,
                 pb::CreateApprovalRequest {
+                    continuation_mode: String::new(),
                     run_id: run_id.clone(),
                     step_id: step_id.clone(),
                     kind: pb::ApprovalKind::Destructive as i32,

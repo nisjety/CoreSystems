@@ -16,6 +16,7 @@ use mp_contracts::model_plane::v1::{
     AcknowledgeApprovalDeliveryRequest, AcknowledgeApprovalDeliveryResponse, Approval,
     ApprovalState, AttachSubagentRequest, AttachSubagentResponse, CancelRunRequest,
     CancelRunResponse, ClaimApprovalDeliveriesRequest, ClaimApprovalDeliveriesResponse,
+    ConsumeApprovalRequest, ConsumeApprovalResponse,
     CreateApprovalRequest, CreateApprovalResponse, DecideApprovalRequest, DecideApprovalResponse,
     GetApprovalContinuationRequest, GetApprovalContinuationResponse, GetApprovalRequest,
     GetApprovalResponse, GetPlanRequest, GetPlanResponse, GetRunRequest,
@@ -457,6 +458,8 @@ impl OrchestrationCoreService for MockOrchestration {
             Some((request.run_id.clone(), request.step_id.clone()));
         Ok(Response::new(ListApprovalsResponse {
             approvals: vec![Approval {
+                consumed_at: None,
+                continuation_mode: String::new(),
                 id: "appr-1".into(),
                 run_id: request.run_id,
                 step_id: request.step_id,
@@ -481,6 +484,8 @@ impl OrchestrationCoreService for MockOrchestration {
         let request = request.into_inner();
         Ok(Response::new(OrgPendingApprovalsResponse {
             approvals: vec![Approval {
+                consumed_at: None,
+                continuation_mode: String::new(),
                 id: "appr-pending-1".into(),
                 run_id: "run-1".into(),
                 step_id: String::new(),
@@ -510,6 +515,8 @@ impl OrchestrationCoreService for MockOrchestration {
         *self.state.get_approval_id.lock().unwrap() = Some(request.approval_id.clone());
         Ok(Response::new(GetApprovalResponse {
             approval: Some(Approval {
+                consumed_at: None,
+                continuation_mode: String::new(),
                 id: request.approval_id,
                 run_id: "run-1".into(),
                 step_id: "step-1".into(),
@@ -534,6 +541,8 @@ impl OrchestrationCoreService for MockOrchestration {
         let request = request.into_inner();
         Ok(Response::new(CreateApprovalResponse {
             approval: Some(Approval {
+                consumed_at: None,
+                continuation_mode: String::new(),
                 id: "appr-mock".into(),
                 run_id: request.run_id,
                 step_id: request.step_id,
@@ -551,6 +560,13 @@ impl OrchestrationCoreService for MockOrchestration {
         }))
     }
 
+    async fn consume_approval(
+        &self,
+        _: TonicRequest<ConsumeApprovalRequest>,
+    ) -> Result<Response<ConsumeApprovalResponse>, Status> {
+        Err(Status::unimplemented("consume_approval not needed in test"))
+    }
+
     async fn decide_approval(
         &self,
         request: TonicRequest<DecideApprovalRequest>,
@@ -564,6 +580,8 @@ impl OrchestrationCoreService for MockOrchestration {
         ));
         Ok(Response::new(DecideApprovalResponse {
             approval: Some(Approval {
+                consumed_at: None,
+                continuation_mode: String::new(),
                 id: request.approval_id,
                 run_id: "run-1".into(),
                 step_id: "step-1".into(),
@@ -1214,6 +1232,13 @@ impl OrchestrationCoreService for OrgScopedMock {
         };
         Ok(Response::new(GetApprovalResponse { approval }))
     }
+    async fn consume_approval(
+        &self,
+        _: TonicRequest<ConsumeApprovalRequest>,
+    ) -> Result<Response<ConsumeApprovalResponse>, Status> {
+        Err(Status::unimplemented("consume_approval not needed in test"))
+    }
+
     async fn decide_approval(
         &self,
         request: TonicRequest<DecideApprovalRequest>,
@@ -1310,6 +1335,8 @@ impl OrchestrationCoreService for OrgScopedMock {
 
 fn owned_approval(state: ApprovalState) -> Approval {
     Approval {
+        consumed_at: None,
+        continuation_mode: String::new(),
         id: "appr-owned".into(),
         run_id: "run-owned".into(),
         step_id: String::new(),

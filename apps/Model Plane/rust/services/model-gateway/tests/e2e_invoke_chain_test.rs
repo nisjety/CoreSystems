@@ -2184,6 +2184,13 @@ impl mpv1::orchestration_core_service_server::OrchestrationCoreService for Scrip
     ) -> Result<Response<mpv1::GetApprovalResponse>, Status> {
         Err(Status::unimplemented("get_approval not needed in test"))
     }
+    async fn consume_approval(
+        &self,
+        _: TReq<mpv1::ConsumeApprovalRequest>,
+    ) -> Result<Response<mpv1::ConsumeApprovalResponse>, Status> {
+        Err(Status::unimplemented("consume_approval not needed in test"))
+    }
+
     async fn decide_approval(
         &self,
         _: TReq<mpv1::DecideApprovalRequest>,

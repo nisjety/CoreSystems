@@ -240,6 +240,40 @@ pub enum ParkReason {
     ReauthRequired,
 }
 
+/// The environment switch that makes a Do-loop approval loop-owned: resumed by
+/// the durable loop through `ConsumeApproval` instead of the cold delivery
+/// worker. Default off. Do not turn it on before the loop can actually continue
+/// (build plan WS03 S3): a loop-owned approval that nothing consumes is stranded.
+pub const CONTINUE_AFTER_APPROVAL_ENV: &str = "AGENT_CONTINUE_AFTER_APPROVAL_ENABLED";
+
+/// Parse the switch. Only an explicit on-value enables it; anything else,
+/// including an unset or malformed value, leaves it off.
+#[must_use]
+pub fn continue_after_approval_from(value: Option<&str>) -> bool {
+    matches!(
+        value.map(|v| v.trim().to_ascii_lowercase()).as_deref(),
+        Some("1" | "true" | "on" | "yes")
+    )
+}
+
+/// Whether the switch is on in this process.
+#[must_use]
+pub fn continue_after_approval_enabled() -> bool {
+    continue_after_approval_from(std::env::var(CONTINUE_AFTER_APPROVAL_ENV).ok().as_deref())
+}
+
+/// The `continuation_mode` a new approval carries: `loop` when the switch is on
+/// and the run keeps state, otherwise empty (the cold worker, exactly as
+/// before). A zero-retention run never gets a loop mode: it retains a fold.
+#[must_use]
+pub const fn continuation_mode_for(zdr: bool, enabled: bool) -> &'static str {
+    if enabled && !zdr {
+        "loop"
+    } else {
+        ""
+    }
+}
+
 /// The stable model-facing sentence for a closed call. The tool name is data in
 /// the sentence, never an instruction; no raw tool output is included.
 #[must_use]
@@ -515,6 +549,23 @@ mod tests {
     fn a_zdr_run_never_persists_a_fold() {
         assert_eq!(LoopFoldV1::refuse_if_zdr(true), Err("agent_run"));
         assert_eq!(LoopFoldV1::refuse_if_zdr(false), Ok(()));
+    }
+
+    #[test]
+    fn the_switch_is_off_unless_explicitly_on_and_never_for_zdr() {
+        assert!(!continue_after_approval_from(None));
+        assert!(!continue_after_approval_from(Some("")));
+        assert!(!continue_after_approval_from(Some("maybe")));
+        assert!(!continue_after_approval_from(Some("0")));
+        assert!(continue_after_approval_from(Some("true")));
+        assert!(continue_after_approval_from(Some(" ON ")));
+        assert_eq!(continuation_mode_for(false, true), "loop");
+        assert_eq!(continuation_mode_for(false, false), "");
+        assert_eq!(
+            continuation_mode_for(true, true),
+            "",
+            "a ZDR run keeps no fold"
+        );
     }
 
     #[test]

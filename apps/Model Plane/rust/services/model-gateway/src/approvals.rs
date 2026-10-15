@@ -57,6 +57,7 @@ pub fn to_create_approval_request(a: &GatewayApproval) -> CreateApprovalRequest 
         _ => ApprovalKind::Unspecified,
     };
     CreateApprovalRequest {
+        continuation_mode: String::new(),
         run_id: a.run_id.clone(),
         step_id: String::new(),
         kind: kind as i32,
@@ -1508,6 +1509,8 @@ mod tests {
 
     fn durable_pending(id: &str, org: &str, run: &str) -> Approval {
         Approval {
+            consumed_at: None,
+            continuation_mode: String::new(),
             id: id.into(),
             run_id: run.into(),
             step_id: String::new(),
