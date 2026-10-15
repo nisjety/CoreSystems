@@ -1,0 +1,95 @@
+# promtool unit tests for audit-delivery.rules.yml:
+#   promtool test rules audit-delivery.rules.test.yml
+rule_files:
+  - audit-delivery.rules.yml
+evaluation_interval: 1m
+tests:
+  - interval: 1m
+    name: terminal rows fire after five quiet minutes
+    input_series:
+      - series: 'mp_session_audit_outbox_terminal_by_subject{subject_class="audit_tool_action"}'
+        values: '4992+0x10'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: ModelAuditOutboxTerminalRows
+        exp_alerts:
+          - exp_labels: { severity: critical, plane: model }
+            exp_annotations:
+              summary: "Audit events gave up publishing (terminal rows in the session-core outbox)"
+              runbook: "apps/Model Plane/docs/runbooks/audit-delivery-alerts.md#terminal-rows"
+
+  - interval: 1m
+    name: no terminal rows stays quiet
+    input_series:
+      - series: 'mp_session_audit_outbox_terminal_by_subject{subject_class="audit_tool_action"}'
+        values: '0+0x20'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: ModelAuditOutboxTerminalRows
+        exp_alerts: []
+
+  - interval: 1m
+    name: increasing terminal counter fires
+    input_series:
+      - series: 'mp_session_audit_outbox_terminal_total'
+        values: '0+1x20'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: ModelAuditOutboxTerminalIncreasing
+        exp_alerts:
+          - exp_labels: { severity: critical, plane: model }
+            exp_annotations:
+              summary: "New audit events are turning terminal right now"
+              runbook: "apps/Model Plane/docs/runbooks/audit-delivery-alerts.md#terminal-rows"
+
+  - interval: 1m
+    name: a missing gauge fires after ten minutes and a present one does not
+    input_series:
+      - series: 'mp_session_audit_outbox_terminal_by_subject{subject_class="audit_tool_action"}'
+        values: '0+0x30'
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: ModelAuditOutboxGaugeAbsent
+        exp_alerts: []
+
+  - interval: 1m
+    name: gauge absent
+    input_series:
+      - series: 'unrelated_metric'
+        values: '1+0x30'
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: ModelAuditOutboxGaugeAbsent
+        exp_alerts:
+          - exp_labels: { severity: warning, plane: model, subject_class: audit_tool_action }
+            exp_annotations:
+              summary: "The audit outbox gauge is not reported (reporter stopped or no scrape)"
+              runbook: "apps/Model Plane/docs/runbooks/audit-delivery-alerts.md#gauge-absent"
+
+  - interval: 1m
+    name: backlog older than fifteen minutes fires
+    input_series:
+      - series: 'mp_session_audit_outbox_oldest_pending_seconds'
+        values: '1200+0x30'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: ModelAuditOutboxBacklog
+        exp_alerts:
+          - exp_labels: { severity: warning, plane: model }
+            exp_annotations:
+              summary: "The oldest unpublished audit event is older than 15 minutes"
+              runbook: "apps/Model Plane/docs/runbooks/audit-delivery-alerts.md#backlog"
+
+  - interval: 1m
+    name: topology failures fire immediately
+    input_series:
+      - series: 'mp_session_audit_outbox_publish_failures_total{reason="stream_not_found"}'
+        values: '0+2x10'
+    alert_rule_test:
+      - eval_time: 8m
+        alertname: ModelAuditTopologyFailure
+        exp_alerts:
+          - exp_labels: { severity: critical, plane: model, reason: stream_not_found }
+            exp_annotations:
+              summary: "Audit publishing fails on broker topology (missing stream or no publish permission)"
+              runbook: "apps/Model Plane/docs/runbooks/audit-delivery-alerts.md#topology"

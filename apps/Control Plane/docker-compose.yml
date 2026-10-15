@@ -1073,6 +1073,7 @@ services:
             - --storage.tsdb.retention.time=15d
         volumes:
             - ./observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+            - ./observability/rules:/etc/prometheus/rules:ro
             - prometheus-data:/prometheus
         ports:
             - "127.0.0.1:${CONTROL_PROMETHEUS_HOST_PORT:-19095}:9090"
