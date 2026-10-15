@@ -1,15 +1,26 @@
 # Physical Service Split - CI/CD Configuration
+#
+# Two proto gates for the Model Plane contracts:
+#   * `buf breaking` compares against the committed image
+#     apps/Model Plane/proto/baseline.binpb. The image is a real build of the
+#     committed protos (it used to be a 0-byte placeholder, which made the
+#     check pass against nothing). Paths contain a space, so every path is
+#     quoted.
+#   * `buf lint` runs as a ratchet: the 1,500-odd pre-existing findings live in
+#     apps/Model Plane/proto/buf-lint-baseline.json and only NEW findings fail.
 name: Buf Proto CI
 on:
   push:
-    branches: [main, develop]
+    branches: [main, develop, fix/ui-premium-restore]
     paths:
       - 'apps/Model Plane/proto/**'
+      - 'scripts/gates/buf-lint-ratchet.py'
       - '.github/workflows/buf.yml'
   pull_request:
-    branches: [main, develop]
+    branches: [main, develop, fix/ui-premium-restore]
     paths:
       - 'apps/Model Plane/proto/**'
+      - 'scripts/gates/buf-lint-ratchet.py'
       - '.github/workflows/buf.yml'
 jobs:
   lint:
@@ -17,7 +28,35 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: bufbuild/buf-setup-action@v1
-      - name: buf lint
-        run: buf lint apps/Model Plane/proto
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: buf lint (ratchet against the committed baseline)
+        run: |
+          set -o pipefail
+          buf lint "apps/Model Plane/proto" --error-format=json > /tmp/buf-lint.json || true
+          python3 scripts/gates/buf-lint-ratchet.py --baseline "apps/Model Plane/proto/buf-lint-baseline.json" /tmp/buf-lint.json
       - name: buf breaking
-        run: buf breaking apps/Model Plane/proto --against apps/Model Plane/proto/baseline.binpb
+        run: buf breaking "apps/Model Plane/proto" --against "apps/Model Plane/proto/baseline.binpb"
+
+      # A gate that cannot fail reads as coverage. Prove on every run that
+      # `buf breaking` really goes red on a breaking change (same pattern as
+      # sse-taxonomy.yml).
+      - name: Prove buf breaking detects a breaking change
+        run: |
+          set -uo pipefail
+          rm -rf /tmp/proto-copy && cp -r "apps/Model Plane/proto" /tmp/proto-copy
+          # Delete a field from a message that the baseline contains.
+          python3 - <<'PY'
+          import re, pathlib
+          p = pathlib.Path('/tmp/proto-copy/model_plane/v1/execution.proto')
+          s = p.read_text(encoding='utf-8')
+          m = re.search(r'^\s*(string|bool|int32|int64|uint32|uint64)\s+\w+\s*=\s*1;\s*$', s, re.M)
+          assert m, 'no field 1 found to delete'
+          p.write_text(s[:m.start()] + s[m.end():], encoding='utf-8')
+          PY
+          if buf breaking /tmp/proto-copy --against "apps/Model Plane/proto/baseline.binpb"; then
+            echo "::error::buf breaking PASSED on a deliberately breaking change; it is not actually checking anything"
+            exit 1
+          fi
+          echo "breaking-change detection confirmed"

@@ -1,0 +1,28 @@
+# Repo-root gates (build plan WS12 S9-S11): plane-boundary, log-content and file
+# size ratchets live under scripts/gates/. This file is the shared trigger shell;
+# each gate adds its own job in the PR that introduces it.
+name: Repo gates
+on:
+  pull_request:
+    paths:
+      - 'scripts/gates/**'
+      - 'scripts/tests/**'
+      - 'apps/**'
+      - '.github/workflows/repo-gates.yml'
+  push:
+    branches: [main, fix/ui-premium-restore]
+    paths:
+      - 'scripts/gates/**'
+      - 'scripts/tests/**'
+      - 'apps/**'
+      - '.github/workflows/repo-gates.yml'
+jobs:
+  buf-lint-ratchet-selftest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: buf lint ratchet unit tests
+        run: python3 -m unittest scripts/tests/test_buf_lint_ratchet.py
