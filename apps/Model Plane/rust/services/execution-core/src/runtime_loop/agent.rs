@@ -9524,6 +9524,76 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_oversized_snapshot_refuses_the_pause_before_any_approval_is_raised() {
+        let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
+        let session_channel = spawn_session_channel(rec.clone()).await;
+        let state = crate::state::StateStore::new();
+        let oversized = serde_json::json!({
+            "tools": [{
+                "name": "delete_records",
+                "description": "x".repeat(crate::runtime_loop::resume::MAX_SNAPSHOT_BYTES),
+                "parameters_json": "{}",
+            }],
+        });
+
+        let err = pause_for_approval(
+            &state,
+            &session_channel,
+            &sample_request(),
+            "step-1",
+            "delete_records",
+            "{}",
+            "ask",
+            0,
+            None,
+            Some(&oversized),
+        )
+        .await
+        .expect_err("a snapshot over the cap must refuse the pause");
+
+        assert_eq!(err.code(), tonic::Code::FailedPrecondition);
+        assert_eq!(err.message(), "approval_snapshot_too_large");
+        assert!(
+            rec.lock().unwrap().approvals.is_empty(),
+            "a refused snapshot must not leave an approval behind"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_snapshot_under_the_cap_is_not_refused_for_size() {
+        let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
+        let session_channel = spawn_session_channel(rec.clone()).await;
+        let state = crate::state::StateStore::new();
+        // Leave headroom for the descriptor's own fields, so only the snapshot's
+        // size is under test.
+        let near_cap = serde_json::json!({
+            "tools": [{
+                "name": "delete_records",
+                "description": "x".repeat(crate::runtime_loop::resume::MAX_SNAPSHOT_BYTES - 1024),
+                "parameters_json": "{}",
+            }],
+        });
+
+        let resp = pause_for_approval(
+            &state,
+            &session_channel,
+            &sample_request(),
+            "step-1",
+            "delete_records",
+            "{}",
+            "ask",
+            0,
+            Some("session-token"),
+            Some(&near_cap),
+        )
+        .await
+        .expect("a snapshot under the cap pauses the run");
+
+        assert_eq!(resp.status, "awaiting_approval");
+        assert_eq!(rec.lock().unwrap().approvals.len(), 1);
+    }
+
+    #[tokio::test]
     async fn gated_tool_rejects_an_undurable_approval_pause() {
         let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
         let session_channel = spawn_session_channel_with_approval_failure(rec.clone(), true).await;
