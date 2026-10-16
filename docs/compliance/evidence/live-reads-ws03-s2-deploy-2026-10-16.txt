@@ -25,3 +25,16 @@ AUDIT OUTBOX (session-core :8081/metrics) after the publisher fix is running
 NOT DONE
   Authenticated end-to-end approval flow through the UI/gateway: needs a signed-in user session, which the agent does not have.
   Prometheus alert rules are committed but the running controlplane-prometheus was not restarted to load them.
+
+LIVE DO FLOW ATTEMPT (signed-in Browser pane at localhost:5173, Do mode, loop switch on for the test only)
+  Prompt sent twice in Do mode ("run the shell command echo ..."). Both runs reached the new execution-core (run_agent logs, status completed).
+  Run 1: the shell tool was blocked: "capability policy returned invalid decision evidence". Cause: recreating execution-core with compose.sh dropped
+  EXECUTION_CORE_CAPABILITY_DECISION_PUBLIC_KEY (the original deploy supplied it from the operator shell, not from .env); capability-core signs
+  decisions (CAPABILITY_CORE_DECISION_SIGNING_KEY set), so execution-core could not verify them. Restored by setting the matching PUBLIC key (derived
+  from the signing key without printing it) when recreating execution-core. It must be supplied the same way on every future recreate.
+  Run 2: the run was created in `plan` mode (the UI's Do mode proposes a plan card first) and ended without a tool call; no approval row was raised.
+  approvals table: 0 rows before and after. The `ask` posture that raises a tool approval was not reached through the UI.
+  Result: the approve -> awaiting_continue -> consume path was NOT exercised live. It is covered by: 4 PG tests incl. a 6-way consume race,
+  the gateway test decide_approval_grant_of_a_loop_owned_approval_reports_awaiting_continue, and the unauthenticated gRPC probe above.
+FINAL STATE: execution-core AGENT_CONTINUE_AFTER_APPROVAL_ENABLED=false, capability decision public key set. model-gateway shows OPENAI_API_KEY empty
+  (not verified whether it was empty before the recreate; chat and Do runs use azure-openai and worked).
