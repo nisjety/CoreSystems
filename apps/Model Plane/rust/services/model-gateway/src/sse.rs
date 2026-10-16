@@ -9200,6 +9200,7 @@ fn build_run_agent_request(
         // The run context is composed and sent by a later slice (build plan
         // WS02 S6); absent = today's behaviour.
         run_context: None,
+        resume: None,
     }
 }
 

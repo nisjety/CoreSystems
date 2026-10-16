@@ -3,6 +3,7 @@
 pub mod agent;
 pub(crate) mod post_mutation;
 pub mod retry;
+pub(crate) mod resume;
 pub(crate) mod skill_budget;
 pub mod subagent_results;
 
@@ -327,6 +328,7 @@ pub async fn execute_step(
         None,
         None,
         sandbox,
+        None,
     )
     .await
 }
@@ -391,6 +393,7 @@ pub(crate) async fn execute_step_with_browser_grant(
         browser_grant,
         None,
         sandbox,
+        None,
     )
     .await
 }
@@ -435,6 +438,7 @@ pub(crate) async fn execute_step_with_subagent(
     capability_policy: &dyn crate::capability_policy::CapabilityPolicy,
     subagent_dispatch: Option<&dyn subagent::SubagentDispatch>,
     sandbox: Option<&crate::sandbox_lease::SandboxLeaseContext<'_>>,
+    release: Option<&resume::ApprovedRelease>,
 ) -> StepOutcome {
     execute_step_inner(
         tool_name,
@@ -459,6 +463,7 @@ pub(crate) async fn execute_step_with_subagent(
         None,
         subagent_dispatch,
         sandbox,
+        release,
     )
     .await
 }
@@ -497,7 +502,13 @@ async fn execute_step_inner(
     // `sandbox_lease::SandboxLeaseContext`'s own doc. Read by exactly one
     // dispatch arm, `code_interpreter`, below.
     sandbox: Option<&crate::sandbox_lease::SandboxLeaseContext<'_>>,
+    // The one call a continuation segment may release after an approval (build
+    // plan WS03 S3). `None` everywhere but the resume boundary. It lifts only the
+    // three `ask` gates below, for exactly this step, tool and arguments; it
+    // never lifts a deny, a missing-evidence refusal or the autonomy rung.
+    release: Option<&resume::ApprovedRelease>,
 ) -> StepOutcome {
+    let released = release.is_some_and(|r| r.covers(step_id, tool_name, tool_input));
     match capability_policy
         .evaluate_with_evidence(tool_name, run_id, org_id)
         .await
@@ -518,7 +529,10 @@ async fn execute_step_inner(
         Ok(evaluation)
             if evaluation.decision == crate::capability_policy::CapabilityDecision::Ask =>
         {
-            return StepOutcome::awaiting_approval();
+            if !released {
+                return StepOutcome::awaiting_approval();
+            }
+            // The user approved this exact call: the ask gate is satisfied.
         }
         Ok(_evaluation) => {
             return StepOutcome::permission_denied();
@@ -558,8 +572,8 @@ async fn execute_step_inner(
         hook::HookDecision::Deny { reason } => {
             return StepOutcome::failed(&format!("blocked by pre-tool hook: {reason}"));
         }
-        hook::HookDecision::Ask { .. } => return StepOutcome::awaiting_approval(),
-        hook::HookDecision::Allow => {}
+        hook::HookDecision::Ask { .. } if !released => return StepOutcome::awaiting_approval(),
+        hook::HookDecision::Ask { .. } | hook::HookDecision::Allow => {}
     }
 
     let mode = PermissionMode::from_wire(permission_mode);
@@ -569,8 +583,8 @@ async fn execute_step_inner(
     // tools are gated by name.
     match permission::evaluate_call(mode, tool_name, tool_input) {
         PermissionDecision::Deny => return StepOutcome::permission_denied(),
-        PermissionDecision::AwaitApproval => return StepOutcome::awaiting_approval(),
-        PermissionDecision::Allow => {}
+        PermissionDecision::AwaitApproval if !released => return StepOutcome::awaiting_approval(),
+        PermissionDecision::AwaitApproval | PermissionDecision::Allow => {}
     }
 
     // Browser-agent returns a structured lifecycle result, not a generic tool

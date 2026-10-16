@@ -1944,6 +1944,9 @@ async fn run_rounds(
                             ctx.capability_policy,
                             Some(dispatch),
                             sandbox.as_ref(),
+                            // No release yet: the resume boundary supplies one
+                            // (build plan WS03 S3, not wired in this slice).
+                            None,
                         )
                         .await;
                         let retryable = attempt < runtime_loop::retry::MAX_TOOL_ATTEMPTS
@@ -7007,6 +7010,7 @@ mod tests {
             provider_hint: String::new(),
             subscription_connection_id: String::new(),
             run_context: None,
+            resume: None,
         }
     }
 

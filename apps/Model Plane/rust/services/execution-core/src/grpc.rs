@@ -669,6 +669,28 @@ fn enforce_run_context(req: &pb::RunAgentRequest) -> Result<(), Status> {
         .map_err(|refusal| Status::invalid_argument(refusal.token()))
 }
 
+/// A continuation (`RunAgentRequest.resume`, build plan WS03 S3) is judged at the
+/// boundary: refused while the durable-loop switch is off, and refused when it
+/// does not name the exact approved call. The resumed segment authenticates with
+/// the request's own bearers; nothing here widens authority.
+fn enforce_resume(req: &pb::RunAgentRequest, enabled: bool) -> Result<(), Status> {
+    let Some(resume) = req.resume.as_ref() else {
+        return Ok(());
+    };
+    if !enabled {
+        return Err(Status::failed_precondition("continue_disabled"));
+    }
+    if !matches!(resume.mode.as_str(), "segment" | "loop")
+        || resume.approval_id.is_empty()
+        || resume.step_id.is_empty()
+        || resume.tool_name.is_empty()
+        || resume.claim_token.is_empty()
+    {
+        return Err(Status::invalid_argument("resume_incomplete"));
+    }
+    Ok(())
+}
+
 fn enforce_persistence_free_execution(
     caller: &AuthenticatedUser,
     request_zdr: bool,
@@ -1270,6 +1292,7 @@ impl ExecutionCore for ExecutionService {
         // context that breaks its bounds, or that carries conversation content
         // on a zero-retention run, is refused with the closed token only.
         enforce_run_context(&req)?;
+        enforce_resume(&req, mp_contracts::loop_fold::continue_after_approval_enabled())?;
         // The inference route the request names (`provider_hint` and
         // `subscription_connection_id`) is judged here, at the boundary and
         // before any of the run's work: a route this process may not honour is
@@ -2164,6 +2187,49 @@ mod run_context_boundary_tests {
         assert_eq!(refused.code(), tonic::Code::InvalidArgument);
         // Only the closed token leaves the service, never the content.
         assert_eq!(refused.message(), "run_context_zdr_history");
+    }
+
+    fn resume(mode: &str) -> pb::AgentResume {
+        pb::AgentResume {
+            mode: mode.to_owned(),
+            approval_id: "appr_1".to_owned(),
+            step_id: "s2.step-1".to_owned(),
+            tool_name: "shell".to_owned(),
+            claim_token: "claim".to_owned(),
+            ..Default::default()
+        }
+    }
+
+    fn with_resume(r: Option<pb::AgentResume>) -> pb::RunAgentRequest {
+        pb::RunAgentRequest {
+            run_id: "run".to_owned(),
+            resume: r,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_continuation_is_refused_while_the_switch_is_off_and_when_incomplete() {
+        let refused = enforce_resume(&with_resume(Some(resume("segment"))), false)
+            .expect_err("switch off");
+        assert_eq!(refused.code(), tonic::Code::FailedPrecondition);
+        assert_eq!(refused.message(), "continue_disabled");
+
+        assert!(enforce_resume(&with_resume(Some(resume("segment"))), true).is_ok());
+        assert!(enforce_resume(&with_resume(Some(resume("loop"))), true).is_ok());
+        assert!(enforce_resume(&with_resume(None), false).is_ok(), "no resume = today");
+
+        let mut bad_mode = resume("segment");
+        bad_mode.mode = "other".to_owned();
+        let mut no_claim = resume("segment");
+        no_claim.claim_token.clear();
+        let mut no_tool = resume("segment");
+        no_tool.tool_name.clear();
+        for incomplete in [bad_mode, no_claim, no_tool] {
+            let e = enforce_resume(&with_resume(Some(incomplete)), true).expect_err("incomplete");
+            assert_eq!(e.code(), tonic::Code::InvalidArgument);
+            assert_eq!(e.message(), "resume_incomplete");
+        }
     }
 
     #[test]
