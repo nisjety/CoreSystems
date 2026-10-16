@@ -39,6 +39,7 @@ mod change_routes;
 #[cfg(feature = "postgres-queue")]
 mod change_webhook;
 mod config;
+mod drain;
 mod experiments;
 mod extract_routes;
 mod graphql;
@@ -112,6 +113,9 @@ async fn shutdown_signal() {
         _ = ctrl_c => tracing::info!("shutdown: Ctrl-C received"),
         _ = terminate => tracing::info!("shutdown: SIGTERM received"),
     }
+    // From here the edge takes no new runs, crawls or batches and `/ready`
+    // says so; requests already in flight finish (see `drain`).
+    drain::begin();
 }
 
 #[tokio::main]
@@ -177,6 +181,9 @@ async fn main() -> anyhow::Result<()> {
     if pool_org_max > 0 {
         tracing::info!(pool_org_max, "per-organization browser pool cap");
     }
+    // How long a shutdown waits for in-flight requests before closing the rest.
+    let drain_deadline = drain::deadline_from_env(|name| std::env::var(name).ok())
+        .map_err(|e| anyhow::anyhow!("drain: {e}"))?;
     let environment = std::env::var("ENVIRONMENT")
         .or_else(|_| std::env::var("APP_ENV"))
         .unwrap_or_default()
@@ -1473,6 +1480,10 @@ async fn main() -> anyhow::Result<()> {
         fleets: quarry_edge::fleet_routes::new_fleet_state(),
     };
 
+    // What the drain releases once the server has stopped.
+    #[cfg(feature = "browser-agent")]
+    let drain_handles = (app_state.agent_runs.clone(), app_state.agent_driver.clone());
+
     let app = routes::router(app_state);
     // Outermost, so a request refused by an auth layer is still counted.
     let app = if metrics_handle.is_some() {
@@ -1496,9 +1507,39 @@ async fn main() -> anyhow::Result<()> {
     let addr = format!("0.0.0.0:{}", cfg.port);
     tracing::info!(%addr, "quarry-edge-rs listening");
     let listener = TcpListener::bind(&addr).await?;
-    axum::serve(listener, app.into_make_service())
-        .with_graceful_shutdown(shutdown_signal())
-        .await?;
+    // Graceful shutdown waits for every open connection, and an SSE stream or
+    // a WebSocket never ends on its own, so cap the wait: once draining has
+    // begun, in-flight requests get `drain_deadline` and the rest are closed.
+    let serve = std::future::IntoFuture::into_future(
+        axum::serve(listener, app.into_make_service()).with_graceful_shutdown(shutdown_signal()),
+    );
+    tokio::select! {
+        result = serve => result?,
+        _ = async {
+            drain::started().await;
+            tokio::time::sleep(drain_deadline).await;
+        } => {
+            tracing::warn!(
+                deadline_s = drain_deadline.as_secs(),
+                "drain: deadline reached with connections still open; closing them"
+            );
+        }
+    }
+
+    // The server is down. Release every live browser session instead of dying
+    // with them; a non-ZDR run's checkpoint stays Active, so it can be resumed.
+    #[cfg(feature = "browser-agent")]
+    {
+        let (runs, driver) = drain_handles;
+        let report =
+            agent_routes::drain_runs(&runs, &driver, std::time::Duration::from_secs(5)).await;
+        tracing::info!(
+            released = report.released,
+            failed = report.failed,
+            in_use = report.in_use,
+            "drain: browser sessions released"
+        );
+    }
 
     // Serve returned, so no new requests can add to the corpus. Signal the
     // maintenance task and wait for its final commit — dropping straight out

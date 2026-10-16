@@ -10,6 +10,7 @@ pub mod canary;
 pub mod change_routes;
 pub mod change_webhook;
 pub mod config;
+pub mod drain;
 pub mod experiments;
 pub mod extract_routes;
 pub mod graphql;

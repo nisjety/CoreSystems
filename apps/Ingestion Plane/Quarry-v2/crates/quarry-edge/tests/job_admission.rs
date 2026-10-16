@@ -76,7 +76,10 @@ async fn handoff_maps_control_429_to_rate_limited_with_details() {
 
     for (path, body) in [
         ("/v1/crawl", json!({ "url": "https://example.com/" })),
-        ("/v1/batch", json!({ "urls": ["https://example.com/a", "https://example.com/b"] })),
+        (
+            "/v1/batch",
+            json!({ "urls": ["https://example.com/a", "https://example.com/b"] }),
+        ),
     ] {
         let (status, envelope) = post_json(addr, path, body).await;
         assert_eq!(status, 429, "{path}: {envelope}");
@@ -91,9 +94,14 @@ async fn handoff_maps_control_429_to_rate_limited_with_details() {
 
 #[tokio::test]
 async fn another_control_429_or_failure_is_still_an_upstream_error() {
-    let control = spawn_control(StatusCode::TOO_MANY_REQUESTS, json!({ "error": "slow down" })).await;
+    let control = spawn_control(
+        StatusCode::TOO_MANY_REQUESTS,
+        json!({ "error": "slow down" }),
+    )
+    .await;
     let addr = spawn_edge(control).await;
-    let (status, envelope) = post_json(addr, "/v1/crawl", json!({ "url": "https://example.com/" })).await;
+    let (status, envelope) =
+        post_json(addr, "/v1/crawl", json!({ "url": "https://example.com/" })).await;
     assert_eq!(status, 502, "{envelope}");
     assert_eq!(envelope["error"]["code"], "UPSTREAM_BLOCKED");
 }

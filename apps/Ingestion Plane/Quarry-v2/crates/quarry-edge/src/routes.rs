@@ -310,6 +310,13 @@ async fn health() -> &'static str {
     "ok"
 }
 async fn ready(State(state): State<AppState>) -> (StatusCode, Json<serde_json::Value>) {
+    // Shutting down: take this instance out of rotation now, before it is gone.
+    if crate::drain::is_draining() {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({"status": "draining"})),
+        );
+    }
     if state.readiness.durable {
         (
             StatusCode::OK,
@@ -604,6 +611,19 @@ fn refuse_durable_job_under_zdr(
     ))
 }
 
+/// A crawl or batch is not accepted while this instance is draining: the job
+/// would be handed off from a process that is about to exit.
+fn refuse_while_draining(request_id: &str) -> Result<(), (StatusCode, Json<Envelope<()>>)> {
+    match crate::drain::refusal() {
+        Some(error) => Err((
+            StatusCode::from_u16(error.code.http_status())
+                .unwrap_or(StatusCode::SERVICE_UNAVAILABLE),
+            Json(Envelope::<()>::err(request_id, error)),
+        )),
+        None => Ok(()),
+    }
+}
+
 async fn crawl_handoff(
     State(state): State<AppState>,
     Extension(claims): Extension<crate::auth::Claims>,
@@ -611,6 +631,7 @@ async fn crawl_handoff(
 ) -> Result<Json<Envelope<HandoffAck>>, (StatusCode, Json<Envelope<()>>)> {
     let request_id = RequestKind::new().to_string();
     refuse_durable_job_under_zdr(&claims, req.zdr, &request_id, "crawl")?;
+    refuse_while_draining(&request_id)?;
     let org_id = claims.org_id.clone();
 
     // Every crawl is bounded: an absent or zero page limit takes the default
@@ -718,6 +739,7 @@ async fn batch_handoff(
 ) -> Result<Json<Envelope<HandoffAck>>, (StatusCode, Json<Envelope<()>>)> {
     let request_id = RequestKind::new().to_string();
     refuse_durable_job_under_zdr(&claims, req.zdr, &request_id, "batch")?;
+    refuse_while_draining(&request_id)?;
     let ack = crate::handoff::forward_to_orchestrator(
         &state.control_base_url,
         &request_id,

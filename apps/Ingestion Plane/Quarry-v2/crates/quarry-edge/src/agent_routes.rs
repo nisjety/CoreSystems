@@ -1345,6 +1345,9 @@ mod enabled {
         Json(body): Json<StartRunBody>,
     ) -> Result<Json<Envelope<StartRunData>>, ApiErr> {
         let request_id = RequestKind::new().to_string();
+        if let Some(error) = crate::drain::refusal() {
+            return Err(driver_err(&request_id, error));
+        }
         let org_id = claims.org_id.clone();
         let actor_id = claims.actor_id().to_owned();
         let execution_tier = body.execution_tier;
@@ -2588,6 +2591,65 @@ mod enabled {
                 result.expect_err("no parent run grant, so the approval is refused");
             assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
             assert_ne!(body["error"]["code"], "BUDGET_EXHAUSTED");
+        }
+
+        fn live_runs(count: usize) -> (AgentRuns, Vec<String>) {
+            let runs: AgentRuns = Arc::default();
+            let mut ids = Vec::new();
+            for _ in 0..count {
+                let entry = entry_with_budget(None);
+                let id = entry.run_id.to_string();
+                runs.lock()
+                    .unwrap()
+                    .insert(id.clone(), Arc::new(TokioMutex::new(entry)));
+                ids.push(id);
+            }
+            (runs, ids)
+        }
+
+        fn test_driver() -> Arc<dyn quarry_browser::BrowserDriver> {
+            Arc::new(quarry_browser::chromiumoxide::ChromiumoxideDriver::new())
+        }
+
+        #[tokio::test]
+        async fn a_drain_releases_every_live_session_and_empties_the_registry() {
+            let (runs, _) = live_runs(5);
+            let report = drain_runs(&runs, &test_driver(), std::time::Duration::from_secs(5)).await;
+            assert_eq!(
+                report,
+                DrainReport {
+                    released: 5,
+                    failed: 0,
+                    in_use: 0
+                }
+            );
+            assert!(
+                runs.lock().unwrap().is_empty(),
+                "nothing is left registered"
+            );
+        }
+
+        #[tokio::test]
+        async fn a_run_a_request_still_holds_is_counted_not_released_and_does_not_block_the_rest() {
+            let (runs, ids) = live_runs(3);
+            let held = runs
+                .lock()
+                .unwrap()
+                .get(&ids[1])
+                .cloned()
+                .expect("registered");
+            let report = drain_runs(&runs, &test_driver(), std::time::Duration::from_secs(5)).await;
+            assert_eq!(report.released, 2);
+            assert_eq!(report.in_use, 1);
+            assert!(runs.lock().unwrap().is_empty());
+            drop(held);
+        }
+
+        #[tokio::test]
+        async fn draining_an_empty_registry_is_a_no_op() {
+            let (runs, _) = live_runs(0);
+            let report = drain_runs(&runs, &test_driver(), std::time::Duration::from_secs(1)).await;
+            assert_eq!(report, DrainReport::default());
         }
 
         #[test]
@@ -4197,6 +4259,77 @@ mod enabled {
             request_id,
             serde_json::json!({ "closed": true }),
         )))
+    }
+
+    /// What a drain did to the live runs.
+    #[derive(Debug, Default, PartialEq, Eq)]
+    pub struct DrainReport {
+        /// Sessions released.
+        pub released: usize,
+        /// Releases that failed or timed out (the browser dies with the process).
+        pub failed: usize,
+        /// Runs a request still held at drain time; they are left to the exit.
+        pub in_use: usize,
+    }
+
+    /// Release every live browser session. Runs concurrently (8 at a time) with
+    /// `per_run_timeout` on each release so one hung Chromium cannot hold up the
+    /// rest. A non-ZDR run's checkpoint is left `Active`, so it can be resumed
+    /// with `resume_run_id` after the restart; nothing is written for a ZDR run.
+    pub async fn drain_runs(
+        runs: &AgentRuns,
+        driver: &Arc<dyn quarry_browser::BrowserDriver>,
+        per_run_timeout: std::time::Duration,
+    ) -> DrainReport {
+        use futures_util::StreamExt;
+        let snapshot: Vec<(String, Arc<TokioMutex<RunEntry>>)> = runs
+            .lock()
+            .expect("agent_runs mutex poisoned")
+            .drain()
+            .collect();
+        let outcomes: Vec<Option<bool>> = futures_util::stream::iter(snapshot)
+            .map(|(run_id, entry)| {
+                let driver = driver.clone();
+                async move {
+                    match Arc::try_unwrap(entry) {
+                        Ok(mutex) => {
+                            let entry = mutex.into_inner();
+                            match tokio::time::timeout(
+                                per_run_timeout,
+                                driver.release(entry.session),
+                            )
+                            .await
+                            {
+                                Ok(Ok(())) => Some(true),
+                                Ok(Err(error)) => {
+                                    tracing::warn!(%run_id, %error, "drain: release failed");
+                                    Some(false)
+                                }
+                                Err(_) => {
+                                    tracing::warn!(%run_id, "drain: release timed out");
+                                    Some(false)
+                                }
+                            }
+                        }
+                        Err(_) => {
+                            tracing::warn!(%run_id, "drain: a request still holds this run");
+                            None
+                        }
+                    }
+                }
+            })
+            .buffer_unordered(8)
+            .collect()
+            .await;
+        let mut report = DrainReport::default();
+        for outcome in outcomes {
+            match outcome {
+                Some(true) => report.released += 1,
+                Some(false) => report.failed += 1,
+                None => report.in_use += 1,
+            }
+        }
+        report
     }
 
     /// Agent routes, merged into the protected router so they inherit

@@ -21,7 +21,13 @@ services:
       - seccomp=./Quarry-v2/deploy/compose/seccomp-chromium.json
     restart: unless-stopped
     init: true
+    # A stop is a drain (docs/RUNBOOKS.md, "Stopping the edge"): up to
+    # QUARRY_EDGE__DRAIN_DEADLINE_S for in-flight requests, then the live browser
+    # sessions are released. The grace period must be longer than the deadline
+    # plus the per-session release time, or the platform kills it first (exit 137).
+    stop_grace_period: 45s
     environment:
+      QUARRY_EDGE__DRAIN_DEADLINE_S: "${QUARRY_EDGE_DRAIN_DEADLINE_S:-30}"
       QUARRY_EDGE__PORT: "8082"
       QUARRY_EDGE__USER_AGENT: "Quarry/2.0 (+https://triodelab.com/quarry)"
       # The browser driver is chosen at BUILD time, never by an env var, so
