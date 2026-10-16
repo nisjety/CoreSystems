@@ -172,6 +172,17 @@ impl ProfileStore for CachedProfileStore {
     }
 }
 
+/// The URL with any `user:password@` removed, for logging. A Redis URL carries the
+/// password in its authority, and the edge logs this one at INFO.
+fn redact_credentials(url: &str) -> String {
+    match (url.find("://"), url.rfind('@')) {
+        (Some(scheme_end), Some(at)) if at > scheme_end => {
+            format!("{}***@{}", &url[..scheme_end + 3], &url[at + 1..])
+        }
+        _ => url.to_string(),
+    }
+}
+
 /// Small helper for `main.rs` — wraps an inner store iff `redis_url`
 /// is set; otherwise returns the inner store unwrapped. Lets the
 /// wire be uniform regardless of deployment shape.
@@ -191,7 +202,7 @@ pub async fn maybe_cache(
     };
     match ConnectionManager::new(client).await {
         Ok(manager) => {
-            tracing::info!(%url, "ProfileStore Redis cache attached");
+            tracing::info!(url = %redact_credentials(url), "ProfileStore Redis cache attached");
             Arc::new(CachedProfileStore::new(inner, manager))
         }
         Err(e) => {
@@ -203,6 +214,19 @@ pub async fn maybe_cache(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn logged_redis_url_never_carries_the_password() {
+        assert_eq!(
+            redact_credentials("redis://:s3cret@dragonfly:6379/6"),
+            "redis://***@dragonfly:6379/6"
+        );
+        assert_eq!(
+            redact_credentials("redis://user:s3cret@host/0"),
+            "redis://***@host/0"
+        );
+        assert_eq!(redact_credentials("redis://host:6379/0"), "redis://host:6379/0");
+    }
+
     use super::*;
     use quarry_browser::session::InMemoryProfileStore;
     use std::sync::atomic::{AtomicUsize, Ordering};

@@ -174,7 +174,7 @@ An unknown value stops the edge at boot naming the variable. A page that suddenl
 
 Prometheus metrics are off unless `QUARRY_EDGE__METRICS_ENABLED=1` (rollback: `0`; the listener is not started and nothing is recorded). When on:
 
-- They are served on `QUARRY_EDGE__METRICS_ADDR` (default `0.0.0.0:9092`), a listener separate from the public port. The public port answers 404 for `/metrics`. The compose files do not publish 9092; scrape it over the compose network.
+- They are served on `QUARRY_EDGE__METRICS_ADDR` (default `0.0.0.0:9092`), a listener separate from the public port. The public port never serves `/metrics`: 404 for a caller with a valid bearer, 401 without one (the auth layer answers first). The compose files do not publish 9092; scrape it over the compose network.
 - `QUARRY_EDGE__METRICS_TOKEN` is a bearer token (constant-time compare). In production an enabled listener without a token of at least 16 characters stops the edge at boot (`metrics: QUARRY_EDGE__METRICS_TOKEN is required in production…`). Without a token (development only) the endpoint is open.
 - Series today: `quarry_http_requests_total{route,method,status_class}`, `quarry_http_request_duration_seconds{route,status_class}`, `quarry_scrape_outcomes_total{outcome}`, `quarry_lease_pool_{in_flight,peak_in_flight,capacity}{pool}`, `quarry_lease_pool_acquired_total{pool}`, `quarry_build_info{version}`. `route` is a class from a fixed list (`scrape`, `agent`, `crawl`, …, `v1_other`, `other`), never the path; no URL, host, organization, user or run id is ever a label.
 - Not yet: agent-run gauges and budget series (they need the run registry), usage and cache series, `quarry_edge_draining`.
@@ -184,7 +184,7 @@ Check it from a container on the same network:
 ```bash
 curl -s -H "Authorization: Bearer $QUARRY_EDGE_METRICS_TOKEN" http://quarry-edge:9092/metrics | head
 curl -s -o /dev/null -w "%{http_code}
-" http://quarry-edge:8082/metrics   # 404
+" http://quarry-edge:8082/metrics   # 401 (404 with a user bearer)
 ```
 
 To scrape it from the Control Plane Prometheus, add a job `quarry-edge` (target `quarry-edge:9092`, `authorization.credentials_file` pointing at a mounted copy of the token) to `apps/Control Plane/observability/prometheus.yml`, and mount the token file read-only. Do this only after the file exists: Prometheus refuses a configuration whose credentials file is missing.
