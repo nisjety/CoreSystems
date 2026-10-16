@@ -1084,6 +1084,11 @@ async fn transition_managed_run_terminal(
             "run terminal outcome is already assigned",
         ));
     }
+    // A terminal run never resumes, so its loop fold is dropped in the same
+    // transaction that ends it (build plan WS03 S4).
+    crate::loop_checkpoint::purge_run(transaction, run_id)
+        .await
+        .map_err(database_error)?;
 
     let plan_status = if matches!(outcome, ManagedOutcome::Completed) {
         "completed"

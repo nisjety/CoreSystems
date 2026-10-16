@@ -39,8 +39,11 @@ use crate::auth::{
     authorize_thread_owner_row, identity, is_system_run_owner, DelegatedDataPlaneBearer,
     JwtVerifier, OwnerIntent, VerifiedIdentity, DATA_PLANE_AUTH_METADATA_KEY,
 };
+use crate::continuation_crypto::DescriptorCipher;
 use crate::letta_adapter::{LettaMemoryAdapter, LettaSearchOutcome};
+use crate::loop_checkpoint;
 use crate::orchestration_grpc::{json_to_struct, struct_to_json};
+use crate::retention_receipt::refuse_zdr_continuation;
 use crate::terminalization;
 
 /// Standard gRPC health names registered on the unauthenticated health-only
@@ -59,7 +62,7 @@ pub const HEALTH_SERVICE_NAMES: [&str; 8] = [
 const RUN_STARTED_TYPE_URL: &str = "type.googleapis.com/model_plane.v1.RunStarted";
 const STEP_COMPLETED_TYPE_URL: &str = "type.googleapis.com/model_plane.v1.StepCompleted";
 const RUN_TERMINAL_TYPE_URL: &str = "type.googleapis.com/model_plane.v1.RunTerminal";
-const CHECKPOINT_SAVED_TYPE_URL: &str = "type.googleapis.com/model_plane.v1.CheckpointSaved";
+pub(crate) const CHECKPOINT_SAVED_TYPE_URL: &str = "type.googleapis.com/model_plane.v1.CheckpointSaved";
 const THREAD_CREATED_TYPE_URL: &str = "type.googleapis.com/model_plane.v1.ThreadCreated";
 const MESSAGE_APPENDED_TYPE_URL: &str = "type.googleapis.com/model_plane.v1.MessageAppended";
 const THREAD_PRESENTATION_UPDATED_TYPE_URL: &str =
@@ -484,6 +487,7 @@ async fn delete_thread_rows(
          WHERE parent_run_id IN (SELECT id FROM runs WHERE thread_id = $1)
             OR child_run_id IN (SELECT id FROM runs WHERE thread_id = $1)",
         "DELETE FROM checkpoints WHERE run_id IN (SELECT id FROM runs WHERE thread_id = $1)",
+        "DELETE FROM run_loop_checkpoints WHERE run_id IN (SELECT id FROM runs WHERE thread_id = $1)",
         "DELETE FROM session_tool_audit_intents WHERE run_id IN (SELECT id FROM runs WHERE thread_id = $1)",
         "DELETE FROM managed_run_terminalization_outbox WHERE run_id IN (SELECT id FROM runs WHERE thread_id = $1)",
         "DELETE FROM runs WHERE thread_id = $1",
@@ -3476,6 +3480,12 @@ async fn record_run_terminal(
         ));
     }
 
+    // A terminal run never resumes, so its loop fold is dropped in this transaction
+    // (build plan WS03 S4).
+    loop_checkpoint::purge_run(tx, &req.run_id)
+        .await
+        .map_err(|e| Status::internal(e.to_string()))?;
+
     // Drive the run's durable plan to its terminal state. `start_run` creates a
     // plan keyed `plan_{run_id}` in `draft`; without this it never left draft
     // ("plans never leave draft"). Only advance a plan that is still open
@@ -4945,6 +4955,99 @@ impl SessionCore for SessionService {
         .await;
         record_metrics("save_checkpoint", started, result.is_ok());
         result
+    }
+
+    async fn save_loop_checkpoint(
+        &self,
+        request: Request<pb::SaveLoopCheckpointRequest>,
+    ) -> Result<Response<pb::SaveLoopCheckpointResponse>, Status> {
+        let caller = identity(&request)?;
+        authorize_operation(&caller, "session:write")?;
+        refuse_zdr_continuation(&caller)?;
+        if !loop_checkpoint::enabled() {
+            return Err(loop_checkpoint::disabled());
+        }
+        let req = request.into_inner();
+        authorize_run_owner(&self.pool, &caller, &req.run_id, OwnerIntent::Mutate).await?;
+        let cipher = DescriptorCipher::from_env()
+            .map_err(|_| Status::failed_precondition("loop checkpoint key unavailable"))?;
+        let expected_seq = i64::try_from(req.expected_seq)
+            .map_err(|_| Status::invalid_argument("expected seq is out of range"))?;
+        let park_until = req
+            .park_until
+            .as_ref()
+            .map(|timestamp| {
+                u32::try_from(timestamp.nanos)
+                    .ok()
+                    .and_then(|nanos| DateTime::<Utc>::from_timestamp(timestamp.seconds, nanos))
+                    .ok_or_else(|| Status::invalid_argument("park_until is out of range"))
+            })
+            .transpose()?;
+        let seq = loop_checkpoint::save(
+            &self.pool,
+            &cipher,
+            loop_checkpoint::SaveInput {
+                run_id: &req.run_id,
+                expected_seq,
+                kind: &req.kind,
+                fold: &req.fold,
+                authority_digest: &req.authority_digest,
+                pause_ref: &req.pause_ref,
+                park_reason: &req.park_reason,
+                park_until,
+            },
+        )
+        .await?;
+        Ok(Response::new(pb::SaveLoopCheckpointResponse {
+            seq: u64::try_from(seq).map_err(|_| Status::internal("loop checkpoint seq is negative"))?,
+        }))
+    }
+
+    async fn claim_loop_checkpoint(
+        &self,
+        request: Request<pb::ClaimLoopCheckpointRequest>,
+    ) -> Result<Response<pb::ClaimLoopCheckpointResponse>, Status> {
+        let caller = identity(&request)?;
+        authorize_operation(&caller, "session:write")?;
+        refuse_zdr_continuation(&caller)?;
+        if !loop_checkpoint::enabled() {
+            return Err(loop_checkpoint::disabled());
+        }
+        let req = request.into_inner();
+        authorize_run_owner(&self.pool, &caller, &req.run_id, OwnerIntent::Mutate).await?;
+        let cipher = DescriptorCipher::from_env()
+            .map_err(|_| Status::failed_precondition("loop checkpoint key unavailable"))?;
+        let claimed = loop_checkpoint::claim(
+            &self.pool,
+            &cipher,
+            &req.run_id,
+            &req.pause_ref,
+            &req.claim_token,
+        )
+        .await?;
+        Ok(Response::new(pb::ClaimLoopCheckpointResponse {
+            seq: u64::try_from(claimed.seq)
+                .map_err(|_| Status::internal("loop checkpoint seq is negative"))?,
+            fold: claimed.fold,
+            segment_no: u32::try_from(claimed.segment_no)
+                .map_err(|_| Status::internal("loop checkpoint segment is negative"))?,
+            authority_digest: claimed.authority_digest,
+            kind: claimed.kind,
+        }))
+    }
+
+    async fn close_loop_checkpoint(
+        &self,
+        request: Request<pb::CloseLoopCheckpointRequest>,
+    ) -> Result<Response<pb::CloseLoopCheckpointResponse>, Status> {
+        let caller = identity(&request)?;
+        authorize_operation(&caller, "session:write")?;
+        let req = request.into_inner();
+        authorize_run_owner(&self.pool, &caller, &req.run_id, OwnerIntent::Mutate).await?;
+        let seq = i64::try_from(req.seq)
+            .map_err(|_| Status::invalid_argument("seq is out of range"))?;
+        loop_checkpoint::close(&self.pool, &req.run_id, seq, &req.reason).await?;
+        Ok(Response::new(pb::CloseLoopCheckpointResponse {}))
     }
 
     type ReplayThreadStream = tokio_stream::wrappers::ReceiverStream<Result<pb::Event, Status>>;

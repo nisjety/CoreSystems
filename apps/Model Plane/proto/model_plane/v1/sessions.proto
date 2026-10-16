@@ -61,6 +61,16 @@ service SessionCore {
   // Persist a checkpoint snapshot for a run.
   rpc SaveCheckpoint(SaveCheckpointRequest) returns (SaveCheckpointResponse);
 
+  // Save the durable loop's fold for a run (build plan WS03 S4). Latest wins,
+  // compare-and-set on expected_seq. Refused for a zero-retention or waived run.
+  rpc SaveLoopCheckpoint(SaveLoopCheckpointRequest) returns (SaveLoopCheckpointResponse);
+
+  // Claim a paused or parked run's fold for one continuation. Exactly one claim wins.
+  rpc ClaimLoopCheckpoint(ClaimLoopCheckpointRequest) returns (ClaimLoopCheckpointResponse);
+
+  // Close a run's fold once its loop has finished. Idempotent for a closed row.
+  rpc CloseLoopCheckpoint(CloseLoopCheckpointRequest) returns (CloseLoopCheckpointResponse);
+
   // Replay the thread event log as a stream of Events.
   // Ordering: (ts, event_id) with event_id as deterministic tiebreaker.
   rpc ReplayThread(ReplayThreadRequest) returns (stream Event);
@@ -1265,3 +1275,83 @@ message RecordRunContextRequest {
 
 // Empty acknowledgement of RecordRunContext.
 message RecordRunContextResponse {}
+
+// --- Durable loop fold (build plan WS03 S4) ---
+
+// Save the fold of a run's loop. The fold is encrypted before it is stored.
+message SaveLoopCheckpointRequest {
+  // Run the fold belongs to.
+  string run_id = 1;
+
+  // The seq the writer last saw: 0 for the first save. A different value is refused.
+  uint64 expected_seq = 2;
+
+  // Why the fold was written: "round", "pre_effect", "pause" or "park".
+  string kind = 3;
+
+  // The fold, as LoopFoldV1 JSON bytes. Its run_id must match run_id.
+  bytes fold = 4;
+
+  // Digest of the authority the fold was written under.
+  string authority_digest = 5;
+
+  // The approval (pause) or park reference the fold resumes from. Set for pause and park.
+  string pause_ref = 6;
+
+  // Why the run parked, for a park. Set for park only.
+  string park_reason = 7;
+
+  // When a park may be resumed, for a park. Set for park only.
+  google.protobuf.Timestamp park_until = 8;
+}
+
+// The seq the fold was stored under.
+message SaveLoopCheckpointResponse {
+  // Seq of the stored fold; the next save must expect this value.
+  uint64 seq = 1;
+}
+
+// Claim a paused or parked run's fold for one continuation.
+message ClaimLoopCheckpointRequest {
+  // Run whose fold to claim.
+  string run_id = 1;
+
+  // The pause or park reference the fold must be waiting on.
+  string pause_ref = 2;
+
+  // Caller-minted token. Only its hash is stored, so the claim cannot be replayed by a reader of the table.
+  string claim_token = 3;
+}
+
+// The claimed fold, ready for the continuation to resume from.
+message ClaimLoopCheckpointResponse {
+  // Seq of the claimed fold.
+  uint64 seq = 1;
+
+  // The fold, as LoopFoldV1 JSON bytes.
+  bytes fold = 2;
+
+  // Segment that wrote the fold.
+  uint32 segment_no = 3;
+
+  // Digest of the authority the fold was written under.
+  string authority_digest = 4;
+
+  // Kind of the stored fold: "pause" or "park" for a claimable row.
+  string kind = 5;
+}
+
+// Close a run's fold once its loop has finished.
+message CloseLoopCheckpointRequest {
+  // Run whose fold to close.
+  string run_id = 1;
+
+  // The seq the closer last saw.
+  uint64 seq = 2;
+
+  // Why the loop closed, for the record.
+  string reason = 3;
+}
+
+// Empty acknowledgement of CloseLoopCheckpoint.
+message CloseLoopCheckpointResponse {}

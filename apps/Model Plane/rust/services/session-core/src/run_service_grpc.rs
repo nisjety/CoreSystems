@@ -843,6 +843,12 @@ impl RunService for RunServiceImpl {
                 }));
             };
 
+            // A cancelled run never resumes, so its loop fold is dropped in this
+            // transaction (build plan WS03 S4).
+            crate::loop_checkpoint::purge_run(&mut tx, &run_id)
+                .await
+                .map_err(|e| Status::internal(e.to_string()))?;
+
             let receipt_id = new_ulid();
             let now = Utc::now();
             let idempotency_key = format!("run_cancelled:{run_id}");

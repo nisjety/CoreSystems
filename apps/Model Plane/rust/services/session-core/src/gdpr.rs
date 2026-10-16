@@ -231,6 +231,14 @@ pub async fn purge_organization_data(
     let mut tx: Transaction<'_, Postgres> = pool.begin().await?;
     let mut summary = PurgeSummary::default();
 
+    // The loop's sealed folds are erased with the org's runs, before them.
+    sqlx::query(
+        "DELETE FROM run_loop_checkpoints WHERE run_id IN (SELECT id FROM runs WHERE org_id = $1)",
+    )
+    .bind(org_id)
+    .execute(&mut *tx)
+    .await?;
+
     // `runs` children with no cascade — must go before `runs`.
     summary.checkpoints = sqlx::query(
         "DELETE FROM checkpoints WHERE run_id IN (SELECT id FROM runs WHERE org_id = $1)",
@@ -672,6 +680,7 @@ mod tests {
         };
 
         let checkpoints = pos("DELETE FROM checkpoints");
+        let loop_checkpoints = pos("DELETE FROM run_loop_checkpoints");
         let subagent_edges = pos("DELETE FROM subagent_edges");
         let todos = pos("DELETE FROM todos");
         let plan_steps = pos("DELETE FROM plan_steps");
@@ -688,6 +697,7 @@ mod tests {
         let runs = pos("DELETE FROM runs WHERE org_id = $1");
         let threads = pos("DELETE FROM threads WHERE org_id = $1");
 
+        assert!(loop_checkpoints < runs, "loop folds must be purged before runs");
         assert!(checkpoints < runs, "checkpoints must be purged before runs");
         assert!(
             subagent_edges < runs,

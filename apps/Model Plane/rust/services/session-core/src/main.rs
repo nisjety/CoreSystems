@@ -22,6 +22,7 @@ mod grpc;
 mod http_health;
 mod learning_events;
 mod letta_adapter;
+mod loop_checkpoint;
 mod memory_erasure;
 mod memory_control;
 mod memory_dedup;

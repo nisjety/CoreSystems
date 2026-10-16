@@ -753,6 +753,9 @@ services:
       # AES-256-GCM key for encrypted approval continuation descriptors. The
       # service fails closed when a descriptor is requested without this key.
       SESSION_CORE_CONTINUATION_DESCRIPTOR_KEY: ${SESSION_CORE_CONTINUATION_DESCRIPTOR_KEY:-}
+      # Durable loop fold store (WS03 S4). Off by default: a loop keeps its fold in
+      # memory and a pause cannot be resumed from the store. Sealed under the key above.
+      SESSION_CORE_LOOP_CHECKPOINT_ENABLED: ${SESSION_CORE_LOOP_CHECKPOINT_ENABLED:-false}
       # Dreaming's LLM memory extraction (dream_extractor.rs). Unset this
       # address, or set DREAMING_LLM_EXTRACTION=0, and Dreaming falls back to
       # the deterministic phrase matcher alone.
