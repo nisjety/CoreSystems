@@ -1028,6 +1028,11 @@ services:
       - "127.0.0.1:9093:9093"   # gRPC compatibility probe; production overlay removes host ports
     environment:
       RUST_LOG: info
+      # Build plan WS03 S2: raise Do-loop approvals as loop-owned (consumed once by
+      # the durable loop through ConsumeApproval) instead of the cold delivery
+      # worker's. OFF by default and never for ZDR runs. Do not turn it on in a
+      # deployment until stage 1 `/continue` exists: nothing else consumes them.
+      AGENT_CONTINUE_AFTER_APPROVAL_ENABLED: ${AGENT_CONTINUE_AFTER_APPROVAL_ENABLED:-false}
       # Autonomous tool-using runs route through Azure's model-router deployment,
       # which selects the best model per turn (tool-calling model selection is
       # handled by the router, cost-aware). Overridable per deployment; empty →

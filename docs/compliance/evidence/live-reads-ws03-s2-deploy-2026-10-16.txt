@@ -1,0 +1,27 @@
+Live deploy evidence: WS03 S2 (approval consume) and the audit outbox publisher fix
+Date: 2026-10-16. Stack: the local Model Plane compose project `model-plane`, containers replaced from branch `model-plane` (worktree build, commit ef790ab7 plus the compose flag line).
+No secrets, tokens or payload content below. Read-only SELECTs and unauthenticated probes only.
+
+BEFORE
+  session-core image sha256:8822680089d1... ; _sqlx_migrations max version 42 (43-46 not applied)
+  execution-core sha256:baa3995e7bfa... ; model-gateway sha256:9b3f20e853bf...
+  Rollback: images tagged model-plane-<svc>:pre-20261016-8822680; session_core dump taken before the migration (kept outside the repository).
+
+DEPLOY (bash "apps/Model Plane/scripts/compose.sh" up -d --no-deps --build <service>)
+  session-core -> healthy; migrations applied in order: 43 (audit requeue), 44, 45 (ZDR receipts), 46 (approval consume) - all success=t
+  execution-core sha256:6c5cde6564cb... ; model-gateway sha256:f2b66c5189dd... ; both healthy
+  approvals now has columns continuation_mode (text not null default ''), consumed_at, consumed_claim_hash
+
+PROBES
+  grpcurl (unauthenticated) OrchestrationCoreService/ConsumeApproval on session-core:9091 -> Code: Unauthenticated, "verified caller credential required"
+  (the same answer as the pre-existing GetApproval: the RPC is registered on the running service, not Unimplemented)
+  execution-core AGENT_CONTINUE_AFTER_APPROVAL_ENABLED was set true briefly to test, then recreated with the default: false (final state false)
+
+AUDIT OUTBOX (session-core :8081/metrics) after the publisher fix is running
+  mp_session_audit_outbox_pending 0 ; oldest_pending_seconds 0
+  mp_session_audit_outbox_terminal 4992 (audit_tool_action 4992; all other classes 0)
+  The 4,992 historical rows are NOT replayed: replay is a deliberate operator step (requeue_session_audit_terminal, postmortem 0002).
+
+NOT DONE
+  Authenticated end-to-end approval flow through the UI/gateway: needs a signed-in user session, which the agent does not have.
+  Prometheus alert rules are committed but the running controlplane-prometheus was not restarted to load them.
