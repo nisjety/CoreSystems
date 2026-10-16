@@ -31,18 +31,22 @@ use crate::{
     config::AppState,
     envelope::{error, ok},
     middleware::{require_session, AuthenticatedUser},
+    rate_limit::{with_rate_class, RateClass},
     upstream::proxy_sse_stream,
 };
 
 pub(crate) fn router(state: AppState) -> Router<AppState> {
-    Router::new()
+    let routes = Router::new()
         .route("/api/v1/search/web", post(search_web))
         .route("/api/v1/search/similar", post(search_similar))
         .route("/api/v1/search/suggest", post(search_suggest))
         .route("/api/v1/search/images", post(search_images))
         .route("/api/v1/search/videos", post(search_videos))
         .route("/api/v1/search/suggestions", get(search_suggestions))
-        .route("/api/v1/search/answer/stream", post(search_answer_stream))
+        .route("/api/v1/search/answer/stream", post(search_answer_stream));
+    // Search and scrape share one per-organization bucket (see
+    // `rate_limit::RateClass`).
+    with_rate_class(routes, &state.rate_limiter, RateClass::SearchScrape)
         .route_layer(axum::middleware::from_fn_with_state(state, require_session))
 }
 

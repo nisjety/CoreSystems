@@ -32,6 +32,27 @@
 //! fail-open by design: a Dragonfly blip must never reject legitimate traffic.
 //! The DashMap path is the original per-instance behaviour and remains fully
 //! covered by tests.
+//!
+//! ## Rate classes
+//!
+//! The limiter above is one bucket per caller for everything, keyed by IP
+//! before authentication. On top of it, routes that differ a lot in cost carry
+//! a **class** limiter ([`RateClass`], applied with [`with_rate_class`] inside
+//! `require_session`), keyed by the organization and kept in its own bucket and
+//! its own Dragonfly key (`verevon:gw:ratelimit:{class}:{key}`), so spending one
+//! class never spends another:
+//!
+//! | class | covers | default per org per minute | env |
+//! |---|---|---|---|
+//! | `interactive` | everything inside an open browser session | 1200 | `GATEWAY_RATE_LIMIT_RPM_INTERACTIVE` |
+//! | `browser_start` | creating a session, starting an AI run | 30 | `GATEWAY_RATE_LIMIT_RPM_BROWSER_START` |
+//! | `job_submit` | starting or discovering a crawl | 20 | `GATEWAY_RATE_LIMIT_RPM_JOB_SUBMIT` |
+//! | `search_scrape` | search, scrape, product extraction | 120 | `GATEWAY_RATE_LIMIT_RPM_SEARCH_SCRAPE` |
+//!
+//! A value that is not a positive number keeps the class default (it never
+//! disables a limit). `GATEWAY_RATE_CLASSES=off` removes the class layers and
+//! leaves only the default limiter. A denied request is `429` with
+//! `Retry-After`, as before.
 
 use std::net::IpAddr;
 use std::sync::Arc;
@@ -122,6 +143,75 @@ pub(crate) struct RateLimiter {
     conn: Option<redis::aio::ConnectionManager>,
     buckets: Arc<DashMap<String, TokenBucket>>,
     rpm: f64,
+    /// `None` for the default (per-IP, pre-auth) limiter; `Some` for a class
+    /// limiter, which owns its buckets and its Dragonfly keys so one class can
+    /// never spend another's budget.
+    class: Option<RateClass>,
+}
+
+/// A kind of request with its own per-organization budget.
+///
+/// The default limiter is one bucket per caller for everything, so a burst of
+/// session creation or crawl submissions can starve interactive browsing, and
+/// the other way round. Each class below has its own bucket and its own key
+/// (`verevon:gw:ratelimit:{class}:{key}`), and is applied inside
+/// `require_session`, so the key is the organization, not the IP.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RateClass {
+    /// Everything a user does inside an open browser session.
+    Interactive,
+    /// Creating a browser session or starting an AI browser run.
+    BrowserStart,
+    /// Submitting a crawl.
+    JobSubmit,
+    /// Search and scrape requests.
+    SearchScrape,
+}
+
+impl RateClass {
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::Interactive => "interactive",
+            Self::BrowserStart => "browser_start",
+            Self::JobSubmit => "job_submit",
+            Self::SearchScrape => "search_scrape",
+        }
+    }
+
+    /// Requests per organization per minute when the env var is unset.
+    pub(crate) const fn default_rpm(self) -> f64 {
+        match self {
+            Self::Interactive => 1200.0,
+            Self::BrowserStart => 30.0,
+            Self::JobSubmit => 20.0,
+            Self::SearchScrape => 120.0,
+        }
+    }
+
+    fn env_name(self) -> String {
+        format!(
+            "GATEWAY_RATE_LIMIT_RPM_{}",
+            self.name().to_ascii_uppercase()
+        )
+    }
+}
+
+/// `GATEWAY_RATE_CLASSES=off` removes the class layers and leaves only the
+/// default limiter. Anything else (including unset) keeps them on.
+fn rate_classes_enabled() -> bool {
+    !std::env::var("GATEWAY_RATE_CLASSES").is_ok_and(|value| {
+        matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "off" | "0" | "false" | "no"
+        )
+    })
+}
+
+fn positive_rpm(raw: &str) -> Option<f64> {
+    raw.trim()
+        .parse::<f64>()
+        .ok()
+        .filter(|value| value.is_finite() && *value > 0.0)
 }
 
 /// Read `GATEWAY_RATE_LIMIT_RPM` (requests per minute), defaulting to
@@ -147,7 +237,29 @@ impl RateLimiter {
             conn: cache.connection(),
             buckets: Arc::new(DashMap::new()),
             rpm: rpm_from_env(),
+            class: None,
         }
+    }
+
+    /// A limiter for `class` that shares this one's Dragonfly connection but
+    /// not its buckets or keys. The rate comes from
+    /// `GATEWAY_RATE_LIMIT_RPM_<CLASS>` (a non-positive or unparseable value
+    /// keeps the class default rather than disabling it). `None` when
+    /// `GATEWAY_RATE_CLASSES=off`.
+    pub(crate) fn for_class(&self, class: RateClass) -> Option<Self> {
+        if !rate_classes_enabled() {
+            return None;
+        }
+        let rpm = std::env::var(class.env_name())
+            .ok()
+            .and_then(|raw| positive_rpm(&raw))
+            .unwrap_or_else(|| class.default_rpm());
+        Some(Self {
+            conn: self.conn.clone(),
+            buckets: Arc::new(DashMap::new()),
+            rpm,
+            class: Some(class),
+        })
     }
 
     /// Build a limiter sharing the same distributed backend as [`from_cache`]
@@ -160,7 +272,12 @@ impl RateLimiter {
         Self {
             conn: cache.connection(),
             buckets: Arc::new(DashMap::new()),
-            rpm: if rpm.is_finite() && rpm > 0.0 { rpm } else { DEFAULT_RPM },
+            rpm: if rpm.is_finite() && rpm > 0.0 {
+                rpm
+            } else {
+                DEFAULT_RPM
+            },
+            class: None,
         }
     }
 
@@ -208,7 +325,7 @@ impl RateLimiter {
                                            // TTL: long enough that an idle bucket isn't reaped mid-burst, bounded
                                            // so abandoned keys self-evict. One full refill window + a margin.
         let ttl_secs = (self.rpm / refill_rate).ceil() as u64 + 60;
-        let redis_key = distributed_key(key);
+        let redis_key = distributed_key_for(self.class, key);
 
         let (allowed, retry_after): (i64, i64) = Script::new(TOKEN_BUCKET_LUA)
             .key(redis_key)
@@ -257,8 +374,34 @@ impl RateLimiter {
 /// Namespaced Dragonfly key for a caller's bucket. Shares the `verevon:gw:`
 /// prefix convention with [`crate::cache::cache_key`] and carries `ratelimit`
 /// so operators can scan/inspect throttling state (`KEYS '*ratelimit*'`).
-fn distributed_key(key: &str) -> String {
-    format!("verevon:gw:ratelimit:{key}")
+/// The default limiter's key is unchanged (so live buckets survive a deploy); a
+/// class limiter inserts its class name: `verevon:gw:ratelimit:{class}:{key}`.
+fn distributed_key_for(class: Option<RateClass>, key: &str) -> String {
+    match class {
+        None => format!("verevon:gw:ratelimit:{key}"),
+        Some(class) => format!("verevon:gw:ratelimit:{}:{key}", class.name()),
+    }
+}
+
+/// Put `class`'s limiter in front of `routes`. It must be applied to routes
+/// that are later wrapped in `require_session`, so `AuthenticatedUser` is
+/// present and the key is the organization. Layer order matters: the
+/// middleware is innermost, the extension that selects the class limiter wraps
+/// it, and `require_session` (added by the caller) is outermost.
+pub(crate) fn with_rate_class<S>(
+    routes: axum::Router<S>,
+    default_limiter: &RateLimiter,
+    class: RateClass,
+) -> axum::Router<S>
+where
+    S: Clone + Send + Sync + 'static,
+{
+    match default_limiter.for_class(class) {
+        None => routes,
+        Some(limiter) => routes
+            .route_layer(axum::middleware::from_fn(rate_limit_middleware))
+            .route_layer(axum::Extension(limiter)),
+    }
 }
 
 /// Derive the rate-limit key for a request, preferring validated identity.
@@ -403,6 +546,7 @@ mod tests {
             conn: None,
             buckets: Arc::new(DashMap::new()),
             rpm,
+            class: None,
         }
     }
 
@@ -478,10 +622,305 @@ mod tests {
     fn distributed_key_is_namespaced_and_scannable() {
         // Operators scan throttling state with `KEYS '*ratelimit*'`.
         assert_eq!(
-            distributed_key("org:org_42"),
+            distributed_key_for(None, "org:org_42"),
             "verevon:gw:ratelimit:org:org_42"
         );
-        assert!(distributed_key("ip:1.2.3.4").contains("ratelimit"));
+        assert!(distributed_key_for(None, "ip:1.2.3.4").contains("ratelimit"));
+    }
+
+    #[test]
+    fn distributed_key_includes_the_class_and_the_default_key_is_unchanged() {
+        // The default key must not move, or every live bucket resets on deploy.
+        assert_eq!(
+            distributed_key_for(None, "org:org_42"),
+            "verevon:gw:ratelimit:org:org_42"
+        );
+        for (class, name) in [
+            (RateClass::Interactive, "interactive"),
+            (RateClass::BrowserStart, "browser_start"),
+            (RateClass::JobSubmit, "job_submit"),
+            (RateClass::SearchScrape, "search_scrape"),
+        ] {
+            let key = distributed_key_for(Some(class), "org:org_42");
+            assert_eq!(key, format!("verevon:gw:ratelimit:{name}:org:org_42"));
+            // Still found by the operators' `KEYS '*ratelimit*'` scan, and never
+            // equal to the default key a class could otherwise collide with.
+            assert!(key.contains("ratelimit"));
+            assert_ne!(key, distributed_key_for(None, "org:org_42"));
+        }
+        // A class name cannot be forged into another class's key through the
+        // caller key: the caller key is always `org:`, `user:`, `ip:` or `anonymous`.
+        assert_ne!(
+            distributed_key_for(Some(RateClass::JobSubmit), "x"),
+            distributed_key_for(Some(RateClass::SearchScrape), "x")
+        );
+    }
+
+    fn classed(class: RateClass, rpm: f64) -> RateLimiter {
+        RateLimiter {
+            conn: None,
+            buckets: Arc::new(DashMap::new()),
+            rpm,
+            class: Some(class),
+        }
+    }
+
+    #[tokio::test]
+    async fn class_limiters_have_independent_buckets_for_the_same_org() {
+        let start = classed(RateClass::BrowserStart, 1.0);
+        let interactive = classed(RateClass::Interactive, 1.0);
+        assert!(start.try_acquire("org:org_a").await.is_ok());
+        assert!(start.try_acquire("org:org_a").await.is_err());
+        assert!(
+            interactive.try_acquire("org:org_a").await.is_ok(),
+            "exhausting browser_start must not spend interactive"
+        );
+    }
+
+    #[test]
+    fn class_defaults_and_names_are_the_documented_ones() {
+        assert_eq!(RateClass::Interactive.default_rpm(), 1200.0);
+        assert_eq!(RateClass::BrowserStart.default_rpm(), 30.0);
+        assert_eq!(RateClass::JobSubmit.default_rpm(), 20.0);
+        assert_eq!(RateClass::SearchScrape.default_rpm(), 120.0);
+        assert_eq!(
+            RateClass::BrowserStart.env_name(),
+            "GATEWAY_RATE_LIMIT_RPM_BROWSER_START"
+        );
+    }
+
+    #[test]
+    fn for_class_reads_env_ignores_garbage_and_honours_the_off_switch() {
+        let _env = crate::config::TEST_ENV_LOCK.blocking_lock();
+        let default = limiter(600.0);
+        std::env::remove_var("GATEWAY_RATE_CLASSES");
+
+        std::env::remove_var("GATEWAY_RATE_LIMIT_RPM_JOB_SUBMIT");
+        assert_eq!(default.for_class(RateClass::JobSubmit).unwrap().rpm, 20.0);
+
+        std::env::set_var("GATEWAY_RATE_LIMIT_RPM_JOB_SUBMIT", "3");
+        let limiter = default.for_class(RateClass::JobSubmit).unwrap();
+        assert_eq!(
+            (limiter.rpm, limiter.class),
+            (3.0, Some(RateClass::JobSubmit))
+        );
+
+        for bad in ["0", "-4", "nope", "NaN", ""] {
+            std::env::set_var("GATEWAY_RATE_LIMIT_RPM_JOB_SUBMIT", bad);
+            assert_eq!(
+                default.for_class(RateClass::JobSubmit).unwrap().rpm,
+                20.0,
+                "{bad:?} must keep the class default, not disable the limit"
+            );
+        }
+        std::env::remove_var("GATEWAY_RATE_LIMIT_RPM_JOB_SUBMIT");
+
+        for off in ["off", "OFF", "0", "false", "no"] {
+            std::env::set_var("GATEWAY_RATE_CLASSES", off);
+            assert!(default.for_class(RateClass::Interactive).is_none(), "{off}");
+        }
+        for on in ["on", "1", "", "anything-else"] {
+            std::env::set_var("GATEWAY_RATE_CLASSES", on);
+            assert!(
+                default.for_class(RateClass::Interactive).is_some(),
+                "{on:?}"
+            );
+        }
+        std::env::remove_var("GATEWAY_RATE_CLASSES");
+    }
+
+    // ---- the layered stack ----
+
+    mod stack {
+        use super::*;
+        use axum::{
+            body::Body,
+            http::{Request as HttpRequest, StatusCode},
+            routing::{get, post},
+            Router,
+        };
+        use tower::ServiceExt;
+
+        fn user(org: &str) -> AuthenticatedUser {
+            AuthenticatedUser {
+                user_id: format!("user-of-{org}"),
+                user_email: String::new(),
+                user_name: String::new(),
+                user_image: None,
+                email_verified: true,
+                auth_role: None,
+                active_org_id: Some(org.to_owned()),
+                authorized_membership: Some(crate::middleware::AuthorizedMembership {
+                    organization_id: org.to_owned(),
+                    role: "member".into(),
+                }),
+            }
+        }
+
+        /// A stand-in for `require_session`: the org comes from a test header and
+        /// is attached as the validated identity, outermost, as in production.
+        async fn fake_session(
+            mut request: axum::extract::Request,
+            next: axum::middleware::Next,
+        ) -> axum::response::Response {
+            if let Some(org) = request
+                .headers()
+                .get("x-test-org")
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_owned)
+            {
+                request.extensions_mut().insert(user(&org));
+            }
+            next.run(request).await
+        }
+
+        async fn ok() -> &'static str {
+            "ok"
+        }
+
+        /// Two classes behind one session layer, built the way the domain
+        /// routers build them. The env is read at construction, under the lock.
+        async fn app(rpm_env: &[(&str, &str)]) -> Router {
+            let _env = crate::config::TEST_ENV_LOCK.lock().await;
+            std::env::remove_var("GATEWAY_RATE_CLASSES");
+            for (name, value) in rpm_env {
+                std::env::set_var(name, value);
+            }
+            let default = limiter(600.0);
+            let job = Router::new().route("/job", post(ok));
+            let interactive = Router::new().route("/frame", get(ok));
+            let app = Router::new()
+                .merge(with_rate_class(job, &default, RateClass::JobSubmit))
+                .merge(with_rate_class(
+                    interactive,
+                    &default,
+                    RateClass::Interactive,
+                ))
+                .route_layer(axum::middleware::from_fn(fake_session));
+            for (name, _) in rpm_env {
+                std::env::remove_var(name);
+            }
+            app
+        }
+
+        async fn call(
+            app: &Router,
+            method: &str,
+            path: &str,
+            org: &str,
+            ip: &str,
+        ) -> (StatusCode, Option<String>) {
+            let response = app
+                .clone()
+                .oneshot(
+                    HttpRequest::builder()
+                        .method(method)
+                        .uri(path)
+                        .header("x-test-org", org)
+                        .header("x-forwarded-for", ip)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let retry = response
+                .headers()
+                .get("retry-after")
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_owned);
+            (response.status(), retry)
+        }
+
+        #[tokio::test]
+        async fn interactive_class_is_not_exhausted_by_job_submit() {
+            let app = app(&[("GATEWAY_RATE_LIMIT_RPM_JOB_SUBMIT", "2")]).await;
+            assert_eq!(
+                call(&app, "POST", "/job", "org_a", "198.51.100.1").await.0,
+                StatusCode::OK
+            );
+            assert_eq!(
+                call(&app, "POST", "/job", "org_a", "198.51.100.1").await.0,
+                StatusCode::OK
+            );
+            let (status, retry) = call(&app, "POST", "/job", "org_a", "198.51.100.1").await;
+            assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+            assert!(retry.is_some_and(|value| value.parse::<u64>().is_ok_and(|secs| secs >= 1)));
+            for _ in 0..20 {
+                assert_eq!(
+                    call(&app, "GET", "/frame", "org_a", "198.51.100.1").await.0,
+                    StatusCode::OK,
+                    "interactive browsing continues while job_submit is exhausted"
+                );
+            }
+        }
+
+        #[tokio::test]
+        async fn class_key_is_the_org_not_the_ip_after_require_session() {
+            let app = app(&[("GATEWAY_RATE_LIMIT_RPM_JOB_SUBMIT", "1")]).await;
+            assert_eq!(
+                call(&app, "POST", "/job", "org_a", "198.51.100.1").await.0,
+                StatusCode::OK
+            );
+            // Same org from a different IP is the same bucket.
+            assert_eq!(
+                call(&app, "POST", "/job", "org_a", "203.0.113.77").await.0,
+                StatusCode::TOO_MANY_REQUESTS
+            );
+            // A different org behind the same IP is its own bucket.
+            assert_eq!(
+                call(&app, "POST", "/job", "org_b", "198.51.100.1").await.0,
+                StatusCode::OK
+            );
+        }
+
+        #[tokio::test]
+        async fn session_create_is_limited_per_org_while_polling_continues() {
+            let app = app(&[
+                ("GATEWAY_RATE_LIMIT_RPM_JOB_SUBMIT", "3"),
+                ("GATEWAY_RATE_LIMIT_RPM_INTERACTIVE", "1000"),
+            ])
+            .await;
+            let mut statuses = Vec::new();
+            for _ in 0..4 {
+                statuses.push(call(&app, "POST", "/job", "org_a", "198.51.100.1").await.0);
+            }
+            assert_eq!(
+                statuses,
+                [
+                    StatusCode::OK,
+                    StatusCode::OK,
+                    StatusCode::OK,
+                    StatusCode::TOO_MANY_REQUESTS
+                ]
+            );
+            assert_eq!(
+                call(&app, "GET", "/frame", "org_a", "198.51.100.1").await.0,
+                StatusCode::OK
+            );
+            assert_eq!(
+                call(&app, "POST", "/job", "org_b", "198.51.100.1").await.0,
+                StatusCode::OK
+            );
+        }
+
+        #[tokio::test]
+        async fn off_switch_removes_the_class_layers() {
+            let _env = crate::config::TEST_ENV_LOCK.lock().await;
+            std::env::set_var("GATEWAY_RATE_CLASSES", "off");
+            std::env::set_var("GATEWAY_RATE_LIMIT_RPM_JOB_SUBMIT", "1");
+            let default = limiter(600.0);
+            let job = Router::new().route("/job", post(ok));
+            let app = with_rate_class(job, &default, RateClass::JobSubmit)
+                .route_layer(axum::middleware::from_fn(fake_session));
+            std::env::remove_var("GATEWAY_RATE_CLASSES");
+            std::env::remove_var("GATEWAY_RATE_LIMIT_RPM_JOB_SUBMIT");
+            for _ in 0..5 {
+                assert_eq!(
+                    call(&app, "POST", "/job", "org_a", "198.51.100.1").await.0,
+                    StatusCode::OK
+                );
+            }
+        }
     }
 
     #[test]

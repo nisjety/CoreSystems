@@ -62,6 +62,7 @@ use crate::{
     envelope::{error, ok, unwrap_data},
     middleware::{require_session, AuthenticatedUser},
     public_url::normalize_public_http_url,
+    rate_limit::{with_rate_class, RateClass},
     upstream::{authorized_org_id, proxy_bearer_json, proxy_sse_stream},
 };
 
@@ -367,8 +368,27 @@ fn default_include_screenshot() -> bool {
 }
 
 pub(crate) fn router(state: AppState) -> Router<AppState> {
-    Router::new()
+    classed_routes(&state.rate_limiter)
+        .route_layer(axum::middleware::from_fn_with_state(state, require_session))
+}
+
+/// Every browser route with its rate class applied, before the session layer.
+/// Split out so the route-to-class assignment is testable without a session.
+fn classed_routes(limiter: &crate::rate_limit::RateLimiter) -> Router<AppState> {
+    // Two rate classes, each its own per-organization bucket (see
+    // `rate_limit::RateClass`): starting a session or an AI run is scarce and
+    // expensive; everything done inside an open session is not, and must keep
+    // working while an organization is out of start budget.
+    let browser_start = Router::new()
         .route("/api/v1/browser/sessions", post(create_session))
+        // Phase 2: start a durable, server-side, multi-step browser-agent run.
+        // Progress streams over the existing chat run-event route
+        // (`GET /api/v1/runs/:run_id/events`), unchanged by this facade.
+        .route(
+            "/api/v1/browser/sessions/{session_id}/ai-runs",
+            post(start_ai_run),
+        );
+    let interactive = Router::new()
         .route("/api/v1/browser/sessions/{session_id}", get(get_session))
         .route(
             "/api/v1/browser/sessions/{session_id}/timeline",
@@ -398,13 +418,7 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
             "/api/v1/browser/sessions/{session_id}/suggestions",
             post(suggest_action),
         )
-        // Phase 2: start/control a durable, server-side, multi-step
-        // browser-agent run. Progress streams over the existing chat run-event
-        // route (`GET /api/v1/runs/:run_id/events`), unchanged by this facade.
-        .route(
-            "/api/v1/browser/sessions/{session_id}/ai-runs",
-            post(start_ai_run),
-        )
+        // Pause / resume / stop a durable browser-agent run.
         .route(
             "/api/v1/browser/runs/{run_id}/control",
             post(control_ai_run),
@@ -444,8 +458,18 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
         .route(
             "/api/v1/browser/profiles/{profile_id}",
             patch(rename_browser_profile).delete(delete_profile),
-        )
-        .route_layer(axum::middleware::from_fn_with_state(state, require_session))
+        );
+    Router::new()
+        .merge(with_rate_class(
+            browser_start,
+            limiter,
+            RateClass::BrowserStart,
+        ))
+        .merge(with_rate_class(
+            interactive,
+            limiter,
+            RateClass::Interactive,
+        ))
 }
 
 pub(crate) async fn create_session(
@@ -4979,6 +5003,89 @@ mod tests {
             mail_task_nats_user: String::new(),
             mail_task_nats_password: String::new(),
             mail_task_pipeline: None,
+        }
+    }
+
+    /// The real browser route table, behind a stand-in session layer: the
+    /// session-create and AI-run routes share one small per-org budget, and
+    /// nothing done inside an open session spends it.
+    #[tokio::test]
+    async fn browser_start_routes_have_their_own_bucket_and_session_use_is_not_limited() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let app = {
+            let _env = crate::config::TEST_ENV_LOCK.lock().await;
+            std::env::remove_var("GATEWAY_RATE_CLASSES");
+            std::env::set_var("GATEWAY_RATE_LIMIT_RPM_BROWSER_START", "1");
+            let state = test_app_state();
+            let app = classed_routes(&state.rate_limiter)
+                .route_layer(axum::middleware::from_fn(
+                    |mut request: axum::extract::Request, next: axum::middleware::Next| async move {
+                        // What `require_session` does for a member of org_a.
+                        request.extensions_mut().insert(AuthenticatedUser {
+                            user_id: "user-a".into(),
+                            user_email: String::new(),
+                            user_name: String::new(),
+                            user_image: None,
+                            email_verified: true,
+                            auth_role: None,
+                            active_org_id: Some("org_a".into()),
+                            authorized_membership: Some(crate::middleware::AuthorizedMembership {
+                                organization_id: "org_a".into(),
+                                role: "member".into(),
+                            }),
+                        });
+                        next.run(request).await
+                    },
+                ))
+                .with_state(state);
+            std::env::remove_var("GATEWAY_RATE_LIMIT_RPM_BROWSER_START");
+            app
+        };
+        let call = |method: &'static str, uri: &'static str| {
+            let app = app.clone();
+            async move {
+                app.oneshot(
+                    axum::http::Request::builder()
+                        .method(method)
+                        .uri(uri)
+                        .header("authorization", "Bearer dev-bypass")
+                        .header("content-type", "application/json")
+                        .body(Body::from(r#"{"url":"https://example.com","goal":"x"}"#))
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+            }
+        };
+
+        let first = call("POST", "/api/v1/browser/sessions").await;
+        assert_ne!(
+            first.status(),
+            StatusCode::TOO_MANY_REQUESTS,
+            "the first create is allowed"
+        );
+        let second = call("POST", "/api/v1/browser/sessions").await;
+        assert_eq!(second.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert!(second.headers().contains_key("retry-after"));
+        // The AI-run start shares the same start budget.
+        let ai_run = call("POST", "/api/v1/browser/sessions/s1/ai-runs").await;
+        assert_eq!(ai_run.status(), StatusCode::TOO_MANY_REQUESTS);
+        // Everything inside an open session is a different class.
+        for (method, uri) in [
+            ("GET", "/api/v1/browser/sessions/s1"),
+            ("GET", "/api/v1/browser/sessions/s1/frame"),
+            ("POST", "/api/v1/browser/sessions/s1/actions"),
+            ("DELETE", "/api/v1/browser/sessions/s1"),
+            ("POST", "/api/v1/browser/runs/r1/control"),
+        ] {
+            let response = call(method, uri).await;
+            assert_ne!(
+                response.status(),
+                StatusCode::TOO_MANY_REQUESTS,
+                "{method} {uri} must not spend the browser_start budget"
+            );
         }
     }
 
