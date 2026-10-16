@@ -179,6 +179,12 @@ services:
       QUARRY_EDGE__CANARY_SALT: ${QUARRY_CANARY_SALT:-quarry-edge-v2}
       QUARRY_EDGE__CACHE_TTL_SECS: ${QUARRY_CACHE_TTL_SECS:-300}
       QUARRY_EDGE__FETCH_TIMEOUT_S: ${QUARRY_FETCH_TIMEOUT_S:-30}
+      # Internal Prometheus listener on :9092 (crates/quarry-edge/src/metrics.rs).
+      # Off by default. When on, production refuses to start without a token of
+      # at least 16 characters. The port is never published; scrape it over the
+      # compose network (see docs/RUNBOOKS.md, "Metrics").
+      QUARRY_EDGE__METRICS_ENABLED: "${QUARRY_EDGE_METRICS_ENABLED:-0}"
+      QUARRY_EDGE__METRICS_TOKEN: "${QUARRY_EDGE_METRICS_TOKEN:-}"
       QUARRY_EDGE__SECURITY_SNAPSHOT_PATH: ${QUARRY_SECURITY_SNAPSHOT_PATH:-/app/data/security-feeds/quarry-security.json}
       # Wave 7 — wire the optional HTTP/3 driver. Default `1` because
       # the edge image is now built with `--features http3` so the

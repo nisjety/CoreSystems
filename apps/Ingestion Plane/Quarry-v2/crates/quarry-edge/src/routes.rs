@@ -492,6 +492,7 @@ async fn scrape(
                     }
                 }
             }
+            crate::metrics::record_scrape("ok");
             // P3 / cluster #billing — meter a scrape.page event on
             // success. Skipped on error so unsuccessful fetches don't
             // bill the org. ZDR mode is recorded in metadata for audit.
@@ -525,6 +526,7 @@ async fn scrape(
             )))
         }
         Err(err) => {
+            crate::metrics::record_scrape(&crate::metrics::error_label(err.code));
             // OSS-parity 3D — structured rate-limit envelope (Tavily-style)
             // on 429, matching /v1/search. Every other failure keeps the
             // canonical `{ data, meta, error }` envelope.

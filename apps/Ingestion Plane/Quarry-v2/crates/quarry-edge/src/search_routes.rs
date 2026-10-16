@@ -198,12 +198,12 @@ struct CachedSearch {
 // ── intent hint + source-quality observability (unit-tested) ────────────────
 //
 // Everything below emits through `tracing`, not the `metrics` facade. That is
-// deliberate: `metrics` and `metrics-exporter-prometheus` are declared in
-// Cargo.toml but nothing in this binary ever installs a recorder or serves
-// `/metrics`, so `metrics::counter!` would compile to a silent no-op and read
-// as instrumented while producing nothing. `tracing` events reach the JSON fmt
-// layer and, when `OTEL_EXPORTER_OTLP_ENDPOINT` is set, the OTLP exporter —
-// see `telemetry::init_telemetry`.
+// deliberate: a recorder is only installed when `QUARRY_EDGE__METRICS_ENABLED=1`
+// (see `crate::metrics`), so a `metrics::counter!` here would be a silent no-op
+// in every deployment that leaves it off, and would need its own closed label
+// set when on. `tracing` events reach the JSON fmt layer and, when
+// `OTEL_EXPORTER_OTLP_ENDPOINT` is set, the OTLP exporter — see
+// `telemetry::init_telemetry`.
 //
 // Cardinality discipline for every field emitted from the search path: no
 // query text, no URLs, no org/user ids. Engine names are clamped to

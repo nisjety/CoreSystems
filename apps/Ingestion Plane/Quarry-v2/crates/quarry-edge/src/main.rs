@@ -45,6 +45,7 @@ mod handoff;
 mod internal_auth;
 mod limits;
 mod map_routes;
+mod metrics;
 mod profile_routes;
 mod queue_routes;
 mod resource_routes;
@@ -183,6 +184,19 @@ async fn main() -> anyhow::Result<()> {
             "QUARRY_EDGE__CROSS_PLANE_AUTH_DEV_BYPASS must never be enabled in production"
         );
     }
+    // Metrics are opt-in. An unreadable setting, or an enabled listener in
+    // production without a usable token, stops the edge here rather than
+    // starting an open or unusable endpoint.
+    let metrics_cfg = metrics::MetricsConfig::from_env(|name| std::env::var(name).ok())
+        .map_err(|e| anyhow::anyhow!("metrics: {e}"))?;
+    metrics_cfg
+        .validate(matches!(environment.as_str(), "prod" | "production"))
+        .map_err(|e| anyhow::anyhow!("metrics: {e}"))?;
+    let metrics_handle = if metrics_cfg.enabled {
+        Some(metrics::install()?)
+    } else {
+        None
+    };
     let durability_required = matches!(environment.as_str(), "prod" | "production")
         || std::env::var("QUARRY_EDGE__REQUIRE_DURABLE_RUNTIME")
             .map(|value| matches!(value.trim(), "1" | "true" | "TRUE" | "yes"))
@@ -318,6 +332,7 @@ async fn main() -> anyhow::Result<()> {
         };
         let bb_driver = Arc::new(BrowserbaseDriver::new(bb_config));
         let pool = Arc::new(RuntimeLeasePool::new(4));
+        metrics::register_pool("browserbase", (*pool).clone());
         let processor_id = std::env::var("QUARRY_BROWSERBASE_PROCESSOR_ID")
             .unwrap_or_else(|_| "browserbase".into());
         let adapter = BrowserDriverAdapter::managed_provider(bb_driver, pool, processor_id);
@@ -332,6 +347,7 @@ async fn main() -> anyhow::Result<()> {
                 .with_pinned_egress_proxy(browser_egress_proxy.clone()),
         );
         let pool = Arc::new(RuntimeLeasePool::new(2));
+        metrics::register_pool("chromium", (*pool).clone());
         let adapter = BrowserDriverAdapter::new(browser_driver, pool);
         drivers.register(Arc::new(adapter));
         tracing::info!("browser driver registered (local chromiumoxide)");
@@ -1443,6 +1459,24 @@ async fn main() -> anyhow::Result<()> {
     };
 
     let app = routes::router(app_state);
+    // Outermost, so a request refused by an auth layer is still counted.
+    let app = if metrics_handle.is_some() {
+        app.layer(axum::middleware::from_fn(metrics::http_middleware))
+    } else {
+        app
+    };
+    if let Some(handle) = metrics_handle {
+        // A separate, internal listener: the public router never serves /metrics.
+        let listener = TcpListener::bind(&metrics_cfg.addr).await?;
+        let router = metrics::router(handle, metrics_cfg.token.as_deref());
+        tracing::info!(addr = %metrics_cfg.addr, authenticated = metrics_cfg.token.is_some(), "metrics listening");
+        tokio::spawn(async move {
+            if let Err(error) = axum::serve(listener, router.into_make_service()).await {
+                tracing::error!(%error, "metrics listener stopped");
+            }
+        });
+        metrics::spawn_sampler();
+    }
 
     let addr = format!("0.0.0.0:{}", cfg.port);
     tracing::info!(%addr, "quarry-edge-rs listening");
