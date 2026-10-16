@@ -589,10 +589,7 @@ impl PageRunner {
                 .await;
                 return Err(QuarryError::new(
                     ErrorCode::UnsupportedMedia,
-                    format!(
-                        "the page is a {} file, which Quarry cannot extract text from",
-                        found.kind.label()
-                    ),
+                    unsupported_media_message(found.kind.label()),
                 )
                 .with_details(details));
             }
@@ -1367,6 +1364,28 @@ impl PageRunner {
         }
 
         Ok((output, inline))
+    }
+}
+
+/// "the page is an image file ...", "a PDF file ..." - the article follows the label.
+fn unsupported_media_message(label: &str) -> String {
+    let article = if label.starts_with(['a', 'e', 'i', 'o', 'u']) {
+        "an"
+    } else {
+        "a"
+    };
+    format!("the page is {article} {label} file, which Quarry cannot extract text from")
+}
+
+#[cfg(test)]
+mod unsupported_media_message_tests {
+    use super::unsupported_media_message;
+
+    #[test]
+    fn the_article_follows_the_label() {
+        assert!(unsupported_media_message("image").starts_with("the page is an image file"));
+        assert!(unsupported_media_message("archive").starts_with("the page is an archive file"));
+        assert!(unsupported_media_message("spreadsheet").starts_with("the page is a spreadsheet file"));
     }
 }
 
