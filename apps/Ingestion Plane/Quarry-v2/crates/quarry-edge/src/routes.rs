@@ -510,16 +510,7 @@ async fn scrape(
                     org_id.clone(),
                     quarry_runtime::usage_metrics::SCRAPE_PAGE,
                     1.0,
-                    serde_json::json!({
-                        "user_id": claims.user_id,
-                        "url": out.url.final_url,
-                        "status": out.status,
-                        "zdr": zdr.is_active(),
-                        "purpose_id": privacy.purpose_id,
-                        "privacy_classification": privacy.privacy_classification,
-                        "allow_third_party_processing": privacy.allow_third_party_processing,
-                        "fingerprint": out.fingerprint,
-                    }),
+                    scrape_meter_metadata(&claims.user_id, &out, zdr, &privacy),
                 ))
                 .await;
             Ok(Json(Envelope::ok(
@@ -1260,6 +1251,31 @@ async fn scrape_stream(
         yield Ok(Event::default().data("done"));
     };
     Sse::new(stream)
+}
+
+/// Metadata stored with a `scrape.page` usage event. Under ZDR the event
+/// still bills and audits (status, `zdr: true`, privacy posture) but names
+/// neither the page nor its content fingerprint: billing-core persists
+/// metadata, so a URL here is a durable copy of what ZDR forbids keeping.
+fn scrape_meter_metadata(
+    user_id: &str,
+    out: &NormalizedOutput,
+    zdr: ZdrMode,
+    privacy: &PrivacyPolicy,
+) -> serde_json::Value {
+    let mut meta = serde_json::json!({
+        "user_id": user_id,
+        "status": out.status,
+        "zdr": zdr.is_active(),
+        "purpose_id": privacy.purpose_id,
+        "privacy_classification": privacy.privacy_classification,
+        "allow_third_party_processing": privacy.allow_third_party_processing,
+    });
+    if !zdr.is_active() {
+        meta["url"] = serde_json::json!(out.url.final_url);
+        meta["fingerprint"] = serde_json::json!(out.fingerprint);
+    }
+    meta
 }
 
 fn effective_privacy(privacy: Option<PrivacyPolicy>, zdr: ZdrMode) -> PrivacyPolicy {

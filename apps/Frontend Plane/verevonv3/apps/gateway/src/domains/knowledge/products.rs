@@ -93,7 +93,7 @@ pub(crate) async fn extract_products(
     .await;
 
     if !status.is_success() {
-        tracing::warn!(%status, target = %target, "product extraction model call failed");
+        tracing::warn!(%status, "product extraction model call failed");
         return (
             StatusCode::BAD_GATEWAY,
             Json(error(

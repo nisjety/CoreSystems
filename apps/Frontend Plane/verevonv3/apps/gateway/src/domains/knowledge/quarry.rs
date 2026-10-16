@@ -151,7 +151,6 @@ pub(super) async fn scrape_preview(
         && browser_elapsed < Duration::from_secs(12);
     if !status.is_success() && retry_worthwhile {
         tracing::warn!(
-            target = %target,
             %status,
             "quarry browser render failed fast; retrying scrape preview as a static fetch"
         );
@@ -171,7 +170,7 @@ pub(super) async fn scrape_preview(
 
     if !status.is_success() {
         if let Some(data) = stale {
-            tracing::warn!(target = %target, "quarry scrape failed; serving stale cached preview");
+            tracing::warn!("quarry scrape failed; serving stale cached preview");
             return (StatusCode::OK, Json(ok(data))).into_response();
         }
         // A Quarry refusal is final. This is where a commercial stealth-proxy
@@ -189,7 +188,7 @@ pub(super) async fn scrape_preview(
         // Always return a clear, typed error promptly — never let a slow or
         // bot-walled upstream collapse into an empty response at the client.
         let (code, message) = classify_scrape_failure(status, browser_elapsed);
-        tracing::warn!(target = %target, %status, code, "scrape preview unavailable");
+        tracing::warn!(%status, code, "scrape preview unavailable");
         return (status, Json(error(code, message))).into_response();
     }
 
@@ -570,7 +569,7 @@ async fn fetch_extract_markdown(
     let (status, Json(response)) =
         proxy_bearer_json(state, Method::POST, &url, Some(body), token, user_id).await;
     if !status.is_success() {
-        tracing::warn!(%status, target, "quarry extract fallback failed for scrape preview");
+        tracing::warn!(%status, "quarry extract fallback failed for scrape preview");
         return None;
     }
     extract_markdown_from_response(&response).map(truncate_markdown)

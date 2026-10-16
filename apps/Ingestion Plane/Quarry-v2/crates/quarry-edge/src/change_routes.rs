@@ -632,7 +632,6 @@ async fn emit_change_side_effects(
     if zdr.is_active() {
         tracing::debug!(
             org_id = %record.org_id,
-            url = %record.source_url,
             "zdr active: change event + webhook suppressed"
         );
         return;

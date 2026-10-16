@@ -358,7 +358,9 @@ impl BraveSearch {
         let http = Client::builder()
             .timeout(Duration::from_secs(15))
             .build()
-            .map_err(|e| QuarryError::new(ErrorCode::Internal, format!("brave: {e}")))?;
+            .map_err(|e| {
+                QuarryError::new(ErrorCode::Internal, format!("brave: {}", e.without_url()))
+            })?;
         Ok(Self {
             http,
             api_key: api_key.into(),
@@ -398,18 +400,22 @@ impl SearchProvider for BraveSearch {
         if opts.safe_search {
             req = req.query(&[("safesearch", "moderate")]);
         }
-        let resp = req
-            .send()
-            .await
-            .map_err(|e| QuarryError::new(ErrorCode::DriverFailed, format!("brave: {e}")))?;
+        let resp = req.send().await.map_err(|e| {
+            QuarryError::new(
+                ErrorCode::DriverFailed,
+                format!("brave: {}", e.without_url()),
+            )
+        })?;
         let status = resp.status();
         if !status.is_success() {
             return Err(map_status(status.as_u16(), "brave"));
         }
-        let body: BraveResponse = resp
-            .json()
-            .await
-            .map_err(|e| QuarryError::new(ErrorCode::DriverFailed, format!("brave decode: {e}")))?;
+        let body: BraveResponse = resp.json().await.map_err(|e| {
+            QuarryError::new(
+                ErrorCode::DriverFailed,
+                format!("brave decode: {}", e.without_url()),
+            )
+        })?;
         let mut results = Vec::new();
         for (i, r) in body.web.results.into_iter().enumerate() {
             results.push(SearchResult {
@@ -461,7 +467,9 @@ impl SerperSearch {
         let http = Client::builder()
             .timeout(Duration::from_secs(15))
             .build()
-            .map_err(|e| QuarryError::new(ErrorCode::Internal, format!("serper: {e}")))?;
+            .map_err(|e| {
+                QuarryError::new(ErrorCode::Internal, format!("serper: {}", e.without_url()))
+            })?;
         Ok(Self {
             http,
             api_key: api_key.into(),
@@ -505,7 +513,12 @@ impl SearchProvider for SerperSearch {
             .json(&body)
             .send()
             .await
-            .map_err(|e| QuarryError::new(ErrorCode::DriverFailed, format!("serper: {e}")))?;
+            .map_err(|e| {
+                QuarryError::new(
+                    ErrorCode::DriverFailed,
+                    format!("serper: {}", e.without_url()),
+                )
+            })?;
 
         let status = resp.status();
         if !status.is_success() {
@@ -513,7 +526,10 @@ impl SearchProvider for SerperSearch {
         }
 
         let response: SerperResponse = resp.json().await.map_err(|e| {
-            QuarryError::new(ErrorCode::DriverFailed, format!("serper decode: {e}"))
+            QuarryError::new(
+                ErrorCode::DriverFailed,
+                format!("serper decode: {}", e.without_url()),
+            )
         })?;
 
         let mut results = Vec::new();
@@ -561,7 +577,9 @@ impl SearXNGSearch {
         let http = Client::builder()
             .timeout(Duration::from_secs(15))
             .build()
-            .map_err(|e| QuarryError::new(ErrorCode::Internal, format!("searxng: {e}")))?;
+            .map_err(|e| {
+                QuarryError::new(ErrorCode::Internal, format!("searxng: {}", e.without_url()))
+            })?;
         Ok(Self {
             http,
             base_url: base_url.into(),
@@ -590,16 +608,21 @@ impl SearchProvider for SearXNGSearch {
         if let Some(cat) = searxng_category(opts.topic.as_deref()) {
             req = req.query(&[("categories", cat)]);
         }
-        let resp = req
-            .send()
-            .await
-            .map_err(|e| QuarryError::new(ErrorCode::DriverFailed, format!("searxng: {e}")))?;
+        let resp = req.send().await.map_err(|e| {
+            QuarryError::new(
+                ErrorCode::DriverFailed,
+                format!("searxng: {}", e.without_url()),
+            )
+        })?;
         let status = resp.status();
         if !status.is_success() {
             return Err(map_status(status.as_u16(), "searxng"));
         }
         let body: SearXNGResponse = resp.json().await.map_err(|e| {
-            QuarryError::new(ErrorCode::DriverFailed, format!("searxng decode: {e}"))
+            QuarryError::new(
+                ErrorCode::DriverFailed,
+                format!("searxng decode: {}", e.without_url()),
+            )
         })?;
         let mut results = Vec::with_capacity(body.results.len());
         for (i, r) in body.results.into_iter().enumerate() {
@@ -729,7 +752,12 @@ impl SearXNGImages {
         let http = Client::builder()
             .timeout(Duration::from_secs(15))
             .build()
-            .map_err(|e| QuarryError::new(ErrorCode::Internal, format!("searxng-images: {e}")))?;
+            .map_err(|e| {
+                QuarryError::new(
+                    ErrorCode::Internal,
+                    format!("searxng-images: {}", e.without_url()),
+                )
+            })?;
         Ok(Self {
             http,
             base_url: base_url.into(),
@@ -748,7 +776,10 @@ impl SearXNGImages {
             .send()
             .await
             .map_err(|e| {
-                QuarryError::new(ErrorCode::DriverFailed, format!("searxng-images: {e}"))
+                QuarryError::new(
+                    ErrorCode::DriverFailed,
+                    format!("searxng-images: {}", e.without_url()),
+                )
             })?;
         let status = resp.status();
         if !status.is_success() {
@@ -757,7 +788,7 @@ impl SearXNGImages {
         let body: SearXNGImageResponse = resp.json().await.map_err(|e| {
             QuarryError::new(
                 ErrorCode::DriverFailed,
-                format!("searxng-images decode: {e}"),
+                format!("searxng-images decode: {}", e.without_url()),
             )
         })?;
         Ok(map_image_results(body, limit))
@@ -850,7 +881,12 @@ impl SearXNGVideos {
         let http = Client::builder()
             .timeout(Duration::from_secs(15))
             .build()
-            .map_err(|e| QuarryError::new(ErrorCode::Internal, format!("searxng-videos: {e}")))?;
+            .map_err(|e| {
+                QuarryError::new(
+                    ErrorCode::Internal,
+                    format!("searxng-videos: {}", e.without_url()),
+                )
+            })?;
         Ok(Self {
             http,
             base_url: base_url.into(),
@@ -869,7 +905,10 @@ impl SearXNGVideos {
             .send()
             .await
             .map_err(|e| {
-                QuarryError::new(ErrorCode::DriverFailed, format!("searxng-videos: {e}"))
+                QuarryError::new(
+                    ErrorCode::DriverFailed,
+                    format!("searxng-videos: {}", e.without_url()),
+                )
             })?;
         let status = resp.status();
         if !status.is_success() {
@@ -878,7 +917,7 @@ impl SearXNGVideos {
         let body: SearXNGVideoResponse = resp.json().await.map_err(|e| {
             QuarryError::new(
                 ErrorCode::DriverFailed,
-                format!("searxng-videos decode: {e}"),
+                format!("searxng-videos decode: {}", e.without_url()),
             )
         })?;
         Ok(map_video_results(body, limit))
@@ -959,7 +998,9 @@ impl StractSearch {
         let http = Client::builder()
             .timeout(Duration::from_secs(15))
             .build()
-            .map_err(|e| QuarryError::new(ErrorCode::Internal, format!("stract: {e}")))?;
+            .map_err(|e| {
+                QuarryError::new(ErrorCode::Internal, format!("stract: {}", e.without_url()))
+            })?;
         let base = base_url.into();
         let endpoint = format!("{}/beta/api/search", base.trim_end_matches('/'));
         Ok(Self { http, endpoint })
@@ -991,7 +1032,12 @@ impl SearchProvider for StractSearch {
             .json(&body)
             .send()
             .await
-            .map_err(|e| QuarryError::new(ErrorCode::DriverFailed, format!("stract: {e}")))?;
+            .map_err(|e| {
+                QuarryError::new(
+                    ErrorCode::DriverFailed,
+                    format!("stract: {}", e.without_url()),
+                )
+            })?;
 
         let status = resp.status();
         if !status.is_success() {
@@ -999,7 +1045,10 @@ impl SearchProvider for StractSearch {
         }
 
         let body: StractResponse = resp.json().await.map_err(|e| {
-            QuarryError::new(ErrorCode::DriverFailed, format!("stract decode: {e}"))
+            QuarryError::new(
+                ErrorCode::DriverFailed,
+                format!("stract decode: {}", e.without_url()),
+            )
         })?;
 
         let mut results = Vec::with_capacity(body.webpages.len());
@@ -1953,5 +2002,92 @@ mod tests {
             .await
             .unwrap();
         assert!(results.is_empty());
+    }
+
+    /// reqwest puts the request URL, query string included, in its error
+    /// text. A provider error is logged and returned to the caller, so a user's
+    /// search words must not ride along inside it.
+    #[tokio::test]
+    async fn reqwest_error_text_carries_the_query_string() {
+        // Probe documenting why the adapters call `without_url()`: if this
+        // stops being true the stripping is dead weight, if it holds the
+        // adapters need it.
+        let err = reqwest::get("http://127.0.0.1:1/?q=SECRET-PROBE")
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("SECRET-PROBE"));
+        assert!(!err.without_url().to_string().contains("SECRET-PROBE"));
+    }
+
+    #[tokio::test]
+    async fn search_provider_errors_do_not_embed_the_query() {
+        let secret = format!("SECRET-QUERY-{}", uuid::Uuid::new_v4().simple());
+        let dead = "http://127.0.0.1:1";
+        let opts = SearchOptions::default();
+
+        let mut errors: Vec<(&str, QuarryError)> = Vec::new();
+        errors.push((
+            "brave",
+            BraveSearch::new("key")
+                .unwrap()
+                .with_endpoint(format!("{dead}/res/v1/web/search"))
+                .search(&secret, &opts)
+                .await
+                .unwrap_err(),
+        ));
+        errors.push((
+            "serper",
+            SerperSearch::new("key")
+                .unwrap()
+                .with_endpoint(format!("{dead}/search"))
+                .search(&secret, &opts)
+                .await
+                .unwrap_err(),
+        ));
+        errors.push((
+            "searxng",
+            SearXNGSearch::new(dead)
+                .unwrap()
+                .search(&secret, &opts)
+                .await
+                .unwrap_err(),
+        ));
+        errors.push((
+            "searxng-images",
+            SearXNGImages::new(dead)
+                .unwrap()
+                .search(&secret, 5)
+                .await
+                .unwrap_err(),
+        ));
+        errors.push((
+            "searxng-videos",
+            SearXNGVideos::new(dead)
+                .unwrap()
+                .search(&secret, 5)
+                .await
+                .unwrap_err(),
+        ));
+        errors.push((
+            "stract",
+            StractSearch::new(dead)
+                .unwrap()
+                .search(&secret, &opts)
+                .await
+                .unwrap_err(),
+        ));
+
+        for (name, err) in errors {
+            assert!(
+                !err.message.contains(&secret),
+                "{name} provider error embeds the query: {}",
+                err.message
+            );
+            assert!(
+                err.message.starts_with(name),
+                "{name} provider error lost its provider prefix: {}",
+                err.message
+            );
+        }
     }
 }

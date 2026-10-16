@@ -250,6 +250,17 @@ pub struct LocalIndexWriteback {
     zdr: ZdrMode,
 }
 
+/// The URL to put in a log field: none while Zero Data Retention is active,
+/// because a log line is a durable copy of a page the organization asked us
+/// not to keep.
+fn log_url(zdr: ZdrMode, url: &str) -> Option<&str> {
+    if zdr.is_active() {
+        None
+    } else {
+        Some(url)
+    }
+}
+
 impl LocalIndexWriteback {
     pub fn new(index: Option<TantivyLocalIndex>, zdr: ZdrMode) -> Self {
         Self { index, zdr }
@@ -285,7 +296,7 @@ impl LocalIndexWriteback {
         let decision = self.decide(&page);
         if decision != WritebackDecision::Index {
             tracing::debug!(
-                url = %page.url,
+                url = log_url(self.zdr, &page.url),
                 decision = ?decision,
                 "local index write-back skipped"
             );
@@ -643,7 +654,7 @@ impl PageRunner {
         );
         if !body_decoded.from_header && body_decoded.encoding != "UTF-8" {
             tracing::debug!(
-                url = %resp.final_url,
+                url = log_url(self.zdr, resp.final_url.as_str()),
                 detected = body_decoded.encoding,
                 "charset sniff overrode declared header"
             );
@@ -770,7 +781,7 @@ impl PageRunner {
                     Err(e) => {
                         tracing::warn!(
                             error = %e,
-                            url = %resp.final_url,
+                            url = log_url(self.zdr, resp.final_url.as_str()),
                             "branding serialization failed; NormalizedOutput.branding will be None despite a successful event emit"
                         );
                         None
@@ -1009,22 +1020,29 @@ impl PageRunner {
                                 );
                             }
                         } else {
-                            tracing::debug!(
-                                url = %resp.final_url,
-                                "page-title model hop skipped by ZDR/privacy posture"
-                            );
+                            tracing::debug!("page-title model hop skipped by ZDR/privacy posture");
                         }
                     }
                 }
-                tracing::info!(
-                    url = %resp.final_url,
-                    driver = ?resp.served_by,
-                    title = %extraction.title,
-                    title_source = extraction.title_source.as_str(),
-                    excerpt_chars = extraction.excerpt.chars().count(),
-                    word_count = extraction.word_count,
-                    "page extracted"
-                );
+                if self.zdr.is_active() {
+                    // A ZDR run logs the shape of the page, never which page.
+                    tracing::info!(
+                        driver = ?resp.served_by,
+                        excerpt_chars = extraction.excerpt.chars().count(),
+                        word_count = extraction.word_count,
+                        "page extracted"
+                    );
+                } else {
+                    tracing::info!(
+                        url = %resp.final_url,
+                        driver = ?resp.served_by,
+                        title = %extraction.title,
+                        title_source = extraction.title_source.as_str(),
+                        excerpt_chars = extraction.excerpt.chars().count(),
+                        word_count = extraction.word_count,
+                        "page extracted"
+                    );
+                }
                 self.emit_page_event(
                     run_id.clone(),
                     EventType::PageExtracted,
