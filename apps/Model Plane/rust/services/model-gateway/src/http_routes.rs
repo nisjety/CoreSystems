@@ -1568,14 +1568,20 @@ async fn decide_approval(
     if matches!(target_state, ApprovalState::Granted)
         && should_resume_granted_approval(prior_approval.as_ref(), &approval)?
     {
-        continuation_delivery = Some(
+        continuation_delivery = Some(if approval.continuation_mode.is_empty() {
             match approvals::quarantine_granted_approval_continuation(
                 &approvals::gateway_approval_from_proto(&approval),
             ) {
                 Ok(()) => "not_applicable",
                 Err(_) => "pending",
-            },
-        );
+            }
+        } else {
+            // A loop-owned approval (build plan WS03 S2) has no delivery row and
+            // is not the cold worker's: the durable Do loop consumes it when the
+            // user continues the run. Say so, rather than reporting a delivery
+            // that will never happen.
+            "awaiting_continue"
+        });
     }
 
     let mut body = json!({ "approval": approval_value(&approval) });

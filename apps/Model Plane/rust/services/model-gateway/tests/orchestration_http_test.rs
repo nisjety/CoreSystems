@@ -572,6 +572,12 @@ impl OrchestrationCoreService for MockOrchestration {
         request: TonicRequest<DecideApprovalRequest>,
     ) -> Result<Response<DecideApprovalResponse>, Status> {
         let request = request.into_inner();
+        // An id that starts with `appr-loop` stands for a loop-owned approval.
+        let continuation_mode = if request.approval_id.starts_with("appr-loop") {
+            "loop".to_owned()
+        } else {
+            String::new()
+        };
         *self.state.decide_approval.lock().unwrap() = Some((
             request.approval_id.clone(),
             request.decision,
@@ -581,7 +587,7 @@ impl OrchestrationCoreService for MockOrchestration {
         Ok(Response::new(DecideApprovalResponse {
             approval: Some(Approval {
                 consumed_at: None,
-                continuation_mode: String::new(),
+                continuation_mode,
                 id: request.approval_id,
                 run_id: "run-1".into(),
                 step_id: "step-1".into(),
@@ -1080,6 +1086,39 @@ async fn decide_approval_grant_succeeds_without_a_continuation_dispatcher() {
             String::new()
         )),
         "the grant must still reach the durable store despite the placeholder"
+    );
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn decide_approval_grant_of_a_loop_owned_approval_reports_awaiting_continue() {
+    let _auth = AuthFixture::start().await;
+    let tokens = AuthFixture::user_tokens("org-1", "user-1");
+    let (mock, _capture) = MockOrchestration::new();
+    let app = build_router(make_state(spawn_orchestration_mock(mock).await), None);
+
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/orchestration/approvals/appr-loop-1/decide")
+        .header(AUTHORIZATION, format!("Bearer {}", tokens.model))
+        .header(
+            "x-session-authorization",
+            format!("Bearer {}", tokens.session),
+        )
+        .header(
+            "x-execution-authorization",
+            format!("Bearer {}", tokens.execution),
+        )
+        .header("content-type", "application/json")
+        .body(Body::from(r#"{"decision":"approve"}"#))
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        json["continuation_delivery"], "awaiting_continue",
+        "a loop-owned approval is consumed by the loop, not delivered by the worker, body={json}"
     );
 }
 
