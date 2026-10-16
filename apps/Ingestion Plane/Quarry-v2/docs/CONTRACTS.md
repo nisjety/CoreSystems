@@ -74,7 +74,7 @@ Error path:
 - `driver.planned`, `driver.fallback`, `transport.probed`
 - `action.started`, `action.completed`, `action.failed`
 - `preview.screenshot`, `preview.markdown`, `preview.artifact`
-- `agent.started`, `agent.delta`, `agent.completed`, `agent.failed`
+- `agent.started`, `agent.delta`, `agent.completed`, `agent.failed`, `agent.expired`
 - `artifact.written`, `snapshot.created`, `store.record.written`
 - `lease.acquired`, `lease.released`, `profile.restored`, `profile.captured`
 - `change.detected`, `change.unchanged`
@@ -436,7 +436,7 @@ Gemma 4 local is the default model provider. OpenAI and Anthropic are additive p
 }
 ```
 
-Agent events use `agent.started`, `agent.delta`, `agent.completed`, and `agent.failed`. Agent tool calls must go through the same action/runtime policy path as user-supplied `actions[]`.
+Agent events use `agent.started`, `agent.delta`, `agent.completed`, `agent.failed`, and `agent.expired` (the run sweeper released an idle or over-age run; payload `{reason: idle|ttl|takeover_idle|max_age, idle_s, age_s}`, no URL; a non-ZDR run stays resumable). Agent tool calls must go through the same action/runtime policy path as user-supplied `actions[]`.
 
 ### Crawl denial reason schema
 

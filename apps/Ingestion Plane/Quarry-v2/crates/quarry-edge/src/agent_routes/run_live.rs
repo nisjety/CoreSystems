@@ -1,6 +1,50 @@
 use super::*;
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+
+use crate::budget::RunClass;
+use crate::run_limits::{RunLimits, AGENT_MAX_TTL_CEILING_S};
+
+/// Milliseconds since the Unix epoch. The sweeper takes `now` as a parameter so a
+/// test can move the clock; production passes this.
+pub fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// Why a run is released by the sweeper (its `agent.expired` `reason`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExpireReason {
+    /// No activity for the class's idle limit.
+    Idle,
+    /// An agent run reached its absolute lifetime.
+    Ttl,
+    /// A person held the browser and then went quiet.
+    TakeoverIdle,
+    /// A person's session reached the absolute backstop (even with a viewer open).
+    MaxAge,
+}
+
+impl ExpireReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Idle => "idle",
+            Self::Ttl => "ttl",
+            Self::TakeoverIdle => "takeover_idle",
+            Self::MaxAge => "max_age",
+        }
+    }
+}
+
+/// A run the sweeper would release, and how long it sat idle and lived.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExpireVerdict {
+    pub reason: ExpireReason,
+    pub idle_s: u64,
+    pub age_s: u64,
+}
 
 /// Who is driving an action: a person at the keyboard, an agent proposing it, or
 /// the edge itself (the run sweeper, later). The same three values the audit
@@ -55,6 +99,15 @@ pub struct RunLive {
     org_id: String,
     actor_id: String,
     control: AtomicU64,
+    class: RunClass,
+    started_ms: u64,
+    last_activity_ms: AtomicU64,
+    /// Open WebSocket, frame stream or event stream: a person is watching.
+    viewers: AtomicU32,
+    /// Requests currently running an action on this run (or waiting to).
+    in_flight: AtomicU32,
+    /// The lifetime the caller asked for (`constraints.max_runtime_s`), if it asked.
+    explicit_runtime_s: Option<u64>,
 }
 
 impl RunLive {
@@ -68,6 +121,118 @@ impl RunLive {
             org_id: org_id.into(),
             actor_id: actor_id.into(),
             control: AtomicU64::new(Self::pack(epoch, mode)),
+            class: RunClass::Interactive,
+            started_ms: now_ms(),
+            last_activity_ms: AtomicU64::new(now_ms()),
+            viewers: AtomicU32::new(0),
+            in_flight: AtomicU32::new(0),
+            explicit_runtime_s: None,
+        }
+    }
+
+    /// Say what kind of run this is and how long its caller asked for.
+    pub fn with_run(mut self, class: RunClass, explicit_runtime_s: Option<u64>) -> Self {
+        self.class = class;
+        self.explicit_runtime_s = explicit_runtime_s.filter(|seconds| *seconds > 0);
+        self
+    }
+
+    /// Start the clocks at `now_ms` (tests).
+    pub fn with_clock(mut self, started_ms: u64) -> Self {
+        self.started_ms = started_ms;
+        *self.last_activity_ms.get_mut() = started_ms;
+        self
+    }
+
+    pub fn class(&self) -> RunClass {
+        self.class
+    }
+
+    pub fn org_id(&self) -> &str {
+        &self.org_id
+    }
+
+    /// Record activity by the run's owner.
+    pub fn touch(&self) {
+        self.touch_at(now_ms());
+    }
+
+    pub fn touch_at(&self, now_ms: u64) {
+        self.last_activity_ms.fetch_max(now_ms, Ordering::AcqRel);
+    }
+
+    pub fn viewers(&self) -> u32 {
+        self.viewers.load(Ordering::Acquire)
+    }
+
+    pub fn in_flight(&self) -> u32 {
+        self.in_flight.load(Ordering::Acquire)
+    }
+
+    /// Hold while a person is watching (a WebSocket, a frame or event stream).
+    pub fn viewer_guard(self: &Arc<Self>) -> ViewerGuard {
+        self.viewers.fetch_add(1, Ordering::AcqRel);
+        self.touch();
+        ViewerGuard(self.clone())
+    }
+
+    /// Hold while an action runs, from before it waits for the run lock until it
+    /// finishes: a run with an action in flight is never expired.
+    pub fn in_flight_guard(self: &Arc<Self>) -> InFlightGuard {
+        self.in_flight.fetch_add(1, Ordering::AcqRel);
+        InFlightGuard(self.clone())
+    }
+
+    /// Whether the sweeper should release this run at `now_ms`, and why.
+    ///
+    /// - An action in flight is never expired.
+    /// - An agent run lives its explicit `max_runtime_s` plus a grace, or the agent
+    ///   default when it gave none (the 120 s a UI session carries is not an agent's
+    ///   request); it expires idle after the agent idle limit; viewers do not matter.
+    /// - A person's session ignores the gateway's 120 s; an open viewer blocks the
+    ///   idle limit but not the absolute backstop; a takeover has a longer idle limit.
+    pub fn verdict(&self, now_ms: u64, limits: &RunLimits) -> Option<ExpireVerdict> {
+        if self.in_flight() > 0 {
+            return None;
+        }
+        let age_s = now_ms.saturating_sub(self.started_ms) / 1000;
+        let idle_s = now_ms.saturating_sub(self.last_activity_ms.load(Ordering::Acquire)) / 1000;
+        let found = |reason| Some(ExpireVerdict { reason, idle_s, age_s });
+        match self.class {
+            RunClass::Agent => {
+                let absolute = match self.explicit_runtime_s {
+                    Some(seconds) => (seconds + limits.agent_ttl_grace_s).min(AGENT_MAX_TTL_CEILING_S),
+                    None => limits.agent_max_ttl_s,
+                };
+                if age_s >= absolute {
+                    found(ExpireReason::Ttl)
+                } else if idle_s >= limits.agent_idle_ttl_s {
+                    found(ExpireReason::Idle)
+                } else {
+                    None
+                }
+            }
+            RunClass::Interactive => {
+                if age_s >= limits.interactive_max_ttl_s {
+                    return found(ExpireReason::MaxAge);
+                }
+                if self.viewers() > 0 {
+                    return None;
+                }
+                if self.snapshot().mode == BrowserControlMode::HumanTakeover {
+                    (idle_s >= limits.takeover_idle_ttl_s).then(|| ExpireVerdict {
+                        reason: ExpireReason::TakeoverIdle,
+                        idle_s,
+                        age_s,
+                    })
+                } else {
+                    (idle_s >= limits.interactive_idle_ttl_s).then(|| ExpireVerdict {
+                        reason: ExpireReason::Idle,
+                        idle_s,
+                        age_s,
+                    })
+                }
+            }
         }
     }
 
@@ -133,6 +298,26 @@ impl RunLive {
     /// `caller_owns_live_run`, without the run lock).
     pub fn owned_by(&self, claims: &crate::auth::Claims) -> bool {
         caller_owns_browser_run(&self.org_id, &self.actor_id, claims)
+    }
+}
+
+/// Counts a person watching the run; released on drop.
+pub struct ViewerGuard(Arc<RunLive>);
+
+impl Drop for ViewerGuard {
+    fn drop(&mut self) {
+        self.0.viewers.fetch_sub(1, Ordering::AcqRel);
+        self.0.touch();
+    }
+}
+
+/// Counts an action in flight; released on drop.
+pub struct InFlightGuard(Arc<RunLive>);
+
+impl Drop for InFlightGuard {
+    fn drop(&mut self) {
+        self.0.in_flight.fetch_sub(1, Ordering::AcqRel);
+        self.0.touch();
     }
 }
 

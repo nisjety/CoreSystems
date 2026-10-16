@@ -1,8 +1,15 @@
-//! Switches and bounds on a live agent run that are decided by the operator.
+//! Switches and bounds on live agent runs that the operator decides.
 //!
-//! Today that is one switch: whether an agent action is refused while a person
-//! holds the browser (`QUARRY_EDGE__TAKEOVER_ENFORCEMENT`). The run caps and the
-//! reaper join it here (WS2.D).
+//! Two kinds: how many runs may be live (global, per organization, and how many of
+//! those may be a person's own browser sessions), and how long a run may sit idle or
+//! live at all before the sweeper releases its browser (`RunLimits`); and whether an
+//! agent action is refused while a person holds the browser
+//! (`QUARRY_EDGE__TAKEOVER_ENFORCEMENT`).
+//!
+//! Every value is read once at boot. One that cannot be parsed stops the edge and
+//! names its variable, rather than silently becoming "no limit".
+
+use std::fmt;
 
 pub const ENV_TAKEOVER_ENFORCEMENT: &str = "QUARRY_EDGE__TAKEOVER_ENFORCEMENT";
 
@@ -28,9 +35,206 @@ pub fn takeover_enforced() -> bool {
         .unwrap_or(false)
 }
 
+/// Ceiling on an agent run's absolute lifetime, whatever it asks for.
+pub const AGENT_MAX_TTL_CEILING_S: u64 = 3600;
+
+/// Caps on live runs and the lifetimes the sweeper enforces. `0` for a cap means
+/// "no cap".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunLimits {
+    /// Run the sweeper at all (`false` is the immediate escape).
+    pub sweeper: bool,
+    /// Log `would_expire` and release nothing. The first deploy runs this way.
+    pub sweeper_dry_run: bool,
+    pub sweep_interval_s: u64,
+    /// An agent run with no activity for this long is released.
+    pub agent_idle_ttl_s: u64,
+    /// An agent run that did not say how long it needs lives at most this long;
+    /// one that did lives its `max_runtime_s` plus the grace. Never above
+    /// [`AGENT_MAX_TTL_CEILING_S`].
+    pub agent_max_ttl_s: u64,
+    pub agent_ttl_grace_s: u64,
+    /// A person's browser session with no activity and no viewer for this long.
+    pub interactive_idle_ttl_s: u64,
+    /// Absolute backstop for a person's session; applies even with a viewer open.
+    pub interactive_max_ttl_s: u64,
+    /// Idle limit while a person holds the browser (they may be reading).
+    pub takeover_idle_ttl_s: u64,
+    pub max_concurrent_runs: u32,
+    pub max_runs_per_org: u32,
+    /// How many of an organization's runs may be a person's own sessions, so open
+    /// tabs cannot crowd out its agent runs.
+    pub max_interactive_runs_per_org: u32,
+    /// What a refused start tells the caller to wait.
+    pub cap_retry_after_s: u64,
+}
+
+impl Default for RunLimits {
+    /// The documented defaults. Placeholders until Chromium memory is recorded at
+    /// 8, 16 and 32 contexts.
+    fn default() -> Self {
+        Self {
+            sweeper: true,
+            sweeper_dry_run: false,
+            sweep_interval_s: 15,
+            agent_idle_ttl_s: 300,
+            agent_max_ttl_s: 1800,
+            agent_ttl_grace_s: 30,
+            interactive_idle_ttl_s: 900,
+            interactive_max_ttl_s: 14_400,
+            takeover_idle_ttl_s: 1800,
+            max_concurrent_runs: 32,
+            max_runs_per_org: 8,
+            max_interactive_runs_per_org: 6,
+            cap_retry_after_s: 10,
+        }
+    }
+}
+
+impl RunLimits {
+    /// No caps and no sweeper: what a registry built without limits (tests, tools)
+    /// behaves like.
+    pub fn unlimited() -> Self {
+        Self {
+            sweeper: false,
+            max_concurrent_runs: 0,
+            max_runs_per_org: 0,
+            max_interactive_runs_per_org: 0,
+            ..Self::default()
+        }
+    }
+
+    pub fn from_env() -> Result<Self, String> {
+        Self::from_lookup(|name| std::env::var(name).ok())
+    }
+
+    /// Read every value through `get` (the environment in production).
+    pub fn from_lookup(get: impl Fn(&str) -> Option<String>) -> Result<Self, String> {
+        let defaults = Self::default();
+        let flag = |name: &str, default: bool| -> Result<bool, String> {
+            let full = format!("QUARRY_EDGE__{name}");
+            match get(&full).map(|v| v.trim().to_ascii_lowercase()).as_deref() {
+                None | Some("") => Ok(default),
+                Some("1") | Some("true") | Some("on") => Ok(true),
+                Some("0") | Some("false") | Some("off") => Ok(false),
+                Some(other) => Err(format!("{full} must be 0, 1, on, off, true or false, got {other:?}")),
+            }
+        };
+        let number = |name: &str, default: u64, min: u64| -> Result<u64, String> {
+            let full = format!("QUARRY_EDGE__{name}");
+            match get(&full).map(|v| v.trim().to_owned()).as_deref() {
+                None | Some("") => Ok(default),
+                Some(raw) => {
+                    let value: u64 = raw
+                        .parse()
+                        .map_err(|_| format!("{full} must be a whole number, got {raw:?}"))?;
+                    if value < min {
+                        return Err(format!("{full} must be at least {min}, got {value}"));
+                    }
+                    Ok(value)
+                }
+            }
+        };
+        let cap = |name: &str, default: u32| -> Result<u32, String> {
+            let value = number(name, u64::from(default), 0)?;
+            u32::try_from(value).map_err(|_| format!("QUARRY_EDGE__{name} is too large: {value}"))
+        };
+        let limits = Self {
+            sweeper: flag("RUN_SWEEPER", defaults.sweeper)?,
+            sweeper_dry_run: flag("RUN_SWEEPER_DRY_RUN", defaults.sweeper_dry_run)?,
+            sweep_interval_s: number("RUN_SWEEP_INTERVAL_S", defaults.sweep_interval_s, 1)?,
+            agent_idle_ttl_s: number("AGENT_RUN_IDLE_TTL_S", defaults.agent_idle_ttl_s, 1)?,
+            agent_max_ttl_s: number("AGENT_RUN_MAX_TTL_S", defaults.agent_max_ttl_s, 1)?
+                .min(AGENT_MAX_TTL_CEILING_S),
+            agent_ttl_grace_s: number("AGENT_RUN_TTL_GRACE_S", defaults.agent_ttl_grace_s, 0)?,
+            interactive_idle_ttl_s: number(
+                "INTERACTIVE_RUN_IDLE_TTL_S",
+                defaults.interactive_idle_ttl_s,
+                1,
+            )?,
+            interactive_max_ttl_s: number(
+                "INTERACTIVE_RUN_MAX_TTL_S",
+                defaults.interactive_max_ttl_s,
+                1,
+            )?,
+            takeover_idle_ttl_s: number("TAKEOVER_IDLE_TTL_S", defaults.takeover_idle_ttl_s, 1)?,
+            max_concurrent_runs: cap("MAX_CONCURRENT_RUNS", defaults.max_concurrent_runs)?,
+            max_runs_per_org: cap("MAX_CONCURRENT_RUNS_PER_ORG", defaults.max_runs_per_org)?,
+            max_interactive_runs_per_org: cap(
+                "MAX_INTERACTIVE_RUNS_PER_ORG",
+                defaults.max_interactive_runs_per_org,
+            )?,
+            cap_retry_after_s: number("RUN_CAP_RETRY_AFTER_S", defaults.cap_retry_after_s, 1)?,
+        };
+        Ok(limits)
+    }
+
+    /// Settings that contradict each other or the driver's own reaper. Logged as
+    /// warnings until the numbers are final; `driver_idle_s` and `driver_max_age_s`
+    /// are the browser driver's backstops, which must sit above every run limit.
+    pub fn ordering_warnings(&self, driver_idle_s: u64, driver_max_age_s: u64) -> Vec<String> {
+        let mut warnings = Vec::new();
+        if self.interactive_idle_ttl_s > self.interactive_max_ttl_s {
+            warnings.push("INTERACTIVE_RUN_IDLE_TTL_S is longer than INTERACTIVE_RUN_MAX_TTL_S".into());
+        }
+        if self.takeover_idle_ttl_s > self.interactive_max_ttl_s {
+            warnings.push("TAKEOVER_IDLE_TTL_S is longer than INTERACTIVE_RUN_MAX_TTL_S".into());
+        }
+        if self.agent_idle_ttl_s > self.agent_max_ttl_s {
+            warnings.push("AGENT_RUN_IDLE_TTL_S is longer than AGENT_RUN_MAX_TTL_S".into());
+        }
+        let longest_run = self.interactive_max_ttl_s.max(self.agent_max_ttl_s);
+        if driver_max_age_s <= longest_run {
+            warnings.push(format!(
+                "the browser driver's max session age ({driver_max_age_s} s) must exceed the longest run limit ({longest_run} s), or the driver reaps a run first"
+            ));
+        }
+        let longest_idle = self
+            .takeover_idle_ttl_s
+            .max(self.interactive_idle_ttl_s)
+            .max(self.agent_idle_ttl_s);
+        if driver_idle_s <= longest_idle {
+            warnings.push(format!(
+                "the browser driver's idle limit ({driver_idle_s} s) must exceed the longest run idle limit ({longest_idle} s)"
+            ));
+        }
+        warnings
+    }
+}
+
+impl fmt::Display for RunLimits {
+    /// One boot log line.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "global={} org={} interactive={} sweeper={} dry_run={} interval_s={} agent_idle_s={} agent_max_s={} interactive_idle_s={} interactive_max_s={} takeover_idle_s={}",
+            self.max_concurrent_runs,
+            self.max_runs_per_org,
+            self.max_interactive_runs_per_org,
+            if self.sweeper { "on" } else { "off" },
+            if self.sweeper_dry_run { "on" } else { "off" },
+            self.sweep_interval_s,
+            self.agent_idle_ttl_s,
+            self.agent_max_ttl_s,
+            self.interactive_idle_ttl_s,
+            self.interactive_max_ttl_s,
+            self.takeover_idle_ttl_s,
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
+
+    fn from(pairs: &[(&str, &str)]) -> Result<RunLimits, String> {
+        let map: HashMap<String, String> = pairs
+            .iter()
+            .map(|(k, v)| (format!("QUARRY_EDGE__{k}"), (*v).to_owned()))
+            .collect();
+        RunLimits::from_lookup(|name| map.get(name).cloned())
+    }
 
     #[test]
     fn takeover_enforcement_is_off_unless_asked() {
@@ -46,5 +250,66 @@ mod tests {
     fn a_misspelled_switch_is_an_error_naming_the_variable() {
         let error = parse_takeover_enforcement(Some("enforce")).unwrap_err();
         assert!(error.contains(ENV_TAKEOVER_ENFORCEMENT), "{error}");
+    }
+
+    #[test]
+    fn defaults_match_the_documented_table() {
+        let limits = from(&[]).unwrap();
+        assert_eq!(limits, RunLimits::default());
+        assert!(limits.sweeper);
+        assert!(!limits.sweeper_dry_run);
+        assert_eq!(limits.sweep_interval_s, 15);
+        assert_eq!(limits.agent_idle_ttl_s, 300);
+        assert_eq!(limits.agent_max_ttl_s, 1800);
+        assert_eq!(limits.agent_ttl_grace_s, 30);
+        assert_eq!(limits.interactive_idle_ttl_s, 900);
+        assert_eq!(limits.interactive_max_ttl_s, 14_400);
+        assert_eq!(limits.takeover_idle_ttl_s, 1800);
+        assert_eq!(limits.max_concurrent_runs, 32);
+        assert_eq!(limits.max_runs_per_org, 8);
+        assert_eq!(limits.max_interactive_runs_per_org, 6);
+        assert_eq!(limits.cap_retry_after_s, 10);
+        assert!(limits.ordering_warnings(3600, 21_600).is_empty());
+    }
+
+    #[test]
+    fn from_env_rejects_unparsable_and_names_the_variable() {
+        for (name, value) in [
+            ("MAX_CONCURRENT_RUNS", "many"),
+            ("RUN_SWEEP_INTERVAL_S", "0"),
+            ("AGENT_RUN_IDLE_TTL_S", "-3"),
+            ("RUN_SWEEPER", "maybe"),
+            ("TAKEOVER_IDLE_TTL_S", "1.5"),
+        ] {
+            let error = from(&[(name, value)]).unwrap_err();
+            assert!(error.contains(&format!("QUARRY_EDGE__{name}")), "{error}");
+        }
+    }
+
+    #[test]
+    fn zero_disables_a_cap_and_the_agent_ceiling_holds() {
+        let limits = from(&[
+            ("MAX_CONCURRENT_RUNS", "0"),
+            ("MAX_CONCURRENT_RUNS_PER_ORG", "0"),
+            ("AGENT_RUN_MAX_TTL_S", "99999"),
+        ])
+        .unwrap();
+        assert_eq!(limits.max_concurrent_runs, 0);
+        assert_eq!(limits.max_runs_per_org, 0);
+        assert_eq!(limits.agent_max_ttl_s, AGENT_MAX_TTL_CEILING_S);
+    }
+
+    #[test]
+    fn ordering_warnings_flag_a_driver_that_would_reap_first() {
+        let limits = RunLimits::default();
+        assert_eq!(limits.ordering_warnings(3600, 21_600).len(), 0);
+        let warnings = limits.ordering_warnings(600, 7200);
+        assert_eq!(warnings.len(), 2, "{warnings:?}");
+    }
+
+    #[test]
+    fn boot_line_names_the_effective_numbers() {
+        let line = RunLimits::default().to_string();
+        assert!(line.contains("global=32 org=8 interactive=6 sweeper=on dry_run=off"), "{line}");
     }
 }

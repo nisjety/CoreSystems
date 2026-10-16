@@ -48,6 +48,7 @@ pub async fn live_frame_ws(
             entry.zdr,
         )
     };
+    let viewer = handle.live.viewer_guard();
     let options = live_frame_options(&query.frame, viewport)
         .map_err(|msg| status_err(StatusCode::BAD_REQUEST, &request_id, msg))?;
     let interval = stream_interval(&query);
@@ -56,7 +57,7 @@ pub async fn live_frame_ws(
 
     Ok(ws.on_upgrade(move |socket| {
         browser_ws_loop(
-            socket, state, handle, claims, session, options, interval, max_frames, zdr_active,
+            socket, state, handle, claims, viewer, session, options, interval, max_frames, zdr_active,
         )
     }))
 }
@@ -70,12 +71,15 @@ pub(super) async fn browser_ws_loop(
     state: AppState,
     handle: RunHandle,
     claims: crate::auth::Claims,
+    viewer: ViewerGuard,
     session: BrowserSession,
     options: LiveFrameOptions,
     interval: Duration,
     max_frames: u64,
     zdr_active: bool,
 ) {
+    // Held for as long as the socket is open.
+    let _viewer = viewer;
     let mut ticker = tokio::time::interval(interval);
     let mut sequence = 0_u64;
     let mut devtools_sequence = 0_u64;

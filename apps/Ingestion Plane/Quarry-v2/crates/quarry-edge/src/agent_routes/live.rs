@@ -15,6 +15,7 @@ pub(super) fn is_user_facing_event(event_type: quarry_core::event::EventType) ->
             | EventType::ActionFailed
             | EventType::ObservationReady
             | EventType::AgentCompleted
+            | EventType::AgentExpired
             | EventType::AgentFailed
     )
 }
@@ -30,6 +31,7 @@ pub(super) fn event_name(event_type: quarry_core::event::EventType) -> &'static 
         EventType::ActionFailed => "action.failed",
         EventType::ObservationReady => "observation.ready",
         EventType::AgentCompleted => "agent.completed",
+        EventType::AgentExpired => "agent.expired",
         EventType::AgentFailed => "agent.failed",
         // Defensive: every other event type is filtered before
         // this is called, but never panic on a future type.
@@ -120,7 +122,12 @@ pub async fn live_frame(
     }
     let entry_arc = {
         let map = state.agent_runs.lock().expect("agent_runs mutex poisoned");
-        map.get(&run_id).map(|handle| handle.entry.clone())
+        map.get(&run_id).map(|handle| {
+            if handle.live.owned_by(&claims) {
+                handle.live.touch();
+            }
+            handle.entry.clone()
+        })
     };
     let Some(entry_arc) = entry_arc else {
         return Err(status_err(
@@ -177,7 +184,12 @@ pub async fn live_view(
     let request_id = RequestKind::new().to_string();
     let entry_arc = {
         let map = state.agent_runs.lock().expect("agent_runs mutex poisoned");
-        map.get(&run_id).map(|handle| handle.entry.clone())
+        map.get(&run_id).map(|handle| {
+            if handle.live.owned_by(&claims) {
+                handle.live.touch();
+            }
+            handle.entry.clone()
+        })
     };
     let Some(entry_arc) = entry_arc else {
         return Err(status_err(
@@ -232,18 +244,15 @@ pub async fn agent_events_stream(
             .map_err(|e: quarry_core::error::QuarryError| {
                 status_err(StatusCode::BAD_REQUEST, &request_id, &e.message)
             })?;
-    let entry_arc = {
-        let map = state.agent_runs.lock().expect("agent_runs mutex poisoned");
-        map.get(&run_id).map(|handle| handle.entry.clone())
-    };
-    let Some(entry_arc) = entry_arc else {
+    let handle = lookup_run(&state, &run_id);
+    let Some(handle) = handle else {
         return Err(status_err(
             StatusCode::NOT_FOUND,
             &request_id,
             "agent run not found",
         ));
     };
-    let entry = entry_arc.lock().await;
+    let entry = handle.entry.lock().await;
     if !caller_owns_live_run(&entry, &claims) {
         return Err(status_err(
             StatusCode::NOT_FOUND,
@@ -267,11 +276,14 @@ pub async fn agent_events_stream(
     > = None;
     let _ = &query.from_seq;
 
+    // A person watching the run keeps it from expiring idle (not from the backstop).
+    let viewer = handle.live.viewer_guard();
     let mut live_rx = state.event_sink.subscribe(&parsed_run);
     let max_events = query.max_events.unwrap_or(0);
     let mut emitted: u64 = 0;
 
     let stream = async_stream::stream! {
+        let _viewer = viewer;
         // Drain the replay tail first (if any). The replay
         // stream yields events already in seq order.
         if let Some(replay) = history_rx.as_mut() {
@@ -367,11 +379,8 @@ pub async fn live_frame_stream(
             ),
         ));
     }
-    let entry_arc = {
-        let map = state.agent_runs.lock().expect("agent_runs mutex poisoned");
-        map.get(&run_id).map(|handle| handle.entry.clone())
-    };
-    let Some(entry_arc) = entry_arc else {
+    let handle = lookup_run(&state, &run_id);
+    let Some(handle) = handle else {
         return Err(status_err(
             StatusCode::NOT_FOUND,
             &request_id,
@@ -380,7 +389,7 @@ pub async fn live_frame_stream(
     };
 
     let (session, viewport, zdr) = {
-        let entry = entry_arc.lock().await;
+        let entry = handle.entry.lock().await;
         if !caller_owns_live_run(&entry, &claims) {
             return Err(status_err(
                 StatusCode::NOT_FOUND,
@@ -401,7 +410,9 @@ pub async fn live_frame_stream(
     let driver = state.agent_driver.clone();
     let zdr_active = matches!(zdr, ZdrMode::On);
 
+    let viewer = handle.live.viewer_guard();
     let stream = async_stream::stream! {
+        let _viewer = viewer;
         let mut sequence = 0_u64;
         // W2 — emit the live-view reference as the first event so
         // the App Shell can decide whether to render the cloud

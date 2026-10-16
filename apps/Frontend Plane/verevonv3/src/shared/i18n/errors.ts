@@ -124,6 +124,7 @@ const ERROR_COPY: Record<string, ErrorCopy> = {
 
   // Browser control (advanced/internal surfaces — low pilot exposure, still safe to map)
   browser_human_takeover_active: { no: 'En person har overtatt styringen av denne nettleserøkten.', en: 'Human takeover is active for this browser session.' },
+  browser_capacity_reached: { no: 'Det er for mange nettleserøkter i gang akkurat nå. Prøv igjen om litt.', en: 'There are too many browser sessions running right now. Try again shortly.' },
   browser_session_not_found: { no: 'Fant ikke nettleserøkten.', en: 'Browser session not found.' },
   browser_session_failed: { no: 'Nettleserøkten feilet. Prøv igjen.', en: 'The browser session failed. Try again.' },
   browser_session_invalid: { no: 'Denne nettleserøkten er ugyldig.', en: 'This browser session is invalid.' },

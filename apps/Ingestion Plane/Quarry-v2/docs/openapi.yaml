@@ -297,6 +297,16 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Envelope_Error'
+        '429':
+          description: >-
+            RATE_LIMITED. A run cap is full: `error.details.reason` is
+            `global_run_cap`, `org_run_cap` or `org_interactive_run_cap`, with
+            `scope`, `limit`, `active` and `retry_after_seconds`. Retryable. See
+            ERROR_REASONS.md.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Envelope_Error'
   /v1/agent/runs/{run_id}/step:
     post:
       operationId: agentStep

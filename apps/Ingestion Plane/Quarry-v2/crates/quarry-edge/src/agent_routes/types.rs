@@ -43,11 +43,18 @@ pub struct RunEntry {
 /// get/insert/remove, never across an await); the handle's tokio-Mutex
 /// serializes steps within a single run across await points, and its `RunLive`
 /// is readable and changeable without that lock.
-pub type AgentRuns = Arc<StdMutex<HashMap<String, RunHandle>>>;
+pub type AgentRuns = Arc<RunRegistry>;
 
+/// A registry with no caps and no sweeper (tests and tools).
 #[must_use]
 pub fn new_runs() -> AgentRuns {
-    Arc::new(StdMutex::new(HashMap::new()))
+    Arc::new(RunRegistry::default())
+}
+
+/// The registry the edge runs with: capped and swept per `limits`.
+#[must_use]
+pub fn new_runs_with(limits: crate::run_limits::RunLimits) -> AgentRuns {
+    Arc::new(RunRegistry::new(limits))
 }
 
 #[derive(Debug, Deserialize)]

@@ -393,6 +393,7 @@ fn event_type_token(t: &EventType) -> &'static str {
         EventType::ObservationReady => "observation_ready",
         EventType::AgentCompleted => "agent_completed",
         EventType::AgentFailed => "agent_failed",
+        EventType::AgentExpired => "agent_expired",
         EventType::SearchIssued => "search_issued",
         EventType::HostDiscovered => "host_discovered",
         EventType::BrandingExtracted => "branding_extracted",

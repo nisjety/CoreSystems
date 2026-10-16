@@ -167,7 +167,12 @@ pub async fn browser_session(
 
     let entry_arc = {
         let map = state.agent_runs.lock().expect("agent_runs mutex poisoned");
-        map.get(&run_id).map(|handle| handle.entry.clone())
+        map.get(&run_id).map(|handle| {
+            if handle.live.owned_by(&claims) {
+                handle.live.touch();
+            }
+            handle.entry.clone()
+        })
     };
     if let Some(entry_arc) = entry_arc {
         let entry = entry_arc.lock().await;
@@ -231,7 +236,12 @@ pub async fn browser_session_timeline(
     })?;
     let entry_arc = {
         let map = state.agent_runs.lock().expect("agent_runs mutex poisoned");
-        map.get(&run_id).map(|handle| handle.entry.clone())
+        map.get(&run_id).map(|handle| {
+            if handle.live.owned_by(&claims) {
+                handle.live.touch();
+            }
+            handle.entry.clone()
+        })
     };
     let (org_id, actor_id, zdr) = if let Some(entry_arc) = entry_arc {
         let entry = entry_arc.lock().await;

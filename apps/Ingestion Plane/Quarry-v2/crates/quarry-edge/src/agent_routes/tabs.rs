@@ -9,7 +9,12 @@ pub async fn list_tabs(
     let request_id = RequestKind::new().to_string();
     let entry_arc = {
         let map = state.agent_runs.lock().expect("agent_runs mutex poisoned");
-        map.get(&run_id).map(|handle| handle.entry.clone())
+        map.get(&run_id).map(|handle| {
+            if handle.live.owned_by(&claims) {
+                handle.live.touch();
+            }
+            handle.entry.clone()
+        })
     };
     let Some(entry_arc) = entry_arc else {
         return Err(status_err(
@@ -62,6 +67,7 @@ pub async fn new_tab(
             "agent run not found",
         ));
     }
+    handle.live.touch();
     let admitted = admit_tab_operation(
         &handle,
         &entry,
@@ -175,6 +181,7 @@ pub async fn select_tab(
             "agent run not found",
         ));
     }
+    handle.live.touch();
     let admitted = admit_tab_operation(
         &handle,
         &entry,
@@ -234,6 +241,7 @@ pub async fn close_tab(
             "agent run not found",
         ));
     }
+    handle.live.touch();
     let admitted = admit_tab_operation(
         &handle,
         &entry,
@@ -279,7 +287,12 @@ pub async fn devtools_events(
     let request_id = RequestKind::new().to_string();
     let entry_arc = {
         let map = state.agent_runs.lock().expect("agent_runs mutex poisoned");
-        map.get(&run_id).map(|handle| handle.entry.clone())
+        map.get(&run_id).map(|handle| {
+            if handle.live.owned_by(&claims) {
+                handle.live.touch();
+            }
+            handle.entry.clone()
+        })
     };
     let Some(entry_arc) = entry_arc else {
         return Err(status_err(
@@ -340,7 +353,12 @@ pub async fn egress_receipts(
     let request_id = RequestKind::new().to_string();
     let entry_arc = {
         let map = state.agent_runs.lock().expect("agent_runs mutex poisoned");
-        map.get(&run_id).map(|handle| handle.entry.clone())
+        map.get(&run_id).map(|handle| {
+            if handle.live.owned_by(&claims) {
+                handle.live.touch();
+            }
+            handle.entry.clone()
+        })
     };
     let Some(entry_arc) = entry_arc else {
         return Err(status_err(

@@ -47,6 +47,10 @@ pub enum EventType {
     ObservationReady,
     AgentCompleted,
     AgentFailed,
+    /// A live agent run was released by the sweeper (idle, over its lifetime, or a
+    /// takeover nobody came back to). Payload: `reason`, `idle_s`, `age_s`; no URL.
+    /// A non-ZDR run's checkpoint stays `active`, so it can be resumed.
+    AgentExpired,
     /// Cycle 19 / cluster #19: emitted by `/v1/search` route on every
     /// query. Reserved for future `autocomplete-core` Sonic ingest into
     /// the `queries` bucket. Payload includes `query` + `provider` +

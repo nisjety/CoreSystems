@@ -3905,7 +3905,45 @@ fn step_request_body(action: Value, actor: BrowserActionActor) -> Value {
     }
 }
 
+/// A start Quarry refused because a run cap is full (`global_run_cap`,
+/// `org_run_cap` or `org_interactive_run_cap`) as the gateway's own
+/// `browser_capacity_reached` 429 with `Retry-After`. Only the numbers survive;
+/// nothing else from the upstream body is echoed. `None` for any other 429.
+fn browser_capacity_response(body: &Value) -> Option<Response> {
+    let details = body.pointer("/error/details")?;
+    let reason = details.get("reason")?.as_str()?;
+    if !matches!(
+        reason,
+        "global_run_cap" | "org_run_cap" | "org_interactive_run_cap"
+    ) {
+        return None;
+    }
+    let retry_after = details
+        .get("retry_after_seconds")
+        .and_then(Value::as_u64)
+        .filter(|seconds| (1..=3600).contains(seconds))
+        .unwrap_or(10);
+    let mut response = error(
+        "browser_capacity_reached",
+        "Browser capacity is full. Try again shortly.",
+    );
+    response["error"]["retryAfterSeconds"] = json!(retry_after);
+    Some(
+        (
+            StatusCode::TOO_MANY_REQUESTS,
+            [(axum::http::header::RETRY_AFTER, retry_after.to_string())],
+            Json(response),
+        )
+            .into_response(),
+    )
+}
+
 fn forward_quarry_failure(status: StatusCode, body: Value) -> Response {
+    if status == StatusCode::TOO_MANY_REQUESTS {
+        if let Some(response) = browser_capacity_response(&body) {
+            return response;
+        }
+    }
     // Quarry enforces the takeover itself; the SPA only knows the gateway's own
     // code for it, so translate (and keep the control epoch for the caller).
     if body.pointer("/error/code").and_then(Value::as_str) == Some("USER_TOOK_OVER") {
@@ -4022,6 +4060,32 @@ mod tests {
             json!({ "action": { "type": "back" } }),
             "a person's own action carries no hint"
         );
+    }
+
+    #[tokio::test]
+    async fn forward_quarry_failure_maps_cap_denial_to_browser_capacity_reached() {
+        for reason in ["global_run_cap", "org_run_cap", "org_interactive_run_cap"] {
+            let quarry = json!({ "error": {
+                "code": "RATE_LIMITED",
+                "message": "browser capacity is full; try again shortly",
+                "details": { "reason": reason, "scope": "org", "limit": 3, "active": 3, "retry_after_seconds": 12 },
+                "retryable": true
+            }});
+            let response = forward_quarry_failure(StatusCode::TOO_MANY_REQUESTS, quarry);
+            assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+            assert_eq!(response.headers().get("retry-after").unwrap(), "12");
+            let bytes = axum::body::to_bytes(response.into_body(), 1 << 20).await.unwrap();
+            let body: Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(body["error"]["code"], "browser_capacity_reached");
+            assert_eq!(body["error"]["retryAfterSeconds"], 12);
+            assert!(!body.to_string().contains("RATE_LIMITED"));
+        }
+        // Any other 429 passes through untouched.
+        let other = json!({ "error": { "code": "RATE_LIMITED", "details": { "reason": "something_else" } } });
+        let response = forward_quarry_failure(StatusCode::TOO_MANY_REQUESTS, other);
+        let bytes = axum::body::to_bytes(response.into_body(), 1 << 20).await.unwrap();
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["error"]["code"], "RATE_LIMITED");
     }
 
     #[tokio::test]

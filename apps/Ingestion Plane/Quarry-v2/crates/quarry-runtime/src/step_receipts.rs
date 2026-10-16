@@ -220,6 +220,8 @@ pub enum BrowserTabOperation {
 pub enum BrowserTimelineLifecycle {
     Started,
     Closed,
+    /// Released by the run sweeper rather than closed by its owner.
+    Expired,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

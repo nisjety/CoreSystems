@@ -242,6 +242,14 @@ pub async fn start_run(
     };
     let profile_id = lease.profile_id.to_string();
 
+    // The run caps come first (R-26: run cap, then the driver's own cap). The slot
+    // counts against them from here and frees itself on every early return below.
+    let run_class = crate::budget::classify(claims.is_service(), body.initiated_by.as_deref());
+    let slot = state
+        .agent_runs
+        .try_reserve(&org_id, run_class)
+        .map_err(|denied| driver_err(&request_id, denied.into_error()))?;
+
     let session = state
         .agent_driver
         .acquire(&lease)
@@ -372,7 +380,8 @@ pub async fn start_run(
         entry.actor_id.clone(),
         entry.control_mode,
         entry.control_epoch,
-    );
+    )
+    .with_run(run_class, body.constraints.max_runtime_s.map(u64::from));
 
     if !zdr.is_active() {
         let checkpoint = checkpoint_for_entry(&entry);
@@ -394,11 +403,7 @@ pub async fn start_run(
         }
     }
 
-    state
-        .agent_runs
-        .lock()
-        .expect("agent_runs mutex poisoned")
-        .insert(run_id.to_string(), RunHandle::new(entry, live));
+    slot.commit(run_id.to_string(), RunHandle::new(entry, live));
 
     state
         .event_sink
@@ -434,74 +439,97 @@ pub async fn close_run(
 ) -> Result<Json<Envelope<serde_json::Value>>, ApiErr> {
     let request_id = RequestKind::new().to_string();
 
-    let entry_arc = {
-        let map = state.agent_runs.lock().expect("agent_runs mutex poisoned");
-        map.get(&run_id).map(|handle| handle.entry.clone())
-    };
-    let Some(entry_arc) = entry_arc else {
+    let Some(handle) = lookup_run(&state, &run_id) else {
         return Err(status_err(
             StatusCode::NOT_FOUND,
             &request_id,
             "agent run not found",
         ));
     };
+    // Ownership first, before touching shared state.
+    if !handle.live.owned_by(&claims) {
+        return Err(status_err(
+            StatusCode::NOT_FOUND,
+            &request_id,
+            "agent run not found",
+        ));
+    }
 
-    // Org check before mutating shared state.
-    {
-        let entry = entry_arc.lock().await;
-        if !caller_owns_live_run(&entry, &claims) {
-            return Err(status_err(
-                StatusCode::NOT_FOUND,
-                &request_id,
-                "agent run not found",
-            ));
+    finish_run(&state, &run_id, handle, CloseReason::Explicit)
+        .await
+        .map_err(|error| driver_err(&request_id, error))?;
+
+    Ok(Json(Envelope::ok(
+        request_id,
+        serde_json::json!({ "closed": true }),
+    )))
+}
+
+/// Why a run ended.
+pub(super) enum CloseReason {
+    /// Its owner closed it.
+    Explicit,
+    /// The sweeper released it.
+    Expired(ExpireVerdict),
+}
+
+/// The one path that ends a run, for the owner's `DELETE` and for the sweeper. It
+/// writes the durable record first (a failure leaves the run registered and
+/// untouched), then marks the run closed so an action that was waiting for the lock
+/// is refused, takes it out of the registry and always releases the browser session,
+/// even while another request still holds a reference to the run.
+///
+/// An explicit close also closes the checkpoint; an expiry leaves it `active`, so a
+/// non-ZDR run can be resumed. A ZDR run leaves nothing durable either way.
+pub(super) async fn finish_run(
+    state: &AppState,
+    run_id: &str,
+    handle: RunHandle,
+    reason: CloseReason,
+) -> QuarryResult<()> {
+    // Waits for an action that is still running.
+    let mut entry = handle.entry.lock().await;
+    if entry.closed {
+        return Ok(());
+    }
+    let zdr = entry.zdr;
+    let rid = entry.run_id.clone();
+    if !zdr.is_active() {
+        let lifecycle = match reason {
+            CloseReason::Explicit => BrowserTimelineLifecycle::Closed,
+            CloseReason::Expired(_) => BrowserTimelineLifecycle::Expired,
+        };
+        state
+            .receipts
+            .append_browser_timeline_event(BrowserTimelineEvent::new(
+                entry.org_id.clone(),
+                entry.actor_id.clone(),
+                rid.to_string(),
+                BrowserTimelineEventKind::Lifecycle { state: lifecycle },
+            ))
+            .await?;
+        if matches!(reason, CloseReason::Explicit) {
+            state
+                .receipts
+                .close_run_checkpoint(&entry.org_id, &rid)
+                .await?;
         }
     }
 
-    let close_event = {
-        let entry = entry_arc.lock().await;
-        (!entry.zdr.is_active()).then(|| {
-            BrowserTimelineEvent::new(
-                entry.org_id.clone(),
-                entry.actor_id.clone(),
-                entry.run_id.to_string(),
-                BrowserTimelineEventKind::Lifecycle {
-                    state: BrowserTimelineLifecycle::Closed,
-                },
-            )
-        })
-    };
-    if let Some(event) = close_event {
-        let parsed_run_id = run_id.parse::<RunKind>().map_err(|_| {
-            status_err(StatusCode::NOT_FOUND, &request_id, "agent run not found")
-        })?;
-        state
-            .receipts
-            .append_browser_timeline_event(event)
-            .await
-            .map_err(|error| driver_err(&request_id, error))?;
-        state
-            .receipts
-            .close_run_checkpoint(&claims.org_id, &parsed_run_id)
-            .await
-            .map_err(|error| driver_err(&request_id, error))?;
-    }
-
-    // An action that was waiting for the lock sees this and is refused.
-    entry_arc.lock().await.closed = true;
+    entry.closed = true;
     state
         .agent_runs
         .lock()
         .expect("agent_runs mutex poisoned")
-        .remove(&run_id);
+        .remove(run_id);
+    let session = entry.session.clone();
+    drop(entry);
+    if let Err(error) = state.agent_driver.release(session).await {
+        tracing::warn!(run_id, %error, "releasing a run's browser session failed");
+    }
 
-    // Release only when we hold the sole reference (no in-flight step).
-    match Arc::try_unwrap(entry_arc) {
-        Ok(mutex) => {
-            let entry = mutex.into_inner();
-            let rid = entry.run_id.clone();
-            let zdr = entry.zdr;
-            let _ = state.agent_driver.release(entry.session).await;
+    match reason {
+        CloseReason::Explicit => {
             state
                 .event_sink
                 .emit_for_zdr(
@@ -513,15 +541,24 @@ pub async fn close_run(
                 )
                 .await;
         }
-        Err(_still_in_use) => {
-            tracing::warn!(run_id = %run_id, "close_run raced an in-flight step; session will drop on last ref");
+        CloseReason::Expired(verdict) => {
+            state
+                .event_sink
+                .emit_for_zdr(
+                    zdr,
+                    rid.clone(),
+                    EventType::AgentExpired,
+                    serde_json::json!({
+                        "reason": verdict.reason.as_str(),
+                        "idle_s": verdict.idle_s,
+                        "age_s": verdict.age_s,
+                    }),
+                    format!("{rid}:agent_expired"),
+                )
+                .await;
         }
     }
-
-    Ok(Json(Envelope::ok(
-        request_id,
-        serde_json::json!({ "closed": true }),
-    )))
+    Ok(())
 }
 
 /// Release every live browser session. Runs concurrently (8 at a time) with

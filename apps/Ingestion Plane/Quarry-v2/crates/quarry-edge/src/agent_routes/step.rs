@@ -19,6 +19,9 @@ pub async fn step(
         ));
     };
 
+    // Counts as in flight from before it waits for the run lock, so the sweeper
+    // never releases a run an action is queued on.
+    let _in_flight = handle.live.in_flight_guard();
     let mut entry = handle.entry.lock().await;
     if !caller_owns_live_run(&entry, &claims) {
         return Err(status_err(
@@ -27,6 +30,7 @@ pub async fn step(
             "agent run not found",
         ));
     }
+    handle.live.touch();
 
     // Every gate, in one fixed order (see `admit_action`).
     let admitted = admit_action(
@@ -151,7 +155,9 @@ pub(super) async fn execute_ws_action(
     instruction: Option<String>,
     hint: Option<InitiatorHint>,
 ) -> QuarryResult<BrowserObservation> {
+    let _in_flight = handle.live.in_flight_guard();
     let mut entry = handle.entry.lock().await;
+    handle.live.touch();
     let admitted = admit_action(
         state,
         handle,

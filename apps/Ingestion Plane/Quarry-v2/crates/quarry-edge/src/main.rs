@@ -175,6 +175,14 @@ async fn main() -> anyhow::Result<()> {
     )
     .map_err(|e| anyhow::anyhow!("takeover enforcement: {e}"))?;
     tracing::info!(takeover_enforced, "agent takeover enforcement");
+    // Caps on live runs and the sweeper's lifetimes. The browser driver's own
+    // backstops (idle 3600 s, max age 21600 s) must sit above every run limit.
+    let run_limit_config = run_limits::RunLimits::from_env()
+        .map_err(|e| anyhow::anyhow!("run limits: {e}"))?;
+    tracing::info!("run limits: {run_limit_config}");
+    for warning in run_limit_config.ordering_warnings(3600, 21_600) {
+        tracing::warn!("run limits: {warning}");
+    }
     // Agent-run budgets: an unreadable mode or limit stops the edge here, naming
     // the variable, rather than silently becoming "no budget".
     let budget_mode = budget::BudgetMode::from_env().map_err(|e| anyhow::anyhow!("budget: {e}"))?;
@@ -1300,7 +1308,7 @@ async fn main() -> anyhow::Result<()> {
             .with_profile_store(profiles.clone()),
     );
     #[cfg(feature = "browser-agent")]
-    let agent_runs = agent_routes::new_runs();
+    let agent_runs = agent_routes::new_runs_with(run_limit_config);
 
     let visual_processor: Option<Arc<dyn quarry_runtime::vision::VisualObservationProcessor>> = {
         let visual_feature_requested = cfg.visual_diff_enabled
@@ -1506,6 +1514,10 @@ async fn main() -> anyhow::Result<()> {
     #[cfg(feature = "browser-agent")]
     let drain_handles = (app_state.agent_runs.clone(), app_state.agent_driver.clone());
 
+    // Releases the browsers of runs nobody is using any more.
+    #[cfg(feature = "browser-agent")]
+    let run_sweeper = agent_routes::spawn_run_sweeper(app_state.clone());
+
     let app = routes::router(app_state);
     // Outermost, so a request refused by an auth layer is still counted.
     let app = if metrics_handle.is_some() {
@@ -1547,6 +1559,9 @@ async fn main() -> anyhow::Result<()> {
             );
         }
     }
+
+    #[cfg(feature = "browser-agent")]
+    run_sweeper.abort();
 
     // The server is down. Release every live browser session instead of dying
     // with them; a non-ZDR run's checkpoint stays Active, so it can be resumed.

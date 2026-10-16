@@ -1220,3 +1220,389 @@ async fn control_event_records_derived_initiator_and_epoch() {
         }
     )));
 }
+
+// ---- WS2.D: run registry, caps, liveness, sweeper
+
+fn live_with(org: &str, class: crate::budget::RunClass) -> RunHandle {
+    let mut entry = entry_with_budget(None);
+    entry.org_id = org.into();
+    let live = RunLive::new(org, "user", BrowserControlMode::AgentControl, 0).with_run(class, None);
+    RunHandle::new(entry, live)
+}
+
+fn registry(
+    global: u32,
+    org: u32,
+    interactive: u32,
+) -> std::sync::Arc<RunRegistry> {
+    let limits = crate::run_limits::RunLimits {
+        max_concurrent_runs: global,
+        max_runs_per_org: org,
+        max_interactive_runs_per_org: interactive,
+        ..crate::run_limits::RunLimits::unlimited()
+    };
+    Arc::new(RunRegistry::new(limits))
+}
+
+#[test]
+fn reserve_respects_global_org_and_interactive_caps() {
+    use crate::budget::RunClass::{Agent, Interactive};
+    let runs = registry(5, 3, 2);
+    // Organization A fills its interactive sub-cap (2), then its total (3).
+    let a1 = runs.try_reserve("org_a", Interactive).unwrap();
+    let a2 = runs.try_reserve("org_a", Interactive).unwrap();
+    let denied = runs.try_reserve("org_a", Interactive).unwrap_err();
+    assert_eq!(denied.reason, "org_interactive_run_cap");
+    assert_eq!((denied.limit, denied.active), (2, 2));
+    // An agent run still fits under the org total: the sub-cap leaves headroom.
+    let a3 = runs.try_reserve("org_a", Agent).unwrap();
+    let denied = runs.try_reserve("org_a", Agent).unwrap_err();
+    assert_eq!(denied.reason, "org_run_cap");
+    assert_eq!(denied.scope, "org");
+    // Another organization is not affected by A's caps until the global one.
+    let b1 = runs.try_reserve("org_b", Interactive).unwrap();
+    let b2 = runs.try_reserve("org_b", Agent).unwrap();
+    let denied = runs.try_reserve("org_c", Agent).unwrap_err();
+    assert_eq!(denied.reason, "global_run_cap");
+    assert_eq!(denied.scope, "global");
+    let error = denied.into_error();
+    assert_eq!(error.code, ErrorCode::RateLimited);
+    assert!(error.retryable);
+    assert_eq!(error.details.as_ref().unwrap()["reason"], "global_run_cap");
+    assert_eq!(error.details.as_ref().unwrap()["retry_after_seconds"], 10);
+    drop((a1, a2, a3, b1, b2));
+}
+
+#[test]
+fn slot_rolls_back_on_drop_until_committed() {
+    use crate::budget::RunClass::Interactive;
+    let runs = registry(1, 0, 0);
+    let slot = runs.try_reserve("org_a", Interactive).unwrap();
+    assert!(runs.try_reserve("org_a", Interactive).is_err(), "the pending slot counts");
+    drop(slot); // a failed start
+    let slot = runs.try_reserve("org_a", Interactive).expect("capacity came back");
+    let handle = live_with("org_a", Interactive);
+    let id = handle.entry.try_lock().unwrap().run_id.to_string();
+    slot.commit(id, handle);
+    // Committed: no longer pending, now a live run, still one against the cap.
+    assert_eq!(runs.stats().live, 1);
+    assert_eq!(runs.stats().pending, 0);
+    assert!(runs.try_reserve("org_a", Interactive).is_err());
+}
+
+#[test]
+fn remove_decrements_counters() {
+    use crate::budget::RunClass::Interactive;
+    let runs = registry(1, 0, 0);
+    let slot = runs.try_reserve("org_a", Interactive).unwrap();
+    let handle = live_with("org_a", Interactive);
+    let id = handle.entry.try_lock().unwrap().run_id.to_string();
+    slot.commit(id.clone(), handle);
+    assert!(runs.try_reserve("org_a", Interactive).is_err());
+    runs.lock().unwrap().remove(&id);
+    assert!(runs.try_reserve("org_a", Interactive).is_ok());
+}
+
+#[test]
+fn zero_means_unlimited() {
+    use crate::budget::RunClass::Interactive;
+    let runs = registry(0, 0, 0);
+    let slots: Vec<_> = (0..200)
+        .map(|_| runs.try_reserve("org_a", Interactive).unwrap())
+        .collect();
+    assert_eq!(slots.len(), 200);
+}
+
+#[test]
+fn concurrent_reservations_never_exceed_cap() {
+    use crate::budget::RunClass::Interactive;
+    let runs = registry(8, 0, 0);
+    let granted = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let keep = Arc::new(StdMutex::new(Vec::new()));
+    let threads: Vec<_> = (0..64)
+        .map(|_| {
+            let runs = runs.clone();
+            let granted = granted.clone();
+            let keep = keep.clone();
+            std::thread::spawn(move || {
+                if let Ok(slot) = runs.try_reserve("org_a", Interactive) {
+                    granted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    keep.lock().unwrap().push(slot);
+                }
+            })
+        })
+        .collect();
+    for thread in threads {
+        thread.join().unwrap();
+    }
+    assert_eq!(granted.load(std::sync::atomic::Ordering::SeqCst), 8);
+}
+
+const T0: u64 = 1_000_000_000;
+
+fn limits() -> crate::run_limits::RunLimits {
+    crate::run_limits::RunLimits::default()
+}
+
+fn live_at(class: crate::budget::RunClass, explicit: Option<u64>) -> Arc<RunLive> {
+    Arc::new(
+        RunLive::new("org", "user", BrowserControlMode::AgentControl, 0)
+            .with_run(class, explicit)
+            .with_clock(T0),
+    )
+}
+
+#[test]
+fn agent_ttl_uses_explicit_runtime_plus_grace() {
+    use crate::budget::RunClass::Agent;
+    let live = live_at(Agent, Some(60));
+    live.touch_at(T0 + 89_000);
+    // 60 s asked for + 30 s grace = absolute lifetime of 90 s, touched or not.
+    assert_eq!(live.verdict(T0 + 89_000, &limits()), None);
+    let verdict = live.verdict(T0 + 91_000, &limits()).unwrap();
+    assert_eq!(verdict.reason, ExpireReason::Ttl);
+}
+
+#[test]
+fn agent_default_120_is_not_absolute() {
+    use crate::budget::RunClass::Agent;
+    // No explicit runtime (the 120 s default is not a request): the agent backstop applies.
+    let live = live_at(Agent, None);
+    live.touch_at(T0 + 200_000);
+    assert_eq!(live.verdict(T0 + 200_000, &limits()), None);
+    live.touch_at(T0 + 1_790_000);
+    assert_eq!(live.verdict(T0 + 1_790_000, &limits()), None);
+    assert_eq!(
+        live.verdict(T0 + 1_801_000, &limits()).unwrap().reason,
+        ExpireReason::Ttl
+    );
+}
+
+#[test]
+fn agent_idle_expires_and_ignores_viewers() {
+    use crate::budget::RunClass::Agent;
+    // Opening a viewer touches the run at the wall clock, so start the run there.
+    let base = now_ms();
+    let live = Arc::new(
+        RunLive::new("org", "user", BrowserControlMode::AgentControl, 0)
+            .with_run(Agent, None)
+            .with_clock(base),
+    );
+    let _viewer = live.viewer_guard();
+    let verdict = live.verdict(base + 310_000, &limits()).unwrap();
+    assert_eq!(verdict.reason, ExpireReason::Idle);
+}
+
+#[test]
+fn interactive_ignores_gateway_120s_ttl() {
+    use crate::budget::RunClass::Interactive;
+    // The gateway sends max_runtime_s 120 for every UI session; a person's session
+    // must not be released at 120 s because of it.
+    let live = live_at(Interactive, Some(120));
+    live.touch_at(T0 + 600_000);
+    assert_eq!(live.verdict(T0 + 600_000, &limits()), None);
+}
+
+#[test]
+fn interactive_idle_blocked_by_viewer() {
+    use crate::budget::RunClass::Interactive;
+    let live = live_at(Interactive, None);
+    assert_eq!(
+        live.verdict(T0 + 901_000, &limits()).unwrap().reason,
+        ExpireReason::Idle
+    );
+    let viewer = live.viewer_guard();
+    live.touch_at(T0);
+    assert_eq!(live.verdict(T0 + 3_000_000, &limits()), None, "a viewer holds off idle");
+    drop(viewer);
+}
+
+#[test]
+fn interactive_backstop_applies_with_viewer() {
+    use crate::budget::RunClass::Interactive;
+    let live = live_at(Interactive, None);
+    let _viewer = live.viewer_guard();
+    live.touch_at(T0 + 14_399_000);
+    let verdict = live.verdict(T0 + 14_401_000, &limits()).unwrap();
+    assert_eq!(verdict.reason, ExpireReason::MaxAge);
+}
+
+#[test]
+fn takeover_idle_longer_than_interactive_idle() {
+    use crate::budget::RunClass::Interactive;
+    let live = live_at(Interactive, None);
+    live.set_mode(BrowserControlMode::HumanTakeover, None).unwrap();
+    live.touch_at(T0);
+    assert_eq!(live.verdict(T0 + 901_000, &limits()), None, "past the normal idle limit");
+    let verdict = live.verdict(T0 + 1_801_000, &limits()).unwrap();
+    assert_eq!(verdict.reason, ExpireReason::TakeoverIdle);
+}
+
+#[test]
+fn touch_resets_idle() {
+    use crate::budget::RunClass::Interactive;
+    let live = live_at(Interactive, None);
+    live.touch_at(T0 + 800_000);
+    assert_eq!(live.verdict(T0 + 1_000_000, &limits()), None);
+    assert!(live.verdict(T0 + 1_800_000, &limits()).is_some());
+}
+
+#[test]
+fn in_flight_is_never_expired() {
+    use crate::budget::RunClass::Agent;
+    let live = live_at(Agent, Some(1));
+    let guard = live.in_flight_guard();
+    assert_eq!(live.verdict(T0 + 99_999_000, &limits()), None);
+    drop(guard);
+    assert!(live.verdict(T0 + 99_999_000, &limits()).is_some());
+}
+
+/// A state whose registry sweeps for real (not dry) with the limits it is given.
+fn swept_state(limits: crate::run_limits::RunLimits) -> AppState {
+    let mut state = test_state_with_static_driver();
+    state.agent_runs = new_runs_with(limits);
+    state
+}
+
+async fn register(state: &AppState, org: &str, class: crate::budget::RunClass, started_ms: u64) -> (String, RunHandle) {
+    let mut entry = entry_with_budget(None);
+    entry.org_id = org.into();
+    entry.actor_id = "user".into();
+    let run_id = entry.run_id.to_string();
+    let live = RunLive::new(org, "user", BrowserControlMode::AgentControl, 0)
+        .with_run(class, None)
+        .with_clock(started_ms);
+    let handle = RunHandle::new(entry, live);
+    let slot = state.agent_runs.try_reserve(org, class).unwrap();
+    slot.commit(run_id.clone(), handle.clone());
+    (run_id, handle)
+}
+
+#[tokio::test]
+async fn sweep_releases_an_idle_run_once_and_leaves_the_checkpoint_active() {
+    use crate::budget::RunClass::Interactive;
+    let state = swept_state(crate::run_limits::RunLimits {
+        sweeper: true,
+        ..crate::run_limits::RunLimits::unlimited()
+    });
+    let (run_id, handle) = register(&state, "org", Interactive, T0).await;
+    let rid = handle.entry.lock().await.run_id.clone();
+    let mut events = state.event_sink.subscribe(&rid);
+    // Not yet old enough.
+    assert_eq!(sweep_once(&state, T0 + 100_000).await, SweepReport::default());
+    assert_eq!(state.agent_runs.stats().live, 1);
+    // Past the idle limit.
+    let report = sweep_once(&state, T0 + 901_000).await;
+    assert_eq!(report, SweepReport { expired: 1, would_expire: 0 });
+    assert_eq!(state.agent_runs.stats().live, 0);
+    assert!(handle.entry.lock().await.closed);
+    assert!(lookup_run(&state, &run_id).is_none());
+    // A second pass finds nothing to do.
+    assert_eq!(sweep_once(&state, T0 + 902_000).await, SweepReport::default());
+    // The lifecycle record says expired, and one agent.expired event went out.
+    let timeline = state
+        .receipts
+        .list_browser_timeline_events("org", "user", &rid)
+        .await
+        .unwrap();
+    assert!(timeline.iter().any(|event| matches!(
+        &event.event,
+        BrowserTimelineEventKind::Lifecycle { state: BrowserTimelineLifecycle::Expired }
+    )));
+    let event = events.try_recv().expect("agent.expired was emitted");
+    assert_eq!(event.event_type, EventType::AgentExpired);
+    assert_eq!(event.payload["reason"], "idle");
+    assert!(event.payload.get("url").is_none(), "no URL in the event");
+}
+
+#[tokio::test]
+async fn dry_run_logs_and_releases_nothing() {
+    use crate::budget::RunClass::Interactive;
+    let state = swept_state(crate::run_limits::RunLimits {
+        sweeper: true,
+        sweeper_dry_run: true,
+        ..crate::run_limits::RunLimits::unlimited()
+    });
+    let (run_id, _handle) = register(&state, "org", Interactive, T0).await;
+    let report = sweep_once(&state, T0 + 5_000_000).await;
+    assert_eq!(report, SweepReport { expired: 0, would_expire: 1 });
+    assert!(lookup_run(&state, &run_id).is_some());
+}
+
+#[tokio::test]
+async fn a_viewer_survives_idle_but_not_the_backstop() {
+    use crate::budget::RunClass::Interactive;
+    let state = swept_state(crate::run_limits::RunLimits::unlimited());
+    let (run_id, handle) = register(&state, "org", Interactive, T0).await;
+    let _viewer = handle.live.viewer_guard();
+    handle.live.touch_at(T0);
+    assert_eq!(sweep_once(&state, T0 + 3_000_000).await, SweepReport::default());
+    assert!(lookup_run(&state, &run_id).is_some());
+    assert_eq!(sweep_once(&state, T0 + 14_401_000).await.expired, 1);
+    assert!(lookup_run(&state, &run_id).is_none());
+}
+
+#[tokio::test]
+async fn an_in_flight_run_is_skipped_by_the_sweep() {
+    use crate::budget::RunClass::Agent;
+    let state = swept_state(crate::run_limits::RunLimits::unlimited());
+    let (run_id, handle) = register(&state, "org", Agent, T0).await;
+    let guard = handle.live.in_flight_guard();
+    assert_eq!(sweep_once(&state, T0 + 9_999_000).await, SweepReport::default());
+    drop(guard);
+    assert_eq!(sweep_once(&state, T0 + 9_999_000).await.expired, 1);
+    assert!(lookup_run(&state, &run_id).is_none());
+}
+
+#[tokio::test]
+async fn zdr_expiry_writes_no_timeline_row_and_no_checkpoint() {
+    use crate::budget::RunClass::Interactive;
+    let state = swept_state(crate::run_limits::RunLimits::unlimited());
+    let mut entry = entry_with_budget(None);
+    entry.org_id = "org".into();
+    entry.actor_id = "user".into();
+    entry.zdr = ZdrMode::On;
+    let run_id = entry.run_id.to_string();
+    let rid = entry.run_id.clone();
+    let live = RunLive::new("org", "user", BrowserControlMode::AgentControl, 0)
+        .with_run(Interactive, None)
+        .with_clock(T0);
+    state
+        .agent_runs
+        .try_reserve("org", Interactive)
+        .unwrap()
+        .commit(run_id.clone(), RunHandle::new(entry, live));
+    assert_eq!(sweep_once(&state, T0 + 901_000).await.expired, 1);
+    assert!(state
+        .receipts
+        .list_browser_timeline_events("org", "user", &rid)
+        .await
+        .unwrap()
+        .is_empty());
+    assert!(state.receipts.load_run_checkpoint("org", &rid).await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn close_run_while_another_reference_is_held_still_releases() {
+    use crate::budget::RunClass::Interactive;
+    let state = swept_state(crate::run_limits::RunLimits::unlimited());
+    let (run_id, handle) = register(&state, "org", Interactive, T0).await;
+    let held = handle.entry.clone(); // another reference to the run
+    finish_run(&state, &run_id, handle, CloseReason::Explicit).await.unwrap();
+    assert!(lookup_run(&state, &run_id).is_none());
+    assert!(held.lock().await.closed, "the run is closed even though a reference outlives it");
+    assert_eq!(state.agent_runs.stats().live, 0);
+}
+
+#[tokio::test]
+async fn a_failed_start_frees_its_slot() {
+    use crate::budget::RunClass::Interactive;
+    let state = swept_state(crate::run_limits::RunLimits {
+        max_concurrent_runs: 1,
+        ..crate::run_limits::RunLimits::unlimited()
+    });
+    let slot = state.agent_runs.try_reserve("org", Interactive).unwrap();
+    assert!(state.agent_runs.try_reserve("org", Interactive).is_err());
+    drop(slot);
+    assert!(state.agent_runs.try_reserve("org", Interactive).is_ok());
+}

@@ -90,6 +90,7 @@ pub async fn set_browser_session_control(
             "agent run not found",
         ));
     }
+    handle.live.touch();
     // Only a person hands the browser over or back. An agent (a service
     // principal, or a person's token labelled agent) cannot take it from them.
     if derive_initiator(&claims, None) != StepInitiator::Human {

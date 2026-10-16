@@ -28,6 +28,11 @@ services:
     stop_grace_period: 45s
     environment:
       QUARRY_EDGE__DRAIN_DEADLINE_S: "${QUARRY_EDGE_DRAIN_DEADLINE_S:-30}"
+      # Caps on live runs and the sweeper that releases idle ones (docs/RUNBOOKS.md,
+      # "Run caps and the run sweeper"). The caps are live from the first deploy; the
+      # sweeper starts in dry run, so it only logs would_expire. Review the log for a
+      # person's sessions, then set QUARRY_EDGE_RUN_SWEEPER_DRY_RUN=0.
+      QUARRY_EDGE__RUN_SWEEPER_DRY_RUN: "${QUARRY_EDGE_RUN_SWEEPER_DRY_RUN:-1}"
       QUARRY_EDGE__PORT: "8082"
       QUARRY_EDGE__USER_AGENT: "Quarry/2.0 (+https://triodelab.com/quarry)"
       # The browser driver is chosen at BUILD time, never by an env var, so

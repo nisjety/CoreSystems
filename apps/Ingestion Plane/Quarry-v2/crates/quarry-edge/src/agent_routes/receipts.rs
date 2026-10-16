@@ -11,7 +11,12 @@ pub async fn list_receipts(
     let request_id = RequestKind::new().to_string();
     let entry_arc = {
         let map = state.agent_runs.lock().expect("agent_runs mutex poisoned");
-        map.get(&run_id).map(|handle| handle.entry.clone())
+        map.get(&run_id).map(|handle| {
+            if handle.live.owned_by(&claims) {
+                handle.live.touch();
+            }
+            handle.entry.clone()
+        })
     };
     let receipts = if let Some(entry_arc) = entry_arc {
         let entry = entry_arc.lock().await;
