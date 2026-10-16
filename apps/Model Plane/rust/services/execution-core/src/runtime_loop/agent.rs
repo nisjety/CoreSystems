@@ -360,6 +360,9 @@ struct PendingPause {
 /// credentials, tools, posture and ZDR flag verbatim through `req` — delegation
 /// is not an opportunity to re-derive scope from model input.
 struct LoopContext<'a> {
+    /// The one approved call this continuation segment may release (build plan
+    /// WS03 S3). `None` for a fresh run and for every delegated child.
+    release: Option<super::resume::ApprovedRelease>,
     state: &'a crate::state::StateStore,
     session_channel: &'a Channel,
     inference_channel: &'a Channel,
@@ -883,18 +886,39 @@ async fn run_agent_with_route(
 
     heartbeat_managed_agent_run(&session_channel, &req, terminal_tokens).await?;
 
-    // 1. Plan: DRAFT → EXECUTING.
-    publish_plan_transition(
-        &session_channel,
-        &plan_id,
-        &req.run_id,
-        pb::PlanState::Draft,
-        pb::PlanState::Executing,
-        session_bearer.as_deref(),
-    )
-    .await;
+    // A continuation segment (build plan WS03 S3): consume the granted approval
+    // exactly once and build the release for the one approved call. Done before
+    // anything else is published, so a refused consume leaves the run exactly
+    // as it was.
+    let resumed = match req.resume.as_ref() {
+        Some(resume) => Some(
+            prepare_resume(
+                &session_channel,
+                session_bearer.as_deref(),
+                &req,
+                resume,
+                permission_wire,
+            )
+            .await?,
+        ),
+        None => None,
+    };
+
+    // 1. Plan: DRAFT → EXECUTING. A continuation is already executing.
+    if resumed.is_none() {
+        publish_plan_transition(
+            &session_channel,
+            &plan_id,
+            &req.run_id,
+            pb::PlanState::Draft,
+            pb::PlanState::Executing,
+            session_bearer.as_deref(),
+        )
+        .await;
+    }
 
     let context = LoopContext {
+        release: resumed.as_ref().map(|r| r.release.clone()),
         state,
         session_channel: &session_channel,
         inference_channel: &inference_channel,
@@ -917,13 +941,17 @@ async fn run_agent_with_route(
         refusal: crate::subscription_refusal::RefusalLatch::default(),
         permission_wire,
         depth: 0,
-        step_prefix: String::new(),
+        step_prefix: resumed.as_ref().map_or_else(String::new, |r| r.step_prefix.clone()),
         child_ceiling,
         deadline,
     };
 
     // 2. The governed ReAct loop.
-    let rounds = run_rounds(&context, &req.goal, max_rounds).await?;
+    let (loop_goal, seeded_round) = match resumed {
+        Some(resumed) => (resumed.goal, Some(resumed.seeded_round)),
+        None => (req.goal.clone(), None),
+    };
+    let rounds = run_rounds(&context, &loop_goal, max_rounds, seeded_round).await?;
     let total_rounds = rounds.total_rounds();
     // Captured before `rounds.outcome` is moved out below.
     let compaction_triggered = rounds.compaction_triggered;
@@ -1173,7 +1201,12 @@ async fn run_rounds(
     ctx: &LoopContext<'_>,
     goal: &str,
     max_rounds: u32,
+    // A continuation's first round: the approved call, proposed as if by the
+    // model, so it goes through the same allowlist, rung, gate and ledger
+    // machinery as every other call. Consumed by the first round.
+    seeded_round: Option<pb::InferResponse>,
 ) -> Result<RoundsResult, tonic::Status> {
+    let mut seeded_round = seeded_round;
     let req = ctx.req;
     // The run's Zero-Data-Retention flag, threaded through every inference round
     // (so inference-core's prompt cache skips durable read/write) and onto each
@@ -1390,7 +1423,10 @@ async fn run_rounds(
                 .parse()
                 .expect("verified compact JWT is valid gRPC metadata"),
         );
-        let infer_result = inference.infer(infer_request).await;
+        let infer_result = match seeded_round.take() {
+            Some(seeded) => Ok(tonic::Response::new(seeded)),
+            None => inference.infer(infer_request).await,
+        };
 
         let response = match infer_result {
             Ok(r) => r.into_inner(),
@@ -1944,9 +1980,9 @@ async fn run_rounds(
                             ctx.capability_policy,
                             Some(dispatch),
                             sandbox.as_ref(),
-                            // No release yet: the resume boundary supplies one
-                            // (build plan WS03 S3, not wired in this slice).
-                            None,
+                            // Only the resume segment holds a release, and it
+                            // covers exactly one call.
+                            ctx.release.as_ref(),
                         )
                         .await;
                         let retryable = attempt < runtime_loop::retry::MAX_TOOL_ATTEMPTS
@@ -3115,6 +3151,7 @@ async fn run_delegated_child(
     // from the tool JSON), so tenant isolation is exactly the parent's. What it
     // does NOT inherit is the parent's transcript.
     let child = LoopContext {
+        release: None,
         state: parent.state,
         session_channel: parent.session_channel,
         inference_channel: parent.inference_channel,
@@ -3159,7 +3196,7 @@ async fn run_delegated_child(
         "run_agent: delegating to subagent (isolated context)"
     );
 
-    let rounds_result = run_rounds(&child, prompt, budget).await;
+    let rounds_result = run_rounds(&child, prompt, budget, None).await;
     let (outcome, rounds) = match rounds_result {
         Ok(result) => {
             let rounds = result.total_rounds();
@@ -4924,6 +4961,93 @@ async fn finalize(
 /// Publish a `PlanTransitioned` orchestration event on session-core's broadcast
 /// (the same `RecordOrchestrationEvent` path `browser_events.rs` uses).
 /// Best-effort: a publish failure is logged, never propagated.
+/// What a continuation segment starts from (build plan WS03 S3).
+struct ResumedSegment {
+    release: super::resume::ApprovedRelease,
+    step_prefix: String,
+    /// The goal with the framed brief of recorded results appended.
+    goal: String,
+    /// The first round: the approved call, proposed as if by the model.
+    seeded_round: pb::InferResponse,
+}
+
+/// Consume the granted approval and build what the segment runs first.
+///
+/// The consume carries the digest of the exact call, which session-core compares
+/// with the retained descriptor: the segment can only run the call that was
+/// approved. A refused consume (not granted, already consumed by another claim,
+/// expired, a different call) ends the request with a closed token before
+/// anything is published.
+async fn prepare_resume(
+    session_channel: &Channel,
+    session_bearer: Option<&str>,
+    req: &pb::RunAgentRequest,
+    resume: &pb::AgentResume,
+    permission_mode: &str,
+) -> Result<ResumedSegment, tonic::Status> {
+    let fingerprint = super::resume::call_fingerprint(
+        &req.run_id,
+        &req.org_id,
+        &req.user_id,
+        &resume.step_id,
+        &resume.tool_name,
+        &resume.tool_input,
+        permission_mode,
+    )
+    .ok_or_else(|| tonic::Status::invalid_argument("resume_incomplete"))?;
+    if !resume.action_fingerprint.is_empty() && resume.action_fingerprint != fingerprint {
+        return Err(tonic::Status::failed_precondition("approval_action_mismatch"));
+    }
+    let step_prefix = format!("s{}.", resume.segment_no.max(2));
+    let call = pb::ToolCall {
+        id: "approved".to_owned(),
+        name: resume.tool_name.trim().to_owned(),
+        arguments_json: resume.tool_input.clone(),
+    };
+    // The step id the loop will compute for this call (the first of the segment).
+    let step_id = tool_step_id(&step_prefix, 1, &call);
+    let release = super::resume::ApprovedRelease::new(&step_id, &call.name, &call.arguments_json)
+        .map_err(|_| tonic::Status::failed_precondition("not_releasable"))?;
+
+    let request = authenticated_session_request(
+        pb::ConsumeApprovalRequest {
+            approval_id: resume.approval_id.clone(),
+            org_id: req.org_id.clone(),
+            run_id: req.run_id.clone(),
+            step_id: resume.step_id.clone(),
+            action_fingerprint: fingerprint,
+            claim_token: resume.claim_token.clone(),
+        },
+        session_bearer,
+    )?;
+    let consumed = OrchestrationCoreServiceClient::new(session_channel.clone())
+        .consume_approval(request)
+        .await?
+        .into_inner();
+    // Won now, or the same claim replaying (a retried continue after a dropped
+    // response): both continue. Another claim that already consumed it does not.
+    if !(consumed.consumed || (consumed.already_consumed && consumed.same_claim)) {
+        return Err(tonic::Status::failed_precondition("continuation_already_consumed"));
+    }
+
+    let goal = if resume.brief.trim().is_empty() {
+        req.goal.clone()
+    } else {
+        format!("{}\n\n{}", req.goal, super::resume::frame_brief(&resume.brief))
+    };
+    Ok(ResumedSegment {
+        release,
+        step_prefix,
+        goal,
+        seeded_round: pb::InferResponse {
+            content: "Continuing after your approval: running the approved call.".to_owned(),
+            tool_calls: vec![call],
+            stop_reason: "tool_use".to_owned(),
+            ..Default::default()
+        },
+    })
+}
+
 async fn publish_plan_transition(
     session_channel: &Channel,
     plan_id: &str,
@@ -5365,6 +5489,8 @@ mod tests {
         replayed_run_status: Option<String>,
         plan_transitions: Vec<(i32, i32)>, // (from, to)
         approvals: Vec<(String, String)>,  // (step_id, reason)
+        /// Every `ConsumeApproval` the mock observed (build plan WS03 S3).
+        consume_calls: Vec<pb::ConsumeApprovalRequest>,
         /// `(thread_id, summary, step_count)` — every `ProposePlan` call
         /// `MockOrchestration` observed, for `plan.propose` dispatch tests.
         propose_plan_calls: Vec<(String, String, usize)>,
@@ -6716,9 +6842,18 @@ mod tests {
 
         async fn consume_approval(
             &self,
-            _: Request<pb::ConsumeApprovalRequest>,
+            request: Request<pb::ConsumeApprovalRequest>,
         ) -> Result<Response<pb::ConsumeApprovalResponse>, Status> {
-            Err(Status::unimplemented("consume_approval not needed in test"))
+            self.rec
+                .lock()
+                .unwrap()
+                .consume_calls
+                .push(request.into_inner());
+            Ok(Response::new(pb::ConsumeApprovalResponse {
+                consumed: true,
+                already_consumed: false,
+                same_claim: false,
+            }))
         }
 
         async fn decide_approval(
@@ -9219,6 +9354,104 @@ mod tests {
         assert_eq!(
             state.get_or_create("run_test").status,
             crate::state::RunStatus::AwaitingApproval
+        );
+    }
+
+    /// The descriptor an approval retains and the fingerprint a continuation sends
+    /// with `ConsumeApproval` must be the same digest, or no continuation could
+    /// ever consume the approval it came from.
+    #[tokio::test]
+    async fn a_resume_fingerprint_equals_the_retained_descriptors() {
+        let req = sample_request();
+        let input = r#"{"command":"echo hi"}"#;
+        let descriptor = continuation_descriptor(&req, "tool_1_x", "shell", input, "ask")
+            .await
+            .expect("descriptor");
+        let value: JsonValue = serde_json::from_str(&descriptor).expect("json");
+        let retained = value["action_fingerprint"].as_str().expect("fingerprint").to_owned();
+        let computed = super::super::resume::call_fingerprint(
+            &req.run_id, &req.org_id, &req.user_id, "tool_1_x", "shell", input, "ask",
+        )
+        .expect("fingerprint");
+        assert_eq!(computed, retained);
+        // A different call, step or posture is a different fingerprint.
+        let other = super::super::resume::call_fingerprint(
+            &req.run_id, &req.org_id, &req.user_id, "tool_1_x", "shell", r#"{"command":"rm -rf /"}"#, "ask",
+        )
+        .unwrap();
+        assert_ne!(other, retained);
+    }
+
+    /// Pause for an approval, then continue: the segment consumes the approval
+    /// once, runs the approved call first through the same gates (released only
+    /// because of the consume), and does not re-announce the plan.
+    #[tokio::test]
+    async fn a_continuation_segment_consumes_the_approval_and_runs_the_approved_call_once() {
+        let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
+        let session_channel = spawn_session_channel(rec.clone()).await;
+        let inference_channel =
+            spawn_inference_channel(vec![Scripted::Answer("The records were removed.".to_owned())]).await;
+        let state = crate::state::StateStore::new();
+        let tools = vec![pb::ToolDefinition {
+            name: "delete_records".to_owned(),
+            description: "Delete records (destructive).".to_owned(),
+            parameters_json: r#"{"type":"object","properties":{}}"#.to_owned(),
+        }];
+        let mut req = sample_request();
+        req.mode = "ask".to_owned();
+        let fingerprint = super::super::resume::call_fingerprint(
+            &req.run_id, &req.org_id, &req.user_id, "tool_1_del-1", "delete_records", "{}", "ask",
+        )
+        .expect("fingerprint");
+        req.resume = Some(pb::AgentResume {
+            mode: "segment".to_owned(),
+            approval_id: "appr_1".to_owned(),
+            step_id: "tool_1_del-1".to_owned(),
+            tool_name: "delete_records".to_owned(),
+            tool_input: "{}".to_owned(),
+            action_fingerprint: fingerprint.clone(),
+            brief: "step 1 listed 3 records".to_owned(),
+            claim_token: "claim-1".to_owned(),
+            segment_no: 2,
+        });
+        let resp = run_agent_with_tools(
+            &state,
+            session_channel,
+            inference_channel,
+            &plain_caller(),
+            req,
+            tools,
+            None,
+            Some("session-token".to_owned()),
+            "inference-token".to_owned(),
+            &ALLOW_CAPABILITY_POLICY,
+            &STATIC_TERMINAL_TOKENS,
+            None,
+            None,
+            &test_sandbox_manager_client(),
+            "test-backend",
+            None,
+            &test_sandbox_tokens(),
+            None,
+        )
+        .await
+        .expect("the continuation segment runs");
+
+        assert_eq!(resp.status, "completed", "the run finished, it did not pause again");
+        let r = rec.lock().unwrap();
+        assert_eq!(r.consume_calls.len(), 1, "the approval is consumed exactly once");
+        assert_eq!(r.consume_calls[0].approval_id, "appr_1");
+        assert_eq!(r.consume_calls[0].action_fingerprint, fingerprint);
+        assert_eq!(r.consume_calls[0].claim_token, "claim-1");
+        assert!(r.approvals.is_empty(), "the released call is not gated again");
+        assert!(
+            r.completed.iter().any(|(step, _)| step == "s2.tool_1_approved"),
+            "the approved call ran as the segment's first step: {:?}",
+            r.completed
+        );
+        assert!(
+            r.plan_transitions.iter().all(|t| *t != (pb::PlanState::Draft as i32, pb::PlanState::Executing as i32)),
+            "a continuation does not re-announce the plan"
         );
     }
 

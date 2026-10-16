@@ -244,6 +244,10 @@ message AgentResume {
   string claim_token = 7;
   // Which segment of the run this is (2 for the first continuation).
   uint32 segment_no = 8;
+  // The JSON arguments of the approved call. The segment runs exactly this call
+  // first; its digest must equal the retained approval descriptor's fingerprint
+  // for the consume to succeed, so the loop cannot run a different call.
+  string tool_input = 9;
 }
 
 // RunContext - what the gateway hands an agent run beyond its goal.

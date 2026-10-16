@@ -685,6 +685,7 @@ fn enforce_resume(req: &pb::RunAgentRequest, enabled: bool) -> Result<(), Status
         || resume.step_id.is_empty()
         || resume.tool_name.is_empty()
         || resume.claim_token.is_empty()
+        || resume.tool_input.is_empty()
     {
         return Err(Status::invalid_argument("resume_incomplete"));
     }
@@ -2196,6 +2197,7 @@ mod run_context_boundary_tests {
             step_id: "s2.step-1".to_owned(),
             tool_name: "shell".to_owned(),
             claim_token: "claim".to_owned(),
+            tool_input: "{}".to_owned(),
             ..Default::default()
         }
     }

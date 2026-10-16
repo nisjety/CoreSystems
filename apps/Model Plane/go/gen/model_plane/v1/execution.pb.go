@@ -573,7 +573,11 @@ type AgentResume struct {
 	// An opaque token for the consume; the same token replays safely.
 	ClaimToken string `protobuf:"bytes,7,opt,name=claim_token,json=claimToken,proto3" json:"claim_token,omitempty"`
 	// Which segment of the run this is (2 for the first continuation).
-	SegmentNo     uint32 `protobuf:"varint,8,opt,name=segment_no,json=segmentNo,proto3" json:"segment_no,omitempty"`
+	SegmentNo uint32 `protobuf:"varint,8,opt,name=segment_no,json=segmentNo,proto3" json:"segment_no,omitempty"`
+	// The JSON arguments of the approved call. The segment runs exactly this call
+	// first; its digest must equal the retained approval descriptor's fingerprint
+	// for the consume to succeed, so the loop cannot run a different call.
+	ToolInput     string `protobuf:"bytes,9,opt,name=tool_input,json=toolInput,proto3" json:"tool_input,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -662,6 +666,13 @@ func (x *AgentResume) GetSegmentNo() uint32 {
 		return x.SegmentNo
 	}
 	return 0
+}
+
+func (x *AgentResume) GetToolInput() string {
+	if x != nil {
+		return x.ToolInput
+	}
+	return ""
 }
 
 // RunContext - what the gateway hands an agent run beyond its goal.
@@ -1395,7 +1406,7 @@ const file_model_plane_v1_execution_proto_rawDesc = "" +
 	"\x1asubscription_connection_id\x18\x11 \x01(\tR\x18subscriptionConnectionId\x12;\n" +
 	"\vrun_context\x18\x12 \x01(\v2\x1a.model_plane.v1.RunContextR\n" +
 	"runContext\x123\n" +
-	"\x06resume\x18\x13 \x01(\v2\x1b.model_plane.v1.AgentResumeR\x06resume\"\xfd\x01\n" +
+	"\x06resume\x18\x13 \x01(\v2\x1b.model_plane.v1.AgentResumeR\x06resume\"\x9c\x02\n" +
 	"\vAgentResume\x12\x12\n" +
 	"\x04mode\x18\x01 \x01(\tR\x04mode\x12\x1f\n" +
 	"\vapproval_id\x18\x02 \x01(\tR\n" +
@@ -1407,7 +1418,9 @@ const file_model_plane_v1_execution_proto_rawDesc = "" +
 	"\vclaim_token\x18\a \x01(\tR\n" +
 	"claimToken\x12\x1d\n" +
 	"\n" +
-	"segment_no\x18\b \x01(\rR\tsegmentNo\"\xd5\x01\n" +
+	"segment_no\x18\b \x01(\rR\tsegmentNo\x12\x1d\n" +
+	"\n" +
+	"tool_input\x18\t \x01(\tR\ttoolInput\"\xd5\x01\n" +
 	"\n" +
 	"RunContext\x123\n" +
 	"\x15authored_instructions\x18\x01 \x01(\tR\x14authoredInstructions\x125\n" +
