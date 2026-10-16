@@ -6,6 +6,8 @@
 
 ## Program status: COMPLETE (2026-07-09)
 
+> **Correction (2026-10-16): "COMPLETE" here means the six phases below were built, not that browser grants are issued in production.** Nothing outside tests called `BrowserBroker.AcquireGrant` and the gateway started Quarry runs with a synthetic `session:{id}` grant id (`apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser.rs`, `build_ai_run_request`). `POST /v1/browser/grants` (model-gateway) is the first real issuer; the gateway and Quarry halves are still open. See `docs/plans/quarry-browser-build-plan-2026-10-14.md`, WS1.
+
 All 6 phases are **done** and live-verified against the real dockerized dev stack. This section is a short, honest index for a future reader — the Phase 6 row below carries the full final-verification pass; each phase's own row carries its build/verification history.
 
 **Most severe finding of the whole program:** a cross-session cookie/storage leak in Quarry-v2's `ChromiumoxideDriver` — one shared Chromium browsing context for every session, process-wide, meaning every session (including `zdr: true` sessions) landed in the same global cookie/storage jar. This is a direct violation of this doc's own hard constraint ("never persist ZDR visual artifacts/screenshots/cookies/profile state"). Found and fixed during Phase 6 (`1a0c1f69`/`26c30908`: each session now gets its own CDP browser context, created lazily on first tab and disposed on release). Independently re-verified a second time in this closing pass with a fresh, differently-targeted cookie probe (see the Phase 6 row's final addendum) — confirmed still fixed.

@@ -47,6 +47,12 @@ message AcquireGrantRequest {
   // Required for a sensitive approval. It binds that one-time authority to
   // the ordinary BrowserBroker grant held by the target Quarry run.
   string parent_grant_id = 9;
+
+  // Request a Zero Data Retention grant. The broker treats this as a floor:
+  // a verified principal whose token carries zdr=true always gets a ZDR grant,
+  // and a request can raise but never lower it. A ZDR grant has a "z_" id
+  // prefix and is never persisted by a durable store.
+  bool zdr = 10;
 }
 
 message AcquireGrantResponse {
@@ -66,6 +72,13 @@ message AcquireGrantResponse {
   repeated string allowed_dialog_ids = 7;
   repeated string allowed_artifact_ids = 8;
   string parent_grant_id = 9;
+
+  // "session" or "sensitive_approval" (a "run" grant is derived from a session
+  // grant, not acquired). Consumers must treat an unknown value as not valid.
+  string kind = 10;
+
+  // True when the grant is a Zero Data Retention grant (its id starts "z_").
+  bool zdr = 11;
 }
 
 message RevokeGrantRequest {
@@ -111,4 +124,15 @@ message ValidateGrantResponse {
   repeated string allowed_dialog_ids = 7;
   repeated string allowed_artifact_ids = 8;
   string parent_grant_id = 9;
+
+  // Same values as AcquireGrantResponse.kind.
+  string kind = 10;
+
+  // The user (or service actor) the grant was issued to. A consumer may bind a
+  // run to it; it is not a credential.
+  string owner_id = 11;
+
+  // True for a Zero Data Retention grant. Consumers must not persist anything
+  // about the run beyond its lifetime when this is set.
+  bool zdr = 12;
 }

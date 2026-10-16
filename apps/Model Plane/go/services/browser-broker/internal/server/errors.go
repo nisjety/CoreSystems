@@ -29,6 +29,10 @@ func mapErr(err error) error {
 		return status.Error(codes.NotFound, err.Error())
 	case errors.Is(err, grant.ErrGrantRevoked), errors.Is(err, grant.ErrGrantExpired):
 		return status.Error(codes.FailedPrecondition, err.Error())
+	case errors.Is(err, grant.ErrInvalidDomainPolicy), errors.Is(err, grant.ErrDomainNotGrantable):
+		return status.Error(codes.InvalidArgument, err.Error())
+	case errors.Is(err, grant.ErrTooManyGrants):
+		return status.Error(codes.ResourceExhausted, err.Error())
 	default:
 		return status.Error(codes.Internal, err.Error())
 	}
@@ -48,6 +52,10 @@ func grantOutcome(err error) string {
 		return "revoked"
 	case errors.Is(err, grant.ErrGrantExpired):
 		return "expired"
+	case errors.Is(err, grant.ErrInvalidDomainPolicy), errors.Is(err, grant.ErrDomainNotGrantable):
+		return "domain_not_grantable"
+	case errors.Is(err, grant.ErrTooManyGrants):
+		return "too_many_grants"
 	default:
 		return "internal_error"
 	}

@@ -43,6 +43,11 @@ type AcquireGrantRequest struct {
 	// Required for a sensitive approval. It binds that one-time authority to
 	// the ordinary BrowserBroker grant held by the target Quarry run.
 	ParentGrantId string `protobuf:"bytes,9,opt,name=parent_grant_id,json=parentGrantId,proto3" json:"parent_grant_id,omitempty"`
+	// Request a Zero Data Retention grant. The broker treats this as a floor:
+	// a verified principal whose token carries zdr=true always gets a ZDR grant,
+	// and a request can raise but never lower it. A ZDR grant has a "z_" id
+	// prefix and is never persisted by a durable store.
+	Zdr           bool `protobuf:"varint,10,opt,name=zdr,proto3" json:"zdr,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -140,6 +145,13 @@ func (x *AcquireGrantRequest) GetParentGrantId() string {
 	return ""
 }
 
+func (x *AcquireGrantRequest) GetZdr() bool {
+	if x != nil {
+		return x.Zdr
+	}
+	return false
+}
+
 type AcquireGrantResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Grant identifier (ULID).
@@ -155,8 +167,13 @@ type AcquireGrantResponse struct {
 	AllowedDialogIds   []string `protobuf:"bytes,7,rep,name=allowed_dialog_ids,json=allowedDialogIds,proto3" json:"allowed_dialog_ids,omitempty"`
 	AllowedArtifactIds []string `protobuf:"bytes,8,rep,name=allowed_artifact_ids,json=allowedArtifactIds,proto3" json:"allowed_artifact_ids,omitempty"`
 	ParentGrantId      string   `protobuf:"bytes,9,opt,name=parent_grant_id,json=parentGrantId,proto3" json:"parent_grant_id,omitempty"`
-	unknownFields      protoimpl.UnknownFields
-	sizeCache          protoimpl.SizeCache
+	// "session" or "sensitive_approval" (a "run" grant is derived from a session
+	// grant, not acquired). Consumers must treat an unknown value as not valid.
+	Kind string `protobuf:"bytes,10,opt,name=kind,proto3" json:"kind,omitempty"`
+	// True when the grant is a Zero Data Retention grant (its id starts "z_").
+	Zdr           bool `protobuf:"varint,11,opt,name=zdr,proto3" json:"zdr,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *AcquireGrantResponse) Reset() {
@@ -250,6 +267,20 @@ func (x *AcquireGrantResponse) GetParentGrantId() string {
 		return x.ParentGrantId
 	}
 	return ""
+}
+
+func (x *AcquireGrantResponse) GetKind() string {
+	if x != nil {
+		return x.Kind
+	}
+	return ""
+}
+
+func (x *AcquireGrantResponse) GetZdr() bool {
+	if x != nil {
+		return x.Zdr
+	}
+	return false
 }
 
 type RevokeGrantRequest struct {
@@ -493,8 +524,16 @@ type ValidateGrantResponse struct {
 	AllowedDialogIds   []string `protobuf:"bytes,7,rep,name=allowed_dialog_ids,json=allowedDialogIds,proto3" json:"allowed_dialog_ids,omitempty"`
 	AllowedArtifactIds []string `protobuf:"bytes,8,rep,name=allowed_artifact_ids,json=allowedArtifactIds,proto3" json:"allowed_artifact_ids,omitempty"`
 	ParentGrantId      string   `protobuf:"bytes,9,opt,name=parent_grant_id,json=parentGrantId,proto3" json:"parent_grant_id,omitempty"`
-	unknownFields      protoimpl.UnknownFields
-	sizeCache          protoimpl.SizeCache
+	// Same values as AcquireGrantResponse.kind.
+	Kind string `protobuf:"bytes,10,opt,name=kind,proto3" json:"kind,omitempty"`
+	// The user (or service actor) the grant was issued to. A consumer may bind a
+	// run to it; it is not a credential.
+	OwnerId string `protobuf:"bytes,11,opt,name=owner_id,json=ownerId,proto3" json:"owner_id,omitempty"`
+	// True for a Zero Data Retention grant. Consumers must not persist anything
+	// about the run beyond its lifetime when this is set.
+	Zdr           bool `protobuf:"varint,12,opt,name=zdr,proto3" json:"zdr,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *ValidateGrantResponse) Reset() {
@@ -590,11 +629,32 @@ func (x *ValidateGrantResponse) GetParentGrantId() string {
 	return ""
 }
 
+func (x *ValidateGrantResponse) GetKind() string {
+	if x != nil {
+		return x.Kind
+	}
+	return ""
+}
+
+func (x *ValidateGrantResponse) GetOwnerId() string {
+	if x != nil {
+		return x.OwnerId
+	}
+	return ""
+}
+
+func (x *ValidateGrantResponse) GetZdr() bool {
+	if x != nil {
+		return x.Zdr
+	}
+	return false
+}
+
 var File_model_plane_v1_browser_proto protoreflect.FileDescriptor
 
 const file_model_plane_v1_browser_proto_rawDesc = "" +
 	"\n" +
-	"\x1cmodel_plane/v1/browser.proto\x12\x0emodel_plane.v1\x1a\x1fgoogle/protobuf/timestamp.proto\"\xe7\x02\n" +
+	"\x1cmodel_plane/v1/browser.proto\x12\x0emodel_plane.v1\x1a\x1fgoogle/protobuf/timestamp.proto\"\xf9\x02\n" +
 	"\x13AcquireGrantRequest\x12\x1f\n" +
 	"\vsession_key\x18\x01 \x01(\tR\n" +
 	"sessionKey\x12\x12\n" +
@@ -605,7 +665,9 @@ const file_model_plane_v1_browser_proto_rawDesc = "" +
 	"\x11allowed_frame_ids\x18\x06 \x03(\tR\x0fallowedFrameIds\x12,\n" +
 	"\x12allowed_dialog_ids\x18\a \x03(\tR\x10allowedDialogIds\x120\n" +
 	"\x14allowed_artifact_ids\x18\b \x03(\tR\x12allowedArtifactIds\x12&\n" +
-	"\x0fparent_grant_id\x18\t \x01(\tR\rparentGrantId\"\x8e\x03\n" +
+	"\x0fparent_grant_id\x18\t \x01(\tR\rparentGrantId\x12\x10\n" +
+	"\x03zdr\x18\n" +
+	" \x01(\bR\x03zdr\"\xb4\x03\n" +
 	"\x14AcquireGrantResponse\x12\x19\n" +
 	"\bgrant_id\x18\x01 \x01(\tR\agrantId\x12\x1a\n" +
 	"\bendpoint\x18\x02 \x01(\tR\bendpoint\x129\n" +
@@ -616,7 +678,10 @@ const file_model_plane_v1_browser_proto_rawDesc = "" +
 	"\x11allowed_frame_ids\x18\x06 \x03(\tR\x0fallowedFrameIds\x12,\n" +
 	"\x12allowed_dialog_ids\x18\a \x03(\tR\x10allowedDialogIds\x120\n" +
 	"\x14allowed_artifact_ids\x18\b \x03(\tR\x12allowedArtifactIds\x12&\n" +
-	"\x0fparent_grant_id\x18\t \x01(\tR\rparentGrantId\"G\n" +
+	"\x0fparent_grant_id\x18\t \x01(\tR\rparentGrantId\x12\x12\n" +
+	"\x04kind\x18\n" +
+	" \x01(\tR\x04kind\x12\x10\n" +
+	"\x03zdr\x18\v \x01(\bR\x03zdr\"G\n" +
 	"\x12RevokeGrantRequest\x12\x19\n" +
 	"\bgrant_id\x18\x01 \x01(\tR\agrantId\x12\x16\n" +
 	"\x06reason\x18\x02 \x01(\tR\x06reason\"/\n" +
@@ -626,7 +691,7 @@ const file_model_plane_v1_browser_proto_rawDesc = "" +
 	"\x15BrowserHealthResponse\x12\x16\n" +
 	"\x06status\x18\x01 \x01(\tR\x06status\"1\n" +
 	"\x14ValidateGrantRequest\x12\x19\n" +
-	"\bgrant_id\x18\x01 \x01(\tR\agrantId\"\x8b\x03\n" +
+	"\bgrant_id\x18\x01 \x01(\tR\agrantId\"\xcc\x03\n" +
 	"\x15ValidateGrantResponse\x12\x19\n" +
 	"\bgrant_id\x18\x01 \x01(\tR\agrantId\x12\x16\n" +
 	"\x06active\x18\x02 \x01(\bR\x06active\x129\n" +
@@ -637,7 +702,11 @@ const file_model_plane_v1_browser_proto_rawDesc = "" +
 	"\x11allowed_frame_ids\x18\x06 \x03(\tR\x0fallowedFrameIds\x12,\n" +
 	"\x12allowed_dialog_ids\x18\a \x03(\tR\x10allowedDialogIds\x120\n" +
 	"\x14allowed_artifact_ids\x18\b \x03(\tR\x12allowedArtifactIds\x12&\n" +
-	"\x0fparent_grant_id\x18\t \x01(\tR\rparentGrantId2\xf7\x02\n" +
+	"\x0fparent_grant_id\x18\t \x01(\tR\rparentGrantId\x12\x12\n" +
+	"\x04kind\x18\n" +
+	" \x01(\tR\x04kind\x12\x19\n" +
+	"\bowner_id\x18\v \x01(\tR\aownerId\x12\x10\n" +
+	"\x03zdr\x18\f \x01(\bR\x03zdr2\xf7\x02\n" +
 	"\rBrowserBroker\x12Y\n" +
 	"\fAcquireGrant\x12#.model_plane.v1.AcquireGrantRequest\x1a$.model_plane.v1.AcquireGrantResponse\x12V\n" +
 	"\vRevokeGrant\x12\".model_plane.v1.RevokeGrantRequest\x1a#.model_plane.v1.RevokeGrantResponse\x12\\\n" +

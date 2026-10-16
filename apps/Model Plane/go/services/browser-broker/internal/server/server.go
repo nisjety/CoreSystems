@@ -4,7 +4,6 @@ import (
 	"context"
 	"os"
 	"strings"
-	"time"
 
 	mpv1 "github.com/triodelab/model-plane/gen/go/model_plane/v1"
 	"github.com/triodelab/model-plane/pkg/authctx"
@@ -19,23 +18,30 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
-const defaultGrantTTL = 15 * time.Minute
-
-// Server is the default implementation backed by an in-memory grant store.
+// Server implements the BrowserBroker gRPC service over a grant Repository.
 type Server struct {
 	mpv1.UnimplementedBrowserBrokerServer
-	grants    *grant.Store
+	grants    grant.Repository
+	cfg       Config
 	baseURL   string
 	principal func(context.Context) (authctx.Principal, error)
 }
 
-// NewServer constructs a Server with the provided grant store.
-func NewServer(grants *grant.Store) *Server {
+// NewServer constructs a Server with the default Config.
+func NewServer(grants grant.Repository) *Server {
+	return NewServerWithConfig(grants, DefaultConfig())
+}
+
+// NewServerWithConfig constructs a Server with explicit limits.
+func NewServerWithConfig(grants grant.Repository, cfg Config) *Server {
 	baseURL := strings.TrimRight(os.Getenv("BROWSER_BROKER_BASE_URL"), "/")
 	if baseURL == "" {
 		baseURL = "https://browser-broker.local"
 	}
-	return &Server{grants: grants, baseURL: baseURL, principal: authz.Principal}
+	if cfg.Policy == nil {
+		cfg.Policy = grant.StaticPolicy{MaxDomains: cfg.MaxSessionDomains}
+	}
+	return &Server{grants: grants, cfg: cfg, baseURL: baseURL, principal: authz.Principal}
 }
 
 // AcquireGrant mints a new browser grant using the proto-defined session/mode contract.
@@ -62,6 +68,13 @@ func (s *Server) AcquireGrant(ctx context.Context, req *AcquireGrantRequest) (*A
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, "allowed_domains must contain bounded hostnames")
 	}
+	if err := s.cfg.Policy.CheckSession(ctx, principal.OrganizationID, allowedDomains); err != nil {
+		telemetry.GrantsIssuedTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("outcome", grantOutcome(err))))
+		return nil, mapErr(err)
+	}
+	// ZDR is a floor: the verified token can raise it, the request can raise
+	// it, nothing here can lower it.
+	zdr := req.GetZdr() || principal.ZeroDataRetention
 	allowedActions, allowedFrameIDs, allowedDialogIDs, allowedArtifactIDs :=
 		req.GetAllowedActions(), req.GetAllowedFrameIds(), req.GetAllowedDialogIds(), req.GetAllowedArtifactIds()
 	if _, err := grant.NormalizeSensitiveScopes(
@@ -74,19 +87,34 @@ func (s *Server) AcquireGrant(ctx context.Context, req *AcquireGrantRequest) (*A
 	}
 	var g *grant.Grant
 	if len(allowedActions) == 0 {
-		g, err = s.grants.Create(
-			principal.OrganizationID, principal.ActorID, req.GetSessionKey(), scopeURL,
-			allowedDomains, defaultGrantTTL,
-		)
+		g, err = s.grants.CreateSession(ctx, grant.CreateSessionParams{
+			OrgID:             principal.OrganizationID,
+			OwnerID:           principal.ActorID,
+			SessionKey:        req.GetSessionKey(),
+			ScopeURL:          scopeURL,
+			AllowedDomains:    allowedDomains,
+			TTL:               s.cfg.TTL,
+			Zdr:               zdr,
+			MaxActivePerOwner: s.cfg.MaxActivePerOwner,
+		})
 	} else {
 		if req.GetParentGrantId() == "" {
 			return nil, status.Error(codes.InvalidArgument, "sensitive browser approval requires parent_grant_id")
 		}
-		g, err = s.grants.CreateScopedSensitiveApproval(
-			principal.OrganizationID, principal.ActorID, req.GetSessionKey(), scopeURL,
-			allowedDomains, allowedActions, allowedFrameIDs, allowedDialogIDs, allowedArtifactIDs,
-			req.GetParentGrantId(), defaultGrantTTL,
-		)
+		g, err = s.grants.CreateScopedSensitiveApproval(ctx, grant.ApprovalParams{
+			OrgID:              principal.OrganizationID,
+			OwnerID:            principal.ActorID,
+			SessionKey:         req.GetSessionKey(),
+			ScopeURL:           scopeURL,
+			AllowedDomains:     allowedDomains,
+			AllowedActions:     allowedActions,
+			AllowedFrameIDs:    allowedFrameIDs,
+			AllowedDialogIDs:   allowedDialogIDs,
+			AllowedArtifactIDs: allowedArtifactIDs,
+			ParentGrantID:      req.GetParentGrantId(),
+			TTL:                s.cfg.TTL,
+			Zdr:                zdr,
+		})
 	}
 	if err != nil {
 		telemetry.GrantsIssuedTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("outcome", grantOutcome(err))))
@@ -103,6 +131,8 @@ func (s *Server) AcquireGrant(ctx context.Context, req *AcquireGrantRequest) (*A
 		AllowedDialogIds:   append([]string(nil), g.AllowedDialogIDs...),
 		AllowedArtifactIds: append([]string(nil), g.AllowedArtifactIDs...),
 		ParentGrantId:      g.ParentGrantID,
+		Kind:               string(g.Kind),
+		Zdr:                g.Zdr,
 	}, nil
 }
 
@@ -116,7 +146,9 @@ func (s *Server) RevokeGrant(ctx context.Context, req *RevokeGrantRequest) (*Rev
 	if req.GetGrantId() == "" {
 		return nil, status.Error(codes.InvalidArgument, "grant_id is required")
 	}
-	if err := s.grants.RevokeScoped(req.GetGrantId(), principal.OrganizationID, authz.OwnerFilter(principal)); err != nil {
+	if err := s.grants.RevokeScoped(
+		ctx, req.GetGrantId(), principal.OrganizationID, authz.OwnerFilter(principal), req.GetReason(),
+	); err != nil {
 		telemetry.GrantsRevokedTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("outcome", grantOutcome(err))))
 		return nil, mapErr(err)
 	}
@@ -134,7 +166,7 @@ func (s *Server) ValidateGrant(ctx context.Context, req *ValidateGrantRequest) (
 	if req.GetGrantId() == "" {
 		return nil, status.Error(codes.InvalidArgument, "grant_id is required")
 	}
-	g, err := s.grants.GetScoped(req.GetGrantId(), principal.OrganizationID, authz.OwnerFilter(principal))
+	g, err := s.grants.GetScoped(ctx, req.GetGrantId(), principal.OrganizationID, authz.OwnerFilter(principal))
 	if err != nil {
 		telemetry.GrantsValidatedTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("outcome", grantOutcome(err))))
 		return nil, mapErr(err)
@@ -150,6 +182,9 @@ func (s *Server) ValidateGrant(ctx context.Context, req *ValidateGrantRequest) (
 		AllowedDialogIds:   append([]string(nil), g.AllowedDialogIDs...),
 		AllowedArtifactIds: append([]string(nil), g.AllowedArtifactIDs...),
 		ParentGrantId:      g.ParentGrantID,
+		Kind:               string(g.Kind),
+		OwnerId:            g.OwnerID,
+		Zdr:                g.Zdr,
 	}, nil
 }
 

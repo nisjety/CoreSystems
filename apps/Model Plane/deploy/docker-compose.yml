@@ -1622,6 +1622,20 @@ services:
       AUTH_CORE_JWKS_URL: ${AUTH_CORE_JWKS_URL:?AUTH_CORE_JWKS_URL is required}
       AUTH_CORE_ISSUER: ${AUTH_CORE_ISSUER:?AUTH_CORE_ISSUER is required}
       BROWSER_BROKER_AUTH_AUDIENCE: ${BROWSER_BROKER_AUTH_AUDIENCE:-browser-broker}
+      # Grant limits (internal/server/config.go). A value that is not a positive
+      # integer stops the broker at boot; the TTL is clamped to 30-3600 s.
+      BROWSER_BROKER_GRANT_TTL_SECONDS: ${BROWSER_BROKER_GRANT_TTL_SECONDS:-900}
+      BROWSER_BROKER_MAX_SESSION_DOMAINS: ${BROWSER_BROKER_MAX_SESSION_DOMAINS:-8}
+      BROWSER_BROKER_MAX_ACTIVE_GRANTS_PER_OWNER: ${BROWSER_BROKER_MAX_ACTIVE_GRANTS_PER_OWNER:-20}
+    # Quarry (Ingestion Plane) validates grants over gRPC, so the broker must be
+    # reachable on inter-plane-bus. Auth is a verified JWT with audience
+    # browser-broker on every method; only the gRPC health service is public.
+    networks:
+      default: {}
+      inter-plane-bus:
+        aliases:
+          - model-plane-browser-broker-1
+          - browser-broker
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8087/healthz"]
       interval: 10s

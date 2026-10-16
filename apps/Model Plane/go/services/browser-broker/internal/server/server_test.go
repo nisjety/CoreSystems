@@ -52,19 +52,19 @@ func newTestClient(t *testing.T) mpv1.BrowserBrokerClient {
 }
 
 func newTestServer() *Server {
-	return testServerFor(grant.NewStore(), authctx.Principal{
+	return testServerFor(grant.NewMemoryRepository(), authctx.Principal{
 		OrganizationID: "org1", ActorID: "user1", PrincipalType: "user",
 	})
 }
 
-func testServerFor(store *grant.Store, principal authctx.Principal) *Server {
+func testServerFor(store grant.Repository, principal authctx.Principal) *Server {
 	srv := NewServer(store)
 	srv.principal = func(context.Context) (authctx.Principal, error) { return principal, nil }
 	return srv
 }
 
 func TestGrantAccessIsPinnedToVerifiedOrganizationAndUser(t *testing.T) {
-	store := grant.NewStore()
+	store := grant.NewMemoryRepository()
 	owner := testServerFor(store, authctx.Principal{OrganizationID: "org1", ActorID: "user1", PrincipalType: "user"})
 	acquired, err := owner.AcquireGrant(context.Background(), &AcquireGrantRequest{
 		OrgId: "org1", SessionKey: "session1", Mode: "cloud", AllowedDomains: []string{"example.com"},

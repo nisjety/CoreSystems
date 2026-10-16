@@ -2,7 +2,9 @@ syntax = "proto3";
 
 // Vendored from /Volumes/Lagring/Triodelab/CoreSystem/apps/Model Plane/proto/model_plane/v1/browser.proto
 // Quarry only consumes BrowserBroker — we vendor the wire schema to keep Quarry buildable
-// in isolation. Update with `tools/sync-protos.sh` if the upstream contract changes.
+// in isolation. It is a hand-maintained SUBSET of the upstream file: every field here must
+// exist upstream with the same number and type. scripts/tests/browser-grant-contract.test.mjs
+// checks that.
 
 package model_plane.v1;
 
@@ -70,4 +72,10 @@ message ValidateGrantResponse {
   repeated string allowed_dialog_ids = 7;
   repeated string allowed_artifact_ids = 8;
   string parent_grant_id = 9;
+
+  // Same values as the upstream contract: "session" / "run" / "sensitive_approval", the
+  // user the grant was issued to, and whether it is a Zero Data Retention grant.
+  string kind = 10;
+  string owner_id = 11;
+  bool zdr = 12;
 }

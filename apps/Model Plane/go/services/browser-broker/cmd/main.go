@@ -30,6 +30,18 @@ func main() {
 		os.Exit(1)
 	}
 
+	cfg, err := bbserver.ConfigFromEnv(os.Getenv)
+	if err != nil {
+		slog.Error("browser-broker grant configuration is invalid", "error", err)
+		os.Exit(1)
+	}
+	// The effective limits only: never a host list or an org.
+	slog.Info("browser-broker grant limits",
+		"grant_ttl_seconds", int(cfg.TTL.Seconds()),
+		"max_session_domains", cfg.MaxSessionDomains,
+		"max_active_grants_per_owner", cfg.MaxActivePerOwner,
+	)
+
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer cancel()
 
@@ -60,7 +72,7 @@ func main() {
 	}
 
 	grpcServer := grpc.NewServer(grpc.UnaryInterceptor(authz.UnaryInterceptor(verifier)))
-	bbserver.Register(grpcServer, bbserver.NewServer(grant.NewStore()))
+	bbserver.Register(grpcServer, bbserver.NewServerWithConfig(grant.NewMemoryRepository(), cfg))
 	healthServerGRPC := health.NewServer()
 	grpc_health_v1.RegisterHealthServer(grpcServer, healthServerGRPC)
 	healthServerGRPC.SetServingStatus("", grpc_health_v1.HealthCheckResponse_SERVING)

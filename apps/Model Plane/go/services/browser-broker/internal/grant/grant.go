@@ -1,9 +1,13 @@
-// Package grant implements in-memory storage for browser grant lifecycle.
-// A grant represents a time-bounded, revocable authorization for an agent to
-// access a scoped browser endpoint.
+// Package grant implements browser grant lifecycle: a grant is a time-bounded,
+// revocable authorization for an agent to access a scoped browser endpoint.
+//
+// Storage sits behind Repository so the in-memory implementation can be routed
+// next to a durable one (WS1.C) without touching issuance. Zero Data
+// Retention grants are never handed to a durable store.
 package grant
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
@@ -24,10 +28,21 @@ var (
 	// ErrInvalidDomainPolicy indicates a browser grant has no safe, bounded
 	// navigation policy. An empty policy never means unrestricted access.
 	ErrInvalidDomainPolicy = errors.New("invalid browser allowed_domains policy")
+	// ErrTooManyGrants indicates the owner already holds the maximum number of
+	// active grants.
+	ErrTooManyGrants = errors.New("too many active browser grants")
+	// ErrDeriveUnsupported is returned by a repository that cannot derive a run
+	// grant yet (reserved for WS1.B).
+	ErrDeriveUnsupported = errors.New("run grant derivation is not supported")
 )
 
 const maxAllowedDomains = 32
 const maxSensitiveScopeValues = 32
+const maxRevokeReasonBytes = 128
+
+// zdrIDPrefix marks a Zero Data Retention grant id, so a log line or a stray
+// id is enough to tell that nothing about it may be persisted.
+const zdrIDPrefix = "z_"
 
 var allowedSensitiveActions = map[string]struct{}{
 	"respond_dialog": {},
@@ -35,13 +50,31 @@ var allowedSensitiveActions = map[string]struct{}{
 	"download_ref":   {},
 }
 
+// Kind says what a grant authorizes.
+type Kind string
+
+const (
+	// KindSession is held by a signed-in user for one browser session. It
+	// carries the navigation policy and is what a run grant derives from.
+	KindSession Kind = "session"
+	// KindRun is derived from a session grant for one agent run (WS1.B).
+	KindRun Kind = "run"
+	// KindSensitiveApproval is a one-time approval for one irreversible
+	// action, bound to its parent grant.
+	KindSensitiveApproval Kind = "sensitive_approval"
+)
+
 // Grant is a trusted browser access grant.
 type Grant struct {
 	ID         string
+	Kind       Kind
 	OrgID      string
 	OwnerID    string
 	SessionKey string
 	ScopeURL   string
+	// Zdr marks a Zero Data Retention grant. It can be raised, never lowered,
+	// and a derived or approval grant inherits it.
+	Zdr bool
 	// AllowedDomains is the broker-owned, canonical navigation policy. It is
 	// copied at every storage boundary so no caller can mutate a persisted grant.
 	AllowedDomains []string
@@ -56,110 +89,144 @@ type Grant struct {
 	ParentGrantID string
 	ExpiresAt     time.Time
 	Revoked       bool
+	// RevokedReason is a short caller-supplied label, never a domain or URL.
+	RevokedReason string
 }
 
-// Store is a thread-safe in-memory grant store.
-type Store struct {
+// CreateSessionParams describes a session grant.
+type CreateSessionParams struct {
+	OrgID, OwnerID, SessionKey, ScopeURL string
+	AllowedDomains                       []string
+	TTL                                  time.Duration
+	Zdr                                  bool
+	// MaxActivePerOwner > 0 refuses creation with ErrTooManyGrants when the
+	// owner already holds that many active ordinary grants. The check and the
+	// insert are one atomic step.
+	MaxActivePerOwner int
+}
+
+// ApprovalParams describes a one-time sensitive approval.
+type ApprovalParams struct {
+	OrgID, OwnerID, SessionKey, ScopeURL                                                  string
+	AllowedDomains, AllowedActions, AllowedFrameIDs, AllowedDialogIDs, AllowedArtifactIDs []string
+	ParentGrantID                                                                         string
+	TTL                                                                                   time.Duration
+	// Zdr raises the approval's flag; it never lowers the parent's.
+	Zdr bool
+}
+
+// DeriveParams describes a run grant derived from a session grant. Reserved
+// for WS1.B; the fields it needs are decided there.
+type DeriveParams struct {
+	OrgID, OwnerID, ParentGrantID string
+	RunDomains                    []string
+	TTL                           time.Duration
+}
+
+// Repository stores grants. Every method is scoped by the verified
+// organization; a non-empty ownerID additionally restricts access to that user.
+type Repository interface {
+	CreateSession(ctx context.Context, p CreateSessionParams) (*Grant, error)
+	CreateScopedSensitiveApproval(ctx context.Context, p ApprovalParams) (*Grant, error)
+	// Derive issues a run grant narrower than its session grant (WS1.B).
+	Derive(ctx context.Context, p DeriveParams) (*Grant, error)
+	GetScoped(ctx context.Context, id, orgID, ownerID string) (*Grant, error)
+	// RevokeScoped revokes the grant and every grant derived from it.
+	RevokeScoped(ctx context.Context, id, orgID, ownerID, reason string) error
+}
+
+// MemoryRepository is a thread-safe in-memory Repository.
+type MemoryRepository struct {
 	mu     sync.Mutex
 	grants map[string]*Grant
+	now    func() time.Time
 }
 
-// NewStore constructs an empty Store.
-func NewStore() *Store {
-	return &Store{grants: make(map[string]*Grant)}
+var _ Repository = (*MemoryRepository)(nil)
+
+// NewMemoryRepository constructs an empty MemoryRepository.
+func NewMemoryRepository() *MemoryRepository {
+	return &MemoryRepository{grants: make(map[string]*Grant), now: time.Now}
 }
 
-// Create issues an ordinary run grant. Sensitive authority is intentionally
-// absent; callers must use CreateWithSensitiveScopes for a one-time approval.
-func (s *Store) Create(
-	orgID, ownerID, sessionKey, scopeURL string,
-	allowedDomains []string,
-	ttl time.Duration,
-) (*Grant, error) {
-	return s.CreateWithSensitiveScopes(
-		orgID, ownerID, sessionKey, scopeURL, allowedDomains,
-		nil, nil, nil, nil, ttl,
-	)
-}
-
-// CreateWithSensitiveScopes issues a grant with explicit, bounded authority
-// for an irreversible browser action. The policy is normalized at the
-// authority boundary even when callers have already validated it, so an empty
-// or malformed policy cannot become unrestricted stored authority.
-func (s *Store) CreateWithSensitiveScopes(
-	orgID, ownerID, sessionKey, scopeURL string,
-	allowedDomains []string,
-	allowedActions, allowedFrameIDs, allowedDialogIDs, allowedArtifactIDs []string,
-	ttl time.Duration,
-) (*Grant, error) {
-	return s.createWithSensitiveScopes(
-		orgID, ownerID, sessionKey, scopeURL, allowedDomains,
-		allowedActions, allowedFrameIDs, allowedDialogIDs, allowedArtifactIDs,
-		"", ttl,
-	)
+// CreateSession issues an ordinary session grant. Sensitive authority is
+// intentionally absent; use CreateScopedSensitiveApproval for a one-time
+// approval. The policy is normalized at the authority boundary even when
+// callers have already validated it, so an empty or malformed policy cannot
+// become unrestricted stored authority.
+func (s *MemoryRepository) CreateSession(_ context.Context, p CreateSessionParams) (*Grant, error) {
+	domains, err := NormalizeAllowedDomains(p.AllowedDomains)
+	if err != nil {
+		return nil, err
+	}
+	id, err := newID(p.Zdr)
+	if err != nil {
+		return nil, err
+	}
+	g := &Grant{
+		ID:             id,
+		Kind:           KindSession,
+		OrgID:          p.OrgID,
+		OwnerID:        p.OwnerID,
+		SessionKey:     p.SessionKey,
+		ScopeURL:       p.ScopeURL,
+		Zdr:            p.Zdr,
+		AllowedDomains: domains,
+		ExpiresAt:      s.now().Add(p.TTL),
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if p.MaxActivePerOwner > 0 && s.activeLocked(p.OrgID, p.OwnerID) >= p.MaxActivePerOwner {
+		return nil, ErrTooManyGrants
+	}
+	s.grants[id] = clone(g)
+	return clone(g), nil
 }
 
 // CreateScopedSensitiveApproval binds a one-time sensitive grant to an
-// already validated ordinary BrowserBroker grant.
-func (s *Store) CreateScopedSensitiveApproval(
-	orgID, ownerID, sessionKey, scopeURL string,
-	allowedDomains, allowedActions, allowedFrameIDs, allowedDialogIDs, allowedArtifactIDs []string,
-	parentGrantID string,
-	ttl time.Duration,
-) (*Grant, error) {
-	parent, err := s.GetScoped(parentGrantID, orgID, ownerID)
+// already validated ordinary BrowserBroker grant. The approval inherits the
+// parent's ZDR flag.
+func (s *MemoryRepository) CreateScopedSensitiveApproval(ctx context.Context, p ApprovalParams) (*Grant, error) {
+	parent, err := s.GetScoped(ctx, p.ParentGrantID, p.OrgID, p.OwnerID)
 	if err != nil {
 		return nil, err
 	}
-	if parent.SessionKey != sessionKey || len(parent.AllowedActions) != 0 {
+	if parent.SessionKey != p.SessionKey || parent.Kind == KindSensitiveApproval || len(parent.AllowedActions) != 0 {
 		return nil, errors.New("sensitive approval parent grant is not an ordinary matching session grant")
 	}
-	return s.createWithSensitiveScopes(
-		orgID, ownerID, sessionKey, scopeURL, allowedDomains,
-		allowedActions, allowedFrameIDs, allowedDialogIDs, allowedArtifactIDs,
-		parentGrantID, ttl,
-	)
-}
-
-func (s *Store) createWithSensitiveScopes(
-	orgID, ownerID, sessionKey, scopeURL string,
-	allowedDomains, allowedActions, allowedFrameIDs, allowedDialogIDs, allowedArtifactIDs []string,
-	parentGrantID string,
-	ttl time.Duration,
-) (*Grant, error) {
-	canonicalDomains, err := NormalizeAllowedDomains(allowedDomains)
+	domains, err := NormalizeAllowedDomains(p.AllowedDomains)
 	if err != nil {
 		return nil, err
 	}
-	approvalScopes, err := NormalizeSensitiveScopes(
-		allowedActions,
-		allowedFrameIDs,
-		allowedDialogIDs,
-		allowedArtifactIDs,
+	scopes, err := NormalizeSensitiveScopes(
+		p.AllowedActions, p.AllowedFrameIDs, p.AllowedDialogIDs, p.AllowedArtifactIDs,
 	)
 	if err != nil {
 		return nil, err
 	}
-	if len(approvalScopes.actions) > 0 && parentGrantID == "" {
-		return nil, errors.New("sensitive grant requires parent browser grant")
+	if len(scopes.actions) == 0 {
+		return nil, errors.New("sensitive grant requires an action")
 	}
-	id, err := newID()
+	zdr := parent.Zdr || p.Zdr
+	id, err := newID(zdr)
 	if err != nil {
 		return nil, err
 	}
 	g := &Grant{
 		ID:                 id,
-		OrgID:              orgID,
-		OwnerID:            ownerID,
-		SessionKey:         sessionKey,
-		ScopeURL:           scopeURL,
-		AllowedDomains:     canonicalDomains,
-		AllowedActions:     approvalScopes.actions,
-		AllowedFrameIDs:    approvalScopes.frames,
-		AllowedDialogIDs:   approvalScopes.dialogs,
-		AllowedArtifactIDs: approvalScopes.artifacts,
-		ParentGrantID:      parentGrantID,
-		ExpiresAt:          time.Now().Add(ttl),
+		Kind:               KindSensitiveApproval,
+		OrgID:              p.OrgID,
+		OwnerID:            p.OwnerID,
+		SessionKey:         p.SessionKey,
+		ScopeURL:           p.ScopeURL,
+		Zdr:                zdr,
+		AllowedDomains:     domains,
+		AllowedActions:     scopes.actions,
+		AllowedFrameIDs:    scopes.frames,
+		AllowedDialogIDs:   scopes.dialogs,
+		AllowedArtifactIDs: scopes.artifacts,
+		ParentGrantID:      p.ParentGrantID,
+		ExpiresAt:          s.now().Add(p.TTL),
 	}
 	s.mu.Lock()
 	s.grants[id] = clone(g)
@@ -167,9 +234,14 @@ func (s *Store) createWithSensitiveScopes(
 	return clone(g), nil
 }
 
+// Derive is reserved for WS1.B.
+func (s *MemoryRepository) Derive(context.Context, DeriveParams) (*Grant, error) {
+	return nil, ErrDeriveUnsupported
+}
+
 // GetScoped returns a grant only within the verified organization. A non-empty
 // ownerID additionally restricts access to the owning user.
-func (s *Store) GetScoped(id, orgID, ownerID string) (*Grant, error) {
+func (s *MemoryRepository) GetScoped(_ context.Context, id, orgID, ownerID string) (*Grant, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	g, ok := s.grants[id]
@@ -179,24 +251,69 @@ func (s *Store) GetScoped(id, orgID, ownerID string) (*Grant, error) {
 	if g.Revoked {
 		return nil, ErrGrantRevoked
 	}
-	if time.Now().After(g.ExpiresAt) {
+	if s.now().After(g.ExpiresAt) {
 		return nil, ErrGrantExpired
 	}
 	return clone(g), nil
 }
 
-// RevokeScoped immutably revokes a grant inside the verified identity scope.
-func (s *Store) RevokeScoped(id, orgID, ownerID string) error {
+// RevokeScoped revokes a grant inside the verified identity scope, and every
+// grant derived from it (a sensitive approval or a derived run grant), so an
+// approval cannot outlive the grant it was bound to.
+func (s *MemoryRepository) RevokeScoped(_ context.Context, id, orgID, ownerID, reason string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	g, ok := s.grants[id]
 	if !ok || g.OrgID != orgID || (ownerID != "" && g.OwnerID != ownerID) {
 		return ErrGrantNotFound
 	}
-	revoked := clone(g)
-	revoked.Revoked = true
-	s.grants[id] = revoked
+	reason = truncateReason(reason)
+	revoked := map[string]struct{}{id: {}}
+	for changed := true; changed; {
+		changed = false
+		for childID, child := range s.grants {
+			if _, done := revoked[childID]; done || child.OrgID != orgID || child.ParentGrantID == "" {
+				continue
+			}
+			if _, parentRevoked := revoked[child.ParentGrantID]; parentRevoked {
+				revoked[childID] = struct{}{}
+				changed = true
+			}
+		}
+	}
+	for revokedID := range revoked {
+		next := clone(s.grants[revokedID])
+		next.Revoked = true
+		next.RevokedReason = reason
+		s.grants[revokedID] = next
+	}
 	return nil
+}
+
+// activeLocked counts the owner's ordinary grants that are neither revoked nor
+// expired. Approvals are children of those and do not count toward the cap.
+func (s *MemoryRepository) activeLocked(orgID, ownerID string) int {
+	now := s.now()
+	active := 0
+	for _, g := range s.grants {
+		if g.OrgID == orgID && g.OwnerID == ownerID && g.Kind != KindSensitiveApproval &&
+			!g.Revoked && !now.After(g.ExpiresAt) {
+			active++
+		}
+	}
+	return active
+}
+
+func truncateReason(reason string) string {
+	reason = strings.TrimSpace(reason)
+	if len(reason) <= maxRevokeReasonBytes {
+		return reason
+	}
+	cut := maxRevokeReasonBytes
+	for cut > 0 && reason[cut]&0xC0 == 0x80 {
+		cut--
+	}
+	return reason[:cut]
 }
 
 func clone(grant *Grant) *Grant {
@@ -353,10 +470,14 @@ func isCanonicalDomain(domain string) bool {
 	return true
 }
 
-func newID() (string, error) {
+func newID(zdr bool) (string, error) {
 	b := make([]byte, 16)
 	if _, err := rand.Read(b); err != nil {
 		return "", err
 	}
-	return hex.EncodeToString(b), nil
+	id := hex.EncodeToString(b)
+	if zdr {
+		return zdrIDPrefix + id, nil
+	}
+	return id, nil
 }

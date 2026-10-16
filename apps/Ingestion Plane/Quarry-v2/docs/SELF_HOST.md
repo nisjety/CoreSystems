@@ -51,7 +51,7 @@ Set the following environment variables:
 | `QUARRY_EDGE__QUARRY_SERVICE_API_KEY` | — | Durable credential registered under fixed service id `quarry-edge`; required when a plane URL is set |
 | `QUARRY_EDGE__CROSS_PLANE_AUTH_DEV_BYPASS` | `false` | Local-only static-token compatibility; refused in production |
 | `MODEL_PLANE_URL` | — | `http://model-gateway:8080` for AI formats + planner |
-| `BROWSER_BROKER_GRPC` | — | `model-plane-broker:9090` for grant validation |
+| `QUARRY_EDGE__BROWSER_GRANT_VALIDATOR_GRPC_URL` | — | `http://browser-broker:9095` for grant validation (the old name `BROWSER_BROKER_GRPC` was never read) |
 | `NATS_URL` | — | `nats://nats:4222` for cross-plane events |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | — | OTLP collector for traces |
 | `BROWSERLESS_URL` / `BROWSERLESS_TOKEN` | — | Browserless cloud browser |

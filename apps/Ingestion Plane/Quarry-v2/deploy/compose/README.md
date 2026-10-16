@@ -92,7 +92,7 @@ to the three Quarry services.
 | `QUARRY_SERVICE_API_KEY` | required with a plane URL | Durable credential registered as Auth Core service id `quarry-edge` |
 | `QUARRY_CROSS_PLANE_AUTH_DEV_BYPASS` | `0` | Explicit local-only legacy static-token escape hatch; production refuses it |
 | `MODEL_PLANE_URL` | plane service DNS | Model Plane gateway URL (for /v1/audio + AI formats) |
-| `BROWSER_BROKER_GRPC` | (unset) | gRPC endpoint for grant validation |
+| `QUARRY_EDGE__BROWSER_GRANT_VALIDATOR_GRPC_URL` | (unset) | BrowserBroker gRPC endpoint for grant validation (`http://browser-broker:9095` on inter-plane-bus). Needs the `grpc` feature. (Corrected 2026-10-16: the old name `BROWSER_BROKER_GRPC` was never read by any code.) |
 | `BROWSERLESS_URL` / `BROWSERLESS_TOKEN` | (unset) | Browserless cloud browser |
 | `BROWSERBASE_API_KEY` | (unset) | Browserbase cloud browser |
 | `KERNEL_URL` / `KERNEL_API_KEY` | (unset) | Kernel cloud browser |
