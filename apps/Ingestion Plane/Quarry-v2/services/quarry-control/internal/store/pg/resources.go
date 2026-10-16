@@ -53,6 +53,47 @@ func encodeCursor(createdAt int64, id string) string {
 
 type jobsStore struct{ pool *pgxpool.Pool }
 
+// jobColumns is the one column list every jobs SELECT uses, in the order
+// scanJob reads it. Adding a column means changing this and scanJob, not seven
+// queries that must agree.
+const jobColumns = `id, org_id, kind, status, policy, params, schedule_id, created_at, run_id, idempotency_key, statistics`
+
+type jobScanner interface{ Scan(dest ...any) error }
+
+// scanJob reads one row selected with jobColumns. A row whose JSON columns do
+// not decode keeps the zero value for that field, as the per-site code did.
+func scanJob(row jobScanner) (store.Job, error) {
+	var (
+		j          store.Job
+		policy     []byte
+		params     []byte
+		statistics []byte
+		sid        *string
+		rid        *string
+		idem       *string
+	)
+	if err := row.Scan(&j.ID, &j.OrgID, &j.Kind, &j.Status, &policy, &params, &sid, &j.CreatedAt, &rid, &idem, &statistics); err != nil {
+		return store.Job{}, err
+	}
+	_ = json.Unmarshal(policy, &j.Policy)
+	if len(params) > 0 {
+		_ = json.Unmarshal(params, &j.Params)
+	}
+	if len(statistics) > 0 {
+		_ = json.Unmarshal(statistics, &j.Statistics)
+	}
+	if sid != nil {
+		v := quarrycontracts.ID(*sid)
+		j.ScheduleID = &v
+	}
+	if rid != nil {
+		v := quarrycontracts.ID(*rid)
+		j.RunID = &v
+	}
+	j.IdempotencyKey = idem
+	return j, nil
+}
+
 func (s *jobsStore) Create(j store.Job) error {
 	policy, _ := json.Marshal(j.Policy)
 	params, _ := json.Marshal(j.Params)
@@ -81,66 +122,20 @@ func (s *jobsStore) FindByIdempotencyKey(orgID, key string) (store.Job, bool) {
 	if key == "" {
 		return store.Job{}, false
 	}
-	var (
-		j      store.Job
-		policy []byte
-		params []byte
-		sid    *string
-		rid    *string
-		idem   *string
-	)
-	err := s.pool.QueryRow(context.Background(),
-		`SELECT id, org_id, kind, status, policy, params, schedule_id, created_at, run_id, idempotency_key
-		   FROM jobs WHERE idempotency_key=$1 AND org_id=$2`, key, orgID,
-	).Scan(&j.ID, &j.OrgID, &j.Kind, &j.Status, &policy, &params, &sid, &j.CreatedAt, &rid, &idem)
+	j, err := scanJob(s.pool.QueryRow(context.Background(),
+		`SELECT `+jobColumns+` FROM jobs WHERE idempotency_key=$1 AND org_id=$2`, key, orgID))
 	if err != nil {
 		return store.Job{}, false
 	}
-	_ = json.Unmarshal(policy, &j.Policy)
-	if len(params) > 0 {
-		_ = json.Unmarshal(params, &j.Params)
-	}
-	if sid != nil {
-		v := quarrycontracts.ID(*sid)
-		j.ScheduleID = &v
-	}
-	if rid != nil {
-		v := quarrycontracts.ID(*rid)
-		j.RunID = &v
-	}
-	j.IdempotencyKey = idem
 	return j, true
 }
 
 func (s *jobsStore) Get(id quarrycontracts.ID) (store.Job, bool) {
-	var (
-		j      store.Job
-		policy []byte
-		params []byte
-		sid    *string
-		rid    *string
-		idem   *string
-	)
-	err := s.pool.QueryRow(context.Background(),
-		`SELECT id, org_id, kind, status, policy, params, schedule_id, created_at, run_id, idempotency_key FROM jobs WHERE id=$1`,
-		string(id),
-	).Scan(&j.ID, &j.OrgID, &j.Kind, &j.Status, &policy, &params, &sid, &j.CreatedAt, &rid, &idem)
+	j, err := scanJob(s.pool.QueryRow(context.Background(),
+		`SELECT `+jobColumns+` FROM jobs WHERE id=$1`, string(id)))
 	if err != nil {
 		return store.Job{}, false
 	}
-	_ = json.Unmarshal(policy, &j.Policy)
-	if len(params) > 0 {
-		_ = json.Unmarshal(params, &j.Params)
-	}
-	if sid != nil {
-		v := quarrycontracts.ID(*sid)
-		j.ScheduleID = &v
-	}
-	if rid != nil {
-		v := quarrycontracts.ID(*rid)
-		j.RunID = &v
-	}
-	j.IdempotencyKey = idem
 	return j, true
 }
 
@@ -148,35 +143,11 @@ func (s *jobsStore) Get(id quarrycontracts.ID) (store.Job, bool) {
 // WHERE-clause guard: a cross-tenant id returns (Job{}, false), never
 // another org's row.
 func (s *jobsStore) GetByOrg(orgID string, id quarrycontracts.ID) (store.Job, bool) {
-	var (
-		j      store.Job
-		policy []byte
-		params []byte
-		sid    *string
-		rid    *string
-		idem   *string
-	)
-	err := s.pool.QueryRow(context.Background(),
-		`SELECT id, org_id, kind, status, policy, params, schedule_id, created_at, run_id, idempotency_key
-		   FROM jobs WHERE id=$1 AND org_id=$2`,
-		string(id), orgID,
-	).Scan(&j.ID, &j.OrgID, &j.Kind, &j.Status, &policy, &params, &sid, &j.CreatedAt, &rid, &idem)
+	j, err := scanJob(s.pool.QueryRow(context.Background(),
+		`SELECT `+jobColumns+` FROM jobs WHERE id=$1 AND org_id=$2`, string(id), orgID))
 	if err != nil {
 		return store.Job{}, false
 	}
-	_ = json.Unmarshal(policy, &j.Policy)
-	if len(params) > 0 {
-		_ = json.Unmarshal(params, &j.Params)
-	}
-	if sid != nil {
-		v := quarrycontracts.ID(*sid)
-		j.ScheduleID = &v
-	}
-	if rid != nil {
-		v := quarrycontracts.ID(*rid)
-		j.RunID = &v
-	}
-	j.IdempotencyKey = idem
 	return j, true
 }
 
@@ -184,39 +155,16 @@ func (s *jobsStore) GetByOrg(orgID string, id quarrycontracts.ID) (store.Job, bo
 // the partial index from 006_jobs_run_id.sql. Unscoped by org — see the
 // store.JobsStore doc comment for why.
 func (s *jobsStore) GetByRunID(runID quarrycontracts.ID) (store.Job, bool) {
-	var (
-		j      store.Job
-		policy []byte
-		params []byte
-		sid    *string
-		rid    *string
-		idem   *string
-	)
-	err := s.pool.QueryRow(context.Background(),
-		`SELECT id, org_id, kind, status, policy, params, schedule_id, created_at, run_id, idempotency_key
-		   FROM jobs WHERE run_id=$1`,
-		string(runID),
-	).Scan(&j.ID, &j.OrgID, &j.Kind, &j.Status, &policy, &params, &sid, &j.CreatedAt, &rid, &idem)
+	j, err := scanJob(s.pool.QueryRow(context.Background(),
+		`SELECT `+jobColumns+` FROM jobs WHERE run_id=$1`, string(runID)))
 	if err != nil {
 		return store.Job{}, false
 	}
-	_ = json.Unmarshal(policy, &j.Policy)
-	if len(params) > 0 {
-		_ = json.Unmarshal(params, &j.Params)
-	}
-	if sid != nil {
-		v := quarrycontracts.ID(*sid)
-		j.ScheduleID = &v
-	}
-	if rid != nil {
-		v := quarrycontracts.ID(*rid)
-		j.RunID = &v
-	}
-	j.IdempotencyKey = idem
 	return j, true
 }
 
-// Update replaces the mutable fields of a job (status + run_id).
+// Update replaces the mutable fields of a job (status, run_id and, when set,
+// statistics).
 // Other fields are immutable post-creation: kind, params, policy, and
 // schedule_id are set at create-time and shouldn't change. Used by the
 // orchestrator's jobs dispatcher.
@@ -226,9 +174,15 @@ func (s *jobsStore) Update(j store.Job) error {
 		v := string(*j.RunID)
 		rid = &v
 	}
+	// nil keeps what is stored: only a terminal event ever sets statistics, and a
+	// later status-only update must not erase them.
+	var statistics []byte
+	if len(j.Statistics) > 0 {
+		statistics, _ = json.Marshal(j.Statistics)
+	}
 	tag, err := s.pool.Exec(context.Background(),
-		`UPDATE jobs SET status=$2, run_id=$3 WHERE id=$1`,
-		string(j.ID), j.Status, rid)
+		`UPDATE jobs SET status=$2, run_id=$3, statistics=COALESCE($4::jsonb, statistics) WHERE id=$1`,
+		string(j.ID), j.Status, rid, statistics)
 	if err != nil {
 		return mapPgErr(err)
 	}
@@ -242,7 +196,7 @@ func (s *jobsStore) List(limit int, cur string) ([]store.Job, string) {
 	limit = pageLimit(limit, defaultMaxPage)
 	c, _ := decodeCursor(cur)
 
-	q := `SELECT id, org_id, kind, status, policy, params, schedule_id, created_at, run_id, idempotency_key FROM jobs`
+	q := `SELECT ` + jobColumns + ` FROM jobs`
 	args := []any{}
 	if c != nil {
 		q += ` WHERE (created_at, id) < ($1, $2)`
@@ -258,30 +212,10 @@ func (s *jobsStore) List(limit int, cur string) ([]store.Job, string) {
 
 	out := make([]store.Job, 0, limit)
 	for rows.Next() {
-		var (
-			j      store.Job
-			policy []byte
-			params []byte
-			sid    *string
-			rid    *string
-			idem   *string
-		)
-		if err := rows.Scan(&j.ID, &j.OrgID, &j.Kind, &j.Status, &policy, &params, &sid, &j.CreatedAt, &rid, &idem); err != nil {
+		j, err := scanJob(rows)
+		if err != nil {
 			return nil, ""
 		}
-		_ = json.Unmarshal(policy, &j.Policy)
-		if len(params) > 0 {
-			_ = json.Unmarshal(params, &j.Params)
-		}
-		if sid != nil {
-			v := quarrycontracts.ID(*sid)
-			j.ScheduleID = &v
-		}
-		if rid != nil {
-			v := quarrycontracts.ID(*rid)
-			j.RunID = &v
-		}
-		j.IdempotencyKey = idem
 		out = append(out, j)
 	}
 	next := ""
@@ -300,7 +234,7 @@ func (s *jobsStore) ListByOrg(orgID string, limit int, cur string) ([]store.Job,
 	limit = pageLimit(limit, defaultMaxPage)
 	c, _ := decodeCursor(cur)
 
-	q := `SELECT id, org_id, kind, status, policy, params, schedule_id, created_at, run_id, idempotency_key FROM jobs WHERE org_id = $1`
+	q := `SELECT ` + jobColumns + ` FROM jobs WHERE org_id = $1`
 	args := []any{orgID}
 	if c != nil {
 		q += ` AND (created_at, id) < ($2, $3)`
@@ -316,30 +250,10 @@ func (s *jobsStore) ListByOrg(orgID string, limit int, cur string) ([]store.Job,
 
 	out := make([]store.Job, 0, limit)
 	for rows.Next() {
-		var (
-			j      store.Job
-			policy []byte
-			params []byte
-			sid    *string
-			rid    *string
-			idem   *string
-		)
-		if err := rows.Scan(&j.ID, &j.OrgID, &j.Kind, &j.Status, &policy, &params, &sid, &j.CreatedAt, &rid, &idem); err != nil {
+		j, err := scanJob(rows)
+		if err != nil {
 			return nil, ""
 		}
-		_ = json.Unmarshal(policy, &j.Policy)
-		if len(params) > 0 {
-			_ = json.Unmarshal(params, &j.Params)
-		}
-		if sid != nil {
-			v := quarrycontracts.ID(*sid)
-			j.ScheduleID = &v
-		}
-		if rid != nil {
-			v := quarrycontracts.ID(*rid)
-			j.RunID = &v
-		}
-		j.IdempotencyKey = idem
 		out = append(out, j)
 	}
 	next := ""
@@ -358,7 +272,7 @@ func (s *jobsStore) ListByKind(orgID, kind string, limit int, cur string) ([]sto
 	limit = pageLimit(limit, defaultMaxPage)
 	c, _ := decodeCursor(cur)
 
-	q := `SELECT id, org_id, kind, status, policy, params, schedule_id, created_at, run_id, idempotency_key FROM jobs WHERE org_id = $1 AND kind = $2`
+	q := `SELECT ` + jobColumns + ` FROM jobs WHERE org_id = $1 AND kind = $2`
 	args := []any{orgID, kind}
 	if c != nil {
 		q += ` AND (created_at, id) < ($3, $4)`
@@ -374,30 +288,10 @@ func (s *jobsStore) ListByKind(orgID, kind string, limit int, cur string) ([]sto
 
 	out := make([]store.Job, 0, limit)
 	for rows.Next() {
-		var (
-			j      store.Job
-			policy []byte
-			params []byte
-			sid    *string
-			rid    *string
-			idem   *string
-		)
-		if err := rows.Scan(&j.ID, &j.OrgID, &j.Kind, &j.Status, &policy, &params, &sid, &j.CreatedAt, &rid, &idem); err != nil {
+		j, err := scanJob(rows)
+		if err != nil {
 			return nil, ""
 		}
-		_ = json.Unmarshal(policy, &j.Policy)
-		if len(params) > 0 {
-			_ = json.Unmarshal(params, &j.Params)
-		}
-		if sid != nil {
-			v := quarrycontracts.ID(*sid)
-			j.ScheduleID = &v
-		}
-		if rid != nil {
-			v := quarrycontracts.ID(*rid)
-			j.RunID = &v
-		}
-		j.IdempotencyKey = idem
 		out = append(out, j)
 	}
 	next := ""
@@ -413,7 +307,7 @@ func (s *jobsStore) ListBySchedule(scheduleID quarrycontracts.ID, limit int, cur
 	limit = pageLimit(limit, defaultMaxPage)
 	c, _ := decodeCursor(cur)
 
-	q := `SELECT id, org_id, kind, status, policy, params, schedule_id, created_at FROM jobs WHERE schedule_id = $1`
+	q := `SELECT ` + jobColumns + ` FROM jobs WHERE schedule_id = $1`
 	args := []any{string(scheduleID)}
 	if c != nil {
 		q += ` AND (created_at, id) < ($2, $3)`
@@ -429,22 +323,9 @@ func (s *jobsStore) ListBySchedule(scheduleID quarrycontracts.ID, limit int, cur
 
 	out := make([]store.Job, 0, limit)
 	for rows.Next() {
-		var (
-			j      store.Job
-			policy []byte
-			params []byte
-			sid    *string
-		)
-		if err := rows.Scan(&j.ID, &j.OrgID, &j.Kind, &j.Status, &policy, &params, &sid, &j.CreatedAt); err != nil {
+		j, err := scanJob(rows)
+		if err != nil {
 			return nil, ""
-		}
-		_ = json.Unmarshal(policy, &j.Policy)
-		if len(params) > 0 {
-			_ = json.Unmarshal(params, &j.Params)
-		}
-		if sid != nil {
-			v := quarrycontracts.ID(*sid)
-			j.ScheduleID = &v
 		}
 		out = append(out, j)
 	}

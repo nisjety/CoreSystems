@@ -312,7 +312,29 @@ func markJobTerminalIfNeeded(db store.DB, ev quarrycontracts.Event) {
 		return
 	}
 	job.Status = status
+	if statistics := terminalStatistics(ev.Payload); statistics != nil {
+		job.Statistics = statistics
+	}
 	_ = db.Jobs().Update(job)
+}
+
+// maxStatisticsBytes bounds what a terminal event may attach to a job. A
+// crawl's statistics are a few dozen counters from closed vocabularies; anything
+// larger is not what the orchestrator sends and is dropped rather than stored.
+const maxStatisticsBytes = 4096
+
+// terminalStatistics returns the "statistics" object of a terminal event's
+// payload, or nil when it is absent, not an object, not encodable or oversize.
+func terminalStatistics(payload map[string]any) map[string]any {
+	statistics, ok := payload["statistics"].(map[string]any)
+	if !ok || len(statistics) == 0 {
+		return nil
+	}
+	encoded, err := json.Marshal(statistics)
+	if err != nil || len(encoded) > maxStatisticsBytes {
+		return nil
+	}
+	return statistics
 }
 
 func jobStatusForEvent(eventType quarrycontracts.EventType) (string, bool) {

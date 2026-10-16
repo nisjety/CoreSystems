@@ -80,6 +80,19 @@ Error path:
 - `change.detected`, `change.unchanged`
 - `schedule.fired`
 
+#### Run statistics on a terminal event
+
+`run.completed` and `run.cancelled` of a **crawl** or **batch** run carry `payload.statistics`, and control copies it onto the job, so `GET /v1/jobs/{id}` returns it as `statistics` (absent while the job runs, and for job kinds that do not report it):
+
+```json
+{ "pages_visited": 5, "pages_failed": 1, "duration_ms": 8423,
+  "status_classes": { "2xx": 4, "4xx": 1 },
+  "drivers": { "static": 4, "browser": 1 },
+  "error_classes": { "client_4xx": 1 } }
+```
+
+Every key comes from a closed vocabulary: status classes `2xx`..`5xx` or `other`; drivers `static`, `browser`, `tls` or `other`; error categories `network`, `timeout`, `server_5xx`, `client_4xx`, `validation`, `blocklist`, `auth` or `unknown`. It never carries a URL, a title, a fingerprint or an error message. Empty breakdowns are omitted, and control drops a `statistics` value that is not an object or is over 4 KiB. A crawl is refused under ZDR, so no ZDR job has statistics.
+
 ## 4. Webhook payload
 
 ```json

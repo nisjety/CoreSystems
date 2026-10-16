@@ -368,17 +368,22 @@ func BatchJobWF(ctx workflow.Context, in BatchJobInput, a *activities.Activities
 	}
 
 	var visited, failed uint32
+	stats := newJobStatistics(workflow.Now(ctx))
 	for _, url := range in.URLs {
-		if _, err := runPage(ctx, a, ids, in.OrgID, in.UserID, in.Ingest, url); err != nil {
+		res, err := runPage(ctx, a, ids, in.OrgID, in.UserID, in.Ingest, url)
+		if err != nil {
 			failed++
+			stats.recordFailure(err)
 			continue
 		}
 		visited++
+		stats.recordPage(res)
 	}
 
 	return emitEvent(ctx, a, ids, quarrycontracts.EvtRunCompleted, map[string]any{
 		"pages_visited": visited,
 		"pages_failed":  failed,
+		"statistics":    stats.payload(visited, failed, workflow.Now(ctx)),
 	}, in.RunID, string(quarrycontracts.EvtRunCompleted))
 }
 
@@ -446,6 +451,7 @@ func CrawlJobWF(ctx workflow.Context, in CrawlJobInput, a *activities.Activities
 
 	var pagesVisited, pagesFailed uint32
 	stopReason := ""
+	stats := newJobStatistics(workflow.Now(ctx))
 
 	emitPaused := false
 	for len(frontier) > 0 {
@@ -481,6 +487,7 @@ func CrawlJobWF(ctx workflow.Context, in CrawlJobInput, a *activities.Activities
 		res, err := runPage(ctx, a, ids, in.OrgID, in.UserID, in.Ingest, cur.URL)
 		if err != nil {
 			pagesFailed++
+			stats.recordFailure(err)
 			ctrl.progress.Failed = pagesFailed
 			ctrl.progress.Pending = uint32(len(frontier))
 			// Failed pages count toward the same bound as visited ones, so a
@@ -492,6 +499,7 @@ func CrawlJobWF(ctx workflow.Context, in CrawlJobInput, a *activities.Activities
 			continue
 		}
 		pagesVisited++
+		stats.recordPage(res)
 		ctrl.progress.Visited = pagesVisited
 
 		// enqueue child links within depth bound
@@ -526,12 +534,14 @@ func CrawlJobWF(ctx workflow.Context, in CrawlJobInput, a *activities.Activities
 			"pages_visited": pagesVisited,
 			"pages_failed":  pagesFailed,
 			"pending":       uint32(len(frontier)),
+			"statistics":    stats.payload(pagesVisited, pagesFailed, workflow.Now(ctx)),
 		}, in.RunID, string(quarrycontracts.EvtRunCancelled))
 	}
 
 	completed := map[string]any{
 		"pages_visited": pagesVisited,
 		"pages_failed":  pagesFailed,
+		"statistics":    stats.payload(pagesVisited, pagesFailed, workflow.Now(ctx)),
 	}
 	if stopReason != "" {
 		completed["reason"] = stopReason
@@ -578,6 +588,7 @@ func crawlJobDurableFrontier(
 
 	var pagesVisited, pagesFailed uint32
 	stopReason := ""
+	stats := newJobStatistics(workflow.Now(ctx))
 	emitPaused := false
 	for {
 		if ctrl.state == statePaused {
@@ -612,11 +623,13 @@ func crawlJobDurableFrontier(
 		res, pageErr := runPage(ctx, a, ids, in.OrgID, in.UserID, in.Ingest, item.URL)
 		if pageErr != nil {
 			pagesFailed++
+			stats.recordFailure(pageErr)
 			if bounded && pagesFailed >= in.MaxPages {
 				stopReason = crawlStopMaxFailures
 			}
 		} else {
 			pagesVisited++
+			stats.recordPage(res)
 			if in.MaxDepth == 0 || depth+1 <= in.MaxDepth {
 				for _, link := range res.Links {
 					if strings.TrimSpace(link) == "" {
@@ -651,9 +664,13 @@ func crawlJobDurableFrontier(
 	if ctrl.state == stateCancelled {
 		return emitEvent(ctx, a, ids, quarrycontracts.EvtRunCancelled, map[string]any{
 			"pages_visited": pagesVisited, "pages_failed": pagesFailed,
+			"statistics": stats.payload(pagesVisited, pagesFailed, workflow.Now(ctx)),
 		}, in.RunID, string(quarrycontracts.EvtRunCancelled))
 	}
-	completed := map[string]any{"pages_visited": pagesVisited, "pages_failed": pagesFailed}
+	completed := map[string]any{
+		"pages_visited": pagesVisited, "pages_failed": pagesFailed,
+		"statistics": stats.payload(pagesVisited, pagesFailed, workflow.Now(ctx)),
+	}
 	if stopReason != "" {
 		completed["reason"] = stopReason
 	}

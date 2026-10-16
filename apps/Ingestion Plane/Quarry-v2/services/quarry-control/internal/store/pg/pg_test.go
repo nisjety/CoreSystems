@@ -195,3 +195,77 @@ func TestPostgres_EventAppendDedupe(t *testing.T) {
 		t.Fatalf("ForRun len=%d, want 1", len(list))
 	}
 }
+
+// Statistics are written once, by the terminal event, and read back by every
+// jobs query: Get, GetByOrg, GetByRunID, the three lists and the schedule list.
+// A later status-only update must not erase them.
+func TestPostgres_JobStatisticsRoundTrip(t *testing.T) {
+	db := openOrSkip(t)
+	org := "org_stats_" + string(quarrycontracts.NewID(quarrycontracts.KindJob))
+	runID := quarrycontracts.NewID(quarrycontracts.KindRun)
+	id := quarrycontracts.NewID(quarrycontracts.KindJob)
+	if err := db.Jobs().Create(store.Job{
+		ID: id, OrgID: org, Kind: "crawl", Status: "running", RunID: &runID,
+		CreatedAt: time.Now().UnixMilli(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Jobs().Delete(id) })
+
+	if job, ok := db.Jobs().Get(id); !ok || job.Statistics != nil {
+		t.Fatalf("a new job has no statistics: %#v ok=%v", job, ok)
+	}
+
+	job, _ := db.Jobs().Get(id)
+	job.Status = "completed"
+	job.Statistics = map[string]any{
+		"pages_visited":  float64(5),
+		"status_classes": map[string]any{"2xx": float64(4), "4xx": float64(1)},
+	}
+	if err := db.Jobs().Update(job); err != nil {
+		t.Fatal(err)
+	}
+
+	check := func(where string, got store.Job, ok bool) {
+		t.Helper()
+		if !ok {
+			t.Fatalf("%s: job not found", where)
+		}
+		if got.Status != "completed" || got.Statistics["pages_visited"] != float64(5) {
+			t.Fatalf("%s: %#v", where, got)
+		}
+		classes, _ := got.Statistics["status_classes"].(map[string]any)
+		if classes["4xx"] != float64(1) {
+			t.Fatalf("%s: nested counts lost: %#v", where, got.Statistics)
+		}
+	}
+	got, ok := db.Jobs().Get(id)
+	check("Get", got, ok)
+	got, ok = db.Jobs().GetByOrg(org, id)
+	check("GetByOrg", got, ok)
+	got, ok = db.Jobs().GetByRunID(runID)
+	check("GetByRunID", got, ok)
+	for name, list := range map[string][]store.Job{
+		"ListByOrg":  first(db.Jobs().ListByOrg(org, 10, "")),
+		"ListByKind": first(db.Jobs().ListByKind(org, "crawl", 10, "")),
+	} {
+		if len(list) != 1 {
+			t.Fatalf("%s returned %d jobs", name, len(list))
+		}
+		check(name, list[0], true)
+	}
+
+	// A status-only update (the dispatcher's shape) keeps what the run reported.
+	again, _ := db.Jobs().Get(id)
+	again.Statistics = nil
+	again.Status = "cancelled"
+	if err := db.Jobs().Update(again); err != nil {
+		t.Fatal(err)
+	}
+	final, _ := db.Jobs().Get(id)
+	if final.Status != "cancelled" || final.Statistics["pages_visited"] != float64(5) {
+		t.Fatalf("a status-only update erased the statistics: %#v", final)
+	}
+}
+
+func first[T any](items []T, _ string) []T { return items }

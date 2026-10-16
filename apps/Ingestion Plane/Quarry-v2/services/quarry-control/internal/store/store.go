@@ -204,6 +204,11 @@ type Job struct {
 	// exists the handler returns the existing record (200) rather than
 	// creating a duplicate (201). Nil for legacy / schedule-driven jobs.
 	IdempotencyKey *string `json:"idempotency_key,omitempty"`
+	// Statistics is what the finished run reported about itself (pages
+	// visited and failed, status classes, drivers, error categories,
+	// duration). Set from the terminal event; absent while the job runs and
+	// for job kinds that do not report it. Closed vocabularies only.
+	Statistics map[string]any `json:"statistics,omitempty"`
 }
 
 // MarshalJSON renders Job.CreatedAt as an RFC3339 string on the wire
@@ -239,6 +244,7 @@ func (j Job) MarshalJSON() ([]byte, error) {
 		CreatedAt      string                    `json:"created_at"`
 		RunID          *quarrycontracts.ID       `json:"run_id,omitempty"`
 		IdempotencyKey *string                   `json:"idempotency_key,omitempty"`
+		Statistics     map[string]any            `json:"statistics,omitempty"`
 	}
 	return json.Marshal(wire{
 		ID:             j.ID,
@@ -251,6 +257,7 @@ func (j Job) MarshalJSON() ([]byte, error) {
 		CreatedAt:      time.UnixMilli(j.CreatedAt).UTC().Format(time.RFC3339Nano),
 		RunID:          j.RunID,
 		IdempotencyKey: j.IdempotencyKey,
+		Statistics:     j.Statistics,
 	})
 }
 
@@ -274,6 +281,7 @@ func (j *Job) UnmarshalJSON(data []byte) error {
 		CreatedAt      string                    `json:"created_at"`
 		RunID          *quarrycontracts.ID       `json:"run_id,omitempty"`
 		IdempotencyKey *string                   `json:"idempotency_key,omitempty"`
+		Statistics     map[string]any            `json:"statistics,omitempty"`
 	}
 	var w wire
 	if err := json.Unmarshal(data, &w); err != nil {
@@ -289,6 +297,7 @@ func (j *Job) UnmarshalJSON(data []byte) error {
 		ScheduleID:     w.ScheduleID,
 		RunID:          w.RunID,
 		IdempotencyKey: w.IdempotencyKey,
+		Statistics:     w.Statistics,
 	}
 	if w.CreatedAt != "" {
 		t, err := time.Parse(time.RFC3339Nano, w.CreatedAt)
