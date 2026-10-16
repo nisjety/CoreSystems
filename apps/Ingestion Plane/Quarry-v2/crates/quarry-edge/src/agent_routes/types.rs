@@ -16,6 +16,9 @@ pub struct RunEntry {
     pub zdr: ZdrMode,
     pub grant_id: Option<String>,
     pub control_mode: BrowserControlMode,
+    /// The control epoch as of the last change this entry saw. The authority is
+    /// `RunLive`; this copy is what a checkpoint and a projection are built from.
+    pub control_epoch: u64,
     pub profile_scope: BrowserProfileScope,
     pub execution_tier: BrowserExecutionTier,
     /// Current live observation. It is intentionally process-local for a
@@ -28,12 +31,19 @@ pub struct RunEntry {
     /// Steps, attempts, active time and estimated cost against the run's
     /// bounds (`crate::budget`). `None` when enforcement is `off`.
     pub budget: Option<crate::budget::RunBudget>,
+    /// Set when the run is being closed, so an action that was waiting for the
+    /// lock is refused instead of running on a session that is going away.
+    pub closed: bool,
+    /// The control epoch for which a refused agent action already left its one
+    /// `skipped` receipt (one per takeover, not one per refused call).
+    pub last_rejected_epoch: Option<u64>,
 }
 
-/// run_id → entry. Outer std-Mutex guards the map (held only for the O(1)
-/// get/insert/remove, never across an await); inner tokio-Mutex serializes
-/// steps within a single run across await points.
-pub type AgentRuns = Arc<StdMutex<HashMap<String, Arc<TokioMutex<RunEntry>>>>>;
+/// run_id → handle. Outer std-Mutex guards the map (held only for the O(1)
+/// get/insert/remove, never across an await); the handle's tokio-Mutex
+/// serializes steps within a single run across await points, and its `RunLive`
+/// is readable and changeable without that lock.
+pub type AgentRuns = Arc<StdMutex<HashMap<String, RunHandle>>>;
 
 #[must_use]
 pub fn new_runs() -> AgentRuns {
@@ -178,6 +188,7 @@ pub struct BrowserSessionProjectionData {
     pub live: bool,
     pub zdr: bool,
     pub control_mode: BrowserControlMode,
+    pub control_epoch: u64,
     pub execution_tier: BrowserExecutionTier,
     pub tabs: Vec<BrowserSessionTab>,
     pub last_observation: Option<BrowserObservation>,
@@ -195,6 +206,10 @@ pub struct BrowserSessionTab {
 #[derive(Debug, Deserialize)]
 pub struct StepBody {
     pub action: AgentAction,
+    /// Who initiated the action. Can only tighten: `agent` on a person's token
+    /// makes this call an agent's; a service principal is an agent regardless.
+    #[serde(default)]
+    pub initiated_by: Option<InitiatorHint>,
     #[serde(default)]
     pub instruction: Option<String>,
     #[serde(default)]
@@ -204,6 +219,9 @@ pub struct StepBody {
 #[derive(Debug, Deserialize)]
 pub struct BrowserSessionControlBody {
     pub mode: BrowserControlMode,
+    /// Compare-and-set: refuse with 409 when the run's control epoch is not this.
+    #[serde(default)]
+    pub expected_epoch: Option<u64>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -237,15 +255,25 @@ pub enum BrowserTimelineItemDetail {
         action: &'static str,
         outcome: &'static str,
         error_code: Option<String>,
+        #[serde(rename = "initiatedBy", skip_serializing_if = "Option::is_none")]
+        initiated_by: Option<BrowserTimelineInitiator>,
+        #[serde(rename = "controlEpoch", skip_serializing_if = "Option::is_none")]
+        control_epoch: Option<u64>,
     },
     Control {
         mode: BrowserControlMode,
         initiated_by: BrowserTimelineInitiator,
+        #[serde(rename = "controlEpoch")]
+        control_epoch: u64,
     },
     Tab {
         operation: BrowserTabOperation,
         tab_id: Option<String>,
         active_tab_id: Option<String>,
+        #[serde(rename = "initiatedBy", skip_serializing_if = "Option::is_none")]
+        initiated_by: Option<BrowserTimelineInitiator>,
+        #[serde(rename = "controlEpoch")]
+        control_epoch: u64,
     },
     Devtools {
         event_count: u32,
@@ -429,6 +457,8 @@ pub struct EgressReceiptsData {
 pub struct NewTabBody {
     #[serde(default)]
     pub url: Option<String>,
+    #[serde(default, alias = "initiatedBy")]
+    pub initiated_by: Option<InitiatorHint>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -438,6 +468,8 @@ pub enum BrowserWsClientMessage {
         action: AgentAction,
         #[serde(default)]
         instruction: Option<String>,
+        #[serde(default, alias = "initiated_by")]
+        actor: Option<InitiatorHint>,
     },
     Ping,
 }

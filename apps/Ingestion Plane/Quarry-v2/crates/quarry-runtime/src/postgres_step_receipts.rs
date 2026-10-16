@@ -92,6 +92,14 @@ impl PostgresStepReceiptStore {
                 .try_get::<i64, _>("cost_micro_usd")
                 .map_err(|error| db_err("decode cost", error))?
                 .max(0) as u64,
+            initiated_by: row
+                .try_get::<Option<String>, _>("initiated_by")
+                .map_err(|error| db_err("decode initiated_by", error))?
+                .and_then(|value| serde_json::from_value(serde_json::Value::String(value)).ok()),
+            control_epoch: row
+                .try_get::<Option<i64>, _>("control_epoch")
+                .map_err(|error| db_err("decode control_epoch", error))?
+                .map(|value| value.max(0) as u64),
         })
     }
 }
@@ -142,8 +150,8 @@ impl StepReceiptStore for PostgresStepReceiptStore {
         sqlx::query(
             "INSERT INTO quarry_step_receipts
              (receipt_id, run_id, org_id, actor_id, step, started_at, finished_at, action,
-              outcome, observation, correction_of, cost_micro_usd)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+              outcome, observation, correction_of, cost_micro_usd, initiated_by, control_epoch)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
              ON CONFLICT (receipt_id) DO NOTHING",
         )
         .bind(&receipt.receipt_id)
@@ -158,6 +166,13 @@ impl StepReceiptStore for PostgresStepReceiptStore {
         .bind(observation)
         .bind(&receipt.correction_of)
         .bind(receipt.cost_micro_usd as i64)
+        .bind(
+            receipt
+                .initiated_by
+                .and_then(|value| serde_json::to_value(value).ok())
+                .and_then(|value| value.as_str().map(str::to_owned)),
+        )
+        .bind(receipt.control_epoch.map(|value| value as i64))
         .execute(&self.pool)
         .await
         .map_err(|error| db_err("append receipt", error))?;
@@ -177,7 +192,8 @@ impl StepReceiptStore for PostgresStepReceiptStore {
         }
         let rows = sqlx::query(
             "SELECT receipt_id, run_id, org_id, actor_id, step, started_at, finished_at,
-                    action, outcome, observation, correction_of, cost_micro_usd
+                    action, outcome, observation, correction_of, cost_micro_usd,
+                    initiated_by, control_epoch
              FROM quarry_step_receipts
              WHERE org_id = $1 AND run_id = $2
              ORDER BY step ASC, finished_at ASC",
@@ -204,7 +220,8 @@ impl StepReceiptStore for PostgresStepReceiptStore {
         }
         let rows = sqlx::query(
             "SELECT receipt_id, run_id, org_id, actor_id, step, started_at, finished_at,
-                    action, outcome, observation, correction_of, cost_micro_usd
+                    action, outcome, observation, correction_of, cost_micro_usd,
+                    initiated_by, control_epoch
              FROM quarry_step_receipts
              WHERE org_id = $1 AND actor_id = $2 AND run_id = $3
              ORDER BY step ASC, finished_at ASC",
@@ -221,7 +238,8 @@ impl StepReceiptStore for PostgresStepReceiptStore {
     async fn get(&self, receipt_id: &str) -> QuarryResult<Option<StepReceipt>> {
         let row = sqlx::query(
             "SELECT receipt_id, run_id, org_id, actor_id, step, started_at, finished_at,
-                    action, outcome, observation, correction_of, cost_micro_usd
+                    action, outcome, observation, correction_of, cost_micro_usd,
+                    initiated_by, control_epoch
              FROM quarry_step_receipts WHERE receipt_id = $1",
         )
         .bind(receipt_id)

@@ -356,12 +356,23 @@ pub async fn start_run(
             .map_or(BrowserControlMode::AgentControl, |checkpoint| {
                 checkpoint.control_mode
             }),
+        control_epoch: resume_checkpoint
+            .as_ref()
+            .map_or(0, |checkpoint| checkpoint.control_epoch),
         profile_scope,
         execution_tier,
         last_observation: None,
         used_sensitive_approval_grants: HashSet::new(),
         budget,
+        closed: false,
+        last_rejected_epoch: None,
     };
+    let live = RunLive::new(
+        entry.org_id.clone(),
+        entry.actor_id.clone(),
+        entry.control_mode,
+        entry.control_epoch,
+    );
 
     if !zdr.is_active() {
         let checkpoint = checkpoint_for_entry(&entry);
@@ -387,7 +398,7 @@ pub async fn start_run(
         .agent_runs
         .lock()
         .expect("agent_runs mutex poisoned")
-        .insert(run_id.to_string(), Arc::new(TokioMutex::new(entry)));
+        .insert(run_id.to_string(), RunHandle::new(entry, live));
 
     state
         .event_sink
@@ -425,7 +436,7 @@ pub async fn close_run(
 
     let entry_arc = {
         let map = state.agent_runs.lock().expect("agent_runs mutex poisoned");
-        map.get(&run_id).cloned()
+        map.get(&run_id).map(|handle| handle.entry.clone())
     };
     let Some(entry_arc) = entry_arc else {
         return Err(status_err(
@@ -476,6 +487,8 @@ pub async fn close_run(
             .map_err(|error| driver_err(&request_id, error))?;
     }
 
+    // An action that was waiting for the lock sees this and is refused.
+    entry_arc.lock().await.closed = true;
     state
         .agent_runs
         .lock()
@@ -525,6 +538,7 @@ pub async fn drain_runs(
         .lock()
         .expect("agent_runs mutex poisoned")
         .drain()
+        .map(|(run_id, handle)| (run_id, handle.entry))
         .collect();
     let outcomes: Vec<Option<bool>> = futures_util::stream::iter(snapshot)
         .map(|(run_id, entry)| {

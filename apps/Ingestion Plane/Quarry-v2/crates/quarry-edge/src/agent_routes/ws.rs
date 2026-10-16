@@ -24,11 +24,8 @@ pub async fn live_frame_ws(
             ),
         ));
     }
-    let entry_arc = {
-        let map = state.agent_runs.lock().expect("agent_runs mutex poisoned");
-        map.get(&run_id).cloned()
-    };
-    let Some(entry_arc) = entry_arc else {
+    let handle = lookup_run(&state, &run_id);
+    let Some(handle) = handle else {
         return Err(status_err(
             StatusCode::NOT_FOUND,
             &request_id,
@@ -37,7 +34,7 @@ pub async fn live_frame_ws(
     };
 
     let (session, viewport, zdr) = {
-        let entry = entry_arc.lock().await;
+        let entry = handle.entry.lock().await;
         if !caller_owns_live_run(&entry, &claims) {
             return Err(status_err(
                 StatusCode::NOT_FOUND,
@@ -59,7 +56,7 @@ pub async fn live_frame_ws(
 
     Ok(ws.on_upgrade(move |socket| {
         browser_ws_loop(
-            socket, state, entry_arc, session, options, interval, max_frames, zdr_active,
+            socket, state, handle, claims, session, options, interval, max_frames, zdr_active,
         )
     }))
 }
@@ -71,7 +68,8 @@ pub async fn live_frame_ws(
 pub(super) async fn browser_ws_loop(
     mut socket: WebSocket,
     state: AppState,
-    entry_arc: Arc<TokioMutex<RunEntry>>,
+    handle: RunHandle,
+    claims: crate::auth::Claims,
     session: BrowserSession,
     options: LiveFrameOptions,
     interval: Duration,
@@ -143,8 +141,8 @@ pub(super) async fn browser_ws_loop(
                                     break;
                                 }
                             }
-                            Ok(BrowserWsClientMessage::Action { action, instruction }) => {
-                                match execute_ws_action(&state, &entry_arc, action, instruction).await {
+                            Ok(BrowserWsClientMessage::Action { action, instruction, actor }) => {
+                                match execute_ws_action(&state, &handle, &claims, action, instruction, actor).await {
                                     Ok(observation) => {
                                         if send_ws_json(&mut socket, serde_json::json!({
                                             "type": "observation",

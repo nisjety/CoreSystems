@@ -9,7 +9,7 @@ pub async fn list_tabs(
     let request_id = RequestKind::new().to_string();
     let entry_arc = {
         let map = state.agent_runs.lock().expect("agent_runs mutex poisoned");
-        map.get(&run_id).cloned()
+        map.get(&run_id).map(|handle| handle.entry.clone())
     };
     let Some(entry_arc) = entry_arc else {
         return Err(status_err(
@@ -45,11 +45,8 @@ pub async fn new_tab(
     Json(body): Json<NewTabBody>,
 ) -> Result<Json<Envelope<BrowserTabData>>, ApiErr> {
     let request_id = RequestKind::new().to_string();
-    let entry_arc = {
-        let map = state.agent_runs.lock().expect("agent_runs mutex poisoned");
-        map.get(&run_id).cloned()
-    };
-    let Some(entry_arc) = entry_arc else {
+    let handle = lookup_run(&state, &run_id);
+    let Some(handle) = handle else {
         return Err(status_err(
             StatusCode::NOT_FOUND,
             &request_id,
@@ -57,7 +54,7 @@ pub async fn new_tab(
         ));
     };
 
-    let entry = entry_arc.lock().await;
+    let entry = handle.entry.lock().await;
     if !caller_owns_live_run(&entry, &claims) {
         return Err(status_err(
             StatusCode::NOT_FOUND,
@@ -65,6 +62,13 @@ pub async fn new_tab(
             "agent run not found",
         ));
     }
+    let admitted = admit_tab_operation(
+        &handle,
+        &entry,
+        derive_initiator(&claims, body.initiated_by),
+        crate::run_limits::takeover_enforced(),
+    )
+    .map_err(|error| driver_err(&request_id, error))?;
 
     if entry.execution_tier.is_ephemeral_evidence() {
         return Err(status_err(
@@ -135,6 +139,8 @@ pub async fn new_tab(
         &entry,
         BrowserTimelineEventKind::Tab {
             operation: BrowserTabOperation::Opened,
+            initiated_by: Some(admitted.initiator),
+            control_epoch: admitted.control_epoch,
             tab_id: Some(tab.tab_id.clone()),
             active_tab_id: active_browser_tab_id(&tabs),
         },
@@ -152,11 +158,8 @@ pub async fn select_tab(
     Path((run_id, tab_id)): Path<(String, String)>,
 ) -> Result<Json<Envelope<BrowserTabsData>>, ApiErr> {
     let request_id = RequestKind::new().to_string();
-    let entry_arc = {
-        let map = state.agent_runs.lock().expect("agent_runs mutex poisoned");
-        map.get(&run_id).cloned()
-    };
-    let Some(entry_arc) = entry_arc else {
+    let handle = lookup_run(&state, &run_id);
+    let Some(handle) = handle else {
         return Err(status_err(
             StatusCode::NOT_FOUND,
             &request_id,
@@ -164,7 +167,7 @@ pub async fn select_tab(
         ));
     };
 
-    let entry = entry_arc.lock().await;
+    let entry = handle.entry.lock().await;
     if !caller_owns_live_run(&entry, &claims) {
         return Err(status_err(
             StatusCode::NOT_FOUND,
@@ -172,6 +175,13 @@ pub async fn select_tab(
             "agent run not found",
         ));
     }
+    let admitted = admit_tab_operation(
+        &handle,
+        &entry,
+        derive_initiator(&claims, None),
+        crate::run_limits::takeover_enforced(),
+    )
+    .map_err(|error| driver_err(&request_id, error))?;
 
     state
         .agent_driver
@@ -188,6 +198,8 @@ pub async fn select_tab(
         &entry,
         BrowserTimelineEventKind::Tab {
             operation: BrowserTabOperation::Selected,
+            initiated_by: Some(admitted.initiator),
+            control_epoch: admitted.control_epoch,
             tab_id: Some(tab_id),
             active_tab_id: active_browser_tab_id(&tabs),
         },
@@ -205,11 +217,8 @@ pub async fn close_tab(
     Path((run_id, tab_id)): Path<(String, String)>,
 ) -> Result<Json<Envelope<BrowserTabsData>>, ApiErr> {
     let request_id = RequestKind::new().to_string();
-    let entry_arc = {
-        let map = state.agent_runs.lock().expect("agent_runs mutex poisoned");
-        map.get(&run_id).cloned()
-    };
-    let Some(entry_arc) = entry_arc else {
+    let handle = lookup_run(&state, &run_id);
+    let Some(handle) = handle else {
         return Err(status_err(
             StatusCode::NOT_FOUND,
             &request_id,
@@ -217,7 +226,7 @@ pub async fn close_tab(
         ));
     };
 
-    let entry = entry_arc.lock().await;
+    let entry = handle.entry.lock().await;
     if !caller_owns_live_run(&entry, &claims) {
         return Err(status_err(
             StatusCode::NOT_FOUND,
@@ -225,6 +234,13 @@ pub async fn close_tab(
             "agent run not found",
         ));
     }
+    let admitted = admit_tab_operation(
+        &handle,
+        &entry,
+        derive_initiator(&claims, None),
+        crate::run_limits::takeover_enforced(),
+    )
+    .map_err(|error| driver_err(&request_id, error))?;
 
     state
         .agent_driver
@@ -241,6 +257,8 @@ pub async fn close_tab(
         &entry,
         BrowserTimelineEventKind::Tab {
             operation: BrowserTabOperation::Closed,
+            initiated_by: Some(admitted.initiator),
+            control_epoch: admitted.control_epoch,
             tab_id: Some(tab_id),
             active_tab_id: active_browser_tab_id(&tabs),
         },
@@ -261,7 +279,7 @@ pub async fn devtools_events(
     let request_id = RequestKind::new().to_string();
     let entry_arc = {
         let map = state.agent_runs.lock().expect("agent_runs mutex poisoned");
-        map.get(&run_id).cloned()
+        map.get(&run_id).map(|handle| handle.entry.clone())
     };
     let Some(entry_arc) = entry_arc else {
         return Err(status_err(
@@ -322,7 +340,7 @@ pub async fn egress_receipts(
     let request_id = RequestKind::new().to_string();
     let entry_arc = {
         let map = state.agent_runs.lock().expect("agent_runs mutex poisoned");
-        map.get(&run_id).cloned()
+        map.get(&run_id).map(|handle| handle.entry.clone())
     };
     let Some(entry_arc) = entry_arc else {
         return Err(status_err(

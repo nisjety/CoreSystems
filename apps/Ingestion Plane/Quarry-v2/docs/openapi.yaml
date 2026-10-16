@@ -325,7 +325,15 @@ paths:
               schema:
                 $ref: '#/components/schemas/Envelope_Error'
         '409':
-          description: Snapshot target is stale, absent, ambiguous, or changed; re-observe before acting
+          description: >-
+            Either the snapshot target is stale, absent, ambiguous, or changed
+            (re-observe before acting), or USER_TOOK_OVER: the person using the
+            browser has taken it over and this action was proposed by an agent
+            (a service principal, or `initiated_by: agent`). `error.details` is
+            `{control_mode: "human_takeover", control_epoch}`. Not retryable until
+            control is handed back. Enforced only when
+            QUARRY_EDGE__TAKEOVER_ENFORCEMENT=1; otherwise the edge logs what it
+            would have refused.
           content:
             application/json:
               schema:
@@ -2589,6 +2597,16 @@ components:
       properties:
         action:
           $ref: '#/components/schemas/AgentAction'
+        initiated_by:
+          type: string
+          nullable: true
+          enum:
+          - human
+          - agent
+          description: >-
+            Who proposed the action. It can only tighten: `agent` on a person's
+            token makes the call an agent's, and a service principal is always an
+            agent. Receipts record the derived initiator and the control epoch.
         instruction:
           type: string
           nullable: true

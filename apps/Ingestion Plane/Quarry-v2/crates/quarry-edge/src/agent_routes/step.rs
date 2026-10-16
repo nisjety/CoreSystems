@@ -11,11 +11,7 @@ pub async fn step(
 ) -> Result<Json<Envelope<BrowserObservation>>, ApiErr> {
     let request_id = RequestKind::new().to_string();
 
-    let entry_arc = {
-        let map = state.agent_runs.lock().expect("agent_runs mutex poisoned");
-        map.get(&run_id).cloned()
-    };
-    let Some(entry_arc) = entry_arc else {
+    let Some(handle) = lookup_run(&state, &run_id) else {
         return Err(status_err(
             StatusCode::NOT_FOUND,
             &request_id,
@@ -23,7 +19,7 @@ pub async fn step(
         ));
     };
 
-    let mut entry = entry_arc.lock().await;
+    let mut entry = handle.entry.lock().await;
     if !caller_owns_live_run(&entry, &claims) {
         return Err(status_err(
             StatusCode::NOT_FOUND,
@@ -32,65 +28,19 @@ pub async fn step(
         ));
     }
 
-    if let Some(grant_id) = entry.grant_id.as_deref() {
-        validate_run_grant(&state, grant_id, &entry.constraints.allowed_domains)
-            .await
-            .map_err(|error| driver_err(&request_id, error))?;
-    } else if state.require_browser_grants {
-        return Err(status_err(
-            StatusCode::FORBIDDEN,
-            &request_id,
-            "browser grant is required for every action",
-        ));
-    }
-
-    deny_raw_script(&body.action, &entry.run_id.to_string())
-        .map_err(|error| driver_err(&request_id, error))?;
-    require_action_capabilities(&body.action, state.agent_driver.capabilities())
-        .map_err(|error| driver_err(&request_id, error))?;
-    if entry.execution_tier.is_ephemeral_evidence() {
-        require_ephemeral_evidence_action(&body.action)
-            .map_err(|error| driver_err(&request_id, error))?;
-    }
-
-    // The budgets refuse before a one-shot approval is consumed: an action
-    // that was never going to run must not burn the approval that was
-    // issued for it.
-    enforce_step_budget(&entry)
-        .map_err(|message| status_err(StatusCode::TOO_MANY_REQUESTS, &request_id, message))?;
-    budget_gate(&mut entry, &body.action).map_err(|error| driver_err(&request_id, error))?;
-
-    if let Some(approval) = sensitive_approval_for_action(&entry, &body.action)
-        .map_err(|error| driver_err(&request_id, error))?
-    {
-        validate_sensitive_approval(&state, &approval)
-            .await
-            .map_err(|error| driver_err(&request_id, error))?;
-        if !entry
-            .used_sensitive_approval_grants
-            .insert(approval.grant_id)
-        {
-            return Err(status_err(
-                StatusCode::CONFLICT,
-                &request_id,
-                "sensitive browser approval grant has already been used by this run",
-            ));
-        }
-    }
-
-    if let AgentAction::Navigate { url } = &body.action {
-        if !domain_allowed(url, &entry.constraints.allowed_domains) {
-            return Err(status_err(
-                StatusCode::FORBIDDEN,
-                &request_id,
-                "browser navigation is outside the run's allowed domains",
-            ));
-        }
-    }
-
-    validate_navigation(&body.action, state.security.as_ref())
-        .await
-        .map_err(|error| driver_err(&request_id, error))?;
+    // Every gate, in one fixed order (see `admit_action`).
+    let admitted = admit_action(
+        &state,
+        &handle,
+        &mut entry,
+        AdmitInput {
+            initiator: derive_initiator(&claims, body.initiated_by),
+            action: &body.action,
+            enforce_takeover: crate::run_limits::takeover_enforced(),
+        },
+    )
+    .await
+    .map_err(|error| driver_err(&request_id, error))?;
 
     let req = AgentActionRequest {
         run_id: entry.run_id.clone(),
@@ -134,6 +84,7 @@ pub async fn step(
             let receipt = ReceiptBuilder::start(receipt_run_id.clone(), receipt_step)
                 .org_id(entry.org_id.clone())
                 .actor_id(entry.actor_id.clone())
+                .initiator(admitted.initiator, admitted.control_epoch)
                 .complete(receipt_action, Some(obs.clone()), cost_usd);
             if !entry.zdr.is_active() {
                 state
@@ -153,6 +104,7 @@ pub async fn step(
             let receipt = ReceiptBuilder::start(receipt_run_id, receipt_step)
                 .org_id(entry.org_id.clone())
                 .actor_id(entry.actor_id.clone())
+                .initiator(admitted.initiator, admitted.control_epoch)
                 .fail(receipt_action, &error);
             if !entry.zdr.is_active() {
                 state
@@ -193,49 +145,24 @@ pub async fn step(
 
 pub(super) async fn execute_ws_action(
     state: &AppState,
-    entry_arc: &Arc<TokioMutex<RunEntry>>,
+    handle: &RunHandle,
+    claims: &crate::auth::Claims,
     action: AgentAction,
     instruction: Option<String>,
+    hint: Option<InitiatorHint>,
 ) -> QuarryResult<BrowserObservation> {
-    validate_navigation(&action, state.security.as_ref()).await?;
-    let mut entry = entry_arc.lock().await;
-    if let Some(grant_id) = entry.grant_id.as_deref() {
-        validate_run_grant(state, grant_id, &entry.constraints.allowed_domains).await?;
-    } else if state.require_browser_grants {
-        return Err(QuarryError::new(
-            ErrorCode::Forbidden,
-            "browser grant is required for every action",
-        ));
-    }
-    deny_raw_script(&action, &entry.run_id.to_string())?;
-    require_action_capabilities(&action, state.agent_driver.capabilities())?;
-    if entry.execution_tier.is_ephemeral_evidence() {
-        require_ephemeral_evidence_action(&action)?;
-    }
-    // Budgets first, so a refusal cannot burn a one-shot approval.
-    enforce_step_budget(&entry)
-        .map_err(|message| QuarryError::new(ErrorCode::RateLimited, message))?;
-    budget_gate(&mut entry, &action)?;
-    if let Some(approval) = sensitive_approval_for_action(&entry, &action)? {
-        validate_sensitive_approval(state, &approval).await?;
-        if !entry
-            .used_sensitive_approval_grants
-            .insert(approval.grant_id)
-        {
-            return Err(QuarryError::new(
-                ErrorCode::Conflict,
-                "sensitive browser approval grant has already been used by this run",
-            ));
-        }
-    }
-    if let AgentAction::Navigate { url } = &action {
-        if !domain_allowed(url, &entry.constraints.allowed_domains) {
-            return Err(QuarryError::new(
-                ErrorCode::SecurityBlocked,
-                "browser navigation is outside the run's allowed domains",
-            ));
-        }
-    }
+    let mut entry = handle.entry.lock().await;
+    let admitted = admit_action(
+        state,
+        handle,
+        &mut entry,
+        AdmitInput {
+            initiator: derive_initiator(claims, hint),
+            action: &action,
+            enforce_takeover: crate::run_limits::takeover_enforced(),
+        },
+    )
+    .await?;
     let req = AgentActionRequest {
         run_id: entry.run_id.clone(),
         lease_id: entry.lease.lease_id.clone(),
@@ -269,6 +196,7 @@ pub(super) async fn execute_ws_action(
                 let receipt = ReceiptBuilder::start(receipt_run_id.clone(), receipt_step)
                     .org_id(entry.org_id.clone())
                     .actor_id(entry.actor_id.clone())
+                    .initiator(admitted.initiator, admitted.control_epoch)
                     .complete(receipt_action.clone(), Some(observation.clone()), cost_usd);
                 state.receipts.append(receipt).await?;
             }
@@ -284,6 +212,7 @@ pub(super) async fn execute_ws_action(
                 let receipt = ReceiptBuilder::start(receipt_run_id, receipt_step)
                     .org_id(entry.org_id.clone())
                     .actor_id(entry.actor_id.clone())
+                    .initiator(admitted.initiator, admitted.control_epoch)
                     .fail(receipt_action, &error);
                 state.receipts.append(receipt).await?;
             }

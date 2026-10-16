@@ -757,7 +757,7 @@ pub(crate) async fn run_action(
         &state,
         Method::POST,
         &format!("/v1/agent/runs/{}/step", urlencoding::encode(&session_id)),
-        Some(json!({ "action": action })),
+        Some(step_request_body(action, actor)),
         token.as_deref(),
         &user.user_id,
     )
@@ -3894,7 +3894,30 @@ impl BrowserArtifactAbsence {
     }
 }
 
+/// The body of a `/step` call for an action the person or the model proposed. An
+/// action the model proposed carries `initiated_by: "agent"`, so Quarry (which owns
+/// the browser) can refuse it while the person has taken over. A person's own action
+/// carries no hint: Quarry already takes it for the person's.
+fn step_request_body(action: Value, actor: BrowserActionActor) -> Value {
+    match actor {
+        BrowserActionActor::Agent => json!({ "action": action, "initiated_by": "agent" }),
+        BrowserActionActor::Human => json!({ "action": action }),
+    }
+}
+
 fn forward_quarry_failure(status: StatusCode, body: Value) -> Response {
+    // Quarry enforces the takeover itself; the SPA only knows the gateway's own
+    // code for it, so translate (and keep the control epoch for the caller).
+    if body.pointer("/error/code").and_then(Value::as_str) == Some("USER_TOOK_OVER") {
+        let mut response = error(
+            "browser_human_takeover_active",
+            "Human takeover is active for this browser session.",
+        );
+        if let Some(details) = body.pointer("/error/details") {
+            response["error"]["details"] = details.clone();
+        }
+        return (StatusCode::CONFLICT, Json(response)).into_response();
+    }
     if body.get("error").is_some() {
         return (status, Json(body)).into_response();
     }
@@ -3986,6 +4009,37 @@ fn looks_like_json_payload(bytes: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn run_action_forwards_agent_initiator_to_quarry() {
+        let action = json!({ "type": "back" });
+        assert_eq!(
+            step_request_body(action.clone(), BrowserActionActor::Agent),
+            json!({ "action": { "type": "back" }, "initiated_by": "agent" })
+        );
+        assert_eq!(
+            step_request_body(action, BrowserActionActor::Human),
+            json!({ "action": { "type": "back" } }),
+            "a person's own action carries no hint"
+        );
+    }
+
+    #[tokio::test]
+    async fn quarry_user_took_over_maps_to_browser_human_takeover_active() {
+        let quarry = json!({ "error": {
+            "code": "USER_TOOK_OVER",
+            "message": "the person using the browser has taken control",
+            "details": { "control_mode": "human_takeover", "control_epoch": 3 },
+            "retryable": false
+        }});
+        let response = forward_quarry_failure(StatusCode::CONFLICT, quarry);
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let bytes = axum::body::to_bytes(response.into_body(), 1 << 20).await.unwrap();
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["error"]["code"], "browser_human_takeover_active");
+        assert_eq!(body["error"]["details"]["control_epoch"], 3);
+        assert!(!body.to_string().contains("USER_TOOK_OVER"));
+    }
 
     #[test]
     fn browser_run_owner_requires_exact_validated_user_and_org() {

@@ -18,6 +18,7 @@ pub(super) fn checkpoint_for_entry(entry: &RunEntry) -> AgentRunCheckpoint {
         grant_id: entry.grant_id.clone(),
         status: AgentRunStatus::Active,
         control_mode: entry.control_mode,
+        control_epoch: entry.control_epoch,
         budget: entry
             .budget
             .as_ref()
@@ -73,27 +74,47 @@ pub async fn set_browser_session_control(
     Json(body): Json<BrowserSessionControlBody>,
 ) -> Result<Json<Envelope<BrowserSessionProjectionData>>, ApiErr> {
     let request_id = RequestKind::new().to_string();
-    let entry_arc = {
-        let map = state.agent_runs.lock().expect("agent_runs mutex poisoned");
-        map.get(&run_id).cloned()
-    };
-    let Some(entry_arc) = entry_arc else {
+    let Some(handle) = lookup_run(&state, &run_id) else {
         return Err(status_err(
             StatusCode::NOT_FOUND,
             &request_id,
             "agent run not found",
         ));
     };
-    let mut entry = entry_arc.lock().await;
-    if !caller_owns_live_run(&entry, &claims) {
+    // Ownership and the flip itself need no run lock: a person taking over must
+    // not queue behind an action that is still running.
+    if !handle.live.owned_by(&claims) {
         return Err(status_err(
             StatusCode::NOT_FOUND,
             &request_id,
             "agent run not found",
         ));
     }
+    // Only a person hands the browser over or back. An agent (a service
+    // principal, or a person's token labelled agent) cannot take it from them.
+    if derive_initiator(&claims, None) != StepInitiator::Human {
+        return Err(driver_err(
+            &request_id,
+            QuarryError::new(ErrorCode::Forbidden, "control_transition_requires_human"),
+        ));
+    }
+    let (changed, epoch) = handle
+        .live
+        .set_mode(body.mode, body.expected_epoch)
+        .map_err(|current| {
+            driver_err(
+                &request_id,
+                QuarryError::new(ErrorCode::Conflict, "the browser's control epoch has moved on")
+                    .with_details(serde_json::json!({
+                        "control_epoch": current,
+                        "expected_epoch": body.expected_epoch,
+                    })),
+            )
+        })?;
 
+    let mut entry = handle.entry.lock().await;
     entry.control_mode = body.mode;
+    entry.control_epoch = epoch;
     if let Some(budget) = entry.budget.as_mut() {
         let now = std::time::Instant::now();
         match body.mode {
@@ -101,16 +122,19 @@ pub async fn set_browser_session_control(
             BrowserControlMode::AgentControl => budget.ledger.resume(now),
         }
     }
-    record_browser_timeline_event(
-        &state,
-        &entry,
-        BrowserTimelineEventKind::Control {
-            mode: body.mode,
-            initiated_by: BrowserTimelineInitiator::Human,
-        },
-    )
-    .await
-    .map_err(|error| driver_err(&request_id, error))?;
+    if changed {
+        record_browser_timeline_event(
+            &state,
+            &entry,
+            BrowserTimelineEventKind::Control {
+                mode: body.mode,
+                initiated_by: BrowserTimelineInitiator::Human,
+                control_epoch: epoch,
+            },
+        )
+        .await
+        .map_err(|error| driver_err(&request_id, error))?;
+    }
 
     let tabs = state
         .agent_driver

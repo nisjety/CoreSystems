@@ -247,3 +247,194 @@ pub(super) fn require_action_capabilities(
     }
     Ok(())
 }
+
+/// What an admitted action runs under: who drove it and the control epoch it was
+/// admitted in (both stamped on its receipt).
+#[derive(Debug, Clone, Copy)]
+pub(super) struct Admitted {
+    pub initiator: StepInitiator,
+    pub control_epoch: u64,
+}
+
+pub(super) struct AdmitInput<'a> {
+    pub initiator: StepInitiator,
+    pub action: &'a AgentAction,
+    /// Refuse (not just log) an agent action while a person holds the browser.
+    pub enforce_takeover: bool,
+}
+
+/// 409 `USER_TOOK_OVER` with the state that caused it.
+pub(super) fn user_took_over(snapshot: ControlSnapshot) -> QuarryError {
+    QuarryError::new(
+        ErrorCode::UserTookOver,
+        "the person using the browser has taken control; this action was not run",
+    )
+    .with_details(serde_json::json!({
+        "control_mode": "human_takeover",
+        "control_epoch": snapshot.epoch,
+    }))
+}
+
+/// The control gate shared by actions and tab operations: while a person holds
+/// the browser only a person's request goes through. In observe mode
+/// (`QUARRY_EDGE__TAKEOVER_ENFORCEMENT` off) a request that would be refused is
+/// logged and let through.
+pub(super) fn takeover_gate(
+    handle: &RunHandle,
+    entry: &RunEntry,
+    initiator: StepInitiator,
+    enforce: bool,
+    what: &str,
+) -> Result<ControlSnapshot, QuarryError> {
+    let snapshot = handle.live.snapshot();
+    if snapshot.mode == BrowserControlMode::HumanTakeover && initiator != StepInitiator::Human {
+        if enforce {
+            return Err(user_took_over(snapshot));
+        }
+        tracing::warn!(
+            run_id = %entry.run_id,
+            control_epoch = snapshot.epoch,
+            what,
+            "would_reject: agent request during human takeover (enforcement is off)"
+        );
+    }
+    Ok(snapshot)
+}
+
+/// A refused agent action leaves one `skipped` receipt per takeover, so the
+/// history shows what the agent tried without growing with every retry. ZDR runs
+/// enforce the gate and persist nothing.
+async fn record_takeover_skip(
+    state: &AppState,
+    entry: &mut RunEntry,
+    action: &AgentAction,
+    initiator: StepInitiator,
+    snapshot: ControlSnapshot,
+) {
+    if entry.last_rejected_epoch == Some(snapshot.epoch) {
+        return;
+    }
+    entry.last_rejected_epoch = Some(snapshot.epoch);
+    if entry.zdr.is_active() {
+        return;
+    }
+    let receipt = ReceiptBuilder::start(entry.run_id.to_string(), entry.ctx.step)
+        .org_id(entry.org_id.clone())
+        .actor_id(entry.actor_id.clone())
+        .initiator(initiator, snapshot.epoch)
+        .skip(action.clone(), "user_took_over");
+    if let Err(error) = state.receipts.append(receipt).await {
+        tracing::warn!(%error, "could not record the skipped receipt for a refused agent action");
+    }
+}
+
+/// The one ordered chain every browser action goes through, whichever surface it
+/// arrives on (REST step, WebSocket, interact). Cheap, local checks first; the
+/// gate that consumes state (the one-shot approval) comes last among the policy
+/// checks, so a refusal never burns an approval or a budget step.
+///
+/// Order (pinned by `admission_order_is_pinned`):
+/// 1 the run is still live, 2 the caller owns it (done by the caller: it needs the
+/// lock-free `RunLive` or the entry), 3 control, 4 grant, 5 driver capabilities,
+/// 6 ephemeral tier, 7 raw script, 8 web policy (slot for WS7), 9 budget,
+/// 10 sensitive approval, 11 navigation domain, 12 navigation security.
+pub(super) async fn admit_action(
+    state: &AppState,
+    handle: &RunHandle,
+    entry: &mut RunEntry,
+    input: AdmitInput<'_>,
+) -> QuarryResult<Admitted> {
+    let action = input.action;
+
+    // 1. closed
+    if entry.closed {
+        return Err(QuarryError::new(ErrorCode::NotFound, "agent run is not live")
+            .with_details(serde_json::json!({ "reason": "run_not_live" })));
+    }
+
+    // 3. control / takeover
+    let snapshot = match takeover_gate(handle, entry, input.initiator, input.enforce_takeover, "action") {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            let snapshot = handle.live.snapshot();
+            record_takeover_skip(state, entry, action, input.initiator, snapshot).await;
+            return Err(error);
+        }
+    };
+
+    // 4. grant
+    if let Some(grant_id) = entry.grant_id.as_deref() {
+        validate_run_grant(state, grant_id, &entry.constraints.allowed_domains).await?;
+    } else if state.require_browser_grants {
+        return Err(QuarryError::new(
+            ErrorCode::Forbidden,
+            "browser grant is required for every action",
+        ));
+    }
+
+    // 5. driver capabilities
+    require_action_capabilities(action, state.agent_driver.capabilities())?;
+    // 6. ephemeral tier
+    if entry.execution_tier.is_ephemeral_evidence() {
+        require_ephemeral_evidence_action(action)?;
+    }
+    // 7. raw script
+    deny_raw_script(action, &entry.run_id.to_string())?;
+    // 8. web policy: WS7 plugs in here.
+
+    // 9. budget
+    enforce_step_budget(entry)
+        .map_err(|message| QuarryError::new(ErrorCode::RateLimited, message))?;
+    budget_gate(entry, action)?;
+
+    // 10. sensitive approval (the only gate that consumes state)
+    if let Some(approval) = sensitive_approval_for_action(entry, action)? {
+        validate_sensitive_approval(state, &approval).await?;
+        if !entry
+            .used_sensitive_approval_grants
+            .insert(approval.grant_id)
+        {
+            return Err(QuarryError::new(
+                ErrorCode::Conflict,
+                "sensitive browser approval grant has already been used by this run",
+            ));
+        }
+    }
+
+    // 11. navigation domain
+    if let AgentAction::Navigate { url } = action {
+        if !domain_allowed(url, &entry.constraints.allowed_domains) {
+            return Err(QuarryError::new(
+                ErrorCode::SecurityBlocked,
+                "browser navigation is outside the run's allowed domains",
+            ));
+        }
+    }
+
+    // 12. navigation security
+    validate_navigation(action, state.security.as_ref()).await?;
+
+    Ok(Admitted {
+        initiator: input.initiator,
+        control_epoch: snapshot.epoch,
+    })
+}
+
+/// The control gate for tab operations (open, select, close): they move the
+/// person's browser too, so an agent cannot do them during a takeover.
+pub(super) fn admit_tab_operation(
+    handle: &RunHandle,
+    entry: &RunEntry,
+    initiator: StepInitiator,
+    enforce_takeover: bool,
+) -> QuarryResult<Admitted> {
+    if entry.closed {
+        return Err(QuarryError::new(ErrorCode::NotFound, "agent run is not live")
+            .with_details(serde_json::json!({ "reason": "run_not_live" })));
+    }
+    let snapshot = takeover_gate(handle, entry, initiator, enforce_takeover, "tab")?;
+    Ok(Admitted {
+        initiator,
+        control_epoch: snapshot.epoch,
+    })
+}

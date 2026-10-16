@@ -68,6 +68,11 @@ pub struct AgentRunCheckpoint {
     /// a gateway restart cannot reset a human takeover back to agent control.
     #[serde(default)]
     pub control_mode: BrowserControlMode,
+    /// How many times `control_mode` has really changed. A resumed run
+    /// continues this count so an epoch never repeats for one run. 0 on a
+    /// checkpoint written before epochs existed.
+    #[serde(default)]
+    pub control_epoch: u64,
     /// What the run has spent against its budget. Absent on a checkpoint
     /// written before budgets existed, or with enforcement off.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -168,11 +173,18 @@ pub enum BrowserTimelineEventKind {
     Control {
         mode: BrowserControlMode,
         initiated_by: BrowserTimelineInitiator,
+        /// The control epoch this transition produced.
+        #[serde(default, skip_serializing_if = "is_zero")]
+        control_epoch: u64,
     },
     Tab {
         operation: BrowserTabOperation,
         tab_id: Option<String>,
         active_tab_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        initiated_by: Option<BrowserTimelineInitiator>,
+        #[serde(default, skip_serializing_if = "is_zero")]
+        control_epoch: u64,
     },
     Devtools {
         event_count: u32,
@@ -181,6 +193,10 @@ pub enum BrowserTimelineEventKind {
     Lifecycle {
         state: BrowserTimelineLifecycle,
     },
+}
+
+fn is_zero(value: &u64) -> bool {
+    *value == 0
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -234,6 +250,13 @@ pub struct StepReceipt {
     /// Cost spent by this step in micro-USD (so receipts can be summed
     /// without floating-point drift).
     pub cost_micro_usd: u64,
+    /// Who drove this step: a person, an agent or the system. Absent on a
+    /// receipt written before initiators were recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub initiated_by: Option<BrowserTimelineInitiator>,
+    /// The control epoch the step was admitted under. Absent on older receipts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub control_epoch: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -488,6 +511,8 @@ pub struct ReceiptBuilder {
     step: u32,
     started_at: DateTime<Utc>,
     correction_of: Option<String>,
+    initiated_by: Option<BrowserTimelineInitiator>,
+    control_epoch: Option<u64>,
 }
 
 impl ReceiptBuilder {
@@ -499,7 +524,16 @@ impl ReceiptBuilder {
             step,
             started_at: Utc::now(),
             correction_of: None,
+            initiated_by: None,
+            control_epoch: None,
         }
+    }
+
+    /// Record who drove the step and the control epoch it was admitted under.
+    pub fn initiator(mut self, initiated_by: BrowserTimelineInitiator, control_epoch: u64) -> Self {
+        self.initiated_by = Some(initiated_by);
+        self.control_epoch = Some(control_epoch);
+        self
     }
 
     pub fn org_id(mut self, org_id: impl Into<String>) -> Self {
@@ -538,6 +572,8 @@ impl ReceiptBuilder {
             observation,
             correction_of: self.correction_of,
             cost_micro_usd: (cost_usd * 1_000_000.0).max(0.0) as u64,
+            initiated_by: self.initiated_by,
+            control_epoch: self.control_epoch,
         }
     }
 
@@ -553,12 +589,17 @@ impl ReceiptBuilder {
             finished_at,
             action,
             outcome: StepOutcome::Failed {
-                error_code: format!("{:?}", err.code).to_uppercase(),
+                // The wire name (SECURITY_BLOCKED), not the Debug rendering of
+                // the Rust identifier (SECURITYBLOCKED). Rows already stored keep
+                // their old spelling.
+                error_code: err.code.wire_name().to_owned(),
                 message: err.message.clone(),
             },
             observation: None,
             correction_of: self.correction_of,
             cost_micro_usd: 0,
+            initiated_by: self.initiated_by,
+            control_epoch: self.control_epoch,
         }
     }
 
@@ -579,6 +620,8 @@ impl ReceiptBuilder {
             observation: None,
             correction_of: self.correction_of,
             cost_micro_usd: 0,
+            initiated_by: self.initiated_by,
+            control_epoch: self.control_epoch,
         }
     }
 }
@@ -670,6 +713,7 @@ mod tests {
             grant_id: Some("grant_1".into()),
             status: AgentRunStatus::Active,
             control_mode: BrowserControlMode::AgentControl,
+            control_epoch: 0,
             budget: None,
         };
         store.save_run_checkpoint(checkpoint).await.unwrap();
@@ -757,6 +801,63 @@ mod tests {
     }
 
     #[test]
+    fn receipt_roundtrips_initiator_and_epoch() {
+        let receipt = ReceiptBuilder::start("run_x", 1)
+            .org_id("org_a")
+            .actor_id("user_a")
+            .initiator(BrowserTimelineInitiator::Agent, 3)
+            .complete(sample_action(), None, 0.0);
+        assert_eq!(receipt.initiated_by, Some(BrowserTimelineInitiator::Agent));
+        assert_eq!(receipt.control_epoch, Some(3));
+        let json = serde_json::to_value(&receipt).unwrap();
+        assert_eq!(json["initiated_by"], "agent");
+        assert_eq!(json["control_epoch"], 3);
+        let back: StepReceipt = serde_json::from_value(json).unwrap();
+        assert_eq!(back.initiated_by, Some(BrowserTimelineInitiator::Agent));
+        assert_eq!(back.control_epoch, Some(3));
+    }
+
+    #[test]
+    fn legacy_receipt_without_new_fields_deserialises() {
+        // A receipt written before initiators were recorded has neither key, and a
+        // receipt without them does not write them either.
+        let receipt = ReceiptBuilder::start("run_x", 1).complete(sample_action(), None, 0.0);
+        let mut json = serde_json::to_value(&receipt).unwrap();
+        assert!(json.get("initiated_by").is_none());
+        assert!(json.get("control_epoch").is_none());
+        json.as_object_mut().unwrap().remove("initiated_by");
+        let back: StepReceipt = serde_json::from_value(json).unwrap();
+        assert_eq!(back.initiated_by, None);
+        assert_eq!(back.control_epoch, None);
+    }
+
+    #[test]
+    fn legacy_checkpoint_without_control_epoch_defaults_to_zero() {
+        let checkpoint = serde_json::json!({
+            "org_id": "org_a",
+            "run_id": "run_x",
+            "profile_id": "prof_x",
+            "step": 1,
+            "current_url": "https://example.com",
+            "constraints": { "max_steps": 5, "allowed_domains": [] },
+            "zdr": "off"
+        });
+        let loaded: AgentRunCheckpoint = serde_json::from_value(checkpoint).unwrap();
+        assert_eq!(loaded.control_epoch, 0);
+        assert_eq!(loaded.control_mode, BrowserControlMode::AgentControl);
+    }
+
+    #[test]
+    fn failed_receipt_uses_the_wire_name_of_the_code() {
+        let err = QuarryError::new(ErrorCode::SecurityBlocked, "denied");
+        let receipt = ReceiptBuilder::start("run_x", 1).fail(sample_action(), &err);
+        match receipt.outcome {
+            StepOutcome::Failed { error_code, .. } => assert_eq!(error_code, "SECURITY_BLOCKED"),
+            _ => panic!("expected Failed outcome"),
+        }
+    }
+
+    #[test]
     fn validate_sequence_rejects_out_of_order() {
         let r1 = ReceiptBuilder::start("run_x", 2).complete(sample_action(), None, 0.0);
         let r2 = ReceiptBuilder::start("run_x", 1).complete(sample_action(), None, 0.0);
@@ -824,6 +925,7 @@ mod tests {
                 BrowserTimelineEventKind::Control {
                     mode: BrowserControlMode::HumanTakeover,
                     initiated_by: BrowserTimelineInitiator::Human,
+                    control_epoch: 1,
                 },
             ))
             .await

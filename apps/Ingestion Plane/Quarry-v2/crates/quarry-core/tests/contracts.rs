@@ -47,7 +47,40 @@ fn error_code_http_status_matrix() {
     assert_eq!(ErrorCode::RuntimeNotReady.http_status(), 503);
     assert_eq!(ErrorCode::UnsupportedMedia.http_status(), 415);
     assert_eq!(ErrorCode::BudgetExhausted.http_status(), 402);
+    assert_eq!(ErrorCode::UserTookOver.http_status(), 409);
     assert_eq!(ErrorCode::Internal.http_status(), 500);
+}
+
+#[test]
+fn wire_name_is_the_serialized_code_for_every_variant() {
+    // wire_name() must equal what serde writes, or a stored receipt and a
+    // response body would name the same code two ways.
+    let all = [
+        ErrorCode::BadRequest,
+        ErrorCode::Unauthorized,
+        ErrorCode::Forbidden,
+        ErrorCode::NotFound,
+        ErrorCode::Conflict,
+        ErrorCode::RateLimited,
+        ErrorCode::Timeout,
+        ErrorCode::SecurityBlocked,
+        ErrorCode::ActionUnknown,
+        ErrorCode::ChallengeDetected,
+        ErrorCode::RuntimeNotReady,
+        ErrorCode::CheckpointLost,
+        ErrorCode::TargetRepairRequired,
+        ErrorCode::DriverFailed,
+        ErrorCode::UpstreamBlocked,
+        ErrorCode::Unsupported,
+        ErrorCode::UnsupportedMedia,
+        ErrorCode::BudgetExhausted,
+        ErrorCode::UserTookOver,
+        ErrorCode::Internal,
+    ];
+    for code in all {
+        let serialized = serde_json::to_string(&code).unwrap();
+        assert_eq!(serialized, format!("\"{}\"", code.wire_name()), "{code:?}");
+    }
 }
 
 #[test]
@@ -63,6 +96,8 @@ fn error_retryable_flag_matches_semantic() {
     assert!(!ErrorCode::UnsupportedMedia.retryable());
     // A spent budget does not refill by waiting.
     assert!(!ErrorCode::BudgetExhausted.retryable());
+    // A person has the browser: waiting does not make the agent's action valid.
+    assert!(!ErrorCode::UserTookOver.retryable());
 }
 
 #[test]

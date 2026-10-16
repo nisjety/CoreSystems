@@ -144,6 +144,10 @@ export type BrowserReplayEvent = {
   actor?: BrowserActionActor | 'system' | string | null
   consoleCount?: number | null
   controlMode?: BrowserControlMode | string | null
+  /** Which takeover the owner is in; counts real control changes. */
+  controlEpoch?: number | null
+  /** Who drove the action: set by Quarry on timeline items. */
+  initiatedBy?: 'human' | 'agent' | 'system' | string | null
   domInteractiveCount?: number | null
   domNodeCount?: number | null
   id: string

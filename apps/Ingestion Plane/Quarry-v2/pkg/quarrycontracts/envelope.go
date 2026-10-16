@@ -60,6 +60,9 @@ const (
 	CodeRuntimeNotReady      ErrorCode = "RUNTIME_NOT_READY"
 	CodeCheckpointLost       ErrorCode = "CHECKPOINT_LOST"
 	CodeTargetRepairRequired ErrorCode = "TARGET_REPAIR_REQUIRED"
+	// CodeUserTookOver mirrors Rust's `ErrorCode::UserTookOver` (409): the person
+	// using the browser has taken it over, so an agent action is refused.
+	CodeUserTookOver ErrorCode = "USER_TOOK_OVER"
 )
 
 func (c ErrorCode) HTTPStatus() int {
@@ -72,7 +75,7 @@ func (c ErrorCode) HTTPStatus() int {
 		return 403
 	case CodeNotFound:
 		return 404
-	case CodeConflict, CodeActionUnknown, CodeCheckpointLost, CodeTargetRepairRequired:
+	case CodeConflict, CodeActionUnknown, CodeCheckpointLost, CodeTargetRepairRequired, CodeUserTookOver:
 		return 409
 	case CodeRuntimeNotReady:
 		return 503

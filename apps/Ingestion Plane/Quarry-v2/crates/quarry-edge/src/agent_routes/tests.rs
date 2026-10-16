@@ -108,18 +108,22 @@ async fn step_refuses_raw_script_and_consumes_nothing() {
         zdr: ZdrMode::Off,
         grant_id: None,
         control_mode: BrowserControlMode::AgentControl,
+        control_epoch: 0,
         profile_scope: BrowserProfileScope::Ephemeral,
         execution_tier: BrowserExecutionTier::Chromium,
         last_observation: None,
         used_sensitive_approval_grants: HashSet::new(),
         budget: None,
+        closed: false,
+        last_rejected_epoch: None,
     };
-    let entry_arc = Arc::new(TokioMutex::new(entry));
+    let handle = handle_for(entry);
+    let entry_arc = handle.entry.clone();
     state
         .agent_runs
         .lock()
         .expect("agent_runs mutex")
-        .insert(run_id.to_string(), entry_arc.clone());
+        .insert(run_id.to_string(), handle);
 
     let result = step(
         State(state.clone()),
@@ -131,6 +135,7 @@ async fn step_refuses_raw_script_and_consumes_nothing() {
             },
             instruction: None,
             extraction_profile: None,
+            initiated_by: None,
         }),
     )
     .await;
@@ -285,11 +290,14 @@ fn step_budget_is_fail_closed_once_limit_is_reached() {
         zdr: ZdrMode::Off,
         grant_id: None,
         control_mode: BrowserControlMode::AgentControl,
+        control_epoch: 0,
         profile_scope: BrowserProfileScope::Ephemeral,
         execution_tier: BrowserExecutionTier::Chromium,
         last_observation: None,
         used_sensitive_approval_grants: HashSet::new(),
         budget: None,
+        closed: false,
+        last_rejected_epoch: None,
     };
     assert!(enforce_step_budget(&entry).is_err());
     entry.constraints.max_steps = 0;
@@ -339,11 +347,14 @@ fn entry_with_budget(budget: Option<crate::budget::RunBudget>) -> RunEntry {
         zdr: ZdrMode::Off,
         grant_id: None,
         control_mode: BrowserControlMode::AgentControl,
+        control_epoch: 0,
         profile_scope: BrowserProfileScope::Ephemeral,
         execution_tier: BrowserExecutionTier::Chromium,
         last_observation: None,
         used_sensitive_approval_grants: HashSet::new(),
         budget,
+        closed: false,
+        last_rejected_epoch: None,
     }
 }
 
@@ -467,12 +478,13 @@ async fn call_step(
     let mut entry = entry_with_budget(budget);
     entry.actor_id = claims.actor_id().to_string();
     let run_id = entry.run_id.to_string();
-    let entry_arc = Arc::new(TokioMutex::new(entry));
+    let handle = handle_for(entry);
+    let entry_arc = handle.entry.clone();
     state
         .agent_runs
         .lock()
         .expect("agent_runs mutex")
-        .insert(run_id.clone(), entry_arc.clone());
+        .insert(run_id.clone(), handle);
     let result = step(
         State(state),
         Extension(claims),
@@ -481,6 +493,7 @@ async fn call_step(
             action,
             instruction: None,
             extraction_profile: None,
+            initiated_by: None,
         }),
     )
     .await;
@@ -540,7 +553,7 @@ fn live_runs(count: usize) -> (AgentRuns, Vec<String>) {
         let id = entry.run_id.to_string();
         runs.lock()
             .unwrap()
-            .insert(id.clone(), Arc::new(TokioMutex::new(entry)));
+            .insert(id.clone(), handle_for(entry));
         ids.push(id);
     }
     (runs, ids)
@@ -746,6 +759,7 @@ fn browser_ws_client_message_parses_action() {
         BrowserWsClientMessage::Action {
             action: AgentAction::ClickPoint { x, y },
             instruction,
+            ..
         } => {
             assert_eq!(x, 12.5);
             assert_eq!(y, 30.0);
@@ -753,4 +767,456 @@ fn browser_ws_client_message_parses_action() {
         }
         other => panic!("unexpected message: {other:?}"),
     }
+}
+
+fn handle_for(entry: RunEntry) -> RunHandle {
+    let live = RunLive::new(
+        entry.org_id.clone(),
+        entry.actor_id.clone(),
+        entry.control_mode,
+        entry.control_epoch,
+    );
+    RunHandle::new(entry, live)
+}
+
+fn service_claims(org_id: &str, service_id: &str) -> crate::auth::Claims {
+    let mut claims = crate::test_support::claims_for_org(org_id);
+    claims.principal_type = Some("service".into());
+    claims.service_id = Some(service_id.into());
+    claims.sub = service_id.into();
+    // require_auth copies the signed service id into user_id, which is what
+    // actor_id() (and so run ownership) reads.
+    claims.user_id = service_id.into();
+    claims
+}
+
+fn test_state_with_static_driver() -> AppState {
+    crate::test_support::test_state(Arc::new(
+        quarry_runtime::fetch::StaticDriver::new(std::time::Duration::from_secs(5), "quarry-test")
+            .expect("static driver"),
+    ))
+}
+
+/// A live run owned by `claims`, with a person holding the browser from `epoch`.
+fn run_in_takeover(claims: &crate::auth::Claims, epoch: u64) -> RunHandle {
+    let mut entry = entry_with_budget(None);
+    entry.actor_id = claims.actor_id().to_string();
+    entry.control_mode = BrowserControlMode::HumanTakeover;
+    entry.control_epoch = epoch;
+    handle_for(entry)
+}
+
+fn input(initiator: StepInitiator, action: &AgentAction, enforce: bool) -> AdmitInput<'_> {
+    AdmitInput {
+        initiator,
+        action,
+        enforce_takeover: enforce,
+    }
+}
+
+#[test]
+fn derive_initiator_service_principal_is_agent_even_with_human_hint() {
+    let service = service_claims("org", "svc_planner");
+    assert_eq!(derive_initiator(&service, None), StepInitiator::Agent);
+    assert_eq!(
+        derive_initiator(&service, Some(InitiatorHint::Human)),
+        StepInitiator::Agent
+    );
+}
+
+#[test]
+fn derive_initiator_user_is_human_unless_hint_tightens() {
+    let user = crate::test_support::claims_for_org("org");
+    assert_eq!(derive_initiator(&user, None), StepInitiator::Human);
+    assert_eq!(
+        derive_initiator(&user, Some(InitiatorHint::Human)),
+        StepInitiator::Human
+    );
+    assert_eq!(
+        derive_initiator(&user, Some(InitiatorHint::Agent)),
+        StepInitiator::Agent
+    );
+}
+
+#[test]
+fn control_epoch_increments_only_on_change() {
+    let live = RunLive::new("org", "user", BrowserControlMode::AgentControl, 0);
+    assert_eq!(live.set_mode(BrowserControlMode::AgentControl, None), Ok((false, 0)));
+    assert_eq!(live.set_mode(BrowserControlMode::HumanTakeover, None), Ok((true, 1)));
+    assert_eq!(live.set_mode(BrowserControlMode::HumanTakeover, None), Ok((false, 1)));
+    assert_eq!(live.set_mode(BrowserControlMode::AgentControl, None), Ok((true, 2)));
+    assert_eq!(
+        live.snapshot(),
+        ControlSnapshot {
+            mode: BrowserControlMode::AgentControl,
+            epoch: 2
+        }
+    );
+}
+
+#[test]
+fn control_epoch_is_monotonic_under_concurrent_flips() {
+    let live = Arc::new(RunLive::new("org", "user", BrowserControlMode::AgentControl, 0));
+    let changes = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let threads: Vec<_> = (0..8)
+        .map(|worker| {
+            let live = live.clone();
+            let changes = changes.clone();
+            std::thread::spawn(move || {
+                let mut last_seen = 0;
+                for i in 0..1000 {
+                    let mode = if (worker + i) % 2 == 0 {
+                        BrowserControlMode::HumanTakeover
+                    } else {
+                        BrowserControlMode::AgentControl
+                    };
+                    if let Ok((true, _)) = live.set_mode(mode, None) {
+                        changes.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    }
+                    let epoch = live.snapshot().epoch;
+                    assert!(epoch >= last_seen, "epoch went backwards: {epoch} < {last_seen}");
+                    last_seen = epoch;
+                }
+            })
+        })
+        .collect();
+    for thread in threads {
+        thread.join().unwrap();
+    }
+    // Every real change advanced the epoch by exactly one: none lost, none repeated.
+    assert_eq!(
+        live.snapshot().epoch,
+        changes.load(std::sync::atomic::Ordering::SeqCst)
+    );
+}
+
+#[test]
+fn restore_continues_the_checkpointed_epoch() {
+    let live = RunLive::new("org", "user", BrowserControlMode::AgentControl, 0);
+    live.restore(7, BrowserControlMode::HumanTakeover);
+    assert_eq!(
+        live.snapshot(),
+        ControlSnapshot {
+            mode: BrowserControlMode::HumanTakeover,
+            epoch: 7
+        }
+    );
+    assert_eq!(live.set_mode(BrowserControlMode::AgentControl, None), Ok((true, 8)));
+}
+
+#[test]
+fn a_stale_expected_epoch_is_refused_and_changes_nothing() {
+    let live = RunLive::new("org", "user", BrowserControlMode::AgentControl, 3);
+    assert_eq!(live.set_mode(BrowserControlMode::HumanTakeover, Some(2)), Err(3));
+    assert_eq!(live.snapshot().mode, BrowserControlMode::AgentControl);
+    assert_eq!(live.set_mode(BrowserControlMode::HumanTakeover, Some(3)), Ok((true, 4)));
+}
+
+#[tokio::test]
+async fn agent_step_is_refused_during_takeover_with_user_took_over() {
+    let state = test_state_with_static_driver();
+    let claims = crate::test_support::claims_for_org("org");
+    let handle = run_in_takeover(&claims, 1);
+    let mut entry = handle.entry.lock().await;
+    let action = AgentAction::Back;
+    let error = admit_action(&state, &handle, &mut entry, input(StepInitiator::Agent, &action, true))
+        .await
+        .expect_err("an agent action during a takeover is refused");
+    assert_eq!(error.code, ErrorCode::UserTookOver);
+    assert_eq!(error.code.http_status(), 409);
+    let details = error.details.expect("details");
+    assert_eq!(details["control_mode"], "human_takeover");
+    assert_eq!(details["control_epoch"], 1);
+}
+
+#[tokio::test]
+async fn human_step_is_allowed_during_takeover() {
+    let state = test_state_with_static_driver();
+    let claims = crate::test_support::claims_for_org("org");
+    let handle = run_in_takeover(&claims, 1);
+    let mut entry = handle.entry.lock().await;
+    let action = AgentAction::Back;
+    // The person's own action passes the control gate (a later gate may still
+    // refuse it for other reasons; it must not be this one).
+    let result = admit_action(&state, &handle, &mut entry, input(StepInitiator::Human, &action, true)).await;
+    if let Err(error) = result {
+        assert_ne!(error.code, ErrorCode::UserTookOver);
+    }
+}
+
+#[tokio::test]
+async fn agent_hint_on_user_token_is_refused_during_takeover() {
+    let state = test_state_with_static_driver();
+    let claims = crate::test_support::claims_for_org("org");
+    let handle = run_in_takeover(&claims, 2);
+    let mut entry = handle.entry.lock().await;
+    let action = AgentAction::Back;
+    let initiator = derive_initiator(&claims, Some(InitiatorHint::Agent));
+    let error = admit_action(&state, &handle, &mut entry, input(initiator, &action, true))
+        .await
+        .expect_err("a user token labelled agent is an agent for this call");
+    assert_eq!(error.code, ErrorCode::UserTookOver);
+}
+
+#[tokio::test]
+async fn observe_mode_lets_the_agent_action_through_the_control_gate() {
+    let state = test_state_with_static_driver();
+    let claims = crate::test_support::claims_for_org("org");
+    let handle = run_in_takeover(&claims, 1);
+    let mut entry = handle.entry.lock().await;
+    let action = AgentAction::Back;
+    let result = admit_action(&state, &handle, &mut entry, input(StepInitiator::Agent, &action, false)).await;
+    if let Err(error) = result {
+        assert_ne!(error.code, ErrorCode::UserTookOver);
+    }
+}
+
+/// The order of the gates is part of the contract: cheap local checks first, the
+/// gate that consumes state last.
+#[tokio::test]
+async fn admission_order_is_pinned() {
+    let _pinned = crate::budget::test_mode::pin(crate::budget::BudgetMode::On);
+    let state = test_state_with_static_driver();
+    let claims = crate::test_support::claims_for_org("org");
+
+    // 1 beats 3: a closed run is "not live" even in a takeover.
+    let handle = run_in_takeover(&claims, 1);
+    {
+        let mut entry = handle.entry.lock().await;
+        entry.closed = true;
+        let action = AgentAction::Back;
+        let error = admit_action(&state, &handle, &mut entry, input(StepInitiator::Agent, &action, true))
+            .await
+            .expect_err("closed");
+        assert_eq!(error.code, ErrorCode::NotFound);
+    }
+
+    // 3 beats 7 and 9: an agent's raw script on an exhausted run in a takeover is
+    // refused for the takeover, not for the script or the budget.
+    let mut exhausted = entry_with_budget(Some(exhausted_budget()));
+    exhausted.actor_id = claims.actor_id().to_string();
+    exhausted.control_mode = BrowserControlMode::HumanTakeover;
+    exhausted.control_epoch = 1;
+    let handle = handle_for(exhausted);
+    {
+        let mut entry = handle.entry.lock().await;
+        let action = AgentAction::Evaluate { script: "1".into() };
+        let error = admit_action(&state, &handle, &mut entry, input(StepInitiator::Agent, &action, true))
+            .await
+            .expect_err("takeover first");
+        assert_eq!(error.code, ErrorCode::UserTookOver);
+    }
+
+    // 7 beats 9: with the browser handed back, the raw script is denied before the
+    // budget is looked at.
+    let mut exhausted = entry_with_budget(Some(exhausted_budget()));
+    exhausted.actor_id = claims.actor_id().to_string();
+    let handle = handle_for(exhausted);
+    {
+        let mut entry = handle.entry.lock().await;
+        let action = AgentAction::Evaluate { script: "1".into() };
+        let error = admit_action(&state, &handle, &mut entry, input(StepInitiator::Human, &action, true))
+            .await
+            .expect_err("raw script denied");
+        assert_eq!(error.code, ErrorCode::Forbidden);
+        assert_ne!(error.code, ErrorCode::BudgetExhausted);
+    }
+}
+
+#[tokio::test]
+async fn takeover_refusal_consumes_no_budget_and_no_approval_grant() {
+    let _pinned = crate::budget::test_mode::pin(crate::budget::BudgetMode::On);
+    let state = test_state_with_static_driver();
+    let claims = crate::test_support::claims_for_org("org");
+    let mut entry = entry_with_budget(Some(agent_budget(5)));
+    entry.actor_id = claims.actor_id().to_string();
+    entry.control_mode = BrowserControlMode::HumanTakeover;
+    entry.control_epoch = 1;
+    let handle = handle_for(entry);
+    let mut entry = handle.entry.lock().await;
+    let steps_before = entry
+        .budget
+        .as_ref()
+        .map(|budget| budget.ledger.snapshot(std::time::Instant::now()).steps);
+    let action = respond_dialog();
+    let error = admit_action(&state, &handle, &mut entry, input(StepInitiator::Agent, &action, true))
+        .await
+        .expect_err("refused");
+    assert_eq!(error.code, ErrorCode::UserTookOver);
+    assert!(entry.used_sensitive_approval_grants.is_empty());
+    assert_eq!(entry.ctx.step, 0);
+    assert_eq!(
+        entry
+            .budget
+            .as_ref()
+            .map(|budget| budget.ledger.snapshot(std::time::Instant::now()).steps),
+        steps_before
+    );
+}
+
+#[tokio::test]
+async fn a_refused_agent_action_leaves_one_skipped_receipt_per_epoch() {
+    let state = test_state_with_static_driver();
+    let claims = crate::test_support::claims_for_org("org");
+    let handle = run_in_takeover(&claims, 1);
+    let run_id = handle.entry.lock().await.run_id.clone();
+    let action = AgentAction::Back;
+    for _ in 0..3 {
+        let mut entry = handle.entry.lock().await;
+        let error = admit_action(&state, &handle, &mut entry, input(StepInitiator::Agent, &action, true))
+            .await
+            .expect_err("refused");
+        assert_eq!(error.code, ErrorCode::UserTookOver);
+    }
+    let receipts = state.receipts.list_for_org("org", &run_id).await.unwrap();
+    assert_eq!(receipts.len(), 1, "one skipped receipt for the epoch, not one per retry");
+    assert!(matches!(receipts[0].outcome, StepOutcome::Skipped { .. }));
+    assert_eq!(receipts[0].initiated_by, Some(StepInitiator::Agent));
+    assert_eq!(receipts[0].control_epoch, Some(1));
+
+    // The person gives the browser back and takes it again: a new epoch, a new receipt.
+    handle.live.set_mode(BrowserControlMode::AgentControl, None).unwrap();
+    handle.live.set_mode(BrowserControlMode::HumanTakeover, None).unwrap();
+    let mut entry = handle.entry.lock().await;
+    admit_action(&state, &handle, &mut entry, input(StepInitiator::Agent, &action, true))
+        .await
+        .expect_err("refused again");
+    drop(entry);
+    let receipts = state.receipts.list_for_org("org", &run_id).await.unwrap();
+    assert_eq!(receipts.len(), 2);
+    assert_eq!(receipts[1].control_epoch, Some(3));
+}
+
+#[tokio::test]
+async fn zdr_run_enforces_gate_but_persists_nothing() {
+    let state = test_state_with_static_driver();
+    let claims = crate::test_support::claims_for_org("org");
+    let mut entry = entry_with_budget(None);
+    entry.actor_id = claims.actor_id().to_string();
+    entry.control_mode = BrowserControlMode::HumanTakeover;
+    entry.control_epoch = 1;
+    entry.zdr = ZdrMode::On;
+    let handle = handle_for(entry);
+    let run_id = handle.entry.lock().await.run_id.clone();
+    let mut entry = handle.entry.lock().await;
+    let action = AgentAction::Back;
+    let error = admit_action(&state, &handle, &mut entry, input(StepInitiator::Agent, &action, true))
+        .await
+        .expect_err("refused");
+    assert_eq!(error.code, ErrorCode::UserTookOver);
+    drop(entry);
+    assert!(state.receipts.list_for_org("org", &run_id).await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn agent_cannot_change_control_mode() {
+    let state = test_state_with_static_driver();
+    // A run a service principal started and a person has since taken over.
+    let service = service_claims("org", "svc_planner");
+    let mut entry = entry_with_budget(None);
+    entry.actor_id = "svc_planner".into();
+    entry.control_mode = BrowserControlMode::HumanTakeover;
+    entry.control_epoch = 1;
+    let handle = handle_for(entry);
+    let run_id = handle.entry.lock().await.run_id.to_string();
+    state
+        .agent_runs
+        .lock()
+        .unwrap()
+        .insert(run_id.clone(), handle.clone());
+    let result = set_browser_session_control(
+        State(state.clone()),
+        Extension(service),
+        Path(run_id),
+        Json(BrowserSessionControlBody {
+            mode: BrowserControlMode::AgentControl,
+            expected_epoch: None,
+        }),
+    )
+    .await;
+    let (status, _) = result.err().expect("an agent cannot hand the browser back to itself");
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(
+        handle.live.snapshot().mode,
+        BrowserControlMode::HumanTakeover,
+        "the refused request changed nothing"
+    );
+}
+
+#[tokio::test]
+async fn stale_expected_epoch_returns_conflict() {
+    let state = test_state_with_static_driver();
+    let claims = crate::test_support::claims_for_org("org");
+    let handle = run_in_takeover(&claims, 4);
+    let run_id = handle.entry.lock().await.run_id.to_string();
+    state
+        .agent_runs
+        .lock()
+        .unwrap()
+        .insert(run_id.clone(), handle.clone());
+    let result = set_browser_session_control(
+        State(state.clone()),
+        Extension(claims),
+        Path(run_id),
+        Json(BrowserSessionControlBody {
+            mode: BrowserControlMode::AgentControl,
+            expected_epoch: Some(1),
+        }),
+    )
+    .await;
+    let (status, Json(envelope)) = result.err().expect("stale epoch");
+    assert_eq!(status, StatusCode::CONFLICT);
+    let rendered = serde_json::to_value(&envelope).unwrap();
+    assert_eq!(rendered["error"]["details"]["control_epoch"], 4);
+    assert_eq!(handle.live.snapshot().mode, BrowserControlMode::HumanTakeover);
+}
+
+#[tokio::test]
+async fn control_event_records_derived_initiator_and_epoch() {
+    let state = test_state_with_static_driver();
+    let claims = crate::test_support::claims_for_org("org");
+    let mut entry = entry_with_budget(None);
+    entry.actor_id = claims.actor_id().to_string();
+    let handle = handle_for(entry);
+    let (run_id, run_key) = {
+        let entry = handle.entry.lock().await;
+        (entry.run_id.clone(), entry.run_id.to_string())
+    };
+    state
+        .agent_runs
+        .lock()
+        .unwrap()
+        .insert(run_key.clone(), handle.clone());
+    // The projection read after the flip needs a browser driver that can list
+    // tabs; the transition itself and its audit event happen before that.
+    let _ = set_browser_session_control(
+        State(state.clone()),
+        Extension(claims.clone()),
+        Path(run_key),
+        Json(BrowserSessionControlBody {
+            mode: BrowserControlMode::HumanTakeover,
+            expected_epoch: None,
+        }),
+    )
+    .await;
+    assert_eq!(
+        handle.live.snapshot(),
+        ControlSnapshot {
+            mode: BrowserControlMode::HumanTakeover,
+            epoch: 1
+        }
+    );
+    let events = state
+        .receipts
+        .list_browser_timeline_events("org", claims.actor_id(), &run_id)
+        .await
+        .unwrap();
+    assert!(events.iter().any(|event| matches!(
+        &event.event,
+        BrowserTimelineEventKind::Control {
+            mode: BrowserControlMode::HumanTakeover,
+            initiated_by: BrowserTimelineInitiator::Human,
+            control_epoch: 1,
+        }
+    )));
 }

@@ -39,6 +39,10 @@ pub enum ErrorCode {
     /// Details name the dimension. Not retryable: the budget does not refill
     /// by waiting, and a resumed run keeps what it spent.
     BudgetExhausted,
+    /// The person using the browser has taken it over, so an action proposed by
+    /// an agent is refused until control is given back. A state, not a fault:
+    /// never retried by the caller. Details carry the control mode and epoch.
+    UserTookOver,
     Internal,
 }
 
@@ -57,7 +61,7 @@ impl ErrorCode {
             Self::Forbidden | Self::SecurityBlocked | Self::ChallengeDetected => 403,
             Self::ActionUnknown | Self::CheckpointLost | Self::TargetRepairRequired => 409,
             Self::NotFound => 404,
-            Self::Conflict => 409,
+            Self::Conflict | Self::UserTookOver => 409,
             Self::RateLimited => 429,
             Self::Timeout => 504,
             Self::DriverFailed | Self::UpstreamBlocked => 502,
@@ -66,6 +70,34 @@ impl ErrorCode {
             Self::BudgetExhausted => 402,
             Self::RuntimeNotReady => 503,
             Self::Internal => 500,
+        }
+    }
+
+    /// The code as it travels on the wire (`SCREAMING_SNAKE_CASE`), as a static
+    /// string. New receipts store this instead of the `Debug` rendering, which
+    /// is a Rust identifier and not a contract.
+    pub fn wire_name(self) -> &'static str {
+        match self {
+            Self::BadRequest => "BAD_REQUEST",
+            Self::Unauthorized => "UNAUTHORIZED",
+            Self::Forbidden => "FORBIDDEN",
+            Self::NotFound => "NOT_FOUND",
+            Self::Conflict => "CONFLICT",
+            Self::RateLimited => "RATE_LIMITED",
+            Self::Timeout => "TIMEOUT",
+            Self::SecurityBlocked => "SECURITY_BLOCKED",
+            Self::ActionUnknown => "ACTION_UNKNOWN",
+            Self::ChallengeDetected => "CHALLENGE_DETECTED",
+            Self::RuntimeNotReady => "RUNTIME_NOT_READY",
+            Self::CheckpointLost => "CHECKPOINT_LOST",
+            Self::TargetRepairRequired => "TARGET_REPAIR_REQUIRED",
+            Self::DriverFailed => "DRIVER_FAILED",
+            Self::UpstreamBlocked => "UPSTREAM_BLOCKED",
+            Self::Unsupported => "UNSUPPORTED",
+            Self::UnsupportedMedia => "UNSUPPORTED_MEDIA",
+            Self::BudgetExhausted => "BUDGET_EXHAUSTED",
+            Self::UserTookOver => "USER_TOOK_OVER",
+            Self::Internal => "INTERNAL",
         }
     }
 }

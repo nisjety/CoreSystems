@@ -30,6 +30,7 @@ var goCodes = map[ErrorCode]int{
 	CodeUnsupported:          501,
 	CodeUnsupportedMedia:     415,
 	CodeBudgetExhausted:      402,
+	CodeUserTookOver:         409,
 	CodeInternal:             500,
 }
 

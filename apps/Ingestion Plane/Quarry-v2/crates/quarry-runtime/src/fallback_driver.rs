@@ -592,6 +592,7 @@ pub(crate) fn error_code_short(code: ErrorCode) -> &'static str {
         ErrorCode::Unsupported => "unsupported",
         ErrorCode::UnsupportedMedia => "unsupported_media",
         ErrorCode::BudgetExhausted => "budget_exhausted",
+        ErrorCode::UserTookOver => "user_took_over",
         ErrorCode::Internal => "internal",
     }
 }

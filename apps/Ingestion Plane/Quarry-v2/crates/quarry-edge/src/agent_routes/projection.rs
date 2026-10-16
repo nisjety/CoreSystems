@@ -51,6 +51,7 @@ pub(super) fn live_browser_session_projection(
         live: true,
         zdr: entry.zdr.is_active(),
         control_mode: entry.control_mode,
+        control_epoch: entry.control_epoch,
         execution_tier: entry.execution_tier,
         tabs: tabs.into_iter().map(browser_session_tab).collect(),
         last_observation: entry.last_observation.clone(),
@@ -77,6 +78,7 @@ pub(super) fn checkpoint_browser_session_projection(
         live: false,
         zdr: checkpoint.zdr.is_active(),
         control_mode: checkpoint.control_mode,
+        control_epoch: checkpoint.control_epoch,
         // Ephemeral evidence runs are ZDR and never checkpointed.
         execution_tier: BrowserExecutionTier::Chromium,
         tabs: Vec::new(),
@@ -97,23 +99,35 @@ pub(super) fn browser_timeline_action(receipt: StepReceipt) -> BrowserTimelineIt
             action: browser_action_name(&receipt.action),
             outcome,
             error_code,
+            initiated_by: receipt.initiated_by,
+            control_epoch: receipt.control_epoch,
         },
     }
 }
 
 pub(super) fn browser_timeline_event(event: BrowserTimelineEvent) -> BrowserTimelineItem {
     let detail = match event.event {
-        BrowserTimelineEventKind::Control { mode, initiated_by } => {
-            BrowserTimelineItemDetail::Control { mode, initiated_by }
-        }
+        BrowserTimelineEventKind::Control {
+            mode,
+            initiated_by,
+            control_epoch,
+        } => BrowserTimelineItemDetail::Control {
+            mode,
+            initiated_by,
+            control_epoch,
+        },
         BrowserTimelineEventKind::Tab {
             operation,
             tab_id,
             active_tab_id,
+            initiated_by,
+            control_epoch,
         } => BrowserTimelineItemDetail::Tab {
             operation,
             tab_id,
             active_tab_id,
+            initiated_by,
+            control_epoch,
         },
         BrowserTimelineEventKind::Devtools {
             event_count,
@@ -153,7 +167,7 @@ pub async fn browser_session(
 
     let entry_arc = {
         let map = state.agent_runs.lock().expect("agent_runs mutex poisoned");
-        map.get(&run_id).cloned()
+        map.get(&run_id).map(|handle| handle.entry.clone())
     };
     if let Some(entry_arc) = entry_arc {
         let entry = entry_arc.lock().await;
@@ -217,7 +231,7 @@ pub async fn browser_session_timeline(
     })?;
     let entry_arc = {
         let map = state.agent_runs.lock().expect("agent_runs mutex poisoned");
-        map.get(&run_id).cloned()
+        map.get(&run_id).map(|handle| handle.entry.clone())
     };
     let (org_id, actor_id, zdr) = if let Some(entry_arc) = entry_arc {
         let entry = entry_arc.lock().await;

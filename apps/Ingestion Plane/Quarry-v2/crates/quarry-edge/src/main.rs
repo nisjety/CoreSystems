@@ -52,6 +52,7 @@ mod profile_routes;
 mod queue_routes;
 mod resource_routes;
 mod routes;
+mod run_limits;
 mod schedule_routes;
 mod search_routes;
 mod source_registrar;
@@ -167,6 +168,13 @@ async fn main() -> anyhow::Result<()> {
     // variable, rather than silently become "no bound" later.
     limits::CrawlLimits::from_env().map_err(|e| anyhow::anyhow!("crawl limits: {e}"))?;
     quarry_runtime::DocRouting::from_env().map_err(|e| anyhow::anyhow!("doc routing: {e}"))?;
+    // Whether an agent action is refused while a person holds the browser. A typo
+    // stops the edge here, naming the variable, rather than leaving it off.
+    let takeover_enforced = run_limits::parse_takeover_enforcement(
+        std::env::var(run_limits::ENV_TAKEOVER_ENFORCEMENT).ok().as_deref(),
+    )
+    .map_err(|e| anyhow::anyhow!("takeover enforcement: {e}"))?;
+    tracing::info!(takeover_enforced, "agent takeover enforcement");
     // Agent-run budgets: an unreadable mode or limit stops the edge here, naming
     // the variable, rather than silently becoming "no budget".
     let budget_mode = budget::BudgetMode::from_env().map_err(|e| anyhow::anyhow!("budget: {e}"))?;

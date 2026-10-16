@@ -23,6 +23,8 @@
 #[cfg(feature = "browser-agent")]
 mod types;
 #[cfg(feature = "browser-agent")]
+mod run_live;
+#[cfg(feature = "browser-agent")]
 mod admission;
 #[cfg(feature = "browser-agent")]
 mod sensitive_approval;
@@ -51,6 +53,8 @@ mod tests;
 
 #[cfg(feature = "browser-agent")]
 pub use self::types::*;
+#[cfg(feature = "browser-agent")]
+pub use self::run_live::*;
 #[cfg(feature = "browser-agent")]
 use self::admission::*;
 #[cfg(feature = "browser-agent")]

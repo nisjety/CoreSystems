@@ -23,6 +23,7 @@ pub mod profile_routes;
 pub mod queue_routes;
 pub mod resource_routes;
 pub mod routes;
+pub mod run_limits;
 pub mod schedule_routes;
 pub mod search_routes;
 pub mod source_registrar;

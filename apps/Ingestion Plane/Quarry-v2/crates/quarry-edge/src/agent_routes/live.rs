@@ -120,7 +120,7 @@ pub async fn live_frame(
     }
     let entry_arc = {
         let map = state.agent_runs.lock().expect("agent_runs mutex poisoned");
-        map.get(&run_id).cloned()
+        map.get(&run_id).map(|handle| handle.entry.clone())
     };
     let Some(entry_arc) = entry_arc else {
         return Err(status_err(
@@ -177,7 +177,7 @@ pub async fn live_view(
     let request_id = RequestKind::new().to_string();
     let entry_arc = {
         let map = state.agent_runs.lock().expect("agent_runs mutex poisoned");
-        map.get(&run_id).cloned()
+        map.get(&run_id).map(|handle| handle.entry.clone())
     };
     let Some(entry_arc) = entry_arc else {
         return Err(status_err(
@@ -234,7 +234,7 @@ pub async fn agent_events_stream(
             })?;
     let entry_arc = {
         let map = state.agent_runs.lock().expect("agent_runs mutex poisoned");
-        map.get(&run_id).cloned()
+        map.get(&run_id).map(|handle| handle.entry.clone())
     };
     let Some(entry_arc) = entry_arc else {
         return Err(status_err(
@@ -369,7 +369,7 @@ pub async fn live_frame_stream(
     }
     let entry_arc = {
         let map = state.agent_runs.lock().expect("agent_runs mutex poisoned");
-        map.get(&run_id).cloned()
+        map.get(&run_id).map(|handle| handle.entry.clone())
     };
     let Some(entry_arc) = entry_arc else {
         return Err(status_err(
