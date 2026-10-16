@@ -93,41 +93,6 @@ impl ApprovedRelease {
     }
 }
 
-/// The fingerprint the retained approval descriptor carries for a call, computed
-/// the same way `agent::continuation_descriptor` computes it (a blake3 digest of
-/// the canonical scope). The resume sends it with `ConsumeApproval`: session-core
-/// consumes the approval only when it equals the descriptor's, so a continuation
-/// can only run the call that was approved. `None` when the input is not JSON.
-pub(crate) fn call_fingerprint(
-    run_id: &str,
-    org_id: &str,
-    user_id: &str,
-    step_id: &str,
-    tool_name: &str,
-    tool_input: &str,
-    permission_mode: &str,
-) -> Option<String> {
-    let input: serde_json::Value = serde_json::from_str(tool_input).ok()?;
-    let permission_mode = if crate::permission::requires_durable_owner_approval(tool_name) {
-        "ask"
-    } else {
-        permission_mode
-    };
-    let scope = serde_json::json!({
-        "version": 1,
-        "run_id": run_id,
-        "org_id": org_id,
-        "user_id": user_id,
-        "step_id": step_id,
-        "action_kind": "tool_call",
-        "tool_name": tool_name,
-        "input": input,
-        "permission_mode": permission_mode,
-    });
-    let canonical = serde_json::to_string(&scope).ok()?;
-    Some(blake3::hash(canonical.as_bytes()).to_hex().to_string())
-}
-
 /// Frame a brief of recorded results for the seed message of a continuation
 /// segment. The text is data the run produced, not instructions: it is labelled
 /// so, bounded, and never gives a recorded output the standing of a command.

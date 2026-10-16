@@ -232,11 +232,13 @@ message AgentResume {
   string mode = 1;
   // The granted approval the segment consumes, exactly once.
   string approval_id = 2;
-  // The step the approval gates.
+  // Optional hint: the step the approval gates. When set it must equal the
+  // retained descriptor's, or the continuation is refused.
   string step_id = 3;
-  // The tool the approval gates.
+  // Optional hint: the tool the approval gates. Same rule.
   string tool_name = 4;
-  // The digest of the exact call that was approved.
+  // Optional: the digest of the exact call that was approved. When set it must
+  // equal the retained descriptor's fingerprint.
   string action_fingerprint = 5;
   // A framed brief of the recorded results so far (data, not instructions).
   string brief = 6;
@@ -244,10 +246,10 @@ message AgentResume {
   string claim_token = 7;
   // Which segment of the run this is (2 for the first continuation).
   uint32 segment_no = 8;
-  // The JSON arguments of the approved call. The segment runs exactly this call
-  // first; its digest must equal the retained approval descriptor's fingerprint
-  // for the consume to succeed, so the loop cannot run a different call.
-  string tool_input = 9;
+  // Field 9 was the approved call's arguments; they now come back from the
+  // consume itself (the retained approval descriptor is the only source of the
+  // approved call), so nothing the client supplies names what the segment runs.
+  reserved 9;
 }
 
 // RunContext - what the gateway hands an agent run beyond its goal.

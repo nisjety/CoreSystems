@@ -4973,49 +4973,27 @@ struct ResumedSegment {
 
 /// Consume the granted approval and build what the segment runs first.
 ///
-/// The consume carries the digest of the exact call, which session-core compares
-/// with the retained descriptor: the segment can only run the call that was
-/// approved. A refused consume (not granted, already consumed by another claim,
-/// expired, a different call) ends the request with a closed token before
+/// The approved call (tool, arguments, step) is read back from the consume: the
+/// retained approval descriptor is the only source of what an approval
+/// authorised, so nothing the client supplies names the call. Any hint the
+/// request does carry (step, tool, fingerprint) must agree with the descriptor.
+/// A refused consume (not granted, already consumed by another claim, expired,
+/// not resumable, a different call) ends the request with a closed token before
 /// anything is published.
 async fn prepare_resume(
     session_channel: &Channel,
     session_bearer: Option<&str>,
     req: &pb::RunAgentRequest,
     resume: &pb::AgentResume,
-    permission_mode: &str,
+    _permission_mode: &str,
 ) -> Result<ResumedSegment, tonic::Status> {
-    let fingerprint = super::resume::call_fingerprint(
-        &req.run_id,
-        &req.org_id,
-        &req.user_id,
-        &resume.step_id,
-        &resume.tool_name,
-        &resume.tool_input,
-        permission_mode,
-    )
-    .ok_or_else(|| tonic::Status::invalid_argument("resume_incomplete"))?;
-    if !resume.action_fingerprint.is_empty() && resume.action_fingerprint != fingerprint {
-        return Err(tonic::Status::failed_precondition("approval_action_mismatch"));
-    }
-    let step_prefix = format!("s{}.", resume.segment_no.max(2));
-    let call = pb::ToolCall {
-        id: "approved".to_owned(),
-        name: resume.tool_name.trim().to_owned(),
-        arguments_json: resume.tool_input.clone(),
-    };
-    // The step id the loop will compute for this call (the first of the segment).
-    let step_id = tool_step_id(&step_prefix, 1, &call);
-    let release = super::resume::ApprovedRelease::new(&step_id, &call.name, &call.arguments_json)
-        .map_err(|_| tonic::Status::failed_precondition("not_releasable"))?;
-
     let request = authenticated_session_request(
         pb::ConsumeApprovalRequest {
             approval_id: resume.approval_id.clone(),
             org_id: req.org_id.clone(),
             run_id: req.run_id.clone(),
             step_id: resume.step_id.clone(),
-            action_fingerprint: fingerprint,
+            action_fingerprint: resume.action_fingerprint.clone(),
             claim_token: resume.claim_token.clone(),
         },
         session_bearer,
@@ -5029,6 +5007,25 @@ async fn prepare_resume(
     if !(consumed.consumed || (consumed.already_consumed && consumed.same_claim)) {
         return Err(tonic::Status::failed_precondition("continuation_already_consumed"));
     }
+    if consumed.tool_name.trim().is_empty() || serde_json::from_str::<JsonValue>(&consumed.tool_input_json).is_err() {
+        return Err(tonic::Status::failed_precondition("approval_not_resumable"));
+    }
+    if (!resume.tool_name.is_empty() && resume.tool_name != consumed.tool_name)
+        || (!resume.step_id.is_empty() && resume.step_id != consumed.step_id)
+    {
+        return Err(tonic::Status::failed_precondition("approval_action_mismatch"));
+    }
+
+    let step_prefix = format!("s{}.", resume.segment_no.max(2));
+    let call = pb::ToolCall {
+        id: "approved".to_owned(),
+        name: consumed.tool_name.trim().to_owned(),
+        arguments_json: consumed.tool_input_json.clone(),
+    };
+    // The step id the loop will compute for this call (the first of the segment).
+    let step_id = tool_step_id(&step_prefix, 1, &call);
+    let release = super::resume::ApprovedRelease::new(&step_id, &call.name, &call.arguments_json)
+        .map_err(|_| tonic::Status::failed_precondition("not_releasable"))?;
 
     let goal = if resume.brief.trim().is_empty() {
         req.goal.clone()
@@ -6853,6 +6850,9 @@ mod tests {
                 consumed: true,
                 already_consumed: false,
                 same_claim: false,
+                tool_name: "delete_records".to_owned(),
+                tool_input_json: "{}".to_owned(),
+                step_id: "tool_1_del-1".to_owned(),
             }))
         }
 
@@ -9357,31 +9357,6 @@ mod tests {
         );
     }
 
-    /// The descriptor an approval retains and the fingerprint a continuation sends
-    /// with `ConsumeApproval` must be the same digest, or no continuation could
-    /// ever consume the approval it came from.
-    #[tokio::test]
-    async fn a_resume_fingerprint_equals_the_retained_descriptors() {
-        let req = sample_request();
-        let input = r#"{"command":"echo hi"}"#;
-        let descriptor = continuation_descriptor(&req, "tool_1_x", "shell", input, "ask")
-            .await
-            .expect("descriptor");
-        let value: JsonValue = serde_json::from_str(&descriptor).expect("json");
-        let retained = value["action_fingerprint"].as_str().expect("fingerprint").to_owned();
-        let computed = super::super::resume::call_fingerprint(
-            &req.run_id, &req.org_id, &req.user_id, "tool_1_x", "shell", input, "ask",
-        )
-        .expect("fingerprint");
-        assert_eq!(computed, retained);
-        // A different call, step or posture is a different fingerprint.
-        let other = super::super::resume::call_fingerprint(
-            &req.run_id, &req.org_id, &req.user_id, "tool_1_x", "shell", r#"{"command":"rm -rf /"}"#, "ask",
-        )
-        .unwrap();
-        assert_ne!(other, retained);
-    }
-
     /// Pause for an approval, then continue: the segment consumes the approval
     /// once, runs the approved call first through the same gates (released only
     /// because of the consume), and does not re-announce the plan.
@@ -9399,20 +9374,15 @@ mod tests {
         }];
         let mut req = sample_request();
         req.mode = "ask".to_owned();
-        let fingerprint = super::super::resume::call_fingerprint(
-            &req.run_id, &req.org_id, &req.user_id, "tool_1_del-1", "delete_records", "{}", "ask",
-        )
-        .expect("fingerprint");
+        // The client names only the approval and its claim: the approved call
+        // comes back from the consume (the retained descriptor).
         req.resume = Some(pb::AgentResume {
             mode: "segment".to_owned(),
             approval_id: "appr_1".to_owned(),
-            step_id: "tool_1_del-1".to_owned(),
-            tool_name: "delete_records".to_owned(),
-            tool_input: "{}".to_owned(),
-            action_fingerprint: fingerprint.clone(),
             brief: "step 1 listed 3 records".to_owned(),
             claim_token: "claim-1".to_owned(),
             segment_no: 2,
+            ..Default::default()
         });
         let resp = run_agent_with_tools(
             &state,
@@ -9441,7 +9411,6 @@ mod tests {
         let r = rec.lock().unwrap();
         assert_eq!(r.consume_calls.len(), 1, "the approval is consumed exactly once");
         assert_eq!(r.consume_calls[0].approval_id, "appr_1");
-        assert_eq!(r.consume_calls[0].action_fingerprint, fingerprint);
         assert_eq!(r.consume_calls[0].claim_token, "claim-1");
         assert!(r.approvals.is_empty(), "the released call is not gated again");
         assert!(

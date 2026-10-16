@@ -2496,7 +2496,15 @@ type ConsumeApprovalResponse struct {
 	AlreadyConsumed bool `protobuf:"varint,2,opt,name=already_consumed,json=alreadyConsumed,proto3" json:"already_consumed,omitempty"`
 	// With already_consumed: whether the earlier claim used the same token (a
 	// replay by the same segment) rather than another.
-	SameClaim     bool `protobuf:"varint,3,opt,name=same_claim,json=sameClaim,proto3" json:"same_claim,omitempty"`
+	SameClaim bool `protobuf:"varint,3,opt,name=same_claim,json=sameClaim,proto3" json:"same_claim,omitempty"`
+	// The approved call, read from the retained descriptor. Present when the claim
+	// is the caller's (consumed now, or the same claim replaying). The descriptor
+	// is the only source of what an approval authorised.
+	ToolName string `protobuf:"bytes,4,opt,name=tool_name,json=toolName,proto3" json:"tool_name,omitempty"`
+	// The approved call's JSON arguments.
+	ToolInputJson string `protobuf:"bytes,5,opt,name=tool_input_json,json=toolInputJson,proto3" json:"tool_input_json,omitempty"`
+	// The step the approval gated.
+	StepId        string `protobuf:"bytes,6,opt,name=step_id,json=stepId,proto3" json:"step_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -2550,6 +2558,27 @@ func (x *ConsumeApprovalResponse) GetSameClaim() bool {
 		return x.SameClaim
 	}
 	return false
+}
+
+func (x *ConsumeApprovalResponse) GetToolName() string {
+	if x != nil {
+		return x.ToolName
+	}
+	return ""
+}
+
+func (x *ConsumeApprovalResponse) GetToolInputJson() string {
+	if x != nil {
+		return x.ToolInputJson
+	}
+	return ""
+}
+
+func (x *ConsumeApprovalResponse) GetStepId() string {
+	if x != nil {
+		return x.StepId
+	}
+	return ""
 }
 
 type CreateApprovalResponse struct {
@@ -5951,12 +5980,15 @@ const file_model_plane_v1_orchestration_proto_rawDesc = "" +
 	"\astep_id\x18\x04 \x01(\tR\x06stepId\x12-\n" +
 	"\x12action_fingerprint\x18\x05 \x01(\tR\x11actionFingerprint\x12\x1f\n" +
 	"\vclaim_token\x18\x06 \x01(\tR\n" +
-	"claimToken\"\x7f\n" +
+	"claimToken\"\xdd\x01\n" +
 	"\x17ConsumeApprovalResponse\x12\x1a\n" +
 	"\bconsumed\x18\x01 \x01(\bR\bconsumed\x12)\n" +
 	"\x10already_consumed\x18\x02 \x01(\bR\x0falreadyConsumed\x12\x1d\n" +
 	"\n" +
-	"same_claim\x18\x03 \x01(\bR\tsameClaim\"N\n" +
+	"same_claim\x18\x03 \x01(\bR\tsameClaim\x12\x1b\n" +
+	"\ttool_name\x18\x04 \x01(\tR\btoolName\x12&\n" +
+	"\x0ftool_input_json\x18\x05 \x01(\tR\rtoolInputJson\x12\x17\n" +
+	"\astep_id\x18\x06 \x01(\tR\x06stepId\"N\n" +
 	"\x16CreateApprovalResponse\x124\n" +
 	"\bapproval\x18\x01 \x01(\v2\x18.model_plane.v1.ApprovalR\bapproval\"]\n" +
 	"\x14ListApprovalsRequest\x12\x15\n" +

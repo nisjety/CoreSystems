@@ -843,8 +843,19 @@ pub async fn decide_approval(
     })
 }
 
+/// The call an approval authorised, read from its retained descriptor.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConsumedCall {
+    /// The step the approval gated.
+    pub step_id: String,
+    /// The tool the approval gated.
+    pub tool_name: String,
+    /// The JSON arguments of the approved call.
+    pub tool_input_json: String,
+}
+
 /// The outcome of [`consume_approval`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConsumeOutcome {
     /// This call consumed the approval.
     pub consumed: bool,
@@ -852,6 +863,8 @@ pub struct ConsumeOutcome {
     pub already_consumed: bool,
     /// With `already_consumed`: the earlier claim used the same token.
     pub same_claim: bool,
+    /// The approved call, present when the claim is the caller's.
+    pub call: Option<ConsumedCall>,
 }
 
 /// Why an approval could not be consumed.
@@ -865,6 +878,8 @@ pub enum ConsumeRefusal {
     Expired,
     /// The call fingerprint does not match the retained descriptor.
     FingerprintMismatch,
+    /// The approval retains no descriptor, so there is nothing to resume.
+    NotResumable,
 }
 
 /// Consume a granted, loop-owned approval exactly once (build plan WS03 S2).
@@ -901,11 +916,13 @@ pub async fn consume_approval(
         .fetch_optional(&mut *transaction)
         .await?;
     if consumed.is_some() {
+        let call = read_consumed_call(&mut transaction, id, org_id, run_id, user_id).await?;
         transaction.commit().await?;
         return Ok(Ok(ConsumeOutcome {
             consumed: true,
             already_consumed: false,
             same_claim: false,
+            call,
         }));
     }
     // Not consumed by this call: say why, from the row as it is now.
@@ -923,27 +940,41 @@ pub async fn consume_approval(
         .bind(user_id)
         .fetch_optional(&mut *transaction)
         .await?;
-    transaction.commit().await?;
     let Some((status, mode, consumed_at, stored_hash, expired, has_descriptor)) = row else {
+        transaction.commit().await?;
         return Ok(Err(ConsumeRefusal::NotFound));
     };
     if mode.is_empty() {
+        transaction.commit().await?;
         return Ok(Err(ConsumeRefusal::NotFound));
     }
     if consumed_at.is_some() {
+        let same_claim = stored_hash.as_deref() == Some(claim_hash);
+        // The call is handed back only to the claim that consumed it.
+        let call = if same_claim {
+            read_consumed_call(&mut transaction, id, org_id, run_id, user_id).await?
+        } else {
+            None
+        };
+        transaction.commit().await?;
         return Ok(Ok(ConsumeOutcome {
             consumed: false,
             already_consumed: true,
-            same_claim: stored_hash.as_deref() == Some(claim_hash),
+            same_claim,
+            call,
         }));
     }
+    transaction.commit().await?;
     if status != "granted" {
         return Ok(Err(ConsumeRefusal::NotGranted));
     }
     if expired {
         return Ok(Err(ConsumeRefusal::Expired));
     }
-    if has_descriptor {
+    if !has_descriptor {
+        return Ok(Err(ConsumeRefusal::NotResumable));
+    }
+    if !action_fingerprint.is_empty() {
         return Ok(Err(ConsumeRefusal::FingerprintMismatch));
     }
     Ok(Err(ConsumeRefusal::NotFound))
@@ -954,10 +985,48 @@ const CONSUME_APPROVAL_SQL: &str = "UPDATE approvals AS a \
      WHERE a.id = $1 AND a.org_id = $2 AND a.run_id = $3 AND a.user_id = $4 \
        AND a.status = 'granted' AND a.continuation_mode <> '' AND a.consumed_at IS NULL \
        AND (a.expires_at IS NULL OR a.expires_at > now()) \
-       AND (NOT EXISTS (SELECT 1 FROM approval_continuation_descriptors d WHERE d.approval_id = a.id) \
-            OR EXISTS (SELECT 1 FROM approval_continuation_descriptors d \
-                       WHERE d.approval_id = a.id AND d.action_fingerprint = $5)) \
+       AND EXISTS (SELECT 1 FROM approval_continuation_descriptors d \
+                   WHERE d.approval_id = a.id \
+                     AND ($5 = '' OR d.action_fingerprint = $5)) \
      RETURNING a.id";
+
+/// Read and decrypt the retained descriptor of an approval the caller holds the
+/// claim on, and return the call it authorised. The descriptor is the only
+/// source of what an approval authorised; nothing a client sends names the call.
+async fn read_consumed_call(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    id: &str,
+    org_id: &str,
+    run_id: &str,
+    user_id: &str,
+) -> Result<Option<ConsumedCall>> {
+    let row: Option<(String,)> = sqlx::query_as(
+        "SELECT ciphertext FROM approval_continuation_descriptors \
+         WHERE approval_id = $1 AND org_id = $2 AND run_id = $3 AND user_id = $4",
+    )
+    .bind(id)
+    .bind(org_id)
+    .bind(run_id)
+    .bind(user_id)
+    .fetch_optional(&mut **transaction)
+    .await?;
+    let Some((ciphertext,)) = row else {
+        return Ok(None);
+    };
+    let plaintext = DescriptorCipher::from_env()?.decrypt(id, org_id, user_id, &ciphertext)?;
+    let descriptor: JsonValue = serde_json::from_str(&plaintext)
+        .map_err(|error| anyhow::anyhow!("stored continuation descriptor is invalid: {error}"))?;
+    let text = |key: &str| descriptor.get(key).and_then(JsonValue::as_str).map(str::to_owned);
+    let (Some(step_id), Some(tool_name)) = (text("step_id"), text("tool_name")) else {
+        return Ok(None);
+    };
+    let input = descriptor.get("input").cloned().unwrap_or(JsonValue::Null);
+    Ok(Some(ConsumedCall {
+        step_id,
+        tool_name,
+        tool_input_json: serde_json::to_string(&input)?,
+    }))
+}
 
 const DECIDE_APPROVAL_SQL: &str =
     "UPDATE approvals SET status = $3, decided_by = $4, decision_reason = $5, \
@@ -1819,6 +1888,7 @@ mod tests {
 #[cfg(test)]
 mod approval_consume_db_tests {
     use super::*;
+    use base64::Engine as _;
     use sqlx::postgres::PgPoolOptions;
 
     async fn scratch_pool() -> Option<Pool> {
@@ -1833,8 +1903,15 @@ mod approval_consume_db_tests {
             .await
             .expect("connect pg");
         sqlx::migrate!("./migrations").run(&pool).await.expect("migrate");
+        // The retained descriptor is encrypted: the process needs its key.
+        std::env::set_var(
+            "SESSION_CORE_CONTINUATION_DESCRIPTOR_KEY",
+            base64::engine::general_purpose::STANDARD.encode([7_u8; 32]),
+        );
         Some(pool)
     }
+
+    const FINGERPRINT: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
     struct Seed {
         run_id: String,
@@ -1859,6 +1936,18 @@ mod approval_consume_db_tests {
 
     async fn approval(pool: &Pool, seed: &Seed, mode: &str) -> String {
         let id = format!("appr_{}", mp_ids::new_ulid());
+        let descriptor = serde_json::json!({
+            "version": 1,
+            "run_id": seed.run_id,
+            "org_id": seed.org,
+            "user_id": seed.user,
+            "step_id": "tool_1_call-1",
+            "action_kind": "tool_call",
+            "action_fingerprint": FINGERPRINT,
+            "tool_name": "shell",
+            "input": {"command": "echo approved"},
+            "permission_mode": "ask"
+        });
         request_approval(
             pool,
             &id,
@@ -1870,7 +1959,7 @@ mod approval_consume_db_tests {
             &seed.user,
             "",
             &serde_json::json!({}),
-            None,
+            Some(&descriptor),
             Some(Utc::now() + chrono::Duration::minutes(5)),
             mode,
         )
@@ -1965,6 +2054,56 @@ mod approval_consume_db_tests {
         let other = consume_approval(&pool, &id, &seed.org, &seed.run_id, &seed.user, "", "b")
             .await.unwrap().unwrap();
         assert!(!other.consumed && other.already_consumed && !other.same_claim);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a scratch Postgres"]
+    async fn approval_consume_hands_back_the_approved_call_from_the_descriptor_to_the_claim_holder_only() {
+        let Some(pool) = scratch_pool().await else { return };
+        let seed = seed_run(&pool, "call").await;
+        let id = approval(&pool, &seed, "loop").await;
+        grant(&pool, &seed, &id).await;
+        let won = consume_approval(&pool, &id, &seed.org, &seed.run_id, &seed.user, "", "a")
+            .await.unwrap().unwrap();
+        let call = won.call.expect("the winner gets the approved call");
+        assert_eq!(call.tool_name, "shell");
+        assert_eq!(call.step_id, "tool_1_call-1");
+        assert_eq!(call.tool_input_json, r#"{"command":"echo approved"}"#);
+        // The same claim replaying gets it again; another claim does not.
+        let replay = consume_approval(&pool, &id, &seed.org, &seed.run_id, &seed.user, "", "a")
+            .await.unwrap().unwrap();
+        assert!(replay.same_claim && replay.call.is_some());
+        let other = consume_approval(&pool, &id, &seed.org, &seed.run_id, &seed.user, "", "b")
+            .await.unwrap().unwrap();
+        assert!(other.already_consumed && !other.same_claim && other.call.is_none());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a scratch Postgres"]
+    async fn approval_consume_checks_a_supplied_fingerprint_and_needs_a_descriptor() {
+        let Some(pool) = scratch_pool().await else { return };
+        let seed = seed_run(&pool, "fp").await;
+        let id = approval(&pool, &seed, "loop").await;
+        grant(&pool, &seed, &id).await;
+        // A different call's fingerprint is refused and leaves the approval unconsumed.
+        assert_eq!(
+            consume_approval(&pool, &id, &seed.org, &seed.run_id, &seed.user, "deadbeef", "a").await.unwrap(),
+            Err(ConsumeRefusal::FingerprintMismatch)
+        );
+        assert!(consume_approval(&pool, &id, &seed.org, &seed.run_id, &seed.user, FINGERPRINT, "a")
+            .await.unwrap().unwrap().consumed);
+        // A loop approval with no retained descriptor has nothing to resume.
+        let bare = format!("appr_{}", mp_ids::new_ulid());
+        request_approval(
+            &pool, &bare, &seed.run_id, None, "tool_call", &seed.user, &seed.org, &seed.user, "",
+            &serde_json::json!({}), None, Some(Utc::now() + chrono::Duration::minutes(5)), "loop",
+        )
+        .await.unwrap().unwrap();
+        grant(&pool, &seed, &bare).await;
+        assert_eq!(
+            consume_approval(&pool, &bare, &seed.org, &seed.run_id, &seed.user, "", "a").await.unwrap(),
+            Err(ConsumeRefusal::NotResumable)
+        );
     }
 
     #[tokio::test]

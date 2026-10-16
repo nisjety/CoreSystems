@@ -2712,10 +2712,18 @@ impl OrchestrationCoreService for OrchestrationGrpc {
                             },
                         );
                     }
+                    let call = done.call.clone().unwrap_or_else(|| store::ConsumedCall {
+                        step_id: String::new(),
+                        tool_name: String::new(),
+                        tool_input_json: String::new(),
+                    });
                     Ok(Response::new(proto::ConsumeApprovalResponse {
                         consumed: done.consumed,
                         already_consumed: done.already_consumed,
                         same_claim: done.same_claim,
+                        tool_name: call.tool_name,
+                        tool_input_json: call.tool_input_json,
+                        step_id: call.step_id,
                     }))
                 }
                 // Closed wording only: nothing about the call or its content.
@@ -2730,6 +2738,9 @@ impl OrchestrationCoreService for OrchestrationGrpc {
                 }
                 Err(store::ConsumeRefusal::FingerprintMismatch) => {
                     Err(Status::failed_precondition("approval_action_mismatch"))
+                }
+                Err(store::ConsumeRefusal::NotResumable) => {
+                    Err(Status::failed_precondition("approval_not_resumable"))
                 }
             }
         }

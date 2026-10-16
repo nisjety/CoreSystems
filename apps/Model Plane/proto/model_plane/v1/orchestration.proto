@@ -723,6 +723,14 @@ message ConsumeApprovalResponse {
   // With already_consumed: whether the earlier claim used the same token (a
   // replay by the same segment) rather than another.
   bool same_claim = 3;
+  // The approved call, read from the retained descriptor. Present when the claim
+  // is the caller's (consumed now, or the same claim replaying). The descriptor
+  // is the only source of what an approval authorised.
+  string tool_name = 4;
+  // The approved call's JSON arguments.
+  string tool_input_json = 5;
+  // The step the approval gated.
+  string step_id = 6;
 }
 
 message CreateApprovalResponse {
