@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { actionRegistry, getActionDescriptor } from '@/shared/actions/action-registry'
+import { isModelExecutableAction } from '@/shared/actions/model-eligibility'
 import { buildModelContextPack } from '@/shared/context-packs/context-pack'
 
 describe('action registry', () => {
@@ -68,6 +69,27 @@ describe('action registry', () => {
       postId: 'social_post_1',
       platforms: ['linkedin', 'x'],
       approvalId: 'approval_1',
+    }).success).toBe(true)
+  })
+
+  it('registers the run continuation as a model-plane action the model cannot execute', () => {
+    const continueRun = getActionDescriptor('chat.run.continue')
+
+    expect(continueRun?.ownerPlane).toBe('model')
+    expect(continueRun?.risk).toBe('high')
+    expect(continueRun?.requiresApproval).toBe(false)
+    expect(isModelExecutableAction('chat.run.continue')).toBe(false)
+
+    // A blank identifier is refused at the contract, before any upstream call.
+    expect(continueRun?.inputSchema.safeParse({
+      runId: 'run_1',
+      approvalId: '',
+      claimToken: 'claim_1',
+    }).success).toBe(false)
+    expect(continueRun?.inputSchema.safeParse({
+      runId: 'run_1',
+      approvalId: 'appr_1',
+      claimToken: 'claim_1',
     }).success).toBe(true)
   })
 })

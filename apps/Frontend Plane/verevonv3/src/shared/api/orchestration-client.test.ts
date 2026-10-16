@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
+  continueRun,
   decideApproval,
   listApprovals,
   normalizePlan,
@@ -182,5 +183,52 @@ describe('normalizePlan', () => {
 
   it('returns null for a payload with no readable id', () => {
     expect(normalizePlan({ summary: 'no id here' })).toBeNull()
+  })
+})
+
+describe('continueRun', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('posts only the approval id and claim token, and relays the continuation frames', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response('event: step_update\ndata: {"status":"running"}\n\n', {
+        status: 200,
+        headers: { 'Content-Type': 'text/event-stream' },
+      }),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+    const events: string[] = []
+
+    await continueRun('run_1', 'appr_1', 'claim_1', (event) => {
+      events.push(event.event ?? '')
+    })
+
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit]
+    expect(url).toContain('/api/v1/orchestration/runs/run_1/continue')
+    expect(init.method).toBe('POST')
+    expect(JSON.parse(String(init.body))).toEqual({
+      approval_id: 'appr_1',
+      claim_token: 'claim_1',
+    })
+    expect(events).toEqual(['step_update'])
+  })
+
+  it('rejects with the gateway error code when the continuation is refused', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        new Response(
+          JSON.stringify({ error: { code: 'approval_not_granted', message: 'approval not granted' } }),
+          { status: 409, headers: { 'Content-Type': 'application/json' } },
+        ),
+      ),
+    )
+
+    await expect(continueRun('run_1', 'appr_1', 'claim_1', () => {})).rejects.toMatchObject({
+      status: 409,
+      code: 'approval_not_granted',
+    })
   })
 })

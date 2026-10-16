@@ -1038,6 +1038,15 @@ const chatQueueInvocationInput = z.object({
   spaceRef: z.string().optional(),
 })
 
+// The granted approval named here is the gate for the continuation, so the entry
+// is not approval-gated a second time: the claim token proves the caller holds
+// the pause it resumes. Not model-executable (see model-eligibility.ts).
+const chatRunContinueInput = z.object({
+  runId: z.string().min(1),
+  approvalId: z.string().min(1),
+  claimToken: z.string().min(1),
+})
+
 const chatClearThreadsInput = z.object({})
 
 const chatDeleteThreadInput = z.object({
@@ -2854,6 +2863,17 @@ export const actionRegistry = [
     requiresApproval: false,
     reversible: false,
     inputSchema: chatQueueInvocationInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'chat.run.continue',
+    label: 'Continue approved run',
+    description: 'Resume a run that paused for a granted approval: the approved call runs once under the authority the pause recorded, then the same run finishes. Streams the continuation.',
+    ownerPlane: 'model',
+    risk: 'high',
+    requiresApproval: false,
+    reversible: false,
+    inputSchema: chatRunContinueInput,
     outputSchema: envelopeStatusOutput,
   },
   {

@@ -1,4 +1,5 @@
 import { requestJson } from './http'
+import { readSseStream, type SseEvent } from './sse'
 
 // Human-in-the-loop run control for agentic chat runs. These call the gateway
 // `/api/v1/orchestration/*` proxy (→ model-gateway → session-core/execution-core).
@@ -108,6 +109,41 @@ export async function resumeRun(runId: string, signal?: AbortSignal): Promise<vo
     body: '{}',
     signal,
   })
+}
+
+/**
+ * Continue a run that paused for a granted loop approval (build plan WS03 S3).
+ * The gateway relays the continuation as SSE: the approved call runs once, then
+ * the same run finishes. Only the approval id and its claim token go on the wire;
+ * the tools and authority come from the pause's snapshot upstream, never here.
+ *
+ * Rejects when the connection or the gateway refuses the continuation, so the
+ * caller sees the typed `ApiError` code rather than a stalled stream.
+ */
+export async function continueRun(
+  runId: string,
+  approvalId: string,
+  claimToken: string,
+  onEvent: (event: SseEvent) => void,
+  signal?: AbortSignal,
+): Promise<void> {
+  let connError: unknown
+
+  await readSseStream(
+    `/api/v1/orchestration/runs/${encodeURIComponent(runId)}/continue`,
+    {
+      method: 'POST',
+      // Snake_case on the wire: the BFF body rejects unknown fields outright.
+      body: JSON.stringify({ approval_id: approvalId, claim_token: claimToken }),
+      signal,
+    },
+    onEvent,
+    (err) => {
+      connError = err
+    },
+  )
+
+  if (connError) throw connError
 }
 
 /** Durable result of an authorized run cancellation. */

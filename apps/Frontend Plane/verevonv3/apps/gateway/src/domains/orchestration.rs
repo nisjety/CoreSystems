@@ -40,7 +40,7 @@ use std::time::Duration;
 use axum::{
     extract::{Path, Query, State},
     http::{HeaderMap, StatusCode},
-    response::IntoResponse,
+    response::{IntoResponse, Response},
     routing::{get, post},
     Extension, Json, Router,
 };
@@ -51,11 +51,13 @@ use serde_json::Value;
 use crate::{
     config::AppState,
     domains::chat::shared::{
-        delegated_auth_unavailable, model_token, proxy_model_json_with_data_plane,
-        proxy_model_json_with_session, required_execution_token, required_session_token,
+        data_plane_token, delegated_auth_unavailable, invalid_chat_request, model_token,
+        proxy_model_json_with_data_plane, proxy_model_json_with_session, required_execution_token,
+        required_inference_token, required_session_token,
     },
     middleware::{require_session, AuthenticatedUser},
     rate_limit::rate_limit_middleware,
+    upstream::{authorized_org_id, proxy_sse_stream_with_data_plane},
 };
 
 pub(crate) fn router(state: AppState) -> Router<AppState> {
@@ -107,6 +109,10 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
         .route(
             "/api/v1/orchestration/runs/{run_id}/resume",
             post(resume_run),
+        )
+        .route(
+            "/api/v1/orchestration/runs/{run_id}/continue",
+            post(continue_run),
         )
         .route(
             "/api/v1/orchestration/runs/{run_id}/cancel",
@@ -544,6 +550,91 @@ pub(crate) async fn resume_run(
     .await
 }
 
+/// The body a continuation accepts. Only the approval id and its claim token: the
+/// tools and authority the continuation runs under are the pause's own snapshot,
+/// held upstream, so no client value can widen them.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ContinueRunBody {
+    approval_id: String,
+    claim_token: String,
+}
+
+/// `None` when either identifier is blank. Otherwise the upstream body is rebuilt
+/// from the two fields alone, so nothing else a client sent is forwarded. The
+/// claim token is forwarded as sent: trimming it would change the credential.
+fn continue_upstream_body(body: &ContinueRunBody) -> Option<Value> {
+    if body.approval_id.trim().is_empty() || body.claim_token.trim().is_empty() {
+        return None;
+    }
+    Some(serde_json::json!({
+        "approval_id": body.approval_id,
+        "claim_token": body.claim_token,
+    }))
+}
+
+/// `POST /api/v1/orchestration/runs/{run_id}/continue` (build plan WS03 S3): resumes
+/// a run that paused for a granted loop approval, relaying the continuation as SSE.
+///
+/// The bearers are minted the way `chat::streams::stream_chat` mints them, because
+/// model-gateway's continue route verifies this same set (model, session, inference,
+/// execution, data plane). Cost, capability, ingestion and sandbox bearers are not
+/// part of a continuation and are not minted.
+pub(crate) async fn continue_run(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    Path(run_id): Path<String>,
+    Json(body): Json<ContinueRunBody>,
+) -> Response {
+    let Some(upstream_body) = continue_upstream_body(&body) else {
+        return invalid_chat_request("continue needs an approval id and a claim token")
+            .into_response();
+    };
+    let model = model_token(&state, &user, &headers).await;
+    let data_plane = data_plane_token(&state, &user, &headers).await;
+    let inference = match required_inference_token(&state, &user, &headers).await {
+        Ok(token) => token,
+        Err(error) => return delegated_auth_unavailable(error).into_response(),
+    };
+    let execution = match required_execution_token(&state, &user, &headers).await {
+        Ok(token) => token,
+        Err(error) => return delegated_auth_unavailable(error).into_response(),
+    };
+    let session = match required_session_token(&state, &user, &headers).await {
+        Ok(token) => token,
+        Err(error) => return delegated_auth_unavailable(error).into_response(),
+    };
+    // The org's standing posture, so the `x-zdr` header reaches model-gateway. The
+    // gateway refuses a continuation under ZDR on its own verified claims as well.
+    let zdr = crate::zdr::org_zdr_enabled(&state, &user).await;
+    let org_id = authorized_org_id(&state, &user).await;
+    let url = format!(
+        "{}/v1/orchestration/runs/{}/continue",
+        state.model_gateway_url,
+        enc(&run_id)
+    );
+    proxy_sse_stream_with_data_plane(
+        &state,
+        Method::POST,
+        &url,
+        Some(upstream_body),
+        model.as_deref(),
+        data_plane.as_deref(),
+        None,
+        Some(&inference),
+        Some(&execution),
+        None,
+        Some(&session),
+        None,
+        None,
+        None,
+        Some((&user.user_id, org_id.as_str())),
+        zdr,
+    )
+    .await
+}
+
 pub(crate) async fn cancel_run(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
@@ -573,8 +664,8 @@ mod tests {
     };
 
     use super::{
-        is_retryable_decide_status, mg_post_decide_with_retry_bounded,
-        requires_execution_delegation, verification_metrics_path,
+        continue_upstream_body, is_retryable_decide_status, mg_post_decide_with_retry_bounded,
+        requires_execution_delegation, verification_metrics_path, ContinueRunBody,
     };
 
     #[test]
@@ -889,5 +980,49 @@ mod tests {
         // The retry's own 100ms timeout elapsed before the 500ms-delayed
         // response arrived, so the original 502 is what comes back.
         assert_eq!(status, StatusCode::BAD_GATEWAY);
+    }
+
+    #[test]
+    fn continue_forwards_only_the_approval_id_and_the_claim_token() {
+        let body = ContinueRunBody {
+            approval_id: "apr-1".to_owned(),
+            claim_token: "claim-1".to_owned(),
+        };
+        assert_eq!(
+            continue_upstream_body(&body),
+            Some(json!({"approval_id": "apr-1", "claim_token": "claim-1"}))
+        );
+    }
+
+    #[test]
+    fn continue_refuses_a_blank_identifier_before_any_upstream_call() {
+        for (approval_id, claim_token) in [
+            ("", "claim-1"),
+            ("   ", "claim-1"),
+            ("apr-1", ""),
+            ("apr-1", " \t"),
+        ] {
+            let body = ContinueRunBody {
+                approval_id: approval_id.to_owned(),
+                claim_token: claim_token.to_owned(),
+            };
+            assert_eq!(
+                continue_upstream_body(&body),
+                None,
+                "approval {approval_id:?}, claim {claim_token:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn continue_body_rejects_any_field_the_client_does_not_own() {
+        // A client cannot smuggle tools or authority into a continuation: the
+        // extractor refuses the request outright rather than dropping the field.
+        let with_tools = json!({
+            "approval_id": "apr-1",
+            "claim_token": "claim-1",
+            "tool_names": ["shell"],
+        });
+        assert!(serde_json::from_value::<ContinueRunBody>(with_tools).is_err());
     }
 }
