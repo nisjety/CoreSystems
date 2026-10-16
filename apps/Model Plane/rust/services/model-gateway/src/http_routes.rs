@@ -225,6 +225,8 @@ pub fn build_router_with_readiness(
         // bounded multi-step browser-agent loop; progress streams over the
         // existing `/v1/runs/:run_id/events` route above.
         .merge(crate::browser_run::router())
+        // A signed-in user's browser grant (issue / release); the broker mints it.
+        .merge(crate::browser_grants::router())
         // AI modality routes  /v1/ai/*
         .merge(ai_routes())
         // App-Plane proxies (capabilities/tasks/cron/memory/skills)

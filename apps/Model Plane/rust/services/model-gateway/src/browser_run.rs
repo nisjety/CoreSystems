@@ -737,7 +737,7 @@ async fn browser_run_control(
     Ok(Json(json!({ "status": status })))
 }
 
-fn authenticated_browser_request<T>(
+pub(crate) fn authenticated_browser_request<T>(
     message: T,
     browser_bearer: &VerifiedBrowserBearer,
 ) -> Result<tonic::Request<T>, ApiError> {

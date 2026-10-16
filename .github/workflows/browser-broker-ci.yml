@@ -1,0 +1,84 @@
+name: Browser Broker CI
+
+# Gate for the Model Plane browser-broker (Go) and the browser-grant contract
+# that spans four planes. Before this file nothing built or tested the broker:
+# `apps/Model Plane/go/**` had no workflow of its own, so a grant-policy
+# regression (cap, ZDR, host deny-list) could only be found by hand.
+#
+# Two jobs:
+#   broker  - vet + tests for the broker module, run through the Model Plane
+#             go.work so the generated `gen/go` and `pkg/authctx` modules are
+#             the in-tree ones (the broker's go.sum is deliberately not used
+#             on its own: it does not carry the transitive sums).
+#   contract (L1) - scripts/tests/browser-grant-contract.test.mjs: proto field
+#             numbers, the Quarry vendored proto being a subset of the
+#             upstream one, the single grant-minting path, and the broker's
+#             compose wiring. Pure file checks, no services.
+#
+# The live end-to-end leg (L2) is a manual pre-merge evidence run, not CI.
+
+on:
+  pull_request:
+    paths:
+      - "apps/Model Plane/go/services/browser-broker/**"
+      - "apps/Model Plane/go/gen/**"
+      - "apps/Model Plane/go/pkg/authctx/**"
+      - "apps/Model Plane/go/go.work"
+      - "apps/Model Plane/proto/model_plane/v1/browser.proto"
+      - "apps/Model Plane/deploy/docker-compose.yml"
+      - "apps/Model Plane/rust/services/model-gateway/src/browser_grants.rs"
+      - "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/proto/browser.proto"
+      - "scripts/tests/browser-grant-contract.test.mjs"
+      - ".github/workflows/browser-broker-ci.yml"
+  push:
+    branches: [main, develop]
+    paths:
+      - "apps/Model Plane/go/services/browser-broker/**"
+      - "apps/Model Plane/go/gen/**"
+      - "apps/Model Plane/go/pkg/authctx/**"
+      - "apps/Model Plane/go/go.work"
+      - "apps/Model Plane/proto/model_plane/v1/browser.proto"
+      - "apps/Model Plane/deploy/docker-compose.yml"
+      - "apps/Model Plane/rust/services/model-gateway/src/browser_grants.rs"
+      - "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/proto/browser.proto"
+      - "scripts/tests/browser-grant-contract.test.mjs"
+      - ".github/workflows/browser-broker-ci.yml"
+
+concurrency:
+  group: browser-broker-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  broker:
+    name: Broker vet + tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: "apps/Model Plane/go/services/browser-broker"
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: "apps/Model Plane/go/go.work"
+          cache-dependency-path: "apps/Model Plane/go/services/browser-broker/go.sum"
+      - name: gofmt
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "gofmt needed:"; echo "$unformatted"; exit 1
+          fi
+      - name: go vet
+        run: go vet ./...
+      - name: go test
+        run: go test ./...
+
+  contract:
+    name: Grant contract (L1)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+      - name: browser-grant contract
+        run: node --test scripts/tests/browser-grant-contract.test.mjs
