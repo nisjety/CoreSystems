@@ -758,7 +758,18 @@ fn validate_approval_decision_context(org_id: &str, decided_by: &str) -> Result<
     Ok(())
 }
 
-const MAX_CONTINUATION_DESCRIPTOR_BYTES: usize = 16 * 1024;
+/// The largest plaintext descriptor a continuation may retain. The mirror value in
+/// execution-core (`runtime_loop::resume::MAX_SNAPSHOT_BYTES`) must match it.
+///
+/// The ceiling is the encrypted row, not the plaintext: `approval_continuation_descriptors`
+/// CHECKs `length(ciphertext) <= 131072`, and the ciphertext is `v1:` plus base64 of
+/// nonce + plaintext + tag. 64 KiB leaves headroom under that CHECK (about 87 KB of
+/// ciphertext); the const assertion below fails the build if the cap ever outgrows it.
+const MAX_CONTINUATION_DESCRIPTOR_BYTES: usize = 64 * 1024;
+const _: () = assert!(
+    3 + (MAX_CONTINUATION_DESCRIPTOR_BYTES + 28) * 4 / 3 + 4 <= 131_072,
+    "descriptor cap must fit the approval_continuation_descriptors ciphertext CHECK"
+);
 
 /// Validate a retained continuation as an exact, approval-scoped action
 /// description. It cannot carry reusable credentials; execution remains
@@ -3553,6 +3564,33 @@ mod tests {
                 .expect_err("descriptor retention must have a finite expiry")
                 .code(),
             tonic::Code::InvalidArgument
+        );
+    }
+
+    #[test]
+    fn continuation_descriptor_size_cap_refuses_one_byte_over() {
+        let req = proto::CreateApprovalRequest {
+            run_id: "run-1".to_owned(),
+            org_id: "org-1".to_owned(),
+            user_id: "user-1".to_owned(),
+            expires_in_seconds: 3600,
+            ..Default::default()
+        };
+        // At the cap the size check passes; this non-JSON body is then refused by
+        // the parser, which proves the cap itself did not fire.
+        let at_cap = "x".repeat(MAX_CONTINUATION_DESCRIPTOR_BYTES);
+        assert_eq!(
+            validate_continuation_descriptor(&at_cap, &req)
+                .expect_err("not JSON")
+                .message(),
+            "continuation descriptor must be JSON"
+        );
+        let over = "x".repeat(MAX_CONTINUATION_DESCRIPTOR_BYTES + 1);
+        assert_eq!(
+            validate_continuation_descriptor(&over, &req)
+                .expect_err("one byte over the cap")
+                .message(),
+            "continuation descriptor is too large"
         );
     }
 
