@@ -210,6 +210,59 @@ jobs:
       - name: Test quarry-browser (chromiumoxide feature)
         run: cargo test -p quarry-browser --features chromiumoxide
 
+  # The browser tests that need a real Chromium. Everywhere else they print
+  # "skipping: set CHROMIUMOXIDE_TEST=1" and pass, so a regression in the live driver
+  # (a viewport change relaunching the browser, a lost egress policy, a profile that
+  # no longer restores) merged green. This lane runs them for real.
+  #
+  # Advisory first: continue-on-error, so a flaky hosted runner cannot block a
+  # merge. Promote it to a required check (remove continue-on-error) after two
+  # weeks green. The tests that need a public origin are #[ignore]d with the reason
+  # (`cargo test ... -- --ignored --list` shows them).
+  quarry-browser-live:
+    name: Live browser tests (Chromium)
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    timeout-minutes: 40
+    defaults:
+      run:
+        working-directory: 'apps/Ingestion Plane/Quarry-v2'
+    env:
+      CARGO_PROFILE_TEST_DEBUG: "0"
+      CHROMIUMOXIDE_TEST: "1"
+      # Hosted runners restrict unprivileged user namespaces, so Chromium cannot
+      # build its own sandbox there. The edge refuses this flag when ENVIRONMENT is
+      # prod or production; it is not set here.
+      QUARRY_BROWSER_NO_SANDBOX: "1"
+      CHROME: /usr/bin/chromium
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: 'apps/Ingestion Plane/Quarry-v2 -> target'
+
+      - uses: arduino/setup-protoc@v3
+        with:
+          version: '27.x'
+
+      - name: Install Chromium
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends chromium fonts-liberation
+          chromium --version
+
+      - name: Live browser tests
+        # One test at a time: each launches its own Chromium.
+        run: cargo test -p quarry-browser --features chromiumoxide -- --test-threads=1
+
+      - name: Show what was skipped on purpose
+        if: always()
+        run: cargo test -p quarry-browser --features chromiumoxide -- --ignored --list
+
   cargo-audit:
     name: cargo-audit
     runs-on: ubuntu-latest
