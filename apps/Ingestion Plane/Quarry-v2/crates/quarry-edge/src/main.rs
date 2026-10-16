@@ -426,17 +426,47 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
+    // D2 / cluster #14 — HMAC signer for cross-plane forwards to control.
+    // None when the secret env is unset → unsigned requests (dev posture only;
+    // control MUST require signatures in prod). Built before the event publisher
+    // because that, too, posts to control and control rejects an unsigned request
+    // once QUARRY_INTERNAL_HMAC_REQUIRED=1.
+    let internal_signer: Option<std::sync::Arc<internal_auth::InternalSigner>> = cfg
+        .internal_secret
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .and_then(|s| match internal_auth::InternalSigner::new(s) {
+            Ok(signer) => {
+                tracing::info!("HMAC signer wired for control-plane forwards");
+                Some(std::sync::Arc::new(signer))
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "internal_secret too short; HMAC signing disabled");
+                None
+            }
+        });
+
     // Event publisher: edge → control-plane event stream.
     let (event_tx, event_rx) = tokio::sync::mpsc::channel(1024);
     let publisher_client = reqwest::Client::builder()
         .timeout(Duration::from_secs(30))
         .build()?;
-    let publisher = quarry_runtime::EventPublisher::new(
+    let mut publisher = quarry_runtime::EventPublisher::new(
         event_rx,
         publisher_client,
         cfg.control_base_url.clone(),
         cfg.control_api_key.clone(),
     );
+    if let Some(signer) = internal_signer.clone() {
+        publisher = publisher.with_signer(std::sync::Arc::new(move |method, path, body| {
+            let signed = internal_auth::apply_to_request(&signer, method, path, body);
+            vec![
+                (internal_auth::HEADER_SIG, signed.signature),
+                (internal_auth::HEADER_TS, signed.timestamp),
+                (internal_auth::HEADER_NONCE, signed.nonce),
+            ]
+        }));
+    }
     tokio::spawn(async move { publisher.run().await });
 
     // P1 / cluster #nats — optional NATS JetStream fan-out. When
@@ -1441,23 +1471,7 @@ async fn main() -> anyhow::Result<()> {
         queue_pool,
         #[cfg(feature = "postgres-queue")]
         baseline_store,
-        // D2 / cluster #14 — HMAC signer for cross-plane forwards.
-        // None when the secret env is unset → unsigned requests (dev
-        // posture only; control plane MUST require signatures in prod).
-        internal_signer: cfg
-            .internal_secret
-            .as_deref()
-            .filter(|s| !s.is_empty())
-            .and_then(|s| match internal_auth::InternalSigner::new(s) {
-                Ok(signer) => {
-                    tracing::info!("HMAC signer wired for control-plane forwards");
-                    Some(std::sync::Arc::new(signer))
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "internal_secret too short; HMAC signing disabled");
-                    None
-                }
-            }),
+        internal_signer,
         // Cycle 21 / cluster #2 — best-effort policy by default.
         // Operators wanting `strict` reproducibility set
         // `QUARRY_EDGE__RUN_POLICY=strict` (future config wiring; for

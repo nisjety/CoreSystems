@@ -682,6 +682,7 @@ async fn crawl_handoff(
             "user_id": claims.user_id,
             "ingest": req.ingest,
         }),
+        state.internal_signer.as_deref(),
     )
     .await;
 
@@ -751,6 +752,7 @@ async fn batch_handoff(
             "user_id": claims.user_id,
             "ingest": req.ingest,
         }),
+        state.internal_signer.as_deref(),
     )
     .await;
 

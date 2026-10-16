@@ -28,6 +28,7 @@ pub async fn forward_to_orchestrator(
     _request_id: &str,
     org_id: &str,
     payload: serde_json::Value,
+    signer: Option<&crate::internal_auth::InternalSigner>,
 ) -> Result<HandoffAck, QuarryError> {
     if control_base_url.is_empty() {
         return Err(QuarryError::new(
@@ -61,11 +62,33 @@ pub async fn forward_to_orchestrator(
         .build()
         .map_err(|e| QuarryError::new(ErrorCode::Internal, format!("http client: {e}")))?;
 
-    let url = format!("{}/v1/jobs", control_base_url.trim_end_matches('/'));
-    let resp = client
-        .post(&url)
-        .query(&[("org_id", org_id)])
-        .json(&body)
+    // Control verifies an HMAC over (method, path?query, body hash, ts, nonce)
+    // once QUARRY_INTERNAL_HMAC_REQUIRED=1 (the production overlay sets it), so
+    // the bytes signed are the bytes sent and the query is the one on the wire.
+    let body_bytes = serde_json::to_vec(&body)
+        .map_err(|e| QuarryError::new(ErrorCode::Internal, format!("encode handoff: {e}")))?;
+    let mut url = reqwest::Url::parse(&format!(
+        "{}/v1/jobs",
+        control_base_url.trim_end_matches('/')
+    ))
+    .map_err(|e| QuarryError::new(ErrorCode::Internal, format!("control url: {e}")))?;
+    url.query_pairs_mut().append_pair("org_id", org_id);
+    let mut request = client
+        .post(url.clone())
+        .header("content-type", "application/json")
+        .body(body_bytes.clone());
+    if let Some(signer) = signer {
+        let path_q = match url.query() {
+            Some(query) => format!("{}?{}", url.path(), query),
+            None => url.path().to_string(),
+        };
+        let signed = crate::internal_auth::apply_to_request(signer, "POST", &path_q, &body_bytes);
+        request = request
+            .header(crate::internal_auth::HEADER_SIG, signed.signature)
+            .header(crate::internal_auth::HEADER_TS, signed.timestamp)
+            .header(crate::internal_auth::HEADER_NONCE, signed.nonce);
+    }
+    let resp = request
         .send()
         .await
         .map_err(|e| {
@@ -176,6 +199,72 @@ mod tests {
             }
         })
         .to_string()
+    }
+
+    #[tokio::test]
+    async fn the_handoff_is_signed_over_the_bytes_and_query_it_sends() {
+        use crate::internal_auth::{InternalSigner, HEADER_NONCE, HEADER_SIG, HEADER_TS};
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/jobs"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "data": { "id": "job_1" } })),
+            )
+            .mount(&server)
+            .await;
+        let signer = InternalSigner::new("0123456789abcdef0123456789abcdef".to_string()).unwrap();
+        let ack = forward_to_orchestrator(
+            &server.uri(),
+            "req_1",
+            "org_1",
+            serde_json::json!({ "kind": "crawl", "url": "https://example.com/" }),
+            Some(&signer),
+        )
+        .await
+        .expect("accepted");
+        assert_eq!(ack.job_id, "job_1");
+
+        let received = server.received_requests().await.unwrap();
+        let request = &received[0];
+        let header = |name: &str| request.headers.get(name).unwrap().to_str().unwrap().to_string();
+        let timestamp: i64 = header(HEADER_TS).parse().unwrap();
+        let nonce = header(HEADER_NONCE);
+        let expected = InternalSigner::header_value(&signer.sign_raw(
+            "POST",
+            "/v1/jobs?org_id=org_1",
+            &InternalSigner::body_digest(&request.body),
+            timestamp,
+            &nonce,
+        ));
+        assert_eq!(header(HEADER_SIG), expected, "signature must cover the sent body and query");
+    }
+
+    #[tokio::test]
+    async fn without_a_signer_the_handoff_carries_no_signature_headers() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "data": { "id": "job_2" } })),
+            )
+            .mount(&server)
+            .await;
+        forward_to_orchestrator(
+            &server.uri(),
+            "req_1",
+            "org_1",
+            serde_json::json!({ "kind": "batch" }),
+            None,
+        )
+        .await
+        .expect("accepted");
+        let received = server.received_requests().await.unwrap();
+        assert!(received[0].headers.get("x-quarry-sig").is_none());
     }
 
     #[test]
