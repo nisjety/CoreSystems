@@ -3,13 +3,35 @@
 | Field | Value |
 |---|---|
 | Date | 2026-10-14 |
-| Status | Approved 2026-10-15 by the user; the recommended defaults for all 13 open questions in 7.1 are accepted. Nothing is built yet. |
+| Status | Approved 2026-10-15 by the user; the recommended defaults for all 13 open questions in 7.1 are accepted. Build in progress on the local branch `quarryv2` (not pushed, no pull requests): see the build ledger below. Nothing has been verified on a rebuilt image or a running stack, so nothing counts as deployed. |
 | Input audit | `C:/dev/verevon-audit-2026-10-14/02-quarry-and-browser-audit.md`, sha256 `60d32ec5270718b82a8baf90d2659e1d55dffa07814abc7153bdcd456ed4d49e` (evidence pack: `C:/dev/verevon-audit-2026-10-14/audit-evidence/`; the folder is read-only) |
 | Target | Commit `afb83928` (2026-10-10) of the live tree `C:/dev/CoresSystem` plus about 324 uncommitted entries (197 modified, 122 untracked, 5 deleted) |
 | Branch note | The planning worktree (branch `claude/gracious-gagarin-087139`, HEAD `828d9d55`) is 61 commits behind main. All code was therefore read from the live tree `C:/dev/CoresSystem`, never from the worktree. Files that exist only as uncommitted work are tagged `[U]` (untracked); files committed at `afb83928` but modified in the live tree are tagged `[M]`; committed and unchanged is `[C]`; a file this plan would create is `[NEW]`. |
 | Scope of this document | Priority items and waves W1 and W2 in file-level detail; waves W3 to W5 as epics. Nothing is built by the planning pipeline. |
 | Path convention | Every product path is written in full, relative to the repo root `C:/dev/CoresSystem/`. Shorthand is allowed in one place only: inside a single table cell or sentence, files that sit in the same directory as the first full path may be written by file name. |
 | Slice ids | `WS<n>.<letter>`, one workstream per design (WS1 grants, WS2 run control, WS3 driver, WS4 ZDR and tenant boundary, WS5 scrape contract, WS6 budgets, WS7 web policy, WS8 shared-browser backend, WS9 shared-browser frontend, WS10 run trace, WS11 planner, WS12 redaction, WS13 scrape actions and capture, WS14 crawl scope and robots, WS15 job lifecycle and schedules, WS16 extraction, WS17 profiles). `WS3.D` is design D3's slice S3. The slice catalogue gives the letter-to-design mapping. |
+
+## Build ledger (branch `quarryv2`, local only)
+
+Every row is unit- or integration-tested in the way its commit message says; none has been rebuilt into an image and run end to end, which the repository requires before a deployment claim. The branch is cut from committed main (`afb83928`), not from the uncommitted live-tree baseline, so files tagged [M] need hand-staged hunk merges.
+
+| Slice | Commit | What is in | Not done in that slice |
+|---|---|---|---|
+| WS4.K, WS4.A | `e4056b14`, `c207b039` | Quarry page cache and gateway result cache keyed by org; ZDR bypass | WS4.B (cache forensics and purge before and after deploy) |
+| PRE-2 | `438b6e83` | production gates case-insensitive | |
+| WS2.A | `256bae09` | raw page script (`evaluate`) denied on every agent entry point | integration test through HTTP |
+| WS6.A | `5995eeca` | crawl page, depth and failure bounds, effective limits returned | |
+| WS3.A | `61533fdd` | Chromium sandbox on by default, scoped seccomp profile, writable Chromium root | WS3 remainder |
+| WS5.A, WS5.B | `2718959e`, `4b28542a` | content sniff, typed 415, PDF and DOCX parse, inline text under ZDR | OCR, XLSX and other formats, streaming body cap, Model Plane mirrors of `UNSUPPORTED_MEDIA` (sibling b) |
+| WS1.A1 | `5b92585e`, `19cba5c1` | broker `Repository`, kinds, ZDR ids, per-owner cap, cascade revoke, host policy, proto fields; model-gateway `POST/DELETE /v1/browser/grants`; broker on `inter-plane-bus`; `browser-broker-ci.yml`; L1 contract test; `buf` CI repaired | `Renew` and absolute expiry (WS8); WS1.A0, WS1.A2 (needs X-1), WS1.B, WS1.C |
+| WS6.F | `c302f7b3` | gateway rate classes, org-keyed | |
+| WS6.I | `7fffb7c8` | opt-in Prometheus recorder on a separate authenticated listener; HTTP, scrape and pool series | agent-run, budget-by-run and usage series; the Control Plane Prometheus job |
+| WS6.B, WS6.G | `77374adc` | agent-run budgets (default `shadow`), `BUDGET_EXHAUSTED` 402, ledger in the checkpoint; per-organization lease-pool permits (default off) | `agent.budget_exhausted` event, `meta.budget`, receipt `cost_source`, entitlement clamp (WS6.D), concurrent-run cap, Model Plane mapping of the 402 (sibling b) |
+| WS6.K | `369caa89` | closed-vocabulary statistics on a finished crawl or batch job | run-duration histogram |
+| WS6.H | `40cb38df` | job admission: per-org caps, bounded backlog, claim endpoint, TTL (default off) | plan-dependent caps stamped at submit time; row-locking claim |
+| WS6.J | `7b67ba1e` | drain on SIGTERM: out of rotation, capped wait, sessions released | `agent.expired` event, usage segment, orchestrator worker stop timeout |
+
+Slices not started and why: WS6.C (usage metering) needs the run lifecycle of WS2.D for its main events and a billing line per new metric that does not exist in Lago; WS6.D (limits resolver) needs the billing-core credential and the fail-mode decision ADR-1; WS6.E (grant-carried budget claim) needs WS1.B.
 
 ## Files that exist only as uncommitted work and what depends on them
 
