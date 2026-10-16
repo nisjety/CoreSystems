@@ -2140,11 +2140,7 @@ pub fn build_dom_summary(html: &str) -> DomSummary {
             let body = &html[body_start..];
             let stripped = strip_tags(body);
             let trimmed = stripped.trim();
-            if trimmed.len() > 500 {
-                format!("{}...", &trimmed[..500])
-            } else {
-                trimmed.to_string()
-            }
+            text_snippet_of(trimmed)
         })
         .filter(|s| !s.is_empty());
 
@@ -2436,6 +2432,21 @@ fn extract_label_for(html: &str, control_id: &str) -> Option<String> {
         offset = start + end + 1;
     }
     None
+}
+
+/// The first 500 bytes of the visible text, cut on a character boundary. Slicing
+/// at byte 500 panics when a multi-byte character straddles it (any CJK, accented
+/// or emoji text), which took down the request for a page in that language.
+fn text_snippet_of(trimmed: &str) -> String {
+    const MAX_BYTES: usize = 500;
+    if trimmed.len() <= MAX_BYTES {
+        return trimmed.to_string();
+    }
+    let mut end = MAX_BYTES;
+    while !trimmed.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}...", &trimmed[..end])
 }
 
 fn strip_tags(html: &str) -> String {
@@ -3054,6 +3065,17 @@ mod tests {
         assert_eq!(network[0].method, "POST");
         assert_eq!(network[0].status, 201);
         assert_eq!(network[0].content_type.as_deref(), Some("application/json"));
+    }
+
+    #[test]
+    fn text_snippet_cuts_on_a_character_boundary() {
+        // A three-byte character covering bytes 498..501 used to panic at [..500].
+        let text = format!("{}文{}", "a".repeat(498), "b".repeat(50));
+        let snippet = text_snippet_of(&text);
+        assert_eq!(snippet, format!("{}...", "a".repeat(498)));
+        assert_eq!(text_snippet_of("short"), "short");
+        let exact = "x".repeat(500);
+        assert_eq!(text_snippet_of(&exact), exact);
     }
 
     #[test]
