@@ -731,6 +731,45 @@ message ConsumeApprovalResponse {
   string tool_input_json = 5;
   // The step the approval gated.
   string step_id = 6;
+  // The tools and the authority the approval was raised under (build plan WS03
+  // S3). A continuation runs under this snapshot only: nothing a client sends
+  // replaces it. Absent for an approval raised cold (no snapshot was taken).
+  ApprovedAuthority authority = 7;
+}
+
+// The authority an approval was raised under, snapshotted at pause time.
+message ApprovedAuthority {
+  // The permission mode the run was offered under (`ask`, `auto`, ...).
+  string mode = 1;
+  // Whether the run was in plan mode.
+  bool plan_mode = 2;
+  // The autonomy rung, as its wire label.
+  string autonomy_rung = 3;
+  // The Space the run belongs to, or empty.
+  string space_id = 4;
+  // The privacy floor as the wire number.
+  int32 min_privacy_tier = 5;
+  // The pinned inference route, or empty.
+  string provider_hint = 6;
+  // The round budget the run started with.
+  uint32 max_rounds = 7;
+  // The names of the offered tools, sorted.
+  repeated string tool_names = 8;
+  // The offered tools, with the definitions the model was given.
+  repeated ApprovedTool tools = 9;
+  // A digest of the authority fields (mp_contracts::loop_fold::Authority::digest).
+  // A continuation recomputes it and refuses a snapshot that does not match.
+  string digest = 10;
+}
+
+// One offered tool, with the definition the model was given.
+message ApprovedTool {
+  // The tool name.
+  string name = 1;
+  // The tool description shown to the model.
+  string description = 2;
+  // The JSON Schema of the tool's arguments.
+  string parameters_json = 3;
 }
 
 message CreateApprovalResponse {

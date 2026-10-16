@@ -852,6 +852,9 @@ pub struct ConsumedCall {
     pub tool_name: String,
     /// The JSON arguments of the approved call.
     pub tool_input_json: String,
+    /// The offered tools and authority the approval was raised under, as the
+    /// retained snapshot's JSON (empty when none was retained).
+    pub offered_json: String,
 }
 
 /// The outcome of [`consume_approval`].
@@ -1021,10 +1024,15 @@ async fn read_consumed_call(
         return Ok(None);
     };
     let input = descriptor.get("input").cloned().unwrap_or(JsonValue::Null);
+    let offered_json = descriptor
+        .get("offered")
+        .map(JsonValue::to_string)
+        .unwrap_or_default();
     Ok(Some(ConsumedCall {
         step_id,
         tool_name,
         tool_input_json: serde_json::to_string(&input)?,
+        offered_json,
     }))
 }
 
@@ -1946,7 +1954,15 @@ mod approval_consume_db_tests {
             "action_fingerprint": FINGERPRINT,
             "tool_name": "shell",
             "input": {"command": "echo approved"},
-            "permission_mode": "ask"
+            "permission_mode": "ask",
+            "offered": {
+                "tools": [{"name": "shell", "description": "run", "parameters_json": "{}"}],
+                "authority": {
+                    "mode": "ask", "plan_mode": false, "autonomy_rung": "", "space_id": "",
+                    "min_privacy_tier": 0, "provider_hint": "", "max_rounds": 4,
+                    "tool_names": ["shell"], "digest": "unchecked-in-this-test"
+                }
+            }
         });
         request_approval(
             pool,
@@ -2069,6 +2085,7 @@ mod approval_consume_db_tests {
         assert_eq!(call.tool_name, "shell");
         assert_eq!(call.step_id, "tool_1_call-1");
         assert_eq!(call.tool_input_json, r#"{"command":"echo approved"}"#);
+        assert!(call.offered_json.contains("\"tool_names\""), "the snapshot comes back with the call");
         // The same claim replaying gets it again; another claim does not.
         let replay = consume_approval(&pool, &id, &seed.org, &seed.run_id, &seed.user, "", "a")
             .await.unwrap().unwrap();

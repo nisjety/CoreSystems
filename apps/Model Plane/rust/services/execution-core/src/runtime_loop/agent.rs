@@ -840,10 +840,29 @@ async fn run_agent_with_route(
 ) -> Result<pb::RunAgentResponse, tonic::Status> {
     let plan_id = format!("plan_{}", req.run_id);
 
+    // A continuation segment (build plan WS03 S3): consume the granted approval
+    // exactly once. Its tools and mode come from the retained snapshot, never
+    // from the request, so this runs before the offered set is derived below.
+    // Refused before anything is published, so the run is left as it was.
+    let resumed = match req.resume.as_ref() {
+        Some(resume) => Some(
+            prepare_resume(&session_channel, session_bearer.as_deref(), &req, resume).await?,
+        ),
+        None => None,
+    };
+    let tools = match resumed.as_ref() {
+        Some(segment) => segment.tools.clone(),
+        None => tools,
+    };
+
     // Posture: deployed agents default to `ask` (risky tools gated behind a
     // human approval). Only an explicit `auto` opens the gate; an unknown/empty
-    // mode is treated as `ask` so `shell` is never silently allowed.
-    let mode = resolve_mode(&req.mode);
+    // mode is treated as `ask` so `shell` is never silently allowed. A
+    // continuation keeps the mode its run was offered under.
+    let mode = match resumed.as_ref() {
+        Some(segment) => resolve_mode(&segment.mode),
+        None => resolve_mode(&req.mode),
+    };
     let permission_wire = mode_wire(mode);
 
     // Purpose-lock: the offered allowlist IS the scope lock. Tool calls outside
@@ -885,24 +904,6 @@ async fn run_agent_with_route(
     );
 
     heartbeat_managed_agent_run(&session_channel, &req, terminal_tokens).await?;
-
-    // A continuation segment (build plan WS03 S3): consume the granted approval
-    // exactly once and build the release for the one approved call. Done before
-    // anything else is published, so a refused consume leaves the run exactly
-    // as it was.
-    let resumed = match req.resume.as_ref() {
-        Some(resume) => Some(
-            prepare_resume(
-                &session_channel,
-                session_bearer.as_deref(),
-                &req,
-                resume,
-                permission_wire,
-            )
-            .await?,
-        ),
-        None => None,
-    };
 
     // 1. Plan: DRAFT → EXECUTING. A continuation is already executing.
     if resumed.is_none() {
@@ -2132,6 +2133,22 @@ async fn run_rounds(
         if let Some(pending) = pending_pause
             .filter(|_| !ctx.route.is_stopped() && ctx.refusal.latched().is_none())
         {
+            // The snapshot is taken only for a loop-owned pause: a cold approval's
+            // descriptor is unchanged, so the cold path cannot regress with it.
+            let offered = if mp_contracts::loop_fold::continuation_mode_for(
+                req.zdr,
+                mp_contracts::loop_fold::continue_after_approval_enabled(),
+            ) == "loop"
+            {
+                let authority = super::resume::offered_authority(
+                    req,
+                    ctx.permission_wire,
+                    &ctx.allowlist,
+                );
+                Some(super::resume::offered_snapshot(&ctx.tools, &authority))
+            } else {
+                None
+            };
             let paused = pause_for_approval(
                 ctx.state,
                 ctx.session_channel,
@@ -2142,6 +2159,7 @@ async fn run_rounds(
                 ctx.permission_wire,
                 rounds_executed.saturating_add(delegated_rounds),
                 ctx.session_bearer,
+                offered.as_ref(),
             )
             .await?;
             return Ok(RoundsResult {
@@ -4523,9 +4541,19 @@ async fn pause_for_approval(
     permission_mode: &str,
     rounds_executed: u32,
     bearer: Option<&str>,
+    offered: Option<&serde_json::Value>,
 ) -> Result<pb::RunAgentResponse, tonic::Status> {
-    let continuation_descriptor_json =
+    let mut continuation_descriptor_json =
         continuation_descriptor(req, step_id, tool_name, tool_input, permission_mode).await?;
+    // A loop-owned pause also retains the offered tools and authority it was
+    // raised under; the fingerprint covers only the call, so it is unchanged.
+    if let Some(offered) = offered {
+        let mut descriptor: JsonValue = serde_json::from_str(&continuation_descriptor_json)
+            .map_err(|_| tonic::Status::internal("could not re-read continuation descriptor"))?;
+        descriptor["offered"] = offered.clone();
+        continuation_descriptor_json = serde_json::to_string(&descriptor)
+            .map_err(|_| tonic::Status::internal("could not encode continuation descriptor"))?;
+    }
     let request = authenticated_session_request(
         pb::CreateApprovalRequest {
             // Cold (the delivery worker) unless the durable-loop switch is on and
@@ -4969,23 +4997,25 @@ struct ResumedSegment {
     goal: String,
     /// The first round: the approved call, proposed as if by the model.
     seeded_round: pb::InferResponse,
+    /// The offered tools, from the retained snapshot. A request's tools are
+    /// never used for a continuation.
+    tools: Vec<pb::ToolDefinition>,
+    /// The permission mode the run was offered under, from the snapshot.
+    mode: String,
 }
 
 /// Consume the granted approval and build what the segment runs first.
 ///
-/// The approved call (tool, arguments, step) is read back from the consume: the
-/// retained approval descriptor is the only source of what an approval
-/// authorised, so nothing the client supplies names the call. Any hint the
-/// request does carry (step, tool, fingerprint) must agree with the descriptor.
-/// A refused consume (not granted, already consumed by another claim, expired,
-/// not resumable, a different call) ends the request with a closed token before
-/// anything is published.
+/// Everything the segment runs with comes from the snapshot the pause retained:
+/// the approved call, the offered tools and the permission mode. The snapshot's
+/// digest must match the authority it carries, the approved tool must be one of
+/// the snapshot's tools, and any hint the request carries must agree. A refused
+/// consume ends the request with a closed token before anything is published.
 async fn prepare_resume(
     session_channel: &Channel,
     session_bearer: Option<&str>,
     req: &pb::RunAgentRequest,
     resume: &pb::AgentResume,
-    _permission_mode: &str,
 ) -> Result<ResumedSegment, tonic::Status> {
     let request = authenticated_session_request(
         pb::ConsumeApprovalRequest {
@@ -5007,8 +5037,27 @@ async fn prepare_resume(
     if !(consumed.consumed || (consumed.already_consumed && consumed.same_claim)) {
         return Err(tonic::Status::failed_precondition("continuation_already_consumed"));
     }
-    if consumed.tool_name.trim().is_empty() || serde_json::from_str::<JsonValue>(&consumed.tool_input_json).is_err() {
+
+    let snapshot = consumed
+        .authority
+        .as_ref()
+        .ok_or_else(|| tonic::Status::failed_precondition("approval_not_resumable"))?;
+    if super::resume::authority_from_proto(snapshot).digest() != snapshot.digest {
+        return Err(tonic::Status::failed_precondition("approval_snapshot_mismatch"));
+    }
+    let tool = consumed.tool_name.trim().to_owned();
+    if tool.is_empty() || serde_json::from_str::<JsonValue>(&consumed.tool_input_json).is_err() {
         return Err(tonic::Status::failed_precondition("approval_not_resumable"));
+    }
+    // The tools must be exactly the ones the digest covers, and the approved
+    // tool must be among them.
+    let names_match = snapshot.tools.len() == snapshot.tool_names.len()
+        && snapshot
+            .tools
+            .iter()
+            .all(|t| snapshot.tool_names.iter().any(|name| *name == t.name));
+    if !names_match || !snapshot.tool_names.iter().any(|name| *name == tool) {
+        return Err(tonic::Status::failed_precondition("approval_snapshot_mismatch"));
     }
     if (!resume.tool_name.is_empty() && resume.tool_name != consumed.tool_name)
         || (!resume.step_id.is_empty() && resume.step_id != consumed.step_id)
@@ -5016,10 +5065,19 @@ async fn prepare_resume(
         return Err(tonic::Status::failed_precondition("approval_action_mismatch"));
     }
 
+    let tools: Vec<pb::ToolDefinition> = snapshot
+        .tools
+        .iter()
+        .map(|t| pb::ToolDefinition {
+            name: t.name.clone(),
+            description: t.description.clone(),
+            parameters_json: t.parameters_json.clone(),
+        })
+        .collect();
     let step_prefix = format!("s{}.", resume.segment_no.max(2));
     let call = pb::ToolCall {
         id: "approved".to_owned(),
-        name: consumed.tool_name.trim().to_owned(),
+        name: tool,
         arguments_json: consumed.tool_input_json.clone(),
     };
     // The step id the loop will compute for this call (the first of the segment).
@@ -5042,6 +5100,8 @@ async fn prepare_resume(
             stop_reason: "tool_use".to_owned(),
             ..Default::default()
         },
+        tools,
+        mode: snapshot.mode.clone(),
     })
 }
 
@@ -6853,6 +6913,7 @@ mod tests {
                 tool_name: "delete_records".to_owned(),
                 tool_input_json: "{}".to_owned(),
                 step_id: "tool_1_del-1".to_owned(),
+                authority: Some(mock_snapshot()),
             }))
         }
 
@@ -9357,6 +9418,36 @@ mod tests {
         );
     }
 
+    /// The snapshot a loop-owned pause retains, as the consume hands it back.
+    fn mock_snapshot() -> pb::ApprovedAuthority {
+        let authority = mp_contracts::loop_fold::Authority {
+            mode: "ask".to_owned(),
+            plan_mode: false,
+            autonomy_rung: String::new(),
+            space_id: String::new(),
+            min_privacy_tier: 0,
+            provider_hint: String::new(),
+            tool_names: vec!["delete_records".to_owned()],
+            max_rounds: 4,
+        };
+        pb::ApprovedAuthority {
+            mode: "ask".to_owned(),
+            plan_mode: false,
+            autonomy_rung: String::new(),
+            space_id: String::new(),
+            min_privacy_tier: 0,
+            provider_hint: String::new(),
+            max_rounds: 4,
+            tool_names: vec!["delete_records".to_owned()],
+            tools: vec![pb::ApprovedTool {
+                name: "delete_records".to_owned(),
+                description: "Delete records (destructive).".to_owned(),
+                parameters_json: r#"{"type":"object","properties":{}}"#.to_owned(),
+            }],
+            digest: authority.digest(),
+        }
+    }
+
     /// Pause for an approval, then continue: the segment consumes the approval
     /// once, runs the approved call first through the same gates (released only
     /// because of the consume), and does not re-announce the plan.
@@ -9367,7 +9458,8 @@ mod tests {
         let inference_channel =
             spawn_inference_channel(vec![Scripted::Answer("The records were removed.".to_owned())]).await;
         let state = crate::state::StateStore::new();
-        let tools = vec![pb::ToolDefinition {
+        // The request names no tools: the continuation runs the snapshot's.
+        let _unused_request_tools = vec![pb::ToolDefinition {
             name: "delete_records".to_owned(),
             description: "Delete records (destructive).".to_owned(),
             parameters_json: r#"{"type":"object","properties":{}}"#.to_owned(),
@@ -9390,7 +9482,7 @@ mod tests {
             inference_channel,
             &plain_caller(),
             req,
-            tools,
+            Vec::new(),
             None,
             Some("session-token".to_owned()),
             "inference-token".to_owned(),

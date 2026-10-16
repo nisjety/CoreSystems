@@ -12,7 +12,10 @@
 //! never lifts a **deny**, a missing-evidence refusal or an autonomy-rung
 //! refusal, and it never covers a tool that is not releasable at all.
 
-use mp_contracts::loop_fold::{closer_text, CloserKind};
+use std::collections::BTreeSet;
+
+use mp_contracts::loop_fold::{closer_text, Authority, CloserKind};
+use mp_contracts::model_plane::v1 as pb;
 
 /// Why a release could not be built.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -90,6 +93,70 @@ impl ApprovedRelease {
         self.step_id == step_id
             && self.tool_name == tool_name.trim()
             && self.args_digest == args_digest(tool_input)
+    }
+}
+
+/// The authority a call is offered under, as the loop sees it at pause time.
+pub(crate) fn offered_authority(
+    req: &pb::RunAgentRequest,
+    permission_wire: &str,
+    tool_names: &BTreeSet<String>,
+) -> Authority {
+    let rung = pb::AutonomyRung::try_from(req.autonomy_rung).unwrap_or(pb::AutonomyRung::Unspecified);
+    Authority {
+        mode: permission_wire.to_owned(),
+        plan_mode: req.plan_mode,
+        autonomy_rung: mp_contracts::autonomy::label(rung).to_owned(),
+        space_id: req.space_id.clone(),
+        min_privacy_tier: req.min_privacy_tier,
+        provider_hint: req.provider_hint.clone(),
+        tool_names: tool_names.iter().cloned().collect(),
+        max_rounds: req.max_rounds,
+    }
+}
+
+/// The snapshot a pause retains in its approval descriptor: the offered tools
+/// with their definitions, and the authority they were offered under, with its
+/// digest. A continuation runs under this and nothing else.
+pub(crate) fn offered_snapshot(
+    tools: &[pb::ToolDefinition],
+    authority: &Authority,
+) -> serde_json::Value {
+    serde_json::json!({
+        "tools": tools
+            .iter()
+            .map(|tool| serde_json::json!({
+                "name": tool.name,
+                "description": tool.description,
+                "parameters_json": tool.parameters_json,
+            }))
+            .collect::<Vec<_>>(),
+        "authority": {
+            "mode": authority.mode,
+            "plan_mode": authority.plan_mode,
+            "autonomy_rung": authority.autonomy_rung,
+            "space_id": authority.space_id,
+            "min_privacy_tier": authority.min_privacy_tier,
+            "provider_hint": authority.provider_hint,
+            "max_rounds": authority.max_rounds,
+            "tool_names": authority.tool_names,
+            "digest": authority.digest(),
+        },
+    })
+}
+
+/// The authority a consume handed back, as the loop's own type, so its digest
+/// can be recomputed and compared with the one the snapshot carried.
+pub(crate) fn authority_from_proto(snapshot: &pb::ApprovedAuthority) -> Authority {
+    Authority {
+        mode: snapshot.mode.clone(),
+        plan_mode: snapshot.plan_mode,
+        autonomy_rung: snapshot.autonomy_rung.clone(),
+        space_id: snapshot.space_id.clone(),
+        min_privacy_tier: snapshot.min_privacy_tier,
+        provider_hint: snapshot.provider_hint.clone(),
+        tool_names: snapshot.tool_names.clone(),
+        max_rounds: snapshot.max_rounds,
     }
 }
 

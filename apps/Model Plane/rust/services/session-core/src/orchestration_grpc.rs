@@ -764,6 +764,69 @@ const MAX_CONTINUATION_DESCRIPTOR_BYTES: usize = 16 * 1024;
 /// description. It cannot carry reusable credentials; execution remains
 /// unavailable until a service-only dispatcher obtains separate authority.
 #[allow(clippy::result_large_err)]
+/// The authority snapshot a consume hands back, read from the retained
+/// descriptor's `offered` section. `None` when the approval retained none.
+fn approved_authority(offered_json: &str) -> Option<proto::ApprovedAuthority> {
+    if offered_json.is_empty() {
+        return None;
+    }
+    let value: JsonValue = serde_json::from_str(offered_json).ok()?;
+    let authority = value.get("authority")?;
+    let text = |v: &JsonValue, key: &str| {
+        v.get(key)
+            .and_then(JsonValue::as_str)
+            .unwrap_or_default()
+            .to_owned()
+    };
+    let tool_names: Vec<String> = authority
+        .get("tool_names")
+        .and_then(JsonValue::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| item.as_str().map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default();
+    let tools: Vec<proto::ApprovedTool> = value
+        .get("tools")
+        .and_then(JsonValue::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .map(|tool| proto::ApprovedTool {
+                    name: text(tool, "name"),
+                    description: text(tool, "description"),
+                    parameters_json: text(tool, "parameters_json"),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    Some(proto::ApprovedAuthority {
+        mode: text(authority, "mode"),
+        plan_mode: authority
+            .get("plan_mode")
+            .and_then(JsonValue::as_bool)
+            .unwrap_or(false),
+        autonomy_rung: text(authority, "autonomy_rung"),
+        space_id: text(authority, "space_id"),
+        min_privacy_tier: authority
+            .get("min_privacy_tier")
+            .and_then(JsonValue::as_i64)
+            .and_then(|v| i32::try_from(v).ok())
+            .unwrap_or(0),
+        provider_hint: text(authority, "provider_hint"),
+        max_rounds: authority
+            .get("max_rounds")
+            .and_then(JsonValue::as_u64)
+            .and_then(|v| u32::try_from(v).ok())
+            .unwrap_or(0),
+        tool_names,
+        tools,
+        digest: text(authority, "digest"),
+    })
+}
+
 fn validate_continuation_descriptor(
     raw: &str,
     req: &proto::CreateApprovalRequest,
@@ -2716,6 +2779,7 @@ impl OrchestrationCoreService for OrchestrationGrpc {
                         step_id: String::new(),
                         tool_name: String::new(),
                         tool_input_json: String::new(),
+                        offered_json: String::new(),
                     });
                     Ok(Response::new(proto::ConsumeApprovalResponse {
                         consumed: done.consumed,
@@ -2724,6 +2788,7 @@ impl OrchestrationCoreService for OrchestrationGrpc {
                         tool_name: call.tool_name,
                         tool_input_json: call.tool_input_json,
                         step_id: call.step_id,
+                        authority: approved_authority(&call.offered_json),
                     }))
                 }
                 // Closed wording only: nothing about the call or its content.
