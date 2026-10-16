@@ -21,6 +21,7 @@ pub mod pdf;
 pub mod readability;
 pub mod robots;
 pub mod sitemap;
+pub mod sniff;
 pub mod soft_404;
 pub mod source_trace;
 pub mod structured;

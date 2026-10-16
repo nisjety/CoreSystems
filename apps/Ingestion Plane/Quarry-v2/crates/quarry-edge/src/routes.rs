@@ -471,6 +471,7 @@ async fn scrape(
         // a "tracked website" row for it.
         source_registrar: None,
         title_enricher: state.page_title_enricher.clone(),
+        doc_routing: quarry_runtime::DocRouting::cached(),
     };
 
     let run_id: RunKind = quarry_core::ids::Id::new();
@@ -1034,6 +1035,7 @@ async fn internal_run_page(
             },
         )),
         title_enricher: state.page_title_enricher.clone(),
+        doc_routing: quarry_runtime::DocRouting::cached(),
     };
 
     let run_id: RunKind = match req.run_id.as_deref() {
@@ -1137,6 +1139,7 @@ async fn scrape_stream(
             // materialize a "tracked website" row for it.
             source_registrar: None,
             title_enricher: state.page_title_enricher.clone(),
+            doc_routing: quarry_runtime::DocRouting::cached(),
         };
         let run_id = RunKind::new();
         let mut rx = state.event_sink.subscribe(&run_id);

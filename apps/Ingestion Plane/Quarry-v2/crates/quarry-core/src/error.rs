@@ -31,6 +31,10 @@ pub enum ErrorCode {
     DriverFailed,
     UpstreamBlocked,
     Unsupported,
+    /// The fetched body is a kind of content Quarry has no extractor for
+    /// (an image, an archive, a spreadsheet). A client condition, not a server
+    /// fault: never retried. Details carry the detected kind.
+    UnsupportedMedia,
     Internal,
 }
 
@@ -54,6 +58,7 @@ impl ErrorCode {
             Self::Timeout => 504,
             Self::DriverFailed | Self::UpstreamBlocked => 502,
             Self::Unsupported => 501,
+            Self::UnsupportedMedia => 415,
             Self::RuntimeNotReady => 503,
             Self::Internal => 500,
         }

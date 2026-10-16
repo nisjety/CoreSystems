@@ -145,7 +145,7 @@ pub use mp_client::{
 };
 pub use nats_event_bus::{NatsConfig, NatsEventBus};
 pub use observation::build_dom_summary;
-pub use pipeline::PageRunner;
+pub use pipeline::{DocRouting, PageRunner};
 pub use planner::{MockPlanner, Planner, PlannerDecision};
 pub use policy::{
     policy_fingerprint, record_determinism_inputs, BlockPolicy, CheckpointPolicy, Determinism,

@@ -160,6 +160,7 @@ async fn main() -> anyhow::Result<()> {
     // A crawl bound that cannot be read must stop the process here, naming the
     // variable, rather than silently become "no bound" later.
     limits::CrawlLimits::from_env().map_err(|e| anyhow::anyhow!("crawl limits: {e}"))?;
+    quarry_runtime::DocRouting::from_env().map_err(|e| anyhow::anyhow!("doc routing: {e}"))?;
     let environment = std::env::var("ENVIRONMENT")
         .or_else(|_| std::env::var("APP_ENV"))
         .unwrap_or_default()

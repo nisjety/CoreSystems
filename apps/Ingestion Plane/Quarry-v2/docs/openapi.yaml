@@ -4521,6 +4521,21 @@ components:
         content_type:
           type: string
           nullable: true
+        content_kind:
+          type: string
+          description: >-
+            What the body was detected to be, from its first bytes and then its
+            Content-Type: html, xml, text, json, pdf, docx, xlsx, pptx, odf, epub,
+            ole_compound, image, audio, video, archive, executable, rtf or binary.
+            Absent when QUARRY_EDGE__DOC_ROUTING is off. A body Quarry cannot
+            extract text from is refused with 415 UNSUPPORTED_MEDIA when the mode
+            is skip or on (details.kind names it).
+        content_kind_source:
+          type: string
+          enum:
+          - header
+          - magic
+          - default
     DriverInfo:
       type: object
       required:

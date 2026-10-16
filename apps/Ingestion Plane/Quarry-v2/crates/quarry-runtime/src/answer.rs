@@ -677,11 +677,6 @@ pub const MIN_USEFUL_EXTRACTION_CHARS: usize = 400;
 /// [`FetchFailure::Decode`] rather than passing through.
 const MAX_REPLACEMENT_RATIO: f64 = 0.10;
 
-/// How far in we look for the `%PDF-` marker. The header belongs at offset 0
-/// per spec, but real exporters prepend junk and Acrobat itself accepts the
-/// marker anywhere in the first kilobyte, so we do too.
-const PDF_MAGIC_SCAN_BYTES: usize = 1024;
-
 /// Lightweight HTTP-based markdown fetcher.
 ///
 /// Production path for `/v1/answer`: fetches a URL via reqwest, decodes the
@@ -742,16 +737,10 @@ impl Default for SimpleHttpMarkdownFetcher {
 /// links (regjeringen.no, Mattilsynet, kommune archives) are served as
 /// `application/octet-stream`, or from a misconfigured file handler as
 /// `text/html`, with the real type visible only in the body.
-fn is_pdf(content_type: Option<&str>, bytes: &[u8]) -> bool {
-    let declared = content_type
-        .map(|ct| ct.to_ascii_lowercase().contains("application/pdf"))
-        .unwrap_or(false);
-    if declared {
-        return true;
-    }
-    let window = &bytes[..bytes.len().min(PDF_MAGIC_SCAN_BYTES)];
-    window.windows(5).any(|w| w == b"%PDF-")
-}
+///
+/// The detection itself lives in `quarry_transform::sniff`, shared with the
+/// scrape pipeline, so the two cannot disagree about what a PDF is.
+use quarry_transform::sniff::is_pdf;
 
 /// Share of the decoded text that is `U+FFFD`. See [`MAX_REPLACEMENT_RATIO`].
 fn replacement_ratio(text: &str) -> f64 {
@@ -1260,7 +1249,7 @@ mod tests {
         assert!(!is_pdf(None, b"<html><body>hi</body></html>"));
         // The marker must be near the front, not anywhere in a long page
         // that merely talks about PDFs.
-        let mut late = vec![b' '; PDF_MAGIC_SCAN_BYTES + 16];
+        let mut late = vec![b' '; quarry_transform::sniff::SNIFF_WINDOW + 16];
         late.extend_from_slice(b"%PDF-1.4");
         assert!(!is_pdf(Some("text/html"), &late));
     }

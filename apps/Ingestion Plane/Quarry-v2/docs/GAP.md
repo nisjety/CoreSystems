@@ -82,7 +82,7 @@ Gap closure now follows the phase system in Section 14. The `Owner Phase` column
 - Action script schema now accepts `screenshotAfterEach` and `write` (alias of `type`), and runtime captures a screenshot after each successful non-screenshot action.
 - Runtime events now use an ephemeral-only path for ZDR requests, so live subscribers still receive progress while durable publisher channels stay empty.
 - Static/TLS drivers now fail fast on browser actions, while the browser adapter executes public action scripts before content extraction.
-- PDF, text, and binary source routing is implemented in the pipeline; PDF text extraction uses a self-hosted parser and text documents preserve raw content.
+- Source routing is partly implemented. The pipeline detects the body kind (quarry-transform `sniff`: magic bytes first, then Content-Type) and records it as `metadata.content_kind`; with `QUARRY_EDGE__DOC_ROUTING=skip` or `on` a body it cannot extract (image, archive, spreadsheet, ...) is refused with a typed 415 `UNSUPPORTED_MEDIA`. PDF and DOCX routing to their text extractors in `/v1/scrape` is NOT yet wired (the `/v1/answer` path extracts PDFs; `docx::extract_text` has no non-test caller). Default mode is `shadow` (detect and record only). Corrected 2026-10-16; plan WS5.A/WS5.B.
 - Wikipedia pages can be fetched through a configurable source adapter, including enterprise-style base URL and bearer token configuration.
 - Chromiumoxide now applies a baseline stealth init script plus request-scoped mobile metrics, touch emulation, locale override, timezone hint, headers, ad blocking, and country proxy selection.
 

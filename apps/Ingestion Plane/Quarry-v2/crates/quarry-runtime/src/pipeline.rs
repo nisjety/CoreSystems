@@ -33,6 +33,66 @@ use crate::local_index::{LocalDocument, TantivyLocalIndex};
 use crate::policy::RunPolicy;
 use crate::source_registrar::SourceRegistrar;
 
+/// What the scrape pipeline does with the kind of body it fetched
+/// (`quarry_transform::sniff`).
+///
+/// - `Off`: no detection; every body takes the HTML path, as before.
+/// - `Shadow`: detect and record (`metadata.content_kind`, the `page_fetched`
+///   event) but change nothing else.
+/// - `Skip`: also refuse bodies Quarry has no extractor for (images, archives,
+///   spreadsheets, ...) with a typed `UNSUPPORTED_MEDIA` (415) instead of
+///   running readability over binary data.
+/// - `On`: also route PDF and DOCX to their text extractors.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DocRouting {
+    Off,
+    #[default]
+    Shadow,
+    Skip,
+    On,
+}
+
+impl DocRouting {
+    pub const ENV: &'static str = "QUARRY_EDGE__DOC_ROUTING";
+
+    pub fn parse(raw: &str) -> Result<Self, String> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "off" | "0" | "false" => Ok(Self::Off),
+            "" | "shadow" => Ok(Self::Shadow),
+            "skip" => Ok(Self::Skip),
+            "on" | "1" | "true" => Ok(Self::On),
+            other => Err(format!(
+                "{}={other:?} is not one of off, shadow, skip, on",
+                Self::ENV
+            )),
+        }
+    }
+
+    /// Read from `QUARRY_EDGE__DOC_ROUTING`; unset is `Shadow`, an unknown
+    /// value is an error naming the variable.
+    pub fn from_env() -> Result<Self, String> {
+        match std::env::var(Self::ENV) {
+            Ok(raw) => Self::parse(&raw),
+            Err(_) => Ok(Self::default()),
+        }
+    }
+
+    /// The process-wide mode, read once. Boot validates the environment first,
+    /// so the fallback only covers a value that was valid at start-up.
+    pub fn cached() -> Self {
+        static MODE: std::sync::OnceLock<DocRouting> = std::sync::OnceLock::new();
+        *MODE.get_or_init(|| Self::from_env().unwrap_or_default())
+    }
+
+    fn detects(self) -> bool {
+        self != Self::Off
+    }
+
+    fn rejects_unsupported(self) -> bool {
+        matches!(self, Self::Skip | Self::On)
+    }
+}
+
 pub struct PageRunner {
     pub driver: Arc<dyn Driver>,
     pub security: Arc<dyn SecurityEngine>,
@@ -104,6 +164,9 @@ pub struct PageRunner {
     /// `QUARRY_EDGE__MODEL_PLANE_URL` + `QUARRY_EDGE__PAGE_TITLE_MODEL`;
     /// test harnesses and ad-hoc runners leave it `None`.
     pub title_enricher: Option<Arc<crate::page_extract::PageTitleEnricher>>,
+    /// Content-kind routing mode; see [`DocRouting`]. Edge wires
+    /// [`DocRouting::cached`].
+    pub doc_routing: DocRouting,
 }
 
 #[cfg(test)]
@@ -446,6 +509,12 @@ impl PageRunner {
             .iter()
             .find(|(k, _)| k.eq_ignore_ascii_case("content-type"))
             .map(|(_, v)| v.clone());
+        // What the body is, decided by its first bytes before its header
+        // (many document links are served as octet-stream or text/html). Only
+        // successful responses are classified: an error page keeps the legacy
+        // path whatever it contains.
+        let detected = (self.doc_routing.detects() && (200..300).contains(&resp.status))
+            .then(|| quarry_transform::sniff::detect(ct.as_deref(), &resp.body));
         // PageFetched payload includes `content_type` so downstream
         // consumers (e.g. the onboarding wizard) can pick the right
         // card style without re-parsing the HTML.
@@ -457,10 +526,51 @@ impl PageRunner {
                 "status": resp.status,
                 "duration_ms": resp.duration_ms,
                 "content_type": ct.clone(),
+                "content_kind": detected.map(|d| d.kind.label()),
+                "content_kind_source": detected.map(|d| d.source.label()),
             }),
             format!("{}:{}:fetched", run_id, resp.final_url),
         )
         .await;
+
+        // A body Quarry has no extractor for is refused with a typed error
+        // rather than decoded as text: an image or an archive run through
+        // readability yields mojibake that then gets ingested.
+        if let Some(found) = detected {
+            let supported = found.kind.is_text_pipeline() || found.kind.is_parseable_document();
+            if self.doc_routing.rejects_unsupported() && !supported {
+                let details = json!({
+                    "reason": "unsupported_media",
+                    "kind": found.kind.label(),
+                    "subtype": found.subtype,
+                    "content_type": ct,
+                    "bytes": resp.body.len(),
+                    "source": found.source.label(),
+                    "supported": ["html", "text", "json", "xml", "pdf", "docx"],
+                });
+                self.emit_page_event(
+                    run_id.clone(),
+                    EventType::PageBlocked,
+                    json!({
+                        "url": resp.final_url.to_string(),
+                        "reason": "unsupported_media",
+                        "kind": found.kind.label(),
+                        "content_type": ct,
+                        "bytes": resp.body.len(),
+                    }),
+                    format!("{}:{}:unsupported_media", run_id, resp.final_url),
+                )
+                .await;
+                return Err(QuarryError::new(
+                    ErrorCode::UnsupportedMedia,
+                    format!(
+                        "the page is a {} file, which Quarry cannot extract text from",
+                        found.kind.label()
+                    ),
+                )
+                .with_details(details));
+            }
+        }
 
         // Transform
         //
@@ -506,6 +616,10 @@ impl PageRunner {
         let md = html_to_readable_markdown(&body_text);
         let link_list = links::extract(&body_text, &resp.final_url);
         let mut meta = metadata::extract(&body_text, ct.clone());
+        if let Some(found) = detected {
+            meta.content_kind = Some(found.kind.label().to_owned());
+            meta.content_kind_source = Some(found.source.label().to_owned());
+        }
 
         // Body-content language detection when the HTML lang
         // attribute is missing or generic. Helps downstream LLM
@@ -1195,6 +1309,7 @@ mod page_extracted_tests {
             page_renderer: None,
             source_registrar: None,
             title_enricher: None,
+            doc_routing: DocRouting::Off,
         }
     }
 
@@ -1336,6 +1451,7 @@ mod local_index_writeback_tests {
             page_renderer: None,
             source_registrar: None,
             title_enricher: None,
+            doc_routing: DocRouting::Off,
         }
     }
 
@@ -1499,5 +1615,232 @@ mod local_index_writeback_tests {
             idx.flush().await.unwrap();
         }
         assert_eq!(idx.doc_count(), 1, "re-fetch must upsert, not append");
+    }
+}
+
+#[cfg(test)]
+mod content_routing_tests {
+    use super::*;
+    use crate::artifact_store::InMemoryStore;
+    use crate::driver::Driver;
+    use crate::fetch::FetchResponse;
+    use async_trait::async_trait;
+    use quarry_core::output::DriverKind;
+    use tokio::sync::mpsc;
+
+    /// Serves one canned body with a chosen status and Content-Type.
+    struct BodyDriver {
+        status: u16,
+        content_type: Option<&'static str>,
+        body: Vec<u8>,
+    }
+
+    #[async_trait]
+    impl Driver for BodyDriver {
+        fn kind(&self) -> DriverKind {
+            DriverKind::Static
+        }
+        async fn fetch(&self, url: &Url) -> QuarryResult<FetchResponse> {
+            Ok(FetchResponse {
+                status: self.status,
+                final_url: url.clone(),
+                headers: self
+                    .content_type
+                    .map(|ct| vec![("content-type".into(), ct.into())])
+                    .unwrap_or_default(),
+                body: self.body.clone(),
+                duration_ms: 1,
+                served_by: DriverKind::Static,
+            })
+        }
+    }
+
+    const HTML: &str = "<html><head><title>Hei</title></head><body><main><h1>Hei</h1><p>En vanlig nettside med nok tekst til at den teller som innhold.</p></main></body></html>";
+    const PNG: &[u8] = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01";
+
+    fn runner_for(
+        mode: DocRouting,
+        status: u16,
+        content_type: Option<&'static str>,
+        body: &[u8],
+    ) -> (PageRunner, mpsc::Receiver<quarry_core::event::Event>) {
+        let (tx, rx) = mpsc::channel(64);
+        let runner = PageRunner {
+            driver: Arc::new(BodyDriver {
+                status,
+                content_type,
+                body: body.to_vec(),
+            }),
+            security: Arc::new(
+                quarry_security::preflight::DefaultEngine::new().with_allow_private_hosts(true),
+            ),
+            artifacts: Arc::new(InMemoryStore::new()),
+            event_sink: EventSink::new(tx),
+            zdr: ZdrMode::Off,
+            ingest: None,
+            org_id: Some("org_test".into()),
+            user_id: None,
+            privacy: PrivacyPolicy::default(),
+            cancel_token: None,
+            local_index: None,
+            policy: RunPolicy::default(),
+            scheduler: None,
+            autoscale: None,
+            render: RenderHints::default(),
+            page_renderer: None,
+            source_registrar: None,
+            title_enricher: None,
+            doc_routing: mode,
+        };
+        (runner, rx)
+    }
+
+    fn url() -> Url {
+        "https://docs.example.test/file".parse().unwrap()
+    }
+
+    fn drain(rx: &mut mpsc::Receiver<quarry_core::event::Event>) -> Vec<quarry_core::event::Event> {
+        let mut events = Vec::new();
+        while let Ok(evt) = rx.try_recv() {
+            events.push(evt);
+        }
+        events
+    }
+
+    #[tokio::test]
+    async fn png_body_is_skipped_with_unsupported_media_and_a_page_blocked_event() {
+        let (runner, mut rx) = runner_for(DocRouting::Skip, 200, Some("image/png"), PNG);
+        let run_id: RunKind = quarry_core::ids::Id::new();
+        let error = runner
+            .run(&run_id, &url(), None)
+            .await
+            .expect_err("an image must be refused");
+        assert_eq!(error.code, ErrorCode::UnsupportedMedia);
+        assert_eq!(error.code.http_status(), 415);
+        assert!(!error.retryable);
+        let details = error.details.expect("typed details");
+        assert_eq!(details["reason"], "unsupported_media");
+        assert_eq!(details["kind"], "image");
+        assert_eq!(details["subtype"], "png");
+        assert_eq!(details["source"], "magic");
+        assert_eq!(details["bytes"], PNG.len());
+
+        let events = drain(&mut rx);
+        let blocked = events
+            .iter()
+            .find(|e| e.event_type == EventType::PageBlocked)
+            .expect("page_blocked emitted");
+        assert_eq!(blocked.payload["reason"], "unsupported_media");
+        assert_eq!(blocked.payload["kind"], "image");
+        let fetched = events
+            .iter()
+            .find(|e| e.event_type == EventType::PageFetched)
+            .expect("page_fetched emitted");
+        assert_eq!(fetched.payload["content_kind"], "image");
+    }
+
+    #[tokio::test]
+    async fn shadow_records_kind_but_never_skips() {
+        let (runner, mut rx) = runner_for(DocRouting::Shadow, 200, Some("image/png"), PNG);
+        let run_id: RunKind = quarry_core::ids::Id::new();
+        let out = runner
+            .run(&run_id, &url(), None)
+            .await
+            .expect("shadow never refuses");
+        assert_eq!(out.metadata.content_kind.as_deref(), Some("image"));
+        assert_eq!(out.metadata.content_kind_source.as_deref(), Some("magic"));
+        let fetched = drain(&mut rx)
+            .into_iter()
+            .find(|e| e.event_type == EventType::PageFetched)
+            .unwrap();
+        assert_eq!(fetched.payload["content_kind"], "image");
+    }
+
+    #[tokio::test]
+    async fn off_detects_nothing_and_changes_nothing() {
+        let (runner, mut rx) = runner_for(DocRouting::Off, 200, Some("image/png"), PNG);
+        let run_id: RunKind = quarry_core::ids::Id::new();
+        let out = runner.run(&run_id, &url(), None).await.expect("legacy path");
+        assert!(out.metadata.content_kind.is_none());
+        let fetched = drain(&mut rx)
+            .into_iter()
+            .find(|e| e.event_type == EventType::PageFetched)
+            .unwrap();
+        assert!(fetched.payload["content_kind"].is_null());
+    }
+
+    #[tokio::test]
+    async fn non_2xx_binary_keeps_legacy_path() {
+        let (runner, _rx) = runner_for(DocRouting::Skip, 404, Some("image/png"), PNG);
+        let run_id: RunKind = quarry_core::ids::Id::new();
+        let out = runner
+            .run(&run_id, &url(), None)
+            .await
+            .expect("an error status is not classified");
+        assert!(out.metadata.content_kind.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_pdf_body_is_recorded_and_not_skipped_in_skip_mode() {
+        let (runner, _rx) = runner_for(
+            DocRouting::Skip,
+            200,
+            Some("application/octet-stream"),
+            b"%PDF-1.4\n1 0 obj\n<<>>\nendobj\n",
+        );
+        let run_id: RunKind = quarry_core::ids::Id::new();
+        let out = runner
+            .run(&run_id, &url(), None)
+            .await
+            .expect("pdf takes the legacy path until routing is on");
+        assert_eq!(out.metadata.content_kind.as_deref(), Some("pdf"));
+        assert_eq!(out.metadata.content_kind_source.as_deref(), Some("magic"));
+    }
+
+    #[tokio::test]
+    async fn html_output_is_identical_across_off_shadow_and_skip() {
+        fn comparable(out: &NormalizedOutput) -> serde_json::Value {
+            let mut value = serde_json::to_value(out).unwrap();
+            let object = value.as_object_mut().unwrap();
+            for volatile in ["run_id", "fetched_at", "driver", "determinism"] {
+                object.remove(volatile);
+            }
+            if let Some(meta) = object.get_mut("metadata").and_then(|m| m.as_object_mut()) {
+                meta.remove("content_kind");
+                meta.remove("content_kind_source");
+            }
+            // Artifact ids are minted per run.
+            if let Some(formats) = object.get_mut("formats").and_then(|m| m.as_object_mut()) {
+                formats.remove("html");
+                formats.remove("markdown");
+            }
+            value
+        }
+        let mut outputs = Vec::new();
+        for mode in [DocRouting::Off, DocRouting::Shadow, DocRouting::Skip] {
+            let (runner, _rx) = runner_for(mode, 200, Some("text/html; charset=utf-8"), HTML.as_bytes());
+            let run_id: RunKind = quarry_core::ids::Id::new();
+            let out = runner.run(&run_id, &url(), None).await.expect("html ok");
+            outputs.push((mode, out));
+        }
+        let baseline = comparable(&outputs[0].1);
+        for (mode, out) in &outputs[1..] {
+            assert_eq!(comparable(out), baseline, "{mode:?} changed the HTML output");
+            assert_eq!(out.metadata.content_kind.as_deref(), Some("html"));
+        }
+        // The fingerprint (what change monitors compare) never moves.
+        assert!(outputs.iter().all(|(_, o)| o.fingerprint == outputs[0].1.fingerprint));
+    }
+
+    #[test]
+    fn doc_routing_parses_known_values_and_names_the_variable_on_error() {
+        assert_eq!(DocRouting::parse("off"), Ok(DocRouting::Off));
+        assert_eq!(DocRouting::parse(" Shadow "), Ok(DocRouting::Shadow));
+        assert_eq!(DocRouting::parse(""), Ok(DocRouting::Shadow));
+        assert_eq!(DocRouting::parse("SKIP"), Ok(DocRouting::Skip));
+        assert_eq!(DocRouting::parse("on"), Ok(DocRouting::On));
+        let error = DocRouting::parse("maybe").unwrap_err();
+        assert!(error.contains("QUARRY_EDGE__DOC_ROUTING"), "{error}");
+        assert_eq!(DocRouting::default(), DocRouting::Shadow);
     }
 }

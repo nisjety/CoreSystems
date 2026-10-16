@@ -45,6 +45,10 @@ const (
 	// (Temporal client, GPU driver, etc.) — never a silent
 	// 200-OK lie.
 	CodeUnsupported      ErrorCode = "UNSUPPORTED"
+	// CodeUnsupportedMedia mirrors Rust's `ErrorCode::UnsupportedMedia`
+	// (415): the fetched body is a kind of content Quarry has no extractor
+	// for. Not retryable; the orchestrator counts it as a failed page.
+	CodeUnsupportedMedia ErrorCode = "UNSUPPORTED_MEDIA"
 )
 
 func (c ErrorCode) HTTPStatus() int {
@@ -67,6 +71,8 @@ func (c ErrorCode) HTTPStatus() int {
 		return 502
 	case CodeUnsupported:
 		return 501
+	case CodeUnsupportedMedia:
+		return 415
 	default:
 		return 500
 	}

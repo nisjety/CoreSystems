@@ -45,6 +45,7 @@ fn error_code_http_status_matrix() {
     assert_eq!(ErrorCode::TargetRepairRequired.http_status(), 409);
     assert_eq!(ErrorCode::ChallengeDetected.http_status(), 403);
     assert_eq!(ErrorCode::RuntimeNotReady.http_status(), 503);
+    assert_eq!(ErrorCode::UnsupportedMedia.http_status(), 415);
     assert_eq!(ErrorCode::Internal.http_status(), 500);
 }
 
@@ -57,6 +58,8 @@ fn error_retryable_flag_matches_semantic() {
     assert!(!ErrorCode::ChallengeDetected.retryable());
     assert!(!ErrorCode::RuntimeNotReady.retryable());
     assert!(!ErrorCode::BadRequest.retryable());
+    // A body Quarry cannot extract is a client condition, never retried.
+    assert!(!ErrorCode::UnsupportedMedia.retryable());
 }
 
 #[test]
