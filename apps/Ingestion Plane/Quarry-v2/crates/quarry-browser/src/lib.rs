@@ -161,7 +161,6 @@ pub mod navigation;
 pub mod persistent_session;
 pub mod pool;
 pub mod session;
-pub mod stealth;
 
 #[cfg(feature = "kernel")]
 pub use kernel::{KernelConfig, KernelDriver};

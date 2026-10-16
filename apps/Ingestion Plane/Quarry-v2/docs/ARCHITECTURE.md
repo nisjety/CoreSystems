@@ -80,7 +80,7 @@ DriverPlan
   ├─ index/cache hit            (fastest; no network when valid)
   ├─ static impersonated HTTP   (rquest upstream / wreq crate + BoringSSL TLS/H2 emulation)
   ├─ browser CDP                (chromiumoxide/local Chrome or Browserless CDP)
-  ├─ browser CDP + stealth      (sticky proxy + persisted profile + action support)
+  ├─ browser CDP + profile      (sticky proxy + persisted profile + action support)
   ├─ document/PDF parser        (PDF/DOCX/XLSX/RTF path, never HTML assumptions)
   └─ specialty handlers         (Wikipedia, YouTube/audio, future site adapters)
 ```

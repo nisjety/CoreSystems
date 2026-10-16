@@ -116,3 +116,7 @@ These files were removed during this audit pass on `2026-06-07` because they wer
 ## Not deletion-ready yet
 
 The remaining candidates should stay for now because they still have planning, historical, or service-local value, even if they are no longer good runtime truth documents.
+
+## WS3.E: stealth claims removed (2026-10-16)
+
+- `apps/Ingestion Plane/Quarry-v2/docs/GAP.md` (stealth rows and bullets), `Features.md` (headless browser and TLS sections), `ARCHITECTURE.md` ("browser CDP + stealth"), `PARITY_IMPLEMENTATION_PLAN.md` (2D rotation). They described `quarry-browser/src/stealth.rs` and `FingerprintRotator`, neither of which was ever wired; both were deleted.

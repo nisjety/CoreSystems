@@ -57,14 +57,13 @@ synthesize, with citations.
 
 ### 6. Headless browser automation — JS-rendered pages
 For sites that need real browsers (SPAs, anti-bot walls, login flows):
-spin up a stealthed Chromium session with cookies, session affinity, and
+spin up a Chromium session with cookies, session affinity, and
 action playback.
 - **Parity with:** Browserbase, Browserless, Playwright Grid.
 - **Powered by:** `quarry-browser` lease pool (host scheduler, kernel,
   driver); optionally delegates to **Browserbase** when the operator
-  configures an external pool. Stealth profiles live in
-  `quarry-runtime/stealth.rs` (fingerprint randomization, UA, viewport,
-  TLS shape via `quarry-tls`).
+  configures an external pool. There is no stealth or fingerprint
+  randomization layer; TLS shape comes from `quarry-tls`.
 
 ### 7. Change tracking — diff between visits
 Crawl the same URL on a schedule, get notified when content meaningfully
@@ -132,7 +131,7 @@ HTTP/2 and HTTP/3 with proper ALPN — sites that block `curl`/`requests`
 still serve content.
 - **Parity with:** ScrapingAnt, ScrapingBee, Bright Data Scraping Browser.
 - **Powered by:** `quarry-tls` (`rquest`/`wreq` upstream — same engine
-  TLS-Client-Identifier libraries use), `quarry-runtime/stealth.rs`.
+  TLS-Client-Identifier libraries use).
 
 ### 15. Multi-tenant safety — SSRF guard + policy
 Every URL passes a security preflight (no localhost, no IPv6 ULA, no AWS

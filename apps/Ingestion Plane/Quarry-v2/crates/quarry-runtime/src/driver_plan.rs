@@ -54,7 +54,6 @@ pub struct DriverPlan {
     pub driver: DriverKind,
     pub fallback_chain: Vec<DriverKind>,
     pub tls_profile: Option<TlsProfile>,
-    pub stealth_level: u8,
     pub js_required: bool,
     pub reason: String,
 }
@@ -65,7 +64,6 @@ impl DriverPlan {
             driver: DriverKind::Static,
             fallback_chain: vec![DriverKind::Tls, DriverKind::Browser],
             tls_profile: None,
-            stealth_level: 0,
             js_required: false,
             reason: reason.into(),
         }
@@ -76,7 +74,6 @@ impl DriverPlan {
             driver: DriverKind::Tls,
             fallback_chain: vec![DriverKind::Browser],
             tls_profile: Some(profile),
-            stealth_level: 1,
             js_required: false,
             reason: reason.into(),
         }
@@ -87,7 +84,6 @@ impl DriverPlan {
             driver: DriverKind::Browser,
             fallback_chain: vec![],
             tls_profile: None,
-            stealth_level: 2,
             js_required: true,
             reason: reason.into(),
         }

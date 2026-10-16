@@ -98,7 +98,8 @@ AIMD (`record_ok` +1 to max, `record_overload` halve to min) via pure `next_targ
 `acquire()` permits. Dep-free (no sysinfo; core-count + backpressure signals). Layers above per-host
 `HostScheduler`. 6 tests. **WIRED** into `PageRunner` fetch path (`global_autoscale()` permit per fetch + AIMD by outcome).
 
-### 2D — Fingerprint/session auto-rotation on block  ·  M  ·  rust-patterns — ✅ SHIPPED
+### 2D — Fingerprint/session auto-rotation on block  ·  M  ·  rust-patterns — ⚠ REMOVED (WS3.E)
+_The rotator below had no caller and was deleted; only `is_block_status` and the fallback-chain fall-through remain._
 `quarry-runtime/src/fingerprint_rotation.rs`: `is_block_status` (401/403/407/429/503),
 `FingerprintRotator` (round-robin over impersonation profiles, bounded `max_rotations`, `on_block()`
 → next profile or None when exhausted), pure `next_index`. Dep-free, 4 tests. **WIRED** into

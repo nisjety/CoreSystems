@@ -29,7 +29,7 @@ Gap closure now follows the phase system in Section 14. The `Owner Phase` column
 | TLS/JA3/JA4/H2 impersonation | ❌ detectable | ✅ BoringSSL via `wreq` | **V1 gap** |
 | Browser (headless) | ✅ Rod (CDP) | ✅ chromiumoxide CDP | Equivalent |
 | Browserbase cloud driver | ❌ | ✅ Feature-gated Browserbase WSS driver (`browserbase`) | V2 ahead (optional cloud browser backend) |
-| Browser stealth mode | ✅ (JS injection evasions) | 🟡 Baseline CDP stealth init script + emulation overrides are wired in chromiumoxide and Browserbase; fingerprint benchmark still pending | **V2 partial gap** |
+| Browser stealth mode | ✅ (JS injection evasions) | ❌ None. Emulation overrides (viewport, locale, timezone, headers) exist; there is no stealth script or fingerprint spoofing, by decision (ADR-5) | **V2 gap by design** |
 | PDF rendering / fetch | ✅ Rod print-to-PDF | ✅ CDP `printToPdf` | Equivalent |
 | PDF parsing (ingest PDF as source) | ❌ | ✅ Self-hosted `pdf-extract` text extraction in transform pipeline | V2 ahead for text PDFs; OCR/layout parsing still optional |
 | Document/binary fetch | ✅ | ✅ Text/PDF/binary classification with raw/markdown output routing | Equivalent |
@@ -49,7 +49,7 @@ Gap closure now follows the phase system in Section 14. The `Owner Phase` column
 | Static TLS impersonation | Fire Engine (hosted) | ✅ self-owned BoringSSL | **V2 structural advantage** |
 | Browser CDP (headless) | Fire Engine + Playwright | ✅ chromiumoxide | Equivalent |
 | Cloud browser session backend | ✅ Managed Fire Engine sessions | ✅ Browserbase WSS driver (feature-gated) | Equivalent (different ops model) |
-| Stealth / anti-detect | Fire Engine stealth tier | 🟡 Baseline CDP stealth script + device/locale overrides are shipped across local/cloud browser paths | **V2 partial gap in hardening/measurement** |
+| Stealth / anti-detect | Fire Engine stealth tier | ❌ None. Device and locale overrides only; the stealth script and fingerprint rotation code were removed (WS3.E) | **V2 gap by design** |
 | `fetch` fallback | ✅ | ✅ | Equivalent |
 | PDF ingest (LlamaParse) | ✅ | 🟡 Self-hosted text-PDF extraction; no hosted OCR/layout parser | **V2 partial gap for OCR/layout fidelity** |
 | Wikipedia Enterprise | ✅ | ✅ Configurable Wikipedia source adapter with enterprise base URL/token support | Equivalent |
@@ -84,7 +84,7 @@ Gap closure now follows the phase system in Section 14. The `Owner Phase` column
 - Static/TLS drivers now fail fast on browser actions, while the browser adapter executes public action scripts before content extraction.
 - Source routing is partly implemented. The pipeline detects the body kind (quarry-transform `sniff`: magic bytes first, then Content-Type) and records it as `metadata.content_kind`; with `QUARRY_EDGE__DOC_ROUTING=skip` or `on` a body it cannot extract (image, archive, spreadsheet, ...) is refused with a typed 415 `UNSUPPORTED_MEDIA`. With `on`, PDF and DOCX bodies are routed to their text extractors (off the request thread, 15 s deadline, 2 concurrent parses, 8 MiB text cap, DOCX zip bounds), stored as `formats.raw` + `formats.markdown`, and under ZDR the text is returned inline in `ScrapeResponse.markdown` with no artifact. Not done: OCR for scans, streaming body cap in the drivers (bodies are still capped at 16 MiB), XLSX/PPTX/ODF/EPUB extraction, an image parser. Default mode is `shadow` (detect and record only); `on` has been tested with unit/integration tests only, not on a running stack. Corrected 2026-10-16; plan WS5.A/WS5.B.
 - Wikipedia pages can be fetched through a configurable source adapter, including enterprise-style base URL and bearer token configuration.
-- Chromiumoxide now applies a baseline stealth init script plus request-scoped mobile metrics, touch emulation, locale override, timezone hint, headers, ad blocking, and country proxy selection.
+- Chromiumoxide applies request-scoped mobile metrics, touch emulation, locale override, timezone hint, headers, ad blocking, and country proxy selection. It injects no stealth script (the one that existed was never loaded and was removed in WS3.E).
 
 ---
 
@@ -767,7 +767,7 @@ After re-checking the live codebase and validating the new tests, the old “mis
 - **Extract parity:** sync single-URL + `structured_output_schema` passthrough are shipped; source-trace, cost-guard, and async multi-URL extraction remain open.
 - **NL crawl parity:** `prompt` field wired on edge and forwarded to orchestrator; Go orchestrator-side BFS URL ranking requires Phase 15.5 work.
 - **Agent parity:** current route is a sync fetch+answer helper, not a full agent loop.
-- **Browser stealth evidence:** baseline stealth and emulation are wired, but benchmark proof is still pending.
+- **Browser stealth:** none (removed in WS3.E); emulation overrides only.
 
 #### ❌ Not Implemented
 - **Deep research workflow:** explicit Post-V2 deferral

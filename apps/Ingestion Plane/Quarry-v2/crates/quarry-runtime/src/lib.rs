@@ -128,7 +128,7 @@ pub use event_bus::{EventBus, EventReceiver, InProcessEventBus};
 pub use events::EventSink;
 pub use fallback_driver::FallbackDriver;
 pub use fetch::StaticDriver;
-pub use fingerprint_rotation::{is_block_status, FingerprintRotator};
+pub use fingerprint_rotation::is_block_status;
 pub use fusion::{rrf_fuse, RRF_K};
 pub use grant_validator::{
     GrantValidation, GrantValidator, HttpGrantValidator, NoopGrantValidator,
