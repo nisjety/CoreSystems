@@ -315,6 +315,10 @@ fn orchestration_routes() -> Router<AppState> {
         )
         .route("/v1/orchestration/runs/:run_id/cancel", post(cancel_run))
         .route("/v1/orchestration/runs/:run_id/resume", post(resume_run))
+        .route(
+            "/v1/orchestration/runs/:run_id/continue",
+            post(crate::sse::continue_run),
+        )
 }
 
 /// App-Plane proxy routes (`/v1/capabilities`, `/v1/tasks`, `/v1/cron`,

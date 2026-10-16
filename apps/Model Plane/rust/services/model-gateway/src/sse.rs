@@ -711,6 +711,7 @@ mod agent_route_tests {
             None,
             route,
             budget,
+            None,
         )
     }
 
@@ -1511,6 +1512,7 @@ pub async fn invoke_stream_sse(
             sandbox_bearer,
             agentic_route,
             idem_guard,
+            None,
         );
     }
 
@@ -9005,6 +9007,7 @@ fn spawn_run_dispatch(
     // plan to consume.
     approved_plan_context: Option<&str>,
     route: &AgentRoute,
+    resume: Option<mp_contracts::model_plane::v1::AgentResume>,
 ) -> Result<tokio::task::JoinHandle<Result<RunAgentResponse, tonic::Status>>, tonic::Status> {
     let mut execution_client = state.execution_client.clone();
     // The graded authority execution-core enforces PER CALL.
@@ -9057,6 +9060,7 @@ fn spawn_run_dispatch(
         approved_plan_context,
         route,
         budget,
+        resume,
     );
     let run_agent_req = authenticated_run_agent_request(
         run_agent_req,
@@ -9137,6 +9141,7 @@ fn build_run_agent_request(
     approved_plan_context: Option<&str>,
     route: &AgentRoute,
     budget: crate::run_budget::RunBudget,
+    resume: Option<mp_contracts::model_plane::v1::AgentResume>,
 ) -> RunAgentRequest {
     RunAgentRequest {
         run_id: run.run_id.clone(),
@@ -9200,7 +9205,8 @@ fn build_run_agent_request(
         // The run context is composed and sent by a later slice (build plan
         // WS02 S6); absent = today's behaviour.
         run_context: None,
-        resume: None,
+        // A continuation segment carries its resume; every other run sends none.
+        resume,
     }
 }
 
@@ -9562,6 +9568,8 @@ fn agentic_run_stream(
     // not on the ChatGPT subscription (see `AgentRoute`).
     route: AgentRoute,
     idem_guard: Option<crate::idempotency_registry::CommitGuard>,
+    // A continuation segment (build plan WS03 S3). `None` for every turn.
+    resume: Option<mp_contracts::model_plane::v1::AgentResume>,
 ) -> Sse<ReceiverStream<Result<Event, Infallible>>> {
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(32);
     tokio::spawn(async move {
@@ -9617,6 +9625,7 @@ fn agentic_run_stream(
             sandbox_bearer.as_ref(),
             plan_context.as_deref(),
             &route,
+            resume.clone(),
         ) {
             Ok(dispatch) => dispatch,
             Err(error) => {
@@ -13333,5 +13342,219 @@ mod zdr_provenance_tests {
         // floor applies.
         assert_eq!(zdr_enforced_floor(99), 3);
         assert_eq!(zdr_enforced_floor(-1), 3);
+    }
+}
+
+/// The body of a continuation request. There is no brief field: the continuation's
+/// brief is built from the run's recorded step events, which is a follow-up. A
+/// client cannot author what the model is told about earlier results.
+#[derive(serde::Deserialize)]
+pub(crate) struct ContinueRunRequest {
+    pub approval_id: String,
+    pub claim_token: String,
+}
+
+/// The checks a continuation makes before any work starts, as a pure function so
+/// each refusal is testable. Returns the status and the closed code.
+fn continue_preflight(
+    enabled: bool,
+    run_status: &str,
+    approval_matches_run: bool,
+    approval_granted: bool,
+    continuation_mode: &str,
+) -> Result<(), (StatusCode, &'static str)> {
+    if !enabled {
+        return Err((StatusCode::CONFLICT, "continue_disabled"));
+    }
+    if matches!(run_status, "completed" | "failed" | "cancelled") {
+        return Err((StatusCode::CONFLICT, "not_resumable"));
+    }
+    if !approval_matches_run {
+        return Err((StatusCode::NOT_FOUND, "approval_not_found"));
+    }
+    if !approval_granted {
+        return Err((StatusCode::CONFLICT, "approval_not_granted"));
+    }
+    if continuation_mode != "loop" {
+        return Err((StatusCode::CONFLICT, "not_resumable"));
+    }
+    Ok(())
+}
+
+fn continue_error(status: StatusCode, code: &str) -> (StatusCode, Json<Value>) {
+    (
+        status,
+        Json(json!({ "error": { "code": code, "message": code.replace('_', " ") } })),
+    )
+}
+
+/// `POST /v1/orchestration/runs/{run_id}/continue` (build plan WS03 S3): continue a
+/// run that paused for a granted approval, as a fresh segment of the SAME run.
+///
+/// The invoke path refuses a run that is already started (`managed_run_already_started`).
+/// This is the one caller that legitimately reuses a started run, and it does so
+/// only after the owner, the approval and the switch are checked here, and after
+/// execution-core consumes the approval exactly once. The segment's tools and
+/// authority come from the pause's retained snapshot, never from this request.
+pub(crate) async fn continue_run(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    model_bearer: VerifiedModelBearer,
+    inference_bearer: VerifiedInferenceBearer,
+    execution_bearer: Option<Extension<VerifiedExecutionBearer>>,
+    data_plane_bearer: Option<Extension<VerifiedBearer>>,
+    axum::extract::Path(run_id): axum::extract::Path<String>,
+    axum::Json(req): axum::Json<ContinueRunRequest>,
+) -> Result<Sse<ReceiverStream<Result<Event, Infallible>>>, (StatusCode, Json<Value>)> {
+    crate::zdr_posture::continuation_gate(&claims)?;
+    if req.approval_id.trim().is_empty() || req.claim_token.trim().is_empty() {
+        return Err(continue_error(StatusCode::BAD_REQUEST, "continue_incomplete"));
+    }
+    let (Some(Extension(execution_bearer)), Some(Extension(data_plane_bearer))) =
+        (execution_bearer, data_plane_bearer)
+    else {
+        return Err(continue_error(StatusCode::UNAUTHORIZED, "missing_bearer"));
+    };
+    crate::session_flow::require_durable_run_owner_with_token(
+        &state,
+        &run_id,
+        &claims.org_id,
+        &claims.user_id,
+        model_bearer.as_str(),
+    )
+    .await
+    .map_err(|error| crate::http_routes::grpc_status_to_http(&error))?;
+
+    let detail = state
+        .run_client
+        .clone()
+        .get_run(authenticated_session_request(
+            mp_contracts::model_plane::v1::GetRunRequest {
+                run_id: run_id.clone(),
+            },
+            &model_bearer,
+        )
+        .map_err(|error| crate::http_routes::grpc_status_to_http(&error))?)
+        .await
+        .map_err(|error| crate::http_routes::grpc_status_to_http(&error))?
+        .into_inner();
+    let approval = state
+        .orchestration_client
+        .clone()
+        .get_approval(authenticated_session_request(
+            mp_contracts::model_plane::v1::GetApprovalRequest {
+                approval_id: req.approval_id.clone(),
+                // Scoped to the verified org, never a client value.
+                org_id: claims.org_id.clone(),
+            },
+            &model_bearer,
+        )
+        .map_err(|error| crate::http_routes::grpc_status_to_http(&error))?)
+        .await
+        .map_err(|error| crate::http_routes::grpc_status_to_http(&error))?
+        .into_inner()
+        .approval;
+    let granted = mp_contracts::model_plane::v1::ApprovalState::Granted as i32;
+    let (matches_run, is_granted, mode) = match approval.as_ref() {
+        Some(approval) => (
+            approval.run_id == run_id,
+            approval.state == granted,
+            approval.continuation_mode.clone(),
+        ),
+        None => (false, false, String::new()),
+    };
+    continue_preflight(
+        mp_contracts::loop_fold::continue_after_approval_enabled(),
+        &detail.status,
+        matches_run,
+        is_granted,
+        &mode,
+    )
+    .map_err(|(status, code)| continue_error(status, code))?;
+
+    // The run already exists: reuse it under its own managed obligation, so one
+    // terminal receipt covers the whole run (decision recorded in the build plan).
+    let run = crate::session_flow::SessionRun {
+        thread_id: detail.thread_id.clone(),
+        run_id: run_id.clone(),
+        org_id: claims.org_id.clone(),
+        already_started: true,
+        terminal_source: mp_contracts::model_plane::v1::ManagedRunSource::ExecutionAgent,
+    };
+    let resume = mp_contracts::model_plane::v1::AgentResume {
+        mode: "segment".to_owned(),
+        approval_id: req.approval_id,
+        claim_token: req.claim_token,
+        // The brief is not client-authored (see ContinueRunRequest); empty for now.
+        brief: String::new(),
+        segment_no: 2,
+        ..Default::default()
+    };
+    Ok(agentic_run_stream(
+        state,
+        run,
+        new_ulid(),
+        claims.org_id.clone(),
+        claims.user_id.clone(),
+        String::new(),
+        detail.goal,
+        Vec::new(),
+        Vec::new(),
+        false,
+        None,
+        0,
+        "ask".to_owned(),
+        false,
+        execution_bearer,
+        data_plane_bearer,
+        model_bearer,
+        inference_bearer,
+        String::new(),
+        None,
+        AgentRoute::default(),
+        None,
+        Some(resume),
+    ))
+}
+
+#[cfg(test)]
+mod continue_run_tests {
+    use super::*;
+
+    #[test]
+    fn a_continuation_is_refused_while_the_switch_is_off() {
+        assert_eq!(
+            continue_preflight(false, "running", true, true, "loop"),
+            Err((StatusCode::CONFLICT, "continue_disabled"))
+        );
+    }
+
+    #[test]
+    fn a_finished_run_is_not_resumable() {
+        for status in ["completed", "failed", "cancelled"] {
+            assert_eq!(
+                continue_preflight(true, status, true, true, "loop"),
+                Err((StatusCode::CONFLICT, "not_resumable")),
+                "{status}"
+            );
+        }
+    }
+
+    #[test]
+    fn only_a_granted_loop_approval_of_this_run_continues() {
+        assert_eq!(
+            continue_preflight(true, "running", false, true, "loop"),
+            Err((StatusCode::NOT_FOUND, "approval_not_found"))
+        );
+        assert_eq!(
+            continue_preflight(true, "running", true, false, "loop"),
+            Err((StatusCode::CONFLICT, "approval_not_granted"))
+        );
+        assert_eq!(
+            continue_preflight(true, "running", true, true, ""),
+            Err((StatusCode::CONFLICT, "not_resumable")),
+            "a cold approval belongs to the delivery worker"
+        );
+        assert_eq!(continue_preflight(true, "running", true, true, "loop"), Ok(()));
     }
 }

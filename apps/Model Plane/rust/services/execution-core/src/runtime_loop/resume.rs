@@ -96,6 +96,10 @@ impl ApprovedRelease {
     }
 }
 
+/// The largest descriptor a loop-owned pause may retain. Mirrors session-core's
+/// `MAX_CONTINUATION_DESCRIPTOR_BYTES`: the two must move together.
+pub(crate) const MAX_SNAPSHOT_BYTES: usize = 16 * 1024;
+
 /// The authority a call is offered under, as the loop sees it at pause time.
 pub(crate) fn offered_authority(
     req: &pb::RunAgentRequest,

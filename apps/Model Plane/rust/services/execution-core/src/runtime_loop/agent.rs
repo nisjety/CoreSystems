@@ -4553,6 +4553,13 @@ async fn pause_for_approval(
         descriptor["offered"] = offered.clone();
         continuation_descriptor_json = serde_json::to_string(&descriptor)
             .map_err(|_| tonic::Status::internal("could not encode continuation descriptor"))?;
+        // Refused before the pause is raised: a pause that the approval store
+        // would reject for size is never created. Closed token only.
+        if continuation_descriptor_json.len() > super::resume::MAX_SNAPSHOT_BYTES {
+            return Err(tonic::Status::failed_precondition(
+                "approval_snapshot_too_large",
+            ));
+        }
     }
     let request = authenticated_session_request(
         pb::CreateApprovalRequest {
