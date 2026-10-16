@@ -215,6 +215,35 @@ message RunAgentRequest {
   // unknown field, which is today's behaviour. Field 18 is reserved for this
   // message in the build plan's proto reservation table (section 4.3).
   RunContext run_context = 18;
+
+  // Continue a run after a pause (build plan WS03 S3): the segment that follows
+  // an approval. Absent = a fresh run, exactly as before. Refused unless the
+  // durable-loop switch is on, refused for zero-retention callers, and it can
+  // only narrow the authority the run paused with. Field 19 is reserved for this
+  // message in the build plan's proto reservation table (section 4.3).
+  AgentResume resume = 19;
+}
+
+// AgentResume names the approved call a continuation segment may release, and
+// carries the brief it is seeded with. It carries no credential: the resumed
+// segment authenticates with fresh bearers minted for the continue request.
+message AgentResume {
+  // "segment" (a fresh segment seeded by a brief) or "loop" (re-entry from a fold).
+  string mode = 1;
+  // The granted approval the segment consumes, exactly once.
+  string approval_id = 2;
+  // The step the approval gates.
+  string step_id = 3;
+  // The tool the approval gates.
+  string tool_name = 4;
+  // The digest of the exact call that was approved.
+  string action_fingerprint = 5;
+  // A framed brief of the recorded results so far (data, not instructions).
+  string brief = 6;
+  // An opaque token for the consume; the same token replays safely.
+  string claim_token = 7;
+  // Which segment of the run this is (2 for the first continuation).
+  uint32 segment_no = 8;
 }
 
 // RunContext - what the gateway hands an agent run beyond its goal.
