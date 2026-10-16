@@ -35,6 +35,10 @@ pub enum ErrorCode {
     /// (an image, an archive, a spreadsheet). A client condition, not a server
     /// fault: never retried. Details carry the detected kind.
     UnsupportedMedia,
+    /// An agent-class run reached a step, attempt, runtime or cost bound.
+    /// Details name the dimension. Not retryable: the budget does not refill
+    /// by waiting, and a resumed run keeps what it spent.
+    BudgetExhausted,
     Internal,
 }
 
@@ -59,6 +63,7 @@ impl ErrorCode {
             Self::DriverFailed | Self::UpstreamBlocked => 502,
             Self::Unsupported => 501,
             Self::UnsupportedMedia => 415,
+            Self::BudgetExhausted => 402,
             Self::RuntimeNotReady => 503,
             Self::Internal => 500,
         }

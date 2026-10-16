@@ -2,6 +2,7 @@ pub mod agent_routes;
 pub mod fleet_routes;
 pub mod answer_routes;
 pub mod api_error;
+pub mod budget;
 pub mod audio_routes;
 pub mod auth;
 pub mod cache;

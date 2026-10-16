@@ -66,7 +66,11 @@ impl MetricsConfig {
             Some(value) => match value.to_ascii_lowercase().as_str() {
                 "1" | "true" | "on" | "yes" => true,
                 "0" | "false" | "off" | "no" => false,
-                _ => return Err(format!("{ENV_ENABLED} must be 1/0 (true/false), got {value:?}")),
+                _ => {
+                    return Err(format!(
+                        "{ENV_ENABLED} must be 1/0 (true/false), got {value:?}"
+                    ))
+                }
             },
         };
         let addr = get(ENV_ADDR)
@@ -74,12 +78,18 @@ impl MetricsConfig {
             .filter(|value| !value.is_empty())
             .unwrap_or_else(|| DEFAULT_METRICS_ADDR.to_owned());
         if enabled && addr.parse::<SocketAddr>().is_err() {
-            return Err(format!("{ENV_ADDR} must be a socket address like 0.0.0.0:9092"));
+            return Err(format!(
+                "{ENV_ADDR} must be a socket address like 0.0.0.0:9092"
+            ));
         }
         let token = get(ENV_TOKEN)
             .map(|value| value.trim().to_owned())
             .filter(|value| !value.is_empty());
-        Ok(Self { enabled, addr, token })
+        Ok(Self {
+            enabled,
+            addr,
+            token,
+        })
     }
 
     /// Production must not expose an unauthenticated or guessable endpoint.
@@ -137,9 +147,16 @@ pub fn route_class(path: &str) -> &'static str {
     match segments.next() {
         Some("v1") => {
             let second = segments.next().unwrap_or("");
-            V1.iter().find(|name| **name == second).copied().unwrap_or("v1_other")
+            V1.iter()
+                .find(|name| **name == second)
+                .copied()
+                .unwrap_or("v1_other")
         }
-        Some(first) => ROOT.iter().find(|name| **name == first).copied().unwrap_or("other"),
+        Some(first) => ROOT
+            .iter()
+            .find(|name| **name == first)
+            .copied()
+            .unwrap_or("other"),
         None => "other",
     }
 }
@@ -179,6 +196,19 @@ pub async fn http_middleware(request: Request, next: Next) -> Response {
     response
 }
 
+/// A run reached a budget bound. `dimension` is steps, attempts, runtime or
+/// cost; `class` is interactive or agent; `mode` is `on` (refused) or
+/// `shadow` (would have been). All three come from closed sets.
+pub fn record_budget_exhausted(dimension: &'static str, class: &'static str, mode: &'static str) {
+    metrics::counter!(
+        "quarry_agent_budget_exhausted_total",
+        "dimension" => dimension,
+        "class" => class,
+        "mode" => mode
+    )
+    .increment(1);
+}
+
 /// Record the result of one `/v1/scrape`. `outcome` is `ok` or the error
 /// code's wire name (a closed enum).
 pub fn record_scrape(outcome: &str) {
@@ -199,7 +229,9 @@ pub fn install() -> anyhow::Result<PrometheusHandle> {
     let handle = PrometheusBuilder::new()
         .set_buckets_for_metric(
             Matcher::Suffix("_seconds".to_owned()),
-            &[0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0],
+            &[
+                0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0,
+            ],
         )?
         .install_recorder()?;
     describe_all();
@@ -209,17 +241,39 @@ pub fn install() -> anyhow::Result<PrometheusHandle> {
 
 fn describe_all() {
     use metrics::{describe_counter, describe_gauge, describe_histogram, Unit};
-    describe_counter!("quarry_http_requests_total", "HTTP requests by route class, method and status class.");
+    describe_counter!(
+        "quarry_http_requests_total",
+        "HTTP requests by route class, method and status class."
+    );
     describe_histogram!(
         "quarry_http_request_duration_seconds",
         Unit::Seconds,
         "HTTP request duration by route class and status class."
     );
-    describe_counter!("quarry_scrape_outcomes_total", "Single-page scrapes by outcome (ok or an error code).");
-    describe_gauge!("quarry_lease_pool_in_flight", "Leases currently held, by pool.");
-    describe_gauge!("quarry_lease_pool_peak_in_flight", "Highest in-flight lease count seen, by pool.");
-    describe_gauge!("quarry_lease_pool_capacity", "Concurrent leases a pool allows.");
-    describe_counter!("quarry_lease_pool_acquired_total", "Leases handed out, by pool.");
+    describe_counter!(
+        "quarry_scrape_outcomes_total",
+        "Single-page scrapes by outcome (ok or an error code)."
+    );
+    describe_counter!(
+        "quarry_agent_budget_exhausted_total",
+        "Agent runs that reached a budget bound, by dimension, class and mode (shadow = would have been refused)."
+    );
+    describe_gauge!(
+        "quarry_lease_pool_in_flight",
+        "Leases currently held, by pool."
+    );
+    describe_gauge!(
+        "quarry_lease_pool_peak_in_flight",
+        "Highest in-flight lease count seen, by pool."
+    );
+    describe_gauge!(
+        "quarry_lease_pool_capacity",
+        "Concurrent leases a pool allows."
+    );
+    describe_counter!(
+        "quarry_lease_pool_acquired_total",
+        "Leases handed out, by pool."
+    );
     describe_gauge!("quarry_build_info", "Always 1; the version is the label.");
 }
 
@@ -243,11 +297,14 @@ pub fn sample_pools() {
     };
     for (name, pool) in snapshot {
         let counters = pool.metrics_snapshot();
-        metrics::gauge!("quarry_lease_pool_in_flight", "pool" => name).set(counters.in_flight as f64);
+        metrics::gauge!("quarry_lease_pool_in_flight", "pool" => name)
+            .set(counters.in_flight as f64);
         metrics::gauge!("quarry_lease_pool_peak_in_flight", "pool" => name)
             .set(counters.peak_in_flight as f64);
-        metrics::gauge!("quarry_lease_pool_capacity", "pool" => name).set(pool.max_concurrent() as f64);
-        metrics::counter!("quarry_lease_pool_acquired_total", "pool" => name).absolute(counters.acquired);
+        metrics::gauge!("quarry_lease_pool_capacity", "pool" => name)
+            .set(pool.max_concurrent() as f64);
+        metrics::counter!("quarry_lease_pool_acquired_total", "pool" => name)
+            .absolute(counters.acquired);
     }
 }
 
@@ -276,7 +333,10 @@ fn digest(value: &str) -> [u8; 32] {
 /// Constant-time equality over two fixed-size digests, so the comparison time
 /// does not depend on how much of a guessed token is right or how long it is.
 fn digests_equal(left: &[u8; 32], right: &[u8; 32]) -> bool {
-    left.iter().zip(right).fold(0u8, |acc, (a, b)| acc | (a ^ b)) == 0
+    left.iter()
+        .zip(right)
+        .fold(0u8, |acc, (a, b)| acc | (a ^ b))
+        == 0
 }
 
 fn authorized(state: &MetricsState, headers: &HeaderMap) -> bool {
@@ -300,7 +360,10 @@ async fn metrics_handler(State(state): State<MetricsState>, headers: HeaderMap) 
             .into_response();
     }
     (
-        [(header::CONTENT_TYPE, "text/plain; version=0.0.4; charset=utf-8")],
+        [(
+            header::CONTENT_TYPE,
+            "text/plain; version=0.0.4; charset=utf-8",
+        )],
         state.handle.render(),
     )
         .into_response()
@@ -324,8 +387,10 @@ mod tests {
     use std::collections::HashMap;
 
     fn cfg(vars: &[(&str, &str)]) -> Result<MetricsConfig, String> {
-        let vars: HashMap<String, String> =
-            vars.iter().map(|(k, v)| ((*k).to_owned(), (*v).to_owned())).collect();
+        let vars: HashMap<String, String> = vars
+            .iter()
+            .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+            .collect();
         MetricsConfig::from_env(|name| vars.get(name).cloned())
     }
 
@@ -343,7 +408,9 @@ mod tests {
 
     #[test]
     fn a_garbled_flag_or_address_stops_the_edge_naming_the_variable() {
-        assert!(cfg(&[(ENV_ENABLED, "maybe")]).unwrap_err().contains(ENV_ENABLED));
+        assert!(cfg(&[(ENV_ENABLED, "maybe")])
+            .unwrap_err()
+            .contains(ENV_ENABLED));
         assert!(cfg(&[(ENV_ENABLED, "1"), (ENV_ADDR, "nine-oh-nine-two")])
             .unwrap_err()
             .contains(ENV_ADDR));
@@ -407,6 +474,9 @@ mod tests {
     fn error_labels_are_the_wire_names() {
         use quarry_core::error::ErrorCode;
         assert_eq!(error_label(ErrorCode::RateLimited), "rate_limited");
-        assert_eq!(error_label(ErrorCode::UnsupportedMedia), "unsupported_media");
+        assert_eq!(
+            error_label(ErrorCode::UnsupportedMedia),
+            "unsupported_media"
+        );
     }
 }

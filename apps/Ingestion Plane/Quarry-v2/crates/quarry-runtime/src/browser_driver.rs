@@ -137,7 +137,7 @@ impl BrowserDriverAdapter {
         let key = url.host_str().unwrap_or("default").to_string();
         let mut guard = self
             .pool
-            .acquire_timeout(&key, LEASE_ACQUIRE_TIMEOUT)
+            .acquire_timeout_for_org(&hints.org_id, &key, LEASE_ACQUIRE_TIMEOUT)
             .await?;
 
         if guard.lease.is_none() {
@@ -167,7 +167,11 @@ impl BrowserDriverAdapter {
             guard.lease = Some(lease);
         }
 
-        let lease_ref = guard.lease.as_ref().expect("lease set above");
+        // The pooled lease is shared by host across callers, so the tenant is
+        // stamped on this call's copy rather than on the pooled one.
+        let mut call_lease = guard.lease.as_ref().expect("lease set above").clone();
+        call_lease.org_id = hints.org_id.clone();
+        let lease_ref = &call_lease;
         let start = Instant::now();
 
         let session = match self.inner.acquire(lease_ref).await {

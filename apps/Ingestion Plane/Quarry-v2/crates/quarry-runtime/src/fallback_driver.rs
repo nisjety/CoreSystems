@@ -591,6 +591,7 @@ pub(crate) fn error_code_short(code: ErrorCode) -> &'static str {
         ErrorCode::UpstreamBlocked => "upstream_blocked",
         ErrorCode::Unsupported => "unsupported",
         ErrorCode::UnsupportedMedia => "unsupported_media",
+        ErrorCode::BudgetExhausted => "budget_exhausted",
         ErrorCode::Internal => "internal",
     }
 }

@@ -183,6 +183,17 @@ services:
       # Off by default. When on, production refuses to start without a token of
       # at least 16 characters. The port is never published; scrape it over the
       # compose network (see docs/RUNBOOKS.md, "Metrics").
+      # Agent-run budgets (crates/quarry-edge/src/budget.rs): off | shadow | on.
+      # shadow (the default) records what would be refused, by class, and
+      # refuses nothing; read quarry_agent_budget_exhausted_total{mode="shadow"}
+      # for at least a day, and confirm no class="interactive" series, before on.
+      QUARRY_EDGE__BUDGET_ENFORCEMENT: "${QUARRY_EDGE_BUDGET_ENFORCEMENT:-shadow}"
+      # How many of the browser pool's leases one organization may hold at once
+      # (0 = no cap). A tenant at its cap waits for its own releases, then gets
+      # a retryable 429 with details.reason = org_render_cap. Off by default: on
+      # a single-tenant deployment any value below the pool size (2) only slows
+      # that tenant down. Set it when more than one organization shares the edge.
+      QUARRY_EDGE__POOL_ORG_MAX_PERMITS: "${QUARRY_POOL_ORG_MAX_PERMITS:-0}"
       QUARRY_EDGE__METRICS_ENABLED: "${QUARRY_EDGE_METRICS_ENABLED:-0}"
       QUARRY_EDGE__METRICS_TOKEN: "${QUARRY_EDGE_METRICS_TOKEN:-}"
       QUARRY_EDGE__SECURITY_SNAPSHOT_PATH: ${QUARRY_SECURITY_SNAPSHOT_PATH:-/app/data/security-feeds/quarry-security.json}

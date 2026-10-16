@@ -27,6 +27,7 @@ mod agent_routes;
 mod fleet_routes;
 mod answer_routes;
 mod api_error;
+mod budget;
 mod audio_routes;
 mod auth;
 mod cache;
@@ -162,6 +163,20 @@ async fn main() -> anyhow::Result<()> {
     // variable, rather than silently become "no bound" later.
     limits::CrawlLimits::from_env().map_err(|e| anyhow::anyhow!("crawl limits: {e}"))?;
     quarry_runtime::DocRouting::from_env().map_err(|e| anyhow::anyhow!("doc routing: {e}"))?;
+    // Agent-run budgets: an unreadable mode or limit stops the edge here, naming
+    // the variable, rather than silently becoming "no budget".
+    let budget_mode = budget::BudgetMode::from_env().map_err(|e| anyhow::anyhow!("budget: {e}"))?;
+    budget::BudgetLimits::from_env(|name| std::env::var(name).ok())
+        .map_err(|e| anyhow::anyhow!("budget: {e}"))?;
+    tracing::info!(mode = budget_mode.label(), "agent run budget enforcement");
+    // How much of a browser pool one organization may hold (0 = no cap).
+    let pool_org_max = quarry_runtime::lease_pool::org_max_permits_from_env(|name| {
+        std::env::var(name).ok()
+    })
+    .map_err(|e| anyhow::anyhow!("lease pool: {e}"))?;
+    if pool_org_max > 0 {
+        tracing::info!(pool_org_max, "per-organization browser pool cap");
+    }
     let environment = std::env::var("ENVIRONMENT")
         .or_else(|_| std::env::var("APP_ENV"))
         .unwrap_or_default()
@@ -331,7 +346,7 @@ async fn main() -> anyhow::Result<()> {
             recording: false,
         };
         let bb_driver = Arc::new(BrowserbaseDriver::new(bb_config));
-        let pool = Arc::new(RuntimeLeasePool::new(4));
+        let pool = Arc::new(RuntimeLeasePool::new(4).with_org_max_permits(pool_org_max));
         metrics::register_pool("browserbase", (*pool).clone());
         let processor_id = std::env::var("QUARRY_BROWSERBASE_PROCESSOR_ID")
             .unwrap_or_else(|_| "browserbase".into());
@@ -346,7 +361,7 @@ async fn main() -> anyhow::Result<()> {
             quarry_browser::chromiumoxide::ChromiumoxideDriver::new()
                 .with_pinned_egress_proxy(browser_egress_proxy.clone()),
         );
-        let pool = Arc::new(RuntimeLeasePool::new(2));
+        let pool = Arc::new(RuntimeLeasePool::new(2).with_org_max_permits(pool_org_max));
         metrics::register_pool("chromium", (*pool).clone());
         let adapter = BrowserDriverAdapter::new(browser_driver, pool);
         drivers.register(Arc::new(adapter));

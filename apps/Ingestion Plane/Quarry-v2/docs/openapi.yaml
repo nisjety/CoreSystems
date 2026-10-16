@@ -330,8 +330,20 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Envelope_Error'
+        '402':
+          description: >-
+            BUDGET_EXHAUSTED. An agent run reached its step, attempt, runtime
+            or estimated-cost bound (error.details.dimension is steps,
+            attempts, runtime or cost, with limit, spent and unit). Not
+            retryable: the budget does not refill, and a resumed run keeps what
+            it spent. Only returned when QUARRY_EDGE__BUDGET_ENFORCEMENT=on;
+            in shadow mode the same condition is only recorded.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Envelope_Error'
         '429':
-          description: Step budget exhausted
+          description: Step budget exhausted (the step limit the request itself set)
           content:
             application/json:
               schema:
@@ -2417,6 +2429,14 @@ components:
         resume_run_id:
           type: string
           nullable: true
+        initiated_by:
+          type: string
+          nullable: true
+          description: >-
+            Set to "agent" for a model-driven run. A run is budgeted (steps,
+            attempts, active runtime, estimated cost) when it is an agent run:
+            a service principal is one whatever it sends. The hint can only
+            tighten: it never turns an agent run into an interactive one.
         execution_tier:
           type: string
           enum:
@@ -2513,6 +2533,55 @@ components:
               enum:
               - chromium
               - chromium_fallback
+            constraints:
+              type: object
+              description: >-
+                The bounds the run runs under after defaults and ceilings.
+                Present when QUARRY_EDGE__BUDGET_ENFORCEMENT is not off.
+                max_* are absent for an interactive (human) run, which is
+                never capped. Cost is estimated from a flat action table.
+              properties:
+                class:
+                  type: string
+                  enum:
+                  - interactive
+                  - agent
+                enforcement:
+                  type: string
+                  enum:
+                  - shadow
+                  - 'on'
+                  description: shadow records what would be refused and refuses nothing.
+                max_steps:
+                  type: integer
+                max_runtime_s:
+                  type: integer
+                max_cost_usd:
+                  type: number
+                estimated:
+                  type: boolean
+            clamped:
+              type: array
+              description: Requested values that were replaced.
+              items:
+                type: object
+                properties:
+                  field:
+                    type: string
+                    enum:
+                    - max_steps
+                    - max_runtime_s
+                    - max_cost_usd
+                  requested:
+                    type: number
+                    nullable: true
+                  effective:
+                    type: number
+                  by:
+                    type: string
+                    enum:
+                    - default
+                    - ceiling
     AgentStepRequest:
       type: object
       required:

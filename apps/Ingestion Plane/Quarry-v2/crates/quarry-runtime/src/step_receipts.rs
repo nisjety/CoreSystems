@@ -68,6 +68,33 @@ pub struct AgentRunCheckpoint {
     /// a gateway restart cannot reset a human takeover back to agent control.
     #[serde(default)]
     pub control_mode: BrowserControlMode,
+    /// What the run has spent against its budget. Absent on a checkpoint
+    /// written before budgets existed, or with enforcement off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget: Option<BudgetCheckpoint>,
+}
+
+/// The budget ledger of a run, stored with its checkpoint so a resume restores
+/// what was spent instead of starting from zero.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BudgetCheckpoint {
+    /// `interactive` or `agent`.
+    #[serde(default)]
+    pub class: String,
+    /// Completed steps.
+    #[serde(default)]
+    pub steps: u32,
+    /// Attempts, completed or failed.
+    #[serde(default)]
+    pub attempts: u32,
+    #[serde(default)]
+    pub spent_micro_usd: u64,
+    /// Time under agent control, in milliseconds.
+    #[serde(default)]
+    pub active_ms: u64,
+    /// The dimension that was reached, once one was.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exhausted: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -643,6 +670,7 @@ mod tests {
             grant_id: Some("grant_1".into()),
             status: AgentRunStatus::Active,
             control_mode: BrowserControlMode::AgentControl,
+            budget: None,
         };
         store.save_run_checkpoint(checkpoint).await.unwrap();
         assert!(store

@@ -3,7 +3,11 @@
 //! The recorder is process-global, so these tests share one install and live
 //! in their own test binary; each asserts only on labels it created.
 
-use std::{net::SocketAddr, sync::{Arc, OnceLock}, time::Duration};
+use std::{
+    net::SocketAddr,
+    sync::{Arc, OnceLock},
+    time::Duration,
+};
 
 use metrics_exporter_prometheus::PrometheusHandle;
 use quarry_edge::metrics;
@@ -58,7 +62,12 @@ async fn get(addr: SocketAddr, path: &str, bearer: Option<&str>) -> (u16, String
 async fn metrics_endpoint_requires_the_bearer_token() {
     let addr = spawn_metrics(Some(TOKEN)).await;
     assert_eq!(get(addr, "/metrics", None).await.0, 401);
-    assert_eq!(get(addr, "/metrics", Some("wrong-token-0123456789")).await.0, 401);
+    assert_eq!(
+        get(addr, "/metrics", Some("wrong-token-0123456789"))
+            .await
+            .0,
+        401
+    );
     assert_eq!(get(addr, "/metrics", Some("")).await.0, 401);
     let (status, body) = get(addr, "/metrics", Some(TOKEN)).await;
     assert_eq!(status, 200);
@@ -94,17 +103,33 @@ async fn http_requests_are_counted_by_route_class_not_by_path() {
 
     let (_, body) = get(metrics_addr, "/metrics", Some(TOKEN)).await;
     assert!(
-        body.lines().any(|line| line.starts_with("quarry_http_requests_total{")
-            && line.contains(r#"route="health""#)
-            && line.contains(r#"status_class="2xx""#)),
+        body.lines()
+            .any(|line| line.starts_with("quarry_http_requests_total{")
+                && line.contains(r#"route="health""#)
+                && line.contains(r#"status_class="2xx""#)),
         "{body}"
     );
-    assert!(body.contains("quarry_http_request_duration_seconds_bucket"), "{body}");
-    assert!(body.contains(r#"route="v1_other""#), "an unknown /v1 path is one class: {body}");
+    assert!(
+        body.contains("quarry_http_request_duration_seconds_bucket"),
+        "{body}"
+    );
+    assert!(
+        body.contains(r#"route="v1_other""#),
+        "an unknown /v1 path is one class: {body}"
+    );
     assert!(body.contains(r#"route="agent""#), "{body}");
     assert!(body.contains(r#"route="other""#), "{body}");
-    for secret in ["probe-host", "example.com", "org_secret_12345", "secret-path", "passwd"] {
-        assert!(!body.contains(secret), "{secret} leaked into the exposition");
+    for secret in [
+        "probe-host",
+        "example.com",
+        "org_secret_12345",
+        "secret-path",
+        "passwd",
+    ] {
+        assert!(
+            !body.contains(secret),
+            "{secret} leaked into the exposition"
+        );
     }
 }
 
@@ -117,14 +142,23 @@ async fn metrics_labels_are_closed_sets() {
         get(public, &format!("/unique-root-{index}"), None).await;
     }
     let (_, body) = get(metrics_addr, "/metrics", Some(TOKEN)).await;
-    assert!(!body.contains("unique-probe"), "a path segment became a label");
-    assert!(!body.contains("unique-root"), "a path segment became a label");
+    assert!(
+        !body.contains("unique-probe"),
+        "a path segment became a label"
+    );
+    assert!(
+        !body.contains("unique-root"),
+        "a path segment became a label"
+    );
     let routes: std::collections::BTreeSet<&str> = body
         .lines()
         .filter(|line| line.starts_with("quarry_http_requests_total{"))
         .filter_map(|line| line.split(r#"route=""#).nth(1)?.split('"').next())
         .collect();
-    assert!(routes.len() <= 10, "route label set grew with the traffic: {routes:?}");
+    assert!(
+        routes.len() <= 10,
+        "route label set grew with the traffic: {routes:?}"
+    );
 }
 
 #[tokio::test]
@@ -153,10 +187,15 @@ async fn sampler_exports_lease_pool_gauges() {
 async fn scrape_outcomes_are_counted_by_closed_outcome() {
     handle();
     metrics::record_scrape("ok");
-    metrics::record_scrape(&metrics::error_label(quarry_core::error::ErrorCode::UnsupportedMedia));
+    metrics::record_scrape(&metrics::error_label(
+        quarry_core::error::ErrorCode::UnsupportedMedia,
+    ));
     let addr = spawn_metrics(Some(TOKEN)).await;
     let (_, body) = get(addr, "/metrics", Some(TOKEN)).await;
-    assert!(body.contains(r#"quarry_scrape_outcomes_total{outcome="ok"}"#), "{body}");
+    assert!(
+        body.contains(r#"quarry_scrape_outcomes_total{outcome="ok"}"#),
+        "{body}"
+    );
     assert!(
         body.contains(r#"quarry_scrape_outcomes_total{outcome="unsupported_media"}"#),
         "{body}"

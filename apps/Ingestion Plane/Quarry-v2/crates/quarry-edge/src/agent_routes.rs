@@ -99,6 +99,9 @@ mod enabled {
         /// only. It is deliberately process-local: a resumed run must obtain
         /// fresh authority instead of replaying a prior approval.
         pub used_sensitive_approval_grants: HashSet<String>,
+        /// Steps, attempts, active time and estimated cost against the run's
+        /// bounds (`crate::budget`). `None` when enforcement is `off`.
+        pub budget: Option<crate::budget::RunBudget>,
     }
 
     /// run_id → entry. Outer std-Mutex guards the map (held only for the O(1)
@@ -370,6 +373,11 @@ mod enabled {
         /// authoritative; a new/renewed grant may be supplied explicitly.
         #[serde(default)]
         pub resume_run_id: Option<String>,
+        /// Who is driving this run: `"agent"` marks it as a model-driven run.
+        /// Tighten-only: it can make a run an agent run (budgeted), never the
+        /// reverse; a service principal is an agent run whatever it sends.
+        #[serde(default)]
+        pub initiated_by: Option<String>,
         /// Optional requirements for the selected execution driver. Quarry
         /// fails closed instead of silently beginning a run with a driver that
         /// cannot supply a capability the caller needs.
@@ -450,6 +458,45 @@ mod enabled {
         Ok(())
     }
 
+    /// The budget gate before an action: refuses with a typed 402 in `on` mode,
+    /// records what it would refuse in `shadow`, and does nothing for a human
+    /// session or with enforcement `off`.
+    fn budget_gate(entry: &mut RunEntry, action: &AgentAction) -> QuarryResult<()> {
+        budget_gate_with(entry, action, crate::budget::current_mode())
+    }
+
+    fn budget_gate_with(
+        entry: &mut RunEntry,
+        action: &AgentAction,
+        mode: crate::budget::BudgetMode,
+    ) -> QuarryResult<()> {
+        let projected = crate::budget::micro_usd(estimated_action_cost_usd(action));
+        match entry.budget.as_mut() {
+            Some(budget) => budget.gate(mode, projected, std::time::Instant::now()),
+            None => Ok(()),
+        }
+    }
+
+    /// Account for an executed action. A failed attempt costs the flat estimate
+    /// and counts toward the attempt allowance, but is not a completed step.
+    fn budget_charge(entry: &mut RunEntry, completed: bool, cost_usd: f64) {
+        if let Some(budget) = entry.budget.as_mut() {
+            budget.charge(completed, crate::budget::micro_usd(cost_usd));
+        }
+    }
+
+    /// The receipt cost of a completed action: the driver's verified cost when
+    /// it supplied one, otherwise the flat table. One definition for the REST
+    /// and WebSocket paths; the WebSocket path used to record 0 here.
+    fn receipt_cost_usd(telemetry: &BrowserTelemetry, action: &AgentAction) -> f64 {
+        let verified = telemetry_receipt_cost_usd(telemetry);
+        if verified == 0.0 {
+            estimated_action_cost_usd(action)
+        } else {
+            verified
+        }
+    }
+
     fn checkpoint_for_entry(entry: &RunEntry) -> AgentRunCheckpoint {
         AgentRunCheckpoint {
             org_id: entry.org_id.clone(),
@@ -468,6 +515,10 @@ mod enabled {
             grant_id: entry.grant_id.clone(),
             status: AgentRunStatus::Active,
             control_mode: entry.control_mode,
+            budget: entry
+                .budget
+                .as_ref()
+                .map(|budget| budget.ledger.snapshot(std::time::Instant::now())),
         }
     }
 
@@ -545,6 +596,12 @@ mod enabled {
         /// Actual engine used for this run. `chromium_fallback` is explicit so
         /// callers never infer Lite throughput/fidelity from a request alone.
         pub execution_engine: &'static str,
+        /// The bounds this run runs under, after defaults and ceilings.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub constraints: Option<crate::budget::EffectiveConstraints>,
+        /// Requested values that were replaced, and by what.
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        pub clamped: Vec<crate::budget::ClampView>,
     }
 
     #[derive(Debug, Serialize)]
@@ -706,10 +763,6 @@ mod enabled {
     /// the receipt (flat_table vs provider_billed) once W4's receipt
     /// `cost` field lands; for now the micro_usd value itself is the
     /// budget signal.
-    fn observation_receipt_cost_usd(observation: &BrowserObservation) -> f64 {
-        telemetry_receipt_cost_usd(&observation.telemetry)
-    }
-
     fn telemetry_receipt_cost_usd(telemetry: &BrowserTelemetry) -> f64 {
         telemetry
             .verified_action_cost_micro_usd
@@ -718,7 +771,7 @@ mod enabled {
     }
 
     /// W4: estimate a cost for an action when no provider-billed cost is
-    /// available. Used as the fallback inside `observation_receipt_cost_usd`
+    /// available. Used as the fallback inside `receipt_cost_usd`
     /// callers and by the AgentLoop budget check. The estimate is
     /// intentionally conservative (flat table) so budgets fail closed
     /// rather than silently under-billing.
@@ -1579,6 +1632,22 @@ mod enabled {
             }
         }
 
+        let budget_mode = crate::budget::current_mode();
+        let budget = (budget_mode != crate::budget::BudgetMode::Off).then(|| {
+            crate::budget::RunBudget::start(
+                crate::budget::BudgetLimits::cached(),
+                crate::budget::classify(claims.is_service(), body.initiated_by.as_deref()),
+                &constraints,
+                resume_checkpoint
+                    .as_ref()
+                    .and_then(|checkpoint| checkpoint.budget.as_ref()),
+                std::time::Instant::now(),
+            )
+        });
+        let budget_view = budget
+            .as_ref()
+            .map(|budget| (budget.effective_constraints(budget_mode), budget.clamped()));
+
         let entry = RunEntry {
             run_id: run_id.clone(),
             org_id: org_id.clone(),
@@ -1626,6 +1695,7 @@ mod enabled {
             execution_tier,
             last_observation: None,
             used_sensitive_approval_grants: HashSet::new(),
+            budget,
         };
 
         if !zdr.is_active() {
@@ -1674,6 +1744,8 @@ mod enabled {
                 driver_capabilities: state.agent_driver.capabilities(),
                 execution_tier,
                 execution_engine: execution_tier.engine_label(),
+                constraints: budget_view.as_ref().map(|(view, _)| view.clone()),
+                clamped: budget_view.map(|(_, clamped)| clamped).unwrap_or_default(),
             },
         )))
     }
@@ -1774,6 +1846,13 @@ mod enabled {
         }
 
         entry.control_mode = body.mode;
+        if let Some(budget) = entry.budget.as_mut() {
+            let now = std::time::Instant::now();
+            match body.mode {
+                BrowserControlMode::HumanTakeover => budget.ledger.pause(now),
+                BrowserControlMode::AgentControl => budget.ledger.resume(now),
+            }
+        }
         record_browser_timeline_event(
             &state,
             &entry,
@@ -2091,6 +2170,7 @@ mod enabled {
                 execution_tier: BrowserExecutionTier::Chromium,
                 last_observation: None,
                 used_sensitive_approval_grants: HashSet::new(),
+                budget: None,
             };
             let entry_arc = Arc::new(TokioMutex::new(entry));
             state
@@ -2117,7 +2197,10 @@ mod enabled {
             let rendered = serde_json::to_value(&envelope).unwrap();
             assert_eq!(rendered["error"]["code"], "FORBIDDEN");
             assert_eq!(rendered["error"]["details"]["reason"], "raw_script_denied");
-            assert!(!rendered.to_string().contains("pwned"), "the script is never echoed");
+            assert!(
+                !rendered.to_string().contains("pwned"),
+                "the script is never echoed"
+            );
 
             let entry = entry_arc.lock().await;
             assert_eq!(entry.ctx.step, 0, "a denial does not consume a step");
@@ -2212,17 +2295,17 @@ mod enabled {
                 run_id: Id::new(),
                 org_id: "org".into(),
                 actor_id: "user".into(),
-                    session: BrowserSession {
-                        lease: BrowserLease {
-                            lease_id: Id::new(),
-                            profile_id: Id::new(),
-                            session_affinity_key: "test-session".into(),
-                            proxy_affinity: Default::default(),
-                            ttl_s: 60,
-                            capabilities: vec![],
-                            artifact_bucket: String::new(),
-                            persist_profile: false,
-                            viewport: None,
+                session: BrowserSession {
+                    lease: BrowserLease {
+                        lease_id: Id::new(),
+                        profile_id: Id::new(),
+                        session_affinity_key: "test-session".into(),
+                        proxy_affinity: Default::default(),
+                        ttl_s: 60,
+                        capabilities: vec![],
+                        artifact_bucket: String::new(),
+                        persist_profile: false,
+                        viewport: None,
                         org_id: "org".into(),
                     },
                     inner: Arc::new(TokioMutex::new(SessionInner::default())),
@@ -2264,10 +2347,313 @@ mod enabled {
                 execution_tier: BrowserExecutionTier::Chromium,
                 last_observation: None,
                 used_sensitive_approval_grants: HashSet::new(),
+                budget: None,
             };
             assert!(enforce_step_budget(&entry).is_err());
             entry.constraints.max_steps = 0;
             assert!(enforce_step_budget(&entry).is_ok());
+        }
+
+        fn entry_with_budget(budget: Option<crate::budget::RunBudget>) -> RunEntry {
+            let lease = BrowserLease {
+                lease_id: Id::new(),
+                profile_id: Id::new(),
+                session_affinity_key: "test".into(),
+                proxy_affinity: Default::default(),
+                ttl_s: 60,
+                capabilities: vec![],
+                artifact_bucket: String::new(),
+                persist_profile: false,
+                viewport: None,
+                org_id: "org".into(),
+            };
+            RunEntry {
+                run_id: Id::new(),
+                org_id: "org".into(),
+                actor_id: "user".into(),
+                session: BrowserSession {
+                    lease: lease.clone(),
+                    inner: Arc::new(TokioMutex::new(SessionInner::default())),
+                },
+                ctx: ObservationContext {
+                    step: 0,
+                    current_url: String::new(),
+                    page_hash: String::new(),
+                    previous_screenshot: None,
+                    previous_observation: None,
+                    previous_network_keys: vec![],
+                    last_egress_sequence: 0,
+                    active_snapshot: None,
+                    observed_action_count: 0,
+                    challenge_observation_count: 0,
+                },
+                lease,
+                constraints: AgentConstraints {
+                    max_steps: 0,
+                    allowed_domains: vec![],
+                    max_runtime_s: None,
+                    max_cost_usd: None,
+                },
+                zdr: ZdrMode::Off,
+                grant_id: None,
+                control_mode: BrowserControlMode::AgentControl,
+                profile_scope: BrowserProfileScope::Ephemeral,
+                execution_tier: BrowserExecutionTier::Chromium,
+                last_observation: None,
+                used_sensitive_approval_grants: HashSet::new(),
+                budget,
+            }
+        }
+
+        fn agent_budget(max_steps: u32) -> crate::budget::RunBudget {
+            crate::budget::RunBudget::start(
+                &crate::budget::BudgetLimits::default(),
+                crate::budget::RunClass::Agent,
+                &AgentConstraints {
+                    max_steps,
+                    allowed_domains: vec![],
+                    max_runtime_s: None,
+                    max_cost_usd: None,
+                },
+                None,
+                std::time::Instant::now(),
+            )
+        }
+
+        #[test]
+        fn an_agent_run_is_refused_with_402_after_its_step_cap_in_on_mode() {
+            use crate::budget::BudgetMode;
+            let mut entry = entry_with_budget(Some(agent_budget(3)));
+            let action = AgentAction::Click {
+                selector: "#go".into(),
+            };
+            for _ in 0..3 {
+                budget_gate_with(&mut entry, &action, BudgetMode::On).expect("within the cap");
+                budget_charge(&mut entry, true, 0.0);
+            }
+            let error = budget_gate_with(&mut entry, &action, BudgetMode::On).unwrap_err();
+            assert_eq!(error.code, ErrorCode::BudgetExhausted);
+            assert_eq!(error.code.http_status(), 402);
+            assert!(!error.retryable);
+            assert_eq!(error.details.as_ref().unwrap()["dimension"], "steps");
+            // It stays refused: calling again cannot refill it.
+            assert!(budget_gate_with(&mut entry, &action, BudgetMode::On).is_err());
+        }
+
+        #[test]
+        fn a_failing_driver_hits_the_attempt_allowance_before_the_step_cap() {
+            use crate::budget::BudgetMode;
+            let mut entry = entry_with_budget(Some(agent_budget(5)));
+            let action = AgentAction::Back;
+            // 5 steps x factor 2 = 10 attempts; every one fails.
+            for _ in 0..10 {
+                budget_gate_with(&mut entry, &action, BudgetMode::On).expect("within attempts");
+                budget_charge(&mut entry, false, estimated_action_cost_usd(&action));
+            }
+            let error = budget_gate_with(&mut entry, &action, BudgetMode::On).unwrap_err();
+            assert_eq!(error.details.as_ref().unwrap()["dimension"], "attempts");
+        }
+
+        #[test]
+        fn a_human_session_is_never_budgeted_even_in_on_mode() {
+            use crate::budget::{BudgetMode, RunBudget, RunClass};
+            let human = RunBudget::start(
+                &crate::budget::BudgetLimits::default(),
+                RunClass::Interactive,
+                &AgentConstraints {
+                    max_steps: 12,
+                    allowed_domains: vec![],
+                    max_runtime_s: Some(120),
+                    max_cost_usd: None,
+                },
+                None,
+                std::time::Instant::now(),
+            );
+            let mut entry = entry_with_budget(Some(human));
+            let action = AgentAction::Back;
+            for _ in 0..40 {
+                budget_gate_with(&mut entry, &action, BudgetMode::On)
+                    .expect("a person is not capped");
+                budget_charge(&mut entry, true, 0.5);
+            }
+        }
+
+        #[test]
+        fn shadow_and_off_modes_never_refuse_and_a_run_without_a_budget_is_untouched() {
+            use crate::budget::BudgetMode;
+            let action = AgentAction::Back;
+            let mut entry = entry_with_budget(Some(agent_budget(1)));
+            budget_charge(&mut entry, true, 0.0);
+            assert!(budget_gate_with(&mut entry, &action, BudgetMode::Shadow).is_ok());
+            assert!(budget_gate_with(&mut entry, &action, BudgetMode::Off).is_ok());
+            let mut bare = entry_with_budget(None);
+            assert!(budget_gate_with(&mut bare, &action, BudgetMode::On).is_ok());
+            budget_charge(&mut bare, true, 1.0);
+        }
+
+        #[test]
+        fn a_budget_refusal_leaves_the_step_counter_and_approvals_alone() {
+            use crate::budget::BudgetMode;
+            let mut entry = entry_with_budget(Some(agent_budget(1)));
+            budget_charge(&mut entry, true, 0.0);
+            entry
+                .used_sensitive_approval_grants
+                .insert("grant_1".into());
+            let before = (entry.ctx.step, entry.used_sensitive_approval_grants.clone());
+            assert!(budget_gate_with(&mut entry, &AgentAction::Back, BudgetMode::On).is_err());
+            assert_eq!(
+                (entry.ctx.step, entry.used_sensitive_approval_grants.clone()),
+                before
+            );
+        }
+
+        async fn call_step(
+            budget: Option<crate::budget::RunBudget>,
+            action: AgentAction,
+        ) -> (
+            Result<(), (StatusCode, serde_json::Value)>,
+            Arc<TokioMutex<RunEntry>>,
+        ) {
+            let state = crate::test_support::test_state(Arc::new(
+                quarry_runtime::fetch::StaticDriver::new(
+                    std::time::Duration::from_secs(5),
+                    "quarry-test",
+                )
+                .expect("static driver"),
+            ));
+            let claims = crate::test_support::claims_for_org("org");
+            let mut entry = entry_with_budget(budget);
+            entry.actor_id = claims.actor_id().to_string();
+            let run_id = entry.run_id.to_string();
+            let entry_arc = Arc::new(TokioMutex::new(entry));
+            state
+                .agent_runs
+                .lock()
+                .expect("agent_runs mutex")
+                .insert(run_id.clone(), entry_arc.clone());
+            let result = step(
+                State(state),
+                Extension(claims),
+                Path(run_id),
+                Json(StepBody {
+                    action,
+                    instruction: None,
+                    extraction_profile: None,
+                }),
+            )
+            .await;
+            let mapped = result.map(|_| ()).map_err(|(status, Json(envelope))| {
+                (status, serde_json::to_value(&envelope).unwrap())
+            });
+            (mapped, entry_arc)
+        }
+
+        fn respond_dialog() -> AgentAction {
+            AgentAction::RespondDialog {
+                dialog_id: "dlg_1".into(),
+                accept: true,
+                approval_grant_id: "grant_approval_1".into(),
+                prompt_text: None,
+            }
+        }
+
+        fn exhausted_budget() -> crate::budget::RunBudget {
+            let mut budget = agent_budget(1);
+            budget.charge(true, 0);
+            budget
+        }
+
+        /// The budget refuses before a one-shot approval is looked at, let alone
+        /// consumed: with the run out of steps, an action that also needs an
+        /// approval gets the 402, not the approval's own error.
+        #[tokio::test]
+        async fn a_budget_refusal_comes_first_and_burns_no_single_use_approval() {
+            let _pinned = crate::budget::test_mode::pin(crate::budget::BudgetMode::On);
+            let (result, entry_arc) = call_step(Some(exhausted_budget()), respond_dialog()).await;
+            let (status, body) = result.expect_err("the run is out of budget");
+            assert_eq!(status, StatusCode::PAYMENT_REQUIRED);
+            assert_eq!(body["error"]["code"], "BUDGET_EXHAUSTED");
+            assert_eq!(body["error"]["retryable"], false);
+            assert_eq!(body["error"]["details"]["dimension"], "steps");
+            let entry = entry_arc.lock().await;
+            assert!(entry.used_sensitive_approval_grants.is_empty());
+            assert_eq!(entry.ctx.step, 0, "a refusal does not run the action");
+        }
+
+        #[tokio::test]
+        async fn shadow_mode_lets_the_same_step_reach_the_approval_check() {
+            let _pinned = crate::budget::test_mode::pin(crate::budget::BudgetMode::Shadow);
+            let (result, _entry) = call_step(Some(exhausted_budget()), respond_dialog()).await;
+            let (status, body) =
+                result.expect_err("no parent run grant, so the approval is refused");
+            assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+            assert_ne!(body["error"]["code"], "BUDGET_EXHAUSTED");
+        }
+
+        #[test]
+        fn the_checkpoint_carries_the_ledger_and_a_resume_restores_it() {
+            use crate::budget::{BudgetMode, RunBudget};
+            let mut entry = entry_with_budget(Some(agent_budget(2)));
+            budget_charge(&mut entry, true, 0.001);
+            budget_charge(&mut entry, true, 0.001);
+            let checkpoint = checkpoint_for_entry(&entry);
+            let saved = checkpoint
+                .budget
+                .clone()
+                .expect("a budget in the checkpoint");
+            assert_eq!(
+                (saved.steps, saved.attempts, saved.spent_micro_usd),
+                (2, 2, 2000)
+            );
+            assert_eq!(saved.class, "agent");
+            // It survives the JSON the store writes.
+            let stored: quarry_runtime::step_receipts::AgentRunCheckpoint =
+                serde_json::from_value(serde_json::to_value(&checkpoint).unwrap()).unwrap();
+            assert_eq!(stored.budget, checkpoint.budget);
+
+            let resumed = RunBudget::start(
+                &crate::budget::BudgetLimits::default(),
+                crate::budget::RunClass::Agent,
+                &AgentConstraints {
+                    max_steps: 2,
+                    allowed_domains: vec![],
+                    max_runtime_s: None,
+                    max_cost_usd: None,
+                },
+                stored.budget.as_ref(),
+                std::time::Instant::now(),
+            );
+            let mut resumed_entry = entry_with_budget(Some(resumed));
+            let error = budget_gate_with(&mut resumed_entry, &AgentAction::Back, BudgetMode::On)
+                .unwrap_err();
+            assert_eq!(error.details.as_ref().unwrap()["dimension"], "steps");
+        }
+
+        #[test]
+        fn an_old_checkpoint_without_a_budget_still_loads() {
+            // What a checkpoint looked like before budgets: the same JSON without the field.
+            let mut legacy =
+                serde_json::to_value(checkpoint_for_entry(&entry_with_budget(None))).unwrap();
+            legacy.as_object_mut().unwrap().remove("budget");
+            let checkpoint: quarry_runtime::step_receipts::AgentRunCheckpoint =
+                serde_json::from_value(legacy).expect("a pre-budget checkpoint loads");
+            assert!(checkpoint.budget.is_none());
+        }
+
+        #[test]
+        fn every_path_prices_a_completed_action_from_the_flat_table_when_the_driver_gave_none() {
+            let action = AgentAction::Click {
+                selector: "#go".into(),
+            };
+            let unmetered = BrowserTelemetry::default();
+            let flat = estimated_action_cost_usd(&action);
+            assert!(flat > 0.0, "the flat table prices a click");
+            assert_eq!(receipt_cost_usd(&unmetered, &action), flat);
+            let metered = BrowserTelemetry {
+                verified_action_cost_micro_usd: Some(7),
+                ..BrowserTelemetry::default()
+            };
+            assert!((receipt_cost_usd(&metered, &action) - 0.000_007).abs() < 1e-12);
         }
 
         #[test]
@@ -2422,6 +2808,13 @@ mod enabled {
                 .map_err(|error| driver_err(&request_id, error))?;
         }
 
+        // The budgets refuse before a one-shot approval is consumed: an action
+        // that was never going to run must not burn the approval that was
+        // issued for it.
+        enforce_step_budget(&entry)
+            .map_err(|message| status_err(StatusCode::TOO_MANY_REQUESTS, &request_id, message))?;
+        budget_gate(&mut entry, &body.action).map_err(|error| driver_err(&request_id, error))?;
+
         if let Some(approval) = sensitive_approval_for_action(&entry, &body.action)
             .map_err(|error| driver_err(&request_id, error))?
         {
@@ -2439,9 +2832,6 @@ mod enabled {
                 ));
             }
         }
-
-        enforce_step_budget(&entry)
-            .map_err(|message| status_err(StatusCode::TOO_MANY_REQUESTS, &request_id, message))?;
 
         if let AgentAction::Navigate { url } = &body.action {
             if !domain_allowed(url, &entry.constraints.allowed_domains) {
@@ -2494,18 +2884,12 @@ mod enabled {
                 // W4: when the driver omits a provider-billed cost, fall
                 // back to the flat action-cost table so max_cost_usd
                 // budgets are enforceable.
-                let mut cost_usd = observation_receipt_cost_usd(&obs);
-                if cost_usd == 0.0 {
-                    cost_usd = estimated_action_cost_usd(&receipt_action);
-                }
+                let cost_usd = receipt_cost_usd(&obs.telemetry, &receipt_action);
+                budget_charge(&mut entry, true, cost_usd);
                 let receipt = ReceiptBuilder::start(receipt_run_id.clone(), receipt_step)
                     .org_id(entry.org_id.clone())
                     .actor_id(entry.actor_id.clone())
-                    .complete(
-                        receipt_action,
-                        Some(obs.clone()),
-                        cost_usd,
-                    );
+                    .complete(receipt_action, Some(obs.clone()), cost_usd);
                 if !entry.zdr.is_active() {
                     state
                         .receipts
@@ -2516,6 +2900,11 @@ mod enabled {
                 obs
             }
             Err(error) => {
+                budget_charge(
+                    &mut entry,
+                    false,
+                    estimated_action_cost_usd(&receipt_action),
+                );
                 let receipt = ReceiptBuilder::start(receipt_run_id, receipt_step)
                     .org_id(entry.org_id.clone())
                     .actor_id(entry.actor_id.clone())
@@ -2813,11 +3202,12 @@ mod enabled {
         use quarry_core::event::EventType;
 
         let request_id = RequestKind::new().to_string();
-        let parsed_run: RunKind = run_id
-            .parse()
-            .map_err(|e: quarry_core::error::QuarryError| {
-                status_err(StatusCode::BAD_REQUEST, &request_id, &e.message)
-            })?;
+        let parsed_run: RunKind =
+            run_id
+                .parse()
+                .map_err(|e: quarry_core::error::QuarryError| {
+                    status_err(StatusCode::BAD_REQUEST, &request_id, &e.message)
+                })?;
         let entry_arc = {
             let map = state.agent_runs.lock().expect("agent_runs mutex poisoned");
             map.get(&run_id).cloned()
@@ -3253,6 +3643,10 @@ mod enabled {
         if entry.execution_tier.is_ephemeral_evidence() {
             require_ephemeral_evidence_action(&action)?;
         }
+        // Budgets first, so a refusal cannot burn a one-shot approval.
+        enforce_step_budget(&entry)
+            .map_err(|message| QuarryError::new(ErrorCode::RateLimited, message))?;
+        budget_gate(&mut entry, &action)?;
         if let Some(approval) = sensitive_approval_for_action(&entry, &action)? {
             validate_sensitive_approval(state, &approval).await?;
             if !entry
@@ -3265,8 +3659,6 @@ mod enabled {
                 ));
             }
         }
-        enforce_step_budget(&entry)
-            .map_err(|message| QuarryError::new(ErrorCode::RateLimited, message))?;
         if let AgentAction::Navigate { url } = &action {
             if !domain_allowed(url, &entry.constraints.allowed_domains) {
                 return Err(QuarryError::new(
@@ -3302,20 +3694,23 @@ mod enabled {
             .await
         {
             Ok(observation) => {
+                let cost_usd = receipt_cost_usd(&observation.telemetry, &receipt_action);
+                budget_charge(&mut entry, true, cost_usd);
                 if !entry.zdr.is_active() {
                     let receipt = ReceiptBuilder::start(receipt_run_id.clone(), receipt_step)
                         .org_id(entry.org_id.clone())
                         .actor_id(entry.actor_id.clone())
-                        .complete(
-                            receipt_action.clone(),
-                            Some(observation.clone()),
-                            observation_receipt_cost_usd(&observation),
-                        );
+                        .complete(receipt_action.clone(), Some(observation.clone()), cost_usd);
                     state.receipts.append(receipt).await?;
                 }
                 observation
             }
             Err(error) => {
+                budget_charge(
+                    &mut entry,
+                    false,
+                    estimated_action_cost_usd(&receipt_action),
+                );
                 if !entry.zdr.is_active() {
                     let receipt = ReceiptBuilder::start(receipt_run_id, receipt_step)
                         .org_id(entry.org_id.clone())
