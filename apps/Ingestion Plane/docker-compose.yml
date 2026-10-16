@@ -14,6 +14,11 @@ services:
       dockerfile: deploy/compose/Dockerfile.edge
       args: *build-metadata
     container_name: quarry-edge
+    # Lets Chromium keep its own sandbox inside the container (unprivileged
+    # user/PID namespaces, which Docker's default seccomp profile blocks).
+    # Allow-by-default plus a deny-list of escape syscalls, this service only.
+    security_opt:
+      - seccomp=./Quarry-v2/deploy/compose/seccomp-chromium.json
     restart: unless-stopped
     init: true
     environment:
@@ -106,8 +111,10 @@ services:
       QUARRY_EDGE__AUTH_CORE_URL: ${AUTH_CORE_URL:-http://auth-core:3011}
       QUARRY_EDGE__QUARRY_SERVICE_API_KEY: ${QUARRY_SERVICE_API_KEY:?QUARRY_SERVICE_API_KEY is required}
       QUARRY_EDGE__CROSS_PLANE_AUTH_DEV_BYPASS: "${QUARRY_CROSS_PLANE_AUTH_DEV_BYPASS:-0}"
-      # Dev compose runs Chromium inside Docker for JS-rendered scrape previews.
-      QUARRY_BROWSER_NO_SANDBOX: "${QUARRY_BROWSER_NO_SANDBOX:-1}"
+      # Chromium keeps its sandbox: the seccomp profile above lets it build one
+      # in a container. 1 is an explicit local opt-out (old kernels, WSL2 without
+      # user namespaces); the edge refuses to launch with it in production.
+      QUARRY_BROWSER_NO_SANDBOX: "${QUARRY_BROWSER_NO_SANDBOX:-0}"
       ENVIRONMENT: ${ENVIRONMENT:-dev}
       QUARRY_EDGE__DRAGONFLY_URL: redis://:${INGESTION_DRAGONFLY_PASSWORD:?INGESTION_DRAGONFLY_PASSWORD is required}@dragonfly:6379/6
       # Compatibility for already-built Quarry Edge images and Redis-protocol clients.

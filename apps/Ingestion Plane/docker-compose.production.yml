@@ -24,11 +24,22 @@ services:
     tmpfs:
       - /tmp:rw,nosuid,size=1g
       - /dev/shm:rw,noexec,nosuid,size=512m
+      # Chromium's profile and crash directories (QUARRY_BROWSER_PROFILE_ROOT,
+      # /var/lib/quarry/chromium in the image). The root is read-only, so without
+      # this the edge cannot create them, and the mount must be owned by the
+      # image's non-root user (65532) or the launch directories are not writable.
+      - /var/lib/quarry/chromium:rw,nosuid,size=512m,uid=65532,gid=65532,mode=0700
     ports: !reset []
     environment:
       ENVIRONMENT: production
       QUARRY_EDGE_AUTH_DEV_BYPASS: "0"
       QUARRY_BROWSER_NO_SANDBOX: "0"
+      # Chromium writes its config and NSS data under $HOME, which in the image
+      # is on the read-only root; it aborts at start-up when it cannot. Point
+      # them at the writable scratch mount. The cache dir stays on the existing
+      # index volume.
+      XDG_CONFIG_HOME: /var/lib/quarry/chromium/xdg-config
+      XDG_DATA_HOME: /var/lib/quarry/chromium/xdg-data
       QUARRY_EDGE__CONTROL_API_KEY: ${QUARRY_CONTROL_API_KEY:?QUARRY_CONTROL_API_KEY is required}
       QUARRY_EDGE__RUNTIME_AUTH_TOKEN: ${QUARRY_RUNTIME_AUTH_TOKEN:?QUARRY_RUNTIME_AUTH_TOKEN is required}
       QUARRY_EDGE__AUTH_CORE_URL: ${AUTH_CORE_URL:?AUTH_CORE_URL is required}

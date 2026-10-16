@@ -109,3 +109,7 @@ The frontend's `QUARRY_URL` env var was changed from
 `http://quarry-api:8090` (V1 monolith) to `http://quarry-edge:8082` (V2 edge).
 V1's separate compose file (`apps/Ingestion Plane/Quarry/docker-compose.yml`) is
 no longer brought up alongside the CoreSystem stack.
+
+## Chromium sandbox
+
+Chromium runs with its own sandbox. `quarry-edge` is started with `seccomp-chromium.json` (allow-by-default plus a deny-list of escape syscalls, scoped to this service), which is what lets Chromium create the user and PID namespaces its sandbox needs; `QUARRY_BROWSER_NO_SANDBOX` defaults to `0`. Setting it to `1` is an explicit local opt-out that production refuses. See `docs/RUNBOOKS.md` for symptoms and for the production overlay's scratch mounts.

@@ -244,8 +244,18 @@ impl ChromiumoxideDriver {
         if let Some(viewport) = viewport {
             builder = builder.viewport(chromium_viewport(viewport));
         }
-        if env_truthy("QUARRY_BROWSER_NO_SANDBOX") {
-            builder = builder.no_sandbox();
+        match sandbox_policy(is_production_env(), env_truthy("QUARRY_BROWSER_NO_SANDBOX")) {
+            Ok(SandboxMode::Enabled) => {}
+            Ok(SandboxMode::DisabledByOperator) => {
+                tracing::warn!(
+                    "chromium sandbox disabled by QUARRY_BROWSER_NO_SANDBOX; \
+                     only acceptable on an isolated development stack"
+                );
+                builder = builder.no_sandbox();
+            }
+            Err(reason) => {
+                return Err(QuarryError::new(ErrorCode::DriverFailed, reason));
+            }
         }
 
         let config = builder.build().map_err(|e| {
@@ -872,6 +882,36 @@ async fn install_dialog_collector(
             session_pages.insert(dialog_id, dialog_page.clone());
         }
     });
+}
+
+/// Whether Chromium runs with its own sandbox.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SandboxMode {
+    Enabled,
+    /// `QUARRY_BROWSER_NO_SANDBOX` was set outside production.
+    DisabledByOperator,
+}
+
+/// The Chromium sandbox is the page-to-host boundary for every browser run, so
+/// production never launches without it: a production environment with
+/// `QUARRY_BROWSER_NO_SANDBOX` set is a launch error, not a warning. Elsewhere
+/// the operator may opt out explicitly (old kernel, WSL2 without user
+/// namespaces) and the launch logs it.
+fn sandbox_policy(env_prod: bool, no_sandbox: bool) -> Result<SandboxMode, &'static str> {
+    match (env_prod, no_sandbox) {
+        (_, false) => Ok(SandboxMode::Enabled),
+        (false, true) => Ok(SandboxMode::DisabledByOperator),
+        (true, true) => Err("chromium sandbox cannot be disabled in production"),
+    }
+}
+
+/// `ENVIRONMENT` (or `APP_ENV`) names a production environment.
+fn is_production_env() -> bool {
+    let value = std::env::var("ENVIRONMENT")
+        .or_else(|_| std::env::var("APP_ENV"))
+        .unwrap_or_default();
+    let value = value.trim();
+    value.eq_ignore_ascii_case("prod") || value.eq_ignore_ascii_case("production")
 }
 
 fn env_truthy(name: &str) -> bool {
@@ -3111,6 +3151,27 @@ impl Drop for ChromiumoxideDriver {
 mod tests {
     use super::*;
     use crate::PinnedEgressProxyEndpoint;
+
+    #[test]
+    fn sandbox_is_on_by_default_everywhere() {
+        assert_eq!(sandbox_policy(false, false), Ok(SandboxMode::Enabled));
+        assert_eq!(sandbox_policy(true, false), Ok(SandboxMode::Enabled));
+    }
+
+    #[test]
+    fn no_sandbox_is_refused_in_production_env() {
+        let error = sandbox_policy(true, true).expect_err("production must keep the sandbox");
+        assert!(error.contains("production"), "{error}");
+    }
+
+    #[test]
+    fn no_sandbox_allowed_in_dev_env_with_warning() {
+        assert_eq!(
+            sandbox_policy(false, true),
+            Ok(SandboxMode::DisabledByOperator)
+        );
+    }
+
     use quarry_core::ids::kinds;
     use quarry_core::lease::{BrowserLease, Capability, ProxyAffinity};
     use wiremock::MockServer;

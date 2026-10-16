@@ -66,6 +66,12 @@ services:
       context: ../..
       dockerfile: deploy/compose/Dockerfile.edge
       args: *build-metadata
+    # Lets Chromium keep its own sandbox inside the container: it needs
+    # unprivileged user/PID namespaces (clone, unshare), which Docker's default
+    # seccomp profile blocks. Allow-by-default plus a deny-list of escape
+    # syscalls; scoped to this service only. See seccomp-chromium.json.
+    security_opt:
+      - seccomp=./seccomp-chromium.json
     environment:
       QUARRY_EDGE__PORT: "8082"
       # The standalone stack includes Postgres, so keep crawl frontier,
@@ -94,9 +100,12 @@ services:
       # Explicit development-only bypass. It defaults off; enable it only for
       # a deliberately isolated stack without Auth Core.
       QUARRY_EDGE_AUTH_DEV_BYPASS: ${QUARRY_EDGE_AUTH_DEV_BYPASS:-0}
-      # Chromium sandboxing also defaults on. Disabling it is an explicit
-      # local compatibility escape hatch, never a production setting.
-      QUARRY_BROWSER_NO_SANDBOX: ${QUARRY_BROWSER_NO_SANDBOX:-1}
+      # Chromium keeps its sandbox: the seccomp profile above is what lets it
+      # build one in a container. Setting this to 1 is an explicit local
+      # compatibility escape hatch (old kernels, WSL2 without user namespaces);
+      # the edge refuses to launch Chromium with it when ENVIRONMENT is
+      # production, and logs a warning otherwise.
+      QUARRY_BROWSER_NO_SANDBOX: ${QUARRY_BROWSER_NO_SANDBOX:-0}
       QUARRY_EDGE__INTERNAL_SECRET: ${QUARRY_INTERNAL_SECRET:?QUARRY_INTERNAL_SECRET is required}
       QUARRY_EDGE__RUNTIME_AUTH_TOKEN: ${QUARRY_RUNTIME_AUTH_TOKEN:?QUARRY_RUNTIME_AUTH_TOKEN is required}
       # Isolated OpenCV sidecar for deterministic visual evidence artifacts.
