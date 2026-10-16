@@ -13,6 +13,11 @@ use quarry_core::{
 };
 
 const MAX_DOCX_BYTES: usize = 25 * 1024 * 1024;
+/// A DOCX that unpacks past this many bytes of WordML is a zip bomb, not a
+/// document: a 100 KB file can inflate to gigabytes.
+const MAX_DOCUMENT_XML_BYTES: u64 = 32 * 1024 * 1024;
+/// More entries than any real document has.
+const MAX_DOCX_ENTRIES: usize = 4096;
 
 /// Extract plain text from DOCX bytes.
 pub fn extract_text(body: &[u8]) -> QuarryResult<String> {
@@ -28,17 +33,36 @@ pub fn extract_text(body: &[u8]) -> QuarryResult<String> {
             format!("not a valid docx (zip): {e}"),
         )
     })?;
+    if zip.len() > MAX_DOCX_ENTRIES {
+        return Err(QuarryError::new(
+            ErrorCode::BadRequest,
+            format!(
+                "docx has {} entries, which exceeds {MAX_DOCX_ENTRIES}",
+                zip.len()
+            ),
+        ));
+    }
     let mut xml = String::new();
     {
-        let mut f = zip.by_name("word/document.xml").map_err(|e| {
+        let f = zip.by_name("word/document.xml").map_err(|e| {
             QuarryError::new(
                 ErrorCode::BadRequest,
                 format!("docx missing word/document.xml: {e}"),
             )
         })?;
-        f.read_to_string(&mut xml).map_err(|e| {
-            QuarryError::new(ErrorCode::Internal, format!("read document.xml: {e}"))
-        })?;
+        // Read one byte past the cap so "exactly at the cap" is not mistaken
+        // for "over it"; decompression is streamed, so a bomb stops here.
+        f.take(MAX_DOCUMENT_XML_BYTES + 1)
+            .read_to_string(&mut xml)
+            .map_err(|e| {
+                QuarryError::new(ErrorCode::Internal, format!("read document.xml: {e}"))
+            })?;
+    }
+    if xml.len() as u64 > MAX_DOCUMENT_XML_BYTES {
+        return Err(QuarryError::new(
+            ErrorCode::BadRequest,
+            format!("docx word/document.xml exceeds {MAX_DOCUMENT_XML_BYTES} bytes"),
+        ));
     }
     Ok(strip_wordml(&xml))
 }
@@ -146,6 +170,47 @@ mod tests {
         }
         let text = extract_text(&buf).unwrap();
         assert_eq!(text, "Contract text");
+    }
+
+    #[test]
+    fn an_inflating_document_xml_is_rejected_at_the_cap() {
+        // ~33 MiB of zeros deflates to a few KiB.
+        let mut payload = b"<w:document><w:body><w:p><w:r><w:t>".to_vec();
+        payload.resize(MAX_DOCUMENT_XML_BYTES as usize + 1024, b'a');
+        let mut buf = Vec::new();
+        {
+            let mut zw = zip::ZipWriter::new(Cursor::new(&mut buf));
+            let opts: zip::write::FileOptions<'_, ()> = zip::write::FileOptions::default()
+                .compression_method(zip::CompressionMethod::Deflated);
+            zw.start_file("word/document.xml", opts).unwrap();
+            zw.write_all(&payload).unwrap();
+            zw.finish().unwrap();
+        }
+        assert!(
+            buf.len() < 256 * 1024,
+            "the bomb itself is small: {}",
+            buf.len()
+        );
+        let error = extract_text(&buf).unwrap_err();
+        assert_eq!(error.code, ErrorCode::BadRequest);
+        assert!(error.message.contains("exceeds"), "{}", error.message);
+    }
+
+    #[test]
+    fn an_archive_with_thousands_of_entries_is_rejected() {
+        let mut buf = Vec::new();
+        {
+            let mut zw = zip::ZipWriter::new(Cursor::new(&mut buf));
+            let opts: zip::write::FileOptions<'_, ()> = zip::write::FileOptions::default();
+            for i in 0..MAX_DOCX_ENTRIES + 5 {
+                zw.start_file(format!("f{i}.txt"), opts).unwrap();
+                zw.write_all(b"x").unwrap();
+            }
+            zw.finish().unwrap();
+        }
+        let error = extract_text(&buf).unwrap_err();
+        assert_eq!(error.code, ErrorCode::BadRequest);
+        assert!(error.message.contains("entries"), "{}", error.message);
     }
 
     #[test]

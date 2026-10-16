@@ -33,6 +33,18 @@ use crate::local_index::{LocalDocument, TantivyLocalIndex};
 use crate::policy::RunPolicy;
 use crate::source_registrar::SourceRegistrar;
 
+/// What a run returns besides its [`NormalizedOutput`]: the parts that cannot
+/// be stored artifacts. Under Zero Data Retention no artifact is written, so
+/// the extracted text is handed back inline instead.
+#[derive(Debug, Clone, Default)]
+pub struct InlineParts {
+    /// The extracted text. `Some` only when this run stores nothing (ZDR).
+    pub markdown: Option<String>,
+    /// `markdown` was cut at the inline cap.
+    pub truncated: bool,
+    pub warnings: Vec<quarry_core::scrape::ScrapeWarning>,
+}
+
 /// What the scrape pipeline does with the kind of body it fetched
 /// (`quarry_transform::sniff`).
 ///
@@ -337,11 +349,25 @@ impl PageRunner {
         requested_url: &Url,
         prev_fingerprint: Option<String>,
     ) -> QuarryResult<NormalizedOutput> {
+        self.run_with_inline(run_id, requested_url, prev_fingerprint)
+            .await
+            .map(|(output, _inline)| output)
+    }
+
+    /// Like [`Self::run`], also returning the inline parts (the extracted text
+    /// under ZDR, and warnings). `/v1/scrape` uses this; crawl and batch keep
+    /// `run`.
+    pub async fn run_with_inline(
+        &self,
+        run_id: &RunKind,
+        requested_url: &Url,
+        prev_fingerprint: Option<String>,
+    ) -> QuarryResult<(NormalizedOutput, InlineParts)> {
         match self
             .run_inner(run_id, requested_url, prev_fingerprint)
             .await
         {
-            Ok(out) => Ok(out),
+            Ok(parts) => Ok(parts),
             Err(e) => {
                 self.emit_page_event(
                     run_id.clone(),
@@ -363,7 +389,7 @@ impl PageRunner {
         run_id: &RunKind,
         requested_url: &Url,
         prev_fingerprint: Option<String>,
-    ) -> QuarryResult<NormalizedOutput> {
+    ) -> QuarryResult<(NormalizedOutput, InlineParts)> {
         // Preflight
         let verdict = self.security.preflight(requested_url).await;
         if verdict.decision == quarry_security::Decision::Block {
@@ -580,10 +606,44 @@ impl PageRunner {
         // so downstream readability + extraction see correct text.
         // Falls through to UTF-8 lossy when no signal is available
         // (preserves previous behaviour for well-behaved servers).
+        // PDF and DOCX go to their text extractors (bounded, off-thread) when
+        // routing is `on`; everything else takes the HTML path below. A file
+        // the parser cannot read is a typed 415 with a reason, not mojibake.
+        let document = match detected {
+            Some(found)
+                if self.doc_routing == DocRouting::On && found.kind.is_parseable_document() =>
+            {
+                match crate::content_route::parse_document(found.kind, resp.body.clone()).await {
+                    Ok(parsed) => Some(parsed),
+                    Err(error) => {
+                        self.emit_page_event(
+                            run_id.clone(),
+                            EventType::PageBlocked,
+                            json!({
+                                "url": resp.final_url.to_string(),
+                                "reason": "document_parse_failed",
+                                "kind": found.kind.label(),
+                                "code": format!("{:?}", error.code),
+                                "bytes": resp.body.len(),
+                            }),
+                            format!("{}:{}:document_parse_failed", run_id, resp.final_url),
+                        )
+                        .await;
+                        return Err(error);
+                    }
+                }
+            }
+            _ => None,
+        };
+        let is_doc = document.is_some();
         let declared_charset = ct
             .as_deref()
             .and_then(quarry_transform::charset::charset_from_content_type);
-        let body_decoded = quarry_transform::charset::decode(&resp.body, declared_charset);
+        // A document body is binary: do not charset-decode megabytes of it.
+        let body_decoded = quarry_transform::charset::decode(
+            if is_doc { &[] } else { &resp.body },
+            declared_charset,
+        );
         if !body_decoded.from_header && body_decoded.encoding != "UTF-8" {
             tracing::debug!(
                 url = %resp.final_url,
@@ -597,8 +657,9 @@ impl PageRunner {
         // shouldn't be ingested as content. Flag here and emit a
         // dedicated event so downstream consumers can drop it from
         // indexing without a content heuristic at every callsite.
-        if let Some(reason) =
-            quarry_transform::soft_404::detect(resp.status, resp.body.len(), &body_text)
+        if let Some(reason) = (!is_doc)
+            .then(|| quarry_transform::soft_404::detect(resp.status, resp.body.len(), &body_text))
+            .flatten()
         {
             self.emit_page_event(
                 run_id.clone(),
@@ -613,9 +674,23 @@ impl PageRunner {
             .await;
         }
 
-        let md = html_to_readable_markdown(&body_text);
-        let link_list = links::extract(&body_text, &resp.final_url);
-        let mut meta = metadata::extract(&body_text, ct.clone());
+        let md = match &document {
+            Some(parsed) => parsed.text.clone(),
+            None => html_to_readable_markdown(&body_text),
+        };
+        let link_list = if is_doc {
+            Vec::new()
+        } else {
+            links::extract(&body_text, &resp.final_url)
+        };
+        let mut meta = if is_doc {
+            quarry_core::output::PageMetadata {
+                content_type: ct.clone(),
+                ..Default::default()
+            }
+        } else {
+            metadata::extract(&body_text, ct.clone())
+        };
         if let Some(found) = detected {
             meta.content_kind = Some(found.kind.label().to_owned());
             meta.content_kind_source = Some(found.source.label().to_owned());
@@ -670,7 +745,11 @@ impl PageRunner {
         // what reaches verevon's onboarding wizard when NATS fan-out is
         // disabled. UTF-8 conversion is best-effort — binary responses
         // (images, PDFs) skip both paths cleanly.
-        let branding_json: Option<serde_json::Value> = match std::str::from_utf8(&resp.body) {
+        let branding_json: Option<serde_json::Value> = match if is_doc {
+            Err(())
+        } else {
+            std::str::from_utf8(&resp.body).map_err(|_| ())
+        } {
             Ok(html_str) => {
                 let branding =
                     quarry_transform::branding_rendered::extract(html_str, &resp.final_url);
@@ -712,10 +791,18 @@ impl PageRunner {
         // stamped with the run's org so `GET /v1/artifacts/{id}` can bind the
         // read back to the same tenant.
         let artifact_org = self.org_id.as_deref().unwrap_or_default();
+        // A document's original bytes are stored as `raw`, never as `html`.
+        let source_label = if is_doc { "raw" } else { "html" };
         let (html_fmt, md_fmt) = if zdr::guard(self.zdr, WriteKind::Artifact).is_ok() {
             let html_art = self
                 .artifacts
-                .put(artifact_org, run_id, &page_hash, "html", resp.body.clone())
+                .put(
+                    artifact_org,
+                    run_id,
+                    &page_hash,
+                    source_label,
+                    resp.body.clone(),
+                )
                 .await?;
             let md_art = self
                 .artifacts
@@ -733,11 +820,11 @@ impl PageRunner {
                     EventType::ArtifactWritten,
                     json!({
                         "url": resp.final_url.to_string(),
-                        "format": "html",
+                        "format": source_label,
                         "artifact_id": html_art.artifact_id.to_string(),
                         "bytes": html_art.bytes,
                     }),
-                    format!("{}:{}:artifact:html", run_id, resp.final_url),
+                    format!("{}:{}:artifact:{source_label}", run_id, resp.final_url),
                 )
                 .await;
             self.event_sink
@@ -809,9 +896,9 @@ impl PageRunner {
             fetched_at,
             fingerprint: fp.0.clone(),
             formats: OutputFormats {
-                html: html_fmt.clone(),
+                html: if is_doc { None } else { html_fmt.clone() },
                 markdown: md_fmt.clone(),
-                raw: None,
+                raw: if is_doc { html_fmt.clone() } else { None },
                 links: link_list,
                 screenshot: None,
                 pdf: None,
@@ -953,6 +1040,38 @@ impl PageRunner {
             output
         };
 
+        // What is returned inline besides the output. Under ZDR nothing was
+        // stored, so the text itself comes back here (capped); a document with
+        // no extractable text, or one cut at the parser cap, says so.
+        let inline = {
+            let mut parts = InlineParts::default();
+            if self.zdr.is_active() {
+                let (text, truncated) = quarry_core::scrape::truncate_on_char_boundary(
+                    &md,
+                    quarry_core::scrape::DEFAULT_INLINE_MAX_BYTES,
+                );
+                parts.markdown = Some(text);
+                parts.truncated = truncated;
+            }
+            if let Some(parsed) = &document {
+                if parsed.truncated {
+                    parts.warnings.push(quarry_core::scrape::ScrapeWarning {
+                        code: "document_text_truncated".into(),
+                        message: "the document's text was cut at the parser's output cap".into(),
+                    });
+                }
+                if md.trim().is_empty() {
+                    parts.warnings.push(quarry_core::scrape::ScrapeWarning {
+                        code: "document_has_no_text_layer".into(),
+                        message: "no text could be extracted; the file may be a scan (OCR is not applied)".into(),
+                    });
+                }
+            }
+            parts
+        };
+        // An empty document is not worth ingesting.
+        let skip_ingest = is_doc && md.trim().is_empty();
+
         // Cycle 19 / cluster #16: index successful scrape into the local
         // Tantivy corpus so subsequent `/v1/search` queries hit warm.
         // Everything about the decision — ZDR, tenant, empty body — lives in
@@ -967,7 +1086,7 @@ impl PageRunner {
         });
 
         if let (Some(ingest), Some(org_id)) = (&self.ingest, &self.org_id) {
-            if zdr::guard(self.zdr, WriteKind::Artifact).is_ok() {
+            if zdr::guard(self.zdr, WriteKind::Artifact).is_ok() && !skip_ingest {
                 let chunks: Vec<ChunkRef> = chunk::paragraph_chunks(&md, 1000)
                     .into_iter()
                     .map(|c| ChunkRef {
@@ -1087,8 +1206,16 @@ impl PageRunner {
                     source_url: resp.final_url.to_string(),
                     title: output.metadata.title.clone(),
                     markdown: Some(md),
-                    html_ref: html_fmt.as_ref().map(|f| f.artifact_id.clone()),
-                    raw_ref: None,
+                    html_ref: if is_doc {
+                        None
+                    } else {
+                        html_fmt.as_ref().map(|f| f.artifact_id.clone())
+                    },
+                    raw_ref: if is_doc {
+                        html_fmt.as_ref().map(|f| f.artifact_id.clone())
+                    } else {
+                        None
+                    },
                     chunks,
                     metadata: ingest_metadata,
                     fingerprint: fp.0.clone(),
@@ -1239,7 +1366,7 @@ impl PageRunner {
             }
         }
 
-        Ok(output)
+        Ok((output, inline))
     }
 }
 
@@ -1760,7 +1887,10 @@ mod content_routing_tests {
     async fn off_detects_nothing_and_changes_nothing() {
         let (runner, mut rx) = runner_for(DocRouting::Off, 200, Some("image/png"), PNG);
         let run_id: RunKind = quarry_core::ids::Id::new();
-        let out = runner.run(&run_id, &url(), None).await.expect("legacy path");
+        let out = runner
+            .run(&run_id, &url(), None)
+            .await
+            .expect("legacy path");
         assert!(out.metadata.content_kind.is_none());
         let fetched = drain(&mut rx)
             .into_iter()
@@ -1818,18 +1948,278 @@ mod content_routing_tests {
         }
         let mut outputs = Vec::new();
         for mode in [DocRouting::Off, DocRouting::Shadow, DocRouting::Skip] {
-            let (runner, _rx) = runner_for(mode, 200, Some("text/html; charset=utf-8"), HTML.as_bytes());
+            let (runner, _rx) =
+                runner_for(mode, 200, Some("text/html; charset=utf-8"), HTML.as_bytes());
             let run_id: RunKind = quarry_core::ids::Id::new();
             let out = runner.run(&run_id, &url(), None).await.expect("html ok");
             outputs.push((mode, out));
         }
         let baseline = comparable(&outputs[0].1);
         for (mode, out) in &outputs[1..] {
-            assert_eq!(comparable(out), baseline, "{mode:?} changed the HTML output");
+            assert_eq!(
+                comparable(out),
+                baseline,
+                "{mode:?} changed the HTML output"
+            );
             assert_eq!(out.metadata.content_kind.as_deref(), Some("html"));
         }
         // The fingerprint (what change monitors compare) never moves.
-        assert!(outputs.iter().all(|(_, o)| o.fingerprint == outputs[0].1.fingerprint));
+        assert!(outputs
+            .iter()
+            .all(|(_, o)| o.fingerprint == outputs[0].1.fingerprint));
+    }
+
+    // ---- routing PDF and DOCX to their text extractors (mode `on`) ----
+
+    /// A valid one-page PDF whose text layer is `text`, with a correct xref table.
+    fn minimal_pdf(text: &str) -> Vec<u8> {
+        let content = format!("BT /F1 24 Tf 100 700 Td ({text}) Tj ET");
+        let objects = [
+            "<< /Type /Catalog /Pages 2 0 R >>".to_owned(),
+            "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_owned(),
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>".to_owned(),
+            format!("<< /Length {} >>\nstream\n{content}\nendstream", content.len()),
+            "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_owned(),
+        ];
+        let mut out = b"%PDF-1.4\n".to_vec();
+        let mut offsets = Vec::new();
+        for (index, object) in objects.iter().enumerate() {
+            offsets.push(out.len());
+            out.extend_from_slice(format!("{} 0 obj\n{object}\nendobj\n", index + 1).as_bytes());
+        }
+        let xref_at = out.len();
+        out.extend_from_slice(
+            format!("xref\n0 {}\n0000000000 65535 f \n", objects.len() + 1).as_bytes(),
+        );
+        for offset in offsets {
+            out.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+        }
+        out.extend_from_slice(
+            format!(
+                "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref_at}\n%%EOF\n",
+                objects.len() + 1
+            )
+            .as_bytes(),
+        );
+        out
+    }
+
+    fn zip_bytes(entries: &[(&str, &[u8])]) -> Vec<u8> {
+        use std::io::Write;
+        let mut buf = Vec::new();
+        {
+            let mut zw = zip::ZipWriter::new(std::io::Cursor::new(&mut buf));
+            let opts: zip::write::FileOptions<'_, ()> = zip::write::FileOptions::default()
+                .compression_method(zip::CompressionMethod::Deflated);
+            for (name, data) in entries {
+                zw.start_file(*name, opts).unwrap();
+                zw.write_all(data).unwrap();
+            }
+            zw.finish().unwrap();
+        }
+        buf
+    }
+
+    fn docx_with(text: &str) -> Vec<u8> {
+        zip_bytes(&[
+            (
+                "[Content_Types].xml",
+                b"<Types>application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml</Types>",
+            ),
+            (
+                "word/document.xml",
+                format!("<w:document><w:body><w:p><w:r><w:t>{text}</w:t></w:r></w:p></w:body></w:document>").as_bytes(),
+            ),
+        ])
+    }
+
+    async fn stored_text(runner: &PageRunner, out: &NormalizedOutput) -> String {
+        let id = out
+            .formats
+            .markdown
+            .as_ref()
+            .expect("a markdown artifact")
+            .artifact_id
+            .clone();
+        String::from_utf8(runner.artifacts.get("org_test", &id).await.unwrap()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn pdf_body_routes_to_pdf_parser_not_readability() {
+        let pdf = minimal_pdf("Hallo dokument fra Verevon");
+        let (runner, _rx) = runner_for(DocRouting::On, 200, Some("application/octet-stream"), &pdf);
+        let run_id: RunKind = quarry_core::ids::Id::new();
+        let out = runner.run(&run_id, &url(), None).await.expect("pdf parsed");
+        assert_eq!(out.metadata.content_kind.as_deref(), Some("pdf"));
+        assert!(stored_text(&runner, &out)
+            .await
+            .contains("Hallo dokument fra Verevon"));
+        // The original bytes are the `raw` format, never `html`.
+        assert!(out.formats.html.is_none());
+        let raw = out.formats.raw.as_ref().expect("raw format");
+        let bytes = runner
+            .artifacts
+            .get("org_test", &raw.artifact_id)
+            .await
+            .unwrap();
+        assert_eq!(bytes, pdf);
+        assert!(out.formats.links.is_empty());
+        // The fingerprint stays the hash of the raw body.
+        assert_eq!(
+            out.fingerprint,
+            quarry_transform::fingerprint::content_fingerprint(&pdf).0
+        );
+    }
+
+    #[tokio::test]
+    async fn docx_zip_routes_to_docx_parser() {
+        let docx = docx_with("Kontrakt mellom partene");
+        let (runner, _rx) = runner_for(DocRouting::On, 200, Some("application/zip"), &docx);
+        let run_id: RunKind = quarry_core::ids::Id::new();
+        let out = runner
+            .run(&run_id, &url(), None)
+            .await
+            .expect("docx parsed");
+        assert_eq!(out.metadata.content_kind.as_deref(), Some("docx"));
+        assert!(stored_text(&runner, &out)
+            .await
+            .contains("Kontrakt mellom partene"));
+    }
+
+    #[tokio::test]
+    async fn plain_zip_and_xlsx_are_unsupported_media() {
+        let plain = zip_bytes(&[("a.txt", b"hello"), ("b.txt", b"world")]);
+        let xlsx = zip_bytes(&[(
+            "[Content_Types].xml",
+            b"<Types>spreadsheetml.sheet.main</Types>",
+        )]);
+        for (body, kind) in [(plain, "archive"), (xlsx, "xlsx")] {
+            let (runner, _rx) =
+                runner_for(DocRouting::On, 200, Some("application/octet-stream"), &body);
+            let run_id: RunKind = quarry_core::ids::Id::new();
+            let error = runner.run(&run_id, &url(), None).await.unwrap_err();
+            assert_eq!(error.code, ErrorCode::UnsupportedMedia, "{kind}");
+            assert_eq!(error.details.unwrap()["kind"], kind);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_corrupt_pdf_is_a_typed_415_with_a_parse_reason() {
+        let (runner, mut rx) = runner_for(
+            DocRouting::On,
+            200,
+            Some("application/pdf"),
+            b"%PDF-1.4 not really a pdf",
+        );
+        let run_id: RunKind = quarry_core::ids::Id::new();
+        let error = runner.run(&run_id, &url(), None).await.unwrap_err();
+        assert_eq!(error.code, ErrorCode::UnsupportedMedia);
+        assert_eq!(error.details.unwrap()["reason"], "pdf_parse_failed");
+        let blocked = drain(&mut rx)
+            .into_iter()
+            .find(|e| e.event_type == EventType::PageBlocked)
+            .expect("page_blocked for the parse failure");
+        assert_eq!(blocked.payload["reason"], "document_parse_failed");
+    }
+
+    #[tokio::test]
+    async fn skip_mode_does_not_parse_documents() {
+        let pdf = minimal_pdf("Hallo");
+        let (runner, _rx) = runner_for(DocRouting::Skip, 200, Some("application/pdf"), &pdf);
+        let run_id: RunKind = quarry_core::ids::Id::new();
+        let out = runner
+            .run(&run_id, &url(), None)
+            .await
+            .expect("legacy path");
+        // Legacy path: the PDF is stored as html, exactly as before.
+        assert!(out.formats.html.is_some());
+        assert!(out.formats.raw.is_none());
+    }
+
+    #[tokio::test]
+    async fn zdr_pdf_writes_no_artifact_and_returns_inline_markdown() {
+        let pdf = minimal_pdf("Hemmelig dokument");
+        let (mut runner, _rx) = runner_for(DocRouting::On, 200, Some("application/pdf"), &pdf);
+        runner.zdr = ZdrMode::On;
+        let store = Arc::new(InMemoryStore::new());
+        runner.artifacts = store.clone();
+        let run_id: RunKind = quarry_core::ids::Id::new();
+        let (out, inline) = runner
+            .run_with_inline(&run_id, &url(), None)
+            .await
+            .expect("zdr pdf parsed");
+        assert!(
+            out.formats.markdown.is_none()
+                && out.formats.raw.is_none()
+                && out.formats.html.is_none()
+        );
+        let listed = store
+            .list("org_test", &quarry_core::pagination::ListFilter::default())
+            .await
+            .unwrap();
+        assert!(listed.items.is_empty(), "ZDR must write no artifact");
+        let text = inline.markdown.expect("inline text under ZDR");
+        assert!(text.contains("Hemmelig dokument"), "{text}");
+        assert!(!inline.truncated);
+    }
+
+    #[tokio::test]
+    async fn zdr_html_returns_inline_markdown_and_non_zdr_does_not() {
+        let (mut zdr_runner, _rx) =
+            runner_for(DocRouting::Off, 200, Some("text/html"), HTML.as_bytes());
+        zdr_runner.zdr = ZdrMode::On;
+        let run_id: RunKind = quarry_core::ids::Id::new();
+        let (_, inline) = zdr_runner
+            .run_with_inline(&run_id, &url(), None)
+            .await
+            .unwrap();
+        assert!(inline.markdown.unwrap().contains("En vanlig nettside"));
+
+        let (runner, _rx) = runner_for(DocRouting::Off, 200, Some("text/html"), HTML.as_bytes());
+        let (_, inline) = runner.run_with_inline(&run_id, &url(), None).await.unwrap();
+        assert!(
+            inline.markdown.is_none(),
+            "stored runs return no inline text"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_pdf_without_a_text_layer_warns_and_skips_ingest() {
+        let pdf = minimal_pdf("");
+        let (runner, _rx) = runner_for(DocRouting::On, 200, Some("application/pdf"), &pdf);
+        let run_id: RunKind = quarry_core::ids::Id::new();
+        let (_, inline) = runner.run_with_inline(&run_id, &url(), None).await.unwrap();
+        assert!(inline
+            .warnings
+            .iter()
+            .any(|w| w.code == "document_has_no_text_layer"));
+    }
+
+    #[tokio::test]
+    async fn html_output_is_unchanged_with_routing_on() {
+        let (off, _r1) = runner_for(
+            DocRouting::Off,
+            200,
+            Some("text/html; charset=utf-8"),
+            HTML.as_bytes(),
+        );
+        let (on, _r2) = runner_for(
+            DocRouting::On,
+            200,
+            Some("text/html; charset=utf-8"),
+            HTML.as_bytes(),
+        );
+        let run_id: RunKind = quarry_core::ids::Id::new();
+        let a = off.run(&run_id, &url(), None).await.unwrap();
+        let b = on.run(&run_id, &url(), None).await.unwrap();
+        assert_eq!(a.fingerprint, b.fingerprint);
+        assert_eq!(a.metadata.title, b.metadata.title);
+        assert_eq!(a.formats.links.len(), b.formats.links.len());
+        assert_eq!(
+            a.formats.markdown.as_ref().map(|f| f.bytes),
+            b.formats.markdown.as_ref().map(|f| f.bytes)
+        );
+        assert!(b.formats.raw.is_none() && b.formats.html.is_some());
     }
 
     #[test]

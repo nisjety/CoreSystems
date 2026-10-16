@@ -25,6 +25,7 @@ pub mod policy;
 pub mod presets;
 pub mod privacy;
 pub mod resources;
+pub mod scrape;
 pub mod tracked_snapshot;
 pub mod zdr;
 

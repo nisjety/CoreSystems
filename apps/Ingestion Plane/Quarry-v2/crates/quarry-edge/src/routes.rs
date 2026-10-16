@@ -399,7 +399,10 @@ async fn scrape(
     State(state): State<AppState>,
     Extension(claims): Extension<crate::auth::Claims>,
     Json(req): Json<ScrapeRequest>,
-) -> Result<Json<Envelope<NormalizedOutput>>, (StatusCode, axum::response::Response)> {
+) -> Result<
+    Json<Envelope<quarry_core::scrape::ScrapeResponse>>,
+    (StatusCode, axum::response::Response),
+> {
     let request_id = RequestKind::new().to_string();
     if req.ingest.unwrap_or(false) && claims.is_service() && !claims.has_scope("scrape:write") {
         let error = QuarryError::new(
@@ -432,7 +435,10 @@ async fn scrape(
     if !zdr.is_active() && should_read(&req.cache) {
         if let (Some(prev), Some(cache)) = (req.prev_fingerprint.as_ref(), state.cache.as_ref()) {
             if let Some(cached) = cache.get(&org_id, prev).await {
-                return Ok(Json(Envelope::ok(request_id, cached)));
+                return Ok(Json(Envelope::ok(
+                    request_id,
+                    quarry_core::scrape::ScrapeResponse::from_output(cached),
+                )));
             }
         }
     }
@@ -476,8 +482,8 @@ async fn scrape(
 
     let run_id: RunKind = quarry_core::ids::Id::new();
     let prev_fp = req.prev_fingerprint.clone();
-    match runner.run(&run_id, &url, prev_fp).await {
-        Ok(out) => {
+    match runner.run_with_inline(&run_id, &url, prev_fp).await {
+        Ok((out, inline)) => {
             if !zdr.is_active() && should_write(&req.cache) {
                 if let Some(cache) = state.cache.as_ref() {
                     let ttl = effective_ttl(&req.cache, DEFAULT_TTL_SECS);
@@ -508,7 +514,15 @@ async fn scrape(
                     }),
                 ))
                 .await;
-            Ok(Json(Envelope::ok(request_id, out)))
+            Ok(Json(Envelope::ok(
+                request_id,
+                quarry_core::scrape::ScrapeResponse {
+                    output: out,
+                    markdown: inline.markdown,
+                    truncated: inline.truncated,
+                    warnings: inline.warnings,
+                },
+            )))
         }
         Err(err) => {
             // OSS-parity 3D — structured rate-limit envelope (Tavily-style)

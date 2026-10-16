@@ -72,6 +72,8 @@ http3 = ["reqwest/http3"]
 tonic-build = { workspace = true, optional = false }
 
 [dev-dependencies]
+# Builds real DOCX/XLSX fixtures for the content-routing tests.
+zip = { version = "2", default-features = false, features = ["deflate"] }
 uuid = { version = "1", features = ["v4"] }
 wiremock = "0.6"
 bytes = "1"

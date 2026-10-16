@@ -68,7 +68,14 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/Envelope_NormalizedOutput'
+                $ref: '#/components/schemas/Envelope_ScrapeResponse'
+        '415':
+          description: >-
+            The page is a kind of file Quarry cannot extract text from (image,
+            archive, spreadsheet, ...), or a PDF/DOCX that could not be read. Code
+            UNSUPPORTED_MEDIA; details name the kind and, for a document that failed
+            to parse, a reason (pdf_parse_failed, docx_parse_failed, too_large). Only
+            returned when QUARRY_EDGE__DOC_ROUTING is skip or on.
         '400':
           description: Invalid request (bad URL, missing fields)
           content:
@@ -4641,6 +4648,49 @@ components:
           description: Always true for success envelopes
         data:
           $ref: '#/components/schemas/NormalizedOutput'
+    ScrapeResponse:
+      description: >-
+        A NormalizedOutput plus what cannot be a stored artifact. Under Zero Data
+        Retention no artifact is written, so the extracted text is returned inline
+        in `markdown`; otherwise read it from formats.markdown. A PDF or DOCX
+        (QUARRY_EDGE__DOC_ROUTING=on) stores its original bytes as formats.raw and
+        has no formats.html.
+      allOf:
+      - $ref: '#/components/schemas/NormalizedOutput'
+      - type: object
+        properties:
+          markdown:
+            type: string
+            description: Inline text; present only when nothing is stored (ZDR). Capped at 1 MiB.
+          truncated:
+            type: boolean
+            description: markdown was cut at the inline cap.
+          warnings:
+            type: array
+            items:
+              type: object
+              required:
+              - code
+              - message
+              properties:
+                code:
+                  type: string
+                  description: e.g. document_has_no_text_layer, document_text_truncated
+                message:
+                  type: string
+    Envelope_ScrapeResponse:
+      type: object
+      required:
+      - request_id
+      - success
+      - data
+      properties:
+        request_id:
+          type: string
+        success:
+          type: boolean
+        data:
+          $ref: '#/components/schemas/ScrapeResponse'
     Envelope_HandoffAck:
       type: object
       required:
