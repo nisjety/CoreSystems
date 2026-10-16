@@ -1,0 +1,474 @@
+use super::*;
+
+/// A live agent run: the leased browser session plus the per-run observation
+/// context (carries `step`/current_url across `/step` calls) and budget.
+pub struct RunEntry {
+    pub run_id: RunKind,
+    pub org_id: String,
+    /// Signed user/service actor that started this run. The browser edge
+    /// scopes live-session reads and mutations to this actor as well as
+    /// the tenant; an org membership alone is not browser-run authority.
+    pub actor_id: String,
+    pub session: BrowserSession,
+    pub ctx: ObservationContext,
+    pub lease: BrowserLease,
+    pub constraints: AgentConstraints,
+    pub zdr: ZdrMode,
+    pub grant_id: Option<String>,
+    pub control_mode: BrowserControlMode,
+    pub profile_scope: BrowserProfileScope,
+    pub execution_tier: BrowserExecutionTier,
+    /// Current live observation. It is intentionally process-local for a
+    /// ZDR run, while non-ZDR proof remains in immutable receipts.
+    pub last_observation: Option<BrowserObservation>,
+    /// A sensitive approval grant can authorize one irreversible action
+    /// only. It is deliberately process-local: a resumed run must obtain
+    /// fresh authority instead of replaying a prior approval.
+    pub used_sensitive_approval_grants: HashSet<String>,
+    /// Steps, attempts, active time and estimated cost against the run's
+    /// bounds (`crate::budget`). `None` when enforcement is `off`.
+    pub budget: Option<crate::budget::RunBudget>,
+}
+
+/// run_id → entry. Outer std-Mutex guards the map (held only for the O(1)
+/// get/insert/remove, never across an await); inner tokio-Mutex serializes
+/// steps within a single run across await points.
+pub type AgentRuns = Arc<StdMutex<HashMap<String, Arc<TokioMutex<RunEntry>>>>>;
+
+#[must_use]
+pub fn new_runs() -> AgentRuns {
+    Arc::new(StdMutex::new(HashMap::new()))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct StartRunBody {
+    // quarry-core `AgentConstraints` has no `Default` impl, so supply one
+    // via a serde default fn (unbounded budget when the caller omits it).
+    #[serde(default = "default_constraints")]
+    pub constraints: AgentConstraints,
+    #[serde(default)]
+    pub profile_id: Option<String>,
+    #[serde(default)]
+    pub persist_profile: bool,
+    /// The effective scope is provided by the authenticated BFF after it
+    /// validates the requested profile. It remains owner state so reads
+    /// and resume paths never depend on a gateway-local session cache.
+    #[serde(default)]
+    pub profile_scope: BrowserProfileScope,
+    #[serde(default)]
+    pub viewport: Option<BrowserViewport>,
+    #[serde(default)]
+    pub zdr: bool,
+    /// BrowserBroker's signed capability. Quarry revalidates it before
+    /// every action, so an approval cannot be replayed after expiry.
+    #[serde(default)]
+    pub grant_id: Option<String>,
+    /// Resume a previously checkpointed run after an edge restart. The
+    /// checkpoint's tenant, constraints, profile, and current step remain
+    /// authoritative; a new/renewed grant may be supplied explicitly.
+    #[serde(default)]
+    pub resume_run_id: Option<String>,
+    /// Who is driving this run: `"agent"` marks it as a model-driven run.
+    /// Tighten-only: it can make a run an agent run (budgeted), never the
+    /// reverse; a service principal is an agent run whatever it sends.
+    #[serde(default)]
+    pub initiated_by: Option<String>,
+    /// Optional requirements for the selected execution driver. Quarry
+    /// fails closed instead of silently beginning a run with a driver that
+    /// cannot supply a capability the caller needs.
+    #[serde(default)]
+    pub driver_requirements: BrowserDriverRequirements,
+    /// `ephemeral_evidence` is an opt-in experimental contract for public,
+    /// disposable evidence acquisition. It is never an alias for a normal
+    /// authenticated browser run.
+    #[serde(default)]
+    pub execution_tier: BrowserExecutionTier,
+}
+
+/// Browser execution contract selected at run creation. The renderer
+/// implementation is intentionally separate from the contract: the Lite
+/// experiment currently transparently falls back to Chromium while a
+/// lightweight renderer earns capability evidence on its own corpus.
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum BrowserExecutionTier {
+    #[default]
+    Chromium,
+    EphemeralEvidence,
+}
+
+impl BrowserExecutionTier {
+    pub(super) const fn is_ephemeral_evidence(self) -> bool {
+        matches!(self, Self::EphemeralEvidence)
+    }
+
+    pub(super) const fn engine_label(self) -> &'static str {
+        match self {
+            Self::Chromium => "chromium",
+            // Do not imply a Boa/Blitz renderer exists merely because its
+            // contract is exposed. This run is a constrained Chromium
+            // fallback until a Lite engine supplies independent evidence.
+            Self::EphemeralEvidence => "chromium_fallback",
+        }
+    }
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct BrowserDriverRequirements {
+    #[serde(default)]
+    pub persistent_profile: bool,
+    #[serde(default)]
+    pub devtools_trace: bool,
+    #[serde(default)]
+    pub downloads_to_artifacts: bool,
+    #[serde(default)]
+    pub uploads_from_artifacts: bool,
+    #[serde(default)]
+    pub full_visual_fidelity: bool,
+    #[serde(default)]
+    pub isolated_egress: bool,
+    #[serde(default)]
+    pub security_evidence: bool,
+    #[serde(default)]
+    pub atomic_target_actions: bool,
+}
+
+pub(super) fn default_constraints() -> AgentConstraints {
+    AgentConstraints {
+        max_steps: 0,
+        allowed_domains: Vec::new(),
+        max_runtime_s: None,
+        max_cost_usd: None,
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub struct StartRunData {
+    pub run_id: String,
+    pub lease_id: String,
+    pub profile_id: String,
+    /// What the selected driver can actually supply for this lease. This
+    /// is evidence-backed routing metadata, not a promise inferred from a
+    /// provider name.
+    pub driver_capabilities: BrowserDriverCapabilities,
+    pub execution_tier: BrowserExecutionTier,
+    /// Actual engine used for this run. `chromium_fallback` is explicit so
+    /// callers never infer Lite throughput/fidelity from a request alone.
+    pub execution_engine: &'static str,
+    /// The bounds this run runs under, after defaults and ceilings.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub constraints: Option<crate::budget::EffectiveConstraints>,
+    /// Requested values that were replaced, and by what.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub clamped: Vec<crate::budget::ClampView>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BrowserSessionProjectionData {
+    pub run_id: String,
+    pub lease_id: String,
+    pub profile_id: String,
+    pub profile_storage: &'static str,
+    pub profile_scope: BrowserProfileScope,
+    pub viewport: Option<BrowserViewport>,
+    pub current_url: String,
+    pub step: u32,
+    pub status: AgentRunStatus,
+    pub live: bool,
+    pub zdr: bool,
+    pub control_mode: BrowserControlMode,
+    pub execution_tier: BrowserExecutionTier,
+    pub tabs: Vec<BrowserSessionTab>,
+    pub last_observation: Option<BrowserObservation>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BrowserSessionTab {
+    pub tab_id: String,
+    pub title: Option<String>,
+    pub url: Option<String>,
+    pub active: bool,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct StepBody {
+    pub action: AgentAction,
+    #[serde(default)]
+    pub instruction: Option<String>,
+    #[serde(default)]
+    pub extraction_profile: Option<ExtractionProfile>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct BrowserSessionControlBody {
+    pub mode: BrowserControlMode,
+}
+
+#[derive(Debug, Deserialize, Default)]
+pub struct BrowserTimelineQuery {
+    #[serde(default)]
+    pub cursor: Option<String>,
+    #[serde(default)]
+    pub limit: Option<usize>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BrowserTimelineData {
+    pub items: Vec<BrowserTimelineItem>,
+    pub next_cursor: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BrowserTimelineItem {
+    pub id: String,
+    pub occurred_at: String,
+    #[serde(flatten)]
+    pub detail: BrowserTimelineItemDetail,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum BrowserTimelineItemDetail {
+    Action {
+        action: &'static str,
+        outcome: &'static str,
+        error_code: Option<String>,
+    },
+    Control {
+        mode: BrowserControlMode,
+        initiated_by: BrowserTimelineInitiator,
+    },
+    Tab {
+        operation: BrowserTabOperation,
+        tab_id: Option<String>,
+        active_tab_id: Option<String>,
+    },
+    Devtools {
+        event_count: u32,
+        last_sequence: u64,
+    },
+    Lifecycle {
+        state: BrowserTimelineLifecycle,
+    },
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CompileProcedureBody {
+    /// Stable caller-owned identifier for the compiled candidate. The
+    /// procedure is still only a deterministic replay candidate; it is
+    /// never silently promoted to an autonomous action policy.
+    #[serde(default)]
+    pub procedure_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ReplayCheckBody {
+    pub procedure: BrowserProcedure,
+    #[serde(default)]
+    pub actions: Vec<AgentAction>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ProcedureImpactBody {
+    pub procedure: BrowserProcedure,
+    #[serde(default)]
+    pub changed_urls: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FrameQuery {
+    #[serde(default)]
+    pub format: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_optional_query_u8")]
+    pub quality: Option<u8>,
+    #[serde(default, deserialize_with = "deserialize_optional_query_u32")]
+    pub max_width: Option<u32>,
+    #[serde(default, deserialize_with = "deserialize_optional_query_u32")]
+    pub max_height: Option<u32>,
+    #[serde(default, deserialize_with = "deserialize_optional_query_u32")]
+    pub every_nth_frame: Option<u32>,
+    #[serde(default, deserialize_with = "deserialize_optional_query_u64")]
+    pub timeout_ms: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FrameStreamQuery {
+    #[serde(flatten)]
+    pub frame: FrameQuery,
+    #[serde(default, deserialize_with = "deserialize_optional_query_u64")]
+    pub interval_ms: Option<u64>,
+    #[serde(default, deserialize_with = "deserialize_optional_query_u64")]
+    pub max_frames: Option<u64>,
+}
+
+/// W3 — query for `GET /v1/agent/runs/{id}/events/stream`.
+/// `from_seq` triggers a durable-history replay before the live
+/// tail; `max_events` caps the total emission count for the
+/// connection.
+#[derive(Debug, Deserialize)]
+pub struct AgentEventsQuery {
+    #[serde(default, deserialize_with = "deserialize_optional_query_u64")]
+    pub from_seq: Option<u64>,
+    #[serde(default, deserialize_with = "deserialize_optional_query_u64")]
+    pub max_events: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+pub(super) enum QueryScalar<T> {
+    Number(T),
+    String(String),
+}
+
+pub(super) fn deserialize_optional_query_u8<'de, D>(deserializer: D) -> Result<Option<u8>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    deserialize_optional_query_number(deserializer)
+}
+
+pub(super) fn deserialize_optional_query_u32<'de, D>(deserializer: D) -> Result<Option<u32>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    deserialize_optional_query_number(deserializer)
+}
+
+pub(super) fn deserialize_optional_query_u64<'de, D>(deserializer: D) -> Result<Option<u64>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    deserialize_optional_query_number(deserializer)
+}
+
+pub(super) fn deserialize_optional_query_number<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de> + FromStr,
+    T::Err: Display,
+{
+    match Option::<QueryScalar<T>>::deserialize(deserializer)? {
+        Some(QueryScalar::Number(value)) => Ok(Some(value)),
+        Some(QueryScalar::String(value)) => {
+            let trimmed = value.trim();
+            if trimmed.is_empty() {
+                Ok(None)
+            } else {
+                trimmed.parse::<T>().map(Some).map_err(D::Error::custom)
+            }
+        }
+        None => Ok(None),
+    }
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LiveFrameData {
+    pub mime_type: String,
+    pub data_base64: String,
+    pub zdr: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LiveFrameStreamData {
+    pub sequence: u64,
+    pub mime_type: String,
+    pub data_base64: String,
+    pub zdr: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BrowserTabsData {
+    pub tabs: Vec<BrowserTab>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BrowserTabData {
+    pub tab: BrowserTab,
+    pub tabs: Vec<BrowserTab>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DevtoolsQuery {
+    #[serde(default)]
+    pub after_sequence: Option<u64>,
+    #[serde(default)]
+    pub limit: Option<usize>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DevtoolsEventsData {
+    pub events: Vec<BrowserDevtoolsEvent>,
+    pub zdr: bool,
+}
+
+/// Bounded, redacted decisions made by the browser egress boundary. This
+/// contains neither resolved IPs nor request secrets; it is safe to read
+/// during a live ZDR session but is never a substitute for the immutable
+/// step receipt retained under the run's ZDR policy.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EgressReceiptsData {
+    pub receipts: Vec<BrowserEgressReceipt>,
+    pub zdr: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NewTabBody {
+    #[serde(default)]
+    pub url: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum BrowserWsClientMessage {
+    Action {
+        action: AgentAction,
+        #[serde(default)]
+        instruction: Option<String>,
+    },
+    Ping,
+}
+
+pub(super) type ApiErr = (StatusCode, Json<Envelope<()>>);
+
+pub(super) fn status_err(status: StatusCode, request_id: &str, msg: &str) -> ApiErr {
+    (
+        status,
+        Json(Envelope::<()>::err(
+            request_id,
+            QuarryError::new(ErrorCode::BadRequest, msg),
+        )),
+    )
+}
+
+pub(super) fn driver_err(request_id: &str, err: QuarryError) -> ApiErr {
+    (
+        StatusCode::from_u16(err.code.http_status())
+            .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+        Json(Envelope::<()>::err(request_id, err)),
+    )
+}
+
+/// What a drain did to the live runs.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct DrainReport {
+    /// Sessions released.
+    pub released: usize,
+    /// Releases that failed or timed out (the browser dies with the process).
+    pub failed: usize,
+    /// Runs a request still held at drain time; they are left to the exit.
+    pub in_use: usize,
+}
