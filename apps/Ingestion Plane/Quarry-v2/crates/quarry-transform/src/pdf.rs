@@ -69,7 +69,21 @@ pub struct PdfHeading {
 pub fn extract_text(body: &[u8]) -> QuarryResult<String> {
     let doc = load_doc(body)?;
     let mut out = String::new();
-    for (_, page_id) in doc.get_pages() {
+    for (page_no, page_id) in doc.get_pages() {
+        // Font-aware first. Most PDFs embed a subset font whose strings are glyph
+        // codes, not characters (the text is in the font's ToUnicode map or
+        // encoding); reading the raw string operands then yields control bytes.
+        // lopdf applies the page's fonts, so use that and keep the raw walk below
+        // for a page it cannot read or finds no text on.
+        if let Ok(text) = doc.extract_text(&[page_no]) {
+            if !text.trim().is_empty() {
+                out.push_str(&text);
+                if !out.ends_with('\n') {
+                    out.push('\n');
+                }
+                continue;
+            }
+        }
         if let Ok(stream) = doc.get_and_decode_page_content(page_id) {
             for op in stream.operations {
                 if let Some(s) = extract_text_op(&op) {
@@ -268,6 +282,72 @@ mod tests {
         let body = b"not a pdf";
         let error = extract_text(body).expect_err("malformed PDF rejected");
         assert_eq!(error.code, ErrorCode::DriverFailed);
+    }
+
+    /// A one-page PDF whose only font is a subset font: the page shows the glyph
+    /// codes 1 and 2, and the font's ToUnicode map says they are "H" and "i".
+    fn subset_font_pdf() -> Vec<u8> {
+        use lopdf::content::Content;
+        use lopdf::{dictionary, Stream};
+
+        let cmap = "/CIDInit /ProcSet findresource begin\n12 dict begin\nbegincmap\n\
+            /CIDSystemInfo << /Registry (Adobe) /Ordering (UCS) /Supplement 0 >> def\n\
+            /CMapName /Adobe-Identity-UCS def\n/CMapType 2 def\n\
+            1 begincodespacerange\n<00> <FF>\nendcodespacerange\n\
+            2 beginbfchar\n<01> <0048>\n<02> <0069>\nendbfchar\n\
+            endcmap\nCMapName currentdict /CMap defineresource pop\nend\nend\n";
+        let mut doc = Document::with_version("1.5");
+        let pages_id = doc.new_object_id();
+        let to_unicode = doc.add_object(Stream::new(dictionary! {}, cmap.as_bytes().to_vec()));
+        let font = doc.add_object(dictionary! {
+            "Type" => "Font",
+            "Subtype" => "TrueType",
+            "BaseFont" => "ABCDEF+Subset",
+            "FirstChar" => 0,
+            "LastChar" => 2,
+            "Widths" => vec![0.into(), 500.into(), 500.into()],
+            "ToUnicode" => to_unicode,
+        });
+        let content = Content {
+            operations: vec![
+                Operation::new("BT", vec![]),
+                Operation::new("Tf", vec!["F1".into(), 12.into()]),
+                Operation::new("Td", vec![72.into(), 700.into()]),
+                Operation::new("Tj", vec![Object::string_literal(vec![1u8, 2u8])]),
+                Operation::new("ET", vec![]),
+            ],
+        };
+        let content_id = doc.add_object(Stream::new(dictionary! {}, content.encode().unwrap()));
+        let page_id = doc.add_object(dictionary! {
+            "Type" => "Page",
+            "Parent" => pages_id,
+            "Contents" => content_id,
+            "Resources" => dictionary! { "Font" => dictionary! { "F1" => font } },
+            "MediaBox" => vec![0.into(), 0.into(), 595.into(), 842.into()],
+        });
+        doc.objects.insert(
+            pages_id,
+            Object::Dictionary(dictionary! {
+                "Type" => "Pages",
+                "Kids" => vec![page_id.into()],
+                "Count" => 1,
+            }),
+        );
+        let catalog = doc.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages_id });
+        doc.trailer.set("Root", catalog);
+        let mut out = Vec::new();
+        doc.save_to(&mut out).unwrap();
+        out
+    }
+
+    #[test]
+    fn subset_font_text_is_read_through_the_tounicode_map() {
+        let text = extract_text(&subset_font_pdf()).expect("parse");
+        assert_eq!(text, "Hi", "glyph codes must map to characters, got {text:?}");
+        assert!(
+            !text.chars().any(char::is_control),
+            "no raw glyph codes in the output: {text:?}"
+        );
     }
 
     #[test]
