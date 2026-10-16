@@ -78,6 +78,14 @@ pub async fn forward_to_orchestrator(
     let status = resp.status();
     if !status.is_success() {
         let text = resp.text().await.unwrap_or_default();
+        // The organization's own queue is full (job admission): that is the
+        // caller's to retry later, not an upstream fault, so it stays a typed
+        // RATE_LIMITED with the numbers control gave instead of a 502.
+        if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+            if let Some(error) = backlog_full(&text) {
+                return Err(error);
+            }
+        }
         return Err(QuarryError::new(
             ErrorCode::UpstreamBlocked,
             format!("control {}: {}", status.as_u16(), truncate(&text, 500)),
@@ -103,6 +111,32 @@ pub async fn forward_to_orchestrator(
     })
 }
 
+/// The `org_backlog_full` refusal from control's error envelope
+/// (`{"error": {"code": "RATE_LIMITED", "details": {"reason": ..}}}`), as a
+/// typed `RATE_LIMITED` carrying `reason`, `limit`, `queued` and
+/// `retry_after_seconds`. `None` for any other 429 body.
+fn backlog_full(body: &str) -> Option<QuarryError> {
+    let envelope: serde_json::Value = serde_json::from_str(body).ok()?;
+    let details = envelope.get("error")?.get("details")?;
+    if details.get("reason")?.as_str()? != "org_backlog_full" {
+        return None;
+    }
+    let pick = |key: &str| details.get(key).cloned().unwrap_or(serde_json::Value::Null);
+    Some(
+        QuarryError::new(
+            ErrorCode::RateLimited,
+            "this organization has too many jobs waiting; try again shortly",
+        )
+        .with_details(serde_json::json!({
+            "reason": "org_backlog_full",
+            "scope": "org",
+            "limit": pick("limit"),
+            "queued": pick("queued"),
+            "retry_after_seconds": pick("retry_after_seconds"),
+        })),
+    )
+}
+
 #[derive(Debug, Deserialize)]
 struct ControlJobEnvelope {
     data: Option<ControlJob>,
@@ -123,5 +157,60 @@ fn truncate(s: &str, max: usize) -> String {
         s.to_string()
     } else {
         format!("{}…", &s[..max])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn control_429(reason: &str) -> String {
+        serde_json::json!({
+            "data": null,
+            "meta": { "request_id": "req_1" },
+            "error": {
+                "code": "RATE_LIMITED",
+                "message": "this organization has too many jobs waiting",
+                "details": { "reason": reason, "limit": 200, "queued": 200, "retry_after_seconds": 30 },
+                "retryable": false
+            }
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn a_full_backlog_is_a_typed_rate_limit_with_the_numbers() {
+        let error = backlog_full(&control_429("org_backlog_full")).expect("typed");
+        assert_eq!(error.code, ErrorCode::RateLimited);
+        assert!(error.retryable);
+        let details = error.details.expect("details");
+        assert_eq!(details["reason"], "org_backlog_full");
+        assert_eq!(details["scope"], "org");
+        assert_eq!(details["limit"], 200);
+        assert_eq!(details["queued"], 200);
+        assert_eq!(details["retry_after_seconds"], 30);
+    }
+
+    #[test]
+    fn any_other_429_or_a_body_that_is_not_the_envelope_stays_an_upstream_error() {
+        assert!(backlog_full(&control_429("something_else")).is_none());
+        assert!(backlog_full("rate limit exceeded").is_none());
+        assert!(backlog_full("{}").is_none());
+        assert!(backlog_full(r#"{"error":{"details":{}}}"#).is_none());
+        assert!(backlog_full(r#"{"error":{"details":{"reason":7}}}"#).is_none());
+    }
+
+    #[test]
+    fn the_refusal_never_echoes_the_control_message_or_extra_fields() {
+        let body = serde_json::json!({
+            "error": { "message": "SECRET-INTERNAL-TEXT", "details": {
+                "reason": "org_backlog_full", "limit": 1, "queued": 1, "retry_after_seconds": 1,
+                "internal_dsn": "postgres://leak"
+            } }
+        })
+        .to_string();
+        let rendered = serde_json::to_string(&backlog_full(&body).unwrap()).unwrap();
+        assert!(!rendered.contains("SECRET-INTERNAL-TEXT"));
+        assert!(!rendered.contains("postgres://leak"));
     }
 }

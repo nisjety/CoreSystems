@@ -119,6 +119,20 @@ func main() {
 		log.Warn().Msg("HMAC cross-plane auth: DISABLED (no secret) — control plane MUST be on private network")
 	}
 
+	// Job admission: per-organization caps, a bounded backlog and the claim
+	// endpoint. Off unless QUARRY_JOB_ADMISSION=on; a value that cannot be read
+	// stops control here rather than silently running without the bound.
+	admission, err := resources.AdmissionFromEnv(os.Getenv)
+	if err != nil {
+		log.Fatal().Err(err).Msg("job admission configuration is invalid")
+	}
+	log.Info().
+		Bool("enabled", admission.Enabled).
+		Int("cap_default", admission.CapDefault).
+		Int("backlog_default", admission.BacklogDefault).
+		Dur("backlog_ttl", admission.BacklogTTL).
+		Msg("job admission")
+
 	var db store.DB
 	var dbPinger httpx.Pinger
 	if dsn == "" {
@@ -153,7 +167,7 @@ func main() {
 	r.Group(func(r chi.Router) {
 		r.Use(hmacVerifier.Middleware)
 
-		resources.MountJobs(r, db)
+		resources.MountJobs(r, db, resources.WithAdmission(admission))
 		resources.MountStores(r, db)
 		// Legacy snapshot CRUD was folded into MountSnapshotsV2 below — the
 		// enriched list is the only /v1/snapshots surface; restore reads the
@@ -194,6 +208,9 @@ func main() {
 	})
 
 	dCtx, dCancel := context.WithCancel(context.Background())
+	// Job admission (off unless QUARRY_JOB_ADMISSION=on): fail jobs that waited
+	// past the TTL so their streams close.
+	go resources.RunBacklogJanitor(dCtx, db, admission, time.Minute, log.Logger)
 	go dispatcher.Run(dCtx, db, nil, dispatcher.Options{Workers: 4}, log.Logger)
 	// Phase 7 retention sweep — INERT unless QUARRY_RETENTION_DAYS>0, and only
 	// deletes when QUARRY_RETENTION_DRY_RUN=false; otherwise a default-safe no-op.

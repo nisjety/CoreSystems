@@ -148,6 +148,10 @@ func main() {
 	if err != nil {
 		log.Fatal().Err(err).Msg("crawl limits")
 	}
+	claimBatch, err := jobs.LoadClaimBatch()
+	if err != nil {
+		log.Fatal().Err(err).Msg("job claim batch")
+	}
 	jobsMgr := jobs.New(c, jobs.Config{
 		ControlBaseURL:    controlURL,
 		ControlAuthToken:  controlToken,
@@ -155,6 +159,7 @@ func main() {
 		TaskQueue:         TaskQueue,
 		Interval:          2 * time.Second,
 		CrawlLimits:       crawlLimits,
+		ClaimBatch:        claimBatch,
 	})
 	go jobsMgr.Run(rootCtx)
 

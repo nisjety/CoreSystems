@@ -80,6 +80,10 @@ Error path:
 - `change.detected`, `change.unchanged`
 - `schedule.fired`
 
+#### Job backlog refusal
+
+`POST /v1/crawl` and `POST /v1/batch` answer `429 RATE_LIMITED` with `error.details = {reason: "org_backlog_full", scope: "org", limit, queued, retry_after_seconds}` when job admission is on and the organization already has `limit` jobs waiting. No job is created. A job that waits longer than the backlog TTL ends with `run.failed` (`payload.reason = "backlog_expired"`).
+
 #### Run statistics on a terminal event
 
 `run.completed` and `run.cancelled` of a **crawl** or **batch** run carry `payload.statistics`, and control copies it onto the job, so `GET /v1/jobs/{id}` returns it as `statistics` (absent while the job runs, and for job kinds that do not report it):

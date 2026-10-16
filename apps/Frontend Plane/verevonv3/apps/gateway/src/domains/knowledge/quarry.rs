@@ -231,6 +231,45 @@ fn classify_scrape_failure(status: StatusCode, elapsed: Duration) -> (&'static s
     )
 }
 
+/// The `org_backlog_full` refusal from Quarry's error envelope as a gateway
+/// `crawl_backlog_full` 429 with `Retry-After`. Only the numbers survive
+/// (limit, queued, seconds); nothing else from the upstream body is echoed.
+/// `None` for any other 429.
+fn crawl_backlog_full_response(resp: &Value) -> Option<Response> {
+    let details = resp.pointer("/error/details")?;
+    if details.get("reason")?.as_str()? != "org_backlog_full" {
+        return None;
+    }
+    let count = |key: &str| {
+        details
+            .get(key)
+            .and_then(Value::as_u64)
+            .filter(|n| *n <= 1_000_000)
+    };
+    let retry_after = count("retry_after_seconds")
+        .filter(|seconds| (1..=3600).contains(seconds))
+        .unwrap_or(30);
+    let mut body = error(
+        "crawl_backlog_full",
+        "Too many crawls are waiting for this organization. Try again shortly.",
+    );
+    body["error"]["retryAfterSeconds"] = json!(retry_after);
+    if let Some(limit) = count("limit") {
+        body["error"]["limit"] = json!(limit);
+    }
+    if let Some(queued) = count("queued") {
+        body["error"]["queued"] = json!(queued);
+    }
+    Some(
+        (
+            StatusCode::TOO_MANY_REQUESTS,
+            [(axum::http::header::RETRY_AFTER, retry_after.to_string())],
+            Json(body),
+        )
+            .into_response(),
+    )
+}
+
 pub(super) async fn start_crawl(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
@@ -272,6 +311,14 @@ pub(super) async fn start_crawl(
     .await;
 
     if !status.is_success() {
+        // The organization's own crawl queue is full: say so in a code the app
+        // has copy for, with when to try again, instead of passing the
+        // upstream envelope through.
+        if status == StatusCode::TOO_MANY_REQUESTS {
+            if let Some(response) = crawl_backlog_full_response(&resp) {
+                return response;
+            }
+        }
         return (status, Json(resp)).into_response();
     }
 
@@ -701,6 +748,81 @@ fn crawl_job_status(value: &Value) -> Option<&str> {
 #[allow(clippy::items_after_test_module)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn start_crawl_maps_backlog_429() {
+        use wiremock::matchers::{method as wm_method, path as wm_path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let quarry = MockServer::start().await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/v1/crawl"))
+            .respond_with(ResponseTemplate::new(429).set_body_json(json!({
+                "request_id": "req_edge",
+                "success": false,
+                "error": {
+                    "code": "RATE_LIMITED",
+                    "message": "internal text that must not be echoed",
+                    "details": {
+                        "reason": "org_backlog_full", "limit": 200, "queued": 200,
+                        "retry_after_seconds": 45, "internal": "postgres://leak"
+                    }
+                }
+            })))
+            .mount(&quarry)
+            .await;
+        let mut state = crate::tests::test_state(false);
+        state.quarry_edge_url = quarry.uri();
+        let user = AuthenticatedUser {
+            user_id: "user-1".to_owned(),
+            user_email: "user@example.invalid".to_owned(),
+            user_name: "User".to_owned(),
+            user_image: None,
+            email_verified: true,
+            auth_role: Some("member".to_owned()),
+            active_org_id: Some("org-1".to_owned()),
+            authorized_membership: None,
+        };
+
+        let response = start_crawl(
+            State(state),
+            Extension(user),
+            HeaderMap::new(),
+            Json(json!({ "url": "https://example.com/" })),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(response.headers().get("retry-after").unwrap(), "45");
+        let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["error"]["code"], "crawl_backlog_full");
+        assert_eq!(body["error"]["retryAfterSeconds"], 45);
+        assert_eq!(body["error"]["limit"], 200);
+        assert_eq!(body["error"]["queued"], 200);
+        let rendered = body.to_string();
+        assert!(
+            !rendered.contains("internal text") && !rendered.contains("postgres://leak"),
+            "{rendered}"
+        );
+    }
+
+    #[test]
+    fn only_the_backlog_429_is_remapped() {
+        assert!(crawl_backlog_full_response(
+            &json!({ "error": { "details": { "reason": "other" } } })
+        )
+        .is_none());
+        assert!(crawl_backlog_full_response(&json!({ "error": "slow down" })).is_none());
+        assert!(crawl_backlog_full_response(&json!({})).is_none());
+        // An absent or absurd retry hint takes the default; nothing negative or huge is echoed.
+        let response = crawl_backlog_full_response(&json!({
+            "error": { "details": { "reason": "org_backlog_full", "retry_after_seconds": 99999999 } }
+        }))
+        .expect("typed");
+        assert_eq!(response.headers().get("retry-after").unwrap(), "30");
+    }
 
     #[tokio::test]
     async fn start_crawl_exposes_upstream_limits() {

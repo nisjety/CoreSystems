@@ -62,6 +62,10 @@ type Config struct {
 	// CrawlLimits bounds every crawl's pages and depth (see limits.go). The
 	// zero value means "use the built-in defaults", never "unbounded".
 	CrawlLimits CrawlLimits
+	// ClaimBatch is how many jobs one claim asks control for (default 50). With
+	// job admission on, control hands out leased jobs under per-organization
+	// caps; otherwise it answers 404 and the dispatcher lists as it always did.
+	ClaimBatch int
 }
 
 // dispatchEntry tracks state for one job ID inside the dispatcher's
@@ -76,6 +80,9 @@ type dispatchEntry struct {
 	// marked the job as failed after exceeding MaxAttempts. Either way
 	// we stop trying.
 	done bool
+	// runID is the run started for this job, kept so a job that control hands
+	// back again (its "mark running" write was lost) can be marked now.
+	runID string
 }
 
 // Manager polls control for `accepted` jobs and starts the matching
@@ -108,6 +115,9 @@ func New(c client.Client, cfg Config) *Manager {
 	}
 	if cfg.CrawlLimits == (CrawlLimits{}) {
 		cfg.CrawlLimits = DefaultCrawlLimits()
+	}
+	if cfg.ClaimBatch <= 0 {
+		cfg.ClaimBatch = defaultClaimBatch
 	}
 	return &Manager{
 		temporal: c,
@@ -153,9 +163,9 @@ func (m *Manager) Run(ctx context.Context) {
 // a flaky control plane shouldn't kill the dispatcher.
 func (m *Manager) tick(ctx context.Context) {
 	m.pruneOldEntries()
-	jobs, err := m.listJobs(ctx)
+	jobs, claimed, err := m.fetchJobs(ctx)
 	if err != nil {
-		log.Warn().Err(err).Msg("jobs dispatcher: list failed")
+		log.Warn().Err(err).Msg("jobs dispatcher: fetch failed")
 		return
 	}
 	for _, j := range jobs {
@@ -166,6 +176,15 @@ func (m *Manager) tick(ctx context.Context) {
 			m.entries[id] = entry
 		}
 		if entry.done {
+			// A claimed job comes back only while it is still "accepted". If we
+			// already started its workflow, the earlier "mark running" write was
+			// lost: repeat it, or the job would never count against its
+			// organization's cap.
+			if claimed && entry.runID != "" && j.Status == "accepted" {
+				if err := m.markRunning(ctx, j.ID, entry.runID); err != nil {
+					log.Warn().Err(err).Str("job_id", id).Msg("mark running (retry) failed")
+				}
+			}
 			continue
 		}
 		if j.Status != "accepted" {
@@ -177,7 +196,8 @@ func (m *Manager) tick(ctx context.Context) {
 			entry.done = true
 			continue
 		}
-		if err := m.dispatch(ctx, j); err != nil {
+		runID, err := m.dispatch(ctx, j)
+		if err != nil {
 			entry.attempts++
 			log.Warn().
 				Err(err).
@@ -205,6 +225,7 @@ func (m *Manager) tick(ctx context.Context) {
 			continue
 		}
 		entry.done = true
+		entry.runID = runID
 	}
 }
 
@@ -247,7 +268,7 @@ func (m *Manager) markFailed(
 
 // dispatch starts the Temporal workflow for one accepted job and then
 // best-effort PUTs the job back as status=running with the run_id.
-func (m *Manager) dispatch(ctx context.Context, j job) error {
+func (m *Manager) dispatch(ctx context.Context, j job) (string, error) {
 	runID := string(quarrycontracts.NewID(quarrycontracts.KindRun))
 	workflowID := "quarry-job-" + string(j.ID)
 	// Workflow ID is deterministic from the job ID so a re-poll of the
@@ -277,26 +298,26 @@ func (m *Manager) dispatch(ctx context.Context, j job) error {
 	case "scrape":
 		in, ierr := scrapeInputFromJob(j, runID)
 		if ierr != nil {
-			return ierr
+			return "", ierr
 		}
 		we, err = m.temporal.ExecuteWorkflow(ctx, startOpts, "ScrapeJobWF", in)
 	case "crawl":
 		in, ierr := crawlInputFromJob(j, runID, m.cfg.CrawlLimits)
 		if ierr != nil {
-			return ierr
+			return "", ierr
 		}
 		we, err = m.temporal.ExecuteWorkflow(ctx, startOpts, "CrawlJobWF", in)
 	case "batch":
 		in, ierr := batchInputFromJob(j, runID)
 		if ierr != nil {
-			return ierr
+			return "", ierr
 		}
 		we, err = m.temporal.ExecuteWorkflow(ctx, startOpts, "BatchJobWF", in)
 	default:
-		return fmt.Errorf("unsupported kind: %s", j.Kind)
+		return "", fmt.Errorf("unsupported kind: %s", j.Kind)
 	}
 	if err != nil {
-		return fmt.Errorf("execute workflow: %w", err)
+		return "", fmt.Errorf("execute workflow: %w", err)
 	}
 	log.Info().
 		Str("job_id", string(j.ID)).
@@ -311,7 +332,7 @@ func (m *Manager) dispatch(ctx context.Context, j job) error {
 	if err := m.markRunning(ctx, j.ID, runID); err != nil {
 		log.Warn().Err(err).Str("job_id", string(j.ID)).Msg("mark running failed")
 	}
-	return nil
+	return runID, nil
 }
 
 // markRunning PUTs to control. Idempotent — control's updateJob handler
@@ -345,6 +366,72 @@ func (m *Manager) markRunning(ctx context.Context, jobID quarrycontracts.ID, run
 		return fmt.Errorf("control %d: %s", resp.StatusCode, truncate(string(bodyBytes), 200))
 	}
 	return nil
+}
+
+// defaultClaimBatch is how many jobs one claim asks for.
+const defaultClaimBatch = 50
+
+// fetchJobs returns the jobs to consider this tick and whether they were
+// claimed. It asks control to claim work first: with job admission on, control
+// leases jobs under per-organization caps, round-robin across organizations,
+// instead of the dispatcher starting every accepted job it can see. Control
+// answers 404 while admission is off (or if it predates it), and the dispatcher
+// then reads the list exactly as before, so the two can be deployed in either
+// order.
+func (m *Manager) fetchJobs(ctx context.Context) ([]job, bool, error) {
+	jobs, supported, err := m.claimJobs(ctx)
+	if err != nil {
+		return nil, false, err
+	}
+	if supported {
+		return jobs, true, nil
+	}
+	jobs, err = m.listJobs(ctx)
+	return jobs, false, err
+}
+
+// claimJobs POSTs the claim. supported is false when control does not serve it.
+func (m *Manager) claimJobs(ctx context.Context) ([]job, bool, error) {
+	body, _ := json.Marshal(map[string]int{"limit": m.cfg.ClaimBatch})
+	url := strings.TrimRight(m.cfg.ControlBaseURL, "/") + "/v1/internal/jobs/claim"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return nil, false, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+	if m.cfg.ControlAuthToken != "" {
+		req.Header.Set("Authorization", "Bearer "+m.cfg.ControlAuthToken)
+	}
+	if err := controlauth.Sign(req, body, m.cfg.ControlHMACSecret); err != nil {
+		return nil, false, err
+	}
+	resp, err := m.http.Do(req)
+	if err != nil {
+		return nil, false, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, false, nil
+	}
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, false, err
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, false, fmt.Errorf("control %d: %s", resp.StatusCode, truncate(string(bodyBytes), 200))
+	}
+	var out []job
+	if err := json.Unmarshal(bodyBytes, &out); err == nil {
+		return out, true, nil
+	}
+	var enveloped struct {
+		Data []job `json:"data"`
+	}
+	if err := json.Unmarshal(bodyBytes, &enveloped); err != nil {
+		return nil, false, fmt.Errorf("decode claim: %w", err)
+	}
+	return enveloped.Data, true, nil
 }
 
 // listJobs fetches the first page of jobs from control. We don't

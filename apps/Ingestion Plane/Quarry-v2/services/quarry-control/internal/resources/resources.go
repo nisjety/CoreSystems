@@ -21,10 +21,27 @@ import (
 	"github.com/triodelab/quarry-v2/services/quarry-control/internal/store"
 )
 
-func MountJobs(r chi.Router, db store.DB) {
+// JobsOption customises MountJobs.
+type JobsOption func(*Admission)
+
+// WithAdmission enables the job-admission policy (per-organization caps, a
+// bounded backlog, the claim endpoint). Without it control behaves as before.
+func WithAdmission(a Admission) JobsOption {
+	return func(into *Admission) { *into = a }
+}
+
+func MountJobs(r chi.Router, db store.DB, opts ...JobsOption) {
+	var adm Admission
+	for _, opt := range opts {
+		opt(&adm)
+	}
+	// Dispatcher-only: take leased work instead of reading a window. Mounted
+	// under the same HMAC group as every other /v1 route; 404 while admission is
+	// off so a newer dispatcher falls back to listing.
+	r.Post("/v1/internal/jobs/claim", claimJobs(db, adm))
 	r.Route("/v1/jobs", func(r chi.Router) {
 		r.Get("/", listJobs(db))
-		r.Post("/", createJob(db))
+		r.Post("/", createJob(db, adm))
 		r.Get("/{id}", getJob(db))
 		r.Put("/{id}", updateJob(db))
 		r.Get("/{id}/events", jobEvents(db))
@@ -415,7 +432,7 @@ func listJobs(db store.DB) http.HandlerFunc {
 // `?org_id` query param (never the request body) and stamped onto the
 // job — mirrors createSourceHandler's guard, which rejects an empty org
 // rather than let a job land unattributed to any tenant.
-func createJob(db store.DB) http.HandlerFunc {
+func createJob(db store.DB, adm Admission) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		org := orgFromQuery(r)
 		if org == "" {
@@ -448,6 +465,14 @@ func createJob(db store.DB) http.HandlerFunc {
 				httpx.WriteJSON(w, r, http.StatusOK, existing)
 				return
 			}
+		}
+		// Bound the backlog before anything is stored: a refused submission
+		// leaves no row. Idempotent retries returned above are not affected.
+		if details, full := adm.backlogFull(db, org, in.Kind, in.Params, time.Now()); full {
+			w.Header().Set("Retry-After", strconv.Itoa(retryAfterSecs))
+			httpx.WriteErr(w, r, quarrycontracts.CodeRateLimited,
+				"this organization has too many jobs waiting", details)
+			return
 		}
 		job := store.Job{
 			ID:        quarrycontracts.NewID(quarrycontracts.KindJob),

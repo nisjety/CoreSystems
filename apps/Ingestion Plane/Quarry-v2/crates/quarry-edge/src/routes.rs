@@ -667,21 +667,26 @@ async fn crawl_handoff(
     // P3 / cluster #billing — meter a crawl.seed event. The handoff
     // request is the billable unit at this surface (the orchestrator
     // independently meters per-page scrapes via /v1/internal/run_page,
-    // so we avoid double-billing the page-level work here).
-    state
-        .usage
-        .meter(quarry_runtime::UsageEvent::new(
-            request_id.clone(),
-            org_id.clone(),
-            quarry_runtime::usage_metrics::CRAWL_SEED,
-            1.0,
-            serde_json::json!({
-                "user_id": claims.user_id,
-                "url": req.url,
-                "max_pages": limits.max_pages.effective,
-            }),
-        ))
-        .await;
+    // so we avoid double-billing the page-level work here). A submission
+    // refused because the organization's queue is full created no job, so it
+    // is not billed.
+    let queue_full = matches!(&ack, Err(error) if error.code == ErrorCode::RateLimited);
+    if !queue_full {
+        state
+            .usage
+            .meter(quarry_runtime::UsageEvent::new(
+                request_id.clone(),
+                org_id.clone(),
+                quarry_runtime::usage_metrics::CRAWL_SEED,
+                1.0,
+                serde_json::json!({
+                    "user_id": claims.user_id,
+                    "url": req.url,
+                    "max_pages": limits.max_pages.effective,
+                }),
+            ))
+            .await;
+    }
     match ack {
         Ok(mut v) => {
             v.limits = Some(limits);
@@ -729,20 +734,25 @@ async fn batch_handoff(
 
     // P3 / cluster #billing — one batch.url event with quantity = url
     // count. Cheaper than emitting N individual events; billing-core can
-    // still derive per-URL pricing via the float quantity.
-    state
-        .usage
-        .meter(quarry_runtime::UsageEvent::new(
-            request_id.clone(),
-            claims.org_id.clone(),
-            quarry_runtime::usage_metrics::BATCH_URL,
-            req.urls.len() as f64,
-            serde_json::json!({
-                "user_id": claims.user_id,
-                "url_count": req.urls.len(),
-            }),
-        ))
-        .await;
+    // still derive per-URL pricing via the float quantity. A submission
+    // refused because the organization's queue is full created no job, so it
+    // is not billed.
+    let queue_full = matches!(&ack, Err(error) if error.code == ErrorCode::RateLimited);
+    if !queue_full {
+        state
+            .usage
+            .meter(quarry_runtime::UsageEvent::new(
+                request_id.clone(),
+                claims.org_id.clone(),
+                quarry_runtime::usage_metrics::BATCH_URL,
+                req.urls.len() as f64,
+                serde_json::json!({
+                    "user_id": claims.user_id,
+                    "url_count": req.urls.len(),
+                }),
+            ))
+            .await;
+    }
     match ack {
         Ok(v) => Ok(Json(Envelope::ok(request_id, v))),
         Err(err) => Err((

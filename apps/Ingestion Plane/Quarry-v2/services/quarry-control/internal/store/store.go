@@ -148,6 +148,58 @@ type JobsStore interface {
 	// tenant's job is treated as a miss, never returning a cross-tenant
 	// record. Used by createJob to de-dupe client retries.
 	FindByIdempotencyKey(orgID, key string) (Job, bool)
+
+	// ClaimAccepted leases up to limit accepted jobs to a dispatcher for
+	// `lease` and returns them, oldest first within each organization and
+	// round-robin across organizations: the first job of every organization with
+	// room, then the second, and so on. An organization has room while the
+	// jobs it has running plus those leased and not yet started are below its
+	// cap, which is the job's own params.admission.cap or defaultCap. A job
+	// whose lease has expired is claimable again. Only the kinds the dispatcher
+	// can execute are claimed (see AdmissionKind).
+	ClaimAccepted(limit int, now time.Time, lease time.Duration, defaultCap int) ([]Job, error)
+	// CountAccepted is how many of the organization's jobs are waiting: accepted
+	// and not currently leased.
+	CountAccepted(orgID string, now time.Time) int
+	// FailExpired fails every waiting (accepted, unleased) job created before
+	// the cutoff and returns them, with params.failure_reason set to
+	// "backlog_expired".
+	FailExpired(createdBefore, now time.Time) ([]Job, error)
+}
+
+// AdmissionKind reports whether the dispatcher executes jobs of this kind, and
+// so whether admission applies to them.
+func AdmissionKind(kind string) bool {
+	switch kind {
+	case "scrape", "crawl", "batch":
+		return true
+	}
+	return false
+}
+
+// JobAdmissionCap is the job's concurrency cap for its organization: the
+// params.admission.cap the edge stamped at submit time when it is a positive
+// number, otherwise def.
+func JobAdmissionCap(j Job, def int) int {
+	admission, ok := j.Params["admission"].(map[string]any)
+	if !ok {
+		return def
+	}
+	switch v := admission["cap"].(type) {
+	case float64:
+		if v >= 1 && v <= 1_000_000 {
+			return int(v)
+		}
+	case int:
+		if v >= 1 && v <= 1_000_000 {
+			return v
+		}
+	case int64:
+		if v >= 1 && v <= 1_000_000 {
+			return int(v)
+		}
+	}
+	return def
 }
 
 type EventLog interface {
@@ -426,6 +478,7 @@ type memDB struct {
 	blocklists   *genericStore[BlocklistEntry]
 	events       *memEventLog
 	snapshotsV2  *memSnapshotsV2
+	jobClaims    *jobClaimTable
 }
 
 func NewMemory() DB {
@@ -442,10 +495,11 @@ func NewMemory() DB {
 		blocklists:   newGeneric[BlocklistEntry](func(b BlocklistEntry) quarrycontracts.ID { return b.ID }),
 		events:       &memEventLog{},
 		snapshotsV2:  &memSnapshotsV2{},
+		jobClaims:    &jobClaimTable{until: map[quarrycontracts.ID]time.Time{}},
 	}
 }
 
-func (d *memDB) Jobs() JobsStore                         { return &memJobs{d.jobs} }
+func (d *memDB) Jobs() JobsStore                         { return &memJobs{d.jobs, d.jobClaims} }
 func (d *memDB) Stores() ResourceStore[NamedStore]       { return d.stores }
 func (d *memDB) Snapshots() ResourceStore[Snapshot]      { return d.snaps }
 func (d *memDB) Artifacts() ResourceStore[Artifact]      { return d.arts }
@@ -575,7 +629,121 @@ func (m *memSources) SoftDeleteByOrg(orgID string, id quarrycontracts.ID) error 
 	return nil
 }
 
-type memJobs struct{ *genericStore[Job] }
+// jobClaimTable holds the in-memory lease of each claimed job (the Postgres
+// store keeps it in jobs.claimed_until).
+type jobClaimTable struct {
+	mu    sync.Mutex
+	until map[quarrycontracts.ID]time.Time
+}
+
+type memJobs struct {
+	*genericStore[Job]
+	claims *jobClaimTable
+}
+
+// ClaimAccepted mirrors the Postgres claim statement; see JobsStore.
+func (m *memJobs) ClaimAccepted(limit int, now time.Time, lease time.Duration, defaultCap int) ([]Job, error) {
+	if limit <= 0 {
+		return nil, nil
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.claims.mu.Lock()
+	defer m.claims.mu.Unlock()
+
+	inUse := map[string]int{}
+	var waiting []Job
+	for _, j := range m.items {
+		leased := m.claims.until[j.ID].After(now)
+		switch {
+		case j.Status == "running":
+			inUse[j.OrgID]++
+		case j.Status == "accepted" && leased:
+			inUse[j.OrgID]++
+		case j.Status == "accepted" && AdmissionKind(j.Kind):
+			waiting = append(waiting, j)
+		}
+	}
+	sort.Slice(waiting, func(a, b int) bool {
+		if waiting[a].CreatedAt != waiting[b].CreatedAt {
+			return waiting[a].CreatedAt < waiting[b].CreatedAt
+		}
+		return waiting[a].ID < waiting[b].ID
+	})
+	type ranked struct {
+		job  Job
+		rank int
+	}
+	seen := map[string]int{}
+	var admitted []ranked
+	for _, j := range waiting {
+		seen[j.OrgID]++
+		room := JobAdmissionCap(j, defaultCap) - inUse[j.OrgID]
+		if room < 0 {
+			room = 0
+		}
+		if seen[j.OrgID] <= room {
+			admitted = append(admitted, ranked{job: j, rank: seen[j.OrgID]})
+		}
+	}
+	sort.SliceStable(admitted, func(a, b int) bool {
+		if admitted[a].rank != admitted[b].rank {
+			return admitted[a].rank < admitted[b].rank
+		}
+		if admitted[a].job.CreatedAt != admitted[b].job.CreatedAt {
+			return admitted[a].job.CreatedAt < admitted[b].job.CreatedAt
+		}
+		return admitted[a].job.ID < admitted[b].job.ID
+	})
+	if len(admitted) > limit {
+		admitted = admitted[:limit]
+	}
+	out := make([]Job, 0, len(admitted))
+	for _, a := range admitted {
+		m.claims.until[a.job.ID] = now.Add(lease)
+		out = append(out, a.job)
+	}
+	return out, nil
+}
+
+// CountAccepted counts the organization's waiting jobs.
+func (m *memJobs) CountAccepted(orgID string, now time.Time) int {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	m.claims.mu.Lock()
+	defer m.claims.mu.Unlock()
+	n := 0
+	for _, j := range m.items {
+		if j.OrgID == orgID && j.Status == "accepted" && !m.claims.until[j.ID].After(now) {
+			n++
+		}
+	}
+	return n
+}
+
+// FailExpired fails waiting jobs created before the cutoff.
+func (m *memJobs) FailExpired(createdBefore, now time.Time) ([]Job, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.claims.mu.Lock()
+	defer m.claims.mu.Unlock()
+	var failed []Job
+	for id, j := range m.items {
+		if j.Status != "accepted" || j.CreatedAt >= createdBefore.UnixMilli() || m.claims.until[id].After(now) {
+			continue
+		}
+		params := make(map[string]any, len(j.Params)+1)
+		for k, v := range j.Params {
+			params[k] = v
+		}
+		params["failure_reason"] = "backlog_expired"
+		j.Params = params
+		j.Status = "failed"
+		m.items[id] = j
+		failed = append(failed, j)
+	}
+	return failed, nil
+}
 
 // FindByIdempotencyKey scans the in-memory job set for a record with the
 // supplied key AND org. Linear scan is fine — the memory store is dev-only

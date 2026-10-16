@@ -2,12 +2,17 @@ package pg
 
 import (
 	"context"
+	"net/url"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
+
 	"github.com/triodelab/quarry-v2/pkg/quarrycontracts"
 	"github.com/triodelab/quarry-v2/services/quarry-control/internal/store"
+	"github.com/triodelab/quarry-v2/services/quarry-control/internal/store/storetest"
 )
 
 // envDSN gates real-database tests. Set QUARRY_TEST_DSN to e.g.
@@ -269,3 +274,47 @@ func TestPostgres_JobStatisticsRoundTrip(t *testing.T) {
 }
 
 func first[T any](items []T, _ string) []T { return items }
+
+// openIsolatedOrSkip opens the database in a schema of its own, dropped when
+// the test ends. A claim is global across organizations, so a suite that claims
+// jobs must not see the rows other tests left behind in the shared schema.
+func openIsolatedOrSkip(t *testing.T) store.DB {
+	t.Helper()
+	dsn := os.Getenv(envDSN)
+	if dsn == "" {
+		t.Skipf("%s unset — skipping postgres integration test", envDSN)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	admin, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatalf("admin pool: %v", err)
+	}
+	schema := "adm_" + strings.ToLower(string(quarrycontracts.NewID(quarrycontracts.KindJob)))
+	if _, err := admin.Exec(ctx, "CREATE SCHEMA "+schema); err != nil {
+		admin.Close()
+		t.Fatalf("create schema: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = admin.Exec(context.Background(), "DROP SCHEMA "+schema+" CASCADE")
+		admin.Close()
+	})
+	u, err := url.Parse(dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	query := u.Query()
+	query.Set("search_path", schema)
+	u.RawQuery = query.Encode()
+	db, err := New(ctx, u.String())
+	if err != nil {
+		t.Fatalf("pg.New: %v", err)
+	}
+	return db
+}
+
+// The claim statement must behave exactly like the in-memory one: the same
+// contract suite runs against both.
+func TestPostgres_JobAdmission(t *testing.T) {
+	storetest.AdmissionConformance(t, func(t *testing.T) store.DB { return openIsolatedOrSkip(t) })
+}

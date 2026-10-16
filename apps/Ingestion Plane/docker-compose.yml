@@ -267,6 +267,16 @@ services:
       QUARRY_CONTROL_API_KEY: ${QUARRY_CONTROL_API_KEY:?QUARRY_CONTROL_API_KEY is required}
       QUARRY_INTERNAL_SECRET: ${QUARRY_INTERNAL_SECRET:?QUARRY_INTERNAL_SECRET must be set (no insecure default)}
       QUARRY_INTERNAL_HMAC_REQUIRED: ${QUARRY_INTERNAL_HMAC_REQUIRED:-0}
+      # Job admission (off by default): per-organization caps on running jobs, a
+      # bounded backlog of waiting ones, and the claim endpoint the orchestrator
+      # uses instead of reading the newest 50 jobs. See docs/RUNBOOKS.md, "Job
+      # admission". Deploy control first (claim is inert), then the orchestrator
+      # and edge, then turn it on.
+      QUARRY_JOB_ADMISSION: ${QUARRY_JOB_ADMISSION:-off}
+      QUARRY_JOB_CAP_DEFAULT: ${QUARRY_JOB_CAP_DEFAULT:-3}
+      QUARRY_JOB_BACKLOG_DEFAULT: ${QUARRY_JOB_BACKLOG_DEFAULT:-200}
+      QUARRY_JOB_BACKLOG_TTL: ${QUARRY_JOB_BACKLOG_TTL:-24h}
+      QUARRY_JOB_CLAIM_LEASE: ${QUARRY_JOB_CLAIM_LEASE:-60s}
       # W2: deliver the one in-product change notification to notification-core
       # (Application Plane) over the shared inter-plane-bus network.
       NOTIFICATION_CORE_URL: ${NOTIFICATION_CORE_URL:-http://notification-core:3140}
@@ -326,6 +336,9 @@ services:
       TEMPORAL_NAMESPACE: default
       RUNTIME_BASE_URL: http://quarry-edge:8082
       CONTROL_BASE_URL: http://quarry-control:8081
+      # How many jobs one claim asks control for (used when control has job
+      # admission on; otherwise the dispatcher lists as before).
+      QUARRY_JOB_CLAIM_BATCH: ${QUARRY_JOB_CLAIM_BATCH:-50}
       RUNTIME_AUTH_TOKEN: ${QUARRY_RUNTIME_AUTH_TOKEN:?QUARRY_RUNTIME_AUTH_TOKEN is required}
       CONTROL_AUTH_TOKEN: ${QUARRY_CONTROL_API_KEY:?QUARRY_CONTROL_API_KEY is required}
       # Shared HMAC secret for the run_page org-binding (must equal the

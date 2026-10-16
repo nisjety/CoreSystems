@@ -34,4 +34,15 @@ describe('translateApiError', () => {
     expect(translateApiError({ code: 'zdr_gate_unavailable' }, en)).toMatch(/could not check which providers/i)
     expect(translateApiError({ code: 'zdr_no_attested_provider' }, no)).not.toMatch(/Noe gikk galt/)
   })
+
+  // A full crawl queue is the organization's own and clears by itself: it gets
+  // its own copy rather than the generic fallback.
+  it('explains a full crawl queue in both languages', () => {
+    const no = (norwegian: string) => norwegian
+    const en = (_norwegian: string, english: string) => english
+
+    expect(translateApiError({ code: 'crawl_backlog_full' }, no)).toMatch(/for mange gjennomganger/i)
+    expect(translateApiError({ code: 'crawl_backlog_full' }, en)).toMatch(/too many crawls are waiting/i)
+    expect(translateApiError({ code: 'crawl_backlog_full' }, no)).not.toMatch(/Noe gikk galt/)
+  })
 })

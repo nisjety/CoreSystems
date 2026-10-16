@@ -6,7 +6,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -190,6 +192,114 @@ func (s *jobsStore) Update(j store.Job) error {
 		return store.ErrNotFound
 	}
 	return nil
+}
+
+// claimAcceptedSQL leases waiting jobs in one statement. in_use counts what
+// each organization already occupies (running, plus leased and not yet
+// started); ranked orders every waiting job oldest first within its
+// organization; picked keeps those whose rank fits the organization's room,
+// first jobs of every organization before any second job, so one tenant's
+// backlog cannot crowd out another's. A cap that is not a plain number falls
+// back to the default instead of failing the whole claim.
+const claimAcceptedSQL = `
+WITH in_use AS (
+  SELECT org_id, count(*)::int AS n FROM jobs
+   WHERE status = 'running' OR (status = 'accepted' AND claimed_until > $1)
+   GROUP BY org_id
+), ranked AS (
+  SELECT j.id, j.org_id, j.created_at,
+         row_number() OVER (PARTITION BY j.org_id ORDER BY j.created_at, j.id) AS rn,
+         CASE WHEN (j.params->'admission'->>'cap') ~ '^[0-9]{1,6}$' AND (j.params->'admission'->>'cap')::int >= 1
+              THEN (j.params->'admission'->>'cap')::int ELSE $2 END AS cap
+    FROM jobs j
+   WHERE j.status = 'accepted' AND j.kind IN ('scrape', 'crawl', 'batch')
+     AND (j.claimed_until IS NULL OR j.claimed_until <= $1)
+), picked AS (
+  SELECT r.id FROM ranked r LEFT JOIN in_use u ON u.org_id = r.org_id
+   WHERE r.rn <= GREATEST(r.cap - COALESCE(u.n, 0), 0)
+   ORDER BY r.rn, r.created_at, r.id
+   LIMIT $3
+)
+UPDATE jobs SET claimed_until = $1 + make_interval(secs => $4)
+ WHERE id IN (SELECT id FROM picked)
+   AND status = 'accepted' AND (claimed_until IS NULL OR claimed_until <= $1)
+RETURNING ` + jobColumns
+
+// ClaimAccepted implements store.JobsStore.
+func (s *jobsStore) ClaimAccepted(limit int, now time.Time, lease time.Duration, defaultCap int) ([]store.Job, error) {
+	if limit <= 0 {
+		return nil, nil
+	}
+	rows, err := s.pool.Query(context.Background(), claimAcceptedSQL,
+		now, defaultCap, limit, lease.Seconds())
+	if err != nil {
+		return nil, mapPgErr(err)
+	}
+	defer rows.Close()
+	var out []store.Job
+	for rows.Next() {
+		j, err := scanJob(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, j)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, mapPgErr(err)
+	}
+	// RETURNING has no order. Hand the jobs back in claim order: each
+	// organization's oldest first, round-robin across organizations. An
+	// organization's claimed jobs are its oldest waiting ones, so the rank of a
+	// job within the returned set is its rank in the claim.
+	sort.SliceStable(out, func(a, b int) bool {
+		if out[a].CreatedAt != out[b].CreatedAt {
+			return out[a].CreatedAt < out[b].CreatedAt
+		}
+		return out[a].ID < out[b].ID
+	})
+	rank := make(map[quarrycontracts.ID]int, len(out))
+	seen := map[string]int{}
+	for _, j := range out {
+		seen[j.OrgID]++
+		rank[j.ID] = seen[j.OrgID]
+	}
+	sort.SliceStable(out, func(a, b int) bool { return rank[out[a].ID] < rank[out[b].ID] })
+	return out, nil
+}
+
+// CountAccepted implements store.JobsStore.
+func (s *jobsStore) CountAccepted(orgID string, now time.Time) int {
+	var n int
+	err := s.pool.QueryRow(context.Background(),
+		`SELECT count(*) FROM jobs WHERE org_id = $1 AND status = 'accepted'
+		    AND (claimed_until IS NULL OR claimed_until <= $2)`, orgID, now).Scan(&n)
+	if err != nil {
+		return 0
+	}
+	return n
+}
+
+// FailExpired implements store.JobsStore.
+func (s *jobsStore) FailExpired(createdBefore, now time.Time) ([]store.Job, error) {
+	rows, err := s.pool.Query(context.Background(),
+		`UPDATE jobs SET status = 'failed',
+		        params = COALESCE(params, '{}'::jsonb) || jsonb_build_object('failure_reason', 'backlog_expired')
+		  WHERE status = 'accepted' AND created_at < $1
+		    AND (claimed_until IS NULL OR claimed_until <= $2)
+		RETURNING `+jobColumns, createdBefore.UnixMilli(), now)
+	if err != nil {
+		return nil, mapPgErr(err)
+	}
+	defer rows.Close()
+	var out []store.Job
+	for rows.Next() {
+		j, err := scanJob(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, j)
+	}
+	return out, mapPgErr(rows.Err())
 }
 
 func (s *jobsStore) List(limit int, cur string) ([]store.Job, string) {

@@ -73,6 +73,7 @@ const ERROR_COPY: Record<string, ErrorCopy> = {
   notification_upstream_target_rejected: { no: 'Varselet kunne ikke leveres.', en: 'The notification could not be delivered.' },
 
   // Knowledge base / crawl / documents
+  crawl_backlog_full: { no: 'Det venter for mange gjennomganger på organisasjonen din. Prøv igjen om litt.', en: 'Too many crawls are waiting for your organization. Try again shortly.' },
   scrape_failed: { no: 'Kunne ikke hente innhold fra siden. Prøv igjen.', en: 'Could not fetch content from the page. Try again.' },
   extraction_failed: { no: 'Kunne ikke hente ut innhold fra dette dokumentet.', en: 'Could not extract content from this document.' },
   translation_failed: { no: 'Kunne ikke oversette innholdet.', en: 'Could not translate the content.' },

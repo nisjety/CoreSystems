@@ -132,3 +132,18 @@ func resolveBound(requested, def, hard uint32) (uint32, string) {
 		return requested, ByNone
 	}
 }
+
+// LoadClaimBatch reads QUARRY_JOB_CLAIM_BATCH, how many jobs one claim asks
+// control for. Unset is the default (50); a value that is not a positive
+// integer is an error naming the variable.
+func LoadClaimBatch() (int, error) {
+	raw := strings.TrimSpace(os.Getenv("QUARRY_JOB_CLAIM_BATCH"))
+	if raw == "" {
+		return defaultClaimBatch, nil
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n < 1 || n > 500 {
+		return 0, fmt.Errorf("QUARRY_JOB_CLAIM_BATCH must be an integer from 1 to 500")
+	}
+	return n, nil
+}
