@@ -66,6 +66,7 @@ use quarry_core::error::{ErrorCode, QuarryError, QuarryResult};
 use quarry_core::lease::{BrowserLease, BrowserViewport};
 
 use crate::actions::ScrollTarget;
+use crate::deadlines::{best_effort, deadline, read_with_retry, timeout_error, with_deadline, Op};
 use crate::navigation::{guard_navigation_target, guard_page_request_target};
 use crate::session::{Cookie, ProfileStore, SessionSnapshot, Viewport};
 use crate::{
@@ -78,8 +79,6 @@ use crate::{
 const LIVE_FRAME_CACHE_TTL_MS: u64 = 250;
 const DEVTOOLS_EVENT_BUFFER_LIMIT: usize = 512;
 const MAX_GOVERNED_DOWNLOAD_BYTES: u64 = 25 * 1024 * 1024;
-const DOWNLOAD_BEGIN_TIMEOUT: Duration = Duration::from_secs(10);
-const DOWNLOAD_COMPLETE_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone)]
 struct CachedLiveFrame {
@@ -237,6 +236,11 @@ impl ChromiumoxideDriver {
             .with_details(json!({ "error": e.to_string() }))
         })?;
         let mut builder = BrowserConfig::builder()
+            // Above the largest deadline in the table, so a typed Timeout from
+            // `with_deadline` always beats the library's untyped one; this only
+            // bounds the calls that are not wrapped (event collectors, guards).
+            .request_timeout(Duration::from_secs(40))
+            .launch_timeout(Duration::from_secs(20))
             .user_data_dir(&launch_dirs.user_data)
             .arg("--disable-dev-shm-usage")
             .arg("--disable-breakpad")
@@ -276,10 +280,13 @@ impl ChromiumoxideDriver {
                 .with_details(json!({ "error": e.to_string() }))
         })?;
 
-        let (browser, mut events) = Browser::launch(config).await.map_err(|e| {
-            QuarryError::new(ErrorCode::DriverFailed, "chromiumoxide launch failed")
-                .with_details(json!({ "error": e.to_string() }))
-        })?;
+        let (browser, mut events) = with_deadline(Op::Launch, async {
+            Browser::launch(config).await.map_err(|e| {
+                QuarryError::new(ErrorCode::DriverFailed, "chromiumoxide launch failed")
+                    .with_details(json!({ "error": e.to_string() }))
+            })
+        })
+        .await?;
 
         let handle = tokio::spawn(async move {
             while let Some(_event) = events.next().await {
@@ -478,13 +485,16 @@ impl ChromiumoxideDriver {
                         )
                         .with_details(json!({ "error": error }))
                     })?;
-                browser.execute(download_behavior).await.map_err(|error| {
-                    QuarryError::new(
-                        ErrorCode::DriverFailed,
-                        "chromiumoxide download quarantine configuration failed",
-                    )
-                    .with_details(json!({ "error": error.to_string() }))
-                })?;
+                with_deadline(Op::TabAttach, async {
+                    browser.execute(download_behavior).await.map_err(|error| {
+                        QuarryError::new(
+                            ErrorCode::DriverFailed,
+                            "chromiumoxide download quarantine configuration failed",
+                        )
+                        .with_details(json!({ "error": error.to_string() }))
+                    })
+                })
+                .await?;
                 let mut pages = self.pages.lock().await;
                 let session_pages = pages.entry(session_key.clone()).or_default();
                 session_pages.browser_context_id = Some(id.clone());
@@ -505,15 +515,21 @@ impl ChromiumoxideDriver {
                 )
                 .with_details(json!({ "error": e }))
             })?;
-        let page = browser.new_page(new_page_params).await.map_err(|e| {
-            QuarryError::new(ErrorCode::DriverFailed, "chromiumoxide new_page failed")
-                .with_details(json!({ "error": e.to_string(), "url": "about:blank" }))
-        })?;
+        let page = with_deadline(Op::TabAttach, async {
+            browser.new_page(new_page_params).await.map_err(|e| {
+                QuarryError::new(ErrorCode::DriverFailed, "chromiumoxide new_page failed")
+                    .with_details(json!({ "error": e.to_string(), "url": "about:blank" }))
+            })
+        })
+        .await?;
         // Size and focus the page before anything observes or navigates it.
-        if let Err(error) = apply_page_hygiene(
-            &page,
-            resolve_viewport(session.lease.viewport),
-            page_hygiene_enabled(),
+        if let Err(error) = with_deadline(
+            Op::TabAttach,
+            apply_page_hygiene(
+                &page,
+                resolve_viewport(session.lease.viewport),
+                page_hygiene_enabled(),
+            ),
         )
         .await
         {
@@ -540,10 +556,13 @@ impl ChromiumoxideDriver {
         )
         .await?;
         if initial_url != "about:blank" {
-            page.goto(initial_url).await.map_err(|e| {
-                QuarryError::new(ErrorCode::DriverFailed, "chromiumoxide goto failed")
-                    .with_details(json!({ "error": e.to_string(), "url": initial_url }))
-            })?;
+            with_deadline(Op::Navigate, async {
+                page.goto(initial_url).await.map_err(|e| {
+                    QuarryError::new(ErrorCode::DriverFailed, "chromiumoxide goto failed")
+                        .with_details(json!({ "error": e.to_string(), "url": initial_url }))
+                })
+            })
+            .await?;
             if let Some(snapshot) = snapshot.as_ref() {
                 // chromiumoxide's `Page::set_cookies` hard-requires the page to
                 // already be on a real http(s) URL — it validates `page.url()`
@@ -563,13 +582,16 @@ impl ChromiumoxideDriver {
                     // Reload so the already-completed initial `goto` request is
                     // replayed with the freshly restored cookies/storage attached
                     // (matches the pre-existing storage-only reload behavior).
-                    page.reload().await.map_err(|e| {
-                        QuarryError::new(
-                            ErrorCode::DriverFailed,
-                            "chromiumoxide profile reload failed",
-                        )
-                        .with_details(json!({ "error": e.to_string(), "url": initial_url }))
-                    })?;
+                    with_deadline(Op::Navigate, async {
+                        page.reload().await.map_err(|e| {
+                            QuarryError::new(
+                                ErrorCode::DriverFailed,
+                                "chromiumoxide profile reload failed",
+                            )
+                            .with_details(json!({ "error": e.to_string(), "url": initial_url }))
+                        })
+                    })
+                    .await?;
                 }
             }
         }
@@ -717,14 +739,7 @@ impl ChromiumoxideDriver {
         let Some((_tab_id, page)) = self.active_tab_page(session).await else {
             return Ok(());
         };
-        let mut snapshot = tokio::time::timeout(Duration::from_secs(5), capture_snapshot(&page))
-            .await
-            .map_err(|_| {
-                QuarryError::new(
-                    ErrorCode::DriverFailed,
-                    "chromiumoxide profile capture timed out",
-                )
-            })??;
+        let mut snapshot = with_deadline(Op::ProfileCapture, capture_snapshot(&page)).await?;
         snapshot.viewport = session.lease.viewport.map(session_viewport);
         store
             .save(&session.lease.org_id, &session.lease.profile_id, &snapshot)
@@ -1745,8 +1760,9 @@ fn finite_metric_u64(value: f64, scale: f64) -> Option<u64> {
 }
 
 async fn page_title(page: &Page) -> Option<String> {
-    page.evaluate("document.title")
+    tokio::time::timeout(deadline(Op::Content), page.evaluate("document.title"))
         .await
+        .ok()?
         .ok()
         .and_then(|value| value.into_value::<String>().ok())
         .map(|title| title.trim().to_owned())
@@ -2012,19 +2028,22 @@ async fn apply_page_hygiene(
             .map_err(viewport_emulation_error)?;
     }
     if hygiene {
-        if let Err(error) = page
+        // Warn-only: the page works without these, a background page may stall.
+        if page
             .execute(SetFocusEmulationEnabledParams::new(true))
             .await
+            .is_err()
         {
-            tracing::warn!(%error, "page focus emulation failed");
+            tracing::warn!("page focus emulation failed");
         }
-        if let Err(error) = page
+        if page
             .execute(SetWebLifecycleStateParams::new(
                 SetWebLifecycleStateState::Active,
             ))
             .await
+            .is_err()
         {
-            tracing::warn!(%error, "page lifecycle state could not be set to active");
+            tracing::warn!("page lifecycle state could not be set to active");
         }
     }
     Ok(())
@@ -2116,7 +2135,7 @@ impl BrowserDriver for ChromiumoxideDriver {
         let removed = self.pages.lock().await.remove(&session_key);
         if let Some(session_pages) = removed {
             for tab in session_pages.tabs {
-                if let Err(err) = tab.page.close().await {
+                if let Err(err) = best_effort(Op::PageClose, tab.page.close()).await {
                     tracing::debug!(
                         tab_id = %tab.tab_id,
                         error = %err,
@@ -2127,7 +2146,12 @@ impl BrowserDriver for ChromiumoxideDriver {
             if let Some(context_id) = session_pages.browser_context_id {
                 let browser_guard = self.browser.lock().await;
                 if let Some(browser) = browser_guard.as_ref() {
-                    if let Err(err) = browser.dispose_browser_context(context_id).await {
+                    if let Err(err) = best_effort(
+                        Op::ContextClose,
+                        browser.dispose_browser_context(context_id),
+                    )
+                    .await
+                    {
                         tracing::warn!(
                             session_key = %session_key,
                             error = %err,
@@ -2164,10 +2188,13 @@ impl BrowserDriver for ChromiumoxideDriver {
         };
 
         if !created {
-            page.goto(url).await.map_err(|e| {
-                QuarryError::new(ErrorCode::DriverFailed, "chromiumoxide goto failed")
-                    .with_details(json!({ "error": e.to_string(), "url": url }))
-            })?;
+            with_deadline(Op::Navigate, async {
+                page.goto(url).await.map_err(|e| {
+                    QuarryError::new(ErrorCode::DriverFailed, "chromiumoxide goto failed")
+                        .with_details(json!({ "error": e.to_string(), "url": url }))
+                })
+            })
+            .await?;
             install_popup_bridge(&page).await?;
         }
 
@@ -2182,10 +2209,13 @@ impl BrowserDriver for ChromiumoxideDriver {
 
     async fn content(&self, _session: &BrowserSession) -> QuarryResult<Bytes> {
         let page = self.current_page(_session).await?;
-        let html = page.content().await.map_err(|e| {
-            QuarryError::new(ErrorCode::DriverFailed, "chromiumoxide content failed")
-                .with_details(json!({ "error": e.to_string() }))
-        })?;
+        let html = read_with_retry(Op::Content, || async {
+            page.content().await.map_err(|e| {
+                QuarryError::new(ErrorCode::DriverFailed, "chromiumoxide content failed")
+                    .with_details(json!({ "error": e.to_string() }))
+            })
+        })
+        .await?;
         Ok(Bytes::from(html.into_bytes()))
     }
 
@@ -2196,7 +2226,11 @@ impl BrowserDriver for ChromiumoxideDriver {
     ) -> QuarryResult<()> {
         let page = self.current_page(session).await?;
         if let Some(native_target) = action.native_target {
-            return execute_native_target_action(&page, native_target, action.operation).await;
+            return with_deadline(
+                Op::NativeAction,
+                execute_native_target_action(&page, native_target, action.operation),
+            )
+            .await;
         }
         let action_json = serde_json::to_string(&action).map_err(|error| {
             QuarryError::new(
@@ -2247,10 +2281,13 @@ impl BrowserDriver for ChromiumoxideDriver {
                 return {{ ok: true }};
             }})()"#,
         );
-        let result = page.evaluate(script).await.map_err(|error| {
-            QuarryError::new(ErrorCode::DriverFailed, "verified target action failed")
-                .with_details(json!({ "error": error.to_string() }))
-        })?;
+        let result = with_deadline(Op::NativeAction, async {
+            page.evaluate(script).await.map_err(|error| {
+                QuarryError::new(ErrorCode::DriverFailed, "verified target action failed")
+                    .with_details(json!({ "error": error.to_string() }))
+            })
+        })
+        .await?;
         let value = result
             .into_value::<serde_json::Value>()
             .unwrap_or(serde_json::Value::Null);
@@ -2271,6 +2308,7 @@ impl BrowserDriver for ChromiumoxideDriver {
         target: BrowserNativeTarget,
         staged_file: &Path,
     ) -> QuarryResult<()> {
+        with_deadline(Op::NativeAction, async move {
         let path = staged_file.to_str().ok_or_else(|| {
             QuarryError::new(
                 ErrorCode::Internal,
@@ -2372,6 +2410,8 @@ impl BrowserDriver for ChromiumoxideDriver {
             .with_details(json!({ "ax_node_id": target.ax_node_id, "error": error.to_string() }))
         })?;
         Ok(())
+    })
+.await
     }
 
     async fn download_from_verified_target(
@@ -2447,9 +2487,13 @@ impl BrowserDriver for ChromiumoxideDriver {
             (begins, progress)
         };
 
-        execute_native_target_action(&page, target, VerifiedTargetOperation::Click).await?;
+        with_deadline(
+            Op::NativeAction,
+            execute_native_target_action(&page, target, VerifiedTargetOperation::Click),
+        )
+        .await?;
 
-        let began = tokio::time::timeout(DOWNLOAD_BEGIN_TIMEOUT, async {
+        let began = tokio::time::timeout(deadline(Op::DownloadBegin), async {
             while let Some(event) = begins.next().await {
                 let event_frame_id = event.frame_id.inner();
                 if expected_frame_id == event_frame_id.as_str() {
@@ -2465,7 +2509,7 @@ impl BrowserDriver for ChromiumoxideDriver {
         })?;
 
         let guid = began.guid.clone();
-        let completed_path = tokio::time::timeout(DOWNLOAD_COMPLETE_TIMEOUT, async {
+        let completed_path = tokio::time::timeout(deadline(Op::DownloadComplete), async {
             while let Some(event) = progress.next().await {
                 if event.guid != guid {
                     continue;
@@ -2561,10 +2605,13 @@ impl BrowserDriver for ChromiumoxideDriver {
             .format(CaptureScreenshotFormat::Png)
             .capture_beyond_viewport(full_page)
             .build();
-        let png = page.screenshot(params).await.map_err(|e| {
-            QuarryError::new(ErrorCode::DriverFailed, "chromiumoxide screenshot failed")
-                .with_details(json!({ "error": e.to_string(), "full_page": full_page }))
-        })?;
+        let png = with_deadline(Op::Screenshot, async {
+            page.screenshot(params).await.map_err(|e| {
+                QuarryError::new(ErrorCode::DriverFailed, "chromiumoxide screenshot failed")
+                    .with_details(json!({ "error": e.to_string(), "full_page": full_page }))
+            })
+        })
+        .await?;
         Ok(Bytes::from(png))
     }
 
@@ -2603,10 +2650,13 @@ impl BrowserDriver for ChromiumoxideDriver {
 
     async fn pdf(&self, _session: &BrowserSession) -> QuarryResult<Bytes> {
         let page = self.current_page(_session).await?;
-        let pdf = page.pdf(PrintToPdfParams::default()).await.map_err(|e| {
-            QuarryError::new(ErrorCode::DriverFailed, "chromiumoxide pdf failed")
-                .with_details(json!({ "error": e.to_string() }))
-        })?;
+        let pdf = with_deadline(Op::Pdf, async {
+            page.pdf(PrintToPdfParams::default()).await.map_err(|e| {
+                QuarryError::new(ErrorCode::DriverFailed, "chromiumoxide pdf failed")
+                    .with_details(json!({ "error": e.to_string() }))
+            })
+        })
+        .await?;
         Ok(Bytes::from(pdf))
     }
 
@@ -2731,7 +2781,7 @@ impl BrowserDriver for ChromiumoxideDriver {
             (removed, empty_context)
         };
 
-        if let Err(err) = removed.page.close().await {
+        if let Err(err) = best_effort(Op::PageClose, removed.page.close()).await {
             tracing::debug!(
                 tab_id = %removed.tab_id,
                 error = %err,
@@ -2741,7 +2791,12 @@ impl BrowserDriver for ChromiumoxideDriver {
         if let Some(context_id) = empty_context {
             let browser_guard = self.browser.lock().await;
             if let Some(browser) = browser_guard.as_ref() {
-                if let Err(error) = browser.dispose_browser_context(context_id).await {
+                if let Err(error) = best_effort(
+                    Op::ContextClose,
+                    browser.dispose_browser_context(context_id),
+                )
+                .await
+                {
                     tracing::warn!(
                         session_key = %session_key,
                         error = %error,
@@ -2849,35 +2904,39 @@ impl BrowserDriver for ChromiumoxideDriver {
         session: &BrowserSession,
     ) -> QuarryResult<BrowserNativeProjection> {
         let page = self.current_page(session).await?;
-        page.execute(AccessibilityEnableParams::default())
-            .await
-            .map_err(|error| {
-                QuarryError::new(
-                    ErrorCode::DriverFailed,
-                    "chromiumoxide accessibility domain enable failed",
-                )
-                .with_details(json!({ "error": error.to_string() }))
-            })?;
-        let ax_tree = page
-            .execute(GetFullAxTreeParams::builder().depth(8).build())
-            .await
-            .map_err(|error| {
-                QuarryError::new(
-                    ErrorCode::DriverFailed,
-                    "chromiumoxide accessibility tree capture failed",
-                )
-                .with_details(json!({ "error": error.to_string() }))
-            })?;
-        let frame_tree = page
-            .execute(GetFrameTreeParams::default())
-            .await
-            .map_err(|error| {
-                QuarryError::new(
-                    ErrorCode::DriverFailed,
-                    "chromiumoxide frame tree capture failed",
-                )
-                .with_details(json!({ "error": error.to_string() }))
-            })?;
+        let (ax_tree, frame_tree) = read_with_retry(Op::AxSnapshot, || async {
+            page.execute(AccessibilityEnableParams::default())
+                .await
+                .map_err(|error| {
+                    QuarryError::new(
+                        ErrorCode::DriverFailed,
+                        "chromiumoxide accessibility domain enable failed",
+                    )
+                    .with_details(json!({ "error": error.to_string() }))
+                })?;
+            let ax_tree = page
+                .execute(GetFullAxTreeParams::builder().depth(8).build())
+                .await
+                .map_err(|error| {
+                    QuarryError::new(
+                        ErrorCode::DriverFailed,
+                        "chromiumoxide accessibility tree capture failed",
+                    )
+                    .with_details(json!({ "error": error.to_string() }))
+                })?;
+            let frame_tree =
+                page.execute(GetFrameTreeParams::default())
+                    .await
+                    .map_err(|error| {
+                        QuarryError::new(
+                            ErrorCode::DriverFailed,
+                            "chromiumoxide frame tree capture failed",
+                        )
+                        .with_details(json!({ "error": error.to_string() }))
+                    })?;
+            Ok((ax_tree, frame_tree))
+        })
+        .await?;
         let ax_tree = serde_json::to_value(&ax_tree.result).map_err(|error| {
             QuarryError::new(
                 ErrorCode::Internal,
@@ -2941,13 +3000,16 @@ impl BrowserDriver for ChromiumoxideDriver {
             })?;
         let mut params = HandleJavaScriptDialogParams::new(accept);
         params.prompt_text = prompt_text.map(str::to_owned);
-        page.execute(params).await.map_err(|error| {
-            QuarryError::new(
-                ErrorCode::DriverFailed,
-                "chromiumoxide dialog response failed",
-            )
-            .with_details(json!({ "error": error.to_string() }))
-        })?;
+        with_deadline(Op::Input, async {
+            page.execute(params).await.map_err(|error| {
+                QuarryError::new(
+                    ErrorCode::DriverFailed,
+                    "chromiumoxide dialog response failed",
+                )
+                .with_details(json!({ "error": error.to_string() }))
+            })
+        })
+        .await?;
         self.dialogs
             .lock()
             .await
@@ -2970,13 +3032,20 @@ impl BrowserDriver for ChromiumoxideDriver {
         timeout_ms: u32,
     ) -> QuarryResult<()> {
         let page = self.current_page(_session).await?;
-        let deadline = Instant::now() + Duration::from_millis(timeout_ms as u64);
+        // The caller's timeout, never longer than the table allows.
+        let give_up_at = Instant::now()
+            + Duration::from_millis(u64::from(timeout_ms)).min(deadline(Op::WaitFor));
         let poll = Duration::from_millis(50);
         loop {
-            match page.find_element(selector).await {
-                Ok(_) => return Ok(()),
-                Err(_) if Instant::now() < deadline => tokio::time::sleep(poll).await,
-                Err(e) => {
+            let found =
+                tokio::time::timeout(deadline(Op::WaitForPoll), page.find_element(selector)).await;
+            match found {
+                Ok(Ok(_)) => return Ok(()),
+                // Not there yet, or this poll stalled: look again until the time is up.
+                Ok(Err(_)) | Err(_) if Instant::now() < give_up_at => {
+                    tokio::time::sleep(poll).await
+                }
+                Ok(Err(e)) => {
                     return Err(QuarryError::new(
                         ErrorCode::DriverFailed,
                         "wait_for selector timed out",
@@ -2987,20 +3056,27 @@ impl BrowserDriver for ChromiumoxideDriver {
                         "error": e.to_string(),
                     })));
                 }
+                Err(_) => return Err(timeout_error(Op::WaitForPoll, deadline(Op::WaitForPoll))),
             }
         }
     }
 
     async fn click(&self, _session: &BrowserSession, selector: &str) -> QuarryResult<()> {
         let page = self.current_page(_session).await?;
-        let element = page.find_element(selector).await.map_err(|e| {
-            QuarryError::new(ErrorCode::DriverFailed, "click: element not found")
-                .with_details(json!({ "selector": selector, "error": e.to_string() }))
-        })?;
-        element.click().await.map_err(|e| {
-            QuarryError::new(ErrorCode::DriverFailed, "click failed")
-                .with_details(json!({ "selector": selector, "error": e.to_string() }))
-        })?;
+        let element = with_deadline(Op::Input, async {
+            page.find_element(selector).await.map_err(|e| {
+                QuarryError::new(ErrorCode::DriverFailed, "click: element not found")
+                    .with_details(json!({ "selector": selector, "error": e.to_string() }))
+            })
+        })
+        .await?;
+        with_deadline(Op::Input, async {
+            element.click().await.map_err(|e| {
+                QuarryError::new(ErrorCode::DriverFailed, "click failed")
+                    .with_details(json!({ "selector": selector, "error": e.to_string() }))
+            })
+        })
+        .await?;
         Ok(())
     }
 
@@ -3046,18 +3122,27 @@ impl BrowserDriver for ChromiumoxideDriver {
                 )
             })?;
 
-        page.execute(moved).await.map_err(|e| {
-            QuarryError::new(ErrorCode::DriverFailed, "click_point move failed")
-                .with_details(json!({ "x": x, "y": y, "error": e.to_string() }))
-        })?;
-        page.execute(pressed).await.map_err(|e| {
-            QuarryError::new(ErrorCode::DriverFailed, "click_point press failed")
-                .with_details(json!({ "x": x, "y": y, "error": e.to_string() }))
-        })?;
-        page.execute(released).await.map_err(|e| {
-            QuarryError::new(ErrorCode::DriverFailed, "click_point release failed")
-                .with_details(json!({ "x": x, "y": y, "error": e.to_string() }))
-        })?;
+        with_deadline(Op::Input, async {
+            page.execute(moved).await.map_err(|e| {
+                QuarryError::new(ErrorCode::DriverFailed, "click_point move failed")
+                    .with_details(json!({ "x": x, "y": y, "error": e.to_string() }))
+            })
+        })
+        .await?;
+        with_deadline(Op::Input, async {
+            page.execute(pressed).await.map_err(|e| {
+                QuarryError::new(ErrorCode::DriverFailed, "click_point press failed")
+                    .with_details(json!({ "x": x, "y": y, "error": e.to_string() }))
+            })
+        })
+        .await?;
+        with_deadline(Op::Input, async {
+            page.execute(released).await.map_err(|e| {
+                QuarryError::new(ErrorCode::DriverFailed, "click_point release failed")
+                    .with_details(json!({ "x": x, "y": y, "error": e.to_string() }))
+            })
+        })
+        .await?;
         Ok(())
     }
 
@@ -3068,18 +3153,27 @@ impl BrowserDriver for ChromiumoxideDriver {
         text: &str,
     ) -> QuarryResult<()> {
         let page = self.current_page(_session).await?;
-        let element = page.find_element(selector).await.map_err(|e| {
-            QuarryError::new(ErrorCode::DriverFailed, "type: element not found")
-                .with_details(json!({ "selector": selector, "error": e.to_string() }))
-        })?;
-        element.focus().await.map_err(|e| {
-            QuarryError::new(ErrorCode::DriverFailed, "type: focus failed")
-                .with_details(json!({ "selector": selector, "error": e.to_string() }))
-        })?;
-        element.type_str(text).await.map_err(|e| {
-            QuarryError::new(ErrorCode::DriverFailed, "type failed")
-                .with_details(json!({ "selector": selector, "error": e.to_string() }))
-        })?;
+        let element = with_deadline(Op::Input, async {
+            page.find_element(selector).await.map_err(|e| {
+                QuarryError::new(ErrorCode::DriverFailed, "type: element not found")
+                    .with_details(json!({ "selector": selector, "error": e.to_string() }))
+            })
+        })
+        .await?;
+        with_deadline(Op::Input, async {
+            element.focus().await.map_err(|e| {
+                QuarryError::new(ErrorCode::DriverFailed, "type: focus failed")
+                    .with_details(json!({ "selector": selector, "error": e.to_string() }))
+            })
+        })
+        .await?;
+        with_deadline(Op::Input, async {
+            element.type_str(text).await.map_err(|e| {
+                QuarryError::new(ErrorCode::DriverFailed, "type failed")
+                    .with_details(json!({ "selector": selector, "error": e.to_string() }))
+            })
+        })
+        .await?;
         Ok(())
     }
 
@@ -3087,28 +3181,40 @@ impl BrowserDriver for ChromiumoxideDriver {
         let page = self.current_page(_session).await?;
         match target {
             ScrollTarget::Top => {
-                page.evaluate("window.scrollTo(0, 0)").await.map_err(|e| {
-                    QuarryError::new(ErrorCode::DriverFailed, "scroll-top failed")
-                        .with_details(json!({ "error": e.to_string() }))
-                })?;
+                with_deadline(Op::Input, async {
+                    page.evaluate("window.scrollTo(0, 0)").await.map_err(|e| {
+                        QuarryError::new(ErrorCode::DriverFailed, "scroll-top failed")
+                            .with_details(json!({ "error": e.to_string() }))
+                    })
+                })
+                .await?;
             }
             ScrollTarget::Bottom => {
-                page.evaluate("window.scrollTo(0, document.documentElement.scrollHeight)")
-                    .await
-                    .map_err(|e| {
-                        QuarryError::new(ErrorCode::DriverFailed, "scroll-bottom failed")
-                            .with_details(json!({ "error": e.to_string() }))
-                    })?;
+                with_deadline(Op::Input, async {
+                    page.evaluate("window.scrollTo(0, document.documentElement.scrollHeight)")
+                        .await
+                        .map_err(|e| {
+                            QuarryError::new(ErrorCode::DriverFailed, "scroll-bottom failed")
+                                .with_details(json!({ "error": e.to_string() }))
+                        })
+                })
+                .await?;
             }
             ScrollTarget::Selector(sel) => {
-                let element = page.find_element(sel).await.map_err(|e| {
-                    QuarryError::new(ErrorCode::DriverFailed, "scroll: element not found")
-                        .with_details(json!({ "selector": sel, "error": e.to_string() }))
-                })?;
-                element.scroll_into_view().await.map_err(|e| {
-                    QuarryError::new(ErrorCode::DriverFailed, "scroll_into_view failed")
-                        .with_details(json!({ "selector": sel, "error": e.to_string() }))
-                })?;
+                let element = with_deadline(Op::Input, async {
+                    page.find_element(sel).await.map_err(|e| {
+                        QuarryError::new(ErrorCode::DriverFailed, "scroll: element not found")
+                            .with_details(json!({ "selector": sel, "error": e.to_string() }))
+                    })
+                })
+                .await?;
+                with_deadline(Op::Input, async {
+                    element.scroll_into_view().await.map_err(|e| {
+                        QuarryError::new(ErrorCode::DriverFailed, "scroll_into_view failed")
+                            .with_details(json!({ "selector": sel, "error": e.to_string() }))
+                    })
+                })
+                .await?;
             }
         }
         Ok(())
@@ -3140,29 +3246,40 @@ impl BrowserDriver for ChromiumoxideDriver {
                 )
             })?;
 
-        page.execute(event).await.map_err(|e| {
-            QuarryError::new(ErrorCode::DriverFailed, "mouse_wheel failed").with_details(json!({
-                "x": x,
-                "y": y,
-                "delta_x": delta_x,
-                "delta_y": delta_y,
-                "error": e.to_string(),
-            }))
-        })?;
+        with_deadline(Op::Input, async {
+            page.execute(event).await.map_err(|e| {
+                QuarryError::new(ErrorCode::DriverFailed, "mouse_wheel failed").with_details(
+                    json!({
+                        "x": x,
+                        "y": y,
+                        "delta_x": delta_x,
+                        "delta_y": delta_y,
+                        "error": e.to_string(),
+                    }),
+                )
+            })
+        })
+        .await?;
         Ok(())
     }
 
     async fn press(&self, _session: &BrowserSession, key: &str) -> QuarryResult<()> {
         let page = self.current_page(_session).await?;
         // press_key is page-global; we use the body element only as a handle.
-        let element = page.find_element("body").await.map_err(|e| {
-            QuarryError::new(ErrorCode::DriverFailed, "press: body not found")
-                .with_details(json!({ "error": e.to_string() }))
-        })?;
-        element.press_key(key).await.map_err(|e| {
-            QuarryError::new(ErrorCode::DriverFailed, "press_key failed")
-                .with_details(json!({ "key": key, "error": e.to_string() }))
-        })?;
+        let element = with_deadline(Op::Input, async {
+            page.find_element("body").await.map_err(|e| {
+                QuarryError::new(ErrorCode::DriverFailed, "press: body not found")
+                    .with_details(json!({ "error": e.to_string() }))
+            })
+        })
+        .await?;
+        with_deadline(Op::Input, async {
+            element.press_key(key).await.map_err(|e| {
+                QuarryError::new(ErrorCode::DriverFailed, "press_key failed")
+                    .with_details(json!({ "key": key, "error": e.to_string() }))
+            })
+        })
+        .await?;
         Ok(())
     }
 
@@ -3172,10 +3289,13 @@ impl BrowserDriver for ChromiumoxideDriver {
         script: &str,
     ) -> QuarryResult<serde_json::Value> {
         let page = self.current_page(_session).await?;
-        let result = page.evaluate(script).await.map_err(|e| {
-            QuarryError::new(ErrorCode::DriverFailed, "evaluate failed")
-                .with_details(json!({ "error": e.to_string() }))
-        })?;
+        let result = with_deadline(Op::Evaluate, async {
+            page.evaluate(script).await.map_err(|e| {
+                QuarryError::new(ErrorCode::DriverFailed, "evaluate failed")
+                    .with_details(json!({ "error": e.to_string() }))
+            })
+        })
+        .await?;
         let value = result
             .into_value::<serde_json::Value>()
             .unwrap_or(serde_json::Value::Null);
@@ -3199,32 +3319,41 @@ impl BrowserDriver for ChromiumoxideDriver {
             sel = serde_json::to_string(selector).unwrap_or_default(),
             val = serde_json::to_string(value).unwrap_or_default(),
         );
-        page.evaluate(script).await.map_err(|e| {
-            QuarryError::new(ErrorCode::DriverFailed, "select failed").with_details(
-                json!({ "selector": selector, "value": value, "error": e.to_string() }),
-            )
-        })?;
+        with_deadline(Op::Input, async {
+            page.evaluate(script).await.map_err(|e| {
+                QuarryError::new(ErrorCode::DriverFailed, "select failed").with_details(
+                    json!({ "selector": selector, "value": value, "error": e.to_string() }),
+                )
+            })
+        })
+        .await?;
         Ok(())
     }
 
     async fn back(&self, _session: &BrowserSession) -> QuarryResult<()> {
         let page = self.current_page(_session).await?;
-        page.evaluate("window.history.back()").await.map_err(|e| {
-            QuarryError::new(ErrorCode::DriverFailed, "back failed")
-                .with_details(json!({ "error": e.to_string() }))
-        })?;
+        with_deadline(Op::Navigate, async {
+            page.evaluate("window.history.back()").await.map_err(|e| {
+                QuarryError::new(ErrorCode::DriverFailed, "back failed")
+                    .with_details(json!({ "error": e.to_string() }))
+            })
+        })
+        .await?;
         tokio::time::sleep(Duration::from_millis(100)).await;
         Ok(())
     }
 
     async fn forward(&self, _session: &BrowserSession) -> QuarryResult<()> {
         let page = self.current_page(_session).await?;
-        page.evaluate("window.history.forward()")
-            .await
-            .map_err(|e| {
-                QuarryError::new(ErrorCode::DriverFailed, "forward failed")
-                    .with_details(json!({ "error": e.to_string() }))
-            })?;
+        with_deadline(Op::Navigate, async {
+            page.evaluate("window.history.forward()")
+                .await
+                .map_err(|e| {
+                    QuarryError::new(ErrorCode::DriverFailed, "forward failed")
+                        .with_details(json!({ "error": e.to_string() }))
+                })
+        })
+        .await?;
         tokio::time::sleep(Duration::from_millis(100)).await;
         Ok(())
     }
@@ -3567,6 +3696,38 @@ mod tests {
         assert_eq!(driver.launch_count(), 1);
         driver.release(a).await.expect("release a");
         driver.release(c).await.expect("release c");
+    }
+
+    /// A script that never finishes gets the typed timeout for `evaluate`, says
+    /// the effect is unknown, is not retryable, and leaves the session usable.
+    #[tokio::test]
+    async fn a_hung_evaluate_times_out_with_a_typed_error_and_the_session_survives() {
+        if !live_enabled() {
+            return;
+        }
+        let driver = live_driver();
+        let session = live_session_sized(&driver, "hung-eval", None, "still-here").await;
+        let started = Instant::now();
+        let error = driver
+            .evaluate(&session, "new Promise(() => {})")
+            .await
+            .expect_err("a promise that never settles must time out");
+        assert_eq!(error.code, ErrorCode::Timeout, "{error:?}");
+        assert!(!error.retryable);
+        let details = error.details.expect("timeout details");
+        assert_eq!(details["op"], "evaluate");
+        assert_eq!(details["effect"], "unknown");
+        assert!(
+            !details.to_string().contains("Promise"),
+            "no script text in the details"
+        );
+        assert!(
+            started.elapsed() >= Duration::from_secs(14),
+            "waited for the deadline"
+        );
+        // The page still answers.
+        assert_eq!(live_marker(&driver, &session).await, "still-here");
+        driver.release(session).await.expect("release");
     }
 
     /// The order leases arrive in does not matter: the phone first, then the

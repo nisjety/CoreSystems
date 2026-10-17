@@ -155,6 +155,8 @@ pub mod browserbase;
 pub mod browserless;
 #[cfg(feature = "chromiumoxide")]
 pub mod chromiumoxide;
+#[cfg(feature = "chromiumoxide")]
+mod deadlines;
 #[cfg(feature = "kernel")]
 pub mod kernel;
 pub mod navigation;

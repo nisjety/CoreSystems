@@ -1,5 +1,5 @@
 {
-  "quarry-browser/src/chromiumoxide.rs::R2": 14,
+  "quarry-browser/src/chromiumoxide.rs::R2": 13,
   "quarry-browser/src/kernel.rs::R2": 2,
   "quarry-edge/src/agent_routes/admission.rs::R2": 1,
   "quarry-edge/src/agent_routes/lifecycle.rs::R2": 2,

@@ -29,7 +29,7 @@ futures = { version = "0.3", optional = true }
 
 [dev-dependencies]
 wiremock = "0.6"
-tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }
 
 [features]
 default = ["kernel"]
