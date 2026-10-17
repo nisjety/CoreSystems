@@ -756,6 +756,10 @@ services:
       # Durable loop fold store (WS03 S4). Off by default: a loop keeps its fold in
       # memory and a pause cannot be resumed from the store. Sealed under the key above.
       SESSION_CORE_LOOP_CHECKPOINT_ENABLED: ${SESSION_CORE_LOOP_CHECKPOINT_ENABLED:-false}
+      # Sweep that closes a tool reservation still open long after its run ended or
+      # parked, as `unknown_outcome` (WS03 S5). Off by default: turning it on changes
+      # what audit sees for such rows, so it is a deliberate rollout step.
+      SESSION_CORE_TOOL_LEDGER_SWEEP_ENABLED: ${SESSION_CORE_TOOL_LEDGER_SWEEP_ENABLED:-false}
       # Dreaming's LLM memory extraction (dream_extractor.rs). Unset this
       # address, or set DREAMING_LLM_EXTRACTION=0, and Dreaming falls back to
       # the deterministic phrase matcher alone.
@@ -1036,6 +1040,10 @@ services:
       # worker's. OFF by default and never for ZDR runs. Do not turn it on in a
       # deployment until stage 1 `/continue` exists: nothing else consumes them.
       AGENT_CONTINUE_AFTER_APPROVAL_ENABLED: ${AGENT_CONTINUE_AFTER_APPROVAL_ENABLED:-false}
+      # Effect ledger (WS03 S5): an effectful tool call is reserved in session-core
+      # before it runs and finalized after, and a call that cannot be reserved is not
+      # run. OFF by default. Needs session-core's migration 0048.
+      EXECUTION_EFFECT_LEDGER_ENABLED: ${EXECUTION_EFFECT_LEDGER_ENABLED:-false}
       # Autonomous tool-using runs route through Azure's model-router deployment,
       # which selects the best model per turn (tool-calling model selection is
       # handled by the router, cost-aware). Overridable per deployment; empty →

@@ -41,6 +41,7 @@ mod space_deletion_reconciler;
 mod space_membership_nats;
 mod store;
 mod terminalization;
+mod tool_ledger;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -195,6 +196,14 @@ async fn main() -> Result<()> {
             async move { terminalization::run_recovery_worker(pool).await }
         },
     ));
+    let tool_ledger_pool = pool.clone();
+    let tool_ledger_handle = tokio::spawn(supervise_background(
+        "session-core tool ledger sweep",
+        move || {
+            let pool = tool_ledger_pool.clone();
+            async move { tool_ledger::run(pool).await }
+        },
+    ));
 
     let shutdown = shutdown_signal();
 
@@ -209,6 +218,7 @@ async fn main() -> Result<()> {
         result = dreaming_handle => result??,
         result = semantic_reconciliation_handle => result??,
         result = terminalization_handle => result??,
+        result = tool_ledger_handle => result??,
         () = shutdown => {},
     }
 

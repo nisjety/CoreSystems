@@ -220,6 +220,8 @@ pub enum LedgerStatus {
     Completed,
     /// Finished with a recorded failure.
     Failed,
+    /// Closed without running: declined, expired, or ended before it started.
+    NotRun,
     /// Reserved and never finished by a loop that is gone.
     Unknown,
 }

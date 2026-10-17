@@ -3595,6 +3595,36 @@ mod tests {
             ))
         }
 
+        async fn save_loop_checkpoint(
+            &self,
+            _: Request<mp_contracts::model_plane::v1::SaveLoopCheckpointRequest>,
+        ) -> Result<Response<mp_contracts::model_plane::v1::SaveLoopCheckpointResponse>, Status>
+        {
+            Err(Status::unimplemented(
+                "save_loop_checkpoint not needed in test",
+            ))
+        }
+
+        async fn claim_loop_checkpoint(
+            &self,
+            _: Request<mp_contracts::model_plane::v1::ClaimLoopCheckpointRequest>,
+        ) -> Result<Response<mp_contracts::model_plane::v1::ClaimLoopCheckpointResponse>, Status>
+        {
+            Err(Status::unimplemented(
+                "claim_loop_checkpoint not needed in test",
+            ))
+        }
+
+        async fn close_loop_checkpoint(
+            &self,
+            _: Request<mp_contracts::model_plane::v1::CloseLoopCheckpointRequest>,
+        ) -> Result<Response<mp_contracts::model_plane::v1::CloseLoopCheckpointResponse>, Status>
+        {
+            Err(Status::unimplemented(
+                "close_loop_checkpoint not needed in test",
+            ))
+        }
+
         async fn save_checkpoint(
             &self,
             _: Request<SaveCheckpointRequest>,

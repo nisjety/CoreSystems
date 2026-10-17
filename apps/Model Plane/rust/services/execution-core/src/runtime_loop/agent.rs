@@ -363,6 +363,9 @@ struct LoopContext<'a> {
     /// The one approved call this continuation segment may release (build plan
     /// WS03 S3). `None` for a fresh run and for every delegated child.
     release: Option<super::resume::ApprovedRelease>,
+    /// Whether tool calls are recorded in the effect ledger (build plan WS03 S5).
+    /// Resolved once per run; a delegated child inherits its parent's.
+    effect_ledger: bool,
     state: &'a crate::state::StateStore,
     session_channel: &'a Channel,
     inference_channel: &'a Channel,
@@ -920,6 +923,7 @@ async fn run_agent_with_route(
 
     let context = LoopContext {
         release: resumed.as_ref().map(|r| r.release.clone()),
+        effect_ledger: runtime_loop::effect::ledger_enabled(),
         state,
         session_channel: &session_channel,
         inference_channel: &inference_channel,
@@ -1949,6 +1953,58 @@ async fn run_rounds(
                     } else {
                         None
                     };
+                    // Effect ledger (build plan WS03 S5): an effectful call is reserved
+                    // before it can run and finalized after, so a loop that dies in
+                    // between leaves a row that says the effect may have happened. A
+                    // call that cannot be reserved is not run: an effect that cannot be
+                    // recorded ahead of time is not one to run blind.
+                    let ledger_entry = if ctx.effect_ledger {
+                        let class = runtime_loop::effect::effect_class_of(
+                            &call.name,
+                            &call.arguments_json,
+                        );
+                        class
+                            .is_effectful()
+                            .then(|| runtime_loop::effect::LedgerEntry {
+                                run_id: &req.run_id,
+                                action_id: runtime_loop::effect::action_id_for(step_id),
+                                tool: &call.name,
+                                data_category: data_category(&call.name),
+                                zdr,
+                                class,
+                                args_digest: runtime_loop::effect::args_digest_of(
+                                    &call.arguments_json,
+                                ),
+                            })
+                    } else {
+                        None
+                    };
+                    if let Some(entry) = &ledger_entry {
+                        if let Err(reason) = runtime_loop::effect::reserve(
+                            ctx.session_channel,
+                            ctx.session_bearer,
+                            entry,
+                        )
+                        .await
+                        {
+                            warn!(
+                                run_id = %req.run_id,
+                                tool = %call.name,
+                                %reason,
+                                "run_agent: effect ledger reservation failed; the call was not run"
+                            );
+                            return Some(runtime_loop::StepOutcome {
+                                status: "failed".to_owned(),
+                                output: String::new(),
+                                error: format!(
+                                    "tool '{}' was not run: its effect could not be recorded ahead \
+                                     of time, so it was held back. Try again.",
+                                    call.name
+                                ),
+                                compaction_triggered: false,
+                            });
+                        }
+                    }
                     let mut outcome = None;
                     for attempt in 1..=runtime_loop::retry::MAX_TOOL_ATTEMPTS {
                         if attempt > 1 {
@@ -2004,6 +2060,27 @@ async fn run_rounds(
                             "run_agent: retrying tool after a transient failure"
                         );
                         outcome = Some(result);
+                    }
+                    if let (Some(entry), Some(result)) = (&ledger_entry, &outcome) {
+                        let closing = runtime_loop::effect::final_outcome_for(&result.status);
+                        if let Err(reason) = runtime_loop::effect::finalize(
+                            ctx.session_channel,
+                            ctx.session_bearer,
+                            &req.run_id,
+                            &entry.action_id,
+                            closing,
+                        )
+                        .await
+                        {
+                            // The row stays `reserved`; the session-core sweep closes it
+                            // as `unknown_outcome`, which is honest and never a replay.
+                            warn!(
+                                run_id = %req.run_id,
+                                tool = %call.name,
+                                %reason,
+                                "run_agent: effect ledger finalize failed; the reservation stays open"
+                            );
+                        }
                     }
                     outcome
                 },
@@ -3170,6 +3247,7 @@ async fn run_delegated_child(
     // does NOT inherit is the parent's transcript.
     let child = LoopContext {
         release: None,
+        effect_ledger: parent.effect_ledger,
         state: parent.state,
         session_channel: parent.session_channel,
         inference_channel: parent.inference_channel,
@@ -5555,6 +5633,12 @@ mod tests {
         approvals: Vec<(String, String)>,  // (step_id, reason)
         /// Every `ConsumeApproval` the mock observed (build plan WS03 S3).
         consume_calls: Vec<pb::ConsumeApprovalRequest>,
+        /// Every `ReserveToolAction` the mock accepted (build plan WS03 S5).
+        reservations: Vec<pb::ReserveToolActionRequest>,
+        /// `(action_id, outcome)` for every `FinalizeToolAction` the mock accepted.
+        finalizations: Vec<(String, String)>,
+        /// Make `ReserveToolAction` fail, to prove an unrecorded effect is not run.
+        fail_reserve: bool,
         /// `(thread_id, summary, step_count)` — every `ProposePlan` call
         /// `MockOrchestration` observed, for `plan.propose` dispatch tests.
         propose_plan_calls: Vec<(String, String, usize)>,
@@ -6277,16 +6361,48 @@ mod tests {
 
         async fn reserve_tool_action(
             &self,
-            _: Request<pb::ReserveToolActionRequest>,
+            request: Request<pb::ReserveToolActionRequest>,
         ) -> Result<Response<pb::ReserveToolActionResponse>, Status> {
-            Err(Status::unimplemented("reserve_tool_action not used"))
+            let mut rec = self.rec.lock().unwrap();
+            if rec.fail_reserve {
+                return Err(Status::unavailable("tool ledger unavailable"));
+            }
+            rec.reservations.push(request.into_inner());
+            Ok(Response::new(pb::ReserveToolActionResponse { created: true }))
         }
 
         async fn finalize_tool_action(
             &self,
-            _: Request<pb::FinalizeToolActionRequest>,
+            request: Request<pb::FinalizeToolActionRequest>,
         ) -> Result<Response<pb::FinalizeToolActionResponse>, Status> {
-            Err(Status::unimplemented("finalize_tool_action not used"))
+            let req = request.into_inner();
+            self.rec
+                .lock()
+                .unwrap()
+                .finalizations
+                .push((req.action_id, req.outcome));
+            Ok(Response::new(pb::FinalizeToolActionResponse { updated: true }))
+        }
+
+        async fn save_loop_checkpoint(
+            &self,
+            _: Request<pb::SaveLoopCheckpointRequest>,
+        ) -> Result<Response<pb::SaveLoopCheckpointResponse>, Status> {
+            Err(Status::unimplemented("save_loop_checkpoint not used"))
+        }
+
+        async fn claim_loop_checkpoint(
+            &self,
+            _: Request<pb::ClaimLoopCheckpointRequest>,
+        ) -> Result<Response<pb::ClaimLoopCheckpointResponse>, Status> {
+            Err(Status::unimplemented("claim_loop_checkpoint not used"))
+        }
+
+        async fn close_loop_checkpoint(
+            &self,
+            _: Request<pb::CloseLoopCheckpointRequest>,
+        ) -> Result<Response<pb::CloseLoopCheckpointResponse>, Status> {
+            Err(Status::unimplemented("close_loop_checkpoint not used"))
         }
 
         async fn save_checkpoint(
@@ -9591,6 +9707,171 @@ mod tests {
 
         assert_eq!(resp.status, "awaiting_approval");
         assert_eq!(rec.lock().unwrap().approvals.len(), 1);
+    }
+
+    /// Run one scripted exchange that offers `tool`, with the effect ledger forced to
+    /// `ledger_on` for the duration (build plan WS03 S5).
+    async fn run_with_ledger(
+        rec: &SharedRecorder,
+        ledger_on: bool,
+        mode: &str,
+        tool: &str,
+        scripted: Vec<Scripted>,
+    ) -> pb::RunAgentResponse {
+        let _switch = runtime_loop::effect::LedgerSwitch::set(ledger_on);
+        let session_channel = spawn_session_channel(rec.clone()).await;
+        let inference_channel = spawn_inference_channel(scripted).await;
+        let state = crate::state::StateStore::new();
+        let tools = vec![pb::ToolDefinition {
+            name: tool.to_owned(),
+            description: "A test tool.".to_owned(),
+            parameters_json: r#"{"type":"object","properties":{}}"#.to_owned(),
+        }];
+        let mut req = sample_request();
+        req.mode = mode.to_owned();
+        run_agent_with_tools(
+            &state,
+            session_channel,
+            inference_channel,
+            &plain_caller(),
+            req,
+            tools,
+            None,
+            Some("session-token".to_owned()),
+            "inference-token".to_owned(),
+            &ALLOW_CAPABILITY_POLICY,
+            &STATIC_TERMINAL_TOKENS,
+            None,
+            None,
+            &test_sandbox_manager_client(),
+            "test-backend",
+            None,
+            &test_sandbox_tokens(),
+            None,
+        )
+        .await
+        .expect("the run returns a response")
+    }
+
+    fn one_call(name: &str, arguments_json: &str) -> Scripted {
+        Scripted::ToolCalls {
+            content: String::new(),
+            calls: vec![pb::ToolCall {
+                id: "call-1".to_owned(),
+                name: name.to_owned(),
+                arguments_json: arguments_json.to_owned(),
+            }],
+        }
+    }
+
+    #[tokio::test]
+    async fn an_effectful_call_is_reserved_before_it_runs_and_finalized_after() {
+        let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
+        let arguments = r#"{"table":"customers"}"#;
+        run_with_ledger(
+            &rec,
+            true,
+            "auto",
+            "delete_records",
+            vec![one_call("delete_records", arguments), Scripted::Answer("done".to_owned())],
+        )
+        .await;
+
+        let r = rec.lock().unwrap();
+        assert_eq!(r.reservations.len(), 1, "one reservation for the one effectful call");
+        let reservation = &r.reservations[0];
+        assert_eq!(reservation.tool, "delete_records");
+        assert_eq!(reservation.effect_class, "external");
+        assert_eq!(
+            reservation.args_digest,
+            mp_contracts::effect_ledger::args_digest(arguments).expect("digest")
+        );
+        assert_eq!(reservation.run_id, reservation.request_id);
+        // The ledger holds a digest, never the arguments.
+        assert!(!format!("{reservation:?}").contains("customers"));
+        assert_eq!(r.finalizations.len(), 1, "finalized exactly once");
+        assert_eq!(r.finalizations[0].0, reservation.action_id);
+        // `delete_records` is not a registered tool, so the step ends failed.
+        assert_eq!(r.finalizations[0].1, "failed");
+    }
+
+    #[tokio::test]
+    async fn a_call_stopped_at_the_approval_gate_is_closed_as_not_run() {
+        let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
+        let resp = run_with_ledger(
+            &rec,
+            true,
+            "ask",
+            "delete_records",
+            vec![one_call("delete_records", "{}")],
+        )
+        .await;
+
+        assert_eq!(resp.status, "awaiting_approval");
+        let r = rec.lock().unwrap();
+        assert_eq!(r.reservations.len(), 1);
+        assert_eq!(
+            r.finalizations,
+            vec![(r.reservations[0].action_id.clone(), "not_run".to_owned())],
+            "the gate stopped it before its body ran, so it did not run"
+        );
+        assert_eq!(r.approvals.len(), 1, "the pause itself is unchanged");
+    }
+
+    #[tokio::test]
+    async fn an_effectful_call_that_cannot_be_reserved_is_not_run() {
+        let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
+        rec.lock().unwrap().fail_reserve = true;
+        let resp = run_with_ledger(
+            &rec,
+            true,
+            "auto",
+            "delete_records",
+            vec![one_call("delete_records", "{}"), Scripted::Answer("done".to_owned())],
+        )
+        .await;
+
+        let r = rec.lock().unwrap();
+        assert!(r.reservations.is_empty());
+        assert!(
+            r.finalizations.is_empty(),
+            "nothing was reserved, so nothing is finalized"
+        );
+        // The model is told the call was held back, and the run goes on.
+        assert!(r
+            .persisted_step_payloads
+            .iter()
+            .any(|(_, _, error)| error.contains("was not run")));
+        assert_eq!(resp.final_output, "done");
+    }
+
+    #[tokio::test]
+    async fn a_read_is_never_reserved_and_neither_is_anything_while_the_ledger_is_off() {
+        // A read, with the ledger on.
+        let reads: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
+        run_with_ledger(
+            &reads,
+            true,
+            "auto",
+            "lookup_thing",
+            vec![one_call("lookup_thing", "{}"), Scripted::Answer("done".to_owned())],
+        )
+        .await;
+        assert!(reads.lock().unwrap().reservations.is_empty());
+
+        // An effect, with the ledger off: the default, and today's behaviour.
+        let off: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
+        run_with_ledger(
+            &off,
+            false,
+            "auto",
+            "delete_records",
+            vec![one_call("delete_records", "{}"), Scripted::Answer("done".to_owned())],
+        )
+        .await;
+        let off = off.lock().unwrap();
+        assert!(off.reservations.is_empty());
+        assert!(off.finalizations.is_empty());
     }
 
     #[tokio::test]

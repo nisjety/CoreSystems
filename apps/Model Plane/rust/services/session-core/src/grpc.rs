@@ -3734,7 +3734,7 @@ fn validate_tool_action_token(
     Ok(())
 }
 
-fn tool_action_detail(
+pub(crate) fn tool_action_detail(
     tool: &str,
     data_category: &str,
     zdr: bool,
@@ -3746,7 +3746,7 @@ fn tool_action_detail(
     }
 }
 
-async fn enqueue_inline_tool_audit(
+pub(crate) async fn enqueue_inline_tool_audit(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     org_id: &str,
     user_id: &str,
@@ -3799,7 +3799,7 @@ async fn enqueue_inline_tool_audit(
     Ok(())
 }
 
-async fn reserve_tool_action_inner(
+pub(crate) async fn reserve_tool_action_inner(
     pool: &PgPool,
     audit_publisher: Option<&crate::audit_publisher::AuditOutbox>,
     req: pb::ReserveToolActionRequest,
@@ -3809,6 +3809,17 @@ async fn reserve_tool_action_inner(
     validate_tool_action_token(&req.request_id, "request_id", 128)?;
     validate_tool_action_token(&req.tool, "tool", 96)?;
     validate_tool_action_token(&req.data_category, "data_category", 64)?;
+    // The ledger's two optional fields (build plan WS03 S5). Empty means the caller
+    // does not supply them; anything else must have the shared shape.
+    if !req.args_digest.is_empty() && !mp_contracts::effect_ledger::is_args_digest(&req.args_digest)
+    {
+        return Err(Status::invalid_argument("invalid args_digest"));
+    }
+    if !req.effect_class.is_empty()
+        && mp_contracts::effect_ledger::EffectClass::parse(&req.effect_class).is_none()
+    {
+        return Err(Status::invalid_argument("invalid effect_class"));
+    }
 
     let mut tx = pool
         .begin()
@@ -3816,8 +3827,8 @@ async fn reserve_tool_action_inner(
         .map_err(|error| Status::internal(error.to_string()))?;
     let inserted = sqlx::query(
         "INSERT INTO session_tool_audit_intents
-            (run_id, action_id, request_id, tool, data_category, zdr)
-         VALUES ($1, $2, $3, $4, $5, $6)
+            (run_id, action_id, request_id, tool, data_category, zdr, args_digest, effect_class)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
          ON CONFLICT (run_id, action_id) DO NOTHING",
     )
     .bind(&req.run_id)
@@ -3826,14 +3837,29 @@ async fn reserve_tool_action_inner(
     .bind(&req.tool)
     .bind(&req.data_category)
     .bind(req.zdr)
+    .bind((!req.args_digest.is_empty()).then_some(req.args_digest.as_str()))
+    .bind((!req.effect_class.is_empty()).then_some(req.effect_class.as_str()))
     .execute(&mut *tx)
     .await
     .map_err(|error| Status::internal(error.to_string()))?
     .rows_affected()
         == 1;
 
-    let existing = sqlx::query_as::<_, (String, String, String, bool, String, String)>(
-        "SELECT i.request_id, i.tool, i.data_category, i.zdr, r.org_id, r.user_id
+    let existing = sqlx::query_as::<
+        _,
+        (
+            String,
+            String,
+            String,
+            bool,
+            String,
+            String,
+            Option<String>,
+            Option<String>,
+        ),
+    >(
+        "SELECT i.request_id, i.tool, i.data_category, i.zdr, r.org_id, r.user_id,
+                i.args_digest, i.effect_class
          FROM session_tool_audit_intents i
          JOIN runs r ON r.id = i.run_id
          WHERE i.run_id = $1 AND i.action_id = $2
@@ -3849,6 +3875,8 @@ async fn reserve_tool_action_inner(
         || existing.1 != req.tool
         || existing.2 != req.data_category
         || existing.3 != req.zdr
+        || existing.6.as_deref().unwrap_or("") != req.args_digest
+        || existing.7.as_deref().unwrap_or("") != req.effect_class
     {
         return Err(Status::already_exists(
             "tool action identity is bound to different immutable input",
@@ -3881,15 +3909,24 @@ async fn reserve_tool_action_inner(
     }))
 }
 
-async fn finalize_tool_action_inner(
+pub(crate) async fn finalize_tool_action_inner(
     pool: &PgPool,
     audit_publisher: Option<&crate::audit_publisher::AuditOutbox>,
     req: pb::FinalizeToolActionRequest,
 ) -> Result<Response<pb::FinalizeToolActionResponse>, Status> {
     validate_tool_action_token(&req.run_id, "run_id", 128)?;
     validate_tool_action_token(&req.action_id, "action_id", 128)?;
-    if !matches!(req.outcome.as_str(), "completed" | "failed") {
+    if !mp_contracts::effect_ledger::is_final_outcome(&req.outcome) {
         return Err(Status::invalid_argument("invalid tool action outcome"));
+    }
+    // A provider receipt belongs to a call that completed.
+    if !req.receipt_id.is_empty() {
+        validate_tool_action_token(&req.receipt_id, "receipt_id", 256)?;
+        if req.outcome != "completed" {
+            return Err(Status::invalid_argument(
+                "a receipt belongs to a completed call",
+            ));
+        }
     }
 
     let mut tx = pool
@@ -3912,12 +3949,14 @@ async fn finalize_tool_action_inner(
     let updated = if existing.4 == "reserved" {
         sqlx::query(
             "UPDATE session_tool_audit_intents
-             SET status = $3, finalized_at = now()
+             SET status = $3, finalized_at = now(), closed_by = 'executor',
+                 provider_receipt_id = $4
              WHERE run_id = $1 AND action_id = $2 AND status = 'reserved'",
         )
         .bind(&req.run_id)
         .bind(&req.action_id)
         .bind(&req.outcome)
+        .bind((!req.receipt_id.is_empty()).then_some(req.receipt_id.as_str()))
         .execute(&mut *tx)
         .await
         .map_err(|error| Status::internal(error.to_string()))?
@@ -11804,6 +11843,7 @@ mod tests {
             tool: "web_search".to_owned(),
             data_category: "public_non_personal".to_owned(),
             zdr: false,
+            ..Default::default()
         };
         assert!(
             reserve_tool_action_inner(&pool, None, reservation.clone())
@@ -11833,6 +11873,7 @@ mod tests {
             run_id: run_id.clone(),
             action_id: reservation.action_id.clone(),
             outcome: "completed".to_owned(),
+            ..Default::default()
         };
         assert!(
             finalize_tool_action_inner(&pool, None, finalization.clone())

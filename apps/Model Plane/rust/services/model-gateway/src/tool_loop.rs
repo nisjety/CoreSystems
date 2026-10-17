@@ -4000,6 +4000,8 @@ async fn dispatch_audited_tool(
         tool: call.name.clone(),
         data_category: crate::audit::tool_data_category(&call.name).to_owned(),
         zdr,
+        // The gateway's read-only loop supplies no class or digest.
+        ..Default::default()
     };
     state
         .session_client
@@ -4089,6 +4091,7 @@ async fn dispatch_audited_tool(
         } else {
             "completed".to_owned()
         },
+        ..Default::default()
     };
     state
         .session_client

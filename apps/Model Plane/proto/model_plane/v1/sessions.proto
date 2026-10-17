@@ -688,6 +688,13 @@ message ReserveToolActionRequest {
   string data_category = 5;
   // Effective Zero Data Retention posture for the action.
   bool zdr = 6;
+  // Digest of the call's arguments: 64 lowercase hex characters (blake3 over the
+  // canonical JSON). Empty when the caller does not supply one. The arguments
+  // themselves are never sent or stored.
+  string args_digest = 7;
+  // What the call may change: "none", "read", "write" or "external". Empty when
+  // the caller does not classify the call.
+  string effect_class = 8;
 }
 
 // ReserveToolActionResponse reports whether a new reservation was created.
@@ -702,8 +709,13 @@ message FinalizeToolActionRequest {
   string run_id = 1;
   // Stable action identifier supplied during reservation.
   string action_id = 2;
-  // "completed" or "failed".
+  // "completed", "failed", "not_run" (closed without running) or
+  // "unknown_outcome" (reserved, then the loop went away; the effect may or may
+  // not have happened and the call is never retried).
   string outcome = 3;
+  // The provider's own receipt for a completed call. Empty when there is none;
+  // refused for any other outcome.
+  string receipt_id = 4;
 }
 
 // FinalizeToolActionResponse reports whether the reservation changed state.
