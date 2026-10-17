@@ -22,11 +22,17 @@
 use opentelemetry::trace::TracerProvider;
 use opentelemetry_otlp::SpanExporter;
 use opentelemetry_sdk::trace::SdkTracerProvider;
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
+use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter, Layer};
 
 pub fn init_telemetry() {
-    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
-    let fmt_layer = tracing_subscriber::fmt::layer().json();
+    // RUST_LOG, with the dependencies that print page content or URLs at debug
+    // capped regardless (see `crate::zdr_log::harden`).
+    let env_filter = crate::zdr_log::harden(
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
+    );
+    // The JSON log layer with the ZDR event filter; ZdrMarkLayer makes the mark
+    // on a request span sticky (see `crate::zdr_log`).
+    let fmt_layer = crate::zdr_log::build_json_layer(std::io::stdout);
 
     if std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT")
         .ok()
@@ -36,8 +42,12 @@ pub fn init_telemetry() {
         match try_init_otel() {
             Ok(provider) => {
                 let tracer = provider.tracer("quarry-edge");
-                let otel_layer = tracing_opentelemetry::layer().with_tracer(tracer);
+                // The exporter gets the same event filter as the log writer.
+                let otel_layer = tracing_opentelemetry::layer()
+                    .with_tracer(tracer)
+                    .with_filter(crate::zdr_log::event_filter());
                 tracing_subscriber::registry()
+                    .with(crate::zdr_log::ZdrMarkLayer)
                     .with(env_filter)
                     .with(fmt_layer)
                     .with(otel_layer)
@@ -52,6 +62,7 @@ pub fn init_telemetry() {
     }
 
     tracing_subscriber::registry()
+        .with(crate::zdr_log::ZdrMarkLayer)
         .with(env_filter)
         .with(fmt_layer)
         .init();

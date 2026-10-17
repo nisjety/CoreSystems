@@ -286,6 +286,9 @@ pub fn router(state: AppState) -> Router {
         .layer(middleware::from_fn(
             crate::auth::require_service_route_scope,
         ))
+        // After require_auth (which inserts the claims), before the handler: a
+        // user of a ZDR org is marked ZDR for the log from the first line.
+        .layer(middleware::from_fn(crate::zdr_log::mark_floor))
         .layer(middleware::from_fn(crate::auth::require_auth));
 
     // Cap request bodies at 1 MB. Largest legit payload is /v1/batch
@@ -301,7 +304,13 @@ pub fn router(state: AppState) -> Router {
         .merge(internal)
         .merge(protected)
         .layer(middleware::from_fn(crate::retry_after::retry_after_header))
-        .layer(TraceLayer::new_for_http())
+        // Method and path only: tower-http's default span records the full URI,
+        // query string included.
+        .layer(
+            TraceLayer::new_for_http().make_span_with(|request: &axum::http::Request<_>| {
+                crate::zdr_log::make_request_span(request)
+            }),
+        )
         .layer(body_limit)
         .layer(timeout)
         .with_state(state)

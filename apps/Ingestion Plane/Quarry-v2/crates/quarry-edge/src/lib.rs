@@ -29,6 +29,7 @@ pub mod schedule_routes;
 pub mod search_routes;
 pub mod source_registrar;
 pub mod state;
+pub mod zdr_log;
 #[cfg(test)]
 pub mod test_support;
 

@@ -177,6 +177,7 @@ pub async fn start_run(
             claims.effective_zdr_mode(Some(body.zdr || execution_tier.is_ephemeral_evidence()))
         }
     };
+    zdr.mark_current_span();
     let ttl_s = constraints.max_runtime_s.unwrap_or(120);
     let viewport = normalize_viewport(
         resume_checkpoint

@@ -19,6 +19,7 @@ pub async fn step(
     // never releases a run an action is queued on.
     let _in_flight = handle.live.in_flight_guard();
     let mut entry = handle.entry.lock().await;
+    entry.zdr.mark_current_span();
     if !caller_owns_live_run(&entry, &claims) {
         return Err(status_err(
             StatusCode::NOT_FOUND,

@@ -1,0 +1,21 @@
+[
+  "url",
+  "uri",
+  "source_url",
+  "target_url",
+  "target",
+  "query",
+  "q",
+  "selector",
+  "title",
+  "host",
+  "domain",
+  "origin",
+  "snippet",
+  "text",
+  "markdown",
+  "excerpt",
+  "error",
+  "err",
+  "reason_text"
+]

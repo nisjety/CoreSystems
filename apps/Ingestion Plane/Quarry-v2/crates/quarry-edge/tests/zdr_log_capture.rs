@@ -2,11 +2,12 @@
 //! and in usage-meter metadata.
 //!
 //! A log line is a durable copy. ZDR promises that the page an organization
-//! fetched is not kept, so a default-level log line naming the URL or the page
-//! title breaks the promise even though no database row was written. These
-//! tests run the real router with real token verification, capture every
-//! tracing event the process emits (JSON, `info` filter: what a deployed edge
-//! logs by default) and look for the probe URL.
+//! fetched is not kept, so a log line naming the URL or the page title breaks
+//! the promise even though no database row was written. These tests run the
+//! real router with real token verification and capture every tracing event the
+//! process emits, at `debug` (the most an operator can turn it up to), through
+//! the layer stack the binary builds: the ZDR mark layer and the sensitive-field
+//! event filter. Then they look for the probe URL.
 //!
 //! Own binary on purpose: the capturing subscriber is process-global.
 
@@ -14,6 +15,8 @@ use std::io::Write;
 use std::sync::{Arc, Mutex, OnceLock};
 
 use serde_json::{json, Value};
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::EnvFilter;
 
 mod support;
@@ -49,10 +52,10 @@ fn capture() -> &'static Capture {
     static CAPTURE: OnceLock<Capture> = OnceLock::new();
     CAPTURE.get_or_init(|| {
         let capture = Capture::default();
-        tracing_subscriber::fmt()
-            .json()
-            .with_env_filter(EnvFilter::new("info"))
-            .with_writer(capture.clone())
+        tracing_subscriber::registry()
+            .with(quarry_edge::zdr_log::ZdrMarkLayer)
+            .with(quarry_edge::zdr_log::harden(EnvFilter::new("debug")))
+            .with(quarry_edge::zdr_log::build_json_layer(capture.clone()))
             .init();
         capture
     })
@@ -68,7 +71,7 @@ fn probe_url() -> (String, String) {
 }
 
 #[tokio::test]
-async fn a_zdr_scrape_logs_no_url_and_no_title_at_the_default_level() {
+async fn a_zdr_scrape_logs_no_url_and_no_title_even_at_debug() {
     capture();
     let harness = Harness::start().await;
     let (url, marker) = probe_url();
@@ -163,4 +166,54 @@ async fn scrape_meter_metadata_outside_zdr_keeps_url_and_fingerprint() {
     assert_eq!(meta["zdr"], json!(false));
     assert_eq!(meta["url"], json!(url));
     assert!(meta["fingerprint"].is_string(), "{meta}");
+}
+
+#[tokio::test]
+async fn a_zdr_search_with_a_failing_provider_logs_no_query() {
+    capture();
+    let harness = Harness::start().await;
+    let secret = format!("SECRET-QUERY-{}", uuid::Uuid::new_v4().simple());
+
+    let response = harness
+        .post(&user_in_zdr_org(), "/v1/search", json!({ "query": secret }))
+        .await;
+    assert!(!response.status().is_success(), "the provider fails");
+
+    let log = logged();
+    assert!(
+        log.lines().any(|l| l.contains("search.upstream")),
+        "the failure is still logged, as a class"
+    );
+    assert!(
+        !log.contains(&secret),
+        "a ZDR search put the query in a log line:\n{}",
+        log.lines()
+            .filter(|l| l.contains(&secret))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+}
+
+#[tokio::test]
+async fn the_request_span_never_logs_the_query_string() {
+    // The access log line tower-http writes per request must not carry the
+    // query string, which can hold the URL a ZDR caller asked about. The probe
+    // rides in the query of a route that does not read it.
+    capture();
+    let harness = Harness::start().await;
+    let marker = format!("zdr-query-probe-{}", uuid::Uuid::new_v4().simple());
+
+    let response = harness
+        .post(
+            &user_in_zdr_org(),
+            &format!("/v1/search?url=https://{marker}.test/"),
+            json!({ "query": "anything" }),
+        )
+        .await;
+    drop(response);
+
+    assert!(
+        !logged().contains(&marker),
+        "a request span recorded the query string"
+    );
 }

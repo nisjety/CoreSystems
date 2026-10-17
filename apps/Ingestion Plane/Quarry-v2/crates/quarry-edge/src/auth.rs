@@ -127,7 +127,12 @@ impl Claims {
     /// a ZDR decision takes it from here, so there is one rule.
     #[must_use]
     pub fn effective_zdr(&self, requested: bool) -> bool {
-        requested || self.zdr_floor()
+        let zdr = requested || self.zdr_floor();
+        // The one place every route learns its posture: mark the request span so
+        // the log filter (see `crate::zdr_log`) drops URL-bearing events from
+        // here on. A no-op off ZDR and outside a request span.
+        ZdrMode::from(zdr).mark_current_span();
+        zdr
     }
 
     /// [`Claims::effective_zdr`] for the optional `zdr` field most request

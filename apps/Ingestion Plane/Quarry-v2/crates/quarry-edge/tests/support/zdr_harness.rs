@@ -18,11 +18,13 @@ use url::Url;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
+use quarry_core::error::{ErrorCode, QuarryError};
 use quarry_core::output::DriverKind;
 use quarry_core::QuarryResult;
 use quarry_edge::state::AppState;
 use quarry_runtime::driver::{Driver, FetchHints};
 use quarry_runtime::fetch::FetchResponse;
+use quarry_runtime::serp::{SearchOptions, SearchProvider, SearchResult};
 use quarry_runtime::{EventSink, UsageEvent, UsageMeter};
 
 const GOLDEN: &str = include_str!("../fixtures/auth-core/quarry-token-claims.golden.json");
@@ -137,6 +139,24 @@ impl UsageMeter for RecordingMeter {
     }
 }
 
+/// A search provider that always fails, with the query inside its error text,
+/// the way a provider that echoes the request would.
+struct FailingSearch;
+
+#[async_trait]
+impl SearchProvider for FailingSearch {
+    async fn search(&self, query: &str, _opts: &SearchOptions) -> QuarryResult<Vec<SearchResult>> {
+        Err(QuarryError::new(
+            ErrorCode::DriverFailed,
+            format!("provider failed for {query}"),
+        ))
+    }
+
+    fn name(&self) -> &str {
+        "failing"
+    }
+}
+
 /// Static driver serving a page whose title and body both carry the URL it
 /// was asked for, so a leak of either shows up as the URL.
 struct EchoDriver;
@@ -186,6 +206,7 @@ impl Harness {
         let usage = Arc::new(RecordingMeter::default());
         let state = AppState {
             usage: usage.clone(),
+            search: Some(Arc::new(FailingSearch)),
             ..crate::support::base_state(Arc::new(EchoDriver), EventSink::new(tx))
         };
         let app = quarry_edge::routes::router(state);
