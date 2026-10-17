@@ -238,6 +238,62 @@ impl ResultCache {
         self.del_raw(key).await;
     }
 
+    /// Delete every key matching the Redis glob `pattern`: `SCAN MATCH` in
+    /// batches of 500 and `UNLINK` (non-blocking), never `KEYS`. Returns how
+    /// many keys were removed; 0 when the cache is disabled or Redis fails
+    /// (degrade-safe, like every other operation here).
+    ///
+    /// The caller builds `pattern` from validated parts only (an org id that
+    /// passed [`crate::cache_admission::valid_org_scope`]): a glob character
+    /// in a tenant id would widen the delete to other tenants.
+    pub(crate) async fn delete_prefix(&self, pattern: &str) -> usize {
+        #[cfg(test)]
+        if let Some(mem) = &self.mem {
+            let Ok(mut map) = mem.lock() else { return 0 };
+            let before = map.len();
+            map.retain(|key, _| !glob_match(pattern, key));
+            return before - map.len();
+        }
+        let Some(mut conn) = self.conn.clone() else {
+            return 0;
+        };
+        let mut cursor: u64 = 0;
+        let mut removed = 0usize;
+        loop {
+            let reply: Result<(u64, Vec<String>), redis::RedisError> = redis::cmd("SCAN")
+                .arg(cursor)
+                .arg("MATCH")
+                .arg(pattern)
+                .arg("COUNT")
+                .arg(500)
+                .query_async(&mut conn)
+                .await;
+            let (next, keys) = match reply {
+                Ok(reply) => reply,
+                Err(error) => {
+                    tracing::warn!(%error, "result cache scan failed; purge incomplete");
+                    break;
+                }
+            };
+            if !keys.is_empty() {
+                let unlinked: Result<usize, redis::RedisError> =
+                    redis::cmd("UNLINK").arg(&keys).query_async(&mut conn).await;
+                match unlinked {
+                    Ok(count) => removed += count,
+                    Err(error) => {
+                        tracing::warn!(%error, "result cache unlink failed; purge incomplete");
+                        break;
+                    }
+                }
+            }
+            if next == 0 {
+                break;
+            }
+            cursor = next;
+        }
+        removed
+    }
+
     /// Every key held by the in-process test backend.
     #[cfg(test)]
     pub(crate) fn mem_keys(&self) -> Vec<String> {
@@ -300,6 +356,24 @@ impl ResultCache {
     }
 }
 
+/// Redis-style glob for the in-process test backend: `*` matches any run of
+/// characters (including none); everything else is literal. The real backend
+/// hands the pattern to Redis; the tests use no other glob syntax.
+#[cfg(test)]
+fn glob_match(pattern: &str, text: &str) -> bool {
+    match pattern.split_once('*') {
+        None => pattern == text,
+        Some((head, rest)) => {
+            let Some(after) = text.strip_prefix(head) else {
+                return false;
+            };
+            (0..=after.len())
+                .filter(|index| after.is_char_boundary(*index))
+                .any(|index| glob_match(rest, &after[index..]))
+        }
+    }
+}
+
 fn now_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -339,4 +413,93 @@ pub(crate) fn cache_key(namespace: &str, parts: &[&str]) -> String {
         0u8.hash(&mut hasher); // delimiter so ["a","b"] != ["ab"]
     }
     format!("verevon:gw:{namespace}:{:x}", hasher.finish())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_test_glob_matches_like_redis_for_star() {
+        assert!(glob_match(
+            "verevon:gw:*:o:org-a:*",
+            "verevon:gw:search:o:org-a:abc"
+        ));
+        assert!(!glob_match(
+            "verevon:gw:*:o:org-a:*",
+            "verevon:gw:search:o:org-ab:abc"
+        ));
+        assert!(!glob_match(
+            "verevon:gw:*:o:org-a:*",
+            "verevon:gw:search:abc"
+        ));
+        assert!(glob_match("*", "anything"));
+        assert!(glob_match("a*b*c", "aXbYc"));
+        assert!(!glob_match("a*b*c", "aXbY"));
+    }
+
+    /// The real `SCAN MATCH` + `UNLINK` path against a real Redis. Skipped
+    /// without `GATEWAY_TEST_REDIS_URL` (for example
+    /// `docker run --rm -p 6390:6379 redis:7-alpine` and
+    /// `GATEWAY_TEST_REDIS_URL=redis://127.0.0.1:6390`).
+    #[tokio::test]
+    async fn delete_prefix_removes_only_matching_keys_across_scan_batches() {
+        let Ok(url) = std::env::var("GATEWAY_TEST_REDIS_URL") else {
+            eprintln!("skipping: GATEWAY_TEST_REDIS_URL not set");
+            return;
+        };
+        let cache = ResultCache::connect(Some(&url)).await;
+        let Some(mut conn) = cache.connection() else {
+            panic!("GATEWAY_TEST_REDIS_URL is set but Redis is unreachable");
+        };
+        let run = ulid_like();
+        let org_a = format!("org-a-{run}");
+        let org_ab = format!("org-a-{run}-more");
+        let org_b = format!("org-b-{run}");
+        // More than one SCAN batch (COUNT 500) of org A's keys, in two namespaces.
+        for index in 0..1300 {
+            let namespace = if index % 2 == 0 {
+                "search"
+            } else {
+                "scrape-preview"
+            };
+            cache
+                .store(
+                    &scoped_key(namespace, &org_a, &[&index.to_string()]),
+                    &json!(index),
+                )
+                .await;
+        }
+        let keep_ab = scoped_key("search", &org_ab, &["x"]);
+        let keep_b = scoped_key("search", &org_b, &["x"]);
+        let keep_identity = cache_key("session-context", &[&run]);
+        for key in [&keep_ab, &keep_b, &keep_identity] {
+            cache.store(key, &json!(1)).await;
+        }
+
+        let removed = cache
+            .delete_prefix(&format!("verevon:gw:*:o:{org_a}:*"))
+            .await;
+        assert_eq!(removed, 1300);
+
+        for key in [&keep_ab, &keep_b, &keep_identity] {
+            let present: bool = redis::cmd("EXISTS")
+                .arg(key)
+                .query_async(&mut conn)
+                .await
+                .unwrap();
+            assert!(present, "{key} must survive");
+            cache.delete(key).await;
+        }
+        let left: Vec<String> = redis::cmd("KEYS")
+            .arg(format!("verevon:gw:*:o:{org_a}:*"))
+            .query_async(&mut conn)
+            .await
+            .unwrap();
+        assert!(left.is_empty());
+    }
+
+    fn ulid_like() -> String {
+        format!("{:x}", now_secs() ^ u64::from(std::process::id()) << 32)
+    }
 }

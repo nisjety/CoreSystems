@@ -329,6 +329,23 @@ async fn handle_message(state: &AppState, payload: &[u8]) -> Outcome {
                 .cache
                 .delete(&crate::cache::cache_key("org-zdr", &[org_id.as_str()]))
                 .await;
+            // Result entries (search results, scrape previews) are keyed by
+            // org: `verevon:gw:{namespace}:o:{org}:{hash}`. The org's own
+            // erasure removes them rather than leaving them to the 24 h expiry.
+            // An org id that is not a plain scope could widen the glob to other
+            // tenants, so it purges nothing here; the entries then expire.
+            match crate::cache_admission::valid_org_scope(&org_id) {
+                Some(scope) => {
+                    let removed = state
+                        .cache
+                        .delete_prefix(&format!("verevon:gw:*:o:{scope}:*"))
+                        .await;
+                    tracing::info!(removed, "org erasure removed result cache entries");
+                }
+                None => tracing::warn!(
+                    "org erasure: org id is not a cache scope; result cache entries left to expire"
+                ),
+            }
             Outcome::Purged {
                 scope: "organization",
                 users: 0,
@@ -433,6 +450,77 @@ mod tests {
         let payload =
             format!(r#"{{"subject_type":"organization","org_id":"{huge}"}}"#).into_bytes();
         assert!(classify(&payload).is_err());
+    }
+
+    fn org_erasure(org_id: &str) -> Vec<u8> {
+        format!(r#"{{"subject_type":"organization","subject_id":"{org_id}","org_id":"{org_id}"}}"#)
+            .into_bytes()
+    }
+
+    async fn cache_with(keys: &[String]) -> AppState {
+        let mut state = crate::tests::test_state(false);
+        state.cache = crate::cache::ResultCache::in_memory();
+        for key in keys {
+            state
+                .cache
+                .store(key, &serde_json::json!({ "k": key }))
+                .await;
+        }
+        state
+    }
+
+    #[tokio::test]
+    async fn an_org_erasure_purges_that_orgs_result_cache_entries_only() {
+        use crate::cache::{cache_key, scoped_key};
+        let a_search = scoped_key("search", "org-a", &["q"]);
+        let a_preview = scoped_key("scrape-preview", "org-a", &["https://x.test"]);
+        let b_search = scoped_key("search", "org-b", &["q"]);
+        // An org whose id merely starts with org-a's must not be touched.
+        let ab_search = scoped_key("search", "org-ab", &["q"]);
+        let identity = cache_key("session-context", &["user-1"]);
+        let zdr_a = cache_key("org-zdr", &["org-a"]);
+        let state = cache_with(&[
+            a_search,
+            a_preview,
+            b_search.clone(),
+            ab_search.clone(),
+            identity.clone(),
+            zdr_a,
+        ])
+        .await;
+
+        let outcome = handle_message(&state, &org_erasure("org-a")).await;
+        assert!(matches!(
+            outcome,
+            Outcome::Purged {
+                scope: "organization",
+                ..
+            }
+        ));
+
+        let mut left = state.cache.mem_keys();
+        left.sort();
+        let mut expected = vec![b_search, ab_search, identity];
+        expected.sort();
+        assert_eq!(
+            left, expected,
+            "only org-a's result keys and its org-zdr key go"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_org_id_with_glob_characters_purges_nothing() {
+        use crate::cache::scoped_key;
+        let keys = [
+            scoped_key("search", "org-a", &["q"]),
+            scoped_key("search", "org-b", &["q"]),
+        ];
+        let state = cache_with(&keys).await;
+        for hostile in ["*", "org-*", "org-a:*", "org?a", "org-[ab]", "org a"] {
+            let outcome = handle_message(&state, &org_erasure(hostile)).await;
+            assert!(matches!(outcome, Outcome::Purged { .. }), "{hostile}");
+        }
+        assert_eq!(state.cache.mem_keys().len(), keys.len());
     }
 
     /// A user erasure must never be widened into an org-wide purge by a missing
