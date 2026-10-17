@@ -3628,4 +3628,99 @@ mod tests {
 
         driver.release(session).await.expect("release");
     }
+
+    /// Chromium's memory by process, from `/proc` (Linux only; zeros elsewhere):
+    /// `(processes, pss_kib, rss_kib)` summed over every process named
+    /// `chrom*`. PSS counts a page shared between renderers once, which is the
+    /// number to size a container by.
+    fn chromium_memory_kib() -> (usize, u64, u64) {
+        let (mut processes, mut pss, mut rss) = (0usize, 0u64, 0u64);
+        let Ok(entries) = std::fs::read_dir("/proc") else {
+            return (0, 0, 0);
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let is_pid = entry
+                .file_name()
+                .to_str()
+                .is_some_and(|name| name.bytes().all(|b| b.is_ascii_digit()));
+            if !is_pid {
+                continue;
+            }
+            let comm = std::fs::read_to_string(path.join("comm")).unwrap_or_default();
+            if !comm.trim().starts_with("chrom") {
+                continue;
+            }
+            let Ok(rollup) = std::fs::read_to_string(path.join("smaps_rollup")) else {
+                continue;
+            };
+            let field = |name: &str| -> u64 {
+                rollup
+                    .lines()
+                    .find_map(|line| line.strip_prefix(name))
+                    .and_then(|rest| rest.split_whitespace().next())
+                    .and_then(|number| number.parse().ok())
+                    .unwrap_or(0)
+            };
+            processes += 1;
+            pss += field("Pss:");
+            rss += field("Rss:");
+        }
+        (processes, pss, rss)
+    }
+
+    /// A page with a few thousand DOM nodes and a script-held array: heavier than
+    /// a blank tab, lighter than most real sites. Memory per session on real
+    /// pages will be higher; this is the floor the run caps are sized from.
+    fn synthetic_page() -> String {
+        let rows: String = (0..3000)
+            .map(|i| format!("<div class=\"row\" style=\"padding:2px\"><span>row {i}</span> some text to lay out</div>"))
+            .collect();
+        format!(
+            "<html><body>{rows}<script>window.items = Array.from({{length: 50000}}, (_, i) => ({{i, s: 'item ' + i}}));</script></body></html>"
+        )
+    }
+
+    /// Measurement, not a regression test: prints Chromium memory with 1, 8, 16
+    /// and 32 sessions open, one tab each, on `synthetic_page`. The edge's
+    /// default run caps (`QUARRY_EDGE__MAX_CONCURRENT_RUNS` and friends) are
+    /// placeholders until this has been run on the target machine:
+    ///
+    /// `CHROMIUMOXIDE_TEST=1 CHROMIUMOXIDE_MEASURE=1 cargo test -p quarry-browser
+    /// --features chromiumoxide measure_memory_per_open_session -- --ignored --nocapture`
+    #[tokio::test]
+    #[ignore = "measurement: needs Chromium and CHROMIUMOXIDE_MEASURE=1; prints MEASURE lines"]
+    async fn measure_memory_per_open_session() {
+        if std::env::var("CHROMIUMOXIDE_TEST").ok().as_deref() != Some("1")
+            || std::env::var("CHROMIUMOXIDE_MEASURE").ok().as_deref() != Some("1")
+        {
+            eprintln!("skipping: set CHROMIUMOXIDE_TEST=1 and CHROMIUMOXIDE_MEASURE=1");
+            return;
+        }
+        let driver = live_driver();
+        let page_html = synthetic_page();
+        let mut sessions = Vec::new();
+        let (processes, pss, rss) = chromium_memory_kib();
+        eprintln!("MEASURE sessions=0 processes={processes} pss_mib={} rss_mib={}", pss / 1024, rss / 1024);
+        for target in [1usize, 8, 16, 32] {
+            while sessions.len() < target {
+                let session = live_session(&driver, &format!("measure-{}", sessions.len())).await;
+                driver.new_tab(&session, None).await.expect("blank tab");
+                let page = driver.current_page(&session).await.expect("current page");
+                page.set_content(&page_html).await.expect("inject page");
+                sessions.push(session);
+            }
+            tokio::time::sleep(Duration::from_secs(3)).await;
+            let (processes, pss, rss) = chromium_memory_kib();
+            eprintln!(
+                "MEASURE sessions={target} processes={processes} pss_mib={} rss_mib={}",
+                pss / 1024,
+                rss / 1024
+            );
+        }
+        for session in sessions {
+            driver.release(session).await.expect("release");
+        }
+    }
+
 }
