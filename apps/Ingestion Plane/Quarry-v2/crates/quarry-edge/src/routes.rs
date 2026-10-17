@@ -415,12 +415,53 @@ impl From<RenderHintsRequest> for RenderHints {
 async fn scrape(
     State(state): State<AppState>,
     Extension(claims): Extension<crate::auth::Claims>,
-    Json(req): Json<ScrapeRequest>,
-) -> Result<
-    Json<Envelope<quarry_core::scrape::ScrapeResponse>>,
-    (StatusCode, axum::response::Response),
-> {
+    body: axum::body::Bytes,
+) -> Result<axum::response::Response, (StatusCode, axum::response::Response)> {
+    scrape_with(
+        state,
+        claims,
+        &body,
+        crate::scrape_contract::ScrapeSettings::current(),
+    )
+    .await
+}
+
+/// A 400 for a request whose body or options are not acceptable: the canonical
+/// envelope with `details.fields[] {path, code, message}`.
+fn contract_error(
+    request_id: &str,
+    fields: Vec<quarry_core::scrape::FieldError>,
+) -> (StatusCode, axum::response::Response) {
+    let error = QuarryError::new(ErrorCode::BadRequest, "the request has invalid fields")
+        .with_details(serde_json::json!({ "fields": fields }));
+    (
+        StatusCode::BAD_REQUEST,
+        Json(Envelope::<()>::err(request_id, error)).into_response(),
+    )
+}
+
+/// `/v1/scrape` with its settings passed in, so tests can pick strictness.
+async fn scrape_with(
+    state: AppState,
+    claims: crate::auth::Claims,
+    body: &[u8],
+    settings: &crate::scrape_contract::ScrapeSettings,
+) -> Result<axum::response::Response, (StatusCode, axum::response::Response)> {
+    use quarry_core::scrape::{CacheState, EffectiveScrapeOptions, ScrapeFormat};
+
     let request_id = RequestKind::new().to_string();
+    let parsed = crate::scrape_contract::parse_body(body, settings, chrono::Utc::now())
+        .map_err(|fields| contract_error(&request_id, fields))?;
+    let req: ScrapeRequest = serde_json::from_value(parsed.value.clone()).map_err(|error| {
+        contract_error(
+            &request_id,
+            vec![quarry_core::scrape::FieldError::new(
+                "$",
+                "invalid_request",
+                error.to_string(),
+            )],
+        )
+    })?;
     if req.ingest.unwrap_or(false) && claims.is_service() && !claims.has_scope("scrape:write") {
         let error = QuarryError::new(
             ErrorCode::Forbidden,
@@ -434,6 +475,21 @@ async fn scrape(
     // Body flag raised (never lowered) by the token's ZDR floor: see
     // `Claims::zdr_floor`.
     let zdr = claims.effective_zdr_mode(req.zdr);
+    let resolved = parsed
+        .options
+        .clone()
+        .resolve(zdr.is_active(), &settings.limits())
+        .map_err(|fields| contract_error(&request_id, fields))?;
+    if !parsed.unknown_keys.is_empty() {
+        // Names only: a key is part of the contract, a value is the caller's.
+        tracing::warn!(
+            target: "quarry.scrape.unknown_field",
+            org_id = %claims.org_id,
+            principal = %claims.actor_id(),
+            fields = ?parsed.unknown_keys,
+            "scrape request carried fields that are not part of the contract"
+        );
+    }
     let privacy = effective_privacy(req.privacy.clone(), zdr);
     // Tenant isolation: ignore any client-supplied org_id and use the
     // verified JWT claim. The `ScrapeRequest.org_id` field is preserved
@@ -449,13 +505,43 @@ async fn scrape(
         )
     })?;
 
-    if !zdr.is_active() && should_read(&req.cache) {
+    let doc_routing = quarry_runtime::DocRouting::cached();
+    let doc_routing_label = format!("{doc_routing:?}").to_ascii_lowercase();
+    let effective = |cache_state: CacheState| {
+        EffectiveScrapeOptions::new(
+            &resolved,
+            zdr.is_active(),
+            cache_state,
+            &doc_routing_label,
+            parsed.strict,
+            &parsed.unknown_keys,
+        )
+    };
+    let finish = |data: quarry_core::scrape::ScrapeResponse| {
+        let mut response = Json(Envelope::ok(request_id.clone(), data)).into_response();
+        if !parsed.unknown_keys.is_empty() {
+            for (name, value) in crate::scrape_contract::deprecation_headers(settings) {
+                response.headers_mut().insert(name, value);
+            }
+        }
+        response
+    };
+    let unknown_warnings = crate::scrape_contract::unknown_field_warnings(&parsed.unknown_keys);
+
+    // The page cache holds the result of a default scrape: any other options
+    // (formats, selectors, an extractor) change what a result is, so they neither
+    // read nor write it. ZDR never touches it (and, with the guard, cannot).
+    let cache_allowed = resolved.is_default()
+        && quarry_core::zdr::guard(zdr, quarry_core::zdr::WriteKind::Cache).is_ok();
+    let mut cache_state = CacheState::Bypass;
+    if cache_allowed && should_read(&req.cache) {
         if let (Some(prev), Some(cache)) = (req.prev_fingerprint.as_ref(), state.cache.as_ref()) {
+            cache_state = CacheState::Miss;
             if let Some(cached) = cache.get(&org_id, prev).await {
-                return Ok(Json(Envelope::ok(
-                    request_id,
-                    quarry_core::scrape::ScrapeResponse::from_output(cached),
-                )));
+                let mut data = quarry_core::scrape::ScrapeResponse::from_output(cached);
+                data.warnings = unknown_warnings;
+                data.effective_options = Some(effective(CacheState::Hit));
+                return Ok(finish(data));
             }
         }
     }
@@ -494,14 +580,36 @@ async fn scrape(
         // a "tracked website" row for it.
         source_registrar: None,
         title_enricher: state.page_title_enricher.clone(),
-        doc_routing: quarry_runtime::DocRouting::cached(),
+        doc_routing,
     };
 
     let run_id: RunKind = quarry_core::ids::Id::new();
     let prev_fp = req.prev_fingerprint.clone();
-    match runner.run_with_inline(&run_id, &url, prev_fp).await {
+    let inline_request = quarry_runtime::InlineRequest {
+        markdown: resolved.wants(ScrapeFormat::Markdown),
+        html: resolved.wants(ScrapeFormat::Html),
+        raw_html: resolved.wants(ScrapeFormat::RawHtml),
+        max_bytes: resolved.max_inline_bytes,
+    };
+    // The caller's bound, never past the table's cap, so the typed Timeout
+    // reaches the caller before the router's own limit drops the request.
+    let run = tokio::time::timeout(
+        Duration::from_millis(resolved.timeout_ms),
+        runner.run_with_inline_request(&run_id, &url, prev_fp, &inline_request),
+    )
+    .await
+    .unwrap_or_else(|_| {
+        Err(
+            QuarryError::new(ErrorCode::Timeout, "the scrape did not finish within timeout_ms")
+                .with_details(serde_json::json!({
+                    "op": "scrape",
+                    "deadline_ms": resolved.timeout_ms,
+                })),
+        )
+    });
+    match run {
         Ok((out, inline)) => {
-            if !zdr.is_active() && should_write(&req.cache) {
+            if cache_allowed && should_write(&req.cache) {
                 if let Some(cache) = state.cache.as_ref() {
                     let ttl = effective_ttl(&req.cache, DEFAULT_TTL_SECS);
                     if let Err(e) = cache.put_with_ttl(&org_id, &out.fingerprint, &out, ttl).await {
@@ -523,15 +631,18 @@ async fn scrape(
                     scrape_meter_metadata(&claims.user_id, &out, zdr, &privacy),
                 ))
                 .await;
-            Ok(Json(Envelope::ok(
-                request_id,
-                quarry_core::scrape::ScrapeResponse {
-                    output: out,
-                    markdown: inline.markdown,
-                    truncated: inline.truncated,
-                    warnings: inline.warnings,
-                },
-            )))
+            let mut warnings = unknown_warnings;
+            warnings.extend(inline.warnings);
+            Ok(finish(quarry_core::scrape::ScrapeResponse {
+                output: out,
+                markdown: inline.markdown,
+                html: inline.html,
+                raw_html: inline.raw_html,
+                truncated: inline.truncated,
+                omitted: inline.omitted,
+                warnings,
+                effective_options: Some(effective(cache_state)),
+            }))
         }
         Err(err) => {
             crate::metrics::record_scrape(&crate::metrics::error_label(err.code));
@@ -1564,26 +1675,25 @@ mod tests {
         state: AppState,
         url: &str,
     ) -> axum::response::Response {
-        match scrape(State(state), Extension(claims_for_org("org_alpha")), Json(request_for(url)))
-            .await
-        {
-            Ok(json) => json.into_response(),
-            Err((status, json)) => (status, json).into_response(),
-        }
+        call_scrape_with(state, serde_json::json!({ "url": url })).await
     }
 
-    fn request_for(url: &str) -> ScrapeRequest {
-        ScrapeRequest {
-            url: url.to_string(),
-            prev_fingerprint: None,
-            cache: None,
-            zdr: None,
-            privacy: None,
-            signals: None,
-            ingest: None,
-            org_id: None,
-            render: None,
-            prefer_http3: false,
+    async fn call_scrape_with(
+        state: AppState,
+        body: serde_json::Value,
+    ) -> axum::response::Response {
+        call_scrape_settings(state, body, &crate::scrape_contract::ScrapeSettings::default()).await
+    }
+
+    async fn call_scrape_settings(
+        state: AppState,
+        body: serde_json::Value,
+        settings: &crate::scrape_contract::ScrapeSettings,
+    ) -> axum::response::Response {
+        let body = serde_json::to_vec(&body).expect("request body");
+        match scrape_with(state, claims_for_org("org_alpha"), &body, settings).await {
+            Ok(response) => response,
+            Err((status, response)) => (status, response).into_response(),
         }
     }
 
@@ -1655,4 +1765,255 @@ mod tests {
             .expect("envelope error message")
             .starts_with("invalid url:"));
     }
+    // ---- WS5.D: the request contract -------------------------------------
+
+    const PAGE: &[u8] = b"<html><head><title>Options page</title></head><body><main><p>Hello options world, long enough to read as content for the extractor.</p></main></body></html>";
+
+    fn page_state() -> AppState {
+        let calls = Arc::new(AtomicU32::new(0));
+        let driver = Arc::new(TestDriver::ok(DriverKind::Static, calls, PAGE));
+        let mut drivers = DriverRegistry::new(DriverKind::Static);
+        drivers.register(driver.clone());
+        test_state(driver, drivers, None)
+    }
+
+    struct SlowDriver;
+
+    #[async_trait]
+    impl Driver for SlowDriver {
+        fn kind(&self) -> DriverKind {
+            DriverKind::Static
+        }
+
+        async fn fetch(&self, _url: &Url) -> QuarryResult<FetchResponse> {
+            tokio::time::sleep(Duration::from_secs(30)).await;
+            Err(QuarryError::new(ErrorCode::DriverFailed, "unreachable"))
+        }
+    }
+
+    fn strict_settings() -> crate::scrape_contract::ScrapeSettings {
+        crate::scrape_contract::ScrapeSettings {
+            strict_validation: true,
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn a_default_request_gets_no_inline_parts_and_reports_its_options() {
+        let response = call_scrape(page_state(), "https://example.com/a").await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(response.headers().get("deprecation").is_none());
+        let body = crate::test_support::response_json(response).await;
+        let data = &body["data"];
+        for absent in ["markdown", "html", "raw_html", "truncated", "omitted", "warnings"] {
+            assert!(data.get(absent).is_none(), "{absent} must be absent on a default request");
+        }
+        // Still the same artifact references as before.
+        assert!(data["formats"]["markdown"]["artifact_id"].is_string());
+        let effective = &data["effective_options"];
+        assert_eq!(effective["formats"], serde_json::json!([]));
+        assert_eq!(effective["cache_state"], "bypass");
+        assert_eq!(effective["zdr"], false);
+        assert_eq!(effective["strict"], false);
+        assert_eq!(effective["extractor"], "readability");
+        assert_eq!(effective["timeout_ms"], 55_000);
+    }
+
+    #[tokio::test]
+    async fn formats_markdown_returns_top_level_markdown_and_keeps_the_refs() {
+        let response = call_scrape_with(
+            page_state(),
+            serde_json::json!({ "url": "https://example.com/a", "formats": ["markdown"] }),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = crate::test_support::response_json(response).await;
+        let data = &body["data"];
+        assert!(data["markdown"].as_str().unwrap().contains("Hello options world"));
+        assert!(data["formats"]["markdown"]["artifact_id"].is_string(), "refs are unchanged");
+        assert!(data.get("html").is_none() && data.get("raw_html").is_none());
+        assert_eq!(data["effective_options"]["formats"], serde_json::json!(["markdown"]));
+        // Non-default options never touch the page cache.
+        assert_eq!(data["effective_options"]["cache_state"], "bypass");
+    }
+
+    #[tokio::test]
+    async fn html_and_raw_html_return_the_fetched_document_inline() {
+        let response = call_scrape_with(
+            page_state(),
+            serde_json::json!({ "url": "https://example.com/a", "formats": ["html", "rawHtml"] }),
+        )
+        .await;
+        let body = crate::test_support::response_json(response).await;
+        let data = &body["data"];
+        assert!(data["html"].as_str().unwrap().contains("<title>Options page</title>"));
+        assert_eq!(data["html"], data["raw_html"], "the same bytes until a cleaning stage exists");
+        assert!(data.get("markdown").is_none(), "markdown only when asked for");
+    }
+
+    #[tokio::test]
+    async fn an_over_cap_field_is_omitted_outside_zdr_and_truncated_under_it() {
+        // Not ZDR: the field is left out and named; the stored artifact has it.
+        let response = call_scrape_with(
+            page_state(),
+            serde_json::json!({ "url": "https://example.com/a", "formats": ["markdown"], "max_inline_bytes": 10 }),
+        )
+        .await;
+        let body = crate::test_support::response_json(response).await;
+        let data = &body["data"];
+        assert!(data.get("markdown").is_none());
+        assert_eq!(data["omitted"], serde_json::json!(["markdown"]));
+        assert!(data["formats"]["markdown"]["artifact_id"].is_string());
+
+        // ZDR: nothing is stored, so the text is cut instead, on a character boundary.
+        let response = call_scrape_with(
+            page_state(),
+            serde_json::json!({ "url": "https://example.com/a", "zdr": true, "max_inline_bytes": 10 }),
+        )
+        .await;
+        let body = crate::test_support::response_json(response).await;
+        let data = &body["data"];
+        assert!(data["markdown"].as_str().unwrap().len() <= 10);
+        assert_eq!(data["truncated"], serde_json::json!(["markdown"]));
+        assert!(data.get("omitted").is_none());
+        assert!(data["formats"]["markdown"].is_null(), "ZDR stores no artifact");
+        assert_eq!(data["effective_options"]["zdr"], true);
+    }
+
+    #[tokio::test]
+    async fn zdr_with_no_formats_defaults_to_inline_markdown() {
+        let response = call_scrape_with(
+            page_state(),
+            serde_json::json!({ "url": "https://example.com/a", "zdr": true }),
+        )
+        .await;
+        let body = crate::test_support::response_json(response).await;
+        assert!(body["data"]["markdown"].as_str().unwrap().contains("Hello options world"));
+        assert_eq!(body["data"]["effective_options"]["formats"], serde_json::json!(["markdown"]));
+    }
+
+    #[tokio::test]
+    async fn lenient_mode_warns_about_unknown_fields_and_says_so_in_headers() {
+        let settings = crate::scrape_contract::ScrapeSettings {
+            strict_after: Some(chrono::DateTime::parse_from_rfc3339("2099-01-01T00:00:00Z").unwrap().into()),
+            ..Default::default()
+        };
+        let response = call_scrape_settings(
+            page_state(),
+            serde_json::json!({ "url": "https://example.com/a", "formats": ["markdown"], "maxPages": 1 }),
+            &settings,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers().get("deprecation").unwrap(), "true");
+        assert_eq!(response.headers().get("sunset").unwrap(), "Thu, 01 Jan 2099 00:00:00 GMT");
+        let body = crate::test_support::response_json(response).await;
+        let data = &body["data"];
+        assert!(data["markdown"].is_string(), "the known option still worked");
+        assert_eq!(data["warnings"][0]["code"], "unknown_field");
+        assert_eq!(data["warnings"][0]["field"], "maxPages");
+        assert_eq!(data["effective_options"]["ignored_fields"], serde_json::json!(["maxPages"]));
+    }
+
+    #[tokio::test]
+    async fn strict_mode_rejects_unknown_fields_with_their_paths() {
+        let response = call_scrape_settings(
+            page_state(),
+            serde_json::json!({ "url": "https://example.com/a", "maxPages": 1 }),
+            &strict_settings(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = crate::test_support::response_json(response).await;
+        assert_eq!(body["error"]["code"], "BAD_REQUEST");
+        assert_eq!(body["error"]["details"]["fields"][0]["path"], "maxPages");
+        assert_eq!(body["error"]["details"]["fields"][0]["code"], "unknown_field");
+    }
+
+    #[tokio::test]
+    async fn a_reserved_field_is_rejected_in_lenient_mode_too() {
+        for key in ["skipTlsVerification", "proxy", "headers", "stealth"] {
+            let response = call_scrape_with(
+                page_state(),
+                serde_json::json!({ "url": "https://example.com/a", key: true }),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{key}");
+            let body = crate::test_support::response_json(response).await;
+            assert_eq!(body["error"]["details"]["fields"][0]["code"], "reserved_field", "{key}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_malformed_body_and_a_bad_option_return_the_envelope_with_field_paths() {
+        let calls = Arc::new(AtomicU32::new(0));
+        let driver = Arc::new(TestDriver::ok(DriverKind::Static, calls, PAGE));
+        let state = test_state(driver, DriverRegistry::new(DriverKind::Static), None);
+
+        let response = scrape_with(
+            state.clone(),
+            claims_for_org("org_alpha"),
+            b"{not json",
+            &crate::scrape_contract::ScrapeSettings::default(),
+        )
+        .await
+        .map(|response| response)
+        .unwrap_or_else(|(status, response)| (status, response).into_response());
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = crate::test_support::response_json(response).await;
+        assert_eq!(body["error"]["details"]["fields"][0]["code"], "invalid_json");
+        assert_eq!(body["data"], serde_json::Value::Null);
+
+        let response = call_scrape_with(
+            state.clone(),
+            serde_json::json!({ "url": "https://example.com/a", "formats": ["markdown", "pdf"], "timeout_ms": 5 }),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = crate::test_support::response_json(response).await;
+        let fields = body["error"]["details"]["fields"].as_array().unwrap();
+        assert_eq!(fields[0]["path"], "formats[1]");
+        assert_eq!(fields[0]["code"], "unsupported_format");
+
+        // A missing url is a field error too, not axum's plain rejection.
+        let response = call_scrape_with(state, serde_json::json!({ "formats": ["markdown"] })).await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = crate::test_support::response_json(response).await;
+        assert_eq!(body["error"]["details"]["fields"][0]["code"], "invalid_request");
+    }
+
+    #[tokio::test]
+    async fn timeout_ms_expiry_is_a_typed_504() {
+        let slow = Arc::new(SlowDriver);
+        let mut drivers = DriverRegistry::new(DriverKind::Static);
+        drivers.register(slow.clone());
+        let state = test_state(slow, drivers, None);
+        let started = std::time::Instant::now();
+        let response = call_scrape_with(
+            state,
+            serde_json::json!({ "url": "https://example.com/slow", "timeout_ms": 1000 }),
+        )
+        .await;
+        assert!(started.elapsed() < Duration::from_secs(10));
+        assert_eq!(response.status(), StatusCode::GATEWAY_TIMEOUT);
+        let body = crate::test_support::response_json(response).await;
+        assert_eq!(body["error"]["code"], "TIMEOUT");
+        assert_eq!(body["error"]["details"]["op"], "scrape");
+        assert_eq!(body["error"]["details"]["deadline_ms"], 1000);
+    }
+
+    #[tokio::test]
+    async fn options_with_no_effect_yet_are_named_in_ignored_fields() {
+        let response = call_scrape_with(
+            page_state(),
+            serde_json::json!({ "url": "https://example.com/a", "exclude_tags": [".nav"], "only_main_content": false }),
+        )
+        .await;
+        let body = crate::test_support::response_json(response).await;
+        assert_eq!(
+            body["data"]["effective_options"]["ignored_fields"],
+            serde_json::json!(["only_main_content", "exclude_tags"])
+        );
+    }
+
 }

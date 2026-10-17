@@ -4391,6 +4391,65 @@ components:
           type: string
           nullable: true
           description: Organization ID for Data Plane ingest
+        formats:
+          type: array
+          description: >-
+            What to return inline besides the artifact references. `markdown`,
+            `html` (the document as fetched, the same bytes as `rawHtml` until an
+            HTML-cleaning stage exists), `rawHtml`, `links` and `metadata` (the
+            last two are in every response already). Naming formats makes the
+            request non-default: it neither reads nor writes the page cache. Under
+            ZDR the default is `["markdown"]`. `json`, `screenshot`, `summary`,
+            `question` and `highlights` are reserved and rejected with
+            `reserved_format`.
+          items:
+            type: string
+            enum: [markdown, html, rawHtml, links, metadata]
+        only_main_content:
+          type: boolean
+          default: true
+          description: Accepted and validated; not applied yet (reported in effective_options.ignored_fields). camelCase alias onlyMainContent.
+        include_tags:
+          type: array
+          maxItems: 32
+          items:
+            type: string
+            maxLength: 256
+          description: Accepted and validated; not applied yet. Alias includeTags.
+        exclude_tags:
+          type: array
+          maxItems: 32
+          items:
+            type: string
+            maxLength: 256
+          description: Accepted and validated; not applied yet. Alias excludeTags.
+        remove_base64_images:
+          type: boolean
+          default: false
+          description: Accepted and validated; not applied yet. Alias removeBase64Images.
+        extractor:
+          type: string
+          enum: [readability, clean_full, raw]
+          default: readability
+          description: Only readability runs today; the others are accepted and reported as ignored.
+        timeout_ms:
+          type: integer
+          minimum: 1000
+          maximum: 55000
+          default: 55000
+          description: Upper bound for the whole scrape; on expiry the response is a 504 TIMEOUT with details.op = scrape. Alias timeoutMs.
+        max_inline_bytes:
+          type: integer
+          minimum: 1
+          maximum: 8388608
+          default: 1048576
+          description: Cap for each inline field. Over it, a non-ZDR field is left out (listed in omitted), a ZDR field is cut (listed in truncated). Alias maxInlineBytes.
+      description: >-
+        Fields not listed here are unknown: ignored with an unknown_field warning
+        (and Deprecation and Sunset headers) unless the edge runs strict, where they
+        are a 400. skipTlsVerification, skip_tls_verification, proxy, proxyUrl,
+        headers, mobile and stealth are always a 400 reserved_field. A bad value is
+        a 400 with details.fields[] {path, code, message}.
     CrawlRequest:
       type: object
       required:
@@ -4758,10 +4817,26 @@ components:
         properties:
           markdown:
             type: string
-            description: Inline text; present only when nothing is stored (ZDR). Capped at 1 MiB.
+            description: Inline text. Present when the markdown format was asked for, and by default under ZDR (nothing is stored). Capped at max_inline_bytes.
+          html:
+            type: string
+            description: The document as fetched, when the html format was asked for. Not available for a PDF or DOCX.
+          raw_html:
+            type: string
+            description: The document as fetched, when the rawHtml format was asked for.
           truncated:
-            type: boolean
-            description: markdown was cut at the inline cap.
+            type: array
+            items:
+              type: string
+            description: Inline fields cut at max_inline_bytes (ZDR only).
+          omitted:
+            type: array
+            items:
+              type: string
+            description: Inline fields left out for exceeding max_inline_bytes (not ZDR); read the matching formats.* artifact.
+          effective_options:
+            type: object
+            description: The options the response was produced with, including ignored_fields, cache_state (hit, miss, bypass), doc_routing and strict.
           warnings:
             type: array
             items:
@@ -4772,9 +4847,12 @@ components:
               properties:
                 code:
                   type: string
-                  description: e.g. document_has_no_text_layer, document_text_truncated
+                  description: e.g. unknown_field, document_has_no_text_layer, document_text_truncated, format_unavailable_for_documents
                 message:
                   type: string
+                field:
+                  type: string
+                  description: The request field a warning is about (unknown_field).
     Envelope_ScrapeResponse:
       type: object
       required:

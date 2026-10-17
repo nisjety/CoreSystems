@@ -55,6 +55,7 @@ mod retry_after;
 mod routes;
 mod run_limits;
 mod schedule_routes;
+mod scrape_contract;
 mod search_routes;
 mod source_registrar;
 mod state;

@@ -19,7 +19,7 @@ runtime dep for us (Rust/Go), but its *practice* — read source, not marketing 
 ### Firecrawl (closest competitor: scrape/crawl/map/search/extract/agent/batch)
 | Capability | Quarry-v2 today | Verdict | Action |
 |---|---|---|---|
-| scrape → markdown/json/screenshot/links/html/summary | full (quarry-transform + AiFormatRunner) | ✅ | — |
+| scrape → markdown/html/rawHtml/links/metadata inline (`formats[]`) | markdown, html, rawHtml, links and metadata ship; json, screenshot, summary, question and highlights are reserved and rejected until they exist | partial | json, screenshot and summary formats on `/v1/scrape` |
 | actions (click/scroll/write/wait/press) before extract | ActionRuntime, 13 variants | ✅ | — |
 | batch scrape | `/v1/batch` | ✅ | — |
 | change tracking | change_history + baseline store + `/v1/change/*` | ✅ | — |

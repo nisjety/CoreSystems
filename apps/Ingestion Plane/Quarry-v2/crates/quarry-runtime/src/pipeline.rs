@@ -38,11 +38,63 @@ use crate::source_registrar::SourceRegistrar;
 /// the extracted text is handed back inline instead.
 #[derive(Debug, Clone, Default)]
 pub struct InlineParts {
-    /// The extracted text. `Some` only when this run stores nothing (ZDR).
+    /// The extracted text. `Some` when it was asked for, and by default when
+    /// this run stores nothing (ZDR).
     pub markdown: Option<String>,
-    /// `markdown` was cut at the inline cap.
-    pub truncated: bool,
+    /// The fetched document as text, when asked for. Not for a document
+    /// (PDF, DOCX): its bytes are not text.
+    pub html: Option<String>,
+    pub raw_html: Option<String>,
+    /// Fields cut at the inline cap (ZDR only: nothing stored to point at).
+    pub truncated: Vec<String>,
+    /// Fields left out for being over the cap (not ZDR: read the artifact).
+    pub omitted: Vec<String>,
     pub warnings: Vec<quarry_core::scrape::ScrapeWarning>,
+}
+
+/// What a caller wants returned inline, and how much.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InlineRequest {
+    pub markdown: bool,
+    pub html: bool,
+    pub raw_html: bool,
+    pub max_bytes: usize,
+}
+
+impl InlineRequest {
+    /// What a run returned before request options existed: the text under ZDR,
+    /// nothing otherwise, capped at the default.
+    pub fn default_for(zdr: ZdrMode) -> Self {
+        Self {
+            markdown: zdr.is_active(),
+            html: false,
+            raw_html: false,
+            max_bytes: quarry_core::scrape::DEFAULT_INLINE_MAX_BYTES,
+        }
+    }
+}
+
+/// Put `text` inline if it fits the cap. Over the cap, ZDR cuts it on a
+/// character boundary (and says so); otherwise the field is left out and named,
+/// because a stored artifact holds it.
+fn offer_inline(
+    field: &str,
+    text: &str,
+    max_bytes: usize,
+    zdr: bool,
+    slot: &mut Option<String>,
+    truncated: &mut Vec<String>,
+    omitted: &mut Vec<String>,
+) {
+    if text.len() <= max_bytes {
+        *slot = Some(text.to_owned());
+    } else if zdr {
+        let (cut, _) = quarry_core::scrape::truncate_on_char_boundary(text, max_bytes);
+        *slot = Some(cut);
+        truncated.push(field.to_owned());
+    } else {
+        omitted.push(field.to_owned());
+    }
 }
 
 /// What the scrape pipeline does with the kind of body it fetched
@@ -375,8 +427,25 @@ impl PageRunner {
         requested_url: &Url,
         prev_fingerprint: Option<String>,
     ) -> QuarryResult<(NormalizedOutput, InlineParts)> {
+        self.run_with_inline_request(
+            run_id,
+            requested_url,
+            prev_fingerprint,
+            &InlineRequest::default_for(self.zdr),
+        )
+        .await
+    }
+
+    /// [`Self::run_with_inline`] returning exactly the inline parts asked for.
+    pub async fn run_with_inline_request(
+        &self,
+        run_id: &RunKind,
+        requested_url: &Url,
+        prev_fingerprint: Option<String>,
+        inline_request: &InlineRequest,
+    ) -> QuarryResult<(NormalizedOutput, InlineParts)> {
         match self
-            .run_inner(run_id, requested_url, prev_fingerprint)
+            .run_inner(run_id, requested_url, prev_fingerprint, inline_request)
             .await
         {
             Ok(parts) => Ok(parts),
@@ -401,6 +470,7 @@ impl PageRunner {
         run_id: &RunKind,
         requested_url: &Url,
         prev_fingerprint: Option<String>,
+        inline_request: &InlineRequest,
     ) -> QuarryResult<(NormalizedOutput, InlineParts)> {
         // Preflight
         let verdict = self.security.preflight(requested_url).await;
@@ -1064,26 +1134,69 @@ impl PageRunner {
         // no extractable text, or one cut at the parser cap, says so.
         let inline = {
             let mut parts = InlineParts::default();
-            if self.zdr.is_active() {
-                let (text, truncated) = quarry_core::scrape::truncate_on_char_boundary(
+            let zdr = self.zdr.is_active();
+            let cap = inline_request.max_bytes;
+            if inline_request.markdown {
+                offer_inline(
+                    "markdown",
                     &md,
-                    quarry_core::scrape::DEFAULT_INLINE_MAX_BYTES,
+                    cap,
+                    zdr,
+                    &mut parts.markdown,
+                    &mut parts.truncated,
+                    &mut parts.omitted,
                 );
-                parts.markdown = Some(text);
-                parts.truncated = truncated;
+            }
+            if is_doc {
+                // A document's bytes are not text; its extracted text is the
+                // markdown format.
+                for (wanted, field) in [(inline_request.html, "html"), (inline_request.raw_html, "raw_html")] {
+                    if wanted {
+                        parts.omitted.push(field.to_owned());
+                    }
+                }
+                if inline_request.html || inline_request.raw_html {
+                    parts.warnings.push(quarry_core::scrape::ScrapeWarning::new(
+                        "format_unavailable_for_documents",
+                        "html and rawHtml are not available for a PDF or DOCX; use markdown",
+                    ));
+                }
+            } else {
+                if inline_request.html {
+                    offer_inline(
+                        "html",
+                        &body_text,
+                        cap,
+                        zdr,
+                        &mut parts.html,
+                        &mut parts.truncated,
+                        &mut parts.omitted,
+                    );
+                }
+                if inline_request.raw_html {
+                    offer_inline(
+                        "raw_html",
+                        &body_text,
+                        cap,
+                        zdr,
+                        &mut parts.raw_html,
+                        &mut parts.truncated,
+                        &mut parts.omitted,
+                    );
+                }
             }
             if let Some(parsed) = &document {
                 if parsed.truncated {
-                    parts.warnings.push(quarry_core::scrape::ScrapeWarning {
-                        code: "document_text_truncated".into(),
-                        message: "the document's text was cut at the parser's output cap".into(),
-                    });
+                    parts.warnings.push(quarry_core::scrape::ScrapeWarning::new(
+                        "document_text_truncated",
+                        "the document's text was cut at the parser's output cap",
+                    ));
                 }
                 if md.trim().is_empty() {
-                    parts.warnings.push(quarry_core::scrape::ScrapeWarning {
-                        code: "document_has_no_text_layer".into(),
-                        message: "no text could be extracted; the file may be a scan (OCR is not applied)".into(),
-                    });
+                    parts.warnings.push(quarry_core::scrape::ScrapeWarning::new(
+                        "document_has_no_text_layer",
+                        "no text could be extracted; the file may be a scan (OCR is not applied)",
+                    ));
                 }
             }
             parts
@@ -2200,7 +2313,7 @@ mod content_routing_tests {
         assert!(listed.items.is_empty(), "ZDR must write no artifact");
         let text = inline.markdown.expect("inline text under ZDR");
         assert!(text.contains("Hemmelig dokument"), "{text}");
-        assert!(!inline.truncated);
+        assert!(inline.truncated.is_empty());
     }
 
     #[tokio::test]
@@ -2273,4 +2386,105 @@ mod content_routing_tests {
         assert!(error.contains("QUARRY_EDGE__DOC_ROUTING"), "{error}");
         assert_eq!(DocRouting::default(), DocRouting::Shadow);
     }
+    // ---- WS5.D: what a caller can ask to get inline -------------------------
+
+    fn want(markdown: bool, html: bool, raw_html: bool, max_bytes: usize) -> InlineRequest {
+        InlineRequest {
+            markdown,
+            html,
+            raw_html,
+            max_bytes,
+        }
+    }
+
+    #[tokio::test]
+    async fn html_and_raw_html_come_back_only_when_asked_for() {
+        let (runner, _rx) = runner_for(DocRouting::Off, 200, Some("text/html"), HTML.as_bytes());
+        let run_id: RunKind = quarry_core::ids::Id::new();
+        let (_, none) = runner
+            .run_with_inline_request(&run_id, &url(), None, &want(false, false, false, 1 << 20))
+            .await
+            .unwrap();
+        assert!(none.markdown.is_none() && none.html.is_none() && none.raw_html.is_none());
+        assert!(none.truncated.is_empty() && none.omitted.is_empty());
+
+        let (_, both) = runner
+            .run_with_inline_request(&run_id, &url(), None, &want(true, true, true, 1 << 20))
+            .await
+            .unwrap();
+        assert!(both.markdown.unwrap().contains("En vanlig nettside"));
+        assert_eq!(both.html.as_deref(), Some(HTML));
+        assert_eq!(both.raw_html.as_deref(), Some(HTML));
+    }
+
+    #[tokio::test]
+    async fn an_over_cap_field_is_omitted_outside_zdr_and_cut_under_it() {
+        let (runner, _rx) = runner_for(DocRouting::Off, 200, Some("text/html"), HTML.as_bytes());
+        let run_id: RunKind = quarry_core::ids::Id::new();
+        let (out, inline) = runner
+            .run_with_inline_request(&run_id, &url(), None, &want(true, true, false, 8))
+            .await
+            .unwrap();
+        assert!(inline.markdown.is_none() && inline.html.is_none());
+        assert_eq!(inline.omitted, vec!["markdown", "html"]);
+        assert!(out.formats.markdown.is_some(), "the stored artifact still holds it");
+
+        let (mut zdr, _rx) = runner_for(DocRouting::Off, 200, Some("text/html"), HTML.as_bytes());
+        zdr.zdr = ZdrMode::On;
+        let (_, inline) = zdr
+            .run_with_inline_request(&run_id, &url(), None, &want(true, true, false, 8))
+            .await
+            .unwrap();
+        assert!(inline.markdown.as_ref().unwrap().len() <= 8);
+        assert!(inline.html.as_ref().unwrap().len() <= 8);
+        assert_eq!(inline.truncated, vec!["markdown", "html"]);
+        assert!(inline.omitted.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_multibyte_character_straddling_the_cap_is_cut_whole_not_split() {
+        // "æøå" is six bytes; a cap of 5 must keep two characters, not panic.
+        let page = "<html><body><p>æøåæøå</p></body></html>";
+        let (mut runner, _rx) = runner_for(DocRouting::Off, 200, Some("text/html"), page.as_bytes());
+        runner.zdr = ZdrMode::On;
+        let run_id: RunKind = quarry_core::ids::Id::new();
+        let (_, inline) = runner
+            .run_with_inline_request(&run_id, &url(), None, &want(false, false, true, 5))
+            .await
+            .unwrap();
+        let cut = inline.raw_html.expect("cut raw html");
+        assert!(cut.len() <= 5 && std::str::from_utf8(cut.as_bytes()).is_ok());
+        assert_eq!(inline.truncated, vec!["raw_html"]);
+    }
+
+    #[tokio::test]
+    async fn a_document_has_markdown_inline_but_no_html() {
+        let pdf = minimal_pdf("Dokumenttekst");
+        let (runner, _rx) = runner_for(DocRouting::On, 200, Some("application/pdf"), &pdf);
+        let run_id: RunKind = quarry_core::ids::Id::new();
+        let (_, inline) = runner
+            .run_with_inline_request(&run_id, &url(), None, &want(true, true, true, 1 << 20))
+            .await
+            .expect("pdf parsed");
+        assert!(inline.markdown.unwrap().contains("Dokumenttekst"));
+        assert!(inline.html.is_none() && inline.raw_html.is_none());
+        assert_eq!(inline.omitted, vec!["html", "raw_html"]);
+        assert!(inline
+            .warnings
+            .iter()
+            .any(|warning| warning.code == "format_unavailable_for_documents"));
+    }
+
+    #[tokio::test]
+    async fn the_default_inline_request_is_the_old_behaviour() {
+        assert_eq!(
+            InlineRequest::default_for(ZdrMode::On),
+            want(true, false, false, quarry_core::scrape::DEFAULT_INLINE_MAX_BYTES)
+        );
+        assert_eq!(
+            InlineRequest::default_for(ZdrMode::Off),
+            want(false, false, false, quarry_core::scrape::DEFAULT_INLINE_MAX_BYTES)
+        );
+    }
+
 }

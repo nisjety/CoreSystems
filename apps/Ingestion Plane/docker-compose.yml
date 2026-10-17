@@ -28,6 +28,13 @@ services:
     stop_grace_period: 45s
     environment:
       QUARRY_EDGE__DRAIN_DEADLINE_S: "${QUARRY_EDGE_DRAIN_DEADLINE_S:-30}"
+      # /v1/scrape request contract (docs/CONTRACTS.md 9.1): unknown keys are
+      # ignored with a warning (lenient) until strict is chosen, either now or from
+      # a date; the inline cap is per field; 0 disables the new option keys.
+      QUARRY_EDGE__SCRAPE_REQUEST_VALIDATION: "${QUARRY_EDGE_SCRAPE_REQUEST_VALIDATION:-lenient}"
+      QUARRY_EDGE__SCRAPE_STRICT_AFTER: "${QUARRY_EDGE_SCRAPE_STRICT_AFTER:-}"
+      QUARRY_EDGE__SCRAPE_INLINE_MAX_BYTES: "${QUARRY_EDGE_SCRAPE_INLINE_MAX_BYTES:-1048576}"
+      QUARRY_EDGE__SCRAPE_OPTIONS_ENABLED: "${QUARRY_EDGE_SCRAPE_OPTIONS_ENABLED:-1}"
       # Caps on live runs and the sweeper that releases idle ones (docs/RUNBOOKS.md,
       # "Run caps and the run sweeper"). The caps are live from the first deploy; the
       # sweeper starts in dry run, so it only logs would_expire. Review the log for a
