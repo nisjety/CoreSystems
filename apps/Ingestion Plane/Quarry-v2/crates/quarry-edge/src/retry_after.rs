@@ -35,8 +35,8 @@ pub async fn retry_after_header(request: Request, next: Next) -> Response {
     let (mut parts, body) = response.into_parts();
     let bytes = match to_bytes(body, MAX_REFUSAL_BODY).await {
         Ok(bytes) => bytes,
-        Err(error) => {
-            tracing::warn!(%error, "refusal body unreadable; Retry-After not added");
+        Err(_) => {
+            tracing::warn!("refusal body unreadable; Retry-After not added");
             return Response::from_parts(parts, Body::empty());
         }
     };

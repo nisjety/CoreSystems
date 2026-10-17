@@ -295,6 +295,7 @@ impl LocalIndexWriteback {
     pub fn submit(&self, page: IndexedPage) -> WritebackDecision {
         let decision = self.decide(&page);
         if decision != WritebackDecision::Index {
+            // zdr-log-ok: log_url() is None while ZDR is active
             tracing::debug!(
                 url = log_url(self.zdr, &page.url),
                 decision = ?decision,
@@ -653,6 +654,7 @@ impl PageRunner {
             declared_charset,
         );
         if !body_decoded.from_header && body_decoded.encoding != "UTF-8" {
+            // zdr-log-ok: log_url() is None while ZDR is active
             tracing::debug!(
                 url = log_url(self.zdr, resp.final_url.as_str()),
                 detected = body_decoded.encoding,
@@ -779,6 +781,7 @@ impl PageRunner {
                 match serde_json::to_value(&branding) {
                     Ok(v) => Some(v),
                     Err(e) => {
+                        // zdr-log-ok: log_url() is None while ZDR is active
                         tracing::warn!(
                             error = %e,
                             url = log_url(self.zdr, resp.final_url.as_str()),
@@ -1033,6 +1036,7 @@ impl PageRunner {
                         "page extracted"
                     );
                 } else {
+                    // zdr-log-ok: the non-ZDR branch of the `if self.zdr.is_active()` above
                     tracing::info!(
                         url = %resp.final_url,
                         driver = ?resp.served_by,
@@ -1326,7 +1330,6 @@ impl PageRunner {
                                             {
                                                 tracing::warn!(
                                                     error = %e,
-                                                    url = %root,
                                                     "tracked-source registration failed (non-fatal)"
                                                 );
                                             }
