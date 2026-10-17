@@ -272,3 +272,9 @@ An expired run emits `agent.expired` (`reason`, `idle_s`, `age_s`; no URL). A no
 The edge sets `Retry-After` itself on a 429 or 503 whose body carries `retry_after_seconds` (`crates/quarry-edge/src/retry_after.rs`). A step or tab call on a run the sweeper released answers 404 with `details.reason = run_not_live`; when the caller owns a non-ZDR, still-active checkpoint it adds `resumable: true` and `resume_run_id` (anyone else, and every ZDR run, gets the plain 404).
 
 Known gap: the lifecycle timeline item does not name `system` as the initiator.
+
+## Browser viewport and page hygiene
+
+A lease's viewport is applied to each page when it opens, never to the browser: one Chromium serves every session, and a lease that asks for another size no longer closes it under the others (it used to relaunch the browser and drop every other session's tabs). A lease with no viewport gets `QUARRY_BROWSER_DEFAULT_VIEWPORT` (`WxH`, default `1280x800`, device scale 1, desktop). **Rollout note:** Model Plane runs used to render at 800x600, the old browser-wide default; set `QUARRY_BROWSER_DEFAULT_VIEWPORT=800x600` to keep that until the larger default (more content per screenshot, different breakpoints, bigger PNGs) has been accepted. A mobile lease also gets touch emulation; a page of a mobile lease lays out at the device width only if it says `width=device-width`, like any mobile page.
+
+Each page is also focused and marked active (`Emulation.setFocusEmulationEnabled`, `Page.setWebLifecycleState`) so a page in a background context does not stall. `QUARRY_BROWSER_PAGE_HYGIENE=off` skips those two calls if one misbehaves on a Chromium update; the size is always applied, and a failure to apply it fails the tab open with `details.reason = viewport_emulation_failed`. The log line `browser slot launched` (with `generation`) appears once per browser launch, so more than one per process start means the browser died and was replaced.

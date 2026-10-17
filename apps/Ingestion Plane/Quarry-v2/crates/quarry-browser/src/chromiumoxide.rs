@@ -17,6 +17,9 @@ use ::chromiumoxide::cdp::browser_protocol::browser::{
 use ::chromiumoxide::cdp::browser_protocol::dom::{
     BackendNodeId, ResolveNodeParams, SetFileInputFilesParams,
 };
+use ::chromiumoxide::cdp::browser_protocol::emulation::{
+    SetDeviceMetricsOverrideParams, SetFocusEmulationEnabledParams, SetTouchEmulationEnabledParams,
+};
 use ::chromiumoxide::cdp::browser_protocol::fetch::{
     ContinueRequestParams, EnableParams as FetchEnableParams, EventRequestPaused, FailRequestParams,
 };
@@ -34,6 +37,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use serde_json::json;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
@@ -42,7 +46,8 @@ use ::chromiumoxide::cdp::browser_protocol::page::{
     CaptureScreenshotFormat, CaptureScreenshotParamsBuilder, EventJavascriptDialogOpening,
     EventLifecycleEvent, EventScreencastFrame, FrameId, GetFrameTreeParams,
     HandleJavaScriptDialogParams, PrintToPdfParams, ScreencastFrameAckParams,
-    StartScreencastFormat, StartScreencastParams, StopScreencastParams,
+    SetWebLifecycleStateParams, SetWebLifecycleStateState, StartScreencastFormat,
+    StartScreencastParams, StopScreencastParams,
 };
 use ::chromiumoxide::cdp::js_protocol::runtime::{
     CallArgument, CallFunctionOnParams, EventConsoleApiCalled, ReleaseObjectParams,
@@ -117,7 +122,10 @@ pub struct ChromiumoxideDriver {
     browser: Arc<Mutex<Option<Browser>>>,
     pages: Arc<Mutex<HashMap<String, SessionPages>>>,
     handler: Arc<Mutex<Option<JoinHandle<()>>>>,
-    active_viewport: Arc<Mutex<Option<BrowserViewport>>>,
+    /// How many times this driver has launched a browser. A launch is rare
+    /// and clears per-browser state, so tests assert it stays at one while
+    /// leases with different viewports come and go.
+    launches: Arc<AtomicUsize>,
     page_epoch: Arc<Mutex<u64>>,
     live_frame_cache: Arc<Mutex<Option<CachedLiveFrame>>>,
     devtools_events: Arc<Mutex<HashMap<String, Vec<BrowserDevtoolsEvent>>>>,
@@ -156,7 +164,7 @@ impl ChromiumoxideDriver {
             browser: Arc::new(Mutex::new(None)),
             pages: Arc::new(Mutex::new(HashMap::new())),
             handler: Arc::new(Mutex::new(None)),
-            active_viewport: Arc::new(Mutex::new(None)),
+            launches: Arc::new(AtomicUsize::new(0)),
             page_epoch: Arc::new(Mutex::new(0)),
             live_frame_cache: Arc::new(Mutex::new(None)),
             devtools_events: Arc::new(Mutex::new(HashMap::new())),
@@ -191,17 +199,22 @@ impl ChromiumoxideDriver {
         self
     }
 
-    async fn ensure_browser(&self, viewport: Option<BrowserViewport>) -> QuarryResult<()> {
+    /// How many browsers this driver has launched (tests only).
+    #[cfg(test)]
+    fn launch_count(&self) -> usize {
+        self.launches.load(Ordering::SeqCst)
+    }
+
+    /// Launch the browser if there is none. A viewport is never a reason to
+    /// launch: it is applied per page (see `apply_page_hygiene`), so a lease
+    /// that asks for a different size cannot close the browser under the other
+    /// sessions that are using it.
+    async fn ensure_browser(&self) -> QuarryResult<()> {
         let mut guard = self.browser.lock().await;
-        let mut active_viewport = self.active_viewport.lock().await;
-        if guard.is_some() && *active_viewport == viewport {
+        if guard.is_some() {
             return Ok(());
         }
-        if let Some(mut browser) = guard.take() {
-            if let Err(err) = browser.close().await {
-                tracing::warn!(error = %err, "chromiumoxide browser close before relaunch failed");
-            }
-        }
+        // A fresh launch: whatever was kept for a previous browser is stale.
         if let Some(handle) = self.handler.lock().await.take() {
             handle.abort();
         }
@@ -241,9 +254,9 @@ impl ChromiumoxideDriver {
             // pinned QUIC egress implementation exists.
             builder = builder.arg("--disable-quic");
         }
-        if let Some(viewport) = viewport {
-            builder = builder.viewport(chromium_viewport(viewport));
-        }
+        // No browser-wide emulation: chromiumoxide's default would force one
+        // 800x600 viewport on every page. Each page is sized when it opens.
+        builder = builder.viewport(None::<ChromiumViewport>);
         match sandbox_policy(is_production_env(), env_truthy("QUARRY_BROWSER_NO_SANDBOX")) {
             Ok(SandboxMode::Enabled) => {}
             Ok(SandboxMode::DisabledByOperator) => {
@@ -276,7 +289,8 @@ impl ChromiumoxideDriver {
 
         *guard = Some(browser);
         *self.handler.lock().await = Some(handle);
-        *active_viewport = viewport;
+        let generation = self.launches.fetch_add(1, Ordering::SeqCst) + 1;
+        tracing::info!(generation, "browser slot launched");
         Ok(())
     }
 
@@ -385,7 +399,7 @@ impl ChromiumoxideDriver {
     ) -> QuarryResult<(String, Page)> {
         let initial_url = url.unwrap_or("about:blank");
         guard_navigation_target(initial_url).await?;
-        self.ensure_browser(session.lease.viewport).await?;
+        self.ensure_browser().await?;
         let browser_guard = self.browser.lock().await;
         let browser = browser_guard.as_ref().ok_or_else(|| {
             QuarryError::new(
@@ -495,6 +509,17 @@ impl ChromiumoxideDriver {
             QuarryError::new(ErrorCode::DriverFailed, "chromiumoxide new_page failed")
                 .with_details(json!({ "error": e.to_string(), "url": "about:blank" }))
         })?;
+        // Size and focus the page before anything observes or navigates it.
+        if let Err(error) = apply_page_hygiene(
+            &page,
+            resolve_viewport(session.lease.viewport),
+            page_hygiene_enabled(),
+        )
+        .await
+        {
+            let _ = page.clone().close().await;
+            return Err(error);
+        }
         self.install_devtools_collectors(session_key.clone(), tab_id.clone(), &page)
             .await;
         install_dialog_collector(
@@ -1888,15 +1913,121 @@ fn storage_entries(value: Option<&serde_json::Value>) -> Vec<(String, String)> {
         .unwrap_or_default()
 }
 
-fn chromium_viewport(viewport: BrowserViewport) -> ChromiumViewport {
-    ChromiumViewport {
-        width: viewport.width,
-        height: viewport.height,
-        device_scale_factor: Some(viewport.device_scale_factor),
-        emulating_mobile: viewport.is_mobile,
-        is_landscape: viewport.width >= viewport.height,
-        has_touch: viewport.is_mobile,
+/// Process default for a lease that asks for no viewport: `WxH`, for example
+/// `1280x800`. Unset or unparsable means 1280x800.
+const DEFAULT_VIEWPORT_ENV: &str = "QUARRY_BROWSER_DEFAULT_VIEWPORT";
+/// `off` skips the two non-fatal page-hygiene calls (focus emulation and the
+/// active lifecycle state). The viewport itself is always applied.
+const PAGE_HYGIENE_ENV: &str = "QUARRY_BROWSER_PAGE_HYGIENE";
+const FALLBACK_VIEWPORT: (u32, u32) = (1280, 800);
+
+/// The viewport a page gets: the lease's own when it asked for one (an unset
+/// device scale factor becomes 1), otherwise the process default.
+fn resolve_viewport(requested: Option<BrowserViewport>) -> BrowserViewport {
+    let configured = std::env::var(DEFAULT_VIEWPORT_ENV).ok();
+    if requested.is_none() {
+        if let Some(raw) = configured.as_deref() {
+            if parse_dimensions(raw).is_none() {
+                tracing::warn!("QUARRY_BROWSER_DEFAULT_VIEWPORT is not WxH; using 1280x800");
+            }
+        }
     }
+    resolve_viewport_with(requested, configured.as_deref())
+}
+
+fn resolve_viewport_with(
+    requested: Option<BrowserViewport>,
+    configured: Option<&str>,
+) -> BrowserViewport {
+    if let Some(viewport) = requested {
+        return BrowserViewport {
+            device_scale_factor: if viewport.device_scale_factor > 0.0 {
+                viewport.device_scale_factor
+            } else {
+                1.0
+            },
+            ..viewport
+        };
+    }
+    let (width, height) = configured
+        .and_then(parse_dimensions)
+        .unwrap_or(FALLBACK_VIEWPORT);
+    BrowserViewport {
+        width,
+        height,
+        device_scale_factor: 1.0,
+        is_mobile: false,
+    }
+}
+
+fn parse_dimensions(raw: &str) -> Option<(u32, u32)> {
+    let (width, height) = raw.trim().split_once(['x', 'X'])?;
+    let width: u32 = width.trim().parse().ok()?;
+    let height: u32 = height.trim().parse().ok()?;
+    ((1..=7680).contains(&width) && (1..=4320).contains(&height)).then_some((width, height))
+}
+
+fn page_hygiene_enabled() -> bool {
+    !matches!(
+        std::env::var(PAGE_HYGIENE_ENV)
+            .ok()
+            .as_deref()
+            .map(|value| value.trim().to_ascii_lowercase())
+            .as_deref(),
+        Some("off" | "0" | "false")
+    )
+}
+
+fn viewport_emulation_error(error: impl std::fmt::Display) -> QuarryError {
+    QuarryError::new(
+        ErrorCode::DriverFailed,
+        "chromiumoxide viewport emulation failed",
+    )
+    .with_details(json!({ "reason": "viewport_emulation_failed", "error": error.to_string() }))
+}
+
+/// Make a fresh page behave like a visible, focused window of `viewport`'s size.
+///
+/// Emulation is per page, and a headless Chromium with several contexts open
+/// does not treat every page as foreground: without focus emulation and an
+/// active lifecycle state a background page can stall timers, rendering and
+/// screenshots. The size and touch calls are fatal (a page of the wrong size
+/// gives wrong observations); the two hygiene calls only warn.
+async fn apply_page_hygiene(
+    page: &Page,
+    viewport: BrowserViewport,
+    hygiene: bool,
+) -> QuarryResult<()> {
+    page.execute(SetDeviceMetricsOverrideParams::new(
+        i64::from(viewport.width),
+        i64::from(viewport.height),
+        viewport.device_scale_factor,
+        viewport.is_mobile,
+    ))
+    .await
+    .map_err(viewport_emulation_error)?;
+    if viewport.is_mobile {
+        page.execute(SetTouchEmulationEnabledParams::new(true))
+            .await
+            .map_err(viewport_emulation_error)?;
+    }
+    if hygiene {
+        if let Err(error) = page
+            .execute(SetFocusEmulationEnabledParams::new(true))
+            .await
+        {
+            tracing::warn!(%error, "page focus emulation failed");
+        }
+        if let Err(error) = page
+            .execute(SetWebLifecycleStateParams::new(
+                SetWebLifecycleStateState::Active,
+            ))
+            .await
+        {
+            tracing::warn!(%error, "page lifecycle state could not be set to active");
+        }
+    }
+    Ok(())
 }
 
 fn session_viewport(viewport: BrowserViewport) -> Viewport {
@@ -1953,16 +2084,12 @@ impl BrowserDriver for ChromiumoxideDriver {
 
     async fn acquire(&self, lease: &BrowserLease) -> QuarryResult<BrowserSession> {
         let acquired_at = Instant::now();
-        let startup_mode = {
-            let browser = self.browser.lock().await;
-            let active_viewport = self.active_viewport.lock().await;
-            if browser.is_some() && *active_viewport == lease.viewport {
-                BrowserStartupMode::Warm
-            } else {
-                BrowserStartupMode::Cold
-            }
+        let startup_mode = if self.browser.lock().await.is_some() {
+            BrowserStartupMode::Warm
+        } else {
+            BrowserStartupMode::Cold
         };
-        self.ensure_browser(lease.viewport).await?;
+        self.ensure_browser().await?;
         let session = BrowserSession {
             lease: lease.clone(),
             inner: Arc::new(Mutex::new(SessionInner {
@@ -2028,7 +2155,6 @@ impl BrowserDriver for ChromiumoxideDriver {
     async fn goto(&self, session: &BrowserSession, url: &str) -> QuarryResult<()> {
         guard_navigation_target(url).await?;
         self.require_configured_egress(session).await?;
-        self.ensure_browser(session.lease.viewport).await?;
         let (tab_id, page, created) = match self.active_tab_page(session).await {
             Some((tab_id, page)) => (tab_id, page, false),
             None => {
@@ -3201,20 +3327,45 @@ mod tests {
     }
 
     #[test]
-    fn chromium_viewport_maps_desktop_dimensions() {
-        let viewport = chromium_viewport(BrowserViewport {
-            width: 1280,
-            height: 800,
-            device_scale_factor: 1.0,
-            is_mobile: false,
-        });
+    fn resolve_viewport_defaults_to_1280x800() {
+        let viewport = resolve_viewport_with(None, None);
+        assert_eq!((viewport.width, viewport.height), (1280, 800));
+        assert_eq!(viewport.device_scale_factor, 1.0);
+        assert!(!viewport.is_mobile);
+        // Garbage in the variable is not a viewport either.
+        for bad in ["", "wide", "0x800", "1280x0", "99999x800", "1280", "-1x5"] {
+            let viewport = resolve_viewport_with(None, Some(bad));
+            assert_eq!((viewport.width, viewport.height), (1280, 800), "{bad:?}");
+        }
+    }
 
-        assert_eq!(viewport.width, 1280);
-        assert_eq!(viewport.height, 800);
-        assert_eq!(viewport.device_scale_factor, Some(1.0));
-        assert!(!viewport.emulating_mobile);
-        assert!(viewport.is_landscape);
-        assert!(!viewport.has_touch);
+    #[test]
+    fn resolve_viewport_honours_env_override() {
+        let viewport = resolve_viewport_with(None, Some("800x600"));
+        assert_eq!((viewport.width, viewport.height), (800, 600));
+        let viewport = resolve_viewport_with(None, Some(" 1920X1080 "));
+        assert_eq!((viewport.width, viewport.height), (1920, 1080));
+    }
+
+    #[test]
+    fn resolve_viewport_passes_through_lease_viewport() {
+        let phone = BrowserViewport {
+            width: 390,
+            height: 844,
+            device_scale_factor: 2.0,
+            is_mobile: true,
+        };
+        // The env default never overrides what a lease asked for.
+        assert_eq!(resolve_viewport_with(Some(phone), Some("800x600")), phone);
+        // An unset scale factor (the serde default is 0) means 1.
+        let unset = BrowserViewport {
+            device_scale_factor: 0.0,
+            ..phone
+        };
+        assert_eq!(
+            resolve_viewport_with(Some(unset), None).device_scale_factor,
+            1.0
+        );
     }
 
     #[test]
@@ -3297,6 +3448,149 @@ mod tests {
     /// place of the pinned proxy (see `StubEgressProvider`).
     fn live_driver() -> ChromiumoxideDriver {
         ChromiumoxideDriver::new().with_pinned_egress_proxy(Arc::new(StubEgressProvider))
+    }
+
+    fn live_enabled() -> bool {
+        if std::env::var("CHROMIUMOXIDE_TEST").ok().as_deref() == Some("1") {
+            true
+        } else {
+            eprintln!("skipping: set CHROMIUMOXIDE_TEST=1 to run");
+            false
+        }
+    }
+
+    /// A session for a lease that asks for `viewport`, with a blank tab holding
+    /// `marker` in its document. Returns the session.
+    async fn live_session_sized(
+        driver: &ChromiumoxideDriver,
+        key: &str,
+        viewport: Option<BrowserViewport>,
+        marker: &str,
+    ) -> BrowserSession {
+        let mut lease = make_lease_with_key(key);
+        lease.viewport = viewport;
+        let session = driver.acquire(&lease).await.expect("acquire");
+        driver
+            .configure_egress_policy(&session, BrowserEgressPolicy::deny_all())
+            .await
+            .expect("install deny-all egress policy");
+        driver.new_tab(&session, None).await.expect("blank tab");
+        let page = driver.current_page(&session).await.expect("current page");
+        // A mobile page only lays out at the device width when it asks to, so the
+        // fixture says `width=device-width` like any mobile-ready page does.
+        page.set_content(format!(
+            "<html><head><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"></head><body><p id=\"m\">{marker}</p></body></html>"
+        ))
+            .await
+            .expect("inject page");
+        session
+    }
+
+    async fn eval_number(driver: &ChromiumoxideDriver, session: &BrowserSession, js: &str) -> i64 {
+        let page = driver.current_page(session).await.expect("current page");
+        page.evaluate(js)
+            .await
+            .expect("evaluate")
+            .into_value::<i64>()
+            .expect("number")
+    }
+
+    async fn eval_string(
+        driver: &ChromiumoxideDriver,
+        session: &BrowserSession,
+        js: &str,
+    ) -> String {
+        let page = driver.current_page(session).await.expect("current page");
+        page.evaluate(js)
+            .await
+            .expect("evaluate")
+            .into_value::<String>()
+            .expect("string")
+    }
+
+    async fn live_marker(driver: &ChromiumoxideDriver, session: &BrowserSession) -> String {
+        eval_string(driver, session, "document.getElementById('m').textContent").await
+    }
+
+    fn desktop() -> BrowserViewport {
+        BrowserViewport {
+            width: 1280,
+            height: 800,
+            device_scale_factor: 1.0,
+            is_mobile: false,
+        }
+    }
+
+    fn phone() -> BrowserViewport {
+        BrowserViewport {
+            width: 390,
+            height: 844,
+            device_scale_factor: 2.0,
+            is_mobile: true,
+        }
+    }
+
+    /// Leases with different viewports share one browser: nobody's pages are
+    /// lost, each page has its own size, and each is focused and visible.
+    #[tokio::test]
+    async fn concurrent_leases_with_different_viewports_do_not_lose_pages() {
+        if !live_enabled() {
+            return;
+        }
+        let driver = live_driver();
+        let a = live_session_sized(&driver, "vp-a", Some(desktop()), "marker-a").await;
+        let b = live_session_sized(&driver, "vp-b", None, "marker-b").await;
+        let c = live_session_sized(&driver, "vp-c", Some(phone()), "marker-c").await;
+
+        assert_eq!(driver.launch_count(), 1, "one browser for all three leases");
+        assert_eq!(live_marker(&driver, &a).await, "marker-a");
+        assert_eq!(live_marker(&driver, &b).await, "marker-b");
+        assert_eq!(live_marker(&driver, &c).await, "marker-c");
+        assert_eq!(eval_number(&driver, &a, "window.innerWidth").await, 1280);
+        assert_eq!(eval_number(&driver, &b, "window.innerWidth").await, 1280);
+        assert_eq!(eval_number(&driver, &c, "window.innerWidth").await, 390);
+        for session in [&a, &b, &c] {
+            assert_eq!(
+                eval_string(&driver, session, "document.visibilityState").await,
+                "visible"
+            );
+            assert_eq!(
+                eval_string(&driver, session, "String(document.hasFocus())").await,
+                "true"
+            );
+        }
+
+        // Releasing one session leaves the others alone.
+        driver.release(b).await.expect("release b");
+        assert_eq!(live_marker(&driver, &a).await, "marker-a");
+        assert_eq!(live_marker(&driver, &c).await, "marker-c");
+        assert_eq!(driver.launch_count(), 1);
+        driver.release(a).await.expect("release a");
+        driver.release(c).await.expect("release c");
+    }
+
+    /// The order leases arrive in does not matter: the phone first, then the
+    /// desktop, then the default.
+    #[tokio::test]
+    async fn acquire_order_does_not_matter() {
+        if !live_enabled() {
+            return;
+        }
+        let driver = live_driver();
+        let c = live_session_sized(&driver, "ord-c", Some(phone()), "marker-c").await;
+        let a = live_session_sized(&driver, "ord-a", Some(desktop()), "marker-a").await;
+        let b = live_session_sized(&driver, "ord-b", None, "marker-b").await;
+
+        assert_eq!(driver.launch_count(), 1);
+        assert_eq!(live_marker(&driver, &c).await, "marker-c");
+        assert_eq!(live_marker(&driver, &a).await, "marker-a");
+        assert_eq!(live_marker(&driver, &b).await, "marker-b");
+        assert_eq!(eval_number(&driver, &c, "window.innerWidth").await, 390);
+        assert_eq!(eval_number(&driver, &a, "window.innerWidth").await, 1280);
+        assert_eq!(eval_number(&driver, &b, "window.innerWidth").await, 1280);
+        for session in [a, b, c] {
+            driver.release(session).await.expect("release");
+        }
     }
 
     /// A session under an allow-nothing policy: the page can render what the test
@@ -3701,7 +3995,11 @@ mod tests {
         let page_html = synthetic_page();
         let mut sessions = Vec::new();
         let (processes, pss, rss) = chromium_memory_kib();
-        eprintln!("MEASURE sessions=0 processes={processes} pss_mib={} rss_mib={}", pss / 1024, rss / 1024);
+        eprintln!(
+            "MEASURE sessions=0 processes={processes} pss_mib={} rss_mib={}",
+            pss / 1024,
+            rss / 1024
+        );
         for target in [1usize, 8, 16, 32] {
             while sessions.len() < target {
                 let session = live_session(&driver, &format!("measure-{}", sessions.len())).await;
@@ -3722,5 +4020,4 @@ mod tests {
             driver.release(session).await.expect("release");
         }
     }
-
 }
