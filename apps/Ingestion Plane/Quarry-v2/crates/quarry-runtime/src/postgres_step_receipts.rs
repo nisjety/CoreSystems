@@ -415,3 +415,192 @@ impl StepReceiptStore for PostgresStepReceiptStore {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::step_receipts::{
+        BrowserControlMode, BrowserProfileScope, BrowserTimelineEventKind,
+        BrowserTimelineInitiator, ReceiptBuilder, StepOutcome,
+    };
+    use quarry_core::contracts::{AgentAction, AgentConstraints};
+    use quarry_core::ids::Id;
+    use quarry_core::zdr::ZdrMode;
+
+    // Needs a Postgres reachable through DATABASE_URL; skipped (loudly) without one,
+    // like the other postgres_* stores. The test only writes rows under fresh run ids.
+    async fn fresh_pool() -> Option<PgPool> {
+        let url = std::env::var("DATABASE_URL")
+            .ok()
+            .filter(|s| !s.is_empty())?;
+        let pool = PgPool::connect(&url).await.ok()?;
+        sqlx::migrate!("./migrations")
+            .run(&pool)
+            .await
+            .expect("migrations must apply");
+        Some(pool)
+    }
+
+    fn action() -> AgentAction {
+        AgentAction::Navigate {
+            url: "https://example.com".into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn receipt_round_trip_keeps_initiator_and_epoch() {
+        let Some(pool) = fresh_pool().await else {
+            eprintln!("skipping: DATABASE_URL not set");
+            return;
+        };
+        let store = PostgresStepReceiptStore::new(pool);
+        let run_id: RunKind = Id::new();
+
+        let agent = ReceiptBuilder::start(run_id.to_string(), 1)
+            .org_id("org_a")
+            .actor_id("svc_agent")
+            .initiator(BrowserTimelineInitiator::Agent, 0)
+            .complete(action(), None, 0.002);
+        let human = ReceiptBuilder::start(run_id.to_string(), 2)
+            .org_id("org_a")
+            .actor_id("user_a")
+            .initiator(BrowserTimelineInitiator::Human, 3)
+            .skip(action(), "user_took_over");
+        // A receipt written before epochs existed carries neither column.
+        let legacy = ReceiptBuilder::start(run_id.to_string(), 3)
+            .org_id("org_a")
+            .actor_id("user_a")
+            .complete(action(), None, 0.0);
+        for receipt in [&agent, &human, &legacy] {
+            store.append(receipt.clone()).await.unwrap();
+        }
+
+        let listed = store.list_for_org("org_a", &run_id).await.unwrap();
+        assert_eq!(listed.len(), 3);
+        assert_eq!(
+            listed[0].initiated_by,
+            Some(BrowserTimelineInitiator::Agent)
+        );
+        assert_eq!(listed[0].control_epoch, Some(0));
+        assert_eq!(
+            listed[1].initiated_by,
+            Some(BrowserTimelineInitiator::Human)
+        );
+        assert_eq!(listed[1].control_epoch, Some(3));
+        assert!(matches!(listed[1].outcome, StepOutcome::Skipped { .. }));
+        assert_eq!(listed[2].initiated_by, None);
+        assert_eq!(listed[2].control_epoch, None);
+
+        let fetched = store.get(&human.receipt_id).await.unwrap().unwrap();
+        assert_eq!(fetched.initiated_by, Some(BrowserTimelineInitiator::Human));
+        assert_eq!(fetched.control_epoch, Some(3));
+
+        // Tenant and actor bounds still hold with the new columns.
+        assert!(store
+            .list_for_org("org_b", &run_id)
+            .await
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            store
+                .list_for_actor("org_a", "user_a", &run_id)
+                .await
+                .unwrap()
+                .len(),
+            2
+        );
+    }
+
+    #[tokio::test]
+    async fn checkpoint_round_trip_keeps_control_epoch_and_closes() {
+        let Some(pool) = fresh_pool().await else {
+            eprintln!("skipping: DATABASE_URL not set");
+            return;
+        };
+        let store = PostgresStepReceiptStore::new(pool);
+        let run_id: RunKind = Id::new();
+        let checkpoint = AgentRunCheckpoint {
+            org_id: "org_a".into(),
+            actor_id: "user_a".into(),
+            run_id: run_id.to_string(),
+            lease_id: "lease_01ARZ3NDEKTSV4RRFFQ69G5FAV".into(),
+            profile_id: "prof_01ARZ3NDEKTSV4RRFFQ69G5FAV".into(),
+            step: 4,
+            current_url: "https://example.com".into(),
+            page_hash: "blake3:abc".into(),
+            constraints: AgentConstraints {
+                max_steps: 5,
+                allowed_domains: vec!["example.com".into()],
+                max_runtime_s: Some(60),
+                max_cost_usd: None,
+            },
+            persist_profile: true,
+            profile_scope: BrowserProfileScope::UserPrivate,
+            viewport: None,
+            zdr: ZdrMode::Off,
+            grant_id: Some("grant_1".into()),
+            status: AgentRunStatus::Active,
+            control_mode: BrowserControlMode::HumanTakeover,
+            control_epoch: 7,
+            budget: None,
+        };
+        store.save_run_checkpoint(checkpoint).await.unwrap();
+
+        let loaded = store
+            .load_run_checkpoint("org_a", &run_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(loaded.control_epoch, 7);
+        assert_eq!(loaded.control_mode, BrowserControlMode::HumanTakeover);
+        assert!(store
+            .load_run_checkpoint("org_b", &run_id)
+            .await
+            .unwrap()
+            .is_none());
+
+        store.close_run_checkpoint("org_a", &run_id).await.unwrap();
+        let closed = store
+            .load_run_checkpoint("org_a", &run_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(closed.control_epoch, 7);
+    }
+
+    #[tokio::test]
+    async fn timeline_event_round_trip_keeps_epoch_and_initiator() {
+        let Some(pool) = fresh_pool().await else {
+            eprintln!("skipping: DATABASE_URL not set");
+            return;
+        };
+        let store = PostgresStepReceiptStore::new(pool);
+        let run_id: RunKind = Id::new();
+        store
+            .append_browser_timeline_event(BrowserTimelineEvent::new(
+                "org_a",
+                "user_a",
+                run_id.to_string(),
+                BrowserTimelineEventKind::Control {
+                    mode: BrowserControlMode::HumanTakeover,
+                    initiated_by: BrowserTimelineInitiator::Human,
+                    control_epoch: 2,
+                },
+            ))
+            .await
+            .unwrap();
+        let events = store
+            .list_browser_timeline_events("org_a", "user_a", &run_id)
+            .await
+            .unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events[0].event,
+            BrowserTimelineEventKind::Control {
+                mode: BrowserControlMode::HumanTakeover,
+                initiated_by: BrowserTimelineInitiator::Human,
+                control_epoch: 2,
+            }
+        );
+    }
+}
