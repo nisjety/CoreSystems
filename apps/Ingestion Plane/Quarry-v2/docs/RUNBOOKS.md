@@ -286,3 +286,12 @@ Every call the driver makes to Chromium has an upper bound from one table (`crat
 Collect a week of the `browser_op_duration_ms` debug lines (fields `op`, `ms`) before tightening any number. The two read paths (page content, and the accessibility snapshot behind native projection) retry once after 100 ms when Chromium reports that a navigation destroyed their execution context; nothing that changes the page is ever retried by the driver. Calls that are not in the table (the CDP event collectors, the network guard) are bounded only by chromiumoxide's own request timeout, set to 40 s so a typed timeout always wins first.
 
 Known gap: a tab attach still holds the driver's browser lock for its whole length (bounded by the deadlines above); narrowing that lock is WS3.F's work.
+
+## Document parser isolation
+
+With `QUARRY_EDGE__DOC_ROUTING=on` a PDF or DOCX is parsed for its text. `lopdf` inflates a compressed stream with no output cap, so a few megabytes of PDF can ask for gigabytes; a permit and a deadline cannot stop an allocation. `QUARRY_EDGE__DOC_PARSE_ISOLATION` chooses where the parser runs:
+
+- `process` (the default on Unix when the running binary is `quarry-edge-rs`): each document is parsed in a child process, the edge binary re-executed as `quarry-edge-rs --doc-parse <pdf|docx>`, with `RLIMIT_AS` 768 MiB, `RLIMIT_CPU` 20 s, `RLIMIT_NOFILE` 16 and no core files. The document goes to the child on stdin and one JSON line comes back; a child that is killed by a limit, crashes or answers nothing usable is a 415 `UNSUPPORTED_MEDIA` with `details.reason` `pdf_parse_failed` (or `docx_parse_failed`) and `details.limit` `parser_stopped`; one that outlives the 15 s deadline is killed and answers 504. Each parse costs a process start (10 to 30 ms).
+- `inprocess`: the previous behaviour, on the blocking pool, bounded only by the permit count (2), the deadline and the input caps. The rollback.
+
+The boot log line `document parser isolation` (field `isolation`) says which is in force. On a build that is not Unix, or when the executable path cannot be found, it falls back to `inprocess` with a warning. `DOC_ROUTING=on` is only advisable in a multi-tenant deployment with `process`.

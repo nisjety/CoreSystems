@@ -123,10 +123,26 @@ async fn shutdown_signal() {
     drain::begin();
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+/// Entry point. The hidden `--doc-parse <pdf|docx>` argument turns this binary
+/// into the document-parser child (see `quarry_runtime::content_route`): it
+/// answers before any configuration, socket, artifact store or async runtime
+/// exists, so the process the limits are applied to holds nothing else.
+fn main() -> anyhow::Result<()> {
+    let mut args = std::env::args().skip(1);
+    if args.next().as_deref() == Some(quarry_runtime::content_route::CHILD_ARG) {
+        std::process::exit(quarry_runtime::content_route::run_child(args.next().as_deref()));
+    }
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?
+        .block_on(run())
+}
+
+async fn run() -> anyhow::Result<()> {
     dotenvy::dotenv().ok();
     telemetry::init_telemetry();
+    // Choose (and log) how documents are parsed before the first one arrives.
+    quarry_runtime::content_route::parse_backend();
 
     // Production safety net: `QUARRY_EDGE_AUTH_DEV_BYPASS=1` accepts any
     // bearer without verifying it against auth-core's JWKS. That's fine
