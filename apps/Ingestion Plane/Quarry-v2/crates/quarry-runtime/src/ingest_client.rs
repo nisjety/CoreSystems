@@ -62,7 +62,7 @@ impl IngestClient {
             .timeout(Duration::from_secs(30))
             .redirect(reqwest::redirect::Policy::none())
             .build()
-            .map_err(|e| QuarryError::new(ErrorCode::Internal, format!("ingest client: {e}")))?;
+            .map_err(|e| QuarryError::new(ErrorCode::Internal, format!("ingest client: {}", e.without_url())))?;
         Ok(Self {
             http,
             base_url: base_url.into(),
@@ -82,7 +82,7 @@ impl IngestClient {
             .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(|error| {
-                QuarryError::new(ErrorCode::Internal, format!("ingest client: {error}"))
+                QuarryError::new(ErrorCode::Internal, format!("ingest client: {}", error.without_url()))
             })?;
         Ok(Self {
             http,
@@ -185,7 +185,7 @@ impl IngestClient {
         let doc = resp.json::<CreateDocumentResponse>().await.map_err(|e| {
             QuarryError::new(
                 ErrorCode::Internal,
-                format!("ingest response parse failed: {e}"),
+                format!("ingest response parse failed: {}", e.without_url()),
             )
         })?;
 

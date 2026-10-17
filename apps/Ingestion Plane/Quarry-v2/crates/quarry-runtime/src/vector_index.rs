@@ -183,7 +183,7 @@ impl VectorIndex for DataPlaneVectorIndex {
             ));
         }
         let parsed: RetrieveResponseBody = resp.json().await.map_err(|e| {
-            QuarryError::new(ErrorCode::Internal, format!("retrieve decode failed: {e}"))
+            QuarryError::new(ErrorCode::Internal, format!("retrieve decode failed: {}", e.without_url()))
         })?;
         Ok(map_candidates(parsed))
     }

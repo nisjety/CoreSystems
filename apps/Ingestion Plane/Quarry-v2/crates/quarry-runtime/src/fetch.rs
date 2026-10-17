@@ -386,7 +386,7 @@ impl StaticDriver {
         } else {
             resp.bytes()
                 .await
-                .map_err(|e| QuarryError::new(ErrorCode::DriverFailed, format!("read body: {e}")))?
+                .map_err(|e| QuarryError::new(ErrorCode::DriverFailed, format!("read body: {}", e.without_url())))?
                 .to_vec()
         };
         Ok(SendOutcome::Response(FetchResponse {
@@ -520,7 +520,7 @@ fn build_client(
     }
     builder
         .build()
-        .map_err(|e| QuarryError::new(ErrorCode::Internal, format!("http client: {e}")))
+        .map_err(|e| QuarryError::new(ErrorCode::Internal, format!("http client: {}", e.without_url())))
 }
 
 #[cfg(test)]

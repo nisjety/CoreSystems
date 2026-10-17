@@ -157,7 +157,7 @@ impl HttpGrantValidator {
             .map_err(|e| {
                 QuarryError::new(
                     ErrorCode::Internal,
-                    format!("http client build failed: {e}"),
+                    format!("http client build failed: {}", e.without_url()),
                 )
             })?;
         Ok(Self {
@@ -196,7 +196,7 @@ impl GrantValidator for HttpGrantValidator {
         let resp = builder.send().await.map_err(|e| {
             QuarryError::new(
                 ErrorCode::DriverFailed,
-                format!("grant validate transport failure: {e}"),
+                format!("grant validate transport failure: {}", e.without_url()),
             )
         })?;
 
@@ -225,7 +225,7 @@ impl GrantValidator for HttpGrantValidator {
         resp.json::<GrantValidation>().await.map_err(|e| {
             QuarryError::new(
                 ErrorCode::DriverFailed,
-                format!("grant validate decode failure: {e}"),
+                format!("grant validate decode failure: {}", e.without_url()),
             )
         })
     }

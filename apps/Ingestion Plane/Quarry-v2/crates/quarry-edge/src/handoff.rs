@@ -60,7 +60,7 @@ pub async fn forward_to_orchestrator(
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(10))
         .build()
-        .map_err(|e| QuarryError::new(ErrorCode::Internal, format!("http client: {e}")))?;
+        .map_err(|e| QuarryError::new(ErrorCode::Internal, format!("http client: {}", e.without_url())))?;
 
     // Control verifies an HMAC over (method, path?query, body hash, ts, nonce)
     // once QUARRY_INTERNAL_HMAC_REQUIRED=1 (the production overlay sets it), so
@@ -94,7 +94,7 @@ pub async fn forward_to_orchestrator(
         .map_err(|e| {
             QuarryError::new(
                 ErrorCode::UpstreamBlocked,
-                format!("control unreachable: {e}"),
+                format!("control unreachable: {}", e.without_url()),
             )
         })?;
 
@@ -116,7 +116,7 @@ pub async fn forward_to_orchestrator(
     }
 
     let parsed: ControlJobEnvelope = resp.json().await.map_err(|e| {
-        QuarryError::new(ErrorCode::Internal, format!("decode control response: {e}"))
+        QuarryError::new(ErrorCode::Internal, format!("decode control response: {}", e.without_url()))
     })?;
 
     let Some(job) = parsed.data else {

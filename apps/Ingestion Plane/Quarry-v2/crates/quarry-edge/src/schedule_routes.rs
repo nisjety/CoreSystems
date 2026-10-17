@@ -143,7 +143,7 @@ where
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(20))
         .build()
-        .map_err(|e| QuarryError::new(ErrorCode::Internal, format!("http client: {e}")))?;
+        .map_err(|e| QuarryError::new(ErrorCode::Internal, format!("http client: {}", e.without_url())))?;
 
     // Serialize the body up front so we can HMAC-hash it AND attach
     // it to the request — both paths see the exact same bytes.
@@ -184,7 +184,7 @@ where
     let resp = req.send().await.map_err(|e| {
         QuarryError::new(
             ErrorCode::DriverFailed,
-            format!("control-plane {method} {path} failed: {e}"),
+            format!("control-plane {method} {path} failed: {}", e.without_url()),
         )
     })?;
     let status = resp.status();
@@ -210,7 +210,7 @@ where
     let text = resp.text().await.map_err(|e| {
         QuarryError::new(
             ErrorCode::Internal,
-            format!("control-plane {method} {path} read: {e}"),
+            format!("control-plane {method} {path} read: {}", e.without_url()),
         )
     })?;
     let inner = if text.trim().is_empty() {

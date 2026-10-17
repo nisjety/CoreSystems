@@ -111,7 +111,7 @@ impl BrowserbaseDriver {
             .await
             .map_err(|e| {
                 QuarryError::new(ErrorCode::DriverFailed, "browserbase session create failed")
-                    .with_details(json!({ "error": e.to_string() }))
+                    .with_details(json!({ "error": e.without_url().to_string() }))
             })?;
 
         let status = resp.status();
@@ -126,7 +126,7 @@ impl BrowserbaseDriver {
 
         resp.json::<CreateSessionResponse>().await.map_err(|e| {
             QuarryError::new(ErrorCode::DriverFailed, "browserbase response parse failed")
-                .with_details(json!({ "error": e.to_string() }))
+                .with_details(json!({ "error": e.without_url().to_string() }))
         })
     }
 
@@ -170,13 +170,13 @@ impl BrowserbaseDriver {
             .await
             .map_err(|e| {
                 QuarryError::new(ErrorCode::DriverFailed, "browserbase request failed")
-                    .with_details(json!({ "error": e.to_string(), "path": path }))
+                    .with_details(json!({ "error": e.without_url().to_string(), "path": path }))
             })?;
 
         let status = resp.status();
         let bytes = resp.bytes().await.map_err(|e| {
             QuarryError::new(ErrorCode::DriverFailed, "browserbase body read failed")
-                .with_details(json!({ "error": e.to_string() }))
+                .with_details(json!({ "error": e.without_url().to_string() }))
         })?;
 
         if !status.is_success() {

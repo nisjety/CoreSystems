@@ -70,7 +70,7 @@ impl ModelPlaneClient {
             .map_err(|e| {
                 QuarryError::new(
                     ErrorCode::Internal,
-                    format!("http client build failed: {e}"),
+                    format!("http client build failed: {}", e.without_url()),
                 )
             })?;
         Ok(Self {
@@ -171,7 +171,7 @@ impl ModelPlaneClient {
         builder.send().await.map_err(|e| {
             QuarryError::new(
                 ErrorCode::DriverFailed,
-                format!("model-plane invoke transport failure: {e}"),
+                format!("model-plane invoke transport failure: {}", e.without_url()),
             )
         })
     }
@@ -195,7 +195,7 @@ impl ModelPlaneClient {
         resp.json::<ModelPlaneInvokeResponse>().await.map_err(|e| {
             QuarryError::new(
                 ErrorCode::DriverFailed,
-                format!("model-plane invoke decode failure: {e}"),
+                format!("model-plane invoke decode failure: {}", e.without_url()),
             )
         })
     }
@@ -301,7 +301,7 @@ impl ModelPlaneClient {
         builder.send().await.map_err(|e| {
             QuarryError::new(
                 ErrorCode::DriverFailed,
-                format!("model-plane invoke/stream transport failure: {e}"),
+                format!("model-plane invoke/stream transport failure: {}", e.without_url()),
             )
         })
     }

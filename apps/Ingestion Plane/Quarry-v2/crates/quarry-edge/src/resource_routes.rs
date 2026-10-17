@@ -261,7 +261,7 @@ where
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(15))
         .build()
-        .map_err(|e| QuarryError::new(ErrorCode::Internal, format!("http client: {e}")))?;
+        .map_err(|e| QuarryError::new(ErrorCode::Internal, format!("http client: {}", e.without_url())))?;
     let mut req = client.get(&url).query(&[("org_id", org_id)]);
     if let Some(s) = &filter.status {
         req = req.query(&[("status", s)]);
@@ -334,7 +334,7 @@ where
     let resp = req.send().await.map_err(|e| {
         QuarryError::new(
             ErrorCode::DriverFailed,
-            format!("control-plane GET {path} failed: {e}"),
+            format!("control-plane GET {path} failed: {}", e.without_url()),
         )
     })?;
     let status = resp.status();
@@ -353,7 +353,7 @@ where
     let raw: serde_json::Value = resp.json().await.map_err(|e| {
         QuarryError::new(
             ErrorCode::Internal,
-            format!("control-plane GET {path} read: {e}"),
+            format!("control-plane GET {path} read: {}", e.without_url()),
         )
     })?;
     let inner = raw.get("data").cloned().unwrap_or(raw);
@@ -457,7 +457,7 @@ async fn forward_mutation(
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(15))
         .build()
-        .map_err(|e| QuarryError::new(ErrorCode::Internal, format!("http client: {e}")))?;
+        .map_err(|e| QuarryError::new(ErrorCode::Internal, format!("http client: {}", e.without_url())))?;
 
     let mut req = client
         .request(method.clone(), &url)
@@ -490,7 +490,7 @@ async fn forward_mutation(
     let resp = req.send().await.map_err(|e| {
         QuarryError::new(
             ErrorCode::DriverFailed,
-            format!("control-plane {method} {path} failed: {e}"),
+            format!("control-plane {method} {path} failed: {}", e.without_url()),
         )
     })?;
     let status = resp.status();
@@ -515,7 +515,7 @@ async fn forward_mutation(
     let text = resp.text().await.map_err(|e| {
         QuarryError::new(
             ErrorCode::Internal,
-            format!("control-plane {method} {path} read: {e}"),
+            format!("control-plane {method} {path} read: {}", e.without_url()),
         )
     })?;
     if text.trim().is_empty() {
@@ -684,7 +684,7 @@ where
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(15))
         .build()
-        .map_err(|e| QuarryError::new(ErrorCode::Internal, format!("http client: {e}")))?;
+        .map_err(|e| QuarryError::new(ErrorCode::Internal, format!("http client: {}", e.without_url())))?;
     let mut req = client.get(&url).query(&[("org_id", org_id)]);
     for (k, v) in query {
         req = req.query(&[(*k, v)]);
@@ -706,7 +706,7 @@ where
     let resp = req.send().await.map_err(|e| {
         QuarryError::new(
             ErrorCode::DriverFailed,
-            format!("control-plane GET {path} failed: {e}"),
+            format!("control-plane GET {path} failed: {}", e.without_url()),
         )
     })?;
     let status = resp.status();
@@ -720,7 +720,7 @@ where
     let parsed: T = resp.json().await.map_err(|e| {
         QuarryError::new(
             ErrorCode::Internal,
-            format!("control-plane GET {path} parse: {e}"),
+            format!("control-plane GET {path} parse: {}", e.without_url()),
         )
     })?;
     Ok(Some(parsed))

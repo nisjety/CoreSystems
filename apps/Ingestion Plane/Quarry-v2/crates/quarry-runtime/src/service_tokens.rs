@@ -401,7 +401,7 @@ impl AuthCoreServiceTokenProvider {
             .map_err(|error| {
                 QuarryError::new(
                     ErrorCode::Internal,
-                    format!("Auth Core token client initialization failed: {error}"),
+                    format!("Auth Core token client initialization failed: {}", error.without_url()),
                 )
             })?;
         Ok(Self {

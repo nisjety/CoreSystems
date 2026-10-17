@@ -315,7 +315,7 @@ impl KernelDriver {
             .map_err(|e| {
                 QuarryError::new(
                     ErrorCode::DriverFailed,
-                    format!("kernel create failed: {e}"),
+                    format!("kernel create failed: {}", e.without_url()),
                 )
             })?;
 
@@ -337,7 +337,7 @@ impl KernelDriver {
         let parsed: CreateBrowserResponse = resp.json().await.map_err(|e| {
             QuarryError::new(
                 ErrorCode::DriverFailed,
-                format!("kernel decode failed: {e}"),
+                format!("kernel decode failed: {}", e.without_url()),
             )
         })?;
 
@@ -369,7 +369,7 @@ impl KernelDriver {
             .map_err(|e| {
                 QuarryError::new(
                     ErrorCode::DriverFailed,
-                    format!("kernel state fetch failed: {e}"),
+                    format!("kernel state fetch failed: {}", e.without_url()),
                 )
             })?;
 
@@ -399,7 +399,7 @@ impl KernelDriver {
         let parsed: StateResponse = resp.json().await.map_err(|e| {
             QuarryError::new(
                 ErrorCode::DriverFailed,
-                format!("kernel state decode failed: {e}"),
+                format!("kernel state decode failed: {}", e.without_url()),
             )
         })?;
 
@@ -467,7 +467,7 @@ impl KernelDriver {
             .map_err(|e| {
                 QuarryError::new(
                     ErrorCode::DriverFailed,
-                    format!("kernel {action} failed: {e}"),
+                    format!("kernel {action} failed: {}", e.without_url()),
                 )
             })?;
 
@@ -475,7 +475,7 @@ impl KernelDriver {
         let bytes = resp.bytes().await.map_err(|e| {
             QuarryError::new(
                 ErrorCode::DriverFailed,
-                format!("kernel {action} body read failed: {e}"),
+                format!("kernel {action} body read failed: {}", e.without_url()),
             )
         })?;
 

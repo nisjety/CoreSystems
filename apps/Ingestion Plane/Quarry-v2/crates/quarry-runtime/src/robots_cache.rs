@@ -175,7 +175,7 @@ impl ReqwestRobotsFetcher {
             .map_err(|e| {
                 QuarryError::new(
                     ErrorCode::Internal,
-                    format!("reqwest robots client build: {e}"),
+                    format!("reqwest robots client build: {}", e.without_url()),
                 )
             })?;
         Ok(Self {
@@ -205,7 +205,7 @@ impl RobotsFetcher for ReqwestRobotsFetcher {
                     return resp.text().await.map(Some).map_err(|e| {
                         QuarryError::new(
                             ErrorCode::DriverFailed,
-                            format!("robots.txt body read: {e}"),
+                            format!("robots.txt body read: {}", e.without_url()),
                         )
                     });
                 }
