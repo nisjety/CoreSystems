@@ -1606,3 +1606,120 @@ async fn a_failed_start_frees_its_slot() {
     drop(slot);
     assert!(state.agent_runs.try_reserve("org", Interactive).is_ok());
 }
+
+// ---- WS2.D follow-up: the 404 for a released run says whether it can be resumed
+
+fn gone_checkpoint(run_id: &RunKind, actor: &str, zdr: ZdrMode, status: AgentRunStatus) -> AgentRunCheckpoint {
+    AgentRunCheckpoint {
+        org_id: "org".into(),
+        actor_id: actor.into(),
+        run_id: run_id.to_string(),
+        lease_id: "lease_01ARZ3NDEKTSV4RRFFQ69G5FAV".into(),
+        profile_id: "prof_01ARZ3NDEKTSV4RRFFQ69G5FAV".into(),
+        step: 2,
+        current_url: "https://example.com".into(),
+        page_hash: "blake3:abc".into(),
+        constraints: quarry_core::contracts::AgentConstraints {
+            max_steps: 5,
+            allowed_domains: vec!["example.com".into()],
+            max_runtime_s: Some(60),
+            max_cost_usd: None,
+        },
+        persist_profile: true,
+        profile_scope: BrowserProfileScope::UserPrivate,
+        viewport: None,
+        zdr,
+        grant_id: None,
+        status,
+        control_mode: BrowserControlMode::AgentControl,
+        control_epoch: 0,
+        budget: None,
+    }
+}
+
+fn user_in_org(org: &str, user: &str) -> crate::auth::Claims {
+    let mut claims = crate::test_support::claims_for_org(org);
+    claims.user_id = user.into();
+    claims.sub = user.into();
+    claims
+}
+
+async fn gone_body(state: &AppState, claims: &crate::auth::Claims, run_id: &str) -> serde_json::Value {
+    let (status, Json(envelope)) = run_gone_err(state, claims, "req", run_id).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    serde_json::to_value(&envelope).unwrap()
+}
+
+#[tokio::test]
+async fn a_released_run_tells_its_owner_it_can_be_resumed() {
+    let state = test_state_with_static_driver();
+    let run_id: RunKind = Id::new();
+    state
+        .receipts
+        .save_run_checkpoint(gone_checkpoint(&run_id, "user", ZdrMode::Off, AgentRunStatus::Active))
+        .await
+        .unwrap();
+
+    let body = gone_body(&state, &user_in_org("org", "user"), &run_id.to_string()).await;
+    assert_eq!(body["error"]["details"]["reason"], "run_not_live");
+    assert_eq!(body["error"]["details"]["resumable"], true);
+    assert_eq!(body["error"]["details"]["resume_run_id"], run_id.to_string());
+}
+
+#[tokio::test]
+async fn the_resumable_hint_is_for_the_owner_of_a_live_non_zdr_checkpoint_only() {
+    let state = test_state_with_static_driver();
+    let owned: RunKind = Id::new();
+    let zdr: RunKind = Id::new();
+    let closed: RunKind = Id::new();
+    for (run, zdr_mode, status) in [
+        (&owned, ZdrMode::Off, AgentRunStatus::Active),
+        (&zdr, ZdrMode::On, AgentRunStatus::Active),
+        (&closed, ZdrMode::Off, AgentRunStatus::Closed),
+    ] {
+        state
+            .receipts
+            .save_run_checkpoint(gone_checkpoint(run, "user", zdr_mode, status))
+            .await
+            .unwrap();
+    }
+    let plain = |body: &serde_json::Value| body["error"]["details"].is_null();
+
+    // Somebody else in the same org, and another org entirely, learn nothing.
+    assert!(plain(&gone_body(&state, &user_in_org("org", "someone-else"), &owned.to_string()).await));
+    assert!(plain(&gone_body(&state, &user_in_org("other-org", "user"), &owned.to_string()).await));
+    // A ZDR run left nothing to resume, a closed run cannot be resumed.
+    assert!(plain(&gone_body(&state, &user_in_org("org", "user"), &zdr.to_string()).await));
+    assert!(plain(&gone_body(&state, &user_in_org("org", "user"), &closed.to_string()).await));
+    // An id that is not a run id, and one nobody ever started.
+    assert!(plain(&gone_body(&state, &user_in_org("org", "user"), "not-a-run-id").await));
+    let never: RunKind = Id::new();
+    assert!(plain(&gone_body(&state, &user_in_org("org", "user"), &never.to_string()).await));
+}
+
+#[tokio::test]
+async fn a_step_on_a_released_run_carries_the_hint() {
+    let state = test_state_with_static_driver();
+    let run_id: RunKind = Id::new();
+    state
+        .receipts
+        .save_run_checkpoint(gone_checkpoint(&run_id, "user", ZdrMode::Off, AgentRunStatus::Active))
+        .await
+        .unwrap();
+    let result = step(
+        State(state.clone()),
+        Extension(user_in_org("org", "user")),
+        Path(run_id.to_string()),
+        Json(StepBody {
+            action: AgentAction::Navigate { url: "https://example.com".into() },
+            instruction: None,
+            extraction_profile: None,
+            initiated_by: None,
+        }),
+    )
+    .await;
+    let (status, Json(envelope)) = result.err().expect("the run is not live");
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let rendered = serde_json::to_value(&envelope).unwrap();
+    assert_eq!(rendered["error"]["details"]["resumable"], true);
+}

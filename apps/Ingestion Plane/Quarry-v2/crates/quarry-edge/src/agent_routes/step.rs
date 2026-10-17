@@ -12,11 +12,7 @@ pub async fn step(
     let request_id = RequestKind::new().to_string();
 
     let Some(handle) = lookup_run(&state, &run_id) else {
-        return Err(status_err(
-            StatusCode::NOT_FOUND,
-            &request_id,
-            "agent run not found",
-        ));
+        return Err(run_gone_err(&state, &claims, &request_id, &run_id).await);
     };
 
     // Counts as in flight from before it waits for the run lock, so the sweeper

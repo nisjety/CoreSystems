@@ -493,6 +493,48 @@ pub(super) fn status_err(status: StatusCode, request_id: &str, msg: &str) -> Api
     )
 }
 
+/// The 404 for a run id this edge no longer holds.
+///
+/// A run whose browser the sweeper (or a restart) released keeps an active
+/// checkpoint unless it ran under ZDR. When the caller owns such a checkpoint
+/// the 404 says so and names the id to pass as `resume_run_id`, so a client
+/// can tell "resume this" from "this never existed". Anyone else, and every ZDR
+/// run, gets the same plain 404 as before: the hint must not reveal that
+/// somebody else's run exists.
+pub(super) async fn run_gone_err(
+    state: &AppState,
+    claims: &crate::auth::Claims,
+    request_id: &str,
+    run_id: &str,
+) -> ApiErr {
+    let resumable = match run_id.parse::<RunKind>() {
+        Ok(parsed) => matches!(
+            state.receipts.load_run_checkpoint(&claims.org_id, &parsed).await,
+            Ok(Some(checkpoint))
+                if checkpoint.status == AgentRunStatus::Active
+                    && !checkpoint.zdr.is_active()
+                    && caller_owns_browser_run(&checkpoint.org_id, &checkpoint.actor_id, claims)
+        ),
+        Err(_) => false,
+    };
+    if !resumable {
+        return status_err(StatusCode::NOT_FOUND, request_id, "agent run not found");
+    }
+    (
+        StatusCode::NOT_FOUND,
+        Json(Envelope::<()>::err(
+            request_id,
+            QuarryError::new(ErrorCode::NotFound, "agent run is not live").with_details(
+                serde_json::json!({
+                    "reason": "run_not_live",
+                    "resumable": true,
+                    "resume_run_id": run_id,
+                }),
+            ),
+        )),
+    )
+}
+
 pub(super) fn driver_err(request_id: &str, err: QuarryError) -> ApiErr {
     (
         StatusCode::from_u16(err.code.http_status())

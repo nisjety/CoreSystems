@@ -300,6 +300,7 @@ pub fn router(state: AppState) -> Router {
         .merge(public)
         .merge(internal)
         .merge(protected)
+        .layer(middleware::from_fn(crate::retry_after::retry_after_header))
         .layer(TraceLayer::new_for_http())
         .layer(body_limit)
         .layer(timeout)

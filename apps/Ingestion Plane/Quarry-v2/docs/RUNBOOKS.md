@@ -269,4 +269,6 @@ An expired run emits `agent.expired` (`reason`, `idle_s`, `age_s`; no URL). A no
 
 **Rollout.** The compose file starts with `QUARRY_EDGE_RUN_SWEEPER_DRY_RUN=1`: the sweeper only logs `would_expire` (run id, class, reason, numbers). Read it for at least a day, check that no live person's session is on it, then set `0`. Rollback with no image change: `QUARRY_EDGE__RUN_SWEEPER=0` and `...MAX_CONCURRENT_RUNS*=0`. The browser driver's own reaper (idle 3600 s, max age 21600 s) must stay above every run limit; the edge warns at boot when the numbers contradict that.
 
-Known gaps: the 429 does not carry a `Retry-After` header from the edge itself (the number is in `details.retry_after_seconds`; the gateway adds the header), a step on a run the sweeper released answers 404 `run_not_live` without a `resumable` hint, and the lifecycle timeline item does not name `system` as the initiator.
+The edge sets `Retry-After` itself on a 429 or 503 whose body carries `retry_after_seconds` (`crates/quarry-edge/src/retry_after.rs`). A step or tab call on a run the sweeper released answers 404 with `details.reason = run_not_live`; when the caller owns a non-ZDR, still-active checkpoint it adds `resumable: true` and `resume_run_id` (anyone else, and every ZDR run, gets the plain 404).
+
+Known gap: the lifecycle timeline item does not name `system` as the initiator.

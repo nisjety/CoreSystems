@@ -52,11 +52,7 @@ pub async fn new_tab(
     let request_id = RequestKind::new().to_string();
     let handle = lookup_run(&state, &run_id);
     let Some(handle) = handle else {
-        return Err(status_err(
-            StatusCode::NOT_FOUND,
-            &request_id,
-            "agent run not found",
-        ));
+        return Err(run_gone_err(&state, &claims, &request_id, &run_id).await);
     };
 
     let entry = handle.entry.lock().await;
@@ -166,11 +162,7 @@ pub async fn select_tab(
     let request_id = RequestKind::new().to_string();
     let handle = lookup_run(&state, &run_id);
     let Some(handle) = handle else {
-        return Err(status_err(
-            StatusCode::NOT_FOUND,
-            &request_id,
-            "agent run not found",
-        ));
+        return Err(run_gone_err(&state, &claims, &request_id, &run_id).await);
     };
 
     let entry = handle.entry.lock().await;
@@ -226,11 +218,7 @@ pub async fn close_tab(
     let request_id = RequestKind::new().to_string();
     let handle = lookup_run(&state, &run_id);
     let Some(handle) = handle else {
-        return Err(status_err(
-            StatusCode::NOT_FOUND,
-            &request_id,
-            "agent run not found",
-        ));
+        return Err(run_gone_err(&state, &claims, &request_id, &run_id).await);
     };
 
     let entry = handle.entry.lock().await;
