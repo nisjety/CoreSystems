@@ -7,6 +7,7 @@ pub mod branding;
 pub mod branding_rendered;
 pub mod charset;
 pub mod chunk;
+pub mod clean_html;
 pub mod determinism;
 pub mod diff;
 pub mod docx;

@@ -591,6 +591,13 @@ async fn scrape_with(
         html: resolved.wants(ScrapeFormat::Html),
         raw_html: resolved.wants(ScrapeFormat::RawHtml),
         max_bytes: resolved.max_inline_bytes,
+        clean: quarry_transform::clean_html::CleanOptions {
+            only_main_content: resolved.only_main_content,
+            include_tags: resolved.include_tags.clone(),
+            exclude_tags: resolved.exclude_tags.clone(),
+            remove_base64_images: resolved.remove_base64_images,
+            extractor: resolved.extractor,
+        },
     };
     // The caller's bound, never past the table's cap, so the typed Timeout
     // reaches the caller before the router's own limit drops the request.
@@ -1877,8 +1884,10 @@ mod tests {
         .await;
         let body = crate::test_support::response_json(response).await;
         let data = &body["data"];
-        assert!(data["html"].as_str().unwrap().contains("<title>Options page</title>"));
-        assert_eq!(data["html"], data["raw_html"], "the same bytes until a cleaning stage exists");
+        // raw_html is the document as fetched; html is what the markdown was made from.
+        assert!(data["raw_html"].as_str().unwrap().contains("<title>Options page</title>"));
+        assert!(data["html"].as_str().unwrap().contains("Hello options world"));
+        assert!(!data["html"].as_str().unwrap().contains("<title>"));
         assert!(data.get("markdown").is_none(), "markdown only when asked for");
     }
 
@@ -2033,18 +2042,82 @@ mod tests {
         assert_eq!(body["error"]["details"]["deadline_ms"], 1000);
     }
 
+    const NOISY: &[u8] = b"<html><head><title>Noisy</title></head><body><nav>Site navigation links</nav><article><h1>The headline</h1><p>Body text of the article that is long enough to be the main content of the page.</p><aside class=\"related\">Related stories box</aside></article><footer>Footer small print</footer></body></html>";
+
+    fn noisy_state() -> AppState {
+        let calls = Arc::new(AtomicU32::new(0));
+        let driver = Arc::new(TestDriver::ok(DriverKind::Static, calls, NOISY));
+        let mut drivers = DriverRegistry::new(DriverKind::Static);
+        drivers.register(driver.clone());
+        test_state(driver, drivers, None)
+    }
+
+    async fn markdown_of(body: serde_json::Value) -> (String, serde_json::Value) {
+        let response = call_scrape_with(noisy_state(), body).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = crate::test_support::response_json(response).await;
+        (body["data"]["markdown"].as_str().unwrap_or_default().to_owned(), body)
+    }
+
     #[tokio::test]
-    async fn options_with_no_effect_yet_are_named_in_ignored_fields() {
+    async fn include_and_exclude_tags_shape_the_markdown_and_nothing_is_ignored() {
+        let (default, _) = markdown_of(serde_json::json!({ "url": "https://example.com/a", "formats": ["markdown"] })).await;
+        let (subset, body) = markdown_of(serde_json::json!({
+            "url": "https://example.com/a", "formats": ["markdown"],
+            "include_tags": ["article"], "exclude_tags": ["aside", ".related"]
+        }))
+        .await;
+        assert!(subset.contains("The headline"), "{subset}");
+        assert!(!subset.contains("Related stories"), "{subset}");
+        assert!(!subset.contains("Site navigation"), "{subset}");
+        assert!(subset.len() <= default.len() + 20, "a strict subset in effect: {subset:?} vs {default:?}");
+        assert_eq!(body["data"]["effective_options"]["ignored_fields"], serde_json::json!([]));
+        assert_eq!(body["data"]["effective_options"]["cache_state"], "bypass");
+    }
+
+    #[tokio::test]
+    async fn only_main_content_false_keeps_the_navigation() {
+        let (full, body) = markdown_of(serde_json::json!({
+            "url": "https://example.com/a", "formats": ["markdown"], "only_main_content": false
+        }))
+        .await;
+        assert!(full.contains("Site navigation"), "{full}");
+        assert!(full.contains("Footer small print"), "{full}");
+        assert_eq!(body["data"]["effective_options"]["extractor"], "clean_full");
+    }
+
+    #[tokio::test]
+    async fn an_include_selector_that_matches_nothing_is_empty_with_a_warning() {
+        let (markdown, body) = markdown_of(serde_json::json!({
+            "url": "https://example.com/a", "formats": ["markdown"], "include_tags": ["#nope"]
+        }))
+        .await;
+        assert_eq!(markdown, "");
+        assert_eq!(body["data"]["warnings"][0]["code"], "include_tags_matched_nothing");
+    }
+
+    #[tokio::test]
+    async fn an_invalid_selector_and_a_conflicting_extractor_are_field_errors() {
         let response = call_scrape_with(
-            page_state(),
-            serde_json::json!({ "url": "https://example.com/a", "exclude_tags": [".nav"], "only_main_content": false }),
+            noisy_state(),
+            serde_json::json!({ "url": "https://example.com/a", "include_tags": ["article", "div["], "exclude_tags": ["ok", "<<<"] }),
         )
         .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         let body = crate::test_support::response_json(response).await;
-        assert_eq!(
-            body["data"]["effective_options"]["ignored_fields"],
-            serde_json::json!(["only_main_content", "exclude_tags"])
-        );
+        let fields = body["error"]["details"]["fields"].as_array().unwrap();
+        let paths: Vec<&str> = fields.iter().map(|f| f["path"].as_str().unwrap()).collect();
+        assert_eq!(paths, vec!["include_tags[1]", "exclude_tags[1]"]);
+        assert!(fields.iter().all(|f| f["code"] == "invalid_selector"));
+
+        let response = call_scrape_with(
+            noisy_state(),
+            serde_json::json!({ "url": "https://example.com/a", "only_main_content": true, "extractor": "raw" }),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = crate::test_support::response_json(response).await;
+        assert_eq!(body["error"]["details"]["fields"][0]["path"], "extractor");
     }
 
     // ---- WS5.F: the scrape record ---------------------------------------

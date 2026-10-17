@@ -170,8 +170,9 @@ impl ScrapeFormat {
     }
 }
 
-/// Which content extractor shapes the markdown. Only `Readability` runs today;
-/// the others are accepted and reported in `ignored_fields` until they exist.
+/// Which content extractor shapes the markdown. `Readability` is the
+/// main-content heuristic (`only_main_content`, the default); `CleanFull` keeps
+/// the whole body minus scripts and chrome; `Raw` converts the document as it is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Extractor {
@@ -407,47 +408,38 @@ impl ScrapeOptions {
             return Err(errors);
         }
 
-        // Accepted and validated, but the stage that would apply them is not in
-        // this version: never accepted-and-ignored without saying so.
-        let mut ignored_fields = Vec::new();
-        if self.only_main_content == Some(false) {
-            ignored_fields.push("only_main_content".to_owned());
-        }
-        if self
-            .include_tags
-            .as_ref()
-            .is_some_and(|tags| !tags.is_empty())
-        {
-            ignored_fields.push("include_tags".to_owned());
-        }
-        if self
-            .exclude_tags
-            .as_ref()
-            .is_some_and(|tags| !tags.is_empty())
-        {
-            ignored_fields.push("exclude_tags".to_owned());
-        }
-        if self.remove_base64_images == Some(true) {
-            ignored_fields.push("remove_base64_images".to_owned());
-        }
-        if self
-            .extractor
-            .is_some_and(|extractor| extractor != Extractor::Readability)
-        {
-            ignored_fields.push("extractor".to_owned());
+        // `only_main_content` and `extractor` are two ways to say one thing: the
+        // heuristic (readability) or the whole body (clean_full, raw). They must
+        // agree; an unset one follows the other.
+        let only_main_content = match (self.only_main_content, self.extractor) {
+            (Some(value), _) => value,
+            (None, Some(extractor)) => extractor == Extractor::Readability,
+            (None, None) => true,
+        };
+        let extractor = self.extractor.unwrap_or(if only_main_content {
+            Extractor::Readability
+        } else {
+            Extractor::CleanFull
+        });
+        if only_main_content != (extractor == Extractor::Readability) {
+            return Err(vec![FieldError::new(
+                "extractor",
+                "conflicts_with_only_main_content",
+                "extractor readability goes with only_main_content true; clean_full and raw go with only_main_content false",
+            )]);
         }
 
         Ok(ResolvedScrapeOptions {
             formats,
             requested_formats,
-            only_main_content: self.only_main_content.unwrap_or(true),
+            only_main_content,
             include_tags: self.include_tags.unwrap_or_default(),
             exclude_tags: self.exclude_tags.unwrap_or_default(),
             remove_base64_images: self.remove_base64_images.unwrap_or(false),
-            extractor: self.extractor.unwrap_or_default(),
+            extractor,
             timeout_ms,
             max_inline_bytes: usize::try_from(max_inline_bytes).unwrap_or(usize::MAX),
-            ignored_fields,
+            ignored_fields: Vec::new(),
         })
     }
 }
@@ -600,7 +592,8 @@ pub struct ResolvedScrapeOptions {
     pub extractor: Extractor,
     pub timeout_ms: u64,
     pub max_inline_bytes: usize,
-    /// Accepted options this version does not apply.
+    /// Accepted options this version does not apply (none today; the field stays
+    /// so a later option can be accepted before it is applied).
     pub ignored_fields: Vec<String>,
 }
 
@@ -845,28 +838,29 @@ mod tests {
     }
 
     #[test]
-    fn options_that_have_no_effect_yet_are_named_not_swallowed() {
-        let resolved = resolve(
-            json!({ "only_main_content": false, "exclude_tags": [".nav"], "remove_base64_images": true, "extractor": "clean_full" }),
-            false,
-        )
-        .unwrap();
-        assert_eq!(
-            resolved.ignored_fields,
-            vec![
-                "only_main_content",
-                "exclude_tags",
-                "remove_base64_images",
-                "extractor"
-            ]
-        );
-        // Asking for the default value is not an ignored option.
-        let resolved = resolve(
-            json!({ "only_main_content": true, "extractor": "readability" }),
-            false,
-        )
-        .unwrap();
-        assert!(resolved.ignored_fields.is_empty());
+    fn extractor_and_only_main_content_follow_each_other_and_must_agree() {
+        // Unset follows the other.
+        let r = resolve(json!({ "only_main_content": false }), false).unwrap();
+        assert_eq!((r.only_main_content, r.extractor), (false, Extractor::CleanFull));
+        let r = resolve(json!({ "extractor": "raw" }), false).unwrap();
+        assert_eq!((r.only_main_content, r.extractor), (false, Extractor::Raw));
+        let r = resolve(json!({ "extractor": "readability" }), false).unwrap();
+        assert_eq!((r.only_main_content, r.extractor), (true, Extractor::Readability));
+        let r = resolve(json!({ "only_main_content": false, "extractor": "clean_full" }), false).unwrap();
+        assert_eq!(r.extractor, Extractor::CleanFull);
+        // Disagreeing is a field error on extractor, both ways round.
+        for body in [
+            json!({ "only_main_content": true, "extractor": "raw" }),
+            json!({ "only_main_content": false, "extractor": "readability" }),
+        ] {
+            let errors = resolve(body, false).unwrap_err();
+            assert_eq!(errors[0].path, "extractor");
+            assert_eq!(errors[0].code, "conflicts_with_only_main_content");
+        }
+        // Nothing is left unapplied now.
+        let r = resolve(json!({ "exclude_tags": [".nav"], "remove_base64_images": true }), false).unwrap();
+        assert!(r.ignored_fields.is_empty());
+        assert!(!r.is_default());
     }
 
     #[test]
@@ -952,7 +946,7 @@ mod tests {
             false,
             &["maxPages".to_owned()],
         );
-        assert_eq!(effective.ignored_fields, vec!["exclude_tags", "maxPages"]);
+        assert_eq!(effective.ignored_fields, vec!["maxPages"]);
         let value = serde_json::to_value(&effective).unwrap();
         assert_eq!(value["cache_state"], "bypass");
         assert_eq!(value["doc_routing"], "shadow");

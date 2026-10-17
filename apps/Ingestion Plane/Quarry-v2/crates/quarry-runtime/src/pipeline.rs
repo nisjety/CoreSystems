@@ -53,12 +53,15 @@ pub struct InlineParts {
 }
 
 /// What a caller wants returned inline, and how much.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InlineRequest {
     pub markdown: bool,
     pub html: bool,
     pub raw_html: bool,
     pub max_bytes: usize,
+    /// How the page becomes markdown. The default is the standard
+    /// main-content extraction, byte-identical to what a run always did.
+    pub clean: quarry_transform::clean_html::CleanOptions,
 }
 
 impl InlineRequest {
@@ -70,6 +73,7 @@ impl InlineRequest {
             html: false,
             raw_html: false,
             max_bytes: quarry_core::scrape::DEFAULT_INLINE_MAX_BYTES,
+            clean: quarry_transform::clean_html::CleanOptions::default(),
         }
     }
 }
@@ -754,9 +758,18 @@ impl PageRunner {
             .await;
         }
 
+        // Cleaning options only apply to a page; a document's text is its own.
+        let mut cleaned_html: Option<String> = None;
+        let mut clean_warnings = Vec::new();
         let md = match &document {
             Some(parsed) => parsed.text.clone(),
-            None => html_to_readable_markdown(&body_text),
+            None if inline_request.clean.is_default() => html_to_readable_markdown(&body_text),
+            None => {
+                let cleaned = quarry_transform::clean_html::to_markdown(&body_text, &inline_request.clean);
+                cleaned_html = Some(cleaned.html);
+                clean_warnings = cleaned.warnings;
+                cleaned.markdown
+            }
         };
         let link_list = if is_doc {
             Vec::new()
@@ -1163,9 +1176,14 @@ impl PageRunner {
                 }
             } else {
                 if inline_request.html {
+                    // The HTML the markdown was made from: after exclusion,
+                    // inclusion and cleaning, or the main content by default.
+                    let html_text = cleaned_html.clone().unwrap_or_else(|| {
+                        quarry_transform::clean_html::to_markdown(&body_text, &inline_request.clean).html
+                    });
                     offer_inline(
                         "html",
-                        &body_text,
+                        &html_text,
                         cap,
                         zdr,
                         &mut parts.html,
@@ -1184,6 +1202,11 @@ impl PageRunner {
                         &mut parts.omitted,
                     );
                 }
+            }
+            for warning in &clean_warnings {
+                parts
+                    .warnings
+                    .push(quarry_core::scrape::ScrapeWarning::new(warning.code, warning.message));
             }
             if let Some(parsed) = &document {
                 if parsed.truncated {
@@ -2394,6 +2417,7 @@ mod content_routing_tests {
             html,
             raw_html,
             max_bytes,
+            clean: Default::default(),
         }
     }
 
@@ -2413,7 +2437,8 @@ mod content_routing_tests {
             .await
             .unwrap();
         assert!(both.markdown.unwrap().contains("En vanlig nettside"));
-        assert_eq!(both.html.as_deref(), Some(HTML));
+        // html is what the markdown came from; raw_html is the document as fetched.
+        assert!(both.html.unwrap().contains("En vanlig nettside"));
         assert_eq!(both.raw_html.as_deref(), Some(HTML));
     }
 

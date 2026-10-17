@@ -225,7 +225,26 @@ pub fn parse_body(
     }
 
     let options = if settings.options_enabled {
-        ScrapeOptions::from_value(&value)?
+        let options = ScrapeOptions::from_value(&value)?;
+        let mut bad = Vec::new();
+        for (name, selectors) in [
+            ("include_tags", options.include_tags.as_deref()),
+            ("exclude_tags", options.exclude_tags.as_deref()),
+        ] {
+            for (index, reason) in
+                quarry_transform::clean_html::validate_selectors(selectors.unwrap_or_default())
+            {
+                bad.push(FieldError::new(
+                    format!("{name}[{index}]"),
+                    "invalid_selector",
+                    format!("not a CSS selector: {reason}"),
+                ));
+            }
+        }
+        if !bad.is_empty() {
+            return Err(bad);
+        }
+        options
     } else {
         ScrapeOptions::default()
     };

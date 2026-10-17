@@ -4395,8 +4395,8 @@ components:
           type: array
           description: >-
             What to return inline besides the artifact references. `markdown`,
-            `html` (the document as fetched, the same bytes as `rawHtml` until an
-            HTML-cleaning stage exists), `rawHtml`, `links` and `metadata` (the
+            `html` (the HTML the markdown was made from, after the cleaning options),
+            `rawHtml` (the document as fetched), `links` and `metadata` (the
             last two are in every response already). Naming formats makes the
             request non-default: it neither reads nor writes the page cache. Under
             ZDR the default is `["markdown"]`. `json`, `screenshot`, `summary`,
@@ -4408,30 +4408,30 @@ components:
         only_main_content:
           type: boolean
           default: true
-          description: Accepted and validated; not applied yet (reported in effective_options.ignored_fields). camelCase alias onlyMainContent.
+          description: true runs the main-content heuristic (extractor readability); false keeps the whole body (clean_full). Must agree with extractor. camelCase alias onlyMainContent.
         include_tags:
           type: array
           maxItems: 32
           items:
             type: string
             maxLength: 256
-          description: Accepted and validated; not applied yet. Alias includeTags.
+          description: CSS selectors; only the matching subtrees are kept, each once. Matching nothing gives empty markdown and the warning include_tags_matched_nothing. An invalid selector is a 400 invalid_selector. Alias includeTags.
         exclude_tags:
           type: array
           maxItems: 32
           items:
             type: string
             maxLength: 256
-          description: Accepted and validated; not applied yet. Alias excludeTags.
+          description: CSS selectors; every match and its subtree is removed before extraction. Alias excludeTags.
         remove_base64_images:
           type: boolean
           default: false
-          description: Accepted and validated; not applied yet. Alias removeBase64Images.
+          description: Strip inline base64 images (clean_full always does). Alias removeBase64Images.
         extractor:
           type: string
           enum: [readability, clean_full, raw]
           default: readability
-          description: Only readability runs today; the others are accepted and reported as ignored.
+          description: readability (main content), clean_full (whole body without scripts and chrome) or raw (as is). Setting it against only_main_content is a 400 conflicts_with_only_main_content.
         timeout_ms:
           type: integer
           minimum: 1000
