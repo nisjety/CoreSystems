@@ -542,6 +542,14 @@ pub async fn require_service_route_scope(req: Request, next: Next) -> Result<Res
     let path = req.uri().path();
     let permitted = match path {
         "/v1/scrape" => claims.has_scope("scrape:read") || claims.has_scope("scrape:write"),
+        // Reading back one scrape record by id. Not the stream route, and not a
+        // nested path.
+        _ if path
+            .strip_prefix("/v1/scrape/")
+            .is_some_and(|rest| rest != "stream" && !rest.contains('/')) =>
+        {
+            claims.has_scope("scrape:read") || claims.has_scope("scrape:write")
+        }
         "/v1/search" => claims.has_scope("search:read"),
         "/v1/extract" => claims.has_scope("extract:read"),
         // Reading one artifact by id is part of the scrape/agent contract, not a
@@ -759,6 +767,9 @@ mod tests {
             .route("/v1/other", get(ok_handler))
             .route("/v1/artifacts", get(ok_handler))
             .route("/v1/artifacts/:id", get(ok_handler))
+            .route("/v1/scrape/stream", get(ok_handler))
+            .route("/v1/scrape/:id", get(ok_handler))
+            .route("/v1/scrape/:id/extra", get(ok_handler))
             .layer(middleware::from_fn(require_service_route_scope))
             .layer(Extension(claims))
     }
@@ -802,6 +813,30 @@ mod tests {
                 "{scope} must be able to read an artifact by id"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn a_scrape_scoped_service_can_read_a_scrape_record_and_nothing_wider() {
+        for scope in ["scrape:read", "scrape:write"] {
+            assert_eq!(
+                status_for(service_claims(&[scope]), "/v1/scrape/art_01ABC").await,
+                StatusCode::OK,
+                "{scope}"
+            );
+        }
+        // Not a producing scope, the stream route, or a nested path.
+        assert_eq!(
+            status_for(service_claims(&["search:read"]), "/v1/scrape/art_01ABC").await,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            status_for(service_claims(&["scrape:read"]), "/v1/scrape/stream").await,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            status_for(service_claims(&["scrape:read"]), "/v1/scrape/art_01ABC/extra").await,
+            StatusCode::FORBIDDEN
+        );
     }
 
     #[tokio::test]

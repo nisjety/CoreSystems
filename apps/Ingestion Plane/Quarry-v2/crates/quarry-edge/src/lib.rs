@@ -27,6 +27,7 @@ pub mod routes;
 pub mod run_limits;
 pub mod schedule_routes;
 pub mod scrape_contract;
+pub mod scrape_routes;
 pub mod search_routes;
 pub mod source_registrar;
 pub mod state;

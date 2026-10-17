@@ -130,6 +130,7 @@ pub fn router(state: AppState) -> Router {
     let protected = Router::new()
         .route("/v1/scrape", post(scrape))
         .route("/v1/scrape/stream", post(scrape_stream))
+        .route("/v1/scrape/:id", get(crate::scrape_routes::get_scrape))
         .route("/v1/crawl", post(crawl_handoff))
         .route("/v1/batch", post(batch_handoff))
         .route("/v1/profiles", post(crate::profile_routes::save_profile))
@@ -633,6 +634,35 @@ async fn scrape_with(
                 .await;
             let mut warnings = unknown_warnings;
             warnings.extend(inline.warnings);
+            let effective_options = effective(cache_state);
+            // One small record per non-ZDR scrape, so the result can be read
+            // again by id. Never the inline text; never under ZDR.
+            let mut scrape_id = None;
+            if settings.records_enabled
+                && quarry_core::zdr::guard(zdr, quarry_core::zdr::WriteKind::Artifact).is_ok()
+            {
+                let record = serde_json::json!({
+                    "output": &out,
+                    "effective_options": &effective_options,
+                });
+                let page_hash =
+                    quarry_core::artifact::page_hash(&out.url.final_url, &out.fingerprint);
+                let stored = match serde_json::to_vec(&record) {
+                    Ok(bytes) => state
+                        .artifacts
+                        .put(&org_id, &run_id, &page_hash, "scrape_record", bytes)
+                        .await
+                        .map(|handle| handle.artifact_id.to_string()),
+                    Err(error) => Err(QuarryError::new(ErrorCode::Internal, error.to_string())),
+                };
+                match stored {
+                    Ok(id) => scrape_id = Some(id),
+                    Err(_) => warnings.push(quarry_core::scrape::ScrapeWarning::new(
+                        "scrape_record_unavailable",
+                        "the result could not be stored for later reads; scrape_id is absent",
+                    )),
+                }
+            }
             Ok(finish(quarry_core::scrape::ScrapeResponse {
                 output: out,
                 markdown: inline.markdown,
@@ -641,7 +671,8 @@ async fn scrape_with(
                 truncated: inline.truncated,
                 omitted: inline.omitted,
                 warnings,
-                effective_options: Some(effective(cache_state)),
+                effective_options: Some(effective_options),
+                scrape_id,
             }))
         }
         Err(err) => {
@@ -2014,6 +2045,113 @@ mod tests {
             body["data"]["effective_options"]["ignored_fields"],
             serde_json::json!(["only_main_content", "exclude_tags"])
         );
+    }
+
+    // ---- WS5.F: the scrape record ---------------------------------------
+
+    async fn scrape_id_of(response: axum::response::Response) -> (String, serde_json::Value) {
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = crate::test_support::response_json(response).await;
+        let id = body["data"]["scrape_id"].as_str().expect("scrape_id").to_owned();
+        (id, body)
+    }
+
+    async fn read_scrape(state: AppState, claims: crate::auth::Claims, id: &str) -> axum::response::Response {
+        crate::scrape_routes::get_scrape(State(state), Extension(claims), axum::extract::Path(id.to_owned())).await
+    }
+
+    #[tokio::test]
+    async fn a_scrape_can_be_read_back_by_id_for_the_same_org_only() {
+        let state = page_state();
+        let (id, original) = scrape_id_of(
+            call_scrape_with(
+                state.clone(),
+                serde_json::json!({ "url": "https://example.com/a", "formats": ["markdown"] }),
+            )
+            .await,
+        )
+        .await;
+
+        let response = read_scrape(state.clone(), claims_for_org("org_alpha"), &id).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers().get("cache-control").unwrap(), "private, max-age=30");
+        let body = crate::test_support::response_json(response).await;
+        let data = &body["data"];
+        assert_eq!(data["fingerprint"], original["data"]["fingerprint"]);
+        assert_eq!(data["scrape_id"], id.as_str());
+        assert_eq!(data["effective_options"]["formats"], serde_json::json!(["markdown"]));
+        // Inline text was never stored, so it is not on the read-back.
+        for absent in ["markdown", "html", "raw_html"] {
+            assert!(data.get(absent).is_none(), "{absent}");
+        }
+
+        // Another organization's token: not found, never forbidden.
+        let response = read_scrape(state, claims_for_org("org_beta"), &id).await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn an_id_that_is_not_a_scrape_record_reads_as_not_found() {
+        let state = page_state();
+        // A screenshot artifact of the same org.
+        let handle = state
+            .artifacts
+            .put("org_alpha", &RunKind::new(), "blake3:x", "screenshot", b"png".to_vec())
+            .await
+            .unwrap();
+        let response =
+            read_scrape(state.clone(), claims_for_org("org_alpha"), &handle.artifact_id.to_string()).await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let response = read_scrape(state, claims_for_org("org_alpha"), "not-an-id").await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn a_zdr_scrape_has_no_scrape_id_and_stores_no_artifact() {
+        let artifacts = Arc::new(InMemoryStore::new());
+        let calls = Arc::new(AtomicU32::new(0));
+        let driver = Arc::new(TestDriver::ok(DriverKind::Static, calls, PAGE));
+        let mut drivers = DriverRegistry::new(DriverKind::Static);
+        drivers.register(driver.clone());
+        let state = test_state_with_artifacts(driver, drivers, None, artifacts.clone());
+        let response = call_scrape_with(
+            state,
+            serde_json::json!({ "url": "https://example.com/a", "zdr": true }),
+        )
+        .await;
+        let body = crate::test_support::response_json(response).await;
+        assert!(body["data"].get("scrape_id").is_none());
+        let listed = artifacts
+            .list("org_alpha", &quarry_core::pagination::ListFilter::default())
+            .await
+            .unwrap();
+        assert!(listed.items.is_empty(), "ZDR must write no artifact");
+    }
+
+    #[tokio::test]
+    async fn a_zdr_floored_reader_is_refused_even_for_an_earlier_record() {
+        let state = page_state();
+        let (id, _) = scrape_id_of(call_scrape(state.clone(), "https://example.com/a").await).await;
+        let mut claims = claims_for_org("org_alpha");
+        claims.zdr = Some(true);
+        let response = read_scrape(state, claims, &id).await;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn records_can_be_switched_off() {
+        let settings = crate::scrape_contract::ScrapeSettings {
+            records_enabled: false,
+            ..Default::default()
+        };
+        let response = call_scrape_settings(
+            page_state(),
+            serde_json::json!({ "url": "https://example.com/a" }),
+            &settings,
+        )
+        .await;
+        let body = crate::test_support::response_json(response).await;
+        assert!(body["data"].get("scrape_id").is_none());
     }
 
 }

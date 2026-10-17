@@ -58,6 +58,9 @@ pub struct ScrapeSettings {
     /// `QUARRY_EDGE__SCRAPE_OPTIONS_ENABLED=0` turns the option keys back into
     /// unknown keys (ignored with a warning): the kill switch.
     pub options_enabled: bool,
+    /// `QUARRY_EDGE__SCRAPE_RECORDS=0` stops storing a record per scrape and
+    /// omits `scrape_id`.
+    pub records_enabled: bool,
 }
 
 impl Default for ScrapeSettings {
@@ -116,11 +119,19 @@ impl ScrapeSettings {
                 .as_deref(),
             Some("0" | "false" | "off")
         );
+        let records_enabled = !matches!(
+            lookup("QUARRY_EDGE__SCRAPE_RECORDS")
+                .as_deref()
+                .map(|value| value.trim().to_ascii_lowercase())
+                .as_deref(),
+            Some("0" | "false" | "off")
+        );
         Self {
             strict_validation,
             strict_after,
             inline_max_bytes,
             options_enabled,
+            records_enabled,
         }
     }
 
@@ -434,6 +445,8 @@ mod tests {
         );
         assert!(!env(&[("QUARRY_EDGE__SCRAPE_OPTIONS_ENABLED", "0")]).options_enabled);
         assert!(env(&[]).options_enabled);
+        assert!(env(&[]).records_enabled);
+        assert!(!env(&[("QUARRY_EDGE__SCRAPE_RECORDS", "0")]).records_enabled);
     }
 
     #[test]

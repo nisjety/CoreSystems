@@ -74,6 +74,10 @@ pub struct ScrapeResponse {
     /// The options this response was produced with.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effective_options: Option<EffectiveScrapeOptions>,
+    /// The id of the stored record of this scrape, for `GET /v1/scrape/{id}`.
+    /// Absent under ZDR (nothing is stored) and when records are off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scrape_id: Option<String>,
 }
 
 impl ScrapeResponse {
@@ -88,6 +92,7 @@ impl ScrapeResponse {
             omitted: Vec::new(),
             warnings: Vec::new(),
             effective_options: None,
+            scrape_id: None,
         }
     }
 }

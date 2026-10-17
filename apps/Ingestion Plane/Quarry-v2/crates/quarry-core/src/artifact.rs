@@ -24,6 +24,9 @@ pub enum ArtifactKind {
     LogoCandidate,
     RenderedPalette,
     Meta,
+    /// The normalized output and effective options of a non-ZDR scrape, read
+    /// back by `GET /v1/scrape/{id}`. Never holds inline page text.
+    ScrapeRecord,
 }
 
 impl ArtifactKind {
@@ -48,6 +51,7 @@ impl ArtifactKind {
             Self::LogoCandidate => "png",
             Self::RenderedPalette => "json",
             Self::Meta => "meta.json",
+            Self::ScrapeRecord => "scrape.json",
         }
     }
 }
@@ -81,6 +85,7 @@ fn kind_stem(kind: ArtifactKind) -> &'static str {
         ArtifactKind::LogoCandidate => "logo_candidate",
         ArtifactKind::RenderedPalette => "rendered_palette",
         ArtifactKind::Meta => "meta",
+        ArtifactKind::ScrapeRecord => "scrape_record",
     }
 }
 
@@ -167,11 +172,19 @@ mod content_type_tests {
             ArtifactKind::LogoCandidate,
             ArtifactKind::RenderedPalette,
             ArtifactKind::Meta,
+            ArtifactKind::ScrapeRecord,
         ] {
             let key = object_key("acme", "run_1", "page_1", kind);
             let declared = content_type_for_key(&key);
             assert!(!declared.is_empty(), "{kind:?} produced no content type");
         }
+    }
+
+    #[test]
+    fn a_scrape_record_is_json_and_its_key_names_the_kind() {
+        let key = object_key("acme", "run_1", "page_1", ArtifactKind::ScrapeRecord);
+        assert!(key.ends_with("/scrape_record.scrape.json"), "{key}");
+        assert_eq!(content_type_for_key(&key), "application/json");
     }
 
     /// Compound extensions must resolve on the LAST segment, not the first.
