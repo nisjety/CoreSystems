@@ -55,6 +55,7 @@ pub(super) fn live_browser_session_projection(
         execution_tier: entry.execution_tier,
         tabs: tabs.into_iter().map(browser_session_tab).collect(),
         last_observation: entry.last_observation.clone(),
+        grant_id: entry.grant_id.clone(),
     }
 }
 
@@ -83,6 +84,7 @@ pub(super) fn checkpoint_browser_session_projection(
         execution_tier: BrowserExecutionTier::Chromium,
         tabs: Vec::new(),
         last_observation: None,
+        grant_id: checkpoint.grant_id,
     }
 }
 
@@ -337,4 +339,38 @@ pub async fn browser_session_timeline(
             next_cursor,
         },
     )))
+}
+
+#[cfg(test)]
+mod grant_projection_tests {
+    use super::*;
+
+    fn checkpoint(grant_id: Option<&str>) -> AgentRunCheckpoint {
+        serde_json::from_value(serde_json::json!({
+            "org_id": "org-a",
+            "actor_id": "user-a",
+            "run_id": "run_01",
+            "profile_id": "prof_01",
+            "step": 1,
+            "current_url": "https://example.com/a?q=secret",
+            "constraints": { "max_steps": 12 },
+            "zdr": "off",
+            "grant_id": grant_id,
+        }))
+        .expect("checkpoint fixture")
+    }
+
+    #[test]
+    fn the_owner_projection_carries_the_session_grant_id_as_grant_id() {
+        let projection = checkpoint_browser_session_projection(checkpoint(Some("grant-abc")));
+        let json = serde_json::to_value(&projection).expect("projection serializes");
+        assert_eq!(json["grantId"], "grant-abc");
+    }
+
+    #[test]
+    fn a_run_without_a_grant_omits_grant_id() {
+        let projection = checkpoint_browser_session_projection(checkpoint(None));
+        let json = serde_json::to_value(&projection).expect("projection serializes");
+        assert!(json.get("grantId").is_none(), "{json}");
+    }
 }

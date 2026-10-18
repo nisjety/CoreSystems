@@ -199,6 +199,11 @@ pub struct BrowserSessionProjectionData {
     pub execution_tier: BrowserExecutionTier,
     pub tabs: Vec<BrowserSessionTab>,
     pub last_observation: Option<BrowserObservation>,
+    /// The BrowserBroker session grant the run was started with. Internal:
+    /// the projection is owner-gated, and the Verevon gateway reads it to
+    /// derive an AI run's grant but never forwards it to the SPA (WS1.B).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub grant_id: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
