@@ -13575,6 +13575,497 @@ fn continue_error(status: StatusCode, code: &str) -> (StatusCode, Json<Value>) {
     )
 }
 
+// ---- The gateway's pre-consume of a continuation, as pure building blocks (build plan
+// WS03 S7c-A4). Nothing in this block is called by `continue_run` yet: the wiring is
+// S7c-B1, after the executor half has landed. Every item is therefore allowed to be
+// unused until then, and none names a segment number, a resume literal or an env var.
+
+/// The HTTP refusals the continue route relays, each with the status it is sent
+/// with. The BFF relays all of them except `continue_incomplete` (its own guard
+/// preempts it) and `missing_bearer` (which it maps to `unauthorized`). Every other
+/// HTTP answer of the route keeps `grpc_status_to_http`'s body. Closed and
+/// test-pinned; the BFF's and the SPA's lists are scanned against this one.
+#[allow(dead_code)] // wired by S7c-B1
+pub(crate) const CONTINUE_HTTP_REFUSALS: &[(&str, StatusCode)] = &[
+    ("continue_disabled", StatusCode::CONFLICT),
+    ("not_resumable", StatusCode::CONFLICT),
+    ("continue_incomplete", StatusCode::BAD_REQUEST),
+    ("missing_bearer", StatusCode::UNAUTHORIZED),
+    ("approval_not_found", StatusCode::NOT_FOUND),
+    ("approval_not_granted", StatusCode::CONFLICT),
+    ("approval_expired", StatusCode::CONFLICT),
+    ("approval_not_resumable", StatusCode::CONFLICT),
+    ("continuation_already_consumed", StatusCode::CONFLICT),
+    ("continue_unavailable", StatusCode::SERVICE_UNAVAILABLE),
+];
+
+/// The messages the executor's refusals of a continuation carry, exactly. A status
+/// whose message is in this list is a typed refusal the gateway can name; any other
+/// message is never echoed and becomes `continue_refused`. A new executor refusal
+/// token needs a row here.
+#[allow(dead_code)] // wired by S7c-B1
+pub(crate) const CONTINUE_EXECUTOR_MESSAGE_TOKENS: &[&str] = &[
+    "continue_disabled",
+    "resume_incomplete",
+    "continuation_already_consumed",
+    "approval_not_granted",
+    "approval_expired",
+    "approval_not_resumable",
+    "approval_action_mismatch",
+    "approval_snapshot_mismatch",
+    "not_releasable",
+    "authority_widened",
+    "authority_space_mismatch",
+    "authority_route_mismatch",
+    "continue_space_scope_unsupported",
+    "continue_in_progress",
+    "resume_checkpoint_unavailable",
+    "not_resumable",
+    "resume_forbidden",
+];
+
+/// The `code` of an `error` frame of a continuation that is a refusal or a failed
+/// dispatch of the continuation itself: the executor's message tokens, the two codes
+/// derived from the gRPC code or the zero-retention trailer (`approval_not_found`,
+/// `durable_mutation_forbidden`), and the three the gateway makes (`continue_refused`,
+/// `continue_unreachable`, `continue_outcome_unknown`). Closed and test-pinned.
+///
+/// A frame carries `approval_spent: true` only when the gateway itself consumed the
+/// approval; without it the frame says the executor refused and the approval state is
+/// unknown. `continue_unreachable` and `continue_outcome_unknown` exist only with it.
+#[allow(dead_code)] // wired by S7c-B1
+pub(crate) const CONTINUE_FRAME_REFUSALS: &[&str] = &[
+    "continue_disabled",
+    "resume_incomplete",
+    "continuation_already_consumed",
+    "approval_not_granted",
+    "approval_expired",
+    "approval_not_resumable",
+    "approval_action_mismatch",
+    "approval_snapshot_mismatch",
+    "not_releasable",
+    "authority_widened",
+    "authority_space_mismatch",
+    "authority_route_mismatch",
+    "continue_space_scope_unsupported",
+    "continue_in_progress",
+    "resume_checkpoint_unavailable",
+    "not_resumable",
+    "resume_forbidden",
+    "approval_not_found",
+    "durable_mutation_forbidden",
+    "continue_refused",
+    "continue_unreachable",
+    "continue_outcome_unknown",
+];
+
+/// How long the gateway waits for its own consume of the approval. A consume that
+/// has not answered by then is ambiguous (the server may have committed), so the
+/// caller ends in `continue_unavailable` and nothing is launched. A constant, not an
+/// environment variable.
+#[allow(dead_code)] // wired by S7c-B1
+const PRECONSUME_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// The stage a continuation asks the executor for. `loop` (the in-place resume) only
+/// when the gateway's resume switch is on AND the run's recorded fold says it can be
+/// resumed (`RunDetail.resumable`); anything else asks for the committed stage,
+/// `segment`. The session-core checkpoint switch is not read here: with it off no
+/// fold is written and `resumable` is false, so it reaches this function through the
+/// flag. The hint is advisory. The executor decides at claim time, and a wrong hint
+/// costs a fallback to the committed stage, never a refusal.
+///
+/// `resume_enabled` is the one read of the switch that the caller makes
+/// ([`mp_contracts::loop_fold::loop_resume_enabled`]); this function reads no
+/// environment.
+#[allow(dead_code)] // wired by S7c-B1
+fn resume_mode_for(resume_enabled: bool, resumable: bool) -> &'static str {
+    if resume_enabled && resumable {
+        "loop"
+    } else {
+        "segment"
+    }
+}
+
+/// Whether the gateway itself spent the approval before it opened the stream. Only
+/// the pre-consume path is `SpentByGateway`, and it is set only after a consume that
+/// was won; it is local knowledge, never read from the executor or from the resume.
+#[allow(dead_code)] // wired by S7c-B1
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ApprovalSpend {
+    NotSpent,
+    SpentByGateway,
+}
+
+impl ApprovalSpend {
+    #[allow(dead_code)] // wired by S7c-B1
+    const fn is_spent(self) -> bool {
+        matches!(self, Self::SpentByGateway)
+    }
+}
+
+/// The spend state a continuation will have, from the one read of the resume switch:
+/// with it on the gateway pre-consumes, with it off it does not.
+#[allow(dead_code)] // wired by S7c-B1
+fn approval_spend_for(resume_enabled: bool) -> ApprovalSpend {
+    if resume_enabled {
+        ApprovalSpend::SpentByGateway
+    } else {
+        ApprovalSpend::NotSpent
+    }
+}
+
+/// The gateway's own consume of the approval a continuation names, behind a trait so
+/// the sequencing and the detach can be tested against a fake instead of a live gRPC
+/// server.
+///
+/// `Send + Sync` are supertraits on purpose: the consume and the launch run inside one
+/// `tokio::spawn`ed task ([`spawn_consume_then_launch`]) that holds `&Self` across an
+/// await, and that future is `Send` only if `Self: Sync`. Declaring them here carries
+/// them to every implementation and every `C: ApprovalConsumer` bound.
+#[allow(dead_code)] // wired by S7c-B1
+trait ApprovalConsumer: Send + Sync {
+    /// Consume the approval for the spend only. `Ok(true)` only when THIS call won the
+    /// single-use compare-and-set; `Ok(false)` when the approval was already consumed,
+    /// by whichever claim (the same token included). Anything else is the status the
+    /// consume failed with.
+    fn consume(
+        &self,
+        request: mp_contracts::model_plane::v1::ConsumeApprovalRequest,
+    ) -> impl std::future::Future<Output = Result<bool, tonic::Status>> + Send;
+}
+
+/// Wait for the consume's answer for at most [`PRECONSUME_TIMEOUT`], and read from it
+/// the one thing the gateway uses: whether the consume was won. A consume that has
+/// not answered by then is `DeadlineExceeded`, which the caller treats as ambiguous
+/// (the server may have committed). It is its own function so the bound is testable
+/// without a socket.
+#[allow(dead_code)] // wired by S7c-B1
+async fn consume_within_bound<F>(rpc: F) -> Result<bool, tonic::Status>
+where
+    F: std::future::Future<
+        Output = Result<
+            tonic::Response<mp_contracts::model_plane::v1::ConsumeApprovalResponse>,
+            tonic::Status,
+        >,
+    >,
+{
+    match tokio::time::timeout(PRECONSUME_TIMEOUT, rpc).await {
+        Ok(Ok(response)) => Ok(response.into_inner().consumed),
+        Ok(Err(status)) => Err(status),
+        Err(_elapsed) => Err(tonic::Status::deadline_exceeded(
+            "the approval consume did not answer in time",
+        )),
+    }
+}
+
+/// [`ApprovalConsumer`] over the run's own session credential: the credential the
+/// executor later receives as its session bearer, so the gateway's consume and the
+/// executor's replay of it are made by one identity. It owns a clone of the
+/// orchestration client (a tonic client over a channel, `Send + Sync`) and of the
+/// bearer (`Arc<str>`, `Send + Sync`), so it satisfies the spawn bounds. The bearer is
+/// never logged.
+#[allow(dead_code)] // wired by S7c-B1
+struct GrpcApprovalConsumer {
+    client: mp_contracts::model_plane::v1::orchestration_core_service_client::OrchestrationCoreServiceClient<
+        tonic::transport::Channel,
+    >,
+    bearer: VerifiedModelBearer,
+}
+
+impl GrpcApprovalConsumer {
+    #[allow(dead_code)] // wired by S7c-B1
+    fn new(
+        client: mp_contracts::model_plane::v1::orchestration_core_service_client::OrchestrationCoreServiceClient<
+            tonic::transport::Channel,
+        >,
+        bearer: VerifiedModelBearer,
+    ) -> Self {
+        Self { client, bearer }
+    }
+}
+
+impl ApprovalConsumer for GrpcApprovalConsumer {
+    async fn consume(
+        &self,
+        request: mp_contracts::model_plane::v1::ConsumeApprovalRequest,
+    ) -> Result<bool, tonic::Status> {
+        let request = authenticated_session_request(request, &self.bearer)?;
+        let mut client = self.client.clone();
+        consume_within_bound(client.consume_approval(request)).await
+    }
+}
+
+/// The one `ConsumeApprovalRequest` the gateway builds: the approval, the verified
+/// org, the run and the claim token as the client sent it, and `omit_call: true`, so
+/// session-core neither decrypts nor returns the approved call and renews the run's
+/// recovery deadline in the winning transaction. The step and the action fingerprint
+/// are not the gateway's to state; the executor's own consume states what it needs.
+#[allow(dead_code)] // wired by S7c-B1
+fn preconsume_request(
+    org_id: &str,
+    run_id: &str,
+    approval_id: &str,
+    claim_token: &str,
+) -> mp_contracts::model_plane::v1::ConsumeApprovalRequest {
+    mp_contracts::model_plane::v1::ConsumeApprovalRequest {
+        approval_id: approval_id.to_owned(),
+        org_id: org_id.to_owned(),
+        run_id: run_id.to_owned(),
+        step_id: String::new(),
+        action_fingerprint: String::new(),
+        claim_token: claim_token.to_owned(),
+        omit_call: true,
+    }
+}
+
+/// Why a continuation does not proceed past its consume. `Closed` is one of the
+/// route's closed HTTP refusals ([`CONTINUE_HTTP_REFUSALS`]). `Status` is a
+/// `PermissionDenied` or `Unauthenticated` answer, which the handler passes to
+/// `grpc_status_to_http` so it reads exactly as the owner check's does.
+#[allow(dead_code)] // wired by S7c-B1
+#[derive(Debug)]
+enum PreconsumeRefusal {
+    Closed(StatusCode, &'static str),
+    Status(tonic::Status),
+}
+
+/// The pure map from the consume's answer to "proceed" or the refusal. Only
+/// `Ok(true)` proceeds. `Ok(false)` is a lost consume: 409
+/// `continuation_already_consumed`, the same token included. `NotFound` is 404
+/// `approval_not_found`. A `FailedPrecondition` whose message is one of the three
+/// closed approval tokens is 409 with that code, any other is 409 `not_resumable`.
+/// `InvalidArgument` is 400 `continue_incomplete`. `PermissionDenied` and
+/// `Unauthenticated` keep their status. Every other code (`Unavailable`,
+/// `DeadlineExceeded`, `Internal`, `Unknown`, `Cancelled`, `Aborted`, and any code
+/// added later) is 503 `continue_unavailable`: ambiguous by definition, because the
+/// consume may have committed. The upstream message of a closed code is never echoed.
+#[allow(dead_code)] // wired by S7c-B1
+#[allow(clippy::result_large_err)]
+fn preconsume_refusal(outcome: Result<bool, tonic::Status>) -> Result<(), PreconsumeRefusal> {
+    match outcome {
+        Ok(true) => Ok(()),
+        Ok(false) => Err(PreconsumeRefusal::Closed(
+            StatusCode::CONFLICT,
+            "continuation_already_consumed",
+        )),
+        Err(status) => Err(match status.code() {
+            tonic::Code::NotFound => {
+                PreconsumeRefusal::Closed(StatusCode::NOT_FOUND, "approval_not_found")
+            }
+            tonic::Code::FailedPrecondition => PreconsumeRefusal::Closed(
+                StatusCode::CONFLICT,
+                match status.message() {
+                    "approval_not_granted" => "approval_not_granted",
+                    "approval_expired" => "approval_expired",
+                    "approval_not_resumable" => "approval_not_resumable",
+                    _ => "not_resumable",
+                },
+            ),
+            tonic::Code::InvalidArgument => {
+                PreconsumeRefusal::Closed(StatusCode::BAD_REQUEST, "continue_incomplete")
+            }
+            tonic::Code::PermissionDenied | tonic::Code::Unauthenticated => {
+                PreconsumeRefusal::Status(status)
+            }
+            _ => PreconsumeRefusal::Closed(StatusCode::SERVICE_UNAVAILABLE, "continue_unavailable"),
+        }),
+    }
+}
+
+/// The sequencing unit: consume, and only a consume that was won launches. `launch`
+/// is called at most once, strictly after the consume's answer, and not at all for a
+/// lost or failed consume. It is pure sequencing: it does not detach (see
+/// [`spawn_consume_then_launch`]), so it is testable with a plain `&C`.
+#[allow(dead_code)] // wired by S7c-B1
+#[allow(clippy::result_large_err)]
+async fn consume_then_launch<C: ApprovalConsumer, T>(
+    consumer: &C,
+    request: mp_contracts::model_plane::v1::ConsumeApprovalRequest,
+    launch: impl FnOnce() -> T,
+) -> Result<T, PreconsumeRefusal> {
+    preconsume_refusal(consumer.consume(request).await)?;
+    Ok(launch())
+}
+
+/// Consume and launch as ONE detached task: the only `tokio::spawn` of the
+/// pre-consume flow. A client that disconnects while the consume is in flight drops
+/// the returned receiver, never the task, so a consume that was won is always
+/// followed by the launch (the launch sends the request to the executor and the
+/// stream task ignores a closed client channel). The caller awaits the receiver for
+/// the stream, or for the refusal; a receiver that is gone is ignored.
+///
+/// `C: ApprovalConsumer` carries `Send + Sync` (the task holds `&C` across an await),
+/// and the launch closure must own everything it uses: it is moved into the task.
+/// `T` is the stream the launch builds.
+#[allow(dead_code)] // wired by S7c-B1
+fn spawn_consume_then_launch<C, T>(
+    consumer: C,
+    request: mp_contracts::model_plane::v1::ConsumeApprovalRequest,
+    launch: impl FnOnce() -> T + Send + 'static,
+) -> tokio::sync::oneshot::Receiver<Result<T, PreconsumeRefusal>>
+where
+    C: ApprovalConsumer + 'static,
+    T: Send + 'static,
+{
+    let (answer, receiver) = tokio::sync::oneshot::channel();
+    tokio::spawn(async move {
+        let outcome = consume_then_launch(&consumer, request, launch).await;
+        // A caller that disconnected is not an error: the launch has happened.
+        let _ = answer.send(outcome);
+    });
+    receiver
+}
+
+/// How the dispatch of a continuation to the executor failed, in the terms of the
+/// frames the client reads. The gateway never terminalizes on any of them: a refused
+/// continuation can be `continuation_already_consumed` while another segment of the
+/// same run is still live, and an unreachable or unknown outcome is left to the
+/// run's recovery deadline.
+#[allow(dead_code)] // wired by S7c-B1
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ContinueDispatchFailure {
+    /// The executor refused, with this closed token ([`CONTINUE_FRAME_REFUSALS`]).
+    Refused(&'static str),
+    /// The connection was never made, so the request provably never left this process.
+    Unreachable,
+    /// Any other outcome: the continuation may be running.
+    Unknown,
+}
+
+/// The pure map from the status `RunAgent` failed with to what the client is told.
+///
+/// In this order: a zero-retention refusal (keyed on its catalogue code in the trailer,
+/// never on its message) is `durable_mutation_forbidden` for the durable-mutation code
+/// and `continue_refused` for any other; `NotFound` is `approval_not_found`; the five
+/// codes the executor refuses a continuation with are the closed token their message
+/// is, exactly, and `continue_refused` for any message not in
+/// [`CONTINUE_EXECUTOR_MESSAGE_TOKENS`] (an unlisted message is never echoed); a
+/// connect-phase failure is unreachable; everything else is unknown.
+#[allow(dead_code)] // wired by S7c-B1
+fn classify_continue_dispatch_failure(status: &tonic::Status) -> ContinueDispatchFailure {
+    use mp_contracts::zdr_refusal::Refusal;
+    if let Some(refusal) = Refusal::from_status(status) {
+        return ContinueDispatchFailure::Refused(
+            if refusal == Refusal::DURABLE_MUTATION_FORBIDDEN {
+                "durable_mutation_forbidden"
+            } else {
+                "continue_refused"
+            },
+        );
+    }
+    match status.code() {
+        tonic::Code::NotFound => return ContinueDispatchFailure::Refused("approval_not_found"),
+        tonic::Code::FailedPrecondition
+        | tonic::Code::Aborted
+        | tonic::Code::InvalidArgument
+        | tonic::Code::PermissionDenied
+        | tonic::Code::Unauthenticated => {
+            return ContinueDispatchFailure::Refused(
+                CONTINUE_EXECUTOR_MESSAGE_TOKENS
+                    .iter()
+                    .copied()
+                    .find(|token| *token == status.message())
+                    .unwrap_or("continue_refused"),
+            );
+        }
+        _ => {}
+    }
+    if dispatch_never_reached_execution_core(status) {
+        ContinueDispatchFailure::Unreachable
+    } else {
+        ContinueDispatchFailure::Unknown
+    }
+}
+
+/// The `error` frame of a refused or failed continuation: the closed token as code and
+/// as a plain message, never retryable, naming the run. Only when the gateway itself
+/// spent the approval does it carry `approval_spent: true`; without it the frame
+/// means the executor refused and the approval state is unknown to the gateway, so
+/// the client re-reads the approval before any retry. `token` is in
+/// [`CONTINUE_FRAME_REFUSALS`]. The extra fields are additive: a client that does not
+/// read them sees an ordinary `error` frame.
+#[allow(dead_code)] // wired by S7c-B1
+fn continue_refusal_event(
+    request_id: &str,
+    run_id: &str,
+    token: &'static str,
+    spend: ApprovalSpend,
+) -> Event {
+    debug_assert!(
+        CONTINUE_FRAME_REFUSALS.contains(&token),
+        "{token} is not in the closed continue frame vocabulary"
+    );
+    let event = crate::sse_events::ChatEvent::Error {
+        code: token.to_owned(),
+        message: token.replace('_', " "),
+        retryable: false,
+    };
+    let mut payload = event.payload(request_id);
+    payload["run_id"] = json!(run_id);
+    if spend.is_spent() {
+        payload["approval_spent"] = json!(true);
+    }
+    Event::default()
+        .event(event.name())
+        .data(payload.to_string())
+}
+
+/// The frame for a failed dispatch of a continuation the gateway pre-consumed (the
+/// spent regime): a refusal is its closed token, an unreachable executor is
+/// `continue_unreachable`, anything else is `continue_outcome_unknown`. All are not
+/// retryable and say `approval_spent`, because the click is gone whichever way the
+/// dispatch failed; the client follows the run and never posts the continue again.
+#[allow(dead_code)] // wired by S7c-B1
+fn continue_failure_event(
+    request_id: &str,
+    run_id: &str,
+    failure: &ContinueDispatchFailure,
+) -> Event {
+    let token = match *failure {
+        ContinueDispatchFailure::Refused(token) => token,
+        ContinueDispatchFailure::Unreachable => "continue_unreachable",
+        ContinueDispatchFailure::Unknown => "continue_outcome_unknown",
+    };
+    continue_refusal_event(request_id, run_id, token, ApprovalSpend::SpentByGateway)
+}
+
+/// The frame for a dispatch whose outcome the gateway cannot state. With nothing
+/// spent it is the committed `agent_dispatch_unavailable` (retryable, the run may be
+/// going); after a pre-consume a retry would be a 409 and the click is gone, so it is
+/// `continue_outcome_unknown`, not retryable, with `approval_spent`.
+#[allow(dead_code)] // wired by S7c-B1
+fn dispatch_unknown_event(spend: ApprovalSpend, request_id: &str, run_id: &str) -> Event {
+    match spend {
+        ApprovalSpend::NotSpent => agent_dispatch_unavailable_event(request_id, run_id),
+        ApprovalSpend::SpentByGateway => {
+            continue_refusal_event(request_id, run_id, "continue_outcome_unknown", spend)
+        }
+    }
+}
+
+/// The payload of the `connected` frame: the ids of the prepared run, so a client can
+/// follow it. With nothing spent it is exactly the committed payload; after a
+/// pre-consume it adds `approval_spent: true`, so a client knows from the first frame
+/// that it must never post the continue again, whatever frames follow.
+#[allow(dead_code)] // wired by S7c-B1
+fn connected_payload(
+    run_id: &str,
+    thread_id: &str,
+    request_id: &str,
+    spend: ApprovalSpend,
+) -> Value {
+    let mut payload = json!({
+        "ok": true,
+        "run_id": run_id,
+        "thread_id": thread_id,
+        "request_id": request_id,
+    });
+    if spend.is_spent() {
+        payload["approval_spent"] = json!(true);
+    }
+    payload
+}
+
 /// `POST /v1/orchestration/runs/{run_id}/continue` (build plan WS03 S3): continue a
 /// run that paused for a granted approval, as a fresh segment of the SAME run.
 ///
@@ -14220,5 +14711,1170 @@ mod continue_run_tests {
             served >= 3 && waived_refused >= 2,
             "served {served}, waived refused {waived_refused}"
         );
+    }
+
+    // ---- S7c-A4: the pure, unwired pieces of the gateway's pre-consume. Nothing
+    // below is called by `continue_run` yet (that is S7c-B1), so with every switch
+    // off and on the route answers exactly as the tests above pin. ----
+
+    /// The production text of this file: everything before this test module, line
+    /// endings normalised. Test items that quote a name cannot stand in for it.
+    fn production_text() -> String {
+        let source = include_str!("sse.rs").replace("\r\n", "\n");
+        source
+            .split("\n#[cfg(test)]\nmod continue_run_tests {")
+            .next()
+            .expect("the test module is in this file")
+            .to_owned()
+    }
+
+    /// The text of one item of the production text, from `header` to the first
+    /// line that is exactly `terminator` (`"\n}\n"` for a free function,
+    /// `"\n    }\n"` for a method). The scans below name items; they never scan the
+    /// whole file, which legitimately uses `.tool_name`, `.step_id` and
+    /// `.authority` elsewhere.
+    fn item_text(header: &str, terminator: &str) -> String {
+        let source = production_text();
+        let from = source
+            .find(header)
+            .unwrap_or_else(|| panic!("`{header}` is in the production text"));
+        let rest = &source[from..];
+        let to = rest
+            .find(terminator)
+            .unwrap_or_else(|| panic!("`{header}` ends with {terminator:?}"));
+        rest[..to].to_owned()
+    }
+
+    fn assert_distinct(items: &[&str]) {
+        let set: std::collections::BTreeSet<&str> = items.iter().copied().collect();
+        assert_eq!(set.len(), items.len(), "a duplicate in {items:?}");
+    }
+
+    #[test]
+    fn resume_mode_for_picks_loop_only_when_enabled_and_resumable() {
+        for (enabled, resumable, expected) in [
+            (true, true, "loop"),
+            (true, false, "segment"),
+            (false, true, "segment"),
+            (false, false, "segment"),
+        ] {
+            assert_eq!(
+                resume_mode_for(enabled, resumable),
+                expected,
+                "switch {enabled}, resumable {resumable}"
+            );
+        }
+    }
+
+    #[test]
+    fn approval_spend_for_is_spent_only_on_the_pre_consume_path() {
+        assert_eq!(approval_spend_for(true), ApprovalSpend::SpentByGateway);
+        assert_eq!(approval_spend_for(false), ApprovalSpend::NotSpent);
+        assert!(ApprovalSpend::SpentByGateway.is_spent());
+        assert!(!ApprovalSpend::NotSpent.is_spent());
+    }
+
+    /// The three vocabularies are closed lists with the sizes the design states, no
+    /// duplicates, and the frame list is exactly the executor's message tokens plus
+    /// the two code-derived tokens plus the three the gateway makes itself.
+    #[test]
+    fn the_continue_vocabularies_have_the_designed_shape() {
+        let http: Vec<&str> = CONTINUE_HTTP_REFUSALS.iter().map(|(code, _)| *code).collect();
+        assert_eq!(http.len(), 10, "{http:?}");
+        assert_distinct(&http);
+        assert_eq!(CONTINUE_EXECUTOR_MESSAGE_TOKENS.len(), 17);
+        assert_distinct(CONTINUE_EXECUTOR_MESSAGE_TOKENS);
+        assert_eq!(CONTINUE_FRAME_REFUSALS.len(), 22);
+        assert_distinct(CONTINUE_FRAME_REFUSALS);
+
+        let mut expected: Vec<&str> = CONTINUE_EXECUTOR_MESSAGE_TOKENS.to_vec();
+        expected.extend([
+            // Derived from the gRPC code or the ZDR trailer, never from a message.
+            "approval_not_found",
+            "durable_mutation_forbidden",
+            // Made by the gateway itself.
+            "continue_refused",
+            "continue_unreachable",
+            "continue_outcome_unknown",
+        ]);
+        expected.sort_unstable();
+        let mut frames: Vec<&str> = CONTINUE_FRAME_REFUSALS.to_vec();
+        frames.sort_unstable();
+        assert_eq!(frames, expected);
+
+        for token in CONTINUE_FRAME_REFUSALS.iter().chain(http.iter()) {
+            assert!(
+                !token.is_empty()
+                    && token.bytes().all(|b| b.is_ascii_lowercase() || b == b'_'),
+                "{token:?} is a closed snake_case token"
+            );
+        }
+    }
+
+    /// The HTTP list states each code with the status it is sent with, and the three
+    /// statuses of the codes the BFF relays are the ones the BFF's own list pins.
+    #[test]
+    fn the_http_refusals_carry_the_statuses_the_route_sends() {
+        let find = |code: &str| {
+            CONTINUE_HTTP_REFUSALS
+                .iter()
+                .find(|(c, _)| *c == code)
+                .map_or_else(|| panic!("{code} is in CONTINUE_HTTP_REFUSALS"), |(_, status)| *status)
+        };
+        for code in [
+            "continue_disabled",
+            "not_resumable",
+            "approval_not_granted",
+            "approval_expired",
+            "approval_not_resumable",
+            "continuation_already_consumed",
+        ] {
+            assert_eq!(find(code), StatusCode::CONFLICT, "{code}");
+        }
+        assert_eq!(find("continue_incomplete"), StatusCode::BAD_REQUEST);
+        assert_eq!(find("missing_bearer"), StatusCode::UNAUTHORIZED);
+        assert_eq!(find("approval_not_found"), StatusCode::NOT_FOUND);
+        assert_eq!(find("continue_unavailable"), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    /// Every `(StatusCode::X, "code")` pair a route function states is in the HTTP
+    /// list with the same status. Scope: `continue_turn_gate`, `continue_preflight`
+    /// and the body of `continue_run`, by name; the handler's other literals are not
+    /// scanned. (The consume map is checked in its own test below.)
+    #[test]
+    fn the_continue_vocabularies_are_closed() {
+        let pairs = |text: &str| -> Vec<(String, String)> {
+            let mut found = Vec::new();
+            let mut rest = text;
+            while let Some(at) = rest.find("StatusCode::") {
+                rest = &rest[at + "StatusCode::".len()..];
+                let name: String = rest
+                    .chars()
+                    .take_while(|c| c.is_ascii_uppercase() || *c == '_')
+                    .collect();
+                let after = rest[name.len()..].trim_start();
+                if let Some(after) = after.strip_prefix(',') {
+                    if let Some(code) = after.trim_start().strip_prefix('"') {
+                        if let Some(end) = code.find('"') {
+                            found.push((name, code[..end].to_owned()));
+                        }
+                    }
+                }
+            }
+            found
+        };
+        let continue_run_body = production_text()
+            .split("pub(crate) async fn continue_run(")
+            .nth(1)
+            .expect("continue_run is in this file")
+            .to_owned();
+        let mut scanned = Vec::new();
+        scanned.extend(pairs(&item_text("fn continue_turn_gate(", "\n}\n")));
+        scanned.extend(pairs(&item_text("fn continue_preflight(", "\n}\n")));
+        scanned.extend(pairs(&continue_run_body));
+        assert!(scanned.len() >= 8, "the scan found only {scanned:?}");
+        for (status_name, code) in &scanned {
+            let listed = CONTINUE_HTTP_REFUSALS
+                .iter()
+                .find(|(c, _)| c == code)
+                .unwrap_or_else(|| panic!("`{code}` is sent by the route but not in CONTINUE_HTTP_REFUSALS"));
+            assert_eq!(
+                listed.1.canonical_reason().map(str::to_ascii_uppercase),
+                Some(status_name.replace('_', " ")),
+                "`{code}` is listed with another status than the route sends"
+            );
+        }
+    }
+
+    // ---- the consumer, its request and the map of its answers ----
+
+    /// What a refusal of the consume says to the HTTP caller, if it is a closed one.
+    #[allow(clippy::needless_pass_by_value)]
+    fn closed(refusal: Result<(), PreconsumeRefusal>) -> Option<(StatusCode, &'static str)> {
+        match refusal {
+            Err(PreconsumeRefusal::Closed(status, code)) => Some((status, code)),
+            _ => None,
+        }
+    }
+
+    const EVERY_CODE: [tonic::Code; 17] = [
+        tonic::Code::Ok,
+        tonic::Code::Cancelled,
+        tonic::Code::Unknown,
+        tonic::Code::InvalidArgument,
+        tonic::Code::DeadlineExceeded,
+        tonic::Code::NotFound,
+        tonic::Code::AlreadyExists,
+        tonic::Code::PermissionDenied,
+        tonic::Code::ResourceExhausted,
+        tonic::Code::FailedPrecondition,
+        tonic::Code::Aborted,
+        tonic::Code::OutOfRange,
+        tonic::Code::Unimplemented,
+        tonic::Code::Internal,
+        tonic::Code::Unavailable,
+        tonic::Code::DataLoss,
+        tonic::Code::Unauthenticated,
+    ];
+
+    #[test]
+    fn the_preconsume_request_spends_without_reading_the_call() {
+        let request = preconsume_request("org-1", "run-1", "appr-1", "claim-1");
+        assert_eq!(request.org_id, "org-1");
+        assert_eq!(request.run_id, "run-1");
+        assert_eq!(request.approval_id, "appr-1");
+        assert_eq!(request.claim_token, "claim-1");
+        assert!(request.omit_call, "the gateway spends; it never holds the approved call");
+        assert!(request.step_id.is_empty(), "the gateway states no step");
+        assert!(request.action_fingerprint.is_empty(), "the gateway states no fingerprint");
+    }
+
+    /// Only a consume that THIS call won proceeds. An approval already consumed is a
+    /// 409 whatever the claim: another click's, and the same token again (the replay
+    /// that the executor accepts is the executor's, never the gateway's).
+    #[test]
+    fn a_consume_that_did_not_win_is_a_409_before_any_stream_opens() {
+        assert!(matches!(preconsume_refusal(Ok(true)), Ok(())));
+        assert_eq!(
+            closed(preconsume_refusal(Ok(false))),
+            Some((StatusCode::CONFLICT, "continuation_already_consumed"))
+        );
+    }
+
+    /// Every answer of the consume maps to one closed HTTP code, and the code is in
+    /// the closed list with that status. The codes that carry an upstream message are
+    /// mapped from the message only when it is one of the three closed tokens.
+    #[test]
+    fn a_consume_refusal_maps_to_its_closed_http_code() {
+        let status = |code: tonic::Code, message: &str| tonic::Status::new(code, message);
+        let mapped = |code: tonic::Code, message: &str| {
+            closed(preconsume_refusal(Err(status(code, message))))
+        };
+        assert_eq!(
+            mapped(tonic::Code::NotFound, "approval not found"),
+            Some((StatusCode::NOT_FOUND, "approval_not_found"))
+        );
+        for token in ["approval_not_granted", "approval_expired", "approval_not_resumable"] {
+            assert_eq!(
+                mapped(tonic::Code::FailedPrecondition, token),
+                Some((StatusCode::CONFLICT, token)),
+                "{token}"
+            );
+        }
+        assert_eq!(
+            mapped(tonic::Code::FailedPrecondition, "some other precondition"),
+            Some((StatusCode::CONFLICT, "not_resumable"))
+        );
+        assert_eq!(
+            mapped(tonic::Code::InvalidArgument, "anything"),
+            Some((StatusCode::BAD_REQUEST, "continue_incomplete"))
+        );
+        // PermissionDenied and Unauthenticated are answered by `grpc_status_to_http`.
+        for code in [tonic::Code::PermissionDenied, tonic::Code::Unauthenticated] {
+            assert!(
+                matches!(
+                    preconsume_refusal(Err(status(code, "m"))),
+                    Err(PreconsumeRefusal::Status(ref s)) if s.code() == code
+                ),
+                "{code:?}"
+            );
+        }
+        // Everything else is ambiguous by definition: the consume may have committed.
+        for code in EVERY_CODE {
+            if matches!(
+                code,
+                tonic::Code::NotFound
+                    | tonic::Code::FailedPrecondition
+                    | tonic::Code::InvalidArgument
+                    | tonic::Code::PermissionDenied
+                    | tonic::Code::Unauthenticated
+            ) {
+                continue;
+            }
+            assert_eq!(
+                mapped(code, "whatever the server said"),
+                Some((StatusCode::SERVICE_UNAVAILABLE, "continue_unavailable")),
+                "{code:?}"
+            );
+        }
+        // Whatever the map says is a code the route lists, with the status it lists.
+        for code in EVERY_CODE {
+            for message in ["approval_not_granted", "approval_expired", "approval_not_resumable", "x"] {
+                if let Some((status, token)) = mapped(code, message) {
+                    assert!(
+                        CONTINUE_HTTP_REFUSALS.contains(&(token, status)),
+                        "{code:?}/{message}: ({token}, {status}) is not in CONTINUE_HTTP_REFUSALS"
+                    );
+                }
+            }
+        }
+    }
+
+    /// For every code but the two the owner check also passes through, the message of
+    /// the failed consume appears in no HTTP body: the answer is a closed code. For
+    /// those two the answer is `grpc_status_to_http`'s, exactly: the one documented
+    /// place a session-core message text reaches the caller (closed session-core
+    /// wording, never the claim token, which the request never echoes).
+    #[test]
+    fn a_consume_failure_echoes_nothing_but_closed_codes() {
+        const SECRET: &str = "claim-token-9f3a-must-not-appear";
+        for code in EVERY_CODE {
+            let status = tonic::Status::new(code, SECRET);
+            match preconsume_refusal(Err(status.clone())) {
+                Err(PreconsumeRefusal::Closed(http, token)) => {
+                    let (sent, Json(body)) = continue_error(http, token);
+                    assert_eq!(sent, http);
+                    assert!(
+                        !body.to_string().contains(SECRET) && !token.contains(SECRET),
+                        "{code:?} echoed the upstream message: {body}"
+                    );
+                }
+                Err(PreconsumeRefusal::Status(kept)) => {
+                    assert!(
+                        matches!(code, tonic::Code::PermissionDenied | tonic::Code::Unauthenticated),
+                        "{code:?} reaches the caller through grpc_status_to_http"
+                    );
+                    let (sent, Json(body)) = crate::http_routes::grpc_status_to_http(&kept);
+                    let (expected, Json(expected_body)) =
+                        crate::http_routes::grpc_status_to_http(&status);
+                    assert_eq!((sent, body), (expected, expected_body));
+                }
+                other => panic!("{code:?}: a consume failure must refuse, got {other:?}"),
+            }
+        }
+    }
+
+    /// The consumer reads one thing from the consume's answer: whether it was won.
+    /// Scope: `consume_within_bound`, the gRPC consumer's impl and `preconsume_request`,
+    /// by name. The gateway never holds the approved call or its authority.
+    #[test]
+    fn the_gateway_reads_only_the_won_flag_of_a_consume() {
+        let request = item_text("fn preconsume_request(", "\n}\n");
+        assert!(request.contains("omit_call: true"), "{request}");
+        // A struct literal is the type, a brace and a `field: value`; a return type
+        // followed by a body is not (its next token is a path).
+        let literal = regex::Regex::new(r"ConsumeApprovalRequest\s*\{\s*[a-z_]+\s*:\s")
+            .expect("pattern");
+        assert_eq!(
+            literal.find_iter(&production_text()).count(),
+            1,
+            "the gateway builds the consume request in one place"
+        );
+        let consumer = format!(
+            "{}\n{}",
+            item_text("fn consume_within_bound<", "\n}\n"),
+            item_text("impl ApprovalConsumer for GrpcApprovalConsumer {", "\n}\n"),
+        );
+        assert!(consumer.contains(".consumed"), "{consumer}");
+        for forbidden in [
+            ".tool_input_json",
+            ".tool_name",
+            ".authority",
+            ".step_id",
+            ".same_claim",
+            ".already_consumed",
+        ] {
+            assert!(
+                !consumer.contains(forbidden),
+                "the consumer reads {forbidden}: {consumer}"
+            );
+        }
+    }
+
+    /// The consumer is declared `Send + Sync`: the spawned task holds `&C` across an
+    /// await, which makes its future `Send` only if `C: Sync`. Pinned by the build in
+    /// the spawn-bounds test below; this names the declaration itself.
+    #[test]
+    fn the_consumer_trait_declares_send_and_sync() {
+        let production = production_text();
+        assert!(
+            production.contains("trait ApprovalConsumer: Send + Sync {"),
+            "the supertraits carry the spawn bounds to every implementation"
+        );
+    }
+
+    // ---- consume, then launch: the sequencing and the detach ----
+
+    use std::sync::{
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+        Arc, Mutex,
+    };
+
+    type ContinueStream = Sse<ReceiverStream<Result<Event, Infallible>>>;
+
+    fn assert_send_and_static<T: Send + 'static>() {}
+
+    fn assert_send_and_sync<T: Send + Sync>() {}
+
+    /// Compile-time proof that the REAL consumer and the REAL stream type satisfy the
+    /// spawn bounds. It is never called: it fails to BUILD if the trait loses a
+    /// supertrait, the consumer stops being `Sync`, or the stream type stops being
+    /// `Send`. (The bound that was missing in the first design, which made the
+    /// spawned future `!Send`.)
+    #[allow(dead_code)]
+    fn the_real_consumer_can_be_spawned(
+        consumer: GrpcApprovalConsumer,
+    ) -> tokio::sync::oneshot::Receiver<Result<ContinueStream, PreconsumeRefusal>> {
+        spawn_consume_then_launch(
+            consumer,
+            preconsume_request("org-1", "run-1", "appr-1", "claim-1"),
+            || -> ContinueStream { unreachable!("compile-time proof only") },
+        )
+    }
+
+    #[test]
+    fn an_approval_consumer_satisfies_the_spawn_bounds() {
+        assert_send_and_sync::<GrpcApprovalConsumer>();
+        assert_send_and_static::<GrpcApprovalConsumer>();
+        assert_send_and_static::<ContinueStream>();
+        assert_send_and_static::<Result<ContinueStream, PreconsumeRefusal>>();
+        // What the launch closure of the wiring will own: it is moved into the
+        // spawned task, so each of these must be `Send + 'static`.
+        assert_send_and_static::<AppState>();
+        assert_send_and_static::<crate::session_flow::SessionRun>();
+        assert_send_and_static::<VerifiedModelBearer>();
+        assert_send_and_static::<VerifiedExecutionBearer>();
+        assert_send_and_static::<VerifiedBearer>();
+        assert_send_and_static::<VerifiedInferenceBearer>();
+    }
+
+    /// A consumer with a real single-use compare-and-set, as session-core's is. Its
+    /// state is an atomic and a mutex only, so it is `Sync` as the trait demands.
+    #[derive(Default)]
+    struct CasState {
+        winner: Mutex<Option<String>>,
+        calls: AtomicUsize,
+    }
+
+    #[derive(Clone, Default)]
+    struct CasConsumer(Arc<CasState>);
+
+    impl ApprovalConsumer for CasConsumer {
+        async fn consume(
+            &self,
+            request: mp_contracts::model_plane::v1::ConsumeApprovalRequest,
+        ) -> Result<bool, tonic::Status> {
+            self.0.calls.fetch_add(1, Ordering::SeqCst);
+            // The racing requests interleave here, as two requests do at the server.
+            tokio::task::yield_now().await;
+            let mut winner = self.0.winner.lock().expect("the lock is not poisoned");
+            if winner.is_none() {
+                *winner = Some(request.claim_token);
+                Ok(true)
+            } else {
+                Ok(false)
+            }
+        }
+    }
+
+    /// A consumer that answers what it was told to, once.
+    struct ScriptedConsumer(Mutex<Option<Result<bool, tonic::Status>>>);
+
+    impl ApprovalConsumer for ScriptedConsumer {
+        async fn consume(
+            &self,
+            _request: mp_contracts::model_plane::v1::ConsumeApprovalRequest,
+        ) -> Result<bool, tonic::Status> {
+            self.0
+                .lock()
+                .expect("the lock is not poisoned")
+                .take()
+                .expect("one consume per script")
+        }
+    }
+
+    /// Counts how often it was launched and says what it launched.
+    fn counting_launch(launched: &Arc<AtomicUsize>) -> impl FnOnce() -> &'static str + Send + 'static {
+        let launched = Arc::clone(launched);
+        move || {
+            launched.fetch_add(1, Ordering::SeqCst);
+            "launched"
+        }
+    }
+
+    /// Wait, bounded, for a flag another task sets.
+    async fn wait_until(what: &str, condition: impl Fn() -> bool) {
+        let waited = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while !condition() {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await;
+        assert!(waited.is_ok(), "{what} never happened");
+    }
+
+    fn won_or_lost(
+        outcome: Result<Result<&'static str, PreconsumeRefusal>, tokio::sync::oneshot::error::RecvError>,
+    ) -> Result<&'static str, (StatusCode, &'static str)> {
+        match outcome.expect("the task answers") {
+            Ok(launched) => Ok(launched),
+            Err(PreconsumeRefusal::Closed(status, code)) => Err((status, code)),
+            Err(PreconsumeRefusal::Status(status)) => {
+                panic!("an unexpected passthrough status: {status:?}")
+            }
+        }
+    }
+
+    /// The consume comes first, with the request it was given, and the launch only
+    /// after it: the order is a fact the gateway keeps.
+    #[tokio::test]
+    async fn a_launch_follows_its_consume_and_never_precedes_it() {
+        struct Recording(Arc<Mutex<Vec<String>>>);
+        impl ApprovalConsumer for Recording {
+            async fn consume(
+                &self,
+                request: mp_contracts::model_plane::v1::ConsumeApprovalRequest,
+            ) -> Result<bool, tonic::Status> {
+                self.0.lock().unwrap().push(format!(
+                    "consume {} omit_call={}",
+                    request.claim_token, request.omit_call
+                ));
+                Ok(true)
+            }
+        }
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let launch_log = Arc::clone(&log);
+        let launched = consume_then_launch(
+            &Recording(Arc::clone(&log)),
+            preconsume_request("org-1", "run-1", "appr-1", "claim-1"),
+            move || {
+                launch_log.lock().unwrap().push("launch".to_owned());
+                "stream"
+            },
+        )
+        .await;
+        assert!(matches!(launched, Ok("stream")), "{launched:?}");
+        assert_eq!(
+            *log.lock().unwrap(),
+            vec!["consume claim-1 omit_call=true".to_owned(), "launch".to_owned()]
+        );
+    }
+
+    /// Two clicks at once with different tokens: one proceeds, the other is a 409
+    /// before any stream opens, and exactly one continuation is launched.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn two_parallel_continues_with_distinct_tokens_get_one_proceed_and_one_409() {
+        let consumer = CasConsumer::default();
+        let launched = Arc::new(AtomicUsize::new(0));
+        let first = spawn_consume_then_launch(
+            consumer.clone(),
+            preconsume_request("org-1", "run-1", "appr-1", "claim-a"),
+            counting_launch(&launched),
+        );
+        let second = spawn_consume_then_launch(
+            consumer.clone(),
+            preconsume_request("org-1", "run-1", "appr-1", "claim-b"),
+            counting_launch(&launched),
+        );
+        let mut outcomes = vec![won_or_lost(first.await), won_or_lost(second.await)];
+        outcomes.sort_by_key(Result::is_err);
+        assert_eq!(
+            outcomes,
+            vec![
+                Ok("launched"),
+                Err((StatusCode::CONFLICT, "continuation_already_consumed"))
+            ]
+        );
+        assert_eq!(launched.load(Ordering::SeqCst), 1);
+        assert_eq!(consumer.0.calls.load(Ordering::SeqCst), 2);
+    }
+
+    /// The same token twice at once, which the executor treats as a safe replay:
+    /// the gateway still lets exactly one through (the loser is a 409, not a second
+    /// dispatch).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn two_parallel_continues_with_the_same_token_get_one_proceed_and_one_409() {
+        let consumer = CasConsumer::default();
+        let launched = Arc::new(AtomicUsize::new(0));
+        let first = spawn_consume_then_launch(
+            consumer.clone(),
+            preconsume_request("org-1", "run-1", "appr-1", "claim-a"),
+            counting_launch(&launched),
+        );
+        let second = spawn_consume_then_launch(
+            consumer.clone(),
+            preconsume_request("org-1", "run-1", "appr-1", "claim-a"),
+            counting_launch(&launched),
+        );
+        let mut outcomes = vec![won_or_lost(first.await), won_or_lost(second.await)];
+        outcomes.sort_by_key(Result::is_err);
+        assert_eq!(
+            outcomes,
+            vec![
+                Ok("launched"),
+                Err((StatusCode::CONFLICT, "continuation_already_consumed"))
+            ]
+        );
+        assert_eq!(launched.load(Ordering::SeqCst), 1);
+    }
+
+    /// A consumer that is parked mid-RPC until the test lets it answer, and that
+    /// records the moment the server side commits.
+    struct ParkedConsumer {
+        started: Arc<AtomicBool>,
+        gate: Arc<tokio::sync::Notify>,
+        committed: Arc<AtomicBool>,
+    }
+
+    impl ApprovalConsumer for ParkedConsumer {
+        async fn consume(
+            &self,
+            _request: mp_contracts::model_plane::v1::ConsumeApprovalRequest,
+        ) -> Result<bool, tonic::Status> {
+            self.started.store(true, Ordering::SeqCst);
+            self.gate.notified().await;
+            self.committed.store(true, Ordering::SeqCst);
+            Ok(true)
+        }
+    }
+
+    /// The caller goes away while the consume is in flight (a closed browser tab, a
+    /// dropped connection). The consume still commits, and so the launch still
+    /// happens: a spent click always has its dispatch. Without the spawn the future
+    /// is dropped with the caller, the commit flag is never set and this fails.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_dropped_receiver_cannot_spend_an_approval_without_dispatching() {
+        let started = Arc::new(AtomicBool::new(false));
+        let committed = Arc::new(AtomicBool::new(false));
+        let gate = Arc::new(tokio::sync::Notify::new());
+        let launched = Arc::new(AtomicUsize::new(0));
+        let receiver = spawn_consume_then_launch(
+            ParkedConsumer {
+                started: Arc::clone(&started),
+                gate: Arc::clone(&gate),
+                committed: Arc::clone(&committed),
+            },
+            preconsume_request("org-1", "run-1", "appr-1", "claim-1"),
+            counting_launch(&launched),
+        );
+        wait_until("the consume starting", || started.load(Ordering::SeqCst)).await;
+        // The caller is gone, mid-RPC. Then the server answers.
+        drop(receiver);
+        gate.notify_one();
+        wait_until("the server side committing", || committed.load(Ordering::SeqCst)).await;
+        wait_until("the launch after the commit", || launched.load(Ordering::SeqCst) > 0).await;
+        // The launch is a FnOnce: it cannot run twice. Give a second run the chance anyway.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert_eq!(launched.load(Ordering::SeqCst), 1);
+    }
+
+    /// A consume that was not won, and every way a consume can fail, launches
+    /// nothing: a continuation is never started without a spent approval.
+    #[tokio::test]
+    async fn a_launch_that_never_follows_a_lost_consume_does_not_run() {
+        let launched = Arc::new(AtomicUsize::new(0));
+        let lost = ScriptedConsumer(Mutex::new(Some(Ok(false))));
+        let outcome = spawn_consume_then_launch(
+            lost,
+            preconsume_request("org-1", "run-1", "appr-1", "claim-1"),
+            counting_launch(&launched),
+        )
+        .await;
+        assert_eq!(
+            won_or_lost(outcome),
+            Err((StatusCode::CONFLICT, "continuation_already_consumed"))
+        );
+        for code in EVERY_CODE {
+            let refused = ScriptedConsumer(Mutex::new(Some(Err(tonic::Status::new(code, "no")))));
+            let outcome = spawn_consume_then_launch(
+                refused,
+                preconsume_request("org-1", "run-1", "appr-1", "claim-1"),
+                counting_launch(&launched),
+            )
+            .await
+            .expect("the task answers");
+            assert!(outcome.is_err(), "{code:?} must refuse");
+        }
+        assert_eq!(launched.load(Ordering::SeqCst), 0, "no launch without a won consume");
+    }
+
+    /// A consumer that never answers ends ambiguous once the bound has passed:
+    /// 503 `continue_unavailable`, and nothing is launched. The clock is paused, so
+    /// the bound is exact.
+    #[tokio::test(start_paused = true)]
+    async fn a_hung_consume_ends_ambiguous_within_the_bound() {
+        struct Hung;
+        impl ApprovalConsumer for Hung {
+            async fn consume(
+                &self,
+                _request: mp_contracts::model_plane::v1::ConsumeApprovalRequest,
+            ) -> Result<bool, tonic::Status> {
+                consume_within_bound(std::future::pending::<
+                    Result<
+                        tonic::Response<mp_contracts::model_plane::v1::ConsumeApprovalResponse>,
+                        tonic::Status,
+                    >,
+                >())
+                .await
+            }
+        }
+        assert_eq!(PRECONSUME_TIMEOUT, std::time::Duration::from_secs(10));
+        let launched = Arc::new(AtomicUsize::new(0));
+        let started = tokio::time::Instant::now();
+        let outcome = spawn_consume_then_launch(
+            Hung,
+            preconsume_request("org-1", "run-1", "appr-1", "claim-1"),
+            counting_launch(&launched),
+        )
+        .await;
+        let elapsed = started.elapsed();
+        assert_eq!(
+            won_or_lost(outcome),
+            Err((StatusCode::SERVICE_UNAVAILABLE, "continue_unavailable"))
+        );
+        assert!(
+            elapsed >= PRECONSUME_TIMEOUT && elapsed < PRECONSUME_TIMEOUT + std::time::Duration::from_secs(1),
+            "the bound is PRECONSUME_TIMEOUT, took {elapsed:?}"
+        );
+        assert_eq!(launched.load(Ordering::SeqCst), 0);
+    }
+
+    /// The detach lives in one function, and the sequencing function does not detach.
+    /// Scope: `spawn_consume_then_launch` and `consume_then_launch`, by name.
+    #[test]
+    fn the_pre_consume_flow_is_spawned_in_exactly_one_place() {
+        let spawner = item_text("fn spawn_consume_then_launch<", "\n}\n");
+        assert_eq!(spawner.matches("tokio::spawn(").count(), 1, "{spawner}");
+        assert!(spawner.contains("consume_then_launch(&consumer"), "{spawner}");
+        let sequencer = item_text("async fn consume_then_launch<", "\n}\n");
+        assert!(!sequencer.contains("spawn"), "{sequencer}");
+        assert_eq!(
+            production_text().matches("consume_then_launch(&").count(),
+            1,
+            "only spawn_consume_then_launch drives the flow"
+        );
+    }
+
+    // ---- the frames of a continuation that is refused or fails to dispatch ----
+
+    /// One frame as the client receives it: its `event:` name and its JSON payload.
+    async fn frame_of(event: Event) -> (String, Value) {
+        use axum::response::IntoResponse;
+        let body = Sse::new(futures::stream::iter([Ok::<_, Infallible>(event)]))
+            .into_response()
+            .into_body();
+        let bytes = axum::body::to_bytes(body, usize::MAX)
+            .await
+            .expect("the stream body reads");
+        let text = String::from_utf8(bytes.to_vec()).expect("SSE is UTF-8");
+        let name = text
+            .lines()
+            .find_map(|line| line.strip_prefix("event: "))
+            .expect("an event line")
+            .to_owned();
+        let data = text
+            .lines()
+            .find_map(|line| line.strip_prefix("data: "))
+            .expect("a data line");
+        (name, serde_json::from_str(data).expect("a JSON payload"))
+    }
+
+    /// The statuses the executor's refusals of a continuation travel in.
+    const REFUSAL_CARRIERS: [tonic::Code; 5] = [
+        tonic::Code::FailedPrecondition,
+        tonic::Code::Aborted,
+        tonic::Code::InvalidArgument,
+        tonic::Code::PermissionDenied,
+        tonic::Code::Unauthenticated,
+    ];
+
+    fn refused(status: &tonic::Status) -> Option<&'static str> {
+        match classify_continue_dispatch_failure(status) {
+            ContinueDispatchFailure::Refused(token) => Some(token),
+            _ => None,
+        }
+    }
+
+    /// A refused continuation is named by a closed token, never by an upstream
+    /// message: the closed executor tokens on the five carrier codes, an unknown
+    /// message on them as `continue_refused`, `NotFound` as `approval_not_found`, a
+    /// zero-retention trailer by its catalogue code and never its sentence. A request
+    /// that provably never left this process is unreachable; every other transport
+    /// outcome is unknown. Classifying never terminalizes: it is a pure map.
+    #[tokio::test]
+    async fn a_refused_continuation_is_classified_without_terminalizing() {
+        use mp_contracts::model_plane::v1::execution_core_client::ExecutionCoreClient;
+        use mp_contracts::zdr_refusal::Refusal;
+        for code in REFUSAL_CARRIERS {
+            for token in CONTINUE_EXECUTOR_MESSAGE_TOKENS {
+                assert_eq!(
+                    refused(&tonic::Status::new(code, *token)),
+                    Some(*token),
+                    "{code:?}/{token}"
+                );
+            }
+            // A message nobody listed is never echoed.
+            assert_eq!(
+                refused(&tonic::Status::new(code, "a brand new sentence with claim-token-77")),
+                Some("continue_refused"),
+                "{code:?}"
+            );
+            assert_eq!(refused(&tonic::Status::new(code, "")), Some("continue_refused"));
+        }
+        // NotFound is the code's own meaning, whatever it says.
+        assert_eq!(
+            refused(&tonic::Status::not_found("approval not found")),
+            Some("approval_not_found")
+        );
+        assert_eq!(
+            refused(&tonic::Status::not_found("continue_disabled")),
+            Some("approval_not_found")
+        );
+        // The zero-retention trailer is keyed on its catalogue code, not the message,
+        // and wins over a closed token in the message.
+        let zdr = Refusal::DURABLE_MUTATION_FORBIDDEN.grpc_status(tonic::Code::FailedPrecondition);
+        assert_eq!(refused(&zdr), Some("durable_mutation_forbidden"));
+        let zdr_on_other_code =
+            Refusal::DURABLE_MUTATION_FORBIDDEN.grpc_status(tonic::Code::InvalidArgument);
+        assert_eq!(refused(&zdr_on_other_code), Some("durable_mutation_forbidden"));
+        let mut disguised = Refusal::DURABLE_MUTATION_FORBIDDEN.grpc_status(tonic::Code::Aborted);
+        disguised = tonic::Status::with_metadata(
+            tonic::Code::Aborted,
+            "resume_incomplete",
+            disguised.metadata().clone(),
+        );
+        assert_eq!(refused(&disguised), Some("durable_mutation_forbidden"));
+        let other_zdr = Refusal::UNAVAILABLE.grpc_status(tonic::Code::Unavailable);
+        assert_eq!(refused(&other_zdr), Some("continue_refused"), "any other catalogue code");
+
+        // A closed token on a code that is not a carrier is not a refusal.
+        for code in EVERY_CODE {
+            if REFUSAL_CARRIERS.contains(&code) || code == tonic::Code::NotFound {
+                continue;
+            }
+            assert_eq!(
+                refused(&tonic::Status::new(code, "continue_disabled")),
+                None,
+                "{code:?} carries no refusal"
+            );
+        }
+
+        // Transport outcomes: a refused connect is unreachable, the rest unknown.
+        assert!(matches!(
+            classify_continue_dispatch_failure(&tonic::Status::unavailable("shedding load")),
+            ContinueDispatchFailure::Unknown
+        ));
+        for code in EVERY_CODE {
+            if REFUSAL_CARRIERS.contains(&code) || code == tonic::Code::NotFound {
+                continue;
+            }
+            assert!(
+                matches!(
+                    classify_continue_dispatch_failure(&tonic::Status::new(code, "no")),
+                    ContinueDispatchFailure::Unknown
+                ),
+                "{code:?}"
+            );
+        }
+        // A real connect failure against a closed port: the only way to build the
+        // genuine source chain (`Status` has no constructor for one).
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind probe port");
+        let addr = listener.local_addr().expect("probe addr");
+        drop(listener);
+        let mut client = ExecutionCoreClient::new(
+            tonic::transport::Endpoint::from_shared(format!("http://{addr}"))
+                .expect("endpoint")
+                .connect_lazy(),
+        );
+        let unreachable = client
+            .run_agent(RunAgentRequest::default())
+            .await
+            .expect_err("nothing is listening");
+        assert!(
+            matches!(
+                classify_continue_dispatch_failure(&unreachable),
+                ContinueDispatchFailure::Unreachable
+            ),
+            "{unreachable:?}"
+        );
+    }
+
+    /// Everything the classifier and the frame builders can say is in the closed frame
+    /// vocabulary, and together they say all of it: the tokens the failure classes
+    /// produce are set-equal to `CONTINUE_FRAME_REFUSALS`.
+    #[tokio::test]
+    async fn every_frame_token_is_in_the_closed_vocabulary_and_all_of_it_is_reachable() {
+        use mp_contracts::zdr_refusal::Refusal;
+        let mut produced: std::collections::BTreeSet<&'static str> = std::collections::BTreeSet::new();
+        for code in REFUSAL_CARRIERS {
+            for token in CONTINUE_EXECUTOR_MESSAGE_TOKENS {
+                produced.extend(refused(&tonic::Status::new(code, *token)));
+            }
+            produced.extend(refused(&tonic::Status::new(code, "unlisted")));
+        }
+        produced.extend(refused(&tonic::Status::not_found("x")));
+        produced.extend(refused(
+            &Refusal::DURABLE_MUTATION_FORBIDDEN.grpc_status(tonic::Code::FailedPrecondition),
+        ));
+        for failure in [ContinueDispatchFailure::Unreachable, ContinueDispatchFailure::Unknown] {
+            let (_, payload) = frame_of(continue_failure_event("req-1", "run-1", &failure)).await;
+            produced.insert(
+                CONTINUE_FRAME_REFUSALS
+                    .iter()
+                    .copied()
+                    .find(|token| payload["code"] == *token)
+                    .expect("the failure frame's code is in the vocabulary"),
+            );
+        }
+        let vocabulary: std::collections::BTreeSet<&'static str> =
+            CONTINUE_FRAME_REFUSALS.iter().copied().collect();
+        assert_eq!(produced, vocabulary);
+
+        // The literals the new functions state are in the vocabulary too (the map above
+        // proves what they can produce; this proves nobody added an unlisted spelling).
+        let quoted = |text: String| -> Vec<String> {
+            text.split('"')
+                .skip(1)
+                .step_by(2)
+                .filter(|s| s.contains('_') && s.bytes().all(|b| b.is_ascii_lowercase() || b == b'_'))
+                .map(str::to_owned)
+                .collect()
+        };
+        let mut stated = quoted(item_text("fn classify_continue_dispatch_failure(", "\n}\n"));
+        stated.extend(quoted(item_text("fn continue_failure_event(", "\n}\n")));
+        stated.extend(quoted(item_text("fn dispatch_unknown_event(", "\n}\n")));
+        assert!(stated.len() >= 4, "{stated:?}");
+        for token in stated {
+            assert!(
+                CONTINUE_FRAME_REFUSALS.contains(&token.as_str()) || token == "agent_dispatch_unavailable",
+                "`{token}` is not in CONTINUE_FRAME_REFUSALS"
+            );
+        }
+    }
+
+    /// A refusal frame is never retryable and names the run. After a pre-consume it
+    /// says the approval is spent. Without one it says nothing of the spend: the
+    /// executor refused, and the approval state is the client's to re-read.
+    #[tokio::test]
+    async fn a_refusal_frame_is_not_retryable_and_names_the_run() {
+        let (name, spent) = frame_of(continue_refusal_event(
+            "req-1",
+            "run-42",
+            "continuation_already_consumed",
+            ApprovalSpend::SpentByGateway,
+        ))
+        .await;
+        assert_eq!(name, "error");
+        assert_eq!(spent["code"], "continuation_already_consumed");
+        assert_eq!(spent["retryable"], false);
+        assert_eq!(spent["run_id"], "run-42");
+        assert_eq!(spent["request_id"], "req-1");
+        assert_eq!(spent["approval_spent"], true);
+        assert!(spent["message"].as_str().is_some_and(|m| m == "continuation already consumed"));
+
+        let (name, unflagged) = frame_of(continue_refusal_event(
+            "req-1",
+            "run-42",
+            "continue_disabled",
+            ApprovalSpend::NotSpent,
+        ))
+        .await;
+        assert_eq!(name, "error");
+        assert_eq!(unflagged["code"], "continue_disabled");
+        assert_eq!(unflagged["retryable"], false);
+        assert_eq!(unflagged["run_id"], "run-42");
+        assert!(
+            unflagged.get("approval_spent").is_none(),
+            "a refusal the gateway did not pre-consume says nothing of the spend: {unflagged}"
+        );
+
+        // The spent regime's failure frames: closed, not retryable, spent, and never
+        // an agent_dispatch_* code.
+        for (failure, code) in [
+            (ContinueDispatchFailure::Refused("approval_snapshot_mismatch"), "approval_snapshot_mismatch"),
+            (ContinueDispatchFailure::Unreachable, "continue_unreachable"),
+            (ContinueDispatchFailure::Unknown, "continue_outcome_unknown"),
+        ] {
+            let (name, frame) = frame_of(continue_failure_event("req-1", "run-42", &failure)).await;
+            assert_eq!(name, "error");
+            assert_eq!(frame["code"], code);
+            assert_eq!(frame["retryable"], false, "{code}");
+            assert_eq!(frame["run_id"], "run-42", "{code}");
+            assert_eq!(frame["approval_spent"], true, "{code}");
+            assert!(!frame["code"].as_str().unwrap_or_default().starts_with("agent_dispatch"));
+        }
+
+        // The ambiguous outcome keeps its committed frame when the gateway spent
+        // nothing, and is the spent regime's own frame when it did.
+        let (_, committed) = frame_of(agent_dispatch_unavailable_event("req-1", "run-42")).await;
+        let (name, not_spent) =
+            frame_of(dispatch_unknown_event(ApprovalSpend::NotSpent, "req-1", "run-42")).await;
+        assert_eq!((name.as_str(), &not_spent), ("error", &committed));
+        let (_, spent_unknown) =
+            frame_of(dispatch_unknown_event(ApprovalSpend::SpentByGateway, "req-1", "run-42")).await;
+        assert_eq!(spent_unknown["code"], "continue_outcome_unknown");
+        assert_eq!(spent_unknown["retryable"], false);
+        assert_eq!(spent_unknown["approval_spent"], true);
+        assert_eq!(spent_unknown["run_id"], "run-42");
+    }
+
+    /// The first frame of a continuation is byte-identical to the committed one when
+    /// the gateway spent nothing, and says `approval_spent` when it did, so a client
+    /// knows from frame one that it must never post the continue again.
+    #[test]
+    fn connected_payload_adds_only_the_spend_flag() {
+        let committed = json!({
+            "ok": true,
+            "run_id": "run-1",
+            "thread_id": "thread-1",
+            "request_id": "req-1",
+        });
+        let not_spent = connected_payload("run-1", "thread-1", "req-1", ApprovalSpend::NotSpent);
+        assert_eq!(not_spent, committed);
+        assert_eq!(not_spent.to_string(), committed.to_string());
+        let spent = connected_payload("run-1", "thread-1", "req-1", ApprovalSpend::SpentByGateway);
+        let mut expected = committed;
+        expected["approval_spent"] = json!(true);
+        assert_eq!(spent, expected);
+        assert_eq!(spent["ok"], true, "the SPA reads ok on the connected frame");
+    }
+
+    // ---- the real consumer, over a real gRPC transport ----
+
+    type ConsumeAnswer = Result<mp_contracts::model_plane::v1::ConsumeApprovalResponse, tonic::Status>;
+
+    /// What the server saw of one consume: the `authorization` metadata and the request.
+    type SeenConsume = (Option<String>, mp_contracts::model_plane::v1::ConsumeApprovalRequest);
+
+    /// A gRPC server that answers `ConsumeApproval` from a script and nothing else. It
+    /// stands in for session-core's service: the generated trait has two dozen
+    /// methods, and the consumer calls one.
+    #[derive(Clone)]
+    struct ConsumeOnlyServer {
+        seen: Arc<Mutex<Vec<SeenConsume>>>,
+        answers: Arc<Mutex<Vec<ConsumeAnswer>>>,
+    }
+
+    impl tonic::server::NamedService for ConsumeOnlyServer {
+        const NAME: &'static str = "model_plane.v1.OrchestrationCoreService";
+    }
+
+    impl<B> tonic::codegen::Service<tonic::codegen::http::Request<B>> for ConsumeOnlyServer
+    where
+        B: tonic::codegen::Body + Send + 'static,
+        B::Error: Into<tonic::codegen::StdError> + Send + 'static,
+    {
+        type Response = tonic::codegen::http::Response<tonic::body::BoxBody>;
+        type Error = Infallible;
+        type Future = tonic::codegen::BoxFuture<Self::Response, Self::Error>;
+
+        fn poll_ready(
+            &mut self,
+            _cx: &mut tonic::codegen::Context<'_>,
+        ) -> tonic::codegen::Poll<Result<(), Self::Error>> {
+            tonic::codegen::Poll::Ready(Ok(()))
+        }
+
+        fn call(&mut self, request: tonic::codegen::http::Request<B>) -> Self::Future {
+            use mp_contracts::model_plane::v1::{ConsumeApprovalRequest, ConsumeApprovalResponse};
+            let server = self.clone();
+            Box::pin(async move {
+                let handler = tower::service_fn(move |request: tonic::Request<ConsumeApprovalRequest>| {
+                    let server = server.clone();
+                    async move {
+                        let authorization = request
+                            .metadata()
+                            .get("authorization")
+                            .and_then(|value| value.to_str().ok())
+                            .map(str::to_owned);
+                        server
+                            .seen
+                            .lock()
+                            .expect("the lock is not poisoned")
+                            .push((authorization, request.into_inner()));
+                        server
+                            .answers
+                            .lock()
+                            .expect("the lock is not poisoned")
+                            .remove(0)
+                            .map(tonic::Response::new)
+                    }
+                });
+                let mut grpc = tonic::server::Grpc::new(
+                    tonic::codec::ProstCodec::<ConsumeApprovalResponse, ConsumeApprovalRequest>::default(),
+                );
+                Ok(grpc.unary(handler, request).await)
+            })
+        }
+    }
+
+    async fn consumer_over_grpc(
+        answers: Vec<ConsumeAnswer>,
+    ) -> (GrpcApprovalConsumer, Arc<Mutex<Vec<SeenConsume>>>) {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let server = ConsumeOnlyServer {
+            seen: Arc::clone(&seen),
+            answers: Arc::new(Mutex::new(answers)),
+        };
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind the test server");
+        let addr = listener.local_addr().expect("server address");
+        tokio::spawn(async move {
+            tonic::transport::Server::builder()
+                .add_service(server)
+                .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener))
+                .await
+                .ok();
+        });
+        let channel = tonic::transport::Endpoint::from_shared(format!("http://{addr}"))
+            .expect("endpoint")
+            .connect()
+            .await
+            .expect("connect to the test server");
+        let client = mp_contracts::model_plane::v1::orchestration_core_service_client::OrchestrationCoreServiceClient::new(channel);
+        (
+            GrpcApprovalConsumer::new(client, VerifiedModelBearer::for_test("session-jwt-for-test")),
+            seen,
+        )
+    }
+
+    /// The real consumer over a real transport: it presents the run's session bearer,
+    /// sends the spend-only request it was given, answers `true` only for a consume
+    /// that was won (a same-claim replay that carries the approved call is NOT a win,
+    /// and the call it carries is never read), and hands a refusal through as the
+    /// status the server sent.
+    #[tokio::test]
+    async fn the_grpc_consumer_asks_for_the_spend_only_and_reads_only_the_won_flag() {
+        use mp_contracts::model_plane::v1::ConsumeApprovalResponse;
+        let (consumer, seen) = consumer_over_grpc(vec![
+            Ok(ConsumeApprovalResponse {
+                consumed: true,
+                ..Default::default()
+            }),
+            Ok(ConsumeApprovalResponse {
+                consumed: false,
+                already_consumed: true,
+                same_claim: true,
+                tool_name: "shell".to_owned(),
+                tool_input_json: "{\"command\":\"echo\"}".to_owned(),
+                step_id: "s1.tool_1".to_owned(),
+                authority: Some(mp_contracts::model_plane::v1::ApprovedAuthority::default()),
+            }),
+            Err(tonic::Status::not_found("approval not found")),
+        ])
+        .await;
+        let request = preconsume_request("org-1", "run-1", "appr-1", "claim-1");
+        assert!(consumer.consume(request.clone()).await.expect("a won consume"));
+        assert!(
+            !consumer.consume(request.clone()).await.expect("a replay answers"),
+            "a same-claim replay is not a win, whatever it carries"
+        );
+        let refused = consumer.consume(request.clone()).await.expect_err("a refusal");
+        assert_eq!(refused.code(), tonic::Code::NotFound);
+        assert_eq!(
+            closed(preconsume_refusal(Err(refused))),
+            Some((StatusCode::NOT_FOUND, "approval_not_found"))
+        );
+
+        let seen = seen.lock().expect("the lock is not poisoned");
+        assert_eq!(seen.len(), 3);
+        for (authorization, received) in seen.iter() {
+            assert_eq!(authorization.as_deref(), Some("Bearer session-jwt-for-test"));
+            assert_eq!(received, &request, "the server received the spend-only request");
+            assert!(received.omit_call);
+        }
     }
 }

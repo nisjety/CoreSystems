@@ -6077,6 +6077,39 @@ fn run_detail_value(run: &RunDetail) -> Value {
     })
 }
 
+#[cfg(test)]
+mod run_detail_value_tests {
+    use super::*;
+
+    /// `RunDetail` carries two fields about a paused run that stay between the services:
+    /// `resumable` (the executor's hint that a fold can be resumed in place) and
+    /// `park_reason`. The run projection the browser reads is an allowlist, so neither
+    /// reaches it, in either casing, and nor does the value of either.
+    #[test]
+    fn run_detail_value_never_carries_resumable_or_park_reason() {
+        let run = RunDetail {
+            run_id: "run-1".to_owned(),
+            thread_id: "thread-1".to_owned(),
+            status: "awaiting_approval".to_owned(),
+            goal: "a goal".to_owned(),
+            resumable: true,
+            park_reason: "a_closed_park_reason".to_owned(),
+            ..Default::default()
+        };
+        let value = run_detail_value(&run);
+        let object = value.as_object().expect("a run is a JSON object");
+        for key in ["resumable", "park_reason", "parkReason"] {
+            assert!(!object.contains_key(key), "{key} reached the browser projection: {value}");
+        }
+        let text = value.to_string();
+        assert!(!text.contains("a_closed_park_reason"), "{text}");
+        assert!(!text.contains("resumable"), "{text}");
+        // The projection still says what it always said.
+        assert_eq!(value["run_id"], "run-1");
+        assert_eq!(value["status"], "awaiting_approval");
+    }
+}
+
 /// Convert a prost `Timestamp` to an RFC3339 JSON string. An out-of-range value
 /// (it cannot occur for stored Postgres timestamps) falls back to null.
 fn prost_ts_to_rfc3339(ts: &prost_types::Timestamp) -> Value {
