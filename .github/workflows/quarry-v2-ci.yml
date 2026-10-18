@@ -204,6 +204,19 @@ jobs:
       - name: Test workspace
         run: cargo test --workspace
 
+      # The scrape options schema is a golden generated from the Rust type, and
+      # the OpenAPI file is checked against it and against the routes the edge
+      # registers (docs/openapi.yaml, scripts/openapi-route-allowlist.json).
+      - name: Test scrape options schema golden
+        run: cargo test -p quarry-core --features jsonschema --test scrape_schema
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '20'
+
+      - name: OpenAPI route coverage and scrape parity
+        run: node --test scripts/tests/openapi-route-coverage.test.mjs scripts/tests/openapi-scrape-parity.test.mjs
+
       - name: Check quarry-browser (chromiumoxide feature)
         run: cargo check -p quarry-browser --features chromiumoxide
 

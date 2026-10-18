@@ -100,6 +100,50 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Envelope_Error'
+  /v1/scrape/{id}:
+    get:
+      operationId: getScrape
+      summary: Read back an earlier scrape
+      description: >-
+        Returns the record a non-ZDR scrape stored: the normalized output and the
+        effective options, without inline text. The id is the `scrape_id` of the
+        scrape response. Another organization's id, or an id that is not a scrape
+        record, is a 404. A caller whose organization is under ZDR is refused with
+        403, even for a record written before the organization turned ZDR on. A ZDR
+        scrape stores nothing and has no id.
+      tags:
+      - scrape
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+        description: The scrape_id from a scrape response.
+      responses:
+        '200':
+          description: The stored scrape
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+              description: private, max-age=30
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Envelope_ScrapeResponse'
+        '403':
+          description: The caller's organization is under Zero Data Retention
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Envelope_Error'
+        '404':
+          description: No such scrape for this organization
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Envelope_Error'
   /v1/scrape/stream:
     post:
       operationId: scrapeStream
@@ -4363,9 +4407,31 @@ components:
               type: string
     ScrapeRequest:
       type: object
+      additionalProperties: true
+      x-quarry-lenient: >-
+        Keys that are not listed are ignored with an unknown_field warning
+        (and Deprecation and Sunset headers) until the edge runs strict, where
+        they are a 400.
       required:
       - url
       properties:
+        privacy:
+          type: object
+          nullable: true
+          description: Privacy policy for this request (purpose, classification, third-party processing). ZDR raises it.
+        render:
+          type: object
+          nullable: true
+          description: Render hints for the browser driver (waitForSelector, waitForTimeoutMs).
+          properties:
+            waitForSelector:
+              type: string
+            waitForTimeoutMs:
+              type: integer
+        prefer_http3:
+          type: boolean
+          default: false
+          description: Prefer HTTP/3 when the edge was built and configured for it.
         url:
           type: string
           format: uri

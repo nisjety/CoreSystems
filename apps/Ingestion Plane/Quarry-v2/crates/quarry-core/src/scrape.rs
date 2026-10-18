@@ -18,6 +18,7 @@ pub const DEFAULT_INLINE_MAX_BYTES: usize = 1_048_576;
 
 /// A non-fatal note about the result.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "jsonschema", derive(schemars::JsonSchema))]
 pub struct ScrapeWarning {
     /// Stable machine-readable code, e.g. `document_has_no_text_layer`.
     pub code: String,
@@ -115,6 +116,7 @@ pub fn truncate_on_char_boundary(text: &str, max_bytes: usize) -> (String, bool)
 /// A field of a request that is not acceptable, with where and why. A model
 /// that proposed bad options can read these and correct itself.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "jsonschema", derive(schemars::JsonSchema))]
 pub struct FieldError {
     /// JSON path of the field, `formats[1]` or `timeout_ms`.
     pub path: String,
@@ -138,9 +140,10 @@ impl FieldError {
 /// What a scrape can return inline besides the stored artifacts.
 ///
 /// `Links` and `Metadata` are part of every response already; naming them is
-/// accepted and changes nothing. `Html` is the document as fetched, the same
-/// bytes as `RawHtml`, until the HTML-cleaning stage exists.
+/// accepted and changes nothing. `Html` is the HTML the markdown was made from
+/// (after the cleaning options); `RawHtml` is the document as fetched.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "jsonschema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum ScrapeFormat {
@@ -174,6 +177,7 @@ impl ScrapeFormat {
 /// main-content heuristic (`only_main_content`, the default); `CleanFull` keeps
 /// the whole body minus scripts and chrome; `Raw` converts the document as it is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "jsonschema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum Extractor {
     #[default]
@@ -196,6 +200,7 @@ impl Extractor {
 /// The options a caller may put at the root of a `/v1/scrape` body, as sent.
 /// Every field is optional; `resolve` turns this into what the run uses.
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
+#[cfg_attr(feature = "jsonschema", derive(schemars::JsonSchema))]
 pub struct ScrapeOptions {
     pub formats: Option<Vec<ScrapeFormat>>,
     pub only_main_content: Option<bool>,
@@ -650,6 +655,7 @@ impl ResolvedScrapeOptions {
 
 /// Whether the page cache was consulted for this response.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "jsonschema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum CacheState {
     Hit,
@@ -661,6 +667,7 @@ pub enum CacheState {
 /// The options a response was produced with, so a caller (or a model) can see
 /// what was applied and what was not.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "jsonschema", derive(schemars::JsonSchema))]
 pub struct EffectiveScrapeOptions {
     pub formats: Vec<ScrapeFormat>,
     pub only_main_content: bool,

@@ -1,0 +1,95 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ScrapeOptions",
+  "description": "The options a caller may put at the root of a `/v1/scrape` body, as sent.\nEvery field is optional; `resolve` turns this into what the run uses.",
+  "type": "object",
+  "properties": {
+    "exclude_tags": {
+      "type": [
+        "array",
+        "null"
+      ],
+      "items": {
+        "type": "string"
+      }
+    },
+    "extractor": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Extractor"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "formats": {
+      "type": [
+        "array",
+        "null"
+      ],
+      "items": {
+        "$ref": "#/$defs/ScrapeFormat"
+      }
+    },
+    "include_tags": {
+      "type": [
+        "array",
+        "null"
+      ],
+      "items": {
+        "type": "string"
+      }
+    },
+    "max_inline_bytes": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint64",
+      "minimum": 0
+    },
+    "only_main_content": {
+      "type": [
+        "boolean",
+        "null"
+      ]
+    },
+    "remove_base64_images": {
+      "type": [
+        "boolean",
+        "null"
+      ]
+    },
+    "timeout_ms": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint64",
+      "minimum": 0
+    }
+  },
+  "$defs": {
+    "Extractor": {
+      "description": "Which content extractor shapes the markdown. `Readability` is the\nmain-content heuristic (`only_main_content`, the default); `CleanFull` keeps\nthe whole body minus scripts and chrome; `Raw` converts the document as it is.",
+      "type": "string",
+      "enum": [
+        "readability",
+        "clean_full",
+        "raw"
+      ]
+    },
+    "ScrapeFormat": {
+      "description": "What a scrape can return inline besides the stored artifacts.\n\n`Links` and `Metadata` are part of every response already; naming them is\naccepted and changes nothing. `Html` is the HTML the markdown was made from\n(after the cleaning options); `RawHtml` is the document as fetched.",
+      "type": "string",
+      "enum": [
+        "markdown",
+        "html",
+        "raw_html",
+        "links",
+        "metadata"
+      ]
+    }
+  }
+}

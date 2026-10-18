@@ -1,0 +1,119 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "EffectiveScrapeOptions",
+  "description": "The options a response was produced with, so a caller (or a model) can see\nwhat was applied and what was not.",
+  "type": "object",
+  "properties": {
+    "cache_state": {
+      "$ref": "#/$defs/CacheState"
+    },
+    "doc_routing": {
+      "type": "string"
+    },
+    "exclude_tags": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "extractor": {
+      "$ref": "#/$defs/Extractor"
+    },
+    "formats": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/ScrapeFormat"
+      }
+    },
+    "ignored_fields": {
+      "description": "Accepted options this version does not apply, and unknown request keys\nthat were ignored.",
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "include_tags": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "max_inline_bytes": {
+      "type": "integer",
+      "format": "uint",
+      "minimum": 0
+    },
+    "only_main_content": {
+      "type": "boolean"
+    },
+    "remove_base64_images": {
+      "type": "boolean"
+    },
+    "strict": {
+      "description": "Unknown keys were rejected (strict) rather than ignored (lenient).",
+      "type": "boolean"
+    },
+    "timeout_ms": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0
+    },
+    "zdr": {
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "formats",
+    "only_main_content",
+    "include_tags",
+    "exclude_tags",
+    "remove_base64_images",
+    "extractor",
+    "timeout_ms",
+    "max_inline_bytes",
+    "zdr",
+    "ignored_fields",
+    "cache_state",
+    "doc_routing",
+    "strict"
+  ],
+  "$defs": {
+    "CacheState": {
+      "description": "Whether the page cache was consulted for this response.",
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "hit",
+            "miss"
+          ]
+        },
+        {
+          "description": "Not used: ZDR, non-default options or an explicit `cache: off`.",
+          "type": "string",
+          "const": "bypass"
+        }
+      ]
+    },
+    "Extractor": {
+      "description": "Which content extractor shapes the markdown. `Readability` is the\nmain-content heuristic (`only_main_content`, the default); `CleanFull` keeps\nthe whole body minus scripts and chrome; `Raw` converts the document as it is.",
+      "type": "string",
+      "enum": [
+        "readability",
+        "clean_full",
+        "raw"
+      ]
+    },
+    "ScrapeFormat": {
+      "description": "What a scrape can return inline besides the stored artifacts.\n\n`Links` and `Metadata` are part of every response already; naming them is\naccepted and changes nothing. `Html` is the HTML the markdown was made from\n(after the cleaning options); `RawHtml` is the document as fetched.",
+      "type": "string",
+      "enum": [
+        "markdown",
+        "html",
+        "raw_html",
+        "links",
+        "metadata"
+      ]
+    }
+  }
+}
