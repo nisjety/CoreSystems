@@ -109,6 +109,12 @@ GOLDENS=(
   # src/token_request_contract.rs compare it), update the digest here, then re-vendor
   # every copy listed in VENDORED (Auth Core's, CR-T17) and refresh its pin.
   "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/contracts/cross-plane-token-requests.json|0849784e418ef475b18f39a58850a0e06b2a0973032d2c2a60fa80908ef30359"
+
+  # WS4.G: the ZDR feature matrix, what Zero Data Retention does to each route. Generated
+  # from quarry_core::zdr_matrix::ROWS by the owner's test, never written by hand:
+  #   QUARRY_UPDATE_GOLDEN=1 cargo test -p quarry-core zdr_matrix
+  # in "apps/Ingestion Plane/Quarry-v2". The .sha256 pin beside it carries the same digest.
+  "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/contracts/zdr-feature-matrix.json|aebe9ef015e14dcf9042011f7160adef2f1c2b3ca394eac5850a25bc9966d6cc"
 )
 
 # "<repo-relative copy>|<repo-relative golden>"
