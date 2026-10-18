@@ -356,15 +356,18 @@ pub(crate) async fn claim(
     .await
     .map_err(internal)?;
     let Some((seq, ciphertext, segment_no, authority_digest, kind)) = row else {
-        // The same continuation asking again while its own lease is live is told
-        // so, which is not the same as losing the pause to someone else.
+        // The same continuation asking again, for the same pause, while its own lease
+        // is live is told so, which is not the same as losing the pause to someone
+        // else. The pause reference is part of the question: a holder of the token who
+        // names another pause is not holding that one.
         let held: Option<(bool,)> = sqlx::query_as(
             "SELECT COALESCE(state = 'resuming' AND claim_token_hash = $2
-                             AND claim_expires_at > now(), false)
+                             AND pause_ref = $3 AND claim_expires_at > now(), false)
                FROM run_loop_checkpoints WHERE run_id = $1",
         )
         .bind(run_id)
         .bind(&token_hash)
+        .bind(pause_ref)
         .fetch_optional(&mut *tx)
         .await
         .map_err(internal)?;
@@ -567,9 +570,9 @@ pub(crate) mod test_support {
     }
 
     /// End a run with a raw write that does not purge its fold, the way a row that
-    /// outlived its run (written before the end-of-run guard) came to exist. Kept
-    /// here so the source scan that pairs every status write with a purge can
-    /// leave this file out.
+    /// outlived its run (written before the end-of-run guard) came to exist. It is
+    /// test-only, so the source scan that pairs every status write with a purge
+    /// skips it with the rest of the `#[cfg(test)]` items.
     pub(crate) async fn end_run_without_purge(pool: &PgPool, run_id: &str) {
         sqlx::query(
             "UPDATE runs SET status = 'cancelled', ended_at = now(), updated_at = now() WHERE id = $1",
@@ -670,7 +673,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn park_reason_accepts_only_the_closed_tokens() {
+    async fn park_reason_refuses_free_text_and_takes_only_the_closed_tokens() {
         use super::test_support::fold_for;
         // The valid tokens are the closed set.
         for token in [
@@ -719,30 +722,458 @@ mod tests {
         (code, status.message())
     }
 
-    /// A run that ends leaves no fold behind, and that holds only if every place
-    /// that writes a terminal status also calls `purge_run`. This is a tripwire,
-    /// not a proof: it counts the two in the source of every other file (test code
-    /// included), so a new terminal writer that forgets the purge breaks it.
+    /// The source scan the tripwire below is built on. It is a text heuristic over
+    /// the production code of `src/`, not a parser: see the tripwire's comment.
+    mod status_write_scan {
+        pub(super) struct Scan {
+            pub(super) status_writes: usize,
+            pub(super) purge_calls: usize,
+        }
+
+        pub(super) fn scan(source: &str) -> Scan {
+            let code = production_code(source);
+            Scan {
+                status_writes: status_writes(&code),
+                purge_calls: purge_calls(&code),
+            }
+        }
+
+        /// A comment, or a string or char literal, and the index just past it.
+        enum Lexeme {
+            Comment(usize),
+            Literal(usize),
+        }
+
+        fn is_ident(c: char) -> bool {
+            c.is_alphanumeric() || c == '_'
+        }
+
+        /// The comment or literal that starts at `i`, if one does. Strings and char
+        /// literals matter because a `{`, `}` or `//` inside one must not be read as
+        /// code; comments because a statement quoted in one is not a write.
+        fn lexeme_at(chars: &[char], i: usize) -> Option<Lexeme> {
+            let next = chars.get(i + 1).copied();
+            match chars[i] {
+                '/' if next == Some('/') => {
+                    let end = (i..chars.len()).find(|&j| chars[j] == '\n');
+                    Some(Lexeme::Comment(end.unwrap_or(chars.len())))
+                }
+                '/' if next == Some('*') => {
+                    let (mut j, mut depth) = (i + 2, 1_usize);
+                    while j < chars.len() && depth > 0 {
+                        match (chars[j], chars.get(j + 1).copied()) {
+                            ('/', Some('*')) => {
+                                depth += 1;
+                                j += 2;
+                            }
+                            ('*', Some('/')) => {
+                                depth -= 1;
+                                j += 2;
+                            }
+                            _ => j += 1,
+                        }
+                    }
+                    Some(Lexeme::Comment(j))
+                }
+                'r' | 'b' if i == 0 || !is_ident(chars[i - 1]) => prefixed_string(chars, i),
+                '"' => Some(Lexeme::Literal(string_end(chars, i))),
+                '\'' => char_literal_end(chars, i).map(Lexeme::Literal),
+                _ => None,
+            }
+        }
+
+        /// The end of the plain string whose opening quote is at `open`.
+        fn string_end(chars: &[char], open: usize) -> usize {
+            let mut j = open + 1;
+            while j < chars.len() {
+                match chars[j] {
+                    '\\' => j += 2,
+                    '"' => return j + 1,
+                    _ => j += 1,
+                }
+            }
+            chars.len()
+        }
+
+        /// A raw string (`r"..."`, `r#"..."#`, `br"..."`) or a byte string (`b"..."`).
+        fn prefixed_string(chars: &[char], i: usize) -> Option<Lexeme> {
+            let mut j = i + usize::from(chars[i] == 'b');
+            if chars.get(j) != Some(&'r') {
+                let byte_string = chars[i] == 'b' && chars.get(i + 1) == Some(&'"');
+                return byte_string.then(|| Lexeme::Literal(string_end(chars, i + 1)));
+            }
+            j += 1;
+            let hashes = chars[j..].iter().take_while(|&&c| c == '#').count();
+            j += hashes;
+            if chars.get(j) != Some(&'"') {
+                return None;
+            }
+            let closes = |k: usize| {
+                chars[k] == '"' && (1..=hashes).all(|n| chars.get(k + n) == Some(&'#'))
+            };
+            let end = (j + 1..chars.len()).find(|&k| closes(k)).map(|k| k + 1 + hashes);
+            Some(Lexeme::Literal(end.unwrap_or(chars.len())))
+        }
+
+        /// The end of the char literal that starts at `i`, or `None` for a lifetime.
+        fn char_literal_end(chars: &[char], i: usize) -> Option<usize> {
+            match (chars.get(i + 1), chars.get(i + 2)) {
+                (Some('\\'), _) => {
+                    let close = (i + 3..chars.len()).find(|&j| chars[j] == '\'');
+                    Some(close.map_or(chars.len(), |j| j + 1))
+                }
+                (Some(c), Some('\'')) if *c != '\'' => Some(i + 3),
+                _ => None,
+            }
+        }
+
+        /// The index just past the `{ ... }` block that opens at `open`.
+        fn skip_braces(chars: &[char], open: usize) -> usize {
+            let (mut i, mut depth) = (open, 0_usize);
+            while i < chars.len() {
+                if let Some(lexeme) = lexeme_at(chars, i) {
+                    i = match lexeme {
+                        Lexeme::Comment(end) | Lexeme::Literal(end) => end,
+                    };
+                    continue;
+                }
+                match chars[i] {
+                    '{' => depth += 1,
+                    '}' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            return i + 1;
+                        }
+                    }
+                    _ => {}
+                }
+                i += 1;
+            }
+            chars.len()
+        }
+
+        /// The index just past the item that follows a `#[cfg(test)]` attribute at
+        /// `i`: up to its closing brace, or to its `;` when it has no body. Brackets
+        /// and parentheses are tracked so the `;` in `[u8; 4]` is not an item end.
+        fn skip_item(chars: &[char], mut i: usize) -> usize {
+            let mut nesting = 0_i32;
+            while i < chars.len() {
+                if let Some(lexeme) = lexeme_at(chars, i) {
+                    i = match lexeme {
+                        Lexeme::Comment(end) | Lexeme::Literal(end) => end,
+                    };
+                    continue;
+                }
+                match chars[i] {
+                    '(' | '[' => nesting += 1,
+                    ')' | ']' => nesting -= 1,
+                    ';' if nesting <= 0 => return i + 1,
+                    '{' if nesting <= 0 => return skip_braces(chars, i),
+                    _ => {}
+                }
+                i += 1;
+            }
+            chars.len()
+        }
+
+        /// The source with its comments blanked and every `#[cfg(test)]` item removed
+        /// (a file that opens with `#![cfg(test)]` has no production code at all).
+        /// Strings are kept: the SQL is in them.
+        fn production_code(source: &str) -> String {
+            const TEST_ONLY: &str = "#[cfg(test)]";
+            if source.lines().any(|line| line.trim() == "#![cfg(test)]") {
+                return String::new();
+            }
+            let chars: Vec<char> = source.chars().collect();
+            let marker: Vec<char> = TEST_ONLY.chars().collect();
+            let mut out = String::with_capacity(source.len());
+            let mut i = 0;
+            while i < chars.len() {
+                match lexeme_at(&chars, i) {
+                    Some(Lexeme::Comment(end)) => {
+                        out.push(' ');
+                        i = end;
+                    }
+                    Some(Lexeme::Literal(end)) => {
+                        out.extend(&chars[i..end]);
+                        i = end;
+                    }
+                    None if chars[i..].starts_with(&marker) => {
+                        out.push(' ');
+                        i = skip_item(&chars, i + marker.len());
+                    }
+                    None => {
+                        out.push(chars[i]);
+                        i += 1;
+                    }
+                }
+            }
+            out
+        }
+
+        /// The code with whitespace collapsed and lower-cased, so a statement split
+        /// over lines, or written in lower case, reads the same.
+        fn flatten(code: &str) -> String {
+            code.split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+                .to_ascii_lowercase()
+        }
+
+        /// How many `UPDATE runs` statements assign the `status` column.
+        fn status_writes(code: &str) -> usize {
+            let flat = flatten(code);
+            let (mut rest, mut count) = (flat.as_str(), 0);
+            while let Some(at) = rest.find("update ") {
+                let standalone = !rest[..at].chars().next_back().is_some_and(is_ident);
+                rest = &rest[at + "update ".len()..];
+                if standalone && assigns_status_of_runs(rest) {
+                    count += 1;
+                }
+            }
+            count
+        }
+
+        /// Whether the statement that begins at `statement` (just past `UPDATE `)
+        /// updates `runs` and names `status` among the columns it sets.
+        fn assigns_status_of_runs(statement: &str) -> bool {
+            let end = statement.find([';', '"']).unwrap_or(statement.len());
+            let statement = &statement[..end];
+            let statement = statement.strip_prefix("only ").unwrap_or(statement);
+            let table: String = statement
+                .chars()
+                .take_while(|&c| is_ident(c) || c == '.')
+                .collect();
+            if table.rsplit('.').next() != Some("runs") {
+                return false;
+            }
+            let Some(set_at) = statement.find(" set ") else {
+                return false;
+            };
+            let list = &statement[set_at + " set ".len()..];
+            let list_end = [" where ", " returning ", " from "]
+                .iter()
+                .filter_map(|keyword| list.find(keyword))
+                .min()
+                .unwrap_or(list.len());
+            set_targets(&list[..list_end]).iter().any(|column| column == "status")
+        }
+
+        /// The column names a SET list assigns: `a = 1, b = f(x, y)` gives `a`, `b`,
+        /// and `(a, b) = (1, 2)` gives both. Commas inside parentheses or quotes do
+        /// not split.
+        fn set_targets(list: &str) -> Vec<String> {
+            let (mut pieces, mut start) = (Vec::new(), 0);
+            let (mut depth, mut quoted) = (0_i32, false);
+            for (at, c) in list.char_indices() {
+                match c {
+                    '\'' => quoted = !quoted,
+                    '(' if !quoted => depth += 1,
+                    ')' if !quoted => depth -= 1,
+                    ',' if !quoted && depth == 0 => {
+                        pieces.push(&list[start..at]);
+                        start = at + 1;
+                    }
+                    _ => {}
+                }
+            }
+            pieces.push(&list[start..]);
+
+            let mut targets = Vec::new();
+            for piece in pieces {
+                let piece = piece.trim();
+                if let Some(group) = piece.strip_prefix('(') {
+                    let names = group.split(')').next().unwrap_or_default();
+                    targets.extend(names.split(',').map(|name| name.trim().to_owned()));
+                    continue;
+                }
+                let name: String = piece.chars().take_while(|&c| is_ident(c)).collect();
+                if piece[name.len()..].trim_start().starts_with('=') {
+                    targets.push(name);
+                }
+            }
+            targets
+        }
+
+        /// How many calls to `purge_run` the code makes; its definition is not one.
+        fn purge_calls(code: &str) -> usize {
+            let flat = flatten(code);
+            flat.match_indices("purge_run(")
+                .filter(|(at, _)| !flat[..*at].ends_with("fn "))
+                .count()
+        }
+    }
+
+    fn writes(source: &str) -> usize {
+        status_write_scan::scan(source).status_writes
+    }
+
     #[test]
-    fn every_run_status_write_outside_the_fold_module_is_paired_with_a_purge() {
-        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-        let (mut status_writes, mut purges) = (0_usize, 0_usize);
-        for entry in std::fs::read_dir(&dir).expect("read src") {
+    fn a_status_assignment_is_found_wherever_it_sits_in_the_statement() {
+        let found = [
+            r#"q("UPDATE runs SET status = 'x' WHERE id = $1");"#,
+            r#"q("UPDATE runs SET ended_at = now(), status = $2 WHERE id = $1");"#,
+            r#"q("UPDATE runs SET updated_at = now(), status = 'awaiting_approval' WHERE id = $1");"#,
+            "q(\"UPDATE runs\n   SET mode = $2,\n       status = $3\n WHERE id = $1\");",
+            r#"q("update runs set status = 'x'");"#,
+            r#"q("UPDATE runs AS r SET status = 'x' WHERE r.id = $1");"#,
+            r#"q("UPDATE ONLY runs SET status = 'x'");"#,
+            r#"q("UPDATE public.runs SET status = 'x'");"#,
+            r#"q("UPDATE runs SET (status, ended_at) = ('x', now())");"#,
+            r#"q("UPDATE runs SET status='x'");"#,
+        ];
+        for source in found {
+            assert_eq!(writes(source), 1, "{source}");
+        }
+        assert_eq!(writes(&found[..2].join("\n")), 2, "two statements count twice");
+    }
+
+    #[test]
+    fn an_update_that_does_not_assign_the_status_column_is_not_a_status_write() {
+        let not_found = [
+            r#"q("UPDATE runs SET metadata = COALESCE(metadata, '{}'::jsonb) || $4::jsonb, updated_at = now() WHERE id = $1");"#,
+            r#"q("UPDATE runs SET mode = $2, metadata = metadata || $4::jsonb WHERE id = $1 RETURNING id, mode");"#,
+            r#"q("UPDATE runs SET final_output = $2, updated_at = now() WHERE id = $1");"#,
+            r#"q("UPDATE runs SET retention_class = 'persistent', waiver_ack_id = NULL WHERE id = $1");"#,
+            r#"q("UPDATE runs SET goal = CASE WHEN status = 'failed' THEN 'a' ELSE goal END WHERE id = $1");"#,
+            r#"q("UPDATE runs SET ended_status = 'x' WHERE id = $1");"#,
+            r#"q("UPDATE runs SET updated_at = now() WHERE id = $1 AND status = 'running'");"#,
+            r#"q("UPDATE runs_archive SET status = 'x'");"#,
+            r#"q("UPDATE plans SET status = $1 WHERE id = $3 AND status IN ('draft')");"#,
+            r#"q("SELECT status FROM runs WHERE id = $1");"#,
+        ];
+        for source in not_found {
+            assert_eq!(writes(source), 0, "{source}");
+        }
+    }
+
+    #[test]
+    fn comments_and_test_only_items_are_not_production_code() {
+        let write = r#"q("UPDATE runs SET status = 'x'");"#;
+        assert_eq!(writes(&format!("// {write}")), 0);
+        assert_eq!(writes(&format!("/// {write}")), 0);
+        assert_eq!(writes(&format!("/* {write} */")), 0);
+        assert_eq!(writes(&format!("/* outer /* nested */ {write} */ fn f() {{}}")), 0);
+
+        // The test module holds braces in a string, a raw string and two char
+        // literals, and a lifetime precedes it; the production write after it counts.
+        let template = r##"
+fn before<'a>(x: &'a str) -> &'a str { x }
+#[cfg(test)]
+mod tests {
+    fn f() { let _ = "}"; let _ = '}'; let _ = '{'; let _ = r#"}"#; WRITE }
+}
+fn after() { WRITE }
+"##;
+        assert_eq!(writes(&template.replace("WRITE", write)), 1);
+
+        // A test-only fn with an array type in its signature, a use, and a module
+        // declared in another file: each is skipped, the write after them counts.
+        let template = r##"
+#[cfg(test)]
+fn helper(x: [u8; 4]) -> u8 { WRITE x[0] }
+#[cfg(test)]
+use std::fmt;
+#[cfg(test)]
+#[allow(dead_code)]
+mod seeded;
+fn after() { WRITE }
+"##;
+        assert_eq!(writes(&template.replace("WRITE", write)), 1);
+
+        // `cfg(not(test))` is production; a raw string is code too.
+        assert_eq!(writes(&format!("#[cfg(not(test))]\nfn f() {{ {write} }}")), 1);
+        assert_eq!(writes("let s = r#\"UPDATE runs SET status = 'x'\"#;"), 1);
+        // A file that is test-only as a whole has no production code.
+        assert_eq!(writes(&format!("#![cfg(test)]\nfn f() {{ {write} }}")), 0);
+    }
+
+    #[test]
+    fn a_purge_call_is_a_call_in_production_code_not_the_definition() {
+        let purges = |source: &str| status_write_scan::scan(source).purge_calls;
+        assert_eq!(purges("fn a() { crate::loop_checkpoint::purge_run(tx, id).await; }"), 1);
+        assert_eq!(purges("pub(crate) async fn purge_run(tx: &mut T) {}"), 0);
+        assert_eq!(purges("// purge_run(tx)\nfn a() {}"), 0);
+        assert_eq!(purges("#[cfg(test)] mod t { fn a() { purge_run(tx); } }"), 0);
+    }
+
+    /// Source files that carry a status write which is not a product terminal write
+    /// and are not already skipped as `#[cfg(test)]` (for instance a module declared
+    /// `#[cfg(test)] mod x;` whose whole file seeds test data). Path under `src/`,
+    /// with the reason. Empty today: every test-seeding write sits in a
+    /// `#[cfg(test)]` module of its file, which the scan leaves out. An entry that
+    /// no longer matches a write fails the tripwire, so the list cannot go stale.
+    const TEST_SEEDING_WRITES: &[(&str, &str)] = &[];
+
+    fn rust_sources(dir: &std::path::Path, found: &mut Vec<std::path::PathBuf>) {
+        for entry in std::fs::read_dir(dir).expect("read a source directory") {
             let path = entry.expect("dir entry").path();
-            if path.extension().and_then(|ext| ext.to_str()) != Some("rs")
-                || path.file_name().and_then(|name| name.to_str()) == Some("loop_checkpoint.rs")
-            {
+            if path.is_dir() {
+                rust_sources(&path, found);
+            } else if path.extension().and_then(|ext| ext.to_str()) == Some("rs") {
+                found.push(path);
+            }
+        }
+    }
+
+    /// A run that ends leaves no fold behind, and that should hold only if every
+    /// place that writes a run's status also calls `purge_run`. This is a HEURISTIC
+    /// TRIPWIRE, not a proof. It reads the production code of every file under
+    /// `src/` as text (comments and `#[cfg(test)]` items left out), finds each
+    /// `UPDATE runs` statement whose SET list assigns `status` in any order, and
+    /// requires the same file to call `purge_run` at least as often. It cannot see
+    /// that the purge is in the same transaction, in the same branch, or reached at
+    /// all, and it cannot see a status written through some other statement shape.
+    /// The proof is the per-path database tests in this module, which end a run
+    /// through each production path and read the fold table back.
+    #[test]
+    fn every_run_status_write_is_paired_with_a_purge() {
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut files = Vec::new();
+        rust_sources(&src, &mut files);
+        files.sort();
+        let mut with_writes = 0_usize;
+        let (mut unpaired, mut allowlist_used) = (Vec::new(), Vec::new());
+        for path in &files {
+            let relative = path
+                .strip_prefix(&src)
+                .expect("under src")
+                .to_string_lossy()
+                .replace('\\', "/");
+            let source = std::fs::read_to_string(path).expect("read source");
+            let found = status_write_scan::scan(&source);
+            if found.status_writes == 0 {
                 continue;
             }
-            let source = std::fs::read_to_string(&path).expect("read source");
-            let normalised = source.split_whitespace().collect::<Vec<_>>().join(" ");
-            status_writes += normalised.matches("UPDATE runs SET status").count();
-            purges += normalised.matches("purge_run(").count();
+            if let Some((entry, _reason)) =
+                TEST_SEEDING_WRITES.iter().find(|(file, _)| *file == relative)
+            {
+                allowlist_used.push(*entry);
+                continue;
+            }
+            with_writes += 1;
+            if found.purge_calls < found.status_writes {
+                unpaired.push(format!(
+                    "{relative}: {} status write(s), {} purge_run call(s)",
+                    found.status_writes, found.purge_calls
+                ));
+            }
         }
-        assert!(status_writes >= 3, "the scan found {status_writes} status writes; it is not reading the sources");
-        assert_eq!(
-            status_writes, purges,
-            "every `UPDATE runs SET status` must be paired with a `purge_run(` in the same transaction"
+        assert!(
+            with_writes >= 3,
+            "the scan found status writes in {with_writes} files; it is not reading the sources"
+        );
+        for (file, reason) in TEST_SEEDING_WRITES {
+            assert!(
+                allowlist_used.contains(file),
+                "the allowlist entry {file} ({reason}) matches no status write; remove it"
+            );
+        }
+        assert!(
+            unpaired.is_empty(),
+            "every `UPDATE runs` that assigns status must be paired with a `purge_run(` call in \
+             the same file (add the purge in the same transaction, or allowlist a test-only \
+             file): {unpaired:#?}"
         );
     }
 
@@ -1059,12 +1490,21 @@ mod tests {
             .await
             .expect("age the obligation");
 
-            // The recovery worker claims any due obligation in the database, so this
-            // asserts on this run rather than on the count it recovered.
-            let recovered = crate::terminalization::recover_due_terminalizations(&pool)
-                .await
-                .expect("recover");
-            assert!(recovered >= 1);
+            // The recovery worker claims any due obligation in the database, and one
+            // pass takes at most a batch, so in a shared database this run may not be
+            // in the first batch. Pass again, bounded, until this run is terminal, and
+            // assert on this run rather than on the count recovered.
+            for _ in 0..100 {
+                crate::terminalization::recover_due_terminalizations(&pool)
+                    .await
+                    .expect("recover");
+                if run_status(&pool, &run_id).await == "failed" {
+                    break;
+                }
+                // Not terminal yet: this run was past the batch, or another worker
+                // holds its lease. Give that a moment instead of spinning.
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
 
             assert_eq!(run_status(&pool, &run_id).await, "failed");
             assert_eq!(fold_rows(&pool, &run_id).await, 0);
@@ -1073,6 +1513,9 @@ mod tests {
         #[tokio::test]
         #[ignore = "requires DATABASE_URL to a scratch Postgres"]
         async fn loop_checkpoint_org_erasure_removes_the_fold() {
+            // This proves the OUTCOME: after an org is erased no fold is left. It does
+            // not prove which statement removed it, because the foreign key from
+            // `run_loop_checkpoints` to `runs` cascades and covers the fold too.
             let Some(pool) = scratch_pool().await else { return };
             let (run_id, org, _user) = seed_run(&pool, "persistent").await;
             seed_fold(&pool, &run_id, "round", "", "", None)
@@ -1201,6 +1644,19 @@ mod tests {
                 .expect_err("the lease is live");
             assert_eq!(held.code(), tonic::Code::Aborted);
             assert_eq!(held.message(), "loop_checkpoint_claim_held");
+
+            // The same token naming a DIFFERENT pause is not holding that pause: the
+            // probe asks about the pause reference too, so this is not claimable, not
+            // held. The live lease on the real pause is left as it was.
+            let other_pause = claim(&pool, &cipher(), &run_id, "appr_2", "token-a")
+                .await
+                .expect_err("the token holds appr_1, not appr_2");
+            assert_eq!(other_pause.code(), tonic::Code::FailedPrecondition);
+            assert_eq!(other_pause.message(), "loop_checkpoint_not_claimable");
+            let still_held = claim(&pool, &cipher(), &run_id, "appr_1", "token-a")
+                .await
+                .expect_err("the lease on appr_1 is still live");
+            assert_eq!(still_held.message(), "loop_checkpoint_claim_held");
 
             // Another continuation lost the pause: not claimable.
             let lost = claim(&pool, &cipher(), &run_id, "appr_1", "token-b")

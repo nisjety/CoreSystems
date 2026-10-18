@@ -59,6 +59,35 @@ mod tests {
         assert_eq!(ParkReason::ReauthRequired.as_str(), "reauth_required");
     }
 
+    /// The position of each reason in `ParkReason::ALL`. The match has no wildcard
+    /// arm on purpose: a new variant does not compile until it is given an index
+    /// here, and the test below then fails until `ALL` lists it at that index.
+    const fn index_in_all(reason: ParkReason) -> usize {
+        match reason {
+            ParkReason::CredentialWindow => 0,
+            ParkReason::ProviderExhausted => 1,
+            ParkReason::UpstreamUnavailable => 2,
+            ParkReason::CrashInterrupted => 3,
+            ParkReason::ReauthRequired => 4,
+        }
+    }
+
+    #[test]
+    fn all_lists_every_variant_once_at_the_index_the_exhaustive_match_names() {
+        for (position, reason) in ParkReason::ALL.into_iter().enumerate() {
+            assert_eq!(index_in_all(reason), position, "{reason:?}");
+        }
+        // Every index the match can return is a slot of `ALL`, and no two reasons
+        // share one: the indexes are exactly 0..len.
+        let mut seen = vec![false; ParkReason::ALL.len()];
+        for reason in ParkReason::ALL {
+            let slot = &mut seen[index_in_all(reason)];
+            assert!(!*slot, "{reason:?} is listed twice");
+            *slot = true;
+        }
+        assert!(seen.iter().all(|listed| *listed));
+    }
+
     #[test]
     fn parse_rejects_everything_outside_the_closed_set() {
         for bad in [

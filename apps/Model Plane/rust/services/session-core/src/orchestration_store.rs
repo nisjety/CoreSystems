@@ -2270,10 +2270,11 @@ mod approval_consume_db_tests {
         grant(&pool, &seed, &late).await;
 
         // Seeds a status in a scratch database. It is not a terminal write of the
-        // product (no fold exists here to purge), and it is written so that the
-        // `every_run_status_write_outside_the_fold_module_is_paired_with_a_purge`
-        // tripwire, which counts production writers, does not count it.
-        sqlx::query("UPDATE runs SET updated_at = now(), status = 'awaiting_approval' WHERE id = $1")
+        // product (no fold exists here to purge). The status-write tripwire in
+        // `loop_checkpoint` skips `#[cfg(test)]` modules, so this module is not counted.
+        sqlx::query(
+            "UPDATE runs SET status = 'awaiting_approval', updated_at = now() WHERE id = $1",
+        )
             .bind(&seed.run_id)
             .execute(&pool)
             .await
@@ -2288,7 +2289,7 @@ mod approval_consume_db_tests {
         );
 
         for ended in ["completed", "failed", "cancelled"] {
-            sqlx::query("UPDATE runs SET ended_at = now(), status = $2 WHERE id = $1")
+            sqlx::query("UPDATE runs SET status = $2, ended_at = now() WHERE id = $1")
                 .bind(&seed.run_id)
                 .bind(ended)
                 .execute(&pool)

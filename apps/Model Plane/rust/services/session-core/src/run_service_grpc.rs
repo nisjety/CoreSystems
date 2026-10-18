@@ -20,6 +20,7 @@
 #![allow(clippy::result_large_err)]
 
 use chrono::Utc;
+use mp_contracts::loop_fold::ParkReason;
 use mp_contracts::model_plane::v1::{
     self as pb,
     run_service_server::{RunService, RunServiceServer},
@@ -188,6 +189,9 @@ struct RunRow {
     checkpoint_index: i64,
     /// The run's retention receipt. A fold is only ever resumable for `persistent`.
     retention_class: String,
+    /// Who owns the run. It decides who may read `park_reason`; it is never put on
+    /// the wire.
+    owner_user_id: String,
     /// The durable loop fold's state, from a LEFT JOIN: `None` when the run has no
     /// fold. The fold's content and digests are never selected.
     fold_state: Option<String>,
@@ -392,6 +396,7 @@ const RUN_SELECT: &str = "SELECT
             WHERE c.run_id = r.id
         ), 0)::bigint AS checkpoint_index,
         r.retention_class,
+        r.user_id AS owner_user_id,
         lc.state AS fold_state,
         lc.kind AS fold_kind,
         (lc.claim_expires_at < now()) AS fold_claim_expired,
@@ -411,8 +416,18 @@ fn fold_is_claimable(state: Option<&str>, claim_expired: bool) -> bool {
     }
 }
 
+/// Whether `viewer` may read a run's `park_reason`. Reading the run's status is not
+/// enough: the reason can reveal a delegated-credential window, so it goes only to
+/// the run's owner and to a service principal (model-gateway reads it as one). A
+/// person who can read a system-owned run through the org-wide read, or a Space
+/// peer who can list a thread's runs, gets `resumable` but no reason.
+fn may_read_park_reason(viewer: &VerifiedIdentity, owner_user_id: &str) -> bool {
+    viewer.is_service()
+        || (!owner_user_id.is_empty() && viewer.user_id() == Some(owner_user_id))
+}
+
 #[allow(clippy::cast_sign_loss)]
-fn row_to_detail(row: RunRow, store_enabled: bool) -> pb::RunDetail {
+fn row_to_detail(row: RunRow, store_enabled: bool, viewer: &VerifiedIdentity) -> pb::RunDetail {
     // The derived counters are non-negative by construction (MAX over a
     // non-negative ordinal, COUNT(*)), so the unsigned cast cannot wrap.
     let steps_completed = u32::try_from(row.steps_completed).unwrap_or(u32::MAX);
@@ -431,8 +446,19 @@ fn row_to_detail(row: RunRow, store_enabled: bool) -> pb::RunDetail {
     // The reason follows the fold's kind, not its state: a claim moves a parked
     // fold to `resuming` but leaves the kind and the reason, so a parked run whose
     // resume lease lapsed still says why it was parked.
-    let park_reason = if resumable && row.fold_kind.as_deref() == Some("park") {
-        row.fold_park_reason.unwrap_or_default()
+    //
+    // Only a closed token is ever emitted: the column is written through `save`,
+    // which refuses anything else, but the read side does not trust that, so a
+    // value that got in some other way reads as no reason rather than reaching the
+    // wire. And only a caller who may read it gets it (see `may_read_park_reason`).
+    let park_reason = if resumable
+        && row.fold_kind.as_deref() == Some("park")
+        && may_read_park_reason(viewer, &row.owner_user_id)
+    {
+        row.fold_park_reason
+            .as_deref()
+            .and_then(ParkReason::parse)
+            .map_or_else(String::new, |reason| reason.as_str().to_owned())
     } else {
         String::new()
     };
@@ -533,6 +559,7 @@ impl RunService for RunServiceImpl {
             Ok(Response::new(row_to_detail(
                 row,
                 crate::loop_checkpoint::enabled(),
+                &caller,
             )))
         }
         .await;
@@ -714,7 +741,7 @@ impl RunService for RunServiceImpl {
             let runs: Vec<pb::RunDetail> = rows
                 .into_iter()
                 .take(usize::try_from(limit).unwrap_or(usize::MAX))
-                .map(|row| row_to_detail(row, store_enabled))
+                .map(|row| row_to_detail(row, store_enabled, &caller))
                 .collect();
             Ok(Response::new(pb::ListRunsResponse { runs, has_more }))
         }
@@ -802,7 +829,7 @@ impl RunService for RunServiceImpl {
             let runs: Vec<pb::RunDetail> = rows
                 .into_iter()
                 .take(usize::try_from(limit).unwrap_or(usize::MAX))
-                .map(|row| row_to_detail(row, store_enabled))
+                .map(|row| row_to_detail(row, store_enabled, &caller))
                 .collect();
 
             Ok(Response::new(pb::ListRunsResponse { runs, has_more }))
@@ -1241,12 +1268,13 @@ mod tests {
             steps_completed: 3,
             checkpoint_index: 2,
             retention_class: "persistent".to_owned(),
+            owner_user_id: "owner_1".to_owned(),
             fold_state: None,
             fold_kind: None,
             fold_claim_expired: None,
             fold_park_reason: None,
         };
-        let detail = row_to_detail(row, false);
+        let detail = row_to_detail(row, false, &owner_viewer());
         assert_eq!(detail.run_id, "run_01");
         assert_eq!(detail.thread_id, "thr_01");
         assert_eq!(detail.parent_run_id, "");
@@ -1276,12 +1304,13 @@ mod tests {
             steps_completed: 0,
             checkpoint_index: 0,
             retention_class: "persistent".to_owned(),
+            owner_user_id: "owner_1".to_owned(),
             fold_state: None,
             fold_kind: None,
             fold_claim_expired: None,
             fold_park_reason: None,
         };
-        let detail = row_to_detail(row, false);
+        let detail = row_to_detail(row, false, &owner_viewer());
         assert_eq!(detail.parent_run_id, "run_parent");
         assert_eq!(detail.final_output, "the answer");
         assert_eq!(detail.error, "");
@@ -1316,11 +1345,17 @@ mod tests {
             steps_completed: 0,
             checkpoint_index: 0,
             retention_class: retention_class.to_owned(),
+            owner_user_id: "owner_1".to_owned(),
             fold_state: fold_state.map(str::to_owned),
             fold_kind: fold_kind.map(str::to_owned),
             fold_claim_expired,
             fold_park_reason: fold_park_reason.map(str::to_owned),
         }
+    }
+
+    /// The run owner `fold_row` builds its rows for.
+    fn owner_viewer() -> VerifiedIdentity {
+        VerifiedIdentity::user_for_test("org_1", "owner_1")
     }
 
     #[test]
@@ -1350,6 +1385,7 @@ mod tests {
                         let detail = row_to_detail(
                             fold_row(status, retention, state, kind, expired, reason),
                             store_enabled,
+                            &owner_viewer(),
                         );
                         let expected = store_enabled
                             && retention == "persistent"
@@ -1383,6 +1419,7 @@ mod tests {
                 Some("credential_window"),
             ),
             true,
+            &owner_viewer(),
         );
         assert!(detail.resumable);
         assert_eq!(detail.park_reason, "");
@@ -1403,6 +1440,7 @@ mod tests {
                 Some("credential_window"),
             ),
             true,
+            &owner_viewer(),
         );
         assert!(lapsed.resumable);
         assert_eq!(lapsed.park_reason, "credential_window");
@@ -1418,9 +1456,118 @@ mod tests {
                 Some("credential_window"),
             ),
             true,
+            &owner_viewer(),
         );
         assert!(!live.resumable);
         assert_eq!(live.park_reason, "");
+    }
+
+    #[test]
+    fn loop_checkpoint_a_park_reason_outside_the_closed_set_is_never_surfaced() {
+        // The column is written only through `save`, which refuses anything but a
+        // closed token. The read side does not rely on that: a value that got in some
+        // other way (an old build, a manual write) is dropped, not copied to the wire.
+        for stored in [
+            "free text about a user",
+            "token=abc",
+            "CREDENTIAL_WINDOW",
+            "credential_window ",
+            " credential_window",
+            "",
+        ] {
+            let detail = row_to_detail(
+                fold_row(
+                    "running",
+                    "persistent",
+                    Some("parked"),
+                    Some("park"),
+                    Some(false),
+                    Some(stored),
+                ),
+                true,
+                &owner_viewer(),
+            );
+            assert!(detail.resumable, "{stored:?}: the run is still resumable");
+            assert_eq!(detail.park_reason, "", "{stored:?}");
+        }
+        for reason in ParkReason::ALL {
+            let detail = row_to_detail(
+                fold_row(
+                    "running",
+                    "persistent",
+                    Some("parked"),
+                    Some("park"),
+                    Some(false),
+                    Some(reason.as_str()),
+                ),
+                true,
+                &owner_viewer(),
+            );
+            assert_eq!(detail.park_reason, reason.as_str());
+        }
+    }
+
+    #[test]
+    fn loop_checkpoint_park_reason_is_read_only_by_the_owner_or_a_service() {
+        // park_reason can reveal a delegated-credential window, so reading a run's
+        // status is not enough to read it. resumable is not secret: model-gateway
+        // reads it as a service caller and a peer's UI may show a resume button.
+        let parked = |owner: &str| {
+            let mut row = fold_row(
+                "running",
+                "persistent",
+                Some("parked"),
+                Some("park"),
+                Some(false),
+                Some("credential_window"),
+            );
+            row.owner_user_id = owner.to_owned();
+            row
+        };
+        let viewers: [(&str, &str, VerifiedIdentity, bool); 6] = [
+            ("the owner", "owner_1", owner_viewer(), true),
+            (
+                "another member of the org",
+                "owner_1",
+                VerifiedIdentity::user_for_test("org_1", "peer_1"),
+                false,
+            ),
+            (
+                "a service principal",
+                "owner_1",
+                VerifiedIdentity::service_for_test("org_1", &["session:read"], false),
+                true,
+            ),
+            (
+                "a person reading a system run",
+                "service:orchestrator-core",
+                VerifiedIdentity::user_for_test("org_1", "peer_1"),
+                false,
+            ),
+            (
+                "the owning workload reading its own system run",
+                "service:orchestrator-core",
+                VerifiedIdentity::service_for_test_as(
+                    "org_1",
+                    "service:orchestrator-core",
+                    &["session:read"],
+                    false,
+                ),
+                true,
+            ),
+            (
+                "a person whose id is empty",
+                "",
+                VerifiedIdentity::user_for_test("org_1", ""),
+                false,
+            ),
+        ];
+        for (who, owner, viewer, sees_reason) in &viewers {
+            let detail = row_to_detail(parked(owner), true, viewer);
+            assert!(detail.resumable, "{who}: resumable is never blanked");
+            let expected = if *sees_reason { "credential_window" } else { "" };
+            assert_eq!(detail.park_reason, expected, "{who}");
+        }
     }
 
     #[test]
@@ -1620,6 +1767,133 @@ mod tests {
             assert!(!detail.resumable, "{retention}");
             assert_eq!(detail.park_reason, "", "{retention}");
         }
+    }
+
+    async fn park_reason_from_get_run(
+        service: &RunServiceImpl,
+        run_id: &str,
+        caller: VerifiedIdentity,
+    ) -> (bool, String) {
+        let detail = service
+            .get_run(identity_request(
+                pb::GetRunRequest {
+                    run_id: run_id.to_owned(),
+                },
+                caller,
+            ))
+            .await
+            .expect("get run")
+            .into_inner();
+        (detail.resumable, detail.park_reason)
+    }
+
+    async fn park_reason_from_list_system_runs(
+        service: &RunServiceImpl,
+        org: &str,
+        run_id: &str,
+        caller: VerifiedIdentity,
+    ) -> (bool, String) {
+        let listed = service
+            .list_system_runs(identity_request(
+                pb::ListSystemRunsRequest {
+                    org_id: org.to_owned(),
+                    limit: 50,
+                    ..Default::default()
+                },
+                caller,
+            ))
+            .await
+            .expect("list system runs")
+            .into_inner();
+        let run = listed
+            .runs
+            .into_iter()
+            .find(|run| run.run_id == run_id)
+            .expect("the maintenance run is listed");
+        (run.resumable, run.park_reason)
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a scratch Postgres; sets the fold store switch, so run with --test-threads=1"]
+    async fn loop_checkpoint_park_reason_reaches_only_the_owner_and_a_service() {
+        use crate::loop_checkpoint::test_support::{scratch_pool, seed_fold};
+        let Some(pool) = scratch_pool().await else {
+            return;
+        };
+        let _on = StoreOn::new();
+        let until = chrono::Utc::now() + chrono::Duration::hours(1);
+        let service = RunServiceImpl::new(pool.clone());
+
+        // A parked run the owner (a person) can read: the owner sees the reason, a
+        // service sees it, and a service-less peer cannot reach the run at all.
+        let (owned, org, owner) =
+            crate::loop_checkpoint::test_support::seed_run(&pool, "persistent").await;
+        seed_fold(&pool, &owned, "park", "appr_1", "credential_window", Some(until))
+            .await
+            .expect("park fold");
+        let got = park_reason_from_get_run(
+            &service,
+            &owned,
+            VerifiedIdentity::user_for_test(&org, &owner),
+        )
+        .await;
+        assert_eq!(got, (true, "credential_window".to_owned()), "the owner");
+        let got = park_reason_from_get_run(
+            &service,
+            &owned,
+            VerifiedIdentity::service_for_test(&org, &["session:read"], false),
+        )
+        .await;
+        assert_eq!(got, (true, "credential_window".to_owned()), "a service");
+
+        // A maintenance run is system-owned and org-readable, so a peer can read its
+        // status. The peer is told it is resumable and is not told why it is parked.
+        let sfx = new_ulid();
+        let (maint_org, thread_id, run_id) = (
+            format!("pr-org-{sfx}"),
+            format!("pr-t-{sfx}"),
+            format!("pr-r-{sfx}"),
+        );
+        seed_system_thread_and_run(
+            &pool,
+            &maint_org,
+            &thread_id,
+            &run_id,
+            None,
+            "nightly maintenance",
+        )
+        .await;
+        seed_fold(&pool, &run_id, "park", "appr_1", "credential_window", Some(until))
+            .await
+            .expect("park fold");
+        let peer = || VerifiedIdentity::user_for_test(&maint_org, "pr-peer");
+        let service_caller =
+            || VerifiedIdentity::service_for_test(&maint_org, &["session:read"], false);
+
+        assert_eq!(
+            park_reason_from_get_run(&service, &run_id, peer()).await,
+            (true, String::new()),
+            "GetRun, a peer"
+        );
+        assert_eq!(
+            park_reason_from_get_run(&service, &run_id, service_caller()).await,
+            (true, "credential_window".to_owned()),
+            "GetRun, a service"
+        );
+        assert_eq!(
+            park_reason_from_list_system_runs(&service, &maint_org, &run_id, peer()).await,
+            (true, String::new()),
+            "ListSystemRuns, a peer"
+        );
+        assert_eq!(
+            park_reason_from_list_system_runs(&service, &maint_org, &run_id, service_caller())
+                .await,
+            (true, "credential_window".to_owned()),
+            "ListSystemRuns, a service"
+        );
+        // The ListRuns Space-peer branch runs the same per-row projection; it needs a
+        // Control read decision to reach, so the row-level cases are covered by the
+        // `loop_checkpoint_park_reason_is_read_only_by_the_owner_or_a_service` unit test.
     }
 
     // -- resolve_thread_owner ------------------------------------------------

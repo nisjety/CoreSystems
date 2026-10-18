@@ -11778,7 +11778,10 @@ mod tests {
         assert_eq!(fold_rows(&pool, &run_id).await, 0, "the fold goes with the run");
     }
 
-    /// Deleting a thread removes the folds of its runs.
+    /// Deleting a thread removes the folds of its runs. This proves the OUTCOME: no
+    /// fold outlives its thread. It does not prove which statement removed it, since
+    /// the foreign key from `run_loop_checkpoints` to `runs` cascades and covers the
+    /// fold as well.
     #[tokio::test]
     #[ignore = "requires DATABASE_URL to a disposable Postgres"]
     async fn loop_checkpoint_thread_delete_removes_the_fold() {
