@@ -4233,28 +4233,36 @@ fn step_request_body(action: Value, actor: BrowserActionActor) -> Value {
     }
 }
 
-/// A start Quarry refused because a run cap is full (`global_run_cap`,
-/// `org_run_cap` or `org_interactive_run_cap`) as the gateway's own
-/// `browser_capacity_reached` 429 with `Retry-After`. Only the numbers survive;
-/// nothing else from the upstream body is echoed. `None` for any other 429.
+/// A start or call Quarry refused because a cap is full, as the gateway's own
+/// 429 with `Retry-After`. Only the retry hint survives; nothing else from the
+/// upstream body is echoed. `None` for any other 429.
+///
+/// - The run caps (`global_run_cap`, `org_run_cap`, `org_interactive_run_cap`)
+///   and the driver's session cap (`browser_session_cap`, WS3.F) are one thing
+///   to a person: the browser is full, try shortly. `browser_capacity_reached`.
+/// - The driver's page cap (`browser_page_cap`) is a different one: this
+///   browser holds too many tabs, and closing one also helps.
+///   `browser_tab_limit_reached`.
 fn browser_capacity_response(body: &Value) -> Option<Response> {
     let details = body.pointer("/error/details")?;
     let reason = details.get("reason")?.as_str()?;
-    if !matches!(
-        reason,
-        "global_run_cap" | "org_run_cap" | "org_interactive_run_cap"
-    ) {
-        return None;
-    }
+    let (code, message) = match reason {
+        "global_run_cap" | "org_run_cap" | "org_interactive_run_cap" | "browser_session_cap" => (
+            "browser_capacity_reached",
+            "Browser capacity is full. Try again shortly.",
+        ),
+        "browser_page_cap" => (
+            "browser_tab_limit_reached",
+            "The browser has too many tabs open. Close a tab or try again shortly.",
+        ),
+        _ => return None,
+    };
     let retry_after = details
         .get("retry_after_seconds")
         .and_then(Value::as_u64)
         .filter(|seconds| (1..=3600).contains(seconds))
         .unwrap_or(10);
-    let mut response = error(
-        "browser_capacity_reached",
-        "Browser capacity is full. Try again shortly.",
-    );
+    let mut response = error(code, message);
     response["error"]["retryAfterSeconds"] = json!(retry_after);
     Some(
         (
@@ -4266,11 +4274,38 @@ fn browser_capacity_response(body: &Value) -> Option<Response> {
     )
 }
 
+/// A browser session the driver no longer holds (WS3.F), as `410 Gone`: Quarry
+/// answers `502 DRIVER_FAILED` with `details.reason` `session_reaped` (the idle
+/// reaper closed it) or `browser_process_lost` (Chromium exited). Neither is
+/// retryable: repeating the call cannot help, the person starts a new session.
+/// No `Retry-After`. `None` for any other `DRIVER_FAILED` (for example
+/// `viewport_emulation_failed`, `no_current_page`), which passes through.
+fn browser_session_lost_response(body: &Value) -> Option<Response> {
+    if body.pointer("/error/code").and_then(Value::as_str) != Some("DRIVER_FAILED") {
+        return None;
+    }
+    let (code, message) = match body.pointer("/error/details/reason")?.as_str()? {
+        "session_reaped" => (
+            "browser_session_reaped",
+            "This browser session was closed after being idle. Start a new session.",
+        ),
+        "browser_process_lost" => (
+            "browser_process_lost",
+            "The browser behind this session stopped unexpectedly. Start a new session.",
+        ),
+        _ => return None,
+    };
+    Some((StatusCode::GONE, Json(error(code, message))).into_response())
+}
+
 fn forward_quarry_failure(status: StatusCode, body: Value) -> Response {
     if status == StatusCode::TOO_MANY_REQUESTS {
         if let Some(response) = browser_capacity_response(&body) {
             return response;
         }
+    }
+    if let Some(response) = browser_session_lost_response(&body) {
+        return response;
     }
     // Quarry enforces the takeover itself; the SPA only knows the gateway's own
     // code for it, so translate (and keep the control epoch for the caller).
@@ -4418,6 +4453,118 @@ mod tests {
             .unwrap();
         let body: Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(body["error"]["code"], "RATE_LIMITED");
+    }
+
+    async fn body_of(response: Response) -> Value {
+        let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    fn driver_cap_body(reason: &str, retry_after: Value) -> Value {
+        json!({ "error": {
+            "code": "RATE_LIMITED",
+            "message": "browser capacity exhausted",
+            "details": {
+                "reason": reason, "scope": "driver", "limit": 40, "active": 40,
+                "retry_after_seconds": retry_after
+            },
+            "retryable": true
+        }})
+    }
+
+    #[tokio::test]
+    async fn the_driver_session_cap_is_browser_capacity_reached_with_the_retry_hint() {
+        let response = forward_quarry_failure(
+            StatusCode::TOO_MANY_REQUESTS,
+            driver_cap_body("browser_session_cap", json!(15)),
+        );
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(response.headers().get("retry-after").unwrap(), "15");
+        let body = body_of(response).await;
+        assert_eq!(body["error"]["code"], "browser_capacity_reached");
+        assert_eq!(body["error"]["retryAfterSeconds"], 15);
+        let text = body.to_string();
+        assert!(!text.contains("RATE_LIMITED") && !text.contains("browser_session_cap"));
+        assert!(!text.contains("\"limit\"") && !text.contains("\"active\""));
+    }
+
+    #[tokio::test]
+    async fn the_driver_page_cap_is_its_own_code_with_the_retry_hint() {
+        let response = forward_quarry_failure(
+            StatusCode::TOO_MANY_REQUESTS,
+            driver_cap_body("browser_page_cap", json!(15)),
+        );
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(response.headers().get("retry-after").unwrap(), "15");
+        let body = body_of(response).await;
+        assert_eq!(body["error"]["code"], "browser_tab_limit_reached");
+        assert_eq!(body["error"]["retryAfterSeconds"], 15);
+        assert!(!body.to_string().contains("browser_page_cap"));
+    }
+
+    #[tokio::test]
+    async fn a_missing_or_absurd_retry_hint_falls_back_to_ten_seconds() {
+        for hint in [json!(null), json!(0), json!(86_400), json!("soon"), json!(-3)] {
+            let response = forward_quarry_failure(
+                StatusCode::TOO_MANY_REQUESTS,
+                driver_cap_body("browser_session_cap", hint.clone()),
+            );
+            assert_eq!(response.headers().get("retry-after").unwrap(), "10", "{hint}");
+            assert_eq!(body_of(response).await["error"]["retryAfterSeconds"], 10);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_lost_browser_session_is_410_with_its_own_code_and_no_retry_hint() {
+        for (reason, code) in [
+            ("session_reaped", "browser_session_reaped"),
+            ("browser_process_lost", "browser_process_lost"),
+        ] {
+            let quarry = json!({ "error": {
+                "code": "DRIVER_FAILED",
+                "message": "browser session was closed after being idle too long",
+                "details": { "reason": reason },
+                "retryable": false
+            }});
+            let response = forward_quarry_failure(StatusCode::BAD_GATEWAY, quarry);
+            assert_eq!(response.status(), StatusCode::GONE, "{reason}");
+            assert!(response.headers().get("retry-after").is_none(), "{reason}");
+            let body = body_of(response).await;
+            assert_eq!(body["error"]["code"], code);
+            assert!(body["error"].get("retryAfterSeconds").is_none());
+            assert!(!body.to_string().contains("DRIVER_FAILED"), "{reason}");
+        }
+    }
+
+    #[tokio::test]
+    async fn other_driver_failures_and_lookalike_bodies_pass_through_untouched() {
+        for (status, quarry) in [
+            // Another DRIVER_FAILED reason keeps its upstream body.
+            (
+                StatusCode::BAD_GATEWAY,
+                json!({ "error": { "code": "DRIVER_FAILED", "details": { "reason": "no_current_page" } } }),
+            ),
+            (
+                StatusCode::BAD_GATEWAY,
+                json!({ "error": { "code": "DRIVER_FAILED", "details": { "reason": "viewport_emulation_failed" } } }),
+            ),
+            // A lost-session reason under a different code is not ours to map.
+            (
+                StatusCode::BAD_GATEWAY,
+                json!({ "error": { "code": "INTERNAL", "details": { "reason": "session_reaped" } } }),
+            ),
+            // A driver-cap reason on a non-429 is not a cap.
+            (
+                StatusCode::BAD_GATEWAY,
+                json!({ "error": { "code": "DRIVER_FAILED", "details": { "reason": "browser_session_cap" } } }),
+            ),
+        ] {
+            let response = forward_quarry_failure(status, quarry.clone());
+            assert_eq!(response.status(), status);
+            assert_eq!(body_of(response).await, quarry);
+        }
     }
 
     #[tokio::test]
