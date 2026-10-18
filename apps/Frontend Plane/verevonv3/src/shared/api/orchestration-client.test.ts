@@ -1,5 +1,9 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
+  chatRunContinueFrameRefusalOf,
+  chatRunContinueHttpRefusalOf,
+  chatRunContinueSpentConnected,
+  chatRunContinueUnflaggedRefusalOf,
   continueRun,
   decideApproval,
   listApprovals,
@@ -230,5 +234,140 @@ describe('continueRun', () => {
       status: 409,
       code: 'approval_not_granted',
     })
+  })
+
+  function refusedWith(status: number, code: string): void {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        new Response(JSON.stringify({ error: { code, message: code.replaceAll('_', ' ') } }), {
+          status,
+          headers: { 'Content-Type': 'application/json' },
+        }),
+      ),
+    )
+  }
+
+  async function rejectionOf(): Promise<unknown> {
+    try {
+      await continueRun('run_1', 'appr_1', 'claim_1', () => {})
+    } catch (error) {
+      return error
+    }
+    throw new Error('continueRun resolved; a refusal was expected')
+  }
+
+  it('rejects with continuation_already_consumed / 409 and the contract reads it as spent', async () => {
+    refusedWith(409, 'continuation_already_consumed')
+
+    const error = await rejectionOf()
+
+    expect(error).toMatchObject({ status: 409, code: 'continuation_already_consumed' })
+    expect(chatRunContinueHttpRefusalOf(error)).toMatchObject({
+      code: 'continuation_already_consumed',
+      approvalSpent: 'yes',
+      retryable: false,
+      followRun: true,
+    })
+  })
+
+  it('rejects with continue_unavailable / 503 and the contract reads it as unknown, resolved by the same token', async () => {
+    refusedWith(503, 'continue_unavailable')
+
+    const error = await rejectionOf()
+
+    expect(error).toMatchObject({ status: 503, code: 'continue_unavailable' })
+    expect(chatRunContinueHttpRefusalOf(error)).toMatchObject({
+      code: 'continue_unavailable',
+      approvalSpent: 'unknown',
+      retryable: true,
+      followRun: true,
+    })
+  })
+
+  it('does not read a BFF send failure as a refusal: a 502 upstream_unavailable says nothing about the spend', async () => {
+    refusedWith(502, 'upstream_unavailable')
+
+    const error = await rejectionOf()
+
+    expect(error).toMatchObject({ status: 502, code: 'upstream_unavailable' })
+    expect(chatRunContinueHttpRefusalOf(error)).toBeNull()
+  })
+})
+
+describe('the chat.run.continue contract guards, re-exported by the client', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('reads an HTTP refusal only for a listed code and status pair', () => {
+    expect(chatRunContinueHttpRefusalOf({ code: 'approval_not_found', status: 404 })).toMatchObject({
+      approvalSpent: 'no',
+      retryable: false,
+      followRun: false,
+    })
+    expect(chatRunContinueHttpRefusalOf({ code: 'approval_not_found', status: 409 })).toBeNull()
+    expect(chatRunContinueHttpRefusalOf({ code: 'model_error', status: 409 })).toBeNull()
+    expect(chatRunContinueHttpRefusalOf(null)).toBeNull()
+  })
+
+  it('does not treat a frame code without approval_spent true as spent', () => {
+    expect(chatRunContinueFrameRefusalOf({ code: 'not_releasable', retryable: false })).toBeNull()
+    expect(chatRunContinueFrameRefusalOf({ code: 'not_releasable', approval_spent: false })).toBeNull()
+    expect(chatRunContinueFrameRefusalOf({ code: 'not_releasable', approval_spent: true })).toMatchObject({
+      regime: 1,
+      code: 'not_releasable',
+      approvalSpent: 'yes',
+      retryable: false,
+      followRun: true,
+    })
+  })
+
+  it('reads an unflagged tuple code as unknown, not retryable and to be re-read', () => {
+    expect(chatRunContinueUnflaggedRefusalOf({ code: 'continuation_already_consumed', retryable: false })).toEqual({
+      regime: 2,
+      code: 'continuation_already_consumed',
+      approvalSpent: 'unknown',
+      retryable: false,
+      followRun: false,
+      reread: true,
+    })
+  })
+
+  it('gives null for a non-tuple code and for a flagged frame on the unflagged guard', () => {
+    expect(chatRunContinueUnflaggedRefusalOf({ code: 'agent_dispatch_unavailable' })).toBeNull()
+    expect(chatRunContinueUnflaggedRefusalOf({ code: 'not_releasable', approval_spent: true })).toBeNull()
+    expect(chatRunContinueFrameRefusalOf({ code: 'agent_dispatch_unavailable', approval_spent: true })).toBeNull()
+    expect(chatRunContinueUnflaggedRefusalOf({ code: 'unheard_of' })).toBeNull()
+  })
+
+  it('reads the connected frame of a pre-consumed continuation as spent', () => {
+    expect(
+      chatRunContinueSpentConnected({ ok: true, run_id: 'run_1', thread_id: 'thr_1', request_id: 'req_1', approval_spent: true }),
+    ).toMatchObject({ approvalSpent: 'yes', retryable: false, followRun: true })
+    expect(chatRunContinueSpentConnected({ ok: true, run_id: 'run_1', thread_id: 'thr_1', request_id: 'req_1' })).toBeNull()
+  })
+
+  it('relays a spent frame through continueRun untouched, so the SPA reads the flag from the raw data', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        new Response(
+          'event: connected\ndata: {"ok":true,"run_id":"run_1","approval_spent":true}\n\n'
+            + 'event: error\ndata: {"code":"continue_unreachable","retryable":false,"run_id":"run_1","approval_spent":true}\n\n',
+          { status: 200, headers: { 'Content-Type': 'text/event-stream' } },
+        ),
+      ),
+    )
+    const frames: Array<[string, unknown]> = []
+
+    await continueRun('run_1', 'appr_1', 'claim_1', (event) => {
+      frames.push([event.event ?? '', JSON.parse(event.data)])
+    })
+
+    expect(frames.map(([name]) => name)).toEqual(['connected', 'error'])
+    const [connected, refusal] = frames.map(([, data]) => data)
+    expect(chatRunContinueSpentConnected(connected)).not.toBeNull()
+    expect(chatRunContinueFrameRefusalOf(refusal)).toMatchObject({ regime: 1, code: 'continue_unreachable' })
   })
 })

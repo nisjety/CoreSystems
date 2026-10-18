@@ -1050,6 +1050,7 @@ mod tests {
             None,
             None,
             false,
+            &[],
         )
         .await;
         assert_eq!(response.status(), StatusCode::OK);
@@ -1099,6 +1100,7 @@ mod tests {
             None,
             None,
             false,
+            &[],
         )
         .await;
         assert_eq!(response.status(), StatusCode::OK);

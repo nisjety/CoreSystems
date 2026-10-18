@@ -127,6 +127,7 @@ pub(super) async fn stream_chat(
         None,
         Some((&user.user_id, org_id.as_str())),
         effective_zdr,
+        &[],
     )
     .await
 }

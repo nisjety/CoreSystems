@@ -1,6 +1,24 @@
 import { requestJson } from './http'
 import { readSseStream, type SseEvent } from './sse'
 
+// The closed refusal vocabulary of `continueRun` lives in the action contract; the
+// client re-exports its guards so a caller reads a failure from one place.
+export {
+  CHAT_RUN_CONTINUE_FRAME_REFUSALS,
+  CHAT_RUN_CONTINUE_HTTP_REFUSALS,
+  chatRunContinueFrameRefusalOf,
+  chatRunContinueHttpRefusalOf,
+  chatRunContinueSpentConnected,
+  chatRunContinueUnflaggedRefusalOf,
+} from '../actions/chat-run-continue-contract'
+export type {
+  ChatRunContinueEffect,
+  ChatRunContinueFrameRefusal,
+  ChatRunContinueFrameRefusalCode,
+  ChatRunContinueHttpRefusal,
+  ChatRunContinueHttpRefusalCode,
+} from '../actions/chat-run-continue-contract'
+
 // Human-in-the-loop run control for agentic chat runs. These call the gateway
 // `/api/v1/orchestration/*` proxy (→ model-gateway → session-core/execution-core).
 // Used by the chat "internal Claude Code" approval UI + plan mode: when an
@@ -118,7 +136,12 @@ export async function resumeRun(runId: string, signal?: AbortSignal): Promise<vo
  * the tools and authority come from the pause's snapshot upstream, never here.
  *
  * Rejects when the connection or the gateway refuses the continuation, so the
- * caller sees the typed `ApiError` code rather than a stalled stream.
+ * caller sees the typed `ApiError` code rather than a stalled stream. Read that
+ * rejection with `chatRunContinueHttpRefusalOf`, and the frames with
+ * `chatRunContinueSpentConnected`, `chatRunContinueFrameRefusalOf` and
+ * `chatRunContinueUnflaggedRefusalOf`: a rejection none of them reads (a 502
+ * `upstream_unavailable`, a dropped connection) says nothing about whether the
+ * approval was spent, so the approval is re-read before any retry.
  */
 export async function continueRun(
   runId: string,

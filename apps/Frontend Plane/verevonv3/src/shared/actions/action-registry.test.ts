@@ -92,4 +92,34 @@ describe('action registry', () => {
       claimToken: 'claim_1',
     }).success).toBe(true)
   })
+
+  it('pins the continuation input keys and says in its description what a refusal or a spent frame means', () => {
+    const continueRun = getActionDescriptor('chat.run.continue')
+
+    // The wire carries only the three identifiers; nothing else widens a continuation.
+    expect(Object.keys((continueRun?.inputSchema as unknown as { shape: Record<string, unknown> }).shape).sort())
+      .toEqual(['approvalId', 'claimToken', 'runId'])
+    expect(continueRun?.risk).toBe('high')
+    expect(continueRun?.requiresApproval).toBe(false)
+    expect(continueRun?.reversible).toBe(false)
+    expect(isModelExecutableAction('chat.run.continue')).toBe(false)
+
+    const description = continueRun?.description ?? ''
+    // Single use, and where the closed refusals live.
+    expect(description).toContain('single use')
+    expect(description).toContain('chat-run-continue-contract.ts')
+    // A spent frame is final: follow the run, never retry with a new token.
+    expect(description).toContain('approval_spent true')
+    expect(description).toContain('never retry with a new token')
+    // A refusal frame without the flag leaves the approval state unknown.
+    expect(description).toContain('without approval_spent')
+    expect(description).toContain('re-read the approval before any retry')
+    // A failed request that is not a listed refusal says nothing about the spend.
+    expect(description).toContain('upstream_unavailable')
+    // The thread's approved plan and its grant are not consumed.
+    expect(description).toContain('approved plan')
+    expect(description).toContain('not consumed')
+    // The original sentence is kept.
+    expect(description).toContain('the approved call runs once under the authority the pause recorded')
+  })
 })

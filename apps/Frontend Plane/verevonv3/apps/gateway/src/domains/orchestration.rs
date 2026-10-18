@@ -573,6 +573,54 @@ fn continue_upstream_body(body: &ContinueRunBody) -> Option<Value> {
     }))
 }
 
+/// The refusals model-gateway's continue route answers before any stream opens,
+/// that the browser is told by their closed code: (code, upstream status, fixed
+/// message). The messages are this BFF's own words; an upstream message is never
+/// relayed. A code relays only under its own status, so a body that merely names a
+/// code does not turn another failure into it. Mirrored by the SPA's
+/// `CHAT_RUN_CONTINUE_HTTP_REFUSALS` and pinned against it and against the
+/// gateway's list in `tests/continue_error_vocabulary.rs`.
+///
+/// Not here, on purpose: `continue_incomplete` (this handler's own blank check
+/// answers first) and `missing_bearer` (a 401, which stays `unauthorized`).
+/// Everything else the gateway answers (the owner check, a read, a consume
+/// PermissionDenied or Unauthenticated, a zero-retention typed refusal) stays
+/// `model_error`.
+pub(crate) const CONTINUE_RELAYED_ERRORS: &[(&str, u16, &str)] = &[
+    (
+        "continue_disabled",
+        409,
+        "Continuing an approved run is not enabled.",
+    ),
+    ("not_resumable", 409, "This run cannot be continued."),
+    (
+        "approval_not_found",
+        404,
+        "The approval was not found for this run.",
+    ),
+    (
+        "approval_not_granted",
+        409,
+        "The approval has not been granted.",
+    ),
+    ("approval_expired", 409, "The approval has expired."),
+    (
+        "approval_not_resumable",
+        409,
+        "The approval is not in a state that can continue the run.",
+    ),
+    (
+        "continuation_already_consumed",
+        409,
+        "This approval has already been used to continue the run.",
+    ),
+    (
+        "continue_unavailable",
+        503,
+        "The continuation could not be confirmed. The same request can be sent again.",
+    ),
+];
+
 /// `POST /api/v1/orchestration/runs/{run_id}/continue` (build plan WS03 S3): resumes
 /// a run that paused for a granted loop approval, relaying the continuation as SSE.
 ///
@@ -580,6 +628,15 @@ fn continue_upstream_body(body: &ContinueRunBody) -> Option<Value> {
 /// model-gateway's continue route verifies this same set (model, session, inference,
 /// execution, data plane). Cost, capability, ingestion and sandbox bearers are not
 /// part of a continuation and are not minted.
+///
+/// A refusal before the stream opens is relayed by its closed code
+/// ([`CONTINUE_RELAYED_ERRORS`]); the SSE body itself is relayed byte for byte, so
+/// the `approval_spent` flag and the closed error frames reach the browser as the
+/// gateway wrote them. A relayed HTTP code is not the whole story for the client: a
+/// request that fails here after it reached model-gateway (a send failure, a
+/// dropped connection) is answered 502 `upstream_unavailable`, and the gateway may
+/// have consumed the approval by then. Only the listed codes say what happened to
+/// the approval; the SPA reads them through `chatRunContinueHttpRefusalOf`.
 pub(crate) async fn continue_run(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
@@ -631,6 +688,7 @@ pub(crate) async fn continue_run(
         None,
         Some((&user.user_id, org_id.as_str())),
         zdr,
+        CONTINUE_RELAYED_ERRORS,
     )
     .await
 }
@@ -666,6 +724,7 @@ mod tests {
     use super::{
         continue_upstream_body, is_retryable_decide_status, mg_post_decide_with_retry_bounded,
         requires_execution_delegation, verification_metrics_path, ContinueRunBody,
+        CONTINUE_RELAYED_ERRORS,
     };
 
     #[test]
@@ -1024,5 +1083,226 @@ mod tests {
             "tool_names": ["shell"],
         });
         assert!(serde_json::from_value::<ContinueRunBody>(with_tools).is_err());
+    }
+
+    const UPSTREAM_TEXT: &str = "UPSTREAM-ONLY-TEXT-must-never-reach-the-client";
+
+    /// The mints `continue_run` makes (model-gateway's dev bearer stands in for the
+    /// model audience, so there is no model mint).
+    async fn mount_continue_token_mocks(server: &wiremock::MockServer) {
+        use wiremock::{
+            matchers::{method, path},
+            Mock, ResponseTemplate,
+        };
+        mount_token_mocks(server).await;
+        Mock::given(method("GET"))
+            .and(path("/api/inference-core/token"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(json!({"token": "inference-test-token"})),
+            )
+            .mount(server)
+            .await;
+        // The org's standing posture. Answered here so the lookup does not wait on
+        // a refused connection (slow on Windows); a record with no posture is not ZDR.
+        Mock::given(method("GET"))
+            .and(path("/api/v1/organizations/org-test"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": {"metadata": {}}})))
+            .mount(server)
+            .await;
+    }
+
+    /// Runs the real `continue_run` handler against a model-gateway that answers
+    /// `/continue` with the given status and body. Returns the status, the JSON
+    /// body and its text as the browser would see them.
+    async fn continue_answered_with(
+        upstream_status: u16,
+        upstream_body: serde_json::Value,
+    ) -> (StatusCode, serde_json::Value, String) {
+        use axum::{
+            extract::{Path, State},
+            response::IntoResponse,
+            Extension,
+        };
+        use http_body_util::BodyExt;
+        use wiremock::{
+            matchers::{method, path},
+            Mock, MockServer, ResponseTemplate,
+        };
+
+        let server = MockServer::start().await;
+        mount_continue_token_mocks(&server).await;
+        Mock::given(method("POST"))
+            .and(path("/v1/orchestration/runs/run-1/continue"))
+            .respond_with(
+                ResponseTemplate::new(upstream_status)
+                    .set_body_raw(upstream_body.to_string(), "application/json"),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let mut state = test_state(false);
+        state.auth_core_url = server.uri();
+        state.model_gateway_url = server.uri();
+        state.org_core_url = server.uri();
+        state.model_gateway_dev_bearer = "dev-model-bearer".into();
+
+        let response = super::continue_run(
+            State(state),
+            Extension(test_user()),
+            HeaderMap::new(),
+            Path("run-1".to_owned()),
+            Json(ContinueRunBody {
+                approval_id: "apr-1".to_owned(),
+                claim_token: "claim-1".to_owned(),
+            }),
+        )
+        .await
+        .into_response();
+        let status = response.status();
+        let bytes = response
+            .into_body()
+            .collect()
+            .await
+            .expect("collect the answer")
+            .to_bytes();
+        let text = String::from_utf8_lossy(&bytes).into_owned();
+        let value = serde_json::from_str(&text).expect("a JSON error envelope");
+        (status, value, text)
+    }
+
+    #[test]
+    fn the_relayed_continue_errors_are_the_eight_closed_codes_with_their_statuses() {
+        let listed: Vec<(&str, u16)> = CONTINUE_RELAYED_ERRORS
+            .iter()
+            .map(|(code, status, _)| (*code, *status))
+            .collect();
+        assert_eq!(
+            listed,
+            vec![
+                ("continue_disabled", 409),
+                ("not_resumable", 409),
+                ("approval_not_found", 404),
+                ("approval_not_granted", 409),
+                ("approval_expired", 409),
+                ("approval_not_resumable", 409),
+                ("continuation_already_consumed", 409),
+                ("continue_unavailable", 503),
+            ]
+        );
+        // The two the gateway sends that the BFF does not relay: its own guard
+        // answers a blank body first, and a missing bearer is `unauthorized` here.
+        for never_relayed in ["continue_incomplete", "missing_bearer"] {
+            assert!(!listed.iter().any(|(code, _)| *code == never_relayed));
+        }
+    }
+
+    #[test]
+    fn every_relayed_continue_message_is_the_bffs_own_and_distinct() {
+        let mut seen = std::collections::BTreeSet::new();
+        for (code, _, message) in CONTINUE_RELAYED_ERRORS {
+            assert!(!message.trim().is_empty(), "{code}");
+            assert!(message.is_ascii(), "{code}");
+            assert!(!message.contains('_'), "{code}: a message is words, not a code");
+            assert!(seen.insert(*message), "{code}: {message} repeats");
+        }
+    }
+
+    #[tokio::test]
+    async fn continue_relays_a_409_with_its_closed_code() {
+        for (code, status, message) in CONTINUE_RELAYED_ERRORS {
+            let (got, body, text) = continue_answered_with(
+                *status,
+                json!({"error": {"code": code, "message": UPSTREAM_TEXT}}),
+            )
+            .await;
+            assert_eq!(got.as_u16(), *status, "{code}");
+            assert_eq!(body["error"]["code"], *code);
+            assert_eq!(body["error"]["message"], *message);
+            assert!(!text.contains(UPSTREAM_TEXT), "{code}: {text}");
+        }
+    }
+
+    #[tokio::test]
+    async fn the_same_upstream_body_through_a_non_continue_call_still_yields_model_error() {
+        use http_body_util::BodyExt;
+        use wiremock::{
+            matchers::{method, path},
+            Mock, MockServer, ResponseTemplate,
+        };
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/relay"))
+            .respond_with(ResponseTemplate::new(409).set_body_raw(
+                json!({"error": {"code": "continuation_already_consumed", "message": UPSTREAM_TEXT}})
+                    .to_string(),
+                "application/json",
+            ))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let response = crate::upstream::proxy_sse_stream_with_data_plane(
+            &test_state(false),
+            reqwest::Method::POST,
+            &format!("{}/relay", server.uri()),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            false,
+            &[],
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let bytes = response.into_body().collect().await.expect("body").to_bytes();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).expect("JSON");
+        assert_eq!(body["error"]["code"], "model_error");
+        assert_eq!(body["error"]["message"], "Model gateway returned 409");
+        assert!(!String::from_utf8_lossy(&bytes).contains(UPSTREAM_TEXT));
+    }
+
+    #[tokio::test]
+    async fn continue_keeps_every_other_upstream_error_closed_and_never_echoes_its_message() {
+        // What a consume PermissionDenied, an Unauthenticated, an owner check or a
+        // ZDR typed refusal looks like from model-gateway: grpc_status_to_http's own
+        // body, with a message the browser must not see. The BFF answers with its
+        // own words and no closed continue code.
+        let cases = [
+            (403, "permission_denied", "model_error"),
+            (401, "unauthenticated", "unauthorized"),
+            (403, "approval_not_found", "model_error"),
+            (404, "continuation_already_consumed", "model_error"),
+            (409, "approval_not_found", "model_error"),
+            (400, "continue_incomplete", "model_error"),
+            (401, "missing_bearer", "unauthorized"),
+            (422, "zdr_feature_not_supported", "model_error"),
+            (500, "internal", "model_error"),
+            (502, "upstream_unavailable", "model_error"),
+        ];
+        for (status, code, expected) in cases {
+            let (got, body, text) = continue_answered_with(
+                status,
+                json!({"error": {"code": code, "message": UPSTREAM_TEXT}}),
+            )
+            .await;
+            assert_eq!(got.as_u16(), status, "{code}");
+            assert_eq!(body["error"]["code"], expected, "{code} under {status}: {text}");
+            assert_eq!(
+                body["error"]["message"],
+                format!("Model gateway returned {status}")
+            );
+            assert!(!text.contains(UPSTREAM_TEXT), "{code}: {text}");
+            assert!(!text.contains(code), "{code}: {text}");
+        }
     }
 }

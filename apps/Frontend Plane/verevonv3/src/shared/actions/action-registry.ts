@@ -2868,7 +2868,7 @@ export const actionRegistry = [
   {
     id: 'chat.run.continue',
     label: 'Continue approved run',
-    description: 'Resume a run that paused for a granted approval: the approved call runs once under the authority the pause recorded, then the same run finishes. Streams the continuation.',
+    description: 'Resume a run that paused for a granted approval: the approved call runs once under the authority the pause recorded, then the same run finishes. Streams the continuation. The claim token is single use. The closed refusals live in chat-run-continue-contract.ts; a failed request that is not one of them, such as a 502 upstream_unavailable, says nothing about whether the approval was spent. A connected or error frame carrying approval_spent true is final: follow the run and never retry with a new token. An error frame from the closed set without approval_spent means the executor refused and the approval state is unknown: re-read the approval before any retry. The thread\'s approved plan and its grant are not consumed.',
     ownerPlane: 'model',
     risk: 'high',
     requiresApproval: false,
