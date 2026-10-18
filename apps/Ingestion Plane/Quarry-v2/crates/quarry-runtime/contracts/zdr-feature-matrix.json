@@ -62,8 +62,7 @@
       },
       "enforced_by": [
         "zdr_claim_floor::durable_crawl_and_batch_are_refused_for_a_zdr_org_user_and_open_otherwise",
-        "zdr_gap_rows::enforced_refusals_hold_for_durable_jobs",
-        "zdr_gap_rows::a_service_principal_with_body_zdr_gets_the_same_refusals"
+        "zdr_gap_rows::enforced_refusals_hold_for_durable_jobs"
       ],
       "id": "durable_jobs",
       "issue": null,
@@ -298,9 +297,7 @@
       "detail": {
         "warning": "the change event and webhook are suppressed; the baseline is still stored"
       },
-      "enforced_by": [
-        "zdr_gap_rows::gap_rows_currently_violate_change_record_internal"
-      ],
+      "enforced_by": [],
       "id": "change_record_internal",
       "issue": "WS4.H: do not persist a baseline when the body declares zdr",
       "log": "log_unverified",
@@ -379,7 +376,7 @@
       },
       "enforced_by": [
         "zdr_claim_floor::a_zdr_org_users_agent_run_cannot_take_a_persistent_profile",
-        "zdr_gap_rows::a_service_principal_with_body_zdr_gets_the_same_refusals"
+        "zdr_gap_rows::a_service_principal_with_body_zdr_gets_the_same_persistent_profile_refusal"
       ],
       "id": "agent_persistent_profile",
       "issue": null,

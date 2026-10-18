@@ -120,7 +120,6 @@ pub const ROWS: &[Row] = &[
         enforced_by: &[
             "zdr_claim_floor::durable_crawl_and_batch_are_refused_for_a_zdr_org_user_and_open_otherwise",
             "zdr_gap_rows::enforced_refusals_hold_for_durable_jobs",
-            "zdr_gap_rows::a_service_principal_with_body_zdr_gets_the_same_refusals",
         ],
         basis: "routes::refuse_durable_job_under_zdr: the job record and per-page results would be retained",
         log: Log::Unverified,
@@ -289,7 +288,9 @@ pub const ROWS: &[Row] = &[
         status: Status::Gap {
             issue: "WS4.H: do not persist a baseline when the body declares zdr",
         },
-        enforced_by: &["zdr_gap_rows::gap_rows_currently_violate_change_record_internal"],
+        // No test here fails if the baseline write stops being true: this binary wires
+        // no baseline store, so the write is unreachable (see the test's own doc).
+        enforced_by: &[],
         basis: "change_routes::emit_change_side_effects returns early under ZDR; record_check has already written the baseline",
         log: Log::Unverified,
     },
@@ -350,7 +351,7 @@ pub const ROWS: &[Row] = &[
         status: Status::Enforced,
         enforced_by: &[
             "zdr_claim_floor::a_zdr_org_users_agent_run_cannot_take_a_persistent_profile",
-            "zdr_gap_rows::a_service_principal_with_body_zdr_gets_the_same_refusals",
+            "zdr_gap_rows::a_service_principal_with_body_zdr_gets_the_same_persistent_profile_refusal",
         ],
         basis: "same route as agent_run: lifecycle::start_run refuses persist_profile or a profile id under ZDR",
         log: Log::Unverified,

@@ -21,8 +21,11 @@
 //! an inversion target (see its doc).
 //!
 //! `enforced_refusals_hold_for_durable_jobs` and
-//! `a_service_principal_with_body_zdr_gets_the_same_refusals` pin refusals the matrix
-//! calls enforced. They keep passing after WS4.H.
+//! `a_service_principal_with_body_zdr_gets_the_same_persistent_profile_refusal` pin
+//! refusals the matrix calls enforced. They keep passing after WS4.H.
+//! `a_service_principal_is_refused_durable_jobs_by_the_scope_gate` pins the route scope
+//! gate's refusal of service principals on the durable routes. That is not the ZDR
+//! refusal, so no matrix row cites it.
 //!
 //! Own binary, on the trimmed harness in `support/zdr_harness.rs`.
 
@@ -425,19 +428,16 @@ async fn enforced_refusals_hold_for_durable_jobs() {
     assert_eq!(control.received_requests().await.unwrap().len(), 2);
 }
 
-/// A service principal's posture is its body flag: the golden `service_model_gateway`
-/// token says `zdr: true` (its registry retention), and that claim is ignored by
-/// design. Sent with `zdr: true` in the body:
-///
-/// * a durable crawl or batch: model-gateway holds no durable-job scope, so the route
-///   scope gate answers 403 before the ZDR refusal can run. That is a refusal, but
-///   the gate's bare 403, not the ZDR message, and no request reaches Control Plane.
-///   It changes if the scope is ever granted.
-/// * an agent run with a persistent profile: execution-core (`service_execution_core`,
-///   which holds `browser:execute`) gets the same ZDR refusal as a ZDR organization's
-///   user, from the body flag alone.
+/// A service principal's durable crawl or batch, sent with `zdr: true` in the body, is
+/// refused by the route scope gate, not by the ZDR refusal. `/v1/crawl` and `/v1/batch`
+/// have no arm in `auth::require_service_route_scope`, so every service principal gets
+/// a bare 403 there, and the body is never read, before
+/// `routes::refuse_durable_job_under_zdr` could run. Nothing reaches Control Plane. This
+/// does not evidence row `durable_jobs`, whose basis is the ZDR refusal for users. It
+/// changes only if a service is ever granted a durable-job scope, and then the ZDR
+/// refusal is what has to hold.
 #[tokio::test]
-async fn a_service_principal_with_body_zdr_gets_the_same_refusals() {
+async fn a_service_principal_is_refused_durable_jobs_by_the_scope_gate() {
     let control = control_plane_double().await;
     let control_url = control.uri();
     let harness = Harness::start_with(move |state| AppState {
@@ -446,52 +446,64 @@ async fn a_service_principal_with_body_zdr_gets_the_same_refusals() {
     })
     .await;
 
-    let model_gateway = golden_token("service_model_gateway");
-    for (route, body) in durable_jobs() {
-        let mut with_flag = body.clone();
-        with_flag["zdr"] = json!(true);
-        let response = harness.post(&model_gateway, route, with_flag).await;
-        assert_eq!(
-            response.status().as_u16(),
-            403,
-            "{route}: the scope gate refuses model-gateway"
-        );
+    for token in [
+        golden_token("service_model_gateway"),
+        golden_token("service_execution_core"),
+    ] {
+        for (route, body) in durable_jobs() {
+            let mut with_flag = body.clone();
+            with_flag["zdr"] = json!(true);
+            let response = harness.post(&token, route, with_flag).await;
+            assert_eq!(
+                response.status().as_u16(),
+                403,
+                "{route}: the route scope gate refuses a service principal"
+            );
+        }
     }
     assert!(
         control.received_requests().await.unwrap().is_empty(),
         "a service's refused durable job never reaches Control Plane"
     );
+}
 
-    if cfg!(feature = "browser-agent") {
-        let user = harness
-            .post(
-                &user_in_zdr_org(),
-                "/v1/agent/runs",
-                json!({ "zdr": false, "persist_profile": true }),
-            )
-            .await;
-        let service = harness
-            .post(
-                &golden_token("service_execution_core"),
-                "/v1/agent/runs",
-                json!({ "zdr": true, "persist_profile": true }),
-            )
-            .await;
-        let user_status = user.status().as_u16();
-        let service_status = service.status().as_u16();
-        let user: Value = user.json().await.unwrap();
-        let service: Value = service.json().await.unwrap();
-        assert_eq!(user_status, 400, "the ZDR user's persistent profile: {user}");
-        assert_eq!(
-            service_status, user_status,
-            "a service's body zdr:true refuses as a ZDR user does: {service}"
+/// A service's persistent-profile refusal, row `agent_persistent_profile`. The body flag
+/// is what counts: `service_execution_core` holds `browser:execute`, so the scope gate
+/// lets it reach `/v1/agent/runs`, and with `zdr: true` in the body it gets the same
+/// `zdr_persistent_profile_forbidden` refusal that a ZDR organization's user gets. Its
+/// own token's `zdr` claim is ignored by design.
+#[cfg(feature = "browser-agent")]
+#[tokio::test]
+async fn a_service_principal_with_body_zdr_gets_the_same_persistent_profile_refusal() {
+    let harness = Harness::start().await;
+    let user = harness
+        .post(
+            &user_in_zdr_org(),
+            "/v1/agent/runs",
+            json!({ "zdr": false, "persist_profile": true }),
+        )
+        .await;
+    let service = harness
+        .post(
+            &golden_token("service_execution_core"),
+            "/v1/agent/runs",
+            json!({ "zdr": true, "persist_profile": true }),
+        )
+        .await;
+    let user_status = user.status().as_u16();
+    let service_status = service.status().as_u16();
+    let user: Value = user.json().await.unwrap();
+    let service: Value = service.json().await.unwrap();
+    assert_eq!(user_status, 400, "the ZDR user's persistent profile: {user}");
+    assert_eq!(
+        service_status, user_status,
+        "a service's body zdr:true refuses as a ZDR user does: {service}"
+    );
+    for payload in [&user, &service] {
+        let message = payload["error"]["message"].as_str().unwrap_or_default();
+        assert!(
+            message.contains("zdr_persistent_profile_forbidden"),
+            "{payload}"
         );
-        for payload in [&user, &service] {
-            let message = payload["error"]["message"].as_str().unwrap_or_default();
-            assert!(
-                message.contains("zdr_persistent_profile_forbidden"),
-                "{payload}"
-            );
-        }
     }
 }

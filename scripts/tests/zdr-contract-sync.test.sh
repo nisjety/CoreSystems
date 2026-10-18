@@ -114,7 +114,7 @@ GOLDENS=(
   # from quarry_core::zdr_matrix::ROWS by the owner's test, never written by hand:
   #   QUARRY_UPDATE_GOLDEN=1 cargo test -p quarry-core zdr_matrix
   # in "apps/Ingestion Plane/Quarry-v2". The .sha256 pin beside it carries the same digest.
-  "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/contracts/zdr-feature-matrix.json|aebe9ef015e14dcf9042011f7160adef2f1c2b3ca394eac5850a25bc9966d6cc"
+  "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/contracts/zdr-feature-matrix.json|a51590ae0ca1e8bf7f3e2d41e5052bc675776bbcccca6663cf14af57fbcc7550"
 )
 
 # "<repo-relative copy>|<repo-relative golden>"
