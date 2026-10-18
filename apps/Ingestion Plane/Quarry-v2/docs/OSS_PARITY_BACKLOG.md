@@ -26,7 +26,7 @@ runtime dep for us (Rust/Go), but its *practice* — read source, not marketing 
 | **`/map`** — fast whole-site URL discovery, relevance-ranked | sitemap.rs + frontier exist, **no endpoint** | ❌ | **P0 `/v1/map`** (reuse sitemap+robots+links+LexicalRanker) |
 | **`/extract`** — prompt+schema across `domain/*` wildcards | per-page StructuredExtractClient only | 🟡 | **P1** multi-URL/wildcard extract fan-out |
 | `agent` (FIRE-1) NL extraction | AgentLoop + Planner exist, not exposed as one call | 🟡 | fold into P1 `/v1/extract {prompt,schema}` |
-| media parsing (PDF/DOCX) | PDF and DOCX text on `/v1/scrape` (`pdf.rs`, `docx.rs`) when `QUARRY_EDGE__DOC_ROUTING=on`; the default `shadow` only detects. The parse runs in a child process under address-space, CPU and file-descriptor limits (`QUARRY_EDGE__DOC_PARSE_ISOLATION`, default `process` on Unix). No OCR, no XLSX, PPTX, ODF or EPUB | 🟡 | OCR for scans; XLSX, PPTX, ODF and EPUB extraction |
+| media parsing (PDF/DOCX) | PDF and DOCX text on `/v1/scrape` (`pdf.rs`, `docx.rs`) when `QUARRY_EDGE__DOC_ROUTING=on`; the default `shadow` only detects. The parse runs in a child process under address-space, CPU and file-descriptor limits (`QUARRY_EDGE__DOC_PARSE_ISOLATION`, default `process` on Unix for the edge binary). No OCR, no XLSX, PPTX, ODF or EPUB | 🟡 | OCR for scans; XLSX, PPTX, ODF and EPUB extraction |
 | MCP server (agents connect in 1 cmd) | none | ⛔ | deferred — **Verevon** is Quarry-v2's client, not external agents |
 | reliability claims (96% web, P95 3.4s) | unproven | 🟡 | benchmark lens → P2 live runs |
 
