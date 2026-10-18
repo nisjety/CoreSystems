@@ -39,7 +39,7 @@ use serde_json::json;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, RwLock};
 use tokio::task::JoinHandle;
 
 use ::chromiumoxide::cdp::browser_protocol::page::{
@@ -134,7 +134,11 @@ struct SessionPages {
 /// Holds a lazy `Browser` handle and per-session `Page` tabs. The CDP event
 /// handler is spawned onto the tokio runtime and aborted on `release`.
 pub struct ChromiumoxideDriver {
-    browser: Arc<Mutex<Option<Browser>>>,
+    /// The running browser. Every CDP call takes the read side, so sessions
+    /// attach, probe and tear down in parallel and a slow `new_page` never
+    /// blocks another session; only a launch, a relaunch and the exit check
+    /// take the write side.
+    browser: Arc<RwLock<Option<Browser>>>,
     pages: Arc<Mutex<HashMap<String, SessionPages>>>,
     handler: Arc<Mutex<Option<JoinHandle<()>>>>,
     /// How many times this driver has launched a browser. A launch is rare
@@ -200,7 +204,7 @@ impl ChromiumoxideDriver {
     pub fn new() -> Self {
         let pool = BrowserPoolConfig::from_env();
         Self {
-            browser: Arc::new(Mutex::new(None)),
+            browser: Arc::new(RwLock::new(None)),
             pages: Arc::new(Mutex::new(HashMap::new())),
             handler: Arc::new(Mutex::new(None)),
             launches: Arc::new(AtomicUsize::new(0)),
@@ -404,12 +408,15 @@ impl ChromiumoxideDriver {
             // Never launched: nothing to probe, and that is ready.
             return;
         }
-        let exited = {
-            let mut guard = self.browser.lock().await;
-            match guard.as_mut() {
+        // `try_wait` needs the write side. Busy (sessions are attaching) means
+        // the browser is answering; the handler task still reports an exit,
+        // and the next tick checks again.
+        let exited = match self.browser.try_write() {
+            Ok(mut guard) => match guard.as_mut() {
                 Some(browser) => matches!(browser.try_wait(), Ok(Some(_))),
                 None => false,
-            }
+            },
+            Err(_) => false,
         };
         if exited {
             self.on_browser_lost(SLOT, generation).await;
@@ -500,7 +507,7 @@ impl ChromiumoxideDriver {
                         .with_details(json!({ "error": error }))
                 })?;
             let page = {
-                let browser_guard = self.browser.lock().await;
+                let browser_guard = self.browser.read().await;
                 let browser = browser_guard.as_ref().ok_or_else(browser_missing)?;
                 browser.new_page(params).await.map_err(|_| {
                     QuarryError::new(ErrorCode::DriverFailed, "probe page did not open")
@@ -564,7 +571,19 @@ impl ChromiumoxideDriver {
     /// `apply_page_hygiene`), so a lease that asks for a different size cannot
     /// close the browser under the other sessions that are using it.
     async fn ensure_browser(&self) -> QuarryResult<()> {
-        let mut guard = self.browser.lock().await;
+        // The common case, a running browser, needs only the read side, so it
+        // never queues behind (or in front of) other sessions' CDP calls.
+        {
+            let guard = self.browser.read().await;
+            let dead = self
+                .book()
+                .slot(SLOT)
+                .is_some_and(|slot| slot.status == SlotStatus::Dead);
+            if guard.is_some() && !dead {
+                return Ok(());
+            }
+        }
+        let mut guard = self.browser.write().await;
         let dead = self
             .book()
             .slot(SLOT)
@@ -700,7 +719,7 @@ impl ChromiumoxideDriver {
         } else {
             CreateBrowserContextParams::default()
         };
-        let browser_guard = self.browser.lock().await;
+        let browser_guard = self.browser.read().await;
         let browser = browser_guard.as_ref().ok_or_else(browser_missing)?;
         with_deadline(Op::TabAttach, async {
             browser
@@ -809,7 +828,7 @@ impl ChromiumoxideDriver {
                 }
             }
             if let Some(context_id) = session_pages.browser_context_id {
-                let browser_guard = self.browser.lock().await;
+                let browser_guard = self.browser.read().await;
                 if let Some(browser) = browser_guard.as_ref() {
                     if let Err(err) = best_effort(
                         Op::ContextClose,
@@ -1029,7 +1048,7 @@ impl ChromiumoxideDriver {
                         .with_details(json!({ "error": error }))
                     })?;
                 {
-                    let browser_guard = self.browser.lock().await;
+                    let browser_guard = self.browser.read().await;
                     let browser = browser_guard.as_ref().ok_or_else(browser_missing)?;
                     with_deadline(Op::TabAttach, async {
                         browser.execute(download_behavior).await.map_err(|error| {
@@ -1060,7 +1079,7 @@ impl ChromiumoxideDriver {
                 .with_details(json!({ "error": e }))
             })?;
         let page = {
-            let browser_guard = self.browser.lock().await;
+            let browser_guard = self.browser.read().await;
             let browser = browser_guard.as_ref().ok_or_else(browser_missing)?;
             with_deadline(Op::TabAttach, async {
                 browser.new_page(new_page_params).await.map_err(|e| {
@@ -1079,6 +1098,7 @@ impl ChromiumoxideDriver {
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             if let Some(stall) = stall {
+                self.hooks.attach_stalled.store(true, Ordering::SeqCst);
                 tokio::time::sleep(stall).await;
             }
         }
@@ -2783,7 +2803,7 @@ impl BrowserDriver for ChromiumoxideDriver {
         // dropping it during a cold launch) and no other acquire holds it.
         let mut rollback = AdmissionRollback::new(self, session_key.clone(), admission_id);
         self.start_background();
-        let startup_mode = if self.browser.lock().await.is_some() && !needs_launch {
+        let startup_mode = if self.browser.read().await.is_some() && !needs_launch {
             BrowserStartupMode::Warm
         } else {
             BrowserStartupMode::Cold
@@ -3120,7 +3140,7 @@ impl BrowserDriver for ChromiumoxideDriver {
         // Chromium process, so the event is additionally tied to this exact
         // target's observed frame before its GUID is accepted.
         let (mut begins, mut progress) = {
-            let browser_guard = self.browser.lock().await;
+            let browser_guard = self.browser.read().await;
             let browser = browser_guard.as_ref().ok_or_else(|| {
                 QuarryError::new(
                     ErrorCode::DriverFailed,
@@ -3180,7 +3200,7 @@ impl BrowserDriver for ChromiumoxideDriver {
                 if event.received_bytes.is_finite()
                     && event.received_bytes > MAX_GOVERNED_DOWNLOAD_BYTES as f64
                 {
-                    if let Some(browser) = self.browser.lock().await.as_ref() {
+                    if let Some(browser) = self.browser.read().await.as_ref() {
                         if let Ok(cancel) = CancelDownloadParams::builder()
                             .guid(guid.clone())
                             .browser_context_id(context_id.clone())
@@ -3483,7 +3503,7 @@ impl BrowserDriver for ChromiumoxideDriver {
             );
         }
         if let Some(context_id) = empty_context {
-            let browser_guard = self.browser.lock().await;
+            let browser_guard = self.browser.read().await;
             if let Some(browser) = browser_guard.as_ref() {
                 if let Err(error) = best_effort(
                     Op::ContextClose,
@@ -4107,7 +4127,7 @@ impl Drop for ChromiumoxideDriver {
         }
         // Kill the browser now rather than whenever its handle is dropped, and
         // take its directories with it.
-        if let Ok(mut guard) = self.browser.try_lock() {
+        if let Ok(mut guard) = self.browser.try_write() {
             if let Some(mut browser) = guard.take() {
                 if let Some(child) = browser.get_mut_child() {
                     let _ = child.as_mut_inner().start_kill();
@@ -4128,6 +4148,9 @@ impl Drop for ChromiumoxideDriver {
 struct TestHooks {
     /// Hold every tab attach this long after its page exists.
     attach_stall: std::sync::Mutex<Option<Duration>>,
+    /// An attach reached its stall: `new_page` returned. (The page target
+    /// shows up in `Target.getTargets` before that.)
+    attach_stalled: AtomicBool,
     /// Hold every teardown this long after it took the session's pages.
     teardown_stall: std::sync::Mutex<Option<Duration>>,
     /// Hold `live_frame` this long after it found the page.
@@ -4220,7 +4243,7 @@ impl Drop for AdmissionRollback {
 /// call created: a context that existed before is the session's and stays.
 struct AttachGuard {
     book: Arc<std::sync::Mutex<SlotBook>>,
-    browser: Arc<Mutex<Option<Browser>>>,
+    browser: Arc<RwLock<Option<Browser>>>,
     session_key: String,
     /// Holds a page reservation in the book that has to be given back.
     reserved: bool,
@@ -4255,7 +4278,7 @@ impl AttachGuard {
             let _ = best_effort(Op::PageClose, page.close()).await;
         }
         if let Some(context_id) = self.context.take() {
-            let browser_guard = driver.browser.lock().await;
+            let browser_guard = driver.browser.read().await;
             if let Some(browser) = browser_guard.as_ref() {
                 let _ = best_effort(
                     Op::ContextClose,
@@ -4302,7 +4325,7 @@ impl Drop for AttachGuard {
                 }
             }
             if let Some(context_id) = context {
-                let browser_guard = browser.lock().await;
+                let browser_guard = browser.read().await;
                 if let Some(browser) = browser_guard.as_ref() {
                     if best_effort(
                         Op::ContextClose,
@@ -4755,9 +4778,11 @@ mod tests {
     /// Browser contexts the running browser holds.
     async fn context_count(driver: &ChromiumoxideDriver) -> usize {
         use ::chromiumoxide::cdp::browser_protocol::target::GetBrowserContextsParams;
-        // Bounded: a test that reads this while an attach stalls fails if the
-        // attach holds the browser lock.
-        let guard = tokio::time::timeout(Duration::from_secs(5), driver.browser.lock())
+        // Bounded: only a launch or a kill holds the write side. (Before the
+        // browser handle became an RwLock, an attach's `new_page` held the
+        // whole lock for up to 4.2 s under the parallel live suite, and these
+        // reads timed out.)
+        let guard = tokio::time::timeout(Duration::from_secs(5), driver.browser.read())
             .await
             .expect("the browser lock is free within 5 s");
         let browser = guard.as_ref().expect("a running browser");
@@ -4773,9 +4798,8 @@ mod tests {
     /// Page targets the running browser holds.
     async fn page_target_count(driver: &ChromiumoxideDriver) -> usize {
         use ::chromiumoxide::cdp::browser_protocol::target::GetTargetsParams;
-        // Bounded: a test that reads this while an attach stalls fails if the
-        // attach holds the browser lock.
-        let guard = tokio::time::timeout(Duration::from_secs(5), driver.browser.lock())
+        // Bounded: only a launch or a kill holds the write side.
+        let guard = tokio::time::timeout(Duration::from_secs(5), driver.browser.read())
             .await
             .expect("the browser lock is free within 5 s");
         let browser = guard.as_ref().expect("a running browser");
@@ -4828,7 +4852,7 @@ mod tests {
         assert_eq!(driver.launch_count(), 1);
         assert_eq!(driver.book().slot(SLOT).unwrap().generation, 1);
         {
-            let mut guard = driver.browser.lock().await;
+            let mut guard = driver.browser.write().await;
             let browser = guard.as_mut().expect("a running browser");
             let _ = browser.kill().await;
         }
@@ -5155,13 +5179,19 @@ mod tests {
         );
         assert_eq!(driver.book().slot(SLOT).unwrap().pages, 1, "page reserved");
         // Once its page exists the attach stalls, and not on the browser lock:
-        // the page count is read through that lock.
+        // nothing else uses this driver (no prober, no reaper), so the write
+        // side is free only if the stalled attach holds no guard at all.
         assert!(
             eventually(Duration::from_secs(15), || async {
-                page_target_count(&driver).await == pages_baseline + 1
+                driver.hooks.attach_stalled.load(Ordering::SeqCst)
             })
             .await,
-            "the attach opened its page and stalls with the browser lock free"
+            "the attach reached its stall"
+        );
+        assert_eq!(page_target_count(&driver).await, pages_baseline + 1, "its page is open");
+        assert!(
+            driver.browser.try_write().is_ok(),
+            "the stalled attach holds no browser lock"
         );
         assert!(!attaching.is_finished(), "the attach is still stalled");
         attaching.abort();
@@ -5410,7 +5440,7 @@ mod tests {
         let old = live_session_sized(&driver, "off-crash", None, "before").await;
         assert_eq!(driver.launch_count(), 1);
         {
-            let mut guard = driver.browser.lock().await;
+            let mut guard = driver.browser.write().await;
             let browser = guard.as_mut().expect("a running browser");
             let _ = browser.kill().await;
         }
@@ -5443,20 +5473,26 @@ mod tests {
         let baseline = context_count(&driver).await;
         let pages_baseline = page_target_count(&driver).await;
         *driver.hooks.attach_stall.lock().unwrap() = Some(Duration::from_secs(2));
-        *driver.hooks.teardown_stall.lock().unwrap() = Some(Duration::from_secs(5));
+        // Eight seconds of margin after the attach wakes: the rest of the attach
+        // (page hygiene, collectors) is slow under the parallel live suite.
+        *driver.hooks.teardown_stall.lock().unwrap() = Some(Duration::from_secs(10));
 
         let attaching = {
             let driver = driver.clone();
             let session = session.clone();
             tokio::spawn(async move { driver.new_tab(&session, None).await })
         };
+        // Wait for the stall itself: the page target is listed before
+        // `new_page` returns, and releasing then would start the teardown's
+        // clock while the attach is still opening its page.
         assert!(
             eventually(Duration::from_secs(15), || async {
-                page_target_count(&driver).await == pages_baseline + 1
+                driver.hooks.attach_stalled.load(Ordering::SeqCst)
             })
             .await,
             "the attach opened its page and stalls"
         );
+        assert_eq!(page_target_count(&driver).await, pages_baseline + 1, "its page is open");
         // The attach wakes up two seconds in, while the teardown stalls.
         driver.release(session.clone()).await.expect("release");
         assert!(attaching.is_finished(), "the attach ended during the teardown");
@@ -5742,7 +5778,9 @@ mod tests {
                     max_width: 640,
                     max_height: 480,
                     every_nth_frame: 1,
-                    timeout_ms: 2_000,
+                    // The clamp's maximum: the first screencast frame took
+                    // over 2 s once under the parallel live suite.
+                    timeout_ms: 5_000,
                 },
             )
             .await
