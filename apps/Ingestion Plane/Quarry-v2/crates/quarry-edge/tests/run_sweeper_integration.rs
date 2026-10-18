@@ -484,7 +484,9 @@ async fn a_dry_run_sweep_reports_would_expire_and_releases_nothing() {
 }
 
 /// An action in flight is never expired, however long the run has been quiet; once
-/// it finishes the run is expired on the next pass.
+/// it finishes the run is expired on the next pass. This checks the guard itself;
+/// `a_step_queued_on_the_run_lock_is_in_flight_and_holds_the_run` checks that the
+/// step handler takes it.
 #[tokio::test]
 async fn an_action_in_flight_is_never_expired() {
     let edge = Edge::start(idle_limits(60)).await;
@@ -502,6 +504,64 @@ async fn an_action_in_flight_is_never_expired() {
     assert_eq!(
         released.expired, 1,
         "the run expires once the action is done"
+    );
+    assert_eq!(edge.driver.released(), vec![run]);
+}
+
+/// An action in flight is never expired on the step path itself. A step counts itself
+/// in flight before it waits for the run's lock (`step.rs`), so while a second step is
+/// queued behind a running one, neither the verdict nor a sweep releases the run. When
+/// the queued step has finished, the next sweep expires the run. This test fails if the
+/// step handler stops counting itself in flight before it takes the lock.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_step_queued_on_the_run_lock_is_in_flight_and_holds_the_run() {
+    let limits = idle_limits(60);
+    let edge = Arc::new(Edge::start(limits.clone()).await);
+    let person = member_token();
+    let run = edge.start_run(&person, json!({})).await;
+    let handle = edge.live(&run).expect("the run is live");
+
+    // A running action holds the run's lock, and a second step queues behind it.
+    let running = handle.entry.lock().await;
+    let queued = tokio::spawn({
+        let edge = edge.clone();
+        let person = person.clone();
+        let run = run.clone();
+        async move { edge.step(&person, &run, wait_action(), None).await }
+    });
+    wait_until("the queued step to count itself in flight", || {
+        handle.live.in_flight() == 1
+    })
+    .await;
+
+    // Two minutes of silence against a one-minute limit, and the run is still held.
+    assert_eq!(
+        handle.live.verdict(later(120_000), &limits),
+        None,
+        "a queued step is in flight"
+    );
+    let held = sweep_once(&edge.state, later(120_000)).await;
+    assert_eq!(
+        held,
+        SweepReport::default(),
+        "a sweep leaves a queued run alone"
+    );
+    assert!(edge.driver.released().is_empty());
+
+    // The running action ends. The queued step then runs, and the run is idle from there.
+    drop(running);
+    let reply = queued.await.expect("queued step");
+    assert_eq!(reply.status, 200, "{}", reply.body);
+    assert_eq!(
+        handle.live.in_flight(),
+        0,
+        "the queued step has let go of the run"
+    );
+
+    let released = sweep_once(&edge.state, later(120_000)).await;
+    assert_eq!(
+        released.expired, 1,
+        "the run expires once its last action is done"
     );
     assert_eq!(edge.driver.released(), vec![run]);
 }
