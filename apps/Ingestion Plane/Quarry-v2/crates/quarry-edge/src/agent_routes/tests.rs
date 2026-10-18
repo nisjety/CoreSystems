@@ -1778,6 +1778,21 @@ async fn the_grant_id_is_served_only_to_the_runs_owner() {
         let rendered = serde_json::to_string(&envelope).expect("envelope serializes");
         assert!(!rendered.contains("grant-live-abc"), "{rendered}");
     }
+
+    // The owner, in the run's own organization, is served the projection
+    // with the grant id: without this the denials above would also pass
+    // against a gate that refused everyone.
+    let mut claims = crate::test_support::claims_for_org("org");
+    claims.sub = "user-owner".into();
+    claims.user_id = "user-owner".into();
+    claims.principal_type = Some("user".into());
+    let Ok(Json(envelope)) =
+        browser_session(State(state.clone()), Extension(claims), Path(run_id.clone())).await
+    else {
+        panic!("the run's owner was refused their own browser session");
+    };
+    let rendered = serde_json::to_value(&envelope).expect("envelope serializes");
+    assert_eq!(rendered["data"]["grantId"], "grant-live-abc", "{rendered}");
 }
 
 fn broker_grant(owner: &str, domains: &[&str], zdr: bool) -> quarry_runtime::GrantValidation {
