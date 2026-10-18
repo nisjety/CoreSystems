@@ -329,6 +329,37 @@ async fn ready(State(state): State<AppState>) -> (StatusCode, Json<serde_json::V
         );
     }
     if state.readiness.durable {
+        // The local browser (WS3.F): reported when the agent driver runs one,
+        // 503 only when every launched browser is unhealthy or dead. A driver
+        // without a local browser (NotApplicable) leaves the body as it was.
+        #[cfg(feature = "browser-agent")]
+        {
+            let browser = state.agent_driver.health().await;
+            match browser.state {
+                quarry_browser::BrowserHealthState::NotApplicable => {}
+                quarry_browser::BrowserHealthState::Unhealthy => {
+                    return (
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        Json(serde_json::json!({
+                            "status": "not_ready",
+                            "durable": true,
+                            "reason": "browser_unhealthy",
+                            "browser": browser,
+                        })),
+                    );
+                }
+                _ => {
+                    return (
+                        StatusCode::OK,
+                        Json(serde_json::json!({
+                            "status": "ready",
+                            "durable": true,
+                            "browser": browser,
+                        })),
+                    );
+                }
+            }
+        }
         (
             StatusCode::OK,
             Json(serde_json::json!({"status": "ready", "durable": true})),
