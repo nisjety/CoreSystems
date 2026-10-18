@@ -630,7 +630,9 @@ async fn get_session(
     let cookie = cookie_header(&headers);
     let token = quarry_token(&state, &user, &cookie).await;
     match owner_browser_session_projection(&state, &user, token.as_deref(), &session_id).await {
-        Ok(projection) => (StatusCode::OK, Json(ok(projection))).into_response(),
+        // The session grant id is internal to the BFF: strip it here, the one
+        // route that forwards Quarry's projection rather than mapping it.
+        Ok(projection) => (StatusCode::OK, Json(ok(spa_owner_projection(projection)))).into_response(),
         Err(response) => response,
     }
 }
@@ -1315,7 +1317,9 @@ fn build_ai_run_request<S: BrowserSessionRunState>(
 /// projection; Model Gateway derives a narrower run grant from it (WS1.B).
 /// A session without a grant (opened with `BROWSER_GRANT_ENFORCEMENT=off`, or
 /// in `permissive` mode when issuance failed) gets 409
-/// `browser_session_grant_missing` and Model Gateway is never called.
+/// `browser_session_grant_missing` and Model Gateway is never called. A
+/// grant that has expired or been revoked since the session opened is 409
+/// `browser_session_grant_inactive` (see `session_grant_inactive`).
 /// Risk-based HITL *gating* of individual risky actions is live as of Phase 5
 /// (see `build_ai_run_request` above and `docs/BROWSER_WORKSPACE_PLAN.md`).
 pub(crate) async fn start_ai_run(
@@ -1389,6 +1393,10 @@ pub(crate) async fn start_ai_run(
     };
     let request_body =
         build_ai_run_request(goal, &grant_id, &metadata, &body, start_url.as_deref());
+    let names_hosts = body
+        .allowed_domains
+        .as_ref()
+        .is_some_and(|domains| !domains.is_empty());
 
     let (token, data_plane, inference, execution, session, browser) = tokio::join!(
         model_token(&state, &user, &headers),
@@ -1442,6 +1450,16 @@ pub(crate) async fn start_ai_run(
     )
     .await;
     if !status.is_success() {
+        if session_grant_inactive(status, &response_body, names_hosts) {
+            return (
+                StatusCode::CONFLICT,
+                Json(error(
+                    "browser_session_grant_inactive",
+                    "This browser session's grant is no longer valid; it may have expired. Reopen the session to start an AI run.",
+                )),
+            )
+                .into_response();
+        }
         return forward_quarry_failure(status, response_body);
     }
 
@@ -4124,6 +4142,33 @@ async fn revoke_session_grant(
     }
 }
 
+/// Quarry's owner projection as the SPA may see it: unchanged except that the
+/// session grant id (`projection_grant_id`) is removed.
+fn spa_owner_projection(mut projection: Value) -> Value {
+    if let Some(object) = projection.as_object_mut() {
+        object.remove("grantId");
+        object.remove("grant_id");
+    }
+    projection
+}
+
+/// Whether Model Gateway refused an AI run because the session grant can no
+/// longer back one. The session grant is issued once, when the session opens,
+/// for the broker's grant TTL (15 minutes by default, at most an hour), and is
+/// not renewed (WS1.B): a session older than that, or one whose grant was
+/// revoked, lands here. Model Gateway never says which (it does not tell
+/// expired, revoked and unknown grants apart), so a 403 is read this way only
+/// when the request did not name hosts; with explicit hosts a 403 may be a
+/// widening refusal and is forwarded unchanged.
+fn session_grant_inactive(status: StatusCode, body: &Value, names_hosts: bool) -> bool {
+    let code = body.get("error").and_then(Value::as_str);
+    match status {
+        StatusCode::CONFLICT => code == Some("browser_grant_not_derivable"),
+        StatusCode::FORBIDDEN => !names_hosts && code == Some("browser grant is not authorized"),
+        _ => false,
+    }
+}
+
 /// The session grant id from Quarry's owner projection. Internal: it is read
 /// to derive AI-run grants and to revoke on close, never sent to the SPA.
 fn projection_grant_id(projection: &Value) -> Option<String> {
@@ -4438,6 +4483,7 @@ mod tests {
                     "runId": "run-owner",
                     "status": "active",
                     "live": true,
+                    "grantId": "0123456789abcdef0123456789abcdef",
                     "tabs": []
                 }
             })))
@@ -4469,6 +4515,12 @@ mod tests {
         assert_eq!(body["data"]["status"], "active");
         assert!(body["data"].get("observation").is_none());
         assert!(body["data"].get("replay").is_none());
+        // The session grant id is internal to the BFF (WS1.B).
+        assert!(body["data"].get("grantId").is_none(), "{body}");
+        assert!(
+            !body.to_string().contains("0123456789abcdef0123456789abcdef"),
+            "grant id reached the SPA: {body}"
+        );
         assert_eq!(
             quarry
                 .received_requests()
@@ -4637,9 +4689,25 @@ mod tests {
         upstream
     }
 
+    /// Answers `GET /api/{slug}/token` with `test-plane-token-{slug}`, so a
+    /// test can tell which audience a forwarded credential was minted for.
+    struct PerAudienceToken;
+
+    impl wiremock::Respond for PerAudienceToken {
+        fn respond(&self, request: &wiremock::Request) -> wiremock::ResponseTemplate {
+            let slug = request
+                .url
+                .path()
+                .trim_start_matches("/api/")
+                .trim_end_matches("/token");
+            wiremock::ResponseTemplate::new(200)
+                .set_body_json(json!({ "token": format!("test-plane-token-{slug}") }))
+        }
+    }
+
     /// Stand in for auth-core's plane-token endpoints so the tests run the real
     /// credential path (`model_token` + `required_session_token`) instead of
-    /// skipping it. `GET /api/{audience}/token` → `{ "token": ... }`.
+    /// skipping it. `GET /api/{audience}/token` → `{ "token": "test-plane-token-{audience}" }`.
     async fn plane_token_issuer() -> wiremock::MockServer {
         use wiremock::{
             matchers::{method as wm_method, path_regex},
@@ -4649,9 +4717,7 @@ mod tests {
         let auth = MockServer::start().await;
         Mock::given(wm_method("GET"))
             .and(path_regex(r"^/api/[a-z-]+/token$"))
-            .respond_with(
-                ResponseTemplate::new(200).set_body_json(json!({ "token": "test-plane-token" })),
-            )
+            .respond_with(PerAudienceToken)
             .mount(&auth)
             .await;
         auth
@@ -5485,7 +5551,7 @@ mod tests {
                     .headers
                     .get("x-browser-authorization")
                     .and_then(|v| v.to_str().ok()),
-                Some("Bearer test-plane-token")
+                Some("Bearer test-plane-token-browser-broker")
             );
             let grant_body: Value = serde_json::from_slice(&grants[0].body).expect("grant body");
             assert_eq!(grant_body["allowed_domains"], json!(["example.com"]));
@@ -5692,16 +5758,17 @@ mod tests {
             let sent: Value = serde_json::from_slice(&runs[0].body).expect("run body");
             assert_eq!(sent["grant_id"], json!(GRANT));
             assert_eq!(sent["allowed_domains"], json!(["shop.example.com"]));
-            for header in [
-                "x-browser-authorization",
-                "x-session-authorization",
-                "x-execution-authorization",
-                "x-inference-authorization",
-                "x-data-plane-authorization",
+            for (header, audience) in [
+                ("x-browser-authorization", "browser-broker"),
+                ("x-session-authorization", "session-core"),
+                ("x-execution-authorization", "execution-core"),
+                ("x-inference-authorization", "inference-core"),
+                ("x-data-plane-authorization", "data-plane"),
+                ("authorization", "model-plane"),
             ] {
                 assert_eq!(
                     runs[0].headers.get(header).and_then(|v| v.to_str().ok()),
-                    Some("Bearer test-plane-token"),
+                    Some(format!("Bearer test-plane-token-{audience}").as_str()),
                     "{header}"
                 );
             }
@@ -5753,8 +5820,103 @@ mod tests {
                     .headers
                     .get("x-browser-authorization")
                     .and_then(|v| v.to_str().ok()),
-                Some("Bearer test-plane-token")
+                Some("Bearer test-plane-token-browser-broker")
             );
+        }
+
+        async fn start_run_with(state: AppState, body: StartAiRunBody) -> (StatusCode, Value) {
+            let response = start_ai_run(
+                State(state),
+                Extension(test_user("user-a", "org-a")),
+                HeaderMap::new(),
+                Path("run-1".to_owned()),
+                Json(body),
+            )
+            .await;
+            let status = response.status();
+            let bytes = to_bytes(response.into_body(), 256 * 1024)
+                .await
+                .expect("body");
+            (
+                status,
+                serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+            )
+        }
+
+        // The session grant is issued once and not renewed. When Model Gateway
+        // refuses it as no longer valid (expired or revoked: 403 from
+        // ValidateGrant, or 409 from DeriveRunGrant), the SPA gets one stable
+        // code that says to reopen the session, not "the session has no grant".
+        #[tokio::test]
+        async fn an_expired_or_revoked_session_grant_is_reported_as_inactive() {
+            for (upstream, code) in [
+                (403, "browser grant is not authorized"),
+                (409, "browser_grant_not_derivable"),
+            ] {
+                let up = upstreams().await;
+                mount_quarry_session(&up.quarry, owner_projection(Some(GRANT))).await;
+                Mock::given(wm_method("POST"))
+                    .and(wm_path("/v1/browser/runs"))
+                    .respond_with(
+                        ResponseTemplate::new(upstream).set_body_json(json!({ "error": code })),
+                    )
+                    .mount(&up.model)
+                    .await;
+                let mut body = ai_run_body();
+                body.allowed_domains = None;
+                let (status, response) =
+                    start_run_with(state(&up, BrowserGrantMode::Strict), body).await;
+                assert_eq!(status, StatusCode::CONFLICT, "{upstream}: {response}");
+                assert_eq!(
+                    response["error"]["code"],
+                    json!("browser_session_grant_inactive"),
+                    "{upstream}: {response}"
+                );
+                assert!(!response.to_string().contains(GRANT), "{response}");
+            }
+        }
+
+        // With explicit hosts a 403 may be a widening refusal, so it is not
+        // relabelled as an inactive grant; other failures pass through too.
+        #[tokio::test]
+        async fn other_ai_run_refusals_are_not_called_an_inactive_grant() {
+            for (upstream, code, names_hosts) in [
+                (403, "browser grant is not authorized", true),
+                (409, "managed browser run already exists", false),
+                (400, "browser_grant_hosts_invalid", false),
+            ] {
+                let up = upstreams().await;
+                mount_quarry_session(&up.quarry, owner_projection(Some(GRANT))).await;
+                Mock::given(wm_method("POST"))
+                    .and(wm_path("/v1/browser/runs"))
+                    .respond_with(
+                        ResponseTemplate::new(upstream).set_body_json(json!({ "error": code })),
+                    )
+                    .mount(&up.model)
+                    .await;
+                let mut body = ai_run_body();
+                if !names_hosts {
+                    body.allowed_domains = None;
+                }
+                let (status, response) =
+                    start_run_with(state(&up, BrowserGrantMode::Strict), body).await;
+                assert_eq!(status.as_u16(), upstream, "{response}");
+                assert_ne!(
+                    response["error"]["code"],
+                    json!("browser_session_grant_inactive"),
+                    "{response}"
+                );
+            }
+        }
+
+        #[test]
+        fn the_spa_owner_projection_drops_only_the_grant_id() {
+            let projection = owner_projection(Some(GRANT));
+            let spa = spa_owner_projection(projection.clone());
+            assert!(!spa.to_string().contains(GRANT), "{spa}");
+            let mut expected = projection;
+            expected.as_object_mut().expect("object").remove("grantId");
+            assert_eq!(spa, expected);
         }
 
         #[test]
