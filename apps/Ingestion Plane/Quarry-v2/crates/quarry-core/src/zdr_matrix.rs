@@ -119,6 +119,8 @@ pub const ROWS: &[Row] = &[
         status: Status::Enforced,
         enforced_by: &[
             "zdr_claim_floor::durable_crawl_and_batch_are_refused_for_a_zdr_org_user_and_open_otherwise",
+            "zdr_gap_rows::enforced_refusals_hold_for_durable_jobs",
+            "zdr_gap_rows::a_service_principal_with_body_zdr_gets_the_same_refusals",
         ],
         basis: "routes::refuse_durable_job_under_zdr: the job record and per-page results would be retained",
         log: Log::Unverified,
@@ -166,7 +168,7 @@ pub const ROWS: &[Row] = &[
         status: Status::Gap {
             issue: "unassigned: forward the posture, or refuse under ZDR",
         },
-        enforced_by: &[],
+        enforced_by: &["zdr_gap_rows::gap_rows_currently_violate_search_suggest"],
         basis: "search_routes::suggest calls the Model Plane and never reads the token's ZDR floor",
         log: Log::Unverified,
     },
@@ -261,7 +263,7 @@ pub const ROWS: &[Row] = &[
         status: Status::Gap {
             issue: "WS4.H: refuse under ZDR, observe first",
         },
-        enforced_by: &[],
+        enforced_by: &["zdr_gap_rows::gap_rows_currently_violate_change_history"],
         basis: "change_routes read the token's identity only; ZDR is consulted nowhere on these routes",
         log: Log::Unverified,
     },
@@ -274,7 +276,7 @@ pub const ROWS: &[Row] = &[
         status: Status::Gap {
             issue: "WS4.H: refuse under ZDR, observe first",
         },
-        enforced_by: &[],
+        enforced_by: &["zdr_gap_rows::gap_rows_currently_violate_change_snapshot"],
         basis: "change_routes::snapshot and ::refresh do not read the ZDR floor",
         log: Log::Unverified,
     },
@@ -287,7 +289,7 @@ pub const ROWS: &[Row] = &[
         status: Status::Gap {
             issue: "WS4.H: do not persist a baseline when the body declares zdr",
         },
-        enforced_by: &[],
+        enforced_by: &["zdr_gap_rows::gap_rows_currently_violate_change_record_internal"],
         basis: "change_routes::emit_change_side_effects returns early under ZDR; record_check has already written the baseline",
         log: Log::Unverified,
     },
@@ -307,7 +309,7 @@ pub const ROWS: &[Row] = &[
         status: Status::Gap {
             issue: "WS4.H: refuse create, trigger, backfill and unpause; keep list, get, pause and delete so an organization can wind down",
         },
-        enforced_by: &[],
+        enforced_by: &["zdr_gap_rows::gap_rows_currently_violate_schedules"],
         basis: "schedule_routes forwards to Control Plane and never reads the ZDR floor",
         log: Log::Unverified,
     },
@@ -325,7 +327,7 @@ pub const ROWS: &[Row] = &[
         status: Status::Gap {
             issue: "WS4.H: refuse POST, PUT and PATCH; keep list and delete so profiles can be erased",
         },
-        enforced_by: &[],
+        enforced_by: &["zdr_gap_rows::gap_rows_currently_violate_profiles"],
         basis: "profile_routes never read the ZDR floor; only the agent start refuses a persistent profile",
         log: Log::Unverified,
     },
@@ -346,7 +348,10 @@ pub const ROWS: &[Row] = &[
             feature: "persistent_profile",
         },
         status: Status::Enforced,
-        enforced_by: &["zdr_claim_floor::a_zdr_org_users_agent_run_cannot_take_a_persistent_profile"],
+        enforced_by: &[
+            "zdr_claim_floor::a_zdr_org_users_agent_run_cannot_take_a_persistent_profile",
+            "zdr_gap_rows::a_service_principal_with_body_zdr_gets_the_same_refusals",
+        ],
         basis: "same route as agent_run: lifecycle::start_run refuses persist_profile or a profile id under ZDR",
         log: Log::Unverified,
     },

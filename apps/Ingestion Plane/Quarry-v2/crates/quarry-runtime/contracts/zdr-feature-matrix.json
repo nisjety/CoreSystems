@@ -61,7 +61,9 @@
         "feature": "durable_job"
       },
       "enforced_by": [
-        "zdr_claim_floor::durable_crawl_and_batch_are_refused_for_a_zdr_org_user_and_open_otherwise"
+        "zdr_claim_floor::durable_crawl_and_batch_are_refused_for_a_zdr_org_user_and_open_otherwise",
+        "zdr_gap_rows::enforced_refusals_hold_for_durable_jobs",
+        "zdr_gap_rows::a_service_principal_with_body_zdr_gets_the_same_refusals"
       ],
       "id": "durable_jobs",
       "issue": null,
@@ -127,7 +129,9 @@
       "detail": {
         "warning": "the partial query is sent to the Model Plane without the ZDR posture"
       },
-      "enforced_by": [],
+      "enforced_by": [
+        "zdr_gap_rows::gap_rows_currently_violate_search_suggest"
+      ],
       "id": "search_suggest",
       "issue": "unassigned: forward the posture, or refuse under ZDR",
       "log": "log_unverified",
@@ -255,7 +259,9 @@
       "detail": {
         "warning": "a change check keeps a baseline and history for the URL"
       },
-      "enforced_by": [],
+      "enforced_by": [
+        "zdr_gap_rows::gap_rows_currently_violate_change_history"
+      ],
       "id": "change_history",
       "issue": "WS4.H: refuse under ZDR, observe first",
       "log": "log_unverified",
@@ -273,7 +279,9 @@
       "detail": {
         "warning": "promoting a snapshot and scheduling a refresh both retain the page"
       },
-      "enforced_by": [],
+      "enforced_by": [
+        "zdr_gap_rows::gap_rows_currently_violate_change_snapshot"
+      ],
       "id": "change_snapshot",
       "issue": "WS4.H: refuse under ZDR, observe first",
       "log": "log_unverified",
@@ -290,7 +298,9 @@
       "detail": {
         "warning": "the change event and webhook are suppressed; the baseline is still stored"
       },
-      "enforced_by": [],
+      "enforced_by": [
+        "zdr_gap_rows::gap_rows_currently_violate_change_record_internal"
+      ],
       "id": "change_record_internal",
       "issue": "WS4.H: do not persist a baseline when the body declares zdr",
       "log": "log_unverified",
@@ -306,7 +316,9 @@
       "detail": {
         "warning": "a schedule is a durable resource; a ZDR organization can create and run one"
       },
-      "enforced_by": [],
+      "enforced_by": [
+        "zdr_gap_rows::gap_rows_currently_violate_schedules"
+      ],
       "id": "schedules",
       "issue": "WS4.H: refuse create, trigger, backfill and unpause; keep list, get, pause and delete so an organization can wind down",
       "log": "log_unverified",
@@ -327,7 +339,9 @@
       "detail": {
         "warning": "a browser profile (cookies, storage) is a durable resource a ZDR organization can create"
       },
-      "enforced_by": [],
+      "enforced_by": [
+        "zdr_gap_rows::gap_rows_currently_violate_profiles"
+      ],
       "id": "profiles",
       "issue": "WS4.H: refuse POST, PUT and PATCH; keep list and delete so profiles can be erased",
       "log": "log_unverified",
@@ -364,7 +378,8 @@
         "feature": "persistent_profile"
       },
       "enforced_by": [
-        "zdr_claim_floor::a_zdr_org_users_agent_run_cannot_take_a_persistent_profile"
+        "zdr_claim_floor::a_zdr_org_users_agent_run_cannot_take_a_persistent_profile",
+        "zdr_gap_rows::a_service_principal_with_body_zdr_gets_the_same_refusals"
       ],
       "id": "agent_persistent_profile",
       "issue": null,

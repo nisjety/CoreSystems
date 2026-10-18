@@ -53,24 +53,24 @@ This describes behaviour. It does not change it. A **gap** is a place where ZDR 
 - `scrape`: no artifact, page-cache entry, scrape record or durable event; the text comes back in the response (default format markdown), cut at max_inline_bytes Tests: `zdr_claim_floor::scrape_runs_as_zdr_for_a_zdr_org_user_and_not_for_a_registry_zdr_service`, `zdr_log_capture::scrape_meter_metadata_under_zdr_has_no_url_or_fingerprint`, `routes::tests::a_zdr_scrape_has_no_scrape_id_and_stores_no_artifact`.
 - `scrape_stream`: the run's posture is the request flag raised by the token floor; page events go to live subscribers only Tests: `zdr_claim_floor::scrape_stream_runs_as_zdr_for_a_zdr_org_user_and_not_for_a_registry_zdr_service`.
 - `scrape_record_read`: scrape_routes::get_scrape refuses a reader whose organization is under ZDR, even for a record written before it was Tests: `routes::tests::a_zdr_floored_reader_is_refused_even_for_an_earlier_record`.
-- `durable_jobs`: routes::refuse_durable_job_under_zdr: the job record and per-page results would be retained Tests: `zdr_claim_floor::durable_crawl_and_batch_are_refused_for_a_zdr_org_user_and_open_otherwise`.
+- `durable_jobs`: routes::refuse_durable_job_under_zdr: the job record and per-page results would be retained Tests: `zdr_claim_floor::durable_crawl_and_batch_are_refused_for_a_zdr_org_user_and_open_otherwise`, `zdr_gap_rows::enforced_refusals_hold_for_durable_jobs`, `zdr_gap_rows::a_service_principal_with_body_zdr_gets_the_same_refusals`.
 - `search`: paid providers closed, search cache bypassed, no durable SearchIssued event; the provider failure is logged as a class only Tests: `zdr_claim_floor::a_user_token_from_a_zdr_org_runs_search_as_zdr_even_when_the_body_says_false`, `zdr_claim_floor::a_user_token_from_a_zdr_org_runs_search_as_zdr_when_the_body_omits_the_flag`.
 - `search_verticals`: search_routes::images and ::videos touch no store; meter_vertical_search records user, kind and result count, not the query
 - `search_similar`: the page fetches run with the token's ZDR floor (effective_zdr_mode); the request has no zdr field of its own
-- `search_suggest`: search_routes::suggest calls the Model Plane and never reads the token's ZDR floor
+- `search_suggest`: search_routes::suggest calls the Model Plane and never reads the token's ZDR floor Tests: `zdr_gap_rows::gap_rows_currently_violate_search_suggest`.
 - `answer`: the answer pipeline runs with the effective ZDR posture: no paid providers, no durable search event Tests: `zdr_claim_floor::answer_runs_as_zdr_for_a_zdr_org_user_and_as_before_otherwise`, `zdr_claim_floor::answer_stream_runs_as_zdr_for_a_zdr_org_user_and_as_before_otherwise`.
 - `extract`: the page runs carry the effective ZDR posture, so no artifact or durable page event is written Tests: `zdr_claim_floor::extract_runs_as_zdr_for_a_zdr_org_user_and_not_for_a_registry_zdr_service`.
 - `map`: map_routes::map touches no cache, artifact store, index or event sink
 - `audio`: audio_routes::raise_to_zdr_floor forwards the posture to the Model Plane, which owns retention for audio Tests: `zdr_claim_floor::audio_forwards_the_floored_posture_to_the_model_plane`, `zdr_claim_floor::audio_transcription_forwards_the_floored_posture_to_the_model_plane`.
 - `artifacts`: resource_routes list and get are tenant-bound reads of the artifact store
 - `control_records`: resource_routes forwards to Control Plane with the verified identity and keeps no copy
-- `change_history`: change_routes read the token's identity only; ZDR is consulted nowhere on these routes
-- `change_snapshot`: change_routes::snapshot and ::refresh do not read the ZDR floor
-- `change_record_internal`: change_routes::emit_change_side_effects returns early under ZDR; record_check has already written the baseline
-- `schedules`: schedule_routes forwards to Control Plane and never reads the ZDR floor
-- `profiles`: profile_routes never read the ZDR floor; only the agent start refuses a persistent profile
+- `change_history`: change_routes read the token's identity only; ZDR is consulted nowhere on these routes Tests: `zdr_gap_rows::gap_rows_currently_violate_change_history`.
+- `change_snapshot`: change_routes::snapshot and ::refresh do not read the ZDR floor Tests: `zdr_gap_rows::gap_rows_currently_violate_change_snapshot`.
+- `change_record_internal`: change_routes::emit_change_side_effects returns early under ZDR; record_check has already written the baseline Tests: `zdr_gap_rows::gap_rows_currently_violate_change_record_internal`.
+- `schedules`: schedule_routes forwards to Control Plane and never reads the ZDR floor Tests: `zdr_gap_rows::gap_rows_currently_violate_schedules`.
+- `profiles`: profile_routes never read the ZDR floor; only the agent start refuses a persistent profile Tests: `zdr_gap_rows::gap_rows_currently_violate_profiles`.
 - `agent_run`: a ZDR run writes no checkpoint, timeline row or receipt and logs under a ZDR span Tests: `agent_routes::tests::zdr_expiry_writes_no_timeline_row_and_no_checkpoint`.
-- `agent_persistent_profile`: same route as agent_run: lifecycle::start_run refuses persist_profile or a profile id under ZDR Tests: `zdr_claim_floor::a_zdr_org_users_agent_run_cannot_take_a_persistent_profile`.
+- `agent_persistent_profile`: same route as agent_run: lifecycle::start_run refuses persist_profile or a profile id under ZDR Tests: `zdr_claim_floor::a_zdr_org_users_agent_run_cannot_take_a_persistent_profile`, `zdr_gap_rows::a_service_principal_with_body_zdr_gets_the_same_refusals`.
 - `agent_resume`: same route as agent_run: lifecycle::start_run refuses a resume of a ZDR checkpoint (none is written)
 - `agent_run_surface`: every step, tab and control change skips receipts and timeline rows when the run is ZDR (step.rs, control.rs, projection.rs) Tests: `agent_routes::tests::zdr_expiry_writes_no_timeline_row_and_no_checkpoint`.
 - `agent_receipts_and_procedures`: receipts.rs lists from the receipt store; replay, quality and impact checks hold no state
