@@ -380,3 +380,172 @@ async fn a_non_zdr_agent_run_logs_the_url_the_driver_is_asked_to_open() {
         "a non-ZDR agent run logs the URL at debug"
     );
 }
+
+// ---- the driver fallback chain and the streaming route (F6 review) ----------
+//
+// `FallbackDriver` logs the page URL on two request-path lines, and the SSE
+// route runs its runner in a spawned task. Both used to be invisible to the ZDR
+// log filter or to the capture tests. The first test below pins that a failed
+// browser fallback is still *visible* to a ZDR caller, as a class, with no URL.
+// The second pins that the spawned runner of `/v1/scrape/stream` still carries
+// the ZDR mark: the "rendered no more readable text" line names the URL by
+// field, so it is only absent from the log if the filter saw the span.
+
+/// A JS shell: big, almost no text, a hydration marker. It makes the fallback
+/// chain escalate to the browser driver.
+fn js_shell_page() -> Vec<u8> {
+    let mut body = Vec::new();
+    body.extend_from_slice(
+        b"<html><head><title>shell</title></head><body><div id=\"__next\"></div>",
+    );
+    for _ in 0..3 {
+        body.extend_from_slice(b"<script>");
+        body.extend_from_slice(&vec![b'x'; 8_000]);
+        body.extend_from_slice(b"</script>");
+    }
+    body.extend_from_slice(b"<script id=\"__NEXT_DATA__\">{}</script></body></html>");
+    body
+}
+
+/// Static driver serving the JS shell; browser driver that either fails (with
+/// the URL inside its error text) or renders the same shell again.
+struct ShellDriver {
+    kind: quarry_core::output::DriverKind,
+    fails: bool,
+}
+
+#[async_trait::async_trait]
+impl quarry_runtime::driver::Driver for ShellDriver {
+    fn kind(&self) -> quarry_core::output::DriverKind {
+        self.kind
+    }
+
+    async fn fetch(&self, url: &url::Url) -> quarry_core::QuarryResult<quarry_runtime::fetch::FetchResponse> {
+        if self.fails {
+            return Err(quarry_core::error::QuarryError::new(
+                quarry_core::error::ErrorCode::DriverFailed,
+                format!("browser could not render {url}"),
+            ));
+        }
+        Ok(quarry_runtime::fetch::FetchResponse {
+            status: 200,
+            final_url: url.clone(),
+            headers: vec![],
+            body: js_shell_page(),
+            duration_ms: 1,
+            served_by: self.kind,
+        })
+    }
+}
+
+/// An edge whose driver registry holds the shell-serving static driver and a
+/// browser driver, so the real `FallbackDriver` is built for every request.
+async fn harness_with_fallback_chain(browser_fails: bool) -> Harness {
+    use quarry_core::output::DriverKind;
+    Harness::start_with(move |mut state| {
+        let mut drivers = quarry_runtime::DriverRegistry::new(DriverKind::Static);
+        drivers.register(std::sync::Arc::new(ShellDriver {
+            kind: DriverKind::Static,
+            fails: false,
+        }));
+        drivers.register(std::sync::Arc::new(ShellDriver {
+            kind: DriverKind::Browser,
+            fails: browser_fails,
+        }));
+        state.drivers = drivers;
+        state
+    })
+    .await
+}
+
+const FALLBACK_FAILED_LINE: &str = "browser fallback failed after JS-shell detection";
+
+#[tokio::test]
+async fn a_zdr_scrape_whose_browser_fallback_fails_logs_the_failure_as_a_class_and_no_url() {
+    capture();
+    let harness = harness_with_fallback_chain(true).await;
+    let (url, marker) = probe_url();
+
+    let response = harness
+        .post(&user_in_zdr_org(), "/v1/scrape", json!({ "url": url }))
+        .await;
+    assert_eq!(response.status().as_u16(), 200, "the static shell is returned");
+
+    let log = logged();
+    assert!(
+        !log.contains(&marker),
+        "a ZDR scrape put the URL in a log line:\n{}",
+        log.lines().filter(|l| l.contains(&marker)).collect::<Vec<_>>().join("\n")
+    );
+    let line = log
+        .lines()
+        .find(|l| l.contains(FALLBACK_FAILED_LINE))
+        .expect("the failed browser fallback must stay visible to a ZDR caller");
+    assert!(line.contains("\"error_class\":\"DRIVER_FAILED\""), "{line}");
+}
+
+#[tokio::test]
+async fn a_non_zdr_scrape_whose_browser_fallback_fails_logs_the_same_line() {
+    // Control: the line exists and carries the class outside ZDR too.
+    capture();
+    let harness = harness_with_fallback_chain(true).await;
+    let (url, _marker) = probe_url();
+
+    let response = harness
+        .post(&user_in_standard_org(), "/v1/scrape", json!({ "url": url }))
+        .await;
+    assert_eq!(response.status().as_u16(), 200);
+
+    assert!(
+        logged()
+            .lines()
+            .any(|l| l.contains(FALLBACK_FAILED_LINE) && l.contains("\"error_class\":\"DRIVER_FAILED\"")),
+        "the failed fallback is logged with its class"
+    );
+}
+
+#[tokio::test]
+async fn a_zdr_streamed_scrape_logs_no_url_from_its_spawned_runner() {
+    capture();
+    let harness = harness_with_fallback_chain(false).await;
+    let (url, marker) = probe_url();
+
+    let response = harness
+        .post(&user_in_zdr_org(), "/v1/scrape/stream", json!({ "url": url }))
+        .await;
+    assert_eq!(response.status().as_u16(), 200);
+    // Read the whole SSE body: the runner has finished when `done` arrives.
+    let body = response.text().await.expect("sse body");
+    assert!(body.contains("done"), "the stream ran to its end:\n{body}");
+
+    let log = logged();
+    assert!(
+        !log.contains(&marker),
+        "the streamed ZDR scrape's runner logged the URL (its span lost the ZDR mark):\n{}",
+        log.lines().filter(|l| l.contains(&marker)).collect::<Vec<_>>().join("\n")
+    );
+}
+
+#[tokio::test]
+async fn a_non_zdr_streamed_scrape_logs_the_line_the_zdr_one_keeps_out() {
+    // Control for the test above: the runner under the stream does emit a
+    // URL-carrying line, and the capture sees it, so the ZDR test passing means
+    // the filter dropped it rather than nothing having been logged.
+    capture();
+    let harness = harness_with_fallback_chain(false).await;
+    let (url, marker) = probe_url();
+
+    let response = harness
+        .post(&user_in_standard_org(), "/v1/scrape/stream", json!({ "url": url }))
+        .await;
+    assert_eq!(response.status().as_u16(), 200);
+    let body = response.text().await.expect("sse body");
+    assert!(body.contains("done"), "{body}");
+
+    assert!(
+        logged()
+            .lines()
+            .any(|l| l.contains("rendered no more readable text") && l.contains(&marker)),
+        "a non-ZDR streamed scrape logs the fallback line with its URL"
+    );
+}

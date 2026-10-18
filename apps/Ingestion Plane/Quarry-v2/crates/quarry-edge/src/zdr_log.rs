@@ -515,6 +515,63 @@ mod tests {
         assert!(log.contains("our own debug stays on"), "{log}");
     }
 
+    /// A body whose text embeds a URL, so a leak of the error text is visible.
+    const SECRET_URL: &str = "http://127.0.0.1:1/secret-path?q=hunter";
+
+    #[tokio::test]
+    async fn class_reqwest_labels_a_connect_failure() {
+        let error = reqwest::get(SECRET_URL).await.unwrap_err();
+        assert!(error.to_string().contains("secret-path"), "premise: the raw text embeds the URL");
+        assert_eq!(class_reqwest(&error), "connect");
+    }
+
+    #[tokio::test]
+    async fn class_reqwest_labels_a_timeout() {
+        // A listener that accepts and never answers.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let _accepting = tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((socket, _)) = listener.accept().await {
+                held.push(socket);
+            }
+        });
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_millis(50))
+            .build()
+            .unwrap();
+        let error = client
+            .get(format!("http://{address}/secret-path?q=hunter"))
+            .send()
+            .await
+            .unwrap_err();
+        assert_eq!(class_reqwest(&error), "timeout");
+    }
+
+    #[test]
+    fn class_reqwest_labels_a_status_error() {
+        let response = reqwest::Response::from(
+            axum::http::Response::builder().status(500).body("").unwrap(),
+        );
+        let error = response.error_for_status().unwrap_err();
+        assert_eq!(class_reqwest(&error), "status");
+    }
+
+    #[tokio::test]
+    async fn class_reqwest_labels_a_decode_failure() {
+        let response = reqwest::Response::from(
+            axum::http::Response::builder().status(200).body("not json").unwrap(),
+        );
+        let error = response.json::<serde_json::Value>().await.unwrap_err();
+        assert_eq!(class_reqwest(&error), "decode");
+    }
+
+    #[test]
+    fn class_reqwest_labels_a_malformed_request_as_request() {
+        let error = reqwest::Client::new().get("not a url").build().unwrap_err();
+        assert_eq!(class_reqwest(&error), "request");
+    }
+
     #[test]
     fn classes_are_closed_vocabularies_that_never_carry_text() {
         use quarry_core::error::ErrorCode;
