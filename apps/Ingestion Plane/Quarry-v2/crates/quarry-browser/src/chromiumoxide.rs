@@ -158,9 +158,12 @@ pub struct ChromiumoxideDriver {
     /// False for the views the background tasks hold: only the driver itself
     /// tears down on drop.
     owner: bool,
-    /// Test hook: hold every tab attach this long after its page exists.
+    /// A teardown in progress, per session: an `acquire` of the same key
+    /// waits for it, so a teardown never frees the next session's state.
+    teardowns: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
+    /// Test hooks: stalls and a stale content read.
     #[cfg(test)]
-    attach_stall: Arc<std::sync::Mutex<Option<Duration>>>,
+    hooks: Arc<TestHooks>,
     frame_epochs: Arc<AtomicU64>,
     live_frames: Arc<Mutex<HashMap<String, LiveFrameSlot>>>,
     devtools_events: Arc<Mutex<HashMap<String, Vec<BrowserDevtoolsEvent>>>>,
@@ -208,8 +211,9 @@ impl ChromiumoxideDriver {
             background: Arc::new(std::sync::Mutex::new(Vec::new())),
             background_started: Arc::new(AtomicBool::new(false)),
             owner: true,
+            teardowns: Arc::new(Mutex::new(HashMap::new())),
             #[cfg(test)]
-            attach_stall: Arc::new(std::sync::Mutex::new(None)),
+            hooks: Arc::new(TestHooks::default()),
             frame_epochs: Arc::new(AtomicU64::new(0)),
             live_frames: Arc::new(Mutex::new(HashMap::new())),
             devtools_events: Arc::new(Mutex::new(HashMap::new())),
@@ -267,8 +271,9 @@ impl ChromiumoxideDriver {
             background: self.background.clone(),
             background_started: self.background_started.clone(),
             owner: false,
+            teardowns: self.teardowns.clone(),
             #[cfg(test)]
-            attach_stall: self.attach_stall.clone(),
+            hooks: self.hooks.clone(),
             frame_epochs: self.frame_epochs.clone(),
             live_frames: self.live_frames.clone(),
             devtools_events: self.devtools_events.clone(),
@@ -301,18 +306,18 @@ impl ChromiumoxideDriver {
 
     /// Start the reaper and the prober once, on the first `acquire` (a driver
     /// that is only constructed, as in most edge tests, starts nothing).
-    /// `QUARRY_BROWSER_REAPER=0` starts neither.
+    /// `QUARRY_BROWSER_REAPER=0` leaves the reaper out. The prober always
+    /// runs: it is what relaunches a crashed browser on an edge that `/ready`
+    /// has taken out of traffic, where no `acquire` comes to do it.
     fn start_background(&self) {
-        if self.pool.reaper == ReaperMode::Off
-            || self.background_started.swap(true, Ordering::SeqCst)
-        {
+        if self.background_started.swap(true, Ordering::SeqCst) {
             return;
         }
         let Ok(runtime) = tokio::runtime::Handle::try_current() else {
             self.background_started.store(false, Ordering::SeqCst);
             return;
         };
-        let reaper = {
+        let reaper = (self.pool.reaper != ReaperMode::Off).then(|| {
             let view = self.share();
             let every = self.pool.reaper_interval;
             runtime.spawn(async move {
@@ -324,7 +329,7 @@ impl ChromiumoxideDriver {
                     view.reaper_tick().await;
                 }
             })
-        };
+        });
         let prober = {
             let view = self.share();
             let every = self.pool.probe_interval;
@@ -342,7 +347,7 @@ impl ChromiumoxideDriver {
             .background
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        background.push(reaper);
+        background.extend(reaper);
         background.push(prober);
     }
 
@@ -350,18 +355,8 @@ impl ChromiumoxideDriver {
     /// do; with `1` it tears the sessions down (without saving their profile:
     /// an abandoned session's state is not a checkpoint anyone asked for).
     async fn reaper_tick(&self) {
-        let enforce = self.pool.reaper == ReaperMode::On;
-        let due = self.book().reap_idle(Instant::now(), enforce);
-        for reaped in due {
-            if enforce {
-                self.teardown_session(&reaped.session_key).await;
-                tracing::info!(
-                    reason = reaped.reason.as_str(),
-                    slot = reaped.slot,
-                    pages = reaped.pages,
-                    "browser session reaped"
-                );
-            } else {
+        if self.pool.reaper != ReaperMode::On {
+            for reaped in self.book().reap_idle(Instant::now(), false) {
                 tracing::info!(
                     reason = reaped.reason.as_str(),
                     slot = reaped.slot,
@@ -370,6 +365,26 @@ impl ChromiumoxideDriver {
                     "browser session would be reaped"
                 );
             }
+            return;
+        }
+        // One session at a time, decided again under its teardown gate: a key
+        // released and admitted again between the book's first look and the
+        // teardown is not due any more, and its new state is left alone.
+        let candidates = self.book().reap_candidates(Instant::now());
+        for key in candidates {
+            let gate = self.teardown_gate(&key).await;
+            let _tearing_down = gate.lock().await;
+            let reaped = self.book().reap_if_due(&key, Instant::now());
+            if let Some(reaped) = reaped {
+                self.teardown_locked(&key).await;
+                tracing::info!(
+                    reason = reaped.reason.as_str(),
+                    slot = reaped.slot,
+                    pages = reaped.pages,
+                    "browser session reaped"
+                );
+            }
+            self.drop_teardown_gate(&key, &gate).await;
         }
     }
 
@@ -715,12 +730,68 @@ impl ChromiumoxideDriver {
             .clone()
     }
 
-    /// Everything `release` frees except the profile capture: pages, context,
-    /// collectors, policies, receipts, the proxy session and the book entry.
+    /// Everything `release` frees except the profile capture: the book entry,
+    /// pages, context, collectors, policies, receipts and the proxy session.
     /// Safe to repeat.
+    ///
+    /// The book entry goes first: an attach still in flight then fails its
+    /// final admission check and its guard closes the page and context it
+    /// made, instead of adding them after the session's pages are gone. A new
+    /// `acquire` of the same key waits for the teardown gate, so the teardown
+    /// never frees the state of the session admitted after it.
     async fn teardown_session(&self, session_key: &str) {
+        let gate = self.teardown_gate(session_key).await;
+        let _tearing_down = gate.lock().await;
+        self.book().release(session_key);
+        self.teardown_locked(session_key).await;
+        self.drop_teardown_gate(session_key, &gate).await;
+    }
+
+    /// The per-session gate `teardown_session` and the reaper hold.
+    async fn teardown_gate(&self, session_key: &str) -> Arc<Mutex<()>> {
+        self.teardowns
+            .lock()
+            .await
+            .entry(session_key.to_owned())
+            .or_default()
+            .clone()
+    }
+
+    /// Forget the gate, unless a later teardown has replaced it.
+    async fn drop_teardown_gate(&self, session_key: &str, gate: &Arc<Mutex<()>>) {
+        let mut teardowns = self.teardowns.lock().await;
+        if teardowns
+            .get(session_key)
+            .is_some_and(|current| Arc::ptr_eq(current, gate))
+        {
+            teardowns.remove(session_key);
+        }
+    }
+
+    /// Wait for a teardown of `session_key` that is still running.
+    async fn wait_for_teardown(&self, session_key: &str) {
+        let gate = self.teardowns.lock().await.get(session_key).cloned();
+        if let Some(gate) = gate {
+            drop(gate.lock().await);
+        }
+    }
+
+    /// The teardown itself. The caller holds the session's teardown gate and
+    /// has already taken the session out of the book.
+    async fn teardown_locked(&self, session_key: &str) {
         let session_key = session_key.to_owned();
         let removed = self.pages.lock().await.remove(&session_key);
+        #[cfg(test)]
+        {
+            let stall = *self
+                .hooks
+                .teardown_stall
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if let Some(stall) = stall {
+                tokio::time::sleep(stall).await;
+            }
+        }
         if let Some(session_pages) = removed {
             for tab in session_pages.tabs {
                 if let Err(err) = best_effort(Op::PageClose, tab.page.close()).await {
@@ -762,7 +833,6 @@ impl ChromiumoxideDriver {
         self.dialog_pages.lock().await.remove(&session_key);
         self.live_frames.lock().await.remove(&session_key);
         self.attach_locks.lock().await.remove(&session_key);
-        self.book().release(&session_key);
     }
 
     fn session_key(session: &BrowserSession) -> String {
@@ -998,6 +1068,7 @@ impl ChromiumoxideDriver {
         #[cfg(test)]
         {
             let stall = *self
+                .hooks
                 .attach_stall
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -1234,9 +1305,16 @@ impl ChromiumoxideDriver {
     /// The session's page changed: drop its cached frame, and make a capture
     /// that is still running for the old page unable to store itself.
     async fn invalidate_live_frame_cache(&self, session: &BrowserSession) {
+        let session_key = Self::session_key(session);
         let epoch = self.frame_epochs.fetch_add(1, Ordering::SeqCst) + 1;
-        self.live_frames.lock().await.insert(
-            Self::session_key(session),
+        let mut frames = self.live_frames.lock().await;
+        // A released session gets no slot back (its teardown removed it).
+        if !self.book().is_admitted(&session_key) {
+            frames.remove(&session_key);
+            return;
+        }
+        frames.insert(
+            session_key,
             LiveFrameSlot {
                 epoch,
                 cached: None,
@@ -2665,6 +2743,7 @@ impl BrowserDriver for ChromiumoxideDriver {
         let acquired_at = Instant::now();
         // The driver's own cap comes after the edge's run caps (R-26).
         let session_key = lease.session_affinity_key.clone();
+        self.wait_for_teardown(&session_key).await;
         let admission = self.book().admit(
             &session_key,
             Duration::from_secs(u64::from(lease.ttl_s)),
@@ -2694,18 +2773,16 @@ impl BrowserDriver for ChromiumoxideDriver {
                 ..
             } => (fresh, needs_launch),
         };
+        // Given back if this call does not finish: an error, or the caller
+        // dropping it during a cold launch.
+        let mut rollback = AdmissionRollback::new(self, session_key.clone(), fresh);
         self.start_background();
         let startup_mode = if self.browser.lock().await.is_some() && !needs_launch {
             BrowserStartupMode::Warm
         } else {
             BrowserStartupMode::Cold
         };
-        if let Err(error) = self.ensure_browser().await {
-            if fresh {
-                self.book().release(&session_key);
-            }
-            return Err(error);
-        }
+        self.ensure_browser().await?;
         let session = BrowserSession {
             lease: lease.clone(),
             inner: Arc::new(Mutex::new(SessionInner {
@@ -2721,6 +2798,7 @@ impl BrowserDriver for ChromiumoxideDriver {
                 ..BrowserTelemetry::default()
             },
         );
+        rollback.disarm();
         Ok(session)
     }
 
@@ -2766,9 +2844,29 @@ impl BrowserDriver for ChromiumoxideDriver {
         Ok(())
     }
 
-    async fn content(&self, _session: &BrowserSession) -> QuarryResult<Bytes> {
-        let page = self.current_page(_session).await?;
+    async fn content(&self, session: &BrowserSession) -> QuarryResult<Bytes> {
+        let page = self.current_page(session).await?;
         let html = read_with_retry(Op::Content, || async {
+            #[cfg(test)]
+            {
+                self.hooks.content_attempts.fetch_add(1, Ordering::SeqCst);
+                let stale = self
+                    .hooks
+                    .content_stale_context
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .take();
+                if let Some(context_id) = stale {
+                    let error = content_in_stale_context(&page, context_id).await;
+                    *self
+                        .hooks
+                        .content_first_error
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+                        error.details.as_ref().map(|details| details.to_string());
+                    return Err(error);
+                }
+            }
             page.content().await.map_err(|e| {
                 QuarryError::new(ErrorCode::DriverFailed, "chromiumoxide content failed")
                     .with_details(json!({ "error": e.to_string() }))
@@ -3182,9 +3280,26 @@ impl BrowserDriver for ChromiumoxideDriver {
         let options = normalize_live_frame_options(options);
         let session_key = Self::session_key(session);
         let (tab_id, page) = self.current_tab_page(session).await?;
+        #[cfg(test)]
+        {
+            let stall = *self
+                .hooks
+                .live_frame_stall
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if let Some(stall) = stall {
+                self.hooks.live_frame_stalled.store(true, Ordering::SeqCst);
+                tokio::time::sleep(stall).await;
+            }
+        }
         // Per session: one viewer's capture never waits for another session's.
         let page_epoch = {
             let mut frames = self.live_frames.lock().await;
+            // Released while this call looked for its page: its teardown has
+            // removed the slot (or will, after this lock), so none is made.
+            if let Some(error) = self.not_admitted_error(&session_key) {
+                return Err(error);
+            }
             let slot = frames.entry(session_key.clone()).or_insert_with(|| LiveFrameSlot {
                 epoch: self.frame_epochs.fetch_add(1, Ordering::SeqCst) + 1,
                 cached: None,
@@ -4001,6 +4116,89 @@ impl Drop for ChromiumoxideDriver {
     }
 }
 
+/// Test hooks: where a live test holds the driver still or bends one call.
+#[cfg(test)]
+#[derive(Default)]
+struct TestHooks {
+    /// Hold every tab attach this long after its page exists.
+    attach_stall: std::sync::Mutex<Option<Duration>>,
+    /// Hold every teardown this long after it took the session's pages.
+    teardown_stall: std::sync::Mutex<Option<Duration>>,
+    /// Hold `live_frame` this long after it found the page.
+    live_frame_stall: std::sync::Mutex<Option<Duration>>,
+    live_frame_stalled: AtomicBool,
+    /// The next `content` read's first attempt evaluates in this execution
+    /// context (one from before a navigation), as the race does.
+    content_stale_context:
+        std::sync::Mutex<Option<::chromiumoxide::cdp::js_protocol::runtime::ExecutionContextId>>,
+    /// Every attempt `content` made, retries included.
+    content_attempts: AtomicUsize,
+    /// The error details of the stale attempt.
+    content_first_error: std::sync::Mutex<Option<String>>,
+}
+
+/// The read `content` makes, in a given (stale) execution context: Chromium's
+/// own answer to a context that a navigation destroyed.
+#[cfg(test)]
+async fn content_in_stale_context(
+    page: &Page,
+    context_id: ::chromiumoxide::cdp::js_protocol::runtime::ExecutionContextId,
+) -> QuarryError {
+    use ::chromiumoxide::cdp::js_protocol::runtime::EvaluateParams;
+    let params = match EvaluateParams::builder()
+        .expression("document.documentElement.outerHTML")
+        .context_id(context_id)
+        .return_by_value(true)
+        .build()
+    {
+        Ok(params) => params,
+        Err(error) => {
+            return QuarryError::new(ErrorCode::Internal, "content params")
+                .with_details(json!({ "error": error }))
+        }
+    };
+    match page.execute(params).await {
+        Ok(_) => QuarryError::new(ErrorCode::Internal, "the stale context answered"),
+        Err(error) => QuarryError::new(ErrorCode::DriverFailed, "chromiumoxide content failed")
+            .with_details(json!({ "error": error.to_string() })),
+    }
+}
+
+/// Gives a fresh admission back when `acquire` does not finish: an error, or
+/// the caller dropping the future during a cold launch (a scrape's own
+/// timeout does that). A second acquire of a key already admitted is not
+/// fresh and rolls nothing back.
+struct AdmissionRollback {
+    book: Arc<std::sync::Mutex<SlotBook>>,
+    session_key: String,
+    armed: bool,
+}
+
+impl AdmissionRollback {
+    fn new(driver: &ChromiumoxideDriver, session_key: String, fresh: bool) -> Self {
+        Self {
+            book: driver.book.clone(),
+            session_key,
+            armed: fresh,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for AdmissionRollback {
+    fn drop(&mut self) {
+        if self.armed {
+            self.book
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .release(&self.session_key);
+        }
+    }
+}
+
 /// Closes what a tab attach (or a probe) created when it does not finish:
 /// an error, a deadline, or the caller dropping the future. Only what this
 /// call created: a context that existed before is the session's and stays.
@@ -4531,6 +4729,9 @@ mod tests {
     fn quiet_pool() -> BrowserPoolConfig {
         BrowserPoolConfig {
             reaper: ReaperMode::Off,
+            // The prober runs even with the reaper off; an hour keeps it out
+            // of the way, tests call `probe_tick` themselves.
+            probe_interval: Duration::from_secs(3_600),
             ..BrowserPoolConfig::default()
         }
     }
@@ -4538,7 +4739,11 @@ mod tests {
     /// Browser contexts the running browser holds.
     async fn context_count(driver: &ChromiumoxideDriver) -> usize {
         use ::chromiumoxide::cdp::browser_protocol::target::GetBrowserContextsParams;
-        let guard = driver.browser.lock().await;
+        // Bounded: a test that reads this while an attach stalls fails if the
+        // attach holds the browser lock.
+        let guard = tokio::time::timeout(Duration::from_secs(5), driver.browser.lock())
+            .await
+            .expect("the browser lock is free within 5 s");
         let browser = guard.as_ref().expect("a running browser");
         browser
             .execute(GetBrowserContextsParams::default())
@@ -4552,7 +4757,11 @@ mod tests {
     /// Page targets the running browser holds.
     async fn page_target_count(driver: &ChromiumoxideDriver) -> usize {
         use ::chromiumoxide::cdp::browser_protocol::target::GetTargetsParams;
-        let guard = driver.browser.lock().await;
+        // Bounded: a test that reads this while an attach stalls fails if the
+        // attach holds the browser lock.
+        let guard = tokio::time::timeout(Duration::from_secs(5), driver.browser.lock())
+            .await
+            .expect("the browser lock is free within 5 s");
         let browser = guard.as_ref().expect("a running browser");
         browser
             .execute(GetTargetsParams::default())
@@ -4833,13 +5042,12 @@ mod tests {
     }
 
     /// A navigation that lands between a content read resolving its execution
-    /// context and using it gets Chromium's real destroyed-context error; the
-    /// read is retried once and returns the new page. The first attempt pins
-    /// the context id from before the navigation, which is exactly what the
-    /// race does, deterministically.
+    /// context and using it gets Chromium's real destroyed-context error. The
+    /// production `content()` retries once and returns the new page. The
+    /// first attempt is made in the context from before the navigation, which
+    /// is exactly what the race does, deterministically.
     #[tokio::test]
     async fn navigation_during_content_read_is_retried_once() {
-        use ::chromiumoxide::cdp::js_protocol::runtime::EvaluateParams;
         if !live_enabled() {
             return;
         }
@@ -4856,42 +5064,24 @@ mod tests {
             .await
             .expect("new content");
 
-        let attempts = Arc::new(AtomicUsize::new(0));
-        let first_error = Arc::new(std::sync::Mutex::new(None::<String>));
-        let html = read_with_retry(Op::Content, || {
-            let attempts = attempts.clone();
-            let first_error = first_error.clone();
-            let page = page.clone();
-            let driver = &driver;
-            let session = &session;
-            async move {
-                if attempts.fetch_add(1, Ordering::SeqCst) == 0 {
-                    let params = EvaluateParams::builder()
-                        .expression("document.documentElement.outerHTML")
-                        .context_id(stale_context)
-                        .return_by_value(true)
-                        .build()
-                        .expect("params");
-                    let error = match page.execute(params).await {
-                        Ok(_) => QuarryError::new(ErrorCode::Internal, "stale context answered"),
-                        Err(error) => QuarryError::new(
-                            ErrorCode::DriverFailed,
-                            "chromiumoxide content failed",
-                        )
-                        .with_details(json!({ "error": error.to_string() })),
-                    };
-                    *first_error.lock().unwrap() =
-                        error.details.as_ref().map(|details| details.to_string());
-                    Err(error)
-                } else {
-                    driver.content(session).await
-                }
-            }
-        })
-        .await
-        .expect("the retried read succeeds");
-        assert_eq!(attempts.load(Ordering::SeqCst), 2, "retried exactly once");
-        let first = first_error.lock().unwrap().clone().expect("first error");
+        driver.hooks.content_attempts.store(0, Ordering::SeqCst);
+        *driver.hooks.content_stale_context.lock().unwrap() = Some(stale_context);
+        let html = driver
+            .content(&session)
+            .await
+            .expect("the retried read succeeds");
+        assert_eq!(
+            driver.hooks.content_attempts.load(Ordering::SeqCst),
+            2,
+            "content() retried exactly once"
+        );
+        let first = driver
+            .hooks
+            .content_first_error
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("first error");
         assert!(
             crate::deadlines::is_context_destroyed(&first),
             "Chromium's error is one the retry recognises: {first}"
@@ -4915,7 +5105,7 @@ mod tests {
         let session = live_session(&driver, "attach-cancel").await;
         let baseline = context_count(&driver).await;
         let pages_baseline = page_target_count(&driver).await;
-        *driver.attach_stall.lock().unwrap() = Some(Duration::from_secs(30));
+        *driver.hooks.attach_stall.lock().unwrap() = Some(Duration::from_secs(30));
 
         let attaching = {
             let driver = driver.clone();
@@ -4965,7 +5155,7 @@ mod tests {
                 && pages.browser_context_id.is_none()));
         }
 
-        *driver.attach_stall.lock().unwrap() = None;
+        *driver.hooks.attach_stall.lock().unwrap() = None;
         driver.new_tab(&session, None).await.expect("next attach works");
         assert_eq!(context_count(&driver).await, baseline + 1);
         assert_eq!(driver.book().slot(SLOT).unwrap().pages, 1);
@@ -4977,6 +5167,341 @@ mod tests {
             })
             .await
         );
+    }
+
+    /// A session object for `key` without going through `acquire` (no browser).
+    fn bare_session(key: &str) -> BrowserSession {
+        BrowserSession {
+            lease: make_lease_with_key(key),
+            inner: Arc::new(Mutex::new(SessionInner {
+                connected: true,
+                pages_served: 0,
+            })),
+        }
+    }
+
+    fn assert_cap_details(error: &QuarryError, reason: &str, limit: usize, active: usize) {
+        assert_eq!(error.code, ErrorCode::RateLimited, "{error:?}");
+        let details = error.details.as_ref().expect("cap details");
+        assert_eq!(details["reason"], reason);
+        assert_eq!(details["scope"], "driver");
+        assert_eq!(details["limit"], limit);
+        assert_eq!(details["active"], active);
+        assert_eq!(
+            details["retry_after_seconds"],
+            crate::slots::BUSY_RETRY_AFTER_S
+        );
+    }
+
+    /// The session cap is the driver's 429: `browser_session_cap` with its
+    /// numbers, and the refused key is not admitted. Refused before any
+    /// launch, so no browser is needed.
+    #[tokio::test]
+    async fn acquire_past_the_session_cap_is_rate_limited_with_details() {
+        let driver = ChromiumoxideDriver::new().with_pool_config(BrowserPoolConfig {
+            max_sessions: 1,
+            ..quiet_pool()
+        });
+        assert!(matches!(
+            driver
+                .book()
+                .admit("cap-holder", Duration::from_secs(30), Instant::now()),
+            Admission::Admitted { .. }
+        ));
+        let error = driver
+            .acquire(&make_lease_with_key("cap-second"))
+            .await
+            .expect_err("over the cap");
+        assert_cap_details(&error, "browser_session_cap", 1, 1);
+        assert!(!driver.book().is_admitted("cap-second"));
+        assert_eq!(driver.launch_count(), 0, "refused before any launch");
+    }
+
+    /// The page cap is the driver's 429 too: `browser_page_cap`, and the
+    /// refused attach takes no page from the book. Refused before any launch.
+    #[tokio::test]
+    async fn new_tab_past_the_page_cap_is_rate_limited_with_details() {
+        let driver = ChromiumoxideDriver::new()
+            .with_pinned_egress_proxy(Arc::new(StubEgressProvider))
+            .with_pool_config(BrowserPoolConfig {
+                max_pages_per_slot: 1,
+                ..quiet_pool()
+            });
+        let now = Instant::now();
+        driver
+            .book()
+            .admit("page-cap", Duration::from_secs(30), now);
+        driver
+            .book()
+            .page_opened("page-cap", now)
+            .expect("the one page");
+        let session = bare_session("page-cap");
+        driver
+            .configure_egress_policy(&session, BrowserEgressPolicy::deny_all())
+            .await
+            .expect("policy");
+        let error = driver
+            .new_tab(&session, None)
+            .await
+            .expect_err("over the page cap");
+        assert_cap_details(&error, "browser_page_cap", 1, 1);
+        assert_eq!(driver.book().slot(SLOT).unwrap().pages, 1);
+        assert_eq!(driver.launch_count(), 0, "refused before any launch");
+    }
+
+    /// The two losses that are not a reap or a crash: an admitted session with
+    /// no page says `no_current_page`, a released one `session_not_open`. Both
+    /// are not retryable and neither opens a tab.
+    #[tokio::test]
+    async fn no_current_page_and_session_not_open_are_typed() {
+        let driver = ChromiumoxideDriver::new()
+            .with_pinned_egress_proxy(Arc::new(StubEgressProvider))
+            .with_pool_config(quiet_pool());
+        driver
+            .book()
+            .admit("typed-loss", Duration::from_secs(30), Instant::now());
+        let session = bare_session("typed-loss");
+        let error = driver.content(&session).await.expect_err("no page yet");
+        assert_eq!(loss_reason(&error), "no_current_page", "{error:?}");
+        assert!(!error.retryable);
+
+        driver.release(session.clone()).await.expect("release");
+        driver
+            .configure_egress_policy(&session, BrowserEgressPolicy::deny_all())
+            .await
+            .expect("policy");
+        let error = driver
+            .new_tab(&session, None)
+            .await
+            .expect_err("a released session opens nothing");
+        assert_eq!(loss_reason(&error), "session_not_open", "{error:?}");
+        assert!(!error.retryable);
+        let error = driver
+            .goto(&session, "about:blank")
+            .await
+            .expect_err("a released session navigates nowhere");
+        assert_eq!(loss_reason(&error), "session_not_open", "{error:?}");
+        assert_eq!(driver.book().slot(SLOT).unwrap().pages, 0);
+        assert_eq!(driver.launch_count(), 0);
+    }
+
+    /// An egress authority whose endpoint fails for the probe's key only, so
+    /// sessions work and every probe fails.
+    struct FailingProbeProvider;
+
+    #[async_trait::async_trait]
+    impl BrowserEgressProxyProvider for FailingProbeProvider {
+        async fn endpoint_for_session(
+            &self,
+            session_key: &str,
+        ) -> QuarryResult<PinnedEgressProxyEndpoint> {
+            if session_key.starts_with("probe:") {
+                return Err(QuarryError::new(
+                    ErrorCode::DriverFailed,
+                    "probe endpoint refused (test)",
+                ));
+            }
+            PinnedEgressProxyEndpoint::parse("http://127.0.0.1:9")
+        }
+
+        async fn receipts_after(
+            &self,
+            _session_key: &str,
+            _after_sequence: u64,
+            _limit: usize,
+        ) -> QuarryResult<Vec<BrowserEgressReceipt>> {
+            Ok(Vec::new())
+        }
+
+        async fn configure_policy(
+            &self,
+            _session_key: &str,
+            _policy: BrowserEgressPolicy,
+        ) -> QuarryResult<()> {
+            Ok(())
+        }
+
+        async fn release_session(&self, _session_key: &str) {}
+    }
+
+    /// Two failed probes make the slot unhealthy. With a session on it the
+    /// browser is never killed and the session keeps working; once the slot
+    /// is empty the next failed probe recycles it.
+    #[tokio::test]
+    async fn unhealthy_slot_with_sessions_is_kept_and_an_empty_one_recycled() {
+        if !live_enabled() {
+            return;
+        }
+        let driver = ChromiumoxideDriver::new()
+            .with_pinned_egress_proxy(Arc::new(FailingProbeProvider))
+            .with_pool_config(quiet_pool());
+        let session = live_session_sized(&driver, "unhealthy-keep", None, "still-mine").await;
+        assert_eq!(driver.launch_count(), 1);
+
+        driver.probe_tick().await;
+        assert_eq!(driver.book().slot(SLOT).unwrap().probe_failures, 1);
+        assert_eq!(driver.book().slot(SLOT).unwrap().healthy, None, "one failure is not enough");
+        driver.probe_tick().await;
+        let slot = driver.book().slot(SLOT).unwrap().clone();
+        assert_eq!(slot.healthy, Some(false), "two failures: unhealthy");
+        assert_eq!(driver.health().await.state, crate::BrowserHealthState::Unhealthy);
+        driver.probe_tick().await;
+        assert_eq!(driver.launch_count(), 1, "a slot with a session is never recycled");
+        assert_eq!(driver.book().slot(SLOT).unwrap().generation, 1);
+        assert!(driver.book().is_admitted("unhealthy-keep"));
+        assert_eq!(live_marker(&driver, &session).await, "still-mine");
+
+        driver.release(session).await.expect("release");
+        driver.probe_tick().await;
+        assert_eq!(driver.launch_count(), 2, "the empty unhealthy slot is recycled");
+        let slot = driver.book().slot(SLOT).unwrap().clone();
+        assert_eq!(slot.generation, 2);
+        assert_eq!(slot.status, SlotStatus::Ready);
+        assert_eq!(slot.healthy, None, "a new browser is unprobed");
+    }
+
+    /// `QUARRY_BROWSER_REAPER=0` turns the reaper off, not the prober: after a
+    /// crash the prober relaunches the browser with no acquire, so an edge
+    /// that `/ready` took out of traffic recovers by itself.
+    #[tokio::test]
+    async fn crash_with_reaper_off_is_relaunched_by_the_prober() {
+        if !live_enabled() {
+            return;
+        }
+        let driver = live_driver().with_pool_config(BrowserPoolConfig {
+            reaper: ReaperMode::Off,
+            probe_interval: Duration::from_millis(300),
+            ..BrowserPoolConfig::default()
+        });
+        let old = live_session_sized(&driver, "off-crash", None, "before").await;
+        assert_eq!(driver.launch_count(), 1);
+        {
+            let mut guard = driver.browser.lock().await;
+            let browser = guard.as_mut().expect("a running browser");
+            let _ = browser.kill().await;
+        }
+        assert!(
+            eventually(Duration::from_secs(40), || async {
+                driver.launch_count() == 2
+                    && driver.health().await.state == crate::BrowserHealthState::Healthy
+            })
+            .await,
+            "relaunched and probed healthy without an acquire (launches {}, state {:?})",
+            driver.launch_count(),
+            driver.health().await.state
+        );
+        let error = driver.content(&old).await.expect_err("the old page is gone");
+        assert_eq!(loss_reason(&error), "browser_process_lost", "{error:?}");
+        driver.release(old).await.expect("release lost");
+    }
+
+    /// A release that runs while a tab attach of the same session is in
+    /// flight (the attach wakes up while the teardown is still running)
+    /// leaves no page and no context behind: the attach fails its admission
+    /// check and its guard closes what it made.
+    #[tokio::test]
+    async fn release_during_attach_leaves_no_page_or_context() {
+        if !live_enabled() {
+            return;
+        }
+        let driver = Arc::new(live_driver().with_pool_config(quiet_pool()));
+        let session = live_session(&driver, "release-attach").await;
+        let baseline = context_count(&driver).await;
+        let pages_baseline = page_target_count(&driver).await;
+        *driver.hooks.attach_stall.lock().unwrap() = Some(Duration::from_secs(2));
+        *driver.hooks.teardown_stall.lock().unwrap() = Some(Duration::from_secs(5));
+
+        let attaching = {
+            let driver = driver.clone();
+            let session = session.clone();
+            tokio::spawn(async move { driver.new_tab(&session, None).await })
+        };
+        assert!(
+            eventually(Duration::from_secs(15), || async {
+                page_target_count(&driver).await == pages_baseline + 1
+            })
+            .await,
+            "the attach opened its page and stalls"
+        );
+        // The attach wakes up two seconds in, while the teardown stalls.
+        driver.release(session.clone()).await.expect("release");
+        assert!(attaching.is_finished(), "the attach ended during the teardown");
+        let attached = attaching.await.expect("join");
+        assert!(attached.is_err(), "the released session got no tab: {attached:?}");
+        *driver.hooks.attach_stall.lock().unwrap() = None;
+        *driver.hooks.teardown_stall.lock().unwrap() = None;
+
+        assert!(!driver.pages.lock().await.contains_key("release-attach"));
+        assert!(!driver.book().is_admitted("release-attach"));
+        assert_eq!(driver.book().slot(SLOT).unwrap().pages, 0);
+        assert!(
+            eventually(Duration::from_secs(10), || async {
+                context_count(&driver).await == baseline
+            })
+            .await,
+            "the attach's context is disposed"
+        );
+        assert!(
+            eventually(Duration::from_secs(10), || async {
+                page_target_count(&driver).await == pages_baseline
+            })
+            .await,
+            "the attach's page is closed"
+        );
+    }
+
+    /// A live frame captured for a session released meanwhile leaves no cache
+    /// slot behind.
+    #[tokio::test]
+    async fn live_frame_for_a_released_session_leaves_no_cache() {
+        if !live_enabled() {
+            return;
+        }
+        let driver = Arc::new(live_driver().with_pool_config(quiet_pool()));
+        let session = live_session_sized(&driver, "frame-release", None, "frame").await;
+        *driver.hooks.live_frame_stall.lock().unwrap() = Some(Duration::from_secs(2));
+        let capturing = {
+            let driver = driver.clone();
+            let session = session.clone();
+            tokio::spawn(async move {
+                driver
+                    .live_frame(&session, LiveFrameOptions::default())
+                    .await
+            })
+        };
+        assert!(
+            eventually(Duration::from_secs(10), || async {
+                driver.hooks.live_frame_stalled.load(Ordering::SeqCst)
+            })
+            .await,
+            "the capture found its page and stalls"
+        );
+        driver.release(session).await.expect("release");
+        let captured = capturing.await.expect("join");
+        *driver.hooks.live_frame_stall.lock().unwrap() = None;
+        let error = captured.expect_err("no frame for a released session");
+        assert_eq!(loss_reason(&error), "session_not_open", "{error:?}");
+        assert!(!driver.live_frames.lock().await.contains_key("frame-release"));
+    }
+
+    /// An acquire dropped during the cold launch (a scrape's own timeout does
+    /// that) gives its admission back, and the next acquire works.
+    #[tokio::test]
+    async fn acquire_dropped_during_launch_gives_its_admission_back() {
+        if !live_enabled() {
+            return;
+        }
+        let driver = live_driver().with_pool_config(quiet_pool());
+        let lease = make_lease_with_key("dropped-acquire");
+        let outcome = tokio::time::timeout(Duration::from_millis(1), driver.acquire(&lease)).await;
+        assert!(outcome.is_err(), "the launch takes longer than 1 ms");
+        assert!(!driver.book().is_admitted("dropped-acquire"));
+        assert_eq!(driver.book().sessions_open(), 0);
+
+        let session = live_session_sized(&driver, "dropped-acquire", None, "back").await;
+        assert_eq!(live_marker(&driver, &session).await, "back");
+        driver.release(session).await.expect("release");
+        assert_eq!(driver.book().sessions_open(), 0);
     }
 
     /// A session under an allow-nothing policy: the page can render what the test

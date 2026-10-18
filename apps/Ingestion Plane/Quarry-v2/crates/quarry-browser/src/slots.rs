@@ -110,7 +110,8 @@ impl Default for SlotConfig {
 /// `QUARRY_BROWSER_REAPER`: what the idle reaper does.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReaperMode {
-    /// No reaper and no prober. Caps and crash handling stay on.
+    /// No reaper. The prober, the caps and crash handling stay on (the
+    /// prober is what relaunches a crashed browser with no traffic).
     Off,
     /// Log what would be reaped, close nothing (the first week).
     Log,
@@ -542,6 +543,48 @@ impl SlotBook {
         due
     }
 
+    /// The keys `reap_idle(now, true)` would reap, sorted, without changing
+    /// anything: the enforcing reaper takes them one at a time.
+    pub fn reap_candidates(&self, now: Instant) -> Vec<String> {
+        let mut due: Vec<String> = self
+            .sessions
+            .iter()
+            .filter(|(_, entry)| Self::due_reason(entry, now).is_some())
+            .map(|(key, _)| key.clone())
+            .collect();
+        due.sort();
+        due
+    }
+
+    /// Reap `key` alone if it is still due: released and tombstoned as
+    /// `reap_idle` with `enforce` does. `None` when it was touched, released
+    /// or admitted afresh since it was a candidate.
+    pub fn reap_if_due(&mut self, key: &str, now: Instant) -> Option<Reaped> {
+        self.prune_tombstones(now);
+        let entry = self.sessions.get(key)?;
+        let reason = Self::due_reason(entry, now)?;
+        let reaped = Reaped {
+            session_key: key.to_owned(),
+            slot: entry.slot,
+            reason,
+            pages: entry.pages,
+        };
+        self.release(key);
+        self.tombstones
+            .insert(key.to_owned(), (now, LossReason::Reaped(reason)));
+        Some(reaped)
+    }
+
+    fn due_reason(entry: &SessionEntry, now: Instant) -> Option<ReapReason> {
+        if now.saturating_duration_since(entry.admitted_at) >= entry.age_limit {
+            Some(ReapReason::MaxAge)
+        } else if now.saturating_duration_since(entry.last_touch) >= entry.idle_limit {
+            Some(ReapReason::Idle)
+        } else {
+            None
+        }
+    }
+
     /// Retiring slots with nothing left on them: close them.
     pub fn retire_candidates(&self) -> Vec<SlotId> {
         self.slots
@@ -626,6 +669,37 @@ impl SlotBook {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reap_if_due_reaps_one_key_and_skips_a_touched_or_new_one() {
+        let mut book = SlotBook::new(cfg(1, 0, 0));
+        let start = Instant::now();
+        let ttl = Duration::from_secs(10);
+        book.admit("idle", ttl, start);
+        book.admit("busy", ttl, start);
+        let later = start + Duration::from_secs(150);
+        assert_eq!(book.reap_candidates(later), vec!["busy".to_owned(), "idle".to_owned()]);
+        assert_eq!(book.sessions_open(), 2, "candidates change nothing");
+
+        // Touched after it became a candidate: not due any more.
+        book.touch("busy", later);
+        assert_eq!(book.reap_if_due("busy", later), None);
+        assert!(book.is_admitted("busy"));
+
+        let reaped = book.reap_if_due("idle", later).expect("still due");
+        assert_eq!(reaped.reason, ReapReason::Idle);
+        assert!(!book.is_admitted("idle"));
+        assert_eq!(
+            book.loss("idle", later),
+            Some(LossReason::Reaped(ReapReason::Idle))
+        );
+        // Admitted afresh under the same key: a new session, not due.
+        book.admit("idle", ttl, later);
+        assert_eq!(book.reap_if_due("idle", later), None);
+        assert!(book.is_admitted("idle"));
+        assert_eq!(book.slot(0).unwrap().sessions, 2);
+    }
+
 
     fn cfg(slots: usize, max_sessions: usize, max_pages: usize) -> SlotConfig {
         SlotConfig {
