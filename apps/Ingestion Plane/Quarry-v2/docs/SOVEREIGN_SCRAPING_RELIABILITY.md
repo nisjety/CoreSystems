@@ -157,8 +157,11 @@ A status alone is never a strong signal.
 Markers come in three classes. Class A is an infrastructure identifier in the
 HTML (a CAPTCHA widget script, a WAF interstitial's own variables); an
 interstitial marker decides alone, a widget also needs the page to be the
-challenge itself (short, or an error status, or a title cue) so that a CAPTCHA
-on a login form or a comment box is a hint at most. Class B is a phrase group in
+challenge itself (an error status, a title cue, a phrase group, or a short page
+with no other form field to fill in) so that a CAPTCHA on a login form, a
+contact or newsletter form or a comment box is a hint at most. An invisible
+reCAPTCHA v3 anchor is ignored, and does not hide a visible v2 widget on the
+same page. Class B is a phrase group in
 the title or in the visible text of a short page ("unusual traffic", "checking
 your browser"); two independent groups are strong, one is weak, a title hit
 counts twice and an error status counts once. Class C is a single word
@@ -172,7 +175,8 @@ recovery: a wait, or a reload of the same URL. Quarry never reloads on its own
 still challenges afterwards, or shows a third strong signal in the run, the
 signal becomes `challenge_loop` with `recovery: exhausted`, and Quarry
 answers navigation to that host and click, type, press and select on its page
-with `403 CHALLENGE_DETECTED` (`details`: `reason`, `host`,
+(and upload or download of one of its nodes, and the snapshot-ref and semantic
+forms of each) with `403 CHALLENGE_DETECTED` (`details`: `reason`, `host`,
 `recovery: "exhausted"`, `next: "user_takeover_or_other_source"`). Screenshots,
 reads, waits, scrolling and navigation to another host stay allowed. A later
 observation that is not strong clears the episode. The state is per run and in
@@ -184,6 +188,13 @@ substring classifier for one release and is not subject to the rule) and
 `QUARRY_CHALLENGE_ENFORCE=enforce|log` (default `enforce`; `log` records a
 `quarry.challenge.would_reject` line and lets the action through while the
 corpus is validated).
+
+**Evidence.** The classification table (about 60 rows) and the runner tests use
+hand-written HTML, modelled on the shape of each vendor's page. None of it is a
+captured page: there are no recorded pages with provenance under the test
+fixtures yet, and no live Turnstile, hCaptcha or login page has been run
+through the classifier. Treat the confidence values as unvalidated until such a
+corpus exists.
 
 Still to do from the original list: `robots_disallowed`, `policy_denied` and
 `processor_not_approved` belong to the fetch path and the policy gate, not to

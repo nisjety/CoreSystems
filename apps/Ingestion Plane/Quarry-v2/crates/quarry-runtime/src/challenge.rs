@@ -264,7 +264,6 @@ const TEXT_GROUPS: &[(&str, &[&str])] = &[
             "performing security verification",
             "performing a security check",
             "verifying your browser",
-            "one more step",
         ],
     ),
     (
@@ -310,7 +309,6 @@ const TITLE_CUES: &[&str] = &[
     "you have been blocked",
     "pardon",
     "captcha",
-    "one more step",
     "checking your browser",
     "challenge",
 ];
@@ -390,6 +388,8 @@ struct Page {
     host: String,
     thin: bool,
     has_password: bool,
+    /// A text-like form control other than the widget's own response field.
+    has_form_fields: bool,
 }
 
 impl Page {
@@ -425,6 +425,7 @@ impl Page {
                 .iter()
                 .any(|needle| src.contains(needle))
         });
+        let has_form_fields = source.as_deref().is_some_and(has_visible_form_fields);
         Self {
             status: input.main_doc_status,
             source,
@@ -434,6 +435,7 @@ impl Page {
             host,
             thin,
             has_password,
+            has_form_fields,
         }
     }
 
@@ -565,15 +567,65 @@ fn decode_entities(chunk: &str) -> String {
     out
 }
 
+/// The whole tag that starts at the first `<` before `at`.
+fn tag_around(src: &str, at: usize) -> &str {
+    let start = src[..at].rfind('<').unwrap_or(0);
+    let end = src[at..].find('>').map_or(src.len(), |p| at + p + 1);
+    &src[start..end]
+}
+
+/// Whether the (lower-cased) source holds a form control a person fills in:
+/// a text-like input, a textarea or a select. Hidden, submit, button and image
+/// inputs and a widget's own response field do not count: a page with only
+/// those is a page that is only the widget.
+fn has_visible_form_fields(src: &str) -> bool {
+    let mut rest = src;
+    while let Some(at) = rest.find("<input") {
+        let tag_end = rest[at..].find('>').map_or(rest.len(), |p| at + p + 1);
+        let tag = &rest[at..tag_end];
+        let skipped = ["hidden", "submit", "button", "image", "reset"].iter().any(|kind| {
+            tag.contains(&format!("type=\"{kind}\""))
+                || tag.contains(&format!("type='{kind}'"))
+                || tag.contains(&format!("type={kind}"))
+        });
+        if !skipped {
+            return true;
+        }
+        rest = &rest[tag_end..];
+    }
+    let mut rest = src;
+    while let Some(at) = rest.find("<textarea") {
+        let tag_end = rest[at..].find('>').map_or(rest.len(), |p| at + p + 1);
+        let tag = &rest[at..tag_end];
+        if !(tag.contains("g-recaptcha-response") || tag.contains("h-captcha-response")) {
+            return true;
+        }
+        rest = &rest[tag_end..];
+    }
+    src.contains("<select")
+}
+
 fn recaptcha_widget(src: &str) -> bool {
-    // v3 is invisible and sits on ordinary pages; its anchor iframe says so.
+    // A visible v2 widget is a widget wherever an invisible one also sits.
+    for marker in ["class=\"g-recaptcha", "class='g-recaptcha"] {
+        let mut from = 0;
+        while let Some(found) = src[from..].find(marker) {
+            let at = from + found;
+            // data-size="invisible" is the invisible v2 variant: no challenge
+            // is on the page until a script asks for one.
+            let tag = tag_around(src, at);
+            if !tag.contains("invisible") {
+                return true;
+            }
+            from = at + marker.len();
+        }
+    }
+    // The anchor and challenge frames are also loaded by v3 and invisible v2;
+    // their src says so.
     if src.contains("size=invisible") {
         return false;
     }
-    src.contains("class=\"g-recaptcha")
-        || src.contains("class='g-recaptcha")
-        || src.contains("recaptcha/api2/anchor")
-        || src.contains("recaptcha/api2/bframe")
+    src.contains("recaptcha/api2/anchor") || src.contains("recaptcha/api2/bframe")
 }
 
 // ---------------------------------------------------------------------------
@@ -731,7 +783,12 @@ fn classify_strong(
         let corroborated = if page.has_password && page.status_2xx_or_unknown() {
             title_cue || non_prove_group
         } else {
-            status_corroborates || title_cue || !hits.is_empty() || (page.thin && !page.has_password)
+            // A short page with nothing else to fill in is the widget itself; a
+            // contact, sign-up or newsletter form that carries one is not.
+            status_corroborates
+                || title_cue
+                || !hits.is_empty()
+                || (page.thin && !page.has_form_fields)
         };
         let gate_open = corroborated && (page.thin || status_corroborates);
         if gate_open {
@@ -1256,7 +1313,8 @@ impl BlockEpisodes {
 
     /// Refuse an action on a host whose recovery is spent. Navigation to an
     /// exhausted host (from any page) and every interaction with the page of an
-    /// exhausted `current_host` (click, type, press, select) are refused with
+    /// exhausted `current_host` (click, type, press, select, upload or download of
+    /// one of its nodes) are refused with
     /// `CHALLENGE_DETECTED`. Observation (screenshot, content, wait, scroll),
     /// navigation to another host and history steps are allowed: the planner
     /// can still look, report, or leave.
@@ -1283,7 +1341,11 @@ impl BlockEpisodes {
             | AgentAction::Select { .. }
             | AgentAction::SelectRef { .. }
             | AgentAction::FrameSelectRef { .. }
-            | AgentAction::SelectSemantic { .. } => {
+            | AgentAction::SelectSemantic { .. }
+            | AgentAction::UploadRef { .. }
+            | AgentAction::FrameUploadRef { .. }
+            | AgentAction::DownloadRef { .. }
+            | AgentAction::FrameDownloadRef { .. } => {
                 (!current_host.is_empty() && self.is_exhausted(current_host, zdr))
                     .then(|| current_host.to_ascii_lowercase())
             }
@@ -1353,6 +1415,16 @@ mod tests {
     const JSD_PAGE: &str = r#"<html><head><title>Shop</title></head><body><h1>Shop</h1><p>Things for sale.</p><script src="/cdn-cgi/challenge-platform/scripts/jsd/main.js"></script></body></html>"#;
 
     const PAYWALL_LD: &str = r#"<html><head><title>Story</title><script type="application/ld+json">{"@type":"NewsArticle","isAccessibleForFree": "False"}</script></head><body><article><p>The first paragraph of the story.</p></article></body></html>"#;
+
+    const CONTACT_WITH_WIDGET: &str = r#"<html><head><title>Contact us</title></head><body><form action="/send" method="post"><label>Name <input type="text" name="n"></label><label>Email <input type="email" name="e"></label><textarea name="m"></textarea><div class="g-recaptcha" data-sitekey="k"></div><button>Send</button></form><script src="https://www.google.com/recaptcha/api.js"></script></body></html>"#;
+
+    const NEWSLETTER_WITH_HCAPTCHA: &str = r#"<html><head><title>Subscribe</title></head><body><h1>Our newsletter</h1><form><input type="email" name="e"><div class="h-captcha" data-sitekey="k"></div><input type="submit" value="Join"></form><script src="https://js.hcaptcha.com/1/api.js"></script></body></html>"#;
+
+    const CONTACT_V2_AND_V3: &str = r#"<html><head><title>Write to us</title></head><body><form><input type="text" name="n"><textarea name="m"></textarea><div class="g-recaptcha" data-sitekey="k"></div></form><iframe src="https://www.google.com/recaptcha/api2/anchor?ar=1&k=abc&size=invisible"></iframe></body></html>"#;
+
+    const WIDGET_V2_AND_V3: &str = r#"<html><head><title>Check</title></head><body><div class="g-recaptcha" data-sitekey="abc"></div><textarea id="g-recaptcha-response" style="display:none"></textarea><iframe src="https://www.google.com/recaptcha/api2/anchor?ar=1&k=abc&size=invisible"></iframe></body></html>"#;
+
+    const WIZARD_PAGE: &str = r#"<html><head><title>One more step - create your account</title></head><body><form><label>Company <input type="text" name="c"></label><button>Next</button></form></body></html>"#;
 
     /// A long, ordinary article: more visible text than a challenge page ever has.
     fn article(extra_head: &str, extra_body: &str) -> String {
@@ -1502,6 +1574,13 @@ mod tests {
             text_case("ordinary text", "https://example.test/article", Some("Example article"), "A normal page with source text", None, Nothing),
             case("404", "https://example.com/missing", Some("Not found"), Some("<html><body>Not found</body></html>"), Some(404), Nothing),
             case("empty html", "https://example.com/", None, Some(""), Some(200), Nothing),
+            // ---- a widget on an ordinary short form, and ordinary titles ----
+            case("contact page with a visible recaptcha", "https://example.com/contact", Some("Contact us"), Some(CONTACT_WITH_WIDGET), Some(200), Weak),
+            case("newsletter sign-up with an hcaptcha", "https://example.com/news", Some("Subscribe"), Some(NEWSLETTER_WITH_HCAPTCHA), Some(200), Weak),
+            case("contact form with a visible v2 and an invisible v3 anchor", "https://example.com/write", Some("Write to us"), Some(CONTACT_V2_AND_V3), Some(200), Weak),
+            case("widget-only page with a visible v2 and an invisible v3 anchor", "https://example.com/check", Some("Check"), Some(WIDGET_V2_AND_V3), Some(200), Strong(CaptchaWidget)),
+            case("sign-up wizard titled one more step", "https://example.com/signup/2", Some("One more step - create your account"), Some(WIZARD_PAGE), Some(200), Nothing),
+            text_case("wizard text says one more step", "https://example.com/signup/2", Some("One more step"), "One more step: choose a plan", Some(200), Nothing),
         ]
     }
 
@@ -1899,6 +1978,65 @@ mod tests {
     }
 
     #[test]
+    fn a_same_url_navigate_alone_spends_the_recovery() {
+        // No wait anywhere: only a reload of the page the browser is on.
+        for target in [
+            PAGE,
+            "https://blocked.example/page#frag",
+            "https://BLOCKED.example/page",
+        ] {
+            let mut e = episodes();
+            e.observe(HOST, ZdrMode::Off, Some(strong()), "h1");
+            e.note_recovery_action(&nav(target), PAGE, ZdrMode::Off);
+            let signal = e.observe(HOST, ZdrMode::Off, Some(strong()), "h2").unwrap();
+            assert_eq!(signal.block_reason, Some(BlockReason::ChallengeLoop), "{target}");
+            assert_eq!(signal.recovery, ChallengeRecovery::Exhausted, "{target}");
+            assert!(e.reject_if_exhausted(&click(), HOST, ZdrMode::Off).is_err(), "{target}");
+        }
+    }
+
+    #[test]
+    fn a_form_with_a_widget_is_a_hint_however_often_it_is_seen() {
+        // The sequence that used to exhaust a host: navigate, type, type, ...
+        let mut e = episodes();
+        for round in 0..6 {
+            let signal = classify(&ChallengeInput {
+                url: "https://example.com/contact",
+                title: Some("Contact us"),
+                html: Some(CONTACT_WITH_WIDGET),
+                main_doc_status: Some(200),
+                ..Default::default()
+            });
+            let seen = e
+                .observe("example.com", ZdrMode::Off, signal, &round.to_string())
+                .unwrap();
+            assert_eq!(seen.strength, ChallengeStrength::Weak);
+            assert!(!seen.requires_escalation);
+        }
+        assert!(e.reason_counts().is_empty());
+        assert!(e.reject_if_exhausted(&click(), "example.com", ZdrMode::Off).is_ok());
+        assert!(e
+            .reject_if_exhausted(&nav("https://example.com/contact"), "example.com", ZdrMode::Off)
+            .is_ok());
+    }
+
+    #[test]
+    fn a_wizard_titled_one_more_step_is_never_counted() {
+        let mut e = episodes();
+        for round in 0..4 {
+            let signal = classify(&ChallengeInput {
+                url: "https://example.com/signup/2",
+                title: Some("One more step - create your account"),
+                html: Some(WIZARD_PAGE),
+                main_doc_status: Some(200),
+                ..Default::default()
+            });
+            assert_eq!(e.observe("example.com", ZdrMode::Off, signal, &round.to_string()), None);
+        }
+        assert!(e.reject_if_exhausted(&click(), "example.com", ZdrMode::Off).is_ok());
+    }
+
+    #[test]
     fn a_single_wait_is_enough_to_spend_the_recovery() {
         let mut e = episodes();
         e.observe(HOST, ZdrMode::Off, Some(strong()), "h1");
@@ -1980,6 +2118,121 @@ mod tests {
         allow(click(), "other.example");
         // An unparseable target is left to the browser to reject.
         allow(nav("not a url"), HOST);
+    }
+
+    fn locator() -> quarry_core::contracts::SemanticLocator {
+        quarry_core::contracts::SemanticLocator::Text { text: "go".into(), exact: false }
+    }
+
+    /// One value of every `AgentAction` variant. Keep it in step with
+    /// `gate_of`, whose exhaustive match stops compiling when a variant is
+    /// added: whoever adds one has to decide it here.
+    fn every_action() -> Vec<AgentAction> {
+        let snapshot = || "snap".to_owned();
+        let artifact = || quarry_core::ids::Id::new();
+        vec![
+            nav("https://blocked.example/x"),
+            click(),
+            AgentAction::ClickRef { snapshot_id: snapshot(), generation: 1, ref_id: "e1".into() },
+            AgentAction::FrameClickRef { snapshot_id: snapshot(), generation: 1, frame_id: "f1".into(), ref_id: "e1".into() },
+            AgentAction::ClickSemantic { snapshot_id: snapshot(), generation: 1, locator: locator() },
+            AgentAction::ClickPoint { x: 1.0, y: 2.0 },
+            AgentAction::Type { selector: "#q".into(), text: "x".into() },
+            AgentAction::TypeRef { snapshot_id: snapshot(), generation: 1, ref_id: "e1".into(), text: "x".into() },
+            AgentAction::FrameTypeRef { snapshot_id: snapshot(), generation: 1, frame_id: "f1".into(), ref_id: "e1".into(), text: "x".into() },
+            AgentAction::TypeSemantic { snapshot_id: snapshot(), generation: 1, locator: locator(), text: "x".into() },
+            AgentAction::Press { key: "Enter".into() },
+            AgentAction::Scroll { target: "#a".into() },
+            AgentAction::MouseWheel { x: 0.0, y: 0.0, delta_x: 0.0, delta_y: 10.0 },
+            AgentAction::Select { selector: "#s".into(), value: "v".into() },
+            AgentAction::SelectRef { snapshot_id: snapshot(), generation: 1, ref_id: "e1".into(), value: "v".into() },
+            AgentAction::FrameSelectRef { snapshot_id: snapshot(), generation: 1, frame_id: "f1".into(), ref_id: "e1".into(), value: "v".into() },
+            AgentAction::SelectSemantic { snapshot_id: snapshot(), generation: 1, locator: locator(), value: "v".into() },
+            AgentAction::Wait { ms: 10 },
+            AgentAction::WaitFor { selector: "#a".into(), timeout_ms: 10 },
+            AgentAction::WaitForRef { snapshot_id: snapshot(), generation: 1, ref_id: "e1".into(), timeout_ms: 10 },
+            AgentAction::FrameWaitForRef { snapshot_id: snapshot(), generation: 1, frame_id: "f1".into(), ref_id: "e1".into(), timeout_ms: 10 },
+            AgentAction::WaitForSemantic { snapshot_id: snapshot(), generation: 1, locator: locator(), timeout_ms: 10 },
+            AgentAction::RespondDialog { dialog_id: "d".into(), accept: true, approval_grant_id: "g".into(), prompt_text: None },
+            AgentAction::UploadRef { snapshot_id: snapshot(), generation: 1, ref_id: "e1".into(), artifact_id: artifact(), approval_grant_id: "g".into() },
+            AgentAction::FrameUploadRef { snapshot_id: snapshot(), generation: 1, frame_id: "f1".into(), ref_id: "e1".into(), artifact_id: artifact(), approval_grant_id: "g".into() },
+            AgentAction::DownloadRef { snapshot_id: snapshot(), generation: 1, ref_id: "e1".into(), approval_grant_id: "g".into() },
+            AgentAction::FrameDownloadRef { snapshot_id: snapshot(), generation: 1, frame_id: "f1".into(), ref_id: "e1".into(), approval_grant_id: "g".into() },
+            AgentAction::Screenshot { full_page: false },
+            AgentAction::Pdf,
+            AgentAction::Evaluate { script: "1".into() },
+            AgentAction::Back,
+            AgentAction::Forward,
+            AgentAction::GetContent,
+        ]
+    }
+
+    /// Whether an action on an exhausted host's page must be refused. No
+    /// wildcard: a new action variant is a compile error until it is decided.
+    fn gate_of(action: &AgentAction) -> bool {
+        match action {
+            AgentAction::Navigate { .. }
+            | AgentAction::Click { .. }
+            | AgentAction::ClickRef { .. }
+            | AgentAction::FrameClickRef { .. }
+            | AgentAction::ClickSemantic { .. }
+            | AgentAction::ClickPoint { .. }
+            | AgentAction::Type { .. }
+            | AgentAction::TypeRef { .. }
+            | AgentAction::FrameTypeRef { .. }
+            | AgentAction::TypeSemantic { .. }
+            | AgentAction::Press { .. }
+            | AgentAction::Select { .. }
+            | AgentAction::SelectRef { .. }
+            | AgentAction::FrameSelectRef { .. }
+            | AgentAction::SelectSemantic { .. }
+            | AgentAction::UploadRef { .. }
+            | AgentAction::FrameUploadRef { .. }
+            | AgentAction::DownloadRef { .. }
+            | AgentAction::FrameDownloadRef { .. } => true,
+            AgentAction::Scroll { .. }
+            | AgentAction::MouseWheel { .. }
+            | AgentAction::Wait { .. }
+            | AgentAction::WaitFor { .. }
+            | AgentAction::WaitForRef { .. }
+            | AgentAction::FrameWaitForRef { .. }
+            | AgentAction::WaitForSemantic { .. }
+            | AgentAction::RespondDialog { .. }
+            | AgentAction::Screenshot { .. }
+            | AgentAction::Pdf
+            | AgentAction::Evaluate { .. }
+            | AgentAction::Back
+            | AgentAction::Forward
+            | AgentAction::GetContent => false,
+        }
+    }
+
+    #[test]
+    fn every_action_variant_is_refused_or_allowed_as_decided() {
+        let actions = every_action();
+        assert_eq!(actions.len(), 33, "one sample per AgentAction variant");
+        let kinds: std::collections::HashSet<String> = actions
+            .iter()
+            .map(|a| serde_json::to_value(a).unwrap()["type"].as_str().unwrap().to_owned())
+            .collect();
+        assert_eq!(kinds.len(), 33, "the samples must be distinct variants");
+
+        let e = exhausted();
+        for action in &actions {
+            let refused = e.reject_if_exhausted(action, HOST, ZdrMode::Off);
+            assert_eq!(refused.is_err(), gate_of(action), "{action:?} on the exhausted host");
+            if let Err(error) = refused {
+                assert_eq!(error.code, quarry_core::error::ErrorCode::ChallengeDetected, "{action:?}");
+            }
+            // From another host's page only navigation back to the exhausted
+            // host is refused; nothing else is gated.
+            if !matches!(action, AgentAction::Navigate { .. }) {
+                assert!(
+                    e.reject_if_exhausted(action, "other.example", ZdrMode::Off).is_ok(),
+                    "{action:?} on another host"
+                );
+            }
+        }
     }
 
     #[test]

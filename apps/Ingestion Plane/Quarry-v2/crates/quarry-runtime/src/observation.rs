@@ -2634,9 +2634,167 @@ mod tests {
         }
     }
 
+    /// Every way the planner can act on a page or navigate to it, snapshot-ref
+    /// and semantic forms included: all of them are refused on an exhausted host.
+    fn refused_on_an_exhausted_page() -> Vec<AgentAction> {
+        let snapshot = || "snap".to_owned();
+        let locator = || quarry_core::contracts::SemanticLocator::Text { text: "go".into(), exact: false };
+        vec![
+            AgentAction::Navigate { url: "https://blocked.example/other".into() },
+            AgentAction::Navigate { url: "https://blocked.example/page".into() },
+            AgentAction::Click { selector: "#go".into() },
+            AgentAction::ClickPoint { x: 1.0, y: 2.0 },
+            AgentAction::ClickRef { snapshot_id: snapshot(), generation: 1, ref_id: "e1".into() },
+            AgentAction::FrameClickRef { snapshot_id: snapshot(), generation: 1, frame_id: "f1".into(), ref_id: "e1".into() },
+            AgentAction::ClickSemantic { snapshot_id: snapshot(), generation: 1, locator: locator() },
+            AgentAction::Type { selector: "#q".into(), text: "x".into() },
+            AgentAction::TypeRef { snapshot_id: snapshot(), generation: 1, ref_id: "e1".into(), text: "x".into() },
+            AgentAction::FrameTypeRef { snapshot_id: snapshot(), generation: 1, frame_id: "f1".into(), ref_id: "e1".into(), text: "x".into() },
+            AgentAction::TypeSemantic { snapshot_id: snapshot(), generation: 1, locator: locator(), text: "x".into() },
+            AgentAction::Press { key: "Enter".into() },
+            AgentAction::Select { selector: "#s".into(), value: "v".into() },
+            AgentAction::SelectRef { snapshot_id: snapshot(), generation: 1, ref_id: "e1".into(), value: "v".into() },
+            AgentAction::FrameSelectRef { snapshot_id: snapshot(), generation: 1, frame_id: "f1".into(), ref_id: "e1".into(), value: "v".into() },
+            AgentAction::SelectSemantic { snapshot_id: snapshot(), generation: 1, locator: locator(), value: "v".into() },
+            AgentAction::UploadRef { snapshot_id: snapshot(), generation: 1, ref_id: "e1".into(), artifact_id: Id::new(), approval_grant_id: "g".into() },
+            AgentAction::DownloadRef { snapshot_id: snapshot(), generation: 1, ref_id: "e1".into(), approval_grant_id: "g".into() },
+        ]
+    }
+
+    /// Collects tracing events as text, for the thread that installs it.
+    #[derive(Clone, Default)]
+    struct EventLog(Arc<std::sync::Mutex<Vec<String>>>);
+
+    impl EventLog {
+        fn lines(&self) -> Vec<String> {
+            self.0.lock().unwrap().clone()
+        }
+
+        fn count(&self, message: &str) -> usize {
+            self.lines().iter().filter(|line| line.contains(message)).count()
+        }
+    }
+
+    impl tracing::Subscriber for EventLog {
+        fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+            true
+        }
+        fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+        fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+        fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+        fn event(&self, event: &tracing::Event<'_>) {
+            struct Fields(String);
+            impl tracing::field::Visit for Fields {
+                fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+                    if !self.0.is_empty() {
+                        self.0.push(' ');
+                    }
+                    self.0.push_str(&format!("{}={:?}", field.name(), value));
+                }
+            }
+            let mut fields = Fields(String::new());
+            event.record(&mut fields);
+            self.0
+                .lock()
+                .unwrap()
+                .push(format!("{} {}", event.metadata().level(), fields.0));
+        }
+        fn enter(&self, _: &tracing::span::Id) {}
+        fn exit(&self, _: &tracing::span::Id) {}
+    }
+
+    #[tokio::test]
+    async fn a_same_url_navigate_alone_spends_the_recovery_at_the_runner() {
+        let driver = Arc::new(ContentDriver { html: TURNSTILE_HTML, atomic_targets: true, ..Default::default() });
+        let runner = challenge_runner(&driver);
+        let lease = challenge_lease();
+        let session = driver.acquire(&lease).await.unwrap();
+        let mut ctx = challenge_ctx(ChallengeConfig::default());
+        let go = |url: &str| challenge_request(&lease, AgentAction::Navigate { url: url.into() }, ZdrMode::Off);
+
+        let first = runner
+            .execute(&go("https://blocked.example/page"), &session, &mut ctx)
+            .await
+            .unwrap();
+        assert_eq!(
+            first.challenge.expect("challenge").recovery,
+            quarry_core::contracts::ChallengeRecovery::Available
+        );
+        // The only recovery here is a reload of the page the browser is on (a
+        // fragment does not make it another page). No wait anywhere.
+        let reload = runner
+            .execute(&go("https://blocked.example/page#again"), &session, &mut ctx)
+            .await
+            .expect("a reload of the same URL is allowed once");
+        let signal = reload.challenge.expect("still challenged");
+        assert_eq!(signal.block_reason, Some(quarry_core::contracts::BlockReason::ChallengeLoop));
+        assert_eq!(signal.recovery, quarry_core::contracts::ChallengeRecovery::Exhausted);
+
+        let reached_before = driver.calls();
+        for action in refused_on_an_exhausted_page() {
+            let error = runner
+                .execute(&challenge_request(&lease, action, ZdrMode::Off), &session, &mut ctx)
+                .await
+                .expect_err("an exhausted host must refuse");
+            assert_eq!(error.code, ErrorCode::ChallengeDetected);
+        }
+        assert_eq!(driver.calls(), reached_before);
+    }
+
+    #[tokio::test]
+    async fn the_log_phase_reports_but_does_not_reject() {
+        let events = EventLog::default();
+        let _installed = tracing::subscriber::set_default(events.clone());
+        let driver = Arc::new(ContentDriver { html: TURNSTILE_HTML, atomic_targets: true, ..Default::default() });
+        let runner = challenge_runner(&driver);
+        let lease = challenge_lease();
+        let session = driver.acquire(&lease).await.unwrap();
+        let go = challenge_request(&lease, AgentAction::Navigate { url: "https://blocked.example/page".into() }, ZdrMode::Off);
+        let wait = challenge_request(&lease, AgentAction::Wait { ms: 0 }, ZdrMode::Off);
+
+        // The same sequence under both settings: navigate, wait, navigate again.
+        let mut log_ctx = challenge_ctx(ChallengeConfig::from_values(None, Some("log")));
+        runner.execute(&go, &session, &mut log_ctx).await.unwrap();
+        let second = runner.execute(&wait, &session, &mut log_ctx).await.unwrap();
+        // The precondition: the loop is real.
+        assert_eq!(
+            second.challenge.expect("still challenged").block_reason,
+            Some(quarry_core::contracts::BlockReason::ChallengeLoop)
+        );
+        assert_eq!(events.count("quarry.challenge.would_reject"), 0, "nothing was refused yet");
+        let reached_before = driver.calls();
+        runner
+            .execute(&go, &session, &mut log_ctx)
+            .await
+            .expect("log mode lets the navigation through");
+        assert_eq!(driver.calls(), reached_before + 1, "the navigation reached the browser");
+        assert_eq!(events.count("quarry.challenge.would_reject"), 1, "{:?}", events.lines());
+        assert!(
+            events.lines().iter().all(|line| !line.contains("blocked.example")),
+            "no event may carry the host: {:?}",
+            events.lines()
+        );
+
+        // Enforce mode refuses the very same sequence, before the browser, and
+        // logs no would_reject.
+        let mut enforce_ctx = challenge_ctx(ChallengeConfig::default());
+        runner.execute(&go, &session, &mut enforce_ctx).await.unwrap();
+        runner.execute(&wait, &session, &mut enforce_ctx).await.unwrap();
+        let reached_before = driver.calls();
+        let error = runner
+            .execute(&go, &session, &mut enforce_ctx)
+            .await
+            .expect_err("enforce mode refuses");
+        assert_eq!(error.code, ErrorCode::ChallengeDetected);
+        assert_eq!(driver.calls(), reached_before, "a refused navigation never reaches the browser");
+        assert_eq!(events.count("quarry.challenge.would_reject"), 1, "enforce mode logs no would_reject");
+    }
+
     #[tokio::test]
     async fn execute_rejects_same_host_navigation_after_challenge_loop() {
-        let driver = Arc::new(ContentDriver { html: TURNSTILE_HTML });
+        let driver = Arc::new(ContentDriver { html: TURNSTILE_HTML, atomic_targets: true, ..Default::default() });
         let runner = challenge_runner(&driver);
         let lease = challenge_lease();
         let session = driver.acquire(&lease).await.unwrap();
@@ -2665,12 +2823,8 @@ mod tests {
         assert_eq!(second.telemetry.challenge_observation_count, 2);
 
         // Now the same host refuses navigation and interaction ...
-        for action in [
-            AgentAction::Navigate { url: "https://blocked.example/other".into() },
-            AgentAction::Navigate { url: "https://blocked.example/page".into() },
-            AgentAction::Click { selector: "#go".into() },
-            AgentAction::Type { selector: "#q".into(), text: "x".into() },
-        ] {
+        let reached_before = driver.calls();
+        for action in refused_on_an_exhausted_page() {
             let error = runner
                 .execute(&challenge_request(&lease, action, ZdrMode::Off), &session, &mut ctx)
                 .await
@@ -2682,6 +2836,11 @@ mod tests {
             assert_eq!(details["host"], "blocked.example");
             assert_eq!(details["next"], "user_takeover_or_other_source");
         }
+        assert_eq!(
+            driver.calls(),
+            reached_before,
+            "a refused action must not reach the browser"
+        );
 
         // ... and still lets the planner look and report.
         runner
@@ -2711,28 +2870,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_log_phase_reports_but_does_not_reject() {
-        let driver = Arc::new(ContentDriver { html: TURNSTILE_HTML });
-        let runner = challenge_runner(&driver);
-        let lease = challenge_lease();
-        let session = driver.acquire(&lease).await.unwrap();
-        let mut ctx = challenge_ctx(ChallengeConfig::from_values(None, Some("log")));
-        let go = challenge_request(&lease, AgentAction::Navigate { url: "https://blocked.example/page".into() }, ZdrMode::Off);
-        runner.execute(&go, &session, &mut ctx).await.unwrap();
-        runner
-            .execute(&challenge_request(&lease, AgentAction::Wait { ms: 0 }, ZdrMode::Off), &session, &mut ctx)
-            .await
-            .unwrap();
-        // The loop is real, the rejection is only logged.
-        runner
-            .execute(&go, &session, &mut ctx)
-            .await
-            .expect("log mode lets the navigation through");
-    }
-
-    #[tokio::test]
     async fn the_legacy_classifier_is_not_subject_to_the_rule() {
-        let driver = Arc::new(ContentDriver { html: LEGACY_HTML });
+        let driver = Arc::new(ContentDriver { html: LEGACY_HTML, ..Default::default() });
         let runner = challenge_runner(&driver);
         let lease = challenge_lease();
         let session = driver.acquire(&lease).await.unwrap();
@@ -2747,7 +2886,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_login_page_is_reported_without_escalation_and_is_not_counted() {
-        let driver = Arc::new(ContentDriver { html: LOGIN_HTML });
+        let driver = Arc::new(ContentDriver { html: LOGIN_HTML, ..Default::default() });
         let runner = challenge_runner(&driver);
         let lease = challenge_lease();
         let session = driver.acquire(&lease).await.unwrap();
@@ -2768,7 +2907,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_zdr_run_leaves_the_host_out_of_the_rejection() {
-        let driver = Arc::new(ContentDriver { html: TURNSTILE_HTML });
+        let driver = Arc::new(ContentDriver { html: TURNSTILE_HTML, atomic_targets: true, ..Default::default() });
         let runner = challenge_runner(&driver);
         let lease = challenge_lease();
         let session = driver.acquire(&lease).await.unwrap();
@@ -3071,8 +3210,26 @@ mod tests {
             .any(|element| element.tag == "a" && element.text.as_deref() == Some("Real")));
     }
 
+    /// Serves fixed HTML. `calls` counts every call that would move or act on
+    /// the page (goto, click, click_point, type, press, select), so a test can
+    /// show that a refused action never reached the browser.
+    #[derive(Default)]
     struct ContentDriver {
         html: &'static [u8],
+        calls: std::sync::atomic::AtomicUsize,
+        /// Claims atomic snapshot-target actions, so that ref and semantic
+        /// actions get past the capability gate and reach what a test is about.
+        atomic_targets: bool,
+    }
+
+    impl ContentDriver {
+        fn calls(&self) -> usize {
+            self.calls.load(std::sync::atomic::Ordering::SeqCst)
+        }
+
+        fn touch(&self) {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
     }
 
     #[async_trait::async_trait]
@@ -3083,6 +3240,12 @@ mod tests {
             _policy: BrowserEgressPolicy,
         ) -> QuarryResult<()> {
             Ok(())
+        }
+        fn capabilities(&self) -> quarry_browser::BrowserDriverCapabilities {
+            quarry_browser::BrowserDriverCapabilities {
+                atomic_target_actions: self.atomic_targets,
+                ..Default::default()
+            }
         }
         async fn acquire(
             &self,
@@ -3103,7 +3266,51 @@ mod tests {
             _session: &quarry_browser::BrowserSession,
             _url: &str,
         ) -> QuarryResult<()> {
+            self.touch();
             Ok(())
+        }
+        async fn click(
+            &self,
+            _session: &quarry_browser::BrowserSession,
+            _selector: &str,
+        ) -> QuarryResult<()> {
+            self.touch();
+            Err(QuarryError::unsupported_action("click"))
+        }
+        async fn click_point(
+            &self,
+            _session: &quarry_browser::BrowserSession,
+            _x: f64,
+            _y: f64,
+        ) -> QuarryResult<()> {
+            self.touch();
+            Err(QuarryError::unsupported_action("click_point"))
+        }
+        async fn type_text(
+            &self,
+            _session: &quarry_browser::BrowserSession,
+            _selector: &str,
+            _text: &str,
+        ) -> QuarryResult<()> {
+            self.touch();
+            Err(QuarryError::unsupported_action("type"))
+        }
+        async fn press(
+            &self,
+            _session: &quarry_browser::BrowserSession,
+            _key: &str,
+        ) -> QuarryResult<()> {
+            self.touch();
+            Err(QuarryError::unsupported_action("press"))
+        }
+        async fn select(
+            &self,
+            _session: &quarry_browser::BrowserSession,
+            _selector: &str,
+            _value: &str,
+        ) -> QuarryResult<()> {
+            self.touch();
+            Err(QuarryError::unsupported_action("select"))
         }
         async fn content(&self, _session: &quarry_browser::BrowserSession) -> QuarryResult<Bytes> {
             Ok(Bytes::from_static(self.html))
@@ -3126,6 +3333,7 @@ mod tests {
         // surface as `Unsupported`. `Forbidden` proves the refusal came first.
         let driver = Arc::new(ContentDriver {
             html: b"<html><body><p>hello</p></body></html>",
+            ..Default::default()
         });
         let runner = ObservationRunner {
             browser: driver.clone(),
@@ -3197,6 +3405,7 @@ mod tests {
         let snapshot_id = active_snapshot.snapshot.snapshot_id.clone();
         let driver = Arc::new(ContentDriver {
             html: b"<html><body><button data-testid='continue'>Changed</button></body></html>",
+            ..Default::default()
         });
         let runner = ObservationRunner {
             browser: driver.clone(),
