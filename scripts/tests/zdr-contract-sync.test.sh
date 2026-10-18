@@ -214,6 +214,15 @@ VENDORED=(
   "apps/Model Plane/rust/services/model-gateway/tests/fixtures/zdr-posture-matrix.json|apps/Model Plane/api/contracts/zdr-posture-matrix.json"
   "apps/Model Plane/rust/services/model-gateway/tests/fixtures/zdr-posture-matrix.json.sha256|apps/Model Plane/api/contracts/zdr-posture-matrix.json.sha256"
 
+  # WS03 S9: execution-core's copy of the posture matrix and its pin. The durable-loop test
+  # (tests/loop_fold_zdr_matrix.rs) runs every enforcement row through resolve_turn and holds
+  # the shared durable gate (mp_contracts::durable_gate) shut for every decision but a
+  # persistent one. The stores' own gates are proved by the tests named in
+  # tests/durable_loop_contract.rs store_proofs(); the copy must stay byte-identical to the
+  # canonical matrix.
+  "apps/Model Plane/rust/services/execution-core/tests/fixtures/zdr-posture-matrix.json|apps/Model Plane/api/contracts/zdr-posture-matrix.json"
+  "apps/Model Plane/rust/services/execution-core/tests/fixtures/zdr-posture-matrix.json.sha256|apps/Model Plane/api/contracts/zdr-posture-matrix.json.sha256"
+
   # Z-05b: the SPA's copy of the refusal catalogue and its pin. zdr-refusals.ts renders every
   # code from it, and zdr-refusals.test.ts reads the copy inside the Frontend tree.
   "apps/Frontend Plane/verevonv3/src/shared/api/contracts/zdr-refusals.json|apps/Model Plane/api/contracts/zdr-refusals.json"
@@ -255,6 +264,7 @@ CONSUMERS=(
   "apps/Model Plane/api/contracts/zdr-posture-matrix.json|auth-core|apps/Control Plane/auth-core/|Z-14 (decision function, mint claims)"
   "apps/Model Plane/api/contracts/zdr-posture-matrix.json|mp-contracts|apps/Model Plane/rust/crates/mp-contracts/|Z-11 (resolver)"
   "apps/Model Plane/api/contracts/zdr-posture-matrix.json|model-gateway|apps/Model Plane/rust/services/model-gateway/|Z-15 (normalize and stream entry)"
+  "apps/Model Plane/api/contracts/zdr-posture-matrix.json|execution-core|apps/Model Plane/rust/services/execution-core/|WS03 S9 (loop fold ZDR matrix: the shared durable gate opens for persistent only)"
   "apps/Model Plane/api/contracts/zdr-posture-matrix.json|bff-gateway|apps/Frontend Plane/verevonv3/apps/gateway/|Z-03 and Z-19 (org posture, turn retention)"
   "apps/Model Plane/api/contracts/zdr-posture-matrix.json|conversation-core|apps/Application Plane/conversation-core/|Z-03 (org posture reader)"
   "apps/Model Plane/api/contracts/zdr-posture-matrix.json|integration-corev2|apps/Ingestion Plane/integration-corev2/|Z-13 (acknowledgement states; named by design section 9, not by the Z-13 entry)"
