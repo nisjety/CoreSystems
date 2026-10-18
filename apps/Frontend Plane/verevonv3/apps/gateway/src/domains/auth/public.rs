@@ -512,7 +512,7 @@ pub(super) async fn oauth_initiate(
     let response = match request.send().await {
         Ok(response) => response,
         Err(err) => {
-            tracing::error!(%provider, error = %err, "oauth initiate: auth-core unreachable");
+            tracing::error!(%provider, error_class = crate::zdr_log::class_reqwest(&err), "oauth initiate: auth-core unreachable");
             return (StatusCode::BAD_GATEWAY, "oauth provider unavailable").into_response();
         }
     };
@@ -526,7 +526,7 @@ pub(super) async fn oauth_initiate(
     let payload = match response.json::<Value>().await {
         Ok(payload) => payload,
         Err(err) => {
-            tracing::error!(%provider, error = %err, "oauth initiate: invalid auth-core response");
+            tracing::error!(%provider, error_class = crate::zdr_log::class_reqwest(&err), "oauth initiate: invalid auth-core response");
             return (StatusCode::BAD_GATEWAY, "oauth provider error").into_response();
         }
     };
@@ -590,7 +590,7 @@ pub(super) async fn sso_initiate(
     let response = match request.send().await {
         Ok(response) => response,
         Err(err) => {
-            tracing::error!(error = %err, "sso initiate: auth-core unreachable");
+            tracing::error!(error_class = crate::zdr_log::class_reqwest(&err), "sso initiate: auth-core unreachable");
             return (StatusCode::BAD_GATEWAY, "sso provider unavailable").into_response();
         }
     };
@@ -604,7 +604,7 @@ pub(super) async fn sso_initiate(
     let payload = match response.json::<Value>().await {
         Ok(payload) => payload,
         Err(err) => {
-            tracing::error!(error = %err, "sso initiate: invalid auth-core response");
+            tracing::error!(error_class = crate::zdr_log::class_reqwest(&err), "sso initiate: invalid auth-core response");
             return (StatusCode::BAD_GATEWAY, "sso provider error").into_response();
         }
     };

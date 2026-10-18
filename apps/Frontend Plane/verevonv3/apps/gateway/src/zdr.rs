@@ -41,13 +41,21 @@ const ORG_ZDR_CACHE_SECS: u64 = 60;
 /// Header OR body, never AND: the header is set by the gateway's own outbound
 /// path and by trusted callers, the body field is what the SPA sends for a
 /// temporary chat. Either one alone means "retain nothing".
+///
+/// A true answer also marks the request's span ZDR, so the log stops carrying
+/// URLs, queries and error text for it from here on (`crate::zdr_log`).
 pub(crate) fn request_zdr(headers: &HeaderMap, body: Option<&Value>) -> bool {
     if crate::domains::chat::shared::zdr_flag(headers) {
         return true;
     }
-    body.and_then(|body| body.get("zdr"))
+    let from_body = body
+        .and_then(|body| body.get("zdr"))
         .and_then(Value::as_bool)
-        .unwrap_or(false)
+        .unwrap_or(false);
+    if from_body {
+        crate::zdr_log::mark_current_span();
+    }
+    from_body
 }
 
 /// What org-core says about an organisation's standing ZDR posture.
@@ -80,8 +88,16 @@ pub(crate) enum OrgPosture {
 ///
 /// A failed lookup is deliberately NOT cached, so the posture self-heals on the
 /// next request instead of pinning a whole minute of refusals to one blip.
+///
+/// A true answer, including the fail-closed one, marks the request's span ZDR
+/// for the log (`crate::zdr_log`): the log is a durable copy too, and dropping
+/// a few events during an outage is the cheaper mistake.
 pub(crate) async fn org_zdr_enabled(state: &AppState, user: &AuthenticatedUser) -> bool {
-    !matches!(org_posture(state, user).await, OrgPosture::NotZdr)
+    let enabled = !matches!(org_posture(state, user).await, OrgPosture::NotZdr);
+    if enabled {
+        crate::zdr_log::mark_current_span();
+    }
+    enabled
 }
 
 /// The tri-state behind [`org_zdr_enabled`]; see there for the failure policy.
@@ -99,6 +115,7 @@ pub(crate) async fn org_posture(state: &AppState, user: &AuthenticatedUser) -> O
     if let Some(cached) = state.cache.lookup_within(&key, ORG_ZDR_CACHE_SECS).await {
         if let Some(value) = cached.as_bool() {
             return if value {
+                crate::zdr_log::mark_current_span();
                 OrgPosture::Zdr
             } else {
                 OrgPosture::NotZdr
@@ -142,6 +159,7 @@ pub(crate) async fn org_posture(state: &AppState, user: &AuthenticatedUser) -> O
         .store_for_secs(&key, &Value::Bool(enabled), ORG_ZDR_CACHE_SECS)
         .await;
     if enabled {
+        crate::zdr_log::mark_current_span();
         OrgPosture::Zdr
     } else {
         OrgPosture::NotZdr

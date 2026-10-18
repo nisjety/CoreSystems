@@ -482,7 +482,7 @@ pub(crate) async fn validate_session_cookie(
         Ok(resp) => resp,
         Err(err) => {
             tracing::warn!(
-                error = %err,
+                error_class = crate::zdr_log::class_reqwest(&err),
                 "session validation could not reach auth-core; preserving the caller's session"
             );
             return SessionValidation::Unavailable;
@@ -514,7 +514,7 @@ pub(crate) async fn validate_session_cookie(
         Ok(None) => return SessionValidation::Rejected,
         Err(err) => {
             tracing::warn!(
-                error = %err,
+                error_class = crate::zdr_log::class_reqwest(&err),
                 "auth-core session response was unreadable; preserving the caller's session"
             );
             return SessionValidation::Unavailable;

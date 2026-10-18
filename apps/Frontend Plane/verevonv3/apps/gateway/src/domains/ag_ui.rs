@@ -176,6 +176,7 @@ async fn stream_agent_ui(
     }
 
     if shared::zdr_flag(&headers) || bool_field(&body, "zdr").unwrap_or(false) {
+        crate::zdr_log::mark_current_span();
         req = req.header("x-zdr", "true");
     }
 

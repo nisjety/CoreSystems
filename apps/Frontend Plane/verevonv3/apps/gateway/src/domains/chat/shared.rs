@@ -25,11 +25,17 @@ pub(super) fn cookie_header(headers: &HeaderMap) -> String {
 }
 
 pub(crate) fn zdr_flag(headers: &HeaderMap) -> bool {
-    headers
+    let flagged = headers
         .get("x-zdr")
         .and_then(|v| v.to_str().ok())
         .map(|v| v.eq_ignore_ascii_case("true") || v == "1")
-        .unwrap_or(false)
+        .unwrap_or(false);
+    if flagged {
+        // The earliest place a request's ZDR header is read: mark the span so
+        // the log drops URL/query/error events for it (`crate::zdr_log`).
+        crate::zdr_log::mark_current_span();
+    }
+    flagged
 }
 
 pub(crate) fn normalized_model_body(mut body: Value, headers: &HeaderMap) -> Value {
@@ -59,6 +65,9 @@ pub(crate) fn normalized_model_body(mut body: Value, headers: &HeaderMap) -> Val
                 object.insert("zdr".to_owned(), Value::Bool(zdr_flag(headers)));
             }
             Some(Value::Bool(body_zdr)) => {
+                if *body_zdr {
+                    crate::zdr_log::mark_current_span();
+                }
                 object.insert(
                     "zdr".to_owned(),
                     Value::Bool(zdr_flag(headers) || *body_zdr),

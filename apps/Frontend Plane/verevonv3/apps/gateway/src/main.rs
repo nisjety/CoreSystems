@@ -38,6 +38,7 @@ mod rate_limit;
 mod upstream;
 mod utils;
 mod zdr;
+mod zdr_log;
 
 use config::{build_cors_layer, build_state};
 use middleware::strip_inbound_identity_headers;
@@ -45,10 +46,9 @@ use rate_limit::rate_limit_middleware;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-        .json()
-        .init();
+    // RUST_LOG (capped for the dependencies that print URLs), the sticky ZDR
+    // mark and the JSON log with the ZDR event filter. See `zdr_log`.
+    zdr_log::init();
 
     // Prometheus recorder for the /metrics endpoint (Phase 6 B13). Installed
     // once, globally, before the router so the request-tracking middleware and
@@ -192,6 +192,12 @@ fn request_target_for_log(uri: &axum::http::Uri) -> String {
     uri.path().to_owned()
 }
 
+/// The span for one HTTP request: method and path (never the query string, and
+/// with single-use secrets in the path templated out, see
+/// `request_target_for_log`). `zdr` starts empty and is recorded
+/// by whichever code first learns the request is ZDR
+/// (`zdr_log::mark_current_span`); from then on the log drops events under this
+/// span that carry a sensitive field name.
 fn make_http_trace_span(request: &axum::http::Request<Body>) -> tracing::Span {
     let request_target = request_target_for_log(request.uri());
     tracing::info_span!(
@@ -199,6 +205,7 @@ fn make_http_trace_span(request: &axum::http::Request<Body>) -> tracing::Span {
         method = %request.method(),
         uri = %request_target,
         version = ?request.version(),
+        zdr = tracing::field::Empty,
     )
 }
 

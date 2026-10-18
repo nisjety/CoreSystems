@@ -1077,12 +1077,12 @@ async fn proxy_json_with_client_and_headers(
             // connect-refused from timeout from a malformed response. Discarding
             // it turned a one-line diagnosis into hours of inference.
             tracing::error!(
-                error = %err,
+                error_class = crate::zdr_log::class_reqwest(&err),
                 is_connect = err.is_connect(),
                 is_timeout = err.is_timeout(),
                 is_request = err.is_request(),
                 is_body = err.is_body(),
-                url = %url,
+                upstream = %crate::zdr_log::upstream_origin(&url),
                 "upstream request failed before a response was received"
             );
             (
@@ -1143,12 +1143,12 @@ async fn proxy_json_bytes_with_client_and_headers(
             // connect-refused from timeout from a malformed response. Discarding
             // it turned a one-line diagnosis into hours of inference.
             tracing::error!(
-                error = %err,
+                error_class = crate::zdr_log::class_reqwest(&err),
                 is_connect = err.is_connect(),
                 is_timeout = err.is_timeout(),
                 is_request = err.is_request(),
                 is_body = err.is_body(),
-                url = %url,
+                upstream = %crate::zdr_log::upstream_origin(&url),
                 "upstream request failed before a response was received"
             );
             (
@@ -1235,12 +1235,12 @@ pub(crate) async fn proxy_auth_with_headers(
         }
         Err(err) => {
             tracing::error!(
-                error = %err,
+                error_class = crate::zdr_log::class_reqwest(&err),
                 is_connect = err.is_connect(),
                 is_timeout = err.is_timeout(),
                 is_request = err.is_request(),
                 is_body = err.is_body(),
-                url = %url,
+                upstream = %crate::zdr_log::upstream_origin(&url),
                 "upstream request failed before a response was received"
             );
             (
@@ -1602,12 +1602,12 @@ pub(crate) async fn proxy_bearer_json_with_headers(
             // connect-refused from timeout from a malformed response. Discarding
             // it turned a one-line diagnosis into hours of inference.
             tracing::error!(
-                error = %err,
+                error_class = crate::zdr_log::class_reqwest(&err),
                 is_connect = err.is_connect(),
                 is_timeout = err.is_timeout(),
                 is_request = err.is_request(),
                 is_body = err.is_body(),
-                url = %url,
+                upstream = %crate::zdr_log::upstream_origin(&url),
                 "upstream request failed before a response was received"
             );
             (
@@ -1845,12 +1845,12 @@ pub(crate) async fn proxy_sse_stream_with_data_plane(
         }
         Err(err) => {
             tracing::error!(
-                error = %err,
+                error_class = crate::zdr_log::class_reqwest(&err),
                 is_connect = err.is_connect(),
                 is_timeout = err.is_timeout(),
                 is_request = err.is_request(),
                 is_body = err.is_body(),
-                url = %url,
+                upstream = %crate::zdr_log::upstream_origin(&url),
                 "upstream request failed before a response was received"
             );
             (
@@ -2888,7 +2888,11 @@ pub(crate) async fn proxy_artifact_bytes(
     let resp = match send_with_retry(req).await {
         Ok(resp) => resp,
         Err(err) => {
-            tracing::warn!(error = %err, %url, "artifact relay upstream request failed");
+            tracing::warn!(
+                error_class = crate::zdr_log::class_reqwest(&err),
+                upstream = %crate::zdr_log::upstream_origin(url),
+                "artifact relay upstream request failed"
+            );
             return (
                 StatusCode::BAD_GATEWAY,
                 Json(error(
@@ -2925,7 +2929,11 @@ pub(crate) async fn proxy_artifact_bytes(
     let bytes = match resp.bytes().await {
         Ok(bytes) => bytes,
         Err(err) => {
-            tracing::warn!(error = %err, %url, "artifact relay body read failed");
+            tracing::warn!(
+                error_class = crate::zdr_log::class_reqwest(&err),
+                upstream = %crate::zdr_log::upstream_origin(url),
+                "artifact relay body read failed"
+            );
             return (
                 StatusCode::BAD_GATEWAY,
                 Json(error(
