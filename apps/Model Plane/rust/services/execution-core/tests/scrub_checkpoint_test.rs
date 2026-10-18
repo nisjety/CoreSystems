@@ -107,10 +107,12 @@ fn serialized_checkpoint_bytes_contain_no_secrets() {
 // ---- The durable loop fold (build plan WS03 S6) ----
 //
 // A fold is conversation content saved so a run can continue after a pause or a
-// crash. It must never be a credential store, and it must stay saveable: session-core
-// refuses a fold that parses badly, and `LoopFoldV1::to_bytes` refuses the WHOLE fold
-// for one credential-shaped string. `scrub_fold` is the writer's pass between the
-// two, and it works per field.
+// crash. It must never be a credential store: session-core refuses a fold that parses
+// badly, and `LoopFoldV1::to_bytes` refuses the WHOLE fold for one credential-shaped
+// string. `scrub_fold` is the writer's pass between the two, and it works per field:
+// a credential-shaped piece of the conversation is stubbed and REPORTED (the writer
+// then saves a tombstone, never a resumable fold with a stub in it), and only a call's
+// arguments are withheld in place.
 
 use execution_core::scrub::{scrub_fold, FoldScrub};
 use mp_contracts::loop_fold::{
@@ -298,7 +300,7 @@ fn arguments_that_scrubbing_would_change_are_withheld_not_rewritten() {
 }
 
 #[test]
-fn a_credential_shaped_word_is_withheld_so_the_fold_still_saves() {
+fn a_credential_shaped_word_is_stubbed_and_reported_so_the_writer_can_tombstone_the_fold() {
     let mut fold = open_round_fold();
     fold.messages.push(message("assistant", "Set the Authorization: header before calling."));
     fold.messages.push(message("user", "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----"));
@@ -316,7 +318,9 @@ fn a_credential_shaped_word_is_withheld_so_the_fold_still_saves() {
     assert_eq!(fold.messages[2].content, WITHHELD);
     assert_eq!(fold.messages[3].content, WITHHELD);
     assert_eq!(fold.round_in_flight.as_ref().unwrap().assistant_content, WITHHELD);
-    let bytes = fold.to_bytes().expect("the fold saves with the offending fields withheld");
+    // The scrubbed copy serializes, but it must never be saved as a resumable fold: the
+    // report above is what makes the writer drop it for a tombstone.
+    let bytes = fold.to_bytes().expect("the scrubbed copy serializes with the offending fields stubbed");
     assert!(LoopFoldV1::from_bytes(&bytes).is_ok());
     // The clean fields around them are untouched.
     assert_eq!(fold.messages[1].content, "Delete the stale records");

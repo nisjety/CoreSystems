@@ -161,8 +161,9 @@ pub fn scrub_string(s: &str) -> String {
 const FOLD_WITHHELD: &str = "[content withheld from the saved state: it looked like a credential]";
 
 /// Scrub one text field of a fold: the known secret patterns first, then, if the
-/// result still has a credential's shape, the whole field is withheld. Returns whether
-/// the field was withheld.
+/// result still has a credential's shape, the whole field is replaced by a stub (the
+/// caller counts it; the fold is then never saved as resumable). Returns whether the
+/// field was replaced.
 fn scrub_fold_text(text: &mut String) -> bool {
     let scrubbed = scrub_string(text);
     if mp_contracts::loop_fold::contains_credential_shape(&scrubbed) {
@@ -233,11 +234,12 @@ fn withhold_arguments_if_sensitive(arguments_json: &mut String) -> bool {
 /// Every free-text field (message content, name and compaction summary, the
 /// assistant text of the open round, completed outputs and errors, the retrievals
 /// already attempted, and a call's id and name) goes through [`scrub_string`]. A
-/// field that still looks like a credential is then withheld whole: the fold's
-/// final gate, `LoopFoldV1::to_bytes`, refuses the **entire** fold for one benign
-/// "Authorization:" or certificate header, which would make every later fold of
-/// the run unsaveable. Call arguments are handled by
-/// [`withhold_arguments_if_sensitive`]: byte-exact or empty.
+/// field that still looks like a credential is then replaced whole by a fixed stub
+/// and counted: the fold's final gate, `LoopFoldV1::to_bytes`, refuses the
+/// **entire** fold for one benign "Authorization:" or certificate header. A stubbed
+/// piece of the conversation makes the fold unfit to resume from (see below): the
+/// writer drops it and saves a tombstone. Only call arguments are withheld in place,
+/// by [`withhold_arguments_if_sensitive`]: byte-exact or empty.
 ///
 /// Structural fields (ids, counters, the authority, the pause descriptor) are the
 /// code's own and are not touched. `to_bytes` stays the last gate.

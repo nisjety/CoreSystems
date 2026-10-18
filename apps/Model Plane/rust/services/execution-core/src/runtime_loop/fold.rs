@@ -14,7 +14,10 @@
 //! * **pause**: inside the pause for approval, after the descriptor exists and
 //!   **before** `CreateApproval`, so a fast approve-and-continue can always claim
 //!   it. Its `pause_ref` is the approval's idempotency key `{run_id}:{step_id}`,
-//!   which is known before session-core mints the approval id.
+//!   which is known before session-core mints the approval id. A pause fold whose
+//!   content is refused is replaced by a tombstone saved as the pause fold (same
+//!   `pause_ref`), so the row behind the approval is never the earlier, resumable
+//!   `pre_effect` fold; the approval is raised either way.
 //!
 //! No `LoopState` refactor: [`Snapshot`] and [`build_fold`] read the existing
 //! `run_rounds` locals. With the switch off nothing here makes an RPC or changes
@@ -644,6 +647,20 @@ impl Header {
             reason,
         )
     }
+
+    /// The serialized tombstone and the authority digest to save it under. Built from
+    /// the header alone, so nothing of the fold that was refused (its conversation, open
+    /// round or pause) can reach it.
+    fn tombstone_bytes(&self, reason: &str) -> Result<(Vec<u8>, String), SaveError> {
+        let tombstone = self.tombstone(reason);
+        let digest = tombstone.authority.digest();
+        match tombstone.to_bytes() {
+            Ok(bytes) => Ok((bytes, digest)),
+            Err(_) => Err(SaveError::ContentRefused {
+                reason: "malformed",
+            }),
+        }
+    }
 }
 
 /// The metrics facade (no recorder is installed in execution-core today, so these
@@ -766,117 +783,6 @@ pub(crate) async fn close_rpc(
     );
 }
 
-/// Why a stage 1 continuation closed the fold the pause had saved.
-pub(crate) const STAGE_ONE_CLOSE_REASON: &str = "continued_at_stage_1";
-
-/// A stage 1 continuation runs the approved call in a fresh segment, which writes no
-/// fold of its own. The fold the pause saved would stay `paused` and claimable while that
-/// segment dispatches effects, so it is closed once the approval's consume is won and
-/// before the segment starts. A later claim of that pause (an in-place resume, a crash
-/// worker) then finds it closed, not a fold whose round already ran.
-///
-/// `CloseLoopCheckpoint` is by seq and a continuation does not know it, so the fold is
-/// claimed by the approval's own reference (`{run_id}:{paused step}`, the key the pause
-/// fold was saved under) to learn it: the claim answers the seq and moves the fold off
-/// `paused`, so it also cannot be claimed by anyone else. The claimed fold's content is
-/// dropped unread.
-///
-/// Best effort in every direction: it is attempted only where a fold can exist (the gate
-/// is the writer's own gate for a root run: switch, ledger, persistent), and a failure
-/// (nothing claimable, a disabled store, a timeout, a close that fails) is logged as a
-/// closed token and ignored: the segment is not held up and not stopped.
-pub(crate) async fn close_continued_pause(
-    channel: &Channel,
-    bearer: Option<&str>,
-    run_id: &str,
-    paused_step_id: &str,
-    claim_token: &str,
-    zdr: bool,
-    waived: bool,
-    space: bool,
-) {
-    // The writer's own gate for a root run (this is where a fold could have been written
-    // for the pause): switch, ledger, persistent. Built here, not by the caller, so the
-    // loop keeps one place that builds a writer's gate.
-    let gate = WriterGate {
-        switch: checkpoint_enabled(),
-        ledger: crate::runtime_loop::effect::ledger_enabled(),
-        zdr,
-        waived,
-        space,
-        depth: 0,
-        resumed: false,
-    };
-    if gate.decide().is_some() {
-        return;
-    }
-    let (Some(bearer), false, false) = (
-        bearer,
-        paused_step_id.is_empty(),
-        claim_token.trim().is_empty(),
-    ) else {
-        info!(
-            target: "loop_fold",
-            run_id = %run_id,
-            outcome = "no_reference",
-            "loop fold close at stage 1 skipped"
-        );
-        return;
-    };
-    let mut request = tonic::Request::new(pb::ClaimLoopCheckpointRequest {
-        run_id: run_id.to_owned(),
-        pause_ref: format!("{run_id}:{paused_step_id}"),
-        claim_token: claim_token.to_owned(),
-    });
-    let Ok(header) = format!("Bearer {bearer}").parse() else {
-        return;
-    };
-    request.metadata_mut().insert("authorization", header);
-    let claimed = tokio::time::timeout(
-        ROUND_SAVE_TIMEOUT,
-        SessionCoreClient::new(channel.clone()).claim_loop_checkpoint(request),
-    )
-    .await;
-    let seq = match claimed {
-        Ok(Ok(response)) => response.into_inner().seq,
-        other => {
-            let outcome = match other {
-                Err(_) => "timeout",
-                Ok(Err(status))
-                    if status.code() == tonic::Code::FailedPrecondition
-                        && status.message() == "loop_checkpoint_not_claimable" =>
-                {
-                    "not_claimable"
-                }
-                Ok(Err(status))
-                    if status.code() == tonic::Code::Aborted
-                        && status.message() == "loop_checkpoint_claim_held" =>
-                {
-                    "claim_held"
-                }
-                Ok(Err(status)) => classify_status(&status).as_str(),
-                Ok(Ok(_)) => "claimed",
-            };
-            info!(
-                target: "loop_fold",
-                run_id = %run_id,
-                outcome,
-                "loop fold close at stage 1: the pause fold was not claimed, so nothing is closed"
-            );
-            return;
-        }
-    };
-    close_rpc(
-        channel,
-        bearer,
-        run_id,
-        seq,
-        STAGE_ONE_CLOSE_REASON,
-        ROUND_SAVE_TIMEOUT,
-    )
-    .await;
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum State {
     Active,
@@ -912,29 +818,25 @@ pub(crate) struct FoldWriter<'a> {
 
 impl<'a> FoldWriter<'a> {
     /// A writer for a loop that resumes a claimed fold: it expects the claimed seq next
-    /// and writes under `segment_no`. The caller (the resume) has already decided that
-    /// this run may write, so there is no gate: the writer is active whenever it has a
-    /// bearer. Pure: it makes no RPC.
+    /// and writes under `segment_no`. It goes through the same [`WriterGate`] as
+    /// [`FoldWriter::new`] (switch, ledger, zero-retention, waived, Space, delegated): it
+    /// is OFF with the gate's reason when the gate refuses and when there is no bearer,
+    /// so a caller that forgets to gate the run cannot write folds for a ZDR or waived
+    /// run. (`gate.resumed` is the stage-1 segment flag; an in-place resume is not one.)
+    /// Pure: it makes no RPC.
     #[cfg_attr(not(test), allow(dead_code))] // the in-place resume (WS03 S7b) builds it
     pub(crate) fn seeded(
         channel: &'a Channel,
         bearer: Option<&'a str>,
         run_id: &'a str,
+        gate: WriterGate,
         expected_seq: u64,
         segment_no: u32,
     ) -> Self {
-        Self {
-            channel,
-            bearer,
-            run_id,
-            tracker: SeqTracker::seeded(expected_seq),
-            segment_no,
-            state: if bearer.is_none() {
-                State::Off(OffReason::NoBearer)
-            } else {
-                State::Active
-            },
-        }
+        let mut writer = Self::new(channel, bearer, run_id, gate);
+        writer.tracker = SeqTracker::seeded(expected_seq);
+        writer.segment_no = segment_no;
+        writer
     }
 
     /// A writer for one loop. Pure: it makes no RPC, whatever the gate says.
@@ -1115,14 +1017,22 @@ impl<'a> FoldWriter<'a> {
     /// Replace the stored fold with a tombstone that says "do not resume from
     /// here". Best effort and kind `round`, so the next ordinary save supersedes it.
     async fn save_tombstone(&mut self, header: &Header, reason: &str) -> Result<u64, SaveError> {
-        let tombstone = header.tombstone(reason);
-        let digest = tombstone.authority.digest();
-        let Ok(bytes) = tombstone.to_bytes() else {
-            return Err(SaveError::ContentRefused {
-                reason: "malformed",
-            });
-        };
-        self.save_bytes(SaveKind::Round, &bytes, &digest, "").await
+        self.save_tombstone_as(header, reason, SaveKind::Round, "")
+            .await
+    }
+
+    /// A tombstone saved under `kind` and `pause_ref`: the pause fold's replacement
+    /// uses kind `pause` and the pause's own reference, so the stored row is the pause's
+    /// and not a resumable fold of an earlier save.
+    async fn save_tombstone_as(
+        &mut self,
+        header: &Header,
+        reason: &str,
+        kind: SaveKind,
+        pause_ref: &str,
+    ) -> Result<u64, SaveError> {
+        let (bytes, digest) = header.tombstone_bytes(reason)?;
+        self.save_bytes(kind, &bytes, &digest, pause_ref).await
     }
 
     /// The end of a round that ran tool calls. Best effort: it never errors, never
@@ -1205,6 +1115,11 @@ pub(crate) fn note_effects_held(count: usize) {
 pub(crate) enum PauseSaved {
     /// Durable under this seq: the approval may be created and continued in place.
     Saved { seq: u64 },
+    /// The fold's content was refused (credential-shaped, too large, rejected as
+    /// invalid), so a tombstone was saved as the pause fold instead, under the same
+    /// pause reference: the row behind the approval is not a resumable fold of an
+    /// earlier save. Never resumable; `/continue` falls back to stage 1 at claim time.
+    Tombstoned { seq: u64 },
     /// Not saved. The approval is still created (a pause is never refused for the
     /// fold's sake) and `/continue` falls back to stage 1 at claim time.
     NotSaved,
@@ -1221,6 +1136,11 @@ impl PauseFold<'_, '_> {
     /// Save the fold for the pause on `step_id`: `pending` names the approval by its
     /// idempotency key `{run_id}:{step_id}`, the same key the approval is created
     /// under, so a resume derives it from the consumed approval's step id.
+    ///
+    /// A content refusal (credential-shaped, oversize, rejected as invalid) saves a
+    /// tombstone as the pause fold instead ([`PauseSaved::Tombstoned`]); if that save
+    /// fails too, or any other save error occurs, nothing more is done
+    /// ([`PauseSaved::NotSaved`]) and the pause goes on.
     pub(crate) async fn save(
         &mut self,
         step_id: &str,
@@ -1235,6 +1155,7 @@ impl PauseFold<'_, '_> {
             action_fingerprint: action_fingerprint.to_owned(),
         });
         let pause_ref = format!("{}:{step_id}", self.writer.run_id);
+        let header = Header::of(&self.fold);
         match self
             .writer
             .save_fold(SaveKind::Pause, self.fold.clone(), &pause_ref)
@@ -1243,6 +1164,41 @@ impl PauseFold<'_, '_> {
             Ok(seq) => {
                 self.saved_seq = Some(seq);
                 PauseSaved::Saved { seq }
+            }
+            // The earlier pre_effect fold is still the stored one (resumable, with the
+            // open round), and the pause is about to wait on an approval: replace it by
+            // a tombstone saved AS the pause fold. Only a content refusal does this; a
+            // store failure leaves the row as it was, as before.
+            Err(SaveError::ContentRefused { reason }) if self.writer.is_active() => {
+                match self
+                    .writer
+                    .save_tombstone_as(&header, reason, SaveKind::Pause, &pause_ref)
+                    .await
+                {
+                    Ok(seq) => {
+                        // Closed again if the approval cannot be created, like any pause fold.
+                        self.saved_seq = Some(seq);
+                        info!(
+                            target: "loop_fold",
+                            run_id = %self.writer.run_id,
+                            reason,
+                            "the pause fold was refused as content; a tombstone was saved in its place"
+                        );
+                        PauseSaved::Tombstoned { seq }
+                    }
+                    Err(error) => {
+                        // The pause goes on: the approval is raised either way.
+                        warn!(
+                            target: "loop_fold",
+                            run_id = %self.writer.run_id,
+                            reason,
+                            outcome = error.as_str(),
+                            cause = error.cause(),
+                            "the pause fold was refused as content and its tombstone could not be saved"
+                        );
+                        PauseSaved::NotSaved
+                    }
+                }
             }
             Err(_) => PauseSaved::NotSaved,
         }
@@ -2084,6 +2040,58 @@ mod tests {
         );
     }
 
+    /// What a content-refused PAUSE fold is replaced by is built from the refused fold's
+    /// header alone: counters and authority, the refusal's closed word, and nothing of the
+    /// conversation, the open round or the pause the refused fold carried.
+    #[test]
+    fn a_pause_tombstone_carries_the_refusal_reason_and_none_of_the_refused_fold() {
+        let secret = format!("sk-{}", "pausetombstonesecret1234567890");
+        let mut refused = fold_with(vec![
+            chat("system", "p"),
+            chat("user", &format!("the key is {secret}")),
+        ]);
+        refused.pending = Some(PendingPause {
+            kind: PauseKind::Approval,
+            pause_ref: "run-1:tool_1_c1".to_owned(),
+            step_id: "tool_1_c1".to_owned(),
+            call: "delete_records".to_owned(),
+            action_fingerprint: "fp".to_owned(),
+        });
+        refused.round_in_flight = Some(RoundInFlight {
+            assistant_content: format!("using {secret}"),
+            calls: Vec::new(),
+            completed: Vec::new(),
+        });
+        let header = Header::of(&refused);
+        for reason in ["credential", "oversize", "rejected", "malformed"] {
+            let (bytes, digest) = header.tombstone_bytes(reason).expect("a tombstone serializes");
+            let parsed = LoopFoldV1::from_bytes(&bytes).expect("a valid fold");
+            assert!(!parsed.is_resumable(), "{reason}");
+            assert_eq!(
+                parsed.extensions[lf::EXT_NOT_RESUMABLE], reason,
+                "the closed reason the refusal carried"
+            );
+            assert!(
+                parsed.messages.is_empty()
+                    && parsed.round_in_flight.is_none()
+                    && parsed.pending.is_none(),
+                "{reason}: no conversation, no open round, no pause"
+            );
+            assert_eq!(digest, refused.authority.digest(), "{reason}");
+            assert!(
+                !String::from_utf8_lossy(&bytes).contains(&secret),
+                "{reason}: the refused content never reaches the tombstone"
+            );
+        }
+        // The counters and the run are the refused fold's own.
+        let (bytes, _) = header.tombstone_bytes("credential").expect("serializes");
+        let parsed = LoopFoldV1::from_bytes(&bytes).expect("parses");
+        assert_eq!(
+            (parsed.run_id.as_str(), parsed.segment_no, parsed.rounds_executed, parsed.step_seq),
+            (refused.run_id.as_str(), refused.segment_no, refused.rounds_executed, refused.step_seq)
+        );
+    }
+
     #[test]
     fn the_held_back_text_names_only_the_tool() {
         let text = held_back_text("delete_records");
@@ -2159,12 +2167,215 @@ mod tests {
         let channel = tonic::transport::Endpoint::from_static("http://127.0.0.1:1").connect_lazy();
         let fresh = FoldWriter::new(&channel, Some("b"), "run-1", all_good());
         assert_eq!((fresh.expected_seq(), fresh.segment()), (0, 1));
-        let seeded = FoldWriter::seeded(&channel, Some("b"), "run-1", 12, 3);
+        let seeded = FoldWriter::seeded(&channel, Some("b"), "run-1", all_good(), 12, 3);
         assert_eq!((seeded.expected_seq(), seeded.segment()), (12, 3));
-        assert!(seeded.is_active(), "the resume decided this run may write");
-        let no_bearer = FoldWriter::seeded(&channel, None, "run-1", 12, 3);
+        assert!(
+            seeded.is_active(),
+            "an open gate and a bearer: the writer writes"
+        );
+        let no_bearer = FoldWriter::seeded(&channel, None, "run-1", all_good(), 12, 3);
         assert_eq!(no_bearer.off_reason(), Some(OffReason::NoBearer));
         assert_eq!(no_bearer.expected_seq(), 12);
+    }
+
+    /// One gate state per refusing reason, the control first.
+    fn refusing_gates() -> Vec<(WriterGate, OffReason)> {
+        vec![
+            (
+                WriterGate {
+                    switch: false,
+                    ..all_good()
+                },
+                OffReason::SwitchOff,
+            ),
+            (
+                WriterGate {
+                    ledger: false,
+                    ..all_good()
+                },
+                OffReason::LedgerOff,
+            ),
+            (
+                WriterGate {
+                    zdr: true,
+                    ..all_good()
+                },
+                OffReason::Zdr,
+            ),
+            (
+                WriterGate {
+                    waived: true,
+                    ..all_good()
+                },
+                OffReason::Waived,
+            ),
+            (
+                WriterGate {
+                    space: true,
+                    ..all_good()
+                },
+                OffReason::Space,
+            ),
+            (
+                WriterGate {
+                    depth: 1,
+                    ..all_good()
+                },
+                OffReason::Delegated,
+            ),
+            (
+                WriterGate {
+                    resumed: true,
+                    ..all_good()
+                },
+                OffReason::ResumedSegment,
+            ),
+        ]
+    }
+
+    /// A listener nothing serves, standing in for session-core: a writer that makes an
+    /// RPC opens a connection to it (the TCP handshake completes in the backlog even
+    /// though nobody accepts), a writer that makes none leaves it untouched.
+    struct Probe {
+        listener: std::net::TcpListener,
+    }
+
+    impl Probe {
+        fn bind() -> Self {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+            listener.set_nonblocking(true).expect("non-blocking");
+            Self { listener }
+        }
+
+        fn channel(&self) -> Channel {
+            let addr = self.listener.local_addr().expect("addr");
+            tonic::transport::Endpoint::from_shared(format!("http://{addr}"))
+                .expect("endpoint")
+                .connect_lazy()
+        }
+
+        /// How many connections were opened to it so far.
+        fn connections(&self) -> usize {
+            let mut count = 0;
+            while self.listener.accept().is_ok() {
+                count += 1;
+            }
+            count
+        }
+    }
+
+    /// Every save entry point of a writer, driven once.
+    async fn drive_every_save(writer: &mut FoldWriter<'_>) -> PreEffect {
+        let fold = || fold_with(vec![chat("system", "p"), chat("user", "g")]);
+        writer.save_round(fold()).await;
+        let pre_effect = writer.save_pre_effect(fold()).await;
+        if let Some(mut pause) = writer.pause_fold(fold()) {
+            pause.save("tool_1_c1", "delete_records", "fp").await;
+            pause.close_after_failed_approval().await;
+        }
+        pre_effect
+    }
+
+    /// The seeded constructor cannot be the way round the gate: a caller that builds a
+    /// resumed writer without gating the run first must still get no folds for a ZDR, a
+    /// waived, a Space or a delegated run, nor with the switch or the ledger off.
+    #[tokio::test]
+    async fn a_seeded_writer_under_every_refusing_gate_is_off_and_makes_no_call() {
+        let probe = Probe::bind();
+        let channel = probe.channel();
+        for (gate, reason) in refusing_gates() {
+            let mut writer = FoldWriter::seeded(&channel, Some("b"), "run-1", gate, 12, 3);
+            assert_eq!(writer.off_reason(), Some(reason), "{gate:?}");
+            assert!(
+                !writer.is_active() && !writer.engaged() && !writer.is_failed(),
+                "{gate:?}"
+            );
+            // The seed is still what the resume handed over, for the log and the tests.
+            assert_eq!((writer.expected_seq(), writer.segment()), (12, 3));
+            // An off writer lets the effect through, as with the switch off.
+            assert_eq!(
+                drive_every_save(&mut writer).await,
+                PreEffect::Degraded,
+                "{gate:?}"
+            );
+            assert!(writer.pause_fold(fold_with(Vec::new())).is_none(), "{gate:?}");
+            assert_eq!(writer.expected_seq(), 12, "{gate:?}: nothing was saved");
+        }
+        assert_eq!(probe.connections(), 0, "no gate state made an RPC");
+    }
+
+    /// The same, over the posture matrix rows the resolver serves: a persistent row
+    /// seeds an active writer, a ZDR or a waived row an off one, for the right reason.
+    #[tokio::test]
+    async fn a_seeded_writer_follows_the_posture_matrix_row_by_row() {
+        use mp_contracts::retention::{
+            resolve_turn, ClaimsView, Resolution, RouteView, WaiverView,
+        };
+        const MATRIX: &str = include_str!("../../tests/fixtures/zdr-posture-matrix.json");
+        let matrix: serde_json::Value = serde_json::from_str(MATRIX).expect("the matrix is JSON");
+        let channel = tonic::transport::Endpoint::from_static("http://127.0.0.1:1").connect_lazy();
+        let (mut on, mut off) = (0_usize, 0_usize);
+        for row in matrix["enforcement_rows"].as_array().expect("rows") {
+            let id = row["id"].as_str().unwrap_or("?");
+            let claims: Vec<ClaimsView<'_>> = row["inputs"]["bearers"]
+                .as_array()
+                .expect("bearers")
+                .iter()
+                .map(|bearer| ClaimsView {
+                    zdr: bearer["zdr"].as_bool().expect("zdr"),
+                    org_zdr: bearer["org_zdr"].as_bool(),
+                    waiver: (!bearer["waiver"].is_null()).then(|| WaiverView {
+                        version: u32::try_from(bearer["waiver"]["version"].as_u64().expect("v"))
+                            .expect("fits"),
+                        provider: bearer["waiver"]["provider"].as_str().expect("provider"),
+                        connection: bearer["waiver"]["connection"].as_str().expect("connection"),
+                    }),
+                })
+                .collect();
+            let route = RouteView {
+                provider: row["inputs"]["route"]["provider"]
+                    .as_str()
+                    .expect("provider"),
+                connection: row["inputs"]["route"]["connection"].as_str(),
+                explicit_zdr: row["inputs"]["route"]["explicit_zdr"]
+                    .as_bool()
+                    .expect("zdr"),
+            };
+            let (zdr, waived, expected) = match resolve_turn(&claims, &route) {
+                Resolution::Refuse(_) => continue,
+                Resolution::Persistent { .. } => (false, false, None),
+                Resolution::Zdr { .. } => (true, false, Some(OffReason::Zdr)),
+                Resolution::Waived { .. } => (false, true, Some(OffReason::Waived)),
+            };
+            let gate = WriterGate {
+                zdr,
+                waived,
+                ..all_good()
+            };
+            let writer = FoldWriter::seeded(&channel, Some("b"), "run-1", gate, 5, 2);
+            assert_eq!(writer.off_reason(), expected, "{id}");
+            assert_eq!(writer.is_active(), expected.is_none(), "{id}");
+            if expected.is_none() {
+                on += 1;
+            } else {
+                off += 1;
+            }
+        }
+        assert_eq!((on, off), (3, 6), "every served row was checked");
+    }
+
+    /// The control for the no-call proofs: the same drive against an ACTIVE writer does
+    /// reach the listener, so a zero is the gate's doing and not an idle harness.
+    #[tokio::test]
+    async fn a_seeded_writer_with_an_open_gate_does_reach_the_store() {
+        let probe = Probe::bind();
+        let channel = probe.channel();
+        let mut writer = FoldWriter::seeded(&channel, Some("b"), "run-1", all_good(), 12, 3);
+        assert!(writer.is_active());
+        writer
+            .save_round(fold_with(vec![chat("system", "p"), chat("user", "g")]))
+            .await;
+        assert!(probe.connections() >= 1, "an open gate makes the RPC");
     }
 
     #[test]

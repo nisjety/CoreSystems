@@ -858,20 +858,12 @@ async fn run_agent_with_route(
     // runs under the authority the pause retained instead (narrowed, never widened).
     if let Some(segment) = resumed.as_ref() {
         super::resume::apply_authority(&mut req, &segment.effective);
-        // The consume is won: the fold the pause saved is stale from here, and this
-        // segment dispatches effects it knows nothing about. Close it before the first
-        // one (WS03 S6; best effort, and only where a fold can exist).
-        runtime_loop::fold::close_continued_pause(
-            &session_channel,
-            session_bearer.as_deref(),
-            &req.run_id,
-            &segment.paused_step_id,
-            req.resume.as_ref().map_or("", |resume| resume.claim_token.as_str()),
-            req.zdr,
-            route.is_waived(),
-            !req.space_id.is_empty(),
-        )
-        .await;
+        // A stage 1 segment makes no fold call of any kind: it writes none (its gate says
+        // `resumed`) and it does not close the fold the pause saved. That fold (state
+        // `paused`, its approval now consumed) is not resumable in practice, because the
+        // consume gate refuses a second use of the approval; a later reader (the in-place
+        // resume, the parking worker) must treat a fold whose approval is consumed as not
+        // resumable, and the terminal purge removes it with the run. (WS03 S6.)
     }
     let tools = match resumed.as_ref() {
         Some(segment) => segment.tools.clone(),
@@ -5415,9 +5407,6 @@ async fn finalize(
 struct ResumedSegment {
     release: super::resume::ApprovedRelease,
     step_prefix: String,
-    /// The step the consumed approval gated (the pause's own step, not the segment's new
-    /// one): with the run id it names the pause fold `{run_id}:{step}`.
-    paused_step_id: String,
     /// The goal with the framed brief of recorded results appended.
     goal: String,
     /// The first round: the approved call, proposed as if by the model.
@@ -5542,7 +5531,6 @@ async fn prepare_resume(
     Ok(ResumedSegment {
         release,
         step_prefix,
-        paused_step_id: consumed.step_id.clone(),
         goal,
         seeded_round: pb::InferResponse {
             content: "Continuing after your approval: running the approved call.".to_owned(),
@@ -6025,19 +6013,11 @@ mod tests {
         loop_save_failures: Vec<LoopSaveFailure>,
         /// Every `CloseLoopCheckpoint` the mock observed.
         close_calls: Vec<pb::CloseLoopCheckpointRequest>,
-        /// Every `ClaimLoopCheckpoint` the mock observed (a stage 1 continuation claims
-        /// the fold of the pause it consumed, to learn the seq it must close).
+        /// Every `ClaimLoopCheckpoint` the mock observed. The loop makes none today (a
+        /// stage 1 continuation touches no fold), so tests pin it empty.
         claim_calls: Vec<pb::ClaimLoopCheckpointRequest>,
-        /// The seq the mock answers a claim with.
+        /// The seq the mock answers a claim with, so a claim that was made would succeed.
         claim_seq: u64,
-        /// Make `ClaimLoopCheckpoint` fail with this status.
-        claim_failure: Option<Status>,
-        /// Make `CloseLoopCheckpoint` fail with this status (after recording the call).
-        close_failure: Option<Status>,
-        /// `("claim" | "close", order.len())` at the moment of each call, so a test can
-        /// say a call came before the first `reserve` without these calls being
-        /// entries of `order` (existing tests read `order` whole).
-        stage_marks: Vec<(&'static str, usize)>,
         /// Every `CreateApproval` the mock accepted, whole.
         approval_requests: Vec<pb::CreateApprovalRequest>,
         /// One entry per call that matters for ordering, across every mock:
@@ -6867,12 +6847,7 @@ mod tests {
             request: Request<pb::ClaimLoopCheckpointRequest>,
         ) -> Result<Response<pb::ClaimLoopCheckpointResponse>, Status> {
             let mut rec = self.rec.lock().unwrap();
-            let mark = rec.order.len();
-            rec.stage_marks.push(("claim", mark));
             rec.claim_calls.push(request.into_inner());
-            if let Some(status) = rec.claim_failure.clone() {
-                return Err(status);
-            }
             Ok(Response::new(pb::ClaimLoopCheckpointResponse {
                 seq: rec.claim_seq,
                 fold: Vec::new(),
@@ -6894,12 +6869,7 @@ mod tests {
             request: Request<pb::CloseLoopCheckpointRequest>,
         ) -> Result<Response<pb::CloseLoopCheckpointResponse>, Status> {
             let mut rec = self.rec.lock().unwrap();
-            let mark = rec.order.len();
-            rec.stage_marks.push(("close", mark));
             rec.close_calls.push(request.into_inner());
-            if let Some(status) = rec.close_failure.clone() {
-                return Err(status);
-            }
             Ok(Response::new(pb::CloseLoopCheckpointResponse {}))
         }
 
@@ -16150,6 +16120,175 @@ mod tests {
         assert!(r.close_calls.is_empty(), "nothing was saved, so nothing is closed");
     }
 
+    /// The pause fold's content is refused while the earlier pre_effect fold is stored and
+    /// resumable (session-core answers the pause save as invalid): the row must not stay that
+    /// resumable fold, with the open round, behind the approval. A tombstone is saved as the
+    /// pause fold under the same pause reference, and the approval is raised as usual.
+    #[tokio::test]
+    async fn loop_fold_a_content_refused_pause_fold_is_replaced_by_a_tombstone_under_its_pause_reference() {
+        // Assembled at runtime so no literal secret sits in committed source.
+        let secret = format!("sk-{}", "pausetombstoneargsecret1234567");
+        let run = drive_fold_run(
+            FoldKnobs::ON.asking(),
+            vec![one_call(
+                "delete_records",
+                &format!(r#"{{"table":"stale","note":"{secret}"}}"#),
+            )],
+            |_, rec| {
+                rec.loop_save_failures.push(failing_save(
+                    "pause",
+                    1,
+                    Status::invalid_argument("loop fold must be a version 1 JSON object"),
+                    false,
+                ));
+            },
+        )
+        .await;
+        assert_eq!(
+            run.result.expect("a pause is never refused for the fold's sake").status,
+            "awaiting_approval"
+        );
+        let r = run.rec.lock().unwrap();
+        assert_eq!(r.approvals.len(), 1, "the approval is raised");
+        assert_eq!(r.approval_modes, vec!["loop".to_owned()], "in its normal mode");
+        assert_eq!(r.loop_save_attempts, 3, "the pre_effect save, the refused pause save, the tombstone");
+        let kinds: Vec<&str> = r.loop_saves.iter().map(|s| s.kind.as_str()).collect();
+        assert_eq!(kinds, ["pre_effect", "pause"], "the refused pause fold was never stored");
+        assert!(r.loop_saves[0].fold().is_resumable(), "the control: the earlier fold is resumable");
+        let stored = &r.loop_saves[1];
+        let tombstone = stored.fold();
+        assert!(
+            !tombstone.is_resumable(),
+            "the row that waits behind the approval is not a resumable fold"
+        );
+        assert_eq!(
+            tombstone.extensions[mp_contracts::loop_fold::EXT_NOT_RESUMABLE],
+            "rejected",
+            "the closed reason is the refusal's"
+        );
+        assert!(
+            tombstone.messages.is_empty()
+                && tombstone.round_in_flight.is_none()
+                && tombstone.pending.is_none(),
+            "a tombstone carries no conversation and no open round"
+        );
+        assert_eq!(stored.expected_seq, 1, "it follows the pre_effect fold in the same chain");
+        assert_eq!(
+            stored.pause_ref,
+            r.approval_requests[0].idempotency_key,
+            "the same pause reference the approval is created under"
+        );
+        assert_eq!(stored.pause_ref, "run_test:tool_1_call-1");
+        assert_eq!(stored.authority_digest, tombstone.authority.digest());
+        for save in &r.loop_saves {
+            let text = String::from_utf8_lossy(&save.fold).into_owned();
+            assert!(!text.contains(&secret), "{}: the secret reached a saved fold", save.kind);
+        }
+        assert!(r.close_calls.is_empty(), "the tombstone stands behind the approval");
+    }
+
+    /// A conversation that cannot be saved as a resumable fold (a withheld message) makes
+    /// the pre_effect AND the pause fold tombstones: the pause one is saved as the pause
+    /// fold, so the row is not left on the round tombstone's `active` state, and nothing
+    /// credential-shaped is in any saved byte.
+    #[tokio::test]
+    async fn loop_fold_a_withheld_message_leaves_a_pause_tombstone_behind_the_approval() {
+        let jwt = "eyJhbGciOiJIUzI1NiJ.eyJzdWIiOiJ1c2VyLTEifQ.abcdefghijklmnopqrstuvwxyz0123456789";
+        let run = drive_fold_run(
+            FoldKnobs::ON.asking(),
+            vec![Scripted::ToolCalls {
+                content: format!("Send Authorization: Bearer {jwt} to the service."),
+                calls: vec![delete_call("d1")],
+            }],
+            |_, _| {},
+        )
+        .await;
+        assert_eq!(run.result.expect("pauses").status, "awaiting_approval");
+        let r = run.rec.lock().unwrap();
+        assert_eq!(r.approvals.len(), 1);
+        assert_eq!(r.approval_modes, vec!["loop".to_owned()]);
+        let kinds: Vec<&str> = r.loop_saves.iter().map(|s| s.kind.as_str()).collect();
+        assert_eq!(kinds, ["round", "pause"], "the pre_effect tombstone, then the pause tombstone");
+        for save in &r.loop_saves {
+            let fold = save.fold();
+            assert!(!fold.is_resumable(), "{}", save.kind);
+            assert_eq!(fold.extensions[mp_contracts::loop_fold::EXT_NOT_RESUMABLE], "credential");
+            let raw = String::from_utf8_lossy(&save.fold).into_owned();
+            let lower = raw.to_lowercase();
+            assert!(
+                !raw.contains(jwt) && !lower.contains("bearer") && !lower.contains("authorization"),
+                "{}: {raw}",
+                save.kind
+            );
+        }
+        assert_eq!(r.loop_saves[1].pause_ref, "run_test:tool_1_d1");
+    }
+
+    /// The tombstone that replaces a refused pause fold can fail too: the pause goes on,
+    /// the approval is raised, and nothing else is saved or closed.
+    #[tokio::test]
+    async fn loop_fold_a_pause_tombstone_that_cannot_be_saved_still_raises_the_approval() {
+        let run = drive_fold_run(
+            FoldKnobs::ON.asking(),
+            vec![one_call("delete_records", "{}")],
+            |_, rec| {
+                rec.loop_save_failures.push(failing_save(
+                    "pause",
+                    1,
+                    Status::invalid_argument("rejected"),
+                    false,
+                ));
+                rec.loop_save_failures.push(failing_save(
+                    "pause",
+                    u32::MAX,
+                    Status::unavailable("store down"),
+                    false,
+                ));
+            },
+        )
+        .await;
+        assert_eq!(
+            run.result.expect("a pause is never refused for the fold's sake").status,
+            "awaiting_approval"
+        );
+        let r = run.rec.lock().unwrap();
+        assert_eq!(r.approvals.len(), 1);
+        assert_eq!(r.approval_modes, vec!["loop".to_owned()]);
+        assert_eq!(r.loop_save_attempts, 3, "the tombstone was tried once and not retried");
+        let kinds: Vec<&str> = r.loop_saves.iter().map(|s| s.kind.as_str()).collect();
+        assert_eq!(kinds, ["pre_effect"]);
+        assert!(r.close_calls.is_empty(), "nothing was saved by the pause, so nothing is closed");
+    }
+
+    /// If the approval then cannot be created, the tombstone saved as the pause fold is
+    /// closed like any pause fold: no orphan paused row.
+    #[tokio::test]
+    async fn loop_fold_a_pause_tombstone_whose_approval_fails_is_closed() {
+        let run = drive_fold_run(
+            FoldKnobs {
+                fail_create_approval: true,
+                ..FoldKnobs::ON.asking()
+            },
+            vec![one_call("delete_records", "{}")],
+            |_, rec| {
+                rec.loop_save_failures.push(failing_save(
+                    "pause",
+                    1,
+                    Status::invalid_argument("rejected"),
+                    false,
+                ));
+            },
+        )
+        .await;
+        run.result.expect_err("the pause fails when its approval cannot be stored");
+        let r = run.rec.lock().unwrap();
+        let kinds: Vec<&str> = r.loop_saves.iter().map(|s| s.kind.as_str()).collect();
+        assert_eq!(kinds, ["pre_effect", "pause"]);
+        assert_eq!(r.close_calls.len(), 1, "the tombstone fold of a pause with no approval is closed");
+        assert_eq!(r.close_calls[0].reason, "approval_not_created");
+        assert_eq!(r.close_calls[0].seq, r.loop_seq, "at the seq the tombstone was saved under");
+    }
+
     #[tokio::test]
     async fn loop_fold_a_pause_whose_approval_fails_closes_its_fold() {
         let run = drive_fold_run(
@@ -16202,7 +16341,9 @@ mod tests {
             }
         }
 
-        // A pause: the approval is raised and no resumable fold exists to claim.
+        // A pause: the approval is raised and no resumable fold exists to claim. The
+        // pause fold is itself a tombstone, saved as the pause (kind and reference), so
+        // the row behind the approval is a tombstone and never a resumable fold.
         let run = drive_fold_run(
             FoldKnobs::ON.asking(),
             vec![one_call("delete_records", "{}")],
@@ -16212,7 +16353,14 @@ mod tests {
         assert_eq!(run.result.expect("pauses").status, "awaiting_approval");
         let r = run.rec.lock().unwrap();
         assert_eq!(r.approval_modes, vec!["loop".to_owned()]);
-        assert!(r.loop_saves.iter().all(|s| s.kind != "pause" && !s.fold().is_resumable()));
+        assert!(r.loop_saves.iter().all(|s| !s.fold().is_resumable()), "only tombstones");
+        let kinds: Vec<&str> = r.loop_saves.iter().map(|s| s.kind.as_str()).collect();
+        assert_eq!(kinds, ["round", "pause"], "the pre_effect tombstone, then the pause tombstone");
+        assert_eq!(r.loop_saves[1].pause_ref, "run_test:tool_1_call-1");
+        assert_eq!(
+            r.loop_saves[1].fold().extensions[mp_contracts::loop_fold::EXT_NOT_RESUMABLE],
+            "oversize"
+        );
     }
 
     /// A fold is saved only for a run that keeps state and owns its loop. Each
@@ -16567,38 +16715,66 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn loop_fold_a_stage_one_continuation_closes_the_pause_fold_it_consumed_before_any_effect() {
+    async fn loop_fold_a_stage_one_continuation_makes_no_fold_call_at_all() {
+        // The checkpoint switch and the ledger on, and the mock answers a claim (it
+        // returns seq 4, as if a pause fold were stored): the one case in which an
+        // earlier build claimed the fold, to learn its seq, and closed it. That claim
+        // wrote a CHECKPOINT_RESTORED audit event for a restore that never happened and
+        // could leave the fold `resuming` on a lease, so stage 1 makes no fold RPC.
         let (rec, policy, result) = stage_one_continue(true, true, |_| {}).await;
         assert_eq!(result.expect("the continuation runs").final_output, "checked");
         assert!(policy.count() >= 1, "the released call ran");
         let r = rec.lock().unwrap();
-        assert_eq!(r.claim_calls.len(), 1, "the pause fold is claimed once, to learn its seq");
-        let claim = &r.claim_calls[0];
-        assert_eq!(claim.run_id, "run_test");
-        assert_eq!(
-            claim.pause_ref, "run_test:tool_1_del-1",
-            "the approval's idempotency key: {{run_id}}:{{paused step}}"
-        );
-        assert_eq!(claim.claim_token, "claim-1");
-        assert_eq!(r.close_calls.len(), 1, "closed exactly once");
-        let close = &r.close_calls[0];
-        assert_eq!(close.run_id, "run_test");
-        assert_eq!(close.seq, 4, "closed at the seq the claim returned");
-        assert_eq!(close.reason, "continued_at_stage_1");
-        let kinds: Vec<&str> = r.stage_marks.iter().map(|(kind, _)| *kind).collect();
-        assert_eq!(kinds, ["claim", "close"]);
-        let first_reserve = r
-            .order
-            .iter()
-            .position(|entry| entry == "reserve")
-            .expect("the released call was reserved");
+        assert!(r.claim_calls.is_empty(), "no claim: {:?}", r.claim_calls);
+        assert!(r.close_calls.is_empty(), "no close: {:?}", r.close_calls);
+        assert_eq!(r.loop_save_attempts, 0, "no save: the segment writes no fold either");
+        assert!(r.loop_saves.is_empty());
         assert!(
-            r.stage_marks.iter().all(|(_, at)| *at <= first_reserve),
-            "the old fold is closed before the segment reserves its first effect: {:?} vs {:?}",
-            r.stage_marks,
+            r.order.iter().any(|entry| entry == "reserve"),
+            "the control: the released call was reserved and ran: {:?}",
             r.order
         );
-        assert_eq!(r.loop_save_attempts, 0, "the segment itself still writes no fold");
+    }
+
+    /// A continue that does not win the consume (another continue won it, or a replay of
+    /// this one that the ledger fences) ends without running the segment: no fold call
+    /// is made for it either. (With the stage-1 close gone there is no fold RPC at all
+    /// on stage 1, so a hung fold RPC cannot delay a continue either: nothing is awaited.)
+    #[tokio::test]
+    async fn loop_fold_a_stage_one_continuation_that_loses_the_consume_makes_no_fold_call() {
+        let _checkpoint = runtime_loop::fold::CheckpointSwitch::set(true);
+        // (same claim, ledger on, the ledger answers a replay, what it is)
+        for (same_claim, ledger, replays, label) in [
+            (false, true, false, "lost to another claim"),
+            (true, false, false, "a replay with no ledger to fence it"),
+            (true, true, true, "a replay the ledger fences"),
+        ] {
+            let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
+            {
+                let mut r = rec.lock().unwrap();
+                r.claim_seq = 4;
+                r.reserve_replays = replays;
+            }
+            let policy = CountingPolicy::new();
+            let inference_channel =
+                spawn_inference_channel(vec![Scripted::Answer("checked".to_owned())]).await;
+            let result = drive_continue(
+                &rec,
+                continue_request(2),
+                consume_of("tool_1_del-1", false, same_claim, snapshot_of(|_| {})),
+                ledger,
+                &policy,
+                inference_channel,
+            )
+            .await;
+            assert!(result.is_err(), "{label}: the segment does not run");
+            assert_eq!(policy.count(), 0, "{label}: the approved call was not dispatched");
+            let r = rec.lock().unwrap();
+            assert!(
+                r.claim_calls.is_empty() && r.close_calls.is_empty() && r.loop_save_attempts == 0,
+                "{label}: no claim, close or save"
+            );
+        }
     }
 
     #[tokio::test]
@@ -16613,37 +16789,6 @@ mod tests {
                 r.claim_calls.is_empty() && r.close_calls.is_empty(),
                 "checkpoint={checkpoint} ledger={ledger}: no call for a fold that cannot exist"
             );
-        }
-    }
-
-    #[tokio::test]
-    async fn loop_fold_a_failed_claim_or_close_does_not_stop_the_stage_one_segment() {
-        let cases: Vec<(Option<Status>, Option<Status>, usize)> = vec![
-            (None, Some(Status::unavailable("store down")), 1),
-            (None, Some(Status::aborted("loop_checkpoint_stale")), 1),
-            (
-                Some(Status::failed_precondition("loop_checkpoint_not_claimable")),
-                None,
-                0,
-            ),
-            (
-                Some(Status::failed_precondition("loop_checkpoint_disabled")),
-                None,
-                0,
-            ),
-            (Some(Status::unavailable("down")), None, 0),
-        ];
-        for (index, (claim_failure, close_failure, closes)) in cases.into_iter().enumerate() {
-            let (rec, policy, result) = stage_one_continue(true, true, |r| {
-                r.claim_failure = claim_failure;
-                r.close_failure = close_failure;
-            })
-            .await;
-            assert_eq!(result.expect("the segment goes on").final_output, "checked", "case {index}");
-            assert!(policy.count() >= 1, "the released call still ran: case {index}");
-            let r = rec.lock().unwrap();
-            assert_eq!(r.claim_calls.len(), 1, "case {index}");
-            assert_eq!(r.close_calls.len(), closes, "case {index}");
         }
     }
 

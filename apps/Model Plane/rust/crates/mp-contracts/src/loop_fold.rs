@@ -490,10 +490,20 @@ fn credential_shaped(text: &str) -> bool {
 /// Whether `text` looks like a credential: the same test [`assert_no_credentials`]
 /// (and so [`LoopFoldV1::to_bytes`]) applies to the whole serialized fold.
 ///
-/// A writer uses it per field. `to_bytes` refuses the **entire** fold for one
-/// benign string such as "Authorization:" or a certificate header, which would
-/// make every later fold of the run unsaveable; withholding just that field when
-/// this returns `true` keeps the fold saveable. One list, so the two cannot drift.
+/// A writer uses it per field, before `to_bytes`. `to_bytes` refuses the **entire**
+/// fold for one benign string such as "Authorization:" or a certificate header. What the
+/// writer does about a field that returns `true` depends on the field:
+///
+/// * a piece of the **conversation** (a message, the open round's text, a call's identity
+///   or a completed outcome) is not stubbed in place, because a resume would continue on a
+///   damaged history and nothing in the fold would say so: the writer refuses the **whole
+///   fold** as a credential and saves a tombstone ([`LoopFoldV1::tombstone`], never
+///   resumable) in its place; the field stays in the history, so every later fold of the
+///   run is a tombstone too (the run loses in-place resumability for good);
+/// * only a call's **arguments** are withheld in place (cleared, never rewritten): an
+///   empty-argument call is never redispatched, so the fold stays resumable.
+///
+/// One list, so this predicate and the fold gate cannot drift.
 #[must_use]
 pub fn contains_credential_shape(text: &str) -> bool {
     credential_shaped(text)
@@ -870,8 +880,10 @@ mod tests {
     }
 
     /// The public predicate is the SAME test `to_bytes` applies, not a second list
-    /// that could drift from it: a writer that withholds exactly what it flags
-    /// never has a whole fold refused for a benign word.
+    /// that could drift from it: a writer that acts on exactly what it flags (a flagged
+    /// conversation field makes the whole fold a tombstone, a flagged call argument is
+    /// cleared in place) is never surprised by `to_bytes` refusing a fold the per-field
+    /// pass let through.
     #[test]
     fn contains_credential_shape_agrees_with_assert_no_credentials() {
         let jwt = "eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJ1c2VyLTEifQ.c2lnbmF0dXJlc2lnbmF0dXJlc2ln";
@@ -881,8 +893,11 @@ mod tests {
             ("-----BEGIN CERTIFICATE-----", true),
             ("send an X-API-Key header", true),
             (jwt, true),
-            // Over-eager on purpose: ordinary prose can trip it, which is exactly why
-            // a writer withholds the one field instead of losing the whole fold.
+            // Over-eager on purpose: ordinary prose can trip it. The cost: a conversation
+            // field that trips it makes the fold a tombstone, and since the field stays in
+            // the history, every later fold of that run is a tombstone too (the run loses
+            // in-place resumability and a resume falls back to stage 1). A call argument
+            // that trips it is only cleared.
             ("a sentence about bearer bonds", true),
             ("a perfectly ordinary sentence about bonds", false),
             ("eyJ-prefixed but far too short.x.y", false),
