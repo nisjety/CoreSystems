@@ -8764,6 +8764,17 @@ async fn approved_plan_context(
     approved_plan_block_for(&state.plan_mode, &source, org_id, thread_id).await
 }
 
+/// Whether a run asks for the plan approved with its thread's grant
+/// ([`approved_plan_context`]). Pure.
+///
+/// A plan-mode run has no authority to consume a plan with yet. A continuation
+/// (`resuming`) takes its goal and authority from the run it continues, which
+/// were fixed when that run paused, so it never takes the thread's single-use
+/// grant: the grant stays pending for the next ordinary run of the thread.
+fn plan_context_wanted(plan_mode: bool, resuming: bool) -> bool {
+    !plan_mode && !resuming
+}
+
 /// The two orchestration calls a run start makes for the plan approved with its
 /// grant, behind a trait so the single-use rule below can be tested against a
 /// fake instead of a live gRPC server.
@@ -9661,13 +9672,15 @@ fn agentic_run_stream(
             .await;
 
         // plan-gate §2.4: a run that is itself in plan mode has no authority
-        // to consume a plan with yet. Any other run asks the store whether an
-        // approval with a plan is waiting for this thread — an in-memory
-        // lookup that answers "no" without an RPC in the common case.
-        let plan_context = if plan_mode {
-            None
-        } else {
+        // to consume a plan with yet, and a continuation takes its goal and
+        // authority from the run it continues, so it leaves the thread's grant
+        // for the next ordinary run (`plan_context_wanted`). Any other run asks
+        // the store whether an approval with a plan is waiting for this thread —
+        // an in-memory lookup that answers "no" without an RPC in the common case.
+        let plan_context = if plan_context_wanted(plan_mode, resume.is_some()) {
             approved_plan_context(&state, &org_id, &thread_id, &model_bearer).await
+        } else {
+            None
         };
 
         // Construct the authenticated request before reporting the run as
@@ -10943,7 +10956,7 @@ mod tests {
 
     // ── plan-gate: an approval is spent by exactly one run ──
 
-    use super::{approved_plan_block_for, ApprovedPlanSource};
+    use super::{approved_plan_block_for, plan_context_wanted, ApprovedPlanSource};
     use std::sync::Mutex;
 
     /// An orchestration fake that records the calls a run start makes.
@@ -11084,6 +11097,30 @@ mod tests {
         assert!(approved_plan_block_for(&store, &source, "org-1", "thread-2").await.is_none());
         assert!(approved_plan_block_for(&store, &source, "org-2", "thread-1").await.is_none());
         assert!(source.calls().is_empty());
+    }
+
+    /// The grant belongs to the thread, not to the continuation that passes it by. A
+    /// continuation asks for nothing, so the grant stays pending and the next ordinary run of
+    /// the thread is handed the plan, and claims it, exactly once. The gate itself is pinned by
+    /// `a_continuation_never_takes_the_threads_approved_plan` in `continue_run_tests`.
+    #[tokio::test]
+    async fn a_continuation_leaves_the_grant_for_the_next_ordinary_run() {
+        let store = granted_store("plan_a");
+        let source = FakePlanSource::new(Some(approved_plan_with_a_step()), true);
+        // The gate's answer for a continuation, as `agentic_run_stream` applies it: no request.
+        if plan_context_wanted(false, true) {
+            let _ = approved_plan_block_for(&store, &source, "org-1", "thread-1").await;
+        }
+        assert!(source.calls().is_empty(), "a continuation reads neither the grant nor the plan");
+        let block = approved_plan_block_for(&store, &source, "org-1", "thread-1")
+            .await
+            .expect("the next ordinary run of the thread is handed the approved plan");
+        assert!(block.contains("1. Draft the email"), "{block}");
+        assert_eq!(source.calls(), vec!["plan:plan_a", "claim:plan_a"]);
+        assert_eq!(
+            store.granted_rung("org-1", "thread-1"),
+            Some(mp_contracts::model_plane::v1::AutonomyRung::WorkspaceWrite)
+        );
     }
 
     #[tokio::test]
@@ -14022,6 +14059,74 @@ mod continue_run_tests {
             dispatch_autonomy_rung(true, true, granted),
             Rung::ReadOnly as i32,
             "a request may always NARROW: plan mode stays read-only"
+        );
+    }
+
+    /// The text of `agentic_run_stream`'s plan-context gate: the code from the binding of
+    /// `plan_context` to the dispatch that follows it. Comment lines are dropped, so a
+    /// mention of the gate in a comment cannot stand in for the gate itself.
+    fn plan_context_gate() -> String {
+        let source = include_str!("sse.rs").replace("\r\n", "\n");
+        let code: String = source
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let from = code
+            .find("let plan_context = ")
+            .expect("agentic_run_stream binds plan_context");
+        let rest = &code[from..];
+        let to = rest
+            .find("spawn_run_dispatch(")
+            .expect("plan_context is bound before the dispatch");
+        rest[..to].to_owned()
+    }
+
+    /// A continuation never asks for the thread's approved plan. Its goal and authority are
+    /// the pause's, and the plan is a single-use grant for the next ordinary run of the
+    /// thread: a `/continue` that took it would spend the grant on the wrong run.
+    #[test]
+    fn a_continuation_never_takes_the_threads_approved_plan() {
+        assert!(
+            !plan_context_wanted(false, true),
+            "a continuation asks for no plan context, so the grant stays pending"
+        );
+        assert!(
+            !plan_context_wanted(true, true),
+            "a plan-mode continuation asks for none either"
+        );
+        // The grant is reached from this run only through `approved_plan_context`, and that
+        // request sits behind the decision, exactly once.
+        let gate = plan_context_gate();
+        let decision = gate
+            .find("if plan_context_wanted(plan_mode, resume.is_some()) {")
+            .expect("the plan context is requested only behind plan_context_wanted");
+        let request = gate
+            .find("approved_plan_context(")
+            .expect("an ordinary run still requests the plan context");
+        assert!(decision < request, "the request comes after the decision: {gate}");
+        assert_eq!(gate.matches("approved_plan_context(").count(), 1, "{gate}");
+        assert!(
+            !gate.contains("take_approved_plan"),
+            "the store is read only inside approved_plan_context: {gate}"
+        );
+    }
+
+    /// An ordinary run is handed its thread's plan exactly as before: without a resume the
+    /// rule is the one it always was (`!plan_mode`), and the request is still made.
+    #[test]
+    fn an_ordinary_run_still_takes_the_threads_approved_plan() {
+        for plan_mode in [false, true] {
+            assert_eq!(
+                plan_context_wanted(plan_mode, false),
+                !plan_mode,
+                "without a resume the rule is the one it always was (plan_mode {plan_mode})"
+            );
+        }
+        let gate = plan_context_gate();
+        assert!(
+            gate.contains("approved_plan_context(&state, &org_id, &thread_id, &model_bearer).await"),
+            "the ordinary request is unchanged: {gate}"
         );
     }
 
