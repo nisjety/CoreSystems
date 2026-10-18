@@ -15,9 +15,7 @@ use tonic::transport::{Channel, ClientTlsConfig, Endpoint};
 use quarry_core::error::{ErrorCode, QuarryError, QuarryResult};
 
 use super::model_plane::v1::browser_broker_client::BrowserBrokerClient;
-use super::model_plane::v1::{
-    AcquireGrantRequest, AcquireGrantResponse, RevokeGrantRequest, ValidateGrantRequest,
-};
+use super::model_plane::v1::{RevokeGrantRequest, ValidateGrantRequest};
 use crate::grant_validator::{GrantValidation, GrantValidator};
 
 #[derive(Clone)]
@@ -93,43 +91,6 @@ impl GrpcGrantValidator {
         req
     }
 
-    /// Acquire a grant (used when Quarry is the issuer, less common path).
-    pub async fn acquire(
-        &self,
-        session_key: &str,
-        mode: &str,
-        org_id: &str,
-    ) -> QuarryResult<AcquiredGrant> {
-        let mut client = self.client();
-        let request = self.apply_auth(tonic::Request::new(AcquireGrantRequest {
-            session_key: session_key.to_string(),
-            mode: mode.to_string(),
-            org_id: org_id.to_string(),
-            // Quarry normally validates Model Plane-issued grants rather than
-            // issuing them. Keep this legacy acquisition path deny-by-default
-            // until its caller can supply a broker-owned domain policy.
-            allowed_domains: Vec::new(),
-            allowed_actions: Vec::new(),
-            allowed_frame_ids: Vec::new(),
-            allowed_dialog_ids: Vec::new(),
-            allowed_artifact_ids: Vec::new(),
-            // Proto3 represents an absent parent grant as the empty string.
-            // This legacy issuance path remains deny-by-default above and does
-            // not claim delegation from a parent grant.
-            parent_grant_id: String::new(),
-        }));
-        let resp: AcquireGrantResponse = client
-            .acquire_grant(request)
-            .await
-            .map_err(grpc_status_to_error)?
-            .into_inner();
-        Ok(AcquiredGrant {
-            grant_id: resp.grant_id,
-            endpoint: resp.endpoint,
-            expires_at: resp.expires_at.and_then(prost_ts_to_chrono),
-        })
-    }
-
     /// Revoke a grant (Quarry calls this when a session ends abnormally).
     pub async fn revoke(&self, grant_id: &str, reason: &str) -> QuarryResult<bool> {
         let mut client = self.client();
@@ -144,13 +105,6 @@ impl GrpcGrantValidator {
             .into_inner();
         Ok(resp.revoked)
     }
-}
-
-#[derive(Debug, Clone)]
-pub struct AcquiredGrant {
-    pub grant_id: String,
-    pub endpoint: String,
-    pub expires_at: Option<DateTime<Utc>>,
 }
 
 #[async_trait]

@@ -59,6 +59,62 @@ test('upstream proto: grant messages keep their field numbers and add kind/zdr/o
   assert.deepEqual(validated.get(12), { name: 'zdr', type: 'bool', repeated: false });
 });
 
+test('upstream proto: DeriveRunGrant request and response pin their field numbers', () => {
+  const proto = read(UPSTREAM_PROTO);
+  const messages = parseProto(proto);
+
+  const request = messages.get('DeriveRunGrantRequest');
+  assert.ok(request, 'DeriveRunGrantRequest is missing');
+  assert.deepEqual(numbers(request), [1, 2, 3, 4, 5, 6]);
+  assert.deepEqual(request.get(1), { name: 'parent_grant_id', type: 'string', repeated: false });
+  assert.deepEqual(request.get(2), { name: 'session_key', type: 'string', repeated: false });
+  assert.deepEqual(request.get(3), { name: 'org_id', type: 'string', repeated: false });
+  assert.deepEqual(request.get(4), { name: 'allowed_domains', type: 'string', repeated: true });
+  assert.deepEqual(request.get(5), { name: 'purpose', type: 'string', repeated: false });
+  assert.deepEqual(request.get(6), { name: 'ttl_seconds', type: 'int32', repeated: false });
+
+  const response = messages.get('DeriveRunGrantResponse');
+  assert.ok(response, 'DeriveRunGrantResponse is missing');
+  assert.deepEqual(numbers(response), [1, 2, 3, 4, 5, 6, 7]);
+  assert.deepEqual(response.get(1), { name: 'grant_id', type: 'string', repeated: false });
+  assert.deepEqual(response.get(2), { name: 'endpoint', type: 'string', repeated: false });
+  assert.deepEqual(response.get(3), { name: 'expires_at', type: 'google.protobuf.Timestamp', repeated: false });
+  assert.deepEqual(response.get(4), { name: 'allowed_domains', type: 'string', repeated: true });
+  assert.deepEqual(response.get(5), { name: 'parent_grant_id', type: 'string', repeated: false });
+  assert.deepEqual(response.get(6), { name: 'kind', type: 'string', repeated: false });
+  assert.deepEqual(response.get(7), { name: 'zdr', type: 'bool', repeated: false });
+
+  // The rpc itself: a rename or a signature change breaks every caller.
+  assert.match(
+    proto.replace(/\/\/.*$/gm, ''),
+    /rpc\s+DeriveRunGrant\s*\(\s*DeriveRunGrantRequest\s*\)\s*returns\s*\(\s*DeriveRunGrantResponse\s*\)/,
+  );
+});
+
+test('the generated Go code carries the same DeriveRunGrant fields as the proto', () => {
+  // The broker's wire contract is the generated code, not the .proto text: a
+  // proto edit without a regeneration leaves them apart. Each struct tag reads
+  // protobuf:"bytes,<number>,<opt|rep>,name=<proto name>,...".
+  const proto = parseProto(read(UPSTREAM_PROTO));
+  const generated = read('apps/Model Plane/go/gen/model_plane/v1/browser.pb.go');
+  const goFields = (name) => {
+    const match = generated.match(new RegExp(`type ${name} struct \\{([\\s\\S]*?)\\n\\}`));
+    assert.ok(match, `${name} is not in browser.pb.go: regenerate it`);
+    return new Map(
+      [...match[1].matchAll(/protobuf:"[a-z0-9]+,(\d+),(?:opt|rep),name=(\w+)/g)].map((m) => [Number(m[1]), m[2]]),
+    );
+  };
+  for (const name of ['DeriveRunGrantRequest', 'DeriveRunGrantResponse']) {
+    const fromProto = new Map([...proto.get(name)].map(([number, field]) => [number, field.name]));
+    assert.ok(fromProto.size > 0, `${name} parsed empty from the proto`);
+    assert.deepEqual(goFields(name), fromProto, `${name}: browser.pb.go is stale against browser.proto`);
+  }
+  assert.match(
+    read('apps/Model Plane/go/gen/model_plane/v1/browser_grpc.pb.go'),
+    /BrowserBroker_DeriveRunGrant_FullMethodName\s*=\s*"\/model_plane\.v1\.BrowserBroker\/DeriveRunGrant"/,
+  );
+});
+
 test('Quarry vendored proto is a subset of the upstream one (same name, number, type)', () => {
   const upstream = parseProto(read(UPSTREAM_PROTO));
   const vendored = parseProto(read(QUARRY_PROTO));
@@ -93,11 +149,9 @@ const isTestPath = (path) =>
   /(^|\/)tests?\//.test(path) || /_test\.(go|rs)$/.test(path) || /(^|\/)testdata\//.test(path);
 
 test('single minting path: only the model-gateway grant route calls AcquireGrant', () => {
-  // Quarry's legacy `GrpcGrantValidator::acquire` has no caller; WS1.B deletes it.
-  const allowedRust = new Set([
-    'apps/Model Plane/rust/services/model-gateway/src/browser_grants.rs',
-    'apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/grpc/browser_broker.rs',
-  ]);
+  // WS1.B deleted Quarry's legacy `GrpcGrantValidator::acquire`: Quarry only
+  // validates grants, so the allow-list is the one model-gateway route.
+  const allowedRust = new Set(['apps/Model Plane/rust/services/model-gateway/src/browser_grants.rs']);
   const rustHits = [];
   for (const path of trackedFiles('*.rs')) {
     if (isTestPath(path) || path.includes('/.claude/') || path.includes('/target/')) continue;
@@ -162,4 +216,48 @@ test('the broker defaults in compose match the Go defaults', () => {
   assert.match(config, /DefaultGrantTTL = 15 \* time\.Minute/);
   assert.match(config, /DefaultMaxActiveGrantsPerOwner = 20/);
   assert.match(read('apps/Model Plane/go/services/browser-broker/internal/grant/policy.go'), /DefaultMaxSessionDomains = 8/);
+});
+
+/** The file without its trailing `#[cfg(test)] mod tests` (test-only imports earlier in a file stay in). */
+const productionPart = (text) => {
+  const at = text.search(/\n#\[cfg\(test\)\]\s*\n\s*mod tests\b/);
+  return at < 0 ? text : text.slice(0, at);
+};
+
+test('the legacy Quarry acquire is gone and Quarry has no grant-minting client call', () => {
+  const quarry = read('apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/grpc/browser_broker.rs');
+  const production = productionPart(quarry);
+  assert.doesNotMatch(production, /AcquireGrantRequest|AcquiredGrant|\.acquire_grant\s*\(|fn acquire\b/);
+});
+
+test('DeriveRunGrant has one caller: the model-gateway browser run route', () => {
+  const hits = [];
+  for (const path of trackedFiles('*.rs')) {
+    if (isTestPath(path) || path.includes('/.claude/') || path.includes('/target/')) continue;
+    let text = read(path);
+    const testsAt = text.indexOf('#[cfg(test)]');
+    if (testsAt >= 0) text = text.slice(0, testsAt);
+    if (/\.derive_run_grant\s*\(/.test(text)) hits.push(path);
+  }
+  assert.deepEqual(hits, ['apps/Model Plane/rust/services/model-gateway/src/browser_run.rs']);
+  const goHits = [];
+  for (const path of trackedFiles('*.go')) {
+    if (isTestPath(path) || path.includes('/gen/') || path.includes('/.claude/')) continue;
+    if (/\.DeriveRunGrant\s*\(/.test(read(path))) goHits.push(path);
+  }
+  assert.deepEqual(goHits, [], 'a Go service calls BrowserBroker.DeriveRunGrant');
+});
+
+test('the Verevon gateway never mints or invents a browser grant', () => {
+  const gatewayRoot = 'apps/Frontend Plane/verevonv3/apps/gateway/src';
+  for (const path of trackedFiles(`${gatewayRoot}/*.rs`)) {
+    const text = productionPart(read(path));
+    assert.doesNotMatch(text, /AcquireGrant|acquire_grant|DeriveRunGrant|derive_run_grant/, `${path} calls the broker directly`);
+    assert.doesNotMatch(text, /"session:|format!\(\s*"session:/, `${path} invents a "session:<id>" grant string`);
+  }
+  // The browser routes send the delegated aud=browser-broker credential.
+  const browser = read(`${gatewayRoot}/domains/browser.rs`);
+  const production = productionPart(browser);
+  assert.match(production, /browser_broker_token\(/, 'browser.rs no longer mints the browser-broker audience token');
+  assert.match(production, /"x-browser-authorization"/, 'browser.rs no longer forwards x-browser-authorization');
 });
