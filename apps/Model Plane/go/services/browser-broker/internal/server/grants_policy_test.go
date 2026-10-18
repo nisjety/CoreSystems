@@ -173,11 +173,15 @@ func TestMapErr_InvalidDomainPolicyIsInvalidArgument(t *testing.T) {
 		in   error
 		want codes.Code
 	}{
-		"invalid policy":     {grant.ErrInvalidDomainPolicy, codes.InvalidArgument},
-		"wrapped invalid":    {fmt.Errorf("x: %w", grant.ErrInvalidDomainPolicy), codes.InvalidArgument},
-		"not grantable":      {grant.ErrDomainNotGrantable, codes.InvalidArgument},
-		"too many grants":    {grant.ErrTooManyGrants, codes.ResourceExhausted},
-		"derive unsupported": {grant.ErrDeriveUnsupported, codes.Internal},
+		"invalid policy":  {grant.ErrInvalidDomainPolicy, codes.InvalidArgument},
+		"wrapped invalid": {fmt.Errorf("x: %w", grant.ErrInvalidDomainPolicy), codes.InvalidArgument},
+		"not grantable":   {grant.ErrDomainNotGrantable, codes.InvalidArgument},
+		"too many grants": {grant.ErrTooManyGrants, codes.ResourceExhausted},
+		"derive widens":   {grant.ErrDeriveWidensParent, codes.PermissionDenied},
+		"not derivable":   {grant.ErrParentNotDerivable, codes.FailedPrecondition},
+		"zdr posture":     {grant.ErrZdrPostureChanged, codes.FailedPrecondition},
+		"needs explicit":  {grant.ErrDeriveNeedsExplicitDomains, codes.InvalidArgument},
+		"derive conflict": {grant.ErrDeriveConflict, codes.AlreadyExists},
 	} {
 		if got := status.Code(mapErr(tc.in)); got != tc.want {
 			t.Errorf("%s: %v, want %v", name, got, tc.want)

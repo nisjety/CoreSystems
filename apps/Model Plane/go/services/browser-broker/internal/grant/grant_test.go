@@ -264,12 +264,6 @@ func TestSensitiveApproval_RejectsAnApprovalParentAndMismatchedSession(t *testin
 	}
 }
 
-func TestDeriveIsReservedForWS1B(t *testing.T) {
-	if _, err := NewMemoryRepository().Derive(ctx, DeriveParams{}); !errors.Is(err, ErrDeriveUnsupported) {
-		t.Fatalf("error = %v", err)
-	}
-}
-
 func TestStaticPolicy(t *testing.T) {
 	policy := StaticPolicy{MaxDomains: 2}
 	for _, ok := range [][]string{

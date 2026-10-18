@@ -48,15 +48,21 @@ func UnaryInterceptor(verifier *authctx.Verifier) grpc.UnaryServerInterceptor {
 // Authorize allows users to operate within their own verified identity and
 // requires explicit least-privilege scopes from workload identities.
 func Authorize(principal authctx.Principal, method string, request any) error {
-	if acquire, ok := request.(*mpv1.AcquireGrantRequest); ok {
-		orgID := strings.TrimSpace(acquire.GetOrgId())
-		if orgID != "" && orgID != principal.OrganizationID {
-			return errors.New("request organization does not match token")
-		}
+	var requestOrg string
+	switch typed := request.(type) {
+	case *mpv1.AcquireGrantRequest:
+		requestOrg = typed.GetOrgId()
+	case *mpv1.DeriveRunGrantRequest:
+		requestOrg = typed.GetOrgId()
+	}
+	if orgID := strings.TrimSpace(requestOrg); orgID != "" && orgID != principal.OrganizationID {
+		return errors.New("request organization does not match token")
 	}
 	required := ScopeRead
 	switch method {
-	case "/model_plane.v1.BrowserBroker/AcquireGrant", "/model_plane.v1.BrowserBroker/RevokeGrant":
+	case "/model_plane.v1.BrowserBroker/AcquireGrant",
+		"/model_plane.v1.BrowserBroker/RevokeGrant",
+		"/model_plane.v1.BrowserBroker/DeriveRunGrant":
 		required = ScopeWrite
 	case "/model_plane.v1.BrowserBroker/ValidateGrant", "/model_plane.v1.BrowserBroker/Health":
 	default:

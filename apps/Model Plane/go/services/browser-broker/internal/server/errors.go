@@ -29,10 +29,17 @@ func mapErr(err error) error {
 		return status.Error(codes.NotFound, err.Error())
 	case errors.Is(err, grant.ErrGrantRevoked), errors.Is(err, grant.ErrGrantExpired):
 		return status.Error(codes.FailedPrecondition, err.Error())
-	case errors.Is(err, grant.ErrInvalidDomainPolicy), errors.Is(err, grant.ErrDomainNotGrantable):
+	case errors.Is(err, grant.ErrInvalidDomainPolicy), errors.Is(err, grant.ErrDomainNotGrantable),
+		errors.Is(err, grant.ErrDeriveNeedsExplicitDomains):
 		return status.Error(codes.InvalidArgument, err.Error())
 	case errors.Is(err, grant.ErrTooManyGrants):
 		return status.Error(codes.ResourceExhausted, err.Error())
+	case errors.Is(err, grant.ErrDeriveWidensParent):
+		return status.Error(codes.PermissionDenied, err.Error())
+	case errors.Is(err, grant.ErrParentNotDerivable), errors.Is(err, grant.ErrZdrPostureChanged):
+		return status.Error(codes.FailedPrecondition, err.Error())
+	case errors.Is(err, grant.ErrDeriveConflict):
+		return status.Error(codes.AlreadyExists, err.Error())
 	default:
 		return status.Error(codes.Internal, err.Error())
 	}
@@ -56,6 +63,16 @@ func grantOutcome(err error) string {
 		return "domain_not_grantable"
 	case errors.Is(err, grant.ErrTooManyGrants):
 		return "too_many_grants"
+	case errors.Is(err, grant.ErrDeriveWidensParent):
+		return "derive_widens_parent"
+	case errors.Is(err, grant.ErrDeriveNeedsExplicitDomains):
+		return "derive_needs_explicit_domains"
+	case errors.Is(err, grant.ErrParentNotDerivable):
+		return "parent_not_derivable"
+	case errors.Is(err, grant.ErrZdrPostureChanged):
+		return "zdr_posture_changed"
+	case errors.Is(err, grant.ErrDeriveConflict):
+		return "derive_conflict"
 	default:
 		return "internal_error"
 	}

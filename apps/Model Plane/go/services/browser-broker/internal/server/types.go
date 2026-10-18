@@ -10,3 +10,5 @@ type BrowserHealthRequest = mpv1.BrowserHealthRequest
 type BrowserHealthResponse = mpv1.BrowserHealthResponse
 type ValidateGrantRequest = mpv1.ValidateGrantRequest
 type ValidateGrantResponse = mpv1.ValidateGrantResponse
+type DeriveRunGrantRequest = mpv1.DeriveRunGrantRequest
+type DeriveRunGrantResponse = mpv1.DeriveRunGrantResponse

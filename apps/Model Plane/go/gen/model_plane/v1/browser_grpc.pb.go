@@ -19,10 +19,11 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	BrowserBroker_AcquireGrant_FullMethodName  = "/model_plane.v1.BrowserBroker/AcquireGrant"
-	BrowserBroker_RevokeGrant_FullMethodName   = "/model_plane.v1.BrowserBroker/RevokeGrant"
-	BrowserBroker_ValidateGrant_FullMethodName = "/model_plane.v1.BrowserBroker/ValidateGrant"
-	BrowserBroker_Health_FullMethodName        = "/model_plane.v1.BrowserBroker/Health"
+	BrowserBroker_AcquireGrant_FullMethodName   = "/model_plane.v1.BrowserBroker/AcquireGrant"
+	BrowserBroker_RevokeGrant_FullMethodName    = "/model_plane.v1.BrowserBroker/RevokeGrant"
+	BrowserBroker_ValidateGrant_FullMethodName  = "/model_plane.v1.BrowserBroker/ValidateGrant"
+	BrowserBroker_DeriveRunGrant_FullMethodName = "/model_plane.v1.BrowserBroker/DeriveRunGrant"
+	BrowserBroker_Health_FullMethodName         = "/model_plane.v1.BrowserBroker/Health"
 )
 
 // BrowserBrokerClient is the client API for BrowserBroker service.
@@ -38,6 +39,11 @@ type BrowserBrokerClient interface {
 	RevokeGrant(ctx context.Context, in *RevokeGrantRequest, opts ...grpc.CallOption) (*RevokeGrantResponse, error)
 	// Validate a browser grant is active and not revoked/expired.
 	ValidateGrant(ctx context.Context, in *ValidateGrantRequest, opts ...grpc.CallOption) (*ValidateGrantResponse, error)
+	// Derive a run grant for one agent run from an active session grant. The
+	// run grant is never wider than its parent: same owner and tenant, hosts
+	// equal to or below the parent's, ZDR inherited, expiry capped by the
+	// parent's, revoked with it. Idempotent on (parent_grant_id, session_key).
+	DeriveRunGrant(ctx context.Context, in *DeriveRunGrantRequest, opts ...grpc.CallOption) (*DeriveRunGrantResponse, error)
 	// Health check.
 	Health(ctx context.Context, in *BrowserHealthRequest, opts ...grpc.CallOption) (*BrowserHealthResponse, error)
 }
@@ -80,6 +86,16 @@ func (c *browserBrokerClient) ValidateGrant(ctx context.Context, in *ValidateGra
 	return out, nil
 }
 
+func (c *browserBrokerClient) DeriveRunGrant(ctx context.Context, in *DeriveRunGrantRequest, opts ...grpc.CallOption) (*DeriveRunGrantResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(DeriveRunGrantResponse)
+	err := c.cc.Invoke(ctx, BrowserBroker_DeriveRunGrant_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *browserBrokerClient) Health(ctx context.Context, in *BrowserHealthRequest, opts ...grpc.CallOption) (*BrowserHealthResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(BrowserHealthResponse)
@@ -103,6 +119,11 @@ type BrowserBrokerServer interface {
 	RevokeGrant(context.Context, *RevokeGrantRequest) (*RevokeGrantResponse, error)
 	// Validate a browser grant is active and not revoked/expired.
 	ValidateGrant(context.Context, *ValidateGrantRequest) (*ValidateGrantResponse, error)
+	// Derive a run grant for one agent run from an active session grant. The
+	// run grant is never wider than its parent: same owner and tenant, hosts
+	// equal to or below the parent's, ZDR inherited, expiry capped by the
+	// parent's, revoked with it. Idempotent on (parent_grant_id, session_key).
+	DeriveRunGrant(context.Context, *DeriveRunGrantRequest) (*DeriveRunGrantResponse, error)
 	// Health check.
 	Health(context.Context, *BrowserHealthRequest) (*BrowserHealthResponse, error)
 	mustEmbedUnimplementedBrowserBrokerServer()
@@ -123,6 +144,9 @@ func (UnimplementedBrowserBrokerServer) RevokeGrant(context.Context, *RevokeGran
 }
 func (UnimplementedBrowserBrokerServer) ValidateGrant(context.Context, *ValidateGrantRequest) (*ValidateGrantResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ValidateGrant not implemented")
+}
+func (UnimplementedBrowserBrokerServer) DeriveRunGrant(context.Context, *DeriveRunGrantRequest) (*DeriveRunGrantResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method DeriveRunGrant not implemented")
 }
 func (UnimplementedBrowserBrokerServer) Health(context.Context, *BrowserHealthRequest) (*BrowserHealthResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method Health not implemented")
@@ -202,6 +226,24 @@ func _BrowserBroker_ValidateGrant_Handler(srv interface{}, ctx context.Context, 
 	return interceptor(ctx, in, info, handler)
 }
 
+func _BrowserBroker_DeriveRunGrant_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(DeriveRunGrantRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(BrowserBrokerServer).DeriveRunGrant(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: BrowserBroker_DeriveRunGrant_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(BrowserBrokerServer).DeriveRunGrant(ctx, req.(*DeriveRunGrantRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _BrowserBroker_Health_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(BrowserHealthRequest)
 	if err := dec(in); err != nil {
@@ -238,6 +280,10 @@ var BrowserBroker_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ValidateGrant",
 			Handler:    _BrowserBroker_ValidateGrant_Handler,
+		},
+		{
+			MethodName: "DeriveRunGrant",
+			Handler:    _BrowserBroker_DeriveRunGrant_Handler,
 		},
 		{
 			MethodName: "Health",

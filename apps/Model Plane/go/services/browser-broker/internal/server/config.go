@@ -19,6 +19,9 @@ const (
 	DefaultMaxSessionDomains = grant.DefaultMaxSessionDomains
 	// DefaultMaxActiveGrantsPerOwner bounds how many live grants one user holds.
 	DefaultMaxActiveGrantsPerOwner = 20
+	// DefaultMaxRunDomains bounds the hosts of one derived run grant, and how
+	// many hosts a run may inherit from its parent without naming them.
+	DefaultMaxRunDomains = grant.DefaultMaxRunDomains
 	// hardMaxSessionDomains is the broker's absolute bound (grant.NormalizeAllowedDomains).
 	hardMaxSessionDomains = 32
 )
@@ -28,6 +31,7 @@ const (
 	EnvGrantTTLSeconds        = "BROWSER_BROKER_GRANT_TTL_SECONDS"
 	EnvMaxSessionDomains      = "BROWSER_BROKER_MAX_SESSION_DOMAINS"
 	EnvMaxActiveGrantsPerUser = "BROWSER_BROKER_MAX_ACTIVE_GRANTS_PER_OWNER"
+	EnvMaxRunDomains          = "BROWSER_BROKER_MAX_RUN_DOMAINS"
 )
 
 // Config holds the limits applied when issuing grants.
@@ -38,6 +42,8 @@ type Config struct {
 	MaxActivePerOwner int
 	// MaxSessionDomains is the hosts-per-grant bound the default Policy applies.
 	MaxSessionDomains int
+	// MaxRunDomains bounds a derived run grant's hosts (explicit or inherited).
+	MaxRunDomains int
 	// Policy decides which hosts may be granted. Nil means a StaticPolicy with
 	// MaxSessionDomains.
 	Policy grant.PolicyResolver
@@ -49,6 +55,7 @@ func DefaultConfig() Config {
 		TTL:               DefaultGrantTTL,
 		MaxActivePerOwner: DefaultMaxActiveGrantsPerOwner,
 		MaxSessionDomains: DefaultMaxSessionDomains,
+		MaxRunDomains:     DefaultMaxRunDomains,
 	}
 }
 
@@ -73,6 +80,11 @@ func ConfigFromEnv(getenv func(string) string) (Config, error) {
 		return Config{}, err
 	} else if ok {
 		cfg.MaxActivePerOwner = v
+	}
+	if v, ok, err := positiveInt(getenv, EnvMaxRunDomains); err != nil {
+		return Config{}, err
+	} else if ok {
+		cfg.MaxRunDomains = min(v, hardMaxSessionDomains)
 	}
 	return cfg, nil
 }

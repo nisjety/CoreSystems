@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"strings"
+	"time"
 
 	mpv1 "github.com/triodelab/model-plane/gen/go/model_plane/v1"
 	"github.com/triodelab/model-plane/pkg/authctx"
@@ -187,6 +188,86 @@ func (s *Server) ValidateGrant(ctx context.Context, req *ValidateGrantRequest) (
 		Zdr:                g.Zdr,
 	}, nil
 }
+
+// derivePurposeAIRun is the only DeriveRunGrant purpose accepted today. A new
+// purpose (attach, WS8.C) is an explicit addition, never an accidental pass.
+const derivePurposeAIRun = "ai_run"
+
+// maxSessionKeyBytes bounds a run's idempotency key.
+const maxSessionKeyBytes = 256
+
+// DeriveRunGrant issues a run grant for one agent run from an active session
+// grant. The grant layer enforces that the run grant is never wider than its
+// parent; this handler checks the request shape and the verified tenant.
+func (s *Server) DeriveRunGrant(ctx context.Context, req *DeriveRunGrantRequest) (*DeriveRunGrantResponse, error) {
+	telemetry.RequestsTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("method", "DeriveRunGrant")))
+	principal, err := s.principal(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if req.GetParentGrantId() == "" {
+		return nil, status.Error(codes.InvalidArgument, "parent_grant_id is required")
+	}
+	sessionKey := req.GetSessionKey()
+	if strings.TrimSpace(sessionKey) == "" || len(sessionKey) > maxSessionKeyBytes || strings.ContainsFunc(sessionKey, isControl) {
+		return nil, status.Error(codes.InvalidArgument, "session_key must be a bounded, printable key")
+	}
+	if req.GetOrgId() == "" {
+		return nil, status.Error(codes.InvalidArgument, "org_id is required")
+	}
+	if req.GetOrgId() != principal.OrganizationID {
+		return nil, status.Error(codes.PermissionDenied, "organization does not match verified identity")
+	}
+	if req.GetPurpose() != derivePurposeAIRun {
+		return nil, status.Error(codes.InvalidArgument, "purpose must be ai_run")
+	}
+	ttl, err := s.deriveTTL(req.GetTtlSeconds())
+	if err != nil {
+		return nil, err
+	}
+	g, err := s.grants.Derive(ctx, grant.DeriveParams{
+		OrgID:             principal.OrganizationID,
+		OwnerID:           authz.OwnerFilter(principal),
+		ParentGrantID:     req.GetParentGrantId(),
+		SessionKey:        sessionKey,
+		RunDomains:        req.GetAllowedDomains(),
+		TTL:               ttl,
+		PrincipalZdr:      principal.ZeroDataRetention,
+		MaxRunDomains:     s.cfg.MaxRunDomains,
+		MaxActivePerOwner: s.cfg.MaxActivePerOwner,
+		Policy:            s.cfg.Policy,
+	})
+	if err != nil {
+		telemetry.GrantsIssuedTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("outcome", grantOutcome(err))))
+		return nil, mapErr(err)
+	}
+	telemetry.GrantsIssuedTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("outcome", "derived")))
+	return &DeriveRunGrantResponse{
+		GrantId:        g.ID,
+		Endpoint:       s.baseURL + "/grants/" + g.ID,
+		ExpiresAt:      timestamppb.New(g.ExpiresAt),
+		AllowedDomains: append([]string(nil), g.AllowedDomains...),
+		ParentGrantId:  g.ParentGrantID,
+		Kind:           string(g.Kind),
+		Zdr:            g.Zdr,
+	}, nil
+}
+
+// deriveTTL resolves a requested run-grant lifetime: 0 is the configured
+// default, a value under the minimum is refused, anything else is clamped to
+// the broker maximum. The parent's expiry caps it again in the grant layer.
+func (s *Server) deriveTTL(seconds int32) (time.Duration, error) {
+	switch {
+	case seconds == 0:
+		return s.cfg.TTL, nil
+	case seconds < 0 || time.Duration(seconds)*time.Second < grant.MinDerivedLifetime:
+		return 0, status.Error(codes.InvalidArgument, "ttl_seconds is below the minimum run grant lifetime")
+	default:
+		return min(time.Duration(seconds)*time.Second, MaxGrantTTL), nil
+	}
+}
+
+func isControl(r rune) bool { return r <= 0x1f || r == 0x7f }
 
 // Health returns service health status.
 func (s *Server) Health(ctx context.Context, _ *BrowserHealthRequest) (*BrowserHealthResponse, error) {

@@ -31,10 +31,51 @@ var (
 	// ErrTooManyGrants indicates the owner already holds the maximum number of
 	// active grants.
 	ErrTooManyGrants = errors.New("too many active browser grants")
-	// ErrDeriveUnsupported is returned by a repository that cannot derive a run
-	// grant yet (reserved for WS1.B).
-	ErrDeriveUnsupported = errors.New("run grant derivation is not supported")
+	// ErrParentNotDerivable means the parent grant cannot seed a run grant: it
+	// is not a derivable kind, carries sensitive actions, or has too little
+	// lifetime left. The message never says which.
+	ErrParentNotDerivable = errors.New("browser grant is not derivable")
+	// ErrDeriveWidensParent means a requested run host is not equal to or
+	// below any host of the parent grant.
+	ErrDeriveWidensParent = errors.New("derived browser grant would widen its parent")
+	// ErrZdrPostureChanged means a Zero Data Retention principal asked to
+	// derive from a grant that is not ZDR, which would hand it a grant whose
+	// run may be persisted.
+	ErrZdrPostureChanged = errors.New("zero data retention posture differs from the parent grant")
+	// ErrDeriveNeedsExplicitDomains means the run must name its hosts: the
+	// parent is wider than one run may inherit, or its kind requires it.
+	ErrDeriveNeedsExplicitDomains = errors.New("derived browser grant requires an explicit host list")
+	// ErrDeriveConflict means (parent, session_key) already names a run grant
+	// with a different host list. A replay never changes an issued grant.
+	ErrDeriveConflict = errors.New("run grant already derived with a different policy")
 )
+
+// DefaultMaxRunDomains bounds the hosts one run grant may hold, and how many
+// it may inherit implicitly (BROWSER_BROKER_MAX_RUN_DOMAINS).
+const DefaultMaxRunDomains = 8
+
+// MinDerivedLifetime is the shortest run grant Derive issues. A grant that
+// would die mid-step is refused instead.
+const MinDerivedLifetime = 30 * time.Second
+
+// derivePolicy says how a run grant may be derived from a parent kind.
+type derivePolicy struct {
+	// explicitHosts requires the caller to name a non-empty host list (R-16:
+	// any parent other than a session grant, e.g. the future human_browse).
+	explicitHosts bool
+}
+
+// derivableParents lists the parent kinds a run grant may derive from. A run
+// grant is not here (no chains), nor is an approval (single-use authority).
+var derivableParents = map[Kind]derivePolicy{
+	KindSession: {explicitHosts: false},
+}
+
+// approvalParents lists the kinds a sensitive approval may bind to.
+var approvalParents = map[Kind]struct{}{
+	KindSession: {},
+	KindRun:     {},
+}
 
 const maxAllowedDomains = 32
 const maxSensitiveScopeValues = 32
@@ -115,12 +156,27 @@ type ApprovalParams struct {
 	Zdr bool
 }
 
-// DeriveParams describes a run grant derived from a session grant. Reserved
-// for WS1.B; the fields it needs are decided there.
+// DeriveParams describes a run grant derived from a session grant.
 type DeriveParams struct {
+	// OrgID is the verified organization. OwnerID is the owner filter: a
+	// user's own id, or empty for a scoped service. The run grant's owner is
+	// always the parent's owner.
 	OrgID, OwnerID, ParentGrantID string
-	RunDomains                    []string
-	TTL                           time.Duration
+	// SessionKey is the run's idempotency key.
+	SessionKey string
+	// RunDomains narrows the parent's hosts; empty inherits them.
+	RunDomains []string
+	// TTL is the requested lifetime; the expiry is capped by the parent's.
+	TTL time.Duration
+	// PrincipalZdr is the verified caller's ZDR flag.
+	PrincipalZdr bool
+	// MaxRunDomains bounds the run's hosts; zero or negative uses
+	// DefaultMaxRunDomains.
+	MaxRunDomains int
+	// MaxActivePerOwner > 0 applies the per-owner active cap atomically.
+	MaxActivePerOwner int
+	// Policy, when set, re-checks the run's hosts (defence in depth).
+	Policy PolicyResolver
 }
 
 // Repository stores grants. Every method is scoped by the verified
@@ -191,8 +247,8 @@ func (s *MemoryRepository) CreateScopedSensitiveApproval(ctx context.Context, p 
 	if err != nil {
 		return nil, err
 	}
-	if parent.SessionKey != p.SessionKey || parent.Kind == KindSensitiveApproval || len(parent.AllowedActions) != 0 {
-		return nil, errors.New("sensitive approval parent grant is not an ordinary matching session grant")
+	if _, ok := approvalParents[parent.Kind]; !ok || parent.SessionKey != p.SessionKey || len(parent.AllowedActions) != 0 {
+		return nil, errors.New("sensitive approval parent grant is not an ordinary matching session or run grant")
 	}
 	domains, err := NormalizeAllowedDomains(p.AllowedDomains)
 	if err != nil {
@@ -234,9 +290,157 @@ func (s *MemoryRepository) CreateScopedSensitiveApproval(ctx context.Context, p 
 	return clone(g), nil
 }
 
-// Derive is reserved for WS1.B.
-func (s *MemoryRepository) Derive(context.Context, DeriveParams) (*Grant, error) {
-	return nil, ErrDeriveUnsupported
+// Derive issues a run grant that is never wider than its parent session grant:
+// same tenant and owner, hosts equal to or below the parent's, the parent's
+// ZDR flag, an expiry no later than the parent's, and a ParentGrantID so a
+// revocation of the parent cascades to it. It is idempotent on
+// (parent, SessionKey): a replay returns the issued grant unchanged.
+//
+// The parent is looked up and the run grant inserted under one lock, so a
+// parent revoked concurrently can never leave a live child behind.
+func (s *MemoryRepository) Derive(ctx context.Context, p DeriveParams) (*Grant, error) {
+	if strings.TrimSpace(p.SessionKey) == "" || p.ParentGrantID == "" || p.OrgID == "" {
+		return nil, ErrParentNotDerivable
+	}
+	s.mu.Lock()
+	parent, err := s.getScopedLocked(p.ParentGrantID, p.OrgID, p.OwnerID)
+	s.mu.Unlock()
+	if err != nil {
+		return nil, err
+	}
+	policy, ok := derivableParents[parent.Kind]
+	if !ok || len(parent.AllowedActions) != 0 {
+		return nil, ErrParentNotDerivable
+	}
+	// ZDR follows the parent. A ZDR caller deriving from a non-ZDR grant
+	// would obtain a grant whose run may be retained: refuse it.
+	if p.PrincipalZdr && !parent.Zdr {
+		return nil, ErrZdrPostureChanged
+	}
+	maxRun := p.MaxRunDomains
+	if maxRun <= 0 {
+		maxRun = DefaultMaxRunDomains
+	}
+	domains, err := deriveDomains(parent.AllowedDomains, p.RunDomains, maxRun, policy.explicitHosts)
+	if err != nil {
+		return nil, err
+	}
+	if p.Policy != nil {
+		if err := p.Policy.CheckSession(ctx, p.OrgID, domains); err != nil {
+			return nil, err
+		}
+	}
+	id, err := newID(parent.Zdr)
+	if err != nil {
+		return nil, err
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	// Re-read the parent under the insert lock: it may have been revoked or
+	// have expired since the first read.
+	parent, err = s.getScopedLocked(p.ParentGrantID, p.OrgID, p.OwnerID)
+	if err != nil {
+		return nil, err
+	}
+	now := s.now()
+	if existing := s.derivedLocked(parent.ID, p.OrgID, p.SessionKey); existing != nil {
+		switch {
+		case existing.Revoked:
+			return nil, ErrGrantRevoked
+		case now.After(existing.ExpiresAt):
+			return nil, ErrGrantExpired
+		case !equalStrings(existing.AllowedDomains, domains):
+			return nil, ErrDeriveConflict
+		}
+		return clone(existing), nil
+	}
+	expires := now.Add(p.TTL)
+	if parent.ExpiresAt.Before(expires) {
+		expires = parent.ExpiresAt
+	}
+	if expires.Sub(now) < MinDerivedLifetime {
+		return nil, ErrParentNotDerivable
+	}
+	if p.MaxActivePerOwner > 0 && s.activeLocked(p.OrgID, parent.OwnerID) >= p.MaxActivePerOwner {
+		return nil, ErrTooManyGrants
+	}
+	g := &Grant{
+		ID:             id,
+		Kind:           KindRun,
+		OrgID:          parent.OrgID,
+		OwnerID:        parent.OwnerID,
+		SessionKey:     p.SessionKey,
+		ScopeURL:       parent.ScopeURL,
+		Zdr:            parent.Zdr,
+		AllowedDomains: domains,
+		ParentGrantID:  parent.ID,
+		ExpiresAt:      expires,
+	}
+	s.grants[id] = clone(g)
+	return clone(g), nil
+}
+
+// derivedLocked returns the run grant already derived from parentID under
+// sessionKey, revoked or not, or nil.
+func (s *MemoryRepository) derivedLocked(parentID, orgID, sessionKey string) *Grant {
+	for _, g := range s.grants {
+		if g.Kind == KindRun && g.ParentGrantID == parentID && g.OrgID == orgID && g.SessionKey == sessionKey {
+			return g
+		}
+	}
+	return nil
+}
+
+// deriveDomains computes a run grant's hosts. An empty request inherits the
+// parent's hosts unless the parent kind requires an explicit list or the
+// parent holds more hosts than one run may inherit. An explicit list must be
+// canonical, at most maxRun hosts, and each host must equal or be a subdomain
+// of a parent host.
+func deriveDomains(parent, requested []string, maxRun int, explicitRequired bool) ([]string, error) {
+	if len(requested) == 0 {
+		if explicitRequired || len(parent) > maxRun {
+			return nil, ErrDeriveNeedsExplicitDomains
+		}
+		return append([]string(nil), parent...), nil
+	}
+	domains, err := NormalizeAllowedDomains(requested)
+	if err != nil {
+		return nil, err
+	}
+	if len(domains) > maxRun {
+		return nil, ErrInvalidDomainPolicy
+	}
+	for _, host := range domains {
+		if !hostWithin(host, parent) {
+			return nil, ErrDeriveWidensParent
+		}
+	}
+	return domains, nil
+}
+
+// hostWithin reports whether host equals one of the policy hosts or is a
+// subdomain of one (a dot boundary, so "badexample.com" is not under
+// "example.com").
+func hostWithin(host string, policy []string) bool {
+	for _, allowed := range policy {
+		if host == allowed || strings.HasSuffix(host, "."+allowed) {
+			return true
+		}
+	}
+	return false
+}
+
+func equalStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // GetScoped returns a grant only within the verified organization. A non-empty
@@ -244,6 +448,10 @@ func (s *MemoryRepository) Derive(context.Context, DeriveParams) (*Grant, error)
 func (s *MemoryRepository) GetScoped(_ context.Context, id, orgID, ownerID string) (*Grant, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.getScopedLocked(id, orgID, ownerID)
+}
+
+func (s *MemoryRepository) getScopedLocked(id, orgID, ownerID string) (*Grant, error) {
 	g, ok := s.grants[id]
 	if !ok || g.OrgID != orgID || (ownerID != "" && g.OwnerID != ownerID) {
 		return nil, ErrGrantNotFound

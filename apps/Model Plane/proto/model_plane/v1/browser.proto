@@ -18,6 +18,12 @@ service BrowserBroker {
   // Validate a browser grant is active and not revoked/expired.
   rpc ValidateGrant(ValidateGrantRequest) returns (ValidateGrantResponse);
 
+  // Derive a run grant for one agent run from an active session grant. The
+  // run grant is never wider than its parent: same owner and tenant, hosts
+  // equal to or below the parent's, ZDR inherited, expiry capped by the
+  // parent's, revoked with it. Idempotent on (parent_grant_id, session_key).
+  rpc DeriveRunGrant(DeriveRunGrantRequest) returns (DeriveRunGrantResponse);
+
   // Health check.
   rpc Health(BrowserHealthRequest) returns (BrowserHealthResponse);
 }
@@ -135,4 +141,42 @@ message ValidateGrantResponse {
   // True for a Zero Data Retention grant. Consumers must not persist anything
   // about the run beyond its lifetime when this is set.
   bool zdr = 12;
+}
+
+message DeriveRunGrantRequest {
+  // The session grant the run derives from. It must be active, of kind
+  // "session", owned by the caller (users) inside the caller's organization.
+  string parent_grant_id = 1;
+
+  // The run's idempotency key. A repeat with the same parent and key returns
+  // the same grant; a repeat with different hosts is ALREADY_EXISTS.
+  string session_key = 2;
+
+  // Tenant identifier; must equal the verified token's organization.
+  string org_id = 3;
+
+  // Optional narrowing. Empty inherits the parent's hosts (refused when the
+  // parent holds more than the broker's run-domain bound); otherwise every
+  // host must equal or be a subdomain of a parent host.
+  repeated string allowed_domains = 4;
+
+  // Why the run grant is derived. Only "ai_run" is accepted today.
+  string purpose = 5;
+
+  // Requested lifetime in seconds; 0 uses the broker default. The expiry is
+  // never later than the parent's.
+  int32 ttl_seconds = 6;
+}
+
+message DeriveRunGrantResponse {
+  string grant_id = 1;
+  string endpoint = 2;
+  google.protobuf.Timestamp expires_at = 3;
+  // Canonical hosts of the run grant.
+  repeated string allowed_domains = 4;
+  string parent_grant_id = 5;
+  // Always "run".
+  string kind = 6;
+  // Inherited from the parent; never lower than the parent's.
+  bool zdr = 7;
 }

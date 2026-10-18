@@ -40,6 +40,7 @@ func main() {
 		"grant_ttl_seconds", int(cfg.TTL.Seconds()),
 		"max_session_domains", cfg.MaxSessionDomains,
 		"max_active_grants_per_owner", cfg.MaxActivePerOwner,
+		"max_run_domains", cfg.MaxRunDomains,
 	)
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
