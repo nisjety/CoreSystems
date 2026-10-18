@@ -245,6 +245,14 @@ services:
       # routed here, and the listener stays open for resume and stop. Keep
       # stop_grace_period above this plus about 10 s.
       MODEL_GATEWAY_DRAIN_SECS: ${MODEL_GATEWAY_DRAIN_SECS:-120}
+      # Build plan WS03 S3: the same switch execution-core reads. With it on, the
+      # gateway serves `POST /v1/orchestration/runs/{run_id}/continue` for a granted
+      # loop-owned approval; with it off, that route answers 409 continue_disabled.
+      # The two services must agree: a gateway that is on while execution-core is
+      # off would accept a continue for an approval nothing minted as loop-owned,
+      # and the reverse mints loop-owned approvals nothing can continue. OFF by
+      # default; flip it on both services together.
+      AGENT_CONTINUE_AFTER_APPROVAL_ENABLED: ${AGENT_CONTINUE_AFTER_APPROVAL_ENABLED:-false}
       # Kill-switches for the review-latency levers. Empty keeps a lever ON;
       # 0/off/false/no/disabled turns it off at the next restart, no rebuild.
       MODEL_GATEWAY_SOLE_NOTE_PREFETCH: ${MODEL_GATEWAY_SOLE_NOTE_PREFETCH:-}

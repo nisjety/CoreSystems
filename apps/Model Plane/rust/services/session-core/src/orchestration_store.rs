@@ -929,11 +929,14 @@ pub async fn consume_approval(
         }));
     }
     // Not consumed by this call: say why, from the row as it is now.
-    let row: Option<(String, String, Option<DateTime<Utc>>, Option<String>, bool, bool)> =
+    let row: Option<(String, String, Option<DateTime<Utc>>, Option<String>, bool, bool, bool)> =
         sqlx::query_as(
             "SELECT a.status, a.continuation_mode, a.consumed_at, a.consumed_claim_hash, \
                     (a.expires_at IS NOT NULL AND a.expires_at <= now()), \
-                    EXISTS (SELECT 1 FROM approval_continuation_descriptors d WHERE d.approval_id = a.id) \
+                    EXISTS (SELECT 1 FROM approval_continuation_descriptors d WHERE d.approval_id = a.id), \
+                    EXISTS (SELECT 1 FROM runs r WHERE r.id = a.run_id AND r.org_id = a.org_id \
+                              AND r.retention_class = 'persistent' \
+                              AND r.status NOT IN ('completed', 'failed', 'cancelled')) \
              FROM approvals a \
              WHERE a.id = $1 AND a.org_id = $2 AND a.run_id = $3 AND a.user_id = $4",
         )
@@ -943,11 +946,17 @@ pub async fn consume_approval(
         .bind(user_id)
         .fetch_optional(&mut *transaction)
         .await?;
-    let Some((status, mode, consumed_at, stored_hash, expired, has_descriptor)) = row else {
+    let Some((status, mode, consumed_at, stored_hash, expired, has_descriptor, run_keeps_state)) =
+        row
+    else {
         transaction.commit().await?;
         return Ok(Err(ConsumeRefusal::NotFound));
     };
-    if mode.is_empty() {
+    // A run that keeps no state (zero retention or waived) or that already ended
+    // has no continuation to hand out: the answer is the same as for an approval
+    // that is not loop-owned, so it discloses nothing about the run. This also
+    // withholds the retained call from a replay on an ended run.
+    if mode.is_empty() || !run_keeps_state {
         transaction.commit().await?;
         return Ok(Err(ConsumeRefusal::NotFound));
     }
@@ -983,9 +992,18 @@ pub async fn consume_approval(
     Ok(Err(ConsumeRefusal::NotFound))
 }
 
+// The run must keep state (`retention_class = 'persistent'`: a zero-retention run
+// and a waived run both keep none) and must not have ended. This is the database
+// side of `mp_contracts::durable_gate::refuse_unless_persistent_class`; the caller's
+// token is checked before this runs, but the stored class is what the run actually
+// is, and a waived token has `zdr = false`.
 const CONSUME_APPROVAL_SQL: &str = "UPDATE approvals AS a \
      SET consumed_at = now(), consumed_claim_hash = $6 \
+     FROM runs AS r \
      WHERE a.id = $1 AND a.org_id = $2 AND a.run_id = $3 AND a.user_id = $4 \
+       AND r.id = a.run_id AND r.org_id = a.org_id \
+       AND r.retention_class = 'persistent' \
+       AND r.status NOT IN ('completed', 'failed', 'cancelled') \
        AND a.status = 'granted' AND a.continuation_mode <> '' AND a.consumed_at IS NULL \
        AND (a.expires_at IS NULL OR a.expires_at > now()) \
        AND EXISTS (SELECT 1 FROM approval_continuation_descriptors d \
@@ -1942,6 +1960,33 @@ mod approval_consume_db_tests {
         Seed { run_id, org, user }
     }
 
+    /// [`seed_run`] with an explicit retention class. A waived run must name its
+    /// acknowledgement and connection, and no other class may (a table CHECK).
+    async fn seed_run_of_class(pool: &Pool, tag: &str, class: &str) -> Seed {
+        let sfx = mp_ids::new_ulid();
+        let (thread_id, run_id, org, user) = (
+            format!("ac-t-{tag}-{sfx}"),
+            format!("ac-r-{tag}-{sfx}"),
+            format!("ac-org-{sfx}"),
+            "u1".to_owned(),
+        );
+        sqlx::query("INSERT INTO threads (id,session_key,org_id,user_id) VALUES ($1,$1,$2,$3)")
+            .bind(&thread_id).bind(&org).bind(&user).execute(pool).await.expect("seed thread");
+        let (ack, connection) = if class == "zdr_waived" {
+            (Some("ack-1"), Some("conn-1"))
+        } else {
+            (None, None)
+        };
+        sqlx::query(
+            "INSERT INTO runs (id,thread_id,goal,org_id,user_id,retention_class,waiver_ack_id,waiver_connection_id) \
+             VALUES ($1,$2,'g',$3,$4,$5,$6,$7)",
+        )
+        .bind(&run_id).bind(&thread_id).bind(&org).bind(&user)
+        .bind(class).bind(ack).bind(connection)
+        .execute(pool).await.expect("seed run");
+        Seed { run_id, org, user }
+    }
+
     async fn approval(pool: &Pool, seed: &Seed, mode: &str) -> String {
         let id = format!("appr_{}", mp_ids::new_ulid());
         let descriptor = serde_json::json!({
@@ -2155,5 +2200,116 @@ mod approval_consume_db_tests {
         );
         assert!(consume_approval(&pool, &id, &seed.org, &seed.run_id, &seed.user, "", "c")
             .await.unwrap().unwrap().consumed);
+    }
+
+    async fn consumed_at_of(pool: &Pool, id: &str) -> Option<DateTime<Utc>> {
+        let (consumed_at,): (Option<DateTime<Utc>>,) =
+            sqlx::query_as("SELECT consumed_at FROM approvals WHERE id = $1")
+                .bind(id)
+                .fetch_one(pool)
+                .await
+                .expect("read consumed_at");
+        consumed_at
+    }
+
+    /// A loop approval of a run that keeps no state is never consumed, whatever the
+    /// caller's token said. A waived run's token has `zdr = false`, so only the
+    /// stored class tells it apart; a zero-retention run is the other class that
+    /// keeps nothing. The refusal is the same as for a cold approval (not found),
+    /// the approval stays unconsumed, and a persistent run's approval still works.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a scratch Postgres"]
+    async fn approval_consume_refuses_a_waived_run_and_a_zdr_run() {
+        let Some(pool) = scratch_pool().await else { return };
+        for class in ["zdr_waived", "zdr"] {
+            let seed = seed_run_of_class(&pool, class, class).await;
+            let id = approval(&pool, &seed, "loop").await;
+            grant(&pool, &seed, &id).await;
+            assert_eq!(
+                consume_approval(&pool, &id, &seed.org, &seed.run_id, &seed.user, "", "claim-a")
+                    .await
+                    .unwrap(),
+                Err(ConsumeRefusal::NotFound),
+                "{class}: a run that keeps no state has nothing to continue"
+            );
+            // With a fingerprint too: the class is checked before the descriptor is.
+            assert_eq!(
+                consume_approval(&pool, &id, &seed.org, &seed.run_id, &seed.user, FINGERPRINT, "claim-a")
+                    .await
+                    .unwrap(),
+                Err(ConsumeRefusal::NotFound),
+                "{class}: the refusal does not depend on the fingerprint"
+            );
+            assert!(consumed_at_of(&pool, &id).await.is_none(), "{class}: nothing was spent");
+        }
+
+        // The control: the same approval on a persistent run is consumed.
+        let seed = seed_run_of_class(&pool, "persistent", "persistent").await;
+        let id = approval(&pool, &seed, "loop").await;
+        grant(&pool, &seed, &id).await;
+        assert!(
+            consume_approval(&pool, &id, &seed.org, &seed.run_id, &seed.user, "", "claim-a")
+                .await
+                .unwrap()
+                .unwrap()
+                .consumed
+        );
+    }
+
+    /// A run that ended cannot take a consume: the continuation would run work on a
+    /// run whose terminal receipt is already written. A run that is merely waiting
+    /// (any state not in the ended set) still can.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a scratch Postgres"]
+    async fn consume_refuses_a_terminal_run() {
+        let Some(pool) = scratch_pool().await else { return };
+        let seed = seed_run(&pool, "terminal").await;
+        let live = approval(&pool, &seed, "loop").await;
+        let late = approval(&pool, &seed, "loop").await;
+        grant(&pool, &seed, &live).await;
+        grant(&pool, &seed, &late).await;
+
+        // Seeds a status in a scratch database. It is not a terminal write of the
+        // product (no fold exists here to purge), and it is written so that the
+        // `every_run_status_write_outside_the_fold_module_is_paired_with_a_purge`
+        // tripwire, which counts production writers, does not count it.
+        sqlx::query("UPDATE runs SET updated_at = now(), status = 'awaiting_approval' WHERE id = $1")
+            .bind(&seed.run_id)
+            .execute(&pool)
+            .await
+            .expect("pause the run");
+        assert!(
+            consume_approval(&pool, &live, &seed.org, &seed.run_id, &seed.user, "", "claim-a")
+                .await
+                .unwrap()
+                .unwrap()
+                .consumed,
+            "a run waiting for its approval is the one that continues"
+        );
+
+        for ended in ["completed", "failed", "cancelled"] {
+            sqlx::query("UPDATE runs SET ended_at = now(), status = $2 WHERE id = $1")
+                .bind(&seed.run_id)
+                .bind(ended)
+                .execute(&pool)
+                .await
+                .expect("end the run");
+            assert_eq!(
+                consume_approval(&pool, &late, &seed.org, &seed.run_id, &seed.user, "", "claim-b")
+                    .await
+                    .unwrap(),
+                Err(ConsumeRefusal::NotFound),
+                "{ended}: an ended run takes no consume"
+            );
+            // The earlier claim's replay does not get the retained call back either.
+            assert_eq!(
+                consume_approval(&pool, &live, &seed.org, &seed.run_id, &seed.user, "", "claim-a")
+                    .await
+                    .unwrap(),
+                Err(ConsumeRefusal::NotFound),
+                "{ended}: a replay on an ended run is not handed the call"
+            );
+        }
+        assert!(consumed_at_of(&pool, &late).await.is_none(), "nothing was spent on the ended run");
     }
 }

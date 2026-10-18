@@ -835,6 +835,10 @@ mod tests {
             ("http_routes.rs", "update_todo_status"),
             ("http_routes.rs", "decide_approval"),
             ("http_routes.rs", "resume_run"),
+            // `/continue` consumes a granted approval and starts a segment of a stored
+            // run (build plan WS03 S3): the same continuation gate, then a stricter
+            // persistent-only check of its own in `continue_preflight`.
+            ("sse.rs", "continue_run"),
             ("http_routes.rs", "cancel_run"),
             ("http_routes.rs", "ingest_feedback"),
         ];

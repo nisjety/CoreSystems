@@ -13354,18 +13354,42 @@ pub(crate) struct ContinueRunRequest {
     pub claim_token: String,
 }
 
+/// The two checks that need nothing but the switch and the caller's credential, so
+/// they can run before the run, the approval or any upstream is read: the route is
+/// on, and the turn keeps state. A waived or ZDR turn is refused here with the same
+/// `not_resumable` a finished run gets. It is its own function so the early refusal
+/// in [`continue_run`] and the pure [`continue_preflight`] cannot disagree.
+fn continue_turn_gate(enabled: bool, persistent: bool) -> Result<(), (StatusCode, &'static str)> {
+    if !enabled {
+        return Err((StatusCode::CONFLICT, "continue_disabled"));
+    }
+    if !persistent {
+        return Err((StatusCode::CONFLICT, "not_resumable"));
+    }
+    Ok(())
+}
+
 /// The checks a continuation makes before any work starts, as a pure function so
 /// each refusal is testable. Returns the status and the closed code.
+///
+/// `approval_consumed` is the approval's `consumed_at`: every consumed approval is
+/// refused, for every caller. That includes a retry with the same claim token. A
+/// same-claim replay on stage 1 can run the approved call again when the effect
+/// ledger is off, so a retry is not a recovery path; what recovers a continuation
+/// that died after its consume is the park window or an unknown-outcome closer.
+/// This read is not the only guard: two concurrent continues can both pass it, so
+/// the executor also refuses a same-claim replay unless the effect ledger fences it.
+/// `persistent` is [`continue_turn_is_persistent`].
 fn continue_preflight(
     enabled: bool,
     run_status: &str,
     approval_matches_run: bool,
     approval_granted: bool,
     continuation_mode: &str,
+    approval_consumed: bool,
+    persistent: bool,
 ) -> Result<(), (StatusCode, &'static str)> {
-    if !enabled {
-        return Err((StatusCode::CONFLICT, "continue_disabled"));
-    }
+    continue_turn_gate(enabled, persistent)?;
     if matches!(run_status, "completed" | "failed" | "cancelled") {
         return Err((StatusCode::CONFLICT, "not_resumable"));
     }
@@ -13375,10 +13399,26 @@ fn continue_preflight(
     if !approval_granted {
         return Err((StatusCode::CONFLICT, "approval_not_granted"));
     }
+    if approval_consumed {
+        return Err((StatusCode::CONFLICT, "continuation_already_consumed"));
+    }
     if continuation_mode != "loop" {
         return Err((StatusCode::CONFLICT, "not_resumable"));
     }
     Ok(())
+}
+
+/// Whether a `/continue` caller is a persistent turn: not ZDR, not waived, and a
+/// credential the resolver accepts. A waiver is an exception for one connection's
+/// inference and nothing else, so a waived run keeps no fold and its approval is
+/// never consumed. [`crate::zdr_posture::continuation_gate`] lets a waiver
+/// through because a cold approval's decision must still work, so the stricter
+/// answer lives here, at the one route that consumes an approval.
+fn continue_turn_is_persistent(claims: &Claims) -> bool {
+    matches!(
+        crate::zdr_posture::decide_for(claims, &crate::zdr_posture::Route::plain(false)),
+        Ok(crate::zdr_posture::TurnPosture::Persistent)
+    )
 }
 
 fn continue_error(status: StatusCode, code: &str) -> (StatusCode, Json<Value>) {
@@ -13407,6 +13447,15 @@ pub(crate) async fn continue_run(
     axum::Json(req): axum::Json<ContinueRunRequest>,
 ) -> Result<Sse<ReceiverStream<Result<Event, Infallible>>>, (StatusCode, Json<Value>)> {
     crate::zdr_posture::continuation_gate(&claims)?;
+    // A waived or ZDR turn is refused before the body, the run or the approval is
+    // read: `continuation_gate` above lets a waiver through (a cold approval's
+    // decision must still work), but a waived run keeps no state to continue.
+    // Only with the switch on: with it off the route answers exactly as it always
+    // did (`continue_preflight` says `continue_disabled`, after the owner checks).
+    if mp_contracts::loop_fold::continue_after_approval_enabled() {
+        continue_turn_gate(true, continue_turn_is_persistent(&claims))
+            .map_err(|(status, code)| continue_error(status, code))?;
+    }
     if req.approval_id.trim().is_empty() || req.claim_token.trim().is_empty() {
         return Err(continue_error(StatusCode::BAD_REQUEST, "continue_incomplete"));
     }
@@ -13455,13 +13504,14 @@ pub(crate) async fn continue_run(
         .into_inner()
         .approval;
     let granted = mp_contracts::model_plane::v1::ApprovalState::Granted as i32;
-    let (matches_run, is_granted, mode) = match approval.as_ref() {
+    let (matches_run, is_granted, mode, consumed) = match approval.as_ref() {
         Some(approval) => (
             approval.run_id == run_id,
             approval.state == granted,
             approval.continuation_mode.clone(),
+            approval.consumed_at.is_some(),
         ),
-        None => (false, false, String::new()),
+        None => (false, false, String::new(), false),
     };
     continue_preflight(
         mp_contracts::loop_fold::continue_after_approval_enabled(),
@@ -13469,6 +13519,8 @@ pub(crate) async fn continue_run(
         matches_run,
         is_granted,
         &mode,
+        consumed,
+        continue_turn_is_persistent(&claims),
     )
     .map_err(|(status, code)| continue_error(status, code))?;
 
@@ -13487,7 +13539,10 @@ pub(crate) async fn continue_run(
         claim_token: req.claim_token,
         // The brief is not client-authored (see ContinueRunRequest); empty for now.
         brief: String::new(),
-        segment_no: 2,
+        // The executor derives the segment number from the step that paused (a
+        // literal here gave every continuation of one run the same step ids). It
+        // ignores this field; 0 says so.
+        segment_no: 0,
         ..Default::default()
     };
     Ok(agentic_run_stream(
@@ -13520,11 +13575,47 @@ pub(crate) async fn continue_run(
 #[cfg(test)]
 mod continue_run_tests {
     use super::*;
+    use mp_contracts::agentic_subscription::PROVIDER_ID;
+
+    /// A user token as Auth Core mints it, decoded by the same serde path the middleware uses.
+    fn token(zdr: bool, org_zdr: Option<bool>, waiver: Option<Value>) -> Claims {
+        let mut payload = json!({
+            "sub": "user-1",
+            "iss": "https://auth.test/model",
+            "aud": "model-gateway",
+            "exp": 4_102_444_800_i64,
+            "nbf": 1_700_000_000_i64,
+            "org_id": "org-1",
+            "user_id": "user-1",
+            "principal_type": "user",
+            "zdr": zdr,
+        });
+        if let Some(org_zdr) = org_zdr {
+            payload["org_zdr"] = json!(org_zdr);
+        }
+        if let Some(waiver) = waiver {
+            payload["zdr_waiver"] = waiver;
+        }
+        serde_json::from_value(payload).expect("a minted token's payload is valid Claims")
+    }
+
+    /// The checks with every other input fine: the one under test is the argument that varies.
+    fn preflight(
+        enabled: bool,
+        run_status: &str,
+        matches_run: bool,
+        granted: bool,
+        mode: &str,
+        consumed: bool,
+        persistent: bool,
+    ) -> Result<(), (StatusCode, &'static str)> {
+        continue_preflight(enabled, run_status, matches_run, granted, mode, consumed, persistent)
+    }
 
     #[test]
     fn a_continuation_is_refused_while_the_switch_is_off() {
         assert_eq!(
-            continue_preflight(false, "running", true, true, "loop"),
+            preflight(false, "running", true, true, "loop", false, true),
             Err((StatusCode::CONFLICT, "continue_disabled"))
         );
     }
@@ -13533,7 +13624,7 @@ mod continue_run_tests {
     fn a_finished_run_is_not_resumable() {
         for status in ["completed", "failed", "cancelled"] {
             assert_eq!(
-                continue_preflight(true, status, true, true, "loop"),
+                preflight(true, status, true, true, "loop", false, true),
                 Err((StatusCode::CONFLICT, "not_resumable")),
                 "{status}"
             );
@@ -13543,18 +13634,107 @@ mod continue_run_tests {
     #[test]
     fn only_a_granted_loop_approval_of_this_run_continues() {
         assert_eq!(
-            continue_preflight(true, "running", false, true, "loop"),
+            preflight(true, "running", false, true, "loop", false, true),
             Err((StatusCode::NOT_FOUND, "approval_not_found"))
         );
         assert_eq!(
-            continue_preflight(true, "running", true, false, "loop"),
+            preflight(true, "running", true, false, "loop", false, true),
             Err((StatusCode::CONFLICT, "approval_not_granted"))
         );
         assert_eq!(
-            continue_preflight(true, "running", true, true, ""),
+            preflight(true, "running", true, true, "", false, true),
             Err((StatusCode::CONFLICT, "not_resumable")),
             "a cold approval belongs to the delivery worker"
         );
-        assert_eq!(continue_preflight(true, "running", true, true, "loop"), Ok(()));
+        assert_eq!(
+            preflight(true, "running", true, true, "loop", false, true),
+            Ok(())
+        );
+    }
+
+    /// Every consumed approval is refused at the gateway, for every caller: a
+    /// second `/continue` with another claim, and a retry with the same one. A
+    /// same-claim replay on stage 1 can run the call again when the ledger is off,
+    /// so the retry is not a recovery path; the recovery of a crash after the
+    /// consume is the park window or an unknown outcome.
+    #[test]
+    fn a_consumed_approval_is_refused_with_409() {
+        assert_eq!(
+            preflight(true, "running", true, true, "loop", true, true),
+            Err((StatusCode::CONFLICT, "continuation_already_consumed"))
+        );
+        // Not a not-found or a not-granted: those still say what they always said.
+        assert_eq!(
+            preflight(true, "running", false, true, "loop", true, true),
+            Err((StatusCode::NOT_FOUND, "approval_not_found"))
+        );
+        assert_eq!(
+            preflight(true, "running", true, false, "loop", true, true),
+            Err((StatusCode::CONFLICT, "approval_not_granted"))
+        );
+    }
+
+    /// A waived or ZDR turn keeps no durable state, so it is refused before any
+    /// lookup or upstream call. The shared `continuation_gate` lets a waiver
+    /// through (a cold approval's decision must still work), so this check lives
+    /// here and nowhere else.
+    #[test]
+    fn a_non_persistent_turn_is_refused_before_any_work() {
+        assert_eq!(
+            preflight(true, "running", true, true, "loop", false, false),
+            Err((StatusCode::CONFLICT, "not_resumable"))
+        );
+        // Refused before the run, the approval or its state is read: even an
+        // approval that does not exist is not looked up for such a turn.
+        assert_eq!(
+            preflight(true, "running", false, false, "", false, false),
+            Err((StatusCode::CONFLICT, "not_resumable"))
+        );
+        // The switch off still answers first: nothing else is said about a disabled route.
+        assert_eq!(
+            preflight(false, "running", true, true, "loop", false, false),
+            Err((StatusCode::CONFLICT, "continue_disabled"))
+        );
+    }
+
+    #[test]
+    fn only_a_persistent_credential_is_a_persistent_continue_turn() {
+        let persistent = token(false, Some(false), None);
+        assert!(continue_turn_is_persistent(&persistent));
+        assert!(
+            continue_turn_is_persistent(&token(false, None, None)),
+            "a token that states no org posture is an ordinary persistent one"
+        );
+        let waived = token(
+            false,
+            Some(true),
+            Some(json!({"version": 1, "provider": PROVIDER_ID, "connection": "conn-1"})),
+        );
+        assert!(
+            !continue_turn_is_persistent(&waived),
+            "a waiver is for one connection's inference, not for a durable continuation"
+        );
+        assert!(!continue_turn_is_persistent(&token(true, Some(true), None)));
+        // A credential the resolver refuses is not persistent either.
+        assert!(!continue_turn_is_persistent(&token(false, Some(true), None)));
+    }
+
+    /// The segment number is the executor's to derive from the step that paused.
+    /// The gateway sends 0, never a literal: the old literal 2 gave every
+    /// continuation of one run the same step prefix.
+    #[test]
+    fn the_gateway_leaves_the_segment_number_to_the_executor() {
+        let source = include_str!("sse.rs");
+        let body = source
+            .split("pub(crate) async fn continue_run(")
+            .nth(1)
+            .and_then(|rest| rest.split("
+#[cfg(test)]").next())
+            .expect("continue_run is in this file");
+        assert!(
+            body.contains("segment_no: 0,"),
+            "continue_run must send segment_no 0"
+        );
+        assert!(!body.contains("segment_no: 2"), "no segment_no literal 2");
     }
 }
