@@ -162,6 +162,22 @@ jobs:
       # the workspace Cargo.toml) so local `cargo test` still gets full
       # debug info for developers.
       CARGO_PROFILE_TEST_DEBUG: "0"
+    # The page-cache and ZDR cache gates need a live Redis. The gate step below
+    # runs them against this service with REQUIRE_CONTRACT=1, so an unreachable
+    # Redis fails the job instead of skipping. The service is published on host
+    # port 6380 rather than the default 6379: the default address that the
+    # workspace tests fall back to stays unused, so `Test workspace` behaves as
+    # before (the cache cases skip there and the gate step asserts them).
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6380:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
     steps:
       - uses: actions/checkout@v7
 
@@ -203,6 +219,16 @@ jobs:
 
       - name: Test workspace
         run: cargo test --workspace
+
+      - name: Page-cache and ZDR cache gates (Redis)
+        # cache_policy.rs (9 cases) and the Redis case of zdr_claim_floor.rs skip
+        # when no Redis answers, so the step above passes without asserting them.
+        # This step runs both binaries against the service above. With
+        # REQUIRE_CONTRACT=1 an unreachable Redis is a failure, not a skip.
+        env:
+          REDIS_URL: redis://127.0.0.1:6380
+          REQUIRE_CONTRACT: "1"
+        run: cargo test -p quarry-edge --test cache_policy --test zdr_claim_floor
 
       # The scrape options schema is a golden generated from the Rust type, and
       # the OpenAPI file is checked against it and against the routes the edge
