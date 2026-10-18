@@ -8,6 +8,9 @@
 //! `#[path = "support/zdr_harness.rs"] mod zdr_harness;` so `support/mod.rs`
 //! is not edited.
 
+// Each test binary compiles this module and uses a different part of it.
+#![allow(dead_code)]
+
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -127,6 +130,11 @@ pub fn user_in_standard_org() -> String {
     token("user_in_standard_org")
 }
 
+/// Any case of the golden: `service_model_gateway`, `service_execution_core`, ...
+pub fn golden_token(case: &str) -> String {
+    token(case)
+}
+
 #[derive(Default)]
 pub struct RecordingMeter {
     pub events: Mutex<Vec<UsageEvent>>,
@@ -198,6 +206,12 @@ pub struct Harness {
 
 impl Harness {
     pub async fn start() -> Self {
+        Self::start_with(|state| state).await
+    }
+
+    /// The same edge as [`Harness::start`], with `configure` applied to its state:
+    /// a control-plane or Model Plane double, for example.
+    pub async fn start_with(configure: impl FnOnce(AppState) -> AppState) -> Self {
         fixture();
 
         let (tx, mut rx) = mpsc::channel::<quarry_core::event::Event>(1024);
@@ -207,9 +221,13 @@ impl Harness {
         let state = AppState {
             usage: usage.clone(),
             search: Some(Arc::new(FailingSearch)),
+            // The agent routes refuse to start without a driver that proves
+            // isolated egress; the guard-only double proves it and launches nothing.
+            #[cfg(feature = "browser-agent")]
+            agent_driver: crate::support::governed_agent_driver(),
             ..crate::support::base_state(Arc::new(EchoDriver), EventSink::new(tx))
         };
-        let app = quarry_edge::routes::router(state);
+        let app = quarry_edge::routes::router(configure(state));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
@@ -232,4 +250,48 @@ impl Harness {
             .await
             .expect("request reaches the edge")
     }
+
+    /// `GET` with the same bearer handling as [`Harness::post`]. A query string
+    /// goes in `route`.
+    pub async fn get(&self, bearer: &str, route: &str) -> reqwest::Response {
+        self.client
+            .get(format!("http://{}{route}", self.addr))
+            .bearer_auth(bearer)
+            .send()
+            .await
+            .expect("request reaches the edge")
+    }
+}
+
+/// Control Plane as the edge sees it for the routes the ZDR matrix classifies as
+/// durable: the crawl and batch handoff (`POST /v1/jobs`) and the schedule create
+/// (`POST /v1/schedules`). wiremock records every request it receives, so a test
+/// can assert that a refused request never reached it.
+pub async fn control_plane_double() -> MockServer {
+    let control = MockServer::start().await;
+    for route in ["/v1/jobs", "/v1/schedules"] {
+        Mock::given(method("POST"))
+            .and(path(route))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(json!({ "data": { "id": "matrix_probe" } })),
+            )
+            .mount(&control)
+            .await;
+    }
+    control
+}
+
+/// Model Plane's `POST /v1/invoke`, answering with `content` as the model's reply.
+pub async fn model_plane_double(content: &str) -> MockServer {
+    let model_plane = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/invoke"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "request_id": "req_matrix_probe",
+            "content": content,
+            "model_used": "matrix-probe-model"
+        })))
+        .mount(&model_plane)
+        .await;
+    model_plane
 }
