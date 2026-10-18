@@ -202,3 +202,63 @@ fn the_isolation_setting_defaults_to_a_child_on_unix_and_can_be_turned_off() {
     assert_eq!(ParseBackend::from_setting(None, missing).label(), "inprocess");
 }
 
+/// A DOCX (a zip) whose `word/document.xml` is `document`, deflated.
+fn docx_with_document(document: &[u8]) -> Vec<u8> {
+    let mut buf = Vec::new();
+    {
+        let mut zip = zip::ZipWriter::new(std::io::Cursor::new(&mut buf));
+        let options: zip::write::FileOptions<'_, ()> =
+            zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+        zip.start_file("word/document.xml", options).unwrap();
+        zip.write_all(document).unwrap();
+        zip.finish().unwrap();
+    }
+    buf
+}
+
+#[tokio::test]
+async fn a_docx_bomb_is_a_typed_415_and_the_next_document_still_parses() {
+    // 40 MiB of text inside word/document.xml: a few tens of kilobytes deflated. The
+    // DOCX parser caps word/document.xml at 32 MiB (docx::extract_text), which the
+    // child reaches long before its address-space limit, so the answer is the cap
+    // error mapped to too_large. A child killed by its own limits would instead give
+    // docx_parse_failed with limit parser_stopped.
+    let mut document = b"<w:document><w:body><w:p><w:r><w:t>".to_vec();
+    document.resize(40 * 1024 * 1024, b'a');
+    let bomb = docx_with_document(&document);
+    assert!(bomb.len() < 512 * 1024, "the bomb is small: {}", bomb.len());
+
+    let started = Instant::now();
+    let error = parse_document_with(
+        &child_backend(ChildLimits::default()),
+        ContentKind::Docx,
+        bomb,
+        Duration::from_secs(15),
+    )
+    .await
+    .expect_err("the bomb must not parse");
+    assert_eq!(error.code, ErrorCode::UnsupportedMedia, "{error:?}");
+    let reason = error.details.as_ref().unwrap()["reason"]
+        .as_str()
+        .unwrap_or_default();
+    assert_eq!(reason, "too_large", "{error:?}");
+    assert!(
+        started.elapsed() < Duration::from_secs(10),
+        "stopped by a cap, not by the deadline: {:?}",
+        started.elapsed()
+    );
+
+    // The service is fine afterwards: the next document parses.
+    let normal = docx_with_document(
+        b"<w:document><w:body><w:p><w:r><w:t>Etter bomben</w:t></w:r></w:p></w:body></w:document>",
+    );
+    let after = parse_document_with(
+        &child_backend(ChildLimits::default()),
+        ContentKind::Docx,
+        normal,
+        Duration::from_secs(15),
+    )
+    .await
+    .expect("a normal document still parses");
+    assert_eq!(after.text, "Etter bomben");
+}
