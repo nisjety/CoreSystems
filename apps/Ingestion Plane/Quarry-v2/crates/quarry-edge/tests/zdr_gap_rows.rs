@@ -11,7 +11,7 @@
 //! this harness cannot reach the write a gap is about (it wires no baseline store
 //! under any feature set), the test says so and pins what it can.
 //!
-//! Each `gap_rows_currently_violate_*` test except `..._change_record_internal` is a
+//! Each `gap_rows_currently_violate_*` test except the change_record_internal one is a
 //! snapshot of a violation and must be INVERTED when WS4.H lands (gated on ADR-4).
 //! Then the ZDR organization's request is refused (`details.zdr_refusal.code ==
 //! "zdr_durable_mutation_forbidden"` for the durable writes) and the refused request
@@ -256,9 +256,10 @@ const INTERNAL_TOKEN: &str = "matrix-probe-internal-token";
 ///
 /// Not an inversion target: no test in this binary fails if the row's warning (the
 /// baseline is still stored) stops being true. The WS4.H test must wire a baseline
-/// store under postgres-queue, which this binary cannot do.
+/// store under postgres-queue, which this binary cannot do. The test measures no
+/// violation, so its name does not use the `gap_rows_currently_violate_*` form.
 #[tokio::test]
-async fn gap_rows_currently_violate_change_record_internal() {
+async fn change_record_internal_pins_the_token_check_and_the_501() {
     std::env::set_var("QUARRY_EDGE_INTERNAL_TOKEN", INTERNAL_TOKEN);
     let harness = Harness::start().await;
     let record = |zdr: Option<bool>| {
