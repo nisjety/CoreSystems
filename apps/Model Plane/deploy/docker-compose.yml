@@ -1052,6 +1052,15 @@ services:
       # before it runs and finalized after, and a call that cannot be reserved is not
       # run. OFF by default. Needs session-core's migration 0048.
       EXECUTION_EFFECT_LEDGER_ENABLED: ${EXECUTION_EFFECT_LEDGER_ENABLED:-false}
+      # Durable loop fold writer (WS03 S6): the Do loop saves its history, counters and
+      # open tool round to session-core at the end of a round, before an effectful call
+      # and before a pause for approval. OFF by default; with it off the loop makes no
+      # call and behaves exactly as before. Only the literal `true` turns it on. Needs
+      # EXECUTION_EFFECT_LEDGER_ENABLED (a fold without ledger rows cannot be
+      # reconciled; otherwise it logs once and writes nothing) AND session-core's
+      # SESSION_CORE_LOOP_CHECKPOINT_ENABLED (otherwise the first save is refused and
+      # the writer turns itself off). Turn session-core on first, execution-core second.
+      EXECUTION_LOOP_CHECKPOINT_ENABLED: ${EXECUTION_LOOP_CHECKPOINT_ENABLED:-false}
       # Autonomous tool-using runs route through Azure's model-router deployment,
       # which selects the best model per turn (tool-calling model selection is
       # handled by the router, cost-aware). Overridable per deployment; empty →

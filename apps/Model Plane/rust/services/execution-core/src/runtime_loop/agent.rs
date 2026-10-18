@@ -1292,6 +1292,34 @@ async fn run_rounds(
     // RunAgentResponse can report real grounding instead of a guess.
     let mut grounded = false;
 
+    // The durable loop's fold (build plan WS03 S6). Off unless the switch, the effect
+    // ledger and a persistent root run all allow it: then this is a pure value, no
+    // call is made, and every later use below returns at its first line. The fold is
+    // built from the locals above and below at three save points, so KEEP IN SYNC
+    // with `fold::Snapshot` when a loop-local is added.
+    let mut folds = runtime_loop::fold::FoldWriter::new(
+        ctx.session_channel,
+        ctx.session_bearer,
+        &req.run_id,
+        runtime_loop::fold::WriterGate {
+            switch: runtime_loop::fold::checkpoint_enabled(),
+            ledger: ctx.effect_ledger,
+            zdr,
+            waived: ctx.route.is_waived(),
+            space: !req.space_id.is_empty(),
+            depth: ctx.depth,
+            resumed: ctx.release.is_some(),
+        },
+    );
+    let fold_authority = folds.engaged().then(|| {
+        super::resume::offered_authority(req, ctx.permission_wire, &ctx.allowlist)
+    });
+    let fold_prompt_digest = if folds.engaged() {
+        runtime_loop::fold::prompt_digest_of(&compose_system_prompt(&ctx.allowlist), &ctx.tools)
+    } else {
+        String::new()
+    };
+
     // A delegated loop's rounds are charged against the SAME budget, so a parent
     // that delegates on every round cannot drive max_rounds² inference calls.
     while rounds_executed + delegated_rounds < max_rounds {
@@ -1899,6 +1927,96 @@ async fn run_rounds(
             slots.push(CallSlot::ToDispatch { call, step_id });
         }
 
+        // The durable loop's fold (WS03 S6): the round as the model asked for it, every
+        // call in its own order (a call rejected above took no step, so its step id is
+        // empty). Built only for a writer that is on; `slots` and the model's calls
+        // are parallel because every branch of the pre-pass pushes exactly one slot.
+        let round_calls = if folds.engaged() {
+            runtime_loop::fold::fold_calls(
+                &response.tool_calls,
+                slots.iter().map(|slot| match slot {
+                    CallSlot::ToDispatch { step_id, .. } => step_id.as_str(),
+                    CallSlot::Rejected(_) => "",
+                }),
+            )
+        } else {
+            Vec::new()
+        };
+        // An effectful call does not start unless the run's state is durable ahead of
+        // it: a resume reconciles the effect from this fold and the ledger row. When it
+        // cannot be saved, this round's effectful calls are held back (the read calls
+        // of the batch still run) and the next round tries again.
+        let effectful_calls = if folds.engaged() {
+            slots
+                .iter()
+                .filter(|slot| {
+                    matches!(slot, CallSlot::ToDispatch { call, .. }
+                        if runtime_loop::effect::effect_class_of(
+                            &call.name,
+                            &call.arguments_json,
+                        )
+                        .is_effectful())
+                })
+                .count()
+        } else {
+            0
+        };
+        let effects_held = match fold_authority.as_ref() {
+            Some(authority) if effectful_calls > 0 => {
+                let fold = runtime_loop::fold::build_fold(
+                    &runtime_loop::fold::Snapshot {
+                        run_id: &req.run_id,
+                        segment_no: 1,
+                        rounds_executed,
+                        delegated_rounds,
+                        step_seq,
+                        children_started: children_started
+                            .load(std::sync::atomic::Ordering::Relaxed),
+                        grounded,
+                        compaction_triggered,
+                        attempted_retrievals: &attempted_retrievals,
+                        messages: &messages,
+                        authority: authority.clone(),
+                        prompt_digest: &fold_prompt_digest,
+                        effect_ledger: ctx.effect_ledger,
+                    },
+                    Some(mp_contracts::loop_fold::RoundInFlight {
+                        assistant_content: response.content.clone(),
+                        calls: round_calls.clone(),
+                        // Nothing has been dispatched, but every call the pre-pass
+                        // refused already has its outcome. It is saved with the
+                        // round: a resume must not re-derive a refusal (a
+                        // truncated call depends on this response's stop reason,
+                        // which the fold does not carry) and must be able to tell
+                        // a refused call from one that was never dispatched.
+                        completed: runtime_loop::fold::fold_rejected(
+                            &round_calls,
+                            slots.iter().map(|slot| match slot {
+                                CallSlot::Rejected(result) => Some((
+                                    result.output.as_str(),
+                                    result.error.as_deref().unwrap_or(""),
+                                )),
+                                CallSlot::ToDispatch { .. } => None,
+                            }),
+                        ),
+                    }),
+                    None,
+                );
+                let held = folds.save_pre_effect(fold).await
+                    == runtime_loop::fold::PreEffect::Hold;
+                if held {
+                    runtime_loop::fold::note_effects_held(effectful_calls);
+                    warn!(
+                        run_id = %req.run_id,
+                        round = rounds_executed,
+                        "run_agent: the loop fold could not be saved ahead of this round's effectful calls; they are held back"
+                    );
+                }
+                held
+            }
+            _ => false,
+        };
+
         // Phase 2: concurrent dispatch. One shared budget pool for every
         // delegation-capable call in this batch — see `LoopSubagentDispatch`.
         let batch_budget = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(
@@ -1987,6 +2105,22 @@ async fn run_rounds(
                     } else {
                         None
                     };
+                    // The run's state could not be saved ahead of this effect (WS03 S6):
+                    // nothing is reserved and nothing runs, exactly as for a reservation
+                    // that could not be recorded. The text names only the tool.
+                    if effects_held && ledger_entry.is_some() {
+                        warn!(
+                            run_id = %req.run_id,
+                            tool = %call.name,
+                            "run_agent: the call was held back: the loop fold was not saved ahead of it"
+                        );
+                        return Some(runtime_loop::StepOutcome {
+                            status: "failed".to_owned(),
+                            output: String::new(),
+                            error: runtime_loop::fold::held_back_text(&call.name),
+                            compaction_triggered: false,
+                        });
+                    }
                     if let Some(entry) = &ledger_entry {
                         match runtime_loop::effect::reserve(
                             ctx.session_channel,
@@ -2151,8 +2285,11 @@ async fn run_rounds(
         // Phase 3: sequential outcome processing, in original order.
         let mut outcomes = Vec::with_capacity(response.tool_calls.len());
         let mut pending_pause: Option<PendingPause> = None;
+        // Which call of the round the pause is on: the one call that pushes no outcome,
+        // so the fold can tell which outcome belongs to which call.
+        let mut paused_index: Option<usize> = None;
 
-        for (slot, outcome) in slots.into_iter().zip(outcomes_by_slot) {
+        for (index, (slot, outcome)) in slots.into_iter().zip(outcomes_by_slot).enumerate() {
             let (call, step_id, outcome) = match (slot, outcome) {
                 (CallSlot::Rejected(result), _) => {
                     outcomes.push(result);
@@ -2177,6 +2314,7 @@ async fn run_rounds(
                     // model can ask for it again once the run resumes, same as
                     // it would today with any call after the first pause.
                     if pending_pause.is_none() {
+                        paused_index = Some(index);
                         pending_pause = Some(PendingPause {
                             step_id,
                             name: call.name.clone(),
@@ -2290,6 +2428,49 @@ async fn run_rounds(
             } else {
                 None
             };
+            // The durable loop's fold for this pause (WS03 S6), only for an approval the
+            // loop will own. It is handed to `pause_for_approval`, which saves it after
+            // the descriptor exists and BEFORE the approval does, so a fast
+            // approve-and-continue can always claim it. The history is the one before
+            // this round (its results are appended below, after the pause returns), and
+            // the open round carries every call, every outcome except the paused call's.
+            let pause_fold = match fold_authority.as_ref() {
+                Some(authority) if offered.is_some() && folds.is_active() => {
+                    let completed = runtime_loop::fold::fold_completed(
+                        &round_calls,
+                        paused_index,
+                        outcomes
+                            .iter()
+                            .map(|o| (o.output.as_str(), o.error.as_deref().unwrap_or(""))),
+                    );
+                    let fold = runtime_loop::fold::build_fold(
+                        &runtime_loop::fold::Snapshot {
+                            run_id: &req.run_id,
+                            segment_no: 1,
+                            rounds_executed,
+                            delegated_rounds,
+                            step_seq,
+                            children_started: children_started
+                                .load(std::sync::atomic::Ordering::Relaxed),
+                            grounded,
+                            compaction_triggered,
+                            attempted_retrievals: &attempted_retrievals,
+                            messages: &messages,
+                            authority: authority.clone(),
+                            prompt_digest: &fold_prompt_digest,
+                            effect_ledger: ctx.effect_ledger,
+                        },
+                        Some(mp_contracts::loop_fold::RoundInFlight {
+                            assistant_content: response.content.clone(),
+                            calls: round_calls.clone(),
+                            completed,
+                        }),
+                        None,
+                    );
+                    folds.pause_fold(fold)
+                }
+                _ => None,
+            };
             let paused = pause_for_approval(
                 ctx.state,
                 ctx.session_channel,
@@ -2301,6 +2482,7 @@ async fn run_rounds(
                 rounds_executed.saturating_add(delegated_rounds),
                 ctx.session_bearer,
                 offered.as_ref(),
+                pause_fold,
             )
             .await?;
             return Ok(RoundsResult {
@@ -2328,6 +2510,31 @@ async fn run_rounds(
             content: format_tool_context(&outcomes),
             name: String::new(),
         });
+
+        // The durable loop's fold at the end of a round that ran tools (WS03 S6): best
+        // effort, never holds the loop. A round that ends in an answer saves nothing.
+        if let Some(authority) = fold_authority.as_ref().filter(|_| folds.is_active()) {
+            let fold = runtime_loop::fold::build_fold(
+                &runtime_loop::fold::Snapshot {
+                    run_id: &req.run_id,
+                    segment_no: 1,
+                    rounds_executed,
+                    delegated_rounds,
+                    step_seq,
+                    children_started: children_started.load(std::sync::atomic::Ordering::Relaxed),
+                    grounded,
+                    compaction_triggered,
+                    attempted_retrievals: &attempted_retrievals,
+                    messages: &messages,
+                    authority: authority.clone(),
+                    prompt_digest: &fold_prompt_digest,
+                    effect_ledger: ctx.effect_ledger,
+                },
+                None,
+                None,
+            );
+            folds.save_round(fold).await;
+        }
     }
 
     // A stopped run never reports an answer, whichever loop stopped it.
@@ -4684,6 +4891,10 @@ async fn pause_for_approval(
     rounds_executed: u32,
     bearer: Option<&str>,
     offered: Option<&serde_json::Value>,
+    // The durable loop's fold for this pause (WS03 S6), present only for a loop-owned
+    // approval whose writer is on. Saved below, after the descriptor and before the
+    // approval; closed again if the approval cannot be created.
+    mut pause_fold: Option<runtime_loop::fold::PauseFold<'_, '_>>,
 ) -> Result<pb::RunAgentResponse, tonic::Status> {
     let mut continuation_descriptor_json =
         continuation_descriptor(req, step_id, tool_name, tool_input, permission_mode).await?;
@@ -4703,6 +4914,21 @@ async fn pause_for_approval(
             ));
         }
     }
+    // The digest of the exact call, read back from the descriptor before it moves
+    // into the request: the pause fold records it so a resume refuses a swapped call.
+    let fold_fingerprint = if pause_fold.is_some() {
+        serde_json::from_str::<JsonValue>(&continuation_descriptor_json)
+            .ok()
+            .and_then(|descriptor| {
+                descriptor
+                    .get("action_fingerprint")
+                    .and_then(JsonValue::as_str)
+                    .map(str::to_owned)
+            })
+            .unwrap_or_default()
+    } else {
+        String::new()
+    };
     let request = authenticated_session_request(
         pb::CreateApprovalRequest {
             // Cold (the delivery worker) unless the durable-loop switch is on, the
@@ -4734,17 +4960,32 @@ async fn pause_for_approval(
         bearer,
     );
     let request = request?;
-    OrchestrationCoreServiceClient::new(session_channel.clone())
+    // The fold of this pause is durable BEFORE the approval is visible, so a fast
+    // approve-and-continue can always claim it. It is named by the approval's own
+    // idempotency key (`{run_id}:{step_id}`, set below), which exists before
+    // session-core mints the approval id. A pause is never refused for the fold's
+    // sake: if it cannot be saved the approval is still raised and `/continue` falls
+    // back to a fresh segment at claim time.
+    if let Some(fold) = pause_fold.as_mut() {
+        if !fold_fingerprint.is_empty() {
+            fold.save(step_id, tool_name, &fold_fingerprint).await;
+        }
+    }
+    let created = OrchestrationCoreServiceClient::new(session_channel.clone())
         .create_approval(request)
-        .await
-        .map_err(|error| {
-            warn!(
-                run_id = %req.run_id,
-                code = ?error.code(),
-                "run_agent: durable approval persistence unavailable"
-            );
-            tonic::Status::unavailable("approval persistence unavailable")
-        })?;
+        .await;
+    if let Err(error) = created {
+        warn!(
+            run_id = %req.run_id,
+            code = ?error.code(),
+            "run_agent: durable approval persistence unavailable"
+        );
+        // A saved pause fold with no approval would be an orphan paused row.
+        if let Some(fold) = pause_fold.as_mut() {
+            fold.close_after_failed_approval().await;
+        }
+        return Err(tonic::Status::unavailable("approval persistence unavailable"));
+    }
 
     let mut snapshot = state.get_or_create(&req.run_id);
     snapshot.status = crate::state::RunStatus::AwaitingApproval;
@@ -5735,6 +5976,22 @@ mod tests {
         finalizations: Vec<(String, String)>,
         /// Make `ReserveToolAction` fail, to prove an unrecorded effect is not run.
         fail_reserve: bool,
+        /// Every `SaveLoopCheckpoint` the mock accepted, in order (build plan WS03 S6).
+        loop_saves: Vec<LoopSave>,
+        /// The stored seq the mock emulates: a save is accepted only when it expects
+        /// exactly this value, then it advances (session-core's compare-and-set).
+        loop_seq: u64,
+        /// Every `SaveLoopCheckpoint` the mock was asked for, accepted or not.
+        loop_save_attempts: usize,
+        /// Injected `SaveLoopCheckpoint` failures, consumed as they match.
+        loop_save_failures: Vec<LoopSaveFailure>,
+        /// Every `CloseLoopCheckpoint` the mock observed.
+        close_calls: Vec<pb::CloseLoopCheckpointRequest>,
+        /// Every `CreateApproval` the mock accepted, whole.
+        approval_requests: Vec<pb::CreateApprovalRequest>,
+        /// One entry per call that matters for ordering, across every mock:
+        /// `save:<kind>`, `save_failed:<kind>`, `reserve`, `finalize`, `create_approval`.
+        order: Vec<String>,
         /// `(thread_id, summary, step_count)` — every `ProposePlan` call
         /// `MockOrchestration` observed, for `plan.propose` dispatch tests.
         propose_plan_calls: Vec<(String, String, usize)>,
@@ -5761,6 +6018,33 @@ mod tests {
         /// requests then need genuine signed bearers (`run_agent`'s session
         /// bearer and a `SignedServiceTokens` provider), which is the point.
         rules: Option<Arc<crate::runtime_loop::session_core_rules_double::SessionCoreRules>>,
+    }
+
+    /// One accepted `SaveLoopCheckpoint`.
+    #[derive(Clone, Debug)]
+    struct LoopSave {
+        kind: String,
+        expected_seq: u64,
+        fold: Vec<u8>,
+        pause_ref: String,
+        authority_digest: String,
+    }
+
+    /// A `SaveLoopCheckpoint` failure the mock injects: for saves of `kind` (`*` for
+    /// any), `times` times, with this status.
+    struct LoopSaveFailure {
+        kind: &'static str,
+        times: u32,
+        status: Status,
+        /// The save is applied before the failure is reported, as when a timeout
+        /// hides a commit: the next save then finds the seq already advanced.
+        commits: bool,
+    }
+
+    impl LoopSave {
+        fn fold(&self) -> mp_contracts::loop_fold::LoopFoldV1 {
+            mp_contracts::loop_fold::LoopFoldV1::from_bytes(&self.fold).expect("a saved fold parses")
+        }
     }
 
     type SharedRecorder = Arc<Mutex<Recorder>>;
@@ -6463,6 +6747,7 @@ mod tests {
             if rec.fail_reserve {
                 return Err(Status::unavailable("tool ledger unavailable"));
             }
+            rec.order.push("reserve".to_owned());
             rec.reservations.push(request.into_inner());
             Ok(Response::new(pb::ReserveToolActionResponse {
                 created: !rec.reserve_replays,
@@ -6474,19 +6759,56 @@ mod tests {
             request: Request<pb::FinalizeToolActionRequest>,
         ) -> Result<Response<pb::FinalizeToolActionResponse>, Status> {
             let req = request.into_inner();
-            self.rec
-                .lock()
-                .unwrap()
-                .finalizations
-                .push((req.action_id, req.outcome));
+            let mut rec = self.rec.lock().unwrap();
+            rec.order.push("finalize".to_owned());
+            rec.finalizations.push((req.action_id, req.outcome));
             Ok(Response::new(pb::FinalizeToolActionResponse { updated: true }))
         }
 
         async fn save_loop_checkpoint(
             &self,
-            _: Request<pb::SaveLoopCheckpointRequest>,
+            request: Request<pb::SaveLoopCheckpointRequest>,
         ) -> Result<Response<pb::SaveLoopCheckpointResponse>, Status> {
-            Err(Status::unimplemented("save_loop_checkpoint not used"))
+            let req = request.into_inner();
+            let mut rec = self.rec.lock().unwrap();
+            rec.loop_save_attempts += 1;
+            if let Some(failure) = rec
+                .loop_save_failures
+                .iter_mut()
+                .find(|f| f.times > 0 && (f.kind == "*" || f.kind == req.kind))
+            {
+                failure.times -= 1;
+                let status = failure.status.clone();
+                if failure.commits && req.expected_seq == rec.loop_seq {
+                    rec.loop_seq += 1;
+                    rec.loop_saves.push(LoopSave {
+                        kind: req.kind.clone(),
+                        expected_seq: req.expected_seq,
+                        fold: req.fold,
+                        pause_ref: req.pause_ref,
+                        authority_digest: req.authority_digest,
+                    });
+                }
+                rec.order.push(format!("save_failed:{}", req.kind));
+                return Err(status);
+            }
+            // session-core's compare-and-set: the first save expects 0, every later
+            // one the seq the previous save returned.
+            if req.expected_seq != rec.loop_seq {
+                rec.order.push(format!("save_failed:{}", req.kind));
+                return Err(Status::aborted("loop_checkpoint_stale"));
+            }
+            rec.loop_seq += 1;
+            let seq = rec.loop_seq;
+            rec.order.push(format!("save:{}", req.kind));
+            rec.loop_saves.push(LoopSave {
+                kind: req.kind,
+                expected_seq: req.expected_seq,
+                fold: req.fold,
+                pause_ref: req.pause_ref,
+                authority_digest: req.authority_digest,
+            });
+            Ok(Response::new(pb::SaveLoopCheckpointResponse { seq }))
         }
 
         async fn claim_loop_checkpoint(
@@ -6496,11 +6818,23 @@ mod tests {
             Err(Status::unimplemented("claim_loop_checkpoint not used"))
         }
 
+        async fn list_tool_actions(
+            &self,
+            _: Request<pb::ListToolActionsRequest>,
+        ) -> Result<Response<pb::ListToolActionsResponse>, Status> {
+            Err(Status::unimplemented("list_tool_actions not used"))
+        }
+
         async fn close_loop_checkpoint(
             &self,
-            _: Request<pb::CloseLoopCheckpointRequest>,
+            request: Request<pb::CloseLoopCheckpointRequest>,
         ) -> Result<Response<pb::CloseLoopCheckpointResponse>, Status> {
-            Err(Status::unimplemented("close_loop_checkpoint not used"))
+            self.rec
+                .lock()
+                .unwrap()
+                .close_calls
+                .push(request.into_inner());
+            Ok(Response::new(pb::CloseLoopCheckpointResponse {}))
         }
 
         async fn save_checkpoint(
@@ -7079,6 +7413,8 @@ mod tests {
             let req = request.into_inner();
             {
                 let mut rec = self.rec.lock().unwrap();
+                rec.order.push("create_approval".to_owned());
+                rec.approval_requests.push(req.clone());
                 rec.approval_modes.push(req.continuation_mode.clone());
                 rec.approvals.push((req.step_id.clone(), req.reason));
             }
@@ -9761,6 +10097,7 @@ mod tests {
             0,
             None,
             Some(&oversized),
+            None,
         )
         .await
         .expect_err("a snapshot over the cap must refuse the pause");
@@ -9799,6 +10136,7 @@ mod tests {
             0,
             Some("session-token"),
             Some(&near_cap),
+            None,
         )
         .await
         .expect("a snapshot under the cap pauses the run");
@@ -14973,5 +15311,1028 @@ mod tests {
                 "{child_id}"
             );
         }
+    }
+
+    // ---- WS03 S6: the writer of the durable loop fold ----
+    //
+    // The loop is driven for real, against a session-core mock that emulates the
+    // fold store's compare-and-set (`Recorder::loop_seq`) and can be told to fail a
+    // save. What each test reads back is what the writer sent: the order of calls
+    // (`Recorder::order`), the folds (`loop_saves`) and what the model was shown.
+
+    /// What a fold-writer test holds for the duration of its run.
+    #[derive(Clone, Copy)]
+    struct FoldKnobs {
+        checkpoint: bool,
+        ledger: bool,
+        continue_on: bool,
+        mode: &'static str,
+        fail_create_approval: bool,
+    }
+
+    impl FoldKnobs {
+        /// The writer on, with the ledger it needs, in the `auto` posture.
+        const ON: Self = Self {
+            checkpoint: true,
+            ledger: true,
+            continue_on: false,
+            mode: "auto",
+            fail_create_approval: false,
+        };
+
+        /// The `ask` posture with loop-owned approvals: a gated call pauses the run.
+        const fn asking(self) -> Self {
+            Self {
+                mode: "ask",
+                continue_on: true,
+                ..self
+            }
+        }
+    }
+
+    struct FoldRun {
+        result: Result<pb::RunAgentResponse, Status>,
+        observed: ObservedMessages,
+        rec: SharedRecorder,
+    }
+
+    /// Drive one run through the real loop. `shape` adjusts the request and the
+    /// session mock (to inject a save failure) before it starts.
+    async fn drive_fold_run(
+        knobs: FoldKnobs,
+        script: Vec<Scripted>,
+        shape: impl FnOnce(&mut pb::RunAgentRequest, &mut Recorder),
+    ) -> FoldRun {
+        let _checkpoint = runtime_loop::fold::CheckpointSwitch::set(knobs.checkpoint);
+        let _ledger = runtime_loop::effect::LedgerSwitch::set(knobs.ledger);
+        let _continue = runtime_loop::resume::ContinueSwitch::set(knobs.continue_on);
+        let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
+        let mut req = sample_request();
+        req.mode = knobs.mode.to_owned();
+        shape(&mut req, &mut rec.lock().unwrap());
+        let observed: ObservedMessages = Arc::new(Mutex::new(Vec::new()));
+        let inference_channel =
+            spawn_inference_channel_with_messages(script, observed.clone()).await;
+        let session_channel =
+            spawn_session_channel_with_approval_failure(rec.clone(), knobs.fail_create_approval)
+                .await;
+        let state = crate::state::StateStore::new();
+        let mut tools = offered_tool_defs();
+        tools.push(delete_records_tool());
+        let result = run_agent_with_tools(
+            &state,
+            session_channel,
+            inference_channel,
+            &plain_caller(),
+            req,
+            tools,
+            None,
+            Some("session-token".to_owned()),
+            "inference-token".to_owned(),
+            &ALLOW_CAPABILITY_POLICY,
+            &STATIC_TERMINAL_TOKENS,
+            None,
+            None,
+            &test_sandbox_manager_client(),
+            "test-backend",
+            None,
+            &test_sandbox_tokens(),
+            None,
+        )
+        .await;
+        FoldRun {
+            result,
+            observed,
+            rec,
+        }
+    }
+
+    /// A round of read-only calls (a failing weather lookup each; the outcome does
+    /// not matter, only that the round ran), one per id.
+    fn read_round(ids: &[&str]) -> Scripted {
+        Scripted::ToolCalls {
+            content: String::new(),
+            calls: ids.iter().map(|id| failing_tool_call(id)).collect(),
+        }
+    }
+
+    fn delete_call(id: &str) -> pb::ToolCall {
+        pb::ToolCall {
+            id: id.to_owned(),
+            name: "delete_records".to_owned(),
+            arguments_json: r#"{"table":"stale"}"#.to_owned(),
+        }
+    }
+
+    fn failing_save(
+        kind: &'static str,
+        times: u32,
+        status: Status,
+        commits: bool,
+    ) -> LoopSaveFailure {
+        LoopSaveFailure {
+            kind,
+            times,
+            status,
+            commits,
+        }
+    }
+
+    fn step_error(rec: &Recorder, step_id: &str) -> String {
+        rec.persisted_step_payloads
+            .iter()
+            .find(|(step, _, _)| step == step_id)
+            .map(|(_, _, error)| error.clone())
+            .unwrap_or_else(|| panic!("no step {step_id}: {:?}", rec.persisted_step_payloads))
+    }
+
+    #[tokio::test]
+    async fn loop_fold_n_tool_rounds_write_n_round_folds_with_a_rising_expected_seq() {
+        let run = drive_fold_run(
+            FoldKnobs::ON,
+            vec![
+                read_round(&["w1"]),
+                read_round(&["w2"]),
+                read_round(&["w3"]),
+                Scripted::Answer("done".to_owned()),
+            ],
+            |_, _| {},
+        )
+        .await;
+        let resp = run.result.expect("the run completes");
+        assert_eq!(resp.final_output, "done");
+
+        let r = run.rec.lock().unwrap();
+        let kinds: Vec<&str> = r.loop_saves.iter().map(|s| s.kind.as_str()).collect();
+        assert_eq!(kinds, ["round", "round", "round"], "an answer round saves nothing");
+        let expected: Vec<u64> = r.loop_saves.iter().map(|s| s.expected_seq).collect();
+        assert_eq!(expected, [0, 1, 2]);
+        for (index, save) in r.loop_saves.iter().enumerate() {
+            let fold = save.fold();
+            assert_eq!(fold.rounds_executed, index as u32 + 1);
+            assert_eq!(fold.run_id, "run_test");
+            assert_eq!(fold.segment_no, 1);
+            assert!(fold.round_in_flight.is_none() && fold.pending.is_none());
+            assert_eq!(save.authority_digest, fold.authority.digest());
+            assert!(save.pause_ref.is_empty(), "only a pause names a reference");
+            assert_eq!(
+                fold.extensions.get(mp_contracts::loop_fold::EXT_EFFECT_LEDGER),
+                Some(&serde_json::json!(true))
+            );
+        }
+        assert_eq!(r.loop_seq, 3, "the mock's compare-and-set ends at the third save");
+        assert!(r.close_calls.is_empty());
+        // The last fold carries the whole history: preamble, goal, three tool rounds.
+        let last = r.loop_saves[2].fold();
+        assert_eq!(last.messages.len(), 5);
+        assert_eq!(last.messages[0].role, "system");
+        assert_eq!(last.messages[1].content, "What is 2 + 2?");
+        assert_eq!(last.step_seq, 3);
+        // The digest a resume recomputes: the code-owned prompt and the offered tools.
+        let mut tools = offered_tool_defs();
+        tools.push(delete_records_tool());
+        let allowlist: BTreeSet<String> = tools.iter().map(|t| t.name.clone()).collect();
+        assert_eq!(
+            last.prompt_digest,
+            runtime_loop::fold::prompt_digest_of(&compose_system_prompt(&allowlist), &tools)
+        );
+    }
+
+    /// The merge gate. With the switch off the writer makes no call at all and
+    /// changes nothing: the model is shown the same conversation, every step is
+    /// recorded the same way, and the response is the same, whether or not the
+    /// writer is on. (Every save here succeeds, so any difference is the writer's.)
+    #[tokio::test]
+    async fn loop_fold_switch_off_makes_no_fold_call_and_the_model_sees_the_same_conversation() {
+        let script = || {
+            vec![
+                Scripted::ToolCalls {
+                    content: "Checking, then deleting.".to_owned(),
+                    calls: vec![failing_tool_call("w1"), delete_call("d1")],
+                },
+                read_round(&["w2"]),
+                Scripted::Answer("all done".to_owned()),
+            ]
+        };
+        let off = drive_fold_run(
+            FoldKnobs {
+                checkpoint: false,
+                ..FoldKnobs::ON
+            },
+            script(),
+            |_, _| {},
+        )
+        .await;
+        let on = drive_fold_run(FoldKnobs::ON, script(), |_, _| {}).await;
+
+        {
+            let r = off.rec.lock().unwrap();
+            assert_eq!(r.loop_save_attempts, 0, "no SaveLoopCheckpoint call");
+            assert!(r.loop_saves.is_empty() && r.close_calls.is_empty(), "no Close call");
+            assert!(
+                !r.order.iter().any(|entry| entry.starts_with("save")),
+                "{:?}",
+                r.order
+            );
+            // The control: this run has an effectful call, so the writer on does write.
+            assert_eq!(r.reservations.len(), 1);
+        }
+        {
+            let r = on.rec.lock().unwrap();
+            assert!(r.loop_saves.len() >= 3, "the control saved: {:?}", r.order);
+        }
+
+        assert_eq!(
+            *off.observed.lock().unwrap(),
+            *on.observed.lock().unwrap(),
+            "the model sees the same conversation on every round"
+        );
+        assert_eq!(off.result.as_ref().unwrap(), on.result.as_ref().unwrap());
+        let (a, b) = (off.rec.lock().unwrap(), on.rec.lock().unwrap());
+        assert_eq!(a.completed, b.completed, "the same step records");
+        assert_eq!(a.persisted_step_payloads, b.persisted_step_payloads);
+        assert_eq!(a.reservations, b.reservations);
+        assert_eq!(a.finalizations, b.finalizations);
+        assert_eq!(a.appended_assistant, b.appended_assistant);
+        assert_eq!(a.approval_modes, b.approval_modes);
+        assert_eq!(a.managed_terminal_outcomes, b.managed_terminal_outcomes);
+    }
+
+    #[tokio::test]
+    async fn loop_fold_switch_off_leaves_the_approval_mode_unchanged() {
+        for (continue_on, mode) in [(false, ""), (true, "loop")] {
+            let run = drive_fold_run(
+                FoldKnobs {
+                    checkpoint: false,
+                    mode: "ask",
+                    continue_on,
+                    ..FoldKnobs::ON
+                },
+                vec![one_call("delete_records", "{}")],
+                |_, _| {},
+            )
+            .await;
+            assert_eq!(run.result.expect("the run pauses").status, "awaiting_approval");
+            let r = run.rec.lock().unwrap();
+            assert_eq!(r.approval_modes, vec![mode.to_owned()], "continue={continue_on}");
+            assert_eq!(r.loop_save_attempts, 0, "no fold call with the switch off");
+            assert!(r.close_calls.is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn loop_fold_the_switch_needs_the_ledger_and_writes_nothing_without_it() {
+        let run = drive_fold_run(
+            FoldKnobs {
+                ledger: false,
+                ..FoldKnobs::ON
+            },
+            vec![read_round(&["w1"]), Scripted::Answer("done".to_owned())],
+            |_, _| {},
+        )
+        .await;
+        assert_eq!(run.result.expect("completes").final_output, "done");
+        let r = run.rec.lock().unwrap();
+        assert_eq!(r.loop_save_attempts, 0, "a fold without ledger rows cannot be reconciled");
+        assert!(r.reservations.is_empty());
+    }
+
+    #[tokio::test]
+    async fn loop_fold_pre_effect_fold_is_saved_before_the_effect_is_reserved() {
+        let run = drive_fold_run(
+            FoldKnobs::ON,
+            vec![
+                Scripted::ToolCalls {
+                    content: "Deleting.".to_owned(),
+                    calls: vec![pb::ToolCall {
+                        id: "d1".to_owned(),
+                        name: "delete_records".to_owned(),
+                        arguments_json: r#"{"table":"customers"}"#.to_owned(),
+                    }],
+                },
+                Scripted::Answer("done".to_owned()),
+            ],
+            |_, _| {},
+        )
+        .await;
+        run.result.expect("completes");
+        let r = run.rec.lock().unwrap();
+        assert_eq!(
+            r.order,
+            ["save:pre_effect", "reserve", "finalize", "save:round"],
+            "the fold is durable before the ledger row, and the round is saved after"
+        );
+        let pre = &r.loop_saves[0];
+        assert_eq!((pre.kind.as_str(), pre.expected_seq), ("pre_effect", 0));
+        assert!(pre.pause_ref.is_empty());
+        let fold = pre.fold();
+        let round = fold.round_in_flight.as_ref().expect("the round is open");
+        assert_eq!(round.assistant_content, "Deleting.");
+        assert_eq!(round.calls.len(), 1);
+        assert_eq!(round.calls[0].id, "d1");
+        assert_eq!(round.calls[0].name, "delete_records");
+        assert_eq!(round.calls[0].step_id, "tool_1_d1");
+        assert_eq!(
+            round.calls[0].arguments_json, r#"{"table":"customers"}"#,
+            "byte-exact, so a resume could redispatch it"
+        );
+        assert!(round.completed.is_empty(), "nothing has run when it is saved");
+        assert!(fold.pending.is_none());
+        assert_eq!(fold.rounds_executed, 1, "the open round counts as started");
+        assert_eq!(fold.step_seq, 1);
+        // The round fold that follows closes the round: the history gained its result.
+        let after = &r.loop_saves[1];
+        assert_eq!((after.kind.as_str(), after.expected_seq), ("round", 1));
+        assert!(after.fold().round_in_flight.is_none());
+        assert_eq!(after.fold().messages.len(), fold.messages.len() + 2);
+    }
+
+    /// A call the loop refuses before dispatch already has its outcome when the
+    /// pre_effect fold is saved, so the fold carries it: a resume must be able to tell
+    /// "refused" from "never dispatched" without re-deriving the refusal.
+    #[tokio::test]
+    async fn loop_fold_pre_effect_fold_carries_the_rejection_of_a_call_outside_the_allowlist() {
+        let run = drive_fold_run(
+            FoldKnobs::ON,
+            vec![
+                Scripted::ToolCalls {
+                    content: String::new(),
+                    calls: vec![
+                        failing_tool_call("w1"),
+                        pb::ToolCall {
+                            id: "u1".to_owned(),
+                            name: "unknown_tool".to_owned(),
+                            arguments_json: "{}".to_owned(),
+                        },
+                        delete_call("d1"),
+                    ],
+                },
+                Scripted::Answer("done".to_owned()),
+            ],
+            |_, _| {},
+        )
+        .await;
+        run.result.expect("completes");
+        let r = run.rec.lock().unwrap();
+        let pre = r
+            .loop_saves
+            .iter()
+            .find(|save| save.kind == "pre_effect")
+            .expect("the round has an effectful call, so a pre_effect fold is saved");
+        let fold = pre.fold();
+        let round = fold.round_in_flight.as_ref().expect("the round is open");
+        let calls: Vec<(&str, &str)> = round
+            .calls
+            .iter()
+            .map(|c| (c.id.as_str(), c.step_id.as_str()))
+            .collect();
+        assert_eq!(
+            calls,
+            [("w1", "tool_1_w1"), ("u1", ""), ("d1", "tool_2_d1")],
+            "the model's order; the refused call took no step"
+        );
+        let completed: Vec<(&str, &str)> = round
+            .completed
+            .iter()
+            .map(|c| (c.call_id.as_str(), c.step_id.as_str()))
+            .collect();
+        assert_eq!(
+            completed,
+            [("u1", "")],
+            "only the refused call has an outcome; the two dispatchable calls have none"
+        );
+        assert!(round.completed[0].output.is_empty());
+        assert_eq!(
+            round.completed[0].error,
+            "tool 'unknown_tool' is not in this agent's allowed scope"
+        );
+    }
+
+    /// The truncated last call is refused only because of the live `stop_reason`, which
+    /// the fold does not carry. Its refusal is therefore part of the fold, so a resume
+    /// never dispatches a call whose arguments were cut off.
+    #[tokio::test]
+    async fn loop_fold_pre_effect_fold_carries_the_rejection_of_a_truncated_call() {
+        let run = drive_fold_run(
+            FoldKnobs::ON,
+            vec![
+                Scripted::TruncatedToolCalls {
+                    content: String::new(),
+                    calls: vec![delete_call("d1"), delete_call("d-cut")],
+                },
+                Scripted::Answer("done".to_owned()),
+            ],
+            |_, _| {},
+        )
+        .await;
+        run.result.expect("completes");
+        let r = run.rec.lock().unwrap();
+        assert_eq!(r.reservations.len(), 1, "only the complete call is an effect");
+        let pre = r
+            .loop_saves
+            .iter()
+            .find(|save| save.kind == "pre_effect")
+            .expect("the complete delete is effectful, so a pre_effect fold is saved");
+        let fold = pre.fold();
+        let round = fold.round_in_flight.as_ref().expect("the round is open");
+        let calls: Vec<(&str, &str)> = round
+            .calls
+            .iter()
+            .map(|c| (c.id.as_str(), c.step_id.as_str()))
+            .collect();
+        assert_eq!(calls, [("d1", "tool_1_d1"), ("d-cut", "")]);
+        assert_eq!(round.completed.len(), 1);
+        let cut = &round.completed[0];
+        assert_eq!((cut.call_id.as_str(), cut.step_id.as_str()), ("d-cut", ""));
+        assert!(
+            cut.error.contains("output token limit") && cut.error.contains("truncated"),
+            "the refusal names truncation as the cause: {}",
+            cut.error
+        );
+        // The round fold that follows the round resolves nothing it need not: no open
+        // round at all.
+        assert!(r
+            .loop_saves
+            .iter()
+            .filter(|save| save.kind == "round")
+            .all(|save| save.fold().round_in_flight.is_none()));
+    }
+
+    #[tokio::test]
+    async fn loop_fold_effectful_call_is_held_back_when_its_pre_effect_fold_cannot_be_saved() {
+        let run = drive_fold_run(
+            FoldKnobs::ON,
+            vec![
+                Scripted::ToolCalls {
+                    content: String::new(),
+                    calls: vec![failing_tool_call("w1"), delete_call("d1")],
+                },
+                Scripted::ToolCalls {
+                    content: String::new(),
+                    calls: vec![delete_call("d2")],
+                },
+                Scripted::Answer("done".to_owned()),
+            ],
+            |_, rec| {
+                rec.loop_save_failures.push(failing_save(
+                    "pre_effect",
+                    1,
+                    Status::unavailable("boom-private-detail"),
+                    false,
+                ));
+            },
+        )
+        .await;
+        run.result.expect("the run goes on");
+        let r = run.rec.lock().unwrap();
+        // Round 1: the fold could not be saved, so the delete was not even reserved.
+        // Round 2: the writer is still active, saves, and the effect runs.
+        assert_eq!(
+            r.order,
+            [
+                "save_failed:pre_effect",
+                "save:round",
+                "save:pre_effect",
+                "reserve",
+                "finalize",
+                "save:round"
+            ],
+            "a failed pre-effect save holds the effect and the next round retries"
+        );
+        assert_eq!(r.reservations.len(), 1);
+        assert_eq!(r.reservations[0].action_id, "tool_3_d2", "the retried call, not the held one");
+        // The model is told which tool was held back, in closed words, and nothing of
+        // the failure.
+        let held = step_error(&r, "tool_2_d1");
+        assert!(held.contains("'delete_records'"), "{held}");
+        assert!(held.contains("was not run") && held.contains("held back"), "{held}");
+        assert!(held.contains("Try again."), "{held}");
+        assert!(!held.contains("boom-private-detail"), "{held}");
+        // The read call in the same batch still ran.
+        assert!(
+            r.completed.iter().any(|(step, _)| step == "tool_1_w1"),
+            "{:?}",
+            r.completed
+        );
+        let seen = run.observed.lock().unwrap();
+        assert!(
+            flattened(&seen[1]).contains("held back"),
+            "the next round shows the model the held-back result"
+        );
+        assert!(!flattened(&seen[1]).contains("boom-private-detail"));
+    }
+
+    #[tokio::test]
+    async fn loop_fold_read_only_rounds_never_block_on_a_failed_fold() {
+        let run = drive_fold_run(
+            FoldKnobs::ON,
+            vec![
+                read_round(&["w1"]),
+                read_round(&["w2"]),
+                Scripted::Answer("done".to_owned()),
+            ],
+            |_, rec| {
+                rec.loop_save_failures.push(failing_save(
+                    "*",
+                    u32::MAX,
+                    Status::unavailable("store down"),
+                    false,
+                ));
+            },
+        )
+        .await;
+        assert_eq!(run.result.expect("completes").final_output, "done");
+        let r = run.rec.lock().unwrap();
+        assert_eq!(r.loop_save_attempts, 2, "a round save is attempted every round");
+        assert!(r.loop_saves.is_empty());
+        assert!(
+            !r.persisted_step_payloads
+                .iter()
+                .any(|(_, _, error)| error.contains("held back")),
+            "nothing was held: no effect was waiting on a fold"
+        );
+    }
+
+    #[tokio::test]
+    async fn loop_fold_a_disabled_store_degrades_to_switch_off_behaviour() {
+        let disabled = || {
+            failing_save(
+                "*",
+                u32::MAX,
+                Status::failed_precondition("loop_checkpoint_disabled"),
+                false,
+            )
+        };
+        // An effectful call is not held: the store being off is configuration.
+        let run = drive_fold_run(
+            FoldKnobs::ON,
+            vec![
+                one_call("delete_records", r#"{"table":"stale"}"#),
+                read_round(&["w1"]),
+                Scripted::Answer("done".to_owned()),
+            ],
+            |_, rec| rec.loop_save_failures.push(disabled()),
+        )
+        .await;
+        assert_eq!(run.result.expect("completes").final_output, "done");
+        {
+            let r = run.rec.lock().unwrap();
+            assert_eq!(r.loop_save_attempts, 1, "exactly one attempt in the whole run");
+            assert_eq!(r.reservations.len(), 1, "the effect ran: nothing was held");
+        }
+
+        // A later pause is unchanged: the approval is raised, loop-owned.
+        let run = drive_fold_run(
+            FoldKnobs::ON.asking(),
+            vec![read_round(&["w1"]), one_call("delete_records", "{}")],
+            |_, rec| rec.loop_save_failures.push(disabled()),
+        )
+        .await;
+        assert_eq!(run.result.expect("pauses").status, "awaiting_approval");
+        let r = run.rec.lock().unwrap();
+        assert_eq!(r.loop_save_attempts, 1, "the writer turned itself off after the first refusal");
+        assert_eq!(r.approval_modes, vec!["loop".to_owned()]);
+        assert!(r.close_calls.is_empty());
+    }
+
+    #[tokio::test]
+    async fn loop_fold_a_stale_writer_stops_and_holds_effects() {
+        let run = drive_fold_run(
+            FoldKnobs::ON,
+            vec![
+                read_round(&["w1"]),
+                Scripted::ToolCalls {
+                    content: String::new(),
+                    calls: vec![delete_call("d1")],
+                },
+                read_round(&["w3"]),
+                Scripted::Answer("done".to_owned()),
+            ],
+            |_, rec| {
+                rec.loop_save_failures.push(failing_save(
+                    "round",
+                    1,
+                    Status::aborted("loop_checkpoint_stale"),
+                    false,
+                ));
+            },
+        )
+        .await;
+        assert_eq!(run.result.expect("the run still ends").final_output, "done");
+        let r = run.rec.lock().unwrap();
+        assert_eq!(r.loop_save_attempts, 1, "after a stale answer there are no more saves");
+        assert!(
+            r.reservations.is_empty(),
+            "a failed writer holds every later effect: it could be a second writer's"
+        );
+        assert!(step_error(&r, "tool_2_d1").contains("held back"));
+    }
+
+    /// A save that timed out may have committed. The next save then reads stale
+    /// through no fault of a second writer, so exactly one retry at `expected + 1`
+    /// follows, and the writer carries on.
+    #[tokio::test]
+    async fn loop_fold_a_save_that_committed_but_reported_failure_does_not_stop_the_writer() {
+        let run = drive_fold_run(
+            FoldKnobs::ON,
+            vec![
+                read_round(&["w1"]),
+                Scripted::ToolCalls {
+                    content: String::new(),
+                    calls: vec![delete_call("d1")],
+                },
+                Scripted::Answer("done".to_owned()),
+            ],
+            |_, rec| {
+                rec.loop_save_failures.push(failing_save(
+                    "round",
+                    1,
+                    Status::unavailable("timed out"),
+                    true,
+                ));
+            },
+        )
+        .await;
+        run.result.expect("completes");
+        let r = run.rec.lock().unwrap();
+        let expected: Vec<(String, u64)> = r
+            .loop_saves
+            .iter()
+            .map(|s| (s.kind.clone(), s.expected_seq))
+            .collect();
+        assert_eq!(
+            expected,
+            [
+                ("round".to_owned(), 0),
+                ("pre_effect".to_owned(), 1),
+                ("round".to_owned(), 2)
+            ],
+            "the pre-effect save recovered the committed seq with one probe"
+        );
+        assert_eq!(r.reservations.len(), 1, "the effect was not held");
+    }
+
+    #[tokio::test]
+    async fn loop_fold_pause_fold_is_saved_before_the_approval_and_the_approval_is_loop_mode() {
+        let run = drive_fold_run(
+            FoldKnobs::ON.asking(),
+            vec![Scripted::ToolCalls {
+                content: "I will check the weather and delete.".to_owned(),
+                calls: vec![
+                    failing_tool_call("w1"),
+                    pb::ToolCall {
+                        id: "x1".to_owned(),
+                        name: "nope_tool".to_owned(),
+                        arguments_json: "{}".to_owned(),
+                    },
+                    delete_call("d1"),
+                ],
+            }],
+            |_, _| {},
+        )
+        .await;
+        assert_eq!(run.result.expect("pauses").status, "awaiting_approval");
+        let r = run.rec.lock().unwrap();
+        assert_eq!(
+            r.order,
+            ["save:pre_effect", "reserve", "finalize", "save:pause", "create_approval"],
+            "the pause fold is durable before the approval is visible"
+        );
+        assert_eq!(r.approval_modes, vec!["loop".to_owned()]);
+
+        let save = r.loop_saves.last().expect("the pause fold");
+        assert_eq!(save.kind, "pause");
+        assert_eq!(save.expected_seq, 1, "after the pre-effect fold");
+        let fold = save.fold();
+        let pending = fold.pending.as_ref().expect("a pause names what it waits on");
+        assert_eq!(pending.kind, mp_contracts::loop_fold::PauseKind::Approval);
+        assert_eq!(pending.pause_ref, "run_test:tool_2_d1");
+        assert_eq!(save.pause_ref, pending.pause_ref, "the request carries the same reference");
+        let approval = &r.approval_requests[0];
+        assert_eq!(
+            approval.idempotency_key, pending.pause_ref,
+            "the fold's reference is the key the approval is created under"
+        );
+        let descriptor: serde_json::Value =
+            serde_json::from_str(&approval.continuation_descriptor_json).expect("descriptor");
+        assert_eq!(pending.action_fingerprint, descriptor["action_fingerprint"]);
+        assert_eq!(pending.step_id, "tool_2_d1");
+        assert_eq!(pending.call, "delete_records");
+
+        let round = fold.round_in_flight.as_ref().expect("the round is open");
+        assert_eq!(round.assistant_content, "I will check the weather and delete.");
+        let calls: Vec<(&str, &str, &str)> = round
+            .calls
+            .iter()
+            .map(|c| (c.id.as_str(), c.name.as_str(), c.step_id.as_str()))
+            .collect();
+        assert_eq!(
+            calls,
+            [
+                ("w1", "yr_weather", "tool_1_w1"),
+                ("x1", "nope_tool", ""),
+                ("d1", "delete_records", "tool_2_d1")
+            ],
+            "every call in the model's order; the rejected one took no step"
+        );
+        let completed: Vec<(&str, &str)> = round
+            .completed
+            .iter()
+            .map(|c| (c.call_id.as_str(), c.step_id.as_str()))
+            .collect();
+        assert_eq!(
+            completed,
+            [("w1", "tool_1_w1"), ("x1", "")],
+            "the sibling and the rejected call have outcomes, the paused call does not"
+        );
+        assert!(round.completed[1].error.contains("not in this agent's allowed scope"));
+        assert_eq!(fold.rounds_executed, 1);
+        assert_eq!(fold.step_seq, 2);
+        // The history is the one before this round: its results are not in it yet.
+        assert_eq!(fold.messages.len(), 2);
+        assert_eq!(save.authority_digest, fold.authority.digest());
+    }
+
+    #[tokio::test]
+    async fn loop_fold_a_pause_whose_fold_cannot_be_saved_still_raises_its_approval() {
+        let run = drive_fold_run(
+            FoldKnobs::ON.asking(),
+            vec![one_call("delete_records", "{}")],
+            |_, rec| {
+                rec.loop_save_failures.push(failing_save(
+                    "pause",
+                    u32::MAX,
+                    Status::unavailable("store down"),
+                    false,
+                ));
+            },
+        )
+        .await;
+        assert_eq!(
+            run.result.expect("a pause is never refused for the fold's sake").status,
+            "awaiting_approval"
+        );
+        let r = run.rec.lock().unwrap();
+        assert_eq!(r.approvals.len(), 1);
+        assert_eq!(
+            r.approval_modes,
+            vec!["loop".to_owned()],
+            "the mode stays what the gate decided: /continue falls back at claim time"
+        );
+        let kinds: Vec<&str> = r.loop_saves.iter().map(|s| s.kind.as_str()).collect();
+        assert_eq!(kinds, ["pre_effect"], "no pause fold, and no tombstone after a failed pause");
+        assert!(r.close_calls.is_empty(), "nothing was saved, so nothing is closed");
+    }
+
+    #[tokio::test]
+    async fn loop_fold_a_pause_whose_approval_fails_closes_its_fold() {
+        let run = drive_fold_run(
+            FoldKnobs {
+                fail_create_approval: true,
+                ..FoldKnobs::ON.asking()
+            },
+            vec![one_call("delete_records", "{}")],
+            |_, _| {},
+        )
+        .await;
+        let error = run.result.expect_err("the pause fails when its approval cannot be stored");
+        assert_eq!(error.code(), tonic::Code::Unavailable);
+        let r = run.rec.lock().unwrap();
+        assert_eq!(r.order.last().map(String::as_str), Some("save:pause"));
+        assert_eq!(r.close_calls.len(), 1, "the fold of a pause with no approval is closed");
+        let close = &r.close_calls[0];
+        assert_eq!(close.run_id, "run_test");
+        assert_eq!(close.reason, "approval_not_created");
+        assert_eq!(close.seq, r.loop_seq, "closed at the seq the pause fold was saved under");
+    }
+
+    #[tokio::test]
+    async fn loop_fold_oversize_degrades_to_a_tombstone_and_the_run_goes_on() {
+        let huge = "g".repeat(runtime_loop::fold::SAVE_BUDGET_BYTES + 4096);
+        // An effectful call still runs: a tombstone means nothing resumable can replay it.
+        let run = drive_fold_run(
+            FoldKnobs::ON,
+            vec![
+                one_call("delete_records", r#"{"table":"stale"}"#),
+                Scripted::Answer("done".to_owned()),
+            ],
+            |req, _| req.goal.clone_from(&huge),
+        )
+        .await;
+        assert_eq!(run.result.expect("completes").final_output, "done");
+        {
+            let r = run.rec.lock().unwrap();
+            assert_eq!(r.reservations.len(), 1, "the effect ran");
+            assert!(!r.loop_saves.is_empty());
+            for save in &r.loop_saves {
+                let fold = save.fold();
+                assert!(!fold.is_resumable(), "only tombstones are saved: {:?}", save.kind);
+                assert_eq!(
+                    fold.extensions[mp_contracts::loop_fold::EXT_NOT_RESUMABLE],
+                    "oversize"
+                );
+                assert!(fold.messages.is_empty(), "a tombstone holds no conversation");
+                assert!(save.fold.len() < 2048);
+            }
+        }
+
+        // A pause: the approval is raised and no resumable fold exists to claim.
+        let run = drive_fold_run(
+            FoldKnobs::ON.asking(),
+            vec![one_call("delete_records", "{}")],
+            |req, _| req.goal.clone_from(&huge),
+        )
+        .await;
+        assert_eq!(run.result.expect("pauses").status, "awaiting_approval");
+        let r = run.rec.lock().unwrap();
+        assert_eq!(r.approval_modes, vec!["loop".to_owned()]);
+        assert!(r.loop_saves.iter().all(|s| s.kind != "pause" && !s.fold().is_resumable()));
+    }
+
+    /// A fold is saved only for a run that keeps state and owns its loop. Each
+    /// refusal here is checked against a control run that DOES save, so a zero is
+    /// the gate's doing and not an idle harness.
+    #[tokio::test]
+    async fn loop_fold_zdr_space_and_resumed_runs_never_save() {
+        let script = || {
+            vec![
+                one_call("delete_records", r#"{"table":"stale"}"#),
+                Scripted::Answer("done".to_owned()),
+            ]
+        };
+        let control = drive_fold_run(FoldKnobs::ON, script(), |_, _| {}).await;
+        assert!(control.rec.lock().unwrap().loop_save_attempts >= 2);
+
+        let zdr = drive_fold_run(FoldKnobs::ON, script(), |req, _| req.zdr = true).await;
+        zdr.result.expect("a ZDR run completes");
+        assert_eq!(zdr.rec.lock().unwrap().loop_save_attempts, 0, "ZDR keeps no fold");
+
+        let space = drive_fold_run(FoldKnobs::ON, script(), |req, _| {
+            req.space_id = "space-1".to_owned();
+        })
+        .await;
+        space.result.expect("a Space run completes");
+        assert_eq!(space.rec.lock().unwrap().loop_save_attempts, 0, "a Space run keeps no fold");
+
+        // A stage-1 continuation segment never writes (it would need the claimed seq).
+        let _checkpoint = runtime_loop::fold::CheckpointSwitch::set(true);
+        let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
+        let policy = CountingPolicy::new();
+        let inference_channel =
+            spawn_inference_channel(vec![Scripted::Answer("checked".to_owned())]).await;
+        drive_continue(
+            &rec,
+            continue_request(2),
+            consume_of("tool_1_del-1", true, false, snapshot_of(|_| {})),
+            true,
+            &policy,
+            inference_channel,
+        )
+        .await
+        .expect("the continuation runs");
+        assert!(policy.count() >= 1, "the released call ran");
+        assert_eq!(rec.lock().unwrap().loop_save_attempts, 0, "a continuation segment never saves");
+    }
+
+    #[tokio::test]
+    async fn loop_fold_a_waived_run_never_saves() {
+        let _checkpoint = runtime_loop::fold::CheckpointSwitch::set(true);
+        let _ledger = runtime_loop::effect::LedgerSwitch::set(true);
+        let _switch = runtime_loop::resume::ContinueSwitch::set(true);
+        let switches = mp_contracts::agentic_subscription::Switches {
+            enabled: true,
+            allow_effects: true,
+        };
+        let req = pb::RunAgentRequest {
+            plan_mode: false,
+            mode: "ask".to_owned(),
+            ..subscription_request()
+        };
+        let caller = crate::auth::AuthenticatedUser::for_test_with_waiver(
+            &req.org_id,
+            &req.user_id,
+            "conn_1",
+            "ack-1",
+        );
+        let route =
+            crate::agent_route::ModelRoute::resolve(&req, switches, COMPOSE_AGENT_MODEL, &caller)
+                .expect("the waived route is admitted on its own connection");
+        assert!(route.is_waived());
+        let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
+        let session_channel = spawn_session_channel(rec.clone()).await;
+        let inference_channel = spawn_inference_channel_with_routes(
+            vec![one_call("delete_records", "{}")],
+            Arc::new(Mutex::new(Vec::new())),
+            Serving::Echo,
+        )
+        .await;
+        let state = crate::state::StateStore::new();
+        let resp = run_agent_with_route(
+            &state,
+            session_channel,
+            inference_channel,
+            req,
+            vec![delete_records_tool()],
+            None,
+            Some("session-token".to_owned()),
+            "inference-token".to_owned(),
+            &ALLOW_CAPABILITY_POLICY,
+            &STATIC_TERMINAL_TOKENS,
+            None,
+            None,
+            &test_sandbox_manager_client(),
+            "test-backend",
+            None,
+            &test_sandbox_tokens(),
+            None,
+            route,
+            crate::run_budget::RunDeadline::NONE,
+        )
+        .await
+        .expect("the waived run pauses");
+        assert_eq!(resp.status, "awaiting_approval");
+        let r = rec.lock().unwrap();
+        assert_eq!(r.loop_save_attempts, 0, "a waived run keeps no fold");
+        assert_eq!(r.reservations.len(), 1, "the control: the ledger was on and the call reserved");
+    }
+
+    /// A delegated loop shares the run's id but not its fold: only the root loop
+    /// writes, so the child's rounds never move the parent's `expected_seq`.
+    #[tokio::test]
+    async fn loop_fold_a_delegated_loop_never_saves() {
+        let run = drive_fold_run(
+            FoldKnobs::ON,
+            vec![
+                Scripted::ToolCalls {
+                    content: "Delegating.".to_owned(),
+                    calls: vec![subagent_call("sub-1", r#"{"goal":"Find the Bergen weather"}"#)],
+                },
+                Scripted::ToolCalls {
+                    content: String::new(),
+                    calls: vec![failing_tool_call("wx-1")],
+                },
+                Scripted::Answer("Bergen: 8 degrees.".to_owned()),
+                Scripted::Answer("Delegated result: Bergen: 8 degrees.".to_owned()),
+            ],
+            |_, _| {},
+        )
+        .await;
+        run.result.expect("completes");
+        let r = run.rec.lock().unwrap();
+        assert!(!r.loop_saves.is_empty(), "the control: the parent saved");
+        let expected: Vec<u64> = r.loop_saves.iter().map(|s| s.expected_seq).collect();
+        let rising: Vec<u64> = (0..expected.len() as u64).collect();
+        assert_eq!(expected, rising, "one writer: no gap a child's save would leave");
+        for save in &r.loop_saves {
+            let text = String::from_utf8_lossy(&save.fold).into_owned();
+            assert!(
+                !text.contains("Find the Bergen weather"),
+                "the child's goal is in a saved fold: {text}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn loop_fold_saved_bytes_contain_no_seeded_secret() {
+        // Assembled at runtime so no literal secret sits in committed source.
+        let api_key = format!("sk-{}", "seededkey1234567890abcdefgh");
+        let jwt = "eyJhbGciOiJIUzI1NiJ.eyJzdWIiOiJ1c2VyLTEifQ.abcdefghijklmnopqrstuvwxyz0123456789";
+        let run = drive_fold_run(
+            FoldKnobs::ON,
+            vec![
+                Scripted::ToolCalls {
+                    content: format!("I found {api_key} in the file."),
+                    calls: vec![failing_tool_call("w1")],
+                },
+                Scripted::ToolCalls {
+                    content: format!("Send Authorization: Bearer {jwt} to it."),
+                    calls: vec![failing_tool_call("w2")],
+                },
+                Scripted::Answer("done".to_owned()),
+            ],
+            |_, _| {},
+        )
+        .await;
+        run.result.expect("completes");
+        let r = run.rec.lock().unwrap();
+        assert_eq!(r.loop_saves.len(), 2, "both rounds still saved: no whole fold was refused");
+        let all: String = r
+            .loop_saves
+            .iter()
+            .map(|s| String::from_utf8_lossy(&s.fold).into_owned())
+            .collect();
+        assert!(!all.contains(&api_key), "an sk- key leaked into a fold");
+        assert!(!all.contains(jwt) && !all.contains("Bearer eyJ"), "a bearer leaked into a fold");
+        assert!(all.contains("[REDACTED]"), "the key was redacted in place");
+        assert!(
+            all.contains("[content withheld from the saved state"),
+            "the credential-shaped sentence was withheld whole"
+        );
+        for save in &r.loop_saves {
+            save.fold();
+        }
+        // The live conversation is untouched: the model still saw both texts.
+        let seen = run.observed.lock().unwrap();
+        assert!(flattened(&seen[1]).contains(&api_key));
     }
 }

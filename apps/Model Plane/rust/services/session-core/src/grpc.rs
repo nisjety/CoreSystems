@@ -3719,7 +3719,7 @@ async fn enqueue_tool_action_audit(
     Ok(())
 }
 
-fn validate_tool_action_token(
+pub(crate) fn validate_tool_action_token(
     value: &str,
     field: &'static str,
     max_len: usize,
@@ -3906,6 +3906,28 @@ pub(crate) async fn reserve_tool_action_inner(
     }
     Ok(Response::new(pb::ReserveToolActionResponse {
         created: inserted,
+    }))
+}
+
+/// Read the effect ledger's rows for named actions of one run (build plan WS03 S7a).
+///
+/// Everything that can refuse does so before the ledger is read: the read scope, a
+/// zero-retention credential (the ledger belongs to a run that persists), the shape of
+/// the request, and the caller's right to read the run. The rows are digest-only.
+pub(crate) async fn list_tool_actions_inner(
+    pool: &PgPool,
+    caller: &VerifiedIdentity,
+    req: pb::ListToolActionsRequest,
+) -> Result<Response<pb::ListToolActionsResponse>, Status> {
+    authorize_operation(caller, "session:read")?;
+    refuse_zdr_continuation(caller)?;
+    crate::tool_ledger::validate_list_request(&req.run_id, &req.action_ids)?;
+    authorize_run_owner(pool, caller, &req.run_id, OwnerIntent::Read).await?;
+    let rows =
+        crate::tool_ledger::list_actions(pool, caller.org_id(), &req.run_id, &req.action_ids)
+            .await?;
+    Ok(Response::new(pb::ListToolActionsResponse {
+        actions: rows.into_iter().map(pb::ToolActionState::from).collect(),
     }))
 }
 
@@ -4915,6 +4937,20 @@ impl SessionCore for SessionService {
         }
         .await;
         record_metrics("finalize_tool_action", started, result.is_ok());
+        result
+    }
+
+    async fn list_tool_actions(
+        &self,
+        request: Request<pb::ListToolActionsRequest>,
+    ) -> Result<Response<pb::ListToolActionsResponse>, Status> {
+        let started = Instant::now();
+        let result = async {
+            let caller = identity(&request)?;
+            list_tool_actions_inner(&self.pool, &caller, request.into_inner()).await
+        }
+        .await;
+        record_metrics("list_tool_actions", started, result.is_ok());
         result
     }
 

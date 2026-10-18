@@ -3,7 +3,10 @@
 //! reader, another version is refused, and a credential-shaped string is never
 //! persisted. The fixture is the contract: change it only with a version bump.
 
-use mp_contracts::loop_fold::{assert_no_credentials, FoldRefusal, LoopFoldV1, PauseKind};
+use mp_contracts::loop_fold::{
+    assert_no_credentials, contains_credential_shape, prompt_digest, FoldRefusal, LoopFoldV1,
+    PauseKind, EXT_EFFECT_LEDGER, EXT_NOT_RESUMABLE,
+};
 
 const GOLDEN: &str = include_str!("fixtures/loop-fold-v1.json");
 
@@ -43,4 +46,216 @@ fn a_bearer_shaped_string_fails_assert_no_credentials() {
         assert_no_credentials(&fold),
         Err(FoldRefusal::ContainsCredential)
     );
+}
+
+// ---- The writer's contract (build plan WS03 S6) ----
+//
+// execution-core writes three kinds of fold and a later build resumes from them.
+// These three checked-in values pin the shape the writer must produce, so the
+// resume is tested against a fixed contract instead of against whatever the writer
+// happens to emit this week. One scenario, three moments of it:
+//
+// * `round`: the end of round 1 (a read call ran, the history holds its result).
+// * `pre_effect`: round 2 has just been answered by the model with three calls
+//   (a read, a call the loop rejects, and an effectful delete). Nothing has been
+//   dispatched, but the rejected call already has its outcome and the fold carries it.
+// * `pause`: the same round after the read ran and the rejection was recorded, with
+//   the delete waiting on a human.
+//
+// execution-core's `runtime_loop::fold` tests build their fold from the loop's own
+// locals and compare it with these same files.
+
+const WRITER_ROUND: &str = include_str!("fixtures/loop-fold-v1-writer-round.json");
+const WRITER_PRE_EFFECT: &str = include_str!("fixtures/loop-fold-v1-writer-pre-effect.json");
+const WRITER_PAUSE: &str = include_str!("fixtures/loop-fold-v1-writer-pause.json");
+
+/// The system prompt and the tool definitions the scenario's run was offered. The
+/// golden's `prompt_digest` is computed from exactly these.
+const GOLDEN_SYSTEM_PROMPT: &str = "SYSTEM_PROMPT_GOLDEN";
+const GOLDEN_TOOLS: [(&str, &str, &str); 2] = [
+    (
+        "knowledge_search",
+        "Search the org knowledge base.",
+        r#"{"type":"object","properties":{"query":{"type":"string"}}}"#,
+    ),
+    (
+        "delete_records",
+        "Delete records (destructive).",
+        r#"{"type":"object","properties":{}}"#,
+    ),
+];
+
+fn parse(golden: &str) -> LoopFoldV1 {
+    LoopFoldV1::from_bytes(golden.as_bytes()).expect("the writer golden parses")
+}
+
+fn as_value(golden: &str) -> serde_json::Value {
+    serde_json::from_str(golden).expect("golden json")
+}
+
+#[test]
+fn every_writer_golden_is_a_valid_v1_fold_that_round_trips_exactly() {
+    for (name, golden) in [
+        ("round", WRITER_ROUND),
+        ("pre_effect", WRITER_PRE_EFFECT),
+        ("pause", WRITER_PAUSE),
+    ] {
+        let fold = parse(golden);
+        assert_eq!(fold.run_id, "run-golden-w", "{name}");
+        assert_eq!(fold.segment_no, 1, "{name}: the first segment");
+        assert!(fold.is_resumable(), "{name}");
+        assert_eq!(assert_no_credentials(&fold), Ok(()), "{name}");
+        // Re-serializing writes the same value: no field is dropped or invented, so
+        // the shape the writer must produce is the whole of what the fixture says.
+        let again = serde_json::to_value(&fold).expect("serialize");
+        assert_eq!(again, as_value(golden), "{name}: the golden is the canonical form");
+        let bytes = fold.to_bytes().expect("serialize");
+        assert_eq!(LoopFoldV1::from_bytes(&bytes).expect("parse again"), fold, "{name}");
+    }
+}
+
+#[test]
+fn every_writer_fold_names_the_ledger_and_the_prompt_it_was_written_under() {
+    for (name, golden) in [
+        ("round", WRITER_ROUND),
+        ("pre_effect", WRITER_PRE_EFFECT),
+        ("pause", WRITER_PAUSE),
+    ] {
+        let fold = parse(golden);
+        assert_eq!(
+            fold.extensions.get(EXT_EFFECT_LEDGER),
+            Some(&serde_json::json!(true)),
+            "{name}: the writer requires the effect ledger and says so"
+        );
+        assert!(!fold.extensions.contains_key(EXT_NOT_RESUMABLE), "{name}");
+        // The shared digest of the system prompt (the first message) and the tools.
+        assert_eq!(fold.messages[0].role, "system", "{name}");
+        assert_eq!(fold.messages[0].content, GOLDEN_SYSTEM_PROMPT, "{name}");
+        assert_eq!(
+            fold.prompt_digest,
+            prompt_digest(&fold.messages[0].content, &GOLDEN_TOOLS),
+            "{name}: prompt_digest is loop_fold::prompt_digest over the prompt and tools"
+        );
+        // The authority names exactly the offered tools, sorted.
+        assert_eq!(
+            fold.authority.tool_names,
+            vec!["delete_records".to_owned(), "knowledge_search".to_owned()],
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn the_round_fold_holds_no_open_round_and_no_pause() {
+    let fold = parse(WRITER_ROUND);
+    assert!(fold.round_in_flight.is_none(), "a round is saved between rounds");
+    assert!(fold.pending.is_none());
+    assert_eq!(fold.rounds_executed, 1, "one round has run");
+    assert_eq!(fold.step_seq, 1);
+    assert!(fold.grounded);
+    assert_eq!(fold.attempted_retrievals, vec!["knowledge_search:contract".to_owned()]);
+}
+
+#[test]
+fn the_pre_effect_fold_lists_every_call_in_order_and_resolves_only_the_refused_one() {
+    let fold = parse(WRITER_PRE_EFFECT);
+    let round = fold.round_in_flight.as_ref().expect("the round is open");
+    // rounds_executed counts rounds STARTED, including this open one.
+    assert_eq!(fold.rounds_executed, 2);
+    assert!(fold.pending.is_none(), "nothing waits on a human yet");
+    // Nothing has been dispatched when it is saved, so the only calls with an outcome
+    // are the ones the loop refused before dispatch (not offered, truncated, over a
+    // rung or a leaf): they are resolved here, matched by call id, with no step. A
+    // resume reads them as refused; it never re-derives a refusal, because some
+    // (truncation) depend on state the fold does not carry.
+    let resolved: Vec<(&str, &str)> = round
+        .completed
+        .iter()
+        .map(|c| (c.call_id.as_str(), c.step_id.as_str()))
+        .collect();
+    assert_eq!(resolved, [("call-3", "")]);
+    assert!(round.completed[0].output.is_empty() && !round.completed[0].error.is_empty());
+    // Exactly the calls without a step are resolved, and no call with a step is.
+    for call in &round.calls {
+        assert_eq!(
+            round.completed.iter().any(|c| c.call_id == call.id),
+            call.step_id.is_empty(),
+            "{}: resolved if and only if it was refused",
+            call.id
+        );
+    }
+    let names: Vec<&str> = round.calls.iter().map(|c| c.name.as_str()).collect();
+    assert_eq!(names, ["knowledge_search", "unknown_tool", "delete_records"], "the model's order");
+    // A call rejected before dispatch has no step id: its id is what identifies it.
+    let step_ids: Vec<&str> = round.calls.iter().map(|c| c.step_id.as_str()).collect();
+    assert_eq!(step_ids, ["tool_2_call-2", "", "tool_3_call-4"]);
+    assert!(round.calls.iter().all(|c| !c.id.is_empty()));
+    // The step counter is past every id handed out (the rejected call took none).
+    assert_eq!(fold.step_seq, 3);
+}
+
+#[test]
+fn the_pause_fold_names_the_pause_by_the_approvals_idempotency_key() {
+    let fold = parse(WRITER_PAUSE);
+    let round = fold.round_in_flight.as_ref().expect("the round is open");
+    let pending = fold.pending.as_ref().expect("the pause");
+    assert_eq!(pending.kind, PauseKind::Approval);
+    // `{run_id}:{step_id}`: the key the approval is created under, known before the
+    // approval exists, which is what lets the fold be saved first.
+    assert_eq!(pending.pause_ref, format!("{}:{}", fold.run_id, pending.step_id));
+    assert_eq!(pending.call, "delete_records");
+    assert_eq!(pending.action_fingerprint.len(), 64);
+    // The paused call is in `calls` and is NOT in `completed`.
+    assert!(round.calls.iter().any(|c| c.step_id == pending.step_id));
+    assert!(round.completed.iter().all(|c| c.step_id != pending.step_id));
+    // Every other call has an outcome, matched by call id; the rejected one has an
+    // empty step id and an error.
+    let by_call: Vec<(&str, &str)> = round
+        .completed
+        .iter()
+        .map(|c| (c.call_id.as_str(), c.step_id.as_str()))
+        .collect();
+    assert_eq!(by_call, [("call-2", "tool_2_call-2"), ("call-3", "")]);
+    let rejected = &round.completed[1];
+    assert!(rejected.output.is_empty() && !rejected.error.is_empty());
+    // Same counters as the pre_effect fold of the same round.
+    let pre = parse(WRITER_PRE_EFFECT);
+    assert_eq!(fold.rounds_executed, pre.rounds_executed);
+    assert_eq!(fold.step_seq, pre.step_seq);
+    assert_eq!(round.calls, pre.round_in_flight.as_ref().unwrap().calls);
+    assert_eq!(fold.messages, pre.messages);
+}
+
+#[test]
+fn a_tombstone_round_trips_and_is_never_resumable() {
+    let golden = parse(WRITER_ROUND);
+    let tombstone = LoopFoldV1::tombstone(
+        &golden.run_id,
+        golden.segment_no,
+        (golden.rounds_executed, golden.delegated_rounds, golden.step_seq),
+        golden.authority.clone(),
+        "oversize",
+    );
+    assert!(!tombstone.is_resumable());
+    assert_eq!(tombstone.extensions[EXT_NOT_RESUMABLE], "oversize");
+    let bytes = tombstone.to_bytes().expect("a tombstone serializes");
+    let back = LoopFoldV1::from_bytes(&bytes).expect("a tombstone is a valid v1 fold");
+    assert_eq!(back, tombstone);
+    assert!(!back.is_resumable());
+    assert_eq!(back.run_id, golden.run_id, "session-core checks the run id on save");
+    assert_eq!(back.authority.digest(), golden.authority.digest());
+}
+
+#[test]
+fn contains_credential_shape_agrees_with_assert_no_credentials() {
+    let mut fold = parse(WRITER_ROUND);
+    for (text, shaped) in [
+        ("curl -H 'Authorization: Bearer abc' https://x", true),
+        ("-----BEGIN CERTIFICATE-----", true),
+        ("an ordinary message", false),
+    ] {
+        fold.messages[1].content = text.to_owned();
+        assert_eq!(contains_credential_shape(text), shaped, "{text:?}");
+        assert_eq!(assert_no_credentials(&fold).is_err(), shaped, "{text:?}");
+    }
 }

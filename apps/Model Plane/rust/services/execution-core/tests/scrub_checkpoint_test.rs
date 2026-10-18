@@ -103,3 +103,209 @@ fn serialized_checkpoint_bytes_contain_no_secrets() {
     );
     assert!(as_str.contains(REDACTED), "no redaction marker present");
 }
+
+// ---- The durable loop fold (build plan WS03 S6) ----
+//
+// A fold is conversation content saved so a run can continue after a pause or a
+// crash. It must never be a credential store, and it must stay saveable: session-core
+// refuses a fold that parses badly, and `LoopFoldV1::to_bytes` refuses the WHOLE fold
+// for one credential-shaped string. `scrub_fold` is the writer's pass between the
+// two, and it works per field.
+
+use execution_core::scrub::scrub_fold;
+use mp_contracts::loop_fold::{
+    Authority, FoldCall, FoldCompleted, FoldMessage, LoopFoldV1, PauseKind, PendingPause,
+    RoundInFlight, FOLD_VERSION,
+};
+
+const WITHHELD: &str = "[content withheld from the saved state: it looked like a credential]";
+
+fn authority() -> Authority {
+    Authority {
+        mode: "ask".to_owned(),
+        plan_mode: false,
+        autonomy_rung: "workspace_write".to_owned(),
+        space_id: String::new(),
+        min_privacy_tier: 1,
+        provider_hint: String::new(),
+        tool_names: vec!["delete_records".to_owned(), "knowledge_search".to_owned()],
+        max_rounds: 8,
+    }
+}
+
+fn message(role: &str, content: &str) -> FoldMessage {
+    FoldMessage {
+        role: role.to_owned(),
+        content: content.to_owned(),
+        name: String::new(),
+        compaction_summary: String::new(),
+    }
+}
+
+fn call(id: &str, name: &str, arguments_json: &str, step_id: &str) -> FoldCall {
+    FoldCall {
+        id: id.to_owned(),
+        name: name.to_owned(),
+        arguments_json: arguments_json.to_owned(),
+        step_id: step_id.to_owned(),
+    }
+}
+
+/// A fold shaped like a pause: an open round with one finished call and one pending.
+fn open_round_fold() -> LoopFoldV1 {
+    LoopFoldV1 {
+        v: FOLD_VERSION,
+        run_id: "run-1".to_owned(),
+        segment_no: 1,
+        rounds_executed: 2,
+        delegated_rounds: 0,
+        step_seq: 2,
+        children_started: 0,
+        grounded: false,
+        compaction_triggered: false,
+        attempted_retrievals: vec!["knowledge_search:contract".to_owned()],
+        messages: vec![
+            message("system", "You are a careful agent."),
+            message("user", "Delete the stale records"),
+        ],
+        round_in_flight: Some(RoundInFlight {
+            assistant_content: "I will look, then delete.".to_owned(),
+            calls: vec![
+                call("call-1", "knowledge_search", r#"{"query":"stale"}"#, "tool_1_call-1"),
+                call("call-2", "delete_records", r#"{"table":"stale"}"#, "tool_2_call-2"),
+            ],
+            completed: vec![FoldCompleted {
+                step_id: "tool_1_call-1".to_owned(),
+                output: "found 3 stale records".to_owned(),
+                error: String::new(),
+                call_id: "call-1".to_owned(),
+            }],
+        }),
+        pending: Some(PendingPause {
+            kind: PauseKind::Approval,
+            pause_ref: "run-1:tool_2_call-2".to_owned(),
+            step_id: "tool_2_call-2".to_owned(),
+            call: "delete_records".to_owned(),
+            action_fingerprint: "abc".to_owned(),
+        }),
+        authority: authority(),
+        prompt_digest: "digest".to_owned(),
+        extensions: serde_json::Map::new(),
+    }
+}
+
+#[test]
+fn scrub_fold_keeps_the_fold_parseable_and_removes_every_seeded_secret() {
+    // Assembled at runtime so no literal secret sits in committed source.
+    let api_key = format!("sk-{}", "seededkey1234567890abcdef");
+    let jwt = "eyJhbGciOiJIUzI1NiJ.eyJzdWIiOiJ1c2VyLTEifQ.abcdefghijklmnopqrstuvwxyz0123456789";
+    let password = "hunter2-do-not-log";
+    let bearer = format!("Bearer {jwt}");
+
+    let mut fold = open_round_fold();
+    fold.messages[1].content = format!("use {api_key} to call it");
+    fold.messages.push(message("user", &format!("curl with {bearer}")));
+    fold.messages.push(message("assistant", &format!("the db_password={password} is set")));
+    let round = fold.round_in_flight.as_mut().unwrap();
+    round.assistant_content = format!("I found {api_key} and {jwt} in the file");
+    round.completed[0].output = format!("response carried {bearer}");
+    round.completed.push(FoldCompleted {
+        step_id: String::new(),
+        output: String::new(),
+        error: format!("failed: password={password}"),
+        call_id: "call-3".to_owned(),
+    });
+
+    scrub_fold(&mut fold);
+
+    let bytes = fold.to_bytes().expect("a scrubbed fold passes the credential gate");
+    let text = std::str::from_utf8(&bytes).expect("utf8");
+    for secret in [api_key.as_str(), jwt, password] {
+        assert!(!text.contains(secret), "{secret} leaked into the fold: {text}");
+    }
+    assert!(text.contains(REDACTED), "the redaction is visible");
+    // It still parses, and the authority (which a key-based scrub would destroy) and
+    // every structural field survived.
+    let back = LoopFoldV1::from_bytes(&bytes).expect("a scrubbed fold still parses");
+    assert_eq!(back.authority, authority());
+    assert_eq!(back.run_id, "run-1");
+    assert_eq!(back.rounds_executed, 2);
+    assert_eq!(back.pending, open_round_fold().pending);
+    assert_eq!(back.round_in_flight.as_ref().unwrap().calls.len(), 2);
+    assert_eq!(back.messages[0].content, "You are a careful agent.", "clean text is untouched");
+}
+
+/// Pins WHY `scrub_fold` is per field: the generic JSON scrub redacts any object key
+/// matching `auth`, and `authority` matches, so scrubbing the serialized fold would
+/// turn the one thing a resume must read intact into "[REDACTED]".
+#[test]
+fn key_based_scrubbing_over_a_whole_fold_would_destroy_the_authority() {
+    let mut value = serde_json::to_value(open_round_fold()).expect("serialize");
+    scrub_json_value(&mut value);
+    assert_eq!(value["authority"], json!(REDACTED));
+    assert!(
+        serde_json::from_value::<LoopFoldV1>(value).is_err(),
+        "a key-scrubbed fold is no longer a fold"
+    );
+    // The per-field pass leaves it alone.
+    let mut fold = open_round_fold();
+    scrub_fold(&mut fold);
+    assert_eq!(fold.authority, authority());
+}
+
+#[test]
+fn arguments_that_scrubbing_would_change_are_withheld_not_rewritten() {
+    let secret = format!("sk-{}", "argumentkey1234567890abcd");
+    let mut fold = open_round_fold();
+    let clean = r#"{"table":"stale","limit":5}"#;
+    let round = fold.round_in_flight.as_mut().unwrap();
+    round.calls = vec![
+        call("call-1", "knowledge_search", clean, "tool_1_call-1"),
+        // A sensitive KEY: the JSON scrub would rewrite its value.
+        call("call-2", "http_post", r#"{"url":"https://x","password":"hunter2"}"#, "tool_2_call-2"),
+        // A secret VALUE under an innocent key.
+        call("call-3", "http_post", &format!(r#"{{"body":"{secret}"}}"#), "tool_3_call-3"),
+        // Not JSON at all, but carrying a secret.
+        call("call-4", "shell", &format!("echo {secret}"), "tool_4_call-4"),
+        // Not JSON and clean: kept byte for byte.
+        call("call-5", "shell", "echo hello", "tool_5_call-5"),
+    ];
+    scrub_fold(&mut fold);
+    let calls = &fold.round_in_flight.as_ref().unwrap().calls;
+    assert_eq!(calls[0].arguments_json, clean, "a clean call keeps its arguments byte for byte");
+    assert_eq!(calls[1].arguments_json, "", "a sensitive key withholds the arguments");
+    assert_eq!(calls[2].arguments_json, "", "a secret value withholds the arguments");
+    assert_eq!(calls[3].arguments_json, "", "a secret in a non-JSON argument is withheld");
+    assert_eq!(calls[4].arguments_json, "echo hello");
+    // Withheld, never rewritten: the stored text is empty, not a half-redacted call a
+    // resume could mistake for what the model asked.
+    let text = serde_json::to_string(&fold).unwrap();
+    assert!(!text.contains(&secret) && !text.contains("hunter2"), "{text}");
+    assert!(!text.contains(REDACTED), "no rewritten argument: {text}");
+    // Identity fields are untouched, so the call can still be matched.
+    assert_eq!(calls[1].id, "call-2");
+    assert_eq!(calls[1].step_id, "tool_2_call-2");
+    assert!(fold.to_bytes().is_ok());
+}
+
+#[test]
+fn a_credential_shaped_word_is_withheld_so_the_fold_still_saves() {
+    let mut fold = open_round_fold();
+    fold.messages.push(message("assistant", "Set the Authorization: header before calling."));
+    fold.messages.push(message("user", "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----"));
+    fold.round_in_flight.as_mut().unwrap().assistant_content =
+        "the x-api-key header is required".to_owned();
+    // Without the pass the WHOLE fold is refused for these benign words.
+    assert!(fold.to_bytes().is_err(), "the control: the gate refuses the fold as it stands");
+
+    scrub_fold(&mut fold);
+
+    assert_eq!(fold.messages[2].content, WITHHELD);
+    assert_eq!(fold.messages[3].content, WITHHELD);
+    assert_eq!(fold.round_in_flight.as_ref().unwrap().assistant_content, WITHHELD);
+    let bytes = fold.to_bytes().expect("the fold saves with the offending fields withheld");
+    assert!(LoopFoldV1::from_bytes(&bytes).is_ok());
+    // The clean fields around them are untouched.
+    assert_eq!(fold.messages[1].content, "Delete the stale records");
+    assert_eq!(fold.messages[0].content, "You are a careful agent.");
+}

@@ -1300,6 +1300,13 @@ impl SessionCore for MockSessionCore {
         Err(Status::unimplemented("claim_loop_checkpoint not needed in test"))
     }
 
+    async fn list_tool_actions(
+        &self,
+        _: TReq<mp_contracts::model_plane::v1::ListToolActionsRequest>,
+    ) -> Result<Response<mp_contracts::model_plane::v1::ListToolActionsResponse>, Status> {
+        Err(Status::unimplemented("list_tool_actions not needed in test"))
+    }
+
     async fn close_loop_checkpoint(
         &self,
         _: TReq<mp_contracts::model_plane::v1::CloseLoopCheckpointRequest>,

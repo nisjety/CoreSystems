@@ -156,6 +156,82 @@ pub fn scrub_string(s: &str) -> String {
     out
 }
 
+/// What replaces a saved-state field that still looks like a credential after
+/// [`scrub_string`]. Fixed words, so nothing of the original survives.
+const FOLD_WITHHELD: &str = "[content withheld from the saved state: it looked like a credential]";
+
+/// Scrub one text field of a fold: the known secret patterns first, then, if the
+/// result still has a credential's shape, the whole field is withheld.
+fn scrub_fold_text(text: &mut String) {
+    let scrubbed = scrub_string(text);
+    if mp_contracts::loop_fold::contains_credential_shape(&scrubbed) {
+        FOLD_WITHHELD.clone_into(text);
+    } else if scrubbed != *text {
+        *text = scrubbed;
+    }
+}
+
+/// A call's arguments are never rewritten: a resume must see exactly what the
+/// model asked for, or an empty string. They are cleared when any scrubbing pass
+/// would have changed them (a sensitive key, a secret value, a secret in text that
+/// is not JSON) or when they carry a credential's shape. A call saved with empty
+/// arguments is not one a resume may dispatch.
+fn withhold_arguments_if_sensitive(arguments_json: &mut String) {
+    let changed = match serde_json::from_str::<Value>(arguments_json) {
+        Ok(original) => {
+            let mut scrubbed = original.clone();
+            scrub_json_value(&mut scrubbed);
+            scrubbed != original
+        }
+        Err(_) => scrub_string(arguments_json) != *arguments_json,
+    };
+    if changed || mp_contracts::loop_fold::contains_credential_shape(arguments_json) {
+        arguments_json.clear();
+    }
+}
+
+/// Scrub a durable-loop fold in place, before it is serialized and saved.
+///
+/// **Per field, never over the serialized JSON.** [`scrub_json_value`] redacts a
+/// whole object whose key matches `auth`, and the fold's `authority` is exactly
+/// such a key: scrubbing the serialized fold would replace the authority a resume
+/// must read intact with `"[REDACTED]"` (pinned by a test).
+///
+/// Every free-text field (message content, name and compaction summary, the
+/// assistant text of the open round, completed outputs and errors, the retrievals
+/// already attempted, and a call's id and name) goes through [`scrub_string`]. A
+/// field that still looks like a credential is then withheld whole: the fold's
+/// final gate, `LoopFoldV1::to_bytes`, refuses the **entire** fold for one benign
+/// "Authorization:" or certificate header, which would make every later fold of
+/// the run unsaveable. Call arguments are handled by
+/// [`withhold_arguments_if_sensitive`]: byte-exact or empty.
+///
+/// Structural fields (ids, counters, the authority, the pause descriptor) are the
+/// code's own and are not touched. `to_bytes` stays the last gate.
+pub fn scrub_fold(fold: &mut mp_contracts::loop_fold::LoopFoldV1) {
+    for message in &mut fold.messages {
+        scrub_fold_text(&mut message.content);
+        scrub_fold_text(&mut message.name);
+        scrub_fold_text(&mut message.compaction_summary);
+    }
+    for retrieval in &mut fold.attempted_retrievals {
+        scrub_fold_text(retrieval);
+    }
+    if let Some(round) = fold.round_in_flight.as_mut() {
+        scrub_fold_text(&mut round.assistant_content);
+        for call in &mut round.calls {
+            scrub_fold_text(&mut call.id);
+            scrub_fold_text(&mut call.name);
+            withhold_arguments_if_sensitive(&mut call.arguments_json);
+        }
+        for done in &mut round.completed {
+            scrub_fold_text(&mut done.output);
+            scrub_fold_text(&mut done.error);
+            scrub_fold_text(&mut done.call_id);
+        }
+    }
+}
+
 /// Flag names whose NEXT argv element is the secret.
 ///
 /// Every pattern in this module keys on a `:` or `=` separator, so a

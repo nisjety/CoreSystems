@@ -71,6 +71,12 @@ service SessionCore {
   // Close a run's fold once its loop has finished. Idempotent for a closed row.
   rpc CloseLoopCheckpoint(CloseLoopCheckpointRequest) returns (CloseLoopCheckpointResponse);
 
+  // Read the effect ledger's rows for named tool calls of one run (build plan WS03
+  // S7a). Digest-only: the status, class and argument digest of each action, never
+  // its arguments or output. The loop that resumes a run reads it to close a call
+  // honestly instead of running it again.
+  rpc ListToolActions(ListToolActionsRequest) returns (ListToolActionsResponse);
+
   // Replay the thread event log as a stream of Events.
   // Ordering: (ts, event_id) with event_id as deterministic tiebreaker.
   rpc ReplayThread(ReplayThreadRequest) returns (stream Event);
@@ -1367,3 +1373,42 @@ message CloseLoopCheckpointRequest {
 
 // Empty acknowledgement of CloseLoopCheckpoint.
 message CloseLoopCheckpointResponse {}
+
+// --- Effect ledger read (build plan WS03 S7a) ---
+
+// Read the ledger rows of the named tool calls of one run.
+message ListToolActionsRequest {
+  // Run whose ledger to read. The caller must be allowed to read the run.
+  string run_id = 1;
+
+  // The ledger's action ids to read: at most 64, each a well-formed action id.
+  // An id the run has no row for is simply absent from the answer.
+  repeated string action_ids = 2;
+}
+
+// One ledger row, digest-only. No argument, output or provider receipt is carried.
+message ToolActionState {
+  // The ledger's action id for the call.
+  string action_id = 1;
+
+  // Canonical tool name the call was reserved under.
+  string tool = 2;
+
+  // "reserved", "completed", "failed", "not_run" or "unknown_outcome".
+  string status = 3;
+
+  // What the call may change: "none", "read", "write" or "external". Empty when the
+  // writer did not classify the call.
+  string effect_class = 4;
+
+  // Digest of the call's arguments: 64 lowercase hex characters. Empty when none was recorded.
+  string args_digest = 5;
+
+  // Who closed the row: "executor" or "sweep". Empty while the row is still open.
+  string closed_by = 6;
+}
+
+// The rows found, in reservation order. A run that keeps no ledger rows answers an empty list.
+message ListToolActionsResponse {
+  repeated ToolActionState actions = 1;
+}

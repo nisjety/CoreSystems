@@ -3,6 +3,7 @@
 pub mod agent;
 pub(crate) mod closers;
 pub(crate) mod effect;
+pub(crate) mod fold;
 pub(crate) mod post_mutation;
 pub mod retry;
 pub(crate) mod resume;

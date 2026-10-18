@@ -3615,6 +3615,16 @@ mod tests {
             ))
         }
 
+        async fn list_tool_actions(
+            &self,
+            _: Request<mp_contracts::model_plane::v1::ListToolActionsRequest>,
+        ) -> Result<Response<mp_contracts::model_plane::v1::ListToolActionsResponse>, Status>
+        {
+            Err(Status::unimplemented(
+                "list_tool_actions not needed in test",
+            ))
+        }
+
         async fn close_loop_checkpoint(
             &self,
             _: Request<mp_contracts::model_plane::v1::CloseLoopCheckpointRequest>,

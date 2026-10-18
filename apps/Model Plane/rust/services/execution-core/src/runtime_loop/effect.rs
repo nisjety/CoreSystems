@@ -193,6 +193,108 @@ pub(crate) async fn finalize(
         .map_err(|status| status.message().to_owned())
 }
 
+/// The most action ids one read of the ledger may name (session-core's bound).
+const LIST_ACTIONS_MAX_IDS: usize = 64;
+
+/// One ledger row as the loop that resumes a run reads it: the tool, the state and
+/// the digest, never the arguments. `effect_class` and `args_digest` are `None` for
+/// a row whose writer did not record them.
+// Read only by the in-place resume (WS03 S7b), which is itself off by default; until
+// it lands nothing in the loop constructs or reads a row.
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct LedgerRow {
+    pub tool: String,
+    pub status: mp_contracts::loop_fold::LedgerStatus,
+    pub effect_class: Option<EffectClass>,
+    pub args_digest: Option<String>,
+}
+
+/// Read one wire row. A value outside the shared vocabulary is an error: a status,
+/// class or digest the loop cannot read must not be guessed at, because a guess
+/// could take a call that may have run for one that did not.
+#[allow(dead_code)] // S7b
+fn row_from_state(state: &pb::ToolActionState) -> Result<LedgerRow, String> {
+    let status = mp_contracts::effect_ledger::ledger_status_from_row(&state.status)
+        .ok_or_else(|| "the ledger returned an unknown status".to_owned())?;
+    let effect_class = if state.effect_class.is_empty() {
+        None
+    } else {
+        Some(
+            EffectClass::parse(&state.effect_class)
+                .ok_or_else(|| "the ledger returned an unknown effect class".to_owned())?,
+        )
+    };
+    let args_digest = if state.args_digest.is_empty() {
+        None
+    } else if mp_contracts::effect_ledger::is_args_digest(&state.args_digest) {
+        Some(state.args_digest.clone())
+    } else {
+        return Err("the ledger returned a malformed args digest".to_owned());
+    };
+    Ok(LedgerRow {
+        tool: state.tool.clone(),
+        status,
+        effect_class,
+        args_digest,
+    })
+}
+
+/// The rows of an answer, by action id. The answer must be to the question: a row
+/// for an action that was not asked, or two rows for one action, is refused.
+#[allow(dead_code)] // S7b
+fn rows_from_states(
+    asked: &[String],
+    states: Vec<pb::ToolActionState>,
+) -> Result<std::collections::BTreeMap<String, LedgerRow>, String> {
+    let mut rows = std::collections::BTreeMap::new();
+    for state in states {
+        if !asked.contains(&state.action_id) {
+            return Err("the ledger answered an action that was not asked".to_owned());
+        }
+        let row = row_from_state(&state)?;
+        if rows.insert(state.action_id, row).is_some() {
+            return Err("the ledger answered one action twice".to_owned());
+        }
+    }
+    Ok(rows)
+}
+
+/// Read the ledger's rows for the named actions of a run: what the loop that resumes
+/// a run needs to close a dangling call honestly. An action with no row is absent
+/// from the map (a run that keeps no ledger rows answers an empty map). The error is
+/// the reason, for the log.
+// Called only by the in-place resume (WS03 S7b), which is itself off by default.
+#[allow(dead_code)]
+pub(crate) async fn list_actions(
+    channel: &Channel,
+    bearer: Option<&str>,
+    run_id: &str,
+    action_ids: &[String],
+) -> Result<std::collections::BTreeMap<String, LedgerRow>, String> {
+    if action_ids.is_empty() {
+        return Ok(std::collections::BTreeMap::new());
+    }
+    let bearer = bearer.ok_or_else(|| "no verified session credential".to_owned())?;
+    let mut rows = std::collections::BTreeMap::new();
+    for chunk in action_ids.chunks(LIST_ACTIONS_MAX_IDS) {
+        let request = super::authenticated_session_request(
+            pb::ListToolActionsRequest {
+                run_id: run_id.to_owned(),
+                action_ids: chunk.to_vec(),
+            },
+            bearer,
+        )?;
+        let response = SessionCoreClient::new(channel.clone())
+            .list_tool_actions(request)
+            .await
+            .map_err(|status| status.message().to_owned())?
+            .into_inner();
+        rows.extend(rows_from_states(chunk, response.actions)?);
+    }
+    Ok(rows)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -304,6 +406,86 @@ mod tests {
         ] {
             assert!(mp_contracts::effect_ledger::is_final_outcome(final_outcome_for(status)));
         }
+    }
+
+    fn state(id: &str, status: &str, class: &str, digest: &str) -> pb::ToolActionState {
+        pb::ToolActionState {
+            action_id: id.to_owned(),
+            tool: "send_email".to_owned(),
+            status: status.to_owned(),
+            effect_class: class.to_owned(),
+            args_digest: digest.to_owned(),
+            closed_by: String::new(),
+        }
+    }
+
+    #[test]
+    fn a_ledger_row_keeps_the_status_class_and_digest_the_ledger_stored() {
+        let digest = args_digest_of(r#"{"to":"a"}"#).expect("digest");
+        let asked = vec!["act-1".to_owned(), "act-2".to_owned(), "act-3".to_owned()];
+        let rows = rows_from_states(
+            &asked,
+            vec![
+                state("act-1", "completed", "external", &digest),
+                // A row the gateway's read-only loop wrote has no class and no digest.
+                state("act-2", "reserved", "", ""),
+                state("act-3", "unknown_outcome", "write", &digest),
+            ],
+        )
+        .expect("rows");
+        assert_eq!(rows.len(), 3);
+        let first = &rows["act-1"];
+        assert_eq!(first.tool, "send_email");
+        assert_eq!(first.status, mp_contracts::loop_fold::LedgerStatus::Completed);
+        assert_eq!(first.effect_class, Some(EffectClass::External));
+        assert_eq!(first.args_digest.as_deref(), Some(digest.as_str()));
+        let second = &rows["act-2"];
+        assert_eq!(second.status, mp_contracts::loop_fold::LedgerStatus::Reserved);
+        assert_eq!((second.effect_class, second.args_digest.as_deref()), (None, None));
+        assert_eq!(rows["act-3"].status, mp_contracts::loop_fold::LedgerStatus::Unknown);
+    }
+
+    #[test]
+    fn a_row_the_loop_cannot_read_is_an_error_never_a_guess() {
+        let digest = args_digest_of("{}").expect("digest");
+        let asked = vec!["act-1".to_owned()];
+        // A status, class or digest outside the shared vocabulary: guessing would let a
+        // call that may have run be taken for one that did not.
+        for bad in [
+            state("act-1", "pending", "write", &digest),
+            state("act-1", "", "write", &digest),
+            state("act-1", "completed", "destructive", &digest),
+            state("act-1", "completed", "write", "not-a-digest"),
+        ] {
+            assert!(rows_from_states(&asked, vec![bad.clone()]).is_err(), "{bad:?}");
+        }
+        // An action nobody asked about, or the same action twice, is not the answer to the question.
+        assert!(rows_from_states(&asked, vec![state("act-9", "completed", "write", &digest)]).is_err());
+        assert!(rows_from_states(
+            &asked,
+            vec![
+                state("act-1", "completed", "write", &digest),
+                state("act-1", "failed", "write", &digest)
+            ]
+        )
+        .is_err());
+        // No rows at all is a valid answer: the run kept none.
+        assert!(rows_from_states(&asked, Vec::new()).expect("empty").is_empty());
+    }
+
+    #[tokio::test]
+    async fn the_read_needs_a_credential_and_asks_nothing_when_there_is_nothing_to_ask() {
+        // A channel that goes nowhere: a call that reached it would fail with a transport error.
+        let channel = Channel::from_static("http://127.0.0.1:1").connect_lazy();
+        let ids = vec!["act-1".to_owned()];
+        assert_eq!(
+            list_actions(&channel, None, "run-1", &ids).await.expect_err("no credential"),
+            "no verified session credential"
+        );
+        assert!(list_actions(&channel, Some("bearer"), "run-1", &[])
+            .await
+            .expect("nothing asked")
+            .is_empty());
     }
 
     #[test]
