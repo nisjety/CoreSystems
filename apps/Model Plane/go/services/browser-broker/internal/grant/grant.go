@@ -58,6 +58,13 @@ const DefaultMaxRunDomains = 8
 // would die mid-step is refused instead.
 const MinDerivedLifetime = 30 * time.Second
 
+// DefaultMaxActiveRunsPerParent bounds the live run grants one session grant
+// may hold at once. Run grants do not count toward the per-owner cap (that
+// cap bounds sessions, and a burst of AI runs must not lock a user out of
+// opening a browser session); they are bounded here instead, so one owner's
+// total stays at most MaxActivePerOwner * (1 + this).
+const DefaultMaxActiveRunsPerParent = 8
+
 // derivePolicy says how a run grant may be derived from a parent kind.
 type derivePolicy struct {
 	// explicitHosts requires the caller to name a non-empty host list (R-16:
@@ -173,8 +180,10 @@ type DeriveParams struct {
 	// MaxRunDomains bounds the run's hosts; zero or negative uses
 	// DefaultMaxRunDomains.
 	MaxRunDomains int
-	// MaxActivePerOwner > 0 applies the per-owner active cap atomically.
-	MaxActivePerOwner int
+	// MaxActivePerParent bounds the parent's live run grants (checked
+	// atomically with the insert); zero or negative uses
+	// DefaultMaxActiveRunsPerParent. A replay of an issued key is not new.
+	MaxActivePerParent int
 	// Policy, when set, re-checks the run's hosts (defence in depth).
 	Policy PolicyResolver
 }
@@ -196,6 +205,11 @@ type MemoryRepository struct {
 	mu     sync.Mutex
 	grants map[string]*Grant
 	now    func() time.Time
+	// betweenLocks, when set (tests only), runs after Derive and
+	// CreateScopedSensitiveApproval have read the parent and released the
+	// lock, before they re-take it to insert: it forces the interleaving a
+	// concurrent revoke or expiry would produce.
+	betweenLocks func()
 }
 
 var _ Repository = (*MemoryRepository)(nil)
@@ -240,10 +254,15 @@ func (s *MemoryRepository) CreateSession(_ context.Context, p CreateSessionParam
 }
 
 // CreateScopedSensitiveApproval binds a one-time sensitive grant to an
-// already validated ordinary BrowserBroker grant. The approval inherits the
-// parent's ZDR flag.
-func (s *MemoryRepository) CreateScopedSensitiveApproval(ctx context.Context, p ApprovalParams) (*Grant, error) {
-	parent, err := s.GetScoped(ctx, p.ParentGrantID, p.OrgID, p.OwnerID)
+// already validated ordinary BrowserBroker grant. The approval is never wider
+// than its parent: it inherits the parent's ZDR flag, each of its hosts must
+// equal or sit below a parent host (ErrDeriveWidensParent), and its expiry is
+// capped at the parent's. The parent is re-read under the insert lock, so a
+// parent revoked or expired meanwhile leaves no approval behind.
+func (s *MemoryRepository) CreateScopedSensitiveApproval(_ context.Context, p ApprovalParams) (*Grant, error) {
+	s.mu.Lock()
+	parent, err := s.getScopedLocked(p.ParentGrantID, p.OrgID, p.OwnerID)
+	s.mu.Unlock()
 	if err != nil {
 		return nil, err
 	}
@@ -253,6 +272,11 @@ func (s *MemoryRepository) CreateScopedSensitiveApproval(ctx context.Context, p 
 	domains, err := NormalizeAllowedDomains(p.AllowedDomains)
 	if err != nil {
 		return nil, err
+	}
+	for _, host := range domains {
+		if !hostWithin(host, parent.AllowedDomains) {
+			return nil, ErrDeriveWidensParent
+		}
 	}
 	scopes, err := NormalizeSensitiveScopes(
 		p.AllowedActions, p.AllowedFrameIDs, p.AllowedDialogIDs, p.AllowedArtifactIDs,
@@ -282,11 +306,21 @@ func (s *MemoryRepository) CreateScopedSensitiveApproval(ctx context.Context, p 
 		AllowedDialogIDs:   scopes.dialogs,
 		AllowedArtifactIDs: scopes.artifacts,
 		ParentGrantID:      p.ParentGrantID,
-		ExpiresAt:          s.now().Add(p.TTL),
+	}
+	if s.betweenLocks != nil {
+		s.betweenLocks()
 	}
 	s.mu.Lock()
+	defer s.mu.Unlock()
+	parent, err = s.getScopedLocked(p.ParentGrantID, p.OrgID, p.OwnerID)
+	if err != nil {
+		return nil, err
+	}
+	g.ExpiresAt = s.now().Add(p.TTL)
+	if parent.ExpiresAt.Before(g.ExpiresAt) {
+		g.ExpiresAt = parent.ExpiresAt
+	}
 	s.grants[id] = clone(g)
-	s.mu.Unlock()
 	return clone(g), nil
 }
 
@@ -334,6 +368,9 @@ func (s *MemoryRepository) Derive(ctx context.Context, p DeriveParams) (*Grant, 
 	if err != nil {
 		return nil, err
 	}
+	if s.betweenLocks != nil {
+		s.betweenLocks()
+	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -362,7 +399,11 @@ func (s *MemoryRepository) Derive(ctx context.Context, p DeriveParams) (*Grant, 
 	if expires.Sub(now) < MinDerivedLifetime {
 		return nil, ErrParentNotDerivable
 	}
-	if p.MaxActivePerOwner > 0 && s.activeLocked(p.OrgID, parent.OwnerID) >= p.MaxActivePerOwner {
+	maxRuns := p.MaxActivePerParent
+	if maxRuns <= 0 {
+		maxRuns = DefaultMaxActiveRunsPerParent
+	}
+	if s.activeRunsLocked(parent.ID, parent.OrgID) >= maxRuns {
 		return nil, ErrTooManyGrants
 	}
 	g := &Grant{
@@ -498,13 +539,27 @@ func (s *MemoryRepository) RevokeScoped(_ context.Context, id, orgID, ownerID, r
 	return nil
 }
 
-// activeLocked counts the owner's ordinary grants that are neither revoked nor
-// expired. Approvals are children of those and do not count toward the cap.
+// activeLocked counts the owner's session grants that are neither revoked nor
+// expired. Approvals and run grants are children of those and are bounded per
+// parent instead (see DefaultMaxActiveRunsPerParent).
 func (s *MemoryRepository) activeLocked(orgID, ownerID string) int {
 	now := s.now()
 	active := 0
 	for _, g := range s.grants {
-		if g.OrgID == orgID && g.OwnerID == ownerID && g.Kind != KindSensitiveApproval &&
+		if g.OrgID == orgID && g.OwnerID == ownerID && g.Kind != KindSensitiveApproval && g.Kind != KindRun &&
+			!g.Revoked && !now.After(g.ExpiresAt) {
+			active++
+		}
+	}
+	return active
+}
+
+// activeRunsLocked counts the live run grants derived from parentID.
+func (s *MemoryRepository) activeRunsLocked(parentID, orgID string) int {
+	now := s.now()
+	active := 0
+	for _, g := range s.grants {
+		if g.Kind == KindRun && g.ParentGrantID == parentID && g.OrgID == orgID &&
 			!g.Revoked && !now.After(g.ExpiresAt) {
 			active++
 		}

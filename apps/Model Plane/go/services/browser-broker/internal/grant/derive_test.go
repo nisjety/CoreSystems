@@ -338,7 +338,42 @@ func TestDerive_RevokingTheParentRevokesTheRunGrant(t *testing.T) {
 }
 
 // A revoke racing a derive must never leave a live run grant under a revoked
-// parent: either the derive fails or the cascade catches its child.
+// parent: either the derive fails or the cascade catches its child. The
+// interleaving that matters (parent read, then revoked, then insert) is
+// forced through the betweenLocks hook, so it is checked on every run rather
+// than only when the scheduler happens to produce it.
+func TestDerive_ParentRevokedBetweenReadAndInsertLeavesNoChild(t *testing.T) {
+	store, _ := clockedRepo()
+	parent := session(t, store, CreateSessionParams{})
+	store.betweenLocks = func() {
+		if err := store.RevokeScoped(ctx, parent.ID, parent.OrgID, parent.OwnerID, "session_closed"); err != nil {
+			t.Errorf("revoke: %v", err)
+		}
+	}
+	if run, err := store.Derive(ctx, deriveParams(parent, "k")); !errors.Is(err, ErrGrantRevoked) {
+		t.Fatalf("derive across a revoke = %#v, %v; want ErrGrantRevoked", run, err)
+	}
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	for id, g := range store.grants {
+		if g.Kind == KindRun {
+			t.Fatalf("run grant %s was inserted under a revoked parent", id)
+		}
+	}
+}
+
+func TestDerive_ParentExpiredBetweenReadAndInsertLeavesNoChild(t *testing.T) {
+	store, clock := clockedRepo()
+	parent := session(t, store, CreateSessionParams{TTL: 2 * time.Minute})
+	store.betweenLocks = func() { clock.Advance(3 * time.Minute) }
+	if _, err := store.Derive(ctx, deriveParams(parent, "k")); !errors.Is(err, ErrGrantExpired) {
+		t.Fatalf("derive across the parent's expiry: %v, want ErrGrantExpired", err)
+	}
+}
+
+// The unforced race, as a smoke test. Every iteration must end in one of the
+// two legal states, and a failed derive must fail for the revoke and nothing
+// else, so a Derive that always failed would not pass.
 func TestDerive_ConcurrentParentRevokeNeverLeavesALiveChild(t *testing.T) {
 	for i := 0; i < 200; i++ {
 		store := NewMemoryRepository()
@@ -357,30 +392,76 @@ func TestDerive_ConcurrentParentRevokeNeverLeavesALiveChild(t *testing.T) {
 		}()
 		wg.Wait()
 		if deriveErr != nil {
+			if !errors.Is(deriveErr, ErrGrantRevoked) {
+				t.Fatalf("iteration %d: derive failed for another reason: %v", i, deriveErr)
+			}
 			continue
 		}
 		if _, err := store.GetScoped(ctx, run.ID, parent.OrgID, parent.OwnerID); !errors.Is(err, ErrGrantRevoked) {
 			t.Fatalf("iteration %d: run grant outlived its revoked parent (err=%v)", i, err)
 		}
 	}
+	// Without the revoke the same derive succeeds, so the loop above was not
+	// passing on a Derive that always fails.
+	store := NewMemoryRepository()
+	parent := session(t, store, CreateSessionParams{})
+	if _, err := store.Derive(ctx, deriveParams(parent, "k")); err != nil {
+		t.Fatalf("derive without a revoke: %v", err)
+	}
 }
 
-func TestDerive_CountsTowardThePerOwnerCap(t *testing.T) {
+// Run grants are bounded per parent, not per owner: a burst of AI runs can
+// neither lock the user out of opening a browser session nor grow without
+// bound under one session.
+func TestDerive_IsBoundedPerParentAndDoesNotConsumeTheOwnerCap(t *testing.T) {
 	store, _ := clockedRepo()
-	parent := session(t, store, CreateSessionParams{})
+	parent := session(t, store, CreateSessionParams{MaxActivePerOwner: 2})
 	p := deriveParams(parent, "one")
-	p.MaxActivePerOwner = 2
-	if _, err := store.Derive(ctx, p); err != nil {
-		t.Fatal(err)
+	p.MaxActivePerParent = 2
+	for _, key := range []string{"one", "two"} {
+		p.SessionKey = key
+		if _, err := store.Derive(ctx, p); err != nil {
+			t.Fatalf("derive %s: %v", key, err)
+		}
 	}
-	p.SessionKey = "two"
+	p.SessionKey = "three"
 	if _, err := store.Derive(ctx, p); !errors.Is(err, ErrTooManyGrants) {
-		t.Fatalf("third active grant: error = %v", err)
+		t.Fatalf("third live run grant under one parent: error = %v", err)
 	}
 	// A replay of an issued key is not a new grant and still succeeds.
 	p.SessionKey = "one"
 	if _, err := store.Derive(ctx, p); err != nil {
 		t.Fatalf("replay at the cap: %v", err)
+	}
+	// Two live run grants did not use the owner's two-session cap.
+	if _, err := store.CreateSession(ctx, CreateSessionParams{
+		OrgID: parent.OrgID, OwnerID: parent.OwnerID, SessionKey: "session-b",
+		AllowedDomains: []string{"example.com"}, TTL: time.Minute, MaxActivePerOwner: 2,
+	}); err != nil {
+		t.Fatalf("a second session after two runs: %v", err)
+	}
+	// Revoking a run grant frees its slot under the parent.
+	first, err := store.Derive(ctx, func() DeriveParams { q := p; q.SessionKey = "two"; return q }())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RevokeScoped(ctx, first.ID, first.OrgID, first.OwnerID, "run_start_failed"); err != nil {
+		t.Fatal(err)
+	}
+	p.SessionKey = "three"
+	if _, err := store.Derive(ctx, p); err != nil {
+		t.Fatalf("derive after a run grant was revoked: %v", err)
+	}
+	// The default bound applies when the caller sets none.
+	store2, _ := clockedRepo()
+	parent2 := session(t, store2, CreateSessionParams{})
+	for i := 0; i < DefaultMaxActiveRunsPerParent; i++ {
+		if _, err := store2.Derive(ctx, deriveParams(parent2, fmt.Sprintf("k%d", i))); err != nil {
+			t.Fatalf("derive %d: %v", i, err)
+		}
+	}
+	if _, err := store2.Derive(ctx, deriveParams(parent2, "over")); !errors.Is(err, ErrTooManyGrants) {
+		t.Fatalf("default per-parent bound: error = %v", err)
 	}
 }
 
@@ -424,6 +505,84 @@ func TestSensitiveApproval_AcceptsASessionOrRunParent(t *testing.T) {
 	for id, g := range store.grants {
 		if !g.Revoked {
 			t.Fatalf("grant %s (%s) survived the session revoke", id, g.Kind)
+		}
+	}
+}
+
+func approvalOn(p *Grant, domains []string, ttl time.Duration) ApprovalParams {
+	return ApprovalParams{
+		OrgID: p.OrgID, OwnerID: p.OwnerID, SessionKey: p.SessionKey,
+		AllowedDomains: domains, AllowedActions: []string{"download_ref"},
+		AllowedFrameIDs: []string{"frame-1"}, ParentGrantID: p.ID, TTL: ttl,
+	}
+}
+
+// An approval is never wider than its parent: a run grant narrowed to one
+// host cannot parent an approval for a sibling or an unrelated host.
+func TestApproval_OnRunParent_CannotWidenHosts(t *testing.T) {
+	store, _ := clockedRepo()
+	parent := session(t, store, CreateSessionParams{
+		AllowedDomains: []string{"example.com", "example.org"}, TTL: 15 * time.Minute,
+	})
+	run, err := store.Derive(ctx, deriveParams(parent, "run-key", "api.example.com"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, widened := range [][]string{{"unrelated.net"}, {"example.com"}, {"example.org"}, {"api.example.com", "www.example.com"}, {"badapi.example.com"}} {
+		if approval, err := store.CreateScopedSensitiveApproval(ctx, approvalOn(run, widened, time.Minute)); !errors.Is(err, ErrDeriveWidensParent) {
+			t.Fatalf("approval on run grant %v for %v = %#v, %v; want ErrDeriveWidensParent", run.AllowedDomains, widened, approval, err)
+		}
+	}
+	for _, within := range [][]string{{"api.example.com"}, {"v1.api.example.com"}} {
+		if _, err := store.CreateScopedSensitiveApproval(ctx, approvalOn(run, within, time.Minute)); err != nil {
+			t.Fatalf("approval for %v inside the run grant: %v", within, err)
+		}
+	}
+	// The same rule holds for a session parent.
+	if _, err := store.CreateScopedSensitiveApproval(ctx, approvalOn(parent, []string{"unrelated.net"}, time.Minute)); !errors.Is(err, ErrDeriveWidensParent) {
+		t.Fatalf("approval on a session grant widened it: %v", err)
+	}
+}
+
+func TestApproval_CannotOutliveParent(t *testing.T) {
+	store, clock := clockedRepo()
+	parent := session(t, store, CreateSessionParams{TTL: 2 * time.Minute})
+	run, err := store.Derive(ctx, deriveParams(parent, "run-key"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []*Grant{parent, run} {
+		approval, err := store.CreateScopedSensitiveApproval(ctx, approvalOn(p, []string{"example.com"}, time.Hour))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if approval.ExpiresAt.After(p.ExpiresAt) {
+			t.Fatalf("approval expires %v after its %s parent %v", approval.ExpiresAt, p.Kind, p.ExpiresAt)
+		}
+	}
+	// A short TTL is kept as asked.
+	short, err := store.CreateScopedSensitiveApproval(ctx, approvalOn(run, []string{"example.com"}, 10*time.Second))
+	if err != nil || !short.ExpiresAt.Equal(clock.Now().Add(10*time.Second)) {
+		t.Fatalf("short approval = %#v, %v", short, err)
+	}
+}
+
+func TestApproval_ParentRevokedBetweenReadAndInsertLeavesNoApproval(t *testing.T) {
+	store, _ := clockedRepo()
+	parent := session(t, store, CreateSessionParams{})
+	store.betweenLocks = func() {
+		if err := store.RevokeScoped(ctx, parent.ID, parent.OrgID, parent.OwnerID, "session_closed"); err != nil {
+			t.Errorf("revoke: %v", err)
+		}
+	}
+	if _, err := store.CreateScopedSensitiveApproval(ctx, approvalOn(parent, []string{"example.com"}, time.Minute)); !errors.Is(err, ErrGrantRevoked) {
+		t.Fatalf("approval across a revoke: %v, want ErrGrantRevoked", err)
+	}
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	for id, g := range store.grants {
+		if g.Kind == KindSensitiveApproval {
+			t.Fatalf("approval %s was inserted under a revoked parent", id)
 		}
 	}
 }

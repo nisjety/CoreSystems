@@ -249,3 +249,56 @@ func TestConfigFromEnv_MaxRunDomains(t *testing.T) {
 		}
 	}
 }
+
+// BROWSER_BROKER_MAX_RUN_DOMAINS reaches DeriveRunGrant: with the bound set to
+// 2 through ConfigFromEnv, a 3-host explicit list is refused, and a 3-host
+// parent can no longer be inherited implicitly but can be narrowed to 2.
+func TestDeriveRunGrant_HonoursTheConfiguredMaxRunDomains(t *testing.T) {
+	cfg, err := ConfigFromEnv(envOf(map[string]string{EnvMaxRunDomains: "2"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := NewServerWithConfig(grant.NewMemoryRepository(), cfg)
+	srv.principal = func(context.Context) (authctx.Principal, error) { return userPrincipal(false), nil }
+	three := []string{"a.example.com", "b.example.com", "c.example.com"}
+	parent := acquire(t, srv, &AcquireGrantRequest{AllowedDomains: three})
+
+	_, err = srv.DeriveRunGrant(context.Background(), deriveReq(parent.GetGrantId(), func(r *DeriveRunGrantRequest) {
+		r.AllowedDomains = three
+	}))
+	if status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("3-host explicit list under a bound of 2: %v, want InvalidArgument", err)
+	}
+	_, err = srv.DeriveRunGrant(context.Background(), deriveReq(parent.GetGrantId(), func(r *DeriveRunGrantRequest) {
+		r.SessionKey = "browser-inherit"
+	}))
+	if status.Code(err) == codes.OK {
+		t.Fatal("a 3-host parent was inherited under a bound of 2")
+	}
+	resp, err := srv.DeriveRunGrant(context.Background(), deriveReq(parent.GetGrantId(), func(r *DeriveRunGrantRequest) {
+		r.SessionKey = "browser-subset"
+		r.AllowedDomains = three[:2]
+	}))
+	if err != nil || len(resp.GetAllowedDomains()) != 2 {
+		t.Fatalf("2-host subset: %#v, %v", resp, err)
+	}
+}
+
+// Run grants do not consume the owner's cap: with MaxActivePerOwner = 2, a
+// user can still open a second browser session after starting several runs.
+func TestDeriveRunGrant_RunsDoNotBlockANewSession(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.MaxActivePerOwner = 2
+	srv := NewServerWithConfig(grant.NewMemoryRepository(), cfg)
+	srv.principal = func(context.Context) (authctx.Principal, error) { return userPrincipal(false), nil }
+	parent := acquire(t, srv, &AcquireGrantRequest{})
+	for i := 0; i < 4; i++ {
+		key := "browser-run-" + string(rune('a'+i))
+		if _, err := srv.DeriveRunGrant(context.Background(), deriveReq(parent.GetGrantId(), func(r *DeriveRunGrantRequest) {
+			r.SessionKey = key
+		})); err != nil {
+			t.Fatalf("derive %d: %v", i, err)
+		}
+	}
+	acquire(t, srv, &AcquireGrantRequest{SessionKey: "session2"})
+}

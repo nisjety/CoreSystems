@@ -234,7 +234,6 @@ func (s *Server) DeriveRunGrant(ctx context.Context, req *DeriveRunGrantRequest)
 		TTL:               ttl,
 		PrincipalZdr:      principal.ZeroDataRetention,
 		MaxRunDomains:     s.cfg.MaxRunDomains,
-		MaxActivePerOwner: s.cfg.MaxActivePerOwner,
 		Policy:            s.cfg.Policy,
 	})
 	if err != nil {
