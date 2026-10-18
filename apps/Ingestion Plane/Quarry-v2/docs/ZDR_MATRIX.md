@@ -66,7 +66,7 @@ This describes behaviour. It does not change it. A **gap** is a place where ZDR 
 - `control_records`: resource_routes forwards to Control Plane with the verified identity and keeps no copy
 - `change_history`: change_routes read the token's identity only; ZDR is consulted nowhere on these routes Tests: `zdr_gap_rows::gap_rows_currently_violate_change_history`.
 - `change_snapshot`: change_routes::snapshot and ::refresh do not read the ZDR floor Tests: `zdr_gap_rows::gap_rows_currently_violate_change_snapshot`.
-- `change_record_internal`: change_routes::emit_change_side_effects returns early under ZDR; record_check has already written the baseline
+- `change_record_internal`: under postgres-queue, record_check saves the baseline (New or Changed) before it reads the body's zdr, and that flag is consulted only in change_routes::emit_change_side_effects, which returns early under ZDR; no test observes the write, because the harness wires no baseline store
 - `schedules`: schedule_routes forwards to Control Plane and never reads the ZDR floor Tests: `zdr_gap_rows::gap_rows_currently_violate_schedules`.
 - `profiles`: profile_routes never read the ZDR floor; only the agent start refuses a persistent profile Tests: `zdr_gap_rows::gap_rows_currently_violate_profiles`.
 - `agent_run`: a ZDR run writes no checkpoint, timeline row or receipt and logs under a ZDR span Tests: `agent_routes::tests::zdr_expiry_writes_no_timeline_row_and_no_checkpoint`.

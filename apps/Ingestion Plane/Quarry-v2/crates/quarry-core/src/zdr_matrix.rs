@@ -291,7 +291,7 @@ pub const ROWS: &[Row] = &[
         // No test here fails if the baseline write stops being true: this binary wires
         // no baseline store, so the write is unreachable (see the test's own doc).
         enforced_by: &[],
-        basis: "change_routes::emit_change_side_effects returns early under ZDR; record_check has already written the baseline",
+        basis: "under postgres-queue, record_check saves the baseline (New or Changed) before it reads the body's zdr, and that flag is consulted only in change_routes::emit_change_side_effects, which returns early under ZDR; no test observes the write, because the harness wires no baseline store",
         log: Log::Unverified,
     },
     Row {

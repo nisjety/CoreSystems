@@ -119,7 +119,7 @@ GOLDENS=(
   # the_golden_and_markdown_are_what_the_table_generates (crates/quarry-core/src/zdr_matrix.rs),
   # which quarry-v2-ci.yml runs through cargo test --workspace. A regenerated golden needs
   # its digest here updated in the same change.
-  "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/contracts/zdr-feature-matrix.json|a51590ae0ca1e8bf7f3e2d41e5052bc675776bbcccca6663cf14af57fbcc7550"
+  "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/contracts/zdr-feature-matrix.json|745363b114dd10983b9da898f5b094c2f212f944c42c5ab1d5ee8695c524fc31"
 )
 
 # "<repo-relative copy>|<repo-relative golden>"
