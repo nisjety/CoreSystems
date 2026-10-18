@@ -590,6 +590,9 @@ fn driver_signals(overrides: serde_json::Value) -> serde_json::Value {
 /// entry is not served, the origin is fetched, and the new result is not written.
 /// Without the plan check in the `routes.rs` gate, the cached static result would
 /// answer the request and its browser-only output would be absent.
+/// The five signals are the ones `plan_from_signals` (quarry-runtime/src/driver_plan.rs)
+/// routes to the browser: a non-empty `actions` list, `screenshot`, `pdf`,
+/// `prior_block_signals` of 2 or more, and `profile_required`. Each has a case below.
 #[tokio::test]
 async fn browser_signals_neither_read_nor_write_the_page_cache() {
     let Some((state, mut conn)) = build_state().await else {
@@ -614,6 +617,7 @@ async fn browser_signals_neither_read_nor_write_the_page_cache() {
     let cases = [
         ("screenshot", driver_signals(serde_json::json!({ "screenshot": true }))),
         ("pdf", driver_signals(serde_json::json!({ "pdf": true }))),
+        ("actions", driver_signals(serde_json::json!({ "actions": ["click"] }))),
         (
             "prior_block_signals 2",
             driver_signals(serde_json::json!({ "prior_block_signals": 2 })),
