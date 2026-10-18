@@ -4,16 +4,16 @@ Owner: Model Plane operator. Script: `apps/Model Plane/scripts/dev/docker-deskto
 
 Who runs this: the human operator or the lead only. Automated agents never run the `-Apply` path, the recovery script, the disposable-Postgres harness (`apps/Model Plane/scripts/tests/session-core-db-tests.sh`), or any `docker` command on this machine. Cargo runs on the host only.
 
-Context: On 2026-10-17 the Docker Desktop VM wedged twice. The first time the backend log showed `connect tcp 192.168.65.7:2376: no route to host`. The second time the WSL VM load average was about 468 with 94 MB free, because dozens of `rustc` and `rust-lld` processes from an orphaned Rust build container were still running and no Windows process owned them. Each forced restart then failed on stale socket folders that Windows cannot delete (error 1920). The fix below worked on 2026-10-11 and 2026-10-12. It renames the folders and never deletes them.
+Context: On 2026-10-17 the Docker Desktop VM wedged twice. The first time the backend log showed `connect tcp 192.168.65.7:2376: no route to host`. The second time the WSL VM load average was about 468 with 94 MB free, because dozens of `rustc` and `rust-lld` processes from an orphaned Rust build container were still running and no Windows process owned them. Each forced restart then failed on stale socket folders that Windows cannot delete (error 1920). The fix below worked on 2026-10-11 and 2026-10-12. On 2026-10-17 and 2026-10-18 the rename had to be repeated after each forced stop (see Symptoms). The fix renames the folders and never deletes them.
 
 ## Symptoms
 
 - `docker` commands hang, or fail with a connection error.
 - The Docker logs contain `no route to host` for 192.168.65.x:2376.
-- A restart fails with `initializing Secrets Engine: listening on unix://...docker-secrets-engine\engine.sock: remove ...: The file cannot be accessed by the system`, or with `initializing Ingest server: ...Docker\run\sailor-ingest.sock: remove ...`.
+- After a forced restart, Docker Desktop fails on the stale socket folders. On 2026-10-17 and 2026-10-18 it failed with `initializing Secrets Engine: listening on unix://...docker-secrets-engine\engine.sock: remove ...: The file cannot be accessed by the system`, or with `initializing Ingest server: ...Docker\run\sailor-ingest.sock: remove ...`. The rename in Fix clears them, and it has to be repeated after each forced stop.
 - Container work stops, the VM load stays high, and free memory is low.
 
-## Diagnose (read-only; every command has a time limit)
+## Diagnose (read-only; stop any command that hangs for about 30 seconds)
 
 Run these in PowerShell 7. If a command hangs for more than about 30 seconds, press Ctrl+C and move on. A hang is itself a symptom.
 
@@ -24,17 +24,19 @@ Run these in PowerShell 7. If a command hangs for more than about 30 seconds, pr
 5. Build processes in the VM, only if Running: `wsl.exe -d docker-desktop --exec sh -c "grep -l -x -E 'rustc|rust-lld|cargo' /proc/[0-9]*/comm 2>/dev/null | wc -l"`. A large count with no matching container is the orphan pattern.
 6. Host free space: `Get-PSDrive -PSProvider FileSystem | Select-Object Name, @{n='FreeGB';e={[math]::Round($_.Free/1GB,1)}}`. The VM disk cannot grow when the host volume is full.
 7. Logs: `Get-ChildItem -LiteralPath (Join-Path $env:LOCALAPPDATA 'Docker\log') -Recurse -File -Filter '*.log' | Sort-Object LastWriteTime -Descending | Select-Object -First 5`, then `Select-String -LiteralPath <file> -Pattern 'no route to host|initializing Secrets Engine|initializing Ingest server|error 1920|cannot be accessed by the system'`.
-8. The script's dry run: `pwsh -NoProfile -File "apps/Model Plane/scripts/dev/docker-desktop-recover.ps1"`. It changes nothing. Exit 0 means the report is complete; exit 3 means Docker Desktop.exe was not found.
+8. The script's dry run: `pwsh -NoProfile -File "apps/Model Plane/scripts/dev/docker-desktop-recover.ps1"`. It changes nothing. Its one command inside the VM is the VM probe: it reads `/proc` (load, memory and build-process counts) in the `docker-desktop` distro, only when that distro is Running, and the probe is bounded to 30 seconds. Exit 0 means the report is complete; exit 3 means Docker Desktop.exe was not found.
 
 ## Fix
 
 1. Read the dry-run report. Check that the process names, the folder paths and the Docker Desktop.exe path are the ones you expect.
 2. If the engine still answers and a build container is running, find that container first (see the orphan section) and stop it by ID. If the engine does not answer, skip this step; the restart stops the VM's processes.
 3. Run `pwsh -NoProfile -File "apps/Model Plane/scripts/dev/docker-desktop-recover.ps1" -Apply`. Add `-Force` only if the engine answers but cannot be used, because step 2 of the script then stops every running container.
-4. The script stops the Docker Desktop processes, terminates the `docker-desktop` distro, renames `%LOCALAPPDATA%\docker-secrets-engine` and `%LOCALAPPDATA%\Docker\run` to `*.stale-<timestamp>`, starts Docker Desktop, and waits up to five minutes for `docker info`.
+4. The script stops the Docker Desktop processes, terminates the `docker-desktop` distro, renames `%LOCALAPPDATA%\docker-secrets-engine` and `%LOCALAPPDATA%\Docker\run` to `*.stale-<timestamp>`, starts Docker Desktop, and waits up to five minutes for `docker info`. The terminate is skipped only when the distro is reported Stopped (or wsl.exe is absent). If the state cannot be read, the script still tries the terminate; a failure or timeout there is a warning and the run carries on to the rename (the rename needs only the Docker processes stopped), whereas a failed terminate of a distro seen Running stops the run before any rename. If WSL reports no such distro, the script logs that and goes on.
 5. Expect every container in the VM to stop. Named volumes survive. Containers with a restart policy return with the engine.
-6. Restart the Model Plane stack with its launcher: `cd "apps/Model Plane" && ./scripts/compose.sh up -d`, as `apps/Model Plane/CLAUDE.md` says. The compose file header names `./build-verevon-services.sh --from model` for builds; that script is not in this worktree, so use `compose.sh` unless the lead says otherwise. Never use a bare `docker compose up`.
+6. Restart the Model Plane stack with its launcher: `cd "apps/Model Plane" && ./scripts/compose.sh up -d`, as `apps/Model Plane/CLAUDE.md` says. The compose file header names `./build-verevon-services.sh --from model` for builds. That script is at `apps/Frontend Plane/verevonv3/build-verevon-services.sh`, not under `apps/Model Plane`, so use `compose.sh` unless the lead says otherwise. Never use a bare `docker compose up`.
 7. Delete the `*.stale-*` folders only after a working restart, by hand, on that exact path. They may need an elevated shell.
+
+**Repeat the rename after each forced stop.** On 2026-10-17 and 2026-10-18 it had to be done again after every forced stop. Treat step 3 of the script as needed each time, not only the first time.
 
 Manual equivalent, if the script is unavailable: quit Docker Desktop from the tray; `wsl.exe --terminate docker-desktop`; rename the two folders to `*.stale-<timestamp>`; start `%LOCALAPPDATA%\Programs\DockerDesktop\Docker Desktop.exe`; wait for `docker info`.
 
@@ -65,7 +67,7 @@ An orphan keeps building or testing after the command that started it has exited
 
 ## Prevent recurrence
 
-- The Model Plane plan tells people to run Linux-gated Rust tests in a `rust:1` container on Windows (`docs/plans/model-plane-chat-build-plan-2026-10-14.md`, for example lines 1106 and 2108; the same advice appears at lines 646, 1108, 1110 and 1243). That is a likely origin of the orphan, not a confirmed one. Until those instructions carry limits, run cargo on the host, one crate at a time. A container run needs the lead's explicit go-ahead.
+- The Model Plane plan tells people to run Linux-gated Rust tests in a `rust:1` container on Windows (`docs/plans/model-plane-chat-build-plan-2026-10-14.md`: the WS08, WS19 and WS22 slice tables, and section 6.4, "Exact commands per plane"). That is a likely origin of the orphan, not a confirmed one. Until those instructions carry limits, run cargo on the host, one crate at a time. A container run needs the lead's explicit go-ahead.
 - Run one build at a time in the VM, and check `docker stats --no-stream` before starting another.
 - The VM memory limit is a user setting (Docker Desktop, Settings, Resources; or `[wsl2] memory=` in `%UserProfile%\.wslconfig`). Scripts in this repo do not change it.
 

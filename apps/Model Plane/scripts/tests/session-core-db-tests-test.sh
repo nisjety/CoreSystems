@@ -5,6 +5,8 @@ set -euo pipefail
 # cargo. It checks the text the harness must keep, and it runs the harness's
 # --check-log mode on fixture logs: that mode decides whether a cargo run proves
 # anything. A stand-in docker function fails the test if any check reaches Docker.
+# It also checks that every docker call is bounded by timeout, and it runs the
+# harness's marked env scrub block under an empty environment.
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 HARNESS="$ROOT_DIR/scripts/tests/session-core-db-tests.sh"
@@ -45,7 +47,19 @@ for required in \
   'panicked' \
   'MIN_PASSED' \
   'test result: ok' \
-  '--check-log'; do
+  '--check-log' \
+  'mktemp timeout; do' \
+  'timeout --version' \
+  'timeout -k 5 30 docker version' \
+  'timeout -k 5 30 docker image inspect' \
+  'timeout -k 5 60 docker run' \
+  'timeout -k 5 60 docker rm -f -v' \
+  'timeout -k 5 30 docker port' \
+  'timeout -k 5 10 docker exec' \
+  'timeout -k 5 30 docker logs' \
+  '# BEGIN env scrub' \
+  '# END env scrub' \
+  'FULL RUN'; do
   grep -F -- "$required" <<<"$source_text" >/dev/null || fail "the harness is missing required text: $required"
 done
 
@@ -62,6 +76,42 @@ for forbidden in \
   if grep -F -- "$forbidden" <<<"$source_text" >/dev/null; then
     fail "the harness must not contain: $forbidden"
   fi
+done
+
+# A docker call that is not under timeout can hang the run on a wedged engine.
+unbounded="$(grep -nE '(^|[^[:alnum:]_-])docker [a-z]' "$HARNESS" | grep -v 'timeout' | grep -vE '^[0-9]+:[[:space:]]*#' || true)"
+[[ -z "$unbounded" ]] || fail "a docker call is not bounded by timeout: $unbounded"
+
+grep -qF '595' "$HARNESS" || fail 'the harness must record the last full run count, 595 passed'
+
+# The env scrub: run the block the harness marks, under an environment that carries
+# every name the block must clear, and check what survives. Nothing here starts Docker.
+scrub_block="$(sed -n '/^# BEGIN env scrub$/,/^# END env scrub$/p' "$HARNESS")"
+[[ -n "$scrub_block" ]] || fail 'the harness has no env scrub block between "# BEGIN env scrub" and "# END env scrub"'
+printf '%s\n' "$scrub_block" >"$WORK/scrub.sh"
+env -i PATH="$PATH" \
+  DATABASE_URL=postgres://leak \
+  SESSION_CORE_LOOP_CHECKPOINT_ENABLED=true \
+  SESSION_CORE_TOOL_LEDGER_SWEEP_ENABLED=true \
+  EXECUTION_EFFECT_LEDGER_ENABLED=true \
+  AGENT_CONTINUE_AFTER_APPROVAL_ENABLED=true \
+  NATS_URL=nats://leak \
+  NATS_USER=leak \
+  REQUIRE_CONTRACT=1 \
+  CI=1 \
+  MODEL_PLANE_RESIDENCY=leak \
+  UPDATE_AUDIT_CORE_FIXTURES=1 \
+  SESSION_CORE_CONTINUATION_DESCRIPTOR_KEY=keep \
+  KEEP_THIS=yes \
+  bash -c 'set -euo pipefail; source "$1"; compgen -e' _ "$WORK/scrub.sh" >"$WORK/scrub.names" 2>"$WORK/scrub.err" \
+  || fail "the env scrub block failed: $(cat "$WORK/scrub.err")"
+for leaked in DATABASE_URL SESSION_CORE_LOOP_CHECKPOINT_ENABLED SESSION_CORE_TOOL_LEDGER_SWEEP_ENABLED \
+  EXECUTION_EFFECT_LEDGER_ENABLED AGENT_CONTINUE_AFTER_APPROVAL_ENABLED NATS_URL NATS_USER \
+  REQUIRE_CONTRACT CI MODEL_PLANE_RESIDENCY UPDATE_AUDIT_CORE_FIXTURES; do
+  grep -qxF "$leaked" "$WORK/scrub.names" && fail "the env scrub left $leaked set"
+done
+for kept in PATH KEEP_THIS SESSION_CORE_CONTINUATION_DESCRIPTOR_KEY; do
+  grep -qxF "$kept" "$WORK/scrub.names" || fail "the env scrub removed $kept, which it must keep"
 done
 
 # Fixture logs. Passing tests print nothing unless --show-output is set, so a

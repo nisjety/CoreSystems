@@ -24,13 +24,32 @@ set -euo pipefail
 # Most DB-backed tests skip silently when DATABASE_URL is missing, and
 # REQUIRE_CONTRACT only makes a few of them fail. The log checks are the guard.
 #
+# Every docker call runs under timeout, so a wedged engine ends the run as BLOCKED
+# instead of hanging. Cargo is not bounded, because a full run takes a long time.
+# The run clears the variables that change what these tests do: DATABASE_URL, the
+# SESSION_CORE_*_ENABLED switches, EXECUTION_*, AGENT_CONTINUE_*, NATS_*, REQUIRE_CONTRACT,
+# CI, MODEL_PLANE_RESIDENCY and UPDATE_AUDIT_CORE_FIXTURES. Other environment reads are not
+# cleared. The block is marked, and the contract test runs it under an empty environment.
+# An unfiltered run prints its pass count in a banner. The last full run recorded for
+# this harness, through a disposable Postgres, passed 595 tests with 0 failed (2026-10-18;
+# it was 588 before the Build 1b follow-ups added seven tests).
+#
 # Needs a responding Docker engine and the image below present locally.
 # If the engine is wedged, see apps/Model Plane/docs/runbooks/docker-desktop-recovery.md.
 
 # Git Bash must not rewrite POSIX-looking arguments for native programs.
 export MSYS_NO_PATHCONV=1
-# This run uses only its own database, never one inherited from the shell.
+
+# BEGIN env scrub
+# This run uses only its own database, never one inherited from the shell, and the
+# switches below cannot be set from the shell. The DB tests read the environment
+# directly, so every name the scrub matches is removed before anything runs.
+# DATABASE_URL is exported again below, from the disposable container only.
 unset DATABASE_URL
+while IFS= read -r name; do
+  unset "$name"
+done < <(compgen -e | grep -E '^(SESSION_CORE_.*_ENABLED|EXECUTION_.*|AGENT_CONTINUE_.*|NATS_.*|REQUIRE_CONTRACT|CI|MODEL_PLANE_RESIDENCY|UPDATE_AUDIT_CORE_FIXTURES)$' || true)
+# END env scrub
 
 # Must match the image the stack runs (apps/Model Plane/deploy/docker-compose.yml).
 IMAGE="postgres:16.14-alpine3.24"
@@ -45,7 +64,7 @@ CLEANUP_NEEDED=0
 
 cleanup() {
   if [[ "$CLEANUP_NEEDED" == 1 ]]; then
-    docker rm -f -v "$CONTAINER" >/dev/null 2>&1 || true
+    timeout -k 5 60 docker rm -f -v "$CONTAINER" >/dev/null 2>&1 || true
   fi
   if [[ -n "$LOG" ]]; then
     rm -f "$LOG"
@@ -112,21 +131,27 @@ if [[ ${#filters[@]} -eq 0 ]]; then
   minimums=("1")
 fi
 
-for tool in docker cargo od tr sed seq sleep grep tee mktemp; do
+for tool in docker cargo od tr sed seq sleep grep tee mktemp timeout; do
   command -v "$tool" >/dev/null 2>&1 || {
     echo "BLOCKED $tool is unavailable" >&2
     exit 2
   }
 done
+# Windows has its own timeout.exe, which does not take these arguments; only GNU timeout does.
+timeout --version >/dev/null 2>&1 || {
+  echo "BLOCKED the timeout on PATH is not GNU timeout; run the harness from Git Bash or Cygwin" >&2
+  exit 2
+}
 [[ -f "$RUST_DIR/Cargo.toml" ]] || {
   echo "BLOCKED $RUST_DIR/Cargo.toml not found" >&2
   exit 2
 }
-docker version --format '{{.Server.Version}}' >/dev/null 2>&1 || {
+# Every docker call runs under timeout: the documented failure mode is a docker command that hangs.
+timeout -k 5 30 docker version --format '{{.Server.Version}}' >/dev/null 2>&1 || {
   echo "BLOCKED the Docker engine does not answer; see apps/Model Plane/docs/runbooks/docker-desktop-recovery.md" >&2
   exit 2
 }
-docker image inspect "$IMAGE" >/dev/null 2>&1 || {
+timeout -k 5 30 docker image inspect "$IMAGE" >/dev/null 2>&1 || {
   echo "BLOCKED $IMAGE is not present locally; pull it deliberately first" >&2
   exit 2
 }
@@ -137,15 +162,18 @@ CONTAINER="session-core-dbtest-$$-${RANDOM}${RANDOM}"
 
 # Set before docker run, so a container that was created but failed to start is removed too.
 CLEANUP_NEEDED=1
-docker run -d \
+timeout -k 5 60 docker run -d \
   --name "$CONTAINER" \
   -e POSTGRES_USER="$PG_USER" \
   -e POSTGRES_PASSWORD="$PG_PASSWORD" \
   -e POSTGRES_DB="$PG_DB" \
   -p 127.0.0.1::5432 \
-  "$IMAGE" >/dev/null
+  "$IMAGE" >/dev/null || {
+  echo "BLOCKED the disposable Postgres did not start; see apps/Model Plane/docs/runbooks/docker-desktop-recovery.md" >&2
+  exit 2
+}
 
-PORT_LINES="$(docker port "$CONTAINER" 5432/tcp)" || {
+PORT_LINES="$(timeout -k 5 30 docker port "$CONTAINER" 5432/tcp)" || {
   echo "BLOCKED Docker published no host port for the disposable Postgres" >&2
   exit 2
 }
@@ -159,7 +187,7 @@ PORT="$(printf '%s\n' "$PORT_LINES" | sed -n '1s/.*://p')"
 # runs a socket-only server, which must not count as ready.
 ready=0
 for _ in $(seq 1 60); do
-  if docker exec "$CONTAINER" pg_isready -h 127.0.0.1 -U "$PG_USER" -d "$PG_DB" >/dev/null 2>&1; then
+  if timeout -k 5 10 docker exec "$CONTAINER" pg_isready -h 127.0.0.1 -U "$PG_USER" -d "$PG_DB" >/dev/null 2>&1; then
     ready=1
     break
   fi
@@ -167,12 +195,12 @@ for _ in $(seq 1 60); do
 done
 if [[ "$ready" != 1 ]]; then
   echo "BLOCKED disposable Postgres did not become ready; last log lines follow" >&2
-  docker logs --tail 20 "$CONTAINER" >&2 2>&1 || true
+  timeout -k 5 30 docker logs --tail 20 "$CONTAINER" >&2 2>&1 || true
   exit 2
 fi
 
 # The password comes from the container's own environment, not from this host command line.
-docker exec "$CONTAINER" sh -c 'PGPASSWORD="$POSTGRES_PASSWORD" psql -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" -tAc "select 1"' >/dev/null 2>&1 || {
+timeout -k 5 30 docker exec "$CONTAINER" sh -c 'PGPASSWORD="$POSTGRES_PASSWORD" psql -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" -tAc "select 1"' >/dev/null 2>&1 || {
   echo "BLOCKED disposable Postgres rejected the probe login" >&2
   exit 2
 }
@@ -204,7 +232,15 @@ run_selection() {
   if [[ "$status" -ne 0 ]]; then
     return "$status"
   fi
-  check_log "$LOG" "$min"
+  check_log "$LOG" "$min" || return $?
+  if [[ -z "$filter" ]]; then
+    # The unfiltered run is the whole suite, so its count goes where a person will read it.
+    printf '\n============================================================\n'
+    printf 'session-core DB tests, FULL RUN: %s passed, 0 failed\n' "$(count_passed "$LOG")"
+    printf 'last full run recorded for this harness: 595 passed, 0 failed; a different count means a test was added, removed or skipped\n'
+    printf '============================================================\n\n'
+  fi
+  return 0
 }
 
 status=0

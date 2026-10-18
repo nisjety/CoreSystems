@@ -1,0 +1,18 @@
+session-core DB-backed tests through the disposable-Postgres harness
+date: 2026-10-18
+command: bash "apps/Model Plane/scripts/tests/session-core-db-tests.sh"  (unfiltered)
+tree: HEAD e8f3561c plus the uncommitted Build 1b follow-ups (committed next); engine: Docker Desktop, a throwaway postgres container removed by the exit trap
+
+session-core DB tests: postgres:16.14-alpine3.24 on 127.0.0.1:50111, database session_core_test, container session-core-dbtest-1095-1058020854
+test result: ok. 595 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 65.11s
+session-core DB tests, FULL RUN: 595 passed, 0 failed
+last full run recorded for this harness: 588 passed, 0 failed; a different count means a test was added, removed or skipped
+session-core DB tests: ok (the exit trap removes the container)
+
+per-area passed counts (from the log):
+  loop_checkpoint::        24
+  tool_ledger::            6
+  approval_consume         8
+  run_service_grpc::       33
+  orchestration_store::    21
+failed tests in the log: 0

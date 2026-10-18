@@ -7,11 +7,16 @@
     The dry run only reads. It lists the Docker Desktop processes, the
     docker-desktop WSL distro state, load and free memory inside the VM, how many
     rustc / rust-lld / cargo processes run inside it, the two stale socket
-    folders, and recent log lines that match known wedge signatures.
+    folders, and recent log lines that match known wedge signatures. Its one
+    command inside the VM is that VM probe, which runs only when the distro is
+    Running, and it is bounded to 30 seconds.
 
     -Apply runs four steps in order:
       1. Closes, then force-stops, the Docker Desktop processes (never docker.exe).
-      2. Terminates the docker-desktop WSL distro (wsl --terminate only).
+      2. Terminates the docker-desktop WSL distro (wsl --terminate only). It is
+         skipped only when the distro is reported Stopped (or wsl.exe is absent).
+         When the state could not be read, a failed terminate is a warning and the
+         run goes on to the rename; for a distro seen Running it stops the run.
       3. RENAMES, never deletes, %LOCALAPPDATA%\docker-secrets-engine and
          %LOCALAPPDATA%\Docker\run to *.stale-<yyyyMMdd-HHmmss>.
       4. Starts Docker Desktop and waits up to five minutes for docker info.
@@ -178,13 +183,37 @@ function Stop-DockerProcesses {
 
 function Stop-Distro {
     $state = Get-DistroState
-    if ($state -ne 'Running') {
+    # Nothing is terminated only when the distro is reported Stopped, or when wsl.exe is absent
+    # (then no distro can be running). Running is the normal case. An unknown state (the probe
+    # failed or timed out) and an absent one (the probe read the distro list and found no such
+    # distro) are not proof that nothing runs, and the probe can misread a running distro, so the
+    # terminate is attempted for them too. It is harmless on a stopped distro.
+    if ($state -eq 'Stopped' -or $state -eq 'wsl.exe not found') {
         Write-Host ('distro ''{0}'' is ''{1}''; nothing to terminate' -f $Distro, $state)
         return
     }
+    # A failed or timed-out terminate is fatal only when the distro was positively seen Running.
+    # For an unknown state (the wedged-WSL case this script exists for) the probe already could
+    # not talk to WSL, so the terminate failing too is expected, and the folder rename that
+    # follows needs only the Docker processes stopped: carry on to it with a warning.
+    $mustSucceed = ($state -eq 'Running')
     $result = Invoke-Bounded -FilePath $wsl -Arguments @('--terminate', $Distro) -TimeoutSeconds 90
-    if ($result.TimedOut -or $result.ExitCode -ne 0) {
-        throw ('wsl --terminate {0} failed: {1}' -f $Distro, $result.Stderr.Trim())
+    if ($result.TimedOut) {
+        $message = ('wsl --terminate {0} timed out after 90 seconds' -f $Distro)
+        if ($mustSucceed) { throw $message }
+        Write-Warning ('{0} (state was ''{1}''); continuing to the rename' -f $message, $state)
+        return
+    }
+    if ($result.ExitCode -ne 0) {
+        if ($state -eq 'absent') {
+            # The probe read the distro list and found no docker-desktop distro, so WSL saying the same is expected.
+            Write-Host ('no ''{0}'' distro to terminate: {1}' -f $Distro, $result.Stderr.Trim())
+            return
+        }
+        $message = ('wsl --terminate {0} failed: {1}' -f $Distro, $result.Stderr.Trim())
+        if ($mustSucceed) { throw $message }
+        Write-Warning ('{0} (state was ''{1}''); continuing to the rename' -f $message, $state)
+        return
     }
     Write-Host ('terminated: {0}' -f $Distro)
 }
