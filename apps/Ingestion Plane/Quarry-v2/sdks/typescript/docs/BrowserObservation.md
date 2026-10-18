@@ -22,7 +22,7 @@ Name | Type
 `policyDenials` | Array&lt;string&gt;
 `actionOutcome` | [ActionOutcome](ActionOutcome.md)
 `observationDelta` | [ObservationDelta](ObservationDelta.md)
-`challenge` | { [key: string]: any; }
+`challenge` | [ChallengeSignal](ChallengeSignal.md)
 `extractionProfile` | { [key: string]: any; }
 `extractionResult` | { [key: string]: any; }
 `proofBundle` | { [key: string]: any; }

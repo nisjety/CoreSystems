@@ -2744,9 +2744,9 @@ components:
         observation_delta:
           $ref: '#/components/schemas/ObservationDelta'
         challenge:
-          type: object
+          allOf:
+          - $ref: '#/components/schemas/ChallengeSignal'
           nullable: true
-          additionalProperties: true
         extraction_profile:
           type: object
           nullable: true
@@ -3858,6 +3858,50 @@ components:
           type: boolean
         content_changed:
           type: boolean
+    ChallengeSignal:
+      type: object
+      required:
+      - kind
+      - confidence
+      description: |
+        What an observed page says about access. Advisory: Quarry never tries to get past a challenge, and
+        a signal does not stop a run by itself. Only strength=strong is a verdict that a bot wall stands in
+        front of the page; strength=non_signal names an ordinary access state (a login form, a consent
+        banner, a paywall, a rate limit, a bare status) so it is not mistaken for one. A strong signal
+        gets one recovery per host and run, a wait or a reload of the same URL; if the host still
+        challenges, block_reason becomes challenge_loop, recovery becomes exhausted and Quarry answers
+        further navigation to that host and interaction with its page with 403 CHALLENGE_DETECTED
+        (details: reason, host, recovery=exhausted, next=user_takeover_or_other_source; host is left
+        out under Zero Data Retention). Screenshots, reads, waits and navigation to another host stay allowed.
+      properties:
+        kind:
+          type: string
+          enum: [captcha, waf, login, consent, rate_limit, access_denied, paywall, geo_blocked, unknown]
+        confidence:
+          type: number
+          format: float
+          description: Strong 0.85 to 0.99 (infrastructure marker 0.95 and up, two text markers 0.85 and up); weak 0.5 or less; non_signal 0.7 and up.
+        evidence:
+          type: array
+          description: Marker ids and the status, for example cloudflare_challenge, unusual_traffic, status:403. Never page text. For a non_signal the first entry names it (bare_status, rate_limited, auth_required, consent_required, paywall, geo_blocked, server_error).
+          items:
+            type: string
+        requires_escalation:
+          type: boolean
+          description: True only for a strong signal. A login page, a cookie banner or a rate limit is not a reason to hand the run to a person.
+        strength:
+          type: string
+          enum: [strong, weak, non_signal]
+          default: strong
+        block_reason:
+          type: string
+          nullable: true
+          enum: [captcha_widget, waf_interstitial, challenge_loop, unexpected_bot_error]
+          description: Set on a strong signal only.
+        recovery:
+          type: string
+          enum: [available, exhausted, not_applicable]
+          default: not_applicable
     EvidenceDelta:
       type: object
       required:
