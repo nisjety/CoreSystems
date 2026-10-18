@@ -858,6 +858,20 @@ mod tests {
                 Some(_) => {}
             }
         }
+        // `continuation_gate` lets a waiver through (a cold approval's decision must
+        // still work), but `/continue` resumes stored state and a waived run keeps
+        // none. Its handler therefore also calls the persistent-only helper, whose
+        // behaviour the handler-boundary tests in `sse.rs` pin with a waived token:
+        // a handler that stopped calling it would pass every one of those tests.
+        match function_body("sse.rs", "continue_run") {
+            None => missing.push("sse.rs::continue_run is not found".to_owned()),
+            Some(body) if !body.contains("continue_persistent_gate(") => missing.push(
+                "sse.rs::continue_run does not call continue_persistent_gate, so a waived \
+                 token is not refused before any work"
+                    .to_owned(),
+            ),
+            Some(_) => {}
+        }
         assert!(missing.is_empty(), "{}", missing.join("\n"));
     }
 

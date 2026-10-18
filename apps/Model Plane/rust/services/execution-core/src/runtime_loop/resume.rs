@@ -351,7 +351,7 @@ pub(crate) fn resumed_step_id(segment_no: u32, original_step_id: &str) -> String
 /// worker, exactly as before.
 pub(crate) fn pause_continuation_mode(persistent: bool, tool_name: &str) -> &'static str {
     if releasable(tool_name) {
-        mp_contracts::durable_gate::continuation_mode_for(persistent, continue_enabled())
+        mp_contracts::durable_gate::loop_mode_for_persistent(persistent, continue_enabled())
     } else {
         ""
     }
@@ -534,6 +534,59 @@ mod tests {
             effective_authority(&unlimited, &neutral_request()).unwrap().max_rounds,
             super::super::agent::DEFAULT_MAX_ROUNDS
         );
+    }
+
+    /// The request a real gateway `/continue` builds (model-gateway
+    /// `continue_run_tests`): mode `ask`, the default 4 rounds, no rung, no floor,
+    /// no Space, no route, not plan mode. Whatever rung or budget the run paused
+    /// with, it must pass: a refusal here comes after the single-use consume, so
+    /// it would spend the user's click and strand the run.
+    #[test]
+    fn the_request_a_real_continue_builds_passes_for_every_paused_rung_and_budget() {
+        let real_continue = pb::RunAgentRequest {
+            mode: "ask".to_owned(),
+            max_rounds: 4,
+            autonomy_rung: pb::AutonomyRung::Unspecified as i32,
+            ..Default::default()
+        };
+        for rung in ["", "unspecified", "read_only", "workspace_write", "danger_full_access"] {
+            for max_rounds in [0, 2, 4, 6, 30] {
+                let mut paused = paused_authority();
+                paused.autonomy_rung = rung.to_owned();
+                paused.max_rounds = max_rounds;
+                let effective = effective_authority(&paused, &real_continue)
+                    .unwrap_or_else(|refusal| panic!("{rung:?}/{max_rounds}: {refusal:?}"));
+                assert_eq!(
+                    effective.autonomy_rung, rung,
+                    "{rung:?}: an unstated rung adopts the paused one"
+                );
+                assert!(
+                    effective.max_rounds <= 4 || max_rounds == 0,
+                    "the request's budget only narrows"
+                );
+            }
+        }
+    }
+
+    /// Defence in depth: a rung the request EXPLICITLY states wider than the paused
+    /// one is still refused, for every pair, however the gateway builds its request.
+    #[test]
+    fn a_rung_stated_wider_than_the_paused_one_is_still_refused() {
+        for (paused_rung, stated) in [
+            ("read_only", pb::AutonomyRung::WorkspaceWrite),
+            ("read_only", pb::AutonomyRung::DangerFullAccess),
+            ("workspace_write", pb::AutonomyRung::DangerFullAccess),
+        ] {
+            let mut paused = paused_authority();
+            paused.autonomy_rung = paused_rung.to_owned();
+            let mut wider = neutral_request();
+            wider.autonomy_rung = stated as i32;
+            assert_eq!(
+                effective_authority(&paused, &wider),
+                Err(Refusal::AuthorityWidened),
+                "{paused_rung} -> {stated:?}"
+            );
+        }
     }
 
     #[test]

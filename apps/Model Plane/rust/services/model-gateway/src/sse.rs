@@ -9024,13 +9024,16 @@ fn spawn_run_dispatch(
     // graded constraint stated" and falls back to the posture gates that
     // governed this path before the ladder existed. Inventing a wider rung
     // here would manufacture an authority no human granted.
-    let autonomy_rung = if plan_mode {
-        mp_contracts::model_plane::v1::AutonomyRung::ReadOnly as i32
+    //
+    // A continuation (`resume` present) states NO rung: its authority is the one
+    // the run paused with, and the executor refuses a request that states a wider
+    // rung only after it has consumed the single-use approval. The thread's grant
+    // may have widened since the pause, so it is not read for a resume
+    // (`dispatch_autonomy_rung`).
+    let granted = if plan_mode {
+        None
     } else {
-        state
-            .plan_mode
-            .granted_rung(org_id, &run.thread_id)
-            .unwrap_or(mp_contracts::model_plane::v1::AutonomyRung::Unspecified) as i32
+        state.plan_mode.granted_rung(org_id, &run.thread_id)
     };
     // The run's round and delegation budget, resolved here from the server's
     // own environment and the route the gateway pinned (never from the
@@ -9044,7 +9047,7 @@ fn spawn_run_dispatch(
         max_subagents = budget.max_subagents,
         "RunAgent budget resolved"
     );
-    let run_agent_req = build_run_agent_request(
+    let run_agent_req = resolved_run_agent_request(
         run,
         org_id,
         user_id,
@@ -9055,7 +9058,7 @@ fn spawn_run_dispatch(
         min_privacy_tier_wire,
         permission_mode,
         plan_mode,
-        autonomy_rung,
+        granted,
         space_id,
         approved_plan_context,
         route,
@@ -9116,6 +9119,71 @@ impl AgentRoute {
     fn is_pinned(&self) -> bool {
         !self.provider_hint.is_empty()
     }
+}
+
+/// The rung a dispatched run states, from what the gateway knows. Pure.
+///
+/// Plan mode is READ_ONLY (a narrowing is always allowed, even on a resume). A
+/// continuation states nothing: UNSPECIFIED means "not stated" to execution-core,
+/// which then runs the continuation under the rung the run paused with, so the
+/// thread's grant (which an approved plan may have widened since the pause) cannot
+/// make the executor refuse after the single-use consume. Any other run states the
+/// rung its thread was granted, or UNSPECIFIED when there is none.
+fn dispatch_autonomy_rung(
+    plan_mode: bool,
+    resuming: bool,
+    granted: Option<mp_contracts::model_plane::v1::AutonomyRung>,
+) -> i32 {
+    use mp_contracts::model_plane::v1::AutonomyRung;
+    if plan_mode {
+        AutonomyRung::ReadOnly as i32
+    } else if resuming {
+        AutonomyRung::Unspecified as i32
+    } else {
+        granted.unwrap_or(AutonomyRung::Unspecified) as i32
+    }
+}
+
+/// [`build_run_agent_request`] with the rung resolved by [`dispatch_autonomy_rung`]:
+/// the one place a dispatch's request is made, so the tests see what really leaves.
+#[allow(clippy::too_many_arguments)] // cohesive: the immutable request fields
+fn resolved_run_agent_request(
+    run: &crate::session_flow::SessionRun,
+    org_id: &str,
+    user_id: &str,
+    model: &str,
+    content: &str,
+    tools: &[ToolDefinition],
+    zdr: bool,
+    min_privacy_tier_wire: i32,
+    permission_mode: &str,
+    plan_mode: bool,
+    granted: Option<mp_contracts::model_plane::v1::AutonomyRung>,
+    space_id: &str,
+    approved_plan_context: Option<&str>,
+    route: &AgentRoute,
+    budget: crate::run_budget::RunBudget,
+    resume: Option<mp_contracts::model_plane::v1::AgentResume>,
+) -> RunAgentRequest {
+    let autonomy_rung = dispatch_autonomy_rung(plan_mode, resume.is_some(), granted);
+    build_run_agent_request(
+        run,
+        org_id,
+        user_id,
+        model,
+        content,
+        tools,
+        zdr,
+        min_privacy_tier_wire,
+        permission_mode,
+        plan_mode,
+        autonomy_rung,
+        space_id,
+        approved_plan_context,
+        route,
+        budget,
+        resume,
+    )
 }
 
 /// The unauthenticated `RunAgentRequest` for one prepared run. Pure, so what
@@ -13421,6 +13489,48 @@ fn continue_turn_is_persistent(claims: &Claims) -> bool {
     )
 }
 
+/// The early refusal in [`continue_run`], over the caller's claims and the switch,
+/// so "a non-persistent turn is refused before any work" is testable at the handler
+/// boundary and the handler cannot quietly stop calling it (a source test in
+/// `zdr_posture` requires the call).
+///
+/// [`crate::zdr_posture::continuation_gate`] lets a waiver through (a cold approval's
+/// decision must still work), but a waived run keeps no state to continue. Only with
+/// the switch on: with it off the route answers exactly as it always did
+/// (`continue_preflight` says `continue_disabled`, after the owner checks).
+fn continue_persistent_gate(
+    switch_on: bool,
+    claims: &Claims,
+) -> Result<(), (StatusCode, &'static str)> {
+    if switch_on {
+        continue_turn_gate(true, continue_turn_is_persistent(claims))
+    } else {
+        Ok(())
+    }
+}
+
+/// The posture a `/continue` request states. A placeholder: the executor runs the
+/// continuation under the mode the run paused with and ignores this one.
+const CONTINUE_PERMISSION_MODE: &str = "ask";
+
+/// The resume a `/continue` carries. The brief is not client-authored (see
+/// [`ContinueRunRequest`]); the executor derives the segment number from the step
+/// that paused (a literal here once gave every continuation of one run the same step
+/// ids) and ignores this field, so it is 0.
+fn continue_resume(
+    approval_id: &str,
+    claim_token: &str,
+) -> mp_contracts::model_plane::v1::AgentResume {
+    mp_contracts::model_plane::v1::AgentResume {
+        mode: "segment".to_owned(),
+        approval_id: approval_id.to_owned(),
+        claim_token: claim_token.to_owned(),
+        brief: String::new(),
+        segment_no: 0,
+        ..Default::default()
+    }
+}
+
 fn continue_error(status: StatusCode, code: &str) -> (StatusCode, Json<Value>) {
     (
         status,
@@ -13450,12 +13560,11 @@ pub(crate) async fn continue_run(
     // A waived or ZDR turn is refused before the body, the run or the approval is
     // read: `continuation_gate` above lets a waiver through (a cold approval's
     // decision must still work), but a waived run keeps no state to continue.
-    // Only with the switch on: with it off the route answers exactly as it always
-    // did (`continue_preflight` says `continue_disabled`, after the owner checks).
-    if mp_contracts::loop_fold::continue_after_approval_enabled() {
-        continue_turn_gate(true, continue_turn_is_persistent(&claims))
-            .map_err(|(status, code)| continue_error(status, code))?;
-    }
+    continue_persistent_gate(
+        mp_contracts::loop_fold::continue_after_approval_enabled(),
+        &claims,
+    )
+    .map_err(|(status, code)| continue_error(status, code))?;
     if req.approval_id.trim().is_empty() || req.claim_token.trim().is_empty() {
         return Err(continue_error(StatusCode::BAD_REQUEST, "continue_incomplete"));
     }
@@ -13533,18 +13642,7 @@ pub(crate) async fn continue_run(
         already_started: true,
         terminal_source: mp_contracts::model_plane::v1::ManagedRunSource::ExecutionAgent,
     };
-    let resume = mp_contracts::model_plane::v1::AgentResume {
-        mode: "segment".to_owned(),
-        approval_id: req.approval_id,
-        claim_token: req.claim_token,
-        // The brief is not client-authored (see ContinueRunRequest); empty for now.
-        brief: String::new(),
-        // The executor derives the segment number from the step that paused (a
-        // literal here gave every continuation of one run the same step ids). It
-        // ignores this field; 0 says so.
-        segment_no: 0,
-        ..Default::default()
-    };
+    let resume = continue_resume(&req.approval_id, &req.claim_token);
     Ok(agentic_run_stream(
         state,
         run,
@@ -13558,7 +13656,7 @@ pub(crate) async fn continue_run(
         false,
         None,
         0,
-        "ask".to_owned(),
+        CONTINUE_PERMISSION_MODE.to_owned(),
         false,
         execution_bearer,
         data_plane_bearer,
@@ -13724,17 +13822,224 @@ mod continue_run_tests {
     /// continuation of one run the same step prefix.
     #[test]
     fn the_gateway_leaves_the_segment_number_to_the_executor() {
+        let resume = continue_resume("appr_1", "claim-1");
+        assert_eq!(resume.segment_no, 0, "the executor derives the number; 0 says so");
+        assert_eq!(resume.mode, "segment");
+        assert_eq!(resume.approval_id, "appr_1");
+        assert_eq!(resume.claim_token, "claim-1");
+        assert!(resume.brief.is_empty(), "a brief is never client-authored");
+    }
+
+    /// The early refusal, as `continue_run` calls it: a waived or ZDR turn is
+    /// refused before anything else is read, and only while the switch is on.
+    #[test]
+    fn a_non_persistent_turn_is_refused_at_the_handler_boundary() {
+        let persistent = token(false, Some(false), None);
+        let waived = token(
+            false,
+            Some(true),
+            Some(json!({"version": 1, "provider": PROVIDER_ID, "connection": "conn-1"})),
+        );
+        let zdr = token(true, Some(true), None);
+
+        // A waived token's `zdr` flag is false: only the persistence check refuses it.
+        assert_eq!(
+            continue_persistent_gate(true, &waived),
+            Err((StatusCode::CONFLICT, "not_resumable"))
+        );
+        assert_eq!(
+            continue_persistent_gate(true, &zdr),
+            Err((StatusCode::CONFLICT, "not_resumable"))
+        );
+        assert_eq!(continue_persistent_gate(true, &persistent), Ok(()));
+        // With the switch off the route answers exactly as it always did: this gate
+        // says nothing, and `continue_preflight` says `continue_disabled`.
+        assert_eq!(continue_persistent_gate(false, &waived), Ok(()));
+        assert_eq!(continue_persistent_gate(false, &persistent), Ok(()));
+    }
+
+    /// `continue_run` must call the helper the test above pins, before the body, the
+    /// run or the approval is read. A handler that stopped calling it would pass
+    /// every pure test and refuse nothing.
+    #[test]
+    fn continue_run_calls_the_persistent_gate_before_it_reads_anything() {
         let source = include_str!("sse.rs");
         let body = source
             .split("pub(crate) async fn continue_run(")
             .nth(1)
-            .and_then(|rest| rest.split("
-#[cfg(test)]").next())
+            .and_then(|rest| rest.split("\n#[cfg(test)]").next())
             .expect("continue_run is in this file");
-        assert!(
-            body.contains("segment_no: 0,"),
-            "continue_run must send segment_no 0"
+        let gate = body
+            .find("continue_persistent_gate(")
+            .expect("continue_run calls continue_persistent_gate");
+        for later in ["req.approval_id.trim()", "require_durable_run_owner", ".get_run(", ".get_approval("] {
+            let at = body.find(later).unwrap_or_else(|| panic!("{later} is in continue_run"));
+            assert!(gate < at, "the gate must come before {later}");
+        }
+    }
+
+    /// The `RunAgentRequest` a `/continue` sends to execution-core, as a pure function
+    /// of what the gateway reads (the run, the verified caller, the run's goal, the
+    /// thread's current grant and the run budget). Everything else is a neutral
+    /// placeholder: the continuation's tools and authority are the pause's retained
+    /// snapshot, and a request that states anything wider than the pause is refused by
+    /// the executor after the single-use consume. `granted` is passed so the test can
+    /// show it makes no difference.
+    ///
+    /// It calls the same [`resolved_run_agent_request`] the dispatch uses, with the
+    /// arguments `continue_run` hands `agentic_run_stream` (the neutral literals, and
+    /// `CONTINUE_PERMISSION_MODE`, which both share). It lives here, not in the
+    /// handler, because the handler's request is built inside the spawned stream.
+    fn continue_run_agent_request(
+        run: &crate::session_flow::SessionRun,
+        org_id: &str,
+        user_id: &str,
+        goal: &str,
+        resume: mp_contracts::model_plane::v1::AgentResume,
+        granted: Option<mp_contracts::model_plane::v1::AutonomyRung>,
+        budget: crate::run_budget::RunBudget,
+    ) -> RunAgentRequest {
+        resolved_run_agent_request(
+            run,
+            org_id,
+            user_id,
+            "",
+            goal,
+            &[],
+            false,
+            0,
+            CONTINUE_PERMISSION_MODE,
+            false,
+            granted,
+            "",
+            None,
+            &AgentRoute::default(),
+            budget,
+            Some(resume),
+        )
+    }
+
+    fn continue_run_record() -> crate::session_flow::SessionRun {
+        crate::session_flow::SessionRun {
+            thread_id: "thread-1".to_owned(),
+            run_id: "run-1".to_owned(),
+            org_id: "org-1".to_owned(),
+            already_started: true,
+            terminal_source: mp_contracts::model_plane::v1::ManagedRunSource::ExecutionAgent,
+        }
+    }
+
+    fn continue_request_for(
+        granted: Option<mp_contracts::model_plane::v1::AutonomyRung>,
+        budget: crate::run_budget::RunBudget,
+    ) -> RunAgentRequest {
+        continue_run_agent_request(
+            &continue_run_record(),
+            "org-1",
+            "user-1",
+            "the run's goal",
+            continue_resume("appr_1", "claim-1"),
+            granted,
+            budget,
+        )
+    }
+
+    /// The request a real `/continue` builds states no rung, whatever the thread's
+    /// grant is now. The authority of a continuation is the pause's, and
+    /// execution-core refuses a request that states a WIDER rung than the pause only
+    /// after the single-use consume, which spends the click and strands the run. The
+    /// grant can legitimately be equal to, wider than or narrower than the rung the
+    /// run paused with (an approved plan can widen the thread's grant after the
+    /// pause), so the gateway cannot state it at all.
+    #[test]
+    fn a_real_continue_states_no_rung_whatever_the_threads_grant_is() {
+        use mp_contracts::model_plane::v1::AutonomyRung as Rung;
+        for granted in [
+            None,
+            Some(Rung::Unspecified),
+            Some(Rung::ReadOnly),
+            Some(Rung::WorkspaceWrite),
+            Some(Rung::DangerFullAccess),
+        ] {
+            let req = continue_request_for(granted, crate::run_budget::RunBudget::default());
+            assert_eq!(
+                req.autonomy_rung,
+                Rung::Unspecified as i32,
+                "grant {granted:?}: the stated authority comes from the paused snapshot"
+            );
+        }
+    }
+
+    /// Everything else a `/continue` states is a neutral placeholder the executor
+    /// reads as "not stated": mode `ask`, no floor, no Space, no route, not plan
+    /// mode, not ZDR, the default 4 rounds, and the resume it was built with.
+    #[test]
+    fn a_real_continue_states_only_neutral_placeholders() {
+        let req = continue_request_for(
+            Some(mp_contracts::model_plane::v1::AutonomyRung::DangerFullAccess),
+            crate::run_budget::RunBudget::default(),
         );
-        assert!(!body.contains("segment_no: 2"), "no segment_no literal 2");
+        assert_eq!(req.max_rounds, 4);
+        assert_eq!(req.mode, "ask");
+        assert!(!req.plan_mode);
+        assert!(!req.zdr);
+        assert_eq!(req.min_privacy_tier, 0);
+        assert_eq!(req.space_id, "");
+        assert_eq!(req.provider_hint, "");
+        assert_eq!(req.subscription_connection_id, "");
+        assert!(req.tools.is_empty(), "the tools are the pause's, never the request's");
+        assert_eq!(req.goal, "the run's goal");
+        assert_eq!(req.run_id, "run-1");
+        let resume = req.resume.expect("a continuation carries its resume");
+        assert_eq!(resume.segment_no, 0);
+        assert_eq!(resume.approval_id, "appr_1");
+        assert_eq!(resume.claim_token, "claim-1");
+    }
+
+    /// The rung rule for every other run is unchanged: plan mode is read-only, and a
+    /// plain run states the rung its thread was granted.
+    #[test]
+    fn only_a_resume_gives_up_the_threads_grant() {
+        use mp_contracts::model_plane::v1::AutonomyRung as Rung;
+        let granted = Some(Rung::WorkspaceWrite);
+        assert_eq!(
+            dispatch_autonomy_rung(false, false, granted),
+            Rung::WorkspaceWrite as i32,
+            "a plain run states its thread's grant"
+        );
+        assert_eq!(dispatch_autonomy_rung(false, false, None), Rung::Unspecified as i32);
+        assert_eq!(
+            dispatch_autonomy_rung(true, false, granted),
+            Rung::ReadOnly as i32,
+            "plan mode is read-only, grant or not"
+        );
+        assert_eq!(
+            dispatch_autonomy_rung(false, true, granted),
+            Rung::Unspecified as i32,
+            "a resume states nothing: the pause's authority applies"
+        );
+        assert_eq!(
+            dispatch_autonomy_rung(true, true, granted),
+            Rung::ReadOnly as i32,
+            "a request may always NARROW: plan mode stays read-only"
+        );
+    }
+
+    /// `continue_run` builds its request through the function the tests above use,
+    /// and fixes the posture literal it shares with it.
+    #[test]
+    fn continue_run_builds_its_request_the_way_the_tests_see_it() {
+        let source = include_str!("sse.rs");
+        let body = source
+            .split("pub(crate) async fn continue_run(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n#[cfg(test)]").next())
+            .expect("continue_run is in this file");
+        assert!(body.contains("continue_resume("), "continue_run builds its resume with continue_resume");
+        assert!(
+            body.contains("CONTINUE_PERMISSION_MODE"),
+            "the posture literal is shared with the request builder"
+        );
+        assert!(!body.contains("segment_no"), "the segment number is continue_resume's alone");
     }
 }

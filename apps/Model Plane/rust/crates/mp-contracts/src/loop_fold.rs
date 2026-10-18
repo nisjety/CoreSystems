@@ -283,14 +283,10 @@ pub fn continue_after_approval_enabled() -> bool {
     continue_after_approval_from(std::env::var(CONTINUE_AFTER_APPROVAL_ENV).ok().as_deref())
 }
 
-/// The `continuation_mode` a new approval carries: `loop` when the switch is on
-/// and the run keeps state (`persistent`), otherwise empty (the cold worker,
-/// exactly as before). The decision lives with the rest of the durable gate
-/// ([`crate::durable_gate`]); this is the same function under the path the
-/// callers already use. Its first argument was `zdr`: it is now `persistent`, and
-/// a caller passes `!zdr && !waived`, because a waived run's `zdr` flag is false
-/// while it keeps no state.
-pub use crate::durable_gate::continuation_mode_for;
+// The `continuation_mode` decision lives with the rest of the durable gate:
+// `crate::durable_gate::loop_mode_for_persistent(persistent, enabled)`. It is
+// deliberately NOT re-exported here under its old name `continuation_mode_for`, whose
+// first argument was `zdr`: a stale caller must fail to compile, not invert.
 
 /// The stable model-facing sentence for a closed call. The tool name is data in
 /// the sentence, never an instruction; no raw tool output is included.
@@ -578,10 +574,13 @@ mod tests {
         assert!(continue_after_approval_from(Some("true")));
         assert!(continue_after_approval_from(Some(" ON ")));
         // `persistent` is the first argument (it was `zdr`): a run that keeps state.
-        assert_eq!(continuation_mode_for(true, true), "loop");
-        assert_eq!(continuation_mode_for(true, false), "");
         assert_eq!(
-            continuation_mode_for(false, true),
+            crate::durable_gate::loop_mode_for_persistent(true, true),
+            "loop"
+        );
+        assert_eq!(crate::durable_gate::loop_mode_for_persistent(true, false), "");
+        assert_eq!(
+            crate::durable_gate::loop_mode_for_persistent(false, true),
             "",
             "a ZDR or waived run keeps no fold"
         );

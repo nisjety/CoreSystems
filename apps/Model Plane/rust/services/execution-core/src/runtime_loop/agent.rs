@@ -1904,6 +1904,8 @@ async fn run_rounds(
         let batch_budget = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(
             max_rounds.saturating_sub(rounds_executed + delegated_rounds),
         ));
+        let released_step_replayed = std::sync::atomic::AtomicBool::new(false);
+        let released_step_replayed = &released_step_replayed;
         let outcomes_by_slot: Vec<Option<runtime_loop::StepOutcome>> = {
             let dispatches: Vec<Option<LoopSubagentDispatch<'_, '_>>> = slots
                 .iter()
@@ -2006,6 +2008,18 @@ async fn run_rounds(
                                     tool = %call.name,
                                     "run_agent: effect ledger already holds this action; the call was not run again"
                                 );
+                                // The released step of a continuation was reserved
+                                // by another segment of this same claim: that one
+                                // owns the run from here. This request ends after
+                                // the batch instead of running a second loop
+                                // beside it (a first segment's re-drive has no
+                                // release and keeps the closer below).
+                                if ctx.release.as_ref().is_some_and(|release| {
+                                    release.covers(step_id, &call.name, &call.arguments_json)
+                                }) {
+                                    released_step_replayed
+                                        .store(true, std::sync::atomic::Ordering::SeqCst);
+                                }
                                 return Some(runtime_loop::StepOutcome {
                                     status: "failed".to_owned(),
                                     output: String::new(),
@@ -2123,6 +2137,16 @@ async fn run_rounds(
             }
             results
         };
+
+        // The released call's reservation belonged to another segment of this claim.
+        // Nothing of this segment is recorded and nothing more runs: the other one is
+        // the continuation, and a second model loop beside it would write the same
+        // run twice.
+        if released_step_replayed.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(tonic::Status::failed_precondition(
+                "continuation_already_consumed",
+            ));
+        }
 
         // Phase 3: sequential outcome processing, in original order.
         let mut outcomes = Vec::with_capacity(response.tool_calls.len());
@@ -10242,16 +10266,22 @@ mod tests {
     }
 
     /// A stage 1 replay by the same claim (a retried continue after a dropped
-    /// response) finds the earlier attempt's reservation. The approved call may
-    /// already have run, so it is not run again; it is closed as unknown.
+    /// response, or two concurrent continues with one client-chosen token) finds
+    /// the earlier attempt's reservation. The approved call may already have run,
+    /// so it is not run again, and the request ends there: running the model loop
+    /// on would be a whole second segment beside the first one.
     #[tokio::test]
-    async fn a_same_claim_replay_after_dispatch_does_not_run_the_call_again() {
+    async fn a_same_claim_replay_after_dispatch_ends_the_request_and_runs_nothing_more() {
         let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
         rec.lock().unwrap().reserve_replays = true;
         let policy = CountingPolicy::new();
-        let inference_channel =
-            spawn_inference_channel(vec![Scripted::Answer("checked".to_owned())]).await;
-        let resp = drive_continue(
+        let observed_tiers: ObservedTiers = Arc::new(Mutex::new(Vec::new()));
+        let inference_channel = spawn_inference_channel_with_tier(
+            vec![Scripted::Answer("checked".to_owned())],
+            observed_tiers.clone(),
+        )
+        .await;
+        let error = drive_continue(
             &rec,
             continue_request(2),
             consume_of("tool_1_del-1", false, true, snapshot_of(|_| {})),
@@ -10260,16 +10290,64 @@ mod tests {
             inference_channel,
         )
         .await
-        .expect("the replay continues");
+        .expect_err("the replayed segment ends instead of running a second loop");
 
+        assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+        assert_eq!(error.message(), "continuation_already_consumed");
         assert_eq!(policy.count(), 0, "the approved call was not dispatched a second time");
+        assert!(
+            observed_tiers.lock().unwrap().is_empty(),
+            "no model round ran after the refusal"
+        );
         let r = rec.lock().unwrap();
+        assert_eq!(r.reservations.len(), 1, "it asked the ledger once, for the released step");
         assert!(r.finalizations.is_empty(), "the earlier attempt's row is not ours to close");
+        assert!(r.completed.is_empty(), "no step of this segment completed");
+        assert!(
+            r.managed_terminal_outcomes.is_empty(),
+            "the other segment owns the terminal outcome"
+        );
+    }
+
+    /// The same collision on a FIRST segment (a re-drive of a run whose earlier
+    /// attempt died after reserving) keeps the unknown-outcome closer and the
+    /// loop: there is no consumed approval to refuse, and the model can still
+    /// tell the user what happened.
+    #[tokio::test]
+    async fn a_first_segment_redrive_keeps_the_unknown_outcome_closer_and_the_loop() {
+        let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
+        rec.lock().unwrap().reserve_replays = true;
+        let policy = CountingPolicy::new();
+        let resp = run_effectful_call(&rec, &policy).await;
+        assert_eq!(resp.final_output, "done");
+        assert_eq!(policy.count(), 0);
+        let r = rec.lock().unwrap();
         assert!(r
             .persisted_step_payloads
             .iter()
-            .any(|(step, _, error)| step == "s2.tool_1_approved" && error.contains("outcome is unknown")));
+            .any(|(_, _, error)| error.contains("outcome is unknown")));
+    }
+
+    /// A continuation whose released step reserves fresh dispatches and goes on:
+    /// the new refusal is only for a replay.
+    #[tokio::test]
+    async fn a_continuation_whose_reservation_is_fresh_still_runs_the_released_call() {
+        let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
+        let policy = CountingPolicy::new();
+        let inference_channel =
+            spawn_inference_channel(vec![Scripted::Answer("checked".to_owned())]).await;
+        let resp = drive_continue(
+            &rec,
+            continue_request(2),
+            consume_of("tool_1_del-1", true, false, snapshot_of(|_| {})),
+            true,
+            &policy,
+            inference_channel,
+        )
+        .await
+        .expect("a won consume with a fresh reservation continues");
         assert_eq!(resp.final_output, "checked");
+        assert!(policy.count() >= 1, "the released call was dispatched");
     }
 
     /// Stage 1 runs under the authority the pause retained. The gateway's

@@ -98,8 +98,22 @@ pub fn refuse_unless_persistent_class(
 ///
 /// `persistent` is the caller's decision, never `!zdr` alone: a waived run's
 /// `zdr` flag is false, and it must still get the cold mode.
+///
+/// The name is the contract. This function was `continuation_mode_for`, whose first
+/// argument was `zdr`; it kept the same `(bool, bool)` signature when that argument
+/// became `persistent`, so a caller that missed the change would have compiled with
+/// the meaning inverted. The old name is removed from both paths it lived at, so
+/// a stale caller fails to compile:
+///
+/// ```compile_fail
+/// let _ = mp_contracts::durable_gate::continuation_mode_for(true, true);
+/// ```
+///
+/// ```compile_fail
+/// let _ = mp_contracts::loop_fold::continuation_mode_for(true, true);
+/// ```
 #[must_use]
-pub const fn continuation_mode_for(persistent: bool, enabled: bool) -> &'static str {
+pub const fn loop_mode_for_persistent(persistent: bool, enabled: bool) -> &'static str {
     if enabled && persistent {
         "loop"
     } else {
@@ -206,13 +220,13 @@ mod tests {
 
     #[test]
     fn a_loop_mode_needs_both_a_run_that_keeps_state_and_the_switch() {
-        assert_eq!(continuation_mode_for(true, true), "loop");
-        assert_eq!(continuation_mode_for(true, false), "");
+        assert_eq!(loop_mode_for_persistent(true, true), "loop");
+        assert_eq!(loop_mode_for_persistent(true, false), "");
         assert_eq!(
-            continuation_mode_for(false, true),
+            loop_mode_for_persistent(false, true),
             "",
             "a zdr or waived run keeps no fold"
         );
-        assert_eq!(continuation_mode_for(false, false), "");
+        assert_eq!(loop_mode_for_persistent(false, false), "");
     }
 }
