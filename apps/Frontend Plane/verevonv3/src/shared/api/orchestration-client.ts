@@ -9,6 +9,7 @@ export {
   chatRunContinueFrameRefusalOf,
   chatRunContinueHttpRefusalOf,
   chatRunContinueSpentConnected,
+  chatRunContinueTransportFailureOf,
   chatRunContinueUnflaggedRefusalOf,
 } from '../actions/chat-run-continue-contract'
 export type {
@@ -17,6 +18,8 @@ export type {
   ChatRunContinueFrameRefusalCode,
   ChatRunContinueHttpRefusal,
   ChatRunContinueHttpRefusalCode,
+  ChatRunContinueTransportFailure,
+  ChatRunContinueTransportReason,
 } from '../actions/chat-run-continue-contract'
 
 // Human-in-the-loop run control for agentic chat runs. These call the gateway
@@ -137,11 +140,21 @@ export async function resumeRun(runId: string, signal?: AbortSignal): Promise<vo
  *
  * Rejects when the connection or the gateway refuses the continuation, so the
  * caller sees the typed `ApiError` code rather than a stalled stream. Read that
- * rejection with `chatRunContinueHttpRefusalOf`, and the frames with
- * `chatRunContinueSpentConnected`, `chatRunContinueFrameRefusalOf` and
- * `chatRunContinueUnflaggedRefusalOf`: a rejection none of them reads (a 502
- * `upstream_unavailable`, a dropped connection) says nothing about whether the
- * approval was spent, so the approval is re-read before any retry.
+ * rejection with `chatRunContinueHttpRefusalOf` (the eight listed refusals) and
+ * then `chatRunContinueTransportFailureOf` (everything else: a 502
+ * `upstream_unavailable`, a 504, a dropped connection, an unlisted body), and the
+ * frames with `chatRunContinueSpentConnected`, `chatRunContinueFrameRefusalOf` and
+ * `chatRunContinueUnflaggedRefusalOf`.
+ *
+ * After an ambiguous failure (an effect whose `approvalSpent` is `unknown`) do not
+ * assume either way: follow the run by its id with the existing run read; the run
+ * read is the arbiter. Sending the request again with the same claim token is
+ * answered either with the continuation or with a refusal. Only 409
+ * `continuation_already_consumed` means the click was spent; `not_resumable`,
+ * `approval_not_found` and `continue_disabled` leave the spend unknown, because a
+ * spent approval whose run has ended gets them too. Following the run does not promise
+ * that it is live: after `continue_unavailable` the run may still be recovered
+ * inside the recovery window, about 15 minutes from the consume.
  */
 export async function continueRun(
   runId: string,

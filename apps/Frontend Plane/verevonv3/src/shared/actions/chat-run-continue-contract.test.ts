@@ -1,20 +1,30 @@
 import { describe, expect, it } from 'vitest'
 import {
+  CHAT_RUN_CONTINUE_AMBIGUOUS_FAILURE_GUIDANCE,
+  CHAT_RUN_CONTINUE_FOLLOW_RUN_NOTE,
   CHAT_RUN_CONTINUE_FRAME_REFUSALS,
   CHAT_RUN_CONTINUE_HTTP_EFFECTS,
   CHAT_RUN_CONTINUE_HTTP_REFUSALS,
+  CHAT_RUN_CONTINUE_PRE_CONSUME_ONLY_HTTP_REFUSALS,
+  CHAT_RUN_CONTINUE_RECOVERY_WINDOW_MINUTES,
   CHAT_RUN_CONTINUE_SPENT_ONLY_FRAME_REFUSALS,
+  CHAT_RUN_CONTINUE_TRANSPORT_EFFECT,
   chatRunContinueFrameRefusalOf,
   chatRunContinueHttpRefusalOf,
   chatRunContinueSpentConnected,
+  chatRunContinueTransportFailureOf,
   chatRunContinueUnflaggedRefusalOf,
 } from './chat-run-continue-contract'
+import contractSource from './chat-run-continue-contract.ts?raw'
 
 // The closed vocabulary below is the one model-gateway's /continue route and its
 // stream speak (build plan WS03 S7c). The BFF relays the HTTP half
 // (apps/gateway CONTINUE_RELAYED_ERRORS); the stream half is relayed byte for
-// byte. Both lists are test-pinned on the Rust side as well
-// (apps/gateway/tests/continue_error_vocabulary.rs).
+// byte. The HTTP list is pinned to the BFF's list on the Rust side
+// (apps/gateway/tests/continue_error_vocabulary.rs). Nothing pins either list to
+// model-gateway's own yet (the gateway constants land with build plan WS03
+// S7c-A4), and nothing pins the 22 stream tokens to any Rust source: until then
+// the stream vocabulary here is unpinned.
 
 const HTTP_PAIRS = [
   ['continue_disabled', 409],
@@ -96,18 +106,61 @@ describe('the closed vocabularies', () => {
   })
 })
 
+// The effect table, pinned row by row: [approvalSpent, retryable, followRun].
+// `no` is claimed only for a code that cannot be produced after a consume. The
+// gateway checks the switch, then the run's state, then the approval's pairing with
+// the run, and only then whether it was already consumed; the consume itself reports
+// a replay on a run that has ended as not found. So continue_disabled,
+// not_resumable and approval_not_found can all answer a client that retries after a
+// dropped stream or a double click for an approval that WAS spent. The other three
+// refusals are only ever produced for an approval that is not consumed: an approval
+// is granted for good once granted, and the consume answers an already-consumed one
+// before it looks at the grant, the expiry or the retained descriptor.
+const HTTP_EFFECT_TABLE = {
+  continue_disabled: ['unknown', false, true],
+  not_resumable: ['unknown', false, true],
+  approval_not_found: ['unknown', false, true],
+  approval_not_granted: ['no', false, false],
+  approval_expired: ['no', false, false],
+  approval_not_resumable: ['no', false, false],
+  continuation_already_consumed: ['yes', false, true],
+  continue_unavailable: ['unknown', true, true],
+} as const
+
 describe('chatRunContinueHttpRefusalOf', () => {
-  it('says not spent, no retry and no follow for the pre-consume refusals', () => {
+  it('pins the whole effect table, row by row, with no re-read field', () => {
     for (const [code, status] of HTTP_PAIRS) {
-      if (code === 'continuation_already_consumed' || code === 'continue_unavailable') continue
-      expect(chatRunContinueHttpRefusalOf({ code, status })).toEqual({
-        code,
-        status,
-        approvalSpent: 'no',
-        retryable: false,
-        followRun: false,
-        reread: false,
-      })
+      const [approvalSpent, retryable, followRun] = HTTP_EFFECT_TABLE[code]
+      const read = chatRunContinueHttpRefusalOf({ code, status })
+      expect(read).toEqual({ code, status, approvalSpent, retryable, followRun })
+      expect(Object.keys(read ?? {}).sort()).toEqual(['approvalSpent', 'code', 'followRun', 'retryable', 'status'])
+    }
+    expect(Object.keys(HTTP_EFFECT_TABLE).sort()).toEqual(HTTP_PAIRS.map(([code]) => code).sort())
+  })
+
+  it('claims not spent only for the three refusals that cannot follow a consume', () => {
+    expect([...CHAT_RUN_CONTINUE_PRE_CONSUME_ONLY_HTTP_REFUSALS].sort()).toEqual([
+      'approval_expired',
+      'approval_not_granted',
+      'approval_not_resumable',
+    ])
+    for (const [code, status] of HTTP_PAIRS) {
+      const pre = (CHAT_RUN_CONTINUE_PRE_CONSUME_ONLY_HTTP_REFUSALS as readonly string[]).includes(code)
+      expect(chatRunContinueHttpRefusalOf({ code, status })?.approvalSpent === 'no').toBe(pre)
+    }
+  })
+
+  it('does not call not_resumable or continue_disabled unspent: a retry after a dropped stream, a double click or a switch flipped after a spend gets them for a spent approval', () => {
+    for (const [code, status] of [
+      ['not_resumable', 409],
+      ['continue_disabled', 409],
+      ['approval_not_found', 404],
+    ] as const) {
+      const read = chatRunContinueHttpRefusalOf({ code, status })
+      expect(read?.approvalSpent).toBe('unknown')
+      expect(read?.retryable).toBe(false)
+      // What resolves it is the run, read by its id.
+      expect(read?.followRun).toBe(true)
     }
   })
 
@@ -118,7 +171,6 @@ describe('chatRunContinueHttpRefusalOf', () => {
       approvalSpent: 'yes',
       retryable: false,
       followRun: true,
-      reread: false,
     })
   })
 
@@ -129,7 +181,6 @@ describe('chatRunContinueHttpRefusalOf', () => {
       approvalSpent: 'unknown',
       retryable: true,
       followRun: true,
-      reread: false,
     })
   })
 
@@ -139,12 +190,13 @@ describe('chatRunContinueHttpRefusalOf', () => {
     expect(chatRunContinueHttpRefusalOf({ code: 'continuation_already_consumed', status: 200 })).toBeNull()
   })
 
-  it('says nothing for any other failure of the request, which is never read as not spent', () => {
+  it('is null for any failure that is not one of the eight, which the transport guard then reads as unknown', () => {
     // A request the BFF could not complete after delivering it upstream (a send
     // failure, a dropped connection) reaches the client as 502 upstream_unavailable
     // although the gateway may already have consumed the approval. A 401, a
-    // model_error and a transport failure are the same: the guard returns null so
-    // the caller cannot read the absence of a refusal as "not spent".
+    // model_error and a transport failure are the same. This guard returns null so
+    // it never reads them as "not spent"; chatRunContinueTransportFailureOf is the
+    // typed answer, so a caller never has to read null as "not a continuation error".
     for (const input of [
       { code: 'upstream_unavailable', status: 502 },
       { code: 'model_error', status: 500 },
@@ -156,6 +208,9 @@ describe('chatRunContinueHttpRefusalOf', () => {
       { code: 'agent_dispatch_unavailable', status: 200 },
     ]) {
       expect(chatRunContinueHttpRefusalOf(input)).toBeNull()
+      if (input.status >= 400) {
+        expect(chatRunContinueTransportFailureOf(input)).toMatchObject({ kind: 'transport', approvalSpent: 'unknown' })
+      }
     }
   })
 
@@ -167,7 +222,7 @@ describe('chatRunContinueHttpRefusalOf', () => {
 
   it('reads a real ApiError by shape', () => {
     // ApiError carries status and code as own properties; the guard needs no import of it.
-    const error = Object.assign(new Error('approval not found'), { status: 404, code: 'approval_not_found' })
+    const error = Object.assign(new Error('approval not granted'), { status: 409, code: 'approval_not_granted' })
     expect(chatRunContinueHttpRefusalOf(error)?.approvalSpent).toBe('no')
   })
 })
@@ -183,7 +238,6 @@ describe('chatRunContinueFrameRefusalOf (regime 1: the gateway spent the approva
         approvalSpent: 'yes',
         retryable: false,
         followRun: true,
-        reread: false,
       })
     }
   })
@@ -210,14 +264,13 @@ describe('chatRunContinueFrameRefusalOf (regime 1: the gateway spent the approva
 })
 
 describe('chatRunContinueUnflaggedRefusalOf (regime 2: refused by the executor, state unknown)', () => {
-  it('reads a tuple code without the flag as unknown, not retryable, not followed and re-read', () => {
+  it('reads a tuple code without the flag as unknown, never retried automatically, and resolved by following the run', () => {
     const expected = (code: string) => ({
       regime: 2,
       code,
       approvalSpent: 'unknown',
       retryable: false,
-      followRun: false,
-      reread: true,
+      followRun: true,
     })
     for (const code of CHAT_RUN_CONTINUE_FRAME_REFUSALS) {
       if ((CHAT_RUN_CONTINUE_SPENT_ONLY_FRAME_REFUSALS as readonly string[]).includes(code)) continue
@@ -269,7 +322,6 @@ describe('chatRunContinueSpentConnected', () => {
       approvalSpent: 'yes',
       retryable: false,
       followRun: true,
-      reread: false,
     })
   })
 
@@ -287,5 +339,147 @@ describe('chatRunContinueSpentConnected', () => {
     for (const input of [null, undefined, 'x', 1, []]) {
       expect(chatRunContinueSpentConnected(input)).toBeNull()
     }
+  })
+})
+
+describe('chatRunContinueTransportFailureOf (a failure that says nothing about the spend)', () => {
+  const effect = { approvalSpent: 'unknown', retryable: true, followRun: true }
+
+  it('exports the effect: spent unknown, the same request resolves it, follow the run', () => {
+    expect(CHAT_RUN_CONTINUE_TRANSPORT_EFFECT).toEqual(effect)
+  })
+
+  it('reads a 502 upstream_unavailable and a 504 as transport failures', () => {
+    expect(chatRunContinueTransportFailureOf({ code: 'upstream_unavailable', status: 502 })).toEqual({
+      kind: 'transport',
+      reason: 'upstream_unavailable',
+      ...effect,
+    })
+    for (const code of [null, 'gateway_timeout', 'model_error']) {
+      expect(chatRunContinueTransportFailureOf({ code, status: 504 })).toEqual({
+        kind: 'transport',
+        reason: 'gateway_timeout',
+        ...effect,
+      })
+    }
+  })
+
+  it('reads a network error, with no status at all, as a transport failure', () => {
+    for (const error of [new TypeError('Failed to fetch'), new Error('SSE connection failed (200)'), new DOMException('gone', 'NetworkError')]) {
+      expect(chatRunContinueTransportFailureOf(error)).toEqual({ kind: 'transport', reason: 'network', ...effect })
+    }
+  })
+
+  it('reads the BFF midstream transport frame, an error envelope naming upstream_unavailable, the same way', () => {
+    expect(
+      chatRunContinueTransportFailureOf({ error: { code: 'upstream_unavailable', message: 'The upstream service is unavailable.' } }),
+    ).toEqual({ kind: 'transport', reason: 'upstream_unavailable', ...effect })
+  })
+
+  it('reads an unlisted body, whatever its status, as unknown too', () => {
+    for (const input of [
+      { code: 'model_error', status: 500 },
+      { code: 'model_error', status: 409 },
+      { code: 'unauthorized', status: 401 },
+      { code: 'continue_incomplete', status: 400 },
+      { code: 'missing_bearer', status: 401 },
+      { code: 'approval_not_found', status: 409 },
+      { code: 'continue_unavailable', status: 502 },
+      { code: 'model_error', status: 502 },
+      { code: null, status: 502 },
+      { code: 7, status: 500 },
+      { status: 500 },
+    ]) {
+      expect(chatRunContinueTransportFailureOf(input)).toEqual({ kind: 'transport', reason: 'unlisted', ...effect })
+    }
+  })
+
+  it('is null for the eight listed refusals: the HTTP guard reads those, and never both', () => {
+    for (const [code, status] of HTTP_PAIRS) {
+      expect(chatRunContinueTransportFailureOf({ code, status })).toBeNull()
+      expect(chatRunContinueHttpRefusalOf({ code, status })).not.toBeNull()
+    }
+  })
+
+  it('is null for a value that is not a failed request: nothing thrown, a success status, no object', () => {
+    for (const input of [null, undefined, 'upstream_unavailable', 502, true, [], { code: 'x', status: 200 }, { code: 'x', status: 204 }]) {
+      expect(chatRunContinueTransportFailureOf(input)).toBeNull()
+    }
+  })
+
+  it('leaves no failed request unread: every object with an error status is read by exactly one of the two guards', () => {
+    const inputs: unknown[] = [
+      ...HTTP_PAIRS.map(([code, status]) => ({ code, status })),
+      { code: 'upstream_unavailable', status: 502 },
+      { code: 'model_error', status: 500 },
+      { status: 504 },
+      new TypeError('Failed to fetch'),
+    ]
+    for (const input of inputs) {
+      const refusal = chatRunContinueHttpRefusalOf(input)
+      const transport = chatRunContinueTransportFailureOf(input)
+      expect([refusal, transport].filter((read) => read !== null)).toHaveLength(1)
+    }
+  })
+})
+
+describe('the wording of the contract', () => {
+  const GUIDANCE = CHAT_RUN_CONTINUE_AMBIGUOUS_FAILURE_GUIDANCE
+
+  it('tells a client what it CAN do after an ambiguous failure: no assumption, follow the run by its id, resend the same token', () => {
+    expect(GUIDANCE).toContain('do not assume')
+    expect(GUIDANCE).toContain('Follow the run by its id with the existing run read')
+    expect(GUIDANCE).toContain('the same claim token')
+    expect(GUIDANCE).toContain('409 continuation_already_consumed')
+    expect(GUIDANCE).toContain('the click was spent')
+  })
+
+  it('says a retry is answered with the continuation or with a refusal, and only 409 continuation_already_consumed means spent', () => {
+    expect(GUIDANCE).toContain('answered either with the continuation or with a refusal')
+    expect(GUIDANCE).toContain('Only 409 continuation_already_consumed means the click was spent')
+    // The three refusals a spent approval can also get leave the spend unknown, and
+    // the run read decides.
+    for (const code of ['not_resumable', 'approval_not_found', 'continue_disabled']) {
+      expect(GUIDANCE).toContain(code)
+    }
+    expect(GUIDANCE).toContain('leave the spend unknown')
+    expect(GUIDANCE).toContain('the run read is the arbiter')
+  })
+
+  it('never claims that a retry that is not a 409 continues the run, or that a refusal other than the 409 shows the approval unspent', () => {
+    const wording = [GUIDANCE, CHAT_RUN_CONTINUE_FOLLOW_RUN_NOTE, contractSource]
+    for (const text of wording) {
+      expect(text).not.toMatch(/otherwise it continues/i)
+      expect(text).not.toMatch(/either the continuation or 409/i)
+      expect(text).not.toMatch(/the retry is the continuation, or 409/i)
+      expect(text).not.toMatch(/either wins, or gets a 409/i)
+    }
+  })
+
+  it('never tells a client to re-read an approval: no read it has shows whether one was spent', () => {
+    const wording = [GUIDANCE, CHAT_RUN_CONTINUE_FOLLOW_RUN_NOTE, contractSource]
+    for (const text of wording) {
+      expect(text).not.toMatch(/re-?read\s+the\s+approval/i)
+      expect(text).not.toMatch(/reread/i)
+    }
+  })
+
+  it('says honestly that following a run does not promise a live run, and names the recovery window', () => {
+    const note = CHAT_RUN_CONTINUE_FOLLOW_RUN_NOTE
+    expect(CHAT_RUN_CONTINUE_RECOVERY_WINDOW_MINUTES).toBe(15)
+    expect(note).toContain('read the run by its id')
+    expect(note).toContain('does not promise that a run is live')
+    expect(note).toContain('continue_unavailable')
+    expect(note).toContain('409 continuation_already_consumed')
+    expect(note).toContain('no run was launched')
+    expect(note).toContain('recovery window')
+    expect(note).toContain(`about ${CHAT_RUN_CONTINUE_RECOVERY_WINDOW_MINUTES} minutes from the consume`)
+  })
+
+  it('puts the followRun caveat on the effect field itself, where a reader of the table finds it', () => {
+    // One doc comment, immediately above the field: no comment may contain a `*/`.
+    const field = contractSource.match(/\/\*\*(?:[^*]|\*(?!\/))*\*\/\s*readonly followRun: boolean/)?.[0] ?? ''
+    expect(field).toContain('read the run by its id')
+    expect(field).toContain('not that a run is live')
   })
 })

@@ -113,7 +113,22 @@ describe('action registry', () => {
     expect(description).toContain('never retry with a new token')
     // A refusal frame without the flag leaves the approval state unknown.
     expect(description).toContain('without approval_spent')
-    expect(description).toContain('re-read the approval before any retry')
+    // No instruction a client cannot follow: no read the SPA has shows whether an
+    // approval was spent, so the description never says to re-read one. It says what
+    // a client can do: do not assume either way, follow the run by its id, and a
+    // retry with the same token answers 409 if the click was spent.
+    expect(description).not.toMatch(/re-?read\s+the\s+approval/i)
+    expect(description).toContain('do not assume either way')
+    expect(description).toContain('follow the run by its id with the existing run read')
+    expect(description).toContain('A retry with the same token is answered either with the continuation or with a refusal')
+    expect(description).toContain('only 409 continuation_already_consumed means the click was spent')
+    expect(description).toContain('not_resumable, approval_not_found and continue_disabled leave the spend unknown')
+    expect(description).toContain('the run read is the arbiter')
+    expect(description).not.toContain('answers 409 if the click was spent')
+    expect(description).toContain('every consumed approval is refused with 409 continuation_already_consumed')
+    // Following a run is not a promise that it is live.
+    expect(description).toContain('does not promise that the run is live')
+    expect(description).toContain('about 15 minutes from the consume')
     // A failed request that is not a listed refusal says nothing about the spend.
     expect(description).toContain('upstream_unavailable')
     // The thread's approved plan and its grant are not consumed.

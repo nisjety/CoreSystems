@@ -1920,13 +1920,20 @@ async fn read_error_body(
 ) -> Option<Vec<u8>> {
     let read = async {
         let mut body = Vec::new();
-        while let Ok(Some(chunk)) = resp.chunk().await {
-            if body.len() + chunk.len() > limit {
-                return None;
+        loop {
+            match resp.chunk().await {
+                Ok(Some(chunk)) => {
+                    if body.len() + chunk.len() > limit {
+                        return None;
+                    }
+                    body.extend_from_slice(&chunk);
+                }
+                Ok(None) => return Some(body),
+                // A read error is not the end of the body: what arrived may parse
+                // on its own and still be a cut-off answer, so it is not used.
+                Err(_) => return None,
             }
-            body.extend_from_slice(&chunk);
         }
-        Some(body)
     };
     tokio::time::timeout(timeout, read).await.ok().flatten()
 }
@@ -3321,7 +3328,10 @@ mod relayed_error_tests {
     async fn a_permission_or_auth_refusal_never_echoes_the_upstream_message() {
         // The gateway keeps grpc_status_to_http's body for a consume
         // PermissionDenied or Unauthenticated; those carry no closed code and the
-        // BFF must give the client its own words, whatever the upstream said.
+        // BFF must give the client its own words, whatever the upstream said. The
+        // real body is FLAT, `{"error": "<message>"}` (the loop after this one);
+        // the nested shape below is the gateway's own error envelope, kept as a
+        // second shape the relay must also never echo.
         for (status, code) in [(403, "permission_denied"), (401, "unauthenticated"), (403, "forbidden")] {
             let upstream_body = json!({"error": {"code": code, "message": UPSTREAM_TEXT}});
             let (got, body, text) =
@@ -3331,6 +3341,35 @@ mod relayed_error_tests {
             assert_eq!(body["error"]["code"], expected);
             assert!(!text.contains(UPSTREAM_TEXT), "{text}");
             assert!(!text.contains(code), "{text}");
+        }
+
+        // The real shape: grpc_status_to_http answers `{"error": "<message>"}`, the
+        // message being the status's text. A flat message never reaches the client,
+        // whatever it says, including a message that is a listed closed code (which
+        // must not turn a 401 or a 403 into that code either).
+        for (status, message) in [
+            (403, UPSTREAM_TEXT),
+            (401, UPSTREAM_TEXT),
+            (403, "permission denied: UPSTREAM-ONLY-TEXT-for-this-org"),
+            (401, "unauthenticated: UPSTREAM-ONLY-TEXT-for-this-token"),
+            (403, "continuation_already_consumed"),
+            (401, "continuation_already_consumed"),
+            (403, "approval_not_found"),
+            (401, "continue_unavailable"),
+        ] {
+            let upstream_body = json!({ "error": message });
+            let (got, body, text) =
+                relay_upstream_answer(status, json_answer(status, &upstream_body), RELAYED).await;
+            assert_eq!(got, status, "{message}");
+            let expected = if status == 401 { "unauthorized" } else { "model_error" };
+            assert_eq!(body["error"]["code"], expected, "{message}: {text}");
+            assert_eq!(
+                body["error"]["message"],
+                format!("Model gateway returned {status}"),
+                "{message}"
+            );
+            assert!(!text.contains("UPSTREAM-ONLY-TEXT"), "{message}: {text}");
+            assert!(!text.contains(message), "{message}: {text}");
         }
     }
 
@@ -3361,6 +3400,77 @@ mod relayed_error_tests {
             }
         });
         (url, handle)
+    }
+
+    /// A server that answers 409 with a complete, listed error object but promises
+    /// more bytes than it sends, then drops the connection: what arrives parses on
+    /// its own, and the read still ends in an error.
+    async fn cut_body_server() -> (String, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind a loopback port");
+        let url = format!("http://{}/relay", listener.local_addr().expect("local addr"));
+        let handle = tokio::spawn(async move {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            loop {
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    return;
+                };
+                tokio::spawn(async move {
+                    let mut buffer = [0u8; 4096];
+                    let _ = stream.read(&mut buffer).await;
+                    let body = json!({"error": {
+                        "code": "continuation_already_consumed",
+                        "message": UPSTREAM_TEXT,
+                    }})
+                    .to_string();
+                    let head = format!(
+                        "HTTP/1.1 409 Conflict\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n",
+                        body.len() + 500
+                    );
+                    let _ = stream.write_all(head.as_bytes()).await;
+                    let _ = stream.write_all(body.as_bytes()).await;
+                    let _ = stream.shutdown().await;
+                });
+            }
+        });
+        (url, handle)
+    }
+
+    #[tokio::test]
+    async fn a_body_that_errors_mid_read_is_given_up_on_even_when_what_arrived_parses() {
+        let (url, server) = cut_body_server().await;
+        let mut resp = reqwest::Client::new()
+            .post(&url)
+            .send()
+            .await
+            .expect("the headers arrive");
+
+        let read = tokio::time::timeout(
+            Duration::from_secs(5),
+            read_error_body(&mut resp, RELAYED_ERROR_BODY_LIMIT, Duration::from_secs(5)),
+        )
+        .await
+        .expect("a read error ends the read at once");
+
+        assert_eq!(read, None, "a read error is not a short body");
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn a_listed_code_in_a_body_that_was_cut_off_is_not_relayed() {
+        let (url, server) = cut_body_server().await;
+
+        let (status, text) = tokio::time::timeout(Duration::from_secs(10), relay_url(&url, RELAYED))
+            .await
+            .expect("the relay answers");
+
+        assert_eq!(status, 409);
+        let body: Value = serde_json::from_str(&text).expect("JSON envelope");
+        assert_eq!(body["error"]["code"], "model_error", "{text}");
+        assert_eq!(body["error"]["message"], "Model gateway returned 409");
+        assert!(!text.contains(UPSTREAM_TEXT), "{text}");
+        server.abort();
     }
 
     #[tokio::test]

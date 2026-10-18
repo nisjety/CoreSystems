@@ -578,8 +578,16 @@ fn continue_upstream_body(body: &ContinueRunBody) -> Option<Value> {
 /// message). The messages are this BFF's own words; an upstream message is never
 /// relayed. A code relays only under its own status, so a body that merely names a
 /// code does not turn another failure into it. Mirrored by the SPA's
-/// `CHAT_RUN_CONTINUE_HTTP_REFUSALS` and pinned against it and against the
-/// gateway's list in `tests/continue_error_vocabulary.rs`.
+/// `CHAT_RUN_CONTINUE_HTTP_REFUSALS` and pinned against it in
+/// `tests/continue_error_vocabulary.rs`. Nothing pins it to model-gateway's own
+/// list yet (those constants land with build plan WS03 S7c-A4).
+///
+/// There is no switch on this relay: with every Model Plane switch off the route
+/// already answers these codes in place of the `model_error` it used to be turned
+/// into (a committed gateway with the continue switch off answers 409
+/// `continue_disabled`). That visible change is accepted because no UI calls the
+/// route yet; `the_continue_relay_has_no_switch_and_names_closed_codes_with_every_model_plane_switch_off`
+/// pins it.
 ///
 /// Not here, on purpose: `continue_incomplete` (this handler's own blank check
 /// answers first) and `missing_bearer` (a 401, which stays `unauthorized`).
@@ -612,7 +620,7 @@ pub(crate) const CONTINUE_RELAYED_ERRORS: &[(&str, u16, &str)] = &[
     (
         "continuation_already_consumed",
         409,
-        "This approval has already been used to continue the run.",
+        "This approval has already been used. Check the run to see what became of it.",
     ),
     (
         "continue_unavailable",
@@ -1273,10 +1281,11 @@ mod tests {
 
     #[tokio::test]
     async fn continue_keeps_every_other_upstream_error_closed_and_never_echoes_its_message() {
-        // What a consume PermissionDenied, an Unauthenticated, an owner check or a
-        // ZDR typed refusal looks like from model-gateway: grpc_status_to_http's own
-        // body, with a message the browser must not see. The BFF answers with its
-        // own words and no closed continue code.
+        // The refusals the gateway does not give a closed continue code, in the
+        // nested `{error: {code, message}}` envelope, with a message the browser
+        // must not see. (grpc_status_to_http's own body is FLAT, `{"error":
+        // "<message>"}`; the test after this one covers that shape.) The BFF answers
+        // with its own words and no closed continue code.
         let cases = [
             (403, "permission_denied", "model_error"),
             (401, "unauthenticated", "unauthorized"),
@@ -1304,5 +1313,87 @@ mod tests {
             assert!(!text.contains(UPSTREAM_TEXT), "{code}: {text}");
             assert!(!text.contains(code), "{code}: {text}");
         }
+    }
+
+    #[tokio::test]
+    async fn a_flat_grpc_status_body_is_never_echoed_for_a_permission_or_auth_refusal() {
+        // grpc_status_to_http answers `{"error": "<message>"}` for a consume
+        // PermissionDenied or Unauthenticated, an owner check and the like. The
+        // BFF must give the client its own words whatever the message says, and a
+        // message that is a listed closed code must not become that code.
+        let cases = [
+            (403, UPSTREAM_TEXT, "model_error"),
+            (401, UPSTREAM_TEXT, "unauthorized"),
+            (403, "permission denied: UPSTREAM-ONLY-TEXT-for-this-org", "model_error"),
+            (401, "unauthenticated: UPSTREAM-ONLY-TEXT-for-this-token", "unauthorized"),
+            (403, "continuation_already_consumed", "model_error"),
+            (401, "continuation_already_consumed", "unauthorized"),
+            (403, "approval_not_found", "model_error"),
+            (401, "continue_unavailable", "unauthorized"),
+            // The same flat body under a status the list does name.
+            (409, "continuation_already_consumed", "model_error"),
+            (404, "approval_not_found", "model_error"),
+            (503, "continue_unavailable", "model_error"),
+        ];
+        for (status, message, expected) in cases {
+            let (got, body, text) = continue_answered_with(status, json!({ "error": message })).await;
+            assert_eq!(got.as_u16(), status, "{message}");
+            assert_eq!(body["error"]["code"], expected, "{message} under {status}: {text}");
+            assert_eq!(
+                body["error"]["message"],
+                format!("Model gateway returned {status}"),
+                "{message}"
+            );
+            assert!(!text.contains("UPSTREAM-ONLY-TEXT"), "{message}: {text}");
+            assert!(!text.contains(message), "{message}: {text}");
+        }
+    }
+
+    #[tokio::test]
+    async fn the_continue_relay_has_no_switch_and_names_closed_codes_with_every_model_plane_switch_off() {
+        // ACCEPTED CHANGE (WS03 S7c-A5): the continue route's error vocabulary is
+        // not behind a switch. A committed model-gateway with its continue switch
+        // off answers 409 `continue_disabled`, which this BFF used to turn into
+        // `model_error` and now relays by its closed code. No UI calls the route
+        // yet. This test pins the behaviour so a later change to it is deliberate:
+        // the answer needs no switch, and the handler hands the closed list to the
+        // relay unconditionally.
+        let (got, body, text) = continue_answered_with(
+            409,
+            json!({"error": {"code": "continue_disabled", "message": UPSTREAM_TEXT}}),
+        )
+        .await;
+        assert_eq!(got.as_u16(), 409);
+        assert_eq!(body["error"]["code"], "continue_disabled", "{text}");
+        assert_ne!(body["error"]["code"], "model_error");
+
+        let source = include_str!("orchestration.rs").replace("\r\n", "\n");
+        let handler = source
+            .split("pub(crate) async fn continue_run(")
+            .nth(1)
+            .expect("continue_run exists")
+            .split("pub(crate) async fn cancel_run(")
+            .next()
+            .expect("cancel_run follows");
+        assert_eq!(
+            handler.matches("CONTINUE_RELAYED_ERRORS").count(),
+            1,
+            "continue_run passes the closed list once, unconditionally"
+        );
+        assert!(!handler.contains("&[]"), "continue_run never passes an empty list");
+        assert!(!handler.contains("env::var"), "no switch is read here");
+    }
+
+    #[test]
+    fn the_already_used_message_does_not_claim_a_run_was_continued() {
+        // After continue_unavailable a same-token retry can answer
+        // continuation_already_consumed although no run was launched.
+        let message = CONTINUE_RELAYED_ERRORS
+            .iter()
+            .find(|(code, _, _)| *code == "continuation_already_consumed")
+            .map(|(_, _, message)| *message)
+            .expect("the code is listed");
+        assert!(!message.contains("continue the run"), "{message}");
+        assert!(message.contains("Check the run"), "{message}");
     }
 }
