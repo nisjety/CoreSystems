@@ -16,6 +16,16 @@
 //!       is in the message, where no field filter can see it.
 //! - R4  `tokio::spawn` without `.in_current_span()` or `.instrument(..)` in a
 //!       request-path file: the task loses the span, so it loses the ZDR mark.
+//! - R5  an `error_class` field whose value is not a closed label. The event
+//!       filter and R1/R2 key on field names, and `error_class` is a name they
+//!       let through, so its value must be a string literal or come from
+//!       `zdr_log::class*`, `ErrorCode::wire_name()`, `cdp_class(..)`,
+//!       `.classify()`, `.kind()` or an `ErrorCode` (`?e.code`). An
+//!       `error_class = %e` would put the error text past the filter.
+//! - R6  a whole event, payload or body debug-printed (`?evt`, `evt = ?evt`):
+//!       a `Debug` of a page event carries page text under a name no filter lists.
+//!       (`?evt.event_type`, one closed field of it, is fine.) A bare `%e` or
+//!       `?e` shorthand for an error is R2, like `error = %e`.
 //! - R0  an exemption with no reason.
 //!
 //! A line is exempt with `// zdr-log-ok: <reason>` on the macro's first line or
@@ -233,6 +243,19 @@ fn exemption(source: &str, line: usize) -> Result<bool, ()> {
     Ok(false)
 }
 
+/// Whether an `error_class` value (masked: string contents are blanked, the
+/// quotes stay) is a closed label that cannot carry caller data.
+fn closed_label(value: &str) -> bool {
+    let value = value.trim();
+    value.starts_with('"')
+        || value.contains("zdr_log::class")
+        || value.contains("cdp_class(")
+        || value.ends_with("wire_name()")
+        || value.ends_with("classify()")
+        || value.ends_with(".kind()")
+        || value.ends_with(".code")
+}
+
 fn request_path_file(rel: &str) -> bool {
     let name = rel.rsplit('/').next().unwrap_or(rel);
     rel.starts_with("quarry-edge/src/")
@@ -335,12 +358,27 @@ fn scan_source(rel: &str, source: &str) -> Vec<Violation> {
                 }
             };
             let head = field.split('.').next().unwrap_or("");
-            if head == "error" || head == "err" {
+            let named = piece.contains('=') && piece[..piece.find('=').unwrap()].trim() == field;
+            if head == "error" || head == "err" || (!named && head == "e") {
                 if !value.contains("zdr_log::class") {
                     push("R2", piece_offset, name_start, &mut found);
                 }
+            } else if head == "error_class" {
+                if !closed_label(&value) {
+                    push("R5", piece_offset, name_start, &mut found);
+                }
             } else if SENSITIVE_FIELDS.contains(&head) {
                 push("R1", piece_offset, name_start, &mut found);
+            }
+            // A whole event / payload / body, debug-printed.
+            let printed = if named { value.as_str() } else { piece };
+            if let Some(root) = printed.trim().strip_prefix('?') {
+                if matches!(
+                    root.trim(),
+                    "evt" | "event" | "payload" | "body" | "resp" | "response" | "req" | "request"
+                ) {
+                    push("R6", piece_offset, name_start, &mut found);
+                }
             }
         }
         search = close;
@@ -525,6 +563,70 @@ fn log_field_lint_flags_raw_error_text_and_accepts_a_class() {
     );
     assert!(
         keys("fn f(e: E) { tracing::warn!(error = zdr_log::class(&e), \"failed\"); }\n").is_empty()
+    );
+}
+
+#[test]
+fn log_field_lint_flags_a_bare_error_shorthand() {
+    for source in [
+        "fn f(e: E) { tracing::warn!(%e, \"failed\"); }\n",
+        "fn f(e: E) { tracing::warn!(?e, \"failed\"); }\n",
+        "fn f(err: E) { tracing::warn!(%err, \"failed\"); }\n",
+    ] {
+        assert_eq!(
+            keys(source),
+            vec!["quarry-edge/src/search_routes.rs::R2"],
+            "{source}"
+        );
+    }
+}
+
+#[test]
+fn log_field_lint_accepts_error_class_only_with_a_closed_label() {
+    for source in [
+        "fn f(e: E) { warn!(error_class = \"serialize\", \"x\"); }\n",
+        "fn f(e: E) { warn!(error_class = crate::zdr_log::class(&e), \"x\"); }\n",
+        "fn f(e: E) { warn!(error_class = crate::zdr_log::class_reqwest(&e), \"x\"); }\n",
+        "fn f(e: E) { warn!(error_class = e.code.wire_name(), \"x\"); }\n",
+        "fn f(e: E) { warn!(error_class = crate::deadlines::cdp_class(&e), \"x\"); }\n",
+        "fn f(e: E) { warn!(error_class = ?e.code, \"x\"); }\n",
+        "fn f(e: E) { warn!(error_class = ?e.classify(), \"x\"); }\n",
+        "fn f(e: E) { warn!(error_class = ?e.kind(), \"x\"); }\n",
+    ] {
+        assert!(keys(source).is_empty(), "{source}");
+    }
+}
+
+#[test]
+fn log_field_lint_flags_an_error_class_that_carries_text() {
+    for source in [
+        "fn f(e: E) { warn!(error_class = %e, \"x\"); }\n",
+        "fn f(e: E) { warn!(error_class = ?e, \"x\"); }\n",
+        "fn f(e: E) { warn!(error_class = e.to_string(), \"x\"); }\n",
+        "fn f(e: E) { warn!(error_class = %e.message, \"x\"); }\n",
+        "fn f(error_class: String) { warn!(%error_class, \"x\"); }\n",
+    ] {
+        assert_eq!(
+            keys(source),
+            vec!["quarry-edge/src/search_routes.rs::R5"],
+            "{source}"
+        );
+    }
+}
+
+#[test]
+fn log_field_lint_flags_a_debug_printed_event_and_accepts_one_closed_field_of_it() {
+    assert_eq!(
+        keys("fn f(evt: Ev) { tracing::warn!(?evt, \"x\"); }\n"),
+        vec!["quarry-edge/src/search_routes.rs::R6"]
+    );
+    assert_eq!(
+        keys("fn f(evt: Ev) { tracing::warn!(event = ?evt, \"x\"); }\n"),
+        vec!["quarry-edge/src/search_routes.rs::R6"]
+    );
+    assert!(
+        keys("fn f(evt: Ev) { tracing::warn!(event_type = ?evt.event_type, seq = evt.seq, \"x\"); }\n")
+            .is_empty()
     );
 }
 
