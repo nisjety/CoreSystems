@@ -129,10 +129,18 @@ async fn record_event(
     event_type: &str,
     type_url: &str,
     seq: i64,
+    discriminator: &str,
     kind: &str,
 ) -> Result<(), Status> {
     let resource = format!("run:{run_id}:loop_checkpoint:{seq}:{event_type}");
-    let key = format!("{run_id}:{seq}:{event_type}");
+    // A save is unique per (run, seq). A claim is a compare-and-set on the same row, so a
+    // lapsed lease can be claimed again at the same seq: its key carries the lease expiry,
+    // which is unique per successful claim, so a reclaim is a new event, not a duplicate.
+    let key = if discriminator.is_empty() {
+        format!("{run_id}:{seq}:{event_type}")
+    } else {
+        format!("{run_id}:{seq}:{event_type}:{discriminator}")
+    };
     let idempotency = derive_idempotency_hash("session-core", event_type, &resource, &key);
     sqlx::query(
         "INSERT INTO events (id, event_type, run_id, payload, ts, org_id, user_id, correlation_id, causation_id, idempotency_key, resource_ref, type_url, producer, schema_version)
@@ -284,6 +292,7 @@ pub(crate) async fn save(
             "CHECKPOINT_SAVED",
             crate::grpc::CHECKPOINT_SAVED_TYPE_URL,
             next_seq,
+            "",
             input.kind,
         )
         .await?;
@@ -325,7 +334,7 @@ pub(crate) async fn claim(
     // Claimable: a paused or parked fold, or a resuming fold whose lease lapsed.
     // An `active` fold is never claimable: its loop may still be running, and only
     // a worker that parks it after a crash makes it resumable.
-    let row: Option<(i64, String, i32, String, String)> = sqlx::query_as(
+    let row: Option<(i64, String, i32, String, String, String)> = sqlx::query_as(
         "UPDATE run_loop_checkpoints
             SET state = 'resuming',
                 claim_token_hash = $2,
@@ -335,7 +344,7 @@ pub(crate) async fn claim(
             AND pause_ref = $4
             AND (state IN ('paused', 'parked')
                  OR (state = 'resuming' AND claim_expires_at < now()))
-          RETURNING seq, ciphertext, segment_no, authority_digest, kind",
+          RETURNING seq, ciphertext, segment_no, authority_digest, kind, claim_expires_at::text",
     )
     .bind(run_id)
     .bind(&token_hash)
@@ -344,7 +353,7 @@ pub(crate) async fn claim(
     .fetch_optional(&mut *tx)
     .await
     .map_err(internal)?;
-    let Some((seq, ciphertext, segment_no, authority_digest, kind)) = row else {
+    let Some((seq, ciphertext, segment_no, authority_digest, kind, lease)) = row else {
         // The same continuation asking again while its own lease is live is told
         // so, which is not the same as losing the pause to someone else.
         let held: Option<(bool,)> = sqlx::query_as(
@@ -379,6 +388,7 @@ pub(crate) async fn claim(
         "CHECKPOINT_RESTORED",
         CHECKPOINT_RESTORED_TYPE_URL,
         seq,
+        &lease,
         &kind,
     )
     .await?;
