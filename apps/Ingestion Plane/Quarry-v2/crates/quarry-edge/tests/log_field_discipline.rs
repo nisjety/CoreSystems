@@ -267,7 +267,7 @@ fn scan_source(rel: &str, source: &str) -> Vec<Violation> {
     let masked_text = mask(source);
     let masked = masked_text.as_bytes();
     let mut found = Vec::new();
-    let mut push = |rule: &str, offset: usize, anchor: usize, found: &mut Vec<Violation>| {
+    let push = |rule: &str, offset: usize, anchor: usize, found: &mut Vec<Violation>| {
         let line = line_of(source, offset);
         // An exemption on the macro's first line (or above it) covers every field
         // in the macro; one on the field's own line (or above) covers that field.
