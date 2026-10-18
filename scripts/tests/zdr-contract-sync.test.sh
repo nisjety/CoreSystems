@@ -114,6 +114,11 @@ GOLDENS=(
   # from quarry_core::zdr_matrix::ROWS by the owner's test, never written by hand:
   #   QUARRY_UPDATE_GOLDEN=1 cargo test -p quarry-core zdr_matrix
   # in "apps/Ingestion Plane/Quarry-v2". The .sha256 pin beside it carries the same digest.
+  # This entry pins the committed bytes; it never reads the table. A table change that is
+  # not regenerated is caught by quarry-core's test
+  # the_golden_and_markdown_are_what_the_table_generates (crates/quarry-core/src/zdr_matrix.rs),
+  # which quarry-v2-ci.yml runs through cargo test --workspace. A regenerated golden needs
+  # its digest here updated in the same change.
   "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/contracts/zdr-feature-matrix.json|a51590ae0ca1e8bf7f3e2d41e5052bc675776bbcccca6663cf14af57fbcc7550"
 )
 
