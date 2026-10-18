@@ -22,6 +22,25 @@ with a pointer forward. Newest first.
 
 ---
 
+## 2026-10-17 - The chat UI reaches the agent route only in plan mode, so no UI run can reach an effectful tool, and an approved plan has no path to execution
+
+**State:** `proposed`
+(found 2026-10-17 while proving WS03 S5 on the stack; the fix is WS14 S2, plan approve-then-execute, which the build plan's spine text calls plan-continue; DEC-04; not built)
+
+**The gap.** The chat "Do" control sends `plan_mode: true` together with the `agentic` feature. The SPA adds `agentic` only when plan mode is on (`apps/Frontend Plane/verevonv3/src/shared/api/chat-client.ts:1085`), and it sends `plan_mode` from the same flag (`chat-client.ts:1117-1121`). model-gateway enters the agent route only for an `agentic` turn (`apps/Model Plane/rust/services/model-gateway/src/sse.rs:1290`, handed off at `sse.rs:1491`) and forwards `plan_mode` into execution-core (`sse.rs:9185`). model-gateway holds a plan-mode run to READ_ONLY (`sse.rs:9027-9028`). While the run is in plan mode, execution-core rejects, as a tool error and before dispatch, any call that `permission::is_risky_call` classifies as risky, or that is a restricted-context write (`apps/Model Plane/rust/services/execution-core/src/runtime_loop/agent.rs:1845-1867`). So no UI run reaches a risky tool.
+
+Approval does not close the gap. `approveTurnPlan` calls `approvePlan` (`apps/Frontend Plane/verevonv3/src/features/chat/components/use-chat-controller.ts:2066`) and then calls `setPlanMode(false)` (`use-chat-controller.ts:2077`). With plan mode off, the next turn does not carry the `agentic` feature (`chat-client.ts:1085`), so it takes the plain chat route, and the plain-chat loop refuses side effects (`apps/Model Plane/CLAUDE.md`, Code Style: model-gateway's `dispatch_tool`). model-gateway consumes an approved plan only for a run that is not in plan mode (`sse.rs:9599-9603`), and no UI turn sends one. The continuation route `/continue` (`sse.rs:13431`, which passes `false` for `plan_mode` to `agentic_run_stream`) needs a granted approval for the run, and a plan-mode run does not create one for a risky call.
+
+**The decision.** Plan approval starts a new Do run, which is not in plan mode and carries the granted rung and the approved plan (WS14 S2, DEC-04). The execute turn is planned to be sent at approval (`continuation: execute_now`), not left for the user to type, and the gateway binds the grant to that run. The planned ledger line is: Plan approval starts a new Do run; a grant never widens a run in flight. The names MODEL_GATEWAY_PLAN_EXECUTE_ON_APPROVE, BindGrantToRun and chat.execute_approved_plan are planned. None of them exists in the tree yet (checked 2026-10-18 under `apps/Model Plane/rust` and `apps/Frontend Plane/verevonv3/src`). The planned switch defaults off.
+
+Until it ships, UI turns cannot reach an effectful tool, subject to the assumptions below. That is the safe state: the gap removes a feature and does not open a hole.
+
+**Assumptions to re-check.** The no-effectful-tool statement holds only if `permission::is_risky_call` covers every effectful tool; the WS05 declared effect classes are the planned check. The plan-mode check also skips subagent tools (`!crate::subagent::is_subagent_tool`, `agent.rs:1847`), which this entry has not traced. It also assumes that a plan-mode run which pauses for a non-risky tool cannot reach an effect through `/continue`. That path is not traced yet.
+
+**Trigger to flip to `implemented`.** WS14 S2 is merged, MODEL_GATEWAY_PLAN_EXECUTE_ON_APPROVE is on in the proof stack, and a live run is recorded: one approval, one executed call under the granted rung, one terminal receipt, and a second approval click that executes nothing.
+
+---
+
 ## 2026-10-16 - Durable agent loop: execution-core hosts it, session-core stores the fold, resume is user-present and stays in the same run
 
 **State:** `proposed`
