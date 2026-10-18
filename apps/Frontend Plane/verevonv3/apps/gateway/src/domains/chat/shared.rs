@@ -24,12 +24,18 @@ pub(super) fn cookie_header(headers: &HeaderMap) -> String {
         .to_owned()
 }
 
-pub(crate) fn zdr_flag(headers: &HeaderMap) -> bool {
-    let flagged = headers
+/// Whether the `x-zdr` header asks for ZDR. Pure: marks nothing, so the router
+/// can call it while it is still building the request's span.
+pub(crate) fn zdr_header(headers: &HeaderMap) -> bool {
+    headers
         .get("x-zdr")
         .and_then(|v| v.to_str().ok())
         .map(|v| v.eq_ignore_ascii_case("true") || v == "1")
-        .unwrap_or(false);
+        .unwrap_or(false)
+}
+
+pub(crate) fn zdr_flag(headers: &HeaderMap) -> bool {
+    let flagged = zdr_header(headers);
     if flagged {
         // The earliest place a request's ZDR header is read: mark the span so
         // the log drops URL/query/error events for it (`crate::zdr_log`).

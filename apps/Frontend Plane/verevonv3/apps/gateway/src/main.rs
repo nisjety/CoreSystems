@@ -200,13 +200,21 @@ fn request_target_for_log(uri: &axum::http::Uri) -> String {
 /// span that carry a sensitive field name.
 fn make_http_trace_span(request: &axum::http::Request<Body>) -> tracing::Span {
     let request_target = request_target_for_log(request.uri());
-    tracing::info_span!(
+    // zdr-log-ok: `uri` is the path only, query stripped and single-use secrets templated out
+    let span = tracing::info_span!(
         "http_request",
         method = %request.method(),
         uri = %request_target,
         version = ?request.version(),
         zdr = tracing::field::Empty,
-    )
+    );
+    // The header is the earliest posture signal there is: mark the span before
+    // the first event (`gateway authenticated request`) rather than when a
+    // handler first reads the header.
+    if domains::chat::shared::zdr_header(request.headers()) {
+        span.record("zdr", true);
+    }
+    span
 }
 
 async fn health() -> Json<Value> {

@@ -175,8 +175,7 @@ async fn stream_agent_ui(
         req = req.header("last-event-id", last_event_id);
     }
 
-    if shared::zdr_flag(&headers) || bool_field(&body, "zdr").unwrap_or(false) {
-        crate::zdr_log::mark_current_span();
+    if turn_requests_zdr(&headers, &body) {
         req = req.header("x-zdr", "true");
     }
 
@@ -1023,6 +1022,20 @@ fn ag_ui_event(mut data: Value) -> Event {
 
 fn string_field(payload: &Value, field: &str) -> Option<String> {
     payload.get(field)?.as_str().map(str::to_owned)
+}
+
+/// Whether this turn asks for Zero Data Retention by header or by body flag.
+/// A true answer marks the request's span ZDR (`crate::zdr_log`), so the log
+/// stops carrying URLs, queries and error text for the rest of the request.
+pub(crate) fn turn_requests_zdr(headers: &HeaderMap, body: &Value) -> bool {
+    if shared::zdr_flag(headers) {
+        return true;
+    }
+    let from_body = bool_field(body, "zdr").unwrap_or(false);
+    if from_body {
+        crate::zdr_log::mark_current_span();
+    }
+    from_body
 }
 
 fn bool_field(payload: &Value, field: &str) -> Option<bool> {

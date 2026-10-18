@@ -23,18 +23,29 @@
 //! - The mark is sticky: set once, it stays for the life of the span, and a
 //!   later `record(zdr, false)` cannot lower it. Events logged before the
 //!   posture was known are not recalled; late ZDR cannot be undone for logs.
+//! - The mark does not depend on `RUST_LOG`. The level filter lives on the JSON
+//!   layer only ([`ZdrLogFilter`]), so the registry and [`ZdrMarkLayer`] see the
+//!   request span even when `RUST_LOG=error` would never create it.
+//! - A span that carries a sensitive field name (`info_span!("x", url = ..)`)
+//!   and is created under a ZDR span is withheld from the log too, so its
+//!   fields do not ride along in the context of other events. A span created
+//!   with an explicit `parent:` is not looked at; the lint reads span macros.
+//!   `Span::record` of a sensitive name after creation is not covered.
+//! - The third-party caps ([`CAPPED_TARGETS`]) are enforced per event, so a more
+//!   specific operator directive (`reqwest::connect=trace`) cannot lift them.
 //! - It is a filter on the log writer. It does not stop code from computing or
 //!   returning the data.
 //!
-//! `GATEWAY_ZDR_LOG_FILTER=off` turns the filter off (an emergency lever for a
-//! debugging session on a non-production gateway; read once at start).
+//! `GATEWAY_ZDR_LOG_FILTER=off` turns the sensitive-field filter off (an
+//! emergency lever for a debugging session on a non-production gateway; read
+//! once at start). The third-party caps stay on.
 //!
 //! This file depends only on `tracing`, `tracing-subscriber` and the standard
 //! library, so it can be read without the rest of the crate.
 
 use tracing::span::{Attributes, Id, Record};
-use tracing::{field::Visit, Metadata, Span, Subscriber};
-use tracing_subscriber::filter::DynFilterFn;
+use tracing::subscriber::Interest;
+use tracing::{field::Visit, Level, Metadata, Span, Subscriber};
 use tracing_subscriber::fmt::MakeWriter;
 use tracing_subscriber::layer::{Context, Filter, SubscriberExt};
 use tracing_subscriber::registry::LookupSpan;
@@ -88,7 +99,8 @@ impl Visit for ZdrVisitor {
 }
 
 /// Makes the ZDR mark sticky. Add it to the registry beneath the layers that
-/// format or export events; it adds no output of its own.
+/// format or export events; it adds no output of its own, and it carries no
+/// level filter, so it sees every span whatever `RUST_LOG` says.
 #[derive(Default, Clone, Copy)]
 pub(crate) struct ZdrMarkLayer;
 
@@ -100,27 +112,29 @@ where
         let mut visitor = ZdrVisitor(false);
         attrs.record(&mut visitor);
         if visitor.0 {
-            if let Some(span) = ctx.span(id) {
-                span.extensions_mut().insert(ZdrMarked);
-            }
+            mark(id, &ctx);
         }
     }
 
     fn on_record(&self, id: &Id, values: &Record<'_>, ctx: Context<'_, S>) {
         let mut visitor = ZdrVisitor(false);
         values.record(&mut visitor);
-        if !visitor.0 {
-            // A `false` (or any other value) never lowers the mark.
-            return;
+        // A `false` (or any other value) never lowers the mark.
+        if visitor.0 {
+            mark(id, &ctx);
         }
-        if let Some(span) = ctx.span(id) {
-            // Look first, then insert: the guard of the first borrow is gone
-            // before the second is taken, and a second mark is not an error.
-            let already = span.extensions().get::<ZdrMarked>().is_some();
-            if !already {
-                span.extensions_mut().insert(ZdrMarked);
-            }
-        }
+    }
+}
+
+/// Sets the marker under ONE write lock. Two tasks that inherit the same span
+/// can both record `zdr = true` at once; `replace` makes the second a no-op,
+/// where a look-then-`insert` would panic in `Extensions::insert`.
+fn mark<S>(id: &Id, ctx: &Context<'_, S>)
+where
+    S: Subscriber + for<'a> LookupSpan<'a>,
+{
+    if let Some(span) = ctx.span(id) {
+        let _ = span.extensions_mut().replace(ZdrMarked);
     }
 }
 
@@ -145,7 +159,7 @@ where
     })
 }
 
-/// Whether an event with these fields may be written under a ZDR span.
+/// Whether an event or span with these fields is one the ZDR filter looks at.
 fn carries_sensitive_field(meta: &Metadata<'_>) -> bool {
     meta.fields()
         .iter()
@@ -168,9 +182,23 @@ pub(crate) const CAPPED_TARGETS: &[(&str, &str)] = &[
     ("chromiumoxide", "info"),
 ];
 
-/// `filter` with [`CAPPED_TARGETS`] applied on top. Directives added last win,
-/// so an operator's `RUST_LOG=debug` still turns the gateway's own crate up but
-/// cannot turn these on.
+/// Whether this event or span is more verbose than the cap on its target (the
+/// target itself or any module under it). Compared per event, so no directive
+/// an operator writes, however specific, can lift a cap.
+fn exceeds_cap(meta: &Metadata<'_>) -> bool {
+    let target = meta.target();
+    CAPPED_TARGETS.iter().any(|(name, level)| {
+        let under = target == *name
+            || target
+                .strip_prefix(name)
+                .is_some_and(|rest| rest.starts_with("::"));
+        under && *meta.level() > level.parse::<Level>().unwrap_or(Level::ERROR)
+    })
+}
+
+/// `filter` with [`CAPPED_TARGETS`] added as directives. This only makes the
+/// common case cheap (the callsite is disabled once, up front); the guarantee
+/// is [`exceeds_cap`], which [`ZdrLogFilter`] applies to every event.
 pub(crate) fn harden(mut filter: EnvFilter) -> EnvFilter {
     for (target, level) in CAPPED_TARGETS {
         if let Ok(directive) = format!("{target}={level}").parse() {
@@ -180,41 +208,128 @@ pub(crate) fn harden(mut filter: EnvFilter) -> EnvFilter {
     filter
 }
 
-fn filter_disabled() -> bool {
-    std::env::var("GATEWAY_ZDR_LOG_FILTER")
-        .map(|value| {
-            matches!(
-                value.trim().to_ascii_lowercase().as_str(),
-                "off" | "0" | "false"
-            )
-        })
-        .unwrap_or(false)
-}
-
-/// The per-layer filter: drops events with a sensitive field while a ZDR span
-/// is in scope, keeps everything else. Spans always pass.
-pub(crate) fn event_filter<S>() -> impl Filter<S>
-where
-    S: Subscriber + for<'a> LookupSpan<'a>,
-{
-    event_filter_with(filter_disabled())
-}
-
-fn event_filter_with<S>(disabled: bool) -> impl Filter<S>
-where
-    S: Subscriber + for<'a> LookupSpan<'a>,
-{
-    DynFilterFn::new(move |meta: &Metadata<'_>, ctx: &Context<'_, S>| {
-        if disabled || !meta.is_event() || !carries_sensitive_field(meta) {
-            return true;
-        }
-        !in_zdr_scope(ctx)
+/// Whether the `GATEWAY_ZDR_LOG_FILTER` value turns the sensitive-field filter
+/// off: `off`, `0` or `false`, any case, surrounding whitespace ignored.
+fn disabled_from(value: Option<&str>) -> bool {
+    value.is_some_and(|value| {
+        matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "off" | "0" | "false"
+        )
     })
 }
 
-/// The JSON log layer the gateway writes to `writer`, with the ZDR filter
-/// applied. Used by [`init`] and by the tests, so they exercise the same layer.
-pub(crate) fn build_json_layer<S, W>(writer: W) -> impl Layer<S>
+fn filter_disabled() -> bool {
+    disabled_from(std::env::var("GATEWAY_ZDR_LOG_FILTER").ok().as_deref())
+}
+
+/// The one per-layer filter of the JSON log. It combines, in this order:
+///
+/// 1. the third-party caps ([`exceeds_cap`]), always;
+/// 2. the operator's `RUST_LOG` filter, for events only: a span always passes,
+///    so the HTTP span exists, is marked and is visible to the lookups below
+///    even at `RUST_LOG=error`;
+/// 3. the ZDR rule: an event or span with a sensitive field name is dropped
+///    while a ZDR span is in scope (unless the lever is off).
+pub(crate) struct ZdrLogFilter {
+    env: Option<EnvFilter>,
+    zdr_rule_off: bool,
+}
+
+impl ZdrLogFilter {
+    /// `env` is the operator's level filter; `None` lets every level through.
+    pub(crate) fn new(env: Option<EnvFilter>, zdr_rule_off: bool) -> Self {
+        Self { env, zdr_rule_off }
+    }
+
+    fn sensitive_under_zdr<S>(&self, meta: &Metadata<'_>, ctx: &Context<'_, S>) -> bool
+    where
+        S: Subscriber + for<'a> LookupSpan<'a>,
+    {
+        !self.zdr_rule_off && carries_sensitive_field(meta) && in_zdr_scope(ctx)
+    }
+}
+
+impl<S> Filter<S> for ZdrLogFilter
+where
+    S: Subscriber + for<'a> LookupSpan<'a>,
+{
+    fn enabled(&self, meta: &Metadata<'_>, ctx: &Context<'_, S>) -> bool {
+        if exceeds_cap(meta) {
+            return false;
+        }
+        if !meta.is_span() {
+            if let Some(env) = &self.env {
+                if !Filter::<S>::enabled(env, meta, ctx) {
+                    return false;
+                }
+            }
+        }
+        !self.sensitive_under_zdr(meta, ctx)
+    }
+
+    fn callsite_enabled(&self, meta: &'static Metadata<'static>) -> Interest {
+        if exceeds_cap(meta) {
+            return Interest::never();
+        }
+        let from_env = self
+            .env
+            .as_ref()
+            .map(|env| Filter::<S>::callsite_enabled(env, meta));
+        // Which side of the ZDR rule a callsite falls on depends on the request,
+        // so a callsite with a sensitive field is decided per call.
+        let per_call = !self.zdr_rule_off && carries_sensitive_field(meta);
+        if meta.is_span() {
+            // The env filter is consulted (above) so dynamic directives register,
+            // but it never hides a span.
+            return if per_call {
+                Interest::sometimes()
+            } else {
+                Interest::always()
+            };
+        }
+        match from_env {
+            Some(interest) if interest.is_never() => Interest::never(),
+            Some(interest) if !per_call => interest,
+            None if !per_call => Interest::always(),
+            _ => Interest::sometimes(),
+        }
+    }
+
+    // No `max_level_hint`: spans pass at every level, so no ceiling holds.
+
+    fn on_new_span(&self, attrs: &Attributes<'_>, id: &Id, ctx: Context<'_, S>) {
+        if let Some(env) = &self.env {
+            Filter::<S>::on_new_span(env, attrs, id, ctx);
+        }
+    }
+
+    fn on_record(&self, id: &Id, values: &Record<'_>, ctx: Context<'_, S>) {
+        if let Some(env) = &self.env {
+            Filter::<S>::on_record(env, id, values, ctx);
+        }
+    }
+
+    fn on_enter(&self, id: &Id, ctx: Context<'_, S>) {
+        if let Some(env) = &self.env {
+            Filter::<S>::on_enter(env, id, ctx);
+        }
+    }
+
+    fn on_exit(&self, id: &Id, ctx: Context<'_, S>) {
+        if let Some(env) = &self.env {
+            Filter::<S>::on_exit(env, id, ctx);
+        }
+    }
+
+    fn on_close(&self, id: Id, ctx: Context<'_, S>) {
+        if let Some(env) = &self.env {
+            Filter::<S>::on_close(env, id, ctx);
+        }
+    }
+}
+
+fn json_layer<S, W>(writer: W, filter: ZdrLogFilter) -> impl Layer<S>
 where
     S: Subscriber + for<'a> LookupSpan<'a>,
     W: for<'w> MakeWriter<'w> + 'static,
@@ -222,18 +337,47 @@ where
     tracing_subscriber::fmt::layer()
         .json()
         .with_writer(writer)
-        .with_filter(event_filter())
+        .with_filter(filter)
+}
+
+/// The JSON log layer the gateway writes to `writer`, with the ZDR filter and
+/// the third-party caps but no `RUST_LOG` level filter (every level passes).
+/// [`production_subscriber`] adds the level filter; tests that only care about
+/// the ZDR rule use this.
+#[cfg(test)]
+pub(crate) fn build_json_layer<S, W>(writer: W) -> impl Layer<S>
+where
+    S: Subscriber + for<'a> LookupSpan<'a>,
+    W: for<'w> MakeWriter<'w> + 'static,
+{
+    json_layer(writer, ZdrLogFilter::new(None, filter_disabled()))
+}
+
+/// The subscriber the gateway runs: the sticky ZDR mark, and a JSON log on
+/// `writer` filtered by `env` (the operator's `RUST_LOG`, already passed through
+/// [`harden`]) and by the ZDR rule. The level filter sits on the JSON layer, not
+/// on the registry, so it cannot keep the request span from being created.
+/// [`init`] installs it; tests build it with the filters they want to probe.
+pub(crate) fn production_subscriber<W>(
+    writer: W,
+    env: EnvFilter,
+) -> impl Subscriber + Send + Sync + 'static
+where
+    W: for<'w> MakeWriter<'w> + Send + Sync + 'static,
+{
+    tracing_subscriber::registry()
+        .with(ZdrMarkLayer)
+        .with(json_layer(
+            writer,
+            ZdrLogFilter::new(Some(env), filter_disabled()),
+        ))
 }
 
 /// Install the process-wide subscriber: `RUST_LOG` (default `error`, as before)
 /// with the capped dependencies, the sticky ZDR mark and the filtered JSON log
-/// on stdout.
+/// on stdout. See [`production_subscriber`].
 pub(crate) fn init() {
-    tracing_subscriber::registry()
-        .with(ZdrMarkLayer)
-        .with(harden(EnvFilter::from_default_env()))
-        .with(build_json_layer(std::io::stdout))
-        .init();
+    production_subscriber(std::io::stdout, harden(EnvFilter::from_default_env())).init();
 }
 
 /// A closed-vocabulary label for a transport error, safe to log under ZDR: one
@@ -428,22 +572,39 @@ mod tests {
     }
 
     #[test]
-    fn the_lever_turns_the_filter_off() {
+    fn the_lever_value_is_parsed_as_documented() {
+        for on in ["off", "OFF", " Off ", "0", "false", "False", "\tfalse\n"] {
+            assert!(disabled_from(Some(on)), "{on:?} turns the rule off");
+        }
+        for keep in [
+            None,
+            Some(""),
+            Some("on"),
+            Some("1"),
+            Some("true"),
+            Some("offf"),
+            Some("no"),
+        ] {
+            assert!(!disabled_from(keep), "{keep:?} leaves the rule on");
+        }
+    }
+
+    #[test]
+    fn the_lever_turns_the_sensitive_field_rule_off_but_not_the_caps() {
         let capture = Capture::default();
-        let layer = tracing_subscriber::fmt::layer()
-            .json()
-            .with_writer(capture.clone())
-            .with_filter(event_filter_with(true));
         let subscriber = tracing_subscriber::registry()
             .with(ZdrMarkLayer)
-            .with(layer);
+            .with(json_layer(capture.clone(), ZdrLogFilter::new(None, true)));
         tracing::subscriber::with_default(subscriber, || {
             let span = tracing::info_span!("request", zdr = tracing::field::Empty);
             span.record("zdr", true);
             let _guard = span.enter();
-            tracing::info!(url = "https://lever.test/", "kept with the filter off");
+            tracing::info!(url = "https://lever.test/", "kept with the rule off");
+            tracing::debug!(target: "reqwest::connect", "CAP-STILL-ON");
         });
-        assert!(capture.text().contains("lever.test"), "{}", capture.text());
+        let log = capture.text();
+        assert!(log.contains("lever.test"), "{log}");
+        assert!(!log.contains("CAP-STILL-ON"), "{log}");
     }
 
     /// The list is a contract with Quarry's edge, and this plane's own golden
@@ -485,25 +646,194 @@ mod tests {
         );
     }
 
+    /// The production stack (`production_subscriber`) with `env` as `RUST_LOG`,
+    /// run through `harden` as `init` does.
+    fn production_log(env: &str, body: impl FnOnce()) -> String {
+        let capture = Capture::default();
+        let subscriber = production_subscriber(capture.clone(), harden(EnvFilter::new(env)));
+        tracing::subscriber::with_default(subscriber, body);
+        capture.text()
+    }
+
     #[test]
     fn harden_caps_the_crates_that_print_content_even_at_debug() {
-        let capture = Capture::default();
-        let subscriber = tracing_subscriber::registry()
-            .with(harden(EnvFilter::new("debug")))
-            .with(build_json_layer(capture.clone()));
-        tracing::subscriber::with_default(subscriber, || {
+        let log = production_log("debug", || {
             tracing::debug!(target: "html5ever::tree_builder", "processing Characters page text");
             tracing::debug!(target: "reqwest::connect", "starting new connection");
             tracing::debug!(target: "hyper_util::client::legacy::connect::http", "connecting to a host");
             tracing::warn!(target: "html5ever::tokenizer", "html5ever still warns");
             tracing::debug!(target: "verevon_gateway_rs::upstream", "our own debug stays on");
         });
-        let log = capture.text();
         assert!(!log.contains("page text"), "{log}");
         assert!(!log.contains("starting new connection"), "{log}");
         assert!(!log.contains("connecting to a host"), "{log}");
         assert!(log.contains("html5ever still warns"), "{log}");
         assert!(log.contains("our own debug stays on"), "{log}");
+    }
+
+    /// An operator directive more specific than a cap (`reqwest::connect=trace`)
+    /// must not lift it, for any of the capped crates.
+    #[test]
+    fn a_more_specific_directive_cannot_lift_a_cap() {
+        let directives = "trace,html5ever::tokenizer=trace,markup5ever::interface=trace,\
+            selectors::matching=trace,reqwest::connect=trace,\
+            hyper_util::client::legacy::connect::http=trace,hyper::proto::h1::io=trace,\
+            chromiumoxide::conn=trace";
+        let log = production_log(directives, || {
+            tracing::debug!(target: "html5ever::tokenizer", "LEAK html5ever");
+            tracing::trace!(target: "markup5ever::interface", "LEAK markup5ever");
+            tracing::debug!(target: "selectors::matching", "LEAK selectors");
+            tracing::debug!(target: "reqwest::connect", "LEAK reqwest");
+            tracing::debug!(target: "hyper_util::client::legacy::connect::http", "LEAK hyper_util");
+            tracing::trace!(target: "hyper::proto::h1::io", "LEAK hyper");
+            tracing::trace!(target: "chromiumoxide::conn", "LEAK chromiumoxide");
+            // At the cap, and below it, stays.
+            tracing::warn!(target: "html5ever::tokenizer", "KEPT html5ever warn");
+            tracing::info!(target: "reqwest::connect", "KEPT reqwest info");
+        });
+        assert!(!log.contains("LEAK"), "{log}");
+        for kept in ["KEPT html5ever warn", "KEPT reqwest info"] {
+            assert!(log.contains(kept), "{kept} missing: {log}");
+        }
+    }
+
+    /// The per-event cap matches the target or a module under it, never a name
+    /// that merely starts with it. (`harden`'s directives are plain prefixes
+    /// and would also cap `hyperion`; this is the guarantee's own precision.)
+    #[test]
+    fn the_cap_matches_module_boundaries_only() {
+        let capture = Capture::default();
+        let subscriber = production_subscriber(capture.clone(), EnvFilter::new("trace"));
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::debug!(target: "hyperion::x", "KEPT hyperion");
+            tracing::debug!(target: "reqwest_middleware", "KEPT reqwest_middleware");
+            tracing::debug!(target: "reqwest", "LEAK reqwest root");
+            tracing::debug!(target: "hyper::proto", "LEAK hyper module");
+        });
+        let log = capture.text();
+        assert!(log.contains("KEPT hyperion"), "{log}");
+        assert!(log.contains("KEPT reqwest_middleware"), "{log}");
+        assert!(!log.contains("LEAK"), "{log}");
+    }
+
+    // ---- the mark and the filter do not depend on RUST_LOG -----------------
+
+    /// One request under the gateway's own HTTP span, with the production stack
+    /// and `env` as `RUST_LOG`: a ZDR (or not) request that logs error, warn and
+    /// info events with sensitive field names, and one safe error event.
+    fn request_log(env: &str, zdr: bool) -> String {
+        production_log(env, || {
+            let request = axum::http::Request::builder()
+                .uri("/api/v1/search/web?q=SECRET-QUERY-STRING")
+                .body(axum::body::Body::empty())
+                .unwrap();
+            let span = crate::make_http_trace_span(&request);
+            let _guard = span.enter();
+            if zdr {
+                mark_current_span();
+            }
+            tracing::error!(error = "SECRET-ERROR-TEXT", "boom");
+            tracing::warn!(url = "https://secret.test/page", "warned");
+            tracing::info!(query = "SECRET-QUERY", "info with a query");
+            tracing::error!(status = 500, "SAFE-ERROR-EVENT");
+        })
+    }
+
+    /// The defect this pins: with a global `EnvFilter` in the registry, the
+    /// info-level HTTP span was never created at `RUST_LOG=error` (the binary's
+    /// default) or `warn`, so nothing was marked and every error event was
+    /// written in full for a ZDR caller.
+    #[test]
+    fn a_zdr_request_drops_sensitive_events_at_every_rust_log_level() {
+        for env in ["error", "warn", "info", "debug", "trace"] {
+            let log = request_log(env, true);
+            assert!(!log.contains("SECRET"), "RUST_LOG={env}: {log}");
+            assert!(!log.contains("secret.test"), "RUST_LOG={env}: {log}");
+            assert!(log.contains("SAFE-ERROR-EVENT"), "RUST_LOG={env}: {log}");
+            assert!(
+                log.contains("\"zdr\":true"),
+                "RUST_LOG={env}: the span carries the mark: {log}"
+            );
+        }
+    }
+
+    /// The control: the level filter still works, and the ZDR rule only acts
+    /// under a ZDR span.
+    #[test]
+    fn the_level_filter_still_applies_and_a_non_zdr_request_keeps_its_events() {
+        let at_error = request_log("error", false);
+        assert!(at_error.contains("SECRET-ERROR-TEXT"), "{at_error}");
+        assert!(at_error.contains("SAFE-ERROR-EVENT"), "{at_error}");
+        assert!(!at_error.contains("secret.test"), "warn is below error: {at_error}");
+        assert!(!at_error.contains("SECRET-QUERY"), "info is below error: {at_error}");
+        assert!(!at_error.contains("\"zdr\":true"), "{at_error}");
+
+        let at_info = request_log("info", false);
+        assert!(at_info.contains("secret.test"), "{at_info}");
+        assert!(at_info.contains("SECRET-QUERY"), "{at_info}");
+    }
+
+    // ---- a second mark of the same span ------------------------------------
+
+    /// Tasks that inherit one span can all learn the posture at once. A
+    /// look-then-insert on the span's extensions panics on the second insert.
+    #[test]
+    fn concurrent_marks_of_one_span_do_not_panic() {
+        use std::sync::Barrier;
+
+        let capture = Capture::default();
+        let dispatch = tracing::Dispatch::new(production_subscriber(
+            capture.clone(),
+            EnvFilter::new("error"),
+        ));
+        let span = tracing::dispatcher::with_default(&dispatch, || {
+            tracing::info_span!("request", zdr = tracing::field::Empty)
+        });
+        for round in 0..1500 {
+            let span = tracing::dispatcher::with_default(&dispatch, || {
+                tracing::info_span!("request", zdr = tracing::field::Empty, round)
+            });
+            let barrier = Barrier::new(4);
+            std::thread::scope(|scope| {
+                for _ in 0..4 {
+                    scope.spawn(|| {
+                        barrier.wait();
+                        span.record("zdr", true);
+                    });
+                }
+            });
+        }
+        drop(span);
+        assert!(capture.text().is_empty(), "no event was logged");
+    }
+
+    // ---- spans that carry a sensitive field --------------------------------
+
+    #[test]
+    fn a_span_with_a_sensitive_field_under_zdr_is_withheld_from_the_log() {
+        let log = captured(|| {
+            let parent = tracing::info_span!("request", zdr = tracing::field::Empty);
+            parent.record("zdr", true);
+            let _parent = parent.enter();
+            let child = tracing::info_span!("upstream_call", url = "https://span-leak.test/?q=SPANQ");
+            let _child = child.enter();
+            tracing::info!(count = 1, "safe child event");
+        });
+        assert!(log.contains("safe child event"), "{log}");
+        assert!(!log.contains("span-leak"), "{log}");
+        assert!(!log.contains("SPANQ"), "{log}");
+    }
+
+    #[test]
+    fn a_span_with_a_sensitive_field_outside_zdr_stays_in_the_log() {
+        let log = captured(|| {
+            let parent = tracing::info_span!("request", zdr = tracing::field::Empty);
+            let _parent = parent.enter();
+            let child = tracing::info_span!("upstream_call", url = "https://span-visible.test/");
+            let _child = child.enter();
+            tracing::info!(count = 1, "safe child event");
+        });
+        assert!(log.contains("span-visible.test"), "{log}");
     }
 
     #[test]
@@ -535,6 +865,229 @@ mod tests {
             "https://example.test"
         );
         assert_eq!(upstream_origin("not a url secret-text"), "invalid");
+    }
+
+    // ---- every place that learns the posture marks the span ----------------
+
+    /// Runs `future` inside the gateway's own HTTP span (built by
+    /// `make_http_trace_span`, as the router does) and says whether the span
+    /// ended up marked ZDR. Marked means the JSON log context carries
+    /// `"zdr":true` on an event logged after the future finished. Needs the
+    /// default single-threaded test runtime (the subscriber is thread-local).
+    async fn span_marked_by<F: std::future::Future>(future: F) -> (F::Output, bool) {
+        use tracing::Instrument;
+
+        let capture = Capture::default();
+        let subscriber = tracing_subscriber::registry()
+            .with(ZdrMarkLayer)
+            .with(build_json_layer(capture.clone()));
+        let _default = tracing::subscriber::set_default(subscriber);
+        let request = axum::http::Request::builder()
+            .uri("/p?q=secret")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let span = crate::make_http_trace_span(&request);
+        let output = async {
+            let output = future.await;
+            tracing::info!(count = 1, "after");
+            output
+        }
+        .instrument(span)
+        .await;
+        (output, capture.text().contains("\"zdr\":true"))
+    }
+
+    fn member() -> crate::middleware::AuthenticatedUser {
+        crate::middleware::AuthenticatedUser {
+            user_id: "user-test".to_owned(),
+            user_email: "user@example.test".to_owned(),
+            user_name: "User Test".to_owned(),
+            user_image: None,
+            email_verified: true,
+            auth_role: Some("member".to_owned()),
+            active_org_id: Some("org-test".to_owned()),
+            authorized_membership: Some(crate::middleware::AuthorizedMembership {
+                organization_id: "org-test".to_owned(),
+                role: "member".to_owned(),
+            }),
+        }
+    }
+
+    /// An org-core that answers `GET /api/v1/organizations/org-test` with `reply`.
+    async fn org_core(reply: wiremock::ResponseTemplate) -> wiremock::MockServer {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/organizations/org-test"))
+            .respond_with(reply)
+            .mount(&server)
+            .await;
+        server
+    }
+
+    fn zdr_org() -> wiremock::ResponseTemplate {
+        wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "metadata": { "interactiveRetention": { "zdr": true } }
+        }))
+    }
+
+    fn plain_org() -> wiremock::ResponseTemplate {
+        wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "metadata": { "interactiveRetention": { "zdr": false } }
+        }))
+    }
+
+    #[tokio::test]
+    async fn the_header_marks_the_span() {
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert("x-zdr", "true".parse().unwrap());
+        let (zdr, marked) = span_marked_by(async { crate::zdr::request_zdr(&headers, None) }).await;
+        assert!(zdr && marked);
+
+        let headers = axum::http::HeaderMap::new();
+        let (zdr, marked) = span_marked_by(async { crate::zdr::request_zdr(&headers, None) }).await;
+        assert!(!zdr && !marked, "no header, no body flag: nothing to mark");
+    }
+
+    #[tokio::test]
+    async fn a_body_flag_marks_the_span_in_request_zdr() {
+        let headers = axum::http::HeaderMap::new();
+        let body = serde_json::json!({ "zdr": true });
+        let (zdr, marked) =
+            span_marked_by(async { crate::zdr::request_zdr(&headers, Some(&body)) }).await;
+        assert!(zdr && marked);
+
+        let body = serde_json::json!({ "zdr": false });
+        let (zdr, marked) =
+            span_marked_by(async { crate::zdr::request_zdr(&headers, Some(&body)) }).await;
+        assert!(!zdr && !marked);
+    }
+
+    #[tokio::test]
+    async fn a_body_flag_marks_the_span_in_normalized_model_body() {
+        let headers = axum::http::HeaderMap::new();
+        let (body, marked) = span_marked_by(async {
+            crate::domains::chat::shared::normalized_model_body(
+                serde_json::json!({ "zdr": true }),
+                &headers,
+            )
+        })
+        .await;
+        assert_eq!(body["zdr"], serde_json::json!(true));
+        assert!(marked);
+
+        let (body, marked) = span_marked_by(async {
+            crate::domains::chat::shared::normalized_model_body(
+                serde_json::json!({ "zdr": false }),
+                &headers,
+            )
+        })
+        .await;
+        assert_eq!(body["zdr"], serde_json::json!(false));
+        assert!(!marked);
+    }
+
+    #[tokio::test]
+    async fn an_ag_ui_turn_marks_the_span_for_a_body_flag_and_for_the_header() {
+        let headers = axum::http::HeaderMap::new();
+        let body = serde_json::json!({ "zdr": true });
+        let (zdr, marked) =
+            span_marked_by(async { crate::domains::ag_ui::turn_requests_zdr(&headers, &body) })
+                .await;
+        assert!(zdr && marked);
+
+        let body = serde_json::json!({});
+        let (zdr, marked) =
+            span_marked_by(async { crate::domains::ag_ui::turn_requests_zdr(&headers, &body) })
+                .await;
+        assert!(!zdr && !marked);
+
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert("x-zdr", "1".parse().unwrap());
+        let (zdr, marked) =
+            span_marked_by(async { crate::domains::ag_ui::turn_requests_zdr(&headers, &body) })
+                .await;
+        assert!(zdr && marked);
+    }
+
+    #[tokio::test]
+    async fn org_posture_marks_the_span_when_org_core_says_zdr_and_not_otherwise() {
+        use crate::zdr::{org_posture, OrgPosture};
+
+        let zdr = org_core(zdr_org()).await;
+        let mut state = crate::tests::test_state(false);
+        state.org_core_url = zdr.uri();
+        let user = member();
+        let (posture, marked) = span_marked_by(org_posture(&state, &user)).await;
+        assert_eq!(posture, OrgPosture::Zdr);
+        assert!(marked, "org-core said ZDR");
+
+        let plain = org_core(plain_org()).await;
+        let mut state = crate::tests::test_state(false);
+        state.org_core_url = plain.uri();
+        let (posture, marked) = span_marked_by(org_posture(&state, &user)).await;
+        assert_eq!(posture, OrgPosture::NotZdr);
+        assert!(!marked, "org-core said not ZDR");
+    }
+
+    /// The cached answer is a separate branch of `org_posture`.
+    #[tokio::test]
+    async fn a_cached_zdr_posture_marks_the_span_without_asking_org_core() {
+        use crate::zdr::{org_posture, OrgPosture};
+
+        for (cached, expected, expect_marked) in [
+            (true, OrgPosture::Zdr, true),
+            (false, OrgPosture::NotZdr, false),
+        ] {
+            let mut state = crate::tests::test_state(false);
+            // Unroutable on purpose: a cache hit must not need org-core.
+            state.org_core_url = "http://127.0.0.1:1".to_owned();
+            state.cache = crate::cache::ResultCache::in_memory();
+            let key = crate::cache::cache_key("org-zdr", &["org-test"]);
+            state
+                .cache
+                .store_for_secs(&key, &serde_json::Value::Bool(cached), 60)
+                .await;
+            let user = member();
+            let (posture, marked) = span_marked_by(org_posture(&state, &user)).await;
+            assert_eq!(posture, expected);
+            assert_eq!(marked, expect_marked, "cached zdr={cached}");
+        }
+    }
+
+    /// `org_zdr_enabled` has its own mark: `org_posture` does not mark an
+    /// answer it could not get, but the fail-closed caller does.
+    #[tokio::test]
+    async fn org_zdr_enabled_marks_the_span_for_zdr_and_for_the_fail_closed_case() {
+        let user = member();
+
+        let zdr = org_core(zdr_org()).await;
+        let mut state = crate::tests::test_state(false);
+        state.org_core_url = zdr.uri();
+        let (enabled, marked) =
+            span_marked_by(crate::zdr::org_zdr_enabled(&state, &user)).await;
+        assert!(enabled && marked, "org-core said ZDR");
+
+        let plain = org_core(plain_org()).await;
+        let mut state = crate::tests::test_state(false);
+        state.org_core_url = plain.uri();
+        let (enabled, marked) =
+            span_marked_by(crate::zdr::org_zdr_enabled(&state, &user)).await;
+        assert!(!enabled && !marked, "org-core said not ZDR");
+
+        let down = org_core(wiremock::ResponseTemplate::new(500)).await;
+        let mut state = crate::tests::test_state(false);
+        state.org_core_url = down.uri();
+        let (posture, marked) =
+            span_marked_by(crate::zdr::org_posture(&state, &user)).await;
+        assert_eq!(posture, crate::zdr::OrgPosture::Unknown);
+        assert!(!marked, "org_posture itself marks only a real ZDR answer");
+        let (enabled, marked) =
+            span_marked_by(crate::zdr::org_zdr_enabled(&state, &user)).await;
+        assert!(enabled, "an org-core outage fails closed");
+        assert!(marked, "and the fail-closed answer marks the span");
     }
 
     // ---- the request span and the real handlers ---------------------------
@@ -711,7 +1264,15 @@ mod tests {
         }
 
         let log = capture.text();
-        assert!(!log.is_empty(), "the capture saw the request's own events");
+        // The capture holds the gateway's own events, not only dependency noise,
+        // and each of them sits under an HTTP span that carries the mark: the
+        // x-zdr header reached `zdr_flag` through the real router.
+        let own = own_events(&log);
+        assert_eq!(own.len(), 2, "one authenticated-request event per request: {log}");
+        for event in &own {
+            assert_eq!(event["span"]["name"], "http_request", "{event}");
+            assert_eq!(event["span"]["zdr"], true, "the span carries the mark: {event}");
+        }
         for needle in [
             "SEARCH-QUERY-IN-URL",
             "SEARCH-QUERY-IN-BODY",
@@ -720,6 +1281,37 @@ mod tests {
         ] {
             assert!(!log.contains(needle), "{needle} reached the log: {log}");
         }
+
+        // The control: the same router without the header leaves the span
+        // unmarked, so the mark above is the header's doing.
+        let before = log.len();
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/search/web")
+                    .header("cookie", "idknuten.sid=session")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&json!({ "query": "CONTROL" })).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        let after = capture.text();
+        let own = own_events(&after[before..]);
+        assert_eq!(own.len(), 1, "{after}");
+        assert!(own[0]["span"].get("zdr").is_none(), "not marked: {}", own[0]);
+    }
+
+    /// The JSON events the gateway itself logged for a request (the
+    /// authenticated-request event), as opposed to its dependencies' output.
+    fn own_events(log: &str) -> Vec<serde_json::Value> {
+        log.lines()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .filter(|event| event["fields"]["message"] == "gateway authenticated request")
+            .collect()
     }
 
     #[tokio::test]
