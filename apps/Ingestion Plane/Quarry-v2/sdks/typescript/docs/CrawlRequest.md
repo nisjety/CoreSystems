@@ -8,6 +8,7 @@ Name | Type
 ------------ | -------------
 `url` | string
 `maxPages` | number
+`maxDepth` | number
 
 ## Example
 
@@ -18,6 +19,7 @@ import type { CrawlRequest } from '@quarry/client'
 const example = {
   "url": null,
   "maxPages": null,
+  "maxDepth": null,
 } satisfies CrawlRequest
 
 console.log(example)

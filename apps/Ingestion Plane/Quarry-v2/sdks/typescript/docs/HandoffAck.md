@@ -8,6 +8,7 @@ Name | Type
 ------------ | -------------
 `jobId` | string
 `acceptedAt` | Date
+`limits` | [HandoffAckLimits](HandoffAckLimits.md)
 
 ## Example
 
@@ -18,6 +19,7 @@ import type { HandoffAck } from '@quarry/client'
 const example = {
   "jobId": null,
   "acceptedAt": null,
+  "limits": null,
 } satisfies HandoffAck
 
 console.log(example)

@@ -152,8 +152,9 @@ No authorization required
 |-------------|-------------|------------------|
 | **200** | Observation and immutable outcome proof |  -  |
 | **403** | Domain, SSRF, policy, or grant denial |  -  |
-| **409** | Snapshot target is stale, absent, ambiguous, or changed; re-observe before acting |  -  |
-| **429** | Step budget exhausted |  -  |
+| **409** | Either the snapshot target is stale, absent, ambiguous, or changed (re-observe before acting), or USER_TOOK_OVER: the person using the browser has taken it over and this action was proposed by an agent (a service principal, or &#x60;initiated_by: agent&#x60;). &#x60;error.details&#x60; is &#x60;{control_mode: \&quot;human_takeover\&quot;, control_epoch}&#x60;. Not retryable until control is handed back. Enforced only when QUARRY_EDGE__TAKEOVER_ENFORCEMENT&#x3D;1; otherwise the edge logs what it would have refused. |  -  |
+| **402** | BUDGET_EXHAUSTED. An agent run reached its step, attempt, runtime or estimated-cost bound (error.details.dimension is steps, attempts, runtime or cost, with limit, spent and unit). Not retryable: the budget does not refill, and a resumed run keeps what it spent. Only returned when QUARRY_EDGE__BUDGET_ENFORCEMENT&#x3D;on; in shadow mode the same condition is only recorded. |  -  |
+| **429** | Step budget exhausted (the step limit the request itself set) |  -  |
 
 [[Back to top]](#) [[Back to API list]](../README.md#api-endpoints) [[Back to Model list]](../README.md#models) [[Back to README]](../README.md)
 
@@ -694,6 +695,7 @@ No authorization required
 | **200** | Browser run acquired |  -  |
 | **400** | Invalid constraints or persistence request |  -  |
 | **403** | Missing or invalid BrowserBroker grant |  -  |
+| **429** | RATE_LIMITED. A run cap is full: &#x60;error.details.reason&#x60; is &#x60;global_run_cap&#x60;, &#x60;org_run_cap&#x60; or &#x60;org_interactive_run_cap&#x60;, with &#x60;scope&#x60;, &#x60;limit&#x60;, &#x60;active&#x60; and &#x60;retry_after_seconds&#x60;. Retryable. See ERROR_REASONS.md. |  -  |
 
 [[Back to top]](#) [[Back to API list]](../README.md#api-endpoints) [[Back to Model list]](../README.md#models) [[Back to README]](../README.md)
 

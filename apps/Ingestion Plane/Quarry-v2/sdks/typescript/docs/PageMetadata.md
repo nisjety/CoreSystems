@@ -9,6 +9,8 @@ Name | Type
 `title` | string
 `lang` | string
 `contentType` | string
+`contentKind` | string
+`contentKindSource` | string
 
 ## Example
 
@@ -20,6 +22,8 @@ const example = {
   "title": null,
   "lang": null,
   "contentType": null,
+  "contentKind": null,
+  "contentKindSource": null,
 } satisfies PageMetadata
 
 console.log(example)

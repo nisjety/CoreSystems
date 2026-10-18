@@ -12,6 +12,8 @@ Name | Type
 `driverCapabilities` | [BrowserDriverCapabilities](BrowserDriverCapabilities.md)
 `executionTier` | string
 `executionEngine` | string
+`constraints` | [EnvelopeStartAgentRunDataConstraints](EnvelopeStartAgentRunDataConstraints.md)
+`clamped` | [Array&lt;EnvelopeStartAgentRunDataClampedInner&gt;](EnvelopeStartAgentRunDataClampedInner.md)
 
 ## Example
 
@@ -26,6 +28,8 @@ const example = {
   "driverCapabilities": null,
   "executionTier": null,
   "executionEngine": null,
+  "constraints": null,
+  "clamped": null,
 } satisfies EnvelopeStartAgentRunData
 
 console.log(example)
