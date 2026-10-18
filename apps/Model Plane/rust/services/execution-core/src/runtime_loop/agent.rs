@@ -901,9 +901,9 @@ async fn run_agent_with_route(
         // A stage 1 segment makes no fold call of any kind: it writes none (its gate says
         // `resumed`) and it does not close the fold the pause saved. That fold (state
         // `paused`, its approval now consumed) is not resumable in practice, because the
-        // consume gate refuses a second use of the approval; a later reader (the in-place
-        // resume, the parking worker) must treat a fold whose approval is consumed as not
-        // resumable, and the terminal purge removes it with the run. (WS03 S6.) An in-place
+        // consume gate refuses a second use of the approval; any reader of it other than an
+        // in-place resume (the parking worker) must treat a fold whose approval is consumed as
+        // not resumable, and the terminal purge removes it with the run. (WS03 S6.) An in-place
         // resume is the one reader that restores such a fold: the holder of the consume's
         // claim token, in this same request.
     }
@@ -1273,6 +1273,14 @@ enum RoundSeed {
 /// `in_place` is whether it resumes the paused loop. A stage-1 segment writes no fold (its
 /// gate says `resumed`); an in-place resume is not a stage-1 segment, so the flag is
 /// `holds_release && !in_place`.
+///
+/// That expression is NOT what keeps an in-place resume's writer on: it is redundant. The only
+/// writer ever built with `in_place == true` is `FoldWriter::seeded`, and both deciders of the
+/// seeded writer's gate force `resumed: false` themselves (`FoldWriter::seeded` and
+/// `resume::in_place_writer_off`, whose agreement the resume tests drive over every
+/// combination of the gate's facts). The `!in_place` is kept so this gate reads true to a
+/// reader, and `in_place_writer_violations` holds it textually; do not read a behavioural
+/// proof into it (removing it turns no lib test red, and that is known).
 fn writer_gate(
     req: &pb::RunAgentRequest,
     route: &crate::agent_route::ModelRoute,
@@ -1292,9 +1300,10 @@ fn writer_gate(
     }
 }
 
-/// What the restored round's first walk does with one of its calls (WS03 S7b).
-#[derive(Debug, PartialEq, Eq)]
-enum SeededCall<'s> {
+/// What the restored round's first walk does with one of its calls (WS03 S7b). A `Resolved`
+/// call borrows the tool's output and error text, so its `Debug` is content-free (see below).
+#[derive(PartialEq, Eq)]
+pub(super) enum SeededCall<'s> {
     /// The call already has its outcome: it is not run through the pre-pass again and not
     /// dispatched. `step_id` is the one it ran under (empty for a call refused before dispatch).
     Resolved {
@@ -1311,12 +1320,38 @@ enum SeededCall<'s> {
     Closed,
 }
 
+impl std::fmt::Debug for SeededCall<'_> {
+    /// Content-free, like the `resume::SeedSlot` it is decided from: step ids
+    /// and the tool name, and for a resolved call only whether it failed and how long its
+    /// output is. Never the output or the error text.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Resolved {
+                step_id,
+                name,
+                output,
+                error,
+                passed_prepass,
+            } => f
+                .debug_struct("Resolved")
+                .field("step_id", step_id)
+                .field("name", name)
+                .field("output_bytes", &output.len())
+                .field("failed", &error.is_some())
+                .field("passed_prepass", passed_prepass)
+                .finish(),
+            Self::Run { step_id } => f.debug_struct("Run").field("step_id", step_id).finish(),
+            Self::Closed => f.write_str("Closed"),
+        }
+    }
+}
+
 /// Decide a restored call from its slot and the arguments its response carries. A call that
 /// still runs needs a step id (it is the call's identity in the ledger) and its arguments: a
 /// call with no step, with withheld arguments, or with no slot at all is closed, never
 /// dispatched. `resume::restore` already resolves every such call itself; this is the same rule
 /// held again at the point of dispatch.
-fn seeded_call<'s>(
+pub(super) fn seeded_call<'s>(
     slot: Option<&'s runtime_loop::resume::SeedSlot>,
     arguments_json: &str,
 ) -> SeededCall<'s> {
@@ -2387,7 +2422,12 @@ async fn run_rounds(
                         // In place the question is whether THIS attempt won the release, and
                         // it cannot be answered: nothing of the restored round is dispatched,
                         // the other calls of it included. (Stage 1 holds only the release back
-                        // and lets the model replan, as it always has.)
+                        // and lets the model replan, as it always has.) That leaves a window
+                        // INV-02 does not close in stage 1: a second attempt of one claim that
+                        // also loses its reserve runs its own loop, and the later rounds of the
+                        // two loops are NOT fenced against each other, because a step id ends in
+                        // the provider's own tool-call id (`tool_step_id`), which each inference
+                        // run chooses anew. Open; tracked in the S7b hardening ledger text.
                         if in_place_round {
                             return Err(
                                 runtime_loop::resume::Refusal::CheckpointUnavailable.status()
@@ -5784,9 +5824,6 @@ async fn finalize(
     })
 }
 
-/// Publish a `PlanTransitioned` orchestration event on session-core's broadcast
-/// (the same `RecordOrchestrationEvent` path `browser_events.rs` uses).
-/// Best-effort: a publish failure is logged, never propagated.
 /// What a continuation starts from (build plan WS03 S3, S7b): the segment of stage 1, or the
 /// paused loop restored in place. Both hold the one release and run under the snapshot's tools,
 /// mode and authority.
@@ -6116,6 +6153,9 @@ async fn begin_continuation(
     Ok(continuation)
 }
 
+/// Publish a `PlanTransitioned` orchestration event on session-core's broadcast
+/// (the same `RecordOrchestrationEvent` path `browser_events.rs` uses).
+/// Best-effort: a publish failure is logged, never propagated.
 async fn publish_plan_transition(
     session_channel: &Channel,
     plan_id: &str,
@@ -11936,6 +11976,68 @@ mod tests {
         assert!(replay.lock().unwrap().finalizations.is_empty());
     }
 
+    /// What tells the stage-1 PRE-reserve of a READ release from the reservation phase 2 makes
+    /// of one: phase 2 reserves a read release only through the slot that dispatches it, and a
+    /// stage-1 segment has one call, so a read release that dispatches is reserved once either
+    /// way. A read release the pre-pass REFUSED has no phase-2 slot: only the pre-reserve gives
+    /// it a row (its own class, closed `not_run`), and only that row makes a replay of the
+    /// approval end at the ledger instead of running a second model loop. Removing the
+    /// pre-reserve turns this red; `a_read_release_is_pre_reserved_with_its_own_class_in_stage_one`
+    /// pins the class and the order, not the existence.
+    #[tokio::test]
+    async fn a_read_release_rejected_in_phase_one_is_pre_reserved_and_closed_not_run() {
+        let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
+        let policy = OrderingPolicy::new(&rec, false);
+        let strict = |mut consume: pb::ConsumeApprovalResponse| {
+            let authority = consume.authority.as_mut().expect("a snapshot");
+            authority.tools[0].parameters_json =
+                r#"{"type":"object","required":["query"],"properties":{"query":{"type":"string"}}}"#
+                    .to_owned();
+            consume
+        };
+        let resp = continue_with_ledger(
+            &rec,
+            strict(release_consume("lookup_thing", "{}", "ask", true, false)),
+            &policy,
+            vec![Scripted::Answer("done".to_owned())],
+        )
+        .await
+        .expect("the model is told and the loop goes on");
+        assert_eq!(resp.final_output, "done");
+        assert_eq!(policy.dispatches(), 0, "a refused release is never dispatched");
+        {
+            let r = rec.lock().unwrap();
+            assert_eq!(r.reservations.len(), 1, "the refused read still has its row");
+            assert_eq!(r.reservations[0].action_id, RELEASE_ACTION);
+            assert_eq!(r.reservations[0].tool, "lookup_thing");
+            assert_eq!(r.reservations[0].effect_class, "read", "its own class");
+            assert_eq!(r.finalizations, vec![(RELEASE_ACTION.to_owned(), "not_run".to_owned())]);
+        }
+
+        let tiers: ObservedTiers = Arc::new(Mutex::new(Vec::new()));
+        let replay: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
+        replay.lock().unwrap().reserve_already_for.insert(RELEASE_ACTION.to_owned());
+        let replay_policy = OrderingPolicy::new(&replay, false);
+        let inference_channel = spawn_inference_channel_with_tier(
+            vec![Scripted::Answer("again".to_owned())],
+            tiers.clone(),
+        )
+        .await;
+        let error = drive_continue(
+            &replay,
+            continue_request(2),
+            strict(release_consume("lookup_thing", "{}", "ask", false, true)),
+            true,
+            &replay_policy,
+            inference_channel,
+        )
+        .await
+        .expect_err("the replay ends at the pre-reserve");
+        assert_eq!(error.message(), "continuation_already_consumed");
+        assert!(tiers.lock().unwrap().is_empty(), "no second model loop");
+        assert!(replay.lock().unwrap().finalizations.is_empty());
+    }
+
     /// A release the capability policy asks consent for runs (the approval is the consent) and
     /// is fenced like any other: reserved first, a replay ends before it dispatches.
     #[tokio::test]
@@ -17543,6 +17645,17 @@ mod tests {
                 kind: "pause".to_owned(),
             }
         }
+
+        /// The same pause, as the consume answers it for another outcome of the click:
+        /// `(true, false)` the consume the executor itself wins, `(false, true)` a replay by
+        /// the same claim (the gateway's pre-consume, which `pause_on` models), `(false,
+        /// false)` a consume another claim already took.
+        fn consume_as(mut self, consumed: bool, same_claim: bool) -> Self {
+            self.consume.consumed = consumed;
+            self.consume.already_consumed = !consumed;
+            self.consume.same_claim = same_claim;
+            self
+        }
     }
 
     fn ledger_row(action_id: &str, tool: &str, status: &str, class: &str, args: &str) -> pb::ToolActionState {
@@ -17700,6 +17813,20 @@ mod tests {
         script: Vec<Scripted>,
         shape: impl FnOnce(&mut pb::RunAgentRequest, &mut Recorder),
     ) -> ResumeRun {
+        resume_on_route(paused, knobs, false, script, shape).await
+    }
+
+    /// [`resume_with`], optionally as a WAIVED run: the route is resolved from the request
+    /// `shape` leaves (which must then be a pinned one) under a caller that holds a ZDR waiver
+    /// for its connection, and the model is served faithfully so the pinned guard passes (the
+    /// continuation's `observed` messages are not recorded for a waived run).
+    async fn resume_on_route(
+        paused: &PausedRun,
+        knobs: ResumeKnobs,
+        waived: bool,
+        script: Vec<Scripted>,
+        shape: impl FnOnce(&mut pb::RunAgentRequest, &mut Recorder),
+    ) -> ResumeRun {
         let _resume = runtime_loop::resume::LoopResumeSwitch::set(knobs.resume);
         let _checkpoint = runtime_loop::fold::CheckpointSwitch::set(knobs.checkpoint);
         let _ledger = runtime_loop::effect::LedgerSwitch::set(knobs.ledger);
@@ -17717,10 +17844,60 @@ mod tests {
             shape(&mut req, &mut r);
         }
         let observed: ObservedMessages = Arc::new(Mutex::new(Vec::new()));
-        let inference_channel =
-            spawn_inference_channel_with_messages(script, observed.clone()).await;
         let policy = OrderingPolicy::new(&rec, false);
-        let result = drive_persistent(&rec, req, Vec::new(), &policy, inference_channel).await;
+        let result = if waived {
+            let caller = crate::auth::AuthenticatedUser::for_test_with_waiver(
+                &req.org_id,
+                &req.user_id,
+                "conn_1",
+                "ack-1",
+            );
+            let route = crate::agent_route::ModelRoute::resolve(
+                &req,
+                mp_contracts::agentic_subscription::Switches {
+                    enabled: true,
+                    allow_effects: true,
+                },
+                COMPOSE_AGENT_MODEL,
+                &caller,
+            )
+            .expect("the waived route is admitted on its own connection");
+            assert!(route.is_waived(), "the route carries the waiver");
+            let inference_channel = spawn_inference_channel_with_routes(
+                script,
+                Arc::new(Mutex::new(Vec::new())),
+                Serving::Echo,
+            )
+            .await;
+            let session_channel = spawn_session_channel(rec.clone()).await;
+            let state = crate::state::StateStore::new();
+            run_agent_with_route(
+                &state,
+                session_channel,
+                inference_channel,
+                req,
+                Vec::new(),
+                None,
+                Some("session-token".to_owned()),
+                "inference-token".to_owned(),
+                &policy,
+                &STATIC_TERMINAL_TOKENS,
+                None,
+                None,
+                &test_sandbox_manager_client(),
+                "test-backend",
+                None,
+                &test_sandbox_tokens(),
+                None,
+                route,
+                crate::run_budget::RunDeadline::NONE,
+            )
+            .await
+        } else {
+            let inference_channel =
+                spawn_inference_channel_with_messages(script, observed.clone()).await;
+            drive_persistent(&rec, req, Vec::new(), &policy, inference_channel).await
+        };
         ResumeRun {
             result,
             rec,
@@ -17790,6 +17967,144 @@ mod tests {
         let stage = captured.with_message("loop_resume_stage");
         assert_eq!(stage.len(), 1, "{stage:?}");
         assert!(stage[0].1.iter().any(|(name, value)| name == "resume_stage" && value.contains("in_place")));
+    }
+
+    /// The consume the executor ITSELF wins (`consumed`, not `already_consumed`) is the only
+    /// production path until the gateway pre-consumes; every test above drives the other, a
+    /// replay of the same claim. Here the executor's own consume spends the click, and the
+    /// resume still goes consume, claim, ledger read, restore, fence, release reserve, dispatch,
+    /// completion, in that order. With the ledger off `loop` is a downgrade to stage 1 (a won
+    /// consume is accepted without the ledger): no claim, no fold call, the release runs.
+    #[tokio::test]
+    async fn an_in_place_resume_through_a_consume_the_executor_wins_runs_end_to_end() {
+        let (captured, _installed) = capture_events();
+        let paused = pause_first_round().await.consume_as(true, false);
+        assert!(
+            paused.consume.consumed && !paused.consume.already_consumed && !paused.consume.same_claim
+        );
+        let claimed_seq = paused.claim.seq;
+        let run = resume_with(&paused, ResumeKnobs::ON, vec![Scripted::Answer("done".to_owned())], |_, _| {}).await;
+        let response = run.result.expect("the in-place continuation runs");
+        assert_eq!(response.final_output, "done");
+        {
+            let r = run.rec.lock().unwrap();
+            assert_eq!(r.consume_calls.len(), 1, "the executor's own consume, and no other");
+            assert_eq!(r.consume_calls[0].claim_token, "claim-1");
+            assert!(!r.consume_calls[0].omit_call, "the executor's consume carries the call");
+            assert_eq!(r.claim_calls.len(), 1);
+            assert_eq!(r.claim_calls[0].pause_ref, PAUSE_REF);
+            assert_eq!(r.claim_calls[0].claim_token, "claim-1");
+            assert_eq!(r.list_calls.len(), 1, "one ledger read");
+            assert_eq!(
+                resume_steps(&r.order),
+                [
+                    "claim",
+                    "list",
+                    "save:pre_effect",
+                    "reserve",
+                    "dispatch:delete_records",
+                    "finalize",
+                    "save:round"
+                ],
+                "the same order as a replay: {:?}",
+                r.order
+            );
+            let seqs: Vec<(String, u64)> = r
+                .loop_saves
+                .iter()
+                .map(|save| (save.kind.clone(), save.expected_seq))
+                .collect();
+            assert_eq!(
+                seqs,
+                [
+                    ("pre_effect".to_owned(), claimed_seq),
+                    ("round".to_owned(), claimed_seq + 1)
+                ]
+            );
+            assert_eq!(r.reservations.len(), 1);
+            assert_eq!(r.reservations[0].action_id, RELEASE_ACTION);
+            assert_eq!(r.finalizations.len(), 1);
+            assert_eq!(r.finalizations[0].0, RELEASE_ACTION);
+            assert!(r.close_calls.is_empty(), "an in-place resume never closes the fold");
+            assert_eq!(run.observed.lock().unwrap().len(), 1, "one model round, after the open round");
+        }
+        let stage = captured.with_message("loop_resume_stage");
+        assert_eq!(stage.len(), 1, "{stage:?}");
+        assert_eq!(log_field(&stage[0], "resume_stage").as_deref(), Some("in_place"));
+        assert!(captured.with_message("loop_resume_downgraded").is_empty());
+
+        // The ledger off: the same click, won, is served by stage 1.
+        let (captured, _installed) = capture_events();
+        let run = resume_with(
+            &paused,
+            ResumeKnobs {
+                ledger: false,
+                ..ResumeKnobs::ON
+            },
+            vec![Scripted::Answer("done".to_owned())],
+            |_, _| {},
+        )
+        .await;
+        run.result.expect("stage 1 serves a won consume with the ledger off");
+        let r = run.rec.lock().unwrap();
+        assert_eq!(r.consume_calls.len(), 1);
+        assert!(r.claim_calls.is_empty() && r.list_calls.is_empty(), "no claim, no read");
+        assert!(r.loop_saves.is_empty() && r.close_calls.is_empty(), "no fold call of any kind");
+        assert!(r.reservations.is_empty(), "the ledger is off");
+        assert_eq!(
+            r.order.iter().filter(|entry| entry.as_str() == "dispatch:delete_records").count(),
+            1,
+            "the release ran, once: {:?}",
+            r.order
+        );
+        let downgraded = captured.with_message("loop_resume_downgraded");
+        assert_eq!(downgraded.len(), 1, "{downgraded:?}");
+        assert_eq!(log_field(&downgraded[0], "reason").as_deref(), Some("ledger_off"));
+    }
+
+    /// A consume another claim already took (`already_consumed`, not the same claim) is lost:
+    /// the request ends with the token every consumed approval gets, before any claim, any
+    /// fold call, any reservation or any dispatch, with the ledger on and with it off. It is
+    /// not a same-claim replay, so the half-done-flip line is not logged either.
+    #[tokio::test]
+    async fn a_consume_lost_to_another_claim_is_refused_before_any_claim_or_dispatch() {
+        let paused = pause_first_round().await.consume_as(false, false);
+        for ledger in [true, false] {
+            let (captured, _installed) = capture_events();
+            let run = resume_with(
+                &paused,
+                ResumeKnobs {
+                    ledger,
+                    ..ResumeKnobs::ON
+                },
+                vec![Scripted::Answer("done".to_owned())],
+                |_, _| {},
+            )
+            .await;
+            let error = run.result.expect_err("a lost consume is refused");
+            assert_eq!(error.code(), tonic::Code::FailedPrecondition, "ledger={ledger}");
+            assert_eq!(error.message(), "continuation_already_consumed", "ledger={ledger}");
+            let r = run.rec.lock().unwrap();
+            assert_eq!(r.consume_calls.len(), 1, "ledger={ledger}");
+            assert!(r.claim_calls.is_empty() && r.list_calls.is_empty(), "ledger={ledger}: no claim");
+            assert!(
+                r.loop_saves.is_empty() && r.close_calls.is_empty(),
+                "ledger={ledger}: no fold RPC"
+            );
+            assert!(r.reservations.is_empty() && r.finalizations.is_empty(), "ledger={ledger}");
+            assert!(
+                !r.order.iter().any(|entry| entry.starts_with("dispatch:")),
+                "ledger={ledger}: nothing dispatched: {:?}",
+                r.order
+            );
+            assert!(r.managed_heartbeats.is_empty(), "ledger={ledger}: refused before the run starts");
+            assert!(r.managed_terminal_outcomes.is_empty(), "ledger={ledger}");
+            assert!(run.observed.lock().unwrap().is_empty(), "ledger={ledger}: no model round");
+            assert!(
+                captured.with_message("continue_replay_refused_ledger_off").is_empty(),
+                "ledger={ledger}: this is not a same-claim replay"
+            );
+        }
     }
 
     /// A field of a captured log line.
@@ -18461,6 +18776,86 @@ mod tests {
         run.result.expect("stage 1 serves it");
         assert!(run.rec.lock().unwrap().claim_calls.is_empty());
         assert!(captured.with_message("loop_resume_downgraded").is_empty());
+    }
+
+    /// The two downgrades the test above cannot drive with its fixture. A replay with the ledger
+    /// off is refused first, so `ledger_off` needs a consume the executor wins; and a WAIVED run
+    /// (its `zdr` flag is false, so `!zdr` alone would let it through) must never keep a fold,
+    /// consume, continue or park, so it runs as a segment with no claim and no fold call. Each
+    /// logs exactly one `loop_resume_downgraded` line with its own reason.
+    #[tokio::test]
+    async fn loop_mode_on_a_ledger_off_or_a_waived_run_runs_as_a_segment_and_makes_no_claim() {
+        let paused = pause_first_round().await.consume_as(true, false);
+        // The waived run is pinned to the subscription; the snapshot it continues states the
+        // same route, so the consume's own checks pass and only the retention posture decides.
+        let mut waived_pause = pause_first_round().await.consume_as(true, false);
+        {
+            let snapshot = waived_pause.consume.authority.as_mut().expect("a snapshot");
+            snapshot.provider_hint = "openai-codex-subscription".to_owned();
+            snapshot.digest = runtime_loop::resume::authority_from_proto(snapshot).digest();
+        }
+        let cases: Vec<(&str, &PausedRun, ResumeKnobs, bool)> = vec![
+            (
+                "ledger_off",
+                &paused,
+                ResumeKnobs {
+                    ledger: false,
+                    ..ResumeKnobs::ON
+                },
+                false,
+            ),
+            ("waived", &waived_pause, ResumeKnobs::ON, true),
+        ];
+        for (reason, pause, knobs, waived) in cases {
+            let (captured, _installed) = capture_events();
+            let run = resume_on_route(
+                pause,
+                knobs,
+                waived,
+                vec![Scripted::Answer("done".to_owned())],
+                |req, _| {
+                    if waived {
+                        let pinned = subscription_request();
+                        req.model = pinned.model;
+                        req.provider_hint = pinned.provider_hint;
+                        req.subscription_connection_id = pinned.subscription_connection_id;
+                        req.plan_mode = false;
+                    }
+                },
+            )
+            .await;
+            let response = run
+                .result
+                .unwrap_or_else(|error| panic!("{reason}: stage 1 serves it: {error:?}"));
+            let r = run.rec.lock().unwrap();
+            assert_eq!(r.consume_calls.len(), 1, "{reason}: the executor's own consume");
+            assert!(r.claim_calls.is_empty() && r.list_calls.is_empty(), "{reason}: no claim, no read");
+            assert!(
+                r.loop_saves.is_empty() && r.close_calls.is_empty() && r.loop_save_attempts == 0,
+                "{reason}: no fold RPC of any kind"
+            );
+            let dispatched = r
+                .order
+                .iter()
+                .filter(|entry| entry.as_str() == "dispatch:delete_records")
+                .count();
+            if waived {
+                // A pinned run's seed round carries no served provider, so the pinned guard
+                // ends the segment before the release (`subscription_route_unavailable`): true
+                // of stage 1 at HEAD, and unreachable in production (a waived run's approval is
+                // cold). What this case holds is the posture, not the release.
+                assert_eq!(response.status, "failed", "{reason}");
+            } else {
+                assert_eq!(dispatched, 1, "{reason}: the release ran, once: {:?}", r.order);
+            }
+            let downgraded = captured.with_message("loop_resume_downgraded");
+            assert_eq!(downgraded.len(), 1, "{reason}: {downgraded:?}");
+            assert_eq!(log_field(&downgraded[0], "reason").as_deref(), Some(reason));
+            assert!(captured.with_message("resume_fallback").is_empty(), "{reason}");
+            let stage = captured.with_message("loop_resume_stage");
+            assert_eq!(stage.len(), 1, "{reason}: {stage:?}");
+            assert_eq!(log_field(&stage[0], "resume_stage").as_deref(), Some("stage_one"), "{reason}");
+        }
     }
 
     /// The fence fold is what a later reader (a crash recovery, the parking worker) sees of the

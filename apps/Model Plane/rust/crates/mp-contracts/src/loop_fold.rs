@@ -341,7 +341,8 @@ pub fn switch_from(value: Option<&str>) -> bool {
 /// Two services read it, each through [`loop_resume_enabled`] and never by this name:
 /// execution-core restores the paused loop from its claimed fold, and model-gateway
 /// pre-consumes the approval and asks for the `loop` stage (the gateway's reader arrives
-/// with S7c-B; until then only its compose entry exists). With the executor's switch off, or
+/// with S7c-B; until then only its compose entry exists and the executor takes the consume
+/// itself). With the executor's switch off, or
 /// with the ledger or the fold writer off, a `loop` request runs as `segment` (a downgrade,
 /// never a refusal). The continue switch is not a downgrade: with
 /// `AGENT_CONTINUE_AFTER_APPROVAL_ENABLED` off the executor REFUSES a continue
@@ -353,6 +354,10 @@ pub fn switch_from(value: Option<&str>) -> bool {
 /// in reverse (model-gateway off first). A gateway that pre-consumes while the executor's
 /// ledger or continue switch is off spends the user's click and has the executor refuse the
 /// replay.
+///
+/// With `AGENT_CONTINUE_AFTER_APPROVAL_ENABLED` on and every other switch of the flip off, a
+/// continuation is the stage-1 segment it always was, and the executor logs one content-free
+/// `loop_resume_stage` line (`resume_stage: stage_one`) for it: a deliberate, log-only change.
 pub const LOOP_RESUME_ENV: &str = "EXECUTION_LOOP_RESUME_ENABLED";
 
 /// Whether the in-place resume switch is on in this process.
@@ -1064,7 +1069,7 @@ mod tests {
     }
 
     /// The digest is a cross-build contract: the writer (this build's save) and the
-    /// reader (a later build's resume) must compute the same value, or every resume
+    /// reader (the in-place resume's restore) must compute the same value, or every resume
     /// reads as a changed prompt. This pins the algorithm: blake3, domain tag
     /// `mp.prompt.v1`, 64-bit little-endian length prefixes, tools sorted.
     #[test]

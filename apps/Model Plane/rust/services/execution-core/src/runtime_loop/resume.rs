@@ -93,8 +93,7 @@ impl Drop for LoopResumeSwitch {
 
 /// Whether `EXECUTION_LOOP_RESUME_ENABLED` is on in this process (the one strict parser,
 /// `mp_contracts::loop_fold::loop_resume_enabled`). Default off.
-// Read by `run_agent_with_route` once the in-place resume is wired (WS03 S7b step 9
-// removes this allow).
+// Read by `agent::begin_continuation`, which feeds it to `select_stage`.
 pub(crate) fn loop_resume_enabled() -> bool {
     #[cfg(test)]
     if let Some(forced) = TEST_LOOP_RESUME.with(std::cell::Cell::get) {
@@ -473,8 +472,8 @@ pub(crate) fn next_segment_no(paused_step_id: &str) -> u32 {
 /// A step id of segment `segment_no`: the original step id behind the segment's
 /// prefix (`s{n}.` + original).
 // Stage 1 builds its first step through `tool_step_id` and a prefix; the in-place
-// resume (WS03 S7) renames the steps it carries over with this. Read by the restore, which has
-// no production caller until S7b step 9 (which removes this allow).
+// resume (WS03 S7) renames the steps it carries over with this. Read by the ledger-action read
+// (`ledger_action_ids`) and by `dangling_slot`, both on the in-place restore's path.
 pub(crate) fn resumed_step_id(segment_no: u32, original_step_id: &str) -> String {
     format!("s{segment_no}.{original_step_id}")
 }
@@ -3486,7 +3485,13 @@ mod tests {
         let mut printed = format!("{:?}\n{:?}\n{:?}", consumed(), claimed, restored);
         for slot in &restored.slots {
             printed.push_str(&format!("\n{slot:?}"));
+            // What the loop's first walk decides from the slot borrows the slot's output and
+            // error text; its `Debug` must not print them either.
+            let call = crate::runtime_loop::agent::seeded_call(Some(slot), "{}");
+            printed.push_str(&format!("\n{call:?}"));
         }
+        let closed = crate::runtime_loop::agent::seeded_call(None, "{}");
+        printed.push_str(&format!("\n{closed:?}"));
         for content in [
             // The consumed call's arguments, and the fold's spelling of them.
             "stale",
@@ -3513,6 +3518,10 @@ mod tests {
             "claimed_seq: 7",
             "messages: 4",
             "Release { step_id: \"s2.tool_1_approved\" }",
+            // The borrowing view of each slot, content-free too.
+            "Run { step_id: \"s2.tool_1_approved\" }",
+            "output_bytes: 16",
+            "Closed",
         ] {
             assert!(printed.contains(shown), "{shown:?} missing from {printed}");
         }
