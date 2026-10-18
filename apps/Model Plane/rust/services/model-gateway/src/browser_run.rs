@@ -27,7 +27,7 @@ use axum::{
 };
 use mp_contracts::model_plane::v1::{
     CancelRunRequest, DeriveRunGrantRequest, ExecuteStepRequest, PauseRunRequest, ResumeRunRequest,
-    ValidateGrantRequest,
+    RevokeGrantRequest, ValidateGrantRequest,
 };
 use mp_ids::new_ulid;
 use serde::Deserialize;
@@ -143,9 +143,12 @@ struct ResolvedBrowserGrant {
 const DERIVE_PURPOSE_AI_RUN: &str = "ai_run";
 
 /// Resolves the caller's grant into the run grant the browser run executes
-/// under. `run_key` is the run's own idempotency key: the same value names the
-/// managed run and keys the derived grant, so a retried start cannot mint a
-/// second grant for the same run.
+/// under. `run_key` names both the managed run and the derived grant, so the
+/// broker's (parent, session_key) idempotency is keyed on this run. It is
+/// minted per start request: a client that retries the POST starts a second
+/// run with a second run grant (bounded per session grant by the broker).
+/// `browser_run_start` revokes the derived grant when the start fails after
+/// the derive, and when the run reaches a terminal state.
 async fn resolve_browser_grant(
     state: &AppState,
     request: &BrowserRunStartRequest,
@@ -312,6 +315,44 @@ async fn derive_run_grant(
         allowed_domains,
         parent_grant_id: Some(parent_grant_id.to_owned()),
     })
+}
+
+/// Why model-gateway revokes a run grant it derived. A short label, never a
+/// host or URL (the broker stores it as the revoke reason).
+const REVOKE_REASON_START_FAILED: &str = "run_start_failed";
+const REVOKE_REASON_RUN_ENDED: &str = "run_ended";
+
+/// Best-effort revoke of a run grant this route derived. A run grant the
+/// caller presented (`parent_grant_id` is `None`) is never touched: it is not
+/// ours to end. A failed revoke is only logged; the broker still bounds the
+/// grant by its parent's lifetime and its per-parent cap.
+async fn revoke_derived_run_grant(
+    state: &AppState,
+    browser_bearer: &VerifiedBrowserBearer,
+    grant: &ResolvedBrowserGrant,
+    reason: &'static str,
+) -> bool {
+    if grant.parent_grant_id.is_none() {
+        return false;
+    }
+    let Ok(request) = authenticated_browser_request(
+        RevokeGrantRequest {
+            grant_id: grant.grant_id.clone(),
+            reason: reason.to_owned(),
+        },
+        browser_bearer,
+    ) else {
+        warn!(reason, "derived browser run grant revoke could not be authenticated");
+        return false;
+    };
+    let mut broker = state.browser_client.clone();
+    match broker.revoke_grant(request).await {
+        Ok(_) => true,
+        Err(status) => {
+            warn!(reason, code = ?status.code(), "derived browser run grant revoke failed");
+            false
+        }
+    }
 }
 
 /// Status map for `DeriveRunGrant`. A widening request is 403; a parent that
@@ -486,7 +527,8 @@ async fn browser_run_start(
     let user_id = claims.user_id.clone();
 
     // One key names both the managed run and its derived run grant, so the
-    // broker's (parent, session_key) idempotency lines up with the run.
+    // broker's (parent, session_key) idempotency lines up with this run. It is
+    // fresh per request: a retried POST is a new run with a new run grant.
     let run_key = format!("browser-{}", new_ulid());
 
     // Validate the opaque caller-provided id before *any* thread/run write.
@@ -513,14 +555,32 @@ async fn browser_run_start(
         false,
         None,
     )
-    .await
-    .map_err(|error| {
-        (
-            StatusCode::BAD_GATEWAY,
-            Json(json!({ "error": format!("session-core managed start failed: {error}") })),
-        )
-    })?;
+    .await;
+    let run = match run {
+        Ok(run) => run,
+        Err(error) => {
+            // The run grant was derived for a run that does not exist.
+            revoke_derived_run_grant(
+                &state,
+                &browser_bearer,
+                &browser_grant,
+                REVOKE_REASON_START_FAILED,
+            )
+            .await;
+            return Err((
+                StatusCode::BAD_GATEWAY,
+                Json(json!({ "error": format!("session-core managed start failed: {error}") })),
+            ));
+        }
+    };
     if run.already_started {
+        revoke_derived_run_grant(
+            &state,
+            &browser_bearer,
+            &browser_grant,
+            REVOKE_REASON_START_FAILED,
+        )
+        .await;
         return Err((
             StatusCode::CONFLICT,
             Json(json!({
@@ -533,15 +593,21 @@ async fn browser_run_start(
     // though Execution Core performs the action. Fail before dispatch if the
     // Gateway's scoped workload credential cannot renew that exact lease;
     // never substitute the delegated Session Core user bearer.
-    crate::session_flow::ensure_browser_agent_run_liveness(&state, &run)
-        .await
-        .map_err(|error| {
-            warn!(%error, run_id = %run.run_id, "initial browser managed-run liveness heartbeat failed");
-            (
-                StatusCode::BAD_GATEWAY,
-                Json(json!({ "error": "session-core liveness heartbeat failed" })),
-            )
-        })?;
+    if let Err(error) = crate::session_flow::ensure_browser_agent_run_liveness(&state, &run).await
+    {
+        warn!(%error, run_id = %run.run_id, "initial browser managed-run liveness heartbeat failed");
+        revoke_derived_run_grant(
+            &state,
+            &browser_bearer,
+            &browser_grant,
+            REVOKE_REASON_START_FAILED,
+        )
+        .await;
+        return Err((
+            StatusCode::BAD_GATEWAY,
+            Json(json!({ "error": "session-core liveness heartbeat failed" })),
+        ));
+    }
     let terminal_run = run.clone();
     let thread_id = run.thread_id;
     let run_id = run.run_id;
@@ -584,6 +650,8 @@ async fn browser_run_start(
     let hook_context = crate::runtime_registries::hook_context_json(&state.hooks, &org_id);
     let step_id = new_ulid();
     let dispatch_run_id = run_id.clone();
+    let revoke_bearer = browser_bearer.clone();
+    let revoke_grant = browser_grant.clone();
     tokio::spawn(async move {
         let mut execution_request = tonic::Request::new(ExecuteStepRequest {
             run_id: dispatch_run_id.clone(),
@@ -654,6 +722,7 @@ async fn browser_run_start(
                         Ok(true) => {}
                         Ok(false) => {
                             warn!(run_id = %dispatch_run_id, "browser managed run became terminal while execution was still pending; refusing to accept a late outcome");
+                            revoke_derived_run_grant(&terminal_state, &revoke_bearer, &revoke_grant, REVOKE_REASON_RUN_ENDED).await;
                             return;
                         }
                         Err(error) => {
@@ -670,6 +739,8 @@ async fn browser_run_start(
                 let outcome = classify_browser_execution_status(&resp.status);
                 match browser_run_finalization(outcome) {
                     BrowserRunFinalization::Complete(terminal) => {
+                        // The loop has finished: its run grant has no further use.
+                        revoke_derived_run_grant(&terminal_state, &revoke_bearer, &revoke_grant, REVOKE_REASON_RUN_ENDED).await;
                         if let Err(error) =
                             crate::session_flow::terminalize_browser_agent_run_authenticated(
                                 &terminal_state,
@@ -685,6 +756,7 @@ async fn browser_run_start(
                         }
                     }
                     BrowserRunFinalization::Cancel(reason) => {
+                        revoke_derived_run_grant(&terminal_state, &revoke_bearer, &revoke_grant, REVOKE_REASON_RUN_ENDED).await;
                         if let Err(error) =
                             crate::session_flow::cancel_browser_agent_run_authenticated(
                                 &terminal_state,
@@ -983,6 +1055,7 @@ mod tests {
         /// predates WS1.B.
         derive: Option<Result<DeriveRunGrantResponse, tonic::Code>>,
         derive_requests: Arc<Mutex<Vec<DeriveRunGrantRequest>>>,
+        revoke_requests: Arc<Mutex<Vec<RevokeGrantRequest>>>,
     }
 
     impl TestBrowserBroker {
@@ -992,6 +1065,7 @@ mod tests {
                 authorizations: Arc::new(Mutex::new(Vec::new())),
                 derive: None,
                 derive_requests: Arc::new(Mutex::new(Vec::new())),
+                revoke_requests: Arc::new(Mutex::new(Vec::new())),
             }
         }
     }
@@ -1007,9 +1081,13 @@ mod tests {
 
         async fn revoke_grant(
             &self,
-            _request: tonic::Request<RevokeGrantRequest>,
+            request: tonic::Request<RevokeGrantRequest>,
         ) -> Result<Response<RevokeGrantResponse>, Status> {
-            Err(Status::unimplemented("not used by validation test"))
+            self.revoke_requests
+                .lock()
+                .expect("revoke recorder")
+                .push(request.into_inner());
+            Ok(Response::new(RevokeGrantResponse { revoked: true }))
         }
 
         async fn validate_grant(
@@ -1804,5 +1882,137 @@ mod tests {
         let claims = browser_claims(true);
 
         assert!(browser_run_zdr_blocked(&claims, false));
+    }
+    /// A Session Core stand-in that counts connections and drops each one, so
+    /// any thread or run write fails and is visible as a connection.
+    async fn counting_session_core() -> (
+        tonic::transport::Channel,
+        Arc<AtomicUsize>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind counting session core");
+        let address = listener.local_addr().expect("counting session core address");
+        let connections = Arc::new(AtomicUsize::new(0));
+        let counter = connections.clone();
+        let handle = tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                counter.fetch_add(1, Ordering::SeqCst);
+                drop(stream);
+            }
+        });
+        let channel = tonic::transport::Endpoint::from_shared(format!("http://{address}"))
+            .expect("session core endpoint")
+            .connect_lazy();
+        (channel, connections, handle)
+    }
+
+    /// Calls the real `POST /v1/browser/runs` handler with `broker` behind
+    /// the browser client and a counting Session Core behind the session and
+    /// managed-run clients.
+    async fn start_with(
+        broker: TestBrowserBroker,
+        request: BrowserRunStartRequest,
+    ) -> (Result<Json<Value>, ApiError>, usize) {
+        let (mut state, broker_handle) = state_with_browser_broker(broker).await;
+        let (channel, connections, session_handle) = counting_session_core().await;
+        state.session_client =
+            mp_contracts::model_plane::v1::session_core_client::SessionCoreClient::new(
+                channel.clone(),
+            );
+        state.managed_run_client =
+            mp_contracts::model_plane::v1::managed_run_lifecycle_client::ManagedRunLifecycleClient::new(
+                channel,
+            );
+        let result = browser_run_start(
+            State(state),
+            Extension(browser_claims(false)),
+            Some(Extension(VerifiedBearer::for_test("data-plane-token"))),
+            VerifiedExecutionBearer::for_test("execution-token"),
+            VerifiedSessionBearer::for_test("session-token"),
+            VerifiedInferenceBearer::for_test("inference-token"),
+            VerifiedBrowserBearer::for_test("browser-user-token"),
+            Json(request),
+        )
+        .await;
+        broker_handle.abort();
+        session_handle.abort();
+        (result, connections.load(Ordering::SeqCst))
+    }
+
+    // Plan name: derive_failure_creates_no_thread_or_run. A refused derive
+    // stops the start before Session Core is contacted at all.
+    #[tokio::test]
+    async fn derive_failure_creates_no_thread_or_run() {
+        for code in [
+            tonic::Code::FailedPrecondition,
+            tonic::Code::PermissionDenied,
+            tonic::Code::ResourceExhausted,
+            tonic::Code::Unimplemented,
+        ] {
+            let broker = session_broker(&["example.com"], Err(code));
+            let (result, session_connections) =
+                start_with(broker.clone(), browser_request("session-1")).await;
+            assert!(result.is_err(), "{code:?} must refuse the start");
+            assert_eq!(
+                broker.derive_requests.lock().expect("recorder").len(),
+                1,
+                "{code:?}: the derive was attempted"
+            );
+            assert_eq!(
+                session_connections, 0,
+                "{code:?}: no thread or run write may follow a refused derive"
+            );
+            assert!(broker.revoke_requests.lock().expect("recorder").is_empty());
+        }
+    }
+
+    // A start that fails after the derive revokes the grant it derived, and
+    // each POST is its own run with its own key, so a retry derives anew.
+    #[tokio::test]
+    async fn a_start_that_fails_after_the_derive_revokes_the_derived_grant() {
+        let broker = session_broker(
+            &["example.com"],
+            Ok(derived_run("run-1", "session-1", &["example.com"])),
+        );
+        for _ in 0..2 {
+            let (result, session_connections) =
+                start_with(broker.clone(), browser_request("session-1")).await;
+            let error = result.expect_err("session-core is down");
+            assert_eq!(error.0, StatusCode::BAD_GATEWAY);
+            assert!(
+                session_connections > 0,
+                "the derive succeeded, so the start reached Session Core"
+            );
+        }
+        let revokes = broker.revoke_requests.lock().expect("recorder").clone();
+        assert_eq!(revokes.len(), 2, "one revoke per failed start");
+        for revoke in &revokes {
+            assert_eq!(revoke.grant_id, "run-1");
+            assert_eq!(revoke.reason, REVOKE_REASON_START_FAILED);
+        }
+        let derives = broker.derive_requests.lock().expect("recorder").clone();
+        assert_eq!(derives.len(), 2);
+        assert!(derives.iter().all(|d| d.session_key.starts_with("browser-")));
+        assert_ne!(
+            derives[0].session_key, derives[1].session_key,
+            "a retried POST is a new run and derives under a new key"
+        );
+    }
+
+    // A run grant the caller presented is not ours to revoke.
+    #[tokio::test]
+    async fn a_failed_start_never_revokes_a_presented_run_grant() {
+        let validation = ValidateGrantResponse {
+            kind: "run".to_owned(),
+            ..session_validation("run-0", &["example.com"])
+        };
+        let broker = TestBrowserBroker::validating(Ok(validation));
+        let (result, session_connections) =
+            start_with(broker.clone(), browser_request("run-0")).await;
+        assert_eq!(result.expect_err("session-core is down").0, StatusCode::BAD_GATEWAY);
+        assert!(session_connections > 0);
+        assert!(broker.revoke_requests.lock().expect("recorder").is_empty());
     }
 }
