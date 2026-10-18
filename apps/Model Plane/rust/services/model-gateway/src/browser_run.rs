@@ -26,7 +26,8 @@ use axum::{
     Extension, Json, Router,
 };
 use mp_contracts::model_plane::v1::{
-    CancelRunRequest, ExecuteStepRequest, PauseRunRequest, ResumeRunRequest, ValidateGrantRequest,
+    CancelRunRequest, DeriveRunGrantRequest, ExecuteStepRequest, PauseRunRequest, ResumeRunRequest,
+    ValidateGrantRequest,
 };
 use mp_ids::new_ulid;
 use serde::Deserialize;
@@ -133,12 +134,24 @@ struct BrowserRunStartRequest {
 struct ResolvedBrowserGrant {
     grant_id: String,
     allowed_domains: Vec<String>,
+    /// The session grant a run grant was derived from (WS1.B); `None` when
+    /// the caller already presented a run grant.
+    parent_grant_id: Option<String>,
 }
 
+/// The only `DeriveRunGrant` purpose this route asks for.
+const DERIVE_PURPOSE_AI_RUN: &str = "ai_run";
+
+/// Resolves the caller's grant into the run grant the browser run executes
+/// under. `run_key` is the run's own idempotency key: the same value names the
+/// managed run and keys the derived grant, so a retried start cannot mint a
+/// second grant for the same run.
 async fn resolve_browser_grant(
     state: &AppState,
     request: &BrowserRunStartRequest,
     browser_bearer: &VerifiedBrowserBearer,
+    org_id: &str,
+    run_key: &str,
 ) -> Result<ResolvedBrowserGrant, ApiError> {
     let grant_id = request.grant_id.trim();
     if grant_id.is_empty() {
@@ -169,6 +182,33 @@ async fn resolve_browser_grant(
     if broker_policy != response.allowed_domains {
         return Err(browser_grant_forbidden());
     }
+    // A ZDR grant must never back a durable run, whatever the request says.
+    if response.zdr {
+        return Err(browser_run_zdr_refusal());
+    }
+    match response.kind.as_str() {
+        "session" => {
+            return derive_run_grant(
+                state,
+                request,
+                browser_bearer,
+                org_id,
+                run_key,
+                grant_id,
+                &broker_policy,
+            )
+            .await;
+        }
+        // A run grant (or a grant from a broker that predates kinds) keeps
+        // the exact-equality path below.
+        "run" | "" => {}
+        "sensitive_approval" => {
+            return Err(bad_request(
+                "a sensitive approval grant cannot start a browser run",
+            ));
+        }
+        _ => return Err(browser_grant_forbidden()),
+    }
     let allowed_domains = match request.allowed_domains.as_deref() {
         None => broker_policy,
         Some(requested) => {
@@ -198,7 +238,116 @@ async fn resolve_browser_grant(
     Ok(ResolvedBrowserGrant {
         grant_id: grant_id.to_owned(),
         allowed_domains,
+        parent_grant_id: None,
     })
+}
+
+/// Derives a run grant from a validated session grant. The broker enforces
+/// that the run grant is never wider than its parent; the response is checked
+/// again here so a misbehaving broker cannot widen what reaches execution-core.
+async fn derive_run_grant(
+    state: &AppState,
+    request: &BrowserRunStartRequest,
+    browser_bearer: &VerifiedBrowserBearer,
+    org_id: &str,
+    run_key: &str,
+    parent_grant_id: &str,
+    parent_policy: &[String],
+) -> Result<ResolvedBrowserGrant, ApiError> {
+    // `allowed_domains` narrows the session grant; absent (or explicit null)
+    // inherits it, which the broker refuses for a parent wider than one run.
+    let requested = match request.allowed_domains.as_deref() {
+        None | Some([]) => Vec::new(),
+        Some(requested) => canonical_browser_domains(requested)
+            .map_err(|()| bad_request("allowed_domains must be a bounded hostname policy"))?,
+    };
+    let mut broker = state.browser_client.clone();
+    let derived = broker
+        .derive_run_grant(authenticated_browser_request(
+            DeriveRunGrantRequest {
+                parent_grant_id: parent_grant_id.to_owned(),
+                session_key: run_key.to_owned(),
+                org_id: org_id.to_owned(),
+                allowed_domains: requested,
+                purpose: DERIVE_PURPOSE_AI_RUN.to_owned(),
+                ttl_seconds: 0,
+            },
+            browser_bearer,
+        )?)
+        .await
+        .map_err(|status| browser_derive_status_to_http(&status))?
+        .into_inner();
+
+    let grant_id = derived.grant_id.trim();
+    if grant_id.is_empty()
+        || grant_id == parent_grant_id
+        || derived.kind != "run"
+        || derived.parent_grant_id != parent_grant_id
+        // The parent was validated as non-ZDR above; a ZDR run grant would
+        // mean the broker and this route disagree about retention.
+        || derived.zdr
+    {
+        return Err(browser_grant_forbidden());
+    }
+    let allowed_domains = canonical_browser_domains(&derived.allowed_domains)
+        .map_err(|()| browser_grant_forbidden())?;
+    if allowed_domains != derived.allowed_domains
+        || !allowed_domains
+            .iter()
+            .all(|host| host_within_policy(host, parent_policy))
+    {
+        return Err(browser_grant_forbidden());
+    }
+    if let Some(start_url) = request
+        .start_url
+        .as_deref()
+        .filter(|url| !url.trim().is_empty())
+    {
+        if !url_is_allowed_by_policy(start_url, &allowed_domains) {
+            return Err(bad_request("start_url is outside the broker grant policy"));
+        }
+    }
+    Ok(ResolvedBrowserGrant {
+        grant_id: grant_id.to_owned(),
+        allowed_domains,
+        parent_grant_id: Some(parent_grant_id.to_owned()),
+    })
+}
+
+/// Status map for `DeriveRunGrant`. A widening request is 403; a parent that
+/// cannot seed a run (kind, lifetime, ZDR posture, a conflicting replay) is
+/// 409 `browser_grant_not_derivable`; anything unexpected fails closed.
+fn browser_derive_status_to_http(status: &tonic::Status) -> ApiError {
+    match status.code() {
+        tonic::Code::FailedPrecondition | tonic::Code::AlreadyExists => (
+            StatusCode::CONFLICT,
+            Json(json!({ "error": "browser_grant_not_derivable" })),
+        ),
+        tonic::Code::InvalidArgument => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "browser_grant_hosts_invalid" })),
+        ),
+        tonic::Code::ResourceExhausted => (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(json!({ "error": "browser_grant_limit_reached" })),
+        ),
+        // A broker that predates WS1.B (a rollback) cannot derive: the run
+        // fails, nothing falls back to the parent grant.
+        tonic::Code::Unimplemented => (
+            StatusCode::BAD_GATEWAY,
+            Json(json!({ "error": "browser_grant_derive_unavailable" })),
+        ),
+        _ => browser_grant_status_to_http(status),
+    }
+}
+
+fn browser_run_zdr_refusal() -> ApiError {
+    (
+        StatusCode::PRECONDITION_FAILED,
+        Json(json!({
+            "error": "ZDR browser runs are disabled until the durable run lifecycle is bypassed"
+        })),
+    )
 }
 
 fn browser_grant_forbidden() -> ApiError {
@@ -272,10 +421,16 @@ fn url_is_allowed_by_policy(url: &str, allowed_domains: &[String]) -> bool {
     let Some(host) = parsed.host_str().map(str::to_ascii_lowercase) else {
         return false;
     };
+    host_within_policy(&host, allowed_domains)
+}
+
+/// True when `host` equals a policy host or is a subdomain of one, on a dot
+/// boundary (`badexample.com` is not under `example.com`).
+fn host_within_policy(host: &str, allowed_domains: &[String]) -> bool {
     allowed_domains.iter().any(|domain| {
-        host == *domain
+        host == domain
             || (host.len() > domain.len()
-                && host.ends_with(domain)
+                && host.ends_with(domain.as_str())
                 && host.as_bytes()[host.len() - domain.len() - 1] == b'.')
     })
 }
@@ -330,10 +485,15 @@ async fn browser_run_start(
     let org_id = claims.org_id.clone();
     let user_id = claims.user_id.clone();
 
+    // One key names both the managed run and its derived run grant, so the
+    // broker's (parent, session_key) idempotency lines up with the run.
+    let run_key = format!("browser-{}", new_ulid());
+
     // Validate the opaque caller-provided id before *any* thread/run write.
     // A cross-tenant/forged/missing policy grant must not create a durable run
     // that later fails asynchronously in execution-core.
-    let browser_grant = resolve_browser_grant(&state, &req, &browser_bearer).await?;
+    let browser_grant =
+        resolve_browser_grant(&state, &req, &browser_bearer, &org_id, &run_key).await?;
 
     let run = crate::session_flow::prepare_managed_run_authenticated(
         &state,
@@ -344,7 +504,7 @@ async fn browser_run_start(
         &req.goal,
         "browser-agent",
         "execute",
-        &format!("browser-{}", new_ulid()),
+        &run_key,
         mp_contracts::model_plane::v1::ManagedRunSource::GatewayBrowser,
         false,
         &session_bearer,
@@ -386,6 +546,13 @@ async fn browser_run_start(
     let thread_id = run.thread_id;
     let run_id = run.run_id;
     let plan_id = non_empty(req.plan_id.as_deref()).map_or_else(new_ulid, str::to_owned);
+    // Whether the run executes under a grant derived here (session parent) or
+    // one the caller presented. Never the hosts.
+    info!(
+        run_id = %run_id,
+        derived_run_grant = browser_grant.parent_grant_id.is_some(),
+        "browser run grant resolved"
+    );
 
     // `run_id` is embedded in the tool_input JSON (not just the
     // ExecuteStepRequest envelope) because `tool_bridge::execute_browser_agent`
@@ -801,9 +968,10 @@ mod tests {
         execution_core_client::ExecutionCoreClient,
         execution_core_server::{ExecutionCore, ExecutionCoreServer},
         AcquireGrantRequest, AcquireGrantResponse, BrowserHealthRequest, BrowserHealthResponse,
-        CancelRunRequest, CancelRunResponse, ExecuteStepRequest, ExecuteStepResponse,
-        PauseRunRequest, PauseRunResponse, ResumeRunRequest, ResumeRunResponse, RevokeGrantRequest,
-        RevokeGrantResponse, RunAgentRequest, RunAgentResponse, ValidateGrantResponse,
+        CancelRunRequest, CancelRunResponse, DeriveRunGrantResponse, ExecuteStepRequest,
+        ExecuteStepResponse, PauseRunRequest, PauseRunResponse, ResumeRunRequest,
+        ResumeRunResponse, RevokeGrantRequest, RevokeGrantResponse, RunAgentRequest,
+        RunAgentResponse, ValidateGrantResponse,
     };
     use tonic::{Response, Status};
 
@@ -811,6 +979,21 @@ mod tests {
     struct TestBrowserBroker {
         validation: Result<ValidateGrantResponse, tonic::Code>,
         authorizations: Arc<Mutex<Vec<String>>>,
+        /// `None`: DeriveRunGrant is `Unimplemented`, as for a broker that
+        /// predates WS1.B.
+        derive: Option<Result<DeriveRunGrantResponse, tonic::Code>>,
+        derive_requests: Arc<Mutex<Vec<DeriveRunGrantRequest>>>,
+    }
+
+    impl TestBrowserBroker {
+        fn validating(validation: Result<ValidateGrantResponse, tonic::Code>) -> Self {
+            Self {
+                validation,
+                authorizations: Arc::new(Mutex::new(Vec::new())),
+                derive: None,
+                derive_requests: Arc::new(Mutex::new(Vec::new())),
+            }
+        }
     }
 
     #[tonic::async_trait]
@@ -846,6 +1029,31 @@ mod tests {
             match &self.validation {
                 Ok(response) => Ok(Response::new(response.clone())),
                 Err(code) => Err(Status::new(*code, "test broker rejection")),
+            }
+        }
+
+        async fn derive_run_grant(
+            &self,
+            request: tonic::Request<DeriveRunGrantRequest>,
+        ) -> Result<Response<DeriveRunGrantResponse>, Status> {
+            if let Some(value) = request
+                .metadata()
+                .get("authorization")
+                .and_then(|value| value.to_str().ok())
+            {
+                self.authorizations
+                    .lock()
+                    .expect("authorization recorder")
+                    .push(value.to_owned());
+            }
+            self.derive_requests
+                .lock()
+                .expect("derive recorder")
+                .push(request.into_inner());
+            match &self.derive {
+                None => Err(Status::unimplemented("not used by validation test")),
+                Some(Ok(response)) => Ok(Response::new(response.clone())),
+                Some(Err(code)) => Err(Status::new(*code, "test broker rejection")),
             }
         }
 
@@ -1217,14 +1425,16 @@ mod tests {
     async fn broker_validation_binds_authorization_and_rejects_forged_or_cross_tenant_grants() {
         let authorizations = Arc::new(Mutex::new(Vec::new()));
         let (state, handle) = state_with_browser_broker(TestBrowserBroker {
-            validation: Err(tonic::Code::NotFound),
             authorizations: authorizations.clone(),
+            ..TestBrowserBroker::validating(Err(tonic::Code::NotFound))
         })
         .await;
         let error = resolve_browser_grant(
             &state,
             &browser_request("forged-or-other-tenant"),
             &VerifiedBrowserBearer::for_test("browser-user-token"),
+            "org-a",
+            "browser-run-key",
         )
         .await
         .expect_err("broker absence must fail closed");
@@ -1243,19 +1453,21 @@ mod tests {
     async fn broker_validation_accepts_only_a_nonempty_server_owned_policy() {
         let authorizations = Arc::new(Mutex::new(Vec::new()));
         let (state, handle) = state_with_browser_broker(TestBrowserBroker {
-            validation: Ok(ValidateGrantResponse {
+            authorizations,
+            ..TestBrowserBroker::validating(Ok(ValidateGrantResponse {
                 grant_id: "grant-valid".to_owned(),
                 active: true,
                 allowed_domains: vec!["example.com".to_owned()],
                 ..Default::default()
-            }),
-            authorizations,
+            }))
         })
         .await;
         let grant = resolve_browser_grant(
             &state,
             &browser_request("grant-valid"),
             &VerifiedBrowserBearer::for_test("browser-user-token"),
+            "org-a",
+            "browser-run-key",
         )
         .await
         .expect("valid broker grant");
@@ -1263,19 +1475,19 @@ mod tests {
         assert_eq!(grant.allowed_domains, ["example.com"]);
         handle.abort();
 
-        let (state, handle) = state_with_browser_broker(TestBrowserBroker {
-            validation: Ok(ValidateGrantResponse {
+        let (state, handle) =
+            state_with_browser_broker(TestBrowserBroker::validating(Ok(ValidateGrantResponse {
                 grant_id: "grant-empty-policy".to_owned(),
                 active: true,
                 ..Default::default()
-            }),
-            authorizations: Arc::new(Mutex::new(Vec::new())),
-        })
-        .await;
+            })))
+            .await;
         let error = resolve_browser_grant(
             &state,
             &browser_request("grant-empty-policy"),
             &VerifiedBrowserBearer::for_test("browser-user-token"),
+            "org-a",
+            "browser-run-key",
         )
         .await
         .expect_err("empty broker policy must never be unrestricted");
@@ -1312,6 +1524,279 @@ mod tests {
             "ZDR browser controls must not reach Execution Core"
         );
         handle.abort();
+    }
+
+    fn session_validation(grant_id: &str, domains: &[&str]) -> ValidateGrantResponse {
+        ValidateGrantResponse {
+            grant_id: grant_id.to_owned(),
+            active: true,
+            allowed_domains: domains.iter().map(|d| (*d).to_owned()).collect(),
+            kind: "session".to_owned(),
+            owner_id: "user-a".to_owned(),
+            ..Default::default()
+        }
+    }
+
+    fn derived_run(grant_id: &str, parent: &str, domains: &[&str]) -> DeriveRunGrantResponse {
+        DeriveRunGrantResponse {
+            grant_id: grant_id.to_owned(),
+            allowed_domains: domains.iter().map(|d| (*d).to_owned()).collect(),
+            parent_grant_id: parent.to_owned(),
+            kind: "run".to_owned(),
+            ..Default::default()
+        }
+    }
+
+    /// Resolves `request` against `broker` and returns the result together
+    /// with the broker, whose recorders the caller can inspect.
+    async fn resolve_with(
+        broker: TestBrowserBroker,
+        request: BrowserRunStartRequest,
+    ) -> (Result<ResolvedBrowserGrant, ApiError>, TestBrowserBroker) {
+        let (state, handle) = state_with_browser_broker(broker.clone()).await;
+        let result = resolve_browser_grant(
+            &state,
+            &request,
+            &VerifiedBrowserBearer::for_test("browser-user-token"),
+            "org-a",
+            "browser-run-key",
+        )
+        .await;
+        handle.abort();
+        (result, broker)
+    }
+
+    fn session_broker(
+        domains: &[&str],
+        derive: Result<DeriveRunGrantResponse, tonic::Code>,
+    ) -> TestBrowserBroker {
+        TestBrowserBroker {
+            derive: Some(derive),
+            ..TestBrowserBroker::validating(Ok(session_validation("session-1", domains)))
+        }
+    }
+
+    #[tokio::test]
+    async fn a_session_grant_derives_a_run_grant_keyed_on_the_run_and_narrowed_by_the_request() {
+        let mut request = browser_request("session-1");
+        request.allowed_domains = Some(vec![" API.example.com ".to_owned()]);
+        request.start_url = Some("https://api.example.com/start".to_owned());
+        let (result, broker) = resolve_with(
+            session_broker(
+                &["example.com", "example.org"],
+                Ok(derived_run("run-1", "session-1", &["api.example.com"])),
+            ),
+            request,
+        )
+        .await;
+        let grant = result.expect("derived run grant");
+        assert_eq!(grant.grant_id, "run-1");
+        assert_eq!(grant.allowed_domains, ["api.example.com"]);
+        assert_eq!(grant.parent_grant_id.as_deref(), Some("session-1"));
+
+        let derives = broker.derive_requests.lock().expect("derive recorder");
+        assert_eq!(derives.len(), 1);
+        let sent = &derives[0];
+        assert_eq!(sent.parent_grant_id, "session-1");
+        assert_eq!(sent.session_key, "browser-run-key");
+        assert_eq!(sent.org_id, "org-a");
+        assert_eq!(sent.allowed_domains, ["api.example.com"]);
+        assert_eq!(sent.purpose, "ai_run");
+        assert_eq!(sent.ttl_seconds, 0);
+        assert_eq!(
+            broker
+                .authorizations
+                .lock()
+                .expect("authorization recorder")
+                .as_slice(),
+            ["Bearer browser-user-token", "Bearer browser-user-token"],
+            "validate and derive both use the delegated browser bearer"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_session_grant_without_requested_hosts_asks_the_broker_to_inherit() {
+        for allowed in [None, Some(Vec::new())] {
+            let mut request = browser_request("session-1");
+            request.allowed_domains = allowed;
+            let (result, broker) = resolve_with(
+                session_broker(
+                    &["example.com"],
+                    Ok(derived_run("run-1", "session-1", &["example.com"])),
+                ),
+                request,
+            )
+            .await;
+            assert_eq!(result.expect("inherited").allowed_domains, ["example.com"]);
+            assert!(broker.derive_requests.lock().expect("recorder")[0]
+                .allowed_domains
+                .is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn derive_refusals_map_to_403_409_400_429_502_and_503() {
+        for (code, want_status, want_error) in [
+            (
+                tonic::Code::PermissionDenied,
+                StatusCode::FORBIDDEN,
+                "browser grant is not authorized",
+            ),
+            (
+                tonic::Code::FailedPrecondition,
+                StatusCode::CONFLICT,
+                "browser_grant_not_derivable",
+            ),
+            (
+                tonic::Code::AlreadyExists,
+                StatusCode::CONFLICT,
+                "browser_grant_not_derivable",
+            ),
+            (
+                tonic::Code::InvalidArgument,
+                StatusCode::BAD_REQUEST,
+                "browser_grant_hosts_invalid",
+            ),
+            (
+                tonic::Code::ResourceExhausted,
+                StatusCode::TOO_MANY_REQUESTS,
+                "browser_grant_limit_reached",
+            ),
+            (
+                tonic::Code::Unavailable,
+                StatusCode::SERVICE_UNAVAILABLE,
+                "browser grant validation unavailable",
+            ),
+            (
+                tonic::Code::NotFound,
+                StatusCode::FORBIDDEN,
+                "browser grant is not authorized",
+            ),
+            (
+                tonic::Code::Unimplemented,
+                StatusCode::BAD_GATEWAY,
+                "browser_grant_derive_unavailable",
+            ),
+            (
+                tonic::Code::Internal,
+                StatusCode::FORBIDDEN,
+                "browser grant is not authorized",
+            ),
+        ] {
+            let (result, _) = resolve_with(
+                session_broker(&["example.com"], Err(code)),
+                browser_request("session-1"),
+            )
+            .await;
+            let error = result.expect_err("refused derive");
+            assert_eq!(error.0, want_status, "{code:?}");
+            assert_eq!(error.1 .0["error"], want_error, "{code:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_derived_grant_that_widens_or_mislabels_is_refused_even_from_the_broker() {
+        let wider = derived_run("run-1", "session-1", &["evil.com"]);
+        let sibling = derived_run("run-1", "session-1", &["badexample.com"]);
+        let session_kind = DeriveRunGrantResponse {
+            kind: "session".to_owned(),
+            ..derived_run("run-1", "session-1", &["example.com"])
+        };
+        let other_parent = derived_run("run-1", "session-2", &["example.com"]);
+        let parent_echo = derived_run("session-1", "session-1", &["example.com"]);
+        let empty_id = derived_run("", "session-1", &["example.com"]);
+        let empty_policy = derived_run("run-1", "session-1", &[]);
+        let not_canonical = derived_run("run-1", "session-1", &["EXAMPLE.com"]);
+        let zdr = DeriveRunGrantResponse {
+            zdr: true,
+            ..derived_run("z_run-1", "session-1", &["example.com"])
+        };
+        for (name, response) in [
+            ("wider", wider),
+            ("sibling", sibling),
+            ("session kind", session_kind),
+            ("other parent", other_parent),
+            ("parent echoed", parent_echo),
+            ("empty id", empty_id),
+            ("empty policy", empty_policy),
+            ("not canonical", not_canonical),
+            ("zdr", zdr),
+        ] {
+            let mut request = browser_request("session-1");
+            request.start_url = None;
+            let (result, _) =
+                resolve_with(session_broker(&["example.com"], Ok(response)), request).await;
+            let error = result.expect_err(name);
+            assert_eq!(error.0, StatusCode::FORBIDDEN, "{name}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_start_url_outside_the_derived_policy_is_refused() {
+        let mut request = browser_request("session-1");
+        request.start_url = Some("https://example.org/".to_owned());
+        let (result, _) = resolve_with(
+            session_broker(
+                &["example.com", "example.org"],
+                Ok(derived_run("run-1", "session-1", &["example.com"])),
+            ),
+            request,
+        )
+        .await;
+        assert_eq!(result.expect_err("outside").0, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn run_and_kindless_grants_keep_exact_equality_and_never_derive() {
+        for kind in ["run", ""] {
+            let validation = ValidateGrantResponse {
+                kind: kind.to_owned(),
+                ..session_validation("run-0", &["example.com", "example.org"])
+            };
+            let broker = TestBrowserBroker {
+                derive: Some(Err(tonic::Code::Internal)),
+                ..TestBrowserBroker::validating(Ok(validation))
+            };
+            let (ok, broker) = resolve_with(broker.clone(), browser_request("run-0")).await;
+            let grant = ok.expect("exact grant");
+            assert_eq!(grant.grant_id, "run-0");
+            assert_eq!(grant.parent_grant_id, None);
+
+            let mut narrower = browser_request("run-0");
+            narrower.allowed_domains = Some(vec!["example.com".to_owned()]);
+            let (error, broker) = resolve_with(broker, narrower).await;
+            assert_eq!(
+                error.expect_err("narrowing a run grant").0,
+                StatusCode::BAD_REQUEST
+            );
+            assert!(
+                broker.derive_requests.lock().expect("recorder").is_empty(),
+                "kind {kind:?} must not derive"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn approval_unknown_and_zdr_grants_cannot_start_a_run() {
+        for (kind, zdr, want) in [
+            ("sensitive_approval", false, StatusCode::BAD_REQUEST),
+            ("human_browse", false, StatusCode::FORBIDDEN),
+            ("session", true, StatusCode::PRECONDITION_FAILED),
+            ("run", true, StatusCode::PRECONDITION_FAILED),
+        ] {
+            let validation = ValidateGrantResponse {
+                kind: kind.to_owned(),
+                zdr,
+                ..session_validation("grant-x", &["example.com"])
+            };
+            let broker = TestBrowserBroker {
+                derive: Some(Ok(derived_run("run-1", "grant-x", &["example.com"]))),
+                ..TestBrowserBroker::validating(Ok(validation))
+            };
+            let (result, broker) = resolve_with(broker, browser_request("grant-x")).await;
+            assert_eq!(result.expect_err(kind).0, want, "{kind} zdr={zdr}");
+            assert!(broker.derive_requests.lock().expect("recorder").is_empty());
+        }
     }
 
     #[test]

@@ -214,8 +214,8 @@ mod tests {
     use mp_contracts::model_plane::v1::{
         browser_broker_client::BrowserBrokerClient,
         browser_broker_server::{BrowserBroker, BrowserBrokerServer},
-        AcquireGrantResponse, BrowserHealthRequest, BrowserHealthResponse, RevokeGrantResponse,
-        ValidateGrantRequest, ValidateGrantResponse,
+        AcquireGrantResponse, BrowserHealthRequest, BrowserHealthResponse, DeriveRunGrantRequest,
+        DeriveRunGrantResponse, RevokeGrantResponse, ValidateGrantRequest, ValidateGrantResponse,
     };
     use tower::ServiceExt;
 
@@ -275,6 +275,13 @@ mod tests {
             &self,
             _request: tonic::Request<ValidateGrantRequest>,
         ) -> Result<tonic::Response<ValidateGrantResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented("not used"))
+        }
+
+        async fn derive_run_grant(
+            &self,
+            _request: tonic::Request<DeriveRunGrantRequest>,
+        ) -> Result<tonic::Response<DeriveRunGrantResponse>, tonic::Status> {
             Err(tonic::Status::unimplemented("not used"))
         }
 
