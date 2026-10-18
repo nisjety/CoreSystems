@@ -63,3 +63,29 @@ A body refused by its content kind (`QUARRY_EDGE__DOC_ROUTING`, `docs/RUNBOOKS.m
 | reason | other fields | meaning |
 |---|---|---|
 | `viewport_emulation_failed` | `error` (Chromium's message) | a new page could not be given its viewport, so the tab does not open. `QUARRY_BROWSER_PAGE_HYGIENE=off` does not skip this call (`docs/RUNBOOKS.md`, "Browser viewport and page hygiene") |
+
+## 429 `RATE_LIMITED` from the browser driver (driver caps, WS3.F)
+
+Checked after the run caps above (R-26), by the local Chromium driver's slot book (`crates/quarry-browser/src/slots.rs`). The body is `details {reason, scope, limit, active, retry_after_seconds}` with `retry_after_seconds` 15. Retryable.
+
+| reason | scope | meaning | knob |
+|---|---|---|---|
+| `browser_session_cap` | `driver` | the driver already holds `limit` browser sessions; an `acquire` for a new session is refused | `QUARRY_BROWSER_MAX_SESSIONS` (40) |
+| `browser_page_cap` | `driver` | the browser process already has `limit` pages open; a new tab is refused | `QUARRY_BROWSER_MAX_PAGES_PER_SLOT` (24) |
+
+`0` disables a cap.
+
+## 502 `DRIVER_FAILED`: a browser session that is gone (WS3.F)
+
+All of these are `retryable: false`: repeating the call cannot help, the caller starts a new session (or resumes a run). A lost session never quietly opens a fresh tab.
+
+| reason | meaning |
+|---|---|
+| `session_reaped` | the driver's idle reaper closed the session (idle past `max(2 x lease ttl, QUARRY_BROWSER_SESSION_IDLE_S)` or older than `max(2 x ttl, QUARRY_BROWSER_SESSION_MAX_AGE_S)`); remembered for 10 minutes |
+| `browser_process_lost` | the Chromium process the session lived in exited or crashed; the next `acquire` launches a new one. Remembered for 10 minutes |
+| `no_current_page` | the session is open but has no page yet (call `goto` or open a tab first) |
+| `session_not_open` | the driver does not hold this session (released, or never acquired) |
+
+## 503 on `GET /ready`: `browser_unhealthy` (WS3.F)
+
+Not an error envelope: `/ready` answers `{"status": "not_ready", "durable": true, "reason": "browser_unhealthy", "browser": {...}}` when every launched browser is dead or failed two health probes in a row. A browser that was never launched is ready. `/health` does not change. The prober's own `health_probe` timeouts stay inside the driver and never reach a client.

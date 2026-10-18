@@ -295,3 +295,38 @@ With `QUARRY_EDGE__DOC_ROUTING=on` a PDF or DOCX is parsed for its text. `lopdf`
 - `inprocess`: the previous behaviour, on the blocking pool, bounded only by the permit count (2), the deadline and the input caps. The rollback.
 
 The boot log line `document parser isolation` (field `isolation`) says which is in force. On a build that is not Unix the mode is `inprocess`, and nothing is logged for that choice; when the executable path cannot be found it falls back to `inprocess` with a warning. The boot line names the mode in force either way. `DOC_ROUTING=on` is only advisable in a multi-tenant deployment with `process`.
+
+## Browser capacity, crashes, the idle reaper and `/ready` (WS3.F)
+
+The local Chromium driver keeps a slot book (`crates/quarry-browser/src/slots.rs`): which session lives in which browser process, how many pages each process holds, and when each session was last used. One process today (K = 1). Settings are read once when the driver is built; a value out of range is clamped, text that is not a number falls back to the default with a warning.
+
+| variable | default | range | what it does |
+|---|---|---|---|
+| `QUARRY_BROWSER_MAX_SESSIONS` | 40 | 0..4096, 0 = no cap | sessions the driver holds; one more is `429 browser_session_cap` |
+| `QUARRY_BROWSER_MAX_PAGES_PER_SLOT` | 24 | 0..4096, 0 = no cap | pages per browser process; one more tab is `429 browser_page_cap` |
+| `QUARRY_BROWSER_SESSION_IDLE_S` | 3600 | 30 s..7 d | a session unused this long is reaped (never before twice its lease TTL) |
+| `QUARRY_BROWSER_SESSION_MAX_AGE_S` | 21600 | 60 s..30 d, never below the idle value | a session older than this is reaped |
+| `QUARRY_BROWSER_REAPER_INTERVAL_S` | 30 | 1..3600 | how often the reaper looks |
+| `QUARRY_BROWSER_PROBE_INTERVAL_S` | 15 | 1..3600 | how often the health probe runs |
+| `QUARRY_BROWSER_REAPER` | `log` | `0`, `log`, `1` | `log`: only log `browser session would be reaped`; `1`: close them; `0`: no reaper and no prober (caps and crash handling stay) |
+
+Keep both reaper limits above every run limit in "Run caps and the run sweeper": the edge's run sweeper is the one that ends runs, the driver's reaper is the backstop for sessions nobody released. Run `log` for a week and check that no line names a session that was still in use before setting `QUARRY_BROWSER_REAPER=1`. A reaped session's next call is `502 session_reaped` (`docs/ERROR_REASONS.md`).
+
+**Crash.** When Chromium exits (killed, crashed, out of memory) the driver logs `browser process lost` with `slot`, `generation` and `sessions`; those sessions' next calls are `502 browser_process_lost`, and the next `acquire` (or the prober) launches a new browser, logged as `browser slot launched` with the next `generation`. No edge restart is needed. A retired browser is killed, given 5 s to exit, and its profile and crash-dump directories under `QUARRY_BROWSER_PROFILE_ROOT` are removed; on the first launch the driver also removes `edge-<pid>-*` directories of processes that no longer exist (Linux only; directories of the edge's own pid are left alone, so a container that always runs as pid 1 does not sweep a previous container's leftovers on a shared volume).
+
+**Probe and `/ready`.** Every probe interval the driver opens `about:blank` in a throwaway browser context and closes it again (deadline `health_probe`, 3 s). With a pinned egress proxy the probe context gets a deny-all policy before its proxy endpoint, like any session. Two failed probes in a row mark the browser unhealthy (`browser slot unhealthy`); an unhealthy browser that holds sessions is never killed, an empty one is recycled (`browser slot recycled`). `GET /ready` carries a `browser` object (`state` `idle`, `healthy`, `degraded` or `unhealthy`, `max_sessions`, `sessions_open`, `slots[]` with `status`, `generation`, `sessions`, `pages`, `healthy`, `probe_failures`) and answers 503 `browser_unhealthy` only when every launched browser is unhealthy or dead. A browser that was never launched is ready. `/health` and the Docker `HEALTHCHECK` stay on the static liveness answer. Check with `curl -s localhost:8082/ready | jq .browser`.
+
+Known gaps: the boot check that the session cap exceeds `MAX_CONCURRENT_RUNS` plus the heavy lane (R-26) is not wired; `docs/openapi.yaml` still documents the old `/ready` body; the gateway does not yet map `browser_session_cap`, `browser_page_cap`, `session_reaped` or `browser_process_lost`. A tab attach now holds the driver's browser lock only while it creates its context and page, and an attach that is cancelled or times out closes the page and context it created.
+
+## Scrape cleaning cost
+
+Measured on 2026-10-18 with `cargo test -p quarry-transform --test clean_html_cost -- --ignored --nocapture` (`crates/quarry-transform/tests/clean_html_cost.rs`). The test builds a 5,243,097-byte page: a navigation bar of 200 links, a share bar, an article of paragraphs with a link in each, a related box every 50 paragraphs, an aside, a footer, and an inline script and style. Each option ran three times, and the test prints each run. The table gives the median and the minimum of `to_markdown` alone, in milliseconds.
+
+| `to_markdown` options | median ms | min ms | markdown bytes |
+| --- | --- | --- | --- |
+| defaults (readability) | 4963.5 | 4626.8 | 4396474 |
+| `exclude_tags` `.related`, `aside` | 6321.1 | 6257.8 | 4384768 |
+| `include_tags` `article` | 4865.5 | 4775.2 | 4396474 |
+| `only_main_content` false (`clean_full`) | 4930.8 | 4810.8 | 4401924 |
+
+**Machine caveat.** These are debug (test-profile) builds, not a release build, so they are not a production figure, and no release run was made. The run was one pass on one Windows host (Intel i7-13700H, 20 logical processors, Docker Desktop, one `quarry-rust-env:1` container) that was shared with other work. The spread between the three runs is the only noise estimate, so read the numbers as an order of magnitude and compare the options with each other. The `exclude_tags` row costs more than the defaults because the exclusion path does one more scraper parse and a serialization before the readability pass, while the default path runs readability on the input string. That is read from the code path; it was not profiled.
