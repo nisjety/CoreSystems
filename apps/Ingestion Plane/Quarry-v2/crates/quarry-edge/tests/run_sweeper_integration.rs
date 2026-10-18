@@ -490,7 +490,8 @@ async fn a_dry_run_sweep_reports_would_expire_and_releases_nothing() {
 /// An action in flight is never expired, however long the run has been quiet; once
 /// it finishes the run is expired on the next pass. This checks the guard itself;
 /// `a_step_queued_on_the_run_lock_is_in_flight_and_holds_the_run` checks that the
-/// step handler takes it.
+/// step handler takes it. The socket path has its own test,
+/// `a_socket_action_queued_on_the_run_lock_holds_the_run_past_the_backstop`.
 #[tokio::test]
 async fn an_action_in_flight_is_never_expired() {
     let edge = Edge::start(idle_limits(60)).await;
@@ -571,6 +572,72 @@ async fn a_step_queued_on_the_run_lock_is_in_flight_and_holds_the_run() {
         "the run expires once its last action is done"
     );
     assert_eq!(edge.driver.released(), vec![run]);
+}
+
+/// An action from a person's browser socket counts itself in flight before it waits for
+/// the run's lock (`execute_ws_action`), as a step does. The open socket is a viewer, and a
+/// viewer does not stop the absolute backstop, so past the backstop only the in-flight guard
+/// holds the run while the socket action is queued. This fails if the socket path stops
+/// counting itself in flight.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_socket_action_queued_on_the_run_lock_holds_the_run_past_the_backstop() {
+    let limits = idle_limits(60);
+    let edge = Edge::start(limits.clone()).await;
+    let person = member_token();
+    let run = edge.start_run(&person, json!({})).await;
+    let handle = edge.live(&run).expect("the run is live");
+    let mut socket =
+        TestSocket::connect(&edge, &person, &format!("/v1/agent/runs/{run}/frames/ws")).await;
+    assert_eq!(handle.live.viewers(), 1, "the open socket is a viewer");
+
+    // A running action holds the run's lock, and a socket action queues behind it.
+    let running = handle.entry.lock().await;
+    socket
+        .send_text(&json!({ "type": "action", "action": wait_action() }).to_string())
+        .await;
+    let counted = wait_for(|| handle.live.in_flight() == 1).await;
+    assert!(
+        counted,
+        "a socket action queued on the run lock must count itself in flight before it waits \
+         for the lock (execute_ws_action takes the in-flight guard first); in_flight is {}",
+        handle.live.in_flight()
+    );
+
+    // Past the 14 400 s backstop, which the open viewer does not stop, the run is still held.
+    let past_backstop = later(14_500_000);
+    assert_eq!(
+        handle.live.verdict(past_backstop, &limits),
+        None,
+        "a socket action queued on the run lock is in flight"
+    );
+    let held = sweep_once(&edge.state, past_backstop).await;
+    assert_eq!(
+        held,
+        SweepReport::default(),
+        "a sweep leaves a run with a socket action queued alone"
+    );
+    assert!(edge.driver.released().is_empty());
+
+    // The running action ends. The queued socket action then runs and is answered.
+    drop(running);
+    let answered = socket
+        .next_matching(|message| message["type"] == "observation" || message["type"] == "error")
+        .await;
+    assert_eq!(answered["type"], "observation", "{answered}");
+    assert_eq!(
+        handle.live.in_flight(),
+        0,
+        "the socket action has let go of the run"
+    );
+
+    // Nothing is in flight now and the run is past its backstop, so the next sweep releases it.
+    let released = sweep_once(&edge.state, past_backstop).await;
+    assert_eq!(
+        released.expired, 1,
+        "the run expires once its last action is done"
+    );
+    assert_eq!(edge.driver.released(), vec![run]);
+    drop(socket);
 }
 
 /// A person watching the run (an open event stream) keeps an idle session alive,
