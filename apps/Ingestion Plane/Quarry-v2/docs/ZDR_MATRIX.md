@@ -18,7 +18,7 @@ This describes behaviour. It does not change it. A **gap** is a place where ZDR 
 | Feature | Routes | Treatment | Status | Log |
 |---|---|---|---|---|
 | `scrape` | `/v1/scrape` | inline only | enforced | canary `zdr_log_capture::a_zdr_scrape_logs_no_url_and_no_title_even_at_debug` |
-| `scrape_stream` | `/v1/scrape/stream` | honored | enforced | log-unverified |
+| `scrape_stream` | `/v1/scrape/stream` | honored | enforced | canary `zdr_log_capture::a_zdr_streamed_scrape_logs_no_url_from_its_spawned_runner` |
 | `scrape_record_read` | `/v1/scrape/{id}` | refused (`FORBIDDEN`, `scrape_record_read`) | enforced | log-unverified |
 | `durable_jobs` | `/v1/crawl`<br>`/v1/batch` | refused (`FORBIDDEN`, `durable_job`) | enforced | log-unverified |
 | `search` | `/v1/search` | honored | enforced | canary `zdr_log_capture::a_zdr_search_with_a_failing_provider_logs_no_query` |

@@ -27,8 +27,8 @@
       ],
       "id": "scrape_stream",
       "issue": null,
-      "log": "log_unverified",
-      "log_canary": null,
+      "log": "canary",
+      "log_canary": "zdr_log_capture::a_zdr_streamed_scrape_logs_no_url_from_its_spawned_runner",
       "routes": [
         "/v1/scrape/stream"
       ],

@@ -95,7 +95,9 @@ pub const ROWS: &[Row] = &[
             "zdr_claim_floor::scrape_stream_runs_as_zdr_for_a_zdr_org_user_and_not_for_a_registry_zdr_service",
         ],
         basis: "the run's posture is the request flag raised by the token floor; page events go to live subscribers only",
-        log: Log::Unverified,
+        log: Log::Canary {
+            test: "zdr_log_capture::a_zdr_streamed_scrape_logs_no_url_from_its_spawned_runner",
+        },
     },
     Row {
         id: "scrape_record_read",
