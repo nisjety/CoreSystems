@@ -9,7 +9,7 @@
   "grounded": true,
   "compaction_triggered": false,
   "attempted_retrievals": [
-    "knowledge_search:contract"
+    "hybrid|5|find the contract"
   ],
   "messages": [
     {

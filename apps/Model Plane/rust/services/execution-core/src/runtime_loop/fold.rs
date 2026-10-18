@@ -108,6 +108,16 @@ pub(crate) fn held_back_text(tool_name: &str) -> String {
     )
 }
 
+/// The same, for a writer that has failed: nothing will be saved for the rest of this
+/// run, so the call is not held for a moment and it must not invite a retry. Names only
+/// the tool.
+pub(crate) fn held_for_good_text(tool_name: &str) -> String {
+    format!(
+        "tool '{tool_name}' was not run: the step could not be started safely in this run, so \
+         it was held back and will not be run here."
+    )
+}
+
 /// Everything that decides whether this run's writer may write at all.
 // Each flag is an independent fact about the run, read once into a gate: a state machine
 // would only rename them.
@@ -232,6 +242,35 @@ pub(crate) enum SaveError {
     /// The store could not be reached or failed. `ambiguous` is set when the save
     /// may nevertheless have committed (a timeout, a transport failure).
     Unavailable { ambiguous: bool },
+    /// session-core refused the save for a reason that will not change within this run
+    /// (the run is not found, the caller is not allowed, the RPC does not exist on that
+    /// session-core, it has no key). Asking again gets the same answer, so the writer
+    /// fails at once and holds effects for the rest of the run.
+    Refused(RefusedBy),
+}
+
+/// Why session-core refused for good ([`SaveError::Refused`]). Closed tokens.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RefusedBy {
+    /// `NotFound`: the run is not known to the store.
+    NotFound,
+    /// `PermissionDenied` or `Unauthenticated`: the credential may not save this run's fold.
+    Denied,
+    /// `Unimplemented`: a session-core that predates `SaveLoopCheckpoint`.
+    Unimplemented,
+    /// `FailedPrecondition` "loop checkpoint key unavailable": no key to seal the fold with.
+    KeyUnavailable,
+}
+
+impl RefusedBy {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::NotFound => "not_found",
+            Self::Denied => "denied",
+            Self::Unimplemented => "unimplemented",
+            Self::KeyUnavailable => "key_unavailable",
+        }
+    }
 }
 
 impl SaveError {
@@ -244,6 +283,16 @@ impl SaveError {
             Self::NotPersistent => "not_persistent",
             Self::ContentRefused { .. } => "content_refused",
             Self::Unavailable { .. } => "unavailable",
+            Self::Refused(_) => "refused",
+        }
+    }
+
+    /// The closed word that says why, for the failures that have one; empty otherwise.
+    pub(crate) const fn cause(self) -> &'static str {
+        match self {
+            Self::ContentRefused { reason } => reason,
+            Self::Refused(by) => by.as_str(),
+            _ => "",
         }
     }
 }
@@ -263,7 +312,19 @@ pub(crate) fn classify_status(status: &tonic::Status) -> SaveError {
             SaveError::Closed
         }
         (Code::FailedPrecondition, "loop_checkpoint_disabled") => SaveError::StoreOff,
-        (Code::InvalidArgument | Code::OutOfRange | Code::ResourceExhausted, _) => {
+        // A deterministic refusal of this run or caller: the same answer comes back next
+        // time, so none of these is retried.
+        (Code::NotFound, _) => SaveError::Refused(RefusedBy::NotFound),
+        (Code::PermissionDenied | Code::Unauthenticated, _) => {
+            SaveError::Refused(RefusedBy::Denied)
+        }
+        (Code::Unimplemented, _) => SaveError::Refused(RefusedBy::Unimplemented),
+        (Code::FailedPrecondition, "loop checkpoint key unavailable") => {
+            SaveError::Refused(RefusedBy::KeyUnavailable)
+        }
+        // The content itself is refused as invalid or out of range. (Throttling,
+        // `ResourceExhausted`, is not about the content: it falls to the transient arm.)
+        (Code::InvalidArgument | Code::OutOfRange, _) => {
             SaveError::ContentRefused { reason: "rejected" }
         }
         (
@@ -275,6 +336,7 @@ pub(crate) fn classify_status(status: &tonic::Status) -> SaveError {
             | Code::DataLoss,
             _,
         ) => SaveError::Unavailable { ambiguous: true },
+        // The rest did not commit (throttling included): transient, certain.
         _ => SaveError::Unavailable { ambiguous: false },
     }
 }
@@ -293,6 +355,16 @@ pub(crate) struct SeqTracker {
 }
 
 impl SeqTracker {
+    /// A tracker that expects `expected` next: the seq a resumed loop was handed by its
+    /// claim, instead of 0 for a run's first save.
+    #[cfg_attr(not(test), allow(dead_code))] // the in-place resume (WS03 S7b) seeds from the claimed seq
+    pub(crate) const fn seeded(expected: u64) -> Self {
+        Self {
+            expected,
+            uncertain: false,
+        }
+    }
+
     pub(crate) const fn expected(&self) -> u64 {
         self.expected
     }
@@ -494,12 +566,22 @@ fn too_big(bytes: &[u8]) -> bool {
 /// Scrub, gate and serialize a fold for saving.
 ///
 /// `scrub_fold` runs per field and `LoopFoldV1::to_bytes` (the credential gate and
-/// the 4 MiB cap) is the last check. A fold over [`SAVE_BUDGET_BYTES`] has its stale
+/// the 4 MiB cap) is the last check. If scrubbing had to withhold any piece of the
+/// conversation (a message, the open round's text or a call's identity or outcome: only
+/// call arguments are exempt, they are withheld by design and an empty-argument call is
+/// never redispatched) the fold is **refused** as a credential, which the writer turns
+/// into a tombstone: a fold with a stub in the goal, a tool result or a system message
+/// would resume on a damaged conversation and nothing in it would say so. A fold over
+/// [`SAVE_BUDGET_BYTES`] has its stale
 /// tool results cleared **once** (the same tier-1 compaction the loop applies to its
 /// own history) and is serialized again; if it is still over, it is refused, never
 /// truncated: a truncated fold reads as a complete one.
 pub(crate) fn fit(mut fold: LoopFoldV1) -> Result<Vec<u8>, SaveError> {
-    crate::scrub::scrub_fold(&mut fold);
+    if crate::scrub::scrub_fold(&mut fold).conversation_withheld() {
+        return Err(SaveError::ContentRefused {
+            reason: "credential",
+        });
+    }
     match fold.to_bytes() {
         Ok(bytes) if !too_big(&bytes) => return Ok(bytes),
         Ok(_) | Err(lf::FoldRefusal::TooLarge) => {}
@@ -637,6 +719,7 @@ pub(crate) async fn save_rpc(
         bytes = fold.len(),
         elapsed_ms = u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX),
         outcome = token,
+        cause = outcome.as_ref().err().map_or("", |error| error.cause()),
         "loop fold save"
     );
     record_metrics(kind, token, fold.len(), elapsed);
@@ -652,6 +735,7 @@ pub(crate) async fn close_rpc(
     run_id: &str,
     seq: u64,
     reason: &'static str,
+    timeout: Duration,
 ) {
     let mut request = tonic::Request::new(pb::CloseLoopCheckpointRequest {
         run_id: run_id.to_owned(),
@@ -663,7 +747,7 @@ pub(crate) async fn close_rpc(
     };
     request.metadata_mut().insert("authorization", header);
     let result = tokio::time::timeout(
-        GATED_SAVE_TIMEOUT,
+        timeout,
         SessionCoreClient::new(channel.clone()).close_loop_checkpoint(request),
     )
     .await;
@@ -680,6 +764,117 @@ pub(crate) async fn close_rpc(
         outcome,
         "loop fold close"
     );
+}
+
+/// Why a stage 1 continuation closed the fold the pause had saved.
+pub(crate) const STAGE_ONE_CLOSE_REASON: &str = "continued_at_stage_1";
+
+/// A stage 1 continuation runs the approved call in a fresh segment, which writes no
+/// fold of its own. The fold the pause saved would stay `paused` and claimable while that
+/// segment dispatches effects, so it is closed once the approval's consume is won and
+/// before the segment starts. A later claim of that pause (an in-place resume, a crash
+/// worker) then finds it closed, not a fold whose round already ran.
+///
+/// `CloseLoopCheckpoint` is by seq and a continuation does not know it, so the fold is
+/// claimed by the approval's own reference (`{run_id}:{paused step}`, the key the pause
+/// fold was saved under) to learn it: the claim answers the seq and moves the fold off
+/// `paused`, so it also cannot be claimed by anyone else. The claimed fold's content is
+/// dropped unread.
+///
+/// Best effort in every direction: it is attempted only where a fold can exist (the gate
+/// is the writer's own gate for a root run: switch, ledger, persistent), and a failure
+/// (nothing claimable, a disabled store, a timeout, a close that fails) is logged as a
+/// closed token and ignored: the segment is not held up and not stopped.
+pub(crate) async fn close_continued_pause(
+    channel: &Channel,
+    bearer: Option<&str>,
+    run_id: &str,
+    paused_step_id: &str,
+    claim_token: &str,
+    zdr: bool,
+    waived: bool,
+    space: bool,
+) {
+    // The writer's own gate for a root run (this is where a fold could have been written
+    // for the pause): switch, ledger, persistent. Built here, not by the caller, so the
+    // loop keeps one place that builds a writer's gate.
+    let gate = WriterGate {
+        switch: checkpoint_enabled(),
+        ledger: crate::runtime_loop::effect::ledger_enabled(),
+        zdr,
+        waived,
+        space,
+        depth: 0,
+        resumed: false,
+    };
+    if gate.decide().is_some() {
+        return;
+    }
+    let (Some(bearer), false, false) = (
+        bearer,
+        paused_step_id.is_empty(),
+        claim_token.trim().is_empty(),
+    ) else {
+        info!(
+            target: "loop_fold",
+            run_id = %run_id,
+            outcome = "no_reference",
+            "loop fold close at stage 1 skipped"
+        );
+        return;
+    };
+    let mut request = tonic::Request::new(pb::ClaimLoopCheckpointRequest {
+        run_id: run_id.to_owned(),
+        pause_ref: format!("{run_id}:{paused_step_id}"),
+        claim_token: claim_token.to_owned(),
+    });
+    let Ok(header) = format!("Bearer {bearer}").parse() else {
+        return;
+    };
+    request.metadata_mut().insert("authorization", header);
+    let claimed = tokio::time::timeout(
+        ROUND_SAVE_TIMEOUT,
+        SessionCoreClient::new(channel.clone()).claim_loop_checkpoint(request),
+    )
+    .await;
+    let seq = match claimed {
+        Ok(Ok(response)) => response.into_inner().seq,
+        other => {
+            let outcome = match other {
+                Err(_) => "timeout",
+                Ok(Err(status))
+                    if status.code() == tonic::Code::FailedPrecondition
+                        && status.message() == "loop_checkpoint_not_claimable" =>
+                {
+                    "not_claimable"
+                }
+                Ok(Err(status))
+                    if status.code() == tonic::Code::Aborted
+                        && status.message() == "loop_checkpoint_claim_held" =>
+                {
+                    "claim_held"
+                }
+                Ok(Err(status)) => classify_status(&status).as_str(),
+                Ok(Ok(_)) => "claimed",
+            };
+            info!(
+                target: "loop_fold",
+                run_id = %run_id,
+                outcome,
+                "loop fold close at stage 1: the pause fold was not claimed, so nothing is closed"
+            );
+            return;
+        }
+    };
+    close_rpc(
+        channel,
+        bearer,
+        run_id,
+        seq,
+        STAGE_ONE_CLOSE_REASON,
+        ROUND_SAVE_TIMEOUT,
+    )
+    .await;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -709,10 +904,39 @@ pub(crate) struct FoldWriter<'a> {
     bearer: Option<&'a str>,
     run_id: &'a str,
     tracker: SeqTracker,
+    /// The segment this writer's folds are written by: 1 for a run's first loop. A
+    /// resumed loop (WS03 S7b) is seeded with its own.
+    segment_no: u32,
     state: State,
 }
 
 impl<'a> FoldWriter<'a> {
+    /// A writer for a loop that resumes a claimed fold: it expects the claimed seq next
+    /// and writes under `segment_no`. The caller (the resume) has already decided that
+    /// this run may write, so there is no gate: the writer is active whenever it has a
+    /// bearer. Pure: it makes no RPC.
+    #[cfg_attr(not(test), allow(dead_code))] // the in-place resume (WS03 S7b) builds it
+    pub(crate) fn seeded(
+        channel: &'a Channel,
+        bearer: Option<&'a str>,
+        run_id: &'a str,
+        expected_seq: u64,
+        segment_no: u32,
+    ) -> Self {
+        Self {
+            channel,
+            bearer,
+            run_id,
+            tracker: SeqTracker::seeded(expected_seq),
+            segment_no,
+            state: if bearer.is_none() {
+                State::Off(OffReason::NoBearer)
+            } else {
+                State::Active
+            },
+        }
+    }
+
     /// A writer for one loop. Pure: it makes no RPC, whatever the gate says.
     pub(crate) fn new(
         channel: &'a Channel,
@@ -742,13 +966,27 @@ impl<'a> FoldWriter<'a> {
             bearer,
             run_id,
             tracker: SeqTracker::default(),
+            segment_no: 1,
             state,
         }
+    }
+
+    /// The segment number the folds of this writer carry. (Not named `segment_no`: the
+    /// source contract forbids the executor loop from reading a `.segment_no`, which is
+    /// the client-supplied resume field; this is the writer's own.)
+    pub(crate) const fn segment(&self) -> u32 {
+        self.segment_no
     }
 
     /// The writer is saving folds.
     pub(crate) fn is_active(&self) -> bool {
         self.state == State::Active
+    }
+
+    /// The writer has failed for good: nothing more will be saved in this run, so a
+    /// call it holds back is not held for a moment but for the rest of the run.
+    pub(crate) fn is_failed(&self) -> bool {
+        matches!(self.state, State::Failed(_))
     }
 
     /// The writer is saving folds or has failed. A failed writer holds effects for
@@ -774,9 +1012,23 @@ impl<'a> FoldWriter<'a> {
 
     /// A save failed: move the state machine. Stale and closed stop the writer
     /// (a second writer exists, or nothing more may be written); a disabled or
-    /// non-persistent store turns it off, which is switch-off behaviour.
+    /// non-persistent store turns it off, which is switch-off behaviour. A store that
+    /// refuses the run for a reason that will not change (not found, denied, a
+    /// session-core without the RPC, no key) fails the writer at once, with one
+    /// content-free line that names the cause: asking again would get the same answer
+    /// and hold every effectful call again.
     fn apply(&mut self, error: SaveError) {
         match error {
+            SaveError::Refused(by) => {
+                warn!(
+                    target: "loop_fold",
+                    run_id = %self.run_id,
+                    cause = by.as_str(),
+                    "the loop fold store refused this run for good; no fold is saved and every \
+                     effectful call is held back for the rest of the run"
+                );
+                self.state = State::Failed(error);
+            }
             SaveError::Stale | SaveError::Closed => self.state = State::Failed(error),
             SaveError::StoreOff => self.state = State::Off(OffReason::StoreDisabled),
             SaveError::NotPersistent => self.state = State::Off(OffReason::RunNotPersistent),
@@ -850,10 +1102,7 @@ impl<'a> FoldWriter<'a> {
                     run_id = %self.run_id,
                     kind = kind.as_str(),
                     outcome = error.as_str(),
-                    reason = match error {
-                        SaveError::ContentRefused { reason } => reason,
-                        _ => "",
-                    },
+                    reason = error.cause(),
                     "loop fold not saved"
                 );
                 record_metrics(kind, error.as_str(), 0, Duration::ZERO);
@@ -901,8 +1150,8 @@ impl<'a> FoldWriter<'a> {
     ///   round tries again;
     /// * content refused: a tombstone replaces the stored fold (nothing resumable
     ///   can replay the effect), then dispatch; if the tombstone also fails, hold;
-    /// * stale or closed: the writer is failed, and holds effects for the rest of
-    ///   the run;
+    /// * stale or closed, or refused for good by the store: the writer is failed,
+    ///   and holds effects for the rest of the run;
     /// * the store off or the run not persistent: the writer turns off and the run
     ///   behaves exactly as with the switch off.
     pub(crate) async fn save_pre_effect(&mut self, fold: LoopFoldV1) -> PreEffect {
@@ -922,9 +1171,12 @@ impl<'a> FoldWriter<'a> {
                 }
             }
             Err(SaveError::StoreOff | SaveError::NotPersistent) => PreEffect::Degraded,
-            Err(SaveError::Stale | SaveError::Closed | SaveError::Unavailable { .. }) => {
-                PreEffect::Hold
-            }
+            Err(
+                SaveError::Stale
+                | SaveError::Closed
+                | SaveError::Refused(_)
+                | SaveError::Unavailable { .. },
+            ) => PreEffect::Hold,
         }
     }
 
@@ -1008,6 +1260,7 @@ impl PauseFold<'_, '_> {
             self.writer.run_id,
             seq,
             "approval_not_created",
+            GATED_SAVE_TIMEOUT,
         )
         .await;
         // A closed fold refuses every later save of the run.
@@ -1223,7 +1476,10 @@ mod tests {
     }
 
     fn golden_retrievals() -> BTreeSet<String> {
-        BTreeSet::from(["knowledge_search:contract".to_owned()])
+        // The real signature the phase-1 pre-pass produces (`route|top_k|normalised
+        // query`), of a search an earlier round already ran. The open round's own search
+        // ("stale records") is NOT in the set the open-round folds carry.
+        BTreeSet::from(["hybrid|5|find the contract".to_owned()])
     }
 
     fn value(fold: &LoopFoldV1) -> serde_json::Value {
@@ -1561,16 +1817,90 @@ mod tests {
         );
     }
 
+    /// A message that is credential-shaped after scrubbing is never replaced by a stub
+    /// inside a fold that stays resumable: a resume would continue on a damaged
+    /// conversation. The fold is refused as a credential (the writer saves a tombstone).
     #[test]
-    fn a_credential_shaped_field_is_withheld_so_the_fold_still_fits() {
-        let fold = fold_with(vec![
-            chat("system", "preamble"),
-            chat("user", "send an Authorization: header"),
-        ]);
-        let bytes = fit(fold).expect("the offending field is withheld, not the fold");
+    fn a_credential_shaped_message_refuses_the_fold_instead_of_stubbing_it() {
+        let credential = Err(SaveError::ContentRefused {
+            reason: "credential",
+        });
+        for (label, fold) in [
+            (
+                "the goal",
+                fold_with(vec![
+                    chat("system", "preamble"),
+                    chat("user", "send an Authorization: header"),
+                ]),
+            ),
+            (
+                "a system message",
+                fold_with(vec![
+                    chat("system", "preamble"),
+                    chat("system", "skills: set the x-api-key header"),
+                    chat("user", "the goal"),
+                ]),
+            ),
+            (
+                "a tool result",
+                fold_with(vec![
+                    chat("system", "preamble"),
+                    chat("user", "the goal"),
+                    chat(
+                        "user",
+                        "Tool results for your previous request: -----BEGIN CERTIFICATE-----",
+                    ),
+                ]),
+            ),
+        ] {
+            assert_eq!(fit(fold), credential, "{label}");
+        }
+        // The open round's text and outcomes are conversation too.
+        let mut fold = fold_with(vec![chat("system", "p"), chat("user", "g")]);
+        fold.round_in_flight = Some(RoundInFlight {
+            assistant_content: "the Authorization: header is needed".to_owned(),
+            calls: Vec::new(),
+            completed: Vec::new(),
+        });
+        assert_eq!(fit(fold), credential, "the open round's assistant text");
+        let mut fold = fold_with(vec![chat("system", "p"), chat("user", "g")]);
+        fold.round_in_flight = Some(RoundInFlight {
+            assistant_content: String::new(),
+            calls: Vec::new(),
+            completed: vec![FoldCompleted {
+                step_id: "s1".to_owned(),
+                output: "x-api-key: abc".to_owned(),
+                error: String::new(),
+                call_id: "c1".to_owned(),
+            }],
+        });
+        assert_eq!(fit(fold), credential, "a completed outcome");
+    }
+
+    /// A secret in a call's arguments is withheld by design: the fold is still saved and
+    /// still resumable, the call carries empty arguments (never redispatched), and the
+    /// secret is nowhere in the bytes.
+    #[test]
+    fn a_secret_in_call_arguments_is_withheld_and_the_fold_stays_resumable() {
+        let secret = format!("sk-{}", "foldargsecretkey1234567890abcd");
+        let mut fold = fold_with(vec![chat("system", "p"), chat("user", "g")]);
+        fold.round_in_flight = Some(RoundInFlight {
+            assistant_content: "Deleting.".to_owned(),
+            calls: vec![FoldCall {
+                id: "c1".to_owned(),
+                name: "delete_records".to_owned(),
+                arguments_json: format!(r#"{{"table":"stale","note":"{secret}"}}"#),
+                step_id: "tool_1_c1".to_owned(),
+            }],
+            completed: Vec::new(),
+        });
+        let bytes = fit(fold).expect("withheld arguments do not refuse the fold");
+        assert!(!String::from_utf8_lossy(&bytes).contains(&secret));
         let parsed = LoopFoldV1::from_bytes(&bytes).expect("parses");
-        assert!(parsed.messages[1].content.contains("withheld"));
-        assert_eq!(parsed.messages[0].content, "preamble");
+        assert!(parsed.is_resumable());
+        let call = &parsed.round_in_flight.as_ref().expect("open round").calls[0];
+        assert_eq!(call.arguments_json, "");
+        assert_eq!(call.step_id, "tool_1_c1", "the call can still be matched");
     }
 
     #[test]
@@ -1657,11 +1987,7 @@ mod tests {
                 "{code:?}"
             );
         }
-        for code in [
-            Code::InvalidArgument,
-            Code::OutOfRange,
-            Code::ResourceExhausted,
-        ] {
+        for code in [Code::InvalidArgument, Code::OutOfRange] {
             assert!(
                 matches!(
                     classify_status(&Status::new(code, "x")),
@@ -1669,6 +1995,42 @@ mod tests {
                 ),
                 "{code:?}"
             );
+        }
+        // Throttling is about the load, not the content: transient, and it did not commit.
+        assert_eq!(
+            classify_status(&Status::resource_exhausted("slow down")),
+            SaveError::Unavailable { ambiguous: false },
+            "ResourceExhausted must not tombstone a fold that would save a moment later"
+        );
+        // A deterministic refusal of this run or caller: the same answer next time, so
+        // the writer fails at once. One closed token per cause.
+        for (status, by, token) in [
+            (
+                Status::not_found("run not found"),
+                RefusedBy::NotFound,
+                "not_found",
+            ),
+            (Status::permission_denied("no"), RefusedBy::Denied, "denied"),
+            (
+                Status::unauthenticated("loop checkpoint did not authenticate"),
+                RefusedBy::Denied,
+                "denied",
+            ),
+            (
+                Status::unimplemented("save_loop_checkpoint"),
+                RefusedBy::Unimplemented,
+                "unimplemented",
+            ),
+            (
+                Status::failed_precondition("loop checkpoint key unavailable"),
+                RefusedBy::KeyUnavailable,
+                "key_unavailable",
+            ),
+        ] {
+            let error = classify_status(&status);
+            assert_eq!(error, SaveError::Refused(by), "{status:?}");
+            assert_eq!(error.as_str(), "refused");
+            assert_eq!(error.cause(), token);
         }
         for code in [
             Code::Unavailable,
@@ -1684,13 +2046,12 @@ mod tests {
                 "{code:?}"
             );
         }
-        // The rest did not commit: certain.
+        // The rest did not commit: certain, and transient. (A FailedPrecondition with
+        // another message is not the key refusal.)
         for status in [
-            Status::unauthenticated("loop checkpoint did not authenticate"),
-            Status::not_found("run not found"),
-            Status::failed_precondition("loop checkpoint key unavailable"),
             Status::aborted("some other conflict"),
-            Status::permission_denied("no"),
+            Status::failed_precondition("some other precondition"),
+            Status::already_exists("x"),
         ] {
             assert_eq!(
                 classify_status(&status),
@@ -1733,6 +2094,80 @@ mod tests {
     }
 
     #[test]
+    fn the_text_for_a_failed_writer_names_only_the_tool_and_never_invites_a_retry() {
+        let text = held_for_good_text("delete_records");
+        assert!(text.contains("'delete_records'"));
+        assert!(text.contains("was not run") && text.contains("could not be started safely"));
+        let lower = text.to_lowercase();
+        assert!(
+            !lower.contains("try again") && !lower.contains("retry"),
+            "a failed writer never saves again: {text}"
+        );
+        assert!(!text.contains("loop_checkpoint"));
+        assert_ne!(text, held_back_text("delete_records"));
+    }
+
+    #[tokio::test]
+    async fn a_refusal_that_will_not_change_fails_the_writer_at_once() {
+        let channel = tonic::transport::Endpoint::from_static("http://127.0.0.1:1").connect_lazy();
+        for by in [
+            RefusedBy::NotFound,
+            RefusedBy::Denied,
+            RefusedBy::Unimplemented,
+            RefusedBy::KeyUnavailable,
+        ] {
+            let mut writer = FoldWriter::new(&channel, Some("b"), "run-1", all_good());
+            assert!(writer.is_active() && !writer.is_failed());
+            writer.apply(SaveError::Refused(by));
+            assert!(
+                writer.is_failed() && writer.engaged() && !writer.is_active(),
+                "{by:?}"
+            );
+            // A failed writer still engages the effect gate, so effects are held.
+            assert_eq!(writer.off_reason(), None);
+        }
+        // The retryable and the switch-off classes are unchanged.
+        let mut writer = FoldWriter::new(&channel, Some("b"), "run-1", all_good());
+        writer.apply(SaveError::Unavailable { ambiguous: false });
+        assert!(
+            writer.is_active(),
+            "an unreachable store is retried next round"
+        );
+        writer.apply(SaveError::StoreOff);
+        assert_eq!(writer.off_reason(), Some(OffReason::StoreDisabled));
+    }
+
+    #[test]
+    fn a_seeded_tracker_expects_the_claimed_seq_and_has_nothing_to_probe() {
+        let mut tracker = SeqTracker::seeded(7);
+        assert_eq!(tracker.expected(), 7);
+        assert_eq!(
+            tracker.probe(),
+            None,
+            "no earlier save of this writer may have committed"
+        );
+        tracker.on_saved(8);
+        assert_eq!(tracker.expected(), 8);
+        // A seeded tracker probes like any other after an ambiguous failure.
+        tracker.on_failed(&SaveError::Unavailable { ambiguous: true });
+        assert_eq!(tracker.probe(), Some(9));
+        assert_eq!(SeqTracker::seeded(0), SeqTracker::default());
+    }
+
+    #[tokio::test]
+    async fn a_seeded_writer_expects_the_claimed_seq_and_writes_under_its_segment() {
+        let channel = tonic::transport::Endpoint::from_static("http://127.0.0.1:1").connect_lazy();
+        let fresh = FoldWriter::new(&channel, Some("b"), "run-1", all_good());
+        assert_eq!((fresh.expected_seq(), fresh.segment()), (0, 1));
+        let seeded = FoldWriter::seeded(&channel, Some("b"), "run-1", 12, 3);
+        assert_eq!((seeded.expected_seq(), seeded.segment()), (12, 3));
+        assert!(seeded.is_active(), "the resume decided this run may write");
+        let no_bearer = FoldWriter::seeded(&channel, None, "run-1", 12, 3);
+        assert_eq!(no_bearer.off_reason(), Some(OffReason::NoBearer));
+        assert_eq!(no_bearer.expected_seq(), 12);
+    }
+
+    #[test]
     fn the_prompt_digest_of_a_run_is_the_shared_digest_of_prompt_and_tools() {
         let tools = golden_tools();
         let expected = lf::prompt_digest(
@@ -1759,5 +2194,87 @@ mod tests {
             "order is not part of it"
         );
         assert_ne!(prompt_digest_of("another prompt", &reversed), expected);
+    }
+
+    /// The writer gate and the pause site, driven by the posture matrix.
+    /// `tests/loop_fold_zdr_matrix.rs` proves the SHARED gate over every row but no
+    /// production code calls it, so this is the test that puts the same rows through the
+    /// gates this crate really has: for every enforcement row the resolver serves, the
+    /// flags the run hands `WriterGate` (`zdr` from the request, `waived` from the route,
+    /// as `run_agent` reads them) must leave the writer on for a persistent row and off,
+    /// for the right reason, for a ZDR or a waived one. A waived row has `zdr == false`,
+    /// so a gate that looked at `zdr` alone would write a fold for it. The pause site is
+    /// held to the same rows through `run_pause_mode`, fed the expression `agent.rs`
+    /// passes it.
+    #[test]
+    fn the_writer_gate_and_the_pause_mint_follow_the_posture_matrix_row_by_row() {
+        use mp_contracts::retention::{
+            resolve_turn, ClaimsView, Resolution, RouteView, WaiverView,
+        };
+        const MATRIX: &str = include_str!("../../tests/fixtures/zdr-posture-matrix.json");
+        let matrix: serde_json::Value = serde_json::from_str(MATRIX).expect("the matrix is JSON");
+        let _continue = crate::runtime_loop::resume::ContinueSwitch::set(true);
+        let (mut open, mut zdr_off, mut waived_off) = (0_usize, 0_usize, 0_usize);
+        for row in matrix["enforcement_rows"].as_array().expect("rows") {
+            let id = row["id"].as_str().unwrap_or("?");
+            let claims: Vec<ClaimsView<'_>> = row["inputs"]["bearers"]
+                .as_array()
+                .expect("bearers")
+                .iter()
+                .map(|bearer| ClaimsView {
+                    zdr: bearer["zdr"].as_bool().expect("zdr"),
+                    org_zdr: bearer["org_zdr"].as_bool(),
+                    waiver: (!bearer["waiver"].is_null()).then(|| WaiverView {
+                        version: u32::try_from(bearer["waiver"]["version"].as_u64().expect("v"))
+                            .expect("fits"),
+                        provider: bearer["waiver"]["provider"].as_str().expect("provider"),
+                        connection: bearer["waiver"]["connection"].as_str().expect("connection"),
+                    }),
+                })
+                .collect();
+            let route = RouteView {
+                provider: row["inputs"]["route"]["provider"]
+                    .as_str()
+                    .expect("provider"),
+                connection: row["inputs"]["route"]["connection"].as_str(),
+                explicit_zdr: row["inputs"]["route"]["explicit_zdr"]
+                    .as_bool()
+                    .expect("zdr"),
+            };
+            // What the run knows about itself: a refused turn never becomes a run.
+            let (zdr, waived, expected) = match resolve_turn(&claims, &route) {
+                Resolution::Refuse(_) => continue,
+                Resolution::Persistent { .. } => (false, false, None),
+                Resolution::Zdr { .. } => (true, false, Some(OffReason::Zdr)),
+                Resolution::Waived { .. } => (false, true, Some(OffReason::Waived)),
+            };
+            let gate = WriterGate {
+                zdr,
+                waived,
+                ..all_good()
+            };
+            assert_eq!(gate.decide(), expected, "{id}: the fold writer's gate");
+            // The pause site (agent.rs): `!req.zdr && !ctx.route.is_waived()`.
+            assert_eq!(
+                crate::runtime_loop::resume::run_pause_mode(
+                    !zdr && !waived,
+                    "",
+                    "",
+                    "delete_records"
+                ),
+                if expected.is_none() { "loop" } else { "" },
+                "{id}: the pause site's loop mint"
+            );
+            match expected {
+                None => open += 1,
+                Some(OffReason::Zdr) => zdr_off += 1,
+                Some(_) => waived_off += 1,
+            }
+        }
+        assert_eq!(
+            (open, zdr_off, waived_off),
+            (3, 4, 2),
+            "every served row was checked"
+        );
     }
 }

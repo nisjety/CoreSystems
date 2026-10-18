@@ -112,7 +112,7 @@ fn serialized_checkpoint_bytes_contain_no_secrets() {
 // for one credential-shaped string. `scrub_fold` is the writer's pass between the
 // two, and it works per field.
 
-use execution_core::scrub::scrub_fold;
+use execution_core::scrub::{scrub_fold, FoldScrub};
 use mp_contracts::loop_fold::{
     Authority, FoldCall, FoldCompleted, FoldMessage, LoopFoldV1, PauseKind, PendingPause,
     RoundInFlight, FOLD_VERSION,
@@ -163,7 +163,7 @@ fn open_round_fold() -> LoopFoldV1 {
         children_started: 0,
         grounded: false,
         compaction_triggered: false,
-        attempted_retrievals: vec!["knowledge_search:contract".to_owned()],
+        attempted_retrievals: vec!["hybrid|5|find the contract".to_owned()],
         messages: vec![
             message("system", "You are a careful agent."),
             message("user", "Delete the stale records"),
@@ -216,7 +216,11 @@ fn scrub_fold_keeps_the_fold_parseable_and_removes_every_seeded_secret() {
         call_id: "call-3".to_owned(),
     });
 
-    scrub_fold(&mut fold);
+    let report = scrub_fold(&mut fold);
+    assert!(
+        !report.conversation_withheld(),
+        "every seeded secret was redacted in place, nothing had to be stubbed: {report:?}"
+    );
 
     let bytes = fold.to_bytes().expect("a scrubbed fold passes the credential gate");
     let text = std::str::from_utf8(&bytes).expect("utf8");
@@ -249,7 +253,7 @@ fn key_based_scrubbing_over_a_whole_fold_would_destroy_the_authority() {
     );
     // The per-field pass leaves it alone.
     let mut fold = open_round_fold();
-    scrub_fold(&mut fold);
+    assert_eq!(scrub_fold(&mut fold), FoldScrub::default(), "a clean fold withholds nothing");
     assert_eq!(fold.authority, authority());
 }
 
@@ -270,7 +274,12 @@ fn arguments_that_scrubbing_would_change_are_withheld_not_rewritten() {
         // Not JSON and clean: kept byte for byte.
         call("call-5", "shell", "echo hello", "tool_5_call-5"),
     ];
-    scrub_fold(&mut fold);
+    let report = scrub_fold(&mut fold);
+    assert_eq!(report.withheld_arguments, 3, "the three calls whose arguments were cleared");
+    assert!(
+        !report.conversation_withheld(),
+        "cleared arguments are by design: the fold stays resumable"
+    );
     let calls = &fold.round_in_flight.as_ref().unwrap().calls;
     assert_eq!(calls[0].arguments_json, clean, "a clean call keeps its arguments byte for byte");
     assert_eq!(calls[1].arguments_json, "", "a sensitive key withholds the arguments");
@@ -298,7 +307,11 @@ fn a_credential_shaped_word_is_withheld_so_the_fold_still_saves() {
     // Without the pass the WHOLE fold is refused for these benign words.
     assert!(fold.to_bytes().is_err(), "the control: the gate refuses the fold as it stands");
 
-    scrub_fold(&mut fold);
+    let report = scrub_fold(&mut fold);
+    // Three conversation fields were stubbed: the writer must not save THIS fold as a
+    // resumable one (it saves a tombstone), because a resume cannot see a stub.
+    assert_eq!(report.withheld_conversation, 3);
+    assert!(report.conversation_withheld());
 
     assert_eq!(fold.messages[2].content, WITHHELD);
     assert_eq!(fold.messages[3].content, WITHHELD);

@@ -858,6 +858,20 @@ async fn run_agent_with_route(
     // runs under the authority the pause retained instead (narrowed, never widened).
     if let Some(segment) = resumed.as_ref() {
         super::resume::apply_authority(&mut req, &segment.effective);
+        // The consume is won: the fold the pause saved is stale from here, and this
+        // segment dispatches effects it knows nothing about. Close it before the first
+        // one (WS03 S6; best effort, and only where a fold can exist).
+        runtime_loop::fold::close_continued_pause(
+            &session_channel,
+            session_bearer.as_deref(),
+            &req.run_id,
+            &segment.paused_step_id,
+            req.resume.as_ref().map_or("", |resume| resume.claim_token.as_str()),
+            req.zdr,
+            route.is_waived(),
+            !req.space_id.is_empty(),
+        )
+        .await;
     }
     let tools = match resumed.as_ref() {
         Some(segment) => segment.tools.clone(),
@@ -1661,6 +1675,13 @@ async fn run_rounds(
             );
         }
 
+        // The retrievals attempted as they stood BEFORE this round's pre-pass (WS03 S6).
+        // The pre-pass below inserts this round's own searches, so a fold of the OPEN
+        // round (pre_effect, pause) that carried the set after it would make a resume
+        // that re-runs the pre-pass over that round reject its own search as a duplicate
+        // of itself. Only the end-of-round fold keeps the final set. Taken only for a
+        // writer that is on.
+        let retrievals_at_round_start = folds.engaged().then(|| attempted_retrievals.clone());
         let mut slots = Vec::with_capacity(response.tool_calls.len());
         for (call_index, call) in response.tool_calls.iter().enumerate() {
             // Refused BEFORE the purpose-lock and duplicate checks: a
@@ -1961,12 +1982,12 @@ async fn run_rounds(
         } else {
             0
         };
-        let effects_held = match fold_authority.as_ref() {
+        let (effects_held, held_for_good) = match fold_authority.as_ref() {
             Some(authority) if effectful_calls > 0 => {
                 let fold = runtime_loop::fold::build_fold(
                     &runtime_loop::fold::Snapshot {
                         run_id: &req.run_id,
-                        segment_no: 1,
+                        segment_no: folds.segment(),
                         rounds_executed,
                         delegated_rounds,
                         step_seq,
@@ -1974,7 +1995,9 @@ async fn run_rounds(
                             .load(std::sync::atomic::Ordering::Relaxed),
                         grounded,
                         compaction_triggered,
-                        attempted_retrievals: &attempted_retrievals,
+                        attempted_retrievals: retrievals_at_round_start
+                            .as_ref()
+                            .unwrap_or(&attempted_retrievals),
                         messages: &messages,
                         authority: authority.clone(),
                         prompt_digest: &fold_prompt_digest,
@@ -2004,17 +2027,20 @@ async fn run_rounds(
                 );
                 let held = folds.save_pre_effect(fold).await
                     == runtime_loop::fold::PreEffect::Hold;
+                // A failed writer never saves again: the model is not invited to retry.
+                let for_good = held && folds.is_failed();
                 if held {
                     runtime_loop::fold::note_effects_held(effectful_calls);
                     warn!(
                         run_id = %req.run_id,
                         round = rounds_executed,
+                        for_good,
                         "run_agent: the loop fold could not be saved ahead of this round's effectful calls; they are held back"
                     );
                 }
-                held
+                (held, for_good)
             }
-            _ => false,
+            _ => (false, false),
         };
 
         // Phase 2: concurrent dispatch. One shared budget pool for every
@@ -2117,7 +2143,11 @@ async fn run_rounds(
                         return Some(runtime_loop::StepOutcome {
                             status: "failed".to_owned(),
                             output: String::new(),
-                            error: runtime_loop::fold::held_back_text(&call.name),
+                            error: if held_for_good {
+                                runtime_loop::fold::held_for_good_text(&call.name)
+                            } else {
+                                runtime_loop::fold::held_back_text(&call.name)
+                            },
                             compaction_triggered: false,
                         });
                     }
@@ -2446,7 +2476,7 @@ async fn run_rounds(
                     let fold = runtime_loop::fold::build_fold(
                         &runtime_loop::fold::Snapshot {
                             run_id: &req.run_id,
-                            segment_no: 1,
+                            segment_no: folds.segment(),
                             rounds_executed,
                             delegated_rounds,
                             step_seq,
@@ -2454,7 +2484,11 @@ async fn run_rounds(
                                 .load(std::sync::atomic::Ordering::Relaxed),
                             grounded,
                             compaction_triggered,
-                            attempted_retrievals: &attempted_retrievals,
+                            // The round's own searches are in the open round, not yet
+                            // in the set: see `retrievals_at_round_start`.
+                            attempted_retrievals: retrievals_at_round_start
+                                .as_ref()
+                                .unwrap_or(&attempted_retrievals),
                             messages: &messages,
                             authority: authority.clone(),
                             prompt_digest: &fold_prompt_digest,
@@ -2517,7 +2551,7 @@ async fn run_rounds(
             let fold = runtime_loop::fold::build_fold(
                 &runtime_loop::fold::Snapshot {
                     run_id: &req.run_id,
-                    segment_no: 1,
+                    segment_no: folds.segment(),
                     rounds_executed,
                     delegated_rounds,
                     step_seq,
@@ -5381,6 +5415,9 @@ async fn finalize(
 struct ResumedSegment {
     release: super::resume::ApprovedRelease,
     step_prefix: String,
+    /// The step the consumed approval gated (the pause's own step, not the segment's new
+    /// one): with the run id it names the pause fold `{run_id}:{step}`.
+    paused_step_id: String,
     /// The goal with the framed brief of recorded results appended.
     goal: String,
     /// The first round: the approved call, proposed as if by the model.
@@ -5505,6 +5542,7 @@ async fn prepare_resume(
     Ok(ResumedSegment {
         release,
         step_prefix,
+        paused_step_id: consumed.step_id.clone(),
         goal,
         seeded_round: pb::InferResponse {
             content: "Continuing after your approval: running the approved call.".to_owned(),
@@ -5987,6 +6025,19 @@ mod tests {
         loop_save_failures: Vec<LoopSaveFailure>,
         /// Every `CloseLoopCheckpoint` the mock observed.
         close_calls: Vec<pb::CloseLoopCheckpointRequest>,
+        /// Every `ClaimLoopCheckpoint` the mock observed (a stage 1 continuation claims
+        /// the fold of the pause it consumed, to learn the seq it must close).
+        claim_calls: Vec<pb::ClaimLoopCheckpointRequest>,
+        /// The seq the mock answers a claim with.
+        claim_seq: u64,
+        /// Make `ClaimLoopCheckpoint` fail with this status.
+        claim_failure: Option<Status>,
+        /// Make `CloseLoopCheckpoint` fail with this status (after recording the call).
+        close_failure: Option<Status>,
+        /// `("claim" | "close", order.len())` at the moment of each call, so a test can
+        /// say a call came before the first `reserve` without these calls being
+        /// entries of `order` (existing tests read `order` whole).
+        stage_marks: Vec<(&'static str, usize)>,
         /// Every `CreateApproval` the mock accepted, whole.
         approval_requests: Vec<pb::CreateApprovalRequest>,
         /// One entry per call that matters for ordering, across every mock:
@@ -6813,9 +6864,22 @@ mod tests {
 
         async fn claim_loop_checkpoint(
             &self,
-            _: Request<pb::ClaimLoopCheckpointRequest>,
+            request: Request<pb::ClaimLoopCheckpointRequest>,
         ) -> Result<Response<pb::ClaimLoopCheckpointResponse>, Status> {
-            Err(Status::unimplemented("claim_loop_checkpoint not used"))
+            let mut rec = self.rec.lock().unwrap();
+            let mark = rec.order.len();
+            rec.stage_marks.push(("claim", mark));
+            rec.claim_calls.push(request.into_inner());
+            if let Some(status) = rec.claim_failure.clone() {
+                return Err(status);
+            }
+            Ok(Response::new(pb::ClaimLoopCheckpointResponse {
+                seq: rec.claim_seq,
+                fold: Vec::new(),
+                segment_no: 1,
+                authority_digest: String::new(),
+                kind: "pause".to_owned(),
+            }))
         }
 
         async fn list_tool_actions(
@@ -6829,11 +6893,13 @@ mod tests {
             &self,
             request: Request<pb::CloseLoopCheckpointRequest>,
         ) -> Result<Response<pb::CloseLoopCheckpointResponse>, Status> {
-            self.rec
-                .lock()
-                .unwrap()
-                .close_calls
-                .push(request.into_inner());
+            let mut rec = self.rec.lock().unwrap();
+            let mark = rec.order.len();
+            rec.stage_marks.push(("close", mark));
+            rec.close_calls.push(request.into_inner());
+            if let Some(status) = rec.close_failure.clone() {
+                return Err(status);
+            }
             Ok(Response::new(pb::CloseLoopCheckpointResponse {}))
         }
 
@@ -16283,6 +16349,12 @@ mod tests {
         let expected: Vec<u64> = r.loop_saves.iter().map(|s| s.expected_seq).collect();
         let rising: Vec<u64> = (0..expected.len() as u64).collect();
         assert_eq!(expected, rising, "one writer: no gap a child's save would leave");
+        assert_eq!(
+            r.loop_save_attempts,
+            r.loop_saves.len(),
+            "every attempt was the parent's and every one was accepted: a child's attempt would \
+             be stale or extra"
+        );
         for save in &r.loop_saves {
             let text = String::from_utf8_lossy(&save.fold).into_owned();
             assert!(
@@ -16324,9 +16396,16 @@ mod tests {
         assert!(!all.contains(&api_key), "an sk- key leaked into a fold");
         assert!(!all.contains(jwt) && !all.contains("Bearer eyJ"), "a bearer leaked into a fold");
         assert!(all.contains("[REDACTED]"), "the key was redacted in place");
+        // A message that still looks like a credential after scrubbing is not stubbed in
+        // place (a resume would continue on a damaged conversation): that save is a
+        // tombstone, and no stub is ever saved.
+        assert!(r.loop_saves[0].fold().is_resumable(), "the first round had nothing withheld");
+        let second = r.loop_saves[1].fold();
+        assert!(!second.is_resumable(), "the withheld sentence made the second fold a tombstone");
+        assert_eq!(second.extensions[mp_contracts::loop_fold::EXT_NOT_RESUMABLE], "credential");
         assert!(
-            all.contains("[content withheld from the saved state"),
-            "the credential-shaped sentence was withheld whole"
+            !all.contains("[content withheld from the saved state"),
+            "a stub is never saved inside a resumable fold"
         );
         for save in &r.loop_saves {
             save.fold();
@@ -16334,5 +16413,515 @@ mod tests {
         // The live conversation is untouched: the model still saw both texts.
         let seen = run.observed.lock().unwrap();
         assert!(flattened(&seen[1]).contains(&api_key));
+    }
+
+    // ---- WS03 S6 hardening ----
+
+    fn search_call(id: &str, query: &str) -> pb::ToolCall {
+        pb::ToolCall {
+            id: id.to_owned(),
+            name: "knowledge_search".to_owned(),
+            arguments_json: format!(r#"{{"query":"{query}"}}"#),
+        }
+    }
+
+    /// Apply the loop's own duplicate-retrieval gate (`retrieval_signature` and the
+    /// `attempted_retrievals.insert` of the phase-1 pre-pass) to the calls of a fold's
+    /// open round that a resume would send back through it. Returns how many searches
+    /// went through the gate; panics if one is rejected as a duplicate of itself.
+    fn run_open_round_through_the_retrieval_gate(
+        fold: &mp_contracts::loop_fold::LoopFoldV1,
+    ) -> usize {
+        let round = fold.round_in_flight.as_ref().expect("the fold has an open round");
+        let mut gate: BTreeSet<String> = fold.attempted_retrievals.iter().cloned().collect();
+        let mut searched = 0;
+        for call in round.calls.iter().filter(|call| !call.step_id.is_empty()) {
+            if let Some(signature) = retrieval_signature(&call.name, &call.arguments_json) {
+                searched += 1;
+                assert!(
+                    gate.insert(signature.clone()),
+                    "call {} ({signature}) is rejected as a duplicate of itself",
+                    call.id
+                );
+            }
+        }
+        searched
+    }
+
+    /// The signatures are the real ones the pre-pass produces (`route|top_k|query`,
+    /// normalised), not a made-up string.
+    #[tokio::test]
+    async fn loop_fold_open_round_folds_snapshot_the_retrievals_of_the_round_start() {
+        let first = "hybrid|5|find the contract".to_owned();
+        let second = "hybrid|5|stale records".to_owned();
+        assert_eq!(
+            retrieval_signature("knowledge_search", &search_call("x", "Find the  CONTRACT").arguments_json),
+            Some(first.clone()),
+            "the format the fold fixtures and this test rely on"
+        );
+        // A pre_effect fold: round 2 searches and deletes.
+        let run = drive_fold_run(
+            FoldKnobs::ON,
+            vec![
+                Scripted::ToolCalls {
+                    content: String::new(),
+                    calls: vec![search_call("s1", "Find the  CONTRACT")],
+                },
+                Scripted::ToolCalls {
+                    content: String::new(),
+                    calls: vec![search_call("s2", "stale records"), delete_call("d1")],
+                },
+                Scripted::Answer("done".to_owned()),
+            ],
+            |_, _| {},
+        )
+        .await;
+        run.result.expect("completes");
+        {
+            let r = run.rec.lock().unwrap();
+            let pre = r
+                .loop_saves
+                .iter()
+                .find(|save| save.kind == "pre_effect")
+                .expect("round 2 has an effectful call")
+                .fold();
+            assert_eq!(
+                pre.attempted_retrievals,
+                vec![first.clone()],
+                "the set as it stood before this round's pre-pass: the open round's own search is \
+                 not in it"
+            );
+            assert_eq!(
+                run_open_round_through_the_retrieval_gate(&pre),
+                1,
+                "the open round's search is not rejected as its own duplicate"
+            );
+            // The control: the end-of-round fold keeps the final set, so the same search
+            // would be a duplicate there.
+            let last_round = r
+                .loop_saves
+                .iter()
+                .rfind(|save| save.kind == "round")
+                .expect("a round fold")
+                .fold();
+            assert_eq!(last_round.attempted_retrievals, vec![first.clone(), second.clone()]);
+            let mut after: BTreeSet<String> =
+                last_round.attempted_retrievals.iter().cloned().collect();
+            assert!(!after.insert(second.clone()), "the control: the final set holds it");
+        }
+
+        // A pause fold of the same shape.
+        let run = drive_fold_run(
+            FoldKnobs::ON.asking(),
+            vec![
+                Scripted::ToolCalls {
+                    content: String::new(),
+                    calls: vec![search_call("s1", "Find the  CONTRACT")],
+                },
+                Scripted::ToolCalls {
+                    content: String::new(),
+                    calls: vec![search_call("s2", "stale records"), delete_call("d1")],
+                },
+            ],
+            |_, _| {},
+        )
+        .await;
+        assert_eq!(run.result.expect("pauses").status, "awaiting_approval");
+        let r = run.rec.lock().unwrap();
+        let pause = r
+            .loop_saves
+            .iter()
+            .find(|save| save.kind == "pause")
+            .expect("the pause fold")
+            .fold();
+        assert_eq!(pause.attempted_retrievals, vec![first], "a pause fold snapshots the round start too");
+        assert_eq!(run_open_round_through_the_retrieval_gate(&pause), 1);
+    }
+
+    /// A stage 1 continuation against the pause fold it consumed.
+    async fn stage_one_continue(
+        checkpoint: bool,
+        ledger: bool,
+        shape: impl FnOnce(&mut Recorder),
+    ) -> (SharedRecorder, CountingPolicy, Result<pb::RunAgentResponse, Status>) {
+        let _checkpoint = runtime_loop::fold::CheckpointSwitch::set(checkpoint);
+        let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
+        {
+            let mut r = rec.lock().unwrap();
+            r.claim_seq = 4;
+            shape(&mut r);
+        }
+        let policy = CountingPolicy::new();
+        let inference_channel =
+            spawn_inference_channel(vec![Scripted::Answer("checked".to_owned())]).await;
+        let result = drive_continue(
+            &rec,
+            continue_request(2),
+            consume_of("tool_1_del-1", true, false, snapshot_of(|_| {})),
+            ledger,
+            &policy,
+            inference_channel,
+        )
+        .await;
+        (rec, policy, result)
+    }
+
+    #[tokio::test]
+    async fn loop_fold_a_stage_one_continuation_closes_the_pause_fold_it_consumed_before_any_effect() {
+        let (rec, policy, result) = stage_one_continue(true, true, |_| {}).await;
+        assert_eq!(result.expect("the continuation runs").final_output, "checked");
+        assert!(policy.count() >= 1, "the released call ran");
+        let r = rec.lock().unwrap();
+        assert_eq!(r.claim_calls.len(), 1, "the pause fold is claimed once, to learn its seq");
+        let claim = &r.claim_calls[0];
+        assert_eq!(claim.run_id, "run_test");
+        assert_eq!(
+            claim.pause_ref, "run_test:tool_1_del-1",
+            "the approval's idempotency key: {{run_id}}:{{paused step}}"
+        );
+        assert_eq!(claim.claim_token, "claim-1");
+        assert_eq!(r.close_calls.len(), 1, "closed exactly once");
+        let close = &r.close_calls[0];
+        assert_eq!(close.run_id, "run_test");
+        assert_eq!(close.seq, 4, "closed at the seq the claim returned");
+        assert_eq!(close.reason, "continued_at_stage_1");
+        let kinds: Vec<&str> = r.stage_marks.iter().map(|(kind, _)| *kind).collect();
+        assert_eq!(kinds, ["claim", "close"]);
+        let first_reserve = r
+            .order
+            .iter()
+            .position(|entry| entry == "reserve")
+            .expect("the released call was reserved");
+        assert!(
+            r.stage_marks.iter().all(|(_, at)| *at <= first_reserve),
+            "the old fold is closed before the segment reserves its first effect: {:?} vs {:?}",
+            r.stage_marks,
+            r.order
+        );
+        assert_eq!(r.loop_save_attempts, 0, "the segment itself still writes no fold");
+    }
+
+    #[tokio::test]
+    async fn loop_fold_a_stage_one_continuation_makes_no_fold_call_when_no_fold_can_exist() {
+        // The checkpoint switch off, the ledger off, or both: no fold was ever written.
+        for (checkpoint, ledger) in [(false, true), (true, false), (false, false)] {
+            let (rec, policy, result) = stage_one_continue(checkpoint, ledger, |_| {}).await;
+            assert_eq!(result.expect("runs").final_output, "checked");
+            assert!(policy.count() >= 1, "checkpoint={checkpoint} ledger={ledger}");
+            let r = rec.lock().unwrap();
+            assert!(
+                r.claim_calls.is_empty() && r.close_calls.is_empty(),
+                "checkpoint={checkpoint} ledger={ledger}: no call for a fold that cannot exist"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn loop_fold_a_failed_claim_or_close_does_not_stop_the_stage_one_segment() {
+        let cases: Vec<(Option<Status>, Option<Status>, usize)> = vec![
+            (None, Some(Status::unavailable("store down")), 1),
+            (None, Some(Status::aborted("loop_checkpoint_stale")), 1),
+            (
+                Some(Status::failed_precondition("loop_checkpoint_not_claimable")),
+                None,
+                0,
+            ),
+            (
+                Some(Status::failed_precondition("loop_checkpoint_disabled")),
+                None,
+                0,
+            ),
+            (Some(Status::unavailable("down")), None, 0),
+        ];
+        for (index, (claim_failure, close_failure, closes)) in cases.into_iter().enumerate() {
+            let (rec, policy, result) = stage_one_continue(true, true, |r| {
+                r.claim_failure = claim_failure;
+                r.close_failure = close_failure;
+            })
+            .await;
+            assert_eq!(result.expect("the segment goes on").final_output, "checked", "case {index}");
+            assert!(policy.count() >= 1, "the released call still ran: case {index}");
+            let r = rec.lock().unwrap();
+            assert_eq!(r.claim_calls.len(), 1, "case {index}");
+            assert_eq!(r.close_calls.len(), closes, "case {index}");
+        }
+    }
+
+    #[tokio::test]
+    async fn loop_fold_a_withheld_message_degrades_the_fold_to_a_tombstone() {
+        // Ordinary prose that mentions a credential's shape. The live run is unaffected.
+        let goal = "Explain what an Authorization: bearer header is for.";
+        let run = drive_fold_run(
+            FoldKnobs::ON,
+            vec![
+                one_call("delete_records", r#"{"table":"stale"}"#),
+                Scripted::Answer("done".to_owned()),
+            ],
+            |req, _| goal.clone_into(&mut req.goal),
+        )
+        .await;
+        assert_eq!(run.result.expect("completes").final_output, "done");
+        let r = run.rec.lock().unwrap();
+        assert_eq!(r.reservations.len(), 1, "the effect ran: a tombstone means nothing can replay it");
+        assert!(!r.loop_saves.is_empty());
+        for save in &r.loop_saves {
+            let fold = save.fold();
+            assert!(!fold.is_resumable(), "{}: a damaged conversation is never resumable", save.kind);
+            assert_eq!(
+                fold.extensions[mp_contracts::loop_fold::EXT_NOT_RESUMABLE],
+                "credential"
+            );
+            assert!(fold.messages.is_empty());
+            let text = String::from_utf8_lossy(&save.fold).to_lowercase();
+            assert!(!text.contains("authorization") && !text.contains("bearer"), "{text}");
+            assert!(!text.contains("content withheld"), "no stub inside any saved fold");
+        }
+        let seen = run.observed.lock().unwrap();
+        assert!(flattened(&seen[0]).contains(goal), "the model still saw the goal whole");
+    }
+
+    #[tokio::test]
+    async fn loop_fold_a_secret_in_call_arguments_keeps_the_fold_resumable_with_empty_arguments() {
+        let secret = format!("sk-{}", "argsecretkey1234567890abcdef");
+        let run = drive_fold_run(
+            FoldKnobs::ON,
+            vec![
+                Scripted::ToolCalls {
+                    content: "Deleting.".to_owned(),
+                    calls: vec![pb::ToolCall {
+                        id: "d1".to_owned(),
+                        name: "delete_records".to_owned(),
+                        arguments_json: format!(r#"{{"table":"stale","note":"{secret}"}}"#),
+                    }],
+                },
+                Scripted::Answer("done".to_owned()),
+            ],
+            |_, _| {},
+        )
+        .await;
+        run.result.expect("completes");
+        let r = run.rec.lock().unwrap();
+        assert_eq!(r.reservations.len(), 1, "the live call ran with its arguments");
+        let pre = r
+            .loop_saves
+            .iter()
+            .find(|save| save.kind == "pre_effect")
+            .expect("a pre_effect fold");
+        let fold = pre.fold();
+        assert!(fold.is_resumable(), "a withheld argument is not a damaged conversation");
+        let call = &fold.round_in_flight.as_ref().expect("open round").calls[0];
+        assert_eq!((call.id.as_str(), call.step_id.as_str()), ("d1", "tool_1_d1"));
+        assert_eq!(
+            call.arguments_json, "",
+            "withheld, never rewritten: an empty-argument call is never redispatched"
+        );
+        for save in &r.loop_saves {
+            let text = String::from_utf8_lossy(&save.fold).into_owned();
+            assert!(!text.contains(&secret), "{}: the secret reached a saved fold", save.kind);
+        }
+    }
+
+    fn held_text_for(rec: &Recorder, step_id: &str) -> String {
+        step_error(rec, step_id)
+    }
+
+    /// A store that answers with a deterministic refusal will answer the same way next
+    /// time: the writer fails at once, asks once, and holds every effect, saying so.
+    #[tokio::test]
+    async fn loop_fold_a_store_that_refuses_the_run_is_asked_once_and_holds_every_effect() {
+        let refusals = [
+            Status::permission_denied("no"),
+            Status::unauthenticated("loop checkpoint did not authenticate"),
+            Status::not_found("run not found"),
+            Status::unimplemented("save_loop_checkpoint"),
+            Status::failed_precondition("loop checkpoint key unavailable"),
+        ];
+        for refusal in refusals {
+            let label = format!("{refusal:?}");
+            let run = drive_fold_run(
+                FoldKnobs::ON,
+                vec![
+                    Scripted::ToolCalls {
+                        content: String::new(),
+                        calls: vec![delete_call("d1")],
+                    },
+                    read_round(&["w2"]),
+                    Scripted::ToolCalls {
+                        content: String::new(),
+                        calls: vec![delete_call("d2")],
+                    },
+                    Scripted::Answer("done".to_owned()),
+                ],
+                |_, rec| {
+                    rec.loop_save_failures
+                        .push(failing_save("*", u32::MAX, refusal, false));
+                },
+            )
+            .await;
+            assert_eq!(run.result.expect("the run goes on").final_output, "done", "{label}");
+            let r = run.rec.lock().unwrap();
+            assert_eq!(r.loop_save_attempts, 1, "{label}: one RPC in the whole run");
+            assert!(r.reservations.is_empty(), "{label}: every effect is held");
+            for step in ["tool_1_d1", "tool_3_d2"] {
+                let held = held_text_for(&r, step);
+                assert!(held.contains("'delete_records'") && held.contains("was not run"), "{label}: {held}");
+                assert!(
+                    !held.to_lowercase().contains("try again") && !held.to_lowercase().contains("retry"),
+                    "{label}: a failed writer never saves again, so it must not invite a retry: {held}"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn loop_fold_not_persistent_degrades_while_closed_and_ended_answers_hold_every_effect() {
+        let script = || {
+            vec![
+                one_call("delete_records", r#"{"table":"a"}"#),
+                read_round(&["w2"]),
+                Scripted::ToolCalls {
+                    content: String::new(),
+                    calls: vec![delete_call("d2")],
+                },
+                Scripted::Answer("done".to_owned()),
+            ]
+        };
+        // Not persistent: switch-off behaviour. Both effects run, one attempt in all.
+        let run = drive_fold_run(FoldKnobs::ON, script(), |_, rec| {
+            rec.loop_save_failures.push(failing_save(
+                "*",
+                u32::MAX,
+                mp_contracts::zdr_refusal::Refusal::DURABLE_MUTATION_FORBIDDEN
+                    .grpc_status(tonic::Code::FailedPrecondition),
+                false,
+            ));
+        })
+        .await;
+        assert_eq!(run.result.expect("completes").final_output, "done");
+        {
+            let r = run.rec.lock().unwrap();
+            assert_eq!(r.loop_save_attempts, 1, "the writer turned itself off");
+            assert_eq!(r.reservations.len(), 2, "no effect was held: nothing is retained for this run");
+        }
+        // Closed and run_ended: fail closed, one attempt, every effect held for good.
+        for token in ["loop_checkpoint_closed", "loop_checkpoint_run_ended"] {
+            let run = drive_fold_run(FoldKnobs::ON, script(), |_, rec| {
+                rec.loop_save_failures.push(failing_save(
+                    "*",
+                    u32::MAX,
+                    Status::failed_precondition(token),
+                    false,
+                ));
+            })
+            .await;
+            assert_eq!(run.result.expect("completes").final_output, "done", "{token}");
+            let r = run.rec.lock().unwrap();
+            assert_eq!(r.loop_save_attempts, 1, "{token}");
+            assert!(r.reservations.is_empty(), "{token}: effects are held");
+            for step in ["tool_1_call-1", "tool_3_d2"] {
+                let held = held_text_for(&r, step);
+                assert!(held.contains("was not run"), "{token}: {held}");
+                assert!(!held.to_lowercase().contains("try again"), "{token}: {held}");
+            }
+        }
+    }
+
+    /// The call that is effectful because it needs approval is held like any other
+    /// effectful call when its pre_effect fold cannot be saved: no approval is raised
+    /// and nothing is reserved, and the model is told.
+    #[tokio::test]
+    async fn loop_fold_the_approval_gated_call_is_held_when_its_pre_effect_save_fails() {
+        for status in [
+            Status::unavailable("store down"),
+            Status::aborted("loop_checkpoint_stale"),
+        ] {
+            let label = format!("{status:?}");
+            let run = drive_fold_run(
+                FoldKnobs::ON.asking(),
+                vec![one_call("delete_records", r#"{"table":"stale"}"#), Scripted::Answer("done".to_owned())],
+                |_, rec| {
+                    rec.loop_save_failures
+                        .push(failing_save("pre_effect", u32::MAX, status, false));
+                },
+            )
+            .await;
+            assert_eq!(run.result.expect("the model answers instead").final_output, "done", "{label}");
+            let r = run.rec.lock().unwrap();
+            assert!(r.approvals.is_empty(), "{label}: no approval for a call that was held");
+            assert!(r.approval_requests.is_empty(), "{label}");
+            assert!(r.reservations.is_empty(), "{label}");
+            assert!(
+                r.loop_saves.iter().all(|save| save.kind == "round"),
+                "{label}: no pre_effect or pause fold exists for the held call: {:?}",
+                r.loop_saves.iter().map(|save| save.kind.as_str()).collect::<Vec<_>>()
+            );
+            let held = held_text_for(&r, "tool_1_call-1");
+            assert!(held.contains("was not run"), "{label}: {held}");
+        }
+    }
+
+    /// The tombstone that replaces an unsaveable fold can itself fail to save: then no
+    /// durable state precedes the effect and it is held.
+    #[tokio::test]
+    async fn loop_fold_a_tombstone_that_cannot_be_saved_holds_the_effect() {
+        let huge = "g".repeat(runtime_loop::fold::SAVE_BUDGET_BYTES + 4096);
+        let run = drive_fold_run(
+            FoldKnobs::ON,
+            vec![
+                one_call("delete_records", r#"{"table":"stale"}"#),
+                Scripted::Answer("done".to_owned()),
+            ],
+            |req, rec| {
+                req.goal.clone_from(&huge);
+                rec.loop_save_failures.push(failing_save(
+                    "round",
+                    u32::MAX,
+                    Status::unavailable("store down"),
+                    false,
+                ));
+            },
+        )
+        .await;
+        assert_eq!(run.result.expect("completes").final_output, "done");
+        let r = run.rec.lock().unwrap();
+        assert!(r.reservations.is_empty(), "the effect was held: nothing durable precedes it");
+        assert!(r.loop_saves.is_empty());
+        assert!(r.loop_save_attempts >= 1, "the tombstone was attempted");
+        let held = held_text_for(&r, "tool_1_call-1");
+        assert!(held.contains("held back") && held.contains("Try again."), "{held}");
+    }
+
+    /// A pause whose fold is refused or stale still raises its approval, in loop mode,
+    /// and persists nothing beyond the pre_effect fold.
+    #[tokio::test]
+    async fn loop_fold_a_stale_closed_or_disabled_answer_to_the_pause_save_still_raises_the_approval() {
+        for status in [
+            Status::aborted("loop_checkpoint_stale"),
+            Status::failed_precondition("loop_checkpoint_closed"),
+            Status::failed_precondition("loop_checkpoint_disabled"),
+        ] {
+            let label = format!("{status:?}");
+            let run = drive_fold_run(
+                FoldKnobs::ON.asking(),
+                vec![one_call("delete_records", "{}")],
+                |_, rec| {
+                    rec.loop_save_failures
+                        .push(failing_save("pause", u32::MAX, status, false));
+                },
+            )
+            .await;
+            assert_eq!(
+                run.result.expect("a pause is never refused for the fold's sake").status,
+                "awaiting_approval",
+                "{label}"
+            );
+            let r = run.rec.lock().unwrap();
+            assert_eq!(r.approvals.len(), 1, "{label}");
+            assert_eq!(r.approval_modes, vec!["loop".to_owned()], "{label}");
+            let kinds: Vec<&str> = r.loop_saves.iter().map(|s| s.kind.as_str()).collect();
+            assert_eq!(kinds, ["pre_effect"], "{label}: no pause fold, no tombstone");
+            assert_eq!(r.loop_save_attempts, 2, "{label}: the pre_effect save and one pause save");
+            assert!(r.close_calls.is_empty(), "{label}: nothing was saved, so nothing is closed");
+        }
     }
 }

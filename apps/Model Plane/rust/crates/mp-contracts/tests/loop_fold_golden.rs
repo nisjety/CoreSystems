@@ -153,7 +153,7 @@ fn the_round_fold_holds_no_open_round_and_no_pause() {
     assert_eq!(fold.rounds_executed, 1, "one round has run");
     assert_eq!(fold.step_seq, 1);
     assert!(fold.grounded);
-    assert_eq!(fold.attempted_retrievals, vec!["knowledge_search:contract".to_owned()]);
+    assert_eq!(fold.attempted_retrievals, vec!["hybrid|5|find the contract".to_owned()]);
 }
 
 #[test]
@@ -224,6 +224,36 @@ fn the_pause_fold_names_the_pause_by_the_approvals_idempotency_key() {
     assert_eq!(fold.step_seq, pre.step_seq);
     assert_eq!(round.calls, pre.round_in_flight.as_ref().unwrap().calls);
     assert_eq!(fold.messages, pre.messages);
+}
+
+/// The folds of an OPEN round carry the retrievals attempted as they stood at the START
+/// of the round, in the real `route|top_k|normalised query` format. The phase-1 pre-pass
+/// inserts the round's own searches, so a set that held them would make a resume that
+/// re-runs the pre-pass reject its own call as a duplicate of itself.
+#[test]
+fn the_open_round_folds_carry_the_retrievals_of_the_round_start_only() {
+    for (name, golden) in [("pre_effect", WRITER_PRE_EFFECT), ("pause", WRITER_PAUSE)] {
+        let fold = parse(golden);
+        let round = fold.round_in_flight.as_ref().expect("the round is open");
+        assert_eq!(fold.attempted_retrievals, vec!["hybrid|5|find the contract".to_owned()], "{name}");
+        let mut searches = 0;
+        for call in round
+            .calls
+            .iter()
+            .filter(|call| !call.step_id.is_empty() && call.name == "knowledge_search")
+        {
+            let arguments: serde_json::Value =
+                serde_json::from_str(&call.arguments_json).expect("arguments are JSON");
+            let query = arguments["query"].as_str().expect("a query").to_lowercase();
+            let signature = format!("hybrid|5|{query}");
+            assert!(
+                !fold.attempted_retrievals.contains(&signature),
+                "{name}: {signature} is the open round's own search"
+            );
+            searches += 1;
+        }
+        assert_eq!(searches, 1, "{name}: the open round does search, so the check is not vacuous");
+    }
 }
 
 #[test]

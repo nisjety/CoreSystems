@@ -445,7 +445,14 @@ pub struct LoopFoldV1 {
     /// Whether compaction already ran.
     #[serde(default)]
     pub compaction_triggered: bool,
-    /// Retrievals already attempted (so a resume does not repeat them).
+    /// Retrievals already attempted (so a resume does not repeat them), as the loop's
+    /// `route|top_k|normalised query` signatures.
+    ///
+    /// For a fold that carries an open round (`pre_effect`, `pause`) this is the set as it
+    /// stood at the START of that round, before the loop's pre-pass inserted the round's
+    /// own searches: a resume that sends the open round back through the pre-pass would
+    /// otherwise reject its own search as a duplicate of itself. The end-of-round (`round`)
+    /// fold carries the final set.
     #[serde(default)]
     pub attempted_retrievals: Vec<String>,
     /// The loop's message history.

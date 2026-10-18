@@ -1045,8 +1045,10 @@ services:
       RUST_LOG: info
       # Build plan WS03 S2: raise Do-loop approvals as loop-owned (consumed once by
       # the durable loop through ConsumeApproval) instead of the cold delivery
-      # worker's. OFF by default and never for ZDR runs. Do not turn it on in a
-      # deployment until stage 1 `/continue` exists: nothing else consumes them.
+      # worker's. OFF by default and never for ZDR runs. Stage 1 `/continue` is
+      # built (the gateway route and this service's consume-and-run segment), so a
+      # loop-owned approval has a consumer; the switch stays off by default until
+      # the live proof, and is flipped on both services together.
       AGENT_CONTINUE_AFTER_APPROVAL_ENABLED: ${AGENT_CONTINUE_AFTER_APPROVAL_ENABLED:-false}
       # Effect ledger (WS03 S5): an effectful tool call is reserved in session-core
       # before it runs and finalized after, and a call that cannot be reserved is not
