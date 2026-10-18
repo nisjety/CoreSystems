@@ -3,14 +3,23 @@
 //! These tests require a reachable Redis at `REDIS_URL` (default
 //! `redis://127.0.0.1:6379`). When Redis is unavailable the tests print a
 //! skip notice and return success so CI without Redis still passes.
+//!
+//! The origin is a loopback wiremock server. The production static driver refuses
+//! loopback targets, so these tests fetch through `LoopbackDriver` instead.
 
 use std::{net::SocketAddr, sync::Arc, time::Duration};
 
+use async_trait::async_trait;
+use quarry_core::output::DriverKind;
+use quarry_core::QuarryResult;
 use quarry_edge::cache::PageCache;
 use quarry_edge::state::AppState;
-use quarry_runtime::{fetch::StaticDriver, EventSink};
+use quarry_runtime::driver::Driver;
+use quarry_runtime::fetch::FetchResponse;
+use quarry_runtime::EventSink;
 use redis::AsyncCommands;
 use tokio::sync::mpsc;
+use url::Url;
 use wiremock::{matchers::method, Mock, MockServer, ResponseTemplate};
 
 mod support;
@@ -29,17 +38,71 @@ async fn try_redis() -> Option<redis::aio::ConnectionManager> {
         .ok()
 }
 
+/// The origin in these tests is a loopback wiremock server, and the production
+/// static driver refuses loopback targets (its address guard, `resolve_public_url`
+/// in `quarry-runtime/src/dns_guard.rs`, which `fetch.rs` calls). This driver fetches
+/// the origin over plain HTTP without that guard, so what these tests exercise is the
+/// page cache at the edge. The origin still records every request it receives.
+#[derive(Default)]
+struct LoopbackDriver;
+
+#[async_trait]
+impl Driver for LoopbackDriver {
+    fn kind(&self) -> DriverKind {
+        DriverKind::Static
+    }
+
+    async fn fetch(&self, url: &Url) -> QuarryResult<FetchResponse> {
+        let started = std::time::Instant::now();
+        let response = reqwest::get(url.clone()).await.map_err(|error| {
+            quarry_core::error::QuarryError::new(
+                quarry_core::error::ErrorCode::DriverFailed,
+                format!("loopback fetch: {}", error.without_url()),
+            )
+        })?;
+        let status = response.status().as_u16();
+        let final_url = response.url().clone();
+        let headers = response
+            .headers()
+            .iter()
+            .filter_map(|(name, value)| {
+                value
+                    .to_str()
+                    .ok()
+                    .map(|value| (name.to_string(), value.to_owned()))
+            })
+            .collect();
+        let body = response
+            .bytes()
+            .await
+            .map_err(|error| {
+                quarry_core::error::QuarryError::new(
+                    quarry_core::error::ErrorCode::DriverFailed,
+                    format!("loopback body: {}", error.without_url()),
+                )
+            })?
+            .to_vec();
+        Ok(FetchResponse {
+            status,
+            final_url,
+            headers,
+            body,
+            duration_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+            served_by: DriverKind::Static,
+        })
+    }
+}
+
 async fn build_state() -> Option<(AppState, redis::aio::ConnectionManager)> {
     let conn = try_redis().await?;
     let (tx, mut rx) = mpsc::channel(1024);
     tokio::spawn(async move { while rx.recv().await.is_some() {} });
     let event_sink = EventSink::new(tx);
-    let static_driver =
-        Arc::new(StaticDriver::new(Duration::from_secs(10), "quarry-test").unwrap());
+    let driver = Arc::new(LoopbackDriver);
     let state = AppState {
         redis: Some(conn.clone()),
         cache: Some(PageCache::new(conn.clone(), Duration::from_secs(3600))),
-        ..support::base_state(static_driver, event_sink)
+        ..support::base_state(driver, event_sink)
     };
     Some((state, conn))
 }
@@ -199,7 +262,7 @@ async fn cache_bypass_always_hits_origin() {
     );
 
     // Bypass should not write either: key must be absent.
-    let key = format!("quarry:page:{fp}");
+    let key = page_key(DEV_ORG, &fp);
     let exists: bool = conn.exists(&key).await.unwrap_or(false);
     assert!(!exists, "bypass mode must not write to redis");
 }
@@ -239,7 +302,7 @@ async fn cache_write_only_skips_read_but_populates_cache() {
     let fp = extract_fingerprint(&body1);
 
     // Key should now exist in Redis (write happened).
-    let key = format!("quarry:page:{fp}");
+    let key = page_key(DEV_ORG, &fp);
     let exists: bool = conn.exists(&key).await.unwrap_or(false);
     assert!(exists, "write_only mode must populate redis");
 
@@ -302,7 +365,7 @@ async fn cache_max_age_zero_uses_default_ttl() {
     let body1: serde_json::Value = resp1.json().await.unwrap();
     let fp = extract_fingerprint(&body1);
 
-    let key = format!("quarry:page:{fp}");
+    let key = page_key(DEV_ORG, &fp);
     let ttl: i64 = conn.ttl(&key).await.unwrap_or(-2);
     assert!(
         ttl > 60,
@@ -401,4 +464,211 @@ async fn page_cache_is_not_readable_across_orgs() {
 
     purge_key(&mut conn, own_fp).await;
     purge_key_for(&mut conn, "org_other", other_fp).await;
+}
+
+/// `quarry:page:{org}:{fingerprint}`, the key `PageCache` writes.
+fn page_key(org: &str, fingerprint: &str) -> String {
+    format!("quarry:page:{org}:{fingerprint}")
+}
+
+/// A value unique to this run, so the pages these tests serve never share a
+/// fingerprint with another test or an earlier run.
+fn unique_nonce() -> String {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock")
+        .as_nanos();
+    format!("{}-{nanos}", std::process::id())
+}
+
+/// A page whose title and body carry `nonce`.
+fn nonce_page(nonce: &str) -> String {
+    format!(
+        "<html><head><title>Cache options {nonce}</title></head><body><main><p>Cache policy page {nonce} is long enough to read as page content.</p></main></body></html>"
+    )
+}
+
+/// A scrape with options other than the defaults must neither read the page cache
+/// through `prev_fingerprint` nor write to it: a cached entry is a default-options
+/// result. The planted entry is never served, the origin is always fetched, and
+/// nothing is written under the fingerprint of the new result.
+#[tokio::test]
+async fn non_default_options_neither_read_nor_write_the_page_cache() {
+    let Some((state, mut conn)) = build_state().await else {
+        eprintln!("skip: REDIS_URL unreachable");
+        return;
+    };
+    let addr = spawn_app(state).await;
+    let client = reqwest::Client::new();
+    let cache = PageCache::new(conn.clone(), Duration::from_secs(3600));
+
+    // An entry a default request would serve, with a title no real page has.
+    let planted_fp = format!("fp-non-default-planted-{}", unique_nonce());
+    let url = "http://127.0.0.1:1/planted";
+    cache
+        .put(DEV_ORG, &planted_fp, &planted_output(url, &planted_fp, "PLANTED TITLE"))
+        .await
+        .expect("plant the entry");
+
+    let cases = [
+        ("formats", serde_json::json!({ "formats": ["markdown"] })),
+        ("include_tags", serde_json::json!({ "include_tags": ["main"] })),
+        ("exclude_tags", serde_json::json!({ "exclude_tags": [".no-such-element"] })),
+        ("extractor", serde_json::json!({ "extractor": "raw" })),
+        ("only_main_content", serde_json::json!({ "only_main_content": false })),
+    ];
+    for (label, options) in cases {
+        let nonce = unique_nonce();
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(nonce_page(&nonce)))
+            .mount(&server)
+            .await;
+
+        let mut body = serde_json::json!({
+            "url": server.uri(),
+            "prev_fingerprint": planted_fp,
+            "cache": { "mode": "read_write" }
+        });
+        body.as_object_mut()
+            .unwrap()
+            .extend(options.as_object().unwrap().clone());
+        let response = authed(client.post(format!("http://{addr}/v1/scrape")).json(&body))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200, "{label}");
+        let text = response.text().await.unwrap();
+        assert!(!text.contains("PLANTED TITLE"), "{label}: the planted entry was read: {text}");
+        let reply: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(reply["data"]["effective_options"]["cache_state"], "bypass", "{label}");
+
+        let received = server.received_requests().await.unwrap_or_default();
+        assert_eq!(received.len(), 1, "{label}: the origin is fetched, got {} hits", received.len());
+
+        let fp = extract_fingerprint(&reply);
+        let written: bool = conn.exists(page_key(DEV_ORG, &fp)).await.unwrap_or(false);
+        assert!(!written, "{label}: a non-default result must not be written to the cache");
+    }
+
+    purge_key(&mut conn, &planted_fp).await;
+}
+
+/// Default options keep the page cache: a result is written under its fingerprint,
+/// a known fingerprint is served from the cache without a fetch, and an unknown one
+/// is a miss that fetches.
+#[tokio::test]
+async fn default_options_still_read_and_write_the_page_cache() {
+    let Some((state, mut conn)) = build_state().await else {
+        eprintln!("skip: REDIS_URL unreachable");
+        return;
+    };
+    let addr = spawn_app(state).await;
+    let client = reqwest::Client::new();
+
+    let nonce = unique_nonce();
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(nonce_page(&nonce)))
+        .mount(&server)
+        .await;
+
+    let first: serde_json::Value = authed(
+        client
+            .post(format!("http://{addr}/v1/scrape"))
+            .json(&serde_json::json!({ "url": server.uri(), "cache": { "mode": "read_write" } })),
+    )
+    .send()
+    .await
+    .unwrap()
+    .json()
+    .await
+    .unwrap();
+    let fp = extract_fingerprint(&first);
+    let written: bool = conn.exists(page_key(DEV_ORG, &fp)).await.unwrap_or(false);
+    assert!(written, "a default result is written under its fingerprint");
+
+    let hit = authed(
+        client
+            .post(format!("http://{addr}/v1/scrape"))
+            .json(&serde_json::json!({ "url": server.uri(), "prev_fingerprint": fp, "cache": { "mode": "read_write" } })),
+    )
+    .send()
+    .await
+    .unwrap();
+    assert_eq!(hit.status(), 200);
+    let hit: serde_json::Value = hit.json().await.unwrap();
+    assert_eq!(hit["data"]["effective_options"]["cache_state"], "hit");
+    assert!(hit["data"]["metadata"]["title"].as_str().unwrap_or_default().contains(&nonce));
+    assert_eq!(server.received_requests().await.unwrap_or_default().len(), 1, "served from cache");
+
+    let unknown = authed(
+        client
+            .post(format!("http://{addr}/v1/scrape"))
+            .json(&serde_json::json!({ "url": server.uri(), "prev_fingerprint": "fp-not-in-the-cache", "cache": { "mode": "read_write" } })),
+    )
+    .send()
+    .await
+    .unwrap();
+    let unknown: serde_json::Value = unknown.json().await.unwrap();
+    assert_eq!(unknown["data"]["effective_options"]["cache_state"], "miss");
+    assert_eq!(server.received_requests().await.unwrap_or_default().len(), 2, "a miss fetches");
+
+    purge_key(&mut conn, &fp).await;
+}
+
+/// ZDR never reads or writes the page cache, even for default options and a known
+/// fingerprint: the planted entry is not served and the result is not stored.
+#[tokio::test]
+async fn zdr_never_reads_or_writes_the_page_cache() {
+    let Some((state, mut conn)) = build_state().await else {
+        eprintln!("skip: REDIS_URL unreachable");
+        return;
+    };
+    let addr = spawn_app(state).await;
+    let client = reqwest::Client::new();
+    let cache = PageCache::new(conn.clone(), Duration::from_secs(3600));
+
+    let planted_fp = format!("fp-zdr-planted-{}", unique_nonce());
+    cache
+        .put(
+            DEV_ORG,
+            &planted_fp,
+            &planted_output("http://127.0.0.1:1/zdr", &planted_fp, "PLANTED ZDR TITLE"),
+        )
+        .await
+        .expect("plant the entry");
+
+    let nonce = unique_nonce();
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(nonce_page(&nonce)))
+        .mount(&server)
+        .await;
+
+    let response = authed(
+        client
+            .post(format!("http://{addr}/v1/scrape"))
+            .json(&serde_json::json!({
+                "url": server.uri(),
+                "zdr": true,
+                "prev_fingerprint": planted_fp,
+                "cache": { "mode": "read_write" }
+            })),
+    )
+    .send()
+    .await
+    .unwrap();
+    assert_eq!(response.status(), 200);
+    let text = response.text().await.unwrap();
+    assert!(!text.contains("PLANTED ZDR TITLE"), "a ZDR scrape read the cache: {text}");
+    let reply: serde_json::Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(reply["data"]["effective_options"]["cache_state"], "bypass");
+    assert_eq!(server.received_requests().await.unwrap_or_default().len(), 1);
+
+    let fp = extract_fingerprint(&reply);
+    let written: bool = conn.exists(page_key(DEV_ORG, &fp)).await.unwrap_or(false);
+    assert!(!written, "a ZDR result must not be written to the cache");
+
+    purge_key(&mut conn, &planted_fp).await;
 }
