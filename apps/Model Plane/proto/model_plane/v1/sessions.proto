@@ -1426,5 +1426,6 @@ message ToolActionState {
 // rows answers an empty list. An asked action id with no row here is UNKNOWN, never
 // "not run": it may be unreserved, uncommitted or hidden, and the read cannot say which.
 message ListToolActionsResponse {
+  // One entry per ledger row found for the asked ids, in reservation order.
   repeated ToolActionState actions = 1;
 }

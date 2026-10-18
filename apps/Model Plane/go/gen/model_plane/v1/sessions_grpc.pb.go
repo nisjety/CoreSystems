@@ -32,6 +32,7 @@ const (
 	SessionCore_SaveLoopCheckpoint_FullMethodName         = "/model_plane.v1.SessionCore/SaveLoopCheckpoint"
 	SessionCore_ClaimLoopCheckpoint_FullMethodName        = "/model_plane.v1.SessionCore/ClaimLoopCheckpoint"
 	SessionCore_CloseLoopCheckpoint_FullMethodName        = "/model_plane.v1.SessionCore/CloseLoopCheckpoint"
+	SessionCore_ListToolActions_FullMethodName            = "/model_plane.v1.SessionCore/ListToolActions"
 	SessionCore_ReplayThread_FullMethodName               = "/model_plane.v1.SessionCore/ReplayThread"
 	SessionCore_GetContextAssembly_FullMethodName         = "/model_plane.v1.SessionCore/GetContextAssembly"
 	SessionCore_CompactNow_FullMethodName                 = "/model_plane.v1.SessionCore/CompactNow"
@@ -104,6 +105,24 @@ type SessionCoreClient interface {
 	ClaimLoopCheckpoint(ctx context.Context, in *ClaimLoopCheckpointRequest, opts ...grpc.CallOption) (*ClaimLoopCheckpointResponse, error)
 	// Close a run's fold once its loop has finished. Idempotent for a closed row.
 	CloseLoopCheckpoint(ctx context.Context, in *CloseLoopCheckpointRequest, opts ...grpc.CallOption) (*CloseLoopCheckpointResponse, error)
+	// Read the effect ledger's rows for named tool calls of one run (build plan WS03
+	// S7a). Digest-only: the status, class and argument digest of each action, never
+	// its arguments or output. The loop that resumes a run reads it to close a call
+	// honestly instead of running it again.
+	//
+	// Answers only while the loop checkpoint store is switched on (otherwise the same
+	// closed "loop_checkpoint_disabled" refusal the checkpoint RPCs give), and only for a
+	// run that persists: a zero-retention or waived run never keeps a fold, so it gets the
+	// durable-mutation refusal. The caller must be allowed to read the run under the same
+	// rule as GetRun, which includes refusing a run whose owner was removed from its
+	// Space. Rows written under zero retention are never returned.
+	//
+	// ABSENCE IS NOT PROOF. An action id missing from the answer is UNKNOWN. It may never
+	// have been reserved, may be reserved by a concurrent writer that has not committed
+	// yet, or may be a row this read hides. Never read absence as "the call did not run".
+	// For an effectful call, only a row with status "not_run" (or a "completed" row with
+	// its output) licenses a re-dispatch decision.
+	ListToolActions(ctx context.Context, in *ListToolActionsRequest, opts ...grpc.CallOption) (*ListToolActionsResponse, error)
 	// Replay the thread event log as a stream of Events.
 	// Ordering: (ts, event_id) with event_id as deterministic tiebreaker.
 	ReplayThread(ctx context.Context, in *ReplayThreadRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[Event], error)
@@ -315,6 +334,16 @@ func (c *sessionCoreClient) CloseLoopCheckpoint(ctx context.Context, in *CloseLo
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(CloseLoopCheckpointResponse)
 	err := c.cc.Invoke(ctx, SessionCore_CloseLoopCheckpoint_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *sessionCoreClient) ListToolActions(ctx context.Context, in *ListToolActionsRequest, opts ...grpc.CallOption) (*ListToolActionsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListToolActionsResponse)
+	err := c.cc.Invoke(ctx, SessionCore_ListToolActions_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -562,6 +591,24 @@ type SessionCoreServer interface {
 	ClaimLoopCheckpoint(context.Context, *ClaimLoopCheckpointRequest) (*ClaimLoopCheckpointResponse, error)
 	// Close a run's fold once its loop has finished. Idempotent for a closed row.
 	CloseLoopCheckpoint(context.Context, *CloseLoopCheckpointRequest) (*CloseLoopCheckpointResponse, error)
+	// Read the effect ledger's rows for named tool calls of one run (build plan WS03
+	// S7a). Digest-only: the status, class and argument digest of each action, never
+	// its arguments or output. The loop that resumes a run reads it to close a call
+	// honestly instead of running it again.
+	//
+	// Answers only while the loop checkpoint store is switched on (otherwise the same
+	// closed "loop_checkpoint_disabled" refusal the checkpoint RPCs give), and only for a
+	// run that persists: a zero-retention or waived run never keeps a fold, so it gets the
+	// durable-mutation refusal. The caller must be allowed to read the run under the same
+	// rule as GetRun, which includes refusing a run whose owner was removed from its
+	// Space. Rows written under zero retention are never returned.
+	//
+	// ABSENCE IS NOT PROOF. An action id missing from the answer is UNKNOWN. It may never
+	// have been reserved, may be reserved by a concurrent writer that has not committed
+	// yet, or may be a row this read hides. Never read absence as "the call did not run".
+	// For an effectful call, only a row with status "not_run" (or a "completed" row with
+	// its output) licenses a re-dispatch decision.
+	ListToolActions(context.Context, *ListToolActionsRequest) (*ListToolActionsResponse, error)
 	// Replay the thread event log as a stream of Events.
 	// Ordering: (ts, event_id) with event_id as deterministic tiebreaker.
 	ReplayThread(*ReplayThreadRequest, grpc.ServerStreamingServer[Event]) error
@@ -687,6 +734,9 @@ func (UnimplementedSessionCoreServer) ClaimLoopCheckpoint(context.Context, *Clai
 }
 func (UnimplementedSessionCoreServer) CloseLoopCheckpoint(context.Context, *CloseLoopCheckpointRequest) (*CloseLoopCheckpointResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method CloseLoopCheckpoint not implemented")
+}
+func (UnimplementedSessionCoreServer) ListToolActions(context.Context, *ListToolActionsRequest) (*ListToolActionsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ListToolActions not implemented")
 }
 func (UnimplementedSessionCoreServer) ReplayThread(*ReplayThreadRequest, grpc.ServerStreamingServer[Event]) error {
 	return status.Error(codes.Unimplemented, "method ReplayThread not implemented")
@@ -993,6 +1043,24 @@ func _SessionCore_CloseLoopCheckpoint_Handler(srv interface{}, ctx context.Conte
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(SessionCoreServer).CloseLoopCheckpoint(ctx, req.(*CloseLoopCheckpointRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _SessionCore_ListToolActions_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListToolActionsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SessionCoreServer).ListToolActions(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SessionCore_ListToolActions_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SessionCoreServer).ListToolActions(ctx, req.(*ListToolActionsRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -1372,6 +1440,10 @@ var SessionCore_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "CloseLoopCheckpoint",
 			Handler:    _SessionCore_CloseLoopCheckpoint_Handler,
+		},
+		{
+			MethodName: "ListToolActions",
+			Handler:    _SessionCore_ListToolActions_Handler,
 		},
 		{
 			MethodName: "GetContextAssembly",
