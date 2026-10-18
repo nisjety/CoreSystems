@@ -158,8 +158,11 @@ Markers come in three classes. Class A is an infrastructure identifier in the
 HTML (a CAPTCHA widget script, a WAF interstitial's own variables); an
 interstitial marker decides alone, a widget also needs the page to be the
 challenge itself (an error status, a title cue, a phrase group, or a short page
-with no other form field to fill in) so that a CAPTCHA on a login form, a
-contact or newsletter form or a comment box is a hint at most. An invisible
+with no other form field to fill in). On a page that also has a form field to
+fill in, a 2xx page needs a title cue or an interstitial phrase group; the
+widget's own label ("please verify you are human") does not count. So a CAPTCHA
+on a login form, a contact or newsletter form or a comment box is a hint at
+most. An invisible
 reCAPTCHA v3 anchor is ignored, and does not hide a visible v2 widget on the
 same page. Class B is a phrase group in
 the title or in the visible text of a short page ("unusual traffic", "checking

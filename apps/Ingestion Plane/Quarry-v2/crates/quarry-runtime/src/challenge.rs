@@ -303,14 +303,14 @@ const TITLE_CUES: &[&str] = &[
     "verifying you",
     "are you human",
     "are you a robot",
-    "robot",
+    "robot check",
     "security check",
     "access denied",
     "you have been blocked",
     "pardon",
     "captcha",
     "checking your browser",
-    "challenge",
+    "security challenge",
 ];
 
 const PAYWALL_PHRASES: &[&str] = &[
@@ -780,15 +780,16 @@ fn classify_strong(
     if !widgets.is_empty() {
         let title_cue = page.title_has(TITLE_CUES);
         let non_prove_group = hits.iter().any(|h| h.id != "prove_human");
-        let corroborated = if page.has_password && page.status_2xx_or_unknown() {
+        let corroborated = if (page.has_password || page.has_form_fields)
+            && page.status_2xx_or_unknown()
+        {
+            // A login, contact, sign-up or newsletter form that carries a
+            // widget is a gate on one control: its own label ("please verify
+            // you are human") is not evidence that the page is the challenge.
             title_cue || non_prove_group
         } else {
-            // A short page with nothing else to fill in is the widget itself; a
-            // contact, sign-up or newsletter form that carries one is not.
-            status_corroborates
-                || title_cue
-                || !hits.is_empty()
-                || (page.thin && !page.has_form_fields)
+            // A short page with nothing else to fill in is the widget itself.
+            status_corroborates || title_cue || !hits.is_empty() || page.thin
         };
         let gate_open = corroborated && (page.thin || status_corroborates);
         if gate_open {
@@ -1349,9 +1350,23 @@ impl BlockEpisodes {
                 (!current_host.is_empty() && self.is_exhausted(current_host, zdr))
                     .then(|| current_host.to_ascii_lowercase())
             }
-            // New action variants are allowed until someone decides they are
-            // an interaction; the cost of a miss is one more attempt.
-            _ => None,
+            // Looking, waiting, scrolling and history steps stay allowed. No
+            // wildcard: a new action variant is a compile error until someone
+            // decides whether it is an interaction.
+            AgentAction::Scroll { .. }
+            | AgentAction::MouseWheel { .. }
+            | AgentAction::Wait { .. }
+            | AgentAction::WaitFor { .. }
+            | AgentAction::WaitForRef { .. }
+            | AgentAction::FrameWaitForRef { .. }
+            | AgentAction::WaitForSemantic { .. }
+            | AgentAction::RespondDialog { .. }
+            | AgentAction::Screenshot { .. }
+            | AgentAction::Pdf
+            | AgentAction::Evaluate { .. }
+            | AgentAction::Back
+            | AgentAction::Forward
+            | AgentAction::GetContent => None,
         };
         match blocked_host {
             Some(host) => Err(QuarryError::challenge_detected(
@@ -1417,6 +1432,8 @@ mod tests {
     const PAYWALL_LD: &str = r#"<html><head><title>Story</title><script type="application/ld+json">{"@type":"NewsArticle","isAccessibleForFree": "False"}</script></head><body><article><p>The first paragraph of the story.</p></article></body></html>"#;
 
     const CONTACT_WITH_WIDGET: &str = r#"<html><head><title>Contact us</title></head><body><form action="/send" method="post"><label>Name <input type="text" name="n"></label><label>Email <input type="email" name="e"></label><textarea name="m"></textarea><div class="g-recaptcha" data-sitekey="k"></div><button>Send</button></form><script src="https://www.google.com/recaptcha/api.js"></script></body></html>"#;
+
+    const CONTACT_PROVE_HUMAN_LABEL: &str = r#"<html><head><title>Contact us</title></head><body><form action="/send" method="post"><label>Name <input type="text" name="n"></label><label>Email <input type="email" name="e"></label><p>Please verify you are human</p><div class="g-recaptcha" data-sitekey="k"></div><button>Send</button></form><script src="https://www.google.com/recaptcha/api.js"></script></body></html>"#;
 
     const NEWSLETTER_WITH_HCAPTCHA: &str = r#"<html><head><title>Subscribe</title></head><body><h1>Our newsletter</h1><form><input type="email" name="e"><div class="h-captcha" data-sitekey="k"></div><input type="submit" value="Join"></form><script src="https://js.hcaptcha.com/1/api.js"></script></body></html>"#;
 
@@ -1576,6 +1593,9 @@ mod tests {
             case("empty html", "https://example.com/", None, Some(""), Some(200), Nothing),
             // ---- a widget on an ordinary short form, and ordinary titles ----
             case("contact page with a visible recaptcha", "https://example.com/contact", Some("Contact us"), Some(CONTACT_WITH_WIDGET), Some(200), Weak),
+            case("contact form whose label says verify you are human, beside a visible recaptcha", "https://example.com/contact", Some("Contact us"), Some(CONTACT_PROVE_HUMAN_LABEL), Some(200), Weak),
+            case("contact form titled robotics, with a visible recaptcha", "https://example.com/contact", Some("Robotics - contact us"), Some(CONTACT_WITH_WIDGET), Some(200), Weak),
+            case("contact form titled challenge accepted, with a visible recaptcha", "https://example.com/contact", Some("Challenge accepted - contact"), Some(CONTACT_WITH_WIDGET), Some(200), Weak),
             case("newsletter sign-up with an hcaptcha", "https://example.com/news", Some("Subscribe"), Some(NEWSLETTER_WITH_HCAPTCHA), Some(200), Weak),
             case("contact form with a visible v2 and an invisible v3 anchor", "https://example.com/write", Some("Write to us"), Some(CONTACT_V2_AND_V3), Some(200), Weak),
             case("widget-only page with a visible v2 and an invisible v3 anchor", "https://example.com/check", Some("Check"), Some(WIDGET_V2_AND_V3), Some(200), Strong(CaptchaWidget)),
