@@ -28,5 +28,6 @@ pub mod resources;
 pub mod scrape;
 pub mod tracked_snapshot;
 pub mod zdr;
+pub mod zdr_matrix;
 
 pub use error::{ErrorCode, QuarryError, QuarryResult};

@@ -22,6 +22,8 @@ base64 = { workspace = true }
 schemars = { version = "1", optional = true }
 
 [dev-dependencies]
+# Pins the generated ZDR matrix golden (zdr_matrix tests).
+sha2 = { workspace = true }
 # Property tests for the change-history serde round-trip contract.
 proptest = "1"
 # Property tests in `tests/properties.rs` exercise URL parsing
