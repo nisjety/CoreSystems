@@ -340,3 +340,45 @@ async fn another_organization_gets_not_found_and_a_zdr_reader_is_refused() {
     edge.stop().await;
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// The owning organization turns ZDR on after the record was written: the same `org_id`
+/// now arrives with `zdr: true`. The refusal is per request, so the owner's own reads
+/// are refused too, while another member of the same organization who is not under ZDR
+/// still reads the record, because the read is organization-scoped.
+#[tokio::test]
+async fn a_record_written_before_the_organization_turned_zdr_is_refused_to_its_readers() {
+    let root = scratch_root("zdr-same-org");
+    let edge = Edge::start(&root).await;
+    let original = edge.scrape(&org_a(), scrape_body()).await;
+    let id = original["data"]["scrape_id"]
+        .as_str()
+        .expect("scrape_id")
+        .to_owned();
+
+    // The same organization as the record (org-standard-golden), now under ZDR.
+    let turned_zdr = token("user_in_zdr_org", |claims| {
+        claims.insert("org_id".into(), json!("org-standard-golden"));
+    });
+    let refused = edge.read(&turned_zdr, &id).await;
+    assert_eq!(
+        refused.status(),
+        403,
+        "a ZDR reader of the owning organization is refused"
+    );
+    let body: Value = refused.json().await.expect("error envelope");
+    assert_eq!(body["error"]["code"], "FORBIDDEN");
+
+    // Control: another member of the same organization, not under ZDR, still reads it.
+    let member = token("user_in_standard_org", |claims| {
+        claims.insert("user_id".into(), json!("user-member-golden"));
+        claims.insert("sub".into(), json!("user-member-golden"));
+    });
+    let read = edge.read(&member, &id).await;
+    assert_eq!(
+        read.status(),
+        200,
+        "the read is organization-scoped, not author-scoped"
+    );
+    edge.stop().await;
+    let _ = std::fs::remove_dir_all(&root);
+}
