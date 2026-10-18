@@ -115,12 +115,36 @@ pub(crate) struct LedgerEntry<'a> {
     pub args_digest: Option<String>,
 }
 
+/// What a reservation did. The ledger answers `created: false` for an exact
+/// replay of an earlier reservation, and that answer is not "go ahead": it says an
+/// earlier attempt, possibly of a loop that has since died, already claimed this
+/// action and may have started it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ReserveOutcome {
+    /// This call made the reservation: nothing has started the action before.
+    Created,
+    /// The reservation already existed. An earlier attempt may have run the call,
+    /// so it is never dispatched again; it is closed as an unknown outcome.
+    AlreadyReserved,
+}
+
+impl ReserveOutcome {
+    /// From the response's `created` flag.
+    pub(crate) const fn from_created(created: bool) -> Self {
+        if created {
+            Self::Created
+        } else {
+            Self::AlreadyReserved
+        }
+    }
+}
+
 /// Reserve a call before it is dispatched. The error is the reason, for the log.
 pub(crate) async fn reserve(
     channel: &Channel,
     bearer: Option<&str>,
     entry: &LedgerEntry<'_>,
-) -> Result<(), String> {
+) -> Result<ReserveOutcome, String> {
     let bearer = bearer.ok_or_else(|| "no verified session credential".to_owned())?;
     let request = super::authenticated_session_request(
         pb::ReserveToolActionRequest {
@@ -139,7 +163,7 @@ pub(crate) async fn reserve(
     SessionCoreClient::new(channel.clone())
         .reserve_tool_action(request)
         .await
-        .map(|_| ())
+        .map(|response| ReserveOutcome::from_created(response.into_inner().created))
         .map_err(|status| status.message().to_owned())
 }
 
@@ -220,6 +244,16 @@ mod tests {
         let digest = args_digest_of(r#"{"b":1,"a":2}"#).expect("digest");
         assert_eq!(args_digest_of(r#"{"a":2,"b":1}"#).as_deref(), Some(digest.as_str()));
         assert_eq!(args_digest_of("not json"), None);
+    }
+
+    #[test]
+    fn a_replayed_reservation_is_not_a_fresh_one() {
+        assert_eq!(ReserveOutcome::from_created(true), ReserveOutcome::Created);
+        assert_eq!(
+            ReserveOutcome::from_created(false),
+            ReserveOutcome::AlreadyReserved,
+            "created: false means an earlier attempt already claimed the action"
+        );
     }
 
     #[test]

@@ -824,7 +824,7 @@ async fn run_agent_with_route(
     state: &crate::state::StateStore,
     session_channel: Channel,
     inference_channel: Channel,
-    req: pb::RunAgentRequest,
+    mut req: pb::RunAgentRequest,
     tools: Vec<pb::ToolDefinition>,
     data_plane_bearer: Option<String>,
     session_bearer: Option<String>,
@@ -853,6 +853,12 @@ async fn run_agent_with_route(
         ),
         None => None,
     };
+    // The loop reads the floor, the rung, plan mode and the round budget off the
+    // request on every round. A continuation's request states placeholders, so it
+    // runs under the authority the pause retained instead (narrowed, never widened).
+    if let Some(segment) = resumed.as_ref() {
+        super::resume::apply_authority(&mut req, &segment.effective);
+    }
     let tools = match resumed.as_ref() {
         Some(segment) => segment.tools.clone(),
         None => tools,
@@ -1980,29 +1986,54 @@ async fn run_rounds(
                         None
                     };
                     if let Some(entry) = &ledger_entry {
-                        if let Err(reason) = runtime_loop::effect::reserve(
+                        match runtime_loop::effect::reserve(
                             ctx.session_channel,
                             ctx.session_bearer,
                             entry,
                         )
                         .await
                         {
-                            warn!(
-                                run_id = %req.run_id,
-                                tool = %call.name,
-                                %reason,
-                                "run_agent: effect ledger reservation failed; the call was not run"
-                            );
-                            return Some(runtime_loop::StepOutcome {
-                                status: "failed".to_owned(),
-                                output: String::new(),
-                                error: format!(
-                                    "tool '{}' was not run: its effect could not be recorded ahead \
-                                     of time, so it was held back. Try again.",
-                                    call.name
-                                ),
-                                compaction_triggered: false,
-                            });
+                            Ok(runtime_loop::effect::ReserveOutcome::Created) => {}
+                            // The ledger already holds this action: an earlier attempt,
+                            // possibly of a loop that has since died, reserved it and may
+                            // have started it. It is never dispatched a second time; the
+                            // model is told, in the stable closed words, that the outcome
+                            // is unknown. The row is another attempt's, so it is not
+                            // finalized here either.
+                            Ok(runtime_loop::effect::ReserveOutcome::AlreadyReserved) => {
+                                warn!(
+                                    run_id = %req.run_id,
+                                    tool = %call.name,
+                                    "run_agent: effect ledger already holds this action; the call was not run again"
+                                );
+                                return Some(runtime_loop::StepOutcome {
+                                    status: "failed".to_owned(),
+                                    output: String::new(),
+                                    error: mp_contracts::loop_fold::closer_text(
+                                        mp_contracts::loop_fold::CloserKind::UnknownOutcome,
+                                        &call.name,
+                                    ),
+                                    compaction_triggered: false,
+                                });
+                            }
+                            Err(reason) => {
+                                warn!(
+                                    run_id = %req.run_id,
+                                    tool = %call.name,
+                                    %reason,
+                                    "run_agent: effect ledger reservation failed; the call was not run"
+                                );
+                                return Some(runtime_loop::StepOutcome {
+                                    status: "failed".to_owned(),
+                                    output: String::new(),
+                                    error: format!(
+                                        "tool '{}' was not run: its effect could not be recorded ahead \
+                                         of time, so it was held back. Try again.",
+                                        call.name
+                                    ),
+                                    compaction_triggered: false,
+                                });
+                            }
                         }
                     }
                     let mut outcome = None;
@@ -2212,9 +2243,18 @@ async fn run_rounds(
         {
             // The snapshot is taken only for a loop-owned pause: a cold approval's
             // descriptor is unchanged, so the cold path cannot regress with it.
-            let offered = if mp_contracts::loop_fold::continuation_mode_for(
-                req.zdr,
-                mp_contracts::loop_fold::continue_after_approval_enabled(),
+            //
+            // `loop` needs a run that keeps state: not zero-retention, and not waived
+            // (a waived run's `zdr` flag is false, so `!zdr` alone let it through),
+            // and a tool the resume boundary will release, in a run with no Space
+            // and no pinned route (a `/continue` states neither). Anything else is
+            // cold. This is the one place the mode is decided; `pause_for_approval`
+            // sends `loop` exactly when it is handed the snapshot this builds.
+            let offered = if super::resume::run_pause_mode(
+                !req.zdr && !ctx.route.is_waived(),
+                &req.space_id,
+                &req.provider_hint,
+                &pending.name,
             ) == "loop"
             {
                 let authority = super::resume::offered_authority(
@@ -4641,13 +4681,11 @@ async fn pause_for_approval(
     }
     let request = authenticated_session_request(
         pb::CreateApprovalRequest {
-            // Cold (the delivery worker) unless the durable-loop switch is on and
-            // the run retains state (build plan WS03 S2); default off.
-            continuation_mode: mp_contracts::loop_fold::continuation_mode_for(
-                req.zdr,
-                mp_contracts::loop_fold::continue_after_approval_enabled(),
-            )
-            .to_owned(),
+            // Cold (the delivery worker) unless the durable-loop switch is on, the
+            // run retains state and the tool is releasable (build plan WS03 S2).
+            // The caller decided that once and says so by handing over the
+            // snapshot a loop-owned pause retains: no snapshot, no loop mode.
+            continuation_mode: if offered.is_some() { "loop" } else { "" }.to_owned(),
             run_id: req.run_id.clone(),
             step_id: step_id.to_owned(),
             // Every pause used to report itself as DESTRUCTIVE. That is true of
@@ -5087,6 +5125,9 @@ struct ResumedSegment {
     tools: Vec<pb::ToolDefinition>,
     /// The permission mode the run was offered under, from the snapshot.
     mode: String,
+    /// The authority the segment runs under: the pause's, narrowed by what the
+    /// request stated. Applied to the request before the loop reads it.
+    effective: mp_contracts::loop_fold::Authority,
 }
 
 /// Consume the granted approval and build what the segment runs first.
@@ -5119,7 +5160,17 @@ async fn prepare_resume(
         .into_inner();
     // Won now, or the same claim replaying (a retried continue after a dropped
     // response): both continue. Another claim that already consumed it does not.
-    if !(consumed.consumed || (consumed.already_consumed && consumed.same_claim)) {
+    //
+    // A same-claim replay is only safe where the effect ledger fences a second
+    // dispatch of the approved call (its reservation comes back as already held).
+    // With the ledger off nothing does, and the claim token is client-chosen, so
+    // two concurrent continues with one token would both reach stage 1 and run the
+    // call twice. Without the ledger a replay is refused like any other consumed
+    // approval (the gateway refuses every consumed approval the same way).
+    let replay_is_fenced = super::effect::ledger_enabled();
+    if !(consumed.consumed
+        || (consumed.already_consumed && consumed.same_claim && replay_is_fenced))
+    {
         return Err(tonic::Status::failed_precondition("continuation_already_consumed"));
     }
 
@@ -5159,7 +5210,18 @@ async fn prepare_resume(
             parameters_json: t.parameters_json.clone(),
         })
         .collect();
-    let step_prefix = format!("s{}.", resume.segment_no.max(2));
+    // The authority the segment runs under: the pause's, narrowed by what the
+    // request states and refused if it widens (closed token, nothing has run).
+    let effective = super::resume::effective_authority(
+        &super::resume::authority_from_proto(snapshot),
+        req,
+    )
+    .map_err(super::resume::Refusal::status)?;
+    // The executor owns the segment number. It is derived from the step that
+    // paused, so a second continuation of one run never reuses the first one's
+    // step ids (approvals are keyed by run and step). `resume.segment_no` is not
+    // read: a gateway that still sends a literal keeps working.
+    let step_prefix = format!("s{}.", super::resume::next_segment_no(&consumed.step_id));
     let call = pb::ToolCall {
         id: "approved".to_owned(),
         name: tool,
@@ -5187,6 +5249,7 @@ async fn prepare_resume(
         },
         tools,
         mode: snapshot.mode.clone(),
+        effective,
     })
 }
 
@@ -5631,8 +5694,17 @@ mod tests {
         replayed_run_status: Option<String>,
         plan_transitions: Vec<(i32, i32)>, // (from, to)
         approvals: Vec<(String, String)>,  // (step_id, reason)
+        /// The `continuation_mode` of every `CreateApproval` the mock accepted, in
+        /// order: `loop` for a loop-owned pause, empty for the cold worker's.
+        approval_modes: Vec<String>,
         /// Every `ConsumeApproval` the mock observed (build plan WS03 S3).
         consume_calls: Vec<pb::ConsumeApprovalRequest>,
+        /// What `ConsumeApproval` answers instead of the default (a won consume of
+        /// `delete_records`), so a test can hand back another pause's call.
+        consume_response: Option<pb::ConsumeApprovalResponse>,
+        /// Make `ReserveToolAction` answer `created: false`, as session-core does
+        /// for an exact replay of an earlier reservation.
+        reserve_replays: bool,
         /// Every `ReserveToolAction` the mock accepted (build plan WS03 S5).
         reservations: Vec<pb::ReserveToolActionRequest>,
         /// `(action_id, outcome)` for every `FinalizeToolAction` the mock accepted.
@@ -6368,7 +6440,9 @@ mod tests {
                 return Err(Status::unavailable("tool ledger unavailable"));
             }
             rec.reservations.push(request.into_inner());
-            Ok(Response::new(pb::ReserveToolActionResponse { created: true }))
+            Ok(Response::new(pb::ReserveToolActionResponse {
+                created: !rec.reserve_replays,
+            }))
         }
 
         async fn finalize_tool_action(
@@ -6979,11 +7053,11 @@ mod tests {
                 return Err(Status::unavailable("approval persistence unavailable"));
             }
             let req = request.into_inner();
-            self.rec
-                .lock()
-                .unwrap()
-                .approvals
-                .push((req.step_id.clone(), req.reason));
+            {
+                let mut rec = self.rec.lock().unwrap();
+                rec.approval_modes.push(req.continuation_mode.clone());
+                rec.approvals.push((req.step_id.clone(), req.reason));
+            }
             // Return a real durable-style record (state REQUESTED) so callers that
             // resolve an approval id (e.g. execute_provider_action) get a genuine
             // per-decision id instead of nothing.
@@ -7024,11 +7098,11 @@ mod tests {
             &self,
             request: Request<pb::ConsumeApprovalRequest>,
         ) -> Result<Response<pb::ConsumeApprovalResponse>, Status> {
-            self.rec
-                .lock()
-                .unwrap()
-                .consume_calls
-                .push(request.into_inner());
+            let mut rec = self.rec.lock().unwrap();
+            rec.consume_calls.push(request.into_inner());
+            if let Some(response) = rec.consume_response.clone() {
+                return Ok(Response::new(response));
+            }
             Ok(Response::new(pb::ConsumeApprovalResponse {
                 consumed: true,
                 already_consumed: false,
@@ -9707,6 +9781,632 @@ mod tests {
 
         assert_eq!(resp.status, "awaiting_approval");
         assert_eq!(rec.lock().unwrap().approvals.len(), 1);
+    }
+
+    // ---- WS03 S3 corrections: the defects that go live with the continue switch ----
+
+    fn delete_records_tool() -> pb::ToolDefinition {
+        pb::ToolDefinition {
+            name: "delete_records".to_owned(),
+            description: "Delete records (destructive).".to_owned(),
+            parameters_json: r#"{"type":"object","properties":{}}"#.to_owned(),
+        }
+    }
+
+    /// A capability policy that counts how often a call reached the dispatch
+    /// pipeline: a call that was held back before dispatch never asks it.
+    struct CountingPolicy {
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    impl CountingPolicy {
+        fn new() -> Self {
+            Self {
+                calls: std::sync::atomic::AtomicUsize::new(0),
+            }
+        }
+
+        fn count(&self) -> usize {
+            self.calls.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    #[tonic::async_trait]
+    impl crate::capability_policy::CapabilityPolicy for CountingPolicy {
+        async fn evaluate(
+            &self,
+            _tool_name: &str,
+            _run_id: &str,
+            _org_id: &str,
+        ) -> Result<crate::capability_policy::CapabilityDecision, Status> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(crate::capability_policy::CapabilityDecision::Allow)
+        }
+    }
+
+    /// Drive `req` through the real loop for the persistent caller, with the
+    /// recorder's session mock and the given inference script.
+    async fn drive_persistent(
+        rec: &SharedRecorder,
+        req: pb::RunAgentRequest,
+        tools: Vec<pb::ToolDefinition>,
+        policy: &dyn crate::capability_policy::CapabilityPolicy,
+        inference_channel: Channel,
+    ) -> Result<pb::RunAgentResponse, tonic::Status> {
+        let session_channel = spawn_session_channel(rec.clone()).await;
+        let state = crate::state::StateStore::new();
+        run_agent_with_tools(
+            &state,
+            session_channel,
+            inference_channel,
+            &plain_caller(),
+            req,
+            tools,
+            None,
+            Some("session-token".to_owned()),
+            "inference-token".to_owned(),
+            policy,
+            &STATIC_TERMINAL_TOKENS,
+            None,
+            None,
+            &test_sandbox_manager_client(),
+            "test-backend",
+            None,
+            &test_sandbox_tokens(),
+            None,
+        )
+        .await
+    }
+
+    /// The `continuation_mode` of every approval a persistent `ask` run raises when
+    /// the model asks for `tool`, with the continue switch held at `switch_on`.
+    async fn pause_modes_for(tool: &str, arguments: &str, switch_on: bool) -> (usize, Vec<String>) {
+        pause_modes_with(tool, arguments, switch_on, |_| {}).await
+    }
+
+    /// [`pause_modes_for`] for a request `shape` has adjusted first.
+    async fn pause_modes_with(
+        tool: &str,
+        arguments: &str,
+        switch_on: bool,
+        shape: impl FnOnce(&mut pb::RunAgentRequest),
+    ) -> (usize, Vec<String>) {
+        let _switch = runtime_loop::resume::ContinueSwitch::set(switch_on);
+        let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
+        let inference_channel = spawn_inference_channel(vec![one_call(tool, arguments)]).await;
+        let mut req = sample_request();
+        req.mode = "ask".to_owned();
+        shape(&mut req);
+        let tools = vec![pb::ToolDefinition {
+            name: tool.to_owned(),
+            description: "A test tool.".to_owned(),
+            parameters_json: r#"{"type":"object","properties":{}}"#.to_owned(),
+        }];
+        let resp = drive_persistent(&rec, req, tools, &ALLOW_CAPABILITY_POLICY, inference_channel)
+            .await
+            .expect("the run pauses");
+        assert_eq!(resp.status, "awaiting_approval", "{tool} must pause the run");
+        let r = rec.lock().unwrap();
+        (r.approvals.len(), r.approval_modes.clone())
+    }
+
+    #[tokio::test]
+    async fn a_persistent_run_offers_a_loop_approval_only_with_the_switch_on() {
+        assert_eq!(
+            pause_modes_for("delete_records", "{}", true).await,
+            (1, vec!["loop".to_owned()]),
+            "the control: a persistent run's gated call is loop-owned with the switch on"
+        );
+        assert_eq!(
+            pause_modes_for("delete_records", "{}", false).await,
+            (1, vec![String::new()]),
+            "with the switch off the cold worker owns it, as before"
+        );
+    }
+
+    /// A waived run keeps no fold and its approval may not be consumed or
+    /// continued, so it must be cold. Its `zdr` flag is false (a waiver is
+    /// persistent for its connection), which is why "not ZDR" was never enough.
+    /// A waived run is always pinned, so the pinned-run rule also makes it cold;
+    /// the waiver rule on its own is pinned in `resume.rs`
+    /// (`a_pause_is_loop_owned_only_for_a_run_a_continue_can_reproduce`).
+    #[tokio::test]
+    async fn a_waived_run_never_offers_a_loop_approval() {
+        let _switch = runtime_loop::resume::ContinueSwitch::set(true);
+        let switches = mp_contracts::agentic_subscription::Switches {
+            enabled: true,
+            allow_effects: true,
+        };
+        let req = pb::RunAgentRequest {
+            plan_mode: false,
+            mode: "ask".to_owned(),
+            ..subscription_request()
+        };
+        let caller = crate::auth::AuthenticatedUser::for_test_with_waiver(
+            &req.org_id,
+            &req.user_id,
+            "conn_1",
+            "ack-1",
+        );
+        let route =
+            crate::agent_route::ModelRoute::resolve(&req, switches, COMPOSE_AGENT_MODEL, &caller)
+                .expect("the waived route is admitted on its own connection");
+        assert!(route.is_waived(), "the route carries the waiver");
+        assert!(!req.zdr, "a waived run is not a ZDR run: that is the point");
+
+        let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
+        let session_channel = spawn_session_channel(rec.clone()).await;
+        let inference_channel = spawn_inference_channel_with_routes(
+            vec![one_call("delete_records", "{}")],
+            Arc::new(Mutex::new(Vec::new())),
+            Serving::Echo,
+        )
+        .await;
+        let state = crate::state::StateStore::new();
+        let resp = run_agent_with_route(
+            &state,
+            session_channel,
+            inference_channel,
+            req,
+            vec![delete_records_tool()],
+            None,
+            Some("session-token".to_owned()),
+            "inference-token".to_owned(),
+            &ALLOW_CAPABILITY_POLICY,
+            &STATIC_TERMINAL_TOKENS,
+            None,
+            None,
+            &test_sandbox_manager_client(),
+            "test-backend",
+            None,
+            &test_sandbox_tokens(),
+            None,
+            route,
+            crate::run_budget::RunDeadline::NONE,
+        )
+        .await
+        .expect("the waived run pauses");
+
+        assert_eq!(resp.status, "awaiting_approval");
+        let r = rec.lock().unwrap();
+        assert_eq!(r.approvals.len(), 1, "the pause itself is unchanged");
+        assert_eq!(
+            r.approval_modes,
+            vec![String::new()],
+            "a waived run's approval belongs to the cold worker, never to the loop"
+        );
+    }
+
+    /// The gateway's `/continue` carries no Space and no route, and stage 1 refuses a
+    /// request whose Space or route differs from the pause's only after the
+    /// single-use consume. A Space run or a pinned (subscription) run is therefore
+    /// offered a cold approval, not a loop one it could never continue.
+    #[tokio::test]
+    async fn a_space_run_and_a_pinned_run_are_offered_a_cold_approval() {
+        // The control: the same pause with neither is loop-owned.
+        assert_eq!(
+            pause_modes_for("delete_records", "{}", true).await,
+            (1, vec!["loop".to_owned()])
+        );
+
+        let (approvals, modes) = pause_modes_with("delete_records", "{}", true, |req| {
+            req.space_id = "space-1".to_owned();
+        })
+        .await;
+        assert_eq!(approvals, 1, "the pause itself is unchanged");
+        assert_eq!(modes, vec![String::new()], "a Space run is cold");
+
+        // A pinned run that is NOT waived, so the waiver rule cannot explain a pass.
+        let _switch = runtime_loop::resume::ContinueSwitch::set(true);
+        let switches = mp_contracts::agentic_subscription::Switches {
+            enabled: true,
+            allow_effects: true,
+        };
+        let req = pb::RunAgentRequest {
+            plan_mode: false,
+            mode: "ask".to_owned(),
+            ..subscription_request()
+        };
+        let caller = plain_caller();
+        let route =
+            crate::agent_route::ModelRoute::resolve(&req, switches, COMPOSE_AGENT_MODEL, &caller)
+                .expect("a pinned run is admitted on a plain caller");
+        assert!(!route.is_waived(), "this run is pinned but not waived");
+        let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
+        let session_channel = spawn_session_channel(rec.clone()).await;
+        let inference_channel = spawn_inference_channel_with_routes(
+            vec![one_call("delete_records", "{}")],
+            Arc::new(Mutex::new(Vec::new())),
+            Serving::Echo,
+        )
+        .await;
+        let state = crate::state::StateStore::new();
+        let resp = run_agent_with_route(
+            &state,
+            session_channel,
+            inference_channel,
+            req,
+            vec![delete_records_tool()],
+            None,
+            Some("session-token".to_owned()),
+            "inference-token".to_owned(),
+            &ALLOW_CAPABILITY_POLICY,
+            &STATIC_TERMINAL_TOKENS,
+            None,
+            None,
+            &test_sandbox_manager_client(),
+            "test-backend",
+            None,
+            &test_sandbox_tokens(),
+            None,
+            route,
+            crate::run_budget::RunDeadline::NONE,
+        )
+        .await
+        .expect("the pinned run pauses");
+        assert_eq!(resp.status, "awaiting_approval");
+        let r = rec.lock().unwrap();
+        assert_eq!(r.approvals.len(), 1);
+        assert_eq!(
+            r.approval_modes,
+            vec![String::new()],
+            "a pinned run is cold: /continue could not name its route"
+        );
+    }
+
+    /// With the effect ledger off nothing fences a second dispatch of the approved
+    /// call, so a consume that reports the same claim already won must not continue:
+    /// the gateway's read of `consumed_at` has a check-then-act gap that two
+    /// concurrent `/continue` calls with one client-chosen token can both pass.
+    #[tokio::test]
+    async fn a_same_claim_replay_is_refused_when_the_ledger_is_off() {
+        let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
+        let policy = CountingPolicy::new();
+        let inference_channel =
+            spawn_inference_channel(vec![Scripted::Answer("checked".to_owned())]).await;
+        let error = drive_continue(
+            &rec,
+            continue_request(2),
+            consume_of("tool_1_del-1", false, true, snapshot_of(|_| {})),
+            false,
+            &policy,
+            inference_channel,
+        )
+        .await
+        .expect_err("the replay is refused");
+
+        assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+        assert_eq!(error.message(), "continuation_already_consumed");
+        assert_eq!(policy.count(), 0, "the approved call was not dispatched again");
+        let r = rec.lock().unwrap();
+        assert!(r.persisted_step_payloads.is_empty(), "nothing ran, nothing was recorded");
+        assert!(r.completed.is_empty());
+    }
+
+    /// A tool the resume boundary refuses (`not_releasable`) must not get a loop
+    /// approval: consuming it would spend the click and then strand the run.
+    #[tokio::test]
+    async fn a_non_releasable_tool_pause_is_cold() {
+        for (tool, arguments) in [
+            ("book_shipment", "{}"),
+            // The owner action needs well-formed arguments just to be paused.
+            (crate::ticket_tools::TOOL_NAME, r#"{"conversation_id":"conv_1"}"#),
+        ] {
+            assert!(
+                !runtime_loop::resume::releasable(tool),
+                "{tool} is meant to be a non-releasable tool"
+            );
+            let (approvals, modes) = pause_modes_for(tool, arguments, true).await;
+            assert_eq!(approvals, 1, "{tool}");
+            assert_eq!(
+                modes,
+                vec![String::new()],
+                "{tool}: a stage 1 refusal after the consume would strand the run"
+            );
+        }
+    }
+
+    /// Run one `auto` exchange where the model asks for the effectful
+    /// `delete_records`, with the ledger on and `policy` as the capability gate.
+    async fn run_effectful_call(
+        rec: &SharedRecorder,
+        policy: &dyn crate::capability_policy::CapabilityPolicy,
+    ) -> pb::RunAgentResponse {
+        let _ledger = runtime_loop::effect::LedgerSwitch::set(true);
+        let inference_channel = spawn_inference_channel(vec![
+            one_call("delete_records", r#"{"table":"customers"}"#),
+            Scripted::Answer("done".to_owned()),
+        ])
+        .await;
+        let mut req = sample_request();
+        req.mode = "auto".to_owned();
+        drive_persistent(rec, req, vec![delete_records_tool()], policy, inference_channel)
+            .await
+            .expect("the run returns a response")
+    }
+
+    /// A second reservation of an action the ledger already holds means an
+    /// earlier attempt may have started it. The call is never dispatched; it is
+    /// closed as an unknown outcome and the run goes on.
+    #[tokio::test]
+    async fn a_second_reserve_of_the_same_action_is_never_dispatched() {
+        // The control: a fresh reservation dispatches (the policy is asked).
+        let fresh: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
+        let fresh_policy = CountingPolicy::new();
+        run_effectful_call(&fresh, &fresh_policy).await;
+        assert!(
+            fresh_policy.count() >= 1,
+            "the harness must see a dispatch when the reservation is new"
+        );
+
+        let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
+        rec.lock().unwrap().reserve_replays = true;
+        let policy = CountingPolicy::new();
+        let resp = run_effectful_call(&rec, &policy).await;
+
+        assert_eq!(policy.count(), 0, "the call was never dispatched");
+        let r = rec.lock().unwrap();
+        assert_eq!(r.reservations.len(), 1, "it asked the ledger once");
+        assert!(
+            r.finalizations.is_empty(),
+            "another attempt's reservation is not ours to finalize"
+        );
+        assert!(
+            r.persisted_step_payloads
+                .iter()
+                .any(|(_, _, error)| error.contains("outcome is unknown")
+                    && error.contains("It was not retried")),
+            "the model is told the outcome is unknown: {:?}",
+            r.persisted_step_payloads
+        );
+        assert_eq!(resp.final_output, "done", "the run goes on");
+    }
+
+    /// The consume's answer for the paused `delete_records` call.
+    fn consume_of(
+        step_id: &str,
+        consumed: bool,
+        same_claim: bool,
+        authority: pb::ApprovedAuthority,
+    ) -> pb::ConsumeApprovalResponse {
+        pb::ConsumeApprovalResponse {
+            consumed,
+            already_consumed: !consumed,
+            same_claim,
+            tool_name: "delete_records".to_owned(),
+            tool_input_json: "{}".to_owned(),
+            step_id: step_id.to_owned(),
+            authority: Some(authority),
+        }
+    }
+
+    /// The approval snapshot a pause retains, for `authority` over `delete_records`.
+    fn snapshot_of(mutate: impl FnOnce(&mut mp_contracts::loop_fold::Authority)) -> pb::ApprovedAuthority {
+        let mut authority = mp_contracts::loop_fold::Authority {
+            mode: "ask".to_owned(),
+            plan_mode: false,
+            autonomy_rung: String::new(),
+            space_id: String::new(),
+            min_privacy_tier: 0,
+            provider_hint: String::new(),
+            tool_names: vec!["delete_records".to_owned()],
+            max_rounds: 4,
+        };
+        mutate(&mut authority);
+        pb::ApprovedAuthority {
+            mode: authority.mode.clone(),
+            plan_mode: authority.plan_mode,
+            autonomy_rung: authority.autonomy_rung.clone(),
+            space_id: authority.space_id.clone(),
+            min_privacy_tier: authority.min_privacy_tier,
+            provider_hint: authority.provider_hint.clone(),
+            max_rounds: authority.max_rounds,
+            tool_names: authority.tool_names.clone(),
+            tools: vec![pb::ApprovedTool {
+                name: "delete_records".to_owned(),
+                description: "Delete records (destructive).".to_owned(),
+                parameters_json: r#"{"type":"object","properties":{}}"#.to_owned(),
+            }],
+            digest: authority.digest(),
+        }
+    }
+
+    /// A `/continue` as the gateway sends it: neutral placeholders for everything
+    /// the snapshot owns, and whatever segment number it was built with.
+    fn continue_request(segment_no: u32) -> pb::RunAgentRequest {
+        let mut req = sample_request();
+        req.mode = "ask".to_owned();
+        req.resume = Some(pb::AgentResume {
+            mode: "segment".to_owned(),
+            approval_id: "appr_1".to_owned(),
+            claim_token: "claim-1".to_owned(),
+            segment_no,
+            ..Default::default()
+        });
+        req
+    }
+
+    /// Continue `req` against a consume that answers `consume`, with the ledger set
+    /// to `ledger_on`. Returns the result; the recorder keeps what the mocks saw.
+    async fn drive_continue(
+        rec: &SharedRecorder,
+        req: pb::RunAgentRequest,
+        consume: pb::ConsumeApprovalResponse,
+        ledger_on: bool,
+        policy: &dyn crate::capability_policy::CapabilityPolicy,
+        inference_channel: Channel,
+    ) -> Result<pb::RunAgentResponse, tonic::Status> {
+        let _ledger = runtime_loop::effect::LedgerSwitch::set(ledger_on);
+        rec.lock().unwrap().consume_response = Some(consume);
+        drive_persistent(rec, req, Vec::new(), policy, inference_channel).await
+    }
+
+    /// A stage 1 replay by the same claim (a retried continue after a dropped
+    /// response) finds the earlier attempt's reservation. The approved call may
+    /// already have run, so it is not run again; it is closed as unknown.
+    #[tokio::test]
+    async fn a_same_claim_replay_after_dispatch_does_not_run_the_call_again() {
+        let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
+        rec.lock().unwrap().reserve_replays = true;
+        let policy = CountingPolicy::new();
+        let inference_channel =
+            spawn_inference_channel(vec![Scripted::Answer("checked".to_owned())]).await;
+        let resp = drive_continue(
+            &rec,
+            continue_request(2),
+            consume_of("tool_1_del-1", false, true, snapshot_of(|_| {})),
+            true,
+            &policy,
+            inference_channel,
+        )
+        .await
+        .expect("the replay continues");
+
+        assert_eq!(policy.count(), 0, "the approved call was not dispatched a second time");
+        let r = rec.lock().unwrap();
+        assert!(r.finalizations.is_empty(), "the earlier attempt's row is not ours to close");
+        assert!(r
+            .persisted_step_payloads
+            .iter()
+            .any(|(step, _, error)| step == "s2.tool_1_approved" && error.contains("outcome is unknown")));
+        assert_eq!(resp.final_output, "checked");
+    }
+
+    /// Stage 1 runs under the authority the pause retained. The gateway's
+    /// `/continue` states nothing (no floor, no rung), and a request that states
+    /// nothing must not widen what the run paused with.
+    #[tokio::test]
+    async fn stage_one_applies_the_paused_authority_not_the_requests() {
+        let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
+        let observed_tiers: ObservedTiers = Arc::new(Mutex::new(Vec::new()));
+        let inference_channel =
+            spawn_inference_channel_with_tier(vec![Scripted::Answer("done".to_owned())], observed_tiers.clone())
+                .await;
+        let policy = CountingPolicy::new();
+        let sovereign = pb::PrivacyTier::Sovereign as i32;
+        let paused = snapshot_of(|authority| {
+            authority.autonomy_rung = "read_only".to_owned();
+            authority.min_privacy_tier = sovereign;
+        });
+        // The request: no floor, no rung, not plan mode.
+        let req = continue_request(2);
+        assert_eq!(req.min_privacy_tier, 0);
+        assert_eq!(req.autonomy_rung, pb::AutonomyRung::Unspecified as i32);
+
+        drive_continue(
+            &rec,
+            req,
+            consume_of("tool_1_del-1", true, false, paused),
+            false,
+            &policy,
+            inference_channel,
+        )
+        .await
+        .expect("the continuation runs");
+
+        assert_eq!(
+            *observed_tiers.lock().unwrap(),
+            vec![sovereign],
+            "the privacy floor of the pause rides on the round, not the request's 0"
+        );
+        assert_eq!(
+            policy.count(),
+            0,
+            "a read_only run's approved destructive call is refused by the rung, not run"
+        );
+    }
+
+    /// A request that states a wider authority than the pause is refused with a
+    /// closed token, never silently narrowed, and runs nothing.
+    #[tokio::test]
+    async fn a_widened_continue_is_refused_with_a_closed_token_and_runs_nothing() {
+        let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
+        let observed_tiers: ObservedTiers = Arc::new(Mutex::new(Vec::new()));
+        let inference_channel =
+            spawn_inference_channel_with_tier(vec![Scripted::Answer("done".to_owned())], observed_tiers.clone())
+                .await;
+        let policy = CountingPolicy::new();
+        let mut req = continue_request(2);
+        req.autonomy_rung = pb::AutonomyRung::DangerFullAccess as i32;
+        let paused = snapshot_of(|authority| authority.autonomy_rung = "read_only".to_owned());
+
+        let error = drive_continue(
+            &rec,
+            req,
+            consume_of("tool_1_del-1", true, false, paused),
+            false,
+            &policy,
+            inference_channel,
+        )
+        .await
+        .expect_err("a widened continue is refused");
+
+        assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+        assert_eq!(error.message(), "authority_widened");
+        assert_eq!(policy.count(), 0);
+        assert!(observed_tiers.lock().unwrap().is_empty(), "no round ran");
+
+        // A request for another Space is refused with its own token.
+        let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
+        let inference_channel =
+            spawn_inference_channel(vec![Scripted::Answer("done".to_owned())]).await;
+        let mut other_space = continue_request(2);
+        other_space.space_id = "space-2".to_owned();
+        let error = drive_continue(
+            &rec,
+            other_space,
+            consume_of("tool_1_del-1", true, false, snapshot_of(|_| {})),
+            false,
+            &policy,
+            inference_channel,
+        )
+        .await
+        .expect_err("a continue into another Space is refused");
+        assert_eq!(error.message(), "authority_space_mismatch");
+    }
+
+    /// Two continuations of one run must not mint the same step id: approvals are
+    /// keyed by `(run, step)`, so the second pause would collide with the first
+    /// segment's. The executor derives the segment number from the step that
+    /// paused; the number a client sends is ignored, not refused.
+    #[tokio::test]
+    async fn two_continuations_of_one_run_use_distinct_step_ids() {
+        let mut first_steps = Vec::new();
+        // (paused step id, the number an old gateway or a new one sent)
+        for (paused_step, sent) in [("tool_1_del-1", 2), ("tool_1_del-1", 0), ("s2.tool_1_approved", 2)] {
+            let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
+            let policy = CountingPolicy::new();
+            let inference_channel =
+                spawn_inference_channel(vec![Scripted::Answer("done".to_owned())]).await;
+            drive_continue(
+                &rec,
+                continue_request(sent),
+                consume_of(paused_step, true, false, snapshot_of(|_| {})),
+                false,
+                &policy,
+                inference_channel,
+            )
+            .await
+            .expect("the continuation runs whatever segment number was sent");
+            let r = rec.lock().unwrap();
+            let ran: Vec<&str> = r
+                .completed
+                .iter()
+                .map(|(step, _)| step.as_str())
+                .filter(|step| step.ends_with("tool_1_approved"))
+                .collect();
+            first_steps.push((paused_step, sent, ran.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>()));
+        }
+        assert_eq!(first_steps[0].2, vec!["s2.tool_1_approved".to_owned()]);
+        assert_eq!(
+            first_steps[1].2, first_steps[0].2,
+            "a client segment number of 0 or 2 changes nothing"
+        );
+        assert_eq!(
+            first_steps[2].2,
+            vec!["s3.tool_1_approved".to_owned()],
+            "a pause raised inside segment 2 continues as segment 3"
+        );
     }
 
     /// Run one scripted exchange that offers `tool`, with the effect ledger forced to

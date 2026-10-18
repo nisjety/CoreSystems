@@ -138,11 +138,28 @@ pub struct Authority {
     pub max_rounds: u32,
 }
 
+/// The width of a rung label, higher is wider. A run with no stated rung is not
+/// limited by the ladder at all (`check_autonomy_rung` is `Ok` for it), so an
+/// unspecified, empty or unrecognised label ranks **widest**: ranking it lowest let
+/// a resume that stated no rung read as a narrowing of any graded pause.
 fn rung_rank(label: &str) -> u8 {
     match label {
-        "danger_full_access" => 2,
+        "read_only" => 0,
         "workspace_write" => 1,
-        _ => 0,
+        "danger_full_access" => 2,
+        _ => 3,
+    }
+}
+
+/// The width of a permission mode, higher is wider: `deny` refuses risky calls,
+/// `ask` gates them behind a human, `auto` runs them. An unrecognised mode ranks
+/// widest, so a typo or a new word is never read as a narrowing.
+fn mode_rank(mode: &str) -> u8 {
+    match mode {
+        "deny" => 0,
+        "ask" => 1,
+        "auto" => 2,
+        _ => 3,
     }
 }
 
@@ -174,13 +191,15 @@ impl Authority {
     }
 
     /// Whether `self` (the authority of a resume) is no wider than `paused`
-    /// (the authority the run paused with): same Space and route, a rung no
-    /// higher, a privacy floor no lower, no tool that was not offered before,
-    /// and no more rounds.
+    /// (the authority the run paused with): same Space and route, a permission
+    /// mode no wider, a rung no higher, a privacy floor no lower, no tool that was
+    /// not offered before, and no more rounds. Plan mode may be turned on by a
+    /// resume and never off.
     #[must_use]
     pub fn narrows(&self, paused: &Self) -> bool {
         self.space_id == paused.space_id
             && self.provider_hint == paused.provider_hint
+            && mode_rank(&self.mode) <= mode_rank(&paused.mode)
             && rung_rank(&self.autonomy_rung) <= rung_rank(&paused.autonomy_rung)
             && self.min_privacy_tier >= paused.min_privacy_tier
             && self.max_rounds <= paused.max_rounds
@@ -265,16 +284,13 @@ pub fn continue_after_approval_enabled() -> bool {
 }
 
 /// The `continuation_mode` a new approval carries: `loop` when the switch is on
-/// and the run keeps state, otherwise empty (the cold worker, exactly as
-/// before). A zero-retention run never gets a loop mode: it retains a fold.
-#[must_use]
-pub const fn continuation_mode_for(zdr: bool, enabled: bool) -> &'static str {
-    if enabled && !zdr {
-        "loop"
-    } else {
-        ""
-    }
-}
+/// and the run keeps state (`persistent`), otherwise empty (the cold worker,
+/// exactly as before). The decision lives with the rest of the durable gate
+/// ([`crate::durable_gate`]); this is the same function under the path the
+/// callers already use. Its first argument was `zdr`: it is now `persistent`, and
+/// a caller passes `!zdr && !waived`, because a waived run's `zdr` flag is false
+/// while it keeps no state.
+pub use crate::durable_gate::continuation_mode_for;
 
 /// The stable model-facing sentence for a closed call. The tool name is data in
 /// the sentence, never an instruction; no raw tool output is included.
@@ -561,12 +577,13 @@ mod tests {
         assert!(!continue_after_approval_from(Some("0")));
         assert!(continue_after_approval_from(Some("true")));
         assert!(continue_after_approval_from(Some(" ON ")));
-        assert_eq!(continuation_mode_for(false, true), "loop");
-        assert_eq!(continuation_mode_for(false, false), "");
+        // `persistent` is the first argument (it was `zdr`): a run that keeps state.
+        assert_eq!(continuation_mode_for(true, true), "loop");
+        assert_eq!(continuation_mode_for(true, false), "");
         assert_eq!(
-            continuation_mode_for(true, true),
+            continuation_mode_for(false, true),
             "",
-            "a ZDR run keeps no fold"
+            "a ZDR or waived run keeps no fold"
         );
     }
 
@@ -600,6 +617,74 @@ mod tests {
         let mut more_rounds = authority();
         more_rounds.max_rounds = 9;
         assert!(!more_rounds.narrows(&paused));
+    }
+
+    /// A run with no stated rung is not limited by the ladder at all
+    /// (`check_autonomy_rung` is `Ok` for it), so "unspecified" is the WIDEST
+    /// rung, not the narrowest. Ranking it lowest let a resume that stated no
+    /// rung look like a narrowing of any graded pause.
+    #[test]
+    fn an_unspecified_or_unknown_rung_is_never_narrower_than_a_graded_one() {
+        let paused = authority(); // workspace_write
+        for label in ["", "unspecified", "unknown", "Danger_Full_Access", " read_only"] {
+            let mut resume = authority();
+            resume.autonomy_rung = label.to_owned();
+            assert!(
+                !resume.narrows(&paused),
+                "{label:?} states no graded rung, so it cannot narrow workspace_write"
+            );
+        }
+
+        // Against a paused authority that was itself unlimited, anything graded narrows
+        // and the same unlimited rung is no wider.
+        let mut open = authority();
+        open.autonomy_rung = "unspecified".to_owned();
+        for label in ["read_only", "workspace_write", "danger_full_access"] {
+            let mut graded = authority();
+            graded.autonomy_rung = label.to_owned();
+            assert!(graded.narrows(&open), "{label} narrows an unlimited pause");
+            assert!(!open.narrows(&graded), "an unlimited resume widens {label}");
+        }
+        assert!(open.narrows(&open));
+        let mut unknown = authority();
+        unknown.autonomy_rung = "something_new".to_owned();
+        assert!(unknown.narrows(&open), "unknown and unspecified are equally wide");
+        assert!(open.narrows(&unknown));
+
+        // The graded ladder is unchanged.
+        let mut read_only = authority();
+        read_only.autonomy_rung = "read_only".to_owned();
+        assert!(read_only.narrows(&paused));
+        let mut danger = authority();
+        danger.autonomy_rung = "danger_full_access".to_owned();
+        assert!(!danger.narrows(&paused));
+        assert!(paused.narrows(&danger));
+    }
+
+    /// `auto` runs risky calls without asking, `ask` gates them, `deny` refuses
+    /// them. A resume that moves up that ladder widens the authority; an unknown
+    /// mode is read as the widest, never as a narrow one.
+    #[test]
+    fn a_resume_may_not_widen_the_permission_mode() {
+        let with_mode = |mode: &str| {
+            let mut a = authority();
+            a.mode = mode.to_owned();
+            a
+        };
+        let (deny, ask, auto) = (with_mode("deny"), with_mode("ask"), with_mode("auto"));
+        assert!(!auto.narrows(&ask), "ask to auto widens");
+        assert!(!auto.narrows(&deny));
+        assert!(!ask.narrows(&deny), "deny to ask widens");
+        assert!(ask.narrows(&ask) && auto.narrows(&auto) && deny.narrows(&deny));
+        assert!(ask.narrows(&auto) && deny.narrows(&auto) && deny.narrows(&ask));
+
+        for unknown in ["", "execute", "bypass", "ASK"] {
+            let resume = with_mode(unknown);
+            assert!(!resume.narrows(&ask), "{unknown:?} is not read as ask");
+            assert!(!resume.narrows(&deny));
+            assert!(!resume.narrows(&auto), "{unknown:?} is wider than even auto");
+            assert!(ask.narrows(&resume), "a known mode narrows an unknown one");
+        }
     }
 
     #[test]
