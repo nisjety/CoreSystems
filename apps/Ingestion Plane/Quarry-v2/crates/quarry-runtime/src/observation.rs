@@ -2658,6 +2658,8 @@ mod tests {
             AgentAction::SelectSemantic { snapshot_id: snapshot(), generation: 1, locator: locator(), value: "v".into() },
             AgentAction::UploadRef { snapshot_id: snapshot(), generation: 1, ref_id: "e1".into(), artifact_id: Id::new(), approval_grant_id: "g".into() },
             AgentAction::DownloadRef { snapshot_id: snapshot(), generation: 1, ref_id: "e1".into(), approval_grant_id: "g".into() },
+            // Raw script is denied anyway; on an exhausted host the rule answers first.
+            AgentAction::Evaluate { script: "document.forms[0].submit()".into() },
         ]
     }
 

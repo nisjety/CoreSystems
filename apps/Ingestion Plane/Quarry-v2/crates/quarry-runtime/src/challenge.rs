@@ -1312,13 +1312,33 @@ impl BlockEpisodes {
         }
     }
 
-    /// Refuse an action on a host whose recovery is spent. Navigation to an
-    /// exhausted host (from any page) and every interaction with the page of an
-    /// exhausted `current_host` (click, type, press, select, upload or download of
-    /// one of its nodes) are refused with
-    /// `CHALLENGE_DETECTED`. Observation (screenshot, content, wait, scroll),
-    /// navigation to another host and history steps are allowed: the planner
-    /// can still look, report, or leave.
+    /// Refuse an action on a host whose recovery is spent. The rule is "one
+    /// recovery, then stop trying": what it stops is a further attempt to get
+    /// past the wall. Navigation to an exhausted host (from any page) and every
+    /// way of acting on the page of an exhausted `current_host` are refused with
+    /// `CHALLENGE_DETECTED`: click, type, press, select, upload or download of
+    /// one of its nodes, and `Evaluate`, because a script can do anything the
+    /// others can (click, type, submit, navigate). Raw script is also denied
+    /// before the driver, by the edge and by the runner, so this arm is a second
+    /// lock on a door that is already shut: it keeps the rule true if that
+    /// denial is ever relaxed for some caller.
+    ///
+    /// What stays allowed is what a person taking over, or a planner
+    /// reporting the block, needs, none of which is another attempt:
+    ///
+    /// * looking: screenshot, pdf, content, every wait (a wait is the recovery
+    ///   itself, and it has no effect on the page);
+    /// * `Scroll` and `MouseWheel`: moving the viewport asks the host for
+    ///   nothing new (the wheel is the pointer form of scroll);
+    /// * `RespondDialog`: answering a dialog the page has already opened, or
+    ///   the page stays wedged behind it and nobody can look at it either;
+    /// * `Back` and `Forward`: the way off the wall. Quarry does not know the
+    ///   history target, so it cannot tell a step back to the wall from a step
+    ///   away from it. The page the browser lands on is observed like any
+    ///   other, and every interaction with it is refused if its host is the
+    ///   exhausted one; a step to a page that is not a challenge clears the
+    ///   episode;
+    /// * navigation to another host.
     ///
     /// The error never names the host in a Zero Data Retention run.
     pub fn reject_if_exhausted(
@@ -1346,13 +1366,15 @@ impl BlockEpisodes {
             | AgentAction::UploadRef { .. }
             | AgentAction::FrameUploadRef { .. }
             | AgentAction::DownloadRef { .. }
-            | AgentAction::FrameDownloadRef { .. } => {
+            | AgentAction::FrameDownloadRef { .. }
+            | AgentAction::Evaluate { .. } => {
                 (!current_host.is_empty() && self.is_exhausted(current_host, zdr))
                     .then(|| current_host.to_ascii_lowercase())
             }
-            // Looking, waiting, scrolling and history steps stay allowed. No
-            // wildcard: a new action variant is a compile error until someone
-            // decides whether it is an interaction.
+            // Looking, waiting, scrolling, answering a dialog already open and
+            // history steps stay allowed (see the doc comment for why each).
+            // No wildcard: a new action variant is a compile error until
+            // someone decides whether it is an interaction.
             AgentAction::Scroll { .. }
             | AgentAction::MouseWheel { .. }
             | AgentAction::Wait { .. }
@@ -1363,7 +1385,6 @@ impl BlockEpisodes {
             | AgentAction::RespondDialog { .. }
             | AgentAction::Screenshot { .. }
             | AgentAction::Pdf
-            | AgentAction::Evaluate { .. }
             | AgentAction::Back
             | AgentAction::Forward
             | AgentAction::GetContent => None,
@@ -2119,6 +2140,7 @@ mod tests {
         refuse(AgentAction::Type { selector: "#q".into(), text: "x".into() }, HOST);
         refuse(AgentAction::Press { key: "Enter".into() }, HOST);
         refuse(AgentAction::Select { selector: "#s".into(), value: "v".into() }, HOST);
+        refuse(AgentAction::Evaluate { script: "document.forms[0].submit()".into() }, HOST);
 
         let allow = |action: AgentAction, host: &str| {
             assert!(
@@ -2209,7 +2231,8 @@ mod tests {
             | AgentAction::UploadRef { .. }
             | AgentAction::FrameUploadRef { .. }
             | AgentAction::DownloadRef { .. }
-            | AgentAction::FrameDownloadRef { .. } => true,
+            | AgentAction::FrameDownloadRef { .. }
+            | AgentAction::Evaluate { .. } => true,
             AgentAction::Scroll { .. }
             | AgentAction::MouseWheel { .. }
             | AgentAction::Wait { .. }
@@ -2220,7 +2243,6 @@ mod tests {
             | AgentAction::RespondDialog { .. }
             | AgentAction::Screenshot { .. }
             | AgentAction::Pdf
-            | AgentAction::Evaluate { .. }
             | AgentAction::Back
             | AgentAction::Forward
             | AgentAction::GetContent => false,
@@ -2253,6 +2275,87 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The decision for every action that is not obviously an interaction or
+    /// obviously a look, with the reason, so a change of mind has to change
+    /// this table and the doc comment of `reject_if_exhausted` together.
+    #[test]
+    fn the_borderline_actions_are_decided_one_by_one() {
+        let e = exhausted();
+        let table: Vec<(&str, AgentAction, bool, &str)> = vec![
+            (
+                "evaluate",
+                AgentAction::Evaluate { script: "fetch('/retry', { method: 'POST' })".into() },
+                true,
+                "a script can click, type, submit and navigate: it is every refused action at once",
+            ),
+            (
+                "mouse_wheel",
+                AgentAction::MouseWheel { x: 10.0, y: 10.0, delta_x: 0.0, delta_y: 120.0 },
+                false,
+                "the pointer form of scroll; asks the host for nothing",
+            ),
+            (
+                "respond_dialog",
+                AgentAction::RespondDialog {
+                    dialog_id: "d".into(),
+                    accept: false,
+                    approval_grant_id: "g".into(),
+                    prompt_text: None,
+                },
+                false,
+                "answers a dialog the page already opened; refusing it would wedge the page",
+            ),
+            (
+                "back",
+                AgentAction::Back,
+                false,
+                "the way off the wall; the landing page is gated by its own host",
+            ),
+            (
+                "forward",
+                AgentAction::Forward,
+                false,
+                "the same as back",
+            ),
+            (
+                "wait",
+                AgentAction::Wait { ms: 5000 },
+                false,
+                "the recovery itself, and passive",
+            ),
+        ];
+        for (name, action, refused, why) in table {
+            let verdict = e.reject_if_exhausted(&action, HOST, ZdrMode::Off);
+            assert_eq!(verdict.is_err(), refused, "{name}: {why}");
+            // None of them is gated from another host's page.
+            assert!(
+                e.reject_if_exhausted(&action, "other.example", ZdrMode::Off).is_ok(),
+                "{name} from another host"
+            );
+            // A host that is not exhausted gates none of them.
+            assert!(
+                episodes().reject_if_exhausted(&action, HOST, ZdrMode::Off).is_ok(),
+                "{name} before the recovery is spent"
+            );
+        }
+    }
+
+    #[test]
+    fn a_step_back_onto_the_exhausted_host_leaves_every_interaction_refused() {
+        // Back and Forward are allowed because the history target is unknown.
+        // What the planner finds there is judged by its own host: still the
+        // wall, so still closed; a page that is not a challenge reopens it.
+        let mut e = exhausted();
+        assert!(e.reject_if_exhausted(&AgentAction::Back, "other.example", ZdrMode::Off).is_ok());
+        assert!(e.reject_if_exhausted(&click(), HOST, ZdrMode::Off).is_err());
+        let wall = e.observe(HOST, ZdrMode::Off, Some(strong()), "h9").unwrap();
+        assert_eq!(wall.recovery, ChallengeRecovery::Exhausted);
+        assert!(e.reject_if_exhausted(&click(), HOST, ZdrMode::Off).is_err());
+        assert!(e.reject_if_exhausted(&nav("https://blocked.example/home"), "other.example", ZdrMode::Off).is_err());
+        assert_eq!(e.observe(HOST, ZdrMode::Off, None, "h10"), None);
+        assert!(e.reject_if_exhausted(&click(), HOST, ZdrMode::Off).is_ok());
     }
 
     #[test]
