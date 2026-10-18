@@ -585,6 +585,72 @@ async fn a_tab_opened_by_an_agent_during_a_takeover_is_refused_with_enforcement_
     assert_eq!(tabs[0]["operation"], "opened");
 }
 
+/// A person may select and close a tab during a take-over: the person holds the browser,
+/// so the gate admits them with enforcement on. Both reach the driver, and the timeline
+/// records each as the person's, under the epoch the take-over set.
+#[tokio::test]
+#[serial]
+async fn a_persons_tab_select_and_close_during_a_takeover_are_admitted() {
+    set_takeover_enforcement(Some("1"));
+
+    let edge = Edge::start(RunLimits::default()).await;
+    let person = member_token();
+    let run = edge.start_run(&person, json!({})).await;
+    let opened = edge.new_tab(&person, &run, None).await;
+    assert_eq!(opened.status, 200, "{}", opened.body);
+    let tab_id = opened.data()["tab"]["tabId"]
+        .as_str()
+        .expect("the new tab has an id")
+        .to_owned();
+    let takeover = edge
+        .control(&person, &run, json!({ "mode": "human_takeover" }))
+        .await;
+    assert_eq!(takeover.status, 200, "{}", takeover.body);
+
+    let select = edge
+        .post(
+            &person,
+            &format!("/v1/agent/runs/{run}/tabs/{tab_id}/select"),
+            json!({}),
+        )
+        .await;
+    assert_eq!(
+        select.status, 200,
+        "a person's select is admitted: {}",
+        select.body
+    );
+    assert_eq!(edge.driver.selected_tabs(), vec![tab_id.clone()]);
+
+    let close = edge
+        .delete(&person, &format!("/v1/agent/runs/{run}/tabs/{tab_id}"))
+        .await;
+    assert_eq!(
+        close.status, 200,
+        "a person's close is admitted: {}",
+        close.body
+    );
+    assert_eq!(edge.driver.closed_tabs(), vec![tab_id]);
+
+    let timeline = edge.timeline(&person, &run).await;
+    let tabs: Vec<&Value> = timeline
+        .iter()
+        .filter(|item| item["kind"] == "tab")
+        .collect();
+    let operations: Vec<&str> = tabs
+        .iter()
+        .map(|item| item["operation"].as_str().unwrap_or(""))
+        .collect();
+    assert_eq!(
+        operations,
+        vec!["opened", "selected", "closed"],
+        "{timeline:?}"
+    );
+    for item in &tabs[1..] {
+        assert_eq!(item["initiatedBy"], "human", "{item}");
+        assert_eq!(item["controlEpoch"], 1, "{item}");
+    }
+}
+
 // ── the browser socket ──────────────────────────────────────────────────────
 
 /// An action on a person's browser socket goes through the same chain as a REST step.

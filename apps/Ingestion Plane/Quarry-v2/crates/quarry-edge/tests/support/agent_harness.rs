@@ -193,6 +193,8 @@ pub struct RecordingDriver {
     tab_ids: Mutex<Vec<String>>,
     refuse_next_acquire: AtomicBool,
     tab_seq: AtomicU32,
+    tab_selects: Mutex<Vec<String>>,
+    tab_closes: Mutex<Vec<String>>,
 }
 
 impl RecordingDriver {
@@ -209,6 +211,16 @@ impl RecordingDriver {
     /// How many tabs were opened on the driver.
     pub fn tabs_opened(&self) -> usize {
         self.tab_urls.lock().unwrap().len()
+    }
+
+    /// Tab ids selected on the driver, in order.
+    pub fn selected_tabs(&self) -> Vec<String> {
+        self.tab_selects.lock().unwrap().clone()
+    }
+
+    /// Tab ids closed on the driver, in order.
+    pub fn closed_tabs(&self) -> Vec<String> {
+        self.tab_closes.lock().unwrap().clone()
     }
 
     /// Make the next `acquire` fail as a driver would.
@@ -326,6 +338,16 @@ impl BrowserDriver for RecordingDriver {
             url: url.map(str::to_owned),
             active: true,
         })
+    }
+
+    async fn select_tab(&self, _session: &BrowserSession, tab_id: &str) -> QuarryResult<()> {
+        self.tab_selects.lock().unwrap().push(tab_id.to_owned());
+        Ok(())
+    }
+
+    async fn close_tab(&self, _session: &BrowserSession, tab_id: &str) -> QuarryResult<()> {
+        self.tab_closes.lock().unwrap().push(tab_id.to_owned());
+        Ok(())
     }
 }
 
