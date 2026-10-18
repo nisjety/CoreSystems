@@ -130,6 +130,7 @@ facets deferred — need enriched results carrying those fields.)
 - **3C DOCX parsing** (S) — ✅ SHIPPED: `transform/src/docx.rs` — `extract_text(bytes)` unzips
   `word/document.xml` (added `zip` dep, deflate-only) + pure `strip_wordml` (runs→text, `</w:p>`/
   `<w:br>`→newline, entity unescape, blank-line collapse). 5 tests incl. in-memory zip round-trip.
+  Correction 2026-10-18: the parser had no production caller until WS5.B (2026-10-16). `/v1/scrape` parses DOCX only with `QUARRY_EDGE__DOC_ROUTING=on`, which defaults to `shadow`. See GAP.md.
 - **3D Structured rate-limit envelope** (S, api-design) — ✅ SHIPPED: `quarry-edge/src/api_error.rs`
   `ApiError{error,code,hint?,window?,retry_after_seconds?,next_actions[]}` + `humanize_secs` +
   `rate_limited()` builder; wired into `/v1/search` 429 path. 3 tests. (Other routes adopt the

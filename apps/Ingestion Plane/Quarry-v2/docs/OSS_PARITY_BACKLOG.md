@@ -19,14 +19,14 @@ runtime dep for us (Rust/Go), but its *practice* — read source, not marketing 
 ### Firecrawl (closest competitor: scrape/crawl/map/search/extract/agent/batch)
 | Capability | Quarry-v2 today | Verdict | Action |
 |---|---|---|---|
-| scrape → markdown/html/rawHtml/links/metadata inline (`formats[]`) | markdown, html, rawHtml, links and metadata ship; json, screenshot, summary, question and highlights are reserved and rejected until they exist | partial | json, screenshot and summary formats on `/v1/scrape` |
-| actions (click/scroll/write/wait/press) before extract | ActionRuntime, 13 variants | ✅ | — |
+| scrape → markdown/html/rawHtml/links/metadata inline (`formats[]`) | markdown, html and rawHtml come back inline when asked for (markdown by default under ZDR); links and metadata are accepted and change nothing, since both are in every response; json, screenshot, summary, question and highlights are reserved and refused with 400 `reserved_format` (CONTRACTS.md 9.1) | partial | json, screenshot and summary formats on `/v1/scrape` |
+| actions (click/scroll/write/wait/press) before extract | each agent step takes one of 33 `AgentAction` variants (`quarry-core/src/contracts.rs`), and the driver refuses some by capability (uploads, for one); `/v1/scrape` takes no `actions` (an unknown key, ignored with a warning) | partial | actions on `/v1/scrape`, if Firecrawl parity there is wanted |
 | batch scrape | `/v1/batch` | ✅ | — |
 | change tracking | change_history + baseline store + `/v1/change/*` | ✅ | — |
 | **`/map`** — fast whole-site URL discovery, relevance-ranked | sitemap.rs + frontier exist, **no endpoint** | ❌ | **P0 `/v1/map`** (reuse sitemap+robots+links+LexicalRanker) |
 | **`/extract`** — prompt+schema across `domain/*` wildcards | per-page StructuredExtractClient only | 🟡 | **P1** multi-URL/wildcard extract fan-out |
 | `agent` (FIRE-1) NL extraction | AgentLoop + Planner exist, not exposed as one call | 🟡 | fold into P1 `/v1/extract {prompt,schema}` |
-| media parsing (PDF/DOCX) | pdf.rs (text) | 🟡 | P2 add DOCX |
+| media parsing (PDF/DOCX) | PDF and DOCX text on `/v1/scrape` (`pdf.rs`, `docx.rs`) when `QUARRY_EDGE__DOC_ROUTING=on`; the default `shadow` only detects. The parse runs in a child process under address-space, CPU and file-descriptor limits (`QUARRY_EDGE__DOC_PARSE_ISOLATION`, default `process` on Unix). No OCR, no XLSX, PPTX, ODF or EPUB | 🟡 | OCR for scans; XLSX, PPTX, ODF and EPUB extraction |
 | MCP server (agents connect in 1 cmd) | none | ⛔ | deferred — **Verevon** is Quarry-v2's client, not external agents |
 | reliability claims (96% web, P95 3.4s) | unproven | 🟡 | benchmark lens → P2 live runs |
 
@@ -101,7 +101,7 @@ runtime dep for us (Rust/Go), but its *practice* — read source, not marketing 
 ### P2
 10. Tantivy index lifecycle (snapshot/reindex/aliases) + per-language analyzers + synonyms.
 11. DOM-for-LLM serialization upgrade + agent memory/scratchpad + sensitive_data redaction.
-12. DOCX/extended media parsing.
+12. Extended media parsing: OCR for scans, XLSX, PPTX, ODF and EPUB. PDF and DOCX text ships behind `QUARRY_EDGE__DOC_ROUTING=on`.
 13. Structured rate-limit error envelope (code/window/retry_after/next_actions).
 14. **Live benchmark corpus** vs Firecrawl/Tavily/Trafilatura/Readability → publish SCOREBOARD.md
     (reference projects publish benchmarks; we must too to claim parity). *Lens:* benchmark.
