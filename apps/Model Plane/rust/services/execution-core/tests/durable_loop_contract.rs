@@ -25,7 +25,17 @@
 //! * which tests drive each store's OWN gate (`store_proofs()`): the shared durable gate the
 //!   posture matrix is held against has no production caller, so the matrix proves the gate and
 //!   these tests, plus the wiring guards above, prove the stores. The map is checked: a named
-//!   test that is renamed, removed or commented out fails here.
+//!   test that is renamed, removed or commented out fails here;
+//! * the gateway's pre-consume (WS03 S7c-B): one `ConsumeApprovalRequest`, spend only
+//!   (`omit_call: true`), called in one place inside its bound, one detached task for the
+//!   consume and the launch (`trait ApprovalConsumer: Send + Sync`), one read of the resume
+//!   switch through `loop_resume_enabled()`, and no attestation field (`consumed_by_gateway`)
+//!   anywhere: the executor's own consume is a same-claim replay it accepts only through the
+//!   effect-ledger fence (`replay_is_fenced`), which is why the switches flip together;
+//! * the frames of a continuation are gated on the gateway's own spend knowledge
+//!   (`ApprovalSpend`), the five dispatch arms of `agentic_run_stream` keep their order, and
+//!   every refusal the executor can send is a word of the gateway's closed vocabulary;
+//! * a delegated child never writes a fold: `run_rounds` hands the writer gate `ctx.depth`.
 //!
 //! # How the guards are written
 //!
@@ -60,7 +70,11 @@ const SESSION_APPROVALS: &str = "../session-core/src/orchestration_store.rs";
 const SESSION_APPROVAL_RPC: &str = "../session-core/src/orchestration_grpc.rs";
 const SESSION_CHECKPOINT: &str = "../session-core/src/loop_checkpoint.rs";
 const SESSION_LEDGER: &str = "../session-core/src/tool_ledger.rs";
+const SESSION_TERMINALIZATION: &str = "../session-core/src/terminalization.rs";
+const GATEWAY_PRECONSUME_TESTS: &str = "../model-gateway/tests/continue_preconsume_test.rs";
 const COMPOSE: &str = "../../../deploy/docker-compose.yml";
+/// The protobuf sources, `apps/Model Plane/proto`, scanned for an attestation field.
+const PROTO_DIR: &str = "../../../proto";
 const MATRIX: &str = include_str!("fixtures/zdr-posture-matrix.json");
 
 /// Every directory whose production code must not read the continue switch itself.
@@ -486,24 +500,47 @@ fn builder_and_validator_violations(
     let Some(builder) = sse.fn_body("continue_resume") else {
         return vec!["sse.rs has no continue_resume builder".into()];
     };
+    let Some(stage_picker) = sse.fn_body("resume_mode_for") else {
+        return vec!["sse.rs has no resume_mode_for: the one place the gateway names a stage".into()];
+    };
     let Some(validator) = grpc.fn_body("enforce_resume") else {
         return vec!["grpc.rs has no enforce_resume validator".into()];
     };
-    let built_mode = Regex::new(r#"\bmode\s*:\s*"([a-z0-9_]+)"\s*\.to_owned\(\)"#)
-        .expect("pattern")
-        .captures(&builder)
-        .map(|captured| captured[1].to_owned());
     let accepted = Regex::new(r"matches!\(\s*resume\.mode\.as_str\(\)\s*,([^)]*)\)")
         .expect("pattern")
         .captures(&validator)
         .map(|captured| quoted(&captured[1]))
         .unwrap_or_default();
-    match built_mode {
-        None => violations.push("continue_resume does not build a literal mode".into()),
-        Some(mode) if !accepted.contains(&mode) => violations.push(format!(
-            "the gateway builds resume mode `{mode}` but the executor accepts only {accepted:?}"
-        )),
-        Some(_) => {}
+    // The builder asks for the stage it is GIVEN; the stages themselves are named in
+    // `resume_mode_for` alone, and every one of them is a stage the executor accepts.
+    if !Regex::new(r"\bmode\s*:\s*mode\s*\.to_owned\(\)")
+        .expect("pattern")
+        .is_match(&builder)
+    {
+        violations.push("continue_resume does not build its mode from its argument".into());
+    }
+    if quoted(&builder).iter().any(|word| !word.is_empty()) {
+        violations.push(
+            "continue_resume names a stage itself: only resume_mode_for names them".into(),
+        );
+    }
+    let stated: BTreeSet<String> = quoted(&stage_picker)
+        .into_iter()
+        .filter(|word| !word.is_empty())
+        .collect();
+    for stage in &stated {
+        if !accepted.contains(stage) {
+            violations.push(format!(
+                "the gateway asks for resume mode `{stage}` but the executor accepts only {accepted:?}"
+            ));
+        }
+    }
+    for required in ["segment", "loop"] {
+        if !stated.contains(required) {
+            violations.push(format!(
+                "resume_mode_for no longer names the `{required}` stage"
+            ));
+        }
     }
     for required in ["segment", "loop"] {
         if !accepted.contains(required) {
@@ -826,7 +863,7 @@ fn switch_table() -> Vec<(&'static str, String, &'static str)> {
         (
             "model-gateway",
             mp_contracts::loop_fold::LOOP_RESUME_ENV.to_owned(),
-            "the /continue pre-consume and the loop stage (the gateway's reader arrives with S7c-B; until then this pins only the compose entry)",
+            "the /continue pre-consume and the loop stage (read once in sse.rs continue_run through loop_resume_enabled; gateway_resume_reader_violations ties this row to that reader)",
         ),
         (
             "session-core",
@@ -1269,6 +1306,1042 @@ fn resume_parser_strictness_violations(loop_fold_source: &str) -> Vec<String> {
     }
 }
 
+// ---- WS03 S7c-B2: the gateway's pre-consume, the frames of a continuation, the coupled flip --
+
+/// The words of the list literal of `const NAME: .. = &[ .. ];`, from comment-free source.
+fn const_words(code: &Code, name: &str) -> Vec<String> {
+    Regex::new(&format!(r"\bconst\s+{name}\s*:[^=]*=\s*&\[([^\]]*)\]"))
+        .expect("pattern")
+        .captures(&code.text)
+        .map(|captured| {
+            Regex::new(r#""([a-z0-9_]*)""#)
+                .expect("pattern")
+                .captures_iter(&captured[1])
+                .map(|word| word[1].to_owned())
+                .collect::<Vec<String>>()
+        })
+        .unwrap_or_default()
+}
+
+/// The arguments of the call whose `(` is at `open` in the blanked source, as text, split at
+/// the commas of its own level.
+fn call_arguments(code: &Code, open: usize) -> Vec<String> {
+    let bytes = code.skel.as_bytes();
+    let mut depth = 0_i32;
+    let mut from = open + 1;
+    let mut arguments = Vec::new();
+    for (index, byte) in bytes.iter().enumerate().skip(open) {
+        match byte {
+            b'(' | b'[' | b'{' => depth += 1,
+            b')' | b']' | b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    let last = code.text[from..index].trim();
+                    if !last.is_empty() {
+                        arguments.push(last.to_owned());
+                    }
+                    return arguments;
+                }
+            }
+            b',' if depth == 1 => {
+                arguments.push(code.text[from..index].trim().to_owned());
+                from = index + 1;
+            }
+            _ => {}
+        }
+    }
+    arguments
+}
+
+/// The braces of the first block whose header (a regex over the blanked source that ends in
+/// the opening `{`) matches: an `impl`, a `trait`, an `enum`.
+fn block_span(code: &Code, header: &str) -> Option<(usize, usize)> {
+    let found = Regex::new(header).ok()?.find(&code.skel)?;
+    let open = found.end().checked_sub(1)?;
+    Some((open, matching_brace(&code.skel, open)?))
+}
+
+/// How many times `pattern` matches in `haystack`.
+fn matches_of(haystack: &str, pattern: &str) -> usize {
+    Regex::new(pattern)
+        .expect("pattern")
+        .find_iter(haystack)
+        .count()
+}
+
+/// What the gateway's `/continue` may do with the approval it spends itself (WS03 S7c).
+///
+/// With the resume switch on, `continue_run` consumes the approval BEFORE it opens the stream,
+/// and the order, the count and the detach of that flow are what make it safe, none of them
+/// visible to a test that does not race. So they are read from the source:
+///
+/// * the gateway builds ONE `ConsumeApprovalRequest`, in `preconsume_request`, and it carries
+///   `omit_call: true` (the gateway spends the click; it never asks session-core to decrypt
+///   the approved call, and the executor's own consume is the one that gets the call back);
+///   EVERY mention of `omit_call` in the gateway is that literal;
+/// * the consume RPC is called in one place, `impl ApprovalConsumer for GrpcApprovalConsumer`,
+///   inside the 10 s bound (`consume_within_bound`), and the only thing read from its answer is
+///   `.consumed`; nothing in the flow reads the call, the step, the authority or the replay
+///   flags;
+/// * the consume and the launch are ONE detached task: the pre-consume flow has exactly one
+///   `tokio::spawn`, in `spawn_consume_then_launch`, and none in `continue_run`, so a client
+///   that disconnects mid-consume cannot spend a click without the run being sent. The
+///   `tokio::spawn` count is the textual half; the compile half is the next bullet;
+/// * `trait ApprovalConsumer: Send + Sync`. The spawned task holds `&C` across an await, so
+///   its future is `Send` only if `C: Sync`. Dropping `Sync` from the trait is a COMPILE
+///   mutation (`spawn_consume_then_launch` stops building, E0277 on the `tokio::spawn`); the
+///   in-memory mutation here only proves the guard names the supertraits;
+/// * `continue_run` reads the resume switch ONCE (`loop_resume_enabled()`), builds the one
+///   launch closure (the single `agentic_run_stream(` call), returns `Ok(launch())` with the
+///   switch off, and only then reaches `spawn_consume_then_launch(`. The design's order
+///   `continue_preflight( < spawn_consume_then_launch( < agentic_run_stream(` cannot hold with
+///   one closure that serves both the off and the on path: the closure is defined first;
+/// * the gateway attests nothing to the executor: the one `AgentResume` literal names exactly
+///   the fields `mode`, `approval_id`, `claim_token`, `brief` and `segment_no`.
+fn gateway_consume_violations(gateway_sources: &[(String, String)]) -> Vec<String> {
+    let mut violations = Vec::new();
+    let Some((sse_path, sse_source)) = gateway_sources
+        .iter()
+        .find(|(path, _)| path.replace('\\', "/").ends_with("/sse.rs"))
+    else {
+        return vec!["the gateway sources have no sse.rs: re-point this guard".into()];
+    };
+    let sse = Code::new(sse_source).without_tests();
+
+    // One ConsumeApprovalRequest literal in the whole gateway, in preconsume_request.
+    let literal = Regex::new(r"\bConsumeApprovalRequest\s*\{").expect("pattern");
+    let consume_call = Regex::new(r"\.\s*consume_approval\s*\(").expect("pattern");
+    let mut literals = Vec::new();
+    let mut consume_calls = Vec::new();
+    let mut omit_mentions = 0;
+    for (path, source) in gateway_sources {
+        let is_sse = path == sse_path;
+        let owned;
+        let code = if is_sse {
+            &sse
+        } else {
+            owned = Code::new(source).without_tests();
+            &owned
+        };
+        for found in literal.find_iter(&code.text) {
+            // `-> .. ::ConsumeApprovalRequest {` is a return type followed by the body.
+            let before = code.text[..found.start()]
+                .trim_end_matches(|c: char| is_ident(c) || c == ':')
+                .trim_end();
+            if !before.ends_with("->") {
+                literals.push((is_sse, found.start()));
+            }
+        }
+        for found in consume_call.find_iter(&code.text) {
+            consume_calls.push((is_sse, found.start()));
+        }
+        for found in Regex::new(r"\bomit_call\b")
+            .expect("pattern")
+            .find_iter(&code.text)
+        {
+            omit_mentions += 1;
+            if !Regex::new(r"^omit_call\s*:\s*true\s*[,}]")
+                .expect("pattern")
+                .is_match(&code.text[found.start()..])
+            {
+                violations.push(format!(
+                    "{path} sets `omit_call` to something other than the literal `true`: the gateway consumes for the spend only and never takes the approved call"
+                ));
+            }
+        }
+    }
+    match literals.as_slice() {
+        [(true, at)] => match sse.fn_span("preconsume_request") {
+            Some((open, close)) if open < *at && *at < close => {}
+            _ => violations.push(
+                "the gateway's one ConsumeApprovalRequest literal is not inside preconsume_request"
+                    .into(),
+            ),
+        },
+        more => violations.push(format!(
+            "the gateway builds {} ConsumeApprovalRequest literals in production code, expected exactly one, in sse.rs preconsume_request",
+            more.len()
+        )),
+    }
+    if omit_mentions == 0 {
+        violations.push(
+            "the gateway's pre-consume never states `omit_call: true`: it would ask session-core for the whole approved call"
+                .into(),
+        );
+    }
+
+    // The consume RPC is called in one place, inside the bound, and its answer is read for
+    // `.consumed` alone.
+    let consumer = block_span(
+        &sse,
+        r"\bimpl\s+ApprovalConsumer\s+for\s+GrpcApprovalConsumer\s*\{",
+    );
+    match (consume_calls.as_slice(), consumer) {
+        ([(true, at)], Some((open, close))) if open < *at && *at < close => {}
+        (calls, _) => violations.push(format!(
+            "the gateway calls `.consume_approval(` {} times in production code; the one call is in `impl ApprovalConsumer for GrpcApprovalConsumer`",
+            calls.len()
+        )),
+    }
+    match consumer {
+        None => violations.push("sse.rs has no `impl ApprovalConsumer for GrpcApprovalConsumer`".into()),
+        Some((open, close)) => {
+            if !sse.skel[open..=close].contains("consume_within_bound(") {
+                violations.push(
+                    "the gateway's real consumer does not apply the bound (`consume_within_bound(`): a session-core that never answers would hold the click open"
+                        .into(),
+                );
+            }
+        }
+    }
+    match sse.fn_body_skel("consume_within_bound") {
+        None => violations.push("sse.rs has no `fn consume_within_bound`".into()),
+        Some(body) => {
+            if matches_of(&body, r"\.\s*consumed\b") != 1 {
+                violations.push(
+                    "consume_within_bound must read `.consumed` of the answer exactly once: the won flag is the one thing the gateway uses"
+                        .into(),
+                );
+            }
+        }
+    }
+
+    // What the pre-consume flow may read, and where it may spawn.
+    let reads = Regex::new(
+        r"\.\s*(tool_input_json|tool_name|authority|step_id|same_claim|already_consumed)\b",
+    )
+    .expect("pattern");
+    let spawn = r"\btokio\s*::\s*spawn\s*\(";
+    let mut flow: Vec<(String, Option<String>, usize)> = [
+        ("consume_within_bound", 0),
+        ("consume_then_launch", 0),
+        ("spawn_consume_then_launch", 1),
+        ("preconsume_refusal", 0),
+        ("preconsume_request", 0),
+        ("continue_run", 0),
+    ]
+    .into_iter()
+    .map(|(name, spawns)| (format!("fn {name}"), sse.fn_body_skel(name), spawns))
+    .collect();
+    flow.push((
+        "impl ApprovalConsumer for GrpcApprovalConsumer".to_owned(),
+        consumer.map(|(open, close)| sse.skel[open..=close].to_owned()),
+        0,
+    ));
+    for (what, body, spawns) in &flow {
+        let Some(body) = body else {
+            violations.push(format!("sse.rs has no {what}: re-point this guard"));
+            continue;
+        };
+        for found in reads.captures_iter(body) {
+            violations.push(format!(
+                "{what} reads `.{}` in the pre-consume flow: the gateway reads only the won flag of a consume",
+                &found[1]
+            ));
+        }
+        let found = matches_of(body, spawn);
+        if found != *spawns {
+            violations.push(format!(
+                "{what} has {found} tokio::spawn( calls, expected {spawns}: the pre-consume flow has exactly one detached task, in spawn_consume_then_launch"
+            ));
+        }
+    }
+
+    // The supertraits the spawned task needs.
+    match block_span(&sse, r"\btrait\s+ApprovalConsumer\s*:[^{]*\{") {
+        None => violations.push("sse.rs has no `trait ApprovalConsumer` with supertraits".into()),
+        Some((open, _)) => {
+            let header_start = sse.skel[..open].rfind("trait").unwrap_or(0);
+            let supertraits: BTreeSet<String> = sse.skel[header_start..open]
+                .split_once(':')
+                .map(|(_, rest)| {
+                    rest.split('+')
+                        .map(|name| name.trim().to_owned())
+                        .collect()
+                })
+                .unwrap_or_default();
+            for required in ["Send", "Sync"] {
+                if !supertraits.contains(required) {
+                    violations.push(format!(
+                        "trait ApprovalConsumer no longer declares `{required}` as a supertrait (it declares {supertraits:?}): the spawned consume-and-launch task holds `&C` across an await and is `Send` only if `C: Sync`"
+                    ));
+                }
+            }
+        }
+    }
+
+    // continue_run: one read of the switch, one launch, the order of the flow.
+    match (sse.fn_body_skel("continue_run"), sse.fn_body("continue_run")) {
+        (Some(body), Some(text)) => {
+            let count = |pattern: &str| matches_of(&body, pattern);
+            let reads_switch = count(r"\bloop_resume_enabled\s*\(");
+            if reads_switch != 1 {
+                violations.push(format!(
+                    "continue_run reads loop_resume_enabled() {reads_switch} times, expected exactly once: the stage, the pre-consume and the spend state must come from one read"
+                ));
+            }
+            if !Regex::new(r"\blet\s+resume_enabled\s*=\s*[\w:]*loop_resume_enabled\s*\(\s*\)\s*;")
+                .expect("pattern")
+                .is_match(&body)
+            {
+                violations.push(
+                    "continue_run does not bind the switch once as `let resume_enabled = ..loop_resume_enabled();`"
+                        .into(),
+                );
+            }
+            if text.contains("EXECUTION_LOOP_RESUME_ENABLED") || count(r"\benv\s*::\s*var\b") > 0 {
+                violations.push(
+                    "continue_run names the resume switch's env var: the gateway reads it through mp_contracts::loop_fold::loop_resume_enabled alone"
+                        .into(),
+                );
+            }
+            let launches = count(r"\bagentic_run_stream\s*\(");
+            if launches != 1 {
+                violations.push(format!(
+                    "continue_run calls agentic_run_stream( {launches} times, expected exactly one (the launch closure)"
+                ));
+            }
+            if count(r"\bspawn_consume_then_launch\s*\(") != 1 {
+                violations.push(
+                    "continue_run must call spawn_consume_then_launch( exactly once".into(),
+                );
+            }
+            if count(r"\bconsume_then_launch\s*\(") > 0 {
+                violations.push(
+                    "continue_run calls consume_then_launch( directly: the consume and the launch must run in the detached task of spawn_consume_then_launch"
+                        .into(),
+                );
+            }
+            let at = |pattern: &str| {
+                Regex::new(pattern)
+                    .expect("pattern")
+                    .find(&body)
+                    .map(|found| found.start())
+            };
+            let off_path = at(r"\bif\s*!\s*resume_enabled\s*\{\s*return\s+Ok\s*\(\s*launch\s*\(\s*\)\s*\)\s*;?\s*\}");
+            if off_path.is_none() {
+                violations.push(
+                    "continue_run no longer returns Ok(launch()) before any consume when the resume switch is off"
+                        .into(),
+                );
+            }
+            if let (Some(preflight), Some(switch), Some(stream), Some(off), Some(spawned)) = (
+                at(r"\bcontinue_preflight\s*\("),
+                at(r"\bloop_resume_enabled\s*\("),
+                at(r"\bagentic_run_stream\s*\("),
+                off_path,
+                at(r"\bspawn_consume_then_launch\s*\("),
+            ) {
+                if !(preflight < switch && switch < stream && stream < off && off < spawned) {
+                    violations.push(
+                        "continue_run's order is no longer continue_preflight( < loop_resume_enabled() < the launch closure (agentic_run_stream() < the off-switch return < spawn_consume_then_launch("
+                            .into(),
+                    );
+                }
+            }
+            if !Regex::new(r"\bagentic_run_stream\s*\([^;]*\bapproval_spend_for\s*\(\s*resume_enabled\s*\)\s*,?\s*\)")
+                .expect("pattern")
+                .is_match(&body)
+            {
+                violations.push(
+                    "continue_run's launch does not state its spend as approval_spend_for(resume_enabled)"
+                        .into(),
+                );
+            }
+        }
+        _ => violations.push("sse.rs has no `fn continue_run`: re-point this guard".into()),
+    }
+
+    // No attestation: the one AgentResume literal names the fields it always named.
+    match sse.fn_body("continue_resume") {
+        None => violations.push("sse.rs has no `fn continue_resume`".into()),
+        Some(body) => {
+            let allowed: BTreeSet<&str> =
+                ["mode", "approval_id", "claim_token", "brief", "segment_no"].into();
+            for field in Regex::new(r"(?:^|,|\{)\s*([a-z_]+)\s*:([^:]|$)")
+                .expect("pattern")
+                .captures_iter(&body)
+            {
+                if !allowed.contains(&field[1]) {
+                    violations.push(format!(
+                        "continue_resume names the field `{}` of AgentResume: the gateway attests nothing to the executor, it states the approval, the claim and the stage it asks for",
+                        &field[1]
+                    ));
+                }
+            }
+        }
+    }
+    violations
+}
+
+/// The one place a dispatch arm of `agentic_run_stream` is: the `Ok(Ok(Err(status)))` pattern,
+/// the text of its guard (what stands between the pattern and `=>`) and of its braced body.
+struct DispatchArm {
+    start: usize,
+    end: usize,
+    guard: String,
+    body: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ArmRole {
+    /// The click is spent by the gateway: never terminalized.
+    Spent,
+    /// The committed confirmed-rejection arm.
+    Confirmed,
+    /// A continuation the gateway did not pre-consume, refused with a closed token.
+    Typed,
+    /// The committed never-connected arm.
+    Unreachable,
+    /// The committed ambiguous-outcome arm.
+    Final,
+    Other,
+}
+
+/// The dispatch arms of `agentic_run_stream`, in source order, over comment-free source.
+fn dispatch_arms(code: &Code) -> Vec<DispatchArm> {
+    let Some((open, close)) = code.fn_span("agentic_run_stream") else {
+        return Vec::new();
+    };
+    let pattern = Regex::new(r"\bOk\(Ok\(Err\(status\)\)\)").expect("pattern");
+    let bytes = code.skel.as_bytes();
+    let mut arms = Vec::new();
+    for found in pattern.find_iter(&code.skel[open..close]) {
+        let start = open + found.start();
+        let after = open + found.end();
+        // The guard runs to the first `=>` outside any bracket.
+        let mut depth = 0_i32;
+        let mut arrow = None;
+        for index in after..close.saturating_sub(1) {
+            match bytes[index] {
+                b'(' | b'[' | b'{' => depth += 1,
+                b')' | b']' | b'}' => depth -= 1,
+                b'=' if depth == 0 && bytes[index + 1] == b'>' => {
+                    arrow = Some(index);
+                    break;
+                }
+                _ => {}
+            }
+        }
+        let Some(arrow) = arrow else {
+            continue;
+        };
+        let Some(brace) = code.skel[arrow..close].find('{').map(|offset| arrow + offset) else {
+            continue;
+        };
+        let Some(end) = matching_brace(&code.skel, brace) else {
+            continue;
+        };
+        arms.push(DispatchArm {
+            start,
+            end: end + 1,
+            guard: code.text[after..arrow].to_owned(),
+            body: code.text[brace..=end].to_owned(),
+        });
+    }
+    arms
+}
+
+fn arm_role(guard: &str) -> ArmRole {
+    let guard = guard.trim();
+    if Regex::new(r"^if\s+spend\.is_spent\(\)$")
+        .expect("pattern")
+        .is_match(guard)
+    {
+        ArmRole::Spent
+    } else if guard.contains("is_confirmed_agent_dispatch_rejection(") {
+        ArmRole::Confirmed
+    } else if guard.contains("classify_continue_dispatch_failure(") {
+        ArmRole::Typed
+    } else if guard.contains("dispatch_never_reached_execution_core(") {
+        ArmRole::Unreachable
+    } else if guard.is_empty() {
+        ArmRole::Final
+    } else {
+        ArmRole::Other
+    }
+}
+
+const TERMINALIZE: &str = r"\bterminalize_agent_dispatch_rejection_authenticated\b";
+
+/// What a frame of a continuation says about the spend is the GATEWAY's own knowledge
+/// (`ApprovalSpend`), never the executor's request (S7c, D1: no attestation).
+///
+/// * the first dispatch arm is guarded by `spend.is_spent()` alone (not by `resume.is_some()`:
+///   an unspent continuation must keep the committed arms), comes before the committed
+///   confirmed-rejection arm, and neither terminalizes nor names `AgentDispatchFailure`: the
+///   click is gone, the run's renewed recovery window ends it, and a refusal can be
+///   `continuation_already_consumed` while another segment of the run is live;
+/// * the request-construction failure checks `spend.is_spent()` before its terminalization;
+/// * `ApprovalSpend::SpentByGateway` is named only where the spend is built or expressed
+///   (`approval_spend_for`, `continue_failure_event`, `dispatch_unknown_event`, the enum and
+///   `is_spent`): nothing in the stream claims it;
+/// * the two callers of `agentic_run_stream` state their spend as `ApprovalSpend::NotSpent`
+///   (an ordinary turn) and `approval_spend_for(resume_enabled)` (a continuation);
+/// * the three ambiguous-outcome sites go through `dispatch_unknown_event(spend, ..)` and the
+///   `connected` frame through `connected_payload(.., spend)`.
+fn spend_gate_violations(gateway_sse: &str) -> Vec<String> {
+    let mut violations = Vec::new();
+    let sse = Code::new(gateway_sse).without_tests();
+    let Some(body) = sse.fn_body_skel("agentic_run_stream") else {
+        return vec!["sse.rs has no agentic_run_stream".into()];
+    };
+    let arms = dispatch_arms(&sse);
+    if arms.is_empty() {
+        return vec!["agentic_run_stream has no `Ok(Ok(Err(status)))` dispatch arm: re-point this guard".into()];
+    }
+    let roles: Vec<ArmRole> = arms.iter().map(|arm| arm_role(&arm.guard)).collect();
+    for arm in &arms {
+        if Regex::new(r"\bresume\b").expect("pattern").is_match(&arm.guard) {
+            violations.push(format!(
+                "a dispatch arm is guarded by `{}`: the spend is the gateway's own knowledge (ApprovalSpend), never the executor's request",
+                arm.guard.trim()
+            ));
+        }
+    }
+    match roles.iter().position(|role| *role == ArmRole::Spent) {
+        None => violations.push(format!(
+            "no dispatch arm is guarded by `spend.is_spent()` alone: a click the gateway spent would take the committed arms and be terminalized (guards: {:?})",
+            arms.iter().map(|arm| arm.guard.trim().to_owned()).collect::<Vec<_>>()
+        )),
+        Some(at) => {
+            let arm = &arms[at];
+            match roles.iter().position(|role| *role == ArmRole::Confirmed) {
+                Some(confirmed) if at > confirmed => violations.push(
+                    "the spent arm comes after the is_confirmed_agent_dispatch_rejection arm: a spent click refused with InvalidArgument, Unauthenticated or PermissionDenied would be terminalized"
+                        .into(),
+                ),
+                Some(_) => {}
+                None => violations.push(
+                    "the committed is_confirmed_agent_dispatch_rejection arm is gone".into(),
+                ),
+            }
+            if Regex::new(TERMINALIZE).expect("pattern").is_match(&arm.body) {
+                violations.push(
+                    "the spent arm terminalizes the run: the gateway never terminalizes a continuation whose click it spent"
+                        .into(),
+                );
+            }
+            if arm.body.contains("AgentDispatchFailure") {
+                violations.push("the spent arm names AgentDispatchFailure: it must not terminalize".into());
+            }
+            if !arm.body.contains("continue_failure_event(") {
+                violations.push(
+                    "the spent arm does not answer with continue_failure_event(..): every failure after a spend is a typed frame saying approval_spent"
+                        .into(),
+                );
+            }
+        }
+    }
+
+    // The request-construction failure checks the spend before it terminalizes.
+    let terminalize = Regex::new(TERMINALIZE).expect("pattern");
+    match (
+        body.find("spend.is_spent()"),
+        terminalize.find(&body).map(|found| found.start()),
+    ) {
+        (Some(checked), Some(terminalized)) if checked < terminalized => {}
+        _ => violations.push(
+            "agentic_run_stream terminalizes a request-construction failure without asking spend.is_spent() first"
+                .into(),
+        ),
+    }
+
+    // Nothing but the builders of the spend names SpentByGateway.
+    let mut cuts = Vec::new();
+    for name in ["approval_spend_for", "continue_failure_event", "dispatch_unknown_event", "is_spent"] {
+        match sse.fn_span(name) {
+            Some(span) => cuts.push(span),
+            None => violations.push(format!("sse.rs has no `fn {name}`: re-point this guard")),
+        }
+    }
+    match block_span(&sse, r"\benum\s+ApprovalSpend\s*\{") {
+        Some(span) => cuts.push(span),
+        None => violations.push("sse.rs has no `enum ApprovalSpend`".into()),
+    }
+    cuts.sort_unstable_by(|a, b| b.0.cmp(&a.0));
+    let mut remaining = sse.text.clone();
+    for (open, close) in cuts {
+        remaining.replace_range(open..=close, "");
+    }
+    if remaining.contains("SpentByGateway") {
+        violations.push(
+            "SpentByGateway is named outside approval_spend_for, continue_failure_event, dispatch_unknown_event and ApprovalSpend itself: something other than the pre-consume claims a spent click"
+                .into(),
+        );
+    }
+
+    // The two callers state their spend.
+    let call = Regex::new(r"\bagentic_run_stream\s*\(").expect("pattern");
+    let mut stated = Vec::new();
+    for found in call.find_iter(&sse.skel) {
+        if sse.skel[..found.start()].trim_end().ends_with("fn") {
+            continue;
+        }
+        let arguments = call_arguments(&sse, found.end() - 1);
+        stated.push(
+            arguments
+                .last()
+                .map(|last| last.split_whitespace().collect::<String>())
+                .unwrap_or_default(),
+        );
+    }
+    stated.sort();
+    if stated != ["ApprovalSpend::NotSpent", "approval_spend_for(resume_enabled)"] {
+        violations.push(format!(
+            "the callers of agentic_run_stream state their spend as {stated:?}, expected an ordinary turn's `ApprovalSpend::NotSpent` and a continuation's `approval_spend_for(resume_enabled)`"
+        ));
+    }
+
+    // The ambiguous outcomes and the first frame.
+    let unknown = matches_of(&body, r"\bdispatch_unknown_event\s*\(\s*spend\s*,");
+    if unknown != 3 {
+        violations.push(format!(
+            "agentic_run_stream asks dispatch_unknown_event(spend, ..) {unknown} times, expected the three ambiguous-outcome sites"
+        ));
+    }
+    if matches_of(&body, r"\bagent_dispatch_unavailable_event\s*\(") > 0 {
+        violations.push(
+            "agentic_run_stream builds agent_dispatch_unavailable_event( itself: after a spend a retry is a 409, so every ambiguous outcome goes through dispatch_unknown_event(spend, ..)"
+                .into(),
+        );
+    }
+    if matches_of(&body, r"\bconnected_payload\s*\([^)]*,\s*spend\s*\)") != 1 {
+        violations.push(
+            "the connected frame is not built by connected_payload(.., spend): a client must learn from the first frame that the click is spent"
+                .into(),
+        );
+    }
+    violations
+}
+
+/// A continuation the gateway did NOT pre-consume that the executor refuses with
+/// `FailedPrecondition`, `Aborted` or `NotFound` (or a zero-retention trailer) is a typed,
+/// non-retryable refusal frame: no `approval_spent`, no `RUN_DISPATCH_DEGRADED`, no
+/// terminalization. The five arms keep their order: spent, committed confirmed-rejection,
+/// typed refusal, committed unreachable, committed final. The typed arm must come AFTER the
+/// confirmed one (an `InvalidArgument`, `Unauthenticated` or `PermissionDenied` refusal keeps
+/// terminalizing, as it always did) and BEFORE the unreachable and final arms (which would
+/// otherwise swallow it as a degraded dispatch).
+fn refusal_arm_violations(gateway_sse: &str) -> Vec<String> {
+    let mut violations = Vec::new();
+    let sse = Code::new(gateway_sse).without_tests();
+    let arms = dispatch_arms(&sse);
+    let roles: Vec<ArmRole> = arms.iter().map(|arm| arm_role(&arm.guard)).collect();
+    let expected = [
+        ArmRole::Spent,
+        ArmRole::Confirmed,
+        ArmRole::Typed,
+        ArmRole::Unreachable,
+        ArmRole::Final,
+    ];
+    for role in expected {
+        let found = roles.iter().filter(|found| **found == role).count();
+        if found != 1 {
+            violations.push(format!(
+                "the dispatch match of agentic_run_stream has {found} {role:?} arms, expected exactly one (arm roles in order: {roles:?})"
+            ));
+        }
+    }
+    let at = |role: ArmRole| roles.iter().position(|found| *found == role);
+    for (earlier, later, why) in [
+        (ArmRole::Confirmed, ArmRole::Typed, "an InvalidArgument, Unauthenticated or PermissionDenied refusal would stop terminalizing"),
+        (ArmRole::Typed, ArmRole::Unreachable, "a refused continuation would be taken for a degraded dispatch"),
+        (ArmRole::Unreachable, ArmRole::Final, "the ambiguous arm would swallow a never-connected dispatch"),
+    ] {
+        if let (Some(first), Some(second)) = (at(earlier), at(later)) {
+            if second < first {
+                violations.push(format!(
+                    "the {later:?} dispatch arm comes before the {earlier:?} arm: {why}"
+                ));
+            }
+        }
+    }
+    if let Some(typed) = at(ArmRole::Typed) {
+        let arm = &arms[typed];
+        if !Regex::new(r"\bcontinuing\b").expect("pattern").is_match(&arm.guard)
+            || !Regex::new(r"!\s*spend\.is_spent\(\)").expect("pattern").is_match(&arm.guard)
+        {
+            violations.push(format!(
+                "the typed-refusal arm is not guarded by `continuing` and `!spend.is_spent()` (guard: `{}`): it would take an ordinary run's refusal, or a spent click's",
+                arm.guard.trim()
+            ));
+        }
+        for (needle, why) in [
+            ("terminalize_agent_dispatch_rejection_authenticated", "it must not terminalize: a refused or replayed segment can be refused while another segment of the run is live"),
+            ("AgentDispatchFailure", "it must not terminalize"),
+            ("RUN_DISPATCH_DEGRADED", "a refused or replayed segment is never a degraded dispatch"),
+            ("approval_spent", "the gateway does not know whether the executor spent the click first"),
+            ("SpentByGateway", "the gateway did not spend the click"),
+        ] {
+            if arm.body.contains(needle) {
+                violations.push(format!("the typed-refusal arm names `{needle}`: {why}"));
+            }
+        }
+        if !arm.body.contains("continue_refusal_event(") {
+            violations.push("the typed-refusal arm does not answer with continue_refusal_event(..)".into());
+        }
+    }
+    for (role, needle, what) in [
+        (ArmRole::Confirmed, "AgentDispatchFailure::Rejected", "the committed confirmed-rejection arm no longer terminalizes as Rejected"),
+        (ArmRole::Unreachable, "AgentDispatchFailure::Unreachable", "the committed unreachable arm no longer terminalizes as Unreachable"),
+        (ArmRole::Final, "dispatch_unknown_event(", "the final arm no longer calls dispatch_unknown_event"),
+    ] {
+        if let Some(found) = at(role) {
+            if !arms[found].body.contains(needle) {
+                violations.push(what.to_owned());
+            }
+        }
+    }
+    violations
+}
+
+/// The words of the continue vocabulary agree with what the executor can send (WS03 S7c).
+///
+/// The gateway names a refusal of a continuation by the message the executor sends it with
+/// (`CONTINUE_EXECUTOR_MESSAGE_TOKENS`) and answers any other message with `continue_refused`,
+/// never echoing it. So a new executor refusal that nobody adds to the list is silently
+/// anonymous, and a token on the list that nothing sends is dead. Both directions are read:
+///
+/// * every message of a `failed_precondition` / `aborted` / `invalid_argument` /
+///   `permission_denied` / `unauthenticated` status built on the executor's resume path
+///   (`enforce_resume`, `consume_for_resume`, `released_call`, `build_segment`,
+///   `begin_continuation`, `restore_continuation`, `run_rounds`, `select_stage`,
+///   `in_place_scope`, and `Refusal` in resume.rs) is in the list; `Refusal`'s own words are in
+///   the frame list, and all but the zero-retention one (whose status is the catalogue's) in
+///   the message list. `internal(..)` statuses are not refusals: they classify as unknown;
+/// * every token of the list is a quoted word in the executor's or session-core's production
+///   code (`produced_elsewhere`: their comment-free production text, joined);
+/// * the frame list is exactly the message list, the two derived codes
+///   (`approval_not_found`, `durable_mutation_forbidden`) and the three the gateway makes.
+fn continue_vocabulary_violations(
+    gateway_sse: &str,
+    executor_grpc: &str,
+    executor_loop: &str,
+    executor_resume: &str,
+    produced_elsewhere: &str,
+) -> Vec<String> {
+    let mut violations = Vec::new();
+    let sse = Code::new(gateway_sse).without_tests();
+    let tokens = const_words(&sse, "CONTINUE_EXECUTOR_MESSAGE_TOKENS");
+    let frames = const_words(&sse, "CONTINUE_FRAME_REFUSALS");
+    if tokens.is_empty() || frames.is_empty() {
+        return vec!["sse.rs has no CONTINUE_EXECUTOR_MESSAGE_TOKENS or CONTINUE_FRAME_REFUSALS: re-point this guard".into()];
+    }
+    for (name, list) in [("CONTINUE_EXECUTOR_MESSAGE_TOKENS", &tokens), ("CONTINUE_FRAME_REFUSALS", &frames)] {
+        let unique: BTreeSet<&String> = list.iter().collect();
+        if unique.len() != list.len() {
+            violations.push(format!("{name} lists a token twice"));
+        }
+    }
+    let token_set: BTreeSet<&str> = tokens.iter().map(String::as_str).collect();
+    let frame_set: BTreeSet<&str> = frames.iter().map(String::as_str).collect();
+    let mut expected_frames = token_set.clone();
+    expected_frames.extend([
+        "approval_not_found",
+        "durable_mutation_forbidden",
+        "continue_refused",
+        "continue_unreachable",
+        "continue_outcome_unknown",
+    ]);
+    if frame_set != expected_frames {
+        violations.push(format!(
+            "CONTINUE_FRAME_REFUSALS differs from the message tokens plus the five derived and gateway-made codes: only in the frame list {:?}, only in the expected set {:?}",
+            frame_set.difference(&expected_frames).collect::<Vec<_>>(),
+            expected_frames.difference(&frame_set).collect::<Vec<_>>()
+        ));
+    }
+
+    // The statuses of the resume path.
+    let agent = Code::new(executor_loop).without_tests();
+    let grpc = Code::new(executor_grpc).without_tests();
+    let resume = Code::new(executor_resume).without_tests();
+    let carrier = Regex::new(
+        r#"\b(?:failed_precondition|aborted|invalid_argument|permission_denied|unauthenticated)\s*\(\s*"([^"]*)""#,
+    )
+    .expect("pattern");
+    let mut bodies: Vec<(String, String)> = Vec::new();
+    for name in [
+        "consume_for_resume",
+        "released_call",
+        "build_segment",
+        "begin_continuation",
+        "restore_continuation",
+        "run_rounds",
+    ] {
+        match agent.fn_body(name) {
+            Some(body) => bodies.push((format!("agent.rs fn {name}"), body)),
+            None => violations.push(format!("agent.rs has no `fn {name}`: re-point this guard")),
+        }
+    }
+    for name in ["select_stage", "in_place_scope"] {
+        match resume.fn_body(name) {
+            Some(body) => bodies.push((format!("resume.rs fn {name}"), body)),
+            None => violations.push(format!("resume.rs has no `fn {name}`: re-point this guard")),
+        }
+    }
+    match grpc.fn_body("enforce_resume") {
+        Some(body) => bodies.push(("grpc.rs fn enforce_resume".to_owned(), body)),
+        None => violations.push("grpc.rs has no `fn enforce_resume`".into()),
+    }
+    for (what, body) in &bodies {
+        for captured in carrier.captures_iter(body) {
+            let word = &captured[1];
+            if !token_set.contains(word) {
+                violations.push(format!(
+                    "{what} refuses a continuation with `{word}`, which CONTINUE_EXECUTOR_MESSAGE_TOKENS does not list: the gateway would answer it as the anonymous `continue_refused`"
+                ));
+            }
+        }
+    }
+    match block_span(&resume, r"\bimpl\s+Refusal\s*\{") {
+        None => violations.push("resume.rs has no `impl Refusal`".into()),
+        Some((open, close)) => {
+            let words = quoted(&resume.text[open..=close]);
+            if words.is_empty() {
+                violations.push("resume.rs `impl Refusal` names no token: re-point this guard".into());
+            }
+            for word in words.iter().filter(|word| !word.is_empty()) {
+                if !frame_set.contains(word.as_str()) {
+                    violations.push(format!(
+                        "resume.rs Refusal names `{word}`, which CONTINUE_FRAME_REFUSALS does not list"
+                    ));
+                }
+                if word != "durable_mutation_forbidden" && !token_set.contains(word.as_str()) {
+                    violations.push(format!(
+                        "resume.rs Refusal sends `{word}` as a status message, which CONTINUE_EXECUTOR_MESSAGE_TOKENS does not list"
+                    ));
+                }
+            }
+        }
+    }
+
+    // Every token is sent by something.
+    for token in &tokens {
+        if !produced_elsewhere.contains(&format!("\"{token}\"")) {
+            violations.push(format!(
+                "CONTINUE_EXECUTOR_MESSAGE_TOKENS lists `{token}`, which no executor or session-core production code sends: a dead token"
+            ));
+        }
+    }
+    violations
+}
+
+/// The D1 pin: the gateway pre-consumes, so the executor's own consume of the same approval is
+/// a same-claim replay, and the executor accepts a replay ONLY when the effect ledger fences a
+/// second dispatch of the approved call. With the ledger off nothing does and the claim token is
+/// client-chosen, so two concurrent continues with one token would both run the call. This is
+/// why the gateway resume switch, the executor resume switch, the ledger, the continue switches
+/// and the checkpoint switches are one coupled flip.
+///
+/// * every read of `.same_claim` in the executor's production code is followed by
+///   `&& replay_is_fenced` (or its negation, for the operator's warn line);
+/// * `replay_is_fenced` is bound once, to `effect::ledger_enabled()`, and never assigned again.
+fn resume_pair_violations(executor_sources: &[(String, String)]) -> Vec<String> {
+    let mut violations = Vec::new();
+    let mut reads = 0;
+    let mut bindings = 0;
+    let mut assignments = 0;
+    let followed = Regex::new(r"^\.\s*same_claim\s*&&\s*!?\s*replay_is_fenced\b").expect("pattern");
+    let binding = Regex::new(
+        r"\blet\s+replay_is_fenced\s*=\s*(?:\w+\s*::\s*)*ledger_enabled\s*\(\s*\)\s*;",
+    )
+    .expect("pattern");
+    for (path, source) in executor_sources {
+        let code = Code::new(source).without_tests();
+        for found in Regex::new(r"\.\s*same_claim\b")
+            .expect("pattern")
+            .find_iter(&code.text)
+        {
+            reads += 1;
+            if !followed.is_match(&code.text[found.start()..]) {
+                violations.push(format!(
+                    "{path} reads `.same_claim` without `&& replay_is_fenced` after it: a same-claim replay is accepted only where the effect ledger fences a second dispatch"
+                ));
+            }
+        }
+        bindings += binding.find_iter(&code.text).count();
+        assignments += matches_of(&code.text, r"\breplay_is_fenced\s*=([^=]|$)");
+    }
+    if reads == 0 {
+        violations.push(
+            "the executor no longer reads `.same_claim`: the same-claim replay rule moved, re-point this guard"
+                .into(),
+        );
+    }
+    if bindings != 1 || assignments != 1 {
+        violations.push(format!(
+            "replay_is_fenced must be bound exactly once, to effect::ledger_enabled(), and never assigned again: {bindings} such bindings, {assignments} assignments"
+        ));
+    }
+    violations
+}
+
+/// The gateway reads the in-place resume switch through `mp_contracts::loop_fold::loop_resume_enabled`
+/// ONCE, in `continue_run`, and through nothing else; and because it reads it, compose sets it
+/// for model-gateway (a `switch_table()` row for the service), as it does for the executor.
+fn gateway_resume_reader_violations(
+    gateway_sources: &[(String, String)],
+    table: &[(&'static str, String, &'static str)],
+) -> Vec<String> {
+    let mut violations = Vec::new();
+    let env = mp_contracts::loop_fold::LOOP_RESUME_ENV;
+    let mut readers = Vec::new();
+    for (path, source) in gateway_sources {
+        let code = Code::new(source).without_tests();
+        for word in [env, "LOOP_RESUME_ENV"] {
+            if code.text.contains(word) {
+                violations.push(format!(
+                    "{path} names {word} itself: the gateway reads the resume switch through mp_contracts::loop_fold::loop_resume_enabled alone"
+                ));
+            }
+        }
+        for found in Regex::new(r"\bloop_resume_enabled\s*\(")
+            .expect("pattern")
+            .find_iter(&code.text)
+        {
+            let in_continue_run = code
+                .fn_span("continue_run")
+                .is_some_and(|(open, close)| open < found.start() && found.start() < close);
+            readers.push((path.clone(), in_continue_run));
+        }
+    }
+    match readers.as_slice() {
+        [(path, true)] if path.replace('\\', "/").ends_with("/sse.rs") => {}
+        other => violations.push(format!(
+            "the gateway must call loop_resume_enabled() exactly once, inside sse.rs continue_run; it calls it {} times ({other:?})",
+            other.len()
+        )),
+    }
+    if !readers.is_empty() {
+        for service in ["model-gateway", "execution-core"] {
+            if !table.iter().any(|(row, key, _)| *row == service && key == env) {
+                violations.push(format!(
+                    "switch_table() has no {service} row for {env}, but {service} reads it: compose must set it there so the coupled flip is one flip"
+                ));
+            }
+        }
+    }
+    violations
+}
+
+/// No attestation (D1): the executor decides what the gateway did from its own consume, so no
+/// field says "the gateway consumed it". The name is absent from every Rust production source
+/// and every non-comment proto line.
+fn no_attestation_violations(
+    rust_sources: &[(String, String)],
+    proto_sources: &[(String, String)],
+) -> Vec<String> {
+    let mut violations = Vec::new();
+    for (path, source) in rust_sources {
+        if Code::new(source).without_tests().text.contains("consumed_by_gateway") {
+            violations.push(format!(
+                "{path} names consumed_by_gateway: there is no attestation field, the executor's consume is a same-claim replay (D1)"
+            ));
+        }
+    }
+    for (path, source) in proto_sources {
+        let code: String = source
+            .lines()
+            .map(|line| line.split("//").next().unwrap_or(""))
+            .collect::<Vec<_>>()
+            .join("\n");
+        if code.contains("consumed_by_gateway") {
+            violations.push(format!(
+                "{path} declares consumed_by_gateway: there is no attestation field (D1)"
+            ));
+        }
+    }
+    violations
+}
+
+/// A delegated child never writes a fold, and a release holder is a resumed segment (WS03 S6/S7b).
+///
+/// `WriterGate::decide` refuses `depth > 0` (`OffReason::Delegated`), and `run_rounds` is the one
+/// place the loop builds its gate, so what keeps a child out is `writer_gate` being handed
+/// `ctx.depth`. A literal `0` there is invisible to every behavioural test that does not run a
+/// delegated child with the writer on, and would let a child overwrite the root run's fold.
+/// So the call is read in exactly this shape:
+/// `writer_gate(req, &ctx.route, ctx.effect_ledger, ctx.depth, ctx.release.is_some(), in_place)`.
+/// `ctx.release.is_some()` is the release flag (`holds_release`), `in_place` the resume's.
+/// A child's context is built from `depth: parent.depth + 1`, and the gate's `decide` still
+/// reads `self.depth > 0`.
+fn writer_gate_argument_violations(executor_loop: &str, executor_fold: &str) -> Vec<String> {
+    let mut violations = Vec::new();
+    let agent = Code::new(executor_loop).without_tests();
+    let fold = Code::new(executor_fold).without_tests();
+    let Some((open, close)) = agent.fn_span("run_rounds") else {
+        return vec!["agent.rs has no `fn run_rounds`: re-point this guard".into()];
+    };
+    let calls: Vec<usize> = Regex::new(r"\bwriter_gate\s*\(")
+        .expect("pattern")
+        .find_iter(&agent.skel[open..close])
+        .map(|found| open + found.end() - 1)
+        .collect();
+    match calls.as_slice() {
+        [paren] => {
+            let arguments: Vec<String> = call_arguments(&agent, *paren)
+                .iter()
+                .map(|argument| argument.split_whitespace().collect::<String>())
+                .collect();
+            let expected = [
+                ("depth", 3, "ctx.depth", "a delegated child must never write folds"),
+                (
+                    "release flag",
+                    4,
+                    "ctx.release.is_some()",
+                    "a release holder is a resumed segment",
+                ),
+                ("in-place flag", 5, "in_place", "an in-place resume is not a stage-1 segment"),
+            ];
+            if arguments.len() != 6 {
+                violations.push(format!(
+                    "run_rounds calls writer_gate with {} arguments, expected (req, &ctx.route, ctx.effect_ledger, ctx.depth, ctx.release.is_some(), in_place)",
+                    arguments.len()
+                ));
+            } else {
+                for (name, index, want, why) in expected {
+                    if arguments[index] != want {
+                        violations.push(format!(
+                            "run_rounds passes `{}` as the writer gate's {name}, expected `{want}`: {why}",
+                            arguments[index]
+                        ));
+                    }
+                }
+            }
+        }
+        other => violations.push(format!(
+            "run_rounds calls writer_gate( {} times, expected the one place the loop builds its gate",
+            other.len()
+        )),
+    }
+    match agent.fn_body("writer_gate") {
+        None => violations.push("agent.rs has no `fn writer_gate`".into()),
+        Some(body) => {
+            if !Regex::new(r"\bdepth\s*(?:,|:\s*depth\b)")
+                .expect("pattern")
+                .is_match(&body)
+            {
+                violations.push("writer_gate does not hand its `depth` argument to the gate".into());
+            }
+        }
+    }
+    if !Regex::new(r"\bdepth\s*:\s*parent\s*\.\s*depth\s*\+\s*1\b")
+        .expect("pattern")
+        .is_match(&agent.text)
+    {
+        violations.push(
+            "a delegated child's context is no longer built with `depth: parent.depth + 1`"
+                .into(),
+        );
+    }
+    match fold.fn_body("decide") {
+        Some(body) if Regex::new(r"\bself\s*\.\s*depth\s*>\s*0\b").expect("pattern").is_match(&body) => {}
+        _ => violations.push("WriterGate::decide no longer refuses `self.depth > 0`".into()),
+    }
+    violations
+}
+
 /// One durable store's real gate in production, and the tests that drive it.
 ///
 /// `mp_contracts::durable_gate::refuse_unless_persistent` is the SPECIFICATION of when a store
@@ -1314,11 +2387,40 @@ fn store_proofs() -> Vec<StoreProof> {
         },
         StoreProof {
             store: Some(DurableStore::Consume),
-            gate: "approval consume: CONSUME_APPROVAL_SQL joins runs.retention_class = 'persistent' (session-core)",
-            tests: &[(
-                SESSION_APPROVALS,
-                "approval_consume_refuses_a_waived_run_and_a_zdr_run",
-            )],
+            gate: "approval consume: CONSUME_APPROVAL_SQL joins runs.retention_class = 'persistent' (session-core); the gateway's spend-only consume (omit_call) goes through the same statement",
+            tests: &[
+                (
+                    SESSION_APPROVALS,
+                    "approval_consume_refuses_a_waived_run_and_a_zdr_run",
+                ),
+                // The spend-only consume (WS03 S7c-A2): no call content leaves session-core, and
+                // the winning transaction renews the run's recovery deadline. The DB-backed ones
+                // are #[ignore] (the disposable-Postgres harness runs them, `cargo test` does not).
+                (
+                    SESSION_APPROVAL_RPC,
+                    "omit_call_withholds_the_call_but_keeps_the_flags",
+                ),
+                (
+                    SESSION_APPROVAL_RPC,
+                    "without_omit_call_the_response_is_unchanged",
+                ),
+                (
+                    SESSION_APPROVALS,
+                    "a_renewal_statement_is_scoped_to_the_run_org_and_open_states",
+                ),
+                (
+                    SESSION_APPROVALS,
+                    "a_won_spend_only_consume_renews_the_recovery_deadline",
+                ),
+                (
+                    SESSION_APPROVALS,
+                    "a_lost_or_replayed_spend_only_consume_does_not_renew",
+                ),
+                (
+                    SESSION_TERMINALIZATION,
+                    "a_spent_click_is_not_recovered_before_the_executor_heartbeats",
+                ),
+            ],
         },
         StoreProof {
             store: Some(DurableStore::Continue),
@@ -1335,6 +2437,45 @@ fn store_proofs() -> Vec<StoreProof> {
                 (
                     GATEWAY_SSE,
                     "continue_run_calls_the_persistent_gate_before_it_reads_anything",
+                ),
+                // The gateway's own pre-consume (WS03 S7c): the order of consume and launch, the
+                // single detached task, the closed refusal of a lost consume, the typed body a
+                // zero-retention refusal of the consume keeps, and the frame arms.
+                (
+                    GATEWAY_SSE,
+                    "continue_run_consumes_through_the_spawned_helper_after_the_preflight",
+                ),
+                (
+                    GATEWAY_SSE,
+                    "a_consume_that_did_not_win_is_a_409_before_any_stream_opens",
+                ),
+                (
+                    GATEWAY_SSE,
+                    "a_dropped_receiver_cannot_spend_an_approval_without_dispatching",
+                ),
+                (
+                    GATEWAY_SSE,
+                    "a_zero_retention_refusal_of_the_consume_keeps_its_typed_body",
+                ),
+                (
+                    GATEWAY_SSE,
+                    "the_dispatch_arms_of_a_continuation_are_spent_then_confirmed_then_typed_then_the_committed_ones",
+                ),
+                (
+                    GATEWAY_PRECONSUME_TESTS,
+                    "the_gateway_consumes_the_approval_before_it_dispatches_the_run",
+                ),
+                (
+                    GATEWAY_PRECONSUME_TESTS,
+                    "a_lost_consume_is_a_409_and_dispatches_nothing",
+                ),
+                (
+                    GATEWAY_PRECONSUME_TESTS,
+                    "a_client_that_disconnects_mid_consume_still_gets_exactly_one_dispatch",
+                ),
+                (
+                    GATEWAY_PRECONSUME_TESTS,
+                    "frame_codes_pair_with_the_spend_state_per_switch_state",
                 ),
             ],
         },
@@ -1394,12 +2535,16 @@ fn store_proof_violations(
             violations.push(format!("{store:?} has no entry in store_proofs()"));
         }
     }
+    // A file is read and cleaned once, however many of its tests are named.
+    let mut cleaned: std::collections::BTreeMap<&str, String> = std::collections::BTreeMap::new();
     for proof in proofs {
         if proof.tests.is_empty() && proof.store != Some(DurableStore::Park) {
             violations.push(format!("{} names no test that drives it", proof.gate));
         }
         for (path, name) in proof.tests {
-            let source = Code::new(&file(path)).text;
+            let source = cleaned
+                .entry(*path)
+                .or_insert_with(|| Code::new(&file(path)).text);
             let attribute = format!(
                 r"#\[(?:tokio::|sqlx::)?test(?:\([^\]]*\))?\]\s*(?:#\[[^\]]*\]\s*)*(?:pub\s+)?(?:async\s+)?fn\s+{}\s*[(<]",
                 regex::escape(name)
@@ -1636,6 +2781,98 @@ fn the_continue_switch_has_one_parser() {
         .contains("pub fn continue_after_approval_enabled()"));
 }
 
+/// The protobuf sources, as (path, text).
+fn proto_files() -> Vec<(String, String)> {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(PROTO_DIR);
+    assert!(
+        root.is_dir(),
+        "{} is not a directory: re-point PROTO_DIR",
+        root.display()
+    );
+    let mut found = Vec::new();
+    let mut stack = vec![root];
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(&dir).expect("the proto tree is readable").flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path.extension().is_some_and(|ext| ext == "proto") {
+                let text = std::fs::read_to_string(&path)
+                    .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()))
+                    .replace("\r\n", "\n");
+                found.push((path.display().to_string(), text));
+            }
+        }
+    }
+    found.sort();
+    found
+}
+
+/// The comment-free production text of the executor and of session-core, joined: what the
+/// continue vocabulary's tokens are looked up in.
+fn executor_and_session_production_text() -> String {
+    let mut all = rust_files("src");
+    all.extend(rust_files("../session-core/src"));
+    all.iter()
+        .map(|(_, source)| Code::new(source).without_tests().text)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// The gateway's pre-consume (WS03 S7c-B): one consume literal that spends only, one RPC call
+/// inside the bound, one detached task, `Send + Sync`, one read of the switch.
+#[test]
+fn the_gateway_pre_consumes_once_spends_only_and_consumes_and_launches_in_one_detached_task() {
+    assert_green(&gateway_consume_violations(&gateway_sources()));
+}
+
+/// What a frame of a continuation says about the spend is the gateway's own knowledge; the
+/// executor attests nothing.
+#[test]
+fn the_frames_of_a_continuation_are_gated_on_the_gateways_own_spend_knowledge() {
+    let sse = read(GATEWAY_SSE);
+    assert_green(&spend_gate_violations(&sse));
+    assert_green(&refusal_arm_violations(&sse));
+}
+
+/// Every refusal the executor can send is a word of the gateway's closed vocabulary, and every
+/// word is sent by something.
+#[test]
+fn every_refusal_the_executor_can_send_is_in_the_gateways_closed_vocabulary() {
+    assert_green(&continue_vocabulary_violations(
+        &read(GATEWAY_SSE),
+        &read(EXECUTOR_GRPC),
+        &read(EXECUTOR_LOOP),
+        &read(EXECUTOR_RESUME),
+        &executor_and_session_production_text(),
+    ));
+}
+
+/// The coupled flip (D1): the executor's replay rule, the one gateway reader of the switch, and
+/// no attestation field anywhere.
+#[test]
+fn the_gateway_and_the_executor_flip_together_the_replay_rule_the_one_reader_no_attestation() {
+    assert_green(&resume_pair_violations(&rust_files("src")));
+    assert_green(&gateway_resume_reader_violations(
+        &gateway_sources(),
+        &switch_table(),
+    ));
+    let mut every = Vec::new();
+    for tree in SOURCE_TREES {
+        every.extend(rust_files(tree));
+    }
+    assert_green(&no_attestation_violations(&every, &proto_files()));
+}
+
+/// A delegated child never writes a fold: `run_rounds` hands the writer gate `ctx.depth`.
+#[test]
+fn a_delegated_child_never_writes_a_fold_and_the_gate_is_handed_the_depth_and_the_release() {
+    assert_green(&writer_gate_argument_violations(
+        &read(EXECUTOR_LOOP),
+        &read(EXECUTOR_FOLD),
+    ));
+}
+
 // ---------------------------------------------------------------------------------------
 // The guards can fail: each goes red on the regression it exists for.
 // ---------------------------------------------------------------------------------------
@@ -1668,6 +2905,49 @@ fn must_flag(violations: Vec<String>, containing: &str) {
             .any(|violation| violation.contains(containing)),
         "expected a violation containing {containing:?}, got {violations:?}"
     );
+}
+
+/// `text` with the first match of `pattern` replaced by `to`; fails the test if nothing
+/// matches, for the same reason [`mutate`] does. For a target whose spacing a formatter owns.
+fn mutate_re(text: &str, pattern: &str, to: &str) -> String {
+    let regex = Regex::new(pattern).expect("a mutation pattern is a valid regex");
+    let found = regex
+        .find(text)
+        .unwrap_or_else(|| panic!("the mutation pattern `{pattern}` matches nothing: re-point this test"));
+    format!("{}{}{}", &text[..found.start()], to, &text[found.end()..])
+}
+
+/// `sources` with the file whose path ends in `suffix` replaced by `text`.
+fn replace_source(
+    sources: &[(String, String)],
+    suffix: &str,
+    text: &str,
+) -> Vec<(String, String)> {
+    let mut changed = sources.to_vec();
+    let at = changed
+        .iter()
+        .position(|(path, _)| path.replace('\\', "/").ends_with(suffix))
+        .unwrap_or_else(|| panic!("no source ends in `{suffix}`: re-point this test"));
+    changed[at].1 = text.to_owned();
+    changed
+}
+
+/// The comment-free text of `source` with dispatch arm `from` of `agentic_run_stream` moved to
+/// stand immediately before arm `before` (`from` > `before`, both indices into the arms in
+/// source order). What a careless reordering of the match would do.
+fn move_arm(source: &str, from: usize, before: usize) -> String {
+    assert!(from > before, "move_arm moves an arm earlier");
+    let code = Code::new(source);
+    let arms = dispatch_arms(&code);
+    assert!(from < arms.len(), "the match has no arm {from}: re-point this test");
+    let moved = &code.text[arms[from].start..arms[from].end];
+    format!(
+        "{}{}\n{}{}",
+        &code.text[..arms[before].start],
+        moved,
+        &code.text[arms[before].start..arms[from].start],
+        &code.text[arms[from].end..]
+    )
 }
 
 #[test]
@@ -1774,15 +3054,36 @@ fn every_guard_goes_red_when_the_code_it_guards_regresses() {
     // Builder and validator drift apart.
     must_flag(
         builder_and_validator_violations(
-            &mutate(
-                &sse,
-                "mode: \"segment\".to_owned()",
-                "mode: \"resume\".to_owned()",
-            ),
+            &mutate_in(&sse, "fn resume_mode_for", "\"segment\"", "\"resume\""),
             &grpc,
             &agent,
         ),
         "executor accepts only",
+    );
+    must_flag(
+        builder_and_validator_violations(
+            &mutate_in(&sse, "fn resume_mode_for", "\"loop\"", "\"segment\""),
+            &grpc,
+            &agent,
+        ),
+        "no longer names the `loop` stage",
+    );
+    // The builder goes back to naming a stage itself, or stops using the one it is given.
+    must_flag(
+        builder_and_validator_violations(
+            &mutate(&sse, "mode: mode.to_owned()", "mode: \"segment\".to_owned()"),
+            &grpc,
+            &agent,
+        ),
+        "does not build its mode from its argument",
+    );
+    must_flag(
+        builder_and_validator_violations(
+            &mutate(&sse, "mode: mode.to_owned()", "mode: mode.to_owned(), brief: \"loop\".to_owned()"),
+            &grpc,
+            &agent,
+        ),
+        "names a stage itself",
     );
     must_flag(
         builder_and_validator_violations(
@@ -2468,4 +3769,648 @@ fn every_guard_goes_red_when_the_code_it_guards_regresses() {
         &fold,
         &resume_rs,
     ));
+
+    // ---- WS03 S7c-B2: the gateway's pre-consume, its frames and the coupled flip -----------
+
+    let gateway = gateway_sources();
+    assert_green(&gateway_consume_violations(&gateway));
+    let consume =
+        |text: &str| gateway_consume_violations(&replace_source(&gateway, "/sse.rs", text));
+    // A second ConsumeApprovalRequest, in sse.rs or anywhere else in the gateway.
+    must_flag(
+        consume(&format!(
+            "{sse}\nfn rogue() -> mp_contracts::model_plane::v1::ConsumeApprovalRequest {{ mp_contracts::model_plane::v1::ConsumeApprovalRequest {{ omit_call: true, ..Default::default() }} }}"
+        )),
+        "2 ConsumeApprovalRequest literals",
+    );
+    must_flag(
+        gateway_consume_violations(&replace_source(
+            &gateway,
+            "/http_routes.rs",
+            &format!(
+                "{routes}\nfn rogue() {{ let _ = ConsumeApprovalRequest {{ omit_call: true, ..Default::default() }}; }}"
+            ),
+        )),
+        "2 ConsumeApprovalRequest literals",
+    );
+    // The consume stops being spend-only: false, a computed value, or no value at all.
+    for to in [
+        "omit_call: false",
+        "omit_call: !flag",
+        "omit_call: flag",
+        "omit_call: Default::default()",
+    ] {
+        must_flag(
+            consume(&mutate_in(&sse, "fn preconsume_request(", "omit_call: true", to)),
+            "something other than the literal `true`",
+        );
+    }
+    // The gateway starts reading more than the won flag, or calls the RPC from a second place,
+    // or calls it without the bound.
+    must_flag(
+        consume(&mutate_in(
+            &sse,
+            "async fn consume_within_bound",
+            "response.into_inner().consumed",
+            "response.into_inner().same_claim",
+        )),
+        "reads `.same_claim`",
+    );
+    must_flag(
+        consume(&format!(
+            "{sse}\nfn rogue(mut c: C, r: R) {{ let _ = c.consume_approval(r); }}"
+        )),
+        "calls `.consume_approval(` 2 times",
+    );
+    must_flag(
+        consume(&mutate_in(
+            &sse,
+            "impl ApprovalConsumer for GrpcApprovalConsumer {",
+            "consume_within_bound(client.consume_approval(request)).await",
+            "client.consume_approval(request).await.map(|answer| answer.into_inner().consumed)",
+        )),
+        "does not apply the bound",
+    );
+    // The detach: no tokio::spawn in the spawning helper, a second one elsewhere in the flow.
+    must_flag(
+        consume(&mutate_in(
+            &sse,
+            "fn spawn_consume_then_launch<",
+            "tokio::spawn(",
+            "run_inline(",
+        )),
+        "fn spawn_consume_then_launch has 0 tokio::spawn( calls",
+    );
+    must_flag(
+        consume(&mutate_in(
+            &sse,
+            "async fn consume_then_launch<",
+            "preconsume_refusal(consumer.consume(request).await)?;",
+            "tokio::spawn(async {});\n    preconsume_refusal(consumer.consume(request).await)?;",
+        )),
+        "fn consume_then_launch has 1 tokio::spawn( calls",
+    );
+    must_flag(
+        consume(&mutate_re(
+            &sse,
+            r"if\s*!\s*resume_enabled\s*\{",
+            "tokio::spawn(async {});\n    if !resume_enabled {",
+        )),
+        "fn continue_run has 1 tokio::spawn( calls",
+    );
+    // `Sync` dropped from the trait. The textual mutation proves the guard names the supertraits;
+    // the real consequence is a COMPILE error (not reproducible in memory): with `trait
+    // ApprovalConsumer: Send` alone, `spawn_consume_then_launch` stops building, because the
+    // spawned future holds `&C` across the consume's await and is `Send` only if `C: Sync`.
+    must_flag(
+        consume(&mutate(
+            &sse,
+            "trait ApprovalConsumer: Send + Sync {",
+            "trait ApprovalConsumer: Send {",
+        )),
+        "no longer declares `Sync`",
+    );
+    must_flag(
+        consume(&mutate(
+            &sse,
+            "trait ApprovalConsumer: Send + Sync {",
+            "trait ApprovalConsumer: Sync {",
+        )),
+        "no longer declares `Send`",
+    );
+    // continue_run consumes inline, or reads the switch twice, or by name, or not at all.
+    must_flag(
+        consume(&mutate(
+            &sse,
+            "spawn_consume_then_launch(consumer, preconsume, launch).await",
+            "consume_then_launch(&consumer, preconsume, launch).await",
+        )),
+        "calls consume_then_launch( directly",
+    );
+    must_flag(
+        consume(&mutate_re(
+            &sse,
+            r"if\s*!\s*resume_enabled\s*\{",
+            "if !mp_contracts::loop_fold::loop_resume_enabled() {",
+        )),
+        "reads loop_resume_enabled() 2 times",
+    );
+    must_flag(
+        consume(&mutate_re(
+            &sse,
+            r"let resume_enabled = mp_contracts::loop_fold::loop_resume_enabled\(\);",
+            "let resume_enabled = std::env::var(\"EXECUTION_LOOP_RESUME_ENABLED\").is_ok();",
+        )),
+        "names the resume switch's env var",
+    );
+    must_flag(
+        consume(&mutate_re(
+            &sse,
+            r"if\s*!\s*resume_enabled\s*\{\s*return\s+Ok\(launch\(\)\);\s*\}",
+            "",
+        )),
+        "no longer returns Ok(launch()) before any consume",
+    );
+    must_flag(
+        consume(&mutate_re(
+            &sse,
+            r"if\s*!\s*resume_enabled\s*\{",
+            "let _ = agentic_run_stream(a);\n    if !resume_enabled {",
+        )),
+        "calls agentic_run_stream( 2 times",
+    );
+    must_flag(
+        consume(&mutate_in(
+            &sse,
+            "let launch = move || {",
+            "approval_spend_for(resume_enabled)",
+            "ApprovalSpend::SpentByGateway",
+        )),
+        "does not state its spend as approval_spend_for(resume_enabled)",
+    );
+    // The switch is read before the preflight: the order the flow depends on is gone.
+    must_flag(
+        consume(&mutate_in(
+            &mutate_re(
+                &sse,
+                r"    let resume_enabled = mp_contracts::loop_fold::loop_resume_enabled\(\);\n",
+                "",
+            ),
+            "pub(crate) async fn continue_run(",
+            "    continue_preflight(\n",
+            "    let resume_enabled = mp_contracts::loop_fold::loop_resume_enabled();\n    continue_preflight(\n",
+        )),
+        "continue_run's order is no longer",
+    );
+    // An attestation: the one AgentResume literal grows a field about the gateway's consume.
+    must_flag(
+        consume(&mutate_in(
+            &sse,
+            "fn continue_resume(",
+            "segment_no: 0,",
+            "segment_no: 0,\n        consumed_by_gateway: true,",
+        )),
+        "names the field `consumed_by_gateway`",
+    );
+
+    // The frames are gated on the gateway's own spend knowledge.
+    assert_green(&spend_gate_violations(&sse));
+    assert_green(&refusal_arm_violations(&sse));
+    // The spent arm keyed on the resume, or on nothing it should be keyed on.
+    must_flag(
+        spend_gate_violations(&mutate_re(
+            &sse,
+            r"Ok\(Ok\(Err\(status\)\)\) if spend\.is_spent\(\) =>",
+            "Ok(Ok(Err(status))) if resume.is_some() =>",
+        )),
+        "guarded by `if resume.is_some()`",
+    );
+    must_flag(
+        spend_gate_violations(&mutate_re(
+            &sse,
+            r"Ok\(Ok\(Err\(status\)\)\) if spend\.is_spent\(\) =>",
+            "Ok(Ok(Err(status))) if continuing =>",
+        )),
+        "no dispatch arm is guarded by `spend.is_spent()` alone",
+    );
+    // The spent arm after the committed confirmed-rejection arm (so a spent click refused with
+    // InvalidArgument would be terminalized).
+    must_flag(
+        spend_gate_violations(&move_arm(&sse, 1, 0)),
+        "the spent arm comes after the is_confirmed_agent_dispatch_rejection arm",
+    );
+    // The spent arm terminalizes.
+    must_flag(
+        spend_gate_violations(&mutate_in(
+            &sse,
+            "RunAgent of a pre-consumed continuation did not start",
+            "if !matches!(failure, ContinueDispatchFailure::Refused(_)) {",
+            "let _ = crate::session_flow::terminalize_agent_dispatch_rejection_authenticated(&state, &run, crate::session_flow::AgentDispatchFailure::Rejected, &model_bearer).await;\n                if !matches!(failure, ContinueDispatchFailure::Refused(_)) {",
+        )),
+        "the spent arm terminalizes the run",
+    );
+    // The request-construction failure terminalizes a spent click.
+    must_flag(
+        spend_gate_violations(&mutate_in(
+            &sse,
+            "RunAgent request construction rejected before dispatch",
+            "if spend.is_spent() {",
+            "if false {",
+        )),
+        "without asking spend.is_spent() first",
+    );
+    // Something other than the pre-consume claims a spent click: the first frame, an ordinary
+    // turn's call.
+    must_flag(
+        spend_gate_violations(&mutate(
+            &sse,
+            "connected_payload(&run_id, &thread_id, &request_id, spend)",
+            "connected_payload(&run_id, &thread_id, &request_id, ApprovalSpend::SpentByGateway)",
+        )),
+        "SpentByGateway is named outside",
+    );
+    must_flag(
+        spend_gate_violations(&mutate_in(
+            &sse,
+            "// An ordinary turn is never a pre-consumed continuation.",
+            "ApprovalSpend::NotSpent",
+            "ApprovalSpend::SpentByGateway",
+        )),
+        "SpentByGateway is named outside",
+    );
+    // An ambiguous outcome builds the retryable frame itself, or the first frame stops saying
+    // the click is spent.
+    must_flag(
+        spend_gate_violations(&mutate_in(
+            &sse,
+            "RunAgent transport outcome is ambiguous",
+            "dispatch_unknown_event(spend, &request_id, &run.run_id)",
+            "agent_dispatch_unavailable_event(&request_id, &run.run_id)",
+        )),
+        "builds agent_dispatch_unavailable_event( itself",
+    );
+    must_flag(
+        spend_gate_violations(&mutate(
+            &sse,
+            "connected_payload(&run_id, &thread_id, &request_id, spend)",
+            "connected_payload(&run_id, &thread_id, &request_id, ApprovalSpend::NotSpent)",
+        )),
+        "is not built by connected_payload(.., spend)",
+    );
+
+    // (c2) The typed-refusal arm for a continuation nobody pre-consumed.
+    must_flag(
+        refusal_arm_violations(&move_arm(&sse, 2, 1)),
+        "the Typed dispatch arm comes before the Confirmed arm",
+    );
+    let typed_log = "\"Execution Core refused a continuation\");";
+    must_flag(
+        refusal_arm_violations(&mutate(
+            &sse,
+            typed_log,
+            &format!(
+                "{typed_log}\n                let _ = crate::session_flow::terminalize_agent_dispatch_rejection_authenticated(&state, &run, crate::session_flow::AgentDispatchFailure::Rejected, &model_bearer).await;"
+            ),
+        )),
+        "the typed-refusal arm names `terminalize_agent_dispatch_rejection_authenticated`",
+    );
+    must_flag(
+        refusal_arm_violations(&mutate(
+            &sse,
+            typed_log,
+            &format!(
+                "{typed_log}\n                let _ = build_stream_envelope(&request_id, \"RUN_DISPATCH_DEGRADED\", &org_id, &user_id, &model);"
+            ),
+        )),
+        "the typed-refusal arm names `RUN_DISPATCH_DEGRADED`",
+    );
+    must_flag(
+        refusal_arm_violations(&mutate(
+            &sse,
+            typed_log,
+            &format!("{typed_log}\n                let _ = \"approval_spent\";"),
+        )),
+        "the typed-refusal arm names `approval_spent`",
+    );
+    must_flag(
+        refusal_arm_violations(&mutate_re(
+            &sse,
+            r"if\s+continuing\s*&&\s*!spend\.is_spent\(\)\s*&&\s*matches!\(",
+            "if matches!(",
+        )),
+        "not guarded by `continuing` and `!spend.is_spent()`",
+    );
+    must_flag(
+        refusal_arm_violations(&mutate_re(
+            &sse,
+            r"&&\s*!spend\.is_spent\(\)\s*&&\s*matches!\(",
+            "&& matches!(",
+        )),
+        "not guarded by `continuing` and `!spend.is_spent()`",
+    );
+    must_flag(
+        refusal_arm_violations(&mutate_in(
+            &sse,
+            "RunAgent transport outcome is ambiguous",
+            "dispatch_unknown_event(spend, &request_id, &run.run_id)",
+            "agent_dispatch_unavailable_event(&request_id, &run.run_id)",
+        )),
+        "the final arm no longer calls dispatch_unknown_event",
+    );
+    // An arm removed: the typed arm's guard turned into something that is no role.
+    must_flag(
+        refusal_arm_violations(&mutate_re(
+            &sse,
+            r"classify_continue_dispatch_failure\(&status\),\s*ContinueDispatchFailure::Refused\(_\)\s*\)\s*=>",
+            "true) =>",
+        )),
+        "0 Typed arms",
+    );
+
+    // The vocabulary agrees with what the executor can send.
+    let produced = executor_and_session_production_text();
+    let vocabulary = |sse: &str, grpc: &str, agent: &str, resume: &str| {
+        continue_vocabulary_violations(sse, grpc, agent, resume, &produced)
+    };
+    assert_green(&vocabulary(&sse, &grpc, &agent, &resume_rs));
+    // A new executor refusal nobody listed, on the consume path and in the validator and in
+    // the refusal enum.
+    must_flag(
+        vocabulary(
+            &sse,
+            &grpc,
+            &mutate(
+                &agent,
+                "tonic::Status::failed_precondition(\"approval_action_mismatch\")",
+                "tonic::Status::failed_precondition(\"approval_brand_new_refusal\")",
+            ),
+            &resume_rs,
+        ),
+        "refuses a continuation with `approval_brand_new_refusal`",
+    );
+    must_flag(
+        vocabulary(
+            &sse,
+            &mutate(
+                &grpc,
+                "Status::invalid_argument(\"resume_incomplete\")",
+                "Status::invalid_argument(\"resume_new_shape\")",
+            ),
+            &agent,
+            &resume_rs,
+        ),
+        "refuses a continuation with `resume_new_shape`",
+    );
+    must_flag(
+        vocabulary(
+            &sse,
+            &grpc,
+            &agent,
+            &mutate_in(
+                &resume_rs,
+                "pub(crate) const fn as_str(self)",
+                "Self::Forbidden => \"resume_forbidden\",",
+                "Self::Forbidden => \"resume_forbidden_x\",",
+            ),
+        ),
+        "Refusal sends `resume_forbidden_x`",
+    );
+    // A token dropped from the gateway's list, a dead token, a frame the list no longer has.
+    must_flag(
+        vocabulary(
+            &mutate_in(
+                &sse,
+                "CONTINUE_EXECUTOR_MESSAGE_TOKENS: &[&str]",
+                "    \"resume_forbidden\",\n",
+                "",
+            ),
+            &grpc,
+            &agent,
+            &resume_rs,
+        ),
+        "Refusal sends `resume_forbidden`",
+    );
+    must_flag(
+        vocabulary(
+            &mutate_in(
+                &sse,
+                "CONTINUE_EXECUTOR_MESSAGE_TOKENS: &[&str]",
+                "\"continue_disabled\",",
+                "\"continue_disabled\",\n    \"never_sent_token\",",
+            ),
+            &grpc,
+            &agent,
+            &resume_rs,
+        ),
+        "lists `never_sent_token`",
+    );
+    must_flag(
+        vocabulary(
+            &mutate_in(
+                &sse,
+                "CONTINUE_FRAME_REFUSALS: &[&str]",
+                "    \"continue_outcome_unknown\",\n",
+                "",
+            ),
+            &grpc,
+            &agent,
+            &resume_rs,
+        ),
+        "CONTINUE_FRAME_REFUSALS differs",
+    );
+
+    // The D1 pin: the executor accepts a same-claim replay only through the ledger fence.
+    let executor = rust_files("src");
+    assert_green(&resume_pair_violations(&executor));
+    let executor_with =
+        |text: &str| replace_source(&executor, "runtime_loop/agent.rs", text);
+    must_flag(
+        resume_pair_violations(&executor_with(&mutate_re(
+            &agent,
+            r"&&\s*replay_is_fenced\s*\)\)",
+            "))",
+        ))),
+        "without `&& replay_is_fenced`",
+    );
+    must_flag(
+        resume_pair_violations(&executor_with(&mutate_re(
+            &agent,
+            r"let replay_is_fenced = super::effect::ledger_enabled\(\);",
+            "let replay_is_fenced = true;",
+        ))),
+        "bound exactly once, to effect::ledger_enabled()",
+    );
+    must_flag(
+        resume_pair_violations(&executor_with(&format!(
+            "{agent}\nfn rogue() {{ let mut replay_is_fenced = false; replay_is_fenced = true; }}"
+        ))),
+        "bound exactly once",
+    );
+    must_flag(
+        resume_pair_violations(&[(
+            "src/other.rs".to_owned(),
+            "fn f(c: &Consumed) -> bool { c.same_claim }".to_owned(),
+        )]),
+        "without `&& replay_is_fenced`",
+    );
+    must_flag(
+        resume_pair_violations(&[]),
+        "no longer reads `.same_claim`",
+    );
+
+    // The gateway's one reader of the switch, and the compose row that goes with it.
+    let table = switch_table();
+    assert_green(&gateway_resume_reader_violations(&gateway, &table));
+    let resume_env = mp_contracts::loop_fold::LOOP_RESUME_ENV;
+    let reader = |text: &str, rows: &[(&'static str, String, &'static str)]| {
+        gateway_resume_reader_violations(&replace_source(&gateway, "/sse.rs", text), rows)
+    };
+    must_flag(
+        reader(
+            &format!("{sse}\nfn rogue() -> bool {{ std::env::var(\"{resume_env}\").is_ok() }}"),
+            &table,
+        ),
+        "names EXECUTION_LOOP_RESUME_ENABLED itself",
+    );
+    must_flag(
+        reader(
+            &format!(
+                "{sse}\nfn rogue() -> bool {{ std::env::var(mp_contracts::loop_fold::LOOP_RESUME_ENV).is_ok() }}"
+            ),
+            &table,
+        ),
+        "names LOOP_RESUME_ENV itself",
+    );
+    must_flag(
+        reader(
+            &mutate_re(
+                &sse,
+                r"let resume_enabled = mp_contracts::loop_fold::loop_resume_enabled\(\);",
+                "let resume_enabled = false;",
+            ),
+            &table,
+        ),
+        "it calls it 0 times",
+    );
+    must_flag(
+        reader(
+            &format!("{sse}\nfn second() -> bool {{ mp_contracts::loop_fold::loop_resume_enabled() }}"),
+            &table,
+        ),
+        "it calls it 2 times",
+    );
+    for service in ["model-gateway", "execution-core"] {
+        let without_row: Vec<(&'static str, String, &'static str)> = table
+            .iter()
+            .filter(|(row, key, _)| !(*row == service && key.as_str() == resume_env))
+            .cloned()
+            .collect();
+        must_flag(
+            reader(&sse, &without_row),
+            &format!("no {service} row for {resume_env}"),
+        );
+    }
+
+    // No attestation field in Rust production code or in a proto, comments and tests aside.
+    let rust = rust_files("src");
+    let protos = proto_files();
+    assert_green(&no_attestation_violations(&rust, &protos));
+    let mut rogue_rust = rust.clone();
+    rogue_rust.push((
+        "src/rogue.rs".to_owned(),
+        "fn f(r: &AgentResume) -> bool { r.consumed_by_gateway }".to_owned(),
+    ));
+    must_flag(
+        no_attestation_violations(&rogue_rust, &protos),
+        "src/rogue.rs names consumed_by_gateway",
+    );
+    let mut rogue_proto = protos.clone();
+    rogue_proto.push((
+        "x.proto".to_owned(),
+        "message AgentResume {\n  bool consumed_by_gateway = 9;\n}".to_owned(),
+    ));
+    must_flag(
+        no_attestation_violations(&rust, &rogue_proto),
+        "x.proto declares consumed_by_gateway",
+    );
+    let mut quiet_rust = rust.clone();
+    quiet_rust.push((
+        "src/quiet.rs".to_owned(),
+        "// consumed_by_gateway\n#[cfg(test)]\nmod t { fn f() { let _ = \"consumed_by_gateway\"; } }"
+            .to_owned(),
+    ));
+    let mut quiet_proto = protos.clone();
+    quiet_proto.push((
+        "quiet.proto".to_owned(),
+        "// no consumed_by_gateway field exists\nmessage X {} // consumed_by_gateway".to_owned(),
+    ));
+    assert_green(&no_attestation_violations(&quiet_rust, &quiet_proto));
+
+    // The writer gate is handed the depth and the release in exactly the shape the guard reads:
+    // a literal 0 depth lets a delegated child overwrite the root run's fold.
+    assert_green(&writer_gate_argument_violations(&agent, &fold));
+    must_flag(
+        writer_gate_argument_violations(
+            &mutate_in(&agent, "let gate = writer_gate(", "ctx.depth,", "0,"),
+            &fold,
+        ),
+        "passes `0` as the writer gate's depth",
+    );
+    must_flag(
+        writer_gate_argument_violations(
+            &mutate_in(&agent, "let gate = writer_gate(", "ctx.release.is_some(),", "false,"),
+            &fold,
+        ),
+        "as the writer gate's release flag",
+    );
+    must_flag(
+        writer_gate_argument_violations(
+            &mutate_in(&agent, "let gate = writer_gate(", "in_place,", "false,"),
+            &fold,
+        ),
+        "as the writer gate's in-place flag",
+    );
+    must_flag(
+        writer_gate_argument_violations(
+            &mutate_in(&agent, "let gate = writer_gate(", "        ctx.depth,\n", ""),
+            &fold,
+        ),
+        "with 5 arguments",
+    );
+    must_flag(
+        writer_gate_argument_violations(
+            &mutate_in(&agent, "fn writer_gate(", "        depth,\n", "        depth: 0,\n"),
+            &fold,
+        ),
+        "does not hand its `depth` argument to the gate",
+    );
+    must_flag(
+        writer_gate_argument_violations(
+            &mutate(&agent, "depth: parent.depth + 1", "depth: 0"),
+            &fold,
+        ),
+        "no longer built with `depth: parent.depth + 1`",
+    );
+    must_flag(
+        writer_gate_argument_violations(
+            &agent,
+            &mutate(&fold, "} else if self.depth > 0 {", "} else if false {"),
+        ),
+        "no longer refuses `self.depth > 0`",
+    );
+
+    // The new store_proofs rows are as checkable as the old ones: a renamed or commented-out
+    // test of the gateway's pre-consume, of session-core's spend-only consume or of its
+    // recovery renewal is flagged.
+    let proofs = store_proofs();
+    let broken = |target: &'static str, from: &str, to: &str| {
+        let text = mutate(&read(target), from, to);
+        move |path: &str| {
+            if path == target {
+                text.clone()
+            } else {
+                read(path)
+            }
+        }
+    };
+    for (target, name, is_async) in [
+        (GATEWAY_SSE, "a_dropped_receiver_cannot_spend_an_approval_without_dispatching", true),
+        (GATEWAY_SSE, "continue_run_consumes_through_the_spawned_helper_after_the_preflight", false),
+        (GATEWAY_PRECONSUME_TESTS, "a_lost_consume_is_a_409_and_dispatches_nothing", true),
+        (GATEWAY_PRECONSUME_TESTS, "frame_codes_pair_with_the_spend_state_per_switch_state", true),
+        (SESSION_APPROVAL_RPC, "omit_call_withholds_the_call_but_keeps_the_flags", false),
+        (SESSION_APPROVALS, "a_won_spend_only_consume_renews_the_recovery_deadline", true),
+        (SESSION_TERMINALIZATION, "a_spent_click_is_not_recovered_before_the_executor_heartbeats", true),
+    ] {
+        let keyword = if is_async { "async fn" } else { "fn" };
+        let from = format!("{keyword} {name}(");
+        must_flag(
+            store_proof_violations(
+                &proofs,
+                &broken(target, &from, &format!("{keyword} {name}_x(")),
+                &[],
+            ),
+            &format!("has no test `{name}`"),
+        );
+    }
 }

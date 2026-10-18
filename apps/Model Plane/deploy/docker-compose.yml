@@ -262,7 +262,8 @@ services:
       # service too) and SESSION_CORE_LOOP_CHECKPOINT_ENABLED on session-core: flip them
       # together, deploy execution-core first, then session-core, then model-gateway, then the
       # BFF, and roll back in reverse (this service off first). This service reads the
-      # variable from S7c-B; until then only this entry exists. A gateway that is on while the
+      # variable once, in the /continue handler, through loop_resume_enabled (S7c-B; the
+      # durable_loop_contract guard ties this entry to that reader). A gateway that is on while the
       # executor's ledger is off, or while the executor's continue switch is off, spends the
       # user's click and has the executor refuse it: the click is lost and the run waits out
       # the renewed recovery window (see the execution-core entry for what each mismatch does).
