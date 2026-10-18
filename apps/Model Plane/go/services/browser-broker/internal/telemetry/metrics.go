@@ -20,6 +20,9 @@ var (
 	GrantsValidatedTotal metric.Int64Counter
 	// GatewayRateLimitedTotal counts requests rejected by the gateway rate limiter, labelled by method.
 	GatewayRateLimitedTotal metric.Int64Counter
+	// GrantStoreErrorsTotal counts grant store failures (the database, not a
+	// refused grant), labelled by op only: never an org, owner or domain.
+	GrantStoreErrorsTotal metric.Int64Counter
 )
 
 func init() {
@@ -43,5 +46,9 @@ func init() {
 	GatewayRateLimitedTotal, _ = meter.Int64Counter(
 		"browser_broker_gateway_rate_limited_total",
 		metric.WithDescription("Total requests rejected by gateway rate limiter, labelled by method."),
+	)
+	GrantStoreErrorsTotal, _ = meter.Int64Counter(
+		"browser_broker_grant_store_errors_total",
+		metric.WithDescription("Total browser grant store failures, labelled by op."),
 	)
 }

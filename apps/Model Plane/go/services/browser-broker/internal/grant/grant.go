@@ -212,7 +212,10 @@ type MemoryRepository struct {
 	betweenLocks func()
 }
 
-var _ Repository = (*MemoryRepository)(nil)
+var (
+	_ Repository = (*MemoryRepository)(nil)
+	_ Purger     = (*MemoryRepository)(nil)
+)
 
 // NewMemoryRepository constructs an empty MemoryRepository.
 func NewMemoryRepository() *MemoryRepository {
@@ -537,6 +540,35 @@ func (s *MemoryRepository) RevokeScoped(_ context.Context, id, orgID, ownerID, r
 		s.grants[revokedID] = next
 	}
 	return nil
+}
+
+// PurgeExpired drops grants that expired before the cutoff, and any grant
+// whose parent it dropped, so the in-memory store (all grants in development,
+// ZDR grants behind Routed) stays bounded.
+func (s *MemoryRepository) PurgeExpired(_ context.Context, before time.Time) (int64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var purged int64
+	for id, g := range s.grants {
+		if g.ExpiresAt.Before(before) {
+			delete(s.grants, id)
+			purged++
+		}
+	}
+	for changed := true; changed; {
+		changed = false
+		for id, g := range s.grants {
+			if g.ParentGrantID == "" {
+				continue
+			}
+			if _, ok := s.grants[g.ParentGrantID]; !ok {
+				delete(s.grants, id)
+				purged++
+				changed = true
+			}
+		}
+	}
+	return purged, nil
 }
 
 // activeLocked counts the owner's session grants that are neither revoked nor
