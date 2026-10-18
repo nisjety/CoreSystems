@@ -240,7 +240,70 @@ pub enum ChallengeKind {
     Consent,
     RateLimit,
     AccessDenied,
+    /// A paywall or subscription gate. Informational: it is not a bot verdict.
+    Paywall,
+    /// A regional or legal restriction (HTTP 451, "not available in your
+    /// country"). Informational: it is not a bot verdict.
+    GeoBlocked,
     Unknown,
+}
+
+/// How much weight a challenge signal carries. Only `Strong` is a verdict
+/// that a bot wall stands in front of the page; `Weak` is a hint worth a look
+/// at the screenshot, and `NonSignal` names an ordinary access state (a login
+/// form, a cookie banner, a paywall, a rate limit, a bare status) so a planner
+/// does not mistake it for one.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ChallengeStrength {
+    /// A signal from before the taxonomy existed has no strength field, and it
+    /// asked for escalation, so it reads as strong.
+    #[default]
+    Strong,
+    Weak,
+    NonSignal,
+}
+
+/// Why a strong signal is strong. A closed set: a new marker family is a new
+/// variant, never a free-text reason.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum BlockReason {
+    /// A CAPTCHA or proof-of-humanity widget gates the page.
+    CaptchaWidget,
+    /// A WAF or CDN interstitial stands in place of the page.
+    WafInterstitial,
+    /// The same host showed a strong signal again after the one allowed
+    /// recovery (a wait or a reload) was spent.
+    ChallengeLoop,
+    /// Two independent markers say the host took the client for a bot.
+    UnexpectedBotError,
+}
+
+impl BlockReason {
+    /// The wire name, for log counters and error details.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::CaptchaWidget => "captcha_widget",
+            Self::WafInterstitial => "waf_interstitial",
+            Self::ChallengeLoop => "challenge_loop",
+            Self::UnexpectedBotError => "unexpected_bot_error",
+        }
+    }
+}
+
+/// Whether the single recovery the planner gets is still there.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ChallengeRecovery {
+    /// One wait or one reload of the same URL is still allowed on this host.
+    Available,
+    /// The recovery was spent and the host still challenges. Quarry refuses
+    /// further navigation and interaction on it.
+    Exhausted,
+    /// Not a strong signal, so there is nothing to recover from.
+    #[default]
+    NotApplicable,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -249,9 +312,18 @@ pub struct ChallengeSignal {
     pub confidence: f32,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub evidence: Vec<String>,
-    /// Explicitly tells the planner that automatic bypass is forbidden.
+    /// Explicitly tells the planner that automatic bypass is forbidden. False
+    /// for `Weak` and `NonSignal`: a login page, a cookie banner or a rate
+    /// limit is not a reason to hand the run to a person.
     #[serde(default = "true_value")]
     pub requires_escalation: bool,
+    #[serde(default)]
+    pub strength: ChallengeStrength,
+    /// Set on a strong signal only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub block_reason: Option<BlockReason>,
+    #[serde(default)]
+    pub recovery: ChallengeRecovery,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

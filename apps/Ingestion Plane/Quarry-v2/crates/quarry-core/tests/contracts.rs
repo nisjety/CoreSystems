@@ -571,3 +571,129 @@ fn zdr_on_serializes_correctly() {
     let json = serde_json::to_string(&req).unwrap();
     assert!(json.contains(r#""zdr":"on""#));
 }
+
+// ---------------------------------------------------------------------------
+// WS3.H: the challenge taxonomy on the wire
+// ---------------------------------------------------------------------------
+
+#[test]
+fn challenge_signal_roundtrips_with_the_taxonomy_fields() {
+    use quarry_core::contracts::{
+        BlockReason, ChallengeKind, ChallengeRecovery, ChallengeSignal, ChallengeStrength,
+    };
+    let signal = ChallengeSignal {
+        kind: ChallengeKind::Waf,
+        confidence: 0.97,
+        evidence: vec!["cloudflare_challenge_platform".into(), "status:403".into()],
+        requires_escalation: true,
+        strength: ChallengeStrength::Strong,
+        block_reason: Some(BlockReason::WafInterstitial),
+        recovery: ChallengeRecovery::Available,
+    };
+    let value = serde_json::to_value(&signal).unwrap();
+    assert_eq!(value["strength"], "strong");
+    assert_eq!(value["block_reason"], "waf_interstitial");
+    assert_eq!(value["recovery"], "available");
+    let back: ChallengeSignal = serde_json::from_value(value).unwrap();
+    assert_eq!(back, signal);
+
+    // A non-signal carries no block reason, and the field is absent, not null.
+    let login = ChallengeSignal {
+        kind: ChallengeKind::Login,
+        confidence: 0.9,
+        evidence: vec!["auth_required".into()],
+        requires_escalation: false,
+        strength: ChallengeStrength::NonSignal,
+        block_reason: None,
+        recovery: ChallengeRecovery::NotApplicable,
+    };
+    let value = serde_json::to_value(&login).unwrap();
+    assert_eq!(value["strength"], "non_signal");
+    assert_eq!(value["recovery"], "not_applicable");
+    assert!(value.get("block_reason").is_none());
+    assert_eq!(serde_json::from_value::<ChallengeSignal>(value).unwrap(), login);
+}
+
+#[test]
+fn an_older_challenge_payload_still_reads_as_a_strong_escalation() {
+    use quarry_core::contracts::{
+        ChallengeKind, ChallengeRecovery, ChallengeSignal, ChallengeStrength,
+    };
+    // What shipped before the taxonomy: no strength, block_reason or recovery.
+    let signal: ChallengeSignal = serde_json::from_value(json!({
+        "kind": "captcha",
+        "confidence": 0.98,
+        "evidence": ["captcha_marker"],
+    }))
+    .unwrap();
+    assert_eq!(signal.kind, ChallengeKind::Captcha);
+    assert!(signal.requires_escalation);
+    assert_eq!(signal.strength, ChallengeStrength::Strong);
+    assert_eq!(signal.block_reason, None);
+    assert_eq!(signal.recovery, ChallengeRecovery::NotApplicable);
+}
+
+#[test]
+fn challenge_kind_gains_paywall_and_geo_blocked_with_snake_case_names() {
+    use quarry_core::contracts::ChallengeKind;
+    assert_eq!(serde_json::to_value(ChallengeKind::Paywall).unwrap(), "paywall");
+    assert_eq!(
+        serde_json::to_value(ChallengeKind::GeoBlocked).unwrap(),
+        "geo_blocked"
+    );
+    for name in [
+        "captcha",
+        "waf",
+        "login",
+        "consent",
+        "rate_limit",
+        "access_denied",
+        "paywall",
+        "geo_blocked",
+        "unknown",
+    ] {
+        let kind: ChallengeKind = serde_json::from_value(json!(name)).unwrap();
+        assert_eq!(serde_json::to_value(&kind).unwrap(), name);
+    }
+}
+
+#[test]
+fn block_reason_names_are_the_closed_set() {
+    use quarry_core::contracts::BlockReason;
+    let all = [
+        (BlockReason::CaptchaWidget, "captcha_widget"),
+        (BlockReason::WafInterstitial, "waf_interstitial"),
+        (BlockReason::ChallengeLoop, "challenge_loop"),
+        (BlockReason::UnexpectedBotError, "unexpected_bot_error"),
+    ];
+    for (reason, name) in all {
+        assert_eq!(reason.as_str(), name);
+        assert_eq!(serde_json::to_value(reason).unwrap(), name);
+    }
+    assert!(serde_json::from_value::<BlockReason>(json!("bare_status")).is_err());
+}
+
+#[test]
+fn challenge_detected_is_a_403_with_the_exhausted_recovery_details() {
+    let error = QuarryError::challenge_detected("blocked.example", "challenge_loop");
+    assert_eq!(error.code, ErrorCode::ChallengeDetected);
+    assert_eq!(error.code.http_status(), 403);
+    assert!(!error.retryable);
+    let details = error.details.expect("details");
+    assert_eq!(details["reason"], "challenge_loop");
+    assert_eq!(details["host"], "blocked.example");
+    assert_eq!(details["recovery"], "exhausted");
+    assert_eq!(details["next"], "user_takeover_or_other_source");
+    assert!(
+        !error.message.contains("blocked.example"),
+        "the message must not carry the host"
+    );
+}
+
+#[test]
+fn challenge_detected_leaves_the_host_out_when_it_is_empty() {
+    let error = QuarryError::challenge_detected("", "challenge_loop");
+    let details = error.details.expect("details");
+    assert!(details.get("host").is_none());
+    assert_eq!(details["recovery"], "exhausted");
+}

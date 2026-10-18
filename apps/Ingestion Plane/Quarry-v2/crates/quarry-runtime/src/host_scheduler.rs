@@ -36,7 +36,11 @@ use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore};
 pub enum BadKind {
     /// 429-style: the host is asking us to slow down.
     RateLimited,
-    /// 401/403/451/999/CDN-challenge: the host actively refused.
+    /// 401/403/451/999: the host refused this request. A politeness bucket
+    /// that makes the scheduler back off, not a bot verdict: a 403 is often
+    /// just a 403, and nothing here means a challenge page was seen. What a
+    /// page says about access is classified by `challenge::classify`
+    /// (WS3.H), and the one-recovery rule lives in `challenge::BlockEpisodes`.
     Blocked,
     /// Network timeout. Less severe than block; sometimes transient.
     Timeout,

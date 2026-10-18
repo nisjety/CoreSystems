@@ -205,6 +205,7 @@ impl AgentLoop {
             active_snapshot: None,
             observed_action_count: 0,
             challenge_observation_count: 0,
+            ..Default::default()
         };
 
         let mut observations = Vec::new();

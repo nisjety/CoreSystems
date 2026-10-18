@@ -15,7 +15,8 @@ use quarry_browser::{
 };
 use quarry_core::contracts::{
     ActionOutcome, AgentAction, AgentActionRequest, BrowserObservation, BrowserSnapshot,
-    BrowserTelemetry, ChallengeKind, ChallengeSignal, ConsoleLine, DomEvidenceDelta, DomSummary,
+    BrowserTelemetry, ChallengeSignal, ChallengeStrength, ConsoleLine, DomEvidenceDelta,
+    DomSummary,
     ElementClickTarget, ElementFingerprint, EvidenceDelta, ExtractionFieldResult,
     ExtractionProfile, ExtractionResult, ExtractionSource, InteractiveElement, NetworkEntry,
     NetworkEvidenceDelta, ObservationDelta, ProofBundle, ResolvedTargetProof, SemanticLocator,
@@ -28,6 +29,7 @@ use quarry_core::zdr::{self, WriteKind, ZdrMode};
 use serde_json::{json, Value};
 
 use crate::artifact_store::ArtifactStore;
+use crate::challenge::{self, BlockEpisodes, ChallengeConfig, ChallengeInput, ClassifierMode, EnforceMode};
 use crate::events::EventSink;
 use crate::vision::{VisualChangeArtifact, VisualObservationInput, VisualObservationProcessor};
 
@@ -43,6 +45,7 @@ pub struct ObservationRunner {
     pub org_id: String,
 }
 
+#[derive(Default)]
 pub struct ObservationContext {
     pub step: u32,
     pub current_url: String,
@@ -66,7 +69,12 @@ pub struct ObservationContext {
     /// Observation counters remain run-local. They deliberately reset on
     /// resume, matching the snapshot and prior-network lifecycle.
     pub observed_action_count: u32,
+    /// Strong challenge signals only; a login page or a rate limit is not
+    /// counted.
     pub challenge_observation_count: u32,
+    /// Per-host challenge bookkeeping for the one-recovery rule. In memory,
+    /// run-local, empty after a resume.
+    pub block_episodes: BlockEpisodes,
 }
 
 /// Page identity captured at observation time. Deliberately tiny so carrying
@@ -152,66 +160,27 @@ impl ObservationRunner {
     const MAX_DOWNLOAD_ARTIFACT_BYTES: usize = 25 * 1024 * 1024;
 
     /// Classify access/challenge pages without attempting to bypass them. The
-    /// signal is deliberately conservative and evidence-bearing so Model
-    /// Plane can decide whether to ask for a user handoff or use another
-    /// source. It is not a success/failure verdict for the business action.
+    /// signal is conservative and evidence-bearing so the Model Plane can decide
+    /// whether to ask for a user handoff or use another source; it is not a
+    /// success/failure verdict for the business action. A thin wrapper over
+    /// `challenge::classify` for a caller that has only text (no HTML, no
+    /// status): the runner itself passes both. `QUARRY_CHALLENGE_CLASSIFIER=
+    /// legacy` selects the old substring classifier.
     pub fn classify_challenge(
         url: &str,
         title: Option<&str>,
         text: Option<&str>,
     ) -> Option<ChallengeSignal> {
-        let haystack = format!(
-            "{} {} {}",
-            url,
-            title.unwrap_or_default(),
-            text.unwrap_or_default()
-        )
-        .to_ascii_lowercase();
-        let (kind, evidence) = if ["captcha", "recaptcha", "hcaptcha", "verify you are human"]
-            .iter()
-            .any(|needle| haystack.contains(needle))
-        {
-            (ChallengeKind::Captcha, vec!["captcha_marker".to_owned()])
-        } else if [
-            "access denied",
-            "forbidden",
-            "blocked by",
-            "status code 403",
-        ]
-        .iter()
-        .any(|needle| haystack.contains(needle))
-        {
-            (
-                ChallengeKind::AccessDenied,
-                vec!["access_denied_marker".to_owned()],
-            )
-        } else if ["sign in", "log in", "login required", "/login"]
-            .iter()
-            .any(|needle| haystack.contains(needle))
-        {
-            (ChallengeKind::Login, vec!["login_marker".to_owned()])
-        } else if ["cookie consent", "accept cookies", "consent required"]
-            .iter()
-            .any(|needle| haystack.contains(needle))
-        {
-            (ChallengeKind::Consent, vec!["consent_marker".to_owned()])
-        } else if ["too many requests", "rate limit", "status code 429"]
-            .iter()
-            .any(|needle| haystack.contains(needle))
-        {
-            (
-                ChallengeKind::RateLimit,
-                vec!["rate_limit_marker".to_owned()],
-            )
-        } else {
-            return None;
-        };
-        Some(ChallengeSignal {
-            kind,
-            confidence: 0.98,
-            evidence,
-            requires_escalation: true,
-        })
+        match ChallengeConfig::from_env().classifier {
+            ClassifierMode::Legacy => challenge::classify_legacy(url, title, text),
+            ClassifierMode::V2 => challenge::classify(&ChallengeInput {
+                url,
+                title,
+                html: None,
+                text_snippet: text,
+                main_doc_status: None,
+            }),
+        }
     }
 
     fn outcome_for_action(action: &AgentAction, current_url: &str) -> ActionOutcome {
@@ -379,6 +348,26 @@ impl ObservationRunner {
                 "selected browser driver cannot produce governed full-fidelity visual evidence",
             ));
         }
+        // The one-recovery rule. A host that kept challenging after its one wait
+        // or reload gets no more navigation and no more interaction. Checked
+        // before anything touches the browser, so a refused action has no effect.
+        let current_host = challenge::host_of(&ctx.current_url).unwrap_or_default();
+        if let Err(error) =
+            ctx.block_episodes
+                .reject_if_exhausted(&request.action, &current_host, request.zdr)
+        {
+            match ctx.block_episodes.config().enforce {
+                EnforceMode::Enforce => return Err(error),
+                // Validation period: say what would have happened (a reason,
+                // never a host or URL) and let the action through.
+                EnforceMode::Log => {
+                    tracing::warn!(reason = "challenge_loop", "quarry.challenge.would_reject");
+                }
+            }
+        }
+        ctx.block_episodes
+            .note_recovery_action(&request.action, &ctx.current_url, request.zdr);
+
         let (effective_action, target_resolution, verified_target_action, transfer_target) = self
             .resolve_snapshot_action(&request.action, session, ctx)
             .await?;
@@ -903,15 +892,38 @@ impl ObservationRunner {
                 None
             });
         let action_outcome = Self::outcome_for_action(&request.action, &ctx.current_url);
-        let challenge = Self::classify_challenge(
-            &ctx.current_url,
-            title.as_deref(),
-            dom_summary
-                .as_ref()
-                .and_then(|summary| summary.text_snippet.as_deref()),
-        );
+        let text_snippet = dom_summary
+            .as_ref()
+            .and_then(|summary| summary.text_snippet.as_deref());
+        let challenge = match ctx.block_episodes.config().classifier {
+            ClassifierMode::Legacy => {
+                challenge::classify_legacy(&ctx.current_url, title.as_deref(), text_snippet)
+            }
+            ClassifierMode::V2 => {
+                let page_html = html_bytes
+                    .as_ref()
+                    .map(|bytes| String::from_utf8_lossy(bytes));
+                let classified = challenge::classify(&ChallengeInput {
+                    url: &ctx.current_url,
+                    title: title.as_deref(),
+                    html: page_html.as_deref(),
+                    text_snippet,
+                    main_doc_status: challenge::main_document_status(
+                        &devtools_events,
+                        &ctx.current_url,
+                    ),
+                });
+                let host = challenge::host_of(&ctx.current_url).unwrap_or_default();
+                let fingerprint = ctx.page_hash.clone();
+                ctx.block_episodes
+                    .observe(&host, request.zdr, classified, &fingerprint)
+            }
+        };
         ctx.observed_action_count = ctx.observed_action_count.saturating_add(1);
-        if challenge.is_some() {
+        if challenge
+            .as_ref()
+            .is_some_and(|signal| signal.strength == ChallengeStrength::Strong)
+        {
             ctx.challenge_observation_count = ctx.challenge_observation_count.saturating_add(1);
         }
         let driver_telemetry = match self.browser.telemetry(session).await {
@@ -2471,9 +2483,10 @@ mod tests {
         VisualObservationArtifact, VisualObservationResult, VisualPreprocessInput,
         VisualPreprocessResult, VisualRegion,
     };
+    use crate::challenge::ChallengeConfig;
     use bytes::Bytes;
     use quarry_browser::BrowserDriver;
-    use quarry_core::contracts::AgentConstraints;
+    use quarry_core::contracts::{AgentConstraints, ChallengeKind};
     use quarry_core::ids::kinds::RunKind;
     use quarry_core::ids::Id;
     use quarry_core::lease::{BrowserLease, ProxyAffinity};
@@ -2526,15 +2539,22 @@ mod tests {
 
     #[test]
     fn challenge_classifier_requires_escalation_and_preserves_evidence() {
+        // The text-only wrapper: a title asking for proof of humanity on a
+        // short page is two markers (a title hit counts twice).
         let signal = ObservationRunner::classify_challenge(
             "https://example.test/challenge",
             Some("Verify you are human"),
             Some("captcha required"),
         )
-        .expect("captcha should be classified");
+        .expect("a human check should be classified");
         assert_eq!(signal.kind, ChallengeKind::Captcha);
+        assert_eq!(signal.strength, ChallengeStrength::Strong);
         assert!(signal.requires_escalation);
-        assert!(signal.confidence > 0.9);
+        assert_eq!(
+            signal.block_reason,
+            Some(quarry_core::contracts::BlockReason::UnexpectedBotError)
+        );
+        assert!(signal.confidence >= 0.85);
         assert!(!signal.evidence.is_empty());
     }
 
@@ -2546,6 +2566,222 @@ mod tests {
             Some("A normal page with source text"),
         )
         .is_none());
+    }
+
+    #[test]
+    fn a_login_page_through_the_wrapper_is_not_an_escalation() {
+        let signal = ObservationRunner::classify_challenge(
+            "https://example.test/login",
+            Some("Sign in"),
+            Some("Sign in to your account"),
+        );
+        assert!(signal.is_none_or(|s| !s.requires_escalation));
+    }
+
+    const TURNSTILE_HTML: &[u8] = b"<html><head><title>Just a moment...</title></head><body><div class=\"cf-turnstile\"></div><script src=\"https://challenges.cloudflare.com/turnstile/v0/api.js\"></script></body></html>";
+    const LEGACY_HTML: &[u8] = b"<html><head><title>Verify you are human</title></head><body>captcha</body></html>";
+    const LOGIN_HTML: &[u8] = b"<html><head><title>Sign in</title></head><body><form><input type=\"password\" name=\"p\"></form></body></html>";
+
+    fn challenge_lease() -> BrowserLease {
+        BrowserLease {
+            lease_id: Id::new(),
+            profile_id: Id::new(),
+            session_affinity_key: "test".into(),
+            proxy_affinity: ProxyAffinity {
+                pool: String::new(),
+                sticky_key: None,
+            },
+            ttl_s: 60,
+            capabilities: vec![],
+            artifact_bucket: String::new(),
+            persist_profile: false,
+            viewport: None,
+            org_id: "org".into(),
+        }
+    }
+
+    fn challenge_request(lease: &BrowserLease, action: AgentAction, zdr: ZdrMode) -> AgentActionRequest {
+        AgentActionRequest {
+            run_id: Id::new(),
+            lease_id: lease.lease_id.clone(),
+            action,
+            instruction: None,
+            constraints: AgentConstraints {
+                max_steps: 10,
+                allowed_domains: vec![],
+                max_runtime_s: None,
+                max_cost_usd: None,
+            },
+            zdr,
+            extraction_profile: None,
+        }
+    }
+
+    fn challenge_runner(driver: &Arc<ContentDriver>) -> ObservationRunner {
+        ObservationRunner {
+            browser: driver.clone(),
+            artifacts: None,
+            events: None,
+            visual_processor: None,
+            org_id: "org".into(),
+        }
+    }
+
+    fn challenge_ctx(config: ChallengeConfig) -> ObservationContext {
+        ObservationContext {
+            block_episodes: BlockEpisodes::new(config),
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn execute_rejects_same_host_navigation_after_challenge_loop() {
+        let driver = Arc::new(ContentDriver { html: TURNSTILE_HTML });
+        let runner = challenge_runner(&driver);
+        let lease = challenge_lease();
+        let session = driver.acquire(&lease).await.unwrap();
+        let mut ctx = challenge_ctx(ChallengeConfig::default());
+        let go = |url: &str| challenge_request(&lease, AgentAction::Navigate { url: url.into() }, ZdrMode::Off);
+
+        // First hit: a strong signal, and the one recovery is still there.
+        let first = runner
+            .execute(&go("https://blocked.example/page"), &session, &mut ctx)
+            .await
+            .expect("the first navigation is allowed");
+        let signal = first.challenge.expect("the turnstile page is a challenge");
+        assert_eq!(signal.strength, ChallengeStrength::Strong);
+        assert_eq!(signal.recovery, quarry_core::contracts::ChallengeRecovery::Available);
+        assert!(signal.requires_escalation);
+        assert_eq!(first.telemetry.challenge_observation_count, 1);
+
+        // The recovery: one wait. The page is still the challenge, so this is a loop.
+        let second = runner
+            .execute(&challenge_request(&lease, AgentAction::Wait { ms: 0 }, ZdrMode::Off), &session, &mut ctx)
+            .await
+            .expect("a wait is always allowed");
+        let signal = second.challenge.expect("still challenged");
+        assert_eq!(signal.block_reason, Some(quarry_core::contracts::BlockReason::ChallengeLoop));
+        assert_eq!(signal.recovery, quarry_core::contracts::ChallengeRecovery::Exhausted);
+        assert_eq!(second.telemetry.challenge_observation_count, 2);
+
+        // Now the same host refuses navigation and interaction ...
+        for action in [
+            AgentAction::Navigate { url: "https://blocked.example/other".into() },
+            AgentAction::Navigate { url: "https://blocked.example/page".into() },
+            AgentAction::Click { selector: "#go".into() },
+            AgentAction::Type { selector: "#q".into(), text: "x".into() },
+        ] {
+            let error = runner
+                .execute(&challenge_request(&lease, action, ZdrMode::Off), &session, &mut ctx)
+                .await
+                .expect_err("an exhausted host must refuse");
+            assert_eq!(error.code, ErrorCode::ChallengeDetected);
+            assert_eq!(error.code.http_status(), 403);
+            let details = error.details.expect("details");
+            assert_eq!(details["recovery"], "exhausted");
+            assert_eq!(details["host"], "blocked.example");
+            assert_eq!(details["next"], "user_takeover_or_other_source");
+        }
+
+        // ... and still lets the planner look and report.
+        runner
+            .execute(&challenge_request(&lease, AgentAction::GetContent, ZdrMode::Off), &session, &mut ctx)
+            .await
+            .expect("reading the page is allowed");
+        runner
+            .execute(&challenge_request(&lease, AgentAction::Wait { ms: 0 }, ZdrMode::Off), &session, &mut ctx)
+            .await
+            .expect("waiting is allowed");
+
+        // Another host is a fresh start ...
+        let elsewhere = runner
+            .execute(&go("https://other.example/"), &session, &mut ctx)
+            .await
+            .expect("another host is allowed");
+        assert_eq!(
+            elsewhere.challenge.expect("this fixture challenges everywhere").recovery,
+            quarry_core::contracts::ChallengeRecovery::Available
+        );
+        // ... but the exhausted host stays closed from there.
+        let error = runner
+            .execute(&go("https://blocked.example/page"), &session, &mut ctx)
+            .await
+            .expect_err("back to the exhausted host");
+        assert_eq!(error.code, ErrorCode::ChallengeDetected);
+    }
+
+    #[tokio::test]
+    async fn the_log_phase_reports_but_does_not_reject() {
+        let driver = Arc::new(ContentDriver { html: TURNSTILE_HTML });
+        let runner = challenge_runner(&driver);
+        let lease = challenge_lease();
+        let session = driver.acquire(&lease).await.unwrap();
+        let mut ctx = challenge_ctx(ChallengeConfig::from_values(None, Some("log")));
+        let go = challenge_request(&lease, AgentAction::Navigate { url: "https://blocked.example/page".into() }, ZdrMode::Off);
+        runner.execute(&go, &session, &mut ctx).await.unwrap();
+        runner
+            .execute(&challenge_request(&lease, AgentAction::Wait { ms: 0 }, ZdrMode::Off), &session, &mut ctx)
+            .await
+            .unwrap();
+        // The loop is real, the rejection is only logged.
+        runner
+            .execute(&go, &session, &mut ctx)
+            .await
+            .expect("log mode lets the navigation through");
+    }
+
+    #[tokio::test]
+    async fn the_legacy_classifier_is_not_subject_to_the_rule() {
+        let driver = Arc::new(ContentDriver { html: LEGACY_HTML });
+        let runner = challenge_runner(&driver);
+        let lease = challenge_lease();
+        let session = driver.acquire(&lease).await.unwrap();
+        let mut ctx = challenge_ctx(ChallengeConfig::from_values(Some("legacy"), None));
+        let go = challenge_request(&lease, AgentAction::Navigate { url: "https://blocked.example/page".into() }, ZdrMode::Off);
+        for _ in 0..4 {
+            let observation = runner.execute(&go, &session, &mut ctx).await.unwrap();
+            let signal = observation.challenge.expect("legacy matches the title text");
+            assert_eq!(signal.block_reason, None);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_login_page_is_reported_without_escalation_and_is_not_counted() {
+        let driver = Arc::new(ContentDriver { html: LOGIN_HTML });
+        let runner = challenge_runner(&driver);
+        let lease = challenge_lease();
+        let session = driver.acquire(&lease).await.unwrap();
+        let mut ctx = challenge_ctx(ChallengeConfig::default());
+        let request = challenge_request(&lease, AgentAction::Navigate { url: "https://example.com/login".into() }, ZdrMode::Off);
+        let observation = runner.execute(&request, &session, &mut ctx).await.unwrap();
+        let signal = observation.challenge.expect("a login page is named");
+        assert_eq!(signal.kind, ChallengeKind::Login);
+        assert_eq!(signal.strength, ChallengeStrength::NonSignal);
+        assert!(!signal.requires_escalation);
+        assert_eq!(observation.telemetry.challenge_observation_count, 0);
+        assert_eq!(observation.telemetry.challenge_rate_per_mille, 0);
+        // Repeated visits never exhaust anything: it is not a block.
+        for _ in 0..4 {
+            runner.execute(&request, &session, &mut ctx).await.expect("login stays reachable");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_zdr_run_leaves_the_host_out_of_the_rejection() {
+        let driver = Arc::new(ContentDriver { html: TURNSTILE_HTML });
+        let runner = challenge_runner(&driver);
+        let lease = challenge_lease();
+        let session = driver.acquire(&lease).await.unwrap();
+        let mut ctx = challenge_ctx(ChallengeConfig::default());
+        let go = challenge_request(&lease, AgentAction::Navigate { url: "https://blocked.example/page".into() }, ZdrMode::On);
+        runner.execute(&go, &session, &mut ctx).await.unwrap();
+        runner
+            .execute(&challenge_request(&lease, AgentAction::Wait { ms: 0 }, ZdrMode::On), &session, &mut ctx)
+            .await
+            .unwrap();
+        let error = runner.execute(&go, &session, &mut ctx).await.expect_err("refused");
+        assert_eq!(error.code, ErrorCode::ChallengeDetected);
+        assert!(error.details.expect("details").get("host").is_none());
     }
 
     #[test]
@@ -2925,6 +3161,7 @@ mod tests {
             active_snapshot: None,
             observed_action_count: 0,
             challenge_observation_count: 0,
+            ..Default::default()
         };
         let request = AgentActionRequest {
             run_id: Id::new(),
@@ -2995,6 +3232,7 @@ mod tests {
             observed_action_count: 0,
             challenge_observation_count: 0,
             active_snapshot: Some(active_snapshot),
+            ..Default::default()
         };
         let error = runner
             .resolve_snapshot_action(
@@ -3268,6 +3506,7 @@ mod tests {
             active_snapshot: None,
             observed_action_count: 0,
             challenge_observation_count: 0,
+            ..Default::default()
         };
 
         let observation = runner.execute(&request, &session, &mut ctx).await.unwrap();

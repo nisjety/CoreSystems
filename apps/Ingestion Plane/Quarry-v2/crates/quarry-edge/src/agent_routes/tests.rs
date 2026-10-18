@@ -97,6 +97,7 @@ async fn step_refuses_raw_script_and_consumes_nothing() {
             active_snapshot: None,
             observed_action_count: 0,
             challenge_observation_count: 0,
+            ..Default::default()
         },
         lease,
         constraints: AgentConstraints {
@@ -268,6 +269,7 @@ fn step_budget_is_fail_closed_once_limit_is_reached() {
             active_snapshot: None,
             observed_action_count: 0,
             challenge_observation_count: 0,
+            ..Default::default()
         },
         lease: BrowserLease {
             lease_id: Id::new(),
@@ -336,6 +338,7 @@ fn entry_with_budget(budget: Option<crate::budget::RunBudget>) -> RunEntry {
             active_snapshot: None,
             observed_action_count: 0,
             challenge_observation_count: 0,
+            ..Default::default()
         },
         lease,
         constraints: AgentConstraints {

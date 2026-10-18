@@ -143,6 +143,28 @@ impl QuarryError {
         }))
     }
 
+    /// The run met a strong challenge on a host, spent the one recovery it is
+    /// allowed there, and asked for more. 403, not retryable by the same
+    /// caller: the next step is a person (user take-over) or another source.
+    /// `host` is left out of the details when it is empty, which is how a Zero
+    /// Data Retention run avoids echoing the host back into a stored receipt.
+    /// The message never names the host or the URL.
+    pub fn challenge_detected(host: &str, reason: &str) -> Self {
+        let mut details = serde_json::json!({
+            "reason": reason,
+            "recovery": "exhausted",
+            "next": "user_takeover_or_other_source",
+        });
+        if !host.is_empty() {
+            details["host"] = serde_json::Value::String(host.to_owned());
+        }
+        Self::new(
+            ErrorCode::ChallengeDetected,
+            "this host keeps presenting a challenge after the one allowed recovery; hand the run to a person or use another source",
+        )
+        .with_details(details)
+    }
+
     pub fn unsupported_action(action: &str) -> Self {
         Self::new(
             ErrorCode::Unsupported,
