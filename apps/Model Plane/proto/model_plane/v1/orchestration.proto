@@ -712,6 +712,14 @@ message ConsumeApprovalRequest {
   // An opaque token the resuming segment generates. The same token consuming
   // twice is a safe replay; another token is refused as already consumed.
   string claim_token = 6;
+  // The caller consumes for the spend only (the model-gateway, ahead of the
+  // executor). The server neither decrypts nor returns the approved call: the
+  // response carries consumed, already_consumed and same_claim only. A winning
+  // spend-only consume also renews the run's managed terminalization deadline in
+  // the same transaction, so a spent click is not recovered before the executor
+  // that will run it has heartbeated. The default (false) is the full consume
+  // the executor makes, unchanged.
+  bool omit_call = 7;
 }
 
 // The outcome of a ConsumeApproval.

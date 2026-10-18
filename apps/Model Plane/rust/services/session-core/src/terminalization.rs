@@ -21,7 +21,7 @@ const STEP_COMPLETED_TYPE_URL: &str = "type.googleapis.com/model_plane.v1.StepCo
 const RUN_TERMINAL_TYPE_URL: &str = "type.googleapis.com/model_plane.v1.RunTerminal";
 const RECOVERY_FAILURE_CODE: &str = "outcome_unknown";
 const MANAGED_RECOVERY_LEASE_SECS: i64 = 60;
-const MANAGED_DEADLINE_SECS: i64 = 15 * 60;
+pub(crate) const MANAGED_DEADLINE_SECS: i64 = 15 * 60;
 const MANAGED_RECOVERY_BATCH: usize = 32;
 const ACTIVITY_RETRY_SECS: i64 = 60;
 const MAX_RUN_ID_BYTES: usize = 128;
@@ -2155,5 +2155,240 @@ mod tests {
                 "{why}"
             );
         }
+    }
+}
+
+/// Build plan WS03 S7c-A2: the recovery race a spent click would otherwise lose.
+/// WRITTEN, NOT RUN by the author: it needs the disposable-Postgres harness
+/// (scripts/tests/session-core-db-tests.sh), which the lead runs. Its path starts
+/// with `terminalization::spent_click_db_tests::`, so the harness filter
+/// `terminalization` selects it.
+///
+/// While a granted loop approval is unconsumed, the recovery worker will not
+/// terminalize its run (it holds the run back). Consuming the approval lifts that
+/// hold, so a click spent after a long human pause (an hour here) would leave the
+/// run recoverable at once, ahead of the executor about to run it. A spend-only
+/// consume renews the obligation in its own transaction and so closes the gap; the
+/// executor's own full consume deliberately does not, which is the control.
+#[cfg(test)]
+mod spent_click_db_tests {
+    use super::*;
+    use crate::orchestration_store as approvals;
+    use base64::Engine as _;
+
+    const FINGERPRINT: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+    async fn scratch_pool() -> Option<PgPool> {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            assert!(
+                std::env::var_os("REQUIRE_CONTRACT").is_none() && std::env::var_os("CI").is_none(),
+                "DATABASE_URL must name a scratch Postgres when REQUIRE_CONTRACT or CI is set"
+            );
+            eprintln!("skipping: DATABASE_URL unset");
+            return None;
+        };
+        let database = url
+            .rsplit('/')
+            .next()
+            .and_then(|tail| tail.split('?').next())
+            .unwrap_or_default();
+        assert!(
+            database.contains("test"),
+            "these tests write rows: DATABASE_URL must name a scratch database whose name contains \"test\""
+        );
+        let pool = PgPool::connect(&url)
+            .await
+            .expect("scratch Postgres is reachable");
+        sqlx::migrate!("./migrations")
+            .run(&pool)
+            .await
+            .expect("session-core migrations apply in order");
+        // The retained descriptor is encrypted: the process needs its key.
+        std::env::set_var(
+            "SESSION_CORE_CONTINUATION_DESCRIPTOR_KEY",
+            base64::engine::general_purpose::STANDARD.encode([7_u8; 32]),
+        );
+        Some(pool)
+    }
+
+    struct Paused {
+        org: String,
+        user: String,
+        run_id: String,
+        approval_id: String,
+    }
+
+    /// A persistent managed run (started through the real start path, so its
+    /// obligation is the real one) paused on a GRANTED, unconsumed loop approval
+    /// whose obligation fell due an hour ago: the shape of a click made after a
+    /// long human pause.
+    async fn paused_for_an_hour(pool: &PgPool, tag: &str) -> Paused {
+        let sfx = new_ulid();
+        let (org, user, thread) = (
+            format!("sc-org-{tag}-{sfx}"),
+            "u1".to_owned(),
+            format!("sc-t-{tag}-{sfx}"),
+        );
+        sqlx::query(
+            "INSERT INTO threads (id, session_key, org_id, user_id, created_at)
+             VALUES ($1, $1, $2, $3, now())",
+        )
+        .bind(&thread)
+        .bind(&org)
+        .bind(&user)
+        .execute(pool)
+        .await
+        .expect("thread seeded");
+        let run_id = start_managed_run_with_retention_inner(
+            pool,
+            pb::StartManagedRunRequest {
+                thread_id: thread,
+                parent_run_id: String::new(),
+                agent_id: "general-v1".to_owned(),
+                goal: "spent click goal".to_owned(),
+                mode: "execute".to_owned(),
+                org_id: org.clone(),
+                user_id: user.clone(),
+                start_key: format!("sc-{tag}-{sfx}"),
+                terminal_source: pb::ManagedRunSource::ExecutionAgent as i32,
+            },
+            RunRetention::persistent(),
+        )
+        .await
+        .expect("the run starts")
+        .run_id;
+
+        let approval_id = format!("appr_{}", new_ulid());
+        let descriptor = serde_json::json!({
+            "version": 1,
+            "run_id": run_id,
+            "org_id": org,
+            "user_id": user,
+            "step_id": "tool_1_call-1",
+            "action_kind": "tool_call",
+            "action_fingerprint": FINGERPRINT,
+            "tool_name": "shell",
+            "input": {"command": "echo approved"},
+            "permission_mode": "ask",
+            "offered": {
+                "tools": [{"name": "shell", "description": "run", "parameters_json": "{}"}],
+                "authority": {
+                    "mode": "ask", "plan_mode": false, "autonomy_rung": "", "space_id": "",
+                    "min_privacy_tier": 0, "provider_hint": "", "max_rounds": 4,
+                    "tool_names": ["shell"], "digest": "unchecked-in-this-test"
+                }
+            }
+        });
+        approvals::request_approval(
+            pool,
+            &approval_id,
+            &run_id,
+            None,
+            "tool_call",
+            &user,
+            &org,
+            &user,
+            "",
+            &serde_json::json!({}),
+            Some(&descriptor),
+            Some(Utc::now() + chrono::Duration::hours(2)),
+            "loop",
+        )
+        .await
+        .expect("request approval")
+        .expect("inserted");
+        approvals::decide_approval(pool, &approval_id, &org, Some(&user), "granted", &user, "ok")
+            .await
+            .expect("grant");
+        // The human took an hour: the obligation fell due while the approval waited.
+        sqlx::query(
+            "UPDATE managed_run_terminalization_outbox
+             SET deadline_at = now() - interval '1 hour', next_attempt_at = now() - interval '1 hour'
+             WHERE run_id = $1",
+        )
+        .bind(&run_id)
+        .execute(pool)
+        .await
+        .expect("age the obligation");
+        Paused {
+            org,
+            user,
+            run_id,
+            approval_id,
+        }
+    }
+
+    /// `claim_due_recovery` looks at every run in the database. Push every other
+    /// live obligation (and every other expired lease) a day out, so the answer
+    /// is about the run under test only. Scratch database only.
+    async fn isolate(pool: &PgPool, keep_run_id: &str) {
+        sqlx::query(
+            "UPDATE managed_run_terminalization_outbox
+             SET deadline_at = now() + interval '1 day',
+                 lease_expires_at = CASE WHEN lease_expires_at IS NULL THEN NULL
+                                         ELSE now() + interval '1 day' END
+             WHERE run_id <> $1 AND state IN ('open', 'processing')",
+        )
+        .bind(keep_run_id)
+        .execute(pool)
+        .await
+        .expect("isolate the other obligations");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a scratch Postgres whose name contains \"test\""]
+    async fn a_spent_click_is_not_recovered_before_the_executor_heartbeats() {
+        let Some(pool) = scratch_pool().await else {
+            return;
+        };
+
+        // The click: a spend-only consume (the gateway's) of an hour-old pause.
+        let spent = paused_for_an_hour(&pool, "spend").await;
+        isolate(&pool, &spent.run_id).await;
+        assert!(
+            claim_due_recovery(&pool).await.expect("claim").is_none(),
+            "premise: the unconsumed granted approval holds the run back"
+        );
+        let won = approvals::consume_approval_spend_only(
+            &pool,
+            &spent.approval_id,
+            &spent.org,
+            &spent.run_id,
+            &spent.user,
+            "",
+            "claim-a",
+        )
+        .await
+        .expect("consume")
+        .expect("outcome");
+        assert!(won.consumed);
+        assert!(
+            claim_due_recovery(&pool).await.expect("claim").is_none(),
+            "the renewal moved the deadline: nothing is due for the spent run"
+        );
+
+        // The control: the same seed consumed with the executor's full consume is
+        // recoverable at once (it deliberately renews nothing), which proves the
+        // assertion above is the renewal's doing and not an artefact of the seed.
+        let control = paused_for_an_hour(&pool, "full").await;
+        isolate(&pool, &control.run_id).await;
+        assert!(approvals::consume_approval(
+            &pool,
+            &control.approval_id,
+            &control.org,
+            &control.run_id,
+            &control.user,
+            "",
+            "claim-a",
+        )
+        .await
+        .expect("consume")
+        .expect("outcome")
+        .consumed);
+        let claimed = claim_due_recovery(&pool)
+            .await
+            .expect("claim")
+            .expect("a full consume leaves the run recoverable");
+        assert_eq!(claimed.row.run_id, control.run_id);
     }
 }

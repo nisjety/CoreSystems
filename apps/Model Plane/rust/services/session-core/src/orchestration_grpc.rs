@@ -838,6 +838,37 @@ fn approved_authority(offered_json: &str) -> Option<proto::ApprovedAuthority> {
     })
 }
 
+/// The wire answer to a consume. A spend-only consume (`omit_call`) carries the
+/// three flags and nothing else, whatever the outcome holds: no call content, no
+/// step and no authority snapshot. Otherwise it is the call, the step and the
+/// snapshot the retained descriptor named, for the claim holder, and empty fields
+/// when the outcome has no call (another claim).
+fn consume_response(done: store::ConsumeOutcome, omit_call: bool) -> proto::ConsumeApprovalResponse {
+    if omit_call {
+        return proto::ConsumeApprovalResponse {
+            consumed: done.consumed,
+            already_consumed: done.already_consumed,
+            same_claim: done.same_claim,
+            ..Default::default()
+        };
+    }
+    let call = done.call.unwrap_or_else(|| store::ConsumedCall {
+        step_id: String::new(),
+        tool_name: String::new(),
+        tool_input_json: String::new(),
+        offered_json: String::new(),
+    });
+    proto::ConsumeApprovalResponse {
+        consumed: done.consumed,
+        already_consumed: done.already_consumed,
+        same_claim: done.same_claim,
+        tool_name: call.tool_name,
+        tool_input_json: call.tool_input_json,
+        step_id: call.step_id,
+        authority: approved_authority(&call.offered_json),
+    }
+}
+
 fn validate_continuation_descriptor(
     raw: &str,
     req: &proto::CreateApprovalRequest,
@@ -2757,16 +2788,32 @@ impl OrchestrationCoreService for OrchestrationGrpc {
             authorize_run_owner(&self.pool, &caller, &req.run_id, OwnerIntent::Mutate).await?;
             // Only a hash of the claim token is stored.
             let claim_hash = blake3::hash(req.claim_token.as_bytes()).to_hex().to_string();
-            let outcome = store::consume_approval(
-                &self.pool,
-                &req.approval_id,
-                &req.org_id,
-                &req.run_id,
-                &user_id,
-                &req.action_fingerprint,
-                &claim_hash,
-            )
-            .await
+            // A caller that consumes for the spend only (the gateway, ahead of the
+            // executor) is neither handed nor does it cause the descriptor to be
+            // read; its winning consume also renews the run's recovery deadline.
+            let outcome = if req.omit_call {
+                store::consume_approval_spend_only(
+                    &self.pool,
+                    &req.approval_id,
+                    &req.org_id,
+                    &req.run_id,
+                    &user_id,
+                    &req.action_fingerprint,
+                    &claim_hash,
+                )
+                .await
+            } else {
+                store::consume_approval(
+                    &self.pool,
+                    &req.approval_id,
+                    &req.org_id,
+                    &req.run_id,
+                    &user_id,
+                    &req.action_fingerprint,
+                    &claim_hash,
+                )
+                .await
+            }
             .map_err(|e| Status::internal(e.to_string()))?;
             match outcome {
                 Ok(done) => {
@@ -2786,21 +2833,7 @@ impl OrchestrationCoreService for OrchestrationGrpc {
                             },
                         );
                     }
-                    let call = done.call.clone().unwrap_or_else(|| store::ConsumedCall {
-                        step_id: String::new(),
-                        tool_name: String::new(),
-                        tool_input_json: String::new(),
-                        offered_json: String::new(),
-                    });
-                    Ok(Response::new(proto::ConsumeApprovalResponse {
-                        consumed: done.consumed,
-                        already_consumed: done.already_consumed,
-                        same_claim: done.same_claim,
-                        tool_name: call.tool_name,
-                        tool_input_json: call.tool_input_json,
-                        step_id: call.step_id,
-                        authority: approved_authority(&call.offered_json),
-                    }))
+                    Ok(Response::new(consume_response(done, req.omit_call)))
                 }
                 // Closed wording only: nothing about the call or its content.
                 Err(store::ConsumeRefusal::NotFound) => {
@@ -3489,6 +3522,118 @@ impl OrchestrationCoreService for OrchestrationGrpc {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A won consume's call, with a retained authority snapshot, as the store
+    /// hands it to the handler.
+    fn consumed_with_call(consumed: bool, same_claim: bool) -> store::ConsumeOutcome {
+        store::ConsumeOutcome {
+            consumed,
+            already_consumed: !consumed,
+            same_claim,
+            call: Some(store::ConsumedCall {
+                step_id: "s1.tool_1_call-1".to_owned(),
+                tool_name: "delete_records".to_owned(),
+                tool_input_json: r#"{"table":"t"}"#.to_owned(),
+                offered_json: r#"{"tools":[{"name":"delete_records","description":"d","parameters_json":"{}"}],"authority":{"mode":"ask","plan_mode":false,"autonomy_rung":"","space_id":"","min_privacy_tier":0,"provider_hint":"","max_rounds":4,"tool_names":["delete_records"],"digest":"abc"}}"#
+                    .to_owned(),
+            }),
+        }
+    }
+
+    // S7c-A2: a spend-only consume (the gateway's, ahead of the executor) gets the
+    // three flags and nothing else: no call content, no step, no authority.
+    #[test]
+    fn omit_call_withholds_the_call_but_keeps_the_flags() {
+        for (consumed, same_claim) in [(true, false), (false, true), (false, false)] {
+            let response = consume_response(consumed_with_call(consumed, same_claim), true);
+            assert_eq!(response.consumed, consumed);
+            assert_eq!(response.already_consumed, !consumed);
+            assert_eq!(response.same_claim, same_claim);
+            assert_eq!(response.tool_name, "");
+            assert_eq!(response.tool_input_json, "");
+            assert_eq!(response.step_id, "");
+            assert!(response.authority.is_none(), "the snapshot is withheld too");
+        }
+        // An outcome that carries no call at all answers the same way.
+        let bare = store::ConsumeOutcome {
+            consumed: true,
+            already_consumed: false,
+            same_claim: false,
+            call: None,
+        };
+        assert_eq!(
+            consume_response(bare, true),
+            proto::ConsumeApprovalResponse {
+                consumed: true,
+                ..Default::default()
+            }
+        );
+    }
+
+    // Without omit_call the answer is what the handler built inline before this
+    // change: the call, the step and the snapshot, to the claim holder.
+    #[test]
+    fn without_omit_call_the_response_is_unchanged() {
+        let won = consume_response(consumed_with_call(true, false), false);
+        assert!(won.consumed && !won.already_consumed && !won.same_claim);
+        assert_eq!(won.tool_name, "delete_records");
+        assert_eq!(won.tool_input_json, r#"{"table":"t"}"#);
+        assert_eq!(won.step_id, "s1.tool_1_call-1");
+        let authority = won.authority.expect("the snapshot comes back with the call");
+        assert_eq!(authority.digest, "abc");
+        assert_eq!(authority.tool_names, vec!["delete_records".to_owned()]);
+
+        let replay = consume_response(consumed_with_call(false, true), false);
+        assert!(!replay.consumed && replay.already_consumed && replay.same_claim);
+        assert_eq!(replay.tool_name, "delete_records");
+
+        // No call (another claim): empty fields and no authority, as before.
+        let other = consume_response(
+            store::ConsumeOutcome {
+                consumed: false,
+                already_consumed: true,
+                same_claim: false,
+                call: None,
+            },
+            false,
+        );
+        assert_eq!(
+            other,
+            proto::ConsumeApprovalResponse {
+                already_consumed: true,
+                ..Default::default()
+            }
+        );
+    }
+
+    // The handler picks the store function from the request and keeps the event
+    // tied to a WON consume only. The source is scanned because the handler needs a
+    // database to run.
+    #[test]
+    fn the_consume_handler_routes_omit_call_to_the_spend_only_store_call() {
+        let source = include_str!("orchestration_grpc.rs").replace("\r\n", "\n");
+        let start = source
+            .find("    async fn consume_approval(")
+            .expect("the handler is present");
+        let rest = &source[start..];
+        let body = &rest[..rest.find("\n    async fn decide_approval(").expect("the next handler")];
+        assert!(body.contains("if req.omit_call {"));
+        assert!(body.contains("store::consume_approval_spend_only("));
+        assert!(body.contains("store::consume_approval("));
+        assert!(
+            body.find("store::consume_approval_spend_only(").unwrap()
+                < body.find("store::consume_approval(").unwrap(),
+            "the spend-only branch is the one under the omit_call test"
+        );
+        assert!(body.contains("consume_response(done, req.omit_call)"));
+        assert!(
+            body.contains("if done.consumed {"),
+            "RunResumedAfterApproval stays tied to the winning consume"
+        );
+        // The checks that come before the store call do not depend on omit_call.
+        let gate = body.find("authorize_run_owner(").unwrap();
+        assert!(gate < body.find("if req.omit_call {").unwrap());
+    }
 
     #[test]
     fn approval_identity_is_pinned_and_cross_tenant_requests_are_rejected() {

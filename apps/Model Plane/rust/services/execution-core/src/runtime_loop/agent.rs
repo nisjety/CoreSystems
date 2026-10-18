@@ -5442,6 +5442,7 @@ async fn prepare_resume(
             step_id: resume.step_id.clone(),
             action_fingerprint: resume.action_fingerprint.clone(),
             claim_token: resume.claim_token.clone(),
+            omit_call: false,
         },
         session_bearer,
     )?;

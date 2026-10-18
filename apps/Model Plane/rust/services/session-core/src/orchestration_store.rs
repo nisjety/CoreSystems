@@ -15,6 +15,7 @@ use tracing::info;
 
 use crate::continuation_crypto::DescriptorCipher;
 use crate::store::Pool;
+use crate::terminalization::MANAGED_DEADLINE_SECS;
 
 // ---------------------------------------------------------------------------
 // Plans
@@ -908,6 +909,90 @@ pub async fn consume_approval(
     action_fingerprint: &str,
     claim_hash: &str,
 ) -> Result<std::result::Result<ConsumeOutcome, ConsumeRefusal>> {
+    consume_approval_with(
+        pool,
+        id,
+        org_id,
+        run_id,
+        user_id,
+        action_fingerprint,
+        claim_hash,
+        ConsumeIntent::Full,
+    )
+    .await
+}
+
+/// What a consume is for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConsumeIntent {
+    /// The executor's consume: it wins or replays, reads the retained descriptor
+    /// and hands the approved call to the claim holder. It never renews anything.
+    Full,
+    /// The caller spends the click and nothing else (the model-gateway, ahead of
+    /// the executor): no descriptor is read or decrypted on any branch and no call
+    /// is returned. A WINNING spend-only consume renews the run's managed
+    /// terminalization obligation in the same transaction.
+    SpendOnly,
+}
+
+impl ConsumeIntent {
+    /// Whether the retained descriptor is read and the call returned.
+    const fn returns_call(self) -> bool {
+        matches!(self, Self::Full)
+    }
+
+    /// Whether a winning consume renews the run's recovery deadline.
+    const fn renews_recovery(self) -> bool {
+        matches!(self, Self::SpendOnly)
+    }
+}
+
+/// Consume a granted, loop-owned approval for its spend only (build plan WS03
+/// S7c). The compare-and-set, the replay and the refusals are exactly those of
+/// [`consume_approval`]; the differences are that the retained descriptor is
+/// neither read nor decrypted on either branch (the outcome never carries a call)
+/// and that a winning consume renews the run's managed terminalization
+/// obligation inside the same transaction, so a click spent here is not recovered
+/// as an abandoned run before the executor that will run it has heartbeated.
+///
+/// # Errors
+///
+/// Returns a database error as `Err`, and a closed [`ConsumeRefusal`] as
+/// `Ok(Err(..))`. A database error rolls the whole consume back, renewal included.
+#[allow(clippy::too_many_arguments)]
+pub async fn consume_approval_spend_only(
+    pool: &Pool,
+    id: &str,
+    org_id: &str,
+    run_id: &str,
+    user_id: &str,
+    action_fingerprint: &str,
+    claim_hash: &str,
+) -> Result<std::result::Result<ConsumeOutcome, ConsumeRefusal>> {
+    consume_approval_with(
+        pool,
+        id,
+        org_id,
+        run_id,
+        user_id,
+        action_fingerprint,
+        claim_hash,
+        ConsumeIntent::SpendOnly,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn consume_approval_with(
+    pool: &Pool,
+    id: &str,
+    org_id: &str,
+    run_id: &str,
+    user_id: &str,
+    action_fingerprint: &str,
+    claim_hash: &str,
+    intent: ConsumeIntent,
+) -> Result<std::result::Result<ConsumeOutcome, ConsumeRefusal>> {
     let mut transaction = pool.begin().await?;
     let consumed = sqlx::query_as::<_, (String,)>(CONSUME_APPROVAL_SQL)
         .bind(id)
@@ -919,7 +1004,14 @@ pub async fn consume_approval(
         .fetch_optional(&mut *transaction)
         .await?;
     if consumed.is_some() {
-        let call = read_consumed_call(&mut transaction, id, org_id, run_id, user_id).await?;
+        let call = if intent.returns_call() {
+            read_consumed_call(&mut transaction, id, org_id, run_id, user_id).await?
+        } else {
+            None
+        };
+        if intent.renews_recovery() {
+            renew_recovery_deadline(&mut transaction, org_id, run_id).await?;
+        }
         transaction.commit().await?;
         return Ok(Ok(ConsumeOutcome {
             consumed: true,
@@ -962,8 +1054,16 @@ pub async fn consume_approval(
     }
     if consumed_at.is_some() {
         let same_claim = stored_hash.as_deref() == Some(claim_hash);
+        // A replay never consults expires_at: while the descriptor stands, it is
+        // answered. When the reaper (it clears the descriptor of every approval
+        // whose expires_at has passed, consumed or not) or a purge removed the
+        // descriptor, there is no call to hand back and the replay is answered with
+        // `call: None`, exactly as before the spend-only consume existed; the
+        // executor turns a call-less replay into its own closed refusal. This
+        // branch adds no refusal of its own, so a full consume is byte-identical
+        // with every switch off.
         // The call is handed back only to the claim that consumed it.
-        let call = if same_claim {
+        let call = if same_claim && intent.returns_call() {
             read_consumed_call(&mut transaction, id, org_id, run_id, user_id).await?
         } else {
             None
@@ -1010,6 +1110,43 @@ const CONSUME_APPROVAL_SQL: &str = "UPDATE approvals AS a \
                    WHERE d.approval_id = a.id \
                      AND ($5 = '' OR d.action_fingerprint = $5)) \
      RETURNING a.id";
+
+/// Renew the managed terminalization obligation of the run whose approval a
+/// spend-only consume just won (build plan WS03 S7c, D8). The recovery worker
+/// treats an open obligation past its deadline as an abandoned run, and a
+/// granted approval that is still unconsumed is what holds it back; consuming the
+/// approval lifts that hold, so without this a click spent after a long human
+/// pause would leave the run recoverable at once, ahead of the executor that is
+/// about to run it. The window is the executor heartbeat's own
+/// ([`MANAGED_DEADLINE_SECS`]). Only a live obligation (open, or leased by the
+/// worker) is touched, and it is scoped by run and org; an obligation that is
+/// applied, awaiting reconciliation or superseded stays as it is. Zero rows is
+/// not an error (a run without an obligation has nothing to renew).
+///
+/// This is one of several writers of `deadline_at` (the obligation insert and the
+/// executor heartbeat are others); it reopens nothing they have settled.
+const RENEW_RECOVERY_SQL: &str = "UPDATE managed_run_terminalization_outbox \
+     SET state = 'open', deadline_at = now() + ($3::bigint * interval '1 second'), \
+         next_attempt_at = now(), lease_owner = NULL, lease_token_hash = NULL, \
+         lease_expires_at = NULL, updated_at = now() \
+     WHERE run_id = $1 AND org_id = $2 AND state IN ('open', 'processing')";
+
+/// Run [`RENEW_RECOVERY_SQL`] inside the winning consume's transaction. A
+/// database error is returned so the caller drops the transaction and the consume
+/// rolls back with it.
+async fn renew_recovery_deadline(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    org_id: &str,
+    run_id: &str,
+) -> Result<()> {
+    sqlx::query(RENEW_RECOVERY_SQL)
+        .bind(run_id)
+        .bind(org_id)
+        .bind(MANAGED_DEADLINE_SECS)
+        .execute(&mut **transaction)
+        .await?;
+    Ok(())
+}
 
 /// Read and decrypt the retained descriptor of an approval the caller holds the
 /// claim on, and return the call it authorised. The descriptor is the only
@@ -1906,6 +2043,189 @@ mod tests {
         assert_eq!(edited_step_status(true), "skipped");
         assert_eq!(edited_step_status(false), "pending");
     }
+
+    /// The production half of this file, normalised to LF, for the source scans
+    /// below. Cut at the first test module so the scans never read themselves.
+    fn production_source() -> String {
+        let source = include_str!("orchestration_store.rs").replace("\r\n", "\n");
+        let cut = source
+            .find("\n#[cfg(test)]\nmod tests {")
+            .expect("the test module marker is present");
+        source[..cut].to_owned()
+    }
+
+    /// The text of one function, from its header to the first closing brace at
+    /// column zero.
+    fn function_text<'a>(source: &'a str, header: &str) -> &'a str {
+        let start = source.find(header).unwrap_or_else(|| panic!("{header} is present"));
+        let rest = &source[start..];
+        let end = rest.find("\n}\n").expect("the function ends") + 3;
+        &rest[..end]
+    }
+
+    // S7c-A2: the renewal statement. It is the third writer of an obligation's
+    // `deadline_at` (the managed-run start insert and the executor's heartbeat are
+    // the others); nothing here assumes it is the only one, it pins what THIS
+    // statement may touch.
+    #[test]
+    fn a_renewal_statement_is_scoped_to_the_run_org_and_open_states() {
+        let sql = RENEW_RECOVERY_SQL;
+        assert!(sql.starts_with("UPDATE managed_run_terminalization_outbox"));
+        assert!(sql.contains("WHERE run_id = $1 AND org_id = $2"), "run and org are predicates");
+        assert!(
+            sql.contains("state IN ('open', 'processing')"),
+            "only a live obligation is renewed"
+        );
+        for settled in ["applied", "reconciliation_required", "superseded"] {
+            assert!(!sql.contains(settled), "a settled obligation ({settled}) is never reopened");
+        }
+        assert!(sql.contains("SET state = 'open'"));
+        assert!(
+            sql.contains("deadline_at = now() + ($3::bigint * interval '1 second')"),
+            "the new deadline is a window from now, bound from MANAGED_DEADLINE_SECS"
+        );
+        assert!(sql.contains("next_attempt_at = now()"));
+        for cleared in ["lease_owner = NULL", "lease_token_hash = NULL", "lease_expires_at = NULL"] {
+            assert!(sql.contains(cleared), "a processing lease is cleared: {cleared}");
+        }
+        assert!(!sql.contains("attempts"), "the renewal does not touch the attempt counter");
+        assert!(!sql.contains("INSERT") && !sql.contains("DELETE"));
+        assert_eq!(sql.matches("$1").count(), 1);
+        assert_eq!(sql.matches("$2").count(), 1);
+        assert_eq!(sql.matches("$3").count(), 1);
+        assert!(!sql.contains("$4"));
+    }
+
+    #[test]
+    fn a_spend_only_consume_is_the_only_one_that_renews_and_the_only_one_that_withholds_the_call() {
+        assert!(ConsumeIntent::Full.returns_call());
+        assert!(!ConsumeIntent::Full.renews_recovery());
+        assert!(!ConsumeIntent::SpendOnly.returns_call());
+        assert!(ConsumeIntent::SpendOnly.renews_recovery());
+    }
+
+    #[test]
+    fn the_consume_body_renews_and_reads_the_descriptor_only_behind_the_intent() {
+        let source = production_source();
+        let body = function_text(&source, "async fn consume_approval_with(");
+        // The descriptor is read on the winning branch and on a same-claim replay,
+        // and on both only for a full consume.
+        assert_eq!(body.matches("read_consumed_call(").count(), 2, "{body}");
+        for (at, _) in body.match_indices("read_consumed_call(") {
+            let before = &body[..at];
+            let guard = before.rfind("intent.returns_call()").expect("a guard precedes the read");
+            assert!(
+                at - guard < 400,
+                "every descriptor read sits directly behind intent.returns_call()"
+            );
+        }
+        // The renewal runs once, on the winning branch only, behind its own guard
+        // and before the commit.
+        assert_eq!(body.matches("renew_recovery_deadline(").count(), 1);
+        let renew = body.find("renew_recovery_deadline(").unwrap();
+        let guard = body[..renew].rfind("intent.renews_recovery()").expect("renewal is guarded");
+        assert!(renew - guard < 200);
+        let first_commit = body.find("transaction.commit()").expect("the winning branch commits");
+        assert!(renew < first_commit, "the renewal is inside the winning transaction");
+        let first_refusal = body.find("Not consumed by this call").expect("the refusal branch");
+        assert!(renew < first_refusal, "the refusal and replay branches never renew");
+        // A spend-only consume never reaches the decrypt: the cipher is only built
+        // inside read_consumed_call.
+        assert!(!body.contains("DescriptorCipher"));
+    }
+
+    #[test]
+    fn the_renewal_is_the_one_outbox_write_here_and_it_uses_the_shared_deadline() {
+        let source = production_source();
+        // This scan covers this file only. The start insert and the heartbeat in
+        // terminalization.rs are other writers and are not this file's business.
+        assert_eq!(
+            source.matches("UPDATE managed_run_terminalization_outbox").count(),
+            1,
+            "one statement writes the outbox here: the renewal"
+        );
+        assert_eq!(source.matches("INSERT INTO managed_run_terminalization_outbox").count(), 0);
+        assert_eq!(source.matches("DELETE FROM managed_run_terminalization_outbox").count(), 0);
+        let renewing = function_text(&source, "async fn renew_recovery_deadline(");
+        assert!(renewing.contains(".bind(run_id)"));
+        assert!(renewing.contains(".bind(org_id)"));
+        assert!(renewing.contains(".bind(MANAGED_DEADLINE_SECS)"));
+        assert!(
+            source.contains("use crate::terminalization::MANAGED_DEADLINE_SECS;"),
+            "the window is the heartbeat's, shared, never a second copy"
+        );
+        assert!(!source.contains("const MANAGED_DEADLINE_SECS"));
+    }
+
+    #[test]
+    fn the_public_consumes_pick_their_intent_and_the_full_signature_is_unchanged() {
+        let source = production_source();
+        let full = function_text(&source, "pub async fn consume_approval(");
+        assert!(full.contains("ConsumeIntent::Full"));
+        assert!(!full.contains("SpendOnly"));
+        assert!(
+            full.contains(
+                "    pool: &Pool,\n    id: &str,\n    org_id: &str,\n    run_id: &str,\n    \
+                 user_id: &str,\n    action_fingerprint: &str,\n    claim_hash: &str,\n) -> \
+                 Result<std::result::Result<ConsumeOutcome, ConsumeRefusal>> {"
+            ),
+            "consume_approval keeps its exact signature"
+        );
+        let spend = function_text(&source, "pub async fn consume_approval_spend_only(");
+        assert!(spend.contains("ConsumeIntent::SpendOnly"));
+        assert!(!spend.contains("Full"));
+        assert!(
+            spend.contains(
+                "    pool: &Pool,\n    id: &str,\n    org_id: &str,\n    run_id: &str,\n    \
+                 user_id: &str,\n    action_fingerprint: &str,\n    claim_hash: &str,\n) -> \
+                 Result<std::result::Result<ConsumeOutcome, ConsumeRefusal>> {"
+            ),
+            "the spend-only consume has the same shape"
+        );
+    }
+
+    // The descriptor reaper (approval_delivery) deletes the descriptor of any
+    // approval whose expires_at has passed, consumed or not. A replay therefore
+    // never needs the approval to be unexpired. A same-claim FULL replay whose
+    // descriptor has gone is answered exactly as the committed code answered it:
+    // already consumed, same claim, no call (the executor turns that into its own
+    // closed refusal). The replay branch adds no refusal of its own, so a
+    // switches-off executor sees the same wire result as before this change.
+    #[test]
+    fn a_replay_that_lost_its_descriptor_is_answered_as_before_with_no_call() {
+        let source = production_source();
+        let body = function_text(&source, "async fn consume_approval_with(");
+        let replay = &body[body.find("if consumed_at.is_some() {").expect("replay branch")..];
+        let replay_block = &replay[..replay.find("if status != \"granted\"").expect("replay ends")];
+        assert!(
+            !replay_block.contains("ConsumeRefusal::"),
+            "the replay branch answers; it never refuses"
+        );
+        assert!(
+            !replay_block.contains("has_descriptor"),
+            "the replay branch does not consult the descriptor probe"
+        );
+        assert!(
+            replay_block.contains(
+                "        let call = if same_claim && intent.returns_call() {\n            \
+                 read_consumed_call(&mut transaction, id, org_id, run_id, user_id).await?\n        \
+                 } else {\n            None\n        };\n"
+            ),
+            "the call is read only for the claim that consumed it, and is None when no descriptor stands"
+        );
+        assert!(
+            !replay_block.contains("if expired") && !replay_block.contains("expired {"),
+            "a replay never consults expires_at"
+        );
+    }
+
+    // `read_consumed_call` is what turns a missing descriptor into `None`.
+    #[test]
+    fn a_missing_descriptor_reads_as_no_call() {
+        let source = production_source();
+        let reader = function_text(&source, "async fn read_consumed_call(");
+        assert!(reader.contains("let Some((ciphertext,)) = row else {\n        return Ok(None);\n    };"));
+    }
 }
 
 /// Build plan WS03 S2: DB-backed checks of the approval consume. Run with
@@ -2312,5 +2632,506 @@ mod approval_consume_db_tests {
             );
         }
         assert!(consumed_at_of(&pool, &late).await.is_none(), "nothing was spent on the ended run");
+    }
+
+    // ------------------------------------------------------------------
+    // S7c-A2: the spend-only consume and the recovery renewal. WRITTEN, NOT RUN by
+    // the author: they need the disposable-Postgres harness
+    // (scripts/tests/session-core-db-tests.sh), which the lead runs. Their paths
+    // all start with `orchestration_store::approval_consume_db_tests::`, so the
+    // harness filters `orchestration_store` and `approval_consume` both select them.
+    // ------------------------------------------------------------------
+
+    /// What the tests read back of an obligation.
+    #[derive(Debug, Clone, PartialEq)]
+    struct Obligation {
+        state: String,
+        deadline_at: DateTime<Utc>,
+        next_attempt_at: DateTime<Utc>,
+        updated_at: DateTime<Utc>,
+        lease_owner: Option<String>,
+        lease_token_hash: Option<String>,
+        lease_expires_at: Option<DateTime<Utc>>,
+    }
+
+    /// An obligation for the seeded run in `state`, as the managed start would have
+    /// inserted it but with a deadline and a next attempt an hour in the past, so a
+    /// renewal is plainly visible. `org` is a parameter only so a test can forge a
+    /// row of another org. A `processing` row carries a live lease.
+    async fn seed_obligation_in(pool: &Pool, run_id: &str, org: &str, user: &str, state: &str) {
+        sqlx::query(
+            "INSERT INTO managed_run_terminalization_outbox \
+             (run_id, org_id, user_id, start_key, configured_source, \
+              configured_terminal_step_id, zdr, state, deadline_at, next_attempt_at, \
+              lease_owner, lease_token_hash, lease_expires_at) \
+             VALUES ($1, $2, $3, $4, 'execution_agent', 'execution-core-agent-final', false, $5, \
+                     now() - interval '1 hour', now() - interval '1 hour', \
+                     CASE WHEN $6::boolean THEN 'session-core-terminalizer' END, \
+                     CASE WHEN $6::boolean THEN repeat('a', 64) END, \
+                     CASE WHEN $6::boolean THEN now() + interval '1 minute' END)",
+        )
+        .bind(run_id)
+        .bind(org)
+        .bind(user)
+        .bind(format!("sk-{}", mp_ids::new_ulid()))
+        .bind(state)
+        .bind(state == "processing")
+        .execute(pool)
+        .await
+        .expect("seed the obligation");
+    }
+
+    async fn seed_obligation(pool: &Pool, seed: &Seed, state: &str) {
+        seed_obligation_in(pool, &seed.run_id, &seed.org, &seed.user, state).await;
+    }
+
+    async fn obligation_of(pool: &Pool, run_id: &str) -> Obligation {
+        let row: (
+            String,
+            DateTime<Utc>,
+            DateTime<Utc>,
+            DateTime<Utc>,
+            Option<String>,
+            Option<String>,
+            Option<DateTime<Utc>>,
+        ) = sqlx::query_as(
+            "SELECT state, deadline_at, next_attempt_at, updated_at, lease_owner, \
+                    lease_token_hash, lease_expires_at \
+             FROM managed_run_terminalization_outbox WHERE run_id = $1",
+        )
+        .bind(run_id)
+        .fetch_one(pool)
+        .await
+        .expect("read the obligation");
+        Obligation {
+            state: row.0,
+            deadline_at: row.1,
+            next_attempt_at: row.2,
+            updated_at: row.3,
+            lease_owner: row.4,
+            lease_token_hash: row.5,
+            lease_expires_at: row.6,
+        }
+    }
+
+    /// A granted loop approval for the seed.
+    async fn granted(pool: &Pool, seed: &Seed) -> String {
+        let id = approval(pool, seed, "loop").await;
+        grant(pool, seed, &id).await;
+        id
+    }
+
+    /// The renewed deadline is about `MANAGED_DEADLINE_SECS` from now (generous
+    /// tolerance: the database clock and this process share a host, not a guarantee).
+    fn assert_renewed(after: &Obligation) {
+        let window = after.deadline_at - Utc::now();
+        assert!(
+            window > chrono::Duration::seconds(MANAGED_DEADLINE_SECS - 120)
+                && window < chrono::Duration::seconds(MANAGED_DEADLINE_SECS + 120),
+            "the deadline is a fresh window from now, not {window}"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a scratch Postgres"]
+    async fn a_won_spend_only_consume_renews_the_recovery_deadline() {
+        let Some(pool) = scratch_pool().await else { return };
+        let seed = seed_run(&pool, "spend-renew").await;
+        let id = granted(&pool, &seed).await;
+        seed_obligation(&pool, &seed, "open").await;
+        let before = obligation_of(&pool, &seed.run_id).await;
+        assert!(before.deadline_at < Utc::now() - chrono::Duration::minutes(30));
+
+        let won = consume_approval_spend_only(&pool, &id, &seed.org, &seed.run_id, &seed.user, "", "a")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(won.consumed && !won.already_consumed && !won.same_claim);
+
+        let after = obligation_of(&pool, &seed.run_id).await;
+        assert_eq!(after.state, "open");
+        assert_renewed(&after);
+        assert!(after.next_attempt_at > before.next_attempt_at, "the next attempt moved to now");
+        assert!(after.next_attempt_at <= Utc::now());
+        assert!(consumed_at_of(&pool, &id).await.is_some(), "and the approval is spent");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a scratch Postgres"]
+    async fn a_full_consume_leaves_the_obligation_untouched() {
+        let Some(pool) = scratch_pool().await else { return };
+        let seed = seed_run(&pool, "full-untouched").await;
+        let id = granted(&pool, &seed).await;
+        seed_obligation(&pool, &seed, "open").await;
+        let before = obligation_of(&pool, &seed.run_id).await;
+
+        let won = consume_approval(&pool, &id, &seed.org, &seed.run_id, &seed.user, "", "a")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(won.consumed && won.call.is_some(), "the executor's consume still hands back the call");
+        let replay = consume_approval(&pool, &id, &seed.org, &seed.run_id, &seed.user, "", "a")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(replay.same_claim && replay.call.is_some());
+        assert_eq!(
+            obligation_of(&pool, &seed.run_id).await,
+            before,
+            "a full consume (won or replayed) does not touch the obligation, not even updated_at"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a scratch Postgres"]
+    async fn a_lost_or_replayed_spend_only_consume_does_not_renew() {
+        let Some(pool) = scratch_pool().await else { return };
+        let seed = seed_run(&pool, "spend-lost").await;
+        let id = granted(&pool, &seed).await;
+        let ungranted = approval(&pool, &seed, "loop").await;
+        seed_obligation(&pool, &seed, "open").await;
+
+        // A refusal (not granted, wrong fingerprint) renews nothing.
+        let before = obligation_of(&pool, &seed.run_id).await;
+        assert_eq!(
+            consume_approval_spend_only(&pool, &ungranted, &seed.org, &seed.run_id, &seed.user, "", "a")
+                .await
+                .unwrap(),
+            Err(ConsumeRefusal::NotGranted)
+        );
+        assert_eq!(
+            consume_approval_spend_only(&pool, &id, &seed.org, &seed.run_id, &seed.user, "deadbeef", "a")
+                .await
+                .unwrap(),
+            Err(ConsumeRefusal::FingerprintMismatch)
+        );
+        assert_eq!(obligation_of(&pool, &seed.run_id).await, before);
+
+        // The win renews; then the obligation is put back to a stale shape.
+        assert!(
+            consume_approval_spend_only(&pool, &id, &seed.org, &seed.run_id, &seed.user, "", "a")
+                .await
+                .unwrap()
+                .unwrap()
+                .consumed
+        );
+        sqlx::query(
+            "UPDATE managed_run_terminalization_outbox \
+             SET deadline_at = now() - interval '1 hour', next_attempt_at = now() - interval '1 hour', \
+                 updated_at = now() - interval '1 hour' WHERE run_id = $1",
+        )
+        .bind(&seed.run_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let stale = obligation_of(&pool, &seed.run_id).await;
+
+        // The same token replaying, and another token losing, renew nothing.
+        let replay = consume_approval_spend_only(&pool, &id, &seed.org, &seed.run_id, &seed.user, "", "a")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!replay.consumed && replay.already_consumed && replay.same_claim);
+        let other = consume_approval_spend_only(&pool, &id, &seed.org, &seed.run_id, &seed.user, "", "b")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!other.consumed && other.already_consumed && !other.same_claim);
+        assert_eq!(obligation_of(&pool, &seed.run_id).await, stale, "only a WON spend-only consume renews");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a scratch Postgres"]
+    async fn a_spend_only_consume_returns_no_call_and_still_a_single_winner() {
+        let Some(pool) = scratch_pool().await else { return };
+        let seed = seed_run(&pool, "spend-race").await;
+        let id = granted(&pool, &seed).await;
+        seed_obligation(&pool, &seed, "open").await;
+        let mut tasks = Vec::new();
+        for n in 0..6 {
+            let (pool, id, run, org, user) = (
+                pool.clone(),
+                id.clone(),
+                seed.run_id.clone(),
+                seed.org.clone(),
+                seed.user.clone(),
+            );
+            tasks.push(tokio::spawn(async move {
+                consume_approval_spend_only(&pool, &id, &org, &run, &user, "", &format!("claim-{n}"))
+                    .await
+                    .expect("consume")
+                    .expect("outcome")
+            }));
+        }
+        let mut wins = 0;
+        for task in tasks {
+            let outcome = task.await.expect("join");
+            assert!(outcome.call.is_none(), "a spend-only consume never carries the call");
+            if outcome.consumed {
+                wins += 1;
+            } else {
+                assert!(outcome.already_consumed && !outcome.same_claim);
+            }
+        }
+        assert_eq!(wins, 1, "exactly one spend-only consumer wins");
+        assert_renewed(&obligation_of(&pool, &seed.run_id).await);
+        // The winner's replay is still told apart and still gets no call.
+        let replay = consume_approval_spend_only(&pool, &id, &seed.org, &seed.run_id, &seed.user, "", "claim-0")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(replay.call.is_none());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a scratch Postgres"]
+    async fn a_spend_only_consume_clears_a_processing_lease() {
+        let Some(pool) = scratch_pool().await else { return };
+        let seed = seed_run(&pool, "spend-lease").await;
+        let id = granted(&pool, &seed).await;
+        seed_obligation(&pool, &seed, "processing").await;
+        let before = obligation_of(&pool, &seed.run_id).await;
+        assert!(before.lease_owner.is_some() && before.lease_token_hash.is_some());
+
+        assert!(
+            consume_approval_spend_only(&pool, &id, &seed.org, &seed.run_id, &seed.user, "", "a")
+                .await
+                .unwrap()
+                .unwrap()
+                .consumed
+        );
+        let after = obligation_of(&pool, &seed.run_id).await;
+        assert_eq!(after.state, "open", "a worker's lease no longer holds the row");
+        assert!(after.lease_owner.is_none());
+        assert!(after.lease_token_hash.is_none());
+        assert!(after.lease_expires_at.is_none());
+        assert_renewed(&after);
+    }
+
+    /// The environment variable the descriptor cipher reads (the one `scratch_pool`
+    /// sets). Put back by Drop, so a failing assertion cannot leave it unset.
+    struct DescriptorKeyUnset {
+        saved: Option<String>,
+    }
+
+    impl DescriptorKeyUnset {
+        const NAME: &'static str = "SESSION_CORE_CONTINUATION_DESCRIPTOR_KEY";
+
+        fn new() -> Self {
+            let saved = std::env::var(Self::NAME).ok();
+            std::env::remove_var(Self::NAME);
+            Self { saved }
+        }
+    }
+
+    impl Drop for DescriptorKeyUnset {
+        fn drop(&mut self) {
+            if let Some(value) = &self.saved {
+                std::env::set_var(Self::NAME, value);
+            }
+        }
+    }
+
+    // The harness runs these with --test-threads=1, so changing the process
+    // environment for one test is safe.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a scratch Postgres"]
+    async fn a_spend_only_consume_wins_with_the_descriptor_cipher_key_unset() {
+        let Some(pool) = scratch_pool().await else { return };
+        let seed = seed_run(&pool, "spend-nokey").await;
+        // Both approvals are raised while the key is present (it encrypts them).
+        let spend = granted(&pool, &seed).await;
+        let full = granted(&pool, &seed).await;
+        seed_obligation(&pool, &seed, "open").await;
+
+        let _unset = DescriptorKeyUnset::new();
+        assert!(
+            DescriptorCipher::from_env().is_err(),
+            "the key really is unset for this part of the test"
+        );
+        let won = consume_approval_spend_only(&pool, &spend, &seed.org, &seed.run_id, &seed.user, "", "a")
+            .await
+            .expect("a spend-only consume never touches the cipher")
+            .expect("and it wins");
+        assert!(won.consumed && won.call.is_none());
+        let replay = consume_approval_spend_only(&pool, &spend, &seed.org, &seed.run_id, &seed.user, "", "a")
+            .await
+            .expect("nor does its replay")
+            .expect("and it is answered");
+        assert!(replay.already_consumed && replay.same_claim && replay.call.is_none());
+        assert_renewed(&obligation_of(&pool, &seed.run_id).await);
+
+        // The control: a full consume of the other approval needs the key, fails,
+        // and rolls back (the approval stays unconsumed).
+        assert!(
+            consume_approval(&pool, &full, &seed.org, &seed.run_id, &seed.user, "", "b")
+                .await
+                .is_err(),
+            "a full consume cannot read the descriptor without the key"
+        );
+        assert!(consumed_at_of(&pool, &full).await.is_none());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a scratch Postgres"]
+    async fn a_spend_only_consume_renews_only_its_own_live_obligation() {
+        let Some(pool) = scratch_pool().await else { return };
+        // Another run's obligation is not touched.
+        let seed = seed_run(&pool, "spend-scope").await;
+        let neighbour = seed_run(&pool, "spend-scope-neighbour").await;
+        let id = granted(&pool, &seed).await;
+        seed_obligation(&pool, &seed, "open").await;
+        seed_obligation(&pool, &neighbour, "open").await;
+        let neighbour_before = obligation_of(&pool, &neighbour.run_id).await;
+        assert!(
+            consume_approval_spend_only(&pool, &id, &seed.org, &seed.run_id, &seed.user, "", "a")
+                .await
+                .unwrap()
+                .unwrap()
+                .consumed
+        );
+        assert_eq!(obligation_of(&pool, &neighbour.run_id).await, neighbour_before);
+
+        // A row of the same run but another org (forged here) is not renewed.
+        let forged = seed_run(&pool, "spend-scope-org").await;
+        let forged_id = granted(&pool, &forged).await;
+        seed_obligation_in(&pool, &forged.run_id, "another-org", &forged.user, "open").await;
+        let forged_before = obligation_of(&pool, &forged.run_id).await;
+        assert!(
+            consume_approval_spend_only(&pool, &forged_id, &forged.org, &forged.run_id, &forged.user, "", "a")
+                .await
+                .unwrap()
+                .unwrap()
+                .consumed,
+            "the consume itself still wins; the renewal is scoped by org"
+        );
+        assert_eq!(obligation_of(&pool, &forged.run_id).await, forged_before);
+
+        // A settled obligation is never reopened.
+        let settled = seed_run(&pool, "spend-scope-settled").await;
+        let settled_id = granted(&pool, &settled).await;
+        seed_obligation(&pool, &settled, "superseded").await;
+        let settled_before = obligation_of(&pool, &settled.run_id).await;
+        assert!(
+            consume_approval_spend_only(&pool, &settled_id, &settled.org, &settled.run_id, &settled.user, "", "a")
+                .await
+                .unwrap()
+                .unwrap()
+                .consumed
+        );
+        assert_eq!(obligation_of(&pool, &settled.run_id).await, settled_before);
+
+        // A run with no obligation at all: zero rows is not an error.
+        let bare = seed_run(&pool, "spend-scope-bare").await;
+        let bare_id = granted(&pool, &bare).await;
+        assert!(
+            consume_approval_spend_only(&pool, &bare_id, &bare.org, &bare.run_id, &bare.user, "", "a")
+                .await
+                .unwrap()
+                .unwrap()
+                .consumed
+        );
+    }
+
+    /// Makes the approval expired, then runs the real descriptor reaper for its org.
+    /// The reaper (`approval_delivery::reap_undeliverable_deliveries`) deletes the
+    /// retained descriptor of every approval whose `expires_at` has passed, consumed
+    /// or not.
+    async fn expire_and_reap(pool: &Pool, seed: &Seed, id: &str) {
+        sqlx::query("UPDATE approvals SET expires_at = now() - interval '1 minute' WHERE id = $1")
+            .bind(id)
+            .execute(pool)
+            .await
+            .expect("expire the approval");
+        crate::approval_delivery::reap_undeliverable_deliveries(pool, &seed.org)
+            .await
+            .expect("reap");
+    }
+
+    async fn descriptor_rows(pool: &Pool, id: &str) -> i64 {
+        sqlx::query_scalar("SELECT count(*) FROM approval_continuation_descriptors WHERE approval_id = $1")
+            .bind(id)
+            .fetch_one(pool)
+            .await
+            .expect("count descriptors")
+    }
+
+    // The expiry race the design review found (finding 6). The gateway's spend-only
+    // consume wins; the executor's own consume replays later, in another
+    // transaction. If expires_at passes in between:
+    //   - before the reaper runs, the replay still gets the call: a replay never
+    //     consults expires_at;
+    //   - after the reaper ran, the descriptor is gone. The same-claim replay is
+    //     answered exactly as the committed code answered it: already consumed, same
+    //     claim, no call. session-core adds no refusal of its own here (that would
+    //     change the wire result of a switches-off executor); the executor turns a
+    //     call-less replay into its own closed refusal. The click is spent either
+    //     way and the run is left to the renewed recovery window.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a scratch Postgres"]
+    async fn a_replay_after_the_approval_expired_is_answered_while_the_descriptor_stands() {
+        let Some(pool) = scratch_pool().await else { return };
+        let seed = seed_run(&pool, "expiry-tolerated").await;
+        let id = granted(&pool, &seed).await;
+        assert!(
+            consume_approval_spend_only(&pool, &id, &seed.org, &seed.run_id, &seed.user, "", "a")
+                .await
+                .unwrap()
+                .unwrap()
+                .consumed
+        );
+        sqlx::query("UPDATE approvals SET expires_at = now() - interval '1 minute' WHERE id = $1")
+            .bind(&id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let replay = consume_approval(&pool, &id, &seed.org, &seed.run_id, &seed.user, "", "a")
+            .await
+            .unwrap()
+            .expect("an expired but already consumed approval replays");
+        assert!(!replay.consumed && replay.already_consumed && replay.same_claim);
+        let call = replay.call.expect("the descriptor still stands, so the claim holder gets the call");
+        assert_eq!(call.tool_name, "shell");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a scratch Postgres"]
+    async fn a_replay_after_the_reaper_removed_the_descriptor_is_answered_with_no_call() {
+        let Some(pool) = scratch_pool().await else { return };
+        let seed = seed_run(&pool, "expiry-reaped").await;
+        let id = granted(&pool, &seed).await;
+        assert!(
+            consume_approval_spend_only(&pool, &id, &seed.org, &seed.run_id, &seed.user, "", "a")
+                .await
+                .unwrap()
+                .unwrap()
+                .consumed
+        );
+        assert_eq!(descriptor_rows(&pool, &id).await, 1);
+        expire_and_reap(&pool, &seed, &id).await;
+        assert_eq!(descriptor_rows(&pool, &id).await, 0, "the reaper cleared the consumed approval's descriptor");
+
+        // The executor's own (full) replay is answered as the committed code answered
+        // it: already consumed, the same claim, and no call. The executor (ledger on)
+        // then refuses with its own approval_not_resumable; with the ledger off it
+        // refuses continuation_already_consumed before it looks at the call.
+        let full_replay = consume_approval(&pool, &id, &seed.org, &seed.run_id, &seed.user, "", "a")
+            .await
+            .unwrap()
+            .expect("a replay is answered, not refused");
+        assert!(!full_replay.consumed && full_replay.already_consumed && full_replay.same_claim);
+        assert!(full_replay.call.is_none(), "no descriptor stands, so there is no call");
+        // A spend-only replay never needed the descriptor and is answered as before.
+        let spend_replay = consume_approval_spend_only(&pool, &id, &seed.org, &seed.run_id, &seed.user, "", "a")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(spend_replay.already_consumed && spend_replay.same_claim && spend_replay.call.is_none());
+        // Another claim is still just "already consumed", with no call.
+        let other = consume_approval(&pool, &id, &seed.org, &seed.run_id, &seed.user, "", "b")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(other.already_consumed && !other.same_claim && other.call.is_none());
     }
 }

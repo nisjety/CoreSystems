@@ -2410,7 +2410,15 @@ type ConsumeApprovalRequest struct {
 	ActionFingerprint string `protobuf:"bytes,5,opt,name=action_fingerprint,json=actionFingerprint,proto3" json:"action_fingerprint,omitempty"`
 	// An opaque token the resuming segment generates. The same token consuming
 	// twice is a safe replay; another token is refused as already consumed.
-	ClaimToken    string `protobuf:"bytes,6,opt,name=claim_token,json=claimToken,proto3" json:"claim_token,omitempty"`
+	ClaimToken string `protobuf:"bytes,6,opt,name=claim_token,json=claimToken,proto3" json:"claim_token,omitempty"`
+	// The caller consumes for the spend only (the model-gateway, ahead of the
+	// executor). The server neither decrypts nor returns the approved call: the
+	// response carries consumed, already_consumed and same_claim only. A winning
+	// spend-only consume also renews the run's managed terminalization deadline in
+	// the same transaction, so a spent click is not recovered before the executor
+	// that will run it has heartbeated. The default (false) is the full consume
+	// the executor makes, unchanged.
+	OmitCall      bool `protobuf:"varint,7,opt,name=omit_call,json=omitCall,proto3" json:"omit_call,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -2485,6 +2493,13 @@ func (x *ConsumeApprovalRequest) GetClaimToken() string {
 		return x.ClaimToken
 	}
 	return ""
+}
+
+func (x *ConsumeApprovalRequest) GetOmitCall() bool {
+	if x != nil {
+		return x.OmitCall
+	}
+	return false
 }
 
 // The outcome of a ConsumeApproval.
@@ -6174,7 +6189,7 @@ const file_model_plane_v1_orchestration_proto_rawDesc = "" +
 	"\x0fidempotency_key\x18\n" +
 	" \x01(\tR\x0eidempotencyKey\x12@\n" +
 	"\x1ccontinuation_descriptor_json\x18\v \x01(\tR\x1acontinuationDescriptorJson\x12+\n" +
-	"\x11continuation_mode\x18\f \x01(\tR\x10continuationMode\"\xd0\x01\n" +
+	"\x11continuation_mode\x18\f \x01(\tR\x10continuationMode\"\xed\x01\n" +
 	"\x16ConsumeApprovalRequest\x12\x1f\n" +
 	"\vapproval_id\x18\x01 \x01(\tR\n" +
 	"approvalId\x12\x15\n" +
@@ -6183,7 +6198,8 @@ const file_model_plane_v1_orchestration_proto_rawDesc = "" +
 	"\astep_id\x18\x04 \x01(\tR\x06stepId\x12-\n" +
 	"\x12action_fingerprint\x18\x05 \x01(\tR\x11actionFingerprint\x12\x1f\n" +
 	"\vclaim_token\x18\x06 \x01(\tR\n" +
-	"claimToken\"\x9e\x02\n" +
+	"claimToken\x12\x1b\n" +
+	"\tomit_call\x18\a \x01(\bR\bomitCall\"\x9e\x02\n" +
 	"\x17ConsumeApprovalResponse\x12\x1a\n" +
 	"\bconsumed\x18\x01 \x01(\bR\bconsumed\x12)\n" +
 	"\x10already_consumed\x18\x02 \x01(\bR\x0falreadyConsumed\x12\x1d\n" +

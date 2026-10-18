@@ -203,6 +203,11 @@ struct RunRow {
     fold_claim_expired: Option<bool>,
     /// The closed park token of a parked fold.
     fold_park_reason: Option<String>,
+    /// For a `pause` fold only (`None` for every other kind and without a fold):
+    /// whether the approval the pause is keyed by (its `pause_ref`) has been
+    /// consumed. A stage-one continuation consumes it and leaves the fold in
+    /// place, so a consumed pause fold is stale: nothing can continue from it.
+    fold_pause_consumed: Option<bool>,
 }
 
 /// The deliberately content-free run/thread projection used only by Control's
@@ -400,7 +405,15 @@ const RUN_SELECT: &str = "SELECT
         lc.state AS fold_state,
         lc.kind AS fold_kind,
         (lc.claim_expires_at < now()) AS fold_claim_expired,
-        lc.park_reason AS fold_park_reason
+        lc.park_reason AS fold_park_reason,
+        CASE WHEN lc.kind = 'pause' THEN EXISTS (
+            SELECT 1 FROM approvals ap
+            WHERE ap.org_id = r.org_id
+              AND ap.user_id = r.user_id
+              AND ap.run_id = r.id
+              AND ap.idempotency_key = lc.pause_ref
+              AND ap.consumed_at IS NOT NULL
+        ) END AS fold_pause_consumed
      FROM runs r
      LEFT JOIN run_loop_checkpoints lc ON lc.run_id = r.id";
 
@@ -436,13 +449,18 @@ fn row_to_detail(row: RunRow, store_enabled: bool, viewer: &VerifiedIdentity) ->
     // Resumable only while the store is on, the run is persistent and not ended,
     // and its fold is claimable. A zero-retention or waived run is never resumable,
     // even if a fold row exists for it.
+    //
+    // And a pause fold whose approval has been consumed is not resumable: the
+    // continuation that consumed it ran from the approval's own descriptor and
+    // left the fold behind, and the approval cannot be consumed again.
     let resumable = store_enabled
         && row.retention_class == "persistent"
         && !is_terminal(&row.status)
         && fold_is_claimable(
             row.fold_state.as_deref(),
             row.fold_claim_expired.unwrap_or(false),
-        );
+        )
+        && !(row.fold_kind.as_deref() == Some("pause") && row.fold_pause_consumed == Some(true));
     // The reason follows the fold's kind, not its state: a claim moves a parked
     // fold to `resuming` but leaves the kind and the reason, so a parked run whose
     // resume lease lapsed still says why it was parked.
@@ -1273,6 +1291,7 @@ mod tests {
             fold_kind: None,
             fold_claim_expired: None,
             fold_park_reason: None,
+            fold_pause_consumed: None,
         };
         let detail = row_to_detail(row, false, &owner_viewer());
         assert_eq!(detail.run_id, "run_01");
@@ -1309,6 +1328,7 @@ mod tests {
             fold_kind: None,
             fold_claim_expired: None,
             fold_park_reason: None,
+            fold_pause_consumed: None,
         };
         let detail = row_to_detail(row, false, &owner_viewer());
         assert_eq!(detail.parent_run_id, "run_parent");
@@ -1350,6 +1370,7 @@ mod tests {
             fold_kind: fold_kind.map(str::to_owned),
             fold_claim_expired,
             fold_park_reason: fold_park_reason.map(str::to_owned),
+            fold_pause_consumed: None,
         }
     }
 
@@ -1603,6 +1624,165 @@ mod tests {
         assert!(RUN_SELECT.trim_end().ends_with("LEFT JOIN run_loop_checkpoints lc ON lc.run_id = r.id"));
     }
 
+    // ------------------------------------------------------------------
+    // S7c-A3 (D5): a pause fold whose approval has been consumed is not resumable.
+    //
+    // A stage-1 continuation consumes the pause's approval and no longer closes the
+    // pause fold, so the fold stays `paused` and claimable although no continuation
+    // can use it any more. The predicate below stops `RunDetail.resumable`
+    // advertising it. `resumable` stays readable by every reader (it is a boolean
+    // and never reaches a browser); `park_reason` stays owner-or-service.
+    // ------------------------------------------------------------------
+
+    fn consumed_pause(consumed: Option<bool>) -> RunRow {
+        let mut row = fold_row(
+            "awaiting_approval",
+            "persistent",
+            Some("paused"),
+            Some("pause"),
+            Some(false),
+            None,
+        );
+        row.fold_pause_consumed = consumed;
+        row
+    }
+
+    #[test]
+    fn a_pause_fold_whose_approval_was_consumed_is_not_resumable() {
+        for state in [("paused", Some(false)), ("resuming", Some(true))] {
+            let mut row = fold_row(
+                "awaiting_approval",
+                "persistent",
+                Some(state.0),
+                Some("pause"),
+                state.1,
+                None,
+            );
+            row.fold_pause_consumed = Some(true);
+            let detail = row_to_detail(row, true, &owner_viewer());
+            assert!(
+                !detail.resumable,
+                "{state:?}: a consumed pause approval leaves nothing a continuation can use"
+            );
+            assert_eq!(detail.park_reason, "");
+        }
+        // The same answer for every reader: it is not blanked for one and shown to
+        // another, and it never turns true for a peer or a service.
+        for viewer in [
+            owner_viewer(),
+            VerifiedIdentity::user_for_test("org_1", "someone_else"),
+            VerifiedIdentity::service_for_test("org_1", &["session:read"], false),
+        ] {
+            let detail = row_to_detail(consumed_pause(Some(true)), true, &viewer);
+            assert!(!detail.resumable);
+        }
+    }
+
+    #[test]
+    fn a_pause_fold_with_an_unconsumed_approval_stays_resumable() {
+        // The probe says unconsumed, or says nothing (no approval row matched, which
+        // is the gateway's old behaviour: a wrong key costs a fallback, never safety).
+        for consumed in [Some(false), None] {
+            let detail = row_to_detail(consumed_pause(consumed), true, &owner_viewer());
+            assert!(detail.resumable, "{consumed:?}");
+            assert_eq!(detail.park_reason, "");
+        }
+        // Every reader sees the boolean.
+        for viewer in [
+            VerifiedIdentity::user_for_test("org_1", "someone_else"),
+            VerifiedIdentity::service_for_test("org_1", &["session:read"], false),
+        ] {
+            assert!(row_to_detail(consumed_pause(Some(false)), true, &viewer).resumable);
+        }
+        // The old gates still apply on top: a switch that is off, an ended run, a
+        // zero-retention run and a live lease are not resumable whatever the probe says.
+        assert!(!row_to_detail(consumed_pause(Some(false)), false, &owner_viewer()).resumable);
+        let mut ended = consumed_pause(Some(false));
+        ended.status = "completed".to_owned();
+        assert!(!row_to_detail(ended, true, &owner_viewer()).resumable);
+        let mut zdr = consumed_pause(Some(false));
+        zdr.retention_class = "zdr".to_owned();
+        assert!(!row_to_detail(zdr, true, &owner_viewer()).resumable);
+        let mut leased = consumed_pause(Some(false));
+        leased.fold_state = Some("resuming".to_owned());
+        leased.fold_claim_expired = Some(false);
+        assert!(!row_to_detail(leased, true, &owner_viewer()).resumable);
+    }
+
+    #[test]
+    fn a_park_fold_ignores_the_consumed_approval_rule() {
+        // The probe is only ever computed for a pause fold, but the rule must not
+        // depend on that: whatever it carries, a park fold is judged by the old gate.
+        for consumed in [None, Some(false), Some(true)] {
+            let mut row = fold_row(
+                "awaiting_approval",
+                "persistent",
+                Some("parked"),
+                Some("park"),
+                Some(false),
+                Some("provider_exhausted"),
+            );
+            row.fold_pause_consumed = consumed;
+            let detail = row_to_detail(row, true, &owner_viewer());
+            assert!(detail.resumable, "{consumed:?}");
+            assert_eq!(detail.park_reason, "provider_exhausted", "{consumed:?}");
+        }
+        // A round or pre-effect fold or no fold at all is judged by the old gate too.
+        for kind in [Some("round"), Some("pre_effect"), None] {
+            let mut row = fold_row("running", "persistent", Some("resuming"), kind, Some(true), None);
+            row.fold_pause_consumed = Some(true);
+            assert!(row_to_detail(row, true, &owner_viewer()).resumable, "{kind:?}");
+        }
+        // The park-reason rule is the one it always was: owner or service only.
+        let mut parked = fold_row(
+            "awaiting_approval",
+            "persistent",
+            Some("parked"),
+            Some("park"),
+            Some(false),
+            Some("credential_window"),
+        );
+        parked.fold_pause_consumed = Some(false);
+        let peer = VerifiedIdentity::user_for_test("org_1", "someone_else");
+        let detail = row_to_detail(parked, true, &peer);
+        assert!(detail.resumable);
+        assert_eq!(detail.park_reason, "", "a peer still gets no reason");
+    }
+
+    #[test]
+    fn run_select_keeps_its_shape_with_the_consumed_probe() {
+        let sql = RUN_SELECT.split_whitespace().collect::<Vec<_>>().join(" ");
+        let probe = "CASE WHEN lc.kind = 'pause' THEN EXISTS ( SELECT 1 FROM approvals ap \
+                     WHERE ap.org_id = r.org_id AND ap.user_id = r.user_id AND ap.run_id = r.id \
+                     AND ap.idempotency_key = lc.pause_ref AND ap.consumed_at IS NOT NULL ) \
+                     END AS fold_pause_consumed";
+        assert!(sql.contains(probe), "{sql}");
+        // It is a column of the projection, before the FROM, and the shared LEFT JOIN
+        // is still the last line, so the Space branch's appended JOIN still composes.
+        assert!(sql.find("END AS fold_pause_consumed").unwrap() < sql.find("FROM runs r").unwrap());
+        assert!(RUN_SELECT.trim_end().ends_with("LEFT JOIN run_loop_checkpoints lc ON lc.run_id = r.id"));
+        // The alias `ap` is the probe's alone: the aliases r, lc, e, c, t and st are
+        // taken by the projection and by the appended Space and system-run clauses.
+        let source = include_str!("run_service_grpc.rs").replace("\r\n", "\n");
+        let production = &source[..source.find("\n#[cfg(test)]\nmod tests {").expect("tests marker")];
+        assert_eq!(production.matches("approvals ap").count(), 1);
+        assert_eq!(RUN_SELECT.matches("ap.").count(), 5, "the five predicates of the probe");
+        // It reads only a flag and still projects no fold content.
+        for forbidden in ["ciphertext", "fold_digest", "authority_digest", "claim_token_hash"] {
+            assert!(!RUN_SELECT.contains(forbidden), "{forbidden}");
+        }
+        // Scoped by org, user and run so the user-led unique index can serve it, and
+        // the probe is confined to a pause fold by the CASE.
+        for scoped in ["ap.org_id = r.org_id", "ap.user_id = r.user_id", "ap.run_id = r.id"] {
+            assert!(RUN_SELECT.contains(scoped), "{scoped}");
+        }
+        // The pause approval is keyed by the pause reference (run id and step id).
+        assert!(RUN_SELECT.contains("ap.idempotency_key = lc.pause_ref"));
+        // Composes with the Space branch's appended JOIN, which names t and st only.
+        let composed = format!("{RUN_SELECT} JOIN threads t ON t.id = r.thread_id WHERE t.org_id = $5");
+        assert!(composed.contains("LEFT JOIN run_loop_checkpoints lc ON lc.run_id = r.id JOIN threads t"));
+    }
+
     /// Turns the fold store on for one test and off again afterwards, even when
     /// the test panics. Tests that hold it run with `--test-threads=1`.
     struct StoreOn;
@@ -1767,6 +1947,195 @@ mod tests {
             assert!(!detail.resumable, "{retention}");
             assert_eq!(detail.park_reason, "", "{retention}");
         }
+    }
+
+    /// A loop approval for `run_id` keyed by `idempotency_key` (the pause
+    /// reference of a fold), granted, with a retained descriptor so it can be
+    /// consumed. Needs the descriptor key in the environment.
+    async fn granted_pause_approval(
+        pool: &PgPool,
+        run_id: &str,
+        org: &str,
+        user: &str,
+        idempotency_key: &str,
+    ) -> String {
+        use base64::Engine as _;
+        std::env::set_var(
+            "SESSION_CORE_CONTINUATION_DESCRIPTOR_KEY",
+            base64::engine::general_purpose::STANDARD.encode([7_u8; 32]),
+        );
+        let id = format!("appr_{}", mp_ids::new_ulid());
+        let descriptor = serde_json::json!({
+            "version": 1,
+            "run_id": run_id,
+            "org_id": org,
+            "user_id": user,
+            "step_id": "tool_1_call-1",
+            "action_kind": "tool_call",
+            "action_fingerprint": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            "tool_name": "shell",
+            "input": {"command": "echo approved"},
+            "permission_mode": "ask",
+            "offered": {
+                "tools": [{"name": "shell", "description": "run", "parameters_json": "{}"}],
+                "authority": {
+                    "mode": "ask", "plan_mode": false, "autonomy_rung": "", "space_id": "",
+                    "min_privacy_tier": 0, "provider_hint": "", "max_rounds": 4,
+                    "tool_names": ["shell"], "digest": "unchecked-in-this-test"
+                }
+            }
+        });
+        crate::orchestration_store::request_approval(
+            pool,
+            &id,
+            run_id,
+            None,
+            "tool_call",
+            user,
+            org,
+            user,
+            idempotency_key,
+            &serde_json::json!({}),
+            Some(&descriptor),
+            Some(chrono::Utc::now() + chrono::Duration::minutes(30)),
+            "loop",
+        )
+        .await
+        .expect("request approval")
+        .expect("inserted");
+        crate::orchestration_store::decide_approval(pool, &id, org, Some(user), "granted", user, "ok")
+            .await
+            .expect("grant");
+        id
+    }
+
+    /// The Space branch of `ListRuns` appends a plain JOIN to the shared projection.
+    /// Its decision token cannot be forged here, so this composes the same SQL and
+    /// reads the row the same way, to prove the probe resolves under that JOIN.
+    async fn space_branch_row(pool: &PgPool, run_id: &str, org: &str) -> RunRow {
+        sqlx::query_as::<_, RunRow>(&format!(
+            "{RUN_SELECT} JOIN threads t ON t.id = r.thread_id \
+             WHERE t.org_id = $1 AND r.id = $2"
+        ))
+        .bind(org)
+        .bind(run_id)
+        .fetch_one(pool)
+        .await
+        .expect("the Space-branch shape resolves the probe")
+    }
+
+    // S7c-A3 (D5). WRITTEN, NOT RUN by the author (disposable Postgres, lead).
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a scratch Postgres; sets the fold store switch, so run with --test-threads=1"]
+    async fn loop_checkpoint_a_stale_pause_fold_after_a_stage_one_continuation_reads_not_resumable() {
+        use crate::loop_checkpoint::test_support::{scratch_pool, seed_fold, seed_run};
+        let Some(pool) = scratch_pool().await else {
+            return;
+        };
+        let _on = StoreOn::new();
+        let until = chrono::Utc::now() + chrono::Duration::hours(1);
+
+        // The paused run: a pause fold keyed by run:step and the approval keyed the same.
+        let (run_id, org, user) = seed_run(&pool, "persistent").await;
+        let pause_ref = format!("{run_id}:step-1");
+        seed_fold(&pool, &run_id, "pause", &pause_ref, "", None)
+            .await
+            .expect("pause fold");
+        let approval = granted_pause_approval(&pool, &run_id, &org, &user, &pause_ref).await;
+        let thread_id: String = sqlx::query_scalar("SELECT thread_id FROM runs WHERE id = $1")
+            .bind(&run_id)
+            .fetch_one(&pool)
+            .await
+            .expect("thread");
+        let list_thread = |pool: PgPool, thread_id: String, org: String, user: String| async move {
+            RunServiceImpl::new(pool)
+                .list_runs(identity_request(
+                    pb::ListRunsRequest {
+                        thread_id,
+                        limit: 10,
+                        ..Default::default()
+                    },
+                    VerifiedIdentity::user_for_test(&org, &user),
+                ))
+                .await
+                .expect("list runs")
+                .into_inner()
+        };
+
+        // Granted and unconsumed: resumable on every read path.
+        assert!(get_run_as(&pool, &run_id, &org, &user).await.resumable);
+        let listed = list_thread(pool.clone(), thread_id.clone(), org.clone(), user.clone()).await;
+        assert!(listed.runs[0].resumable);
+        assert_eq!(
+            space_branch_row(&pool, &run_id, &org).await.fold_pause_consumed,
+            Some(false)
+        );
+
+        // A stage-one continuation consumes the approval and leaves the fold in place.
+        assert!(
+            crate::orchestration_store::consume_approval(
+                &pool, &approval, &org, &run_id, &user, "", "claim-a"
+            )
+            .await
+            .expect("consume")
+            .expect("outcome")
+            .consumed
+        );
+        let state: String = sqlx::query_scalar("SELECT state FROM run_loop_checkpoints WHERE run_id = $1")
+            .bind(&run_id)
+            .fetch_one(&pool)
+            .await
+            .expect("fold state");
+        assert_eq!(state, "paused", "the stale fold is still there and still claimable by state");
+
+        // Now no read path advertises it.
+        let detail = get_run_as(&pool, &run_id, &org, &user).await;
+        assert!(!detail.resumable);
+        assert_eq!(detail.park_reason, "");
+        let listed = list_thread(pool.clone(), thread_id, org.clone(), user.clone()).await;
+        assert!(!listed.runs[0].resumable);
+        let space_row = space_branch_row(&pool, &run_id, &org).await;
+        assert_eq!(space_row.fold_pause_consumed, Some(true));
+        assert!(!row_to_detail(space_row, true, &VerifiedIdentity::user_for_test(&org, &user)).resumable);
+
+        // A consumed approval under another key does not mark a pause fold keyed
+        // differently: the pairing is the pause reference, run and user.
+        let (other_run, other_org, other_user) = seed_run(&pool, "persistent").await;
+        seed_fold(&pool, &other_run, "pause", &format!("{other_run}:step-9"), "", None)
+            .await
+            .expect("pause fold");
+        let unrelated =
+            granted_pause_approval(&pool, &other_run, &other_org, &other_user, "some-other-key").await;
+        assert!(
+            crate::orchestration_store::consume_approval(
+                &pool, &unrelated, &other_org, &other_run, &other_user, "", "claim-a"
+            )
+            .await
+            .expect("consume")
+            .expect("outcome")
+            .consumed
+        );
+        assert!(get_run_as(&pool, &other_run, &other_org, &other_user).await.resumable);
+
+        // A park fold is judged by the old gate, whatever approvals the run has consumed.
+        let (parked, parked_org, parked_user) = seed_run(&pool, "persistent").await;
+        let park_ref = format!("{parked}:step-2");
+        seed_fold(&pool, &parked, "park", &park_ref, "provider_exhausted", Some(until))
+            .await
+            .expect("park fold");
+        let keyed = granted_pause_approval(&pool, &parked, &parked_org, &parked_user, &park_ref).await;
+        assert!(
+            crate::orchestration_store::consume_approval(
+                &pool, &keyed, &parked_org, &parked, &parked_user, "", "claim-a"
+            )
+            .await
+            .expect("consume")
+            .expect("outcome")
+            .consumed
+        );
+        let detail = get_run_as(&pool, &parked, &parked_org, &parked_user).await;
+        assert!(detail.resumable);
+        assert_eq!(detail.park_reason, "provider_exhausted");
     }
 
     async fn park_reason_from_get_run(
