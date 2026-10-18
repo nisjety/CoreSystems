@@ -28,6 +28,47 @@ func (c *fakeClock) Advance(d time.Duration) {
 	c.mu.Unlock()
 }
 
+// storeFactory returns a Repository and the fake clock it reads, so one
+// contract runs against MemoryRepository here and against Routed{PgStore,
+// MemoryRepository} in postgres_integration_test.go.
+type storeFactory func(t *testing.T) (Repository, *fakeClock)
+
+func memoryStore(*testing.T) (Repository, *fakeClock) {
+	store, clock := clockedRepo()
+	return store, clock
+}
+
+// deriveContract is the store-agnostic Derive and approval semantics of WS1.B.
+var deriveContract = []struct {
+	name string
+	run  func(*testing.T, storeFactory)
+}{
+	{"Derive_InheritsHostsZdrOwnerScopeAndBindsToParent", contractDerive_InheritsHostsZdrOwnerScopeAndBindsToParent},
+	{"Derive_ExplicitHostsMayNarrowToTheParentOrBelowIt", contractDerive_ExplicitHostsMayNarrowToTheParentOrBelowIt},
+	{"Derive_NeverWidensTheParentsHosts", contractDerive_NeverWidensTheParentsHosts},
+	{"Derive_WideParentMustBeNarrowedExplicitly", contractDerive_WideParentMustBeNarrowedExplicitly},
+	{"Derive_ParentMustBeAnActiveOrdinarySessionGrant", contractDerive_ParentMustBeAnActiveOrdinarySessionGrant},
+	{"Derive_IsScopedToTheParentsTenantAndOwner", contractDerive_IsScopedToTheParentsTenantAndOwner},
+	{"Derive_ZdrFollowsTheParentAndIsNeverLowered", contractDerive_ZdrFollowsTheParentAndIsNeverLowered},
+	{"Derive_ExpiryIsCappedByTheParentAndAShortRemainderIsRefused", contractDerive_ExpiryIsCappedByTheParentAndAShortRemainderIsRefused},
+	{"Derive_ReplayReturnsTheSameGrantAndCannotWidenOrRefreshIt", contractDerive_ReplayReturnsTheSameGrantAndCannotWidenOrRefreshIt},
+	{"Derive_RevokingTheParentRevokesTheRunGrant", contractDerive_RevokingTheParentRevokesTheRunGrant},
+	{"Derive_ConcurrentParentRevokeNeverLeavesALiveChild", contractDerive_ConcurrentParentRevokeNeverLeavesALiveChild},
+	{"Derive_IsBoundedPerParentAndDoesNotConsumeTheOwnerCap", contractDerive_IsBoundedPerParentAndDoesNotConsumeTheOwnerCap},
+	{"Derive_RechecksTheHostPolicy", contractDerive_RechecksTheHostPolicy},
+	{"SensitiveApproval_AcceptsASessionOrRunParent", contractSensitiveApproval_AcceptsASessionOrRunParent},
+	{"Approval_OnRunParent_CannotWidenHosts", contractApproval_OnRunParent_CannotWidenHosts},
+	{"Approval_CannotOutliveParent", contractApproval_CannotOutliveParent},
+}
+
+func runDeriveContract(t *testing.T, mk storeFactory) {
+	for _, c := range deriveContract {
+		t.Run(c.name, func(t *testing.T) { c.run(t, mk) })
+	}
+}
+
+func TestDeriveContract_Memory(t *testing.T) { runDeriveContract(t, memoryStore) }
+
 func clockedRepo() (*MemoryRepository, *fakeClock) {
 	clock := &fakeClock{now: time.Date(2026, 10, 18, 12, 0, 0, 0, time.UTC)}
 	store := NewMemoryRepository()
@@ -54,8 +95,8 @@ func hosts(n int) []string {
 	return out
 }
 
-func TestDerive_InheritsHostsZdrOwnerScopeAndBindsToParent(t *testing.T) {
-	store, _ := clockedRepo()
+func contractDerive_InheritsHostsZdrOwnerScopeAndBindsToParent(t *testing.T, mk storeFactory) {
+	store, _ := mk(t)
 	parent := session(t, store, CreateSessionParams{
 		AllowedDomains: []string{"example.com", "api.example.org"}, TTL: 15 * time.Minute,
 	})
@@ -79,8 +120,8 @@ func TestDerive_InheritsHostsZdrOwnerScopeAndBindsToParent(t *testing.T) {
 	}
 }
 
-func TestDerive_ExplicitHostsMayNarrowToTheParentOrBelowIt(t *testing.T) {
-	store, _ := clockedRepo()
+func contractDerive_ExplicitHostsMayNarrowToTheParentOrBelowIt(t *testing.T, mk storeFactory) {
+	store, _ := mk(t)
 	parent := session(t, store, CreateSessionParams{AllowedDomains: []string{"example.com", "example.org"}})
 	run, err := store.Derive(ctx, deriveParams(parent, "k", " API.Example.com ", "example.org"))
 	if err != nil {
@@ -91,8 +132,8 @@ func TestDerive_ExplicitHostsMayNarrowToTheParentOrBelowIt(t *testing.T) {
 	}
 }
 
-func TestDerive_NeverWidensTheParentsHosts(t *testing.T) {
-	store, _ := clockedRepo()
+func contractDerive_NeverWidensTheParentsHosts(t *testing.T, mk storeFactory) {
+	store, _ := mk(t)
 	parent := session(t, store, CreateSessionParams{AllowedDomains: []string{"api.example.com"}})
 	for _, attempt := range [][]string{
 		{"evil.com"},
@@ -113,8 +154,8 @@ func TestDerive_NeverWidensTheParentsHosts(t *testing.T) {
 	}
 }
 
-func TestDerive_WideParentMustBeNarrowedExplicitly(t *testing.T) {
-	store, _ := clockedRepo()
+func contractDerive_WideParentMustBeNarrowedExplicitly(t *testing.T, mk storeFactory) {
+	store, _ := mk(t)
 	wide := hosts(DefaultMaxRunDomains + 1)
 	parent := session(t, store, CreateSessionParams{AllowedDomains: wide})
 	if _, err := store.Derive(ctx, deriveParams(parent, "inherit")); !errors.Is(err, ErrDeriveNeedsExplicitDomains) {
@@ -162,8 +203,8 @@ func TestDerive_NonSessionDerivableKindRequiresExplicitHosts(t *testing.T) {
 	}
 }
 
-func TestDerive_ParentMustBeAnActiveOrdinarySessionGrant(t *testing.T) {
-	store, clock := clockedRepo()
+func contractDerive_ParentMustBeAnActiveOrdinarySessionGrant(t *testing.T, mk storeFactory) {
+	store, clock := mk(t)
 	parent := session(t, store, CreateSessionParams{TTL: 10 * time.Minute})
 
 	run, err := store.Derive(ctx, deriveParams(parent, "first"))
@@ -204,8 +245,8 @@ func TestDerive_ParentMustBeAnActiveOrdinarySessionGrant(t *testing.T) {
 	}
 }
 
-func TestDerive_IsScopedToTheParentsTenantAndOwner(t *testing.T) {
-	store, _ := clockedRepo()
+func contractDerive_IsScopedToTheParentsTenantAndOwner(t *testing.T, mk storeFactory) {
+	store, _ := mk(t)
 	parent := session(t, store, CreateSessionParams{})
 	for _, tc := range []struct{ name, org, owner string }{
 		{"other tenant", "org-b", "user-a"},
@@ -228,8 +269,8 @@ func TestDerive_IsScopedToTheParentsTenantAndOwner(t *testing.T) {
 	}
 }
 
-func TestDerive_ZdrFollowsTheParentAndIsNeverLowered(t *testing.T) {
-	store, _ := clockedRepo()
+func contractDerive_ZdrFollowsTheParentAndIsNeverLowered(t *testing.T, mk storeFactory) {
+	store, _ := mk(t)
 	zdrParent := session(t, store, CreateSessionParams{Zdr: true, SessionKey: "zdr"})
 	run, err := store.Derive(ctx, deriveParams(zdrParent, "k"))
 	if err != nil {
@@ -247,8 +288,8 @@ func TestDerive_ZdrFollowsTheParentAndIsNeverLowered(t *testing.T) {
 	}
 }
 
-func TestDerive_ExpiryIsCappedByTheParentAndAShortRemainderIsRefused(t *testing.T) {
-	store, clock := clockedRepo()
+func contractDerive_ExpiryIsCappedByTheParentAndAShortRemainderIsRefused(t *testing.T, mk storeFactory) {
+	store, clock := mk(t)
 	parent := session(t, store, CreateSessionParams{TTL: 5 * time.Minute})
 
 	p := deriveParams(parent, "long")
@@ -274,8 +315,8 @@ func TestDerive_ExpiryIsCappedByTheParentAndAShortRemainderIsRefused(t *testing.
 	}
 }
 
-func TestDerive_ReplayReturnsTheSameGrantAndCannotWidenOrRefreshIt(t *testing.T) {
-	store, clock := clockedRepo()
+func contractDerive_ReplayReturnsTheSameGrantAndCannotWidenOrRefreshIt(t *testing.T, mk storeFactory) {
+	store, clock := mk(t)
 	parent := session(t, store, CreateSessionParams{AllowedDomains: []string{"example.com", "example.org"}, TTL: 30 * time.Minute})
 	first, err := store.Derive(ctx, deriveParams(parent, "run-1", "example.com"))
 	if err != nil {
@@ -322,8 +363,8 @@ func TestDerive_ReplayReturnsTheSameGrantAndCannotWidenOrRefreshIt(t *testing.T)
 	}
 }
 
-func TestDerive_RevokingTheParentRevokesTheRunGrant(t *testing.T) {
-	store, _ := clockedRepo()
+func contractDerive_RevokingTheParentRevokesTheRunGrant(t *testing.T, mk storeFactory) {
+	store, _ := mk(t)
 	parent := session(t, store, CreateSessionParams{})
 	run, err := store.Derive(ctx, deriveParams(parent, "k"))
 	if err != nil {
@@ -374,9 +415,9 @@ func TestDerive_ParentExpiredBetweenReadAndInsertLeavesNoChild(t *testing.T) {
 // The unforced race, as a smoke test. Every iteration must end in one of the
 // two legal states, and a failed derive must fail for the revoke and nothing
 // else, so a Derive that always failed would not pass.
-func TestDerive_ConcurrentParentRevokeNeverLeavesALiveChild(t *testing.T) {
+func contractDerive_ConcurrentParentRevokeNeverLeavesALiveChild(t *testing.T, mk storeFactory) {
 	for i := 0; i < 200; i++ {
-		store := NewMemoryRepository()
+		store, _ := mk(t)
 		parent := session(t, store, CreateSessionParams{})
 		var wg sync.WaitGroup
 		var run *Grant
@@ -403,7 +444,7 @@ func TestDerive_ConcurrentParentRevokeNeverLeavesALiveChild(t *testing.T) {
 	}
 	// Without the revoke the same derive succeeds, so the loop above was not
 	// passing on a Derive that always fails.
-	store := NewMemoryRepository()
+	store, _ := mk(t)
 	parent := session(t, store, CreateSessionParams{})
 	if _, err := store.Derive(ctx, deriveParams(parent, "k")); err != nil {
 		t.Fatalf("derive without a revoke: %v", err)
@@ -413,8 +454,8 @@ func TestDerive_ConcurrentParentRevokeNeverLeavesALiveChild(t *testing.T) {
 // Run grants are bounded per parent, not per owner: a burst of AI runs can
 // neither lock the user out of opening a browser session nor grow without
 // bound under one session.
-func TestDerive_IsBoundedPerParentAndDoesNotConsumeTheOwnerCap(t *testing.T) {
-	store, _ := clockedRepo()
+func contractDerive_IsBoundedPerParentAndDoesNotConsumeTheOwnerCap(t *testing.T, mk storeFactory) {
+	store, _ := mk(t)
 	parent := session(t, store, CreateSessionParams{MaxActivePerOwner: 2})
 	p := deriveParams(parent, "one")
 	p.MaxActivePerParent = 2
@@ -453,7 +494,7 @@ func TestDerive_IsBoundedPerParentAndDoesNotConsumeTheOwnerCap(t *testing.T) {
 		t.Fatalf("derive after a run grant was revoked: %v", err)
 	}
 	// The default bound applies when the caller sets none.
-	store2, _ := clockedRepo()
+	store2, _ := mk(t)
 	parent2 := session(t, store2, CreateSessionParams{})
 	for i := 0; i < DefaultMaxActiveRunsPerParent; i++ {
 		if _, err := store2.Derive(ctx, deriveParams(parent2, fmt.Sprintf("k%d", i))); err != nil {
@@ -469,8 +510,8 @@ type denyAll struct{}
 
 func (denyAll) CheckSession(context.Context, string, []string) error { return ErrDomainNotGrantable }
 
-func TestDerive_RechecksTheHostPolicy(t *testing.T) {
-	store, _ := clockedRepo()
+func contractDerive_RechecksTheHostPolicy(t *testing.T, mk storeFactory) {
+	store, _ := mk(t)
 	parent := session(t, store, CreateSessionParams{})
 	p := deriveParams(parent, "k")
 	p.Policy = denyAll{}
@@ -479,13 +520,14 @@ func TestDerive_RechecksTheHostPolicy(t *testing.T) {
 	}
 }
 
-func TestSensitiveApproval_AcceptsASessionOrRunParent(t *testing.T) {
-	store, _ := clockedRepo()
+func contractSensitiveApproval_AcceptsASessionOrRunParent(t *testing.T, mk storeFactory) {
+	store, _ := mk(t)
 	parent := session(t, store, CreateSessionParams{})
 	run, err := store.Derive(ctx, deriveParams(parent, "run-key"))
 	if err != nil {
 		t.Fatal(err)
 	}
+	all := []*Grant{parent, run}
 	for _, p := range []*Grant{parent, run} {
 		approval, err := store.CreateScopedSensitiveApproval(ctx, ApprovalParams{
 			OrgID: p.OrgID, OwnerID: p.OwnerID, SessionKey: p.SessionKey,
@@ -495,16 +537,15 @@ func TestSensitiveApproval_AcceptsASessionOrRunParent(t *testing.T) {
 		if err != nil || approval.ParentGrantID != p.ID {
 			t.Fatalf("approval on %s parent: %#v, %v", p.Kind, approval, err)
 		}
+		all = append(all, approval)
 	}
 	// Revoking the session cascades through the run grant to its approval.
 	if err := store.RevokeScoped(ctx, parent.ID, parent.OrgID, parent.OwnerID, "session_closed"); err != nil {
 		t.Fatal(err)
 	}
-	store.mu.Lock()
-	defer store.mu.Unlock()
-	for id, g := range store.grants {
-		if !g.Revoked {
-			t.Fatalf("grant %s (%s) survived the session revoke", id, g.Kind)
+	for _, g := range all {
+		if _, err := store.GetScoped(ctx, g.ID, g.OrgID, g.OwnerID); !errors.Is(err, ErrGrantRevoked) {
+			t.Fatalf("grant %s (%s) survived the session revoke: %v", g.ID, g.Kind, err)
 		}
 	}
 }
@@ -519,8 +560,8 @@ func approvalOn(p *Grant, domains []string, ttl time.Duration) ApprovalParams {
 
 // An approval is never wider than its parent: a run grant narrowed to one
 // host cannot parent an approval for a sibling or an unrelated host.
-func TestApproval_OnRunParent_CannotWidenHosts(t *testing.T) {
-	store, _ := clockedRepo()
+func contractApproval_OnRunParent_CannotWidenHosts(t *testing.T, mk storeFactory) {
+	store, _ := mk(t)
 	parent := session(t, store, CreateSessionParams{
 		AllowedDomains: []string{"example.com", "example.org"}, TTL: 15 * time.Minute,
 	})
@@ -544,8 +585,8 @@ func TestApproval_OnRunParent_CannotWidenHosts(t *testing.T) {
 	}
 }
 
-func TestApproval_CannotOutliveParent(t *testing.T) {
-	store, clock := clockedRepo()
+func contractApproval_CannotOutliveParent(t *testing.T, mk storeFactory) {
+	store, clock := mk(t)
 	parent := session(t, store, CreateSessionParams{TTL: 2 * time.Minute})
 	run, err := store.Derive(ctx, deriveParams(parent, "run-key"))
 	if err != nil {
