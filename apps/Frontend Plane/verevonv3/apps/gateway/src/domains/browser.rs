@@ -1320,6 +1320,10 @@ fn build_ai_run_request<S: BrowserSessionRunState>(
 /// `browser_session_grant_missing` and Model Gateway is never called. A
 /// grant that has expired or been revoked since the session opened is 409
 /// `browser_session_grant_inactive` (see `session_grant_inactive`).
+///
+/// An optional `Idempotency-Key` header makes a retry of this start safe: it
+/// goes to Model Gateway, which answers a repeat with the same run and the same
+/// derived grant (see `client_idempotency_key` and `idempotency_refusal`).
 /// Risk-based HITL *gating* of individual risky actions is live as of Phase 5
 /// (see `build_ai_run_request` above and `docs/BROWSER_WORKSPACE_PLAN.md`).
 pub(crate) async fn start_ai_run(
@@ -1350,6 +1354,10 @@ pub(crate) async fn start_ai_run(
         )
             .into_response();
     }
+    let idempotency_key = match client_idempotency_key(&headers) {
+        Ok(key) => key,
+        Err(response) => return response,
+    };
 
     let cookie = cookie_header(&headers);
     let quarry_bearer = quarry_token(&state, &user, &cookie).await;
@@ -1433,7 +1441,15 @@ pub(crate) async fn start_ai_run(
         Err(error) => return delegated_auth_unavailable(error).into_response(),
     };
     let url = format!("{}/v1/browser/runs", state.model_gateway_url);
-    let (status, Json(response_body)) = proxy_model_json_with_delegated(
+    // A retry of this start carries the client's key to Model Gateway, which
+    // scopes it to the user and this session's grant and answers a repeat with
+    // the same run and the same derived grant.
+    let idempotency_header: Vec<(&'static str, &str)> = idempotency_key
+        .as_deref()
+        .map(|key| ("idempotency-key", key))
+        .into_iter()
+        .collect();
+    let (status, Json(response_body)) = proxy_model_json_with_delegated_headers(
         &state,
         Method::POST,
         &url,
@@ -1446,10 +1462,14 @@ pub(crate) async fn start_ai_run(
             ("x-session-authorization", session.as_str()),
             ("x-browser-authorization", browser.as_str()),
         ],
+        &idempotency_header,
         &user,
     )
     .await;
     if !status.is_success() {
+        if let Some(response) = idempotency_refusal(status, &response_body) {
+            return response;
+        }
         if session_grant_inactive(status, &response_body, names_hosts) {
             return (
                 StatusCode::CONFLICT,
@@ -3947,6 +3967,35 @@ async fn proxy_model_json_with_delegated(
     delegations: &[(&'static str, &str)],
     user: &AuthenticatedUser,
 ) -> (StatusCode, Json<Value>) {
+    proxy_model_json_with_delegated_headers(
+        state,
+        method,
+        url,
+        body,
+        bearer_token,
+        delegations,
+        &[],
+        user,
+    )
+    .await
+}
+
+/// `proxy_model_json_with_delegated` plus plain request headers
+/// (`extra_headers`: name and the raw value, which a caller has already
+/// checked). They are not credentials and never get a `Bearer ` prefix.
+// reason: one more distinct argument than the plain call; the plain call is
+// the wrapper above and the only other way in.
+#[allow(clippy::too_many_arguments)]
+async fn proxy_model_json_with_delegated_headers(
+    state: &AppState,
+    method: Method,
+    url: &str,
+    body: Option<Value>,
+    bearer_token: Option<&str>,
+    delegations: &[(&'static str, &str)],
+    extra_headers: &[(&'static str, &str)],
+    user: &AuthenticatedUser,
+) -> (StatusCode, Json<Value>) {
     let org_id = authorized_org_id(state, user).await;
     let user_role = user
         .auth_role
@@ -3967,6 +4016,11 @@ async fn proxy_model_json_with_delegated(
     }
     for (header_name, token) in delegations {
         if let Some(value) = data_plane_authorization_value(token) {
+            req = req.header(*header_name, value);
+        }
+    }
+    for (header_name, value) in extra_headers {
+        if let Ok(value) = axum::http::HeaderValue::from_str(value) {
             req = req.header(*header_name, value);
         }
     }
@@ -4150,6 +4204,86 @@ fn spa_owner_projection(mut projection: Value) -> Value {
         object.remove("grant_id");
     }
     projection
+}
+
+/// The client's `Idempotency-Key` for an AI-run start: one header, 1 to 128
+/// characters of `A-Z a-z 0-9 - _ . :`. Model Gateway enforces the same shape;
+/// checking it here keeps a malformed key from costing a token mint and a round
+/// trip, and keeps the SPA's error in the gateway's own envelope.
+fn client_idempotency_key(headers: &HeaderMap) -> Result<Option<String>, Response> {
+    let refusal = || {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(error(
+                "invalid_idempotency_key",
+                "The Idempotency-Key header must be 1 to 128 letters, digits, '-', '_', '.' or ':'.",
+            )),
+        )
+            .into_response()
+    };
+    let mut values = headers.get_all("idempotency-key").iter();
+    let Some(first) = values.next() else {
+        return Ok(None);
+    };
+    if values.next().is_some() {
+        return Err(refusal());
+    }
+    let key = first.to_str().map_err(|_| refusal())?.trim();
+    if key.is_empty()
+        || key.len() > 128
+        || !key
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':'))
+    {
+        return Err(refusal());
+    }
+    Ok(Some(key.to_owned()))
+}
+
+/// Model Gateway's refusals of a keyed AI-run start, in the gateway's own
+/// typed envelope. `None` for anything else. The raw upstream strings
+/// (`idempotency_key_reused`, `idempotency_key_run_ended`,
+/// `idempotency_replay_unverified`) never reach the SPA.
+fn idempotency_refusal(status: StatusCode, body: &Value) -> Option<Response> {
+    let code = body.get("error").and_then(Value::as_str)?;
+    match (status, code) {
+        (StatusCode::CONFLICT, "idempotency_key_reused") => Some(
+            (
+                StatusCode::CONFLICT,
+                Json(error(
+                    "browser_idempotency_key_reused",
+                    "This request key was already used for a different goal. Use a new key to start a new run.",
+                )),
+            )
+                .into_response(),
+        ),
+        (StatusCode::CONFLICT, "idempotency_key_run_ended") => {
+            let mut response = error(
+                "browser_idempotency_key_run_ended",
+                "The run for this request key has already ended. Use a new key to start another run.",
+            );
+            if let Some(run_id) = body
+                .get("run_id")
+                .and_then(Value::as_str)
+                .filter(|id| is_valid_path_segment(id))
+            {
+                response["error"]["details"] = json!({ "runId": run_id });
+            }
+            Some((StatusCode::CONFLICT, Json(response)).into_response())
+        }
+        (StatusCode::SERVICE_UNAVAILABLE, "idempotency_replay_unverified") => Some(
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                [(axum::http::header::RETRY_AFTER, "5")],
+                Json(error(
+                    "browser_idempotency_unverified",
+                    "The earlier run for this request key could not be confirmed. Try again shortly.",
+                )),
+            )
+                .into_response(),
+        ),
+        _ => None,
+    }
 }
 
 /// Whether Model Gateway refused an AI run because the session grant can no
@@ -6021,6 +6155,257 @@ mod tests {
                 );
                 assert!(!response.to_string().contains(GRANT), "{response}");
             }
+        }
+
+        async fn start_run_response(
+            state: AppState,
+            headers: HeaderMap,
+            body: StartAiRunBody,
+        ) -> Response {
+            start_ai_run(
+                State(state),
+                Extension(test_user("user-a", "org-a")),
+                headers,
+                Path("run-1".to_owned()),
+                Json(body),
+            )
+            .await
+        }
+
+        fn key_headers(values: &[&str]) -> HeaderMap {
+            let mut headers = HeaderMap::new();
+            for value in values {
+                headers.append(
+                    "idempotency-key",
+                    axum::http::HeaderValue::from_bytes(value.as_bytes()).expect("header value"),
+                );
+            }
+            headers
+        }
+
+        async fn json_of(response: Response) -> (StatusCode, HeaderMap, Value) {
+            let status = response.status();
+            let headers = response.headers().clone();
+            let bytes = to_bytes(response.into_body(), 256 * 1024)
+                .await
+                .expect("body");
+            (
+                status,
+                headers,
+                serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+            )
+        }
+
+        #[tokio::test]
+        async fn a_client_idempotency_key_reaches_model_gateway_and_only_when_sent() {
+            let up = upstreams().await;
+            mount_quarry_session(&up.quarry, owner_projection(Some(GRANT))).await;
+            Mock::given(wm_method("POST"))
+                .and(wm_path("/v1/browser/runs"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                    "run_id": "mp-run-1", "thread_id": "t-1", "plan_id": "p-1"
+                })))
+                .mount(&up.model)
+                .await;
+
+            for headers in [key_headers(&["retry-1"]), key_headers(&["  retry-1  "])] {
+                let (status, _, body) = json_of(
+                    start_run_response(state(&up, BrowserGrantMode::Strict), headers, ai_run_body())
+                        .await,
+                )
+                .await;
+                assert_eq!(status, StatusCode::OK, "{body}");
+            }
+            let (status, _, _) = json_of(
+                start_run_response(
+                    state(&up, BrowserGrantMode::Strict),
+                    HeaderMap::new(),
+                    ai_run_body(),
+                )
+                .await,
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+
+            let runs = requests_to(&up.model, "POST", "/v1/browser/runs").await;
+            let sent: Vec<Option<String>> = runs
+                .iter()
+                .map(|run| {
+                    run.headers
+                        .get("idempotency-key")
+                        .and_then(|v| v.to_str().ok())
+                        .map(str::to_owned)
+                })
+                .collect();
+            assert_eq!(
+                sent,
+                [Some("retry-1".to_owned()), Some("retry-1".to_owned()), None],
+                "the key is forwarded trimmed, and absent when the client sent none"
+            );
+        }
+
+        #[tokio::test]
+        async fn a_malformed_or_repeated_idempotency_key_is_400_before_any_upstream_call() {
+            let long = "k".repeat(129);
+            for values in [
+                vec!["has space"],
+                vec!["semi;colon"],
+                vec![""],
+                vec!["ünicode"],
+                vec![long.as_str()],
+                vec!["one", "two"],
+            ] {
+                let up = upstreams().await;
+                mount_quarry_session(&up.quarry, owner_projection(Some(GRANT))).await;
+                let (status, _, body) = json_of(
+                    start_run_response(
+                        state(&up, BrowserGrantMode::Strict),
+                        key_headers(&values),
+                        ai_run_body(),
+                    )
+                    .await,
+                )
+                .await;
+                assert_eq!(status, StatusCode::BAD_REQUEST, "{values:?}: {body}");
+                assert_eq!(body["error"]["code"], "invalid_idempotency_key");
+                for server in [&up.model, &up.quarry] {
+                    assert!(
+                        server
+                            .received_requests()
+                            .await
+                            .unwrap_or_default()
+                            .is_empty(),
+                        "{values:?} reached an upstream"
+                    );
+                }
+            }
+        }
+
+        #[tokio::test]
+        async fn a_replayed_start_returns_the_same_run_the_first_one_reported() {
+            let up = upstreams().await;
+            mount_quarry_session(&up.quarry, owner_projection(Some(GRANT))).await;
+            let first = json!({ "run_id": "mp-run-1", "thread_id": "t-1", "plan_id": "p-1" });
+            let replay = json!({
+                "run_id": "mp-run-1", "thread_id": "t-1", "plan_id": "p-1",
+                "idempotent_replay": true
+            });
+            Mock::given(wm_method("POST"))
+                .and(wm_path("/v1/browser/runs"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(first))
+                .up_to_n_times(1)
+                .mount(&up.model)
+                .await;
+            Mock::given(wm_method("POST"))
+                .and(wm_path("/v1/browser/runs"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(replay))
+                .mount(&up.model)
+                .await;
+
+            let (_, _, one) = json_of(
+                start_run_response(
+                    state(&up, BrowserGrantMode::Strict),
+                    key_headers(&["retry-1"]),
+                    ai_run_body(),
+                )
+                .await,
+            )
+            .await;
+            let (status, _, two) = json_of(
+                start_run_response(
+                    state(&up, BrowserGrantMode::Strict),
+                    key_headers(&["retry-1"]),
+                    ai_run_body(),
+                )
+                .await,
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            for field in ["run_id", "thread_id", "plan_id"] {
+                assert_eq!(one["data"][field], two["data"][field], "{field}");
+            }
+            assert_eq!(two["data"]["idempotent_replay"], true);
+            assert!(one["data"].get("idempotent_replay").is_none());
+        }
+
+        #[tokio::test]
+        async fn model_gateways_keyed_start_refusals_get_typed_gateway_codes() {
+            for (upstream, body, want_status, want_code, retry_after) in [
+                (
+                    409,
+                    json!({ "error": "idempotency_key_reused" }),
+                    StatusCode::CONFLICT,
+                    "browser_idempotency_key_reused",
+                    None,
+                ),
+                (
+                    409,
+                    json!({ "error": "idempotency_key_run_ended", "run_id": "mp-run-1" }),
+                    StatusCode::CONFLICT,
+                    "browser_idempotency_key_run_ended",
+                    None,
+                ),
+                (
+                    503,
+                    json!({ "error": "idempotency_replay_unverified" }),
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "browser_idempotency_unverified",
+                    Some("5"),
+                ),
+            ] {
+                let up = upstreams().await;
+                mount_quarry_session(&up.quarry, owner_projection(Some(GRANT))).await;
+                Mock::given(wm_method("POST"))
+                    .and(wm_path("/v1/browser/runs"))
+                    .respond_with(ResponseTemplate::new(upstream).set_body_json(body.clone()))
+                    .mount(&up.model)
+                    .await;
+                let (status, headers, response) = json_of(
+                    start_run_response(
+                        state(&up, BrowserGrantMode::Strict),
+                        key_headers(&["retry-1"]),
+                        ai_run_body(),
+                    )
+                    .await,
+                )
+                .await;
+                assert_eq!(status, want_status, "{response}");
+                assert_eq!(response["error"]["code"], want_code);
+                assert_eq!(
+                    headers.get("retry-after").and_then(|v| v.to_str().ok()),
+                    retry_after
+                );
+                // The upstream strings are exact JSON values; the gateway's own
+                // codes only contain them as a suffix.
+                let text = response.to_string();
+                for raw in [
+                    "\"idempotency_key_reused\"",
+                    "\"idempotency_key_run_ended\"",
+                    "\"idempotency_replay_unverified\"",
+                ] {
+                    assert!(!text.contains(raw), "an upstream string leaked: {response}");
+                }
+            }
+            // The run id of an ended run is the person's own, and is offered as a detail.
+            let up = upstreams().await;
+            mount_quarry_session(&up.quarry, owner_projection(Some(GRANT))).await;
+            Mock::given(wm_method("POST"))
+                .and(wm_path("/v1/browser/runs"))
+                .respond_with(ResponseTemplate::new(409).set_body_json(
+                    json!({ "error": "idempotency_key_run_ended", "run_id": "mp-run-1" }),
+                ))
+                .mount(&up.model)
+                .await;
+            let (_, _, response) = json_of(
+                start_run_response(
+                    state(&up, BrowserGrantMode::Strict),
+                    key_headers(&["retry-1"]),
+                    ai_run_body(),
+                )
+                .await,
+            )
+            .await;
+            assert_eq!(response["error"]["details"]["runId"], "mp-run-1");
         }
 
         // With explicit hosts a 403 may be a widening refusal, so it is not
