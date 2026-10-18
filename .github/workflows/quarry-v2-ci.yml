@@ -236,12 +236,18 @@ jobs:
       - name: Test scrape options schema golden
         run: cargo test -p quarry-core --features jsonschema --test scrape_schema
 
+      - name: Test challenge signal schema golden
+        run: cargo test -p quarry-core --features jsonschema --test challenge_schema
+
       - uses: actions/setup-node@v7
         with:
           node-version: '20'
 
       - name: OpenAPI route coverage and scrape parity
         run: node --test scripts/tests/openapi-route-coverage.test.mjs scripts/tests/openapi-scrape-parity.test.mjs
+
+      - name: OpenAPI challenge parity
+        run: node --test scripts/tests/openapi-challenge-parity.test.mjs
 
       - name: Check quarry-browser (chromiumoxide feature)
         run: cargo check -p quarry-browser --features chromiumoxide

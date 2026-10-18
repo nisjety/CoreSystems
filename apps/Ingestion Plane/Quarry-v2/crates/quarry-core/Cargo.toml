@@ -41,3 +41,7 @@ jsonschema = ["dep:schemars"]
 [[test]]
 name = "scrape_schema"
 required-features = ["jsonschema"]
+
+[[test]]
+name = "challenge_schema"
+required-features = ["jsonschema"]

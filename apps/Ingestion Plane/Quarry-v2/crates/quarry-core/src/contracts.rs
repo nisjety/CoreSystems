@@ -232,6 +232,7 @@ impl Default for ActionOutcome {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "jsonschema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum ChallengeKind {
     Captcha,
@@ -254,6 +255,7 @@ pub enum ChallengeKind {
 /// form, a cookie banner, a paywall, a rate limit, a bare status) so a planner
 /// does not mistake it for one.
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "jsonschema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum ChallengeStrength {
     /// A signal from before the taxonomy existed has no strength field, and it
@@ -267,6 +269,7 @@ pub enum ChallengeStrength {
 /// Why a strong signal is strong. A closed set: a new marker family is a new
 /// variant, never a free-text reason.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "jsonschema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum BlockReason {
     /// A CAPTCHA or proof-of-humanity widget gates the page.
@@ -294,6 +297,7 @@ impl BlockReason {
 
 /// Whether the single recovery the planner gets is still there.
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "jsonschema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum ChallengeRecovery {
     /// One wait or one reload of the same URL is still allowed on this host.
@@ -307,6 +311,7 @@ pub enum ChallengeRecovery {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "jsonschema", derive(schemars::JsonSchema))]
 pub struct ChallengeSignal {
     pub kind: ChallengeKind,
     pub confidence: f32,
