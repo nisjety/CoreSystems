@@ -95,7 +95,6 @@ impl Drop for LoopResumeSwitch {
 /// `mp_contracts::loop_fold::loop_resume_enabled`). Default off.
 // Read by `run_agent_with_route` once the in-place resume is wired (WS03 S7b step 9
 // removes this allow).
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn loop_resume_enabled() -> bool {
     #[cfg(test)]
     if let Some(forced) = TEST_LOOP_RESUME.with(std::cell::Cell::get) {
@@ -185,32 +184,30 @@ impl ApprovedRelease {
     }
 
     /// The step id the released call runs under.
-    #[cfg_attr(not(test), allow(dead_code))] // S7b step 7 (agent.rs pre-reserve)
+    #[cfg(test)] // read by the tests only: production reads the fields it builds an entry from
     pub(crate) fn step_id(&self) -> &str {
         &self.step_id
     }
 
     /// The (trimmed) tool name.
-    #[cfg_attr(not(test), allow(dead_code))] // S7b step 7
     pub(crate) fn tool_name(&self) -> &str {
         &self.tool_name
     }
 
     /// What the released call may change, from the tool and its approved arguments.
-    #[cfg_attr(not(test), allow(dead_code))] // S7b step 7
+    #[cfg(test)] // read by the tests only
     pub(crate) fn class(&self) -> EffectClass {
         self.class
     }
 
     /// The digest of the approved arguments. Always `Some`: [`ApprovedRelease::new`] refuses
     /// a call with no digest. An `Option` so it plugs into [`effect::LedgerEntry`] as it is.
-    #[cfg_attr(not(test), allow(dead_code))] // S7b step 7
+    #[cfg(test)] // read by the tests only
     pub(crate) fn args_digest(&self) -> Option<&str> {
         Some(self.args_digest.as_str())
     }
 
     /// The ledger's action id for the released step.
-    #[cfg_attr(not(test), allow(dead_code))] // S7b step 7
     pub(crate) fn action_id(&self) -> String {
         effect::action_id_for(&self.step_id)
     }
@@ -220,7 +217,6 @@ impl ApprovedRelease {
     /// dispatch of the same call would reserve. session-core binds a reservation to run,
     /// action, tool, data category, zdr, class and digest: an entry that differs in any of
     /// them is an identity conflict, which would let a second attempt through.
-    #[cfg_attr(not(test), allow(dead_code))] // S7b step 7
     pub(crate) fn ledger_entry<'a>(
         &'a self,
         run_id: &'a str,
@@ -319,28 +315,21 @@ pub(crate) enum Refusal {
     /// The request names another inference route than the run's.
     AuthorityRouteMismatch,
     /// The paused run belongs to a Space, which an in-place resume cannot restore.
-    #[cfg_attr(not(test), allow(dead_code))] // S7b step 9 (run_agent_with_route wiring)
     SpaceScopeUnsupported,
     /// Another request of this same claim already holds the fold.
-    #[cfg_attr(not(test), allow(dead_code))] // S7b step 9
     ContinueInProgress,
     /// The resume could not write its fence or reserve its release, so nothing of the
     /// resumed round was dispatched.
-    #[cfg_attr(not(test), allow(dead_code))] // S7b step 9
     CheckpointUnavailable,
     /// An earlier attempt of this approval already reserved its release (or ran its paused
     /// step): this request dispatches nothing.
-    #[cfg_attr(not(test), allow(dead_code))] // S7b step 9
     ContinuationAlreadyConsumed,
     /// The run has ended: there is nothing to resume.
-    #[cfg_attr(not(test), allow(dead_code))] // S7b step 9
     RunEnded,
     /// The caller may not resume this run (a missing scope, not the owner, a revoked Space
     /// membership). Never downgraded to stage 1.
-    #[cfg_attr(not(test), allow(dead_code))] // S7b step 9
     Forbidden,
     /// The ZDR catalogue refused: the run keeps no durable state, so it is never resumed.
-    #[cfg_attr(not(test), allow(dead_code))] // S7b step 9
     DurableMutationForbidden,
 }
 
@@ -484,8 +473,8 @@ pub(crate) fn next_segment_no(paused_step_id: &str) -> u32 {
 /// A step id of segment `segment_no`: the original step id behind the segment's
 /// prefix (`s{n}.` + original).
 // Stage 1 builds its first step through `tool_step_id` and a prefix; the in-place
-// resume (WS03 S7) renames the steps it carries over with this.
-#[allow(dead_code)]
+// resume (WS03 S7) renames the steps it carries over with this. Read by the restore, which has
+// no production caller until S7b step 9 (which removes this allow).
 pub(crate) fn resumed_step_id(segment_no: u32, original_step_id: &str) -> String {
     format!("s{segment_no}.{original_step_id}")
 }
@@ -565,16 +554,15 @@ pub(crate) fn decision_closer(denied: bool, tool_name: &str) -> String {
 // ---------------------------------------------------------------------------------------
 // The in-place resume (build plan WS03 S7b).
 //
-// Everything below is built and tested but not yet called from the loop: the wiring is
-// S7b step 9, which removes every `allow(dead_code)` marked `S7b step 9`. The order a resume
-// follows is: select the stage, consume (with `effective_authority`), check the scope, claim
-// the pause's fold, run the pure fold checks, read the ledger once, then rebuild the open
-// round. A failure is a FALLBACK (stage 1 runs under the same consume, no fold RPC, the fold
-// is not closed) or a REFUSAL (nothing is dispatched, not even by stage 1).
+// `agent::begin_continuation` drives it. The order a resume follows is: select the stage,
+// consume (with `effective_authority`), check the scope, claim the pause's fold, run the pure
+// fold checks, read the ledger once, then rebuild the open round; `run_rounds` then writes
+// the fence and pre-reserves the release before it dispatches anything. A failure is a
+// FALLBACK (stage 1 runs under the same consume, no fold RPC, the fold is not closed) or a
+// REFUSAL (nothing is dispatched, not even by stage 1).
 // ---------------------------------------------------------------------------------------
 
 /// Why `loop` runs as `segment`: the first prerequisite that is missing, in this order.
-#[cfg_attr(not(test), allow(dead_code))] // S7b step 9
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Downgrade {
     /// `EXECUTION_LOOP_RESUME_ENABLED` is off.
@@ -589,7 +577,6 @@ pub(crate) enum Downgrade {
     Waived,
 }
 
-#[cfg_attr(not(test), allow(dead_code))] // S7b step 9
 impl Downgrade {
     /// The closed token, for the log line.
     pub(crate) const fn as_str(self) -> &'static str {
@@ -604,7 +591,6 @@ impl Downgrade {
 }
 
 /// How a continuation runs.
-#[cfg_attr(not(test), allow(dead_code))] // S7b step 9
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Stage {
     /// A fresh segment seeded by the approved call (stage 1). `Some` when the request asked
@@ -620,7 +606,6 @@ pub(crate) enum Stage {
 ///
 /// `zdr` and `waived` are the run's retention posture; the order of the downgrades is the
 /// order of the prerequisites, and each run takes the first that applies.
-#[cfg_attr(not(test), allow(dead_code))] // S7b step 9
 pub(crate) fn select_stage(
     mode: &str,
     resume_on: bool,
@@ -649,7 +634,6 @@ pub(crate) fn select_stage(
 }
 
 /// Why an in-place resume did not restore. Closed tokens, for the log.
-#[cfg_attr(not(test), allow(dead_code))] // S7b step 9
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RestoreFailure {
     /// The pause's fold is not claimable (another claimant won it, or it was superseded).
@@ -695,7 +679,7 @@ pub(crate) enum RestoreFailure {
     PinnedRoute,
 }
 
-#[cfg_attr(not(test), allow(dead_code))] // S7b step 9 (the tests read ALL)
+#[cfg(test)]
 impl RestoreFailure {
     /// Every failure, so a test can hold the token table to its rules.
     pub(crate) const ALL: [Self; 20] = [
@@ -720,7 +704,9 @@ impl RestoreFailure {
         Self::PausedStepUnsettled,
         Self::PinnedRoute,
     ];
+}
 
+impl RestoreFailure {
     /// The closed token, for the log line.
     pub(crate) const fn as_str(self) -> &'static str {
         match self {
@@ -749,7 +735,6 @@ impl RestoreFailure {
 }
 
 /// What an in-place resume that did not restore does next.
-#[cfg_attr(not(test), allow(dead_code))] // S7b step 9
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RestoreOrRefuse {
     /// Run stage 1 under the same consume: no second consume, no fold RPC, the fold is left
@@ -773,7 +758,6 @@ pub(crate) enum RestoreOrRefuse {
 /// # Errors
 ///
 /// [`RestoreOrRefuse::Refuse`] for a Space, [`RestoreOrRefuse::Fallback`] for a pinned route.
-#[cfg_attr(not(test), allow(dead_code))] // S7b step 9
 pub(crate) fn in_place_scope(consumed: &Consumed) -> Result<(), RestoreOrRefuse> {
     if !consumed.snapshot_authority.space_id.is_empty() {
         return Err(RestoreOrRefuse::Refuse(Refusal::SpaceScopeUnsupported));
@@ -786,14 +770,15 @@ pub(crate) fn in_place_scope(consumed: &Consumed) -> Result<(), RestoreOrRefuse>
 
 /// Why the writer an in-place resume seeds would not be Active, or `None` when it would be.
 /// Pure, and decided from the SAME [`fold::WriterGate`] [`fold::FoldWriter::seeded`] applies
-/// (the writer's own gate is the one source of truth), with one difference: `gate.resumed` is
-/// the stage-1 segment flag, which an in-place resume is not, so it is ignored here. A missing
-/// credential is the last reason.
+/// (the writer's own gate is the one source of truth). `gate.resumed` is the stage-1 segment
+/// flag, which an in-place resume is not: `FoldWriter::seeded` forces it false itself and so
+/// does this helper, so the two cannot disagree whatever a caller put there (pinned for every
+/// gate by `the_seeded_writers_activity_is_decided_by_the_one_gate_before_any_claim`). A
+/// missing credential is the last reason.
 ///
 /// A caller asks this BEFORE it claims: after a won claim the row is `resuming` and a fence that
 /// cannot be written can only be refused, which strands the run for the lease and spends the
 /// click for nothing. Before the claim, the same fact is a downgrade to stage 1.
-#[cfg_attr(not(test), allow(dead_code))] // S7b step 9 (agent.rs logs the reason)
 pub(crate) fn in_place_writer_off(
     gate: fold::WriterGate,
     has_bearer: bool,
@@ -810,7 +795,6 @@ pub(crate) fn in_place_writer_off(
 /// the persistence refusal on a non-persistent run, and to nothing else). A denial or a ZDR
 /// refusal is never downgraded to stage 1: stage 1 would dispatch the released call for a
 /// caller who may not resume the run.
-#[cfg_attr(not(test), allow(dead_code))] // S7b step 9
 pub(crate) fn classify_claim(status: &tonic::Status) -> RestoreOrRefuse {
     use tonic::Code;
     use RestoreFailure as F;
@@ -853,7 +837,6 @@ pub(crate) fn classify_claim(status: &tonic::Status) -> RestoreOrRefuse {
 /// `resume_checkpoint_unavailable`. (A writer that is not active is a downgrade BEFORE the
 /// claim, [`in_place_writer_off`]; here it is only defence in depth, because after a won claim
 /// there is nothing left to downgrade to.)
-#[cfg_attr(not(test), allow(dead_code))] // S7b step 9 (run_rounds fence)
 pub(crate) fn fence_refusal(error: fold::SaveError) -> Refusal {
     match error {
         fold::SaveError::Refused(fold::RefusedBy::Denied) => Refusal::Forbidden,
@@ -863,11 +846,11 @@ pub(crate) fn fence_refusal(error: fold::SaveError) -> Refusal {
 }
 
 /// What the consume handed back, as the resume needs it. Built by `consume_for_resume`.
-// `tools`, `mode` and `snapshot_digest` are read only by `build_segment` (S7b step 6), which
-// takes over what `prepare_resume` does today; the tests do not read them (S7b step 6 removes
-// this allow).
-#[allow(dead_code)]
-#[derive(Debug, Clone)]
+///
+/// It holds the approved call's arguments and the offered tool definitions, so it has no
+/// derived `Debug`: the manual one below prints ids and counts only, and a `{:?}` of it can
+/// never put a call's content in a log line or a failed assertion.
+#[derive(Clone)]
 pub(crate) struct Consumed {
     /// The approved tool (trimmed).
     pub tool_name: String,
@@ -881,7 +864,8 @@ pub(crate) struct Consumed {
     pub mode: String,
     /// The authority the pause retained.
     pub snapshot_authority: Authority,
-    /// The digest the snapshot carried for it.
+    /// The digest the snapshot carried for it (already checked against the authority it
+    /// covers by the consume step; it is a hash, so the `Debug` below prints it).
     pub snapshot_digest: String,
     /// The authority the continuation runs under: the pause's, narrowed by the request.
     pub effective: Authority,
@@ -889,9 +873,25 @@ pub(crate) struct Consumed {
     pub segment: u32,
 }
 
-/// A fold the claim handed back.
-#[cfg_attr(not(test), allow(dead_code))] // S7b step 9
-#[derive(Debug, Clone)]
+impl std::fmt::Debug for Consumed {
+    /// Content-free: the tool and step ids, the segment, the mode and counts. Never the
+    /// arguments, the tool definitions or the authority.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Consumed")
+            .field("tool_name", &self.tool_name)
+            .field("step_id", &self.step_id)
+            .field("segment", &self.segment)
+            .field("mode", &self.mode)
+            .field("snapshot_digest", &self.snapshot_digest)
+            .field("tools", &self.tools.len())
+            .field("tool_input_bytes", &self.tool_input_json.len())
+            .finish_non_exhaustive()
+    }
+}
+
+/// A fold the claim handed back. It holds the paused history, so its `Debug` is content-free
+/// (see [`Consumed`]).
+#[derive(Clone)]
 pub(crate) struct ClaimedFold {
     /// The seq the row stood at: the fence expects it.
     pub seq: u64,
@@ -905,9 +905,27 @@ pub(crate) struct ClaimedFold {
     pub fold: LoopFoldV1,
 }
 
+impl std::fmt::Debug for ClaimedFold {
+    /// Content-free: the seq, the segment, the kind, the digest, the run id and counts.
+    /// Never the history or the open round's calls.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ClaimedFold")
+            .field("seq", &self.seq)
+            .field("kind", &self.kind)
+            .field("segment", &self.segment)
+            .field("authority_digest", &self.authority_digest)
+            .field("run_id", &self.fold.run_id)
+            .field("messages", &self.fold.messages.len())
+            .field(
+                "round_calls",
+                &self.fold.round_in_flight.as_ref().map(|round| round.calls.len()),
+            )
+            .finish_non_exhaustive()
+    }
+}
+
 /// What one call of the restored round does when the loop re-enters it.
-#[cfg_attr(not(test), allow(dead_code))] // S7b step 9
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub(crate) enum SeedSlot {
     /// The call already has its outcome (it finished, was refused before dispatch, or is
     /// closed as unknown or lost): the loop does not run it.
@@ -928,9 +946,38 @@ pub(crate) enum SeedSlot {
     Redispatch { step_id: String },
 }
 
-/// The paused loop, rebuilt from its claimed fold.
-#[cfg_attr(not(test), allow(dead_code))] // S7b step 9
-#[derive(Debug, Clone, PartialEq)]
+impl std::fmt::Debug for SeedSlot {
+    /// Content-free: step ids, the tool name, and for a resolved call only whether it failed
+    /// and how long its output is. Never the output or the error text.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Resolved {
+                step_id,
+                name,
+                output,
+                error,
+                passed_prepass,
+            } => f
+                .debug_struct("Resolved")
+                .field("step_id", step_id)
+                .field("name", name)
+                .field("output_bytes", &output.len())
+                .field("failed", &error.is_some())
+                .field("passed_prepass", passed_prepass)
+                .finish(),
+            Self::Release { step_id } => {
+                f.debug_struct("Release").field("step_id", step_id).finish()
+            }
+            Self::Redispatch { step_id } => {
+                f.debug_struct("Redispatch").field("step_id", step_id).finish()
+            }
+        }
+    }
+}
+
+/// The paused loop, rebuilt from its claimed fold. It holds the history and the open round's
+/// calls and results, so its `Debug` is content-free (see [`Consumed`]).
+#[derive(Clone, PartialEq)]
 pub(crate) struct Restored {
     /// The history, system prompt first.
     pub messages: Vec<pb::ChatMessage>,
@@ -954,6 +1001,37 @@ pub(crate) struct Restored {
     pub segment: u32,
 }
 
+impl Restored {
+    /// Whether the seed is one a loop can re-enter: the open round has calls, and there is one
+    /// slot per call, in order. [`restore`] builds it so by construction; the loop asks again
+    /// before it dispatches anything, because a slot that does not line up with its call would
+    /// run the wrong call under another's step.
+    pub(crate) fn is_consistent(&self) -> bool {
+        !self.response.tool_calls.is_empty() && self.slots.len() == self.response.tool_calls.len()
+    }
+}
+
+impl std::fmt::Debug for Restored {
+    /// Content-free: counters, counts and the slot kinds (which carry ids only). Never the
+    /// history, the model's text, a call's arguments or an outcome.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Restored")
+            .field("messages", &self.messages.len())
+            .field("calls", &self.response.tool_calls.len())
+            .field("slots", &self.slots)
+            .field("rounds_executed", &self.rounds_executed)
+            .field("delegated_rounds", &self.delegated_rounds)
+            .field("step_seq", &self.step_seq)
+            .field("children_started", &self.children_started)
+            .field("grounded", &self.grounded)
+            .field("compaction_triggered", &self.compaction_triggered)
+            .field("attempted_retrievals", &self.attempted_retrievals.len())
+            .field("claimed_seq", &self.claimed_seq)
+            .field("segment", &self.segment)
+            .finish()
+    }
+}
+
 /// The ledger's action ids a restore asks about, in the order the rules read them, with no
 /// repeat:
 ///
@@ -966,7 +1044,6 @@ pub(crate) struct Restored {
 /// The read is limited to ids a fold can name. A row for an action no call of the fold
 /// names (a later round of an earlier continuation) is not visible to it; see
 /// `a_ledger_row_for_a_later_round_action_is_not_seen`.
-#[cfg_attr(not(test), allow(dead_code))] // S7b step 9
 pub(crate) fn ledger_action_ids(
     fold: &LoopFoldV1,
     paused_step_id: &str,
@@ -1341,6 +1418,12 @@ fn dangling_slot(
     consumed: &Consumed,
     ledger: &BTreeMap<String, effect::LedgerRow>,
 ) -> Result<SeedSlot, RestoreOrRefuse> {
+    // `check_fold` (13) already refuses a call with no step id and no outcome. This is the
+    // second, local check: a call with no step id has no ledger identity, so it is never
+    // redispatched whatever a caller of this function did before it.
+    if call.step_id.is_empty() {
+        return fallback(RestoreFailure::RoundInvalid);
+    }
     let closed = |kind: CloserKind| SeedSlot::Resolved {
         step_id: call.step_id.clone(),
         name: call.name.clone(),
@@ -1394,7 +1477,10 @@ fn dangling_slot(
 /// [`RestoreOrRefuse::Fallback`] for a fold that cannot be restored (stage 1 runs under the
 /// same consume), [`RestoreOrRefuse::Refuse`] for a widened authority or a release the ledger
 /// already holds (nothing is dispatched).
-#[cfg_attr(not(test), allow(dead_code))] // S7b step 9
+// The pure whole, for the tests that drive every fold and ledger rule without an RPC.
+// `restore_in_place_with` runs its two halves itself, because it reads the ledger between
+// them (and only for a fold that passed its own checks).
+#[cfg(test)]
 pub(crate) fn restore(
     claimed: &ClaimedFold,
     consumed: &Consumed,
@@ -1436,7 +1522,6 @@ pub(crate) fn restore(
 /// a denial, a ZDR refusal, a widened authority and a release the ledger already holds. A
 /// ledger read that is denied or refused by the ZDR catalogue is a refusal, never a fallback.
 #[allow(clippy::too_many_arguments)]
-#[cfg_attr(not(test), allow(dead_code))] // S7b step 9
 pub(crate) async fn restore_in_place_with<C, CFut, L, LFut>(
     bearer: Option<&str>,
     writer: fold::WriterGate,
@@ -1529,9 +1614,9 @@ where
 /// # Errors
 ///
 /// As [`restore_in_place_with`].
-// Not even the tests call it (they drive `restore_in_place_with` with injected answers): the
-// only caller is `run_agent_with_route` (S7b step 9 removes this allow).
-#[allow(dead_code)]
+// The only production caller is `agent::restore_continuation`; the tests drive
+// `restore_in_place_with` with injected answers and this one through its no-credential
+// downgrade.
 pub(crate) async fn restore_in_place(
     channel: &Channel,
     bearer: Option<&str>,
@@ -2525,6 +2610,24 @@ mod tests {
     }
 
     #[test]
+    fn a_restored_seed_is_consistent_only_with_one_slot_per_call() {
+        let claimed = claimed_of(pause_fold());
+        let restored = restore_of(&claimed, &consumed(), &Ledger::new()).expect("restores");
+        assert!(restored.is_consistent(), "what restore builds is consistent");
+
+        let mut short = restored.clone();
+        short.slots.pop();
+        assert!(!short.is_consistent(), "a slot missing for a call");
+        let mut long = restored.clone();
+        long.slots.push(restored.slots[0].clone());
+        assert!(!long.is_consistent(), "a slot with no call");
+        let mut empty = restored;
+        empty.slots.clear();
+        empty.response.tool_calls.clear();
+        assert!(!empty.is_consistent(), "a round with no call is not one to re-enter");
+    }
+
+    #[test]
     fn restore_rebuilds_the_open_round_in_original_order_with_the_release_in_place() {
         let claimed = claimed_of(pause_fold());
         let restored = restore_of(&claimed, &consumed(), &Ledger::new()).expect("restores");
@@ -3350,6 +3453,88 @@ mod tests {
         assert!(seen.claims.is_empty() && seen.lists.is_empty());
     }
 
+    /// The production entry point over a real channel takes the same downgrade as the injected
+    /// core: no credential means no RPC, so the answer is the writer's token and not a transport
+    /// failure's (a claim attempted on this unreachable channel would fail as `claim_unavailable`).
+    #[tokio::test]
+    async fn the_production_restore_downgrades_without_a_credential_before_any_rpc() {
+        let channel = tonic::transport::Endpoint::from_static("http://127.0.0.1:1").connect_lazy();
+        let req = pb::RunAgentRequest {
+            run_id: RUN.to_owned(),
+            ..Default::default()
+        };
+        let result = restore_in_place(
+            &channel,
+            None,
+            active_gate(),
+            &req,
+            &resume_of("claim-1", ""),
+            &consumed(),
+            RELEASE_ID,
+            PROMPT,
+        )
+        .await;
+        assert_eq!(fallback_of(result), RestoreFailure::WriterInactive);
+    }
+
+    /// What the approved call, the history and the outcomes say never reaches a log line or a
+    /// failed assertion through `{:?}` of the types that hold them.
+    #[test]
+    fn the_content_bearing_types_debug_without_content() {
+        let claimed = claimed_of(pause_fold());
+        let restored = restore_of(&claimed, &consumed(), &Ledger::new()).expect("restores");
+        let mut printed = format!("{:?}\n{:?}\n{:?}", consumed(), claimed, restored);
+        for slot in &restored.slots {
+            printed.push_str(&format!("\n{slot:?}"));
+        }
+        for content in [
+            // The consumed call's arguments, and the fold's spelling of them.
+            "stale",
+            "table",
+            // The history and the model's own text.
+            "SYSTEM PROMPT",
+            "Find the contract",
+            "Searching.",
+            "Tool results for your previous request",
+            "Looking, then deleting.",
+            // A call's output and a refusal's text.
+            "found 1 document",
+            "is not offered",
+            // A tool's definition.
+            "description",
+            "object",
+        ] {
+            assert!(!printed.contains(content), "{content:?} reached a Debug: {printed}");
+        }
+        // What it does print is the ids and counts a log line may carry.
+        for shown in [
+            "tool_name: \"delete_records\"",
+            "segment: 2",
+            "claimed_seq: 7",
+            "messages: 4",
+            "Release { step_id: \"s2.tool_1_approved\" }",
+        ] {
+            assert!(printed.contains(shown), "{shown:?} missing from {printed}");
+        }
+    }
+
+    /// `check_fold` refuses a call with no step id and no outcome; `dangling_slot` does not rely
+    /// on that, so a caller that skipped it still never redispatches a call with no identity.
+    #[test]
+    fn a_call_with_no_step_id_is_never_a_dangling_slot() {
+        let call = fold_call("call-x", "knowledge_search", r#"{"query":"x"}"#, "");
+        assert_eq!(
+            fallback_of(dangling_slot(&call, &consumed(), &Ledger::new())),
+            RestoreFailure::RoundInvalid
+        );
+        // The control: the same call with a step id is a redispatchable read.
+        let call = fold_call("call-x", "knowledge_search", r#"{"query":"x"}"#, "tool_5_call-x");
+        assert!(matches!(
+            dangling_slot(&call, &consumed(), &Ledger::new()),
+            Ok(SeedSlot::Redispatch { .. })
+        ));
+    }
+
     /// The seeded writer is built by `FoldWriter::seeded` through the SAME gate as a fresh one,
     /// except that an in-place resume is not a stage-1 segment (`resumed` is false for it). The
     /// helper that decides it before the claim must say exactly what the writer's own gate says.
@@ -3375,31 +3560,34 @@ mod tests {
         // `resumed` is the stage-1 flag, which would switch a fresh writer off: an in-place
         // resume is not one, so it is ignored here (and the token stays the writer's own).
         assert_eq!(in_place_writer_off(fold::WriterGate { resumed: true, ..gate }, true), None);
-        // The answer is the writer's: the same gate through `FoldWriter::seeded` is Active
-        // exactly when the helper says None.
+        // The answer is the writer's: the SAME, UNMODIFIED candidate gate (`resumed` included)
+        // goes to the helper and to `FoldWriter::seeded`, over every combination of the gate's
+        // facts, a delegated depth and a credential, and the two must agree on whether the
+        // writer is Active and on why not. (A divergence here is a resume that claims and then
+        // cannot write its fence: the click spent and the row `resuming` for nothing.)
         let channel = tonic::transport::Endpoint::from_static("http://127.0.0.1:1").connect_lazy();
-        for (candidate, bearer) in [
-            (gate, Some("tok")),
-            (gate, None),
-            (fold::WriterGate { depth: 2, ..gate }, Some("tok")),
-            (fold::WriterGate { zdr: true, ..gate }, Some("tok")),
-            (fold::WriterGate { switch: false, ..gate }, Some("tok")),
-            (fold::WriterGate { resumed: true, ..gate }, Some("tok")),
-        ] {
-            let writer = fold::FoldWriter::seeded(
-                &channel,
-                bearer,
-                RUN,
-                fold::WriterGate { resumed: false, ..candidate },
-                7,
-                2,
-            );
-            assert_eq!(
-                writer.is_active(),
-                in_place_writer_off(candidate, bearer.is_some()).is_none(),
-                "{candidate:?} {bearer:?}"
-            );
+        let mut candidates = 0;
+        for bits in 0..(1u32 << 6) {
+            for depth in [0u32, 1, 2] {
+                for bearer in [Some("tok"), None] {
+                    let candidate = fold::WriterGate {
+                        switch: bits & 1 != 0,
+                        ledger: bits & 2 != 0,
+                        zdr: bits & 4 != 0,
+                        waived: bits & 8 != 0,
+                        space: bits & 16 != 0,
+                        depth,
+                        resumed: bits & 32 != 0,
+                    };
+                    let writer = fold::FoldWriter::seeded(&channel, bearer, RUN, candidate, 7, 2);
+                    let off = in_place_writer_off(candidate, bearer.is_some());
+                    assert_eq!(writer.off_reason(), off, "{candidate:?} {bearer:?}");
+                    assert_eq!(writer.is_active(), off.is_none(), "{candidate:?} {bearer:?}");
+                    candidates += 1;
+                }
+            }
         }
+        assert_eq!(candidates, 64 * 3 * 2, "the whole space was walked");
     }
 
     /// The finding this pins: a resume whose seeded writer would not be Active must be

@@ -360,7 +360,6 @@ pub(crate) struct SeqTracker {
 impl SeqTracker {
     /// A tracker that expects `expected` next: the seq a resumed loop was handed by its
     /// claim, instead of 0 for a run's first save.
-    #[cfg_attr(not(test), allow(dead_code))] // the in-place resume (WS03 S7b) seeds from the claimed seq
     pub(crate) const fn seeded(expected: u64) -> Self {
         Self {
             expected,
@@ -537,11 +536,13 @@ pub(crate) fn fold_completed<'a>(
 ///
 /// `results` is parallel to `calls`: `Some((output, error))` for a call the loop
 /// rejected (not offered, truncated, over the autonomy rung, a leaf role, ...), `None`
-/// for a call that is still to be dispatched. Each entry carries its call's id and an
-/// empty step id (a refused call took no step). A refusal is saved, never re-derived
-/// on resume, because some of them (a truncated final call) depend on state the fold
-/// does not carry. A call with an empty `step_id` is therefore resolved here, and a
-/// resume never dispatches it.
+/// for a call that is still to be dispatched. Each entry carries its call's id and its
+/// call's own step id: empty for a call refused before dispatch (it took no step), and,
+/// in a round an in-place resume restored, the step a sibling that already ran kept (so
+/// the fold records it as one that ran, not as one that was refused). A refusal is saved,
+/// never re-derived on resume, because some of them (a truncated final call) depend on
+/// state the fold does not carry. A call with an empty `step_id` is therefore resolved
+/// here, and a resume never dispatches it.
 pub(crate) fn fold_rejected<'a>(
     calls: &[FoldCall],
     results: impl IntoIterator<Item = Option<(&'a str, &'a str)>>,
@@ -552,7 +553,7 @@ pub(crate) fn fold_rejected<'a>(
         .filter_map(|(call, result)| {
             let (output, error) = result?;
             Some(FoldCompleted {
-                step_id: String::new(),
+                step_id: call.step_id.clone(),
                 output: output.to_owned(),
                 error: error.to_owned(),
                 call_id: call.id.clone(),
@@ -831,9 +832,11 @@ impl<'a> FoldWriter<'a> {
     /// [`FoldWriter::new`] (switch, ledger, zero-retention, waived, Space, delegated): it
     /// is OFF with the gate's reason when the gate refuses and when there is no bearer,
     /// so a caller that forgets to gate the run cannot write folds for a ZDR or waived
-    /// run. (`gate.resumed` is the stage-1 segment flag; an in-place resume is not one.)
+    /// run. (`gate.resumed` is the stage-1 segment flag and an in-place resume is never one,
+    /// so this constructor forces it false itself: the decision a caller makes before it
+    /// claims, `resume::in_place_writer_off`, and this writer's own are one decision by
+    /// construction, whatever the caller put in `resumed`.)
     /// Pure: it makes no RPC.
-    #[cfg_attr(not(test), allow(dead_code))] // the in-place resume (WS03 S7b) builds it
     pub(crate) fn seeded(
         channel: &'a Channel,
         bearer: Option<&'a str>,
@@ -842,6 +845,10 @@ impl<'a> FoldWriter<'a> {
         expected_seq: u64,
         segment_no: u32,
     ) -> Self {
+        let gate = WriterGate {
+            resumed: false,
+            ..gate
+        };
         let mut writer = Self::new(channel, bearer, run_id, gate);
         writer.tracker = SeqTracker::seeded(expected_seq);
         writer.segment_no = segment_no;
@@ -907,7 +914,7 @@ impl<'a> FoldWriter<'a> {
     }
 
     /// Why the writer is off, if it is.
-    #[cfg_attr(not(test), allow(dead_code))] // read by the tests; a log line's reason is at `new`
+    #[cfg(test)] // read by the tests; a log line's reason is at `new`
     pub(crate) fn off_reason(&self) -> Option<OffReason> {
         match self.state {
             State::Off(reason) => Some(reason),
@@ -916,7 +923,7 @@ impl<'a> FoldWriter<'a> {
     }
 
     /// The seq the next save will expect.
-    #[cfg_attr(not(test), allow(dead_code))] // the in-place resume (WS03 S7) seeds from the claimed seq
+    #[cfg(test)] // read by the tests: the fence is written at the seq the claim returned
     pub(crate) fn expected_seq(&self) -> u64 {
         self.tracker.expected()
     }
@@ -1122,7 +1129,6 @@ impl<'a> FoldWriter<'a> {
     ///
     /// The [`SaveError`] of the failed save, or `Unavailable { ambiguous: false }` (no RPC
     /// was made) when the writer is not active.
-    #[cfg_attr(not(test), allow(dead_code))] // S7b step 9 (run_rounds fence)
     pub(crate) async fn save_fence(&mut self, fold: LoopFoldV1) -> Result<u64, SaveError> {
         let (channel, run_id) = (self.channel, self.run_id);
         let Some(bearer) = self.bearer else {
@@ -1803,6 +1809,30 @@ mod tests {
         assert_eq!(fold_rejected(&calls[..1], [None, Some(("", "x"))]).len(), 0);
     }
 
+    /// A restored round's resolved sibling (one that ran before the loop stopped) is a call
+    /// WITH a step whose outcome is already known: the fold keeps that step, so a reader sees
+    /// a call that ran and not one that was refused before dispatch.
+    #[test]
+    fn a_resolved_call_that_ran_keeps_its_step_in_the_fold() {
+        let tool_calls: Vec<pb::ToolCall> = ["a", "b"]
+            .iter()
+            .map(|id| pb::ToolCall {
+                id: (*id).to_owned(),
+                name: format!("tool_{id}"),
+                arguments_json: "{}".to_owned(),
+            })
+            .collect();
+        let calls = fold_calls(&tool_calls, ["tool_1_a", ""]);
+        let resolved = fold_rejected(&calls, [Some(("done", "")), Some(("", "refused"))]);
+        assert_eq!(
+            resolved
+                .iter()
+                .map(|c| (c.call_id.as_str(), c.step_id.as_str()))
+                .collect::<Vec<_>>(),
+            [("a", "tool_1_a"), ("b", "")]
+        );
+    }
+
     fn big_tool_result(chars: usize) -> pb::ChatMessage {
         chat(
             "user",
@@ -2322,14 +2352,43 @@ mod tests {
                 },
                 OffReason::Delegated,
             ),
-            (
+        ]
+    }
+
+    /// `resumed` is the stage-1 segment flag and only [`FoldWriter::new`] honours it: an
+    /// in-place resume is never a stage-1 segment, so [`FoldWriter::seeded`] forces it false
+    /// itself. The decision a caller makes before it claims (`resume::in_place_writer_off`)
+    /// is therefore the writer's own whatever the caller put in `resumed`.
+    #[tokio::test]
+    async fn only_a_fresh_writer_honours_the_stage_one_segment_flag() {
+        let channel = tonic::transport::Endpoint::from_static("http://127.0.0.1:1").connect_lazy();
+        let resumed = WriterGate {
+            resumed: true,
+            ..all_good()
+        };
+        let fresh = FoldWriter::new(&channel, Some("b"), "run-1", resumed);
+        assert_eq!(fresh.off_reason(), Some(OffReason::ResumedSegment));
+        let seeded = FoldWriter::seeded(&channel, Some("b"), "run-1", resumed, 12, 3);
+        assert!(
+            seeded.is_active(),
+            "an in-place resume is not a stage-1 segment, whatever the gate says"
+        );
+        assert_eq!((seeded.expected_seq(), seeded.segment()), (12, 3));
+        // Every other refusal still applies to it, with `resumed` set or not.
+        for (gate, reason) in refusing_gates() {
+            let writer = FoldWriter::seeded(
+                &channel,
+                Some("b"),
+                "run-1",
                 WriterGate {
                     resumed: true,
-                    ..all_good()
+                    ..gate
                 },
-                OffReason::ResumedSegment,
-            ),
-        ]
+                12,
+                3,
+            );
+            assert_eq!(writer.off_reason(), Some(reason), "{gate:?}");
+        }
     }
 
     /// A listener nothing serves, standing in for session-core: a writer that makes an

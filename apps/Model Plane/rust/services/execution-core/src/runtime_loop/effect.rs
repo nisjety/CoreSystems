@@ -123,10 +123,9 @@ pub(crate) struct LedgerEntry<'a> {
 }
 
 impl<'a> LedgerEntry<'a> {
-    /// The one builder. `step_id` becomes the ledger's action id ([`action_id_for`]).
-    // Called only by `entry_for_call` and the release's entry, both dead until the in-place
-    // resume lands (WS03 S7b step 9 removes this allow).
-    #[cfg_attr(not(test), allow(dead_code))]
+    /// The one builder. `step_id` becomes the ledger's action id ([`action_id_for`]); the tool
+    /// name is trimmed here, in the one place, so a padded spelling of a tool is never a second
+    /// identity for the same action.
     pub(crate) fn new(
         run_id: &'a str,
         step_id: &str,
@@ -139,7 +138,7 @@ impl<'a> LedgerEntry<'a> {
         Self {
             run_id,
             action_id: action_id_for(step_id),
-            tool,
+            tool: tool.trim(),
             data_category,
             zdr,
             class,
@@ -149,11 +148,8 @@ impl<'a> LedgerEntry<'a> {
 }
 
 /// The entry for a call about to be dispatched: its class and digest come from the tool
-/// and its actual arguments. The loop's phase 2 builds the entry of every effectful call
-/// this way.
-// WS03 S7b step 7/9 switches phase 2 to this builder; until then the loop spells the same
-// fields inline and only the tests call it (step 9 removes this allow).
-#[cfg_attr(not(test), allow(dead_code))]
+/// and its actual arguments. The loop's phase 2 builds the entry of every call it reserves
+/// this way, and so does the release's pre-reserve: one identity per action.
 pub(crate) fn entry_for_call<'a>(
     run_id: &'a str,
     step_id: &str,
@@ -184,6 +180,11 @@ pub(crate) enum ReserveOutcome {
     /// The reservation already existed. An earlier attempt may have run the call,
     /// so it is never dispatched again; it is closed as an unknown outcome.
     AlreadyReserved,
+    /// The action id exists and is bound to different immutable input (session-core answers
+    /// `already_exists`): another attempt reserved it under another identity. Not a replay,
+    /// and not an outage: whatever holds the row is not this reservation, so the call is never
+    /// dispatched on the strength of it.
+    IdentityConflict,
 }
 
 impl ReserveOutcome {
@@ -218,11 +219,28 @@ pub(crate) async fn reserve(
         },
         bearer,
     )?;
-    SessionCoreClient::new(channel.clone())
-        .reserve_tool_action(request)
-        .await
-        .map(|response| ReserveOutcome::from_created(response.into_inner().created))
-        .map_err(|status| status.message().to_owned())
+    reserve_result(
+        SessionCoreClient::new(channel.clone())
+            .reserve_tool_action(request)
+            .await
+            .map(tonic::Response::into_inner),
+    )
+}
+
+/// What session-core's answer to a reservation means. `created` is a fresh row, `created:
+/// false` an exact replay, `already_exists` a row bound to other input, and anything else a
+/// failure whose reason is kept for the log (and which may have committed: a reservation that
+/// timed out is not a reservation that did not happen).
+fn reserve_result(
+    answer: Result<pb::ReserveToolActionResponse, tonic::Status>,
+) -> Result<ReserveOutcome, String> {
+    match answer {
+        Ok(response) => Ok(ReserveOutcome::from_created(response.created)),
+        Err(status) if status.code() == tonic::Code::AlreadyExists => {
+            Ok(ReserveOutcome::IdentityConflict)
+        }
+        Err(status) => Err(status.message().to_owned()),
+    }
 }
 
 /// Record how a reserved call ended. A failure leaves the row `reserved`, which the
@@ -257,9 +275,7 @@ const LIST_ACTIONS_MAX_IDS: usize = 64;
 /// One ledger row as the loop that resumes a run reads it: the tool, the state and
 /// the digest, never the arguments. `effect_class` and `args_digest` are `None` for
 /// a row whose writer did not record them.
-// Read only by the in-place resume (WS03 S7b), which is itself off by default; until
-// it lands nothing in the loop constructs or reads a row.
-#[allow(dead_code)]
+// Read only by the in-place resume (WS03 S7b), which is itself off by default.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct LedgerRow {
     pub tool: String,
@@ -336,7 +352,6 @@ impl PartialEq<&str> for LedgerReadError {
 /// Read one wire row. A value outside the shared vocabulary is an error: a status,
 /// class or digest the loop cannot read must not be guessed at, because a guess
 /// could take a call that may have run for one that did not.
-#[allow(dead_code)] // S7b
 fn row_from_state(state: &pb::ToolActionState) -> Result<LedgerRow, String> {
     let status = mp_contracts::effect_ledger::ledger_status_from_row(&state.status)
         .ok_or_else(|| "the ledger returned an unknown status".to_owned())?;
@@ -365,7 +380,6 @@ fn row_from_state(state: &pb::ToolActionState) -> Result<LedgerRow, String> {
 
 /// The rows of an answer, by action id. The answer must be to the question: a row
 /// for an action that was not asked, or two rows for one action, is refused.
-#[allow(dead_code)] // S7b
 fn rows_from_states(
     asked: &[String],
     states: Vec<pb::ToolActionState>,
@@ -396,8 +410,10 @@ fn rows_from_states(
 /// this read is UNKNOWN and must be closed as such, never re-dispatched as "not run,
 /// safe to dispatch". Only a row with status `not_run` (or a `completed` row with its
 /// output) licenses a re-dispatch decision.
-// Called only by the in-place resume (WS03 S7b), which is itself off by default.
-#[allow(dead_code)]
+// Production reads the ledger through `list_actions_with`, from `resume::restore_in_place`,
+// which supplies its own RPC under its own timeout; this is the same read over a bare channel,
+// kept for the tests that drive it against the session mock.
+#[cfg(test)]
 pub(crate) async fn list_actions(
     channel: &Channel,
     bearer: Option<&str>,
@@ -418,7 +434,6 @@ pub(crate) async fn list_actions(
 /// Each id is asked once, in the order given (a repeat is dropped before chunking, so
 /// two chunks cannot answer the same id). The read stops at the first refused or
 /// unreadable chunk: a partial map is never returned.
-#[allow(dead_code)] // S7b, through `list_actions`
 pub(crate) async fn list_actions_with<F, Fut>(
     bearer: Option<&str>,
     run_id: &str,
@@ -938,6 +953,47 @@ mod tests {
         assert_eq!(entry, reordered);
         let other = entry_for_call("run-1", "tool_1_c1", "delete_records", r#"{"a":3}"#, "public_non_personal", false);
         assert_ne!(entry, other);
+        // The tool name is trimmed in the one place, so a padded spelling is not a second
+        // identity for the same action.
+        let padded = entry_for_call(
+            "run-1",
+            "tool_1_c1",
+            " delete_records ",
+            input,
+            "public_non_personal",
+            false,
+        );
+        assert_eq!(padded.tool, "delete_records");
+        assert_eq!(entry, padded);
+    }
+
+    #[test]
+    fn a_reserve_answer_tells_a_replay_an_identity_conflict_and_an_outage_apart() {
+        use tonic::Status;
+        let created = |created| Ok(pb::ReserveToolActionResponse { created });
+        assert_eq!(reserve_result(created(true)), Ok(ReserveOutcome::Created));
+        assert_eq!(reserve_result(created(false)), Ok(ReserveOutcome::AlreadyReserved));
+        // The row exists and is bound to other input: not a replay, and not an outage.
+        assert_eq!(
+            reserve_result(Err(Status::already_exists(
+                "tool action identity is bound to different immutable input"
+            ))),
+            Ok(ReserveOutcome::IdentityConflict)
+        );
+        // Every other failure keeps its reason, whether or not the reservation committed.
+        for status in [
+            Status::unavailable("tool ledger unavailable"),
+            Status::deadline_exceeded("tool ledger timed out"),
+            Status::invalid_argument("invalid args_digest"),
+            Status::failed_precondition("tool action run is unavailable"),
+            Status::permission_denied("no scope"),
+        ] {
+            assert_eq!(
+                reserve_result(Err(status.clone())),
+                Err(status.message().to_owned()),
+                "{status:?}"
+            );
+        }
     }
 
     #[test]

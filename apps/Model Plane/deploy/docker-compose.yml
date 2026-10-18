@@ -258,11 +258,14 @@ services:
       # (or with any prerequisite off) the continuation runs as a `segment`, as before. OFF
       # by default; only the literal `true` turns it on. One coupled flip with
       # EXECUTION_EFFECT_LEDGER_ENABLED, EXECUTION_LOOP_CHECKPOINT_ENABLED and
-      # AGENT_CONTINUE_AFTER_APPROVAL_ENABLED on execution-core and
-      # SESSION_CORE_LOOP_CHECKPOINT_ENABLED on session-core: flip them together, deploy
-      # execution-core first, then session-core, then model-gateway, then the BFF, and roll
-      # back in reverse (this service off first). A gateway that is on while the executor's
-      # ledger is off spends the user's click and has the executor refuse it.
+      # AGENT_CONTINUE_AFTER_APPROVAL_ENABLED on execution-core (the last one is read on this
+      # service too) and SESSION_CORE_LOOP_CHECKPOINT_ENABLED on session-core: flip them
+      # together, deploy execution-core first, then session-core, then model-gateway, then the
+      # BFF, and roll back in reverse (this service off first). This service reads the
+      # variable from S7c-B; until then only this entry exists. A gateway that is on while the
+      # executor's ledger is off, or while the executor's continue switch is off, spends the
+      # user's click and has the executor refuse it: the click is lost and the run waits out
+      # the renewed recovery window (see the execution-core entry for what each mismatch does).
       EXECUTION_LOOP_RESUME_ENABLED: ${EXECUTION_LOOP_RESUME_ENABLED:-false}
       # Kill-switches for the review-latency levers. Empty keeps a lever ON;
       # 0/off/false/no/disabled turns it off at the next restart, no rebuild.
@@ -1076,12 +1079,25 @@ services:
       EXECUTION_LOOP_CHECKPOINT_ENABLED: ${EXECUTION_LOOP_CHECKPOINT_ENABLED:-false}
       # In-place resume of a paused Do loop (WS03 S7): a `/continue` in the `loop` stage
       # claims the pause's fold and re-enters the loop instead of starting a fresh segment.
-      # OFF by default; with it off, or with the ledger, the fold writer or the continue
-      # switch off, or for a zero-retention or waived run, `loop` runs as a `segment`. Only
-      # the literal `true` turns it on. The same variable is read by model-gateway: one
-      # coupled flip with EXECUTION_EFFECT_LEDGER_ENABLED, EXECUTION_LOOP_CHECKPOINT_ENABLED,
-      # SESSION_CORE_LOOP_CHECKPOINT_ENABLED and AGENT_CONTINUE_AFTER_APPROVAL_ENABLED.
-      # Deploy this service first, then session-core, then model-gateway, then the BFF.
+      # OFF by default. With it off, or with the ledger or the fold writer off, or for a
+      # zero-retention or waived run, `loop` runs as a `segment` (a downgrade, never a refusal).
+      # A pause whose fold cannot be restored (not claimable, tombstone, prompt drift, a ledger
+      # that cannot be read) also runs as a `segment`, under the same consume. A denied claim
+      # or ledger read, a release the ledger already holds, or a fence or pre-reserve that
+      # cannot be written is REFUSED with nothing dispatched (the click is spent).
+      # The continue switch is not a downgrade: with AGENT_CONTINUE_AFTER_APPROVAL_ENABLED off
+      # here a continue is REFUSED (continue_disabled) after the gateway has already spent the
+      # click, and the click is lost. Only the literal `true` turns this switch on. The same
+      # variable is read by model-gateway (from S7c-B): one coupled flip with
+      # EXECUTION_EFFECT_LEDGER_ENABLED, EXECUTION_LOOP_CHECKPOINT_ENABLED,
+      # SESSION_CORE_LOOP_CHECKPOINT_ENABLED and AGENT_CONTINUE_AFTER_APPROVAL_ENABLED (both
+      # services). What a mismatch does, with the gateway's resume switch on: the executor's
+      # ledger off, or its continue switch off, refuses the replay of the click the gateway
+      # spent (continuation_already_consumed, or continue_disabled) and the click is lost; the
+      # executor's own resume switch, fold writer or session-core's fold store off only
+      # downgrade `loop` to a `segment`. The operator's signature for the ledger case is the
+      # warn line continue_replay_refused_ledger_off. Deploy this service first, then
+      # session-core, then model-gateway, then the BFF.
       EXECUTION_LOOP_RESUME_ENABLED: ${EXECUTION_LOOP_RESUME_ENABLED:-false}
       # Autonomous tool-using runs route through Azure's model-router deployment,
       # which selects the best model per turn (tool-calling model selection is

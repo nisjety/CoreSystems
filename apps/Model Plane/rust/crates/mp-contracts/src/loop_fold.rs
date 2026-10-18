@@ -339,15 +339,20 @@ pub fn switch_from(value: Option<&str>) -> bool {
 /// S7). Default off; parsed by [`switch_from`] (`true` and nothing else).
 ///
 /// Two services read it, each through [`loop_resume_enabled`] and never by this name:
-/// execution-core restores the paused loop from its claimed fold, and model-gateway (S7c)
-/// pre-consumes the approval and asks for the `loop` stage. With it off, or with any
-/// prerequisite off, a `loop` request runs as `segment` (a downgrade, never a refusal).
+/// execution-core restores the paused loop from its claimed fold, and model-gateway
+/// pre-consumes the approval and asks for the `loop` stage (the gateway's reader arrives
+/// with S7c-B; until then only its compose entry exists). With the executor's switch off, or
+/// with the ledger or the fold writer off, a `loop` request runs as `segment` (a downgrade,
+/// never a refusal). The continue switch is not a downgrade: with
+/// `AGENT_CONTINUE_AFTER_APPROVAL_ENABLED` off the executor REFUSES a continue
+/// (`continue_disabled`), after the gateway has already spent the click.
 ///
 /// It is one coupled flip with `EXECUTION_EFFECT_LEDGER_ENABLED`,
 /// `EXECUTION_LOOP_CHECKPOINT_ENABLED`, `SESSION_CORE_LOOP_CHECKPOINT_ENABLED` and
-/// `AGENT_CONTINUE_AFTER_APPROVAL_ENABLED`: flip them together, roll back in reverse
-/// (model-gateway off first). A gateway that pre-consumes while the executor's ledger is
-/// off spends the user's click and has the executor refuse the replay.
+/// `AGENT_CONTINUE_AFTER_APPROVAL_ENABLED` (on both services): flip them together, roll back
+/// in reverse (model-gateway off first). A gateway that pre-consumes while the executor's
+/// ledger or continue switch is off spends the user's click and has the executor refuse the
+/// replay.
 pub const LOOP_RESUME_ENV: &str = "EXECUTION_LOOP_RESUME_ENABLED";
 
 /// Whether the in-place resume switch is on in this process.

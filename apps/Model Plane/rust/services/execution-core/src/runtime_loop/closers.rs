@@ -15,10 +15,6 @@
 //! The sentence comes from `mp_contracts::loop_fold::closer_text`. It names the
 //! tool and the kind of closure, never the call's arguments or output.
 
-// Nothing calls this until the in-place resume (build plan WS03 S7) does. The decision
-// table is pinned by the tests below now, so the resume cannot invent its own.
-#![allow(dead_code)]
-
 use mp_contracts::effect_ledger::EffectClass;
 use mp_contracts::loop_fold::{CloserKind, LedgerStatus};
 

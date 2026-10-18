@@ -292,6 +292,17 @@ impl Code {
 
     /// The body of the first `fn name`, between its braces.
     fn fn_body(&self, name: &str) -> Option<String> {
+        self.fn_span(name).map(|(open, close)| self.text[open + 1..close].to_owned())
+    }
+
+    /// As [`Code::fn_body`], over the blanked source: string contents are spaces, so a word
+    /// inside a log message or an error text is never mistaken for a call.
+    fn fn_body_skel(&self, name: &str) -> Option<String> {
+        self.fn_span(name).map(|(open, close)| self.skel[open + 1..close].to_owned())
+    }
+
+    /// The indices of the braces of the first `fn name` that has a body.
+    fn fn_span(&self, name: &str) -> Option<(usize, usize)> {
         let pattern = Regex::new(&format!(r"\bfn\s+{}\s*[<(]", regex::escape(name))).ok()?;
         for found in pattern.find_iter(&self.skel) {
             let rest = &self.skel[found.end()..];
@@ -303,7 +314,7 @@ impl Code {
             }
             let open = found.end() + offset;
             let close = matching_brace(&self.skel, open)?;
-            return Some(self.text[open + 1..close].to_owned());
+            return Some((open, close));
         }
         None
     }
@@ -815,7 +826,7 @@ fn switch_table() -> Vec<(&'static str, String, &'static str)> {
         (
             "model-gateway",
             mp_contracts::loop_fold::LOOP_RESUME_ENV.to_owned(),
-            "the /continue pre-consume and the loop stage (S7c)",
+            "the /continue pre-consume and the loop stage (the gateway's reader arrives with S7c-B; until then this pins only the compose entry)",
         ),
         (
             "session-core",
@@ -886,19 +897,21 @@ fn fold_gate_violations(executor_loop: &str, executor_fold: &str) -> Vec<String>
     let agent = Code::new(executor_loop).without_tests();
     let fold = Code::new(executor_fold).without_tests();
 
-    let literals: Vec<_> = Regex::new(r"\bWriterGate\s*\{")
+    // A literal, not the `-> WriterGate {` of the one fn that builds it.
+    let literals: Vec<_> = Regex::new(r"(?:->\s*(?:\w+\s*::\s*)*)?\bWriterGate\s*\{")
         .expect("pattern")
         .find_iter(&agent.skel)
+        .filter(|found| !found.as_str().starts_with("->"))
         .collect();
     if literals.len() == 1 {
         let open = literals[0].end() - 1;
         let body = matching_brace(&agent.skel, open).map_or("", |close| &agent.text[open..=close]);
-        if !Regex::new(r"\bwaived\s*:\s*ctx\.route\.is_waived\(\)")
+        if !Regex::new(r"\bwaived\s*:\s*(?:ctx\.)?route\.is_waived\(\)")
             .expect("pattern")
             .is_match(body)
         {
             violations.push(
-                "the loop builds its fold writer without `waived: ctx.route.is_waived()`".into(),
+                "the loop builds its fold writer without `waived: route.is_waived()`".into(),
             );
         }
         if !Regex::new(r"\bzdr\b").expect("pattern").is_match(body) {
@@ -974,20 +987,27 @@ fn parser_violations(name: &str, parser: &str, sources: &[(String, String)]) -> 
 /// The gateway's pre-consume is spend-only (`omit_call`, S7c), and then the executor's own
 /// consume is a same-claim replay that hands the approved call back. The executor needs that
 /// descriptor (it is the only source of what an approval authorised), so it never asks for the
-/// call to be left out: `omit_call: true` anywhere in execution-core would starve the resume
-/// of the call it runs. And one literal means one place to read what the executor asks for.
+/// call to be left out: an `omit_call` that is anything but the literal `false` anywhere in
+/// execution-core (`omit_call: flag`, `omit_call: !x`, the shorthand `omit_call,`, an assignment)
+/// could starve the resume of the call it runs, and no test of a value can see a value that is
+/// computed. So EVERY mention of `omit_call` in production code must be exactly `omit_call:
+/// false` followed by the end of the field. And one literal means one place to read what the
+/// executor asks for.
 fn consume_request_violations(executor_sources: &[(String, String)]) -> Vec<String> {
     let literal = Regex::new(r"\bConsumeApprovalRequest\s*\{").expect("pattern");
-    let omits = Regex::new(r"\bomit_call\s*:\s*true\b").expect("pattern");
+    let mention = Regex::new(r"\bomit_call\b").expect("pattern");
+    let only_false = Regex::new(r"^omit_call\s*:\s*false\s*[,}]").expect("pattern");
     let mut violations = Vec::new();
     let mut literals = 0;
     for (path, source) in executor_sources {
         let code = Code::new(source).without_tests();
         literals += literal.find_iter(&code.text).count();
-        if omits.is_match(&code.text) {
-            violations.push(format!(
-                "{path} sets `omit_call: true`: the executor needs the approved call back and never omits it"
-            ));
+        for found in mention.find_iter(&code.text) {
+            if !only_false.is_match(&code.text[found.start()..]) {
+                violations.push(format!(
+                    "{path} sets `omit_call` to something other than the literal `false`: the executor needs the approved call back and never omits it"
+                ));
+            }
         }
     }
     if literals != 1 {
@@ -998,28 +1018,255 @@ fn consume_request_violations(executor_sources: &[(String, String)]) -> Vec<Stri
     violations
 }
 
-/// `resume.rs` holds `restore_in_place`, which is handed the client's whole `AgentResume`.
-/// The executor derives the segment from the step that paused and NEVER reads the client's
-/// `segment_no` (the gateway sends 0 and an old gateway sends 2: both must work). The fold's
-/// own `segment_no` and the claim response's are the only `.segment_no` it may read, so any
-/// other receiver (`resume.`, `r.`, ...) is a read of the client's.
-fn resume_module_segment_violations(executor_resume: &str) -> Vec<String> {
-    let code = Code::new(executor_resume).without_tests();
-    let read = Regex::new(r"\b([A-Za-z_][A-Za-z0-9_]*)\s*\.\s*segment_no\b").expect("pattern");
+/// The in-place resume's order and its one writer (WS03 S7b).
+///
+/// What makes the resume safe is the ORDER of three things inside `run_rounds`: the fence (the
+/// seeded writer's one `pre_effect` save at the claimed seq) comes first, the release's
+/// pre-reserve second, and the phase-2 dispatch (`join_all`) last. Two claimants of one pause hold
+/// the same seq, and the fence's compare-and-set is what lets exactly one through; the
+/// pre-reserve is what lets exactly one attempt of the approval dispatch. Neither is visible to a
+/// test that does not race, so the order is read from the source:
+///
+/// * `FoldWriter::seeded(` is called once in the loop's production code, inside `run_rounds`
+///   (a second seeded writer is a second opinion on the seq the fence expects);
+/// * the writer's gate is built by the one `writer_gate` fn, whose `resumed` flag reads
+///   `!in_place` (an in-place resume is not a stage-1 segment), is handed `in_place` by
+///   `run_rounds` and `true, true` by the pre-claim decision (`restore_continuation`), and the
+///   two places that decide the seeded writer's gate force the flag false themselves
+///   (`FoldWriter::seeded`, `resume::in_place_writer_off`), so they cannot disagree;
+/// * `save_fence(` is called once, before `reserve_release(`, which is called once, before the
+///   phase-2 `join_all(`, all inside `run_rounds`;
+/// * no production file outside mp-contracts names the resume switch's env var.
+fn in_place_writer_violations(
+    executor_sources: &[(String, String)],
+    executor_loop: &str,
+    executor_fold: &str,
+    executor_resume: &str,
+) -> Vec<String> {
     let mut violations = Vec::new();
-    let mut allowed = 0;
-    for captured in read.captures_iter(&code.text) {
-        match &captured[1] {
-            "fold" | "response" => allowed += 1,
-            receiver => violations.push(format!(
-                "resume.rs reads `{receiver}.segment_no`: only the fold's own and the claim response's may be read; the executor derives the segment from the paused step and never reads the client-supplied AgentResume.segment_no"
-            )),
+    let agent = Code::new(executor_loop).without_tests();
+    let fold = Code::new(executor_fold).without_tests();
+    let resume = Code::new(executor_resume).without_tests();
+    let count = |haystack: &str, pattern: &str| {
+        Regex::new(pattern)
+            .expect("pattern")
+            .find_iter(haystack)
+            .count()
+    };
+
+    let Some(rounds) = agent.fn_body_skel("run_rounds") else {
+        violations.push("agent.rs has no `fn run_rounds`: re-point this guard".into());
+        return violations;
+    };
+
+    // One seeded writer, built by the loop.
+    let seeded = r"\bFoldWriter\s*::\s*seeded\s*\(";
+    let seeded_total = count(&agent.skel, seeded);
+    let seeded_in_rounds = count(&rounds, seeded);
+    if seeded_total != 1 || seeded_in_rounds != 1 {
+        violations.push(format!(
+            "agent.rs calls `FoldWriter::seeded(` {seeded_total} times ({seeded_in_rounds} inside run_rounds); the in-place resume has exactly one seeded writer, built by run_rounds"
+        ));
+    }
+
+    // The gate: one fn builds it, `resumed` reads `!in_place`.
+    match agent.fn_body("writer_gate") {
+        None => violations.push("agent.rs has no `fn writer_gate`".into()),
+        Some(body) => {
+            if !Regex::new(r"\bresumed\s*:[^,}]*!\s*in_place\b")
+                .expect("pattern")
+                .is_match(&body)
+            {
+                violations.push(
+                    "the fold writer's gate does not read `!in_place` for `resumed`: an in-place resume is not a stage-1 segment, and its seeded writer would be off"
+                        .into(),
+                );
+            }
         }
     }
-    if allowed == 0 {
+    if !Regex::new(r"\bwriter_gate\s*\([^;]*\bin_place\s*,?\s*\)\s*;")
+        .expect("pattern")
+        .is_match(&rounds)
+    {
+        violations.push(
+            "run_rounds does not build its writer's gate with `in_place` as the last argument of writer_gate(..)"
+                .into(),
+        );
+    }
+    match agent.fn_body_skel("restore_continuation") {
+        None => violations.push("agent.rs has no `fn restore_continuation`".into()),
+        Some(body) => {
+            if !Regex::new(r"\bwriter_gate\s*\([^;]*\btrue\s*,\s*true\s*,?\s*\)")
+                .expect("pattern")
+                .is_match(&body)
+            {
+                violations.push(
+                    "the pre-claim writer decision does not go through `writer_gate(.., true, true)`: it must be the gate the loop builds the seeded writer from"
+                        .into(),
+                );
+            }
+        }
+    }
+    // Both deciders force the stage-1 flag off themselves.
+    if !Regex::new(r"WriterGate\s*\{\s*resumed\s*:\s*false\s*,\s*\.\.\s*gate\s*,?\s*\}")
+        .expect("pattern")
+        .is_match(&fold.skel)
+    {
+        violations.push(
+            "FoldWriter::seeded no longer forces `resumed: false` on the gate it is given"
+                .into(),
+        );
+    }
+    match resume.fn_body_skel("in_place_writer_off") {
+        Some(body)
+            if Regex::new(r"WriterGate\s*\{\s*resumed\s*:\s*false\s*,\s*\.\.\s*gate\s*,?\s*\}")
+                .expect("pattern")
+                .is_match(&body) => {}
+        _ => violations.push(
+            "resume::in_place_writer_off no longer forces `resumed: false`: it and the seeded writer must be one decision"
+                .into(),
+        ),
+    }
+
+    // The order: fence, then the release's pre-reserve, then the dispatch.
+    let fence = r"\bsave_fence\s*\(";
+    let reserve = r"\breserve_release\s*\(";
+    let join = r"\bjoin_all\s*\(";
+    let fences = count(&rounds, fence);
+    let fences_total = count(&agent.skel, fence);
+    let reserves = count(&rounds, reserve);
+    let reserves_total =
+        count(&agent.skel, reserve).saturating_sub(count(&agent.skel, r"\bfn\s+reserve_release\b"));
+    let joins = count(&rounds, join);
+    if fences != 1 || fences_total != 1 {
+        violations.push(format!(
+            "agent.rs calls `save_fence(` {fences_total} times ({fences} inside run_rounds); the in-place resume writes exactly one fence, in run_rounds"
+        ));
+    }
+    if reserves != 1 || reserves_total != 1 {
+        violations.push(format!(
+            "agent.rs calls `reserve_release(` {reserves_total} times ({reserves} inside run_rounds); the release is pre-reserved exactly once, in run_rounds"
+        ));
+    }
+    if joins != 1 {
+        violations.push(format!(
+            "run_rounds has {joins} `join_all(` calls; the guard reads the one phase-2 dispatch"
+        ));
+    }
+    let at = |pattern: &str| {
+        Regex::new(pattern)
+            .expect("pattern")
+            .find(&rounds)
+            .map(|found| found.start())
+    };
+    if let (Some(fence_at), Some(reserve_at), Some(join_at)) = (at(fence), at(reserve), at(join)) {
+        if fence_at > reserve_at {
+            violations.push(
+                "`reserve_release(` comes before `save_fence(` in run_rounds: a claimant that has not won the fence must not take the release"
+                    .into(),
+            );
+        }
+        if reserve_at > join_at {
+            violations.push(
+                "the phase-2 `join_all(` comes before `reserve_release(` in run_rounds: a call would be dispatched before the release is reserved"
+                    .into(),
+            );
+        }
+    }
+
+    // The switch has one parser.
+    violations.extend(one_resume_parser_violations(executor_sources));
+    violations
+}
+
+/// `resume.rs` holds `restore_in_place`, which is handed the client's whole `AgentResume`.
+/// The executor derives the segment from the step that paused and NEVER reads the client's
+/// `segment_no` (the gateway sends 0 and an old gateway sends 2: both must work).
+///
+/// The reads the file is allowed are an EXACT whitelist, by expression and by count, not by the
+/// name a receiver happens to have: `fold.segment_no` twice (the fold the claim handed back, in
+/// `check_fold`) and `response.segment_no` once (the claim response, in `restore_in_place_with`).
+/// A client's resume renamed to `fold` or `response` is a fourth or third read and fails the
+/// count. Everything else that names `segment_no` is refused: another receiver, a bare
+/// `segment_no` (destructuring, a binding), an `AgentResume { .. }` pattern or literal, and any
+/// field of the client's resume other than the two the claim needs (`claim_token`,
+/// `action_fingerprint`). `resumed_step_id`'s own parameter is the one bare use.
+fn resume_module_segment_violations(executor_resume: &str) -> Vec<String> {
+    let code = Code::new(executor_resume).without_tests();
+    let mut violations = Vec::new();
+
+    // Taking the client's resume apart (or building one) by pattern reads a field with no
+    // `.segment_no` to find.
+    let pattern = Regex::new(r"\bAgentResume\s*\{").expect("pattern");
+    if pattern.is_match(&code.text) {
+        violations.push("resume.rs destructures or builds an AgentResume by pattern: it reads the client-supplied segment_no (or could) without a `.segment_no` to find; take only `resume.claim_token` and `resume.action_fingerprint`".into());
+    }
+
+    // Every field read of an argument named `resume` (the one name the client's resume has).
+    let field = Regex::new(r"\bresume\s*\.\s*([A-Za-z_][A-Za-z0-9_]*)").expect("pattern");
+    for captured in field.captures_iter(&code.text) {
+        if !matches!(&captured[1], "claim_token" | "action_fingerprint") {
+            violations.push(format!(
+                "resume.rs reads `resume.{}`: only `claim_token` and `action_fingerprint` are read from the client's resume; the executor derives everything else from the consume",
+                &captured[1]
+            ));
+        }
+    }
+
+    // Every `segment_no` there is, with the receiver it is read from, if any.
+    let token = Regex::new(r"(?:\b([A-Za-z_][A-Za-z0-9_]*)\s*\.\s*)?\bsegment_no\b")
+        .expect("pattern");
+    let (mut folds, mut responses) = (0, 0);
+    for captured in token.captures_iter(&code.text) {
+        let whole = captured.get(0).expect("the whole match");
+        match captured.get(1).map(|receiver| receiver.as_str()) {
+            Some("fold") => folds += 1,
+            Some("response") => responses += 1,
+            Some(receiver) => violations.push(format!(
+                "resume.rs reads `{receiver}.segment_no`: only the fold's own and the claim response's may be read; the executor derives the segment from the paused step and never reads the client-supplied AgentResume.segment_no"
+            )),
+            None => {
+                // A bare `segment_no`: only `resumed_step_id`'s parameter and its `{segment_no}`.
+                let before = code.text[..whole.start()].trim_end();
+                let after = code.text[whole.end()..].trim_start();
+                let parameter = after.starts_with(": u32") && (before.ends_with('(') || before.ends_with(','));
+                let formatted = before.ends_with('{') && after.starts_with('}');
+                if !(parameter || formatted) {
+                    violations.push("resume.rs names a bare `segment_no` (a destructuring, a binding, a method on a reader): it must not read the client-supplied AgentResume.segment_no; only `resumed_step_id`'s own parameter is allowed".into());
+                }
+            }
+        }
+    }
+    if folds + responses == 0 {
         violations.push("the scan found no fold or response `.segment_no` in resume.rs: it is not reading the file the guard exists for".into());
+    } else if (folds, responses) != (2, 1) {
+        violations.push(format!(
+            "resume.rs reads `fold.segment_no` {folds} times and `response.segment_no` {responses} times; the whitelist is exactly 2 and 1 (check_fold's two reads of the claimed fold, and the claim response in restore_in_place_with): a new read is a read of a client-supplied `.segment_no` until this guard says otherwise"
+        ));
     }
     violations
+}
+
+/// The in-place resume switch is parsed by the strict `switch_from` and by nothing else: the
+/// one function in mp-contracts is a single call to it, with no lenient `*_from` parser beside
+/// it in the body (the continue switch's `1`, `on` and `yes` would otherwise flip the resume).
+fn resume_parser_strictness_violations(loop_fold_source: &str) -> Vec<String> {
+    let code = Code::new(loop_fold_source).without_tests();
+    let Some(body) = code.fn_body("loop_resume_enabled") else {
+        return vec!["mp-contracts has no `fn loop_resume_enabled`".into()];
+    };
+    let calls: Vec<String> = Regex::new(r"\b([a-z_][a-z0-9_]*_from)\s*\(")
+        .expect("pattern")
+        .captures_iter(&body)
+        .map(|captured| captured[1].to_owned())
+        .collect();
+    if calls == ["switch_from"] {
+        Vec::new()
+    } else {
+        vec![format!(
+            "loop_resume_enabled must parse with the strict `switch_from` alone (`true` and nothing else), not {calls:?}"
+        )]
+    }
 }
 
 /// One durable store's real gate in production, and the tests that drive it.
@@ -1340,14 +1587,11 @@ fn the_resume_switch_has_one_parser() {
     }
     assert_green(&one_resume_parser_violations(&every));
     // The shared parser exists where the const says it does, and is the strict one.
-    let loop_fold = Code::new(&read("../../crates/mp-contracts/src/loop_fold.rs")).text;
-    assert!(loop_fold.contains("pub fn loop_resume_enabled()"));
-    assert!(
-        Regex::new(r"pub fn loop_resume_enabled\(\)[^}]*switch_from\(")
-            .expect("pattern")
-            .is_match(&loop_fold),
-        "the resume switch is parsed by the strict `switch_from`, not the lenient continue parser"
-    );
+    let loop_fold = read("../../crates/mp-contracts/src/loop_fold.rs");
+    assert!(Code::new(&loop_fold)
+        .text
+        .contains("pub fn loop_resume_enabled()"));
+    assert_green(&resume_parser_strictness_violations(&loop_fold));
 }
 
 #[test]
@@ -1360,6 +1604,22 @@ fn the_executor_consumes_through_one_literal_and_never_omits_the_call() {
 #[test]
 fn the_resume_module_never_reads_the_clients_segment_no() {
     assert_green(&resume_module_segment_violations(&read(EXECUTOR_RESUME)));
+}
+
+/// The in-place resume has one seeded writer, and fences, then pre-reserves the release, then
+/// dispatches, in that order, inside `run_rounds`.
+#[test]
+fn the_in_place_resume_is_seeded_fenced_and_reserved_in_order() {
+    let mut every = Vec::new();
+    for tree in SOURCE_TREES {
+        every.extend(rust_files(tree));
+    }
+    assert_green(&in_place_writer_violations(
+        &every,
+        &read(EXECUTOR_LOOP),
+        &read(EXECUTOR_FOLD),
+        &read(EXECUTOR_RESUME),
+    ));
 }
 
 #[test]
@@ -1730,10 +1990,10 @@ fn every_guard_goes_red_when_the_code_it_guards_regresses() {
     assert_green(&fold_gate_violations(&agent, &fold));
     must_flag(
         fold_gate_violations(
-            &mutate(&agent, "waived: ctx.route.is_waived(),", "waived: false,"),
+            &mutate(&agent, "waived: route.is_waived(),", "waived: false,"),
             &fold,
         ),
-        "without `waived: ctx.route.is_waived()`",
+        "without `waived: route.is_waived()`",
     );
     must_flag(
         fold_gate_violations(
@@ -1891,12 +2151,36 @@ fn every_guard_goes_red_when_the_code_it_guards_regresses() {
             .to_owned(),
     ));
     must_flag(consume_request_violations(&second), "2 ConsumeApprovalRequest literals");
-    let mut omitting = executor_sources.clone();
-    omitting.push((
-        "src/rogue.rs".to_owned(),
-        "fn rogue() { let _ = X { omit_call:  true }; }".to_owned(),
-    ));
-    must_flag(consume_request_violations(&omitting), "sets `omit_call: true`");
+    // ANY value of `omit_call` but the literal `false` is flagged, computed ones included: a
+    // flag, a negation, the field shorthand, an assignment, an expression that merely starts
+    // with `false`, `true` with any spacing.
+    for rogue in [
+        "fn rogue() { let _ = X { omit_call:  true }; }",
+        "fn rogue() { let _ = X { omit_call:true }; }",
+        "fn rogue(flag: bool) { let _ = X { omit_call: flag }; }",
+        "fn rogue(x: bool) { let _ = X { omit_call: !x }; }",
+        "fn rogue(omit_call: bool) { let _ = X { omit_call, ..Default::default() }; }",
+        "fn rogue(x: &mut X, flag: bool) { x.omit_call = flag; }",
+        "fn rogue(flag: bool) { let _ = X { omit_call: false || flag }; }",
+        "fn rogue() { let _ = X { omit_call: ( true ) }; }",
+    ] {
+        let mut omitting = executor_sources.clone();
+        omitting.push(("src/rogue.rs".to_owned(), rogue.to_owned()));
+        must_flag(
+            consume_request_violations(&omitting),
+            "something other than the literal `false`",
+        );
+    }
+    // The literal `false`, however it is spaced or ended, is the one thing that is fine.
+    for fine in [
+        "fn ok() { let _ = X { omit_call: false, y: 1 }; }",
+        "fn ok() { let _ = X { omit_call : false }; }",
+        "fn ok() { let _ = X { y: 1, omit_call:false }; }",
+    ] {
+        let mut allowed = executor_sources.clone();
+        allowed.push(("src/fine.rs".to_owned(), fine.to_owned()));
+        assert_green(&consume_request_violations(&allowed));
+    }
     // None at all is as wrong as two: the guard cannot go quiet by reading nothing.
     executor_sources.clear();
     must_flag(consume_request_violations(&executor_sources), "0 ConsumeApprovalRequest literals");
@@ -1933,4 +2217,255 @@ fn every_guard_goes_red_when_the_code_it_guards_regresses() {
         resume_module_segment_violations("fn only() {}"),
         "not reading the file",
     );
+    // The reads that are allowed are exactly the three the file makes, by count and not by the
+    // name of a receiver: the client's resume under the name `fold` or `response` is one more.
+    for (rogue, flagged) in [
+        (
+            "fn rogue(fold: &pb::AgentResume) -> u32 { fold.segment_no }",
+            "reads `fold.segment_no` 3 times",
+        ),
+        (
+            "fn rogue(response: &pb::AgentResume) -> u32 { response.segment_no }",
+            "`response.segment_no` 2 times",
+        ),
+        (
+            "fn rogue(claimed: &ClaimedFold) -> u32 { claimed.fold.segment_no }",
+            "reads `fold.segment_no` 3 times",
+        ),
+        // Destructuring and every other way to get at the field without `.segment_no`.
+        (
+            "fn rogue(resume: &pb::AgentResume) -> u32 { let pb::AgentResume { segment_no, .. } = resume; *segment_no }",
+            "destructures or builds an AgentResume",
+        ),
+        (
+            "fn rogue(resume: &pb::AgentResume) -> u32 { let pb::AgentResume { segment_no, .. } = resume; *segment_no }",
+            "bare `segment_no`",
+        ),
+        (
+            "fn rogue(resume: pb::AgentResume) -> u32 { let n = resume.segment_no; n }",
+            "reads `resume.segment_no`",
+        ),
+        (
+            "fn rogue(r: &pb::AgentResume) -> u32 { r.clone().segment_no }",
+            "bare `segment_no`",
+        ),
+        // Any other field of the client's resume than the two the claim needs.
+        (
+            "fn rogue(resume: &pb::AgentResume) -> String { resume.step_id.clone() }",
+            "reads `resume.step_id`",
+        ),
+        (
+            "fn rogue(resume: &pb::AgentResume) -> String { resume.approval_id.clone() }",
+            "reads `resume.approval_id`",
+        ),
+    ] {
+        must_flag(
+            resume_module_segment_violations(&format!("{resume_rs}\n{rogue}")),
+            flagged,
+        );
+    }
+    // A comment, a test module and the two fields the claim needs are not reads.
+    assert_green(&resume_module_segment_violations(&format!(
+        "{resume_rs}\n// resume.segment_no and AgentResume {{ segment_no }}\n#[cfg(test)]\nmod t {{ fn f(resume: &pb::AgentResume) -> u32 {{ resume.segment_no }} }}\nfn fine(resume: &pb::AgentResume) -> (String, String) {{ (resume.claim_token.clone(), resume.action_fingerprint.clone()) }}"
+    )));
+
+    // The strict switch parser: the one function must be a single `switch_from` call. Any
+    // lenient parser in its place, or beside it, is flagged (the continue switch also accepts
+    // `1`, `on` and `yes`).
+    let loop_fold = read("../../crates/mp-contracts/src/loop_fold.rs");
+    assert_green(&resume_parser_strictness_violations(&loop_fold));
+    must_flag(
+        resume_parser_strictness_violations(&mutate_in(
+            &loop_fold,
+            "pub fn loop_resume_enabled()",
+            "switch_from(std::env::var(LOOP_RESUME_ENV)",
+            "continue_after_approval_from(std::env::var(LOOP_RESUME_ENV)",
+        )),
+        "strict `switch_from` alone",
+    );
+    must_flag(
+        resume_parser_strictness_violations(&mutate_in(
+            &loop_fold,
+            "pub fn loop_resume_enabled()",
+            "switch_from(std::env::var(LOOP_RESUME_ENV)",
+            "let _ = switch_from(None); continue_after_approval_from(std::env::var(LOOP_RESUME_ENV)",
+        )),
+        "strict `switch_from` alone",
+    );
+    must_flag(
+        resume_parser_strictness_violations("pub fn something_else() -> bool { true }"),
+        "no `fn loop_resume_enabled`",
+    );
+
+    // The in-place resume's writer and its order. The real source is green; each regression a
+    // careless edit would make is flagged.
+    let mut every = Vec::new();
+    for tree in SOURCE_TREES {
+        every.extend(rust_files(tree));
+    }
+    let in_place = |sources: &[(String, String)], agent: &str, fold: &str, resume: &str| {
+        in_place_writer_violations(sources, agent, fold, resume)
+    };
+    assert_green(&in_place(&every, &agent, &fold, &resume_rs));
+    // A second seeded writer, or none.
+    must_flag(
+        in_place(
+            &every,
+            &format!(
+                "{agent}\nfn sneaky() {{ let _ = runtime_loop::fold::FoldWriter::seeded(c, b, r, g, 0, 1); }}"
+            ),
+            &fold,
+            &resume_rs,
+        ),
+        "calls `FoldWriter::seeded(` 2 times",
+    );
+    must_flag(
+        in_place(
+            &every,
+            &mutate(
+                &agent,
+                "runtime_loop::fold::FoldWriter::seeded(",
+                "runtime_loop::fold::FoldWriter::replayed(",
+            ),
+            &fold,
+            &resume_rs,
+        ),
+        "calls `FoldWriter::seeded(` 0 times",
+    );
+    // The gate stops saying an in-place resume is not a stage-1 segment, or run_rounds stops
+    // handing it `in_place`, or the pre-claim decision stops using the same gate.
+    must_flag(
+        in_place(
+            &every,
+            &mutate(&agent, "resumed: holds_release && !in_place,", "resumed: holds_release,"),
+            &fold,
+            &resume_rs,
+        ),
+        "does not read `!in_place`",
+    );
+    must_flag(
+        in_place(
+            &every,
+            &mutate_in(
+                &agent,
+                "let gate = writer_gate(",
+                "        in_place,\n    );",
+                "        false,\n    );",
+            ),
+            &fold,
+            &resume_rs,
+        ),
+        "`in_place` as the last argument",
+    );
+    must_flag(
+        in_place(
+            &every,
+            &mutate(&agent, "ledger_enabled(), 0, true, true);", "ledger_enabled(), 0, true, false);"),
+            &fold,
+            &resume_rs,
+        ),
+        "pre-claim writer decision",
+    );
+    // The two deciders stop forcing the stage-1 flag off.
+    must_flag(
+        in_place(
+            &every,
+            &agent,
+            &mutate(&fold, "resumed: false,\n            ..gate", "..gate"),
+            &resume_rs,
+        ),
+        "no longer forces `resumed: false`",
+    );
+    must_flag(
+        in_place(
+            &every,
+            &agent,
+            &fold,
+            &mutate_in(
+                &resume_rs,
+                "fn in_place_writer_off(",
+                "resumed: false",
+                "resumed: gate.resumed",
+            ),
+        ),
+        "in_place_writer_off no longer forces",
+    );
+    // A second fence or release pre-reserve, outside run_rounds.
+    must_flag(
+        in_place(
+            &every,
+            &format!("{agent}\nfn sneaky() {{ writer.save_fence(x); }}"),
+            &fold,
+            &resume_rs,
+        ),
+        "calls `save_fence(` 2 times",
+    );
+    must_flag(
+        in_place(
+            &every,
+            &format!("{agent}\nfn sneaky() {{ reserve_release(a, b); }}"),
+            &fold,
+            &resume_rs,
+        ),
+        "calls `reserve_release(` 2 times",
+    );
+    // The order. The release reserved before the fence: another claimant that lost the seq
+    // would already hold the release.
+    must_flag(
+        in_place(
+            &every,
+            &mutate(
+                &mutate(
+                    &agent,
+                    "folds.save_fence(open_round_fold(authority))",
+                    "folds.save_fence_old(open_round_fold(authority))",
+                ),
+                "let released_step_replayed = std::sync::atomic::AtomicBool::new(false);",
+                "let _ = folds.save_fence(open_round_fold(authority));\n        let released_step_replayed = std::sync::atomic::AtomicBool::new(false);",
+            ),
+            &fold,
+            &resume_rs,
+        ),
+        "comes before `save_fence(`",
+    );
+    // A dispatch before the release is reserved.
+    must_flag(
+        in_place(
+            &every,
+            &mutate(
+                &mutate(
+                    &agent,
+                    "match reserve_release(ctx, release).await {",
+                    "match reserve_release_old(ctx, release).await {",
+                ),
+                "for dispatch in dispatches.iter().flatten() {",
+                "let _ = reserve_release(ctx, release).await;\n            for dispatch in dispatches.iter().flatten() {",
+            ),
+            &fold,
+            &resume_rs,
+        ),
+        "`join_all(` comes before `reserve_release(`",
+    );
+    // The switch's env var read by a second parser.
+    let mut rogue = every.clone();
+    rogue.push((
+        "src/rogue.rs".to_owned(),
+        format!(
+            "fn on() -> bool {{ std::env::var(\"{}\").is_ok() }}",
+            mp_contracts::loop_fold::LOOP_RESUME_ENV
+        ),
+    ));
+    must_flag(
+        in_place(&rogue, &agent, &fold, &resume_rs),
+        "names EXECUTION_LOOP_RESUME_ENABLED itself",
+    );
+    // A comment or a test module that names the calls is not a call.
+    assert_green(&in_place(
+        &every,
+        &format!(
+            "{agent}\n// FoldWriter::seeded( save_fence( reserve_release(\n#[cfg(test)]\nmod t {{ fn f() {{ FoldWriter::seeded(a); w.save_fence(x); reserve_release(a, b); }} }}"
+        ),
+        &fold,
+        &resume_rs,
+    ));
 }
