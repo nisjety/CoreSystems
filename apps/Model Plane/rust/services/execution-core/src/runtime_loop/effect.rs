@@ -105,6 +105,13 @@ pub(crate) fn final_outcome_for(status: &str) -> &'static str {
 }
 
 /// What the ledger records about one call: ids and a class, never arguments.
+///
+/// session-core binds a reservation to ALL of these (run, action, tool, data category,
+/// zdr, class and digest): a second reserve of the same action that differs in any of them
+/// is refused as an identity conflict, not answered as a replay. So an entry is built one
+/// way, by [`LedgerEntry::new`], whoever reserves (a dispatch in phase 2, or the release's
+/// pre-reserve), and two entries for one call are equal.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct LedgerEntry<'a> {
     pub run_id: &'a str,
     pub action_id: String,
@@ -113,6 +120,57 @@ pub(crate) struct LedgerEntry<'a> {
     pub zdr: bool,
     pub class: EffectClass,
     pub args_digest: Option<String>,
+}
+
+impl<'a> LedgerEntry<'a> {
+    /// The one builder. `step_id` becomes the ledger's action id ([`action_id_for`]).
+    // Called only by `entry_for_call` and the release's entry, both dead until the in-place
+    // resume lands (WS03 S7b step 9 removes this allow).
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn new(
+        run_id: &'a str,
+        step_id: &str,
+        tool: &'a str,
+        data_category: &'a str,
+        zdr: bool,
+        class: EffectClass,
+        args_digest: Option<String>,
+    ) -> Self {
+        Self {
+            run_id,
+            action_id: action_id_for(step_id),
+            tool,
+            data_category,
+            zdr,
+            class,
+            args_digest,
+        }
+    }
+}
+
+/// The entry for a call about to be dispatched: its class and digest come from the tool
+/// and its actual arguments. The loop's phase 2 builds the entry of every effectful call
+/// this way.
+// WS03 S7b step 7/9 switches phase 2 to this builder; until then the loop spells the same
+// fields inline and only the tests call it (step 9 removes this allow).
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn entry_for_call<'a>(
+    run_id: &'a str,
+    step_id: &str,
+    tool: &'a str,
+    tool_input: &str,
+    data_category: &'a str,
+    zdr: bool,
+) -> LedgerEntry<'a> {
+    LedgerEntry::new(
+        run_id,
+        step_id,
+        tool,
+        data_category,
+        zdr,
+        effect_class_of(tool, tool_input),
+        args_digest_of(tool_input),
+    )
 }
 
 /// What a reservation did. The ledger answers `created: false` for an exact
@@ -210,6 +268,71 @@ pub(crate) struct LedgerRow {
     pub args_digest: Option<String>,
 }
 
+/// Why a ledger read failed, by what the loop that resumes a run must do about it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LedgerReadFailure {
+    /// `PermissionDenied` or `Unauthenticated`: the caller may not read this run (a missing
+    /// scope, not the owner, a revoked Space membership). Asking again, or running the
+    /// call another way, is not allowed: the resume holds.
+    Denied,
+    /// The ZDR catalogue refused: the run keeps no durable state. The resume holds.
+    NotPersistent,
+    /// Anything else: the read could not be made or could not be trusted. The resume may
+    /// fall back to the stage that needs no read.
+    Other,
+}
+
+/// A failed ledger read: what kind of failure, and the reason for the log.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct LedgerReadError {
+    pub kind: LedgerReadFailure,
+    /// The server's reason, or the plumbing's. Content-free by construction (a closed
+    /// token or a fixed sentence); it is only ever logged.
+    pub reason: String,
+}
+
+impl LedgerReadError {
+    /// Classify a refused `ListToolActions`. The ZDR catalogue trailer is read first,
+    /// whatever the code, exactly as the fold store's statuses are.
+    fn from_status(status: &tonic::Status) -> Self {
+        use tonic::Code;
+        let kind = if mp_contracts::zdr_refusal::Refusal::from_status(status).is_some() {
+            LedgerReadFailure::NotPersistent
+        } else if matches!(status.code(), Code::PermissionDenied | Code::Unauthenticated) {
+            LedgerReadFailure::Denied
+        } else {
+            LedgerReadFailure::Other
+        };
+        Self {
+            kind,
+            reason: status.message().to_owned(),
+        }
+    }
+}
+
+impl From<String> for LedgerReadError {
+    /// A local failure (no credential, an answer that is not the answer to the question).
+    fn from(reason: String) -> Self {
+        Self {
+            kind: LedgerReadFailure::Other,
+            reason,
+        }
+    }
+}
+
+impl std::fmt::Display for LedgerReadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.reason)
+    }
+}
+
+/// Compares the reason, so a test that asked "what was the reason" keeps asking it.
+impl PartialEq<&str> for LedgerReadError {
+    fn eq(&self, other: &&str) -> bool {
+        self.reason == *other
+    }
+}
+
 /// Read one wire row. A value outside the shared vocabulary is an error: a status,
 /// class or digest the loop cannot read must not be guessed at, because a guess
 /// could take a call that may have run for one that did not.
@@ -280,7 +403,7 @@ pub(crate) async fn list_actions(
     bearer: Option<&str>,
     run_id: &str,
     action_ids: &[String],
-) -> Result<std::collections::BTreeMap<String, LedgerRow>, String> {
+) -> Result<std::collections::BTreeMap<String, LedgerRow>, LedgerReadError> {
     list_actions_with(bearer, run_id, action_ids, |request| {
         let mut client = SessionCoreClient::new(channel.clone());
         async move { client.list_tool_actions(request).await }
@@ -296,12 +419,12 @@ pub(crate) async fn list_actions(
 /// two chunks cannot answer the same id). The read stops at the first refused or
 /// unreadable chunk: a partial map is never returned.
 #[allow(dead_code)] // S7b, through `list_actions`
-async fn list_actions_with<F, Fut>(
+pub(crate) async fn list_actions_with<F, Fut>(
     bearer: Option<&str>,
     run_id: &str,
     action_ids: &[String],
     mut call: F,
-) -> Result<std::collections::BTreeMap<String, LedgerRow>, String>
+) -> Result<std::collections::BTreeMap<String, LedgerRow>, LedgerReadError>
 where
     F: FnMut(tonic::Request<pb::ListToolActionsRequest>) -> Fut,
     Fut: std::future::Future<Output = Result<tonic::Response<pb::ListToolActionsResponse>, tonic::Status>>,
@@ -327,7 +450,7 @@ where
         )?;
         let response = call(request)
             .await
-            .map_err(|status| status.message().to_owned())?
+            .map_err(|status| LedgerReadError::from_status(&status))?
             .into_inner();
         rows.extend(rows_from_states(chunk, response.actions)?);
     }
@@ -541,7 +664,7 @@ mod tests {
         ids: &[String],
         answer: impl Fn(&[String]) -> Result<Vec<pb::ToolActionState>, tonic::Status>,
     ) -> (
-        Result<std::collections::BTreeMap<String, LedgerRow>, String>,
+        Result<std::collections::BTreeMap<String, LedgerRow>, LedgerReadError>,
         Vec<(String, String, Vec<String>)>,
     ) {
         let seen: Seen = Seen::default();
@@ -706,6 +829,115 @@ mod tests {
         let (no_bearer, seen) = list_through(None, &ids, |_| panic!("no credential")).await;
         assert_eq!(no_bearer.expect_err("no credential"), "no verified session credential");
         assert!(seen.is_empty());
+    }
+
+    /// A refusal that will not change (the caller is not allowed, or the run keeps no
+    /// durable state) must not be read as "the ledger is unavailable": the loop that resumes a
+    /// run holds on the first and may fall back on the second.
+    #[tokio::test]
+    async fn a_denied_or_zdr_ledger_read_is_told_apart_from_an_unavailable_one() {
+        let ids = many_ids(3);
+        for code in [tonic::Code::PermissionDenied, tonic::Code::Unauthenticated] {
+            let (result, seen) = list_through(Some("tok-1"), &ids, |_| {
+                Err(tonic::Status::new(code, "Space membership required for this run"))
+            })
+            .await;
+            let error = result.expect_err("a denial");
+            assert_eq!(error.kind, LedgerReadFailure::Denied, "{code:?}");
+            assert_eq!(error, "Space membership required for this run", "{code:?}");
+            assert_eq!(seen.len(), 1);
+        }
+        // The ZDR catalogue refusal carries its kind on a trailer, whatever the code, and the
+        // trailer wins over the code (a `NotFound` or `InvalidArgument` is not "other").
+        for code in [
+            tonic::Code::FailedPrecondition,
+            tonic::Code::NotFound,
+            tonic::Code::InvalidArgument,
+            tonic::Code::PermissionDenied,
+        ] {
+            let refusal = mp_contracts::zdr_refusal::Refusal::DURABLE_MUTATION_FORBIDDEN.grpc_status(code);
+            let (result, _) = list_through(Some("tok-1"), &ids, |_| Err(refusal.clone())).await;
+            assert_eq!(
+                result.expect_err("a catalogue refusal").kind,
+                LedgerReadFailure::NotPersistent,
+                "{code:?}"
+            );
+        }
+        // Anything else is an unavailable read, with the server's reason kept for the log.
+        for code in [
+            tonic::Code::Unavailable,
+            tonic::Code::DeadlineExceeded,
+            tonic::Code::NotFound,
+            tonic::Code::Unimplemented,
+            tonic::Code::Internal,
+            tonic::Code::FailedPrecondition,
+        ] {
+            let (result, _) = list_through(Some("tok-1"), &ids, |_| {
+                Err(tonic::Status::new(code, "loop_checkpoint_disabled"))
+            })
+            .await;
+            let error = result.expect_err("an unavailable read");
+            assert_eq!(error.kind, LedgerReadFailure::Other, "{code:?}");
+            assert_eq!(error, "loop_checkpoint_disabled");
+        }
+        // The local failures (no credential, a chunk that is not the answer) are `Other`.
+        let (no_bearer, _) = list_through(None, &ids, |_| panic!("no credential")).await;
+        assert_eq!(no_bearer.expect_err("no credential").kind, LedgerReadFailure::Other);
+
+        // A refusal in a later chunk ends the read: the rows of the first chunk are never
+        // returned as if they were the whole answer.
+        let digest = digest_for_tests();
+        let many = many_ids(70);
+        let (partial, seen) = list_through(Some("tok-1"), &many, |asked| {
+            if asked.first().map(String::as_str) == Some("act-000") {
+                Ok(vec![state("act-000", "completed", "write", &digest)])
+            } else {
+                Err(tonic::Status::permission_denied("not yours"))
+            }
+        })
+        .await;
+        assert_eq!(partial.expect_err("the second chunk is denied").kind, LedgerReadFailure::Denied);
+        assert_eq!(seen.len(), 2);
+    }
+
+    /// The reservation and the ledger read build their entry the same way, from the same
+    /// inputs: session-core binds a reservation to run, action, tool, data category, zdr,
+    /// class and digest, so two spellings of one call would be an identity conflict.
+    #[test]
+    fn a_ledger_entry_is_built_one_way_whoever_asks() {
+        let input = r#"{"b":1,"a":2}"#;
+        let entry = entry_for_call("run-1", "tool_1_c1", "delete_records", input, "public_non_personal", false);
+        assert_eq!(entry.run_id, "run-1");
+        assert_eq!(entry.action_id, action_id_for("tool_1_c1"));
+        assert_eq!(entry.tool, "delete_records");
+        assert_eq!(entry.data_category, "public_non_personal");
+        assert!(!entry.zdr);
+        assert_eq!(entry.class, effect_class_of("delete_records", input));
+        assert_eq!(entry.args_digest, args_digest_of(input));
+        assert_eq!(
+            entry,
+            LedgerEntry::new(
+                "run-1",
+                "tool_1_c1",
+                "delete_records",
+                "public_non_personal",
+                false,
+                entry.class,
+                entry.args_digest.clone(),
+            )
+        );
+        // Key order does not change the identity; a changed class or digest does.
+        let reordered = entry_for_call(
+            "run-1",
+            "tool_1_c1",
+            "delete_records",
+            r#"{"a":2,"b":1}"#,
+            "public_non_personal",
+            false,
+        );
+        assert_eq!(entry, reordered);
+        let other = entry_for_call("run-1", "tool_1_c1", "delete_records", r#"{"a":3}"#, "public_non_personal", false);
+        assert_ne!(entry, other);
     }
 
     #[test]

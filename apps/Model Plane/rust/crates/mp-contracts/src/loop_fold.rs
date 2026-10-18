@@ -335,6 +335,27 @@ pub fn switch_from(value: Option<&str>) -> bool {
     value.is_some_and(|v| v.trim().eq_ignore_ascii_case("true"))
 }
 
+/// The environment switch for the in-place resume of a paused Do loop (build plan WS03
+/// S7). Default off; parsed by [`switch_from`] (`true` and nothing else).
+///
+/// Two services read it, each through [`loop_resume_enabled`] and never by this name:
+/// execution-core restores the paused loop from its claimed fold, and model-gateway (S7c)
+/// pre-consumes the approval and asks for the `loop` stage. With it off, or with any
+/// prerequisite off, a `loop` request runs as `segment` (a downgrade, never a refusal).
+///
+/// It is one coupled flip with `EXECUTION_EFFECT_LEDGER_ENABLED`,
+/// `EXECUTION_LOOP_CHECKPOINT_ENABLED`, `SESSION_CORE_LOOP_CHECKPOINT_ENABLED` and
+/// `AGENT_CONTINUE_AFTER_APPROVAL_ENABLED`: flip them together, roll back in reverse
+/// (model-gateway off first). A gateway that pre-consumes while the executor's ledger is
+/// off spends the user's click and has the executor refuse the replay.
+pub const LOOP_RESUME_ENV: &str = "EXECUTION_LOOP_RESUME_ENABLED";
+
+/// Whether the in-place resume switch is on in this process.
+#[must_use]
+pub fn loop_resume_enabled() -> bool {
+    switch_from(std::env::var(LOOP_RESUME_ENV).ok().as_deref())
+}
+
 /// Domain tag of [`prompt_digest`].
 const PROMPT_DIGEST_DOMAIN: &str = "mp.prompt.v1";
 
@@ -1077,5 +1098,37 @@ mod tests {
         // The older, looser parser is unchanged and is a different function.
         assert!(continue_after_approval_from(Some("1")));
         assert!(!switch_from(Some("1")));
+    }
+
+    #[test]
+    fn the_loop_resume_switch_is_off_unless_explicitly_true() {
+        // The env var name is a contract: compose, the executor and the gateway all name it
+        // through this const, never as a literal.
+        assert_eq!(LOOP_RESUME_ENV, "EXECUTION_LOOP_RESUME_ENABLED");
+        // The parser is the strict one: `1`, `on`, `yes` and a typo never turn the in-place
+        // resume on, and neither does the lenient continue parser's vocabulary.
+        for not_on in [
+            None,
+            Some(""),
+            Some(" "),
+            Some("1"),
+            Some("on"),
+            Some("yes"),
+            Some("ON"),
+            Some("maybe"),
+            Some("false"),
+            Some("truee"),
+        ] {
+            assert!(!switch_from(not_on), "{not_on:?} must stay off");
+        }
+        for on in [Some("true"), Some(" TRUE "), Some("True")] {
+            assert!(switch_from(on), "{on:?}");
+        }
+        // The reader of the process environment is that parser applied to the one variable.
+        // A test process does not set the variable, so the default is off.
+        assert_eq!(
+            loop_resume_enabled(),
+            switch_from(std::env::var(LOOP_RESUME_ENV).ok().as_deref())
+        );
     }
 }

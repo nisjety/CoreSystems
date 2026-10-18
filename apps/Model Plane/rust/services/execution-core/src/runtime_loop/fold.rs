@@ -802,6 +802,15 @@ pub(crate) enum PreEffect {
     Hold,
 }
 
+/// One fence save, as the RPC sees it ([`FoldWriter::save_fence`]).
+struct FenceSave {
+    expected_seq: u64,
+    kind: SaveKind,
+    bytes: Vec<u8>,
+    authority_digest: String,
+    pause_ref: String,
+}
+
 /// The writer of one run's fold. A plain `&mut` local of `run_rounds`: saves happen
 /// strictly in sequence (between dispatch phases and at round end), so `expected_seq`
 /// needs no lock.
@@ -1088,6 +1097,96 @@ impl<'a> FoldWriter<'a> {
                 | SaveError::Unavailable { .. },
             ) => PreEffect::Hold,
         }
+    }
+
+    /// The fence of an in-place resume: ONE `pre_effect` save at the claimed seq, before any
+    /// call of the resumed round is reserved or dispatched.
+    ///
+    /// Two claimants can hold the same claimed seq (a claim whose lease lapsed, or a replay of
+    /// the same request), and the claim does not bump the seq. The seq compare-and-set is
+    /// therefore the fence: of two saves at one seq exactly one wins, and the loser gets
+    /// [`SaveError::Stale`] and must dispatch nothing. So this save is deliberately not a
+    /// round save:
+    ///
+    /// * it makes exactly one RPC, with no probe: the retry a stale answer gets after an
+    ///   ambiguous failure would overwrite the claimant that won;
+    /// * a content refusal is an error, never a tombstone and never a degrade: without a
+    ///   durable fence nothing stops a second claimant, so the resume dispatches nothing;
+    /// * a writer that is not active (off, or failed) makes no call and fails: a resume whose
+    ///   writer is `Off(NoBearer)` or `Failed` has no fence to write.
+    ///
+    /// The seq moves to the saved one on success. Any failure moves the writer as any save's
+    /// does (a stale or closed answer stops it for good).
+    ///
+    /// # Errors
+    ///
+    /// The [`SaveError`] of the failed save, or `Unavailable { ambiguous: false }` (no RPC
+    /// was made) when the writer is not active.
+    #[cfg_attr(not(test), allow(dead_code))] // S7b step 9 (run_rounds fence)
+    pub(crate) async fn save_fence(&mut self, fold: LoopFoldV1) -> Result<u64, SaveError> {
+        let (channel, run_id) = (self.channel, self.run_id);
+        let Some(bearer) = self.bearer else {
+            return Err(SaveError::Unavailable { ambiguous: false });
+        };
+        self.fence_with(fold, |save| async move {
+            save_rpc(
+                channel,
+                bearer,
+                run_id,
+                save.expected_seq,
+                save.kind,
+                &save.bytes,
+                &save.authority_digest,
+                &save.pause_ref,
+                GATED_SAVE_TIMEOUT,
+            )
+            .await
+        })
+        .await
+    }
+
+    /// [`FoldWriter::save_fence`] with the RPC passed in, so the one-call rule and the
+    /// failure handling are testable without a gRPC server.
+    async fn fence_with<F, Fut>(&mut self, fold: LoopFoldV1, rpc: F) -> Result<u64, SaveError>
+    where
+        F: FnOnce(FenceSave) -> Fut,
+        Fut: std::future::Future<Output = Result<u64, SaveError>>,
+    {
+        if !self.is_active() {
+            return Err(SaveError::Unavailable { ambiguous: false });
+        }
+        let authority_digest = fold.authority.digest();
+        let bytes = match fit(fold) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                info!(
+                    target: "loop_fold",
+                    run_id = %self.run_id,
+                    kind = SaveKind::PreEffect.as_str(),
+                    outcome = error.as_str(),
+                    reason = error.cause(),
+                    "loop fold not saved"
+                );
+                record_metrics(SaveKind::PreEffect, error.as_str(), 0, Duration::ZERO);
+                return Err(error);
+            }
+        };
+        let result = rpc(FenceSave {
+            expected_seq: self.tracker.expected(),
+            kind: SaveKind::PreEffect,
+            bytes,
+            authority_digest,
+            pause_ref: String::new(),
+        })
+        .await;
+        match result {
+            Ok(seq) => self.tracker.on_saved(seq),
+            Err(error) => {
+                self.tracker.on_failed(&error);
+                self.apply(error);
+            }
+        }
+        result
     }
 
     /// The pause fold, ready to be saved just before the approval is created. `None`
@@ -2376,6 +2475,142 @@ mod tests {
             .save_round(fold_with(vec![chat("system", "p"), chat("user", "g")]))
             .await;
         assert!(probe.connections() >= 1, "an open gate makes the RPC");
+    }
+
+    // ---- the fence of an in-place resume (WS03 S7b) ----
+
+    /// What the injected fence RPC saw, in order.
+    type FenceCalls = std::sync::Arc<std::sync::Mutex<Vec<(u64, SaveKind, String, usize)>>>;
+
+    /// Run `fence_with` against an RPC that answers each call from `answers` in order, and
+    /// report what it was asked.
+    async fn fence_through(
+        writer: &mut FoldWriter<'_>,
+        fold: LoopFoldV1,
+        answers: Vec<Result<u64, SaveError>>,
+    ) -> (Result<u64, SaveError>, Vec<(u64, SaveKind, String, usize)>) {
+        let calls: FenceCalls = FenceCalls::default();
+        let recorder = std::sync::Arc::clone(&calls);
+        let mut answers = answers.into_iter();
+        let result = writer
+            .fence_with(fold, |save| {
+                recorder.lock().unwrap().push((
+                    save.expected_seq,
+                    save.kind,
+                    save.pause_ref.clone(),
+                    save.bytes.len(),
+                ));
+                let answer = answers.next().expect("the fence made a call nobody answered");
+                async move { answer }
+            })
+            .await;
+        let calls = calls.lock().unwrap().clone();
+        (result, calls)
+    }
+
+    fn fenceable_fold() -> LoopFoldV1 {
+        fold_with(vec![chat("system", "p"), chat("user", "g")])
+    }
+
+    /// The fence is the whole defence against a second claimant: ONE save of kind
+    /// `pre_effect` at the seq the claim returned, the seq compare-and-set deciding who
+    /// proceeds. A stale answer means another claimant won, and it is final: the probe a
+    /// round save makes after an ambiguous failure would overwrite that claimant.
+    #[tokio::test]
+    async fn the_fence_is_one_save_at_the_claimed_seq_with_no_probe() {
+        let channel = tonic::transport::Endpoint::from_static("http://127.0.0.1:1").connect_lazy();
+        let mut writer = FoldWriter::seeded(&channel, Some("b"), "run-1", all_good(), 12, 3);
+
+        let (result, calls) = fence_through(&mut writer, fenceable_fold(), vec![Ok(13)]).await;
+        assert_eq!(result, Ok(13));
+        assert_eq!(calls.len(), 1, "exactly one RPC");
+        let (expected, kind, pause_ref, bytes) = &calls[0];
+        assert_eq!(*expected, 12, "at the claimed seq");
+        assert_eq!(*kind, SaveKind::PreEffect);
+        assert_eq!(pause_ref, "", "a fence is not a pause");
+        assert!(*bytes > 0);
+        assert_eq!(writer.expected_seq(), 13, "the writer chains from the fence");
+        assert!(writer.is_active());
+
+        // The probe case: an ambiguous failure makes a normal save retry a stale answer once
+        // with `expected + 1`. The fence never does: one call, and the stale answer is final.
+        writer.tracker.on_failed(&SaveError::Unavailable { ambiguous: true });
+        let (stale, calls) = fence_through(&mut writer, fenceable_fold(), vec![Err(SaveError::Stale)]).await;
+        assert_eq!(stale, Err(SaveError::Stale));
+        assert_eq!(
+            calls.iter().map(|call| call.0).collect::<Vec<_>>(),
+            vec![13],
+            "one call, at the expected seq, and no retry at 14"
+        );
+        assert!(writer.is_failed(), "another claimant won: this writer stops for good");
+    }
+
+    #[tokio::test]
+    async fn a_fence_on_a_writer_that_is_off_or_failed_makes_no_call_and_fails() {
+        let probe = Probe::bind();
+        let channel = probe.channel();
+        // Off: the gate says no, or there is no credential.
+        for (writer_gate, bearer) in [
+            (WriterGate { switch: false, ..all_good() }, Some("b")),
+            (WriterGate { ledger: false, ..all_good() }, Some("b")),
+            (WriterGate { zdr: true, ..all_good() }, Some("b")),
+            (WriterGate { waived: true, ..all_good() }, Some("b")),
+            (WriterGate { space: true, ..all_good() }, Some("b")),
+            (all_good(), None),
+        ] {
+            let mut writer = FoldWriter::seeded(&channel, bearer, "run-1", writer_gate, 12, 3);
+            assert!(!writer.is_active());
+            let (result, calls) = fence_through(&mut writer, fenceable_fold(), Vec::new()).await;
+            assert_eq!(result, Err(SaveError::Unavailable { ambiguous: false }), "{writer_gate:?}");
+            assert!(calls.is_empty(), "{writer_gate:?}: no RPC from a writer that is off");
+            // The real entry point makes no connection either.
+            let result = writer.save_fence(fenceable_fold()).await;
+            assert_eq!(result, Err(SaveError::Unavailable { ambiguous: false }));
+            assert_eq!(writer.expected_seq(), 12, "nothing moved");
+        }
+        // Failed: a writer that lost its claim, or whose store refused it for good.
+        for failure in [
+            SaveError::Stale,
+            SaveError::Closed,
+            SaveError::Refused(RefusedBy::Denied),
+        ] {
+            let mut writer = FoldWriter::seeded(&channel, Some("b"), "run-1", all_good(), 12, 3);
+            writer.apply(failure);
+            assert!(writer.is_failed());
+            let (result, calls) = fence_through(&mut writer, fenceable_fold(), Vec::new()).await;
+            assert_eq!(result, Err(SaveError::Unavailable { ambiguous: false }), "{failure:?}");
+            assert!(calls.is_empty(), "{failure:?}");
+            assert!(writer.save_fence(fenceable_fold()).await.is_err());
+        }
+        assert_eq!(probe.connections(), 0, "no writer that is not active reached the store");
+    }
+
+    /// A pre_effect save degrades a refused fold to a tombstone and dispatches anyway. A
+    /// fence must not: without a durable fence at the claimed seq nothing stops a second
+    /// claimant, so a refused fence is an error and the resume dispatches nothing.
+    #[tokio::test]
+    async fn a_content_refused_fence_is_an_error_not_a_tombstone() {
+        let channel = tonic::transport::Endpoint::from_static("http://127.0.0.1:1").connect_lazy();
+        // Refused here, by the scrub and the credential gate: no RPC at all, and no tombstone.
+        let mut writer = FoldWriter::seeded(&channel, Some("b"), "run-1", all_good(), 12, 3);
+        let credential = fold_with(vec![chat("system", "p"), chat("user", "send an Authorization: header")]);
+        let (result, calls) = fence_through(&mut writer, credential, Vec::new()).await;
+        assert_eq!(result, Err(SaveError::ContentRefused { reason: "credential" }));
+        assert!(calls.is_empty(), "a refused fold is not saved, and no tombstone replaces it");
+        assert_eq!(writer.expected_seq(), 12);
+        assert!(writer.is_active(), "a refused fence leaves the writer as it was");
+
+        // Refused there, by session-core as invalid: ONE call, and no tombstone call after it.
+        let (rejected, calls) = fence_through(
+            &mut writer,
+            fenceable_fold(),
+            vec![Err(SaveError::ContentRefused { reason: "rejected" })],
+        )
+        .await;
+        assert_eq!(rejected, Err(SaveError::ContentRefused { reason: "rejected" }));
+        assert_eq!(calls.len(), 1, "no tombstone follow-up");
+        assert_eq!(writer.expected_seq(), 12);
+        assert!(writer.is_active());
     }
 
     #[test]

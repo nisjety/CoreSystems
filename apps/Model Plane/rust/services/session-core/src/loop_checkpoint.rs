@@ -1763,6 +1763,124 @@ fn after() { WRITE }
             assert_eq!(stale_holder.message(), "loop_checkpoint_not_claimable");
         }
 
+        /// A `pre_effect` save, the kind an in-place resume writes as its fence.
+        async fn save_fence_at(pool: &PgPool, run_id: &str, expected_seq: i64) -> Result<i64, Status> {
+            let fold = fold_for(run_id);
+            save(
+                pool,
+                &cipher(),
+                SaveInput {
+                    run_id,
+                    expected_seq,
+                    kind: "pre_effect",
+                    fold: &fold,
+                    authority_digest: "auth-1",
+                    pause_ref: "",
+                    park_reason: "",
+                    park_until: None,
+                },
+            )
+            .await
+        }
+
+        async fn claim_columns(pool: &PgPool, run_id: &str) -> (Option<String>, bool) {
+            sqlx::query_as::<_, (Option<String>, bool)>(
+                "SELECT claim_token_hash, claim_expires_at IS NULL
+                   FROM run_loop_checkpoints WHERE run_id = $1",
+            )
+            .bind(run_id)
+            .fetch_one(pool)
+            .await
+            .expect("claim columns")
+        }
+
+        /// The fencing argument of the in-place resume (WS03 S7b). `claim` does not bump the
+        /// seq, so two claimants can hold the SAME seq (a claim whose lease lapsed, or a
+        /// replay). The executor's fence is a `pre_effect` save at the claimed seq before it
+        /// dispatches anything, and `save` is a compare-and-set on that seq under the row lock,
+        /// so of any number of fences at one seq exactly one wins. The row then becomes
+        /// `active`, which is never claimable, so a later claimant gets `not_claimable`.
+        #[tokio::test]
+        #[ignore = "requires DATABASE_URL to a scratch Postgres"]
+        async fn loop_checkpoint_a_fence_at_the_claimed_seq_is_won_exactly_once() {
+            let Some(pool) = scratch_pool().await else { return };
+
+            // One claimant: the fence at the claimed seq wins once, and only once.
+            let (run_id, _org, _user) = seed_run(&pool, "persistent").await;
+            seed_fold(&pool, &run_id, "pause", "appr_1", "", None)
+                .await
+                .expect("pause fold");
+            let claimed = claim(&pool, &cipher(), &run_id, "appr_1", "token-a")
+                .await
+                .expect("the claim wins");
+            assert_eq!(claimed.seq, 1, "the claim does not bump the seq");
+            assert_eq!(fold_state(&pool, &run_id).await.as_deref(), Some("resuming"));
+            assert_eq!(
+                save_fence_at(&pool, &run_id, claimed.seq)
+                    .await
+                    .expect("the fence at the claimed seq wins"),
+                2
+            );
+            assert_eq!(fold_state(&pool, &run_id).await.as_deref(), Some("active"));
+            assert_eq!(
+                claim_columns(&pool, &run_id).await,
+                (None, true),
+                "the fence clears the claim"
+            );
+            let again = save_fence_at(&pool, &run_id, claimed.seq)
+                .await
+                .expect_err("a second fence at the claimed seq loses");
+            assert_eq!(again.code(), tonic::Code::Aborted);
+            assert_eq!(again.message(), "loop_checkpoint_stale");
+            let reclaim = claim(&pool, &cipher(), &run_id, "appr_1", "token-b")
+                .await
+                .expect_err("an active row is never claimable");
+            assert_eq!(reclaim.code(), tonic::Code::FailedPrecondition);
+            assert_eq!(reclaim.message(), "loop_checkpoint_not_claimable");
+
+            // Two claimants at the same seq: A claims, A's lease lapses, B claims the same
+            // pause. Both hold seq 1; A's and B's fences race, and exactly one wins.
+            let (run_id, _org, _user) = seed_run(&pool, "persistent").await;
+            seed_fold(&pool, &run_id, "pause", "appr_1", "", None)
+                .await
+                .expect("pause fold");
+            let a = claim(&pool, &cipher(), &run_id, "appr_1", "token-a").await.expect("A claims");
+            sqlx::query(
+                "UPDATE run_loop_checkpoints SET claim_expires_at = now() - interval '1 second' WHERE run_id = $1",
+            )
+            .bind(&run_id)
+            .execute(&pool)
+            .await
+            .expect("lapse A's lease");
+            let b = claim(&pool, &cipher(), &run_id, "appr_1", "token-b")
+                .await
+                .expect("B claims after the lapse");
+            assert_eq!((a.seq, b.seq), (1, 1), "two claimants hold one seq");
+            let (fence_a, fence_b) = tokio::join!(
+                save_fence_at(&pool, &run_id, a.seq),
+                save_fence_at(&pool, &run_id, b.seq),
+            );
+            let wins = [&fence_a, &fence_b].iter().filter(|fence| fence.is_ok()).count();
+            assert_eq!(wins, 1, "exactly one fence wins: {fence_a:?} / {fence_b:?}");
+            let loser = [fence_a, fence_b]
+                .into_iter()
+                .find_map(Result::err)
+                .expect("one fence lost");
+            assert_eq!(loser.code(), tonic::Code::Aborted);
+            assert_eq!(loser.message(), "loop_checkpoint_stale");
+            assert_eq!(fold_state(&pool, &run_id).await.as_deref(), Some("active"));
+            let stored: i64 = sqlx::query_scalar("SELECT seq FROM run_loop_checkpoints WHERE run_id = $1")
+                .bind(&run_id)
+                .fetch_one(&pool)
+                .await
+                .expect("read the fold seq");
+            assert_eq!(stored, 2, "one fence moved the seq, once");
+            let late = claim(&pool, &cipher(), &run_id, "appr_1", "token-c")
+                .await
+                .expect_err("after the fence the pause is not claimable");
+            assert_eq!(late.message(), "loop_checkpoint_not_claimable");
+        }
+
         #[tokio::test]
         #[ignore = "requires DATABASE_URL to a scratch Postgres"]
         async fn loop_checkpoint_a_park_stores_only_a_closed_reason() {

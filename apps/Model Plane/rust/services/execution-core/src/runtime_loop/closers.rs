@@ -5,10 +5,12 @@
 //! mid-round. The resumed loop must not guess what happened to them. This module is
 //! the whole decision, as a pure function of what the ledger recorded:
 //!
-//! * a call whose result is already recorded is kept as it is;
-//! * a call that provably never started, or is safe to repeat, runs again;
+//! * a call whose result is already recorded is kept as it is (for every tool);
+//! * a call the ledger says was closed without running, or a read that may have run,
+//!   runs again;
 //! * a call that may have run and could repeat an effect is closed with a sentence
-//!   that says so, and is never retried.
+//!   that says so, and is never retried. A call the ledger has no row for is such a
+//!   call: absence is unknown, never "not run".
 //!
 //! The sentence comes from `mp_contracts::loop_fold::closer_text`. It names the
 //! tool and the kind of closure, never the call's arguments or output.
@@ -38,12 +40,12 @@ pub(crate) struct DanglingCall<'a> {
     pub tool_name: &'a str,
     /// What the call may change.
     pub class: EffectClass,
-    /// The ledger row's state, or `None` when no row exists.
+    /// The ledger row's state, or `None` when no row exists. A missing row is UNKNOWN
+    /// (the call may never have started, or its reserve may have been lost, or the read
+    /// may hide the row): it never proves the call did not run.
     pub ledger: Option<LedgerStatus>,
-    /// Whether the ledger was on when the call was made. With it off, a missing
-    /// row proves nothing: the call may have run unrecorded.
-    pub ledger_was_on: bool,
-    /// Whether the call's result is recorded in the fold.
+    /// Whether the call's result is recorded in the fold. A recorded result wins over
+    /// every ledger state, for every tool.
     pub has_output: bool,
     /// Whether the workspace the tool needs still exists.
     pub workspace_available: bool,
@@ -59,13 +61,28 @@ fn needs_workspace(tool_name: &str) -> bool {
     tool_name == "code_interpreter" || tool_name.starts_with("process_")
 }
 
-/// Decide what to do with one dangling call.
+/// Decide what to do with one dangling call. The rules, in order:
+///
+/// 1. A recorded output wins: `Keep`, for every tool (a recorded `browser_agent` result
+///    included) and whatever the ledger says. Keeping re-runs nothing.
+/// 2. `browser_agent` with no recorded output is `NotResumableTool`.
+/// 3. A workspace tool whose workspace is gone is `WorkspaceStateLost`.
+/// 4. A finished row (`completed`, `failed`) whose result is not in the fold is `ResultLost`.
+/// 5. `not_run`: nothing happened, so it runs now.
+/// 6. `reserved` or `unknown_outcome`: it may have run. An effect is `UnknownOutcome`, a
+///    read runs again.
+/// 7. No row: unknown, as in 6. An effect is `UnknownOutcome`, a read runs again.
+///
+/// This function sees no arguments, so the rule that a call whose arguments were withheld
+/// is never redispatched is enforced by the caller (`resume::restore`) before it gets here.
+/// The ORIGINAL paused step is never fed to it either: the release runs under a new step id
+/// and the paused step is not a dangling call.
 pub(crate) fn decide(call: &DanglingCall<'_>) -> CloseDecision {
+    if call.has_output {
+        return CloseDecision::Keep;
+    }
     if call.tool_name == NOT_RESUMABLE_TOOL {
         return CloseDecision::Close(CloserKind::NotResumableTool);
-    }
-    if call.has_output && matches!(call.ledger, Some(LedgerStatus::Completed | LedgerStatus::Failed)) {
-        return CloseDecision::Keep;
     }
     if needs_workspace(call.tool_name) && !call.workspace_available {
         return CloseDecision::Close(CloserKind::WorkspaceStateLost);
@@ -77,23 +94,14 @@ pub(crate) fn decide(call: &DanglingCall<'_>) -> CloseDecision {
         }
         // Closed without running: nothing happened, so it may run now.
         Some(LedgerStatus::NotRun) => CloseDecision::Redispatch,
-        // Reserved and never finished: it may have run. Repeating a read is
-        // harmless; repeating an effect is not, so an effect is never retried.
-        Some(LedgerStatus::Reserved | LedgerStatus::Unknown) => {
+        // Reserved and never finished, or no row at all: it may have run (absence is
+        // unknown, never "not run"). Repeating a read is harmless; repeating an effect is
+        // not, so an effect is never retried.
+        Some(LedgerStatus::Reserved | LedgerStatus::Unknown) | None => {
             if call.class.is_effectful() {
                 CloseDecision::Close(CloserKind::UnknownOutcome)
             } else {
                 CloseDecision::Redispatch
-            }
-        }
-        // No row. With the ledger on, the loop reserves before it dispatches, so a
-        // missing row means the call never started. With it off, a missing row proves
-        // nothing, and an effect that may have run is not repeated.
-        None => {
-            if call.ledger_was_on || !call.class.is_effectful() {
-                CloseDecision::Redispatch
-            } else {
-                CloseDecision::Close(CloserKind::UnknownOutcome)
             }
         }
     }
@@ -109,11 +117,20 @@ mod tests {
             tool_name: tool,
             class,
             ledger,
-            ledger_was_on: true,
             has_output: false,
             workspace_available: true,
         }
     }
+
+    /// Every state a ledger row can be in, and no row at all.
+    const EVERY_LEDGER_STATE: [Option<LedgerStatus>; 6] = [
+        None,
+        Some(LedgerStatus::Reserved),
+        Some(LedgerStatus::Completed),
+        Some(LedgerStatus::Failed),
+        Some(LedgerStatus::NotRun),
+        Some(LedgerStatus::Unknown),
+    ];
 
     const EFFECTS: [EffectClass; 2] = [EffectClass::Write, EffectClass::External];
     const SAFE: [EffectClass; 2] = [EffectClass::NoEffect, EffectClass::Read];
@@ -169,25 +186,65 @@ mod tests {
         }
     }
 
+    /// Absence from the ledger is UNKNOWN, never "not run": a row can be missing because the
+    /// call never started, because the reserve was lost, or because the read hides it. An
+    /// effect that may have run is closed, and only a read is safe to run again.
     #[test]
-    fn a_missing_row_proves_the_call_never_started_only_while_the_ledger_was_on() {
-        for class in EFFECTS.into_iter().chain(SAFE) {
+    fn an_absent_row_is_unknown_so_an_effect_is_closed_and_a_read_runs_again() {
+        for class in EFFECTS {
             assert_eq!(
                 decide(&call("send_email", class, None)),
-                CloseDecision::Redispatch,
-                "ledger on: {class:?}"
+                CloseDecision::Close(CloserKind::UnknownOutcome),
+                "an effect with no row may have run unrecorded: {class:?}"
             );
         }
-        let mut ledger_off = call("send_email", EffectClass::External, None);
-        ledger_off.ledger_was_on = false;
-        assert_eq!(
-            decide(&ledger_off),
-            CloseDecision::Close(CloserKind::UnknownOutcome),
-            "an effect with no row and no ledger may have run unrecorded"
-        );
-        let mut read_off = call("knowledge_search", EffectClass::Read, None);
-        read_off.ledger_was_on = false;
-        assert_eq!(decide(&read_off), CloseDecision::Redispatch);
+        for class in SAFE {
+            assert_eq!(
+                decide(&call("knowledge_search", class, None)),
+                CloseDecision::Redispatch,
+                "repeating a read is harmless: {class:?}"
+            );
+        }
+    }
+
+    /// A result the fold recorded is authoritative: whatever the ledger says, even a row
+    /// that never closed (a failed best-effort finalize leaves `reserved`), and even with
+    /// no row at all, the call is kept as it is. Nothing is re-run and nothing is closed.
+    #[test]
+    fn fold_output_is_authoritative_over_an_open_reservation() {
+        for ledger in EVERY_LEDGER_STATE {
+            for class in EFFECTS.into_iter().chain(SAFE) {
+                let mut recorded = call("send_email", class, ledger);
+                recorded.has_output = true;
+                assert_eq!(
+                    decide(&recorded),
+                    CloseDecision::Keep,
+                    "{ledger:?} {class:?}: a recorded output wins"
+                );
+            }
+        }
+        // A tool that keeps workspace state, its workspace gone: the result is still recorded.
+        let mut workspace_lost = call("code_interpreter", EffectClass::Write, Some(LedgerStatus::Reserved));
+        workspace_lost.has_output = true;
+        workspace_lost.workspace_available = false;
+        assert_eq!(decide(&workspace_lost), CloseDecision::Keep);
+    }
+
+    /// A read whose output is in the fold is not run a second time, whatever its row says.
+    #[test]
+    fn a_recorded_read_is_not_rerun() {
+        for ledger in EVERY_LEDGER_STATE {
+            for class in SAFE {
+                let mut recorded = call("knowledge_search", class, ledger);
+                recorded.has_output = true;
+                assert_ne!(
+                    decide(&recorded),
+                    CloseDecision::Redispatch,
+                    "{ledger:?} {class:?}: a read with a recorded output is never run again"
+                );
+                assert_eq!(decide(&recorded), CloseDecision::Keep, "{ledger:?} {class:?}");
+            }
+        }
     }
 
     #[test]
@@ -198,6 +255,18 @@ mod tests {
                 CloseDecision::Close(CloserKind::NotResumableTool),
                 "{ledger:?}"
             );
+        }
+    }
+
+    /// The browser rule is for a browser run with NO recorded output. A recorded output wins
+    /// for every tool: keeping it re-runs nothing, and closing it would throw away a result
+    /// the run already has. (The tool is still never dispatched again; `Keep` is not a run.)
+    #[test]
+    fn a_recorded_browser_output_is_kept() {
+        for ledger in EVERY_LEDGER_STATE {
+            let mut recorded = call("browser_agent", EffectClass::External, ledger);
+            recorded.has_output = true;
+            assert_eq!(decide(&recorded), CloseDecision::Keep, "{ledger:?}");
         }
     }
 

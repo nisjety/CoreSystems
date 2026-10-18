@@ -808,6 +808,16 @@ fn switch_table() -> Vec<(&'static str, String, &'static str)> {
             "the fold writer",
         ),
         (
+            "execution-core",
+            mp_contracts::loop_fold::LOOP_RESUME_ENV.to_owned(),
+            "the in-place resume",
+        ),
+        (
+            "model-gateway",
+            mp_contracts::loop_fold::LOOP_RESUME_ENV.to_owned(),
+            "the /continue pre-consume and the loop stage (S7c)",
+        ),
+        (
             "session-core",
             const_str(&read(SESSION_CHECKPOINT), "ENABLED_ENV"),
             "the fold store",
@@ -932,13 +942,84 @@ fn fold_gate_violations(executor_loop: &str, executor_fold: &str) -> Vec<String>
 
 /// The switch has one parser: no production code outside mp-contracts names the env var.
 fn one_parser_violations(sources: &[(String, String)]) -> Vec<String> {
-    let name = mp_contracts::loop_fold::CONTINUE_AFTER_APPROVAL_ENV;
+    parser_violations(
+        mp_contracts::loop_fold::CONTINUE_AFTER_APPROVAL_ENV,
+        "continue_after_approval_enabled",
+        sources,
+    )
+}
+
+/// The in-place resume switch has one parser too (S7b): `loop_resume_enabled`, strict (`true`
+/// and nothing else). A second reader of the variable would be a second opinion on when the
+/// resume is on, and the gateway and the executor must never disagree.
+fn one_resume_parser_violations(sources: &[(String, String)]) -> Vec<String> {
+    parser_violations(
+        mp_contracts::loop_fold::LOOP_RESUME_ENV,
+        "loop_resume_enabled",
+        sources,
+    )
+}
+
+fn parser_violations(name: &str, parser: &str, sources: &[(String, String)]) -> Vec<String> {
     sources
         .iter()
         .filter(|(path, _)| !path.replace('\\', "/").contains("crates/mp-contracts/"))
         .filter(|(_, source)| Code::new(source).without_tests().text.contains(name))
-        .map(|(path, _)| format!("{path} names {name} itself: use mp_contracts::loop_fold::continue_after_approval_enabled"))
+        .map(|(path, _)| format!("{path} names {name} itself: use mp_contracts::loop_fold::{parser}"))
         .collect()
+}
+
+/// The executor builds ONE `ConsumeApprovalRequest`, and it always wants the call back.
+///
+/// The gateway's pre-consume is spend-only (`omit_call`, S7c), and then the executor's own
+/// consume is a same-claim replay that hands the approved call back. The executor needs that
+/// descriptor (it is the only source of what an approval authorised), so it never asks for the
+/// call to be left out: `omit_call: true` anywhere in execution-core would starve the resume
+/// of the call it runs. And one literal means one place to read what the executor asks for.
+fn consume_request_violations(executor_sources: &[(String, String)]) -> Vec<String> {
+    let literal = Regex::new(r"\bConsumeApprovalRequest\s*\{").expect("pattern");
+    let omits = Regex::new(r"\bomit_call\s*:\s*true\b").expect("pattern");
+    let mut violations = Vec::new();
+    let mut literals = 0;
+    for (path, source) in executor_sources {
+        let code = Code::new(source).without_tests();
+        literals += literal.find_iter(&code.text).count();
+        if omits.is_match(&code.text) {
+            violations.push(format!(
+                "{path} sets `omit_call: true`: the executor needs the approved call back and never omits it"
+            ));
+        }
+    }
+    if literals != 1 {
+        violations.push(format!(
+            "execution-core builds {literals} ConsumeApprovalRequest literals; there must be exactly one (the executor's consume)"
+        ));
+    }
+    violations
+}
+
+/// `resume.rs` holds `restore_in_place`, which is handed the client's whole `AgentResume`.
+/// The executor derives the segment from the step that paused and NEVER reads the client's
+/// `segment_no` (the gateway sends 0 and an old gateway sends 2: both must work). The fold's
+/// own `segment_no` and the claim response's are the only `.segment_no` it may read, so any
+/// other receiver (`resume.`, `r.`, ...) is a read of the client's.
+fn resume_module_segment_violations(executor_resume: &str) -> Vec<String> {
+    let code = Code::new(executor_resume).without_tests();
+    let read = Regex::new(r"\b([A-Za-z_][A-Za-z0-9_]*)\s*\.\s*segment_no\b").expect("pattern");
+    let mut violations = Vec::new();
+    let mut allowed = 0;
+    for captured in read.captures_iter(&code.text) {
+        match &captured[1] {
+            "fold" | "response" => allowed += 1,
+            receiver => violations.push(format!(
+                "resume.rs reads `{receiver}.segment_no`: only the fold's own and the claim response's may be read; the executor derives the segment from the paused step and never reads the client-supplied AgentResume.segment_no"
+            )),
+        }
+    }
+    if allowed == 0 {
+        violations.push("the scan found no fold or response `.segment_no` in resume.rs: it is not reading the file the guard exists for".into());
+    }
+    violations
 }
 
 /// One durable store's real gate in production, and the tests that drive it.
@@ -1252,6 +1333,36 @@ fn every_durable_store_names_the_tests_that_drive_its_real_gate() {
 }
 
 #[test]
+fn the_resume_switch_has_one_parser() {
+    let mut every = Vec::new();
+    for tree in SOURCE_TREES {
+        every.extend(rust_files(tree));
+    }
+    assert_green(&one_resume_parser_violations(&every));
+    // The shared parser exists where the const says it does, and is the strict one.
+    let loop_fold = Code::new(&read("../../crates/mp-contracts/src/loop_fold.rs")).text;
+    assert!(loop_fold.contains("pub fn loop_resume_enabled()"));
+    assert!(
+        Regex::new(r"pub fn loop_resume_enabled\(\)[^}]*switch_from\(")
+            .expect("pattern")
+            .is_match(&loop_fold),
+        "the resume switch is parsed by the strict `switch_from`, not the lenient continue parser"
+    );
+}
+
+#[test]
+fn the_executor_consumes_through_one_literal_and_never_omits_the_call() {
+    assert_green(&consume_request_violations(&rust_files("src")));
+}
+
+/// The executor never reads the client's `segment_no`, in the file that is handed the whole
+/// `AgentResume` as much as in the two files the older guard watches.
+#[test]
+fn the_resume_module_never_reads_the_clients_segment_no() {
+    assert_green(&resume_module_segment_violations(&read(EXECUTOR_RESUME)));
+}
+
+#[test]
 fn the_continue_switch_has_one_parser() {
     let mut every = Vec::new();
     for tree in SOURCE_TREES {
@@ -1560,6 +1671,48 @@ fn every_guard_goes_red_when_the_code_it_guards_regresses() {
         compose_violations(&compose.replacen(":-false}", ":-true}", usize::MAX), &table),
         "must default to OFF",
     );
+    // The in-place resume switch (WS03 S7b) is a row of its own on BOTH services that read it:
+    // each line is `${EXECUTION_LOOP_RESUME_ENABLED:-false}`, and dropping either one, or a
+    // literal `true` on either, is flagged. (The first occurrence is model-gateway's.)
+    let resume_key = mp_contracts::loop_fold::LOOP_RESUME_ENV;
+    let resume_line = format!("      {resume_key}: ${{{resume_key}:-false}}\n");
+    assert_eq!(
+        compose.matches(&resume_line).count(),
+        2,
+        "the compose resume switch lines moved: re-point this test"
+    );
+    let first_at = compose.find(&resume_line).expect("model-gateway line");
+    let second_at = first_at
+        + resume_line.len()
+        + compose[first_at + resume_line.len()..]
+            .find(&resume_line)
+            .expect("execution-core line");
+    let without_gateway = compose.replacen(&resume_line, "", 1);
+    let without_executor = format!(
+        "{}{}",
+        &compose[..second_at],
+        &compose[second_at + resume_line.len()..]
+    );
+    must_flag(
+        compose_violations(&without_gateway, &table),
+        &format!("model-gateway does not set {resume_key}"),
+    );
+    must_flag(
+        compose_violations(&without_executor, &table),
+        &format!("execution-core does not set {resume_key}"),
+    );
+    let literal_on = format!("      {resume_key}: true\n");
+    must_flag(
+        compose_violations(&compose.replacen(&resume_line, &literal_on, 1), &table),
+        &format!("model-gateway sets {resume_key}: true"),
+    );
+    must_flag(
+        every_switch_defaults_off_violations(&[(
+            "x.yml".to_owned(),
+            format!("{compose}\n      {resume_key}: true\n"),
+        )]),
+        resume_key,
+    );
     must_flag(
         every_switch_defaults_off_violations(&[(
             "x.yml".to_owned(),
@@ -1708,5 +1861,76 @@ fn every_guard_goes_red_when_the_code_it_guards_regresses() {
             "fn f() { std::env::var(\"AGENT_CONTINUE_AFTER_APPROVAL_ENABLED\"); }".to_owned(),
         )]),
         "names AGENT_CONTINUE_AFTER_APPROVAL_ENABLED itself",
+    );
+
+    // A second parser of the in-place resume switch, in production code or behind a macro or a
+    // string; a mention in a comment or in a test module is not a read.
+    let literal = format!(
+        "fn f() {{ std::env::var(\"{}\"); }}",
+        mp_contracts::loop_fold::LOOP_RESUME_ENV
+    );
+    must_flag(
+        one_resume_parser_violations(&[("services/x/src/lib.rs".to_owned(), literal.clone())]),
+        "names EXECUTION_LOOP_RESUME_ENABLED itself",
+    );
+    assert_green(&one_resume_parser_violations(&[
+        ("../../crates/mp-contracts/src/loop_fold.rs".to_owned(), literal.clone()),
+        (
+            "services/x/src/lib.rs".to_owned(),
+            format!("// {}\n#[cfg(test)]\nmod t {{ {literal} }}", mp_contracts::loop_fold::LOOP_RESUME_ENV),
+        ),
+    ]));
+
+    // The executor builds a second ConsumeApprovalRequest, or asks for the call to be omitted.
+    let mut executor_sources = rust_files("src");
+    assert_green(&consume_request_violations(&executor_sources));
+    let mut second = executor_sources.clone();
+    second.push((
+        "src/rogue.rs".to_owned(),
+        "fn rogue() { let _ = pb::ConsumeApprovalRequest { omit_call: false, ..Default::default() }; }"
+            .to_owned(),
+    ));
+    must_flag(consume_request_violations(&second), "2 ConsumeApprovalRequest literals");
+    let mut omitting = executor_sources.clone();
+    omitting.push((
+        "src/rogue.rs".to_owned(),
+        "fn rogue() { let _ = X { omit_call:  true }; }".to_owned(),
+    ));
+    must_flag(consume_request_violations(&omitting), "sets `omit_call: true`");
+    // None at all is as wrong as two: the guard cannot go quiet by reading nothing.
+    executor_sources.clear();
+    must_flag(consume_request_violations(&executor_sources), "0 ConsumeApprovalRequest literals");
+    // A literal in a test module, or named in a comment, is not production code.
+    let mut quiet = rust_files("src");
+    quiet.push((
+        "src/rogue.rs".to_owned(),
+        "// ConsumeApprovalRequest { omit_call: true }\n#[cfg(test)]\nmod t { fn f() { pb::ConsumeApprovalRequest { omit_call: true }; } }".to_owned(),
+    ));
+    assert_green(&consume_request_violations(&quiet));
+
+    // resume.rs reads the client's segment_no: through the argument it is handed, or through
+    // any other name for the resume. The fold's own and the claim response's are not reads of it.
+    let resume_rs = read(EXECUTOR_RESUME);
+    assert_green(&resume_module_segment_violations(&resume_rs));
+    for rogue in [
+        "fn rogue(resume: &pb::AgentResume) -> u32 { resume.segment_no }",
+        "fn rogue(r: &pb::AgentResume) -> u32 { r.segment_no.max(2) }",
+        "fn rogue(resume: &pb::AgentResume) -> u32 { resume\n    .segment_no }",
+    ] {
+        must_flag(
+            resume_module_segment_violations(&format!("{resume_rs}\n{rogue}")),
+            ".segment_no`: only the fold's own",
+        );
+    }
+    must_flag(
+        resume_module_segment_violations(&format!(
+            "{resume_rs}\nfn rogue(resume: &pb::AgentResume) -> u32 {{ resume.segment_no }}"
+        )),
+        "resume.segment_no",
+    );
+    // A scan that reads nothing is itself a violation, so the guard cannot go quiet.
+    must_flag(
+        resume_module_segment_violations("fn only() {}"),
+        "not reading the file",
     );
 }
