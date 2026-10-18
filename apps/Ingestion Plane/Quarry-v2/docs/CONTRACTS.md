@@ -249,9 +249,11 @@ Production snapshot storage uses real S3. Local development and tests use MinIO-
 }
 ```
 
+Today `formats` holds `html`, `markdown`, `raw`, `links`, `screenshot`, `pdf` and `extract` (`quarry_core::output::OutputFormats`); the other entries above are the planned shape.
+
 ### Requested formats schema
 
-Firecrawl-compatible names are accepted at the edge and normalized internally.
+What `POST /v1/scrape` accepts today is in 9.1: `markdown`, `html`, `rawHtml`, `links` and `metadata`, where `links` and `metadata` change nothing because both are in every response. `json`, `screenshot`, `summary`, `question` and `highlights` are reserved and refused with 400 `reserved_format`. Any other name, and any object form such as `{ "type": "json" }`, is refused with 400 `unsupported_format`. The example and the rules below are the target design for the formats not built yet.
 
 ```json
 {
@@ -590,11 +592,11 @@ A run has a control mode (`agent_control` or `human_takeover`) and an epoch that
 
 ## 9.1 `POST /v1/scrape` request options (WS5.D)
 
-Root-level, all optional, snake_case with a camelCase alias: `formats` (`markdown`, `html`, `rawHtml`, `links`, `metadata`), `only_main_content`, `include_tags`, `exclude_tags`, `remove_base64_images`, `extractor` (`readability`, `clean_full`, `raw`), `timeout_ms` (1000 to 55000, default 55000), `max_inline_bytes` (1 to 8 MiB, default 1 MiB).
+Root-level, all optional, snake_case with a camelCase alias: `formats` (`markdown`, `html`, `rawHtml`, `links`, `metadata`; `links` and `metadata` change nothing, since both are already in every response), `only_main_content`, `include_tags`, `exclude_tags`, `remove_base64_images`, `extractor` (`readability`, `clean_full`, `raw`), `timeout_ms` (1000 to 55000, default 55000), `max_inline_bytes` (1 to 8 MiB, default 1 MiB).
 
 All eight are applied. `exclude_tags` (CSS selectors) removes every match and its subtree. `include_tags` keeps only the matching subtrees, in document order, each once; an explicit selection beats the main-content heuristic, so the heuristic does not run on it, and a list that matches nothing gives empty markdown and the warning `include_tags_matched_nothing`, never the whole page. A selector that does not parse is a 400 `invalid_selector` at `include_tags[i]`. `only_main_content` (default true) and `extractor` say one thing two ways: `readability` is the main-content heuristic, `clean_full` keeps the whole body minus head, scripts, styles, templates and iframes (lazy images resolved, inline images stripped) and `raw` converts the document as it is. An unset one follows the other; setting them to disagree is a 400 `conflicts_with_only_main_content` on `extractor`. `remove_base64_images` strips inline `data:` images on the readability and raw paths too. With default options the markdown is byte-identical to what a scrape returned before these options existed. `html` is the HTML the markdown was made from (after exclusion, inclusion and cleaning); `rawHtml` is the document as fetched. `effective_options.ignored_fields` now lists only unknown request keys. `json`, `screenshot`, `summary`, `question` and `highlights` are reserved: a 400 `reserved_format`.
 
-Response additions on `data`: `markdown`, `html`, `raw_html` (inline, only when asked for; `markdown` also by default under ZDR), `truncated[]` (ZDR: cut at the cap), `omitted[]` (not ZDR: over the cap, read the `formats.*` artifact), `warnings[]`, `effective_options`. `formats.*` artifact references are unchanged. A request that names formats or any non-default option neither reads nor writes the page cache; ZDR never touches it.
+Response additions on `data`: `markdown`, `html`, `raw_html` (inline, only when asked for; `markdown` also by default under ZDR), `truncated[]` (ZDR: cut at the cap), `omitted[]` (not ZDR: over the cap, read the `formats.*` artifact), `warnings[]`, `effective_options`. `formats.*` artifact references are unchanged. A request that names `formats`, `include_tags`, `exclude_tags`, `remove_base64_images`, `only_main_content: false` or an `extractor` other than `readability` neither reads nor writes the page cache. `timeout_ms` and `max_inline_bytes` change delivery, not the result, so they do not bypass it. ZDR never touches it.
 
 Unknown keys: ignored with a `warnings[] {code: "unknown_field", field}` entry, `effective_options.ignored_fields`, `Deprecation: true` (and `Sunset` when `QUARRY_EDGE__SCRAPE_STRICT_AFTER` is set) and a `quarry.scrape.unknown_field` log line naming the keys. `QUARRY_EDGE__SCRAPE_REQUEST_VALIDATION=strict` (or a passed strict-after date) makes them a 400. `skipTlsVerification`, `skip_tls_verification`, `proxy`, `proxyUrl`, `headers`, `mobile` and `stealth` are always a 400 `reserved_field`. A bad value is a 400 `BAD_REQUEST` with `details.fields[] {path, code, message}`, including a body that is not JSON. `QUARRY_EDGE__SCRAPE_OPTIONS_ENABLED=0` turns the option keys back into unknown keys (the kill switch); `QUARRY_EDGE__SCRAPE_INLINE_MAX_BYTES` changes the default inline cap.
 
