@@ -299,6 +299,7 @@ impl RateLimiter {
                 Ok(Err(error)) => {
                     // Degrade to the in-process bucket rather than failing the
                     // request. Log the error class only — never the key value.
+                    // zdr-log-ok: a Redis/Dragonfly client error for the Lua EVAL; the rate-limit key is a bind argument and is not part of the error text
                     tracing::warn!(
                         %error,
                         "distributed rate-limit backend errored; falling back to in-process bucket"

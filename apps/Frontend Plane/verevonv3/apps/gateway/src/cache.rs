@@ -142,6 +142,7 @@ impl ResultCache {
                         }
                     }
                     Ok(Err(error)) => {
+                        // zdr-log-ok: boot-time connection error for the operator-configured Redis; no request span exists
                         tracing::warn!(%error, "gateway result cache unreachable; running without cache");
                         Self::disabled()
                     }
@@ -154,6 +155,7 @@ impl ResultCache {
                 }
             }
             Err(error) => {
+                // zdr-log-ok: boot-time parse error of the operator-configured Redis URL; no request span exists
                 tracing::warn!(%error, "invalid GATEWAY_CACHE_REDIS_URL; running without cache");
                 Self::disabled()
             }
@@ -271,6 +273,7 @@ impl ResultCache {
             let (next, keys) = match reply {
                 Ok(reply) => reply,
                 Err(error) => {
+                    // zdr-log-ok: a Redis client error (connection or protocol state), never a cache key or value; ZDR responses are never cached (cache_admission), so a ZDR request cannot be the subject; the purge is an operator action
                     tracing::warn!(%error, "result cache scan failed; purge incomplete");
                     break;
                 }
@@ -281,6 +284,7 @@ impl ResultCache {
                 match unlinked {
                     Ok(count) => removed += count,
                     Err(error) => {
+                        // zdr-log-ok: a Redis client error (connection or protocol state), never a cache key or value; ZDR responses are never cached (cache_admission), so a ZDR request cannot be the subject; the purge is an operator action
                         tracing::warn!(%error, "result cache unlink failed; purge incomplete");
                         break;
                     }
@@ -323,6 +327,7 @@ impl ResultCache {
         };
         let added: Result<i64, redis::RedisError> = conn.sadd(key, member).await;
         if let Err(error) = added {
+            // zdr-log-ok: a Redis client error (connection or protocol state), never a cache key or value; ZDR responses are never cached (cache_admission), so a ZDR request cannot be the subject
             tracing::debug!(%error, "roster sadd failed");
             return;
         }
@@ -340,6 +345,7 @@ impl ResultCache {
         conn.smembers::<_, Vec<String>>(key)
             .await
             .unwrap_or_else(|error| {
+                // zdr-log-ok: a Redis client error (connection or protocol state), never a cache key or value; ZDR responses are never cached (cache_admission), so a ZDR request cannot be the subject
                 tracing::debug!(%error, "roster smembers failed");
                 Vec::new()
             })

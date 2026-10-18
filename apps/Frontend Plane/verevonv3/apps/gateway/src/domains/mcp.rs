@@ -394,6 +394,7 @@ async fn oauth_callback(
     {
         Ok(response) => response,
         Err(error) => {
+            // zdr-log-ok: an http::Error from building a redirect response out of a header value the model-gateway returned; it names the header problem, not a page or query
             tracing::warn!(%org_id, error = %error, "mcp oauth callback: could not build the redirect response");
             return Redirect::to(&fallback).into_response();
         }

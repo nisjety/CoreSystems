@@ -125,6 +125,7 @@ pub(crate) fn spawn(state: AppState) -> bool {
 async fn run_supervised(state: AppState, url: String, user: String, password: String) {
     loop {
         if let Err(error) = run_once(&state, &url, &user, &password).await {
+            // zdr-log-ok: a NATS client error (connection or stream state), never an erasure subject payload; this is the background GDPR consumer, which runs with no request span
             tracing::error!(%error, "gateway GDPR erasure consumer stopped; retrying");
         }
         tokio::time::sleep(RECONNECT_BACKOFF).await;
@@ -156,6 +157,7 @@ async fn run_once(state: &AppState, url: &str, user: &str, password: &str) -> an
         let message = match message {
             Ok(message) => message,
             Err(error) => {
+                // zdr-log-ok: a NATS client error (connection or stream state), never an erasure subject payload; this is the background GDPR consumer, which runs with no request span
                 tracing::warn!(%error, "GDPR erasure consumer receive error");
                 tokio::time::sleep(Duration::from_millis(500)).await;
                 continue;
@@ -175,6 +177,7 @@ async fn run_once(state: &AppState, url: &str, user: &str, password: &str) -> an
                     "erasure: purged the gateway's chat-history copy"
                 );
                 if let Err(error) = message.ack().await {
+                    // zdr-log-ok: a NATS client error (connection or stream state), never an erasure subject payload; this is the background GDPR consumer, which runs with no request span
                     tracing::warn!(%error, "ack failed after purge");
                 }
             }
@@ -185,12 +188,14 @@ async fn run_once(state: &AppState, url: &str, user: &str, password: &str) -> an
             // rule the sibling consumers on this subject follow.
             Outcome::Skipped => {
                 if let Err(error) = message.ack().await {
+                    // zdr-log-ok: a NATS client error (connection or stream state), never an erasure subject payload; this is the background GDPR consumer, which runs with no request span
                     tracing::warn!(%error, "ack failed after skip");
                 }
             }
             Outcome::Poison { reason } => {
                 tracing::error!(reason, "unprocessable GDPR erasure event; acking");
                 if let Err(error) = message.ack().await {
+                    // zdr-log-ok: a NATS client error (connection or stream state), never an erasure subject payload; this is the background GDPR consumer, which runs with no request span
                     tracing::warn!(%error, "ack failed after poison");
                 }
             }
@@ -199,6 +204,7 @@ async fn run_once(state: &AppState, url: &str, user: &str, password: &str) -> an
             Outcome::Retry { reason } => {
                 tracing::error!(reason, "GDPR erasure purge failed; naking for redelivery");
                 if let Err(error) = message.ack_with(AckKind::Nak(None)).await {
+                    // zdr-log-ok: a NATS client error (connection or stream state), never an erasure subject payload; this is the background GDPR consumer, which runs with no request span
                     tracing::warn!(%error, "nak failed");
                 }
             }

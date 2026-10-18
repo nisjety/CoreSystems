@@ -53,6 +53,7 @@ pub(crate) async fn fetch_remote_recommendation(
     let inference_token = match shared::required_inference_token(state, user, headers).await {
         Ok(token) => token,
         Err(err) => {
+            // zdr-log-ok: the error of minting a service token against the operator-configured control plane; it concerns the mint call, not what the user typed
             tracing::warn!(?err, "plan recommendation inference-core token mint failed");
             return None;
         }
