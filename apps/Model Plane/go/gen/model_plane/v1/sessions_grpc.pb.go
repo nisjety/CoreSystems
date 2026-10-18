@@ -29,6 +29,9 @@ const (
 	SessionCore_ReserveToolAction_FullMethodName          = "/model_plane.v1.SessionCore/ReserveToolAction"
 	SessionCore_FinalizeToolAction_FullMethodName         = "/model_plane.v1.SessionCore/FinalizeToolAction"
 	SessionCore_SaveCheckpoint_FullMethodName             = "/model_plane.v1.SessionCore/SaveCheckpoint"
+	SessionCore_SaveLoopCheckpoint_FullMethodName         = "/model_plane.v1.SessionCore/SaveLoopCheckpoint"
+	SessionCore_ClaimLoopCheckpoint_FullMethodName        = "/model_plane.v1.SessionCore/ClaimLoopCheckpoint"
+	SessionCore_CloseLoopCheckpoint_FullMethodName        = "/model_plane.v1.SessionCore/CloseLoopCheckpoint"
 	SessionCore_ReplayThread_FullMethodName               = "/model_plane.v1.SessionCore/ReplayThread"
 	SessionCore_GetContextAssembly_FullMethodName         = "/model_plane.v1.SessionCore/GetContextAssembly"
 	SessionCore_CompactNow_FullMethodName                 = "/model_plane.v1.SessionCore/CompactNow"
@@ -94,6 +97,13 @@ type SessionCoreClient interface {
 	FinalizeToolAction(ctx context.Context, in *FinalizeToolActionRequest, opts ...grpc.CallOption) (*FinalizeToolActionResponse, error)
 	// Persist a checkpoint snapshot for a run.
 	SaveCheckpoint(ctx context.Context, in *SaveCheckpointRequest, opts ...grpc.CallOption) (*SaveCheckpointResponse, error)
+	// Save the durable loop's fold for a run (build plan WS03 S4). Latest wins,
+	// compare-and-set on expected_seq. Refused for a zero-retention or waived run.
+	SaveLoopCheckpoint(ctx context.Context, in *SaveLoopCheckpointRequest, opts ...grpc.CallOption) (*SaveLoopCheckpointResponse, error)
+	// Claim a paused or parked run's fold for one continuation. Exactly one claim wins.
+	ClaimLoopCheckpoint(ctx context.Context, in *ClaimLoopCheckpointRequest, opts ...grpc.CallOption) (*ClaimLoopCheckpointResponse, error)
+	// Close a run's fold once its loop has finished. Idempotent for a closed row.
+	CloseLoopCheckpoint(ctx context.Context, in *CloseLoopCheckpointRequest, opts ...grpc.CallOption) (*CloseLoopCheckpointResponse, error)
 	// Replay the thread event log as a stream of Events.
 	// Ordering: (ts, event_id) with event_id as deterministic tiebreaker.
 	ReplayThread(ctx context.Context, in *ReplayThreadRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[Event], error)
@@ -275,6 +285,36 @@ func (c *sessionCoreClient) SaveCheckpoint(ctx context.Context, in *SaveCheckpoi
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(SaveCheckpointResponse)
 	err := c.cc.Invoke(ctx, SessionCore_SaveCheckpoint_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *sessionCoreClient) SaveLoopCheckpoint(ctx context.Context, in *SaveLoopCheckpointRequest, opts ...grpc.CallOption) (*SaveLoopCheckpointResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(SaveLoopCheckpointResponse)
+	err := c.cc.Invoke(ctx, SessionCore_SaveLoopCheckpoint_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *sessionCoreClient) ClaimLoopCheckpoint(ctx context.Context, in *ClaimLoopCheckpointRequest, opts ...grpc.CallOption) (*ClaimLoopCheckpointResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ClaimLoopCheckpointResponse)
+	err := c.cc.Invoke(ctx, SessionCore_ClaimLoopCheckpoint_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *sessionCoreClient) CloseLoopCheckpoint(ctx context.Context, in *CloseLoopCheckpointRequest, opts ...grpc.CallOption) (*CloseLoopCheckpointResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(CloseLoopCheckpointResponse)
+	err := c.cc.Invoke(ctx, SessionCore_CloseLoopCheckpoint_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -515,6 +555,13 @@ type SessionCoreServer interface {
 	FinalizeToolAction(context.Context, *FinalizeToolActionRequest) (*FinalizeToolActionResponse, error)
 	// Persist a checkpoint snapshot for a run.
 	SaveCheckpoint(context.Context, *SaveCheckpointRequest) (*SaveCheckpointResponse, error)
+	// Save the durable loop's fold for a run (build plan WS03 S4). Latest wins,
+	// compare-and-set on expected_seq. Refused for a zero-retention or waived run.
+	SaveLoopCheckpoint(context.Context, *SaveLoopCheckpointRequest) (*SaveLoopCheckpointResponse, error)
+	// Claim a paused or parked run's fold for one continuation. Exactly one claim wins.
+	ClaimLoopCheckpoint(context.Context, *ClaimLoopCheckpointRequest) (*ClaimLoopCheckpointResponse, error)
+	// Close a run's fold once its loop has finished. Idempotent for a closed row.
+	CloseLoopCheckpoint(context.Context, *CloseLoopCheckpointRequest) (*CloseLoopCheckpointResponse, error)
 	// Replay the thread event log as a stream of Events.
 	// Ordering: (ts, event_id) with event_id as deterministic tiebreaker.
 	ReplayThread(*ReplayThreadRequest, grpc.ServerStreamingServer[Event]) error
@@ -631,6 +678,15 @@ func (UnimplementedSessionCoreServer) FinalizeToolAction(context.Context, *Final
 }
 func (UnimplementedSessionCoreServer) SaveCheckpoint(context.Context, *SaveCheckpointRequest) (*SaveCheckpointResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method SaveCheckpoint not implemented")
+}
+func (UnimplementedSessionCoreServer) SaveLoopCheckpoint(context.Context, *SaveLoopCheckpointRequest) (*SaveLoopCheckpointResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method SaveLoopCheckpoint not implemented")
+}
+func (UnimplementedSessionCoreServer) ClaimLoopCheckpoint(context.Context, *ClaimLoopCheckpointRequest) (*ClaimLoopCheckpointResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ClaimLoopCheckpoint not implemented")
+}
+func (UnimplementedSessionCoreServer) CloseLoopCheckpoint(context.Context, *CloseLoopCheckpointRequest) (*CloseLoopCheckpointResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method CloseLoopCheckpoint not implemented")
 }
 func (UnimplementedSessionCoreServer) ReplayThread(*ReplayThreadRequest, grpc.ServerStreamingServer[Event]) error {
 	return status.Error(codes.Unimplemented, "method ReplayThread not implemented")
@@ -883,6 +939,60 @@ func _SessionCore_SaveCheckpoint_Handler(srv interface{}, ctx context.Context, d
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(SessionCoreServer).SaveCheckpoint(ctx, req.(*SaveCheckpointRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _SessionCore_SaveLoopCheckpoint_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SaveLoopCheckpointRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SessionCoreServer).SaveLoopCheckpoint(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SessionCore_SaveLoopCheckpoint_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SessionCoreServer).SaveLoopCheckpoint(ctx, req.(*SaveLoopCheckpointRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _SessionCore_ClaimLoopCheckpoint_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ClaimLoopCheckpointRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SessionCoreServer).ClaimLoopCheckpoint(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SessionCore_ClaimLoopCheckpoint_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SessionCoreServer).ClaimLoopCheckpoint(ctx, req.(*ClaimLoopCheckpointRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _SessionCore_CloseLoopCheckpoint_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CloseLoopCheckpointRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SessionCoreServer).CloseLoopCheckpoint(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SessionCore_CloseLoopCheckpoint_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SessionCoreServer).CloseLoopCheckpoint(ctx, req.(*CloseLoopCheckpointRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -1250,6 +1360,18 @@ var SessionCore_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "SaveCheckpoint",
 			Handler:    _SessionCore_SaveCheckpoint_Handler,
+		},
+		{
+			MethodName: "SaveLoopCheckpoint",
+			Handler:    _SessionCore_SaveLoopCheckpoint_Handler,
+		},
+		{
+			MethodName: "ClaimLoopCheckpoint",
+			Handler:    _SessionCore_ClaimLoopCheckpoint_Handler,
+		},
+		{
+			MethodName: "CloseLoopCheckpoint",
+			Handler:    _SessionCore_CloseLoopCheckpoint_Handler,
 		},
 		{
 			MethodName: "GetContextAssembly",

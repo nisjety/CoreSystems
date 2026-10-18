@@ -1392,7 +1392,17 @@ type RunDetail struct {
 	CreatedAt *timestamppb.Timestamp `protobuf:"bytes,14,opt,name=created_at,json=createdAt,proto3" json:"created_at,omitempty"`
 	UpdatedAt *timestamppb.Timestamp `protobuf:"bytes,15,opt,name=updated_at,json=updatedAt,proto3" json:"updated_at,omitempty"`
 	// Arbitrary metadata.
-	Metadata      *structpb.Struct `protobuf:"bytes,16,opt,name=metadata,proto3" json:"metadata,omitempty"`
+	Metadata *structpb.Struct `protobuf:"bytes,16,opt,name=metadata,proto3" json:"metadata,omitempty"`
+	// True when a continuation can claim this run's durable loop fold now: the
+	// loop is paused for an approval or parked, the fold store is on, and the run
+	// is persistent and not ended. A flag only; the fold never appears on this
+	// message. Owner: WS03 durable loop.
+	Resumable bool `protobuf:"varint,17,opt,name=resumable,proto3" json:"resumable,omitempty"`
+	// Why the run is parked. Set only while resumable and parked; one closed
+	// token: credential_window, provider_exhausted, upstream_unavailable,
+	// crash_interrupted or reauth_required (mp_contracts::loop_fold::ParkReason).
+	// Owner: WS03 durable loop.
+	ParkReason    string `protobuf:"bytes,18,opt,name=park_reason,json=parkReason,proto3" json:"park_reason,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1537,6 +1547,20 @@ func (x *RunDetail) GetMetadata() *structpb.Struct {
 		return x.Metadata
 	}
 	return nil
+}
+
+func (x *RunDetail) GetResumable() bool {
+	if x != nil {
+		return x.Resumable
+	}
+	return false
+}
+
+func (x *RunDetail) GetParkReason() string {
+	if x != nil {
+		return x.ParkReason
+	}
+	return ""
 }
 
 // The assembly outcome of one part of the run context.
@@ -1787,7 +1811,7 @@ const file_model_plane_v1_runs_proto_rawDesc = "" +
 	"step_index\x18\f \x01(\rR\tstepIndex\x12'\n" +
 	"\x0fidempotency_key\x18\r \x01(\tR\x0eidempotencyKey\x12\x1d\n" +
 	"\n" +
-	"run_status\x18\x0e \x01(\tR\trunStatus\"\xbe\x04\n" +
+	"run_status\x18\x0e \x01(\tR\trunStatus\"\xfd\x04\n" +
 	"\tRunDetail\x12\x15\n" +
 	"\x06run_id\x18\x01 \x01(\tR\x05runId\x12\x1b\n" +
 	"\tthread_id\x18\x02 \x01(\tR\bthreadId\x12\"\n" +
@@ -1807,7 +1831,10 @@ const file_model_plane_v1_runs_proto_rawDesc = "" +
 	"created_at\x18\x0e \x01(\v2\x1a.google.protobuf.TimestampR\tcreatedAt\x129\n" +
 	"\n" +
 	"updated_at\x18\x0f \x01(\v2\x1a.google.protobuf.TimestampR\tupdatedAt\x123\n" +
-	"\bmetadata\x18\x10 \x01(\v2\x17.google.protobuf.StructR\bmetadata\"\x95\x01\n" +
+	"\bmetadata\x18\x10 \x01(\v2\x17.google.protobuf.StructR\bmetadata\x12\x1c\n" +
+	"\tresumable\x18\x11 \x01(\bR\tresumable\x12\x1f\n" +
+	"\vpark_reason\x18\x12 \x01(\tR\n" +
+	"parkReason\"\x95\x01\n" +
 	"\x0eRunContextPart\x125\n" +
 	"\x05state\x18\x01 \x01(\x0e2\x1f.model_plane.v1.RunContextStateR\x05state\x12\x1a\n" +
 	"\bincluded\x18\x02 \x01(\rR\bincluded\x12\x18\n" +
