@@ -35,7 +35,43 @@ const CHECKPOINT_RESTORED_TYPE_URL: &str = "type.googleapis.com/model_plane.v1.C
 /// Whether the fold store is switched on. Off by default: a loop keeps its fold in
 /// memory and a pause cannot be resumed from the store.
 pub(crate) fn enabled() -> bool {
+    // A test that serves an RPC through its trait method forces the answer for its own thread,
+    // so it does not race the tests that set the process environment. Compiled out of the binary.
+    #[cfg(test)]
+    if let Some(forced) = test_switch::forced() {
+        return forced;
+    }
     std::env::var(ENABLED_ENV).is_ok_and(|value| value.trim().eq_ignore_ascii_case("true"))
+}
+
+/// A per-thread override of [`enabled`] for tests. It holds only for a test that runs its call
+/// on its own thread (a `#[tokio::test]` is single-threaded), and restores the earlier value
+/// when the guard drops.
+#[cfg(test)]
+pub(crate) mod test_switch {
+    use std::cell::Cell;
+
+    thread_local! {
+        static FORCED: Cell<Option<bool>> = const { Cell::new(None) };
+    }
+
+    pub(crate) fn forced() -> Option<bool> {
+        FORCED.with(Cell::get)
+    }
+
+    pub(crate) struct Forced(Option<bool>);
+
+    impl Forced {
+        pub(crate) fn set(on: bool) -> Self {
+            Self(FORCED.with(|cell| cell.replace(Some(on))))
+        }
+    }
+
+    impl Drop for Forced {
+        fn drop(&mut self) {
+            FORCED.with(|cell| cell.set(self.0));
+        }
+    }
 }
 
 /// The refusal while the switch is off.
@@ -567,6 +603,49 @@ pub(crate) mod test_support {
             },
         )
         .await
+    }
+
+    /// Place a run inside a Space, with the authority context the table requires.
+    pub(crate) async fn put_run_in_space(pool: &PgPool, run_id: &str, space_ref: &str) {
+        sqlx::query(
+            "UPDATE runs SET space_id = $2, space_decision_ref = 'decision-1',
+                    recipient_audience_ref = 'audience-1', privacy_policy_ref = 'policy-1',
+                    resource_authorization_ref = 'resource-1', authority_revision = 1,
+                    recipient_audience_revision = 1, recipient_audience_hash = 'audience-hash-1'
+              WHERE id = $1",
+        )
+        .bind(run_id)
+        .bind(space_ref)
+        .execute(pool)
+        .await
+        .expect("put the run in a Space");
+    }
+
+    /// Remove the run's owner from `space_ref`, the way the membership consumer records it.
+    pub(crate) async fn remove_owner_from_space(pool: &PgPool, run_id: &str, space_ref: &str) {
+        sqlx::query(
+            "INSERT INTO space_membership_revocations (space_ref, org_id, subject_id)
+             SELECT $2, org_id, user_id FROM runs WHERE id = $1
+             ON CONFLICT (space_ref, subject_id) DO UPDATE SET revoked_at = NOW()",
+        )
+        .bind(run_id)
+        .bind(space_ref)
+        .execute(pool)
+        .await
+        .expect("remove the owner from the Space");
+    }
+
+    /// The owner joins `space_ref` again: the revocation is cleared.
+    pub(crate) async fn rejoin_owner_to_space(pool: &PgPool, run_id: &str, space_ref: &str) {
+        sqlx::query(
+            "DELETE FROM space_membership_revocations
+              WHERE space_ref = $2 AND subject_id = (SELECT user_id FROM runs WHERE id = $1)",
+        )
+        .bind(run_id)
+        .bind(space_ref)
+        .execute(pool)
+        .await
+        .expect("rejoin the owner to the Space");
     }
 
     /// End a run with a raw write that does not purge its fold, the way a row that
@@ -1713,5 +1792,218 @@ fn after() { WRITE }
                 assert_eq!(fold_state(&pool, &run_id).await.as_deref(), Some("parked"));
             }
         }
+    }
+}
+
+/// The three fold RPCs follow `GetRun` and `ListToolActions` on a run whose owner was removed
+/// from its Space. Every case is served through the same handler functions the RPCs call, with
+/// the switch and the key passed in, so no process environment is set.
+#[cfg(test)]
+mod revocation_tests {
+    use super::test_support::{
+        cipher, fold_for, fold_state, put_run_in_space, rejoin_owner_to_space,
+        remove_owner_from_space, scratch_pool, seed_run,
+    };
+    use super::*;
+    use crate::auth::VerifiedIdentity;
+    use crate::grpc::{
+        claim_loop_checkpoint_inner, close_loop_checkpoint_inner, save_loop_checkpoint_inner,
+    };
+    use mp_contracts::model_plane::v1 as pb;
+    use tonic::Response;
+
+    /// The refusal `GetRun` and `ListToolActions` give a run whose owner was removed.
+    const REFUSAL: &str = "Space membership required for this run";
+
+    fn key() -> Result<DescriptorCipher, Status> {
+        Ok(cipher())
+    }
+
+    async fn save_rpc(
+        pool: &PgPool,
+        caller: &VerifiedIdentity,
+        run_id: &str,
+        expected_seq: u64,
+        kind: &str,
+        pause_ref: &str,
+    ) -> Result<u64, Status> {
+        save_loop_checkpoint_inner(
+            pool,
+            caller,
+            pb::SaveLoopCheckpointRequest {
+                run_id: run_id.to_owned(),
+                expected_seq,
+                kind: kind.to_owned(),
+                fold: fold_for(run_id),
+                authority_digest: "auth-1".to_owned(),
+                pause_ref: pause_ref.to_owned(),
+                ..Default::default()
+            },
+            true,
+            key,
+        )
+        .await
+        .map(|response| response.into_inner().seq)
+    }
+
+    async fn claim_rpc(
+        pool: &PgPool,
+        caller: &VerifiedIdentity,
+        run_id: &str,
+        pause_ref: &str,
+    ) -> Result<pb::ClaimLoopCheckpointResponse, Status> {
+        claim_loop_checkpoint_inner(
+            pool,
+            caller,
+            pb::ClaimLoopCheckpointRequest {
+                run_id: run_id.to_owned(),
+                pause_ref: pause_ref.to_owned(),
+                claim_token: "token-1".to_owned(),
+            },
+            true,
+            key,
+        )
+        .await
+        .map(Response::into_inner)
+    }
+
+    async fn close_rpc(
+        pool: &PgPool,
+        caller: &VerifiedIdentity,
+        run_id: &str,
+        seq: u64,
+    ) -> Result<(), Status> {
+        close_loop_checkpoint_inner(
+            pool,
+            caller,
+            pb::CloseLoopCheckpointRequest {
+                run_id: run_id.to_owned(),
+                seq,
+                reason: "loop_finished".to_owned(),
+            },
+        )
+        .await
+        .map(|_| ())
+    }
+
+    fn assert_refused(refused: &Status, who: &str, rpc: &str) {
+        assert_eq!(refused.code(), tonic::Code::PermissionDenied, "{who} {rpc}");
+        assert_eq!(refused.message(), REFUSAL, "{who} {rpc}");
+    }
+
+    async fn stored_seq(pool: &PgPool, run_id: &str) -> i64 {
+        sqlx::query_scalar("SELECT seq FROM run_loop_checkpoints WHERE run_id = $1")
+            .bind(run_id)
+            .fetch_one(pool)
+            .await
+            .expect("read the fold seq")
+    }
+
+    async fn restored_events(pool: &PgPool, run_id: &str) -> i64 {
+        sqlx::query_scalar(
+            "SELECT COUNT(*) FROM events WHERE run_id = $1 AND event_type = 'CHECKPOINT_RESTORED'",
+        )
+        .bind(run_id)
+        .fetch_one(pool)
+        .await
+        .expect("count restore events")
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a scratch Postgres"]
+    async fn a_member_removed_from_the_runs_space_cannot_save_claim_or_close_a_fold() {
+        let Some(pool) = scratch_pool().await else { return };
+        let (run_id, org, _user) = seed_run(&pool, "persistent").await;
+        let space_ref = format!("lc-space-{}", mp_ids::new_ulid());
+        put_run_in_space(&pool, &run_id, &space_ref).await;
+        let owner = VerifiedIdentity::user_for_test(&org, "u1");
+        let service = VerifiedIdentity::service_for_test(&org, &["session:write"], false);
+
+        // While the owner is a member the run's fold is theirs to write: the control case, so
+        // the refusals below are about the removal and nothing else about the run.
+        assert_eq!(
+            save_rpc(&pool, &owner, &run_id, 0, "pause", "appr_1").await.expect("a member saves"),
+            1
+        );
+        assert_eq!(fold_state(&pool, &run_id).await.as_deref(), Some("paused"));
+
+        remove_owner_from_space(&pool, &run_id, &space_ref).await;
+
+        // The owner and a service in the org are both refused, with the refusal GetRun gives,
+        // on each of the three RPCs.
+        for (who, caller) in [("owner", &owner), ("service", &service)] {
+            let refused = save_rpc(&pool, caller, &run_id, 1, "round", "")
+                .await
+                .expect_err("a removed member's run takes no save");
+            assert_refused(&refused, who, "save");
+            let refused = claim_rpc(&pool, caller, &run_id, "appr_1")
+                .await
+                .expect_err("a removed member's run cannot be claimed");
+            assert_refused(&refused, who, "claim");
+            let refused = close_rpc(&pool, caller, &run_id, 1)
+                .await
+                .expect_err("a removed member's run cannot be closed");
+            assert_refused(&refused, who, "close");
+        }
+        // Nothing moved: the fold is the paused seq 1 it was, unclaimed, and no restore was recorded.
+        assert_eq!(fold_state(&pool, &run_id).await.as_deref(), Some("paused"));
+        assert_eq!(stored_seq(&pool, &run_id).await, 1);
+        assert_eq!(restored_events(&pool, &run_id).await, 0);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a scratch Postgres"]
+    async fn a_rejoin_restores_the_save_claim_and_close_of_a_fold() {
+        let Some(pool) = scratch_pool().await else { return };
+        let (run_id, org, _user) = seed_run(&pool, "persistent").await;
+        let space_ref = format!("lc-space-{}", mp_ids::new_ulid());
+        put_run_in_space(&pool, &run_id, &space_ref).await;
+        let owner = VerifiedIdentity::user_for_test(&org, "u1");
+        let service = VerifiedIdentity::service_for_test(&org, &["session:write"], false);
+        assert_eq!(
+            save_rpc(&pool, &owner, &run_id, 0, "pause", "appr_1").await.expect("save"),
+            1
+        );
+        remove_owner_from_space(&pool, &run_id, &space_ref).await;
+        assert_refused(
+            &claim_rpc(&pool, &service, &run_id, "appr_1").await.expect_err("removed"),
+            "service",
+            "claim",
+        );
+
+        rejoin_owner_to_space(&pool, &run_id, &space_ref).await;
+
+        // The service claims the pause, the loop saves its next round under the claimed seq and
+        // the owner closes the fold: each RPC is open again, and the fold the removal left in
+        // place is the one the claim returns.
+        let claimed = claim_rpc(&pool, &service, &run_id, "appr_1")
+            .await
+            .expect("a rejoined member's fold is claimable");
+        assert_eq!(claimed.seq, 1);
+        assert_eq!(claimed.kind, "pause");
+        assert_eq!(
+            save_rpc(&pool, &service, &run_id, 1, "round", "").await.expect("save after rejoin"),
+            2
+        );
+        close_rpc(&pool, &owner, &run_id, 2).await.expect("close after rejoin");
+        assert_eq!(fold_state(&pool, &run_id).await.as_deref(), Some("closed"));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a scratch Postgres"]
+    async fn a_run_outside_any_space_is_unaffected_by_a_revocation_row_for_its_owner() {
+        let Some(pool) = scratch_pool().await else { return };
+        let (run_id, org, _user) = seed_run(&pool, "persistent").await;
+        let owner = VerifiedIdentity::user_for_test(&org, "u1");
+        // A revocation names a Space; a run with no Space never matches it, even for the same user.
+        let other_space = format!("lc-space-{}", mp_ids::new_ulid());
+        remove_owner_from_space(&pool, &run_id, &other_space).await;
+
+        assert_eq!(
+            save_rpc(&pool, &owner, &run_id, 0, "pause", "appr_1").await.expect("unscoped save"),
+            1
+        );
+        assert_eq!(claim_rpc(&pool, &owner, &run_id, "appr_1").await.expect("unscoped claim").seq, 1);
+        close_rpc(&pool, &owner, &run_id, 1).await.expect("unscoped close");
     }
 }

@@ -642,13 +642,25 @@ mod tests {
     async fn an_unknown_status_or_class_and_a_duplicate_answer_are_errors() {
         let digest = digest_for_tests();
         let ids = vec!["act-a".to_owned()];
-        for (bad, why) in [
-            (state("act-a", "pending", "write", &digest), "unknown status"),
-            (state("act-a", "completed", "destructive", &digest), "unknown class"),
-            (state("act-a", "completed", "write", "nope"), "malformed digest"),
+        // Each value is refused for its own reason: the error names what was wrong with the row,
+        // so a row refused by some other check (a different order of checks, an earlier error)
+        // does not pass for the case it was meant to prove.
+        for (bad, expected) in [
+            (
+                state("act-a", "pending", "write", &digest),
+                "the ledger returned an unknown status",
+            ),
+            (
+                state("act-a", "completed", "destructive", &digest),
+                "the ledger returned an unknown effect class",
+            ),
+            (
+                state("act-a", "completed", "write", "nope"),
+                "the ledger returned a malformed args digest",
+            ),
         ] {
             let (result, _) = list_through(Some("tok-1"), &ids, |_| Ok(vec![bad.clone()])).await;
-            assert!(result.is_err(), "{why}");
+            assert_eq!(result.expect_err(expected), expected);
         }
         let (duplicate, _) = list_through(Some("tok-1"), &ids, |_| {
             Ok(vec![

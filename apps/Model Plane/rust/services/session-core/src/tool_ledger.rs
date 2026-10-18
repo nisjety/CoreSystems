@@ -528,13 +528,32 @@ mod tests {
             .expect("row")
         }
 
+        /// Sweep until `action_id`'s reservation is closed. One pass closes at most `BATCH` rows,
+        /// oldest first across the whole database, so on a long-lived scratch database the older
+        /// rows of other runs (a young reservation left on a finished run, say) can fill a pass
+        /// before this row is reached. The loop is bounded, and it stops early, as a failure, when
+        /// a pass closes nothing and the row is still open: then the row is not sweepable at all.
+        async fn sweep_until_closed(pool: &PgPool, run_id: &str, action_id: &str) {
+            for _ in 0..200 {
+                let closed = sweep_once(pool, 0.0).await.expect("sweep");
+                if status_of(pool, run_id, action_id).await.0 != "reserved" {
+                    return;
+                }
+                assert!(
+                    closed > 0,
+                    "a pass closed nothing and {action_id} is still reserved: it is not sweepable"
+                );
+            }
+            panic!("{action_id} was still reserved after 200 sweep passes");
+        }
+
         #[tokio::test]
         #[ignore = "requires DATABASE_URL to a scratch Postgres"]
         async fn a_reservation_of_a_finished_run_is_closed_as_unknown_outcome() {
             let Some(pool) = scratch_pool().await else { return };
             let (run_id, action_id) = seed_reservation(&pool, "failed").await;
 
-            assert!(sweep_once(&pool, 0.0).await.expect("sweep") >= 1);
+            sweep_until_closed(&pool, &run_id, &action_id).await;
 
             let (status, closed_by) = status_of(&pool, &run_id, &action_id).await;
             assert_eq!(status, "unknown_outcome");
@@ -985,8 +1004,11 @@ mod tests {
             let org = org_of(&pool, &run_id).await;
             let owner = crate::auth::VerifiedIdentity::user_for_test(&org, "u1");
 
-            // Reserved in id order (a, m, z, t1, t2), but their reservation times run the other
-            // way, so neither insertion order nor action-id order can produce the expected answer.
+            // Reserved in the order a, m, z, t2, t1, but given reservation times that follow neither
+            // that order nor action-id order (z oldest, then m, then a, then the tied t1 and t2),
+            // so neither insertion order nor action-id order alone can produce the expected answer.
+            // The tied pair is reserved t2 first so that its tie is broken by action id, not by
+            // insertion.
             for id in ["tl-a-a", "tl-a-m", "tl-a-z", "tl-a-t2", "tl-a-t1"] {
                 reserve_tool_action_inner(&pool, None, reservation(&run_id, id, "", "write"))
                     .await
@@ -1061,7 +1083,8 @@ mod tests {
                 .execute(&pool)
                 .await
                 .expect("end the run");
-            assert!(sweep_once(&pool, 0.0).await.expect("sweep") >= 1);
+            // Only the swept row is still open, and its run has ended: the loop ends when it is closed.
+            sweep_until_closed(&pool, &run_id, "tl-a-5-swept").await;
 
             let asked = [
                 "tl-a-1-completed",

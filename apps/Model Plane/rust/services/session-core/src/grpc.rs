@@ -2972,24 +2972,90 @@ mod list_tool_actions_wiring_tests {
         assert_eq!((refused.code(), refused.message()), (closed.code(), closed.message()));
     }
 
-    #[test]
-    fn the_method_reads_the_store_switch_through_the_accessor_the_checkpoint_rpcs_use() {
-        // The switch is a process environment variable, so a served call cannot assert it without
-        // racing the tests that set it. This pins that the trait method hands the same accessor's
-        // answer to the handler (whose refusal is tested with the switch passed in).
-        let source = include_str!("grpc.rs");
-        // The needles are split so this test's own text does not match them.
-        let start = source
-            .find(concat!("async fn list_tool_", "actions("))
-            .expect("the trait method");
-        let body = &source[start..];
-        let end = body
-            .find(concat!("async fn save_", "checkpoint("))
-            .expect("the next method");
-        assert!(
-            body[..end].contains(concat!("loop_checkpoint::", "enabled()")),
-            "list_tool_actions must pass loop_checkpoint::enabled() to the handler"
-        );
+    /// A caller that passes every check before the switch (the read scope, a persistent
+    /// credential), so a call goes as far as the switch lets it.
+    fn owner() -> VerifiedIdentity {
+        VerifiedIdentity::user_for_test("org-1", "u1")
+    }
+
+    /// The switch refusal, served through the trait method itself. The switch is forced for this
+    /// test's own thread (see `loop_checkpoint::test_switch`), so no process environment is set
+    /// and no other test is raced. With the switch off the answer is the closed refusal and the
+    /// pool, which goes nowhere, is never asked; with it on the call reaches the run lookup,
+    /// which cannot connect, and answers `Internal`. A trait method that ignored the switch, or
+    /// passed a constant to the handler, would fail one of the two halves.
+    #[tokio::test]
+    async fn the_method_answers_the_store_switch_it_reads_not_a_constant() {
+        let closed = loop_checkpoint::disabled();
+        {
+            let _off = loop_checkpoint::test_switch::Forced::set(false);
+            let refused = service()
+                .list_tool_actions(request(Some(owner())))
+                .await
+                .expect_err("the store is off");
+            assert_eq!((refused.code(), refused.message()), (closed.code(), closed.message()));
+        }
+        {
+            let _on = loop_checkpoint::test_switch::Forced::set(true);
+            let reached = service()
+                .list_tool_actions(request(Some(owner())))
+                .await
+                .expect_err("the lookup cannot connect");
+            assert_eq!(
+                reached.code(),
+                tonic::Code::Internal,
+                "with the store on the call passes the switch and reaches the run lookup: {reached:?}"
+            );
+        }
+    }
+
+    /// The same, for the two fold RPCs that carry the switch (the close RPC has none: it only
+    /// ever lets a loop that finished say so).
+    #[tokio::test]
+    async fn the_fold_rpcs_answer_the_store_switch_they_read_not_a_constant() {
+        let closed = loop_checkpoint::disabled();
+        let save = || {
+            Request::new(pb::SaveLoopCheckpointRequest {
+                run_id: "run-1".to_owned(),
+                ..Default::default()
+            })
+        };
+        let claim = || {
+            Request::new(pb::ClaimLoopCheckpointRequest {
+                run_id: "run-1".to_owned(),
+                ..Default::default()
+            })
+        };
+        fn with_caller<T>(mut request: Request<T>) -> Request<T> {
+            request.extensions_mut().insert(owner());
+            request
+        }
+        {
+            let _off = loop_checkpoint::test_switch::Forced::set(false);
+            let refused = service()
+                .save_loop_checkpoint(with_caller(save()))
+                .await
+                .expect_err("the store is off");
+            assert_eq!((refused.code(), refused.message()), (closed.code(), closed.message()));
+            let refused = service()
+                .claim_loop_checkpoint(with_caller(claim()))
+                .await
+                .expect_err("the store is off");
+            assert_eq!((refused.code(), refused.message()), (closed.code(), closed.message()));
+        }
+        {
+            let _on = loop_checkpoint::test_switch::Forced::set(true);
+            let reached = service()
+                .save_loop_checkpoint(with_caller(save()))
+                .await
+                .expect_err("the lookup cannot connect");
+            assert_eq!(reached.code(), tonic::Code::Internal, "{reached:?}");
+            let reached = service()
+                .claim_loop_checkpoint(with_caller(claim()))
+                .await
+                .expect_err("the lookup cannot connect");
+            assert_eq!(reached.code(), tonic::Code::Internal, "{reached:?}");
+        }
     }
 }
 
@@ -4107,6 +4173,129 @@ pub(crate) async fn list_tool_actions_inner(
     }))
 }
 
+/// The cipher the loop-checkpoint RPCs seal and open folds with.
+fn loop_checkpoint_cipher() -> Result<DescriptorCipher, Status> {
+    DescriptorCipher::from_env()
+        .map_err(|_| Status::failed_precondition("loop checkpoint key unavailable"))
+}
+
+/// A caller's right to write, claim or close a run's fold: the rule `GetRun` and
+/// `ListToolActions` apply, so the three fold RPCs and the ledger read cannot disagree.
+///
+/// Not this file's `authorize_run_owner`: that one has no Space-membership check, and a fold
+/// that is claimable while its ledger is unreadable lets a removed member's run continue
+/// through the one lane that skips the revocation. The refusal is the shared one, a
+/// permission-denied "Space membership required for this run", for any caller, owner or
+/// service, while the run's owner is removed from its Space; a rejoin restores access. The
+/// terminal purges (`purge_run`) never pass through here, so a run ends and loses its fold
+/// whatever the owner's membership.
+async fn authorize_loop_checkpoint_run(
+    pool: &PgPool,
+    caller: &VerifiedIdentity,
+    run_id: &str,
+) -> Result<(), Status> {
+    crate::run_service_grpc::authorize_run_owner(pool, caller, run_id, OwnerIntent::Mutate).await
+}
+
+/// Store a run's fold (build plan WS03 S4). `store_enabled` is the loop checkpoint switch and
+/// `cipher` the key lookup, both passed in so a test can serve the call without the process
+/// environment; the trait method hands in the real ones.
+pub(crate) async fn save_loop_checkpoint_inner(
+    pool: &PgPool,
+    caller: &VerifiedIdentity,
+    req: pb::SaveLoopCheckpointRequest,
+    store_enabled: bool,
+    cipher: impl FnOnce() -> Result<DescriptorCipher, Status>,
+) -> Result<Response<pb::SaveLoopCheckpointResponse>, Status> {
+    authorize_operation(caller, "session:write")?;
+    refuse_zdr_continuation(caller)?;
+    if !store_enabled {
+        return Err(loop_checkpoint::disabled());
+    }
+    authorize_loop_checkpoint_run(pool, caller, &req.run_id).await?;
+    let cipher = cipher()?;
+    let expected_seq = i64::try_from(req.expected_seq)
+        .map_err(|_| Status::invalid_argument("expected seq is out of range"))?;
+    let park_until = req
+        .park_until
+        .as_ref()
+        .map(|timestamp| {
+            u32::try_from(timestamp.nanos)
+                .ok()
+                .and_then(|nanos| DateTime::<Utc>::from_timestamp(timestamp.seconds, nanos))
+                .ok_or_else(|| Status::invalid_argument("park_until is out of range"))
+        })
+        .transpose()?;
+    let seq = loop_checkpoint::save(
+        pool,
+        &cipher,
+        loop_checkpoint::SaveInput {
+            run_id: &req.run_id,
+            expected_seq,
+            kind: &req.kind,
+            fold: &req.fold,
+            authority_digest: &req.authority_digest,
+            pause_ref: &req.pause_ref,
+            park_reason: &req.park_reason,
+            park_until,
+        },
+    )
+    .await?;
+    Ok(Response::new(pb::SaveLoopCheckpointResponse {
+        seq: u64::try_from(seq).map_err(|_| Status::internal("loop checkpoint seq is negative"))?,
+    }))
+}
+
+/// Claim a paused or parked run's fold. See [`save_loop_checkpoint_inner`] for the two seams.
+pub(crate) async fn claim_loop_checkpoint_inner(
+    pool: &PgPool,
+    caller: &VerifiedIdentity,
+    req: pb::ClaimLoopCheckpointRequest,
+    store_enabled: bool,
+    cipher: impl FnOnce() -> Result<DescriptorCipher, Status>,
+) -> Result<Response<pb::ClaimLoopCheckpointResponse>, Status> {
+    authorize_operation(caller, "session:write")?;
+    refuse_zdr_continuation(caller)?;
+    if !store_enabled {
+        return Err(loop_checkpoint::disabled());
+    }
+    authorize_loop_checkpoint_run(pool, caller, &req.run_id).await?;
+    let cipher = cipher()?;
+    let claimed = loop_checkpoint::claim(
+        pool,
+        &cipher,
+        &req.run_id,
+        &req.pause_ref,
+        &req.claim_token,
+    )
+    .await?;
+    Ok(Response::new(pb::ClaimLoopCheckpointResponse {
+        seq: u64::try_from(claimed.seq)
+            .map_err(|_| Status::internal("loop checkpoint seq is negative"))?,
+        fold: claimed.fold,
+        segment_no: u32::try_from(claimed.segment_no)
+            .map_err(|_| Status::internal("loop checkpoint segment is negative"))?,
+        authority_digest: claimed.authority_digest,
+        kind: claimed.kind,
+    }))
+}
+
+/// Close a run's fold once its loop has finished. Like the other two it is refused for a run
+/// whose owner was removed from its Space: that run ends, and its fold is purged, through the
+/// terminal paths, which do not ask this question.
+pub(crate) async fn close_loop_checkpoint_inner(
+    pool: &PgPool,
+    caller: &VerifiedIdentity,
+    req: pb::CloseLoopCheckpointRequest,
+) -> Result<Response<pb::CloseLoopCheckpointResponse>, Status> {
+    authorize_operation(caller, "session:write")?;
+    authorize_loop_checkpoint_run(pool, caller, &req.run_id).await?;
+    let seq = i64::try_from(req.seq)
+        .map_err(|_| Status::invalid_argument("seq is out of range"))?;
+    loop_checkpoint::close(pool, &req.run_id, seq, &req.reason).await?;
+    Ok(Response::new(pb::CloseLoopCheckpointResponse {}))
+}
+
 pub(crate) async fn finalize_tool_action_inner(
     pool: &PgPool,
     audit_publisher: Option<&crate::audit_publisher::AuditOutbox>,
@@ -5219,45 +5408,14 @@ impl SessionCore for SessionService {
         request: Request<pb::SaveLoopCheckpointRequest>,
     ) -> Result<Response<pb::SaveLoopCheckpointResponse>, Status> {
         let caller = identity(&request)?;
-        authorize_operation(&caller, "session:write")?;
-        refuse_zdr_continuation(&caller)?;
-        if !loop_checkpoint::enabled() {
-            return Err(loop_checkpoint::disabled());
-        }
-        let req = request.into_inner();
-        authorize_run_owner(&self.pool, &caller, &req.run_id, OwnerIntent::Mutate).await?;
-        let cipher = DescriptorCipher::from_env()
-            .map_err(|_| Status::failed_precondition("loop checkpoint key unavailable"))?;
-        let expected_seq = i64::try_from(req.expected_seq)
-            .map_err(|_| Status::invalid_argument("expected seq is out of range"))?;
-        let park_until = req
-            .park_until
-            .as_ref()
-            .map(|timestamp| {
-                u32::try_from(timestamp.nanos)
-                    .ok()
-                    .and_then(|nanos| DateTime::<Utc>::from_timestamp(timestamp.seconds, nanos))
-                    .ok_or_else(|| Status::invalid_argument("park_until is out of range"))
-            })
-            .transpose()?;
-        let seq = loop_checkpoint::save(
+        save_loop_checkpoint_inner(
             &self.pool,
-            &cipher,
-            loop_checkpoint::SaveInput {
-                run_id: &req.run_id,
-                expected_seq,
-                kind: &req.kind,
-                fold: &req.fold,
-                authority_digest: &req.authority_digest,
-                pause_ref: &req.pause_ref,
-                park_reason: &req.park_reason,
-                park_until,
-            },
+            &caller,
+            request.into_inner(),
+            loop_checkpoint::enabled(),
+            loop_checkpoint_cipher,
         )
-        .await?;
-        Ok(Response::new(pb::SaveLoopCheckpointResponse {
-            seq: u64::try_from(seq).map_err(|_| Status::internal("loop checkpoint seq is negative"))?,
-        }))
+        .await
     }
 
     async fn claim_loop_checkpoint(
@@ -5265,32 +5423,14 @@ impl SessionCore for SessionService {
         request: Request<pb::ClaimLoopCheckpointRequest>,
     ) -> Result<Response<pb::ClaimLoopCheckpointResponse>, Status> {
         let caller = identity(&request)?;
-        authorize_operation(&caller, "session:write")?;
-        refuse_zdr_continuation(&caller)?;
-        if !loop_checkpoint::enabled() {
-            return Err(loop_checkpoint::disabled());
-        }
-        let req = request.into_inner();
-        authorize_run_owner(&self.pool, &caller, &req.run_id, OwnerIntent::Mutate).await?;
-        let cipher = DescriptorCipher::from_env()
-            .map_err(|_| Status::failed_precondition("loop checkpoint key unavailable"))?;
-        let claimed = loop_checkpoint::claim(
+        claim_loop_checkpoint_inner(
             &self.pool,
-            &cipher,
-            &req.run_id,
-            &req.pause_ref,
-            &req.claim_token,
+            &caller,
+            request.into_inner(),
+            loop_checkpoint::enabled(),
+            loop_checkpoint_cipher,
         )
-        .await?;
-        Ok(Response::new(pb::ClaimLoopCheckpointResponse {
-            seq: u64::try_from(claimed.seq)
-                .map_err(|_| Status::internal("loop checkpoint seq is negative"))?,
-            fold: claimed.fold,
-            segment_no: u32::try_from(claimed.segment_no)
-                .map_err(|_| Status::internal("loop checkpoint segment is negative"))?,
-            authority_digest: claimed.authority_digest,
-            kind: claimed.kind,
-        }))
+        .await
     }
 
     async fn close_loop_checkpoint(
@@ -5298,13 +5438,7 @@ impl SessionCore for SessionService {
         request: Request<pb::CloseLoopCheckpointRequest>,
     ) -> Result<Response<pb::CloseLoopCheckpointResponse>, Status> {
         let caller = identity(&request)?;
-        authorize_operation(&caller, "session:write")?;
-        let req = request.into_inner();
-        authorize_run_owner(&self.pool, &caller, &req.run_id, OwnerIntent::Mutate).await?;
-        let seq = i64::try_from(req.seq)
-            .map_err(|_| Status::invalid_argument("seq is out of range"))?;
-        loop_checkpoint::close(&self.pool, &req.run_id, seq, &req.reason).await?;
-        Ok(Response::new(pb::CloseLoopCheckpointResponse {}))
+        close_loop_checkpoint_inner(&self.pool, &caller, request.into_inner()).await
     }
 
     type ReplayThreadStream = tokio_stream::wrappers::ReceiverStream<Result<pb::Event, Status>>;
@@ -11996,6 +12130,52 @@ mod tests {
         assert_eq!(fold_rows(&pool, &run_id).await, 0, "the fold goes with the run");
     }
 
+    /// A run whose owner was removed from its Space still ends, and its fold goes with it. The
+    /// three fold RPCs refuse such a run (see `loop_checkpoint::revocation_tests`), so this is the
+    /// other half: the terminal path purges in its own transaction and does not pass the owner
+    /// authorisation, so a removal cannot strand a fold that no RPC may touch.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres"]
+    async fn loop_checkpoint_a_removed_members_run_still_ends_and_loses_its_fold() {
+        use crate::loop_checkpoint::test_support::{
+            fold_rows, put_run_in_space, remove_owner_from_space, scratch_pool, seed_fold, seed_run,
+        };
+        let Some(pool) = scratch_pool().await else {
+            return;
+        };
+        let (run_id, _org, _user) = seed_run(&pool, "persistent").await;
+        let space_ref = format!("lc-space-{}", mp_ids::new_ulid());
+        put_run_in_space(&pool, &run_id, &space_ref).await;
+        seed_fold(&pool, &run_id, "pause", "appr_1", "", None)
+            .await
+            .expect("seed a paused fold");
+        remove_owner_from_space(&pool, &run_id, &space_ref).await;
+        assert_eq!(fold_rows(&pool, &run_id).await, 1);
+
+        complete_step_inner(
+            &pool,
+            None,
+            pb::CompleteStepRequest {
+                run_id: run_id.clone(),
+                step_id: "legacy-final".to_owned(),
+                status: "completed".to_owned(),
+                output: String::new(),
+                error: String::new(),
+                terminal: true,
+            },
+        )
+        .await
+        .expect("a removed member's run still terminates");
+
+        let status: String = sqlx::query_scalar("SELECT status FROM runs WHERE id = $1")
+            .bind(&run_id)
+            .fetch_one(&pool)
+            .await
+            .expect("read status");
+        assert_eq!(status, "completed");
+        assert_eq!(fold_rows(&pool, &run_id).await, 0, "the fold is purged with the run");
+    }
+
     /// Deleting a thread removes the folds of its runs. This proves the OUTCOME: no
     /// fold outlives its thread. It does not prove which statement removed it, since
     /// the foreign key from `run_loop_checkpoints` to `runs` cascades and covers the
@@ -13696,6 +13876,48 @@ mod direct_completion_db_tests {
         let response = complete(&pool, completion(&run, "Alt er klart.", &new_ulid()), &run.org_id)
             .await
             .expect("complete");
+
+        assert!(!response.already_terminal);
+        assert_eq!(run_status(&pool, &run.run_id).await, "completed");
+        assert_eq!(
+            crate::loop_checkpoint::test_support::fold_rows(&pool, &run.run_id).await,
+            0,
+            "the fold goes with the run"
+        );
+    }
+
+    /// The managed terminal path of a run whose owner was removed from its Space: the run still
+    /// ends and its fold goes with it, since the purge does not pass the owner authorisation
+    /// the three fold RPCs now apply.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres"]
+    async fn loop_checkpoint_a_removed_members_direct_completion_still_removes_the_fold() {
+        use crate::loop_checkpoint::test_support::{put_run_in_space, remove_owner_from_space};
+        let Some(pool) = disposable_pool().await else {
+            return;
+        };
+        let run = managed_run(&pool, pb::ManagedRunSource::GatewayDirect, false).await;
+        crate::loop_checkpoint::test_support::seed_fold(
+            &pool,
+            &run.run_id,
+            "pause",
+            "appr_1",
+            "",
+            None,
+        )
+        .await
+        .expect("seed fold");
+        let space_ref = format!("lc-space-{}", new_ulid());
+        put_run_in_space(&pool, &run.run_id, &space_ref).await;
+        remove_owner_from_space(&pool, &run.run_id, &space_ref).await;
+        assert_eq!(
+            crate::loop_checkpoint::test_support::fold_rows(&pool, &run.run_id).await,
+            1
+        );
+
+        let response = complete(&pool, completion(&run, "Alt er klart.", &new_ulid()), &run.org_id)
+            .await
+            .expect("a removed member's run still completes");
 
         assert!(!response.already_terminal);
         assert_eq!(run_status(&pool, &run.run_id).await, "completed");
