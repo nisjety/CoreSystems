@@ -15,7 +15,8 @@
 //!
 //! Rules (each violation is counted per `file::rule`):
 //! - R1  a sensitive field name (`url`, `query`, `title`, `host`, ...) in a
-//!       `tracing` macro. Log a count, a class, a hash or an id instead.
+//!       `tracing` macro: the level macros, `*_span!`, `span!` and `event!`.
+//!       Log a count, a class, a hash or an id instead.
 //! - R2  a raw `error = %e` / `err = ?e` field not wrapped in `zdr_log::class*`:
 //!       transport error text embeds the request URL (log `error_class`).
 //! - R3  an interpolated message literal (`info!("failed for {url}")`): the data
@@ -36,7 +37,7 @@
 //!
 //! Known limits, accepted: a field built by a helper, or a macro wrapped in
 //! another macro, is not seen; a field named innocently that holds a URL is not
-//! caught. This is a ratchet against the common mistakes, not a proof.
+//! caught; `Span::record("url", ..)` is not seen. This is a ratchet against the common mistakes, not a proof.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -53,6 +54,17 @@ fn sensitive_fields() -> &'static [String] {
     })
 }
 const LEVELS: &[&str] = &["trace", "debug", "info", "warn", "error"];
+/// Span and generic event macros. A sensitive field on a span rides along in
+/// the context of every event logged under it, so the same rules apply.
+const SPAN_MACROS: &[&str] = &[
+    "trace_span",
+    "debug_span",
+    "info_span",
+    "warn_span",
+    "error_span",
+    "span",
+    "event",
+];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Violation {
@@ -318,7 +330,7 @@ fn scan_source(rel: &str, source: &str) -> Vec<Violation> {
             name_start -= 1;
         }
         let name = &masked_text[name_start..bang];
-        if !LEVELS.contains(&name) {
+        if !LEVELS.contains(&name) && !SPAN_MACROS.contains(&name) {
             continue;
         }
         // `tracing::info!` or a bare `info!`, never `foo_info!` (the ident scan
@@ -577,6 +589,36 @@ fn log_field_lint_flags_a_new_url_field() {
         keys("fn f(query: &str) { warn!(?query, \"x\"); }\n").len(),
         1
     );
+}
+
+#[test]
+fn log_field_lint_flags_sensitive_fields_on_spans_and_generic_events() {
+    assert_eq!(
+        keys("fn f(u: &str) { let _s = tracing::info_span!(\"upstream\", url = %u); }\n"),
+        vec!["src/domains/search.rs::R1"]
+    );
+    assert_eq!(
+        keys("fn f(q: &str) { let _s = error_span!(\"x\", query = q, status = 1); }\n").len(),
+        1
+    );
+    assert_eq!(
+        keys("fn f(u: &str) { let _s = tracing::span!(Level::INFO, \"upstream\", url = %u); }\n"),
+        vec!["src/domains/search.rs::R1"]
+    );
+    assert_eq!(
+        keys("fn f(t: &str) { tracing::event!(Level::INFO, title = %t, \"x\"); }\n"),
+        vec!["src/domains/search.rs::R1"]
+    );
+    // Safe span fields, and a span with the `zdr` field the router records into.
+    assert!(keys(
+        "fn f() { let _s = tracing::info_span!(\"request\", method = \"GET\", zdr = tracing::field::Empty); }\n"
+    )
+    .is_empty());
+    // The exemption works on a span macro too.
+    assert!(keys(
+        "fn f(p: &str) {\n    // zdr-log-ok: the path only\n    let _s = tracing::info_span!(\"request\", uri = %p);\n}\n"
+    )
+    .is_empty());
 }
 
 #[test]
