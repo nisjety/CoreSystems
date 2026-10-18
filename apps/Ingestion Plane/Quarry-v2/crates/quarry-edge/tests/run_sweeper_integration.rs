@@ -79,14 +79,18 @@ async fn lifecycle_states(edge: &Edge, run_id: &str) -> Vec<BrowserTimelineLifec
         .collect()
 }
 
-/// Poll `ready` for up to a second, for the one place a test must wait for a request
-/// to reach a point inside the edge. It never sleeps for longer than 5 ms at a time.
-async fn wait_until(what: &str, ready: impl Fn() -> bool) {
+/// Poll `ready` for up to a second, for a test that must wait for a request to reach a
+/// point inside the edge. It never sleeps for longer than 5 ms at a time. It returns
+/// whether `ready` came true, so the caller asserts with the cause in its own message.
+async fn wait_for(ready: impl Fn() -> bool) -> bool {
     let deadline = Instant::now() + Duration::from_secs(1);
     while !ready() {
-        assert!(Instant::now() < deadline, "timed out waiting for {what}");
+        if Instant::now() >= deadline {
+            return false;
+        }
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
+    true
 }
 
 /// The `agent.expired` payloads the durable channel carried, in order.
@@ -529,10 +533,13 @@ async fn a_step_queued_on_the_run_lock_is_in_flight_and_holds_the_run() {
         let run = run.clone();
         async move { edge.step(&person, &run, wait_action(), None).await }
     });
-    wait_until("the queued step to count itself in flight", || {
-        handle.live.in_flight() == 1
-    })
-    .await;
+    let counted = wait_for(|| handle.live.in_flight() == 1).await;
+    assert!(
+        counted,
+        "a step queued on the run lock must count itself in flight before it waits for the lock \
+         (step() takes the in-flight guard first); in_flight is {}",
+        handle.live.in_flight()
+    );
 
     // Two minutes of silence against a one-minute limit, and the run is still held.
     assert_eq!(
@@ -787,10 +794,13 @@ async fn a_step_queued_behind_an_expiry_gets_the_resume_hint() {
         let run = run.clone();
         async move { edge.step(&person, &run, wait_action(), None).await }
     });
-    wait_until("the queued step to count itself in flight", || {
-        handle.live.in_flight() == 1
-    })
-    .await;
+    let counted = wait_for(|| handle.live.in_flight() == 1).await;
+    assert!(
+        counted,
+        "a step queued on the run lock must count itself in flight before it waits for the lock \
+         (step() takes the in-flight guard first); in_flight is {}",
+        handle.live.in_flight()
+    );
 
     // The sweeper releases the run meanwhile: closed, out of the registry, and its
     // checkpoint left active, as an expiry leaves it.
