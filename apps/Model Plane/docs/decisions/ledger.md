@@ -22,6 +22,24 @@ with a pointer forward. Newest first.
 
 ---
 
+## 2026-10-18 - Durable loop build: the fold writer, the ledger read and the proofs are built behind default-off switches, and what the reviews changed in the design
+
+**Status: implemented, source-verified, not live-verified. The 2026-10-16 entry below stays proposed.**
+
+Built and committed (plan Build ledger has the hashes): S6 fold writer (`EXECUTION_LOOP_CHECKPOINT_ENABLED`, default false), S7a `SessionCore.ListToolActions`, S9 static proofs. The DB-backed session-core suite passes through the disposable-Postgres harness (616 tests). Nothing here is production evidence.
+
+**Writer rules.** Three save points (round, pre_effect, pause). A fold is never written for a zero-retention, waived, Space or delegated run, a stage-1 continuation, or without the effect ledger. A failed pre_effect save holds that round's effectful calls (fail closed); a failed round save is skipped. Deterministic store refusals (not found, denied, unimplemented, key unavailable) fail the writer at once and hold effects for the rest of the run, with a held-back text that never invites a retry. A conversation field that scrub had to withhold makes the fold a tombstone (never resumable), and because the field stays in the history every later fold of the run is a tombstone too; only call arguments are withheld in place (empty, never redispatched). Open-round folds carry the retrieval set as of the round start and the pre_effect fold carries the outcome of every call refused before dispatch. A content-refused pause fold is saved as a tombstone under the same pause_ref so the row behind an approval is never the earlier resumable fold.
+
+**Ledger read.** An action absent from a ListToolActions answer is UNKNOWN: it may be unreserved, uncommitted or hidden. Only a not_run row, or a completed row with its output, licenses a re-dispatch decision. The read, and the three fold RPCs, follow GetRun's Space-revocation rule; the read answers only while the store switch is on and only for persistent runs.
+
+**Supersedes reconcile.json:** the dropped tombstone-on-failed-pause step is reinstated for content refusals only, and `FoldWriter::seeded` takes the WriterGate (the reconcile signature had none).
+
+**Rejected:** closing the paused fold at stage 1 by claiming it to learn its seq (a false CHECKPOINT_RESTORED event, and a fold left on a lease when the close fails). Stage 1 makes no fold call; the fold it leaves behind is not resumable in practice because its approval is consumed, and the terminal purge removes it.
+
+**Obligations for S7b, S7c and S8:** treat a fold whose approval is consumed as not resumable; an in-place resume cross-checks the ledger against the fold and falls back to stage 1 when the ledger holds actions the fold does not account for (a writer that went off after an earlier success leaves a stale fold behind an effect that ran); an empty step_id call is never dispatched by a resume; a PermissionDenied from claim, save, close or the ledger read means hold, never dispatch an effectful dangling call; S8 must require the pause_ref match for an approval pause.
+
+**Conservative defaults taken for the open owner decisions** (all reversible, all behind switches): every consumed approval is refused with 409; a waived run keeps cold approvals and never gets loop mode, consume or continue; a widened `/continue` request is refused rather than narrowed; the writer requires the ledger. Still open for the owner: the S8 parking design, the UI plan-approval gap (WS14 S2a, below), the S9 live-proof trigger, and when the 2026-10-16 entry flips.
+
 ## 2026-10-17 - The chat UI reaches the agent route only in plan mode, so no UI run can reach an effectful tool, and an approved plan has no path to execution
 
 **State:** `proposed`
