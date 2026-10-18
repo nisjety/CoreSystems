@@ -163,6 +163,7 @@ pub mod navigation;
 pub mod persistent_session;
 pub mod pool;
 pub mod session;
+pub mod slots;
 
 #[cfg(feature = "kernel")]
 pub use kernel::{KernelConfig, KernelDriver};
@@ -396,6 +397,79 @@ pub trait BrowserEgressProxyProvider: Send + Sync {
     async fn release_session(&self, session_key: &str);
 }
 
+/// How a browser driver's own processes are doing, for `/ready`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BrowserHealthState {
+    /// The driver runs no local browser (a remote provider, a test double).
+    NotApplicable,
+    /// No browser has been launched yet. Ready: the first run launches one.
+    Idle,
+    Healthy,
+    /// Some launched browsers are unhealthy or dead, not all.
+    Degraded,
+    /// Every launched browser is unhealthy or dead.
+    Unhealthy,
+}
+
+/// One browser process of a local driver. Content-free: counts and states only.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SlotHealth {
+    pub slot: usize,
+    pub status: String,
+    pub generation: u64,
+    pub sessions: usize,
+    pub pages: usize,
+    /// `None` until the first probe answered.
+    pub healthy: Option<bool>,
+    pub probe_failures: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BrowserHealth {
+    pub state: BrowserHealthState,
+    /// 0 = no cap.
+    pub max_sessions: usize,
+    pub sessions_open: usize,
+    pub slots: Vec<SlotHealth>,
+}
+
+impl BrowserHealth {
+    pub fn not_applicable() -> Self {
+        Self {
+            state: BrowserHealthState::NotApplicable,
+            max_sessions: 0,
+            sessions_open: 0,
+            slots: Vec::new(),
+        }
+    }
+
+    /// The overall state from the slots: never launched is `Idle`, every
+    /// launched slot dead or unhealthy is `Unhealthy`, some is `Degraded`.
+    pub fn from_slots(max_sessions: usize, sessions_open: usize, slots: Vec<SlotHealth>) -> Self {
+        let launched: Vec<&SlotHealth> = slots.iter().filter(|slot| slot.generation > 0).collect();
+        let bad = launched
+            .iter()
+            .filter(|slot| slot.status == "dead" || slot.healthy == Some(false))
+            .count();
+        let state = if launched.is_empty() {
+            BrowserHealthState::Idle
+        } else if bad == launched.len() {
+            BrowserHealthState::Unhealthy
+        } else if bad > 0 {
+            BrowserHealthState::Degraded
+        } else {
+            BrowserHealthState::Healthy
+        };
+        Self {
+            state,
+            max_sessions,
+            sessions_open,
+            slots,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum VerifiedTargetOperation {
@@ -412,7 +486,15 @@ pub trait BrowserDriver: Send + Sync {
     }
 
     async fn acquire(&self, lease: &BrowserLease) -> QuarryResult<BrowserSession>;
+    /// Must be idempotent: releasing a session twice (or a clone of a released
+    /// one) is not an error and changes nothing the second time.
     async fn release(&self, session: BrowserSession) -> QuarryResult<()>;
+
+    /// How this driver's own browser processes are doing, for `/ready`.
+    /// Default: not applicable (remote providers, test doubles).
+    async fn health(&self) -> BrowserHealth {
+        BrowserHealth::not_applicable()
+    }
 
     /// W2 — return the live-view reference for the given session, if
     /// the driver has one. Cloud providers (Browserbase, Browserless,
