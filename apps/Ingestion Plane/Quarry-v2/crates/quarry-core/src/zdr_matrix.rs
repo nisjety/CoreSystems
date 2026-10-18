@@ -339,7 +339,9 @@ pub const ROWS: &[Row] = &[
         status: Status::Enforced,
         enforced_by: &["agent_routes::tests::zdr_expiry_writes_no_timeline_row_and_no_checkpoint"],
         basis: "a ZDR run writes no checkpoint, timeline row or receipt and logs under a ZDR span",
-        log: Log::Unverified,
+        log: Log::Canary {
+            test: "zdr_log_capture::a_zdr_agent_start_logs_no_url",
+        },
     },
     Row {
         id: "agent_persistent_profile",

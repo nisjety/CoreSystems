@@ -22,6 +22,12 @@ use tracing_subscriber::EnvFilter;
 mod support;
 #[path = "support/zdr_harness.rs"]
 mod zdr_harness;
+// Only for its `RecordingDriver`: this binary's tokens come from zdr_harness, and
+// agent_harness's own fixture() is never called here, so the two do not fight over
+// the JWKS environment.
+#[cfg(feature = "browser-agent")]
+#[path = "support/agent_harness.rs"]
+mod agent_harness;
 
 use zdr_harness::{user_in_standard_org, user_in_zdr_org, Harness};
 
@@ -215,5 +221,162 @@ async fn the_request_span_never_logs_the_query_string() {
     assert!(
         !logged().contains(&marker),
         "a request span recorded the query string"
+    );
+}
+
+// ---- agent runs ------------------------------------------------------------
+
+/// The recording browser double of `support/agent_harness.rs`, plus what a real
+/// driver does when it opens a page: it says so, with the address, at debug.
+/// Nothing else on the agent path logs the address of the page a run is asked to
+/// open, so without this line the capture below would pass whatever the filter
+/// did; with it, the test fails if a ZDR run's step ever runs outside the ZDR span
+/// (a spawned task that lost it, a layer that reordered the mark).
+#[cfg(feature = "browser-agent")]
+struct UrlLoggingDriver(agent_harness::RecordingDriver);
+
+#[cfg(feature = "browser-agent")]
+#[async_trait::async_trait]
+impl quarry_browser::BrowserDriver for UrlLoggingDriver {
+    fn capabilities(&self) -> quarry_browser::BrowserDriverCapabilities {
+        self.0.capabilities()
+    }
+
+    async fn acquire(
+        &self,
+        lease: &quarry_core::lease::BrowserLease,
+    ) -> quarry_core::QuarryResult<quarry_browser::BrowserSession> {
+        self.0.acquire(lease).await
+    }
+
+    async fn release(
+        &self,
+        session: quarry_browser::BrowserSession,
+    ) -> quarry_core::QuarryResult<()> {
+        self.0.release(session).await
+    }
+
+    async fn configure_egress_policy(
+        &self,
+        session: &quarry_browser::BrowserSession,
+        policy: quarry_browser::BrowserEgressPolicy,
+    ) -> quarry_core::QuarryResult<()> {
+        self.0.configure_egress_policy(session, policy).await
+    }
+
+    async fn goto(
+        &self,
+        session: &quarry_browser::BrowserSession,
+        url: &str,
+    ) -> quarry_core::QuarryResult<()> {
+        tracing::debug!(url, "agent driver opening a page");
+        self.0.goto(session, url).await
+    }
+
+    async fn content(
+        &self,
+        session: &quarry_browser::BrowserSession,
+    ) -> quarry_core::QuarryResult<bytes::Bytes> {
+        self.0.content(session).await
+    }
+
+    async fn screenshot(
+        &self,
+        session: &quarry_browser::BrowserSession,
+        full_page: bool,
+    ) -> quarry_core::QuarryResult<bytes::Bytes> {
+        self.0.screenshot(session, full_page).await
+    }
+
+    async fn live_frame(
+        &self,
+        session: &quarry_browser::BrowserSession,
+        options: quarry_browser::LiveFrameOptions,
+    ) -> quarry_core::QuarryResult<quarry_browser::LiveFrame> {
+        self.0.live_frame(session, options).await
+    }
+
+    async fn pdf(
+        &self,
+        session: &quarry_browser::BrowserSession,
+    ) -> quarry_core::QuarryResult<bytes::Bytes> {
+        self.0.pdf(session).await
+    }
+}
+
+/// Start an agent run for `bearer`, ask it to open `url`, and return the run id.
+#[cfg(feature = "browser-agent")]
+async fn start_a_run_and_open(bearer: &str, url: &str) -> String {
+    let harness = Harness::start_with(|state| quarry_edge::state::AppState {
+        agent_driver: Arc::new(UrlLoggingDriver(agent_harness::RecordingDriver::default())),
+        ..state
+    })
+    .await;
+
+    let started = harness.post(bearer, "/v1/agent/runs", json!({})).await;
+    assert_eq!(started.status().as_u16(), 200, "the run must start");
+    let body: Value = started.json().await.expect("start answers JSON");
+    let run_id = body["data"]["run_id"]
+        .as_str()
+        .expect("start answers a run_id")
+        .to_owned();
+
+    let step = harness
+        .post(
+            bearer,
+            &format!("/v1/agent/runs/{run_id}/step"),
+            json!({ "action": { "type": "navigate", "url": url } }),
+        )
+        .await;
+    assert_eq!(
+        step.status().as_u16(),
+        200,
+        "the navigate step must run for the capture to mean anything: {}",
+        step.text().await.unwrap_or_default()
+    );
+    run_id
+}
+
+#[cfg(feature = "browser-agent")]
+#[tokio::test]
+async fn a_zdr_agent_start_logs_no_url() {
+    capture();
+    let (url, marker) = probe_url();
+
+    let run_id = start_a_run_and_open(&user_in_zdr_org(), &url).await;
+
+    let log = logged();
+    assert!(
+        !log.contains(&marker),
+        "a ZDR agent run put the page URL in a log line:\n{}",
+        log.lines()
+            .filter(|l| l.contains(&marker))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+    // The run did happen and the capture saw it: its own requests are logged,
+    // marked ZDR, without a URL.
+    assert!(
+        log.lines()
+            .any(|l| l.contains(&run_id) && l.contains("\"zdr\":true")),
+        "the ZDR run's requests must still be logged, marked zdr"
+    );
+}
+
+#[cfg(feature = "browser-agent")]
+#[tokio::test]
+async fn a_non_zdr_agent_run_logs_the_url_the_driver_is_asked_to_open() {
+    // Control: the line the test above keeps out of a ZDR log is really emitted on
+    // this path and really captured, so that test passing is not a quiet subscriber.
+    capture();
+    let (url, marker) = probe_url();
+
+    start_a_run_and_open(&user_in_standard_org(), &url).await;
+
+    assert!(
+        logged()
+            .lines()
+            .any(|l| l.contains("agent driver opening a page") && l.contains(&marker)),
+        "a non-ZDR agent run logs the URL at debug"
     );
 }

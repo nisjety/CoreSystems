@@ -360,8 +360,8 @@
       ],
       "id": "agent_run",
       "issue": null,
-      "log": "log_unverified",
-      "log_canary": null,
+      "log": "canary",
+      "log_canary": "zdr_log_capture::a_zdr_agent_start_logs_no_url",
       "routes": [
         "/v1/agent/runs"
       ],
