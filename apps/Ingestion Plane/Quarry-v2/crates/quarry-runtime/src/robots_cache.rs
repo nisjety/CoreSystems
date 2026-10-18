@@ -129,6 +129,7 @@ impl RobotsCache {
             Ok(Some(body)) => Some(RobotsTxt::parse(&body)),
             Ok(None) => None,
             Err(e) => {
+                // zdr-log-ok: RobotsCache has no production caller (it is only re-exported from quarry-runtime); a caller that serves a ZDR request must convert this line to error_class first
                 tracing::warn!(host, error = %e, "robots.txt fetch failed; cached negative");
                 None
             }

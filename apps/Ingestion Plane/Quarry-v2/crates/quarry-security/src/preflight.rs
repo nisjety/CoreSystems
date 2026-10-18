@@ -91,7 +91,7 @@ impl DefaultEngine {
     async fn maybe_persist(&self) {
         if let Some(p) = &self.persist_path {
             if let Err(e) = self.save_snapshot(p).await {
-                tracing::warn!(error = %e, path = %p.display(), "blocklist persist failed");
+                tracing::warn!(error_class = ?e.kind(), path = %p.display(), "blocklist persist failed");
             }
         }
     }

@@ -239,7 +239,6 @@ impl FallbackDriver {
                         warn!(
                             driver = ?kind,
                             error_class = e.code.wire_name(),
-                            url = %url,
                             shell_text_chars = visible_text_len(&shell.body),
                             "browser fallback failed after JS-shell detection; returning the static shell response"
                         );

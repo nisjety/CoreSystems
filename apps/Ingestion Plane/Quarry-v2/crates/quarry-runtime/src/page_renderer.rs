@@ -187,6 +187,7 @@ impl PageRenderer {
                     png = processed.clean_png;
                 }
                 Err(e) => {
+                    // zdr-log-ok: render_and_emit returns early when page_image_persistence_allowed(zdr) is false, so a ZDR request never reaches the visual processor
                     tracing::warn!(
                         error = %e,
                         document_id,

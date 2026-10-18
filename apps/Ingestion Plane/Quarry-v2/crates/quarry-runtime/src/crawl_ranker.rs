@@ -74,6 +74,7 @@ impl CrawlRanker for ModelPlaneRanker {
         let body = match result {
             Ok(resp) => resp.content,
             Err(e) => {
+                // zdr-log-ok: ModelPlaneRanker has no production caller (quarry-edge's map route uses LexicalRanker) and ranks crawl frontiers, a durable job ZDR refuses
                 tracing::warn!(error = %e, "ranker fell back to lexical scoring");
                 return self.fallback.rank(prompt, urls).await;
             }
@@ -90,6 +91,7 @@ impl CrawlRanker for ModelPlaneRanker {
                 Ok(ranked)
             }
             Err(e) => {
+                // zdr-log-ok: same as above: ModelPlaneRanker has no production caller and serves a durable crawl job
                 tracing::warn!(error = %e, "ranker JSON parse failed; falling back");
                 self.fallback.rank(prompt, urls).await
             }

@@ -384,6 +384,7 @@ impl LocalIndexWriteback {
         };
         tokio::spawn(async move {
             if let Err(e) = idx.add_document(doc).await {
+                // zdr-log-ok: `decide` skips the write-back when the ZDR guard blocks an artifact write, so a ZDR request never reaches this detached task
                 tracing::warn!(error = %e, "local index add_document failed (non-fatal)");
             }
         });

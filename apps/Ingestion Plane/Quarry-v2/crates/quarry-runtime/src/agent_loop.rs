@@ -131,6 +131,7 @@ impl AgentLoop {
                 .publish(self.run_id.clone(), event_type, payload, idempotency_key)
                 .await
             {
+                // zdr-log-ok: inside `if !self.zdr.is_active()` above; a ZDR run never publishes to the bus, so this line is never emitted for one
                 tracing::warn!(error = %e, "agent event bus publish failed");
             }
         }

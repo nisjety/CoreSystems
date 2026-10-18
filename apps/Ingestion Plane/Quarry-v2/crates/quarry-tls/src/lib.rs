@@ -339,8 +339,8 @@ async fn fetch_with_client(client: &Client, url: &Url) -> QuarryResult<TlsFetchR
     let status = resp.status().as_u16();
     let final_url = match Url::parse(&resp.uri().to_string()) {
         Ok(parsed) => parsed,
-        Err(err) => {
-            tracing::warn!(error = %err, "failed to parse wreq response URI; falling back to requested URL");
+        Err(_) => {
+            tracing::warn!(error_class = "response_uri_parse", "failed to parse wreq response URI; falling back to requested URL");
             url.clone()
         }
     };

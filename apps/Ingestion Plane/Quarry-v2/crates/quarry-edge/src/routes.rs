@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::timeout::TimeoutLayer;
 use tower_http::trace::TraceLayer;
+use tracing::Instrument as _;
 use url::Url;
 
 use quarry_core::cache::{CacheMode, CachePolicy};
@@ -1328,6 +1329,10 @@ async fn scrape_stream(
     // Tenant enforcement: claim wins over any client-supplied org_id.
     let _ = &req.org_id;
     let org_id = claims.org_id.clone();
+    // The request span, taken here and handed to the runner's task below:
+    // `tokio::spawn` does not inherit the caller's span, so without this the
+    // runner would log without the ZDR mark and the event filter could not see it.
+    let request_span = tracing::Span::current();
     let stream = async_stream::stream! {
         let url = match req.url.parse::<Url>() {
             Ok(u) => u,
@@ -1402,7 +1407,7 @@ async fn scrape_stream(
                 }
             }
             res
-        });
+        }.instrument(request_span));
 
         // Drain broadcast events until the runner finishes and the channel drains.
         loop {

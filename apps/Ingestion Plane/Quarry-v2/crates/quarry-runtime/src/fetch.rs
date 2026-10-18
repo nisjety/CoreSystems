@@ -282,7 +282,6 @@ impl StaticDriver {
                     ));
                     if is_retryable_egress_error(err.code) && idx + 1 < plan.len() {
                         tracing::warn!(
-                            host = %host,
                             error_class = err.code.wire_name(),
                             attempt = idx,
                             egress = decision.identity.label(),
