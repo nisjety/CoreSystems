@@ -37,7 +37,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use serde_json::json;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
@@ -52,6 +52,7 @@ use ::chromiumoxide::cdp::browser_protocol::page::{
 use ::chromiumoxide::cdp::js_protocol::runtime::{
     CallArgument, CallFunctionOnParams, EventConsoleApiCalled, ReleaseObjectParams,
 };
+use ::chromiumoxide::error::CdpError;
 use ::chromiumoxide::handler::viewport::Viewport as ChromiumViewport;
 use ::chromiumoxide::{Browser, BrowserConfig, Page};
 use futures::StreamExt;
@@ -69,25 +70,40 @@ use crate::actions::ScrollTarget;
 use crate::deadlines::{best_effort, deadline, read_with_retry, timeout_error, with_deadline, Op};
 use crate::navigation::{guard_navigation_target, guard_page_request_target};
 use crate::session::{Cookie, ProfileStore, SessionSnapshot, Viewport};
+use crate::slots::{
+    Admission, BrowserPoolConfig, LossReason, PageRefusal, ReaperMode, SlotBook, SlotId,
+    SlotStatus,
+};
 use crate::{
     BrowserDevtoolsEvent, BrowserDownloadedFile, BrowserDriver, BrowserDriverCapabilities,
-    BrowserEgressPolicy, BrowserEgressProxyProvider, BrowserNativeProjection, BrowserNativeTarget,
-    BrowserSession, BrowserTab, LiveFrame, LiveFrameFormat, LiveFrameOptions, SessionInner,
-    VerifiedTargetAction, VerifiedTargetOperation,
+    BrowserEgressPolicy, BrowserEgressProxyProvider, BrowserHealth, BrowserNativeProjection,
+    BrowserNativeTarget, BrowserSession, BrowserTab, LiveFrame, LiveFrameFormat, LiveFrameOptions,
+    SessionInner, SlotHealth, VerifiedTargetAction, VerifiedTargetOperation,
 };
 
 const LIVE_FRAME_CACHE_TTL_MS: u64 = 250;
 const DEVTOOLS_EVENT_BUFFER_LIMIT: usize = 512;
 const MAX_GOVERNED_DOWNLOAD_BYTES: u64 = 25 * 1024 * 1024;
+/// The driver runs one browser process today (K = 1, ADR-10).
+const SLOT: SlotId = 0;
+/// How long a retired browser gets to exit before its directories go.
+const BROWSER_EXIT_WAIT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone)]
 struct CachedLiveFrame {
-    session_key: String,
     tab_id: String,
     page_epoch: u64,
     options: LiveFrameOptions,
     captured_at: Instant,
     frame: LiveFrame,
+}
+
+/// One session's live-frame cache. The epoch changes whenever the session's
+/// page changes, so a capture that started before the change is not stored.
+#[derive(Debug)]
+struct LiveFrameSlot {
+    epoch: u64,
+    cached: Option<CachedLiveFrame>,
 }
 
 #[derive(Debug, Clone)]
@@ -125,8 +141,28 @@ pub struct ChromiumoxideDriver {
     /// and clears per-browser state, so tests assert it stays at one while
     /// leases with different viewports come and go.
     launches: Arc<AtomicUsize>,
-    page_epoch: Arc<Mutex<u64>>,
-    live_frame_cache: Arc<Mutex<Option<CachedLiveFrame>>>,
+    /// Who holds a session, on which slot, with how many pages (slots.rs).
+    /// Innermost lock: a `std` mutex, never held across an `.await`.
+    book: Arc<std::sync::Mutex<SlotBook>>,
+    pool: BrowserPoolConfig,
+    /// Where the running browser keeps its profile and crash dumps; removed
+    /// when that browser is retired.
+    launch_dirs: Arc<Mutex<Option<ChromiumLaunchDirs>>>,
+    /// One tab attach at a time per session, so two attaches cannot each
+    /// create a browser context; attaches of different sessions run in
+    /// parallel (the browser lock is held only while creating).
+    attach_locks: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
+    /// The reaper and the prober, started at the first `acquire`.
+    background: Arc<std::sync::Mutex<Vec<JoinHandle<()>>>>,
+    background_started: Arc<AtomicBool>,
+    /// False for the views the background tasks hold: only the driver itself
+    /// tears down on drop.
+    owner: bool,
+    /// Test hook: hold every tab attach this long after its page exists.
+    #[cfg(test)]
+    attach_stall: Arc<std::sync::Mutex<Option<Duration>>>,
+    frame_epochs: Arc<AtomicU64>,
+    live_frames: Arc<Mutex<HashMap<String, LiveFrameSlot>>>,
     devtools_events: Arc<Mutex<HashMap<String, Vec<BrowserDevtoolsEvent>>>>,
     devtools_sequence: Arc<Mutex<u64>>,
     egress_receipts: Arc<Mutex<HashMap<String, Vec<BrowserEgressReceipt>>>>,
@@ -159,13 +195,23 @@ impl Default for ChromiumoxideDriver {
 
 impl ChromiumoxideDriver {
     pub fn new() -> Self {
+        let pool = BrowserPoolConfig::from_env();
         Self {
             browser: Arc::new(Mutex::new(None)),
             pages: Arc::new(Mutex::new(HashMap::new())),
             handler: Arc::new(Mutex::new(None)),
             launches: Arc::new(AtomicUsize::new(0)),
-            page_epoch: Arc::new(Mutex::new(0)),
-            live_frame_cache: Arc::new(Mutex::new(None)),
+            book: Arc::new(std::sync::Mutex::new(SlotBook::new(pool.slot_config()))),
+            pool,
+            launch_dirs: Arc::new(Mutex::new(None)),
+            attach_locks: Arc::new(Mutex::new(HashMap::new())),
+            background: Arc::new(std::sync::Mutex::new(Vec::new())),
+            background_started: Arc::new(AtomicBool::new(false)),
+            owner: true,
+            #[cfg(test)]
+            attach_stall: Arc::new(std::sync::Mutex::new(None)),
+            frame_epochs: Arc::new(AtomicU64::new(0)),
+            live_frames: Arc::new(Mutex::new(HashMap::new())),
             devtools_events: Arc::new(Mutex::new(HashMap::new())),
             devtools_sequence: Arc::new(Mutex::new(0)),
             egress_receipts: Arc::new(Mutex::new(HashMap::new())),
@@ -198,24 +244,322 @@ impl ChromiumoxideDriver {
         self
     }
 
+    /// Replace the pool settings read from the environment (session cap, page
+    /// cap, reaper and prober). Call before the first `acquire`.
+    pub fn with_pool_config(mut self, pool: BrowserPoolConfig) -> Self {
+        self.pool = pool;
+        self.book = Arc::new(std::sync::Mutex::new(SlotBook::new(pool.slot_config())));
+        self
+    }
+
+    /// A non-owning view over the same state, for the background tasks. Its
+    /// drop tears nothing down.
+    fn share(&self) -> Self {
+        Self {
+            browser: self.browser.clone(),
+            pages: self.pages.clone(),
+            handler: self.handler.clone(),
+            launches: self.launches.clone(),
+            book: self.book.clone(),
+            pool: self.pool,
+            launch_dirs: self.launch_dirs.clone(),
+            attach_locks: self.attach_locks.clone(),
+            background: self.background.clone(),
+            background_started: self.background_started.clone(),
+            owner: false,
+            #[cfg(test)]
+            attach_stall: self.attach_stall.clone(),
+            frame_epochs: self.frame_epochs.clone(),
+            live_frames: self.live_frames.clone(),
+            devtools_events: self.devtools_events.clone(),
+            devtools_sequence: self.devtools_sequence.clone(),
+            egress_receipts: self.egress_receipts.clone(),
+            egress_sequence: self.egress_sequence.clone(),
+            egress_policies: self.egress_policies.clone(),
+            pinned_egress_proxy: self.pinned_egress_proxy.clone(),
+            proxy_receipt_cursors: self.proxy_receipt_cursors.clone(),
+            session_telemetry: self.session_telemetry.clone(),
+            dialogs: self.dialogs.clone(),
+            dialog_pages: self.dialog_pages.clone(),
+            dialog_sequence: self.dialog_sequence.clone(),
+            profiles: self.profiles.clone(),
+        }
+    }
+
+    /// The slot book. Never hold the guard across an `.await`.
+    fn book(&self) -> std::sync::MutexGuard<'_, SlotBook> {
+        self.book
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     /// How many browsers this driver has launched (tests only).
     #[cfg(test)]
     fn launch_count(&self) -> usize {
         self.launches.load(Ordering::SeqCst)
     }
 
-    /// Launch the browser if there is none. A viewport is never a reason to
-    /// launch: it is applied per page (see `apply_page_hygiene`), so a lease
-    /// that asks for a different size cannot close the browser under the other
-    /// sessions that are using it.
+    /// Start the reaper and the prober once, on the first `acquire` (a driver
+    /// that is only constructed, as in most edge tests, starts nothing).
+    /// `QUARRY_BROWSER_REAPER=0` starts neither.
+    fn start_background(&self) {
+        if self.pool.reaper == ReaperMode::Off
+            || self.background_started.swap(true, Ordering::SeqCst)
+        {
+            return;
+        }
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            self.background_started.store(false, Ordering::SeqCst);
+            return;
+        };
+        let reaper = {
+            let view = self.share();
+            let every = self.pool.reaper_interval;
+            runtime.spawn(async move {
+                let mut ticks = tokio::time::interval(every);
+                ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                ticks.tick().await;
+                loop {
+                    ticks.tick().await;
+                    view.reaper_tick().await;
+                }
+            })
+        };
+        let prober = {
+            let view = self.share();
+            let every = self.pool.probe_interval;
+            runtime.spawn(async move {
+                let mut ticks = tokio::time::interval(every);
+                ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                ticks.tick().await;
+                loop {
+                    ticks.tick().await;
+                    view.probe_tick().await;
+                }
+            })
+        };
+        let mut background = self
+            .background
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        background.push(reaper);
+        background.push(prober);
+    }
+
+    /// One pass of the idle reaper. In `log` mode it only says what it would
+    /// do; with `1` it tears the sessions down (without saving their profile:
+    /// an abandoned session's state is not a checkpoint anyone asked for).
+    async fn reaper_tick(&self) {
+        let enforce = self.pool.reaper == ReaperMode::On;
+        let due = self.book().reap_idle(Instant::now(), enforce);
+        for reaped in due {
+            if enforce {
+                self.teardown_session(&reaped.session_key).await;
+                tracing::info!(
+                    reason = reaped.reason.as_str(),
+                    slot = reaped.slot,
+                    pages = reaped.pages,
+                    "browser session reaped"
+                );
+            } else {
+                tracing::info!(
+                    reason = reaped.reason.as_str(),
+                    slot = reaped.slot,
+                    pages = reaped.pages,
+                    mode = "log",
+                    "browser session would be reaped"
+                );
+            }
+        }
+    }
+
+    /// One pass of the health prober over the slot. A browser whose process
+    /// has exited is marked dead and relaunched here, so an edge that answers
+    /// `/ready` 503 (and so gets no traffic) can still recover. An unhealthy
+    /// slot that holds sessions is never killed; an empty one is recycled.
+    async fn probe_tick(&self) {
+        let Some((status, generation)) = self
+            .book()
+            .slot(SLOT)
+            .map(|slot| (slot.status, slot.generation))
+        else {
+            return;
+        };
+        if generation == 0 {
+            // Never launched: nothing to probe, and that is ready.
+            return;
+        }
+        let exited = {
+            let mut guard = self.browser.lock().await;
+            match guard.as_mut() {
+                Some(browser) => matches!(browser.try_wait(), Ok(Some(_))),
+                None => false,
+            }
+        };
+        if exited {
+            self.on_browser_lost(SLOT, generation).await;
+        }
+        if exited || status == SlotStatus::Dead {
+            if let Err(error) = self.ensure_browser().await {
+                tracing::warn!(
+                    slot = SLOT,
+                    code = error.code.wire_name(),
+                    "browser slot relaunch failed"
+                );
+            }
+            return;
+        }
+        let ok = match self.run_probe(SLOT).await {
+            Ok(()) => true,
+            Err(error) => {
+                tracing::debug!(
+                    slot = SLOT,
+                    code = error.code.wire_name(),
+                    "browser health probe failed"
+                );
+                false
+            }
+        };
+        let (became_unhealthy, unhealthy) = {
+            let mut book = self.book();
+            let became = book.record_probe(SLOT, generation, ok);
+            let unhealthy = book
+                .slot(SLOT)
+                .is_some_and(|slot| slot.healthy == Some(false));
+            (became, unhealthy)
+        };
+        if became_unhealthy {
+            tracing::warn!(slot = SLOT, generation, "browser slot unhealthy");
+        }
+        // Nobody is using it: recycle. With sessions on it, never. The count is
+        // read again under the book lock that marks it dead, so a session
+        // admitted while the probe ran is never thrown away.
+        let recycled = unhealthy && {
+            let mut book = self.book();
+            let empty = book.slot(SLOT).is_some_and(|slot| slot.sessions == 0);
+            if empty {
+                book.mark_dead(SLOT, generation, Instant::now());
+            }
+            empty
+        };
+        if recycled {
+            tracing::warn!(slot = SLOT, generation, "browser slot recycled");
+            if let Err(error) = self.ensure_browser().await {
+                tracing::warn!(
+                    slot = SLOT,
+                    code = error.code.wire_name(),
+                    "browser slot relaunch failed"
+                );
+            }
+        }
+    }
+
+    /// Open and close a page in a throwaway context, under `Op::HealthProbe`.
+    /// The context is made like a session's (`create_session_context`), so it
+    /// goes through the pinned egress proxy when there is one, with a deny-all
+    /// policy installed first. It never touches a session's pages, policies or
+    /// receipts.
+    async fn run_probe(&self, slot: SlotId) -> QuarryResult<()> {
+        let probe_key = format!("probe:{slot}");
+        let mut guard = AttachGuard::new(self, probe_key.clone(), false);
+        let outcome = with_deadline(Op::HealthProbe, async {
+            if let Some(provider) = &self.pinned_egress_proxy {
+                provider
+                    .configure_policy(&probe_key, BrowserEgressPolicy::deny_all())
+                    .await?;
+            }
+            let context_id = self.create_session_context(&probe_key).await?;
+            guard.context = Some(context_id.clone());
+            let params = CreateTargetParamsBuilder::default()
+                .url("about:blank")
+                .browser_context_id(context_id)
+                .build()
+                .map_err(|error| {
+                    QuarryError::new(ErrorCode::Internal, "probe page params failed")
+                        .with_details(json!({ "error": error }))
+                })?;
+            let page = {
+                let browser_guard = self.browser.lock().await;
+                let browser = browser_guard.as_ref().ok_or_else(browser_missing)?;
+                browser.new_page(params).await.map_err(|_| {
+                    QuarryError::new(ErrorCode::DriverFailed, "probe page did not open")
+                })?
+            };
+            guard.page = Some(page.clone());
+            Ok(())
+        })
+        .await;
+        // Tear down inline; a probe that timed out leaves it to the guard.
+        if outcome.is_ok() {
+            guard.close_now(self).await;
+        }
+        drop(guard);
+        if let Some(provider) = &self.pinned_egress_proxy {
+            provider.release_session(&probe_key).await;
+        }
+        outcome
+    }
+
+    /// The browser of `slot` at `generation` went away: mark it dead, drop the
+    /// page handles of every session that was on it (their next call says
+    /// `browser_process_lost`) and log it once.
+    async fn on_browser_lost(&self, slot: SlotId, generation: u64) {
+        let (changed, lost) = {
+            let mut book = self.book();
+            let live = book
+                .slot(slot)
+                .is_some_and(|state| state.generation == generation && state.status != SlotStatus::Dead);
+            (live, book.mark_dead(slot, generation, Instant::now()))
+        };
+        if !changed {
+            return;
+        }
+        tracing::warn!(
+            slot,
+            generation,
+            sessions = lost.len(),
+            "browser process lost"
+        );
+        for key in &lost {
+            self.pages.lock().await.remove(key);
+            self.dialog_pages.lock().await.remove(key);
+            self.live_frames.lock().await.remove(key);
+        }
+    }
+
+    /// Take the browser out of service: kill it if it still runs, wait for it
+    /// (bounded), then delete its profile and crash-dump directories.
+    async fn retire_browser(mut browser: Browser, dirs: Option<ChromiumLaunchDirs>) {
+        let _ = tokio::time::timeout(BROWSER_EXIT_WAIT, browser.kill()).await;
+        let _ = tokio::time::timeout(BROWSER_EXIT_WAIT, browser.wait()).await;
+        drop(browser);
+        if let Some(dirs) = dirs {
+            dirs.remove();
+        }
+    }
+
+    /// Launch the browser if there is none, or if the one there is dead. A
+    /// viewport is never a reason to launch: it is applied per page (see
+    /// `apply_page_hygiene`), so a lease that asks for a different size cannot
+    /// close the browser under the other sessions that are using it.
     async fn ensure_browser(&self) -> QuarryResult<()> {
         let mut guard = self.browser.lock().await;
-        if guard.is_some() {
+        let dead = self
+            .book()
+            .slot(SLOT)
+            .is_some_and(|slot| slot.status == SlotStatus::Dead);
+        if guard.is_some() && !dead {
             return Ok(());
         }
         // A fresh launch: whatever was kept for a previous browser is stale.
         if let Some(handle) = self.handler.lock().await.take() {
             handle.abort();
+        }
+        if let Some(old) = guard.take() {
+            let dirs = self.launch_dirs.lock().await.take();
+            Self::retire_browser(old, dirs).await;
+        } else if self.launches.load(Ordering::SeqCst) == 0 {
+            sweep_stale_launch_dirs();
         }
         self.pages.lock().await.clear();
         self.devtools_events.lock().await.clear();
@@ -226,7 +570,7 @@ impl ChromiumoxideDriver {
         self.session_telemetry.lock().await.clear();
         self.dialogs.lock().await.clear();
         self.dialog_pages.lock().await.clear();
-        self.invalidate_live_frame_cache().await;
+        self.live_frames.lock().await.clear();
 
         let launch_dirs = chromium_launch_dirs().map_err(|e| {
             QuarryError::new(
@@ -280,25 +624,145 @@ impl ChromiumoxideDriver {
                 .with_details(json!({ "error": e.to_string() }))
         })?;
 
-        let (browser, mut events) = with_deadline(Op::Launch, async {
+        let launched = with_deadline(Op::Launch, async {
             Browser::launch(config).await.map_err(|e| {
                 QuarryError::new(ErrorCode::DriverFailed, "chromiumoxide launch failed")
                     .with_details(json!({ "error": e.to_string() }))
             })
         })
-        .await?;
-
-        let handle = tokio::spawn(async move {
-            while let Some(_event) = events.next().await {
-                // drain CDP events; explicit handling can be added later
+        .await;
+        let (browser, mut events) = match launched {
+            Ok(launched) => launched,
+            Err(error) => {
+                launch_dirs.remove();
+                return Err(error);
             }
+        };
+
+        self.launches.fetch_add(1, Ordering::SeqCst);
+        let generation = self.book().launched(SLOT);
+        // Drain CDP events. The websocket failing means the browser process is
+        // gone (killed, crashed, out of memory): mark the slot dead so the next
+        // acquire relaunches it and its sessions get a typed loss.
+        let watcher = self.share();
+        let handle = tokio::spawn(async move {
+            while let Some(event) = events.next().await {
+                if let Err(CdpError::Ws(_)) = event {
+                    break;
+                }
+            }
+            watcher.on_browser_lost(SLOT, generation).await;
         });
 
         *guard = Some(browser);
+        *self.launch_dirs.lock().await = Some(launch_dirs);
         *self.handler.lock().await = Some(handle);
-        let generation = self.launches.fetch_add(1, Ordering::SeqCst) + 1;
-        tracing::info!(generation, "browser slot launched");
+        tracing::info!(slot = SLOT, generation, "browser slot launched");
         Ok(())
+    }
+
+    /// Create the isolated browser context a session's tabs live in (or a
+    /// probe's throwaway page). With a pinned egress proxy the context is
+    /// bound to that proxy's per-session endpoint, always: there is no other
+    /// way to make a context in this driver. The browser lock is held only for
+    /// the creation itself.
+    async fn create_session_context(&self, session_key: &str) -> QuarryResult<BrowserContextId> {
+        let context_params = if let Some(provider) = &self.pinned_egress_proxy {
+            let endpoint = provider.endpoint_for_session(session_key).await?;
+            CreateBrowserContextParams::builder()
+                .proxy_server(endpoint.as_str())
+                // Override Chromium's implicit loopback bypass. The
+                // Fetch policy still denies loopback destinations;
+                // this only stops a transport-level proxy bypass.
+                .proxy_bypass_list("<-loopback>")
+                .build()
+        } else {
+            CreateBrowserContextParams::default()
+        };
+        let browser_guard = self.browser.lock().await;
+        let browser = browser_guard.as_ref().ok_or_else(browser_missing)?;
+        with_deadline(Op::TabAttach, async {
+            browser
+                .create_browser_context(context_params)
+                .await
+                .map_err(|e| {
+                    QuarryError::new(
+                        ErrorCode::DriverFailed,
+                        "chromiumoxide create_browser_context failed",
+                    )
+                    .with_details(json!({ "error": e.to_string() }))
+                })
+        })
+        .await
+    }
+
+    /// Whether `session` was lost (reaped or its browser died): the typed
+    /// error for it, so a later call never quietly opens a fresh tab.
+    fn refuse_lost(&self, session: &BrowserSession) -> QuarryResult<()> {
+        let key = Self::session_key(session);
+        match self.book().loss(&key, Instant::now()) {
+            Some(reason) => Err(session_lost_error(reason)),
+            None => Ok(()),
+        }
+    }
+
+    async fn attach_lock(&self, session_key: &str) -> Arc<Mutex<()>> {
+        self.attach_locks
+            .lock()
+            .await
+            .entry(session_key.to_owned())
+            .or_default()
+            .clone()
+    }
+
+    /// Everything `release` frees except the profile capture: pages, context,
+    /// collectors, policies, receipts, the proxy session and the book entry.
+    /// Safe to repeat.
+    async fn teardown_session(&self, session_key: &str) {
+        let session_key = session_key.to_owned();
+        let removed = self.pages.lock().await.remove(&session_key);
+        if let Some(session_pages) = removed {
+            for tab in session_pages.tabs {
+                if let Err(err) = best_effort(Op::PageClose, tab.page.close()).await {
+                    tracing::debug!(
+                        tab_id = %tab.tab_id,
+                        error = %err,
+                        "chromiumoxide tab close during release failed"
+                    );
+                }
+            }
+            if let Some(context_id) = session_pages.browser_context_id {
+                let browser_guard = self.browser.lock().await;
+                if let Some(browser) = browser_guard.as_ref() {
+                    if let Err(err) = best_effort(
+                        Op::ContextClose,
+                        browser.dispose_browser_context(context_id),
+                    )
+                    .await
+                    {
+                        tracing::warn!(
+                            session_key = %session_key,
+                            error = %err,
+                            "chromiumoxide dispose_browser_context failed"
+                        );
+                    }
+                }
+            }
+        }
+        self.devtools_events.lock().await.remove(&session_key);
+        self.egress_receipts.lock().await.remove(&session_key);
+        self.egress_sequence.lock().await.remove(&session_key);
+        self.egress_policies.lock().await.remove(&session_key);
+        self.proxy_receipt_cursors.lock().await.remove(&session_key);
+        self.session_telemetry.lock().await.remove(&session_key);
+        if let Some(provider) = &self.pinned_egress_proxy {
+            provider.release_session(&session_key).await;
+        }
+        self.dialogs.lock().await.remove(&session_key);
+        self.dialog_pages.lock().await.remove(&session_key);
+        self.live_frames.lock().await.remove(&session_key);
+        self.attach_locks.lock().await.remove(&session_key);
+        self.book().release(&session_key);
     }
 
     fn session_key(session: &BrowserSession) -> String {
@@ -376,22 +840,42 @@ impl ChromiumoxideDriver {
 
     async fn active_tab_page(&self, session: &BrowserSession) -> Option<(String, Page)> {
         let session_key = Self::session_key(session);
-        let pages = self.pages.lock().await;
-        let session_pages = pages.get(&session_key)?;
-        let active_tab_id = session_pages.active_tab_id.as_ref()?;
-        session_pages
-            .tabs
-            .iter()
-            .find(|tab| &tab.tab_id == active_tab_id)
-            .map(|tab| (tab.tab_id.clone(), tab.page.clone()))
+        let found = {
+            let pages = self.pages.lock().await;
+            let session_pages = pages.get(&session_key)?;
+            let active_tab_id = session_pages.active_tab_id.as_ref()?;
+            session_pages
+                .tabs
+                .iter()
+                .find(|tab| &tab.tab_id == active_tab_id)
+                .map(|tab| (tab.tab_id.clone(), tab.page.clone()))
+        };
+        if found.is_some() {
+            // Any use of the session's page counts as activity for the reaper.
+            self.book().touch(&session_key, Instant::now());
+        }
+        found
     }
 
+    /// The session's active page, or why there is none: `session_reaped`,
+    /// `browser_process_lost` or `no_current_page` (all not retryable).
     async fn current_tab_page(&self, session: &BrowserSession) -> QuarryResult<(String, Page)> {
-        self.active_tab_page(session).await.ok_or_else(|| {
-            QuarryError::new(
-                ErrorCode::DriverFailed,
-                "chromiumoxide: no current page; call goto() first",
-            )
+        if let Some(found) = self.active_tab_page(session).await {
+            return Ok(found);
+        }
+        let key = Self::session_key(session);
+        let loss = self.book().loss(&key, Instant::now());
+        Err(match loss {
+            Some(reason) => session_lost_error(reason),
+            None => {
+                let mut error = QuarryError::new(
+                    ErrorCode::DriverFailed,
+                    "chromiumoxide: no current page; call goto() first",
+                )
+                .with_details(json!({ "reason": "no_current_page" }));
+                error.retryable = false;
+                error
+            }
         })
     }
 
@@ -406,16 +890,19 @@ impl ChromiumoxideDriver {
     ) -> QuarryResult<(String, Page)> {
         let initial_url = url.unwrap_or("about:blank");
         guard_navigation_target(initial_url).await?;
-        self.ensure_browser().await?;
-        let browser_guard = self.browser.lock().await;
-        let browser = browser_guard.as_ref().ok_or_else(|| {
-            QuarryError::new(
-                ErrorCode::DriverFailed,
-                "chromiumoxide: browser not initialized",
-            )
-        })?;
-
         let session_key = Self::session_key(session);
+        // One attach at a time for this session (so it cannot get two
+        // contexts); other sessions attach in parallel.
+        let attach_lock = self.attach_lock(&session_key).await;
+        let _attaching = attach_lock.lock().await;
+
+        // The page counts against the slot from here; the guard gives it back,
+        // and closes whatever this call created, on every early return, on a
+        // timeout and when the caller drops this future.
+        self.reserve_page(&session_key)?;
+        let mut attach = AttachGuard::new(self, session_key.clone(), true);
+        self.ensure_browser().await?;
+
         let (tab_id, existing_context_id) = {
             let mut pages = self.pages.lock().await;
             let session_pages = pages.entry(session_key.clone()).or_default();
@@ -432,28 +919,8 @@ impl ChromiumoxideDriver {
         let context_id = match existing_context_id {
             Some(id) => id,
             None => {
-                let context_params = if let Some(provider) = &self.pinned_egress_proxy {
-                    let endpoint = provider.endpoint_for_session(&session_key).await?;
-                    CreateBrowserContextParams::builder()
-                        .proxy_server(endpoint.as_str())
-                        // Override Chromium's implicit loopback bypass. The
-                        // Fetch policy still denies loopback destinations;
-                        // this only stops a transport-level proxy bypass.
-                        .proxy_bypass_list("<-loopback>")
-                        .build()
-                } else {
-                    CreateBrowserContextParams::default()
-                };
-                let id = browser
-                    .create_browser_context(context_params)
-                    .await
-                    .map_err(|e| {
-                        QuarryError::new(
-                            ErrorCode::DriverFailed,
-                            "chromiumoxide create_browser_context failed",
-                        )
-                        .with_details(json!({ "error": e.to_string() }))
-                    })?;
+                let id = self.create_session_context(&session_key).await?;
+                attach.context = Some(id.clone());
                 let download_dir = Arc::new(
                     tempfile::Builder::new()
                         .prefix("quarry-download-")
@@ -485,20 +952,21 @@ impl ChromiumoxideDriver {
                         )
                         .with_details(json!({ "error": error }))
                     })?;
-                with_deadline(Op::TabAttach, async {
-                    browser.execute(download_behavior).await.map_err(|error| {
-                        QuarryError::new(
-                            ErrorCode::DriverFailed,
-                            "chromiumoxide download quarantine configuration failed",
-                        )
-                        .with_details(json!({ "error": error.to_string() }))
+                {
+                    let browser_guard = self.browser.lock().await;
+                    let browser = browser_guard.as_ref().ok_or_else(browser_missing)?;
+                    with_deadline(Op::TabAttach, async {
+                        browser.execute(download_behavior).await.map_err(|error| {
+                            QuarryError::new(
+                                ErrorCode::DriverFailed,
+                                "chromiumoxide download quarantine configuration failed",
+                            )
+                            .with_details(json!({ "error": error.to_string() }))
+                        })
                     })
-                })
-                .await?;
-                let mut pages = self.pages.lock().await;
-                let session_pages = pages.entry(session_key.clone()).or_default();
-                session_pages.browser_context_id = Some(id.clone());
-                session_pages.download_dir = Some(download_dir);
+                    .await?;
+                }
+                attach.download_dir = Some(download_dir);
                 id
             }
         };
@@ -515,15 +983,30 @@ impl ChromiumoxideDriver {
                 )
                 .with_details(json!({ "error": e }))
             })?;
-        let page = with_deadline(Op::TabAttach, async {
-            browser.new_page(new_page_params).await.map_err(|e| {
-                QuarryError::new(ErrorCode::DriverFailed, "chromiumoxide new_page failed")
-                    .with_details(json!({ "error": e.to_string(), "url": "about:blank" }))
+        let page = {
+            let browser_guard = self.browser.lock().await;
+            let browser = browser_guard.as_ref().ok_or_else(browser_missing)?;
+            with_deadline(Op::TabAttach, async {
+                browser.new_page(new_page_params).await.map_err(|e| {
+                    QuarryError::new(ErrorCode::DriverFailed, "chromiumoxide new_page failed")
+                        .with_details(json!({ "error": e.to_string(), "url": "about:blank" }))
+                })
             })
-        })
-        .await?;
+            .await?
+        };
+        attach.page = Some(page.clone());
+        #[cfg(test)]
+        {
+            let stall = *self
+                .attach_stall
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if let Some(stall) = stall {
+                tokio::time::sleep(stall).await;
+            }
+        }
         // Size and focus the page before anything observes or navigates it.
-        if let Err(error) = with_deadline(
+        with_deadline(
             Op::TabAttach,
             apply_page_hygiene(
                 &page,
@@ -531,11 +1014,7 @@ impl ChromiumoxideDriver {
                 page_hygiene_enabled(),
             ),
         )
-        .await
-        {
-            let _ = page.clone().close().await;
-            return Err(error);
-        }
+        .await?;
         self.install_devtools_collectors(session_key.clone(), tab_id.clone(), &page)
             .await;
         install_dialog_collector(
@@ -602,7 +1081,15 @@ impl ChromiumoxideDriver {
         install_popup_bridge(&page).await?;
 
         let mut pages = self.pages.lock().await;
+        // Released, reaped or lost while attaching: the guard closes the page.
+        if let Some(error) = self.not_admitted_error(&session_key) {
+            return Err(error);
+        }
         let session_pages = pages.entry(session_key).or_default();
+        if let Some(context_id) = attach.context.take() {
+            session_pages.browser_context_id = Some(context_id);
+            session_pages.download_dir = attach.download_dir.take();
+        }
         session_pages.tabs.push(TabPage {
             tab_id: tab_id.clone(),
             page: page.clone(),
@@ -610,7 +1097,42 @@ impl ChromiumoxideDriver {
             url_hint: Some(initial_url.to_owned()),
         });
         session_pages.active_tab_id = Some(tab_id.clone());
+        attach.disarm();
         Ok((tab_id, page))
+    }
+
+    /// Count a page against the session's slot, or say why it cannot open:
+    /// `browser_page_cap` (429), or the session is gone.
+    fn reserve_page(&self, session_key: &str) -> QuarryResult<()> {
+        let refusal = self.book().page_opened(session_key, Instant::now());
+        match refusal {
+            Ok(_) => Ok(()),
+            Err(PageRefusal::Cap { limit, active }) => Err(QuarryError::new(
+                ErrorCode::RateLimited,
+                "browser page capacity exhausted",
+            )
+            .with_details(json!({
+                "reason": "browser_page_cap",
+                "scope": "driver",
+                "limit": limit,
+                "active": active,
+                "retry_after_seconds": crate::slots::BUSY_RETRY_AFTER_S,
+            }))),
+            Err(PageRefusal::NotAdmitted(Some(reason))) => Err(session_lost_error(reason)),
+            Err(PageRefusal::NotAdmitted(None)) => Err(not_open_error()),
+        }
+    }
+
+    /// `Some` when the session is no longer admitted.
+    fn not_admitted_error(&self, session_key: &str) -> Option<QuarryError> {
+        let book = self.book();
+        if book.is_admitted(session_key) {
+            return None;
+        }
+        Some(match book.loss(session_key, Instant::now()) {
+            Some(reason) => session_lost_error(reason),
+            None => not_open_error(),
+        })
     }
 
     async fn update_tab_metadata(&self, session_key: &str, tab_id: &str, page: &Page) {
@@ -709,10 +1231,17 @@ impl ChromiumoxideDriver {
         }
     }
 
-    async fn invalidate_live_frame_cache(&self) {
-        let mut epoch = self.page_epoch.lock().await;
-        *epoch = epoch.saturating_add(1);
-        *self.live_frame_cache.lock().await = None;
+    /// The session's page changed: drop its cached frame, and make a capture
+    /// that is still running for the old page unable to store itself.
+    async fn invalidate_live_frame_cache(&self, session: &BrowserSession) {
+        let epoch = self.frame_epochs.fetch_add(1, Ordering::SeqCst) + 1;
+        self.live_frames.lock().await.insert(
+            Self::session_key(session),
+            LiveFrameSlot {
+                epoch,
+                cached: None,
+            },
+        );
     }
 
     async fn load_snapshot(&self, lease: &BrowserLease) -> Option<SessionSnapshot> {
@@ -965,10 +1494,23 @@ struct ChromiumLaunchDirs {
     crash_dumps: PathBuf,
 }
 
-fn chromium_launch_dirs() -> std::io::Result<ChromiumLaunchDirs> {
-    let root = std::env::var_os("QUARRY_BROWSER_PROFILE_ROOT")
+impl ChromiumLaunchDirs {
+    /// Delete both directories (best effort: a retired browser has exited, or
+    /// had five seconds to).
+    fn remove(&self) {
+        let _ = std::fs::remove_dir_all(&self.user_data);
+        let _ = std::fs::remove_dir_all(&self.crash_dumps);
+    }
+}
+
+fn chromium_profile_root() -> PathBuf {
+    std::env::var_os("QUARRY_BROWSER_PROFILE_ROOT")
         .map(PathBuf::from)
-        .unwrap_or_else(|| std::env::temp_dir().join("quarry-chromium"));
+        .unwrap_or_else(|| std::env::temp_dir().join("quarry-chromium"))
+}
+
+fn chromium_launch_dirs() -> std::io::Result<ChromiumLaunchDirs> {
+    let root = chromium_profile_root();
     let stamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -2080,6 +2622,24 @@ impl BrowserDriver for ChromiumoxideDriver {
         }
     }
 
+    async fn health(&self) -> BrowserHealth {
+        let book = self.book();
+        let slots = book
+            .slots()
+            .iter()
+            .map(|slot| SlotHealth {
+                slot: slot.id,
+                status: slot.status.as_str().to_owned(),
+                generation: slot.generation,
+                sessions: slot.sessions,
+                pages: slot.pages,
+                healthy: slot.healthy,
+                probe_failures: slot.probe_failures,
+            })
+            .collect();
+        BrowserHealth::from_slots(book.config().max_sessions, book.sessions_open(), slots)
+    }
+
     async fn configure_egress_policy(
         &self,
         session: &BrowserSession,
@@ -2103,12 +2663,49 @@ impl BrowserDriver for ChromiumoxideDriver {
 
     async fn acquire(&self, lease: &BrowserLease) -> QuarryResult<BrowserSession> {
         let acquired_at = Instant::now();
-        let startup_mode = if self.browser.lock().await.is_some() {
+        // The driver's own cap comes after the edge's run caps (R-26).
+        let session_key = lease.session_affinity_key.clone();
+        let admission = self.book().admit(
+            &session_key,
+            Duration::from_secs(u64::from(lease.ttl_s)),
+            acquired_at,
+        );
+        let (fresh, needs_launch) = match admission {
+            Admission::Busy {
+                limit,
+                active,
+                retry_after_s,
+            } => {
+                return Err(QuarryError::new(
+                    ErrorCode::RateLimited,
+                    "browser capacity exhausted",
+                )
+                .with_details(json!({
+                    "reason": "browser_session_cap",
+                    "scope": "driver",
+                    "limit": limit,
+                    "active": active,
+                    "retry_after_seconds": retry_after_s,
+                })));
+            }
+            Admission::Admitted {
+                fresh,
+                needs_launch,
+                ..
+            } => (fresh, needs_launch),
+        };
+        self.start_background();
+        let startup_mode = if self.browser.lock().await.is_some() && !needs_launch {
             BrowserStartupMode::Warm
         } else {
             BrowserStartupMode::Cold
         };
-        self.ensure_browser().await?;
+        if let Err(error) = self.ensure_browser().await {
+            if fresh {
+                self.book().release(&session_key);
+            }
+            return Err(error);
+        }
         let session = BrowserSession {
             lease: lease.clone(),
             inner: Arc::new(Mutex::new(SessionInner {
@@ -2131,52 +2728,14 @@ impl BrowserDriver for ChromiumoxideDriver {
         if let Err(err) = self.persist_current_page(&session).await {
             tracing::warn!(error = %err, "chromiumoxide profile capture skipped");
         }
-        let session_key = Self::session_key(&session);
-        let removed = self.pages.lock().await.remove(&session_key);
-        if let Some(session_pages) = removed {
-            for tab in session_pages.tabs {
-                if let Err(err) = best_effort(Op::PageClose, tab.page.close()).await {
-                    tracing::debug!(
-                        tab_id = %tab.tab_id,
-                        error = %err,
-                        "chromiumoxide tab close during release failed"
-                    );
-                }
-            }
-            if let Some(context_id) = session_pages.browser_context_id {
-                let browser_guard = self.browser.lock().await;
-                if let Some(browser) = browser_guard.as_ref() {
-                    if let Err(err) = best_effort(
-                        Op::ContextClose,
-                        browser.dispose_browser_context(context_id),
-                    )
-                    .await
-                    {
-                        tracing::warn!(
-                            session_key = %session_key,
-                            error = %err,
-                            "chromiumoxide dispose_browser_context failed"
-                        );
-                    }
-                }
-            }
-        }
-        self.devtools_events.lock().await.remove(&session_key);
-        self.egress_receipts.lock().await.remove(&session_key);
-        self.egress_sequence.lock().await.remove(&session_key);
-        self.egress_policies.lock().await.remove(&session_key);
-        self.proxy_receipt_cursors.lock().await.remove(&session_key);
-        self.session_telemetry.lock().await.remove(&session_key);
-        if let Some(provider) = &self.pinned_egress_proxy {
-            provider.release_session(&session_key).await;
-        }
-        self.dialogs.lock().await.remove(&session_key);
-        self.dialog_pages.lock().await.remove(&session_key);
-        self.invalidate_live_frame_cache().await;
+        // Idempotent: a second release (WS2.D's finish_run releases a clone)
+        // finds nothing left to free.
+        self.teardown_session(&Self::session_key(&session)).await;
         Ok(())
     }
 
     async fn goto(&self, session: &BrowserSession, url: &str) -> QuarryResult<()> {
+        self.refuse_lost(session)?;
         guard_navigation_target(url).await?;
         self.require_configured_egress(session).await?;
         let (tab_id, page, created) = match self.active_tab_page(session).await {
@@ -2200,7 +2759,7 @@ impl BrowserDriver for ChromiumoxideDriver {
 
         let session_key = Self::session_key(session);
         self.update_tab_metadata(&session_key, &tab_id, &page).await;
-        self.invalidate_live_frame_cache().await;
+        self.invalidate_live_frame_cache(session).await;
 
         let mut inner = session.inner.lock().await;
         inner.pages_served = inner.pages_served.saturating_add(1);
@@ -2623,28 +3182,40 @@ impl BrowserDriver for ChromiumoxideDriver {
         let options = normalize_live_frame_options(options);
         let session_key = Self::session_key(session);
         let (tab_id, page) = self.current_tab_page(session).await?;
-        let page_epoch = *self.page_epoch.lock().await;
-        let mut cache = self.live_frame_cache.lock().await;
-        if let Some(cached) = cache.as_ref() {
-            if cached.session_key == session_key
-                && cached.tab_id == tab_id
-                && cached.page_epoch == page_epoch
-                && cached.options == options
-                && cached.captured_at.elapsed() <= Duration::from_millis(LIVE_FRAME_CACHE_TTL_MS)
-            {
-                return Ok(cached.frame.clone());
+        // Per session: one viewer's capture never waits for another session's.
+        let page_epoch = {
+            let mut frames = self.live_frames.lock().await;
+            let slot = frames.entry(session_key.clone()).or_insert_with(|| LiveFrameSlot {
+                epoch: self.frame_epochs.fetch_add(1, Ordering::SeqCst) + 1,
+                cached: None,
+            });
+            if let Some(cached) = slot.cached.as_ref() {
+                if cached.tab_id == tab_id
+                    && cached.page_epoch == slot.epoch
+                    && cached.options == options
+                    && cached.captured_at.elapsed()
+                        <= Duration::from_millis(LIVE_FRAME_CACHE_TTL_MS)
+                {
+                    return Ok(cached.frame.clone());
+                }
             }
-        }
+            slot.epoch
+        };
 
         let frame = capture_live_frame(&page, options).await?;
-        *cache = Some(CachedLiveFrame {
-            session_key,
-            tab_id,
-            page_epoch,
-            options,
-            captured_at: Instant::now(),
-            frame: frame.clone(),
-        });
+        // Stored only if the page did not change (and the session was not
+        // released) while the frame was being captured.
+        if let Some(slot) = self.live_frames.lock().await.get_mut(&session_key) {
+            if slot.epoch == page_epoch {
+                slot.cached = Some(CachedLiveFrame {
+                    tab_id,
+                    page_epoch,
+                    options,
+                    captured_at: Instant::now(),
+                    frame: frame.clone(),
+                });
+            }
+        }
         Ok(frame)
     }
 
@@ -2710,11 +3281,12 @@ impl BrowserDriver for ChromiumoxideDriver {
         session: &BrowserSession,
         url: Option<&str>,
     ) -> QuarryResult<BrowserTab> {
+        self.refuse_lost(session)?;
         self.require_configured_egress(session).await?;
         let (tab_id, page) = self.open_tab_page(session, url).await?;
         let session_key = Self::session_key(session);
         self.update_tab_metadata(&session_key, &tab_id, &page).await;
-        self.invalidate_live_frame_cache().await;
+        self.invalidate_live_frame_cache(session).await;
         let tabs = self.list_tabs(session).await?;
         tabs.into_iter()
             .find(|tab| tab.tab_id == tab_id)
@@ -2744,7 +3316,7 @@ impl BrowserDriver for ChromiumoxideDriver {
         }
         session_pages.active_tab_id = Some(tab_id.to_owned());
         drop(pages);
-        self.invalidate_live_frame_cache().await;
+        self.invalidate_live_frame_cache(session).await;
         Ok(())
     }
 
@@ -2780,6 +3352,7 @@ impl BrowserDriver for ChromiumoxideDriver {
             };
             (removed, empty_context)
         };
+        self.book().page_closed(&session_key);
 
         if let Err(err) = best_effort(Op::PageClose, removed.page.close()).await {
             tracing::debug!(
@@ -2805,7 +3378,7 @@ impl BrowserDriver for ChromiumoxideDriver {
                 }
             }
         }
-        self.invalidate_live_frame_cache().await;
+        self.invalidate_live_frame_cache(session).await;
         Ok(())
     }
 
@@ -3393,12 +3966,210 @@ async fn root_frame_id(page: &Page) -> QuarryResult<String> {
 
 impl Drop for ChromiumoxideDriver {
     fn drop(&mut self) {
+        // The background tasks hold views; only the driver itself tears down.
+        if !self.owner {
+            return;
+        }
         // Best-effort: abort the event-loop task so it doesn't outlive the driver.
         if let Ok(mut guard) = self.handler.try_lock() {
             if let Some(h) = guard.take() {
                 h.abort();
             }
         }
+        for task in self
+            .background
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .drain(..)
+        {
+            task.abort();
+        }
+        // Kill the browser now rather than whenever its handle is dropped, and
+        // take its directories with it.
+        if let Ok(mut guard) = self.browser.try_lock() {
+            if let Some(mut browser) = guard.take() {
+                if let Some(child) = browser.get_mut_child() {
+                    let _ = child.as_mut_inner().start_kill();
+                }
+            }
+        }
+        if let Ok(mut dirs) = self.launch_dirs.try_lock() {
+            if let Some(dirs) = dirs.take() {
+                dirs.remove();
+            }
+        }
+    }
+}
+
+/// Closes what a tab attach (or a probe) created when it does not finish:
+/// an error, a deadline, or the caller dropping the future. Only what this
+/// call created: a context that existed before is the session's and stays.
+struct AttachGuard {
+    book: Arc<std::sync::Mutex<SlotBook>>,
+    browser: Arc<Mutex<Option<Browser>>>,
+    session_key: String,
+    /// Holds a page reservation in the book that has to be given back.
+    reserved: bool,
+    page: Option<Page>,
+    context: Option<BrowserContextId>,
+    download_dir: Option<Arc<tempfile::TempDir>>,
+    armed: bool,
+}
+
+impl AttachGuard {
+    fn new(driver: &ChromiumoxideDriver, session_key: String, reserved: bool) -> Self {
+        Self {
+            book: driver.book.clone(),
+            browser: driver.browser.clone(),
+            session_key,
+            reserved,
+            page: None,
+            context: None,
+            download_dir: None,
+            armed: true,
+        }
+    }
+
+    /// The attach finished: everything it made now belongs to the session.
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+
+    /// Close the page and dispose the context now, and disarm.
+    async fn close_now(&mut self, driver: &ChromiumoxideDriver) {
+        if let Some(page) = self.page.take() {
+            let _ = best_effort(Op::PageClose, page.close()).await;
+        }
+        if let Some(context_id) = self.context.take() {
+            let browser_guard = driver.browser.lock().await;
+            if let Some(browser) = browser_guard.as_ref() {
+                let _ = best_effort(
+                    Op::ContextClose,
+                    browser.dispose_browser_context(context_id),
+                )
+                .await;
+            }
+        }
+        if self.reserved {
+            self.book
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .page_closed(&self.session_key);
+        }
+        self.armed = false;
+    }
+}
+
+impl Drop for AttachGuard {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        if self.reserved {
+            self.book
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .page_closed(&self.session_key);
+        }
+        let page = self.page.take();
+        let context = self.context.take();
+        let download_dir = self.download_dir.take();
+        if page.is_none() && context.is_none() {
+            return;
+        }
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let browser = self.browser.clone();
+        runtime.spawn(async move {
+            if let Some(page) = page {
+                if best_effort(Op::PageClose, page.close()).await.is_err() {
+                    tracing::debug!("abandoned tab attach: page close failed");
+                }
+            }
+            if let Some(context_id) = context {
+                let browser_guard = browser.lock().await;
+                if let Some(browser) = browser_guard.as_ref() {
+                    if best_effort(
+                        Op::ContextClose,
+                        browser.dispose_browser_context(context_id),
+                    )
+                    .await
+                    .is_err()
+                    {
+                        tracing::debug!("abandoned tab attach: context dispose failed");
+                    }
+                }
+            }
+            // The quarantine directory goes after the context that used it.
+            drop(download_dir);
+        });
+    }
+}
+
+fn browser_missing() -> QuarryError {
+    QuarryError::new(
+        ErrorCode::DriverFailed,
+        "chromiumoxide: browser not initialized",
+    )
+}
+
+/// A session that was reaped or whose browser died. Not retryable: the run has
+/// to start a new session (or resume), repeating the call cannot help.
+fn session_lost_error(reason: LossReason) -> QuarryError {
+    let message = match reason {
+        LossReason::Reaped(_) => "browser session was closed after being idle too long",
+        LossReason::ProcessLost => "browser process was lost; start a new session",
+    };
+    let mut error = QuarryError::new(ErrorCode::DriverFailed, message)
+        .with_details(json!({ "reason": reason.as_str() }));
+    error.retryable = false;
+    error
+}
+
+/// A session this driver does not hold (released, or never acquired).
+fn not_open_error() -> QuarryError {
+    let mut error = QuarryError::new(ErrorCode::DriverFailed, "browser session is not open")
+        .with_details(json!({ "reason": "session_not_open" }));
+    error.retryable = false;
+    error
+}
+
+/// Remove `<root>/{profiles,crashpad}/edge-<pid>-*` left by a process that is
+/// gone (Linux: no `/proc/<pid>`). Our own pid's directories may belong to
+/// another driver in this process, and elsewhere liveness is unknown: both are
+/// left alone.
+fn sweep_stale_launch_dirs() {
+    if !cfg!(target_os = "linux") {
+        return;
+    }
+    let root = chromium_profile_root();
+    let ours = std::process::id();
+    let mut removed = 0usize;
+    for sub in ["profiles", "crashpad"] {
+        let Ok(entries) = std::fs::read_dir(root.join(sub)) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let Some(pid) = name
+                .to_str()
+                .and_then(|name| name.strip_prefix("edge-"))
+                .and_then(|rest| rest.split('-').next())
+                .and_then(|pid| pid.parse::<u32>().ok())
+            else {
+                continue;
+            };
+            if pid == ours || Path::new(&format!("/proc/{pid}")).exists() {
+                continue;
+            }
+            if std::fs::remove_dir_all(entry.path()).is_ok() {
+                removed += 1;
+            }
+        }
+    }
+    if removed > 0 {
+        tracing::info!(removed, "removed stale browser launch directories");
     }
 }
 
@@ -3752,6 +4523,460 @@ mod tests {
         for session in [a, b, c] {
             driver.release(session).await.expect("release");
         }
+    }
+
+    // ---- WS3.F: slot book, crash, reaper, probe; WS3.D: attach cleanup ----
+
+    /// A pool config without background tasks unless a test asks for them.
+    fn quiet_pool() -> BrowserPoolConfig {
+        BrowserPoolConfig {
+            reaper: ReaperMode::Off,
+            ..BrowserPoolConfig::default()
+        }
+    }
+
+    /// Browser contexts the running browser holds.
+    async fn context_count(driver: &ChromiumoxideDriver) -> usize {
+        use ::chromiumoxide::cdp::browser_protocol::target::GetBrowserContextsParams;
+        let guard = driver.browser.lock().await;
+        let browser = guard.as_ref().expect("a running browser");
+        browser
+            .execute(GetBrowserContextsParams::default())
+            .await
+            .expect("Target.getBrowserContexts")
+            .result
+            .browser_context_ids
+            .len()
+    }
+
+    /// Page targets the running browser holds.
+    async fn page_target_count(driver: &ChromiumoxideDriver) -> usize {
+        use ::chromiumoxide::cdp::browser_protocol::target::GetTargetsParams;
+        let guard = driver.browser.lock().await;
+        let browser = guard.as_ref().expect("a running browser");
+        browser
+            .execute(GetTargetsParams::default())
+            .await
+            .expect("Target.getTargets")
+            .result
+            .target_infos
+            .iter()
+            .filter(|target| target.r#type == "page")
+            .count()
+    }
+
+    /// Poll `check` every 100 ms for up to `limit`.
+    async fn eventually<F, Fut>(limit: Duration, mut check: F) -> bool
+    where
+        F: FnMut() -> Fut,
+        Fut: std::future::Future<Output = bool>,
+    {
+        let started = Instant::now();
+        while started.elapsed() < limit {
+            if check().await {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        check().await
+    }
+
+    fn loss_reason(error: &QuarryError) -> String {
+        error
+            .details
+            .as_ref()
+            .and_then(|details| details["reason"].as_str())
+            .unwrap_or_default()
+            .to_owned()
+    }
+
+    /// Killing Chromium is noticed by the CDP handler: the slot is dead, the
+    /// old session's next call says `browser_process_lost` (not retryable),
+    /// and the next acquire launches a new browser that works.
+    #[tokio::test]
+    async fn crash_is_detected_and_next_acquire_relaunches() {
+        if !live_enabled() {
+            return;
+        }
+        let driver = live_driver().with_pool_config(quiet_pool());
+        let old = live_session_sized(&driver, "crash-old", None, "before").await;
+        assert_eq!(driver.launch_count(), 1);
+        assert_eq!(driver.book().slot(SLOT).unwrap().generation, 1);
+        {
+            let mut guard = driver.browser.lock().await;
+            let browser = guard.as_mut().expect("a running browser");
+            let _ = browser.kill().await;
+        }
+        assert!(
+            eventually(Duration::from_secs(20), || async {
+                driver
+                    .book()
+                    .slot(SLOT)
+                    .is_some_and(|slot| slot.status == SlotStatus::Dead)
+            })
+            .await,
+            "the handler task marks the slot dead"
+        );
+        assert_eq!(driver.health().await.state, crate::BrowserHealthState::Unhealthy);
+        assert_eq!(driver.health().await.sessions_open, 0);
+
+        let error = driver.content(&old).await.expect_err("the old page is gone");
+        assert_eq!(loss_reason(&error), "browser_process_lost", "{error:?}");
+        assert!(!error.retryable);
+        let error = driver
+            .goto(&old, "about:blank")
+            .await
+            .expect_err("a lost session never opens a fresh tab");
+        assert_eq!(loss_reason(&error), "browser_process_lost", "{error:?}");
+        // Releasing the lost session is fine, twice.
+        driver.release(old.clone()).await.expect("release lost");
+        driver.release(old).await.expect("release lost again");
+
+        let fresh = live_session_sized(&driver, "crash-new", None, "after").await;
+        assert_eq!(driver.launch_count(), 2, "relaunched on the next acquire");
+        assert_eq!(driver.book().slot(SLOT).unwrap().generation, 2);
+        assert_eq!(live_marker(&driver, &fresh).await, "after");
+        assert_eq!(driver.health().await.state, crate::BrowserHealthState::Healthy);
+        driver.release(fresh).await.expect("release fresh");
+    }
+
+    /// With the reaper on, a session idle past `max(2 x ttl, idle)` is torn
+    /// down (its context is disposed), tombstoned as `session_reaped`, and a
+    /// busy session next to it is left alone.
+    #[tokio::test]
+    async fn reaper_closes_abandoned_session_and_tombstones_it() {
+        if !live_enabled() {
+            return;
+        }
+        let driver = live_driver().with_pool_config(BrowserPoolConfig {
+            session_idle: Duration::from_secs(1),
+            reaper_interval: Duration::from_millis(200),
+            probe_interval: Duration::from_secs(3_600),
+            reaper: ReaperMode::On,
+            ..BrowserPoolConfig::default()
+        });
+        let keeper = live_session_sized(&driver, "reap-keeper", None, "kept").await;
+        let mut lease = make_lease_with_key("reap-abandoned");
+        // 5 s, so a 10 s idle floor: long enough to set the session up on a
+        // loaded machine, short enough for a test.
+        lease.ttl_s = 5;
+        let abandoned = driver.acquire(&lease).await.expect("acquire");
+        driver
+            .configure_egress_policy(&abandoned, BrowserEgressPolicy::deny_all())
+            .await
+            .expect("policy");
+        driver.new_tab(&abandoned, None).await.expect("blank tab");
+        let with_both = context_count(&driver).await;
+        assert_eq!(driver.health().await.sessions_open, 2);
+
+        assert!(
+            eventually(Duration::from_secs(30), || async {
+                !driver.book().is_admitted("reap-abandoned")
+            })
+            .await,
+            "the abandoned session is reaped within max(2 x 5 s, 1 s) plus a tick"
+        );
+        assert_eq!(
+            driver.book().loss("reap-abandoned", Instant::now()),
+            Some(LossReason::Reaped(crate::slots::ReapReason::Idle))
+        );
+        assert!(
+            eventually(Duration::from_secs(5), || async {
+                context_count(&driver).await == with_both - 1
+            })
+            .await,
+            "its browser context is disposed"
+        );
+        assert!(!driver.pages.lock().await.contains_key("reap-abandoned"));
+        let error = driver
+            .content(&abandoned)
+            .await
+            .expect_err("a reaped session has no page");
+        assert_eq!(loss_reason(&error), "session_reaped", "{error:?}");
+        assert!(!error.retryable);
+        let error = driver
+            .new_tab(&abandoned, None)
+            .await
+            .expect_err("a reaped session never opens a fresh tab");
+        assert_eq!(loss_reason(&error), "session_reaped", "{error:?}");
+
+        // The keeper (ttl 30 s, so a 60 s floor) is untouched.
+        assert!(driver.book().is_admitted("reap-keeper"));
+        assert_eq!(live_marker(&driver, &keeper).await, "kept");
+        assert_eq!(driver.health().await.sessions_open, 1);
+        driver.release(abandoned).await.expect("release reaped");
+        driver.release(keeper).await.expect("release keeper");
+    }
+
+    /// Records what the driver asks of the egress authority, in order.
+    #[derive(Default)]
+    struct RecordingEgressProvider {
+        calls: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl RecordingEgressProvider {
+        fn take(&self) -> Vec<String> {
+            std::mem::take(&mut *self.calls.lock().unwrap())
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl BrowserEgressProxyProvider for RecordingEgressProvider {
+        async fn endpoint_for_session(
+            &self,
+            session_key: &str,
+        ) -> QuarryResult<PinnedEgressProxyEndpoint> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push(format!("endpoint {session_key}"));
+            PinnedEgressProxyEndpoint::parse("http://127.0.0.1:9")
+        }
+
+        async fn receipts_after(
+            &self,
+            _session_key: &str,
+            _after_sequence: u64,
+            _limit: usize,
+        ) -> QuarryResult<Vec<BrowserEgressReceipt>> {
+            Ok(Vec::new())
+        }
+
+        async fn configure_policy(
+            &self,
+            session_key: &str,
+            policy: BrowserEgressPolicy,
+        ) -> QuarryResult<()> {
+            let kind = if policy == BrowserEgressPolicy::deny_all() {
+                "deny_all"
+            } else {
+                "other"
+            };
+            self.calls
+                .lock()
+                .unwrap()
+                .push(format!("policy {session_key} {kind}"));
+            Ok(())
+        }
+
+        async fn release_session(&self, session_key: &str) {
+            self.calls
+                .lock()
+                .unwrap()
+                .push(format!("release {session_key}"));
+        }
+    }
+
+    /// The probe opens and closes a page in a throwaway context bound to the
+    /// pinned proxy under a deny-all policy (installed before the endpoint is
+    /// asked for), and leaves every session's pages, policies, receipts and
+    /// events exactly as they were.
+    #[tokio::test]
+    async fn probe_does_not_touch_session_state_or_egress() {
+        if !live_enabled() {
+            return;
+        }
+        let provider = Arc::new(RecordingEgressProvider::default());
+        let driver = ChromiumoxideDriver::new()
+            .with_pinned_egress_proxy(provider.clone())
+            .with_pool_config(quiet_pool());
+        let session = live_session_sized(&driver, "probe-session", None, "untouched").await;
+        let contexts_before = context_count(&driver).await;
+        let tabs_before: Vec<String> = driver
+            .pages
+            .lock()
+            .await
+            .get("probe-session")
+            .map(|pages| pages.tabs.iter().map(|tab| tab.tab_id.clone()).collect())
+            .unwrap_or_default();
+        let mut policy_keys_before: Vec<String> =
+            driver.egress_policies.lock().await.keys().cloned().collect();
+        policy_keys_before.sort();
+        let receipts_before = driver.egress_receipts.lock().await.len();
+        let events_before = driver.devtools_events.lock().await.len();
+        let pages_book_before = driver.book().slot(SLOT).unwrap().pages;
+        provider.take();
+
+        driver.probe_tick().await;
+
+        assert_eq!(
+            provider.take(),
+            vec![
+                "policy probe:0 deny_all".to_owned(),
+                "endpoint probe:0".to_owned(),
+                "release probe:0".to_owned(),
+            ],
+            "deny-all first, then the pinned endpoint, then released"
+        );
+        let slot = driver.book().slot(SLOT).unwrap().clone();
+        assert_eq!(slot.healthy, Some(true));
+        assert_eq!(slot.probe_failures, 0);
+        assert_eq!(slot.pages, pages_book_before, "the probe page is not counted");
+        assert_eq!(context_count(&driver).await, contexts_before, "probe context disposed");
+        let tabs_after: Vec<String> = driver
+            .pages
+            .lock()
+            .await
+            .get("probe-session")
+            .map(|pages| pages.tabs.iter().map(|tab| tab.tab_id.clone()).collect())
+            .unwrap_or_default();
+        assert_eq!(tabs_after, tabs_before);
+        assert!(!driver.pages.lock().await.contains_key("probe:0"));
+        let mut policy_keys_after: Vec<String> =
+            driver.egress_policies.lock().await.keys().cloned().collect();
+        policy_keys_after.sort();
+        assert_eq!(policy_keys_after, policy_keys_before);
+        assert_eq!(driver.egress_receipts.lock().await.len(), receipts_before);
+        assert_eq!(driver.devtools_events.lock().await.len(), events_before);
+        assert_eq!(live_marker(&driver, &session).await, "untouched");
+        driver.release(session).await.expect("release");
+    }
+
+    /// A navigation that lands between a content read resolving its execution
+    /// context and using it gets Chromium's real destroyed-context error; the
+    /// read is retried once and returns the new page. The first attempt pins
+    /// the context id from before the navigation, which is exactly what the
+    /// race does, deterministically.
+    #[tokio::test]
+    async fn navigation_during_content_read_is_retried_once() {
+        use ::chromiumoxide::cdp::js_protocol::runtime::EvaluateParams;
+        if !live_enabled() {
+            return;
+        }
+        let driver = live_driver().with_pool_config(quiet_pool());
+        let session = live_session_sized(&driver, "nav-race", None, "old-page").await;
+        let page = driver.current_page(&session).await.expect("page");
+        let stale_context = page
+            .execution_context()
+            .await
+            .expect("execution context")
+            .expect("a main-frame context");
+        page.goto("about:blank").await.expect("navigate");
+        page.set_content("<html><body><p id=\"m\">new-page</p></body></html>")
+            .await
+            .expect("new content");
+
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let first_error = Arc::new(std::sync::Mutex::new(None::<String>));
+        let html = read_with_retry(Op::Content, || {
+            let attempts = attempts.clone();
+            let first_error = first_error.clone();
+            let page = page.clone();
+            let driver = &driver;
+            let session = &session;
+            async move {
+                if attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+                    let params = EvaluateParams::builder()
+                        .expression("document.documentElement.outerHTML")
+                        .context_id(stale_context)
+                        .return_by_value(true)
+                        .build()
+                        .expect("params");
+                    let error = match page.execute(params).await {
+                        Ok(_) => QuarryError::new(ErrorCode::Internal, "stale context answered"),
+                        Err(error) => QuarryError::new(
+                            ErrorCode::DriverFailed,
+                            "chromiumoxide content failed",
+                        )
+                        .with_details(json!({ "error": error.to_string() })),
+                    };
+                    *first_error.lock().unwrap() =
+                        error.details.as_ref().map(|details| details.to_string());
+                    Err(error)
+                } else {
+                    driver.content(session).await
+                }
+            }
+        })
+        .await
+        .expect("the retried read succeeds");
+        assert_eq!(attempts.load(Ordering::SeqCst), 2, "retried exactly once");
+        let first = first_error.lock().unwrap().clone().expect("first error");
+        assert!(
+            crate::deadlines::is_context_destroyed(&first),
+            "Chromium's error is one the retry recognises: {first}"
+        );
+        let html = String::from_utf8_lossy(&html).into_owned();
+        assert!(html.contains("new-page"), "the new page: {html}");
+        assert!(!html.contains("old-page"));
+        driver.release(session).await.expect("release");
+    }
+
+    /// A tab attach that is cancelled after it created its context and page
+    /// (the caller's deadline, a dropped request) leaves nothing behind: the
+    /// context is disposed, the page reservation is returned, and the next
+    /// attach of the same session works.
+    #[tokio::test]
+    async fn attach_timeout_cleans_up_partial_context() {
+        if !live_enabled() {
+            return;
+        }
+        let driver = Arc::new(live_driver().with_pool_config(quiet_pool()));
+        let session = live_session(&driver, "attach-cancel").await;
+        let baseline = context_count(&driver).await;
+        let pages_baseline = page_target_count(&driver).await;
+        *driver.attach_stall.lock().unwrap() = Some(Duration::from_secs(30));
+
+        let attaching = {
+            let driver = driver.clone();
+            let session = session.clone();
+            tokio::spawn(async move { driver.new_tab(&session, None).await })
+        };
+        assert!(
+            eventually(Duration::from_secs(15), || async {
+                context_count(&driver).await == baseline + 1
+            })
+            .await,
+            "the attach created its context and stalls"
+        );
+        assert_eq!(driver.book().slot(SLOT).unwrap().pages, 1, "page reserved");
+        // Once its page exists the attach stalls, and not on the browser lock:
+        // the page count is read through that lock.
+        assert!(
+            eventually(Duration::from_secs(15), || async {
+                page_target_count(&driver).await == pages_baseline + 1
+            })
+            .await,
+            "the attach opened its page and stalls with the browser lock free"
+        );
+        assert!(!attaching.is_finished(), "the attach is still stalled");
+        attaching.abort();
+        let _ = attaching.await;
+
+        assert_eq!(driver.book().slot(SLOT).unwrap().pages, 0, "reservation returned");
+        assert!(
+            eventually(Duration::from_secs(10), || async {
+                context_count(&driver).await == baseline
+            })
+            .await,
+            "the abandoned context is disposed"
+        );
+        assert!(
+            eventually(Duration::from_secs(10), || async {
+                page_target_count(&driver).await == pages_baseline
+            })
+            .await,
+            "the abandoned page is closed"
+        );
+        {
+            let pages = driver.pages.lock().await;
+            let entry = pages.get("attach-cancel");
+            assert!(entry.is_none_or(|pages| pages.tabs.is_empty()
+                && pages.browser_context_id.is_none()));
+        }
+
+        *driver.attach_stall.lock().unwrap() = None;
+        driver.new_tab(&session, None).await.expect("next attach works");
+        assert_eq!(context_count(&driver).await, baseline + 1);
+        assert_eq!(driver.book().slot(SLOT).unwrap().pages, 1);
+        driver.release(session).await.expect("release");
+        assert_eq!(driver.book().slot(SLOT).unwrap().pages, 0);
+        assert!(
+            eventually(Duration::from_secs(5), || async {
+                context_count(&driver).await == baseline
+            })
+            .await
+        );
     }
 
     /// A session under an allow-nothing policy: the page can render what the test
