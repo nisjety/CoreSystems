@@ -145,7 +145,9 @@ pub fn to_markdown(html: &str, options: &CleanOptions) -> CleanOutput {
             .flat_map(|selector| doc.select(selector).map(|element| element.id()))
             .collect();
         let mut kept = Vec::new();
-        for node in doc.root_element().descendants() {
+        // The document node, not the html element: an exclusion may have detached
+        // the html element, and root_element() panics when it is missing.
+        for node in doc.tree.root().descendants() {
             if !matched.contains(&node.id()) {
                 continue;
             }
