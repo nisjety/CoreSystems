@@ -52,12 +52,15 @@ use tokio_tungstenite::{
 use url::Url;
 
 use crate::{
-    audience_tokens::{get_audience_token, get_onboarding_preview_token},
-    config::AppState,
+    audience_tokens::{
+        get_audience_token, get_onboarding_preview_token, require_model_service_token,
+        ModelServiceAudience, RequiredAudienceTokenError,
+    },
+    config::{AppState, BrowserGrantMode},
     domains::chat::shared::{
-        data_plane_token, delegated_auth_unavailable, model_token, proxy_model_json,
-        proxy_model_json_with_data_plane, proxy_model_json_with_session, required_execution_token,
-        required_inference_token, required_session_token,
+        data_plane_authorization_value, data_plane_token, delegated_auth_unavailable, model_token,
+        proxy_model_json, proxy_model_json_with_data_plane, proxy_model_json_with_session,
+        required_execution_token, required_inference_token, required_session_token,
     },
     envelope::{error, ok, unwrap_data},
     middleware::{require_session, AuthenticatedUser},
@@ -504,6 +507,13 @@ pub(crate) async fn create_session(
     // the flag is threaded through metadata so the SPA renders persistence
     // state from data instead of assuming it.
     let zdr = body.zdr;
+    // A BrowserBroker session grant for the start host, before Quarry is
+    // asked for a lease: in strict mode no grant means no session.
+    let grant_id =
+        match issue_session_grant(&state, &user, &headers, allowed_domain.as_deref(), zdr).await {
+            Ok(grant_id) => grant_id,
+            Err(response) => return response,
+        };
     let mut start_body = json!({
         "constraints": {
             "max_steps": 12,
@@ -523,6 +533,9 @@ pub(crate) async fn create_session(
     if requested_persistent_profile {
         start_body["persist_profile"] = Value::Bool(true);
     }
+    if let Some(grant_id) = grant_id.as_deref() {
+        start_body["grant_id"] = Value::String(grant_id.to_owned());
+    }
 
     let (start_status, start_body) = quarry_call(
         &state,
@@ -534,6 +547,9 @@ pub(crate) async fn create_session(
     )
     .await;
     if !start_status.is_success() {
+        if let Some(grant_id) = grant_id.as_deref() {
+            revoke_session_grant(&state, &user, &headers, grant_id).await;
+        }
         return forward_quarry_failure(start_status, start_body);
     }
 
@@ -575,6 +591,9 @@ pub(crate) async fn create_session(
             &user.user_id,
         )
         .await;
+        if let Some(grant_id) = grant_id.as_deref() {
+            revoke_session_grant(&state, &user, &headers, grant_id).await;
+        }
         return forward_quarry_failure(step_status, step_body);
     }
 
@@ -1062,6 +1081,14 @@ pub(crate) async fn close_session(
     }
     let cookie = cookie_header(&headers);
     let token = quarry_token(&state, &user, &cookie).await;
+    // The session grant is read from the owner projection before the run is
+    // closed, so it can be revoked with it. Best effort: an absent or foreign
+    // run keeps today's idempotent close.
+    let grant_id = owner_browser_session_projection(&state, &user, token.as_deref(), &session_id)
+        .await
+        .ok()
+        .as_ref()
+        .and_then(projection_grant_id);
     let (status, body) = quarry_call(
         &state,
         Method::DELETE,
@@ -1073,6 +1100,9 @@ pub(crate) async fn close_session(
     .await;
     if !status.is_success() && status != StatusCode::NOT_FOUND {
         return forward_quarry_failure(status, body);
+    }
+    if let Some(grant_id) = grant_id.as_deref() {
+        revoke_session_grant(&state, &user, &headers, grant_id).await;
     }
     (StatusCode::OK, Json(ok(json!({ "closed": true })))).into_response()
 }
@@ -1235,7 +1265,7 @@ impl BrowserSessionRunState for BrowserRunMetadata {
 /// here should ever arm the broken legacy switch on a caller's behalf.
 fn build_ai_run_request<S: BrowserSessionRunState>(
     goal: &str,
-    session_id: &str,
+    grant_id: &str,
     metadata: &S,
     body: &StartAiRunBody,
     start_url: Option<&str>,
@@ -1256,7 +1286,9 @@ fn build_ai_run_request<S: BrowserSessionRunState>(
         .flatten();
     json!({
         "goal": goal,
-        "grant_id": format!("session:{session_id}"),
+        // The session's BrowserBroker grant. Model Gateway derives the run's
+        // own grant from it; `allowed_domains` below can only narrow it.
+        "grant_id": grant_id,
         "profile_id": persistent_profile_id,
         "start_url": start_url,
         "allowed_domains": body.allowed_domains,
@@ -1279,11 +1311,13 @@ fn build_ai_run_request<S: BrowserSessionRunState>(
 /// genuinely persistent (see `build_ai_run_request`'s doc comment — Quarry
 /// assigns a working-set `profile_id` to every lease, ephemeral ones
 /// included, so the raw value alone is not evidence of persistence).
-/// `grant_id` is an interim, session-scoped string — real Model-Plane
-/// browser-grant *issuance* (a durable `BrowserGrant` record) is still
-/// unbuilt; risk-based HITL *gating* of individual risky actions is live as
-/// of Phase 5 (see `build_ai_run_request` above and
-/// `docs/BROWSER_WORKSPACE_PLAN.md`).
+/// `grant_id` is the session's BrowserBroker grant, read from Quarry's owner
+/// projection; Model Gateway derives a narrower run grant from it (WS1.B).
+/// A session without a grant (opened with `BROWSER_GRANT_ENFORCEMENT=off`, or
+/// in `permissive` mode when issuance failed) gets 409
+/// `browser_session_grant_missing` and Model Gateway is never called.
+/// Risk-based HITL *gating* of individual risky actions is live as of Phase 5
+/// (see `build_ai_run_request` above and `docs/BROWSER_WORKSPACE_PLAN.md`).
 pub(crate) async fn start_ai_run(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
@@ -1338,15 +1372,31 @@ pub(crate) async fn start_ai_run(
         .filter(|value| !value.is_empty())
         .map(str::to_owned);
 
+    let grant_id = match projection_grant_id(&projection) {
+        Some(grant_id) => grant_id,
+        // No grant means no run in every mode: the broker refuses anything
+        // that is not a grant it issued, so there is no placeholder to send.
+        None => {
+            return (
+                StatusCode::CONFLICT,
+                Json(error(
+                    "browser_session_grant_missing",
+                    "This browser session has no browser grant. Reopen it to start an AI run.",
+                )),
+            )
+                .into_response()
+        }
+    };
     let request_body =
-        build_ai_run_request(goal, &session_id, &metadata, &body, start_url.as_deref());
+        build_ai_run_request(goal, &grant_id, &metadata, &body, start_url.as_deref());
 
-    let (token, data_plane, inference, execution, session) = tokio::join!(
+    let (token, data_plane, inference, execution, session, browser) = tokio::join!(
         model_token(&state, &user, &headers),
         data_plane_token(&state, &user, &headers),
         required_inference_token(&state, &user, &headers),
         required_execution_token(&state, &user, &headers),
         required_session_token(&state, &user, &headers),
+        browser_broker_token(&state, &user, &headers),
     );
     let Some(data_plane) = data_plane else {
         return (
@@ -1370,18 +1420,24 @@ pub(crate) async fn start_ai_run(
         Ok(token) => token,
         Err(error) => return delegated_auth_unavailable(error).into_response(),
     };
+    let browser = match browser {
+        Ok(token) => token,
+        Err(error) => return delegated_auth_unavailable(error).into_response(),
+    };
     let url = format!("{}/v1/browser/runs", state.model_gateway_url);
-    let (status, Json(response_body)) = proxy_model_json_with_data_plane(
+    let (status, Json(response_body)) = proxy_model_json_with_delegated(
         &state,
         Method::POST,
         &url,
         Some(request_body),
         token.as_deref(),
-        Some(&data_plane),
-        Some(&inference),
-        Some(&execution),
-        None,
-        Some(&session),
+        &[
+            ("x-data-plane-authorization", data_plane.as_str()),
+            ("x-inference-authorization", inference.as_str()),
+            ("x-execution-authorization", execution.as_str()),
+            ("x-session-authorization", session.as_str()),
+            ("x-browser-authorization", browser.as_str()),
+        ],
         &user,
     )
     .await;
@@ -3852,6 +3908,233 @@ fn dev_quarry_token_for(allow_dev_auth_bypass: bool) -> Option<String> {
     allow_dev_auth_bypass.then(|| "dev-bypass".to_owned())
 }
 
+// ---------------------------------------------------------------------------
+// BrowserBroker session grants (WS1.B)
+// ---------------------------------------------------------------------------
+
+/// Model Gateway JSON call that carries the delegated credentials a browser
+/// grant or browser run needs, each on its own audience-bound header (for
+/// example `x-browser-authorization` for `aud=browser-broker`). Org and role
+/// headers follow `proxy_model_json`; the role is a presentation hint only.
+///
+/// Local to the browser domain until `chat::shared`'s proxy grows a browser
+/// slot (the plan's `proxy_model_json_with_browser`); it never forwards a
+/// credential under a header other than the one named for its audience.
+async fn proxy_model_json_with_delegated(
+    state: &AppState,
+    method: Method,
+    url: &str,
+    body: Option<Value>,
+    bearer_token: Option<&str>,
+    delegations: &[(&'static str, &str)],
+    user: &AuthenticatedUser,
+) -> (StatusCode, Json<Value>) {
+    let org_id = authorized_org_id(state, user).await;
+    let user_role = user
+        .auth_role
+        .as_deref()
+        .map(str::trim)
+        .filter(|role| !role.is_empty())
+        .unwrap_or("member");
+    let mut req = state
+        .client
+        .request(method, url)
+        .header("x-user-id", &user.user_id)
+        .header("x-user-role", user_role);
+    if !org_id.trim().is_empty() {
+        req = req.header("x-org-id", org_id);
+    }
+    if let Some(token) = bearer_token {
+        req = req.bearer_auth(token);
+    }
+    for (header_name, token) in delegations {
+        if let Some(value) = data_plane_authorization_value(token) {
+            req = req.header(*header_name, value);
+        }
+    }
+    if let Some(body) = body {
+        req = req.json(&body);
+    }
+    match req.send().await {
+        Ok(resp) => {
+            let status =
+                StatusCode::from_u16(resp.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+            let body = resp.json::<Value>().await.unwrap_or_else(|_| json!({}));
+            (status, Json(body))
+        }
+        Err(_) => (
+            StatusCode::BAD_GATEWAY,
+            Json(error(
+                "model_gateway_unreachable",
+                "Model Gateway is temporarily unavailable.",
+            )),
+        ),
+    }
+}
+
+/// The delegated `aud=browser-broker` credential for this user.
+async fn browser_broker_token(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+) -> Result<String, RequiredAudienceTokenError> {
+    require_model_service_token(
+        state,
+        &user.user_id,
+        &cookie_header(headers),
+        ModelServiceAudience::BrowserBroker,
+    )
+    .await
+}
+
+/// Why a session grant could not be issued, as the SPA sees it in strict mode.
+fn session_grant_refusal(upstream: Option<StatusCode>) -> Response {
+    let (status, code, message) = match upstream {
+        Some(StatusCode::BAD_REQUEST) | None => (
+            StatusCode::BAD_REQUEST,
+            "browser_host_not_grantable",
+            "This address cannot be opened in the in-app browser.",
+        ),
+        Some(StatusCode::FORBIDDEN) => (
+            StatusCode::FORBIDDEN,
+            "browser_grant_denied",
+            "Browser access was not granted for this session.",
+        ),
+        Some(StatusCode::TOO_MANY_REQUESTS) => (
+            StatusCode::TOO_MANY_REQUESTS,
+            "browser_grant_limit_reached",
+            "Too many browser sessions are open. Close one and try again.",
+        ),
+        Some(_) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "browser_grant_unavailable",
+            "Browser access is temporarily unavailable.",
+        ),
+    };
+    (status, Json(error(code, message))).into_response()
+}
+
+/// Obtains a BrowserBroker session grant for the session's start host.
+///
+/// `Ok(None)` means the session opens without a grant: the mode is `Off`, or
+/// it is `Permissive` and issuance failed. In `Strict` every failure is an
+/// error response and no Quarry run is started. Hosts are never logged.
+async fn issue_session_grant(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+    host: Option<&str>,
+    zdr: bool,
+) -> Result<Option<String>, Response> {
+    let mode = state.browser_grant_mode;
+    if !mode.issues_grants() {
+        return Ok(None);
+    }
+    let strict = mode == BrowserGrantMode::Strict;
+    let Some(host) = host else {
+        return if strict {
+            Err(session_grant_refusal(None))
+        } else {
+            Ok(None)
+        };
+    };
+    let (model, browser) = tokio::join!(
+        model_token(state, user, headers),
+        browser_broker_token(state, user, headers),
+    );
+    let browser = match browser {
+        Ok(token) => token,
+        Err(error) if strict => return Err(delegated_auth_unavailable(error).into_response()),
+        Err(_) => {
+            tracing::warn!(
+                outcome = "browser_token_unavailable",
+                "browser session opened without a grant (permissive)"
+            );
+            return Ok(None);
+        }
+    };
+    let url = format!("{}/v1/browser/grants", state.model_gateway_url);
+    let (status, Json(body)) = proxy_model_json_with_delegated(
+        state,
+        Method::POST,
+        &url,
+        Some(json!({ "allowed_domains": [host], "zdr": zdr })),
+        model.as_deref(),
+        &[("x-browser-authorization", browser.as_str())],
+        user,
+    )
+    .await;
+    let grant_id = status
+        .is_success()
+        .then(|| str_field(&unwrap_data(&body), "grant_id"))
+        .flatten()
+        .filter(|id| is_valid_path_segment(id));
+    match grant_id {
+        Some(grant_id) => Ok(Some(grant_id)),
+        None if strict => Err(session_grant_refusal(Some(status))),
+        None => {
+            tracing::warn!(
+                status = status.as_u16(),
+                outcome = "grant_not_issued",
+                "browser session opened without a grant (permissive)"
+            );
+            Ok(None)
+        }
+    }
+}
+
+/// Revokes a session grant, best effort: a failure leaves the grant to expire
+/// on its own TTL, and revoking an already-gone grant is a 200 upstream.
+async fn revoke_session_grant(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+    grant_id: &str,
+) {
+    if !is_valid_path_segment(grant_id) {
+        return;
+    }
+    let (model, browser) = tokio::join!(
+        model_token(state, user, headers),
+        browser_broker_token(state, user, headers),
+    );
+    let Ok(browser) = browser else {
+        return;
+    };
+    let url = format!(
+        "{}/v1/browser/grants/{}",
+        state.model_gateway_url,
+        urlencoding::encode(grant_id)
+    );
+    let (status, _) = proxy_model_json_with_delegated(
+        state,
+        Method::DELETE,
+        &url,
+        None,
+        model.as_deref(),
+        &[("x-browser-authorization", browser.as_str())],
+        user,
+    )
+    .await;
+    if !status.is_success() {
+        tracing::warn!(
+            status = status.as_u16(),
+            "browser session grant revoke failed; it expires on its TTL"
+        );
+    }
+}
+
+/// The session grant id from Quarry's owner projection. Internal: it is read
+/// to derive AI-run grants and to revoke on close, never sent to the SPA.
+fn projection_grant_id(projection: &Value) -> Option<String> {
+    projection
+        .get("grantId")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|id| !id.is_empty() && is_valid_path_segment(id))
+        .map(str::to_owned)
+}
+
 fn cookie_header(headers: &HeaderMap) -> String {
     headers
         .get("cookie")
@@ -4074,7 +4357,9 @@ mod tests {
             let response = forward_quarry_failure(StatusCode::TOO_MANY_REQUESTS, quarry);
             assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
             assert_eq!(response.headers().get("retry-after").unwrap(), "12");
-            let bytes = axum::body::to_bytes(response.into_body(), 1 << 20).await.unwrap();
+            let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+                .await
+                .unwrap();
             let body: Value = serde_json::from_slice(&bytes).unwrap();
             assert_eq!(body["error"]["code"], "browser_capacity_reached");
             assert_eq!(body["error"]["retryAfterSeconds"], 12);
@@ -4083,7 +4368,9 @@ mod tests {
         // Any other 429 passes through untouched.
         let other = json!({ "error": { "code": "RATE_LIMITED", "details": { "reason": "something_else" } } });
         let response = forward_quarry_failure(StatusCode::TOO_MANY_REQUESTS, other);
-        let bytes = axum::body::to_bytes(response.into_body(), 1 << 20).await.unwrap();
+        let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+            .await
+            .unwrap();
         let body: Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(body["error"]["code"], "RATE_LIMITED");
     }
@@ -4098,7 +4385,9 @@ mod tests {
         }});
         let response = forward_quarry_failure(StatusCode::CONFLICT, quarry);
         assert_eq!(response.status(), StatusCode::CONFLICT);
-        let bytes = axum::body::to_bytes(response.into_body(), 1 << 20).await.unwrap();
+        let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+            .await
+            .unwrap();
         let body: Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(body["error"]["code"], "browser_human_takeover_active");
         assert_eq!(body["error"]["details"]["control_epoch"], 3);
@@ -5052,6 +5341,451 @@ mod tests {
         }
     }
 
+    // --- WS1.B: BrowserBroker session grants ------------------------------
+
+    mod session_grants {
+        use super::*;
+        use axum::body::to_bytes;
+        use wiremock::{
+            matchers::{method as wm_method, path as wm_path},
+            Mock, MockServer, ResponseTemplate,
+        };
+
+        const GRANT: &str = "0123456789abcdef0123456789abcdef";
+
+        struct Upstreams {
+            auth: MockServer,
+            model: MockServer,
+            quarry: MockServer,
+        }
+
+        async fn upstreams() -> Upstreams {
+            Upstreams {
+                auth: plane_token_issuer().await,
+                model: MockServer::start().await,
+                quarry: MockServer::start().await,
+            }
+        }
+
+        fn state(up: &Upstreams, mode: BrowserGrantMode) -> AppState {
+            let mut state = test_app_state();
+            state.auth_core_url = up.auth.uri();
+            state.model_gateway_url = up.model.uri();
+            state.quarry_edge_url = up.quarry.uri();
+            state.browser_grant_mode = mode;
+            state
+        }
+
+        async fn mount_quarry_session(quarry: &MockServer, projection: Value) {
+            Mock::given(wm_method("POST"))
+                .and(wm_path("/v1/agent/runs"))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .set_body_json(json!({ "data": { "run_id": "run-1" } })),
+                )
+                .mount(quarry)
+                .await;
+            Mock::given(wm_method("POST"))
+                .and(wm_path("/v1/agent/runs/run-1/step"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(
+                    json!({ "data": { "url": "https://example.com/", "title": "Example" } }),
+                ))
+                .mount(quarry)
+                .await;
+            Mock::given(wm_method("GET"))
+                .and(wm_path("/v1/agent/runs/run-1/browser-session"))
+                .respond_with(
+                    ResponseTemplate::new(200).set_body_json(json!({ "data": projection })),
+                )
+                .mount(quarry)
+                .await;
+            Mock::given(wm_method("DELETE"))
+                .and(wm_path("/v1/agent/runs/run-1"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "data": {} })))
+                .mount(quarry)
+                .await;
+        }
+
+        fn owner_projection(grant: Option<&str>) -> Value {
+            let mut projection = json!({
+                "runId": "run-1",
+                "status": "active",
+                "live": true,
+                "currentUrl": "https://example.com/",
+                "profileScope": "ephemeral",
+                "zdr": false,
+                "tabs": []
+            });
+            if let Some(grant) = grant {
+                projection["grantId"] = json!(grant);
+            }
+            projection
+        }
+
+        async fn create(state: AppState) -> (StatusCode, Value) {
+            let body: CreateSessionBody =
+                serde_json::from_value(json!({ "url": "https://example.com/" })).expect("body");
+            let response = create_session(
+                State(state),
+                Extension(test_user("user-a", "org-a")),
+                HeaderMap::new(),
+                Json(body),
+            )
+            .await;
+            let status = response.status();
+            let bytes = to_bytes(response.into_body(), 256 * 1024)
+                .await
+                .expect("body");
+            (
+                status,
+                serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+            )
+        }
+
+        async fn requests_to(
+            server: &MockServer,
+            method: &str,
+            path: &str,
+        ) -> Vec<wiremock::Request> {
+            server
+                .received_requests()
+                .await
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|r| r.method.as_str() == method && r.url.path() == path)
+                .collect()
+        }
+
+        #[tokio::test]
+        async fn create_session_puts_the_issued_grant_on_the_quarry_start_and_never_in_the_response(
+        ) {
+            let up = upstreams().await;
+            Mock::given(wm_method("POST"))
+                .and(wm_path("/v1/browser/grants"))
+                .respond_with(
+                    ResponseTemplate::new(201).set_body_json(
+                        json!({ "grant_id": GRANT, "kind": "session", "zdr": false }),
+                    ),
+                )
+                .mount(&up.model)
+                .await;
+            mount_quarry_session(&up.quarry, owner_projection(Some(GRANT))).await;
+
+            let (status, body) = create(state(&up, BrowserGrantMode::Strict)).await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            assert!(
+                !body.to_string().contains(GRANT),
+                "grant id leaked to the SPA: {body}"
+            );
+
+            let grants = requests_to(&up.model, "POST", "/v1/browser/grants").await;
+            assert_eq!(grants.len(), 1);
+            assert_eq!(
+                grants[0]
+                    .headers
+                    .get("x-browser-authorization")
+                    .and_then(|v| v.to_str().ok()),
+                Some("Bearer test-plane-token")
+            );
+            let grant_body: Value = serde_json::from_slice(&grants[0].body).expect("grant body");
+            assert_eq!(grant_body["allowed_domains"], json!(["example.com"]));
+            assert_eq!(grant_body["zdr"], json!(false));
+
+            let starts = requests_to(&up.quarry, "POST", "/v1/agent/runs").await;
+            let start_body: Value = serde_json::from_slice(&starts[0].body).expect("start body");
+            assert_eq!(start_body["grant_id"], json!(GRANT));
+        }
+
+        #[tokio::test]
+        async fn strict_mode_without_a_grant_never_starts_a_quarry_run() {
+            for (upstream, want_status, want_code) in [
+                (400, StatusCode::BAD_REQUEST, "browser_host_not_grantable"),
+                (403, StatusCode::FORBIDDEN, "browser_grant_denied"),
+                (
+                    429,
+                    StatusCode::TOO_MANY_REQUESTS,
+                    "browser_grant_limit_reached",
+                ),
+                (
+                    503,
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "browser_grant_unavailable",
+                ),
+                (
+                    502,
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "browser_grant_unavailable",
+                ),
+            ] {
+                let up = upstreams().await;
+                Mock::given(wm_method("POST"))
+                    .and(wm_path("/v1/browser/grants"))
+                    .respond_with(
+                        ResponseTemplate::new(upstream)
+                            .set_body_json(json!({ "error": "browser_host_not_grantable" })),
+                    )
+                    .mount(&up.model)
+                    .await;
+                mount_quarry_session(&up.quarry, owner_projection(None)).await;
+
+                let (status, body) = create(state(&up, BrowserGrantMode::Strict)).await;
+                assert_eq!(status, want_status, "upstream {upstream}: {body}");
+                assert_eq!(body["error"]["code"], want_code, "upstream {upstream}");
+                assert!(
+                    up.quarry
+                        .received_requests()
+                        .await
+                        .unwrap_or_default()
+                        .is_empty(),
+                    "upstream {upstream}: Quarry must not be called without a grant"
+                );
+            }
+        }
+
+        #[tokio::test]
+        async fn permissive_mode_opens_the_session_without_a_grant_when_issuance_fails() {
+            let up = upstreams().await;
+            Mock::given(wm_method("POST"))
+                .and(wm_path("/v1/browser/grants"))
+                .respond_with(ResponseTemplate::new(503).set_body_json(json!({})))
+                .mount(&up.model)
+                .await;
+            mount_quarry_session(&up.quarry, owner_projection(None)).await;
+
+            let (status, _) = create(state(&up, BrowserGrantMode::Permissive)).await;
+            assert_eq!(status, StatusCode::OK);
+            let starts = requests_to(&up.quarry, "POST", "/v1/agent/runs").await;
+            let start_body: Value = serde_json::from_slice(&starts[0].body).expect("start body");
+            assert!(start_body.get("grant_id").is_none(), "{start_body}");
+        }
+
+        #[tokio::test]
+        async fn off_mode_never_asks_for_a_grant() {
+            let up = upstreams().await;
+            mount_quarry_session(&up.quarry, owner_projection(None)).await;
+            let (status, _) = create(state(&up, BrowserGrantMode::Off)).await;
+            assert_eq!(status, StatusCode::OK);
+            assert!(up
+                .model
+                .received_requests()
+                .await
+                .unwrap_or_default()
+                .is_empty());
+        }
+
+        #[tokio::test]
+        async fn a_failed_quarry_start_revokes_the_grant_it_was_given() {
+            let up = upstreams().await;
+            Mock::given(wm_method("POST"))
+                .and(wm_path("/v1/browser/grants"))
+                .respond_with(
+                    ResponseTemplate::new(201).set_body_json(json!({ "grant_id": GRANT })),
+                )
+                .mount(&up.model)
+                .await;
+            Mock::given(wm_method("DELETE"))
+                .and(wm_path(format!("/v1/browser/grants/{GRANT}")))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "revoked": true })))
+                .mount(&up.model)
+                .await;
+            Mock::given(wm_method("POST"))
+                .and(wm_path("/v1/agent/runs"))
+                .respond_with(ResponseTemplate::new(503).set_body_json(json!({})))
+                .mount(&up.quarry)
+                .await;
+
+            let (status, _) = create(state(&up, BrowserGrantMode::Strict)).await;
+            assert!(!status.is_success());
+            let revokes =
+                requests_to(&up.model, "DELETE", &format!("/v1/browser/grants/{GRANT}")).await;
+            assert_eq!(revokes.len(), 1);
+        }
+
+        #[tokio::test]
+        async fn a_failed_first_step_revokes_the_grant_it_was_given() {
+            let up = upstreams().await;
+            Mock::given(wm_method("POST"))
+                .and(wm_path("/v1/browser/grants"))
+                .respond_with(
+                    ResponseTemplate::new(201).set_body_json(json!({ "grant_id": GRANT })),
+                )
+                .mount(&up.model)
+                .await;
+            Mock::given(wm_method("DELETE"))
+                .and(wm_path(format!("/v1/browser/grants/{GRANT}")))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "revoked": true })))
+                .mount(&up.model)
+                .await;
+            Mock::given(wm_method("POST"))
+                .and(wm_path("/v1/agent/runs"))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .set_body_json(json!({ "data": { "run_id": "run-1" } })),
+                )
+                .mount(&up.quarry)
+                .await;
+            Mock::given(wm_method("POST"))
+                .and(wm_path("/v1/agent/runs/run-1/step"))
+                .respond_with(ResponseTemplate::new(502).set_body_json(json!({})))
+                .mount(&up.quarry)
+                .await;
+            Mock::given(wm_method("DELETE"))
+                .and(wm_path("/v1/agent/runs/run-1"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "data": {} })))
+                .mount(&up.quarry)
+                .await;
+
+            let (status, _) = create(state(&up, BrowserGrantMode::Strict)).await;
+            assert!(!status.is_success());
+            let revokes =
+                requests_to(&up.model, "DELETE", &format!("/v1/browser/grants/{GRANT}")).await;
+            assert_eq!(revokes.len(), 1);
+        }
+
+        fn ai_run_body() -> StartAiRunBody {
+            StartAiRunBody {
+                goal: "find the price".to_owned(),
+                allowed_domains: Some(vec!["shop.example.com".to_owned()]),
+                max_steps: None,
+                max_runtime_s: None,
+                stop_criteria: None,
+                require_approval: None,
+                max_cost_usd: None,
+            }
+        }
+
+        async fn start_run(state: AppState) -> (StatusCode, Value) {
+            let response = start_ai_run(
+                State(state),
+                Extension(test_user("user-a", "org-a")),
+                HeaderMap::new(),
+                Path("run-1".to_owned()),
+                Json(ai_run_body()),
+            )
+            .await;
+            let status = response.status();
+            let bytes = to_bytes(response.into_body(), 256 * 1024)
+                .await
+                .expect("body");
+            (
+                status,
+                serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+            )
+        }
+
+        #[tokio::test]
+        async fn an_ai_run_carries_the_session_grant_and_the_browser_bearer() {
+            let up = upstreams().await;
+            mount_quarry_session(&up.quarry, owner_projection(Some(GRANT))).await;
+            Mock::given(wm_method("POST"))
+                .and(wm_path("/v1/browser/runs"))
+                .respond_with(
+                    ResponseTemplate::new(200).set_body_json(json!({ "run_id": "mp-run-1" })),
+                )
+                .mount(&up.model)
+                .await;
+
+            let (status, body) = start_run(state(&up, BrowserGrantMode::Strict)).await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            let runs = requests_to(&up.model, "POST", "/v1/browser/runs").await;
+            assert_eq!(runs.len(), 1);
+            let sent: Value = serde_json::from_slice(&runs[0].body).expect("run body");
+            assert_eq!(sent["grant_id"], json!(GRANT));
+            assert_eq!(sent["allowed_domains"], json!(["shop.example.com"]));
+            for header in [
+                "x-browser-authorization",
+                "x-session-authorization",
+                "x-execution-authorization",
+                "x-inference-authorization",
+                "x-data-plane-authorization",
+            ] {
+                assert_eq!(
+                    runs[0].headers.get(header).and_then(|v| v.to_str().ok()),
+                    Some("Bearer test-plane-token"),
+                    "{header}"
+                );
+            }
+        }
+
+        #[tokio::test]
+        async fn an_ai_run_on_a_session_without_a_grant_is_409_in_every_mode() {
+            for mode in [
+                BrowserGrantMode::Strict,
+                BrowserGrantMode::Permissive,
+                BrowserGrantMode::Off,
+            ] {
+                let up = upstreams().await;
+                mount_quarry_session(&up.quarry, owner_projection(None)).await;
+                let (status, body) = start_run(state(&up, mode)).await;
+                assert_eq!(status, StatusCode::CONFLICT, "{mode:?}");
+                assert_eq!(body["error"]["code"], "browser_session_grant_missing");
+                assert!(up
+                    .model
+                    .received_requests()
+                    .await
+                    .unwrap_or_default()
+                    .is_empty());
+            }
+        }
+
+        #[tokio::test]
+        async fn closing_a_session_revokes_its_grant() {
+            let up = upstreams().await;
+            mount_quarry_session(&up.quarry, owner_projection(Some(GRANT))).await;
+            Mock::given(wm_method("DELETE"))
+                .and(wm_path(format!("/v1/browser/grants/{GRANT}")))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "revoked": true })))
+                .mount(&up.model)
+                .await;
+            let response = close_session(
+                State(state(&up, BrowserGrantMode::Strict)),
+                Extension(test_user("user-a", "org-a")),
+                HeaderMap::new(),
+                Path("run-1".to_owned()),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::OK);
+            let revokes =
+                requests_to(&up.model, "DELETE", &format!("/v1/browser/grants/{GRANT}")).await;
+            assert_eq!(revokes.len(), 1);
+            assert_eq!(
+                revokes[0]
+                    .headers
+                    .get("x-browser-authorization")
+                    .and_then(|v| v.to_str().ok()),
+                Some("Bearer test-plane-token")
+            );
+        }
+
+        #[test]
+        fn the_spa_projection_mapping_never_exposes_the_grant_id() {
+            let mapped =
+                browser_response_from_owner_projection(&owner_projection(Some(GRANT)), None);
+            let text = mapped.to_string();
+            assert!(!text.contains(GRANT) && !text.contains("grantId"), "{text}");
+        }
+
+        #[test]
+        fn a_projection_grant_id_must_be_a_plain_path_segment() {
+            assert_eq!(
+                projection_grant_id(&owner_projection(Some(GRANT))).as_deref(),
+                Some(GRANT)
+            );
+            assert_eq!(
+                projection_grant_id(&owner_projection(Some("z_abc123"))).as_deref(),
+                Some("z_abc123")
+            );
+            for bad in ["", "../x", "a/b", "g?x=1"] {
+                assert_eq!(
+                    projection_grant_id(&owner_projection(Some(bad))),
+                    None,
+                    "{bad:?}"
+                );
+            }
+            assert_eq!(projection_grant_id(&owner_projection(None)), None);
+        }
+    }
+
     fn test_app_state() -> AppState {
         let cache = crate::cache::ResultCache::disabled();
         AppState {
@@ -5059,6 +5793,7 @@ mod tests {
             streaming_client: reqwest::Client::new(),
             internal_api_key: "test-key".into(),
             enforcement_mode: "off".to_string(),
+            browser_grant_mode: BrowserGrantMode::Permissive,
             auth_core_url: "http://127.0.0.1:1".into(),
             verevon_public_origin: "http://localhost:5173".into(),
             session_core_url: "http://127.0.0.1:1".into(),
@@ -5450,7 +6185,7 @@ mod tests {
         assert_eq!(request["require_approval"], json!(false));
         // Sanity: everything else still forwards as expected.
         assert_eq!(request["goal"], json!("check out the cart"));
-        assert_eq!(request["grant_id"], json!("session:sess_1"));
+        assert_eq!(request["grant_id"], json!("sess_1"));
         assert_eq!(request["profile_id"], json!("prof_1"));
         assert_eq!(request["max_steps"], json!(5));
         assert_eq!(request["zdr"], json!(false));

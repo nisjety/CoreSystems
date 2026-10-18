@@ -634,6 +634,7 @@ mod tests {
             streaming_client: reqwest::Client::new(),
             internal_api_key: "test-key".into(),
             enforcement_mode: "off".to_string(),
+            browser_grant_mode: crate::config::BrowserGrantMode::Permissive,
             auth_core_url: "http://127.0.0.1:1".into(),
             verevon_public_origin: "http://localhost:5173".into(),
             session_core_url: "http://127.0.0.1:1".into(),

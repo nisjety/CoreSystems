@@ -25,6 +25,10 @@ pub(crate) struct AppState {
     /// privacy affordances (badges/ShareDialog) render ONLY when this is
     /// "strict" AND viewer identity is live — surfaced via GET /api/v1/ownership/status.
     pub(crate) enforcement_mode: String,
+    /// `BROWSER_GRANT_ENFORCEMENT` (off|permissive|strict): whether the
+    /// in-app browser obtains a BrowserBroker session grant, and whether a
+    /// failure to obtain one stops the session (WS1.B).
+    pub(crate) browser_grant_mode: BrowserGrantMode,
     pub(crate) auth_core_url: String,
     pub(crate) verevon_public_origin: String,
     pub(crate) session_core_url: String,
@@ -77,7 +81,10 @@ pub(crate) struct AppState {
     /// at a mock that mounts nothing and asserting the mock received no
     /// request at all. The tripwire only works while the field still exists,
     /// so it is deliberately retained rather than deleted with its warning.
-    #[allow(dead_code, reason = "tripwire for the closed direct-to-SearXNG bypass; see doc comment")]
+    #[allow(
+        dead_code,
+        reason = "tripwire for the closed direct-to-SearXNG bypass; see doc comment"
+    )]
     pub(crate) searxng_url: String,
     pub(crate) autocomplete_core_url: String,
     pub(crate) autocomplete_token: String,
@@ -121,7 +128,8 @@ pub(crate) struct AppState {
     /// execution-core" step. Deliberately `None` in every production build
     /// today -- see `domains/mail_task.rs`'s module doc for why this is a real
     /// gap, not an oversight, and what unblocks it.
-    pub(crate) mail_task_pipeline: Option<std::sync::Arc<dyn crate::domains::mail_task::MailTaskPipeline>>,
+    pub(crate) mail_task_pipeline:
+        Option<std::sync::Arc<dyn crate::domains::mail_task::MailTaskPipeline>>,
 }
 
 pub(crate) async fn build_state() -> Result<AppState> {
@@ -162,6 +170,10 @@ pub(crate) async fn build_state() -> Result<AppState> {
             .map(|v| v.trim().to_lowercase())
             .filter(|v| matches!(v.as_str(), "off" | "permissive" | "strict"))
             .unwrap_or_else(|| "off".to_string()),
+        browser_grant_mode: browser_grant_mode(
+            env::var("BROWSER_GRANT_ENFORCEMENT").ok().as_deref(),
+            &env::var("APP_ENV").unwrap_or_default(),
+        ),
         auth_core_url: env_url("AUTH_CORE_URL", "http://auth-core:3011"),
         verevon_public_origin: canonical_public_origin(
             &env::var("VEREVON_PUBLIC_ORIGIN")
@@ -430,6 +442,58 @@ fn dev_flags_allowed(app_env: &str) -> bool {
     !matches!(app_env.to_ascii_lowercase().as_str(), "production" | "prod")
 }
 
+/// How the BFF treats BrowserBroker grants for the in-app browser
+/// (`BROWSER_GRANT_ENFORCEMENT`, WS1.B).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum BrowserGrantMode {
+    /// No grant is issued; Quarry runs on its own client-supplied constraints.
+    Off,
+    /// A session grant is requested; if it cannot be issued the session still
+    /// opens without one (logged by outcome class, never by host).
+    Permissive,
+    /// No grant, no browser session.
+    Strict,
+}
+
+impl BrowserGrantMode {
+    pub(crate) const fn issues_grants(self) -> bool {
+        !matches!(self, Self::Off)
+    }
+}
+
+/// Resolves `BROWSER_GRANT_ENFORCEMENT` against `APP_ENV`. Outside production
+/// the default is `permissive`; in production it is `strict`, and an explicit
+/// `off` is refused there (the `dev_only_flag` pattern: report and fall back
+/// to the safe value rather than silently run without grants). An unknown
+/// value is the environment's default, never a looser mode.
+pub(crate) fn browser_grant_mode(raw: Option<&str>, app_env: &str) -> BrowserGrantMode {
+    let production = !dev_flags_allowed(app_env);
+    let default = if production {
+        BrowserGrantMode::Strict
+    } else {
+        BrowserGrantMode::Permissive
+    };
+    let Some(value) = raw.map(|value| value.trim().to_ascii_lowercase()) else {
+        return default;
+    };
+    match value.as_str() {
+        "" => default,
+        "strict" => BrowserGrantMode::Strict,
+        "permissive" => BrowserGrantMode::Permissive,
+        "off" if production => {
+            eprintln!(
+                "refusing BROWSER_GRANT_ENFORCEMENT=off because APP_ENV={app_env}; using strict"
+            );
+            BrowserGrantMode::Strict
+        }
+        "off" => BrowserGrantMode::Off,
+        _ => {
+            eprintln!("unknown BROWSER_GRANT_ENFORCEMENT value; using the {default:?} default");
+            default
+        }
+    }
+}
+
 fn env_bool(key: &str, fallback: bool) -> bool {
     env::var(key)
         .ok()
@@ -589,5 +653,31 @@ mod tests {
         assert!(dev_flags_allowed(""));
         assert!(dev_flags_allowed("development"));
         assert!(dev_flags_allowed("staging"));
+    }
+
+    #[test]
+    fn browser_grant_mode_defaults_permissive_outside_production_and_strict_in_it() {
+        use super::{browser_grant_mode, BrowserGrantMode::*};
+        assert_eq!(browser_grant_mode(None, ""), Permissive);
+        assert_eq!(browser_grant_mode(None, "development"), Permissive);
+        assert_eq!(browser_grant_mode(None, "production"), Strict);
+        assert_eq!(browser_grant_mode(Some("  "), "prod"), Strict);
+        assert_eq!(browser_grant_mode(Some("STRICT"), ""), Strict);
+        assert_eq!(
+            browser_grant_mode(Some("permissive"), "production"),
+            Permissive
+        );
+        assert_eq!(browser_grant_mode(Some("off"), "development"), Off);
+    }
+
+    #[test]
+    fn browser_grant_mode_refuses_off_in_production_and_never_loosens_on_a_typo() {
+        use super::{browser_grant_mode, BrowserGrantMode::*};
+        assert_eq!(browser_grant_mode(Some("off"), "production"), Strict);
+        assert_eq!(browser_grant_mode(Some("Off"), "Prod"), Strict);
+        assert_eq!(browser_grant_mode(Some("of"), "production"), Strict);
+        assert_eq!(browser_grant_mode(Some("disabled"), ""), Permissive);
+        assert!(!Off.issues_grants());
+        assert!(Permissive.issues_grants() && Strict.issues_grants());
     }
 }

@@ -112,6 +112,7 @@ fn test_state(quarry_edge_url: String) -> AppState {
         streaming_client: reqwest::Client::new(),
         internal_api_key: "test-key".into(),
         enforcement_mode: "off".into(),
+        browser_grant_mode: crate::config::BrowserGrantMode::Permissive,
         // Unroutable: the onboarding preview-token mint fails, so the
         // upstream calls go out unauthenticated — which is exactly the
         // degraded path we want covered here, and the stub does not check.
