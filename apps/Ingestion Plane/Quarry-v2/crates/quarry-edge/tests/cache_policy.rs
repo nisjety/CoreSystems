@@ -2,7 +2,11 @@
 //!
 //! These tests require a reachable Redis at `REDIS_URL` (default
 //! `redis://127.0.0.1:6379`). When Redis is unavailable the tests print a
-//! skip notice and return success so CI without Redis still passes.
+//! skip notice and return success, so a job without Redis still passes. A job
+//! that provides a Redis sets `REQUIRE_CONTRACT=1`; then an unreachable Redis is
+//! a failure, as in `zdr_claim_floor.rs`. `quarry-v2-ci.yml` provides no Redis and
+//! does not set `REQUIRE_CONTRACT`, so in that job these cases skip and the ZDR and
+//! non-default guards are not gated.
 //!
 //! The origin is a loopback wiremock server. The production static driver refuses
 //! loopback targets, so these tests fetch through `LoopbackDriver` instead.
@@ -94,7 +98,15 @@ impl Driver for LoopbackDriver {
 }
 
 async fn build_state() -> Option<(AppState, redis::aio::ConnectionManager)> {
-    let conn = try_redis().await?;
+    let Some(conn) = try_redis().await else {
+        // A guard that quietly skips is not a guard (see the module comment).
+        assert!(
+            std::env::var_os("REQUIRE_CONTRACT").is_none(),
+            "REQUIRE_CONTRACT is set but REDIS_URL is unreachable: the page cache guards \
+             cannot be skipped"
+        );
+        return None;
+    };
     let (tx, mut rx) = mpsc::channel(1024);
     tokio::spawn(async move { while rx.recv().await.is_some() {} });
     let event_sink = EventSink::new(tx);
@@ -516,6 +528,7 @@ async fn non_default_options_neither_read_nor_write_the_page_cache() {
         ("exclude_tags", serde_json::json!({ "exclude_tags": [".no-such-element"] })),
         ("extractor", serde_json::json!({ "extractor": "raw" })),
         ("only_main_content", serde_json::json!({ "only_main_content": false })),
+        ("remove_base64_images", serde_json::json!({ "remove_base64_images": true })),
     ];
     for (label, options) in cases {
         let nonce = unique_nonce();
@@ -549,6 +562,111 @@ async fn non_default_options_neither_read_nor_write_the_page_cache() {
         let fp = extract_fingerprint(&reply);
         let written: bool = conn.exists(page_key(DEV_ORG, &fp)).await.unwrap_or(false);
         assert!(!written, "{label}: a non-default result must not be written to the cache");
+    }
+
+    purge_key(&mut conn, &planted_fp).await;
+}
+
+/// A `signals` object with every field the contract requires (`DriverSignals` has no
+/// serde defaults), with `overrides` applied.
+fn driver_signals(overrides: serde_json::Value) -> serde_json::Value {
+    let mut signals = serde_json::json!({
+        "actions": [],
+        "screenshot": false,
+        "pdf": false,
+        "prior_block_signals": 0,
+        "profile_required": false,
+        "url_type": "Default"
+    });
+    signals
+        .as_object_mut()
+        .expect("signals is an object")
+        .extend(overrides.as_object().expect("overrides is an object").clone());
+    signals
+}
+
+/// Each signal that selects the browser driver needs a render the page cache does not
+/// hold, so a request carrying one neither reads nor writes the cache: the planted
+/// entry is not served, the origin is fetched, and the new result is not written.
+/// Without the plan check in the `routes.rs` gate, the cached static result would
+/// answer the request and its browser-only output would be absent.
+#[tokio::test]
+async fn browser_signals_neither_read_nor_write_the_page_cache() {
+    let Some((state, mut conn)) = build_state().await else {
+        eprintln!("skip: REDIS_URL unreachable");
+        return;
+    };
+    let addr = spawn_app(state).await;
+    let client = reqwest::Client::new();
+    let cache = PageCache::new(conn.clone(), Duration::from_secs(3600));
+
+    let planted_fp = format!("fp-browser-signals-planted-{}", unique_nonce());
+    let url = "http://127.0.0.1:1/browser-signals";
+    cache
+        .put(
+            DEV_ORG,
+            &planted_fp,
+            &planted_output(url, &planted_fp, "PLANTED SIGNALS TITLE"),
+        )
+        .await
+        .expect("plant the entry");
+
+    let cases = [
+        ("screenshot", driver_signals(serde_json::json!({ "screenshot": true }))),
+        ("pdf", driver_signals(serde_json::json!({ "pdf": true }))),
+        (
+            "prior_block_signals 2",
+            driver_signals(serde_json::json!({ "prior_block_signals": 2 })),
+        ),
+        (
+            "profile_required",
+            driver_signals(serde_json::json!({ "profile_required": true })),
+        ),
+    ];
+    for (label, signals) in cases {
+        let nonce = unique_nonce();
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(nonce_page(&nonce)))
+            .mount(&server)
+            .await;
+
+        let body = serde_json::json!({
+            "url": server.uri(),
+            "prev_fingerprint": planted_fp,
+            "cache": { "mode": "read_write" },
+            "signals": signals
+        });
+        let response = authed(client.post(format!("http://{addr}/v1/scrape")).json(&body))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200, "{label}");
+        let text = response.text().await.unwrap();
+        assert!(
+            !text.contains("PLANTED SIGNALS TITLE"),
+            "{label}: the planted entry was read: {text}"
+        );
+        let reply: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(
+            reply["data"]["effective_options"]["cache_state"], "bypass",
+            "{label}"
+        );
+
+        let received = server.received_requests().await.unwrap_or_default();
+        assert_eq!(
+            received.len(),
+            1,
+            "{label}: the origin is fetched, got {} hits",
+            received.len()
+        );
+
+        let fp = extract_fingerprint(&reply);
+        let written: bool = conn.exists(page_key(DEV_ORG, &fp)).await.unwrap_or(false);
+        assert!(
+            !written,
+            "{label}: a browser-signal result must not be written to the cache"
+        );
     }
 
     purge_key(&mut conn, &planted_fp).await;

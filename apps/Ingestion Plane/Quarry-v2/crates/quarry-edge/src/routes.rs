@@ -562,8 +562,13 @@ async fn scrape_with(
 
     // The page cache holds the result of a default scrape: any other options
     // (formats, selectors, an extractor) change what a result is, so they neither
-    // read nor write it. ZDR never touches it (and, with the guard, cannot).
+    // read nor write it. A request whose signals select the browser driver needs a
+    // render the cache does not hold, so it neither reads nor writes it either. ZDR
+    // never touches it (and, with the guard, cannot). The driver is chosen here, before
+    // the cache is consulted, so the gate can see it.
+    let plan = plan_from_signals(req.signals.unwrap_or_default());
     let cache_allowed = resolved.is_default()
+        && plan.driver != quarry_core::output::DriverKind::Browser
         && quarry_core::zdr::guard(zdr, quarry_core::zdr::WriteKind::Cache).is_ok();
     let mut cache_state = CacheState::Bypass;
     if cache_allowed && should_read(&req.cache) {
@@ -578,7 +583,6 @@ async fn scrape_with(
         }
     }
 
-    let plan = plan_from_signals(req.signals.unwrap_or_default());
     let driver = pick_driver(&state, &plan, req.prefer_http3);
 
     let ingest_client = if req.ingest.unwrap_or(false) {
