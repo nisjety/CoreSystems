@@ -1,0 +1,755 @@
+//! Run caps, the sweeper and what a released run leaves behind, against the real
+//! router and real token verification (the harness is in
+//! `support/agent_harness.rs`).
+//!
+//! Expiry is driven by an injected clock: `sweep_once(state, later(ms))` decides
+//! with the reading it is given, so nothing waits on a real timer. The browser is
+//! the recording driver, so "released exactly once" is a count of the driver's
+//! releases for that run.
+
+#![cfg(feature = "browser-agent")]
+
+#[path = "support/agent_harness.rs"]
+mod agent_harness;
+mod support;
+
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use agent_harness::*;
+use quarry_core::event::EventType;
+use quarry_edge::agent_routes::{sweep_once, SweepReport};
+use quarry_edge::run_limits::RunLimits;
+use quarry_runtime::step_receipts::{
+    AgentRunStatus, BrowserTimelineEventKind, BrowserTimelineLifecycle,
+};
+use serde_json::{json, Value};
+
+/// The org and actor of the standard-org member (`org-standard-golden`, `user-golden`).
+const MEMBER_ORG: &str = "org-standard-golden";
+const MEMBER: &str = "user-golden";
+/// The org and actor of the ZDR-org member (`org-zdr-golden`, `user-golden`).
+const ZDR_ORG: &str = "org-zdr-golden";
+
+/// Caps off, and a person's idle and agent idle limits both `idle_s`, so that
+/// only the sweeper decides when a run is over.
+fn idle_limits(idle_s: u64) -> RunLimits {
+    RunLimits {
+        interactive_idle_ttl_s: idle_s,
+        agent_idle_ttl_s: idle_s,
+        max_concurrent_runs: 0,
+        max_runs_per_org: 0,
+        max_interactive_runs_per_org: 0,
+        ..RunLimits::default()
+    }
+}
+
+/// A capacity refusal: 429, the closed reason, the cap that was hit, how many were
+/// live, the wait the body names, and the same wait as a `Retry-After` header.
+fn assert_capacity_refusal(reply: &Reply, reason: &str, scope: &str, limit: u64, active: u64) {
+    assert_eq!(reply.status, 429, "{}", reply.body);
+    assert_eq!(reply.code(), "RATE_LIMITED", "{}", reply.body);
+    assert_eq!(reply.details()["reason"], reason, "{}", reply.body);
+    assert_eq!(reply.details()["scope"], scope, "{}", reply.body);
+    assert_eq!(reply.details()["limit"], limit, "{}", reply.body);
+    assert_eq!(reply.details()["active"], active, "{}", reply.body);
+    assert_eq!(reply.details()["retry_after_seconds"], 10, "{}", reply.body);
+    assert_eq!(
+        reply
+            .headers
+            .get("retry-after")
+            .and_then(|value| value.to_str().ok()),
+        Some("10"),
+        "the wait is also a Retry-After header"
+    );
+}
+
+/// The lifecycle states on a run's owner timeline, in the order stored.
+async fn lifecycle_states(edge: &Edge, run_id: &str) -> Vec<BrowserTimelineLifecycle> {
+    edge.state
+        .receipts
+        .list_browser_timeline_events(MEMBER_ORG, MEMBER, &kind(run_id))
+        .await
+        .expect("timeline")
+        .into_iter()
+        .filter_map(|event| match event.event {
+            BrowserTimelineEventKind::Lifecycle { state } => Some(state),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Poll `ready` for up to a second, for the one place a test must wait for a request
+/// to reach a point inside the edge. It never sleeps for longer than 5 ms at a time.
+async fn wait_until(what: &str, ready: impl Fn() -> bool) {
+    let deadline = Instant::now() + Duration::from_secs(1);
+    while !ready() {
+        assert!(Instant::now() < deadline, "timed out waiting for {what}");
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+}
+
+/// The `agent.expired` payloads the durable channel carried, in order.
+async fn expired_payloads(edge: &Edge) -> Vec<Value> {
+    edge.durable_events()
+        .await
+        .into_iter()
+        .filter(|(event_type, _)| *event_type == EventType::AgentExpired)
+        .map(|(_, payload)| payload)
+        .collect()
+}
+
+// ── caps ────────────────────────────────────────────────────────────────────
+
+/// Each cap refuses with its own reason, counted across the person's and the
+/// agent's runs together, and the global cap counts every organization.
+#[tokio::test]
+async fn a_start_over_a_cap_is_refused_with_its_reason_and_a_retry_after_header() {
+    let limits = RunLimits {
+        max_concurrent_runs: 3,
+        max_runs_per_org: 2,
+        max_interactive_runs_per_org: 1,
+        ..RunLimits::default()
+    };
+    let edge = Edge::start(limits).await;
+    let person = member_token();
+
+    let first = edge.post(&person, "/v1/agent/runs", json!({})).await;
+    assert_eq!(first.status, 200, "{}", first.body);
+
+    // The person's own sessions in the org are capped below the org.
+    let second = edge.post(&person, "/v1/agent/runs", json!({})).await;
+    assert_capacity_refusal(&second, "org_interactive_run_cap", "org", 1, 1);
+
+    // An agent's run in the same org still fits under the org cap...
+    let agent = edge
+        .post(&service_token(), "/v1/agent/runs", json!({}))
+        .await;
+    assert_eq!(agent.status, 200, "{}", agent.body);
+
+    // ...and the org is then full, whatever the class.
+    let full = edge
+        .post(&service_token(), "/v1/agent/runs", json!({}))
+        .await;
+    assert_capacity_refusal(&full, "org_run_cap", "org", 2, 2);
+
+    // Another organization takes the third global slot...
+    let stranger = edge
+        .post(&stranger_token(), "/v1/agent/runs", json!({}))
+        .await;
+    assert_eq!(stranger.status, 200, "{}", stranger.body);
+
+    // ...and the next start is refused by the global cap.
+    let over = edge
+        .post(&stranger_token(), "/v1/agent/runs", json!({}))
+        .await;
+    assert_capacity_refusal(&over, "global_run_cap", "global", 3, 3);
+
+    // Nothing was admitted by the refused starts.
+    assert_eq!(edge.driver.acquired().len(), 3);
+    assert_eq!(edge.state.agent_runs.stats().live, 3);
+}
+
+/// A closed run gives its slot back: the next start in a full org succeeds.
+#[tokio::test]
+async fn a_closed_run_frees_its_slot_for_the_next_start() {
+    let limits = RunLimits {
+        max_runs_per_org: 1,
+        max_concurrent_runs: 0,
+        max_interactive_runs_per_org: 0,
+        ..RunLimits::default()
+    };
+    let edge = Edge::start(limits).await;
+    let person = member_token();
+
+    let run = edge.start_run(&person, json!({})).await;
+    let full = edge.post(&person, "/v1/agent/runs", json!({})).await;
+    assert_capacity_refusal(&full, "org_run_cap", "org", 1, 1);
+
+    let closed = edge.delete(&person, &format!("/v1/agent/runs/{run}")).await;
+    assert_eq!(closed.status, 200, "{}", closed.body);
+    assert_eq!(closed.data()["closed"], true);
+    assert_eq!(edge.driver.released(), vec![run.clone()]);
+
+    let again = edge.post(&person, "/v1/agent/runs", json!({})).await;
+    assert_eq!(again.status, 200, "the slot came back: {}", again.body);
+}
+
+/// A start the driver refuses after its slot was admitted gives the slot back.
+#[tokio::test]
+async fn a_start_whose_acquire_fails_frees_its_slot() {
+    let limits = RunLimits {
+        max_concurrent_runs: 1,
+        max_runs_per_org: 0,
+        max_interactive_runs_per_org: 0,
+        ..RunLimits::default()
+    };
+    let edge = Edge::start(limits).await;
+    let person = member_token();
+
+    edge.driver.refuse_next_acquire();
+    let failed = edge.post(&person, "/v1/agent/runs", json!({})).await;
+    assert_eq!(failed.status, 502, "{}", failed.body);
+    assert_eq!(failed.code(), "DRIVER_FAILED");
+    let stats = edge.state.agent_runs.stats();
+    assert_eq!(
+        (stats.live, stats.pending),
+        (0, 0),
+        "nothing is held by the failed start"
+    );
+
+    let ok = edge.post(&person, "/v1/agent/runs", json!({})).await;
+    assert_eq!(ok.status, 200, "the one slot is free: {}", ok.body);
+}
+
+/// Twelve starts race for an organization that holds four. Exactly four are admitted
+/// and the other eight are refused by the org cap, however the requests interleave: a
+/// start holds its slot from before its first await until it commits or fails.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_starts_never_exceed_the_organization_cap() {
+    let limits = RunLimits {
+        max_runs_per_org: 4,
+        max_concurrent_runs: 0,
+        max_interactive_runs_per_org: 0,
+        ..RunLimits::default()
+    };
+    let edge = Arc::new(Edge::start(limits).await);
+    let person = member_token();
+
+    let starts: Vec<_> = (0..12)
+        .map(|_| {
+            let edge = edge.clone();
+            let person = person.clone();
+            tokio::spawn(async move { edge.post(&person, "/v1/agent/runs", json!({})).await })
+        })
+        .collect();
+    let mut admitted = 0;
+    for start in starts {
+        let reply = start.await.expect("start task");
+        if reply.status == 200 {
+            admitted += 1;
+        } else {
+            // A refusal names the org cap, and the org is exactly full when it is given.
+            assert_capacity_refusal(&reply, "org_run_cap", "org", 4, 4);
+        }
+    }
+    assert_eq!(admitted, 4, "the cap admits four");
+    assert_eq!(
+        edge.driver.acquired().len(),
+        4,
+        "only admitted starts reach the driver"
+    );
+    let stats = edge.state.agent_runs.stats();
+    assert_eq!((stats.live, stats.pending), (4, 0), "{stats:?}");
+}
+
+// ── the sweeper ─────────────────────────────────────────────────────────────
+
+/// An idle run is released exactly once through the driver. Its non-ZDR checkpoint
+/// stays active (resumable), its owner's timeline records an expiry and no close,
+/// and the durable channel carries one `agent.expired` with the reason.
+#[tokio::test]
+async fn an_idle_run_is_released_exactly_once_and_its_checkpoint_stays_resumable() {
+    let edge = Edge::start(idle_limits(60)).await;
+    let person = member_token();
+    let run = edge.start_run(&person, json!({})).await;
+    let step = edge.step(&person, &run, wait_action(), None).await;
+    assert_eq!(step.status, 200, "{}", step.body);
+
+    // Two minutes of silence against a one-minute limit.
+    let report = sweep_once(&edge.state, later(120_000)).await;
+    assert_eq!(
+        report,
+        SweepReport {
+            expired: 1,
+            would_expire: 0
+        }
+    );
+    // A second pass finds nothing left to do.
+    let again = sweep_once(&edge.state, later(240_000)).await;
+    assert_eq!(again, SweepReport::default());
+
+    assert_eq!(
+        edge.driver.released(),
+        vec![run.clone()],
+        "released exactly once"
+    );
+    assert!(
+        edge.live(&run).is_none(),
+        "the registry no longer holds the run"
+    );
+
+    let checkpoint = edge
+        .state
+        .receipts
+        .load_run_checkpoint(MEMBER_ORG, &kind(&run))
+        .await
+        .expect("checkpoint read")
+        .expect("a non-ZDR run keeps its checkpoint");
+    assert_eq!(checkpoint.status, AgentRunStatus::Active);
+    assert!(!checkpoint.zdr.is_active());
+    assert_eq!(checkpoint.step, 1);
+
+    let states = lifecycle_states(&edge, &run).await;
+    assert!(
+        states.contains(&BrowserTimelineLifecycle::Started),
+        "{states:?}"
+    );
+    assert!(
+        states.contains(&BrowserTimelineLifecycle::Expired),
+        "{states:?}"
+    );
+    assert!(
+        !states.contains(&BrowserTimelineLifecycle::Closed),
+        "{states:?}"
+    );
+
+    let durable = edge.durable_events().await;
+    let expired: Vec<&Value> = durable
+        .iter()
+        .filter(|(event_type, _)| *event_type == EventType::AgentExpired)
+        .map(|(_, payload)| payload)
+        .collect();
+    assert_eq!(expired.len(), 1, "one agent.expired: {durable:?}");
+    assert_eq!(expired[0]["reason"], "idle");
+    assert!(
+        expired[0].get("url").is_none(),
+        "the expiry carries no URL: {}",
+        expired[0]
+    );
+}
+
+/// A ZDR run is released exactly once too, and nothing is written for it: no
+/// checkpoint, no timeline item, no receipt. Its expiry is announced to live
+/// subscribers only, and its owner's next step is the plain 404.
+#[tokio::test]
+async fn a_zdr_run_is_released_once_and_leaves_nothing_behind() {
+    let edge = Edge::start(idle_limits(60)).await;
+    let person = zdr_member_token();
+    let run = edge.start_run(&person, json!({})).await;
+    let mut live = edge.state.event_sink.subscribe(&kind(&run));
+    let step = edge.step(&person, &run, wait_action(), None).await;
+    assert_eq!(step.status, 200, "{}", step.body);
+
+    let report = sweep_once(&edge.state, later(120_000)).await;
+    assert_eq!(report.expired, 1);
+    assert_eq!(
+        edge.driver.released(),
+        vec![run.clone()],
+        "released exactly once"
+    );
+
+    let store = edge.state.receipts.clone();
+    assert!(store
+        .load_run_checkpoint(ZDR_ORG, &kind(&run))
+        .await
+        .expect("checkpoint read")
+        .is_none());
+    assert!(store
+        .list_browser_timeline_events(ZDR_ORG, MEMBER, &kind(&run))
+        .await
+        .expect("timeline read")
+        .is_empty());
+    assert!(store
+        .list_for_actor(ZDR_ORG, MEMBER, &kind(&run))
+        .await
+        .expect("receipt read")
+        .is_empty());
+
+    let mut heard = Vec::new();
+    while let Ok(event) = live.try_recv() {
+        heard.push(event.event_type);
+    }
+    assert!(
+        heard.contains(&EventType::AgentExpired),
+        "live subscribers hear it: {heard:?}"
+    );
+
+    let durable = edge.durable_events().await;
+    assert!(
+        durable
+            .iter()
+            .all(|(event_type, _)| *event_type != EventType::AgentExpired),
+        "a ZDR expiry never enters the durable channel: {durable:?}"
+    );
+
+    let gone = edge.step(&person, &run, wait_action(), None).await;
+    assert_eq!(gone.status, 404, "{}", gone.body);
+    assert_eq!(gone.message(), "agent run not found");
+    assert!(
+        gone.details()["resumable"].is_null() && gone.details()["reason"].is_null(),
+        "a ZDR run gets no resume hint: {}",
+        gone.body
+    );
+}
+
+/// After the sweeper releases a run, a step answers 404 `run_not_live` with
+/// `resumable: true` and the run id for its owner. Another member of the same org
+/// gets the plain 404. The owner resumes under the same id; another member cannot.
+#[tokio::test]
+async fn after_expiry_a_step_is_run_not_live_and_resumable_for_the_owner_only() {
+    let edge = Edge::start(idle_limits(60)).await;
+    let person = member_token();
+    let run = edge.start_run(&person, json!({})).await;
+    let step = edge.step(&person, &run, wait_action(), None).await;
+    assert_eq!(step.status, 200, "{}", step.body);
+    assert_eq!(sweep_once(&edge.state, later(120_000)).await.expired, 1);
+
+    let gone = edge.step(&person, &run, wait_action(), None).await;
+    assert_eq!(gone.status, 404, "{}", gone.body);
+    assert_eq!(gone.code(), "NOT_FOUND");
+    assert_eq!(gone.details()["reason"], "run_not_live", "{}", gone.body);
+    assert_eq!(gone.details()["resumable"], true, "{}", gone.body);
+    assert_eq!(
+        gone.details()["resume_run_id"],
+        run.as_str(),
+        "{}",
+        gone.body
+    );
+
+    // A tab call on the released run gets the same answer, and opens nothing.
+    let tab = edge.new_tab(&person, &run, None).await;
+    assert_eq!(tab.status, 404, "{}", tab.body);
+    assert_eq!(tab.details()["reason"], "run_not_live", "{}", tab.body);
+    assert_eq!(tab.details()["resumable"], true, "{}", tab.body);
+    assert_eq!(
+        edge.driver.tabs_opened(),
+        0,
+        "no tab reaches the driver after expiry"
+    );
+
+    let other = edge
+        .step(&other_member_token(), &run, wait_action(), None)
+        .await;
+    assert_eq!(other.status, 404, "{}", other.body);
+    assert_eq!(other.message(), "agent run not found");
+    assert!(
+        other.details()["resumable"].is_null() && other.details()["reason"].is_null(),
+        "another member learns nothing about the run: {}",
+        other.body
+    );
+
+    let resumed = edge
+        .post(&person, "/v1/agent/runs", json!({ "resume_run_id": run }))
+        .await;
+    assert_eq!(resumed.status, 200, "{}", resumed.body);
+    assert_eq!(resumed.data()["run_id"], run.as_str());
+    assert_eq!(edge.driver.acquired(), vec![run.clone(), run.clone()]);
+
+    let after = edge.step(&person, &run, wait_action(), None).await;
+    assert_eq!(after.status, 200, "the resumed run steps: {}", after.body);
+
+    let stolen = edge
+        .post(
+            &other_member_token(),
+            "/v1/agent/runs",
+            json!({ "resume_run_id": run }),
+        )
+        .await;
+    assert_eq!(
+        stolen.status, 404,
+        "only the owner resumes: {}",
+        stolen.body
+    );
+    assert_eq!(stolen.message(), "agent run not found");
+}
+
+/// A dry run logs what it would release and releases nothing; the run keeps
+/// working. This is how the first deploy runs.
+#[tokio::test]
+async fn a_dry_run_sweep_reports_would_expire_and_releases_nothing() {
+    let limits = RunLimits {
+        sweeper_dry_run: true,
+        ..idle_limits(60)
+    };
+    let edge = Edge::start(limits).await;
+    let person = member_token();
+    let run = edge.start_run(&person, json!({})).await;
+
+    let report = sweep_once(&edge.state, later(120_000)).await;
+    assert_eq!(
+        report,
+        SweepReport {
+            expired: 0,
+            would_expire: 1
+        }
+    );
+    assert!(edge.driver.released().is_empty());
+
+    let projection = edge.projection(&person, &run).await;
+    assert_eq!(projection.status, 200, "{}", projection.body);
+    assert_eq!(projection.data()["live"], true);
+    let step = edge.step(&person, &run, wait_action(), None).await;
+    assert_eq!(step.status, 200, "{}", step.body);
+}
+
+/// An action in flight is never expired, however long the run has been quiet; once
+/// it finishes the run is expired on the next pass.
+#[tokio::test]
+async fn an_action_in_flight_is_never_expired() {
+    let edge = Edge::start(idle_limits(60)).await;
+    let person = member_token();
+    let run = edge.start_run(&person, json!({})).await;
+    let handle = edge.live(&run).expect("the run is live");
+
+    let in_flight = handle.live.in_flight_guard();
+    let held = sweep_once(&edge.state, later(120_000)).await;
+    assert_eq!(held.expired, 0, "an action in flight holds the run");
+    assert!(edge.driver.released().is_empty());
+
+    drop(in_flight);
+    let released = sweep_once(&edge.state, later(120_000)).await;
+    assert_eq!(
+        released.expired, 1,
+        "the run expires once the action is done"
+    );
+    assert_eq!(edge.driver.released(), vec![run]);
+}
+
+/// A person watching the run (an open event stream) keeps an idle session alive,
+/// but not past the absolute backstop, which applies even with a viewer open.
+#[tokio::test]
+async fn a_viewer_holds_an_idle_session_until_the_absolute_backstop() {
+    let edge = Edge::start(idle_limits(60)).await;
+    let person = member_token();
+    let run = edge.start_run(&person, json!({})).await;
+    let watching = edge
+        .open_stream(&person, &format!("/v1/agent/runs/{run}/events/stream"))
+        .await;
+
+    let blocked = sweep_once(&edge.state, later(120_000)).await;
+    assert_eq!(blocked.expired, 0, "a viewer blocks the idle limit");
+    assert!(edge.driver.released().is_empty());
+
+    // 14 500 s is past the 14 400 s backstop for a person's session.
+    let backstop = sweep_once(&edge.state, later(14_500_000)).await;
+    assert_eq!(
+        backstop.expired, 1,
+        "the backstop applies with a viewer open"
+    );
+    assert_eq!(edge.driver.released(), vec![run]);
+    drop(watching);
+}
+
+/// Closing a run releases its session even while another request still holds a
+/// reference to it, and the held run is marked closed so a waiting action is refused.
+#[tokio::test]
+async fn closing_a_run_releases_it_even_while_another_request_holds_it() {
+    let edge = Edge::start(idle_limits(60)).await;
+    let person = member_token();
+    let run = edge.start_run(&person, json!({})).await;
+    let held = edge.live(&run).expect("the run is live");
+
+    let closed = edge.delete(&person, &format!("/v1/agent/runs/{run}")).await;
+    assert_eq!(closed.status, 200, "{}", closed.body);
+    assert_eq!(closed.data()["closed"], true);
+    assert_eq!(edge.driver.released(), vec![run.clone()]);
+    assert_eq!(edge.state.agent_runs.stats().live, 0);
+    assert!(
+        held.entry.lock().await.closed,
+        "the held run is marked closed"
+    );
+    drop(held);
+}
+
+/// A person who takes the browser and then goes quiet keeps it for the takeover idle
+/// limit (1 800 s by default), longer than an ordinary session's 900 s, and only then
+/// is it released, with reason `takeover_idle`.
+#[tokio::test]
+async fn a_run_held_in_a_takeover_expires_on_the_takeover_idle_limit() {
+    let edge = Edge::start(RunLimits::default()).await;
+    let person = member_token();
+    let run = edge.start_run(&person, json!({})).await;
+    let takeover = edge
+        .control(&person, &run, json!({ "mode": "human_takeover" }))
+        .await;
+    assert_eq!(takeover.status, 200, "{}", takeover.body);
+
+    // 1 000 s is past the 900 s an ordinary session may sit idle, inside the takeover limit.
+    let held = sweep_once(&edge.state, later(1_000_000)).await;
+    assert_eq!(
+        held,
+        SweepReport::default(),
+        "a takeover outlives the ordinary idle limit"
+    );
+    assert!(edge.driver.released().is_empty());
+
+    let released = sweep_once(&edge.state, later(1_900_000)).await;
+    assert_eq!(
+        released,
+        SweepReport {
+            expired: 1,
+            would_expire: 0
+        }
+    );
+    assert_eq!(edge.driver.released(), vec![run]);
+    let expired = expired_payloads(&edge).await;
+    assert_eq!(expired.len(), 1, "{expired:?}");
+    assert_eq!(expired[0]["reason"], "takeover_idle");
+}
+
+/// An agent run that asks for a runtime lives that long plus the grace (100 s and 30 s
+/// here), whatever its idle limit says, and is then released with reason `ttl`.
+#[tokio::test]
+async fn an_agent_run_lives_the_runtime_it_asked_for_plus_the_grace() {
+    let limits = RunLimits {
+        agent_idle_ttl_s: 10_000,
+        max_concurrent_runs: 0,
+        max_runs_per_org: 0,
+        max_interactive_runs_per_org: 0,
+        ..RunLimits::default()
+    };
+    let edge = Edge::start(limits).await;
+    let service = service_token();
+    let run = edge
+        .start_run(
+            &service,
+            json!({ "constraints": { "max_steps": 0, "max_runtime_s": 100 } }),
+        )
+        .await;
+
+    // 120 s is past the 100 s asked for, inside the 130 s the grace allows.
+    let held = sweep_once(&edge.state, later(120_000)).await;
+    assert_eq!(
+        held,
+        SweepReport::default(),
+        "the grace is part of the lifetime"
+    );
+    assert!(edge.driver.released().is_empty());
+
+    let released = sweep_once(&edge.state, later(140_000)).await;
+    assert_eq!(
+        released,
+        SweepReport {
+            expired: 1,
+            would_expire: 0
+        }
+    );
+    assert_eq!(edge.driver.released(), vec![run]);
+    let expired = expired_payloads(&edge).await;
+    assert_eq!(expired.len(), 1, "{expired:?}");
+    assert_eq!(expired[0]["reason"], "ttl");
+}
+
+/// Two sweeps that reach the same idle run at the same moment release it once: one
+/// browser release and one `agent.expired`, whichever sweep gets there first. The other
+/// either misses the run or finds it already closed and releases nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn two_overlapping_sweeps_release_an_idle_run_once() {
+    let edge = Edge::start(idle_limits(60)).await;
+    let person = member_token();
+    let run = edge.start_run(&person, json!({})).await;
+
+    let now = later(120_000);
+    let first = tokio::spawn({
+        let state = edge.state.clone();
+        async move { sweep_once(&state, now).await }
+    });
+    let second = tokio::spawn({
+        let state = edge.state.clone();
+        async move { sweep_once(&state, now).await }
+    });
+    first.await.expect("first sweep");
+    second.await.expect("second sweep");
+
+    assert!(
+        edge.live(&run).is_none(),
+        "the registry no longer holds the run"
+    );
+    assert_eq!(
+        edge.driver.released(),
+        vec![run.clone()],
+        "released exactly once"
+    );
+    let expired = expired_payloads(&edge).await;
+    assert_eq!(expired.len(), 1, "one agent.expired: {expired:?}");
+}
+
+/// Finding F5-2 (ignored until the code agrees; `cargo test -- --ignored` shows it fail).
+///
+/// A resumed run keeps the stricter of its stored and derived budget class (budget.rs
+/// says so), but the class the sweeper reads is built from the request alone
+/// (`start_run` makes the `RunLive` with `classify(is_service, body.initiated_by)`).
+/// So a person who resumes an agent run without the `initiated_by: "agent"` hint is
+/// swept on the interactive limits (900 s idle here), not on the agent's 60 s.
+#[tokio::test]
+#[ignore = "finding F5-2: a resumed agent run is swept with the interactive class"]
+async fn a_resumed_agent_run_keeps_the_agent_lifetime() {
+    let limits = RunLimits {
+        agent_idle_ttl_s: 60,
+        interactive_idle_ttl_s: 900,
+        max_concurrent_runs: 0,
+        max_runs_per_org: 0,
+        max_interactive_runs_per_org: 0,
+        ..RunLimits::default()
+    };
+    let edge = Edge::start(limits).await;
+    let person = member_token();
+    let run = edge
+        .start_run(&person, json!({ "initiated_by": "agent" }))
+        .await;
+    let step = edge.step(&person, &run, wait_action(), None).await;
+    assert_eq!(step.status, 200, "{}", step.body);
+    let first = sweep_once(&edge.state, later(120_000)).await;
+    assert_eq!(first.expired, 1, "the agent run is released at 60 s idle");
+
+    let resumed = edge
+        .post(&person, "/v1/agent/runs", json!({ "resume_run_id": run }))
+        .await;
+    assert_eq!(resumed.status, 200, "{}", resumed.body);
+
+    let second = sweep_once(&edge.state, later(120_000)).await;
+    assert_eq!(
+        second.expired, 1,
+        "the resumed run keeps its agent lifetime, so 120 s idle releases it"
+    );
+}
+
+/// Finding F5-3 (ignored until the code agrees).
+///
+/// A step that is past the registry lookup and waiting for the run's lock when the
+/// sweeper releases the run is refused by admission (`closed`). That 404 carries
+/// `reason: run_not_live` but not the `resumable` hint a step on a run already gone
+/// carries; WS2.D asks for both on a step or tab call on a dead run.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "finding F5-3: the closed-while-queued 404 lacks the resumable hint"]
+async fn a_step_queued_behind_an_expiry_gets_the_resume_hint() {
+    let edge = Arc::new(Edge::start(idle_limits(60)).await);
+    let person = member_token();
+    let run = edge.start_run(&person, json!({})).await;
+    let handle = edge.live(&run).expect("the run is live");
+
+    // An action is running: hold the run's lock while a second step arrives.
+    let mut running = handle.entry.lock().await;
+    let queued = tokio::spawn({
+        let edge = edge.clone();
+        let person = person.clone();
+        let run = run.clone();
+        async move { edge.step(&person, &run, wait_action(), None).await }
+    });
+    wait_until("the queued step to count itself in flight", || {
+        handle.live.in_flight() == 1
+    })
+    .await;
+
+    // The sweeper releases the run meanwhile: closed, out of the registry, and its
+    // checkpoint left active, as an expiry leaves it.
+    running.closed = true;
+    edge.state
+        .agent_runs
+        .lock()
+        .expect("agent_runs mutex")
+        .remove(&run);
+    drop(running);
+
+    let reply = queued.await.expect("queued step");
+    assert_eq!(reply.status, 404, "{}", reply.body);
+    assert_eq!(reply.details()["reason"], "run_not_live", "{}", reply.body);
+    assert_eq!(reply.details()["resumable"], true, "{}", reply.body);
+    assert_eq!(
+        reply.details()["resume_run_id"],
+        run.as_str(),
+        "{}",
+        reply.body
+    );
+}
