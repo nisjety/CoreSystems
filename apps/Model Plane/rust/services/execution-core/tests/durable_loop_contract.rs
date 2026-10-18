@@ -1369,6 +1369,47 @@ fn matches_of(haystack: &str, pattern: &str) -> usize {
         .count()
 }
 
+/// The innermost `if` whose CONDITION contains the byte `at`: the condition text, the text of
+/// its braced body, and the body's brace span. The condition runs from the `if` to the first
+/// `{` outside parentheses and brackets. `None` when `at` is in no `if` condition.
+fn enclosing_if(code: &Code, at: usize) -> Option<(String, String, (usize, usize))> {
+    let bytes = code.skel.as_bytes();
+    let mut found = None;
+    for keyword in Regex::new(r"\bif\b").expect("pattern").find_iter(&code.skel) {
+        if keyword.end() > at {
+            break;
+        }
+        let mut depth = 0_i32;
+        let mut open = None;
+        for (index, byte) in bytes.iter().enumerate().skip(keyword.end()) {
+            match byte {
+                b'(' | b'[' => depth += 1,
+                b')' | b']' => depth -= 1,
+                b'{' if depth == 0 => {
+                    open = Some(index);
+                    break;
+                }
+                _ => {}
+            }
+        }
+        let Some(open) = open else {
+            continue;
+        };
+        if open <= at {
+            continue;
+        }
+        let Some(close) = matching_brace(&code.skel, open) else {
+            continue;
+        };
+        found = Some((
+            code.text[keyword.end()..open].trim().to_owned(),
+            code.text[open..=close].to_owned(),
+            (open, close),
+        ));
+    }
+    found
+}
+
 /// What the gateway's `/continue` may do with the approval it spends itself (WS03 S7c).
 ///
 /// With the resume switch on, `continue_run` consumes the approval BEFORE it opens the stream,
@@ -1378,7 +1419,9 @@ fn matches_of(haystack: &str, pattern: &str) -> usize {
 /// * the gateway builds ONE `ConsumeApprovalRequest`, in `preconsume_request`, and it carries
 ///   `omit_call: true` (the gateway spends the click; it never asks session-core to decrypt
 ///   the approved call, and the executor's own consume is the one that gets the call back);
-///   EVERY mention of `omit_call` in the gateway is that literal;
+///   EVERY mention of `omit_call` in the gateway is that literal, and the one literal states
+///   it itself (a field dropped from the literal while `omit_call: true` survives elsewhere
+///   is a full consume);
 /// * the consume RPC is called in one place, `impl ApprovalConsumer for GrpcApprovalConsumer`,
 ///   inside the 10 s bound (`consume_within_bound`), and the only thing read from its answer is
 ///   `.consumed`; nothing in the flow reads the call, the step, the authority or the replay
@@ -1429,7 +1472,7 @@ fn gateway_consume_violations(gateway_sources: &[(String, String)]) -> Vec<Strin
                 .trim_end_matches(|c: char| is_ident(c) || c == ':')
                 .trim_end();
             if !before.ends_with("->") {
-                literals.push((is_sse, found.start()));
+                literals.push((is_sse, found.start(), found.end() - 1));
             }
         }
         for found in consume_call.find_iter(&code.text) {
@@ -1451,13 +1494,29 @@ fn gateway_consume_violations(gateway_sources: &[(String, String)]) -> Vec<Strin
         }
     }
     match literals.as_slice() {
-        [(true, at)] => match sse.fn_span("preconsume_request") {
-            Some((open, close)) if open < *at && *at < close => {}
-            _ => violations.push(
-                "the gateway's one ConsumeApprovalRequest literal is not inside preconsume_request"
-                    .into(),
-            ),
-        },
+        [(true, at, brace)] => {
+            match sse.fn_span("preconsume_request") {
+                Some((open, close)) if open < *at && *at < close => {}
+                _ => violations.push(
+                    "the gateway's one ConsumeApprovalRequest literal is not inside preconsume_request"
+                        .into(),
+                ),
+            }
+            // `omit_call: true` is a field OF that literal, not a mention somewhere else in the
+            // gateway: a field dropped from the literal leaves a full consume that returns the
+            // approved call, whatever `omit_call: true` survives elsewhere.
+            let states_it = matching_brace(&sse.skel, *brace).is_some_and(|close| {
+                Regex::new(r"\bomit_call\s*:\s*true\s*[,}]")
+                    .expect("pattern")
+                    .is_match(&sse.text[*brace..=close])
+            });
+            if !states_it {
+                violations.push(
+                    "the gateway's one ConsumeApprovalRequest literal does not state `omit_call: true` itself: a consume without it asks session-core for the whole approved call"
+                        .into(),
+                );
+            }
+        }
         more => violations.push(format!(
             "the gateway builds {} ConsumeApprovalRequest literals in production code, expected exactly one, in sse.rs preconsume_request",
             more.len()
@@ -2135,29 +2194,75 @@ fn continue_vocabulary_violations(
 /// and the checkpoint switches are one coupled flip.
 ///
 /// * every read of `.same_claim` in the executor's production code is followed by
-///   `&& replay_is_fenced` (or its negation, for the operator's warn line);
+///   `&& replay_is_fenced`, in the ONE shape the executor has: the accept is the plain read,
+///   inside the condition of the refusal `if !( .. ) { .. continuation_already_consumed .. }`
+///   (the replay is accepted only where the ledger fences it); the NEGATED read
+///   (`&& !replay_is_fenced`) is allowed only as the condition of the operator's warn line
+///   (`continue_replay_refused_ledger_off`), inside that refusal branch. A negated read
+///   anywhere else, such as in the accept expression itself, is an inverted accept: a replay
+///   accepted only when the ledger is OFF, exactly where nothing fences a second dispatch;
 /// * `replay_is_fenced` is bound once, to `effect::ledger_enabled()`, and never assigned again.
 fn resume_pair_violations(executor_sources: &[(String, String)]) -> Vec<String> {
     let mut violations = Vec::new();
     let mut reads = 0;
+    let mut plain_reads = 0;
     let mut bindings = 0;
     let mut assignments = 0;
-    let followed = Regex::new(r"^\.\s*same_claim\s*&&\s*!?\s*replay_is_fenced\b").expect("pattern");
+    let followed =
+        Regex::new(r"^\.\s*same_claim\s*&&\s*(!?)\s*replay_is_fenced\b").expect("pattern");
     let binding = Regex::new(
         r"\blet\s+replay_is_fenced\s*=\s*(?:\w+\s*::\s*)*ledger_enabled\s*\(\s*\)\s*;",
     )
     .expect("pattern");
     for (path, source) in executor_sources {
         let code = Code::new(source).without_tests();
+        let mut refusal_bodies = Vec::new();
+        let mut negated = Vec::new();
         for found in Regex::new(r"\.\s*same_claim\b")
             .expect("pattern")
             .find_iter(&code.text)
         {
             reads += 1;
-            if !followed.is_match(&code.text[found.start()..]) {
+            let Some(shape) = followed.captures(&code.text[found.start()..]) else {
                 violations.push(format!(
                     "{path} reads `.same_claim` without `&& replay_is_fenced` after it: a same-claim replay is accepted only where the effect ledger fences a second dispatch"
                 ));
+                continue;
+            };
+            let enclosing = enclosing_if(&code, found.start());
+            if shape[1].is_empty() {
+                plain_reads += 1;
+                match enclosing {
+                    Some((condition, body, span))
+                        if condition.starts_with('!')
+                            && body.contains("continuation_already_consumed") =>
+                    {
+                        refusal_bodies.push(span);
+                    }
+                    _ => violations.push(format!(
+                        "{path} reads `.same_claim && replay_is_fenced` outside a refusal condition `if !( .. ) {{ .. continuation_already_consumed .. }}`: the replay is accepted only when the ledger fences it, and the executor refuses everything else"
+                    )),
+                }
+            } else {
+                negated.push(enclosing);
+            }
+        }
+        // The negated read: the warn line's own `if`, inside a refusal branch found above.
+        for enclosing in negated {
+            let inside_refusal = |span: &(usize, usize)| {
+                refusal_bodies
+                    .iter()
+                    .any(|(open, close)| *open < span.0 && span.1 < *close)
+            };
+            match enclosing {
+                Some((condition, body, span))
+                    if !condition.starts_with('!')
+                        && body.contains("continue_replay_refused_ledger_off")
+                        && !body.contains("Ok(")
+                        && inside_refusal(&span) => {}
+                _ => violations.push(format!(
+                    "{path} reads `.same_claim && !replay_is_fenced` outside the refusal branch's warn line: an inverted accept, a replay accepted only when the ledger is OFF (nothing then fences a second dispatch of the approved call)"
+                )),
             }
         }
         bindings += binding.find_iter(&code.text).count();
@@ -2166,6 +2271,11 @@ fn resume_pair_violations(executor_sources: &[(String, String)]) -> Vec<String> 
     if reads == 0 {
         violations.push(
             "the executor no longer reads `.same_claim`: the same-claim replay rule moved, re-point this guard"
+                .into(),
+        );
+    } else if plain_reads == 0 {
+        violations.push(
+            "no read of `.same_claim && replay_is_fenced` remains: the accept of a same-claim replay is gone or inverted, re-point this guard"
                 .into(),
         );
     }
@@ -2225,16 +2335,131 @@ fn gateway_resume_reader_violations(
     violations
 }
 
+/// Whether `text` names the attestation field in any casing a language gives it:
+/// `consumed_by_gateway` (Rust, proto, a JSON tag), `ConsumedByGateway` (a Go field),
+/// `consumedByGateway` (TypeScript). The underscores and the case are folded away.
+fn names_attestation(text: &str) -> bool {
+    text.chars()
+        .filter(|c| *c != '_')
+        .flat_map(char::to_lowercase)
+        .collect::<String>()
+        .contains("consumedbygateway")
+}
+
+/// `source` with `//` line comments and `/* */` block comments removed: the comment syntax of
+/// Go and TypeScript. A string that holds `//` loses the rest of its line, which can only
+/// hide a mention in the same line from this scan and never invents one.
+fn strip_c_comments(source: &str) -> String {
+    let mut out = String::with_capacity(source.len());
+    let mut chars = source.chars().peekable();
+    while let Some(c) = chars.next() {
+        match (c, chars.peek().copied()) {
+            ('/', Some('/')) => {
+                for skipped in chars.by_ref() {
+                    if skipped == '\n' {
+                        out.push('\n');
+                        break;
+                    }
+                }
+            }
+            ('/', Some('*')) => {
+                chars.next();
+                let mut previous = ' ';
+                for skipped in chars.by_ref() {
+                    if previous == '*' && skipped == '/' {
+                        break;
+                    }
+                    if skipped == '\n' {
+                        out.push('\n');
+                    }
+                    previous = skipped;
+                }
+            }
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+/// The trees outside the Model Plane's Rust and proto sources that could carry an attestation
+/// field: the Go bindings generated from the protos (and the hand-written Go beside them), the
+/// BFF (`apps/gateway/src`, Rust) and the SPA (`src`, TypeScript). Relative to this crate; the
+/// extensions each is read by.
+const ATTESTATION_TREES: [(&str, &[&str], usize); 3] = [
+    ("../../../go", &["go"], 100),
+    ("../../../../Frontend Plane/verevonv3/apps/gateway/src", &["rs"], 20),
+    ("../../../../Frontend Plane/verevonv3/src", &["ts", "tsx"], 100),
+];
+
+/// Every source of [`ATTESTATION_TREES`], as (path, text): generated Go included, tests
+/// (`*_test.go`, `*.test.ts`, `*.spec.ts`) and dependency directories left out, this test
+/// file and the docs being outside the trees. A tree with fewer files than its floor fails
+/// loudly: a scan that found nothing proves nothing.
+fn attestation_sources() -> Vec<(String, String)> {
+    fn walk(dir: &std::path::Path, extensions: &[&str], out: &mut Vec<PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if path.is_dir() {
+                if !["node_modules", "target", "vendor", "dist", ".git"].contains(&name.as_str()) {
+                    walk(&path, extensions, out);
+                }
+            } else if path
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .is_some_and(|ext| extensions.contains(&ext))
+                && !name.ends_with("_test.go")
+                && !name.contains(".test.")
+                && !name.contains(".spec.")
+            {
+                out.push(path);
+            }
+        }
+    }
+    let mut found = Vec::new();
+    for (tree, extensions, floor) in ATTESTATION_TREES {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(tree);
+        assert!(
+            root.is_dir(),
+            "{} is not a directory: re-point ATTESTATION_TREES",
+            root.display()
+        );
+        let mut paths = Vec::new();
+        walk(&root, extensions, &mut paths);
+        assert!(
+            paths.len() >= floor,
+            "{} holds {} source files, expected at least {floor}: the attestation scan is not looking at the tree",
+            root.display(),
+            paths.len()
+        );
+        paths.sort();
+        for path in paths {
+            let text = std::fs::read_to_string(&path)
+                .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()))
+                .replace("\r\n", "\n");
+            found.push((path.display().to_string(), text));
+        }
+    }
+    found
+}
+
 /// No attestation (D1): the executor decides what the gateway did from its own consume, so no
-/// field says "the gateway consumed it". The name is absent from every Rust production source
-/// and every non-comment proto line.
+/// field says "the gateway consumed it". The name is absent, in any casing, from every Rust
+/// production source, every non-comment proto line, and (`other_sources`) the generated Go
+/// bindings, the BFF and the SPA, comments and (for Rust) test modules aside. A field that
+/// reappeared only on the wire's far side, in a Go struct or a TypeScript type, would be an
+/// attestation the executor could never have meant to read.
 fn no_attestation_violations(
     rust_sources: &[(String, String)],
     proto_sources: &[(String, String)],
+    other_sources: &[(String, String)],
 ) -> Vec<String> {
     let mut violations = Vec::new();
     for (path, source) in rust_sources {
-        if Code::new(source).without_tests().text.contains("consumed_by_gateway") {
+        if names_attestation(&Code::new(source).without_tests().text) {
             violations.push(format!(
                 "{path} names consumed_by_gateway: there is no attestation field, the executor's consume is a same-claim replay (D1)"
             ));
@@ -2246,9 +2471,21 @@ fn no_attestation_violations(
             .map(|line| line.split("//").next().unwrap_or(""))
             .collect::<Vec<_>>()
             .join("\n");
-        if code.contains("consumed_by_gateway") {
+        if names_attestation(&code) {
             violations.push(format!(
                 "{path} declares consumed_by_gateway: there is no attestation field (D1)"
+            ));
+        }
+    }
+    for (path, source) in other_sources {
+        let code = if path.ends_with(".rs") {
+            Code::new(source).without_tests().text
+        } else {
+            strip_c_comments(source)
+        };
+        if names_attestation(&code) {
+            violations.push(format!(
+                "{path} names consumed_by_gateway (in some casing): there is no attestation field in the Go bindings, the BFF or the SPA (D1)"
             ));
         }
     }
@@ -2314,6 +2551,69 @@ fn writer_gate_argument_violations(executor_loop: &str, executor_fold: &str) -> 
             "run_rounds calls writer_gate( {} times, expected the one place the loop builds its gate",
             other.len()
         )),
+    }
+    // The loop's gate is not the only one: the in-place resume builds a second, in
+    // `restore_continuation`, to decide whether the writer it restores into is on. Its literal
+    // shape is `writer_gate(req, route, runtime_loop::effect::ledger_enabled(), 0, true, true)`
+    // and each literal is right for a reason, not by accident: depth `0` because only the ROOT
+    // run is resumed (a resume is a RunAgent-level request, and a delegated child's context is
+    // built from `depth: parent.depth + 1` and never resumes); release `true` and in-place
+    // `true` because this IS the resumed segment and it is in place, so the gate's `resumed`
+    // flag (`holds_release && !in_place`) is false: an in-place resume is not a stage-1
+    // segment. A different literal, or a third call, changes who may write a fold, and no test
+    // runs a delegated child or a resume with the writer on to notice. (The last two literals
+    // are also read by `in_place_writer_violations`; the depth and the ledger are read only
+    // here.)
+    let every_call: Vec<usize> = Regex::new(r"\bwriter_gate\s*\(")
+        .expect("pattern")
+        .find_iter(&agent.skel)
+        .filter(|found| !agent.skel[..found.start()].trim_end().ends_with("fn"))
+        .map(|found| found.end() - 1)
+        .collect();
+    if every_call.len() != 2 {
+        violations.push(format!(
+            "agent.rs calls writer_gate( {} times in production code, expected exactly two: run_rounds (the loop's gate) and restore_continuation (the in-place resume's gate)",
+            every_call.len()
+        ));
+    }
+    match every_call.iter().find(|paren| {
+        agent
+            .fn_span("restore_continuation")
+            .is_some_and(|(open, close)| open < **paren && **paren < close)
+    }) {
+        None => violations.push(
+            "restore_continuation no longer calls writer_gate(: the in-place resume's gate moved, re-point this guard"
+                .into(),
+        ),
+        Some(paren) => {
+            let arguments: Vec<String> = call_arguments(&agent, *paren)
+                .iter()
+                .map(|argument| argument.split_whitespace().collect::<String>())
+                .collect();
+            let expected = [
+                ("request", "req"),
+                ("route", "route"),
+                ("effect ledger", "runtime_loop::effect::ledger_enabled()"),
+                ("depth", "0"),
+                ("release flag", "true"),
+                ("in-place flag", "true"),
+            ];
+            if arguments.len() == expected.len() {
+                for (index, (name, want)) in expected.iter().enumerate() {
+                    if arguments[index] != *want {
+                        violations.push(format!(
+                            "restore_continuation passes `{}` as the in-place resume gate's {name}, expected `{want}`: only the root run is resumed, and an in-place resume is the resumed segment but not a stage-1 one",
+                            arguments[index]
+                        ));
+                    }
+                }
+            } else {
+                violations.push(format!(
+                    "restore_continuation calls writer_gate with {} arguments, expected (req, route, runtime_loop::effect::ledger_enabled(), 0, true, true)",
+                    arguments.len()
+                ));
+            }
+        }
     }
     match agent.fn_body("writer_gate") {
         None => violations.push("agent.rs has no `fn writer_gate`".into()),
@@ -2861,7 +3161,11 @@ fn the_gateway_and_the_executor_flip_together_the_replay_rule_the_one_reader_no_
     for tree in SOURCE_TREES {
         every.extend(rust_files(tree));
     }
-    assert_green(&no_attestation_violations(&every, &proto_files()));
+    assert_green(&no_attestation_violations(
+        &every,
+        &proto_files(),
+        &attestation_sources(),
+    ));
 }
 
 /// A delegated child never writes a fold: `run_rounds` hands the writer gate `ctx.depth`.
@@ -3805,6 +4109,16 @@ fn every_guard_goes_red_when_the_code_it_guards_regresses() {
             "something other than the literal `true`",
         );
     }
+    // `omit_call: true` survives somewhere else in the gateway, but the field is gone from the
+    // one literal: a full consume that returns the approved call. The mention count alone
+    // (`omit_mentions`) stays satisfied by the survivor.
+    must_flag(
+        consume(&format!(
+            "{}\nfn rogue() {{ let _ = X {{ omit_call: true }}; }}",
+            mutate_in(&sse, "fn preconsume_request(", "        omit_call: true,\n", "")
+        )),
+        "does not state `omit_call: true` itself",
+    );
     // The gateway starts reading more than the won flag, or calls the RPC from a second place,
     // or calls it without the bound.
     must_flag(
@@ -4237,6 +4551,46 @@ fn every_guard_goes_red_when_the_code_it_guards_regresses() {
         resume_pair_violations(&[]),
         "no longer reads `.same_claim`",
     );
+    // The negated form is the refusal branch's warn line and nothing else. An INVERTED accept
+    // (the replay accepted only when the ledger is OFF) used to pass, because the pattern had an
+    // optional negation: the same text with the negation moved into the accept expression.
+    must_flag(
+        resume_pair_violations(&executor_with(&mutate_re(
+            &agent,
+            r"consumed\.same_claim\s*&&\s*replay_is_fenced\)\)",
+            "consumed.same_claim && !replay_is_fenced))",
+        ))),
+        "an inverted accept",
+    );
+    // The warn line loses its negation: the plain read is then outside a refusal condition.
+    must_flag(
+        resume_pair_violations(&executor_with(&mutate_re(
+            &agent,
+            r"consumed\.same_claim\s*&&\s*!replay_is_fenced\s*\{",
+            "consumed.same_claim && replay_is_fenced {",
+        ))),
+        "outside a refusal condition",
+    );
+    // A negated read somewhere that is not the warn line, and an accept written as a positive
+    // `if`, are both flagged.
+    must_flag(
+        resume_pair_violations(&[(
+            "src/other.rs".to_owned(),
+            "fn f(c: &Consumed, replay_is_fenced: bool) -> bool { c.same_claim && !replay_is_fenced }"
+                .to_owned(),
+        )]),
+        "an inverted accept",
+    );
+    must_flag(
+        resume_pair_violations(&executor_with(&format!(
+            "{agent}\nfn rogue(c: &Consumed, replay_is_fenced: bool) -> bool {{ if c.already_consumed && c.same_claim && replay_is_fenced {{ return true; }} false }}"
+        ))),
+        "outside a refusal condition",
+    );
+    // A comment or a test that names the pattern is not a read.
+    assert_green(&resume_pair_violations(&executor_with(&format!(
+        "{agent}\n// c.same_claim && !replay_is_fenced\n#[cfg(test)]\nmod t {{ fn f(c: &C, r: bool) -> bool {{ c.same_claim && !r }} }}"
+    ))));
 
     // The gateway's one reader of the switch, and the compose row that goes with it.
     let table = switch_table();
@@ -4291,17 +4645,19 @@ fn every_guard_goes_red_when_the_code_it_guards_regresses() {
         );
     }
 
-    // No attestation field in Rust production code or in a proto, comments and tests aside.
+    // No attestation field in Rust production code, in a proto, in the generated Go bindings,
+    // in the BFF or in the SPA, comments and tests aside.
     let rust = rust_files("src");
     let protos = proto_files();
-    assert_green(&no_attestation_violations(&rust, &protos));
+    let others = attestation_sources();
+    assert_green(&no_attestation_violations(&rust, &protos, &others));
     let mut rogue_rust = rust.clone();
     rogue_rust.push((
         "src/rogue.rs".to_owned(),
         "fn f(r: &AgentResume) -> bool { r.consumed_by_gateway }".to_owned(),
     ));
     must_flag(
-        no_attestation_violations(&rogue_rust, &protos),
+        no_attestation_violations(&rogue_rust, &protos, &others),
         "src/rogue.rs names consumed_by_gateway",
     );
     let mut rogue_proto = protos.clone();
@@ -4310,9 +4666,53 @@ fn every_guard_goes_red_when_the_code_it_guards_regresses() {
         "message AgentResume {\n  bool consumed_by_gateway = 9;\n}".to_owned(),
     ));
     must_flag(
-        no_attestation_violations(&rust, &rogue_proto),
+        no_attestation_violations(&rust, &rogue_proto, &others),
         "x.proto declares consumed_by_gateway",
     );
+    // The same name in another casing, in Rust or in a proto, is still the name.
+    let mut camel_rust = rust.clone();
+    camel_rust.push((
+        "src/camel.rs".to_owned(),
+        "enum Flag { ConsumedByGateway }".to_owned(),
+    ));
+    must_flag(
+        no_attestation_violations(&camel_rust, &protos, &others),
+        "src/camel.rs names consumed_by_gateway",
+    );
+    // A Go binding, the BFF and the SPA: a field that reappears only on the far side of the wire.
+    for (path, text) in [
+        // A generated Go struct field, as protoc-gen-go writes it.
+        (
+            "go/gen/model_plane/v1/rogue.pb.go",
+            "type AgentResume struct {\n\tConsumedByGateway bool `protobuf:\"varint,9,opt,name=consumed_by_gateway\"`\n}",
+        ),
+        // A hand-written Go getter.
+        (
+            "go/services/x/rogue.go",
+            "func f(r *AgentResume) bool { return r.GetConsumedByGateway() }",
+        ),
+        // The BFF.
+        (
+            "apps/gateway/src/rogue.rs",
+            "fn f(r: &Resume) -> bool { r.consumed_by_gateway }",
+        ),
+        // The SPA: a type, and a request body.
+        (
+            "src/shared/rogue.ts",
+            "export type Resume = { consumedByGateway: boolean }",
+        ),
+        (
+            "src/shared/rogue.tsx",
+            "const body = { consumed_by_gateway: true }",
+        ),
+    ] {
+        let mut rogue = others.clone();
+        rogue.push((path.to_owned(), text.to_owned()));
+        must_flag(
+            no_attestation_violations(&rust, &protos, &rogue),
+            &format!("{path} names consumed_by_gateway"),
+        );
+    }
     let mut quiet_rust = rust.clone();
     quiet_rust.push((
         "src/quiet.rs".to_owned(),
@@ -4324,7 +4724,42 @@ fn every_guard_goes_red_when_the_code_it_guards_regresses() {
         "quiet.proto".to_owned(),
         "// no consumed_by_gateway field exists\nmessage X {} // consumed_by_gateway".to_owned(),
     ));
-    assert_green(&no_attestation_violations(&quiet_rust, &quiet_proto));
+    assert_green(&no_attestation_violations(&quiet_rust, &quiet_proto, &others));
+    // A comment in Go or TypeScript, and a Rust test module in the BFF, explain the absence and
+    // are not the field.
+    let mut quiet_others = others.clone();
+    quiet_others.extend([
+        (
+            "go/gen/quiet.go".to_owned(),
+            "// ConsumedByGateway is not a field\n/* consumed_by_gateway\n   either */\nfunc f() {}"
+                .to_owned(),
+        ),
+        (
+            "src/shared/quiet.ts".to_owned(),
+            "// consumedByGateway does not exist\n/* consumedByGateway */\nexport const x = 1"
+                .to_owned(),
+        ),
+        (
+            "apps/gateway/src/quiet.rs".to_owned(),
+            "// consumed_by_gateway\n#[cfg(test)]\nmod t { fn f() { let _ = \"consumed_by_gateway\"; } }"
+                .to_owned(),
+        ),
+    ]);
+    assert_green(&no_attestation_violations(&quiet_rust, &quiet_proto, &quiet_others));
+    // The comment stripper itself: both comment forms go, code stays, the line count is kept.
+    assert_eq!(
+        strip_c_comments("a // x\nb /* y\nz */ c\nd"),
+        "a \nb \n c\nd"
+    );
+    // The scan is looking at the trees it names.
+    let normalized = |path: &String| path.replace('\\', "/");
+    assert!(others.iter().any(|(path, _)| path.ends_with(".pb.go")));
+    assert!(others
+        .iter()
+        .any(|(path, _)| normalized(path).ends_with("shared/actions/chat-run-continue-contract.ts")));
+    assert!(others
+        .iter()
+        .any(|(path, _)| normalized(path).ends_with("apps/gateway/src/domains/orchestration.rs")));
 
     // The writer gate is handed the depth and the release in exactly the shape the guard reads:
     // a literal 0 depth lets a delegated child overwrite the root run's fold.
@@ -4378,6 +4813,71 @@ fn every_guard_goes_red_when_the_code_it_guards_regresses() {
         ),
         "no longer refuses `self.depth > 0`",
     );
+    // The in-place resume's own gate, in `restore_continuation`: the literal shape
+    // `(req, route, runtime_loop::effect::ledger_enabled(), 0, true, true)`, and no third call.
+    for (from, to, expect) in [
+        (
+            "ledger_enabled(), 0, true, true)",
+            "ledger_enabled(), 1, true, true)",
+            "passes `1` as the in-place resume gate's depth",
+        ),
+        (
+            "runtime_loop::effect::ledger_enabled(), 0, true, true)",
+            "true, 0, true, true)",
+            "as the in-place resume gate's effect ledger",
+        ),
+        (
+            "ledger_enabled(), 0, true, true)",
+            "ledger_enabled(), 0, false, true)",
+            "as the in-place resume gate's release flag",
+        ),
+        (
+            "ledger_enabled(), 0, true, true)",
+            "ledger_enabled(), 0, true, false)",
+            "as the in-place resume gate's in-place flag",
+        ),
+        (
+            "ledger_enabled(), 0, true, true)",
+            "ledger_enabled(), 0, true)",
+            "calls writer_gate with 5 arguments",
+        ),
+    ] {
+        must_flag(
+            writer_gate_argument_violations(
+                &mutate_in(&agent, "async fn restore_continuation(", from, to),
+                &fold,
+            ),
+            expect,
+        );
+    }
+    must_flag(
+        writer_gate_argument_violations(
+            &format!(
+                "{agent}\nfn rogue(req: &R, route: &M) {{ let _ = writer_gate(req, route, true, 0, true, true); }}"
+            ),
+            &fold,
+        ),
+        "calls writer_gate( 3 times in production code",
+    );
+    must_flag(
+        writer_gate_argument_violations(
+            &mutate_in(
+                &agent,
+                "async fn restore_continuation(",
+                "let gate = writer_gate(req, route, runtime_loop::effect::ledger_enabled(), 0, true, true);",
+                "let gate = other_gate(req);",
+            ),
+            &fold,
+        ),
+        "restore_continuation no longer calls writer_gate(",
+    );
+    // A comment or a test that calls it is not a production call.
+    assert_green(&writer_gate_argument_violations(
+        &format!(
+            "{agent}\n// writer_gate(req, route, true, 0, true, true)\n#[cfg(test)]\nmod t {{ fn f() {{ let _ = writer_gate(a, b, c, 9, d, e); }} }}"
+        ),
+        &fold,
+    ));
 
     // The new store_proofs rows are as checkable as the old ones: a renamed or commented-out
     // test of the gateway's pre-consume, of session-core's spend-only consume or of its

@@ -19,6 +19,9 @@
 //!   own blank check answers first) and `missing_bearer` (a 401, which stays
 //!   `unauthorized`);
 //! * the SPA's stream-frame tuple = model-gateway's `CONTINUE_FRAME_REFUSALS`, in order;
+//! * the SPA's run-end pair (`CHAT_RUN_CONTINUE_SPENT_RUN_END_FRAMES`, the two frames that
+//!   follow the executor's answer and are final after a pre-consume) = model-gateway's
+//!   `CONTINUE_SPENT_RUN_END_FRAMES`, and neither refusal list holds them;
 //! * every `proxy_sse_stream_with_data_plane` caller other than `continue_run` passes `&[]`.
 //!
 //! The model-gateway source is read across the plane boundary as a TEST only, the way
@@ -322,6 +325,61 @@ fn the_spa_frame_tuple_is_the_gateways_frame_list() {
          must list the same tokens in the same order. A token only the gateway knows is a frame \
          the SPA's guards read as null."
     );
+}
+
+/// The SPA's run-end frame codes, from `CHAT_RUN_CONTINUE_SPENT_RUN_END_FRAMES`.
+fn spa_run_end_frames() -> Vec<String> {
+    let source = spa_contract_source();
+    let list = delimited(
+        &source,
+        "export const CHAT_RUN_CONTINUE_SPENT_RUN_END_FRAMES",
+        '[',
+        ']',
+    );
+    let code_lines = list
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("//"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    string_literals(&code_lines, '\'')
+}
+
+/// The two frames that follow the executor's ANSWER (the run ended failed, or in a status the
+/// gateway does not know) are final and say `approval_spent` after a gateway pre-consume. The
+/// SPA reads them only with the flag (`chatRunContinueSpentRunEndOf`), so the SPA's pair is the
+/// gateway's pair: a code only the gateway makes final is a frame the SPA would read as an
+/// ordinary retryable failure of a click that is gone. They are NOT refusal-vocabulary codes:
+/// neither list may hold them (an unspent continuation's frame of this code is the committed
+/// one, read by nobody here).
+#[test]
+fn the_spa_run_end_frames_are_the_gateways_and_stay_out_of_the_refusal_lists() {
+    let gateway = string_literals(
+        &gateway_const_list(&model_gateway_sse_source(), "CONTINUE_SPENT_RUN_END_FRAMES"),
+        '"',
+    );
+    let spa = spa_run_end_frames();
+    assert_eq!(
+        gateway,
+        ["agent_run_failed", "agent_run_state_unknown"],
+        "model-gateway's CONTINUE_SPENT_RUN_END_FRAMES is the closed pair; parsed {gateway:?}"
+    );
+    assert_eq!(
+        spa, gateway,
+        "the SPA's CHAT_RUN_CONTINUE_SPENT_RUN_END_FRAMES and model-gateway's \
+         CONTINUE_SPENT_RUN_END_FRAMES must list the same codes in the same order"
+    );
+    let gateway_refusals = string_literals(
+        &gateway_const_list(&model_gateway_sse_source(), "CONTINUE_FRAME_REFUSALS"),
+        '"',
+    );
+    let spa_refusals = spa_frame_refusals();
+    for code in &gateway {
+        assert!(
+            !gateway_refusals.contains(code) && !spa_refusals.contains(code),
+            "`{code}` is a run-end frame, not a refusal: it would be read as an executor refusal \
+             (spend unknown) when the gateway did not flag it"
+        );
+    }
 }
 
 /// Every call of the relay other than `continue_run`'s passes the empty list, so no

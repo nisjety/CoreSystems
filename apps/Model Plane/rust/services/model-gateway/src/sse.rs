@@ -10131,14 +10131,17 @@ fn agentic_run_stream(
                             }
                         }
                         crate::sse_events::ChatEvent::subscription_error(&failure, message)
+                            .to_sse(&request_id)
                     }
-                    None => crate::sse_events::ChatEvent::Error {
-                        code: "agent_run_failed".to_owned(),
-                        message: "The governed agent run failed.".to_owned(),
-                        retryable: true,
-                    },
+                    None => run_end_error_event(
+                        &request_id,
+                        &run.run_id,
+                        "agent_run_failed",
+                        "The governed agent run failed.",
+                        spend,
+                    ),
                 };
-                let _ = tx.send(Ok(event.to_sse(&request_id))).await;
+                let _ = tx.send(Ok(event)).await;
                 return;
             }
             AgenticRunOutcome::Unknown => {
@@ -10154,12 +10157,14 @@ fn agentic_run_stream(
                     .publisher
                     .publish(&subjects::run_event_subject(&run.run_id), &degraded)
                     .await;
-                let event = crate::sse_events::ChatEvent::Error {
-                    code: "agent_run_state_unknown".to_owned(),
-                    message: "The agent returned an unsupported lifecycle state.".to_owned(),
-                    retryable: true,
-                };
-                let _ = tx.send(Ok(event.to_sse(&request_id))).await;
+                let event = run_end_error_event(
+                    &request_id,
+                    &run.run_id,
+                    "agent_run_state_unknown",
+                    "The agent returned an unsupported lifecycle state.",
+                    spend,
+                );
+                let _ = tx.send(Ok(event)).await;
                 return;
             }
             AgenticRunOutcome::Completed => {}
@@ -13896,6 +13901,50 @@ fn preconsume_request(
     }
 }
 
+/// Whether the `RunAgent` request of a continuation can be built from the credentials
+/// its launch will carry: the one local, deterministic failure the launch has
+/// (`authenticated_run_agent_request`, whose only failure is a bearer that is not valid
+/// gRPC metadata). It is asked BEFORE the gateway consumes the approval, so that a
+/// request that can never be sent does not spend the click. The request's content does
+/// not matter to it (the failure depends on the four credentials alone, and a
+/// continuation states no sandbox credential), so it builds an empty one.
+///
+/// The launch still builds the real request and still refuses after a spend if that ever
+/// fails ([`agentic_run_stream`]): this is a pre-check, not a replacement.
+#[allow(clippy::result_large_err)]
+fn run_agent_request_is_buildable(
+    execution_bearer: &VerifiedExecutionBearer,
+    data_plane_bearer: &VerifiedBearer,
+    session_bearer: &VerifiedModelBearer,
+    inference_bearer: &VerifiedInferenceBearer,
+) -> Result<(), tonic::Status> {
+    authenticated_run_agent_request(
+        RunAgentRequest::default(),
+        execution_bearer,
+        data_plane_bearer,
+        session_bearer,
+        inference_bearer,
+        None,
+    )
+    .map(|_| ())
+}
+
+/// The stream of a continuation refused before the gateway consumed anything: one
+/// `continue_refused` frame, not retryable, naming the run, WITHOUT `approval_spent`
+/// (nothing was spent and nothing was sent to the executor). No `connected` frame
+/// precedes it: the run was never prepared for a stream. It is queued in a channel of
+/// one and the sender dropped, so it needs no task.
+fn unbuildable_continuation_stream(run_id: &str) -> Sse<ReceiverStream<Result<Event, Infallible>>> {
+    let (tx, rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(1);
+    let _ = tx.try_send(Ok(continue_refusal_event(
+        &new_ulid(),
+        run_id,
+        "continue_refused",
+        ApprovalSpend::NotSpent,
+    )));
+    Sse::new(ReceiverStream::new(rx))
+}
+
 /// Why a continuation does not proceed past its consume. `Closed` is one of the
 /// route's closed HTTP refusals ([`CONTINUE_HTTP_REFUSALS`]). `Status` is a
 /// `PermissionDenied` or `Unauthenticated` answer, which the handler passes to
@@ -14138,6 +14187,52 @@ fn dispatch_unknown_event(spend: ApprovalSpend, request_id: &str, run_id: &str) 
     }
 }
 
+/// The codes of the two `error` frames that follow the executor's ANSWER to a
+/// dispatch (not its refusal): the run ended failed, or it ended in a status the
+/// gateway does not know. After a pre-consume they are final and say `approval_spent`
+/// ([`run_end_error_event`]); the SPA contract lists the same two
+/// (`CHAT_RUN_CONTINUE_SPENT_RUN_END_FRAMES`) and the BFF test pins the lists equal.
+pub(crate) const CONTINUE_SPENT_RUN_END_FRAMES: &[&str] = &[
+    "agent_run_failed",
+    "agent_run_state_unknown",
+];
+
+/// The `error` frame of a run the executor answered with a failure: `agent_run_failed`
+/// (the run ended failed) or `agent_run_state_unknown` (an unsupported status).
+///
+/// With nothing spent by the gateway it is exactly the committed frame: retryable, no
+/// run id, no `approval_spent`; so are the frames of every ordinary run. After a
+/// pre-consume the click is gone and a retry would be a 409, so the same code and text
+/// are not retryable, name the run and say `approval_spent`, like every other failure
+/// frame of a spent continuation. The gateway never terminalizes it either way: the
+/// executor owns the run's end.
+fn run_end_error_event(
+    request_id: &str,
+    run_id: &str,
+    code: &'static str,
+    message: &str,
+    spend: ApprovalSpend,
+) -> Event {
+    debug_assert!(
+        CONTINUE_SPENT_RUN_END_FRAMES.contains(&code),
+        "{code} is not one of the run-end frames of a continuation"
+    );
+    let event = crate::sse_events::ChatEvent::Error {
+        code: code.to_owned(),
+        message: message.to_owned(),
+        retryable: !spend.is_spent(),
+    };
+    if !spend.is_spent() {
+        return event.to_sse(request_id);
+    }
+    let mut payload = event.payload(request_id);
+    payload["run_id"] = json!(run_id);
+    payload["approval_spent"] = json!(true);
+    Event::default()
+        .event(event.name())
+        .data(payload.to_string())
+}
+
 /// The payload of the `connected` frame: the ids of the prepared run, so a client can
 /// follow it. With nothing spent it is exactly the committed payload; after a
 /// pre-consume it adds `approval_spent: true`, so a client knows from the first frame
@@ -14270,6 +14365,24 @@ pub(crate) async fn continue_run(
     // say about the spend. With it off nothing below differs from the route as it was.
     let resume_enabled = mp_contracts::loop_fold::loop_resume_enabled();
     let mode = resume_mode_for(resume_enabled, detail.resumable);
+
+    // The gateway is about to spend the click. The one local failure its launch can still
+    // have, a credential that is not valid metadata, is checked BEFORE the consume, so a
+    // request that can never be sent does not spend anything: the client is told
+    // `continue_refused` with nothing spent and the approval stays usable. The launch builds
+    // the real request later and still handles a failure there after a spend. With the
+    // switch off none of this runs.
+    if resume_enabled {
+        if let Err(error) = run_agent_request_is_buildable(
+            &execution_bearer,
+            &data_plane_bearer,
+            &model_bearer,
+            &inference_bearer,
+        ) {
+            tracing::warn!(%error, run_id = %run_id, "continuation refused before the consume: its RunAgent request cannot be built");
+            return Ok(unbuildable_continuation_stream(&run_id));
+        }
+    }
 
     // The run already exists: reuse it under its own managed obligation, so one
     // terminal receipt covers the whole run (decision recorded in the build plan).
@@ -14874,9 +14987,11 @@ mod continue_run_tests {
         );
     }
 
-    // ---- S7c-A4: the pure, unwired pieces of the gateway's pre-consume. Nothing
-    // below is called by `continue_run` yet (that is S7c-B1), so with every switch
-    // off and on the route answers exactly as the tests above pin. ----
+    // ---- S7c-A4: the pieces of the gateway's pre-consume, tested one at a time: the
+    // pure maps, the sequencing, the detach and the consumer over a real transport.
+    // `continue_run` wires them (S7c-B1) behind `EXECUTION_LOOP_RESUME_ENABLED`; with
+    // the switch off the route answers as the tests above pin, and the handler-level
+    // scenarios are in `tests/continue_preconsume_test.rs`. ----
 
     /// The production text of this file: everything before this test module, line
     /// endings normalised. Test items that quote a name cannot stand in for it.
@@ -15289,7 +15404,7 @@ mod continue_run_tests {
         assert_send_and_static::<GrpcApprovalConsumer>();
         assert_send_and_static::<ContinueStream>();
         assert_send_and_static::<Result<ContinueStream, PreconsumeRefusal>>();
-        // What the launch closure of the wiring will own: it is moved into the
+        // What the launch closure of `continue_run` owns: it is moved into the
         // spawned task, so each of these must be `Send + 'static`.
         assert_send_and_static::<AppState>();
         assert_send_and_static::<crate::session_flow::SessionRun>();
@@ -15894,6 +16009,280 @@ mod continue_run_tests {
         assert_eq!(spent["ok"], true, "the SPA reads ok on the connected frame");
     }
 
+    /// The two frames after the executor's answer. With nothing spent they are the
+    /// committed frames BYTE for byte (the very `ChatEvent::Error` the code built before:
+    /// retryable, no run id, no `approval_spent`); after a pre-consume the same code and
+    /// text are final, name the run and say `approval_spent`.
+    #[tokio::test]
+    async fn the_run_end_frames_are_the_committed_ones_unless_the_gateway_spent_the_click() {
+        for (code, message) in [
+            ("agent_run_failed", "The governed agent run failed."),
+            (
+                "agent_run_state_unknown",
+                "The agent returned an unsupported lifecycle state.",
+            ),
+        ] {
+            let committed = crate::sse_events::ChatEvent::Error {
+                code: code.to_owned(),
+                message: message.to_owned(),
+                retryable: true,
+            };
+            let (name, unspent) = frame_of(run_end_error_event(
+                "req-1",
+                "run-42",
+                code,
+                message,
+                ApprovalSpend::NotSpent,
+            ))
+            .await;
+            let (committed_name, committed_payload) = frame_of(committed.to_sse("req-1")).await;
+            assert_eq!((name.as_str(), &unspent), (committed_name.as_str(), &committed_payload));
+            assert_eq!(unspent["retryable"], true, "{code}");
+            assert!(
+                unspent.get("run_id").is_none() && unspent.get("approval_spent").is_none(),
+                "{code}: an unspent continuation keeps the committed frame: {unspent}"
+            );
+
+            let (name, spent) = frame_of(run_end_error_event(
+                "req-1",
+                "run-42",
+                code,
+                message,
+                ApprovalSpend::SpentByGateway,
+            ))
+            .await;
+            assert_eq!(name, "error");
+            assert_eq!(
+                spent,
+                json!({
+                    "code": code,
+                    "message": message,
+                    "retryable": false,
+                    "request_id": "req-1",
+                    "run_id": "run-42",
+                    "approval_spent": true,
+                }),
+                "{code}"
+            );
+        }
+    }
+
+    /// Every frame of a whole stream, in order: `(event, payload)`.
+    async fn frames_of_stream(stream: Sse<ReceiverStream<Result<Event, Infallible>>>) -> Vec<(String, Value)> {
+        use axum::response::IntoResponse;
+        let body = stream.into_response().into_body();
+        let bytes = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            axum::body::to_bytes(body, usize::MAX),
+        )
+        .await
+        .expect("the stream ends")
+        .expect("the stream body reads");
+        String::from_utf8(bytes.to_vec())
+            .expect("SSE is UTF-8")
+            .split("\n\n")
+            .filter_map(|block| {
+                let event = block.lines().find_map(|line| line.strip_prefix("event: "))?;
+                let data = block.lines().find_map(|line| line.strip_prefix("data: "))?;
+                Some((event.to_owned(), serde_json::from_str(data).ok()?))
+            })
+            .collect()
+    }
+
+    /// The four credentials a continuation's launch carries, each valid, with one of them
+    /// replaced by a value that is not valid gRPC metadata (a newline).
+    fn bearers_with(
+        broken: Option<&str>,
+    ) -> (
+        VerifiedExecutionBearer,
+        VerifiedBearer,
+        VerifiedModelBearer,
+        VerifiedInferenceBearer,
+    ) {
+        let pick = |name: &str, good: &'static str| -> &'static str {
+            if broken == Some(name) {
+                "bad\nbearer"
+            } else {
+                good
+            }
+        };
+        (
+            VerifiedExecutionBearer::for_test(pick("execution", "execution-token")),
+            VerifiedBearer::for_test(pick("data_plane", "data-token")),
+            VerifiedModelBearer::for_test(pick("session", "session-token")),
+            VerifiedInferenceBearer::for_test(pick("inference", "inference-token")),
+        )
+    }
+
+    /// The request a continuation will send is checked BEFORE the click is spent: any one of
+    /// the four credentials that is not valid metadata is `Unauthenticated`, which is what the
+    /// launch's own construction would say after a spend.
+    #[test]
+    fn a_request_that_cannot_be_built_is_found_before_the_consume() {
+        let (execution, data_plane, session, inference) = bearers_with(None);
+        assert!(run_agent_request_is_buildable(&execution, &data_plane, &session, &inference).is_ok());
+        for broken in ["execution", "data_plane", "session", "inference"] {
+            let (execution, data_plane, session, inference) = bearers_with(Some(broken));
+            let refused = run_agent_request_is_buildable(&execution, &data_plane, &session, &inference)
+                .expect_err(broken);
+            assert_eq!(refused.code(), tonic::Code::Unauthenticated, "{broken}");
+            // The same four credentials make the launch's own request fail the same way.
+            let launch = authenticated_run_agent_request(
+                RunAgentRequest::default(),
+                &execution,
+                &data_plane,
+                &session,
+                &inference,
+                None,
+            )
+            .expect_err(broken);
+            assert_eq!(launch.code(), refused.code(), "{broken}: the pre-check is the launch's check");
+        }
+    }
+
+    /// What the client is told when that pre-check fails: one `continue_refused` frame,
+    /// final, naming the run, and no `approval_spent` (nothing was spent, nothing sent), and
+    /// no `connected` frame before it.
+    #[tokio::test]
+    async fn a_continuation_refused_before_the_consume_is_one_unspent_continue_refused_frame() {
+        let frames = frames_of_stream(unbuildable_continuation_stream("run-42")).await;
+        assert_eq!(frames.len(), 1, "{frames:?}");
+        let (name, frame) = &frames[0];
+        assert_eq!(name, "error");
+        assert_eq!(frame["code"], "continue_refused");
+        assert_eq!(frame["retryable"], false);
+        assert_eq!(frame["run_id"], "run-42");
+        assert!(frame.get("approval_spent").is_none(), "{frame}");
+    }
+
+    /// The pre-check stands strictly BEFORE the consume: inside the resume switch's branch
+    /// (so with the switch off the route is untouched), before the launch closure takes the
+    /// credentials, before `spawn_consume_then_launch(`, and it answers with the unspent
+    /// refusal stream. This is the textual half of "a construction failure never reaches a
+    /// consume": a handler-level test cannot make a verified bearer malformed (a verified JWT
+    /// is always valid metadata), so the order is read from the source and the two halves
+    /// (the check, the answer) are driven above.
+    #[test]
+    fn continue_run_checks_the_request_before_it_consumes() {
+        let body = continue_run_code();
+        let squashed = squash(&body);
+        let check = "run_agent_request_is_buildable( &execution_bearer, &data_plane_bearer, &model_bearer, &inference_bearer, )";
+        assert_eq!(squashed.matches(check).count(), 1, "one pre-check, over the four credentials");
+        assert_eq!(body.matches("unbuildable_continuation_stream(").count(), 1);
+        let at = position(&body, "run_agent_request_is_buildable(");
+        let switch = position(&body, "let resume_enabled =");
+        let branch = position(&body, "if resume_enabled {");
+        let closure = position(&body, "let launch = move ||");
+        let off = position(&body, "if !resume_enabled {");
+        let consume = position(&body, "spawn_consume_then_launch(");
+        assert!(switch < branch && branch < at, "the pre-check is inside `if resume_enabled {{`");
+        assert!(at < closure, "the pre-check borrows the credentials before the launch closure moves them");
+        assert!(closure < off && off < consume, "the committed off path and the consume keep their order");
+        // The answer of a failed check is the unspent refusal stream, returned at once.
+        let answer = &body[at..closure];
+        assert!(
+            squash(answer).contains("return Ok(unbuildable_continuation_stream(&run_id));"),
+            "{answer}"
+        );
+        // And the branch is closed before the closure: the off path never reaches it.
+        let branch_text = &body[branch..closure];
+        assert_eq!(branch_text.matches('{').count(), branch_text.matches('}').count(), "{branch_text}");
+    }
+
+    /// A request that cannot be built AFTER a spend (the pre-check is a pre-check, not a
+    /// proof): the stream answers `continue_refused` saying the click is spent, never
+    /// terminalizes, publishes nothing (no `RUN_STARTED`, `RUN_FAILED` or
+    /// `RUN_DISPATCH_DEGRADED`), and sends nothing to the executor (the state's clients are
+    /// the unreachable defaults, so a dispatch or a terminalization would show as a
+    /// different frame). The run waits out its renewed recovery window.
+    #[tokio::test]
+    async fn a_request_that_cannot_be_built_after_a_spend_is_continue_refused_and_ends_nothing() {
+        let mut state = AppState::new();
+        let publisher = std::sync::Arc::new(crate::state::DynPublisher::InMemory(
+            mp_events::publisher::InMemoryPublisher::new(),
+        ));
+        state.publisher = publisher.clone();
+        let (execution, data_plane, session, inference) = bearers_with(Some("execution"));
+        let stream = agentic_run_stream(
+            state,
+            crate::session_flow::SessionRun {
+                thread_id: "thread-1".to_owned(),
+                run_id: "run-42".to_owned(),
+                org_id: "org-1".to_owned(),
+                already_started: true,
+                terminal_source: mp_contracts::model_plane::v1::ManagedRunSource::ExecutionAgent,
+            },
+            "req-1".to_owned(),
+            "org-1".to_owned(),
+            "user-1".to_owned(),
+            String::new(),
+            "the run's goal".to_owned(),
+            Vec::new(),
+            Vec::new(),
+            false,
+            None,
+            0,
+            CONTINUE_PERMISSION_MODE.to_owned(),
+            false,
+            execution,
+            data_plane,
+            session,
+            inference,
+            String::new(),
+            None,
+            AgentRoute::default(),
+            None,
+            Some(continue_resume("appr-1", "claim-1", "loop")),
+            ApprovalSpend::SpentByGateway,
+        );
+        let frames = frames_of_stream(stream).await;
+        let names: Vec<&str> = frames.iter().map(|(name, _)| name.as_str()).collect();
+        assert_eq!(names, ["connected", "error"], "{frames:?}");
+        assert_eq!(frames[0].1["approval_spent"], true, "the first frame already says the click is spent");
+        let error = &frames[1].1;
+        assert_eq!(error["code"], "continue_refused");
+        assert_eq!(error["retryable"], false);
+        assert_eq!(error["run_id"], "run-42");
+        assert_eq!(error["approval_spent"], true);
+        assert!(
+            publisher.drain().is_empty(),
+            "nothing is published: the run is neither started, failed nor degraded"
+        );
+    }
+
+    /// The run-end frames are a closed pair, and the stream builds each of them through
+    /// `run_end_error_event(.., spend)` and nowhere else: a hand-built `ChatEvent::Error`
+    /// with one of these codes would say `retryable: true` after a spend.
+    #[test]
+    fn the_run_end_frames_are_closed_and_only_built_with_the_spend() {
+        assert_eq!(
+            CONTINUE_SPENT_RUN_END_FRAMES,
+            ["agent_run_failed", "agent_run_state_unknown"]
+        );
+        // Not part of the refusal vocabulary: they are the run's own end, and an unspent
+        // continuation's frame of this code is the committed one.
+        for code in CONTINUE_SPENT_RUN_END_FRAMES {
+            assert!(!CONTINUE_FRAME_REFUSALS.contains(code), "{code}");
+        }
+        let stream = squash(&stream_code());
+        for code in CONTINUE_SPENT_RUN_END_FRAMES {
+            let call = format!("run_end_error_event( &request_id, &run.run_id, \"{code}\", \"");
+            assert_eq!(stream.matches(&call).count(), 1, "{code}: exactly one site");
+            let at = stream.find(&call).expect("the call is in the stream");
+            let call = &stream[at..];
+            let call = &call[..call.find(" )").expect("the call ends") + 2];
+            assert!(
+                call.ends_with(", spend, )"),
+                "{code}: the call does not pass the spend last: {call}"
+            );
+        }
+        assert!(
+            !stream.contains("code: \"agent_run_failed\"")
+                && !stream.contains("code: \"agent_run_state_unknown\""),
+            "a hand-built ChatEvent::Error with a run-end code ignores the spend"
+        );
+    }
+
     // ---- the real consumer, over a real gRPC transport ----
 
     type ConsumeAnswer = Result<mp_contracts::model_plane::v1::ConsumeApprovalResponse, tonic::Status>;
@@ -15901,9 +16290,6 @@ mod continue_run_tests {
     /// What the server saw of one consume: the `authorization` metadata and the request.
     type SeenConsume = (Option<String>, mp_contracts::model_plane::v1::ConsumeApprovalRequest);
 
-    /// A gRPC server that answers `ConsumeApproval` from a script and nothing else. It
-    /// stands in for session-core's service: the generated trait has two dozen
-    /// methods, and the consumer calls one.
     /// How the double answers a consume.
     #[derive(Clone)]
     enum ServerBehaviour {
@@ -15952,6 +16338,9 @@ mod continue_run_tests {
         }
     }
 
+    /// A gRPC server that answers `ConsumeApproval` as its [`ServerBehaviour`] says and
+    /// nothing else. It stands in for session-core's service: the generated trait has two
+    /// dozen methods, and the consumer calls one.
     #[derive(Clone)]
     struct ConsumeOnlyServer {
         seen: Arc<Mutex<Vec<SeenConsume>>>,

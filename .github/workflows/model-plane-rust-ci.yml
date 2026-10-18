@@ -36,6 +36,14 @@ on:
       - "apps/Control Plane/audit-core/internal/testdata/**"
       - "apps/Data Plane v2/services/retrieval-engine-rs/tests/fixtures/**"
       - "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/tests/fixtures/**"
+      # durable_loop_contract reads these across the plane boundary (no attestation field, the
+      # continue vocabulary lists), so a change there must run it.
+      - "apps/Model Plane/go/gen/**"
+      - "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/orchestration.rs"
+      - "apps/Frontend Plane/verevonv3/apps/gateway/src/upstream.rs"
+      - "apps/Frontend Plane/verevonv3/apps/gateway/tests/continue_error_vocabulary.rs"
+      - "apps/Frontend Plane/verevonv3/src/shared/actions/chat-run-continue-contract*"
+      - "apps/Frontend Plane/verevonv3/src/shared/api/orchestration-client*"
       - "scripts/tests/zdr-contract-sync.test.sh"
       - ".github/workflows/model-plane-rust-ci.yml"
   push:
@@ -49,6 +57,14 @@ on:
       - "apps/Control Plane/audit-core/internal/testdata/**"
       - "apps/Data Plane v2/services/retrieval-engine-rs/tests/fixtures/**"
       - "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/tests/fixtures/**"
+      # durable_loop_contract reads these across the plane boundary (no attestation field, the
+      # continue vocabulary lists), so a change there must run it.
+      - "apps/Model Plane/go/gen/**"
+      - "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/orchestration.rs"
+      - "apps/Frontend Plane/verevonv3/apps/gateway/src/upstream.rs"
+      - "apps/Frontend Plane/verevonv3/apps/gateway/tests/continue_error_vocabulary.rs"
+      - "apps/Frontend Plane/verevonv3/src/shared/actions/chat-run-continue-contract*"
+      - "apps/Frontend Plane/verevonv3/src/shared/api/orchestration-client*"
       - "scripts/tests/zdr-contract-sync.test.sh"
       - ".github/workflows/model-plane-rust-ci.yml"
 

@@ -19,7 +19,10 @@
 //
 //   1. `approval_spent: true` (any frame of a continuation the gateway
 //      pre-consumed, the `connected` frame included): the approval is spent, the
-//      frame is final and never retried, and the client follows the run.
+//      frame is final and never retried, and the client follows the run. That
+//      includes the two frames that follow the executor's ANSWER rather than its
+//      refusal, `agent_run_failed` and `agent_run_state_unknown`
+//      ([chatRunContinueSpentRunEndOf]): after a spend they are not retryable.
 //   2. A code from the tuple WITHOUT `approval_spent`, from a continuation the
 //      gateway did not pre-consume: the executor refused, the gateway does not
 //      know whether the executor spent the approval first, so the spend is
@@ -29,7 +32,9 @@
 //      `agent_dispatch_rejected`, `agent_dispatch_unreachable`,
 //      `session_terminalization_failed`): they say nothing about the approval,
 //      so they are not in this vocabulary and every guard here returns null for
-//      them. A retry with a new token is what the committed rules permit.
+//      them. A retry with a new token is what the committed rules permit. The
+//      run-end frames above are of this regime too, whenever they do NOT carry
+//      `approval_spent: true`: their own `retryable` flag stands.
 //
 // What the spend flag can honestly say. `no` is claimed only for a refusal that
 // cannot be produced after a consume. Most refusals can: the gateway checks the
@@ -137,6 +142,19 @@ export const CHAT_RUN_CONTINUE_SPENT_ONLY_FRAME_REFUSALS = [
   'continue_unreachable',
   'continue_outcome_unknown',
 ] as const
+
+/**
+ * The two `error` frames that follow the executor's ANSWER to a dispatch rather than its
+ * refusal: the run ended failed (`agent_run_failed`) or in a status the gateway does not
+ * know (`agent_run_state_unknown`). They are frames of every run, retryable as the
+ * committed code says, and so NOT part of the refusal vocabulary above. Only when the
+ * gateway pre-consumed the approval do they carry `approval_spent: true`, and then they
+ * are final: regime 1, read by [chatRunContinueSpentRunEndOf]. The BFF test pins this
+ * pair to model-gateway's CONTINUE_SPENT_RUN_END_FRAMES.
+ */
+export const CHAT_RUN_CONTINUE_SPENT_RUN_END_FRAMES = ['agent_run_failed', 'agent_run_state_unknown'] as const
+
+export type ChatRunContinueSpentRunEndCode = (typeof CHAT_RUN_CONTINUE_SPENT_RUN_END_FRAMES)[number]
 
 /**
  * Whether the approval's claim token was spent: `yes`, `no` (only for a refusal
@@ -254,6 +272,11 @@ export type ChatRunContinueFrameRefusal = ChatRunContinueEffect & {
   readonly code: ChatRunContinueFrameRefusalCode
 }
 
+export type ChatRunContinueSpentRunEnd = ChatRunContinueEffect & {
+  readonly regime: 1
+  readonly code: ChatRunContinueSpentRunEndCode
+}
+
 /** Why a failure is a transport failure (see [chatRunContinueTransportFailureOf]). */
 export type ChatRunContinueTransportReason =
   | 'upstream_unavailable'
@@ -344,6 +367,20 @@ export function chatRunContinueFrameRefusalOf(frame: unknown): ChatRunContinueFr
   const record = asRecord(frame)
   if (!record || record.approval_spent !== true || !isFrameRefusalCode(record.code)) return null
   return { regime: 1, code: record.code, ...CHAT_RUN_CONTINUE_SPENT_EFFECT }
+}
+
+/**
+ * Regime 1 for the two frames after the executor's answer: an `error` frame whose code is
+ * `agent_run_failed` or `agent_run_state_unknown` AND that carries `approval_spent === true`.
+ * Without the flag the same codes are the committed frames of an ordinary run (regime 3):
+ * this guard, and every other guard here, returns null for them.
+ */
+export function chatRunContinueSpentRunEndOf(frame: unknown): ChatRunContinueSpentRunEnd | null {
+  const record = asRecord(frame)
+  if (!record || record.approval_spent !== true) return null
+  const code = (CHAT_RUN_CONTINUE_SPENT_RUN_END_FRAMES as readonly unknown[]).find((candidate) => candidate === record.code)
+  if (code === undefined) return null
+  return { regime: 1, code: code as ChatRunContinueSpentRunEndCode, ...CHAT_RUN_CONTINUE_SPENT_EFFECT }
 }
 
 /**

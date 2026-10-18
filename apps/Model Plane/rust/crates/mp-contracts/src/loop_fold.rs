@@ -340,9 +340,9 @@ pub fn switch_from(value: Option<&str>) -> bool {
 ///
 /// Two services read it, each through [`loop_resume_enabled`] and never by this name:
 /// execution-core restores the paused loop from its claimed fold, and model-gateway
-/// pre-consumes the approval and asks for the `loop` stage (the gateway's reader arrives
-/// with S7c-B; until then only its compose entry exists and the executor takes the consume
-/// itself). With the executor's switch off, or
+/// pre-consumes the approval and asks for the `loop` stage (the gateway reads it once, in
+/// `continue_run`; with it off the executor takes the consume itself, as it always did).
+/// With the executor's switch off, or
 /// with the ledger or the fold writer off, a `loop` request runs as `segment` (a downgrade,
 /// never a refusal). The continue switch is not a downgrade: with
 /// `AGENT_CONTINUE_AFTER_APPROVAL_ENABLED` off the executor REFUSES a continue

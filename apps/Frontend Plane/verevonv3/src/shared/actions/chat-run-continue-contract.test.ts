@@ -7,11 +7,14 @@ import {
   CHAT_RUN_CONTINUE_HTTP_REFUSALS,
   CHAT_RUN_CONTINUE_PRE_CONSUME_ONLY_HTTP_REFUSALS,
   CHAT_RUN_CONTINUE_RECOVERY_WINDOW_MINUTES,
+  CHAT_RUN_CONTINUE_SPENT_EFFECT,
   CHAT_RUN_CONTINUE_SPENT_ONLY_FRAME_REFUSALS,
+  CHAT_RUN_CONTINUE_SPENT_RUN_END_FRAMES,
   CHAT_RUN_CONTINUE_TRANSPORT_EFFECT,
   chatRunContinueFrameRefusalOf,
   chatRunContinueHttpRefusalOf,
   chatRunContinueSpentConnected,
+  chatRunContinueSpentRunEndOf,
   chatRunContinueTransportFailureOf,
   chatRunContinueUnflaggedRefusalOf,
 } from './chat-run-continue-contract'
@@ -21,10 +24,10 @@ import contractSource from './chat-run-continue-contract.ts?raw'
 // stream speak (build plan WS03 S7c). The BFF relays the HTTP half
 // (apps/gateway CONTINUE_RELAYED_ERRORS); the stream half is relayed byte for
 // byte. The HTTP list is pinned to the BFF's list on the Rust side
-// (apps/gateway/tests/continue_error_vocabulary.rs). Nothing pins either list to
-// model-gateway's own yet (the gateway constants land with build plan WS03
-// S7c-A4), and nothing pins the 22 stream tokens to any Rust source: until then
-// the stream vocabulary here is unpinned.
+// (apps/gateway/tests/continue_error_vocabulary.rs), which also pins the HTTP list
+// and the 22 stream tokens to model-gateway's own constants
+// (CONTINUE_HTTP_REFUSALS, CONTINUE_FRAME_REFUSALS) and the two run-end frames
+// to CONTINUE_SPENT_RUN_END_FRAMES.
 
 const HTTP_PAIRS = [
   ['continue_disabled', 409],
@@ -310,6 +313,71 @@ describe('chatRunContinueUnflaggedRefusalOf (regime 2: refused by the executor, 
         const unflagged = chatRunContinueUnflaggedRefusalOf(frame)
         expect(spent !== null && unflagged !== null).toBe(false)
       }
+    }
+  })
+})
+
+describe('chatRunContinueSpentRunEndOf (regime 1 for the two frames after the executor answered)', () => {
+  const spentFrame = (code: string) => ({
+    code,
+    message: 'x',
+    retryable: false,
+    request_id: 'r',
+    run_id: 'run_1',
+    approval_spent: true,
+  })
+
+  it('lists exactly the two codes, outside the refusal tuple', () => {
+    expect([...CHAT_RUN_CONTINUE_SPENT_RUN_END_FRAMES]).toEqual(['agent_run_failed', 'agent_run_state_unknown'])
+    for (const code of CHAT_RUN_CONTINUE_SPENT_RUN_END_FRAMES) {
+      expect((CHAT_RUN_CONTINUE_FRAME_REFUSALS as readonly string[]).includes(code)).toBe(false)
+    }
+  })
+
+  it('reads each as spent, final and to be followed when approval_spent is true', () => {
+    for (const code of CHAT_RUN_CONTINUE_SPENT_RUN_END_FRAMES) {
+      expect(chatRunContinueSpentRunEndOf(spentFrame(code))).toEqual({
+        regime: 1,
+        code,
+        approvalSpent: 'yes',
+        retryable: false,
+        followRun: true,
+      })
+      // The same effect the refusal frames of regime 1 have: one table, no second opinion.
+      expect(chatRunContinueSpentRunEndOf(spentFrame(code))).toMatchObject(CHAT_RUN_CONTINUE_SPENT_EFFECT)
+    }
+  })
+
+  it('never reads them without approval_spent === true: those are the committed, retryable frames of every ordinary run', () => {
+    for (const code of CHAT_RUN_CONTINUE_SPENT_RUN_END_FRAMES) {
+      for (const flag of [undefined, false, 'true', 1, null]) {
+        const frame: Record<string, unknown> = { code, retryable: true }
+        if (flag !== undefined) frame.approval_spent = flag
+        expect(chatRunContinueSpentRunEndOf(frame)).toBeNull()
+        // And they are not regime 2 either: the code is not in the refusal tuple.
+        expect(chatRunContinueUnflaggedRefusalOf(frame)).toBeNull()
+      }
+    }
+  })
+
+  it('does not read the refusal codes or the committed dispatch frames, flagged or not', () => {
+    for (const code of [...CHAT_RUN_CONTINUE_FRAME_REFUSALS, 'agent_dispatch_unavailable', 'agent_dispatch_rejected', 'agent_run_output_unavailable', 'nope', '']) {
+      expect(chatRunContinueSpentRunEndOf({ code, approval_spent: true })).toBeNull()
+    }
+  })
+
+  it('is not read by the refusal guard: one guard per vocabulary, never both', () => {
+    for (const code of CHAT_RUN_CONTINUE_SPENT_RUN_END_FRAMES) {
+      expect(chatRunContinueFrameRefusalOf(spentFrame(code))).toBeNull()
+    }
+    for (const code of CHAT_RUN_CONTINUE_FRAME_REFUSALS) {
+      expect(chatRunContinueSpentRunEndOf(spentFrame(code))).toBeNull()
+    }
+  })
+
+  it('gives null for anything that is not a frame object', () => {
+    for (const input of [null, undefined, 'agent_run_failed', 7, [], { approval_spent: true }, { code: 7, approval_spent: true }]) {
+      expect(chatRunContinueSpentRunEndOf(input)).toBeNull()
     }
   })
 })

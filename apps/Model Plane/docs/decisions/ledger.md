@@ -22,7 +22,7 @@ with a pointer forward. Newest first.
 
 ---
 
-## 2026-10-18 - In-place resume and the gateway pre-consume, as built (S7b, S7c-0, S7c-A, S7c-A5; S7c-B gateway wiring still to land)
+## 2026-10-18 - In-place resume and the gateway pre-consume, as built (S7b, S7c-0, S7c-A, S7c-A5, S7c-B)
 
 **Status: implemented behind default-off switches, source-verified, not live-verified. The 2026-10-16 entry stays proposed.** Hashes are in the plan's Build ledger.
 
@@ -39,6 +39,12 @@ with a pointer forward. Newest first.
 **S7c-0.** A `/continue` never takes the thread's approved plan (the grant is single-use and belongs to the next ordinary run).
 
 **BFF and SPA contract, no UI caller.** The `/continue` relay has no switch: with every Model Plane switch off it answers closed codes (continue_disabled, not_resumable, approval_not_found, approval_not_granted, approval_expired, approval_not_resumable, continuation_already_consumed, continue_unavailable) where it used to answer model_error; it reads at most 4 KiB of the error body under a 5 s bound and never echoes an upstream message for PermissionDenied or Unauthenticated. `approvalSpent` is no/yes/unknown per code: no only for approval_not_granted, approval_expired and approval_not_resumable (produced only for an unconsumed approval); unknown for continue_disabled, not_resumable, approval_not_found, continue_unavailable and any transport failure. No read the SPA has shows whether an approval was spent, so the contract tells a client to follow the run by its id and that a same-token retry answers 409 if the click was spent (after continue_unavailable that 409 can mean spent with no run launched; the run may be recovered inside the 15-minute window).
+
+**Gateway wiring (S7c-B, built).** `continue_run` reads `loop_resume_enabled()` once; with it off it returns the committed route. With it on a spend-only consume and the launch run in one detached task (`spawn_consume_then_launch`), so a client disconnect cannot spend an approval without sending RunAgent; the loser of a race gets 409 `continuation_already_consumed` before the executor. The typed `approval_spent` frames depend on the gateway's own knowledge that it won the consume; a lost or refused consume never claims it; a zero-retention catalogue refusal on the consume keeps its typed body. The two frames that follow the executor's answer, `agent_run_failed` and `agent_run_state_unknown`, are final (`retryable: false`, run id, `approval_spent: true`) for a spent continuation and byte-identical for every other run. Still open: the typed subscription-failure frames and `agent_run_output_unavailable` of a spent continuation are still retryable (same treatment proposed: widen the closed pair). A request that cannot be built is refused BEFORE the consume (a one-frame `continue_refused`, no `approval_spent`; defence in depth, not reachable today); the real request is still built later, and a failure there after a spend is `continue_refused` with `approval_spent: true`.
+
+**Metrics consequence (no code).** RUN_STARTED is published before the dispatch result, so a refused continuation shows a started run with no closing event until session-core recovery terminalizes it about 15 minutes after the spend; the gateway never terminalizes a spent continuation because a refusal can be `continuation_already_consumed` while another segment is live.
+
+**Guards.** `durable_loop_contract` pins one consume literal that carries `omit_call: true`, one spawn, `Send + Sync` on the consumer trait, the switch read once, the spent arm ahead of the confirmed arm and never terminalizing, the executor's closed tokens inside the gateway vocabulary, the replay rule bound to the ledger (accepted only inside the refusal's negation), `writer_gate` handed the depth and the release flag in both production calls, and no attestation field in Rust, proto, Go, the BFF or the SPA. The contract test runs in the Model Plane Rust CI; its path filter now includes the Go bindings and the specific BFF and SPA continue files it reads.
 
 **Open for the owner (unchanged):** the S8 parking design, the WS14 S2a UI plan-approval gap, the S9 live-proof trigger, and when the 2026-10-16 entry flips. Follow-ups outside WS03 scope: the executor stopping when the managed heartbeat answers already_terminal; `has_approval_pending` ignoring `expires_at`.
 

@@ -611,6 +611,21 @@ fn refusing(status: Status) -> ExecutionKind {
     ExecutionKind::Answers(Err(status))
 }
 
+/// `RunAgent` answers, successfully, that the run ended in this status (`failed`, or one the
+/// gateway does not know).
+fn ending_as(status: &str) -> ExecutionKind {
+    ExecutionKind::Answers(Ok(mpv1::RunAgentResponse {
+        status: status.to_owned(),
+        ..Default::default()
+    }))
+}
+
+/// A zero-retention refusal of a durable mutation, as the executor's trailer carries it, on
+/// the gRPC code the case names.
+fn zero_retention_refusal(code: tonic::Code) -> ExecutionKind {
+    refusing(mp_contracts::zdr_refusal::Refusal::DURABLE_MUTATION_FORBIDDEN.grpc_status(code))
+}
+
 struct Case {
     /// `EXECUTION_LOOP_RESUME_ENABLED` at the gateway.
     resume_switch: bool,
@@ -1042,6 +1057,13 @@ async fn frame_codes_pair_with_the_spend_state_per_switch_state() {
         ("on / DeadlineExceeded", true, refusing(Status::deadline_exceeded("slow")), spent("continue_outcome_unknown", true)),
         ("on / unreachable", true, ExecutionKind::Unreachable, spent("continue_unreachable", true)),
         ("on / dropped", true, ExecutionKind::Dropping, spent("continue_outcome_unknown", true)),
+        ("on / Unauthenticated", true, refusing(Status::unauthenticated("a credential sentence")), spent("continue_refused", false)),
+        ("on / zero-retention trailer", true, zero_retention_refusal(tonic::Code::FailedPrecondition), spent("durable_mutation_forbidden", false)),
+        ("on / zero-retention trailer on PermissionDenied", true, zero_retention_refusal(tonic::Code::PermissionDenied), spent("durable_mutation_forbidden", false)),
+        // The two frames AFTER the executor answered: the run ended failed, or in a status the
+        // gateway does not know. The click is spent, so neither may say `retryable`.
+        ("on / the run ended failed", true, ending_as("failed"), spent("agent_run_failed", false)),
+        ("on / the run ended in an unknown status", true, ending_as("quarantined"), spent("agent_run_state_unknown", true)),
         // --- switch OFF: nothing consumed by the gateway ---
         ("off / FailedPrecondition", false, refusing(Status::failed_precondition("continue_disabled")), typed("continue_disabled")),
         ("off / Aborted", false, refusing(Status::aborted("continue_in_progress")), typed("continue_in_progress")),
@@ -1051,6 +1073,14 @@ async fn frame_codes_pair_with_the_spend_state_per_switch_state() {
         ("off / DeadlineExceeded", false, refusing(Status::deadline_exceeded("slow")), Expect { code: "agent_dispatch_unavailable", spent: false, retryable: true, degraded: true, receipts: 0 }),
         ("off / unreachable", false, ExecutionKind::Unreachable, Expect { code: "agent_dispatch_unreachable", spent: false, retryable: true, degraded: false, receipts: 1 }),
         ("off / dropped", false, ExecutionKind::Dropping, Expect { code: "agent_dispatch_unavailable", spent: false, retryable: true, degraded: true, receipts: 0 }),
+        ("off / Unauthenticated", false, refusing(Status::unauthenticated("a credential sentence")), Expect { code: "agent_dispatch_rejected", spent: false, retryable: false, degraded: false, receipts: 1 }),
+        ("off / zero-retention trailer", false, zero_retention_refusal(tonic::Code::FailedPrecondition), typed("durable_mutation_forbidden")),
+        // The committed confirmed-rejection arm answers before the typed one: a trailer that
+        // travels on PermissionDenied still terminalizes, as it always did.
+        ("off / zero-retention trailer on PermissionDenied", false, zero_retention_refusal(tonic::Code::PermissionDenied), Expect { code: "agent_dispatch_rejected", spent: false, retryable: false, degraded: false, receipts: 1 }),
+        // The run's own end, with nothing spent by the gateway: the committed frames, retryable.
+        ("off / the run ended failed", false, ending_as("failed"), Expect { code: "agent_run_failed", spent: false, retryable: true, degraded: false, receipts: 0 }),
+        ("off / the run ended in an unknown status", false, ending_as("quarantined"), Expect { code: "agent_run_state_unknown", spent: false, retryable: true, degraded: true, receipts: 0 }),
     ];
     for (name, switch, execution, expect) in cases {
         let rig = rig(Case::new(switch, execution)).await;
@@ -1061,8 +1091,19 @@ async fn frame_codes_pair_with_the_spend_state_per_switch_state() {
             .unwrap_or_else(|| panic!("{name}: an error frame is expected: {}", answer.body));
         assert_eq!(error["code"], expect.code, "{name}: {}", answer.body);
         assert_eq!(error["retryable"], expect.retryable, "{name}");
-        // The two committed terminalizing frames never named the run; every other frame does.
-        if !matches!(expect.code, "agent_dispatch_rejected" | "agent_dispatch_unreachable") {
+        // The committed frames of an unspent continuation that never named the run keep not
+        // naming it (the two terminalizing ones, and the run's own end); every other frame does.
+        let committed_without_run = !expect.spent
+            && matches!(
+                expect.code,
+                "agent_dispatch_rejected"
+                    | "agent_dispatch_unreachable"
+                    | "agent_run_failed"
+                    | "agent_run_state_unknown"
+            );
+        if committed_without_run {
+            assert!(error.get("run_id").is_none(), "{name}: the committed frame is unchanged: {error}");
+        } else {
             assert_eq!(error["run_id"], RUN, "{name}");
         }
         if expect.spent {
@@ -1134,4 +1175,56 @@ async fn a_client_that_disconnects_mid_consume_still_gets_exactly_one_dispatch()
     assert_eq!(rig.orders(), vec!["consume", "run_agent"]);
     let requests = rig.run_agents.lock().expect("lock");
     assert_eq!(requests[0].resume.as_ref().expect("resume").claim_token, "claim-1");
+}
+
+/// The two frames after the executor answered, byte for byte. A continuation the gateway did
+/// not pre-consume gets the committed frames (retryable, no run id, no `approval_spent`): the
+/// click is not the gateway's, and a retry with a new token is what the committed rules allow.
+/// One the gateway spent gets the same code and text, not retryable, naming the run and
+/// saying `approval_spent`: a retry of a spent click is a 409, and the client follows the run.
+#[tokio::test]
+#[serial_test::serial]
+async fn the_frames_after_the_executors_answer_are_the_committed_ones_unless_the_gateway_spent_the_click() {
+    for (status, code, message) in [
+        ("failed", "agent_run_failed", "The governed agent run failed."),
+        (
+            "quarantined",
+            "agent_run_state_unknown",
+            "The agent returned an unsupported lifecycle state.",
+        ),
+    ] {
+        let rig_off = rig(Case::new(false, ending_as(status))).await;
+        let off = rig_off.post("claim-1").await;
+        let frame = off.error_frame().expect("an error frame");
+        assert_eq!(
+            frame,
+            json!({
+                "code": code,
+                "message": message,
+                "retryable": true,
+                "request_id": frame["request_id"].clone(),
+            }),
+            "off / {status}: the committed frame, unchanged: {}",
+            off.body
+        );
+        drop(rig_off);
+
+        let rig_on = rig(Case::new(true, ending_as(status))).await;
+        let on = rig_on.post("claim-1").await;
+        let frame = on.error_frame().expect("an error frame");
+        assert_eq!(
+            frame,
+            json!({
+                "code": code,
+                "message": message,
+                "retryable": false,
+                "request_id": frame["request_id"].clone(),
+                "run_id": RUN,
+                "approval_spent": true,
+            }),
+            "on / {status}: the same code and text, final and spent: {}",
+            on.body
+        );
+        assert_eq!(rig_on.receipt_count(), 0, "a spent click is never terminalized by the gateway");
+    }
 }

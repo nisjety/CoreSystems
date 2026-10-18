@@ -1089,7 +1089,7 @@ services:
       # The continue switch is not a downgrade: with AGENT_CONTINUE_AFTER_APPROVAL_ENABLED off
       # here a continue is REFUSED (continue_disabled) after the gateway has already spent the
       # click, and the click is lost. Only the literal `true` turns this switch on. The same
-      # variable is read by model-gateway (from S7c-B): one coupled flip with
+      # variable is read by model-gateway (once, in continue_run): one coupled flip with
       # EXECUTION_EFFECT_LEDGER_ENABLED, EXECUTION_LOOP_CHECKPOINT_ENABLED,
       # SESSION_CORE_LOOP_CHECKPOINT_ENABLED and AGENT_CONTINUE_AFTER_APPROVAL_ENABLED (both
       # services). What a mismatch does, with the gateway's resume switch on: the executor's
