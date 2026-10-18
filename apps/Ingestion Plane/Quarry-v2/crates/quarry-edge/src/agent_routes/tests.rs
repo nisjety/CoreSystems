@@ -1726,3 +1726,135 @@ async fn a_step_on_a_released_run_carries_the_hint() {
     let rendered = serde_json::to_value(&envelope).unwrap();
     assert_eq!(rendered["error"]["details"]["resumable"], true);
 }
+
+// WS1.B: the live owner projection carries the session grant id, which the
+// Verevon BFF reads to derive AI-run grants. Without it every AI run started
+// from a live session would be refused as having no grant.
+#[test]
+fn the_live_owner_projection_carries_the_session_grant_id() {
+    let mut entry = entry_with_budget(None);
+    entry.grant_id = Some("grant-live-abc".into());
+    let json = serde_json::to_value(live_browser_session_projection(&entry, Vec::new()))
+        .expect("projection serializes");
+    assert_eq!(json["grantId"], "grant-live-abc");
+
+    entry.grant_id = None;
+    let json = serde_json::to_value(live_browser_session_projection(&entry, Vec::new()))
+        .expect("projection serializes");
+    assert!(json.get("grantId").is_none(), "{json}");
+}
+
+// The grant id is only ever served to the run's owner: another user of the
+// same organization, or a caller from another organization, gets the same
+// 404 as for an unknown run, before any projection is built.
+#[tokio::test]
+async fn the_grant_id_is_served_only_to_the_runs_owner() {
+    let state = test_state_with_static_driver();
+    let mut entry = entry_with_budget(None);
+    entry.grant_id = Some("grant-live-abc".into());
+    entry.actor_id = "user-owner".into();
+    let run_id = entry.run_id.to_string();
+    state
+        .agent_runs
+        .lock()
+        .expect("agent_runs mutex")
+        .insert(run_id.clone(), handle_for(entry));
+
+    for (org, user) in [("org", "user-other"), ("org-other", "user-owner")] {
+        let mut claims = crate::test_support::claims_for_org(org);
+        claims.sub = user.into();
+        claims.user_id = user.into();
+        claims.principal_type = Some("user".into());
+        let result = browser_session(
+            State(state.clone()),
+            Extension(claims),
+            Path(run_id.clone()),
+        )
+        .await;
+        let Err((status, Json(envelope))) = result else {
+            panic!("{org}/{user} read another user's browser session");
+        };
+        assert_eq!(status, StatusCode::NOT_FOUND, "{org}/{user}");
+        let rendered = serde_json::to_string(&envelope).expect("envelope serializes");
+        assert!(!rendered.contains("grant-live-abc"), "{rendered}");
+    }
+}
+
+fn broker_grant(owner: &str, domains: &[&str], zdr: bool) -> quarry_runtime::GrantValidation {
+    quarry_runtime::GrantValidation {
+        grant_id: "grant-1".into(),
+        active: true,
+        expires_at: None,
+        allowed_domains: domains.iter().map(|d| (*d).to_owned()).collect(),
+        allowed_actions: Vec::new(),
+        allowed_frame_ids: Vec::new(),
+        allowed_dialog_ids: Vec::new(),
+        allowed_artifact_ids: Vec::new(),
+        parent_grant_id: None,
+        kind: "session".into(),
+        owner_id: owner.into(),
+        zdr,
+    }
+}
+
+fn user_claims(user: &str) -> crate::auth::Claims {
+    let mut claims = crate::test_support::claims_for_org("org");
+    claims.sub = user.into();
+    claims.user_id = user.into();
+    claims.principal_type = Some("user".into());
+    claims
+}
+
+// Plan name (WS1.B): user_cannot_use_another_users_grant.
+#[test]
+fn user_cannot_use_another_users_grant() {
+    let grant = broker_grant("user-owner", &["example.com"], false);
+    for require in [false, true] {
+        assert_eq!(
+            bind_validated_grant(&grant, &user_claims("user-other"), require),
+            Err("browser grant belongs to another user".to_owned()),
+            "require={require}"
+        );
+        assert!(bind_validated_grant(&grant, &user_claims("user-owner"), require).is_ok());
+    }
+    // A service principal acts for the run's owner; the broker's org
+    // scoping, not the owner, bounds it.
+    assert!(
+        bind_validated_grant(&grant, &service_claims("org", "execution-core"), true).is_ok()
+    );
+    // A grant without an owner is refused to a user when grants are required.
+    let ownerless = broker_grant("", &["example.com"], false);
+    assert!(bind_validated_grant(&ownerless, &user_claims("user-owner"), true).is_err());
+    assert!(bind_validated_grant(&ownerless, &user_claims("user-owner"), false).is_ok());
+}
+
+// Plan name (WS1.B): zdr_grant_cannot_back_a_non_zdr_run.
+#[test]
+fn zdr_grant_cannot_back_a_non_zdr_run() {
+    assert!(!zdr_grant_may_back_run(true, false));
+    assert!(zdr_grant_may_back_run(true, true));
+    assert!(zdr_grant_may_back_run(false, false));
+    assert!(zdr_grant_may_back_run(false, true));
+}
+
+// Plan name (WS1.B): validated_grant_overrides_client_domains_in_every_mode.
+#[test]
+fn validated_grant_overrides_client_domains_in_every_mode() {
+    let claims = user_claims("user-owner");
+    let grant = broker_grant("user-owner", &["api.example.com", "example.org"], false);
+    for require in [false, true] {
+        assert_eq!(
+            bind_validated_grant(&grant, &claims, require),
+            Ok(Some(vec!["api.example.com".to_owned(), "example.org".to_owned()])),
+            "require={require}"
+        );
+    }
+    // A non-canonical broker policy is refused, never repaired.
+    let loose = broker_grant("user-owner", &["API.example.com"], false);
+    assert!(bind_validated_grant(&loose, &claims, false).is_err());
+    // A grant without hosts leaves the caller's constraints only when grants
+    // are not required; when they are, it is refused.
+    let hostless = broker_grant("user-owner", &[], false);
+    assert_eq!(bind_validated_grant(&hostless, &claims, false), Ok(None));
+    assert!(bind_validated_grant(&hostless, &claims, true).is_err());
+}

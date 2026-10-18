@@ -193,6 +193,9 @@ impl GrantValidator for GrpcGrantValidator {
                         allowed_artifact_ids: resp.allowed_artifact_ids,
                         parent_grant_id: (!resp.parent_grant_id.is_empty())
                             .then_some(resp.parent_grant_id),
+                        kind: resp.kind,
+                        owner_id: resp.owner_id,
+                        zdr: resp.zdr,
                     });
                 }
                 Err(status) if status.code() == tonic::Code::NotFound => {
@@ -206,6 +209,9 @@ impl GrantValidator for GrpcGrantValidator {
                         allowed_dialog_ids: Vec::new(),
                         allowed_artifact_ids: Vec::new(),
                         parent_grant_id: None,
+                        kind: String::new(),
+                        owner_id: String::new(),
+                        zdr: false,
                     });
                 }
                 Err(status) if is_transient(status.code()) => {

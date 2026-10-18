@@ -44,6 +44,16 @@ pub struct GrantValidation {
     pub allowed_artifact_ids: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_grant_id: Option<String>,
+    /// "session", "run" or "sensitive_approval"; empty from a broker that
+    /// predates grant kinds.
+    #[serde(default)]
+    pub kind: String,
+    /// The user the grant was issued to; empty from an older broker.
+    #[serde(default)]
+    pub owner_id: String,
+    /// A Zero Data Retention grant. It may only back a ZDR run.
+    #[serde(default)]
+    pub zdr: bool,
 }
 
 impl GrantValidation {
@@ -133,6 +143,9 @@ impl GrantValidator for NoopGrantValidator {
             allowed_dialog_ids: Vec::new(),
             allowed_artifact_ids: Vec::new(),
             parent_grant_id: None,
+            kind: String::new(),
+            owner_id: String::new(),
+            zdr: false,
         })
     }
 }
@@ -212,6 +225,9 @@ impl GrantValidator for HttpGrantValidator {
                 allowed_dialog_ids: Vec::new(),
                 allowed_artifact_ids: Vec::new(),
                 parent_grant_id: None,
+                kind: String::new(),
+                owner_id: String::new(),
+                zdr: false,
             });
         }
         if !status.is_success() {
@@ -251,6 +267,9 @@ mod tests {
             allowed_dialog_ids: Vec::new(),
             allowed_artifact_ids: Vec::new(),
             parent_grant_id: None,
+            kind: String::new(),
+            owner_id: String::new(),
+            zdr: false,
         };
         assert!(!g.is_usable());
     }
@@ -267,6 +286,9 @@ mod tests {
             allowed_dialog_ids: Vec::new(),
             allowed_artifact_ids: Vec::new(),
             parent_grant_id: None,
+            kind: String::new(),
+            owner_id: String::new(),
+            zdr: false,
         };
         assert!(!g.is_usable());
     }
@@ -283,6 +305,9 @@ mod tests {
             allowed_dialog_ids: Vec::new(),
             allowed_artifact_ids: Vec::new(),
             parent_grant_id: None,
+            kind: String::new(),
+            owner_id: String::new(),
+            zdr: false,
         };
         assert!(g.is_usable());
     }
@@ -299,6 +324,9 @@ mod tests {
             allowed_dialog_ids: Vec::new(),
             allowed_artifact_ids: Vec::new(),
             parent_grant_id: None,
+            kind: String::new(),
+            owner_id: String::new(),
+            zdr: false,
         };
         assert!(g.is_usable());
     }

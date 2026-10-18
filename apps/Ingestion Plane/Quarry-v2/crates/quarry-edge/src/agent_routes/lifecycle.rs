@@ -1,5 +1,44 @@
 use super::*;
 
+/// Binds a validated broker grant to the run being started (WS1.B).
+///
+/// A user principal may only start a run under a grant issued to that user
+/// (`browser grant belongs to another user`). A service principal acts for
+/// the run's owner and is held to the broker's organization scoping instead.
+/// An empty `owner_id` (a broker that predates owners, or the no-op
+/// validator) is refused only when grants are required.
+///
+/// Returns the broker's canonical hosts when they replace the caller's
+/// domains: whenever grants are required, and in every mode when the grant
+/// carries a host policy. `None` keeps the caller's constraints.
+pub(super) fn bind_validated_grant(
+    grant: &quarry_runtime::GrantValidation,
+    claims: &crate::auth::Claims,
+    require_browser_grants: bool,
+) -> Result<Option<Vec<String>>, String> {
+    if !claims.is_service() {
+        let owner = grant.owner_id.trim();
+        if owner.is_empty() {
+            if require_browser_grants {
+                return Err("browser grant belongs to another user".to_owned());
+            }
+        } else if owner != claims.actor_id() {
+            return Err("browser grant belongs to another user".to_owned());
+        }
+    }
+    if require_browser_grants || !grant.allowed_domains.is_empty() {
+        return BrowserEgressPolicy::canonical_broker_domains(&grant.allowed_domains).map(Some);
+    }
+    Ok(None)
+}
+
+/// A ZDR grant may only back a ZDR run: a run that is not ZDR would persist
+/// what the grant's owner asked never to be kept. A non-ZDR grant may back
+/// either (the run's own posture can only raise ZDR).
+pub(super) fn zdr_grant_may_back_run(grant_zdr: bool, run_zdr: bool) -> bool {
+    !grant_zdr || run_zdr
+}
+
 /// `POST /v1/agent/runs` — acquire a leased browser session for a new run.
 pub async fn start_run(
     State(state): State<AppState>,
@@ -115,6 +154,7 @@ pub async fn start_run(
             "browser grant_id is required",
         ));
     }
+    let mut grant_is_zdr = false;
     if let Some(grant_id) = grant_id.as_deref() {
         let grant = state
             .grant_validator
@@ -128,11 +168,11 @@ pub async fn start_run(
                 "browser grant is inactive or expired",
             ));
         }
-        if state.require_browser_grants {
-            let broker_domains = BrowserEgressPolicy::canonical_broker_domains(
-                &grant.allowed_domains,
-            )
-            .map_err(|reason| status_err(StatusCode::FORBIDDEN, &request_id, &reason))?;
+        grant_is_zdr = grant.zdr;
+        if let Some(broker_domains) =
+            bind_validated_grant(&grant, &claims, state.require_browser_grants)
+                .map_err(|reason| status_err(StatusCode::FORBIDDEN, &request_id, &reason))?
+        {
             if resume_checkpoint.is_some() && constraints.allowed_domains != broker_domains {
                 return Err(status_err(
                     StatusCode::FORBIDDEN,
@@ -178,6 +218,13 @@ pub async fn start_run(
         }
     };
     zdr.mark_current_span();
+    if !zdr_grant_may_back_run(grant_is_zdr, zdr.is_active()) {
+        return Err(status_err(
+            StatusCode::FORBIDDEN,
+            &request_id,
+            "a ZDR browser grant cannot back a non-ZDR run",
+        ));
+    }
     let ttl_s = constraints.max_runtime_s.unwrap_or(120);
     let viewport = normalize_viewport(
         resume_checkpoint
