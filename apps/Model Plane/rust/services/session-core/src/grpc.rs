@@ -2834,6 +2834,165 @@ mod source_scope_db_tests {
     }
 }
 
+/// The `ListToolActions` trait method itself (not only `list_tool_actions_inner`) is wired:
+/// it reads the caller's identity, refuses before any lookup and records its metrics.
+#[cfg(test)]
+mod list_tool_actions_wiring_tests {
+    use super::*;
+    use metrics::{
+        Counter, CounterFn, Gauge, Histogram, HistogramFn, Key, KeyName, Metadata, Recorder,
+        SharedString, Unit,
+    };
+    use mp_contracts::model_plane::v1::session_core_server::SessionCore;
+    use std::sync::{Arc, Mutex};
+
+    /// Every counter increment and histogram record, keyed `name{label=value,...}`.
+    #[derive(Default)]
+    struct Seen {
+        counters: Arc<Mutex<Vec<String>>>,
+        histograms: Arc<Mutex<Vec<String>>>,
+    }
+
+    struct Tap {
+        key: String,
+        into: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl CounterFn for Tap {
+        fn increment(&self, _value: u64) {
+            self.into.lock().expect("tap").push(self.key.clone());
+        }
+        fn absolute(&self, _value: u64) {}
+    }
+
+    impl HistogramFn for Tap {
+        fn record(&self, _value: f64) {
+            self.into.lock().expect("tap").push(self.key.clone());
+        }
+    }
+
+    fn rendered(key: &Key) -> String {
+        let mut labels: Vec<String> = key
+            .labels()
+            .map(|label| format!("{}={}", label.key(), label.value()))
+            .collect();
+        labels.sort();
+        format!("{}{{{}}}", key.name(), labels.join(","))
+    }
+
+    impl Recorder for Seen {
+        fn describe_counter(&self, _key: KeyName, _unit: Option<Unit>, _description: SharedString) {}
+        fn describe_gauge(&self, _key: KeyName, _unit: Option<Unit>, _description: SharedString) {}
+        fn describe_histogram(&self, _key: KeyName, _unit: Option<Unit>, _description: SharedString) {}
+        fn register_counter(&self, key: &Key, _metadata: &Metadata<'_>) -> Counter {
+            Counter::from_arc(Arc::new(Tap {
+                key: rendered(key),
+                into: Arc::clone(&self.counters),
+            }))
+        }
+        fn register_gauge(&self, _key: &Key, _metadata: &Metadata<'_>) -> Gauge {
+            Gauge::noop()
+        }
+        fn register_histogram(&self, key: &Key, _metadata: &Metadata<'_>) -> Histogram {
+            Histogram::from_arc(Arc::new(Tap {
+                key: rendered(key),
+                into: Arc::clone(&self.histograms),
+            }))
+        }
+    }
+
+    /// A service whose pool goes nowhere: every case below is refused before a lookup.
+    fn service() -> SessionService {
+        SessionService {
+            pool: sqlx::postgres::PgPoolOptions::new()
+                .acquire_timeout(std::time::Duration::from_millis(250))
+                .connect_lazy("postgresql://session-core@127.0.0.1:1/session_core")
+                .expect("lazy pool"),
+            retrieval_client: None,
+            graph_client: None,
+            knowledge_client: None,
+            letta_memory: None,
+            audit_publisher: None,
+            auth: None,
+        }
+    }
+
+    fn request(caller: Option<VerifiedIdentity>) -> Request<pb::ListToolActionsRequest> {
+        let mut request = Request::new(pb::ListToolActionsRequest {
+            run_id: "run-1".to_owned(),
+            action_ids: vec!["act-1".to_owned()],
+        });
+        if let Some(caller) = caller {
+            request.extensions_mut().insert(caller);
+        }
+        request
+    }
+
+    #[tokio::test]
+    async fn the_method_needs_a_verified_identity_and_counts_the_refusal() {
+        let seen = Seen::default();
+        let _guard = metrics::set_default_local_recorder(&seen);
+        let refused = service()
+            .list_tool_actions(request(None))
+            .await
+            .expect_err("no identity");
+        assert_eq!(refused.code(), tonic::Code::Unauthenticated);
+        let counters = seen.counters.lock().expect("counters").clone();
+        assert_eq!(
+            counters,
+            vec!["mp_session_grpc_requests_total{method=list_tool_actions,status=error}".to_owned()]
+        );
+        let histograms = seen.histograms.lock().expect("histograms").clone();
+        assert_eq!(
+            histograms,
+            vec!["mp_session_grpc_request_duration_seconds{method=list_tool_actions}".to_owned()]
+        );
+    }
+
+    #[tokio::test]
+    async fn the_method_applies_the_callers_own_refusals_before_any_lookup() {
+        let service = service();
+        // A service without the read scope.
+        let writer = VerifiedIdentity::service_for_test("org-1", &["session:write"], false);
+        assert_eq!(
+            service
+                .list_tool_actions(request(Some(writer)))
+                .await
+                .expect_err("no session:read")
+                .code(),
+            tonic::Code::PermissionDenied
+        );
+        // A zero-retention human credential: the durable-mutation refusal, never a lookup.
+        let zdr = VerifiedIdentity::user_for_test_with_zdr("org-1", "u1", true);
+        let refused = service
+            .list_tool_actions(request(Some(zdr)))
+            .await
+            .expect_err("a zdr human");
+        let closed = Refusal::DURABLE_MUTATION_FORBIDDEN.grpc_status(tonic::Code::FailedPrecondition);
+        assert_eq!((refused.code(), refused.message()), (closed.code(), closed.message()));
+    }
+
+    #[test]
+    fn the_method_reads_the_store_switch_through_the_accessor_the_checkpoint_rpcs_use() {
+        // The switch is a process environment variable, so a served call cannot assert it without
+        // racing the tests that set it. This pins that the trait method hands the same accessor's
+        // answer to the handler (whose refusal is tested with the switch passed in).
+        let source = include_str!("grpc.rs");
+        // The needles are split so this test's own text does not match them.
+        let start = source
+            .find(concat!("async fn list_tool_", "actions("))
+            .expect("the trait method");
+        let body = &source[start..];
+        let end = body
+            .find(concat!("async fn save_", "checkpoint("))
+            .expect("the next method");
+        assert!(
+            body[..end].contains(concat!("loop_checkpoint::", "enabled()")),
+            "list_tool_actions must pass loop_checkpoint::enabled() to the handler"
+        );
+    }
+}
+
 #[cfg(test)]
 mod persona_db_tests {
     use super::*;
@@ -3912,17 +4071,34 @@ pub(crate) async fn reserve_tool_action_inner(
 /// Read the effect ledger's rows for named actions of one run (build plan WS03 S7a).
 ///
 /// Everything that can refuse does so before the ledger is read: the read scope, a
-/// zero-retention credential (the ledger belongs to a run that persists), the shape of
-/// the request, and the caller's right to read the run. The rows are digest-only.
+/// zero-retention credential (the ledger belongs to a run that persists), the loop
+/// checkpoint switch (`store_enabled`, the same closed refusal the checkpoint RPCs
+/// give while the store is off, decided before any table is touched), the shape of
+/// the request, the caller's right to read the run (the same rule `GetRun` applies,
+/// including the refusal of a run whose owner was removed from its Space) and the
+/// run's retention (a run that is not `persistent` keeps no fold, so no resume needs
+/// its ledger, and it gets the refusal the claim path gives it). The rows are
+/// digest-only.
+///
+/// An action id that is absent from the answer is not evidence that the call never
+/// ran: see [`crate::tool_ledger::list_actions`].
 pub(crate) async fn list_tool_actions_inner(
     pool: &PgPool,
     caller: &VerifiedIdentity,
     req: pb::ListToolActionsRequest,
+    store_enabled: bool,
 ) -> Result<Response<pb::ListToolActionsResponse>, Status> {
     authorize_operation(caller, "session:read")?;
     refuse_zdr_continuation(caller)?;
+    if !store_enabled {
+        return Err(loop_checkpoint::disabled());
+    }
     crate::tool_ledger::validate_list_request(&req.run_id, &req.action_ids)?;
-    authorize_run_owner(pool, caller, &req.run_id, OwnerIntent::Read).await?;
+    // Not this file's `authorize_run_owner`: that one has no Space-membership check, and a
+    // user removed from a Space must not read through this RPC what `GetRun` refuses them.
+    crate::run_service_grpc::authorize_run_owner(pool, caller, &req.run_id, OwnerIntent::Read)
+        .await?;
+    crate::tool_ledger::require_persistent_run(pool, &req.run_id).await?;
     let rows =
         crate::tool_ledger::list_actions(pool, caller.org_id(), &req.run_id, &req.action_ids)
             .await?;
@@ -4947,7 +5123,13 @@ impl SessionCore for SessionService {
         let started = Instant::now();
         let result = async {
             let caller = identity(&request)?;
-            list_tool_actions_inner(&self.pool, &caller, request.into_inner()).await
+            list_tool_actions_inner(
+                &self.pool,
+                &caller,
+                request.into_inner(),
+                loop_checkpoint::enabled(),
+            )
+            .await
         }
         .await;
         record_metrics("list_tool_actions", started, result.is_ok());

@@ -75,6 +75,19 @@ service SessionCore {
   // S7a). Digest-only: the status, class and argument digest of each action, never
   // its arguments or output. The loop that resumes a run reads it to close a call
   // honestly instead of running it again.
+  //
+  // Answers only while the loop checkpoint store is switched on (otherwise the same
+  // closed "loop_checkpoint_disabled" refusal the checkpoint RPCs give), and only for a
+  // run that persists: a zero-retention or waived run never keeps a fold, so it gets the
+  // durable-mutation refusal. The caller must be allowed to read the run under the same
+  // rule as GetRun, which includes refusing a run whose owner was removed from its
+  // Space. Rows written under zero retention are never returned.
+  //
+  // ABSENCE IS NOT PROOF. An action id missing from the answer is UNKNOWN. It may never
+  // have been reserved, may be reserved by a concurrent writer that has not committed
+  // yet, or may be a row this read hides. Never read absence as "the call did not run".
+  // For an effectful call, only a row with status "not_run" (or a "completed" row with
+  // its output) licenses a re-dispatch decision.
   rpc ListToolActions(ListToolActionsRequest) returns (ListToolActionsResponse);
 
   // Replay the thread event log as a stream of Events.
@@ -1382,7 +1395,8 @@ message ListToolActionsRequest {
   string run_id = 1;
 
   // The ledger's action ids to read: at most 64, each a well-formed action id.
-  // An id the run has no row for is simply absent from the answer.
+  // An id the run has no row for (or whose row the read hides) is absent from the
+  // answer. Absence is NOT evidence that the call never ran: treat it as unknown.
   repeated string action_ids = 2;
 }
 
@@ -1408,7 +1422,9 @@ message ToolActionState {
   string closed_by = 6;
 }
 
-// The rows found, in reservation order. A run that keeps no ledger rows answers an empty list.
+// The rows found, in reservation order (ties by action id). A run that keeps no ledger
+// rows answers an empty list. An asked action id with no row here is UNKNOWN, never
+// "not run": it may be unreserved, uncommitted or hidden, and the read cannot say which.
 message ListToolActionsResponse {
   repeated ToolActionState actions = 1;
 }

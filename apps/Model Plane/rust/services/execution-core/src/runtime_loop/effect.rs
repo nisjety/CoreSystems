@@ -261,9 +261,18 @@ fn rows_from_states(
 }
 
 /// Read the ledger's rows for the named actions of a run: what the loop that resumes
-/// a run needs to close a dangling call honestly. An action with no row is absent
-/// from the map (a run that keeps no ledger rows answers an empty map). The error is
-/// the reason, for the log.
+/// a run needs to close a dangling call honestly. A run that keeps no ledger rows
+/// answers an empty map. The error is the reason, for the log.
+///
+/// # Absence is not proof
+/// An action id that is missing from the returned map is UNKNOWN, never "not run".
+/// It can mean the id was never reserved, that a concurrent writer reserved it and has
+/// not committed yet, or that the row is one the read hides (a zero-retention row, or a
+/// run that keeps no ledger). The read cannot tell these apart and this function never
+/// invents a row for an absent id. The S7b rule: an effectful call that is absent from
+/// this read is UNKNOWN and must be closed as such, never re-dispatched as "not run,
+/// safe to dispatch". Only a row with status `not_run` (or a `completed` row with its
+/// output) licenses a re-dispatch decision.
 // Called only by the in-place resume (WS03 S7b), which is itself off by default.
 #[allow(dead_code)]
 pub(crate) async fn list_actions(
@@ -272,12 +281,43 @@ pub(crate) async fn list_actions(
     run_id: &str,
     action_ids: &[String],
 ) -> Result<std::collections::BTreeMap<String, LedgerRow>, String> {
+    list_actions_with(bearer, run_id, action_ids, |request| {
+        let mut client = SessionCoreClient::new(channel.clone());
+        async move { client.list_tool_actions(request).await }
+    })
+    .await
+}
+
+/// [`list_actions`] with the RPC passed in, so the bearer, the chunking and the checks
+/// on each answer are testable without a gRPC server. `call` is given the finished
+/// request (bearer attached) of one chunk and returns the served response.
+///
+/// Each id is asked once, in the order given (a repeat is dropped before chunking, so
+/// two chunks cannot answer the same id). The read stops at the first refused or
+/// unreadable chunk: a partial map is never returned.
+#[allow(dead_code)] // S7b, through `list_actions`
+async fn list_actions_with<F, Fut>(
+    bearer: Option<&str>,
+    run_id: &str,
+    action_ids: &[String],
+    mut call: F,
+) -> Result<std::collections::BTreeMap<String, LedgerRow>, String>
+where
+    F: FnMut(tonic::Request<pb::ListToolActionsRequest>) -> Fut,
+    Fut: std::future::Future<Output = Result<tonic::Response<pb::ListToolActionsResponse>, tonic::Status>>,
+{
     if action_ids.is_empty() {
         return Ok(std::collections::BTreeMap::new());
     }
     let bearer = bearer.ok_or_else(|| "no verified session credential".to_owned())?;
+    let mut seen = std::collections::BTreeSet::new();
+    let unique: Vec<String> = action_ids
+        .iter()
+        .filter(|id| seen.insert((*id).clone()))
+        .cloned()
+        .collect();
     let mut rows = std::collections::BTreeMap::new();
-    for chunk in action_ids.chunks(LIST_ACTIONS_MAX_IDS) {
+    for chunk in unique.chunks(LIST_ACTIONS_MAX_IDS) {
         let request = super::authenticated_session_request(
             pb::ListToolActionsRequest {
                 run_id: run_id.to_owned(),
@@ -285,8 +325,7 @@ pub(crate) async fn list_actions(
             },
             bearer,
         )?;
-        let response = SessionCoreClient::new(channel.clone())
-            .list_tool_actions(request)
+        let response = call(request)
             .await
             .map_err(|status| status.message().to_owned())?
             .into_inner();
@@ -486,6 +525,175 @@ mod tests {
             .await
             .expect("nothing asked")
             .is_empty());
+    }
+
+    /// What a served `ListToolActions` saw: the authorization header, the run id and the ids.
+    type Seen = std::sync::Arc<std::sync::Mutex<Vec<(String, String, Vec<String>)>>>;
+
+    fn digest_for_tests() -> String {
+        args_digest_of(r#"{"to":"a"}"#).expect("digest")
+    }
+
+    /// Run `list_actions_with` against a served answer that is computed from each request,
+    /// and report what the server saw. No gRPC server is involved: the call is a closure.
+    async fn list_through(
+        bearer: Option<&str>,
+        ids: &[String],
+        answer: impl Fn(&[String]) -> Result<Vec<pb::ToolActionState>, tonic::Status>,
+    ) -> (
+        Result<std::collections::BTreeMap<String, LedgerRow>, String>,
+        Vec<(String, String, Vec<String>)>,
+    ) {
+        let seen: Seen = Seen::default();
+        let recorder = std::sync::Arc::clone(&seen);
+        let result = list_actions_with(bearer, "run-7", ids, |request| {
+            let header = request
+                .metadata()
+                .get("authorization")
+                .and_then(|value| value.to_str().ok())
+                .unwrap_or_default()
+                .to_owned();
+            let message = request.into_inner();
+            recorder
+                .lock()
+                .expect("seen lock")
+                .push((header, message.run_id.clone(), message.action_ids.clone()));
+            let served = answer(&message.action_ids)
+                .map(|actions| tonic::Response::new(pb::ListToolActionsResponse { actions }));
+            async move { served }
+        })
+        .await;
+        let seen = seen.lock().expect("seen lock").clone();
+        (result, seen)
+    }
+
+    fn many_ids(count: usize) -> Vec<String> {
+        (0..count).map(|index| format!("act-{index:03}")).collect()
+    }
+
+    #[tokio::test]
+    async fn the_bearer_and_the_run_are_forwarded_and_ids_go_in_chunks_of_sixty_four() {
+        let digest = digest_for_tests();
+        let ids = many_ids(130);
+        let (result, seen) = list_through(Some("tok-1"), &ids, |asked| {
+            // Answer only every other id: the others have no row.
+            Ok(asked
+                .iter()
+                .filter(|id| id.ends_with(['0', '2', '4', '6', '8']))
+                .map(|id| state(id, "completed", "write", &digest))
+                .collect())
+        })
+        .await;
+
+        let sizes: Vec<usize> = seen.iter().map(|(_, _, chunk)| chunk.len()).collect();
+        assert_eq!(sizes, vec![64, 64, 2], "every chunk is asked, none over the bound");
+        assert!(seen.iter().all(|(header, run, _)| header == "Bearer tok-1" && run == "run-7"));
+        let asked: Vec<String> = seen.iter().flat_map(|(_, _, chunk)| chunk.clone()).collect();
+        assert_eq!(asked, ids, "every id is asked once, in order");
+
+        let rows = result.expect("merged answer");
+        assert_eq!(rows.len(), 65, "rows from all three chunks are merged");
+        assert!(rows.contains_key("act-000") && rows.contains_key("act-128"));
+        assert!(!rows.contains_key("act-001"), "an id with no row stays absent");
+    }
+
+    #[tokio::test]
+    async fn an_absent_id_stays_absent_and_is_never_reported_as_a_row() {
+        // Absence is not evidence that the call never ran: the id may never have been reserved, may be
+        // reserved by a writer that has not committed, or may be a row hidden from this read. The map
+        // therefore has no entry for it, and S7b must treat a missing entry as UNKNOWN for an effectful call.
+        let digest = digest_for_tests();
+        let ids = vec!["act-a".to_owned(), "act-b".to_owned()];
+        let (result, _) = list_through(Some("tok-1"), &ids, |_| {
+            Ok(vec![state("act-a", "not_run", "external", &digest)])
+        })
+        .await;
+        let rows = result.expect("answer");
+        assert_eq!(rows.keys().map(String::as_str).collect::<Vec<_>>(), vec!["act-a"]);
+        assert!(rows.get("act-b").is_none(), "the absent id is not in the map");
+        assert_eq!(rows["act-a"].status, mp_contracts::loop_fold::LedgerStatus::NotRun);
+
+        // An answer with no rows at all is an empty map, never a map of invented rows.
+        let (empty, _) = list_through(Some("tok-1"), &ids, |_| Ok(Vec::new())).await;
+        assert!(empty.expect("empty answer").is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_row_for_an_id_asked_in_another_chunk_is_not_the_answer_to_this_chunk() {
+        let digest = digest_for_tests();
+        let ids = many_ids(70);
+        // The first chunk answers with an id that was only asked in the second chunk.
+        let (result, seen) = list_through(Some("tok-1"), &ids, |asked| {
+            if asked.first().map(String::as_str) == Some("act-000") {
+                Ok(vec![state("act-069", "completed", "write", &digest)])
+            } else {
+                Ok(Vec::new())
+            }
+        })
+        .await;
+        assert_eq!(
+            result.expect_err("an id of another chunk"),
+            "the ledger answered an action that was not asked"
+        );
+        assert_eq!(seen.len(), 1, "a refused chunk ends the read: nothing further is asked");
+    }
+
+    #[tokio::test]
+    async fn an_unknown_status_or_class_and_a_duplicate_answer_are_errors() {
+        let digest = digest_for_tests();
+        let ids = vec!["act-a".to_owned()];
+        for (bad, why) in [
+            (state("act-a", "pending", "write", &digest), "unknown status"),
+            (state("act-a", "completed", "destructive", &digest), "unknown class"),
+            (state("act-a", "completed", "write", "nope"), "malformed digest"),
+        ] {
+            let (result, _) = list_through(Some("tok-1"), &ids, |_| Ok(vec![bad.clone()])).await;
+            assert!(result.is_err(), "{why}");
+        }
+        let (duplicate, _) = list_through(Some("tok-1"), &ids, |_| {
+            Ok(vec![
+                state("act-a", "completed", "write", &digest),
+                state("act-a", "completed", "write", &digest),
+            ])
+        })
+        .await;
+        assert_eq!(duplicate.expect_err("one id twice"), "the ledger answered one action twice");
+    }
+
+    #[tokio::test]
+    async fn an_id_named_twice_is_asked_once_so_two_chunks_cannot_answer_it_twice() {
+        let digest = digest_for_tests();
+        let mut ids = many_ids(64);
+        ids.push("act-000".to_owned());
+        let (result, seen) = list_through(Some("tok-1"), &ids, |asked| {
+            Ok(asked
+                .iter()
+                .map(|id| state(id, "completed", "write", &digest))
+                .collect())
+        })
+        .await;
+        assert_eq!(seen.len(), 1, "the repeat is dropped before chunking");
+        assert_eq!(result.expect("answer").len(), 64);
+    }
+
+    #[tokio::test]
+    async fn a_refused_call_is_the_servers_reason_and_an_empty_list_asks_nothing() {
+        let ids = many_ids(3);
+        let (refused, seen) = list_through(Some("tok-1"), &ids, |_| {
+            Err(tonic::Status::failed_precondition("loop_checkpoint_disabled"))
+        })
+        .await;
+        assert_eq!(refused.expect_err("refused"), "loop_checkpoint_disabled");
+        assert_eq!(seen.len(), 1);
+
+        let (none, seen) = list_through(Some("tok-1"), &[], |_| panic!("nothing was asked")).await;
+        assert!(none.expect("nothing asked").is_empty());
+        assert!(seen.is_empty(), "an empty id list makes no call");
+
+        // No credential: the error is the plumbing's, and no call is made.
+        let (no_bearer, seen) = list_through(None, &ids, |_| panic!("no credential")).await;
+        assert_eq!(no_bearer.expect_err("no credential"), "no verified session credential");
+        assert!(seen.is_empty());
     }
 
     #[test]

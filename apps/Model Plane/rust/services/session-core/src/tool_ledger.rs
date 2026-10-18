@@ -13,8 +13,9 @@
 use std::time::Duration;
 
 use anyhow::Result;
+use mp_contracts::zdr_refusal::Refusal;
 use sqlx::PgPool;
-use tonic::Status;
+use tonic::{Code, Status};
 
 const ENABLED_ENV: &str = "SESSION_CORE_TOOL_LEDGER_SWEEP_ENABLED";
 
@@ -134,12 +135,42 @@ pub(crate) fn validate_list_request(run_id: &str, action_ids: &[String]) -> Resu
     Ok(())
 }
 
-/// The ledger rows of `run_id` for the named actions, in reservation order.
+/// Refuse a run that is not `persistent`. A zero-retention or waived run never keeps a
+/// fold, so no resume needs its ledger, and the refusal is the closed durable-mutation
+/// refusal the claim path gives such a run. A run that does not exist is `not_found`.
+/// Run after the caller has been authorised to read the run, so a caller who may not
+/// read it learns nothing about its retention.
+pub(crate) async fn require_persistent_run(pool: &PgPool, run_id: &str) -> Result<(), Status> {
+    let retention: Option<String> =
+        sqlx::query_scalar("SELECT retention_class FROM runs WHERE id = $1")
+            .bind(run_id)
+            .fetch_optional(pool)
+            .await
+            .map_err(internal)?;
+    match retention.as_deref() {
+        None => Err(Status::not_found("run not found")),
+        Some("persistent") => Ok(()),
+        Some(_) => Err(Refusal::DURABLE_MUTATION_FORBIDDEN.grpc_status(Code::FailedPrecondition)),
+    }
+}
+
+/// The ledger rows of `run_id` for the named actions, in reservation order (ties by
+/// action id).
 ///
 /// Scoped to `org_id` and to the run: an action id of another run or another org
-/// is never answered. A row a zero-retention call wrote is left out, and an id with
-/// no row is absent, so a run that keeps no ledger rows answers an empty list. The
-/// caller has already been authorised to read the run.
+/// is never answered. Only a `persistent` run is answered. A row a zero-retention
+/// call wrote is left out, so a run that keeps no ledger rows answers an empty list.
+/// The caller has already been authorised to read the run.
+///
+/// # Absence is not proof
+/// An action id with no row in the answer is UNKNOWN, never "not run". It can mean the
+/// id was never reserved, that a concurrent writer reserved it and has not committed
+/// (this is one autocommit read, with nothing that fences a live executor), or that the
+/// row is one this read hides (a zero-retention row, or a run that is not `persistent`).
+/// The read cannot tell these apart, and it never reports an absent id as a row. The S7b
+/// rule: an effectful call absent from this read is UNKNOWN and is closed as such, never
+/// re-dispatched as "not run, safe to dispatch"; only a row with status `not_run` (or a
+/// `completed` row with its output) licenses a re-dispatch decision.
 pub(crate) async fn list_actions(
     pool: &PgPool,
     org_id: &str,
@@ -157,6 +188,7 @@ pub(crate) async fn list_actions(
                JOIN runs r ON r.id = i.run_id
               WHERE i.run_id = $1
                 AND r.org_id = $2
+                AND r.retention_class = 'persistent'
                 AND i.action_id = ANY($3)
                 AND NOT i.zdr
               ORDER BY i.reserved_at, i.action_id",
@@ -319,7 +351,7 @@ mod tests {
         // A zero-retention credential reads no ledger: the ledger belongs to a run that persists.
         let zdr = VerifiedIdentity::user_for_test_with_zdr("org-1", "u1", true);
         assert_eq!(
-            list_tool_actions_inner(&pool, &zdr, list_request("run-1", 1))
+            list_tool_actions_inner(&pool, &zdr, list_request("run-1", 1), true)
                 .await
                 .expect_err("a zdr caller")
                 .code(),
@@ -329,7 +361,7 @@ mod tests {
         // is not refused here; the rows a zero-retention call wrote are left out of the answer.
         let zdr_service = VerifiedIdentity::service_for_test("org-1", &["session:read"], true);
         assert_eq!(
-            list_tool_actions_inner(&pool, &zdr_service, list_request("run-1", 1))
+            list_tool_actions_inner(&pool, &zdr_service, list_request("run-1", 1), true)
                 .await
                 .expect_err("there is no database behind this pool")
                 .code(),
@@ -339,7 +371,7 @@ mod tests {
         // A service needs the read scope; the write scope is not a read allowance.
         let writer = VerifiedIdentity::service_for_test("org-1", &["session:write"], false);
         assert_eq!(
-            list_tool_actions_inner(&pool, &writer, list_request("run-1", 1))
+            list_tool_actions_inner(&pool, &writer, list_request("run-1", 1), true)
                 .await
                 .expect_err("no session:read")
                 .code(),
@@ -349,14 +381,14 @@ mod tests {
         // An oversized or malformed request is refused before the run is even looked up.
         let owner = VerifiedIdentity::user_for_test("org-1", "u1");
         assert_eq!(
-            list_tool_actions_inner(&pool, &owner, list_request("run-1", MAX_LIST_ACTION_IDS + 1))
+            list_tool_actions_inner(&pool, &owner, list_request("run-1", MAX_LIST_ACTION_IDS + 1), true)
                 .await
                 .expect_err("65 ids")
                 .code(),
             tonic::Code::InvalidArgument
         );
         assert_eq!(
-            list_tool_actions_inner(&pool, &owner, list_request(" ", 1))
+            list_tool_actions_inner(&pool, &owner, list_request(" ", 1), true)
                 .await
                 .expect_err("bad run id")
                 .code(),
@@ -364,10 +396,57 @@ mod tests {
         );
 
         // A valid request from a permitted caller does reach the run-owner lookup.
-        let reached = list_tool_actions_inner(&pool, &owner, list_request("run-1", 1))
+        let reached = list_tool_actions_inner(&pool, &owner, list_request("run-1", 1), true)
             .await
             .expect_err("there is no database behind this pool");
         assert_eq!(reached.code(), tonic::Code::Internal, "{reached:?}");
+    }
+
+    #[tokio::test]
+    async fn with_the_store_off_the_read_answers_the_closed_disabled_refusal_and_touches_no_table() {
+        use crate::auth::VerifiedIdentity;
+        use crate::grpc::list_tool_actions_inner;
+        // A pool that never answers: anything but the closed refusal would be a pool timeout
+        // (Internal) or a validation error, so the refusal was decided before any lookup.
+        let (_silent_database, pool) = silent_pool();
+        let disabled = crate::loop_checkpoint::disabled();
+        let owner = VerifiedIdentity::user_for_test("org-1", "u1");
+        let service = VerifiedIdentity::service_for_test("org-1", &["session:read"], false);
+        let zdr_service = VerifiedIdentity::service_for_test("org-1", &["session:read"], true);
+        for (who, caller) in [("owner", &owner), ("service", &service), ("zdr service", &zdr_service)] {
+            for request in [
+                list_request("run-1", 1),
+                // Not even a malformed request is looked at while the store is off.
+                list_request("run-1", MAX_LIST_ACTION_IDS + 1),
+                list_request(" ", 1),
+                list_request("run-1", 0),
+            ] {
+                let refusal = list_tool_actions_inner(&pool, caller, request, false)
+                    .await
+                    .expect_err("the store is off");
+                assert_eq!(refusal.code(), disabled.code(), "{who}");
+                assert_eq!(refusal.message(), disabled.message(), "{who}");
+                assert_eq!(refusal.message(), "loop_checkpoint_disabled");
+            }
+        }
+        // The caller's own refusals still come first: a missing scope or a ZDR credential
+        // learns nothing about the store, and a switch-on read is unchanged.
+        let writer = VerifiedIdentity::service_for_test("org-1", &["session:write"], false);
+        assert_eq!(
+            list_tool_actions_inner(&pool, &writer, list_request("run-1", 1), false)
+                .await
+                .expect_err("no session:read")
+                .code(),
+            tonic::Code::PermissionDenied
+        );
+        let zdr_human = VerifiedIdentity::user_for_test_with_zdr("org-1", "u1", true);
+        assert_ne!(
+            list_tool_actions_inner(&pool, &zdr_human, list_request("run-1", 1), false)
+                .await
+                .expect_err("a zdr human")
+                .message(),
+            disabled.message()
+        );
     }
 
     /// The database-backed tests need a scratch database. Run them with
@@ -677,6 +756,8 @@ mod tests {
             run_id: &str,
             action_ids: &[&str],
         ) -> Result<Vec<pb::ToolActionState>, tonic::Status> {
+            // The rows come back exactly as the server ordered them: a test that wants a
+            // sorted view sorts for itself, so an ordering bug is never hidden here.
             crate::grpc::list_tool_actions_inner(
                 pool,
                 caller,
@@ -684,13 +765,78 @@ mod tests {
                     run_id: run_id.to_owned(),
                     action_ids: action_ids.iter().map(|id| (*id).to_owned()).collect(),
                 },
+                true,
             )
             .await
-            .map(|response| {
-                let mut actions = response.into_inner().actions;
-                actions.sort_by(|a, b| a.action_id.cmp(&b.action_id));
-                actions
-            })
+            .map(|response| response.into_inner().actions)
+        }
+
+        /// A queued run in `retention` (a waived run names its acknowledgement and connection,
+        /// as the table requires); returns the run id.
+        async fn seed_run_retained(pool: &PgPool, retention: &str) -> String {
+            // The receipt columns are immutable once written, so the run is inserted under its class.
+            let sfx = mp_ids::new_ulid();
+            let (thread_id, run_id, org) = (
+                format!("tl-t-{sfx}"),
+                format!("tl-r-{sfx}"),
+                format!("tl-org-{sfx}"),
+            );
+            sqlx::query("INSERT INTO threads (id,session_key,org_id,user_id) VALUES ($1,$1,$2,'u1')")
+                .bind(&thread_id)
+                .bind(&org)
+                .execute(pool)
+                .await
+                .expect("seed thread");
+            let (waiver_ack, waiver_connection) = if retention == "zdr_waived" {
+                (Some("ack-1"), Some("conn-1"))
+            } else {
+                (None, None)
+            };
+            sqlx::query(
+                "INSERT INTO runs (id,thread_id,goal,org_id,user_id,status,retention_class,waiver_ack_id,waiver_connection_id)
+                 VALUES ($1,$2,'g',$3,'u1','queued',$4,$5,$6)",
+            )
+            .bind(&run_id)
+            .bind(&thread_id)
+            .bind(&org)
+            .bind(retention)
+            .bind(waiver_ack)
+            .bind(waiver_connection)
+            .execute(pool)
+            .await
+            .expect("seed run");
+            run_id
+        }
+
+        /// Place a run inside a Space, with the authority context the table requires.
+        async fn put_run_in_space(pool: &PgPool, run_id: &str, space_ref: &str) {
+            sqlx::query(
+                "UPDATE runs SET space_id = $2, space_decision_ref = 'decision-1',
+                        recipient_audience_ref = 'audience-1', privacy_policy_ref = 'policy-1',
+                        resource_authorization_ref = 'resource-1', authority_revision = 1,
+                        recipient_audience_revision = 1, recipient_audience_hash = 'audience-hash-1'
+                  WHERE id = $1",
+            )
+            .bind(run_id)
+            .bind(space_ref)
+            .execute(pool)
+            .await
+            .expect("put the run in a Space");
+        }
+
+        /// Give a reservation a fixed reservation time, `seconds_ago` before now.
+        async fn reserved_at_seconds_ago(pool: &PgPool, run_id: &str, action_id: &str, seconds_ago: i32) {
+            sqlx::query(
+                "UPDATE session_tool_audit_intents
+                    SET reserved_at = now() - make_interval(secs => $3)
+                  WHERE run_id = $1 AND action_id = $2",
+            )
+            .bind(run_id)
+            .bind(action_id)
+            .bind(f64::from(seconds_ago))
+            .execute(pool)
+            .await
+            .expect("pin reserved_at");
         }
 
         #[tokio::test]
@@ -731,7 +877,10 @@ mod tests {
             reserve_tool_action_inner(&pool, None, zdr).await.expect("reserve");
 
             let asked = ["tl-a-done", "tl-a-open", "tl-a-bare", "tl-a-zdr", "tl-a-never-reserved"];
-            let rows = list(&pool, &owner, &run_id, &asked).await.expect("list");
+            let mut rows = list(&pool, &owner, &run_id, &asked).await.expect("list");
+            // This test is about the content of the rows; the order is pinned by
+            // `rows_come_back_in_reservation_order_with_ties_by_action_id`.
+            rows.sort_by(|a, b| a.action_id.cmp(&b.action_id));
             let summary: Vec<(&str, &str, &str, &str, &str, &str)> = rows
                 .iter()
                 .map(|row| {
@@ -826,6 +975,237 @@ mod tests {
             // A service in the org with the read scope may read it, as it may read the run.
             let service = crate::auth::VerifiedIdentity::service_for_test(&org, &["session:read"], false);
             assert_eq!(list(&pool, &service, &run_id, &["tl-a-mine"]).await.expect("service").len(), 1);
+        }
+
+        #[tokio::test]
+        #[ignore = "requires DATABASE_URL to a scratch Postgres"]
+        async fn rows_come_back_in_reservation_order_with_ties_by_action_id() {
+            let Some(pool) = scratch_pool().await else { return };
+            let run_id = seed_run(&pool, "queued").await;
+            let org = org_of(&pool, &run_id).await;
+            let owner = crate::auth::VerifiedIdentity::user_for_test(&org, "u1");
+
+            // Reserved in id order (a, m, z, t1, t2), but their reservation times run the other
+            // way, so neither insertion order nor action-id order can produce the expected answer.
+            for id in ["tl-a-a", "tl-a-m", "tl-a-z", "tl-a-t2", "tl-a-t1"] {
+                reserve_tool_action_inner(&pool, None, reservation(&run_id, id, "", "write"))
+                    .await
+                    .expect("reserve");
+            }
+            reserved_at_seconds_ago(&pool, &run_id, "tl-a-z", 500).await;
+            reserved_at_seconds_ago(&pool, &run_id, "tl-a-m", 400).await;
+            reserved_at_seconds_ago(&pool, &run_id, "tl-a-a", 300).await;
+            // Two rows with the very same reservation time are ordered by action id.
+            sqlx::query(
+                "UPDATE session_tool_audit_intents
+                    SET reserved_at = now() - interval '100 seconds'
+                  WHERE run_id = $1 AND action_id IN ('tl-a-t1', 'tl-a-t2')",
+            )
+            .bind(&run_id)
+            .execute(&pool)
+            .await
+            .expect("tie the times");
+
+            // The order of the ids in the request does not matter either.
+            let asked = ["tl-a-t2", "tl-a-a", "tl-a-z", "tl-a-t1", "tl-a-m"];
+            let rows = list(&pool, &owner, &run_id, &asked).await.expect("list");
+            assert_eq!(
+                rows.iter().map(|row| row.action_id.as_str()).collect::<Vec<_>>(),
+                vec!["tl-a-z", "tl-a-m", "tl-a-a", "tl-a-t1", "tl-a-t2"]
+            );
+        }
+
+        #[tokio::test]
+        #[ignore = "requires DATABASE_URL to a scratch Postgres"]
+        async fn every_status_and_closer_a_resume_reads_crosses_the_wire_unchanged() {
+            let Some(pool) = scratch_pool().await else { return };
+            let run_id = seed_run(&pool, "queued").await;
+            let org = org_of(&pool, &run_id).await;
+            let owner = crate::auth::VerifiedIdentity::user_for_test(&org, "u1");
+            let finalize = |action_id: &str, outcome: &str| pb::FinalizeToolActionRequest {
+                run_id: run_id.clone(),
+                action_id: action_id.to_owned(),
+                outcome: outcome.to_owned(),
+                receipt_id: String::new(),
+            };
+
+            for (id, class) in [
+                ("tl-a-1-completed", "write"),
+                ("tl-a-2-failed", "write"),
+                ("tl-a-3-not-run", "external"),
+                ("tl-a-4-unknown", "external"),
+                ("tl-a-5-swept", "external"),
+                ("tl-a-6-read", "read"),
+            ] {
+                reserve_tool_action_inner(&pool, None, reservation(&run_id, id, "", class))
+                    .await
+                    .expect("reserve");
+            }
+            for (id, outcome) in [
+                ("tl-a-1-completed", "completed"),
+                ("tl-a-2-failed", "failed"),
+                ("tl-a-3-not-run", "not_run"),
+                ("tl-a-4-unknown", "unknown_outcome"),
+            ] {
+                finalize_tool_action_inner(&pool, None, finalize(id, outcome))
+                    .await
+                    .expect("finalize");
+            }
+            // The read-class row is finalized by the executor too; only the swept row is left
+            // open for the sweep, which closes a reservation of a run that has ended.
+            finalize_tool_action_inner(&pool, None, finalize("tl-a-6-read", "completed"))
+                .await
+                .expect("finalize");
+            sqlx::query("UPDATE runs SET status = 'failed' WHERE id = $1")
+                .bind(&run_id)
+                .execute(&pool)
+                .await
+                .expect("end the run");
+            assert!(sweep_once(&pool, 0.0).await.expect("sweep") >= 1);
+
+            let asked = [
+                "tl-a-1-completed",
+                "tl-a-2-failed",
+                "tl-a-3-not-run",
+                "tl-a-4-unknown",
+                "tl-a-5-swept",
+                "tl-a-6-read",
+            ];
+            let mut rows = list(&pool, &owner, &run_id, &asked).await.expect("list");
+            rows.sort_by(|a, b| a.action_id.cmp(&b.action_id));
+            let wire: Vec<(&str, &str, &str, &str)> = rows
+                .iter()
+                .map(|row| {
+                    (
+                        row.action_id.as_str(),
+                        row.status.as_str(),
+                        row.effect_class.as_str(),
+                        row.closed_by.as_str(),
+                    )
+                })
+                .collect();
+            assert_eq!(
+                wire,
+                vec![
+                    ("tl-a-1-completed", "completed", "write", "executor"),
+                    ("tl-a-2-failed", "failed", "write", "executor"),
+                    ("tl-a-3-not-run", "not_run", "external", "executor"),
+                    ("tl-a-4-unknown", "unknown_outcome", "external", "executor"),
+                    ("tl-a-5-swept", "unknown_outcome", "external", "sweep"),
+                    ("tl-a-6-read", "completed", "read", "executor"),
+                ]
+            );
+        }
+
+        #[tokio::test]
+        #[ignore = "requires DATABASE_URL to a scratch Postgres"]
+        async fn the_query_itself_is_scoped_to_the_org_and_the_run() {
+            let Some(pool) = scratch_pool().await else { return };
+            let run_id = seed_run(&pool, "queued").await;
+            let other_run = seed_run(&pool, "queued").await;
+            let org = org_of(&pool, &run_id).await;
+            reserve_tool_action_inner(&pool, None, reservation(&run_id, "tl-a-mine", "", "write"))
+                .await
+                .expect("reserve");
+            let ids = vec!["tl-a-mine".to_owned()];
+
+            // Called directly, past every caller check: the join on the run's org and the run id
+            // are what keep another org's caller, or another run, from being answered.
+            let mine = list_actions(&pool, &org, &run_id, &ids).await.expect("own org");
+            assert_eq!(mine.len(), 1);
+            assert!(list_actions(&pool, "another-org", &run_id, &ids)
+                .await
+                .expect("another org")
+                .is_empty());
+            assert!(list_actions(&pool, &org, &other_run, &ids)
+                .await
+                .expect("another run")
+                .is_empty());
+        }
+
+        #[tokio::test]
+        #[ignore = "requires DATABASE_URL to a scratch Postgres"]
+        async fn a_member_removed_from_the_runs_space_cannot_read_its_ledger() {
+            let Some(pool) = scratch_pool().await else { return };
+            let run_id = seed_run(&pool, "queued").await;
+            let org = org_of(&pool, &run_id).await;
+            let space_ref = format!("tl-space-{}", mp_ids::new_ulid());
+            put_run_in_space(&pool, &run_id, &space_ref).await;
+            reserve_tool_action_inner(&pool, None, reservation(&run_id, "tl-a-mine", "", "write"))
+                .await
+                .expect("reserve");
+            let owner = crate::auth::VerifiedIdentity::user_for_test(&org, "u1");
+            let service = crate::auth::VerifiedIdentity::service_for_test(&org, &["session:read"], false);
+
+            // Before any revocation the owner reads the ledger, as it reads the run.
+            assert_eq!(list(&pool, &owner, &run_id, &["tl-a-mine"]).await.expect("member").len(), 1);
+
+            sqlx::query(
+                "INSERT INTO space_membership_revocations (space_ref, org_id, subject_id) VALUES ($1, $2, 'u1')
+                 ON CONFLICT (space_ref, subject_id) DO UPDATE SET revoked_at = NOW()",
+            )
+            .bind(&space_ref)
+            .bind(&org)
+            .execute(&pool)
+            .await
+            .expect("revoke");
+            // The same rule as GetRun: the removed owner is refused, and so is a service reading
+            // a run whose owner has been removed.
+            for (who, caller) in [("owner", &owner), ("service", &service)] {
+                let refused = list(&pool, caller, &run_id, &["tl-a-mine"])
+                    .await
+                    .expect_err("a removed member's run is not readable");
+                assert_eq!(refused.code(), tonic::Code::PermissionDenied, "{who}");
+                assert_eq!(refused.message(), "Space membership required for this run", "{who}");
+            }
+
+            // A rejoin clears the revocation and the read is restored.
+            sqlx::query("DELETE FROM space_membership_revocations WHERE space_ref = $1 AND subject_id = 'u1'")
+                .bind(&space_ref)
+                .execute(&pool)
+                .await
+                .expect("rejoin");
+            assert_eq!(list(&pool, &owner, &run_id, &["tl-a-mine"]).await.expect("rejoined").len(), 1);
+        }
+
+        #[tokio::test]
+        #[ignore = "requires DATABASE_URL to a scratch Postgres"]
+        async fn a_run_that_does_not_persist_keeps_no_readable_ledger() {
+            let Some(pool) = scratch_pool().await else { return };
+            let closed = Refusal::DURABLE_MUTATION_FORBIDDEN.grpc_status(tonic::Code::FailedPrecondition);
+
+            // A persistent run reads normally.
+            let persistent = seed_run_retained(&pool, "persistent").await;
+            let org = org_of(&pool, &persistent).await;
+            let owner = crate::auth::VerifiedIdentity::user_for_test(&org, "u1");
+            reserve_tool_action_inner(&pool, None, reservation(&persistent, "tl-a-mine", "", "write"))
+                .await
+                .expect("reserve");
+            assert_eq!(list(&pool, &owner, &persistent, &["tl-a-mine"]).await.expect("persistent").len(), 1);
+
+            // A zero-retention run and a waived run each answer the closed refusal the claim path
+            // gives them, even to their own owner, though a waived run's rows are not zdr rows.
+            for retention in ["zdr", "zdr_waived"] {
+                let run_id = seed_run_retained(&pool, retention).await;
+                let org = org_of(&pool, &run_id).await;
+                let owner = crate::auth::VerifiedIdentity::user_for_test(&org, "u1");
+                reserve_tool_action_inner(&pool, None, reservation(&run_id, "tl-a-mine", "", "write"))
+                    .await
+                    .expect("reserve");
+                let refused = list(&pool, &owner, &run_id, &["tl-a-mine"])
+                    .await
+                    .expect_err(retention);
+                assert_eq!(refused.code(), closed.code(), "{retention}");
+                assert_eq!(refused.message(), closed.message(), "{retention}");
+                // The query is closed on its own account too: it answers nothing for such a run.
+                assert!(
+                    list_actions(&pool, &org, &run_id, &["tl-a-mine".to_owned()])
+                        .await
+                        .expect("direct read")
+                        .is_empty(),
+                    "{retention}"
+                );
+            }
         }
     }
 }

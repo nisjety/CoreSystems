@@ -43,7 +43,7 @@ use crate::orchestration_grpc::json_to_struct;
 /// `space_membership_revocations` (migration 0032, populated by
 /// `space_membership_nats.rs`). A row with a null `space_id` never matches
 /// the revocation join, so unscoped runs/threads are unaffected.
-async fn authorize_run_owner(
+pub(crate) async fn authorize_run_owner(
     pool: &PgPool,
     caller: &VerifiedIdentity,
     run_id: &str,
