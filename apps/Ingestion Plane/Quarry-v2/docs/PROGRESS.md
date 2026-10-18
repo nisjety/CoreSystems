@@ -213,7 +213,7 @@ Firecrawl self-hosting explicitly lacks the full managed Fire Engine advantage. 
 | `quarry-runtime` publisher wiremock  | 1     | ✅     |
 | `quarry-edge` sse_stream             | 1     | ✅     |
 | `control/internal/dispatcher` Go     | 7     | ✅     |
-| `quarry-edge` cache_policy           | 4     | ✅ (requires REDIS_URL) |
+| `quarry-edge` cache_policy           | 8     | Needs a live Redis at REDIS_URL. Without one each case prints a skip and passes, and CI has no Redis, so CI runs none of its assertions |
 | `quarry-browser` (pool + browserless + session/profiles) | 21 | ✅     |
 | `quarry-transform::readability` unit | 4     | ✅ added 2026-04-29 |
 | `quarry-transform::diff` unit (semantic) | 6 | ✅ added 2026-04-29 |
