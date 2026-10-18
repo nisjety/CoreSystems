@@ -12,7 +12,7 @@
 //! `SESSION_CORE_LOOP_CHECKPOINT_ENABLED` is `true`.
 
 use chrono::{DateTime, Utc};
-use mp_contracts::loop_fold::{LoopFoldV1, FOLD_VERSION};
+use mp_contracts::loop_fold::{LoopFoldV1, ParkReason, FOLD_VERSION};
 use mp_contracts::zdr_refusal::Refusal;
 use mp_events::idempotency::derive_idempotency_hash;
 use mp_ids::new_ulid;
@@ -28,9 +28,6 @@ pub(crate) const MAX_FOLD_BYTES: usize = 4 * 1024 * 1024;
 
 /// A claim holds a pause for this many seconds before another continuation may take it.
 const CLAIM_LEASE_SECONDS: f64 = 120.0;
-
-/// An active row not written for this many seconds belongs to a loop that stopped.
-const STALE_ACTIVE_SECONDS: f64 = 900.0;
 
 const ENABLED_ENV: &str = "SESSION_CORE_LOOP_CHECKPOINT_ENABLED";
 const CHECKPOINT_RESTORED_TYPE_URL: &str = "type.googleapis.com/model_plane.v1.CheckpointRestored";
@@ -77,24 +74,50 @@ pub(crate) fn check_fold(run_id: &str, bytes: &[u8]) -> Result<LoopFoldV1, Statu
     Ok(fold)
 }
 
+/// The run a fold belongs to, as read under the run row's lock.
+struct RunOwner {
+    org_id: String,
+    user_id: String,
+    status: String,
+}
+
+/// Whether a run status can no longer change. A run in one of these never resumes.
+fn ended(status: &str) -> bool {
+    matches!(status, "completed" | "failed" | "cancelled")
+}
+
+/// The refusal for a write or claim on a run that has ended. Closed token: the
+/// loop that receives it must stop writing, not retry.
+fn run_ended() -> Status {
+    Status::failed_precondition("loop_checkpoint_run_ended")
+}
+
 /// Lock the run and return its owner. A run that is not `persistent` never keeps a
 /// fold, so its refusal is the durable-mutation refusal the rest of session-core uses.
+///
+/// The `FOR UPDATE` on the runs row serialises this against every terminal status
+/// write, and the lock order (runs row, then fold row) matches the purge order.
 async fn run_owner_tx(
     tx: &mut Transaction<'_, Postgres>,
     run_id: &str,
-) -> Result<(String, String), Status> {
-    let row: Option<(String, String, String)> = sqlx::query_as(
-        "SELECT org_id, user_id, retention_class FROM runs WHERE id = $1 FOR UPDATE",
+) -> Result<RunOwner, Status> {
+    let row: Option<(String, String, String, String)> = sqlx::query_as(
+        "SELECT org_id, user_id, retention_class, status FROM runs WHERE id = $1 FOR UPDATE",
     )
     .bind(run_id)
     .fetch_optional(&mut **tx)
     .await
     .map_err(internal)?;
-    let (org_id, user_id, retention) = row.ok_or_else(|| Status::not_found("run not found"))?;
+    let (org_id, user_id, retention, status) =
+        row.ok_or_else(|| Status::not_found("run not found"))?;
     if retention != "persistent" {
         return Err(Refusal::DURABLE_MUTATION_FORBIDDEN.grpc_status(Code::FailedPrecondition));
     }
-    Ok((org_id, user_id))
+    Ok(RunOwner {
+        org_id,
+        user_id,
+        status,
+    })
 }
 
 /// Write a content-free audit event for a fold, in the caller's transaction.
@@ -177,10 +200,14 @@ pub(crate) async fn save(
                     "a park needs its reference, reason and resume time",
                 ));
             }
+            // The reason is one closed token, never free text: it reaches the
+            // run's read model and must not carry content.
+            let reason = ParkReason::parse(input.park_reason)
+                .ok_or_else(|| Status::invalid_argument("park reason is not recognised"))?;
             (
                 "parked",
                 Some(input.pause_ref),
-                Some(input.park_reason),
+                Some(reason.as_str()),
                 input.park_until,
             )
         }
@@ -188,7 +215,11 @@ pub(crate) async fn save(
     };
 
     let mut tx = pool.begin().await.map_err(internal)?;
-    let (org_id, user_id) = run_owner_tx(&mut tx, input.run_id).await?;
+    let owner = run_owner_tx(&mut tx, input.run_id).await?;
+    if ended(&owner.status) {
+        return Err(run_ended());
+    }
+    let (org_id, user_id) = (owner.org_id, owner.user_id);
     let current: Option<(i64, String)> = sqlx::query_as(
         "SELECT seq, state FROM run_loop_checkpoints WHERE run_id = $1 FOR UPDATE",
     )
@@ -285,8 +316,15 @@ pub(crate) async fn claim(
     }
     let token_hash = sha256_hex(claim_token.as_bytes());
     let mut tx = pool.begin().await.map_err(internal)?;
-    let (org_id, user_id) = run_owner_tx(&mut tx, run_id).await?;
+    let owner = run_owner_tx(&mut tx, run_id).await?;
+    if ended(&owner.status) {
+        return Err(run_ended());
+    }
+    let (org_id, user_id) = (owner.org_id, owner.user_id);
 
+    // Claimable: a paused or parked fold, or a resuming fold whose lease lapsed.
+    // An `active` fold is never claimable: its loop may still be running, and only
+    // a worker that parks it after a crash makes it resumable.
     let row: Option<(i64, String, i32, String, String)> = sqlx::query_as(
         "UPDATE run_loop_checkpoints
             SET state = 'resuming',
@@ -294,22 +332,37 @@ pub(crate) async fn claim(
                 claim_expires_at = now() + make_interval(secs => $3),
                 updated_at = now()
           WHERE run_id = $1
-            AND ((pause_ref = $4
-                    AND (state IN ('paused', 'parked')
-                         OR (state = 'resuming' AND claim_expires_at < now())))
-                 OR (state = 'active' AND updated_at < now() - make_interval(secs => $5)))
+            AND pause_ref = $4
+            AND (state IN ('paused', 'parked')
+                 OR (state = 'resuming' AND claim_expires_at < now()))
           RETURNING seq, ciphertext, segment_no, authority_digest, kind",
     )
     .bind(run_id)
     .bind(&token_hash)
     .bind(CLAIM_LEASE_SECONDS)
     .bind(pause_ref)
-    .bind(STALE_ACTIVE_SECONDS)
     .fetch_optional(&mut *tx)
     .await
     .map_err(internal)?;
-    let (seq, ciphertext, segment_no, authority_digest, kind) =
-        row.ok_or_else(|| Status::failed_precondition("loop_checkpoint_not_claimable"))?;
+    let Some((seq, ciphertext, segment_no, authority_digest, kind)) = row else {
+        // The same continuation asking again while its own lease is live is told
+        // so, which is not the same as losing the pause to someone else.
+        let held: Option<(bool,)> = sqlx::query_as(
+            "SELECT COALESCE(state = 'resuming' AND claim_token_hash = $2
+                             AND claim_expires_at > now(), false)
+               FROM run_loop_checkpoints WHERE run_id = $1",
+        )
+        .bind(run_id)
+        .bind(&token_hash)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(internal)?;
+        return Err(if held.is_some_and(|(held,)| held) {
+            Status::aborted("loop_checkpoint_claim_held")
+        } else {
+            Status::failed_precondition("loop_checkpoint_not_claimable")
+        });
+    };
 
     // Open and check the fold before the claim commits, so a fold that does not
     // authenticate leaves the pause where it was.
@@ -394,13 +447,151 @@ pub(crate) async fn purge_run(
     Ok(removed.rows_affected())
 }
 
+/// Helpers for tests, here and in the run service, that need a scratch database
+/// and a seeded fold. Every database helper refuses a database whose name does
+/// not say it is a test database.
 #[cfg(test)]
-mod tests {
+pub(crate) mod test_support {
     use super::*;
     use serde_json::Value;
+    use sqlx::postgres::PgPoolOptions;
 
     /// A real LoopFoldV1 golden fixture from mp-contracts.
-    const FIXTURE: &str = include_str!("../../../crates/mp-contracts/tests/fixtures/loop-fold-v1.json");
+    pub(crate) const FIXTURE: &str =
+        include_str!("../../../crates/mp-contracts/tests/fixtures/loop-fold-v1.json");
+
+    pub(crate) async fn scratch_pool() -> Option<PgPool> {
+        let Ok(url) = std::env::var("DATABASE_URL") else {
+            eprintln!("skipping: DATABASE_URL unset");
+            return None;
+        };
+        assert!(url.contains("test"), "the scratch database name must say test");
+        let pool = PgPoolOptions::new()
+            .max_connections(8)
+            .connect(&url)
+            .await
+            .expect("connect pg");
+        sqlx::migrate!("./migrations").run(&pool).await.expect("migrate");
+        Some(pool)
+    }
+
+    pub(crate) fn cipher() -> DescriptorCipher {
+        DescriptorCipher::from_key_bytes_for_test(&[7_u8; 32]).expect("test key")
+    }
+
+    /// Seed a thread and a run with the given retention class; returns the run
+    /// id, the org and the user. The org is unique per call.
+    pub(crate) async fn seed_run(pool: &PgPool, retention: &str) -> (String, String, String) {
+        let sfx = mp_ids::new_ulid();
+        let (thread_id, run_id, org, user) = (
+            format!("lc-t-{sfx}"),
+            format!("lc-r-{sfx}"),
+            format!("lc-org-{sfx}"),
+            "u1".to_owned(),
+        );
+        sqlx::query("INSERT INTO threads (id,session_key,org_id,user_id) VALUES ($1,$1,$2,$3)")
+            .bind(&thread_id)
+            .bind(&org)
+            .bind(&user)
+            .execute(pool)
+            .await
+            .expect("seed thread");
+        // A waived run must name its acknowledgement and connection, and no other class may.
+        let (waiver_ack, waiver_connection) = if retention == "zdr_waived" {
+            (Some("ack-1"), Some("conn-1"))
+        } else {
+            (None, None)
+        };
+        sqlx::query(
+            "INSERT INTO runs (id,thread_id,goal,org_id,user_id,retention_class,waiver_ack_id,waiver_connection_id)
+             VALUES ($1,$2,'g',$3,$4,$5,$6,$7)",
+        )
+        .bind(&run_id)
+        .bind(&thread_id)
+        .bind(&org)
+        .bind(&user)
+        .bind(retention)
+        .bind(waiver_ack)
+        .bind(waiver_connection)
+        .execute(pool)
+        .await
+        .expect("seed run");
+        (run_id, org, user)
+    }
+
+    /// The golden fold, re-addressed to `run_id`.
+    pub(crate) fn fold_for(run_id: &str) -> Vec<u8> {
+        let mut value: Value = serde_json::from_str(FIXTURE).expect("fixture json");
+        value["run_id"] = json!(run_id);
+        serde_json::to_vec(&value).expect("fold json")
+    }
+
+    /// Store a fold through the real `save`, the way a loop does. `kind` is
+    /// `round`, `pre_effect`, `pause` or `park`; the pause fields follow from it.
+    pub(crate) async fn seed_fold(
+        pool: &PgPool,
+        run_id: &str,
+        kind: &str,
+        pause_ref: &str,
+        park_reason: &str,
+        park_until: Option<DateTime<Utc>>,
+    ) -> Result<i64, Status> {
+        let fold = fold_for(run_id);
+        save(
+            pool,
+            &cipher(),
+            SaveInput {
+                run_id,
+                expected_seq: 0,
+                kind,
+                fold: &fold,
+                authority_digest: "auth-1",
+                pause_ref,
+                park_reason,
+                park_until,
+            },
+        )
+        .await
+    }
+
+    /// End a run with a raw write that does not purge its fold, the way a row that
+    /// outlived its run (written before the end-of-run guard) came to exist. Kept
+    /// here so the source scan that pairs every status write with a purge can
+    /// leave this file out.
+    pub(crate) async fn end_run_without_purge(pool: &PgPool, run_id: &str) {
+        sqlx::query(
+            "UPDATE runs SET status = 'cancelled', ended_at = now(), updated_at = now() WHERE id = $1",
+        )
+        .bind(run_id)
+        .execute(pool)
+        .await
+        .expect("end the run without a purge");
+    }
+
+    /// How many fold rows a run has (0 or 1).
+    pub(crate) async fn fold_rows(pool: &PgPool, run_id: &str) -> i64 {
+        sqlx::query_scalar("SELECT COUNT(*) FROM run_loop_checkpoints WHERE run_id = $1")
+            .bind(run_id)
+            .fetch_one(pool)
+            .await
+            .expect("count fold rows")
+    }
+
+    /// The fold's state, or `None` when the run has no fold.
+    pub(crate) async fn fold_state(pool: &PgPool, run_id: &str) -> Option<String> {
+        sqlx::query_scalar("SELECT state FROM run_loop_checkpoints WHERE run_id = $1")
+            .bind(run_id)
+            .fetch_optional(pool)
+            .await
+            .expect("read fold state")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::test_support::FIXTURE;
+    use super::*;
+    use serde_json::Value;
 
     fn fixture_run_id() -> String {
         let value: Value = serde_json::from_str(FIXTURE).expect("fixture json");
@@ -453,77 +644,104 @@ mod tests {
         std::env::remove_var(ENABLED_ENV);
     }
 
+    #[test]
+    fn ended_is_exactly_the_three_terminal_run_statuses() {
+        for status in ["completed", "failed", "cancelled"] {
+            assert!(ended(status), "{status}");
+        }
+        for status in ["queued", "running", "awaiting_approval", "", "Completed"] {
+            assert!(!ended(status), "{status}");
+        }
+        let refusal = run_ended();
+        assert_eq!(refusal.code(), tonic::Code::FailedPrecondition);
+        assert_eq!(refusal.message(), "loop_checkpoint_run_ended");
+    }
+
+    #[tokio::test]
+    async fn park_reason_accepts_only_the_closed_tokens() {
+        use super::test_support::fold_for;
+        // The valid tokens are the closed set.
+        for token in [
+            "credential_window",
+            "provider_exhausted",
+            "upstream_unavailable",
+            "crash_interrupted",
+            "reauth_required",
+        ] {
+            assert!(ParkReason::parse(token).is_some(), "{token}");
+        }
+        // Anything else is refused before the database is touched, so a lazy pool
+        // that cannot connect is enough to prove the refusal.
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgresql://unreachable.invalid/session")
+            .expect("lazy pool");
+        let fold = fold_for(&fixture_run_id());
+        for bad in ["free text about a user", "CREDENTIAL_WINDOW", "credential_window ", "other"] {
+            let refused = save(
+                &pool,
+                &DescriptorCipher::from_key_bytes_for_test(&[7_u8; 32]).expect("test key"),
+                SaveInput {
+                    run_id: &fixture_run_id(),
+                    expected_seq: 0,
+                    kind: "park",
+                    fold: &fold,
+                    authority_digest: "auth-1",
+                    pause_ref: "appr_1",
+                    park_reason: bad,
+                    park_until: Some(Utc::now()),
+                },
+            )
+            .await
+            .expect_err("an unknown park reason is refused");
+            assert_eq!(refusal_pair(&refused), ("invalid_argument", "park reason is not recognised"), "{bad:?}");
+        }
+    }
+
+    fn refusal_pair(status: &Status) -> (&'static str, &str) {
+        let code = match status.code() {
+            tonic::Code::InvalidArgument => "invalid_argument",
+            tonic::Code::FailedPrecondition => "failed_precondition",
+            tonic::Code::Aborted => "aborted",
+            _ => "other",
+        };
+        (code, status.message())
+    }
+
+    /// A run that ends leaves no fold behind, and that holds only if every place
+    /// that writes a terminal status also calls `purge_run`. This is a tripwire,
+    /// not a proof: it counts the two in the source of every other file (test code
+    /// included), so a new terminal writer that forgets the purge breaks it.
+    #[test]
+    fn every_run_status_write_outside_the_fold_module_is_paired_with_a_purge() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let (mut status_writes, mut purges) = (0_usize, 0_usize);
+        for entry in std::fs::read_dir(&dir).expect("read src") {
+            let path = entry.expect("dir entry").path();
+            if path.extension().and_then(|ext| ext.to_str()) != Some("rs")
+                || path.file_name().and_then(|name| name.to_str()) == Some("loop_checkpoint.rs")
+            {
+                continue;
+            }
+            let source = std::fs::read_to_string(&path).expect("read source");
+            let normalised = source.split_whitespace().collect::<Vec<_>>().join(" ");
+            status_writes += normalised.matches("UPDATE runs SET status").count();
+            purges += normalised.matches("purge_run(").count();
+        }
+        assert!(status_writes >= 3, "the scan found {status_writes} status writes; it is not reading the sources");
+        assert_eq!(
+            status_writes, purges,
+            "every `UPDATE runs SET status` must be paired with a `purge_run(` in the same transaction"
+        );
+    }
+
     /// The database-backed tests need a scratch database. Run them with
     /// `DATABASE_URL=... cargo test -p session-core --bin session-core loop_checkpoint -- --ignored --test-threads=1`
     /// against a scratch Postgres (the database name must say it is a test database).
     mod db {
+        use super::super::test_support::{
+            cipher, fold_for, fold_rows, fold_state, scratch_pool, seed_fold, seed_run,
+        };
         use super::*;
-        use sqlx::postgres::PgPoolOptions;
-
-        async fn scratch_pool() -> Option<PgPool> {
-            let Ok(url) = std::env::var("DATABASE_URL") else {
-                eprintln!("skipping: DATABASE_URL unset");
-                return None;
-            };
-            assert!(url.contains("test"), "the scratch database name must say test");
-            let pool = PgPoolOptions::new()
-                .max_connections(8)
-                .connect(&url)
-                .await
-                .expect("connect pg");
-            sqlx::migrate!("./migrations").run(&pool).await.expect("migrate");
-            Some(pool)
-        }
-
-        fn cipher() -> DescriptorCipher {
-            DescriptorCipher::from_key_bytes_for_test(&[7_u8; 32]).expect("test key")
-        }
-
-        /// Seed a thread and a run with the given retention class; returns the run id.
-        async fn seed_run(pool: &PgPool, retention: &str) -> (String, String, String) {
-            let sfx = mp_ids::new_ulid();
-            let (thread_id, run_id, org, user) = (
-                format!("lc-t-{sfx}"),
-                format!("lc-r-{sfx}"),
-                format!("lc-org-{sfx}"),
-                "u1".to_owned(),
-            );
-            sqlx::query("INSERT INTO threads (id,session_key,org_id,user_id) VALUES ($1,$1,$2,$3)")
-                .bind(&thread_id)
-                .bind(&org)
-                .bind(&user)
-                .execute(pool)
-                .await
-                .expect("seed thread");
-            // A waived run must name its acknowledgement and connection, and no other class may.
-            let (waiver_ack, waiver_connection) = if retention == "zdr_waived" {
-                (Some("ack-1"), Some("conn-1"))
-            } else {
-                (None, None)
-            };
-            sqlx::query(
-                "INSERT INTO runs (id,thread_id,goal,org_id,user_id,retention_class,waiver_ack_id,waiver_connection_id)
-                 VALUES ($1,$2,'g',$3,$4,$5,$6,$7)",
-            )
-            .bind(&run_id)
-            .bind(&thread_id)
-            .bind(&org)
-            .bind(&user)
-            .bind(retention)
-            .bind(waiver_ack)
-            .bind(waiver_connection)
-            .execute(pool)
-            .await
-            .expect("seed run");
-            (run_id, org, user)
-        }
-
-        /// The golden fold, re-addressed to `run_id`.
-        fn fold_for(run_id: &str) -> Vec<u8> {
-            let mut value: Value = serde_json::from_str(FIXTURE).expect("fixture json");
-            value["run_id"] = json!(run_id);
-            serde_json::to_vec(&value).expect("fold json")
-        }
 
         async fn save_round(pool: &PgPool, run_id: &str, expected_seq: i64) -> Result<i64, Status> {
             let fold = fold_for(run_id);
@@ -668,6 +886,364 @@ mod tests {
                     .await
                     .expect("count");
             assert_eq!(rows, 0);
+        }
+
+        // -- Purge on every run-end path, and the ended-run guard (WS03 S4) ------------
+        //
+        // Every test below is written for a scratch database and is `#[ignore]`d. The
+        // names share the `loop_checkpoint_` prefix so one filter runs them all.
+
+        use mp_contracts::model_plane::v1 as pb;
+        use mp_contracts::model_plane::v1::run_service_server::RunService as _;
+
+        fn as_caller<T>(message: T, org_id: &str, user_id: &str) -> tonic::Request<T> {
+            let mut request = tonic::Request::new(message);
+            request
+                .extensions_mut()
+                .insert(crate::auth::VerifiedIdentity::user_for_test(org_id, user_id));
+            request
+        }
+
+        /// A thread and a persistent managed run (queued) whose terminal source is
+        /// `source`; returns the run id, the org and the user.
+        async fn seed_managed_run(
+            pool: &PgPool,
+            source: pb::ManagedRunSource,
+        ) -> (String, String, String) {
+            let sfx = mp_ids::new_ulid();
+            let (thread_id, org, user) = (
+                format!("lc-mt-{sfx}"),
+                format!("lc-morg-{sfx}"),
+                "u1".to_owned(),
+            );
+            sqlx::query("INSERT INTO threads (id,session_key,org_id,user_id) VALUES ($1,$1,$2,$3)")
+                .bind(&thread_id)
+                .bind(&org)
+                .bind(&user)
+                .execute(pool)
+                .await
+                .expect("seed thread");
+            let started = crate::terminalization::start_managed_run_inner(
+                pool,
+                pb::StartManagedRunRequest {
+                    thread_id,
+                    agent_id: "managed-agent".to_owned(),
+                    goal: "g".to_owned(),
+                    mode: "execute".to_owned(),
+                    org_id: org.clone(),
+                    user_id: user.clone(),
+                    start_key: format!("lc-start-{sfx}"),
+                    terminal_source: source as i32,
+                    ..Default::default()
+                },
+                false,
+            )
+            .await
+            .expect("start managed run");
+            (started.run_id, org, user)
+        }
+
+        /// End a run through the production `CancelRun`.
+        async fn cancel_through_the_service(pool: &PgPool, run_id: &str, org: &str, user: &str) {
+            let cancelled = crate::run_service_grpc::RunServiceImpl::new(pool.clone())
+                .cancel_run(as_caller(
+                    pb::CancelRunRequest {
+                        run_id: run_id.to_owned(),
+                        reason: "test".to_owned(),
+                    },
+                    org,
+                    user,
+                ))
+                .await
+                .expect("cancel run")
+                .into_inner()
+                .cancelled;
+            assert!(cancelled, "the run was live, so the cancel took effect");
+        }
+
+        /// End a managed run through `RecordTerminalOutcome` as its execution agent.
+        async fn complete_through_the_receipt(pool: &PgPool, run_id: &str) {
+            crate::terminalization::record_terminal_outcome_inner(
+                pool,
+                pb::RecordTerminalOutcomeRequest {
+                    run_id: run_id.to_owned(),
+                    source: pb::ManagedRunSource::ExecutionAgent as i32,
+                    outcome: pb::TerminalOutcome::Completed as i32,
+                    failure_code: String::new(),
+                },
+            )
+            .await
+            .expect("record terminal outcome");
+        }
+
+        async fn run_status(pool: &PgPool, run_id: &str) -> String {
+            sqlx::query_scalar("SELECT status FROM runs WHERE id = $1")
+                .bind(run_id)
+                .fetch_one(pool)
+                .await
+                .expect("run status")
+        }
+
+        #[tokio::test]
+        #[ignore = "requires DATABASE_URL to a scratch Postgres"]
+        async fn loop_checkpoint_cancel_run_removes_the_fold() {
+            let Some(pool) = scratch_pool().await else { return };
+            let (run_id, org, user) = seed_run(&pool, "persistent").await;
+            seed_fold(&pool, &run_id, "round", "", "", None)
+                .await
+                .expect("seed fold");
+            assert_eq!(fold_rows(&pool, &run_id).await, 1);
+
+            cancel_through_the_service(&pool, &run_id, &org, &user).await;
+
+            assert_eq!(run_status(&pool, &run_id).await, "cancelled");
+            assert_eq!(fold_rows(&pool, &run_id).await, 0);
+        }
+
+        #[tokio::test]
+        #[ignore = "requires DATABASE_URL to a scratch Postgres"]
+        async fn loop_checkpoint_recorded_terminal_outcome_removes_the_fold() {
+            let Some(pool) = scratch_pool().await else { return };
+            let (run_id, _org, _user) =
+                seed_managed_run(&pool, pb::ManagedRunSource::ExecutionAgent).await;
+            seed_fold(&pool, &run_id, "round", "", "", None)
+                .await
+                .expect("seed fold");
+            assert_eq!(fold_rows(&pool, &run_id).await, 1);
+
+            complete_through_the_receipt(&pool, &run_id).await;
+
+            assert_eq!(run_status(&pool, &run_id).await, "completed");
+            assert_eq!(fold_rows(&pool, &run_id).await, 0);
+        }
+
+        #[tokio::test]
+        #[ignore = "requires DATABASE_URL to a scratch Postgres"]
+        async fn loop_checkpoint_recovery_terminalization_removes_the_fold() {
+            let Some(pool) = scratch_pool().await else { return };
+            let (run_id, _org, _user) =
+                seed_managed_run(&pool, pb::ManagedRunSource::ExecutionAgent).await;
+            seed_fold(&pool, &run_id, "round", "", "", None)
+                .await
+                .expect("seed fold");
+            let state: String = sqlx::query_scalar(
+                "SELECT state FROM managed_run_terminalization_outbox WHERE run_id = $1",
+            )
+            .bind(&run_id)
+            .fetch_one(&pool)
+            .await
+            .expect("obligation state");
+            assert_eq!(state, "open", "the obligation is waiting for its producer");
+
+            // The producer is gone: its deadline and retry time are in the past.
+            sqlx::query(
+                "UPDATE managed_run_terminalization_outbox
+                    SET deadline_at = now() - interval '1 hour',
+                        next_attempt_at = now() - interval '1 hour'
+                  WHERE run_id = $1",
+            )
+            .bind(&run_id)
+            .execute(&pool)
+            .await
+            .expect("age the obligation");
+
+            // The recovery worker claims any due obligation in the database, so this
+            // asserts on this run rather than on the count it recovered.
+            let recovered = crate::terminalization::recover_due_terminalizations(&pool)
+                .await
+                .expect("recover");
+            assert!(recovered >= 1);
+
+            assert_eq!(run_status(&pool, &run_id).await, "failed");
+            assert_eq!(fold_rows(&pool, &run_id).await, 0);
+        }
+
+        #[tokio::test]
+        #[ignore = "requires DATABASE_URL to a scratch Postgres"]
+        async fn loop_checkpoint_org_erasure_removes_the_fold() {
+            let Some(pool) = scratch_pool().await else { return };
+            let (run_id, org, _user) = seed_run(&pool, "persistent").await;
+            seed_fold(&pool, &run_id, "round", "", "", None)
+                .await
+                .expect("seed fold");
+            assert_eq!(fold_rows(&pool, &run_id).await, 1);
+
+            crate::gdpr::purge_organization_data(&pool, &org, None)
+                .await
+                .expect("erase the org");
+
+            assert_eq!(fold_rows(&pool, &run_id).await, 0);
+            let runs: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM runs WHERE id = $1")
+                .bind(&run_id)
+                .fetch_one(&pool)
+                .await
+                .expect("count runs");
+            assert_eq!(runs, 0, "the run goes with the fold");
+        }
+
+        #[tokio::test]
+        #[ignore = "requires DATABASE_URL to a scratch Postgres"]
+        async fn loop_checkpoint_save_for_an_ended_run_is_refused_and_writes_nothing() {
+            let Some(pool) = scratch_pool().await else { return };
+
+            // Path 1: the production cancel. Path 2: a recorded terminal outcome.
+            for path in ["cancel", "terminal_outcome"] {
+                let (run_id, org, user) = if path == "cancel" {
+                    seed_run(&pool, "persistent").await
+                } else {
+                    seed_managed_run(&pool, pb::ManagedRunSource::ExecutionAgent).await
+                };
+                assert_eq!(save_round(&pool, &run_id, 0).await.expect("first save"), 1);
+                if path == "cancel" {
+                    cancel_through_the_service(&pool, &run_id, &org, &user).await;
+                } else {
+                    complete_through_the_receipt(&pool, &run_id).await;
+                }
+                assert_eq!(fold_rows(&pool, &run_id).await, 0, "{path}: the end purged the fold");
+
+                // A late writer that starts over (seq 0) must not recreate the fold,
+                // and one that still holds the old seq (1) is refused the same way.
+                for expected_seq in [0, 1] {
+                    let refused = save_round(&pool, &run_id, expected_seq)
+                        .await
+                        .expect_err("an ended run takes no fold");
+                    assert_eq!(refused.code(), tonic::Code::FailedPrecondition, "{path}");
+                    assert_eq!(refused.message(), "loop_checkpoint_run_ended", "{path}");
+                }
+                assert_eq!(fold_rows(&pool, &run_id).await, 0, "{path}: nothing was written");
+            }
+        }
+
+        #[tokio::test]
+        #[ignore = "requires DATABASE_URL to a scratch Postgres"]
+        async fn loop_checkpoint_claim_on_an_ended_run_is_refused() {
+            let Some(pool) = scratch_pool().await else { return };
+            let (run_id, _org, _user) = seed_run(&pool, "persistent").await;
+            seed_fold(&pool, &run_id, "pause", "appr_1", "", None)
+                .await
+                .expect("pause fold");
+            // A row that outlived its run, as one written before the guard would:
+            // the run is ended by a raw write that does not purge.
+            super::super::test_support::end_run_without_purge(&pool, &run_id).await;
+
+            let refused = claim(&pool, &cipher(), &run_id, "appr_1", "token-a")
+                .await
+                .expect_err("an ended run's fold is not claimable");
+            assert_eq!(refused.code(), tonic::Code::FailedPrecondition);
+            assert_eq!(refused.message(), "loop_checkpoint_run_ended");
+
+            // The row is untouched: still paused, no claim recorded.
+            assert_eq!(fold_state(&pool, &run_id).await.as_deref(), Some("paused"));
+            let claimed: Option<String> = sqlx::query_scalar(
+                "SELECT claim_token_hash FROM run_loop_checkpoints WHERE run_id = $1",
+            )
+            .bind(&run_id)
+            .fetch_one(&pool)
+            .await
+            .expect("claim hash");
+            assert_eq!(claimed, None);
+        }
+
+        #[tokio::test]
+        #[ignore = "requires DATABASE_URL to a scratch Postgres"]
+        async fn loop_checkpoint_a_stale_active_row_is_not_claimable() {
+            let Some(pool) = scratch_pool().await else { return };
+            let (run_id, _org, _user) = seed_run(&pool, "persistent").await;
+            assert_eq!(save_round(&pool, &run_id, 0).await.expect("active fold"), 1);
+            // Not written for far longer than the old 900 second window.
+            sqlx::query(
+                "UPDATE run_loop_checkpoints SET updated_at = now() - interval '1 hour' WHERE run_id = $1",
+            )
+            .bind(&run_id)
+            .execute(&pool)
+            .await
+            .expect("age the row");
+
+            // Whatever pause reference the caller names, an active fold is not
+            // claimable: only a worker that parks it after a crash makes it so.
+            for pause_ref in ["", "appr_1", "anything"] {
+                let refused = claim(&pool, &cipher(), &run_id, pause_ref, "token-a")
+                    .await
+                    .expect_err("a stale active fold is not a pause");
+                assert_eq!(refused.code(), tonic::Code::FailedPrecondition, "{pause_ref:?}");
+                assert_eq!(refused.message(), "loop_checkpoint_not_claimable", "{pause_ref:?}");
+            }
+            assert_eq!(fold_state(&pool, &run_id).await.as_deref(), Some("active"));
+        }
+
+        #[tokio::test]
+        #[ignore = "requires DATABASE_URL to a scratch Postgres"]
+        async fn loop_checkpoint_claim_held_is_told_apart_from_losing_the_pause() {
+            let Some(pool) = scratch_pool().await else { return };
+            let (run_id, _org, _user) = seed_run(&pool, "persistent").await;
+            seed_fold(&pool, &run_id, "pause", "appr_1", "", None)
+                .await
+                .expect("pause fold");
+            claim(&pool, &cipher(), &run_id, "appr_1", "token-a")
+                .await
+                .expect("first claim wins");
+
+            // The same continuation asking again while its lease is live: held.
+            let held = claim(&pool, &cipher(), &run_id, "appr_1", "token-a")
+                .await
+                .expect_err("the lease is live");
+            assert_eq!(held.code(), tonic::Code::Aborted);
+            assert_eq!(held.message(), "loop_checkpoint_claim_held");
+
+            // Another continuation lost the pause: not claimable.
+            let lost = claim(&pool, &cipher(), &run_id, "appr_1", "token-b")
+                .await
+                .expect_err("another claimant lost");
+            assert_eq!(lost.code(), tonic::Code::FailedPrecondition);
+            assert_eq!(lost.message(), "loop_checkpoint_not_claimable");
+
+            // Once the lease lapses the pause is claimable again, by anyone.
+            sqlx::query(
+                "UPDATE run_loop_checkpoints SET claim_expires_at = now() - interval '1 second' WHERE run_id = $1",
+            )
+            .bind(&run_id)
+            .execute(&pool)
+            .await
+            .expect("lapse the lease");
+            let reclaimed = claim(&pool, &cipher(), &run_id, "appr_1", "token-b")
+                .await
+                .expect("a lapsed lease is claimable");
+            assert_eq!(reclaimed.kind, "pause");
+            // And the previous holder, whose lease lapsed, is no longer "held".
+            let stale_holder = claim(&pool, &cipher(), &run_id, "appr_1", "token-a")
+                .await
+                .expect_err("token-b holds it now");
+            assert_eq!(stale_holder.message(), "loop_checkpoint_not_claimable");
+        }
+
+        #[tokio::test]
+        #[ignore = "requires DATABASE_URL to a scratch Postgres"]
+        async fn loop_checkpoint_a_park_stores_only_a_closed_reason() {
+            let Some(pool) = scratch_pool().await else { return };
+            let until = Utc::now() + chrono::Duration::hours(1);
+
+            let (bad_run, _org, _user) = seed_run(&pool, "persistent").await;
+            let refused = seed_fold(&pool, &bad_run, "park", "appr_1", "free text", Some(until))
+                .await
+                .expect_err("free text is not a park reason");
+            assert_eq!(refused.code(), tonic::Code::InvalidArgument);
+            assert_eq!(fold_rows(&pool, &bad_run).await, 0, "nothing was written");
+
+            for reason in mp_contracts::loop_fold::ParkReason::ALL {
+                let (run_id, _org, _user) = seed_run(&pool, "persistent").await;
+                seed_fold(&pool, &run_id, "park", "appr_1", reason.as_str(), Some(until))
+                    .await
+                    .expect("a closed token is stored");
+                let stored: Option<String> = sqlx::query_scalar(
+                    "SELECT park_reason FROM run_loop_checkpoints WHERE run_id = $1",
+                )
+                .bind(&run_id)
+                .fetch_one(&pool)
+                .await
+                .expect("stored reason");
+                assert_eq!(stored.as_deref(), Some(reason.as_str()));
+                assert_eq!(fold_state(&pool, &run_id).await.as_deref(), Some("parked"));
+            }
         }
     }
 }

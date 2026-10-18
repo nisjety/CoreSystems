@@ -310,6 +310,18 @@ message RunDetail {
 
   // Arbitrary metadata.
   google.protobuf.Struct metadata = 16;
+
+  // True when a continuation can claim this run's durable loop fold now: the
+  // loop is paused for an approval or parked, the fold store is on, and the run
+  // is persistent and not ended. A flag only; the fold never appears on this
+  // message. Owner: WS03 durable loop.
+  bool resumable = 17;
+
+  // Why the run is parked. Set only while resumable and parked; one closed
+  // token: credential_window, provider_exhausted, upstream_unavailable,
+  // crash_interrupted or reauth_required (mp_contracts::loop_fold::ParkReason).
+  // Owner: WS03 durable loop.
+  string park_reason = 18;
 }
 
 // --- Run context (build plan WS02 S4) ---

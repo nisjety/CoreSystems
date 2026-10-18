@@ -167,6 +167,20 @@ jobs:
             echo "expected at least 8 receipt contract tests to run, got ${passed:-0}"
             exit 1
           fi
+      # WS03 S4: the durable loop fold store's Postgres tests (purge on every
+      # run-end path, the ended-run guard, claim semantics, the RunDetail
+      # resumable projection). They share the `loop_checkpoint` filter, run one at a
+      # time because some set the fold-store switch, and the count fails the job if
+      # the filter stops matching them.
+      - name: Run the loop checkpoint tests against a migrated database
+        run: |
+          set -euo pipefail
+          cargo test -p session-core --bin session-core loop_checkpoint -- --ignored --test-threads=1 2>&1 | tee loop-checkpoint-tests.log
+          passed=$(grep -oE "test result: ok\. [0-9]+ passed" loop-checkpoint-tests.log | grep -oE "[0-9]+" | head -1)
+          if [ -z "$passed" ] || [ "$passed" -lt 18 ]; then
+            echo "expected at least 18 loop checkpoint tests to run, got ${passed:-0}"
+            exit 1
+          fi
 
 # Deliberately NOT in this workflow, so nobody mistakes its green for
 # coverage it does not provide:

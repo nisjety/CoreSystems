@@ -11738,6 +11738,74 @@ mod tests {
             .expect("clean thread fixture");
     }
 
+    /// A legacy terminal step on a run no managed obligation owns ends it, and the
+    /// run's durable loop fold goes with it in the same transaction (WS03 S4).
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres"]
+    async fn loop_checkpoint_legacy_terminal_step_removes_the_fold() {
+        use crate::loop_checkpoint::test_support::{fold_rows, scratch_pool, seed_fold, seed_run};
+        let Some(pool) = scratch_pool().await else {
+            return;
+        };
+        // An unmanaged run: no terminalization obligation, so the legacy step may end it.
+        let (run_id, _org, _user) = seed_run(&pool, "persistent").await;
+        seed_fold(&pool, &run_id, "round", "", "", None)
+            .await
+            .expect("seed fold");
+        assert_eq!(fold_rows(&pool, &run_id).await, 1);
+
+        complete_step_inner(
+            &pool,
+            None,
+            pb::CompleteStepRequest {
+                run_id: run_id.clone(),
+                step_id: "legacy-final".to_owned(),
+                status: "completed".to_owned(),
+                output: String::new(),
+                error: String::new(),
+                terminal: true,
+            },
+        )
+        .await
+        .expect("legacy terminal completion");
+
+        let status: String = sqlx::query_scalar("SELECT status FROM runs WHERE id = $1")
+            .bind(&run_id)
+            .fetch_one(&pool)
+            .await
+            .expect("read status");
+        assert_eq!(status, "completed");
+        assert_eq!(fold_rows(&pool, &run_id).await, 0, "the fold goes with the run");
+    }
+
+    /// Deleting a thread removes the folds of its runs.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres"]
+    async fn loop_checkpoint_thread_delete_removes_the_fold() {
+        use crate::loop_checkpoint::test_support::{fold_rows, scratch_pool, seed_fold, seed_run};
+        let Some(pool) = scratch_pool().await else {
+            return;
+        };
+        let (run_id, _org, _user) = seed_run(&pool, "persistent").await;
+        let thread_id: String = sqlx::query_scalar("SELECT thread_id FROM runs WHERE id = $1")
+            .bind(&run_id)
+            .fetch_one(&pool)
+            .await
+            .expect("run's thread");
+        seed_fold(&pool, &run_id, "round", "", "", None)
+            .await
+            .expect("seed fold");
+        assert_eq!(fold_rows(&pool, &run_id).await, 1);
+
+        let mut tx = pool.begin().await.expect("begin");
+        super::delete_thread_rows(&mut tx, &thread_id)
+            .await
+            .expect("delete the thread's rows");
+        tx.commit().await.expect("commit");
+
+        assert_eq!(fold_rows(&pool, &run_id).await, 0, "no fold outlives its thread");
+    }
+
     #[tokio::test]
     #[ignore = "requires DATABASE_URL to a disposable Postgres"]
     async fn inline_tool_audit_reservation_and_finalization_are_idempotent_in_postgres() {
@@ -13387,6 +13455,36 @@ mod direct_completion_db_tests {
         );
     }
 
+    /// A direct completion ends the run, so the run's durable loop fold goes with it
+    /// in the same transaction (build plan WS03 S4).
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres"]
+    async fn loop_checkpoint_direct_completion_removes_the_fold() {
+        let Some(pool) = disposable_pool().await else {
+            return;
+        };
+        let run = managed_run(&pool, pb::ManagedRunSource::GatewayDirect, false).await;
+        crate::loop_checkpoint::test_support::seed_fold(&pool, &run.run_id, "round", "", "", None)
+            .await
+            .expect("seed fold");
+        assert_eq!(
+            crate::loop_checkpoint::test_support::fold_rows(&pool, &run.run_id).await,
+            1
+        );
+
+        let response = complete(&pool, completion(&run, "Alt er klart.", &new_ulid()), &run.org_id)
+            .await
+            .expect("complete");
+
+        assert!(!response.already_terminal);
+        assert_eq!(run_status(&pool, &run.run_id).await, "completed");
+        assert_eq!(
+            crate::loop_checkpoint::test_support::fold_rows(&pool, &run.run_id).await,
+            0,
+            "the fold goes with the run"
+        );
+    }
+
     /// A cancel holding the run row makes the completion wait; once the cancel
     /// commits, the completion finds the run over and writes nothing.
     #[tokio::test]
@@ -13408,6 +13506,11 @@ mod direct_completion_db_tests {
         .await
         .unwrap();
         assert_eq!(cancelled.rows_affected(), 1);
+        // And the fold purge `CancelRun` makes in the same transaction, so no test
+        // path ends a run without it.
+        crate::loop_checkpoint::purge_run(&mut cancel_tx, &run.run_id)
+            .await
+            .unwrap();
 
         let racing = {
             let pool = pool.clone();
