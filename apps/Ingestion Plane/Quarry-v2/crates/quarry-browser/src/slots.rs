@@ -334,6 +334,15 @@ struct SessionEntry {
     idle_limit: Duration,
     age_limit: Duration,
     reap_reported: bool,
+    /// Which admission this entry is: a key released and admitted again is a
+    /// new entry with a new id, so a late acquire of the old one changes
+    /// nothing here.
+    id: u64,
+    /// Acquires of this entry that have neither finished nor been abandoned.
+    pending: u32,
+    /// An acquire of this entry finished: the session is someone's now, and
+    /// an abandoned acquire no longer gives the entry back.
+    committed: bool,
 }
 
 #[derive(Debug)]
@@ -342,6 +351,7 @@ pub struct SlotBook {
     slots: Vec<SlotState>,
     sessions: HashMap<String, SessionEntry>,
     tombstones: HashMap<String, (Instant, LossReason)>,
+    next_id: u64,
 }
 
 impl SlotBook {
@@ -352,6 +362,7 @@ impl SlotBook {
             slots: (0..count).map(SlotState::new).collect(),
             sessions: HashMap::new(),
             tombstones: HashMap::new(),
+            next_id: 0,
         }
     }
 
@@ -386,6 +397,7 @@ impl SlotBook {
         if let Some(entry) = self.sessions.get_mut(key) {
             entry.last_touch = now;
             entry.reap_reported = false;
+            entry.pending = entry.pending.saturating_add(1);
             let slot = entry.slot;
             return Admission::Admitted {
                 slot,
@@ -416,6 +428,8 @@ impl SlotBook {
         };
         self.tombstones.remove(key);
         let twice_ttl = ttl.saturating_mul(2);
+        self.next_id += 1;
+        let id = self.next_id;
         self.sessions.insert(
             key.to_owned(),
             SessionEntry {
@@ -426,6 +440,9 @@ impl SlotBook {
                 idle_limit: twice_ttl.max(self.cfg.session_idle),
                 age_limit: twice_ttl.max(self.cfg.session_max_age),
                 reap_reported: false,
+                id,
+                pending: 1,
+                committed: false,
             },
         );
         self.slots[slot].sessions += 1;
@@ -434,6 +451,35 @@ impl SlotBook {
             needs_launch: self.slots[slot].status != SlotStatus::Ready,
             fresh: true,
         }
+    }
+
+    /// The id of the entry `key` is admitted under, read right after `admit`
+    /// (under the same lock) so an acquire can name the entry it joined.
+    pub fn admission_id(&self, key: &str) -> Option<u64> {
+        self.sessions.get(key).map(|entry| entry.id)
+    }
+
+    /// An acquire of entry `id` returned its session. Nothing happens when the
+    /// entry is gone or is a newer one under the same key.
+    pub fn acquire_finished(&mut self, key: &str, id: u64) {
+        if let Some(entry) = self.sessions.get_mut(key).filter(|entry| entry.id == id) {
+            entry.pending = entry.pending.saturating_sub(1);
+            entry.committed = true;
+        }
+    }
+
+    /// An acquire of entry `id` failed or was dropped. The entry is given back
+    /// only when no acquire of it ever finished and no other one is still
+    /// running: a second acquire that joined a launching first one keeps the
+    /// entry when the first is dropped, and an acquire of a session already
+    /// handed out never takes it away.
+    pub fn acquire_abandoned(&mut self, key: &str, id: u64) -> Option<Released> {
+        let entry = self.sessions.get_mut(key).filter(|entry| entry.id == id)?;
+        entry.pending = entry.pending.saturating_sub(1);
+        if entry.committed || entry.pending > 0 {
+            return None;
+        }
+        self.release(key)
     }
 
     /// The slot's browser is up: a new generation, healthy until probed.
@@ -700,6 +746,57 @@ mod tests {
         assert_eq!(book.slot(0).unwrap().sessions, 2);
     }
 
+
+    #[test]
+    fn abandoned_acquire_gives_back_only_an_entry_nobody_else_holds() {
+        let mut book = SlotBook::new(cfg(1, 0, 0));
+        let now = Instant::now();
+
+        // Alone and abandoned: given back.
+        book.admit("alone", TTL, now);
+        let id = book.admission_id("alone").expect("admitted");
+        assert!(book.acquire_abandoned("alone", id).is_some());
+        assert!(!book.is_admitted("alone"));
+
+        // A second acquire joined while the first was launching; the first is
+        // dropped: the joiner keeps the entry and finishes with it.
+        book.admit("joined", TTL, now);
+        let first = book.admission_id("joined").expect("admitted");
+        assert!(matches!(
+            book.admit("joined", TTL, now),
+            Admission::Admitted { fresh: false, .. }
+        ));
+        let second = book.admission_id("joined").expect("admitted");
+        assert_eq!(first, second, "a joiner names the same entry");
+        assert_eq!(book.acquire_abandoned("joined", first), None);
+        assert!(book.is_admitted("joined"));
+        book.acquire_finished("joined", second);
+        assert!(book.is_admitted("joined"));
+
+        // An acquire of a session already handed out fails: the session stays.
+        book.admit("joined", TTL, now);
+        assert_eq!(book.acquire_abandoned("joined", first), None);
+        assert!(book.is_admitted("joined"));
+
+        // Both acquires of a launching entry abandoned: given back once.
+        book.admit("both", TTL, now);
+        book.admit("both", TTL, now);
+        let id = book.admission_id("both").expect("admitted");
+        assert_eq!(book.acquire_abandoned("both", id), None);
+        assert!(book.acquire_abandoned("both", id).is_some());
+        assert!(!book.is_admitted("both"));
+
+        // A late abandon of an old entry does not touch a newer one.
+        book.admit("again", TTL, now);
+        let old = book.admission_id("again").expect("admitted");
+        book.release("again");
+        book.admit("again", TTL, now);
+        let new = book.admission_id("again").expect("admitted");
+        assert_ne!(old, new);
+        assert_eq!(book.acquire_abandoned("again", old), None);
+        assert!(book.is_admitted("again"));
+        assert_eq!(book.slot(0).unwrap().sessions, 2, "joined and again");
+    }
 
     fn cfg(slots: usize, max_sessions: usize, max_pages: usize) -> SlotConfig {
         SlotConfig {

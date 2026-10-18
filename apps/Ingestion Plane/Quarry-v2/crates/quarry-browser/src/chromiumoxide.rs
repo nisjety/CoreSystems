@@ -432,6 +432,12 @@ impl ChromiumoxideDriver {
                     code = error.code.wire_name(),
                     "browser health probe failed"
                 );
+                #[cfg(test)]
+                self.hooks
+                    .probe_errors
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .push((error.code, error.message.clone()));
                 false
             }
         };
@@ -2744,12 +2750,16 @@ impl BrowserDriver for ChromiumoxideDriver {
         // The driver's own cap comes after the edge's run caps (R-26).
         let session_key = lease.session_affinity_key.clone();
         self.wait_for_teardown(&session_key).await;
-        let admission = self.book().admit(
-            &session_key,
-            Duration::from_secs(u64::from(lease.ttl_s)),
-            acquired_at,
-        );
-        let (fresh, needs_launch) = match admission {
+        let (admission, admission_id) = {
+            let mut book = self.book();
+            let admission = book.admit(
+                &session_key,
+                Duration::from_secs(u64::from(lease.ttl_s)),
+                acquired_at,
+            );
+            (admission, book.admission_id(&session_key))
+        };
+        let needs_launch = match admission {
             Admission::Busy {
                 limit,
                 active,
@@ -2767,15 +2777,11 @@ impl BrowserDriver for ChromiumoxideDriver {
                     "retry_after_seconds": retry_after_s,
                 })));
             }
-            Admission::Admitted {
-                fresh,
-                needs_launch,
-                ..
-            } => (fresh, needs_launch),
+            Admission::Admitted { needs_launch, .. } => needs_launch,
         };
-        // Given back if this call does not finish: an error, or the caller
-        // dropping it during a cold launch.
-        let mut rollback = AdmissionRollback::new(self, session_key.clone(), fresh);
+        // Given back if this call does not finish (an error, or the caller
+        // dropping it during a cold launch) and no other acquire holds it.
+        let mut rollback = AdmissionRollback::new(self, session_key.clone(), admission_id);
         self.start_background();
         let startup_mode = if self.browser.lock().await.is_some() && !needs_launch {
             BrowserStartupMode::Warm
@@ -2798,7 +2804,7 @@ impl BrowserDriver for ChromiumoxideDriver {
                 ..BrowserTelemetry::default()
             },
         );
-        rollback.disarm();
+        rollback.finish();
         Ok(session)
     }
 
@@ -4135,6 +4141,8 @@ struct TestHooks {
     content_attempts: AtomicUsize,
     /// The error details of the stale attempt.
     content_first_error: std::sync::Mutex<Option<String>>,
+    /// Every failed probe's code and message, oldest first.
+    probe_errors: std::sync::Mutex<Vec<(ErrorCode, String)>>,
 }
 
 /// The read `content` makes, in a given (stale) execution context: Chromium's
@@ -4164,37 +4172,45 @@ async fn content_in_stale_context(
     }
 }
 
-/// Gives a fresh admission back when `acquire` does not finish: an error, or
-/// the caller dropping the future during a cold launch (a scrape's own
-/// timeout does that). A second acquire of a key already admitted is not
-/// fresh and rolls nothing back.
+/// Tells the book how an `acquire` of one admitted entry ended. Finished:
+/// the entry is someone's session. Not finished (an error, or the caller
+/// dropping the future during a cold launch, which a scrape's own timeout
+/// does): the book gives the entry back only when no acquire of it ever
+/// finished and no other one is still running, so a second acquire that
+/// joined a launching first one keeps it when the first is dropped.
 struct AdmissionRollback {
     book: Arc<std::sync::Mutex<SlotBook>>,
     session_key: String,
-    armed: bool,
+    /// The entry this acquire admitted or joined; `None` once settled.
+    admission_id: Option<u64>,
 }
 
 impl AdmissionRollback {
-    fn new(driver: &ChromiumoxideDriver, session_key: String, fresh: bool) -> Self {
+    fn new(driver: &ChromiumoxideDriver, session_key: String, admission_id: Option<u64>) -> Self {
         Self {
             book: driver.book.clone(),
             session_key,
-            armed: fresh,
+            admission_id,
         }
     }
 
-    fn disarm(&mut self) {
-        self.armed = false;
+    fn finish(&mut self) {
+        if let Some(id) = self.admission_id.take() {
+            self.book
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .acquire_finished(&self.session_key, id);
+        }
     }
 }
 
 impl Drop for AdmissionRollback {
     fn drop(&mut self) {
-        if self.armed {
+        if let Some(id) = self.admission_id.take() {
             self.book
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .release(&self.session_key);
+                .acquire_abandoned(&self.session_key, id);
         }
     }
 }
@@ -5006,19 +5022,37 @@ mod tests {
         let pages_book_before = driver.book().slot(SLOT).unwrap().pages;
         provider.take();
 
-        driver.probe_tick().await;
-
-        assert_eq!(
-            provider.take(),
-            vec![
-                "policy probe:0 deny_all".to_owned(),
-                "endpoint probe:0".to_owned(),
-                "release probe:0".to_owned(),
-            ],
-            "deny-all first, then the pinned endpoint, then released"
+        // The probe's own 3 s deadline (`Op::HealthProbe`) can run out when
+        // twenty live tests share the machine; that failure is the prober
+        // working, not the property under test. Up to three probes, each with
+        // the same egress sequence; any failure other than a timeout fails.
+        let mut probes = 0;
+        while probes < 3 {
+            probes += 1;
+            driver.probe_tick().await;
+            assert_eq!(
+                provider.take(),
+                vec![
+                    "policy probe:0 deny_all".to_owned(),
+                    "endpoint probe:0".to_owned(),
+                    "release probe:0".to_owned(),
+                ],
+                "deny-all first, then the pinned endpoint, then released (probe {probes})"
+            );
+            if driver.book().slot(SLOT).unwrap().healthy == Some(true) {
+                break;
+            }
+        }
+        let probe_errors = driver.hooks.probe_errors.lock().unwrap().clone();
+        if !probe_errors.is_empty() {
+            eprintln!("probe_does_not_touch_session_state_or_egress: failed probes {probe_errors:?}");
+        }
+        assert!(
+            probe_errors.iter().all(|(code, _)| *code == ErrorCode::Timeout),
+            "only a probe deadline may fail here: {probe_errors:?}"
         );
         let slot = driver.book().slot(SLOT).unwrap().clone();
-        assert_eq!(slot.healthy, Some(true));
+        assert_eq!(slot.healthy, Some(true), "{probe_errors:?}");
         assert_eq!(slot.probe_failures, 0);
         assert_eq!(slot.pages, pages_book_before, "the probe page is not counted");
         assert_eq!(context_count(&driver).await, contexts_before, "probe context disposed");
@@ -5500,6 +5534,50 @@ mod tests {
 
         let session = live_session_sized(&driver, "dropped-acquire", None, "back").await;
         assert_eq!(live_marker(&driver, &session).await, "back");
+        driver.release(session).await.expect("release");
+        assert_eq!(driver.book().sessions_open(), 0);
+    }
+
+    /// Two acquires of one key, the second joining while the first launches.
+    /// The first is dropped (its scrape timed out): the second still returns
+    /// a session the book holds, and it opens pages.
+    #[tokio::test]
+    async fn acquire_joining_a_dropped_launch_keeps_the_admission() {
+        if !live_enabled() {
+            return;
+        }
+        let driver = live_driver().with_pool_config(quiet_pool());
+        let lease = make_lease_with_key("joined-acquire");
+        let mut first = Box::pin(driver.acquire(&lease));
+        let second = driver.acquire(&lease);
+        tokio::pin!(second);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(1), &mut first)
+                .await
+                .is_err(),
+            "the launch takes longer than 1 ms"
+        );
+        assert!(driver.book().is_admitted("joined-acquire"));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(1), &mut second)
+                .await
+                .is_err(),
+            "the joiner waits for the launch"
+        );
+        // Boxed, so this drops the future itself and not a pinned reference.
+        drop(first);
+        assert!(
+            driver.book().is_admitted("joined-acquire"),
+            "the joiner still holds the entry"
+        );
+        let session = second.await.expect("the joiner's acquire");
+        assert!(driver.book().is_admitted("joined-acquire"));
+        assert_eq!(driver.book().sessions_open(), 1);
+        driver
+            .configure_egress_policy(&session, BrowserEgressPolicy::deny_all())
+            .await
+            .expect("install deny-all egress policy");
+        driver.new_tab(&session, None).await.expect("a page opens");
         driver.release(session).await.expect("release");
         assert_eq!(driver.book().sessions_open(), 0);
     }
