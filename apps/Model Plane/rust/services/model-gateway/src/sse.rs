@@ -14042,4 +14042,78 @@ mod continue_run_tests {
         );
         assert!(!body.contains("segment_no"), "the segment number is continue_resume's alone");
     }
+
+    /// The posture matrix through the handler's own functions. `/continue` decides its turn
+    /// from the caller's one bearer with no route (`Route::plain(false)`), so for every bearer of
+    /// every enforcement row of `tests/fixtures/zdr-posture-matrix.json` the early gate and the
+    /// preflight serve it exactly when it is a persistent credential: not ZDR, its org not ZDR, no
+    /// waiver. A waived bearer's `zdr` claim is false, so a check written as "not ZDR" would serve
+    /// it; the matrix has waived bearers, and this fails if one is served.
+    #[test]
+    fn every_enforcement_row_of_the_matrix_is_continued_only_for_a_persistent_bearer() {
+        const MATRIX: &str = include_str!("../tests/fixtures/zdr-posture-matrix.json");
+        let matrix: Value = serde_json::from_str(MATRIX).expect("the vendored matrix is JSON");
+        let (mut served, mut waived_refused) = (0_usize, 0_usize);
+        for row in matrix["enforcement_rows"]
+            .as_array()
+            .expect("rows are an array")
+        {
+            let id = row["id"].as_str().unwrap_or("?");
+            let bearers = row["inputs"]["bearers"]
+                .as_array()
+                .expect("bearers are an array");
+            for bearer in bearers {
+                let waiver = (!bearer["waiver"].is_null()).then(|| bearer["waiver"].clone());
+                let claims = token(
+                    bearer["zdr"].as_bool().expect("every bearer states zdr"),
+                    bearer["org_zdr"].as_bool(),
+                    waiver.clone(),
+                );
+                let persistent =
+                    bearer["zdr"] == false && bearer["org_zdr"] != true && waiver.is_none();
+                assert_eq!(
+                    continue_turn_is_persistent(&claims),
+                    persistent,
+                    "{id}: {bearer}"
+                );
+                assert_eq!(
+                    continue_persistent_gate(true, &claims).is_ok(),
+                    persistent,
+                    "{id}: the early gate must serve a persistent bearer and no other"
+                );
+                // Everything else fine: the persistence of the turn alone decides the preflight.
+                let turn = continue_turn_is_persistent(&claims);
+                assert_eq!(
+                    preflight(true, "running", true, true, "loop", false, turn).is_ok(),
+                    persistent,
+                    "{id}: the preflight must serve a persistent bearer and no other"
+                );
+                if persistent {
+                    served += 1;
+                } else if waiver.is_some() && bearer["zdr"] == false {
+                    waived_refused += 1;
+                }
+            }
+            // Where the row and /continue name the same turn (one bearer, no ZDR asked for), the
+            // matrix's own decision says the same.
+            if bearers.len() == 1 && row["inputs"]["route"]["explicit_zdr"] != true {
+                let claims = token(
+                    bearers[0]["zdr"].as_bool().expect("zdr"),
+                    bearers[0]["org_zdr"].as_bool(),
+                    (!bearers[0]["waiver"].is_null()).then(|| bearers[0]["waiver"].clone()),
+                );
+                match row["expect"]["decision"].as_str() {
+                    Some("persistent") => assert!(continue_turn_is_persistent(&claims), "{id}"),
+                    Some("zdr" | "waived") => {
+                        assert!(!continue_turn_is_persistent(&claims), "{id}")
+                    }
+                    _ => {}
+                }
+            }
+        }
+        assert!(
+            served >= 3 && waived_refused >= 2,
+            "served {served}, waived refused {waived_refused}"
+        );
+    }
 }
