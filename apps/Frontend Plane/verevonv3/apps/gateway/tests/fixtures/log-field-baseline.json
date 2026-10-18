@@ -1,0 +1,11 @@
+{
+  "src/cache.rs::R2": 6,
+  "src/domains/browser.rs::R2": 1,
+  "src/domains/mail_task.rs::R2": 3,
+  "src/domains/mcp.rs::R2": 1,
+  "src/gdpr_nats.rs::R2": 6,
+  "src/onboarding/crawl_preview/handler.rs::R2": 3,
+  "src/onboarding/crawl_preview/handler.rs::R4": 1,
+  "src/onboarding/recommendation/remote.rs::R2": 1,
+  "src/rate_limit.rs::R2": 1
+}

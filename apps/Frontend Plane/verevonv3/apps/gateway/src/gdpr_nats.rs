@@ -104,6 +104,7 @@ pub(crate) fn spawn(state: AppState) -> bool {
         std::env::var(USER_ENV),
         std::env::var(PASSWORD_ENV),
     ) else {
+        // zdr-log-ok: the three interpolated names are environment variable names, not data
         tracing::warn!(
             "GDPR erasure consumer not configured ({URL_ENV}/{USER_ENV}/{PASSWORD_ENV}); \
              org-scoped erasure will NOT purge the gateway's chat-history copy"
@@ -131,6 +132,7 @@ async fn run_supervised(state: AppState, url: String, user: String, password: St
 }
 
 async fn run_once(state: &AppState, url: &str, user: &str, password: &str) -> anyhow::Result<()> {
+    // zdr-log-ok: the operator-configured NATS broker URL at start-up, outside any request
     tracing::info!(%url, subject = SUBJECT, "gateway GDPR erasure consumer connecting");
     let client =
         async_nats::ConnectOptions::with_user_and_password(user.to_owned(), password.to_owned())
