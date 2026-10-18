@@ -128,7 +128,7 @@ impl PinnedBrowserEgressProxy {
                         serve_connection(stream, receipts, sequence, policy, connection_shutdown)
                             .await
                     {
-                        tracing::debug!(error = %error, "browser egress proxy request refused");
+                        tracing::debug!(error_class = error.code.wire_name(), "browser egress proxy request refused");
                     }
                 });
             }

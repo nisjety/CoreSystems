@@ -1117,8 +1117,8 @@ pub async fn list_job_events(
                 .to_owned();
             match Event::default().event(name).json_data(&event) {
                 Ok(ev) => yield Ok::<Event, std::convert::Infallible>(ev),
-                Err(err) => {
-                    tracing::warn!(error = %err, "job-event serialize failed; skipping frame");
+                Err(_) => {
+                    tracing::warn!(error_class = "serialize", "job-event serialize failed; skipping frame");
                 }
             }
         }

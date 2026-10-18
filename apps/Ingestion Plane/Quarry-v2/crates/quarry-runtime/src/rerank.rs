@@ -121,7 +121,7 @@ impl ModelPlaneSearchReranker {
         let body = match response {
             Ok(resp) => resp.content,
             Err(e) => {
-                tracing::warn!(error = %e, "rerank: model plane failed; keeping original order");
+                tracing::warn!(error_class = e.code.wire_name(), "rerank: model plane failed; keeping original order");
                 return results;
             }
         };
@@ -129,7 +129,7 @@ impl ModelPlaneSearchReranker {
         match serde_json::from_str::<Vec<RerankEntry>>(&stripped) {
             Ok(entries) => apply_rerank(results, entries, n),
             Err(e) => {
-                tracing::warn!(error = %e, "rerank: JSON parse failed; keeping original order");
+                tracing::warn!(error_class = ?e.classify(), "rerank: JSON parse failed; keeping original order");
                 results
             }
         }

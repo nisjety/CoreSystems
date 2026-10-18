@@ -49,7 +49,7 @@ impl SearchProvider for HybridSearchProvider {
         let vector = match vec_res {
             Ok(v) => v,
             Err(e) => {
-                tracing::warn!(error = %e, "hybrid: vector retrieval failed; lexical-only");
+                tracing::warn!(error_class = e.code.wire_name(), "hybrid: vector retrieval failed; lexical-only");
                 Vec::new()
             }
         };

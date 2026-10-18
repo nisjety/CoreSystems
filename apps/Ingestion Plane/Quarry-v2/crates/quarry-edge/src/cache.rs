@@ -56,6 +56,7 @@ impl PageCache {
         match serde_json::from_str::<NormalizedOutput>(&raw) {
             Ok(out) => Some(out),
             Err(err) => {
+                // zdr-log-ok: the page cache is never read for a ZDR request (every caller gates on the ZDR guard), so only non-ZDR work reaches this line
                 tracing::warn!(error = %err, fingerprint, "page cache: deserialize failed");
                 None
             }
@@ -157,6 +158,7 @@ impl SearchCache {
         match serde_json::from_str::<T>(&raw?) {
             Ok(v) => Some(v),
             Err(err) => {
+                // zdr-log-ok: the search cache is never read for a ZDR request (the caller skips the lookup when zdr is set), so only non-ZDR work reaches this line
                 tracing::warn!(error = %err, key, "search cache: deserialize failed");
                 None
             }

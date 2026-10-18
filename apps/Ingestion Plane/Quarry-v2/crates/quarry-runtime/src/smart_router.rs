@@ -541,7 +541,7 @@ impl SmartSearchRouter {
             }
             Err(e) => {
                 state.record_failure(&self.config);
-                tracing::warn!(provider = name, error = %e, "provider failed");
+                tracing::warn!(provider = name, error_class = e.code.wire_name(), "provider failed");
                 None
             }
         }

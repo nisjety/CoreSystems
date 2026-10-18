@@ -226,6 +226,20 @@ where
     outcome.map_err(|error| error.message)
 }
 
+/// A closed-vocabulary label for a CDP failure that is only logged: `timeout` when
+/// our own per-op deadline fired (see [`timeout_error`]), `cdp` for anything the
+/// protocol or the connection said. The text itself is not logged: a CDP error can
+/// quote the page it was about, and the event filter drops a ZDR caller's line for
+/// carrying a field named `error`.
+#[cfg(feature = "chromiumoxide")]
+pub(crate) fn cdp_class(text: &impl std::fmt::Display) -> &'static str {
+    if text.to_string().contains(" timed out") {
+        "timeout"
+    } else {
+        "cdp"
+    }
+}
+
 /// Signatures of a CDP call that lost its execution context to a navigation.
 const DESTROYED_CONTEXT_SIGNATURES: [&str; 3] = [
     "Cannot find context with specified id",
@@ -301,6 +315,16 @@ mod tests {
         assert!(names
             .iter()
             .all(|name| name.bytes().all(|b| b.is_ascii_lowercase() || b == b'_')));
+    }
+
+    #[cfg(feature = "chromiumoxide")]
+    #[test]
+    fn cdp_class_is_a_closed_label_and_never_the_text() {
+        let deadline = timeout_error(Op::PageClose, Duration::from_millis(50)).message;
+        assert_eq!(cdp_class(&deadline), "timeout");
+        // Anything else the protocol says, including text that quotes a page, is `cdp`.
+        assert_eq!(cdp_class(&"No target with given id found"), "cdp");
+        assert_eq!(cdp_class(&"navigation to https://example.test/secret failed"), "cdp");
     }
 
     #[test]

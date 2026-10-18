@@ -171,11 +171,11 @@ impl ActionRuntime {
                         return Err(err);
                     }
                     OnError::Continue => {
-                        warn!(action_index = index, error = %err, "action failed, continuing");
+                        warn!(action_index = index, error_class = err.code.wire_name(), "action failed, continuing");
                         ActionResult::err(index, err.to_string())
                     }
                     OnError::Retry => {
-                        warn!(action_index = index, error = %err, "action failed, retrying once");
+                        warn!(action_index = index, error_class = err.code.wire_name(), "action failed, retrying once");
                         match self.execute_action(index, action).await {
                             Ok(result) => result,
                             Err(retry_err) => ActionResult::err(index, retry_err.to_string()),

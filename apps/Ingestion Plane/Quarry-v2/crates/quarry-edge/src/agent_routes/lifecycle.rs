@@ -574,7 +574,7 @@ pub(super) async fn finish_run(
     let session = entry.session.clone();
     drop(entry);
     if let Err(error) = state.agent_driver.release(session).await {
-        tracing::warn!(run_id, %error, "releasing a run's browser session failed");
+        tracing::warn!(run_id, error_class = crate::zdr_log::class(&error), "releasing a run's browser session failed");
     }
 
     match reason {
@@ -641,7 +641,7 @@ pub async fn drain_runs(
                         {
                             Ok(Ok(())) => Some(true),
                             Ok(Err(error)) => {
-                                tracing::warn!(%run_id, %error, "drain: release failed");
+                                tracing::warn!(%run_id, error_class = crate::zdr_log::class(&error), "drain: release failed");
                                 Some(false)
                             }
                             Err(_) => {

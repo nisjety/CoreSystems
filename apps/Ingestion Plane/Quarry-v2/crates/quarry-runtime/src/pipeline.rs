@@ -1422,7 +1422,7 @@ impl PageRunner {
                                         )
                                         .await
                                     {
-                                        tracing::warn!(error = %e, document_id = %resp.document_id, "page-image render/emit failed (non-fatal)");
+                                        tracing::warn!(error_class = e.code.wire_name(), document_id = %resp.document_id, "page-image render/emit failed (non-fatal)");
                                     }
                                 }
                                 event_sink
@@ -1465,7 +1465,7 @@ impl PageRunner {
                                                 .await
                                             {
                                                 tracing::warn!(
-                                                    error = %e,
+                                                    error_class = e.code.wire_name(),
                                                     "tracked-source registration failed (non-fatal)"
                                                 );
                                             }
@@ -1474,7 +1474,7 @@ impl PageRunner {
                                 }
                             }
                             Err(e) => {
-                                tracing::warn!(error = %e, "data plane ingest failed (non-fatal)");
+                                tracing::warn!(error_class = e.code.wire_name(), "data plane ingest failed (non-fatal)");
                                 // P0 fix — Aquatiq crawl-to-KB pipeline (2026-07-20): a
                                 // failed Data Plane write was previously ONLY logged,
                                 // never surfaced on the job's event stream, so a crawl

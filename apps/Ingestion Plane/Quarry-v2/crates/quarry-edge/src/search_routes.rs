@@ -713,7 +713,7 @@ pub async fn search(
                             match p.answer(areq).await {
                                 Ok(ar) => (Some(ar.answer), Some(ar.citations)),
                                 Err(e) => {
-                                    tracing::warn!(error = %e, "include_answer synthesis failed");
+                                    tracing::warn!(error_class = crate::zdr_log::class(&e), "include_answer synthesis failed");
                                     (None, None)
                                 }
                             }
@@ -739,6 +739,7 @@ pub async fn search(
                             citations: citations.clone(),
                         };
                         if let Err(e) = c.put_with_ttl(&cache_key, &payload, ttl).await {
+                            // zdr-log-ok: inside the `if !zdr` write-back, so only non-ZDR work reaches this line; the redis error text is what an operator needs
                             tracing::warn!(error = %e, "search cache: put failed");
                         }
                     }
@@ -1468,7 +1469,7 @@ entity: a compact knowledge panel for the query's PRIMARY entity (one specific p
     match client.invoke_for_org(org_id, &req).await {
         Ok(resp) => parse_suggestions(&resp.content, query),
         Err(e) => {
-            tracing::warn!(error = %e, "suggest: model plane failed; returning no suggestions");
+            tracing::warn!(error_class = crate::zdr_log::class(&e), "suggest: model plane failed; returning no suggestions");
             SuggestResponse::default()
         }
     }

@@ -168,7 +168,7 @@ impl MpIntentClassifier {
         match tokio::time::timeout(self.timeout, invocation).await {
             Ok(Ok(resp)) => Self::parse(&resp.content),
             Ok(Err(e)) => {
-                tracing::debug!(error = %e, "MP intent classify failed; defaulting");
+                tracing::debug!(error_class = e.code.wire_name(), "MP intent classify failed; defaulting");
                 QueryIntent::Default
             }
             Err(_) => {

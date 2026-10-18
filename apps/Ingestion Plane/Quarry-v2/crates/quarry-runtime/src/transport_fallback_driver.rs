@@ -52,7 +52,7 @@ impl TransportFallbackDriver {
                 warn!(
                     primary = self.primary_name,
                     fallback = self.fallback_name,
-                    error = %primary_err,
+                    error_class = primary_err.code.wire_name(),
                     "preferred transport failed, falling back"
                 );
                 match self.fallback.fetch_conditional(url, hints).await {

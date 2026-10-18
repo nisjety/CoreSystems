@@ -656,6 +656,7 @@ async fn scrape_with(
                 if let Some(cache) = state.cache.as_ref() {
                     let ttl = effective_ttl(&req.cache, DEFAULT_TTL_SECS);
                     if let Err(e) = cache.put_with_ttl(&org_id, &out.fingerprint, &out, ttl).await {
+                        // zdr-log-ok: reached only when the ZDR guard allows a cache write (cache_allowed, or !zdr.is_active()); the redis error text is what an operator needs
                         tracing::warn!(error = %e, "cache put failed");
                     }
                 }
@@ -1296,6 +1297,7 @@ async fn internal_run_page(
                 if let Some(cache) = state.cache.as_ref() {
                     let ttl = effective_ttl(&req.cache, DEFAULT_TTL_SECS);
                     if let Err(e) = cache.put_with_ttl(&org_id, &out.fingerprint, &out, ttl).await {
+                        // zdr-log-ok: reached only when the ZDR guard allows a cache write (cache_allowed, or !zdr.is_active()); the redis error text is what an operator needs
                         tracing::warn!(error = %e, "cache put failed");
                     }
                 }
@@ -1393,6 +1395,7 @@ async fn scrape_stream(
                     if let Some(c) = cache.as_ref() {
                         let ttl = effective_ttl(&policy, DEFAULT_TTL_SECS);
                         if let Err(e) = c.put_with_ttl(&cache_org_id, &out.fingerprint, out, ttl).await {
+                            // zdr-log-ok: reached only under !zdr.is_active(); the redis error text is what an operator needs
                             tracing::warn!(error = %e, "cache put failed");
                         }
                     }

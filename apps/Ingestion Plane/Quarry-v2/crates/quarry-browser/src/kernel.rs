@@ -549,7 +549,7 @@ impl BrowserDriver for KernelDriver {
                 match tokio::time::timeout(Duration::from_secs(5), fetch_fut).await {
                     Ok(Ok(snap)) => snap,
                     Ok(Err(e)) => {
-                        tracing::warn!(error = %e, "kernel state fetch failed; skipping capture");
+                        tracing::warn!(error_class = e.code.wire_name(), "kernel state fetch failed; skipping capture");
                         None
                     }
                     Err(_) => {
@@ -586,7 +586,7 @@ impl BrowserDriver for KernelDriver {
                 .save(&session.lease.org_id, &session.lease.profile_id, &snapshot)
                 .await
             {
-                tracing::warn!(error = %e, "kernel session capture save failed");
+                tracing::warn!(error_class = e.code.wire_name(), "kernel session capture save failed");
             }
         }
         Ok(())

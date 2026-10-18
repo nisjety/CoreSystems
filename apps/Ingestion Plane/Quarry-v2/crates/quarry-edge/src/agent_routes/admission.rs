@@ -324,6 +324,7 @@ async fn record_takeover_skip(
         .initiator(initiator, snapshot.epoch)
         .skip(action.clone(), "user_took_over");
     if let Err(error) = state.receipts.append(receipt).await {
+        // zdr-log-ok: a ZDR run returns above, before the receipt is built; only a non-ZDR run reaches this line, and the store error text is what an operator needs
         tracing::warn!(%error, "could not record the skipped receipt for a refused agent action");
     }
 }

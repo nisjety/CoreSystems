@@ -691,12 +691,15 @@ async fn emit_change_side_effects(
                                 tracing::warn!(status = %r.status(), "change webhook delivery failed")
                             }
                             Err(e) => {
-                                tracing::warn!(error = %e, "change webhook transport failed")
+                                tracing::warn!(
+                                    error_class = crate::zdr_log::class_reqwest(&e),
+                                    "change webhook transport failed"
+                                )
                             }
                         }
                     });
                 }
-                Err(e) => tracing::warn!(error = %e, "change webhook signing failed"),
+                Err(e) => tracing::warn!(error_class = crate::zdr_log::class(&e), "change webhook signing failed"),
             }
         } else {
             tracing::warn!("change webhook skipped: QUARRY_EDGE__INTERNAL_SECRET not configured (unsigned delivery refused, fail closed)");

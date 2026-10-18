@@ -297,10 +297,12 @@ async fn fetch_jwks() -> Result<JwkSet, StatusCode> {
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
     let resp = reqwest::get(&url).await.map_err(|e| {
+        // zdr-log-ok: runs inside require_auth, before the claims exist and before mark_floor can mark the span, so the filter cannot see a ZDR posture here; the text is a JWT or JWKS error, never caller data, and the url is the operator-set JWKS endpoint
         error!(error = %e, url = %url, "failed to fetch JWKS");
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
     let jwks: JwkSet = resp.json().await.map_err(|e| {
+        // zdr-log-ok: runs inside require_auth, before the claims exist and before mark_floor can mark the span, so the filter cannot see a ZDR posture here; the text is a JWT or JWKS error, never caller data
         error!(error = %e, "failed to parse JWKS JSON");
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
@@ -339,6 +341,7 @@ async fn get_jwks(force_refresh: bool) -> Result<JwkSet, StatusCode> {
 ///   unset without `AUTH_CORE_AUDIENCE_OPTIONAL=1`.
 async fn verify_jwt_bearer(token: &str) -> Result<Claims, StatusCode> {
     let jwt_header = decode_header(token).map_err(|e| {
+        // zdr-log-ok: runs inside require_auth, before the claims exist and before mark_floor can mark the span, so the filter cannot see a ZDR posture here; the text is a JWT or JWKS error, never caller data
         warn!(error = %e, "failed to decode JWT header");
         StatusCode::UNAUTHORIZED
     })?;
@@ -368,6 +371,7 @@ async fn verify_jwt_bearer(token: &str) -> Result<Claims, StatusCode> {
     };
 
     let decoding_key = DecodingKey::from_jwk(&jwk).map_err(|e| {
+        // zdr-log-ok: runs inside require_auth, before the claims exist and before mark_floor can mark the span, so the filter cannot see a ZDR posture here; the text is a JWT or JWKS error, never caller data
         error!(error = %e, "failed to build decoding key from JWK");
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
@@ -404,6 +408,7 @@ async fn verify_jwt_bearer(token: &str) -> Result<Claims, StatusCode> {
     }
 
     let mut token_data = decode::<Claims>(token, &decoding_key, &validation).map_err(|e| {
+        // zdr-log-ok: runs inside require_auth, before the claims exist and before mark_floor can mark the span, so the filter cannot see a ZDR posture here; the text is a JWT or JWKS error, never caller data
         warn!(error = %e, "JWT validation failed");
         StatusCode::UNAUTHORIZED
     })?;

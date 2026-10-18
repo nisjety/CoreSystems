@@ -229,7 +229,7 @@ impl FallbackDriver {
                         warn!(
                             driver = ?kind,
                             next = ?order.get(idx + 1),
-                            error = %e,
+                            error_class = e.code.wire_name(),
                             "driver failed, falling back"
                         );
                         last_err = Some(e);
@@ -238,7 +238,7 @@ impl FallbackDriver {
                     if let Some(shell) = best_shell.take() {
                         warn!(
                             driver = ?kind,
-                            error = %e,
+                            error_class = e.code.wire_name(),
                             url = %url,
                             shell_text_chars = visible_text_len(&shell.body),
                             "browser fallback failed after JS-shell detection; returning the static shell response"

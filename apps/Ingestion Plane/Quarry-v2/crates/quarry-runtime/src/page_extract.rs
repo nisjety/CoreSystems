@@ -488,7 +488,7 @@ impl PageTitleEnricher {
         let result = match tokio::time::timeout(self.timeout, call).await {
             Ok(Ok(resp)) => parse_model_title(&resp.content, url),
             Ok(Err(e)) => {
-                tracing::warn!(error = %e, url = %url, model = %self.model, "page-title enrichment failed");
+                tracing::warn!(error_class = e.code.wire_name(), url = %url, model = %self.model, "page-title enrichment failed");
                 None
             }
             Err(_) => {

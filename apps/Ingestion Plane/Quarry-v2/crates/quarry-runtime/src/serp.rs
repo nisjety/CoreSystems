@@ -327,7 +327,7 @@ impl SearchProvider for FallbackSearchProvider {
                 Err(e) if e.code.retryable() => {
                     tracing::warn!(
                         provider = provider.name(),
-                        error = %e,
+                        error_class = e.code.wire_name(),
                         "search provider failed; trying next in chain"
                     );
                     last_err = Some(e);

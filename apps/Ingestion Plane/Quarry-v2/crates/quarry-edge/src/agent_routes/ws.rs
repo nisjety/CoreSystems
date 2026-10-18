@@ -178,8 +178,10 @@ pub(super) async fn browser_ws_loop(
                     }
                     Some(Ok(Message::Close(_))) | None => break,
                     Some(Ok(_)) => {}
-                    Some(Err(err)) => {
-                        tracing::debug!(error = %err, "browser websocket receive failed");
+                    Some(Err(_)) => {
+                        // The frame error's text is not logged: it is a transport error and a
+                        // ZDR caller's line would be dropped for carrying it.
+                        tracing::debug!(error_class = "ws_receive", "browser websocket receive failed");
                         break;
                     }
                 }

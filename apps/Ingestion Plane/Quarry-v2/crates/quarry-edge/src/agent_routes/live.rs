@@ -318,17 +318,19 @@ pub async fn agent_events_stream(
                     }
                     emitted += 1;
                     let name = event_name(evt.event_type);
-                    let evt_for_log = evt.clone();
                     match Event::default()
                         .event(name)
                         .id(evt.seq.to_string())
                         .json_data(&evt)
                     {
                         Ok(event) => yield Ok(event),
-                        Err(err) => {
+                        Err(_) => {
+                            // The event's payload can hold the page's URL, title and text, so the
+                            // line names its type and sequence number, never the event itself.
                             tracing::warn!(
-                                error = %err,
-                                ?evt_for_log,
+                                error_class = "serialize",
+                                event_type = ?evt.event_type,
+                                seq = evt.seq,
                                 "agent events stream: failed to serialize event; skipping"
                             );
                         }

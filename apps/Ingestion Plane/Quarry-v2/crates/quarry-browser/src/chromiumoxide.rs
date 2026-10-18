@@ -803,7 +803,7 @@ impl ChromiumoxideDriver {
                 if let Err(err) = best_effort(Op::PageClose, tab.page.close()).await {
                     tracing::debug!(
                         tab_id = %tab.tab_id,
-                        error = %err,
+                        error_class = crate::deadlines::cdp_class(&err),
                         "chromiumoxide tab close during release failed"
                     );
                 }
@@ -819,7 +819,7 @@ impl ChromiumoxideDriver {
                     {
                         tracing::warn!(
                             session_key = %session_key,
-                            error = %err,
+                            error_class = crate::deadlines::cdp_class(&err),
                             "chromiumoxide dispose_browser_context failed"
                         );
                     }
@@ -1242,7 +1242,7 @@ impl ChromiumoxideDriver {
                     }
                 });
             }
-            Err(err) => tracing::debug!(error = %err, "console devtools listener unavailable"),
+            Err(err) => tracing::debug!(error_class = crate::deadlines::cdp_class(&err), "console devtools listener unavailable"),
         }
 
         match page.event_listener::<EventEntryAdded>().await {
@@ -1258,7 +1258,7 @@ impl ChromiumoxideDriver {
                     }
                 });
             }
-            Err(err) => tracing::debug!(error = %err, "log devtools listener unavailable"),
+            Err(err) => tracing::debug!(error_class = crate::deadlines::cdp_class(&err), "log devtools listener unavailable"),
         }
 
         match page.event_listener::<EventRequestWillBeSent>().await {
@@ -1274,7 +1274,7 @@ impl ChromiumoxideDriver {
                     }
                 });
             }
-            Err(err) => tracing::debug!(error = %err, "request devtools listener unavailable"),
+            Err(err) => tracing::debug!(error_class = crate::deadlines::cdp_class(&err), "request devtools listener unavailable"),
         }
 
         match page.event_listener::<EventResponseReceived>().await {
@@ -1290,7 +1290,7 @@ impl ChromiumoxideDriver {
                     }
                 });
             }
-            Err(err) => tracing::debug!(error = %err, "response devtools listener unavailable"),
+            Err(err) => tracing::debug!(error_class = crate::deadlines::cdp_class(&err), "response devtools listener unavailable"),
         }
 
         match page.event_listener::<EventLifecycleEvent>().await {
@@ -1304,7 +1304,7 @@ impl ChromiumoxideDriver {
                     }
                 });
             }
-            Err(err) => tracing::debug!(error = %err, "lifecycle devtools listener unavailable"),
+            Err(err) => tracing::debug!(error_class = crate::deadlines::cdp_class(&err), "lifecycle devtools listener unavailable"),
         }
     }
 
@@ -1337,7 +1337,7 @@ impl ChromiumoxideDriver {
             .load(&lease.org_id, &lease.profile_id)
             .await
             .unwrap_or_else(|err| {
-                tracing::warn!(error = %err, "chromiumoxide profile load failed; starting fresh");
+                tracing::warn!(error_class = err.code.wire_name(), "chromiumoxide profile load failed; starting fresh");
                 None
             })
     }
@@ -1471,7 +1471,7 @@ async fn install_network_guard(
             )
             .await;
             if let Err(error) = command_result {
-                tracing::warn!(error = %error, "chromiumoxide request guard resolution failed");
+                tracing::warn!(error_class = crate::deadlines::cdp_class(&error), "chromiumoxide request guard resolution failed");
             }
         }
     });
@@ -2466,7 +2466,7 @@ async fn capture_live_frame(page: &Page, options: LiveFrameOptions) -> QuarryRes
             .with_details(json!({ "error": e.to_string() }))
         })?;
     if let Err(err) = page.execute(StopScreencastParams::default()).await {
-        tracing::warn!(error = %err, "chromiumoxide screencast stop failed");
+        tracing::warn!(error_class = crate::deadlines::cdp_class(&err), "chromiumoxide screencast stop failed");
     }
 
     Ok(LiveFrame {
@@ -2810,7 +2810,7 @@ impl BrowserDriver for ChromiumoxideDriver {
 
     async fn release(&self, session: BrowserSession) -> QuarryResult<()> {
         if let Err(err) = self.persist_current_page(&session).await {
-            tracing::warn!(error = %err, "chromiumoxide profile capture skipped");
+            tracing::warn!(error_class = err.code.wire_name(), "chromiumoxide profile capture skipped");
         }
         // Idempotent: a second release (WS2.D's finish_run releases a clone)
         // finds nothing left to free.
@@ -3478,7 +3478,7 @@ impl BrowserDriver for ChromiumoxideDriver {
         if let Err(err) = best_effort(Op::PageClose, removed.page.close()).await {
             tracing::debug!(
                 tab_id = %removed.tab_id,
-                error = %err,
+                error_class = crate::deadlines::cdp_class(&err),
                 "chromiumoxide close_tab failed"
             );
         }
@@ -3493,7 +3493,7 @@ impl BrowserDriver for ChromiumoxideDriver {
                 {
                     tracing::warn!(
                         session_key = %session_key,
-                        error = %error,
+                        error_class = crate::deadlines::cdp_class(&error),
                         "chromiumoxide dispose_browser_context after final tab close failed"
                     );
                 }

@@ -283,7 +283,7 @@ impl StaticDriver {
                     if is_retryable_egress_error(err.code) && idx + 1 < plan.len() {
                         tracing::warn!(
                             host = %host,
-                            error = %err,
+                            error_class = err.code.wire_name(),
                             attempt = idx,
                             egress = decision.identity.label(),
                             "egress transport failed; rotating to next approved proxy"

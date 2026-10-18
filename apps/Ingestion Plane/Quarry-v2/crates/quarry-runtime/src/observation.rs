@@ -819,13 +819,13 @@ impl ObservationRunner {
                             {
                                 Ok(id) => visual_observation_artifact_id = id,
                                 Err(e) => tracing::warn!(
-                                    error = %e,
+                                    error_class = e.code.wire_name(),
                                     "visual observation artifact write failed"
                                 ),
                             }
                         }
                         Err(e) => tracing::warn!(
-                            error = %e,
+                            error_class = e.code.wire_name(),
                             "visual observation processor failed"
                         ),
                     }
@@ -888,7 +888,7 @@ impl ObservationRunner {
             )
             .await
             .unwrap_or_else(|error| {
-                tracing::warn!(error = %error, "evidence delta artifact write failed");
+                tracing::warn!(error_class = error.code.wire_name(), "evidence delta artifact write failed");
                 None
             });
         let action_outcome = Self::outcome_for_action(&request.action, &ctx.current_url);
@@ -932,7 +932,7 @@ impl ObservationRunner {
                 // A telemetry sample must not turn a completed browser action
                 // into a retryable effect. Keep the unknown/default fields and
                 // retain the real execution outcome separately.
-                tracing::warn!(error = %error, "browser telemetry sample failed");
+                tracing::warn!(error_class = error.code.wire_name(), "browser telemetry sample failed");
                 BrowserTelemetry::default()
             }
         };

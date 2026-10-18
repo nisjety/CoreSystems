@@ -281,6 +281,7 @@ impl EdgeConfig {
             .add_source(config::Environment::with_prefix("QUARRY_EDGE").separator("__"))
             .build()?;
         let mut edge: Self = cfg.try_deserialize().unwrap_or_else(|err| {
+            // zdr-log-ok: runs once while the process boots, before any request or ZDR span exists; an operator needs the field name in the error
             tracing::error!(error = %err, "EdgeConfig failed to deserialize from environment; falling back to all-defaults (check for a required field with no #[serde(default)])");
             Self::defaults()
         });
