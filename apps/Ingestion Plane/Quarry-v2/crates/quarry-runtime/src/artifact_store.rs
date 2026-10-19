@@ -157,6 +157,56 @@ pub trait ArtifactStore: Send + Sync {
     }
 }
 
+/// The listing rules every in-process backend shares, so the memory store and the
+/// filesystem store cannot drift apart: the `status` filter, the `created_*`
+/// bounds, the sort, the cursor and the page size.
+///
+/// `key` gives a row's `(created_at, id)`. Rows are totally ordered by that pair,
+/// in the filter's direction, so two rows created in the same instant (ULIDs carry
+/// milliseconds) still have one fixed order, and a cursor resumes strictly after
+/// the row it names. Returns the page window and the cursor of the next page
+/// (`Some` only when at least one more row exists).
+///
+/// ZDR needs nothing here: a ZDR request never calls `put`, so there is no row.
+fn list_window<T>(
+    rows: Vec<T>,
+    filter: &quarry_core::pagination::ListFilter,
+    key: impl Fn(&T) -> (chrono::DateTime<chrono::Utc>, String),
+) -> (Vec<T>, Option<quarry_core::pagination::Cursor>) {
+    // Artifacts carry no lifecycle status; "stored" is the implicit one, so a
+    // `?status=stored` filter matches and any other status returns nothing.
+    if matches!(&filter.status, Some(status) if status != "stored") {
+        return (Vec::new(), None);
+    }
+    let descending = filter.sort.is_descending();
+    let mut keyed: Vec<((chrono::DateTime<chrono::Utc>, String), T)> = rows
+        .into_iter()
+        .map(|row| (key(&row), row))
+        .filter(|((created_at, _), _)| filter.created_before.map_or(true, |t| *created_at <= t))
+        .filter(|((created_at, _), _)| filter.created_after.map_or(true, |t| *created_at >= t))
+        .collect();
+    if descending {
+        keyed.sort_by(|a, b| b.0.cmp(&a.0));
+    } else {
+        keyed.sort_by(|a, b| a.0.cmp(&b.0));
+    }
+    if let Some(cursor) = filter.decoded_cursor() {
+        let at = (cursor.created_at, cursor.id);
+        keyed.retain(|(row_key, _)| if descending { *row_key < at } else { *row_key > at });
+    }
+    let limit = filter.effective_limit() as usize;
+    let has_more = keyed.len() > limit;
+    keyed.truncate(limit);
+    let next = if has_more {
+        keyed
+            .last()
+            .map(|((created_at, id), _)| quarry_core::pagination::Cursor::new(*created_at, id.clone()))
+    } else {
+        None
+    };
+    (keyed.into_iter().map(|(_, row)| row).collect(), next)
+}
+
 /// Per-artifact metadata kept alongside the body so `list()` can serve
 /// without re-walking the body blob. Cycle 22 / cluster #4 part 1.
 #[derive(Debug, Clone)]
@@ -242,76 +292,31 @@ impl ArtifactStore for InMemoryStore {
         org_id: &str,
         filter: &quarry_core::pagination::ListFilter,
     ) -> QuarryResult<quarry_core::pagination::Page<quarry_core::resources::ArtifactSummary>> {
-        use quarry_core::pagination::{Cursor, Page};
+        use quarry_core::pagination::Page;
         use quarry_core::resources::ArtifactSummary;
 
-        let meta = self.meta.read().await;
-        let mut rows: Vec<&InMemoryArtifactMeta> = meta
+        // An org-less caller lists nothing, as it reads nothing (`get` refuses an
+        // empty org): unattributed writes are not browsable.
+        if org_id.is_empty() {
+            return Ok(Page::new(Vec::new(), None, None));
+        }
+        let rows: Vec<InMemoryArtifactMeta> = self
+            .meta
+            .read()
+            .await
             .iter()
             // Tenant isolation: an artifact is only listable by the org that
             // wrote it (stamped from the writer's claim at `put`).
             .filter(|m| m.org_id == org_id)
-            .filter(|_m| match &filter.status {
-                // We don't track lifecycle status on artifacts in this
-                // backend; surface "stored" as the implicit status so
-                // a `?status=stored` filter matches and any other
-                // status filter returns empty.
-                Some(s) if s != "stored" => false,
-                _ => true,
-            })
-            .filter(|m| match filter.created_before {
-                Some(t) => m.created_at <= t,
-                None => true,
-            })
-            .filter(|m| match filter.created_after {
-                Some(t) => m.created_at >= t,
-                None => true,
-            })
+            .cloned()
             .collect();
-
-        // Sort newest-first by default (matches dashboard expectations).
-        if filter.sort.is_descending() {
-            rows.sort_by(|a, b| b.created_at.cmp(&a.created_at));
-        } else {
-            rows.sort_by(|a, b| a.created_at.cmp(&b.created_at));
-        }
-
-        // Apply cursor: drop rows up to and including the cursor's
-        // position so the next page starts strictly after it.
-        if let Some(cur) = filter.decoded_cursor() {
-            rows.retain(|m| {
-                if filter.sort.is_descending() {
-                    m.created_at < cur.created_at
-                        || (m.created_at == cur.created_at && m.id.to_string() > cur.id)
-                } else {
-                    m.created_at > cur.created_at
-                        || (m.created_at == cur.created_at && m.id.to_string() > cur.id)
-                }
-            });
-        }
-
-        let limit = filter.effective_limit() as usize;
-        // Take one extra row so we can detect "more available" without
-        // a separate count query.
-        let mut window: Vec<&InMemoryArtifactMeta> = rows.iter().take(limit + 1).copied().collect();
-        let has_more = window.len() > limit;
-        if has_more {
-            window.pop();
-        }
-        let next_cursor = if has_more {
-            window
-                .last()
-                .map(|m| Cursor::new(m.created_at, m.id.to_string()))
-        } else {
-            None
-        };
-
+        let (window, next_cursor) = list_window(rows, filter, |m| (m.created_at, m.id.to_string()));
         let items: Vec<ArtifactSummary> = window
-            .iter()
+            .into_iter()
             .map(|m| ArtifactSummary {
-                artifact_id: m.id.clone(),
-                org_id: m.org_id.clone(),
-                kind: m.kind.clone(),
+                artifact_id: m.id,
+                org_id: m.org_id,
+                kind: m.kind,
                 bytes: m.bytes,
                 sha256: None,
                 created_at: m.created_at,
@@ -338,6 +343,13 @@ impl ArtifactStore for InMemoryStore {
 ///   {root}/org={org}/run={run_id}/page={page_hash}/{stem}.{ext}
 pub struct FilesystemStore {
     root: PathBuf,
+}
+
+/// One `.index` line of one organization, as `list` sees it.
+struct FsRow {
+    id: ArtifactKind,
+    key: String,
+    created_at: chrono::DateTime<chrono::Utc>,
 }
 
 impl FilesystemStore {
@@ -398,6 +410,49 @@ impl FilesystemStore {
             }
         }
         Ok(None)
+    }
+
+    /// Every index row of `org_id`: `(id, key, created_at)`, in index order.
+    ///
+    /// The organization is the `org=` segment of the key, the same tenant boundary
+    /// `get` checks, so a row of another organization is never returned. The time is
+    /// the one inside the id (a ULID carries its creation time in milliseconds), so
+    /// it survives a restart, a copy of the directory and a rewritten file.
+    async fn index_rows(&self, org_id: &str) -> QuarryResult<Vec<FsRow>> {
+        let content = match tokio::fs::read_to_string(self.index_path()).await {
+            Ok(s) => s,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) => {
+                return Err(QuarryError::new(
+                    ErrorCode::Internal,
+                    format!("index read: {e}"),
+                ))
+            }
+        };
+        let mut rows = Vec::new();
+        for line in content.lines() {
+            let Some((id, key)) = line.split_once('\t') else {
+                continue;
+            };
+            if org_from_key(key) != Some(org_id) {
+                continue;
+            }
+            let Ok(id) = id.parse::<ArtifactKind>() else {
+                continue;
+            };
+            let Some(created_at) = i64::try_from(id.ulid().timestamp_ms())
+                .ok()
+                .and_then(chrono::DateTime::from_timestamp_millis)
+            else {
+                continue;
+            };
+            rows.push(FsRow {
+                id,
+                key: key.to_string(),
+                created_at,
+            });
+        }
+        Ok(rows)
     }
 }
 
@@ -471,6 +526,58 @@ impl ArtifactStore for FilesystemStore {
             )
         })?;
         Ok((bytes, key))
+    }
+
+    /// Lists from the same `.index` file `get` resolves ids with, so what `put`
+    /// wrote is listed after a restart, with the rules of [`InMemoryStore::list`]
+    /// (see [`list_window`]). The size is read from the file for the page window
+    /// only, not for every row of the organization. A row whose file has been
+    /// removed from disk is skipped.
+    async fn list(
+        &self,
+        org_id: &str,
+        filter: &quarry_core::pagination::ListFilter,
+    ) -> QuarryResult<quarry_core::pagination::Page<quarry_core::resources::ArtifactSummary>> {
+        use quarry_core::pagination::Page;
+        use quarry_core::resources::ArtifactSummary;
+
+        if org_id.is_empty() {
+            return Ok(Page::new(Vec::new(), None, None));
+        }
+        let rows = self.index_rows(org_id).await?;
+        let (window, next_cursor) = list_window(rows, filter, |r| (r.created_at, r.id.to_string()));
+        let mut items = Vec::with_capacity(window.len());
+        for row in window {
+            let path = self.abs_path(&row.key);
+            let bytes = match tokio::fs::metadata(&path).await {
+                Ok(meta) => meta.len(),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(e) => {
+                    return Err(QuarryError::new(
+                        ErrorCode::Internal,
+                        format!("fs stat {}: {e}", path.display()),
+                    ))
+                }
+            };
+            // `{stem}.{ext}`: the stem is the kind and never contains a dot.
+            let kind = row
+                .key
+                .rsplit('/')
+                .next()
+                .and_then(|file| file.split('.').next())
+                .unwrap_or_default()
+                .to_string();
+            items.push(ArtifactSummary {
+                artifact_id: row.id,
+                org_id: org_id.to_string(),
+                kind,
+                bytes,
+                sha256: None,
+                created_at: row.created_at,
+                source_url: None,
+            });
+        }
+        Ok(Page::new(items, next_cursor, None))
     }
 }
 
@@ -849,6 +956,221 @@ mod tests {
             p1_ids,
             p2_ids
         );
+    }
+
+    // ---- One list contract, run against both in-process stores (R7) --------
+
+    use quarry_core::pagination::ListFilter;
+
+    /// What one listed artifact looks like to a caller, minus the id.
+    type Shape = (String, String, u64);
+
+    /// The behaviour every in-process store must have. Puts five artifacts for
+    /// `org_a` (alternating html and markdown, with distinct page hashes and bodies
+    /// of distinct lengths), one for `org_b` and one unattributed, then checks
+    /// scoping, order, limit, cursor, the status and time filters and the empty
+    /// org. Returns what `org_a` sees, newest first, so two stores can be compared.
+    async fn assert_list_contract(store: &dyn ArtifactStore) -> Vec<Shape> {
+        let run: RunKind = Id::new();
+        let mut put_ids = Vec::new();
+        let mut put_shapes = Vec::new();
+        for i in 0..5usize {
+            let kind = if i % 2 == 0 { "html" } else { "markdown" };
+            let body = vec![b'x'; i + 1];
+            let handle = store
+                .put("org_a", &run, &format!("blake3:{i}"), kind, body)
+                .await
+                .unwrap();
+            put_ids.push(handle.artifact_id.to_string());
+            put_shapes.push(("org_a".to_string(), kind.to_string(), (i + 1) as u64));
+            // ULIDs carry milliseconds: tick so every artifact has its own time.
+            tokio::time::sleep(std::time::Duration::from_millis(3)).await;
+        }
+        store
+            .put("org_b", &run, "blake3:b", "html", b"other org".to_vec())
+            .await
+            .unwrap();
+        store
+            .put("", &run, "blake3:none", "html", b"unattributed".to_vec())
+            .await
+            .unwrap();
+
+        let all = ListFilter::default();
+        let page = store.list("org_a", &all).await.unwrap();
+        assert!(page.next_cursor.is_none(), "five rows fit one default page");
+        let newest_first: Vec<String> = page.items.iter().map(|m| m.artifact_id.to_string()).collect();
+        let mut expected_ids = put_ids.clone();
+        expected_ids.reverse();
+        assert_eq!(newest_first, expected_ids, "newest first, by creation");
+        let shapes: Vec<Shape> = page
+            .items
+            .iter()
+            .map(|m| (m.org_id.clone(), m.kind.clone(), m.bytes))
+            .collect();
+        let mut expected_shapes = put_shapes.clone();
+        expected_shapes.reverse();
+        assert_eq!(shapes, expected_shapes, "org, kind and size of every row");
+        assert!(page.items.iter().all(|m| m.org_id == "org_a"));
+
+        // Oldest first is the same rows the other way round.
+        let oldest = store
+            .list("org_a", &ListFilter { sort: quarry_core::pagination::SortDirection::Oldest, ..Default::default() })
+            .await
+            .unwrap();
+        let oldest_ids: Vec<String> = oldest.items.iter().map(|m| m.artifact_id.to_string()).collect();
+        assert_eq!(oldest_ids, put_ids, "oldest first");
+
+        // Limit, and a cursor walk that visits every row exactly once.
+        for sort in [quarry_core::pagination::SortDirection::Newest, quarry_core::pagination::SortDirection::Oldest] {
+            let full: Vec<String> = store
+                .list("org_a", &ListFilter { sort, ..Default::default() })
+                .await
+                .unwrap()
+                .items
+                .iter()
+                .map(|m| m.artifact_id.to_string())
+                .collect();
+            let mut walked = Vec::new();
+            let mut cursor = None;
+            let mut sizes = Vec::new();
+            loop {
+                let page = store
+                    .list("org_a", &ListFilter { limit: Some(2), cursor: cursor.clone(), sort, ..Default::default() })
+                    .await
+                    .unwrap();
+                sizes.push(page.items.len());
+                walked.extend(page.items.iter().map(|m| m.artifact_id.to_string()));
+                match page.next_cursor {
+                    Some(next) => cursor = Some(next),
+                    None => break,
+                }
+                assert!(sizes.len() < 10, "the cursor never ends");
+            }
+            assert_eq!(sizes, vec![2, 2, 1], "{sort:?}: page sizes");
+            assert_eq!(walked, full, "{sort:?}: the walk equals the full list");
+        }
+        let one = store
+            .list("org_a", &ListFilter { limit: Some(0), ..Default::default() })
+            .await
+            .unwrap();
+        assert_eq!(one.items.len(), 1, "a limit of 0 is clamped to 1");
+        assert!(one.next_cursor.is_some());
+
+        // Status: "stored" is the implicit status, any other matches nothing.
+        let stored = store
+            .list("org_a", &ListFilter { status: Some("stored".into()), ..Default::default() })
+            .await
+            .unwrap();
+        assert_eq!(stored.items.len(), 5);
+        let failed = store
+            .list("org_a", &ListFilter { status: Some("failed".into()), ..Default::default() })
+            .await
+            .unwrap();
+        assert!(failed.items.is_empty());
+
+        // Time bounds are inclusive and use the listed `created_at`.
+        let third = &oldest.items[2];
+        let before = store
+            .list("org_a", &ListFilter { created_before: Some(third.created_at), ..Default::default() })
+            .await
+            .unwrap();
+        assert_eq!(before.items.len(), 3, "the first three, the bound row included");
+        let after = store
+            .list("org_a", &ListFilter { created_after: Some(third.created_at), ..Default::default() })
+            .await
+            .unwrap();
+        assert_eq!(after.items.len(), 3, "the last three, the bound row included");
+
+        // Another organization sees only its own, an unknown one nothing, an
+        // org-less caller nothing (not even the unattributed write).
+        let b = store.list("org_b", &all).await.unwrap();
+        assert_eq!(b.items.len(), 1);
+        assert_eq!(b.items[0].org_id, "org_b");
+        assert!(store.list("org_c", &all).await.unwrap().items.is_empty());
+        assert!(store.list("", &all).await.unwrap().items.is_empty());
+
+        shapes
+    }
+
+    #[tokio::test]
+    async fn in_memory_store_meets_the_list_contract() {
+        assert_list_contract(&InMemoryStore::new()).await;
+    }
+
+    #[tokio::test]
+    async fn fs_store_meets_the_list_contract() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert_list_contract(&FilesystemStore::new(tmp.path()).unwrap()).await;
+    }
+
+    #[tokio::test]
+    async fn both_stores_list_the_same_shapes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fs = assert_list_contract(&FilesystemStore::new(tmp.path()).unwrap()).await;
+        let memory = assert_list_contract(&InMemoryStore::new()).await;
+        assert_eq!(fs, memory);
+    }
+
+    #[tokio::test]
+    async fn fs_store_lists_what_an_earlier_store_wrote() {
+        let tmp = tempfile::tempdir().unwrap();
+        let run: RunKind = Id::new();
+        let mut ids = Vec::new();
+        {
+            let store = FilesystemStore::new(tmp.path()).unwrap();
+            for i in 0..3 {
+                let h = store
+                    .put("org_a", &run, &format!("blake3:{i}"), "markdown", format!("# {i}").into_bytes())
+                    .await
+                    .unwrap();
+                ids.push(h.artifact_id.to_string());
+                tokio::time::sleep(std::time::Duration::from_millis(3)).await;
+            }
+            store
+                .put("org_b", &run, "blake3:b", "html", b"<p>b</p>".to_vec())
+                .await
+                .unwrap();
+        } // dropped: nothing of the first store is in memory any more.
+
+        let reopened = FilesystemStore::new(tmp.path()).unwrap();
+        let page = reopened.list("org_a", &ListFilter::default()).await.unwrap();
+        let listed: Vec<String> = page.items.iter().map(|m| m.artifact_id.to_string()).collect();
+        ids.reverse();
+        assert_eq!(listed, ids, "the new store lists the records, newest first");
+        assert!(page.items.iter().all(|m| m.kind == "markdown" && m.bytes == 3));
+        // A listed id reads back through the same store.
+        let first = &page.items[0];
+        assert_eq!(reopened.get("org_a", &first.artifact_id).await.unwrap(), b"# 2".to_vec());
+        // Another organization sees none of org_a's.
+        let b = reopened.list("org_b", &ListFilter::default()).await.unwrap();
+        assert_eq!(b.items.len(), 1);
+        assert_eq!(b.items[0].kind, "html");
+        assert!(reopened.list("org_z", &ListFilter::default()).await.unwrap().items.is_empty());
+    }
+
+    #[tokio::test]
+    async fn fs_store_list_skips_a_row_whose_file_is_gone_and_a_damaged_index_line() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = FilesystemStore::new(tmp.path()).unwrap();
+        let run: RunKind = Id::new();
+        let keep = store
+            .put("org_a", &run, "blake3:keep", "html", b"keep".to_vec())
+            .await
+            .unwrap();
+        let gone = store
+            .put("org_a", &run, "blake3:gone", "markdown", b"gone".to_vec())
+            .await
+            .unwrap();
+        std::fs::remove_file(tmp.path().join(&gone.key)).unwrap();
+        // A truncated last line (a crash mid-append) and a line that is not an id.
+        let mut index = std::fs::read_to_string(tmp.path().join(".index")).unwrap();
+        index.push_str("art_01TRUNCATED");
+        index.push_str("\nnot-an-id\torg=org_a/run=r/page=p/html.html\n");
+        std::fs::write(tmp.path().join(".index"), index).unwrap();
+
+        let page = store.list("org_a", &ListFilter::default()).await.unwrap();
+        assert_eq!(page.items.len(), 1);
+        assert_eq!(page.items[0].artifact_id.to_string(), keep.artifact_id.to_string());
     }
 
     #[tokio::test]
