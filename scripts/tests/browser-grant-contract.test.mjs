@@ -283,6 +283,31 @@ test('the broker is reachable on inter-plane-bus under the names its clients use
   assert.match(compose, /BROWSER_BROKER_ADDR: http:\/\/model-plane-browser-broker-1:9095/);
 });
 
+test('the broker uses a dedicated database and role on Quarry\'s Postgres, reached over a Postgres-only network', () => {
+  const compose = read('apps/Model Plane/deploy/docker-compose.yml');
+  const broker = composeService(compose, 'browser-broker');
+  // Dedicated role + database on ingestion-postgres: never quarry_edge / quarry_v2, never the postgres superuser.
+  assert.match(
+    broker,
+    /DATABASE_URL: postgresql:\/\/browser_broker:\$\{BROWSER_BROKER_PG_PASSWORD:\?[^}]+\}@ingestion-postgres:5432\/browser_broker\n/,
+  );
+  assert.doesNotMatch(broker, /^s+BROWSER_BROKER_ALLOW_EPHEMERAL_DEVELOPMENT:/m, 'the base file must not enable the ephemeral store');
+  // The broker joins the dedicated network, declared external in Model Plane and owned by the Ingestion compose.
+  assert.match(broker, /\n\s+browser-broker-db: \{\}/);
+  assert.match(compose, /\n {2}browser-broker-db:\n {4}external: true/);
+  const ingestion = read('apps/Ingestion Plane/docker-compose.yml');
+  const postgres = composeService(ingestion, 'postgres');
+  assert.match(postgres, /container_name: ingestion-postgres/);
+  assert.match(postgres, /networks:\n(?:\s+(?:#.*|- ingestion-net)\n)+\s+- browser-broker-db\n/);
+  assert.match(ingestion, /\n {2}browser-broker-db:\n {4}name: browser-broker-db\n {4}driver: bridge/);
+  // Only the broker joins it on the Model Plane side.
+  const joiners = [...compose.matchAll(/\n {6}browser-broker-db: \{\}/g)].length;
+  assert.equal(joiners, 1, 'only browser-broker joins browser-broker-db in the Model Plane compose');
+  // The password is documented, and a signed release may carry it.
+  assert.match(read('apps/Model Plane/deploy/.env.example'), /^BROWSER_BROKER_PG_PASSWORD=$/m);
+  assert.match(read('apps/Model Plane/scripts/release-artifact.sh'), /\bBROWSER_BROKER_PG_PASSWORD\b/);
+});
+
 test('the broker defaults in compose match the Go defaults', () => {
   const config = read('apps/Model Plane/go/services/browser-broker/internal/server/config.go');
   assert.match(config, /DefaultGrantTTL = 15 \* time\.Minute/);

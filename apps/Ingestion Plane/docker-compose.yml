@@ -1049,6 +1049,11 @@ services:
     restart: unless-stopped
     networks:
       - ingestion-net
+      # Dedicated link to the Model Plane browser-broker, which keeps its grant
+      # store in its own database (browser_broker) on this server. Only this
+      # service and the broker are on that network; Model Plane declares it
+      # external. scripts/bootstrap_broker_db.sh creates the role and database.
+      - browser-broker-db
     environment:
       POSTGRES_USER: ingestion_user
       POSTGRES_PASSWORD: ${INGESTION_PG_PASSWORD:?INGESTION_PG_PASSWORD is required}
@@ -1600,6 +1605,14 @@ networks:
   # Privat nettverk for ingestion plane
   ingestion-net:
     name: ingestion-net
+    driver: bridge
+
+  # Postgres-only network shared with the Model Plane browser-broker (its grant
+  # store is the dedicated browser_broker database on ingestion-postgres). Owned
+  # here because this plane owns the server; Model Plane joins it as external, so
+  # bring this stack (at least postgres) up before the broker.
+  browser-broker-db:
+    name: browser-broker-db
     driver: bridge
 
   # Felles nettverk for intern kommunikasjon på tvers av planes

@@ -143,3 +143,12 @@ CREATE DATABASE finspo
 
 SELECT 'CREATE DATABASE shipping_core OWNER ingestion_user'
 WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = 'shipping_core')\gexec
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- 8. browser_broker database + role  (used by the Model Plane browser-broker)
+--    NOT created here: the role needs a password this script cannot read, and
+--    this file only runs on a fresh data volume. Run
+--    scripts/bootstrap_broker_db.sh (idempotent) after the stack is up; it
+--    creates role browser_broker and database browser_broker (owned by it, with
+--    CONNECT revoked from PUBLIC). The broker applies its own migrations.
+-- ─────────────────────────────────────────────────────────────────────────────
