@@ -5217,14 +5217,16 @@ pub(super) async fn dispatch_browser_run_action(
     if session_id.is_empty() || action.is_none() {
         return ticket_bad_request("browser_action.run requires 'sessionId' and 'action'");
     }
-    let actor_raw = input
-        .get("actor")
-        .and_then(Value::as_str)
-        .unwrap_or("human");
-    let actor = match actor_raw {
-        "agent" => BrowserActionActor::Agent,
-        "human" => BrowserActionActor::Human,
-        _ => return ticket_bad_request("browser_action.run 'actor' must be 'human' or 'agent'"),
+    // An absent actor is the person's (the SPA's own calls omit it); a present
+    // actor that is not exactly the string "human" or "agent" is refused, never
+    // read as the person's.
+    let actor = match input.get("actor") {
+        None => BrowserActionActor::Human,
+        Some(Value::String(actor)) if actor == "human" => BrowserActionActor::Human,
+        Some(Value::String(actor)) if actor == "agent" => BrowserActionActor::Agent,
+        Some(_) => {
+            return ticket_bad_request("browser_action.run 'actor' must be 'human' or 'agent'")
+        }
     };
     let body = BrowserActionBody {
         action: action.unwrap_or(Value::Null),
@@ -6220,6 +6222,41 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn a_browser_action_with_a_non_string_actor_is_refused_not_read_as_human() {
+        let quarry = wiremock::MockServer::start().await;
+        mount_tab_run(&quarry, "human_takeover").await;
+        let mut state = crate::tests::test_state(false);
+        state.quarry_edge_url = quarry.uri();
+        let user = tab_dispatch_user();
+        let headers = HeaderMap::new();
+
+        for actor in [
+            json!(null),
+            json!(1),
+            json!(true),
+            json!(["agent"]),
+            json!({ "kind": "agent" }),
+            json!("system"),
+        ] {
+            let response = dispatch_browser_run_action(
+                &state,
+                &user,
+                &headers,
+                &json!({
+                    "sessionId": "run-1",
+                    "action": { "type": "click", "selector": "#go" },
+                    "actor": actor,
+                }),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{actor}");
+        }
+        assert!(
+            quarry.received_requests().await.expect("recorded").is_empty(),
+            "a malformed actor is refused before Quarry is asked anything"
+        );
+    }
 
     #[test]
     fn audio_dictate_forwards_safari_recordings_and_the_retention_flag() {
