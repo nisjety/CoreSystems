@@ -274,6 +274,7 @@ pub enum BrowserTimelineItemDetail {
     },
     Control {
         mode: BrowserControlMode,
+        #[serde(rename = "initiatedBy")]
         initiated_by: BrowserTimelineInitiator,
         #[serde(rename = "controlEpoch")]
         control_epoch: u64,
@@ -473,6 +474,18 @@ pub struct NewTabBody {
     pub initiated_by: Option<InitiatorHint>,
 }
 
+/// The query of a tab select or close (neither has a body): who initiated the call.
+/// Same rule as `/step`: the hint can only tighten. `agent` on a person's token makes
+/// the call an agent's, so it is refused during a take-over; a service principal is an
+/// agent whatever it sends. A value that is not `human` or `agent` is a 400, never
+/// read as the person's.
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TabCallQuery {
+    #[serde(default, alias = "initiated_by")]
+    pub initiated_by: Option<InitiatorHint>,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum BrowserWsClientMessage {
@@ -512,7 +525,17 @@ pub(super) async fn run_gone_err(
     request_id: &str,
     run_id: &str,
 ) -> ApiErr {
-    let resumable = match run_id.parse::<RunKind>() {
+    if !run_is_resumable(state, claims, run_id).await {
+        return status_err(StatusCode::NOT_FOUND, request_id, "agent run not found");
+    }
+    run_not_live_err(request_id, run_id, true)
+}
+
+/// Whether the caller owns an active, non-ZDR checkpoint for `run_id`, i.e. may
+/// start a run with it as `resume_run_id`. An explicitly closed run's checkpoint is
+/// `closed`, so it is not resumable.
+async fn run_is_resumable(state: &AppState, claims: &crate::auth::Claims, run_id: &str) -> bool {
+    match run_id.parse::<RunKind>() {
         Ok(parsed) => matches!(
             state.receipts.load_run_checkpoint(&claims.org_id, &parsed).await,
             Ok(Some(checkpoint))
@@ -521,22 +544,44 @@ pub(super) async fn run_gone_err(
                     && caller_owns_browser_run(&checkpoint.org_id, &checkpoint.actor_id, claims)
         ),
         Err(_) => false,
-    };
-    if !resumable {
-        return status_err(StatusCode::NOT_FOUND, request_id, "agent run not found");
     }
+}
+
+/// The 404 `run_not_live`, with the resume hint when the run can be resumed.
+fn run_not_live_err(request_id: &str, run_id: &str, resumable: bool) -> ApiErr {
+    let details = if resumable {
+        serde_json::json!({
+            "reason": "run_not_live",
+            "resumable": true,
+            "resume_run_id": run_id,
+        })
+    } else {
+        serde_json::json!({ "reason": "run_not_live" })
+    };
     (
         StatusCode::NOT_FOUND,
         Json(Envelope::<()>::err(
             request_id,
-            QuarryError::new(ErrorCode::NotFound, "agent run is not live").with_details(
-                serde_json::json!({
-                    "reason": "run_not_live",
-                    "resumable": true,
-                    "resume_run_id": run_id,
-                }),
-            ),
+            QuarryError::new(ErrorCode::NotFound, "agent run is not live").with_details(details),
         )),
+    )
+}
+
+/// The 404 for a call that was queued on the run's lock when the run was closed
+/// under it (the sweeper released it, or its owner closed it). The caller owns the
+/// run (checked before this), so the answer is `run_not_live` as for a run already
+/// gone; it carries the resume hint only when the checkpoint is still active: an
+/// expiry leaves it so, an explicit close does not.
+pub(super) async fn run_closed_err(
+    state: &AppState,
+    claims: &crate::auth::Claims,
+    request_id: &str,
+    run_id: &str,
+) -> ApiErr {
+    run_not_live_err(
+        request_id,
+        run_id,
+        run_is_resumable(state, claims, run_id).await,
     )
 }
 

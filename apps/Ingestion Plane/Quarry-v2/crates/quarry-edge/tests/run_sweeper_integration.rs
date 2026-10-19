@@ -799,15 +799,12 @@ async fn two_overlapping_sweeps_release_an_idle_run_once() {
     assert_eq!(expired.len(), 1, "one agent.expired: {expired:?}");
 }
 
-/// Finding F5-2 (ignored until the code agrees; `cargo test -- --ignored` shows it fail).
-///
-/// A resumed run keeps the stricter of its stored and derived budget class (budget.rs
-/// says so), but the class the sweeper reads is built from the request alone
-/// (`start_run` makes the `RunLive` with `classify(is_service, body.initiated_by)`).
-/// So a person who resumes an agent run without the `initiated_by: "agent"` hint is
-/// swept on the interactive limits (900 s idle here), not on the agent's 60 s.
+/// A resumed run keeps the stricter of its stored and derived class, for the budget
+/// (budget.rs) and for the sweeper alike (`resumed_run_class`). A person who resumes an
+/// agent run without the `initiated_by: "agent"` hint is swept on the agent's 60 s idle
+/// limit, not the interactive 900 s (finding F5-2: the sweeper's class was built from the
+/// request alone).
 #[tokio::test]
-#[ignore = "finding F5-2: a resumed agent run is swept with the interactive class"]
 async fn a_resumed_agent_run_keeps_the_agent_lifetime() {
     let limits = RunLimits {
         agent_idle_ttl_s: 60,
@@ -839,14 +836,13 @@ async fn a_resumed_agent_run_keeps_the_agent_lifetime() {
     );
 }
 
-/// Finding F5-3 (ignored until the code agrees).
-///
 /// A step that is past the registry lookup and waiting for the run's lock when the
-/// sweeper releases the run is refused by admission (`closed`). That 404 carries
-/// `reason: run_not_live` but not the `resumable` hint a step on a run already gone
-/// carries; WS2.D asks for both on a step or tab call on a dead run.
+/// sweeper releases the run gets the 404 `run_not_live` with the `resumable` hint a step
+/// on a run already gone carries (finding F5-3: it used to get the reason alone). The
+/// hint is the checkpoint's: see `a_call_queued_behind_the_owners_close_is_not_offered_a_resume`
+/// for the owner's close, and `a_tab_call_queued_behind_an_expiry_gets_the_resume_hint`
+/// for the tab calls.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "finding F5-3: the closed-while-queued 404 lacks the resumable hint"]
 async fn a_step_queued_behind_an_expiry_gets_the_resume_hint() {
     let edge = Arc::new(Edge::start(idle_limits(60)).await);
     let person = member_token();
@@ -888,5 +884,258 @@ async fn a_step_queued_behind_an_expiry_gets_the_resume_hint() {
         run.as_str(),
         "{}",
         reply.body
+    );
+}
+
+// ── tab calls: the in-flight guard, and a call queued behind a release ──────────
+
+const TAB_CALLS: [&str; 3] = ["open", "select", "close"];
+
+/// Open a tab on the run and return its id.
+async fn a_tab_id(edge: &Edge, person: &str, run: &str) -> String {
+    let opened = edge.new_tab(person, run, None).await;
+    assert_eq!(opened.status, 200, "{}", opened.body);
+    opened.data()["tab"]["tabId"]
+        .as_str()
+        .expect("the new tab has an id")
+        .to_owned()
+}
+
+/// The verb, route and body of a tab call (`open`, `select` or `close`).
+fn tab_call(which: &str, run: &str, tab_id: &str) -> (reqwest::Method, String, Option<Value>) {
+    match which {
+        "open" => (
+            reqwest::Method::POST,
+            format!("/v1/agent/runs/{run}/tabs"),
+            Some(json!({})),
+        ),
+        "select" => (
+            reqwest::Method::POST,
+            format!("/v1/agent/runs/{run}/tabs/{tab_id}/select"),
+            None,
+        ),
+        "close" => (
+            reqwest::Method::DELETE,
+            format!("/v1/agent/runs/{run}/tabs/{tab_id}"),
+            None,
+        ),
+        other => panic!("not a tab call: {other}"),
+    }
+}
+
+/// Send `call` on its own task, so it can queue on the run's lock while the test holds it.
+fn spawn_call(
+    edge: &Arc<Edge>,
+    person: &str,
+    (method, route, body): (reqwest::Method, String, Option<Value>),
+) -> tokio::task::JoinHandle<Reply> {
+    let edge = edge.clone();
+    let person = person.to_owned();
+    tokio::spawn(async move { edge.send(method, &person, &route, body).await })
+}
+
+/// A tab call counts itself in flight before it waits for the run's lock, as a step
+/// does (`tabs.rs`), so while one is queued behind a running action neither the verdict
+/// nor a sweep releases the run. When it has finished, the next sweep expires the run.
+/// This fails if a tab handler stops counting itself in flight before it takes the lock.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_tab_call_queued_on_the_run_lock_is_in_flight_and_holds_the_run() {
+    for which in TAB_CALLS {
+        let limits = idle_limits(60);
+        let edge = Arc::new(Edge::start(limits.clone()).await);
+        let person = member_token();
+        let run = edge.start_run(&person, json!({})).await;
+        let tab_id = a_tab_id(&edge, &person, &run).await;
+        let handle = edge.live(&run).expect("the run is live");
+
+        // A running action holds the run's lock, and the tab call queues behind it.
+        let running = handle.entry.lock().await;
+        let queued = spawn_call(&edge, &person, tab_call(which, &run, &tab_id));
+        let counted = wait_for(|| handle.live.in_flight() == 1).await;
+        assert!(
+            counted,
+            "a tab {which} queued on the run lock must count itself in flight before it waits \
+             for the lock (the tab handlers take the in-flight guard first); in_flight is {}",
+            handle.live.in_flight()
+        );
+
+        assert_eq!(
+            handle.live.verdict(later(120_000), &limits),
+            None,
+            "a queued tab {which} is in flight"
+        );
+        let held = sweep_once(&edge.state, later(120_000)).await;
+        assert_eq!(
+            held,
+            SweepReport::default(),
+            "a sweep leaves a run with a queued tab {which} alone"
+        );
+        assert!(edge.driver.released().is_empty());
+
+        drop(running);
+        let reply = queued.await.expect("queued tab call");
+        assert_eq!(reply.status, 200, "tab {which}: {}", reply.body);
+        assert_eq!(
+            handle.live.in_flight(),
+            0,
+            "the tab {which} has let go of the run"
+        );
+        let released = sweep_once(&edge.state, later(120_000)).await;
+        assert_eq!(
+            released.expired, 1,
+            "the run expires once its last call is done (tab {which})"
+        );
+        assert_eq!(edge.driver.released(), vec![run]);
+    }
+}
+
+/// Queue `call` on the run's lock, then release the run under it as the sweeper does
+/// (closed, out of the registry, the checkpoint left active). With `explicit` the
+/// owner's close also closes the checkpoint, as `DELETE /v1/agent/runs/{id}` does.
+/// Returns the reply the queued call got.
+async fn call_queued_behind_a_release(
+    call: impl FnOnce(&str, &str) -> (reqwest::Method, String, Option<Value>),
+    explicit: bool,
+) -> Reply {
+    let edge = Arc::new(Edge::start(idle_limits(60)).await);
+    let person = member_token();
+    let run = edge.start_run(&person, json!({})).await;
+    let tab_id = a_tab_id(&edge, &person, &run).await;
+    let handle = edge.live(&run).expect("the run is live");
+
+    let mut running = handle.entry.lock().await;
+    let queued = spawn_call(&edge, &person, call(&run, &tab_id));
+    let counted = wait_for(|| handle.live.in_flight() == 1).await;
+    assert!(
+        counted,
+        "the call must count itself in flight before it waits for the run lock; in_flight is {}",
+        handle.live.in_flight()
+    );
+
+    running.closed = true;
+    edge.state
+        .agent_runs
+        .lock()
+        .expect("agent_runs mutex")
+        .remove(&run);
+    if explicit {
+        edge.state
+            .receipts
+            .close_run_checkpoint(MEMBER_ORG, &kind(&run))
+            .await
+            .expect("the owner's close closes the checkpoint");
+    }
+    drop(running);
+    queued.await.expect("queued call")
+}
+
+/// A tab call queued behind an expiry gets the same hint a step does: `run_not_live`
+/// with `resumable` and the id to resume, because the expiry left the checkpoint active.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_tab_call_queued_behind_an_expiry_gets_the_resume_hint() {
+    for which in TAB_CALLS {
+        let reply =
+            call_queued_behind_a_release(|run, tab_id| tab_call(which, run, tab_id), false).await;
+        assert_eq!(reply.status, 404, "tab {which}: {}", reply.body);
+        assert_eq!(reply.details()["reason"], "run_not_live", "{}", reply.body);
+        assert_eq!(
+            reply.details()["resumable"],
+            true,
+            "tab {which}: {}",
+            reply.body
+        );
+        assert!(
+            reply.details()["resume_run_id"].as_str().is_some(),
+            "tab {which}: {}",
+            reply.body
+        );
+    }
+}
+
+/// The hint follows the checkpoint, not the run's closed flag: when the owner's own
+/// close ended the run, its checkpoint is closed and the run cannot be resumed, so a
+/// step or tab call queued behind that close is told the run is not live and nothing
+/// more.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_call_queued_behind_the_owners_close_is_not_offered_a_resume() {
+    let step = call_queued_behind_a_release(
+        |run, _| {
+            (
+                reqwest::Method::POST,
+                format!("/v1/agent/runs/{run}/step"),
+                Some(json!({ "action": wait_action() })),
+            )
+        },
+        true,
+    )
+    .await;
+    assert_eq!(step.status, 404, "{}", step.body);
+    assert_eq!(step.details()["reason"], "run_not_live", "{}", step.body);
+    assert!(step.details().get("resumable").is_none(), "{}", step.body);
+
+    for which in TAB_CALLS {
+        let reply =
+            call_queued_behind_a_release(|run, tab_id| tab_call(which, run, tab_id), true).await;
+        assert_eq!(reply.status, 404, "tab {which}: {}", reply.body);
+        assert_eq!(reply.details()["reason"], "run_not_live", "{}", reply.body);
+        assert!(
+            reply.details().get("resumable").is_none(),
+            "tab {which}: {}",
+            reply.body
+        );
+    }
+}
+
+/// A resumed agent run keeps the lifetime its stored constraints set, not the one the
+/// resume request names: the stored `max_runtime_s` is authoritative (a resume cannot
+/// widen it), and the sweeper reads it, not the request's.
+#[tokio::test]
+async fn a_resumed_agent_run_keeps_its_stored_runtime_not_the_resume_requests() {
+    let limits = RunLimits {
+        agent_idle_ttl_s: 100_000,
+        agent_ttl_grace_s: 5,
+        agent_max_ttl_s: 100_000,
+        interactive_idle_ttl_s: 100_000,
+        max_concurrent_runs: 0,
+        max_runs_per_org: 0,
+        max_interactive_runs_per_org: 0,
+        ..RunLimits::default()
+    };
+    let edge = Edge::start(limits).await;
+    let person = member_token();
+    let run = edge
+        .start_run(
+            &person,
+            json!({
+                "initiated_by": "agent",
+                "constraints": { "max_steps": 0, "max_runtime_s": 30 },
+            }),
+        )
+        .await;
+    let first = sweep_once(&edge.state, later(120_000)).await;
+    assert_eq!(first.expired, 1, "30 s plus the grace is over at 120 s");
+
+    let resumed = edge
+        .post(
+            &person,
+            "/v1/agent/runs",
+            json!({
+                "resume_run_id": run,
+                "initiated_by": "agent",
+                "constraints": { "max_steps": 0, "max_runtime_s": 3000 },
+            }),
+        )
+        .await;
+    assert_eq!(resumed.status, 200, "{}", resumed.body);
+
+    let early = sweep_once(&edge.state, later(20_000)).await;
+    assert_eq!(
+        early.expired, 0,
+        "20 s is inside the stored 30 s plus grace"
+    );
+    let late = sweep_once(&edge.state, later(40_000)).await;
+    assert_eq!(
+        late.expired, 1,
+        "40 s is past the stored 30 s plus grace; the request's 3000 s does not apply"
     );
 }

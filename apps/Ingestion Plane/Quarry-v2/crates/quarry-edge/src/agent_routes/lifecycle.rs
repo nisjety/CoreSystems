@@ -39,6 +39,24 @@ pub(super) fn zdr_grant_may_back_run(grant_zdr: bool, run_zdr: bool) -> bool {
     !grant_zdr || run_zdr
 }
 
+/// The class a run is swept and capped under. A resumed run keeps the stricter of the
+/// class it was checkpointed with and the one this request derives, so a person who
+/// resumes an agent's run without the `initiated_by: "agent"` hint does not turn it
+/// into an interactive session with the longer interactive limits (the budget ledger
+/// already takes the same rule, `RunBudget::start`).
+///
+/// The stored class is the budget ledger's, so a run checkpointed while budget
+/// enforcement was `off` carries none and is classed from the request alone.
+pub(super) fn resumed_run_class(
+    checkpoint: Option<&AgentRunCheckpoint>,
+    derived: crate::budget::RunClass,
+) -> crate::budget::RunClass {
+    checkpoint
+        .and_then(|checkpoint| checkpoint.budget.as_ref())
+        .and_then(|budget| crate::budget::RunClass::from_label(&budget.class))
+        .map_or(derived, |stored| stored.stricter(derived))
+}
+
 /// `POST /v1/agent/runs` — acquire a leased browser session for a new run.
 pub async fn start_run(
     State(state): State<AppState>,
@@ -292,7 +310,10 @@ pub async fn start_run(
 
     // The run caps come first (R-26: run cap, then the driver's own cap). The slot
     // counts against them from here and frees itself on every early return below.
-    let run_class = crate::budget::classify(claims.is_service(), body.initiated_by.as_deref());
+    let run_class = resumed_run_class(
+        resume_checkpoint.as_ref(),
+        crate::budget::classify(claims.is_service(), body.initiated_by.as_deref()),
+    );
     let slot = state
         .agent_runs
         .try_reserve(&org_id, run_class)
@@ -357,7 +378,7 @@ pub async fn start_run(
     let budget = (budget_mode != crate::budget::BudgetMode::Off).then(|| {
         crate::budget::RunBudget::start(
             crate::budget::BudgetLimits::cached(),
-            crate::budget::classify(claims.is_service(), body.initiated_by.as_deref()),
+            run_class,
             &constraints,
             resume_checkpoint
                 .as_ref()
@@ -430,7 +451,9 @@ pub async fn start_run(
         entry.control_mode,
         entry.control_epoch,
     )
-    .with_run(run_class, body.constraints.max_runtime_s.map(u64::from));
+    // The lifetime is the run's effective one: a resumed run's stored constraints
+    // are authoritative (see above), so the resume request cannot lengthen it.
+    .with_run(run_class, entry.constraints.max_runtime_s.map(u64::from));
 
     if !zdr.is_active() {
         let checkpoint = checkpoint_for_entry(&entry);

@@ -28,6 +28,10 @@ pub async fn step(
         ));
     }
     handle.live.touch();
+    // The run was closed while this step waited for its lock.
+    if entry.closed {
+        return Err(run_closed_err(&state, &claims, &request_id, &run_id).await);
+    }
 
     // Every gate, in one fixed order (see `admit_action`).
     let admitted = admit_action(

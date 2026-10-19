@@ -12,9 +12,9 @@
 //! that token labelled `initiated_by: "agent"` (a step, a tab open, a socket action
 //! labelled `actor: "agent"`), and a labelled action meets the take-over gate that any
 //! agent action meets.
-//! Tab select and close take no label, so on a person's token they are the person's,
-//! and an agent's select or close during a take-over is not refused (finding F5-4,
-//! the ignored test at the end of this file). A service principal's run is owned by
+//! Tab select and close take the label in the `initiatedBy` query (they have no body;
+//! a tab open takes it in its body), read the way a step's is, so an agent's select
+//! or close during a take-over is refused too. A service principal's run is owned by
 //! the service, and a service is always an agent, so no HTTP route can take a
 //! service-owned run over. The one test that needs a take-over of such a run sets it
 //! on the live handle, the way the control route does, and says so.
@@ -714,24 +714,23 @@ async fn a_socket_action_labelled_agent_during_a_takeover_is_refused() {
     assert_eq!(done[0]["control_epoch"], 1);
 }
 
-// ── contract findings ───────────────────────────────────────────────────────
+// ── contract: the wire names of a control item, and the tab label ───────────
 
-/// The plan's contract says timeline items carry `initiatedBy` and `controlEpoch`.
-/// The Tab and Action items do; a Control item does not (`BrowserTimelineItemDetail::Control`
-/// in `agent_routes/types.rs` has no `rename` on `initiated_by`), so it serialises
-/// `initiated_by`. The plan fixes the name as `initiatedBy`, so this stays strict and
-/// ignored until the code agrees; `cargo test -- --ignored` shows the failure.
+/// Timeline items carry `initiatedBy` and `controlEpoch` (the names the SPA's
+/// `BrowserOwnerTimelineItem` reads). Every kind of item says so, the control item
+/// too: it once serialised `initiated_by` (finding F5-1).
 #[tokio::test]
 #[serial]
-#[ignore = "finding F5-1: a control timeline item serialises initiated_by, not initiatedBy"]
 async fn control_timeline_items_carry_initiated_by_under_the_documented_name() {
     set_takeover_enforcement(None);
 
     let edge = Edge::start(RunLimits::default()).await;
     let person = member_token();
     let run = edge.start_run(&person, json!({})).await;
-    edge.control(&person, &run, json!({ "mode": "human_takeover" }))
+    let takeover = edge
+        .control(&person, &run, json!({ "mode": "human_takeover" }))
         .await;
+    assert_eq!(takeover.status, 200, "{}", takeover.body);
 
     let timeline = edge.timeline(&person, &run).await;
     let control = timeline
@@ -740,53 +739,57 @@ async fn control_timeline_items_carry_initiated_by_under_the_documented_name() {
         .expect("the take-over is on the timeline");
     assert_eq!(control["initiatedBy"], "human", "{control}");
     assert_eq!(control["controlEpoch"], 1, "{control}");
+    assert!(
+        control.get("initiated_by").is_none() && control.get("control_epoch").is_none(),
+        "one name for each field, camelCase: {control}"
+    );
 }
 
-/// Finding F5-4 (ignored until the code agrees; `cargo test -- --ignored` shows it fail).
-///
-/// Under enforcement an agent's tab select or close during a take-over is refused, as
-/// the tab gate's own comment says (`admission.rs`: an agent cannot do them during a
-/// takeover). The select and close routes take no body and no initiator, so
-/// `select_tab` and `close_tab` classify every call on a person's token as the person's
-/// (`derive_initiator(&claims, None)`), and the gate lets it through. This test labels
-/// the two calls `initiatedBy: "agent"` in the body, the way `new_tab` takes its label.
-/// A fix may take the label somewhere else (a query, say), and then this test changes
-/// with it.
-#[tokio::test]
-#[serial]
-#[ignore = "finding F5-4: tab select and close take no initiator, so an agent's call is the person's"]
-async fn an_agent_labelled_tab_select_or_close_during_a_takeover_is_refused() {
-    set_takeover_enforcement(Some("1"));
-
-    let edge = Edge::start(RunLimits::default()).await;
-    let person = member_token();
-    let run = edge.start_run(&person, json!({})).await;
-    let opened = edge.new_tab(&person, &run, None).await;
+/// Open a tab on a run, take the browser over, and return the run and the tab's id.
+async fn run_with_a_tab_under_takeover(edge: &Edge, person: &str) -> (String, String) {
+    let run = edge.start_run(person, json!({})).await;
+    let opened = edge.new_tab(person, &run, None).await;
     assert_eq!(opened.status, 200, "{}", opened.body);
     let tab_id = opened.data()["tab"]["tabId"]
         .as_str()
         .expect("the new tab has an id")
         .to_owned();
     let takeover = edge
-        .control(&person, &run, json!({ "mode": "human_takeover" }))
+        .control(person, &run, json!({ "mode": "human_takeover" }))
         .await;
     assert_eq!(takeover.status, 200, "{}", takeover.body);
+    (run, tab_id)
+}
 
-    let label = json!({ "initiatedBy": "agent" });
+/// Under enforcement an agent's tab select or close during a take-over is refused, as
+/// the tab gate says (`admission.rs`: an agent cannot do them during a takeover).
+/// Neither call has a body, so the label is the `initiatedBy` query, as `new_tab` takes
+/// it in its body; the Verevon gateway sends `?initiatedBy=agent` for a model's call
+/// (finding F5-4: before, `derive_initiator(&claims, None)` made every call on a
+/// person's token the person's, and the gate let it through).
+#[tokio::test]
+#[serial]
+async fn an_agent_labelled_tab_select_or_close_during_a_takeover_is_refused() {
+    set_takeover_enforcement(Some("1"));
+
+    let edge = Edge::start(RunLimits::default()).await;
+    let person = member_token();
+    let (run, tab_id) = run_with_a_tab_under_takeover(&edge, &person).await;
+
     let select = edge
         .send(
             reqwest::Method::POST,
             &person,
-            &format!("/v1/agent/runs/{run}/tabs/{tab_id}/select"),
-            Some(label.clone()),
+            &format!("/v1/agent/runs/{run}/tabs/{tab_id}/select?initiatedBy=agent"),
+            None,
         )
         .await;
     let close = edge
         .send(
             reqwest::Method::DELETE,
             &person,
-            &format!("/v1/agent/runs/{run}/tabs/{tab_id}"),
-            Some(label),
+            &format!("/v1/agent/runs/{run}/tabs/{tab_id}?initiatedBy=agent"),
+            None,
         )
         .await;
     assert_eq!(
@@ -798,8 +801,114 @@ async fn an_agent_labelled_tab_select_or_close_during_a_takeover_is_refused() {
     );
     assert_eq!(select.code(), "USER_TOOK_OVER", "{}", select.body);
     assert_eq!(close.code(), "USER_TOOK_OVER", "{}", close.body);
+    assert_eq!(select.details()["control_epoch"], 1, "{}", select.body);
     assert!(
         edge.driver.selected_tabs().is_empty() && edge.driver.closed_tabs().is_empty(),
         "a refused select or close never reaches the driver"
+    );
+
+    // The person is still admitted on the same tab, unlabelled or labelled human.
+    let select = edge
+        .send(
+            reqwest::Method::POST,
+            &person,
+            &format!("/v1/agent/runs/{run}/tabs/{tab_id}/select?initiatedBy=human"),
+            None,
+        )
+        .await;
+    assert_eq!(select.status, 200, "{}", select.body);
+    assert_eq!(edge.driver.selected_tabs(), vec![tab_id]);
+}
+
+/// The label is read the way `/step` reads it: it can only tighten. An agent's call
+/// with no take-over in progress is admitted and recorded as the agent's (the timeline
+/// names who moved the tab), and with enforcement off a call that would be refused is
+/// admitted too, still recorded as the agent's.
+#[tokio::test]
+#[serial]
+async fn an_agent_labelled_tab_select_is_recorded_as_the_agents() {
+    set_takeover_enforcement(None);
+
+    let edge = Edge::start(RunLimits::default()).await;
+    let person = member_token();
+    let (run, tab_id) = run_with_a_tab_under_takeover(&edge, &person).await;
+
+    let observed = edge
+        .send(
+            reqwest::Method::POST,
+            &person,
+            &format!("/v1/agent/runs/{run}/tabs/{tab_id}/select?initiatedBy=agent"),
+            None,
+        )
+        .await;
+    assert_eq!(
+        observed.status, 200,
+        "observe mode admits it: {}",
+        observed.body
+    );
+    let handed_back = edge
+        .control(&person, &run, json!({ "mode": "agent_control" }))
+        .await;
+    assert_eq!(handed_back.status, 200, "{}", handed_back.body);
+    let after = edge
+        .send(
+            reqwest::Method::POST,
+            &person,
+            &format!("/v1/agent/runs/{run}/tabs/{tab_id}/select?initiatedBy=agent"),
+            None,
+        )
+        .await;
+    assert_eq!(after.status, 200, "{}", after.body);
+
+    let timeline = edge.timeline(&person, &run).await;
+    let selected: Vec<&Value> = timeline
+        .iter()
+        .filter(|item| item["kind"] == "tab" && item["operation"] == "selected")
+        .collect();
+    assert_eq!(selected.len(), 2, "{timeline:?}");
+    for item in selected {
+        assert_eq!(item["initiatedBy"], "agent", "{item}");
+    }
+}
+
+/// A hint that is neither `human` nor `agent` is a 400 on both routes; it is not read as
+/// the person's, and nothing reaches the driver.
+#[tokio::test]
+#[serial]
+async fn an_unknown_tab_label_is_refused_and_runs_nothing() {
+    set_takeover_enforcement(Some("1"));
+
+    let edge = Edge::start(RunLimits::default()).await;
+    let person = member_token();
+    let (run, tab_id) = run_with_a_tab_under_takeover(&edge, &person).await;
+
+    for label in ["system", "", "AGENT"] {
+        let select = edge
+            .send(
+                reqwest::Method::POST,
+                &person,
+                &format!("/v1/agent/runs/{run}/tabs/{tab_id}/select?initiatedBy={label}"),
+                None,
+            )
+            .await;
+        let close = edge
+            .send(
+                reqwest::Method::DELETE,
+                &person,
+                &format!("/v1/agent/runs/{run}/tabs/{tab_id}?initiatedBy={label}"),
+                None,
+            )
+            .await;
+        assert_eq!(
+            (select.status, close.status),
+            (400, 400),
+            "label {label:?}: select {} close {}",
+            select.body,
+            close.body
+        );
+    }
+    assert!(
+        edge.driver.selected_tabs().is_empty() && edge.driver.closed_tabs().is_empty(),
+        "a malformed label never reaches the driver"
     );
 }

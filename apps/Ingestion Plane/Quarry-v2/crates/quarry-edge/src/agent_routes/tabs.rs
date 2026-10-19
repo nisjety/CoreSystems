@@ -55,6 +55,9 @@ pub async fn new_tab(
         return Err(run_gone_err(&state, &claims, &request_id, &run_id).await);
     };
 
+    // Counts as in flight from before it waits for the run lock, as a step does, so
+    // the sweeper never releases a run a tab call is queued on.
+    let _in_flight = handle.live.in_flight_guard();
     let entry = handle.entry.lock().await;
     if !caller_owns_live_run(&entry, &claims) {
         return Err(status_err(
@@ -64,6 +67,10 @@ pub async fn new_tab(
         ));
     }
     handle.live.touch();
+    // The run was closed while this call waited for its lock.
+    if entry.closed {
+        return Err(run_closed_err(&state, &claims, &request_id, &run_id).await);
+    }
     let admitted = admit_tab_operation(
         &handle,
         &entry,
@@ -158,6 +165,7 @@ pub async fn select_tab(
     State(state): State<AppState>,
     Extension(claims): Extension<crate::auth::Claims>,
     Path((run_id, tab_id)): Path<(String, String)>,
+    Query(call): Query<TabCallQuery>,
 ) -> Result<Json<Envelope<BrowserTabsData>>, ApiErr> {
     let request_id = RequestKind::new().to_string();
     let handle = lookup_run(&state, &run_id);
@@ -165,6 +173,9 @@ pub async fn select_tab(
         return Err(run_gone_err(&state, &claims, &request_id, &run_id).await);
     };
 
+    // Counts as in flight from before it waits for the run lock, as a step does, so
+    // the sweeper never releases a run a tab call is queued on.
+    let _in_flight = handle.live.in_flight_guard();
     let entry = handle.entry.lock().await;
     if !caller_owns_live_run(&entry, &claims) {
         return Err(status_err(
@@ -174,10 +185,14 @@ pub async fn select_tab(
         ));
     }
     handle.live.touch();
+    // The run was closed while this call waited for its lock.
+    if entry.closed {
+        return Err(run_closed_err(&state, &claims, &request_id, &run_id).await);
+    }
     let admitted = admit_tab_operation(
         &handle,
         &entry,
-        derive_initiator(&claims, None),
+        derive_initiator(&claims, call.initiated_by),
         crate::run_limits::takeover_enforced(),
     )
     .map_err(|error| driver_err(&request_id, error))?;
@@ -214,6 +229,7 @@ pub async fn close_tab(
     State(state): State<AppState>,
     Extension(claims): Extension<crate::auth::Claims>,
     Path((run_id, tab_id)): Path<(String, String)>,
+    Query(call): Query<TabCallQuery>,
 ) -> Result<Json<Envelope<BrowserTabsData>>, ApiErr> {
     let request_id = RequestKind::new().to_string();
     let handle = lookup_run(&state, &run_id);
@@ -221,6 +237,9 @@ pub async fn close_tab(
         return Err(run_gone_err(&state, &claims, &request_id, &run_id).await);
     };
 
+    // Counts as in flight from before it waits for the run lock, as a step does, so
+    // the sweeper never releases a run a tab call is queued on.
+    let _in_flight = handle.live.in_flight_guard();
     let entry = handle.entry.lock().await;
     if !caller_owns_live_run(&entry, &claims) {
         return Err(status_err(
@@ -230,10 +249,14 @@ pub async fn close_tab(
         ));
     }
     handle.live.touch();
+    // The run was closed while this call waited for its lock.
+    if entry.closed {
+        return Err(run_closed_err(&state, &claims, &request_id, &run_id).await);
+    }
     let admitted = admit_tab_operation(
         &handle,
         &entry,
-        derive_initiator(&claims, None),
+        derive_initiator(&claims, call.initiated_by),
         crate::run_limits::takeover_enforced(),
     )
     .map_err(|error| driver_err(&request_id, error))?;
