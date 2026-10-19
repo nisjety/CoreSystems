@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -21,6 +22,10 @@ var (
 	// SQL text, row value or domain; callers map it to a retryable error and
 	// never treat it as an allow.
 	ErrStoreUnavailable = errors.New("browser grant store unavailable")
+	// ErrInvalidGrantText means a caller string cannot be stored (a NUL byte
+	// or invalid UTF-8): PostgreSQL text rejects both, so the request is
+	// refused as invalid input instead of failing as a store outage.
+	ErrInvalidGrantText = errors.New("grant field contains a NUL byte or invalid UTF-8")
 	// ErrZdrNotPersistable means a Zero Data Retention grant reached the
 	// durable store. Routed never sends one; the store refuses it anyway.
 	ErrZdrNotPersistable = errors.New("zero data retention grant cannot be persisted")
@@ -31,6 +36,7 @@ var (
 const (
 	lockNsOwnerSessions int32 = 0x62620001
 	lockNsParentRuns    int32 = 0x62620002
+	lockNsRevokeRoot    int32 = 0x62620003
 )
 
 // Purger removes grants that expired before a cutoff.
@@ -82,6 +88,26 @@ func (s *PgStore) clock() time.Time {
 	return s.now().UTC().Truncate(time.Microsecond)
 }
 
+// storeError is ErrStoreUnavailable plus the SQLSTATE of the failure, kept
+// only so inTx can retry a deadlock or serialization failure. Its text and
+// errors.Is behaviour are exactly ErrStoreUnavailable's.
+type storeError struct{ sqlState string }
+
+func (e *storeError) Error() string        { return ErrStoreUnavailable.Error() }
+func (e *storeError) Is(target error) bool { return target == ErrStoreUnavailable }
+
+// retryableTx reports a failure that PostgreSQL resolved by aborting this
+// transaction (deadlock victim, serialization failure): nothing was written,
+// so running the whole transaction again is safe.
+func retryableTx(err error) bool {
+	var se *storeError
+	return errors.As(err, &se) && (se.sqlState == "40P01" || se.sqlState == "40001")
+}
+
+// txAttempts bounds how many times inTx runs a transaction that PostgreSQL
+// aborted as a deadlock or serialization victim.
+const txAttempts = 3
+
 // dbErr records a database failure and hides its text. A cancelled or timed
 // out request is passed through uncounted: it is the caller leaving, not the
 // store failing.
@@ -98,7 +124,18 @@ func (s *PgStore) dbErr(ctx context.Context, op string, err error) error {
 	}
 	// The SQLSTATE class only: a PostgreSQL message can quote row values.
 	slog.Warn("browser grant store error", "op", op, "sqlstate", sqlState)
-	return ErrStoreUnavailable
+	return &storeError{sqlState: sqlState}
+}
+
+// validText reports whether every string can be stored in a PostgreSQL text
+// column.
+func validText(values ...string) bool {
+	for _, v := range values {
+		if !utf8.ValidString(v) || strings.IndexByte(v, 0) >= 0 {
+			return false
+		}
+	}
+	return true
 }
 
 type querier interface {
@@ -144,7 +181,26 @@ func scoped(g *Grant, orgID, ownerID string, now time.Time) error {
 	return nil
 }
 
+// inTx runs fn in a transaction, and runs it again (at most txAttempts times
+// in all) when PostgreSQL aborted it as a deadlock or serialization victim.
+// fn must therefore be safe to repeat: every one here only reads and writes
+// through tx, and a retry starts from a rolled-back transaction.
 func (s *PgStore) inTx(ctx context.Context, op string, fn func(pgx.Tx) error) error {
+	var err error
+	for attempt := 1; attempt <= txAttempts; attempt++ {
+		if err = s.inTxOnce(ctx, op, fn); !retryableTx(err) {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return err
+		case <-time.After(time.Duration(attempt) * 5 * time.Millisecond):
+		}
+	}
+	return err
+}
+
+func (s *PgStore) inTxOnce(ctx context.Context, op string, fn func(pgx.Tx) error) error {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return s.dbErr(ctx, op, err)
@@ -192,6 +248,9 @@ func insertArgs(g *Grant) []any {
 func (s *PgStore) CreateSession(ctx context.Context, p CreateSessionParams) (*Grant, error) {
 	if p.Zdr {
 		return nil, ErrZdrNotPersistable
+	}
+	if !validText(p.OrgID, p.OwnerID, p.SessionKey, p.ScopeURL) {
+		return nil, ErrInvalidGrantText
 	}
 	domains, err := NormalizeAllowedDomains(p.AllowedDomains)
 	if err != nil {
@@ -249,6 +308,9 @@ func (s *PgStore) CreateScopedSensitiveApproval(ctx context.Context, p ApprovalP
 	}
 	if p.Zdr {
 		return nil, ErrZdrPostureChanged
+	}
+	if !validText(p.OrgID, p.OwnerID, p.SessionKey, p.ScopeURL, p.ParentGrantID) {
+		return nil, ErrInvalidGrantText
 	}
 	var out *Grant
 	err := s.inTx(ctx, "create_approval", func(tx pgx.Tx) error {
@@ -340,6 +402,9 @@ func (s *PgStore) Derive(ctx context.Context, p DeriveParams) (*Grant, error) {
 	}
 	if strings.HasPrefix(p.ParentGrantID, zdrIDPrefix) {
 		return nil, ErrGrantNotFound
+	}
+	if !validText(p.OrgID, p.OwnerID, p.SessionKey, p.ParentGrantID) {
+		return nil, ErrInvalidGrantText
 	}
 	var out *Grant
 	err := s.inTx(ctx, "derive", func(tx pgx.Tx) error {
@@ -476,7 +541,7 @@ func (s *PgStore) existingRun(ctx context.Context, q querier, parentID, orgID, s
 // GetScoped returns a grant only within the verified organization and, with a
 // non-empty ownerID, the owning user. A "z_" id never reaches the database.
 func (s *PgStore) GetScoped(ctx context.Context, id, orgID, ownerID string) (*Grant, error) {
-	if strings.HasPrefix(id, zdrIDPrefix) {
+	if strings.HasPrefix(id, zdrIDPrefix) || !validText(id, orgID, ownerID) {
 		return nil, ErrGrantNotFound
 	}
 	g, err := s.fetch(ctx, s.pool, "get", id, "")
@@ -501,8 +566,35 @@ UPDATE browser_grants g
 SET revoked_at = COALESCE(g.revoked_at, $3), revoked_reason = $4
 FROM subtree WHERE g.id = subtree.id`
 
-// RevokeScoped revokes the grant and its whole subtree. The root is locked FOR
-// UPDATE first, which waits for every in-flight Derive or approval holding it
+// maxGrantDepth is the longest parent chain (session, run, approval), with
+// one spare level.
+const maxGrantDepth = 4
+
+// revokeRootID follows parent_grant_id up from id to the topmost grant. The
+// link is written once at insert and never changes, so the unlocked read is
+// stable. A missing row ends the walk at the id it reached.
+func (s *PgStore) revokeRootID(ctx context.Context, tx pgx.Tx, id string) (string, error) {
+	for i := 0; i < maxGrantDepth; i++ {
+		var parent string
+		err := tx.QueryRow(ctx, `SELECT COALESCE(parent_grant_id, '') FROM browser_grants WHERE id = $1`, id).Scan(&parent)
+		if errors.Is(err, pgx.ErrNoRows) || (err == nil && parent == "") {
+			return id, nil
+		}
+		if err != nil {
+			return "", s.dbErr(ctx, "revoke", err)
+		}
+		id = parent
+	}
+	return id, nil
+}
+
+// RevokeScoped revokes the grant and its whole subtree. Revokes that share a
+// root session are serialized by an advisory lock on that root: two revokes
+// (of a session and of one of its runs, say) lock overlapping rows in
+// different orders, and PostgreSQL aborted one as a deadlock victim, leaving a
+// revoked parent live until the caller retried. inTx also retries a
+// deadlock, as a second line. The root is then locked FOR
+// UPDATE, which waits for every in-flight Derive or approval holding it
 // FOR SHARE; the recursive update then runs as a new statement, so its
 // snapshot includes any child those transactions committed. (As a single
 // statement, the subtree would be computed from a snapshot taken before the
@@ -512,7 +604,17 @@ func (s *PgStore) RevokeScoped(ctx context.Context, id, orgID, ownerID, reason s
 		return ErrGrantNotFound
 	}
 	reason = truncateReason(reason)
+	if !validText(id, orgID, ownerID) {
+		return ErrGrantNotFound
+	}
 	return s.inTx(ctx, "revoke", func(tx pgx.Tx) error {
+		root, err := s.revokeRootID(ctx, tx, id)
+		if err != nil {
+			return err
+		}
+		if err := s.advisoryLock(ctx, tx, "revoke", lockNsRevokeRoot, root); err != nil {
+			return err
+		}
 		g, err := s.fetch(ctx, tx, "revoke", id, " FOR UPDATE")
 		if err != nil {
 			return err

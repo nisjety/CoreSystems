@@ -599,7 +599,16 @@ func (s *MemoryRepository) activeRunsLocked(parentID, orgID string) int {
 	return active
 }
 
+// truncateReason bounds a revoke reason and drops what a store cannot hold or
+// a log should not carry: control characters (NUL included) and invalid
+// UTF-8. A reason is a label; revoking must never fail because of it.
 func truncateReason(reason string) string {
+	reason = strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f {
+			return -1
+		}
+		return r
+	}, strings.ToValidUTF8(reason, ""))
 	reason = strings.TrimSpace(reason)
 	if len(reason) <= maxRevokeReasonBytes {
 		return reason

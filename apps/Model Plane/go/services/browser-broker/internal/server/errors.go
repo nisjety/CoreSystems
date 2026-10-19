@@ -40,6 +40,8 @@ func mapErr(err error) error {
 		return status.Error(codes.FailedPrecondition, err.Error())
 	case errors.Is(err, grant.ErrDeriveConflict):
 		return status.Error(codes.AlreadyExists, err.Error())
+	case errors.Is(err, grant.ErrInvalidGrantText):
+		return status.Error(codes.InvalidArgument, grant.ErrInvalidGrantText.Error())
 	case errors.Is(err, grant.ErrStoreUnavailable):
 		// The durable store failed: retryable, never a fail-open.
 		return status.Error(codes.Unavailable, grant.ErrStoreUnavailable.Error())
@@ -76,6 +78,8 @@ func grantOutcome(err error) string {
 		return "zdr_posture_changed"
 	case errors.Is(err, grant.ErrDeriveConflict):
 		return "derive_conflict"
+	case errors.Is(err, grant.ErrInvalidGrantText):
+		return "invalid_input"
 	case errors.Is(err, grant.ErrStoreUnavailable):
 		return "store_unavailable"
 	default:

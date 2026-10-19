@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"net"
 	"net/http"
@@ -31,9 +32,8 @@ func main() {
 	// grant store, so a broker restart does not silently void every live
 	// session grant. The in-memory store alone is a development opt-in.
 	// Copied from sandbox-manager's gate (cmd/main.go).
-	ephemeralDev := ephemeralDevelopmentEnabled(os.Getenv("BROWSER_BROKER_ALLOW_EPHEMERAL_DEVELOPMENT"))
 	databaseURL := strings.TrimSpace(os.Getenv("DATABASE_URL"))
-	if databaseURL == "" && !ephemeralDev {
+	if err := startupGate(databaseURL, os.Getenv("BROWSER_BROKER_ALLOW_EPHEMERAL_DEVELOPMENT")); err != nil {
 		slog.Error("refusing to start browser-broker without a durable database", "required", "DATABASE_URL", "development_override", "BROWSER_BROKER_ALLOW_EPHEMERAL_DEVELOPMENT=true")
 		os.Exit(1)
 	}
@@ -67,9 +67,8 @@ func main() {
 	var purger grant.Purger = ephemeral
 	var ready func(context.Context) error
 	if databaseURL != "" {
-		pool, err := pgxpool.New(ctx, databaseURL)
+		pool, err := newPool(ctx, databaseURL)
 		if err != nil {
-			// The parse error can quote the URL; it is not logged.
 			slog.Error("browser-broker database configuration is invalid", "required", "DATABASE_URL")
 			os.Exit(1)
 		}
@@ -95,19 +94,7 @@ func main() {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))
 	})
-	mux.HandleFunc("/readyz", func(w http.ResponseWriter, r *http.Request) {
-		if ready != nil {
-			pingCtx, pingCancel := context.WithTimeout(r.Context(), 2*time.Second)
-			defer pingCancel()
-			if err := ready(pingCtx); err != nil {
-				w.WriteHeader(http.StatusServiceUnavailable)
-				_, _ = w.Write([]byte("grant store unavailable"))
-				return
-			}
-		}
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("ok"))
-	})
+	mux.HandleFunc("/readyz", readyzHandler(ready))
 
 	healthServer := &http.Server{Addr: ":8087", Handler: mux}
 	go func() {
@@ -158,16 +145,66 @@ func purgeLoop(ctx context.Context, purger grant.Purger) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			n, err := purger.PurgeExpired(ctx, time.Now().Add(-purgeRetention))
-			if err != nil {
-				// The store already counted and classified the failure.
-				slog.Warn("browser grant purge failed", "purged", n)
-				continue
-			}
-			if n > 0 {
-				slog.Info("browser grants purged", "purged", n)
+			purgeOnce(ctx, purger, time.Now())
+		}
+	}
+}
+
+// purgeOnce deletes the grants that expired more than purgeRetention before now.
+func purgeOnce(ctx context.Context, purger grant.Purger, now time.Time) {
+	n, err := purger.PurgeExpired(ctx, now.Add(-purgeRetention))
+	if err != nil {
+		// The store already counted and classified the failure.
+		slog.Warn("browser grant purge failed", "purged", n)
+		return
+	}
+	if n > 0 {
+		slog.Info("browser grants purged", "purged", n)
+	}
+}
+
+// errStartupRefused means no durable database is configured and the
+// ephemeral-development opt-in is not exactly "true".
+var errStartupRefused = errors.New("refusing to start browser-broker without a durable database")
+
+// startupGate refuses to start without DATABASE_URL unless the explicit
+// development opt-in is set, so a production restart cannot silently void
+// every live session grant by running on in-memory grants.
+func startupGate(databaseURL, ephemeralFlag string) error {
+	if databaseURL == "" && !ephemeralDevelopmentEnabled(ephemeralFlag) {
+		return errStartupRefused
+	}
+	return nil
+}
+
+// errDatabaseURLInvalid carries no part of the URL: a parse error can quote
+// the host or a password.
+var errDatabaseURLInvalid = errors.New("DATABASE_URL is not a valid connection string")
+
+// newPool builds the pool; it does not connect until first use.
+func newPool(ctx context.Context, databaseURL string) (*pgxpool.Pool, error) {
+	pool, err := pgxpool.New(ctx, databaseURL)
+	if err != nil {
+		return nil, errDatabaseURLInvalid
+	}
+	return pool, nil
+}
+
+// readyzHandler answers 503 while the grant store does not answer within 2 s.
+// A nil ready (ephemeral development) is always ready.
+func readyzHandler(ready func(context.Context) error) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if ready != nil {
+			pingCtx, pingCancel := context.WithTimeout(r.Context(), 2*time.Second)
+			defer pingCancel()
+			if err := ready(pingCtx); err != nil {
+				w.WriteHeader(http.StatusServiceUnavailable)
+				_, _ = w.Write([]byte("grant store unavailable"))
+				return
 			}
 		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
 	}
 }
 

@@ -55,6 +55,9 @@ func (s *Server) AcquireGrant(ctx context.Context, req *AcquireGrantRequest) (*A
 	if req.GetSessionKey() == "" {
 		return nil, status.Error(codes.InvalidArgument, "session_key is required")
 	}
+	if len(req.GetSessionKey()) > maxSessionKeyBytes || strings.ContainsFunc(req.GetSessionKey(), isControl) {
+		return nil, status.Error(codes.InvalidArgument, "session_key must be a bounded, printable key")
+	}
 	if req.GetOrgId() == "" {
 		return nil, status.Error(codes.InvalidArgument, "org_id is required")
 	}
