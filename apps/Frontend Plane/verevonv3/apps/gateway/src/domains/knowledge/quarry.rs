@@ -187,9 +187,9 @@ pub(super) async fn scrape_preview(
         //
         // Always return a clear, typed error promptly — never let a slow or
         // bot-walled upstream collapse into an empty response at the client.
-        let (code, message) = classify_scrape_failure(status, browser_elapsed);
+        let (code, message) = classify_scrape_failure(status, browser_elapsed, &scrape_body);
         tracing::warn!(%status, code, "scrape preview unavailable");
-        return (status, Json(error(code, message))).into_response();
+        return scrape_failure_response(status, code, message, &scrape_body);
     }
 
     let extract_target = preview_url(&target, &scrape_body);
@@ -208,14 +208,63 @@ pub(super) async fn scrape_preview(
     (StatusCode::OK, Json(ok(preview))).into_response()
 }
 
-/// Map a failed upstream scrape into a clear, user-facing (code, message). A long
-/// elapsed time means a hung render or a bot-wall stall — the common case for
-/// JS-heavy, protected retailer pages — while 403/429 is an explicit block.
-fn classify_scrape_failure(status: StatusCode, elapsed: Duration) -> (&'static str, String) {
-    if matches!(status.as_u16(), 403 | 429) {
+/// `details.block_reason` values Quarry sends on a scrape's `403
+/// CHALLENGE_DETECTED` (the closed `BlockReason` enum in `quarry-core`). The
+/// gateway reads the field and nothing else of the upstream body: a value that is
+/// not in this list is treated as if the field were absent, so a new or garbled
+/// reason falls back to the bare-403 class instead of being echoed.
+const SCRAPE_BLOCK_REASONS: [&str; 4] = [
+    "captcha_widget",
+    "waf_interstitial",
+    "unexpected_bot_error",
+    "challenge_loop",
+];
+
+/// The typed block reason Quarry attached to a refused scrape, as one of this
+/// file's own static strings. `None` unless the upstream error is a
+/// `CHALLENGE_DETECTED` carrying a known `details.block_reason`. The returned
+/// value is never upstream text.
+fn scrape_block_reason(upstream: &Value) -> Option<&'static str> {
+    if upstream.pointer("/error/code").and_then(Value::as_str) != Some("CHALLENGE_DETECTED") {
+        return None;
+    }
+    let reason = upstream
+        .pointer("/error/details/block_reason")?
+        .as_str()?;
+    SCRAPE_BLOCK_REASONS
+        .iter()
+        .copied()
+        .find(|known| *known == reason)
+}
+
+/// Map a failed upstream scrape into a clear, user-facing (code, message). Only
+/// a Quarry-supplied strong `block_reason` means the site put a bot wall in
+/// front of the page (`site_blocked`); a bare 403 is a refusal we cannot
+/// explain (`scrape_refused`: login, geo, policy, a plain "no"), and a 429 is
+/// the site or Quarry asking us to slow down (`scrape_rate_limited`). A long
+/// elapsed time means a hung render or a stall. None of the messages offers a
+/// proxy, and none carries the host, the page text or the upstream message.
+fn classify_scrape_failure(
+    status: StatusCode,
+    elapsed: Duration,
+    upstream: &Value,
+) -> (&'static str, String) {
+    if status == StatusCode::FORBIDDEN && scrape_block_reason(upstream).is_some() {
         return (
             "site_blocked",
-            "Dette nettstedet blokkerer automatisert henting. Prøv en annen kilde, eller be om proxy-tilgang for å hente beskyttede nettsteder.".to_owned(),
+            "Dette nettstedet stopper automatisert henting med en bot-sperre. Prøv en annen kilde, eller åpne siden selv i nettleseren.".to_owned(),
+        );
+    }
+    if status == StatusCode::FORBIDDEN {
+        return (
+            "scrape_refused",
+            "Nettstedet avviste forespørselen om å hente siden. Siden kan kreve innlogging eller være stengt for automatisk henting. Prøv en annen kilde.".to_owned(),
+        );
+    }
+    if status == StatusCode::TOO_MANY_REQUESTS {
+        return (
+            "scrape_rate_limited",
+            "Nettstedet mottar for mange forespørsler akkurat nå. Vent litt og prøv igjen.".to_owned(),
         );
     }
     if elapsed >= Duration::from_secs(20) || matches!(status.as_u16(), 408 | 504) {
@@ -228,6 +277,41 @@ fn classify_scrape_failure(status: StatusCode, elapsed: Duration) -> (&'static s
         "scrape_failed",
         "Kunne ikke hente forhåndsvisning av siden. Sjekk lenken og prøv igjen.".to_owned(),
     )
+}
+
+/// The refusal the caller sees for a failed scrape preview: the typed gateway
+/// code and a fixed message, plus the two typed hints the SPA has copy for. The
+/// block reason is one of this file's static strings (`scrape_block_reason`);
+/// the retry hint is a number in 1..=3600 seconds. Nothing else of the
+/// upstream body is forwarded.
+fn scrape_failure_response(
+    status: StatusCode,
+    code: &'static str,
+    message: String,
+    upstream: &Value,
+) -> Response {
+    let mut body = error(code, message);
+    if code == "site_blocked" {
+        if let Some(reason) = scrape_block_reason(upstream) {
+            body["error"]["blockReason"] = json!(reason);
+        }
+    }
+    if code == "scrape_rate_limited" {
+        let retry_after = upstream
+            .pointer("/error/details/retry_after_seconds")
+            .and_then(Value::as_u64)
+            .filter(|seconds| (1..=3600).contains(seconds));
+        if let Some(seconds) = retry_after {
+            body["error"]["retryAfterSeconds"] = json!(seconds);
+            return (
+                status,
+                [(axum::http::header::RETRY_AFTER, seconds.to_string())],
+                Json(body),
+            )
+                .into_response();
+        }
+    }
+    (status, Json(body)).into_response()
 }
 
 /// The `org_backlog_full` refusal from Quarry's error envelope as a gateway
@@ -1031,6 +1115,216 @@ mod tests {
         assert_eq!(discovery["url"], "https://x.io/");
         assert_eq!(discovery["count"], 1);
         assert_eq!(discovery["pages"][0]["url"], "https://x.io/p");
+    }
+
+    // ---- scrape refusals: classify_scrape_failure reads details.block_reason (WS3.J) ----
+
+    fn challenge_body(reason: Value) -> Value {
+        json!({
+            "success": false,
+            "error": {
+                "code": "CHALLENGE_DETECTED",
+                "message": "blocked https://secret.example/private?q=1 <html>wall</html>",
+                "retryable": false,
+                "details": { "reason": reason.clone(), "block_reason": reason, "recovery": "not_applicable", "next": "other_source" }
+            }
+        })
+    }
+
+    fn assert_no_proxy_or_leak(message: &str) {
+        let lowered = message.to_lowercase();
+        assert!(!message.is_empty());
+        assert!(!lowered.contains("proxy"), "no proxy suggestion: {message}");
+        assert!(!lowered.contains("secret.example") && !lowered.contains("<html"), "no host or page text: {message}");
+    }
+
+    #[test]
+    fn a_strong_block_reason_from_quarry_is_site_blocked() {
+        for reason in ["captcha_widget", "waf_interstitial", "unexpected_bot_error", "challenge_loop"] {
+            let (code, message) = classify_scrape_failure(
+                StatusCode::FORBIDDEN,
+                Duration::ZERO,
+                &challenge_body(json!(reason)),
+            );
+            assert_eq!(code, "site_blocked", "{reason}");
+            assert_no_proxy_or_leak(&message);
+        }
+    }
+
+    #[test]
+    fn a_bare_403_is_scrape_refused_not_site_blocked() {
+        let bodies = [
+            Value::Null,
+            json!({}),
+            json!({ "error": { "code": "FORBIDDEN", "message": "body_too_large" } }),
+            json!({ "error": { "code": "SECURITY_BLOCKED", "message": "ssrf secret.example" } }),
+            // a CHALLENGE_DETECTED that names no reason is not a verdict
+            json!({ "error": { "code": "CHALLENGE_DETECTED", "details": {} } }),
+        ];
+        for body in bodies {
+            let (code, message) = classify_scrape_failure(StatusCode::FORBIDDEN, Duration::ZERO, &body);
+            assert_eq!(code, "scrape_refused", "{body}");
+            assert_no_proxy_or_leak(&message);
+        }
+        // Slow or not, a refusal stays a refusal.
+        assert_eq!(
+            classify_scrape_failure(StatusCode::FORBIDDEN, Duration::from_secs(30), &Value::Null).0,
+            "scrape_refused"
+        );
+    }
+
+    #[test]
+    fn an_unknown_or_malformed_block_reason_falls_back_to_scrape_refused() {
+        let reasons = [
+            json!("made_up_reason"),
+            json!("https://secret.example/wall"),
+            json!("WAF_INTERSTITIAL"),
+            json!(""),
+            json!(7),
+            json!(null),
+            json!(["captcha_widget"]),
+        ];
+        for reason in reasons {
+            let body = challenge_body(reason.clone());
+            let (code, message) = classify_scrape_failure(StatusCode::FORBIDDEN, Duration::ZERO, &body);
+            assert_eq!(code, "scrape_refused", "{reason}");
+            assert_no_proxy_or_leak(&message);
+            assert!(scrape_block_reason(&body).is_none(), "{reason}");
+        }
+    }
+
+    #[test]
+    fn a_block_reason_counts_only_beside_the_challenge_code_and_a_403() {
+        let other_code = json!({ "error": { "code": "RATE_LIMITED", "details": { "block_reason": "captcha_widget" } } });
+        assert_eq!(
+            classify_scrape_failure(StatusCode::FORBIDDEN, Duration::ZERO, &other_code).0,
+            "scrape_refused"
+        );
+        // Only the `block_reason` field is read, not the agent path's `reason`.
+        let reason_only = json!({ "error": { "code": "CHALLENGE_DETECTED", "details": { "reason": "captcha_widget" } } });
+        assert_eq!(
+            classify_scrape_failure(StatusCode::FORBIDDEN, Duration::ZERO, &reason_only).0,
+            "scrape_refused"
+        );
+        // On any other status the reason does not turn a failure into a bot wall.
+        let wall = challenge_body(json!("captcha_widget"));
+        assert_eq!(classify_scrape_failure(StatusCode::TOO_MANY_REQUESTS, Duration::ZERO, &wall).0, "scrape_rate_limited");
+        assert_eq!(classify_scrape_failure(StatusCode::BAD_GATEWAY, Duration::ZERO, &wall).0, "scrape_failed");
+        assert_eq!(classify_scrape_failure(StatusCode::GATEWAY_TIMEOUT, Duration::ZERO, &wall).0, "scrape_timeout");
+    }
+
+    #[test]
+    fn a_429_is_scrape_rate_limited_and_the_rest_keep_their_codes() {
+        let (code, message) =
+            classify_scrape_failure(StatusCode::TOO_MANY_REQUESTS, Duration::ZERO, &Value::Null);
+        assert_eq!(code, "scrape_rate_limited");
+        assert_no_proxy_or_leak(&message);
+        assert_eq!(classify_scrape_failure(StatusCode::GATEWAY_TIMEOUT, Duration::ZERO, &Value::Null).0, "scrape_timeout");
+        assert_eq!(classify_scrape_failure(StatusCode::BAD_GATEWAY, Duration::from_secs(21), &Value::Null).0, "scrape_timeout");
+        assert_eq!(classify_scrape_failure(StatusCode::BAD_GATEWAY, Duration::ZERO, &Value::Null).0, "scrape_failed");
+    }
+
+    fn refusal_user() -> AuthenticatedUser {
+        AuthenticatedUser {
+            user_id: "user-1".to_owned(),
+            user_email: "user@example.invalid".to_owned(),
+            user_name: "User".to_owned(),
+            user_image: None,
+            email_verified: true,
+            auth_role: Some("member".to_owned()),
+            active_org_id: Some("org-1".to_owned()),
+            authorized_membership: None,
+        }
+    }
+
+    /// Run `scrape_preview` against a mock Quarry that answers `status` and
+    /// `upstream`; returns the gateway's status, `Retry-After` and body text.
+    async fn refused_preview(status: u16, upstream: Value) -> (StatusCode, Option<String>, String, usize) {
+        use wiremock::matchers::{method as wm_method, path as wm_path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let quarry = MockServer::start().await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/v1/scrape"))
+            .respond_with(ResponseTemplate::new(status).set_body_json(upstream))
+            .mount(&quarry)
+            .await;
+        let mut state = crate::tests::test_state(false);
+        state.quarry_edge_url = quarry.uri();
+        let response = scrape_preview(
+            State(state),
+            Extension(refusal_user()),
+            HeaderMap::new(),
+            Json(json!({ "url": "https://example.com/a" })),
+        )
+        .await;
+        let status = response.status();
+        let retry_after = response
+            .headers()
+            .get(axum::http::header::RETRY_AFTER)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned);
+        let bytes = axum::body::to_bytes(response.into_body(), 1 << 20).await.unwrap();
+        let calls = quarry.received_requests().await.unwrap().len();
+        (status, retry_after, String::from_utf8(bytes.to_vec()).unwrap(), calls)
+    }
+
+    #[tokio::test]
+    async fn a_scrape_the_site_walled_reaches_the_caller_as_site_blocked_with_the_typed_reason_only() {
+        let (status, retry_after, text, calls) =
+            refused_preview(403, challenge_body(json!("waf_interstitial"))).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert!(retry_after.is_none());
+        let body: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(body["error"]["code"], "site_blocked");
+        assert_eq!(body["error"]["blockReason"], "waf_interstitial");
+        assert_no_proxy_or_leak(body["error"]["message"].as_str().unwrap());
+        assert!(!text.contains("secret.example") && !text.contains("CHALLENGE_DETECTED") && !text.contains("<html"), "{text}");
+        assert_eq!(calls, 1, "a refusal is final: no static retry");
+    }
+
+    #[tokio::test]
+    async fn a_bare_403_scrape_reaches_the_caller_as_scrape_refused_without_a_block_reason() {
+        let (status, _, text, calls) = refused_preview(
+            403,
+            json!({ "error": { "code": "FORBIDDEN", "message": "denied by https://secret.example" } }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        let body: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(body["error"]["code"], "scrape_refused");
+        assert!(body["error"].get("blockReason").is_none());
+        assert!(!text.contains("secret.example"), "{text}");
+        assert_eq!(calls, 1);
+
+        // A made-up reason is dropped, not echoed.
+        let (_, _, text, _) = refused_preview(403, challenge_body(json!("https://secret.example/x"))).await;
+        let body: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(body["error"]["code"], "scrape_refused");
+        assert!(body["error"].get("blockReason").is_none());
+        assert!(!text.contains("secret.example"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn a_429_scrape_carries_retry_after_only_when_quarry_sent_a_sane_number() {
+        let upstream = |seconds: Value| json!({
+            "error": { "code": "RATE_LIMITED", "message": "secret.example", "details": { "reason": "org_render_cap", "retry_after_seconds": seconds } }
+        });
+        let (status, retry_after, text, _) = refused_preview(429, upstream(json!(17))).await;
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(retry_after.as_deref(), Some("17"));
+        let body: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(body["error"]["code"], "scrape_rate_limited");
+        assert_eq!(body["error"]["retryAfterSeconds"], 17);
+        assert!(!text.contains("secret.example") && !text.contains("org_render_cap"), "{text}");
+
+        for bad in [json!(0), json!(99999), json!("soon"), json!(null)] {
+            let (_, retry_after, text, _) = refused_preview(429, upstream(bad.clone())).await;
+            assert!(retry_after.is_none(), "{bad}");
+            let body: Value = serde_json::from_str(&text).unwrap();
+            assert_eq!(body["error"]["code"], "scrape_rate_limited");
+            assert!(body["error"].get("retryAfterSeconds").is_none(), "{bad}");
+        }
     }
 }
 
