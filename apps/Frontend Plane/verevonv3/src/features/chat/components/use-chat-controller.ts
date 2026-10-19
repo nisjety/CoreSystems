@@ -45,6 +45,7 @@ import {
 } from '@/features/chat/lib/pending-chat-launch'
 import {
   bindSupportChatThread,
+  isSupportChatThread,
 } from '@/shared/chat/support-chat-thread'
 import { readThreadDeepLink } from '@/features/chat/lib/chat-thread-deep-link'
 import {
@@ -169,9 +170,11 @@ import type {
   QueuedInput,
   SendOptions,
   TaskStepStatus,
+  ThreadPlanGrant,
 } from './chat-types'
 import type { ChatEffectClass } from '@/shared/chat/effect-class'
 import { isEffectfulChatTurn } from '@/shared/chat/effect-class'
+import { planExecuteEnabled } from '@/shared/chat/plan-execute'
 import { readPinnedMessages, togglePinnedMessage } from '../lib/chat-pinned-messages'
 import { CHAT_SURFACE_IDS, chatSurfaceSpec, isChatTab } from '../lib/chat-surfaces'
 
@@ -274,7 +277,38 @@ export function useChatController() {
     setUiEvents((current) => [...current, event].slice(-MAX_TRACE_EVENTS))
   }
   const [imageMode, setImageMode] = createSignal(false)
-  const [planMode, setPlanMode] = createSignal(false)
+  const [planMode, setPlanModeRaw] = createSignal(false)
+  // WS14 S2a, "Run the approved plan". `threadGrant` is the client's pointer to
+  // the grant the Model Plane holds for a thread, set when a plan is approved;
+  // `executeArmed` says the NEXT send is the turn that runs it. Both are
+  // session-only (no storage, no snapshot, nothing sent to a server) and neither
+  // is authority: the gateway decides whether an execute turn runs. One approval
+  // is one execute turn, so the grant is spent when that turn connects. See
+  // `sendContent` for the single place a turn is sent as an execute turn.
+  const [threadGrant, setThreadGrant] = createSignal<ThreadPlanGrant | null>(null)
+  const [executeArmed, setExecuteArmed] = createSignal(false)
+  // The gateway answered an execute turn with `plan_execute_disabled`: running a
+  // plan is switched off on this deployment although this build offers it. For
+  // the rest of the session an approval arms nothing and prefills nothing, so the
+  // person is not sent into a refusal twice. Session-only, like the grant.
+  const [executeSwitchedOff, setExecuteSwitchedOff] = createSignal(false)
+  // The plan card (turn id) an execute turn belongs to, by the execute turn's
+  // own id: a refusal arrives after the grant was spent on connect, and it is
+  // explained on the card where the person approved.
+  const executePlanTurnIds = new Map<string, string>()
+  /**
+   * The composer's Ask/Do control, and every reset that must also drop out of
+   * the approved-plan mode (a retrieval scope, a conversation-only scope or a
+   * stale subscription route all turn Do off through this). Plan mode and an
+   * execute turn are mutually exclusive, so any write here disarms execute.
+   * Approve and reject use the raw setter: they decide a plan, they are not a
+   * choice of mode.
+   */
+  const setPlanMode = (value: boolean | ((previous: boolean) => boolean)) => {
+    if (typeof value === 'function') setPlanModeRaw(value)
+    else setPlanModeRaw(value)
+    setExecuteArmed(false)
+  }
   const [browseWeb, setBrowseWeb] = createSignal(readBrowseWebPreference())
   const [selectedSourceScope, setSourceScope] = createSignal<import('@/shared/actions/chat-source-scope').ChatSourceScope>('workspace')
   const sourceScope = () => state.turns.find(turn => turn.role === 'user')?.sourceScope ?? (state.turns.length ? 'workspace' : selectedSourceScope())
@@ -398,13 +432,15 @@ export function useChatController() {
    * those ids here would make the calm chat page look like an IDE after the
    * first message. Work is reserved for an explicitly planned run or the
    * multi-step research mode, both of which have a meaningful adjacent
-   * surface (steps, approvals, browser evidence, or a research trace).
+   * surface (steps, approvals, browser evidence, or a research trace). A turn
+   * that runs an approved plan is one too: it is an executing run, not a plan
+   * turn, so `planMode` is false on it.
    */
   const isWorkSurfaceTurn = (turn: ChatTurn | undefined): boolean => Boolean(
     turn
     && turn.role === 'assistant'
     && turn.runId
-    && (turn.planMode === true || turn.tools.includes('research')),
+    && (turn.planMode === true || turn.executeGranted === true || turn.tools.includes('research')),
   )
   /**
    * The run the live agent panel watches: the most recent assistant turn that
@@ -499,6 +535,42 @@ export function useChatController() {
       if (current.has(threadId)) return current
       return new Set(current).add(threadId)
     })
+  }
+
+  /**
+   * Whether the pointer to the approved plan's grant may be offered on the
+   * thread that is open: the grant was made for THIS thread, which is neither
+   * temporary, nor foreign, nor Support-derived, and has not lapsed (when the
+   * gateway said when). `selected` is the armed state. Display only: a send
+   * re-checks everything in `sendContent`, and the gateway decides.
+   */
+  const usableThreadGrant = (): ThreadPlanGrant | null => {
+    const grant = threadGrant()
+    const threadId = state.threadId
+    if (!grant || !threadId || grant.threadId !== threadId) return null
+    if (isTemporaryThread(threadId) || isForeignOriginThread(threadId) || isSupportChatThread(threadId)) return null
+    return grant
+  }
+  const grantHasLapsed = (grant: ThreadPlanGrant): boolean =>
+    grant.expiresAtMs !== undefined && Date.now() >= grant.expiresAtMs
+  const approvedPlanView = createMemo((): { rung: AutonomyRung; selected: boolean } | null => {
+    const grant = usableThreadGrant()
+    if (!grant || grantHasLapsed(grant)) return null
+    return { rung: grant.rung, selected: executeArmed() }
+  })
+  /** The composer's "run the approved plan" pill: execute is the mode, so plan mode is off. */
+  const selectExecute = () => {
+    if (!approvedPlanView()) return
+    setPlanModeRaw(false)
+    setExecuteArmed(true)
+  }
+  /** One approval is one execute turn: spent when the turn connects, or when the gateway refuses it typed. */
+  const spendThreadGrant = (grant: ThreadPlanGrant) => {
+    // Only the pointer this turn was sent under: a newer approval made while the
+    // turn was connecting is somebody's fresh decision and stays.
+    if (threadGrant() !== grant) return
+    setThreadGrant(null)
+    setExecuteArmed(false)
   }
 
   // Surface focus is a user preference, not durable agent state. Keep it
@@ -2049,6 +2121,10 @@ export function useChatController() {
     if (isForeignOriginThread(state.threadId)) return
     const turnBefore = state.turns.find((turn) => turn.id === turnId)
     const runId = turnBefore?.runId
+    // The thread the plan belongs to, read BEFORE the approval is awaited: the
+    // gateway keys the grant by the plan run's thread, so the pointer to it must
+    // name that thread, not whichever one is open when the answer comes back.
+    const grantThreadId = state.threadId
     if (!runId) {
       setPlanApprovalError((prev) => ({
         ...prev,
@@ -2074,7 +2150,34 @@ export function useChatController() {
         const turn = s.turns.find((turn) => turn.id === turnId)
         if (turn) turn.grantedRung = result.grantedRung
       })
-      setPlanMode(false)
+      setPlanModeRaw(false)
+      // WS14 S2a: the grant exists on the gateway for this thread. Remember it
+      // here, session-only, and arm the next send as the turn that runs the plan.
+      // Nothing is sent by itself (auto-send stays in S2), and a draft the person
+      // already typed is never overwritten. Only where this build offers the turn
+      // (the gateway's switch is on) and the plan card is still the thread on
+      // screen: after a thread switch the grant stays on the gateway, unreferenced.
+      if (
+        planExecuteEnabled()
+        && !executeSwitchedOff()
+        && grantThreadId
+        && state.threadId === grantThreadId
+        && !isTemporaryThread(grantThreadId)
+        && !isSupportChatThread(grantThreadId)
+      ) {
+        setThreadGrant({
+          threadId: grantThreadId,
+          rung: result.grantedRung,
+          planId: turnBefore?.proposedPlan?.planId,
+          turnId,
+          approvedAtMs: Date.now(),
+          expiresAtMs: result.grantExpiresAtMs,
+        })
+        setExecuteArmed(true)
+        if (!input().trim()) {
+          setInput(i18n.tr('Kjør den godkjente planen', 'Run the approved plan'))
+        }
+      }
       if (!result.persisted) {
         // The agent has the grant but the run does not record it, so the NEXT
         // turn will not carry it. Saying so beats letting the user discover it
@@ -2131,7 +2234,7 @@ export function useChatController() {
         const turn = s.turns.find((turn) => turn.id === turnId)
         if (turn) turn.planRejected = true
       })
-      setPlanMode(false)
+      setPlanModeRaw(false)
     } catch (error) {
       setPlanApprovalError((prev) => ({
         ...prev,
@@ -2257,12 +2360,56 @@ export function useChatController() {
     // agent at its next tool-round boundary, where the agent decides whether it
     // redirects the work or follows it (see the Model Plane's `queued_input`).
     if (state.status === 'streaming') {
-      await deliverMidRun(content, modelOverride, options)
+      // A message typed mid-run is queued input, or an ordinary turn once the
+      // run ends: never the turn that runs the approved plan, even though the
+      // pill was armed when it was typed. A deferred send keeps its options,
+      // so the request is removed here, not left to be re-read later.
+      await deliverMidRun(
+        content,
+        modelOverride,
+        options.executeGranted ? { ...options, executeGranted: undefined } : options,
+      )
       return
     }
     // A new turn owns the mid-run strip: whatever the previous run showed there
     // has either landed in the transcript or been reported as refused.
     if (state.queuedInputs.length > 0) setState((s) => { s.queuedInputs = [] })
+
+    // WS14 S2a: the one place a turn becomes the turn that runs the approved
+    // plan. The composer only REQUESTS it (`options.executeGranted`); every
+    // condition the gateway and the wire builder also enforce is checked here,
+    // so a send that cannot execute goes out as the ordinary Ask turn it will
+    // be read as, never as one that spends the person's approval and runs
+    // nothing. Regenerate, edit-resubmit, continue-generation and retry never
+    // set the request, so an executed turn cannot be executed again from the
+    // transcript.
+    let executeGrant: ThreadPlanGrant | null = null
+    if (options.executeGranted === true) {
+      // A one-shot read at the moment of the send, not a subscription.
+      const grant = untrack(usableThreadGrant)
+      const blocked =
+        !grant
+        || Boolean(options.zdr)
+        || options.provider === OPENAI_CODEX_SUBSCRIPTION_PROVIDER
+        || (options.sourceScope ?? sourceScope()) === 'conversation'
+        || (options.retrievalScope ?? retrievalScope()) !== 'auto'
+        || planMode()
+      if (grant && !blocked && grantHasLapsed(grant)) {
+        // Past the time the gateway said the grant lapses: nothing is sent, the
+        // draft stays where it is, and the plan card says what to do instead.
+        spendThreadGrant(grant)
+        setPlanApprovalError((prev) => ({
+          ...prev,
+          [grant.turnId]: i18n.tr(
+            'Fullmakten har utløpt. Be agenten lage planen på nytt (Utfør), og godkjenn den.',
+            'The authority has expired. Ask the agent to make the plan again (Do), and approve it.',
+          ),
+        }))
+        return
+      }
+      if (grant && !blocked) executeGrant = grant
+      else setExecuteArmed(false)
+    }
 
     let activeThreadId = state.threadId ?? createId('thread')
     const provisionalThreadId = activeThreadId
@@ -2337,6 +2484,9 @@ export function useChatController() {
       // Captured at SEND time so a toggle flipped later cannot retroactively
       // change what a finished turn was.
       planMode: planMode(),
+      // An execute turn is an executing run, not a plan: `planMode` stays false
+      // on it. Session-only, like the armed state it came from.
+      ...(executeGrant ? { executeGranted: true } : {}),
       // Same reasoning: `deriveConversationNodes`'s scope badge prefers the
       // server's own `scopeApplied` confirmation but falls back to this while
       // streaming/before that frame arrives — a fallback that only works if
@@ -2349,6 +2499,7 @@ export function useChatController() {
       tools,
       attachments: [],
     }
+    if (executeGrant) executePlanTurnIds.set(assistantId, executeGrant.turnId)
     const nextTurns = [
       ...state.turns,
       ...(userTurn ? [userTurn] : []),
@@ -2485,6 +2636,9 @@ export function useChatController() {
     deferStopUntilConnected = deferStop
     const cancelOnceConnected = ({ requestId, threadId: serverThreadId, runId }: ChatConnectedEvent) => {
       releaseDeferredStop()
+      // The gateway accepted the execute turn: the approval is spent, even though
+      // the person stopped it before it was shown.
+      if (executeGrant) spendThreadGrant(executeGrant)
       setState((s) => {
         const turn = s.turns.find((t) => t.id === assistantId)
         if (turn && requestId) turn.requestId = requestId
@@ -2548,6 +2702,9 @@ export function useChatController() {
           attachments: options.attachments,
           actions: options.actions,
           planMode: planMode(),
+          // Only the turn `sendContent` validated above; the wire builder drops it
+          // again on any turn that cannot execute. It carries no rung.
+          ...(executeGrant ? { executeGranted: true } : {}),
           effort: options.effort,
           verbosity: options.tone,
           zdr: options.zdr,
@@ -2571,6 +2728,11 @@ export function useChatController() {
               return
             }
             releaseDeferredStop()
+            // One approval is one execute turn: the gateway has accepted it, so
+            // the pointer to the grant is spent and the pill goes away. A typed
+            // refusal can still follow (the rung is resolved after `connected`);
+            // it is explained on the plan card through `executePlanTurnIds`.
+            if (executeGrant) spendThreadGrant(executeGrant)
             const { requestId, threadId: serverThreadId, model: connectedModel, runId } = connected
             captureRequestId(requestId)
             // An agentic / plan-mode turn learns its durable orchestration run
@@ -2892,6 +3054,10 @@ export function useChatController() {
       // Carried only when the selected catalog model attests a tier; the wire
       // body omits it otherwise (see buildChatWireBody).
       minPrivacyTier: payload.minPrivacyTier,
+      // WS14 S2a: whether this send was made while the pill that runs the
+      // approved plan is selected. Read here, at the moment of the send, after
+      // the awaits above. It is only a request: `sendContent` decides.
+      executeGranted: executeArmed(),
     })
   }
 
@@ -3296,6 +3462,25 @@ export function useChatController() {
       now: Date.now(),
     })
     setState((s) => { s.error = shown.message })
+    if (failure.code === 'plan_grant_unavailable' || failure.code === 'plan_execute_disabled') {
+      // The turn that runs the approved plan was refused, typed, and nothing ran:
+      // the gateway holds no live grant for the thread (a restart or the 24 h
+      // lapse), or running a plan is switched off here. The pointer to the grant
+      // is dropped so the pill does not keep offering a turn that always refuses,
+      // and the same words go on the plan card, where the person approved. The
+      // refusal can arrive after `connected` has already spent the grant, so the
+      // card is found through the execute turn, not through the grant.
+      // `plan_execute_disabled` also says the switch is off on this deployment:
+      // later approvals in this session arm nothing. A lapsed grant says no such thing.
+      if (failure.code === 'plan_execute_disabled') setExecuteSwitchedOff(true)
+      const grant = threadGrant()
+      const planTurnId = executePlanTurnIds.get(assistantId) ?? (grant?.threadId === threadId ? grant.turnId : undefined)
+      if (grant && grant.threadId === threadId) spendThreadGrant(grant)
+      executePlanTurnIds.delete(assistantId)
+      if (planTurnId) {
+        setPlanApprovalError((prev) => ({ ...prev, [planTurnId]: shown.message }))
+      }
+    }
     setState((s) => {
       const turn = s.turns.find((candidate) => candidate.id === assistantId)
       if (!turn) return
@@ -3880,6 +4065,10 @@ export function useChatController() {
     planApprovalPending,
     planApprovalError,
     setPlanMode,
+    // WS14 S2a: the approved plan's rung and whether the next send runs it
+    // (null when there is nothing to offer on this thread), and the pill's click.
+    approvedPlanView,
+    selectExecute,
     browseWeb,
     sourceScope,
     setSourceScope,

@@ -859,6 +859,15 @@ export function DashboardComposer(props: {
 	onMessageChange: (value: string) => void;
 	onPlanModeChange?: (value: boolean) => void;
 	planMode?: boolean;
+	/**
+	 * A plan the person approved is waiting to run (WS14 S2a). Present only
+	 * then: the chat appearance shows a third "Kjør plan" pill beside Ask and Do.
+	 * `rungLabel` says what the agent may now do; `selected` is whether the next
+	 * send runs the plan. The pill is disabled, with its reason, on a route or in
+	 * a mode that cannot run it.
+	 */
+	approvedPlan?: { rungLabel: string; selected: boolean };
+	onApprovedPlanSelect?: () => void;
 	onStop?: () => void;
 	onLaunchStart?: () => void;
 	onSubmit?: (
@@ -1328,6 +1337,40 @@ export function DashboardComposer(props: {
 	const temporaryChat = createMemo(
 		() => props.temporaryChatLocked || (props.temporaryChat ?? false),
 	);
+	// WS14 S2a, the "Kjør plan" pill. Why the turn that runs the approved plan
+	// cannot be sent from here, or undefined when it can. Each reason mirrors a
+	// condition the controller and the gateway enforce again at send time, so the
+	// pill never offers a turn that would go out as something else. A blocked pill
+	// is disabled, says why, and is never drawn as selected.
+	const executeBlockedReason = createMemo((): string | undefined => {
+		if (subscriptionBacked()) {
+			return i18n.tr(
+				"Kjøring av godkjent plan er ikke tilgjengelig for ChatGPT-abonnementet ennå",
+				"Running an approved plan is not available for the ChatGPT subscription yet",
+			);
+		}
+		if (temporaryChat()) {
+			return i18n.tr(
+				"Ikke tilgjengelig i en midlertidig samtale",
+				"Not available in a temporary chat",
+			);
+		}
+		if (conversationOnly()) {
+			return i18n.tr(
+				"Ikke tilgjengelig når bare samtalen er kilden",
+				"Not available when only the conversation is the source",
+			);
+		}
+		if (retrievalScope() !== "auto") {
+			return i18n.tr(
+				"Ikke tilgjengelig med kildefilter (kun nett eller kun kunnskap)",
+				"Not available with a source filter (web only or knowledge only)",
+			);
+		}
+		return undefined;
+	});
+	const executeSelected = () =>
+		Boolean(props.approvedPlan?.selected) && executeBlockedReason() === undefined;
 	// Locked (already inside a temporary thread) still wins: that control is
 	// disabled because the choice is settled, not because it is unavailable.
 	const temporaryChatUnavailable = createMemo(
@@ -3026,16 +3069,16 @@ export function DashboardComposer(props: {
 							<div class="dashboard-composer-intent-segment" role="group" aria-label={i18n.tr("Arbeidsmodus", "Work mode")}>
 								<button
 									type="button"
-									aria-pressed={!planMode() ? "true" : "false"}
-									class={{ "is-active": !planMode() }}
+									aria-pressed={!planMode() && !executeSelected() ? "true" : "false"}
+									class={{ "is-active": !planMode() && !executeSelected() }}
 									onClick={() => props.onPlanModeChange?.(false)}
 								>
 									{i18n.tr("Spør", "Ask")}
 								</button>
 								<button
 									type="button"
-									aria-pressed={planMode() ? "true" : "false"}
-									class={{ "is-active": planMode() }}
+									aria-pressed={planMode() && !executeSelected() ? "true" : "false"}
+									class={{ "is-active": planMode() && !executeSelected() }}
 									disabled={!planModeAvailable() || conversationOnly()}
 									title={!planModeAvailable() ? subscriptionDoDisabledTitle() : undefined}
 									onClick={() => props.onPlanModeChange?.(true)}
@@ -3043,6 +3086,31 @@ export function DashboardComposer(props: {
 								>
 									{i18n.tr("Utfør", "Do")}
 								</button>
+								<Show when={props.approvedPlan}>
+									{(approved) => (
+										<button
+											type="button"
+											aria-pressed={executeSelected() ? "true" : "false"}
+											class={{ "is-active": executeSelected() }}
+											disabled={executeBlockedReason() !== undefined}
+											title={
+												executeBlockedReason() ??
+												i18n.tr(
+													`Kjør den godkjente planen — agenten kan nå ${approved().rungLabel}`,
+													`Run the approved plan (${approved().rungLabel})`,
+												)
+											}
+											onClick={() => props.onApprovedPlanSelect?.()}
+											style={
+												executeBlockedReason() === undefined
+													? undefined
+													: { opacity: 0.5, cursor: "not-allowed" }
+											}
+										>
+											{i18n.tr("Kjør plan", "Run plan")}
+										</button>
+									)}
+								</Show>
 							</div>
 						</Show>
 					</Show>

@@ -2533,7 +2533,8 @@ export function PlanApprovalControl(props: {
  */
 const GRANTABLE_RUNGS: AutonomyRung[] = ['workspace_write', 'danger_full_access']
 
-const RUNG_LABEL: Record<AutonomyRung, string> = {
+// Exported for the composer's "Kjør plan" pill, which names the same rung in the same words.
+export const RUNG_LABEL: Record<AutonomyRung, string> = {
   read_only: 'bare undersøke',
   workspace_write: 'skrive i arbeidsområdet',
   danger_full_access: 'utføre alt, også utgående handlinger',

@@ -1021,11 +1021,38 @@ const organizationSwitchActiveInput = z.object({
 // Grants a running model invocation an autonomy rung up to
 // danger_full_access. The owner (model-gateway) checks run ownership
 // server-side; nothing here or in the gateway re-derives that check.
+//
+// `planId` names the structured plan the person approved and `editedSteps` are
+// the edits they made to its steps; both are optional, so the rung-only grant
+// is unchanged. A step with no `stepId` is a new one, and `removed` marks one
+// the person dropped (it is kept, as skipped, rather than deleted).
 const chatApprovePlanInput = z.object({
   runId: z.string().min(1),
   grantedRung: z.enum(['read_only', 'workspace_write', 'danger_full_access']),
   justification: z.string().trim().min(1),
+  planId: z.string().min(1).optional(),
+  editedSteps: z
+    .array(
+      z.object({
+        stepId: z.string().optional(),
+        title: z.string().min(1),
+        operation: z.string().optional(),
+        removed: z.boolean().optional(),
+      }),
+    )
+    .optional(),
 })
+
+// Starts the turn that runs an approved plan. Strict on purpose: the rung is
+// held by the server (the grant recorded when the person approved the plan) and
+// is never a client input, so a supplied `grantedRung` must fail to parse. The
+// controller spends the grant on connect: one approval is one execute turn.
+const chatExecuteApprovedPlanInput = z
+  .object({
+    threadId: z.string().min(1),
+    planId: z.string().min(1).optional(),
+  })
+  .strict()
 
 const chatCancelInvocationInput = z.object({
   requestId: z.string().min(1),
@@ -2835,12 +2862,23 @@ export const actionRegistry = [
   {
     id: 'chat.approve_plan',
     label: 'Approve run autonomy',
-    description: 'Grant a running agent invocation an autonomy rung, up to danger_full_access. The owner independently verifies the caller owns the run.',
+    description: 'Grant a planning run an autonomy rung, up to danger_full_access, for the thread it belongs to. When planId is given the structured plan is approved with the person\'s editedSteps in the same decision, and the grant records its expiry. The owner independently verifies the caller owns the run, and the grant is held by the server, not by the client. Never model-executable: a model does not grant itself authority.',
     ownerPlane: 'model',
     risk: 'high',
     requiresApproval: false,
     reversible: false,
     inputSchema: chatApprovePlanInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'chat.execute_approved_plan',
+    label: 'Run approved plan',
+    description: 'Start a NEW executing run on a thread whose plan the person approved, under the rung the server holds for that thread. The plan run itself stays read-only and is never widened. The turn is refused typed, with nothing run, when the server holds no live grant (plan_grant_unavailable) or the capability is switched off on the deployment (plan_execute_disabled). One approval is one execute turn on the client, and the grant is never accepted from a client. It is the person\'s click after they approved the plan, and never model-executable.',
+    ownerPlane: 'model',
+    risk: 'high',
+    requiresApproval: false,
+    reversible: false,
+    inputSchema: chatExecuteApprovedPlanInput,
     outputSchema: envelopeStatusOutput,
   },
   {

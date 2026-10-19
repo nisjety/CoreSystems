@@ -415,7 +415,11 @@ function zdrStreamPresentation(code: string, tr: Translate, feature: string | un
  * was used, because the subscription route never swaps.
  * `agentic_subscription_disabled` is the server saying Do is off for the
  * subscription route: the reader is told to choose Ask or another model, and
- * no retry is offered. `prompt_too_long`,
+ * no retry is offered. `plan_grant_unavailable` and `plan_execute_disabled` are
+ * the refusals of the turn that runs an approved plan (WS14 S2a): the server holds
+ * no live grant for the thread, or the capability is switched off on this
+ * deployment. Nothing ran, a retry cannot help, so each says so in words and
+ * offers none. `prompt_too_long`,
  * `inference_stream_error` and `model_plane_unavailable` are translated too;
  * the last one's server text is raw transport detail and is never shown.
  */
@@ -489,6 +493,33 @@ export function streamFailurePresentation(
         message: tr(
           'Utfør er ikke slått på for ChatGPT-abonnementet. Velg Spør, eller velg en annen modell for å bruke Utfør. Ingen modell ble brukt.',
           'Do is not switched on for the ChatGPT subscription. Choose Ask, or pick another model to use Do. No model was used.',
+        ),
+        unsaved: true,
+        unavailable: false,
+        action: 'none',
+      }
+    case 'plan_grant_unavailable':
+      // The turn that runs the approved plan was refused before anything ran:
+      // the gateway holds no live grant for the thread (it restarted, or the
+      // 24 h grant lapsed). Sending it again would be refused the same way, so
+      // there is no retry; the words say what does help. The server's text is
+      // English operator wording and is never shown.
+      return {
+        message: tr(
+          'Fullmakten er ikke lenger aktiv (utløpt eller tjenesten ble startet på nytt). Velg Utfør, be agenten lage planen på nytt, og godkjenn den. Ingenting ble kjørt.',
+          'The authority is no longer active (it expired or the service restarted). Choose Do, ask the agent to make the plan again, and approve it. Nothing was run.',
+        ),
+        unsaved: true,
+        unavailable: false,
+        action: 'none',
+      }
+    case 'plan_execute_disabled':
+      // Running an approved plan is switched off on this deployment. Nothing
+      // the reader does here changes that, so there is no retry either.
+      return {
+        message: tr(
+          'Kjøring av godkjent plan er slått av i denne installasjonen. Ingenting ble kjørt.',
+          'Running an approved plan is switched off on this deployment. Nothing was run.',
         ),
         unsaved: true,
         unavailable: false,

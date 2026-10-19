@@ -755,6 +755,10 @@ fn strip_support_thread_capabilities(object: &mut serde_json::Map<String, Value>
     object.insert("browse_web".to_owned(), Value::Bool(false));
     object.insert("generate_image".to_owned(), Value::Bool(false));
     object.insert("plan_mode".to_owned(), Value::Bool(false));
+    // An execute turn runs under a plan grant, and a support thread can never
+    // hold one. The model gateway reads both spellings, so both are removed.
+    object.remove("execute_granted");
+    object.remove("executeGranted");
     object.insert("deep_research".to_owned(), Value::Bool(false));
     // Pinning changes the prompt sent upstream, and a support thread's
     // history is customer-authored transcript text this surface is only ever
@@ -1009,6 +1013,8 @@ mod tests {
             "browse_web": true,
             "generate_image": true,
             "plan_mode": true,
+            "execute_granted": true,
+            "executeGranted": true,
             "deep_research": true,
             "pinned_message_ids": ["m1", "m2"],
             "session_key": "spoofed-session"
@@ -1020,6 +1026,16 @@ mod tests {
         assert_eq!(body["browse_web"], false);
         assert_eq!(body["generate_image"], false);
         assert_eq!(body["plan_mode"], false);
+        // An execute turn runs under a plan grant a support thread can never
+        // hold; the model gateway accepts the camelCase alias, so both go.
+        assert!(
+            body.get("execute_granted").is_none(),
+            "a support turn must not forward execute_granted"
+        );
+        assert!(
+            body.get("executeGranted").is_none(),
+            "a support turn must not forward the executeGranted alias"
+        );
         assert_eq!(body["deep_research"], false);
         assert_eq!(body["pinned_message_ids"], serde_json::json!([]));
         assert_eq!(body["session_key"], "support_thread");

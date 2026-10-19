@@ -4533,6 +4533,10 @@ fn apply_mention_binding_policy(
         "auto" => {}
         _ => {
             object.insert("plan_mode".to_owned(), json!(false));
+            // An execute turn is an autonomous run too; the model gateway
+            // reads both spellings, so both are removed.
+            object.remove("execute_granted");
+            object.remove("executeGranted");
             if let Some(features) = object.get_mut("features").and_then(Value::as_array_mut) {
                 features.retain(|feature| feature.as_str() != Some("agentic"));
             }
@@ -8929,6 +8933,8 @@ mod tests {
             "space_ref": "space-1",
             "mentioned_agent_ref": "svc-support",
             "plan_mode": true,
+            "execute_granted": true,
+            "executeGranted": true,
             "features": ["tools", "agentic", "memory"],
             "tools": [{"name": "web_search"}],
         });
@@ -8948,6 +8954,10 @@ mod tests {
         assert_eq!(
             body["plan_mode"], false,
             "confirmation policy forbids autonomous runs"
+        );
+        assert!(
+            body.get("execute_granted").is_none() && body.get("executeGranted").is_none(),
+            "confirmation policy forbids an execute turn, under either spelling"
         );
         assert_eq!(
             body["features"],

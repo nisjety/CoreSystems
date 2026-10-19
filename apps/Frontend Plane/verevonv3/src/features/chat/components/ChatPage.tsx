@@ -31,6 +31,7 @@ import {
   EmptyChatState,
   MessageBlock,
   QueuedInputStrip,
+  RUNG_LABEL,
 } from './ChatMessages'
 import {
   ArtifactsPanel,
@@ -120,6 +121,8 @@ export default function ChatPage() {
     rejectTurnPlan,
     planApprovalPending,
     planApprovalError,
+    approvedPlanView,
+    selectExecute,
     browseWeb,
     sourceScope,
     setSourceScope,
@@ -239,6 +242,14 @@ export default function ChatPage() {
       onSubmit={handleComposerSubmit}
       onTemporaryChatChange={setTemporaryChat}
       planMode={planMode()}
+      // WS14 S2a: the third pill, shown only while an approved plan is waiting to
+      // run on this thread. The controller owns whether it is selected.
+      approvedPlan={
+        approvedPlanView()
+          ? { rungLabel: RUNG_LABEL[approvedPlanView()!.rung], selected: approvedPlanView()!.selected }
+          : undefined
+      }
+      onApprovedPlanSelect={selectExecute}
       showTurnReceipt={false}
       submitting={isStreaming()}
       allowMidRunSubmit

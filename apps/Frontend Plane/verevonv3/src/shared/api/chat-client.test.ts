@@ -941,6 +941,164 @@ describe('approvePlan / rejectPlan (plan-gate §2.3)', () => {
     })
     expect(result.plan?.state).toBe('PLAN_STATE_REJECTED')
   })
+
+  it('reads the grant expiry the gateway returns, in seconds, as milliseconds', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        jsonResponse({
+          granted_rung: 'workspace_write',
+          was_in_plan_mode: true,
+          persisted: true,
+          grant_expires_at_unix: 1_900_000_000,
+        }),
+      ),
+    )
+
+    const result = await approvePlan('run_1', 'workspace_write', 'writes its report')
+
+    expect(result.grantExpiresAtMs).toBe(1_900_000_000_000)
+  })
+
+  it('leaves grantExpiresAtMs undefined for an older gateway, a null, or a value that is not a positive finite number', async () => {
+    for (const grant of [undefined, null, 0, -5, 'soon', Number.NaN]) {
+      vi.stubGlobal(
+        'fetch',
+        vi.fn().mockResolvedValue(
+          jsonResponse({
+            granted_rung: 'workspace_write',
+            was_in_plan_mode: true,
+            persisted: true,
+            grant_expires_at_unix: grant,
+          }),
+        ),
+      )
+      const result = await approvePlan('run_1', 'workspace_write', 'writes its report')
+      expect(result.grantExpiresAtMs).toBeUndefined()
+    }
+  })
+})
+
+// WS14 S2a: the turn after a plan approval is an EXECUTE turn. It is agentic with
+// plan_mode false and says so with `execute_granted`; the rung is never on the
+// wire, the gateway reads it from the grant it holds for the thread.
+describe('chat-client execute turn (WS14 S2a)', () => {
+  afterEach(() => {
+    clearSupportChatThreads()
+  })
+
+  const execute = { content: 'Kjør den godkjente planen', threadId: 'thread_1', executeGranted: true }
+
+  it('puts execute_granted with agentic and tools on the wire, plan_mode false and no rung', () => {
+    const body = buildChatWireBody(execute)
+
+    expect(body.execute_granted).toBe(true)
+    expect(body.plan_mode).toBe(false)
+    expect(body.thread_id).toBe('thread_1')
+    expect(body.features).toEqual(expect.arrayContaining(['agentic', 'tools']))
+    expect(body).not.toHaveProperty('granted_rung')
+    expect(body).not.toHaveProperty('autonomy_rung')
+    expect(body).not.toHaveProperty('execute_granted_rung')
+  })
+
+  it('never carries the key on an ordinary, plan, regenerate, edit-resubmit or filtered turn, and the rest of the body is unchanged', () => {
+    const ordinary = [
+      { content: 'hi' },
+      { content: 'hi', threadId: 'thread_1' },
+      { content: 'hi', threadId: 'thread_1', executeGranted: false },
+      { content: 'plan it', threadId: 'thread_1', planMode: true },
+      { content: 'again', threadId: 'thread_1', regenerated: true },
+      { content: 'edited', threadId: 'thread_1', editResubmit: true },
+      { content: 'hi', threadId: 'thread_1', retrievalScope: 'web_only' as const },
+    ]
+    for (const request of ordinary) {
+      const body = buildChatWireBody(request)
+      expect(Object.keys(body)).not.toContain('execute_granted')
+    }
+
+    // An explicit false is the same body, key for key, as the field being absent.
+    expect(buildChatWireBody({ content: 'hi', threadId: 'thread_1', executeGranted: false })).toEqual(
+      buildChatWireBody({ content: 'hi', threadId: 'thread_1' }),
+    )
+    // And an execute turn differs from the same turn without it by exactly the
+    // key and the agentic feature, nothing else.
+    const withoutIt = buildChatWireBody({ content: 'Kjør den godkjente planen', threadId: 'thread_1' })
+    const withIt = buildChatWireBody(execute)
+    const strip = (body: Record<string, unknown>) => ({
+      ...body,
+      execute_granted: undefined,
+      features: (body.features as string[]).filter((feature) => feature !== 'agentic'),
+    })
+    expect(strip(withIt)).toEqual(strip(withoutIt))
+  })
+
+  it('lets plan mode win: a plan turn is a plan turn, not an execute turn', () => {
+    const body = buildChatWireBody({ ...execute, planMode: true })
+
+    expect(body).not.toHaveProperty('execute_granted')
+    expect(body.plan_mode).toBe(true)
+    expect(body.features).toContain('agentic')
+  })
+
+  it('drops executeGranted when there is no thread to hold the grant', () => {
+    for (const threadId of [undefined, '', '   ']) {
+      const body = buildChatWireBody({ ...execute, threadId })
+
+      expect(body).not.toHaveProperty('execute_granted')
+      expect(body.features).not.toContain('agentic')
+      expect(body.plan_mode).toBe(false)
+    }
+  })
+
+  it('drops executeGranted on a conversation-only turn', () => {
+    const body = buildChatWireBody({ ...execute, sourceScope: 'conversation' })
+
+    expect(body).not.toHaveProperty('execute_granted')
+    expect(body.features).not.toContain('agentic')
+    expect(body.plan_mode).toBe(false)
+  })
+
+  it('drops executeGranted on a Support-derived thread', () => {
+    bindSupportChatThread({ userId: 'user-1', orgId: 'org-1', conversationId: 'conversation-1' }, 'support_thread')
+
+    const body = buildChatWireBody({ ...execute, threadId: 'support_thread' })
+
+    expect(body).not.toHaveProperty('execute_granted')
+    expect(body.features).not.toContain('agentic')
+    expect(body.plan_mode).toBe(false)
+    expect(body.tools).toEqual([])
+  })
+
+  it('drops executeGranted under zero data retention, where no plan or grant exists', () => {
+    const body = buildChatWireBody({ ...execute, zdr: true })
+
+    expect(body).not.toHaveProperty('execute_granted')
+    expect(body.features).not.toContain('agentic')
+    expect(body.plan_mode).toBe(false)
+    expect(body.zdr).toBe(true)
+  })
+
+  it('drops executeGranted on the ChatGPT-subscription route', () => {
+    const body = buildChatWireBody({
+      ...execute,
+      model: 'gpt-5.6-terra',
+      provider: 'openai-codex-subscription',
+      subscriptionConnectionId: 'conn-subscription-1',
+    })
+
+    expect(body).not.toHaveProperty('execute_granted')
+    expect(body.features).not.toContain('agentic')
+    expect(body.plan_mode).toBe(false)
+  })
+
+  it('sends no retrieval_scope on an execute turn, since the gateway refuses agentic with a filtered scope', () => {
+    for (const retrievalScope of ['web_only', 'knowledge_only'] as const) {
+      const body = buildChatWireBody({ ...execute, retrievalScope })
+
+      expect(body.execute_granted).toBe(true)
+      expect(body).not.toHaveProperty('retrieval_scope')
+    }
+  })
 })
 
 describe('buildChatWireBody — retrieval scope (chat-wave2 scope spec)', () => {

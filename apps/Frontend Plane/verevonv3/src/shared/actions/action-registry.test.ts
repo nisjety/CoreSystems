@@ -137,4 +137,54 @@ describe('action registry', () => {
     // The original sentence is kept.
     expect(description).toContain('the approved call runs once under the authority the pause recorded')
   })
+
+  it('registers chat.execute_approved_plan as a high-risk model-plane action the model cannot execute', () => {
+    const execute = getActionDescriptor('chat.execute_approved_plan')
+
+    expect(execute?.ownerPlane).toBe('model')
+    expect(execute?.risk).toBe('high')
+    // The approval click and the server-held grant are the human decision.
+    expect(execute?.requiresApproval).toBe(false)
+    expect(execute?.reversible).toBe(false)
+    expect(isModelExecutableAction('chat.execute_approved_plan')).toBe(false)
+    // Approving a plan is not model-executable either: a model never grants itself authority.
+    expect(isModelExecutableAction('chat.approve_plan')).toBe(false)
+
+    expect(execute?.inputSchema.safeParse({ threadId: 'thread_1' }).success).toBe(true)
+    expect(execute?.inputSchema.safeParse({ threadId: 'thread_1', planId: 'plan_1' }).success).toBe(true)
+    // The rung lives on the server; a client-supplied rung is refused at the contract.
+    expect(execute?.inputSchema.safeParse({
+      threadId: 'thread_1',
+      grantedRung: 'danger_full_access',
+    }).success).toBe(false)
+    expect(execute?.inputSchema.safeParse({ threadId: '' }).success).toBe(false)
+    expect(execute?.inputSchema.safeParse({ threadId: 'thread_1', planId: '' }).success).toBe(false)
+
+    const description = execute?.description ?? ''
+    expect(description).toContain('NEW')
+    expect(description).toContain('rung the server holds')
+    expect(description).toContain('never model-executable')
+  })
+
+  it('lets chat.approve_plan name the structured plan and carry the person\'s step edits', () => {
+    const approve = getActionDescriptor('chat.approve_plan')
+    const base = { runId: 'run_1', grantedRung: 'workspace_write', justification: 'Looks right to me' }
+
+    // The legacy rung-only input still parses.
+    expect(approve?.inputSchema.safeParse(base).success).toBe(true)
+    expect(approve?.inputSchema.safeParse({
+      ...base,
+      planId: 'plan_1',
+      editedSteps: [
+        { stepId: 's1', title: 'Rename the file', removed: false },
+        { title: 'A step the person added', operation: 'write file', removed: false },
+        { stepId: 's3', title: 'Drop me', removed: true },
+      ],
+    }).success).toBe(true)
+    expect(approve?.inputSchema.safeParse({ ...base, planId: '' }).success).toBe(false)
+    expect(approve?.inputSchema.safeParse({
+      ...base,
+      editedSteps: [{ stepId: 's1', removed: true }],
+    }).success).toBe(false)
+  })
 })

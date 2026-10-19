@@ -139,6 +139,18 @@ export type ChatInvokeRequest = {
    */
   planMode?: boolean
   /**
+   * This turn runs the plan the person just approved (WS14 S2a "Run the
+   * approved plan"). Only the chat controller sets it, and only after it has
+   * checked that a grant for this thread is armed and usable. It carries NO rung:
+   * model-gateway runs the turn under the grant it holds for the thread and
+   * refuses it typed (`plan_grant_unavailable`, `plan_execute_disabled`) when it
+   * cannot. Dropped here, with no `agentic` feature, when the turn has no
+   * thread, is a plan turn, is conversation-only, Support-derived, zero-retention
+   * or on the subscription route, so it can never ride on a turn that cannot
+   * execute. Regenerate, edit-resubmit, continue-generation and retry never set it.
+   */
+  executeGranted?: boolean
+  /**
    * This turn is a REGENERATE of the previous answer, not a new question.
    *
    * Client-declared because the server cannot infer it: a regenerate arrives as
@@ -1082,7 +1094,24 @@ export function buildChatWireBody(request: ChatInvokeRequest): Record<string, un
   // code, which the chat presents in words (`streamFailurePresentation`). The
   // body stays as narrow as before on every other axis: no client tools,
   // browsing, image generation, deep research, skills or attachments.
-  if (request.planMode && !conversationOnly && !supportReadOnly) features.add('agentic')
+  //
+  // An EXECUTE turn (WS14 S2a, the turn that runs an approved plan) is agentic
+  // too, with plan_mode false: model-gateway runs it under the grant it holds
+  // for the thread, or refuses it typed. It is only ever put on the wire when
+  // every precondition the server enforces also holds here (an existing thread,
+  // not Support-derived, not conversation-only, not zero-retention, not the
+  // subscription route, not a plan turn), so the body this builds never asks for
+  // something the gateway would refuse as malformed. The controller has already
+  // decided whether the turn may execute; this is the last, narrow gate.
+  const executeGranted =
+    request.executeGranted === true &&
+    !request.planMode &&
+    !conversationOnly &&
+    !supportReadOnly &&
+    !subscriptionBacked &&
+    !request.zdr &&
+    Boolean(threadId)
+  if ((request.planMode || executeGranted) && !conversationOnly && !supportReadOnly) features.add('agentic')
   else features.delete('agentic')
 
   const supportContextQuery = !conversationOnly && !supportReadOnly && shouldRequestSupportContext(request.content)
@@ -1119,6 +1148,10 @@ export function buildChatWireBody(request: ChatInvokeRequest): Record<string, un
       : subscriptionBacked
         ? (request.planMode ?? false) && !conversationOnly
         : request.planMode ?? false,
+    // Present ONLY on an execute turn, so every other body is byte-identical to
+    // what it was before this field existed. It carries no rung and no plan id:
+    // the server holds the grant, and a rung supplied here would never be read.
+    ...(executeGranted ? { execute_granted: true } : {}),
     // Deep research is its OWN field, not just `browse_web`. "Dyp research"
     // used to set only browseWeb, so it was indistinguishable from a plain
     // Search turn — the same failure planMode had. The gateway keys the
@@ -1140,7 +1173,10 @@ export function buildChatWireBody(request: ChatInvokeRequest): Record<string, un
     // gateway reads an absent value as `auto` (today's byte-identical
     // behavior), so this is only ever sent for a real `knowledge_only`/
     // `web_only` pick on a `workspace`-scope thread.
-    ...(retrievalScope !== 'auto' ? { retrieval_scope: retrievalScope } : {}),
+    //
+    // Never on an execute turn: the gateway refuses an agentic run with a
+    // filtered scope, and the execute turn carries no per-turn source filter.
+    ...(retrievalScope !== 'auto' && !executeGranted ? { retrieval_scope: retrievalScope } : {}),
     attachments: subscriptionBacked ? [] : request.attachments ?? [],
     // Opt-in only, like `min_privacy_tier` below: omitted entirely when
     // nothing is pinned, so an ordinary turn's body is byte-identical to
@@ -1892,6 +1928,13 @@ export type PlanApprovalResult = {
   /** The finalized, post-edit plan (plan-gate §2.3) — absent when this turn
    * never proposed a structured plan (the pure rung-grant path, unchanged). */
   plan?: Plan
+  /**
+   * When the grant the gateway just recorded lapses, in epoch milliseconds
+   * (`grant_expires_at_unix` on the wire is seconds). Absent for an older
+   * gateway, a null, or a value that is not a positive finite number. A pointer
+   * for the UI only: the gateway's grant is the authority, never this value.
+   */
+  grantExpiresAtMs?: number
 }
 
 /**
@@ -1934,6 +1977,11 @@ export async function approvePlan(
     wasInPlanMode: raw.was_in_plan_mode === true,
     persisted: raw.persisted !== false,
     plan: plan ? (normalizePlan(plan) ?? undefined) : undefined,
+    ...(typeof raw.grant_expires_at_unix === 'number' &&
+    Number.isFinite(raw.grant_expires_at_unix) &&
+    raw.grant_expires_at_unix > 0
+      ? { grantExpiresAtMs: raw.grant_expires_at_unix * 1000 }
+      : {}),
   }
 }
 

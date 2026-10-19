@@ -392,6 +392,17 @@ export type ChatTurn = {
    */
   planMode?: boolean
   /**
+   * This turn ran the plan the person had approved (WS14 S2a): an EXECUTING run
+   * under the grant the Model Plane holds for the thread, not a planning one.
+   *
+   * Session-only, like the armed state that produced it: set by `sendContent`
+   * when it sent the turn as an execute turn, never read back from server
+   * metadata and not part of the local thread record. It makes the Work surface
+   * treat the turn as a run (steps, run id, effect class) even though
+   * `planMode` is false.
+   */
+  executeGranted?: boolean
+  /**
    * The rung a person granted this run, once they approved its plan. Absent
    * means no grant has been made — never "granted everything".
    */
@@ -511,6 +522,29 @@ export type StreamAttachment = {
   mime_type: string
 }
 
+/**
+ * The client's pointer to the plan grant the Model Plane holds for a thread
+ * (WS14 S2a), set when the person approves a plan.
+ *
+ * Session-only: never written to local storage, a thread snapshot or the
+ * server, and it carries no authority. The gateway's grant is the authority and
+ * decides whether an execute turn runs; this only remembers that one was given,
+ * for which thread and rung, so the composer can offer the "run the approved
+ * plan" pill and the controller can refuse to send an execute turn on a thread
+ * the grant was not made for.
+ */
+export type ThreadPlanGrant = {
+  threadId: string
+  rung: AutonomyRung
+  /** The structured plan that was approved, when the turn proposed one. */
+  planId?: string
+  /** The plan card's turn: where a refusal or an expiry is explained. */
+  turnId: string
+  approvedAtMs: number
+  /** When the gateway's grant lapses, when it said so; absent for an older gateway. */
+  expiresAtMs?: number
+}
+
 export type SendOptions = {
   sourceScope?: import('@/shared/actions/chat-source-scope').ChatSourceScope
   /** See `ChatInvokeRequest.retrievalScope`. Per-turn, unlike `sourceScope`. */
@@ -566,6 +600,13 @@ export type SendOptions = {
    */
   regenerated?: boolean
   editResubmit?: boolean
+  /**
+   * A REQUEST that this send runs the approved plan. Set only by the composer
+   * submit, from the armed state, and re-validated by `sendContent`, which is
+   * the authority boundary: a send that fails any check goes out as an ordinary
+   * turn. Regenerate, edit-resubmit, continue-generation and retry never set it.
+   */
+  executeGranted?: boolean
   /**
    * Minimum privacy tier requested for this turn (Venice-style tiering).
    * Only set when the user explicitly picked a tiered catalog model; omitted
