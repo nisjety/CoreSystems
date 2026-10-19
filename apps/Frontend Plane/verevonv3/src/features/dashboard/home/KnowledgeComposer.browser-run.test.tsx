@@ -278,4 +278,60 @@ describe('KnowledgeComposer blocked notice', () => {
     expect(shown).not.toMatch(/secret\.example|raw gateway/)
     expect(view.container.querySelector('.knowledge-browser-chrome')).not.toBeNull()
   })
+
+  const receipt = (result: unknown) =>
+    json(200, { data: { actionId: 'browser.blocked.try_other_source', auditId: 'a', eventStream: '', result, runId: 'r', status: 'completed' } })
+  const leaveNoticeOf = (container: HTMLElement) =>
+    container.querySelector<HTMLElement>('.dashboard-knowledge-composer__status[role="status"]')
+
+  it('leaves the site and tells the person when the run could not be stopped (run controls off)', async () => {
+    const calls = gateway({
+      challenge: STRONG_CHALLENGE,
+      execute: [() => receipt({ closed: true, runStopped: false, runControlsDisabled: true })],
+    })
+    const view = render(() => <KnowledgeComposer />)
+    await openPreview(view.container)
+    await startRunOn(view.container, calls)
+
+    fireEvent.click(leaveButton(view.container))
+
+    await waitFor(() => expect(view.container.querySelector('.knowledge-browser-chrome')).toBeNull())
+    const notice = await waitFor(() => {
+      const found = leaveNoticeOf(view.container)
+      expect(found).not.toBeNull()
+      return found!.textContent ?? ''
+    })
+    expect(notice).toContain('kjøringskontroller er slått av')
+    expect(view.container.querySelector('.dashboard-knowledge-composer__error')).toBeNull()
+  })
+
+  it('shows no such note when the run was stopped, or when there was none', async () => {
+    const calls = gateway({
+      challenge: STRONG_CHALLENGE,
+      execute: [() => receipt({ closed: true, runStopped: true })],
+    })
+    const view = render(() => <KnowledgeComposer />)
+    await openPreview(view.container)
+    await startRunOn(view.container, calls)
+
+    fireEvent.click(leaveButton(view.container))
+
+    await waitFor(() => expect(view.container.querySelector('.knowledge-browser-chrome')).toBeNull())
+    expect(leaveNoticeOf(view.container)).toBeNull()
+  })
+
+  it('drops the note when the next link is submitted', async () => {
+    gateway({
+      challenge: STRONG_CHALLENGE,
+      execute: [() => receipt({ closed: true, runStopped: false, runControlsDisabled: true })],
+    })
+    const view = render(() => <KnowledgeComposer />)
+    await openPreview(view.container)
+    fireEvent.click(leaveButton(view.container))
+    await waitFor(() => expect(leaveNoticeOf(view.container)).not.toBeNull())
+
+    await openPreview(view.container)
+
+    expect(leaveNoticeOf(view.container)).toBeNull()
+  })
 })

@@ -18,6 +18,7 @@ import {
 import { createEffect, createMemo, createSignal, For, Match, onCleanup, Show, Switch, untrack } from 'solid-js'
 import { createResource } from '@/shared/lib/create-resource-compat'
 import { executeAction } from '@/shared/actions/action-client'
+import { leftWithRunControlsDisabled, runControlsDisabledNotice } from './browser-blocked'
 import { getAuthSession, getSessionContext } from '@/shared/api/auth-client'
 import {
   closeBrowserSession,
@@ -250,6 +251,9 @@ export function KnowledgeComposer(props: {
   const [productSummary, setProductSummary] = createSignal<string | null>(null)
   const [summarizing, setSummarizing] = createSignal(false)
   const [formError, setFormError] = createSignal<string | null>(null)
+  // A plain-language note that is not a failure: set when the site was left but the AI run
+  // could not be stopped (run controls off). Cleared by the next link submit.
+  const [leaveNotice, setLeaveNotice] = createSignal<string | null>(null)
   const [jobs, setJobs] = createSignal<IngestJob[]>([])
   let fileInputRef: HTMLInputElement | undefined
   let hydratedProfilesOrg: string | null = null
@@ -945,8 +949,10 @@ export function KnowledgeComposer(props: {
     if (!current || !sessionId || !id || browserBusy()) return
     setBrowserBusy(true)
     setFormError(null)
+    setLeaveNotice(null)
+    let left: unknown
     try {
-      await executeAction(
+      left = await executeAction(
         'browser.blocked.try_other_source',
         { orgId: id, type: 'human', userId: ctx()?.userId ?? '' },
         lastAiRun?.sessionId === sessionId ? { sessionId, runId: lastAiRun.runId } : { sessionId },
@@ -958,6 +964,7 @@ export function KnowledgeComposer(props: {
       setBrowserBusy(false)
     }
     clearPreview()
+    if (leftWithRunControlsDisabled(left)) setLeaveNotice(runControlsDisabledNotice(i18n.tr))
   }
 
   const createPreviewBrowserTab = async () => {
@@ -1217,6 +1224,7 @@ export function KnowledgeComposer(props: {
       return
     }
     setFormError(null)
+    setLeaveNotice(null)
     setSubmitting(true)
 
     try {
@@ -1700,6 +1708,9 @@ export function KnowledgeComposer(props: {
       </Show>
       <Show when={formError()}>
         {(message) => <p class="dashboard-knowledge-composer__error">{message()}</p>}
+      </Show>
+      <Show when={leaveNotice()}>
+        {(message) => <p class="dashboard-knowledge-composer__status" role="status">{message()}</p>}
       </Show>
 
       <Show when={jobs().length > 0}>

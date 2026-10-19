@@ -3,7 +3,7 @@ import { getActionDescriptor } from '@/shared/actions/action-registry'
 import { buildActionCatalogManifest } from '@/shared/actions/catalog-manifest'
 import type { BrowserChallenge } from '@/shared/api/browser-client'
 import { BLOCK_REASON_COPY, ERROR_COPY } from '@/shared/i18n/errors'
-import { blockedSentence, blockedStateFor } from './browser-blocked'
+import { blockedSentence, blockedStateFor, leftWithRunControlsDisabled, runControlsDisabledNotice } from './browser-blocked'
 import { attachBrowserSession, browserSessionFromPreview } from './browser-session'
 import type { ScrapePreview } from './knowledge-preview'
 
@@ -164,5 +164,29 @@ describe('the action contract browser.blocked.try_other_source', () => {
   it('is for the person: a model may not run it', () => {
     const entry = buildActionCatalogManifest().actions.find((candidate) => candidate.id === 'browser.blocked.try_other_source')
     expect(entry?.allowedActorTypes).toEqual(['human'])
+  })
+})
+
+describe('leaving a site whose run could not be stopped (run controls off)', () => {
+  it('reads runControlsDisabled only when it is a literal true on the action result', () => {
+    expect(leftWithRunControlsDisabled({ result: { closed: true, runStopped: false, runControlsDisabled: true } })).toBe(true)
+    expect(leftWithRunControlsDisabled({ result: { closed: true, runStopped: true } })).toBe(false)
+    expect(leftWithRunControlsDisabled({ result: { closed: true, runStopped: false } })).toBe(false)
+    expect(leftWithRunControlsDisabled({ result: { runControlsDisabled: 'true' } })).toBe(false)
+    expect(leftWithRunControlsDisabled({ result: { runControlsDisabled: 1 } })).toBe(false)
+    expect(leftWithRunControlsDisabled({ result: null })).toBe(false)
+    expect(leftWithRunControlsDisabled({ result: 'closed' })).toBe(false)
+    expect(leftWithRunControlsDisabled({})).toBe(false)
+    expect(leftWithRunControlsDisabled(null)).toBe(false)
+    expect(leftWithRunControlsDisabled(undefined)).toBe(false)
+  })
+
+  it('says in both languages that the session is closed and the run was not stopped, and names no page', () => {
+    for (const text of [runControlsDisabledNotice(no), runControlsDisabledNotice(en)]) {
+      expect(text).toMatch(/lukket|closed/)
+      expect(text).toMatch(/stoppes|stopped/)
+      expect(text).not.toMatch(/https?:|\.com|\.no\b/)
+    }
+    expect(runControlsDisabledNotice(no)).not.toBe(runControlsDisabledNotice(en))
   })
 })

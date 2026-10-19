@@ -5033,8 +5033,8 @@ enum RunStopOutcome {
     /// is no longer running (409). Leaving a site after the agent already gave up
     /// on it is the usual case, so this is not a failure.
     AlreadyEnded,
-    /// The owner answered 412: run controls are disabled for this organization
-    /// (zero data retention). Nobody can stop the run, so refusing would leave the
+    /// The owner answered 412 with its zero-data-retention refusal of run controls
+    /// (see [`is_zdr_run_controls_refusal`]). Nobody can stop the run, so refusing would leave the
     /// person with no way off the blocked site; the session is still closed, which
     /// ends the run's browsing, and the result says the run was not stopped.
     ControlsDisabled,
@@ -5043,11 +5043,33 @@ enum RunStopOutcome {
     Refused,
 }
 
-fn run_stop_outcome(status: StatusCode) -> RunStopOutcome {
+/// The start of the text model-gateway's run-control endpoint answers when the
+/// organization has zero data retention (`browser_run.rs`, `control_browser_run`:
+/// "ZDR browser-run controls are disabled until ..."). The owner sends it as
+/// `{ "error": "<text>" }`, with no code, so the text is the only thing that tells it
+/// from another 412. Coupled to that sentence: if the owner reworded it the check
+/// would fail closed (the stop reads as refused and the session stays open), never
+/// open, and the test below that pins the text would need the new wording.
+const ZDR_RUN_CONTROLS_REFUSAL: &str = "ZDR browser-run controls are disabled";
+
+/// A 412 is only "run controls are off" when it carries the ZDR refusal. The same
+/// status also comes out of the owner for a failed precondition on the cancel itself
+/// (gRPC FailedPrecondition mapped to 412); that one says nothing about the run
+/// being unstoppable, it may still be going, so it is a refusal like any other.
+fn is_zdr_run_controls_refusal(payload: &Value) -> bool {
+    payload
+        .get("error")
+        .and_then(Value::as_str)
+        .is_some_and(|text| text.starts_with(ZDR_RUN_CONTROLS_REFUSAL))
+}
+
+fn run_stop_outcome(status: StatusCode, payload: &Value) -> RunStopOutcome {
     match status {
         status if status.is_success() => RunStopOutcome::Stopped,
         StatusCode::NOT_FOUND | StatusCode::CONFLICT => RunStopOutcome::AlreadyEnded,
-        StatusCode::PRECONDITION_FAILED => RunStopOutcome::ControlsDisabled,
+        StatusCode::PRECONDITION_FAILED if is_zdr_run_controls_refusal(payload) => {
+            RunStopOutcome::ControlsDisabled
+        }
         _ => RunStopOutcome::Refused,
     }
 }
@@ -5066,8 +5088,9 @@ fn run_stop_outcome(status: StatusCode) -> RunStopOutcome {
 ///
 /// A failure to stop the run aborts before the close, so a run that may still be
 /// going is never reported as left behind, with two exceptions: "it already ended"
-/// (404, 409) and "run controls are disabled" (412, zero data retention), where
-/// stopping is impossible and the close is the only way off the site.
+/// (404, 409) and "run controls are disabled" (a 412 that carries the owner's
+/// zero-data-retention refusal; any other 412 aborts like the rest), where stopping
+/// is impossible and the close is the only way off the site.
 pub(super) async fn dispatch_browser_blocked_try_other_source(
     state: &AppState,
     user: &AuthenticatedUser,
@@ -5100,7 +5123,7 @@ pub(super) async fn dispatch_browser_blocked_try_other_source(
         )
         .await;
         let (status, payload) = response_to_status_and_json(response).await;
-        match run_stop_outcome(status) {
+        match run_stop_outcome(status, &payload) {
             RunStopOutcome::Stopped => run_stopped = true,
             RunStopOutcome::AlreadyEnded => {}
             RunStopOutcome::ControlsDisabled => run_controls_disabled = true,
@@ -6361,26 +6384,56 @@ mod tests {
         );
     }
 
+    /// What model-gateway's run-control endpoint answers (412) for a zero-data-retention
+    /// organization: the exact text of its `browser_run.rs` refusal, as a bare string.
+    fn zdr_refusal_body() -> Value {
+        json!({
+            "error": "ZDR browser-run controls are disabled until the durable run lifecycle is bypassed"
+        })
+    }
+
     #[test]
     fn a_failed_stop_is_only_fine_when_the_run_is_gone() {
+        let none = json!({});
         for status in [StatusCode::OK, StatusCode::ACCEPTED, StatusCode::NO_CONTENT] {
             assert_eq!(
-                run_stop_outcome(status),
+                run_stop_outcome(status, &none),
                 RunStopOutcome::Stopped,
                 "{status}"
             );
         }
         for status in [StatusCode::NOT_FOUND, StatusCode::CONFLICT] {
             assert_eq!(
-                run_stop_outcome(status),
+                run_stop_outcome(status, &none),
                 RunStopOutcome::AlreadyEnded,
                 "{status}"
             );
         }
         // ZDR's refusal of run controls: nobody can stop the run, so the close goes ahead.
         assert_eq!(
-            run_stop_outcome(StatusCode::PRECONDITION_FAILED),
+            run_stop_outcome(StatusCode::PRECONDITION_FAILED, &zdr_refusal_body()),
             RunStopOutcome::ControlsDisabled
+        );
+        // Any other 412 (a failed precondition on the cancel itself, a bare 412, an
+        // error object with some other text) says nothing about run controls being
+        // off: the run may still be going.
+        for other in [
+            none.clone(),
+            json!({ "error": "run is not in a cancellable state" }),
+            json!({ "error": { "code": "run_control_refused", "message": "refused" } }),
+            json!({ "error": "browser_approval_continuation_unavailable" }),
+            json!({ "message": "ZDR browser-run controls are disabled" }),
+        ] {
+            assert_eq!(
+                run_stop_outcome(StatusCode::PRECONDITION_FAILED, &other),
+                RunStopOutcome::Refused,
+                "{other}"
+            );
+        }
+        // The body of a 404 or a 409 is not looked at.
+        assert_eq!(
+            run_stop_outcome(StatusCode::NOT_FOUND, &zdr_refusal_body()),
+            RunStopOutcome::AlreadyEnded
         );
         // Everything else may leave the run going, including a missing grant (403),
         // a missing sign-in (401) and every 5xx.
@@ -6394,7 +6447,7 @@ mod tests {
             StatusCode::SERVICE_UNAVAILABLE,
         ] {
             assert_eq!(
-                run_stop_outcome(status),
+                run_stop_outcome(status, &zdr_refusal_body()),
                 RunStopOutcome::Refused,
                 "{status}"
             );
@@ -6522,6 +6575,7 @@ mod tests {
     async fn stop_path_upstreams(
         run_id: &str,
         control_status: u16,
+        refusal_body: Value,
     ) -> (
         AppState,
         wiremock::MockServer,
@@ -6550,9 +6604,7 @@ mod tests {
         let control = if (200..300).contains(&control_status) {
             ResponseTemplate::new(control_status).set_body_json(json!({ "data": { "ok": true } }))
         } else {
-            ResponseTemplate::new(control_status).set_body_json(json!({
-                "error": { "code": "run_control_refused", "message": "refused" }
-            }))
+            ResponseTemplate::new(control_status).set_body_json(refusal_body)
         };
         Mock::given(wm_method("POST"))
             .and(wm_path(format!("/v1/browser/runs/{run_id}/control")))
@@ -6588,7 +6640,7 @@ mod tests {
     async fn leaving_a_blocked_site_stops_the_named_run_then_closes_the_named_session() {
         // The run id and the session id differ on purpose: the two are authorized
         // separately and not matched against each other, each acts on its own id.
-        let (state, _auth, model, quarry) = stop_path_upstreams("run-2", 200).await;
+        let (state, _auth, model, quarry) = stop_path_upstreams("run-2", 200, json!({})).await;
 
         let response = dispatch_browser_blocked_try_other_source(
             &state,
@@ -6629,7 +6681,13 @@ mod tests {
         for (control_status, run_stopped, controls_disabled) in
             [(404, false, false), (409, false, false), (412, false, true)]
         {
-            let (state, _auth, model, quarry) = stop_path_upstreams("run-2", control_status).await;
+            let refusal = if control_status == 412 {
+                zdr_refusal_body()
+            } else {
+                json!({ "error": "not found or not running" })
+            };
+            let (state, _auth, model, quarry) =
+                stop_path_upstreams("run-2", control_status, refusal).await;
 
             let response = dispatch_browser_blocked_try_other_source(
                 &state,
@@ -6661,8 +6719,15 @@ mod tests {
 
     #[tokio::test]
     async fn leaving_a_blocked_site_does_not_close_when_a_run_that_may_still_go_cannot_be_stopped() {
-        for control_status in [401, 403, 500, 502, 503] {
-            let (state, _auth, model, quarry) = stop_path_upstreams("run-2", control_status).await;
+        // 412 is in the list with a body that is not the ZDR refusal: a failed
+        // precondition on the cancel itself says nothing about run controls being off.
+        for control_status in [401, 403, 412, 500, 502, 503] {
+            let (state, _auth, model, quarry) = stop_path_upstreams(
+                "run-2",
+                control_status,
+                json!({ "error": "run is not in a cancellable state" }),
+            )
+            .await;
 
             let response = dispatch_browser_blocked_try_other_source(
                 &state,

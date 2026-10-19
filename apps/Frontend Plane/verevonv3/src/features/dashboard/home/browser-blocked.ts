@@ -39,3 +39,25 @@ export function blockedSentence(
   if (!copy) return tr('Nettstedet stopper automatisk nettlesing.', 'The site blocks automated browsing.')
   return tr(copy.no, copy.en)
 }
+
+/**
+ * Whether "Try another source" closed the session but could not stop the AI run
+ * that was using it, because run controls are off for the organization (zero data
+ * retention). The gateway's action result says so with `runControlsDisabled`;
+ * it is read from the loose `result` of the action receipt, and only a literal
+ * `true` counts.
+ */
+export function leftWithRunControlsDisabled(execution: unknown): boolean {
+  if (!execution || typeof execution !== 'object') return false
+  const result = (execution as { result?: unknown }).result
+  if (!result || typeof result !== 'object') return false
+  return (result as { runControlsDisabled?: unknown }).runControlsDisabled === true
+}
+
+/** What the person is told after such a leave: the site is left, the run was not stopped by us. */
+export function runControlsDisabledNotice(tr: (noText: string, enText: string) => string): string {
+  return tr(
+    'Nettleserøkten er lukket, men AI-kjøringen kunne ikke stoppes herfra fordi kjøringskontroller er slått av for organisasjonen (ingen datalagring). Den kan fortsatt gi en feil før den avsluttes.',
+    'The browser session is closed, but the AI run could not be stopped from here because run controls are turned off for your organization (zero data retention). It may still report an error before it ends.',
+  )
+}
