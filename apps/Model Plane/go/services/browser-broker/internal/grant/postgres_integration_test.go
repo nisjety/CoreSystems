@@ -214,7 +214,7 @@ func TestPg_CreateGetExpireRevoke(t *testing.T) {
 
 func TestPg_RevokeCascadesWholeSubtree(t *testing.T) {
 	pool, _ := newTestDB(t)
-	_, _, store, _ := stores(pool)
+	_, _, store, clock := stores(pool)
 	parent := session(t, store, CreateSessionParams{TTL: 10 * time.Minute, AllowedDomains: []string{"example.com"}})
 	r1, err := store.Derive(ctx, deriveParams(parent, "r1"))
 	if err != nil {
@@ -245,6 +245,16 @@ func TestPg_RevokeCascadesWholeSubtree(t *testing.T) {
 	if n := rowCount(t, pool, "WHERE revoked_at IS NOT NULL"); n != 1 {
 		t.Fatalf("after a leaf revoke %d rows are revoked, want 1", n)
 	}
+	revokedAt := func(id string) time.Time {
+		t.Helper()
+		var at time.Time
+		if err := pool.QueryRow(ctx, `SELECT revoked_at FROM browser_grants WHERE id = $1`, id).Scan(&at); err != nil {
+			t.Fatal(err)
+		}
+		return at
+	}
+	leafRevokedAt := revokedAt(r2.ID)
+	clock.Advance(time.Minute)
 	// Revoking the session takes the whole subtree, at every depth.
 	if err := store.RevokeScoped(ctx, parent.ID, parent.OrgID, parent.OwnerID, "session_closed"); err != nil {
 		t.Fatal(err)
@@ -257,9 +267,13 @@ func TestPg_RevokeCascadesWholeSubtree(t *testing.T) {
 	if n := rowCount(t, pool, "WHERE revoked_at IS NOT NULL"); n != 5 {
 		t.Fatalf("%d rows revoked, want 5", n)
 	}
-	// The leaf revoked earlier keeps its first revocation time.
-	if n := rowCount(t, pool, "WHERE id = $1 AND revoked_at IS NOT NULL", r2.ID); n != 1 {
-		t.Fatal("leaf lost its revocation")
+	// The leaf revoked earlier keeps its first revocation time; the rest of
+	// the subtree carries the later one.
+	if got := revokedAt(r2.ID); !got.Equal(leafRevokedAt) {
+		t.Fatalf("leaf revoked_at moved from %v to %v", leafRevokedAt, got)
+	}
+	if got := revokedAt(r1.ID); !got.After(leafRevokedAt) {
+		t.Fatalf("run revoked_at %v is not after the leaf's %v", got, leafRevokedAt)
 	}
 	for _, g := range []*Grant{sibling, siblingRun} {
 		if _, err := store.GetScoped(ctx, g.ID, g.OrgID, g.OwnerID); err != nil {
@@ -406,6 +420,123 @@ func TestPg_DeriveRejectsRevokedParentRace(t *testing.T) {
 			t.Fatalf("%d approvals under a revoked session", c)
 		}
 	})
+	// The approval's own parent is the session: only the FOR SHARE on that
+	// parent row (not the root lock a run-parented approval also takes)
+	// stands between it and a revoke.
+	t.Run("approval directly under the session while the session is revoked", func(t *testing.T) {
+		pool, _ := newTestDB(t)
+		pg, _, store, _ := stores(pool)
+		parent := session(t, store, CreateSessionParams{TTL: 10 * time.Minute})
+		done := make(chan error, 1)
+		pg.afterRootLock = func() {
+			go func() {
+				_, err := store.CreateScopedSensitiveApproval(ctx, approvalOn(parent, []string{"example.com"}, time.Minute))
+				done <- err
+			}()
+			select {
+			case err := <-done:
+				t.Errorf("approval finished while its session was being revoked: %v", err)
+				done <- err // keep the later receive from blocking
+			case <-time.After(300 * time.Millisecond):
+			}
+		}
+		if err := store.RevokeScoped(ctx, parent.ID, parent.OrgID, parent.OwnerID, "session_closed"); err != nil {
+			t.Fatal(err)
+		}
+		if err := <-done; !errors.Is(err, ErrGrantRevoked) {
+			t.Fatalf("approval after the session revoke: %v, want ErrGrantRevoked", err)
+		}
+		if c := rowCount(t, pool, "WHERE kind = 'sensitive_approval'"); c != 0 {
+			t.Fatalf("%d approvals under a revoked session", c)
+		}
+	})
+}
+
+// Concurrent revokes of a session and of its own run, repeated (a client
+// retry beside a session close), used to deadlock: they locked the same rows
+// in different orders and PostgreSQL aborted one, so a revoke failed with
+// Unavailable and its parent stayed live. None may fail now, and the subtree
+// must end revoked.
+func TestPg_ConcurrentRevokesOfSessionAndRunNeverFail(t *testing.T) {
+	pool, _ := newTestDB(t)
+	_, _, store, _ := stores(pool)
+	const iterations = 150
+	failures := 0
+	for i := 0; i < iterations; i++ {
+		parent := session(t, store, CreateSessionParams{SessionKey: fmt.Sprintf("s%d", i), TTL: 10 * time.Minute})
+		run, err := store.Derive(ctx, deriveParams(parent, "run"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		ids := []string{run.ID, parent.ID}
+		for a := 0; a < 3; a++ {
+			ap, err := store.CreateScopedSensitiveApproval(ctx, approvalOn(run, []string{"example.com"}, time.Minute))
+			if err != nil {
+				t.Fatal(err)
+			}
+			ids = append(ids, ap.ID)
+		}
+		start := make(chan struct{})
+		var wg sync.WaitGroup
+		var mu sync.Mutex
+		for _, id := range []string{parent.ID, run.ID, parent.ID, run.ID} {
+			wg.Add(1)
+			go func(id string) {
+				defer wg.Done()
+				<-start
+				if err := store.RevokeScoped(ctx, id, parent.OrgID, parent.OwnerID, "close"); err != nil {
+					mu.Lock()
+					failures++
+					mu.Unlock()
+					t.Errorf("iteration %d: revoke of %s: %v", i, id, err)
+				}
+			}(id)
+		}
+		close(start)
+		wg.Wait()
+		for _, id := range ids {
+			if c := rowCount(t, pool, "WHERE id = $1 AND revoked_at IS NOT NULL", id); c != 1 {
+				t.Fatalf("iteration %d: grant %s is still live after both revokes", i, id)
+			}
+		}
+	}
+	if failures > 0 {
+		t.Fatalf("%d concurrent revokes failed over %d iterations", failures, iterations)
+	}
+}
+
+// A caller string PostgreSQL cannot store never turns into a store outage and
+// never leaves a grant live: a revoke with a NUL in its reason still revokes,
+// and a NUL in a key or id is invalid input (or not found), not Unavailable.
+func TestPg_UnstorableTextIsNotAStoreOutage(t *testing.T) {
+	pool, _ := newTestDB(t)
+	_, _, store, _ := stores(pool)
+	parent := session(t, store, CreateSessionParams{TTL: 10 * time.Minute})
+	if err := store.RevokeScoped(ctx, parent.ID, parent.OrgID, parent.OwnerID, "bad\x00reason\xff"); err != nil {
+		t.Fatalf("revoke with a NUL reason: %v", err)
+	}
+	if _, err := store.GetScoped(ctx, parent.ID, parent.OrgID, parent.OwnerID); !errors.Is(err, ErrGrantRevoked) {
+		t.Fatalf("grant after a NUL-reason revoke: %v, want ErrGrantRevoked", err)
+	}
+	var reason string
+	if err := pool.QueryRow(ctx, `SELECT revoked_reason FROM browser_grants WHERE id = $1`, parent.ID).Scan(&reason); err != nil || reason != "badreason" {
+		t.Fatalf("stored reason %q, %v", reason, err)
+	}
+	if _, err := store.CreateSession(ctx, CreateSessionParams{
+		OrgID: "org-a", OwnerID: "user-a", SessionKey: "s\x00k", ScopeURL: "browser://cloud", TTL: time.Minute,
+	}); !errors.Is(err, ErrInvalidGrantText) || errors.Is(err, ErrStoreUnavailable) {
+		t.Fatalf("create with a NUL session key: %v, want ErrInvalidGrantText", err)
+	}
+	live := session(t, store, CreateSessionParams{SessionKey: "live", TTL: 10 * time.Minute})
+	if _, err := store.Derive(ctx, deriveParams(live, "r\x00")); !errors.Is(err, ErrInvalidGrantText) {
+		t.Fatalf("derive with a NUL key: %v, want ErrInvalidGrantText", err)
+	}
+	if _, err := store.GetScoped(ctx, "g_\x00", live.OrgID, live.OwnerID); !errors.Is(err, ErrGrantNotFound) {
+		t.Fatalf("get with a NUL id: %v, want ErrGrantNotFound", err)
+	}
+	if err := store.RevokeScoped(ctx, "g_\x00", live.OrgID, live.OwnerID, "x"); !errors.Is(err, ErrGrantNotFound) {
+		t.Fatalf("revoke with a NUL id: %v, want ErrGrantNotFound", err)
+	}
 }
 
 // The plan names this test for a per-owner cap. Under the WS1.B review
@@ -685,8 +816,12 @@ func TestPg_ClosedPoolIsStoreUnavailable(t *testing.T) {
 	pg, _, store, _ := stores(pool)
 	g := session(t, store, CreateSessionParams{TTL: 10 * time.Minute})
 	pool.Close()
-	if _, err := store.GetScoped(ctx, g.ID, g.OrgID, g.OwnerID); !errors.Is(err, ErrStoreUnavailable) {
+	_, err := store.GetScoped(ctx, g.ID, g.OrgID, g.OwnerID)
+	if !errors.Is(err, ErrStoreUnavailable) {
 		t.Fatalf("get on a closed pool: %v", err)
+	}
+	if err.Error() != ErrStoreUnavailable.Error() {
+		t.Fatalf("store error text %q carries more than the fixed message", err.Error())
 	}
 	if _, err := store.Derive(ctx, deriveParams(g, "k")); !errors.Is(err, ErrStoreUnavailable) {
 		t.Fatalf("derive on a closed pool: %v", err)

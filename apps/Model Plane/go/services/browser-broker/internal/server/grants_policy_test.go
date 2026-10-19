@@ -168,6 +168,23 @@ func TestRevokeGrant_CascadesToSensitiveChildren(t *testing.T) {
 	}
 }
 
+// A session key with a control character (NUL included) or past the bound is
+// refused up front: the durable store cannot hold it.
+func TestAcquireGrant_RejectsUnprintableOrOversizedSessionKey(t *testing.T) {
+	srv := NewServerWithConfig(grant.NewMemoryRepository(), DefaultConfig())
+	srv.principal = func(context.Context) (authctx.Principal, error) { return userPrincipal(false), nil }
+	for name, key := range map[string]string{
+		"nul": "s\x00k", "newline": "s\nk", "del": "s\x7fk", "oversized": strings.Repeat("k", maxSessionKeyBytes+1),
+	} {
+		_, err := srv.AcquireGrant(context.Background(), &AcquireGrantRequest{
+			OrgId: "org1", SessionKey: key, AllowedDomains: []string{"example.com"},
+		})
+		if status.Code(err) != codes.InvalidArgument {
+			t.Errorf("%s: code = %v, want InvalidArgument", name, status.Code(err))
+		}
+	}
+}
+
 func TestMapErr_InvalidDomainPolicyIsInvalidArgument(t *testing.T) {
 	for name, tc := range map[string]struct {
 		in   error
@@ -182,6 +199,9 @@ func TestMapErr_InvalidDomainPolicyIsInvalidArgument(t *testing.T) {
 		"zdr posture":     {grant.ErrZdrPostureChanged, codes.FailedPrecondition},
 		"needs explicit":  {grant.ErrDeriveNeedsExplicitDomains, codes.InvalidArgument},
 		"derive conflict": {grant.ErrDeriveConflict, codes.AlreadyExists},
+		"store down":      {grant.ErrStoreUnavailable, codes.Unavailable},
+		"store down wrap": {fmt.Errorf("x: %w", grant.ErrStoreUnavailable), codes.Unavailable},
+		"invalid text":    {grant.ErrInvalidGrantText, codes.InvalidArgument},
 	} {
 		if got := status.Code(mapErr(tc.in)); got != tc.want {
 			t.Errorf("%s: %v, want %v", name, got, tc.want)
@@ -189,6 +209,13 @@ func TestMapErr_InvalidDomainPolicyIsInvalidArgument(t *testing.T) {
 	}
 	if grantOutcome(grant.ErrTooManyGrants) != "too_many_grants" || grantOutcome(grant.ErrDomainNotGrantable) != "domain_not_grantable" {
 		t.Fatal("telemetry outcomes missing")
+	}
+	if grantOutcome(grant.ErrStoreUnavailable) != "store_unavailable" || grantOutcome(grant.ErrInvalidGrantText) != "invalid_input" {
+		t.Fatal("store telemetry outcomes missing")
+	}
+	// The Unavailable status never carries more than the fixed text.
+	if msg := status.Convert(mapErr(fmt.Errorf("x: %w", grant.ErrStoreUnavailable))).Message(); msg != grant.ErrStoreUnavailable.Error() {
+		t.Fatalf("unavailable message = %q", msg)
 	}
 }
 
