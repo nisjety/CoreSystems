@@ -48,8 +48,10 @@ use quarry_runtime::PinnedBrowserEgressProxy;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use wiremock::MockServer;
 
+/// Skips without `CHROMIUMOXIDE_TEST=1`; with it, FAILS when no Chromium is found
+/// (the shared gate, see `quarry_browser::live_gate`).
 fn browser_available() -> bool {
-    std::env::var("CHROMIUMOXIDE_TEST").ok().as_deref() == Some("1")
+    quarry_browser::live_gate::live_enabled()
 }
 
 fn lease(key: &str) -> BrowserLease {
@@ -80,7 +82,6 @@ fn restricted_policy() -> BrowserEgressPolicy {
 #[tokio::test]
 async fn chromium_refuses_a_loopback_navigation() {
     if !browser_available() {
-        eprintln!("skipping: set CHROMIUMOXIDE_TEST=1 and provide a Chromium binary");
         return;
     }
 

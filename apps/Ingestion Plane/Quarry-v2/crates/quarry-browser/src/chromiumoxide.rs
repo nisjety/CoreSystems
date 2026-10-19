@@ -4737,13 +4737,10 @@ mod tests {
         ChromiumoxideDriver::new().with_pinned_egress_proxy(Arc::new(StubEgressProvider))
     }
 
+    /// The shared gate: skips without `CHROMIUMOXIDE_TEST=1`, and FAILS (panics)
+    /// with it when no Chromium can be found. See `crate::live_gate`.
     fn live_enabled() -> bool {
-        if std::env::var("CHROMIUMOXIDE_TEST").ok().as_deref() == Some("1") {
-            true
-        } else {
-            eprintln!("skipping: set CHROMIUMOXIDE_TEST=1 to run");
-            false
-        }
+        crate::live_gate::live_enabled()
     }
 
     /// A session for a lease that asks for `viewport`, with a blank tab holding
@@ -6012,8 +6009,7 @@ mod tests {
     /// that has none.
     #[tokio::test]
     async fn blocks_loopback_subresources_before_they_reach_the_server() {
-        if std::env::var("CHROMIUMOXIDE_TEST").ok().as_deref() != Some("1") {
-            eprintln!("skipping: set CHROMIUMOXIDE_TEST=1 to run");
+        if !live_enabled() {
             return;
         }
 
@@ -6091,8 +6087,7 @@ mod tests {
     /// Skipped unless `CHROMIUMOXIDE_TEST=1` is set.
     #[tokio::test]
     async fn launches_and_fetches_content() {
-        if std::env::var("CHROMIUMOXIDE_TEST").ok().as_deref() != Some("1") {
-            eprintln!("skipping: set CHROMIUMOXIDE_TEST=1 to run");
+        if !live_enabled() {
             return;
         }
 
@@ -6118,8 +6113,7 @@ mod tests {
     /// Skipped unless `CHROMIUMOXIDE_TEST=1` is set.
     #[tokio::test]
     async fn captures_live_frame_after_navigation() {
-        if std::env::var("CHROMIUMOXIDE_TEST").ok().as_deref() != Some("1") {
-            eprintln!("skipping: set CHROMIUMOXIDE_TEST=1 to run");
+        if !live_enabled() {
             return;
         }
 
@@ -6164,8 +6158,7 @@ mod tests {
     #[tokio::test]
     #[ignore = "needs a public origin: cookie hydration needs a real http(s) page, and the navigation guard refuses loopback"]
     async fn reopening_a_session_with_a_saved_profile_restores_cookies_without_erroring() {
-        if std::env::var("CHROMIUMOXIDE_TEST").ok().as_deref() != Some("1") {
-            eprintln!("skipping: set CHROMIUMOXIDE_TEST=1 to run");
+        if !live_enabled() {
             return;
         }
 
@@ -6218,8 +6211,7 @@ mod tests {
     #[tokio::test]
     #[ignore = "needs a public origin: document.cookie needs a real http(s) origin, and the navigation guard refuses loopback"]
     async fn distinct_sessions_do_not_share_cookies() {
-        if std::env::var("CHROMIUMOXIDE_TEST").ok().as_deref() != Some("1") {
-            eprintln!("skipping: set CHROMIUMOXIDE_TEST=1 to run");
+        if !live_enabled() {
             return;
         }
 
@@ -6276,8 +6268,7 @@ mod tests {
     #[tokio::test]
     #[ignore = "needs a public origin: document.cookie needs a real http(s) origin, and the navigation guard refuses loopback"]
     async fn second_tab_on_same_session_shares_that_sessions_cookies() {
-        if std::env::var("CHROMIUMOXIDE_TEST").ok().as_deref() != Some("1") {
-            eprintln!("skipping: set CHROMIUMOXIDE_TEST=1 to run");
+        if !live_enabled() {
             return;
         }
 
