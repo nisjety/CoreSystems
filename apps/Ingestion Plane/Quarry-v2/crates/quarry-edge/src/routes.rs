@@ -330,35 +330,44 @@ async fn ready(State(state): State<AppState>) -> (StatusCode, Json<serde_json::V
         );
     }
     if state.readiness.durable {
-        // The local browser (WS3.F): reported when the agent driver runs one,
-        // 503 only when every launched browser is unhealthy or dead. A driver
-        // without a local browser (NotApplicable) leaves the body as it was.
+        // The local browsers (WS3.F). The edge runs two driver instances, each
+        // with its own Chromium: agent runs' (`browser`) and the scrape
+        // path's (`scrape_browser`). Each is reported when it runs a local
+        // browser; 503 `browser_unhealthy` when either one is Unhealthy
+        // (every launched browser of that driver unhealthy or dead). Drivers
+        // without a local browser (NotApplicable) leave the body as it was.
         #[cfg(feature = "browser-agent")]
         {
-            let browser = state.agent_driver.health().await;
-            match browser.state {
-                quarry_browser::BrowserHealthState::NotApplicable => {}
-                quarry_browser::BrowserHealthState::Unhealthy => {
-                    return (
-                        StatusCode::SERVICE_UNAVAILABLE,
-                        Json(serde_json::json!({
-                            "status": "not_ready",
-                            "durable": true,
-                            "reason": "browser_unhealthy",
-                            "browser": browser,
-                        })),
-                    );
+            use quarry_browser::BrowserHealthState;
+            let local = |health: quarry_browser::BrowserHealth| {
+                (health.state != BrowserHealthState::NotApplicable).then_some(health)
+            };
+            let agent = local(state.agent_driver.health().await);
+            let scrape = state.drivers.browser_health().await.and_then(local);
+            if agent.is_some() || scrape.is_some() {
+                let unhealthy = agent
+                    .iter()
+                    .chain(scrape.iter())
+                    .any(|health| health.state == BrowserHealthState::Unhealthy);
+                let mut body = serde_json::json!({
+                    "status": if unhealthy { "not_ready" } else { "ready" },
+                    "durable": true,
+                });
+                if unhealthy {
+                    body["reason"] = serde_json::json!("browser_unhealthy");
                 }
-                _ => {
-                    return (
-                        StatusCode::OK,
-                        Json(serde_json::json!({
-                            "status": "ready",
-                            "durable": true,
-                            "browser": browser,
-                        })),
-                    );
+                if let Some(agent) = agent {
+                    body["browser"] = serde_json::json!(agent);
                 }
+                if let Some(scrape) = scrape {
+                    body["scrape_browser"] = serde_json::json!(scrape);
+                }
+                let status = if unhealthy {
+                    StatusCode::SERVICE_UNAVAILABLE
+                } else {
+                    StatusCode::OK
+                };
+                return (status, Json(body));
             }
         }
         (

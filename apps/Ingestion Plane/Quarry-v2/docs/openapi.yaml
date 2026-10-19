@@ -33,16 +33,139 @@ paths:
     get:
       operationId: ready
       summary: Readiness probe
+      description: >-
+        Whether this edge should receive traffic. 503 while it drains for
+        shutdown, while its stores are not durable, and when a local browser
+        is unhealthy. The edge runs two local Chromium drivers: agent runs'
+        (`browser`) and the scrape path's (`scrape_browser`); each object is
+        present only when that driver runs a local browser, and a driver
+        without one (a remote provider) leaves the body as
+        `{"durable":true,"status":"ready"}`. A browser that was never launched
+        is `idle` and ready: the first run launches it. `/health` never
+        changes with any of this.
       tags:
       - ops
       responses:
         '200':
           description: Service is ready to accept traffic
           content:
-            text/plain:
+            application/json:
               schema:
-                type: string
-                example: ready
+                type: object
+                additionalProperties: false
+                required: [status, durable]
+                properties:
+                  status:
+                    type: string
+                    enum: [ready]
+                  durable:
+                    type: boolean
+                    enum: [true]
+                  browser:
+                    $ref: '#/paths/~1ready/get/responses/503/content/application~1json/schema/properties/browser'
+                  scrape_browser:
+                    $ref: '#/paths/~1ready/get/responses/503/content/application~1json/schema/properties/browser'
+              example:
+                status: ready
+                durable: true
+                browser:
+                  state: healthy
+                  max_sessions: 40
+                  sessions_open: 2
+                  slots:
+                  - slot: 0
+                    status: ready
+                    generation: 1
+                    sessions: 2
+                    pages: 3
+                    healthy: true
+                    probe_failures: 0
+        '503':
+          description: >-
+            Not ready. `status: draining` (the body has no other key) while the
+            edge shuts down; `status: not_ready` with `durable: false` and the
+            store's `reason` when the stores are not durable; `status:
+            not_ready`, `durable: true`, `reason: browser_unhealthy` when the
+            agent or the scrape browser is `unhealthy` (every launched browser
+            of that driver failed two health probes in a row, or its process
+            is dead), with both browser objects as in the 200 body.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [status]
+                properties:
+                  status:
+                    type: string
+                    enum: [draining, not_ready]
+                  durable:
+                    type: boolean
+                  reason:
+                    type: [string, 'null']
+                    description: '`browser_unhealthy`, or why the stores are not durable.'
+                  browser:
+                    type: object
+                    description: A local browser driver's health. Counts and states only, no session data.
+                    additionalProperties: false
+                    required: [state, max_sessions, sessions_open, slots]
+                    properties:
+                      state:
+                        type: string
+                        enum: [idle, healthy, degraded, unhealthy]
+                        description: >-
+                          `idle`: never launched (ready). `healthy`: every launched
+                          browser answers its probe. `degraded`: some, not all,
+                          launched browsers are unhealthy or dead (ready).
+                          `unhealthy`: all are (503). A driver without a local
+                          browser (`not_applicable`) is left out of the body.
+                      max_sessions:
+                        type: integer
+                        description: QUARRY_BROWSER_MAX_SESSIONS; 0 means no cap.
+                      sessions_open:
+                        type: integer
+                      slots:
+                        type: array
+                        items:
+                          type: object
+                          additionalProperties: false
+                          required: [slot, status, generation, sessions, pages, healthy, probe_failures]
+                          properties:
+                            slot:
+                              type: integer
+                            status:
+                              type: string
+                              enum: [starting, ready, retiring, dead]
+                            generation:
+                              type: integer
+                              description: Launches of this slot; 0 is never launched.
+                            sessions:
+                              type: integer
+                            pages:
+                              type: integer
+                            healthy:
+                              type: [boolean, 'null']
+                              description: The last probe's verdict; null until probed.
+                            probe_failures:
+                              type: integer
+                  scrape_browser:
+                    $ref: '#/paths/~1ready/get/responses/503/content/application~1json/schema/properties/browser'
+              example:
+                status: not_ready
+                durable: true
+                reason: browser_unhealthy
+                browser:
+                  state: unhealthy
+                  max_sessions: 40
+                  sessions_open: 2
+                  slots:
+                  - slot: 0
+                    status: ready
+                    generation: 1
+                    sessions: 2
+                    pages: 3
+                    healthy: false
+                    probe_failures: 2
   /v1/scrape:
     post:
       operationId: scrape
@@ -83,7 +206,15 @@ paths:
               schema:
                 $ref: '#/components/schemas/Envelope_Error'
         '403':
-          description: Security blocked (SSRF, blocklist, policy)
+          description: >-
+            Security blocked (SSRF, blocklist, policy), or the fetched page is itself a bot
+            challenge. A challenge is code CHALLENGE_DETECTED with details.block_reason
+            (captcha_widget, waf_interstitial or unexpected_bot_error; the same value is given as
+            details.reason), details.recovery not_applicable and details.next other_source. It
+            carries no host, URL or page text. A status alone (a bare 403, a 429, a login page) is
+            never a challenge, and a page that is not a challenge scrapes as before. Classified by
+            QUARRY_CHALLENGE_CLASSIFIER=v2 (the default; legacy does not classify a scrape) and
+            refused unless QUARRY_CHALLENGE_ENFORCE=log, which only counts the page by reason.
           content:
             application/json:
               schema:
@@ -3872,7 +4003,9 @@ components:
         challenges, block_reason becomes challenge_loop, recovery becomes exhausted and Quarry answers
         further navigation to that host and interaction with its page with 403 CHALLENGE_DETECTED
         (details: reason, host, recovery=exhausted, next=user_takeover_or_other_source; host is left
-        out under Zero Data Retention). Screenshots, reads, waits and navigation to another host stay allowed.
+        out under Zero Data Retention). Screenshots, reads, waits, scrolling, answering a dialog the page
+        already opened, back and forward, and navigation to another host stay allowed; raw script
+        (evaluate) is refused with the interaction.
       properties:
         kind:
           type: string
