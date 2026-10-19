@@ -260,27 +260,49 @@ jobs:
   # (a viewport change relaunching the browser, a lost egress policy, a profile that
   # no longer restores) merged green. This lane runs them for real.
   #
-  # Advisory first: continue-on-error, so a flaky hosted runner cannot block a
-  # merge. Promote it to a required check (remove continue-on-error) after two
-  # weeks green. The tests that need a public origin are #[ignore]d with the reason
+  # REQUIRED: no continue-on-error. A red run here blocks the merge. Add the check
+  # name "Live browser tests (Chromium)" to the branch protection rule for main
+  # (repository settings; a workflow file cannot do that). What makes it safe to
+  # require:
+  #  - The browser is pinned and installed by an action that fails when it cannot
+  #    install it. The earlier `apt-get install chromium` is not a dependable
+  #    source on the Ubuntu 24.04 runner image (Ubuntu distributes Chromium as a
+  #    snap, not a deb). Chrome for Testing 155.0.8059.84 is the
+  #    version the local evidence matched (Chromium 155.0.8059.79); bump it on
+  #    purpose, not by drift.
+  #  - A missing browser cannot pass by skipping. With CHROMIUMOXIDE_TEST=1 every
+  #    live test goes through quarry_browser::live_gate, which FAILS when no
+  #    Chromium is found or when CHROME names a file that does not exist
+  #    (chromiumoxide itself would fall back silently to any chromium on the PATH).
+  #  - It runs all three sets that are gated on the live feature or flag:
+  #    quarry-browser (the live driver tests), quarry-runtime's
+  #    browser_egress_boundary (a real Chromium refusing a loopback navigation
+  #    through the real pinned proxy; it is compiled out entirely without
+  #    `--features chromiumoxide`, so `cargo test --workspace` never ran it) and
+  #    quarry-edge's zdr_behavior (needs no Chromium, only the default
+  #    browser-agent feature, and is listed here so a lane that proves ZDR for the
+  #    agent routes runs it next to the browser tests).
+  #  - One test at a time (--test-threads=1): each launches its own Chromium, and
+  #    the parallel suite was the cause of the lock-timeout flake fixed in
+  #    7420d3a6.
+  # The tests that need a public origin are #[ignore]d with the reason
   # (`cargo test ... -- --ignored --list` shows them).
   quarry-browser-live:
     name: Live browser tests (Chromium)
     if: github.event_name != 'schedule'
-    runs-on: ubuntu-latest
-    continue-on-error: true
-    timeout-minutes: 40
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
     defaults:
       run:
         working-directory: 'apps/Ingestion Plane/Quarry-v2'
     env:
       CARGO_PROFILE_TEST_DEBUG: "0"
       CHROMIUMOXIDE_TEST: "1"
-      # Hosted runners restrict unprivileged user namespaces, so Chromium cannot
-      # build its own sandbox there. The edge refuses this flag when ENVIRONMENT is
-      # prod or production; it is not set here.
+      # Hosted runners restrict unprivileged user namespaces (AppArmor on
+      # Ubuntu 24.04), so Chromium cannot build its own sandbox there. The edge
+      # refuses this flag when ENVIRONMENT is prod or production; it is not set
+      # here. CHROME is exported by the "Install Chromium" step below.
       QUARRY_BROWSER_NO_SANDBOX: "1"
-      CHROME: /usr/bin/chromium
     steps:
       - uses: actions/checkout@v7
 
@@ -294,15 +316,40 @@ jobs:
         with:
           version: '27.x'
 
-      - name: Install Chromium
+      # The quarry-edge test binary links the whole dependency graph; see the
+      # cargo-check job for why the disk is freed first. Never add
+      # $AGENT_TOOLSDIRECTORY here: setup-protoc and setup-chrome install there.
+      - name: Free disk space
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq --no-install-recommends chromium fonts-liberation
-          chromium --version
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc || true
+          df -h /
 
-      - name: Live browser tests
-        # One test at a time: each launches its own Chromium.
+      - name: Install Chromium (Chrome for Testing, pinned)
+        id: chrome
+        uses: browser-actions/setup-chrome@v2
+        with:
+          chrome-version: '155.0.8059.84'
+          install-dependencies: true
+
+      - name: Chromium must exist and run
+        env:
+          CHROME_PATH: ${{ steps.chrome.outputs.chrome-path }}
+        run: |
+          if [ -z "$CHROME_PATH" ] || [ ! -x "$CHROME_PATH" ]; then
+            echo "::error::setup-chrome did not provide an executable Chromium (chrome-path='$CHROME_PATH')"
+            exit 1
+          fi
+          "$CHROME_PATH" --version
+          echo "CHROME=$CHROME_PATH" >> "$GITHUB_ENV"
+
+      - name: Live tests - quarry-browser
         run: cargo test -p quarry-browser --features chromiumoxide -- --test-threads=1
+
+      - name: Live tests - quarry-runtime browser_egress_boundary
+        run: cargo test -p quarry-runtime --features chromiumoxide --test browser_egress_boundary -- --test-threads=1
+
+      - name: Agent-route ZDR tests - quarry-edge zdr_behavior
+        run: cargo test -p quarry-edge --test zdr_behavior -- --test-threads=1
 
       - name: Show what was skipped on purpose
         if: always()
