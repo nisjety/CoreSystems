@@ -5,8 +5,14 @@
 //! produced 30.9 MB of markdown with `only_main_content=false`. It also read the
 //! rows of a nested table once per nesting level, which is exponential in the
 //! depth. The tests below build pathological inputs and assert that the markdown
-//! stays within a small multiple of the input, and that ordinary tables, lists
-//! and `pre` blocks keep their content.
+//! stays within a small multiple of the input (tables, `pre` blocks), and that
+//! ordinary tables, lists and `pre` blocks keep their content.
+//!
+//! Known limit, not fixed: nested lists. html2md indents every line of a nested
+//! item by the list depth, so the markdown grows with the SQUARE of the depth (the
+//! ratio to the input grows linearly with it). A 1 MB page of 20,000 nested lists
+//! would be about a gigabyte; real pages are a few levels deep. The last test pins
+//! the quadratic shape so that it cannot get worse unnoticed.
 //!
 //! Measured before the fix (debug build, html2md 0.2.17 table handler):
 //!   wide cell, 200 rows       26,162 B html ->     4,061,420 B markdown (x155)
@@ -181,21 +187,20 @@ fn a_pre_block_is_copied_without_growth() {
 }
 
 #[test]
-fn nested_lists_grow_with_depth_but_only_by_the_indentation() {
-    // Known limit, recorded rather than fixed: html2md indents each nested line by
-    // the list depth, so the output is O(lines x depth). A depth of 200 with three
-    // lines per item is x12 of the input; the bound below keeps it from getting
-    // worse (it is not the x3 bound of the table cases).
-    let depth = 200;
-    let mut html = String::new();
-    for _ in 0..depth {
-        html.push_str("<ul><li>item<br>second line<br>third line");
+fn nested_lists_grow_quadratically_with_depth_and_no_faster() {
+    // Measured: depth 100 -> 33,506 B, 200 -> 127,006 B, 400 -> 494,006 B (three lines
+    // per item), about 3.1 x depth^2. The bound allows 4 x depth^2 plus the item text.
+    for depth in [100usize, 200, 400] {
+        let mut html = String::new();
+        for _ in 0..depth {
+            html.push_str("<ul><li>item<br>second line<br>third line");
+        }
+        html.push_str("deepest");
+        for _ in 0..depth {
+            html.push_str("</li></ul>");
+        }
+        let md = convert("nested_lists", &html);
+        assert!(md.len() <= 4 * depth * depth + 100 * depth, "depth {depth}: {} -> {}", html.len(), md.len());
+        assert!(md.contains("deepest"));
     }
-    html.push_str("deepest");
-    for _ in 0..depth {
-        html.push_str("</li></ul>");
-    }
-    let md = convert("nested_lists", &html);
-    assert!(md.len() <= html.len() * 20, "{} -> {}", html.len(), md.len());
-    assert!(md.contains("deepest"));
 }
