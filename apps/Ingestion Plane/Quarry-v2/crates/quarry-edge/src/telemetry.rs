@@ -24,16 +24,21 @@ use opentelemetry_otlp::SpanExporter;
 use opentelemetry_sdk::trace::SdkTracerProvider;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter, Layer};
 
-pub fn init_telemetry() {
-    // RUST_LOG, with the dependencies that print page content or URLs at debug
-    // capped regardless (see `crate::zdr_log::harden`).
-    let env_filter = crate::zdr_log::harden(
+/// `RUST_LOG` (default `info`), with the dependencies that print page content or
+/// URLs at debug capped regardless (see `crate::zdr_log::harden`).
+///
+/// This is handed to each OUTPUT layer as its own filter and never added to the
+/// registry. A level filter on the registry decides which spans exist: at
+/// `RUST_LOG=error` the info-level request span was never created, the ZDR mark
+/// had nowhere to live, and every sensitive-named error event was written for a
+/// ZDR caller. (The gateway had the same wiring; commit d8a9708d fixed it there.)
+fn env_filter() -> EnvFilter {
+    crate::zdr_log::harden(
         EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
-    );
-    // The JSON log layer with the ZDR event filter; ZdrMarkLayer makes the mark
-    // on a request span sticky (see `crate::zdr_log`).
-    let fmt_layer = crate::zdr_log::build_json_layer(std::io::stdout);
+    )
+}
 
+pub fn init_telemetry() {
     if std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT")
         .ok()
         .filter(|endpoint| !endpoint.trim().is_empty())
@@ -42,14 +47,16 @@ pub fn init_telemetry() {
         match try_init_otel() {
             Ok(provider) => {
                 let tracer = provider.tracer("quarry-edge");
-                // The exporter gets the same event filter as the log writer.
+                // The exporter gets the same filter as the log writer (level
+                // filter, caps and ZDR rule), as its own per-layer filter.
                 let otel_layer = tracing_opentelemetry::layer()
                     .with_tracer(tracer)
-                    .with_filter(crate::zdr_log::event_filter());
+                    .with_filter(crate::zdr_log::export_filter(env_filter()));
+                // ZdrMarkLayer makes the mark on a request span sticky (see
+                // `crate::zdr_log`); it carries no filter.
                 tracing_subscriber::registry()
                     .with(crate::zdr_log::ZdrMarkLayer)
-                    .with(env_filter)
-                    .with(fmt_layer)
+                    .with(crate::zdr_log::log_layer(std::io::stdout, env_filter()))
                     .with(otel_layer)
                     .init();
                 tracing::info!("OTEL tracing enabled");
@@ -61,11 +68,7 @@ pub fn init_telemetry() {
         }
     }
 
-    tracing_subscriber::registry()
-        .with(crate::zdr_log::ZdrMarkLayer)
-        .with(env_filter)
-        .with(fmt_layer)
-        .init();
+    crate::zdr_log::production_subscriber(std::io::stdout, env_filter()).init();
 }
 
 fn try_init_otel() -> Result<SdkTracerProvider, Box<dyn std::error::Error>> {

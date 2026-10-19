@@ -15,7 +15,6 @@ use std::io::Write;
 use std::sync::{Arc, Mutex, OnceLock};
 
 use serde_json::{json, Value};
-use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::EnvFilter;
 
@@ -58,11 +57,12 @@ fn capture() -> &'static Capture {
     static CAPTURE: OnceLock<Capture> = OnceLock::new();
     CAPTURE.get_or_init(|| {
         let capture = Capture::default();
-        tracing_subscriber::registry()
-            .with(quarry_edge::zdr_log::ZdrMarkLayer)
-            .with(quarry_edge::zdr_log::harden(EnvFilter::new("debug")))
-            .with(quarry_edge::zdr_log::build_json_layer(capture.clone()))
-            .init();
+        // The stack the binary runs without an exporter, at the loudest level.
+        quarry_edge::zdr_log::production_subscriber(
+            capture.clone(),
+            quarry_edge::zdr_log::harden(EnvFilter::new("debug")),
+        )
+        .init();
         capture
     })
 }
@@ -421,6 +421,13 @@ impl quarry_runtime::driver::Driver for ShellDriver {
     }
 
     async fn fetch(&self, url: &url::Url) -> quarry_core::QuarryResult<quarry_runtime::fetch::FetchResponse> {
+        // A deliberate probe, not a production line: a URL-bearing event emitted
+        // from inside the driver, which runs on whatever task the pipeline runs
+        // on. It was once the production fallback line "rendered no more readable
+        // text" (now class and counts only, no URL), so the streamed-scrape canary
+        // below needs its own: under ZDR it is dropped only if the spawned runner
+        // kept the request span, and it stays visible outside ZDR.
+        tracing::info!(url = %url, "shell driver probe fetch");
         if self.fails {
             return Err(quarry_core::error::QuarryError::new(
                 quarry_core::error::ErrorCode::DriverFailed,
@@ -529,8 +536,9 @@ async fn a_zdr_streamed_scrape_logs_no_url_from_its_spawned_runner() {
 #[tokio::test]
 async fn a_non_zdr_streamed_scrape_logs_the_line_the_zdr_one_keeps_out() {
     // Control for the test above: the runner under the stream does emit a
-    // URL-carrying line, and the capture sees it, so the ZDR test passing means
-    // the filter dropped it rather than nothing having been logged.
+    // URL-carrying line (the driver's probe), and the capture sees it, so the ZDR
+    // test passing means the filter dropped it rather than nothing having been
+    // logged.
     capture();
     let harness = harness_with_fallback_chain(false).await;
     let (url, marker) = probe_url();
@@ -545,7 +553,7 @@ async fn a_non_zdr_streamed_scrape_logs_the_line_the_zdr_one_keeps_out() {
     assert!(
         logged()
             .lines()
-            .any(|l| l.contains("rendered no more readable text") && l.contains(&marker)),
-        "a non-ZDR streamed scrape logs the fallback line with its URL"
+            .any(|l| l.contains("shell driver probe fetch") && l.contains(&marker)),
+        "a non-ZDR streamed scrape logs the driver's probe line with its URL"
     );
 }
