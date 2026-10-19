@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log/slog"
 	"strings"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -108,6 +109,11 @@ func retryableTx(err error) bool {
 // aborted as a deadlock or serialization victim.
 const txAttempts = 3
 
+// deadlockRetries counts transactions inTx ran again after a 40P01 deadlock
+// abort. It exists so a test can prove the advisory locks keep concurrent
+// revokes from deadlocking at all (a retry alone would hide it).
+var deadlockRetries atomic.Int64
+
 // dbErr records a database failure and hides its text. A cancelled or timed
 // out request is passed through uncounted: it is the caller leaving, not the
 // store failing.
@@ -190,6 +196,10 @@ func (s *PgStore) inTx(ctx context.Context, op string, fn func(pgx.Tx) error) er
 	for attempt := 1; attempt <= txAttempts; attempt++ {
 		if err = s.inTxOnce(ctx, op, fn); !retryableTx(err) {
 			return err
+		}
+		var se *storeError
+		if errors.As(err, &se) && se.sqlState == "40P01" {
+			deadlockRetries.Add(1)
 		}
 		select {
 		case <-ctx.Done():

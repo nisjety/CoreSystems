@@ -462,6 +462,7 @@ func TestPg_ConcurrentRevokesOfSessionAndRunNeverFail(t *testing.T) {
 	_, _, store, _ := stores(pool)
 	const iterations = 150
 	failures := 0
+	deadlocksBefore := deadlockRetries.Load()
 	for i := 0; i < iterations; i++ {
 		parent := session(t, store, CreateSessionParams{SessionKey: fmt.Sprintf("s%d", i), TTL: 10 * time.Minute})
 		run, err := store.Derive(ctx, deriveParams(parent, "run"))
@@ -502,6 +503,12 @@ func TestPg_ConcurrentRevokesOfSessionAndRunNeverFail(t *testing.T) {
 	}
 	if failures > 0 {
 		t.Fatalf("%d concurrent revokes failed over %d iterations", failures, iterations)
+	}
+	// The retry in inTx would mask a deadlock (the revoke succeeds on the
+	// second try), so the advisory lock itself is proven by no deadlock
+	// having happened at all.
+	if n := deadlockRetries.Load() - deadlocksBefore; n != 0 {
+		t.Fatalf("%d transactions were aborted as deadlock victims and retried; the revoke lock order is broken", n)
 	}
 }
 

@@ -10,13 +10,13 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
-	"sync"
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 )
@@ -25,19 +25,25 @@ import (
 // metric, whatever fails.
 const unitTestDSN = "postgres://leaky-user:s3cret-pw@db.invalid.example:5432/leaky_db"
 
+// The grant package counts store errors through the global meter provider,
+// and an instrument created before a provider is installed binds to the first
+// one only. The test provider is therefore installed once, in init, before any
+// test runs, and no test in this package may install another (storeErrorCount
+// fails loudly if one does).
 var (
-	meterOnce   sync.Once
-	meterReader *sdkmetric.ManualReader
+	meterReader   = sdkmetric.NewManualReader()
+	meterProvider = sdkmetric.NewMeterProvider(sdkmetric.WithReader(meterReader))
 )
+
+func init() { otel.SetMeterProvider(meterProvider) }
 
 // storeErrorCount returns browser_broker_grant_store_errors_total for one op,
 // and fails if any data point carries an attribute other than op.
 func storeErrorCount(t *testing.T, op string) int64 {
 	t.Helper()
-	meterOnce.Do(func() {
-		meterReader = sdkmetric.NewManualReader()
-		otel.SetMeterProvider(sdkmetric.NewMeterProvider(sdkmetric.WithReader(meterReader)))
-	})
+	if otel.GetMeterProvider() != metric.MeterProvider(meterProvider) {
+		t.Fatal("another test replaced the global meter provider; the store error counter is bound to the one installed in init")
+	}
 	var rm metricdata.ResourceMetrics
 	if err := meterReader.Collect(context.Background(), &rm); err != nil {
 		t.Fatal(err)
