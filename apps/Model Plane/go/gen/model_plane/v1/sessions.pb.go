@@ -5723,7 +5723,12 @@ func (x *SaveLoopCheckpointRequest) GetParkUntil() *timestamppb.Timestamp {
 type SaveLoopCheckpointResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Seq of the stored fold; the next save must expect this value.
-	Seq           uint64 `protobuf:"varint,1,opt,name=seq,proto3" json:"seq,omitempty"`
+	Seq uint64 `protobuf:"varint,1,opt,name=seq,proto3" json:"seq,omitempty"`
+	// True only when a park-aware store durably accepted a kind "park" save under
+	// its park rules (park recovery on). False for every other save, and for a
+	// store that predates the field (an absent field reads as false): the caller
+	// must then treat its park as not taken and take the committed outcome.
+	ParkAccepted  bool `protobuf:"varint,2,opt,name=park_accepted,json=parkAccepted,proto3" json:"park_accepted,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -5765,12 +5770,24 @@ func (x *SaveLoopCheckpointResponse) GetSeq() uint64 {
 	return 0
 }
 
+func (x *SaveLoopCheckpointResponse) GetParkAccepted() bool {
+	if x != nil {
+		return x.ParkAccepted
+	}
+	return false
+}
+
 // Claim a paused or parked run's fold for one continuation.
 type ClaimLoopCheckpointRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Run whose fold to claim.
 	RunId string `protobuf:"bytes,1,opt,name=run_id,json=runId,proto3" json:"run_id,omitempty"`
-	// The pause or park reference the fold must be waiting on.
+	// The pause or park reference the fold must be waiting on. An EMPTY value
+	// names the run's current parked fold (kind "park") once it is due, and never
+	// a pause fold. A park-aware store refuses it with failed_precondition
+	// "park_not_due" before park_until, and with aborted "loop_checkpoint_claim_held"
+	// while another claim's lease is live; a store without park recovery answers
+	// an empty reference as not claimable.
 	PauseRef string `protobuf:"bytes,2,opt,name=pause_ref,json=pauseRef,proto3" json:"pause_ref,omitempty"`
 	// Caller-minted token. Only its hash is stored, so the claim cannot be replayed by a reader of the table.
 	ClaimToken    string `protobuf:"bytes,3,opt,name=claim_token,json=claimToken,proto3" json:"claim_token,omitempty"`
@@ -6654,9 +6671,10 @@ const file_model_plane_v1_sessions_proto_rawDesc = "" +
 	"\vpark_reason\x18\a \x01(\tR\n" +
 	"parkReason\x129\n" +
 	"\n" +
-	"park_until\x18\b \x01(\v2\x1a.google.protobuf.TimestampR\tparkUntil\".\n" +
+	"park_until\x18\b \x01(\v2\x1a.google.protobuf.TimestampR\tparkUntil\"S\n" +
 	"\x1aSaveLoopCheckpointResponse\x12\x10\n" +
-	"\x03seq\x18\x01 \x01(\x04R\x03seq\"q\n" +
+	"\x03seq\x18\x01 \x01(\x04R\x03seq\x12#\n" +
+	"\rpark_accepted\x18\x02 \x01(\bR\fparkAccepted\"q\n" +
 	"\x1aClaimLoopCheckpointRequest\x12\x15\n" +
 	"\x06run_id\x18\x01 \x01(\tR\x05runId\x12\x1b\n" +
 	"\tpause_ref\x18\x02 \x01(\tR\bpauseRef\x12\x1f\n" +

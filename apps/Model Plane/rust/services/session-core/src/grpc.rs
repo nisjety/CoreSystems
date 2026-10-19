@@ -4243,6 +4243,9 @@ pub(crate) async fn save_loop_checkpoint_inner(
     .await?;
     Ok(Response::new(pb::SaveLoopCheckpointResponse {
         seq: u64::try_from(seq).map_err(|_| Status::internal("loop checkpoint seq is negative"))?,
+        // No store path accepts a park under the park rules yet (WS03 S8-4
+        // fills this from the store's answer): every save reports false.
+        park_accepted: false,
     }))
 }
 
@@ -8023,6 +8026,24 @@ mod tests {
     use tonic::Request;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    // WS03 S8 review finding: RecordOrchestrationEvent persists RUN_PARKED and
+    // RUN_RESUMED rows (orchestration_grpc.rs), but no `EventType` value exists
+    // for them, so the durable replay reads them back as EVENT_TYPE_UNSPECIFIED
+    // and the gateway's projection drops them. That is today's behaviour, pinned
+    // here so nobody describes the persistence as a durable replay. Giving them
+    // a ChatEvent is the design's S8-7/S8-8 and WS15 S7; when that adds enum
+    // values this test is the one to change.
+    #[test]
+    fn replay_maps_the_park_event_types_to_unspecified() {
+        for stored in ["RUN_PARKED", "RUN_RESUMED"] {
+            assert_eq!(super::event_type_to_i32(stored), 0, "{stored}");
+            let kind = pb::EventType::try_from(super::event_type_to_i32(stored))
+                .expect("0 is a valid EventType");
+            assert_eq!(kind, pb::EventType::Unspecified, "{stored}");
+            assert_eq!(kind.as_str_name(), "EVENT_TYPE_UNSPECIFIED", "{stored}");
+        }
+    }
 
     #[test]
     fn assistant_reply_slot_opens_only_directly_after_a_user_turn() {

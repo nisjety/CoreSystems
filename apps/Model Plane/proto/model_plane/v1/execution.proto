@@ -228,7 +228,11 @@ message RunAgentRequest {
 // carries the brief it is seeded with. It carries no credential: the resumed
 // segment authenticates with fresh bearers minted for the continue request.
 message AgentResume {
-  // "segment" (a fresh segment seeded by a brief) or "loop" (re-entry from a fold).
+  // "segment" (a fresh segment seeded by a brief), "loop" (re-entry from a fold)
+  // or "park" (resume of the run's current parked fold, claimed with an empty
+  // pause reference). A "park" resume carries ONLY `claim_token`: approval_id,
+  // step_id, tool_name, action_fingerprint and brief must be empty, and
+  // segment_no is sent and ignored.
   string mode = 1;
   // The granted approval the segment consumes, exactly once.
   string approval_id = 2;
@@ -267,7 +271,10 @@ message RunContext {
 
 // RunAgentResponse — terminal outcome of a driven agent run.
 message RunAgentResponse {
-  // Terminal status: "completed" or "failed".
+  // Outcome status: "completed" or "failed" (terminal), "awaiting_approval" or
+  // "parked" (the run stays open). "parked" means the loop saved a durable park
+  // fold at a round boundary and returned without finalizing: no assistant
+  // message was appended, no receipt written; `park_reason` says why.
   string status = 1;
 
   // The persisted assistant answer (or graceful error sentence on failure).
@@ -319,6 +326,13 @@ message RunAgentResponse {
   // When a "subscription_usage_limit" resets: RFC 3339 UTC to whole seconds.
   // Empty when unknown. Meaningful only with `failure_code`.
   string resets_at = 8;
+
+  // Why the run parked, as a closed token ("credential_window",
+  // "provider_exhausted", "upstream_unavailable" or "reauth_required"), when
+  // `status` is "parked". Empty for every other outcome. With status "parked",
+  // `resets_at` carries the earliest time a resume is due (RFC 3339 UTC) and
+  // `failure_code` is empty.
+  string park_reason = 11;
 }
 
 // ExecuteStepRequest — request to execute one step in the agent loop.

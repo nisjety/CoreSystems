@@ -330,6 +330,20 @@ pub(crate) enum Refusal {
     Forbidden,
     /// The ZDR catalogue refused: the run keeps no durable state, so it is never resumed.
     DurableMutationForbidden,
+    /// The run's parked fold cannot be restored (it is structurally unusable, or the tools
+    /// the run would offer no longer match the fold's): the fold is closed, never re-routed.
+    // Built by the park resume (WS03 S8-6), which removes this allow.
+    #[allow(dead_code)]
+    ParkNotRestorable,
+    /// The parked run's pinned route cannot be rebuilt (the connection or model is gone, or
+    /// the route is no longer pinned): never a default route.
+    // Built by the park resume (WS03 S8-6), which removes this allow.
+    #[allow(dead_code)]
+    ParkRouteUnavailable,
+    /// The park is not yet due: its earliest resume time has not passed. The run stays parked.
+    // Built by the park resume (WS03 S8-6), which removes this allow.
+    #[allow(dead_code)]
+    ParkNotDue,
 }
 
 impl Refusal {
@@ -348,6 +362,9 @@ impl Refusal {
             Self::RunEnded => "not_resumable",
             Self::Forbidden => "resume_forbidden",
             Self::DurableMutationForbidden => "durable_mutation_forbidden",
+            Self::ParkNotRestorable => "park_not_restorable",
+            Self::ParkRouteUnavailable => "park_route_unavailable",
+            Self::ParkNotDue => "park_not_due",
         }
     }
 
@@ -2549,6 +2566,9 @@ mod tests {
             (Refusal::ContinuationAlreadyConsumed, "continuation_already_consumed", Code::FailedPrecondition),
             (Refusal::RunEnded, "not_resumable", Code::FailedPrecondition),
             (Refusal::Forbidden, "resume_forbidden", Code::PermissionDenied),
+            (Refusal::ParkNotRestorable, "park_not_restorable", Code::FailedPrecondition),
+            (Refusal::ParkRouteUnavailable, "park_route_unavailable", Code::FailedPrecondition),
+            (Refusal::ParkNotDue, "park_not_due", Code::FailedPrecondition),
         ] {
             assert_eq!(refusal.as_str(), token);
             let status = refusal.status();

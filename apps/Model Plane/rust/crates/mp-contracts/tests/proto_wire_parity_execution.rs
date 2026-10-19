@@ -105,6 +105,85 @@ fn a_response_without_the_fields_has_no_typed_failure() {
     assert_eq!(decoded.resets_at, "");
 }
 
+// ---- RunAgentResponse.park_reason (field 11, build plan WS03 S8) ----
+
+/// A run that parked after two rounds: status "parked", its earliest resume time in
+/// `resets_at` (field 8) and the closed reason in field 11. No failure code, no final
+/// output. Pinned so the field number cannot drift unseen between the Rust writer and the
+/// Go readers; the same bytes are pinned in the Go test of the same name.
+const PARKED_WIRE_HEX: &str = "0a067061726b656418024214323032362d30392d32365430313a32313a30305a5a1270726f76696465725f657868617573746564";
+
+fn parked(park_reason: &str) -> RunAgentResponse {
+    RunAgentResponse {
+        status: "parked".to_owned(),
+        rounds_executed: 2,
+        resets_at: "2026-09-26T01:21:00Z".to_owned(),
+        park_reason: park_reason.to_owned(),
+        ..Default::default()
+    }
+}
+
+#[test]
+fn a_parked_response_encodes_park_reason_as_field_11() {
+    assert_eq!(
+        hex(&parked("provider_exhausted").encode_to_vec()),
+        PARKED_WIRE_HEX
+    );
+    // Field 11, wire type 2: key byte 0x5a. The reason is the last field written.
+    let wire = unhex(PARKED_WIRE_HEX);
+    assert!(
+        wire.windows(2).any(|pair| pair == [0x5a, 0x12]),
+        "park_reason (field 11) is a length-delimited string"
+    );
+}
+
+#[test]
+fn the_parked_golden_bytes_decode_and_a_response_without_the_field_is_not_parked() {
+    let decoded = RunAgentResponse::decode(unhex(PARKED_WIRE_HEX).as_slice()).expect("decode");
+    assert_eq!(decoded.status, "parked");
+    assert_eq!(decoded.park_reason, "provider_exhausted");
+    assert_eq!(decoded.resets_at, "2026-09-26T01:21:00Z");
+    assert_eq!(decoded.failure_code, "");
+    assert_eq!(decoded.final_output, "");
+    // A response written before the field existed has no park reason, so an older
+    // execution-core is never read as having parked.
+    let before = RunAgentResponse::decode(
+        failed("subscription_usage_limit", None, "").encode_to_vec().as_slice(),
+    )
+    .expect("decode");
+    assert_eq!(before.park_reason, "");
+    // An unset reason is not on the wire at all: the key byte and the length byte are
+    // two bytes, and the reason's eighteen.
+    assert_eq!(
+        parked("").encode_to_vec().len() + 2 + "provider_exhausted".len(),
+        unhex(PARKED_WIRE_HEX).len()
+    );
+}
+
+// ---- SaveLoopCheckpointResponse.park_accepted (field 2, build plan WS03 S8) ----
+
+/// The store's answer to a park save: seq 7 (field 1) and park_accepted true (field 2).
+/// execution-core reads field 2 to know whether the park was durably accepted; a store
+/// that predates the field sends only field 1, and the executor must read that as false.
+#[test]
+fn a_save_response_carries_park_accepted_as_field_2() {
+    use mp_contracts::model_plane::v1::SaveLoopCheckpointResponse;
+    let accepted = SaveLoopCheckpointResponse {
+        seq: 7,
+        park_accepted: true,
+    };
+    assert_eq!(hex(&accepted.encode_to_vec()), "08071001");
+    let old_store = SaveLoopCheckpointResponse::decode(unhex("0807").as_slice()).expect("decode");
+    assert_eq!(old_store.seq, 7);
+    assert!(!old_store.park_accepted, "an absent field reads as not accepted");
+    // A save that was not a park accepted nothing: false is not on the wire.
+    let plain = SaveLoopCheckpointResponse {
+        seq: 7,
+        park_accepted: false,
+    };
+    assert_eq!(hex(&plain.encode_to_vec()), "0807");
+}
+
 // ---- RunAgentRequest.run_context (field 18, build plan WS02 S4) ----
 
 /// A run that carries instructions, a memory block and a status. Pinned so the

@@ -318,8 +318,8 @@ fn the_spa_frame_tuple_is_the_gateways_frame_list() {
     let spa = spa_frame_refusals();
     assert_eq!(
         gateway.len(),
-        22,
-        "model-gateway's CONTINUE_FRAME_REFUSALS has 22 tokens; parsed {gateway:?}"
+        25,
+        "model-gateway's CONTINUE_FRAME_REFUSALS has 25 tokens; parsed {gateway:?}"
     );
     no_duplicates("model-gateway's CONTINUE_FRAME_REFUSALS", &gateway);
     no_duplicates("the SPA's CHAT_RUN_CONTINUE_FRAME_REFUSALS", &spa);

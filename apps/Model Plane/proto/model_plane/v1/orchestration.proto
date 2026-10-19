@@ -1154,6 +1154,15 @@ message OrchestrationEvent {
     // verification result — an older worker's outcome (no `verification`
     // field) never fires this event.
     ApprovalContinuationVerified approval_continuation_verified = 23;
+
+    // Durable loop (build plan WS03 S8, tag 24 — additive). A run's loop
+    // parked at a round boundary: the run stays non-terminal and resumable.
+    // Ids only: the park reason is never broadcast.
+    RunParked run_parked = 24;
+    // Durable loop (build plan WS03 S8, tag 25 — additive). A parked run's
+    // loop resumed through the one continue route. Ids and the resumed segment
+    // number only.
+    RunResumed run_resumed = 25;
   }
 
   message PlanTransitioned {
@@ -1331,6 +1340,20 @@ message OrchestrationEvent {
     string approval_id = 3;
     string receipt_id = 4;
     VerificationResult verification = 5;
+  }
+
+  // The run's loop saved a durable park fold at a round boundary and returned
+  // without finalizing. The run stays non-terminal until it is resumed, cancelled
+  // or its park TTL lapses. Carries the run id only (the reason is owner-only).
+  message RunParked {
+    string run_id = 1;
+  }
+
+  // A parked run's loop resumed from its park fold and is running again.
+  message RunResumed {
+    string run_id = 1;
+    // The segment the resumed loop runs as.
+    uint32 resumed_segment = 2;
   }
 }
 

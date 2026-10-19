@@ -103,9 +103,12 @@ export const CHAT_RUN_CONTINUE_HTTP_REFUSALS = [
 export type ChatRunContinueHttpRefusalCode = (typeof CHAT_RUN_CONTINUE_HTTP_REFUSALS)[number]['code']
 
 /**
- * The refusal codes an `error` frame of a continuation can carry: 17 message
- * tokens the executor returns, 2 the gateway derives from the status (a vanished
- * approval or run, a zero-retention refusal) and 3 the gateway makes itself.
+ * The refusal codes an `error` frame of a continuation can carry: 20 message
+ * tokens the executor returns (the last three, `park_not_restorable`,
+ * `park_route_unavailable` and `park_not_due`, are its refusals of the resume of a
+ * PARKED run, WS03 S8: the gateway sends them only on a park continue, which never
+ * spends an approval), 2 the gateway derives from the status (a vanished approval
+ * or run, a zero-retention refusal) and 3 the gateway makes itself.
  */
 export const CHAT_RUN_CONTINUE_FRAME_REFUSALS = [
   // Message tokens carried by the executor.
@@ -126,6 +129,9 @@ export const CHAT_RUN_CONTINUE_FRAME_REFUSALS = [
   'resume_checkpoint_unavailable',
   'not_resumable',
   'resume_forbidden',
+  'park_not_restorable',
+  'park_route_unavailable',
+  'park_not_due',
   // Derived from the status by the gateway.
   'approval_not_found',
   'durable_mutation_forbidden',
@@ -139,7 +145,10 @@ export type ChatRunContinueFrameRefusalCode = (typeof CHAT_RUN_CONTINUE_FRAME_RE
 
 /**
  * The frame codes that exist only after a gateway pre-consume (regime 1): there
- * is no unflagged form of them.
+ * is no unflagged form of them on an approval continuation, so regime 2 never reads
+ * them. A PARK continue (WS03 S8: the resume of a parked run, which has no approval to
+ * spend) says the same two codes WITHOUT `approval_spent`, under `park_continue: true`;
+ * that regime is read only by its own guard (WS03 S8-3), never by regime 1 or 2.
  */
 export const CHAT_RUN_CONTINUE_SPENT_ONLY_FRAME_REFUSALS = [
   'continue_unreachable',

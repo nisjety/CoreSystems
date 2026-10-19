@@ -558,7 +558,11 @@ func (x *RunAgentRequest) GetResume() *AgentResume {
 // segment authenticates with fresh bearers minted for the continue request.
 type AgentResume struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// "segment" (a fresh segment seeded by a brief) or "loop" (re-entry from a fold).
+	// "segment" (a fresh segment seeded by a brief), "loop" (re-entry from a fold)
+	// or "park" (resume of the run's current parked fold, claimed with an empty
+	// pause reference). A "park" resume carries ONLY `claim_token`: approval_id,
+	// step_id, tool_name, action_fingerprint and brief must be empty, and
+	// segment_no is sent and ignored.
 	Mode string `protobuf:"bytes,1,opt,name=mode,proto3" json:"mode,omitempty"`
 	// The granted approval the segment consumes, exactly once.
 	ApprovalId string `protobuf:"bytes,2,opt,name=approval_id,json=approvalId,proto3" json:"approval_id,omitempty"`
@@ -743,7 +747,10 @@ func (x *RunContext) GetStatus() *RunContextStatus {
 // RunAgentResponse — terminal outcome of a driven agent run.
 type RunAgentResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// Terminal status: "completed" or "failed".
+	// Outcome status: "completed" or "failed" (terminal), "awaiting_approval" or
+	// "parked" (the run stays open). "parked" means the loop saved a durable park
+	// fold at a round boundary and returned without finalizing: no assistant
+	// message was appended, no receipt written; `park_reason` says why.
 	Status string `protobuf:"bytes,1,opt,name=status,proto3" json:"status,omitempty"`
 	// The persisted assistant answer (or graceful error sentence on failure).
 	FinalOutput string `protobuf:"bytes,2,opt,name=final_output,json=finalOutput,proto3" json:"final_output,omitempty"`
@@ -787,7 +794,13 @@ type RunAgentResponse struct {
 	RetryAfterMs *uint64 `protobuf:"varint,7,opt,name=retry_after_ms,json=retryAfterMs,proto3,oneof" json:"retry_after_ms,omitempty"`
 	// When a "subscription_usage_limit" resets: RFC 3339 UTC to whole seconds.
 	// Empty when unknown. Meaningful only with `failure_code`.
-	ResetsAt      string `protobuf:"bytes,8,opt,name=resets_at,json=resetsAt,proto3" json:"resets_at,omitempty"`
+	ResetsAt string `protobuf:"bytes,8,opt,name=resets_at,json=resetsAt,proto3" json:"resets_at,omitempty"`
+	// Why the run parked, as a closed token ("credential_window",
+	// "provider_exhausted", "upstream_unavailable" or "reauth_required"), when
+	// `status` is "parked". Empty for every other outcome. With status "parked",
+	// `resets_at` carries the earliest time a resume is due (RFC 3339 UTC) and
+	// `failure_code` is empty.
+	ParkReason    string `protobuf:"bytes,11,opt,name=park_reason,json=parkReason,proto3" json:"park_reason,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -874,6 +887,13 @@ func (x *RunAgentResponse) GetRetryAfterMs() uint64 {
 func (x *RunAgentResponse) GetResetsAt() string {
 	if x != nil {
 		return x.ResetsAt
+	}
+	return ""
+}
+
+func (x *RunAgentResponse) GetParkReason() string {
+	if x != nil {
+		return x.ParkReason
 	}
 	return ""
 }
@@ -1416,7 +1436,7 @@ const file_model_plane_v1_execution_proto_rawDesc = "" +
 	"\x15authored_instructions\x18\x01 \x01(\tR\x14authoredInstructions\x125\n" +
 	"\ahistory\x18\x02 \x03(\v2\x1b.model_plane.v1.ChatMessageR\ahistory\x12!\n" +
 	"\fmemory_block\x18\x03 \x01(\tR\vmemoryBlock\x128\n" +
-	"\x06status\x18\x04 \x01(\v2 .model_plane.v1.RunContextStatusR\x06status\"\xc3\x02\n" +
+	"\x06status\x18\x04 \x01(\v2 .model_plane.v1.RunContextStatusR\x06status\"\xe4\x02\n" +
 	"\x10RunAgentResponse\x12\x16\n" +
 	"\x06status\x18\x01 \x01(\tR\x06status\x12!\n" +
 	"\ffinal_output\x18\x02 \x01(\tR\vfinalOutput\x12'\n" +
@@ -1425,7 +1445,9 @@ const file_model_plane_v1_execution_proto_rawDesc = "" +
 	"\x14compaction_triggered\x18\x05 \x01(\bR\x13compactionTriggered\x12!\n" +
 	"\ffailure_code\x18\x06 \x01(\tR\vfailureCode\x12)\n" +
 	"\x0eretry_after_ms\x18\a \x01(\x04H\x00R\fretryAfterMs\x88\x01\x01\x12\x1b\n" +
-	"\tresets_at\x18\b \x01(\tR\bresetsAtB\x11\n" +
+	"\tresets_at\x18\b \x01(\tR\bresetsAt\x12\x1f\n" +
+	"\vpark_reason\x18\v \x01(\tR\n" +
+	"parkReasonB\x11\n" +
 	"\x0f_retry_after_ms\"\xf0\x02\n" +
 	"\x12ExecuteStepRequest\x12\x15\n" +
 	"\x06run_id\x18\x01 \x01(\tR\x05runId\x12\x17\n" +

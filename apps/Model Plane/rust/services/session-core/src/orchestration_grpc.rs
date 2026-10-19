@@ -1727,6 +1727,30 @@ async fn assemble_plan(pool: &Pool, plan: &store::PlanRow) -> Result<proto::Plan
 
 /// Persist the safe browser-agent event projection in the canonical event log.
 ///
+/// The one principal allowed to record the durable-loop park events.
+const PARK_EVENT_PRINCIPAL: &str = "service:execution-core";
+
+/// `RunParked` and `RunResumed` (WS03 S8) are the executor's events: it alone
+/// parks and resumes a run. Before those tags existed prost skipped them, so any
+/// caller that sent one got `InvalidArgument("event payload is required")`. A
+/// caller other than `service:execution-core` (a run's human owner, another
+/// service holding `orchestration:write`) still gets exactly that answer, so the
+/// new tags open no new write path: nothing is persisted or broadcast for them.
+#[allow(clippy::result_large_err)]
+fn refuse_park_event_from_other_principals(
+    caller: &VerifiedIdentity,
+    event: &proto::OrchestrationEvent,
+) -> Result<(), Status> {
+    let is_park_event = matches!(
+        event.event,
+        Some(orchestration_event::Event::RunParked(_) | orchestration_event::Event::RunResumed(_))
+    );
+    if is_park_event && !(caller.is_service() && caller.principal_id() == PARK_EVENT_PRINCIPAL) {
+        return Err(Status::invalid_argument("event payload is required"));
+    }
+    Ok(())
+}
+
 /// Browser progress historically lived only in the per-run Redis/in-memory
 /// replay ring. That is enough for a reconnecting tab, but not for a reload
 /// after the ring TTL or a process restart. Keep the durable record deliberately
@@ -1827,6 +1851,33 @@ async fn persist_browser_event(
                 })
             },
             "type.googleapis.com/model_plane.v1.ApprovalContinuationVerified",
+        ),
+        // Durable loop (WS03 S8): ids and a segment number only. The park
+        // reason never rides this projection, so a reader of the event log
+        // learns that a run parked, never why.
+        //
+        // Today these two rows are WRITE-ONLY. The durable replay maps the
+        // RUN_PARKED / RUN_RESUMED event types to EVENT_TYPE_UNSPECIFIED (no
+        // `EventType` value exists for them) and the gateway's durable-run-event
+        // projection drops everything outside its allowlist, so they are not
+        // readable back and this persistence is not a durable replay of a park.
+        // Whether they become a ChatEvent is decided by the design's S8-7/S8-8 and
+        // WS15 S7; pinned by `replay_maps_the_park_event_types_to_unspecified`
+        // in grpc.rs.
+        Some(orchestration_event::Event::RunParked(value)) => (
+            "RUN_PARKED",
+            value.run_id.as_str(),
+            serde_json::json!({ "run_id": value.run_id }),
+            "type.googleapis.com/model_plane.v1.RunParked",
+        ),
+        Some(orchestration_event::Event::RunResumed(value)) => (
+            "RUN_RESUMED",
+            value.run_id.as_str(),
+            serde_json::json!({
+                "run_id": value.run_id,
+                "resumed_segment": value.resumed_segment,
+            }),
+            "type.googleapis.com/model_plane.v1.RunResumed",
         ),
         _ => return Ok(()),
     };
@@ -1952,6 +2003,10 @@ fn event_run_id(ev: &proto::OrchestrationEvent) -> Option<&str> {
         orchestration_event::Event::BrowserActionApprovalRequired(p) => Some(&p.run_id),
         orchestration_event::Event::BrowserActionDecided(p) => Some(&p.run_id),
         orchestration_event::Event::ApprovalContinuationVerified(p) => Some(&p.run_id),
+        // Durable loop (WS03 S8): both are run-scoped, so they reach the per-run
+        // stream and the replay buffer.
+        orchestration_event::Event::RunParked(p) => Some(&p.run_id),
+        orchestration_event::Event::RunResumed(p) => Some(&p.run_id),
     }
 }
 
@@ -3426,6 +3481,8 @@ impl OrchestrationCoreService for OrchestrationGrpc {
             if ev.event.is_none() {
                 return Err(Status::invalid_argument("event payload is required"));
             }
+            // Before anything is looked up, persisted or broadcast.
+            refuse_park_event_from_other_principals(&caller, &ev)?;
             // Only run-scoped events are deliverable on the per-run stream;
             // reject ones we couldn't route so callers learn early.
             if event_run_id(&ev).is_none_or(str::is_empty) {
@@ -4675,6 +4732,167 @@ mod tests {
             )),
         };
         assert_eq!(event_run_id(&resumed_run), Some("run_p"));
+
+        // A durable-loop park and its resume are run-scoped, so both reach the
+        // per-run stream and the replay buffer (WS03 S8).
+        let parked = proto::OrchestrationEvent {
+            event_id: String::new(),
+            at: None,
+            event: Some(orchestration_event::Event::RunParked(
+                orchestration_event::RunParked {
+                    run_id: "run_k".into(),
+                },
+            )),
+        };
+        assert_eq!(event_run_id(&parked), Some("run_k"));
+
+        let loop_resumed = proto::OrchestrationEvent {
+            event_id: String::new(),
+            at: None,
+            event: Some(orchestration_event::Event::RunResumed(
+                orchestration_event::RunResumed {
+                    run_id: "run_k".into(),
+                    resumed_segment: 3,
+                },
+            )),
+        };
+        assert_eq!(event_run_id(&loop_resumed), Some("run_k"));
+    }
+
+    #[test]
+    fn the_execution_principal_holds_the_scope_the_park_events_are_recorded_under() {
+        // The park and resume events are recorded through the same
+        // `RecordOrchestrationEvent` gate as every other run event:
+        // `orchestration:write` for a service, then the run's owner check.
+        let execution_core = VerifiedIdentity::service_for_test_as(
+            "org_x",
+            "service:execution-core",
+            &["orchestration:write"],
+            false,
+        );
+        assert!(authorize_operation(&execution_core, "orchestration:write").is_ok());
+        let without_scope = VerifiedIdentity::service_for_test_as(
+            "org_x",
+            "service:execution-core",
+            &["orchestration:read"],
+            false,
+        );
+        assert!(authorize_operation(&without_scope, "orchestration:write").is_err());
+    }
+
+    fn park_event(resumed: bool, run_id: &str) -> proto::OrchestrationEvent {
+        proto::OrchestrationEvent {
+            event_id: String::new(),
+            at: None,
+            event: Some(if resumed {
+                orchestration_event::Event::RunResumed(orchestration_event::RunResumed {
+                    run_id: run_id.to_owned(),
+                    resumed_segment: 2,
+                })
+            } else {
+                orchestration_event::Event::RunParked(orchestration_event::RunParked {
+                    run_id: run_id.to_owned(),
+                })
+            }),
+        }
+    }
+
+    // WS03 S8 review finding: before S8-2 prost skipped tags 24 and 25, so every
+    // caller got "event payload is required" for them. Only the executor may
+    // record them now; anyone else gets that same refusal.
+    #[test]
+    fn only_the_execution_principal_may_record_the_park_events() {
+        let executor = VerifiedIdentity::service_for_test_as(
+            "org_x",
+            "service:execution-core",
+            &["orchestration:write"],
+            false,
+        );
+        let human = VerifiedIdentity::user_for_test("org_x", "user_x");
+        let other_service = VerifiedIdentity::service_for_test_as(
+            "org_x",
+            "service:model-gateway",
+            &["orchestration:write"],
+            false,
+        );
+        // A look-alike service id is not the executor.
+        let lookalike = VerifiedIdentity::service_for_test_as(
+            "org_x",
+            "service:execution-core-2",
+            &["orchestration:write"],
+            false,
+        );
+        for resumed in [false, true] {
+            let ev = park_event(resumed, "run_x");
+            assert!(refuse_park_event_from_other_principals(&executor, &ev).is_ok());
+            for caller in [&human, &other_service, &lookalike] {
+                let refused = refuse_park_event_from_other_principals(caller, &ev)
+                    .expect_err("a non-executor principal must not record a park event");
+                assert_eq!(refused.code(), tonic::Code::InvalidArgument);
+                assert_eq!(refused.message(), "event payload is required");
+            }
+        }
+        // Every other event is untouched by this gate.
+        let other = proto::OrchestrationEvent {
+            event_id: String::new(),
+            at: None,
+            event: Some(orchestration_event::Event::BrowserRunPaused(
+                orchestration_event::BrowserRunPaused {
+                    run_id: "run_x".into(),
+                    plan_id: "plan_x".into(),
+                },
+            )),
+        };
+        assert!(refuse_park_event_from_other_principals(&human, &other).is_ok());
+    }
+
+    // The handler refuses before the run-owner lookup, the broadcast and the
+    // persist. The pool is lazy and unreachable: reaching the owner lookup would
+    // answer Internal, not InvalidArgument, and a broadcast would reach `rx`.
+    #[tokio::test]
+    async fn record_orchestration_event_refuses_park_events_from_a_human_owner_before_anything_runs()
+    {
+        let (tx, mut rx) = broadcast::channel::<proto::OrchestrationEvent>(8);
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgresql://session-core@127.0.0.1:1/session_core")
+            .expect("lazy pool");
+        let svc = OrchestrationGrpc::new(pool, tx);
+        for resumed in [false, true] {
+            let mut request = Request::new(proto::RecordOrchestrationEventRequest {
+                event: Some(park_event(resumed, "run_x")),
+            });
+            request
+                .extensions_mut()
+                .insert(VerifiedIdentity::user_for_test("org_x", "user_x"));
+            let refused = svc
+                .record_orchestration_event(request)
+                .await
+                .expect_err("a human owner must not record a park event");
+            assert_eq!(refused.code(), tonic::Code::InvalidArgument);
+            assert_eq!(refused.message(), "event payload is required");
+
+            let mut request = Request::new(proto::RecordOrchestrationEventRequest {
+                event: Some(park_event(resumed, "run_x")),
+            });
+            request
+                .extensions_mut()
+                .insert(VerifiedIdentity::service_for_test_as(
+                    "org_x",
+                    "service:model-gateway",
+                    &["orchestration:write"],
+                    false,
+                ));
+            let refused = svc
+                .record_orchestration_event(request)
+                .await
+                .expect_err("another service must not record a park event");
+            assert_eq!(refused.code(), tonic::Code::InvalidArgument);
+            assert_eq!(refused.message(), "event payload is required");
+        }
+        assert!(
+            matches!(rx.try_recv(), Err(broadcast::error::TryRecvError::Empty)),
+            "a refused park event is never broadcast"
+        );
     }
 
     #[tokio::test]
@@ -5538,6 +5756,147 @@ mod tests {
                 first.await.expect("first decision task"),
                 second.await.expect("second decision task"),
             )
+        }
+
+        // -----------------------------------------------------------------
+        // the durable-loop park events (WS03 S8-2)
+        // -----------------------------------------------------------------
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        #[ignore = "requires DATABASE_URL to a SCRATCH Postgres (name contains \"test\")"]
+        async fn the_execution_principal_records_run_parked_and_run_resumed() {
+            let db = PlanGateDb::connect().await;
+            let run = db.new_run(&db.thread).await;
+            let record = |event: orchestration_event::Event| {
+                db.as_exec_core(proto::RecordOrchestrationEventRequest {
+                    event: Some(proto::OrchestrationEvent {
+                        event_id: String::new(),
+                        at: None,
+                        event: Some(event),
+                    }),
+                })
+            };
+
+            let parked = db
+                .svc
+                .record_orchestration_event(record(orchestration_event::Event::RunParked(
+                    orchestration_event::RunParked { run_id: run.clone() },
+                )))
+                .await
+                .expect("execution-core records RunParked")
+                .into_inner()
+                .event_id;
+            let resumed = db
+                .svc
+                .record_orchestration_event(record(orchestration_event::Event::RunResumed(
+                    orchestration_event::RunResumed {
+                        run_id: run.clone(),
+                        resumed_segment: 2,
+                    },
+                )))
+                .await
+                .expect("execution-core records RunResumed")
+                .into_inner()
+                .event_id;
+
+            // The projection is ids and a segment number only, under the closed
+            // event types and their type URLs.
+            let rows: Vec<(String, String, serde_json::Value, String)> = sqlx::query_as(
+                "SELECT id, event_type, payload, type_url FROM events \
+                 WHERE run_id = $1 ORDER BY event_type",
+            )
+            .bind(&run)
+            .fetch_all(&db.pool)
+            .await
+            .expect("read the event log");
+            assert_eq!(
+                rows,
+                vec![
+                    (
+                        parked,
+                        "RUN_PARKED".to_owned(),
+                        serde_json::json!({ "run_id": run }),
+                        "type.googleapis.com/model_plane.v1.RunParked".to_owned(),
+                    ),
+                    (
+                        resumed,
+                        "RUN_RESUMED".to_owned(),
+                        serde_json::json!({ "run_id": run, "resumed_segment": 2 }),
+                        "type.googleapis.com/model_plane.v1.RunResumed".to_owned(),
+                    ),
+                ]
+            );
+
+            // A caller that does not own the run is refused, as for every event.
+            let mut stranger = Request::new(proto::RecordOrchestrationEventRequest {
+                event: Some(proto::OrchestrationEvent {
+                    event_id: String::new(),
+                    at: None,
+                    event: Some(orchestration_event::Event::RunParked(
+                        orchestration_event::RunParked { run_id: run.clone() },
+                    )),
+                }),
+            });
+            stranger
+                .extensions_mut()
+                .insert(VerifiedIdentity::user_for_test("org-someone-else", "user-x"));
+            let refused = db
+                .svc
+                .record_orchestration_event(stranger)
+                .await
+                .expect_err("another org's caller must not record a park event");
+            assert_ne!(refused.code(), tonic::Code::Ok);
+
+            // The run's own human owner and another service principal that
+            // holds orchestration:write are refused with exactly the answer
+            // they got before the tags existed, and nothing is written.
+            let before: i64 = sqlx::query_scalar("SELECT count(*) FROM events WHERE run_id = $1")
+                .bind(&run)
+                .fetch_one(&db.pool)
+                .await
+                .expect("count events");
+            let mut as_other_service = Request::new(proto::RecordOrchestrationEventRequest {
+                event: Some(park_event(false, &run)),
+            });
+            as_other_service
+                .extensions_mut()
+                .insert(VerifiedIdentity::service_for_test_as(
+                    &db.org,
+                    "service:model-gateway",
+                    &["orchestration:write"],
+                    false,
+                ));
+            let callers = [
+                db.as_owner(proto::RecordOrchestrationEventRequest {
+                    event: Some(park_event(false, &run)),
+                }),
+                db.as_owner(proto::RecordOrchestrationEventRequest {
+                    event: Some(park_event(true, &run)),
+                }),
+                as_other_service,
+            ];
+            for request in callers {
+                let refused = db
+                    .svc
+                    .record_orchestration_event(request)
+                    .await
+                    .expect_err("only execution-core records a park event");
+                assert_eq!(refused.code(), tonic::Code::InvalidArgument);
+                assert_eq!(refused.message(), "event payload is required");
+            }
+            let after: i64 = sqlx::query_scalar("SELECT count(*) FROM events WHERE run_id = $1")
+                .bind(&run)
+                .fetch_one(&db.pool)
+                .await
+                .expect("count events");
+            assert_eq!(before, after, "a refused park event writes no events row");
+
+            sqlx::query("DELETE FROM events WHERE run_id = $1")
+                .bind(&run)
+                .execute(&db.pool)
+                .await
+                .expect("cleanup events");
+            db.cleanup().await;
         }
 
         // -----------------------------------------------------------------

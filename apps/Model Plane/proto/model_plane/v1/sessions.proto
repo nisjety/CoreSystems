@@ -1340,6 +1340,12 @@ message SaveLoopCheckpointRequest {
 message SaveLoopCheckpointResponse {
   // Seq of the stored fold; the next save must expect this value.
   uint64 seq = 1;
+
+  // True only when a park-aware store durably accepted a kind "park" save under
+  // its park rules (park recovery on). False for every other save, and for a
+  // store that predates the field (an absent field reads as false): the caller
+  // must then treat its park as not taken and take the committed outcome.
+  bool park_accepted = 2;
 }
 
 // Claim a paused or parked run's fold for one continuation.
@@ -1347,7 +1353,12 @@ message ClaimLoopCheckpointRequest {
   // Run whose fold to claim.
   string run_id = 1;
 
-  // The pause or park reference the fold must be waiting on.
+  // The pause or park reference the fold must be waiting on. An EMPTY value
+  // names the run's current parked fold (kind "park") once it is due, and never
+  // a pause fold. A park-aware store refuses it with failed_precondition
+  // "park_not_due" before park_until, and with aborted "loop_checkpoint_claim_held"
+  // while another claim's lease is live; a store without park recovery answers
+  // an empty reference as not claimable.
   string pause_ref = 2;
 
   // Caller-minted token. Only its hash is stored, so the claim cannot be replayed by a reader of the table.

@@ -27,7 +27,7 @@ import contractSource from './chat-run-continue-contract.ts?raw'
 // (apps/gateway CONTINUE_RELAYED_ERRORS); the stream half is relayed byte for
 // byte. The HTTP list is pinned to the BFF's list on the Rust side
 // (apps/gateway/tests/continue_error_vocabulary.rs), which also pins the HTTP list
-// and the 22 stream tokens to model-gateway's own constants
+// and the 25 stream tokens to model-gateway's own constants
 // (CONTINUE_HTTP_REFUSALS, CONTINUE_FRAME_REFUSALS), the three run-end frames
 // to CONTINUE_SPENT_RUN_END_FRAMES and the seven typed subscription failures to
 // CONTINUE_SPENT_SUBSCRIPTION_FRAMES.
@@ -61,6 +61,9 @@ const EXECUTOR_TOKENS = [
   'resume_checkpoint_unavailable',
   'not_resumable',
   'resume_forbidden',
+  'park_not_restorable',
+  'park_route_unavailable',
+  'park_not_due',
 ] as const
 
 const CODE_DERIVED = ['approval_not_found', 'durable_mutation_forbidden'] as const
@@ -74,11 +77,18 @@ describe('the closed vocabularies', () => {
     expect(CHAT_RUN_CONTINUE_HTTP_REFUSALS).toHaveLength(8)
   })
 
-  it('lists exactly the 22 stream refusals: 17 executor tokens, 2 code-derived, 3 gateway-made', () => {
+  it('lists exactly the 25 stream refusals: 20 executor tokens, 2 code-derived, 3 gateway-made', () => {
     expect([...CHAT_RUN_CONTINUE_FRAME_REFUSALS].sort()).toEqual(
       [...EXECUTOR_TOKENS, ...CODE_DERIVED, ...GATEWAY_MADE].sort(),
     )
-    expect(CHAT_RUN_CONTINUE_FRAME_REFUSALS).toHaveLength(22)
+    expect(CHAT_RUN_CONTINUE_FRAME_REFUSALS).toHaveLength(25)
+    expect(EXECUTOR_TOKENS).toHaveLength(20)
+  })
+
+  it('lists the three park refusals, the executor refusals of the resume of a parked run', () => {
+    for (const code of ['park_not_restorable', 'park_route_unavailable', 'park_not_due']) {
+      expect(CHAT_RUN_CONTINUE_FRAME_REFUSALS).toContain(code)
+    }
   })
 
   it('has no duplicate code in either list', () => {
@@ -234,7 +244,7 @@ describe('chatRunContinueHttpRefusalOf', () => {
 })
 
 describe('chatRunContinueFrameRefusalOf (regime 1: the gateway spent the approval)', () => {
-  it('reads every one of the 22 codes as spent, final, and to be followed when approval_spent is true', () => {
+  it('reads every one of the 25 codes as spent, final, and to be followed when approval_spent is true', () => {
     for (const code of CHAT_RUN_CONTINUE_FRAME_REFUSALS) {
       expect(
         chatRunContinueFrameRefusalOf({ code, message: code.replaceAll('_', ' '), retryable: false, request_id: 'r', run_id: 'run_1', approval_spent: true }),

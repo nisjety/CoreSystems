@@ -5461,6 +5461,7 @@ async fn pause_for_approval(
         failure_code: String::new(),
         retry_after_ms: None,
         resets_at: String::new(),
+        park_reason: String::new(),
     })
 }
 
@@ -5821,6 +5822,7 @@ async fn finalize(
         resets_at: refusal
             .and_then(crate::subscription_refusal::Refusal::resets_at_label)
             .unwrap_or_default(),
+        park_reason: String::new(),
     })
 }
 
@@ -7484,7 +7486,10 @@ mod tests {
                 pause_ref: req.pause_ref,
                 authority_digest: req.authority_digest,
             });
-            Ok(Response::new(pb::SaveLoopCheckpointResponse { seq }))
+            Ok(Response::new(pb::SaveLoopCheckpointResponse {
+                seq,
+                park_accepted: false,
+            }))
         }
 
         async fn claim_loop_checkpoint(

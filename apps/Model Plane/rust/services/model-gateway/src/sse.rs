@@ -10621,6 +10621,8 @@ fn orchestration_event_to_sse(event: &OrchestrationEvent) -> Option<Event> {
         orchestration_event::Event::ApprovalContinuationVerified(_) => {
             "approval_continuation_verified"
         }
+        orchestration_event::Event::RunParked(_) => "run_parked",
+        orchestration_event::Event::RunResumed(_) => "run_resumed",
     };
     let data = serde_json::to_string(&payload).unwrap_or_else(|_| "{}".to_owned());
     Some(Event::default().event(event_name).data(data))
@@ -10797,6 +10799,10 @@ fn orchestration_event_to_step_update(
                 status.to_owned(),
             )
         }
+        // A park and its resume are not steps of the chat timeline: the owner's turn
+        // stream carries its own `run_parked` frame (WS03 S8), and the run console reads
+        // the raw orchestration events.
+        Event::RunParked(_) | Event::RunResumed(_) => return None,
     };
     Some(crate::sse_events::ChatEvent::StepUpdate {
         id,
@@ -10955,6 +10961,17 @@ fn event_payload_value(event: &OrchestrationEvent) -> Option<Value> {
                 object.insert("verification_method".to_owned(), json!(v.method));
                 object.insert("verification_reason".to_owned(), json!(v.reason));
             }
+        }
+        // Ids and a segment number only: the park reason is never broadcast.
+        orchestration_event::Event::RunParked(payload) => {
+            object.insert("run_id".to_owned(), json!(payload.run_id));
+        }
+        orchestration_event::Event::RunResumed(payload) => {
+            object.insert("run_id".to_owned(), json!(payload.run_id));
+            object.insert(
+                "resumed_segment".to_owned(),
+                json!(payload.resumed_segment),
+            );
         }
     }
 
@@ -13903,7 +13920,9 @@ pub(crate) const CONTINUE_HTTP_REFUSALS: &[(&str, StatusCode)] = &[
 /// The messages the executor's refusals of a continuation carry, exactly. A status
 /// whose message is in this list is a typed refusal the gateway can name; any other
 /// message is never echoed and becomes `continue_refused`. A new executor refusal
-/// token needs a row here.
+/// token needs a row here. The last three (`park_not_restorable`,
+/// `park_route_unavailable`, `park_not_due`) are the executor's refusals of the
+/// resume of a PARKED run (WS03 S8); the executor builds them from S8-6 on.
 pub(crate) const CONTINUE_EXECUTOR_MESSAGE_TOKENS: &[&str] = &[
     "continue_disabled",
     "resume_incomplete",
@@ -13922,6 +13941,9 @@ pub(crate) const CONTINUE_EXECUTOR_MESSAGE_TOKENS: &[&str] = &[
     "resume_checkpoint_unavailable",
     "not_resumable",
     "resume_forbidden",
+    "park_not_restorable",
+    "park_route_unavailable",
+    "park_not_due",
 ];
 
 /// The `code` of an `error` frame of a continuation that is a refusal or a failed
@@ -13933,6 +13955,11 @@ pub(crate) const CONTINUE_EXECUTOR_MESSAGE_TOKENS: &[&str] = &[
 /// A frame carries `approval_spent: true` only when the gateway itself consumed the
 /// approval; without it the frame says the executor refused and the approval state is
 /// unknown. `continue_unreachable` and `continue_outcome_unknown` exist only with it.
+///
+/// The three park tokens (`park_not_restorable`, `park_route_unavailable`,
+/// `park_not_due`) are the executor's refusals of the resume of a parked run (WS03 S8).
+/// A park continue never spends an approval, so a frame carrying one never has
+/// `approval_spent`.
 pub(crate) const CONTINUE_FRAME_REFUSALS: &[&str] = &[
     "continue_disabled",
     "resume_incomplete",
@@ -13951,6 +13978,9 @@ pub(crate) const CONTINUE_FRAME_REFUSALS: &[&str] = &[
     "resume_checkpoint_unavailable",
     "not_resumable",
     "resume_forbidden",
+    "park_not_restorable",
+    "park_route_unavailable",
+    "park_not_due",
     "approval_not_found",
     "durable_mutation_forbidden",
     "continue_refused",
@@ -15394,9 +15424,9 @@ mod continue_run_tests {
         let http: Vec<&str> = CONTINUE_HTTP_REFUSALS.iter().map(|(code, _)| *code).collect();
         assert_eq!(http.len(), 10, "{http:?}");
         assert_distinct(&http);
-        assert_eq!(CONTINUE_EXECUTOR_MESSAGE_TOKENS.len(), 17);
+        assert_eq!(CONTINUE_EXECUTOR_MESSAGE_TOKENS.len(), 20);
         assert_distinct(CONTINUE_EXECUTOR_MESSAGE_TOKENS);
-        assert_eq!(CONTINUE_FRAME_REFUSALS.len(), 22);
+        assert_eq!(CONTINUE_FRAME_REFUSALS.len(), 25);
         assert_distinct(CONTINUE_FRAME_REFUSALS);
 
         let mut expected: Vec<&str> = CONTINUE_EXECUTOR_MESSAGE_TOKENS.to_vec();
