@@ -5099,15 +5099,18 @@ pub(super) async fn dispatch_browser_close_session(
     owner_json_response_to_envelope("browser_session.close", user, status, payload)
 }
 
-/// The optional `actor` of a browser tab action (`human` when absent). Same two
-/// values as `browser_action.run`; anything else is refused here, never read as
+/// The `actor` of a browser tab action: the JSON string `"human"` or `"agent"`.
+/// It is required. Omitting it is refused rather than read as the person's, so a
+/// caller that forgets to say who is asking fails closed instead of being
+/// recorded as a person during a take-over. Anything else (another string, a
+/// number, a boolean, an array, an object, `null`) is refused too, never read as
 /// the person's.
 fn ticket_tab_actor(input: &Value, action: &str) -> Result<BrowserActionActor, Response> {
-    match input.get("actor").and_then(Value::as_str) {
-        None | Some("human") => Ok(BrowserActionActor::Human),
-        Some("agent") => Ok(BrowserActionActor::Agent),
-        Some(_) => Err(ticket_bad_request(&format!(
-            "{action} 'actor' must be 'human' or 'agent'"
+    match input.get("actor") {
+        Some(Value::String(actor)) if actor == "human" => Ok(BrowserActionActor::Human),
+        Some(Value::String(actor)) if actor == "agent" => Ok(BrowserActionActor::Agent),
+        _ => Err(ticket_bad_request(&format!(
+            "{action} requires 'actor', which must be the string 'human' or 'agent'"
         ))),
     }
 }
@@ -5984,7 +5987,6 @@ mod tests {
     #[test]
     fn a_tab_action_takes_human_or_agent_as_its_actor_and_nothing_else() {
         let actor = |input: Value| ticket_tab_actor(&input, "browser_tab.select");
-        assert_eq!(actor(json!({})).ok(), Some(BrowserActionActor::Human));
         assert_eq!(
             actor(json!({ "actor": "human" })).ok(),
             Some(BrowserActionActor::Human)
@@ -5993,11 +5995,231 @@ mod tests {
             actor(json!({ "actor": "agent" })).ok(),
             Some(BrowserActionActor::Agent)
         );
-        for refused in [json!({ "actor": "system" }), json!({ "actor": "" })] {
-            let response = actor(refused).expect_err("an unknown actor is refused");
-            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        // Omitting the actor, a null, another string and every non-string value
+        // are all refused: none is read as the person's.
+        for refused in [
+            json!({}),
+            json!({ "actor": null }),
+            json!({ "actor": "system" }),
+            json!({ "actor": "" }),
+            json!({ "actor": "Agent" }),
+            json!({ "actor": 1 }),
+            json!({ "actor": 0 }),
+            json!({ "actor": true }),
+            json!({ "actor": false }),
+            json!({ "actor": ["agent"] }),
+            json!({ "actor": ["human"] }),
+            json!({ "actor": { "kind": "agent" } }),
+        ] {
+            let response =
+                actor(refused.clone()).expect_err("a missing or unknown actor is refused");
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{refused}");
         }
     }
+
+    /// A Quarry that knows one run (`run-1`, one tab `tab-1`) in the given control
+    /// mode, answering every tab route.
+    async fn mount_tab_run(quarry: &wiremock::MockServer, control_mode: &str) {
+        use wiremock::{
+            matchers::{method as wm_method, path as wm_path},
+            Mock, ResponseTemplate,
+        };
+
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/v1/agent/runs/run-1/browser-session"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": { "runId": "run-1", "controlMode": control_mode, "tabs": [] }
+            })))
+            .mount(quarry)
+            .await;
+        let tabs = ResponseTemplate::new(200).set_body_json(json!({ "data": { "tabs": [] } }));
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/v1/agent/runs/run-1/tabs/tab-1/select"))
+            .respond_with(tabs.clone())
+            .mount(quarry)
+            .await;
+        Mock::given(wm_method("DELETE"))
+            .and(wm_path("/v1/agent/runs/run-1/tabs/tab-1"))
+            .respond_with(tabs)
+            .mount(quarry)
+            .await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/v1/agent/runs/run-1/tabs"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": { "tab": { "tabId": "tab-2" }, "tabs": [] }
+            })))
+            .mount(quarry)
+            .await;
+    }
+
+    /// What Quarry was asked to change: method, path with query, and JSON body.
+    async fn quarry_mutations(quarry: &wiremock::MockServer) -> Vec<(String, String, Value)> {
+        quarry
+            .received_requests()
+            .await
+            .expect("recorded Quarry requests")
+            .into_iter()
+            .filter(|request| request.method.as_str() != "GET")
+            .map(|request| {
+                (
+                    request.method.to_string(),
+                    match request.url.query() {
+                        Some(query) => format!("{}?{query}", request.url.path()),
+                        None => request.url.path().to_owned(),
+                    },
+                    serde_json::from_slice(&request.body).unwrap_or(Value::Null),
+                )
+            })
+            .collect()
+    }
+
+    fn tab_dispatch_user() -> crate::middleware::AuthenticatedUser {
+        crate::middleware::AuthenticatedUser {
+            user_id: "user-owner".to_owned(),
+            user_email: "owner@example.test".to_owned(),
+            user_name: "owner".to_owned(),
+            user_image: None,
+            email_verified: true,
+            auth_role: None,
+            active_org_id: Some("org-owner".to_owned()),
+            authorized_membership: Some(crate::middleware::AuthorizedMembership {
+                organization_id: "org-owner".to_owned(),
+                role: "member".to_owned(),
+            }),
+        }
+    }
+
+    /// Runs the three tab dispatchers with `extra` merged into each input and
+    /// returns their statuses in the order create, select, close.
+    async fn dispatch_tab_actions(state: &AppState, extra: Value) -> [StatusCode; 3] {
+        let user = tab_dispatch_user();
+        let headers = HeaderMap::new();
+        let with_extra = |mut base: Value| {
+            if let (Some(base), Some(extra)) = (base.as_object_mut(), extra.as_object()) {
+                base.extend(extra.clone());
+            }
+            base
+        };
+        let create = dispatch_browser_create_tab(
+            state,
+            &user,
+            &headers,
+            &with_extra(json!({ "sessionId": "run-1" })),
+        )
+        .await;
+        let select = dispatch_browser_select_tab(
+            state,
+            &user,
+            &headers,
+            &with_extra(json!({ "sessionId": "run-1", "tabId": "tab-1" })),
+        )
+        .await;
+        let close = dispatch_browser_close_tab(
+            state,
+            &user,
+            &headers,
+            &with_extra(json!({ "sessionId": "run-1", "tabId": "tab-1" })),
+        )
+        .await;
+        [create.status(), select.status(), close.status()]
+    }
+
+    #[tokio::test]
+    async fn the_tab_dispatchers_carry_actor_agent_to_quarry_as_the_initiator_hint() {
+        let quarry = wiremock::MockServer::start().await;
+        mount_tab_run(&quarry, "agent_control").await;
+        let mut state = crate::tests::test_state(false);
+        state.quarry_edge_url = quarry.uri();
+
+        assert_eq!(
+            dispatch_tab_actions(&state, json!({ "actor": "agent" })).await,
+            [StatusCode::OK; 3]
+        );
+        let mutations = quarry_mutations(&quarry).await;
+        assert_eq!(
+            mutations
+                .iter()
+                .map(|(method, target, _)| (method.as_str(), target.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("POST", "/v1/agent/runs/run-1/tabs"),
+                ("POST", "/v1/agent/runs/run-1/tabs/tab-1/select?initiatedBy=agent"),
+                ("DELETE", "/v1/agent/runs/run-1/tabs/tab-1?initiatedBy=agent"),
+            ]
+        );
+        assert_eq!(mutations[0].2["initiatedBy"], "agent", "{:?}", mutations[0]);
+    }
+
+    #[tokio::test]
+    async fn the_tab_dispatchers_send_a_persons_calls_without_a_hint() {
+        let quarry = wiremock::MockServer::start().await;
+        mount_tab_run(&quarry, "human_takeover").await;
+        let mut state = crate::tests::test_state(false);
+        state.quarry_edge_url = quarry.uri();
+
+        assert_eq!(
+            dispatch_tab_actions(&state, json!({ "actor": "human" })).await,
+            [StatusCode::OK; 3]
+        );
+        let mutations = quarry_mutations(&quarry).await;
+        assert_eq!(
+            mutations
+                .iter()
+                .map(|(method, target, _)| (method.as_str(), target.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("POST", "/v1/agent/runs/run-1/tabs"),
+                ("POST", "/v1/agent/runs/run-1/tabs/tab-1/select"),
+                ("DELETE", "/v1/agent/runs/run-1/tabs/tab-1"),
+            ]
+        );
+        assert!(mutations[0].2.get("initiatedBy").is_none(), "{:?}", mutations[0]);
+    }
+
+    #[tokio::test]
+    async fn a_models_tab_dispatch_is_refused_during_a_takeover_before_it_reaches_quarry() {
+        let quarry = wiremock::MockServer::start().await;
+        mount_tab_run(&quarry, "human_takeover").await;
+        let mut state = crate::tests::test_state(false);
+        state.quarry_edge_url = quarry.uri();
+
+        assert_eq!(
+            dispatch_tab_actions(&state, json!({ "actor": "agent" })).await,
+            [StatusCode::CONFLICT; 3]
+        );
+        assert!(
+            quarry_mutations(&quarry).await.is_empty(),
+            "a refused tab call never reaches Quarry"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_tab_dispatch_without_a_usable_actor_never_reaches_quarry() {
+        let quarry = wiremock::MockServer::start().await;
+        mount_tab_run(&quarry, "human_takeover").await;
+        let mut state = crate::tests::test_state(false);
+        state.quarry_edge_url = quarry.uri();
+
+        for extra in [
+            json!({}),
+            json!({ "actor": null }),
+            json!({ "actor": 1 }),
+            json!({ "actor": true }),
+            json!({ "actor": ["agent"] }),
+            json!({ "actor": "system" }),
+        ] {
+            assert_eq!(
+                dispatch_tab_actions(&state, extra.clone()).await,
+                [StatusCode::BAD_REQUEST; 3],
+                "{extra}"
+            );
+        }
+        assert!(
+            quarry.received_requests().await.expect("recorded").is_empty(),
+            "an unlabelled tab call is refused before Quarry is asked anything"
+        );
+    }
+
 
     #[test]
     fn audio_dictate_forwards_safari_recordings_and_the_retention_flag() {

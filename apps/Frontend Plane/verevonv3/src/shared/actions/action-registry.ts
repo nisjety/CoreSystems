@@ -1134,19 +1134,19 @@ const browserCloseSessionInput = z.object({
 const browserCreateTabInput = z.object({
   sessionId: z.string().min(1),
   url: z.string().trim().min(1).optional(),
-  actor: z.enum(['human', 'agent']).optional(),
+  actor: z.enum(['human', 'agent']),
 })
 
 const browserSelectTabInput = z.object({
   sessionId: z.string().min(1),
   tabId: z.string().min(1),
-  actor: z.enum(['human', 'agent']).optional(),
+  actor: z.enum(['human', 'agent']),
 })
 
 const browserCloseTabInput = z.object({
   sessionId: z.string().min(1),
   tabId: z.string().min(1),
-  actor: z.enum(['human', 'agent']).optional(),
+  actor: z.enum(['human', 'agent']),
 })
 
 // `action` is passed through as a raw object: `sanitize_action` in browser.rs
